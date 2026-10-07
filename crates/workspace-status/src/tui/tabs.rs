@@ -42,6 +42,9 @@ pub const ONLY_WORKSPACE_TAB_OPEN: &str = "only the Workspace tab is open";
 pub const SWITCH_TO_WORKSPACE_TAB: &str = "Switch to Workspace tab";
 /// File tab body for a file with a NUL byte near the start.
 pub const FILE_IS_BINARY: &str = "binary file — e opens it in the editor";
+/// Status when the watch poll finds the active file tab's file gone. The
+/// tab stays open on the last content.
+pub const FILE_DELETED: &str = "file deleted";
 
 /// File tab body for a file over the 2 MiB read cap:
 /// `file is over 2 MiB (X.Y MiB) — e opens it in the editor`.
@@ -582,10 +585,20 @@ pub struct FileTab {
     /// Pane title: `<checkout>/<rel>` (snapshot `repo` path, unique per
     /// checkout).
     pub display: String,
-    /// Loaded body. `None` while a load is in flight.
+    /// Loaded body. `None` while an open / `r` / editor-return load is in
+    /// flight; a watch reload keeps the old body until the new one lands.
     pub body: Option<Arc<FileRead>>,
     /// Load generation. A result for an older generation is dropped.
     pub generation: u64,
+    /// Generation [`Self::body`] loaded at, `None` without a body. It
+    /// trails [`Self::generation`] while a watch reload is in flight, so
+    /// memos keyed by it (search hits, line blame) stay with the painted
+    /// body.
+    pub body_generation: Option<u64>,
+    /// Disk token of the file when the last load was issued: `size:mtimeMs`,
+    /// or `gone` when missing. `None` before the first load. The watch poll
+    /// reads the file again only when the token moved.
+    pub disk_stamp: Option<String>,
     /// Focused 0-based line.
     pub cursor: usize,
     /// First painted line.
@@ -611,6 +624,8 @@ impl FileTab {
             display,
             body: None,
             generation: 0,
+            body_generation: None,
+            disk_stamp: None,
             cursor: 0,
             scroll: 0,
             col_offset: 0,
@@ -638,6 +653,14 @@ impl FileTab {
     pub fn bump_generation(&mut self) -> u64 {
         self.generation = self.generation.saturating_add(1);
         self.body = None;
+        self.body_generation = None;
+        self.generation
+    }
+
+    /// Bump the load generation and keep the painted body until the new
+    /// read lands (a silent watch reload: no loading flash).
+    pub fn bump_generation_keep_body(&mut self) -> u64 {
+        self.generation = self.generation.saturating_add(1);
         self.generation
     }
 }
@@ -961,6 +984,15 @@ impl TabStrip {
         self.tabs
             .iter_mut()
             .filter_map(SessionTab::as_compare_mut)
+            .find(|tab| tab.id == id)
+    }
+
+    #[cfg(test)]
+    /// File tab by stable id.
+    pub fn get_file_id(&self, id: u64) -> Option<&FileTab> {
+        self.tabs
+            .iter()
+            .filter_map(SessionTab::as_file)
             .find(|tab| tab.id == id)
     }
 

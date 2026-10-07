@@ -605,8 +605,9 @@ struct DiffSearchMemo {
 /// Memo for [`AppState::file_search_hits`].
 #[derive(Clone, Debug)]
 struct FileSearchMemo {
-    /// Tab id, load generation, case-folded query.
-    key: (u64, u64, String),
+    /// Tab id, generation of the painted body
+    /// ([`super::tabs::FileTab::body_generation`]), case-folded query.
+    key: (u64, Option<u64>, String),
     /// Shared with every caller of the frame, so a hit does not copy.
     hits: std::rc::Rc<[usize]>,
 }
@@ -5696,8 +5697,12 @@ impl AppState {
         self.park_active_session();
         self.tabs.active = index;
         self.apply_active_session();
-        // A working-tree tab may have missed watch reloads while inactive.
-        self.active_worktree_compare_reload()
+        // A working-tree or file tab may have missed watch reloads while
+        // inactive. Only one tab is active, so at most one check reloads.
+        match self.active_worktree_compare_reload() {
+            Effect::None => self.active_file_tab_live_reload(),
+            reload => reload,
+        }
     }
 
     /// Drop the visual-line highlight and any pending confirm.
@@ -5913,6 +5918,8 @@ impl AppState {
         self.clear_tab_transients();
         if closing_active {
             self.apply_active_session();
+            // A file tab that becomes active may have missed watch reloads.
+            return self.active_file_tab_live_reload();
         }
         Effect::None
     }

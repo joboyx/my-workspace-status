@@ -3,7 +3,9 @@
 //! A file tab paints one file of one checkout. Its body is read on the
 //! blocking pool ([`Effect::LoadFileTab`]) and lands through
 //! [`AppState::apply_file_tab`], which drops a result for an older load
-//! generation. Git writes refuse with the Workspace-tab copy.
+//! generation. Loads start on open, `r`, editor return, and
+//! [`AppState::file_tab_live_reload`] (watch poll and tab switch, when the
+//! file's disk token moved). Git writes refuse with the Workspace-tab copy.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -14,20 +16,24 @@ use crate::file_index::FileRead;
 
 use super::super::action::{Action, Effect};
 use super::super::command_palette::{CommandScope, PaletteCommand};
+use super::super::event_pump::overlay_blocks_background_ticks;
 use super::super::search::{apply_pan, match_diff_line_indices, step_from_anchor};
 use super::super::selection::TextSelection;
 use super::super::split::SplitDrag;
 use super::super::status::StatusMessage;
 use super::super::tabs::{
-    file_gutter_width, OpenFile, ONLY_WORKSPACE_TAB_OPEN, SWITCH_TO_WORKSPACE_TAB,
+    file_gutter_width, OpenFile, FILE_DELETED, ONLY_WORKSPACE_TAB_OPEN, SWITCH_TO_WORKSPACE_TAB,
 };
+use super::super::watch::{file_disk_token, GONE_DISK_TOKEN};
 use super::{AppState, FileSearchMemo, NO_SEARCH_ARMED, Z_FOLDS_TREE_ROWS};
 
 impl AppState {
     /// Open or focus the file tab for `rel` in `checkout`.
     ///
-    /// Parks the active tab's session first. A new tab returns its first
-    /// [`Effect::LoadFileTab`]; an existing one is focused unchanged.
+    /// Parks the active tab's session first. A new tab records its disk
+    /// token and returns its first [`Effect::LoadFileTab`]; an existing one
+    /// is focused and reloads only when its file changed on disk
+    /// ([`Self::file_tab_live_reload`]).
     pub(crate) fn open_file_tab(&mut self, checkout: String, rel: String) -> Effect {
         let before = self.tabs.active;
         self.park_active_session();
@@ -40,14 +46,83 @@ impl AppState {
         }
         self.apply_active_session();
         match opened {
-            OpenFile::Focused => Effect::None,
-            OpenFile::Created(tab_id) => Effect::LoadFileTab {
-                tab_id,
-                gen: 0,
-                repo: checkout,
-                path: rel,
-            },
+            OpenFile::Focused => self.active_file_tab_live_reload(),
+            OpenFile::Created(tab_id) => {
+                self.stamp_active_file_tab();
+                Effect::LoadFileTab {
+                    tab_id,
+                    gen: 0,
+                    repo: checkout,
+                    path: rel,
+                }
+            }
         }
+    }
+
+    /// Record the active file tab's disk token as of the load about to be
+    /// issued. Taken before the read: a change between the stat and the
+    /// read costs at most one extra reload.
+    fn stamp_active_file_tab(&mut self) {
+        let Some(tab) = self.tabs.active_file() else {
+            return;
+        };
+        let stamp = file_disk_token(&self.cwd, &tab.checkout, &tab.rel);
+        if let Some(tab) = self.tabs.active_file_mut() {
+            tab.disk_stamp = Some(stamp);
+        }
+    }
+
+    /// Silent reload of the active file tab of `checkout` when its file's
+    /// disk token (`size:mtimeMs`, or `gone`) moved since the last load.
+    ///
+    /// Runs after each checkout status load (the watch poll) and when a
+    /// file tab becomes active ([`Self::active_file_tab_live_reload`]). A
+    /// background tab is not checked. The old body stays painted until the
+    /// new read lands, with no status. A deleted file keeps the last
+    /// content and warns [`FILE_DELETED`]. While an overlay holds input
+    /// nothing is checked or recorded, so the next poll catches the change.
+    /// One `stat`; no git.
+    pub(crate) fn file_tab_live_reload(&mut self, checkout: &str) -> Option<Effect> {
+        if overlay_blocks_background_ticks(self.input_mode()) {
+            return None;
+        }
+        let tab = self.tabs.active_file()?;
+        if tab.checkout != checkout {
+            return None;
+        }
+        let stamp = file_disk_token(&self.cwd, &tab.checkout, &tab.rel);
+        let tab = self.tabs.active_file_mut()?;
+        if tab.disk_stamp.as_deref() == Some(stamp.as_str()) {
+            return None;
+        }
+        let gone = stamp == GONE_DISK_TOKEN;
+        tab.disk_stamp = Some(stamp);
+        if gone {
+            let has_content = tab
+                .body
+                .as_deref()
+                .is_some_and(|body| !matches!(body, FileRead::Failed(_)));
+            if has_content {
+                self.status = StatusMessage::warn(FILE_DELETED);
+            }
+            return None;
+        }
+        let gen = tab.bump_generation_keep_body();
+        Some(Effect::LoadFileTab {
+            tab_id: tab.id,
+            gen,
+            repo: tab.checkout.clone(),
+            path: tab.rel.clone(),
+        })
+    }
+
+    /// [`Self::file_tab_live_reload`] for the active file tab's checkout,
+    /// or [`Effect::None`] off a file tab.
+    pub(super) fn active_file_tab_live_reload(&mut self) -> Effect {
+        let Some(checkout) = self.tabs.active_file().map(|tab| tab.checkout.clone()) else {
+            return Effect::None;
+        };
+        self.file_tab_live_reload(&checkout).unwrap_or(Effect::None)
     }
 
     /// Why `action` refuses on the active file tab, or `None` (also off a
@@ -257,8 +332,9 @@ impl AppState {
         Effect::EditFile { repo, path, line }
     }
 
-    /// `r`: read the active file tab again.
+    /// `r`: read the active file tab again (the body shows loading).
     fn reload_active_file_tab(&mut self) -> Effect {
+        self.stamp_active_file_tab();
         let Some(tab) = self.tabs.active_file_mut() else {
             return Effect::None;
         };
@@ -302,8 +378,12 @@ impl AppState {
 
     /// Accept a finished read for tab `tab_id` at load generation `gen`.
     ///
-    /// Dropped (false) when the tab closed or a newer load started. The
-    /// cursor and scroll clamp to the new line count.
+    /// Dropped (false) when the tab closed or a newer load started. A
+    /// failed read while the tab still paints a body (a silent watch
+    /// reload) keeps that body; if the file is gone, the next poll reports
+    /// it deleted. The
+    /// cursor and scroll keep their line numbers, clamped to the new line
+    /// count.
     pub(crate) fn apply_file_tab(&mut self, tab_id: u64, gen: u64, body: FileRead) -> bool {
         let active = self.tabs.active_file().is_some_and(|tab| tab.id == tab_id);
         let Some(tab) = self
@@ -313,7 +393,11 @@ impl AppState {
         else {
             return false;
         };
+        if matches!(body, FileRead::Failed(_)) && tab.body.is_some() {
+            return false;
+        }
         tab.body = Some(Arc::new(body));
+        tab.body_generation = Some(gen);
         let len = tab.lines().len();
         tab.cursor = tab.cursor.min(len.saturating_sub(1));
         tab.scroll = tab.scroll.min(tab.cursor);
@@ -336,7 +420,7 @@ impl AppState {
         let Some(tab) = self.tabs.active_file().filter(|_| !query.is_empty()) else {
             return Rc::from([]);
         };
-        let key = (tab.id, tab.generation, query);
+        let key = (tab.id, tab.body_generation, query);
         if let Some(memo) = self.file_search_memo.borrow().as_ref() {
             if memo.key == key {
                 return Rc::clone(&memo.hits);
@@ -855,5 +939,211 @@ mod tests {
         );
         assert_eq!(cursor(&app), 2);
         assert!(app.text_selection.is_some());
+    }
+
+    /// A state whose cwd is a fresh temp dir; files go under `app/`.
+    fn disk_state() -> (AppState, PathBuf) {
+        let cwd = crate::testutil::unique_dir("ws-file-tab-live");
+        std::fs::create_dir_all(cwd.join("app")).expect("app dir");
+        let snapshot = build_workspace_snapshot(&[repo("app"), repo("lib")], &[], false, &[]);
+        (AppState::new(cwd.clone(), snapshot, true), cwd)
+    }
+
+    /// Write `lines` to `app/<rel>`. Callers change the line count (so the
+    /// size) on every rewrite, so the disk token moves whatever the mtime
+    /// granularity.
+    fn write_lines(cwd: &std::path::Path, rel: &str, lines: &[&str]) {
+        std::fs::write(cwd.join("app").join(rel), lines.join("\n")).expect("write file");
+    }
+
+    /// Write `rel`, open it, and land `lines` as its body.
+    fn open_on_disk(app: &mut AppState, cwd: &std::path::Path, rel: &str, lines: &[&str]) -> u64 {
+        write_lines(cwd, rel, lines);
+        open_loaded(app, rel, lines)
+    }
+
+    fn file_tab(app: &AppState, tab_id: u64) -> &crate::tui::tabs::FileTab {
+        app.tabs.get_file_id(tab_id).expect("file tab by id")
+    }
+
+    fn live_load(effect: Option<Effect>, tab_id: u64) -> u64 {
+        match effect {
+            Some(Effect::LoadFileTab {
+                tab_id: id, gen, ..
+            }) if id == tab_id => gen,
+            other => panic!("expected a load of tab {tab_id}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn live_reload_skips_an_unchanged_file() {
+        let (mut app, cwd) = disk_state();
+        let id = open_on_disk(&mut app, &cwd, "notes.txt", &["a", "b"]);
+        assert!(file_tab(&app, id).disk_stamp.is_some(), "open stamps");
+        for _ in 0..3 {
+            assert_eq!(app.file_tab_live_reload("app"), None);
+        }
+        assert_eq!(file_tab(&app, id).generation, 0, "no re-read");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn live_reload_rereads_the_active_tab_quietly() {
+        let (mut app, cwd) = disk_state();
+        let id = open_on_disk(&mut app, &cwd, "notes.txt", &["alpha", "beta"]);
+        assert_eq!(&*app.file_search_hits("beta"), &[1]);
+        write_lines(&cwd, "notes.txt", &["beta", "alpha", "beta"]);
+        assert_eq!(app.file_tab_live_reload("lib"), None, "another checkout");
+        let gen = live_load(app.file_tab_live_reload("app"), id);
+        assert_eq!(gen, 1);
+        let tab = file_tab(&app, id);
+        assert_eq!(tab.lines(), ["alpha", "beta"], "old body stays painted");
+        assert_eq!(tab.body_generation, Some(0));
+        assert!(app.status.is_empty(), "silent: {}", &*app.status);
+        assert_eq!(
+            &*app.file_search_hits("beta"),
+            &[1],
+            "hits follow the painted body"
+        );
+        assert_eq!(app.file_tab_live_reload("app"), None, "stamp recorded");
+
+        assert!(app.apply_file_tab(id, gen, text(&["beta", "alpha", "beta"])));
+        assert_eq!(&*app.file_search_hits("beta"), &[0, 2]);
+
+        // `r` and the watch share the generation: the newest load wins.
+        let Effect::LoadFileTab { gen: by_r, .. } = app.dispatch(Action::Refresh) else {
+            panic!("r reloads");
+        };
+        assert!(file_tab(&app, id).body.is_none(), "r still shows loading");
+        write_lines(&cwd, "notes.txt", &["one"]);
+        let by_watch = live_load(app.file_tab_live_reload("app"), id);
+        assert!(by_watch > by_r);
+        assert!(!app.apply_file_tab(id, by_r, text(&["stale"])));
+        assert!(app.apply_file_tab(id, by_watch, text(&["one"])));
+        assert_eq!(file_tab(&app, id).lines(), ["one"]);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn background_file_tab_reloads_once_when_activated() {
+        let (mut app, cwd) = disk_state();
+        let a = open_on_disk(&mut app, &cwd, "a.txt", &["a1"]);
+        let b = open_on_disk(&mut app, &cwd, "b.txt", &["b1"]);
+        write_lines(&cwd, "a.txt", &["a1", "a2"]);
+        assert_eq!(app.file_tab_live_reload("app"), None, "b is unchanged");
+        assert_eq!(file_tab(&app, a).generation, 0, "a waits in the background");
+
+        // `g1`-style jump: tab 2 is a.
+        let gen = live_load(Some(app.dispatch(Action::JumpToTab(2))), a);
+        assert_eq!(file_tab(&app, a).lines(), ["a1"], "old body kept");
+        assert!(app.apply_file_tab(a, gen, text(&["a1", "a2"])));
+        assert_eq!(app.dispatch(Action::NextTab), Effect::None, "b unchanged");
+        assert_eq!(
+            app.dispatch(Action::PreviousTab),
+            Effect::None,
+            "a reloaded once"
+        );
+
+        // Quick Open on the open tab checks once too.
+        write_lines(&cwd, "b.txt", &["b1", "b2"]);
+        app.dispatch(Action::JumpToTab(1));
+        live_load(Some(app.open_file_tab("app".into(), "b.txt".into())), b);
+        assert_eq!(
+            app.open_file_tab("app".into(), "b.txt".into()),
+            Effect::None
+        );
+
+        // Closing the active tab checks the file tab it reveals.
+        write_lines(&cwd, "a.txt", &["a1", "a2", "a3"]);
+        assert!(app.tabs.active_file().is_some_and(|tab| tab.id == b));
+        live_load(Some(app.dispatch(Action::CloseTab)), a);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn deleted_file_keeps_the_last_content() {
+        let (mut app, cwd) = disk_state();
+        let id = open_on_disk(&mut app, &cwd, "notes.txt", &["kept", "lines"]);
+        std::fs::remove_file(cwd.join("app/notes.txt")).expect("delete");
+        assert_eq!(app.file_tab_live_reload("app"), None, "nothing to read");
+        assert_eq!(app.status, FILE_DELETED);
+        assert_eq!(app.status.kind(), crate::tui::status::StatusKind::Warn);
+        assert_eq!(file_tab(&app, id).lines(), ["kept", "lines"]);
+        assert_eq!(app.file_tab_live_reload("app"), None, "gone recorded");
+
+        // A silent read that fails (deleted after the stat) keeps the body.
+        write_lines(&cwd, "notes.txt", &["back"]);
+        let gen = live_load(app.file_tab_live_reload("app"), id);
+        assert!(!app.apply_file_tab(id, gen, FileRead::Failed("gone".into())));
+        assert_eq!(file_tab(&app, id).lines(), ["kept", "lines"]);
+
+        // `r` on a missing file still shows the read error.
+        std::fs::remove_file(cwd.join("app/notes.txt")).expect("delete");
+        let Effect::LoadFileTab { gen, .. } = app.dispatch(Action::Refresh) else {
+            panic!("r reloads");
+        };
+        assert!(app.apply_file_tab(id, gen, FileRead::Failed("missing".into())));
+        assert!(matches!(
+            file_tab(&app, id).body.as_deref(),
+            Some(FileRead::Failed(_))
+        ));
+
+        // A tab whose first load is still in flight gets no deleted note.
+        app.status.clear();
+        write_lines(&cwd, "other.txt", &["x"]);
+        app.open_file_tab("app".into(), "other.txt".into());
+        std::fs::remove_file(cwd.join("app/other.txt")).expect("delete");
+        assert_eq!(app.file_tab_live_reload("app"), None);
+        assert!(app.status.is_empty(), "{}", &*app.status);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn live_reload_keeps_the_line_number() {
+        let (mut app, cwd) = disk_state();
+        let ten: Vec<String> = (0..10).map(|i| format!("line {i}")).collect();
+        let ten: Vec<&str> = ten.iter().map(String::as_str).collect();
+        let id = open_on_disk(&mut app, &cwd, "notes.txt", &ten);
+        {
+            let tab = app.tabs.active_file_mut().unwrap();
+            tab.cursor = 7;
+            tab.scroll = 5;
+        }
+        let twelve: Vec<String> = (0..12).map(|i| format!("new {i}")).collect();
+        let twelve: Vec<&str> = twelve.iter().map(String::as_str).collect();
+        write_lines(&cwd, "notes.txt", &twelve);
+        let gen = live_load(app.file_tab_live_reload("app"), id);
+        assert!(app.apply_file_tab(id, gen, text(&twelve)));
+        let tab = file_tab(&app, id);
+        assert_eq!(
+            (tab.cursor, tab.scroll),
+            (7, 5),
+            "same line, no jump to top"
+        );
+
+        write_lines(&cwd, "notes.txt", &["a", "b", "c"]);
+        let gen = live_load(app.file_tab_live_reload("app"), id);
+        assert!(app.apply_file_tab(id, gen, text(&["a", "b", "c"])));
+        let tab = file_tab(&app, id);
+        assert_eq!(
+            (tab.cursor, tab.scroll),
+            (2, 2),
+            "clamped to the shorter file"
+        );
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn live_reload_waits_while_an_overlay_is_open() {
+        let (mut app, cwd) = disk_state();
+        let id = open_on_disk(&mut app, &cwd, "notes.txt", &["a"]);
+        let stamp = file_tab(&app, id).disk_stamp.clone();
+        write_lines(&cwd, "notes.txt", &["a", "b"]);
+        quick_open_with(&mut app, &["notes.txt"], &[0]);
+        assert_eq!(app.file_tab_live_reload("app"), None);
+        assert_eq!(file_tab(&app, id).disk_stamp, stamp, "not recorded");
+        app.dispatch(Action::QuickOpenCancel);
+        live_load(app.file_tab_live_reload("app"), id);
+        let _ = std::fs::remove_dir_all(&cwd);
     }
 }
