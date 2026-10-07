@@ -380,7 +380,8 @@ impl AppState {
     ///
     /// Dropped (false) when the tab closed or a newer load started. A
     /// failed read while the tab still paints a body (a silent watch
-    /// reload) keeps that body; the next poll reports a deleted file. The
+    /// reload) keeps that body; if the file is gone, the next poll reports
+    /// it deleted. The
     /// cursor and scroll keep their line numbers, clamped to the new line
     /// count.
     pub(crate) fn apply_file_tab(&mut self, tab_id: u64, gen: u64, body: FileRead) -> bool {
