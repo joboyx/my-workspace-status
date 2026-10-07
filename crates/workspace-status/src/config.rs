@@ -977,7 +977,7 @@ mod tests {
 
     #[test]
     fn view_defaults_commit_message_lines_accepts_min_max_and_default() {
-        for n in [1usize, 8, 20] {
+        for n in [1usize, 4, 20] {
             let got = load_view_defaults(&format!(
                 r#"{{"ignoredRepos":[],"viewDefaults":{{"commitMessageLines":{n}}}}}"#
             ))
