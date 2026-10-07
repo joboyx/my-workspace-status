@@ -269,7 +269,7 @@ fn pty_commit_msg_expand_toggle() {
     tui.key('+');
     tui.wait_pred(
         |screen| {
-            crumb_row(screen).contains("msg lines 9")
+            crumb_row(screen).contains("msg lines 5")
                 && footer_top(screen, "nnnn") == Some(long_top - 1)
         },
         "+ grows the footer by one message row",
@@ -278,7 +278,7 @@ fn pty_commit_msg_expand_toggle() {
     tui.key('-');
     tui.wait_pred(
         |screen| {
-            crumb_row(screen).contains("msg lines 8")
+            crumb_row(screen).contains("msg lines 4")
                 && footer_top(screen, "nnnn") == Some(long_top)
         },
         "- shrinks the footer back",

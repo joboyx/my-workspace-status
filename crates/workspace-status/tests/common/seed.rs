@@ -225,6 +225,10 @@ pub const COMMIT_MSG_BODY_TAIL: &str = "UNIQUE_MSG_BODY_TAIL";
 /// Long subject plus a body taller than the graph footer: [`COMMIT_MSG_BODY`],
 /// filler lines, then [`COMMIT_MSG_BODY_TAIL`].
 ///
+/// The subject clips on graph rows but wraps to at most two footer rows in an
+/// 80-column terminal, so subject, blank, and [`COMMIT_MSG_BODY`] fit the
+/// default 4-row expanded footer in both panes.
+///
 /// Do not `/` search the body tokens. Graph rows stay one line; the graph footer
 /// and commit-files footer wrap when expanded.
 pub fn seed_multiline_message_repo(workspace: &Path, name: &str) {
@@ -236,7 +240,7 @@ pub fn seed_multiline_message_repo(workspace: &Path, name: &str) {
     git(&repo, &["checkout", "-q", "-b", "feature/long-msg"]);
     fs::write(repo.join("wip.txt"), "x\n").unwrap();
     git(&repo, &["add", "wip.txt"]);
-    let subject = format!("{}{COMMIT_MSG_SUBJ_TAIL}", "n".repeat(80));
+    let subject = format!("{}{COMMIT_MSG_SUBJ_TAIL}", "n".repeat(30));
     let filler = (1..=20)
         .map(|i| format!("filler {i:02}"))
         .collect::<Vec<_>>()

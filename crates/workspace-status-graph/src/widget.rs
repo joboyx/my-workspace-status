@@ -1466,23 +1466,23 @@ mod tests {
             ..GraphModel::default()
         };
         let top = render_lines_scrolled(&model, 28, 20, true, Some(0), true, 0);
-        let footer = &top[top.len() - 9..];
+        let footer = &top[top.len() - 5..];
         assert!(footer[0].starts_with("subject"), "{top:#?}");
-        assert!(footer[7].starts_with("L05"), "{top:#?}");
-        assert!(footer[8].contains("aaa1111"), "meta pinned: {top:#?}");
-        assert!(!top.join("\n").contains("L06"), "{top:#?}");
+        assert!(footer[3].starts_with("L01"), "{top:#?}");
+        assert!(footer[4].contains("aaa1111"), "meta pinned: {top:#?}");
+        assert!(!top.join("\n").contains("L02"), "{top:#?}");
         assert!(
             footer[0].ends_with('█'),
             "scrollbar thumb at the top: {top:#?}"
         );
 
         let bottom = render_lines_scrolled(&model, 28, 20, true, Some(0), true, 999);
-        let footer = &bottom[bottom.len() - 9..];
-        assert!(footer[0].starts_with("L22"), "clamped to max: {bottom:#?}");
-        assert!(footer[7].starts_with("L29"), "{bottom:#?}");
-        assert!(footer[8].contains("aaa1111"), "meta pinned: {bottom:#?}");
+        let footer = &bottom[bottom.len() - 5..];
+        assert!(footer[0].starts_with("L26"), "clamped to max: {bottom:#?}");
+        assert!(footer[3].starts_with("L29"), "{bottom:#?}");
+        assert!(footer[4].contains("aaa1111"), "meta pinned: {bottom:#?}");
         assert!(
-            footer[7].ends_with('█'),
+            footer[3].ends_with('█'),
             "scrollbar thumb at the bottom: {bottom:#?}"
         );
     }
@@ -1552,13 +1552,13 @@ mod tests {
         let long = render_footer(&model, width, height, opts(1));
         let short_list = painted_list_rows(&short);
         let long_list = painted_list_rows(&long);
-        // Default N=8: footer is 8 message rows + meta.
-        assert_eq!(short_list.len(), usize::from(height - 9), "{short_list:?}");
+        // Default N=4: footer is 4 message rows + meta.
+        assert_eq!(short_list.len(), usize::from(height - 5), "{short_list:?}");
         assert_eq!(
             short_list, long_list,
             "list height follows N, not the message"
         );
-        let footer_top = height - 9;
+        let footer_top = height - 5;
         assert!(buf_row(&short, footer_top).starts_with("commit 0"));
         assert!(buf_row(&long, footer_top).starts_with("commit 1"));
         assert!(
@@ -1619,7 +1619,7 @@ mod tests {
                 ascii: true,
             },
         );
-        let top = height - 9;
+        let top = height - 5;
         assert_eq!(buf_row(&buf, top).trim_end(), "commit 0");
         for y in top + 1..height - 1 {
             assert_eq!(buf_row(&buf, y).trim(), "", "blank padding row {y}");
@@ -1667,7 +1667,7 @@ mod tests {
                 },
             )
         };
-        // Message: subject, blank, L00..L29 = 32 lines in 8 rows.
+        // Message: subject, blank, L00..L29 = 32 lines in 4 rows.
         let last_msg_row = height - 2;
         let bar_x = width - 1;
         let hint_at = |buf: &Buffer, text: &str| {
@@ -1679,12 +1679,12 @@ mod tests {
             assert_eq!(cols[start..usize::from(bar_x)].concat(), text, "{row:?}");
         };
         let top = render(0, false);
-        hint_at(&top, "\u{f103}24");
-        assert!(buf_row(&top, last_msg_row).starts_with("L05"));
+        hint_at(&top, "\u{f103}28");
+        assert!(buf_row(&top, last_msg_row).starts_with("L01"));
         let mid = render(10, false);
-        hint_at(&mid, "\u{f103}14");
+        hint_at(&mid, "\u{f103}18");
         let ascii = render(10, true);
-        hint_at(&ascii, "v14");
+        hint_at(&ascii, "v18");
         assert!(!buf_row(&ascii, last_msg_row).contains('\u{f103}'));
         let end = render(999, false);
         let end_row = buf_row(&end, last_msg_row);
@@ -4475,7 +4475,7 @@ mod tests {
             assert_eq!(hint.len(), 1, "{spans:?}");
             assert_eq!(hint[0].row_index, Some(1));
             assert_eq!(hint[0].y, height - 2);
-            assert_eq!(span_text(&buf, hint[0]), format!("{glyph}14"));
+            assert_eq!(span_text(&buf, hint[0]), format!("{glyph}18"));
         }
         // Every line shown: no hint span.
         let mut buf = Buffer::empty(Rect::new(0, 0, width, height));

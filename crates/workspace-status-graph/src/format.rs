@@ -1052,7 +1052,7 @@ pub fn format_commit_subject(commit: &Commit) -> String {
 /// still takes this many rows (blank padding), so moving between commits
 /// never changes the list height. The graph footer scrolls a longer message.
 /// The commit-files footer ends the last visible line with `…`.
-pub const COMMIT_MSG_LINES_DEFAULT: usize = 8;
+pub const COMMIT_MSG_LINES_DEFAULT: usize = 4;
 
 /// Fewest message rows an expanded commit-message footer can be set to.
 pub const COMMIT_MSG_LINES_MIN: usize = 1;

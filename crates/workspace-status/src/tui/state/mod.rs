@@ -13615,9 +13615,10 @@ mod tests {
                 stat: None,
             }],
         );
+        // 32 columns: subject (2 rows), blank, body fill the N = 4 rows.
         let collapsed_files_footer = {
             app.commit_msg_expand = false;
-            app.commit_detail_footer_lines(16)
+            app.commit_detail_footer_lines(32)
         };
         assert_eq!(collapsed_files_footer.len(), 2, "title + subtitle");
         let collapsed_join = collapsed_files_footer.join("\n");
@@ -13626,7 +13627,7 @@ mod tests {
             "collapsed files footer hides body: {collapsed_join}"
         );
         app.commit_msg_expand = true;
-        let expanded_files_footer = app.commit_detail_footer_lines(16);
+        let expanded_files_footer = app.commit_detail_footer_lines(32);
         assert_eq!(
             expanded_files_footer.len(),
             2 + app.commit_msg_lines,
@@ -15818,12 +15819,12 @@ mod tests {
         let mut app = graph_state(false);
         focus_repo(&mut app, "app");
         install_linear_graph(&mut app, 20);
-        // Expanded N = 8 asks for 9 rows; a 12-row pane caps the footer at
-        // half (6), so the list keeps 6 rows and a page is 5 painted lines.
+        // Expanded N = 4 asks for 5 rows; an 8-row pane caps the footer at
+        // half (4), so the list keeps 4 rows and a page is 3 painted lines.
         assert!(app.commit_msg_expand);
-        app.layout.tree_height = 12;
+        app.layout.tree_height = 8;
         let chrome = app.graph_chrome();
-        assert_eq!((chrome.footer_height, chrome.list_height), (6, 6));
+        assert_eq!((chrome.footer_height, chrome.list_height), (4, 4));
         let list_h = chrome.list_height as usize;
         let page = list_h - 1;
         app.graph_cursor = 0;

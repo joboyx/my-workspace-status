@@ -176,7 +176,7 @@ moving between commits never changes the list height:
 
 - Expanded requests N message rows plus the meta row
   (`graph_footer_request`, N from `GraphWidget::commit_msg_lines`, default
-  `COMMIT_MSG_LINES_DEFAULT` = 8, clamped from `COMMIT_MSG_LINES_MIN` (1)
+  `COMMIT_MSG_LINES_DEFAULT` = 4, clamped from `COMMIT_MSG_LINES_MIN` (1)
   to `COMMIT_MSG_LINES_MAX` (20)). Collapsed requests 2. The TUI passes
   its session N (`AppState::commit_msg_lines`: `viewDefaults.commitMessageLines`,
   then `-` / `+`) to both the widget and `graph_footer_request`.

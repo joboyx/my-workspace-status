@@ -7326,6 +7326,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         set_seed_commit_body(&mut state, &body);
+        // The tallest N, so the footer outgrows the shortest pane.
+        state.commit_msg_lines = workspace_status_graph::COMMIT_MSG_LINES_MAX;
         let mut terminal = Terminal::new(TestBackend::new(120, MIN_TERM_ROWS)).unwrap();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let layout = &state.layout;
