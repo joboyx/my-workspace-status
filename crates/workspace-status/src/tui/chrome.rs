@@ -436,6 +436,7 @@ pub fn ctrl_c_prompt_pinned(state: &AppState) -> bool {
         && state.comment.is_none()
         && state.comment_export.is_none()
         && state.quick_open.is_none()
+        && state.search_files.is_none()
 }
 
 /// Bold quit-prompt line painted between the breadcrumb and the status / overlay.
@@ -477,13 +478,16 @@ pub enum DialogKind {
     GraphFocusPicker,
     /// Quick Open: `:` / `>` commands, Ctrl-p / `F` files.
     QuickOpen,
+    /// Search in files (Ctrl-f): query, results, and the preview pane.
+    SearchFiles,
 }
 
 /// The dialog that paints this frame, or `None` when only the panes and
 /// the bottom chrome paint.
 ///
 /// Same order as the render if-chain: help, confirm, stash, blame menu,
-/// create branch, comment, export, then the list pickers and the palette.
+/// create branch, comment, export, then the list pickers, the palette, and
+/// search in files.
 pub fn open_dialog(state: &AppState) -> Option<DialogKind> {
     if state.help_open {
         Some(DialogKind::Help)
@@ -507,6 +511,8 @@ pub fn open_dialog(state: &AppState) -> Option<DialogKind> {
         Some(DialogKind::GraphFocusPicker)
     } else if state.quick_open.is_some() {
         Some(DialogKind::QuickOpen)
+    } else if state.search_files.is_some() {
+        Some(DialogKind::SearchFiles)
     } else {
         None
     }
@@ -533,12 +539,12 @@ pub const LIST_DIALOG_ROWS: u16 = LIST_OVERLAY_CHROME_ROWS + LIST_OVERLAY_MAX_RO
 
 /// Box width of `kind` inside `area` (the pane area).
 ///
-/// Help takes the whole width less a two-column margin each side; the
-/// other dialogs also stop at [`DIALOG_MAX_WIDTH`].
+/// Help and search in files take the whole width less a two-column margin
+/// each side; the other dialogs also stop at [`DIALOG_MAX_WIDTH`].
 pub fn dialog_width(area: Rect, kind: DialogKind) -> u16 {
     let width = area.width.saturating_sub(4);
     match kind {
-        DialogKind::Help => width,
+        DialogKind::Help | DialogKind::SearchFiles => width,
         _ => width.min(DIALOG_MAX_WIDTH),
     }
 }
@@ -598,6 +604,9 @@ pub fn dialog_height(state: &AppState, kind: DialogKind, width: u16) -> u16 {
         | DialogKind::ComparePicker
         | DialogKind::GraphFocusPicker
         | DialogKind::QuickOpen => LIST_DIALOG_ROWS,
+        // The pane area less one row above and below: results and preview
+        // use every row they get.
+        DialogKind::SearchFiles => state.layout.pane_height.saturating_sub(2),
     }
 }
 
@@ -1184,6 +1193,7 @@ pub(crate) fn status_uses_status_text(state: &AppState) -> bool {
         || state.comment.is_some()
         || state.comment_export.is_some()
         || state.quick_open.is_some()
+        || state.search_files.is_some()
 }
 
 fn breadcrumb_op_status(state: &AppState) -> String {
@@ -2287,6 +2297,29 @@ mod tests {
             copied: Some(true),
         });
         assert_eq!(dialog_height(&app, DialogKind::CommentExport, 96), 20);
+    }
+
+    #[test]
+    fn search_files_is_a_large_dialog_with_the_quit_prompt_inline() {
+        use crate::file_search::SearchOptions;
+        use crate::tui::quick_open::QuickOpenScope;
+        use crate::tui::search_files::SearchFilesState;
+        let mut app = state();
+        app.search_files = Some(SearchFilesState::new(
+            QuickOpenScope::Workspace,
+            String::new(),
+            SearchOptions::default(),
+        ));
+        assert_eq!(open_dialog(&app), Some(DialogKind::SearchFiles));
+        let area = Rect::new(0, 1, 160, 40);
+        assert_eq!(dialog_width(area, DialogKind::SearchFiles), 156);
+        app.layout.pane_height = 40;
+        assert_eq!(dialog_height(&app, DialogKind::SearchFiles, 156), 38);
+        assert!(status_uses_status_text(&app));
+        assert_eq!(line_plain(&status_line(&app, 80)), "");
+        app.status = "Press Ctrl-c again to exit".into();
+        assert!(!ctrl_c_prompt_pinned(&app), "the dialog shows it inline");
+        assert_eq!(ctrl_c_prompt_rows(&app), 0);
     }
 
     #[test]

@@ -42,7 +42,7 @@ This is the glance I wanted instead. Left pane is the workspace tree (repos, wor
 
 ![Help overlay](docs/images/08-help.gif)
 
-**Quick Open** — `Ctrl-p` or `F` goes to a file: fuzzy match in the focused repo or worktree (all repos on the workspace row), Enter opens it in a read-only tab. `:` lists commands (`>` already typed; Backspace over it returns to files): type a name or an alias (`compare`, `checkout`). Every letter types; disabled rows say why.
+**Quick Open** — `Ctrl-p` or `F` goes to a file: fuzzy match in the focused repo or worktree (all repos on the workspace row), Enter opens it in a read-only tab. `:` lists commands (`>` already typed; Backspace over it returns to files): type a name or an alias (`compare`, `checkout`). Every letter types; disabled rows say why. `Ctrl-f` (or `#` first in Quick Open) searches the text of those files instead; Enter opens the hit line in a file tab, where `n` / `N` step the matches.
 
 ![Command palette](docs/images/09-palette.gif)
 

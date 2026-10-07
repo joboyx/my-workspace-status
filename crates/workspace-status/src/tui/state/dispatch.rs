@@ -329,6 +329,16 @@ impl AppState {
             | Action::QuickOpenBackspace
             | Action::QuickOpenSubmit
             | Action::QuickOpenCancel
+            | Action::ToggleSearchFiles
+            | Action::SearchFilesChar(_)
+            | Action::SearchFilesBackspace
+            | Action::SearchFilesMove(_)
+            | Action::SearchFilesPage(_)
+            | Action::SearchFilesToggleScope
+            | Action::SearchFilesToggleOption(_)
+            | Action::SearchFilesCancel
+            | Action::SearchFilesSubmit
+            | Action::SearchFilesEdit
             | Action::CompareVsDefault
             | Action::CompareVsBranch
             | Action::CompareVsCommit

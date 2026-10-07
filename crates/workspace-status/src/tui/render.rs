@@ -58,10 +58,15 @@ use super::popover::{
     tree_icon_target, IconTarget, PopoverLine, POPOVER_FOOTER, POPOVER_MAX_WIDTH,
 };
 use super::pull_request::PrState;
-use super::quick_open::{files_row_shows_status, FileIndexState, QuickOpenMode, QuickOpenState};
+use super::quick_open::{
+    files_row_shows_status, FileIndexState, QuickOpenMode, QuickOpenScope, QuickOpenState,
+};
 use super::search::{
     collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids, slice_cols,
     wrap_col_starts, wrap_col_starts_capped, wrap_cols, SearchPane,
+};
+use super::search_files::{
+    search_row_shows_status, SearchFilesState, SearchRow, SearchZone, SEARCH_PREVIEW_MIN_COLS,
 };
 use super::split::{
     diff_paint_width, diff_split_rule_x, pane_widths, side_by_side_column_widths, DiffMode,
@@ -85,7 +90,8 @@ use super::tree::{
     pr_badge_mark, visible_window, workspace_trailing_fit, NodeKind, NodeSegments, SegRole,
     TextSeg, VisibleRow,
 };
-use crate::file_index::FileRead;
+use crate::file_index::{FileIndex, FileRead};
+use crate::file_search::{SearchHit, SearchOptions};
 use crate::helpers::{is_detached_head_branch, visible_width};
 
 /// Empty tree / empty commit-file list.
@@ -237,6 +243,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
             DialogKind::ComparePicker => draw_compare_picker(frame, rect, state),
             DialogKind::GraphFocusPicker => draw_graph_focus_picker(frame, rect, state),
             DialogKind::QuickOpen => draw_quick_open(frame, rect, state),
+            DialogKind::SearchFiles => draw_search_files(frame, rect, state),
         }
     }
 
@@ -4024,7 +4031,7 @@ fn draw_quick_open(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         (
             quick_open_file_rows(quick, palette_theme, max_rows, inner_width),
             status,
-            "↑↓ move · Enter open · > commands · Esc close".to_string(),
+            "↑↓ move · Enter open · > commands · # search · Esc close".to_string(),
         )
     } else {
         let commands = &quick.commands;
@@ -4282,6 +4289,561 @@ fn quick_open_command_rows(
         }
     }
     lines
+}
+
+/// Search-in-files preview body while its read runs.
+const PREVIEW_LOADING: &str = "loading…";
+/// Search-in-files preview body for a binary file.
+const PREVIEW_BINARY: &str = "binary file";
+/// Search-in-files preview body for a file over the 2 MiB read cap.
+const PREVIEW_TOO_LARGE: &str = "file is over 2 MiB";
+/// Query row placeholder while the search query is empty.
+const SEARCH_FILES_PLACEHOLDER: &str = "type to search…";
+
+/// Syntax spans of one preview window: preview generation, theme, first
+/// and end line.
+type SearchPreviewSyntaxKey = (u64, ThemeId, usize, usize);
+
+thread_local! {
+    static SEARCH_PREVIEW_SYNTAX_CACHE: RefCell<Option<(SearchPreviewSyntaxKey, FileSyntaxSpans)>> =
+        const { RefCell::new(None) };
+}
+
+/// Search-in-files dialog: title and option chips on the top border, the
+/// query row, the status row, the results grouped by file, and the preview
+/// pane on the right when the terminal is at least
+/// [`SEARCH_PREVIEW_MIN_COLS`] wide. Records the results height for PgUp /
+/// PgDn and keeps the highlighted hit in view.
+fn draw_search_files(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let wide = frame.area().width >= SEARCH_PREVIEW_MIN_COLS;
+    let palette = state.theme.palette();
+    let theme = state.theme;
+    let surface = overlay_surface(state);
+    let Some(dialog) = state.search_files.as_ref() else {
+        return;
+    };
+    let accent = palette.cursor;
+    let muted = Style::default().fg(palette.muted);
+    let block = overlay_block(accent)
+        .title(Span::styled(
+            dialog.title(),
+            Style::default()
+                .fg(palette.heading)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_top(search_option_chips(dialog.options, palette, surface).right_aligned());
+    frame.render_widget(Clear, area);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let row_at = |offset: u16| Rect {
+        x: inner.x,
+        y: inner.y + offset,
+        width: inner.width,
+        height: 1,
+    };
+    let h = inner.height;
+    let width = usize::from(inner.width);
+    let caret = Span::styled(
+        "▏",
+        Style::default().fg(if dialog.zone == SearchZone::Query {
+            accent
+        } else {
+            palette.muted
+        }),
+    );
+    let query = if dialog.query.is_empty() {
+        Line::from(vec![caret, Span::styled(SEARCH_FILES_PLACEHOLDER, muted)])
+    } else {
+        let (query, _) = cut_left(&dialog.query, width.saturating_sub(1));
+        Line::from(vec![
+            Span::styled(query, Style::default().fg(accent)),
+            caret,
+        ])
+    };
+    frame.render_widget(Paragraph::new(query), row_at(0));
+    if h >= 2 {
+        let status = if search_row_shows_status(&state.status) {
+            list_dialog_status(state, palette)
+        } else {
+            search_status_line(dialog, palette)
+        };
+        frame.render_widget(Paragraph::new(clamp_line(status, width)), row_at(1));
+    }
+    if h >= 3 {
+        let footer = Line::from(Span::styled(dialog.footer_hints(), muted));
+        frame.render_widget(
+            Paragraph::new(fit_list_dialog_footer(footer, width)),
+            row_at(h - 1),
+        );
+    }
+    let body_h = h.saturating_sub(3);
+    state.layout.search_files_rows = body_h;
+    if body_h == 0 {
+        return;
+    }
+    let body = Rect {
+        x: inner.x,
+        y: inner.y + 2,
+        width: inner.width,
+        height: body_h,
+    };
+    let (list_area, preview_area) = if wide {
+        let list_w = inner.width * 9 / 20;
+        (
+            Rect {
+                width: list_w,
+                ..body
+            },
+            Some(Rect {
+                x: body.x + list_w,
+                width: body.width - list_w,
+                ..body
+            }),
+        )
+    } else {
+        (body, None)
+    };
+    let rows = match state.search_files.as_mut() {
+        Some(dialog) => {
+            let rows = dialog.result_rows();
+            dialog.scroll_to_cursor(&rows, usize::from(body_h));
+            rows
+        }
+        None => return,
+    };
+    let Some(dialog) = state.search_files.as_ref() else {
+        return;
+    };
+    let FileIndexState::Ready(index) = &dialog.index else {
+        return;
+    };
+    let lines = search_result_lines(dialog, index, &rows, palette, theme, list_area);
+    frame.render_widget(Paragraph::new(lines), list_area);
+    if let Some(preview_area) = preview_area {
+        let block = Block::default()
+            .borders(Borders::LEFT)
+            .border_style(Style::default().fg(palette.border_dim))
+            .padding(Padding::left(1));
+        let preview_inner = block.inner(preview_area);
+        frame.render_widget(block, preview_area);
+        let lines = search_preview_lines(dialog, index, palette, theme, preview_inner);
+        frame.render_widget(Paragraph::new(lines), preview_inner);
+    }
+}
+
+/// `line` cut to `width` columns.
+fn clamp_line(line: Line<'static>, width: usize) -> Line<'static> {
+    Line::from(clamp_spans(line.spans, width))
+}
+
+/// Top-border chips for the match options: `Aa` case, `ab` whole word,
+/// `.*` regex. An option that is on paints as a filled chip, an off one
+/// as muted text.
+fn search_option_chips(options: SearchOptions, palette: Palette, surface: Color) -> Line<'static> {
+    let chip = |label: &str, on: bool| {
+        if on {
+            key_chip(label, palette.cursor, surface)
+        } else {
+            Span::styled(format!(" {label} "), Style::default().fg(palette.muted))
+        }
+    };
+    Line::from(vec![
+        chip("Aa", options.case_sensitive),
+        Span::raw(" "),
+        chip("ab", options.whole_word),
+        Span::raw(" "),
+        chip(".*", options.regex),
+    ])
+}
+
+/// Status row of the search dialog: its [`SearchStatus`] parts joined by
+/// ` · `; errors red, the skipped count dim, the rest muted.
+fn search_status_line(dialog: &SearchFilesState, palette: Palette) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (i, part) in dialog.status().iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" · ", Style::default().fg(palette.muted)));
+        }
+        let style = if part.is_error() {
+            Style::default().fg(palette.deleted)
+        } else if part.is_dim() {
+            Style::default()
+                .fg(palette.muted)
+                .add_modifier(Modifier::DIM)
+        } else {
+            Style::default().fg(palette.muted)
+        };
+        spans.push(Span::styled(part.text(), style));
+    }
+    Line::from(spans)
+}
+
+/// Header text of `entry`: `(Some(checkout), path)` when the dialog
+/// searches all repos (painted `repo › path`), else `(None, path)`.
+fn search_file_label(
+    dialog: &SearchFilesState,
+    index: &FileIndex,
+    entry: usize,
+) -> Option<(Option<String>, String)> {
+    let file = index.entries.get(entry)?;
+    let repo =
+        (dialog.scope() == QuickOpenScope::Workspace).then(|| index.checkout(file).to_string());
+    Some((repo, file.rel().to_string()))
+}
+
+/// Results rows from [`SearchFilesState::scroll`]: file headers (`path`,
+/// or `repo › path` across all repos) and hit rows `❯ <line>: <text>` with
+/// every match in the search highlight colours.
+fn search_result_lines(
+    dialog: &SearchFilesState,
+    index: &FileIndex,
+    rows: &[SearchRow],
+    palette: Palette,
+    theme: ThemeId,
+    area: Rect,
+) -> Vec<Line<'static>> {
+    let width = usize::from(area.width);
+    let window = rows
+        .iter()
+        .skip(dialog.scroll)
+        .take(usize::from(area.height));
+    let number_w = window
+        .clone()
+        .filter_map(|row| match row {
+            SearchRow::Hit(idx) => dialog.hits.get(*idx).map(|hit| hit.line),
+            SearchRow::Header(_) => None,
+        })
+        .max()
+        .map_or(1, |line| line.to_string().len());
+    let filter = theme.pills().filter;
+    let matched = Style::default()
+        .fg(filter.fg)
+        .bg(filter.bg)
+        .add_modifier(Modifier::BOLD);
+    let mut lines = Vec::new();
+    for row in window {
+        match *row {
+            SearchRow::Header(entry) => {
+                let Some((repo, rel)) = search_file_label(dialog, index, entry) else {
+                    lines.push(Line::default());
+                    continue;
+                };
+                let path = Style::default()
+                    .fg(palette.heading)
+                    .add_modifier(Modifier::BOLD);
+                let full = match &repo {
+                    Some(repo) => format!("{repo} › {rel}"),
+                    None => rel.clone(),
+                };
+                let line = match repo {
+                    Some(repo) if visible_width(&full) <= width => Line::from(vec![
+                        Span::styled(repo, Style::default().fg(palette.repo)),
+                        Span::styled(" › ", Style::default().fg(palette.muted)),
+                        Span::styled(rel, path),
+                    ]),
+                    _ => Line::from(Span::styled(cut_left(&full, width).0, path)),
+                };
+                lines.push(line);
+            }
+            SearchRow::Hit(idx) => {
+                let Some(hit) = dialog.hits.get(idx) else {
+                    lines.push(Line::default());
+                    continue;
+                };
+                let selected = idx == dialog.cursor;
+                let row_bg = if selected {
+                    palette.cursor_bg
+                } else {
+                    Color::Reset
+                };
+                let text_fg = if selected {
+                    palette.file
+                } else {
+                    palette.muted
+                };
+                let mut spans = vec![
+                    Span::styled(
+                        if selected { "❯ " } else { "  " },
+                        Style::default().fg(if selected {
+                            palette.cursor
+                        } else {
+                            palette.muted
+                        }),
+                    ),
+                    Span::styled(
+                        format!("{:>number_w$}: ", hit.line),
+                        Style::default().fg(palette.muted),
+                    ),
+                ];
+                let room = width.saturating_sub(help_spans_width(&spans));
+                let (text, ranges) = hit_text_window(&hit.text, &hit.ranges, room);
+                spans.extend(mark_byte_ranges(
+                    vec![(text, Style::default().fg(text_fg))],
+                    &ranges,
+                    matched,
+                ));
+                let mut spans = clamp_spans(spans, width);
+                for span in &mut spans {
+                    if span.style.bg.is_none() {
+                        span.style = span.style.bg(row_bg);
+                    }
+                }
+                lines.push(Line::from(spans));
+            }
+        }
+    }
+    lines
+}
+
+/// Valid byte `ranges` of `text` as `usize`, in order.
+fn hit_byte_ranges(text: &str, ranges: &[(u32, u32)]) -> Vec<(usize, usize)> {
+    ranges
+        .iter()
+        .map(|&(start, end)| (start as usize, end as usize))
+        .filter(|&(start, end)| {
+            start < end
+                && end <= text.len()
+                && text.is_char_boundary(start)
+                && text.is_char_boundary(end)
+        })
+        .collect()
+}
+
+/// Hit text to paint in `width` columns and its match byte ranges.
+///
+/// When the first match would end past `width`, the head is cut to a
+/// leading `…` so that match starts about a quarter of the way in.
+fn hit_text_window(
+    text: &str,
+    ranges: &[(u32, u32)],
+    width: usize,
+) -> (String, Vec<(usize, usize)>) {
+    let ranges = hit_byte_ranges(text, ranges);
+    let Some(&(first_start, first_end)) = ranges.first() else {
+        return (text.to_string(), ranges);
+    };
+    if visible_width(&text[..first_end]) <= width {
+        return (text.to_string(), ranges);
+    }
+    let lead = width / 4;
+    let mut from = first_start;
+    let mut used = 0usize;
+    for (at, ch) in text[..first_start].char_indices().rev() {
+        let mut buf = [0u8; 4];
+        let w = visible_width(ch.encode_utf8(&mut buf));
+        if used + w > lead {
+            break;
+        }
+        used += w;
+        from = at;
+    }
+    let ellipsis = '…'.len_utf8();
+    let shifted = ranges
+        .into_iter()
+        .filter(|&(_, end)| end > from)
+        .map(|(start, end)| (start.max(from) - from + ellipsis, end - from + ellipsis))
+        .collect();
+    (format!("…{}", &text[from..]), shifted)
+}
+
+/// `parts` as spans, with the bytes inside `ranges` (offsets across the
+/// joined parts) painted `marked`. A range edge that is not a char
+/// boundary of its part is ignored.
+fn mark_byte_ranges(
+    parts: Vec<(String, Style)>,
+    ranges: &[(usize, usize)],
+    marked: Style,
+) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    for (text, style) in parts {
+        let len = text.len();
+        let mut cuts = vec![0, len];
+        for &(start, end) in ranges {
+            for edge in [start, end] {
+                if edge > offset && edge < offset + len && text.is_char_boundary(edge - offset) {
+                    cuts.push(edge - offset);
+                }
+            }
+        }
+        cuts.sort_unstable();
+        cuts.dedup();
+        for pair in cuts.windows(2) {
+            let (from, to) = (pair[0], pair[1]);
+            if from == to {
+                continue;
+            }
+            let at = offset + from;
+            let inside = ranges.iter().any(|&(start, end)| start <= at && at < end);
+            out.push(Span::styled(
+                text[from..to].to_string(),
+                if inside { marked } else { style },
+            ));
+        }
+        offset += len;
+    }
+    out
+}
+
+/// Syntax spans for `lines[window]` of the preview read `gen`, reused while
+/// the window, read, and theme stay the same.
+fn search_preview_spans(
+    gen: u64,
+    rel: &str,
+    lines: &[String],
+    theme: ThemeId,
+    fallback: Color,
+    window: std::ops::Range<usize>,
+) -> FileSyntaxSpans {
+    let key = (gen, theme, window.start, window.end);
+    SEARCH_PREVIEW_SYNTAX_CACHE.with(|slot| {
+        let mut cache = slot.borrow_mut();
+        if let Some((hit_key, spans)) = cache.as_ref() {
+            if *hit_key == key {
+                return Arc::clone(spans);
+            }
+        }
+        let spans = Arc::new(highlight_file_window(rel, lines, theme, fallback, window));
+        *cache = Some((key, Arc::clone(&spans)));
+        spans
+    })
+}
+
+/// Preview pane: a `path:line` header, then the highlighted hit's file
+/// around the hit line (centered when the file allows), syntax-highlighted
+/// with a line-number gutter. The hit line has the cursor background; every
+/// hit of that file in view has its matches in the search colours. A
+/// binary, too large, or unreadable file is one dim line.
+fn search_preview_lines(
+    dialog: &SearchFilesState,
+    index: &FileIndex,
+    palette: Palette,
+    theme: ThemeId,
+    area: Rect,
+) -> Vec<Line<'static>> {
+    let width = usize::from(area.width);
+    let height = usize::from(area.height);
+    let Some(hit) = dialog.selected_hit() else {
+        return Vec::new();
+    };
+    let Some((repo, rel)) = search_file_label(dialog, index, hit.entry) else {
+        return Vec::new();
+    };
+    let header = match repo {
+        Some(repo) => format!("{repo} › {rel}:{}", hit.line),
+        None => format!("{rel}:{}", hit.line),
+    };
+    let mut out = vec![Line::from(Span::styled(
+        cut_left(&header, width).0,
+        Style::default().fg(palette.muted),
+    ))];
+    let body = dialog
+        .preview
+        .as_ref()
+        .filter(|preview| {
+            index
+                .entries
+                .get(hit.entry)
+                .is_some_and(|entry| preview.is_for(index.checkout(entry), entry.rel()))
+        })
+        .and_then(|preview| preview.body.as_ref().map(|body| (preview.gen, body)));
+    let dim = Style::default()
+        .fg(palette.muted)
+        .add_modifier(Modifier::DIM);
+    let notice = |text: String, style: Style| {
+        Line::from(Span::styled(fit_with_ellipsis(&text, width), style))
+    };
+    let (gen, lines) = match body {
+        None => {
+            out.push(notice(
+                PREVIEW_LOADING.to_string(),
+                Style::default().fg(palette.muted),
+            ));
+            return out;
+        }
+        Some((_, FileRead::Binary)) => {
+            out.push(notice(PREVIEW_BINARY.to_string(), dim));
+            return out;
+        }
+        Some((_, FileRead::TooLarge { .. })) => {
+            out.push(notice(PREVIEW_TOO_LARGE.to_string(), dim));
+            return out;
+        }
+        Some((_, FileRead::Failed(err))) => {
+            out.push(notice(err.clone(), dim));
+            return out;
+        }
+        Some((_, FileRead::Text { lines, .. }))
+            if lines.is_empty() || (lines.len() == 1 && lines[0].is_empty()) =>
+        {
+            out.push(notice(EMPTY_FILE.to_string(), dim));
+            return out;
+        }
+        Some((gen, FileRead::Text { lines, .. })) => (gen, lines),
+    };
+    let rows = height.saturating_sub(1);
+    if rows == 0 {
+        return out;
+    }
+    let focus = usize::try_from(hit.line.saturating_sub(1))
+        .unwrap_or(usize::MAX)
+        .min(lines.len() - 1);
+    let end = (focus.saturating_sub(rows / 2) + rows).min(lines.len());
+    let start = end.saturating_sub(rows);
+    let spans = search_preview_spans(gen, &rel, lines, theme, palette.repo, start..end);
+    let gutter = file_gutter_width(lines.len());
+    let code_w = width.saturating_sub(gutter);
+    let filter = theme.pills().filter;
+    let matched = Style::default()
+        .fg(filter.fg)
+        .bg(filter.bg)
+        .add_modifier(Modifier::BOLD);
+    // Hits are in index order then line order: this file's hits in view.
+    let in_view: Vec<&SearchHit> = dialog
+        .hits
+        .iter()
+        .filter(|other| other.entry == hit.entry)
+        .filter(|other| usize::try_from(other.line).is_ok_and(|line| line > start && line <= end))
+        .collect();
+    for line in start..end {
+        let focused = line == focus;
+        let bg = if focused {
+            palette.cursor_bg
+        } else {
+            Color::Reset
+        };
+        let mut row = vec![Span::styled(
+            format!("{:>w$} ", line + 1, w = gutter.saturating_sub(1)),
+            diff_gutter_style(palette),
+        )];
+        let code = spans.get(line - start).map(Vec::as_slice).unwrap_or(&[]);
+        let parts: Vec<(String, Style)> = slice_styled_cols(code, 0, code_w)
+            .into_iter()
+            .map(|span| (span.text, Style::default().fg(span.fg)))
+            .collect();
+        let ranges: Vec<(usize, usize)> = in_view
+            .iter()
+            .filter(|other| usize::try_from(other.line).is_ok_and(|n| n == line + 1))
+            .flat_map(|other| hit_byte_ranges(&other.text, &other.ranges))
+            .collect();
+        row.extend(mark_byte_ranges(parts, &ranges, matched));
+        let mut row = clamp_spans(row, width);
+        if focused {
+            for span in &mut row {
+                if span.style.bg.is_none() {
+                    span.style = span.style.bg(bg);
+                }
+            }
+        }
+        out.push(Line::from(row));
+    }
+    out
 }
 
 fn draw_create_branch(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -10028,6 +10590,20 @@ mod tests {
         let files = buffer_text(&terminal);
         assert!(files.contains("Enter open"), "{files}");
         assert!(!files.contains("Enter run"), "{files}");
+        assert!(
+            files.contains("↑↓ move · Enter open · > commands · # search · Esc close"),
+            "{files}"
+        );
+        // A narrow box drops chips from the left; `Esc close` stays.
+        let mut narrow = Terminal::new(TestBackend::new(50, 30)).unwrap();
+        draw_state(&mut narrow, &mut state);
+        let text = buffer_text(&narrow);
+        let footer = text
+            .lines()
+            .find(|line| line.contains("Esc close"))
+            .unwrap_or_else(|| panic!("footer keeps `Esc close`:\n{text}"));
+        assert!(!footer.contains("↑↓ move"), "{text}");
+        assert!(footer.contains("# search"), "{text}");
         state.dispatch(Action::QuickOpenBackspace);
         state.dispatch(Action::QuickOpenBackspace);
         state.dispatch(Action::QuickOpenBackspace);
@@ -10087,6 +10663,375 @@ mod tests {
             !buf[(x + 4, y)].modifier.contains(Modifier::BOLD),
             "`.` is not"
         );
+    }
+
+    /// Search dialog over `app` (or all repos) with `needle` hits in two
+    /// files: `src/lib.rs` lines 3 and 12, `src/main.rs` line 7.
+    fn search_files_state(all_repos: bool) -> AppState {
+        use crate::file_index::{FileEntry, IndexRoot};
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let (scope, prefix) = if all_repos {
+            (QuickOpenScope::Workspace, "app/")
+        } else {
+            (QuickOpenScope::Checkout("app".into()), "")
+        };
+        let index = FileIndex {
+            roots: vec![IndexRoot {
+                checkout: "app".into(),
+                prefix: prefix.into(),
+            }],
+            entries: ["src/lib.rs", "src/main.rs"]
+                .iter()
+                .map(|rel| FileEntry {
+                    root: 0,
+                    display: format!("{prefix}{rel}"),
+                    rel_start: prefix.len() as u32,
+                })
+                .collect(),
+            truncated: false,
+            errors: Vec::new(),
+        };
+        let mut dialog = SearchFilesState::new(scope, "needle".into(), SearchOptions::default());
+        dialog.index = FileIndexState::Ready(Arc::new(index));
+        dialog.hits = vec![
+            SearchHit {
+                entry: 0,
+                line: 3,
+                text: "let needle = needle();".into(),
+                ranges: vec![(4, 10), (13, 19)],
+            },
+            SearchHit {
+                entry: 0,
+                line: 12,
+                text: "// needle".into(),
+                ranges: vec![(3, 9)],
+            },
+            SearchHit {
+                entry: 1,
+                line: 7,
+                text: "needle".into(),
+                ranges: vec![(0, 6)],
+            },
+        ];
+        dialog.hits_query = "needle".into();
+        state.search_files = Some(dialog);
+        state
+    }
+
+    fn draw_search(state: &mut AppState, cols: u16, rows: u16) -> Terminal<TestBackend> {
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap();
+        draw_state(&mut terminal, state);
+        terminal
+    }
+
+    /// Column of the first cell run on row `y` that spells `needle`.
+    fn cells_x(terminal: &Terminal<TestBackend>, y: usize, needle: &str) -> u16 {
+        let buf = terminal.backend().buffer();
+        let chars: Vec<char> = needle.chars().collect();
+        (0..buf.area().width)
+            .find(|&x| {
+                chars.iter().enumerate().all(|(i, ch)| {
+                    x + (i as u16) < buf.area().width
+                        && buf[(x + i as u16, y as u16)].symbol() == ch.to_string()
+                })
+            })
+            .unwrap_or_else(|| panic!("no {needle:?} on row {y}"))
+    }
+
+    fn search_dialog(state: &mut AppState) -> &mut SearchFilesState {
+        state.search_files.as_mut().expect("search dialog open")
+    }
+
+    #[test]
+    fn search_files_paints_title_query_grouped_hits_and_footer() {
+        let mut state = search_files_state(false);
+        let terminal = draw_search(&mut state, 120, 30);
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Search · app"), "{text}");
+        assert!(
+            text.contains("needle▏"),
+            "query row with its caret:\n{text}"
+        );
+        let rows = [
+            row_of(&text, "needle▏"),
+            row_of(&text, " src/lib.rs "),
+            row_of(&text, "❯  3: let needle = needle();"),
+            row_of(&text, "   12: // needle"),
+            row_of(&text, " src/main.rs "),
+            row_of(&text, "    7: needle"),
+        ];
+        assert!(rows.windows(2).all(|w| w[0] < w[1]), "{rows:?}\n{text}");
+        assert!(
+            text.contains("↑↓ move · Enter open · Tab all repos · Alt-c/w/r · Esc close"),
+            "{text}"
+        );
+        assert_eq!(
+            row_of(&text, "Esc close"),
+            row_of(&text, "Search · app") + 23,
+            "footer on the last inner row of a 25-row box"
+        );
+        assert_eq!(state.layout.search_files_rows, 20);
+
+        search_dialog(&mut state).zone = SearchZone::Results;
+        let text = buffer_text(&draw_search(&mut state, 120, 30));
+        assert!(
+            text.contains("j/k move · Enter open · e edit · Tab all repos · Alt-c/w/r · Esc close"),
+            "{text}"
+        );
+
+        let mut state = search_files_state(true);
+        let text = buffer_text(&draw_search(&mut state, 120, 30));
+        assert!(text.contains("Search · all repos"), "{text}");
+        assert!(text.contains("app › src/lib.rs"), "{text}");
+        assert!(text.contains("app › src/main.rs"), "{text}");
+        assert!(!text.contains("Tab all repos"), "{text}");
+
+        search_dialog(&mut state).query.clear();
+        let text = buffer_text(&draw_search(&mut state, 120, 30));
+        assert!(text.contains("▏type to search…"), "{text}");
+    }
+
+    #[test]
+    fn search_files_chips_show_which_options_are_on() {
+        let mut state = search_files_state(false);
+        let palette = state.theme.palette();
+        let terminal = draw_search(&mut state, 120, 30);
+        let text = buffer_text(&terminal);
+        let y = row_of(&text, "Search · app");
+        let line = text.lines().nth(y).unwrap();
+        assert!(line.contains(" Aa   ab   .* "), "{line}");
+        let buf = terminal.backend().buffer();
+        for chip in ["Aa", "ab", ".*"] {
+            let x = cells_x(&terminal, y, chip);
+            assert_eq!(buf[(x, y as u16)].fg, palette.muted, "{chip} off");
+            assert_eq!(buf[(x, y as u16)].bg, Color::Reset, "{chip} off");
+        }
+
+        search_dialog(&mut state).options = SearchOptions {
+            case_sensitive: true,
+            whole_word: false,
+            regex: true,
+        };
+        let terminal = draw_search(&mut state, 120, 30);
+        let buf = terminal.backend().buffer();
+        for (chip, on) in [("Aa", true), ("ab", false), (".*", true)] {
+            let x = cells_x(&terminal, y, chip);
+            let cell = &buf[(x, y as u16)];
+            assert_eq!(cell.bg == palette.cursor, on, "{chip}: {cell:?}");
+            assert_eq!(cell.modifier.contains(Modifier::BOLD), on, "{chip}");
+        }
+    }
+
+    #[test]
+    fn search_files_highlights_every_match_on_a_hit_row() {
+        let mut state = search_files_state(false);
+        let palette = state.theme.palette();
+        let filter = state.theme.pills().filter;
+        let terminal = draw_search(&mut state, 99, 30);
+        let text = buffer_text(&terminal);
+        let buf = terminal.backend().buffer();
+
+        let y = row_of(&text, "let needle = needle();");
+        let x = cells_x(&terminal, y, "let needle = needle();");
+        let at = |dx: u16| &buf[(x + dx, y as u16)];
+        for dx in (4..10).chain(13..19) {
+            assert_eq!(at(dx).bg, filter.bg, "match cell {dx}");
+            assert_eq!(at(dx).fg, filter.fg, "match cell {dx}");
+        }
+        for dx in [0, 3, 10, 12, 19] {
+            assert_eq!(at(dx).bg, palette.cursor_bg, "highlighted row cell {dx}");
+        }
+
+        let y = row_of(&text, "// needle");
+        let x = cells_x(&terminal, y, "// needle");
+        assert_eq!(buf[(x, y as u16)].bg, Color::Reset, "plain text");
+        assert_eq!(buf[(x, y as u16)].fg, palette.muted);
+        assert_eq!(buf[(x + 3, y as u16)].bg, filter.bg, "match");
+    }
+
+    #[test]
+    fn search_files_cuts_a_long_hit_line_to_show_its_match() {
+        let mut state = search_files_state(false);
+        let long = format!("{}needle", "x".repeat(200));
+        search_dialog(&mut state).hits[0] = SearchHit {
+            entry: 0,
+            line: 3,
+            text: long,
+            ranges: vec![(200, 206)],
+        };
+        let text = buffer_text(&draw_search(&mut state, 99, 30));
+        let line = text.lines().nth(row_of(&text, "❯  3: …")).unwrap();
+        assert!(line.contains("xneedle"), "the match shows: {line}");
+    }
+
+    #[test]
+    fn search_files_status_row_texts() {
+        let mut state = search_files_state(false);
+        let palette = state.theme.palette();
+        search_dialog(&mut state).hits.clear();
+        let text = buffer_text(&draw_search(&mut state, 120, 30));
+        assert_eq!(
+            row_of(&text, "no matches in app"),
+            row_of(&text, "needle▏") + 1,
+            "status row under the query:\n{text}"
+        );
+
+        let dialog = search_dialog(&mut state);
+        dialog.hits.push(SearchHit {
+            entry: 0,
+            line: 1,
+            text: "needle".into(),
+            ranges: vec![(0, 6)],
+        });
+        dialog.capped = true;
+        dialog.skipped = 2;
+        dialog.error = Some("unclosed group".into());
+        let terminal = draw_search(&mut state, 120, 30);
+        let text = buffer_text(&terminal);
+        let y = row_of(&text, "invalid regex: unclosed group");
+        let line = text.lines().nth(y).unwrap();
+        assert!(
+            line.contains(
+                "invalid regex: unclosed group · 5000+ hits · showing first 5000 · narrow the query · 2 skipped (binary / >2 MiB)"
+            ),
+            "{line}"
+        );
+        let buf = terminal.backend().buffer();
+        let x = cells_x(&terminal, y, "invalid regex");
+        assert_eq!(buf[(x, y as u16)].fg, palette.deleted, "error is red");
+        let x = cells_x(&terminal, y, "2 skipped");
+        assert!(buf[(x, y as u16)].modifier.contains(Modifier::DIM), "dim");
+        let x = cells_x(&terminal, y, "5000+");
+        assert!(!buf[(x, y as u16)].modifier.contains(Modifier::DIM));
+
+        // Enter's miss warning and the quit prompt show in the dialog.
+        state.status =
+            crate::tui::status::StatusMessage::warn(crate::tui::search_files::NO_SEARCH_MATCHES);
+        let text = buffer_text(&draw_search(&mut state, 120, 30));
+        assert_eq!(row_of(&text, "no matches"), y, "{text}");
+        assert!(!text.contains("invalid regex"), "{text}");
+        state.status = crate::tui::ctrl_c_exit::CTRL_C_EXIT_PROMPT.into();
+        assert_eq!(super::super::chrome::ctrl_c_prompt_rows(&state), 0);
+        let text = buffer_text(&draw_search(&mut state, 120, 30));
+        assert_eq!(row_of(&text, "Press Ctrl-c again to exit"), y, "{text}");
+        // A leftover status from outside the dialog never hides its own.
+        state.status = "Fetched 2 repos".into();
+        let text = buffer_text(&draw_search(&mut state, 120, 30));
+        assert!(!text.contains("Fetched 2 repos"), "{text}");
+        assert!(text.contains("invalid regex"), "{text}");
+    }
+
+    #[test]
+    fn search_files_preview_shows_at_100_columns_and_hides_at_99() {
+        use crate::tui::search_files::SearchPreview;
+        let mut state = search_files_state(false);
+        let palette = state.theme.palette();
+        let filter = state.theme.pills().filter;
+        let mut lines: Vec<String> = (1..=40).map(|n| format!("// line {n}")).collect();
+        lines[2] = "let needle = needle();".into();
+        lines[11] = "// needle".into();
+        search_dialog(&mut state).preview = Some(SearchPreview {
+            checkout: "app".into(),
+            rel: "src/lib.rs".into(),
+            gen: 1,
+            body: Some(FileRead::Text {
+                lines,
+                max_cols: 22,
+            }),
+        });
+
+        let terminal = draw_search(&mut state, 100, 30);
+        let text = buffer_text(&terminal);
+        assert!(text.contains("src/lib.rs:3"), "preview header:\n{text}");
+        let y = row_of(&text, " 3 let needle = needle();");
+        assert_eq!(y, row_of(&text, "❯  3:") + 2, "hit line near the top");
+        assert!(text.contains("12 // needle"), "{text}");
+        assert!(text.contains(" 1 // line 1"), "{text}");
+        let buf = terminal.backend().buffer();
+        let x = cells_x(&terminal, y, " 3 let needle");
+        assert_eq!(buf[(x + 1, y as u16)].bg, palette.cursor_bg, "hit line");
+        assert_eq!(buf[(x + 7, y as u16)].bg, filter.bg, "match in preview");
+        let y12 = row_of(&text, "12 // needle");
+        let x = cells_x(&terminal, y12, "12 // needle");
+        assert_eq!(buf[(x + 6, y12 as u16)].bg, filter.bg, "other hit in view");
+        assert_ne!(buf[(x, y12 as u16)].bg, palette.cursor_bg);
+
+        let text = buffer_text(&draw_search(&mut state, 99, 30));
+        assert!(!text.contains("src/lib.rs:3"), "{text}");
+        assert!(!text.contains("// line 1"), "{text}");
+
+        // A hit deep in the file centers its line.
+        search_dialog(&mut state).hits[1].line = 30;
+        search_dialog(&mut state).cursor = 1;
+        let text = buffer_text(&draw_search(&mut state, 120, 30));
+        let header = row_of(&text, "src/lib.rs:30");
+        let hit = row_of(&text, "30 // line 30");
+        assert_eq!(hit, header + 1 + 9, "19 code rows, hit in the middle");
+    }
+
+    #[test]
+    fn search_files_preview_notices() {
+        use crate::tui::search_files::SearchPreview;
+        let mut state = search_files_state(false);
+        let text = buffer_text(&draw_search(&mut state, 120, 30));
+        assert!(text.contains("loading…"), "no read yet:\n{text}");
+        let preview = |body| SearchPreview {
+            checkout: "app".into(),
+            rel: "src/lib.rs".into(),
+            gen: 1,
+            body: Some(body),
+        };
+        for (body, want) in [
+            (FileRead::Binary, "binary file"),
+            (FileRead::TooLarge { bytes: 3 << 20 }, "file is over 2 MiB"),
+            (
+                FileRead::Failed("permission denied".into()),
+                "permission denied",
+            ),
+        ] {
+            search_dialog(&mut state).preview = Some(preview(body));
+            let terminal = draw_search(&mut state, 120, 30);
+            let text = buffer_text(&terminal);
+            let y = row_of(&text, want);
+            let x = cells_x(&terminal, y, want);
+            let cell = &terminal.backend().buffer()[(x, y as u16)];
+            assert!(cell.modifier.contains(Modifier::DIM), "{want} is dim");
+        }
+        // A preview of another file is not shown for this hit.
+        search_dialog(&mut state).cursor = 2;
+        let text = buffer_text(&draw_search(&mut state, 120, 30));
+        assert!(text.contains("src/main.rs:7"), "{text}");
+        assert!(text.contains("loading…"), "{text}");
+    }
+
+    #[test]
+    fn search_files_scroll_keeps_the_highlighted_hit_in_view() {
+        let mut state = search_files_state(false);
+        let dialog = search_dialog(&mut state);
+        dialog.hits = (1..=60)
+            .map(|line| SearchHit {
+                entry: 0,
+                line,
+                text: format!("needle {line}"),
+                ranges: vec![(0, 6)],
+            })
+            .collect();
+        dialog.cursor = 59;
+        let text = buffer_text(&draw_search(&mut state, 120, 20));
+        assert!(text.contains("❯ 60: needle 60"), "{text}");
+        let scroll = search_dialog(&mut state).scroll;
+        assert!(scroll > 0, "scrolled to the last hit");
+        let rows = usize::from(state.layout.search_files_rows);
+        assert_eq!(scroll, 61 - rows, "last row at the bottom");
+
+        // Moving up inside the window keeps the scroll.
+        state.dispatch(Action::SearchFilesMove(-2));
+        draw_search(&mut state, 120, 20);
+        assert_eq!(search_dialog(&mut state).scroll, scroll);
+        // PgUp moves by the painted height.
+        state.dispatch(Action::SearchFilesPage(-1));
+        assert_eq!(search_dialog(&mut state).cursor, 57 - (rows - 1));
     }
 
     #[test]

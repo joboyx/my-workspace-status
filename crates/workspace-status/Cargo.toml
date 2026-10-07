@@ -36,6 +36,12 @@ two-face = { version = "0.4.5", default-features = false, features = ["syntect-d
 # 0.3.1 declares no rust-version; deps memchr / unicode-segmentation are
 # already locked at versions that build on 1.85.
 nucleo-matcher = "0.3.1"
+# Search in files runs ripgrep's engine in process. These releases build on
+# rustc 1.85; Cargo.lock pins encoding_rs 0.8.35 because 0.8.36+ needs a
+# newer compiler.
+grep-matcher = "0.1.9"
+grep-regex = "0.1.14"
+grep-searcher = "0.1.17"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

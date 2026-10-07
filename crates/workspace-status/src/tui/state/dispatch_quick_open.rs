@@ -181,7 +181,19 @@ impl AppState {
     }
 
     /// Replace the query, then refilter commands or request a file score.
+    ///
+    /// A query that starts with `#` hands off instead: Quick Open closes
+    /// and the search-in-files dialog opens as Ctrl-f would, with the text
+    /// after `#` (leading spaces trimmed) as its query.
     fn quick_open_edit(&mut self, query: String) -> Effect {
+        if self.quick_open.is_none() {
+            return Effect::None;
+        }
+        if let Some(text) = query.strip_prefix('#') {
+            let text = text.trim_start().to_string();
+            self.close_quick_open();
+            return self.open_search_files_with(text);
+        }
         let Some(quick) = self.quick_open.as_mut() else {
             return Effect::None;
         };

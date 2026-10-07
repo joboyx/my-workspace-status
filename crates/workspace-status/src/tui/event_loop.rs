@@ -264,6 +264,7 @@ pub async fn run(
         let ctrl_remain = ctx.state.ctrl_c_remaining_ms(now).unwrap_or(u64::MAX);
         let status_remain = ctx.state.status_expiry_ms(now).unwrap_or(u64::MAX);
         let peek_remain = ctx.state.peek_remaining_ms(now).unwrap_or(u64::MAX);
+        let search_remain = ctx.state.search_files_due_ms(now).unwrap_or(u64::MAX);
         let present_remain = ctx.presenter.remain_ms(ctx.state.has_active_flashes());
         let join_empty = ctx.join.is_empty();
 
@@ -322,6 +323,14 @@ pub async fn run(
             _ = sleep_ms(peek_remain) => {
                 let (redraw, effect) = ctx.state.expire_peek_with_details(Instant::now());
                 if redraw {
+                    ctx.interp.schedule(ctx.state, ctx.opts, effect, &Action::None);
+                    let _ = ctx.interp.take_dirty();
+                    ctx.presenter.mark();
+                }
+            }
+            _ = sleep_ms(search_remain) => {
+                // Search-in-files debounce: the last query edit went quiet.
+                if let Some(effect) = ctx.state.fire_search_files_due(Instant::now()) {
                     ctx.interp.schedule(ctx.state, ctx.opts, effect, &Action::None);
                     let _ = ctx.interp.take_dirty();
                     ctx.presenter.mark();

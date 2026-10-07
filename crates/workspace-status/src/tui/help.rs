@@ -77,6 +77,10 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "next / prev match (after Enter)",
             },
             HelpEntry {
+                keys: "Ctrl-f",
+                desc: "search in files",
+            },
+            HelpEntry {
                 keys: "gt gT",
                 desc: "next / prev tab",
             },
@@ -1121,6 +1125,7 @@ mod tests {
         assert!(move_keys.contains(&"g1-g9"));
         assert!(move_keys.contains(&"/"));
         assert!(move_keys.contains(&"n N"));
+        assert!(move_keys.contains(&"Ctrl-f"), "search in files");
         assert!(!move_keys.contains(&"PgUp PgDn"));
         assert!(!move_keys.contains(&"Ctrl-u Ctrl-d"));
         assert!(view_keys.contains(&"PgUp PgDn"));
@@ -1225,7 +1230,7 @@ mod tests {
         );
         let at_140 = help_status_lines(140, HelpTab::Workspace) - legend(140);
         assert!(
-            at_140 <= 26,
+            at_140 <= 27,
             "at 140×40 the key columns fit without scrolling; only the legend \
              scrolls (render `help_columns_keep_a_gutter_and_the_panes_rows`): {at_140}"
         );
@@ -1336,11 +1341,11 @@ mod tests {
         // (terminal cols, tab, row-aligned body rows, reflow body rows as
         // measured).
         for (term, tab, row_aligned, measured) in [
-            (60usize, HelpTab::Workspace, 60usize, 56usize),
-            (64, HelpTab::Compare, 251, 56),
+            (60usize, HelpTab::Workspace, 60usize, 57usize),
+            (64, HelpTab::Compare, 251, 57),
             (80, HelpTab::Workspace, 86, 45),
-            (100, HelpTab::Workspace, 47, 30),
-            (140, HelpTab::Workspace, 28, 22),
+            (100, HelpTab::Workspace, 47, 32),
+            (140, HelpTab::Workspace, 28, 23),
         ] {
             let groups = help_groups(tab);
             let widths = help_column_widths(groups, help_inner_width(term));

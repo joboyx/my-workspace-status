@@ -34,6 +34,7 @@ mod quick_open;
 mod render;
 mod scheduler;
 pub(crate) mod search;
+mod search_files;
 mod selection;
 mod split;
 mod stash;

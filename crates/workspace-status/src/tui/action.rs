@@ -248,7 +248,8 @@ pub enum Action {
     ToggleQuickOpen(QuickOpenEntry),
     /// Move the Quick Open highlight (arrows, Ctrl-n / Ctrl-p).
     QuickOpenMove(i32),
-    /// Append a query character (`>` first switches to commands mode).
+    /// Append a query character (`>` first switches to commands mode, `#`
+    /// first hands off to search in files).
     QuickOpenChar(char),
     /// Delete the last query character.
     QuickOpenBackspace,
@@ -257,6 +258,35 @@ pub enum Action {
     QuickOpenSubmit,
     /// Esc close. No run.
     QuickOpenCancel,
+    /// Open or close the search-in-files dialog (Ctrl-f).
+    ///
+    /// Opening follows the focused scope and restores the last dialog when
+    /// it searched that same scope. Inside the dialog Ctrl-f closes it.
+    ToggleSearchFiles,
+    /// Append a character to the search query. From the results zone it
+    /// goes back to the query zone first.
+    SearchFilesChar(char),
+    /// Delete the last search query character (back to the query zone).
+    SearchFilesBackspace,
+    /// Move the highlighted hit by `delta` rows (arrows, Ctrl-n / Ctrl-p,
+    /// `j` / `k` in the results zone). Enters the results zone.
+    SearchFilesMove(i32),
+    /// PgUp / PgDn: move the highlighted hit by `pages` times the painted
+    /// results height. Enters the results zone.
+    SearchFilesPage(i32),
+    /// Tab: widen the dialog to all repos, or back to the focused scope.
+    SearchFilesToggleScope,
+    /// Alt-c / Alt-w / Alt-r: flip one match option and search again.
+    SearchFilesToggleOption(SearchFilesOption),
+    /// Esc close. The dialog is parked for the next Ctrl-f.
+    SearchFilesCancel,
+    /// Enter: park the dialog and open the highlighted hit's file in a file
+    /// tab at the hit line, with the in-file search armed on the query
+    /// (literal mode only).
+    SearchFilesSubmit,
+    /// `e` in the results zone: park the dialog and open the highlighted
+    /// hit's file in `$EDITOR` at the hit line.
+    SearchFilesEdit,
     /// Open or focus a compare tab versus the checkout default tip.
     CompareVsDefault,
     /// Open the compare-only branch picker.
@@ -325,6 +355,17 @@ pub enum QuickOpenEntry {
     /// `:` from Normal, highlight, or a pending `z` / `g` chord: commands
     /// mode with `>` already in the query.
     Commands,
+}
+
+/// Match option chip of the search-in-files dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchFilesOption {
+    /// `Alt-c`: match case exactly (off is smart case).
+    Case,
+    /// `Alt-w`: whole words only.
+    WholeWord,
+    /// `Alt-r`: the query is a regular expression (off is literal text).
+    Regex,
 }
 
 /// LEFT/RIGHT pair for [`Effect::ExternalDiff`].
@@ -563,6 +604,25 @@ pub enum Effect {
         gen: u64,
         index: std::sync::Arc<crate::file_index::FileIndex>,
         query: String,
+    },
+    /// List the files of `roots` for the search-in-files dialog
+    /// (`git ls-files` per root). `gen` is the dialog's index generation; a
+    /// stale result is dropped.
+    LoadSearchIndex {
+        gen: u64,
+        roots: Vec<crate::file_index::IndexRoot>,
+    },
+    /// Search one chunk of `index` for `query` from entry `start`, at most
+    /// `room` more hits. `gen` is the dialog's search generation: a newer
+    /// one stops the running chunk between files, and apply drops a stale
+    /// result.
+    SearchFilesChunk {
+        gen: u64,
+        index: std::sync::Arc<crate::file_index::FileIndex>,
+        query: String,
+        options: crate::file_search::SearchOptions,
+        start: usize,
+        room: usize,
     },
     /// Read one file tab's body on the blocking pool. `gen` is the tab's
     /// load generation; a stale result is dropped.

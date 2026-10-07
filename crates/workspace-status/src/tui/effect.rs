@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use workspace_status_graph::LOADING_OLDER;
@@ -25,6 +25,7 @@ use crate::file_index::{
     build_file_index, read_text_file, score_files, FileHit, FileIndex, FileRead, IndexRoot,
     MAX_FILE_BYTES, MAX_INDEX_ENTRIES, MAX_RESULTS,
 };
+use crate::file_search::{build_matcher, search_chunk, SearchChunk, SearchOptions};
 use crate::git::{
     apply_cached_patch, apply_worktree_patch_reverse, blame_line, create_branch_at,
     create_branch_checkout, exec_git_checked, latest_stash_ref, list_compare_picker_branches,
@@ -65,6 +66,7 @@ use super::pull_request::{lookup, lookup_detail, PrDetailLookup, PrLookup};
 #[cfg(not(test))]
 use super::pull_request::{open_in_browser, run_cli};
 use super::scheduler::{ApplyDecision, Scheduler, SpawnKind, UserTag};
+use super::search_files::SEARCH_CHUNK_BUDGET;
 use super::stash::{resolve_stash_menu_key, StashMenuKeyResult, StashOpId};
 use super::state::{revert_scope, AppState, PendingConfirm};
 use super::status::StatusMessage;
@@ -191,6 +193,21 @@ pub(crate) enum JobOutcome {
     FileScore {
         gen: u64,
         hits: Vec<FileHit>,
+    },
+    /// Search-in-files file listing for index generation `gen`.
+    SearchIndex {
+        gen: u64,
+        index: FileIndex,
+    },
+    /// One search-in-files chunk for search generation `gen`.
+    SearchChunk {
+        gen: u64,
+        chunk: SearchChunk,
+    },
+    /// Search-in-files preview body for preview generation `gen`.
+    SearchPreview {
+        gen: u64,
+        body: FileRead,
     },
     /// File tab body for load generation `gen`.
     FileTab {
@@ -469,6 +486,43 @@ struct CompareProbeJob {
     last_base_tip: Option<String>,
 }
 
+/// One search-in-files chunk waiting for a worker
+/// ([`Effect::SearchFilesChunk`]).
+struct SearchChunkJob {
+    gen: u64,
+    index: Arc<FileIndex>,
+    query: String,
+    options: SearchOptions,
+    start: usize,
+    room: usize,
+}
+
+impl SearchChunkJob {
+    /// Compile the query and search one chunk under `cwd`. Stops between
+    /// files once `live` no longer holds this job's generation.
+    ///
+    /// The event thread validated the query before it asked, so a compile
+    /// error here only ends the search with no hits.
+    fn run(self, cwd: &Path, live: &AtomicU64) -> JobOutcome {
+        let chunk = match build_matcher(&self.query, self.options) {
+            Ok(matcher) => search_chunk(
+                cwd,
+                &self.index,
+                &matcher,
+                self.start,
+                self.room,
+                SEARCH_CHUNK_BUDGET,
+                || live.load(Ordering::Relaxed) != self.gen,
+            ),
+            Err(_) => SearchChunk::default(),
+        };
+        JobOutcome::SearchChunk {
+            gen: self.gen,
+            chunk,
+        }
+    }
+}
+
 /// Occupancy key: linked checkouts use `primary_repo`, else the checkout path.
 fn gitdir_key(state: &AppState, checkout: &str) -> String {
     state
@@ -590,6 +644,19 @@ pub(crate) struct Interpreter {
     file_score_job: Option<(u64, Arc<FileIndex>, String)>,
     /// Queued file tab reads: tab id, load generation, checkout, path.
     file_tab_jobs: VecDeque<(u64, u64, String, String)>,
+    /// Latest search-in-files index request; a newer one replaces it
+    /// before spawn.
+    search_index_job: Option<(u64, Vec<IndexRoot>)>,
+    /// Latest search-in-files chunk request; a newer one replaces it
+    /// before spawn.
+    search_chunk_job: Option<SearchChunkJob>,
+    /// Latest search-in-files preview read: generation, checkout, path. A
+    /// newer one replaces it before spawn.
+    search_preview_job: Option<(u64, String, String)>,
+    /// Generation of the search that may still run (0: none). Synced from
+    /// the state after every change; a running chunk stops between files
+    /// once it no longer names the chunk's own generation.
+    search_live: Arc<AtomicU64>,
     /// Latest focused-line blame question; a newer one replaces it
     /// before spawn, so cursor moves never queue a blame per line.
     line_blame_slot: Option<BlameKey>,
@@ -660,6 +727,10 @@ impl Interpreter {
             file_index_job: None,
             file_score_job: None,
             file_tab_jobs: VecDeque::new(),
+            search_index_job: None,
+            search_chunk_job: None,
+            search_preview_job: None,
+            search_live: Arc::new(AtomicU64::new(0)),
             line_blame_slot: None,
             line_blame_inflight: false,
             blame_previous: None,
@@ -1247,6 +1318,28 @@ impl Interpreter {
                 self.file_score_job = Some((gen, index, query));
                 self.sched.enqueue_user(UserTag::QuickOpen);
             }
+            Effect::LoadSearchIndex { gen, roots } => {
+                self.search_index_job = Some((gen, roots));
+                self.sched.enqueue_user(UserTag::SearchFiles);
+            }
+            Effect::SearchFilesChunk {
+                gen,
+                index,
+                query,
+                options,
+                start,
+                room,
+            } => {
+                self.search_chunk_job = Some(SearchChunkJob {
+                    gen,
+                    index,
+                    query,
+                    options,
+                    start,
+                    room,
+                });
+                self.sched.enqueue_user(UserTag::SearchFiles);
+            }
             Effect::LoadFileTab {
                 tab_id,
                 gen,
@@ -1303,10 +1396,17 @@ impl Interpreter {
         }
     }
 
-    /// Jobs the state asks for after any schedule or apply: the focused
-    /// line's blame, and an older graph page for a pending blame reveal
-    /// (dropped once the graph pane loses focus).
+    /// Jobs the state asks for after any schedule or apply: the
+    /// search-in-files preview read, the focused line's blame, and an older
+    /// graph page for a pending blame reveal (dropped once the graph pane
+    /// loses focus).
     fn after_change(&mut self, state: &mut AppState) {
+        self.search_live
+            .store(state.search_files_live_gen(), Ordering::Relaxed);
+        if let Some(job) = state.search_preview_request() {
+            self.search_preview_job = Some(job);
+            self.sched.enqueue_user(UserTag::SearchFiles);
+        }
         self.maybe_queue_line_blame(state);
         state.drop_graph_reveal_off_graph();
         if Self::autoload_allowed(state) && state.graph_reveal_wants_older() {
@@ -1850,6 +1950,23 @@ impl Interpreter {
             JobOutcome::FileScore { gen, hits } => {
                 if let Some(follow) = state.apply_file_score(gen, hits) {
                     self.schedule(state, opts, follow, &Action::None);
+                    self.mark();
+                }
+            }
+            JobOutcome::SearchIndex { gen, index } => {
+                if let Some(follow) = state.apply_search_index(gen, index) {
+                    self.schedule(state, opts, follow, &Action::None);
+                    self.mark();
+                }
+            }
+            JobOutcome::SearchChunk { gen, chunk } => {
+                if let Some(follow) = state.apply_search_chunk(gen, chunk) {
+                    self.schedule(state, opts, follow, &Action::None);
+                    self.mark();
+                }
+            }
+            JobOutcome::SearchPreview { gen, body } => {
+                if state.apply_search_preview(gen, body) {
                     self.mark();
                 }
             }
@@ -2775,6 +2892,44 @@ impl Interpreter {
                             hits: score_files(&index, &query, MAX_RESULTS),
                         }),
                     );
+                    return;
+                }
+                self.sched.note_job_finished(id);
+            }
+            UserTag::SearchFiles => {
+                // The preview is one file read: it goes before a chunk so
+                // a moving highlight does not wait on a whole search.
+                if let Some((gen, checkout, rel)) = self.search_preview_job.take() {
+                    let file = opts.cwd.join(checkout).join(rel);
+                    spawn(
+                        id,
+                        Box::new(move || JobOutcome::SearchPreview {
+                            gen,
+                            body: read_text_file(&file, MAX_FILE_BYTES),
+                        }),
+                    );
+                    return;
+                }
+                if let Some((gen, roots)) = self.search_index_job.take() {
+                    let cwd = opts.cwd.clone();
+                    spawn(
+                        id,
+                        Box::new(move || JobOutcome::SearchIndex {
+                            gen,
+                            index: build_file_index(&cwd, roots, MAX_INDEX_ENTRIES),
+                        }),
+                    );
+                    return;
+                }
+                // A chunk whose search is no longer live never starts.
+                let live = Arc::clone(&self.search_live);
+                if let Some(job) = self
+                    .search_chunk_job
+                    .take()
+                    .filter(|job| job.gen == live.load(Ordering::Relaxed))
+                {
+                    let cwd = opts.cwd.clone();
+                    spawn(id, Box::new(move || job.run(&cwd, &live)));
                     return;
                 }
                 self.sched.note_job_finished(id);
@@ -5786,6 +5941,142 @@ mod tests {
         assert!(!quick.score_pending);
         let top = quick.hits.first().expect("a hit for main");
         assert_eq!(index.entries[top.entry].display, "src/main.rs");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn search_files_pipeline_streams_hits_from_a_real_checkout() {
+        let (root, mut state) = git_app_state("ws-effect-search-files", "main", true);
+        std::fs::create_dir_all(root.join("app/src")).unwrap();
+        std::fs::write(
+            root.join("app/src/main.rs"),
+            "fn main() {\n    needle();\n}\nfn needle() {}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("app/blob.bin"), b"needle\0binary").unwrap();
+        state.cursor = state
+            .rows
+            .iter()
+            .position(|row| row.repo.as_deref() == Some("app"))
+            .expect("app row");
+        let opts = opts(&state);
+        let mut interp = Interpreter::with_cap(4);
+        let open = Action::ToggleSearchFiles;
+        let effect = state.dispatch(open.clone());
+        assert!(
+            matches!(effect, Effect::LoadSearchIndex { .. }),
+            "{effect:?}"
+        );
+        interp.interpret_sync(&mut state, &opts, effect, &open);
+        for c in "needle".chars() {
+            let typed = Action::SearchFilesChar(c);
+            let effect = state.dispatch(typed.clone());
+            assert_eq!(effect, Effect::None, "typing waits for the debounce");
+            interp.interpret_sync(&mut state, &opts, effect, &typed);
+        }
+        let due = state
+            .search_files
+            .as_ref()
+            .and_then(|d| d.due)
+            .expect("armed");
+        let effect = state.fire_search_files_due(due).expect("due");
+        interp.interpret_sync(&mut state, &opts, effect, &Action::None);
+
+        let dialog = state.search_files.as_ref().expect("dialog open");
+        let crate::tui::quick_open::FileIndexState::Ready(index) = &dialog.index else {
+            panic!("index not ready: {:?}", dialog.index);
+        };
+        assert!(!dialog.searching, "search finished");
+        let lines: Vec<(&str, u32, &str)> = dialog
+            .hits
+            .iter()
+            .map(|hit| {
+                (
+                    index.entries[hit.entry].display.as_str(),
+                    hit.line,
+                    hit.text.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                ("src/main.rs", 2, "    needle();"),
+                ("src/main.rs", 4, "fn needle() {}"),
+            ]
+        );
+        assert_eq!(dialog.skipped, 1, "the binary file");
+        // The highlighted hit's file was read for the preview pane on the
+        // pool (the default terminal is wide enough to paint it).
+        let preview = dialog.preview.as_ref().expect("preview requested");
+        assert_eq!(
+            (preview.checkout.as_str(), preview.rel.as_str()),
+            ("app", "src/main.rs")
+        );
+        match &preview.body {
+            Some(FileRead::Text { lines, .. }) => assert_eq!(lines[3], "fn needle() {}"),
+            other => panic!("expected the file text, got {other:?}"),
+        }
+
+        // Below the preview width nothing is read.
+        state.dispatch(Action::SearchFilesCancel);
+        state.search_files_parked.as_mut().expect("parked").preview = None;
+        state.layout.term_cols = crate::tui::search_files::SEARCH_PREVIEW_MIN_COLS - 1;
+        let effect = state.dispatch(Action::ToggleSearchFiles);
+        interp.interpret_sync(&mut state, &opts, effect, &Action::None);
+        let dialog = state.search_files.as_ref().expect("dialog open");
+        assert_eq!(dialog.hits.len(), 2, "restored with its hits");
+        assert_eq!(dialog.preview, None, "no preview below 100 columns");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_newer_search_stops_the_running_chunk() {
+        let (root, mut state) = git_app_state("ws-effect-search-files-cancel", "main", false);
+        std::fs::write(root.join("app/notes.txt"), "alpha\nbeta\n").unwrap();
+        let opts = opts(&state);
+        let mut interp = Interpreter::with_cap(4);
+        let effect = state.dispatch(Action::ToggleSearchFiles);
+        interp.interpret_sync(&mut state, &opts, effect, &Action::None);
+        state.dispatch(Action::SearchFilesChar('a'));
+        let due = state
+            .search_files
+            .as_ref()
+            .and_then(|d| d.due)
+            .expect("armed");
+        let first = state.fire_search_files_due(due).expect("due");
+        schedule_effect(&mut interp, &mut state, first, &Action::None);
+        let running = capture_jobs(&mut interp, &mut state);
+        assert_eq!(running.len(), 1);
+
+        // Regex on: a new generation while the first chunk is on a worker.
+        let toggle = Action::SearchFilesToggleOption(crate::tui::action::SearchFilesOption::Regex);
+        let second = state.dispatch(toggle.clone());
+        assert!(
+            matches!(second, Effect::SearchFilesChunk { .. }),
+            "{second:?}"
+        );
+        schedule_effect(&mut interp, &mut state, second, &toggle);
+        for (id, work) in running {
+            let outcome = work();
+            match &outcome {
+                JobOutcome::SearchChunk { chunk, .. } => {
+                    assert!(chunk.hits.is_empty(), "stopped before the first file");
+                    assert_eq!(chunk.next_entry, Some(0));
+                }
+                _ => panic!("expected a search chunk"),
+            }
+            apply_id(&mut interp, &mut state, id, outcome);
+        }
+        assert!(
+            state.search_files.as_ref().unwrap().hits.is_empty(),
+            "dropped"
+        );
+        run_jobs(&mut interp, &mut state);
+        let dialog = state.search_files.as_ref().unwrap();
+        assert!(!dialog.searching);
+        let lines: Vec<u32> = dialog.hits.iter().map(|hit| hit.line).collect();
+        assert_eq!(lines, vec![1, 2], "the newer search ran");
         let _ = std::fs::remove_dir_all(root);
     }
 

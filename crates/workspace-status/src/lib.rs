@@ -36,6 +36,7 @@ pub mod cli;
 pub mod config;
 pub mod discovery;
 pub mod file_index;
+pub mod file_search;
 pub mod git;
 pub mod helpers;
 pub(crate) mod parallel;
