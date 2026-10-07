@@ -17,7 +17,7 @@ use crate::file_index::FileRead;
 use super::super::action::{Action, Effect};
 use super::super::command_palette::{CommandScope, PaletteCommand};
 use super::super::event_pump::overlay_blocks_background_ticks;
-use super::super::search::{apply_pan, match_diff_line_indices, step_from_anchor};
+use super::super::search::{apply_pan, match_diff_line_indices, step_from_anchor, SearchPane};
 use super::super::selection::TextSelection;
 use super::super::split::SplitDrag;
 use super::super::status::StatusMessage;
@@ -57,6 +57,42 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// Open or focus the file tab for `rel` in `checkout` with its cursor on
+    /// 0-based `line` (the paint keeps the cursor in view).
+    ///
+    /// With `search`, the in-file search is armed on that text with `line`
+    /// as the current hit, as if `/` and Enter had landed there, so `n` /
+    /// `N` step its matches from `line`. A new tab has no lines yet: its
+    /// cursor stays on `line` until [`Self::apply_file_tab`] clamps it to
+    /// the loaded length.
+    pub(crate) fn open_file_tab_at_line(
+        &mut self,
+        checkout: String,
+        rel: String,
+        line: usize,
+        search: Option<String>,
+    ) -> Effect {
+        let effect = self.open_file_tab(checkout, rel);
+        let Some(tab) = self.tabs.active_file_mut() else {
+            return effect;
+        };
+        tab.cursor = if tab.body.is_some() {
+            line.min(tab.lines().len().saturating_sub(1))
+        } else {
+            line
+        };
+        let cursor = tab.cursor;
+        if let Some(query) = search {
+            self.search_mode = false;
+            self.search_origin = None;
+            self.search_active = true;
+            self.search_query = query;
+            self.search_target = SearchPane::File;
+            self.search_hit = Some(cursor);
+        }
+        effect
     }
 
     /// Record the active file tab's disk token as of the load about to be

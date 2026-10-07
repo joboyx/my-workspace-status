@@ -18,6 +18,9 @@ use super::tabs::checkout_leaf;
 /// Quiet time after the last query edit before the search starts.
 pub const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
 
+/// Warning when Enter or `e` finds no highlighted hit to open.
+pub const NO_SEARCH_MATCHES: &str = "no matches";
+
 /// Wall time one search chunk may spend on the blocking pool before it
 /// returns its hits and the next chunk is scheduled.
 pub const SEARCH_CHUNK_BUDGET: Duration = Duration::from_millis(30);
@@ -124,6 +127,9 @@ pub struct SearchFilesState {
     /// Query the running (or last) search used. A chunk continuation
     /// searches this text, not a newer edit still waiting for the debounce.
     pub searched: String,
+    /// Options the running (or last) search used. A chunk continuation
+    /// searches with these, not with a chip flipped since.
+    pub searched_options: SearchOptions,
     /// A search of [`Self::search_gen`] is queued or running.
     pub searching: bool,
     /// [`Self::hits`] came from an earlier search. The first chunk of
@@ -161,6 +167,7 @@ impl SearchFilesState {
             index_gen: 0,
             search_gen: 0,
             searched: String::new(),
+            searched_options: SearchOptions::default(),
             searching: false,
             stale: false,
             hits: Vec::new(),

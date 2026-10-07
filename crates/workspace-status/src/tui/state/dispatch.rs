@@ -336,6 +336,8 @@ impl AppState {
             | Action::SearchFilesToggleScope
             | Action::SearchFilesToggleOption(_)
             | Action::SearchFilesCancel
+            | Action::SearchFilesSubmit
+            | Action::SearchFilesEdit
             | Action::CompareVsDefault
             | Action::CompareVsBranch
             | Action::CompareVsCommit

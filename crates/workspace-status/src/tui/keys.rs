@@ -524,6 +524,13 @@ fn repeat_maps_to_action(key: KeyEvent, mode: InputMode) -> bool {
         InputMode::QuickOpen | InputMode::SearchFiles { .. } => match key.code {
             _ if list_overlay_move(key).is_some() => true,
             KeyCode::Backspace => true,
+            // `e` in the results zone opens the editor: one-shot, like Enter.
+            KeyCode::Char('e')
+                if mode == (InputMode::SearchFiles { results: true })
+                    && key.modifiers.is_empty() =>
+            {
+                false
+            }
             KeyCode::Char(_) => typing,
             _ => false,
         },
@@ -897,10 +904,11 @@ fn quick_open_key_action(key: KeyEvent) -> Action {
 /// Keys inside the search-in-files dialog (Ctrl-f is matched before).
 ///
 /// Both zones: list moves and PgUp / PgDn move the highlight (and enter
-/// the results zone), Tab widens to all repos, Alt-c / Alt-w / Alt-r flip
-/// case / whole word / regex, Esc closes. The query zone types every other
-/// printable key. The results zone also moves on `j` / `k`; any other
-/// printable key or Backspace goes back to the query and applies there.
+/// the results zone), Enter opens the highlighted hit, Tab widens to all
+/// repos, Alt-c / Alt-w / Alt-r flip case / whole word / regex, Esc
+/// closes. The query zone types every other printable key. The results
+/// zone also moves on `j` / `k` and edits on `e`; any other printable key
+/// or Backspace goes back to the query and applies there.
 fn search_files_key_action(key: KeyEvent, results: bool) -> Action {
     if let Some(delta) = list_overlay_move(key) {
         return Action::SearchFilesMove(delta);
@@ -908,6 +916,7 @@ fn search_files_key_action(key: KeyEvent, results: bool) -> Action {
     let alt_only = key.modifiers.difference(KeyModifiers::SHIFT) == KeyModifiers::ALT;
     match key.code {
         KeyCode::Esc => Action::SearchFilesCancel,
+        KeyCode::Enter => Action::SearchFilesSubmit,
         KeyCode::Tab => Action::SearchFilesToggleScope,
         KeyCode::PageDown => Action::SearchFilesMove(SEARCH_FILES_PAGE),
         KeyCode::PageUp => Action::SearchFilesMove(-SEARCH_FILES_PAGE),
@@ -920,6 +929,7 @@ fn search_files_key_action(key: KeyEvent, results: bool) -> Action {
         },
         KeyCode::Char('j') if results && key.modifiers.is_empty() => Action::SearchFilesMove(1),
         KeyCode::Char('k') if results && key.modifiers.is_empty() => Action::SearchFilesMove(-1),
+        KeyCode::Char('e') if results && key.modifiers.is_empty() => Action::SearchFilesEdit,
         KeyCode::Char(c) if !has_command_modifier(key) => Action::SearchFilesChar(c),
         _ => Action::None,
     }
@@ -3499,7 +3509,7 @@ mod tests {
         assert_eq!(at(key(KeyCode::Esc)), Action::SearchFilesCancel);
         assert_eq!(at(ctrl(KeyCode::Char('f'))), Action::ToggleSearchFiles);
         assert_eq!(at(ctrl(KeyCode::Char('c'))), Action::CtrlC);
-        assert_eq!(at(key(KeyCode::Enter)), Action::None, "no open yet");
+        assert_eq!(at(key(KeyCode::Enter)), Action::SearchFilesSubmit);
         for (c, option) in [
             ('c', SearchFilesOption::Case),
             ('w', SearchFilesOption::WholeWord),
@@ -3522,9 +3532,11 @@ mod tests {
         assert_eq!(at(key(KeyCode::Char('j'))), Action::SearchFilesMove(1));
         assert_eq!(at(key(KeyCode::Char('k'))), Action::SearchFilesMove(-1));
         assert_eq!(at(key(KeyCode::Down)), Action::SearchFilesMove(1));
-        for c in ['x', 'n', 'f', 'J', 'K'] {
+        for c in ['x', 'n', 'f', 'J', 'K', 'E'] {
             assert_eq!(at(key(KeyCode::Char(c))), Action::SearchFilesChar(c), "{c}");
         }
+        assert_eq!(at(key(KeyCode::Char('e'))), Action::SearchFilesEdit);
+        assert_eq!(at(key(KeyCode::Enter)), Action::SearchFilesSubmit);
         assert_eq!(at(key(KeyCode::Backspace)), Action::SearchFilesBackspace);
         assert_eq!(at(key(KeyCode::Tab)), Action::SearchFilesToggleScope);
         assert_eq!(
@@ -3559,6 +3571,25 @@ mod tests {
                 false
             ),
             Action::None
+        );
+        assert_eq!(
+            event_to_action(
+                &key_kind(KeyCode::Char('e'), KeyEventKind::Repeat),
+                search_files(true),
+                false,
+                false
+            ),
+            Action::None,
+            "a held `e` opens the editor once"
+        );
+        assert_eq!(
+            event_to_action(
+                &key_kind(KeyCode::Char('e'), KeyEventKind::Repeat),
+                search_files(false),
+                false,
+                false
+            ),
+            Action::SearchFilesChar('e')
         );
     }
 

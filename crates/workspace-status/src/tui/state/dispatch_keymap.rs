@@ -422,7 +422,9 @@ impl AppState {
             | Action::SearchFilesMove(_)
             | Action::SearchFilesToggleScope
             | Action::SearchFilesToggleOption(_)
-            | Action::SearchFilesCancel => self.dispatch_search_files(action),
+            | Action::SearchFilesCancel
+            | Action::SearchFilesSubmit
+            | Action::SearchFilesEdit => self.dispatch_search_files(action),
             Action::CompareVsDefault => self.compare_vs_default(),
             Action::CompareVsBranch => self.prepare_compare_picker(ComparePickerKind::Branch),
             Action::CompareVsCommit => self.prepare_compare_picker(ComparePickerKind::Commit),

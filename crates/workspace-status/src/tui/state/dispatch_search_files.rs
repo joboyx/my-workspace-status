@@ -8,7 +8,8 @@
 //! latest. An accepted chunk that did not finish the file list schedules
 //! the next chunk. A query edit only arms the debounce
 //! ([`AppState::search_files_due_ms`]); the live loop fires it through
-//! [`AppState::fire_search_files_due`].
+//! [`AppState::fire_search_files_due`]. Enter and `e` park the dialog and
+//! open the highlighted hit in a file tab or in `$EDITOR`.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -18,8 +19,11 @@ use crate::file_search::MAX_SEARCH_HITS;
 
 use super::super::action::{Action, Effect, SearchFilesOption};
 use super::super::ctrl_c_exit::is_ctrl_c_exit_prompt;
-use super::super::quick_open::FileIndexState;
-use super::super::search_files::{query_error, SearchFilesState, SearchZone, SEARCH_DEBOUNCE};
+use super::super::quick_open::{FileIndexState, QuickOpenScope};
+use super::super::search_files::{
+    query_error, SearchFilesState, SearchZone, NO_SEARCH_MATCHES, SEARCH_DEBOUNCE,
+};
+use super::super::status::StatusMessage;
 use super::AppState;
 
 impl AppState {
@@ -70,6 +74,8 @@ impl AppState {
                 self.close_search_files();
                 Effect::None
             }
+            Action::SearchFilesSubmit => self.submit_search_files(),
+            Action::SearchFilesEdit => self.edit_search_files_hit(),
             _ => Effect::None,
         }
     }
@@ -87,6 +93,20 @@ impl AppState {
             self.close_search_files();
             return Effect::None;
         }
+        self.open_search_files(None)
+    }
+
+    /// Quick Open `#`: open the dialog the way Ctrl-f does, with `query` as
+    /// its query. A non-empty query searches at once (once the index is
+    /// ready), with no debounce.
+    pub(super) fn open_search_files_with(&mut self, query: String) -> Effect {
+        self.open_search_files(Some(query))
+    }
+
+    /// Open the dialog for the focused scope (see
+    /// [`Self::toggle_search_files`]). `query` replaces the query text; a
+    /// same-scope restore whose query it changes searches again.
+    fn open_search_files(&mut self, query: Option<String>) -> Effect {
         self.cancel_mouse_drag();
         self.help_open = false;
         self.clear_help_search();
@@ -99,7 +119,12 @@ impl AppState {
         match self.search_files_parked.take() {
             Some(mut parked) if parked.focused == focused && parked.scope() == focused => {
                 parked.zone = SearchZone::Query;
-                let unfinished = parked.pending();
+                let mut unfinished = parked.pending();
+                if let Some(query) = query.filter(|query| *query != parked.query) {
+                    parked.error = query_error(&query, parked.options);
+                    parked.query = query;
+                    unfinished = true;
+                }
                 parked.searching = false;
                 parked.due = None;
                 let index_ready = matches!(parked.index, FileIndexState::Ready(_));
@@ -113,9 +138,10 @@ impl AppState {
                 }
             }
             parked => {
-                let (query, options) = parked
+                let (parked_query, options) = parked
                     .map(|parked| (parked.query, parked.options))
                     .unwrap_or_default();
+                let query = query.unwrap_or(parked_query);
                 self.search_files = Some(SearchFilesState::new(focused, query, options));
                 self.request_search_index()
             }
@@ -136,11 +162,16 @@ impl AppState {
         let Some(dialog) = self.search_files.as_mut() else {
             return Effect::None;
         };
-        let before = dialog.scope();
-        dialog.widened = !dialog.widened;
-        if dialog.scope() == before {
+        let widened = !dialog.widened;
+        let after = if widened {
+            QuickOpenScope::Workspace
+        } else {
+            dialog.focused.clone()
+        };
+        if after == dialog.scope() {
             return Effect::None;
         }
+        dialog.widened = widened;
         dialog.clear_results();
         dialog.searching = false;
         self.request_search_index()
@@ -167,6 +198,13 @@ impl AppState {
     /// that does not compile shows its error, keeps the previous list, and
     /// arms nothing.
     fn search_files_edit(&mut self, query: String) -> Effect {
+        if self.search_files.is_none() {
+            return Effect::None;
+        }
+        // Enter's miss warning is about the old query.
+        if self.status == NO_SEARCH_MATCHES {
+            self.status.clear();
+        }
         let Some(dialog) = self.search_files.as_mut() else {
             return Effect::None;
         };
@@ -186,9 +224,10 @@ impl AppState {
     /// Search the current query now: the first chunk of a new generation.
     ///
     /// Clears the debounce. An empty query drops the hits instead; a query
-    /// that does not compile only sets its error. With the index not ready
-    /// yet nothing leaves: [`Self::apply_search_index`] searches once it
-    /// lands. The hits on screen stay until the first chunk replaces them.
+    /// that does not compile sets its error and stops the running search
+    /// (its list stays). With the index not ready yet nothing leaves:
+    /// [`Self::apply_search_index`] searches once it lands. The hits on
+    /// screen stay until the first chunk replaces them.
     fn request_search(&mut self) -> Effect {
         let Some(dialog) = self.search_files.as_mut() else {
             return Effect::None;
@@ -201,6 +240,7 @@ impl AppState {
             return Effect::None;
         }
         if dialog.error.is_some() {
+            dialog.searching = false;
             return Effect::None;
         }
         let FileIndexState::Ready(index) = &dialog.index else {
@@ -215,13 +255,70 @@ impl AppState {
         dialog.searching = true;
         dialog.stale = true;
         dialog.searched = dialog.query.clone();
+        dialog.searched_options = dialog.options;
         Effect::SearchFilesChunk {
             gen,
             index,
             query: dialog.searched.clone(),
-            options: dialog.options,
+            options: dialog.searched_options,
             start: 0,
             room: MAX_SEARCH_HITS,
+        }
+    }
+
+    /// Checkout, checkout-relative path, and 1-based line of the
+    /// highlighted hit, or `None` with no hit (or no ready index to name
+    /// its file).
+    fn search_files_target(&self) -> Option<(String, String, u32)> {
+        let dialog = self.search_files.as_ref()?;
+        let FileIndexState::Ready(index) = &dialog.index else {
+            return None;
+        };
+        let hit = dialog.hits.get(dialog.cursor)?;
+        let entry = index.entries.get(hit.entry)?;
+        Some((
+            index.checkout(entry).to_string(),
+            entry.rel().to_string(),
+            hit.line,
+        ))
+    }
+
+    /// Enter: park the dialog, then open or focus the highlighted hit's
+    /// file tab with its cursor on the hit line.
+    ///
+    /// A literal search also arms the in-file search on the searched text,
+    /// so `n` / `N` step its matches; a regex search does not (the in-file
+    /// search matches plain text only). With no hit the dialog stays and
+    /// the status warns `no matches`.
+    fn submit_search_files(&mut self) -> Effect {
+        let Some((checkout, rel, line)) = self.search_files_target() else {
+            self.status = StatusMessage::warn(NO_SEARCH_MATCHES);
+            return Effect::None;
+        };
+        let search = self
+            .search_files
+            .as_ref()
+            .filter(|dialog| !dialog.searched_options.regex)
+            .map(|dialog| dialog.searched.clone());
+        self.close_search_files();
+        let line = usize::try_from(line.saturating_sub(1)).unwrap_or(usize::MAX);
+        self.open_file_tab_at_line(checkout, rel, line, search)
+    }
+
+    /// `e`: park the dialog and open the highlighted hit's file in the
+    /// editor at the hit line. With no hit the dialog stays and the status
+    /// warns `no matches`.
+    fn edit_search_files_hit(&mut self) -> Effect {
+        let Some((repo, path, line)) = self.search_files_target() else {
+            self.status = StatusMessage::warn(NO_SEARCH_MATCHES);
+            return Effect::None;
+        };
+        self.close_search_files();
+        self.status = StatusMessage::progress(format!("opening {path}…"));
+        Effect::EditFile {
+            repo,
+            path,
+            line: Some(line),
         }
     }
 
@@ -310,7 +407,7 @@ impl AppState {
             gen,
             index: Arc::clone(index),
             query: dialog.searched.clone(),
-            options: dialog.options,
+            options: dialog.searched_options,
             start,
             room: MAX_SEARCH_HITS.saturating_sub(dialog.hits.len()),
         })
@@ -322,12 +419,16 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use super::super::super::quick_open::QuickOpenScope;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    use super::super::super::action::QuickOpenEntry;
+    use super::super::super::keys::event_to_action;
+    use super::super::super::search::SearchPane;
     use super::super::super::search_files::SearchStatus;
     use super::super::super::status::StatusMessage;
     use super::super::super::tree::NodeKind;
     use super::*;
-    use crate::file_index::{FileEntry, IndexRoot};
+    use crate::file_index::{FileEntry, FileRead, IndexRoot};
     use crate::file_search::{SearchChunk, SearchHit};
     use crate::snapshot::{
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
@@ -638,6 +739,7 @@ mod tests {
         open(&mut app);
         assert_eq!(app.dispatch(Action::SearchFilesToggleScope), Effect::None);
         assert_eq!(dialog(&app).scope(), QuickOpenScope::Workspace);
+        assert!(!dialog(&app).widened, "nothing flipped");
     }
 
     #[test]
@@ -956,5 +1058,298 @@ mod tests {
         assert_eq!(fire(&mut app), Effect::None, "no index yet");
         let follow = app.apply_search_index(gen, index_of(&["a.rs"]));
         search_gen(follow);
+    }
+
+    fn text(lines: &[&str]) -> FileRead {
+        FileRead::Text {
+            lines: lines.iter().map(|line| (*line).to_string()).collect(),
+            max_cols: lines.iter().map(|line| line.len()).max().unwrap_or(0),
+        }
+    }
+
+    const MAIN_RS: [&str; 6] = [
+        "fn main() {",
+        "  foo();",
+        "}",
+        "fn foo() {",
+        "  bar();",
+        "} // foo",
+    ];
+
+    /// Map `code` through the keymap of the current input mode, then
+    /// dispatch it.
+    fn press(app: &mut AppState, code: KeyCode) -> Effect {
+        let event = Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        let action = event_to_action(&event, app.input_mode(), false, false);
+        app.dispatch(action)
+    }
+
+    fn file_cursor(app: &AppState) -> usize {
+        app.tabs.active_file().expect("file tab").cursor
+    }
+
+    #[test]
+    fn enter_opens_the_hit_line_with_the_search_armed() {
+        let mut app = family_state();
+        let gen = open_and_search(&mut app, "foo");
+        app.apply_search_chunk(gen, chunk(vec![hit(1, 2), hit(1, 4)], None));
+        app.dispatch(Action::SearchFilesMove(1));
+        let Effect::LoadFileTab {
+            tab_id,
+            gen,
+            repo,
+            path,
+        } = app.dispatch(Action::SearchFilesSubmit)
+        else {
+            panic!("expected a new file tab load");
+        };
+        assert_eq!((repo.as_str(), path.as_str()), ("app", "src/main.rs"));
+        assert!(app.search_files.is_none(), "Enter closes the dialog");
+        assert_eq!(
+            app.search_files_parked.as_ref().map(|d| d.cursor),
+            Some(1),
+            "Enter parks it for the next Ctrl-f"
+        );
+        assert!(app.is_file_tab());
+        assert!(app.apply_file_tab(tab_id, gen, text(&MAIN_RS)));
+        assert_eq!(file_cursor(&app), 3, "line 4 is cursor 3");
+        assert!(app.search_active);
+        assert_eq!(app.search_query, "foo");
+        assert_eq!(app.search_target, SearchPane::File);
+        assert_eq!(app.search_hit, Some(3));
+
+        app.dispatch(Action::SearchNext);
+        assert_eq!(file_cursor(&app), 5, "`n` steps to the next match");
+        app.dispatch(Action::SearchPrev);
+        assert_eq!(file_cursor(&app), 3);
+
+        // A hit past the loaded length clamps like any cursor.
+        let gen = {
+            app.dispatch(Action::ToggleSearchFiles);
+            type_text(&mut app, "x");
+            search_gen(Some(fire(&mut app)))
+        };
+        app.apply_search_chunk(gen, chunk(vec![hit(0, 40)], None));
+        let Effect::LoadFileTab { tab_id, gen, .. } = app.dispatch(Action::SearchFilesSubmit)
+        else {
+            panic!("expected a new file tab load");
+        };
+        app.apply_file_tab(tab_id, gen, text(&["a", "b"]));
+        assert_eq!(file_cursor(&app), 1);
+        assert_eq!(app.search_hit, None, "past the end is no hit");
+    }
+
+    #[test]
+    fn regex_enter_opens_the_line_without_arming_the_search() {
+        let mut app = family_state();
+        open_and_search(&mut app, "fo+");
+        let gen = search_gen(Some(
+            app.dispatch(Action::SearchFilesToggleOption(SearchFilesOption::Regex)),
+        ));
+        app.apply_search_chunk(gen, chunk(vec![hit(1, 4)], None));
+        let Effect::LoadFileTab { tab_id, gen, .. } = app.dispatch(Action::SearchFilesSubmit)
+        else {
+            panic!("expected a new file tab load");
+        };
+        app.apply_file_tab(tab_id, gen, text(&MAIN_RS));
+        assert_eq!(file_cursor(&app), 3);
+        assert!(!app.search_active, "in-file search is plain text only");
+        assert_eq!(app.search_hit, None);
+    }
+
+    #[test]
+    fn enter_on_an_open_tab_moves_its_cursor() {
+        let mut app = family_state();
+        let Effect::LoadFileTab { tab_id, gen, .. } =
+            app.open_file_tab("app".into(), "src/main.rs".into())
+        else {
+            panic!("expected a load");
+        };
+        app.apply_file_tab(tab_id, gen, text(&MAIN_RS));
+        assert_eq!(file_cursor(&app), 0);
+        let tabs = app.tabs.len();
+
+        // On a file tab the dialog scopes to its checkout, `app`.
+        let (gen, roots) = open(&mut app);
+        assert_eq!(roots[0].checkout, "app");
+        app.apply_search_index(gen, index_of(&["README.md", "src/main.rs"]));
+        type_text(&mut app, "bar");
+        let gen = search_gen(Some(fire(&mut app)));
+        app.apply_search_chunk(gen, chunk(vec![hit(1, 5)], None));
+        app.dispatch(Action::SearchFilesSubmit);
+        assert_eq!(app.tabs.len(), tabs, "the open tab is reused");
+        assert_eq!(app.tabs.active_file().map(|tab| tab.id), Some(tab_id));
+        assert_eq!(file_cursor(&app), 4);
+        assert_eq!(app.search_query, "bar");
+        assert_eq!(app.search_hit, Some(4));
+    }
+
+    #[test]
+    fn e_edits_the_hit_line_and_parks_the_dialog() {
+        let mut app = family_state();
+        let gen = open_and_search(&mut app, "foo");
+        app.apply_search_chunk(gen, chunk(vec![hit(0, 1), hit(1, 4)], None));
+        app.dispatch(Action::SearchFilesMove(1));
+        assert_eq!(
+            app.dispatch(Action::SearchFilesEdit),
+            Effect::EditFile {
+                repo: "app".into(),
+                path: "src/main.rs".into(),
+                line: Some(4),
+            }
+        );
+        assert!(app.search_files.is_none(), "`e` closes the dialog");
+        assert!(app.search_files_parked.is_some(), "`e` parks it");
+        assert_eq!(app.status, "opening src/main.rs…");
+        assert!(!app.is_file_tab(), "no file tab for `e`");
+    }
+
+    #[test]
+    fn enter_or_e_without_a_hit_warns_and_stays_open() {
+        let mut app = family_state();
+        let gen = open_and_search(&mut app, "zzz");
+        app.apply_search_chunk(gen, chunk(Vec::new(), None));
+        for action in [Action::SearchFilesSubmit, Action::SearchFilesEdit] {
+            assert_eq!(app.dispatch(action.clone()), Effect::None, "{action:?}");
+            assert!(app.search_files.is_some(), "{action:?} keeps the dialog");
+            assert_eq!(app.status, NO_SEARCH_MATCHES);
+        }
+        type_text(&mut app, "z");
+        assert!(app.status.is_empty(), "an edit drops the miss warning");
+    }
+
+    #[test]
+    fn zone_keys_move_edit_and_return_to_the_query() {
+        let mut app = family_state();
+        let gen = open_and_search(&mut app, "a");
+        app.apply_search_chunk(gen, chunk(vec![hit(0, 1), hit(1, 2)], None));
+
+        press(&mut app, KeyCode::Down);
+        assert_eq!(dialog(&app).zone, SearchZone::Results);
+        assert_eq!(dialog(&app).cursor, 1);
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(dialog(&app).cursor, 0, "`k` moves in the results zone");
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(dialog(&app).zone, SearchZone::Query);
+        assert_eq!(dialog(&app).query, "ax", "`x` goes back and types");
+        press(&mut app, KeyCode::Char('e'));
+        assert_eq!(dialog(&app).query, "axe", "`e` types in the query zone");
+
+        press(&mut app, KeyCode::Down);
+        assert_eq!(dialog(&app).zone, SearchZone::Results);
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(dialog(&app).zone, SearchZone::Query);
+        assert_eq!(dialog(&app).query, "ax", "Backspace goes back and deletes");
+
+        press(&mut app, KeyCode::Down);
+        match press(&mut app, KeyCode::Char('e')) {
+            Effect::EditFile { path, line, .. } => {
+                assert_eq!((path.as_str(), line), ("src/main.rs", Some(2)));
+            }
+            other => panic!("`e` in the results zone edits, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quick_open_hash_hands_off_to_search_files() {
+        let mut app = family_state();
+        focus_row(&mut app, NodeKind::Checkout, Some("app"));
+        app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Files));
+        assert!(app.quick_open.is_some());
+        match press(&mut app, KeyCode::Char('#')) {
+            Effect::LoadSearchIndex { roots, .. } => assert_eq!(roots[0].checkout, "app"),
+            other => panic!("expected the dialog's index load, got {other:?}"),
+        }
+        assert!(app.quick_open.is_none(), "Quick Open closes");
+        assert_eq!(dialog(&app).query, "", "`#` alone opens with no query");
+        assert_eq!(dialog(&app).scope(), QuickOpenScope::Checkout("app".into()));
+        for c in "foo".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert_eq!(dialog(&app).query, "foo", "the rest types into the dialog");
+
+        // Text after `#` is the query, leading spaces trimmed.
+        app.dispatch(Action::SearchFilesCancel);
+        focus_row(&mut app, NodeKind::Repo, Some("lib"));
+        app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Files));
+        app.quick_open.as_mut().unwrap().query = "#  ba".into();
+        let effect = app.dispatch(Action::QuickOpenChar('r'));
+        assert!(
+            matches!(effect, Effect::LoadSearchIndex { .. }),
+            "{effect:?}"
+        );
+        assert_eq!(dialog(&app).query, "bar");
+        let gen = dialog(&app).index_gen;
+        let follow = app.apply_search_index(gen, index_of(&["lib.rs"]));
+        match follow {
+            Some(Effect::SearchFilesChunk { query, .. }) => assert_eq!(query, "bar"),
+            other => panic!("searches as soon as the index lands, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hash_on_a_parked_same_scope_dialog_searches_its_query_at_once() {
+        let mut app = family_state();
+        let gen = open_and_search(&mut app, "line");
+        app.apply_search_chunk(gen, chunk(vec![hit(0, 1)], None));
+        app.dispatch(Action::SearchFilesCancel);
+
+        app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Files));
+        app.quick_open.as_mut().unwrap().query = "#fo".into();
+        match app.dispatch(Action::QuickOpenChar('o')) {
+            Effect::SearchFilesChunk {
+                query, start: 0, ..
+            } => assert_eq!(query, "foo"),
+            other => panic!("expected a search with no debounce, got {other:?}"),
+        }
+        assert_eq!(dialog(&app).due, None);
+        assert!(
+            matches!(dialog(&app).index, FileIndexState::Ready(_)),
+            "parked index kept"
+        );
+
+        // `#` alone empties the query and its hits.
+        app.dispatch(Action::SearchFilesCancel);
+        app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Files));
+        assert_eq!(app.dispatch(Action::QuickOpenChar('#')), Effect::None);
+        assert_eq!(dialog(&app).query, "");
+        assert!(dialog(&app).hits.is_empty());
+        assert_eq!(app.search_files_live_gen(), 0);
+    }
+
+    #[test]
+    fn continuations_keep_the_searched_options() {
+        let mut app = family_state();
+        let gen = open_and_search(&mut app, "a(");
+        // A chip flipped without a new search must not reach the worker.
+        app.search_files.as_mut().unwrap().options.regex = true;
+        match app.apply_search_chunk(gen, chunk(vec![hit(0, 1)], Some(1))) {
+            Some(Effect::SearchFilesChunk { query, options, .. }) => {
+                assert_eq!(query, "a(");
+                assert!(!options.regex, "continues as the literal search it began");
+            }
+            other => panic!("expected the next chunk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_option_that_breaks_the_query_stops_the_running_search() {
+        let mut app = family_state();
+        let gen = open_and_search(&mut app, "a(");
+        app.apply_search_chunk(gen, chunk(vec![hit(0, 1)], Some(1)));
+        assert_eq!(app.search_files_live_gen(), gen);
+        assert_eq!(
+            app.dispatch(Action::SearchFilesToggleOption(SearchFilesOption::Regex)),
+            Effect::None
+        );
+        assert_eq!(app.search_files_live_gen(), 0, "the literal search stops");
+        assert_eq!(
+            app.apply_search_chunk(gen, chunk(vec![hit(1, 2)], None)),
+            None,
+            "its in-flight chunk is dropped"
+        );
+        let state = dialog(&app);
+        assert_eq!(state.hits, vec![hit(0, 1)], "the list stays");
+        assert!(matches!(state.status()[0], SearchStatus::InvalidRegex(_)));
     }
 }

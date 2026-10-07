@@ -64,6 +64,7 @@ pub fn classify_busy_action(action: &Action) -> BusyAction {
         | Action::ConfirmYes
         | Action::ConfirmYesClean
         | Action::Edit
+        | Action::SearchFilesEdit
         | Action::ExternalDiff
         | Action::WatchTick
         | Action::StashMenuEnter
@@ -341,7 +342,8 @@ mod tests {
     }
 
     /// The search-in-files dialog only reads files, so every key in it
-    /// stays live while a git write runs.
+    /// stays live while a git write runs, Enter (open a file tab) too. `e`
+    /// launches the editor, so it waits like [`Action::Edit`].
     #[test]
     fn search_files_actions_stay_live_while_busy() {
         use super::super::action::SearchFilesOption;
@@ -353,6 +355,7 @@ mod tests {
             Action::SearchFilesToggleScope,
             Action::SearchFilesToggleOption(SearchFilesOption::Regex),
             Action::SearchFilesCancel,
+            Action::SearchFilesSubmit,
         ] {
             assert_eq!(
                 classify_busy_dispatch(&action, None),
@@ -360,6 +363,14 @@ mod tests {
                 "{action:?}"
             );
         }
+        assert_eq!(
+            classify_busy_dispatch(&Action::SearchFilesEdit, None),
+            classify_busy_dispatch(&Action::Edit, None),
+        );
+        assert_eq!(
+            classify_busy_dispatch(&Action::SearchFilesEdit, None),
+            BusyAction::Ignore
+        );
     }
 
     #[test]

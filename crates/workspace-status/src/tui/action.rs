@@ -277,6 +277,13 @@ pub enum Action {
     SearchFilesToggleOption(SearchFilesOption),
     /// Esc close. The dialog is parked for the next Ctrl-f.
     SearchFilesCancel,
+    /// Enter: park the dialog and open the highlighted hit's file in a file
+    /// tab at the hit line, with the in-file search armed on the query
+    /// (literal mode only).
+    SearchFilesSubmit,
+    /// `e` in the results zone: park the dialog and open the highlighted
+    /// hit's file in `$EDITOR` at the hit line.
+    SearchFilesEdit,
     /// Open or focus a compare tab versus the checkout default tip.
     CompareVsDefault,
     /// Open the compare-only branch picker.
