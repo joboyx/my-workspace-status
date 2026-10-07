@@ -19,6 +19,7 @@ const HELP_MOVE_ROWS: &[(&str, &str)] = &[
     ("Home End", "top / bottom"),
     ("/", "search focused pane (Enter arms)"),
     ("n N", "next / prev match (after Enter)"),
+    ("Ctrl-f", "search in files"),
 ];
 
 /// Painted GIT rows. One `e E` tuple matches the overlay; split `e` / `E`

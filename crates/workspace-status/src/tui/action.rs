@@ -248,7 +248,8 @@ pub enum Action {
     ToggleQuickOpen(QuickOpenEntry),
     /// Move the Quick Open highlight (arrows, Ctrl-n / Ctrl-p).
     QuickOpenMove(i32),
-    /// Append a query character (`>` first switches to commands mode).
+    /// Append a query character (`>` first switches to commands mode, `#`
+    /// first hands off to search in files).
     QuickOpenChar(char),
     /// Delete the last query character.
     QuickOpenBackspace,

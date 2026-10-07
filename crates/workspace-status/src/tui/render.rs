@@ -4031,7 +4031,7 @@ fn draw_quick_open(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         (
             quick_open_file_rows(quick, palette_theme, max_rows, inner_width),
             status,
-            "↑↓ move · Enter open · > commands · Esc close".to_string(),
+            "↑↓ move · Enter open · > commands · # search · Esc close".to_string(),
         )
     } else {
         let commands = &quick.commands;
