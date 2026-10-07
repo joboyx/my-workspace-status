@@ -203,6 +203,12 @@ mod tests {
         }));
         assert!(!overlay_blocks_background_ticks(InputMode::DiffVisual));
         assert!(overlay_blocks_background_ticks(InputMode::QuickOpen));
+        assert!(overlay_blocks_background_ticks(InputMode::SearchFiles {
+            results: false
+        }));
+        assert!(overlay_blocks_background_ticks(InputMode::SearchFiles {
+            results: true
+        }));
         assert!(
             !overlay_blocks_background_ticks(InputMode::Popover),
             "a pinned popover lets watch and fetch ticks run"
@@ -332,6 +338,28 @@ mod tests {
             classify_busy_dispatch(&Action::QuickOpenSubmit, None),
             BusyAction::Handle
         );
+    }
+
+    /// The search-in-files dialog only reads files, so every key in it
+    /// stays live while a git write runs.
+    #[test]
+    fn search_files_actions_stay_live_while_busy() {
+        use super::super::action::SearchFilesOption;
+        for action in [
+            Action::ToggleSearchFiles,
+            Action::SearchFilesChar('a'),
+            Action::SearchFilesBackspace,
+            Action::SearchFilesMove(1),
+            Action::SearchFilesToggleScope,
+            Action::SearchFilesToggleOption(SearchFilesOption::Regex),
+            Action::SearchFilesCancel,
+        ] {
+            assert_eq!(
+                classify_busy_dispatch(&action, None),
+                BusyAction::Handle,
+                "{action:?}"
+            );
+        }
     }
 
     #[test]

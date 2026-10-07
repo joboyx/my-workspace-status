@@ -6,7 +6,7 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
-use super::action::{Action, QuickOpenEntry};
+use super::action::{Action, QuickOpenEntry, SearchFilesOption};
 
 /// Rows PgUp / PgDn scroll the `?` help body.
 ///
@@ -101,6 +101,11 @@ pub enum InputMode {
     CommentExport,
     /// Quick Open (`:` / `>` commands, Ctrl-p / `F` files). Query, list, Enter.
     QuickOpen,
+    /// Search-in-files dialog (Ctrl-f). `results` is the results zone:
+    /// `j` / `k` move there, while the query zone types every printable key.
+    SearchFiles {
+        results: bool,
+    },
     /// Pinned icon popover (click on an icon, or `gh`): `j` / `k` move,
     /// Enter runs, `y` copies the focused line, Esc closes. The mouse stays
     /// live (click, drag-select, wheel). A hover peek is not a mode.
@@ -302,7 +307,8 @@ pub fn event_to_action_with(
                     | InputMode::CreateBranch
                     | InputMode::Comment
                     | InputMode::CommentExport
-                    | InputMode::QuickOpen,
+                    | InputMode::QuickOpen
+                    | InputMode::SearchFiles { .. },
             ) {
                 Action::None
             } else if mode == InputMode::Popover
@@ -515,7 +521,7 @@ fn repeat_maps_to_action(key: KeyEvent, mode: InputMode) -> bool {
             KeyCode::Char(_) => typing,
             _ => false,
         },
-        InputMode::QuickOpen => match key.code {
+        InputMode::QuickOpen | InputMode::SearchFiles { .. } => match key.code {
             _ if list_overlay_move(key).is_some() => true,
             KeyCode::Backspace => true,
             KeyCode::Char(_) => typing,
@@ -585,6 +591,27 @@ fn key_to_action(
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Action::CtrlC;
     }
+    if is_search_files_key(key) {
+        match mode {
+            InputMode::Normal { .. }
+            | InputMode::ZPending { .. }
+            | InputMode::GPending { .. }
+            | InputMode::DiffVisual
+            | InputMode::SearchFiles { .. } => return Action::ToggleSearchFiles,
+            // Text and list overlays keep their own Ctrl handling.
+            InputMode::QuickOpen
+            | InputMode::SearchPrompt
+            | InputMode::HelpSearch
+            | InputMode::Comment
+            | InputMode::CreateBranch
+            | InputMode::BranchPicker
+            | InputMode::ComparePicker
+            | InputMode::GraphFocusPicker
+            | InputMode::StashMenu
+            | InputMode::BlameMenu => {}
+            _ => return Action::None,
+        }
+    }
     if let Some(entry) = quick_open_key(key) {
         match mode {
             InputMode::Normal { .. }
@@ -594,6 +621,7 @@ fn key_to_action(
                 return Action::ToggleQuickOpen(entry);
             }
             InputMode::QuickOpen
+            | InputMode::SearchFiles { .. }
             | InputMode::SearchPrompt
             | InputMode::HelpSearch
             | InputMode::Comment
@@ -788,6 +816,7 @@ fn key_to_action(
             _ => Action::None,
         },
         InputMode::QuickOpen => quick_open_key_action(key),
+        InputMode::SearchFiles { results } => search_files_key_action(key, results),
         InputMode::DiffVisual => diff_visual_key(key),
         InputMode::Normal { .. } => normal_key(
             key,
@@ -820,6 +849,19 @@ fn quick_open_key(key: KeyEvent) -> Option<QuickOpenEntry> {
     }
 }
 
+/// True for the search-in-files opener: Ctrl-f, alone or with Shift.
+///
+/// Without the kitty keyboard protocol Ctrl-Shift-F sends the same byte as
+/// Ctrl-f, so both map the same way. Alt, Super, Hyper, or Meta never
+/// match, and plain `f` stays fetch.
+fn is_search_files_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('f' | 'F'))
+        && key.modifiers.difference(KeyModifiers::SHIFT) == KeyModifiers::CONTROL
+}
+
+/// Results moved by one PgUp / PgDn in the search-in-files dialog.
+const SEARCH_FILES_PAGE: i32 = 10;
+
 /// Cursor step for a list overlay key (Quick Open and every picker), if any.
 ///
 /// Up / Down, Ctrl-n / Ctrl-p, and Ctrl-j / Ctrl-k move. Letters never move,
@@ -848,6 +890,37 @@ fn quick_open_key_action(key: KeyEvent) -> Action {
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             Action::QuickOpenChar(c)
         }
+        _ => Action::None,
+    }
+}
+
+/// Keys inside the search-in-files dialog (Ctrl-f is matched before).
+///
+/// Both zones: list moves and PgUp / PgDn move the highlight (and enter
+/// the results zone), Tab widens to all repos, Alt-c / Alt-w / Alt-r flip
+/// case / whole word / regex, Esc closes. The query zone types every other
+/// printable key. The results zone also moves on `j` / `k`; any other
+/// printable key or Backspace goes back to the query and applies there.
+fn search_files_key_action(key: KeyEvent, results: bool) -> Action {
+    if let Some(delta) = list_overlay_move(key) {
+        return Action::SearchFilesMove(delta);
+    }
+    let alt_only = key.modifiers.difference(KeyModifiers::SHIFT) == KeyModifiers::ALT;
+    match key.code {
+        KeyCode::Esc => Action::SearchFilesCancel,
+        KeyCode::Tab => Action::SearchFilesToggleScope,
+        KeyCode::PageDown => Action::SearchFilesMove(SEARCH_FILES_PAGE),
+        KeyCode::PageUp => Action::SearchFilesMove(-SEARCH_FILES_PAGE),
+        KeyCode::Backspace => Action::SearchFilesBackspace,
+        KeyCode::Char(c) if alt_only => match c.to_ascii_lowercase() {
+            'c' => Action::SearchFilesToggleOption(SearchFilesOption::Case),
+            'w' => Action::SearchFilesToggleOption(SearchFilesOption::WholeWord),
+            'r' => Action::SearchFilesToggleOption(SearchFilesOption::Regex),
+            _ => Action::None,
+        },
+        KeyCode::Char('j') if results && key.modifiers.is_empty() => Action::SearchFilesMove(1),
+        KeyCode::Char('k') if results && key.modifiers.is_empty() => Action::SearchFilesMove(-1),
+        KeyCode::Char(c) if !has_command_modifier(key) => Action::SearchFilesChar(c),
         _ => Action::None,
     }
 }
@@ -3309,6 +3382,186 @@ mod tests {
         );
     }
 
+    fn search_files(results: bool) -> InputMode {
+        InputMode::SearchFiles { results }
+    }
+
+    fn with_mods(c: char, mods: KeyModifiers) -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char(c), mods))
+    }
+
+    #[test]
+    fn ctrl_f_opens_search_files_and_plain_f_stays_fetch() {
+        let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        let openers = [
+            normal(),
+            InputMode::Normal {
+                search_active: true,
+            },
+            InputMode::ZPending {
+                search_active: false,
+            },
+            InputMode::GPending {
+                search_active: false,
+            },
+            InputMode::DiffVisual,
+        ];
+        for mode in openers {
+            for event in [
+                ctrl(KeyCode::Char('f')),
+                with_mods('f', ctrl_shift),
+                with_mods('F', ctrl_shift),
+            ] {
+                assert_eq!(
+                    event_to_action(&event, mode, true, true),
+                    Action::ToggleSearchFiles,
+                    "{mode:?} {event:?}"
+                );
+            }
+            for (c, mods) in [
+                ('f', KeyModifiers::ALT),
+                ('F', KeyModifiers::ALT),
+                ('f', KeyModifiers::CONTROL | KeyModifiers::ALT),
+                ('f', KeyModifiers::CONTROL | KeyModifiers::SUPER),
+            ] {
+                let got = event_to_action(&with_mods(c, mods), mode, true, true);
+                assert_ne!(got, Action::ToggleSearchFiles, "{mode:?} {c} {mods:?}");
+            }
+        }
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('f')), normal(), false, false),
+            Action::Fetch
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('/')), normal(), false, false),
+            Action::SearchStart
+        );
+        // A held Ctrl-f does not toggle the dialog shut again.
+        let held = Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Repeat,
+        ));
+        assert_eq!(event_to_action(&held, normal(), false, false), Action::None);
+    }
+
+    #[test]
+    fn overlays_do_not_open_search_files() {
+        let overlays = [
+            InputMode::Help,
+            InputMode::HelpSearch,
+            InputMode::SearchPrompt,
+            InputMode::Comment,
+            InputMode::Confirm,
+            InputMode::BranchPicker,
+            InputMode::ComparePicker,
+            InputMode::GraphFocusPicker,
+            InputMode::CreateBranch,
+            InputMode::StashMenu,
+            InputMode::BlameMenu,
+            InputMode::CommentExport,
+            InputMode::QuickOpen,
+            InputMode::Popover,
+        ];
+        for mode in overlays {
+            let got = event_to_action(&ctrl(KeyCode::Char('f')), mode, false, false);
+            assert_ne!(got, Action::ToggleSearchFiles, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn search_files_query_zone_types_letters_and_moves_on_arrows() {
+        let query = search_files(false);
+        let at = |event: Event| event_to_action(&event, query, false, false);
+        for c in ['f', 'e', 'n', 'j', 'k', 'N', ':', 'F', '#', '/', ' '] {
+            assert_eq!(at(key(KeyCode::Char(c))), Action::SearchFilesChar(c), "{c}");
+        }
+        assert_eq!(at(shift(KeyCode::Char('Q'))), Action::SearchFilesChar('Q'));
+        assert_eq!(at(key(KeyCode::Down)), Action::SearchFilesMove(1));
+        assert_eq!(at(key(KeyCode::Up)), Action::SearchFilesMove(-1));
+        for (c, delta) in [('n', 1), ('j', 1), ('p', -1), ('k', -1)] {
+            assert_eq!(
+                at(ctrl(KeyCode::Char(c))),
+                Action::SearchFilesMove(delta),
+                "Ctrl-{c}"
+            );
+        }
+        assert_eq!(
+            at(key(KeyCode::PageDown)),
+            Action::SearchFilesMove(SEARCH_FILES_PAGE)
+        );
+        assert_eq!(
+            at(key(KeyCode::PageUp)),
+            Action::SearchFilesMove(-SEARCH_FILES_PAGE)
+        );
+        assert_eq!(at(key(KeyCode::Backspace)), Action::SearchFilesBackspace);
+        assert_eq!(at(key(KeyCode::Tab)), Action::SearchFilesToggleScope);
+        assert_eq!(at(key(KeyCode::Esc)), Action::SearchFilesCancel);
+        assert_eq!(at(ctrl(KeyCode::Char('f'))), Action::ToggleSearchFiles);
+        assert_eq!(at(ctrl(KeyCode::Char('c'))), Action::CtrlC);
+        assert_eq!(at(key(KeyCode::Enter)), Action::None, "no open yet");
+        for (c, option) in [
+            ('c', SearchFilesOption::Case),
+            ('w', SearchFilesOption::WholeWord),
+            ('r', SearchFilesOption::Regex),
+        ] {
+            assert_eq!(
+                at(with_mods(c, KeyModifiers::ALT)),
+                Action::SearchFilesToggleOption(option),
+                "Alt-{c}"
+            );
+        }
+        assert_eq!(at(with_mods('x', KeyModifiers::ALT)), Action::None);
+        assert_eq!(at(ctrl(KeyCode::Char('x'))), Action::None);
+    }
+
+    #[test]
+    fn search_files_results_zone_moves_on_j_k_and_types_the_rest() {
+        let results = search_files(true);
+        let at = |event: Event| event_to_action(&event, results, false, false);
+        assert_eq!(at(key(KeyCode::Char('j'))), Action::SearchFilesMove(1));
+        assert_eq!(at(key(KeyCode::Char('k'))), Action::SearchFilesMove(-1));
+        assert_eq!(at(key(KeyCode::Down)), Action::SearchFilesMove(1));
+        for c in ['x', 'n', 'f', 'J', 'K'] {
+            assert_eq!(at(key(KeyCode::Char(c))), Action::SearchFilesChar(c), "{c}");
+        }
+        assert_eq!(at(key(KeyCode::Backspace)), Action::SearchFilesBackspace);
+        assert_eq!(at(key(KeyCode::Tab)), Action::SearchFilesToggleScope);
+        assert_eq!(
+            at(with_mods('r', KeyModifiers::ALT)),
+            Action::SearchFilesToggleOption(SearchFilesOption::Regex)
+        );
+        assert_eq!(at(key(KeyCode::Esc)), Action::SearchFilesCancel);
+    }
+
+    #[test]
+    fn search_files_swallows_the_mouse_and_repeats_typing() {
+        use crate::tui::tty::{decode_sgr_mouse, sgr_mouse_report, SGR_POINTER_MOVE};
+        let moved = decode_sgr_mouse(&sgr_mouse_report(SGR_POINTER_MOVE, 30, 0)).unwrap();
+        assert_eq!(
+            event_to_action(&moved, search_files(false), false, false),
+            Action::None
+        );
+        assert_eq!(
+            event_to_action(
+                &key_kind(KeyCode::Char('a'), KeyEventKind::Repeat),
+                search_files(false),
+                false,
+                false
+            ),
+            Action::SearchFilesChar('a')
+        );
+        assert_eq!(
+            event_to_action(
+                &key_kind(KeyCode::Enter, KeyEventKind::Repeat),
+                search_files(true),
+                false,
+                false
+            ),
+            Action::None
+        );
+    }
+
     #[test]
     fn quick_open_repeat_types_and_moves_but_not_enter_or_esc() {
         use super::super::action::QuickOpenEntry;
@@ -3693,6 +3946,7 @@ mod tests {
             for (code, mods) in chords {
                 // Explicit Ctrl chords keep their own bindings: Ctrl-c
                 // everywhere, Ctrl-p (Ctrl alone) where Quick Open opens,
+                // Ctrl-f (Shift allowed) where search in files opens,
                 // Ctrl-o / u / d in Normal and pending chords, Ctrl-u / d in
                 // highlight.
                 let ctrl_only = !mods.intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
@@ -3707,6 +3961,7 @@ mod tests {
                 let bound = match code {
                     Char('c') => true,
                     Char('p') => (normal_like || visual) && mods == KeyModifiers::CONTROL,
+                    Char('f' | 'F') => normal_like || visual,
                     Char('o') => normal_like,
                     Char('u' | 'd') => normal_like || visual,
                     _ => false,

@@ -416,6 +416,13 @@ impl AppState {
             | Action::QuickOpenBackspace
             | Action::QuickOpenSubmit
             | Action::QuickOpenCancel => self.dispatch_quick_open(action),
+            Action::ToggleSearchFiles
+            | Action::SearchFilesChar(_)
+            | Action::SearchFilesBackspace
+            | Action::SearchFilesMove(_)
+            | Action::SearchFilesToggleScope
+            | Action::SearchFilesToggleOption(_)
+            | Action::SearchFilesCancel => self.dispatch_search_files(action),
             Action::CompareVsDefault => self.compare_vs_default(),
             Action::CompareVsBranch => self.prepare_compare_picker(ComparePickerKind::Branch),
             Action::CompareVsCommit => self.prepare_compare_picker(ComparePickerKind::Commit),

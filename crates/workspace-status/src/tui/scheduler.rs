@@ -57,6 +57,8 @@ pub enum UserTag {
     Autoload,
     /// Quick Open file index load or fuzzy score (latest-only slots).
     QuickOpen,
+    /// Search-in-files index load or search chunk (latest-only slots).
+    SearchFiles,
     /// Focused-line `git blame -L n,n` (latest-only slot).
     LineBlame,
     /// Forge PR lookup for a row badge, or a `gx` lookup then browser open.

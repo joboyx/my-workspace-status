@@ -4,6 +4,7 @@ mod dispatch;
 mod dispatch_drill;
 mod dispatch_keymap;
 mod dispatch_quick_open;
+mod dispatch_search_files;
 mod dispatch_write;
 mod file_tab;
 mod line_blame;
@@ -84,6 +85,7 @@ use super::search::{
     focus_commit_file_search, focus_diff_search, focus_graph_search, focus_tree_search,
     match_diff_line_indices, SearchPane,
 };
+use super::search_files::{SearchFilesState, SearchZone};
 use super::selection::TextSelection;
 use super::split::{
     clamp_tree_fraction, diff_col_from_col, diff_col_from_delta, diff_paint_width, diff_pane_mode,
@@ -702,6 +704,13 @@ pub struct AppState {
     pub quick_open: Option<QuickOpenState>,
     /// Session counter for Quick Open index and score generations.
     quick_open_gen: u64,
+    /// Open search-in-files dialog (Ctrl-f).
+    pub search_files: Option<SearchFilesState>,
+    /// Last closed search-in-files dialog, restored by the next Ctrl-f in
+    /// the same scope.
+    pub search_files_parked: Option<SearchFilesState>,
+    /// Session counter for search-in-files index and search generations.
+    search_files_gen: u64,
     /// Permanent Workspace plus session compare and file tabs.
     pub tabs: TabStrip,
     pub compare_picker: Option<ComparePickerState>,
@@ -914,6 +923,9 @@ impl AppState {
             create_branch: None,
             quick_open: None,
             quick_open_gen: 0,
+            search_files: None,
+            search_files_parked: None,
+            search_files_gen: 0,
             tabs: TabStrip::default(),
             compare_picker: None,
             compare_picker_pending: None,
@@ -1027,6 +1039,10 @@ impl AppState {
             InputMode::GraphFocusPicker
         } else if self.quick_open.is_some() {
             InputMode::QuickOpen
+        } else if let Some(dialog) = &self.search_files {
+            InputMode::SearchFiles {
+                results: dialog.zone == SearchZone::Results,
+            }
         } else if self.help_open {
             if self.help_search_query.is_some() {
                 InputMode::HelpSearch
