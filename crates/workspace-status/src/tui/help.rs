@@ -96,10 +96,11 @@ macro_rules! move_group {
     };
 }
 
-/// The VIEW column: the rows every tab paints, with `$workspace` rows (the
-/// Workspace pane sizes and filters) after the first one.
+/// The VIEW column: the rows every tab paints, with the `$sizes` rows (pane
+/// and message sizes) after the first one and the `$ignored` rows after
+/// `t`, the order the Workspace tab has always painted.
 macro_rules! view_group {
-    ($($workspace:expr),* $(,)?) => {
+    ($($sizes:expr),*; $($ignored:expr),*) => {
         HelpGroup {
             title: "VIEW",
             entries: &[
@@ -107,11 +108,12 @@ macro_rules! view_group {
                     keys: "i \\ M B",
                     desc: "inline / split · wrap · msg · blame",
                 },
-                $($workspace,)*
+                $($sizes,)*
                 HelpEntry {
                     keys: "t",
                     desc: "flat / tree · Staged split",
                 },
+                $($ignored,)*
                 HelpEntry {
                     keys: "T",
                     desc: "cycle theme",
@@ -192,7 +194,7 @@ macro_rules! view_group {
 /// `-` on the Workspace tab (MOVE).
 const HELP_DASH_EXPLORER: HelpEntry = HelpEntry {
     keys: "-",
-    desc: "Explorer tab of the row's checkout",
+    desc: "Explorer tab",
 };
 
 /// `< > - +` on the Workspace, compare, and file tabs (VIEW).
@@ -212,7 +214,7 @@ pub const HELP_TAB_MOVE_GROUP: HelpGroup = move_group!();
 
 /// VIEW on the Explorer tab: no pane-size or ignored-repo rows (`-` is the
 /// parent folder there; `<`, `>`, `+`, and `.` do nothing).
-pub const HELP_EXPLORER_VIEW_GROUP: HelpGroup = view_group!();
+pub const HELP_EXPLORER_VIEW_GROUP: HelpGroup = view_group!(;);
 
 /// Short key list shown in the `?` overlay, grouped the same.
 pub const HELP_GROUPS: &[HelpGroup] = &[
@@ -294,7 +296,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
         ],
     },
-    view_group!(HELP_PANE_SIZES, HELP_IGNORED_REPOS),
+    view_group!(HELP_PANE_SIZES; HELP_IGNORED_REPOS),
 ];
 
 /// Compare-tab column that takes the place of GIT while a compare tab is active.
