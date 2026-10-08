@@ -105,6 +105,7 @@ mod pty_n_and_n_pane_next_prev;
 mod pty_overlapping_fetch_then_pull_on_same_repo_pulls;
 mod pty_overlapping_fetches_on_two_repos_both_mark_behind;
 mod pty_paint_default_launch_is_flat_slate;
+mod pty_paint_explorer_tab_is_flat;
 mod pty_paint_flat_mouse;
 mod pty_paint_shift_t_repaints_pane_fills;
 mod pty_paint_terminal_background_keeps_boxed_slate;

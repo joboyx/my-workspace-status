@@ -591,8 +591,9 @@ fn draw_file_body(frame: &mut Frame<'_>, inner: Rect, state: &mut AppState) {
     }
 }
 
-/// Pane chrome shared by the left pane, the right pane, and the file tab
-/// (so the Workspace, compare, and file tabs look the same).
+/// Pane chrome shared by the left pane, the right pane, the file tab, and
+/// the Explorer tab's two panes (so the Workspace, compare, file, and
+/// Explorer tabs look the same).
 ///
 /// [`BackgroundMode::Terminal`]: a boxed [`Block`] with the title in
 /// `heading` and a [`pane_border`] colour that shows focus (the v0.1.244
@@ -679,9 +680,12 @@ fn fill_bg(frame: &mut Frame<'_>, area: Rect, bg: Color) {
 }
 
 /// The active Explorer tab: the checkout's file tree on the left (titled
-/// with the checkout path) and the focused file's preview on the right —
-/// the worktree diff of a changed file, the body of a clean one, or a
-/// short hint on a folder.
+/// with the checkout path, on `sidebar` in paint mode) and the focused
+/// file's preview on the right (on `surface`) — the worktree diff of a
+/// changed file, the body of a clean one, or a short hint on a folder.
+/// Both panes go through [`draw_pane_chrome`], so they are boxed or flat
+/// as the Workspace panes are, and every recorded rect is the content
+/// rect.
 fn draw_explorer_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let widths = pane_widths(area.width, state.tree_fraction);
     let panes = Layout::default()
@@ -692,7 +696,6 @@ fn draw_explorer_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         ])
         .split(area);
     let palette = state.theme.palette();
-    let title_style = Style::default().fg(palette.heading);
     let Some(tab) = state.tabs.active_explorer() else {
         return;
     };
@@ -707,26 +710,28 @@ fn draw_explorer_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let rows = tab.tree.rows(&status);
     let cursor = tab.tree.cursor_index(&rows);
     let folder = cursor.is_some_and(|index| rows[index].is_dir);
-    let tree_block = Block::default()
-        .borders(Borders::ALL)
-        .title(pane_title(&tab.checkout))
-        .title_style(title_style)
-        .border_style(pane_border(state.focus == FocusPane::Left, palette));
-    let tree_inner = tree_block.inner(panes[0]);
-    frame.render_widget(tree_block, panes[0]);
+    let tree_inner = draw_pane_chrome(
+        frame,
+        panes[0],
+        &tab.checkout,
+        state.focus == FocusPane::Left,
+        palette.sidebar,
+        state,
+    );
     state.layout.explorer_tree = tree_inner;
     draw_explorer_tree(frame, tree_inner, state, &rows, cursor, &status);
     if let Some(tab) = state.tabs.active_explorer_mut() {
         tab.painted_rel = cursor.map(|index| rows[index].rel.clone());
     }
 
-    let right_block = Block::default()
-        .borders(Borders::ALL)
-        .title(pane_title(&preview_title))
-        .title_style(title_style)
-        .border_style(pane_border(state.focus == FocusPane::Right, palette));
-    let right_inner = right_block.inner(panes[1]);
-    frame.render_widget(right_block, panes[1]);
+    let right_inner = draw_pane_chrome(
+        frame,
+        panes[1],
+        &preview_title,
+        state.focus == FocusPane::Right,
+        palette.surface,
+        state,
+    );
     state.layout.explorer_preview = right_inner;
     state.layout.right_x = panes[1].x;
     state.layout.right_y = right_inner.y;
@@ -10301,6 +10306,20 @@ mod tests {
         (left, right)
     }
 
+    /// Outer rects of the Explorer tree and preview panes in a flat
+    /// frame: the recorded content rects grown by their title row.
+    fn explorer_pane_rects(state: &AppState) -> (Rect, Rect) {
+        let grow = |inner: Rect| Rect {
+            y: inner.y - 1,
+            height: inner.height + 1,
+            ..inner
+        };
+        (
+            grow(state.layout.explorer_tree),
+            grow(state.layout.explorer_preview),
+        )
+    }
+
     const BORDER_GLYPHS: &[&str] = &["│", "─", "┌", "┐", "└", "┘", "╭", "╮", "╰", "╯", "├", "┤"];
 
     /// Every edge cell of `pane` that is a border glyph.
@@ -10534,8 +10553,9 @@ mod tests {
     }
 
     /// Paint-mode screens for the every-cell sweep: each pane screen in
-    /// both focus states, each [`DialogKind`], the icon popover, and the
-    /// too-small notice, as (label, state, cols, rows).
+    /// both focus states (Explorer folder / file / diff previews too), each
+    /// [`DialogKind`], the icon popover, and the too-small notice, as
+    /// (label, state, cols, rows).
     fn paint_sweep_screens() -> Vec<(String, AppState, u16, u16)> {
         use crate::git::{AncestorCommit, LocalBranch};
         use crate::tui::action::QuickOpenEntry;
@@ -10565,6 +10585,21 @@ mod tests {
 
         let mut screens = Vec::new();
         for (label, state) in panes {
+            for focus in [FocusPane::Left, FocusPane::Right] {
+                let mut state = painted(state.clone());
+                state.focus = focus;
+                screens.push((format!("{label} / {focus:?}"), state, 120, 30));
+            }
+        }
+        let explorer: Vec<(&str, AppState)> = vec![
+            ("explorer folder", explorer_state()),
+            ("explorer file", explorer_preview_state("new.txt", None)),
+            (
+                "explorer diff",
+                explorer_preview_state("README.md", Some("@@ -1 +1 @@\n-# seed\n+# dirty\n")),
+            ),
+        ];
+        for (label, state) in explorer {
             for focus in [FocusPane::Left, FocusPane::Right] {
                 let mut state = painted(state.clone());
                 state.focus = focus;
@@ -10759,6 +10794,9 @@ mod tests {
                 let pane_h = state.layout.pane_height;
                 let panes: Vec<(Rect, Color)> = if state.is_file_tab() {
                     vec![(Rect::new(0, 1, *cols, pane_h), palette.surface)]
+                } else if state.is_explorer_tab() {
+                    let (left, right) = explorer_pane_rects(state);
+                    vec![(left, palette.sidebar), (right, palette.surface)]
                 } else {
                     let (left, right) = pane_rects(state, *cols);
                     vec![(left, palette.sidebar), (right, palette.surface)]
@@ -10923,6 +10961,158 @@ mod tests {
         assert_flat_title_row(buf, right, "diff", false, palette.surface, palette);
         assert_eq!(state.layout.diff_content_x, right.x);
         assert_eq!(state.layout.files_list_y, left.y + 1);
+    }
+
+    /// The Explorer tab paints flat in paint mode through the shared pane
+    /// chrome: tree on `sidebar`, preview on `surface`, no border glyphs,
+    /// the accent line on the focused title, and every recorded rect is
+    /// the content rect (pane less its title row).
+    #[test]
+    fn paint_mode_explorer_tab_is_flat() {
+        let mut state = painted(explorer_preview_state("new.txt", None));
+        state.focus = FocusPane::Left;
+        let palette = state.theme.palette();
+        let checkout = state.tabs.active_explorer().unwrap().checkout.clone();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let (left, right) = explorer_pane_rects(&state);
+        assert_eq!((left.x, left.y), (0, 1));
+        assert_eq!(left.height, state.layout.pane_height);
+        assert_eq!(right.x, left.right(), "panes abut");
+        assert_eq!(right.right(), 120);
+        {
+            let buf = terminal.backend().buffer();
+            assert_eq!(pane_edge_borders(buf, left), vec![], "tree edges");
+            assert_eq!(pane_edge_borders(buf, right), vec![], "preview edges");
+            assert_flat_title_row(buf, left, &checkout, true, palette.sidebar, palette);
+            assert_flat_title_row(buf, right, "app/new.txt", false, palette.surface, palette);
+            let body: String = (right.x..right.right())
+                .map(|x| buf[(x, right.y + 1)].symbol())
+                .collect();
+            assert!(body.starts_with(" 1 line 1"), "{body}");
+            let bottom = left.bottom() - 1;
+            assert_eq!(buf[(left.right() - 2, bottom)].bg, palette.sidebar);
+            assert_eq!(buf[(right.right() - 2, bottom)].bg, palette.surface);
+        }
+        let layout = &state.layout;
+        assert_eq!(
+            (layout.file_view_x, layout.file_view_y),
+            (right.x, right.y + 1)
+        );
+        assert_eq!(layout.file_view_width, right.width);
+        assert_eq!(layout.file_view_height, right.height - 1);
+        assert_eq!(layout.right_x, right.x);
+        assert_eq!(layout.right_y, right.y + 1);
+        assert_eq!(layout.diff_content_x, right.x);
+        assert_eq!(layout.diff_pane_width, right.width);
+        assert_eq!(layout.diff_pane_height, right.height - 1);
+
+        state.dispatch(Action::FocusRight);
+        assert_eq!(state.focus, FocusPane::Right);
+        draw_state(&mut terminal, &mut state);
+        let buf = terminal.backend().buffer();
+        assert_flat_title_row(buf, left, &checkout, false, palette.sidebar, palette);
+        assert_flat_title_row(buf, right, "app/new.txt", true, palette.surface, palette);
+    }
+
+    /// Mouse in a flat Explorer: title rows are not content, the first
+    /// column and first content row of each pane hit, and the wheel moves
+    /// the pane under the pointer.
+    #[test]
+    fn paint_mode_explorer_mouse_hits_the_flat_content_rects() {
+        let mut state = painted(explorer_preview_state("new.txt", None));
+        state.focus = FocusPane::Left;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let (left, right) = explorer_pane_rects(&state);
+        let file_cursor = |state: &AppState| match state.tabs.active_explorer().map(|t| &t.preview)
+        {
+            Some(ExplorerPreview::File(file)) => file.cursor,
+            other => panic!("file preview, got {other:?}"),
+        };
+        let painted_rel = |state: &AppState| {
+            state
+                .tabs
+                .active_explorer()
+                .and_then(|tab| tab.painted_rel.clone())
+        };
+
+        // The preview's title row is not the body.
+        state.dispatch(Action::Click {
+            col: right.x,
+            row: right.y,
+        });
+        assert_eq!(state.focus, FocusPane::Left);
+        // Its first column, third body row, takes focus and that line.
+        state.dispatch(Action::Click {
+            col: right.x,
+            row: right.y + 3,
+        });
+        assert_eq!(state.focus, FocusPane::Right);
+        assert_eq!(file_cursor(&state), 2);
+        state.dispatch(Action::ScrollWheel {
+            col: right.x,
+            row: right.y + 1,
+            delta: 1,
+            horizontal: false,
+        });
+        assert_eq!(file_cursor(&state), 3);
+        draw_state(&mut terminal, &mut state);
+
+        // The tree's title row is not a row; its first column is.
+        assert_eq!(painted_rel(&state).as_deref(), Some("new.txt"));
+        state.dispatch(Action::Click {
+            col: left.x,
+            row: left.y,
+        });
+        assert_eq!(state.focus, FocusPane::Right, "title row: no hit");
+        let tree = state.layout.explorer_tree;
+        let readme = (tree.y..tree.bottom())
+            .find(|&y| buf_line(terminal.backend().buffer(), y).contains("README.md"))
+            .expect("README.md row");
+        state.dispatch(Action::Click {
+            col: left.x,
+            row: readme,
+        });
+        assert_eq!(state.focus, FocusPane::Left);
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(painted_rel(&state).as_deref(), Some("README.md"));
+        state.dispatch(Action::ScrollWheel {
+            col: left.x,
+            row: left.y + 1,
+            delta: -1,
+            horizontal: false,
+        });
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(painted_rel(&state).as_deref(), Some("new.txt"));
+    }
+
+    /// Terminal mode keeps the MYWS-047 boxed Explorer panes: corners,
+    /// `heading` border on the focused pane, `border_dim` on the other, no
+    /// fills, and content rects inside the borders.
+    #[test]
+    fn terminal_mode_explorer_tab_keeps_boxed_panes() {
+        let mut state = explorer_preview_state("new.txt", None);
+        assert_eq!(state.background, BackgroundMode::Terminal);
+        state.focus = FocusPane::Left;
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let tree = state.layout.explorer_tree;
+        let preview = state.layout.explorer_preview;
+        assert_eq!((tree.x, tree.y), (1, 2));
+        assert_eq!(preview.y, 2);
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(0, 1)].symbol(), "┌");
+        assert_eq!(buf[(0, 1)].fg, palette.heading, "focused border");
+        assert_eq!(buf[(preview.x - 1, 1)].symbol(), "┌");
+        assert_eq!(buf[(preview.x - 1, 1)].fg, palette.border_dim);
+        assert_eq!(state.layout.right_x, preview.x - 1);
+        assert_eq!(state.layout.diff_content_x, preview.x);
+        assert_eq!(state.layout.right_y, 2);
+        for (x, y) in [(119, 0), (tree.x + 2, tree.bottom() - 1), (118, 12)] {
+            assert_eq!(buf[(x, y)].bg, Color::Reset, "no fill at ({x},{y})");
+        }
     }
 
     /// Below the minimum size, paint mode puts the notice on `surface`.
@@ -12666,6 +12856,40 @@ mod tests {
         state
             .apply_explorer_dir(tab_id, req, "", Ok(listing))
             .expect("fresh listing");
+        state
+    }
+
+    /// [`explorer_state`] with the cursor on `rel` and its preview loaded:
+    /// a diff when `diff` is set, else a clean-file body (`new.txt` then
+    /// counts as clean).
+    fn explorer_preview_state(rel: &str, diff: Option<&str>) -> AppState {
+        use crate::tui::effect::ExplorerPreviewBody;
+        let mut state = explorer_state();
+        if diff.is_none() {
+            state.snapshot.repos[0]
+                .changes
+                .retain(|change| change.path != rel);
+        }
+        let (tab_id, gen) = loop {
+            if let Effect::LoadExplorerPreview {
+                tab_id, gen, path, ..
+            } = state.dispatch(Action::Move(1))
+            {
+                if path == rel {
+                    break (tab_id, gen);
+                }
+            }
+        };
+        let body = match diff {
+            Some(unified) => {
+                ExplorerPreviewBody::Diff(super::super::diff::DiffContent::from_unified(unified))
+            }
+            None => ExplorerPreviewBody::File(FileRead::Text {
+                lines: (1..=40).map(|n| format!("line {n}")).collect(),
+                max_cols: 7,
+            }),
+        };
+        assert!(state.apply_explorer_preview(tab_id, gen, body));
         state
     }
 
