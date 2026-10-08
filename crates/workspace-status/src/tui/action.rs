@@ -114,6 +114,13 @@ pub enum Action {
     /// the launch value. Clamped to 1..=20 rows. The footer keeps this height
     /// whatever the selected message is.
     ResizeCommitMsg(i32),
+    /// `-`. On an Explorer tab: move the tree cursor to the parent folder.
+    /// On the Workspace tab with the tree focused on a row in a checkout
+    /// (repo, worktree, folder, or file row): open or focus that checkout's
+    /// Explorer tab and reveal the row. Anywhere else (a workspace or group
+    /// row, another pane, a compare or file tab) it is
+    /// [`Self::ResizeCommitMsg`]`(-1)`, which a file tab ignores.
+    ExplorerReveal,
     /// Toggle the current-line blame annotation (`B`).
     ///
     /// Session-only, like wrap. `viewDefaults.lineBlame` sets the launch
@@ -319,7 +326,7 @@ pub enum Action {
     BlameMenuEnter,
     /// Esc or `q` in the blame-actions menu: close it.
     BlameMenuCancel,
-    /// Close the active compare or file tab.
+    /// Close the active compare, file, or Explorer tab.
     CloseTab,
     /// Cycle to the next tab (`gt`).
     NextTab,
@@ -633,6 +640,36 @@ pub enum Effect {
         repo: String,
         /// Path relative to the checkout.
         path: String,
+    },
+    /// List one Explorer folder on the blocking pool
+    /// ([`super::explorer::list_dir`]). `req` is the folder's newest
+    /// request id on the tab; a stale result is dropped.
+    LoadExplorerDir {
+        tab_id: u64,
+        req: u64,
+        /// Checkout path (snapshot `repo`).
+        repo: String,
+        /// Folder relative to the checkout (`""` is the root).
+        rel_dir: String,
+        /// The folder is gitignored: every child is too, and git is not
+        /// asked.
+        parent_ignored: bool,
+    },
+    /// Load the Explorer preview of one file on the blocking pool: the
+    /// worktree diff of a changed file (`change` set, the Workspace diff
+    /// pane's load) or the body of a clean one. `gen` is the tab's preview
+    /// generation; a stale result is dropped.
+    LoadExplorerPreview {
+        tab_id: u64,
+        gen: u64,
+        /// Checkout path (snapshot `repo`).
+        repo: String,
+        /// Path relative to the checkout.
+        path: String,
+        /// Snapshot change of a changed file; `None` reads the file.
+        change: Option<crate::snapshot::FileChange>,
+        /// Diff context (`-U`) of a changed file, as the Workspace pane.
+        context: Option<u32>,
     },
     /// Look up the PR of `branch` on a worker, then open it in the browser.
     ///

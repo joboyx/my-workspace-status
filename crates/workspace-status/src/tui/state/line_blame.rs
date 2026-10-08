@@ -460,7 +460,8 @@ impl AppState {
     }
 
     fn focused_blame(&self) -> Option<(FocusedBlame, BlameSide)> {
-        if !self.line_blame.enabled {
+        // The Explorer preview paints no line blame.
+        if !self.line_blame.enabled || self.is_explorer_tab() {
             return None;
         }
         if self.is_file_tab() {

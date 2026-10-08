@@ -170,10 +170,27 @@ impl AppState {
         ) {
             self.g_pending_at = None;
         }
+        // `-` picks its meaning from the tab and the focused row.
+        if matches!(action, Action::ExplorerReveal) {
+            return self.explorer_reveal();
+        }
+        // An Explorer tab answers its own keys and refuses writes, like a
+        // file tab below.
+        let explorer_tab = self.is_explorer_tab();
+        if explorer_tab {
+            if let Some(reason) = self.explorer_tab_refusal(&action) {
+                self.status = StatusMessage::warn(reason);
+                return Effect::None;
+            }
+            if let Some(effect) = self.dispatch_explorer_tab(&action) {
+                return effect;
+            }
+        }
         // A file tab answers its own keys and refuses writes; the Workspace
-        // gates below read the parked tree, so it skips them.
-        let file_tab = self.is_file_tab();
-        if file_tab {
+        // gates below read the parked tree, so it (and an Explorer tab)
+        // skips them.
+        let file_tab = self.is_file_tab() || explorer_tab;
+        if self.is_file_tab() {
             if let Some(reason) = self.file_tab_refusal(&action) {
                 self.status = StatusMessage::warn(reason);
                 return Effect::None;
@@ -289,6 +306,7 @@ impl AppState {
             | Action::ToggleDiffWrap
             | Action::ToggleCommitMsgExpand
             | Action::ResizeCommitMsg(_)
+            | Action::ExplorerReveal
             | Action::ToggleLineBlame
             | Action::ToggleMouse
             | Action::SearchStart

@@ -551,7 +551,9 @@ pub fn dialog_width(area: Rect, kind: DialogKind) -> u16 {
 
 /// Which help columns the active tab paints.
 pub fn help_tab(state: &AppState) -> HelpTab {
-    if state.is_file_tab() {
+    if state.is_explorer_tab() {
+        HelpTab::Explorer
+    } else if state.is_file_tab() {
         HelpTab::File
     } else if state.is_compare_tab() {
         HelpTab::Compare
@@ -1066,9 +1068,15 @@ pub fn hint_row_kind(state: &AppState) -> HintRowKind {
 
 /// Display segments for the breadcrumb (workspace + drill frames).
 ///
-/// A file tab reads `workspace › <checkout leaf> › <rel>`.
+/// A file tab reads `workspace › <checkout leaf> › <rel>`; an Explorer tab
+/// `workspace › <checkout leaf> › <cursor row rel>` (as last painted).
 pub fn breadcrumb_segments(state: &AppState) -> Vec<String> {
     let mut out = vec![workspace_label(state)];
+    if let Some(tab) = state.tabs.active_explorer() {
+        out.push(checkout_leaf(&tab.checkout));
+        out.extend(tab.painted_rel.clone());
+        return out;
+    }
     if let Some(tab) = state.tabs.active_file() {
         out.push(checkout_leaf(&tab.checkout));
         out.push(tab.rel.clone());
@@ -1293,7 +1301,29 @@ pub fn status_line(state: &AppState, width: u16) -> Line<'static> {
     if state.is_file_tab() {
         return file_tab_status_line(state, palette, pills, surface, width);
     }
+    if state.is_explorer_tab() {
+        return viewer_status_line(
+            state,
+            palette,
+            pills,
+            surface,
+            width,
+            &explorer_tab_hint_segments(),
+        );
+    }
     idle_status_line(state, palette, pills, surface, width)
+}
+
+/// Hint chips on an Explorer tab, in cut order (the last ones truncate
+/// first).
+pub fn explorer_tab_hint_segments() -> Vec<HintSegment> {
+    vec![
+        hint("l h", "open/close", false),
+        hint("-", "parent", false),
+        hint("e", "edit", false),
+        hint("r", "reload", false),
+        hint("F", "go to file", false),
+    ]
 }
 
 /// Hint chips on a file tab, in cut order (the last ones truncate first).
@@ -1317,6 +1347,26 @@ fn file_tab_status_line(
     surface: Color,
     width: u16,
 ) -> Line<'static> {
+    viewer_status_line(
+        state,
+        palette,
+        pills,
+        surface,
+        width,
+        &file_tab_hint_segments(),
+    )
+}
+
+/// Idle row on a file or Explorer tab: `wrap` and armed-search pills,
+/// `? help`, `hints`, then the pinned `q quit`.
+fn viewer_status_line(
+    state: &AppState,
+    palette: Palette,
+    pills: Pills,
+    surface: Color,
+    width: u16,
+    hints: &[HintSegment],
+) -> Line<'static> {
     let mut spans = Vec::new();
     if state.diff_wrap {
         spans.push(pill_span("wrap", pills.diff));
@@ -1328,13 +1378,7 @@ fn file_tab_status_line(
         " ? help".to_string(),
         Style::default().fg(palette.file),
     ));
-    push_hint_pieces(
-        &mut spans,
-        &file_tab_hint_segments(),
-        palette,
-        surface,
-        width,
-    );
+    push_hint_pieces(&mut spans, hints, palette, surface, width);
     Line::from(spans)
 }
 

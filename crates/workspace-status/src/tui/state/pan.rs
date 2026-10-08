@@ -217,7 +217,8 @@ impl AppState {
         }
     }
 
-    fn pan_diff_content(&mut self, delta: i32) {
+    /// Pan the right-pane diff by `delta` columns, clamped to its pan max.
+    pub(super) fn pan_diff_content(&mut self, delta: i32) {
         let max = self.diff_pan_max();
         self.diff_col_offset = apply_pan(self.diff_col_offset, delta, max);
     }

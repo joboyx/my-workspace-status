@@ -48,12 +48,16 @@ impl AppState {
 
     /// Checkouts Quick Open lists for the focused context.
     ///
-    /// The active file tab's checkout; the active compare tab's checkout;
+    /// The active file or Explorer tab's checkout; the active compare tab's
+    /// checkout;
     /// else the focused row's checkout
     /// ([`Self::focused_checkout_path`]); else (workspace row, group) the
     /// whole workspace.
     pub(crate) fn quick_open_scope(&self) -> QuickOpenScope {
         if let Some(tab) = self.tabs.active_file() {
+            return QuickOpenScope::Checkout(tab.checkout.clone());
+        }
+        if let Some(tab) = self.tabs.active_explorer() {
             return QuickOpenScope::Checkout(tab.checkout.clone());
         }
         if let Some(tab) = self.tabs.active_compare() {

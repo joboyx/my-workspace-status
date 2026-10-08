@@ -6,6 +6,7 @@ mod dispatch_keymap;
 mod dispatch_quick_open;
 mod dispatch_search_files;
 mod dispatch_write;
+mod explorer_tab;
 mod file_tab;
 mod line_blame;
 mod pan;
@@ -65,6 +66,7 @@ use super::diff::{
 use super::drill::{
     source_from_graph_row, stash_ref_from_graph_row, CommitFile, CommitFileSource, DrillView,
 };
+use super::explorer::ExplorerStatus;
 use super::fetch::background_fetch_targets;
 use super::gates::{
     ListFocusTarget, FOCUS_A_FILE_DIFF, FOCUS_A_FILE_TO_MARK_REVIEWED,
@@ -129,6 +131,16 @@ use crate::git::FULL_DIFF_CONTEXT_LINES;
 
 /// Status for a key drained while a git write runs and the job has no name.
 pub(crate) const BUSY_WRITE_RUNNING: &str = "busy: a git write is running";
+
+/// The diff of a right pane that shows none (an Explorer folder row).
+static EMPTY_DIFF: DiffContent = DiffContent {
+    staged: String::new(),
+    unstaged: String::new(),
+    is_new: false,
+    is_committed: false,
+    vs_worktree: false,
+    error: None,
+};
 
 /// `n` / `N` with no armed search.
 pub(crate) const NO_SEARCH_ARMED: &str = "no search — press / first";
@@ -308,6 +320,12 @@ pub struct LayoutHit {
     /// 0-based file line painted on each body row from
     /// [`Self::file_view_y`] (a wrapped line repeats). Empty off a file tab.
     pub file_view_row_lines: Vec<usize>,
+    /// Inner area of the painted Explorer tree pane (empty off an Explorer
+    /// tab).
+    pub explorer_tree: Rect,
+    /// Inner area of the painted Explorer preview pane (empty off an
+    /// Explorer tab).
+    pub explorer_preview: Rect,
     /// Results rows the search-in-files dialog painted last; PgUp / PgDn
     /// move by it.
     pub search_files_rows: u16,
@@ -365,6 +383,8 @@ impl Default for LayoutHit {
             file_view_width: 0,
             file_view_height: 0,
             file_view_row_lines: Vec::new(),
+            explorer_tree: Rect::default(),
+            explorer_preview: Rect::default(),
             search_files_rows: 0,
         }
     }
@@ -783,6 +803,10 @@ pub struct AppState {
     /// File tab search hits for one (tab id, load generation, case-folded
     /// query), so the status pill and the paint do not rescan the file.
     file_search_memo: RefCell<Option<FileSearchMemo>>,
+    /// Last Explorer status index: checkout, fingerprint of its snapshot
+    /// changes, and the index. Paint asks several times a frame; a status
+    /// reload that changes the checkout's changes changes the fingerprint.
+    explorer_status_memo: RefCell<Option<(String, u64, std::rc::Rc<ExplorerStatus>)>>,
     /// Current-line blame toggle and answer cache.
     pub line_blame: LineBlameState,
     /// Focused diff row's source line, so the blame hook does not rebuild
@@ -966,6 +990,7 @@ impl AppState {
             pr_cache: pull_request::PrCache::default(),
             diff_search_memo: RefCell::new(None),
             file_search_memo: RefCell::new(None),
+            explorer_status_memo: RefCell::new(None),
             line_blame: LineBlameState::default(),
             line_blame_row_memo: RefCell::new(None),
             graph_reveal: None,
@@ -1109,11 +1134,15 @@ impl AppState {
     }
 
     pub fn graph_stash_focused(&self) -> bool {
-        !self.is_file_tab() && self.graph_pane_focused() && self.focused_graph_stash_ref().is_some()
+        !self.is_file_tab()
+            && !self.is_explorer_tab()
+            && self.graph_pane_focused()
+            && self.focused_graph_stash_ref().is_some()
     }
 
     pub fn graph_commit_focused(&self) -> bool {
         !self.is_file_tab()
+            && !self.is_explorer_tab()
             && self.graph_pane_focused()
             && matches!(self.focused_graph_row(), Some(GraphRow::Commit { .. }))
     }
@@ -1150,6 +1179,10 @@ impl AppState {
     pub(crate) fn hl_folds(&self) -> bool {
         if self.is_file_tab() {
             return false;
+        }
+        // Tree: open / close a folder. Preview: `h` goes back to the tree.
+        if self.is_explorer_tab() {
+            return true;
         }
         match self.list_focus_target() {
             ListFocusTarget::Tree => true,
@@ -1242,6 +1275,11 @@ impl AppState {
     /// never the parked Workspace diff; `None` until both are loaded. A
     /// Workspace tree file diff has source `None` (the worktree).
     pub(crate) fn open_diff_target(&self) -> Option<(&str, &str, Option<&CommitFileSource>)> {
+        if self.is_explorer_tab() {
+            return self
+                .explorer_diff()
+                .map(|(checkout, rel, _)| (checkout, rel, None));
+        }
         if let Some(tab) = self.tabs.active_compare() {
             let source = tab.source.as_ref()?;
             return Some((
@@ -1516,7 +1554,7 @@ impl AppState {
     /// moving back onto that file repaints it with no reload. Built from
     /// the full file list, so files under folded subfolders count.
     pub(crate) fn folder_summary(&self) -> Option<FolderSummary> {
-        if !self.is_compare_tab() && !self.drill.is_diff() {
+        if self.is_explorer_tab() || (!self.is_compare_tab() && !self.drill.is_diff()) {
             return None;
         }
         let row = self.focused_commit_file_row().filter(|row| row.is_dir())?;
@@ -3243,6 +3281,11 @@ impl AppState {
         if let Some(tab) = self.tabs.active_compare() {
             return &tab.content;
         }
+        if self.is_explorer_tab() {
+            return self
+                .explorer_diff()
+                .map_or(&EMPTY_DIFF, |(_, _, content)| content);
+        }
         match &self.drill {
             DrillView::Diff { content, .. } => content,
             _ => &self.diff_content,
@@ -3251,6 +3294,12 @@ impl AppState {
 
     /// Path shown in the diff pane header (`repo/path`).
     pub fn diff_header_path(&self) -> String {
+        if self.is_explorer_tab() {
+            return self
+                .explorer_diff()
+                .map(|(checkout, rel, _)| format!("{checkout}/{rel}"))
+                .unwrap_or_default();
+        }
         if let Some(tab) = self.tabs.active_compare() {
             return match tab.path.as_deref() {
                 Some(path) if !path.is_empty() => {
@@ -3574,6 +3623,11 @@ impl AppState {
     }
 
     fn displayed_diff_id(&self) -> Option<String> {
+        if self.is_explorer_tab() {
+            return self
+                .explorer_diff()
+                .map(|(checkout, rel, _)| Self::file_context_id(checkout, rel));
+        }
         if let Some(tab) = self.tabs.active_compare() {
             return tab
                 .path
@@ -4345,6 +4399,17 @@ impl AppState {
     }
 
     fn current_entity_reference(&self) -> Option<EntityRef> {
+        if let Some(tab) = self.tabs.active_explorer() {
+            let primary = self
+                .snapshot
+                .repos
+                .iter()
+                .find(|repo| repo.repo == tab.checkout)
+                .and_then(|repo| repo.primary_repo.as_deref());
+            let (rows, cursor) = self.explorer_rows()?;
+            let row = rows.into_iter().nth(cursor?).filter(|row| !row.is_dir)?;
+            return Some(EntityRef::file(&tab.checkout, primary, row.rel));
+        }
         if let Some(tab) = self.tabs.active_file() {
             let primary = self
                 .snapshot
@@ -5616,6 +5681,10 @@ impl AppState {
     }
 
     fn park_active_session(&mut self) {
+        // An Explorer tab owns its pane focus and diff view.
+        if self.park_explorer_session() {
+            return;
+        }
         // A file tab owns only its search; Workspace stays parked.
         if let Some(tab) = self.tabs.active_file_mut() {
             tab.search_mode = self.search_mode;
@@ -5656,6 +5725,9 @@ impl AppState {
     }
 
     fn apply_active_session(&mut self) {
+        if self.apply_explorer_session() {
+            return;
+        }
         if let Some(tab) = self.tabs.active_file() {
             self.search_mode = tab.search_mode;
             self.search_active = tab.search_active;
@@ -5917,7 +5989,7 @@ impl AppState {
         self.open_compare_tab(repo, format!("{commit_id}^"), commit_id)
     }
 
-    /// Close the active compare or file tab (Workspace refuses).
+    /// Close the active compare, file, or Explorer tab (Workspace refuses).
     pub(crate) fn close_active_tab(&mut self) -> Effect {
         self.close_tab_at(self.tabs.active)
     }
@@ -10470,6 +10542,40 @@ mod tests {
         assert_eq!(app.status, WORKSPACE_TAB_CANNOT_CLOSE);
         assert_eq!(app.tabs.active, 1);
         assert_eq!(app.tabs.compare_count(), 1);
+    }
+
+    /// Ctrl-w runs the key → action → dispatch path: it closes the active
+    /// compare tab (the left neighbour takes over), and on Workspace it only
+    /// warns, never quits or closes.
+    #[test]
+    fn ctrl_w_closes_active_tab_and_warns_on_workspace() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        fn press_ctrl_w(app: &mut AppState) -> Effect {
+            let event = Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+            let action = crate::tui::keys::event_to_action(&event, app.input_mode(), false, false);
+            assert_eq!(action, Action::CloseTab);
+            app.dispatch(action)
+        }
+        let mut app = state();
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+        app.tabs
+            .open_or_focus("app".into(), "develop".into(), "HEAD".into());
+        assert_eq!(app.tabs.active, 2);
+        assert_eq!(app.tabs.compare_count(), 2);
+
+        assert_eq!(press_ctrl_w(&mut app), Effect::None);
+        assert_eq!(app.tabs.active, 1, "left neighbour is active");
+        assert_eq!(app.tabs.compare_count(), 1);
+        assert_eq!(press_ctrl_w(&mut app), Effect::None);
+        assert!(app.tabs.is_workspace());
+        assert_eq!(app.tabs.compare_count(), 0);
+
+        let len = app.tabs.len();
+        assert_eq!(press_ctrl_w(&mut app), Effect::None);
+        assert_eq!(app.status, WORKSPACE_TAB_CANNOT_CLOSE);
+        assert_eq!(app.tabs.len(), len, "Workspace never closes");
+        assert!(app.tabs.is_workspace());
     }
 
     #[test]

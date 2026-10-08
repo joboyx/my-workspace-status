@@ -125,11 +125,12 @@ impl AppState {
     /// Checkout and branch `gx` opens a PR for, or `None`.
     ///
     /// The focused tree repo / checkout row with a branch, or the focused
-    /// graph worktree row with a branch. A file or compare tab, commit files,
+    /// graph worktree row with a branch. A file, Explorer, or compare tab,
+    /// commit files,
     /// a diff, a commit, stash, dir, or file row, a repo that groups several
     /// checkouts, and a detached HEAD have no target.
     pub(super) fn pr_target_for_focus(&self) -> Option<(PathBuf, String)> {
-        if self.is_file_tab() || self.is_compare_tab() {
+        if self.is_file_tab() || self.is_explorer_tab() || self.is_compare_tab() {
             return None;
         }
         match self.list_focus_target() {

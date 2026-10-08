@@ -18,6 +18,7 @@ pub(crate) mod editor;
 mod effect;
 mod event_loop;
 mod event_pump;
+pub(crate) mod explorer;
 pub(crate) mod fetch;
 mod gates;
 mod graph_focus;
