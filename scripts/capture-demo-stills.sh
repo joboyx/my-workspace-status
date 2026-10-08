@@ -21,9 +21,11 @@
 # writes the README set: every clip, default theme and background, into
 # docs/images/. The other knobs need WS_STATUS_STILLS_OUT, so they never
 # replace the README clips or stills.
-#   WS_STATUS_STILLS_OUT         Output directory under docs/images/ (relative to
-#                                the repo root), for example docs/images/themes/x.
-#                                Not docs/images itself and not docs/images/stills.
+#   WS_STATUS_STILLS_OUT         Leaf output directory under docs/images/ (relative
+#                                to the repo root), for example docs/images/themes/x.
+#                                Checked in canonical form. Not docs/images, not
+#                                docs/images/stills or docs/images/themes, not
+#                                inside docs/images/stills, no subdirectories.
 #   WS_STATUS_STILLS_CLIPS       Clips to run, comma- or space-separated, by name
 #                                (01-tree-diff) or number (01). Default: all.
 #   WS_STATUS_STILLS_THEME       Theme slug (slate, tokyo-night, ...). Written as
@@ -31,8 +33,8 @@
 #   WS_STATUS_STILLS_BACKGROUND  paint or terminal. Written as
 #                                "viewDefaults.background" in that file.
 #   WS_STATUS_STILLS_GIFS        1 (default) or 0. With 0 the run is stills-only:
-#                                no GIF is copied out, and the PNG stills land
-#                                directly in WS_STATUS_STILLS_OUT.
+#                                no GIF is copied out, and the PNG stills replace
+#                                the whole WS_STATUS_STILLS_OUT directory.
 # The launcher unsets WS_STATUS_THEME, so a parent shell cannot change the theme
 # of a run. Use WS_STATUS_STILLS_THEME instead.
 #
@@ -57,12 +59,18 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/with-desktop-session.sh"
 DEST="${1:-"$REPO_ROOT/tmp/demo-workspace"}"
 README_OUT="docs/images"
-OUT_REL="${WS_STATUS_STILLS_OUT:-$README_OUT}"
-OUT_REL="${OUT_REL%/}"
+# Directories a knob run must never replace or hold (check_knobs).
+PROTECTED_OUT=("$README_OUT" "$README_OUT/stills" "$README_OUT/themes")
+OUT_RAW="${WS_STATUS_STILLS_OUT:-$README_OUT}"
+# Canonical form, so docs/images//, docs/images/. or a/../b compare as what they are.
+OUT_REL="$(realpath -m --relative-to="$REPO_ROOT" -- "$REPO_ROOT/$OUT_RAW")"
 OUT_DIR="$REPO_ROOT/$OUT_REL"
 STILLS_THEME="${WS_STATUS_STILLS_THEME:-}"
 STILLS_BACKGROUND="${WS_STATUS_STILLS_BACKGROUND:-}"
 STILLS_CLIPS="${WS_STATUS_STILLS_CLIPS:-}"
+# Split on commas and blanks into an array; read -a does no glob expansion.
+CLIP_TOKENS=()
+read -ra CLIP_TOKENS <<<"${STILLS_CLIPS//,/ }"
 STILLS_GIFS="${WS_STATUS_STILLS_GIFS:-1}"
 if [[ "$STILLS_GIFS" == 0 ]]; then
   STILLS_DIR="$OUT_DIR"
@@ -127,16 +135,31 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 # Check the WS_STATUS_STILLS_* knobs before any install, seed, or capture.
 check_knobs() {
-  local tok name found
+  local tok name found protected sub
   if [[ "$OUT_REL" == "$README_OUT" ]]; then
     if [[ -n "$STILLS_THEME$STILLS_BACKGROUND$STILLS_CLIPS" || "$STILLS_GIFS" != 1 ]]; then
       die "WS_STATUS_STILLS_THEME/BACKGROUND/CLIPS/GIFS need WS_STATUS_STILLS_OUT (a directory under $README_OUT/), so the README clips and stills stay the default set"
     fi
   else
-    [[ "$OUT_REL" == "$README_OUT"/* && "$OUT_REL" != *..* && "$OUT_REL" != /* ]] \
-      || die "WS_STATUS_STILLS_OUT must be a relative directory under $README_OUT/ (got '$OUT_REL')"
-    [[ "$OUT_REL" != "$README_OUT/stills" && "$OUT_REL" != "$README_OUT/stills/"* ]] \
-      || die "WS_STATUS_STILLS_OUT must not be inside $README_OUT/stills"
+    [[ "$OUT_RAW" != /* ]] \
+      || die "WS_STATUS_STILLS_OUT must be relative to the repo root (got '$OUT_RAW')"
+    [[ "$OUT_REL" == "$README_OUT"/* ]] \
+      || die "WS_STATUS_STILLS_OUT must be a directory under $README_OUT/ (got '$OUT_RAW', which is '$OUT_REL')"
+    [[ "$OUT_REL" != "$README_OUT/stills/"* ]] \
+      || die "WS_STATUS_STILLS_OUT must not be inside $README_OUT/stills (got '$OUT_RAW')"
+    # The run replaces OUT (stills-only) or OUT/stills, so OUT must not be or
+    # hold a directory that other runs own.
+    for protected in "${PROTECTED_OUT[@]}"; do
+      if [[ "$OUT_REL" == "$protected" || "$protected" == "$OUT_REL"/* ]]; then
+        die "WS_STATUS_STILLS_OUT must not be $protected or hold it (got '$OUT_RAW', which is '$OUT_REL')"
+      fi
+    done
+    if [[ -d "$OUT_DIR" ]]; then
+      while IFS= read -r sub; do
+        [[ "$STILLS_GIFS" == 1 && "$sub" == stills ]] && continue
+        die "WS_STATUS_STILLS_OUT must be a leaf directory: '$OUT_REL' holds '$sub/'"
+      done < <(find "$OUT_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n')
+    fi
   fi
   [[ "$STILLS_GIFS" == 0 || "$STILLS_GIFS" == 1 ]] \
     || die "WS_STATUS_STILLS_GIFS must be 0 or 1 (got '$STILLS_GIFS')"
@@ -145,10 +168,10 @@ check_knobs() {
   # The binary checks the slug against its theme list (see check_config).
   [[ -z "$STILLS_THEME" || "$STILLS_THEME" =~ ^[a-z0-9-]+$ ]] \
     || die "WS_STATUS_STILLS_THEME must be a theme slug such as slate (got '$STILLS_THEME')"
-  if [[ -n "$STILLS_CLIPS" && -z "${STILLS_CLIPS//[, ]/}" ]]; then
+  if [[ -n "$STILLS_CLIPS" && ${#CLIP_TOKENS[@]} -eq 0 ]]; then
     die "WS_STATUS_STILLS_CLIPS names no clip (got '$STILLS_CLIPS')"
   fi
-  for tok in ${STILLS_CLIPS//,/ }; do
+  for tok in "${CLIP_TOKENS[@]}"; do
     found=""
     for name in "${CLIP_NAMES[@]}"; do
       if [[ "$tok" == "$name" || "$tok" == "${name%%-*}" ]]; then
@@ -162,8 +185,8 @@ check_knobs() {
 # True when clip NAME is in this run (every clip when WS_STATUS_STILLS_CLIPS is empty).
 want_clip() {
   local name="$1" tok
-  [[ -z "$STILLS_CLIPS" ]] && return 0
-  for tok in ${STILLS_CLIPS//,/ }; do
+  ((${#CLIP_TOKENS[@]})) || return 0
+  for tok in "${CLIP_TOKENS[@]}"; do
     if [[ "$tok" == "$name" || "$tok" == "${name%%-*}" ]]; then
       return 0
     fi

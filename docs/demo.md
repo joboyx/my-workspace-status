@@ -10,7 +10,7 @@ That script seeds, installs MesloLGS NF and ffmpeg if needed, starts Xvfb and Op
 
 Each clip also takes full-colour PNG stills from the same recording (not from the GIF palette): `NN-name.png` is the last frame, and `NN-name-mid.png` is the middle of the settled hold after the step where the clip calls `mark_mid` (the **Mid still** line below). The mid offset subtracts ffmpeg's start-up delay. Stills are lossless-optimized when `optipng` is installed.
 
-The script rejects a clip and keeps the old GIF when the last or mid frame is gray or too small, when no frame differs from the first (the keys did nothing), or when a GIF is over 4 MB. A rejected clip stops the run. Stills go to `tmp/demo-stills-stage/stills` first and replace `docs/images/stills/` as one set only when every clip passes.
+The script rejects a clip and keeps the old GIF when the last or mid frame is gray or too small, when no frame differs from the first (the keys did nothing), or when a GIF is over 4 MB. A rejected clip stops the run. Stills go to `tmp/demo-stills-stage/stills` first and replace the stills directory as one set only when every clip passes: `docs/images/stills/` for the README set, `<OUT>/stills/` for a knob run, or the whole `<OUT>` directory when `WS_STATUS_STILLS_GIFS=0` (see below).
 
 The script runs Xvfb on `:99`. Set `WS_STATUS_STILLS_DISPLAY` to another number when `:99` is busy. It stops only the `xfce4-terminal` it started on that display.
 
@@ -22,11 +22,11 @@ These environment variables make other sets with the same clips and keys. Each k
 
 | Variable | Value | Effect |
 | --- | --- | --- |
-| `WS_STATUS_STILLS_OUT` | directory under `docs/images/`, relative to the repo root | GIFs go here and stills to its `stills/`. Not `docs/images` and not inside `docs/images/stills`. |
+| `WS_STATUS_STILLS_OUT` | leaf directory under `docs/images/`, relative to the repo root | GIFs go here and stills to its `stills/`. The script checks the canonical path (`docs/images//x/.` is `docs/images/x`). It refuses `docs/images`, `docs/images/stills`, `docs/images/themes`, any directory inside `docs/images/stills`, and a directory that already holds subdirectories (other than its own `stills/`). |
 | `WS_STATUS_STILLS_CLIPS` | clip names or numbers, comma- or space-separated (`01`, `01-tree-diff`) | Runs only those clips. Default: all. |
 | `WS_STATUS_STILLS_THEME` | theme slug (`slate`, `tokyo-night`, ...) | Written as `theme` in the isolated user config file. |
 | `WS_STATUS_STILLS_BACKGROUND` | `paint` or `terminal` | Written as `viewDefaults.background` in that file. |
-| `WS_STATUS_STILLS_GIFS` | `1` (default) or `0` | `0` makes a stills-only run: the GIF is still checked but not copied, and the PNG stills land directly in `WS_STATUS_STILLS_OUT`. |
+| `WS_STATUS_STILLS_GIFS` | `1` (default) or `0` | `0` makes a stills-only run: the GIF is still checked but not copied, and the PNG stills replace the whole `WS_STATUS_STILLS_OUT` directory (any other file in it is removed). |
 
 The script loads that config once with `--plain` in the seeded workspace, so an unknown theme slug stops the run with the binary's error. The xfce terminal keeps its fixed colours (`#1a1b26` / `#c0caf5`) for every run. In `paint` mode the TUI fills every cell, and only the terminal's 1 px inner padding shows the terminal colour.
 
