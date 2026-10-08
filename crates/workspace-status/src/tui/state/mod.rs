@@ -781,6 +781,10 @@ pub struct AppState {
     /// Who paints pane and chrome backgrounds. Launch default
     /// [`BackgroundMode::Paint`]; `viewDefaults.background` sets it.
     pub background: BackgroundMode,
+    /// The terminal draws a coloured underline (SGR 58), detected once at
+    /// launch ([`Settings`]). Off: the focused flat title gets a plain
+    /// underline in its own colour. Off in test state.
+    pub coloured_underline: bool,
     pub mouse_enabled: bool,
     /// Last pointer cell `(col, row)` from any-event motion. `None` when
     /// unknown or mouse capture is off. Paint derives the tab `[✗]` hover
@@ -836,17 +840,19 @@ fn unix_now() -> i64 {
 }
 
 impl AppState {
-    /// TUI launch state: glyphs, theme, and the viewed / comment store paths
-    /// come from the resolved `settings`.
+    /// TUI launch state: glyphs, theme, coloured-underline support, and the
+    /// viewed / comment store paths come from the resolved `settings`.
     pub fn launch(cwd: PathBuf, snapshot: WorkspaceSnapshot, settings: &Settings) -> Self {
-        Self::build(
+        let mut state = Self::build(
             cwd,
             snapshot,
             settings.ascii,
             settings.viewed_store.clone(),
             settings.comment_store.clone(),
             settings.theme,
-        )
+        );
+        state.coloured_underline = settings.coloured_underline;
+        state
     }
 
     /// Test state with a unique temp viewed store, Tokyo Night, and
@@ -991,6 +997,7 @@ impl AppState {
             too_small: false,
             theme,
             background: BackgroundMode::default(),
+            coloured_underline: false,
             mouse_enabled: true,
             pointer: None,
             popover: None,

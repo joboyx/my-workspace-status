@@ -157,6 +157,9 @@ impl PtySession {
                     | "CLICOLOR_FORCE"
                     | "WS_STATUS_WORKSPACE"
                     | "VISUAL"
+                    | "VTE_VERSION"
+                    | "KITTY_WINDOW_ID"
+                    | "TERM_PROGRAM"
             ) {
                 continue;
             }
@@ -166,11 +169,16 @@ impl PtySession {
         // above does not drop these; remove them so the TTY paints colour
         // and the fixture cwd wins over an operator WS_STATUS_WORKSPACE.
         // `e` reads $VISUAL before $EDITOR, so an operator VISUAL would
-        // outrank the stub EDITOR a test passes.
+        // outrank the stub EDITOR a test passes. The developer terminal's
+        // VTE_VERSION / KITTY_WINDOW_ID / TERM_PROGRAM would turn on the
+        // coloured title underline, so the PTY output would depend on it.
         cmd.env_remove("NO_COLOR");
         cmd.env_remove("FORCE_COLOR");
         cmd.env_remove("WS_STATUS_WORKSPACE");
         cmd.env_remove("VISUAL");
+        cmd.env_remove("VTE_VERSION");
+        cmd.env_remove("KITTY_WINDOW_ID");
+        cmd.env_remove("TERM_PROGRAM");
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("WS_STATUS_GLYPHS", "ascii");
@@ -1130,7 +1138,6 @@ pub(crate) fn write_fresh_update_check(path: &Path) {
     write_update_check(path, None);
 }
 
-/// `last_check_unix = None` writes "now" so the startup prompt is skipped.
 /// Path of the user config file under `config_home` (`$XDG_CONFIG_HOME`).
 pub fn user_config_file(config_home: &Path) -> PathBuf {
     config_home.join("my-workspace-status").join("config.json")
@@ -1148,6 +1155,8 @@ pub(crate) fn write_baseline_user_config(config_home: &Path) {
     fs::write(file, BASELINE_USER_CONFIG).unwrap();
 }
 
+/// Write the update-check store at `path`. `last_check_unix = None` writes
+/// "now" so the startup prompt is skipped.
 pub(crate) fn write_update_check(path: &Path, last_check_unix: Option<u64>) {
     let unix = last_check_unix.unwrap_or_else(|| {
         SystemTime::now()

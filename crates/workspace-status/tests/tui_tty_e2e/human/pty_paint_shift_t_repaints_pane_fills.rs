@@ -64,15 +64,12 @@ fn pty_paint_shift_t_repaints_pane_fills() {
         |screen| {
             screen.contains("theme: Solarized Dark")
                 && pane_fills(&tui, SOLARIZED_SIDEBAR, SOLARIZED_SURFACE, SOLARIZED_CHROME)
+                && [SLATE_SIDEBAR, SLATE_SURFACE, SLATE_CHROME]
+                    .iter()
+                    .all(|&(r, g, b)| !tui.has_rgb(r, g, b))
         },
-        "Shift+T: Solarized Dark toast and Solarized sidebar / surface / chrome fills",
+        "Shift+T: Solarized Dark toast, Solarized sidebar / surface / chrome fills, \
+         and no Slate fill left",
         WAIT,
     );
-    for (r, g, b) in [SLATE_SIDEBAR, SLATE_SURFACE, SLATE_CHROME] {
-        assert!(
-            !tui.has_rgb(r, g, b),
-            "Slate fill rgb({r},{g},{b}) must not remain after Shift+T:\n{}",
-            tui.screen()
-        );
-    }
 }

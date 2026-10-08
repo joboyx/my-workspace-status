@@ -629,6 +629,7 @@ fn draw_pane_chrome(
             focused,
             area.width,
             state.ascii,
+            state.coloured_underline,
             palette,
         )),
         Rect { height: 1, ..area },
@@ -645,23 +646,28 @@ fn draw_pane_chrome(
 ///
 /// Focused: every blank cell is an accent line (`▁`, `_` in ASCII mode) in
 /// `cursor`, and the title is `heading`, bold, underlined in `cursor`, so
-/// the line runs under the whole row. Unfocused: the title is `muted` on
+/// the line runs under the whole row. Without `coloured_underline` (no
+/// SGR 58) the title underline is plain and takes the `heading` colour.
+/// Unfocused: the title is `muted` on
 /// plain blanks. The background is left to the pane fill.
 fn flat_title_line(
     title: &str,
     focused: bool,
     width: u16,
     ascii: bool,
+    coloured_underline: bool,
     palette: Palette,
 ) -> Line<'static> {
     let title_w = painted_width(title).min(width.saturating_sub(1));
     let tail = usize::from(width.saturating_sub(1).saturating_sub(title_w));
     let (blank, blank_style, title_style) = if focused {
         let line = Style::default().fg(palette.cursor);
-        let title_style = Style::default()
+        let mut title_style = Style::default()
             .fg(palette.heading)
-            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-            .underline_color(palette.cursor);
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        if coloured_underline {
+            title_style = title_style.underline_color(palette.cursor);
+        }
         (glyph(ascii, "\u{2581}", "_"), line, title_style)
     } else {
         (" ", Style::default(), Style::default().fg(palette.muted))
@@ -2741,11 +2747,6 @@ fn key_chip(key: &str, bg: Color, fg: Color) -> Span<'static> {
     )
 }
 
-/// Popup background: the theme's `panel` role, in both background modes.
-fn overlay_surface(state: &AppState) -> Color {
-    state.theme.palette().panel
-}
-
 fn help_spans_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(|span| visible_width(&span.content)).sum()
 }
@@ -2955,7 +2956,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) -> usize {
     let searching = state.help_search_query.is_some();
     let palette = state.theme.palette();
     let pills = state.theme.pills();
-    let surface = overlay_surface(state);
+    let panel = palette.panel;
     // A compare tab swaps GIT for the COMPARE column, a file tab for FILE.
     let groups = help_groups(help_tab(state));
     let mut lines: Vec<Line> = Vec::new();
@@ -3003,7 +3004,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) -> usize {
                             &vis,
                             key_width,
                             color,
-                            surface,
+                            panel,
                             palette.muted,
                             content,
                         ),
@@ -3068,7 +3069,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) -> usize {
     };
 
     frame.render_widget(Clear, area);
-    let block = overlay_block(palette.cursor, surface);
+    let block = overlay_block(palette.cursor, panel);
     let inner_area = block.inner(area);
     frame.render_widget(block, area);
     if inner_area.width == 0 || inner_area.height == 0 {
@@ -3198,7 +3199,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         return;
     };
     let palette = state.theme.palette();
-    let surface = overlay_surface(state);
+    let panel = palette.panel;
     let (accent, lines) = match pending {
         PendingConfirm::Revert { targets, label } => {
             let untracked = targets.iter().filter(|t| t.untracked).count();
@@ -3259,7 +3260,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 extra,
                 accent,
                 palette.muted,
-                surface,
+                panel,
             ));
             (accent, lines)
         }
@@ -3275,7 +3276,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                     Span::styled(path.clone(), Style::default().fg(palette.file)),
                     Span::styled("?", Style::default().fg(accent)),
                 ]),
-                confirm_action_row("y", "revert", None, accent, palette.muted, surface),
+                confirm_action_row("y", "revert", None, accent, palette.muted, panel),
             ];
             (accent, lines)
         }
@@ -3293,7 +3294,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                     COMPARE_REVERT_WORKTREE_ONLY,
                     Style::default().fg(palette.muted),
                 )),
-                confirm_action_row("y", "revert", None, accent, palette.muted, surface),
+                confirm_action_row("y", "revert", None, accent, palette.muted, panel),
             ];
             (accent, lines)
         }
@@ -3323,7 +3324,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                     None,
                     accent,
                     palette.muted,
-                    surface,
+                    panel,
                 ),
             ];
             (accent, lines)
@@ -3339,7 +3340,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                     Span::styled(stash_ref.clone(), Style::default().fg(palette.file)),
                     Span::styled("?", Style::default().fg(accent)),
                 ]),
-                confirm_action_row("y", "drop", None, accent, palette.muted, surface),
+                confirm_action_row("y", "drop", None, accent, palette.muted, panel),
             ];
             (accent, lines)
         }
@@ -3405,7 +3406,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 None,
                 accent,
                 palette.muted,
-                surface,
+                panel,
             ));
             (accent, lines)
         }
@@ -3443,7 +3444,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 None,
                 accent,
                 palette.muted,
-                surface,
+                panel,
             ));
             (accent, lines)
         }
@@ -3465,7 +3466,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                     "  dirty repos are skipped",
                     Style::default().fg(palette.muted),
                 )),
-                confirm_action_row("y", "switch", None, accent, palette.muted, surface),
+                confirm_action_row("y", "switch", None, accent, palette.muted, panel),
             ];
             (accent, lines)
         }
@@ -3486,7 +3487,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                     "  fast-forward if possible, otherwise a merge commit",
                     Style::default().fg(palette.muted),
                 )),
-                confirm_action_row("y", "merge", None, accent, palette.muted, surface),
+                confirm_action_row("y", "merge", None, accent, palette.muted, panel),
             ];
             (accent, lines)
         }
@@ -3497,7 +3498,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines)
-            .block(overlay_block(accent, surface))
+            .block(overlay_block(accent, panel))
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -3511,7 +3512,7 @@ fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         return;
     }
     let palette = state.theme.palette();
-    let surface = overlay_surface(state);
+    let panel = palette.panel;
     let accent = palette.modified;
     let subtitle = state.stash_repo.as_deref().unwrap_or("");
     let mut lines = vec![Line::from(vec![
@@ -3529,7 +3530,7 @@ fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             super::stash::StashOpId::Create => "",
         };
         let mut spans = vec![
-            key_chip(&op.key.to_string(), accent, surface),
+            key_chip(&op.key.to_string(), accent, panel),
             Span::styled(format!(" {}", op.label), Style::default().fg(palette.file)),
         ];
         if !detail.is_empty() {
@@ -3552,7 +3553,7 @@ fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines)
-            .block(overlay_block(accent, surface))
+            .block(overlay_block(accent, panel))
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -3566,7 +3567,7 @@ fn draw_blame_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         return;
     }
     let palette = state.theme.palette();
-    let surface = overlay_surface(state);
+    let panel = palette.panel;
     let accent = palette.modified;
     const TITLE: &str = "Blame ";
     // Inside the border, after the title.
@@ -3584,7 +3585,7 @@ fn draw_blame_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     ])];
     for row in &BLAME_MENU_ROWS {
         lines.push(Line::from(vec![
-            key_chip(&row.key.to_string(), accent, surface),
+            key_chip(&row.key.to_string(), accent, panel),
             Span::styled(format!(" {}", row.label), Style::default().fg(palette.file)),
         ]));
     }
@@ -3594,7 +3595,7 @@ fn draw_blame_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     )));
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(lines).block(overlay_block(accent, surface)),
+        Paragraph::new(lines).block(overlay_block(accent, panel)),
         area,
     );
 }
@@ -4480,7 +4481,7 @@ fn quick_open_command_rows(
 ) -> Vec<Line<'static>> {
     let palette_theme = state.theme.palette();
     let accent = palette_theme.cursor;
-    let surface = overlay_surface(state);
+    let panel = palette_theme.panel;
     let paint_rows = palette.paint_rows();
     let cursor_paint = paint_rows.iter().position(|row| match row {
         PalettePaintRow::Command { index, .. } => *index == palette.cursor,
@@ -4565,7 +4566,7 @@ fn quick_open_command_rows(
                             } else {
                                 accent
                             },
-                            surface,
+                            panel,
                         ));
                     }
                     if !header_painted {
@@ -4631,20 +4632,20 @@ fn draw_search_files(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let wide = frame.area().width >= SEARCH_PREVIEW_MIN_COLS;
     let palette = state.theme.palette();
     let theme = state.theme;
-    let surface = overlay_surface(state);
+    let panel = palette.panel;
     let Some(dialog) = state.search_files.as_ref() else {
         return;
     };
     let accent = palette.cursor;
     let muted = Style::default().fg(palette.muted);
-    let block = overlay_block(accent, surface)
+    let block = overlay_block(accent, panel)
         .title(Span::styled(
             dialog.title(),
             Style::default()
                 .fg(palette.heading)
                 .add_modifier(Modifier::BOLD),
         ))
-        .title_top(search_option_chips(dialog.options, palette, surface).right_aligned());
+        .title_top(search_option_chips(dialog.options, palette, panel).right_aligned());
     frame.render_widget(Clear, area);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -5244,7 +5245,7 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
         None
     };
     let palette = state.theme.palette();
-    let surface = overlay_surface(state);
+    let panel = palette.panel;
     let accent = palette.cursor;
     let muted = Style::default().fg(palette.muted);
 
@@ -5411,7 +5412,7 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
                             } else {
                                 accent
                             };
-                            chip = Some(key_chip(command.keys, chip_bg, surface));
+                            chip = Some(key_chip(command.keys, chip_bg, panel));
                         }
                     }
                 }
@@ -5454,7 +5455,7 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
         })
         .unwrap_or(0);
     let (start, shown) = visible_window(body, focus_row, body_height);
-    let mut block = overlay_block(accent, surface);
+    let mut block = overlay_block(accent, panel);
     let below = body - (start + shown);
     if below > 0 {
         // The rows under the cut: the same glyph the graph footer uses
@@ -5594,7 +5595,7 @@ fn draw_comment(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         return;
     }
     let palette = state.theme.palette();
-    let surface = overlay_surface(state);
+    let panel = palette.panel;
     let accent = palette.heading;
     let title = if prompt.resolved {
         "Comment · resolved"
@@ -5622,7 +5623,7 @@ fn draw_comment(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(palette.muted),
         )),
     ];
-    paint_text_dialog(frame, area, overlay_block(accent, surface), lines, footer);
+    paint_text_dialog(frame, area, overlay_block(accent, panel), lines, footer);
 }
 
 fn draw_comment_export(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -10344,7 +10345,8 @@ mod tests {
 
     /// Check the flat title row of `pane`: `title` after one blank cell,
     /// the accent line and underlined `heading` when `focused`, else a
-    /// `muted` title on plain blanks; the row bg is `bg` throughout.
+    /// `muted` title on plain blanks; the row bg is `bg` throughout. The
+    /// title underline is plain (no SGR 58 colour), as in test state.
     fn assert_flat_title_row(
         buf: &ratatui::buffer::Buffer,
         pane: Rect,
@@ -10370,7 +10372,7 @@ mod tests {
                     cell.modifier.contains(Modifier::UNDERLINED),
                     "underline at x={x}"
                 );
-                assert_eq!(cell.underline_color, palette.cursor, "x={x}");
+                assert_eq!(cell.underline_color, Color::Reset, "plain underline x={x}");
             } else if focused {
                 assert_eq!(cell.symbol(), "\u{2581}", "accent line at x={x}");
                 assert_eq!(cell.fg, palette.cursor, "accent line fg at x={x}");
@@ -10407,6 +10409,45 @@ mod tests {
         assert_eq!(layout.right_y, right.y + 1);
         assert_eq!(layout.diff_pane_width, right.width);
         assert_eq!(layout.diff_pane_height, right.height - 1);
+    }
+
+    /// The focused title's underline takes `cursor` (SGR 58) only on a
+    /// terminal known to support it; otherwise it is a plain underline in
+    /// the title's own `heading` colour, and the accent line is unchanged.
+    #[test]
+    fn paint_mode_title_underline_colour_follows_terminal_support() {
+        for supported in [true, false] {
+            let mut state = painted(two_pane_diff_state());
+            state.coloured_underline = supported;
+            state.dispatch(Action::FocusLeft);
+            let palette = state.theme.palette();
+            let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let (left, _) = pane_rects(&state, 120);
+            let buf = terminal.backend().buffer();
+            let want = if supported {
+                palette.cursor
+            } else {
+                Color::Reset
+            };
+            for x in left.x + 1..left.x + 1 + "tree".len() as u16 {
+                let cell = &buf[(x, left.y)];
+                assert_eq!(cell.fg, palette.heading, "supported={supported} x={x}");
+                assert!(
+                    cell.modifier
+                        .contains(Modifier::BOLD | Modifier::UNDERLINED),
+                    "supported={supported} x={x}"
+                );
+                assert_eq!(cell.underline_color, want, "supported={supported} x={x}");
+            }
+            let line = &buf[(left.x, left.y)];
+            assert_eq!(
+                line.symbol(),
+                "\u{2581}",
+                "accent line supported={supported}"
+            );
+            assert_eq!(line.fg, palette.cursor, "accent line supported={supported}");
+        }
     }
 
     /// Flat focus: the active pane's title row carries the accent line and
@@ -12870,15 +12911,17 @@ mod tests {
                 .changes
                 .retain(|change| change.path != rel);
         }
-        let (tab_id, gen) = loop {
-            if let Effect::LoadExplorerPreview {
+        // Each step moves one row down, so the tree's row count bounds the
+        // walk; a fixture without `rel` fails here instead of hanging.
+        let rows = state.explorer_rows().expect("an Explorer tab").0.len();
+        let found = (0..rows).find_map(|_| match state.dispatch(Action::Move(1)) {
+            Effect::LoadExplorerPreview {
                 tab_id, gen, path, ..
-            } = state.dispatch(Action::Move(1))
-            {
-                if path == rel {
-                    break (tab_id, gen);
-                }
-            }
+            } if path == rel => Some((tab_id, gen)),
+            _ => None,
+        });
+        let Some((tab_id, gen)) = found else {
+            panic!("Explorer tree has no row for {rel} within {rows} moves");
         };
         let body = match diff {
             Some(unified) => {

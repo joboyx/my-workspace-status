@@ -46,6 +46,10 @@ pub struct Settings {
     pub(crate) viewed_store: PathBuf,
     /// Git binary (`WORKSPACE_STATUS_GIT` / `git`).
     pub(crate) git: PathBuf,
+    /// The terminal draws a coloured underline (SGR 58). Detected from the
+    /// terminal's own env vars ([`coloured_underline_supported`]); there is
+    /// no config key.
+    pub(crate) coloured_underline: bool,
 }
 
 impl Settings {
@@ -77,6 +81,12 @@ impl Settings {
             comment_store: comment_store_path_from_env(&mut get, keys.comment_store.as_deref()),
             viewed_store: viewed_store_path_from_env(&mut get, keys.viewed_store.as_deref()),
             git: resolve_git_binary(get("WORKSPACE_STATUS_GIT").as_deref(), keys.git.as_deref()),
+            coloured_underline: coloured_underline_supported(
+                get("TERM").as_deref(),
+                get("TERM_PROGRAM").as_deref(),
+                get("VTE_VERSION").as_deref(),
+                get("KITTY_WINDOW_ID").as_deref(),
+            ),
         }
     }
 }
@@ -91,6 +101,36 @@ fn glyphs_ascii(env_value: Option<&str>, config: Option<GlyphSet>) -> bool {
         _ => None,
     };
     from_env.or(config) == Some(GlyphSet::Ascii)
+}
+
+/// Whether the terminal is known to draw a coloured underline (SGR 58),
+/// from `TERM`, `TERM_PROGRAM`, `VTE_VERSION` and `KITTY_WINDOW_ID`.
+///
+/// A terminal that does not know SGR 58 can read its colour bytes as other
+/// SGR codes (`2` is faint), so only a short allowlist gets it: VTE
+/// terminals (`VTE_VERSION` set), kitty (`TERM=xterm-kitty` or
+/// `KITTY_WINDOW_ID` set), WezTerm, iTerm2 and Ghostty (`TERM_PROGRAM`, or
+/// `TERM=xterm-ghostty`), and foot (`TERM=foot*`). tmux and screen
+/// (`TERM_PROGRAM=tmux`, `TERM=screen*` / `tmux*`) win over the vars they
+/// inherit from the outer terminal. Anything else gets a plain underline.
+fn coloured_underline_supported(
+    term: Option<&str>,
+    term_program: Option<&str>,
+    vte_version: Option<&str>,
+    kitty_window_id: Option<&str>,
+) -> bool {
+    let set = |value: Option<&str>| value.is_some_and(|v| !v.is_empty());
+    let term = term.unwrap_or("");
+    let term_program = term_program.unwrap_or("");
+    if term_program == "tmux" || term.starts_with("screen") || term.starts_with("tmux") {
+        return false;
+    }
+    set(vte_version)
+        || term == "xterm-kitty"
+        || set(kitty_window_id)
+        || matches!(term_program, "WezTerm" | "iTerm.app" | "ghostty")
+        || term == "xterm-ghostty"
+        || term.starts_with("foot")
 }
 
 #[cfg(test)]
@@ -151,6 +191,7 @@ mod tests {
             Path::new("/xdg/state/my-workspace-status/viewed-files.json")
         );
         assert_eq!(got.git, resolve_git_binary(None, None));
+        assert!(!got.coloured_underline);
     }
 
     #[test]
@@ -169,6 +210,7 @@ mod tests {
                 comment_store: PathBuf::from("/cfg/comments.json"),
                 viewed_store: PathBuf::from("/cfg/viewed.json"),
                 git: PathBuf::from("/cfg/git"),
+                coloured_underline: false,
             }
         );
     }
@@ -201,6 +243,7 @@ mod tests {
                 comment_store: PathBuf::from("/env/comments.json"),
                 viewed_store: PathBuf::from("/env/viewed.json"),
                 git: PathBuf::from("/env/git"),
+                coloured_underline: false,
             }
         );
     }
@@ -232,5 +275,68 @@ mod tests {
         assert!(glyphs_ascii(Some("1"), Some(GlyphSet::Ascii)));
         assert!(!glyphs_ascii(Some("1"), None));
         assert!(!glyphs_ascii(None, None));
+    }
+
+    #[test]
+    fn coloured_underline_allowlist() {
+        /// TERM, TERM_PROGRAM, VTE_VERSION, KITTY_WINDOW_ID, supported.
+        type Case = (
+            Option<&'static str>,
+            Option<&'static str>,
+            Option<&'static str>,
+            Option<&'static str>,
+            bool,
+        );
+        let cases: &[Case] = &[
+            (None, None, None, None, false),
+            (Some("xterm-256color"), None, None, None, false),
+            (
+                Some("xterm-256color"),
+                Some("Apple_Terminal"),
+                None,
+                None,
+                false,
+            ),
+            (Some("xterm-256color"), None, Some("7600"), None, true),
+            (Some("xterm-256color"), None, Some(""), None, false),
+            (Some("xterm-kitty"), None, None, None, true),
+            (Some("xterm-256color"), None, None, Some("1"), true),
+            (Some("xterm-256color"), Some("WezTerm"), None, None, true),
+            (Some("xterm-256color"), Some("iTerm.app"), None, None, true),
+            (Some("xterm-256color"), Some("ghostty"), None, None, true),
+            (Some("xterm-ghostty"), None, None, None, true),
+            (Some("foot"), None, None, None, true),
+            (Some("foot-extra"), None, None, None, true),
+            (
+                Some("tmux-256color"),
+                Some("tmux"),
+                Some("7600"),
+                Some("1"),
+                false,
+            ),
+            (
+                Some("xterm-256color"),
+                Some("tmux"),
+                Some("7600"),
+                None,
+                false,
+            ),
+            (Some("screen-256color"), None, Some("7600"), None, false),
+            (Some("tmux-256color"), Some("WezTerm"), None, None, false),
+            (Some("screen"), None, None, Some("1"), false),
+        ];
+        for &(term, program, vte, kitty, want) in cases {
+            assert_eq!(
+                coloured_underline_supported(term, program, vte, kitty),
+                want,
+                "TERM={term:?} TERM_PROGRAM={program:?} VTE_VERSION={vte:?} KITTY_WINDOW_ID={kitty:?}"
+            );
+        }
+        let settings =
+            Settings::resolve(&RuntimeKeys::default(), env_of(&[("TERM", "xterm-kitty")]));
+        assert!(
+            settings.coloured_underline,
+            "resolve reads the terminal env"
+        );
     }
 }
