@@ -679,6 +679,66 @@ impl AppState {
         }
     }
 
+    /// After a status load of `checkout`: list again each open, visible
+    /// folder of its Explorer tabs whose cached listing lacks a path the
+    /// status now reports (a new untracked file or folder), so the row
+    /// shows without `r`. Deleted paths are skipped (they already merge in
+    /// as rows). A folder with a listing in flight is not asked twice, and
+    /// a status path re-lists at most once while it stays in the status,
+    /// so a poll with nothing new sends nothing. The cursor keeps its rel.
+    pub(crate) fn explorer_status_relist(&mut self, checkout: &str) -> Option<Effect> {
+        let changes: Vec<String> = self
+            .snapshot
+            .repos
+            .iter()
+            .find(|repo| repo.repo == checkout)?
+            .changes
+            .iter()
+            .filter(|change| {
+                change.unstaged_status.as_deref() != Some("D")
+                    && change.staged_status.as_deref() != Some("D")
+            })
+            .map(|change| change.path.trim_end_matches('/').to_string())
+            .filter(|path| !path.is_empty())
+            .collect();
+        let ids: Vec<u64> = self
+            .tabs
+            .explorer_tabs()
+            .filter(|tab| tab.checkout == checkout)
+            .map(|tab| tab.id)
+            .collect();
+        let mut effects = Vec::new();
+        for id in ids {
+            let Some(tab) = self.tabs.get_explorer_id_mut(id) else {
+                continue;
+            };
+            tab.status_relisted.retain(|path| changes.contains(path));
+            let mut dirs: Vec<String> = Vec::new();
+            for path in &changes {
+                if tab.status_relisted.contains(path) {
+                    continue;
+                }
+                let stale: Vec<String> = tab
+                    .tree
+                    .stale_on_path(path)
+                    .into_iter()
+                    .filter(|dir| tab.tree.is_open_and_visible(dir))
+                    .collect();
+                if stale.is_empty() {
+                    continue;
+                }
+                tab.status_relisted.insert(path.clone());
+                for dir in stale {
+                    if !dirs.contains(&dir) && !tab.dir_reqs.contains_key(&dir) {
+                        dirs.push(dir);
+                    }
+                }
+            }
+            effects.extend(explorer_dir_loads(tab, dirs));
+        }
+        (!effects.is_empty()).then(|| single_or_batch(effects))
+    }
+
     /// Land folder `rel_dir`'s listing for request `req` of tab `tab_id`.
     ///
     /// `None` (dropped) when the tab closed or a newer listing of that
@@ -1478,5 +1538,63 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A status load that reports a new untracked file under an open,
+    /// listed folder lists that folder again once; the row then shows
+    /// `??`. An unchanged status sends nothing, in flight or after.
+    #[test]
+    fn a_status_path_missing_from_an_open_listing_relists_its_folder_once() {
+        let mut app = state();
+        open_root(&mut app);
+        let open = app.dispatch(Action::FoldOpen);
+        land(&mut app, open);
+        assert!(tab(&app).tree.is_expanded("src"));
+        let status_load = |app: &mut AppState, changes: Vec<FileChange>| {
+            let snap = repo("app", CheckoutKind::Primary, None, changes);
+            crate::tui::app::apply_one_repo_snapshot(app, "app", Some(snap));
+            app.explorer_status_relist("app")
+        };
+        let base = vec![
+            change("src/tui/app.rs", Some("M"), false),
+            change("new.txt", None, true),
+        ];
+        assert_eq!(status_load(&mut app, base.clone()), None, "nothing new");
+
+        let mut with_new = base.clone();
+        with_new.push(change("src/fresh.rs", None, true));
+        let Some(Effect::LoadExplorerDir {
+            tab_id,
+            req,
+            rel_dir,
+            ..
+        }) = status_load(&mut app, with_new.clone())
+        else {
+            panic!("a re-list of src");
+        };
+        assert_eq!(rel_dir, "src");
+        assert_eq!(
+            status_load(&mut app, with_new.clone()),
+            None,
+            "in flight: not asked twice"
+        );
+        let mut listing = app_listing("src");
+        listing.push(entry("fresh.rs", false, false));
+        app.apply_explorer_dir(tab_id, req, "src", Ok(listing))
+            .expect("fresh listing");
+        assert_eq!(status_load(&mut app, with_new), None, "landed: no churn");
+        let (rows, _) = app.explorer_rows().unwrap();
+        assert!(rows.iter().any(|row| row.rel == "src/fresh.rs"));
+        let status = app.explorer_status("app");
+        assert!(status.is_untracked("src/fresh.rs"), "paints ??");
+        assert_eq!(cursor_rel(&app), "src", "the cursor keeps its row");
+
+        // A new untracked folder at the root re-lists the root; a deleted
+        // path never re-lists.
+        let mut more = base;
+        more.push(change("newdir/", None, true));
+        more.push(change("gone.txt", Some("D"), false));
+        let relist = flat(status_load(&mut app, more).expect("a root re-list"));
+        assert_eq!(dir_loads(&relist), [""]);
     }
 }

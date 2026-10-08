@@ -1793,6 +1793,9 @@ impl Interpreter {
                 if let Some(reload) = state.file_tab_live_reload(&path) {
                     self.schedule(state, opts, reload, &Action::None);
                 }
+                if let Some(relist) = state.explorer_status_relist(&path) {
+                    self.schedule(state, opts, relist, &Action::None);
+                }
                 self.queue_due_pr_lookups(state, opts);
                 let decision = self.sched.note_repo_done(gen, &path);
                 if focused.as_deref() == Some(path.as_str())

@@ -451,6 +451,15 @@ impl ExplorerTree {
             .collect()
     }
 
+    /// True when folder `rel_dir` is expanded and every ancestor folder is
+    /// too, so its rows paint.
+    pub fn is_open_and_visible(&self, rel_dir: &str) -> bool {
+        self.expanded.contains(rel_dir)
+            && ancestors(rel_dir)
+                .iter()
+                .all(|dir| self.expanded.contains(*dir))
+    }
+
     /// Drop the cached listings of collapsed folders (they reload on the
     /// next expand) and return every visible expanded folder with a loaded
     /// listing, root first, for the caller to re-list. A folder under a

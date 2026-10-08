@@ -722,6 +722,11 @@ pub struct ExplorerTab {
     pub dir_reqs: HashMap<String, u64>,
     /// Last folder listing request id.
     pub dir_req: u64,
+    /// Status paths that already made a folder list again
+    /// (the Explorer status re-list), so a path a listing
+    /// never shows does not re-list on every poll. Pruned to the live
+    /// status paths.
+    pub status_relisted: HashSet<String>,
     /// Preview of the focused row.
     pub preview: ExplorerPreview,
     /// Preview load generation. A result for an older one is dropped.
@@ -749,6 +754,7 @@ impl ExplorerTab {
             tree: ExplorerTree::new(),
             dir_reqs: HashMap::new(),
             dir_req: 0,
+            status_relisted: HashSet::new(),
             preview: ExplorerPreview::None,
             preview_gen: 0,
             tree_scroll: 0,
@@ -957,6 +963,11 @@ impl TabStrip {
             }) => Some(tab),
             _ => None,
         }
+    }
+
+    /// Every Explorer tab in strip order.
+    pub fn explorer_tabs(&self) -> impl Iterator<Item = &ExplorerTab> {
+        self.tabs.iter().filter_map(SessionTab::as_explorer)
     }
 
     /// Every compare tab in strip order.
