@@ -487,6 +487,41 @@ impl PtySession {
             .and_then(|cell| cell.contents().chars().next())
     }
 
+    /// Glyph, 24-bit colours, and bold / underline of one vt100 cell.
+    ///
+    /// Paint-mode claims read pane fills and the focused title row per cell.
+    /// [`Self::screen`] is glyphs only. `None` when the cell is off-grid.
+    pub fn cell_paint(&self, row: u16, col: u16) -> Option<CellPaint> {
+        let parser = self.parser.lock().unwrap();
+        let cell = parser.screen().cell(row, col)?;
+        Some(CellPaint {
+            glyph: cell.contents().chars().next(),
+            fg: rgb_of(cell.fgcolor()),
+            bg: rgb_of(cell.bgcolor()),
+            bold: cell.bold(),
+            underline: cell.underline(),
+        })
+    }
+
+    /// Glyphs of `row` over `cols` from the vt100 cell grid, one char per
+    /// cell. An empty cell reads as a space, so the char index is the column.
+    pub fn grid_row_text(&self, row: u16, cols: std::ops::Range<u16>) -> String {
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        cols.map(|col| {
+            screen
+                .cell(row, col)
+                .and_then(|cell| cell.contents().chars().next())
+                .unwrap_or(' ')
+        })
+        .collect()
+    }
+
+    /// Current grid size as `(cols, rows)`.
+    pub fn grid_size(&self) -> (u16, u16) {
+        (self.cols, self.rows)
+    }
+
     /// First `█` and last `█`/`═`/`─` on an h-bar row, from the vt100 cell grid.
     ///
     /// [`Self::screen`] concatenates glyphs and can skip empty/wide cells, so
@@ -1122,6 +1157,17 @@ pub(crate) fn write_update_check(path: &Path, last_check_unix: Option<u64>) {
     });
     let body = format!("{{\n  \"version\": 1,\n  \"lastCheckUnix\": {unix}\n}}\n");
     fs::write(path, body).unwrap();
+}
+
+/// One painted vt100 cell ([`PtySession::cell_paint`]). A colour that is
+/// not 24-bit (terminal default, indexed) is `None`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellPaint {
+    pub glyph: Option<char>,
+    pub fg: Option<(u8, u8, u8)>,
+    pub bg: Option<(u8, u8, u8)>,
+    pub bold: bool,
+    pub underline: bool,
 }
 
 enum CellColor {
