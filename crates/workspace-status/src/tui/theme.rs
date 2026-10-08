@@ -1664,8 +1664,8 @@ mod tests {
         );
     }
 
-    /// Icon popover and `?` legend text. Both paint on the theme surface
-    /// (and on `panel` once popups move there); the same roles paint the
+    /// Icon popover and `?` legend text. Popups paint on `panel`; the
+    /// same roles paint the right pane on the surface, the
     /// left pane on `sidebar` and the bars on `chrome`:
     /// popover headings and field values in their pane colour roles,
     /// muted labels and notes, legend glyphs in the colour their pane
@@ -1674,8 +1674,8 @@ mod tests {
     /// `cursor`. Every role meets AA on the surface, `panel`,
     /// `sidebar`, and `chrome` (`deleted` its 4.0 floor). A pinned popover's focused line puts the same text on
     /// `cursor_bg`: 3.5, and `deleted` 2.5 like the hovered tab close.
-    /// Key chips paint the surface on `cursor` (enabled) or `muted`
-    /// (disabled): AA.
+    /// Key chips paint the surface (bars) or `panel` (popups) on `cursor`
+    /// (enabled) or `muted` (disabled): AA.
     #[test]
     fn popover_and_legend_text_meets_floors_on_surface_and_focus() {
         const AA: f64 = 4.5;
@@ -1723,8 +1723,13 @@ mod tests {
                 }
             }
             for (name, chip_bg) in [("enabled", pal.cursor), ("disabled", pal.muted)] {
-                let ratio = contrast_ratio(surface, chip_bg);
-                assert!(ratio >= AA, "{id:?} {name} key chip {ratio:.2} < {AA}");
+                for (fg_name, fg) in [("surface", surface), ("panel", pal.panel)] {
+                    let ratio = contrast_ratio(fg, chip_bg);
+                    assert!(
+                        ratio >= AA,
+                        "{id:?} {name} key chip ({fg_name}) {ratio:.2} < {AA}"
+                    );
+                }
             }
         }
     }
