@@ -26,7 +26,7 @@ Merge rules:
 - `ignoredRepos` is required in the workspace file when that file exists. In the user file it is optional; an omitted or `null` user `ignoredRepos` sets nothing. A wrong type is an error in both files.
 - Nothing writes either file.
 
-PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` point `XDG_CONFIG_HOME` at a temp dir, so a user file cannot change their results. The PTY and desktop harnesses write a fixed baseline user file there (theme and `viewDefaults.background`, see [tui-tty-e2e.md](tui-tty-e2e.md)); the capture script leaves it empty. CI guards those TTY spawn paths only: `tty_spawn_paths_isolate_user_config` in `crates/workspace-status/tests/release_watch.rs`. The CLI integration tests that run the binary (`snapshot_contract.rs`, `update.rs`, `seed_demo_workspace.rs`) also set `XDG_CONFIG_HOME`, but no CI guard checks them.
+PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` point `XDG_CONFIG_HOME` at a temp dir, so a user file cannot change their results. The PTY and desktop harnesses write a fixed baseline user file there (theme and `viewDefaults.background`, see [tui-tty-e2e.md](tui-tty-e2e.md)); the capture script leaves it empty unless its `WS_STATUS_STILLS_THEME` / `WS_STATUS_STILLS_BACKGROUND` knobs write `theme` / `viewDefaults.background` there (see [demo.md](demo.md)). CI guards those TTY spawn paths only: `tty_spawn_paths_isolate_user_config` in `crates/workspace-status/tests/release_watch.rs`. The CLI integration tests that run the binary (`snapshot_contract.rs`, `update.rs`, `seed_demo_workspace.rs`) also set `XDG_CONFIG_HOME`, but no CI guard checks them.
 
 ## `.workspace-status-config.json`
 

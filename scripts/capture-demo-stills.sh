@@ -17,6 +17,25 @@
 # xfce4-terminal started on that display is stopped, so another capture on a
 # different display keeps its terminal.
 #
+# Optional knobs for theme and before/after stills. A run with none of them set
+# writes the README set: every clip, default theme and background, into
+# docs/images/. The other knobs need WS_STATUS_STILLS_OUT, so they never
+# replace the README clips or stills.
+#   WS_STATUS_STILLS_OUT         Output directory under docs/images/ (relative to
+#                                the repo root), for example docs/images/themes/x.
+#                                Not docs/images itself and not docs/images/stills.
+#   WS_STATUS_STILLS_CLIPS       Clips to run, comma- or space-separated, by name
+#                                (01-tree-diff) or number (01). Default: all.
+#   WS_STATUS_STILLS_THEME       Theme slug (slate, tokyo-night, ...). Written as
+#                                "theme" in the isolated user config file.
+#   WS_STATUS_STILLS_BACKGROUND  paint or terminal. Written as
+#                                "viewDefaults.background" in that file.
+#   WS_STATUS_STILLS_GIFS        1 (default) or 0. With 0 the run is stills-only:
+#                                no GIF is copied out, and the PNG stills land
+#                                directly in WS_STATUS_STILLS_OUT.
+# The launcher unsets WS_STATUS_THEME, so a parent shell cannot change the theme
+# of a run. Use WS_STATUS_STILLS_THEME instead.
+#
 # Self-contained for a Cursor Cloud Agent Linux VM: installs MesloLGS NF,
 # xvfb, xfce4-terminal, xdotool, and ffmpeg when missing. Fails loudly instead
 # of writing ASCII/gray/static clips over good ones. Xvfb + dbus + Openbox come from
@@ -37,8 +56,19 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=with-desktop-session.sh
 source "$SCRIPT_DIR/with-desktop-session.sh"
 DEST="${1:-"$REPO_ROOT/tmp/demo-workspace"}"
-OUT_DIR="$REPO_ROOT/docs/images"
-STILLS_DIR="$OUT_DIR/stills"
+README_OUT="docs/images"
+OUT_REL="${WS_STATUS_STILLS_OUT:-$README_OUT}"
+OUT_REL="${OUT_REL%/}"
+OUT_DIR="$REPO_ROOT/$OUT_REL"
+STILLS_THEME="${WS_STATUS_STILLS_THEME:-}"
+STILLS_BACKGROUND="${WS_STATUS_STILLS_BACKGROUND:-}"
+STILLS_CLIPS="${WS_STATUS_STILLS_CLIPS:-}"
+STILLS_GIFS="${WS_STATUS_STILLS_GIFS:-1}"
+if [[ "$STILLS_GIFS" == 0 ]]; then
+  STILLS_DIR="$OUT_DIR"
+else
+  STILLS_DIR="$OUT_DIR/stills"
+fi
 STAGE_DIR="$REPO_ROOT/tmp/demo-stills-stage"
 STAGE_STILLS="$STAGE_DIR/stills"
 STATE_DIR="$STAGE_DIR/state"
@@ -82,6 +112,11 @@ MAX_GIF_BYTES=$((4 * 1024 * 1024))
 # 12 Tab, s, Tab, / zzz Enter, Esc
 # 13 < < < (diff pane reaches split), >
 # 14 / auth Enter, n, n
+CLIP_NAMES=(
+  01-tree-diff 02-git-graph 03-stage-unstage 04-search 05-reviewed 06-stash
+  07-show-ignored 08-help 09-palette 10-branch-picker 11-confirm
+  12-blocked-key 13-split-resize 14-search-count
+)
 
 die() {
   echo "capture-demo-stills: $*" >&2
@@ -89,6 +124,85 @@ die() {
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# Check the WS_STATUS_STILLS_* knobs before any install, seed, or capture.
+check_knobs() {
+  local tok name found
+  if [[ "$OUT_REL" == "$README_OUT" ]]; then
+    if [[ -n "$STILLS_THEME$STILLS_BACKGROUND$STILLS_CLIPS" || "$STILLS_GIFS" != 1 ]]; then
+      die "WS_STATUS_STILLS_THEME/BACKGROUND/CLIPS/GIFS need WS_STATUS_STILLS_OUT (a directory under $README_OUT/), so the README clips and stills stay the default set"
+    fi
+  else
+    [[ "$OUT_REL" == "$README_OUT"/* && "$OUT_REL" != *..* && "$OUT_REL" != /* ]] \
+      || die "WS_STATUS_STILLS_OUT must be a relative directory under $README_OUT/ (got '$OUT_REL')"
+    [[ "$OUT_REL" != "$README_OUT/stills" && "$OUT_REL" != "$README_OUT/stills/"* ]] \
+      || die "WS_STATUS_STILLS_OUT must not be inside $README_OUT/stills"
+  fi
+  [[ "$STILLS_GIFS" == 0 || "$STILLS_GIFS" == 1 ]] \
+    || die "WS_STATUS_STILLS_GIFS must be 0 or 1 (got '$STILLS_GIFS')"
+  [[ -z "$STILLS_BACKGROUND" || "$STILLS_BACKGROUND" == paint || "$STILLS_BACKGROUND" == terminal ]] \
+    || die "WS_STATUS_STILLS_BACKGROUND must be paint or terminal (got '$STILLS_BACKGROUND')"
+  # The binary checks the slug against its theme list (see check_config).
+  [[ -z "$STILLS_THEME" || "$STILLS_THEME" =~ ^[a-z0-9-]+$ ]] \
+    || die "WS_STATUS_STILLS_THEME must be a theme slug such as slate (got '$STILLS_THEME')"
+  if [[ -n "$STILLS_CLIPS" && -z "${STILLS_CLIPS//[, ]/}" ]]; then
+    die "WS_STATUS_STILLS_CLIPS names no clip (got '$STILLS_CLIPS')"
+  fi
+  for tok in ${STILLS_CLIPS//,/ }; do
+    found=""
+    for name in "${CLIP_NAMES[@]}"; do
+      if [[ "$tok" == "$name" || "$tok" == "${name%%-*}" ]]; then
+        found=1
+      fi
+    done
+    [[ -n "$found" ]] || die "WS_STATUS_STILLS_CLIPS: unknown clip '$tok' (known: ${CLIP_NAMES[*]})"
+  done
+}
+
+# True when clip NAME is in this run (every clip when WS_STATUS_STILLS_CLIPS is empty).
+want_clip() {
+  local name="$1" tok
+  [[ -z "$STILLS_CLIPS" ]] && return 0
+  for tok in ${STILLS_CLIPS//,/ }; do
+    if [[ "$tok" == "$name" || "$tok" == "${name%%-*}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Write the isolated user config file when a theme or background knob is set.
+# With neither, the config dir stays empty and the binary defaults apply.
+write_user_config() {
+  local file="$CONFIG_DIR/my-workspace-status/config.json"
+  local keys=()
+  [[ -n "$STILLS_THEME" ]] && keys+=("  \"theme\": \"$STILLS_THEME\"")
+  [[ -n "$STILLS_BACKGROUND" ]] && keys+=("  \"viewDefaults\": { \"background\": \"$STILLS_BACKGROUND\" }")
+  ((${#keys[@]})) || return 0
+  mkdir -p "$(dirname "$file")"
+  {
+    echo "{"
+    local i
+    for i in "${!keys[@]}"; do
+      if ((i + 1 < ${#keys[@]})); then
+        echo "${keys[$i]},"
+      else
+        echo "${keys[$i]}"
+      fi
+    done
+    echo "}"
+  } >"$file"
+  echo "capture-demo-stills: user config $(tr -d '\n' <"$file")" >&2
+}
+
+# Load the config once with --plain in the seeded workspace, so a bad theme
+# slug fails here with the binary's message instead of as a TUI that never starts.
+check_config() {
+  local err
+  if ! err="$(cd "$DEST" && "$LAUNCHER" --plain 2>&1 >/dev/null)"; then
+    die "config check failed: $err"
+  fi
+}
 
 apt_install() {
   local missing=()
@@ -141,7 +255,8 @@ write_helpers() {
   cat >"$LAUNCHER" <<EOF
 #!/usr/bin/env bash
 # Cloud Agent shells export NO_COLOR=1; a gray first frame means it leaked in.
-unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE
+# WS_STATUS_THEME would beat the config theme; WS_STATUS_STILLS_THEME sets it.
+unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE WS_STATUS_THEME
 export WS_STATUS_WATCH_MS=0
 export WS_STATUS_FETCH_MS=0
 export XDG_STATE_HOME=$(printf '%q' "$STATE_DIR")
@@ -155,9 +270,10 @@ export TERM=xterm-256color
 export COLORTERM=truecolor
 export NO_AT_BRIDGE=1
 export GTK_A11Y=none
-exec $(printf '%q' "$BIN")
+exec $(printf '%q' "$BIN") "\$@"
 EOF
   chmod +x "$LAUNCHER"
+  write_user_config
 }
 
 # xfce4-terminal processes launch_tui started on this run's DISPLAY. A bare
@@ -281,7 +397,7 @@ launch_tui() {
   echo "capture-demo-stills: stop+launch" >&2
   stop_tui
   sleep 0.35
-  unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE
+  unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE WS_STATUS_THEME
   if [[ -n "${WS_STATUS_GLYPHS:-}" ]]; then
     die "WS_STATUS_GLYPHS is set; refusing ASCII clips while MesloLGS NF is installed."
   fi
@@ -531,9 +647,9 @@ optimize_png() {
 }
 
 # Stop the recording, encode the GIF under STAGE_DIR, gate it and its stills,
-# then copy the GIF to docs/images and keep the stills in STAGE_STILLS for
-# publish_stills. A rejected clip leaves the existing GIF and all existing
-# stills in place.
+# then copy the GIF to OUT_DIR (unless stills-only) and keep the stills in
+# STAGE_STILLS for publish_stills. A rejected clip leaves the existing GIF and
+# all existing stills in place.
 clip_commit() {
   local name="$1"
   local staged="$STAGE_DIR/${name}.gif"
@@ -564,11 +680,16 @@ clip_commit() {
   if ((bytes > MAX_GIF_BYTES)); then
     die "rejecting $final: $((bytes / 1024)) KiB is over $((MAX_GIF_BYTES / 1024)) KiB. Shorten the clip."
   fi
-  mkdir -p "$OUT_DIR" "$STAGE_STILLS"
-  cp -f "$staged" "$final"
+  mkdir -p "$STAGE_STILLS"
+  if [[ "$STILLS_GIFS" == 1 ]]; then
+    mkdir -p "$OUT_DIR"
+    cp -f "$staged" "$final"
+    echo "ok $final ($((bytes / 1024)) KiB, frames/seconds: $info)"
+  else
+    echo "ok checked ${name}.gif, not copied (stills-only; $((bytes / 1024)) KiB, frames/seconds: $info)"
+  fi
   cp -f "$last" "$STAGE_STILLS/${name}.png"
   optimize_png "$STAGE_STILLS/${name}.png"
-  echo "ok $final ($((bytes / 1024)) KiB, frames/seconds: $info)"
   echo "ok staged ${name}.png (last frame)"
   if [[ -n "$CLIP_MID" ]]; then
     cp -f "$mid" "$STAGE_STILLS/${name}-mid.png"
@@ -577,11 +698,13 @@ clip_commit() {
   fi
 }
 
-# Replace docs/images/stills with the staged set. Runs only after every clip
-# passed (a rejected clip exits first), so a partial run never mixes old and
-# new stills or keeps stills of a removed clip.
+# Replace STILLS_DIR (docs/images/stills by default) with the staged set. Runs
+# only after every clip passed (a rejected clip exits first), so a partial run
+# never mixes old and new stills or keeps stills of a removed clip.
 publish_stills() {
-  local next="$OUT_DIR/.stills-next"
+  local next
+  next="$(dirname "$STILLS_DIR")/.$(basename "$STILLS_DIR")-next"
+  mkdir -p "$(dirname "$STILLS_DIR")"
   rm -rf "$next"
   cp -r "$STAGE_STILLS" "$next"
   rm -rf "$STILLS_DIR"
@@ -595,8 +718,9 @@ seed() {
 }
 
 cd "$REPO_ROOT"
+check_knobs
 # Cloud Agent / CI shells often export these; they paint a gray first frame.
-unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE
+unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE WS_STATUS_THEME
 export NO_AT_BRIDGE=1
 export GTK_A11Y=none
 export TZ=Asia/Manila
@@ -609,151 +733,180 @@ write_helpers
 
 ws_desktop_session_start --display "${WS_STATUS_STILLS_DISPLAY:-99}"
 seed
+check_config
 
 # 01 tree + live diff: walk the app rows from session.ts, end on auth.ts.
-launch_tui
-clip_start 01-tree-diff
-send j
-send j
-send j
-send j
-send k
-clip_commit 01-tree-diff
+if want_clip 01-tree-diff; then
+  launch_tui
+  clip_start 01-tree-diff
+  send j
+  send j
+  send j
+  send j
+  send k
+  clip_commit 01-tree-diff
+fi
 
 # 02 git graph: pass the stash, then drill into a commit.
-launch_tui
-clip_start 02-git-graph
-send slash type:merger Return
-send Tab
-send j
-send j
-send Return
-clip_commit 02-git-graph
+if want_clip 02-git-graph; then
+  launch_tui
+  clip_start 02-git-graph
+  send slash type:merger Return
+  send Tab
+  send j
+  send j
+  send Return
+  clip_commit 02-git-graph
+fi
 
 # 03 unstage / stage session.ts (real git writes).
-launch_tui
-clip_start 03-stage-unstage
-send u
-mark_mid
-hold 0.6
-send s
-clip_commit 03-stage-unstage
-seed
+if want_clip 03-stage-unstage; then
+  launch_tui
+  clip_start 03-stage-unstage
+  send u
+  mark_mid
+  hold 0.6
+  send s
+  clip_commit 03-stage-unstage
+  seed
+fi
 
 # 04 search: type the query, arm it, step to the next match.
-launch_tui
-clip_start 04-search
-send slash type:auth
-send Return
-send n
-clip_commit 04-search
+if want_clip 04-search; then
+  launch_tui
+  clip_start 04-search
+  send slash type:auth
+  send Return
+  send n
+  clip_commit 04-search
+fi
 
 # 05 reviewed marks: move to auth.ts before recording, then mark two files.
-launch_tui
-send j j j
-clip_start 05-reviewed
-send space
-send j
-send space
-clip_commit 05-reviewed
-clear_viewed
+if want_clip 05-reviewed; then
+  launch_tui
+  send j j j
+  clip_start 05-reviewed
+  send space
+  send j
+  send space
+  clip_commit 05-reviewed
+  clear_viewed
+fi
 
 # 06 stash: create-only menu from the tree, then the graph drop confirm.
-launch_tui
-clip_start 06-stash
-send shift+s
-send Escape
-send slash type:merger Return
-send Tab
-send j
-send shift+d
-mark_mid
-send n
-clip_commit 06-stash
+if want_clip 06-stash; then
+  launch_tui
+  clip_start 06-stash
+  send shift+s
+  send Escape
+  send slash type:merger Return
+  send Tab
+  send j
+  send shift+d
+  mark_mid
+  send n
+  clip_commit 06-stash
+fi
 
 # 07 show / hide ignored repos.
-launch_tui
-clip_start 07-show-ignored
-send period
-mark_mid
-hold 0.6
-send period
-clip_commit 07-show-ignored
+if want_clip 07-show-ignored; then
+  launch_tui
+  clip_start 07-show-ignored
+  send period
+  mark_mid
+  hold 0.6
+  send period
+  clip_commit 07-show-ignored
+fi
 
 # 08 help overlay.
-launch_tui
-clip_start 08-help
-send shift+slash
-mark_mid
-hold 1.2
-send Escape
-clip_commit 08-help
+if want_clip 08-help; then
+  launch_tui
+  clip_start 08-help
+  send shift+slash
+  mark_mid
+  hold 1.2
+  send Escape
+  clip_commit 08-help
+fi
 
 # 09 command palette: an alias match, then letters that used to move the cursor.
-launch_tui
-clip_start 09-palette
-send shift+semicolon
-send type:compare
-mark_mid
-send BackSpace BackSpace BackSpace BackSpace BackSpace BackSpace BackSpace
-send type:checkout
-send Escape
-clip_commit 09-palette
+if want_clip 09-palette; then
+  launch_tui
+  clip_start 09-palette
+  send shift+semicolon
+  send type:compare
+  mark_mid
+  send BackSpace BackSpace BackSpace BackSpace BackSpace BackSpace BackSpace
+  send type:checkout
+  send Escape
+  clip_commit 09-palette
+fi
 
 # 10 branch picker on the app checkout: filter, then the explicit create row.
 # Esc closes it; nothing is created or checked out.
-launch_tui
-send k k k
-clip_start 10-branch-picker
-send b
-send type:login
-send BackSpace BackSpace BackSpace BackSpace BackSpace
-send type:fix/banner
-mark_mid
-send Escape
-clip_commit 10-branch-picker
+if want_clip 10-branch-picker; then
+  launch_tui
+  send k k k
+  clip_start 10-branch-picker
+  send b
+  send type:login
+  send BackSpace BackSpace BackSpace BackSpace BackSpace
+  send type:fix/banner
+  mark_mid
+  send Escape
+  clip_commit 10-branch-picker
+fi
 
 # 11 revert confirm on auth.ts: Enter does not confirm, n cancels. Never y.
-launch_tui
-send j j j
-clip_start 11-confirm
-send x
-send Return
-mark_mid
-send n
-clip_commit 11-confirm
+if want_clip 11-confirm; then
+  launch_tui
+  send j j j
+  clip_start 11-confirm
+  send x
+  send Return
+  mark_mid
+  send n
+  clip_commit 11-confirm
+fi
 
 # 12 keys that do nothing say why: s from the diff pane, a search with no match.
-launch_tui
-clip_start 12-blocked-key
-send Tab
-send s
-mark_mid
-send Tab
-send slash type:zzz
-send Return
-send Escape
-clip_commit 12-blocked-key
+if want_clip 12-blocked-key; then
+  launch_tui
+  clip_start 12-blocked-key
+  send Tab
+  send s
+  mark_mid
+  send Tab
+  send slash type:zzz
+  send Return
+  send Escape
+  clip_commit 12-blocked-key
+fi
 
 # 13 keyboard pane resize: the diff pane reaches 100 columns and turns split.
-launch_tui
-clip_start 13-split-resize
-send "type:<"
-send "type:<"
-send "type:<"
-mark_mid
-send "type:>"
-clip_commit 13-split-resize
+if want_clip 13-split-resize; then
+  launch_tui
+  clip_start 13-split-resize
+  send "type:<"
+  send "type:<"
+  send "type:<"
+  mark_mid
+  send "type:>"
+  clip_commit 13-split-resize
+fi
 
 # 14 search position chip: /auth 2/2 (first match after the cursor), wrap to 1/2, then 2/2.
-launch_tui
-clip_start 14-search-count
-send slash type:auth
-send Return
-send n
-mark_mid
-send n
-clip_commit 14-search-count
+if want_clip 14-search-count; then
+  launch_tui
+  clip_start 14-search-count
+  send slash type:auth
+  send Return
+  send n
+  mark_mid
+  send n
+  clip_commit 14-search-count
+fi
 
 stop_tui
 publish_stills
