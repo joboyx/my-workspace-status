@@ -26,7 +26,7 @@ Merge rules:
 - `ignoredRepos` is required in the workspace file when that file exists. In the user file it is optional; an omitted or `null` user `ignoredRepos` sets nothing. A wrong type is an error in both files.
 - Nothing writes either file.
 
-PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` point `XDG_CONFIG_HOME` at an empty temp dir, so a user file cannot change their results. CI guards those TTY spawn paths only: `tty_spawn_paths_isolate_user_config` in `crates/workspace-status/tests/release_watch.rs`. The CLI integration tests that run the binary (`snapshot_contract.rs`, `update.rs`, `seed_demo_workspace.rs`) also set `XDG_CONFIG_HOME`, but no CI guard checks them.
+PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` point `XDG_CONFIG_HOME` at a temp dir, so a user file cannot change their results. The PTY and desktop harnesses write a fixed baseline user file there (theme and `viewDefaults.background`, see [tui-tty-e2e.md](tui-tty-e2e.md)); the capture script leaves it empty unless its `WS_STATUS_STILLS_THEME` / `WS_STATUS_STILLS_BACKGROUND` knobs write `theme` / `viewDefaults.background` there (see [demo.md](demo.md)). CI guards those TTY spawn paths only: `tty_spawn_paths_isolate_user_config` in `crates/workspace-status/tests/release_watch.rs`. The CLI integration tests that run the binary (`snapshot_contract.rs`, `update.rs`, `seed_demo_workspace.rs`) also set `XDG_CONFIG_HOME`, but no CI guard checks them.
 
 ## `.workspace-status-config.json`
 
@@ -159,7 +159,7 @@ These top-level keys set the same settings as the env vars in [Environment varia
 
 | Key | Env var | Value |
 | --- | --- | --- |
-| `theme` | `WS_STATUS_THEME` | one of `"tokyo-night"`, `"monokai"`, `"dracula"`, `"gruvbox-dark"`, `"catppuccin-mocha"` |
+| `theme` | `WS_STATUS_THEME` | one of `"tokyo-night"`, `"monokai"`, `"dracula"`, `"gruvbox-dark"`, `"catppuccin-mocha"`, `"slate"`, `"solarized-dark"`, `"nord"`, `"rose-pine"`, `"kanagawa"`, `"everforest"`, `"one-dark"`, `"github-dark-dimmed"` |
 | `glyphs` | `WS_STATUS_GLYPHS` | `"nerd"` \| `"ascii"` |
 | `watchMs` | `WS_STATUS_WATCH_MS` | integer >= 0. `0` turns the poll off. `1` to `499` clamp up to `500`, like the env var |
 | `fetchMs` | `WS_STATUS_FETCH_MS` | integer >= 0. `0` turns the background fetch off. `1` to `29999` clamp up to `30000`, like the env var |
@@ -190,7 +190,8 @@ Optional object. It sets the TUI view modes at launch. Each key is optional. An 
   "wrap": "unwrap",
   "commitMessage": "collapse",
   "commitMessageLines": 12,
-  "lineBlame": "hide"
+  "lineBlame": "hide",
+  "background": "terminal"
 }
 ```
 
@@ -203,12 +204,14 @@ Optional object. It sets the TUI view modes at launch. Each key is optional. An 
 | `commitMessage`      | `expand` \| `collapse` | `expand`       | `M`                          |
 | `commitMessageLines` | integer `1` to `20`    | `4`            | `-` / `+` (`=` is `+`)       |
 | `lineBlame`          | `show` \| `hide`       | `show`         | `B`                          |
+| `background`         | `paint` \| `terminal`  | `paint`        | —                            |
 
 - String values are trimmed, then matched case-sensitively.
 - A string key with a value of the wrong type, an unknown value, or a blank value is an error: `<file> viewDefaults.<key> must be "<a>" or "<b>"`. `<file>` is `.workspace-status-config.json` for the workspace file, or the full path of the user file. A `viewDefaults` that is not an object is an error. An unknown key inside it is an error that names the key. A typo never falls back silently.
 - `commitMessageLines` is the number of message rows in the expanded commit-message footer (graph pane and commit-files pane). It must be a JSON integer from 1 to 20. A string, a fraction (`8.5`, also `8.0`), a bool, `null`, or a number out of range is an error: `<file> viewDefaults.commitMessageLines must be an integer from 1 to 20` (same `<file>` label).
 - `"viewDefaults": null` counts as omitted.
 - The config loads before the CLI picks a mode, so an invalid `viewDefaults` also fails `--plain` and `--json`. Valid values do not change that output.
+- `background` picks who paints the pane and chrome backgrounds. `paint` fills them with theme colours. `terminal` keeps boxed panes with no fills, so the terminal background shows through. Popups sit on the theme panel colour in both modes. There is no session toggle and no env var.
 - `commitTree` sets the commit file list in commit drills and in each new compare tab. A `t` toggle changes the current tab only. The next compare tab opens in the `commitTree` mode again.
 - `-a` / `--all` and positional repo paths keep `viewDefaults`.
 - `diff: "split"` does not force side-by-side in a narrow pane. The split to inline fallback below `NARROW_SXS` still applies (see **Defaults**).
@@ -223,7 +226,7 @@ Optional object. It sets the TUI view modes at launch. Each key is optional. An 
 | `WS_STATUS_WATCH_MS` | `watchMs` | `3000` (`DEFAULT_WATCH_MS`)                             | Live-refresh poll period. `0` disables the poll. Values below `MIN_WATCH_MS` (500) are clamped up. Non-numeric, negative, or empty falls through to config `watchMs`, then the default. File, graph, and commit-file rows flash (~800ms background fade) on add/update/remove of the same row identity. Add is green (`flash` / `flash_ramp`), update is amber (`flash_update` / `flash_update_ramp`), remove is red/magenta (`flash_remove` / `flash_remove_ramp`). Flash background wins over cursor and search. The cursor bar stays. File signatures use status letter or worktree `size:mtimeMs`. Chrome identity includes `HEAD` and `sync_note` so a new local commit or ahead 2→3 reloads status / graph without `r`. The active file tab reads its file again when the file's `size:mtimeMs` moved. A disjoint identity set (repo switch / first paint) seeds and does not flash. The TUI polls local git only (no fetch) and keeps fold, focus, and scroll. Unchanged polls skip the right-pane `git log` / diff reload. The next tick is scheduled from the start of the interval, not after collect finishes. The live loop applies each checkout as it finishes; keys cannot starve the tick. |
 | `WS_STATUS_FETCH_MS` | `fetchMs` | `300000` (`DEFAULT_FETCH_MS`)                           | Background `git fetch` period for the TUI. `0` disables. Values below `MIN_FETCH_MS` (30000) are clamped up when enabled. Non-numeric, negative, or empty falls through to config `fetchMs`, then the default. The tick paints no progress or summary line; it writes the status slot only when a repo fails. |
 | `WS_STATUS_FETCH_CONCURRENCY` | `fetchConcurrency` | `10` (`FETCH_CONCURRENCY`)                            | In-flight cap for independent per-repo fetch / pull / push on the TTY Scheduler JoinSet, and for CLI `collect_snapshots` / `process_repo`. Remotes queue per gitdir when that gitdir is occupied. Missing, empty, `0`, negative, or non-numeric falls through to config `fetchConcurrency`, then 10. Exclusive writes (stage, commit, merge into HEAD) stay serial. |
-| `WS_STATUS_THEME` | `theme` | `tokyo-night`                                           | Built-in TUI theme id: `tokyo-night`, `monokai`, `dracula`, `gruvbox-dark`, `catppuccin-mocha`. Unknown values fall through to config `theme`, then `tokyo-night`. Seeds the TUI at launch. `T` cycles the same list in the current session only; there is no theme file. Palettes assume a dark terminal. See **Theme flash tokens**. |
+| `WS_STATUS_THEME` | `theme` | `slate`                                                 | Built-in TUI theme id: `tokyo-night`, `monokai`, `dracula`, `gruvbox-dark`, `catppuccin-mocha`, `slate`, `solarized-dark`, `nord`, `rose-pine`, `kanagawa`, `everforest`, `one-dark`, `github-dark-dimmed`. Unknown values fall through to config `theme`, then `slate`. Seeds the TUI at launch. `T` cycles the same list in the current session only; there is no theme file. All palettes are dark. See [Theme tokens](#theme-tokens) and **Theme flash tokens**. |
 | `EDITOR` | — (system var; use `editor`) | unset                                                   | Used for `e` when config `editor` and `VISUAL` are unset or blank. Blank values are ignored. May include fixed args (`code --wait`, `nvim -p`); simple quoting is supported for paths with spaces. |
 | `VISUAL` | — (system var; use `editor`) | unset                                                   | Fallback editor for `e` when config `editor` is omitted or blank; wins over `EDITOR` (same argv parsing).                                                                                         |
 | _(editor fallback)_ | `editor` | `vim`                                                   | When config `editor`, `VISUAL`, and `EDITOR` are all unset/blank, `resolve_editor` returns `vim`.                                                                                                 |
@@ -243,7 +246,7 @@ A **Config key** sets the same setting from a config file; a valid env var wins 
 
 ### Theme flash tokens
 
-Each built-in palette keeps three four-step flash ramps. Accents mix toward `surface` so the row stays readable.
+Each built-in palette keeps three four-step flash ramps. Each step is `surface` mixed 42%, 28%, 16%, then 8% toward the accent, so the row stays readable.
 
 | Kind | Peak / ramp | Accent source |
 | --- | --- | --- |
@@ -295,7 +298,8 @@ On many macOS setups there is no dedicated PageUp key. `Fn+Up` and `Fn+Down` oft
 | Commit message   | Expanded. `viewDefaults.commitMessage` overrides at launch                                                                                        | `M`                                                  |
 | Message rows     | 4 rows in the expanded commit-message footer, whatever the message length. `viewDefaults.commitMessageLines` overrides at launch (1 to 20)        | `-` / `+` (`=` is `+`)                               |
 | Line blame       | On. `viewDefaults.lineBlame` overrides at launch                                                                                                  | `B`                                                  |
-| Theme            | Tokyo Night                                                                                                                                       | `T` cycles / `WS_STATUS_THEME`                       |
+| Theme            | Slate                                                                                                                                             | `T` cycles / `WS_STATUS_THEME`                       |
+| Background       | Paint: theme colours fill the panes and chrome rows. `viewDefaults.background` overrides at launch                                                | —                                                    |
 | Live refresh     | On, 3 s                                                                                                                                           | `WS_STATUS_WATCH_MS=0`                               |
 | Background fetch | On, 5 min                                                                                                                                         | `WS_STATUS_FETCH_MS=0`                               |
 | Initial folds    | The "No updates" group collapsed, plus any repo the TUI was given as ignored (positional args only — never under `-a` or after `.` shows ignored) | `z` / `h` / `l`                                      |
@@ -306,9 +310,35 @@ Split falls back to inline when the diff's painted width (the right pane less it
 
 ## Theme tokens
 
-Built-in palettes live in `crates/workspace-status/src/tui/theme.rs`. `WS_STATUS_THEME` seeds the first paint. `T` cycles the same list in this session. There is no theme file.
+Built-in palettes live in `crates/workspace-status/src/tui/theme.rs`. `WS_STATUS_THEME` seeds the first paint. `T` cycles the same list in this session, in the order of the tables below. There is no theme file.
 
-Unfocused pane borders use `palette.borderDim`. That token is a near-surface dark gray. It is darker than that theme's `muted`. Focused pane borders use `palette.heading`. Pane body text stays full brightness. The TUI does not DIM body text because a pane is unfocused. The selected row on an unfocused list keeps a thinner `▏` marker and `palette.cursorBgInactive` (between that theme's surface and `cursorBg`). The focused list still uses `▌` / `cursorBg`.
+Besides `surface` (the right pane and the file tab), each theme has three background roles. A theme can set each one; otherwise the default rule applies. Each mix is per RGB channel, `surface + (target - surface) × percent / 100`, rounded to the nearest integer.
+
+| Role | Background of | Default rule |
+| --- | --- | --- |
+| `palette.sidebar` | Left pane (tree, graph, files list) | `surface` mixed 22% toward black |
+| `palette.chrome` | Tab strip, breadcrumb, ctrl-c prompt, and key-chip footer rows | `surface` mixed 38% toward black |
+| `palette.panel` | Popups | `surface` mixed 5% toward white |
+
+Every text role meets its contrast floor on `surface`, `sidebar`, `chrome`, and `panel` (`theme.rs` tests). Monokai, Dracula, and Gruvbox Dark set a smaller `panel` lift (4%, 3%, 2% toward white) because the 5% rule drops their popup text below the floor.
+
+| Theme | slug | surface | sidebar | chrome | panel |
+| --- | --- | --- | --- | --- | --- |
+| Tokyo Night | `tokyo-night` | `#1a1b26` | `#14151e` (rule) | `#101118` (rule) | `#252631` (rule) |
+| Monokai | `monokai` | `#272822` | `#1e1f1b` (rule) | `#181915` (rule) | `#30312b` |
+| Dracula | `dracula` | `#282a36` | `#1f212a` (rule) | `#191a21` (rule) | `#2e303c` |
+| Gruvbox Dark | `gruvbox-dark` | `#282828` | `#1f1f1f` (rule) | `#191919` (rule) | `#2c2c2c` |
+| Catppuccin Mocha | `catppuccin-mocha` | `#1e1e2e` | `#171724` (rule) | `#13131d` (rule) | `#292938` (rule) |
+| Slate | `slate` | `#11151b` | `#151a21` | `#0d1116` | `#19202a` |
+| Solarized Dark | `solarized-dark` | `#002b36` | `#00222a` (rule) | `#001b21` (rule) | `#073642` |
+| Nord | `nord` | `#2e3440` | `#242932` (rule) | `#1d2028` (rule) | `#3b4252` |
+| Rosé Pine | `rose-pine` | `#191724` | `#1f1d2e` | `#131220` | `#26233a` |
+| Kanagawa | `kanagawa` | `#1f1f28` | `#16161d` | `#121218` | `#2a2a37` |
+| Everforest | `everforest` | `#2d353b` | `#232a2e` | `#1c2125` (rule) | `#343f44` |
+| One Dark | `one-dark` | `#282c34` | `#21252b` | `#1b1e23` | `#2c313c` |
+| GitHub Dark Dimmed | `github-dark-dimmed` | `#22272e` | `#1c2128` | `#171b21` | `#2d333b` |
+
+With `viewDefaults.background` `"terminal"` (boxed panes), unfocused pane borders use `palette.borderDim`. That token is a near-surface dark gray. It is darker than that theme's `muted`. Focused pane borders use `palette.heading`. With `"paint"` (flat panes, no borders), the focused pane's title row carries an accent line in `palette.cursor` (`▁` on blank cells, the title in `heading`, bold, underlined; the underline is in `cursor` only on a terminal known to support coloured underlines (SGR 58), else plain — the allowlist is in [tui-rust.md](./tui-rust.md#layout)); the unfocused title is `muted` with no line. Paint mode draws the side-by-side diff rule in `borderDim`. Pane body text stays full brightness. The TUI does not DIM body text because a pane is unfocused. The selected row on an unfocused list keeps a thinner `▏` marker and `palette.cursorBgInactive` (between that theme's surface and `cursorBg`). The focused list still uses `▌` / `cursorBg`.
 
 | Theme | surface | muted | `palette.borderDim` |
 | --- | --- | --- | --- |
@@ -317,6 +347,14 @@ Unfocused pane borders use `palette.borderDim`. That token is a near-surface dar
 | Dracula | `#282a36` | `#b4bce4` | `#44475a` |
 | Gruvbox Dark | `#282828` | `#bdae93` | `#504945` |
 | Catppuccin Mocha | `#1e1e2e` | `#a6adc8` | `#45475a` |
+| Slate | `#11151b` | `#8a94a3` | `#2b3442` |
+| Solarized Dark | `#002b36` | `#92a1a3` | `#1a4957` |
+| Nord | `#2e3440` | `#afb8c7` | `#434c5e` |
+| Rosé Pine | `#191724` | `#9c99b3` | `#403d52` |
+| Kanagawa | `#1f1f28` | `#a6a08a` | `#363646` |
+| Everforest | `#2d353b` | `#aeb8b0` | `#475258` |
+| One Dark | `#282c34` | `#a6abb4` | `#3e4451` |
+| GitHub Dark Dimmed | `#22272e` | `#9ea8b3` | `#444c56` |
 
 The compare-tab close `[✗]` (U+2717, ballot x) uses `palette.tabClose` at rest. That neutral dark gray is darker than `muted` and stays readable on the surface and on `cursorBg` (the active tab). Under the pointer it uses `palette.tabCloseHover`, red (the theme's `deleted` color), in bold.
 
@@ -327,6 +365,14 @@ The compare-tab close `[✗]` (U+2717, ballot x) uses `palette.tabClose` at rest
 | Dracula | `#888888` | `#ff5555` |
 | Gruvbox Dark | `#787878` | `#fb4934` |
 | Catppuccin Mocha | `#707070` | `#f38ba8` |
+| Slate | `#686868` | `#e27a7a` |
+| Solarized Dark | `#727272` | `#e56967` |
+| Nord | `#828282` | `#d3949a` |
+| Rosé Pine | `#707070` | `#eb6f92` |
+| Kanagawa | `#717171` | `#e46876` |
+| Everforest | `#858585` | `#e78183` |
+| One Dark | `#7c7c7c` | `#e06c75` |
+| GitHub Dark Dimmed | `#797979` | `#f47067` |
 
 Graph ref chips: default-branch names use `palette.branchDefault` (distinct from `muted`). Checkout / detached marks use per-theme high-contrast `palette.headMark` (Nerd Font crosshairs / `[HEAD]`). Synced chips put Nerd Font exchange before the branch name. Marks are PUA icons so MesloLGS NF keeps 1-cell metrics. The graph selection footer reuses those same chip colours; it is not a single muted wash. The graph sync header paints the branch in `palette.branchDefault` or `palette.branchFeature`, the ahead count in `palette.added`, the behind count in `palette.deleted` (the tree's sync colours and glyphs), and `no-upstream` in `palette.muted`.
 
@@ -400,7 +446,7 @@ See [tui-rust.md](./tui-rust.md) for the same keys with layout notes. In Normal,
 
 File tab (opened by Enter in files-mode Quick Open or on a search-in-files hit): a read-only view of one file. `j` / `k`, PgUp / PgDn, Ctrl-u / Ctrl-d, `gg` / `G`, Home / End, and the wheel move the line cursor; `h` / `l` and arrows pan (not while `\` wrap is on; the tab shares the file-diff wrap state, so it opens wrapped by default); `/`, `n`, `N` search its lines from the cursor, like the other panes; `'` copies a file reference; `e` opens the editor at the cursor line; `r` reads the file again; `:` (commands) and `Ctrl-p` / `F` (files) open Quick Open scoped to its checkout, and `Ctrl-f` searches the files of that checkout; `gt` / `gT` / `g1`–`g9` switch tabs; `Ctrl-w`, palette Close tab, or the `[✗]` click closes it. Git writes (`s`, `u`, `x`, `S`, `f`, `p`, `P`, `d`, `b`, `W`), comments, `V`, `E`, `Ctrl-o`, and space say `Switch to Workspace tab`. Files over 2 MiB and binary files show a notice; `e` still opens them.
 
-Explorer tab (opened by `-` on a Workspace tree row in a checkout; one per checkout, labelled `Explorer · <checkout leaf>`): a file tree of that checkout beside a preview of the focused file. In the tree `j` / `k`, PgUp / PgDn, Ctrl-u / Ctrl-d, `gg` / `G`, Home / End, and the wheel move the cursor; `l` opens a folder; `h` closes an open folder, and on a file or closed folder jumps to the parent folder; `-` jumps to the parent folder; Enter opens or closes a folder and on a file moves focus to the preview; Tab switches panes. A folder lists only when opened, off the event thread. Ignored entries (`node_modules/`, `target/`, `.next/`, …) always list, dimmed; there is no `.` toggle. File names paint in their git status colour with the letter on the right (`M`, `A`, `D`, …), `??` for untracked; a folder with changes inside shows `●`. The preview shows the worktree diff of a changed file (as the Workspace diff pane) or the read-only body of a clean file (as a file tab); a folder shows a short hint. In the preview the move keys move its cursor, Shift-←/→ pan, and Esc, `h`, or a right click go back to the tree. `r` re-lists the open folders and reloads the preview; `e` opens the focused file in the editor; `'` copies its file reference; `\` and `i` act on the preview; `/` says `no search on the Explorer tab · Ctrl-f searches files`. `Ctrl-p` / `F` / `:` and `Ctrl-f` scope to its checkout. Git writes (`s` / `u` / `x`, stash, fetch / pull / push, branch, worktree), comments, highlight, `E`, `Ctrl-o`, space, the blame actions, and the Diff … commands say `Explorer tab is read-only · switch to Workspace tab`, on a key press and in the palette. Close it with `[✗]`, `Ctrl-w`, or `:` Close tab.
+Explorer tab (opened by `-` on a Workspace tree row in a checkout; one per checkout, labelled `Explorer · <checkout leaf>`): a file tree of that checkout beside a preview of the focused file. In the tree `j` / `k`, PgUp / PgDn, Ctrl-u / Ctrl-d, `gg` / `G`, Home / End, and the wheel move the cursor; `l` opens a folder; `h` closes an open folder, and on a file or closed folder jumps to the parent folder; `-` jumps to the parent folder; Enter opens or closes a folder and on a file moves focus to the preview; Tab switches panes. A folder lists only when opened, off the event thread. Ignored entries (`node_modules/`, `target/`, `.next/`, …) always list, dimmed; there is no `.` toggle. File names paint in their git status colour with the letter on the right (`M`, `A`, `D`, …), `??` for untracked; a folder with changes inside shows `●`. The preview shows the worktree diff of a changed file (as the Workspace diff pane) or the read-only body of a clean file (as a file tab); a folder shows a short hint. The two panes look like the Workspace panes: flat on `sidebar` (tree) and `surface` (preview) in paint mode, boxed with `viewDefaults.background` `"terminal"`. In the preview the move keys move its cursor, Shift-←/→ pan, and Esc, `h`, or a right click go back to the tree. `r` re-lists the open folders and reloads the preview; `e` opens the focused file in the editor; `'` copies its file reference; `\` and `i` act on the preview; `/` says `no search on the Explorer tab · Ctrl-f searches files`. `Ctrl-p` / `F` / `:` and `Ctrl-f` scope to its checkout. Git writes (`s` / `u` / `x`, stash, fetch / pull / push, branch, worktree), comments, highlight, `E`, `Ctrl-o`, space, the blame actions, and the Diff … commands say `Explorer tab is read-only · switch to Workspace tab`, on a key press and in the palette. Close it with `[✗]`, `Ctrl-w`, or `:` Close tab.
 
 Mouse (when enabled): left-click a tab in the strip to switch; click `[✗]` on a compare, file, or Explorer tab to close it, as `Ctrl-w` does for the active one (Workspace never closes); left-click any list row the keyboard can select (workspace tree, graph, commit files) to focus that pane and select it; **click the diff** to focus the right pane and select the hit row; click a fold chevron to toggle fold; double-click a list row (not the chevron) to run Enter (focus right / drill); right-click anywhere outside an overlay to step back like Esc; wheel over a list (tree, graph, commit files, or file-diff) moves that list's cursor (±1). The viewport keeps the focused row near the vertical middle. Graph scrollbar drag still scrolls the viewport without moving the cursor. File-diff horizontal thumb drag pans without moving `diff_cursor`. **horizontal wheel** (and Shift-wheel) pans the pane under the pointer without moving the focused row, including the workspace tree. Trackpad hscroll is SGR `66`/`67`. The live loop enables click, button-event, and any-event (DECSET 1003) tracking, rxvt 1015, and SGR (`tui/tty.rs`). Some terminals add the motion bit to wheel reports under any-event tracking; the Unix reader decodes those as the plain wheel. The Unix reader otherwise decodes SGR, X10, and 1015 the same way as crossterm 0.28. The compare-tab `[✗]` paints in `palette.tabClose`, a neutral dark gray darker than `muted`. Pointer motion over it paints `palette.tabCloseHover` (red, the theme's `deleted` color, bold). The TUI redraws only when that hover changes. When a file diff has long lines, that report over the left pane pans the diff; short tree paths still pan the tree when the painted diff fits. Keyboard `h` / `l` still fold the tree. Drag the divider to resize. Drag the graph scrollbar thumbs or a file-diff horizontal thumb to scroll / pan; click the track to jump toward that position (`hit_split` / `SplitDrag`, same stack as the pane and in-diff splitters). Tree and commit-file lists pan with the wheel and keys only; they do not paint an h-bar. Graph and file-diff vertical bars show whenever the content overflows, at the top too. Graph and file-diff horizontal bars show only after the viewport leaves the left edge.
 

@@ -18,7 +18,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::common::hscroll::TREE_HSCROLL_TAIL;
-use super::harness::{clipped_long_path_row, write_fresh_update_check, COLS, ROWS};
+use super::harness::{
+    clipped_long_path_row, write_baseline_user_config, write_fresh_update_check, COLS, ROWS,
+};
 use super::seed::git_env;
 
 const OPENBOX_RC: &str = include_str!("../../../../scripts/openbox.xml");
@@ -62,16 +64,18 @@ impl DesktopSession {
         fs::create_dir_all(&state_home).unwrap();
         let update_store = state_home.join("update-check.json");
         write_fresh_update_check(&update_store);
-        // Empty user config dir: an operator user config file cannot change
-        // the fixture's settings.
+        // Temp user config dir with the harness baseline file: an operator
+        // user config file cannot change the fixture's settings.
         let config_home = workspace.join(".e2e-config");
         fs::create_dir_all(&config_home).unwrap();
+        write_baseline_user_config(&config_home);
 
         let bin = env!("CARGO_BIN_EXE_workspace-status");
         let launcher = stage.join("run-tui.sh");
         let mut script = String::from("#!/usr/bin/env bash\nset -euo pipefail\n");
         script.push_str(
-            "unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE\n",
+            "unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE \
+             VTE_VERSION KITTY_WINDOW_ID TERM_PROGRAM\n",
         );
         script.push_str("export TERM=xterm-256color COLORTERM=truecolor\n");
         script.push_str("export LANG=C.UTF-8 LC_ALL=C.UTF-8\n");

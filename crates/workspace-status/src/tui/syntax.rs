@@ -52,6 +52,17 @@ fn syntect_theme_name(id: ThemeId) -> EmbeddedThemeName {
         ThemeId::Dracula => EmbeddedThemeName::Dracula,
         ThemeId::GruvboxDark => EmbeddedThemeName::GruvboxDark,
         ThemeId::CatppuccinMocha => EmbeddedThemeName::Base16MochaDark,
+        // Slate, Rosé Pine, Kanagawa, Everforest, and GitHub Dark Dimmed
+        // have no embedded twin: each takes the closest dark theme by surface
+        // hue and tone (`Github` is light). `TwoDark` ports Atom One Dark.
+        ThemeId::Slate => EmbeddedThemeName::ColdarkDark,
+        ThemeId::SolarizedDark => EmbeddedThemeName::SolarizedDark,
+        ThemeId::Nord => EmbeddedThemeName::Nord,
+        ThemeId::RosePine => EmbeddedThemeName::Dracula,
+        ThemeId::Kanagawa => EmbeddedThemeName::Dracula,
+        ThemeId::Everforest => EmbeddedThemeName::Base16OceanDark,
+        ThemeId::OneDark => EmbeddedThemeName::TwoDark,
+        ThemeId::GithubDarkDimmed => EmbeddedThemeName::OneHalfDark,
     }
 }
 
@@ -930,6 +941,55 @@ mod tests {
                     span.fg == FALLBACK || contrast_ratio(span.fg, bg) >= ROW_BG_CONTRAST_FLOOR,
                     "row {row} {span:?} must stay readable on {bg:?}"
                 );
+            }
+        }
+    }
+
+    /// Every built-in theme maps to a dark embedded syntax theme, and its
+    /// token colours stay at or above the floor on that theme's own diff row
+    /// and changed-word backgrounds (or fall back to the default text).
+    #[test]
+    fn every_theme_maps_to_a_dark_syntax_theme_and_keeps_the_row_floor() {
+        use crate::tui::theme::THEME_IDS;
+        let rows = vec![
+            line_row(
+                DiffCellKind::Del,
+                r#"  let total = price * qty; // "ttlMs": 5000"#,
+                1,
+            ),
+            line_row(
+                DiffCellKind::Add,
+                r#"  let total = price * count; // "ttlMs": 2000"#,
+                1,
+            ),
+        ];
+        for id in THEME_IDS {
+            let syn = theme_set().get(syntect_theme_name(id));
+            let bg = syn.settings.background.expect("embedded theme background");
+            let bg = Color::Rgb(bg.r, bg.g, bg.b);
+            let bg_l = relative_luminance(bg).expect("rgb");
+            assert!(
+                bg_l < 0.1,
+                "{id:?} syntax theme background {bg:?} must be dark"
+            );
+            let pal = id.palette();
+            let bgs = DiffBackgrounds {
+                add: pal.diff_add_bg,
+                del: pal.diff_del_bg,
+                add_word: pal.diff_add_word_bg,
+                del_word: pal.diff_del_word_bg,
+            };
+            let spans = highlight_diff_rows("calc.rs", &rows, id, pal.repo, bgs, 0..rows.len());
+            for (row, row_bg, word_bg) in [(0, bgs.del, bgs.del_word), (1, bgs.add, bgs.add_word)] {
+                let line = spans.left(row);
+                assert!(line.iter().any(|s| s.word), "{id:?} row {row}: {line:?}");
+                for span in line {
+                    let bg = if span.word { word_bg } else { row_bg };
+                    assert!(
+                        span.fg == pal.repo || contrast_ratio(span.fg, bg) >= ROW_BG_CONTRAST_FLOOR,
+                        "{id:?} row {row} {span:?} must stay readable on {bg:?}"
+                    );
+                }
             }
         }
     }

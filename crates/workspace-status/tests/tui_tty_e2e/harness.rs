@@ -34,6 +34,23 @@ pub const SGR_WHEEL_RIGHT_MOTION: u8 = 67 | 32;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(12);
 
+/// User config the harness writes before a spawn: the v0.1.244 look
+/// (Tokyo Night, boxed panes on the terminal background). Existing PTY and
+/// desktop tests assert that look, so a change to the shipped defaults does
+/// not move them. `WS_STATUS_THEME` in a test's env still beats this theme.
+pub const BASELINE_USER_CONFIG: &str =
+    "{\"theme\":\"tokyo-night\",\"viewDefaults\":{\"background\":\"terminal\"}}\n";
+
+/// Which user config file a spawn starts with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UserConfig {
+    /// Write [`BASELINE_USER_CONFIG`] unless the file already exists.
+    Baseline,
+    /// Write nothing. The test writes its own file, or runs on the shipped
+    /// defaults.
+    Own,
+}
+
 pub struct PtySession {
     child: Box<dyn portable_pty::Child + Send>,
     writer: Box<dyn Write + Send>,
@@ -71,7 +88,19 @@ impl PtySession {
         rows: u16,
         extra_env: &[(&str, &str)],
     ) -> Self {
-        Self::spawn(workspace, cols, rows, extra_env, None, true)
+        Self::open_size_with_config(workspace, cols, rows, extra_env, UserConfig::Baseline)
+    }
+
+    /// Spawn with an explicit user config choice. [`UserConfig::Own`] skips
+    /// the [`BASELINE_USER_CONFIG`] pin, for tests of the shipped look.
+    pub fn open_size_with_config(
+        workspace: &Path,
+        cols: u16,
+        rows: u16,
+        extra_env: &[(&str, &str)],
+        user_config: UserConfig,
+    ) -> Self {
+        Self::spawn(workspace, cols, rows, extra_env, None, true, user_config)
     }
 
     /// Spawn without waiting for the TUI. Used when the GitHub Release
@@ -88,6 +117,7 @@ impl PtySession {
             extra_env,
             Some(last_check_unix),
             false,
+            UserConfig::Baseline,
         )
     }
 
@@ -98,6 +128,7 @@ impl PtySession {
         extra_env: &[(&str, &str)],
         last_check_unix: Option<u64>,
         wait_ready: bool,
+        user_config: UserConfig,
     ) -> Self {
         assert!(
             workspace.is_dir(),
@@ -126,6 +157,9 @@ impl PtySession {
                     | "CLICOLOR_FORCE"
                     | "WS_STATUS_WORKSPACE"
                     | "VISUAL"
+                    | "VTE_VERSION"
+                    | "KITTY_WINDOW_ID"
+                    | "TERM_PROGRAM"
             ) {
                 continue;
             }
@@ -135,11 +169,16 @@ impl PtySession {
         // above does not drop these; remove them so the TTY paints colour
         // and the fixture cwd wins over an operator WS_STATUS_WORKSPACE.
         // `e` reads $VISUAL before $EDITOR, so an operator VISUAL would
-        // outrank the stub EDITOR a test passes.
+        // outrank the stub EDITOR a test passes. The developer terminal's
+        // VTE_VERSION / KITTY_WINDOW_ID / TERM_PROGRAM would turn on the
+        // coloured title underline, so the PTY output would depend on it.
         cmd.env_remove("NO_COLOR");
         cmd.env_remove("FORCE_COLOR");
         cmd.env_remove("WS_STATUS_WORKSPACE");
         cmd.env_remove("VISUAL");
+        cmd.env_remove("VTE_VERSION");
+        cmd.env_remove("KITTY_WINDOW_ID");
+        cmd.env_remove("TERM_PROGRAM");
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("WS_STATUS_GLYPHS", "ascii");
@@ -170,12 +209,19 @@ impl PtySession {
         let update_store = state_home.join("update-check.json");
         write_update_check(&update_store, last_check_unix);
         cmd.env("WS_STATUS_UPDATE_CHECK_STORE", &update_store);
-        // Empty user config dir: an operator user config file cannot change
-        // the fixture's settings.
-        if !extra_has("XDG_CONFIG_HOME") {
-            let config_home = workspace.join(".e2e-config");
-            fs::create_dir_all(&config_home).unwrap();
-            cmd.env("XDG_CONFIG_HOME", &config_home);
+        // Temp user config dir: an operator user config file cannot change
+        // the fixture's settings. A test may pass its own dir.
+        let config_home = match extra_env.iter().find(|(k, _)| *k == "XDG_CONFIG_HOME") {
+            Some((_, dir)) => PathBuf::from(dir),
+            None => {
+                let config_home = workspace.join(".e2e-config");
+                fs::create_dir_all(&config_home).unwrap();
+                cmd.env("XDG_CONFIG_HOME", &config_home);
+                config_home
+            }
+        };
+        if user_config == UserConfig::Baseline {
+            write_baseline_user_config(&config_home);
         }
 
         let child = pair
@@ -447,6 +493,41 @@ impl PtySession {
             .screen()
             .cell(row, col)
             .and_then(|cell| cell.contents().chars().next())
+    }
+
+    /// Glyph, 24-bit colours, and bold / underline of one vt100 cell.
+    ///
+    /// Paint-mode claims read pane fills and the focused title row per cell.
+    /// [`Self::screen`] is glyphs only. `None` when the cell is off-grid.
+    pub fn cell_paint(&self, row: u16, col: u16) -> Option<CellPaint> {
+        let parser = self.parser.lock().unwrap();
+        let cell = parser.screen().cell(row, col)?;
+        Some(CellPaint {
+            glyph: cell.contents().chars().next(),
+            fg: rgb_of(cell.fgcolor()),
+            bg: rgb_of(cell.bgcolor()),
+            bold: cell.bold(),
+            underline: cell.underline(),
+        })
+    }
+
+    /// Glyphs of `row` over `cols` from the vt100 cell grid, one char per
+    /// cell. An empty cell reads as a space, so the char index is the column.
+    pub fn grid_row_text(&self, row: u16, cols: std::ops::Range<u16>) -> String {
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        cols.map(|col| {
+            screen
+                .cell(row, col)
+                .and_then(|cell| cell.contents().chars().next())
+                .unwrap_or(' ')
+        })
+        .collect()
+    }
+
+    /// Current grid size as `(cols, rows)`.
+    pub fn grid_size(&self) -> (u16, u16) {
+        (self.cols, self.rows)
     }
 
     /// First `█` and last `█`/`═`/`─` on an h-bar row, from the vt100 cell grid.
@@ -1057,7 +1138,25 @@ pub(crate) fn write_fresh_update_check(path: &Path) {
     write_update_check(path, None);
 }
 
-/// `last_check_unix = None` writes "now" so the startup prompt is skipped.
+/// Path of the user config file under `config_home` (`$XDG_CONFIG_HOME`).
+pub fn user_config_file(config_home: &Path) -> PathBuf {
+    config_home.join("my-workspace-status").join("config.json")
+}
+
+/// Write [`BASELINE_USER_CONFIG`] under `config_home`. Skips a file that
+/// already exists: a test that writes its own user config owns all of it,
+/// theme and background included.
+pub(crate) fn write_baseline_user_config(config_home: &Path) {
+    let file = user_config_file(config_home);
+    if file.exists() {
+        return;
+    }
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(file, BASELINE_USER_CONFIG).unwrap();
+}
+
+/// Write the update-check store at `path`. `last_check_unix = None` writes
+/// "now" so the startup prompt is skipped.
 pub(crate) fn write_update_check(path: &Path, last_check_unix: Option<u64>) {
     let unix = last_check_unix.unwrap_or_else(|| {
         SystemTime::now()
@@ -1067,6 +1166,17 @@ pub(crate) fn write_update_check(path: &Path, last_check_unix: Option<u64>) {
     });
     let body = format!("{{\n  \"version\": 1,\n  \"lastCheckUnix\": {unix}\n}}\n");
     fs::write(path, body).unwrap();
+}
+
+/// One painted vt100 cell ([`PtySession::cell_paint`]). A colour that is
+/// not 24-bit (terminal default, indexed) is `None`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellPaint {
+    pub glyph: Option<char>,
+    pub fg: Option<(u8, u8, u8)>,
+    pub bg: Option<(u8, u8, u8)>,
+    pub bold: bool,
+    pub underline: bool,
 }
 
 enum CellColor {

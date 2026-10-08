@@ -38,9 +38,6 @@ pub const TREE_FRACTION_STEP: f64 = 0.05;
 /// Minimum width of either side-by-side column when the pane is wide enough.
 pub const MIN_DIFF_COL: u16 = 16;
 
-/// Columns after the tree border before right-pane content starts.
-pub const DIFF_CONTENT_PAD: u16 = 2;
-
 /// Preferred diff layout. Narrow panes still paint inline.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DiffMode {
@@ -123,12 +120,16 @@ pub struct SplitLayout {
     pub term_cols: u16,
     pub term_rows: u16,
     pub pane_height: u16,
-    /// Outer tree box width.
+    /// Outer left-pane width (its border columns included when boxed).
     pub tree_width: u16,
     /// Right-pane content width (inner).
     pub diff_pane_width: u16,
-    /// 0-based first content column of the right pane.
+    /// 0-based first content column of the right pane, as painted.
     pub diff_content_x: u16,
+    /// Panes paint flat (no border glyphs). The pane divider band is then
+    /// the two columns at the pane boundary, and the pane's last row is
+    /// content (a horizontal scrollbar can sit there).
+    pub flat_panes: bool,
     /// 0-based RULE column when a split is painted.
     pub diff_split_rule_x: Option<u16>,
     /// 0-based graph scrollbar column when a graph list is painted.
@@ -267,14 +268,13 @@ pub fn step_tree_fraction(term_cols: u16, fraction: f64, steps: i32) -> f64 {
     tree_fraction_from_width(cols, target)
 }
 
-/// 1-based terminal column of the first right-pane content cell.
-pub fn diff_content_origin_x(tree_width: u16) -> u16 {
-    tree_width.saturating_add(DIFF_CONTENT_PAD)
-}
-
-/// 1-based terminal column of the in-diff vertical RULE.
-pub fn diff_split_rule_x(tree_width: u16, left_width: u16) -> u16 {
-    diff_content_origin_x(tree_width).saturating_add(left_width)
+/// 0-based terminal column of the in-diff vertical RULE.
+///
+/// `content_x` is the 0-based first content column of the right pane as
+/// painted (`LayoutHit::diff_content_x`), so the result is right for boxed
+/// and flat panes alike.
+pub fn diff_split_rule_x(content_x: u16, left_width: u16) -> u16 {
+    content_x.saturating_add(left_width)
 }
 
 /// Clamp a left-column width so both sides stay ≥ [`MIN_DIFF_COL`] when possible.
@@ -297,10 +297,11 @@ pub fn diff_split_fraction_from_left_width(pane_width: u16, left_width: i32) -> 
 }
 
 /// Map a 0-based mouse column onto an in-diff split fraction.
-pub fn diff_split_fraction_from_col(tree_width: u16, pane_width: u16, col: u16) -> f64 {
-    let origin = i32::from(diff_content_origin_x(tree_width));
-    let x_1based = i32::from(col) + 1;
-    diff_split_fraction_from_left_width(pane_width, x_1based - origin)
+///
+/// `content_x` is the 0-based first content column of the right pane as
+/// painted; the inverse of [`diff_split_rule_x`].
+pub fn diff_split_fraction_from_col(content_x: u16, pane_width: u16, col: u16) -> f64 {
+    diff_split_fraction_from_left_width(pane_width, i32::from(col) - i32::from(content_x))
 }
 
 /// Left / right column widths for one side-by-side diff row.
@@ -328,6 +329,20 @@ pub fn is_divider_column(x: u16, center: u16, term_cols: u16) -> bool {
         }
     }
     false
+}
+
+/// True when `x` (1-based) is on the pane divider grab band.
+///
+/// Boxed panes: the 3-column band around the left pane's right border
+/// ([`is_divider_column`] on `tree_width`). Flat panes: the two columns at
+/// the pane boundary, the left pane's last column and the right pane's first.
+fn is_pane_divider(layout: SplitLayout, x: u16) -> bool {
+    if !layout.flat_panes {
+        return is_divider_column(x, layout.tree_width, layout.term_cols);
+    }
+    let left_last = layout.tree_width;
+    let right_first = left_last.saturating_add(1);
+    x >= 1 && x <= layout.term_cols && (x == left_last || x == right_first)
 }
 
 /// Max `graph_scroll` so the last painted lines can sit in the viewport.
@@ -471,17 +486,25 @@ fn hit_diff_hscrollbar(layout: SplitLayout, col: u16, row: u16) -> Option<SplitH
 
 /// Map a 0-based mouse cell onto a drag handle.
 ///
-/// Graph scrollbar (exact column, list track) wins over the 3-column pane
-/// divider band so a left-pane graph thumb stays draggable. Horizontal graph
-/// track is next, then the file-diff horizontal bar, then pane, then in-diff
-/// RULE.
+/// Graph scrollbar (exact column, list track) wins over the pane divider
+/// band (3 columns boxed, 2 flat) so a left-pane graph thumb stays
+/// draggable. Horizontal graph track is next, then the file-diff horizontal
+/// bar, then pane, then in-diff RULE. Boxed panes stop above the pane
+/// area's last row (the bottom border); flat panes include it.
 pub fn hit_split(layout: SplitLayout, col: u16, row: u16) -> SplitHit {
     let x = col.saturating_add(1);
     let y = row.saturating_add(1);
     if x < 1 || y < 1 || x > layout.term_cols || y > layout.term_rows {
         return SplitHit::Other;
     }
-    if y > layout.pane_height {
+    // `pane_height` rows start under the tab strip, so the last pane row is
+    // 1-based `pane_height + 1`; boxed, that row is the bottom border.
+    let last_row = if layout.flat_panes {
+        layout.pane_height.saturating_add(1)
+    } else {
+        layout.pane_height
+    };
+    if y > last_row {
         return SplitHit::Other;
     }
     if let Some(hit) = hit_graph_scrollbar(layout, col, row) {
@@ -493,7 +516,7 @@ pub fn hit_split(layout: SplitLayout, col: u16, row: u16) -> SplitHit {
     if let Some(hit) = hit_diff_hscrollbar(layout, col, row) {
         return hit;
     }
-    if is_divider_column(x, layout.tree_width, layout.term_cols) {
+    if is_pane_divider(layout, x) {
         return SplitHit::Pane;
     }
     if let Some(rule_x) = layout.diff_split_rule_x {
@@ -740,6 +763,7 @@ mod tests {
             tree_width: 48,
             diff_pane_width: 110,
             diff_content_x: 50,
+            flat_panes: false,
             diff_split_rule_x: rule,
             graph_scrollbar_x: None,
             graph_scrollbar_y: 0,
@@ -767,6 +791,7 @@ mod tests {
             tree_width: 48,
             diff_pane_width: 110,
             diff_content_x: 50,
+            flat_panes: false,
             diff_split_rule_x: None,
             graph_scrollbar_x: Some(158),
             graph_scrollbar_y: 2,
@@ -822,6 +847,7 @@ mod tests {
             tree_width: 48,
             diff_pane_width: 110,
             diff_content_x: 50,
+            flat_panes: false,
             diff_split_rule_x: Some(47),
             graph_scrollbar_x: None,
             graph_scrollbar_y: 0,
@@ -867,6 +893,7 @@ mod tests {
             tree_width: 48,
             diff_pane_width: 30,
             diff_content_x: 50,
+            flat_panes: false,
             diff_split_rule_x: None,
             // Left-pane graph: last inner column overlaps the ±1 pane band.
             graph_scrollbar_x: Some(46),
@@ -1094,6 +1121,96 @@ mod tests {
             "file-diff h-bar must win over the pane divider band"
         );
         assert_eq!(hit_split(layout, 47, 4), SplitHit::Pane);
+    }
+
+    /// [`wide_layout`] as a flat render records it: the left pane is 48
+    /// columns and the right pane's content starts on its first column.
+    fn flat_wide_layout(rule: Option<u16>) -> SplitLayout {
+        SplitLayout {
+            diff_content_x: 48,
+            flat_panes: true,
+            ..wide_layout(rule)
+        }
+    }
+
+    #[test]
+    fn diff_split_rule_round_trips_through_the_fraction_boxed_and_flat() {
+        // Boxed: content after the right pane's left border (48 + 1).
+        // Flat: content on the right pane's first column (48).
+        for content_x in [49u16, 48] {
+            for pane in [101u16, 110, 157] {
+                let left = side_by_side_column_widths(pane, DIFF_SPLIT_FRACTION).left_width;
+                let rule = diff_split_rule_x(content_x, left);
+                assert_eq!(rule, content_x + left, "x={content_x} pane={pane}");
+                let back = diff_split_fraction_from_col(content_x, pane, rule);
+                assert_eq!(
+                    side_by_side_column_widths(pane, back).left_width,
+                    left,
+                    "x={content_x} pane={pane}"
+                );
+                // A drag 7 columns right of the rule asks for 7 more left columns.
+                assert_eq!(
+                    diff_split_fraction_from_col(content_x, pane, rule + 7),
+                    diff_split_fraction_from_left_width(pane, i32::from(left) + 7),
+                    "x={content_x} pane={pane}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pane_divider_band_is_three_columns_boxed_and_two_flat() {
+        let boxed = wide_layout(None);
+        // Last left content column, left pane's right border, right pane's
+        // left border.
+        for col in [46, 47, 48] {
+            assert_eq!(hit_split(boxed, col, 5), SplitHit::Pane, "boxed {col}");
+        }
+        for col in [45, 49] {
+            assert_eq!(hit_split(boxed, col, 5), SplitHit::Other, "boxed {col}");
+        }
+        let flat = flat_wide_layout(None);
+        // Left pane's last column, right pane's first column.
+        for col in [47, 48] {
+            assert_eq!(hit_split(flat, col, 5), SplitHit::Pane, "flat {col}");
+        }
+        for col in [46, 49] {
+            assert_eq!(hit_split(flat, col, 5), SplitHit::Other, "flat {col}");
+        }
+    }
+
+    #[test]
+    fn flat_rule_band_stays_rule_plus_minus_one() {
+        let left = side_by_side_column_widths(110, DIFF_SPLIT_FRACTION).left_width;
+        let rule = diff_split_rule_x(48, left);
+        let layout = flat_wide_layout(Some(rule));
+        for col in [rule - 1, rule, rule + 1] {
+            assert_eq!(hit_split(layout, col, 5), SplitHit::DiffSplit, "{col}");
+        }
+        assert_eq!(hit_split(layout, rule + 2, 5), SplitHit::Other);
+    }
+
+    #[test]
+    fn last_pane_row_is_hit_only_when_flat() {
+        // pane_height 22 under the tab strip: 0-based rows 1..=22, the last
+        // one the bottom border when boxed and a content row when flat.
+        let last = 22;
+        let with_hbar = |mut layout: SplitLayout| {
+            layout.diff_hscrollbar_y = Some(last);
+            layout.diff_hscrollbar_x = 50;
+            layout.diff_hscrollbar_width = 20;
+            layout.diff_col_max = 40;
+            layout
+        };
+        let flat = with_hbar(flat_wide_layout(None));
+        assert_eq!(hit_split(flat, 50, last), SplitHit::DiffHThumb);
+        assert_eq!(hit_split(flat, 69, last), SplitHit::DiffHTrack);
+        assert_eq!(hit_split(flat, 47, last), SplitHit::Pane);
+        assert_eq!(hit_split(flat, 50, last + 1), SplitHit::Other);
+        let boxed = with_hbar(wide_layout(None));
+        assert_eq!(hit_split(boxed, 50, last), SplitHit::Other);
+        assert_eq!(hit_split(boxed, 47, last), SplitHit::Other);
+        assert_eq!(hit_split(boxed, 47, last - 1), SplitHit::Pane);
     }
 
     #[test]

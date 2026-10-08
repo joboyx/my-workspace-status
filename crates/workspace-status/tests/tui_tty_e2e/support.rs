@@ -1250,3 +1250,67 @@ pub fn open_compare_regions_in(tui: &mut PtySession) {
         WAIT,
     );
 }
+
+/// Slate (the shipped default theme) roles in paint mode, from `tui/theme.rs`.
+pub const SLATE_SIDEBAR: (u8, u8, u8) = (0x15, 0x1a, 0x21);
+pub const SLATE_SURFACE: (u8, u8, u8) = (0x11, 0x15, 0x1b);
+pub const SLATE_CHROME: (u8, u8, u8) = (0x0d, 0x11, 0x16);
+pub const SLATE_CURSOR: (u8, u8, u8) = (0x79, 0xa6, 0xdc);
+pub const SLATE_HEADING: (u8, u8, u8) = (0x7f, 0xc4, 0xd6);
+pub const SLATE_MUTED: (u8, u8, u8) = (0x8a, 0x94, 0xa3);
+
+/// Pane title row of the flat (paint-mode) layout. Row 0 is the tab strip;
+/// pane bodies start on the next row.
+pub const FLAT_TITLE_ROW: u16 = 1;
+
+/// First column of the right pane in the flat layout: the first title-row
+/// cell after the left pane whose background is not `sidebar`.
+///
+/// Flat panes have no border glyph to split on, so the join is the fill edge.
+pub fn flat_join_col(tui: &PtySession, sidebar: (u8, u8, u8)) -> Option<u16> {
+    let (cols, _) = tui.grid_size();
+    let mut seen_sidebar = false;
+    for col in 0..cols {
+        let bg = tui.cell_paint(FLAT_TITLE_ROW, col)?.bg;
+        if bg == Some(sidebar) {
+            seen_sidebar = true;
+        } else if seen_sidebar {
+            return Some(col);
+        }
+    }
+    None
+}
+
+/// Last pane body row of the flat layout (crumb and status rows below it).
+pub fn flat_pane_last_row(tui: &PtySession) -> u16 {
+    tui.grid_size().1.saturating_sub(3)
+}
+
+/// Left pane body rows (title row excluded), one line per screen row.
+pub fn flat_left_body(tui: &PtySession, join: u16) -> String {
+    (FLAT_TITLE_ROW + 1..=flat_pane_last_row(tui))
+        .map(|row| tui.grid_row_text(row, 0..join))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Right pane body rows (title row excluded), one line per screen row.
+pub fn flat_right_body(tui: &PtySession, join: u16) -> String {
+    let (cols, _) = tui.grid_size();
+    (FLAT_TITLE_ROW + 1..=flat_pane_last_row(tui))
+        .map(|row| tui.grid_row_text(row, join..cols))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 0-based screen row of the left pane body row that contains `needle`.
+pub fn flat_left_row_containing(tui: &PtySession, join: u16, needle: &str) -> Option<u16> {
+    (FLAT_TITLE_ROW + 1..=flat_pane_last_row(tui))
+        .find(|row| tui.grid_row_text(*row, 0..join).contains(needle))
+}
+
+/// Left pane cursor bar (`▌`) on the body row that contains `needle`.
+pub fn flat_left_cursor_on(tui: &PtySession, join: u16, needle: &str) -> bool {
+    flat_left_row_containing(tui, join, needle)
+        .is_some_and(|row| tui.grid_row_text(row, 0..join).contains('\u{258C}'))
+}

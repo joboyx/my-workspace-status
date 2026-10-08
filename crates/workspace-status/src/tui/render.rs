@@ -84,8 +84,7 @@ use super::tabs::{
     compare_picker_empty, file_gutter_width, file_too_large, ComparePickerState, ExplorerPreview,
     FileTab, EXPLORER_FOLDER_HINT, FILE_IS_BINARY,
 };
-use super::theme::ThemeId;
-use super::theme::{hex_color, Palette, Pill};
+use super::theme::{hex_color, BackgroundMode, Palette, Pill, ThemeId};
 use super::tree::{
     file_change_from_name_status, file_change_segments, painted_row_segments, pr_badge_kind,
     pr_badge_mark, visible_window, workspace_trailing_fit, NodeKind, NodeSegments, SegRole,
@@ -108,11 +107,12 @@ const NO_FILES_IN_WORKTREE: &str = "no uncommitted changes";
 /// Commit-file list while git is still listing.
 const LOADING_FILES: &str = "loading files…";
 
-/// Pane `Block::title`: the plain pane name for focused and unfocused.
+/// Pane title: the plain pane name for focused and unfocused.
 ///
 /// Names are exactly `tree`, `graph`, `files`, or `diff`. Focus is the
-/// border colour, not a title glyph or space-pad. Title text uses
-/// `palette.heading` via `title_style` so it does not inherit `border_style`.
+/// border colour (boxed) or the accent line ([`flat_title_line`]), never a
+/// title glyph or space-pad. Boxed title text uses `palette.heading` via
+/// `title_style` so it does not inherit `border_style`.
 fn pane_title(name: &str) -> String {
     name.to_string()
 }
@@ -163,7 +163,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     let area = frame.area();
     state.too_small = area.width < MIN_TERM_COLS || area.height < MIN_TERM_ROWS;
     if state.too_small {
-        draw_too_small(frame, area, state.theme.palette());
+        draw_too_small(frame, area, state);
         return;
     }
     // Dialogs paint over the panes (see the end of this fn), so no open
@@ -180,6 +180,13 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
             Constraint::Length(1),
         ])
         .split(area);
+    let palette = state.theme.palette();
+    let painted = state.background == BackgroundMode::Paint;
+    if painted {
+        for row in [chunks[0], chunks[2], chunks[3], chunks[4]] {
+            fill_bg(frame, row, palette.chrome);
+        }
+    }
     draw_tab_strip(frame, chunks[0], state);
     state.layout.graph_scrollbar_x = None;
     state.layout.graph_scrollbar_y = 0;
@@ -279,15 +286,14 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
     let left_is_graph = !state.is_compare_tab() && state.drill.is_files();
     let left_name = state.left_pane_title();
     let palette = state.theme.palette();
-    let title_style = Style::default().fg(palette.heading);
-    let left_title = pane_title(left_name);
-    let tree_block = Block::default()
-        .borders(Borders::ALL)
-        .title(left_title)
-        .title_style(title_style)
-        .border_style(pane_border(state.focus == FocusPane::Left, palette));
-    let tree_inner = tree_block.inner(panes[0]);
-    frame.render_widget(tree_block, panes[0]);
+    let tree_inner = draw_pane_chrome(
+        frame,
+        panes[0],
+        left_name,
+        state.focus == FocusPane::Left,
+        palette.sidebar,
+        state,
+    );
     if left_is_files {
         let cursor = state.commit_files_cursor();
         let col_offset = state.left_col_offset as usize;
@@ -311,16 +317,16 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
     } else {
         "graph"
     };
-    let right_title = pane_title(right_name);
-    let right_block = Block::default()
-        .borders(Borders::ALL)
-        .title(right_title)
-        .title_style(title_style)
-        .border_style(pane_border(state.focus == FocusPane::Right, palette));
-    let right_inner = right_block.inner(panes[1]);
+    let right_inner = draw_pane_chrome(
+        frame,
+        panes[1],
+        right_name,
+        state.focus == FocusPane::Right,
+        palette.surface,
+        state,
+    );
     state.layout.diff_pane_width = right_inner.width;
     state.layout.diff_pane_height = right_inner.height;
-    frame.render_widget(right_block, panes[1]);
     draw_right(frame, right_inner, state);
 
     state.layout.tree_x = tree_inner.x;
@@ -338,7 +344,7 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
         && state.diff_layout() == DiffMode::SideBySide
     {
         let split = side_by_side_column_widths(right_inner.width, state.diff_split_fraction);
-        Some(diff_split_rule_x(panes[0].width, split.left_width).saturating_sub(1))
+        Some(diff_split_rule_x(right_inner.x, split.left_width))
     } else {
         None
     };
@@ -455,21 +461,15 @@ fn file_view_scroll(
     top
 }
 
-/// The active file tab: one bordered pane over the full width, titled with
-/// `<checkout>/<rel>` (snapshot `repo` path), with line numbers and
-/// highlighted code.
+/// The active file tab: one pane over the full width (boxed or flat, see
+/// [`draw_pane_chrome`]), titled with `<checkout>/<rel>` (snapshot `repo`
+/// path), with line numbers and highlighted code.
 fn draw_file_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let palette = state.theme.palette();
     let Some(tab) = state.tabs.active_file() else {
         return;
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(pane_title(&tab.display))
-        .title_style(Style::default().fg(palette.heading))
-        .border_style(pane_border(true, palette));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = draw_pane_chrome(frame, area, &tab.display, true, palette.surface, state);
     draw_file_body(frame, inner, state);
 }
 
@@ -591,10 +591,107 @@ fn draw_file_body(frame: &mut Frame<'_>, inner: Rect, state: &mut AppState) {
     }
 }
 
+/// Pane chrome shared by the left pane, the right pane, the file tab, and
+/// the Explorer tab's two panes (so the Workspace, compare, file, and
+/// Explorer tabs look the same).
+///
+/// [`BackgroundMode::Terminal`]: a boxed [`Block`] with the title in
+/// `heading` and a [`pane_border`] colour that shows focus (the v0.1.244
+/// look). [`BackgroundMode::Paint`]: `area` is filled with `bg`, no border
+/// glyphs, and row 0 is the title row ([`flat_title_line`]). Returns the
+/// content rect: the block's inner rect, or `area` less its first row.
+fn draw_pane_chrome(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    focused: bool,
+    bg: Color,
+    state: &AppState,
+) -> Rect {
+    let palette = state.theme.palette();
+    if state.background == BackgroundMode::Terminal {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(pane_title(title))
+            .title_style(Style::default().fg(palette.heading))
+            .border_style(pane_border(focused, palette));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        return inner;
+    }
+    fill_bg(frame, area, bg);
+    if area.height == 0 {
+        return area;
+    }
+    frame.render_widget(
+        Paragraph::new(flat_title_line(
+            title,
+            focused,
+            area.width,
+            state.ascii,
+            state.coloured_underline,
+            palette,
+        )),
+        Rect { height: 1, ..area },
+    );
+    Rect {
+        y: area.y + 1,
+        height: area.height - 1,
+        ..area
+    }
+}
+
+/// Title row of a flat pane, `width` cells: one blank cell, the title,
+/// then blanks to the right edge.
+///
+/// Focused: every blank cell is an accent line (`▁`, `_` in ASCII mode) in
+/// `cursor`, and the title is `heading`, bold, underlined in `cursor`, so
+/// the line runs under the whole row. Without `coloured_underline` (no
+/// SGR 58) the title underline is plain and takes the `heading` colour.
+/// Unfocused: the title is `muted` on
+/// plain blanks. The background is left to the pane fill.
+fn flat_title_line(
+    title: &str,
+    focused: bool,
+    width: u16,
+    ascii: bool,
+    coloured_underline: bool,
+    palette: Palette,
+) -> Line<'static> {
+    let title_w = painted_width(title).min(width.saturating_sub(1));
+    let tail = usize::from(width.saturating_sub(1).saturating_sub(title_w));
+    let (blank, blank_style, title_style) = if focused {
+        let line = Style::default().fg(palette.cursor);
+        let mut title_style = Style::default()
+            .fg(palette.heading)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        if coloured_underline {
+            title_style = title_style.underline_color(palette.cursor);
+        }
+        (glyph(ascii, "\u{2581}", "_"), line, title_style)
+    } else {
+        (" ", Style::default(), Style::default().fg(palette.muted))
+    };
+    Line::from(vec![
+        Span::styled(blank, blank_style),
+        Span::styled(title.to_string(), title_style),
+        Span::styled(blank.repeat(tail), blank_style),
+    ])
+}
+
+/// Set the background of every cell in `area` to `bg` (paint mode). Text
+/// and spans without their own background keep it.
+fn fill_bg(frame: &mut Frame<'_>, area: Rect, bg: Color) {
+    frame.buffer_mut().set_style(area, Style::default().bg(bg));
+}
+
 /// The active Explorer tab: the checkout's file tree on the left (titled
-/// with the checkout path) and the focused file's preview on the right —
-/// the worktree diff of a changed file, the body of a clean one, or a
-/// short hint on a folder.
+/// with the checkout path, on `sidebar` in paint mode) and the focused
+/// file's preview on the right (on `surface`) — the worktree diff of a
+/// changed file, the body of a clean one, or a short hint on a folder.
+/// Both panes go through [`draw_pane_chrome`], so they are boxed or flat
+/// as the Workspace panes are, and every recorded rect is the content
+/// rect.
 fn draw_explorer_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let widths = pane_widths(area.width, state.tree_fraction);
     let panes = Layout::default()
@@ -605,7 +702,6 @@ fn draw_explorer_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         ])
         .split(area);
     let palette = state.theme.palette();
-    let title_style = Style::default().fg(palette.heading);
     let Some(tab) = state.tabs.active_explorer() else {
         return;
     };
@@ -620,26 +716,28 @@ fn draw_explorer_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let rows = tab.tree.rows(&status);
     let cursor = tab.tree.cursor_index(&rows);
     let folder = cursor.is_some_and(|index| rows[index].is_dir);
-    let tree_block = Block::default()
-        .borders(Borders::ALL)
-        .title(pane_title(&tab.checkout))
-        .title_style(title_style)
-        .border_style(pane_border(state.focus == FocusPane::Left, palette));
-    let tree_inner = tree_block.inner(panes[0]);
-    frame.render_widget(tree_block, panes[0]);
+    let tree_inner = draw_pane_chrome(
+        frame,
+        panes[0],
+        &tab.checkout,
+        state.focus == FocusPane::Left,
+        palette.sidebar,
+        state,
+    );
     state.layout.explorer_tree = tree_inner;
     draw_explorer_tree(frame, tree_inner, state, &rows, cursor, &status);
     if let Some(tab) = state.tabs.active_explorer_mut() {
         tab.painted_rel = cursor.map(|index| rows[index].rel.clone());
     }
 
-    let right_block = Block::default()
-        .borders(Borders::ALL)
-        .title(pane_title(&preview_title))
-        .title_style(title_style)
-        .border_style(pane_border(state.focus == FocusPane::Right, palette));
-    let right_inner = right_block.inner(panes[1]);
-    frame.render_widget(right_block, panes[1]);
+    let right_inner = draw_pane_chrome(
+        frame,
+        panes[1],
+        &preview_title,
+        state.focus == FocusPane::Right,
+        palette.surface,
+        state,
+    );
     state.layout.explorer_preview = right_inner;
     state.layout.right_x = panes[1].x;
     state.layout.right_y = right_inner.y;
@@ -776,7 +874,11 @@ fn pane_border(focused: bool, palette: Palette) -> Style {
 
 /// Resize notice in place of the panes when the terminal is below
 /// [`MIN_TERM_COLS`] × [`MIN_TERM_ROWS`]. Keys still dispatch (`q` quits).
-fn draw_too_small(frame: &mut Frame<'_>, area: Rect, palette: Palette) {
+fn draw_too_small(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let palette = state.theme.palette();
+    if state.background == BackgroundMode::Paint {
+        fill_bg(frame, area, palette.surface);
+    }
     let text = too_small_notice(area.width, area.height);
     let lines = wrap_cols(&text, area.width.max(1) as usize);
     let top = area.height.saturating_sub(lines.len() as u16) / 2;
@@ -2116,7 +2218,7 @@ fn paint_diff_row(
                     }
                     spans.push(Span::styled(
                         DIFF_RULE.to_string(),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(diff_rule_fg(state)),
                     ));
                     let mut right_spans = paint_cell_spans(
                         right.as_ref().unwrap(),
@@ -2180,6 +2282,15 @@ fn paint_diff_row(
         .into_iter()
         .map(|line| finish_diff_line(line, selected, focused, visual, search, palette))
         .collect()
+}
+
+/// Side-by-side rule colour: `border_dim` on a painted pane, the v0.1.244
+/// `DarkGray` on the terminal background.
+fn diff_rule_fg(state: &AppState) -> Color {
+    match state.background {
+        BackgroundMode::Paint => state.theme.palette().border_dim,
+        BackgroundMode::Terminal => Color::DarkGray,
+    }
 }
 
 /// Paint `text` dimmed at the end of a cell or file line, inside its
@@ -2636,10 +2747,6 @@ fn key_chip(key: &str, bg: Color, fg: Color) -> Span<'static> {
     )
 }
 
-fn overlay_surface(state: &AppState) -> Color {
-    hex_color(state.theme.theme().surface)
-}
-
 fn help_spans_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(|span| visible_width(&span.content)).sum()
 }
@@ -2671,11 +2778,15 @@ fn help_footer_with_version(
     }
 }
 
-fn overlay_block(accent: Color) -> Block<'static> {
+/// Rounded popup box with an `accent` border, filled with `panel` so no
+/// cell under the popup keeps the terminal background. Callers render
+/// [`Clear`] first to drop the pane glyphs underneath.
+fn overlay_block(accent: Color, panel: Color) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(accent))
+        .style(Style::default().bg(panel))
         .padding(Padding::horizontal(1))
 }
 
@@ -2845,7 +2956,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) -> usize {
     let searching = state.help_search_query.is_some();
     let palette = state.theme.palette();
     let pills = state.theme.pills();
-    let surface = overlay_surface(state);
+    let panel = palette.panel;
     // A compare tab swaps GIT for the COMPARE column, a file tab for FILE.
     let groups = help_groups(help_tab(state));
     let mut lines: Vec<Line> = Vec::new();
@@ -2893,7 +3004,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) -> usize {
                             &vis,
                             key_width,
                             color,
-                            surface,
+                            panel,
                             palette.muted,
                             content,
                         ),
@@ -2958,7 +3069,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) -> usize {
     };
 
     frame.render_widget(Clear, area);
-    let block = overlay_block(palette.cursor);
+    let block = overlay_block(palette.cursor, panel);
     let inner_area = block.inner(area);
     frame.render_widget(block, area);
     if inner_area.width == 0 || inner_area.height == 0 {
@@ -3088,7 +3199,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         return;
     };
     let palette = state.theme.palette();
-    let surface = overlay_surface(state);
+    let panel = palette.panel;
     let (accent, lines) = match pending {
         PendingConfirm::Revert { targets, label } => {
             let untracked = targets.iter().filter(|t| t.untracked).count();
@@ -3149,7 +3260,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 extra,
                 accent,
                 palette.muted,
-                surface,
+                panel,
             ));
             (accent, lines)
         }
@@ -3165,7 +3276,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                     Span::styled(path.clone(), Style::default().fg(palette.file)),
                     Span::styled("?", Style::default().fg(accent)),
                 ]),
-                confirm_action_row("y", "revert", None, accent, palette.muted, surface),
+                confirm_action_row("y", "revert", None, accent, palette.muted, panel),
             ];
             (accent, lines)
         }
@@ -3183,7 +3294,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                     COMPARE_REVERT_WORKTREE_ONLY,
                     Style::default().fg(palette.muted),
                 )),
-                confirm_action_row("y", "revert", None, accent, palette.muted, surface),
+                confirm_action_row("y", "revert", None, accent, palette.muted, panel),
             ];
             (accent, lines)
         }
@@ -3213,7 +3324,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                     None,
                     accent,
                     palette.muted,
-                    surface,
+                    panel,
                 ),
             ];
             (accent, lines)
@@ -3229,7 +3340,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                     Span::styled(stash_ref.clone(), Style::default().fg(palette.file)),
                     Span::styled("?", Style::default().fg(accent)),
                 ]),
-                confirm_action_row("y", "drop", None, accent, palette.muted, surface),
+                confirm_action_row("y", "drop", None, accent, palette.muted, panel),
             ];
             (accent, lines)
         }
@@ -3295,7 +3406,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 None,
                 accent,
                 palette.muted,
-                surface,
+                panel,
             ));
             (accent, lines)
         }
@@ -3333,7 +3444,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 None,
                 accent,
                 palette.muted,
-                surface,
+                panel,
             ));
             (accent, lines)
         }
@@ -3355,7 +3466,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                     "  dirty repos are skipped",
                     Style::default().fg(palette.muted),
                 )),
-                confirm_action_row("y", "switch", None, accent, palette.muted, surface),
+                confirm_action_row("y", "switch", None, accent, palette.muted, panel),
             ];
             (accent, lines)
         }
@@ -3376,7 +3487,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                     "  fast-forward if possible, otherwise a merge commit",
                     Style::default().fg(palette.muted),
                 )),
-                confirm_action_row("y", "merge", None, accent, palette.muted, surface),
+                confirm_action_row("y", "merge", None, accent, palette.muted, panel),
             ];
             (accent, lines)
         }
@@ -3387,7 +3498,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines)
-            .block(overlay_block(accent))
+            .block(overlay_block(accent, panel))
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -3401,7 +3512,7 @@ fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         return;
     }
     let palette = state.theme.palette();
-    let surface = overlay_surface(state);
+    let panel = palette.panel;
     let accent = palette.modified;
     let subtitle = state.stash_repo.as_deref().unwrap_or("");
     let mut lines = vec![Line::from(vec![
@@ -3419,7 +3530,7 @@ fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             super::stash::StashOpId::Create => "",
         };
         let mut spans = vec![
-            key_chip(&op.key.to_string(), accent, surface),
+            key_chip(&op.key.to_string(), accent, panel),
             Span::styled(format!(" {}", op.label), Style::default().fg(palette.file)),
         ];
         if !detail.is_empty() {
@@ -3442,7 +3553,7 @@ fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines)
-            .block(overlay_block(accent))
+            .block(overlay_block(accent, panel))
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -3456,7 +3567,7 @@ fn draw_blame_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         return;
     }
     let palette = state.theme.palette();
-    let surface = overlay_surface(state);
+    let panel = palette.panel;
     let accent = palette.modified;
     const TITLE: &str = "Blame ";
     // Inside the border, after the title.
@@ -3474,7 +3585,7 @@ fn draw_blame_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     ])];
     for row in &BLAME_MENU_ROWS {
         lines.push(Line::from(vec![
-            key_chip(&row.key.to_string(), accent, surface),
+            key_chip(&row.key.to_string(), accent, panel),
             Span::styled(format!(" {}", row.label), Style::default().fg(palette.file)),
         ]));
     }
@@ -3483,7 +3594,10 @@ fn draw_blame_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         Style::default().fg(palette.muted),
     )));
     frame.render_widget(Clear, area);
-    frame.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+    frame.render_widget(
+        Paragraph::new(lines).block(overlay_block(accent, panel)),
+        area,
+    );
 }
 
 /// Compare-tab close control as painted and hit-tested: brackets around
@@ -3850,7 +3964,7 @@ fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             let row_bg = if selected {
                 palette.cursor_bg
             } else {
-                Color::Reset
+                palette.panel
             };
             let name_fg = if selected {
                 palette.file
@@ -3882,7 +3996,7 @@ fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     paint_list_dialog(
         frame,
         area,
-        overlay_block(accent),
+        overlay_block(accent, palette.panel),
         Line::from(title),
         rows,
         list_dialog_status(state, palette),
@@ -3974,7 +4088,7 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             let row_bg = if selected {
                 palette.cursor_bg
             } else {
-                Color::Reset
+                palette.panel
             };
             let name_fg = if branch.current {
                 palette.added
@@ -4027,7 +4141,7 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     paint_list_dialog(
         frame,
         area,
-        overlay_block(accent),
+        overlay_block(accent, palette.panel),
         Line::from(title),
         rows,
         list_dialog_status(state, palette),
@@ -4047,7 +4161,7 @@ fn branch_create_row(
     let row_bg = if selected {
         palette.cursor_bg
     } else {
-        Color::Reset
+        palette.panel
     };
     let label_fg = if selected { accent } else { palette.muted };
     let mut spans = vec![
@@ -4142,7 +4256,7 @@ fn draw_graph_focus_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) 
             let row_bg = if selected {
                 palette.cursor_bg
             } else {
-                Color::Reset
+                palette.panel
             };
             let name_fg = if marked || branch.current {
                 palette.added
@@ -4176,7 +4290,7 @@ fn draw_graph_focus_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) 
     paint_list_dialog(
         frame,
         area,
-        overlay_block(accent),
+        overlay_block(accent, palette.panel),
         header,
         rows,
         list_dialog_status(state, palette),
@@ -4203,7 +4317,7 @@ fn draw_quick_open(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     } else {
         "Commands".to_string()
     };
-    let block = overlay_block(accent).title(Span::styled(
+    let block = overlay_block(accent, palette_theme.panel).title(Span::styled(
         title,
         Style::default()
             .fg(palette_theme.heading)
@@ -4309,7 +4423,7 @@ fn quick_open_file_rows(
         let row_bg = if selected {
             palette.cursor_bg
         } else {
-            Color::Reset
+            palette.panel
         };
         let plain = Style::default()
             .fg(if selected {
@@ -4367,7 +4481,7 @@ fn quick_open_command_rows(
 ) -> Vec<Line<'static>> {
     let palette_theme = state.theme.palette();
     let accent = palette_theme.cursor;
-    let surface = overlay_surface(state);
+    let panel = palette_theme.panel;
     let paint_rows = palette.paint_rows();
     let cursor_paint = paint_rows.iter().position(|row| match row {
         PalettePaintRow::Command { index, .. } => *index == palette.cursor,
@@ -4412,7 +4526,7 @@ fn quick_open_command_rows(
                     let row_bg = if selected {
                         palette_theme.cursor_bg
                     } else {
-                        Color::Reset
+                        palette_theme.panel
                     };
                     let mut style = Style::default()
                         .fg(if selected {
@@ -4452,7 +4566,7 @@ fn quick_open_command_rows(
                             } else {
                                 accent
                             },
-                            surface,
+                            panel,
                         ));
                     }
                     if !header_painted {
@@ -4518,20 +4632,20 @@ fn draw_search_files(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let wide = frame.area().width >= SEARCH_PREVIEW_MIN_COLS;
     let palette = state.theme.palette();
     let theme = state.theme;
-    let surface = overlay_surface(state);
+    let panel = palette.panel;
     let Some(dialog) = state.search_files.as_ref() else {
         return;
     };
     let accent = palette.cursor;
     let muted = Style::default().fg(palette.muted);
-    let block = overlay_block(accent)
+    let block = overlay_block(accent, panel)
         .title(Span::styled(
             dialog.title(),
             Style::default()
                 .fg(palette.heading)
                 .add_modifier(Modifier::BOLD),
         ))
-        .title_top(search_option_chips(dialog.options, palette, surface).right_aligned());
+        .title_top(search_option_chips(dialog.options, palette, panel).right_aligned());
     frame.render_widget(Clear, area);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -4757,7 +4871,7 @@ fn search_result_lines(
                 let row_bg = if selected {
                     palette.cursor_bg
                 } else {
-                    Color::Reset
+                    palette.panel
                 };
                 let text_fg = if selected {
                     palette.file
@@ -5010,11 +5124,6 @@ fn search_preview_lines(
         .collect();
     for line in start..end {
         let focused = line == focus;
-        let bg = if focused {
-            palette.cursor_bg
-        } else {
-            Color::Reset
-        };
         let mut row = vec![Span::styled(
             format!("{:>w$} ", line + 1, w = gutter.saturating_sub(1)),
             diff_gutter_style(palette),
@@ -5034,7 +5143,7 @@ fn search_preview_lines(
         if focused {
             for span in &mut row {
                 if span.style.bg.is_none() {
-                    span.style = span.style.bg(bg);
+                    span.style = span.style.bg(palette.cursor_bg);
                 }
             }
         }
@@ -5085,14 +5194,10 @@ fn draw_create_branch(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines)
-            .block(overlay_block(accent))
+            .block(overlay_block(accent, palette.panel))
             .wrap(Wrap { trim: false }),
         area,
     );
-}
-
-fn overlay_block_filled(accent: Color, surface: Color) -> Block<'static> {
-    overlay_block(accent).style(Style::default().bg(surface))
 }
 
 /// One painted row of the icon popover.
@@ -5140,7 +5245,7 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
         None
     };
     let palette = state.theme.palette();
-    let surface = overlay_surface(state);
+    let panel = palette.panel;
     let accent = palette.cursor;
     let muted = Style::default().fg(palette.muted);
 
@@ -5307,7 +5412,7 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
                             } else {
                                 accent
                             };
-                            chip = Some(key_chip(command.keys, chip_bg, surface));
+                            chip = Some(key_chip(command.keys, chip_bg, panel));
                         }
                     }
                 }
@@ -5350,7 +5455,7 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
         })
         .unwrap_or(0);
     let (start, shown) = visible_window(body, focus_row, body_height);
-    let mut block = overlay_block_filled(accent, surface);
+    let mut block = overlay_block(accent, panel);
     let below = body - (start + shown);
     if below > 0 {
         // The rows under the cut: the same glyph the graph footer uses
@@ -5413,7 +5518,7 @@ fn popover_fallback_anchor(state: &AppState) -> Rect {
             return Rect::new(layout.tree_x.saturating_add(2), y, 1, 1);
         }
     }
-    Rect::new(layout.right_x.saturating_add(1), layout.right_y, 1, 1)
+    Rect::new(layout.diff_content_x, layout.right_y, 1, 1)
 }
 
 fn comment_body_lines(prompt: &CommentPrompt, palette: Palette) -> Vec<Line<'static>> {
@@ -5490,7 +5595,7 @@ fn draw_comment(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         return;
     }
     let palette = state.theme.palette();
-    let surface = overlay_surface(state);
+    let panel = palette.panel;
     let accent = palette.heading;
     let title = if prompt.resolved {
         "Comment · resolved"
@@ -5518,13 +5623,7 @@ fn draw_comment(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(palette.muted),
         )),
     ];
-    paint_text_dialog(
-        frame,
-        area,
-        overlay_block_filled(accent, surface),
-        lines,
-        footer,
-    );
+    paint_text_dialog(frame, area, overlay_block(accent, panel), lines, footer);
 }
 
 fn draw_comment_export(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -5569,7 +5668,13 @@ fn draw_comment_export(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         "Esc close",
         Style::default().fg(palette.muted),
     ))];
-    paint_text_dialog(frame, area, overlay_block(accent), lines, footer);
+    paint_text_dialog(
+        frame,
+        area,
+        overlay_block(accent, palette.panel),
+        lines,
+        footer,
+    );
 }
 
 #[cfg(test)]
@@ -9000,9 +9105,16 @@ mod tests {
                 buf[(chip[0], hit_y)].modifier.contains(Modifier::BOLD),
                 "{id:?} hit chip keeps bold"
             );
+            // A key chip outside a hit paints `panel` on its group colour,
+            // which can be the pill bg (Dracula: `cursor` == filter bg).
+            let panel = id.palette().panel;
             for y in rows_with_bg(buf, pill.bg) {
                 for x in cols_with_bg(buf, y, pill.bg) {
-                    assert_eq!(buf[(x, y)].fg, pill.fg, "{id:?} ({x},{y}) on pill bg");
+                    let fg = buf[(x, y)].fg;
+                    assert!(
+                        fg == pill.fg || fg == panel,
+                        "{id:?} ({x},{y}) on pill bg: {fg:?}"
+                    );
                 }
             }
             // A non-matching entry keeps its normal paint.
@@ -10125,6 +10237,989 @@ mod tests {
     }
 
     #[test]
+    fn recorded_split_rule_is_the_painted_rule_column() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.diff_mode = crate::tui::split::DiffMode::SideBySide;
+        state.cursor = state
+            .rows
+            .iter()
+            .position(|r| r.kind == NodeKind::File)
+            .expect("file row");
+        state.set_diff(
+            "app".into(),
+            "README.md".into(),
+            super::super::diff::DiffContent::from_lines(vec![
+                "@@ -1,1 +1,1 @@".into(),
+                "-old line".into(),
+                "+new line".into(),
+            ]),
+        );
+        for fraction in [0.3, 0.5, 0.7] {
+            state.diff_split_fraction = fraction;
+            let mut terminal = Terminal::new(TestBackend::new(220, 20)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let rule = state.layout.diff_split_rule_x.expect("rule");
+            assert_eq!(
+                state.layout.diff_content_x,
+                state.layout.outer_tree_width + 1,
+                "boxed content starts after the right pane's left border"
+            );
+            let buf = terminal.backend().buffer();
+            let y = first_row_with(buf, "old line").expect("diff row");
+            let rule_glyph = DIFF_RULE.to_string();
+            let painted: Vec<u16> = (0..buf.area.width)
+                .filter(|&x| {
+                    buf[(x, y)].symbol() == rule_glyph && buf[(x, y)].fg == Color::DarkGray
+                })
+                .collect();
+            assert_eq!(painted.len(), 1, "one split rule: {}", buf_line(buf, y));
+            // The paint sizes the columns from the row width (less the
+            // cursor bar and the scrollbar column), the layout from the pane
+            // width, so off the default fraction the two can be one column
+            // apart. The ±1 grab band still covers the painted rule.
+            if fraction == crate::tui::split::DIFF_SPLIT_FRACTION {
+                assert_eq!(painted[0], rule, "{}", buf_line(buf, y));
+            } else {
+                assert!(
+                    painted[0].abs_diff(rule) <= 1,
+                    "fraction {fraction}: painted {} recorded {rule}",
+                    painted[0]
+                );
+            }
+        }
+    }
+
+    /// `state` in paint mode on Slate with Unicode glyphs, the shipped
+    /// default look.
+    fn painted(mut state: AppState) -> AppState {
+        state.background = BackgroundMode::Paint;
+        state.theme = ThemeId::Slate;
+        state.ascii = false;
+        state
+    }
+
+    /// Left and right pane rects of the last frame (rows 1..=pane_height).
+    fn pane_rects(state: &AppState, cols: u16) -> (Rect, Rect) {
+        let height = state.layout.pane_height;
+        let left = Rect::new(0, 1, state.layout.outer_tree_width, height);
+        let right = Rect::new(state.layout.right_x, 1, cols - state.layout.right_x, height);
+        (left, right)
+    }
+
+    /// Outer rects of the Explorer tree and preview panes in a flat
+    /// frame: the recorded content rects grown by their title row.
+    fn explorer_pane_rects(state: &AppState) -> (Rect, Rect) {
+        let grow = |inner: Rect| Rect {
+            y: inner.y - 1,
+            height: inner.height + 1,
+            ..inner
+        };
+        (
+            grow(state.layout.explorer_tree),
+            grow(state.layout.explorer_preview),
+        )
+    }
+
+    const BORDER_GLYPHS: &[&str] = &["│", "─", "┌", "┐", "└", "┘", "╭", "╮", "╰", "╯", "├", "┤"];
+
+    /// Every edge cell of `pane` that is a border glyph.
+    fn pane_edge_borders(buf: &ratatui::buffer::Buffer, pane: Rect) -> Vec<(u16, u16, String)> {
+        let right = pane.x + pane.width - 1;
+        let bottom = pane.y + pane.height - 1;
+        let mut edges: Vec<(u16, u16)> = Vec::new();
+        for x in pane.x..=right {
+            edges.push((x, pane.y));
+            edges.push((x, bottom));
+        }
+        for y in pane.y..=bottom {
+            edges.push((pane.x, y));
+            edges.push((right, y));
+        }
+        edges
+            .into_iter()
+            .filter(|&(x, y)| BORDER_GLYPHS.contains(&buf[(x, y)].symbol()))
+            .map(|(x, y)| (x, y, buf[(x, y)].symbol().to_string()))
+            .collect()
+    }
+
+    /// Check the flat title row of `pane`: `title` after one blank cell,
+    /// the accent line and underlined `heading` when `focused`, else a
+    /// `muted` title on plain blanks; the row bg is `bg` throughout. The
+    /// title underline is plain (no SGR 58 colour), as in test state.
+    fn assert_flat_title_row(
+        buf: &ratatui::buffer::Buffer,
+        pane: Rect,
+        title: &str,
+        focused: bool,
+        bg: Color,
+        palette: Palette,
+    ) {
+        let y = pane.y;
+        let title_end = pane.x + 1 + title.chars().count() as u16;
+        let text: String = (pane.x + 1..title_end)
+            .map(|x| buf[(x, y)].symbol())
+            .collect();
+        assert_eq!(text, title, "title row: {}", buf_line(buf, y));
+        for x in pane.x..pane.x + pane.width {
+            let cell = &buf[(x, y)];
+            assert_eq!(cell.bg, bg, "title row bg at x={x}");
+            let in_title = x > pane.x && x < title_end;
+            if focused && in_title {
+                assert_eq!(cell.fg, palette.heading, "title fg at x={x}");
+                assert!(cell.modifier.contains(Modifier::BOLD), "bold at x={x}");
+                assert!(
+                    cell.modifier.contains(Modifier::UNDERLINED),
+                    "underline at x={x}"
+                );
+                assert_eq!(cell.underline_color, Color::Reset, "plain underline x={x}");
+            } else if focused {
+                assert_eq!(cell.symbol(), "\u{2581}", "accent line at x={x}");
+                assert_eq!(cell.fg, palette.cursor, "accent line fg at x={x}");
+            } else if in_title {
+                assert_eq!(cell.fg, palette.muted, "muted title at x={x}");
+                assert!(cell.modifier.is_empty(), "plain title at x={x}");
+            } else {
+                assert_eq!(cell.symbol(), " ", "no line on an unfocused row x={x}");
+                assert!(cell.modifier.is_empty(), "x={x}");
+            }
+        }
+    }
+
+    /// Paint mode draws flat panes: no border glyph on any pane edge, the
+    /// title on row 0, and the content rect from the pane's first column
+    /// to its bottom row.
+    #[test]
+    fn paint_mode_panes_are_flat_with_content_from_the_pane_edge() {
+        let mut state = painted(two_pane_diff_state());
+        state.focus = FocusPane::Left;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let (left, right) = pane_rects(&state, 120);
+        let buf = terminal.backend().buffer();
+        assert_eq!(pane_edge_borders(buf, left), vec![], "left pane edges");
+        assert_eq!(pane_edge_borders(buf, right), vec![], "right pane edges");
+        assert_eq!(right.x, left.x + left.width, "panes abut");
+
+        let layout = &state.layout;
+        assert_eq!((layout.tree_x, layout.tree_y), (left.x, left.y + 1));
+        assert_eq!(layout.tree_width, left.width);
+        assert_eq!(layout.tree_height, left.height - 1, "uses the bottom row");
+        assert_eq!(layout.diff_content_x, right.x);
+        assert_eq!(layout.right_y, right.y + 1);
+        assert_eq!(layout.diff_pane_width, right.width);
+        assert_eq!(layout.diff_pane_height, right.height - 1);
+    }
+
+    /// The focused title's underline takes `cursor` (SGR 58) only on a
+    /// terminal known to support it; otherwise it is a plain underline in
+    /// the title's own `heading` colour, and the accent line is unchanged.
+    #[test]
+    fn paint_mode_title_underline_colour_follows_terminal_support() {
+        for supported in [true, false] {
+            let mut state = painted(two_pane_diff_state());
+            state.coloured_underline = supported;
+            state.dispatch(Action::FocusLeft);
+            let palette = state.theme.palette();
+            let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let (left, _) = pane_rects(&state, 120);
+            let buf = terminal.backend().buffer();
+            let want = if supported {
+                palette.cursor
+            } else {
+                Color::Reset
+            };
+            for x in left.x + 1..left.x + 1 + "tree".len() as u16 {
+                let cell = &buf[(x, left.y)];
+                assert_eq!(cell.fg, palette.heading, "supported={supported} x={x}");
+                assert!(
+                    cell.modifier
+                        .contains(Modifier::BOLD | Modifier::UNDERLINED),
+                    "supported={supported} x={x}"
+                );
+                assert_eq!(cell.underline_color, want, "supported={supported} x={x}");
+            }
+            let line = &buf[(left.x, left.y)];
+            assert_eq!(
+                line.symbol(),
+                "\u{2581}",
+                "accent line supported={supported}"
+            );
+            assert_eq!(line.fg, palette.cursor, "accent line supported={supported}");
+        }
+    }
+
+    /// Flat focus: the active pane's title row carries the accent line and
+    /// the underlined `heading` title; `Tab` moves both to the other pane.
+    /// Pane backgrounds and body text colours do not change with focus.
+    #[test]
+    fn paint_mode_tab_moves_the_accent_line_and_keeps_pane_colours() {
+        let mut state = painted(two_pane_diff_state());
+        let palette = state.theme.palette();
+        state.dispatch(Action::FocusLeft);
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let (left, right) = pane_rects(&state, 120);
+        let body_style = |terminal: &Terminal<TestBackend>, needle: &str| {
+            let buf = terminal.backend().buffer();
+            let y = first_row_with(buf, needle).expect(needle);
+            let x = find_cell_col(buf, y, needle).expect(needle);
+            buf[(x, y)].fg
+        };
+        let before = (
+            body_style(&terminal, "new line"),
+            body_style(&terminal, "old line"),
+        );
+        {
+            let buf = terminal.backend().buffer();
+            assert_flat_title_row(buf, left, "tree", true, palette.sidebar, palette);
+            assert_flat_title_row(buf, right, "diff", false, palette.surface, palette);
+        }
+
+        state.dispatch(Action::FocusRight);
+        draw_state(&mut terminal, &mut state);
+        {
+            let buf = terminal.backend().buffer();
+            assert_flat_title_row(buf, left, "tree", false, palette.sidebar, palette);
+            assert_flat_title_row(buf, right, "diff", true, palette.surface, palette);
+        }
+        let after = (
+            body_style(&terminal, "new line"),
+            body_style(&terminal, "old line"),
+        );
+        assert_eq!(before, after, "diff text colours do not follow focus");
+
+        // Blank body cells keep each pane's own bg in both focus states.
+        let buf = terminal.backend().buffer();
+        let bottom = left.y + left.height - 1;
+        assert_eq!(buf[(left.x + left.width - 2, bottom)].bg, palette.sidebar);
+        assert_eq!(buf[(right.x + right.width - 2, bottom)].bg, palette.surface);
+    }
+
+    /// ASCII glyph mode draws the accent line with `_`.
+    #[test]
+    fn paint_mode_ascii_accent_line_is_underscore() {
+        let mut state = painted(two_pane_diff_state());
+        state.ascii = true;
+        state.focus = FocusPane::Right;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let (_, right) = pane_rects(&state, 120);
+        let row = row_cells(&terminal, right.x, right.y, right.width);
+        assert!(row.starts_with("_diff___"), "{row}");
+        assert!(!row.contains('\u{2581}'), "{row}");
+    }
+
+    /// Paint mode backgrounds: tab strip, breadcrumb, and status rows on
+    /// `chrome` (the active tab keeps `cursor_bg`), the left pane on
+    /// `sidebar`, the right pane on `surface`. No cell keeps the terminal
+    /// background.
+    #[test]
+    fn paint_mode_fills_chrome_rows_and_pane_backgrounds() {
+        let mut state = painted(two_pane_diff_state());
+        state
+            .tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+        state.tabs.active = 0;
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let (left, right) = pane_rects(&state, 120);
+        let buf = terminal.backend().buffer();
+        for y in 0..24 {
+            for x in 0..120 {
+                assert_ne!(buf[(x, y)].bg, Color::Reset, "terminal bg at ({x},{y})");
+            }
+        }
+        let (active_x, active_w, _) = state.layout.tab_hits[0];
+        let (inactive_x, inactive_w, _) = state.layout.tab_hits[1];
+        for x in active_x..active_x + active_w {
+            assert_eq!(buf[(x, 0)].bg, palette.cursor_bg, "active tab x={x}");
+        }
+        for x in inactive_x..inactive_x + inactive_w {
+            assert_eq!(buf[(x, 0)].bg, palette.chrome, "inactive tab x={x}");
+        }
+        assert_eq!(buf[(119, 0)].bg, palette.chrome, "tab strip tail");
+        let crumb_y = 1 + state.layout.pane_height;
+        assert_eq!(buf[(119, crumb_y)].bg, palette.chrome, "breadcrumb row");
+        assert_eq!(buf[(119, 23)].bg, palette.chrome, "status row");
+        let bottom = left.y + left.height - 1;
+        for x in left.x..left.x + left.width {
+            assert_eq!(buf[(x, bottom)].bg, palette.sidebar, "left x={x}");
+        }
+        for x in right.x..right.x + right.width {
+            assert_eq!(buf[(x, bottom)].bg, palette.surface, "right x={x}");
+        }
+    }
+
+    /// Terminal mode keeps the v0.1.244 boxed panes with no fills.
+    #[test]
+    fn terminal_mode_keeps_boxed_panes_on_the_terminal_background() {
+        let mut state = two_pane_diff_state();
+        state.theme = ThemeId::Slate;
+        assert_eq!(state.background, BackgroundMode::Terminal);
+        state.focus = FocusPane::Left;
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let (left, right) = pane_rects(&state, 120);
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(left.x, left.y)].symbol(), "┌");
+        assert_eq!(buf[(left.x, left.y)].fg, palette.heading, "focused border");
+        assert_eq!(buf[(right.x, right.y)].symbol(), "┌");
+        assert_eq!(buf[(right.x, right.y)].fg, palette.border_dim);
+        assert_eq!(
+            buf[(left.x + 1, left.y)].symbol(),
+            "t",
+            "title after corner"
+        );
+        assert_eq!(state.layout.tree_x, left.x + 1);
+        assert_eq!(state.layout.diff_content_x, right.x + 1);
+        for (x, y) in [(119, 0), (left.x + 2, left.y + 8), (right.x + 30, 12)] {
+            assert_eq!(buf[(x, y)].bg, Color::Reset, "no fill at ({x},{y})");
+        }
+    }
+
+    /// Rect of the rounded popup box in `buf` (`╭` … `╯`), if any. Flat
+    /// panes paint no border glyphs, so the only rounded corner is a popup.
+    fn rounded_box(buf: &ratatui::buffer::Buffer) -> Option<Rect> {
+        let area = buf.area;
+        let (x0, y0) = (area.top()..area.bottom())
+            .flat_map(|y| (area.left()..area.right()).map(move |x| (x, y)))
+            .find(|&(x, y)| buf[(x, y)].symbol() == "╭")?;
+        let x1 = (x0 + 1..area.right()).find(|&x| buf[(x, y0)].symbol() == "╮")?;
+        let y1 = (y0 + 1..area.bottom()).find(|&y| buf[(x0, y)].symbol() == "╰")?;
+        Some(Rect::new(x0, y0, x1 - x0 + 1, y1 - y0 + 1))
+    }
+
+    /// Paint-mode screens for the every-cell sweep: each pane screen in
+    /// both focus states (Explorer folder / file / diff previews too), each
+    /// [`DialogKind`], the icon popover, and the too-small notice, as
+    /// (label, state, cols, rows).
+    fn paint_sweep_screens() -> Vec<(String, AppState, u16, u16)> {
+        use crate::git::{AncestorCommit, LocalBranch};
+        use crate::tui::action::QuickOpenEntry;
+        use crate::tui::branches::{BranchPickerState, CreateBranchState};
+        use crate::tui::comments::CommentExport;
+        use crate::tui::graph_focus::GraphFocusPickerState;
+        use crate::tui::quick_open::{QuickOpenScope, QuickOpenState};
+        use crate::tui::search_files::SearchPreview;
+        use crate::tui::stash::{stash_ops_for_context, StashOpsContext};
+
+        let mut panes: Vec<(&str, AppState)> = vec![
+            ("tree + graph", two_pane_graph_state()),
+            ("files drill", two_pane_files_state()),
+            ("commit diff", two_pane_commit_diff_state()),
+            ("inline diff", two_pane_diff_state()),
+            ("compare tab", summary_compare_state(summary_files())),
+        ];
+        let mut summary = summary_drill_state(summary_files());
+        let _ = summary_move_to(&mut summary, "src");
+        panes.push(("folder summary", summary));
+        let mut split = two_pane_diff_state();
+        split.diff_mode = crate::tui::split::DiffMode::SideBySide;
+        panes.push(("side-by-side diff", split));
+        let mut prompt = two_pane_diff_state();
+        prompt.status = crate::tui::ctrl_c_exit::CTRL_C_EXIT_PROMPT.into();
+        panes.push(("ctrl-c prompt", prompt));
+
+        let mut screens = Vec::new();
+        for (label, state) in panes {
+            for focus in [FocusPane::Left, FocusPane::Right] {
+                let mut state = painted(state.clone());
+                state.focus = focus;
+                screens.push((format!("{label} / {focus:?}"), state, 120, 30));
+            }
+        }
+        let explorer: Vec<(&str, AppState)> = vec![
+            ("explorer folder", explorer_state()),
+            ("explorer file", explorer_preview_state("new.txt", None)),
+            (
+                "explorer diff",
+                explorer_preview_state("README.md", Some("@@ -1 +1 @@\n-# seed\n+# dirty\n")),
+            ),
+        ];
+        for (label, state) in explorer {
+            for focus in [FocusPane::Left, FocusPane::Right] {
+                let mut state = painted(state.clone());
+                state.focus = focus;
+                screens.push((format!("{label} / {focus:?}"), state, 120, 30));
+            }
+        }
+        // One pane: focus does not change the file tab.
+        let file_tab = painted(file_tab_state(&["# app", "dirty"]));
+        screens.push(("file tab".into(), file_tab, 120, 30));
+
+        let branch = |name: &str, current: bool| LocalBranch {
+            name: name.into(),
+            current,
+            authordate: 0,
+        };
+        let base = two_pane_diff_state;
+        let mut dialogs: Vec<(&str, AppState)> = Vec::new();
+        let mut state = base();
+        state.help_open = true;
+        dialogs.push(("help", state));
+        let mut state = base();
+        state.confirm = Some(PendingConfirm::StashDrop {
+            repo: "app".into(),
+            stash_ref: "stash@{0}".into(),
+        });
+        dialogs.push(("confirm", state));
+        let mut state = base();
+        state.stash_repo = Some("app".into());
+        state.stash_menu = Some(stash_ops_for_context(&StashOpsContext {
+            dirty: true,
+            dirty_paths: None,
+            focused_stash_ref: Some("stash@{0}".into()),
+            latest_stash_ref: Some("stash@{0}".into()),
+        }));
+        dialogs.push(("stash menu", state));
+        let mut state = base();
+        state.blame_menu = true;
+        dialogs.push(("blame menu", state));
+        let mut state = base();
+        state.create_branch = Some(CreateBranchState {
+            repo: "app".into(),
+            name: "topic".into(),
+            commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        });
+        dialogs.push(("create branch", state));
+        let mut state = base();
+        state.comment = Some(CommentPrompt::new(
+            CommentKey::WorktreeLine {
+                repo: "app".into(),
+                branch: "main".into(),
+                path: "README.md".into(),
+                line: 1,
+                end_line: 1,
+            },
+            "hello".into(),
+            "app · branch main · README.md:1".into(),
+        ));
+        dialogs.push(("comment", state));
+        let mut state = base();
+        state.comment_export = Some(CommentExport {
+            markdown: "- README.md:1 hello".into(),
+            copied: Some(true),
+        });
+        dialogs.push(("comment export", state));
+        let mut state = base();
+        // `topic/a` selected, `topic/b` and the create row not.
+        let mut picker = BranchPickerState::checkout(
+            "app".into(),
+            vec![branch("topic/a", false), branch("topic/b", false)],
+        );
+        picker.set_filter("topic".into());
+        assert_eq!(picker.create_name(), Some("topic"));
+        state.branch_picker = Some(picker);
+        dialogs.push(("branch picker", state));
+        let mut state = base();
+        let commits = (0..3)
+            .map(|i| AncestorCommit {
+                id: format!("{i:02}{}", "a".repeat(38)),
+                subject: format!("commit {i}"),
+            })
+            .collect();
+        state.open_compare_commit_picker("app".into(), commits);
+        dialogs.push(("compare picker", state));
+        let mut state = base();
+        state.graph_focus_picker = Some(GraphFocusPickerState::new(
+            "app".into(),
+            vec![branch("main", true), branch("topic/a", false)],
+            &[],
+        ));
+        dialogs.push(("graph focus picker", state));
+        dialogs.push(("quick open files", quick_open_files_state(5)));
+        let mut state = base();
+        state.quick_open = Some(QuickOpenState::new(
+            QuickOpenEntry::Commands,
+            QuickOpenScope::Workspace,
+        ));
+        dialogs.push(("quick open commands", state));
+        let mut state = search_files_state(false);
+        let mut lines: Vec<String> = (1..=20).map(|n| format!("// line {n}")).collect();
+        lines[2] = "let needle = needle();".into();
+        search_dialog(&mut state).preview = Some(SearchPreview {
+            checkout: "app".into(),
+            rel: "src/lib.rs".into(),
+            gen: 1,
+            body: Some(FileRead::Text {
+                lines,
+                max_cols: 22,
+            }),
+        });
+        dialogs.push(("search files", state));
+        for (label, state) in dialogs {
+            screens.push((format!("dialog {label}"), painted(state), 120, 30));
+        }
+
+        let mut state = painted(pr_state(&[branch_repo("app", "feature")], false));
+        set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+        focus_tree_row(&mut state, "repo:app");
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        state.dispatch(Action::PopoverOpenFocused);
+        screens.push(("icon popover".into(), state, 120, 30));
+
+        let too_small = painted(two_pane_diff_state());
+        screens.push(("too small".into(), too_small, 40, 10));
+        screens
+    }
+
+    /// Paint mode leaves no cell on the terminal background, for every
+    /// theme and screen: panes, chrome rows, each dialog, the icon
+    /// popover, and the too-small notice. Pane title rows sit on their
+    /// role colour (`sidebar` left, `surface` right and file tab), no pane
+    /// cell carries another pane's role, chrome rows end on `chrome`, and a
+    /// popup's border sits on `panel` with no pane role inside it.
+    #[test]
+    fn paint_mode_sets_a_background_on_every_cell_for_every_theme() {
+        let mut screens = paint_sweep_screens();
+        // Every dialog kind and the popover are in the sweep.
+        let mut kinds = HashSet::new();
+        for (label, state, ..) in &screens {
+            if let Some(kind) = open_dialog(state) {
+                kinds.insert(format!("{kind:?}"));
+            }
+            assert!(
+                !label.starts_with("dialog") || open_dialog(state).is_some(),
+                "{label}"
+            );
+        }
+        assert_eq!(kinds.len(), 12, "{kinds:?}");
+        for id in crate::tui::theme::THEME_IDS {
+            let palette = id.palette();
+            for (label, state, cols, rows) in &mut screens {
+                state.theme = id;
+                let mut terminal = Terminal::new(TestBackend::new(*cols, *rows)).unwrap();
+                draw_state(&mut terminal, state);
+                let buf = terminal.backend().buffer();
+                let at = |x: u16, y: u16| format!("{id:?} {label} ({x},{y})");
+                for y in 0..*rows {
+                    for x in 0..*cols {
+                        assert_ne!(buf[(x, y)].bg, Color::Reset, "{}", at(x, y));
+                    }
+                }
+                if state.too_small {
+                    for y in 0..*rows {
+                        for x in 0..*cols {
+                            assert_eq!(buf[(x, y)].bg, palette.surface, "{}", at(x, y));
+                        }
+                    }
+                    continue;
+                }
+                let popup = rounded_box(buf);
+                if label.starts_with("dialog") || label.as_str() == "icon popover" {
+                    let popup = popup.unwrap_or_else(|| panic!("{id:?} {label}: no popup"));
+                    for y in popup.top()..popup.bottom() {
+                        for x in popup.left()..popup.right() {
+                            let edge = y == popup.top()
+                                || y == popup.bottom() - 1
+                                || x == popup.left()
+                                || x == popup.right() - 1;
+                            let bg = buf[(x, y)].bg;
+                            if edge && buf[(x, y)].symbol() != " " {
+                                assert_eq!(bg, palette.panel, "{} border", at(x, y));
+                            }
+                            for role in [palette.sidebar, palette.surface, palette.chrome] {
+                                if role != palette.panel {
+                                    assert_ne!(bg, role, "{} pane role in popup", at(x, y));
+                                }
+                            }
+                        }
+                    }
+                }
+                let outside = |x: u16, y: u16| popup.is_none_or(|p| !p.contains((x, y).into()));
+                let pane_h = state.layout.pane_height;
+                let panes: Vec<(Rect, Color)> = if state.is_file_tab() {
+                    vec![(Rect::new(0, 1, *cols, pane_h), palette.surface)]
+                } else if state.is_explorer_tab() {
+                    let (left, right) = explorer_pane_rects(state);
+                    vec![(left, palette.sidebar), (right, palette.surface)]
+                } else {
+                    let (left, right) = pane_rects(state, *cols);
+                    vec![(left, palette.sidebar), (right, palette.surface)]
+                };
+                let roles = [
+                    palette.sidebar,
+                    palette.surface,
+                    palette.chrome,
+                    palette.panel,
+                ];
+                for (pane, role) in panes {
+                    for y in pane.top()..pane.bottom() {
+                        for x in pane.left()..pane.right() {
+                            if !outside(x, y) {
+                                continue;
+                            }
+                            let bg = buf[(x, y)].bg;
+                            if y == pane.top() {
+                                assert_eq!(bg, role, "{} title row", at(x, y));
+                            }
+                            for other in roles {
+                                if other != role {
+                                    assert_ne!(bg, other, "{} wrong role", at(x, y));
+                                }
+                            }
+                        }
+                    }
+                }
+                let crumb_y = 1 + pane_h;
+                let mut chrome_rows = vec![0, crumb_y, *rows - 1];
+                if super::super::chrome::ctrl_c_prompt_rows(state) > 0 {
+                    chrome_rows.push(crumb_y + breadcrumb_rows(state));
+                }
+                for y in chrome_rows {
+                    assert_eq!(
+                        buf[(*cols - 1, y)].bg,
+                        palette.chrome,
+                        "{} chrome",
+                        at(*cols - 1, y)
+                    );
+                }
+            }
+        }
+    }
+
+    /// Terminal mode: popups sit on `panel` (border and blank inner cells)
+    /// while the boxed panes keep the terminal background.
+    #[test]
+    fn terminal_mode_popups_sit_on_panel_over_unfilled_panes() {
+        let mut state = two_pane_diff_state();
+        assert_eq!(state.background, BackgroundMode::Terminal);
+        state.confirm = Some(PendingConfirm::StashDrop {
+            repo: "app".into(),
+            stash_ref: "stash@{0}".into(),
+        });
+        for id in crate::tui::theme::THEME_IDS {
+            state.theme = id;
+            let palette = id.palette();
+            let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let buf = terminal.backend().buffer();
+            let popup = rounded_box(buf).expect("confirm box");
+            for y in popup.top()..popup.bottom() {
+                for x in popup.left()..popup.right() {
+                    assert_ne!(buf[(x, y)].bg, Color::Reset, "{id:?} popup ({x},{y})");
+                }
+            }
+            assert_eq!(buf[(popup.x, popup.y)].bg, palette.panel, "{id:?} corner");
+            let inner_blank = (popup.left() + 1..popup.right() - 1)
+                .find(|&x| buf[(x, popup.bottom() - 2)].symbol() == " ")
+                .expect("blank inner cell");
+            assert_eq!(buf[(inner_blank, popup.bottom() - 2)].bg, palette.panel);
+            let (left, right) = pane_rects(&state, 120);
+            for (x, y) in [(119, 0), (left.x + 2, left.y + 2), (right.right() - 2, 2)] {
+                assert!(!popup.contains((x, y).into()));
+                assert_eq!(buf[(x, y)].bg, Color::Reset, "{id:?} pane ({x},{y})");
+            }
+        }
+    }
+
+    /// Clicks on the flat left pane's first column, first content row, and
+    /// bottom row select the tree row painted there.
+    #[test]
+    fn paint_mode_clicks_on_flat_pane_edges_select_the_painted_row() {
+        let repos: Vec<RepoSnapshot> = (0..40).map(|i| repo(&format!("r{i:02}"), true)).collect();
+        let snapshot = build_workspace_snapshot(&repos, &[], false, &[]);
+        let mut state = painted(AppState::new(PathBuf::from("/tmp"), snapshot, true));
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let (left, _) = pane_rects(&state, 120);
+        let first = left.y + 1;
+        let last = left.y + left.height - 1;
+        assert_eq!(state.layout.tree_y, first);
+        for row in [first, last, first + 3] {
+            let idx = state.layout.list_offset + (row - first) as usize;
+            let want = state.painted_tree_rows()[idx].id.clone();
+            let label = buf_line(terminal.backend().buffer(), row);
+            state.dispatch(Action::Click { col: left.x, row });
+            assert_eq!(state.rows[state.cursor].id, want, "row {row}: {label}");
+            assert_eq!(state.focus, FocusPane::Left);
+            draw_state(&mut terminal, &mut state);
+            let buf = terminal.backend().buffer();
+            let bar_row = (first..=last)
+                .find(|&y| buf[(left.x, y)].symbol() == CURSOR_BAR)
+                .expect("cursor bar");
+            let left_text = |y: u16| -> String {
+                (left.x + 1..left.x + left.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect()
+            };
+            assert_eq!(
+                left_text(bar_row),
+                label
+                    .chars()
+                    .skip(usize::from(left.x) + 1)
+                    .take(usize::from(left.width) - 1)
+                    .collect::<String>(),
+                "the clicked row is selected"
+            );
+        }
+    }
+
+    /// The file tab paints flat in paint mode: title row on `surface` with
+    /// the accent line, code from the pane's first column, last row used.
+    #[test]
+    fn paint_mode_file_tab_is_flat() {
+        let mut state = painted(file_tab_state(&["# app", "dirty"]));
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let pane = Rect::new(0, 1, 80, state.layout.pane_height);
+        let buf = terminal.backend().buffer();
+        assert_eq!(pane_edge_borders(buf, pane), vec![]);
+        assert_flat_title_row(buf, pane, "app/README.md", true, palette.surface, palette);
+        assert!(
+            buf_line(buf, 2).starts_with("1 # app"),
+            "{}",
+            buf_line(buf, 2)
+        );
+        assert_eq!((state.layout.file_view_x, state.layout.file_view_y), (0, 2));
+        assert_eq!(state.layout.file_view_width, 80);
+        assert_eq!(state.layout.file_view_height, pane.height - 1);
+        let bottom = pane.y + pane.height - 1;
+        assert_eq!(buf[(40, bottom)].bg, palette.surface);
+    }
+
+    /// The compare tab uses the same flat chrome: file list on `sidebar`,
+    /// diff on `surface`, no border glyphs.
+    #[test]
+    fn paint_mode_compare_tab_is_flat() {
+        let mut state = painted(compare_json_over_stale_workspace_state());
+        state.focus = FocusPane::Left;
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let (left, right) = pane_rects(&state, 120);
+        let buf = terminal.backend().buffer();
+        assert_eq!(pane_edge_borders(buf, left), vec![]);
+        assert_eq!(pane_edge_borders(buf, right), vec![]);
+        let left_title = state.left_pane_title();
+        assert_flat_title_row(buf, left, left_title, true, palette.sidebar, palette);
+        assert_flat_title_row(buf, right, "diff", false, palette.surface, palette);
+        assert_eq!(state.layout.diff_content_x, right.x);
+        assert_eq!(state.layout.files_list_y, left.y + 1);
+    }
+
+    /// The Explorer tab paints flat in paint mode through the shared pane
+    /// chrome: tree on `sidebar`, preview on `surface`, no border glyphs,
+    /// the accent line on the focused title, and every recorded rect is
+    /// the content rect (pane less its title row).
+    #[test]
+    fn paint_mode_explorer_tab_is_flat() {
+        let mut state = painted(explorer_preview_state("new.txt", None));
+        state.focus = FocusPane::Left;
+        let palette = state.theme.palette();
+        let checkout = state.tabs.active_explorer().unwrap().checkout.clone();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let (left, right) = explorer_pane_rects(&state);
+        assert_eq!((left.x, left.y), (0, 1));
+        assert_eq!(left.height, state.layout.pane_height);
+        assert_eq!(right.x, left.right(), "panes abut");
+        assert_eq!(right.right(), 120);
+        {
+            let buf = terminal.backend().buffer();
+            assert_eq!(pane_edge_borders(buf, left), vec![], "tree edges");
+            assert_eq!(pane_edge_borders(buf, right), vec![], "preview edges");
+            assert_flat_title_row(buf, left, &checkout, true, palette.sidebar, palette);
+            assert_flat_title_row(buf, right, "app/new.txt", false, palette.surface, palette);
+            let body: String = (right.x..right.right())
+                .map(|x| buf[(x, right.y + 1)].symbol())
+                .collect();
+            assert!(body.starts_with(" 1 line 1"), "{body}");
+            let bottom = left.bottom() - 1;
+            assert_eq!(buf[(left.right() - 2, bottom)].bg, palette.sidebar);
+            assert_eq!(buf[(right.right() - 2, bottom)].bg, palette.surface);
+        }
+        let layout = &state.layout;
+        assert_eq!(
+            (layout.file_view_x, layout.file_view_y),
+            (right.x, right.y + 1)
+        );
+        assert_eq!(layout.file_view_width, right.width);
+        assert_eq!(layout.file_view_height, right.height - 1);
+        assert_eq!(layout.right_x, right.x);
+        assert_eq!(layout.right_y, right.y + 1);
+        assert_eq!(layout.diff_content_x, right.x);
+        assert_eq!(layout.diff_pane_width, right.width);
+        assert_eq!(layout.diff_pane_height, right.height - 1);
+
+        state.dispatch(Action::FocusRight);
+        assert_eq!(state.focus, FocusPane::Right);
+        draw_state(&mut terminal, &mut state);
+        let buf = terminal.backend().buffer();
+        assert_flat_title_row(buf, left, &checkout, false, palette.sidebar, palette);
+        assert_flat_title_row(buf, right, "app/new.txt", true, palette.surface, palette);
+    }
+
+    /// Mouse in a flat Explorer: title rows are not content, the first
+    /// column and first content row of each pane hit, and the wheel moves
+    /// the pane under the pointer.
+    #[test]
+    fn paint_mode_explorer_mouse_hits_the_flat_content_rects() {
+        let mut state = painted(explorer_preview_state("new.txt", None));
+        state.focus = FocusPane::Left;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let (left, right) = explorer_pane_rects(&state);
+        let file_cursor = |state: &AppState| match state.tabs.active_explorer().map(|t| &t.preview)
+        {
+            Some(ExplorerPreview::File(file)) => file.cursor,
+            other => panic!("file preview, got {other:?}"),
+        };
+        let painted_rel = |state: &AppState| {
+            state
+                .tabs
+                .active_explorer()
+                .and_then(|tab| tab.painted_rel.clone())
+        };
+
+        // The preview's title row is not the body.
+        state.dispatch(Action::Click {
+            col: right.x,
+            row: right.y,
+        });
+        assert_eq!(state.focus, FocusPane::Left);
+        // Its first column, third body row, takes focus and that line.
+        state.dispatch(Action::Click {
+            col: right.x,
+            row: right.y + 3,
+        });
+        assert_eq!(state.focus, FocusPane::Right);
+        assert_eq!(file_cursor(&state), 2);
+        state.dispatch(Action::ScrollWheel {
+            col: right.x,
+            row: right.y + 1,
+            delta: 1,
+            horizontal: false,
+        });
+        assert_eq!(file_cursor(&state), 3);
+        draw_state(&mut terminal, &mut state);
+
+        // The tree's title row is not a row; its first column is.
+        assert_eq!(painted_rel(&state).as_deref(), Some("new.txt"));
+        state.dispatch(Action::Click {
+            col: left.x,
+            row: left.y,
+        });
+        assert_eq!(state.focus, FocusPane::Right, "title row: no hit");
+        let tree = state.layout.explorer_tree;
+        let readme = (tree.y..tree.bottom())
+            .find(|&y| buf_line(terminal.backend().buffer(), y).contains("README.md"))
+            .expect("README.md row");
+        state.dispatch(Action::Click {
+            col: left.x,
+            row: readme,
+        });
+        assert_eq!(state.focus, FocusPane::Left);
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(painted_rel(&state).as_deref(), Some("README.md"));
+        state.dispatch(Action::ScrollWheel {
+            col: left.x,
+            row: left.y + 1,
+            delta: -1,
+            horizontal: false,
+        });
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(painted_rel(&state).as_deref(), Some("new.txt"));
+    }
+
+    /// Terminal mode keeps the MYWS-047 boxed Explorer panes: corners,
+    /// `heading` border on the focused pane, `border_dim` on the other, no
+    /// fills, and content rects inside the borders.
+    #[test]
+    fn terminal_mode_explorer_tab_keeps_boxed_panes() {
+        let mut state = explorer_preview_state("new.txt", None);
+        assert_eq!(state.background, BackgroundMode::Terminal);
+        state.focus = FocusPane::Left;
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let tree = state.layout.explorer_tree;
+        let preview = state.layout.explorer_preview;
+        assert_eq!((tree.x, tree.y), (1, 2));
+        assert_eq!(preview.y, 2);
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(0, 1)].symbol(), "┌");
+        assert_eq!(buf[(0, 1)].fg, palette.heading, "focused border");
+        assert_eq!(buf[(preview.x - 1, 1)].symbol(), "┌");
+        assert_eq!(buf[(preview.x - 1, 1)].fg, palette.border_dim);
+        assert_eq!(state.layout.right_x, preview.x - 1);
+        assert_eq!(state.layout.diff_content_x, preview.x);
+        assert_eq!(state.layout.right_y, 2);
+        for (x, y) in [(119, 0), (tree.x + 2, tree.bottom() - 1), (118, 12)] {
+            assert_eq!(buf[(x, y)].bg, Color::Reset, "no fill at ({x},{y})");
+        }
+    }
+
+    /// Below the minimum size, paint mode puts the notice on `surface`.
+    #[test]
+    fn paint_mode_too_small_notice_sits_on_surface() {
+        let mut state = painted(two_pane_diff_state());
+        let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert!(state.too_small);
+        let surface = state.theme.palette().surface;
+        let buf = terminal.backend().buffer();
+        for y in 0..5 {
+            for x in 0..20 {
+                assert_eq!(buf[(x, y)].bg, surface, "({x},{y})");
+            }
+        }
+    }
+
+    /// Paint-mode twin of [`recorded_split_rule_is_the_painted_rule_column`]:
+    /// flat content starts at the right pane's first column, the recorded
+    /// rule is the painted `border_dim` rule, and the diff h-bar sits on the
+    /// pane's last row.
+    #[test]
+    fn paint_mode_recorded_split_rule_is_the_painted_rule_column() {
+        let mut state = painted(two_pane_diff_state());
+        state.diff_mode = crate::tui::split::DiffMode::SideBySide;
+        let rule_fg = state.theme.palette().border_dim;
+        for fraction in [0.3, 0.5, 0.7] {
+            state.diff_split_fraction = fraction;
+            let mut terminal = Terminal::new(TestBackend::new(220, 20)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let rule = state.layout.diff_split_rule_x.expect("rule");
+            assert_eq!(
+                state.layout.diff_content_x, state.layout.right_x,
+                "flat content starts on the right pane's first column"
+            );
+            let buf = terminal.backend().buffer();
+            let y = first_row_with(buf, "old line").expect("diff row");
+            let rule_glyph = DIFF_RULE.to_string();
+            let painted: Vec<u16> = (0..buf.area.width)
+                .filter(|&x| buf[(x, y)].symbol() == rule_glyph && buf[(x, y)].fg == rule_fg)
+                .collect();
+            assert_eq!(painted.len(), 1, "one split rule: {}", buf_line(buf, y));
+            if fraction == crate::tui::split::DIFF_SPLIT_FRACTION {
+                assert_eq!(painted[0], rule, "{}", buf_line(buf, y));
+            } else {
+                assert!(
+                    painted[0].abs_diff(rule) <= 1,
+                    "fraction {fraction}: painted {} recorded {rule}",
+                    painted[0]
+                );
+            }
+        }
+
+        let mut state = painted(long_panning_diff_state(1));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let last_pane_row = state.layout.pane_height;
+        assert_eq!(
+            state.layout.diff_hscrollbar_y,
+            Some(last_pane_row),
+            "flat diff h-bar on the pane's last row"
+        );
+    }
+
+    #[test]
     fn paints_draggable_side_by_side_rule_on_wide_diff() {
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
@@ -11016,7 +12111,7 @@ mod tests {
         for chip in ["Aa", "ab", ".*"] {
             let x = cells_x(&terminal, y, chip);
             assert_eq!(buf[(x, y as u16)].fg, palette.muted, "{chip} off");
-            assert_eq!(buf[(x, y as u16)].bg, Color::Reset, "{chip} off");
+            assert_eq!(buf[(x, y as u16)].bg, palette.panel, "{chip} off");
         }
 
         search_dialog(&mut state).options = SearchOptions {
@@ -11056,7 +12151,7 @@ mod tests {
 
         let y = row_of(&text, "// needle");
         let x = cells_x(&terminal, y, "// needle");
-        assert_eq!(buf[(x, y as u16)].bg, Color::Reset, "plain text");
+        assert_eq!(buf[(x, y as u16)].bg, palette.panel, "plain text");
         assert_eq!(buf[(x, y as u16)].fg, palette.muted);
         assert_eq!(buf[(x + 3, y as u16)].bg, filter.bg, "match");
     }
@@ -11802,6 +12897,42 @@ mod tests {
         state
             .apply_explorer_dir(tab_id, req, "", Ok(listing))
             .expect("fresh listing");
+        state
+    }
+
+    /// [`explorer_state`] with the cursor on `rel` and its preview loaded:
+    /// a diff when `diff` is set, else a clean-file body (`new.txt` then
+    /// counts as clean).
+    fn explorer_preview_state(rel: &str, diff: Option<&str>) -> AppState {
+        use crate::tui::effect::ExplorerPreviewBody;
+        let mut state = explorer_state();
+        if diff.is_none() {
+            state.snapshot.repos[0]
+                .changes
+                .retain(|change| change.path != rel);
+        }
+        // Each step moves one row down, so the tree's row count bounds the
+        // walk; a fixture without `rel` fails here instead of hanging.
+        let rows = state.explorer_rows().expect("an Explorer tab").0.len();
+        let found = (0..rows).find_map(|_| match state.dispatch(Action::Move(1)) {
+            Effect::LoadExplorerPreview {
+                tab_id, gen, path, ..
+            } if path == rel => Some((tab_id, gen)),
+            _ => None,
+        });
+        let Some((tab_id, gen)) = found else {
+            panic!("Explorer tree has no row for {rel} within {rows} moves");
+        };
+        let body = match diff {
+            Some(unified) => {
+                ExplorerPreviewBody::Diff(super::super::diff::DiffContent::from_unified(unified))
+            }
+            None => ExplorerPreviewBody::File(FileRead::Text {
+                lines: (1..=40).map(|n| format!("line {n}")).collect(),
+                max_cols: 7,
+            }),
+        };
+        assert!(state.apply_explorer_preview(tab_id, gen, body));
         state
     }
 

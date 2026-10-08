@@ -10,9 +10,35 @@ That script seeds, installs MesloLGS NF and ffmpeg if needed, starts Xvfb and Op
 
 Each clip also takes full-colour PNG stills from the same recording (not from the GIF palette): `NN-name.png` is the last frame, and `NN-name-mid.png` is the middle of the settled hold after the step where the clip calls `mark_mid` (the **Mid still** line below). The mid offset subtracts ffmpeg's start-up delay. Stills are lossless-optimized when `optipng` is installed.
 
-The script rejects a clip and keeps the old GIF when the last or mid frame is gray or too small, when no frame differs from the first (the keys did nothing), or when a GIF is over 4 MB. A rejected clip stops the run. Stills go to `tmp/demo-stills-stage/stills` first and replace `docs/images/stills/` as one set only when every clip passes.
+The script rejects a clip and keeps the old GIF when the last or mid frame is gray or too small, when no frame differs from the first (the keys did nothing), or when a GIF is over 4 MB. A rejected clip stops the run. Stills go to `tmp/demo-stills-stage/stills` first and replace the stills directory as one set only when every clip passes: `docs/images/stills/` for the README set, `<OUT>/stills/` for a knob run, or the whole `<OUT>` directory when `WS_STATUS_STILLS_GIFS=0` (see below).
 
 The script runs Xvfb on `:99`. Set `WS_STATUS_STILLS_DISPLAY` to another number when `:99` is busy. It stops only the `xfce4-terminal` it started on that display.
+
+The README set uses the shipped defaults: theme Slate and `viewDefaults.background` `paint`. The script points `XDG_CONFIG_HOME` at `tmp/demo-stills-stage/config` and unsets `WS_STATUS_THEME`, so a parent shell or an operator config file cannot change the look.
+
+### Theme and background knobs
+
+These environment variables make other sets with the same clips and keys. Each knob other than `WS_STATUS_STILLS_DISPLAY` needs `WS_STATUS_STILLS_OUT`, so such a run never replaces the README clips or stills. The script checks the knobs before it installs or records anything.
+
+| Variable | Value | Effect |
+| --- | --- | --- |
+| `WS_STATUS_STILLS_OUT` | leaf directory under `docs/images/`, relative to the repo root | GIFs go here and stills to its `stills/`. The script checks the canonical path (`docs/images//x/.` is `docs/images/x`). It refuses `docs/images`, `docs/images/stills`, `docs/images/themes`, any directory inside `docs/images/stills`, and a directory that already holds subdirectories (other than its own `stills/`). |
+| `WS_STATUS_STILLS_CLIPS` | clip names or numbers, comma- or space-separated (`01`, `01-tree-diff`) | Runs only those clips. Default: all. |
+| `WS_STATUS_STILLS_THEME` | theme slug (`slate`, `tokyo-night`, ...) | Written as `theme` in the isolated user config file. |
+| `WS_STATUS_STILLS_BACKGROUND` | `paint` or `terminal` | Written as `viewDefaults.background` in that file. |
+| `WS_STATUS_STILLS_GIFS` | `1` (default) or `0` | `0` makes a stills-only run: the GIF is still checked but not copied, and the PNG stills replace the whole `WS_STATUS_STILLS_OUT` directory (any other file in it is removed). |
+
+The script loads that config once with `--plain` in the seeded workspace, so an unknown theme slug stops the run with the binary's error. The xfce terminal keeps its fixed colours (`#1a1b26` / `#c0caf5`) for every run. In `paint` mode the TUI fills every cell, and only the terminal's 1 px inner padding shows the terminal colour.
+
+The before/after stills in `docs/images/themes/` are the last frame of clip 01 for each theme and background (`<slug>-terminal/` is the boxed look on the terminal background, `<slug>-paint/` is the painted flat look):
+
+    for slug in slate tokyo-night solarized-dark; do
+      for bg in terminal paint; do
+        WS_STATUS_STILLS_OUT="docs/images/themes/$slug-$bg" WS_STATUS_STILLS_CLIPS=01 \
+          WS_STATUS_STILLS_GIFS=0 WS_STATUS_STILLS_THEME="$slug" WS_STATUS_STILLS_BACKGROUND="$bg" \
+          ./scripts/capture-demo-stills.sh
+      done
+    done
 
 ## Seed
 
@@ -33,7 +59,7 @@ Both go away when DEST is wiped.
     unset NO_COLOR FORCE_COLOR
     WS_STATUS_WATCH_MS=0 WS_STATUS_FETCH_MS=0 workspace-status
 
-- Theme: default Tokyo Night. Do not press `T`.
+- Theme: default Slate, background `paint` (flat painted panes). Do not press `T`. To show another theme, use `WS_STATUS_STILLS_THEME` (see above).
 - Font: `MesloLGS NF` 13 (romkatv/powerlevel10k-media). Do not set `WS_STATUS_GLYPHS=ascii` when that font is present. Set it only if the font is missing. Do not use MesloLGM Nerd Font Mono — it letter-spaces in xfce4-terminal (VTE sizes cells off the widest Nerd glyph).
 - Graph dates: operator local timezone (relative through 3 hours, then `YYYY-MM-DD HH:MM`). Seed timestamps are Asia/Manila (UTC+8). `capture-demo-stills.sh` sets `TZ=Asia/Manila` so clips match that clock.
 - Some hosts export `NO_COLOR=1`, which paints the first frame gray. Unset `NO_COLOR` and `FORCE_COLOR` before launch.
@@ -165,6 +191,6 @@ Mid still: `/auth 1/2` after the wrap.
 - Fetch / pull / push in-flight (`f`, `p`, `P`)
 - Completing a confirm with `y` (clips 06 and 11 show the overlay and cancel with `n`)
 - Creating a branch (Enter on the `+ create branch` row, or graph `c`) — clip 10 shows the row and closes with Esc
-- Theme cycle (`T`) — stay on Tokyo Night
+- Theme cycle (`T`) — stay on the theme the run starts with (Slate for the README set)
 - Watch poll (already disabled)
 - `V` line-range stage — the PTY e2e proves it on a separate two-hunk fixture, not on this seed

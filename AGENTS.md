@@ -35,7 +35,7 @@ CI fails if a TTY spawn path drops that assignment: `crates/workspace-status/tes
 
 PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` also unset `WS_STATUS_WORKSPACE` so a parent pin cannot retarget the fixture. CI: `tty_spawn_paths_isolate_workspace_env`.
 
-They also point `XDG_CONFIG_HOME` at an empty temp dir, so the operator user config file (`$XDG_CONFIG_HOME/my-workspace-status/config.json`, else `~/.config/...`) cannot change the fixture's settings. CLI integration tests that run the binary do the same. CI: `tty_spawn_paths_isolate_user_config`.
+They also point `XDG_CONFIG_HOME` at a temp dir (PTY and desktop e2e write a fixed baseline config file there, see [docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md)), so the operator user config file (`$XDG_CONFIG_HOME/my-workspace-status/config.json`, else `~/.config/...`) cannot change the fixture's settings. CLI integration tests that run the binary do the same. CI: `tty_spawn_paths_isolate_user_config`.
 
 Env table: [docs/configuration.md](./docs/configuration.md).
 
