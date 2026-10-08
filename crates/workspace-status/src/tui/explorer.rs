@@ -295,8 +295,12 @@ pub struct ExplorerRow {
 enum Listing {
     /// Requested from the pool; not arrived yet.
     Loading,
-    /// Children on disk, in [`list_dir`] order.
-    Loaded(Vec<ExplorerEntry>),
+    /// Children on disk, in [`list_dir`] order, plus their names for O(1)
+    /// lookups (a status path against a large folder).
+    Loaded {
+        entries: Vec<ExplorerEntry>,
+        names: HashSet<String>,
+    },
 }
 
 /// Explorer model for one checkout: folder listings, the expanded set,
@@ -335,8 +339,9 @@ impl ExplorerTree {
     /// Store the listing of `rel_dir`. The cursor stays on the same rel
     /// path when that path is still a row.
     pub fn apply_listing(&mut self, rel_dir: &str, entries: Vec<ExplorerEntry>) {
+        let names = entries.iter().map(|entry| entry.name.clone()).collect();
         self.listings
-            .insert(rel_dir.to_string(), Listing::Loaded(entries));
+            .insert(rel_dir.to_string(), Listing::Loaded { entries, names });
     }
 
     /// True when folder `rel_dir` is expanded (the root always is).
@@ -352,7 +357,7 @@ impl ExplorerTree {
         }
         let name = rel_dir.rsplit('/').next().unwrap_or(rel_dir);
         match self.listings.get(parent_rel(rel_dir)) {
-            Some(Listing::Loaded(entries)) => entries
+            Some(Listing::Loaded { entries, .. }) => entries
                 .iter()
                 .any(|entry| entry.is_dir && entry.ignored && entry.name == name),
             _ => false,
@@ -440,9 +445,7 @@ impl ExplorerTree {
                 let parent = parent_rel(step);
                 let name = step.rsplit('/').next().unwrap_or(step);
                 match self.listings.get(parent) {
-                    Some(Listing::Loaded(entries))
-                        if !entries.iter().any(|entry| entry.name == name) =>
-                    {
+                    Some(Listing::Loaded { names, .. }) if !names.contains(name) => {
                         Some(parent.to_string())
                     }
                     _ => None,
@@ -473,7 +476,7 @@ impl ExplorerTree {
             .listings
             .iter()
             .filter(|(rel, listing)| {
-                matches!(listing, Listing::Loaded(_))
+                matches!(listing, Listing::Loaded { .. })
                     && expanded.contains(*rel)
                     && ancestors(rel.as_str())
                         .iter()
@@ -510,7 +513,11 @@ impl ExplorerTree {
         status: &ExplorerStatus,
         out: &mut Vec<ExplorerRow>,
     ) {
-        let Some(Listing::Loaded(listed)) = self.listings.get(dir) else {
+        let Some(Listing::Loaded {
+            entries: listed,
+            names,
+        }) = self.listings.get(dir)
+        else {
             out.push(ExplorerRow {
                 rel: dir.to_string(),
                 name: String::new(),
@@ -525,7 +532,7 @@ impl ExplorerTree {
         let missing: Vec<&String> = status
             .deleted_in(dir)
             .iter()
-            .filter(|name| !listed.iter().any(|entry| &entry.name == *name))
+            .filter(|name| !names.contains(name.as_str()))
             .collect();
         // Borrow the listing; copy it only when deleted files merge in.
         let entries: Cow<'_, [ExplorerEntry]> = if missing.is_empty() {

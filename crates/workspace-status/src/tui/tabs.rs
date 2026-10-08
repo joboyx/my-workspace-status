@@ -722,10 +722,10 @@ pub struct ExplorerTab {
     pub dir_reqs: HashMap<String, u64>,
     /// Last folder listing request id.
     pub dir_req: u64,
-    /// Status paths that already made a folder list again
-    /// (the Explorer status re-list), so a path a listing
-    /// never shows does not re-list on every poll. Pruned to the live
-    /// status paths.
+    /// Status paths that sent a folder re-list (the Explorer status
+    /// re-list), so a path a listing never shows does not re-list on every
+    /// poll. Only the path that first finds a folder stale is marked;
+    /// pruned to the live status paths.
     pub status_relisted: HashSet<String>,
     /// Preview of the focused row.
     pub preview: ExplorerPreview,

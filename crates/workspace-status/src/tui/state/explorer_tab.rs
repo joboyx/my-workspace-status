@@ -11,6 +11,7 @@
 //! time. Git writes refuse with [`EXPLORER_TAB_READ_ONLY`].
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -683,11 +684,25 @@ impl AppState {
     /// folder of its Explorer tabs whose cached listing lacks a path the
     /// status now reports (a new untracked file or folder), so the row
     /// shows without `r`. Deleted paths are skipped (they already merge in
-    /// as rows). A folder with a listing in flight is not asked twice, and
-    /// a status path re-lists at most once while it stays in the status,
-    /// so a poll with nothing new sends nothing. The cursor keeps its rel.
+    /// as rows). The cursor keeps its rel.
+    ///
+    /// No churn: a folder with a listing in flight is not asked twice, and
+    /// a status path that sent a re-list does not send another while it
+    /// stays in the status (`ExplorerTab::status_relisted`). Only the path
+    /// that first finds a folder stale is marked, so thousands of new files
+    /// in one folder mark one path; the others find the folder in flight,
+    /// and after the listing lands they are in it. Linear in the status:
+    /// set lookups only, and nothing at all without an Explorer tab of
+    /// `checkout`.
     pub(crate) fn explorer_status_relist(&mut self, checkout: &str) -> Option<Effect> {
-        let changes: Vec<String> = self
+        if !self
+            .tabs
+            .explorer_tabs()
+            .any(|tab| tab.checkout == checkout)
+        {
+            return None;
+        }
+        let changes: HashSet<&str> = self
             .snapshot
             .repos
             .iter()
@@ -698,7 +713,7 @@ impl AppState {
                 change.unstaged_status.as_deref() != Some("D")
                     && change.staged_status.as_deref() != Some("D")
             })
-            .map(|change| change.path.trim_end_matches('/').to_string())
+            .map(|change| change.path.trim_end_matches('/'))
             .filter(|path| !path.is_empty())
             .collect();
         let ids: Vec<u64> = self
@@ -712,26 +727,25 @@ impl AppState {
             let Some(tab) = self.tabs.get_explorer_id_mut(id) else {
                 continue;
             };
-            tab.status_relisted.retain(|path| changes.contains(path));
+            tab.status_relisted
+                .retain(|path| changes.contains(path.as_str()));
             let mut dirs: Vec<String> = Vec::new();
             for path in &changes {
-                if tab.status_relisted.contains(path) {
+                if tab.status_relisted.contains(*path) {
                     continue;
                 }
-                let stale: Vec<String> = tab
-                    .tree
-                    .stale_on_path(path)
-                    .into_iter()
-                    .filter(|dir| tab.tree.is_open_and_visible(dir))
-                    .collect();
-                if stale.is_empty() {
-                    continue;
-                }
-                tab.status_relisted.insert(path.clone());
-                for dir in stale {
-                    if !dirs.contains(&dir) && !tab.dir_reqs.contains_key(&dir) {
+                let mut asks = false;
+                for dir in tab.tree.stale_on_path(path) {
+                    if tab.tree.is_open_and_visible(&dir)
+                        && !tab.dir_reqs.contains_key(&dir)
+                        && !dirs.contains(&dir)
+                    {
                         dirs.push(dir);
+                        asks = true;
                     }
+                }
+                if asks {
+                    tab.status_relisted.insert((*path).to_string());
                 }
             }
             effects.extend(explorer_dir_loads(tab, dirs));
@@ -1546,6 +1560,17 @@ mod tests {
     #[test]
     fn a_status_path_missing_from_an_open_listing_relists_its_folder_once() {
         let mut app = state();
+        app.snapshot.repos[0]
+            .changes
+            .push(change("brand-new.txt", None, true));
+        assert_eq!(
+            app.explorer_status_relist(&app.snapshot.repos[0].repo.clone()),
+            None,
+            "no Explorer tab: nothing to send"
+        );
+        app.snapshot.repos[0]
+            .changes
+            .retain(|change| change.path != "brand-new.txt");
         open_root(&mut app);
         let open = app.dispatch(Action::FoldOpen);
         land(&mut app, open);
@@ -1563,6 +1588,7 @@ mod tests {
 
         let mut with_new = base.clone();
         with_new.push(change("src/fresh.rs", None, true));
+        with_new.push(change("src/other.rs", None, true));
         let Some(Effect::LoadExplorerDir {
             tab_id,
             req,
@@ -1572,7 +1598,8 @@ mod tests {
         else {
             panic!("a re-list of src");
         };
-        assert_eq!(rel_dir, "src");
+        assert_eq!(rel_dir, "src", "two new files, one re-list");
+        assert_eq!(tab(&app).status_relisted.len(), 1, "one path marked");
         assert_eq!(
             status_load(&mut app, with_new.clone()),
             None,
@@ -1580,6 +1607,7 @@ mod tests {
         );
         let mut listing = app_listing("src");
         listing.push(entry("fresh.rs", false, false));
+        listing.push(entry("other.rs", false, false));
         app.apply_explorer_dir(tab_id, req, "src", Ok(listing))
             .expect("fresh listing");
         assert_eq!(status_load(&mut app, with_new), None, "landed: no churn");
