@@ -198,7 +198,7 @@ impl AppState {
 
     /// Icons of the focused row in paint order, clipped ones included.
     fn focused_row_icons(&self) -> Vec<(IconKind, IconTarget)> {
-        if self.is_file_tab() {
+        if self.is_file_tab() || self.is_explorer_tab() {
             return Vec::new();
         }
         match self.list_focus_target() {

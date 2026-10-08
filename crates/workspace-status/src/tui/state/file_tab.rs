@@ -329,29 +329,31 @@ impl AppState {
         }
     }
 
-    /// Put `cursor` on the active file tab, clamped to its lines.
-    fn set_file_cursor(&mut self, cursor: usize) {
-        if let Some(tab) = self.tabs.active_file_mut() {
+    /// Put `cursor` on the active file body (a file tab or an Explorer
+    /// file preview), clamped to its lines.
+    pub(super) fn set_file_cursor(&mut self, cursor: usize) {
+        if let Some(tab) = self.tabs.active_file_view_mut() {
             let last = tab.lines().len().saturating_sub(1);
             tab.cursor = cursor.min(last);
         }
     }
 
-    fn step_file_cursor(&mut self, delta: i64) {
-        let Some(cursor) = self.tabs.active_file().map(|tab| tab.cursor) else {
+    /// Move the active file body's cursor by `delta` lines, clamped.
+    pub(super) fn step_file_cursor(&mut self, delta: i64) {
+        let Some(cursor) = self.tabs.active_file_view().map(|tab| tab.cursor) else {
             return;
         };
         let next = (cursor as i64).saturating_add(delta).max(0);
         self.set_file_cursor(usize::try_from(next).unwrap_or(usize::MAX));
     }
 
-    /// Pan the code columns. A no-op while wrap is on.
-    fn pan_file_tab(&mut self, delta: i32) {
+    /// Pan the active file body's code columns. A no-op while wrap is on.
+    pub(super) fn pan_file_tab(&mut self, delta: i32) {
         if self.diff_wrap {
             return;
         }
         let view = usize::from(self.layout.file_view_width);
-        let Some(tab) = self.tabs.active_file_mut() else {
+        let Some(tab) = self.tabs.active_file_view_mut() else {
             return;
         };
         let max_cols = match tab.body.as_deref() {
@@ -391,15 +393,21 @@ impl AppState {
     }
 
     /// Reload for the active file tab when the editor just saved its file.
+    ///
+    /// An Explorer tab previewing that file reloads its preview instead.
     pub(crate) fn reload_file_tab_after_edit(&mut self, repo: &str, path: &str) -> Option<Effect> {
+        if self.is_explorer_tab() {
+            return self.reload_explorer_after_edit(repo, path);
+        }
         self.tabs
             .active_file()
             .filter(|tab| tab.checkout == repo && tab.rel == path)?;
         Some(self.reload_active_file_tab())
     }
 
-    /// Press in the body: focus the clicked line and arm a text selection.
-    fn click_file_tab(&mut self, col: u16, row: u16) {
+    /// Press in the file body (a file tab or an Explorer file preview):
+    /// focus the clicked line and arm a text selection.
+    pub(super) fn click_file_tab(&mut self, col: u16, row: u16) {
         self.drag = SplitDrag::None;
         let layout = &self.layout;
         let body = Rect::new(
@@ -811,6 +819,20 @@ mod tests {
         assert_eq!(app.search_query, "readme");
         assert_eq!(app.search_target, SearchPane::Tree);
         assert_eq!(app.diff_cursor, 7);
+    }
+
+    #[test]
+    fn ctrl_w_closes_the_active_file_tab() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = state();
+        open_loaded(&mut app, "README.md", &["# app"]);
+        assert!(app.is_file_tab());
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        let action = crate::tui::keys::event_to_action(&event, app.input_mode(), false, false);
+        assert_eq!(action, Action::CloseTab);
+        app.dispatch(action);
+        assert!(app.tabs.is_workspace());
+        assert!(!app.is_file_tab());
     }
 
     #[test]

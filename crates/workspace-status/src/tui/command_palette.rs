@@ -405,7 +405,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     },
     PaletteCommand {
         title: "Close tab",
-        keys: "",
+        keys: "Ctrl-w",
         group: CommandGroup::Git,
         action: Action::CloseTab,
         aliases: &["close compare"],
@@ -1089,7 +1089,7 @@ mod tests {
             ),
             (
                 "Close tab",
-                "",
+                "Ctrl-w",
                 CommandGroup::Git,
                 Action::CloseTab,
                 CommandScope::NoHighlight,

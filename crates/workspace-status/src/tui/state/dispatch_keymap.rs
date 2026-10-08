@@ -481,6 +481,8 @@ impl AppState {
 
     /// Why palette row `command` cannot run, or `None` if Enter should dispatch.
     ///
+    /// On an Explorer tab: [`Self::explorer_tab_refusal`], then
+    /// [`Self::explorer_tab_palette_reason`].
     /// On a file tab: [`Self::file_tab_refusal`], the blame gate
     /// ([`Self::blame_refusal`]), then [`Self::file_tab_palette_reason`].
     /// Otherwise: compare refusal ([`Self::compare_refusal`], which also gates
@@ -490,6 +492,11 @@ impl AppState {
     /// revert), then the action gate.
     pub(crate) fn palette_disabled_reason(&self, command: &PaletteCommand) -> Option<String> {
         let action = &command.action;
+        if self.is_explorer_tab() {
+            return self
+                .explorer_tab_refusal(action)
+                .or_else(|| self.explorer_tab_palette_reason(command));
+        }
         if self.is_file_tab() {
             return self
                 .file_tab_refusal(action)
