@@ -10472,6 +10472,40 @@ mod tests {
         assert_eq!(app.tabs.compare_count(), 1);
     }
 
+    /// Ctrl-w runs the key → action → dispatch path: it closes the active
+    /// compare tab (the left neighbour takes over), and on Workspace it only
+    /// warns, never quits or closes.
+    #[test]
+    fn ctrl_w_closes_active_tab_and_warns_on_workspace() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        fn press_ctrl_w(app: &mut AppState) -> Effect {
+            let event = Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+            let action = crate::tui::keys::event_to_action(&event, app.input_mode(), false, false);
+            assert_eq!(action, Action::CloseTab);
+            app.dispatch(action)
+        }
+        let mut app = state();
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+        app.tabs
+            .open_or_focus("app".into(), "develop".into(), "HEAD".into());
+        assert_eq!(app.tabs.active, 2);
+        assert_eq!(app.tabs.compare_count(), 2);
+
+        assert_eq!(press_ctrl_w(&mut app), Effect::None);
+        assert_eq!(app.tabs.active, 1, "left neighbour is active");
+        assert_eq!(app.tabs.compare_count(), 1);
+        assert_eq!(press_ctrl_w(&mut app), Effect::None);
+        assert!(app.tabs.is_workspace());
+        assert_eq!(app.tabs.compare_count(), 0);
+
+        let len = app.tabs.len();
+        assert_eq!(press_ctrl_w(&mut app), Effect::None);
+        assert_eq!(app.status, WORKSPACE_TAB_CANNOT_CLOSE);
+        assert_eq!(app.tabs.len(), len, "Workspace never closes");
+        assert!(app.tabs.is_workspace());
+    }
+
     #[test]
     fn pointer_move_reports_tab_close_hover_changes_and_keeps_chords() {
         let mut app = state();

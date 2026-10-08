@@ -308,7 +308,7 @@ pub const HELP_COMPARE_GROUP: HelpGroup = HelpGroup {
         },
         HelpEntry {
             keys: super::render::TAB_CLOSE_GLYPH,
-            desc: "close tab (or :)",
+            desc: "close tab (Ctrl-w or :)",
         },
         HelpEntry {
             keys: "s u",
@@ -373,7 +373,7 @@ pub const HELP_FILE_GROUP: HelpGroup = HelpGroup {
         },
         HelpEntry {
             keys: super::render::TAB_CLOSE_GLYPH,
-            desc: "close tab",
+            desc: "close tab (Ctrl-w)",
         },
         HelpEntry {
             keys: "s u x S",
@@ -1421,7 +1421,11 @@ mod tests {
                 "' copy reference",
                 "e editor at line",
                 "r reload",
-                format!("{} close tab", super::super::render::TAB_CLOSE_GLYPH).as_str(),
+                format!(
+                    "{} close tab (Ctrl-w)",
+                    super::super::render::TAB_CLOSE_GLYPH
+                )
+                .as_str(),
                 "s u x S Workspace tab only",
                 "f p P d Workspace tab only",
             ]
@@ -1459,7 +1463,7 @@ mod tests {
             "Ctrl-o",
             "space",
             "e E",
-            "close tab",
+            "close tab (Ctrl-w or :)",
             "s u",
             "f p P d",
             "b c W",

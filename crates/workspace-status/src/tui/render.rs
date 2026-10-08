@@ -4245,7 +4245,7 @@ fn quick_open_command_rows(
                         ),
                         Span::styled(command.title.to_string(), style),
                     ];
-                    // Palette-only rows (Diff … in new tab, Close tab) have no key.
+                    // Palette-only rows (Diff … in new tab, Blame: …) have no key.
                     if !command.keys.is_empty() {
                         spans.push(Span::raw(" "));
                         spans.push(key_chip(
@@ -10349,10 +10349,22 @@ mod tests {
         assert!(next.ends_with(ONLY_WORKSPACE_TAB_OPEN), "{next}");
         let close = row("Close tab");
         let after_title = close.split("Close tab").nth(1).unwrap_or_default();
-        assert_eq!(
-            after_title.trim_start(),
-            WORKSPACE_TAB_CANNOT_CLOSE,
-            "no empty chip, no group label: {close}"
+        assert!(
+            after_title.trim_start().starts_with("Ctrl-w"),
+            "Close tab paints its key chip: {close}"
+        );
+        assert!(
+            after_title.ends_with(WORKSPACE_TAB_CANNOT_CLOSE),
+            "then its reason, no group label: {close}"
+        );
+        let diff = row("Diff commit vs parent in new tab");
+        let after_diff = diff
+            .split("Diff commit vs parent in new tab")
+            .nth(1)
+            .unwrap_or_default();
+        assert!(
+            !after_diff.contains("Ctrl-") && !after_diff.contains('['),
+            "a key-less row paints no empty chip: {diff}"
         );
         let other = row("Other pane");
         assert!(

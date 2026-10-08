@@ -684,7 +684,7 @@ fn key_to_action(
             ),
         },
         // A modifier chord falls through to `normal_key`, which keeps
-        // Ctrl-o / Ctrl-u / Ctrl-d and maps the rest to None.
+        // Ctrl-o / Ctrl-u / Ctrl-d / Ctrl-w and maps the rest to None.
         InputMode::GPending { .. } => match key.code {
             KeyCode::Char('g') if !has_command_modifier(key) => Action::MoveToStart,
             KeyCode::Char('t') if !has_command_modifier(key) => Action::NextTab,
@@ -991,10 +991,10 @@ fn diff_visual_key(key: KeyEvent) -> Action {
 
 /// Normal-mode keys, including the graph-stash and graph-commit row keys.
 ///
-/// Ctrl-o / Ctrl-u / Ctrl-d match first. Any other key with Ctrl / Alt /
-/// Super / Hyper / Meta is [`Action::None`], so Ctrl-f is not `f` fetch
-/// (Ctrl-p opens Quick Open files before this map runs). Shift alone still
-/// selects the shifted binding (`P` push).
+/// Ctrl-o / Ctrl-u / Ctrl-d / Ctrl-w (close tab) match first. Any other key
+/// with Ctrl / Alt / Super / Hyper / Meta is [`Action::None`], so Ctrl-f is
+/// not `f` fetch (Ctrl-p opens Quick Open files before this map runs). Shift
+/// alone still selects the shifted binding (`P` push).
 fn normal_key(
     key: KeyEvent,
     _right_is_diff: bool,
@@ -1011,6 +1011,9 @@ fn normal_key(
     }
     if is_ctrl_chord(key, 'd') {
         return Action::Move(5);
+    }
+    if is_ctrl_chord(key, 'w') || is_ctrl_chord(key, 'W') {
+        return Action::CloseTab;
     }
     if is_unbound_chord(key) {
         return Action::None;
@@ -3398,6 +3401,78 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_w_closes_the_tab_in_normal_keymaps_only() {
+        let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        let normal_like = [
+            normal(),
+            InputMode::Normal {
+                search_active: true,
+            },
+            InputMode::ZPending {
+                search_active: false,
+            },
+            InputMode::GPending {
+                search_active: false,
+            },
+        ];
+        for mode in normal_like {
+            for event in [
+                ctrl(KeyCode::Char('w')),
+                with_mods('w', ctrl_shift),
+                with_mods('W', ctrl_shift),
+                with_mods('W', KeyModifiers::CONTROL),
+            ] {
+                assert_eq!(
+                    event_to_action(&event, mode, true, true),
+                    Action::CloseTab,
+                    "{mode:?} {event:?}"
+                );
+            }
+            // Alt / Super chords stay unbound; plain `w` is unchanged.
+            for mods in [
+                KeyModifiers::ALT,
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyModifiers::CONTROL | KeyModifiers::SUPER,
+            ] {
+                assert_eq!(
+                    event_to_action(&with_mods('w', mods), mode, true, true),
+                    Action::None,
+                    "{mode:?} {mods:?}"
+                );
+            }
+            assert_eq!(
+                event_to_action(&key(KeyCode::Char('w')), mode, true, true),
+                Action::None,
+                "{mode:?} plain w"
+            );
+        }
+        // Plain `W` still removes a worktree.
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('W')), normal(), true, true),
+            Action::RemoveWorktree
+        );
+        // Text input keeps Ctrl-w: the comment editor gets the key (delete
+        // word), the filter prompts and Quick Open do not close the tab.
+        let ctrl_w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert_eq!(
+            event_to_action(&Event::Key(ctrl_w), InputMode::Comment, true, true),
+            Action::CommentInput(ctrl_w)
+        );
+        for mode in [
+            InputMode::QuickOpen,
+            InputMode::SearchPrompt,
+            InputMode::HelpSearch,
+            InputMode::CreateBranch,
+        ] {
+            assert_eq!(
+                event_to_action(&Event::Key(ctrl_w), mode, true, true),
+                Action::None,
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
     fn ctrl_f_opens_search_files_and_plain_f_stays_fetch() {
         let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
         let openers = [
@@ -3969,7 +4044,7 @@ mod tests {
                 // Explicit Ctrl chords keep their own bindings: Ctrl-c
                 // everywhere, Ctrl-p (Ctrl alone) where Quick Open opens,
                 // Ctrl-f (Shift allowed) where search in files opens,
-                // Ctrl-o / u / d in Normal and pending chords, Ctrl-u / d in
+                // Ctrl-o / u / d / w in Normal and pending chords, Ctrl-u / d in
                 // highlight.
                 let ctrl_only = !mods.intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
                     && mods.contains(KeyModifiers::CONTROL);
@@ -3985,6 +4060,7 @@ mod tests {
                     Char('p') => (normal_like || visual) && mods == KeyModifiers::CONTROL,
                     Char('f' | 'F') => normal_like || visual,
                     Char('o') => normal_like,
+                    Char('w' | 'W') => normal_like,
                     Char('u' | 'd') => normal_like || visual,
                     _ => false,
                 };

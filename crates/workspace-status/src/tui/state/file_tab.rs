@@ -814,6 +814,20 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_w_closes_the_active_file_tab() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = state();
+        open_loaded(&mut app, "README.md", &["# app"]);
+        assert!(app.is_file_tab());
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        let action = crate::tui::keys::event_to_action(&event, app.input_mode(), false, false);
+        assert_eq!(action, Action::CloseTab);
+        app.dispatch(action);
+        assert!(app.tabs.is_workspace());
+        assert!(!app.is_file_tab());
+    }
+
+    #[test]
     fn closing_file_tab_keeps_a_compare_tab_working() {
         let mut app = state();
         open_loaded(&mut app, "README.md", &["# app"]);
