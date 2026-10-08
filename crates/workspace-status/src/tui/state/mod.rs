@@ -108,7 +108,7 @@ use super::tabs::{
 };
 #[cfg(test)]
 use super::theme::DEFAULT_THEME_ID;
-use super::theme::{cycle_theme_id, ThemeId};
+use super::theme::{cycle_theme_id, BackgroundMode, ThemeId};
 use super::tree::{
     build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, visible_for_tree,
     visible_window, workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
@@ -757,6 +757,9 @@ pub struct AppState {
     /// Mouse events are dropped then, since no pane was painted to hit.
     pub(crate) too_small: bool,
     pub theme: ThemeId,
+    /// Who paints pane and chrome backgrounds. Launch default
+    /// [`BackgroundMode::Paint`]; `viewDefaults.background` sets it.
+    pub background: BackgroundMode,
     pub mouse_enabled: bool,
     /// Last pointer cell `(col, row)` from any-event motion. `None` when
     /// unknown or mouse capture is off. Paint derives the tab `[✗]` hover
@@ -821,13 +824,18 @@ impl AppState {
         )
     }
 
-    /// Test state with a unique temp viewed store and the default theme.
+    /// Test state with a unique temp viewed store, the default theme, and
+    /// [`BackgroundMode::Terminal`] (see [`Self::with_viewed_path`]).
     #[cfg(test)]
     pub fn new(cwd: PathBuf, snapshot: WorkspaceSnapshot, ascii: bool) -> Self {
         Self::with_viewed_path(cwd, snapshot, ascii, default_viewed_path())
     }
 
     /// Test state with `viewed_path`; the comment store sits next to it.
+    ///
+    /// Pins [`BackgroundMode::Terminal`], the v0.1.244 look (boxed panes, no
+    /// fills), so render tests keep proving that mode is unchanged. Tests of
+    /// the painted look set [`BackgroundMode::Paint`] themselves.
     #[cfg(test)]
     pub(crate) fn with_viewed_path(
         cwd: PathBuf,
@@ -836,14 +844,16 @@ impl AppState {
         viewed_path: PathBuf,
     ) -> Self {
         let comment_path = viewed_path.with_file_name("comments.json");
-        Self::build(
+        let mut state = Self::build(
             cwd,
             snapshot,
             ascii,
             viewed_path,
             comment_path,
             DEFAULT_THEME_ID,
-        )
+        );
+        state.background = BackgroundMode::Terminal;
+        state
     }
 
     fn build(
@@ -953,6 +963,7 @@ impl AppState {
             painted_frame: Buffer::default(),
             too_small: false,
             theme,
+            background: BackgroundMode::default(),
             mouse_enabled: true,
             pointer: None,
             popover: None,
@@ -1019,6 +1030,9 @@ impl AppState {
         }
         if let Some(on) = defaults.line_blame {
             self.line_blame.set_enabled(on);
+        }
+        if let Some(background) = defaults.background {
+            self.background = background;
         }
     }
 
@@ -14289,6 +14303,11 @@ mod tests {
         assert!(app.commit_msg_expand);
         assert_eq!(app.commit_msg_lines, COMMIT_MSG_LINES_DEFAULT);
         assert_eq!(
+            app.background,
+            BackgroundMode::Terminal,
+            "omitted background keeps the fixture's terminal pin"
+        );
+        assert_eq!(
             app.rows
                 .iter()
                 .map(|row| row.id.clone())
@@ -14305,6 +14324,7 @@ mod tests {
             commit_message_expand: Some(false),
             line_blame: None,
             commit_message_lines: Some(3),
+            background: Some(BackgroundMode::Paint),
         });
         assert!(!app.tree_mode);
         assert!(app.rows.iter().all(|row| row.kind != NodeKind::Dir));
@@ -14315,7 +14335,36 @@ mod tests {
         assert!(!app.diff_wrap);
         assert!(!app.commit_msg_expand);
         assert_eq!(app.commit_msg_lines, 3);
+        assert_eq!(app.background, BackgroundMode::Paint);
         assert_eq!(app.status, "", "launch defaults post no status");
+
+        app.apply_view_defaults(&ViewDefaults {
+            background: Some(BackgroundMode::Terminal),
+            ..ViewDefaults::default()
+        });
+        assert_eq!(app.background, BackgroundMode::Terminal);
+    }
+
+    #[test]
+    fn launch_with_no_env_and_no_config_paints_background() {
+        let viewed = default_viewed_path();
+        let comments = viewed.with_extension("comments.json");
+        let (viewed_s, comments_s) = (viewed.display().to_string(), comments.display().to_string());
+        let settings = Settings::resolve(&Default::default(), |key| match key {
+            "WS_STATUS_VIEWED_STORE" => Some(viewed_s.clone()),
+            "WS_STATUS_COMMENT_STORE" => Some(comments_s.clone()),
+            _ => None,
+        });
+        let snapshot = build_workspace_snapshot(&[tree_repo()], &[], false, &[]);
+        let mut app = AppState::launch(PathBuf::from("/tmp"), snapshot, &settings);
+        assert_eq!(app.background, BackgroundMode::Paint);
+
+        app.apply_view_defaults(&ViewDefaults::default());
+        assert_eq!(
+            app.background,
+            BackgroundMode::Paint,
+            "an empty viewDefaults keeps the paint launch default"
+        );
     }
 
     #[test]

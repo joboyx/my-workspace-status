@@ -26,7 +26,7 @@ Merge rules:
 - `ignoredRepos` is required in the workspace file when that file exists. In the user file it is optional; an omitted or `null` user `ignoredRepos` sets nothing. A wrong type is an error in both files.
 - Nothing writes either file.
 
-PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` point `XDG_CONFIG_HOME` at an empty temp dir, so a user file cannot change their results. CI guards those TTY spawn paths only: `tty_spawn_paths_isolate_user_config` in `crates/workspace-status/tests/release_watch.rs`. The CLI integration tests that run the binary (`snapshot_contract.rs`, `update.rs`, `seed_demo_workspace.rs`) also set `XDG_CONFIG_HOME`, but no CI guard checks them.
+PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` point `XDG_CONFIG_HOME` at a temp dir, so a user file cannot change their results. The PTY and desktop harnesses write a fixed baseline user file there (theme and `viewDefaults.background`, see [tui-tty-e2e.md](tui-tty-e2e.md)); the capture script leaves it empty. CI guards those TTY spawn paths only: `tty_spawn_paths_isolate_user_config` in `crates/workspace-status/tests/release_watch.rs`. The CLI integration tests that run the binary (`snapshot_contract.rs`, `update.rs`, `seed_demo_workspace.rs`) also set `XDG_CONFIG_HOME`, but no CI guard checks them.
 
 ## `.workspace-status-config.json`
 
@@ -190,7 +190,8 @@ Optional object. It sets the TUI view modes at launch. Each key is optional. An 
   "wrap": "unwrap",
   "commitMessage": "collapse",
   "commitMessageLines": 12,
-  "lineBlame": "hide"
+  "lineBlame": "hide",
+  "background": "terminal"
 }
 ```
 
@@ -203,12 +204,14 @@ Optional object. It sets the TUI view modes at launch. Each key is optional. An 
 | `commitMessage`      | `expand` \| `collapse` | `expand`       | `M`                          |
 | `commitMessageLines` | integer `1` to `20`    | `4`            | `-` / `+` (`=` is `+`)       |
 | `lineBlame`          | `show` \| `hide`       | `show`         | `B`                          |
+| `background`         | `paint` \| `terminal`  | `paint`        | —                            |
 
 - String values are trimmed, then matched case-sensitively.
 - A string key with a value of the wrong type, an unknown value, or a blank value is an error: `<file> viewDefaults.<key> must be "<a>" or "<b>"`. `<file>` is `.workspace-status-config.json` for the workspace file, or the full path of the user file. A `viewDefaults` that is not an object is an error. An unknown key inside it is an error that names the key. A typo never falls back silently.
 - `commitMessageLines` is the number of message rows in the expanded commit-message footer (graph pane and commit-files pane). It must be a JSON integer from 1 to 20. A string, a fraction (`8.5`, also `8.0`), a bool, `null`, or a number out of range is an error: `<file> viewDefaults.commitMessageLines must be an integer from 1 to 20` (same `<file>` label).
 - `"viewDefaults": null` counts as omitted.
 - The config loads before the CLI picks a mode, so an invalid `viewDefaults` also fails `--plain` and `--json`. Valid values do not change that output.
+- `background` picks who paints the pane and chrome backgrounds. `paint` fills them with theme colours. `terminal` keeps boxed panes with no fills, so the terminal background shows through. Popups sit on the theme panel colour in both modes. There is no session toggle and no env var.
 - `commitTree` sets the commit file list in commit drills and in each new compare tab. A `t` toggle changes the current tab only. The next compare tab opens in the `commitTree` mode again.
 - `-a` / `--all` and positional repo paths keep `viewDefaults`.
 - `diff: "split"` does not force side-by-side in a narrow pane. The split to inline fallback below `NARROW_SXS` still applies (see **Defaults**).
@@ -296,6 +299,7 @@ On many macOS setups there is no dedicated PageUp key. `Fn+Up` and `Fn+Down` oft
 | Message rows     | 4 rows in the expanded commit-message footer, whatever the message length. `viewDefaults.commitMessageLines` overrides at launch (1 to 20)        | `-` / `+` (`=` is `+`)                               |
 | Line blame       | On. `viewDefaults.lineBlame` overrides at launch                                                                                                  | `B`                                                  |
 | Theme            | Tokyo Night                                                                                                                                       | `T` cycles / `WS_STATUS_THEME`                       |
+| Background       | Paint: theme colours fill the panes and chrome rows. `viewDefaults.background` overrides at launch                                                | —                                                    |
 | Live refresh     | On, 3 s                                                                                                                                           | `WS_STATUS_WATCH_MS=0`                               |
 | Background fetch | On, 5 min                                                                                                                                         | `WS_STATUS_FETCH_MS=0`                               |
 | Initial folds    | The "No updates" group collapsed, plus any repo the TUI was given as ignored (positional args only — never under `-a` or after `.` shows ignored) | `z` / `h` / `l`                                      |

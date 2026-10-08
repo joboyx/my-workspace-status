@@ -12,7 +12,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::helpers::normalize_filter_repo;
-use crate::tui::theme::{ThemeId, THEME_IDS};
+use crate::tui::theme::{BackgroundMode, ThemeId, THEME_IDS};
 use serde::Deserialize;
 use workspace_status_graph::{COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN};
 
@@ -117,6 +117,9 @@ pub struct ViewDefaults {
     /// footer, an integer from [`COMMIT_MSG_LINES_MIN`] to
     /// [`COMMIT_MSG_LINES_MAX`].
     pub commit_message_lines: Option<usize>,
+    /// `background`: [`BackgroundMode::Paint`] for `"paint"`,
+    /// [`BackgroundMode::Terminal`] for `"terminal"`.
+    pub background: Option<BackgroundMode>,
 }
 
 impl WorkspaceStatusConfig {
@@ -241,7 +244,7 @@ fn parse_view_defaults(
     let Some(obj) = v.as_object() else {
         return Err(format!("{file} viewDefaults must be an object"));
     };
-    const KEYS: [&str; 7] = [
+    const KEYS: [&str; 8] = [
         "tree",
         "commitTree",
         "diff",
@@ -249,6 +252,7 @@ fn parse_view_defaults(
         "commitMessage",
         "commitMessageLines",
         "lineBlame",
+        "background",
     ];
     if let Some(key) = obj.keys().find(|k| !KEYS.contains(&k.as_str())) {
         return Err(format!("{file} viewDefaults has unknown key \"{key}\""));
@@ -261,6 +265,13 @@ fn parse_view_defaults(
         commit_message_expand: parse_view_choice(file, obj, "commitMessage", "expand", "collapse")?,
         line_blame: parse_view_choice(file, obj, "lineBlame", "show", "hide")?,
         commit_message_lines: parse_view_msg_lines(file, obj)?,
+        background: parse_view_choice(file, obj, "background", "paint", "terminal")?.map(|paint| {
+            if paint {
+                BackgroundMode::Paint
+            } else {
+                BackgroundMode::Terminal
+            }
+        }),
     })
 }
 
@@ -275,6 +286,7 @@ impl ViewDefaults {
             commit_message_expand: over.commit_message_expand.or(self.commit_message_expand),
             line_blame: over.line_blame.or(self.line_blame),
             commit_message_lines: over.commit_message_lines.or(self.commit_message_lines),
+            background: over.background.or(self.background),
         }
     }
 }
@@ -889,7 +901,7 @@ mod tests {
     #[test]
     fn view_defaults_first_values_are_true() {
         let got = load_view_defaults(
-            r#"{"ignoredRepos":[],"viewDefaults":{"tree":"tree","commitTree":"tree","diff":"split","wrap":"wrap","commitMessage":"expand","lineBlame":"show"}}"#,
+            r#"{"ignoredRepos":[],"viewDefaults":{"tree":"tree","commitTree":"tree","diff":"split","wrap":"wrap","commitMessage":"expand","lineBlame":"show","background":"paint"}}"#,
         )
         .unwrap();
         assert_eq!(
@@ -902,6 +914,7 @@ mod tests {
                 commit_message_expand: Some(true),
                 line_blame: Some(true),
                 commit_message_lines: None,
+                background: Some(BackgroundMode::Paint),
             }
         );
     }
@@ -909,7 +922,7 @@ mod tests {
     #[test]
     fn view_defaults_second_values_are_false() {
         let got = load_view_defaults(
-            r#"{"ignoredRepos":[],"viewDefaults":{"tree":"flat","commitTree":"flat","diff":"inline","wrap":"unwrap","commitMessage":"collapse","lineBlame":"hide"}}"#,
+            r#"{"ignoredRepos":[],"viewDefaults":{"tree":"flat","commitTree":"flat","diff":"inline","wrap":"unwrap","commitMessage":"collapse","lineBlame":"hide","background":"terminal"}}"#,
         )
         .unwrap();
         assert_eq!(
@@ -922,6 +935,7 @@ mod tests {
                 commit_message_expand: Some(false),
                 line_blame: Some(false),
                 commit_message_lines: None,
+                background: Some(BackgroundMode::Terminal),
             }
         );
     }
@@ -932,6 +946,13 @@ mod tests {
             .unwrap();
         assert_eq!(got.wrap, Some(false));
         assert_eq!(got.tree, None);
+
+        let got = load_view_defaults(
+            r#"{"ignoredRepos":[],"viewDefaults":{"background":" terminal  "}}"#,
+        )
+        .unwrap();
+        assert_eq!(got.background, Some(BackgroundMode::Terminal));
+        assert_eq!(got.wrap, None);
     }
 
     #[test]
@@ -961,6 +982,9 @@ mod tests {
             ("commitMessage", "null", r#""expand" or "collapse""#),
             ("lineBlame", r#""on""#, r#""show" or "hide""#),
             ("lineBlame", "true", r#""show" or "hide""#),
+            ("background", r#""Paint""#, r#""paint" or "terminal""#),
+            ("background", r#""none""#, r#""paint" or "terminal""#),
+            ("background", "false", r#""paint" or "terminal""#),
         ];
         for (key, raw, choices) in cases {
             let err = load_view_defaults(&format!(
@@ -1020,6 +1044,15 @@ mod tests {
         assert_eq!(
             err,
             r#".workspace-status-config.json viewDefaults has unknown key "theme""#
+        );
+
+        let err = load_view_defaults(
+            r#"{"ignoredRepos":[],"viewDefaults":{"background":"paint","backgroundColor":"paint"}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            r#".workspace-status-config.json viewDefaults has unknown key "backgroundColor""#
         );
     }
 
@@ -1136,7 +1169,9 @@ mod tests {
             Some(
                 r#"{"ignoredRepos":[],"viewDefaults":{"tree":"flat","wrap":"unwrap","commitMessageLines":12}}"#,
             ),
-            Some(r#"{"ignoredRepos":[],"viewDefaults":{"wrap":"wrap","lineBlame":"hide"}}"#),
+            Some(
+                r#"{"ignoredRepos":[],"viewDefaults":{"wrap":"wrap","lineBlame":"hide","background":"terminal"}}"#,
+            ),
         )
         .unwrap();
         assert_eq!(
@@ -1146,8 +1181,20 @@ mod tests {
                 wrap: Some(true),
                 line_blame: Some(false),
                 commit_message_lines: Some(12),
+                background: Some(BackgroundMode::Terminal),
                 ..ViewDefaults::default()
             }
+        );
+
+        let cfg = load_layered(
+            Some(r#"{"ignoredRepos":[],"viewDefaults":{"background":"terminal"}}"#),
+            Some(r#"{"ignoredRepos":[],"viewDefaults":{"wrap":"wrap"}}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.view_defaults.background,
+            Some(BackgroundMode::Terminal),
+            "user background survives a workspace file that omits it"
         );
     }
 

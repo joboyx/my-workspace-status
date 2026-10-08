@@ -32,6 +32,20 @@ pub const THEME_IDS: [ThemeId; 5] = [
 /// Default when neither `WS_STATUS_THEME` nor the config `theme` key sets a theme.
 pub const DEFAULT_THEME_ID: ThemeId = ThemeId::TokyoNight;
 
+/// Who paints the pane and chrome backgrounds (`viewDefaults.background`).
+///
+/// Popups sit on the theme panel colour in both modes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BackgroundMode {
+    /// `"paint"`: the TUI fills panes and chrome rows with theme colours
+    /// and draws flat panes with no border glyphs. The launch default.
+    #[default]
+    Paint,
+    /// `"terminal"`: boxed panes with no fills, so the terminal background
+    /// shows through.
+    Terminal,
+}
+
 /// Ratatui colours for the active theme.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {

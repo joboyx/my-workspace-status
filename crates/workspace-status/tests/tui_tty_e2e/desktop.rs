@@ -18,7 +18,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::common::hscroll::TREE_HSCROLL_TAIL;
-use super::harness::{clipped_long_path_row, write_fresh_update_check, COLS, ROWS};
+use super::harness::{
+    clipped_long_path_row, write_baseline_user_config, write_fresh_update_check, COLS, ROWS,
+};
 use super::seed::git_env;
 
 const OPENBOX_RC: &str = include_str!("../../../../scripts/openbox.xml");
@@ -62,10 +64,11 @@ impl DesktopSession {
         fs::create_dir_all(&state_home).unwrap();
         let update_store = state_home.join("update-check.json");
         write_fresh_update_check(&update_store);
-        // Empty user config dir: an operator user config file cannot change
-        // the fixture's settings.
+        // Temp user config dir with the harness baseline file: an operator
+        // user config file cannot change the fixture's settings.
         let config_home = workspace.join(".e2e-config");
         fs::create_dir_all(&config_home).unwrap();
+        write_baseline_user_config(&config_home);
 
         let bin = env!("CARGO_BIN_EXE_workspace-status");
         let launcher = stage.join("run-tui.sh");

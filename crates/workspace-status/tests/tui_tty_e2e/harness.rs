@@ -34,6 +34,23 @@ pub const SGR_WHEEL_RIGHT_MOTION: u8 = 67 | 32;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(12);
 
+/// User config the harness writes before a spawn: the v0.1.244 look
+/// (Tokyo Night, boxed panes on the terminal background). Existing PTY and
+/// desktop tests assert that look, so a change to the shipped defaults does
+/// not move them. `WS_STATUS_THEME` in a test's env still beats this theme.
+pub const BASELINE_USER_CONFIG: &str =
+    "{\"theme\":\"tokyo-night\",\"viewDefaults\":{\"background\":\"terminal\"}}\n";
+
+/// Which user config file a spawn starts with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UserConfig {
+    /// Write [`BASELINE_USER_CONFIG`] unless the file already exists.
+    Baseline,
+    /// Write nothing. The test writes its own file, or runs on the shipped
+    /// defaults.
+    Own,
+}
+
 pub struct PtySession {
     child: Box<dyn portable_pty::Child + Send>,
     writer: Box<dyn Write + Send>,
@@ -71,7 +88,19 @@ impl PtySession {
         rows: u16,
         extra_env: &[(&str, &str)],
     ) -> Self {
-        Self::spawn(workspace, cols, rows, extra_env, None, true)
+        Self::open_size_with_config(workspace, cols, rows, extra_env, UserConfig::Baseline)
+    }
+
+    /// Spawn with an explicit user config choice. [`UserConfig::Own`] skips
+    /// the [`BASELINE_USER_CONFIG`] pin, for tests of the shipped look.
+    pub fn open_size_with_config(
+        workspace: &Path,
+        cols: u16,
+        rows: u16,
+        extra_env: &[(&str, &str)],
+        user_config: UserConfig,
+    ) -> Self {
+        Self::spawn(workspace, cols, rows, extra_env, None, true, user_config)
     }
 
     /// Spawn without waiting for the TUI. Used when the GitHub Release
@@ -88,6 +117,7 @@ impl PtySession {
             extra_env,
             Some(last_check_unix),
             false,
+            UserConfig::Baseline,
         )
     }
 
@@ -98,6 +128,7 @@ impl PtySession {
         extra_env: &[(&str, &str)],
         last_check_unix: Option<u64>,
         wait_ready: bool,
+        user_config: UserConfig,
     ) -> Self {
         assert!(
             workspace.is_dir(),
@@ -170,12 +201,19 @@ impl PtySession {
         let update_store = state_home.join("update-check.json");
         write_update_check(&update_store, last_check_unix);
         cmd.env("WS_STATUS_UPDATE_CHECK_STORE", &update_store);
-        // Empty user config dir: an operator user config file cannot change
-        // the fixture's settings.
-        if !extra_has("XDG_CONFIG_HOME") {
-            let config_home = workspace.join(".e2e-config");
-            fs::create_dir_all(&config_home).unwrap();
-            cmd.env("XDG_CONFIG_HOME", &config_home);
+        // Temp user config dir: an operator user config file cannot change
+        // the fixture's settings. A test may pass its own dir.
+        let config_home = match extra_env.iter().find(|(k, _)| *k == "XDG_CONFIG_HOME") {
+            Some((_, dir)) => PathBuf::from(dir),
+            None => {
+                let config_home = workspace.join(".e2e-config");
+                fs::create_dir_all(&config_home).unwrap();
+                cmd.env("XDG_CONFIG_HOME", &config_home);
+                config_home
+            }
+        };
+        if user_config == UserConfig::Baseline {
+            write_baseline_user_config(&config_home);
         }
 
         let child = pair
@@ -1058,6 +1096,23 @@ pub(crate) fn write_fresh_update_check(path: &Path) {
 }
 
 /// `last_check_unix = None` writes "now" so the startup prompt is skipped.
+/// Path of the user config file under `config_home` (`$XDG_CONFIG_HOME`).
+pub fn user_config_file(config_home: &Path) -> PathBuf {
+    config_home.join("my-workspace-status").join("config.json")
+}
+
+/// Write [`BASELINE_USER_CONFIG`] under `config_home`. Skips a file that
+/// already exists: a test that writes its own user config owns all of it,
+/// theme and background included.
+pub(crate) fn write_baseline_user_config(config_home: &Path) {
+    let file = user_config_file(config_home);
+    if file.exists() {
+        return;
+    }
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(file, BASELINE_USER_CONFIG).unwrap();
+}
+
 pub(crate) fn write_update_check(path: &Path, last_check_unix: Option<u64>) {
     let unix = last_check_unix.unwrap_or_else(|| {
         SystemTime::now()
