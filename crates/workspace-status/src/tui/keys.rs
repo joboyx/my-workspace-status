@@ -1063,7 +1063,7 @@ fn normal_key(
         KeyCode::Char('>') => Action::ResizeTree(1),
         KeyCode::Char('\\') => Action::ToggleDiffWrap,
         KeyCode::Char('M') => Action::ToggleCommitMsgExpand,
-        KeyCode::Char('-') => Action::ResizeCommitMsg(-1),
+        KeyCode::Char('-') => Action::ExplorerReveal,
         KeyCode::Char('+') | KeyCode::Char('=') => Action::ResizeCommitMsg(1),
         KeyCode::Char('B') => Action::ToggleLineBlame,
         KeyCode::Char('A') => Action::BlameMenu,
@@ -1227,10 +1227,12 @@ mod tests {
         );
     }
 
+    /// `-` is [`Action::ExplorerReveal`] (dispatch picks Explorer or the
+    /// commit-message shrink); `+` / `=` grow the commit message.
     #[test]
     fn minus_plus_equals_resize_the_commit_message_in_normal_mode_only() {
         for (code, want) in [
-            (KeyCode::Char('-'), Action::ResizeCommitMsg(-1)),
+            (KeyCode::Char('-'), Action::ExplorerReveal),
             (KeyCode::Char('+'), Action::ResizeCommitMsg(1)),
             (KeyCode::Char('='), Action::ResizeCommitMsg(1)),
         ] {
@@ -3857,7 +3859,7 @@ mod tests {
             (n, 0, Char('>'), Action::ResizeTree(1)),
             (n, 0, Char('\\'), Action::ToggleDiffWrap),
             (n, 0, Char('M'), Action::ToggleCommitMsgExpand),
-            (n, 0, Char('-'), Action::ResizeCommitMsg(-1)),
+            (n, 0, Char('-'), Action::ExplorerReveal),
             (n, 0, Char('+'), Action::ResizeCommitMsg(1)),
             (n, 0, Char('='), Action::ResizeCommitMsg(1)),
             (n, 0, Char('B'), Action::ToggleLineBlame),

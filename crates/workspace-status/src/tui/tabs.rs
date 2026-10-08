@@ -1,9 +1,10 @@
-//! Session tab strip: permanent Workspace plus compare and file tabs.
+//! Session tab strip: permanent Workspace plus compare, file, and Explorer
+//! tabs.
 //!
 //! Compare identity is `(checkout_path, base_ref, head_ref, worktree_file)`
 //! (`worktree_file` only on a commit-vs-working-tree tab); file identity
-//! is `(checkout, rel)`. Both kinds share one strip in creation order and
-//! one id counter. Tabs are session-only.
+//! is `(checkout, rel)`; Explorer identity is the checkout. All kinds share
+//! one strip in creation order and one id counter. Tabs are session-only.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -13,6 +14,7 @@ use crate::file_index::FileRead;
 
 use super::diff::DiffContent;
 use super::drill::{CommitFile, CommitFileSource};
+use super::explorer::ExplorerTree;
 
 /// Palette / overlay copy when the focused row is not a compare target.
 pub const FOCUS_A_CHECKOUT: &str = "Focus a checkout to compare";
@@ -35,6 +37,14 @@ pub const REVIEWED_MARKS_NEED_A_COMMIT_RANGE: &str = "reviewed marks need a comm
 pub const NOT_ON_WORKTREE_COMPARE: &str = "not available on a working-tree compare";
 /// Palette copy when Close is run on the Workspace tab.
 pub const WORKSPACE_TAB_CANNOT_CLOSE: &str = "Workspace tab cannot be closed";
+
+/// Refusal copy for git writes and Workspace-only actions on an Explorer
+/// tab.
+pub const EXPLORER_TAB_READ_ONLY: &str = "Explorer tab is read-only · switch to Workspace tab";
+/// Refusal copy for `/` on an Explorer tab.
+pub const EXPLORER_HAS_NO_SEARCH: &str = "no search on the Explorer tab · Ctrl-f searches files";
+/// Explorer preview copy on a folder row.
+pub const EXPLORER_FOLDER_HINT: &str = "folder · l / Enter opens or closes it";
 
 /// `gt` / `gT` and the Next / Previous tab palette rows with no compare tab.
 pub const ONLY_WORKSPACE_TAB_OPEN: &str = "only the Workspace tab is open";
@@ -665,13 +675,128 @@ impl FileTab {
     }
 }
 
-/// One tab after Workspace: a compare tab or a file tab.
+/// What the Explorer preview pane shows for the focused tree row.
+#[derive(Clone, Debug)]
+pub enum ExplorerPreview {
+    /// A folder row, or no row: the pane paints a short hint.
+    None,
+    /// A file with git changes: its worktree diff, the same load as the
+    /// Workspace tab's diff pane.
+    Diff {
+        /// Path relative to the checkout.
+        rel: String,
+        /// Loaded diff (empty while `loading`).
+        content: DiffContent,
+        /// True while the load is in flight.
+        loading: bool,
+    },
+    /// A clean file: a read-only body, painted like a file tab. Its
+    /// [`FileTab::id`] is the Explorer tab id and its
+    /// [`FileTab::generation`] the preview generation.
+    File(FileTab),
+}
+
+impl ExplorerPreview {
+    /// Path of the previewed file, `None` for [`Self::None`].
+    pub fn rel(&self) -> Option<&str> {
+        match self {
+            Self::None => None,
+            Self::Diff { rel, .. } => Some(rel),
+            Self::File(tab) => Some(&tab.rel),
+        }
+    }
+}
+
+/// One session-only Explorer tab: a file tree of one checkout beside a
+/// preview of the focused file.
+#[derive(Clone, Debug)]
+pub struct ExplorerTab {
+    /// Stable id for in-flight loads (shared counter with other tabs).
+    pub id: u64,
+    /// Checkout path (same string as snapshot `repo`). Tab identity.
+    pub checkout: String,
+    /// Folder listings, expanded set, and cursor.
+    pub tree: ExplorerTree,
+    /// Folder rel → id of its newest listing request. A listing for any
+    /// other id is stale and dropped.
+    pub dir_reqs: HashMap<String, u64>,
+    /// Last folder listing request id.
+    pub dir_req: u64,
+    /// Preview of the focused row.
+    pub preview: ExplorerPreview,
+    /// Preview load generation. A result for an older one is dropped.
+    pub preview_gen: u64,
+    /// First painted tree row.
+    pub tree_scroll: usize,
+    /// Rel path of the cursor row in the last paint (the breadcrumb reads
+    /// it, so a frame walks the tree once).
+    pub painted_rel: Option<String>,
+    /// Parked pane focus: true when the preview has focus.
+    pub focus_preview: bool,
+    /// Parked diff cursor of a diff preview.
+    pub diff_cursor: usize,
+    /// Parked diff scroll of a diff preview.
+    pub diff_scroll: u16,
+    /// Parked diff pan of a diff preview.
+    pub diff_col_offset: u16,
+}
+
+impl ExplorerTab {
+    fn new(id: u64, checkout: String) -> Self {
+        Self {
+            id,
+            checkout,
+            tree: ExplorerTree::new(),
+            dir_reqs: HashMap::new(),
+            dir_req: 0,
+            preview: ExplorerPreview::None,
+            preview_gen: 0,
+            tree_scroll: 0,
+            painted_rel: None,
+            focus_preview: false,
+            diff_cursor: 0,
+            diff_scroll: 0,
+            diff_col_offset: 0,
+        }
+    }
+
+    /// Strip label: `Explorer · <checkout leaf>`.
+    pub fn label(&self) -> String {
+        format!("Explorer · {}", checkout_leaf(&self.checkout))
+    }
+
+    /// Record a listing request for folder `rel_dir` and return its id.
+    pub fn next_dir_req(&mut self, rel_dir: &str) -> u64 {
+        self.dir_req = self.dir_req.saturating_add(1);
+        self.dir_reqs.insert(rel_dir.to_string(), self.dir_req);
+        self.dir_req
+    }
+
+    /// Show `preview` for a new load and return its generation.
+    pub fn next_preview(&mut self, preview: ExplorerPreview) -> u64 {
+        self.preview_gen = self.preview_gen.saturating_add(1);
+        self.preview = preview;
+        self.preview_gen
+    }
+
+    /// A clean-file preview of `rel`, loading, at generation `gen`.
+    pub fn file_preview(&self, rel: &str, gen: u64) -> ExplorerPreview {
+        let display = format!("{}/{rel}", self.checkout);
+        let mut file = FileTab::new(self.id, self.checkout.clone(), rel.to_string(), display);
+        file.generation = gen;
+        ExplorerPreview::File(file)
+    }
+}
+
+/// One tab after Workspace: a compare, file, or Explorer tab.
 #[derive(Clone, Debug)]
 pub enum SessionTab {
     /// Committed-range compare tab.
     Compare(CompareTab),
     /// Read-only file viewer tab.
     File(FileTab),
+    /// File tree of one checkout.
+    Explorer(ExplorerTab),
 }
 
 impl SessionTab {
@@ -680,6 +805,7 @@ impl SessionTab {
         match self {
             Self::Compare(tab) => tab.label(),
             Self::File(tab) => tab.label(),
+            Self::Explorer(tab) => tab.label(),
         }
     }
 
@@ -687,7 +813,7 @@ impl SessionTab {
     pub fn as_compare(&self) -> Option<&CompareTab> {
         match self {
             Self::Compare(tab) => Some(tab),
-            Self::File(_) => None,
+            _ => None,
         }
     }
 
@@ -695,7 +821,7 @@ impl SessionTab {
     pub fn as_compare_mut(&mut self) -> Option<&mut CompareTab> {
         match self {
             Self::Compare(tab) => Some(tab),
-            Self::File(_) => None,
+            _ => None,
         }
     }
 
@@ -703,7 +829,7 @@ impl SessionTab {
     pub fn as_file(&self) -> Option<&FileTab> {
         match self {
             Self::File(tab) => Some(tab),
-            Self::Compare(_) => None,
+            _ => None,
         }
     }
 
@@ -711,12 +837,29 @@ impl SessionTab {
     pub fn as_file_mut(&mut self) -> Option<&mut FileTab> {
         match self {
             Self::File(tab) => Some(tab),
-            Self::Compare(_) => None,
+            _ => None,
+        }
+    }
+
+    /// The Explorer tab, if this is one.
+    pub fn as_explorer(&self) -> Option<&ExplorerTab> {
+        match self {
+            Self::Explorer(tab) => Some(tab),
+            _ => None,
+        }
+    }
+
+    /// Mutable [`Self::as_explorer`].
+    pub fn as_explorer_mut(&mut self) -> Option<&mut ExplorerTab> {
+        match self {
+            Self::Explorer(tab) => Some(tab),
+            _ => None,
         }
     }
 }
 
-/// Permanent Workspace plus compare and file tabs in creation order.
+/// Permanent Workspace plus compare, file, and Explorer tabs in creation
+/// order.
 #[derive(Clone, Debug)]
 pub struct TabStrip {
     /// 0 is Workspace. Session tabs follow.
@@ -781,6 +924,41 @@ impl TabStrip {
         self.active_tab_mut().and_then(SessionTab::as_file_mut)
     }
 
+    /// Active Explorer tab, if any.
+    pub fn active_explorer(&self) -> Option<&ExplorerTab> {
+        self.active_tab().and_then(SessionTab::as_explorer)
+    }
+
+    /// Mutable active Explorer tab, if any.
+    pub fn active_explorer_mut(&mut self) -> Option<&mut ExplorerTab> {
+        self.active_tab_mut().and_then(SessionTab::as_explorer_mut)
+    }
+
+    /// The read-only file body the active tab paints: a file tab, or the
+    /// clean-file preview of an Explorer tab.
+    pub fn active_file_view(&self) -> Option<&FileTab> {
+        match self.active_tab()? {
+            SessionTab::File(tab) => Some(tab),
+            SessionTab::Explorer(ExplorerTab {
+                preview: ExplorerPreview::File(tab),
+                ..
+            }) => Some(tab),
+            _ => None,
+        }
+    }
+
+    /// Mutable [`Self::active_file_view`].
+    pub fn active_file_view_mut(&mut self) -> Option<&mut FileTab> {
+        match self.active_tab_mut()? {
+            SessionTab::File(tab) => Some(tab),
+            SessionTab::Explorer(ExplorerTab {
+                preview: ExplorerPreview::File(tab),
+                ..
+            }) => Some(tab),
+            _ => None,
+        }
+    }
+
     /// Every compare tab in strip order.
     pub fn compare_tabs(&self) -> impl Iterator<Item = &CompareTab> {
         self.tabs.iter().filter_map(SessionTab::as_compare)
@@ -834,6 +1012,18 @@ impl TabStrip {
             .position(|tab| {
                 tab.as_file()
                     .is_some_and(|tab| tab.checkout == checkout && tab.rel == rel)
+            })
+            .map(|i| i + 1)
+    }
+
+    /// Find the Explorer tab of `checkout`. `0` is never returned
+    /// (Workspace).
+    pub fn find_explorer(&self, checkout: &str) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|tab| {
+                tab.as_explorer()
+                    .is_some_and(|tab| tab.checkout == checkout)
             })
             .map(|i| i + 1)
     }
@@ -910,6 +1100,19 @@ impl TabStrip {
         OpenFile::Created(id)
     }
 
+    /// Focus the Explorer tab of `checkout` or append a new one.
+    pub fn open_or_focus_explorer(&mut self, checkout: String) -> OpenFile {
+        if let Some(index) = self.find_explorer(&checkout) {
+            self.active = index;
+            return OpenFile::Focused;
+        }
+        let id = self.take_id();
+        self.tabs
+            .push(SessionTab::Explorer(ExplorerTab::new(id, checkout)));
+        self.active = self.tabs.len();
+        OpenFile::Created(id)
+    }
+
     #[cfg(test)]
     /// Close the active session tab. Workspace is a no-op.
     ///
@@ -918,8 +1121,7 @@ impl TabStrip {
         self.close_at(self.active)
     }
 
-    /// Close the compare or file tab at strip `index`. `0` (Workspace) is a
-    /// no-op.
+    /// Close the session tab at strip `index`. `0` (Workspace) is a no-op.
     ///
     /// Closing the active tab activates the tab immediately to the left.
     /// Closing a tab left of the active tab shifts `active` down by one.
@@ -1003,9 +1205,26 @@ impl TabStrip {
             .filter_map(SessionTab::as_file_mut)
             .find(|tab| tab.id == id)
     }
+
+    /// Explorer tab by stable id.
+    pub fn get_explorer_id(&self, id: u64) -> Option<&ExplorerTab> {
+        self.tabs
+            .iter()
+            .filter_map(SessionTab::as_explorer)
+            .find(|tab| tab.id == id)
+    }
+
+    /// Mutable Explorer tab by stable id.
+    pub fn get_explorer_id_mut(&mut self, id: u64) -> Option<&mut ExplorerTab> {
+        self.tabs
+            .iter_mut()
+            .filter_map(SessionTab::as_explorer_mut)
+            .find(|tab| tab.id == id)
+    }
 }
 
-/// Result of [`TabStrip::open_or_focus_file`].
+/// Result of [`TabStrip::open_or_focus_file`] and
+/// [`TabStrip::open_or_focus_explorer`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenFile {
     /// Existing identity. State is unchanged.

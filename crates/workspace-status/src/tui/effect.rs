@@ -53,6 +53,7 @@ use super::diff_tool::{
 use super::drill::{CommitFileSource, DrillView};
 #[cfg(test)]
 use super::event_pump::action_triggers_graph_autoload;
+use super::explorer::{list_dir, ExplorerEntry};
 use super::graph_load::{
     autoload_limit, autoload_skip, load_graph_model_window, merge_autoload, should_autoload,
     GraphIdentity, ShouldAutoload,
@@ -215,6 +216,21 @@ pub(crate) enum JobOutcome {
         gen: u64,
         body: FileRead,
     },
+    /// One Explorer folder listing for request `req`. `Err` is the read
+    /// error; the folder then lists empty.
+    ExplorerDir {
+        tab_id: u64,
+        req: u64,
+        rel_dir: String,
+        entries: Result<Vec<ExplorerEntry>, String>,
+    },
+    /// Explorer preview for generation `gen`: a worktree diff or a file
+    /// body.
+    ExplorerPreview {
+        tab_id: u64,
+        gen: u64,
+        body: ExplorerPreviewBody,
+    },
     /// `git blame -L n,n` answer for one focused line.
     LineBlame {
         key: BlameKey,
@@ -251,6 +267,89 @@ pub(crate) enum JobOutcome {
         lookup: PrLookup,
         opened: bool,
     },
+}
+
+/// Loaded Explorer preview of one file.
+#[derive(Debug)]
+pub(crate) enum ExplorerPreviewBody {
+    /// Worktree diff of a changed file.
+    Diff(super::diff::DiffContent),
+    /// Body of a clean file.
+    File(FileRead),
+}
+
+/// Queued Explorer pool job: the fields of [`Effect::LoadExplorerDir`] or
+/// [`Effect::LoadExplorerPreview`].
+#[derive(Clone, Debug)]
+enum ExplorerJob {
+    Dir {
+        tab_id: u64,
+        req: u64,
+        repo: String,
+        rel_dir: String,
+        parent_ignored: bool,
+    },
+    Preview {
+        tab_id: u64,
+        gen: u64,
+        repo: String,
+        path: String,
+        change: Option<crate::snapshot::FileChange>,
+        context: Option<u32>,
+    },
+}
+
+impl ExplorerJob {
+    /// Explorer tab the job loads for.
+    fn tab_id(&self) -> u64 {
+        match self {
+            Self::Dir { tab_id, .. } | Self::Preview { tab_id, .. } => *tab_id,
+        }
+    }
+}
+
+/// Run one Explorer job on a worker. Blocking: folder read plus one
+/// `git check-ignore`, a file read, or `git diff`.
+fn run_explorer_job(cwd: &Path, job: ExplorerJob) -> JobOutcome {
+    match job {
+        ExplorerJob::Dir {
+            tab_id,
+            req,
+            repo,
+            rel_dir,
+            parent_ignored,
+        } => {
+            let entries = list_dir(&cwd.join(&repo), &rel_dir, parent_ignored).map_err(|err| {
+                let folder = if rel_dir.is_empty() { &repo } else { &rel_dir };
+                format!("{folder}: {err}")
+            });
+            JobOutcome::ExplorerDir {
+                tab_id,
+                req,
+                rel_dir,
+                entries,
+            }
+        }
+        ExplorerJob::Preview {
+            tab_id,
+            gen,
+            repo,
+            path,
+            change,
+            context,
+        } => {
+            let body = match change {
+                Some(change) => ExplorerPreviewBody::Diff(super::diff::load_file_diff(
+                    cwd, &repo, &change, context,
+                )),
+                None => ExplorerPreviewBody::File(read_text_file(
+                    &cwd.join(&repo).join(&path),
+                    MAX_FILE_BYTES,
+                )),
+            };
+            JobOutcome::ExplorerPreview { tab_id, gen, body }
+        }
+    }
 }
 
 /// One popover detail fetch: the fields of
@@ -644,6 +743,11 @@ pub(crate) struct Interpreter {
     file_score_job: Option<(u64, Arc<FileIndex>, String)>,
     /// Queued file tab reads: tab id, load generation, checkout, path.
     file_tab_jobs: VecDeque<(u64, u64, String, String)>,
+    /// Queued Explorer folder listings, one per enqueue.
+    explorer_jobs: VecDeque<ExplorerJob>,
+    /// Latest Explorer preview load per tab (latest-only: a newer pick on
+    /// the same tab replaces a queued one, so a held `j` queues one read).
+    explorer_previews: Vec<ExplorerJob>,
     /// Latest search-in-files index request; a newer one replaces it
     /// before spawn.
     search_index_job: Option<(u64, Vec<IndexRoot>)>,
@@ -727,6 +831,8 @@ impl Interpreter {
             file_index_job: None,
             file_score_job: None,
             file_tab_jobs: VecDeque::new(),
+            explorer_jobs: VecDeque::new(),
+            explorer_previews: Vec::new(),
             search_index_job: None,
             search_chunk_job: None,
             search_preview_job: None,
@@ -1348,6 +1454,49 @@ impl Interpreter {
             } => {
                 self.file_tab_jobs.push_back((tab_id, gen, repo, path));
                 self.sched.enqueue_user(UserTag::QuickOpen);
+            }
+            Effect::LoadExplorerDir {
+                tab_id,
+                req,
+                repo,
+                rel_dir,
+                parent_ignored,
+            } => {
+                self.explorer_jobs.push_back(ExplorerJob::Dir {
+                    tab_id,
+                    req,
+                    repo,
+                    rel_dir,
+                    parent_ignored,
+                });
+                self.sched.enqueue_user(UserTag::QuickOpen);
+            }
+            Effect::LoadExplorerPreview {
+                tab_id,
+                gen,
+                repo,
+                path,
+                change,
+                context,
+            } => {
+                let job = ExplorerJob::Preview {
+                    tab_id,
+                    gen,
+                    repo,
+                    path,
+                    change,
+                    context,
+                };
+                if let Some(slot) = self
+                    .explorer_previews
+                    .iter_mut()
+                    .find(|queued| queued.tab_id() == tab_id)
+                {
+                    *slot = job;
+                } else {
+                    self.explorer_previews.push(job);
+                    self.sched.enqueue_user(UserTag::QuickOpen);
+                }
             }
             Effect::OpenPullRequest { repo, branch } => {
                 self.pr_opens.push_back((repo, branch));
@@ -1972,6 +2121,22 @@ impl Interpreter {
             }
             JobOutcome::FileTab { tab_id, gen, body } => {
                 if state.apply_file_tab(tab_id, gen, body) {
+                    self.mark();
+                }
+            }
+            JobOutcome::ExplorerDir {
+                tab_id,
+                req,
+                rel_dir,
+                entries,
+            } => {
+                if let Some(follow) = state.apply_explorer_dir(tab_id, req, &rel_dir, entries) {
+                    self.schedule(state, opts, follow, &Action::None);
+                    self.mark();
+                }
+            }
+            JobOutcome::ExplorerPreview { tab_id, gen, body } => {
+                if state.apply_explorer_preview(tab_id, gen, body) {
                     self.mark();
                 }
             }
@@ -2871,6 +3036,14 @@ impl Interpreter {
                             body: read_text_file(&file, MAX_FILE_BYTES),
                         }),
                     );
+                    return;
+                }
+                let job = self.explorer_jobs.pop_front().or_else(|| {
+                    (!self.explorer_previews.is_empty()).then(|| self.explorer_previews.remove(0))
+                });
+                if let Some(job) = job {
+                    let cwd = opts.cwd.clone();
+                    spawn(id, Box::new(move || run_explorer_job(&cwd, job)));
                     return;
                 }
                 if let Some((gen, roots)) = self.file_index_job.take() {
@@ -6077,6 +6250,125 @@ mod tests {
         assert!(!dialog.searching);
         let lines: Vec<u32> = dialog.hits.iter().map(|hit| hit.line).collect();
         assert_eq!(lines, vec![1, 2], "the newer search ran");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Explorer previews are latest-only per tab: a held `j` that picks two
+    /// files before a worker is free reads only the last one. Folder
+    /// listings stay one job each.
+    #[test]
+    fn explorer_preview_is_latest_only_per_tab() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        let preview = |tab_id: u64, gen: u64, path: &str| Effect::LoadExplorerPreview {
+            tab_id,
+            gen,
+            repo: "app".into(),
+            path: path.into(),
+            change: None,
+            context: None,
+        };
+        let dir = |req: u64| Effect::LoadExplorerDir {
+            tab_id: 1,
+            req,
+            repo: "app".into(),
+            rel_dir: String::new(),
+            parent_ignored: false,
+        };
+        for effect in [
+            preview(1, 1, "a.txt"),
+            preview(1, 2, "b.txt"),
+            dir(1),
+            dir(2),
+            preview(2, 1, "c.txt"),
+        ] {
+            schedule_effect(&mut interp, &mut state, effect, &Action::None);
+        }
+        assert_eq!(interp.explorer_previews.len(), 2, "one slot per tab");
+        assert_eq!(interp.explorer_jobs.len(), 2, "listings stay FIFO");
+        let mut previews = Vec::new();
+        let mut listings = 0;
+        for (_, work) in capture_jobs(&mut interp, &mut state) {
+            match work() {
+                JobOutcome::ExplorerPreview { tab_id, gen, .. } => previews.push((tab_id, gen)),
+                JobOutcome::ExplorerDir { .. } => listings += 1,
+                _ => panic!("unexpected job"),
+            }
+        }
+        assert_eq!(listings, 2);
+        previews.sort_unstable();
+        assert_eq!(previews, [(1, 2), (2, 1)], "only the newest pick per tab");
+        assert!(capture_jobs(&mut interp, &mut state).is_empty());
+    }
+
+    /// The Explorer lists folders and loads previews on the pool: ignored
+    /// entries list flagged, a changed file previews its worktree diff, a
+    /// clean one its body.
+    #[test]
+    fn explorer_lists_and_previews_a_real_checkout() {
+        let (root, mut state) = git_app_state("ws-effect-explorer", "main", true);
+        let app = root.join("app");
+        std::fs::write(app.join(".gitignore"), "target/\n").unwrap();
+        std::fs::create_dir_all(app.join("target/debug")).unwrap();
+        std::fs::create_dir_all(app.join("src")).unwrap();
+        std::fs::write(app.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let opts = opts(&state);
+        let mut interp = Interpreter::with_cap(4);
+        state.cursor = state
+            .rows
+            .iter()
+            .position(|row| row.kind == crate::tui::tree::NodeKind::Repo)
+            .expect("repo row");
+        let open = state.dispatch(Action::ExplorerReveal);
+        interp.interpret_sync(&mut state, &opts, open, &Action::None);
+        let (rows, _) = state.explorer_rows().expect("explorer tab");
+        let listed: Vec<(&str, bool)> = rows
+            .iter()
+            .map(|row| (row.rel.as_str(), row.ignored))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("src", false),
+                ("target", true),
+                (".gitignore", false),
+                ("README.md", false)
+            ]
+        );
+
+        let target = state.dispatch(Action::Move(1));
+        assert_eq!(target, Effect::None, "a folder row loads nothing");
+        let expand = state.dispatch(Action::NavEnter);
+        interp.interpret_sync(&mut state, &opts, expand, &Action::None);
+        let (rows, _) = state.explorer_rows().unwrap();
+        let debug = rows.iter().find(|row| row.rel == "target/debug").unwrap();
+        assert!(debug.ignored, "children of an ignored folder are ignored");
+        state.dispatch(Action::NavEnter);
+
+        let readme = loop {
+            match state.dispatch(Action::Move(1)) {
+                effect @ Effect::LoadExplorerPreview { .. } => {
+                    if state.explorer_diff().is_some() {
+                        break effect;
+                    }
+                    interp.interpret_sync(&mut state, &opts, effect, &Action::None);
+                    let body = state
+                        .tabs
+                        .active_file_view()
+                        .and_then(|tab| tab.body.clone());
+                    assert!(
+                        matches!(body.as_deref(), Some(FileRead::Text { lines, .. }) if lines == &["target/"]),
+                        "{body:?}"
+                    );
+                }
+                other => panic!("{other:?}"),
+            }
+        };
+        interp.interpret_sync(&mut state, &opts, readme, &Action::None);
+        let (_, path, diff) = state.explorer_diff().expect("diff preview");
+        assert_eq!(path, "README.md");
+        assert!(diff.unstaged.contains("+# dirty"), "{diff:?}");
+        assert!(!state.explorer_diff_loading());
         let _ = std::fs::remove_dir_all(root);
     }
 

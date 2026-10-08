@@ -7,7 +7,8 @@
 //! short as it can be. The footer shows [`crate::APP_VERSION`] in the
 //! lower-right. On a compare tab [`help_groups`] swaps GIT for
 //! [`HELP_COMPARE_GROUP`] (what acts on the compare diff and what needs the
-//! Workspace tab), on a file tab for [`HELP_FILE_GROUP`];
+//! Workspace tab), on a file tab for [`HELP_FILE_GROUP`], on an Explorer
+//! tab for [`HELP_EXPLORER_GROUP`];
 //! [`help_status_lines`] sizes the help dialog for the columns that paint
 //! plus the icon legend under them. A dialog shorter than that scrolls its
 //! body.
@@ -39,57 +40,183 @@ pub struct HelpGroup {
 #[cfg(test)]
 pub const HELP_COLUMN_COUNT: usize = 3;
 
+/// The MOVE column: the rows every tab paints, then `$extra` rows.
+macro_rules! move_group {
+    ($($extra:expr),* $(,)?) => {
+        HelpGroup {
+            title: "MOVE",
+            entries: &[
+                HelpEntry {
+                    keys: "j k",
+                    desc: "down / up",
+                },
+                HelpEntry {
+                    keys: "h l",
+                    desc: "fold · pan lists/diff · Shift-←→ tree",
+                },
+                HelpEntry {
+                    keys: "z",
+                    desc: "toggle fold (instant; no-op on graph/diff)",
+                },
+                HelpEntry {
+                    keys: "zz",
+                    desc: "toggle subtree (no-op on graph/diff)",
+                },
+                HelpEntry {
+                    keys: "gg G",
+                    desc: "top / bottom of focused pane",
+                },
+                HelpEntry {
+                    keys: "Home End",
+                    desc: "top / bottom",
+                },
+                HelpEntry {
+                    keys: "/",
+                    desc: "search focused pane (Enter arms)",
+                },
+                HelpEntry {
+                    keys: "n N",
+                    desc: "next / prev match (after Enter)",
+                },
+                HelpEntry {
+                    keys: "Ctrl-f",
+                    desc: "search in files",
+                },
+                HelpEntry {
+                    keys: "gt gT",
+                    desc: "next / prev tab",
+                },
+                HelpEntry {
+                    keys: "g1-g9",
+                    desc: "jump to tab (1=Workspace)",
+                },
+                $($extra),*
+            ],
+        }
+    };
+}
+
+/// The VIEW column: the rows every tab paints, with `$workspace` rows (the
+/// Workspace pane sizes and filters) after the first one.
+macro_rules! view_group {
+    ($($workspace:expr),* $(,)?) => {
+        HelpGroup {
+            title: "VIEW",
+            entries: &[
+                HelpEntry {
+                    keys: "i \\ M B",
+                    desc: "inline / split · wrap · msg · blame",
+                },
+                $($workspace,)*
+                HelpEntry {
+                    keys: "t",
+                    desc: "flat / tree · Staged split",
+                },
+                HelpEntry {
+                    keys: "T",
+                    desc: "cycle theme",
+                },
+                HelpEntry {
+                    keys: "Ctrl-o",
+                    desc: "full-file · keep hunk in view",
+                },
+                HelpEntry {
+                    keys: "o O",
+                    desc: "focus branches / clear (graph · repo)",
+                },
+                HelpEntry {
+                    keys: "PgUp PgDn",
+                    desc: "page focused pane",
+                },
+                HelpEntry {
+                    keys: "Ctrl-u Ctrl-d",
+                    desc: "page focused ±5",
+                },
+                HelpEntry {
+                    keys: "m",
+                    desc: "mouse on/off (graph commit: merge)",
+                },
+                HelpEntry {
+                    keys: ";",
+                    desc: "comment row/line · Ctrl-r resolves in box",
+                },
+                HelpEntry {
+                    keys: "V",
+                    desc: "highlight diff lines for ; / s / u / x / :",
+                },
+                HelpEntry {
+                    keys: "y",
+                    desc: "copy comments as markdown",
+                },
+                HelpEntry {
+                    keys: "'",
+                    desc: "copy entity reference",
+                },
+                HelpEntry {
+                    keys: "Esc",
+                    desc: "back / unfocus · right-click · never quit",
+                },
+                HelpEntry {
+                    keys: "Enter dblclick",
+                    desc: "focus right / drill",
+                },
+                HelpEntry {
+                    keys: ": Ctrl-p F",
+                    desc: "commands · go to file (> first switches)",
+                },
+                HelpEntry {
+                    keys: "?",
+                    desc: "help",
+                },
+                HelpEntry {
+                    keys: "gh",
+                    desc: "icon popover",
+                },
+                HelpEntry {
+                    keys: "Tab",
+                    desc: "other pane",
+                },
+                HelpEntry {
+                    keys: "q",
+                    desc: "quit",
+                },
+                HelpEntry {
+                    keys: "Ctrl-c Ctrl-c",
+                    desc: "quit (press twice)",
+                },
+            ],
+        }
+    };
+}
+
+/// `-` on the Workspace tab (MOVE).
+const HELP_DASH_EXPLORER: HelpEntry = HelpEntry {
+    keys: "-",
+    desc: "Explorer tab of the row's checkout",
+};
+
+/// `< > - +` on the Workspace, compare, and file tabs (VIEW).
+const HELP_PANE_SIZES: HelpEntry = HelpEntry {
+    keys: "< > - +",
+    desc: "tree width · msg rows (= is +)",
+};
+
+/// `.` everywhere but the Explorer tab (VIEW).
+const HELP_IGNORED_REPOS: HelpEntry = HelpEntry {
+    keys: ".",
+    desc: "show / hide ignored repos",
+};
+
+/// MOVE on every tab but Workspace: no `-` Explorer row.
+pub const HELP_TAB_MOVE_GROUP: HelpGroup = move_group!();
+
+/// VIEW on the Explorer tab: no pane-size or ignored-repo rows (`-` is the
+/// parent folder there; `<`, `>`, `+`, and `.` do nothing).
+pub const HELP_EXPLORER_VIEW_GROUP: HelpGroup = view_group!();
+
 /// Short key list shown in the `?` overlay, grouped the same.
 pub const HELP_GROUPS: &[HelpGroup] = &[
-    HelpGroup {
-        title: "MOVE",
-        entries: &[
-            HelpEntry {
-                keys: "j k",
-                desc: "down / up",
-            },
-            HelpEntry {
-                keys: "h l",
-                desc: "fold · pan lists/diff · Shift-←→ tree",
-            },
-            HelpEntry {
-                keys: "z",
-                desc: "toggle fold (instant; no-op on graph/diff)",
-            },
-            HelpEntry {
-                keys: "zz",
-                desc: "toggle subtree (no-op on graph/diff)",
-            },
-            HelpEntry {
-                keys: "gg G",
-                desc: "top / bottom of focused pane",
-            },
-            HelpEntry {
-                keys: "Home End",
-                desc: "top / bottom",
-            },
-            HelpEntry {
-                keys: "/",
-                desc: "search focused pane (Enter arms)",
-            },
-            HelpEntry {
-                keys: "n N",
-                desc: "next / prev match (after Enter)",
-            },
-            HelpEntry {
-                keys: "Ctrl-f",
-                desc: "search in files",
-            },
-            HelpEntry {
-                keys: "gt gT",
-                desc: "next / prev tab",
-            },
-            HelpEntry {
-                keys: "g1-g9",
-                desc: "jump to tab (1=Workspace)",
-            },
-        ],
-    },
+    move_group!(HELP_DASH_EXPLORER),
     HelpGroup {
         title: "GIT",
         entries: &[
@@ -167,99 +294,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
         ],
     },
-    HelpGroup {
-        title: "VIEW",
-        entries: &[
-            HelpEntry {
-                keys: "i \\ M B",
-                desc: "inline / split · wrap · msg · blame",
-            },
-            HelpEntry {
-                keys: "< > - +",
-                desc: "tree width · msg rows (= is +)",
-            },
-            HelpEntry {
-                keys: "t",
-                desc: "flat / tree · Staged split",
-            },
-            HelpEntry {
-                keys: ".",
-                desc: "show / hide ignored repos",
-            },
-            HelpEntry {
-                keys: "T",
-                desc: "cycle theme",
-            },
-            HelpEntry {
-                keys: "Ctrl-o",
-                desc: "full-file · keep hunk in view",
-            },
-            HelpEntry {
-                keys: "o O",
-                desc: "focus branches / clear (graph · repo)",
-            },
-            HelpEntry {
-                keys: "PgUp PgDn",
-                desc: "page focused pane",
-            },
-            HelpEntry {
-                keys: "Ctrl-u Ctrl-d",
-                desc: "page focused ±5",
-            },
-            HelpEntry {
-                keys: "m",
-                desc: "mouse on/off (graph commit: merge)",
-            },
-            HelpEntry {
-                keys: ";",
-                desc: "comment row/line · Ctrl-r resolves in box",
-            },
-            HelpEntry {
-                keys: "V",
-                desc: "highlight diff lines for ; / s / u / x / :",
-            },
-            HelpEntry {
-                keys: "y",
-                desc: "copy comments as markdown",
-            },
-            HelpEntry {
-                keys: "'",
-                desc: "copy entity reference",
-            },
-            HelpEntry {
-                keys: "Esc",
-                desc: "back / unfocus · right-click · never quit",
-            },
-            HelpEntry {
-                keys: "Enter dblclick",
-                desc: "focus right / drill",
-            },
-            HelpEntry {
-                keys: ": Ctrl-p F",
-                desc: "commands · go to file (> first switches)",
-            },
-            HelpEntry {
-                keys: "?",
-                desc: "help",
-            },
-            HelpEntry {
-                keys: "gh",
-                desc: "icon popover",
-            },
-            HelpEntry {
-                keys: "Tab",
-                desc: "other pane",
-            },
-            HelpEntry {
-                keys: "q",
-                desc: "quit",
-            },
-            HelpEntry {
-                keys: "Ctrl-c Ctrl-c",
-                desc: "quit (press twice)",
-            },
-        ],
-    },
+    view_group!(HELP_PANE_SIZES, HELP_IGNORED_REPOS),
 ];
 
 /// Compare-tab column that takes the place of GIT while a compare tab is active.
@@ -338,7 +373,8 @@ pub const HELP_COMPARE_GROUP: HelpGroup = HelpGroup {
 };
 
 /// Help columns on a compare tab: MOVE, [`HELP_COMPARE_GROUP`], VIEW.
-pub const HELP_COMPARE_GROUPS: &[HelpGroup] = &[HELP_GROUPS[0], HELP_COMPARE_GROUP, HELP_GROUPS[2]];
+pub const HELP_COMPARE_GROUPS: &[HelpGroup] =
+    &[HELP_TAB_MOVE_GROUP, HELP_COMPARE_GROUP, HELP_GROUPS[2]];
 
 /// File-tab column that takes the place of GIT while a file tab is active.
 ///
@@ -387,7 +423,69 @@ pub const HELP_FILE_GROUP: HelpGroup = HelpGroup {
 };
 
 /// Help columns on a file tab: MOVE, [`HELP_FILE_GROUP`], VIEW.
-pub const HELP_FILE_GROUPS: &[HelpGroup] = &[HELP_GROUPS[0], HELP_FILE_GROUP, HELP_GROUPS[2]];
+pub const HELP_FILE_GROUPS: &[HelpGroup] = &[HELP_TAB_MOVE_GROUP, HELP_FILE_GROUP, HELP_GROUPS[2]];
+
+/// Explorer-tab column that takes the place of GIT while an Explorer tab
+/// is active.
+///
+/// Lists the tree and preview keys, the row marks, and the git keys that
+/// stay on the Workspace tab. The tab-close chip is the tab bar glyph.
+pub const HELP_EXPLORER_GROUP: HelpGroup = HelpGroup {
+    title: "EXPLORER",
+    entries: &[
+        HelpEntry {
+            keys: "l h",
+            desc: "open / close folder · h on a file: parent",
+        },
+        HelpEntry {
+            keys: "-",
+            desc: "parent folder",
+        },
+        HelpEntry {
+            keys: "Enter",
+            desc: "folder open / close · file: preview",
+        },
+        HelpEntry {
+            keys: "Esc h",
+            desc: "preview back to tree",
+        },
+        HelpEntry {
+            keys: "?? ●",
+            desc: "untracked · changes inside (dim: ignored)",
+        },
+        HelpEntry {
+            keys: "e",
+            desc: "editor (at preview line)",
+        },
+        HelpEntry {
+            keys: "'",
+            desc: "copy reference",
+        },
+        HelpEntry {
+            keys: "r",
+            desc: "re-list folders · reload preview",
+        },
+        HelpEntry {
+            keys: super::render::TAB_CLOSE_GLYPH,
+            desc: "close tab (Ctrl-w or :)",
+        },
+        HelpEntry {
+            keys: "s u x S",
+            desc: "Workspace tab only",
+        },
+        HelpEntry {
+            keys: "f p P d",
+            desc: "Workspace tab only",
+        },
+    ],
+};
+
+/// Help columns on an Explorer tab: MOVE, [`HELP_EXPLORER_GROUP`], VIEW.
+pub const HELP_EXPLORER_GROUPS: &[HelpGroup] = &[
+    HELP_TAB_MOVE_GROUP,
+    HELP_EXPLORER_GROUP,
+    HELP_EXPLORER_VIEW_GROUP,
+];
 
 /// Which kind of tab the help overlay describes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -398,15 +496,19 @@ pub enum HelpTab {
     Compare,
     /// A file tab: MOVE / FILE / VIEW.
     File,
+    /// An Explorer tab: MOVE / EXPLORER / VIEW.
+    Explorer,
 }
 
 /// Help columns for the active tab: [`HELP_COMPARE_GROUPS`] on a compare
-/// tab, [`HELP_FILE_GROUPS`] on a file tab, else [`HELP_GROUPS`].
+/// tab, [`HELP_FILE_GROUPS`] on a file tab, [`HELP_EXPLORER_GROUPS`] on an
+/// Explorer tab, else [`HELP_GROUPS`].
 pub fn help_groups(tab: HelpTab) -> &'static [HelpGroup] {
     match tab {
         HelpTab::Workspace => HELP_GROUPS,
         HelpTab::Compare => HELP_COMPARE_GROUPS,
         HelpTab::File => HELP_FILE_GROUPS,
+        HelpTab::Explorer => HELP_EXPLORER_GROUPS,
     }
 }
 
@@ -1380,7 +1482,12 @@ mod tests {
     fn descriptions_leave_the_gutter_blank() {
         for term in [60usize, 64, 80, 100, 120, 140, 200] {
             let inner = help_inner_width(term);
-            for tab in [HelpTab::Workspace, HelpTab::Compare, HelpTab::File] {
+            for tab in [
+                HelpTab::Workspace,
+                HelpTab::Compare,
+                HelpTab::File,
+                HelpTab::Explorer,
+            ] {
                 let groups = help_groups(tab);
                 for (group, width) in groups.iter().zip(help_column_widths(groups, inner)) {
                     let content = help_column_content_width(width);
@@ -1432,6 +1539,50 @@ mod tests {
         );
     }
 
+    /// An Explorer tab paints MOVE / EXPLORER / VIEW; EXPLORER lists the
+    /// tree and preview keys and the git keys that need the Workspace tab.
+    #[test]
+    fn explorer_column_lists_tree_keys() {
+        assert_eq!(help_groups(HelpTab::Explorer)[1].title, "EXPLORER");
+        assert_eq!(help_groups(HelpTab::Explorer)[0], HELP_TAB_MOVE_GROUP);
+        assert_eq!(help_groups(HelpTab::Explorer)[2], HELP_EXPLORER_VIEW_GROUP);
+        // `-` is the parent folder here: no Workspace `-` row, no msg rows.
+        for group in help_groups(HelpTab::Explorer) {
+            for entry in group.entries {
+                assert_ne!(entry.desc, HELP_DASH_EXPLORER.desc, "{entry:?}");
+                assert_ne!(entry.keys, HELP_PANE_SIZES.keys, "{entry:?}");
+                assert_ne!(entry.keys, ".", "no ignored-repo toggle: {entry:?}");
+            }
+        }
+        let rows: Vec<String> = HELP_EXPLORER_GROUP
+            .entries
+            .iter()
+            .map(|e| help_entry_label(e.keys, e.desc))
+            .collect();
+        for needle in [
+            "l h open / close folder",
+            "- parent folder",
+            "Enter folder open / close",
+            "Esc h preview back to tree",
+            "?? ● untracked",
+            "e editor",
+            "r re-list folders",
+            "close tab (Ctrl-w or :)",
+            "s u x S Workspace tab only",
+            "f p P d Workspace tab only",
+        ] {
+            assert!(
+                rows.iter()
+                    .any(|row| row.starts_with(needle) || row.contains(needle)),
+                "{needle}: {rows:?}"
+            );
+        }
+        assert!(
+            help_entries().any(|e| e.keys == "-"),
+            "MOVE lists - on Workspace"
+        );
+    }
+
     /// A compare tab paints MOVE / COMPARE / VIEW; COMPARE lists what acts
     /// on the compare diff and what needs the Workspace tab. The row budget
     /// is checked against the paint in `render.rs`
@@ -1442,10 +1593,10 @@ mod tests {
         assert_eq!(HELP_COMPARE_GROUPS.len(), HELP_COLUMN_COUNT);
         assert_eq!(help_groups(HelpTab::Workspace), HELP_GROUPS);
         assert_eq!(help_groups(HelpTab::Compare)[1].title, "COMPARE");
-        assert_eq!(help_groups(HelpTab::Compare)[0], HELP_GROUPS[0]);
+        assert_eq!(help_groups(HelpTab::Compare)[0], HELP_TAB_MOVE_GROUP);
         assert_eq!(help_groups(HelpTab::Compare)[2], HELP_GROUPS[2]);
         assert_eq!(help_groups(HelpTab::File)[1].title, "FILE");
-        assert_eq!(help_groups(HelpTab::File)[0], HELP_GROUPS[0]);
+        assert_eq!(help_groups(HelpTab::File)[0], HELP_TAB_MOVE_GROUP);
         assert_eq!(help_groups(HelpTab::File)[2], HELP_GROUPS[2]);
         let text: String = HELP_COMPARE_GROUP
             .entries
@@ -1617,7 +1768,12 @@ mod tests {
     #[test]
     fn status_lines_count_the_legend() {
         for term in [60usize, 100, 140, 200] {
-            for tab in [HelpTab::Workspace, HelpTab::Compare, HelpTab::File] {
+            for tab in [
+                HelpTab::Workspace,
+                HelpTab::Compare,
+                HelpTab::File,
+                HelpTab::Explorer,
+            ] {
                 let groups = help_groups(tab);
                 let inner = help_inner_width(term);
                 let keys = help_body_line_count(groups, &help_column_widths(groups, inner));

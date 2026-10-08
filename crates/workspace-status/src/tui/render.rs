@@ -36,6 +36,7 @@ use super::diff::{
     section_header, wrap_viewport_start, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
 };
 use super::drill::DrillView;
+use super::explorer::{ExplorerRow, ExplorerStatus};
 use super::gates::ListFocusTarget;
 use super::help::{
     attach_help_version, help_chip_gap_spaces, help_column_content_width, help_column_widths,
@@ -80,8 +81,8 @@ use super::syntax::{
     CachedDiffSyntax, CodeSpan, DiffBackgrounds, DiffSyntaxKey,
 };
 use super::tabs::{
-    compare_picker_empty, file_gutter_width, file_too_large, ComparePickerState, FileTab,
-    FILE_IS_BINARY,
+    compare_picker_empty, file_gutter_width, file_too_large, ComparePickerState, ExplorerPreview,
+    FileTab, EXPLORER_FOLDER_HINT, FILE_IS_BINARY,
 };
 use super::theme::ThemeId;
 use super::theme::{hex_color, Palette, Pill};
@@ -198,10 +199,14 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.layout.diff_hscrollbar_width = 0;
     state.layout.diff_col_max = 0;
     state.layout.file_view_row_lines.clear();
+    state.layout.explorer_tree = Rect::default();
+    state.layout.explorer_preview = Rect::default();
     state.layout.term_cols = area.width;
     state.layout.pane_height = chunks[1].height;
     if state.is_file_tab() {
         draw_file_tab(frame, chunks[1], state);
+    } else if state.is_explorer_tab() {
+        draw_explorer_tab(frame, chunks[1], state);
     } else {
         draw_panes(frame, chunks[1], state);
     }
@@ -368,6 +373,10 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
 
 /// File tab body copy while it loads.
 const LOADING_FILE: &str = "loading…";
+/// Explorer tree copy for a checkout with no entries.
+const EMPTY_FOLDER: &str = "empty folder";
+/// Explorer badge of an untracked file (the Workspace tree says `A`).
+const UNTRACKED_BADGE: &str = "??";
 /// File tab body for an empty file.
 const EMPTY_FILE: &str = "empty file";
 
@@ -461,6 +470,14 @@ fn draw_file_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         .border_style(pane_border(true, palette));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    draw_file_body(frame, inner, state);
+}
+
+/// The active read-only file body (a file tab, or an Explorer tab's
+/// clean-file preview) inside `inner`: line numbers and highlighted code,
+/// or a loading / binary / too-large / empty notice.
+fn draw_file_body(frame: &mut Frame<'_>, inner: Rect, state: &mut AppState) {
+    let palette = state.theme.palette();
     state.layout.file_view_x = inner.x;
     state.layout.file_view_y = inner.y;
     state.layout.file_view_width = inner.width;
@@ -468,7 +485,7 @@ fn draw_file_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let Some(tab) = state.tabs.active_file() else {
+    let Some(tab) = state.tabs.active_file_view() else {
         return;
     };
     let notice = match tab.body.as_deref() {
@@ -569,8 +586,183 @@ fn draw_file_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     }
     frame.render_widget(Paragraph::new(painted), inner);
     state.layout.file_view_row_lines = row_lines;
-    if let Some(tab) = state.tabs.active_file_mut() {
+    if let Some(tab) = state.tabs.active_file_view_mut() {
         tab.scroll = scroll;
+    }
+}
+
+/// The active Explorer tab: the checkout's file tree on the left (titled
+/// with the checkout path) and the focused file's preview on the right —
+/// the worktree diff of a changed file, the body of a clean one, or a
+/// short hint on a folder.
+fn draw_explorer_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
+    let widths = pane_widths(area.width, state.tree_fraction);
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(widths.tree_width),
+            Constraint::Min(MIN_PANE_COLS),
+        ])
+        .split(area);
+    let palette = state.theme.palette();
+    let title_style = Style::default().fg(palette.heading);
+    let Some(tab) = state.tabs.active_explorer() else {
+        return;
+    };
+    let preview_title = match &tab.preview {
+        ExplorerPreview::None => "preview".to_string(),
+        ExplorerPreview::Diff { .. } => "diff".to_string(),
+        ExplorerPreview::File(file) => file.display.clone(),
+    };
+    // One status index and one row walk per frame, shared by the tree,
+    // the folder hint, and the breadcrumb.
+    let status = state.explorer_status(&tab.checkout);
+    let rows = tab.tree.rows(&status);
+    let cursor = tab.tree.cursor_index(&rows);
+    let folder = cursor.is_some_and(|index| rows[index].is_dir);
+    let tree_block = Block::default()
+        .borders(Borders::ALL)
+        .title(pane_title(&tab.checkout))
+        .title_style(title_style)
+        .border_style(pane_border(state.focus == FocusPane::Left, palette));
+    let tree_inner = tree_block.inner(panes[0]);
+    frame.render_widget(tree_block, panes[0]);
+    state.layout.explorer_tree = tree_inner;
+    draw_explorer_tree(frame, tree_inner, state, &rows, cursor, &status);
+    if let Some(tab) = state.tabs.active_explorer_mut() {
+        tab.painted_rel = cursor.map(|index| rows[index].rel.clone());
+    }
+
+    let right_block = Block::default()
+        .borders(Borders::ALL)
+        .title(pane_title(&preview_title))
+        .title_style(title_style)
+        .border_style(pane_border(state.focus == FocusPane::Right, palette));
+    let right_inner = right_block.inner(panes[1]);
+    frame.render_widget(right_block, panes[1]);
+    state.layout.explorer_preview = right_inner;
+    state.layout.right_x = panes[1].x;
+    state.layout.right_y = right_inner.y;
+    state.layout.diff_content_x = right_inner.x;
+    state.layout.diff_pane_width = right_inner.width;
+    state.layout.diff_pane_height = right_inner.height;
+    state.layout.diff_split_rule_x = None;
+    if right_inner.width == 0 || right_inner.height == 0 {
+        return;
+    }
+    match state.tabs.active_explorer().map(|tab| &tab.preview) {
+        Some(ExplorerPreview::Diff { .. }) => draw_diff_pane(frame, right_inner, state),
+        Some(ExplorerPreview::File(_)) => draw_file_body(frame, right_inner, state),
+        _ if folder => frame.render_widget(
+            Paragraph::new(muted_copy(EXPLORER_FOLDER_HINT, palette)),
+            right_inner,
+        ),
+        _ => {}
+    }
+}
+
+/// Explorer tree `rows` (the cursor on `cursor`) inside `area`, keeping
+/// the cursor row in view. `status` gives each row its mark.
+fn draw_explorer_tree(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &mut AppState,
+    rows: &[ExplorerRow],
+    cursor: Option<usize>,
+    status: &ExplorerStatus,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let palette = state.theme.palette();
+    if rows.is_empty() {
+        frame.render_widget(Paragraph::new(muted_copy(EMPTY_FOLDER, palette)), area);
+        return;
+    }
+    let height = area.height as usize;
+    let (start, _) = visible_window(rows.len(), cursor.unwrap_or(0), height);
+    if let Some(tab) = state.tabs.active_explorer_mut() {
+        tab.tree_scroll = start;
+    }
+    let focused = state.focus == FocusPane::Left;
+    let search = state.theme.pills().filter;
+    let lines: Vec<Line> = rows
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(height)
+        .map(|(index, row)| {
+            paint_segmented_row(
+                row.depth,
+                row.is_dir,
+                !row.expanded,
+                &explorer_row_segments(row, status, state.ascii),
+                area.width as usize,
+                Some(index) == cursor,
+                focused,
+                None,
+                false,
+                search,
+                state.ascii,
+                palette,
+                0,
+            )
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Name and right-hand mark of one Explorer row.
+///
+/// A changed file paints in its status colour with its letter badge
+/// (`??` for an untracked file); a folder with changes under it gets a
+/// `●` in the modified colour. Ignored entries are muted and dim; a
+/// loading row says so.
+fn explorer_row_segments(row: &ExplorerRow, status: &ExplorerStatus, ascii: bool) -> NodeSegments {
+    let seg = |text: &str, role: SegRole, dim: bool| TextSeg {
+        text: text.to_string(),
+        role,
+        hex: None,
+        bold: false,
+        dim,
+        icon: None,
+    };
+    if row.placeholder {
+        return NodeSegments {
+            segments: vec![seg(LOADING_FILE, SegRole::Muted, false)],
+            trailing: Vec::new(),
+        };
+    }
+    if row.ignored {
+        return NodeSegments {
+            segments: vec![seg(&row.name, SegRole::Muted, true)],
+            trailing: Vec::new(),
+        };
+    }
+    if row.is_dir {
+        let dirty = status.dir_dirty(&row.rel);
+        let dot = if ascii { "* " } else { "● " };
+        return NodeSegments {
+            segments: vec![seg(&row.name, SegRole::Dir, false)],
+            trailing: if dirty {
+                vec![seg(dot, SegRole::Modified, false)]
+            } else {
+                Vec::new()
+            },
+        };
+    }
+    let (role, badge) = if status.is_untracked(&row.rel) {
+        (SegRole::Added, Some(UNTRACKED_BADGE))
+    } else if let Some(letter) = status.letter(&row.rel) {
+        (SegRole::from(letter.color_role()), Some(letter.badge()))
+    } else {
+        (SegRole::File, None)
+    };
+    NodeSegments {
+        segments: vec![seg(&row.name, role, false)],
+        trailing: badge
+            .map(|badge| vec![seg(badge, role, false)])
+            .unwrap_or_default(),
     }
 }
 
@@ -1663,6 +1855,8 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         let mut color = palette.muted;
         let msg = if let Some(tab) = state.tabs.active_compare() {
             tab.error.clone().unwrap_or_else(|| tab.empty_diff_copy())
+        } else if state.explorer_diff_loading() {
+            LOADING_FILE.to_string()
         } else if path.is_empty() {
             "select a dirty file".to_string()
         } else if let Some(err) = state.current_diff_content().error.as_deref() {
@@ -2258,6 +2452,9 @@ fn cell_word_bg(kind: DiffCellKind, palette: Palette) -> Option<Color> {
 }
 
 fn diff_syntax_path(state: &AppState) -> &str {
+    if let Some((_, rel, _)) = state.explorer_diff() {
+        return rel;
+    }
     if let Some(tab) = state.tabs.active_compare() {
         return tab.path.as_deref().unwrap_or("");
     }
@@ -11559,6 +11756,179 @@ mod tests {
         let crumb = buffer_text(&terminal);
         assert!(crumb.contains("app › README.md"), "{crumb}");
         assert!(crumb.contains("edit") && crumb.contains("quit"), "{crumb}");
+    }
+
+    /// `app` with an Explorer tab at its root, listed as: `src/` (with a
+    /// change inside), `target/` (ignored), `new.txt` (untracked),
+    /// `README.md` (modified).
+    fn explorer_state() -> AppState {
+        let mut app = repo("app", true);
+        app.changes.push(FileChange {
+            path: "new.txt".into(),
+            staged_status: None,
+            unstaged_status: None,
+            untracked: true,
+            old_path: None,
+        });
+        app.changes.push(FileChange {
+            path: "src/a.rs".into(),
+            staged_status: None,
+            unstaged_status: Some("M".into()),
+            untracked: false,
+            old_path: None,
+        });
+        let snapshot = build_workspace_snapshot(&[app], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, false);
+        state.cursor = state
+            .rows
+            .iter()
+            .position(|row| row.kind == NodeKind::Repo)
+            .expect("repo row");
+        let Effect::LoadExplorerDir { tab_id, req, .. } = state.dispatch(Action::ExplorerReveal)
+        else {
+            panic!("a root listing");
+        };
+        let entry = |name: &str, is_dir: bool, ignored: bool| crate::tui::explorer::ExplorerEntry {
+            name: name.into(),
+            is_dir,
+            ignored,
+        };
+        let listing = vec![
+            entry("src", true, false),
+            entry("target", true, true),
+            entry("new.txt", false, false),
+            entry("README.md", false, false),
+        ];
+        state
+            .apply_explorer_dir(tab_id, req, "", Ok(listing))
+            .expect("fresh listing");
+        state
+    }
+
+    /// The Explorer tree paints status letters (`??` for untracked), a `●`
+    /// on a folder with changes, and dims ignored entries.
+    #[test]
+    fn explorer_tree_paints_status_marks_and_dims_ignored() {
+        let mut state = explorer_state();
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let buf = terminal.backend().buffer();
+        assert!(buf_line(buf, 1).contains("app"), "{}", buf_line(buf, 1));
+        let tree = state.layout.explorer_tree;
+        let row_of = |name: &str| {
+            (tree.y..tree.bottom())
+                .find(|y| find_cell_col(buf, *y, name).is_some_and(|x| x < tree.right()))
+                .unwrap_or_else(|| panic!("no {name} row"))
+        };
+        let tree_text = |y: u16| -> String {
+            (tree.x..tree.right())
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect()
+        };
+        let name_style = |name: &str| {
+            let y = row_of(name);
+            buf[(find_cell_col(buf, y, name).unwrap(), y)].style()
+        };
+
+        let src = tree_text(row_of("src"));
+        assert!(src.trim_end().ends_with('●'), "{src}");
+        let readme = tree_text(row_of("README.md"));
+        assert!(readme.trim_end().ends_with('M'), "{readme}");
+        assert_eq!(name_style("README.md").fg, Some(palette.modified));
+        let new = tree_text(row_of("new.txt"));
+        assert!(new.trim_end().ends_with("??"), "{new}");
+        assert_eq!(name_style("new.txt").fg, Some(palette.added));
+
+        let ignored = name_style("target");
+        assert_eq!(ignored.fg, Some(palette.muted));
+        assert!(ignored.add_modifier.contains(Modifier::DIM), "{ignored:?}");
+        let normal = name_style("README.md");
+        assert!(!normal.add_modifier.contains(Modifier::DIM), "{normal:?}");
+        let target = tree_text(row_of("target"));
+        assert!(!target.contains('●'), "{target}");
+
+        // The cursor sits on `src/`, a folder: the preview shows a hint.
+        let preview = state.layout.explorer_preview;
+        assert!(buf_line(buf, preview.y).contains(EXPLORER_FOLDER_HINT));
+        let crumb = buffer_text(&terminal);
+        assert!(crumb.contains("app › src"), "{crumb}");
+        assert!(crumb.contains("parent"), "{crumb}");
+    }
+
+    /// The Explorer preview paints a changed file with the diff pane and a
+    /// clean file with the file-tab body.
+    #[test]
+    fn explorer_preview_paints_diff_or_file_body() {
+        use crate::tui::effect::ExplorerPreviewBody;
+        let mut state = explorer_state();
+        let mut terminal = Terminal::new(TestBackend::new(110, 16)).unwrap();
+        let to = |state: &mut AppState, rel: &str| -> (u64, u64) {
+            loop {
+                let effect = state.dispatch(Action::Move(1));
+                if let Effect::LoadExplorerPreview {
+                    tab_id, gen, path, ..
+                } = effect
+                {
+                    if path == rel {
+                        return (tab_id, gen);
+                    }
+                }
+            }
+        };
+        let (tab_id, gen) = to(&mut state, "README.md");
+        let diff =
+            super::super::diff::DiffContent::from_unified("@@ -1 +1 @@\n-# seed\n+# dirty\n");
+        assert!(state.apply_explorer_preview(tab_id, gen, ExplorerPreviewBody::Diff(diff)));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let preview = state.layout.explorer_preview;
+        let text = |terminal: &Terminal<TestBackend>| -> String {
+            let buf = terminal.backend().buffer();
+            (preview.y..preview.bottom())
+                .map(|y| {
+                    (preview.x..preview.right())
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let pane = text(&terminal);
+        assert!(pane.contains("app/README.md"), "{pane}");
+        assert!(pane.contains("# dirty"), "{pane}");
+
+        state.dispatch(Action::MoveToStart);
+        let (tab_id, gen) = to(&mut state, "README.md");
+        assert!(state.explorer_diff_loading(), "a new pick loads again");
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert!(text(&terminal).contains("loading…"), "{}", text(&terminal));
+        assert!(!state.apply_explorer_preview(
+            tab_id,
+            gen,
+            ExplorerPreviewBody::File(FileRead::Binary)
+        ));
+
+        // `new.txt` is untracked, so it previews as a diff too; check a
+        // clean file through the file body instead.
+        state.snapshot.repos[0]
+            .changes
+            .retain(|change| change.path != "new.txt");
+        state.dispatch(Action::MoveToStart);
+        let (tab_id, gen) = to(&mut state, "new.txt");
+        let body = FileRead::Text {
+            lines: vec!["hello".into()],
+            max_cols: 5,
+        };
+        assert!(state.apply_explorer_preview(tab_id, gen, ExplorerPreviewBody::File(body)));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let pane = text(&terminal);
+        assert!(pane.starts_with("1 hello"), "{pane}");
+        let buf = terminal.backend().buffer();
+        assert!(
+            buf_line(buf, 1).contains("app/new.txt"),
+            "{}",
+            buf_line(buf, 1)
+        );
     }
 
     /// Cache `summary` as the blame of the line `state` focuses now.

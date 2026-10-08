@@ -10,9 +10,6 @@
 //! Paths are `/`-separated and relative to the checkout. The checkout root
 //! is `""`.
 
-// Wired into the Explorer tab in a follow-up change.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -426,6 +423,34 @@ impl ExplorerTree {
         to_load
     }
 
+    /// Folders on the path to `rel_path` whose cached listing lacks the
+    /// next step of that path (a file or folder created after the listing
+    /// was taken), root first. The caller lists them again; their old
+    /// listing stays painted until the new one lands.
+    pub fn stale_on_path(&self, rel_path: &str) -> Vec<String> {
+        if rel_path.is_empty() {
+            return Vec::new();
+        }
+        let mut steps = ancestors(rel_path);
+        steps.remove(0);
+        steps.push(rel_path);
+        steps
+            .into_iter()
+            .filter_map(|step| {
+                let parent = parent_rel(step);
+                let name = step.rsplit('/').next().unwrap_or(step);
+                match self.listings.get(parent) {
+                    Some(Listing::Loaded(entries))
+                        if !entries.iter().any(|entry| entry.name == name) =>
+                    {
+                        Some(parent.to_string())
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
     /// Drop the cached listings of collapsed folders (they reload on the
     /// next expand) and return every visible expanded folder with a loaded
     /// listing, root first, for the caller to re-list. A folder under a
@@ -525,6 +550,7 @@ impl ExplorerTree {
     }
 
     /// Rel path of the focused row as stored. `None` before the first move.
+    #[cfg(test)]
     pub fn cursor_rel(&self) -> Option<&str> {
         self.cursor.as_deref()
     }
