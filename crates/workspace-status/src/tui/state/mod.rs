@@ -222,8 +222,11 @@ pub struct LayoutHit {
     pub pane_height: u16,
     pub outer_tree_width: u16,
     pub diff_pane_width: u16,
-    /// Inner right-pane height (excludes the tree/graph border).
+    /// Right-pane content height: the rows under the pane's title (the top
+    /// border or the flat title row), less the bottom border when boxed.
     pub diff_pane_height: u16,
+    /// 0-based first right-pane content column, as painted (after the left
+    /// border when boxed, the pane's first column when flat).
     pub diff_content_x: u16,
     pub diff_split_rule_x: Option<u16>,
     pub right_y: u16,
@@ -2417,6 +2420,7 @@ impl AppState {
             tree_width: self.layout.outer_tree_width.max(1),
             diff_pane_width: self.layout.diff_pane_width,
             diff_content_x: self.layout.diff_content_x,
+            flat_panes: self.background == BackgroundMode::Paint,
             diff_split_rule_x: self.layout.diff_split_rule_x,
             graph_scrollbar_x: self.layout.graph_scrollbar_x,
             graph_scrollbar_y: self.layout.graph_scrollbar_y,
@@ -2447,7 +2451,7 @@ impl AppState {
 
     fn apply_diff_fraction_from_col(&mut self, col: u16) {
         self.diff_split_fraction = diff_split_fraction_from_col(
-            self.layout.outer_tree_width.max(1),
+            self.layout.diff_content_x,
             self.layout.diff_pane_width.max(1),
             col,
         );
@@ -6550,7 +6554,8 @@ mod tests {
     };
     use crate::testutil::init_repo;
     use crate::tui::split::{
-        pane_widths, side_by_side_column_widths, DIFF_SPLIT_FRACTION, MIN_PANE_COLS,
+        diff_split_fraction_from_left_width, pane_widths, side_by_side_column_widths,
+        DIFF_SPLIT_FRACTION, MIN_PANE_COLS,
     };
     use crate::tui::status::StatusKind;
     use crate::tui::watch::watch_interval_ms;
@@ -13159,6 +13164,98 @@ mod tests {
             side_by_side_column_widths(110, app.diff_split_fraction).left_width,
             after
         );
+    }
+
+    /// [`wide_split_layout`] as each mode's render records it: boxed content
+    /// starts after the right pane's left border (48 + 1), flat content on
+    /// the right pane's first column (48).
+    fn split_layout_for(background: BackgroundMode) -> super::LayoutHit {
+        let content_x = match background {
+            BackgroundMode::Terminal => 49,
+            BackgroundMode::Paint => 48,
+        };
+        let left = side_by_side_column_widths(110, DIFF_SPLIT_FRACTION).left_width;
+        super::LayoutHit {
+            diff_content_x: content_x,
+            diff_split_rule_x: Some(content_x + left),
+            ..wide_split_layout()
+        }
+    }
+
+    #[test]
+    fn in_diff_drag_from_the_painted_rule_keeps_then_moves_the_split() {
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            let mut app = state();
+            app.background = background;
+            app.layout = split_layout_for(background);
+            let rule = app.layout.diff_split_rule_x.expect("rule");
+            let left =
+                i32::from(side_by_side_column_widths(110, app.diff_split_fraction).left_width);
+            app.dispatch(Action::Click { col: rule, row: 6 });
+            assert_eq!(app.drag, SplitDrag::Diff, "{background:?}");
+            assert_eq!(
+                app.diff_split_fraction,
+                diff_split_fraction_from_left_width(110, left),
+                "{background:?}: a press on the painted rule keeps the split"
+            );
+            app.dispatch(Action::Drag {
+                col: rule + 6,
+                row: 6,
+            });
+            assert_eq!(
+                app.diff_split_fraction,
+                diff_split_fraction_from_left_width(110, left + 6),
+                "{background:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pane_divider_band_follows_the_background_mode() {
+        // Boxed: last left content column (46) through the right pane's
+        // left border (48). Flat: the boundary columns 47 and 48.
+        for (background, col, divider) in [
+            (BackgroundMode::Terminal, 46, true),
+            (BackgroundMode::Terminal, 48, true),
+            (BackgroundMode::Paint, 46, false),
+            (BackgroundMode::Paint, 47, true),
+            (BackgroundMode::Paint, 48, true),
+        ] {
+            let mut app = state();
+            app.background = background;
+            app.layout = split_layout_for(background);
+            app.dispatch(Action::Click { col, row: 5 });
+            assert_eq!(
+                app.drag == SplitDrag::Pane,
+                divider,
+                "{background:?} col {col}: {:?}",
+                app.drag
+            );
+        }
+    }
+
+    #[test]
+    fn diff_hscrollbar_on_the_last_pane_row_drags_only_when_flat() {
+        for (background, drags) in [
+            (BackgroundMode::Paint, true),
+            (BackgroundMode::Terminal, false),
+        ] {
+            let mut app = state();
+            app.background = background;
+            app.layout = split_layout_for(background);
+            // pane_height 22: 0-based row 22 is the pane area's last row.
+            app.layout.diff_hscrollbar_y = Some(22);
+            app.layout.diff_hscrollbar_x = 60;
+            app.layout.diff_hscrollbar_width = 20;
+            app.layout.diff_col_max = 40;
+            app.dispatch(Action::Click { col: 60, row: 22 });
+            assert_eq!(
+                matches!(app.drag, SplitDrag::DiffHScrollbar { .. }),
+                drags,
+                "{background:?}: {:?}",
+                app.drag
+            );
+        }
     }
 
     #[test]

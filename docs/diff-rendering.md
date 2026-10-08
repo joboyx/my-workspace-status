@@ -90,7 +90,7 @@ Scroll position is reset only when the painted file-diff identity changes, so a 
 
 ## Side-by-side column drag
 
-Split rows (`left + RULE + right`) take column widths from `tui/split.rs`. Default fraction is 0.5. Mouse drag on the RULE (± 1 columns, same band as the tree/diff pane divider) updates a session-only split fraction; it is **not** written to disk, so the next launch resets to 50/50. Drag is armed only while the diff paints side-by-side (`diff_pane_mode`): the painted width (`diff_paint_width`, the right pane less its 1-column scrollbar column, reserved whether or not the bar shows) is ≥ `NARROW_SXS` (100), so the right pane needs ≥ 101 columns. `i` still toggles inline / split.
+Split rows (`left + RULE + right`) take column widths from `tui/split.rs`. Default fraction is 0.5. Mouse drag on the RULE (± 1 columns; the hit test reads the right pane's painted content column, so boxed and flat panes map the same) updates a session-only split fraction; it is **not** written to disk, so the next launch resets to 50/50. Drag is armed only while the diff paints side-by-side (`diff_pane_mode`): the painted width (`diff_paint_width`, the right pane less its 1-column scrollbar column, reserved whether or not the bar shows) is ≥ `NARROW_SXS` (100), so the right pane needs ≥ 101 columns. `i` still toggles inline / split.
 
 ## Path header
 

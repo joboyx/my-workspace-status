@@ -333,7 +333,7 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
         && state.diff_layout() == DiffMode::SideBySide
     {
         let split = side_by_side_column_widths(right_inner.width, state.diff_split_fraction);
-        Some(diff_split_rule_x(panes[0].width, split.left_width).saturating_sub(1))
+        Some(diff_split_rule_x(right_inner.x, split.left_width))
     } else {
         None
     };
@@ -5216,7 +5216,7 @@ fn popover_fallback_anchor(state: &AppState) -> Rect {
             return Rect::new(layout.tree_x.saturating_add(2), y, 1, 1);
         }
     }
-    Rect::new(layout.right_x.saturating_add(1), layout.right_y, 1, 1)
+    Rect::new(layout.diff_content_x, layout.right_y, 1, 1)
 }
 
 fn comment_body_lines(prompt: &CommentPrompt, palette: Palette) -> Vec<Line<'static>> {
@@ -9925,6 +9925,60 @@ mod tests {
             "the other file match should use search bg: a={a_bg:?} b={b_bg:?} search={search_bg:?}"
         );
         assert_ne!(a_bg, b_bg, "cursor and search-match paint must differ");
+    }
+
+    #[test]
+    fn recorded_split_rule_is_the_painted_rule_column() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.diff_mode = crate::tui::split::DiffMode::SideBySide;
+        state.cursor = state
+            .rows
+            .iter()
+            .position(|r| r.kind == NodeKind::File)
+            .expect("file row");
+        state.set_diff(
+            "app".into(),
+            "README.md".into(),
+            super::super::diff::DiffContent::from_lines(vec![
+                "@@ -1,1 +1,1 @@".into(),
+                "-old line".into(),
+                "+new line".into(),
+            ]),
+        );
+        for fraction in [0.3, 0.5, 0.7] {
+            state.diff_split_fraction = fraction;
+            let mut terminal = Terminal::new(TestBackend::new(220, 20)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let rule = state.layout.diff_split_rule_x.expect("rule");
+            assert_eq!(
+                state.layout.diff_content_x,
+                state.layout.outer_tree_width + 1,
+                "boxed content starts after the right pane's left border"
+            );
+            let buf = terminal.backend().buffer();
+            let y = first_row_with(buf, "old line").expect("diff row");
+            let rule_glyph = DIFF_RULE.to_string();
+            let painted: Vec<u16> = (0..buf.area.width)
+                .filter(|&x| {
+                    buf[(x, y)].symbol() == rule_glyph && buf[(x, y)].fg == Color::DarkGray
+                })
+                .collect();
+            assert_eq!(painted.len(), 1, "one split rule: {}", buf_line(buf, y));
+            // The paint sizes the columns from the row width (less the
+            // cursor bar and the scrollbar column), the layout from the pane
+            // width, so off the default fraction the two can be one column
+            // apart. The ±1 grab band still covers the painted rule.
+            if fraction == crate::tui::split::DIFF_SPLIT_FRACTION {
+                assert_eq!(painted[0], rule, "{}", buf_line(buf, y));
+            } else {
+                assert!(
+                    painted[0].abs_diff(rule) <= 1,
+                    "fraction {fraction}: painted {} recorded {rule}",
+                    painted[0]
+                );
+            }
+        }
     }
 
     #[test]
