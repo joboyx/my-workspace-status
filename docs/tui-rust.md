@@ -115,7 +115,7 @@ One key spelling everywhere a key is shown (help, hint chips, palette, prompts, 
 - `o` on a focused graph list, or on a highlighted repo or worktree row, opens a local-branch overlay. Type to filter. Space marks a set; Enter applies visible marks, or the cursor row when none of the visible rows are marked. Reopening pre-marks the current focus; filter-then-Enter replaces that focus with the visible hit. Unmarking every `[x]` (including that pre-mark) then Enter restores `--all`. The graph then loads ancestors of those tips instead of `--all`. `O` (Ctrl-o inside the overlay, where `O` types) restores the full graph. Overlay Esc cancels without changing the current focus. File, dir, workspace, and commit-file rows are a no-op. `gg` / `G` and worktree glyphs are unchanged
 - `m` on a focused graph commit opens a boxed confirm, then merges that commit into the checkout's current HEAD. Local and `origin/*` names are used when present; tags and unlabeled commits use the commit id. Tries `git merge --ff-only`, then `git merge --no-ff --no-edit` (no rebase). A dirty tracked worktree refuses (`Dirty worktree — commit or stash first`) before the overlay. Conflicts stay in the worktree with no auto-continue. Scope is the checkout that owns the graph, so a linked worktree merges only when that row is focused. Stash and uncommitted rows leave `m` as mouse-capture toggle
 - Action / Effect loop: crossterm events become `Action`, dispatch updates state and returns an `Effect`. Focus / depth / kind gates live in `tui/gates.rs`; pull / default / fetch kind (including group) lives in `ops.rs`. Fetch / pull / push enqueue on the per-gitdir remote queue in `tui/effect.rs`. Palette Push is repo / checkout only. `r` is `ReloadRepo` for a focused checkout (or file / dir / section / flat repo) and `ReloadSnapshot` on the workspace row or No-updates group
-- `T` cycles Tokyo Night → Monokai → Dracula → Gruvbox Dark → Catppuccin Mocha → Tokyo Night. Launch seed is `WS_STATUS_THEME`. The cycle stays in the current session; there is no theme file. Graph gutter lanes follow the active theme
+- `T` cycles Tokyo Night → Monokai → Dracula → Gruvbox Dark → Catppuccin Mocha → Slate → Solarized Dark → Nord → Rosé Pine → Kanagawa → Everforest → One Dark → GitHub Dark Dimmed → Tokyo Night. The launch default is Slate; launch seed is `WS_STATUS_THEME`, then config `theme`. The cycle stays in the current session; there is no theme file. Graph gutter lanes follow the active theme
 - Mouse is optional. Keys work without it. `m` toggles capture except on a focused graph commit (merge). Double-click is Enter. Click a fold chevron to toggle fold. Drag the tree / right splitter, or the in-diff RULE in split mode, to resize. Drag a graph scrollbar thumb or a file-diff horizontal thumb to scroll / pan (track click jumps toward that position). The same `hit_split` / `SplitDrag` mouse stack arms the splitters, both graph bars, and the file-diff horizontal bar. `i` toggles inline / split without a mouse. Vertical wheel over a list (tree, graph, commit files, or file-diff) moves that list's cursor. The viewport keeps the focused row near the vertical middle. Horizontal wheel (and Shift-wheel) pans the pane under the pointer without moving the focused row — the workspace tree matches the right pane. Trackpad hscroll is SGR `66`/`67`. The live loop enables click, button-event, and any-event tracking, rxvt 1015, and SGR (`tui/tty.rs`). xterm protocol modes 1000/1002/1003 are exclusive, so 1003 is set last and any-event is the active mode. The Unix reader decodes a motion-bit wheel (`96`–`99`) as the plain wheel, and decodes SGR, X10, and 1015 otherwise like crossterm 0.28. Buttonless motion stores the pointer; the compare-tab `[✗]` paints `palette.tabClose` (dark gray, dimmer than `muted`) and `palette.tabCloseHover` (red, the theme's `deleted` color, bold) under the pointer. The loop redraws only when the hovered `[✗]` changes. When a file diff has long lines, that report over the left pane pans the diff; short tree paths still pan the tree when the painted diff fits. Click still selects. Keyboard `h` / `l` still fold the tree. Graph and file-diff vertical bars show whenever the content overflows, at the top too. Graph and file-diff horizontal bars show only after the viewport leaves the left edge.
 - Tree / right and in-diff split ratios stay in the current session only. They reset on the next launch
 - `--plain` / `--json` / `-v` / `-p` / `-d` stay headless
@@ -149,11 +149,27 @@ See [tui-model.md](./tui-model.md) for the tree model and action registry.
 
 A tree checkout row with a branch and a graph worktree row with a branch show a one-column badge after the branch name when the branch has an open or a merged PR (GitHub PR or GitLab merge request; the UI says PR). The badge is one space plus one glyph, never a word. Closed-unmerged PRs, branches with no PR, lookups in flight, and lookups that failed show nothing. Other graph rows (commit, stash, uncommitted) get no badge.
 
-| State | Glyph (Nerd / ASCII) | Colour role | Tokyo Night | Monokai | Dracula | Gruvbox Dark | Catppuccin Mocha |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Open | nf-oct-git_pull_request `U+F407` / `P` | `branch_feature` | `#bb9af7` | `#ae81ff` | `#bd93f9` | `#d3869b` | `#cba6f7` |
-| Approved (open, forge reports approved) | nf-oct-check `U+F42E` / `A` | `added` | `#9ece6a` | `#a6e22e` | `#50fa7b` | `#b8bb26` | `#a6e3a1` |
-| Merged | nf-oct-git_merge `U+F419` / `m` | `muted` | `#9aa5ce` | `#b8b39c` | `#b4bce4` | `#bdae93` | `#a6adc8` |
+| State | Glyph (Nerd / ASCII) | Colour role |
+| --- | --- | --- |
+| Open | nf-oct-git_pull_request `U+F407` / `P` | `branch_feature` |
+| Approved (open, forge reports approved) | nf-oct-check `U+F42E` / `A` | `added` |
+| Merged | nf-oct-git_merge `U+F419` / `m` | `muted` |
+
+| Theme | Open | Approved | Merged |
+| --- | --- | --- | --- |
+| Tokyo Night | `#bb9af7` | `#9ece6a` | `#9aa5ce` |
+| Monokai | `#ae81ff` | `#a6e22e` | `#b8b39c` |
+| Dracula | `#bd93f9` | `#50fa7b` | `#b4bce4` |
+| Gruvbox Dark | `#d3869b` | `#b8bb26` | `#bdae93` |
+| Catppuccin Mocha | `#cba6f7` | `#a6e3a1` | `#a6adc8` |
+| Slate | `#b39ddb` | `#78c48d` | `#8a94a3` |
+| Solarized Dark | `#8f93d2` | `#8fa114` | `#92a1a3` |
+| Nord | `#c3a5bd` | `#a4bf8d` | `#afb8c7` |
+| Rosé Pine | `#c4a7e7` | `#9ccfd8` | `#9c99b3` |
+| Kanagawa | `#9d89be` | `#98bb6c` | `#a6a08a` |
+| Everforest | `#d699b6` | `#a7c080` | `#aeb8b0` |
+| One Dark | `#c77bde` | `#98c379` | `#a6abb4` |
+| GitHub Dark Dimmed | `#dcbdfb` | `#6bc46d` | `#9ea8b3` |
 
 `WS_STATUS_GLYPHS=ascii` selects the ASCII column. No new theme colour exists: the roles are the ones the branch text (`branch_feature`), added files (`added`), and secondary text (`muted`) already use. Merged is muted because the work is done. In every theme the three badge colours differ from each other. The glyphs are `icon_pr_open`, `icon_pr_approved`, and `icon_pr_merged` in `tui/icons.rs`. On a search-match graph row the badge takes the filter foreground like the label.
 

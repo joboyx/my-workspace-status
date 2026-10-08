@@ -106,8 +106,6 @@ use super::tabs::{
     COMPARE_STILL_LOADING, FOCUS_A_COMMIT_TO_DIFF, ROOT_COMMIT_HAS_NO_PARENT,
     SWITCH_TO_WORKSPACE_TAB, WORKSPACE_TAB_CANNOT_CLOSE,
 };
-#[cfg(test)]
-use super::theme::DEFAULT_THEME_ID;
 use super::theme::{cycle_theme_id, BackgroundMode, ThemeId};
 use super::tree::{
     build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, visible_for_tree,
@@ -824,7 +822,7 @@ impl AppState {
         )
     }
 
-    /// Test state with a unique temp viewed store, the default theme, and
+    /// Test state with a unique temp viewed store, Tokyo Night, and
     /// [`BackgroundMode::Terminal`] (see [`Self::with_viewed_path`]).
     #[cfg(test)]
     pub fn new(cwd: PathBuf, snapshot: WorkspaceSnapshot, ascii: bool) -> Self {
@@ -833,9 +831,11 @@ impl AppState {
 
     /// Test state with `viewed_path`; the comment store sits next to it.
     ///
-    /// Pins [`BackgroundMode::Terminal`], the v0.1.244 look (boxed panes, no
-    /// fills), so render tests keep proving that mode is unchanged. Tests of
-    /// the painted look set [`BackgroundMode::Paint`] themselves.
+    /// Pins Tokyo Night and [`BackgroundMode::Terminal`], the v0.1.244 look
+    /// (theme, boxed panes, no fills), so render tests keep proving that mode
+    /// is unchanged. Tests of the painted look or the shipped default theme
+    /// set [`BackgroundMode::Paint`] / the theme themselves; the shipped
+    /// launch default is pinned by `launch_with_no_env_and_no_config_paints_background`.
     #[cfg(test)]
     pub(crate) fn with_viewed_path(
         cwd: PathBuf,
@@ -850,7 +850,7 @@ impl AppState {
             ascii,
             viewed_path,
             comment_path,
-            DEFAULT_THEME_ID,
+            ThemeId::TokyoNight,
         );
         state.background = BackgroundMode::Terminal;
         state
@@ -14207,16 +14207,18 @@ mod tests {
         assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
         assert_eq!(app.theme, ThemeId::Monokai);
         assert!(app.status.contains("Monokai"));
-        app.dispatch(Action::CycleTheme);
-        app.dispatch(Action::CycleTheme);
-        app.dispatch(Action::CycleTheme);
+        for _ in 2..crate::tui::theme::THEME_IDS.len() {
+            app.dispatch(Action::CycleTheme);
+        }
+        assert_eq!(app.theme, ThemeId::GithubDarkDimmed);
+        assert!(app.status.contains("GitHub Dark Dimmed"));
         app.dispatch(Action::CycleTheme);
         assert_eq!(app.theme, ThemeId::TokyoNight);
         assert_eq!(
             theme_id_from(Some("gruvbox-dark"), None),
             ThemeId::GruvboxDark
         );
-        assert_eq!(theme_id_from(Some("nope"), None), ThemeId::TokyoNight);
+        assert_eq!(theme_id_from(Some("nope"), None), ThemeId::Slate);
     }
 
     fn tree_repo() -> RepoSnapshot {
@@ -14358,6 +14360,7 @@ mod tests {
         let snapshot = build_workspace_snapshot(&[tree_repo()], &[], false, &[]);
         let mut app = AppState::launch(PathBuf::from("/tmp"), snapshot, &settings);
         assert_eq!(app.background, BackgroundMode::Paint);
+        assert_eq!(app.theme, ThemeId::Slate, "Slate is the launch default");
 
         app.apply_view_defaults(&ViewDefaults::default());
         assert_eq!(

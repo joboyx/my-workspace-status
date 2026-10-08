@@ -1428,6 +1428,19 @@ mod tests {
     }
 
     #[test]
+    fn theme_key_accepts_every_built_in_slug() {
+        for id in THEME_IDS {
+            assert_eq!(
+                load_runtime_key("theme", &format!(r#""{}""#, id.as_str()))
+                    .unwrap()
+                    .theme,
+                Some(id),
+                "{id:?}"
+            );
+        }
+    }
+
+    #[test]
     fn runtime_keys_parse_valid_values() {
         let cfg = load_layered_home(
             Some(
@@ -1477,12 +1490,12 @@ mod tests {
 
     #[test]
     fn runtime_keys_bad_values_name_the_file_key_and_choices() {
-        let themes = r#"must be one of "tokyo-night", "monokai", "dracula", "gruvbox-dark", "catppuccin-mocha""#;
+        let themes = r#"must be one of "tokyo-night", "monokai", "dracula", "gruvbox-dark", "catppuccin-mocha", "slate", "solarized-dark", "nord", "rose-pine", "kanagawa", "everforest", "one-dark", "github-dark-dimmed""#;
         let path_rule = "must be an absolute path or a path that starts with ~/";
         let git_rule =
             "must be an absolute path, a path that starts with ~/, or a command name without /";
         let cases: Vec<(&str, &str, String)> = vec![
-            ("theme", r#""solarized""#, themes.to_string()),
+            ("theme", r#""solarized-light""#, themes.to_string()),
             ("theme", r#""Dracula""#, themes.to_string()),
             ("theme", r#""""#, themes.to_string()),
             ("theme", "1", themes.to_string()),

@@ -16,8 +16,8 @@ struct ThemeChrome {
     muted: (u8, u8, u8),
 }
 
-/// Docs + help `T` cycle. Wraps after Catppuccin Mocha.
-const THEME_CYCLE: [ThemeChrome; 5] = [
+/// Docs + help `T` cycle. Wraps after GitHub Dark Dimmed.
+const THEME_CYCLE: [ThemeChrome; 13] = [
     ThemeChrome {
         id: "tokyo-night",
         toast: "theme: Tokyo Night",
@@ -57,6 +57,70 @@ const THEME_CYCLE: [ThemeChrome; 5] = [
         pill: (0x45, 0x47, 0x5a),
         heading: (0x89, 0xdc, 0xeb),
         muted: (0xa6, 0xad, 0xc8),
+    },
+    ThemeChrome {
+        id: "slate",
+        toast: "theme: Slate",
+        surface: (0x11, 0x15, 0x1b),
+        pill: (0x2d, 0x45, 0x66),
+        heading: (0x7f, 0xc4, 0xd6),
+        muted: (0x8a, 0x94, 0xa3),
+    },
+    ThemeChrome {
+        id: "solarized-dark",
+        toast: "theme: Solarized Dark",
+        surface: (0x00, 0x2b, 0x36),
+        pill: (0x0e, 0x5a, 0x74),
+        heading: (0x39, 0xa8, 0x9f),
+        muted: (0x92, 0xa1, 0xa3),
+    },
+    ThemeChrome {
+        id: "nord",
+        toast: "theme: Nord",
+        surface: (0x2e, 0x34, 0x40),
+        pill: (0x5e, 0x81, 0xac),
+        heading: (0x88, 0xc0, 0xd0),
+        muted: (0xaf, 0xb8, 0xc7),
+    },
+    ThemeChrome {
+        id: "rose-pine",
+        toast: "theme: Rosé Pine",
+        surface: (0x19, 0x17, 0x24),
+        pill: (0x31, 0x74, 0x8f),
+        heading: (0xeb, 0xbc, 0xba),
+        muted: (0x9c, 0x99, 0xb3),
+    },
+    ThemeChrome {
+        id: "kanagawa",
+        toast: "theme: Kanagawa",
+        surface: (0x1f, 0x1f, 0x28),
+        pill: (0x2d, 0x4f, 0x67),
+        heading: (0x7f, 0xb4, 0xca),
+        muted: (0xa6, 0xa0, 0x8a),
+    },
+    ThemeChrome {
+        id: "everforest",
+        toast: "theme: Everforest",
+        surface: (0x2d, 0x35, 0x3b),
+        pill: (0x3a, 0x51, 0x5d),
+        heading: (0x83, 0xc0, 0x92),
+        muted: (0xae, 0xb8, 0xb0),
+    },
+    ThemeChrome {
+        id: "one-dark",
+        toast: "theme: One Dark",
+        surface: (0x28, 0x2c, 0x34),
+        pill: (0x3b, 0x50, 0x70),
+        heading: (0x56, 0xb6, 0xc2),
+        muted: (0xa6, 0xab, 0xb4),
+    },
+    ThemeChrome {
+        id: "github-dark-dimmed",
+        toast: "theme: GitHub Dark Dimmed",
+        surface: (0x22, 0x27, 0x2e),
+        pill: (0x25, 0x5a, 0xb2),
+        heading: (0x96, 0xd0, 0xff),
+        muted: (0x9e, 0xa8, 0xb3),
     },
 ];
 
@@ -173,7 +237,8 @@ fn assert_no_theme_store(dir: &Path) {
 /// Help lists `T` cycle theme next to `t` flat/tree. Launch seed
 /// `WS_STATUS_THEME` paints that id. Each Shift+T advances
 /// Tokyo Night → Monokai → Dracula → Gruvbox Dark → Catppuccin Mocha →
-/// Tokyo Night. Toast, surface, mode pill, heading, muted (line numbers /
+/// Slate → Solarized Dark → Nord → Rosé Pine → Kanagawa → Everforest →
+/// One Dark → GitHub Dark Dimmed → Tokyo Night. Toast, surface, mode pill, heading, muted (line numbers /
 /// graph meta), and graph lane 0 must all match that id. A no-op, a skipped
 /// id, or lowercase `t` cannot pass. There is no theme file.
 #[test]

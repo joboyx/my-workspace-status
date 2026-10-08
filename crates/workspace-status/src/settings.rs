@@ -208,7 +208,7 @@ mod tests {
     #[test]
     fn invalid_env_falls_through_to_config() {
         let env = [
-            ("WS_STATUS_THEME", "solarized"),
+            ("WS_STATUS_THEME", "solarized-light"),
             ("WS_STATUS_GLYPHS", "ASCII"),
             ("WS_STATUS_WATCH_MS", "-1"),
             ("WS_STATUS_FETCH_MS", "soon"),

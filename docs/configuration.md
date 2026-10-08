@@ -159,7 +159,7 @@ These top-level keys set the same settings as the env vars in [Environment varia
 
 | Key | Env var | Value |
 | --- | --- | --- |
-| `theme` | `WS_STATUS_THEME` | one of `"tokyo-night"`, `"monokai"`, `"dracula"`, `"gruvbox-dark"`, `"catppuccin-mocha"` |
+| `theme` | `WS_STATUS_THEME` | one of `"tokyo-night"`, `"monokai"`, `"dracula"`, `"gruvbox-dark"`, `"catppuccin-mocha"`, `"slate"`, `"solarized-dark"`, `"nord"`, `"rose-pine"`, `"kanagawa"`, `"everforest"`, `"one-dark"`, `"github-dark-dimmed"` |
 | `glyphs` | `WS_STATUS_GLYPHS` | `"nerd"` \| `"ascii"` |
 | `watchMs` | `WS_STATUS_WATCH_MS` | integer >= 0. `0` turns the poll off. `1` to `499` clamp up to `500`, like the env var |
 | `fetchMs` | `WS_STATUS_FETCH_MS` | integer >= 0. `0` turns the background fetch off. `1` to `29999` clamp up to `30000`, like the env var |
@@ -226,7 +226,7 @@ Optional object. It sets the TUI view modes at launch. Each key is optional. An 
 | `WS_STATUS_WATCH_MS` | `watchMs` | `3000` (`DEFAULT_WATCH_MS`)                             | Live-refresh poll period. `0` disables the poll. Values below `MIN_WATCH_MS` (500) are clamped up. Non-numeric, negative, or empty falls through to config `watchMs`, then the default. File, graph, and commit-file rows flash (~800ms background fade) on add/update/remove of the same row identity. Add is green (`flash` / `flash_ramp`), update is amber (`flash_update` / `flash_update_ramp`), remove is red/magenta (`flash_remove` / `flash_remove_ramp`). Flash background wins over cursor and search. The cursor bar stays. File signatures use status letter or worktree `size:mtimeMs`. Chrome identity includes `HEAD` and `sync_note` so a new local commit or ahead 2→3 reloads status / graph without `r`. The active file tab reads its file again when the file's `size:mtimeMs` moved. A disjoint identity set (repo switch / first paint) seeds and does not flash. The TUI polls local git only (no fetch) and keeps fold, focus, and scroll. Unchanged polls skip the right-pane `git log` / diff reload. The next tick is scheduled from the start of the interval, not after collect finishes. The live loop applies each checkout as it finishes; keys cannot starve the tick. |
 | `WS_STATUS_FETCH_MS` | `fetchMs` | `300000` (`DEFAULT_FETCH_MS`)                           | Background `git fetch` period for the TUI. `0` disables. Values below `MIN_FETCH_MS` (30000) are clamped up when enabled. Non-numeric, negative, or empty falls through to config `fetchMs`, then the default. The tick paints no progress or summary line; it writes the status slot only when a repo fails. |
 | `WS_STATUS_FETCH_CONCURRENCY` | `fetchConcurrency` | `10` (`FETCH_CONCURRENCY`)                            | In-flight cap for independent per-repo fetch / pull / push on the TTY Scheduler JoinSet, and for CLI `collect_snapshots` / `process_repo`. Remotes queue per gitdir when that gitdir is occupied. Missing, empty, `0`, negative, or non-numeric falls through to config `fetchConcurrency`, then 10. Exclusive writes (stage, commit, merge into HEAD) stay serial. |
-| `WS_STATUS_THEME` | `theme` | `tokyo-night`                                           | Built-in TUI theme id: `tokyo-night`, `monokai`, `dracula`, `gruvbox-dark`, `catppuccin-mocha`. Unknown values fall through to config `theme`, then `tokyo-night`. Seeds the TUI at launch. `T` cycles the same list in the current session only; there is no theme file. Palettes assume a dark terminal. See **Theme flash tokens**. |
+| `WS_STATUS_THEME` | `theme` | `slate`                                                 | Built-in TUI theme id: `tokyo-night`, `monokai`, `dracula`, `gruvbox-dark`, `catppuccin-mocha`, `slate`, `solarized-dark`, `nord`, `rose-pine`, `kanagawa`, `everforest`, `one-dark`, `github-dark-dimmed`. Unknown values fall through to config `theme`, then `slate`. Seeds the TUI at launch. `T` cycles the same list in the current session only; there is no theme file. All palettes are dark. See [Theme tokens](#theme-tokens) and **Theme flash tokens**. |
 | `EDITOR` | — (system var; use `editor`) | unset                                                   | Used for `e` when config `editor` and `VISUAL` are unset or blank. Blank values are ignored. May include fixed args (`code --wait`, `nvim -p`); simple quoting is supported for paths with spaces. |
 | `VISUAL` | — (system var; use `editor`) | unset                                                   | Fallback editor for `e` when config `editor` is omitted or blank; wins over `EDITOR` (same argv parsing).                                                                                         |
 | _(editor fallback)_ | `editor` | `vim`                                                   | When config `editor`, `VISUAL`, and `EDITOR` are all unset/blank, `resolve_editor` returns `vim`.                                                                                                 |
@@ -246,7 +246,7 @@ A **Config key** sets the same setting from a config file; a valid env var wins 
 
 ### Theme flash tokens
 
-Each built-in palette keeps three four-step flash ramps. Accents mix toward `surface` so the row stays readable.
+Each built-in palette keeps three four-step flash ramps. Each step is `surface` mixed 42%, 28%, 16%, then 8% toward the accent, so the row stays readable.
 
 | Kind | Peak / ramp | Accent source |
 | --- | --- | --- |
@@ -298,7 +298,7 @@ On many macOS setups there is no dedicated PageUp key. `Fn+Up` and `Fn+Down` oft
 | Commit message   | Expanded. `viewDefaults.commitMessage` overrides at launch                                                                                        | `M`                                                  |
 | Message rows     | 4 rows in the expanded commit-message footer, whatever the message length. `viewDefaults.commitMessageLines` overrides at launch (1 to 20)        | `-` / `+` (`=` is `+`)                               |
 | Line blame       | On. `viewDefaults.lineBlame` overrides at launch                                                                                                  | `B`                                                  |
-| Theme            | Tokyo Night                                                                                                                                       | `T` cycles / `WS_STATUS_THEME`                       |
+| Theme            | Slate                                                                                                                                             | `T` cycles / `WS_STATUS_THEME`                       |
 | Background       | Paint: theme colours fill the panes and chrome rows. `viewDefaults.background` overrides at launch                                                | —                                                    |
 | Live refresh     | On, 3 s                                                                                                                                           | `WS_STATUS_WATCH_MS=0`                               |
 | Background fetch | On, 5 min                                                                                                                                         | `WS_STATUS_FETCH_MS=0`                               |
@@ -310,7 +310,33 @@ Split falls back to inline when the diff's painted width (the right pane less it
 
 ## Theme tokens
 
-Built-in palettes live in `crates/workspace-status/src/tui/theme.rs`. `WS_STATUS_THEME` seeds the first paint. `T` cycles the same list in this session. There is no theme file.
+Built-in palettes live in `crates/workspace-status/src/tui/theme.rs`. `WS_STATUS_THEME` seeds the first paint. `T` cycles the same list in this session, in the order of the tables below. There is no theme file.
+
+Besides `surface` (the right pane and the file tab), each theme has three background roles. A theme can set each one; otherwise the default rule applies. Each mix is per RGB channel, `surface + (target - surface) × percent / 100`, rounded to the nearest integer.
+
+| Role | Background of | Default rule |
+| --- | --- | --- |
+| `palette.sidebar` | Left pane (tree, graph, files list) | `surface` mixed 22% toward black |
+| `palette.chrome` | Tab strip, breadcrumb, ctrl-c prompt, and key-chip footer rows | `surface` mixed 38% toward black |
+| `palette.panel` | Popups | `surface` mixed 5% toward white |
+
+Every text role meets its contrast floor on `surface`, `sidebar`, `chrome`, and `panel` (`theme.rs` tests). Monokai, Dracula, and Gruvbox Dark set a smaller `panel` lift (4%, 3%, 2% toward white) because the 5% rule drops their popup text below the floor.
+
+| Theme | slug | surface | sidebar | chrome | panel |
+| --- | --- | --- | --- | --- | --- |
+| Tokyo Night | `tokyo-night` | `#1a1b26` | `#14151e` (rule) | `#101118` (rule) | `#252631` (rule) |
+| Monokai | `monokai` | `#272822` | `#1e1f1b` (rule) | `#181915` (rule) | `#30312b` |
+| Dracula | `dracula` | `#282a36` | `#1f212a` (rule) | `#191a21` (rule) | `#2e303c` |
+| Gruvbox Dark | `gruvbox-dark` | `#282828` | `#1f1f1f` (rule) | `#191919` (rule) | `#2c2c2c` |
+| Catppuccin Mocha | `catppuccin-mocha` | `#1e1e2e` | `#171724` (rule) | `#13131d` (rule) | `#292938` (rule) |
+| Slate | `slate` | `#11151b` | `#151a21` | `#0d1116` | `#19202a` |
+| Solarized Dark | `solarized-dark` | `#002b36` | `#00222a` (rule) | `#001b21` (rule) | `#073642` |
+| Nord | `nord` | `#2e3440` | `#242932` (rule) | `#1d2028` (rule) | `#3b4252` |
+| Rosé Pine | `rose-pine` | `#191724` | `#1f1d2e` | `#131220` | `#26233a` |
+| Kanagawa | `kanagawa` | `#1f1f28` | `#16161d` | `#121218` | `#2a2a37` |
+| Everforest | `everforest` | `#2d353b` | `#232a2e` | `#1c2125` (rule) | `#343f44` |
+| One Dark | `one-dark` | `#282c34` | `#21252b` | `#1b1e23` | `#2c313c` |
+| GitHub Dark Dimmed | `github-dark-dimmed` | `#22272e` | `#1c2128` | `#171b21` | `#2d333b` |
 
 Unfocused pane borders use `palette.borderDim`. That token is a near-surface dark gray. It is darker than that theme's `muted`. Focused pane borders use `palette.heading`. Pane body text stays full brightness. The TUI does not DIM body text because a pane is unfocused. The selected row on an unfocused list keeps a thinner `▏` marker and `palette.cursorBgInactive` (between that theme's surface and `cursorBg`). The focused list still uses `▌` / `cursorBg`.
 
@@ -321,6 +347,14 @@ Unfocused pane borders use `palette.borderDim`. That token is a near-surface dar
 | Dracula | `#282a36` | `#b4bce4` | `#44475a` |
 | Gruvbox Dark | `#282828` | `#bdae93` | `#504945` |
 | Catppuccin Mocha | `#1e1e2e` | `#a6adc8` | `#45475a` |
+| Slate | `#11151b` | `#8a94a3` | `#2b3442` |
+| Solarized Dark | `#002b36` | `#92a1a3` | `#1a4957` |
+| Nord | `#2e3440` | `#afb8c7` | `#434c5e` |
+| Rosé Pine | `#191724` | `#9c99b3` | `#403d52` |
+| Kanagawa | `#1f1f28` | `#a6a08a` | `#363646` |
+| Everforest | `#2d353b` | `#aeb8b0` | `#475258` |
+| One Dark | `#282c34` | `#a6abb4` | `#3e4451` |
+| GitHub Dark Dimmed | `#22272e` | `#9ea8b3` | `#444c56` |
 
 The compare-tab close `[✗]` (U+2717, ballot x) uses `palette.tabClose` at rest. That neutral dark gray is darker than `muted` and stays readable on the surface and on `cursorBg` (the active tab). Under the pointer it uses `palette.tabCloseHover`, red (the theme's `deleted` color), in bold.
 
@@ -331,6 +365,14 @@ The compare-tab close `[✗]` (U+2717, ballot x) uses `palette.tabClose` at rest
 | Dracula | `#888888` | `#ff5555` |
 | Gruvbox Dark | `#787878` | `#fb4934` |
 | Catppuccin Mocha | `#707070` | `#f38ba8` |
+| Slate | `#686868` | `#e27a7a` |
+| Solarized Dark | `#727272` | `#e56967` |
+| Nord | `#828282` | `#d3949a` |
+| Rosé Pine | `#707070` | `#eb6f92` |
+| Kanagawa | `#717171` | `#e46876` |
+| Everforest | `#858585` | `#e78183` |
+| One Dark | `#7c7c7c` | `#e06c75` |
+| GitHub Dark Dimmed | `#797979` | `#f47067` |
 
 Graph ref chips: default-branch names use `palette.branchDefault` (distinct from `muted`). Checkout / detached marks use per-theme high-contrast `palette.headMark` (Nerd Font crosshairs / `[HEAD]`). Synced chips put Nerd Font exchange before the branch name. Marks are PUA icons so MesloLGS NF keeps 1-cell metrics. The graph selection footer reuses those same chip colours; it is not a single muted wash. The graph sync header paints the branch in `palette.branchDefault` or `palette.branchFeature`, the ahead count in `palette.added`, the behind count in `palette.deleted` (the tree's sync colours and glyphs), and `no-upstream` in `palette.muted`.
 
