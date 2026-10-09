@@ -95,6 +95,19 @@ fn footer_top(screen: &str, subject: &str) -> Option<usize> {
         .position(|line| line.contains(subject) && !line.contains('\u{258C}'))
 }
 
+/// The right-pane row above the footer top `top` is the footer rule: all
+/// `▁` (`_` in ASCII mode) inside the pane borders.
+fn rule_above(screen: &str, top: usize) -> bool {
+    let Some(row) = top.checked_sub(1) else {
+        return false;
+    };
+    right_pane(screen).lines().nth(row).is_some_and(|line| {
+        let inner = line.trim_matches(|c: char| c == '\u{2502}' || c.is_whitespace());
+        inner.chars().count() >= 10
+            && (inner.chars().all(|c| c == '\u{2581}') || inner.chars().all(|c| c == '_'))
+    })
+}
+
 /// The one-line `root` commit is selected with its footer painted.
 fn root_selected(screen: &str) -> bool {
     panes_tree_unfocused_graph_focused(screen)
@@ -175,8 +188,9 @@ fn diff_msg_collapsed(screen: &str) -> bool {
 /// one line. With no key, `j` onto the commit paints `UNIQUE_MSG_BODY_LINE`
 /// but not `UNIQUE_MSG_BODY_TAIL`. Wheel down over the footer brings the
 /// tail in without moving the list cursor; wheel up goes back. `j` onto the
-/// one-line `root` commit keeps the footer top row (fixed height); `+` / `-`
-/// move it by one row with `msg lines <N>`. `M` hides the
+/// one-line `root` commit keeps the footer top row (fixed height), with the
+/// footer rule right above it; `+` / `-` move both by one row with
+/// `msg lines <N>`. `M` hides the
 /// body (`msg off`), `M` again shows it (`msg on`). Enter (depth 1) keeps
 /// expand on the left graph footer; the right files pane shows no message,
 /// and `M` toggles the graph footer the same way. Enter on `wip.txt` (depth
@@ -249,6 +263,11 @@ fn pty_commit_msg_expand_toggle() {
     // Fixed height: the footer starts on the same row for the long message
     // and for the one-line `root` commit below it.
     let long_top = footer_top(&tui.screen(), "nnnn").expect("long footer top");
+    assert!(
+        rule_above(&tui.screen(), long_top),
+        "the footer rule sits right above the footer:\n{}",
+        tui.screen()
+    );
     tui.key('j');
     tui.wait_pred(root_selected, "j onto the one-line root commit", WAIT);
     assert_eq!(
@@ -271,6 +290,7 @@ fn pty_commit_msg_expand_toggle() {
         |screen| {
             crumb_row(screen).contains("msg lines 5")
                 && footer_top(screen, "nnnn") == Some(long_top - 1)
+                && rule_above(screen, long_top - 1)
         },
         "+ grows the footer by one message row",
         WAIT,

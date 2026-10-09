@@ -12,6 +12,7 @@ use unicode_width::UnicodeWidthStr;
 use workspace_status_graph::{
     footer_message_scroll_max, graph_col_max, graph_hscroll_visible, graph_vscroll_visible,
     painted_line_count, short_id, GraphIconKind, GraphLabelPalette, GraphRow, GraphWidget,
+    FOOTER_RULE_ROWS,
 };
 
 use std::cell::RefCell;
@@ -1513,6 +1514,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         .commit_msg_expand(state.commit_msg_expand)
         .commit_msg_lines(state.commit_msg_lines)
         .commit_msg_scroll(state.graph_footer_msg_scroll())
+        .footer_rule(footer_rule_glyph(state.ascii), pal.border_dim)
         .lane_colors(&lane_colors)
         .label_palette(GraphLabelPalette {
             subject: pal.repo,
@@ -1652,7 +1654,7 @@ fn record_graph_scrollbar(
     let list_height = chrome.list_height;
     let footer_scroll_max = footer_message_scroll_max(
         state.graph_footer_line_count(area.width as usize),
-        chrome.footer_height,
+        chrome.footer_body_height(),
     );
     if chrome.footer && footer_scroll_max > 0 {
         let bottom = area.y.saturating_add(area.height);
@@ -1681,22 +1683,41 @@ fn record_graph_scrollbar(
 }
 
 /// Rows the commit-message footer takes at the bottom of a commit-files pane
-/// `pane_h` rows tall, for a footer request of `footer_len` rows
+/// `pane_h` rows tall, for a footer body of `body_len` rows
 /// ([`AppState::commit_detail_footer_request`], fixed whatever the message).
 ///
-/// The file list keeps at least one row whenever the pane has two or more,
-/// so a short terminal never hides the list for the message. Draw and
-/// layout both size the footer here so the list rows and click mapping
-/// agree.
-fn commit_detail_footer_height(footer_len: usize, pane_h: u16) -> u16 {
-    let footer_len = footer_len.min(u16::MAX as usize) as u16;
+/// The footer is the [`FOOTER_RULE_ROWS`] rule row, then the body, so it
+/// asks for `body_len + 1` rows. The file list keeps at least one row
+/// whenever the pane has two or more, so a short terminal never hides the
+/// list for the message; the body clips first, down to the rule only.
+/// Draw and layout both size the footer here so the list rows and click
+/// mapping agree.
+fn commit_detail_footer_height(body_len: usize, pane_h: u16) -> u16 {
+    let want = body_len
+        .min(usize::from(u16::MAX - FOOTER_RULE_ROWS))
+        .saturating_add(usize::from(FOOTER_RULE_ROWS)) as u16;
     let max = if pane_h >= 2 { pane_h - 1 } else { pane_h };
-    footer_len.min(max)
+    want.min(max)
+}
+
+/// Rule glyph between a list and its footer: `▁` (`_` in ASCII mode).
+fn footer_rule_glyph(ascii: bool) -> &'static str {
+    glyph(ascii, "\u{2581}", "_")
+}
+
+/// The rule row that tops a list footer, `width` cells of
+/// [`footer_rule_glyph`] in `border_dim`. Boxed and flat panes alike.
+fn footer_rule_line(width: u16, ascii: bool, palette: Palette) -> Line<'static> {
+    Line::from(Span::styled(
+        footer_rule_glyph(ascii).repeat(usize::from(width)),
+        Style::default().fg(palette.border_dim),
+    ))
 }
 
 /// Commit files beside the file diff (depth 2, left pane): the file list on
 /// top, the selected commit's title, meta, and message pinned to the bottom
 /// rows as a footer (like the graph selection footer on the graph pane).
+/// The footer's first row is a rule ([`footer_rule_line`]) under the list.
 ///
 /// `col_offset` is the horizontal pan of the file list.
 fn draw_commit_detail(
@@ -1722,10 +1743,24 @@ fn draw_commit_detail(
         return;
     }
     let palette = state.theme.palette();
+    let rule_y = area.y.saturating_add(list_h);
+    frame.render_widget(
+        Paragraph::new(footer_rule_line(area.width, state.ascii, palette)),
+        Rect {
+            x: area.x,
+            y: rule_y,
+            width: area.width,
+            height: 1,
+        },
+    );
+    let body_h = footer_h.saturating_sub(FOOTER_RULE_ROWS);
+    if body_h == 0 {
+        return;
+    }
     // Clip keeps the first lines: title, meta, then message lines.
     let footer_lines: Vec<Line> = footer
         .iter()
-        .take(footer_h as usize)
+        .take(body_h as usize)
         .enumerate()
         .map(|(i, line)| {
             let style = if i == 0 {
@@ -1738,9 +1773,9 @@ fn draw_commit_detail(
         .collect();
     let footer_area = Rect {
         x: area.x,
-        y: area.y.saturating_add(list_h),
+        y: rule_y.saturating_add(FOOTER_RULE_ROWS),
         width: area.width,
-        height: footer_h,
+        height: body_h,
     };
     frame.render_widget(Paragraph::new(footer_lines), footer_area);
 }
@@ -7613,8 +7648,8 @@ mod tests {
             commit_detail_footer_height(state.commit_detail_footer_request(), layout.tree_height);
         assert_eq!(
             footer_h as usize,
-            2 + workspace_status_graph::COMMIT_MSG_LINES_DEFAULT,
-            "title + meta + N message rows for a one-line body"
+            1 + 2 + workspace_status_graph::COMMIT_MSG_LINES_DEFAULT,
+            "rule + title + meta + N message rows for a one-line body"
         );
         assert_eq!(layout.files_list_y, layout.tree_y);
         assert_eq!(
@@ -7685,8 +7720,8 @@ mod tests {
         assert_eq!(short_h, long_h, "expanded: same list height");
         assert_eq!(
             short_h as usize,
-            pane as usize - (2 + n),
-            "title + meta + N"
+            pane as usize - (1 + 2 + n),
+            "rule + title + meta + N"
         );
         assert!(left.contains('…'), "a long body clips with …:\n{left}");
         assert!(
@@ -7696,9 +7731,286 @@ mod tests {
         let (_, short_c, _) = list_height("", false, n);
         let (_, long_c, _) = list_height(&long, false, n);
         assert_eq!(short_c, long_c, "collapsed: same list height");
-        assert_eq!(short_c, pane - 2, "collapsed: title + subtitle");
+        assert_eq!(short_c, pane - 3, "collapsed: rule + title + subtitle");
         let (_, grown, _) = list_height("", true, n + 1);
         assert_eq!(grown + 1, short_h, "one more message row");
+    }
+
+    /// Commit files beside a file diff, with `n` files so the list
+    /// overflows any test pane.
+    fn commit_diff_state_with_files(n: usize) -> AppState {
+        let mut state = two_pane_files_state();
+        let files: Vec<super::super::drill::CommitFile> = (0..n)
+            .map(|i| super::super::drill::CommitFile {
+                status: "M".into(),
+                path: format!("f{i:02}.txt"),
+                old_path: None,
+                stat: None,
+            })
+            .collect();
+        state.open_commit_diff(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            files,
+            0,
+            "f00.txt".into(),
+            super::super::diff::DiffContent::from_lines(vec!["@@ -1,1 +1,1 @@".into()]),
+        );
+        state
+    }
+
+    /// The depth-2 commit-files footer starts with a full-width rule
+    /// (`▁`, `_` in ASCII mode) in `border_dim`, in paint and terminal
+    /// mode, expanded and collapsed. The list gives up one row for it and
+    /// the footer body under it is unchanged.
+    #[test]
+    fn commit_detail_footer_rule_sits_between_list_and_footer() {
+        for background in [BackgroundMode::Paint, BackgroundMode::Terminal] {
+            for ascii in [false, true] {
+                for expand in [true, false] {
+                    let case = format!("{background:?} ascii={ascii} expand={expand}");
+                    let mut state = two_pane_commit_diff_state();
+                    set_seed_commit_body(&mut state, FOOTER_BODY_TOKEN);
+                    state.background = background;
+                    state.ascii = ascii;
+                    state.commit_msg_expand = expand;
+                    state.focus = FocusPane::Left;
+                    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+                    draw_state(&mut terminal, &mut state);
+                    let l = state.layout.clone();
+                    let body_len = state.commit_detail_footer_request();
+                    assert_eq!(
+                        l.files_list_height as usize,
+                        l.tree_height as usize - body_len - 1,
+                        "{case}: the list gives up one row"
+                    );
+                    let rule_y = l.files_list_y + l.files_list_height;
+                    let want = if ascii { "_" } else { "\u{2581}" };
+                    let palette = state.theme.palette();
+                    let buf = terminal.backend().buffer();
+                    for x in l.tree_x..l.tree_x + l.tree_width {
+                        assert_eq!(buf[(x, rule_y)].symbol(), want, "{case}: x={x}");
+                        assert_eq!(buf[(x, rule_y)].fg, palette.border_dim, "{case}: x={x}");
+                    }
+                    assert_ne!(
+                        buf[(l.tree_x, rule_y - 1)].symbol(),
+                        want,
+                        "{case}: the row above the rule is the list"
+                    );
+                    let footer = state.commit_detail_footer_lines(l.tree_width as usize);
+                    let painted = region_text(
+                        &terminal,
+                        l.tree_x,
+                        rule_y + 1,
+                        l.tree_width,
+                        body_len as u16,
+                    );
+                    for (i, (row, line)) in painted.lines().zip(&footer).enumerate() {
+                        // The pane clips a long line at its width.
+                        let clipped: String = line.chars().take(l.tree_width as usize).collect();
+                        assert_eq!(row.trim_end(), clipped.trim_end(), "{case}: body row {i}");
+                    }
+                    assert_eq!(rule_y + 1 + body_len as u16, l.tree_y + l.tree_height);
+                }
+            }
+        }
+    }
+
+    /// A footer capped to one row is the rule only; a zero-row footer
+    /// paints nothing.
+    #[test]
+    fn commit_detail_footer_is_rule_only_or_nothing_on_tiny_panes() {
+        assert_eq!(commit_detail_footer_height(4, 0), 0);
+        assert_eq!(commit_detail_footer_height(4, 1), 1);
+        assert_eq!(
+            commit_detail_footer_height(4, 2),
+            1,
+            "rule only, one list row"
+        );
+        assert_eq!(commit_detail_footer_height(4, 3), 2);
+        assert_eq!(commit_detail_footer_height(4, 40), 5, "rule + 4 body rows");
+        assert_eq!(commit_detail_footer_height(usize::MAX, 40), 39);
+
+        let mut state = two_pane_commit_diff_state();
+        state.ascii = true;
+        let mut terminal = Terminal::new(TestBackend::new(30, 4)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_commit_detail(
+                    frame,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: 30,
+                        height: 2,
+                    },
+                    &mut state,
+                    0,
+                    0,
+                )
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        assert!(
+            buf_line(buf, 0).contains("README.md"),
+            "{}",
+            buf_line(buf, 0)
+        );
+        assert_eq!(buf_line(buf, 1), "_".repeat(30), "rule only");
+        assert_eq!(buf_line(buf, 2).trim(), "", "nothing under the pane");
+
+        let mut terminal = Terminal::new(TestBackend::new(30, 2)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_commit_detail(
+                    frame,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: 30,
+                        height: 0,
+                    },
+                    &mut state,
+                    0,
+                    0,
+                )
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        for y in 0..2 {
+            assert_eq!(buf_line(buf, y).trim(), "", "zero-height footer row {y}");
+        }
+    }
+
+    /// A click on the commit-files footer rule selects nothing; the last
+    /// list row above it still selects the file painted there.
+    #[test]
+    fn commit_detail_click_on_the_rule_selects_nothing() {
+        for background in [BackgroundMode::Paint, BackgroundMode::Terminal] {
+            let mut state = commit_diff_state_with_files(60);
+            state.background = background;
+            state.focus = FocusPane::Left;
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let l = state.layout.clone();
+            let rule_y = l.files_list_y + l.files_list_height;
+            let col = l.tree_x + 4;
+            assert_eq!(state.commit_files_cursor(), 0);
+            state.dispatch(Action::Click { col, row: rule_y });
+            assert_eq!(state.commit_files_cursor(), 0, "{background:?}: rule row");
+            let last = rule_y - 1;
+            let label = buf_line(terminal.backend().buffer(), last);
+            let idx = l.files_list_offset + usize::from(l.files_list_height) - 1;
+            let want = state.painted_commit_file_rows()[idx].id.clone();
+            state.dispatch(Action::Click { col, row: last });
+            let live = state.commit_file_rows();
+            assert_eq!(
+                live[state.commit_files_cursor()].id,
+                want,
+                "{background:?}: last list row {label}"
+            );
+        }
+    }
+
+    /// Long body on the seed commit and enough commits that the graph list
+    /// overflows the pane.
+    fn tall_graph_state() -> AppState {
+        let mut state = two_pane_graph_state();
+        if let Some(model) = state.graph.as_mut() {
+            let seed = model.commits[0].clone();
+            model.commits = (0..60)
+                .map(|i| Commit {
+                    id: format!("{i:040x}"),
+                    subject: format!("commit {i:02}"),
+                    body: (0..30)
+                        .map(|b| format!("BODY{b:02}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    ..seed.clone()
+                })
+                .collect();
+            model.head_id = Some(format!("{:040x}", 0));
+        }
+        state.graph_cursor = 1;
+        state
+    }
+
+    /// The graph selection footer starts with a full-width rule in
+    /// `border_dim` (`_` in ASCII mode), in both modes. The recorded footer
+    /// hit box starts on the rule, the list scrollbar ends above it, and a
+    /// click on the rule selects nothing while the last list row still
+    /// selects its commit.
+    #[test]
+    fn graph_footer_rule_tops_the_footer_and_takes_no_click() {
+        for background in [BackgroundMode::Paint, BackgroundMode::Terminal] {
+            for ascii in [false, true] {
+                let case = format!("{background:?} ascii={ascii}");
+                let mut state = tall_graph_state();
+                state.background = background;
+                state.ascii = ascii;
+                let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let l = state.layout.clone();
+                let chrome = state.graph_chrome_in(l.diff_pane_height);
+                assert_eq!(chrome, state.graph_chrome(), "{case}");
+                let list_top = l.right_y + u16::from(chrome.header);
+                let rule_y = list_top + chrome.list_height;
+                assert_eq!(
+                    rule_y + chrome.footer_height,
+                    l.right_y + l.diff_pane_height,
+                    "{case}: footer ends on the pane bottom"
+                );
+                let want = if ascii { "_" } else { "\u{2581}" };
+                let palette = state.theme.palette();
+                let buf = terminal.backend().buffer();
+                for x in l.diff_content_x..l.diff_content_x + l.diff_pane_width {
+                    assert_eq!(buf[(x, rule_y)].symbol(), want, "{case}: x={x}");
+                    assert_eq!(buf[(x, rule_y)].fg, palette.border_dim, "{case}: x={x}");
+                }
+                let body = buf_line(buf, rule_y + 1);
+                // Row 1 is the first commit (row 0 is the uncommitted row).
+                assert!(
+                    body.contains("commit 00"),
+                    "{case}: subject under the rule: {body}"
+                );
+                assert_eq!(l.graph_footer_y, Some(rule_y), "{case}: footer hit box");
+                assert_eq!(l.graph_footer_height, chrome.footer_height, "{case}");
+                assert_eq!(l.graph_scrollbar_y, list_top, "{case}");
+                assert_eq!(l.graph_scrollbar_height, chrome.list_height, "{case}");
+                assert!(l.graph_footer_scroll_max > 0, "{case}");
+                assert_eq!(
+                    l.graph_footer_scroll_max,
+                    footer_message_scroll_max(
+                        state.graph_footer_line_count(l.diff_pane_width as usize),
+                        chrome.footer_body_height(),
+                    ),
+                    "{case}"
+                );
+
+                let col = l.diff_content_x + 2;
+                state.dispatch(Action::Click { col, row: rule_y });
+                assert_eq!(state.graph_cursor, 1, "{case}: rule row selects nothing");
+                let glyphs = if ascii {
+                    &workspace_status_graph::ASCII
+                } else {
+                    &workspace_status_graph::UNICODE
+                };
+                let painted = workspace_status_graph::paint_model(
+                    state.graph.as_ref().unwrap(),
+                    glyphs,
+                    None,
+                );
+                let last = rule_y - 1;
+                let line =
+                    &painted[state.graph_scroll as usize + usize::from(chrome.list_height) - 1];
+                state.dispatch(Action::Click { col, row: last });
+                let idx = line.row_index.expect("last list row maps to a graph row");
+                assert_eq!(state.graph_cursor, idx, "{case}: last list row");
+                assert_ne!(idx, 1, "{case}: the click moved the cursor");
+            }
+        }
     }
 
     fn assert_titles_heading_borders_split(state: &mut AppState) {

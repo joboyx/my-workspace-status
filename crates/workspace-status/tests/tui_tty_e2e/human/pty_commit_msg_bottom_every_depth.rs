@@ -62,19 +62,42 @@ fn meta_row(screen: &str, pane: Pane) -> Option<usize> {
     })
 }
 
+/// Footer rule: the pane row is all `▁` (`_` in ASCII mode) inside its
+/// borders.
+fn is_rule(cells: &str) -> bool {
+    let inner = cells.trim_matches(|c: char| c == '\u{2502}' || c.is_whitespace());
+    inner.chars().count() >= 10
+        && (inner.chars().all(|c| c == '\u{2581}') || inner.chars().all(|c| c == '_'))
+}
+
+/// 0-based screen row of the footer rule on `pane`.
+fn rule_row(screen: &str, pane: Pane) -> Option<usize> {
+    pane_row(screen, pane, is_rule)
+}
+
 /// `row` is painted, below `anchor`.
 fn below(anchor: usize, row: Option<usize>) -> bool {
     row.is_some_and(|row| row > anchor)
 }
 
 /// The graph footer paints the body under the selected list row of `pane`
-/// (right at depth 0, left at depth 1).
+/// (right at depth 0, left at depth 1), with the footer rule between the
+/// list and the footer's subject row.
 fn graph_msg_at_bottom(screen: &str, pane: Pane) -> bool {
     let Some(selected) = selected_subject_row(screen, pane) else {
         return false;
     };
+    let rule = rule_row(screen, pane);
+    let start = pane_body_start(screen.lines().count());
+    let subject_under_rule = rule.is_some_and(|rule| {
+        pane_cells(screen, pane)
+            .get(rule + 1 - start)
+            .is_some_and(|cells| cells.contains(SUBJECT))
+    });
     crumb_row(screen).contains(REPO)
-        && below(selected, pane_row_of(screen, pane, COMMIT_MSG_BODY))
+        && below(selected, rule)
+        && subject_under_rule
+        && rule.is_some_and(|rule| below(rule, pane_row_of(screen, pane, COMMIT_MSG_BODY)))
         && no_wrong_overlays(screen)
 }
 
@@ -114,9 +137,9 @@ fn msg_pinned_to_left_bottom(screen: &str, file: usize, meta: usize) -> bool {
     painted.is_some_and(|row| row + 1 == border && row >= meta && row > file)
 }
 
-/// Depth 2: the left file list comes first, then subject, meta, and body,
-/// with the message block pinned to the left pane bottom. The right diff
-/// pane carries no commit message.
+/// Depth 2: the left file list comes first, then the footer rule, title,
+/// meta, subject, and body, with the message block pinned to the left pane
+/// bottom. The right diff pane carries no commit message.
 ///
 /// `need_body` is false when the pane is too short for the body to fit
 /// under the list; the meta line must still sit under the file row, and the
@@ -132,8 +155,12 @@ fn files_msg_at_left_bottom(screen: &str, need_body: bool) -> bool {
     let subject = pane_row(screen, Pane::Left, |cells| {
         cells.contains(SUBJECT) && !cells.contains(FILE)
     });
+    // The footer's first row is the rule, then the title row, then meta.
+    let rule_on_top =
+        rule_row(screen, Pane::Left).is_some_and(|rule| rule > file && rule + 2 == meta);
     title_has_diff(screen)
         && meta > file
+        && rule_on_top
         && msg_pinned_to_left_bottom(screen, file, meta)
         && subject.is_none_or(|row| row > file)
         && body.is_none_or(|row| row > file)
@@ -166,6 +193,8 @@ fn diff_collapsed_at_left_bottom(screen: &str) -> bool {
 /// The selected commit message sits at the bottom of exactly one pane at
 /// every drill depth, like the graph selection footer.
 ///
+/// Both footers start with a full-width rule (`▁`, `_` in ASCII mode)
+/// right under their list.
 /// Depth 0 (graph): body under the selected `nnnn` row on the right. Depth
 /// 1 (Enter, commit files): the left graph keeps the body under its
 /// selected row; the right files pane is the `wip.txt` list with no
@@ -178,6 +207,7 @@ fn diff_collapsed_at_left_bottom(screen: &str) -> bool {
 /// graph footer.
 ///
 /// Live PTY 80×28. A message on the depth 1 files pane or the depth 2 diff,
+/// a footer with no rule above it,
 /// a header painted above the depth 2 file list, a message painted directly
 /// under the list with blank rows below it, or a short terminal that drops
 /// the file row for the message cannot pass.
