@@ -27,7 +27,8 @@ use workspace_status_graph::{
     format_commit_message, format_relative_date, graph_chrome_budget_for, graph_footer_request,
     graph_vscroll_visible, paint_model, selection_footer_parts, wrap_commit_message,
     GraphChromeBudget, GraphFooterSelection, GraphModel, GraphRow, PaintedLine, ASCII,
-    COMMIT_MSG_LINES_DEFAULT, COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN, UNICODE,
+    COMMIT_MSG_LINES_DEFAULT, COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN, FOOTER_RULE_ROWS,
+    UNICODE,
 };
 
 use crate::config::ViewDefaults;
@@ -235,7 +236,7 @@ pub struct LayoutHit {
     pub outer_tree_width: u16,
     pub diff_pane_width: u16,
     /// Right-pane content height: the rows under the pane's title (the top
-    /// border or the flat title row), less the bottom border when boxed.
+    /// border or the flat title and accent rows), less the bottom border when boxed.
     pub diff_pane_height: u16,
     /// 0-based first right-pane content column, as painted (after the left
     /// border when boxed, the pane's first column when flat).
@@ -264,14 +265,15 @@ pub struct LayoutHit {
     pub graph_hscrollbar_width: u16,
     /// Max horizontal pan for the painted graph.
     pub graph_col_max: u16,
-    /// 0-based first row of the graph selection footer when its expanded
-    /// message is taller than the footer (wheel there scrolls the message).
+    /// 0-based first row of the graph selection footer (its rule row) when
+    /// its expanded message is taller than the footer (wheel there scrolls
+    /// the message).
     pub graph_footer_y: Option<u16>,
     /// 0-based first column of that footer.
     pub graph_footer_x: u16,
     /// Footer width.
     pub graph_footer_width: u16,
-    /// Footer height, meta row included.
+    /// Footer height, the rule row on top and the meta row included.
     pub graph_footer_height: u16,
     /// Max message scroll for the painted footer.
     pub graph_footer_scroll_max: usize,
@@ -781,10 +783,6 @@ pub struct AppState {
     /// Who paints pane and chrome backgrounds. Launch default
     /// [`BackgroundMode::Paint`]; `viewDefaults.background` sets it.
     pub background: BackgroundMode,
-    /// The terminal draws a coloured underline (SGR 58), detected once at
-    /// launch ([`Settings`]). Off: the focused flat title gets a plain
-    /// underline in its own colour. Off in test state.
-    pub coloured_underline: bool,
     pub mouse_enabled: bool,
     /// Last pointer cell `(col, row)` from any-event motion. `None` when
     /// unknown or mouse capture is off. Paint derives the tab `[✗]` hover
@@ -840,19 +838,17 @@ fn unix_now() -> i64 {
 }
 
 impl AppState {
-    /// TUI launch state: glyphs, theme, coloured-underline support, and the
-    /// viewed / comment store paths come from the resolved `settings`.
+    /// TUI launch state: glyphs, theme, and the viewed / comment store paths
+    /// come from the resolved `settings`.
     pub fn launch(cwd: PathBuf, snapshot: WorkspaceSnapshot, settings: &Settings) -> Self {
-        let mut state = Self::build(
+        Self::build(
             cwd,
             snapshot,
             settings.ascii,
             settings.viewed_store.clone(),
             settings.comment_store.clone(),
             settings.theme,
-        );
-        state.coloured_underline = settings.coloured_underline;
-        state
+        )
     }
 
     /// Test state with a unique temp viewed store, Tokyo Night, and
@@ -997,7 +993,6 @@ impl AppState {
             too_small: false,
             theme,
             background: BackgroundMode::default(),
-            coloured_underline: false,
             mouse_enabled: true,
             pointer: None,
             popover: None,
@@ -1470,7 +1465,10 @@ impl AppState {
         if layout.graph_footer_y.is_none() {
             return 0;
         }
-        let rows = usize::from(layout.graph_footer_height).saturating_sub(1);
+        // Message rows: the footer less its rule and the pinned meta row.
+        let rows = usize::from(layout.graph_footer_height)
+            .saturating_sub(usize::from(FOOTER_RULE_ROWS))
+            .saturating_sub(1);
         let messages = self
             .graph_footer_line_count(usize::from(layout.graph_footer_width))
             .saturating_sub(1);
@@ -16033,12 +16031,12 @@ mod tests {
         let mut app = graph_state(false);
         focus_repo(&mut app, "app");
         install_linear_graph(&mut app, 20);
-        // Collapsed 2-row footer, height 12, no sync header → list_height 10,
-        // page = 9 painted lines.
+        // Collapsed footer (rule + 2 rows), height 12, no sync header →
+        // list_height 9, page = 8 painted lines.
         app.commit_msg_expand = false;
         app.layout.tree_height = 12;
         let list_h = app.graph_chrome().list_height.max(1) as usize;
-        assert_eq!(list_h, 10, "list_height from chrome budget");
+        assert_eq!(list_h, 9, "list_height from chrome budget");
         let page = list_h.saturating_sub(1).max(1);
         app.graph_cursor = 0;
         app.sync_graph_scroll();
@@ -16081,12 +16079,13 @@ mod tests {
         let mut app = graph_state(false);
         focus_repo(&mut app, "app");
         install_linear_graph(&mut app, 20);
-        // Expanded N = 4 asks for 5 rows; an 8-row pane caps the footer at
-        // half (4), so the list keeps 4 rows and a page is 3 painted lines.
+        // Expanded N = 4 asks for the rule + 5 rows; an 8-row pane caps the
+        // body at half (4) under the rule, so the list keeps 3 rows and a
+        // page is 2 painted lines.
         assert!(app.commit_msg_expand);
         app.layout.tree_height = 8;
         let chrome = app.graph_chrome();
-        assert_eq!((chrome.footer_height, chrome.list_height), (4, 4));
+        assert_eq!((chrome.footer_height, chrome.list_height), (5, 3));
         let list_h = chrome.list_height as usize;
         let page = list_h - 1;
         app.graph_cursor = 0;
@@ -16157,10 +16156,11 @@ mod tests {
             assert_eq!(long.footer_height, short.footer_height, "expand {expand}");
             app.dispatch(Action::Move(-1));
             assert_eq!(app.graph_chrome(), short, "expand {expand}");
+            // The rule row, then N message rows + meta, or subject + meta.
             let want = if expand {
-                app.commit_msg_lines as u16 + 1
+                app.commit_msg_lines as u16 + 2
             } else {
-                2
+                3
             };
             assert_eq!(short.footer_height, want, "expand {expand}");
         }
@@ -16175,7 +16175,7 @@ mod tests {
         app.layout.tree_height = 60;
         assert_eq!(app.commit_msg_lines, COMMIT_MSG_LINES_DEFAULT);
         let base = app.graph_chrome();
-        assert_eq!(base.footer_height as usize, COMMIT_MSG_LINES_DEFAULT + 1);
+        assert_eq!(base.footer_height as usize, COMMIT_MSG_LINES_DEFAULT + 2);
 
         assert_eq!(app.dispatch(Action::ResizeCommitMsg(1)), Effect::None);
         assert_eq!(
@@ -16199,19 +16199,20 @@ mod tests {
         }
         assert_eq!(app.commit_msg_lines, COMMIT_MSG_LINES_MIN);
         assert_eq!(app.status, "msg lines 1", "status also at the clamp");
-        assert_eq!(app.graph_chrome().footer_height, 2);
+        assert_eq!(app.graph_chrome().footer_height, 3);
         for _ in 0..30 {
             app.dispatch(Action::ResizeCommitMsg(1));
         }
         assert_eq!(app.commit_msg_lines, COMMIT_MSG_LINES_MAX);
         assert_eq!(app.status, "msg lines 20", "status also at the clamp");
-        assert_eq!(app.graph_chrome().footer_height, 21);
+        assert_eq!(app.graph_chrome().footer_height, 22);
 
-        // Collapsed keeps its 2 rows; N still changes for the next expand.
+        // Collapsed keeps its rule + 2 rows; N still changes for the next
+        // expand.
         app.commit_msg_expand = false;
         app.dispatch(Action::ResizeCommitMsg(-1));
         assert_eq!(app.commit_msg_lines, COMMIT_MSG_LINES_MAX - 1);
-        assert_eq!(app.graph_chrome().footer_height, 2);
+        assert_eq!(app.graph_chrome().footer_height, 3);
         assert!(!app.commit_msg_expand, "- / + never toggle expand");
     }
 
@@ -16255,11 +16256,11 @@ mod tests {
         let mut app = graph_state(false);
         focus_repo(&mut app, "app");
         install_linear_graph(&mut app, 40);
-        // Collapsed 2-row footer keeps a 10-row list.
+        // Collapsed footer (rule + 2 rows) keeps a 9-row list.
         app.commit_msg_expand = false;
         app.layout.tree_height = 12;
         let list_h = app.graph_chrome().list_height.max(1) as usize;
-        assert_eq!(list_h, 10, "list_height from chrome budget");
+        assert_eq!(list_h, 9, "list_height from chrome budget");
         app.graph_cursor = 0;
         app.sync_graph_scroll();
         let steps = list_h / 2 + 4;

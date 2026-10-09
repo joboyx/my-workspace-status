@@ -8,7 +8,7 @@ use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, Stateful
 
 use crate::chrome::{
     footer_message_scroll_max, graph_chrome_budget_for, graph_footer_request,
-    selection_footer_parts, GraphFooterSelection,
+    selection_footer_parts, GraphFooterSelection, FOOTER_RULE_ROWS,
 };
 use crate::format::{
     format_label, format_sync_parts, parts_text, slice_label_parts, LabelKind, LabelPart,
@@ -182,6 +182,11 @@ pub struct GraphWidget<'a> {
     /// Fixed message rows of the expanded footer (see
     /// [`Self::commit_msg_lines`]).
     commit_msg_lines: usize,
+    /// Footer rule glyph (see [`Self::footer_rule`]). `None` uses `▁`
+    /// (`_` in ASCII mode).
+    footer_rule_glyph: Option<&'a str>,
+    /// Footer rule colour (see [`Self::footer_rule`]).
+    footer_rule_color: Color,
 }
 
 impl<'a> GraphWidget<'a> {
@@ -214,6 +219,8 @@ impl<'a> GraphWidget<'a> {
             commit_msg_expand: false,
             commit_msg_scroll: 0,
             commit_msg_lines: COMMIT_MSG_LINES_DEFAULT,
+            footer_rule_glyph: None,
+            footer_rule_color: Color::DarkGray,
         }
     }
 
@@ -394,6 +401,19 @@ impl<'a> GraphWidget<'a> {
     /// [`COMMIT_MSG_LINES_DEFAULT`]. The collapsed footer ignores it.
     pub fn commit_msg_lines(mut self, n: usize) -> Self {
         self.commit_msg_lines = n.clamp(COMMIT_MSG_LINES_MIN, COMMIT_MSG_LINES_MAX);
+        self
+    }
+
+    /// Glyph and colour of the rule on the selection footer's first row,
+    /// repeated across the pane width.
+    ///
+    /// The rule parts the footer from the commit list; it is one of the
+    /// footer rows ([`crate::FOOTER_RULE_ROWS`]). `glyph` is one column
+    /// wide; the TUI passes `▁` (`_` in ASCII mode) and its `border_dim`
+    /// colour. Default is `▁` (`_` with [`Self::ascii`]) in dark grey.
+    pub fn footer_rule(mut self, glyph: &'a str, color: Color) -> Self {
+        self.footer_rule_glyph = Some(glyph);
+        self.footer_rule_color = color;
         self
     }
 }
@@ -726,25 +746,41 @@ impl GraphWidget<'_> {
             }
         }
 
-        let mut footer_y = area.y.saturating_add(area.height);
-        if chrome.footer {
-            let h = chrome.footer_height.max(1);
-            footer_y = footer_y.saturating_sub(h);
-            icon_spans.extend(self.paint_footer(
+        if chrome.footer && chrome.footer_height > 0 {
+            let footer_y = area
+                .y
+                .saturating_add(area.height)
+                .saturating_sub(chrome.footer_height);
+            let default_rule = if self.ascii { "_" } else { "\u{2581}" };
+            let rule = self.footer_rule_glyph.unwrap_or(default_rule);
+            put_text_line(
                 buf,
-                area,
+                area.x,
                 footer_y,
-                h,
-                footer_lines,
-                glyphs.more_below,
-            ));
+                area.width,
+                &rule.repeat(usize::from(area.width)),
+                false,
+                self.footer_rule_color,
+            );
+            let body = chrome.footer_body_height();
+            if body > 0 {
+                icon_spans.extend(self.paint_footer(
+                    buf,
+                    area,
+                    footer_y.saturating_add(FOOTER_RULE_ROWS),
+                    body,
+                    footer_lines,
+                    glyphs.more_below,
+                ));
+            }
         }
         icon_spans
     }
 }
 
 impl GraphWidget<'_> {
-    /// Paint the selection footer into `h` rows from `top`.
+    /// Paint the selection footer body (the rows under the rule) into `h`
+    /// rows from `top`.
     ///
     /// The last line (meta) is pinned on the bottom row. Message lines fill
     /// the rows above it from the top; a short message leaves blank rows. A
@@ -1552,8 +1588,8 @@ mod tests {
         let long = render_footer(&model, width, height, opts(1));
         let short_list = painted_list_rows(&short);
         let long_list = painted_list_rows(&long);
-        // Default N=4: footer is 4 message rows + meta.
-        assert_eq!(short_list.len(), usize::from(height - 5), "{short_list:?}");
+        // Default N=4: footer is the rule, 4 message rows, and meta.
+        assert_eq!(short_list.len(), usize::from(height - 6), "{short_list:?}");
         assert_eq!(
             short_list, long_list,
             "list height follows N, not the message"
@@ -1577,7 +1613,7 @@ mod tests {
         };
         let short3 = painted_list_rows(&render_footer(&model, width, height, n3(0)));
         let long3 = painted_list_rows(&render_footer(&model, width, height, n3(1)));
-        assert_eq!(short3.len(), usize::from(height - 4));
+        assert_eq!(short3.len(), usize::from(height - 5));
         assert_eq!(short3, long3);
 
         // N is clamped to 1..=20.
@@ -1590,7 +1626,11 @@ mod tests {
                 ..opts(0)
             },
         ));
-        assert_eq!(n0.len(), 60 - 2, "N=0 clamps to 1 message row + meta");
+        assert_eq!(
+            n0.len(),
+            60 - 3,
+            "N=0 clamps to rule + 1 message row + meta"
+        );
         let n99 = painted_list_rows(&render_footer(
             &model,
             width,
@@ -1600,7 +1640,11 @@ mod tests {
                 ..opts(0)
             },
         ));
-        assert_eq!(n99.len(), 60 - 21, "N=99 clamps to 20 message rows + meta");
+        assert_eq!(
+            n99.len(),
+            60 - 22,
+            "N=99 clamps to rule + 20 message rows + meta"
+        );
     }
 
     #[test]
@@ -1644,8 +1688,108 @@ mod tests {
                     ascii: true,
                 },
             );
-            assert_eq!(painted_list_rows(&buf).len(), usize::from(height - 2));
+            assert_eq!(painted_list_rows(&buf).len(), usize::from(height - 3));
+            assert_eq!(buf_row(&buf, height - 3), "_".repeat(usize::from(width)));
             assert!(buf_row(&buf, height - 2).starts_with(&format!("commit {selected}")));
+        }
+    }
+
+    #[test]
+    fn footer_rule_tops_the_footer_in_the_caller_glyph_and_colour() {
+        let model = fixed_footer_model();
+        let (width, height) = (40u16, 30u16);
+        let rule_color = Color::Rgb(1, 2, 3);
+        let draw = |ascii: bool, rule: Option<&'static str>, expand: bool| {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).expect("test backend");
+            terminal
+                .draw(|frame| {
+                    let mut widget = GraphWidget::new(&model)
+                        .ascii(ascii)
+                        .now_unix(NOW)
+                        .selected(Some(0))
+                        .commit_msg_expand(expand);
+                    if let Some(glyph) = rule {
+                        widget = widget.footer_rule(glyph, rule_color);
+                    }
+                    widget.render(frame.area(), frame.buffer_mut());
+                })
+                .expect("draw");
+            terminal.backend().buffer().clone()
+        };
+        for (expand, footer_h) in [(true, 6u16), (false, 3)] {
+            let rule_y = height - footer_h;
+            let custom = draw(false, Some("\u{2581}"), expand);
+            assert_eq!(
+                buf_row(&custom, rule_y),
+                "\u{2581}".repeat(usize::from(width)),
+                "expand {expand}"
+            );
+            for x in 0..width {
+                assert_eq!(custom[(x, rule_y)].fg, rule_color, "x={x}");
+            }
+            assert!(
+                buf_row(&custom, rule_y + 1).starts_with("commit 0"),
+                "body starts under the rule"
+            );
+            assert!(buf_row(&custom, height - 1).contains("c00aaaa"));
+            // The last list row sits right above the rule.
+            assert!(!buf_row(&custom, rule_y - 1).trim().is_empty());
+
+            let ascii = draw(true, Some("_"), expand);
+            assert_eq!(buf_row(&ascii, rule_y), "_".repeat(usize::from(width)));
+            let ascii_default = draw(true, None, expand);
+            assert_eq!(
+                buf_row(&ascii_default, rule_y),
+                "_".repeat(usize::from(width))
+            );
+            let unicode_default = draw(false, None, expand);
+            assert_eq!(
+                buf_row(&unicode_default, rule_y),
+                "\u{2581}".repeat(usize::from(width))
+            );
+        }
+    }
+
+    #[test]
+    fn short_pane_footer_keeps_the_rule_and_the_list_row() {
+        let model = fixed_footer_model();
+        let buf = render_footer(
+            &model,
+            20,
+            3,
+            FooterRender {
+                selected: 0,
+                expand: true,
+                msg_scroll: 0,
+                msg_lines: None,
+                ascii: true,
+            },
+        );
+        assert_eq!(painted_list_rows(&buf), vec![0]);
+        assert_eq!(buf_row(&buf, 1), "_".repeat(20));
+        assert!(buf_row(&buf, 2).contains("c00aaaa"), "meta stays pinned");
+    }
+
+    #[test]
+    fn no_footer_paints_no_rule() {
+        let model = fixed_footer_model();
+        for height in [1u16, 2] {
+            let buf = render_footer(
+                &model,
+                20,
+                height,
+                FooterRender {
+                    selected: 0,
+                    expand: false,
+                    msg_scroll: 0,
+                    msg_lines: None,
+                    ascii: true,
+                },
+            );
+            for y in 0..height {
+                assert!(!buf_row(&buf, y).contains("___"), "{height}: row {y}");
+            }
         }
     }
 

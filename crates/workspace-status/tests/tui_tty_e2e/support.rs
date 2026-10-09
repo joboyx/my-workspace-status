@@ -1259,9 +1259,15 @@ pub const SLATE_CURSOR: (u8, u8, u8) = (0x79, 0xa6, 0xdc);
 pub const SLATE_HEADING: (u8, u8, u8) = (0x7f, 0xc4, 0xd6);
 pub const SLATE_MUTED: (u8, u8, u8) = (0x8a, 0x94, 0xa3);
 
-/// Pane title row of the flat (paint-mode) layout. Row 0 is the tab strip;
-/// pane bodies start on the next row.
+/// Pane title row of the flat (paint-mode) layout. Row 0 is the tab strip.
 pub const FLAT_TITLE_ROW: u16 = 1;
+
+/// Accent row of the flat layout, under the title row: a full-width `cursor`
+/// line on the focused pane, blank on the other.
+pub const FLAT_ACCENT_ROW: u16 = FLAT_TITLE_ROW + 1;
+
+/// First pane body row of the flat layout, under the accent row.
+pub const FLAT_BODY_ROW: u16 = FLAT_TITLE_ROW + 2;
 
 /// First column of the right pane in the flat layout: the first title-row
 /// cell after the left pane whose background is not `sidebar`.
@@ -1286,18 +1292,20 @@ pub fn flat_pane_last_row(tui: &PtySession) -> u16 {
     tui.grid_size().1.saturating_sub(3)
 }
 
-/// Left pane body rows (title row excluded), one line per screen row.
+/// Left pane body rows (title and accent rows excluded), one line per
+/// screen row.
 pub fn flat_left_body(tui: &PtySession, join: u16) -> String {
-    (FLAT_TITLE_ROW + 1..=flat_pane_last_row(tui))
+    (FLAT_BODY_ROW..=flat_pane_last_row(tui))
         .map(|row| tui.grid_row_text(row, 0..join))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-/// Right pane body rows (title row excluded), one line per screen row.
+/// Right pane body rows (title and accent rows excluded), one line per
+/// screen row.
 pub fn flat_right_body(tui: &PtySession, join: u16) -> String {
     let (cols, _) = tui.grid_size();
-    (FLAT_TITLE_ROW + 1..=flat_pane_last_row(tui))
+    (FLAT_BODY_ROW..=flat_pane_last_row(tui))
         .map(|row| tui.grid_row_text(row, join..cols))
         .collect::<Vec<_>>()
         .join("\n")
@@ -1305,7 +1313,7 @@ pub fn flat_right_body(tui: &PtySession, join: u16) -> String {
 
 /// 0-based screen row of the left pane body row that contains `needle`.
 pub fn flat_left_row_containing(tui: &PtySession, join: u16, needle: &str) -> Option<u16> {
-    (FLAT_TITLE_ROW + 1..=flat_pane_last_row(tui))
+    (FLAT_BODY_ROW..=flat_pane_last_row(tui))
         .find(|row| tui.grid_row_text(*row, 0..join).contains(needle))
 }
 

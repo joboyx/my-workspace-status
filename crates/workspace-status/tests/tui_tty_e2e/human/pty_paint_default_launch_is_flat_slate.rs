@@ -3,8 +3,9 @@ use std::ops::Range;
 use crate::harness::{PtySession, UserConfig, COLS, ROWS};
 use crate::seed::daily_workspace;
 use crate::support::{
-    crumb_row, flat_join_col, flat_pane_last_row, status_row, FLAT_TITLE_ROW, SLATE_CHROME,
-    SLATE_CURSOR, SLATE_HEADING, SLATE_MUTED, SLATE_SIDEBAR, SLATE_SURFACE, WAIT,
+    crumb_row, flat_join_col, flat_pane_last_row, status_row, FLAT_ACCENT_ROW, FLAT_BODY_ROW,
+    FLAT_TITLE_ROW, SLATE_CHROME, SLATE_CURSOR, SLATE_HEADING, SLATE_MUTED, SLATE_SIDEBAR,
+    SLATE_SURFACE, WAIT,
 };
 
 /// Tokyo Night surface: the harness baseline theme. A launch that still
@@ -14,9 +15,37 @@ const TOKYO_NIGHT_SURFACE: (u8, u8, u8) = (0x1a, 0x1b, 0x26);
 /// Box-drawing glyphs of a boxed pane or a popup. Flat panes paint none.
 const BOX_CORNERS: [char; 8] = ['┌', '┐', '└', '┘', '╭', '╮', '╰', '╯'];
 
-/// Flat title row over `cols` with focus: every blank cell is `accent` in
-/// `cursor`, the title (one cell in) is `heading`, bold, underlined. All
-/// cells keep the pane fill `bg`.
+/// Flat title row over `cols`: the title (one cell in) is `heading` and
+/// bold when `focused`, else `muted` and normal weight; other cells are
+/// blank; nothing is underlined. All cells keep the pane fill `bg`.
+fn title_row(
+    tui: &PtySession,
+    cols: Range<u16>,
+    title: &str,
+    focused: bool,
+    bg: (u8, u8, u8),
+) -> bool {
+    let title_at = cols.start + 1;
+    let title_end = title_at + title.chars().count() as u16;
+    let mut title_chars = title.chars();
+    let title_fg = if focused { SLATE_HEADING } else { SLATE_MUTED };
+    cols.into_iter().all(|col| {
+        let Some(cell) = tui.cell_paint(FLAT_TITLE_ROW, col) else {
+            return false;
+        };
+        if cell.bg != Some(bg) || cell.underline {
+            return false;
+        }
+        if (title_at..title_end).contains(&col) {
+            cell.glyph == title_chars.next() && cell.fg == Some(title_fg) && cell.bold == focused
+        } else {
+            matches!(cell.glyph, None | Some(' ')) && !cell.bold
+        }
+    })
+}
+
+/// Flat pane with focus over `cols`: [`title_row`] focused, and every
+/// accent-row cell is `accent` in `cursor` on `bg`.
 fn title_focused(
     tui: &PtySession,
     cols: Range<u16>,
@@ -24,46 +53,22 @@ fn title_focused(
     accent: char,
     bg: (u8, u8, u8),
 ) -> bool {
-    let title_at = cols.start + 1;
-    let title_end = title_at + title.chars().count() as u16;
-    let mut title_chars = title.chars();
-    cols.into_iter().all(|col| {
-        let Some(cell) = tui.cell_paint(FLAT_TITLE_ROW, col) else {
-            return false;
-        };
-        if cell.bg != Some(bg) {
-            return false;
-        }
-        if (title_at..title_end).contains(&col) {
-            cell.glyph == title_chars.next()
-                && cell.fg == Some(SLATE_HEADING)
-                && cell.bold
-                && cell.underline
-        } else {
-            cell.glyph == Some(accent) && cell.fg == Some(SLATE_CURSOR) && !cell.underline
-        }
-    })
+    title_row(tui, cols.clone(), title, true, bg)
+        && cols.into_iter().all(|col| {
+            tui.cell_paint(FLAT_ACCENT_ROW, col).is_some_and(|cell| {
+                cell.glyph == Some(accent) && cell.fg == Some(SLATE_CURSOR) && cell.bg == Some(bg)
+            })
+        })
 }
 
-/// Flat title row over `cols` without focus: the title (one cell in) is
-/// `muted`, normal weight, no underline; other cells are blank. No accent.
+/// Flat pane without focus over `cols`: [`title_row`] unfocused, and the
+/// accent row is blank on `bg`.
 fn title_unfocused(tui: &PtySession, cols: Range<u16>, title: &str, bg: (u8, u8, u8)) -> bool {
-    let title_at = cols.start + 1;
-    let title_end = title_at + title.chars().count() as u16;
-    let mut title_chars = title.chars();
-    cols.into_iter().all(|col| {
-        let Some(cell) = tui.cell_paint(FLAT_TITLE_ROW, col) else {
-            return false;
-        };
-        if cell.bg != Some(bg) || cell.underline || cell.bold {
-            return false;
-        }
-        if (title_at..title_end).contains(&col) {
-            cell.glyph == title_chars.next() && cell.fg == Some(SLATE_MUTED)
-        } else {
-            matches!(cell.glyph, None | Some(' '))
-        }
-    })
+    title_row(tui, cols.clone(), title, false, bg)
+        && cols.into_iter().all(|col| {
+            tui.cell_paint(FLAT_ACCENT_ROW, col)
+                .is_some_and(|cell| matches!(cell.glyph, None | Some(' ')) && cell.bg == Some(bg))
+        })
 }
 
 /// Launch frame: README diff on the right, both panes flat.
@@ -71,7 +76,7 @@ fn flat_first_paint(tui: &PtySession) -> bool {
     let Some(join) = flat_join_col(tui, SLATE_SIDEBAR) else {
         return false;
     };
-    let body = FLAT_TITLE_ROW + 1;
+    let body = FLAT_BODY_ROW;
     let left = tui.grid_row_text(body, 0..join);
     let right = tui.grid_row_text(body, join..COLS);
     let screen = tui.screen();
@@ -115,10 +120,11 @@ fn assert_no_pane_borders(tui: &PtySession, join: u16) {
 /// Docs: paint is the default background and Slate the default theme. The
 /// left pane fills with `sidebar`, the right pane with `surface`, and the
 /// tab strip, breadcrumb and status rows with `chrome`. Panes have no
-/// borders: row 0 of a pane is its title row and the body starts on the
-/// next row. The active pane's title row carries a `cursor` accent line
-/// (`▁`, `_` with ASCII glyphs) under a `heading`, bold, underlined title;
-/// the other title is `muted` with no line. Tab moves the line.
+/// borders: row 0 of a pane is its title row, row 1 its accent row, and the
+/// body starts on row 2. The active pane's accent row is a `cursor` line
+/// (`▁`, `_` with ASCII glyphs) under a `heading`, bold title (no
+/// underline); the other title is `muted` over a blank row. Tab moves the
+/// line.
 ///
 /// Live PTY, `UserConfig::Own` with no file: Slate fills on the expected
 /// cells, no Tokyo Night surface, no box glyphs, accent on the tree title,
@@ -164,14 +170,16 @@ fn pty_paint_default_launch_is_flat_slate() {
     );
     assert_no_pane_borders(&tui, join);
 
-    let title = tui.grid_row_text(FLAT_TITLE_ROW, 0..COLS);
-    assert!(
-        !title.contains("# workspace") && !title.contains("app/README.md"),
-        "pane body starts below the title row:\n{screen}"
-    );
+    for row in [FLAT_TITLE_ROW, FLAT_ACCENT_ROW] {
+        let text = tui.grid_row_text(row, 0..COLS);
+        assert!(
+            !text.contains("# workspace") && !text.contains("app/README.md"),
+            "pane body starts below the title and accent rows:\n{screen}"
+        );
+    }
     assert!(
         title_focused(&tui, 0..join, "tree", '_', SLATE_SIDEBAR),
-        "tree title row: `_` accent in cursor, heading bold underlined title:\n{screen}"
+        "tree: heading bold title, `_` accent row in cursor, no underline:\n{screen}"
     );
     assert!(
         title_unfocused(&tui, join..COLS, "diff", SLATE_SURFACE),

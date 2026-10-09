@@ -165,7 +165,7 @@ stay out of ops unless shown.
 ## Paint
 
 `GraphWidget` uses a chrome budget (`graph_chrome_budget_for`): a
-selection footer when height ≥ 3 (2 lines collapsed), then a 1-line sync header if
+selection footer when height ≥ 3 (a rule row plus 2 lines collapsed), then a 1-line sync header if
 space remains (footer wins when tight; no header when `sync` is unset).
 The footer wraps the full subject plus body by default
 (`commit_msg_expand`, `selection_footer_parts`); `M` collapses it to the
@@ -174,15 +174,23 @@ two clipped lines.
 The footer height is fixed. It does not follow the selected message, so
 moving between commits never changes the list height:
 
-- Expanded requests N message rows plus the meta row
+- The footer's first row is a full-width rule that parts it from the
+  list (`FOOTER_RULE_ROWS` = 1). `GraphWidget::footer_rule` sets its glyph
+  and colour; the TUI passes `▁` (`_` in ASCII mode) and `borderDim`.
+  Without it the widget paints `▁` / `_` in dark grey.
+- Under the rule, expanded requests N message rows plus the meta row
   (`graph_footer_request`, N from `GraphWidget::commit_msg_lines`, default
   `COMMIT_MSG_LINES_DEFAULT` = 4, clamped from `COMMIT_MSG_LINES_MIN` (1)
-  to `COMMIT_MSG_LINES_MAX` (20)). Collapsed requests 2. The TUI passes
+  to `COMMIT_MSG_LINES_MAX` (20)). Collapsed requests 2. The request
+  counts the rule (N + 2 expanded, 3 collapsed). The TUI passes
   its session N (`AppState::commit_msg_lines`: `viewDefaults.commitMessageLines`,
   then `-` / `+`) to both the widget and `graph_footer_request`.
-- `graph_chrome_budget_for` clamps the request to at most half the pane
-  (never under 2) and leaves the list at least one row. A pane under 3
-  rows drops the footer. The budget depends only on the pane and the
+- `graph_chrome_budget_for` clamps the rows under the rule to at most
+  half the pane (never under 2), adds the rule row, and leaves the list
+  at least one row. `GraphChromeBudget::footer_height` counts the rule;
+  `footer_body_height` is the rows under it, the height
+  `footer_message_scroll_max` takes. A pane under 3 rows drops the footer
+  and its rule. The budget depends only on the pane and the
   request. The app calls the same `graph_footer_request`, so its layout
   matches the paint.
 - The meta row is always on the footer's bottom row. A short message

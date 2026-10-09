@@ -74,8 +74,7 @@ impl DesktopSession {
         let launcher = stage.join("run-tui.sh");
         let mut script = String::from("#!/usr/bin/env bash\nset -euo pipefail\n");
         script.push_str(
-            "unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE \
-             VTE_VERSION KITTY_WINDOW_ID TERM_PROGRAM\n",
+            "unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE\n",
         );
         script.push_str("export TERM=xterm-256color COLORTERM=truecolor\n");
         script.push_str("export LANG=C.UTF-8 LC_ALL=C.UTF-8\n");

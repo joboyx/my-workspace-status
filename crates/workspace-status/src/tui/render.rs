@@ -12,6 +12,7 @@ use unicode_width::UnicodeWidthStr;
 use workspace_status_graph::{
     footer_message_scroll_max, graph_col_max, graph_hscroll_visible, graph_vscroll_visible,
     painted_line_count, short_id, GraphIconKind, GraphLabelPalette, GraphRow, GraphWidget,
+    FOOTER_RULE_ROWS,
 };
 
 use std::cell::RefCell;
@@ -110,7 +111,7 @@ const LOADING_FILES: &str = "loading files…";
 /// Pane title: the plain pane name for focused and unfocused.
 ///
 /// Names are exactly `tree`, `graph`, `files`, or `diff`. Focus is the
-/// border colour (boxed) or the accent line ([`flat_title_line`]), never a
+/// border colour (boxed) or the accent row ([`flat_accent_line`]), never a
 /// title glyph or space-pad. Boxed title text uses `palette.heading` via
 /// `title_style` so it does not inherit `border_style`.
 fn pane_title(name: &str) -> String {
@@ -598,8 +599,10 @@ fn draw_file_body(frame: &mut Frame<'_>, inner: Rect, state: &mut AppState) {
 /// [`BackgroundMode::Terminal`]: a boxed [`Block`] with the title in
 /// `heading` and a [`pane_border`] colour that shows focus (the v0.1.244
 /// look). [`BackgroundMode::Paint`]: `area` is filled with `bg`, no border
-/// glyphs, and row 0 is the title row ([`flat_title_line`]). Returns the
-/// content rect: the block's inner rect, or `area` less its first row.
+/// glyphs, row 0 is the title row ([`flat_title_line`]) and row 1 the
+/// accent row ([`flat_accent_line`]), focused or not, so focus never moves
+/// the content. Returns the content rect: the block's inner rect, or
+/// `area` less its first two rows.
 fn draw_pane_chrome(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -620,63 +623,69 @@ fn draw_pane_chrome(
         return inner;
     }
     fill_bg(frame, area, bg);
-    if area.height == 0 {
-        return area;
+    let rows = [
+        flat_title_line(title, focused, area.width, palette),
+        flat_accent_line(focused, area.width, state.ascii, palette),
+    ];
+    for (row, line) in (area.y..area.bottom()).zip(rows) {
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect {
+                y: row,
+                height: 1,
+                ..area
+            },
+        );
     }
-    frame.render_widget(
-        Paragraph::new(flat_title_line(
-            title,
-            focused,
-            area.width,
-            state.ascii,
-            state.coloured_underline,
-            palette,
-        )),
-        Rect { height: 1, ..area },
-    );
+    let chrome = area.height.min(FLAT_CHROME_ROWS);
     Rect {
-        y: area.y + 1,
-        height: area.height - 1,
+        y: area.y + chrome,
+        height: area.height - chrome,
         ..area
     }
 }
 
+/// Rows a flat pane's chrome takes above its content: the title row and
+/// the accent row.
+const FLAT_CHROME_ROWS: u16 = 2;
+
 /// Title row of a flat pane, `width` cells: one blank cell, the title,
 /// then blanks to the right edge.
 ///
-/// Focused: every blank cell is an accent line (`▁`, `_` in ASCII mode) in
-/// `cursor`, and the title is `heading`, bold, underlined in `cursor`, so
-/// the line runs under the whole row. Without `coloured_underline` (no
-/// SGR 58) the title underline is plain and takes the `heading` colour.
-/// Unfocused: the title is `muted` on
-/// plain blanks. The background is left to the pane fill.
-fn flat_title_line(
-    title: &str,
-    focused: bool,
-    width: u16,
-    ascii: bool,
-    coloured_underline: bool,
-    palette: Palette,
-) -> Line<'static> {
+/// Focused: the title is `heading`, bold. Unfocused: `muted`, normal
+/// weight. Never underlined; the blank cells are plain spaces and the
+/// background is left to the pane fill.
+fn flat_title_line(title: &str, focused: bool, width: u16, palette: Palette) -> Line<'static> {
     let title_w = painted_width(title).min(width.saturating_sub(1));
     let tail = usize::from(width.saturating_sub(1).saturating_sub(title_w));
-    let (blank, blank_style, title_style) = if focused {
-        let line = Style::default().fg(palette.cursor);
-        let mut title_style = Style::default()
+    let title_style = if focused {
+        Style::default()
             .fg(palette.heading)
-            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
-        if coloured_underline {
-            title_style = title_style.underline_color(palette.cursor);
-        }
-        (glyph(ascii, "\u{2581}", "_"), line, title_style)
+            .add_modifier(Modifier::BOLD)
     } else {
-        (" ", Style::default(), Style::default().fg(palette.muted))
+        Style::default().fg(palette.muted)
     };
     Line::from(vec![
-        Span::styled(blank, blank_style),
+        Span::raw(" "),
         Span::styled(title.to_string(), title_style),
-        Span::styled(blank.repeat(tail), blank_style),
+        Span::raw(" ".repeat(tail)),
     ])
+}
+
+/// Accent row of a flat pane (the row under the title), `width` cells.
+///
+/// Focused: a full-width line (`▁`, `_` in ASCII mode) in `cursor`.
+/// Unfocused: blank. The background is left to the pane fill.
+fn flat_accent_line(focused: bool, width: u16, ascii: bool, palette: Palette) -> Line<'static> {
+    let width = usize::from(width);
+    if focused {
+        Line::from(Span::styled(
+            glyph(ascii, "\u{2581}", "_").repeat(width),
+            Style::default().fg(palette.cursor),
+        ))
+    } else {
+        Line::from(" ".repeat(width))
+    }
 }
 
 /// Set the background of every cell in `area` to `bg` (paint mode). Text
@@ -1505,6 +1514,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         .commit_msg_expand(state.commit_msg_expand)
         .commit_msg_lines(state.commit_msg_lines)
         .commit_msg_scroll(state.graph_footer_msg_scroll())
+        .footer_rule(footer_rule_glyph(state.ascii), pal.border_dim)
         .lane_colors(&lane_colors)
         .label_palette(GraphLabelPalette {
             subject: pal.repo,
@@ -1644,7 +1654,7 @@ fn record_graph_scrollbar(
     let list_height = chrome.list_height;
     let footer_scroll_max = footer_message_scroll_max(
         state.graph_footer_line_count(area.width as usize),
-        chrome.footer_height,
+        chrome.footer_body_height(),
     );
     if chrome.footer && footer_scroll_max > 0 {
         let bottom = area.y.saturating_add(area.height);
@@ -1673,22 +1683,41 @@ fn record_graph_scrollbar(
 }
 
 /// Rows the commit-message footer takes at the bottom of a commit-files pane
-/// `pane_h` rows tall, for a footer request of `footer_len` rows
+/// `pane_h` rows tall, for a footer body of `body_len` rows
 /// ([`AppState::commit_detail_footer_request`], fixed whatever the message).
 ///
-/// The file list keeps at least one row whenever the pane has two or more,
-/// so a short terminal never hides the list for the message. Draw and
-/// layout both size the footer here so the list rows and click mapping
-/// agree.
-fn commit_detail_footer_height(footer_len: usize, pane_h: u16) -> u16 {
-    let footer_len = footer_len.min(u16::MAX as usize) as u16;
+/// The footer is the [`FOOTER_RULE_ROWS`] rule row, then the body, so it
+/// asks for `body_len + 1` rows. The file list keeps at least one row
+/// whenever the pane has two or more, so a short terminal never hides the
+/// list for the message; the body clips first, down to the rule only.
+/// Draw and layout both size the footer here so the list rows and click
+/// mapping agree.
+fn commit_detail_footer_height(body_len: usize, pane_h: u16) -> u16 {
+    let want = body_len
+        .min(usize::from(u16::MAX - FOOTER_RULE_ROWS))
+        .saturating_add(usize::from(FOOTER_RULE_ROWS)) as u16;
     let max = if pane_h >= 2 { pane_h - 1 } else { pane_h };
-    footer_len.min(max)
+    want.min(max)
+}
+
+/// Rule glyph between a list and its footer: `▁` (`_` in ASCII mode).
+fn footer_rule_glyph(ascii: bool) -> &'static str {
+    glyph(ascii, "\u{2581}", "_")
+}
+
+/// The rule row that tops a list footer, `width` cells of
+/// [`footer_rule_glyph`] in `border_dim`. Boxed and flat panes alike.
+fn footer_rule_line(width: u16, ascii: bool, palette: Palette) -> Line<'static> {
+    Line::from(Span::styled(
+        footer_rule_glyph(ascii).repeat(usize::from(width)),
+        Style::default().fg(palette.border_dim),
+    ))
 }
 
 /// Commit files beside the file diff (depth 2, left pane): the file list on
 /// top, the selected commit's title, meta, and message pinned to the bottom
 /// rows as a footer (like the graph selection footer on the graph pane).
+/// The footer's first row is a rule ([`footer_rule_line`]) under the list.
 ///
 /// `col_offset` is the horizontal pan of the file list.
 fn draw_commit_detail(
@@ -1714,10 +1743,24 @@ fn draw_commit_detail(
         return;
     }
     let palette = state.theme.palette();
+    let rule_y = area.y.saturating_add(list_h);
+    frame.render_widget(
+        Paragraph::new(footer_rule_line(area.width, state.ascii, palette)),
+        Rect {
+            x: area.x,
+            y: rule_y,
+            width: area.width,
+            height: 1,
+        },
+    );
+    let body_h = footer_h.saturating_sub(FOOTER_RULE_ROWS);
+    if body_h == 0 {
+        return;
+    }
     // Clip keeps the first lines: title, meta, then message lines.
     let footer_lines: Vec<Line> = footer
         .iter()
-        .take(footer_h as usize)
+        .take(body_h as usize)
         .enumerate()
         .map(|(i, line)| {
             let style = if i == 0 {
@@ -1730,9 +1773,9 @@ fn draw_commit_detail(
         .collect();
     let footer_area = Rect {
         x: area.x,
-        y: area.y.saturating_add(list_h),
+        y: rule_y.saturating_add(FOOTER_RULE_ROWS),
         width: area.width,
-        height: footer_h,
+        height: body_h,
     };
     frame.render_widget(Paragraph::new(footer_lines), footer_area);
 }
@@ -7605,8 +7648,8 @@ mod tests {
             commit_detail_footer_height(state.commit_detail_footer_request(), layout.tree_height);
         assert_eq!(
             footer_h as usize,
-            2 + workspace_status_graph::COMMIT_MSG_LINES_DEFAULT,
-            "title + meta + N message rows for a one-line body"
+            1 + 2 + workspace_status_graph::COMMIT_MSG_LINES_DEFAULT,
+            "rule + title + meta + N message rows for a one-line body"
         );
         assert_eq!(layout.files_list_y, layout.tree_y);
         assert_eq!(
@@ -7677,8 +7720,8 @@ mod tests {
         assert_eq!(short_h, long_h, "expanded: same list height");
         assert_eq!(
             short_h as usize,
-            pane as usize - (2 + n),
-            "title + meta + N"
+            pane as usize - (1 + 2 + n),
+            "rule + title + meta + N"
         );
         assert!(left.contains('…'), "a long body clips with …:\n{left}");
         assert!(
@@ -7688,9 +7731,286 @@ mod tests {
         let (_, short_c, _) = list_height("", false, n);
         let (_, long_c, _) = list_height(&long, false, n);
         assert_eq!(short_c, long_c, "collapsed: same list height");
-        assert_eq!(short_c, pane - 2, "collapsed: title + subtitle");
+        assert_eq!(short_c, pane - 3, "collapsed: rule + title + subtitle");
         let (_, grown, _) = list_height("", true, n + 1);
         assert_eq!(grown + 1, short_h, "one more message row");
+    }
+
+    /// Commit files beside a file diff, with `n` files so the list
+    /// overflows any test pane.
+    fn commit_diff_state_with_files(n: usize) -> AppState {
+        let mut state = two_pane_files_state();
+        let files: Vec<super::super::drill::CommitFile> = (0..n)
+            .map(|i| super::super::drill::CommitFile {
+                status: "M".into(),
+                path: format!("f{i:02}.txt"),
+                old_path: None,
+                stat: None,
+            })
+            .collect();
+        state.open_commit_diff(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            files,
+            0,
+            "f00.txt".into(),
+            super::super::diff::DiffContent::from_lines(vec!["@@ -1,1 +1,1 @@".into()]),
+        );
+        state
+    }
+
+    /// The depth-2 commit-files footer starts with a full-width rule
+    /// (`▁`, `_` in ASCII mode) in `border_dim`, in paint and terminal
+    /// mode, expanded and collapsed. The list gives up one row for it and
+    /// the footer body under it is unchanged.
+    #[test]
+    fn commit_detail_footer_rule_sits_between_list_and_footer() {
+        for background in [BackgroundMode::Paint, BackgroundMode::Terminal] {
+            for ascii in [false, true] {
+                for expand in [true, false] {
+                    let case = format!("{background:?} ascii={ascii} expand={expand}");
+                    let mut state = two_pane_commit_diff_state();
+                    set_seed_commit_body(&mut state, FOOTER_BODY_TOKEN);
+                    state.background = background;
+                    state.ascii = ascii;
+                    state.commit_msg_expand = expand;
+                    state.focus = FocusPane::Left;
+                    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+                    draw_state(&mut terminal, &mut state);
+                    let l = state.layout.clone();
+                    let body_len = state.commit_detail_footer_request();
+                    assert_eq!(
+                        l.files_list_height as usize,
+                        l.tree_height as usize - body_len - 1,
+                        "{case}: the list gives up one row"
+                    );
+                    let rule_y = l.files_list_y + l.files_list_height;
+                    let want = if ascii { "_" } else { "\u{2581}" };
+                    let palette = state.theme.palette();
+                    let buf = terminal.backend().buffer();
+                    for x in l.tree_x..l.tree_x + l.tree_width {
+                        assert_eq!(buf[(x, rule_y)].symbol(), want, "{case}: x={x}");
+                        assert_eq!(buf[(x, rule_y)].fg, palette.border_dim, "{case}: x={x}");
+                    }
+                    assert_ne!(
+                        buf[(l.tree_x, rule_y - 1)].symbol(),
+                        want,
+                        "{case}: the row above the rule is the list"
+                    );
+                    let footer = state.commit_detail_footer_lines(l.tree_width as usize);
+                    let painted = region_text(
+                        &terminal,
+                        l.tree_x,
+                        rule_y + 1,
+                        l.tree_width,
+                        body_len as u16,
+                    );
+                    for (i, (row, line)) in painted.lines().zip(&footer).enumerate() {
+                        // The pane clips a long line at its width.
+                        let clipped: String = line.chars().take(l.tree_width as usize).collect();
+                        assert_eq!(row.trim_end(), clipped.trim_end(), "{case}: body row {i}");
+                    }
+                    assert_eq!(rule_y + 1 + body_len as u16, l.tree_y + l.tree_height);
+                }
+            }
+        }
+    }
+
+    /// A footer capped to one row is the rule only; a zero-row footer
+    /// paints nothing.
+    #[test]
+    fn commit_detail_footer_is_rule_only_or_nothing_on_tiny_panes() {
+        assert_eq!(commit_detail_footer_height(4, 0), 0);
+        assert_eq!(commit_detail_footer_height(4, 1), 1);
+        assert_eq!(
+            commit_detail_footer_height(4, 2),
+            1,
+            "rule only, one list row"
+        );
+        assert_eq!(commit_detail_footer_height(4, 3), 2);
+        assert_eq!(commit_detail_footer_height(4, 40), 5, "rule + 4 body rows");
+        assert_eq!(commit_detail_footer_height(usize::MAX, 40), 39);
+
+        let mut state = two_pane_commit_diff_state();
+        state.ascii = true;
+        let mut terminal = Terminal::new(TestBackend::new(30, 4)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_commit_detail(
+                    frame,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: 30,
+                        height: 2,
+                    },
+                    &mut state,
+                    0,
+                    0,
+                )
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        assert!(
+            buf_line(buf, 0).contains("README.md"),
+            "{}",
+            buf_line(buf, 0)
+        );
+        assert_eq!(buf_line(buf, 1), "_".repeat(30), "rule only");
+        assert_eq!(buf_line(buf, 2).trim(), "", "nothing under the pane");
+
+        let mut terminal = Terminal::new(TestBackend::new(30, 2)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_commit_detail(
+                    frame,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: 30,
+                        height: 0,
+                    },
+                    &mut state,
+                    0,
+                    0,
+                )
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        for y in 0..2 {
+            assert_eq!(buf_line(buf, y).trim(), "", "zero-height footer row {y}");
+        }
+    }
+
+    /// A click on the commit-files footer rule selects nothing; the last
+    /// list row above it still selects the file painted there.
+    #[test]
+    fn commit_detail_click_on_the_rule_selects_nothing() {
+        for background in [BackgroundMode::Paint, BackgroundMode::Terminal] {
+            let mut state = commit_diff_state_with_files(60);
+            state.background = background;
+            state.focus = FocusPane::Left;
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let l = state.layout.clone();
+            let rule_y = l.files_list_y + l.files_list_height;
+            let col = l.tree_x + 4;
+            assert_eq!(state.commit_files_cursor(), 0);
+            state.dispatch(Action::Click { col, row: rule_y });
+            assert_eq!(state.commit_files_cursor(), 0, "{background:?}: rule row");
+            let last = rule_y - 1;
+            let label = buf_line(terminal.backend().buffer(), last);
+            let idx = l.files_list_offset + usize::from(l.files_list_height) - 1;
+            let want = state.painted_commit_file_rows()[idx].id.clone();
+            state.dispatch(Action::Click { col, row: last });
+            let live = state.commit_file_rows();
+            assert_eq!(
+                live[state.commit_files_cursor()].id,
+                want,
+                "{background:?}: last list row {label}"
+            );
+        }
+    }
+
+    /// Long body on the seed commit and enough commits that the graph list
+    /// overflows the pane.
+    fn tall_graph_state() -> AppState {
+        let mut state = two_pane_graph_state();
+        if let Some(model) = state.graph.as_mut() {
+            let seed = model.commits[0].clone();
+            model.commits = (0..60)
+                .map(|i| Commit {
+                    id: format!("{i:040x}"),
+                    subject: format!("commit {i:02}"),
+                    body: (0..30)
+                        .map(|b| format!("BODY{b:02}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    ..seed.clone()
+                })
+                .collect();
+            model.head_id = Some(format!("{:040x}", 0));
+        }
+        state.graph_cursor = 1;
+        state
+    }
+
+    /// The graph selection footer starts with a full-width rule in
+    /// `border_dim` (`_` in ASCII mode), in both modes. The recorded footer
+    /// hit box starts on the rule, the list scrollbar ends above it, and a
+    /// click on the rule selects nothing while the last list row still
+    /// selects its commit.
+    #[test]
+    fn graph_footer_rule_tops_the_footer_and_takes_no_click() {
+        for background in [BackgroundMode::Paint, BackgroundMode::Terminal] {
+            for ascii in [false, true] {
+                let case = format!("{background:?} ascii={ascii}");
+                let mut state = tall_graph_state();
+                state.background = background;
+                state.ascii = ascii;
+                let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let l = state.layout.clone();
+                let chrome = state.graph_chrome_in(l.diff_pane_height);
+                assert_eq!(chrome, state.graph_chrome(), "{case}");
+                let list_top = l.right_y + u16::from(chrome.header);
+                let rule_y = list_top + chrome.list_height;
+                assert_eq!(
+                    rule_y + chrome.footer_height,
+                    l.right_y + l.diff_pane_height,
+                    "{case}: footer ends on the pane bottom"
+                );
+                let want = if ascii { "_" } else { "\u{2581}" };
+                let palette = state.theme.palette();
+                let buf = terminal.backend().buffer();
+                for x in l.diff_content_x..l.diff_content_x + l.diff_pane_width {
+                    assert_eq!(buf[(x, rule_y)].symbol(), want, "{case}: x={x}");
+                    assert_eq!(buf[(x, rule_y)].fg, palette.border_dim, "{case}: x={x}");
+                }
+                let body = buf_line(buf, rule_y + 1);
+                // Row 1 is the first commit (row 0 is the uncommitted row).
+                assert!(
+                    body.contains("commit 00"),
+                    "{case}: subject under the rule: {body}"
+                );
+                assert_eq!(l.graph_footer_y, Some(rule_y), "{case}: footer hit box");
+                assert_eq!(l.graph_footer_height, chrome.footer_height, "{case}");
+                assert_eq!(l.graph_scrollbar_y, list_top, "{case}");
+                assert_eq!(l.graph_scrollbar_height, chrome.list_height, "{case}");
+                assert!(l.graph_footer_scroll_max > 0, "{case}");
+                assert_eq!(
+                    l.graph_footer_scroll_max,
+                    footer_message_scroll_max(
+                        state.graph_footer_line_count(l.diff_pane_width as usize),
+                        chrome.footer_body_height(),
+                    ),
+                    "{case}"
+                );
+
+                let col = l.diff_content_x + 2;
+                state.dispatch(Action::Click { col, row: rule_y });
+                assert_eq!(state.graph_cursor, 1, "{case}: rule row selects nothing");
+                let glyphs = if ascii {
+                    &workspace_status_graph::ASCII
+                } else {
+                    &workspace_status_graph::UNICODE
+                };
+                let painted = workspace_status_graph::paint_model(
+                    state.graph.as_ref().unwrap(),
+                    glyphs,
+                    None,
+                );
+                let last = rule_y - 1;
+                let line =
+                    &painted[state.graph_scroll as usize + usize::from(chrome.list_height) - 1];
+                state.dispatch(Action::Click { col, row: last });
+                let idx = line.row_index.expect("last list row maps to a graph row");
+                assert_eq!(state.graph_cursor, idx, "{case}: last list row");
+                assert_ne!(idx, 1, "{case}: the click moved the cursor");
+            }
+        }
     }
 
     fn assert_titles_heading_borders_split(state: &mut AppState) {
@@ -10308,11 +10628,12 @@ mod tests {
     }
 
     /// Outer rects of the Explorer tree and preview panes in a flat
-    /// frame: the recorded content rects grown by their title row.
+    /// frame: the recorded content rects grown by their title and accent
+    /// rows.
     fn explorer_pane_rects(state: &AppState) -> (Rect, Rect) {
         let grow = |inner: Rect| Rect {
-            y: inner.y - 1,
-            height: inner.height + 1,
+            y: inner.y - FLAT_CHROME_ROWS,
+            height: inner.height + FLAT_CHROME_ROWS,
             ..inner
         };
         (
@@ -10343,10 +10664,11 @@ mod tests {
             .collect()
     }
 
-    /// Check the flat title row of `pane`: `title` after one blank cell,
-    /// the accent line and underlined `heading` when `focused`, else a
-    /// `muted` title on plain blanks; the row bg is `bg` throughout. The
-    /// title underline is plain (no SGR 58 colour), as in test state.
+    /// Check the flat title and accent rows of `pane`. Title row: `title`
+    /// after one blank cell, `heading` and bold when `focused`, else
+    /// `muted` and plain; every other cell a plain space; nothing
+    /// underlined. Accent row: a full-width `▁` in `cursor` when `focused`,
+    /// else blank. Both rows keep `bg` throughout.
     fn assert_flat_title_row(
         buf: &ratatui::buffer::Buffer,
         pane: Rect,
@@ -10364,31 +10686,35 @@ mod tests {
         for x in pane.x..pane.x + pane.width {
             let cell = &buf[(x, y)];
             assert_eq!(cell.bg, bg, "title row bg at x={x}");
+            assert!(
+                !cell.modifier.contains(Modifier::UNDERLINED),
+                "no underline on the title row at x={x}"
+            );
             let in_title = x > pane.x && x < title_end;
             if focused && in_title {
                 assert_eq!(cell.fg, palette.heading, "title fg at x={x}");
                 assert!(cell.modifier.contains(Modifier::BOLD), "bold at x={x}");
-                assert!(
-                    cell.modifier.contains(Modifier::UNDERLINED),
-                    "underline at x={x}"
-                );
-                assert_eq!(cell.underline_color, Color::Reset, "plain underline x={x}");
-            } else if focused {
-                assert_eq!(cell.symbol(), "\u{2581}", "accent line at x={x}");
-                assert_eq!(cell.fg, palette.cursor, "accent line fg at x={x}");
             } else if in_title {
                 assert_eq!(cell.fg, palette.muted, "muted title at x={x}");
                 assert!(cell.modifier.is_empty(), "plain title at x={x}");
             } else {
-                assert_eq!(cell.symbol(), " ", "no line on an unfocused row x={x}");
+                assert_eq!(cell.symbol(), " ", "plain blank on the title row x={x}");
                 assert!(cell.modifier.is_empty(), "x={x}");
+            }
+            let accent = &buf[(x, y + 1)];
+            assert_eq!(accent.bg, bg, "accent row bg at x={x}");
+            if focused {
+                assert_eq!(accent.symbol(), "\u{2581}", "accent line at x={x}");
+                assert_eq!(accent.fg, palette.cursor, "accent line fg at x={x}");
+            } else {
+                assert_eq!(accent.symbol(), " ", "blank accent row at x={x}");
             }
         }
     }
 
     /// Paint mode draws flat panes: no border glyph on any pane edge, the
-    /// title on row 0, and the content rect from the pane's first column
-    /// to its bottom row.
+    /// title on row 0, the accent row on row 1, and the content rect from
+    /// the pane's first column and row 2 to its bottom row.
     #[test]
     fn paint_mode_panes_are_flat_with_content_from_the_pane_edge() {
         let mut state = painted(two_pane_diff_state());
@@ -10402,57 +10728,69 @@ mod tests {
         assert_eq!(right.x, left.x + left.width, "panes abut");
 
         let layout = &state.layout;
-        assert_eq!((layout.tree_x, layout.tree_y), (left.x, left.y + 1));
+        assert_eq!((layout.tree_x, layout.tree_y), (left.x, left.y + 2));
         assert_eq!(layout.tree_width, left.width);
-        assert_eq!(layout.tree_height, left.height - 1, "uses the bottom row");
+        assert_eq!(layout.tree_height, left.height - 2, "uses the bottom row");
         assert_eq!(layout.diff_content_x, right.x);
-        assert_eq!(layout.right_y, right.y + 1);
+        assert_eq!(layout.right_y, right.y + 2);
         assert_eq!(layout.diff_pane_width, right.width);
-        assert_eq!(layout.diff_pane_height, right.height - 1);
+        assert_eq!(layout.diff_pane_height, right.height - 2);
     }
 
-    /// The focused title's underline takes `cursor` (SGR 58) only on a
-    /// terminal known to support it; otherwise it is a plain underline in
-    /// the title's own `heading` colour, and the accent line is unchanged.
+    /// Terminal mode keeps the boxed panes: border glyphs, no accent line,
+    /// and the content rect inside the border.
     #[test]
-    fn paint_mode_title_underline_colour_follows_terminal_support() {
-        for supported in [true, false] {
-            let mut state = painted(two_pane_diff_state());
-            state.coloured_underline = supported;
-            state.dispatch(Action::FocusLeft);
-            let palette = state.theme.palette();
-            let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
-            draw_state(&mut terminal, &mut state);
-            let (left, _) = pane_rects(&state, 120);
-            let buf = terminal.backend().buffer();
-            let want = if supported {
-                palette.cursor
-            } else {
-                Color::Reset
-            };
-            for x in left.x + 1..left.x + 1 + "tree".len() as u16 {
-                let cell = &buf[(x, left.y)];
-                assert_eq!(cell.fg, palette.heading, "supported={supported} x={x}");
+    fn terminal_mode_keeps_boxed_pane_chrome() {
+        let mut state = two_pane_diff_state();
+        state.focus = FocusPane::Left;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let (left, right) = pane_rects(&state, 120);
+        let buf = terminal.backend().buffer();
+        assert_ne!(pane_edge_borders(buf, left), vec![], "left pane is boxed");
+        assert_ne!(pane_edge_borders(buf, right), vec![], "right pane is boxed");
+        for pane in [left, right] {
+            for y in pane.y..pane.y + 2 {
                 assert!(
-                    cell.modifier
-                        .contains(Modifier::BOLD | Modifier::UNDERLINED),
-                    "supported={supported} x={x}"
+                    !buf_line(buf, y).contains('\u{2581}'),
+                    "{}",
+                    buf_line(buf, y)
                 );
-                assert_eq!(cell.underline_color, want, "supported={supported} x={x}");
             }
-            let line = &buf[(left.x, left.y)];
+        }
+        let layout = &state.layout;
+        assert_eq!((layout.tree_x, layout.tree_y), (left.x + 1, left.y + 1));
+        assert_eq!(layout.tree_height, left.height - 2);
+        assert_eq!(layout.right_y, right.y + 1);
+    }
+
+    /// A flat pane too short for its title and accent rows draws what fits
+    /// and returns an empty content rect without panicking.
+    #[test]
+    fn paint_mode_pane_chrome_fits_tiny_panes() {
+        let state = painted(two_pane_diff_state());
+        for height in 0..=3u16 {
+            let mut terminal = Terminal::new(TestBackend::new(10, 4)).unwrap();
+            let area = Rect::new(0, 0, 10, height);
+            let mut inner = Rect::default();
+            terminal
+                .draw(|frame| {
+                    inner = draw_pane_chrome(frame, area, "tree", true, Color::Black, &state);
+                })
+                .unwrap();
+            let chrome = height.min(2);
             assert_eq!(
-                line.symbol(),
-                "\u{2581}",
-                "accent line supported={supported}"
+                inner,
+                Rect::new(0, chrome, 10, height - chrome),
+                "h={height}"
             );
-            assert_eq!(line.fg, palette.cursor, "accent line supported={supported}");
         }
     }
 
-    /// Flat focus: the active pane's title row carries the accent line and
-    /// the underlined `heading` title; `Tab` moves both to the other pane.
-    /// Pane backgrounds and body text colours do not change with focus.
+    /// Flat focus: the active pane's accent row carries the line and its
+    /// title is `heading`, bold; `Tab` moves both to the other pane. The
+    /// content rects stay put. Pane backgrounds and body text colours do
+    /// not change with focus.
     #[test]
     fn paint_mode_tab_moves_the_accent_line_and_keeps_pane_colours() {
         let mut state = painted(two_pane_diff_state());
@@ -10471,6 +10809,11 @@ mod tests {
             body_style(&terminal, "new line"),
             body_style(&terminal, "old line"),
         );
+        let content_rects = |state: &AppState| {
+            let l = &state.layout;
+            (l.tree_y, l.tree_height, l.right_y, l.diff_pane_height)
+        };
+        let rects_before = content_rects(&state);
         {
             let buf = terminal.backend().buffer();
             assert_flat_title_row(buf, left, "tree", true, palette.sidebar, palette);
@@ -10489,6 +10832,11 @@ mod tests {
             body_style(&terminal, "old line"),
         );
         assert_eq!(before, after, "diff text colours do not follow focus");
+        assert_eq!(
+            content_rects(&state),
+            rects_before,
+            "Tab does not move the content rects"
+        );
 
         // Blank body cells keep each pane's own bg in both focus states.
         let buf = terminal.backend().buffer();
@@ -10497,7 +10845,8 @@ mod tests {
         assert_eq!(buf[(right.x + right.width - 2, bottom)].bg, palette.surface);
     }
 
-    /// ASCII glyph mode draws the accent line with `_`.
+    /// ASCII glyph mode draws the accent row with `_`; the title row keeps
+    /// plain blanks.
     #[test]
     fn paint_mode_ascii_accent_line_is_underscore() {
         let mut state = painted(two_pane_diff_state());
@@ -10506,9 +10855,10 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
         draw_state(&mut terminal, &mut state);
         let (_, right) = pane_rects(&state, 120);
-        let row = row_cells(&terminal, right.x, right.y, right.width);
-        assert!(row.starts_with("_diff___"), "{row}");
-        assert!(!row.contains('\u{2581}'), "{row}");
+        let title = row_cells(&terminal, right.x, right.y, right.width);
+        assert!(title.starts_with(" diff   "), "{title}");
+        let accent = row_cells(&terminal, right.x, right.y + 1, right.width);
+        assert_eq!(accent, "_".repeat(usize::from(right.width)), "{accent}");
     }
 
     /// Paint mode backgrounds: tab strip, breadcrumb, and status rows on
@@ -10918,8 +11268,9 @@ mod tests {
         }
     }
 
-    /// Clicks on the flat left pane's first column, first content row, and
-    /// bottom row select the tree row painted there.
+    /// Clicks on the flat left pane's title and accent rows select nothing;
+    /// clicks on its first column, first content row, and bottom row
+    /// select the tree row painted there.
     #[test]
     fn paint_mode_clicks_on_flat_pane_edges_select_the_painted_row() {
         let repos: Vec<RepoSnapshot> = (0..40).map(|i| repo(&format!("r{i:02}"), true)).collect();
@@ -10928,9 +11279,15 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
         draw_state(&mut terminal, &mut state);
         let (left, _) = pane_rects(&state, 120);
-        let first = left.y + 1;
+        let first = left.y + 2;
         let last = left.y + left.height - 1;
         assert_eq!(state.layout.tree_y, first);
+        state.cursor = 2;
+        draw_state(&mut terminal, &mut state);
+        for row in [left.y, left.y + 1] {
+            state.dispatch(Action::Click { col: left.x, row });
+            assert_eq!(state.cursor, 2, "chrome row {row} selects nothing");
+        }
         for row in [first, last, first + 3] {
             let idx = state.layout.list_offset + (row - first) as usize;
             let want = state.painted_tree_rows()[idx].id.clone();
@@ -10960,8 +11317,8 @@ mod tests {
         }
     }
 
-    /// The file tab paints flat in paint mode: title row on `surface` with
-    /// the accent line, code from the pane's first column, last row used.
+    /// The file tab paints flat in paint mode: title and accent rows on
+    /// `surface`, code from the pane's first column, last row used.
     #[test]
     fn paint_mode_file_tab_is_flat() {
         let mut state = painted(file_tab_state(&["# app", "dirty"]));
@@ -10973,13 +11330,13 @@ mod tests {
         assert_eq!(pane_edge_borders(buf, pane), vec![]);
         assert_flat_title_row(buf, pane, "app/README.md", true, palette.surface, palette);
         assert!(
-            buf_line(buf, 2).starts_with("1 # app"),
+            buf_line(buf, 3).starts_with("1 # app"),
             "{}",
-            buf_line(buf, 2)
+            buf_line(buf, 3)
         );
-        assert_eq!((state.layout.file_view_x, state.layout.file_view_y), (0, 2));
+        assert_eq!((state.layout.file_view_x, state.layout.file_view_y), (0, 3));
         assert_eq!(state.layout.file_view_width, 80);
-        assert_eq!(state.layout.file_view_height, pane.height - 1);
+        assert_eq!(state.layout.file_view_height, pane.height - 2);
         let bottom = pane.y + pane.height - 1;
         assert_eq!(buf[(40, bottom)].bg, palette.surface);
     }
@@ -11001,13 +11358,13 @@ mod tests {
         assert_flat_title_row(buf, left, left_title, true, palette.sidebar, palette);
         assert_flat_title_row(buf, right, "diff", false, palette.surface, palette);
         assert_eq!(state.layout.diff_content_x, right.x);
-        assert_eq!(state.layout.files_list_y, left.y + 1);
+        assert_eq!(state.layout.files_list_y, left.y + 2);
     }
 
     /// The Explorer tab paints flat in paint mode through the shared pane
     /// chrome: tree on `sidebar`, preview on `surface`, no border glyphs,
-    /// the accent line on the focused title, and every recorded rect is
-    /// the content rect (pane less its title row).
+    /// the accent row under the focused title, and every recorded rect is
+    /// the content rect (pane less its title and accent rows).
     #[test]
     fn paint_mode_explorer_tab_is_flat() {
         let mut state = painted(explorer_preview_state("new.txt", None));
@@ -11028,7 +11385,7 @@ mod tests {
             assert_flat_title_row(buf, left, &checkout, true, palette.sidebar, palette);
             assert_flat_title_row(buf, right, "app/new.txt", false, palette.surface, palette);
             let body: String = (right.x..right.right())
-                .map(|x| buf[(x, right.y + 1)].symbol())
+                .map(|x| buf[(x, right.y + 2)].symbol())
                 .collect();
             assert!(body.starts_with(" 1 line 1"), "{body}");
             let bottom = left.bottom() - 1;
@@ -11038,15 +11395,15 @@ mod tests {
         let layout = &state.layout;
         assert_eq!(
             (layout.file_view_x, layout.file_view_y),
-            (right.x, right.y + 1)
+            (right.x, right.y + 2)
         );
         assert_eq!(layout.file_view_width, right.width);
-        assert_eq!(layout.file_view_height, right.height - 1);
+        assert_eq!(layout.file_view_height, right.height - 2);
         assert_eq!(layout.right_x, right.x);
-        assert_eq!(layout.right_y, right.y + 1);
+        assert_eq!(layout.right_y, right.y + 2);
         assert_eq!(layout.diff_content_x, right.x);
         assert_eq!(layout.diff_pane_width, right.width);
-        assert_eq!(layout.diff_pane_height, right.height - 1);
+        assert_eq!(layout.diff_pane_height, right.height - 2);
 
         state.dispatch(Action::FocusRight);
         assert_eq!(state.focus, FocusPane::Right);
@@ -11056,7 +11413,7 @@ mod tests {
         assert_flat_title_row(buf, right, "app/new.txt", true, palette.surface, palette);
     }
 
-    /// Mouse in a flat Explorer: title rows are not content, the first
+    /// Mouse in a flat Explorer: title and accent rows are not content, the first
     /// column and first content row of each pane hit, and the wheel moves
     /// the pane under the pointer.
     #[test]
@@ -11078,35 +11435,33 @@ mod tests {
                 .and_then(|tab| tab.painted_rel.clone())
         };
 
-        // The preview's title row is not the body.
-        state.dispatch(Action::Click {
-            col: right.x,
-            row: right.y,
-        });
-        assert_eq!(state.focus, FocusPane::Left);
+        // The preview's title and accent rows are not the body.
+        for row in [right.y, right.y + 1] {
+            state.dispatch(Action::Click { col: right.x, row });
+            assert_eq!(state.focus, FocusPane::Left, "row {row}");
+        }
         // Its first column, third body row, takes focus and that line.
         state.dispatch(Action::Click {
             col: right.x,
-            row: right.y + 3,
+            row: right.y + 4,
         });
         assert_eq!(state.focus, FocusPane::Right);
         assert_eq!(file_cursor(&state), 2);
         state.dispatch(Action::ScrollWheel {
             col: right.x,
-            row: right.y + 1,
+            row: right.y + 2,
             delta: 1,
             horizontal: false,
         });
         assert_eq!(file_cursor(&state), 3);
         draw_state(&mut terminal, &mut state);
 
-        // The tree's title row is not a row; its first column is.
+        // The tree's title and accent rows are not rows; its first column is.
         assert_eq!(painted_rel(&state).as_deref(), Some("new.txt"));
-        state.dispatch(Action::Click {
-            col: left.x,
-            row: left.y,
-        });
-        assert_eq!(state.focus, FocusPane::Right, "title row: no hit");
+        for row in [left.y, left.y + 1] {
+            state.dispatch(Action::Click { col: left.x, row });
+            assert_eq!(state.focus, FocusPane::Right, "chrome row {row}: no hit");
+        }
         let tree = state.layout.explorer_tree;
         let readme = (tree.y..tree.bottom())
             .find(|&y| buf_line(terminal.backend().buffer(), y).contains("README.md"))
@@ -11120,7 +11475,7 @@ mod tests {
         assert_eq!(painted_rel(&state).as_deref(), Some("README.md"));
         state.dispatch(Action::ScrollWheel {
             col: left.x,
-            row: left.y + 1,
+            row: left.y + 2,
             delta: -1,
             horizontal: false,
         });
