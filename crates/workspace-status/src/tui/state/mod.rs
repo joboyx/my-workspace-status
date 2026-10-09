@@ -445,17 +445,6 @@ pub struct PopoverHit {
     pub lines: Vec<(u16, usize)>,
 }
 
-/// Cells where a press picks a pane row: the recorded full-width `rows`
-/// (flat pad cells included), or the content rect `inner` when `rows` is
-/// empty (a hand-built layout, as in tests, that sets only `inner`).
-pub(super) fn row_hit_rect(rows: Rect, inner: Rect) -> Rect {
-    if rows.is_empty() {
-        inner
-    } else {
-        rows
-    }
-}
-
 fn hit_tab_box(hits: &[(u16, u16, usize)], tab_y: u16, col: u16, row: u16) -> Option<usize> {
     if row != tab_y {
         return None;
@@ -2861,10 +2850,9 @@ impl AppState {
 
     fn drag_split(&mut self, col: u16, row: u16) -> Effect {
         match self.drag {
-            // A flat pad press stays a pending row click until the
-            // pointer leaves its column.
-            // A move along the pressed column only (vertical) keeps the
-            // press a row click: its release clicks the pressed row.
+            // A flat pad press stays a row click while the pointer keeps to
+            // its column (a vertical move too): the release clicks the
+            // pressed row.
             SplitDrag::Pane if self.pad_press.is_some_and(|(c, _)| c == col) => {}
             SplitDrag::Pane => {
                 if self.pad_press.take().is_some() {

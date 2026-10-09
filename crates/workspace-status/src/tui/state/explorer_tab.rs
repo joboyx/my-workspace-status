@@ -34,7 +34,7 @@ use super::super::tabs::{
     ONLY_WORKSPACE_TAB_OPEN, SWITCH_TO_WORKSPACE_TAB,
 };
 use super::super::tree::{dir_path_from_id, NodeKind};
-use super::{row_hit_rect, single_or_batch, AppState, FocusPane, NO_SEARCH_ARMED};
+use super::{single_or_batch, AppState, FocusPane, NO_SEARCH_ARMED};
 
 /// `e` refusal on an Explorer folder row (the folder-summary copy).
 const FOCUS_A_FILE_TO_EDIT: &str = "focus a file to edit";
@@ -487,21 +487,14 @@ impl AppState {
             return Effect::None;
         }
         let at = ratatui::layout::Position::new(col, row);
-        if row_hit_rect(
-            self.layout.explorer_preview_rows,
-            self.layout.explorer_preview,
-        )
-        .contains(at)
-        {
+        if self.layout.explorer_preview_rows.contains(at) {
             if horizontal {
                 self.explorer_preview_pan(delta);
                 return Effect::None;
             }
             return self.explorer_preview_move(i64::from(delta));
         }
-        if horizontal
-            || !row_hit_rect(self.layout.explorer_tree_rows, self.layout.explorer_tree).contains(at)
-        {
+        if horizontal || !self.layout.explorer_tree_rows.contains(at) {
             return Effect::None;
         }
         self.explorer_move(delta as isize)
@@ -516,7 +509,7 @@ impl AppState {
         self.pad_press = None;
         let at = ratatui::layout::Position::new(col, row);
         let tree = self.layout.explorer_tree;
-        if row_hit_rect(self.layout.explorer_tree_rows, tree).contains(at) {
+        if self.layout.explorer_tree_rows.contains(at) {
             self.text_selection = TextSelection::arm(tree, col, row);
             self.focus = FocusPane::Left;
             let Some((rows, _)) = self.explorer_rows() else {
@@ -540,8 +533,7 @@ impl AppState {
             let tab_id = tab.id;
             return self.explorer_preview_effect(tab_id);
         }
-        let preview = self.layout.explorer_preview;
-        if row_hit_rect(self.layout.explorer_preview_rows, preview).contains(at) {
+        if self.layout.explorer_preview_rows.contains(at) {
             self.explorer_focus_preview();
             if matches!(
                 self.tabs.active_explorer().map(|tab| &tab.preview),

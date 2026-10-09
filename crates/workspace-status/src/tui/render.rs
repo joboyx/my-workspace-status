@@ -10976,6 +10976,16 @@ mod tests {
             ("files left, diff right", two_pane_commit_diff_state()),
         ] {
             let mut state = painted(state);
+            // The graph pane, if any, with its commit selected: that commit
+            // paints a node row and a spacer row, both with the bar.
+            let graph_pane = match name {
+                "graph right" => Some(FocusPane::Right),
+                "graph left, files right" => Some(FocusPane::Left),
+                _ => None,
+            };
+            if graph_pane.is_some() {
+                state.graph_cursor = 1;
+            }
             for focus in [FocusPane::Left, FocusPane::Right] {
                 state.focus = focus;
                 let palette = state.theme.palette();
@@ -10983,10 +10993,8 @@ mod tests {
                 draw_state(&mut terminal, &mut state);
                 let (left, right) = pane_rects(&state, 120);
                 let buf = terminal.backend().buffer();
-                for (pane, focused) in [
-                    (left, focus == FocusPane::Left),
-                    (right, focus == FocusPane::Right),
-                ] {
+                for (pane, side) in [(left, FocusPane::Left), (right, FocusPane::Right)] {
+                    let focused = focus == side;
                     let (bar, selected_bg) = if focused {
                         (CURSOR_BAR, palette.cursor_bg)
                     } else {
@@ -11012,6 +11020,10 @@ mod tests {
                             "no bar in column 1: {}",
                             ctx(y)
                         );
+                    }
+                    if graph_pane == Some(side) {
+                        let pair = bar_rows.windows(2).any(|w| w[1] == w[0] + 1);
+                        assert!(pair, "commit node + spacer bars: {bar_rows:?}");
                     }
                     for &y in &bar_rows {
                         assert_eq!(buf[(pane.x + 1, y)].symbol(), " ", "{}", ctx(y));
@@ -11086,8 +11098,18 @@ mod tests {
     /// to its last.
     #[test]
     fn paint_mode_diff_tints_reach_both_pane_edges() {
+        /// Diff cursor on the first header (section) row, away from the
+        /// change rows the test reads.
+        fn cursor_off_change_rows(state: &mut AppState) {
+            state.diff_cursor = state
+                .current_diff_rows()
+                .iter()
+                .position(|row| !matches!(row, DiffRow::Line { .. }))
+                .expect("a header row");
+        }
         let mut state = painted(two_pane_diff_state());
         state.focus = FocusPane::Left;
+        cursor_off_change_rows(&mut state);
         let palette = state.theme.palette();
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
         draw_state(&mut terminal, &mut state);
@@ -11099,10 +11121,6 @@ mod tests {
         ] {
             let y = first_row_with(buf, needle).expect(needle);
             let line = buf_line(buf, y);
-            if buf[(right.x, y)].symbol() == CURSOR_BAR_INACTIVE {
-                // The diff cursor row: its tint carries the cursor overlay.
-                continue;
-            }
             for x in [right.x, right.x + 1, right.right() - 2, right.right() - 1] {
                 assert_eq!(buf[(x, y)].bg, tint, "{needle} x={x}: {line}");
             }
@@ -11116,6 +11134,7 @@ mod tests {
         let mut state = painted(two_pane_diff_state());
         state.focus = FocusPane::Left;
         state.diff_mode = crate::tui::split::DiffMode::SideBySide;
+        cursor_off_change_rows(&mut state);
         let mut terminal = Terminal::new(TestBackend::new(220, 24)).unwrap();
         draw_state(&mut terminal, &mut state);
         assert!(state.layout.diff_split_rule_x.is_some(), "split diff");
@@ -11124,13 +11143,11 @@ mod tests {
         let y = first_row_with(buf, "old line").expect("paired row");
         let line = buf_line(buf, y);
         assert!(line.contains("new line"), "one paired row: {line}");
-        if buf[(right.x, y)].symbol() != CURSOR_BAR_INACTIVE {
-            for x in [right.x, right.x + 1] {
-                assert_eq!(buf[(x, y)].bg, palette.diff_del_bg, "x={x}: {line}");
-            }
-            for x in [right.right() - 2, right.right() - 1] {
-                assert_eq!(buf[(x, y)].bg, palette.diff_add_bg, "x={x}: {line}");
-            }
+        for x in [right.x, right.x + 1] {
+            assert_eq!(buf[(x, y)].bg, palette.diff_del_bg, "x={x}: {line}");
+        }
+        for x in [right.right() - 2, right.right() - 1] {
+            assert_eq!(buf[(x, y)].bg, palette.diff_add_bg, "x={x}: {line}");
         }
     }
 
