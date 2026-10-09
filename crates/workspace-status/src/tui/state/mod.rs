@@ -236,10 +236,12 @@ pub struct LayoutHit {
     pub outer_tree_width: u16,
     pub diff_pane_width: u16,
     /// Right-pane content height: the rows under the pane's title (the top
-    /// border or the flat title and accent rows), less the bottom border when boxed.
+    /// border or the flat title row), less the bottom border when boxed.
     pub diff_pane_height: u16,
     /// 0-based first right-pane content column, as painted (after the left
-    /// border when boxed, the pane's first column when flat).
+    /// border when boxed, after the one-cell left pad when flat). Row
+    /// clicks pick the pane by [`Self::right_x`], so a pad cell selects its
+    /// row too.
     pub diff_content_x: u16,
     pub diff_split_rule_x: Option<u16>,
     pub right_y: u16,
@@ -320,6 +322,10 @@ pub struct LayoutHit {
     pub file_view_width: u16,
     /// File tab body height in rows.
     pub file_view_height: u16,
+    /// The file body's rows across the full pane width: the flat pad cells
+    /// beside [`Self::file_view_x`]..[`Self::file_view_width`] included
+    /// (the body itself when boxed). A press here picks the row.
+    pub file_view_rows: Rect,
     /// 0-based file line painted on each body row from
     /// [`Self::file_view_y`] (a wrapped line repeats). Empty off a file tab.
     pub file_view_row_lines: Vec<usize>,
@@ -329,6 +335,13 @@ pub struct LayoutHit {
     /// Inner area of the painted Explorer preview pane (empty off an
     /// Explorer tab).
     pub explorer_preview: Rect,
+    /// [`Self::explorer_tree`]'s rows across the full pane width, flat pad
+    /// cells included (the inner area when boxed). Clicks and the wheel
+    /// hit rows here; text selection keeps to the inner area.
+    pub explorer_tree_rows: Rect,
+    /// [`Self::explorer_preview`]'s rows across the full pane width, as
+    /// [`Self::explorer_tree_rows`].
+    pub explorer_preview_rows: Rect,
     /// Results rows the search-in-files dialog painted last; PgUp / PgDn
     /// move by it.
     pub search_files_rows: u16,
@@ -385,9 +398,12 @@ impl Default for LayoutHit {
             file_view_y: 0,
             file_view_width: 0,
             file_view_height: 0,
+            file_view_rows: Rect::default(),
             file_view_row_lines: Vec::new(),
             explorer_tree: Rect::default(),
             explorer_preview: Rect::default(),
+            explorer_tree_rows: Rect::default(),
+            explorer_preview_rows: Rect::default(),
             search_files_rows: 0,
         }
     }
@@ -427,6 +443,17 @@ pub struct PopoverHit {
     /// `(screen row, line index)` of each painted field or action line.
     /// The index is into [`super::popover::flat_lines`].
     pub lines: Vec<(u16, usize)>,
+}
+
+/// Cells where a press picks a pane row: the recorded full-width `rows`
+/// (flat pad cells included), or the content rect `inner` when no paint
+/// recorded them.
+pub(super) fn row_hit_rect(rows: Rect, inner: Rect) -> Rect {
+    if rows.is_empty() {
+        inner
+    } else {
+        rows
+    }
 }
 
 fn hit_tab_box(hits: &[(u16, u16, usize)], tab_y: u16, col: u16, row: u16) -> Option<usize> {
@@ -771,6 +798,10 @@ pub struct AppState {
     /// the graph row identity it belongs to. Any other selection reads `0`.
     commit_msg_scroll: Option<(String, usize)>,
     pub drag: SplitDrag,
+    /// Flat panes: a press on a pad cell at the pane join (the divider grab
+    /// band). It arms [`SplitDrag::Pane`]; a release before the pointer
+    /// leaves its column makes it a row click at that cell instead.
+    pad_press: Option<(u16, u16)>,
     /// Mouse text selection armed by a press in a pane body.
     pub text_selection: Option<TextSelection>,
     /// Last painted frame before the selection highlight. Release copies from it.
@@ -988,6 +1019,7 @@ impl AppState {
             commit_msg_lines: COMMIT_MSG_LINES_DEFAULT,
             commit_msg_scroll: None,
             drag: SplitDrag::None,
+            pad_press: None,
             text_selection: None,
             painted_frame: Buffer::default(),
             too_small: false,
@@ -2526,6 +2558,7 @@ impl AppState {
     /// Plain left press: tabs, dividers, scrollbars, then the row under it.
     fn click_at(&mut self, col: u16, row: u16) -> Effect {
         self.text_selection = None;
+        self.pad_press = None;
         if let Some(index) = self.hit_tab_close(col, row) {
             return self.close_tab_at(index);
         }
@@ -2533,6 +2566,14 @@ impl AppState {
             return self.activate_tab(index);
         }
         match hit_split(self.split_layout(), col, row) {
+            SplitHit::Pane if self.background == BackgroundMode::Paint => {
+                // A flat divider press sits on a row's pad cell: resize only
+                // once the pointer moves, else the release clicks the row
+                // (`last_click` stays for its double-click test).
+                self.drag = SplitDrag::Pane;
+                self.pad_press = Some((col, row));
+                return Effect::None;
+            }
             SplitHit::Pane => {
                 self.drag = SplitDrag::Pane;
                 self.apply_tree_fraction_from_col(col);
@@ -2607,6 +2648,13 @@ impl AppState {
             }
             SplitHit::Other => self.arm_text_selection(col, row),
         }
+        self.click_row(col, row)
+    }
+
+    /// The row under (`col`, `row`) after [`Self::click_at`] found no tab,
+    /// divider, or scrollbar there: focus its pane and select the row; a
+    /// second press on the same cell within 400 ms is a double-click.
+    fn click_row(&mut self, col: u16, row: u16) -> Effect {
         let now = Instant::now();
         let is_double = self.last_click.as_ref().is_some_and(|(c, r, at)| {
             *c == col && *r == row && at.elapsed() <= Duration::from_millis(400)
@@ -2813,7 +2861,13 @@ impl AppState {
 
     fn drag_split(&mut self, col: u16, row: u16) -> Effect {
         match self.drag {
-            SplitDrag::Pane => self.apply_tree_fraction_from_col(col),
+            // A flat pad press stays a pending row click until the
+            // pointer leaves its column.
+            SplitDrag::Pane if self.pad_press.is_some_and(|(c, _)| c == col) => {}
+            SplitDrag::Pane => {
+                self.pad_press = None;
+                self.apply_tree_fraction_from_col(col);
+            }
             SplitDrag::Diff => self.apply_diff_fraction_from_col(col),
             SplitDrag::GraphScrollbar {
                 origin_row,
@@ -2889,7 +2943,19 @@ impl AppState {
     /// Drop any split / scrollbar drag and any text selection.
     pub(crate) fn cancel_mouse_drag(&mut self) {
         self.drag = SplitDrag::None;
+        self.pad_press = None;
         self.text_selection = None;
+    }
+
+    /// Mouse release: a flat divider press that never moved clicks the row
+    /// under it ([`Self::pad_press`]); then [`Self::release_mouse`].
+    fn release(&mut self) -> Effect {
+        self.drag = SplitDrag::None;
+        let Some((col, row)) = self.pad_press.take() else {
+            return self.release_mouse();
+        };
+        let clicked = self.click_row(col, row);
+        popover::then(clicked, self.release_mouse())
     }
 
     fn focus_graph_pane(&mut self) {
@@ -13277,13 +13343,12 @@ mod tests {
         );
     }
 
-    /// [`wide_split_layout`] as each mode's render records it: boxed content
-    /// starts after the right pane's left border (48 + 1), flat content on
-    /// the right pane's first column (48).
+    /// [`wide_split_layout`] as each mode's render records it. Both modes
+    /// start the right pane's content one column in (48 + 1): after its
+    /// left border when boxed, after its left pad cell when flat.
     fn split_layout_for(background: BackgroundMode) -> super::LayoutHit {
         let content_x = match background {
-            BackgroundMode::Terminal => 49,
-            BackgroundMode::Paint => 48,
+            BackgroundMode::Terminal | BackgroundMode::Paint => 49,
         };
         let left = side_by_side_column_widths(110, DIFF_SPLIT_FRACTION).left_width;
         super::LayoutHit {
@@ -13324,7 +13389,8 @@ mod tests {
     #[test]
     fn pane_divider_band_follows_the_background_mode() {
         // Boxed: last left content column (46) through the right pane's
-        // left border (48). Flat: the boundary columns 47 and 48.
+        // left border (48). Flat: the boundary columns 47 and 48 (the left
+        // pane's right pad cell and the right pane's left pad cell).
         for (background, col, divider) in [
             (BackgroundMode::Terminal, 46, true),
             (BackgroundMode::Terminal, 48, true),
@@ -13342,6 +13408,78 @@ mod tests {
                 "{background:?} col {col}: {:?}",
                 app.drag
             );
+        }
+    }
+
+    /// Flat divider band = the pad cells at the pane join. A press there
+    /// arms the pane drag; released without leaving its column it is a row
+    /// click on that cell (row, focus, double-click), with no resize.
+    #[test]
+    fn flat_divider_pad_release_without_move_clicks_the_row() {
+        let mut app = state();
+        app.background = BackgroundMode::Paint;
+        app.layout = split_layout_for(BackgroundMode::Paint);
+        let fraction = app.tree_fraction;
+        let start = app.cursor;
+        let target = (0..app.rows.len())
+            .find(|&idx| app.layout.list_offset + idx != start)
+            .expect("another row");
+        let row = app.layout.tree_y + target as u16;
+        app.focus = FocusPane::Right;
+        assert_eq!(app.dispatch(Action::Click { col: 47, row }), Effect::None);
+        assert_eq!(app.drag, SplitDrag::Pane, "the press arms the divider");
+        assert_eq!(app.cursor, start, "no row click on press");
+        // A drag event in the same column is not a move.
+        app.dispatch(Action::Drag {
+            col: 47,
+            row: row + 1,
+        });
+        assert_eq!(app.tree_fraction, fraction);
+        assert_eq!(app.dispatch(Action::Release), Effect::LoadRightPane);
+        assert_eq!(app.drag, SplitDrag::None);
+        assert_eq!(
+            app.cursor,
+            app.layout.list_offset + target,
+            "left pane's right pad"
+        );
+        assert_eq!(app.focus, FocusPane::Left);
+        assert_eq!(app.tree_fraction, fraction, "a click never resizes");
+
+        // A second press + release on the same cell is a double-click on
+        // the row, as on its text.
+        app.dispatch(Action::Click { col: 47, row });
+        let double = app.dispatch(Action::Release);
+        let mut twin = state();
+        twin.layout = split_layout_for(BackgroundMode::Paint);
+        twin.dispatch(Action::Click { col: 10, row });
+        assert_eq!(double, twin.dispatch(Action::Click { col: 10, row }));
+
+        app.cancel_mouse_drag();
+        app.focus = FocusPane::Left;
+        app.dispatch(Action::Click { col: 48, row });
+        assert_eq!(app.drag, SplitDrag::Pane);
+        app.dispatch(Action::Release);
+        assert_eq!(app.focus, FocusPane::Right, "right pane's left pad");
+        assert_eq!(app.tree_fraction, fraction);
+    }
+
+    /// A flat divider press that moves resizes as before and clicks no row.
+    #[test]
+    fn flat_divider_pad_press_and_drag_resizes() {
+        for col in [47, 48] {
+            let mut app = state();
+            app.background = BackgroundMode::Paint;
+            app.layout = split_layout_for(BackgroundMode::Paint);
+            let start = pane_widths(160, app.tree_fraction).tree_width;
+            let cursor = app.cursor;
+            let row = app.layout.tree_y + u16::from(cursor == 0);
+            app.dispatch(Action::Click { col, row });
+            app.dispatch(Action::Drag { col: 70, row });
+            let after = pane_widths(160, app.tree_fraction).tree_width;
+            assert!(after > start, "col {col}: start={start} after={after}");
+            assert_eq!(app.dispatch(Action::Release), Effect::None, "col {col}");
+            assert_eq!(app.cursor, cursor, "col {col}: no row click after a drag");
+            assert_eq!(app.drag, SplitDrag::None);
         }
     }
 

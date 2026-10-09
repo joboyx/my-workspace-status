@@ -210,6 +210,8 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.layout.file_view_row_lines.clear();
     state.layout.explorer_tree = Rect::default();
     state.layout.explorer_preview = Rect::default();
+    state.layout.explorer_tree_rows = Rect::default();
+    state.layout.explorer_preview_rows = Rect::default();
     state.layout.term_cols = area.width;
     state.layout.pane_height = chunks[1].height;
     if state.is_file_tab() {
@@ -288,7 +290,7 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
     let left_is_graph = !state.is_compare_tab() && state.drill.is_files();
     let left_name = state.left_pane_title();
     let palette = state.theme.palette();
-    let tree_inner = draw_pane_chrome(
+    let left_pane = draw_pane_chrome(
         frame,
         panes[0],
         left_name,
@@ -296,6 +298,7 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
         palette.sidebar,
         state,
     );
+    let tree_inner = left_pane.inner;
     if left_is_files {
         let cursor = state.commit_files_cursor();
         let col_offset = state.left_col_offset as usize;
@@ -309,6 +312,7 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
     } else {
         draw_tree(frame, tree_inner, state);
     }
+    bleed_flat_pad(frame, left_pane);
 
     let right_name = if state.is_compare_tab() {
         "diff"
@@ -319,7 +323,7 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
     } else {
         "graph"
     };
-    let right_inner = draw_pane_chrome(
+    let right_pane = draw_pane_chrome(
         frame,
         panes[1],
         right_name,
@@ -327,9 +331,11 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
         palette.surface,
         state,
     );
+    let right_inner = right_pane.inner;
     state.layout.diff_pane_width = right_inner.width;
     state.layout.diff_pane_height = right_inner.height;
     draw_right(frame, right_inner, state);
+    bleed_flat_pad(frame, right_pane);
 
     state.layout.tree_x = tree_inner.x;
     state.layout.tree_y = tree_inner.y;
@@ -471,15 +477,18 @@ fn draw_file_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let Some(tab) = state.tabs.active_file() else {
         return;
     };
-    let inner = draw_pane_chrome(frame, area, &tab.display, true, palette.surface, state);
-    draw_file_body(frame, inner, state);
+    let pane = draw_pane_chrome(frame, area, &tab.display, true, palette.surface, state);
+    draw_file_body(frame, pane, state);
+    bleed_flat_pad(frame, pane);
 }
 
 /// The active read-only file body (a file tab, or an Explorer tab's
-/// clean-file preview) inside `inner`: line numbers and highlighted code,
-/// or a loading / binary / too-large / empty notice.
-fn draw_file_body(frame: &mut Frame<'_>, inner: Rect, state: &mut AppState) {
+/// clean-file preview) inside `pane.inner`: line numbers and highlighted
+/// code, or a loading / binary / too-large / empty notice.
+fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
     let palette = state.theme.palette();
+    let inner = pane.inner;
+    state.layout.file_view_rows = pane.rows;
     state.layout.file_view_x = inner.x;
     state.layout.file_view_y = inner.y;
     state.layout.file_view_width = inner.width;
@@ -602,8 +611,9 @@ fn draw_file_body(frame: &mut Frame<'_>, inner: Rect, state: &mut AppState) {
 /// look). [`BackgroundMode::Paint`]: `area` is filled with `bg`, no border
 /// glyphs, and row 0 is the title row ([`flat_title_line`]): the title and
 /// a rule to the right edge whose colours show focus. Focus never moves
-/// the content. Returns the content rect: the block's inner rect, or
-/// `area` less its first row.
+/// the content. Returns the pane's [`PaneArea`]: boxed, the block's inner
+/// rect; flat, `area` less its first row and [`FLAT_PAD_COLS`] on each
+/// side. Call [`bleed_flat_pad`] once the content has drawn.
 fn draw_pane_chrome(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -611,7 +621,7 @@ fn draw_pane_chrome(
     focused: bool,
     bg: Color,
     state: &AppState,
-) -> Rect {
+) -> PaneArea {
     let palette = state.theme.palette();
     if state.background == BackgroundMode::Terminal {
         let block = Block::default()
@@ -621,7 +631,7 @@ fn draw_pane_chrome(
             .border_style(pane_border(focused, palette));
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        return inner;
+        return PaneArea { inner, rows: inner };
     }
     fill_bg(frame, area, bg);
     if area.height > 0 {
@@ -637,15 +647,83 @@ fn draw_pane_chrome(
         );
     }
     let chrome = area.height.min(FLAT_CHROME_ROWS);
-    Rect {
+    let rows = Rect {
         y: area.y + chrome,
         height: area.height - chrome,
         ..area
+    };
+    // A pane too narrow to keep a content column between its pads drops
+    // the pads.
+    let pad = if area.width > 2 * FLAT_PAD_COLS {
+        FLAT_PAD_COLS
+    } else {
+        0
+    };
+    PaneArea {
+        inner: Rect {
+            x: rows.x + pad,
+            width: rows.width - 2 * pad,
+            ..rows
+        },
+        rows,
     }
 }
 
 /// Rows a flat pane's chrome takes above its content: the title row.
 const FLAT_CHROME_ROWS: u16 = 1;
+
+/// Blank columns a flat pane keeps on each side of its content. Row
+/// backgrounds and the selection bar run into them ([`bleed_flat_pad`]).
+const FLAT_PAD_COLS: u16 = 1;
+
+/// Where a pane's rows go, from [`draw_pane_chrome`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PaneArea {
+    /// Content rect: rows draw here. Inside the border when boxed, inside
+    /// the [`FLAT_PAD_COLS`] pad columns when flat.
+    inner: Rect,
+    /// The content rows across the full pane width, pad cells included
+    /// (flat). Equal to `inner` when boxed. A press anywhere in it picks
+    /// the row.
+    rows: Rect,
+}
+
+/// Finish a flat pane after its content has drawn: each content row's pad
+/// cells take that row's background (the left pad from the first content
+/// cell, the right pad from the last), so selection, flash, search, and
+/// diff tints run to both pane edges.
+///
+/// A selection bar ([`CURSOR_BAR`] / [`CURSOR_BAR_INACTIVE`]) in the first
+/// content column moves to the left pad cell, on the pane edge, and leaves
+/// a blank on the row background, so row text lines up with unselected
+/// rows. Bars in other columns stay. A no-op when boxed (`rows == inner`).
+fn bleed_flat_pad(frame: &mut Frame<'_>, pane: PaneArea) {
+    let PaneArea { inner, rows } = pane;
+    if inner.width == 0 || inner == rows {
+        return;
+    }
+    let buf = frame.buffer_mut();
+    let first = inner.x;
+    let last = inner.right() - 1;
+    for y in inner.top()..inner.bottom() {
+        if rows.x < first {
+            let cell = buf[(first, y)].clone();
+            if matches!(cell.symbol(), CURSOR_BAR | CURSOR_BAR_INACTIVE) {
+                let bg = cell.bg;
+                buf[(rows.x, y)] = cell;
+                let blank = &mut buf[(first, y)];
+                blank.reset();
+                blank.set_bg(bg);
+            } else {
+                buf[(rows.x, y)].set_bg(cell.bg);
+            }
+        }
+        if rows.right() > inner.right() {
+            let bg = buf[(last, y)].bg;
+            buf[(rows.right() - 1, y)].set_bg(bg);
+        }
+    }
+}
 
 /// Title row of a flat pane, `width` cells: one blank cell, the title,
 /// one blank cell, then a rule (`▁`, `_` in ASCII mode) to the right edge.
@@ -698,8 +776,9 @@ fn fill_bg(frame: &mut Frame<'_>, area: Rect, bg: Color) {
 /// file's preview on the right (on `surface`) — the worktree diff of a
 /// changed file, the body of a clean one, or a short hint on a folder.
 /// Both panes go through [`draw_pane_chrome`], so they are boxed or flat
-/// as the Workspace panes are, and every recorded rect is the content
-/// rect.
+/// as the Workspace panes are. `explorer_tree` / `explorer_preview` record
+/// the content rects, `explorer_tree_rows` / `explorer_preview_rows` the
+/// full-width rows (pad cells included when flat).
 fn draw_explorer_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let widths = pane_widths(area.width, state.tree_fraction);
     let panes = Layout::default()
@@ -724,7 +803,7 @@ fn draw_explorer_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let rows = tab.tree.rows(&status);
     let cursor = tab.tree.cursor_index(&rows);
     let folder = cursor.is_some_and(|index| rows[index].is_dir);
-    let tree_inner = draw_pane_chrome(
+    let tree_pane = draw_pane_chrome(
         frame,
         panes[0],
         &tab.checkout,
@@ -732,13 +811,16 @@ fn draw_explorer_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         palette.sidebar,
         state,
     );
+    let tree_inner = tree_pane.inner;
     state.layout.explorer_tree = tree_inner;
+    state.layout.explorer_tree_rows = tree_pane.rows;
     draw_explorer_tree(frame, tree_inner, state, &rows, cursor, &status);
+    bleed_flat_pad(frame, tree_pane);
     if let Some(tab) = state.tabs.active_explorer_mut() {
         tab.painted_rel = cursor.map(|index| rows[index].rel.clone());
     }
 
-    let right_inner = draw_pane_chrome(
+    let right_pane = draw_pane_chrome(
         frame,
         panes[1],
         &preview_title,
@@ -746,7 +828,9 @@ fn draw_explorer_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         palette.surface,
         state,
     );
+    let right_inner = right_pane.inner;
     state.layout.explorer_preview = right_inner;
+    state.layout.explorer_preview_rows = right_pane.rows;
     state.layout.right_x = panes[1].x;
     state.layout.right_y = right_inner.y;
     state.layout.diff_content_x = right_inner.x;
@@ -758,13 +842,14 @@ fn draw_explorer_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     }
     match state.tabs.active_explorer().map(|tab| &tab.preview) {
         Some(ExplorerPreview::Diff { .. }) => draw_diff_pane(frame, right_inner, state),
-        Some(ExplorerPreview::File(_)) => draw_file_body(frame, right_inner, state),
+        Some(ExplorerPreview::File(_)) => draw_file_body(frame, right_pane, state),
         _ if folder => frame.render_widget(
             Paragraph::new(muted_copy(EXPLORER_FOLDER_HINT, palette)),
             right_inner,
         ),
         _ => {}
     }
+    bleed_flat_pad(frame, right_pane);
 }
 
 /// Explorer tree `rows` (the cursor on `cursor`) inside `area`, keeping
@@ -2106,6 +2191,9 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         height: line_h as u16,
     };
     frame.render_widget(Paragraph::new(painted), lines_area);
+    if state.background == BackgroundMode::Paint {
+        bleed_diff_row_edges(frame, lines_area, area.right());
+    }
     let buf = frame.buffer_mut();
     if vscroll && body.height > 0 && area.width > 0 {
         state.layout.diff_scrollbar_x = Some(area.x.saturating_add(area.width.saturating_sub(1)));
@@ -2374,6 +2462,29 @@ fn put_line_annotation(
     }
     if rest > 0 {
         spans.push(Span::styled(" ".repeat(rest), style));
+    }
+}
+
+/// Flat diff rows, before [`bleed_flat_pad`]: the two cells a row leaves
+/// unpainted take its background, so add / remove tints and the cursor
+/// row reach the pane edges. A blank edge-marker cell (column 0, no
+/// selection bar) takes the bg of the cell after it; the reserved
+/// scrollbar column (from `lines.right()` up to `right`) the bg of the
+/// row's last cell. The scrollbar glyphs paint on top.
+fn bleed_diff_row_edges(frame: &mut Frame<'_>, lines: Rect, right: u16) {
+    if lines.width < 2 {
+        return;
+    }
+    let buf = frame.buffer_mut();
+    for y in lines.top()..lines.bottom() {
+        if buf[(lines.x, y)].symbol() == " " {
+            let bg = buf[(lines.x + 1, y)].bg;
+            buf[(lines.x, y)].set_bg(bg);
+        }
+        let bg = buf[(lines.right() - 1, y)].bg;
+        for x in lines.right()..right {
+            buf[(x, y)].set_bg(bg);
+        }
     }
 }
 
@@ -10627,16 +10738,16 @@ mod tests {
     }
 
     /// Outer rects of the Explorer tree and preview panes in a flat
-    /// frame: the recorded content rects grown by their title row.
+    /// frame: the recorded full-width row rects grown by their title row.
     fn explorer_pane_rects(state: &AppState) -> (Rect, Rect) {
-        let grow = |inner: Rect| Rect {
-            y: inner.y - FLAT_CHROME_ROWS,
-            height: inner.height + FLAT_CHROME_ROWS,
-            ..inner
+        let grow = |rows: Rect| Rect {
+            y: rows.y - FLAT_CHROME_ROWS,
+            height: rows.height + FLAT_CHROME_ROWS,
+            ..rows
         };
         (
-            grow(state.layout.explorer_tree),
-            grow(state.layout.explorer_preview),
+            grow(state.layout.explorer_tree_rows),
+            grow(state.layout.explorer_preview_rows),
         )
     }
 
@@ -10712,9 +10823,9 @@ mod tests {
 
     /// Paint mode draws flat panes: no border glyph on any pane edge, the
     /// title row on row 0 (no separate focus row), and the content rect
-    /// from the pane's first column and row 1 to its bottom row.
+    /// one pad column in from each side, from row 1 to the bottom row.
     #[test]
-    fn paint_mode_panes_are_flat_with_content_from_the_pane_edge() {
+    fn paint_mode_panes_are_flat_with_content_inside_the_pad_columns() {
         let mut state = painted(two_pane_diff_state());
         state.focus = FocusPane::Left;
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
@@ -10726,13 +10837,276 @@ mod tests {
         assert_eq!(right.x, left.x + left.width, "panes abut");
 
         let layout = &state.layout;
-        assert_eq!((layout.tree_x, layout.tree_y), (left.x, left.y + 1));
-        assert_eq!(layout.tree_width, left.width);
+        let pads = 2 * FLAT_PAD_COLS;
+        assert_eq!(
+            (layout.tree_x, layout.tree_y),
+            (left.x + FLAT_PAD_COLS, left.y + 1)
+        );
+        assert_eq!(layout.tree_width, left.width - pads);
         assert_eq!(layout.tree_height, left.height - 1, "uses the bottom row");
-        assert_eq!(layout.diff_content_x, right.x);
+        assert_eq!(layout.diff_content_x, right.x + FLAT_PAD_COLS);
         assert_eq!(layout.right_y, right.y + 1);
-        assert_eq!(layout.diff_pane_width, right.width);
+        assert_eq!(layout.diff_pane_width, right.width - pads);
         assert_eq!(layout.diff_pane_height, right.height - 1);
+    }
+
+    /// Flat full-bleed rows, for each focus: every pane's selected row
+    /// paints its background to both pane edges with the bar (`▌` focused,
+    /// `▏` unfocused) in pad column 0 and a blank on the row background in
+    /// column 1, so its text starts at column 2 like every other row. The
+    /// pads of plain rows hold only the pane background.
+    #[test]
+    fn paint_mode_rows_bleed_into_the_pads_with_the_bar_on_the_pane_edge() {
+        for focus in [FocusPane::Left, FocusPane::Right] {
+            let mut state = painted(two_pane_diff_state());
+            state.focus = focus;
+            // A section header row highlights only its label; put the diff
+            // cursor on a line row, which paints the full row width.
+            state.diff_cursor = state
+                .current_diff_rows()
+                .iter()
+                .position(|row| matches!(row, DiffRow::Line { .. }))
+                .expect("a diff line row");
+            let palette = state.theme.palette();
+            let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let (left, right) = pane_rects(&state, 120);
+            let buf = terminal.backend().buffer();
+            for (pane, bg, focused) in [
+                (left, palette.sidebar, focus == FocusPane::Left),
+                (right, palette.surface, focus == FocusPane::Right),
+            ] {
+                let (bar, other_bar, selected_bg) = if focused {
+                    (CURSOR_BAR, CURSOR_BAR_INACTIVE, palette.cursor_bg)
+                } else {
+                    (CURSOR_BAR_INACTIVE, CURSOR_BAR, palette.cursor_bg_inactive)
+                };
+                let last = pane.right() - 1;
+                let rows = pane.y + 1..pane.bottom();
+                let ctx = |y: u16| format!("{focus:?} pane x={}: {}", pane.x, buf_line(buf, y));
+                let bars: Vec<u16> = rows
+                    .clone()
+                    .filter(|&y| buf[(pane.x, y)].symbol() == bar)
+                    .collect();
+                assert_eq!(
+                    bars.len(),
+                    1,
+                    "one bar in {focus:?} pad x={}: {bars:?}",
+                    pane.x
+                );
+                let y = bars[0];
+                assert_eq!(buf[(pane.x, y)].bg, selected_bg, "{}", ctx(y));
+                assert_eq!(buf[(pane.x + 1, y)].symbol(), " ", "{}", ctx(y));
+                assert_eq!(buf[(pane.x + 1, y)].bg, selected_bg, "{}", ctx(y));
+                assert_eq!(buf[(last, y)].symbol(), " ", "{}", ctx(y));
+                // The tree row is flat `selected_bg` to its end; a diff
+                // line row ends in its change tint with the cursor overlay.
+                let row_end_bg = if pane == left {
+                    selected_bg
+                } else {
+                    palette.cursor_tint(palette.diff_del_bg, selected_bg)
+                };
+                assert_eq!(buf[(last, y)].bg, row_end_bg, "{}", ctx(y));
+                for y in rows.clone() {
+                    assert_ne!(buf[(pane.x, y)].symbol(), other_bar, "{}", ctx(y));
+                    for x in [pane.x + 1, last] {
+                        let symbol = buf[(x, y)].symbol();
+                        assert!(
+                            symbol != CURSOR_BAR && symbol != CURSOR_BAR_INACTIVE,
+                            "no bar off the pane edge at x={x}: {}",
+                            ctx(y)
+                        );
+                    }
+                }
+                // Tree rows and diff line rows: the gutter blank in column
+                // 1, text after it.
+                for y in rows.clone().filter(|&y| y != bars[0]) {
+                    let text = buf_line(buf, y);
+                    let row = &text[text.char_indices().nth(usize::from(pane.x)).unwrap().0..];
+                    if pane == left || row.contains(" line") {
+                        assert_eq!(buf[(pane.x + 1, y)].symbol(), " ", "gutter: {}", ctx(y));
+                    }
+                }
+                let plain: Vec<u16> = rows
+                    .clone()
+                    .filter(|&y| y != bars[0])
+                    .filter(|&y| buf[(pane.x + 1, y)].bg == bg && buf[(last - 1, y)].bg == bg)
+                    .collect();
+                assert!(!plain.is_empty(), "a plain row in {focus:?} x={}", pane.x);
+                for y in plain {
+                    for x in [pane.x, last] {
+                        assert_eq!(buf[(x, y)].symbol(), " ", "pad x={x}: {}", ctx(y));
+                        assert_eq!(buf[(x, y)].bg, bg, "pad x={x}: {}", ctx(y));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Flat bars on the graph (right and left) and the commit-file lists:
+    /// for each focus, every pane's bar is in pad column 0 (`▌` focused,
+    /// `▏` unfocused) with a blank in column 1, never in column 1, and the
+    /// selected row's background reaches the pane's last column.
+    #[test]
+    fn paint_mode_graph_and_file_list_bars_sit_on_the_pane_edge() {
+        for (name, state) in [
+            ("graph right", two_pane_graph_state()),
+            ("graph left, files right", two_pane_files_state()),
+            ("files left, diff right", two_pane_commit_diff_state()),
+        ] {
+            let mut state = painted(state);
+            for focus in [FocusPane::Left, FocusPane::Right] {
+                state.focus = focus;
+                let palette = state.theme.palette();
+                let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let (left, right) = pane_rects(&state, 120);
+                let buf = terminal.backend().buffer();
+                for (pane, focused) in [
+                    (left, focus == FocusPane::Left),
+                    (right, focus == FocusPane::Right),
+                ] {
+                    let (bar, selected_bg) = if focused {
+                        (CURSOR_BAR, palette.cursor_bg)
+                    } else {
+                        (CURSOR_BAR_INACTIVE, palette.cursor_bg_inactive)
+                    };
+                    let last = pane.right() - 1;
+                    let ctx =
+                        |y: u16| format!("{name} {focus:?} x={}: {}", pane.x, buf_line(buf, y));
+                    let rows = pane.y + 1..pane.bottom();
+                    let bar_rows: Vec<u16> = rows
+                        .clone()
+                        .filter(|&y| buf[(pane.x, y)].symbol() == bar)
+                        .collect();
+                    assert!(
+                        !bar_rows.is_empty(),
+                        "{name} {focus:?}: bar in pad x={}",
+                        pane.x
+                    );
+                    for y in rows {
+                        let symbol = buf[(pane.x + 1, y)].symbol();
+                        assert!(
+                            symbol != CURSOR_BAR && symbol != CURSOR_BAR_INACTIVE,
+                            "no bar in column 1: {}",
+                            ctx(y)
+                        );
+                    }
+                    for &y in &bar_rows {
+                        assert_eq!(buf[(pane.x + 1, y)].symbol(), " ", "{}", ctx(y));
+                        assert_eq!(buf[(pane.x + 1, y)].bg, buf[(pane.x, y)].bg, "{}", ctx(y));
+                    }
+                    if pane == right && state.right_is_diff() {
+                        // The diff cursor sits on a section header, which
+                        // highlights only its label (see the diff tests).
+                        continue;
+                    }
+                    let full = bar_rows.iter().any(|&y| {
+                        buf[(pane.x, y)].bg == selected_bg && buf[(last, y)].bg == selected_bg
+                    });
+                    assert!(full, "selected bg edge to edge: {}", ctx(bar_rows[0]));
+                }
+            }
+        }
+    }
+
+    /// Flat diff add / remove tints run from the right pane's first column
+    /// to its last.
+    #[test]
+    fn paint_mode_diff_tints_reach_both_pane_edges() {
+        let mut state = painted(two_pane_diff_state());
+        state.focus = FocusPane::Left;
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let (_, right) = pane_rects(&state, 120);
+        let buf = terminal.backend().buffer();
+        for (needle, tint) in [
+            ("old line", palette.diff_del_bg),
+            ("new line", palette.diff_add_bg),
+        ] {
+            let y = first_row_with(buf, needle).expect(needle);
+            let line = buf_line(buf, y);
+            if buf[(right.x, y)].symbol() == CURSOR_BAR_INACTIVE {
+                // The diff cursor row: its tint carries the cursor overlay.
+                continue;
+            }
+            for x in [right.x, right.x + 1, right.right() - 2, right.right() - 1] {
+                assert_eq!(buf[(x, y)].bg, tint, "{needle} x={x}: {line}");
+            }
+            assert_eq!(buf[(right.x, y)].symbol(), " ", "{line}");
+            assert_eq!(buf[(right.right() - 1, y)].symbol(), " ", "{line}");
+        }
+    }
+
+    /// Flat pad cells are part of their row for the mouse: a press on the
+    /// tree pane's left pad or the right pane's right pad selects that row.
+    /// The two pads at the pane boundary are the pane divider's grab band:
+    /// a press there drags the split, a press released without moving
+    /// selects the row.
+    #[test]
+    fn paint_mode_pad_clicks_select_the_row_and_boundary_pads_drag_the_split() {
+        let mut state = painted(two_pane_diff_state());
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let (left, right) = pane_rects(&state, 120);
+        assert!(state.current_diff_rows().len() >= 2, "diff rows");
+
+        // Right pane: its right pad, then its left pad (the divider band,
+        // press + release without moving), each move the diff cursor.
+        for (col, boundary) in [(right.right() - 1, false), (right.x, true)] {
+            state.focus = FocusPane::Left;
+            let start = state.diff_cursor;
+            let mut moved = false;
+            for row in right.y + 1..right.bottom() {
+                state.dispatch(Action::Click { col, row });
+                if boundary {
+                    assert_eq!(state.drag, SplitDrag::Pane, "the press arms the divider");
+                }
+                state.dispatch(Action::Release);
+                assert_eq!(state.focus, FocusPane::Right, "col {col} focuses the pane");
+                if state.diff_cursor != start {
+                    moved = true;
+                    break;
+                }
+            }
+            assert!(moved, "a click on col {col} moves the diff cursor");
+            draw_state(&mut terminal, &mut state);
+        }
+
+        // Tree: its left pad, then its right pad (the divider band).
+        let first = state.layout.tree_y;
+        for col in [left.x, left.right() - 1] {
+            let target = (0..state.painted_tree_rows().len())
+                .find(|&idx| state.layout.list_offset + idx != state.cursor)
+                .expect("another tree row");
+            let want = state.painted_tree_rows()[target].id.clone();
+            state.focus = FocusPane::Right;
+            state.dispatch(Action::Click {
+                col,
+                row: first + target as u16,
+            });
+            state.dispatch(Action::Release);
+            assert_eq!(
+                state.rows[state.cursor].id, want,
+                "col {col} selects the row"
+            );
+            assert_eq!(state.focus, FocusPane::Left);
+            draw_state(&mut terminal, &mut state);
+        }
+
+        // Press + drag on a boundary pad still resizes.
+        let fraction = state.tree_fraction;
+        state.dispatch(Action::Click {
+            col: right.x,
+            row: first,
+        });
+        state.dispatch(Action::Drag {
+            col: right.x + 10,
+            row: first,
+        });
+        state.dispatch(Action::Release);
+        assert!(state.tree_fraction > fraction, "the drag resized the panes");
     }
 
     /// Terminal mode keeps the boxed panes: border glyphs, no `▁` rule,
@@ -10774,10 +11148,10 @@ mod tests {
                     for height in 0..=3u16 {
                         let mut terminal = Terminal::new(TestBackend::new(10, 4)).unwrap();
                         let area = Rect::new(0, 0, width, height);
-                        let mut inner = Rect::default();
+                        let mut pane = PaneArea::default();
                         terminal
                             .draw(|frame| {
-                                inner = draw_pane_chrome(
+                                pane = draw_pane_chrome(
                                     frame,
                                     area,
                                     "tree",
@@ -10785,12 +11159,19 @@ mod tests {
                                     Color::Black,
                                     &state,
                                 );
+                                bleed_flat_pad(frame, pane);
                             })
                             .unwrap();
                         let chrome = height.min(FLAT_CHROME_ROWS);
+                        let pad = if width > 2 { FLAT_PAD_COLS } else { 0 };
                         assert_eq!(
-                            inner,
+                            pane.rows,
                             Rect::new(0, chrome, width, height - chrome),
+                            "w={width} h={height}"
+                        );
+                        assert_eq!(
+                            pane.inner,
+                            Rect::new(pad, chrome, width - 2 * pad, height - chrome),
                             "w={width} h={height}"
                         );
                         if height > 0 {
@@ -11356,7 +11737,8 @@ mod tests {
     }
 
     /// The file tab paints flat in paint mode: the title row on
-    /// `surface`, code from the pane's first column, last row used.
+    /// `surface`, code inside the pad columns (from column 1), last row
+    /// used. The cursor line's background runs into both pad cells.
     #[test]
     fn paint_mode_file_tab_is_flat() {
         let mut state = painted(file_tab_state(&["# app", "dirty"]));
@@ -11368,15 +11750,100 @@ mod tests {
         assert_eq!(pane_edge_borders(buf, pane), vec![]);
         assert_flat_title_row(buf, pane, "app/README.md", true, palette.surface, palette);
         assert!(
-            buf_line(buf, 2).starts_with("1 # app"),
+            buf_line(buf, 2).starts_with(" 1 # app"),
             "{}",
             buf_line(buf, 2)
         );
-        assert_eq!((state.layout.file_view_x, state.layout.file_view_y), (0, 2));
-        assert_eq!(state.layout.file_view_width, 80);
+        assert_eq!((state.layout.file_view_x, state.layout.file_view_y), (1, 2));
+        assert_eq!(state.layout.file_view_width, 78);
         assert_eq!(state.layout.file_view_height, pane.height - 1);
+        assert_eq!(
+            state.layout.file_view_rows,
+            Rect::new(0, 2, 80, pane.height - 1)
+        );
         let bottom = pane.y + pane.height - 1;
         assert_eq!(buf[(40, bottom)].bg, palette.surface);
+        // Line 1 holds the cursor: its background reaches both pane edges.
+        for x in [0, 79] {
+            assert_eq!(buf[(x, 2)].symbol(), " ", "pad x={x}");
+            assert_eq!(buf[(x, 2)].bg, palette.cursor_bg, "pad x={x}");
+        }
+        assert_eq!(buf[(0, 3)].bg, palette.surface, "plain row pad");
+    }
+
+    /// Explorer flat pads: a press on either pad cell of a tree row
+    /// selects that row (no pane divider on this tab), the bar sits on the
+    /// pane edge, and a press on the preview's pad cell picks the file
+    /// line.
+    #[test]
+    fn paint_mode_explorer_pad_clicks_select_the_row() {
+        let mut state = painted(explorer_preview_state("new.txt", None));
+        state.focus = FocusPane::Left;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let tree = state.layout.explorer_tree;
+        let rows = state.layout.explorer_tree_rows;
+        assert_eq!((rows.x, rows.width), (tree.x - 1, tree.width + 2));
+        let cursor_rel = |state: &AppState| {
+            let tab = state.tabs.active_explorer().unwrap();
+            tab.painted_rel.clone()
+        };
+        for (col, name) in [(rows.x, "README.md"), (rows.right() - 1, "src")] {
+            let y = (tree.y..tree.bottom())
+                .find(|&y| buf_line(terminal.backend().buffer(), y).contains(name))
+                .expect(name);
+            state.dispatch(Action::Click { col, row: y });
+            draw_state(&mut terminal, &mut state);
+            let buf = terminal.backend().buffer();
+            assert_eq!(state.focus, FocusPane::Left, "col {col}");
+            if name == "src" {
+                // A folder press toggles it; the cursor lands on it.
+                assert_eq!(cursor_rel(&state).as_deref(), Some("src"), "col {col}");
+            } else {
+                assert_eq!(cursor_rel(&state).as_deref(), Some(name), "col {col}");
+            }
+            assert_eq!(
+                buf[(rows.x, y)].symbol(),
+                CURSOR_BAR,
+                "{}",
+                buf_line(buf, y)
+            );
+            assert_eq!(buf[(tree.x, y)].symbol(), " ", "{}", buf_line(buf, y));
+        }
+
+        let mut state = painted(explorer_preview_state("new.txt", None));
+        draw_state(&mut terminal, &mut state);
+        let preview = state.layout.explorer_preview_rows;
+        assert_eq!(preview.x + 1, state.layout.explorer_preview.x);
+        state.dispatch(Action::Click {
+            col: preview.x,
+            row: preview.y + 3,
+        });
+        assert_eq!(state.focus, FocusPane::Right);
+        assert_eq!(state.tabs.active_file_view().unwrap().cursor, 3);
+        state.dispatch(Action::Release);
+        state.dispatch(Action::Click {
+            col: preview.right() - 1,
+            row: preview.y + 5,
+        });
+        assert_eq!(state.tabs.active_file_view().unwrap().cursor, 5);
+    }
+
+    /// A press on a file tab's pad cell picks the line on that row.
+    #[test]
+    fn paint_mode_file_tab_pad_click_picks_the_line() {
+        let mut state = painted(file_tab_state(&["one", "two", "three"]));
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let y = state.layout.file_view_y;
+        for (col, line) in [(0, 2), (79, 1)] {
+            state.dispatch(Action::Click {
+                col,
+                row: y + line as u16,
+            });
+            state.dispatch(Action::Release);
+            assert_eq!(state.tabs.active_file().unwrap().cursor, line, "col {col}");
+        }
     }
 
     /// The compare tab uses the same flat chrome: file list on `sidebar`,
@@ -11395,14 +11862,21 @@ mod tests {
         let left_title = state.left_pane_title();
         assert_flat_title_row(buf, left, left_title, true, palette.sidebar, palette);
         assert_flat_title_row(buf, right, "diff", false, palette.surface, palette);
-        assert_eq!(state.layout.diff_content_x, right.x);
+        assert_eq!(state.layout.diff_content_x, right.x + FLAT_PAD_COLS);
+        assert_eq!(state.layout.tree_x, left.x + FLAT_PAD_COLS);
         assert_eq!(state.layout.files_list_y, left.y + 1);
+        // The focused file list's bar sits on the pane edge.
+        let bar = (left.y + 1..left.bottom()).find(|&y| buf[(left.x, y)].symbol() == CURSOR_BAR);
+        let y = bar.expect("file list cursor bar in the left pad");
+        assert_eq!(buf[(left.x + 1, y)].symbol(), " ");
+        assert_eq!(buf[(left.right() - 1, y)].bg, palette.cursor_bg);
     }
 
     /// The Explorer tab paints flat in paint mode through the shared pane
     /// chrome: tree on `sidebar`, preview on `surface`, no border glyphs,
     /// focus shown by the title row colours, and every recorded rect is
-    /// the content rect (pane less its title row).
+    /// the content rect (pane less its title row and pad columns); the
+    /// `*_rows` rects keep the full pane width.
     #[test]
     fn paint_mode_explorer_tab_is_flat() {
         let mut state = painted(explorer_preview_state("new.txt", None));
@@ -11425,22 +11899,27 @@ mod tests {
             let body: String = (right.x..right.right())
                 .map(|x| buf[(x, right.y + 1)].symbol())
                 .collect();
-            assert!(body.starts_with(" 1 line 1"), "{body}");
+            assert!(body.starts_with("  1 line 1"), "{body}");
             let bottom = left.bottom() - 1;
             assert_eq!(buf[(left.right() - 2, bottom)].bg, palette.sidebar);
             assert_eq!(buf[(right.right() - 2, bottom)].bg, palette.surface);
         }
         let layout = &state.layout;
+        let pad = FLAT_PAD_COLS;
+        assert_eq!(
+            (layout.explorer_tree.x, layout.explorer_tree.width),
+            (left.x + pad, left.width - 2 * pad)
+        );
         assert_eq!(
             (layout.file_view_x, layout.file_view_y),
-            (right.x, right.y + 1)
+            (right.x + pad, right.y + 1)
         );
-        assert_eq!(layout.file_view_width, right.width);
+        assert_eq!(layout.file_view_width, right.width - 2 * pad);
         assert_eq!(layout.file_view_height, right.height - 1);
         assert_eq!(layout.right_x, right.x);
         assert_eq!(layout.right_y, right.y + 1);
-        assert_eq!(layout.diff_content_x, right.x);
-        assert_eq!(layout.diff_pane_width, right.width);
+        assert_eq!(layout.diff_content_x, right.x + pad);
+        assert_eq!(layout.diff_pane_width, right.width - 2 * pad);
         assert_eq!(layout.diff_pane_height, right.height - 1);
 
         state.dispatch(Action::FocusRight);
@@ -11568,7 +12047,7 @@ mod tests {
     }
 
     /// Paint-mode twin of [`recorded_split_rule_is_the_painted_rule_column`]:
-    /// flat content starts at the right pane's first column, the recorded
+    /// flat content starts one pad column into the right pane, the recorded
     /// rule is the painted `border_dim` rule, and the diff h-bar sits on the
     /// pane's last row.
     #[test]
@@ -11582,8 +12061,9 @@ mod tests {
             draw_state(&mut terminal, &mut state);
             let rule = state.layout.diff_split_rule_x.expect("rule");
             assert_eq!(
-                state.layout.diff_content_x, state.layout.right_x,
-                "flat content starts on the right pane's first column"
+                state.layout.diff_content_x,
+                state.layout.right_x + FLAT_PAD_COLS,
+                "flat content starts after the right pane's left pad"
             );
             let buf = terminal.backend().buffer();
             let y = first_row_with(buf, "old line").expect("diff row");

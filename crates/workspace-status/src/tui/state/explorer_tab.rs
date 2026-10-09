@@ -34,7 +34,7 @@ use super::super::tabs::{
     ONLY_WORKSPACE_TAB_OPEN, SWITCH_TO_WORKSPACE_TAB,
 };
 use super::super::tree::{dir_path_from_id, NodeKind};
-use super::{single_or_batch, AppState, FocusPane, NO_SEARCH_ARMED};
+use super::{row_hit_rect, single_or_batch, AppState, FocusPane, NO_SEARCH_ARMED};
 
 /// `e` refusal on an Explorer folder row (the folder-summary copy).
 const FOCUS_A_FILE_TO_EDIT: &str = "focus a file to edit";
@@ -487,26 +487,35 @@ impl AppState {
             return Effect::None;
         }
         let at = ratatui::layout::Position::new(col, row);
-        if self.layout.explorer_preview.contains(at) {
+        if row_hit_rect(
+            self.layout.explorer_preview_rows,
+            self.layout.explorer_preview,
+        )
+        .contains(at)
+        {
             if horizontal {
                 self.explorer_preview_pan(delta);
                 return Effect::None;
             }
             return self.explorer_preview_move(i64::from(delta));
         }
-        if horizontal || !self.layout.explorer_tree.contains(at) {
+        if horizontal
+            || !row_hit_rect(self.layout.explorer_tree_rows, self.layout.explorer_tree).contains(at)
+        {
             return Effect::None;
         }
         self.explorer_move(delta as isize)
     }
 
     /// Press in a pane: a tree row takes the cursor (a folder also opens or
-    /// closes); the preview takes focus and, for a file body, the line.
+    /// closes); the preview takes focus and, for a file body, the line. A
+    /// flat pad cell counts as its row; a text selection arms only in the
+    /// inner area.
     fn explorer_click(&mut self, col: u16, row: u16) -> Effect {
         self.drag = SplitDrag::None;
         let at = ratatui::layout::Position::new(col, row);
         let tree = self.layout.explorer_tree;
-        if tree.contains(at) {
+        if row_hit_rect(self.layout.explorer_tree_rows, tree).contains(at) {
             self.text_selection = TextSelection::arm(tree, col, row);
             self.focus = FocusPane::Left;
             let Some((rows, _)) = self.explorer_rows() else {
@@ -530,7 +539,8 @@ impl AppState {
             let tab_id = tab.id;
             return self.explorer_preview_effect(tab_id);
         }
-        if self.layout.explorer_preview.contains(at) {
+        let preview = self.layout.explorer_preview;
+        if row_hit_rect(self.layout.explorer_preview_rows, preview).contains(at) {
             self.explorer_focus_preview();
             if matches!(
                 self.tabs.active_explorer().map(|tab| &tab.preview),

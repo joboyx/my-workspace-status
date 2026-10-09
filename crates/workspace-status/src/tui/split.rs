@@ -127,7 +127,8 @@ pub struct SplitLayout {
     /// 0-based first content column of the right pane, as painted.
     pub diff_content_x: u16,
     /// Panes paint flat (no border glyphs). The pane divider band is then
-    /// the two columns at the pane boundary, and the pane's last row is
+    /// the two columns at the pane boundary (the left pane's right pad cell
+    /// and the right pane's left pad cell), and the pane's last row is
     /// content (a horizontal scrollbar can sit there).
     pub flat_panes: bool,
     /// 0-based RULE column when a split is painted.
@@ -335,7 +336,9 @@ pub fn is_divider_column(x: u16, center: u16, term_cols: u16) -> bool {
 ///
 /// Boxed panes: the 3-column band around the left pane's right border
 /// ([`is_divider_column`] on `tree_width`). Flat panes: the two columns at
-/// the pane boundary, the left pane's last column and the right pane's first.
+/// the pane boundary, the left pane's last column and the right pane's
+/// first (the pad cells beside the boundary, so the band covers no row
+/// text).
 fn is_pane_divider(layout: SplitLayout, x: u16) -> bool {
     if !layout.flat_panes {
         return is_divider_column(x, layout.tree_width, layout.term_cols);

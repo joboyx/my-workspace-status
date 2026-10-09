@@ -25,7 +25,7 @@ use super::super::tabs::{
     file_gutter_width, OpenFile, FILE_DELETED, ONLY_WORKSPACE_TAB_OPEN, SWITCH_TO_WORKSPACE_TAB,
 };
 use super::super::watch::{file_disk_token, GONE_DISK_TOKEN};
-use super::{AppState, FileSearchMemo, NO_SEARCH_ARMED, Z_FOLDS_TREE_ROWS};
+use super::{row_hit_rect, AppState, FileSearchMemo, NO_SEARCH_ARMED, Z_FOLDS_TREE_ROWS};
 
 impl AppState {
     /// Open or focus the file tab for `rel` in `checkout`.
@@ -406,7 +406,9 @@ impl AppState {
     }
 
     /// Press in the file body (a file tab or an Explorer file preview):
-    /// focus the clicked line and arm a text selection.
+    /// focus the clicked line and arm a text selection. A press on a flat
+    /// pad cell beside the body picks its line too; the selection keeps to
+    /// the body.
     pub(super) fn click_file_tab(&mut self, col: u16, row: u16) {
         self.drag = SplitDrag::None;
         let layout = &self.layout;
@@ -416,11 +418,12 @@ impl AppState {
             layout.file_view_width,
             layout.file_view_height,
         );
+        let rows = row_hit_rect(layout.file_view_rows, body);
         let line = row
             .checked_sub(layout.file_view_y)
             .and_then(|offset| layout.file_view_row_lines.get(usize::from(offset)))
             .copied()
-            .filter(|_| col >= body.x && col < body.right());
+            .filter(|_| col >= rows.x && col < rows.right());
         self.text_selection = TextSelection::arm(body, col, row);
         if let Some(line) = line {
             self.set_file_cursor(line);
