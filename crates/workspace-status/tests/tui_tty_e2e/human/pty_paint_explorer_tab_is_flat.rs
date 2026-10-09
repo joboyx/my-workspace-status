@@ -5,8 +5,8 @@ use crate::harness::{PtySession, UserConfig, COLS, ROWS};
 use crate::seed::{daily_workspace, git};
 use crate::support::{
     crumb_row, flat_join_col, flat_left_body, flat_left_row_containing, flat_pane_last_row,
-    flat_right_body, FLAT_TITLE_ROW, GIT_WAIT, SLATE_CHROME, SLATE_CURSOR, SLATE_HEADING,
-    SLATE_MUTED, SLATE_SIDEBAR, SLATE_SURFACE, WAIT,
+    flat_right_body, FLAT_ACCENT_ROW, FLAT_BODY_ROW, FLAT_TITLE_ROW, GIT_WAIT, SLATE_CHROME,
+    SLATE_CURSOR, SLATE_HEADING, SLATE_MUTED, SLATE_SIDEBAR, SLATE_SURFACE, WAIT,
 };
 
 /// Strip label of the `app` checkout's Explorer tab.
@@ -25,26 +25,29 @@ fn seed_kept_file(workspace: &Path) {
     git(&app, &["commit", "-q", "-m", "add kept.rs"]);
 }
 
-/// Title row cell `col` is the accent line: `_` in `cursor` on `bg`.
+/// Accent row cell `col` is the accent line: `_` in `cursor` on `bg`.
 fn accent_at(tui: &PtySession, col: u16, bg: (u8, u8, u8)) -> bool {
-    tui.cell_paint(FLAT_TITLE_ROW, col).is_some_and(|cell| {
+    tui.cell_paint(FLAT_ACCENT_ROW, col).is_some_and(|cell| {
         cell.glyph == Some('_') && cell.fg == Some(SLATE_CURSOR) && cell.bg == Some(bg)
     })
 }
 
-/// Title row cell `col` is a plain blank on `bg` (no accent line).
+/// Title row and accent row cells at `col` are plain blanks on `bg` (no
+/// accent line).
 fn blank_at(tui: &PtySession, col: u16, bg: (u8, u8, u8)) -> bool {
-    tui.cell_paint(FLAT_TITLE_ROW, col).is_some_and(|cell| {
-        matches!(cell.glyph, None | Some(' ')) && !cell.underline && cell.bg == Some(bg)
+    [FLAT_TITLE_ROW, FLAT_ACCENT_ROW].into_iter().all(|row| {
+        tui.cell_paint(row, col).is_some_and(|cell| {
+            matches!(cell.glyph, None | Some(' ')) && !cell.underline && cell.bg == Some(bg)
+        })
     })
 }
 
-/// First title character one cell in from `col`: `heading`, bold, and
-/// underlined when focused; `muted`, plain when not.
+/// First title character one cell in from `col`: `heading` and bold when
+/// focused; `muted`, plain when not. Never underlined.
 fn title_char_at(tui: &PtySession, col: u16, focused: bool) -> bool {
     tui.cell_paint(FLAT_TITLE_ROW, col + 1).is_some_and(|cell| {
         if focused {
-            cell.fg == Some(SLATE_HEADING) && cell.bold && cell.underline
+            cell.fg == Some(SLATE_HEADING) && cell.bold && !cell.underline
         } else {
             cell.fg == Some(SLATE_MUTED) && !cell.bold && !cell.underline
         }
@@ -79,15 +82,15 @@ fn flat_explorer(tui: &PtySession, title: &str, preview: &str) -> bool {
 ///
 /// Docs: an Explorer tab paints its tree and preview panes through the
 /// shared pane chrome. In paint mode the tree fills with `sidebar`, the
-/// preview with `surface`, no border glyphs, and the focused pane's title
-/// row carries the `cursor` accent line. Mouse clicks hit the flat content
-/// rows.
+/// preview with `surface`, no border glyphs, and the focused pane's accent
+/// row (under its title) carries the `cursor` line. Mouse clicks hit the
+/// flat content rows.
 ///
 /// Live PTY on the shipped look (no user config, Slate): `-` on
 /// `README.md` opens `Explorer · app` with its diff. Fills, borders, and
 /// the accent on the tree title are checked per cell. A click on the
 /// `kept.rs` row (first column) previews its body; a click on the
-/// preview's first column moves the accent to the preview title. A boxed
+/// preview's first column moves the accent to the preview. A boxed
 /// Explorer, an unfilled pane, or an accent that does not follow focus
 /// cannot pass.
 #[test]
@@ -124,6 +127,7 @@ fn pty_paint_explorer_tab_is_flat() {
         (last, 0, SLATE_SIDEBAR, "tree body"),
         (last, join - 1, SLATE_SIDEBAR, "tree last column"),
         (FLAT_TITLE_ROW, join, SLATE_SURFACE, "preview title row"),
+        (FLAT_ACCENT_ROW, join, SLATE_SURFACE, "preview accent row"),
         (last, join, SLATE_SURFACE, "preview body"),
         (last, COLS - 1, SLATE_SURFACE, "preview last column"),
         (ROWS - 1, COLS - 1, SLATE_CHROME, "status row"),
@@ -155,7 +159,7 @@ fn pty_paint_explorer_tab_is_flat() {
             && blank_at(&tui, join, SLATE_SURFACE)
             && blank_at(&tui, COLS - 1, SLATE_SURFACE)
             && title_char_at(&tui, join, false),
-        "accent line on the tree title only:\n{screen}"
+        "accent line under the tree title only:\n{screen}"
     );
 
     let kept = flat_left_row_containing(&tui, join, "kept.rs").expect("kept.rs row");
@@ -166,7 +170,7 @@ fn pty_paint_explorer_tab_is_flat() {
         GIT_WAIT,
     );
 
-    tui.sgr_click(join, FLAT_TITLE_ROW + 1);
+    tui.sgr_click(join, FLAT_BODY_ROW);
     tui.wait_pred(
         |_| {
             accent_at(&tui, join, SLATE_SURFACE)
@@ -175,7 +179,7 @@ fn pty_paint_explorer_tab_is_flat() {
                 && blank_at(&tui, 0, SLATE_SIDEBAR)
                 && title_char_at(&tui, 0, false)
         },
-        "click on the preview's first column moves the accent to its title",
+        "click on the preview's first column moves the accent to the preview",
         WAIT,
     );
 }

@@ -157,9 +157,6 @@ impl PtySession {
                     | "CLICOLOR_FORCE"
                     | "WS_STATUS_WORKSPACE"
                     | "VISUAL"
-                    | "VTE_VERSION"
-                    | "KITTY_WINDOW_ID"
-                    | "TERM_PROGRAM"
             ) {
                 continue;
             }
@@ -169,16 +166,11 @@ impl PtySession {
         // above does not drop these; remove them so the TTY paints colour
         // and the fixture cwd wins over an operator WS_STATUS_WORKSPACE.
         // `e` reads $VISUAL before $EDITOR, so an operator VISUAL would
-        // outrank the stub EDITOR a test passes. The developer terminal's
-        // VTE_VERSION / KITTY_WINDOW_ID / TERM_PROGRAM would turn on the
-        // coloured title underline, so the PTY output would depend on it.
+        // outrank the stub EDITOR a test passes.
         cmd.env_remove("NO_COLOR");
         cmd.env_remove("FORCE_COLOR");
         cmd.env_remove("WS_STATUS_WORKSPACE");
         cmd.env_remove("VISUAL");
-        cmd.env_remove("VTE_VERSION");
-        cmd.env_remove("KITTY_WINDOW_ID");
-        cmd.env_remove("TERM_PROGRAM");
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("WS_STATUS_GLYPHS", "ascii");
