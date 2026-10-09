@@ -152,7 +152,7 @@ On a TTY (or `-i` / `--tui`) the binary opens the ratatui TUI. Tree chrome (stat
 `crates/workspace-status-graph` is a ratatui widget for one git graph window.
 The crate itself does not run a terminal app. The TUI paints `GraphWidget`.
 `GraphWidget` colours subject vs meta vs HEAD / default / feature / remote / tag chips
-(including the selection footer, which reuses the row-chip `LabelKind` runs; it is a fixed height: 2 rows collapsed, N message rows plus meta expanded, see [graph.md](./graph.md#paint))
+(including the selection footer, which reuses the row-chip `LabelKind` runs; it is a fixed height: a rule row, then 2 rows collapsed or N message rows plus meta expanded, see [graph.md](./graph.md#paint))
 and paints a 1-column position scrollbar whenever the list overflows, plus a 1-row horizontal bar after the viewport leaves the left edge. The TUI hit-tests those thumbs through
 the same `tui/split.rs` `hit_split` / `SplitDrag` stack as the pane divider,
 in-diff RULE, and file-diff horizontal bar (`SplitDrag::GraphScrollbar` / `GraphHScrollbar` / `DiffHScrollbar`). Track clicks jump toward that
