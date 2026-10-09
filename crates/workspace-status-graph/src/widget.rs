@@ -278,7 +278,8 @@ impl<'a> GraphWidget<'a> {
     ///
     /// `rows` are [`GraphModel::visible_rows`] indexes with the fade colour.
     /// Flash background wins over cursor and search. The cursor bar (`▌`)
-    /// still marks selection. Unlike search, spacers follow the node.
+    /// still marks the selected node and its spacer. Unlike search,
+    /// spacers follow the node.
     pub fn flash_rows(mut self, rows: &'a [(usize, Color)]) -> Self {
         self.flash_rows = rows;
         self
@@ -335,7 +336,8 @@ impl<'a> GraphWidget<'a> {
         self
     }
 
-    /// Cursor bar (`▌`) plus `cursorBg`. Spacers keep the background only.
+    /// Cursor bar (`▌`) plus `cursorBg`. The selected row's spacer (commit
+    /// hash and chips, stash meta) gets the bar and the background too.
     pub fn cursor_style(mut self, fg: Color, bg: Color) -> Self {
         self.cursor_fg = fg;
         self.cursor_bg = Some(bg);
@@ -895,6 +897,7 @@ fn now_unix_secs() -> i64 {
 /// These were positional `bool`s in a row, so a transposed pair at the
 /// call site compiled and painted the wrong chrome.
 struct RowFlags {
+    /// Line belongs to the selected row: its node line or its spacer.
     selected: bool,
     cursor_bar: bool,
     search_match: bool,
@@ -968,8 +971,9 @@ fn put_painted_line(
         return icons;
     }
     let row = Rect::new(x, y, width, 1);
-    let show_bar = selected && line.selectable;
-    let bar = if !show_bar {
+    // Spacers keep their row's index, so the bar marks both lines of the
+    // selected commit or stash and no other spacer.
+    let bar = if !selected {
         " "
     } else if cursor_bar {
         "▌"
@@ -3027,6 +3031,131 @@ mod tests {
         assert!(!saw_reversed, "graph cursor should not use reverse video");
     }
 
+    /// Render `sample_model` with the commit `subject` selected. Returns the
+    /// bar column symbol of each `(node, spacer)` pair, keyed by subject.
+    fn commit_bar_cells(subject: &str, focused: bool) -> Vec<(String, String, String)> {
+        let model = sample_model();
+        let rows = model.visible_rows();
+        let selected = rows
+            .iter()
+            .position(
+                |row| matches!(row, GraphRow::Commit { commit, .. } if commit.subject == subject),
+            )
+            .expect("selected commit row");
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .selected(Some(selected))
+                    .cursor_bar(focused)
+                    .cursor_style(Color::Cyan, Color::DarkGray)
+                    .now_unix(NOW)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let line = |y: u16| -> String { (0..80u16).map(|x| buffer[(x, y)].symbol()).collect() };
+        ["add graph crate", "prior commit", "WIP on main"]
+            .iter()
+            .map(|want| {
+                let y = (0..30u16)
+                    .find(|&y| line(y).contains(want))
+                    .unwrap_or_else(|| panic!("{want} line"));
+                (
+                    (*want).to_string(),
+                    buffer[(0, y)].symbol().to_string(),
+                    buffer[(0, y + 1)].symbol().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn selected_commit_paints_focused_bar_on_node_and_spacer() {
+        let cells = commit_bar_cells("add graph crate", true);
+        assert_eq!(
+            cells[0],
+            ("add graph crate".into(), "▌".into(), "▌".into()),
+            "focused bar on the selected node and its spacer"
+        );
+        assert_eq!(
+            cells[1],
+            ("prior commit".into(), " ".into(), " ".into()),
+            "other commit node and spacer stay unmarked"
+        );
+        assert_eq!(
+            cells[2],
+            ("WIP on main".into(), " ".into(), " ".into()),
+            "unselected stash node and spacer stay unmarked"
+        );
+    }
+
+    #[test]
+    fn selected_commit_paints_inactive_bar_on_node_and_spacer() {
+        let cells = commit_bar_cells("prior commit", false);
+        assert_eq!(
+            cells[1],
+            ("prior commit".into(), "▏".into(), "▏".into()),
+            "unfocused bar on the selected node and its spacer"
+        );
+        assert_eq!(
+            cells[0],
+            ("add graph crate".into(), " ".into(), " ".into()),
+            "other commit node and spacer stay unmarked"
+        );
+    }
+
+    #[test]
+    fn selected_stash_paints_bar_on_node_and_spacer() {
+        let model = sample_model();
+        let rows = model.visible_rows();
+        let stash_idx = rows
+            .iter()
+            .position(|row| matches!(row, GraphRow::Stash(_)))
+            .expect("stash row");
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .selected(Some(stash_idx))
+                    .cursor_style(Color::Cyan, Color::DarkGray)
+                    .now_unix(NOW)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let y = (0..30u16)
+            .find(|&y| {
+                (0..80u16)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("WIP on main")
+            })
+            .expect("stash line");
+        assert_eq!(buffer[(0, y)].symbol(), "▌", "bar on the stash node");
+        assert_eq!(buffer[(0, y + 1)].symbol(), "▌", "bar on the stash spacer");
+        let other = (0..30u16)
+            .find(|&y| {
+                (0..80u16)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("add graph crate")
+            })
+            .expect("commit line");
+        assert_eq!(
+            buffer[(0, other)].symbol(),
+            " ",
+            "other commit node unmarked"
+        );
+        assert_eq!(
+            buffer[(0, other + 1)].symbol(),
+            " ",
+            "other commit spacer unmarked"
+        );
+    }
+
     #[test]
     fn selected_row_without_cursor_bar_paints_inactive_keeps_footer() {
         let model = sample_model();
@@ -3691,9 +3820,11 @@ mod tests {
     }
 
     fn fg_at(text: &str, colors: &[Color], needle: &str, offset: usize) -> Color {
-        let i = text
+        let byte = text
             .find(needle)
             .unwrap_or_else(|| panic!("missing {needle:?} in {text:?}"));
+        // `colors` is per char; a multi-byte cursor bar would skew a byte index.
+        let i = text[..byte].chars().count();
         colors[i + offset]
     }
 
