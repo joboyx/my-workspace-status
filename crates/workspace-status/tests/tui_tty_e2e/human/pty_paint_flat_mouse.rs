@@ -5,7 +5,7 @@ use crate::harness::{PtySession, UserConfig, COLS, ROWS, SGR_WHEEL_RIGHT};
 use crate::seed::{daily_workspace, seed_long_diff_file, unwrap_diffs_at_launch};
 use crate::support::{
     crumb_row, flat_join_col, flat_left_body, flat_left_cursor_on, flat_left_row_containing,
-    flat_pane_last_row, flat_right_body, status_row, SETTLE_MS, SLATE_SIDEBAR, WAIT,
+    flat_pane_last_row, flat_right_body, status_row, FLAT_PAD_COLS, SETTLE_MS, SLATE_SIDEBAR, WAIT,
 };
 
 /// xterm SGR left-button drag (`Cb` 0 + motion bit 32).
@@ -69,10 +69,11 @@ fn wait_flat_launch(tui: &PtySession) -> u16 {
 
 /// A click on the first column of a tree row selects that row.
 ///
-/// Flat panes have no border, so column 0 is content (the `▌` cursor
-/// column). Live PTY: SGR press + release at column 0 of the merger row
-/// moves the cursor there and loads that repo's graph; focus stays left.
-/// A click dropped as a border hit leaves README selected.
+/// Flat panes have no border: column 0 is the row's left pad cell (where
+/// the selected row's `▌` sits), and a pad cell maps to its row. Live PTY:
+/// SGR press + release at column 0 of the merger row moves the cursor
+/// there and loads that repo's graph; focus stays left. A click dropped as
+/// a border hit leaves README selected.
 #[test]
 fn pty_paint_flat_click_first_column_selects_row() {
     let (_root, workspace) = daily_workspace();
@@ -271,9 +272,9 @@ fn pty_paint_flat_diff_hbar_drags_on_last_row() {
 
 /// A drag in the flat tree pane copies that pane's text only.
 ///
-/// Live PTY: SGR press at column 0 of the README row (flat panes have no
-/// border column), motion-bit drag into the right pane one row down,
-/// release. The OSC 52 payload holds the README label and no diff text;
+/// Live PTY: SGR press on the first content column of the README row (one
+/// pad cell in; flat panes have no border column), motion-bit drag into
+/// the right pane one row down, release. The OSC 52 payload holds the README label and no diff text;
 /// the breadcrumb flashes `copied`. A plain click copies nothing.
 #[test]
 fn pty_paint_flat_drag_select_copies_pane_text() {
@@ -291,7 +292,7 @@ fn pty_paint_flat_drag_select_copies_pane_text() {
         tui.screen()
     );
 
-    sgr_drag(&mut tui, (0, row), (join + 30, row + 1));
+    sgr_drag(&mut tui, (FLAT_PAD_COLS, row), (join + 30, row + 1));
     tui.wait_clipboard_pred(
         |payloads| {
             payloads.iter().any(|text| {

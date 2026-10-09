@@ -489,7 +489,8 @@ impl PtySession {
 
     /// Glyph, 24-bit colours, and bold / underline of one vt100 cell.
     ///
-    /// Paint-mode claims read pane fills and the focused title row per cell.
+    /// Paint-mode claims read pane fills and the title-row rule colours per
+    /// cell.
     /// [`Self::screen`] is glyphs only. `None` when the cell is off-grid.
     pub fn cell_paint(&self, row: u16, col: u16) -> Option<CellPaint> {
         let parser = self.parser.lock().unwrap();
@@ -1216,7 +1217,8 @@ pub fn left_tree(screen: &str) -> String {
         .join("\n")
 }
 
-/// Rows above pane bodies: tab strip, then the `tree` / `diff` title row.
+/// Rows above pane bodies: tab strip, then the `tree` / `diff` title row
+/// (the box top border when boxed, the one chrome row when flat).
 pub fn pane_body_start(line_count: usize) -> usize {
     let end = line_count.saturating_sub(2);
     if end > 2 {

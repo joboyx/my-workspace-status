@@ -751,10 +751,21 @@ pub fn graph_pane_focused(screen: &str) -> bool {
     panes_tree_unfocused_graph_focused(screen)
 }
 
+/// Focused graph cursor bar (`▌`) on the right-pane node row that contains
+/// `needle`.
+///
+/// The selected commit or stash also paints the bar on its spacer row (hash,
+/// ref chips, `stash@{n}`) right under the node. Only the first `▌` row of a
+/// run counts, so a needle that matches a chip on that spacer does not
+/// count as the cursor row.
 pub fn graph_cursor_on(screen: &str, needle: &str) -> bool {
+    let mut above_has_bar = false;
     screen.lines().any(|line| {
         let right = right_of_split(line);
-        right.contains('\u{258C}') && right.contains(needle)
+        let bar = right.contains('\u{258C}');
+        let node = bar && !above_has_bar;
+        above_has_bar = bar;
+        node && right.contains(needle)
     })
 }
 
@@ -1258,16 +1269,20 @@ pub const SLATE_CHROME: (u8, u8, u8) = (0x0d, 0x11, 0x16);
 pub const SLATE_CURSOR: (u8, u8, u8) = (0x79, 0xa6, 0xdc);
 pub const SLATE_HEADING: (u8, u8, u8) = (0x7f, 0xc4, 0xd6);
 pub const SLATE_MUTED: (u8, u8, u8) = (0x8a, 0x94, 0xa3);
+pub const SLATE_BORDER_DIM: (u8, u8, u8) = (0x2b, 0x34, 0x42);
 
 /// Pane title row of the flat (paint-mode) layout. Row 0 is the tab strip.
+/// The row holds a blank cell, the title, a blank cell, then a rule to the
+/// pane's right edge: `cursor` on the focused pane, `border_dim` on the
+/// other.
 pub const FLAT_TITLE_ROW: u16 = 1;
 
-/// Accent row of the flat layout, under the title row: a full-width `cursor`
-/// line on the focused pane, blank on the other.
-pub const FLAT_ACCENT_ROW: u16 = FLAT_TITLE_ROW + 1;
+/// First pane body row of the flat layout, right under the title row.
+pub const FLAT_BODY_ROW: u16 = FLAT_TITLE_ROW + 1;
 
-/// First pane body row of the flat layout, under the accent row.
-pub const FLAT_BODY_ROW: u16 = FLAT_TITLE_ROW + 2;
+/// Pad columns a flat pane keeps on each side of its content. The row
+/// gutter is pane column 1; the selected row's bar sits in pane column 0.
+pub const FLAT_PAD_COLS: u16 = 1;
 
 /// First column of the right pane in the flat layout: the first title-row
 /// cell after the left pane whose background is not `sidebar`.
@@ -1292,8 +1307,7 @@ pub fn flat_pane_last_row(tui: &PtySession) -> u16 {
     tui.grid_size().1.saturating_sub(3)
 }
 
-/// Left pane body rows (title and accent rows excluded), one line per
-/// screen row.
+/// Left pane body rows (title row excluded), one line per screen row.
 pub fn flat_left_body(tui: &PtySession, join: u16) -> String {
     (FLAT_BODY_ROW..=flat_pane_last_row(tui))
         .map(|row| tui.grid_row_text(row, 0..join))
@@ -1301,8 +1315,7 @@ pub fn flat_left_body(tui: &PtySession, join: u16) -> String {
         .join("\n")
 }
 
-/// Right pane body rows (title and accent rows excluded), one line per
-/// screen row.
+/// Right pane body rows (title row excluded), one line per screen row.
 pub fn flat_right_body(tui: &PtySession, join: u16) -> String {
     let (cols, _) = tui.grid_size();
     (FLAT_BODY_ROW..=flat_pane_last_row(tui))
