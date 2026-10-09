@@ -75,7 +75,8 @@ use super::split::{
     MIN_PANE_COLS, MIN_TERM_COLS, MIN_TERM_ROWS,
 };
 use super::state::{
-    revert_scope, AppState, CompareRevertTarget, FocusPane, IconHit, PendingConfirm, PopoverHit,
+    revert_scope, AppState, CompareRevertTarget, FocusPane, IconHit, LayoutHit, PendingConfirm,
+    PopoverHit,
 };
 use super::syntax::{
     cached_highlight_diff_rows, highlight_file_window, readable_fg, slice_styled_cols,
@@ -212,6 +213,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.layout.explorer_preview = Rect::default();
     state.layout.explorer_tree_rows = Rect::default();
     state.layout.explorer_preview_rows = Rect::default();
+    state.layout.file_view_rows = Rect::default();
     state.layout.term_cols = area.width;
     state.layout.pane_height = chunks[1].height;
     if state.is_file_tab() {
@@ -1650,6 +1652,25 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         .collect();
     state.layout.icon_hits.extend(hits);
     record_graph_scrollbar(state, area, col_offset, &badges);
+    if state.background == BackgroundMode::Paint {
+        bleed_graph_scrollbar_column(frame, &state.layout);
+    }
+}
+
+/// Flat graph list, before [`bleed_flat_pad`]: the widget paints rows one
+/// column short of a shown vertical scrollbar, so each list row's
+/// scrollbar cell takes the bg of the cell left of it. Selection, flash,
+/// and search backgrounds then reach the pad. The scrollbar glyph stays.
+fn bleed_graph_scrollbar_column(frame: &mut Frame<'_>, layout: &LayoutHit) {
+    let Some(x) = layout.graph_scrollbar_x.filter(|&x| x > 0) else {
+        return;
+    };
+    let buf = frame.buffer_mut();
+    let top = layout.graph_scrollbar_y;
+    for y in top..top.saturating_add(layout.graph_scrollbar_height) {
+        let bg = buf[(x - 1, y)].bg;
+        buf[(x, y)].set_bg(bg);
+    }
 }
 
 /// One graph worktree row's PR badge: visible row index, checkout,
@@ -11010,6 +11031,57 @@ mod tests {
         }
     }
 
+    /// A flat graph that overflows (vertical scrollbar shown), right and
+    /// left: the selected row's background runs under the scrollbar column
+    /// to the pane's last column, and the scrollbar glyph stays.
+    #[test]
+    fn paint_mode_overflowing_graph_selection_reaches_the_pane_edge() {
+        for left_graph in [false, true] {
+            let mut state = if left_graph {
+                two_pane_files_state()
+            } else {
+                two_pane_graph_state()
+            };
+            if let Some(model) = state.graph.as_mut() {
+                let seed = model.commits[0].clone();
+                model.commits = (0..40)
+                    .map(|i| Commit {
+                        id: format!("{i:040x}"),
+                        ..seed.clone()
+                    })
+                    .collect();
+            }
+            let mut state = painted(state);
+            state.graph_cursor = 3;
+            let palette = state.theme.palette();
+            let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let x = state.layout.graph_scrollbar_x.expect("vertical scrollbar");
+            let (left, right) = pane_rects(&state, 120);
+            let pane = if left_graph { left } else { right };
+            let focused = state.focus == FocusPane::Left;
+            let (bar, selected_bg) = if focused == left_graph {
+                (CURSOR_BAR, palette.cursor_bg)
+            } else {
+                (CURSOR_BAR_INACTIVE, palette.cursor_bg_inactive)
+            };
+            assert_eq!(x, pane.right() - 1 - FLAT_PAD_COLS, "bar one column in");
+            let buf = terminal.backend().buffer();
+            let y = (state.layout.graph_scrollbar_y..pane.bottom())
+                .find(|&y| buf[(pane.x, y)].symbol() == bar && buf[(pane.x, y)].bg == selected_bg)
+                .expect("selected graph row");
+            let line = buf_line(buf, y);
+            assert_ne!(buf[(x, y)].symbol(), " ", "scrollbar glyph stays: {line}");
+            for x in [x, pane.right() - 1] {
+                assert_eq!(
+                    buf[(x, y)].bg,
+                    selected_bg,
+                    "left_graph={left_graph} x={x}: {line}"
+                );
+            }
+        }
+    }
+
     /// Flat diff add / remove tints run from the right pane's first column
     /// to its last.
     #[test]
@@ -11036,6 +11108,29 @@ mod tests {
             }
             assert_eq!(buf[(right.x, y)].symbol(), " ", "{line}");
             assert_eq!(buf[(right.right() - 1, y)].symbol(), " ", "{line}");
+        }
+
+        // Side by side: the paired row's left half is the removed line and
+        // its right half the added one, so the left pad follows the remove
+        // tint and the scrollbar column and right pad the add tint.
+        let mut state = painted(two_pane_diff_state());
+        state.focus = FocusPane::Left;
+        state.diff_mode = crate::tui::split::DiffMode::SideBySide;
+        let mut terminal = Terminal::new(TestBackend::new(220, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert!(state.layout.diff_split_rule_x.is_some(), "split diff");
+        let (_, right) = pane_rects(&state, 220);
+        let buf = terminal.backend().buffer();
+        let y = first_row_with(buf, "old line").expect("paired row");
+        let line = buf_line(buf, y);
+        assert!(line.contains("new line"), "one paired row: {line}");
+        if buf[(right.x, y)].symbol() != CURSOR_BAR_INACTIVE {
+            for x in [right.x, right.x + 1] {
+                assert_eq!(buf[(x, y)].bg, palette.diff_del_bg, "x={x}: {line}");
+            }
+            for x in [right.right() - 2, right.right() - 1] {
+                assert_eq!(buf[(x, y)].bg, palette.diff_add_bg, "x={x}: {line}");
+            }
         }
     }
 

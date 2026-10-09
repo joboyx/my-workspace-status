@@ -446,8 +446,8 @@ pub struct PopoverHit {
 }
 
 /// Cells where a press picks a pane row: the recorded full-width `rows`
-/// (flat pad cells included), or the content rect `inner` when no paint
-/// recorded them.
+/// (flat pad cells included), or the content rect `inner` when `rows` is
+/// empty (a hand-built layout, as in tests, that sets only `inner`).
 pub(super) fn row_hit_rect(rows: Rect, inner: Rect) -> Rect {
     if rows.is_empty() {
         inner
@@ -2863,9 +2863,15 @@ impl AppState {
         match self.drag {
             // A flat pad press stays a pending row click until the
             // pointer leaves its column.
+            // A move along the pressed column only (vertical) keeps the
+            // press a row click: its release clicks the pressed row.
             SplitDrag::Pane if self.pad_press.is_some_and(|(c, _)| c == col) => {}
             SplitDrag::Pane => {
-                self.pad_press = None;
+                if self.pad_press.take().is_some() {
+                    // Now a resize, as a boxed divider press: never half of
+                    // a double-click.
+                    self.last_click = None;
+                }
                 self.apply_tree_fraction_from_col(col);
             }
             SplitDrag::Diff => self.apply_diff_fraction_from_col(col),
@@ -2947,11 +2953,16 @@ impl AppState {
         self.text_selection = None;
     }
 
-    /// Mouse release: a flat divider press that never moved clicks the row
-    /// under it ([`Self::pad_press`]); then [`Self::release_mouse`].
-    fn release(&mut self) -> Effect {
+    /// Mouse release: ends any drag; a flat divider press still pending
+    /// ([`Self::pad_press`], with the pane drag it armed) clicks the row
+    /// under it. Then [`Self::release_mouse`].
+    fn release_press(&mut self) -> Effect {
+        let press = self
+            .pad_press
+            .take()
+            .filter(|_| matches!(self.drag, SplitDrag::Pane));
         self.drag = SplitDrag::None;
-        let Some((col, row)) = self.pad_press.take() else {
+        let Some((col, row)) = press else {
             return self.release_mouse();
         };
         let clicked = self.click_row(col, row);
@@ -13480,7 +13491,25 @@ mod tests {
             assert_eq!(app.dispatch(Action::Release), Effect::None, "col {col}");
             assert_eq!(app.cursor, cursor, "col {col}: no row click after a drag");
             assert_eq!(app.drag, SplitDrag::None);
+            assert!(app.last_click.is_none(), "col {col}: a resize is no click");
         }
+    }
+
+    /// A pad press that something else ended (here a right click, which
+    /// cancels the drag) never clicks a row on a later release.
+    #[test]
+    fn flat_divider_pad_press_cancelled_before_release_clicks_nothing() {
+        let mut app = state();
+        app.background = BackgroundMode::Paint;
+        app.layout = split_layout_for(BackgroundMode::Paint);
+        let cursor = app.cursor;
+        let row = app.layout.tree_y + u16::from(cursor == 0);
+        app.focus = FocusPane::Right;
+        app.dispatch(Action::Click { col: 47, row });
+        assert_eq!(app.drag, SplitDrag::Pane);
+        app.dispatch(Action::BackClick);
+        assert_eq!(app.dispatch(Action::Release), Effect::None);
+        assert_eq!(app.cursor, cursor, "no row click");
     }
 
     #[test]

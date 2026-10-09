@@ -411,6 +411,7 @@ impl AppState {
     /// the body.
     pub(super) fn click_file_tab(&mut self, col: u16, row: u16) {
         self.drag = SplitDrag::None;
+        self.pad_press = None;
         let layout = &self.layout;
         let body = Rect::new(
             layout.file_view_x,

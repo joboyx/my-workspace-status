@@ -513,6 +513,7 @@ impl AppState {
     /// inner area.
     fn explorer_click(&mut self, col: u16, row: u16) -> Effect {
         self.drag = SplitDrag::None;
+        self.pad_press = None;
         let at = ratatui::layout::Position::new(col, row);
         let tree = self.layout.explorer_tree;
         if row_hit_rect(self.layout.explorer_tree_rows, tree).contains(at) {

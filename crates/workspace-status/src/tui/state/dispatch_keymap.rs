@@ -141,7 +141,7 @@ impl AppState {
                 if !self.mouse_enabled {
                     Effect::None
                 } else {
-                    self.release()
+                    self.release_press()
                 }
             }
             Action::BackClick => {
