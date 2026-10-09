@@ -487,26 +487,29 @@ impl AppState {
             return Effect::None;
         }
         let at = ratatui::layout::Position::new(col, row);
-        if self.layout.explorer_preview.contains(at) {
+        if self.layout.explorer_preview_rows.contains(at) {
             if horizontal {
                 self.explorer_preview_pan(delta);
                 return Effect::None;
             }
             return self.explorer_preview_move(i64::from(delta));
         }
-        if horizontal || !self.layout.explorer_tree.contains(at) {
+        if horizontal || !self.layout.explorer_tree_rows.contains(at) {
             return Effect::None;
         }
         self.explorer_move(delta as isize)
     }
 
     /// Press in a pane: a tree row takes the cursor (a folder also opens or
-    /// closes); the preview takes focus and, for a file body, the line.
+    /// closes); the preview takes focus and, for a file body, the line. A
+    /// flat pad cell counts as its row; a text selection arms only in the
+    /// inner area.
     fn explorer_click(&mut self, col: u16, row: u16) -> Effect {
         self.drag = SplitDrag::None;
+        self.pad_press = None;
         let at = ratatui::layout::Position::new(col, row);
         let tree = self.layout.explorer_tree;
-        if tree.contains(at) {
+        if self.layout.explorer_tree_rows.contains(at) {
             self.text_selection = TextSelection::arm(tree, col, row);
             self.focus = FocusPane::Left;
             let Some((rows, _)) = self.explorer_rows() else {
@@ -530,7 +533,7 @@ impl AppState {
             let tab_id = tab.id;
             return self.explorer_preview_effect(tab_id);
         }
-        if self.layout.explorer_preview.contains(at) {
+        if self.layout.explorer_preview_rows.contains(at) {
             self.explorer_focus_preview();
             if matches!(
                 self.tabs.active_explorer().map(|tab| &tab.preview),

@@ -65,7 +65,8 @@ unhighlighted. `GraphWidget::flash_rows` paints the fade background on
 the same visible-row indexes, including spacers (a flashing commit
 keeps its spacer). Flash background wins over cursor and search.
 The cursor bar (`▌`) still marks selection when `GraphWidget::cursor_bar`
-is on (default). `cursorBg` paints when the row is not flashing
+is on (default). It paints on the selected commit or stash row and on its
+spacer row; spacers of other rows get no bar. `cursorBg` paints when the row is not flashing
 (`GraphWidget::cursor_style`). When the graph pane is unfocused the TUI
 sets `cursor_bar` false and paints the thinner `▏` marker plus
 `cursorBgInactive` (`GraphWidget::cursor_inactive_style`).

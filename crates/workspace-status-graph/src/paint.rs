@@ -39,9 +39,10 @@ pub struct PaintedLine {
     /// Text after the gutter (no leading node for commit / stash).
     pub label: String,
     /// Index into [`GraphModel::visible_rows`] for this content line.
-    /// Spacers keep the parent row index so click / highlight pair with it.
+    /// Spacers keep the parent row index so click, highlight and the
+    /// cursor bar pair with it.
     pub row_index: Option<usize>,
-    /// True on the selectable node line. Spacers are display-only.
+    /// True on the selectable node line. Spacers are not selectable.
     pub selectable: bool,
     /// Styled runs for the label (subject vs meta vs chips). Empty → treat `label` as one run.
     pub parts: Vec<crate::format::LabelPart>,

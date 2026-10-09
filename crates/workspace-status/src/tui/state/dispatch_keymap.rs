@@ -13,7 +13,6 @@ use super::super::gates::{
 };
 use super::super::graph_focus::GRAPH_FOCUS_NEED_CONTEXT;
 use super::super::ops::{collect_write_files, op_is_kind_noop, op_kind_noop_reason, Op};
-use super::super::split::SplitDrag;
 use super::super::status::StatusMessage;
 use super::super::tabs::{
     ComparePickerKind, NOT_ON_WORKTREE_COMPARE, ONLY_WORKSPACE_TAB_OPEN, WORKSPACE_TAB_CANNOT_CLOSE,
@@ -142,8 +141,7 @@ impl AppState {
                 if !self.mouse_enabled {
                     Effect::None
                 } else {
-                    self.drag = SplitDrag::None;
-                    self.release_mouse()
+                    self.release_press()
                 }
             }
             Action::BackClick => {

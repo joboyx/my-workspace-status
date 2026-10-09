@@ -406,9 +406,12 @@ impl AppState {
     }
 
     /// Press in the file body (a file tab or an Explorer file preview):
-    /// focus the clicked line and arm a text selection.
+    /// focus the clicked line and arm a text selection. A press on a flat
+    /// pad cell beside the body picks its line too; the selection keeps to
+    /// the body.
     pub(super) fn click_file_tab(&mut self, col: u16, row: u16) {
         self.drag = SplitDrag::None;
+        self.pad_press = None;
         let layout = &self.layout;
         let body = Rect::new(
             layout.file_view_x,
@@ -416,11 +419,12 @@ impl AppState {
             layout.file_view_width,
             layout.file_view_height,
         );
+        let rows = layout.file_view_rows;
         let line = row
             .checked_sub(layout.file_view_y)
             .and_then(|offset| layout.file_view_row_lines.get(usize::from(offset)))
             .copied()
-            .filter(|_| col >= body.x && col < body.right());
+            .filter(|_| col >= rows.x && col < rows.right());
         self.text_selection = TextSelection::arm(body, col, row);
         if let Some(line) = line {
             self.set_file_cursor(line);
@@ -677,6 +681,7 @@ mod tests {
         open_loaded(&mut app, "src/main.rs", &refs);
         app.layout.file_view_height = 10;
         app.layout.file_view_width = 40;
+        app.layout.file_view_rows = Rect::new(0, 0, 40, 10);
 
         app.dispatch(Action::Move(3));
         assert_eq!(cursor(&app), 3);
@@ -991,6 +996,7 @@ mod tests {
         app.layout.file_view_y = 2;
         app.layout.file_view_width = 30;
         app.layout.file_view_height = 5;
+        app.layout.file_view_rows = Rect::new(0, 2, 32, 5);
         app.layout.file_view_row_lines = vec![0, 1, 1, 2];
         app.dispatch(Action::Click { col: 5, row: 4 });
         assert_eq!(cursor(&app), 1);
