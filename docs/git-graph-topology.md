@@ -112,7 +112,7 @@ Cursor / search / page / `j`/`k` / click land only on selectable rows
 (`uncommitted` | `stash` | `commit`). Spacers remain in the painted list for
 display and viewport scrolling, but `j`/`k` and match stepping skip them.
 Focusing a commit or stash highlights the full 2-row pair (selectable + its
-spacer); the cursor bar stays on the selectable row.
+spacer); the cursor bar paints on both rows of the pair (`▌` focused, `▏` unfocused).
 
 ## Stash rows — visual grammar
 
