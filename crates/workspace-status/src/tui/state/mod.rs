@@ -14578,10 +14578,10 @@ mod tests {
         app.dispatch(Action::CycleTheme);
         assert_eq!(app.theme, ThemeId::TokyoNight);
         assert_eq!(
-            theme_id_from(Some("gruvbox-dark"), None),
+            theme_id_from(Some("gruvbox-dark"), None, None),
             ThemeId::GruvboxDark
         );
-        assert_eq!(theme_id_from(Some("nope"), None), ThemeId::Slate);
+        assert_eq!(theme_id_from(Some("nope"), None, None), ThemeId::Slate);
     }
 
     fn tree_repo() -> RepoSnapshot {
@@ -14714,10 +14714,13 @@ mod tests {
     fn launch_with_no_env_and_no_config_paints_background() {
         let viewed = default_viewed_path();
         let comments = viewed.with_extension("comments.json");
+        let theme = viewed.with_extension("theme.json");
         let (viewed_s, comments_s) = (viewed.display().to_string(), comments.display().to_string());
+        let theme_s = theme.display().to_string();
         let settings = Settings::resolve(&Default::default(), |key| match key {
             "WS_STATUS_VIEWED_STORE" => Some(viewed_s.clone()),
             "WS_STATUS_COMMENT_STORE" => Some(comments_s.clone()),
+            "WS_STATUS_THEME_STORE" => Some(theme_s.clone()),
             _ => None,
         });
         let snapshot = build_workspace_snapshot(&[tree_repo()], &[], false, &[]);

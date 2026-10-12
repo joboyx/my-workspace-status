@@ -44,6 +44,7 @@ mod status;
 pub(crate) mod syntax;
 mod tabs;
 pub(crate) mod theme;
+pub(crate) mod theme_store;
 mod tree;
 pub(crate) mod tty;
 pub(crate) mod viewed;
