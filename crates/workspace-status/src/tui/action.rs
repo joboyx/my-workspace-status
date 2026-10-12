@@ -98,12 +98,12 @@ pub enum Action {
     ToggleDiffMode,
     /// Toggle soft word-wrap on file diffs (`\`).
     ///
-    /// Session-only, like theme and mouse. Wrap uses display columns.
+    /// Session-only, like mouse. Wrap uses display columns.
     /// Horizontal pan is a no-op while wrap is on.
     ToggleDiffWrap,
     /// Toggle expand of the selected commit / stash message (`M`).
     ///
-    /// Session-only, like wrap and theme. Graph list rows stay one line.
+    /// Session-only, like wrap and mouse. Graph list rows stay one line.
     /// The graph selection footer and the commit-files footer wrap the
     /// full subject plus body when this is on.
     ToggleCommitMsgExpand,

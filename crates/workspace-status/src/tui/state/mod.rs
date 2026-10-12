@@ -14573,7 +14573,7 @@ mod tests {
     }
 
     #[test]
-    fn theme_cycle_wraps_and_stays_in_session() {
+    fn theme_cycle_wraps_through_every_theme() {
         let mut app = state();
         app.theme = ThemeId::TokyoNight;
         assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
