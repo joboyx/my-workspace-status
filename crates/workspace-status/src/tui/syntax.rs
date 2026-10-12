@@ -1,4 +1,4 @@
-//! File-aware syntax highlighting for painted diff cells and file tabs.
+//! File-aware syntax highlighting for painted diff cells and file views.
 //!
 //! Language comes from the file path (basename, then extension), then an
 //! optional first-line shebang. Unknown paths use Plain Text.

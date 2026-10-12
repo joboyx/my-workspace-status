@@ -120,13 +120,13 @@ pub enum Action {
     /// (repo, worktree, folder, or file row): open or focus that checkout's
     /// Explorer tab and reveal the row (also the Open in Explorer palette
     /// row). Anywhere else (a workspace or group row, another pane, a
-    /// compare or file tab) it refuses with a warning on the status line;
+    /// compare tab) it refuses with a warning on the status line;
     /// the palette row is disabled there and on an Explorer tab.
     ExplorerReveal,
     /// Toggle the current-line blame annotation (`B`).
     ///
     /// Session-only, like wrap. `viewDefaults.lineBlame` sets the launch
-    /// value. Runs on file tabs too.
+    /// value. Runs on Explorer tabs too.
     ToggleLineBlame,
     /// Mouse wheel. Positive `delta` is down / right.
     ///
@@ -336,6 +336,12 @@ pub enum Action {
     PreviousTab,
     /// Absolute tab index. `1` is Workspace.
     JumpToTab(u8),
+    /// `[` on an Explorer tab: activate the previous inner file tab
+    /// (wrapping) and select its file in the tree.
+    PreviousFileTab,
+    /// `]` on an Explorer tab: activate the next inner file tab (wrapping)
+    /// and select its file in the tree.
+    NextFileTab,
     /**
      * Put the focused line view's cursor on this 1-based line (`:<n>` in
      * Quick Open commands mode).
@@ -485,8 +491,9 @@ pub enum Effect {
         repo: String,
         /// Path relative to the checkout.
         path: String,
-        /// 1-based line to open at, when the editor takes one. A file tab
-        /// passes its cursor line; every other producer passes `None`.
+        /// 1-based line to open at, when the editor takes one. An Explorer
+        /// file view and a search-in-files hit pass their line; every other
+        /// producer passes `None`.
         line: Option<u32>,
     },
     /// Open LEFT/RIGHT in the configured external diff tool (`E`).
@@ -640,16 +647,6 @@ pub enum Effect {
         start: usize,
         room: usize,
     },
-    /// Read one file tab's body on the blocking pool. `gen` is the tab's
-    /// load generation; a stale result is dropped.
-    LoadFileTab {
-        tab_id: u64,
-        gen: u64,
-        /// Checkout path (snapshot `repo`).
-        repo: String,
-        /// Path relative to the checkout.
-        path: String,
-    },
     /// List one Explorer folder on the blocking pool
     /// ([`super::explorer::list_dir`]). `req` is the folder's newest
     /// request id on the tab; a stale result is dropped.
@@ -664,10 +661,11 @@ pub enum Effect {
         /// asked.
         parent_ignored: bool,
     },
-    /// Load the Explorer preview of one file on the blocking pool: the
-    /// worktree diff of a changed file (`change` set, the Workspace diff
-    /// pane's load) or the body of a clean one. `gen` is the tab's preview
-    /// generation; a stale result is dropped.
+    /// Load one Explorer inner file tab on the blocking pool: the
+    /// whole-file worktree diff of a changed file (`change` set, the
+    /// Workspace diff pane's load at full context) or the body of a clean
+    /// one. `gen` is the inner tab's load generation; a stale result is
+    /// dropped.
     LoadExplorerPreview {
         tab_id: u64,
         gen: u64,
@@ -677,8 +675,6 @@ pub enum Effect {
         path: String,
         /// Snapshot change of a changed file; `None` reads the file.
         change: Option<crate::snapshot::FileChange>,
-        /// Diff context (`-U`) of a changed file, as the Workspace pane.
-        context: Option<u32>,
     },
     /// Look up the PR of `branch` on a worker, then open it in the browser.
     ///

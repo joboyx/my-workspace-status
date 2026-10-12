@@ -509,7 +509,8 @@ impl PtySession {
             .and_then(|cell| cell.contents().chars().next())
     }
 
-    /// Glyph, 24-bit colours, and bold / underline of one vt100 cell.
+    /// Glyph, 24-bit colours, and bold / italic / underline of one vt100
+    /// cell.
     ///
     /// Paint-mode claims read pane fills and the title-row rule colours per
     /// cell.
@@ -522,6 +523,7 @@ impl PtySession {
             fg: rgb_of(cell.fgcolor()),
             bg: rgb_of(cell.bgcolor()),
             bold: cell.bold(),
+            italic: cell.italic(),
             underline: cell.underline(),
         })
     }
@@ -1191,6 +1193,7 @@ pub struct CellPaint {
     pub fg: Option<(u8, u8, u8)>,
     pub bg: Option<(u8, u8, u8)>,
     pub bold: bool,
+    pub italic: bool,
     pub underline: bool,
 }
 

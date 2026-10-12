@@ -126,12 +126,11 @@ impl AppState {
     /// Checkout and branch `gx` opens a PR for, or `None`.
     ///
     /// The focused tree repo / checkout row with a branch, or the focused
-    /// graph worktree row with a branch. A file, Explorer, or compare tab,
-    /// commit files,
-    /// a diff, a commit, stash, dir, or file row, a repo that groups several
-    /// checkouts, and a detached HEAD have no target.
+    /// graph worktree row with a branch. An Explorer or compare tab, commit
+    /// files, a diff, a commit, stash, dir, or file row, a repo that groups
+    /// several checkouts, and a detached HEAD have no target.
     pub(super) fn pr_target_for_focus(&self) -> Option<(PathBuf, String)> {
-        if self.is_file_tab() || self.is_explorer_tab() || self.is_compare_tab() {
+        if self.is_explorer_tab() || self.is_compare_tab() {
             return None;
         }
         match self.list_focus_target() {
@@ -686,12 +685,12 @@ mod tests {
     }
 
     #[test]
-    fn gx_on_a_file_tab_says_no_pr_for_this_row() {
+    fn gx_on_an_explorer_file_says_no_pr_for_this_row() {
         let mut app = app_with(&[repo("app", "feature")], &[]);
         focus(&mut app, "repo:app");
-        let _ = app.open_file_tab("app".into(), "src/lib.rs".into());
-        assert!(app.is_file_tab());
-        assert_no_pr_for_row(&mut app, "file tab");
+        app.open_loaded_inner_file("app", "README.md", &["# app"]);
+        assert!(app.is_explorer_tab());
+        assert_no_pr_for_row(&mut app, "Explorer file");
     }
 
     #[test]

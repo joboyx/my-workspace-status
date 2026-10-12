@@ -650,6 +650,42 @@ pub fn build_diff_rows(content: &DiffContent, mode: DiffMode) -> Vec<DiffRow> {
         .collect()
 }
 
+/// Painted row of `content` in `mode` (a diff cursor index) that shows
+/// 1-based line `new_line` of the new side: a context or added line of the
+/// unstaged (or NEW) section first, else of the staged section. `None`
+/// when no row shows it.
+pub fn row_for_new_line(content: &DiffContent, mode: DiffMode, new_line: u32) -> Option<usize> {
+    let rows = annotated_diff_rows(content, mode);
+    let staged = parse_unified_diff(&content.staged);
+    let unstaged = parse_unified_diff(&content.unstaged);
+    let find = |in_staged: bool| {
+        rows.iter().position(|(_, bind)| {
+            let RowBind::Line {
+                section,
+                hunk,
+                parsed,
+            } = bind
+            else {
+                return false;
+            };
+            if (*section == DiffSection::Staged) != in_staged {
+                return false;
+            }
+            let hunks = if in_staged { &staged } else { &unstaged };
+            hunks.get(*hunk).is_some_and(|hunk| {
+                parsed
+                    .iter()
+                    .filter_map(|&i| hunk.lines.get(i))
+                    .any(|line| {
+                        matches!(line.kind, DiffCellKind::Add | DiffCellKind::Ctx)
+                            && line.new_no == Some(new_line)
+                    })
+            })
+        })
+    };
+    find(false).or_else(|| find(true))
+}
+
 /// The source line behind one painted diff row: its section, kind, and
 /// line numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1670,6 +1706,39 @@ index 1111111..2222222 100644
         assert_eq!(
             row_line_ref(&committed, DiffMode::Inline, 2),
             line_ref(DiffSection::Committed, DiffCellKind::Add, None, Some(1))
+        );
+    }
+
+    #[test]
+    fn row_for_new_line_prefers_the_unstaged_section() {
+        let content = DiffContent {
+            staged: "@@ -1,2 +1,2 @@\n a\n-b\n+B\n".into(),
+            unstaged: "@@ -1,2 +1,3 @@\n a\n+x\n B\n".into(),
+            is_new: false,
+            is_committed: false,
+            vs_worktree: false,
+            error: None,
+        };
+        // STAGED 0, hunk 1, a 2, -b 3, +B 4; UNSTAGED 5, hunk 6, a 7, +x 8,
+        // B 9.
+        let row = |line| row_for_new_line(&content, DiffMode::Inline, line);
+        assert_eq!(row(1), Some(7), "unstaged first");
+        assert_eq!(row(2), Some(8), "an added line");
+        assert_eq!(row(3), Some(9));
+        assert_eq!(row(9), None);
+        let staged_only = DiffContent {
+            unstaged: String::new(),
+            ..content
+        };
+        assert_eq!(
+            row_for_new_line(&staged_only, DiffMode::Inline, 2),
+            Some(4),
+            "staged when the unstaged section has no such line"
+        );
+        assert_eq!(
+            row_for_new_line(&staged_only, DiffMode::SideBySide, 2),
+            Some(3),
+            "a split row pairs -b with +B"
         );
     }
 

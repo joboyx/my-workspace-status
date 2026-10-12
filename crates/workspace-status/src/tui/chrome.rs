@@ -553,8 +553,6 @@ pub fn dialog_width(area: Rect, kind: DialogKind) -> u16 {
 pub fn help_tab(state: &AppState) -> HelpTab {
     if state.is_explorer_tab() {
         HelpTab::Explorer
-    } else if state.is_file_tab() {
-        HelpTab::File
     } else if state.is_compare_tab() {
         HelpTab::Compare
     } else {
@@ -1068,18 +1066,21 @@ pub fn hint_row_kind(state: &AppState) -> HintRowKind {
 
 /// Display segments for the breadcrumb (workspace + drill frames).
 ///
-/// A file tab reads `workspace › <checkout leaf> › <rel>`; an Explorer tab
-/// `workspace › <checkout leaf> › <cursor row rel>` (as last painted).
+/// An Explorer tab reads `workspace › <checkout leaf> › <rel>`: with the
+/// right pane focused, the active inner file; with the tree focused, the
+/// tree cursor row as last painted (a folder row names the folder), else
+/// the active inner file.
 pub fn breadcrumb_segments(state: &AppState) -> Vec<String> {
     let mut out = vec![workspace_label(state)];
     if let Some(tab) = state.tabs.active_explorer() {
         out.push(checkout_leaf(&tab.checkout));
-        out.extend(tab.painted_rel.clone());
-        return out;
-    }
-    if let Some(tab) = state.tabs.active_file() {
-        out.push(checkout_leaf(&tab.checkout));
-        out.push(tab.rel.clone());
+        let inner = tab.active_inner().map(|inner| inner.rel.clone());
+        let rel = if state.focus == FocusPane::Right {
+            inner.or_else(|| tab.painted_rel.clone())
+        } else {
+            tab.painted_rel.clone().or(inner)
+        };
+        out.extend(rel);
         return out;
     }
     let mut seen_repo: Option<String> = None;
@@ -1219,12 +1220,7 @@ pub fn breadcrumb_line(state: &AppState, width: u16) -> Line<'static> {
     let op = breadcrumb_op_status(state);
     let (crumb_max, op_max) = allocate_chrome_row(width, visible_width(&op));
     let segments = breadcrumb_segments(state);
-    // A file tab is one pane: no right-focus mark on the path.
-    let focus = if state.is_file_tab() {
-        FocusPane::Left
-    } else {
-        state.focus
-    };
+    let focus = state.focus;
     let mut spans = Vec::new();
     let mut used = 0usize;
     for (i, seg) in segments.iter().enumerate() {
@@ -1298,9 +1294,6 @@ pub fn status_line(state: &AppState, width: u16) -> Line<'static> {
     if state.search_mode {
         return search_typing_line(state, palette, pills.filter);
     }
-    if state.is_file_tab() {
-        return file_tab_status_line(state, palette, pills, surface, width);
-    }
     if state.is_explorer_tab() {
         return viewer_status_line(
             state,
@@ -1320,45 +1313,16 @@ pub fn explorer_tab_hint_segments() -> Vec<HintSegment> {
     vec![
         hint("l h", "open/close", false),
         hint("-", "parent", false),
+        hint("[ ]", "file tabs", false),
         hint("e", "edit", false),
         hint("r", "reload", false),
         hint("F", "go to file", false),
     ]
 }
 
-/// Hint chips on a file tab, in cut order (the last ones truncate first).
-pub fn file_tab_hint_segments() -> Vec<HintSegment> {
-    vec![
-        hint("e", "edit", false),
-        hint("/", "search", false),
-        hint("\\", "wrap", false),
-        hint("'", "copy ref", false),
-        hint("r", "reload", false),
-        hint("F", "go to file", false),
-    ]
-}
-
-/// Idle row on a file tab: `wrap` and armed-search pills, `? help`, the
-/// viewer hints, then the pinned `q quit`.
-fn file_tab_status_line(
-    state: &AppState,
-    palette: Palette,
-    pills: Pills,
-    surface: Color,
-    width: u16,
-) -> Line<'static> {
-    viewer_status_line(
-        state,
-        palette,
-        pills,
-        surface,
-        width,
-        &file_tab_hint_segments(),
-    )
-}
-
-/// Idle row on a file or Explorer tab: `wrap` and armed-search pills,
-/// `? help`, `hints`, then the pinned `q quit`.
+/// Idle row on an Explorer tab: `wrap` and armed-search pills,
+/// `? help` (`z…` while a `zz` is pending), `hints`, then the pinned
+/// `q quit`.
 fn viewer_status_line(
     state: &AppState,
     palette: Palette,
@@ -1374,8 +1338,9 @@ fn viewer_status_line(
     if let Some(label) = search_pill_label(state) {
         spans.push(pill_span(&label, pills.filter));
     }
+    let message = if z_pending(state) { " z…" } else { " ? help" };
     spans.push(Span::styled(
-        " ? help".to_string(),
+        message.to_string(),
         Style::default().fg(palette.file),
     ));
     push_hint_pieces(&mut spans, hints, palette, surface, width);
@@ -2395,21 +2360,38 @@ mod tests {
     }
 
     #[test]
-    fn file_tab_chrome_names_the_file_and_viewer_keys() {
+    fn explorer_status_line_shows_the_tree_search_and_a_pending_z() {
         let mut app = state();
-        app.focus = FocusPane::Right;
-        app.open_file_tab("app".into(), "src/main.rs".into());
+        app.open_loaded_inner_file("app", "src/main.rs", &["fn main() {}"]);
+        app.diff_wrap = false;
+        app.search_target = crate::tui::search::SearchPane::ExplorerTree;
+        app.search_active = true;
+        app.search_query = "main".into();
+        let row = line_plain(&status_line(&app, 160));
+        assert!(row.contains("/main") && row.contains("· tree"), "{row}");
+        app.search_active = false;
+        app.z_pending_at = Some(std::time::Instant::now());
+        let row = line_plain(&status_line(&app, 160));
+        assert!(row.starts_with(" z…"), "{row}");
+    }
+
+    #[test]
+    fn explorer_file_chrome_names_the_file_and_explorer_keys() {
+        let mut app = state();
+        app.open_loaded_inner_file("app", "src/main.rs", &["fn main() {}"]);
+        assert_eq!(app.focus, FocusPane::Left, "an open keeps the tree focused");
+        // The paint records the tree cursor row, which follows the open.
+        app.tabs.active_explorer_mut().unwrap().painted_rel = Some("src/main.rs".into());
         assert_eq!(
             breadcrumb_segments(&app),
             ["workspace", "app", "src/main.rs"]
         );
         assert_eq!(
             line_plain(&breadcrumb_line(&app, 80)),
-            "workspace › app › src/main.rs",
-            "no right-focus mark on a file tab"
+            "workspace › app › src/main.rs"
         );
-        assert_eq!(help_tab(&app), HelpTab::File);
-        // A file tab opens wrapped: it shares the diff wrap flag (on by default).
+        assert_eq!(help_tab(&app), HelpTab::Explorer);
+        // The file view shares the diff wrap flag (on by default).
         assert!(app.diff_wrap);
         let row = line_plain(&status_line(&app, 160));
         assert!(
@@ -2420,10 +2402,10 @@ mod tests {
         let row = line_plain(&status_line(&app, 160));
         assert!(row.starts_with(" ? help"), "no tree / diff pill: {row}");
         for chip in [
+            "open/close",
+            "parent",
+            "[ ]   file tabs",
             "edit",
-            "search",
-            "wrap",
-            "copy ref",
             "reload",
             "go to file",
             "quit",

@@ -38,11 +38,11 @@ This is the glance I wanted instead. Left pane is the workspace tree (repos, wor
 
 ![Show ignored](docs/images/07-show-ignored.gif)
 
-**Help** — `?` opens MOVE / GIT / VIEW. On a compare tab, a COMPARE column replaces GIT: the keys that work on the compare diff and the ones that need the Workspace tab.
+**Help** — `?` opens MOVE / GIT / VIEW. On a compare or Explorer tab, a COMPARE or EXPLORER column replaces GIT: the keys that work there and the ones that need the Workspace tab.
 
 ![Help overlay](docs/images/08-help.gif)
 
-**Quick Open** — `Ctrl-p` or `F` goes to a file: fuzzy match in the focused repo or worktree (all repos on the workspace row), Enter opens it in a read-only tab. `:` lists commands (`>` already typed; Backspace over it returns to files): type a name or an alias (`compare`, `checkout`), or a number (`:42`) to go to that line. Every letter types; disabled rows say why. `Ctrl-f` (or `#` first in Quick Open) searches the text of those files instead; Enter opens the hit line in a file tab, where `n` / `N` step the matches.
+**Quick Open** — `Ctrl-p` or `F` goes to a file: fuzzy match in the focused repo or worktree (all repos on the workspace row), Enter opens it in that checkout's Explorer tab: a file tree with the open files as tabs beside it (`-` on a tree row opens it too). `:` lists commands (`>` already typed; Backspace over it returns to files): type a name or an alias (`compare`, `checkout`), or a number (`:42`) to go to that line. Every letter types; disabled rows say why. `Ctrl-f` (or `#` first in Quick Open) searches the text of those files instead; Enter opens the hit line there, where `n` / `N` step the matches.
 
 ![Command palette](docs/images/09-palette.gif)
 

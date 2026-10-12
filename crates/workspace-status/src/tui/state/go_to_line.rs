@@ -2,11 +2,11 @@
 //!
 //! [`super::super::action::Action::GoToLine`] moves the cursor of the
 //! focused line view with the same cursor and scroll paths `gg` / `G` use:
-//! a file body (file tab, or a clean file in the Explorer preview) moves
+//! a file body (a clean file in the active Explorer inner file tab) moves
 //! its line cursor; a file diff
-//! (Workspace diff pane, compare tab, commit or stash diff, or a changed
-//! file in the Explorer preview) moves its diff cursor to the row of that
-//! line ([`row_for_line`]). A `V` highlight keeps its anchor, so the jump
+//! (Workspace diff pane, compare tab, commit or stash diff, or the
+//! whole-file diff of a changed Explorer inner file) moves its diff cursor
+//! to the row of that line ([`row_for_line`]). A `V` highlight keeps its anchor, so the jump
 //! moves the range end like `G` does. [`AppState::go_to_line_refusal`] is
 //! the one gate: the palette row and the dispatch both read it.
 
@@ -18,7 +18,8 @@ use super::super::tabs::ExplorerPreview;
 use super::{AppState, FocusPane};
 
 /// Go-to-line refusal on a view that is a line view but shows no line yet
-/// (loading, empty, binary, or failed body or diff; an Explorer folder row).
+/// (loading, empty, binary, or failed body or diff; an Explorer tab with no
+/// inner file tab).
 pub(crate) const NO_LINES_TO_GO_TO: &str = "no lines to go to";
 
 /// Which cursor a go to line moves.
@@ -32,8 +33,8 @@ enum LineView {
 impl AppState {
     /// Why the go-to-line row cannot run here, or `None` when it can.
     ///
-    /// A file tab or an Explorer tab needs a body or diff with lines (the
-    /// Explorer tree jumps in its preview). Elsewhere the file diff must
+    /// An Explorer tab needs an active inner file tab whose body or diff
+    /// has lines (from the tree the jump lands in that inner file). Elsewhere the file diff must
     /// have focus: the tree, graph, commit-file, and compare file lists,
     /// and a folder summary refuse with [`FOCUS_A_FILE_DIFF`]; a diff with
     /// no numbered line refuses with [`NO_LINES_TO_GO_TO`].
@@ -53,7 +54,7 @@ impl AppState {
             }
         };
         if self.is_explorer_tab() {
-            // From the Explorer tree the jump lands in the preview.
+            // From the Explorer tree the jump lands in the active inner file.
             self.focus = FocusPane::Right;
         }
         let line = line.max(1);
@@ -74,14 +75,11 @@ impl AppState {
 
     /// The line view a go to line moves, or why there is none.
     fn line_view(&self) -> Result<LineView, &'static str> {
-        if self.is_file_tab() {
-            return self.file_body_has_lines().ok_or(NO_LINES_TO_GO_TO);
-        }
         if let Some(tab) = self.tabs.active_explorer() {
-            return match &tab.preview {
-                ExplorerPreview::File(_) => self.file_body_has_lines(),
-                ExplorerPreview::Diff { .. } => self.diff_has_lines(),
-                ExplorerPreview::None => None,
+            return match tab.active_inner().map(|inner| &inner.view) {
+                Some(ExplorerPreview::File(_)) => self.file_body_has_lines(),
+                Some(ExplorerPreview::Diff { .. }) => self.diff_has_lines(),
+                None => None,
             }
             .ok_or(NO_LINES_TO_GO_TO);
         }

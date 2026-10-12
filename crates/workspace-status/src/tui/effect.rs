@@ -210,12 +210,6 @@ pub(crate) enum JobOutcome {
         gen: u64,
         body: FileRead,
     },
-    /// File tab body for load generation `gen`.
-    FileTab {
-        tab_id: u64,
-        gen: u64,
-        body: FileRead,
-    },
     /// One Explorer folder listing for request `req`. `Err` is the read
     /// error; the folder then lists empty.
     ExplorerDir {
@@ -295,17 +289,7 @@ enum ExplorerJob {
         repo: String,
         path: String,
         change: Option<crate::snapshot::FileChange>,
-        context: Option<u32>,
     },
-}
-
-impl ExplorerJob {
-    /// Explorer tab the job loads for.
-    fn tab_id(&self) -> u64 {
-        match self {
-            Self::Dir { tab_id, .. } | Self::Preview { tab_id, .. } => *tab_id,
-        }
-    }
 }
 
 /// Run one Explorer job on a worker. Blocking: folder read plus one
@@ -336,11 +320,14 @@ fn run_explorer_job(cwd: &Path, job: ExplorerJob) -> JobOutcome {
             repo,
             path,
             change,
-            context,
         } => {
+            // The Explorer always shows the whole file of a changed file.
             let body = match change {
                 Some(change) => ExplorerPreviewBody::Diff(super::diff::load_file_diff(
-                    cwd, &repo, &change, context,
+                    cwd,
+                    &repo,
+                    &change,
+                    Some(crate::git::FULL_DIFF_CONTEXT_LINES),
                 )),
                 None => ExplorerPreviewBody::File(read_text_file(
                     &cwd.join(&repo).join(&path),
@@ -741,12 +728,12 @@ pub(crate) struct Interpreter {
     file_index_job: Option<(u64, Vec<IndexRoot>)>,
     /// Latest Quick Open score request; a newer one replaces it before spawn.
     file_score_job: Option<(u64, Arc<FileIndex>, String)>,
-    /// Queued file tab reads: tab id, load generation, checkout, path.
-    file_tab_jobs: VecDeque<(u64, u64, String, String)>,
     /// Queued Explorer folder listings, one per enqueue.
     explorer_jobs: VecDeque<ExplorerJob>,
-    /// Latest Explorer preview load per tab (latest-only: a newer pick on
-    /// the same tab replaces a queued one, so a held `j` queues one read).
+    /// Queued Explorer inner-tab loads, at most one per `(tab, path)`. A
+    /// new load first drops each queued one whose generation no inner tab
+    /// holds any more, so a held `j` (each move replacing the preview tab)
+    /// queues one read.
     explorer_previews: Vec<ExplorerJob>,
     /// Latest search-in-files index request; a newer one replaces it
     /// before spawn.
@@ -830,7 +817,6 @@ impl Interpreter {
             pending_diff_launch: None,
             file_index_job: None,
             file_score_job: None,
-            file_tab_jobs: VecDeque::new(),
             explorer_jobs: VecDeque::new(),
             explorer_previews: Vec::new(),
             search_index_job: None,
@@ -1446,15 +1432,6 @@ impl Interpreter {
                 });
                 self.sched.enqueue_user(UserTag::SearchFiles);
             }
-            Effect::LoadFileTab {
-                tab_id,
-                gen,
-                repo,
-                path,
-            } => {
-                self.file_tab_jobs.push_back((tab_id, gen, repo, path));
-                self.sched.enqueue_user(UserTag::QuickOpen);
-            }
             Effect::LoadExplorerDir {
                 tab_id,
                 req,
@@ -1477,20 +1454,33 @@ impl Interpreter {
                 repo,
                 path,
                 change,
-                context,
             } => {
+                // Drop queued loads no inner tab waits for any more (a
+                // replaced preview, a closed inner tab or Explorer tab), so
+                // a held `j` reads only the last file while a pinned tab's
+                // queued load still runs.
+                self.explorer_previews.retain(|queued| match queued {
+                    ExplorerJob::Preview { tab_id, gen, .. } => state
+                        .tabs
+                        .get_explorer_id(*tab_id)
+                        .is_some_and(|tab| tab.has_gen(*gen)),
+                    ExplorerJob::Dir { .. } => true,
+                });
+                let same_file = |queued: &ExplorerJob| {
+                    matches!(queued, ExplorerJob::Preview { tab_id: id, path: queued_path, .. }
+                        if *id == tab_id && *queued_path == path)
+                };
                 let job = ExplorerJob::Preview {
                     tab_id,
                     gen,
                     repo,
-                    path,
+                    path: path.clone(),
                     change,
-                    context,
                 };
                 if let Some(slot) = self
                     .explorer_previews
                     .iter_mut()
-                    .find(|queued| queued.tab_id() == tab_id)
+                    .find(|queued| same_file(queued))
                 {
                     *slot = job;
                 } else {
@@ -1790,7 +1780,7 @@ impl Interpreter {
                 if let Some(reload) = state.worktree_compare_reload(&path) {
                     self.schedule(state, opts, reload, &Action::None);
                 }
-                if let Some(reload) = state.file_tab_live_reload(&path) {
+                if let Some(reload) = state.explorer_live_reload(&path) {
                     self.schedule(state, opts, reload, &Action::None);
                 }
                 if let Some(relist) = state.explorer_status_relist(&path) {
@@ -2119,11 +2109,6 @@ impl Interpreter {
             }
             JobOutcome::SearchPreview { gen, body } => {
                 if state.apply_search_preview(gen, body) {
-                    self.mark();
-                }
-            }
-            JobOutcome::FileTab { tab_id, gen, body } => {
-                if state.apply_file_tab(tab_id, gen, body) {
                     self.mark();
                 }
             }
@@ -3027,20 +3012,9 @@ impl Interpreter {
                 self.sched.note_job_finished(id);
             }
             UserTag::QuickOpen => {
-                // Reads are queued one per enqueue, so draining them first
-                // never strands one behind the latest-only index / score slots.
-                if let Some((tab_id, gen, repo, path)) = self.file_tab_jobs.pop_front() {
-                    let file = opts.cwd.join(repo).join(path);
-                    spawn(
-                        id,
-                        Box::new(move || JobOutcome::FileTab {
-                            tab_id,
-                            gen,
-                            body: read_text_file(&file, MAX_FILE_BYTES),
-                        }),
-                    );
-                    return;
-                }
+                // Explorer loads are queued one per enqueue, so draining them
+                // first never strands one behind the latest-only index /
+                // score slots.
                 let job = self.explorer_jobs.pop_front().or_else(|| {
                     (!self.explorer_previews.is_empty()).then(|| self.explorer_previews.remove(0))
                 });
@@ -6256,52 +6230,199 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// Explorer previews are latest-only per tab: a held `j` that picks two
-    /// files before a worker is free reads only the last one. Folder
-    /// listings stay one job each.
-    #[test]
-    fn explorer_preview_is_latest_only_per_tab() {
-        let mut state = fixture_state();
-        let mut interp = Interpreter::with_cap(4);
-        let preview = |tab_id: u64, gen: u64, path: &str| Effect::LoadExplorerPreview {
+    /// Open (or focus) the Explorer tab of `checkout` and make `rel` its
+    /// active inner tab: pinned, or the preview tab (replaced in place, as
+    /// a tree move does). Returns the tab id and the load generation.
+    fn explorer_inner(
+        state: &mut AppState,
+        checkout: &str,
+        rel: &str,
+        changed: bool,
+        pinned: bool,
+    ) -> (u64, u64) {
+        state.tabs.open_or_focus_explorer(checkout.into());
+        let tab = state.tabs.active_explorer_mut().expect("explorer tab");
+        let inner = tab.new_inner(rel, changed, pinned);
+        let gen = inner.gen;
+        let index = match tab.preview_index().filter(|_| !pinned) {
+            Some(index) => {
+                tab.files[index] = inner;
+                index
+            }
+            None => {
+                tab.files.push(inner);
+                tab.files.len() - 1
+            }
+        };
+        tab.active_file = Some(index);
+        (tab.id, gen)
+    }
+
+    fn explorer_load(tab_id: u64, gen: u64, path: &str) -> Effect {
+        Effect::LoadExplorerPreview {
             tab_id,
             gen,
             repo: "app".into(),
             path: path.into(),
             change: None,
-            context: None,
-        };
-        let dir = |req: u64| Effect::LoadExplorerDir {
-            tab_id: 1,
+        }
+    }
+
+    /// Generations of the queued Explorer file loads, by tab, after
+    /// running every ready job.
+    fn run_explorer_loads(interp: &mut Interpreter, state: &mut AppState) -> Vec<(u64, u64)> {
+        let mut previews = Vec::new();
+        for (_, work) in capture_jobs(interp, state) {
+            match work() {
+                JobOutcome::ExplorerPreview { tab_id, gen, .. } => previews.push((tab_id, gen)),
+                JobOutcome::ExplorerDir { .. } => {}
+                _ => panic!("unexpected job"),
+            }
+        }
+        previews.sort_unstable();
+        previews
+    }
+
+    /// A held `j` that replaces the preview tab twice before a worker is
+    /// free reads only the last file: the first load's generation is no
+    /// inner tab's any more. Each tab keeps its own load; folder listings
+    /// stay one job each.
+    #[test]
+    fn explorer_preview_queue_keeps_only_live_loads() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        let dir = |tab_id: u64, req: u64| Effect::LoadExplorerDir {
+            tab_id,
             req,
             repo: "app".into(),
             rel_dir: String::new(),
             parent_ignored: false,
         };
-        for effect in [
-            preview(1, 1, "a.txt"),
-            preview(1, 2, "b.txt"),
-            dir(1),
-            dir(2),
-            preview(2, 1, "c.txt"),
-        ] {
-            schedule_effect(&mut interp, &mut state, effect, &Action::None);
-        }
-        assert_eq!(interp.explorer_previews.len(), 2, "one slot per tab");
+        let (app, a) = explorer_inner(&mut state, "app", "a.txt", false, false);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            explorer_load(app, a, "a.txt"),
+            &Action::None,
+        );
+        let (_, b) = explorer_inner(&mut state, "app", "b.txt", false, false);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            explorer_load(app, b, "b.txt"),
+            &Action::None,
+        );
+        schedule_effect(&mut interp, &mut state, dir(app, 1), &Action::None);
+        schedule_effect(&mut interp, &mut state, dir(app, 2), &Action::None);
+        let (lib, c) = explorer_inner(&mut state, "lib", "c.txt", false, false);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            explorer_load(lib, c, "c.txt"),
+            &Action::None,
+        );
+        assert_eq!(interp.explorer_previews.len(), 2, "one live load per tab");
         assert_eq!(interp.explorer_jobs.len(), 2, "listings stay FIFO");
-        let mut previews = Vec::new();
-        let mut listings = 0;
-        for (_, work) in capture_jobs(&mut interp, &mut state) {
-            match work() {
-                JobOutcome::ExplorerPreview { tab_id, gen, .. } => previews.push((tab_id, gen)),
-                JobOutcome::ExplorerDir { .. } => listings += 1,
-                _ => panic!("unexpected job"),
-            }
-        }
-        assert_eq!(listings, 2);
-        previews.sort_unstable();
-        assert_eq!(previews, [(1, 2), (2, 1)], "only the newest pick per tab");
+        assert_eq!(
+            run_explorer_loads(&mut interp, &mut state),
+            [(app, b), (lib, c)],
+            "only the newest pick per tab"
+        );
         assert!(capture_jobs(&mut interp, &mut state).is_empty());
+    }
+
+    /// A pinned file whose load is still queued keeps it when a later tree
+    /// move queues the preview tab's load on the same tab.
+    #[test]
+    fn pinned_inner_load_survives_a_later_preview_load() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        let (tab, kept) = explorer_inner(&mut state, "app", "kept.txt", false, true);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            explorer_load(tab, kept, "kept.txt"),
+            &Action::None,
+        );
+        let (_, first) = explorer_inner(&mut state, "app", "a.txt", false, false);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            explorer_load(tab, first, "a.txt"),
+            &Action::None,
+        );
+        let (_, last) = explorer_inner(&mut state, "app", "b.txt", false, false);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            explorer_load(tab, last, "b.txt"),
+            &Action::None,
+        );
+        assert_eq!(
+            run_explorer_loads(&mut interp, &mut state),
+            [(tab, kept), (tab, last)],
+            "the pinned load and the newest preview load run"
+        );
+
+        // A closed Explorer tab's queued load is dropped by the next load.
+        let (lib, gen) = explorer_inner(&mut state, "lib", "lib.rs", false, true);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            explorer_load(lib, gen, "lib.rs"),
+            &Action::None,
+        );
+        let index = state.tabs.find_explorer("lib").unwrap();
+        state.tabs.close_at(index);
+        let (_, next) = explorer_inner(&mut state, "app", "c.txt", false, false);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            explorer_load(tab, next, "c.txt"),
+            &Action::None,
+        );
+        assert_eq!(run_explorer_loads(&mut interp, &mut state), [(tab, next)]);
+    }
+
+    /// A changed file's Explorer diff loads with the whole file as context,
+    /// so a line far from the change still shows.
+    #[test]
+    fn changed_file_preview_loads_full_file_context() {
+        let (root, mut state) = git_app_state("ws-effect-explorer-full", "main", false);
+        let app = root.join("app");
+        let lines: Vec<String> = (1..=20).map(|n| format!("line {n}")).collect();
+        std::fs::write(app.join("long.txt"), lines.join("\n") + "\n").unwrap();
+        crate::testutil::git(&app, &["add", "long.txt"]);
+        crate::testutil::git(&app, &["commit", "-q", "-m", "long"]);
+        let mut changed = lines.clone();
+        changed[19] = "line twenty".into();
+        std::fs::write(app.join("long.txt"), changed.join("\n") + "\n").unwrap();
+        let change = FileChange {
+            path: "long.txt".into(),
+            staged_status: None,
+            unstaged_status: Some("M".into()),
+            untracked: false,
+            old_path: None,
+        };
+        let opts = opts(&state);
+        let mut interp = Interpreter::with_cap(4);
+        let (tab_id, gen) = explorer_inner(&mut state, "app", "long.txt", true, false);
+        let load = Effect::LoadExplorerPreview {
+            tab_id,
+            gen,
+            repo: "app".into(),
+            path: "long.txt".into(),
+            change: Some(change),
+        };
+        interp.interpret_sync(&mut state, &opts, load, &Action::None);
+        let (_, path, diff) = state.explorer_diff().expect("diff view");
+        assert_eq!(path, "long.txt");
+        assert!(diff.unstaged.contains("+line twenty"), "{diff:?}");
+        assert!(
+            diff.unstaged.contains(" line 1\n"),
+            "line 1 is 19 lines from the change: {diff:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The Explorer lists folders and loads previews on the pool: ignored
@@ -6375,53 +6496,84 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// The inner file load of `effect` (a batch with the Explorer folder
+    /// listings): `(tab_id, gen)`.
+    fn inner_load_of(effect: &Effect) -> (u64, u64) {
+        let effects = match effect {
+            Effect::Batch(effects) => effects.as_slice(),
+            other => std::slice::from_ref(other),
+        };
+        effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::LoadExplorerPreview { tab_id, gen, .. } => Some((*tab_id, *gen)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("an inner file load: {effect:?}"))
+    }
+
     #[test]
-    fn file_tab_load_drops_stale_generation() {
-        let (root, mut state) = git_app_state("ws-effect-file-tab-stale", "main", false);
+    fn explorer_file_load_drops_stale_generation() {
+        let (root, mut state) = git_app_state("ws-effect-file-view-stale", "main", false);
         std::fs::write(root.join("app/notes.txt"), "old\n").unwrap();
         let mut interp = Interpreter::with_cap(4);
-        let first = state.open_file_tab("app".into(), "notes.txt".into());
-        assert!(
-            matches!(first, Effect::LoadFileTab { gen: 0, .. }),
-            "{first:?}"
-        );
+        let first = state.open_file_in_explorer("app".into(), "notes.txt".into(), None, None);
+        let (tab_id, first_gen) = inner_load_of(&first);
         schedule_effect(&mut interp, &mut state, first, &Action::None);
         let stale = capture_jobs(&mut interp, &mut state);
-        assert_eq!(stale.len(), 1);
+        assert!(!stale.is_empty());
         let reload = state.dispatch(Action::Refresh);
         assert!(
-            matches!(reload, Effect::LoadFileTab { gen: 1, .. }),
-            "{reload:?}"
+            inner_load_of(&reload).1 > first_gen,
+            "r loads at a newer generation: {reload:?}"
         );
         std::fs::write(root.join("app/notes.txt"), "fresh\nlines\n").unwrap();
         for (id, work) in stale {
             apply_id(&mut interp, &mut state, id, work());
         }
         assert!(
-            state.tabs.active_file().unwrap().body.is_none(),
-            "a generation-0 read is dropped after r"
+            state.tabs.active_file_view().unwrap().body.is_none(),
+            "the first read is dropped after r"
         );
         let opts = opts(&state);
         interp.interpret_sync(&mut state, &opts, reload, &Action::Refresh);
         assert_eq!(
-            state.tabs.active_file().unwrap().lines(),
+            state.tabs.active_file_view().unwrap().lines(),
             ["fresh", "lines"]
         );
 
-        state.dispatch(Action::CloseTab);
-        let gone = JobOutcome::FileTab {
-            tab_id: 1,
-            gen: 1,
-            body: FileRead::Binary,
+        // A late result for the replaced generation changes nothing.
+        let stale = |gen| JobOutcome::ExplorerPreview {
+            tab_id,
+            gen,
+            body: ExplorerPreviewBody::File(FileRead::Binary),
         };
-        apply(&mut interp, &mut state, gone);
-        assert!(state.tabs.is_workspace(), "a closed tab takes no result");
+        apply(&mut interp, &mut state, stale(first_gen));
+        assert_eq!(
+            state.tabs.active_file_view().unwrap().lines(),
+            ["fresh", "lines"],
+            "the stale result is dropped"
+        );
+
+        // Ctrl-w closes the inner tab, then the Explorer tab; a result for
+        // the closed tab is dropped.
+        let live_gen = state.tabs.active_file_view().unwrap().generation;
+        state.dispatch(Action::CloseTab);
+        state.dispatch(Action::CloseTab);
+        assert!(state.tabs.is_workspace());
+        assert!(!state.apply_explorer_preview(
+            tab_id,
+            live_gen,
+            ExplorerPreviewBody::File(FileRead::Binary)
+        ));
+        apply(&mut interp, &mut state, stale(live_gen));
+        assert!(state.tabs.get_explorer_id(tab_id).is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn file_tab_loads_text_binary_and_too_large() {
-        let (root, mut state) = git_app_state("ws-effect-file-tab-kinds", "main", false);
+    fn explorer_file_loads_text_binary_and_too_large() {
+        let (root, mut state) = git_app_state("ws-effect-file-view-kinds", "main", false);
         let app = root.join("app");
         std::fs::create_dir_all(app.join("src")).unwrap();
         std::fs::write(app.join("src/main.rs"), "fn main() {\n\tprintln!();\n}\n").unwrap();
@@ -6430,9 +6582,9 @@ mod tests {
         let opts = opts(&state);
         let mut interp = Interpreter::with_cap(4);
         let mut load = |state: &mut AppState, rel: &str| -> FileRead {
-            let effect = state.open_file_tab("app".into(), rel.into());
+            let effect = state.open_file_in_explorer("app".into(), rel.into(), None, None);
             interp.interpret_sync(state, &opts, effect, &Action::None);
-            let tab = state.tabs.active_file().expect("file tab");
+            let tab = state.tabs.active_file_view().expect("a file view");
             assert_eq!(tab.rel, rel);
             tab.body.as_deref().cloned().expect("loaded")
         };
@@ -6454,7 +6606,12 @@ mod tests {
             load(&mut state, "missing.txt"),
             FileRead::Failed(_)
         ));
-        assert_eq!(state.tabs.len(), 5, "one tab per file");
+        assert_eq!(state.tabs.len(), 2, "one Explorer tab");
+        assert_eq!(
+            state.tabs.active_explorer().map(|tab| tab.files.len()),
+            Some(4),
+            "one pinned inner tab per file"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -6653,6 +6810,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn explorer_file_view_blames_the_focused_line_with_git() {
+        let root = crate::testutil::unique_dir("ws-effect-explorer-blame");
+        let dir = root.join("app");
+        crate::testutil::init_repo(&dir);
+        std::fs::write(dir.join("README.md"), "a\nb\nc\n").unwrap();
+        crate::testutil::git(&dir, &["commit", "-q", "-am", "three lines"]);
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(root.clone(), snapshot, true);
+        state.open_loaded_inner_file("app", "README.md", &["a", "b", "c"]);
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(&mut interp, &mut state, Effect::None, &Action::Move(1));
+        assert!(
+            capture_jobs(&mut interp, &mut state).is_empty(),
+            "the tree has focus: no git"
+        );
+        let effect = state.dispatch(Action::FocusRight);
+        schedule_effect(&mut interp, &mut state, effect, &Action::FocusRight);
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 1, "the cursor line asks once");
+        for (id, work) in jobs {
+            apply_id(&mut interp, &mut state, id, work());
+        }
+        let (text, side) = state.painted_line_annotation().expect("annotation");
+        assert_eq!(side, BlameSide::New);
+        assert!(text.ends_with(" · three lines"), "{text}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn older_page(ids: &[&str]) -> GraphModel {
         GraphModel {
             has_more: true,
@@ -6727,19 +6913,28 @@ mod tests {
             .position(|row| row.id == "dir:app:src")
             .expect("dir row");
         state.set_graph(older_page(&["aaa", "ccc"]), "app".into(), "head-app".into());
-        let Effect::LoadFileTab { tab_id, gen, .. } =
-            state.open_file_tab("app".into(), "src/lib.rs".into())
-        else {
-            panic!("expected a load");
-        };
-        assert!(state.apply_file_tab(
-            tab_id,
-            gen,
-            FileRead::Text {
-                lines: vec!["a".into()],
-                max_cols: 1,
-            }
-        ));
+        // A compare tab whose focused diff line blames `ccc`.
+        state
+            .tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+        let tab = state.tabs.active_compare_mut().unwrap();
+        tab.source = Some(CommitFileSource::Compare {
+            base_ref: "main".into(),
+            head_ref: "HEAD".into(),
+            base_tip: "bbb".into(),
+            merge_base: "bbb".into(),
+            head: "head-app".into(),
+        });
+        tab.files = vec![CommitFile {
+            status: "M".into(),
+            path: "README.md".into(),
+            old_path: None,
+            stat: None,
+        }];
+        tab.path = Some("README.md".into());
+        tab.content = DiffContent::from_compare_lines(vec!["@@ -1 +1 @@".into(), "+a".into()]);
+        state.focus = FocusPane::Right;
+        state.diff_cursor = 2;
         let key = state.line_blame_want().expect("cursor line asks");
         state.apply_line_blame(
             key,
@@ -6749,7 +6944,7 @@ mod tests {
                 author_time: 0,
                 summary: "s-ccc".into(),
                 orig_line: 1,
-                filename: "src/lib.rs".into(),
+                filename: "README.md".into(),
                 previous: None,
                 boundary: false,
                 uncommitted: false,
@@ -6788,6 +6983,27 @@ mod tests {
         assert_eq!(state.status.kind(), StatusKind::Warn);
     }
 
+    /// Drill commit `sha` (`a`, `b` → `a`, `B` in README.md) with the diff
+    /// focused. Rows: section, hunk, `a`, `-b`, `+B`.
+    fn drill_commit_readme(state: &mut AppState, sha: &str) {
+        state.open_commit_diff(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: sha.into(),
+            },
+            vec![CommitFile {
+                status: "M".into(),
+                path: "README.md".into(),
+                old_path: None,
+                stat: None,
+            }],
+            0,
+            "README.md".into(),
+            DiffContent::from_unified("@@ -1,2 +1,2 @@\n a\n-b\n+B\n"),
+        );
+        state.focus = FocusPane::Right;
+    }
+
     #[test]
     fn blame_previous_change_opens_the_earlier_commit_tab() {
         let root = crate::testutil::unique_dir("ws-effect-blame-previous");
@@ -6804,10 +7020,9 @@ mod tests {
         let opts = opts(&state);
         let mut interp = Interpreter::with_cap(4);
 
-        // File tab on README.md, cursor on line 2 (`B`, from `two`).
-        let open = state.open_file_tab("app".into(), "README.md".into());
-        interp.interpret_sync(&mut state, &opts, open, &Action::None);
-        state.tabs.active_file_mut().unwrap().cursor = 1;
+        // Commit `two` drilled on README.md, cursor on its line 2 (`B`).
+        drill_commit_readme(&mut state, &rev("HEAD"));
+        state.diff_cursor = 4;
         interp.interpret_sync(&mut state, &opts, Effect::None, &Action::Move(1));
         let (text, _) = state.painted_line_annotation().expect("line 2 blamed");
         assert!(text.ends_with(" · two"), "{text}");
@@ -6848,9 +7063,10 @@ mod tests {
         let opts = opts(&state);
         let mut interp = Interpreter::with_cap(4);
 
-        // File tab on README.md, cursor on line 1 (`a`, from `one`).
-        let open = state.open_file_tab("app".into(), "README.md".into());
-        interp.interpret_sync(&mut state, &opts, open, &Action::None);
+        // Commit `two` drilled on README.md, cursor on line 1 (`a`, from
+        // `one`).
+        drill_commit_readme(&mut state, &rev("HEAD"));
+        state.diff_cursor = 2;
         interp.interpret_sync(&mut state, &opts, Effect::None, &Action::None);
         let (text, _) = state.painted_line_annotation().expect("line 1 blamed");
         assert!(text.ends_with(" · one"), "{text}");

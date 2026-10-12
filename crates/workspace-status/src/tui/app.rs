@@ -402,7 +402,7 @@ impl RightPaneRequest {
     }
 }
 
-/// Apply a coalesced right-pane load. Compare and file tabs ignore this path.
+/// Apply a coalesced right-pane load. Compare and Explorer tabs ignore this path.
 pub(crate) fn apply_right_pane_load(state: &mut AppState, payload: RightPaneLoad) {
     if !state.tabs.is_workspace() {
         return;

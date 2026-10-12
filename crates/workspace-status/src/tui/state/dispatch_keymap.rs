@@ -444,6 +444,13 @@ impl AppState {
             Action::NextTab => self.activate_relative_tab(1),
             Action::PreviousTab => self.activate_relative_tab(-1),
             Action::JumpToTab(n) => self.jump_to_tab(n),
+            // An Explorer tab answers `[` / `]` before this router.
+            Action::PreviousFileTab | Action::NextFileTab => {
+                if let Some(reason) = self.file_tab_cycle_reason() {
+                    self.status = StatusMessage::warn(reason);
+                }
+                Effect::None
+            }
             Action::ComparePickerMove(delta) => {
                 if let Some(picker) = self.compare_picker.as_mut() {
                     picker.move_cursor(delta);
@@ -481,13 +488,12 @@ impl AppState {
     ///
     /// The synthetic go-to-line row answers from
     /// [`Self::go_to_line_refusal`] alone, on every tab and in highlight.
+    /// `[` / `]` rows: [`Self::file_tab_cycle_reason`] on every tab.
     /// Open in Explorer checks [`Self::explorer_open_target`] first, on
     /// every tab (on an Explorer tab `-` is the parent folder, a different
     /// action, so the row is off there).
-    /// On an Explorer tab: [`Self::explorer_tab_refusal`], then
-    /// [`Self::explorer_tab_palette_reason`].
-    /// On a file tab: [`Self::file_tab_refusal`], the blame gate
-    /// ([`Self::blame_refusal`]), then [`Self::file_tab_palette_reason`].
+    /// On an Explorer tab: [`Self::explorer_tab_refusal`], the blame gate,
+    /// then [`Self::explorer_tab_palette_reason`].
     /// Otherwise: compare refusal ([`Self::compare_refusal`], which also gates
     /// the compare open commands on every tab), the blame gate, folder-summary refusal
     /// ([`Self::summary_refusal`]), then the row's
@@ -498,6 +504,9 @@ impl AppState {
         if matches!(action, Action::GoToLine(_)) {
             return self.go_to_line_refusal();
         }
+        if matches!(action, Action::PreviousFileTab | Action::NextFileTab) {
+            return self.file_tab_cycle_reason();
+        }
         if matches!(action, Action::ExplorerReveal) {
             if let Err(reason) = self.explorer_open_target() {
                 return Some(reason.into());
@@ -506,13 +515,8 @@ impl AppState {
         if self.is_explorer_tab() {
             return self
                 .explorer_tab_refusal(action)
-                .or_else(|| self.explorer_tab_palette_reason(command));
-        }
-        if self.is_file_tab() {
-            return self
-                .file_tab_refusal(action)
                 .or_else(|| self.blame_refusal(action))
-                .or_else(|| self.file_tab_palette_reason(command));
+                .or_else(|| self.explorer_tab_palette_reason(command));
         }
         if let Some(reason) = self
             .compare_refusal(action)
@@ -660,7 +664,7 @@ impl AppState {
                 if self.list_focus_target() != ListFocusTarget::None {
                     Some(FOCUS_A_FILE_DIFF.into())
                 } else if self.current_diff_rows().is_empty() {
-                    Some("no highlight target".into())
+                    Some(super::NO_HIGHLIGHT_TARGET.into())
                 } else {
                     None
                 }
