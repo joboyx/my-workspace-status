@@ -1,13 +1,15 @@
 //! Commit-activity sparkline on tree repo rows.
 //!
-//! A worker counts the commits on each repo's local branches over the last
-//! [`ACTIVITY_DAYS`] days ([`load_activity`], one `git log` per repo). The
-//! tree paints those day counts as a short bar run (`▁▂▅▇`) at the end of
-//! the repo row. The job never runs on the draw / event thread: the loop
-//! queues it after the first frame, after a Pull wave, and on a full
-//! reload (`r`).
+//! Workers count the commits on each repo's local branches over the last
+//! [`ACTIVITY_DAYS`] days ([`load_activity`], one `git log` per repo, one
+//! low-priority job per repo). The tree paints those day counts as a short
+//! bar run (`▁▂▅▇`) between the repo label and its right-aligned marks.
+//! The jobs never run on the draw / event thread: the loop queues them
+//! after the first frame, after a Pull wave, and when a full reload (`r`)
+//! lands.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::tree::{NodeKind, VisibleRow};
 use crate::snapshot::WorkspaceSnapshot;
@@ -108,23 +110,23 @@ pub fn activity_targets(snapshot: &WorkspaceSnapshot, only: Option<&[String]>) -
     keys
 }
 
-/// Day counts for each key, read one repo after another under `cwd`.
+/// Day counts of one repo (`key`, relative to `cwd`).
 ///
-/// Blocking: one `git log` per repo. Worker only, never on the loop thread.
+/// Blocking: one `git log`. Worker only, never on the loop thread. `None`
+/// without running git once `cancel` is set (the TUI is quitting), so a
+/// job that starts after quit ends at once.
 pub fn load_activity(
     cwd: &Path,
-    checkouts: Vec<String>,
+    key: &str,
     now_unix: i64,
-) -> Vec<(String, [u32; ACTIVITY_DAYS])> {
-    checkouts
-        .into_iter()
-        .map(|key| {
-            let days = u32::try_from(ACTIVITY_DAYS).unwrap_or(u32::MAX);
-            let times = crate::git::commit_times_since(&cwd.join(&key), days);
-            let buckets = bucket_days(&times, now_unix);
-            (key, buckets)
-        })
-        .collect()
+    cancel: &AtomicBool,
+) -> Option<[u32; ACTIVITY_DAYS]> {
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
+    let days = u32::try_from(ACTIVITY_DAYS).unwrap_or(u32::MAX);
+    let times = crate::git::commit_times_since(&cwd.join(key), days);
+    Some(bucket_days(&times, now_unix))
 }
 
 #[cfg(test)]
@@ -186,6 +188,22 @@ mod tests {
         assert!(line.is_ascii(), "{line}");
         assert!(line.starts_with("_.,:-=+#"), "{line}");
         assert!(line.chars().all(|c| SPARK_BARS_ASCII.contains(&c)));
+    }
+
+    #[test]
+    fn load_activity_counts_a_repo_and_stops_once_cancelled() {
+        let root = crate::testutil::unique_dir("ws-activity-load");
+        crate::testutil::init_repo(&root.join("app"));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let cancel = AtomicBool::new(false);
+        let days = load_activity(&root, "app", now, &cancel).expect("counted");
+        assert_eq!(days[ACTIVITY_DAYS - 1], 1, "{days:?}");
+        cancel.store(true, Ordering::Relaxed);
+        assert_eq!(load_activity(&root, "app", now, &cancel), None);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

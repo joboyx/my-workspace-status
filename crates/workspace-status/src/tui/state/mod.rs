@@ -772,8 +772,9 @@ pub struct AppState {
     /// Remote git work in flight, published by the interpreter for paint.
     pub remote_activity: RemoteActivity,
     /// Day commit counts (last [`ACTIVITY_DAYS`] days, today last) per
-    /// activity key, from the low-priority [`Effect::LoadActivity`] worker.
-    /// Empty until that job lands; the tree paints no sparkline before.
+    /// activity key, from the low-priority [`Effect::LoadActivity`] workers
+    /// (one job per repo). Empty until those land; the tree paints no
+    /// sparkline before.
     pub activity: HashMap<String, [u32; ACTIVITY_DAYS]>,
     pub search_mode: bool,
     pub search_active: bool,

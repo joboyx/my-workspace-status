@@ -24,15 +24,6 @@ fn behind_mark_cell(screen: &str) -> Option<(u16, u16)> {
     Some((line[..at].chars().count() as u16, row))
 }
 
-/// The syncbox row ends with its ASCII activity bars: the seed commit is
-/// today, so the last bar is the top one (`#`).
-fn syncbox_sparkline_painted(screen: &str) -> bool {
-    tree_row_containing(screen, "syncbox")
-        .and_then(|row| screen.lines().nth(usize::from(row)))
-        .and_then(|line| line.split('│').nth(1))
-        .is_some_and(|tree| tree.trim_end().ends_with('#'))
-}
-
 fn peek_shown(screen: &str) -> bool {
     screen.contains(BEHIND_MEANING)
         && screen.contains(BEHIND_COUNT)
@@ -67,13 +58,7 @@ fn closed(screen: &str) -> bool {
 fn pty_icon_popover_peek_pin_esc() {
     let (_root, workspace) = behind_workspace();
     let mut tui = PtySession::open(&workspace);
-    // Wait for the commit-activity bars too: they land after the first
-    // frame and push the right-aligned `v1` to the left.
-    tui.wait_pred(
-        |screen| syncbox_row_behind(screen) && syncbox_sparkline_painted(screen),
-        "syncbox row shows v1 and its activity bars",
-        WAIT,
-    );
+    tui.wait_pred(syncbox_row_behind, "syncbox row shows v1", WAIT);
     let (col, row) = behind_mark_cell(&tui.screen())
         .unwrap_or_else(|| panic!("behind mark cell:\n{}", tui.screen()));
 

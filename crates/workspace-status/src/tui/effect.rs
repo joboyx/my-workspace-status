@@ -263,9 +263,11 @@ pub(crate) enum JobOutcome {
         lookup: PrLookup,
         opened: bool,
     },
-    /// Day commit counts per activity key for the tree sparklines.
+    /// Day commit counts of activity key `key` for its tree sparkline.
+    /// `None` when the job saw the quit flag and ran no git.
     Activity {
-        rows: Vec<(String, [u32; ACTIVITY_DAYS])>,
+        key: String,
+        days: Option<[u32; ACTIVITY_DAYS]>,
     },
 }
 
@@ -779,11 +781,13 @@ pub(crate) struct Interpreter {
     /// Set on quit. PR jobs on workers stop their CLI or opener wait at
     /// once, so the runtime shutdown does not wait for them.
     pr_cancel: Arc<AtomicBool>,
-    /// Activity keys waiting for a sparkline count. The one queued
-    /// [`UserTag::Activity`] slot takes them all when it spawns.
-    activity_pending: Vec<String>,
-    /// A [`UserTag::Activity`] slot is queued and not yet spawned.
-    activity_queued: bool,
+    /// Activity keys waiting for a sparkline count, one queued
+    /// [`UserTag::Activity`] slot each; a slot takes the front key.
+    activity_pending: VecDeque<String>,
+    /// Set on quit: activity jobs not yet started run no git.
+    activity_cancel: Arc<AtomicBool>,
+    /// A full reload (`r`) waits to land; its collect queues the counts.
+    activity_after_reload: bool,
     exclusive_inflight: HashMap<u64, Vec<String>>,
     /// Name of the exclusive write or default-branch job on a worker.
     running_write: Option<&'static str>,
@@ -844,8 +848,9 @@ impl Interpreter {
             pr_cli: DEFAULT_PR_CLI,
             pr_opener: DEFAULT_PR_OPENER,
             pr_cancel: Arc::new(AtomicBool::new(false)),
-            activity_pending: Vec::new(),
-            activity_queued: false,
+            activity_pending: VecDeque::new(),
+            activity_cancel: Arc::new(AtomicBool::new(false)),
+            activity_after_reload: false,
             exclusive_inflight: HashMap::new(),
             running_write: None,
             dirty: false,
@@ -1014,7 +1019,8 @@ impl Interpreter {
             Effect::ReloadSnapshot => {
                 state.forget_pr_lookups(None);
                 self.sched.on_reload_snapshot(state.focused_checkout_path());
-                self.queue_activity(activity_targets(&state.snapshot, None));
+                // Count once the reload lands, so repos it finds get bars.
+                self.activity_after_reload = true;
             }
             Effect::ReloadRepo { repo } => {
                 state.forget_pr_lookups(Some(Path::new(&repo)));
@@ -1568,20 +1574,25 @@ impl Interpreter {
         }
     }
 
-    /// Queue a sparkline count for `checkouts` (activity keys).
+    /// Queue a sparkline count for each of `checkouts` (activity keys).
     ///
-    /// One low-priority slot at a time: keys that arrive while it waits
-    /// join it, and a key already waiting is not added twice.
+    /// One low-priority [`UserTag::Activity`] slot per repo, so user jobs
+    /// take the pool between repos. A key that already waits is not
+    /// queued again, so a reload and a Pull wave count a repo once.
     fn queue_activity(&mut self, checkouts: Vec<String>) {
         for key in checkouts {
             if !self.activity_pending.contains(&key) {
-                self.activity_pending.push(key);
+                self.activity_pending.push_back(key);
+                self.sched.enqueue_background(UserTag::Activity);
             }
         }
-        if !self.activity_pending.is_empty() && !self.activity_queued {
-            self.activity_queued = true;
-            self.sched.enqueue_background(UserTag::Activity);
-        }
+    }
+
+    /// Stop sparkline counts: a job not yet started runs no git, and no
+    /// waiting repo starts. The live loop calls this on quit, so the
+    /// runtime shutdown does not wait for a walk over every repo.
+    pub(crate) fn cancel_activity_jobs(&self) {
+        self.activity_cancel.store(true, Ordering::Relaxed);
     }
 
     /// Queue a blame for the focused line when the cache has no answer.
@@ -1870,6 +1881,12 @@ impl Interpreter {
                 }
                 self.queue_due_pr_lookups(state, opts);
                 let decision = self.sched.note_repo_done(gen, &path);
+                // The `r` reload has landed: count every repo it found.
+                if decision == ApplyDecision::CollectionIdle
+                    && std::mem::take(&mut self.activity_after_reload)
+                {
+                    self.queue_activity(activity_targets(&state.snapshot, None));
+                }
                 if focused.as_deref() == Some(path.as_str())
                     && focused_repo_needs_pane(&before_sigs, &before_snap, state, &path)
                     && state.tabs.is_workspace()
@@ -2210,13 +2227,12 @@ impl Interpreter {
                     self.mark();
                 }
             }
-            JobOutcome::Activity { rows } => {
-                let mut changed = false;
-                for (key, days) in rows {
-                    changed |= state.activity.insert(key, days) != Some(days);
-                }
-                if changed {
-                    self.mark();
+            JobOutcome::Activity { key, days } => {
+                // `None`: the job saw the quit flag and ran no git.
+                if let Some(days) = days {
+                    if state.activity.insert(key, days) != Some(days) {
+                        self.mark();
+                    }
                 }
             }
             JobOutcome::LineBlame { key, result } => {
@@ -3197,12 +3213,14 @@ impl Interpreter {
                 );
             }
             UserTag::Activity => {
-                self.activity_queued = false;
-                let checkouts = std::mem::take(&mut self.activity_pending);
-                if checkouts.is_empty() {
+                // One repo per job, so user work takes the slot between
+                // repos. After quit nothing more starts.
+                let key = self.activity_pending.pop_front();
+                let cancel = Arc::clone(&self.activity_cancel);
+                let Some(key) = key.filter(|_| !cancel.load(Ordering::Relaxed)) else {
                     self.sched.note_job_finished(id);
                     return;
-                }
+                };
                 let cwd = opts.cwd.clone();
                 spawn(
                     id,
@@ -3210,9 +3228,8 @@ impl Interpreter {
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
-                        JobOutcome::Activity {
-                            rows: load_activity(&cwd, checkouts, now),
-                        }
+                        let days = load_activity(&cwd, &key, now, &cancel);
+                        JobOutcome::Activity { key, days }
                     }),
                 );
             }
@@ -6984,65 +7001,157 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Real repos `app` and `lib` under one root; the snapshot lists both.
+    fn two_repo_state(tag: &str) -> (PathBuf, AppState) {
+        let root = crate::testutil::unique_dir(tag);
+        crate::testutil::init_repo(&root.join("app"));
+        crate::testutil::init_repo(&root.join("lib"));
+        let snapshot =
+            build_workspace_snapshot(&[repo("app", false), repo("lib", false)], &[], false, &[]);
+        (root.clone(), AppState::new(root, snapshot, true))
+    }
+
     #[test]
     fn launch_schedules_activity_on_a_worker_not_inline() {
         let (root, mut state) = git_app_state("ws-effect-activity", "main", false);
         let mut interp = Interpreter::with_cap(1);
         let checkouts = activity_targets(&state.snapshot, None);
         assert_eq!(checkouts, vec!["app".to_string()]);
-        let load = Effect::LoadActivity {
-            checkouts: checkouts.clone(),
-        };
+        let load = Effect::LoadActivity { checkouts };
         schedule_effect(&mut interp, &mut state, load.clone(), &Action::None);
         assert_eq!(interp.sched.queued_user_tag(UserTag::Activity), 1);
         assert!(state.activity.is_empty(), "schedule runs no git");
-        // A second ask while the slot waits joins it.
+        // A second ask while the repo waits does not count it twice.
         schedule_effect(&mut interp, &mut state, load, &Action::None);
         assert_eq!(interp.sched.queued_user_tag(UserTag::Activity), 1);
 
-        // User work queued after it still spawns first: low priority.
-        schedule_effect(
-            &mut interp,
-            &mut state,
-            Effect::LoadRightPane,
-            &Action::None,
-        );
-        let mut first = true;
-        let mut applied_activity = false;
-        loop {
-            let jobs = capture_jobs(&mut interp, &mut state);
-            if jobs.is_empty() {
-                break;
-            }
-            for (id, work) in jobs {
-                let outcome = work();
-                let is_activity = matches!(outcome, JobOutcome::Activity { .. });
-                assert!(!(first && is_activity), "the pane load must spawn first");
-                first = false;
-                assert!(
-                    state.activity.is_empty(),
-                    "counts land only when the worker outcome is applied"
-                );
-                apply_id(&mut interp, &mut state, id, outcome);
-                applied_activity |= is_activity;
-            }
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 1);
+        for (id, work) in jobs {
+            let outcome = work();
+            assert!(matches!(outcome, JobOutcome::Activity { .. }));
+            assert!(
+                state.activity.is_empty(),
+                "counts land only when the worker outcome is applied"
+            );
+            apply_id(&mut interp, &mut state, id, outcome);
         }
-        assert!(applied_activity);
         let days = state.activity.get("app").expect("app counted");
         assert!(
             days[ACTIVITY_DAYS - 1] >= 1,
             "seed commit is today: {days:?}"
         );
         assert_eq!(interp.sched.queued_user_tag(UserTag::Activity), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
-        // A full reload (`r`) counts again.
+    /// One job per repo: with one pool slot, a user job queued after the
+    /// activity jobs runs before the second repo's count.
+    #[test]
+    fn activity_jobs_yield_the_slot_to_user_work_between_repos() {
+        let (root, mut state) = two_repo_state("ws-effect-activity-yield");
+        let mut interp = Interpreter::with_cap(1);
+        let checkouts = activity_targets(&state.snapshot, None);
         schedule_effect(
             &mut interp,
             &mut state,
-            Effect::ReloadSnapshot,
-            &Action::Refresh,
+            Effect::LoadActivity { checkouts },
+            &Action::None,
         );
-        assert_eq!(interp.sched.queued_user_tag(UserTag::Activity), 1);
+        assert_eq!(interp.sched.queued_user_tag(UserTag::Activity), 2);
+        let first = capture_jobs(&mut interp, &mut state);
+        assert_eq!(first.len(), 1, "cap 1");
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::LoadRightPane,
+            &Action::None,
+        );
+        let mut order = Vec::new();
+        let mut jobs = first;
+        while !jobs.is_empty() {
+            for (id, work) in jobs {
+                let outcome = work();
+                order.push(match &outcome {
+                    JobOutcome::Activity { key, .. } => format!("activity:{key}"),
+                    _ => "user".to_string(),
+                });
+                apply_id(&mut interp, &mut state, id, outcome);
+            }
+            jobs = capture_jobs(&mut interp, &mut state);
+        }
+        assert_eq!(order.first().map(String::as_str), Some("activity:app"));
+        let user = order
+            .iter()
+            .position(|job| job == "user")
+            .expect("pane ran");
+        let lib = order
+            .iter()
+            .position(|job| job == "activity:lib")
+            .expect("lib counted");
+        assert!(user < lib, "user work runs between repos: {order:?}");
+        assert!(state.activity.contains_key("app") && state.activity.contains_key("lib"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Quit sets the cancel flag: the started job runs no git and the next
+    /// repo never starts.
+    #[test]
+    fn quit_flag_stops_the_activity_walk_before_the_next_repo() {
+        let (root, mut state) = two_repo_state("ws-effect-activity-quit");
+        let mut interp = Interpreter::with_cap(1);
+        let checkouts = activity_targets(&state.snapshot, None);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::LoadActivity { checkouts },
+            &Action::None,
+        );
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 1);
+        interp.cancel_activity_jobs();
+        for (id, work) in jobs {
+            let outcome = work();
+            assert!(
+                matches!(outcome, JobOutcome::Activity { days: None, .. }),
+                "a cancelled job reports no counts"
+            );
+            apply_id(&mut interp, &mut state, id, outcome);
+        }
+        assert!(
+            capture_jobs(&mut interp, &mut state).is_empty(),
+            "lib never starts"
+        );
+        assert!(state.activity.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `r` counts once its reload lands, from the new snapshot: a repo the
+    /// reload finds gets bars too.
+    #[test]
+    fn reload_counts_activity_when_the_snapshot_lands() {
+        let (root, mut state) = git_app_state("ws-effect-activity-reload", "main", false);
+        crate::testutil::init_repo(&root.join("lib"));
+        let mut interp = Interpreter::with_cap(4);
+        let effect = state.dispatch(Action::Refresh);
+        assert_eq!(effect, Effect::ReloadSnapshot);
+        schedule_effect(&mut interp, &mut state, effect, &Action::Refresh);
+        assert_eq!(
+            interp.sched.queued_user_tag(UserTag::Activity),
+            0,
+            "nothing counted from the old snapshot"
+        );
+        let mut rounds = 0;
+        while !state.activity.contains_key("lib") && rounds < 20 {
+            run_jobs(&mut interp, &mut state);
+            rounds += 1;
+        }
+        assert!(
+            state.snapshot.repos.iter().any(|row| row.repo == "lib"),
+            "the reload found lib"
+        );
+        assert!(state.activity.contains_key("app"));
+        assert!(state.activity.contains_key("lib"), "new repo counted");
         let _ = std::fs::remove_dir_all(root);
     }
 

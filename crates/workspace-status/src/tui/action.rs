@@ -694,7 +694,7 @@ pub enum Effect {
         targets: Vec<(PathBuf, String)>,
     },
     /// Count the last 14 days of local-branch commits of each repo for the
-    /// tree sparklines, on one low-priority worker job.
+    /// tree sparklines, one low-priority worker job per repo.
     LoadActivity {
         /// Activity keys (primary checkout paths) to count, in order.
         checkouts: Vec<String>,

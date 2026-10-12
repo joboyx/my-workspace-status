@@ -216,9 +216,11 @@ struct LoopCtx<'a> {
 impl Drop for LoopCtx<'_> {
     /// Every exit from [`run`], an error included, ends here before the
     /// caller drops the runtime. That drop waits for running workers, so
-    /// stop the PR lookups and opens, which can take many seconds.
+    /// stop the PR lookups and opens, which can take many seconds, and the
+    /// sparkline counts that have not started.
     fn drop(&mut self) {
         self.interp.cancel_pull_request_jobs();
+        self.interp.cancel_activity_jobs();
     }
 }
 
@@ -258,7 +260,7 @@ pub async fn run(
     };
     ctx.interp
         .schedule(ctx.state, ctx.opts, lookups, &Action::None);
-    // Sparkline counts run on a low-priority worker after the first frame,
+    // Sparkline counts run on low-priority workers after the first frame,
     // so they never hold up the first paint or user work.
     let activity = Effect::LoadActivity {
         checkouts: activity_targets(&ctx.state.snapshot, None),

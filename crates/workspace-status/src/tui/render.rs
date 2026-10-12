@@ -1528,10 +1528,11 @@ struct TreeRowDecor {
     /// PR badge state of the row's branch.
     pr: Option<PrState>,
     /// Spinner frame while a fetch / pull / push runs on the row's
-    /// checkout. Paints first in the trailing run.
+    /// checkout. Paints ahead of the marks, after the sparkline.
     spinner: Option<&'static str>,
-    /// Commit-activity bars of a repo row ([`sparkline`]). Paints last in
-    /// the trailing run.
+    /// Commit-activity bars of a repo row ([`sparkline`]). Paints first in
+    /// the trailing run, ahead of the spinner and the marks: the run is
+    /// right-aligned, so the bars take label room and the marks never move.
     sparkline: Option<String>,
     /// `NO_COLOR`: the spinner and the sparkline take the terminal
     /// foreground.
@@ -1604,19 +1605,25 @@ fn paint_tree_row(
             },
         );
     }
+    // The bars go left of the spinner and every mark. The trailing run is
+    // right-aligned, so they come out of the label budget and the marks
+    // keep their columns when the counts land.
     if let Some(bars) = decor.sparkline {
-        segs.trailing.push(TextSeg {
-            text: format!(" {bars} "),
-            role: if decor.no_color {
-                SegRole::Plain
-            } else {
-                SegRole::Muted
+        segs.trailing.insert(
+            0,
+            TextSeg {
+                text: format!("{bars} "),
+                role: if decor.no_color {
+                    SegRole::Plain
+                } else {
+                    SegRole::Muted
+                },
+                hex: None,
+                bold: false,
+                dim: false,
+                icon: None,
             },
-            hex: None,
-            bold: false,
-            dim: false,
-            icon: None,
-        });
+        );
     }
     if row.kind == NodeKind::Workspace {
         // The summary gives way before the name. Same prefix as
@@ -13538,7 +13545,7 @@ mod tests {
 
     /// The launch paints with no sparkline: the counts come from a worker
     /// job the loop queues after that frame. Only the applied outcome
-    /// paints the bars, at the end of the repo row.
+    /// paints the bars on the repo row.
     #[test]
     fn first_paint_has_no_sparkline_then_shows_after_apply() {
         use super::super::activity::activity_targets;
@@ -13567,10 +13574,7 @@ mod tests {
         run_interp_jobs(&mut interp, &mut state, &opts);
         draw_state(&mut terminal, &mut state);
         let applied = tree_row_text(&terminal, &state, &id);
-        assert!(
-            applied.trim_end().ends_with(today),
-            "bars end the row: {applied:?}"
-        );
+        assert!(applied.contains(today), "bars on the row: {applied:?}");
         // The bars take the muted fg.
         let row_y = (state.layout.tree_y..state.layout.tree_y + 16)
             .find(|&y| {
@@ -13601,10 +13605,48 @@ mod tests {
         state.ascii = true;
         draw_state(&mut terminal, &mut state);
         let ascii = tree_row_text(&terminal, &state, &id);
-        assert!(
-            ascii.trim_end().ends_with("_____________#"),
-            "ascii bars: {ascii:?}"
+        assert!(ascii.contains("_____________#"), "ascii bars: {ascii:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The bars land between the label and the marks: the repo row's
+    /// right-aligned marks keep their columns when the counts arrive.
+    #[test]
+    fn sparkline_keeps_repo_row_marks_in_place() {
+        let (root, mut state) = activity_state("ws-render-sparkline-marks", true);
+        let mut terminal = Terminal::new(TestBackend::new(160, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let id = app_repo_row_id(&state);
+        let marks: String = state
+            .painted_tree_rows()
+            .iter()
+            .find(|row| row.id == id)
+            .expect("app row")
+            .trailing_segs
+            .iter()
+            .map(|seg| seg.text.as_str())
+            .collect();
+        assert!(!marks.trim().is_empty(), "the repo row has marks");
+        // ASCII glyph mode: one column per char.
+        let marks_col = |text: &str| -> usize {
+            let at = text.rfind(marks.as_str()).expect("marks on the row");
+            text[..at].chars().count()
+        };
+        let before = tree_row_text(&terminal, &state, &id);
+
+        let mut days = [0u32; super::super::activity::ACTIVITY_DAYS];
+        days[super::super::activity::ACTIVITY_DAYS - 1] = 2;
+        state.activity.insert("app".into(), days);
+        draw_state(&mut terminal, &mut state);
+        let after = tree_row_text(&terminal, &state, &id);
+        assert!(after.contains("_____________#"), "bars painted: {after:?}");
+        assert_eq!(
+            marks_col(&after),
+            marks_col(&before),
+            "marks moved:\n{before:?}\n{after:?}"
         );
+        let bars_col = after.find("_____________#").unwrap();
+        assert!(bars_col < after.rfind(marks.as_str()).unwrap());
         let _ = std::fs::remove_dir_all(root);
     }
 
