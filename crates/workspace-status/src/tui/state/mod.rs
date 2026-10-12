@@ -110,6 +110,7 @@ use super::tabs::{
     SWITCH_TO_WORKSPACE_TAB, WORKSPACE_TAB_CANNOT_CLOSE,
 };
 use super::theme::{cycle_theme_id, BackgroundMode, ThemeId};
+use super::theme_store::save_last_theme;
 use super::tree::{
     build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, visible_for_tree,
     visible_window, workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
@@ -703,6 +704,8 @@ pub struct AppState {
     pub viewed_path: PathBuf,
     pub comment_store: CommentStore,
     pub comment_path: PathBuf,
+    /// Last-used theme store that `T` writes (see [`crate::tui::theme_store`]).
+    pub theme_path: PathBuf,
     pub comment: Option<CommentPrompt>,
     pub comment_export: Option<CommentExport>,
     /// Visual-line anchor on a focused file diff (`V`). Cursor is the other end.
@@ -858,8 +861,8 @@ fn unix_now() -> i64 {
 }
 
 impl AppState {
-    /// TUI launch state: glyphs, theme, and the viewed / comment store paths
-    /// come from the resolved `settings`.
+    /// TUI launch state: glyphs, theme, and the viewed / comment / theme store
+    /// paths come from the resolved `settings`.
     pub fn launch(cwd: PathBuf, snapshot: WorkspaceSnapshot, settings: &Settings) -> Self {
         Self::build(
             cwd,
@@ -867,6 +870,7 @@ impl AppState {
             settings.ascii,
             settings.viewed_store.clone(),
             settings.comment_store.clone(),
+            settings.theme_store.clone(),
             settings.theme,
         )
     }
@@ -878,7 +882,8 @@ impl AppState {
         Self::with_viewed_path(cwd, snapshot, ascii, default_viewed_path())
     }
 
-    /// Test state with `viewed_path`; the comment store sits next to it.
+    /// Test state with `viewed_path`; the comment and theme stores sit next
+    /// to it.
     ///
     /// Pins Tokyo Night and [`BackgroundMode::Terminal`], the v0.1.244 look
     /// (theme, boxed panes, no fills), so render tests keep proving that mode
@@ -893,12 +898,14 @@ impl AppState {
         viewed_path: PathBuf,
     ) -> Self {
         let comment_path = viewed_path.with_file_name("comments.json");
+        let theme_path = viewed_path.with_file_name("theme.json");
         let mut state = Self::build(
             cwd,
             snapshot,
             ascii,
             viewed_path,
             comment_path,
+            theme_path,
             ThemeId::TokyoNight,
         );
         state.background = BackgroundMode::Terminal;
@@ -911,6 +918,7 @@ impl AppState {
         ascii: bool,
         viewed_path: PathBuf,
         comment_path: PathBuf,
+        theme_path: PathBuf,
         theme: ThemeId,
     ) -> Self {
         let show_ignored = snapshot.show_ignored;
@@ -959,6 +967,7 @@ impl AppState {
             viewed_path,
             comment_store,
             comment_path,
+            theme_path,
             comment: None,
             comment_export: None,
             diff_visual_anchor: None,
@@ -2232,9 +2241,13 @@ impl AppState {
         self.commit_file_signatures = commit_file_signatures(&repo, &source, &unfolded);
     }
 
+    /// `T`: next theme in this session, saved as the last-used theme.
     fn cycle_theme(&mut self) -> Effect {
         self.theme = cycle_theme_id(self.theme);
         self.status = format!("theme: {}", self.theme.label()).into();
+        if let Err(err) = save_last_theme(&self.theme_path, self.theme) {
+            self.status = StatusMessage::error(persist_failed_status("theme", err));
+        }
         Effect::None
     }
 
@@ -6700,6 +6713,7 @@ mod tests {
         DIFF_SPLIT_FRACTION, MIN_PANE_COLS,
     };
     use crate::tui::status::StatusKind;
+    use crate::tui::theme_store::load_last_theme;
     use crate::tui::watch::watch_interval_ms;
     use workspace_status_graph::{Commit, GraphModel, GraphRef, Stash};
 
@@ -14582,6 +14596,88 @@ mod tests {
             ThemeId::GruvboxDark
         );
         assert_eq!(theme_id_from(Some("nope"), None, None), ThemeId::Slate);
+    }
+
+    /// State whose theme store is `state/theme.json` in a fresh temp dir.
+    fn state_with_theme_store(prefix: &str) -> (AppState, PathBuf) {
+        let dir = crate::testutil::unique_dir(prefix);
+        let mut app = state();
+        app.theme_path = dir.join("state").join("theme.json");
+        (app, dir)
+    }
+
+    #[test]
+    fn theme_cycle_saves_new_theme_to_store() {
+        let (mut app, dir) = state_with_theme_store("ws-theme-cycle-save");
+        app.theme = ThemeId::TokyoNight;
+        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
+        assert_eq!(app.theme, ThemeId::Monokai);
+        assert_eq!(load_last_theme(&app.theme_path), Some(ThemeId::Monokai));
+        assert_eq!(app.status.kind(), StatusKind::Info);
+        app.dispatch(Action::CycleTheme);
+        assert_eq!(load_last_theme(&app.theme_path), Some(app.theme));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_cycle_wrap_saves_tokyo_night() {
+        let (mut app, dir) = state_with_theme_store("ws-theme-cycle-wrap");
+        app.theme = ThemeId::GithubDarkDimmed;
+        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
+        assert_eq!(app.theme, ThemeId::TokyoNight);
+        assert_eq!(load_last_theme(&app.theme_path), Some(ThemeId::TokyoNight));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_cycle_to_slate_saves_slate() {
+        let (mut app, dir) = state_with_theme_store("ws-theme-cycle-slate");
+        app.theme = *crate::tui::theme::THEME_IDS
+            .iter()
+            .find(|&&id| cycle_theme_id(id) == ThemeId::Slate)
+            .expect("some theme cycles to Slate");
+        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
+        assert_eq!(app.theme, ThemeId::Slate);
+        let text = std::fs::read_to_string(&app.theme_path).expect("store written");
+        assert!(text.contains("\"slate\""), "store names slate: {text}");
+        assert_eq!(load_last_theme(&app.theme_path), Some(ThemeId::Slate));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_cycle_names_save_failure_when_unwritable() {
+        let mut app = state();
+        app.theme = ThemeId::TokyoNight;
+        let (root, path) = unwritable_store_path("ws-theme-save-fail");
+        app.theme_path = path;
+        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
+        assert_eq!(app.theme, ThemeId::Monokai, "session theme still changes");
+        assert_eq!(app.status.kind(), StatusKind::Error);
+        assert!(
+            app.status.contains("theme save failed"),
+            "failed persist must name the theme store: {}",
+            app.status
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn theme_cycle_leaves_foreign_store_file_unchanged() {
+        let (mut app, dir) = state_with_theme_store("ws-theme-foreign");
+        std::fs::create_dir_all(app.theme_path.parent().unwrap()).unwrap();
+        let foreign = b"{\"editor\": \"vim\"}\n";
+        std::fs::write(&app.theme_path, foreign).unwrap();
+        app.theme = ThemeId::TokyoNight;
+        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
+        assert_eq!(app.theme, ThemeId::Monokai, "session theme still changes");
+        assert_eq!(std::fs::read(&app.theme_path).unwrap(), foreign);
+        assert_eq!(app.status.kind(), StatusKind::Error);
+        assert!(
+            app.status.contains("theme save failed"),
+            "foreign store must surface an error: {}",
+            app.status
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn tree_repo() -> RepoSnapshot {

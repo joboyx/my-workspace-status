@@ -89,10 +89,6 @@ fn is_store_file(bytes: &[u8]) -> bool {
 /// (like the viewed and comment stores, a config path that names some other
 /// file never overwrites it). The write takes the sibling lock and replaces
 /// the file atomically.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the T theme cycle calls save_last_theme next")
-)]
 pub fn save_last_theme(path: &Path, theme: ThemeId) -> io::Result<()> {
     persist_with_lock(path, |existing| {
         if existing.is_some_and(|bytes| !is_store_file(bytes)) {
