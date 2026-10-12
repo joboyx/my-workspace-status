@@ -1641,42 +1641,30 @@ fn paint_tree_row(
         decor.resolved,
         decor.pr,
     );
-    if let Some(glyph) = decor.spinner {
-        segs.trailing.insert(
-            0,
-            TextSeg {
-                text: format!("{glyph} "),
-                role: if decor.no_color {
-                    SegRole::Plain
-                } else {
-                    SegRole::Muted
-                },
-                hex: None,
-                bold: false,
-                dim: false,
-                icon: None,
-            },
-        );
-    }
-    // The bars go left of the spinner and every mark. The trailing run is
-    // right-aligned, so they come out of the label budget and the marks
-    // keep their columns when the counts land.
-    if let Some(bars) = decor.sparkline {
-        segs.trailing.insert(
-            0,
-            TextSeg {
-                text: format!("{bars} "),
-                role: if decor.no_color {
-                    SegRole::Plain
-                } else {
-                    SegRole::Muted
-                },
-                hex: None,
-                bold: false,
-                dim: false,
-                icon: None,
-            },
-        );
+    // The spinner, then the bars left of it, lead the trailing run: each is
+    // a bare token one space before the rest, as the run packs its marks.
+    // The run is right-aligned, so they come out of the label budget and
+    // the marks keep their columns when a fetch starts or the counts land.
+    let live_role = if decor.no_color {
+        SegRole::Plain
+    } else {
+        SegRole::Muted
+    };
+    let live = [decor.spinner.map(str::to_string), decor.sparkline];
+    for text in live.into_iter().flatten() {
+        let seg = |text: String, role: SegRole| TextSeg {
+            text,
+            role,
+            hex: None,
+            bold: false,
+            dim: false,
+            icon: None,
+        };
+        if !segs.trailing.is_empty() {
+            segs.trailing
+                .insert(0, seg(" ".to_string(), SegRole::Muted));
+        }
+        segs.trailing.insert(0, seg(text, live_role));
     }
     if row.kind == NodeKind::Workspace {
         // The summary gives way before the name. Same prefix as
@@ -11441,7 +11429,7 @@ mod tests {
         pr: Option<PrState>,
     ) -> (String, Vec<IconSpan>) {
         let palette = crate::tui::theme::ThemeId::TokyoNight.palette();
-        let (line, icons) = paint_tree_row(
+        let (line, icons, _) = paint_tree_row(
             row,
             width,
             false,
@@ -11450,10 +11438,10 @@ mod tests {
             false,
             search_bg_unused(),
             true,
-            false,
-            false,
-            false,
-            pr,
+            TreeRowDecor {
+                pr,
+                ..TreeRowDecor::default()
+            },
             palette,
             0,
         );
@@ -11559,7 +11547,7 @@ mod tests {
             (&dir, true, "\"", IconKind::Comment),
             (&section, true, "\"", IconKind::Comment),
         ] {
-            let (line, icons) = paint_tree_row(
+            let (line, icons, _) = paint_tree_row(
                 row,
                 width,
                 false,
@@ -11568,10 +11556,10 @@ mod tests {
                 false,
                 search_bg_unused(),
                 true,
-                false,
-                commented,
-                false,
-                None,
+                TreeRowDecor {
+                    commented,
+                    ..TreeRowDecor::default()
+                },
                 palette,
                 0,
             );
@@ -14322,6 +14310,15 @@ mod tests {
         );
         let bars_col = after.find("_____________#").unwrap();
         assert!(bars_col < after.rfind(marks.as_str()).unwrap());
+        // The packed run: bars, one space, then the marks flush right.
+        assert!(
+            after.contains(&format!("_____________# {marks}")),
+            "one space between the bars and the marks: {after:?}"
+        );
+        assert!(
+            after.trim_end().ends_with(marks.as_str()),
+            "marks stay flush right: {after:?}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
