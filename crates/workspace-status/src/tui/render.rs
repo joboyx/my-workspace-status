@@ -47,6 +47,7 @@ use super::help::{
     help_version_label, wrap_help_footer, HELP_LEGEND_HEAD_ROWS, HELP_LEGEND_TITLE,
     HELP_SEARCH_ESC_HINT,
 };
+use super::hyperlink::LinkHit;
 use super::icons::{
     comment_mark_cols, glyph, icon_branch, icon_comment, icon_comment_resolved, icon_diff,
     icon_merged_into_default, icon_move, icon_open_vs_default, truncate_visible, IconKind,
@@ -5514,6 +5515,9 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
     let height = u16::try_from(rows.len() + 2).unwrap_or(u16::MAX);
     let rect = popover_rect(anchor, bounds, width, height);
 
+    // Per line: the painted value of a link field, as (inner column,
+    // width, full URL), for the OSC 8 overlay.
+    let mut line_links: Vec<Option<(usize, usize, String)>> = vec![None; lines.len()];
     let painted: Vec<Line<'static>> = rows
         .iter()
         .map(|row| match *row {
@@ -5556,13 +5560,28 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
                     PopoverLine::Note(text) => {
                         spans.push(Span::styled(text.clone(), muted));
                     }
-                    PopoverLine::Field { label, value, role } => {
+                    PopoverLine::Field {
+                        label,
+                        value,
+                        role,
+                        link,
+                    } => {
                         let pad = label_width(index).saturating_sub(visible_width(label));
                         spans.push(Span::styled(format!("{label}{} ", " ".repeat(pad)), muted));
-                        spans.push(Span::styled(
-                            value.clone(),
-                            Style::default().fg(seg_role_color(*role, palette)),
-                        ));
+                        let style = Style::default().fg(seg_role_color(*role, palette));
+                        if *link {
+                            // A cut URL ends in `…`; the link keeps the
+                            // full URL.
+                            let x = help_spans_width(&spans);
+                            let room = inner_width.saturating_sub(x);
+                            if room > 0 {
+                                let shown = fit_with_ellipsis(value, room);
+                                line_links[index] = Some((x, visible_width(&shown), value.clone()));
+                                spans.push(Span::styled(shown, style));
+                            }
+                        } else {
+                            spans.push(Span::styled(value.clone(), style));
+                        }
                     }
                     PopoverLine::Action(command) => {
                         let reason = reasons[index].as_deref();
@@ -5666,6 +5685,19 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
         if let PopoverRow::Line(index) = *row {
             if lines[index].focusable() {
                 hit_lines.push((y, index));
+            }
+            if let Some((x, width, url)) = line_links[index].take() {
+                let width = width.min(usize::from(inner.width).saturating_sub(x));
+                if let (Ok(x), Ok(width)) = (u16::try_from(x), u16::try_from(width)) {
+                    if width > 0 {
+                        state.layout.links.push(LinkHit {
+                            y,
+                            x: inner.x + x,
+                            width,
+                            url,
+                        });
+                    }
+                }
             }
         }
     }
@@ -15423,6 +15455,62 @@ mod tests {
             assert!(text.contains(want), "{want:?} in\n{text}");
         }
         assert!(!text.contains("loading…"), "{text}");
+    }
+
+    /// The painted text under the popover's URL link and the link itself,
+    /// for a pinned PR popover with `url` on a `cols`-wide terminal.
+    fn pr_popover_url_link(url: &str, cols: u16) -> (String, crate::tui::hyperlink::LinkHit) {
+        let mut state = pr_state(&[branch_repo("app", "feature")], false);
+        set_pr(
+            &mut state,
+            "app",
+            "feature",
+            PrLookup::Found(PullRequest {
+                number: 7,
+                url: url.into(),
+                state: PrState::Open,
+            }),
+        );
+        focus_tree_row(&mut state, "repo:app");
+        let mut terminal = Terminal::new(TestBackend::new(cols, 40)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let _ = state.dispatch(Action::PopoverOpenFocused);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        // The URL line is the one link the popover records; the overlay
+        // also gets it (after any badge link).
+        assert_eq!(state.layout.links.len(), 1, "{:?}", state.layout.links);
+        let link = state.layout.links[0].clone();
+        assert_eq!(state.hyperlinks().last(), Some(&link));
+        let inner = state.layout.popover.as_ref().expect("pinned").inner;
+        assert!(inner.contains(ratatui::layout::Position::new(link.x, link.y)));
+        assert!(link.x + link.width <= inner.right());
+        let buf = terminal.backend().buffer();
+        let text: String = (link.x..link.x + link.width)
+            .map(|x| buf[(x, link.y)].symbol())
+            .collect();
+        (text, link)
+    }
+
+    #[test]
+    fn pr_popover_url_line_links_to_the_full_url_when_cut() {
+        let url = format!(
+            "https://github.com/acme/widgets-with-a-rather-long-name/pull/{}",
+            "9".repeat(40)
+        );
+        let (text, link) = pr_popover_url_link(&url, 60);
+        assert_eq!(link.url, url, "the link keeps the full URL");
+        assert!(text.ends_with('…'), "{text:?}");
+        let kept = text.trim_end_matches('…');
+        assert!(url.starts_with(kept) && kept.len() < url.len(), "{text:?}");
+        assert_eq!(usize::from(link.width), visible_width(&text));
+    }
+
+    #[test]
+    fn pr_popover_url_line_links_the_whole_url_when_it_fits() {
+        let url = "https://github.com/octo/demo/pull/7";
+        let (text, link) = pr_popover_url_link(url, 120);
+        assert_eq!(text, url);
+        assert_eq!(link.url, url);
     }
 
     #[test]

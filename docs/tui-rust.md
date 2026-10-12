@@ -60,7 +60,7 @@ One key spelling everywhere a key is shown (help, hint chips, palette, prompts, 
 | `W` | Remove the focused linked worktree after a boxed confirm (`y` / `n`). Unshifted `w` is not this action. Other rows refuse with `Focus a linked worktree to remove` |
 | `Tab` | Focus the other pane |
 | click | Select a tree, graph, or commit-file row, or focus the right pane. Click the fold chevron to toggle that row's fold. A click on an icon selects its row and pins its popover (see `gh`); it never counts toward a double-click. While a popover is pinned, a click inside it focuses that line and runs an action line on release, and a click outside it only closes it |
-| Ctrl+click | On a PR badge in the tree or the graph: select that row like a click and open its PR (same lookup as `gx`). Anywhere else it is a plain click |
+| Ctrl+click | On a PR badge in the tree or the graph: select that row like a click and open its PR (same lookup as `gx`). Anywhere else it is a plain click. A terminal that handles Ctrl+click on OSC 8 links itself opens the full PR URL from the badge or the popover URL line (see **Pull request badge**) |
 | double-click | Same as Enter / drill on the clicked cell. A chevron double-click still folds (once; it does not Enter). Two clicks on an icon pin and then close its popover; they do not drill |
 | hover | Rest the pointer on an icon for 400 ms to peek at its popover. The peek takes no keys. It closes 250 ms after the pointer leaves both the icon and the peek; a click inside it pins it |
 | right-click | Same as Esc: one step back (or leave `V` highlight); in a pending `z` / `g` chord it is swallowed like Esc, with no step back. A pinned popover closes. Overlays ignore it. Off with mouse capture |
@@ -178,6 +178,8 @@ A tree checkout row with a branch and a graph worktree row with a branch show a 
 
 The tree paints the badge at paint time, after the branch segment (`with_pr_badge` in `tui/tree.rs`), so it pans and clips with the label and counts toward the tree's max pan. The graph widget paints it after the worktree label (`GraphWidget::row_badges`, see [graph.md](./graph.md)). Each painted badge records its screen cells as an icon hit (`LayoutHit.icon_hits`, read through `LayoutHit::pr_badge_hits`); only those cells react to Ctrl+click, a click (pin), and hover (peek). A badge that is scrolled out, panned past, or clipped has no cells. The graph pan limit (`graph_col_max`) counts the badge too.
 
+**Hyperlinks (OSC 8).** Ratatui has no hyperlink API, and an escape sequence in a cell breaks its buffer diff. So each frame draws as usual, then `tui/hyperlink.rs` prints the cells of each link again from the finished buffer, wrapped in OSC 8 (`draw_frame` in `tui/event_loop.rs`). This happens on every frame: a diff that rewrites a linked cell clears its link, and the next frame puts it back. `AppState::hyperlinks` lists the links of the last frame: each painted badge glyph links to the full URL of its PR, then come the spans panes record in `LayoutHit.links` (cleared each frame), such as the popover URL line. The link target is always the full URL, even when the visible text is cut. A URL with a byte outside printable ASCII gets no link.
+
 Status text of `gx`, palette Open PR, and Ctrl+click (one status, set when the job finishes):
 
 | Status | Kind | When |
@@ -190,7 +192,7 @@ Status text of `gx`, palette Open PR, and Ctrl+click (one status, set when the j
 
 Background badge lookups never set a status.
 
-The PR badge popover shows the number and URL from the badge answer at once, plus a muted `loading…` line while the detail fetch runs. When the detail lands it shows `#<n> <title>`, the state with `DRAFT` and the review decision (`OPEN · APPROVED`, `CHANGES_REQUESTED`, `REVIEW_REQUIRED`; GitLab `APPROVED` or `NOT_APPROVED`), the author, `head → base` (`->` with ASCII glyphs), the checks (`✓ P · ✗ F · … N`; ASCII `P pass · F fail · N pending`; `none` with no check), and the update time (local time, plus the relative age when it is younger than 3 hours). A field the forge did not send is left out. A failed fetch shows `could not load details` under the number. Open PR (`gx`) and the URL line (`y` copies it) stay in every state.
+The PR badge popover shows the number and URL from the badge answer at once, plus a muted `loading…` line while the detail fetch runs. When the detail lands it shows `#<n> <title>`, the state with `DRAFT` and the review decision (`OPEN · APPROVED`, `CHANGES_REQUESTED`, `REVIEW_REQUIRED`; GitLab `APPROVED` or `NOT_APPROVED`), the author, `head → base` (`->` with ASCII glyphs), the checks (`✓ P · ✗ F · … N`; ASCII `P pass · F fail · N pending`; `none` with no check), and the update time (local time, plus the relative age when it is younger than 3 hours). A field the forge did not send is left out. A failed fetch shows `could not load details` under the number. Open PR (`gx`) and the URL line (`y` copies it) stay in every state. A URL longer than the box ends in `…`; its painted text links (OSC 8) to the full URL, and `y` copies the full URL.
 
 ### Pull request jobs
 
