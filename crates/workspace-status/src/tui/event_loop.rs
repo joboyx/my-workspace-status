@@ -161,7 +161,11 @@ impl Presenter {
     /// the animation tick `anim_tick` after the last draw
     /// ([`AppState::next_anim_tick_ms`]). `u64::MAX` when clean and idle.
     fn remain_ms(&self, anim_tick: Option<u64>) -> u64 {
-        let elapsed = self.elapsed_ms();
+        self.remain_ms_after(self.elapsed_ms(), anim_tick)
+    }
+
+    /// [`Self::remain_ms`] with `elapsed` ms since the last draw.
+    fn remain_ms_after(&self, elapsed: u64, anim_tick: Option<u64>) -> u64 {
         let floor = DRAW_MIN_MS.saturating_sub(elapsed);
         let dirty = if self.dirty { floor } else { u64::MAX };
         let tick = anim_tick.map_or(u64::MAX, |tick| tick.saturating_sub(elapsed).max(floor));
@@ -175,7 +179,11 @@ impl Presenter {
     /// A draw is due: past the draw floor, and dirty or one animation tick
     /// since the last draw.
     fn should_draw(&self, anim_tick: Option<u64>) -> bool {
-        let elapsed = self.elapsed_ms();
+        self.should_draw_after(self.elapsed_ms(), anim_tick)
+    }
+
+    /// [`Self::should_draw`] with `elapsed` ms since the last draw.
+    fn should_draw_after(&self, elapsed: u64, anim_tick: Option<u64>) -> bool {
         elapsed >= DRAW_MIN_MS && (self.dirty || anim_tick.is_some_and(|tick| elapsed >= tick))
     }
 
@@ -638,48 +646,65 @@ mod tests {
         })
     }
 
-    /// A clean presenter whose last draw was `ago_ms` back.
-    fn clean_presenter(ago_ms: u64) -> Presenter {
+    /// A presenter with the given dirty flag. Tests pass the elapsed time
+    /// since the last draw explicitly, so a stalled thread cannot move it.
+    fn presenter(dirty: bool) -> Presenter {
         Presenter {
-            dirty: false,
-            last_draw: Instant::now() - Duration::from_millis(ago_ms),
+            dirty,
+            last_draw: Instant::now(),
         }
     }
 
     #[test]
     fn presenter_has_no_timer_when_clean_and_not_animating() {
-        let presenter = clean_presenter(10_000);
-        assert_eq!(presenter.remain_ms(None), u64::MAX);
-        assert!(!presenter.should_draw(None));
-        let mut dirty = clean_presenter(10_000);
-        dirty.mark();
-        assert_eq!(dirty.remain_ms(None), 0, "dirty past the floor draws now");
-        assert!(dirty.should_draw(None));
+        let clean = presenter(false);
+        assert_eq!(clean.remain_ms_after(10_000, None), u64::MAX);
+        assert_eq!(clean.remain_ms_after(0, None), u64::MAX);
+        assert!(!clean.should_draw_after(10_000, None));
+        let dirty = presenter(true);
+        assert_eq!(
+            dirty.remain_ms_after(10_000, None),
+            0,
+            "dirty past the floor draws now"
+        );
+        assert_eq!(dirty.remain_ms_after(0, None), DRAW_MIN_MS);
+        assert!(dirty.should_draw_after(DRAW_MIN_MS, None));
+        assert!(!dirty.should_draw_after(DRAW_MIN_MS - 1, None));
     }
 
     #[test]
     fn presenter_ticks_at_spinner_rate_while_animating() {
         use super::super::anim::SPINNER_FRAME_MS;
         let tick = Some(SPINNER_FRAME_MS);
-        let mut presenter = clean_presenter(0);
-        presenter.painted();
-        let remain = presenter.remain_ms(tick);
-        assert!(
-            remain > DRAW_MIN_MS && remain <= SPINNER_FRAME_MS,
-            "just painted: next frame one spinner tick away, not at the draw floor ({remain})"
+        let clean = presenter(false);
+        assert_eq!(
+            clean.remain_ms_after(0, tick),
+            SPINNER_FRAME_MS,
+            "just painted: next frame one spinner tick away, not at the draw floor"
         );
-        assert!(!presenter.should_draw(tick), "no draw before the tick");
+        assert_eq!(clean.remain_ms_after(30, tick), SPINNER_FRAME_MS - 30);
+        assert!(!clean.should_draw_after(SPINNER_FRAME_MS - 1, tick));
 
-        let due = clean_presenter(SPINNER_FRAME_MS);
-        assert_eq!(due.remain_ms(tick), 0);
-        assert!(due.should_draw(tick), "one tick after the last draw");
-        assert!(!due.should_draw(None), "the same clean presenter idles");
-
-        let mut fresh = clean_presenter(0);
-        fresh.painted();
+        assert_eq!(clean.remain_ms_after(SPINNER_FRAME_MS, tick), 0);
         assert!(
-            fresh.remain_ms(Some(1)) >= DRAW_MIN_MS - 1,
+            clean.should_draw_after(SPINNER_FRAME_MS, tick),
+            "one tick after the last draw"
+        );
+        assert!(
+            !clean.should_draw_after(SPINNER_FRAME_MS, None),
+            "the same clean presenter idles"
+        );
+
+        assert_eq!(
+            clean.remain_ms_after(0, Some(1)),
+            DRAW_MIN_MS,
             "a tick never beats the draw floor"
+        );
+        assert!(!clean.should_draw_after(DRAW_MIN_MS - 1, Some(1)));
+        assert_eq!(
+            presenter(true).remain_ms_after(0, tick),
+            DRAW_MIN_MS,
+            "dirty draws at the floor even while animating"
         );
     }
 

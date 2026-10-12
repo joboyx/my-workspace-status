@@ -126,7 +126,7 @@ fn pane_title(name: &str) -> String {
     name.to_string()
 }
 
-fn muted_copy(text: impl Into<std::borrow::Cow<'static, str>>, palette: Palette) -> Line<'static> {
+fn muted_copy(text: &'static str, palette: Palette) -> Line<'static> {
     Line::from(Span::styled(text, Style::default().fg(palette.muted)))
 }
 
@@ -141,6 +141,16 @@ fn loading_line(state: &mut AppState, text: &str) -> String {
 fn spinner_text(epoch: Instant, ascii: bool, layout: &mut LayoutHit, text: &str) -> String {
     layout.animating = true;
     format!("{} {text}", spinner_glyph(epoch, Instant::now(), ascii))
+}
+
+/// Foreground of spinner-prefixed loading copy: muted, or the terminal
+/// foreground under `NO_COLOR`.
+fn loading_fg(no_color: bool, palette: Palette) -> Color {
+    if no_color {
+        Color::Reset
+    } else {
+        palette.muted
+    }
 }
 
 /// Flash → focused cursor → inactive cursor → search match.
@@ -529,7 +539,7 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
                 &mut state.layout,
                 LOADING_FILE,
             ),
-            palette.muted,
+            loading_fg(state.no_color, palette),
         )),
         Some(FileRead::Binary) => Some((FILE_IS_BINARY.to_string(), palette.muted)),
         Some(FileRead::TooLarge { bytes }) => Some((file_too_large(*bytes), palette.muted)),
@@ -1028,7 +1038,7 @@ fn draw_explorer_tree(
     } else {
         HashSet::new()
     };
-    let loading = if rows
+    let loading_text = if rows
         .iter()
         .skip(start)
         .take(height)
@@ -1037,6 +1047,18 @@ fn draw_explorer_tree(
         loading_line(state, LOADING_FILE)
     } else {
         LOADING_FILE.to_string()
+    };
+    let loading = TextSeg {
+        text: loading_text,
+        role: if state.no_color {
+            SegRole::Plain
+        } else {
+            SegRole::Muted
+        },
+        hex: None,
+        bold: false,
+        dim: false,
+        icon: None,
     };
     let lines: Vec<Line> = rows
         .iter()
@@ -1069,12 +1091,12 @@ fn draw_explorer_tree(
 /// A changed file paints in its status colour with its letter badge
 /// (`??` for an untracked file); a folder with changes under it gets a
 /// `●` in the modified colour. Ignored entries are muted and dim; a
-/// loading row says `loading` (the spinner-prefixed copy).
+/// loading row paints `loading` (the spinner-prefixed copy and its role).
 fn explorer_row_segments(
     row: &ExplorerRow,
     status: &ExplorerStatus,
     ascii: bool,
-    loading: &str,
+    loading: &TextSeg,
 ) -> NodeSegments {
     let seg = |text: &str, role: SegRole, dim: bool| TextSeg {
         text: text.to_string(),
@@ -1086,7 +1108,7 @@ fn explorer_row_segments(
     };
     if row.placeholder {
         return NodeSegments {
-            segments: vec![seg(loading, SegRole::Muted, false)],
+            segments: vec![loading.clone()],
             trailing: Vec::new(),
         };
     }
@@ -1191,9 +1213,22 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let mut lines = Vec::new();
     let mut hits = Vec::new();
     let now = Instant::now();
+    let running = &state.remote_activity.running;
+    let running_families: HashSet<String> = running
+        .iter()
+        .map(|checkout| {
+            state
+                .snapshot
+                .repos
+                .iter()
+                .find(|snap| &snap.repo == checkout)
+                .and_then(|snap| snap.primary_repo.clone())
+                .unwrap_or_else(|| checkout.clone())
+        })
+        .collect();
     for (y, row) in (area.y..).zip(painted.iter().skip(start).take(height)) {
         let (viewed, commented, resolved, pr) = state.tree_row_marks(row);
-        let spinner = tree_row_runs_remote(row, &state.remote_activity.running)
+        let spinner = tree_row_runs_remote(row, &state.remote_activity.running, &running_families)
             .then(|| spinner_glyph(state.anim_epoch, now, state.ascii));
         state.layout.animating |= spinner.is_some();
         let decor = TreeRowDecor {
@@ -1255,10 +1290,26 @@ struct TreeRowDecor {
     no_color: bool,
 }
 
-/// A repo or checkout row whose checkout has remote git in flight.
-fn tree_row_runs_remote(row: &VisibleRow, running: &HashSet<String>) -> bool {
-    matches!(row.kind, NodeKind::Repo | NodeKind::Checkout)
-        && row.repo.as_ref().is_some_and(|repo| running.contains(repo))
+/// A repo or checkout row with remote git in flight.
+///
+/// A checkout row, or a repo row of one checkout, spins while its own
+/// checkout runs (`running`). A family repo row (a primary with linked
+/// checkouts) spins while any member runs: `running_families` holds the
+/// family key (`primary_repo`, else the checkout) of each running
+/// checkout, and the family row's `repo` is that key.
+fn tree_row_runs_remote(
+    row: &VisibleRow,
+    running: &HashSet<String>,
+    running_families: &HashSet<String>,
+) -> bool {
+    let Some(repo) = row.repo.as_ref() else {
+        return false;
+    };
+    match row.kind {
+        NodeKind::Repo if row.chrome.is_family => running_families.contains(repo),
+        NodeKind::Repo | NodeKind::Checkout => running.contains(repo),
+        _ => false,
+    }
 }
 
 /// Paint one tree row. Also returns an [`IconSpan`] for each segment the
@@ -1657,12 +1708,21 @@ fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     }
     // A focused repo always has a graph load in flight until the graph
     // lands (a file diff clears the graph it replaced).
-    let copy = if state.focused_graph_repo().is_some() {
-        loading_line(state, LOADING_GRAPH)
+    let (copy, style) = if state.focused_graph_repo().is_some() {
+        // NO_COLOR: the terminal foreground, never a fill's colour.
+        let style = if state.no_color {
+            Style::default().fg(Color::Reset)
+        } else {
+            Style::default()
+        };
+        (loading_line(state, LOADING_GRAPH), style)
     } else {
-        "focus a repo for the graph, or a file for its diff".to_string()
+        (
+            "focus a repo for the graph, or a file for its diff".to_string(),
+            Style::default(),
+        )
     };
-    frame.render_widget(Paragraph::new(copy), area);
+    frame.render_widget(Paragraph::new(Span::styled(copy, style)), area);
 }
 
 /// Folder summary in the diff pane: `dir/` and its totals, then one row per
@@ -2129,32 +2189,38 @@ fn draw_commit_file_list(
                 );
                 return;
             }
-            let copy = if tab.loading {
-                spinner_text(
+            let (copy, fg) = if tab.loading {
+                let text = spinner_text(
                     state.anim_epoch,
                     state.ascii,
                     &mut state.layout,
                     LOADING_FILES,
-                )
+                );
+                (text, loading_fg(state.no_color, palette))
             } else {
-                tab.empty_files_copy().to_string()
+                (tab.empty_files_copy().to_string(), palette.muted)
             };
-            frame.render_widget(Paragraph::new(muted_copy(copy, palette)), area);
+            let line = Span::styled(copy, Style::default().fg(fg));
+            frame.render_widget(Paragraph::new(line), area);
             return;
         }
         // Commit-file lists have no row filter: empty after the load means
         // the source has no files.
-        let copy = if state.commit_files_loading {
-            loading_line(state, LOADING_FILES)
+        let (copy, fg) = if state.commit_files_loading {
+            (
+                loading_line(state, LOADING_FILES),
+                loading_fg(state.no_color, palette),
+            )
         } else {
-            match state.commit_drill_source().map(|(_, source)| source) {
+            let copy = match state.commit_drill_source().map(|(_, source)| source) {
                 Some(super::drill::CommitFileSource::Stash { .. }) => NO_FILES_IN_STASH,
                 Some(super::drill::CommitFileSource::Worktree) => NO_FILES_IN_WORKTREE,
                 _ => NO_FILES_IN_COMMIT,
-            }
-            .to_string()
+            };
+            (copy.to_string(), palette.muted)
         };
-        frame.render_widget(Paragraph::new(muted_copy(copy, palette)), area);
+        let line = Span::styled(copy, Style::default().fg(fg));
+        frame.render_widget(Paragraph::new(line), area);
         return;
     }
     let height = area.height as usize;
@@ -2332,6 +2398,7 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         let msg = if let Some(tab) = state.tabs.active_compare() {
             tab.error.clone().unwrap_or_else(|| tab.empty_diff_copy())
         } else if state.explorer_diff_loading() {
+            color = loading_fg(state.no_color, palette);
             loading_line(state, LOADING_FILE)
         } else if path.is_empty() {
             "select a dirty file".to_string()
@@ -5175,8 +5242,9 @@ fn draw_search_files(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         let preview_inner = block.inner(preview_area);
         frame.render_widget(block, preview_area);
         let (epoch, ascii) = (state.anim_epoch, state.ascii);
+        let fg = loading_fg(state.no_color, palette);
         let layout = &mut state.layout;
-        let mut loading = |text: &str| spinner_text(epoch, ascii, layout, text);
+        let mut loading = |text: &str| (spinner_text(epoch, ascii, layout, text), fg);
         let lines =
             search_preview_lines(dialog, index, palette, theme, preview_inner, &mut loading);
         frame.render_widget(Paragraph::new(lines), preview_inner);
@@ -5466,14 +5534,14 @@ fn search_preview_spans(
 /// with a line-number gutter. The hit line has the cursor background; every
 /// hit of that file in view has its matches in the search colours. A
 /// binary, too large, or unreadable file is one dim line. A file still
-/// loading shows `loading` of [`PREVIEW_LOADING`] (the spinner copy).
+/// loading shows `loading` of [`PREVIEW_LOADING`] (the spinner copy and its fg).
 fn search_preview_lines(
     dialog: &SearchFilesState,
     index: &FileIndex,
     palette: Palette,
     theme: ThemeId,
     area: Rect,
-    loading: &mut dyn FnMut(&str) -> String,
+    loading: &mut dyn FnMut(&str) -> (String, Color),
 ) -> Vec<Line<'static>> {
     let width = usize::from(area.width);
     let height = usize::from(area.height);
@@ -5509,10 +5577,8 @@ fn search_preview_lines(
     };
     let (gen, lines) = match body {
         None => {
-            out.push(notice(
-                loading(PREVIEW_LOADING),
-                Style::default().fg(palette.muted),
-            ));
+            let (text, fg) = loading(PREVIEW_LOADING);
+            out.push(notice(text, Style::default().fg(fg)));
             return out;
         }
         Some((_, FileRead::Binary)) => {
@@ -12714,6 +12780,132 @@ mod tests {
         assert!(!state.layout.animating, "draw resets the frame flag");
         assert!(!state.layout.gliding, "draw resets the glide flag");
         assert_eq!(state.next_anim_tick_ms(), None, "idle: no timer redraw");
+    }
+
+    /// Fg of the first painted braille spinner cell inside `area`.
+    fn spinner_cell_fg(terminal: &Terminal<TestBackend>, area: Rect) -> Option<Color> {
+        use super::super::anim::SPINNER_FRAMES;
+        let buf = terminal.backend().buffer();
+        (area.y..area.bottom())
+            .flat_map(|y| (area.x..area.right()).map(move |x| (x, y)))
+            .map(|at| &buf[at])
+            .find(|cell| SPINNER_FRAMES.contains(&cell.symbol()))
+            .map(|cell| cell.fg)
+    }
+
+    #[test]
+    fn tree_spinner_has_no_fg_under_no_color() {
+        let mut state = fetching_app_state(false);
+        let muted = state.theme.palette().muted;
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let tree = Rect::new(
+            state.layout.tree_x,
+            state.layout.tree_y,
+            state.layout.tree_width,
+            state.layout.tree_height,
+        );
+        assert_eq!(spinner_cell_fg(&terminal, tree), Some(muted));
+
+        state.no_color = true;
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(
+            spinner_cell_fg(&terminal, tree),
+            Some(Color::Reset),
+            "NO_COLOR: the tree spinner takes the terminal foreground"
+        );
+    }
+
+    #[test]
+    fn pane_loading_spinner_has_no_fg_under_no_color() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, false);
+        let muted = state.theme.palette().muted;
+        state.begin_commit_files(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let whole = terminal.backend().buffer().area;
+        assert!(buffer_text(&terminal).contains(LOADING_FILES));
+        assert_eq!(spinner_cell_fg(&terminal, whole), Some(muted));
+
+        state.no_color = true;
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(
+            spinner_cell_fg(&terminal, whole),
+            Some(Color::Reset),
+            "NO_COLOR: the loading spinner takes the terminal foreground"
+        );
+    }
+
+    /// A primary `app` with a linked `wt` checkout: one family repo row
+    /// over two checkout rows.
+    fn family_state() -> AppState {
+        let mut wt = repo("wt", true);
+        wt.checkout_kind = crate::snapshot::CheckoutKind::Linked;
+        wt.primary_repo = Some("app".into());
+        let snapshot = build_workspace_snapshot(&[repo("app", true), wt], &[], false, &[]);
+        AppState::new(PathBuf::from("/tmp"), snapshot, true)
+    }
+
+    /// Painted text of the tree row with id `id`.
+    fn tree_row_text(terminal: &Terminal<TestBackend>, state: &AppState, id: &str) -> String {
+        let layout = &state.layout;
+        let index = state
+            .painted_tree_rows()
+            .iter()
+            .position(|row| row.id == id)
+            .unwrap_or_else(|| panic!("row {id}"));
+        let y = layout.tree_y + u16::try_from(index - layout.list_offset).unwrap();
+        buffer_row(
+            terminal,
+            y,
+            layout.tree_x,
+            layout.tree_x + layout.tree_width,
+        )
+    }
+
+    #[test]
+    fn family_repo_row_spins_while_a_linked_checkout_runs() {
+        use super::super::anim::SPINNER_FRAMES_ASCII;
+        let spins = |text: &str| {
+            SPINNER_FRAMES_ASCII.iter().any(|frame| {
+                text.ends_with(&format!("{frame} ")) || text.contains(&format!(" {frame} "))
+            })
+        };
+        let mut state = family_state();
+        let mut terminal = Terminal::new(TestBackend::new(120, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert!(
+            state
+                .painted_tree_rows()
+                .iter()
+                .any(|row| row.id == "repo:app" && row.chrome.is_family),
+            "fixture paints a family row"
+        );
+        let idle_family = tree_row_text(&terminal, &state, "repo:app");
+        let idle_wt = tree_row_text(&terminal, &state, "checkout:wt");
+        let idle_app = tree_row_text(&terminal, &state, "checkout:app");
+
+        state.remote_activity.running.insert("wt".into());
+        draw_state(&mut terminal, &mut state);
+        let family = tree_row_text(&terminal, &state, "repo:app");
+        let wt = tree_row_text(&terminal, &state, "checkout:wt");
+        let app = tree_row_text(&terminal, &state, "checkout:app");
+        assert!(
+            !spins(&idle_family) && spins(&family),
+            "family row spins for its linked checkout:\n{idle_family}\n{family}"
+        );
+        assert!(
+            !spins(&idle_wt) && spins(&wt),
+            "wt row spins:\n{idle_wt}\n{wt}"
+        );
+        assert_eq!(app, idle_app, "the idle primary checkout row stays still");
+        assert!(state.layout.animating);
     }
 
     /// A failed `git diff` names git's reason; a focused repo whose graph
