@@ -14,7 +14,7 @@ The script rejects a clip and keeps the old GIF when the last or mid frame is gr
 
 The script runs Xvfb on `:99`. Set `WS_STATUS_STILLS_DISPLAY` to another number when `:99` is busy. It stops only the `xfce4-terminal` it started on that display.
 
-The README set uses the shipped defaults: theme Slate and `viewDefaults.background` `paint`. The script points `XDG_CONFIG_HOME` at `tmp/demo-stills-stage/config`, unsets `WS_STATUS_THEME`, and removes its own `WS_STATUS_THEME_STORE` file before each launch, so a parent shell, an operator config file, or a last-used theme cannot change the look.
+The README set uses the shipped defaults: theme Slate and `viewDefaults.background` `paint`. The script points `XDG_CONFIG_HOME` at `tmp/demo-stills-stage/config`, unsets `WS_STATUS_THEME`, and removes its own `WS_STATUS_THEME_STORE` file before each launch, so a parent shell, an operator config file, or a last-used theme cannot change the look. It also exports `WS_STATUS_THEME_MODE=dark`, so the default `themeMode` `auto` never asks the terminal and picks a twin from its background.
 
 ### Theme and background knobs
 
@@ -26,6 +26,7 @@ These environment variables make other sets with the same clips and keys. Each k
 | `WS_STATUS_STILLS_CLIPS` | clip names or numbers, comma- or space-separated (`01`, `01-tree-diff`) | Runs only those clips. Default: all. |
 | `WS_STATUS_STILLS_THEME` | theme slug (`slate`, `tokyo-night`, ...) | Written as `theme` in the isolated user config file. |
 | `WS_STATUS_STILLS_BACKGROUND` | `paint` or `terminal` | Written as `viewDefaults.background` in that file. |
+| `WS_STATUS_STILLS_THEME_MODE` | `dark` (default) or `light` | Exported as `WS_STATUS_THEME_MODE`. `dark` paints the dark variant of the theme, `light` its light twin (`WS_STATUS_STILLS_THEME=tokyo-night` with `light` shows `tokyo-night-day`). A light slug needs `light`, or it paints as its dark twin. |
 | `WS_STATUS_STILLS_GIFS` | `1` (default) or `0` | `0` makes a stills-only run: the GIF is still checked but not copied, and the PNG stills replace the whole `WS_STATUS_STILLS_OUT` directory (any other file in it is removed). |
 
 The script loads that config once with `--plain` in the seeded workspace, so an unknown theme slug stops the run with the binary's error. The xfce terminal keeps its fixed colours (`#1a1b26` / `#c0caf5`) for every run. In `paint` mode the TUI fills every cell, and only the terminal's 1 px inner padding shows the terminal colour.

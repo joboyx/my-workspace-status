@@ -105,12 +105,9 @@ pub(crate) struct UpdateCheckHooks<F, P> {
 /// (trimmed, any case). Any other env value, or no env var, falls through
 /// to `config`, then to on.
 pub(crate) fn update_check_enabled(env_value: Option<&str>, config: Option<bool>) -> bool {
-    let from_env = env_value.and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
-        "0" | "false" | "off" => Some(false),
-        "1" | "true" | "on" => Some(true),
-        _ => None,
-    });
-    from_env.or(config).unwrap_or(true)
+    crate::settings::env_bool(env_value)
+        .or(config)
+        .unwrap_or(true)
 }
 
 /// True when this build and the resolved setting may run the TUI-startup check.

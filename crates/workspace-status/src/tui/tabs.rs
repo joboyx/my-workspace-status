@@ -628,8 +628,13 @@ pub struct FileTab {
     pub body_generation: Option<u64>,
     /// Focused 0-based line.
     pub cursor: usize,
-    /// First painted line.
+    /// Viewport top: the first painted line, or during a Ctrl-d / Ctrl-u
+    /// glide the top the glide lands on.
     pub scroll: usize,
+    /// Ctrl-d / Ctrl-u moved the cursor: the next paint puts it near the
+    /// vertical middle instead of keeping the sticky [`Self::scroll`] top,
+    /// then clears this.
+    pub recenter: bool,
     /// Horizontal pan of the code columns.
     pub col_offset: u16,
 }
@@ -646,6 +651,7 @@ impl FileTab {
             body_generation: None,
             cursor: 0,
             scroll: 0,
+            recenter: false,
             col_offset: 0,
         }
     }

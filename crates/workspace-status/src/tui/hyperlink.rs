@@ -7,9 +7,11 @@
 //! come back with the link attached. A later diff that writes those cells
 //! without OSC 8 clears the link, and the next frame adds it again.
 //!
-//! [`link_cells`] reads the cells to print; [`write_links`] prints them. The
-//! target URL comes from a forge API, so a URL with a byte outside printable
-//! ASCII (`0x21..=0x7E`) is dropped and can never inject an escape.
+//! [`link_cells`] reads the cells to print; [`write_links`] prints them. A
+//! target URL can come from a forge API (PR badge), a git remote (commit
+//! hash), or a file name (path rows, [`file_url`]), so a URL with a byte
+//! outside printable ASCII (`0x21..=0x7E`) is dropped and can never inject
+//! an escape. [`file_url`] percent-encodes so a path link always passes.
 
 use std::io::{self, Write};
 
@@ -17,7 +19,8 @@ use crossterm::cursor::{RestorePosition, SavePosition};
 use crossterm::queue;
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::buffer::{Buffer, Cell};
-use unicode_width::UnicodeWidthStr;
+
+use super::undercurl::span_cells;
 
 /// A screen span that links to a URL.
 ///
@@ -50,36 +53,87 @@ fn is_safe_url(url: &str) -> bool {
     !url.is_empty() && url.bytes().all(|b| (0x21..=0x7E).contains(&b))
 }
 
+/// Append `bytes` to `out`, each byte outside RFC 3986 unreserved
+/// (`A-Z a-z 0-9 - . _ ~`) as `%XX`. `/` stays as is when `keep_slash`.
+fn push_percent_encoded(out: &mut String, bytes: &[u8], keep_slash: bool) {
+    for &byte in bytes {
+        if byte.is_ascii_alphanumeric()
+            || matches!(byte, b'-' | b'.' | b'_' | b'~')
+            || (keep_slash && byte == b'/')
+        {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+}
+
+/// `file://` URL of the local file at absolute path `abs` on `host`.
+///
+/// `file://{host}{path}`. Every path byte outside RFC 3986 unreserved
+/// characters and `/` is percent-encoded (spaces, `#`, `?`, `%`, non-ASCII
+/// bytes), so the URL always passes the OSC 8 safety check. An empty
+/// `host` gives `file:///…`. On Windows, `\` becomes `/` and the drive
+/// gets a leading `/`.
+pub fn file_url(host: &str, abs: &std::path::Path) -> String {
+    #[cfg(unix)]
+    let path = {
+        use std::os::unix::ffi::OsStrExt;
+        abs.as_os_str().as_bytes().to_vec()
+    };
+    #[cfg(not(unix))]
+    let path = {
+        let text = abs.to_string_lossy().replace('\\', "/");
+        if text.starts_with('/') {
+            text.into_bytes()
+        } else {
+            format!("/{text}").into_bytes()
+        }
+    };
+    let mut url = String::from("file://");
+    push_percent_encoded(&mut url, host.as_bytes(), false);
+    push_percent_encoded(&mut url, &path, true);
+    url
+}
+
+/// Host name for [`file_url`], read once per process.
+///
+/// `gethostname` on unix; `""` when it fails and on other systems, which
+/// gives a `file:///…` URL.
+pub(crate) fn local_host() -> &'static str {
+    static HOST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HOST.get_or_init(read_host_name)
+}
+
+#[cfg(unix)]
+fn read_host_name() -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: `buf` is valid for `buf.len()` bytes; the call writes at most
+    // that many.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+    if rc != 0 {
+        return String::new();
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
+}
+
+#[cfg(not(unix))]
+fn read_host_name() -> String {
+    String::new()
+}
+
 /// Read the cells of each link in `links` from `buffer`.
 ///
 /// A link with an unsafe URL, or whose span is off the buffer, is left out.
-/// The span is clipped to the buffer. A wide glyph is read once: the cells it
-/// covers after the first are skipped, as is a cell with `skip` set, the
-/// same way ratatui's diff skips them.
+/// The span is clipped to the buffer and read with [`span_cells`]: a wide
+/// glyph once, skip cells left out.
 pub(crate) fn link_cells(buffer: &Buffer, links: &[LinkHit]) -> Vec<LinkCells> {
-    let area = buffer.area;
     links
         .iter()
         .filter(|link| is_safe_url(&link.url))
         .filter_map(|link| {
-            if link.y < area.top() || link.y >= area.bottom() {
-                return None;
-            }
-            let start = link.x.max(area.left());
-            let end = link.x.saturating_add(link.width).min(area.right());
-            let mut cells = Vec::new();
-            let mut to_skip = 0usize;
-            for x in start..end {
-                let cell = &buffer[(x, link.y)];
-                if to_skip == 0 && !cell.skip {
-                    cells.push((x, link.y, cell.clone()));
-                }
-                to_skip = if to_skip > 0 {
-                    to_skip - 1
-                } else {
-                    cell.symbol().width().saturating_sub(1)
-                };
-            }
+            let cells = span_cells(buffer, link.y, link.x, link.width);
             (!cells.is_empty()).then(|| LinkCells {
                 url: link.url.clone(),
                 cells,
@@ -117,6 +171,7 @@ mod tests {
     use super::*;
     use ratatui::layout::Rect;
     use ratatui::style::Style;
+    use unicode_width::UnicodeWidthStr;
 
     const FULL: &str = "https://github.com/acme/widgets/pull/12345";
 
@@ -205,6 +260,59 @@ mod tests {
         assert!(link_cells(&buffer, &[link(0, 9, 2, FULL)]).is_empty());
         let clipped = link_cells(&buffer, &[link(1, 2, 9, FULL)]);
         assert_eq!(clipped[0].cells.len(), 2);
+    }
+
+    /// Decode `%XX` escapes back to bytes.
+    fn percent_decode(text: &str) -> Vec<u8> {
+        let bytes = text.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap();
+                out.push(u8::from_str_radix(hex, 16).unwrap());
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn file_url_percent_encodes_spaces_hash_and_non_ascii() {
+        let path = std::path::Path::new("/work/a b#c/é.rs");
+        let url = file_url("box-1", path);
+        assert_eq!(url, "file://box-1/work/a%20b%23c/%C3%A9.rs");
+        let rest = url.strip_prefix("file://box-1").unwrap();
+        assert!(
+            rest.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-._~/%".contains(&b)),
+            "{url}"
+        );
+        assert_eq!(percent_decode(rest), "/work/a b#c/é.rs".as_bytes());
+        // No host: `file:///…`.
+        assert_eq!(
+            file_url("", std::path::Path::new("/x/?%.rs")),
+            "file:///x/%3F%25.rs"
+        );
+    }
+
+    #[test]
+    fn file_url_passes_is_safe_url() {
+        for (host, path) in [
+            ("box-1", "/work/a b#c/é.rs"),
+            ("", "/tmp/tab\there/new\nline"),
+            ("host with space", "/界/\u{7f}/x"),
+        ] {
+            let url = file_url(host, std::path::Path::new(path));
+            assert!(is_safe_url(&url), "{url:?}");
+        }
+        assert!(is_safe_url(&file_url(
+            local_host(),
+            std::path::Path::new("/a b")
+        )));
     }
 
     #[test]

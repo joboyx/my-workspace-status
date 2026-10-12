@@ -218,3 +218,33 @@ fn tty_spawn_paths_isolate_theme_store() {
         );
     }
 }
+
+#[test]
+fn tty_spawn_paths_pin_theme_mode() {
+    // PTY harness: the baseline user config pins themeMode, and a parent
+    // WS_STATUS_THEME_MODE is dropped so it cannot beat the pin.
+    assert!(
+        PTY_HARNESS.contains(r#"\"themeMode\":\"dark\""#),
+        "tui_tty_e2e/harness.rs BASELINE_USER_CONFIG must pin themeMode to dark \
+         (auto follows the terminal background and flips colour assertions)"
+    );
+    assert!(
+        PTY_HARNESS.contains("env_remove(\"WS_STATUS_THEME_MODE\")"),
+        "tui_tty_e2e/harness.rs must drop a parent WS_STATUS_THEME_MODE"
+    );
+    // Desktop harness: same baseline file (xterm is white, auto would pick light).
+    assert!(
+        DESKTOP_HARNESS.contains("write_baseline_user_config(&config_home)"),
+        "tui_tty_e2e/desktop.rs must write the harness baseline config (themeMode dark)"
+    );
+    assert!(
+        DESKTOP_HARNESS.contains(r#"WS_STATUS_THEME WS_STATUS_THEME_MODE\n""#),
+        "tui_tty_e2e/desktop.rs must unset a parent WS_STATUS_THEME_MODE"
+    );
+    // Demo clips: the launcher exports the knob, which defaults to dark.
+    assert!(
+        STILLS_SH.contains("STILLS_THEME_MODE=\"${WS_STATUS_STILLS_THEME_MODE:-dark}\"")
+            && STILLS_SH.contains("export WS_STATUS_THEME_MODE="),
+        "scripts/capture-demo-stills.sh must export WS_STATUS_THEME_MODE (default dark)"
+    );
+}

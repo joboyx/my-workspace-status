@@ -1,10 +1,10 @@
 use crate::seed::{regions_diff, two_hunk_regions_workspace, REGIONS_ALPHA, REGIONS_OMEGA};
 use crate::support::{
-    crumb_row, open_regions_first_hunk_highlight, revert_range_confirm, GIT_WAIT, SETTLE_MS, WAIT,
+    ack_rows, open_regions_first_hunk_highlight, revert_range_confirm, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 fn reverted_range_toast(screen: &str) -> bool {
-    crumb_row(screen).contains("reverted range regions.txt")
+    ack_rows(screen).contains("reverted range regions.txt")
         && !screen.contains("Discard highlighted lines")
         && !screen.contains("VISUAL")
 }

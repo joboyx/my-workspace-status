@@ -28,8 +28,8 @@ use super::super::gates::ListFocusTarget;
 use super::super::hyperlink::LinkHit;
 use super::super::popover::IconTarget;
 use super::super::pull_request::{
-    lookup_failed_status, no_pr_status, PrDetailLookup, PrLookup, PrState, PullRequest,
-    PullRequestDetail, NO_PR_FOR_ROW, OPEN_FAILED,
+    commit_url, lookup_failed_status, no_pr_status, parse_remote, PrDetailLookup, PrLookup,
+    PrState, PullRequest, PullRequestDetail, NO_PR_FOR_ROW, OPEN_FAILED,
 };
 use super::super::status::StatusMessage;
 use super::super::tree::NodeKind;
@@ -98,6 +98,13 @@ pub(crate) struct PrCache {
 }
 
 impl PrCache {
+    /// Remote URL the PR lookup resolved for checkout `checkout`.
+    ///
+    /// `None` before the lookup lands, and when the checkout has no remote.
+    pub(crate) fn remote_for(&self, checkout: &Path) -> Option<&str> {
+        self.checkouts.get(checkout)?.remote.as_deref()
+    }
+
     /// Drop answers and details that no checkout points at any more.
     fn prune_answers(&mut self) {
         let live: HashSet<(&str, &str)> = self
@@ -244,6 +251,22 @@ impl AppState {
             BranchPr::Ready(Some(pr)) => Some(pr),
             BranchPr::Ready(None) | BranchPr::Failed => None,
         }
+    }
+
+    /// Web page of commit `sha` (full id) in checkout `checkout`, or `None`.
+    ///
+    /// The forge comes from the remote URL the PR badge lookup already
+    /// resolved for the checkout ([`PrCache::remote_for`]); no git runs
+    /// here. No resolved remote, or a remote that is not GitHub or GitLab,
+    /// gives no link. An id that is not a full SHA-1 or SHA-256 hex id (an
+    /// abbreviated one) gives no link either.
+    pub(crate) fn commit_link(&self, checkout: &Path, sha: &str) -> Option<String> {
+        let full = matches!(sha.len(), 40 | 64) && sha.bytes().all(|b| b.is_ascii_hexdigit());
+        if !full {
+            return None;
+        }
+        let remote = self.pr_cache.remote_for(checkout)?;
+        Some(commit_url(&parse_remote(remote)?, sha))
     }
 
     /// PR state for the badge of checkout `repo`.
@@ -755,6 +778,25 @@ mod tests {
         assert!(app.status.is_empty(), "a background failure stays silent");
         assert!(app.apply_pr_lookup(path, "feature", None, PrLookup::NoPr));
         assert_eq!(app.pr_badge(path), None, "no remote");
+    }
+
+    #[test]
+    fn commit_link_needs_a_resolved_remote_and_a_full_id() {
+        const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+        let mut app = app_with(&[repo("app", "feature")], &[]);
+        let path = Path::new("app");
+        let _ = app.due_pr_lookups();
+        assert_eq!(app.commit_link(path, SHA), None, "lookup in flight");
+        assert!(app.apply_pr_lookup(path, "feature", Some(REMOTE.into()), PrLookup::NoPr));
+        assert_eq!(
+            app.commit_link(path, SHA).as_deref(),
+            Some("https://github.com/octo/demo/commit/0123456789abcdef0123456789abcdef01234567")
+        );
+        let sha256 = "ab".repeat(32);
+        assert!(app.commit_link(path, &sha256).is_some(), "SHA-256 id");
+        for short in ["0123456", &SHA[..39], "HEAD", &"g".repeat(40)] {
+            assert_eq!(app.commit_link(path, short), None, "{short}");
+        }
     }
 
     #[test]

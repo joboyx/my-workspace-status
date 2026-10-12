@@ -3,7 +3,7 @@
 use crate::desktop::DesktopSession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    documented_graph_stash_pop, documented_launch_first_paint,
+    after_ack, documented_graph_stash_pop, documented_launch_first_paint,
     graph_focused_merger_before_stash_pop, merger_graph_left_unfocused, stash_row_ready_to_pop,
     GIT_WAIT, SETTLE_MS, WAIT,
 };
@@ -68,7 +68,7 @@ fn desktop_xfce_stash_graph_pop() {
 
     tui.key("p");
     tui.wait_pred(
-        documented_graph_stash_pop,
+        after_ack("popped stash@{0}", documented_graph_stash_pop),
         "graph p pops stash@{0}: wip.txt A on merger, stash gone, popped toast",
         GIT_WAIT,
     );

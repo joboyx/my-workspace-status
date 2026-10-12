@@ -206,6 +206,20 @@ mod tests {
     }
 
     #[test]
+    fn store_round_trips_a_light_slug() {
+        let (dir, path) = temp_store();
+        save_last_theme(&path, ThemeId::CatppuccinLatte).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "{\n  \"version\": 1,\n  \"theme\": \"catppuccin-latte\"\n}\n"
+        );
+        assert_eq!(load_last_theme(&path), Some(ThemeId::CatppuccinLatte));
+        fs::write(&path, "{\"version\":1,\"theme\":\"solarized-light\"}\n").unwrap();
+        assert_eq!(load_last_theme(&path), Some(ThemeId::SolarizedLight));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn save_creates_missing_parent_dirs() {
         let (dir, path) = temp_store();
         let path = path
@@ -231,7 +245,7 @@ mod tests {
             "[1, 2]\n",
             "{\"theme\":\"dracula\"}\n",
             "{\"version\":1}\n",
-            "{\"version\":1,\"theme\":\"solarized-light\"}\n",
+            "{\"version\":1,\"theme\":\"solarized\"}\n",
             "{\"version\":1,\"theme\":\"Dracula\"}\n",
             "{\"version\":2,\"theme\":\"dracula\"}\n",
             "{\"version\":0,\"theme\":\"dracula\"}\n",
@@ -277,7 +291,7 @@ mod tests {
         let (dir, path) = temp_store();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         for body in [
-            "{\"version\":1,\"theme\":\"solarized-light\"}\n",
+            "{\"version\":1,\"theme\":\"solarized\"}\n",
             "{\"version\":99,\"theme\":\"dracula\"}\n",
         ] {
             fs::write(&path, body).unwrap();

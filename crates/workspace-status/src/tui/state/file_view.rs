@@ -35,6 +35,17 @@ impl AppState {
         self.set_file_cursor(usize::try_from(next).unwrap_or(usize::MAX));
     }
 
+    /// Ctrl-d / Ctrl-u on the file body: the next paint puts the cursor
+    /// near the vertical middle ([`FileTab::recenter`]), as the tree,
+    /// graph, and diff do. `j` / `k` keep the sticky top.
+    ///
+    /// [`FileTab::recenter`]: super::super::tabs::FileTab::recenter
+    pub(super) fn recenter_file_view(&mut self) {
+        if let Some(tab) = self.tabs.active_file_view_mut() {
+            tab.recenter = true;
+        }
+    }
+
     /// Pan the active file body's code columns. A no-op while wrap is on.
     pub(super) fn pan_file_tab(&mut self, delta: i32) {
         if self.diff_wrap {

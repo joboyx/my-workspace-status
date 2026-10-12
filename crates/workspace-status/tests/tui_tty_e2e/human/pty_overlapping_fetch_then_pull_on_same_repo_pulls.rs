@@ -4,9 +4,9 @@ use crate::harness::PtySession;
 use crate::seed::unfetched_behind_workspace;
 use crate::slow_git::{open_with_slow_git, wait_slow_git_started, SlowFetchPullGit};
 use crate::support::{
-    crumb_row, has_fetch_hint, panes_tree_focused_graph_unfocused, repo_row_in_sync, status_row,
-    syncbox_row_behind, tree_cursor_on, tree_dir_collapsed, tree_dir_expanded, tree_has,
-    tree_line_containing, GIT_WAIT, WAIT,
+    ack_rows, crumb_row, has_fetch_hint, panes_tree_focused_graph_unfocused, repo_row_in_sync,
+    status_row, syncbox_row_behind, tree_cursor_on, tree_dir_collapsed, tree_dir_expanded,
+    tree_has, tree_line_containing, GIT_WAIT, WAIT,
 };
 
 fn no_lock_or_search(screen: &str) -> bool {
@@ -55,10 +55,10 @@ fn cursor_on_syncbox_in_sync(screen: &str) -> bool {
 }
 
 fn pulled_without_lock(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
     screen.contains("Pulled")
-        && (crumb.contains("Pulled 1 repo") || crumb.contains("Pulled"))
-        && !crumb.contains("failed")
+        && (acks.contains("Pulled 1 repo") || acks.contains("Pulled"))
+        && !acks.contains("failed")
         && !screen.contains("index.lock")
         && no_lock_or_search(screen)
 }

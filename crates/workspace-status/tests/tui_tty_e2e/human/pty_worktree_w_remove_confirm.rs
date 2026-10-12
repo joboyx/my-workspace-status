@@ -4,9 +4,9 @@ use std::process::{Command, Stdio};
 use crate::harness::PtySession;
 use crate::seed::{git_env, worktree_workspace};
 use crate::support::{
-    crumb_row, merge_mark_after, no_mouse_toggle_toast, status_row, title_has_files,
-    tree_cursor_on, tree_has, tree_line_containing, tree_line_has_leading_worktree_icon,
-    tree_pane_focused, GIT_WAIT, SETTLE_MS, WAIT,
+    ack_rows, after_ack, crumb_row, merge_mark_after, no_mouse_toggle_toast, status_row,
+    title_has_files, tree_cursor_on, tree_has, tree_line_containing,
+    tree_line_has_leading_worktree_icon, tree_pane_focused, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 const LINKED_PATH: &str = "app/.worktrees/feat";
@@ -80,7 +80,7 @@ fn family_tree_idle(screen: &str) -> bool {
 
 /// First paint: family `app` focused (trailing `@`). Linked row is visible. `W` has not run.
 fn idle_family_before_remove(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
+    let crumb = ack_rows(screen);
     family_tree_idle(screen)
         && !crumb.contains("removed worktree")
         && !crumb.contains("Focus a linked worktree to remove")
@@ -89,22 +89,24 @@ fn idle_family_before_remove(screen: &str) -> bool {
 /// Family-row `W` refuses. Overlay stays closed. Linked checkout stays.
 fn family_w_refuses_without_confirm(screen: &str) -> bool {
     let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
     family_tree_idle(screen)
         && crumb.contains("Focus a linked worktree to remove")
-        && !crumb.contains("removed worktree")
+        && !acks.contains("removed worktree")
 }
 
 /// Cursor on the linked checkout. Hint `W` is remove. Overlay closed.
 fn linked_ready_to_remove(screen: &str) -> bool {
     let status = status_row(screen);
     let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
     tree_pane_focused(screen)
         && tree_cursor_on(screen, LINKED_BRANCH)
         && !tree_cursor_on(screen, "app")
         && !tree_cursor_on(screen, PRIMARY_BRANCH)
         && family_and_linked_on_tree(screen)
         && crumb.contains("workspace › feat")
-        && !crumb.contains("removed worktree")
+        && !acks.contains("removed worktree")
         && status.contains("W")
         && status.contains("remove worktree")
         && no_remove_confirm(screen)
@@ -113,7 +115,7 @@ fn linked_ready_to_remove(screen: &str) -> bool {
 
 /// `PendingConfirm::RemoveWorktree` boxed overlay. Linked checkout still there.
 fn remove_worktree_confirm(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
+    let crumb = ack_rows(screen);
     tree_pane_focused(screen)
         && tree_cursor_on(screen, LINKED_BRANCH)
         && family_and_linked_on_tree(screen)
@@ -129,13 +131,12 @@ fn remove_worktree_confirm(screen: &str) -> bool {
 
 /// Confirm `y` ran `git worktree remove`. Ghost / overlay-only cannot pass.
 fn documented_worktree_removed(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
+    let crumb = ack_rows(screen);
     tree_pane_focused(screen)
         && tree_has(screen, "app")
         && tree_has(screen, PRIMARY_BRANCH)
         && !tree_has(screen, LINKED_BRANCH)
         && !tree_has(screen, "2 wt")
-        && crumb.contains(&format!("removed worktree {LINKED_PATH}"))
         && !crumb.contains("failed")
         && !crumb.contains("Focus a linked worktree to remove")
         && !crumb.contains("remove worktree cancelled")
@@ -252,7 +253,10 @@ fn pty_worktree_w_remove_confirm() {
 
     tui.key('y');
     tui.wait_pred(
-        documented_worktree_removed,
+        after_ack(
+            &format!("removed worktree {LINKED_PATH}"),
+            documented_worktree_removed,
+        ),
         "y removes the linked worktree: toast, row gone, primary stays",
         GIT_WAIT,
     );

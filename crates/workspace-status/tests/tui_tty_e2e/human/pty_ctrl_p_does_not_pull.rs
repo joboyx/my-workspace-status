@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 use crate::harness::PtySession;
 use crate::seed::behind_workspace;
 use crate::support::{
-    crumb_row, has_pull_hint, syncbox_row_behind, syncbox_row_current, tree_cursor_on, tree_has,
-    GIT_WAIT, WAIT,
+    ack_rows, after_ack, has_pull_hint, syncbox_row_behind, syncbox_row_current, tree_cursor_on,
+    tree_has, GIT_WAIT, WAIT,
 };
 
 /// Long enough for a pull against the local bare origin to start and paint.
@@ -30,9 +30,8 @@ fn no_pull_started(screen: &str) -> bool {
         && !screen.contains("Pulled")
 }
 
-fn crumb_pulled_one(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
-    crumb.contains("Pulled 1 repo") && !crumb.contains("failed")
+fn no_failed_ack(screen: &str) -> bool {
+    !ack_rows(screen).contains("failed")
 }
 
 /// Ctrl-p is not `p`: it opens Quick Open on files and never pulls.
@@ -78,7 +77,9 @@ fn pty_ctrl_p_does_not_pull() {
 
     tui.key('p');
     tui.wait_pred(
-        |screen| crumb_pulled_one(screen) && syncbox_row_current(screen),
+        after_ack("Pulled 1 repo", |screen| {
+            no_failed_ack(screen) && syncbox_row_current(screen)
+        }),
         "plain p still pulls: Pulled 1 repo, syncbox current",
         GIT_WAIT,
     );

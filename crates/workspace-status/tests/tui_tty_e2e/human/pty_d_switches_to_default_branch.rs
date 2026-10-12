@@ -5,9 +5,10 @@ use std::process::{Command, Stdio};
 use crate::harness::PtySession;
 use crate::seed::{daily_workspace, focus_workspace, git_env};
 use crate::support::{
-    crumb_row, documented_launch_first_paint, focusbox_graph_left_full, has_fetch_hint,
-    launch_status_chrome, line_on_branch, not_files_search_or_stash, status_row, title_has_files,
-    tree_cursor_on, tree_has, tree_has_branch, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
+    ack_rows, after_ack, crumb_row, documented_launch_first_paint, focusbox_graph_left_full,
+    has_fetch_hint, launch_status_chrome, line_on_branch, not_files_search_or_stash, status_row,
+    title_has_files, tree_cursor_on, tree_has, tree_has_branch, tree_line_containing, GIT_WAIT,
+    SETTLE_MS, WAIT,
 };
 
 fn git_stdout(repo: &Path, args: &[&str]) -> String {
@@ -101,27 +102,31 @@ fn main_is_checked_out(screen: &str) -> bool {
         && !screen.contains("[+feature/keep]")
 }
 
+/// Breadcrumb after a clean switch: no failure. The `Switched 1 repo` toast is
+/// checked by the wait (`after_ack`), since it can expire before the reload lands.
 fn crumb_switched_one(screen: &str) -> bool {
     let crumb = crumb_row(screen);
-    crumb.contains("Switched 1 repo")
-        && !crumb.contains("failed")
-        && !crumb.contains("no non-default")
+    let acks = ack_rows(screen);
+    !acks.contains("failed")
+        && !acks.contains("no non-default")
         && crumb.contains("workspace › focusbox")
-        && !crumb.contains("[focusbox]")
+        && !acks.contains("[focusbox]")
 }
 
 fn crumb_already_on_default(screen: &str) -> bool {
     let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
     crumb.contains("no non-default branches to switch")
-        && !crumb.contains("Switched")
-        && !crumb.contains("failed")
+        && !acks.contains("Switched")
+        && !acks.contains("failed")
         && crumb.contains("workspace › focusbox")
 }
 
 fn crumb_dirty_skip(screen: &str) -> bool {
     let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
     crumb.contains("Switched 1 repo (1 skipped: dirty)")
-        && !crumb.contains("no non-default")
+        && !acks.contains("no non-default")
         && crumb.contains("workspace › focusbox")
 }
 
@@ -200,12 +205,13 @@ fn daily_first_paint_on_readme(screen: &str) -> bool {
 /// nothing. `app` stays on `main`. `merger` stays off default.
 fn documented_d_file_row_says_why(screen: &str) -> bool {
     let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
     crumb.trim_start().starts_with("workspace")
         && crumb.contains("focus a repo or checkout to switch to default")
         && launch_status_chrome(screen)
-        && !crumb_row(screen).contains("Switched")
-        && !crumb_row(screen).contains("no non-default")
-        && !crumb_row(screen).contains("failed")
+        && !acks.contains("Switched")
+        && !acks.contains("no non-default")
+        && !ack_rows(screen).contains("failed")
         && tree_has(screen, "feature/graph")
         && tree_cursor_on(screen, "README.md")
 }
@@ -248,7 +254,7 @@ fn pty_d_switches_to_default_branch() {
 
     tui.key('d');
     tui.wait_pred(
-        documented_d_switched_to_main,
+        after_ack("Switched 1 repo", documented_d_switched_to_main),
         "d checks out main: Switched 1 repo, tree on main, [+main]",
         GIT_WAIT,
     );

@@ -18,6 +18,7 @@ use tokio::task::JoinSet;
 use tokio::time::{sleep, Duration as TokioDuration};
 
 use super::action::{Action, Effect, ExternalDiffKind};
+use super::activity::activity_targets;
 use super::app::{
     apply_terminal_resize, discard_held_nav_backlog, map_event, run_blocking_editor,
     sync_mouse_capture, TuiOpts,
@@ -30,12 +31,14 @@ use super::event_pump::{
     BusyAction,
 };
 use super::hyperlink::{link_cells, write_links};
-use super::keys::{drop_g_chord_echo, held_nav_key, KeyStrokeOrigin};
+use super::keys::{drop_g_chord_echo, held_nav_key, is_half_page_chord, KeyStrokeOrigin};
 use super::render::draw;
 use super::state::{AppState, PendingConfirm};
 use super::status::StatusMessage;
+use super::term_progress::{progress_for, TermProgress};
 use super::tty::{poll_event, read_event_origin};
-use super::watch::{watch_remain_ms, FLASH_TICK_MS};
+use super::undercurl::{undercurl_cells, write_undercurls};
+use super::watch::watch_remain_ms;
 
 const INPUT_BATCH: usize = 8;
 
@@ -157,24 +160,34 @@ impl Presenter {
         self.dirty = true;
     }
 
-    fn remain_ms(&self, flashes: bool) -> u64 {
-        if flashes {
-            return FLASH_TICK_MS.min(self.dirty_remain());
-        }
-        if !self.dirty {
-            return u64::MAX;
-        }
-        self.dirty_remain()
+    /// Milliseconds until the next draw: the draw floor when dirty, else
+    /// the animation tick `anim_tick` after the last draw
+    /// ([`AppState::next_anim_tick_ms`]). `u64::MAX` when clean and idle.
+    fn remain_ms(&self, anim_tick: Option<u64>) -> u64 {
+        self.remain_ms_after(self.elapsed_ms(), anim_tick)
     }
 
-    /// Milliseconds until the next draw is allowed; `0` once one is due.
-    fn dirty_remain(&self) -> u64 {
-        let elapsed = self.last_draw.elapsed().as_millis() as u64;
-        DRAW_MIN_MS.saturating_sub(elapsed)
+    /// [`Self::remain_ms`] with `elapsed` ms since the last draw.
+    fn remain_ms_after(&self, elapsed: u64, anim_tick: Option<u64>) -> u64 {
+        let floor = DRAW_MIN_MS.saturating_sub(elapsed);
+        let dirty = if self.dirty { floor } else { u64::MAX };
+        let tick = anim_tick.map_or(u64::MAX, |tick| tick.saturating_sub(elapsed).max(floor));
+        dirty.min(tick)
     }
 
-    fn should_draw(&self) -> bool {
-        self.dirty && self.last_draw.elapsed().as_millis() as u64 >= DRAW_MIN_MS
+    fn elapsed_ms(&self) -> u64 {
+        self.last_draw.elapsed().as_millis() as u64
+    }
+
+    /// A draw is due: past the draw floor, and dirty or one animation tick
+    /// since the last draw.
+    fn should_draw(&self, anim_tick: Option<u64>) -> bool {
+        self.should_draw_after(self.elapsed_ms(), anim_tick)
+    }
+
+    /// [`Self::should_draw`] with `elapsed` ms since the last draw.
+    fn should_draw_after(&self, elapsed: u64, anim_tick: Option<u64>) -> bool {
+        elapsed >= DRAW_MIN_MS && (self.dirty || anim_tick.is_some_and(|tick| elapsed >= tick))
     }
 
     fn painted(&mut self) {
@@ -195,15 +208,19 @@ struct LoopCtx<'a> {
     last_fetch: Instant,
     watch_ms: u64,
     fetch_ms: u64,
+    /// OSC 9;4 progress the terminal shows for the current batch.
+    progress: TermProgress,
     quit: bool,
 }
 
 impl Drop for LoopCtx<'_> {
     /// Every exit from [`run`], an error included, ends here before the
     /// caller drops the runtime. That drop waits for running workers, so
-    /// stop the PR lookups and opens, which can take many seconds.
+    /// stop the PR lookups and opens, which can take many seconds, and the
+    /// sparkline counts that have not started.
     fn drop(&mut self) {
         self.interp.cancel_pull_request_jobs();
+        self.interp.cancel_activity_jobs();
     }
 }
 
@@ -215,7 +232,8 @@ pub async fn run(
 ) -> Result<(), u8> {
     let input = InputBridge::spawn();
     let mut presenter = Presenter::new();
-    draw_frame(terminal, state)?;
+    let mut progress = TermProgress::new(opts.settings.term_progress);
+    draw_frame(terminal, state, &mut progress)?;
     presenter.painted();
 
     let mut ctx = LoopCtx {
@@ -230,6 +248,7 @@ pub async fn run(
         last_fetch: Instant::now(),
         watch_ms: opts.settings.watch_ms,
         fetch_ms: opts.settings.fetch_ms,
+        progress,
         quit: false,
     };
     ctx.interp
@@ -241,6 +260,13 @@ pub async fn run(
     };
     ctx.interp
         .schedule(ctx.state, ctx.opts, lookups, &Action::None);
+    // Sparkline counts run on low-priority workers after the first frame,
+    // so they never hold up the first paint or user work.
+    let activity = Effect::LoadActivity {
+        checkouts: activity_targets(&ctx.state.snapshot, None),
+    };
+    ctx.interp
+        .schedule(ctx.state, ctx.opts, activity, &Action::None);
     if opts.start_fetch {
         let effect = ctx.state.dispatch(Action::Fetch);
         ctx.interp
@@ -266,7 +292,7 @@ pub async fn run(
         let status_remain = ctx.state.status_expiry_ms(now).unwrap_or(u64::MAX);
         let peek_remain = ctx.state.peek_remaining_ms(now).unwrap_or(u64::MAX);
         let search_remain = ctx.state.search_files_due_ms(now).unwrap_or(u64::MAX);
-        let present_remain = ctx.presenter.remain_ms(ctx.state.has_active_flashes());
+        let present_remain = ctx.presenter.remain_ms(ctx.state.next_anim_tick_ms());
         let join_empty = ctx.join.is_empty();
 
         tokio::select! {
@@ -338,13 +364,17 @@ pub async fn run(
                 }
             }
             _ = sleep_ms(present_remain) => {
+                let flashing = ctx.state.has_active_flashes();
                 ctx.state.prune_expired_flashes();
-                if ctx.presenter.should_draw() || ctx.state.has_active_flashes() {
-                    draw_frame(ctx.terminal, ctx.state)?;
+                if flashing && !ctx.state.has_active_flashes() {
+                    // The last flash ended: one more frame clears its tint.
+                    ctx.presenter.mark();
+                }
+                // Animation frames redraw on their own tick (spinner,
+                // flash, glide); idle draws only when dirty.
+                if ctx.presenter.should_draw(ctx.state.next_anim_tick_ms()) {
+                    draw_frame(ctx.terminal, ctx.state, &mut ctx.progress)?;
                     ctx.presenter.painted();
-                    if ctx.state.has_active_flashes() {
-                        ctx.presenter.mark();
-                    }
                 }
             }
         }
@@ -353,17 +383,31 @@ pub async fn run(
     Ok(())
 }
 
-/// Draw one frame, then paint its hyperlinks over it (OSC 8).
+/// Draw one frame, then paint its hyperlinks over it (OSC 8), then its
+/// curly underlines (SGR 4:3 + 58), then write the batch's terminal
+/// progress (OSC 9;4) when it changed.
 ///
-/// The links are printed again on every frame: a diff that rewrites a
-/// linked cell clears its link, and this puts it back.
+/// The links and curls are printed again on every frame: a diff that
+/// rewrites such a cell clears its link or curl, and this puts it back.
+/// Link cells and curl cells never overlap (`draw` cuts link cells out of
+/// the curls), so the two writers' order does not matter. A batch that
+/// ends sets `batch` to `None`, so the next frame writes the clear state.
 fn draw_frame(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
+    progress: &mut TermProgress,
 ) -> Result<(), u8> {
     let completed = terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
     let links = link_cells(completed.buffer, &state.layout.links);
-    write_links(terminal.backend_mut(), &links).map_err(|_| 1u8)
+    let curls = undercurl_cells(completed.buffer, &state.layout.undercurls);
+    write_links(terminal.backend_mut(), &links).map_err(|_| 1u8)?;
+    write_undercurls(terminal.backend_mut(), &curls, state.undercurl).map_err(|_| 1u8)?;
+    progress
+        .write_if_changed(
+            terminal.backend_mut(),
+            progress_for(state.remote_activity.batch.as_ref()),
+        )
+        .map_err(|_| 1u8)
 }
 
 async fn sleep_ms(ms: u64) {
@@ -398,6 +442,13 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
             ctx.presenter.mark();
         }
         return;
+    }
+    // Ctrl-d / Ctrl-u still dispatch `Move(±5)`; only paint glides the
+    // viewport to the new top. Any other input ends a live glide.
+    if is_half_page_chord(&event) && matches!(action, Action::Move(_)) {
+        ctx.state.arm_scroll_glide(Instant::now());
+    } else if action != Action::None {
+        ctx.state.cancel_scroll_glide();
     }
     if ctx.interp.busy_for_writes() {
         let inner_action = match action {
@@ -508,6 +559,10 @@ fn spawn_joinset(ctx: &mut LoopCtx<'_>) {
     interp.spawn_ready(state, opts, &mut |id, work| {
         join.spawn_blocking(move || (id, work()));
     });
+    // A started remote shows its row spinner and progress at once.
+    if ctx.interp.take_dirty() {
+        ctx.presenter.mark();
+    }
 }
 
 fn schedule_edit(ctx: &mut LoopCtx<'_>, repo: String, path: String, line: Option<u32>) {
@@ -636,6 +691,68 @@ mod tests {
             row: 0,
             modifiers: KeyModifiers::NONE,
         })
+    }
+
+    /// A presenter with the given dirty flag. Tests pass the elapsed time
+    /// since the last draw explicitly, so a stalled thread cannot move it.
+    fn presenter(dirty: bool) -> Presenter {
+        Presenter {
+            dirty,
+            last_draw: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn presenter_has_no_timer_when_clean_and_not_animating() {
+        let clean = presenter(false);
+        assert_eq!(clean.remain_ms_after(10_000, None), u64::MAX);
+        assert_eq!(clean.remain_ms_after(0, None), u64::MAX);
+        assert!(!clean.should_draw_after(10_000, None));
+        let dirty = presenter(true);
+        assert_eq!(
+            dirty.remain_ms_after(10_000, None),
+            0,
+            "dirty past the floor draws now"
+        );
+        assert_eq!(dirty.remain_ms_after(0, None), DRAW_MIN_MS);
+        assert!(dirty.should_draw_after(DRAW_MIN_MS, None));
+        assert!(!dirty.should_draw_after(DRAW_MIN_MS - 1, None));
+    }
+
+    #[test]
+    fn presenter_ticks_at_spinner_rate_while_animating() {
+        use super::super::anim::SPINNER_FRAME_MS;
+        let tick = Some(SPINNER_FRAME_MS);
+        let clean = presenter(false);
+        assert_eq!(
+            clean.remain_ms_after(0, tick),
+            SPINNER_FRAME_MS,
+            "just painted: next frame one spinner tick away, not at the draw floor"
+        );
+        assert_eq!(clean.remain_ms_after(30, tick), SPINNER_FRAME_MS - 30);
+        assert!(!clean.should_draw_after(SPINNER_FRAME_MS - 1, tick));
+
+        assert_eq!(clean.remain_ms_after(SPINNER_FRAME_MS, tick), 0);
+        assert!(
+            clean.should_draw_after(SPINNER_FRAME_MS, tick),
+            "one tick after the last draw"
+        );
+        assert!(
+            !clean.should_draw_after(SPINNER_FRAME_MS, None),
+            "the same clean presenter idles"
+        );
+
+        assert_eq!(
+            clean.remain_ms_after(0, Some(1)),
+            DRAW_MIN_MS,
+            "a tick never beats the draw floor"
+        );
+        assert!(!clean.should_draw_after(DRAW_MIN_MS - 1, Some(1)));
+        assert_eq!(
+            presenter(true).remain_ms_after(0, tick),
+            DRAW_MIN_MS,
+            "dirty draws at the floor even while animating"
+        );
     }
 
     #[test]

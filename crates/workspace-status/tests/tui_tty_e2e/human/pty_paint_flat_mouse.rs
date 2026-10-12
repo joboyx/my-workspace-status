@@ -4,8 +4,9 @@ use crate::common::hscroll::DIFF_HSCROLL_TAIL;
 use crate::harness::{PtySession, UserConfig, COLS, ROWS, SGR_WHEEL_RIGHT};
 use crate::seed::{daily_workspace, seed_long_diff_file, unwrap_diffs_at_launch};
 use crate::support::{
-    crumb_row, flat_join_col, flat_left_body, flat_left_cursor_on, flat_left_row_containing,
-    flat_pane_last_row, flat_right_body, status_row, FLAT_PAD_COLS, SETTLE_MS, SLATE_SIDEBAR, WAIT,
+    ack_rows, crumb_row, flat_join_col, flat_left_body, flat_left_cursor_on,
+    flat_left_row_containing, flat_pane_last_row, flat_right_body, status_row, FLAT_PAD_COLS,
+    SETTLE_MS, SLATE_SIDEBAR, WAIT,
 };
 
 /// xterm SGR left-button drag (`Cb` 0 + motion bit 32).
@@ -312,7 +313,7 @@ fn pty_paint_flat_drag_select_copies_pane_text() {
         tui.screen()
     );
     tui.wait_pred(
-        |screen| crumb_row(screen).contains("copied"),
+        |screen| ack_rows(screen).contains("copied"),
         "release flashes the copied toast",
         WAIT,
     );

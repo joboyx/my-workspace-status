@@ -1,7 +1,7 @@
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    crumb_row, documented_launch_first_paint, graph_cursor_on, graph_pane_focused,
+    ack_rows, after_ack, documented_launch_first_paint, graph_cursor_on, graph_pane_focused,
     merger_graph_drilled_right, merger_graph_left_unfocused, no_mouse_toggle_toast, right_pane,
     status_row, tree_has, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
@@ -35,7 +35,7 @@ fn graph_stash_still_listed(screen: &str) -> bool {
 }
 
 fn no_pull_or_other_stash_write(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
+    let crumb = ack_rows(screen);
     !crumb.contains("Pulled")
         && !crumb.contains("applied")
         && !crumb.contains("dropped")
@@ -49,7 +49,7 @@ fn graph_focused_merger_stash_listed(screen: &str) -> bool {
         && graph_pane_focused(screen)
         && graph_stash_still_listed(screen)
         && !tree_has(screen, "wip.txt")
-        && !crumb_row(screen).contains("popped")
+        && !ack_rows(screen).contains("popped")
         && no_pull_or_other_stash_write(screen)
         && no_wrong_stash_pop_overlays(screen)
 }
@@ -74,8 +74,8 @@ fn stash_row_ready_to_pop(screen: &str) -> bool {
 }
 
 /// Graph `p` popped `stash@{0}`: apply + drop. Apply-only / drop-only fail.
+/// The wait checks the `popped stash@{0}` toast (`after_ack`).
 fn documented_graph_stash_pop(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
     let status = status_row(screen);
     graph_pane_focused(screen)
         && tree_has(screen, "merger")
@@ -83,7 +83,6 @@ fn documented_graph_stash_pop(screen: &str) -> bool {
         && !graph_stash_still_listed(screen)
         && screen.contains("uncommitted changes")
         && !screen.contains("working tree clean")
-        && crumb.contains("popped stash@{0}")
         && no_pull_or_other_stash_write(screen)
         && !status.contains("pop stash")
         && !status.contains("apply stash")
@@ -147,7 +146,7 @@ fn pty_stash_graph_pop() {
 
     tui.key('p');
     tui.wait_pred(
-        documented_graph_stash_pop,
+        after_ack("popped stash@{0}", documented_graph_stash_pop),
         "graph p pops stash@{0}: wip.txt A on merger, stash gone, popped toast",
         GIT_WAIT,
     );

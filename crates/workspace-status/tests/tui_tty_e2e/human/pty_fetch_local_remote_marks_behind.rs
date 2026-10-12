@@ -1,8 +1,9 @@
 use crate::harness::PtySession;
 use crate::seed::unfetched_behind_workspace;
 use crate::support::{
-    crumb_row, has_fetch_hint, has_pull_hint, panes_tree_focused_graph_unfocused, status_row,
-    syncbox_row_behind, tree_cursor_on, tree_has, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
+    ack_rows, after_ack, crumb_row, has_fetch_hint, has_pull_hint,
+    panes_tree_focused_graph_unfocused, status_row, syncbox_row_behind, tree_cursor_on, tree_has,
+    tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 fn no_wrong_fetch_overlays(screen: &str) -> bool {
@@ -12,12 +13,11 @@ fn no_wrong_fetch_overlays(screen: &str) -> bool {
         && !screen.contains("nothing behind to pull")
 }
 
-fn crumb_fetched_one(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
-    crumb.contains("Fetched 1 repo")
-        && !crumb.contains("failed")
-        && !crumb.contains("Pulled")
-        && !crumb.contains("Pushed")
+/// No failure and no pull / push ack. The `Fetched 1 repo` toast is checked by
+/// the wait (`after_ack`), since it can expire before the reload lands.
+fn no_stray_remote_ack(screen: &str) -> bool {
+    let crumb = ack_rows(screen);
+    !crumb.contains("failed") && !crumb.contains("Pulled") && !crumb.contains("Pushed")
 }
 
 /// First paint: workspace focused, syncbox hidden under folded No updates.
@@ -58,7 +58,7 @@ fn documented_workspace_fetch_behind(screen: &str) -> bool {
         && syncbox_row_behind(screen)
         && screen.contains("focus a repo for the graph")
         && !screen.contains("origin-tip-commit")
-        && crumb_fetched_one(screen)
+        && no_stray_remote_ack(screen)
         && has_fetch_hint(screen)
         && has_pull_hint(screen)
         && status.contains(" tree")
@@ -116,7 +116,7 @@ fn pty_fetch_local_remote_marks_behind() {
 
     tui.key('f');
     tui.wait_pred(
-        documented_workspace_fetch_behind,
+        after_ack("Fetched 1 repo", documented_workspace_fetch_behind),
         "f fetches remotes: Fetched 1 repo, syncbox v1, 1 behind, pull hint, not pulled",
         GIT_WAIT,
     );

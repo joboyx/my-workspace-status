@@ -63,6 +63,9 @@ pub enum UserTag {
     LineBlame,
     /// Forge PR lookup for a row badge, or a `gx` lookup then browser open.
     PullRequest,
+    /// Commit-activity counts for the tree sparklines. Low priority: it
+    /// waits behind every user job ([`Scheduler::enqueue_background`]).
+    Activity,
 }
 
 /// A job the loop should `spawn_blocking`.
@@ -240,10 +243,12 @@ impl Scheduler {
             })
     }
 
-    /// Count of queued [`SpawnKind::UserWork`] slots with this tag.
+    /// Count of queued [`SpawnKind::UserWork`] slots with this tag, in the
+    /// user queue or the background queue.
     pub(crate) fn queued_user_tag(&self, tag: UserTag) -> usize {
         self.user_queue
             .iter()
+            .chain(&self.status_queue)
             .filter(|kind| matches!(kind, SpawnKind::UserWork { tag: t } if *t == tag))
             .count()
     }
@@ -526,6 +531,12 @@ impl Scheduler {
             self.default_branch_busy = true;
         }
         self.user_queue.push_back(SpawnKind::UserWork { tag });
+    }
+
+    /// Queue a low-priority slot behind every user job: it spawns only when
+    /// the user queue is empty, in turn with background `git status`.
+    pub fn enqueue_background(&mut self, tag: UserTag) {
+        self.status_queue.push_back(SpawnKind::UserWork { tag });
     }
 
     pub fn enqueue_user_front(&mut self, tag: UserTag) {

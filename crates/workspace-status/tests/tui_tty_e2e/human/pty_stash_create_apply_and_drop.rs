@@ -1,10 +1,10 @@
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    app_focused_stash_visible, app_graph_stash_row_focused, app_graph_working_tree_focused,
-    documented_stash_applied, documented_stash_created, documented_stash_dropped,
-    idle_dirty_readme_unstaged, no_updates_unfolded_after_stash, stash_create_overlay_open,
-    stash_drop_confirm_open, GIT_WAIT, SETTLE_MS, WAIT,
+    after_ack, app_focused_stash_visible, app_graph_stash_row_focused,
+    app_graph_working_tree_focused, documented_stash_applied, documented_stash_created,
+    documented_stash_dropped, idle_dirty_readme_unstaged, no_updates_unfolded_after_stash,
+    stash_create_overlay_open, stash_drop_confirm_open, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 /// CSI-u Shift+S creates a stash, graph `a` applies it, CSI-u Shift+D
@@ -45,7 +45,7 @@ fn pty_stash_create_apply_and_drop() {
 
     tui.key('s');
     tui.wait_pred(
-        documented_stash_created,
+        after_ack("Stashed 1 file", documented_stash_created),
         "overlay s stashes README: Stashed 1 file, file leaves tree, overlay closes",
         GIT_WAIT,
     );
@@ -84,7 +84,7 @@ fn pty_stash_create_apply_and_drop() {
 
     tui.key('a');
     tui.wait_pred(
-        documented_stash_applied,
+        after_ack("applied stash@{0}", documented_stash_applied),
         "graph a applies: README returns dirty, stash@{0} stays, applied toast",
         GIT_WAIT,
     );
@@ -103,7 +103,7 @@ fn pty_stash_create_apply_and_drop() {
     );
     tui.key('y');
     tui.wait_pred(
-        documented_stash_dropped,
+        after_ack("dropped stash@{0}", documented_stash_dropped),
         "y drops stash@{0}; README stays dirty; graph stash row is gone",
         GIT_WAIT,
     );

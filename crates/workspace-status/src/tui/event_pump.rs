@@ -571,6 +571,16 @@ mod tests {
             effect.contains("blame_line(") && effect.contains("UserTag::LineBlame"),
             "focused-line blame must run on spawn_blocking via Interpreter"
         );
+        for banned in ["commit_times_since(", "load_activity("] {
+            assert!(
+                !app.contains(banned) && !loop_src.contains(banned) && !render.contains(banned),
+                "{banned} (sparkline git log) must not run on the TTY loop thread"
+            );
+        }
+        assert!(
+            effect.contains("load_activity(&cwd") && effect.contains("UserTag::Activity"),
+            "sparkline counts must run on spawn_blocking via Interpreter"
+        );
         assert!(
             effect.contains("prepare_worktree_diff(")
                 && effect.contains("prepare_rev_diff_paths(")

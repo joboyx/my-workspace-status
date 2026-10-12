@@ -1,7 +1,7 @@
 use crate::harness::PtySession;
 use crate::seed::focus_workspace;
 use crate::support::{
-    crumb_row, focusbox_graph_left_full, graph_cursor_on, graph_pane_focused,
+    ack_rows, crumb_row, focusbox_graph_left_full, graph_cursor_on, graph_pane_focused,
     graph_subject_meta_line, no_mouse_toggle_toast, status_row, title_has_files, tree_has,
     tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
@@ -59,11 +59,12 @@ fn focusbox_diverged_graph_body(screen: &str) -> bool {
 fn graph_focused_diverged_before_create(screen: &str) -> bool {
     let status = status_row(screen);
     let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
     graph_pane_focused(screen)
         && tree_has(screen, "focusbox")
         && focusbox_diverged_graph_body(screen)
         && crumb.contains("workspace › [focusbox]")
-        && !crumb.contains(&format!("created {BRANCH}"))
+        && !acks.contains(&format!("created {BRANCH}"))
         && status.contains("drill")
         && status.contains("Esc")
         && (status.contains("← tree") || status.contains("Esc   clear"))
@@ -113,10 +114,10 @@ fn named_create_branch_at_overlay(screen: &str) -> bool {
 
 /// `create_branch_at`: new ref on `main-leaf-commit`. HEAD stays `feature/keep`.
 fn documented_graph_create_branch_at(screen: &str, overlay_hash: &str) -> bool {
-    let crumb = crumb_row(screen);
+    let crumb = ack_rows(screen);
     let status = status_row(screen);
     graph_pane_focused(screen)
-        && hex7_after(crumb, &format!("created {BRANCH} at ")).as_deref() == Some(overlay_hash)
+        && hex7_after(&crumb, &format!("created {BRANCH} at ")).as_deref() == Some(overlay_hash)
         && !crumb.contains("failed")
         && !crumb.contains("Switched")
         && !crumb.contains("Already on")

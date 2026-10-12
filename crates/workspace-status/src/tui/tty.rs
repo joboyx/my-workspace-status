@@ -126,6 +126,21 @@ fn lock_tty_buf() -> std::sync::MutexGuard<'static, TtyBuf> {
         .unwrap_or_else(|poison| poison.into_inner())
 }
 
+/// Hand stdin bytes that a startup query read back to the live reader.
+///
+/// The bytes go in front of any stdin not read yet, so a key typed while
+/// [`super::term_bg::query_background`] waited for the terminal is read as
+/// that key by [`poll_event`] / [`read_event`].
+#[cfg(unix)]
+pub(crate) fn push_pending_input(bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let mut buf = lock_tty_buf();
+    buf.raw.extend_from_slice(bytes);
+    buf.lone_esc_ready = false;
+}
+
 #[cfg(unix)]
 fn unix_poll(timeout: Duration) -> io::Result<bool> {
     {
@@ -194,8 +209,10 @@ fn stdin_pending() -> io::Result<usize> {
     Ok(n.max(0) as usize)
 }
 
+/// Wait up to `timeout` for stdin to be readable. `Ok(false)` on timeout or
+/// `EINTR`; a hangup is an error.
 #[cfg(unix)]
-fn poll_stdin(timeout: Duration) -> io::Result<bool> {
+pub(crate) fn poll_stdin(timeout: Duration) -> io::Result<bool> {
     let mut pfd = libc::pollfd {
         fd: libc::STDIN_FILENO,
         events: libc::POLLIN,
@@ -422,6 +439,11 @@ fn take_esc(bytes: &[u8], more: bool) -> Take {
         // further stdin so a split CSI / CSI-u is not leftover keys.
         return Take::NeedMore;
     }
+    if bytes[1] == b']' {
+        if let Some(take) = take_osc_reply(bytes, more) {
+            return take;
+        }
+    }
     match bytes[1] {
         b'O' => take_ss3(bytes),
         b'[' => take_csi(bytes),
@@ -436,6 +458,39 @@ fn take_esc(bytes: &[u8], more: bool) -> Take {
             Take::Ready(n, event, _) => Take::Ready(n + 1, event, KeyStrokeOrigin::Protocol),
         },
     }
+}
+
+/// Longest unterminated OSC reply the reader holds before it treats the
+/// bytes as keys again. An OSC 11 colour reply is about 30 bytes.
+const OSC_REPLY_MAX: usize = 256;
+
+/// Skip a terminal OSC reply (`ESC ] Ps ; ... BEL` or `... ESC \`).
+///
+/// An OSC 11 background reply that lands after the startup query stopped
+/// waiting ([`super::term_bg::query_background`]) must not read as Alt+`]`
+/// and a run of typed keys. `None` when the bytes do not start `ESC ] Ps ;`
+/// (Alt+`]` stays a key), or when an unterminated reply passes
+/// [`OSC_REPLY_MAX`] bytes.
+fn take_osc_reply(bytes: &[u8], more: bool) -> Option<Take> {
+    let body = &bytes[2..];
+    let digits = body.iter().take_while(|b| b.is_ascii_digit()).count();
+    if digits > 0 && body.get(digits) == Some(&b';') {
+        if let Some(end) = osc_end(bytes) {
+            return Some(Take::Skip(end));
+        }
+        return (bytes.len() < OSC_REPLY_MAX).then_some(Take::NeedMore);
+    }
+    // `ESC ]` plus digits so far: wait only while more stdin is queued.
+    (digits == body.len() && more).then_some(Take::NeedMore)
+}
+
+/// Byte length of an OSC sequence through its BEL or `ESC \` terminator.
+fn osc_end(bytes: &[u8]) -> Option<usize> {
+    (2..bytes.len()).find_map(|i| match bytes[i] {
+        0x07 => Some(i + 1),
+        0x1b if bytes.get(i + 1) == Some(&b'\\') => Some(i + 2),
+        _ => None,
+    })
 }
 
 fn take_ss3(bytes: &[u8]) -> Take {
@@ -1211,6 +1266,49 @@ mod tests {
         assert_eq!(key_code(&event), KeyCode::Char('g'));
         assert_eq!(origin, KeyStrokeOrigin::Protocol);
         assert!(take_ready_event(&mut csi_u, false).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pushed_pending_input_is_read_as_keys() {
+        push_pending_input(b"jq\x1b[A");
+        let mut buf = lock_tty_buf();
+        let mut keys = Vec::new();
+        while let Some((event, origin)) = take_ready_event(&mut buf, false) {
+            keys.push((key_code(&event), origin));
+        }
+        assert_eq!(
+            keys,
+            [
+                (KeyCode::Char('j'), KeyStrokeOrigin::LegacyByte),
+                (KeyCode::Char('q'), KeyStrokeOrigin::LegacyByte),
+                (KeyCode::Up, KeyStrokeOrigin::Protocol),
+            ],
+            "bytes a startup query read back reach the live reader in order"
+        );
+        assert!(buf.raw.is_empty());
+    }
+
+    #[test]
+    fn late_osc_reply_is_skipped_not_typed() {
+        for reply in [
+            &b"\x1b]11;rgb:ffff/ffff/ffff\x07j"[..],
+            &b"\x1b]11;rgb:00/00/00\x1b\\j"[..],
+        ] {
+            let events = parse_tty_chunk(reply);
+            assert_eq!(events.len(), 1, "{reply:?}: {events:?}");
+            assert_eq!(key_code(&events[0].0), KeyCode::Char('j'));
+        }
+        let alt = parse_tty_chunk(b"\x1b]x");
+        assert_eq!(alt.len(), 2, "{alt:?}");
+        match &alt[0].0 {
+            Event::Key(key) => {
+                assert_eq!(key.code, KeyCode::Char(']'));
+                assert!(key.modifiers.contains(KeyModifiers::ALT));
+            }
+            other => panic!("expected Alt+], got {other:?}"),
+        }
+        assert_eq!(key_code(&alt[1].0), KeyCode::Char('x'));
     }
 
     #[test]

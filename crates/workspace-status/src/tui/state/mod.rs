@@ -13,6 +13,7 @@ mod line_blame;
 mod pan;
 mod popover;
 mod pull_request;
+mod scroll_glide;
 
 pub(crate) use pull_request::PrDetailState;
 
@@ -41,6 +42,8 @@ use crate::snapshot::{
 #[cfg(test)]
 use super::action::Action;
 use super::action::{Effect, ExternalDiffKind, SearchFilesOption};
+use super::activity::ACTIVITY_DAYS;
+use super::anim::{next_tick_ms, AnimNeeds, RemoteActivity, ScrollGlide};
 use super::branches::{
     branch_name_error, can_open_branch_picker, checkoutable_branch_names, merge_rev_for_commit,
     BranchPickerState, CreateBranchState, DIRTY_WORKTREE_STATUS,
@@ -103,7 +106,7 @@ use super::stash::{
     checkout_path, resolve_stash_menu_key, row_is_hidden_ignored, stash_dirty_for_row,
     stash_ops_for_context, StashMenuKeyResult, StashOp, StashOpId, StashOpsContext,
 };
-use super::status::StatusMessage;
+use super::status::{StatusKind, StatusMessage};
 use super::tabs::{
     compare_file_dirty, compare_range_label, CommitPickerState, ComparePickerKind,
     ComparePickerState, OpenCompare, TabStrip, WorktreeFile, CANNOT_REVERT_COMMITTED_DIFF,
@@ -113,10 +116,12 @@ use super::tabs::{
 };
 use super::theme::{BackgroundMode, ThemeId};
 use super::theme_store::save_last_theme;
+use super::toast::ToastStack;
 use super::tree::{
     build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, visible_for_tree,
     visible_window, workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
 };
+use super::undercurl::UndercurlHit;
 use super::viewed::{
     collect_current_fingerprints, fingerprint_file_change, load_viewed_store, reconcile_viewed,
     save_viewed_store, toggle_viewed, viewed_identity, viewed_row_ids, workspace_store_id,
@@ -265,6 +270,11 @@ pub struct LayoutHit {
     pub graph_scrollbar_height: u16,
     /// Painted graph line count.
     pub graph_content_len: usize,
+    /// Graph list top the last frame painted: `graph_scroll`, or the step
+    /// of a live Ctrl-d / Ctrl-u glide. `None` when no graph list painted.
+    /// Graph row clicks and the scrollbar thumb read it, as the tree reads
+    /// [`Self::list_offset`].
+    pub graph_painted_top: Option<u16>,
     /// 0-based graph horizontal scrollbar row when the bar is painted.
     pub graph_hscrollbar_y: Option<u16>,
     /// 0-based first column of the graph horizontal scrollbar track.
@@ -319,6 +329,12 @@ pub struct LayoutHit {
     /// the popover URL line. A dialog or the popover drops the links under
     /// its box before it records its own.
     pub links: Vec<LinkHit>,
+    /// Curly-underline spans of the frame, rebuilt every paint: the code
+    /// columns of each painted row of a line with an open comment, in the
+    /// diff pane and the file view. A dialog, the popover, or a toast drops
+    /// the spans under its box, and link cells are cut out at the end of
+    /// the paint. The post-draw writer prints exactly these.
+    pub undercurls: Vec<UndercurlHit>,
     /// The popover painted last frame, if any.
     pub popover: Option<PopoverHit>,
     /// First tab the strip painted. Kept across paints so the window only
@@ -359,6 +375,16 @@ pub struct LayoutHit {
     /// Results rows the search-in-files dialog painted last; PgUp / PgDn
     /// move by it.
     pub search_files_rows: u16,
+    /// The last draw painted a time-based frame (a spinner or a fading toast).
+    /// [`AppState::next_anim_tick_ms`] keeps redrawing while it holds.
+    pub animating: bool,
+    /// The last draw painted a scroll glide step; redraws at the draw floor
+    /// while it holds.
+    pub gliding: bool,
+    /// One redraw wanted this many ms after the last draw, with no frame
+    /// ticks before it: a toast at full strength wakes the loop when its
+    /// fade starts (under `NO_COLOR`, when it expires).
+    pub wake_ms: Option<u64>,
     /// Row of the search-in-files dialog's top border, where its option
     /// chips paint.
     pub search_option_y: u16,
@@ -392,6 +418,7 @@ impl Default for LayoutHit {
             graph_scrollbar_y: 0,
             graph_scrollbar_height: 0,
             graph_content_len: 0,
+            graph_painted_top: None,
             graph_hscrollbar_y: None,
             graph_hscrollbar_x: 0,
             graph_hscrollbar_width: 0,
@@ -413,6 +440,7 @@ impl Default for LayoutHit {
             tab_close_hits: Vec::new(),
             icon_hits: Vec::new(),
             links: Vec::new(),
+            undercurls: Vec::new(),
             popover: None,
             tab_scroll: 0,
             help_scroll_max: 0,
@@ -427,6 +455,9 @@ impl Default for LayoutHit {
             explorer_tree_rows: Rect::default(),
             explorer_preview_rows: Rect::default(),
             search_files_rows: 0,
+            animating: false,
+            gliding: false,
+            wake_ms: None,
             search_option_y: 0,
             search_option_hits: Vec::new(),
         }
@@ -745,6 +776,9 @@ pub struct AppState {
     pub focus: FocusPane,
     /// Breadcrumb trailing slot / overlay status row ([`StatusMessage`]).
     pub status: StatusMessage,
+    /// One-shot acks painted bottom-right. Filled from an ok `status` by
+    /// [`Self::route_ack_to_toast`] at the top of each draw.
+    pub toasts: ToastStack,
     pub graph: Option<GraphModel>,
     pub graph_identity: Option<(String, String)>,
     pub graph_scroll: u16,
@@ -781,6 +815,31 @@ pub struct AppState {
     diff_visual_rows: Option<Vec<DiffRow>>,
     pub layout: LayoutHit,
     pub ascii: bool,
+    /// `NO_COLOR` is set: the new visuals (spinner, toasts, …) paint with no
+    /// colour of their own. The rest of the TUI keeps its palette.
+    pub no_color: bool,
+    /// The terminal gets the curly underline on commented lines
+    /// ([`crate::tui::undercurl::undercurl_enabled`], resolved at launch).
+    /// Off, those lines keep the plain underline the frame paints.
+    pub undercurl: bool,
+    /// Spinner clock: every spinner frame counts from this instant.
+    pub anim_epoch: Instant,
+    /// Ctrl-d / Ctrl-u glide the viewport (`smoothScroll`, default on).
+    /// Off, the viewport jumps as the cursor moves.
+    pub smooth_scroll: bool,
+    /// The live Ctrl-d / Ctrl-u viewport glide, if any
+    /// ([`Self::arm_scroll_glide`], [`Self::glide_start`]).
+    pub(crate) scroll_glide: Option<ScrollGlide>,
+    /// Clock of the frame being drawn, set at the top of each draw. Glide
+    /// painters read it so one frame uses one instant.
+    pub(crate) frame_now: Instant,
+    /// Remote git work in flight, published by the interpreter for paint.
+    pub remote_activity: RemoteActivity,
+    /// Day commit counts (last [`ACTIVITY_DAYS`] days, today last) per
+    /// activity key, from the low-priority [`Effect::LoadActivity`] workers
+    /// (one job per repo). Empty until those land; the tree paints no
+    /// sparkline before.
+    pub activity: HashMap<String, [u32; ACTIVITY_DAYS]>,
     pub search_mode: bool,
     pub search_active: bool,
     pub search_query: String,
@@ -931,10 +990,10 @@ fn unix_now() -> i64 {
 }
 
 impl AppState {
-    /// TUI launch state: glyphs, theme, and the viewed / comment / theme store
-    /// paths come from the resolved `settings`.
+    /// TUI launch state: glyphs, theme, `NO_COLOR`, and the viewed /
+    /// comment / theme store paths come from the resolved `settings`.
     pub fn launch(cwd: PathBuf, snapshot: WorkspaceSnapshot, settings: &Settings) -> Self {
-        Self::build(
+        let mut state = Self::build(
             cwd,
             snapshot,
             settings.ascii,
@@ -942,7 +1001,11 @@ impl AppState {
             settings.comment_store.clone(),
             settings.theme_store.clone(),
             settings.theme,
-        )
+        );
+        state.no_color = settings.no_color;
+        state.undercurl = settings.undercurl;
+        state.smooth_scroll = settings.smooth_scroll;
+        state
     }
 
     /// Test state with a unique temp viewed store, Tokyo Night, and
@@ -1019,6 +1082,7 @@ impl AppState {
             help_scroll: 0,
             focus: FocusPane::Left,
             status: StatusMessage::default(),
+            toasts: ToastStack::default(),
             graph: None,
             graph_identity: None,
             graph_scroll: 0,
@@ -1044,6 +1108,14 @@ impl AppState {
             diff_visual_rows: None,
             layout: LayoutHit::default(),
             ascii,
+            no_color: false,
+            undercurl: false,
+            anim_epoch: Instant::now(),
+            smooth_scroll: true,
+            scroll_glide: None,
+            frame_now: Instant::now(),
+            remote_activity: RemoteActivity::default(),
+            activity: HashMap::new(),
             search_mode: false,
             search_active: false,
             search_query: String::new(),
@@ -2210,6 +2282,25 @@ impl AppState {
         self.status.expire(now)
     }
 
+    /// Move a one-shot ack ([`StatusKind::Ok`]) from the status slot to a
+    /// toast pushed at `now`, and drop toasts whose time ran out.
+    ///
+    /// Info, progress, warn, and error stay in the slot. An ok message also
+    /// stays while an overlay paints `status` as its own row
+    /// (`status_uses_status_text`). `draw` calls this first, so dispatch
+    /// and state tests still see the ack in `status`.
+    pub fn route_ack_to_toast(&mut self, now: Instant) {
+        self.toasts.prune(now);
+        if self.status.kind() != StatusKind::Ok || status_uses_status_text(self) {
+            return;
+        }
+        let text = self.status.trim();
+        if !text.is_empty() {
+            self.toasts.push(text, now);
+        }
+        self.status.clear();
+    }
+
     fn prune_flash_state(&mut self, now: Instant) {
         prune_flashes(&mut self.flashes, now);
         prune_ghosts(&mut self.tree_ghosts, now);
@@ -2226,6 +2317,19 @@ impl AppState {
         !self.flashes.is_empty()
             || !self.tree_ghosts.is_empty()
             || !self.commit_file_ghosts.is_empty()
+    }
+
+    /// Milliseconds between timer redraws while something animates: a
+    /// decaying flash, a spinner or fading toast frame, or a scroll glide painted
+    /// last frame, or the one wake a holding toast asked for. `None` when
+    /// idle, so no timer redraw runs.
+    pub fn next_anim_tick_ms(&self) -> Option<u64> {
+        next_tick_ms(AnimNeeds {
+            flashes: self.has_active_flashes(),
+            frames: self.layout.animating,
+            glide: self.layout.gliding,
+            wake_ms: self.layout.wake_ms,
+        })
     }
 
     /// Fade colour for a row id, if it is still flashing.
@@ -2594,7 +2698,7 @@ impl AppState {
             graph_scrollbar_y: self.layout.graph_scrollbar_y,
             graph_scrollbar_height: self.layout.graph_scrollbar_height,
             graph_content_len: self.layout.graph_content_len,
-            graph_scroll: self.graph_scroll,
+            graph_scroll: self.graph_painted_top(),
             graph_hscrollbar_y: self.layout.graph_hscrollbar_y,
             graph_hscrollbar_x: self.layout.graph_hscrollbar_x,
             graph_hscrollbar_width: self.layout.graph_hscrollbar_width,
@@ -2681,6 +2785,9 @@ impl AppState {
             }
             SplitHit::GraphThumb => {
                 self.focus_graph_pane();
+                // The press ended any glide: keep the rows on screen, so a
+                // grab mid-glide does not jump to the glide's target.
+                self.graph_scroll = self.graph_painted_top();
                 self.drag = SplitDrag::GraphScrollbar {
                     origin_row: row,
                     origin_scroll: self.graph_scroll,
@@ -2903,7 +3010,10 @@ impl AppState {
         }
         let glyphs = if self.ascii { &ASCII } else { &UNICODE };
         let painted = paint_model(model, glyphs, None);
-        let Some(line) = painted.get(self.graph_scroll as usize + offset) else {
+        // Hit-test the rows on screen: mid-glide they sit above or below
+        // the jump top in `graph_scroll`.
+        let top = usize::from(self.graph_painted_top());
+        let Some(line) = painted.get(top + offset) else {
             return Effect::None;
         };
         if let Some(idx) = line.row_index {
@@ -5655,6 +5765,14 @@ impl AppState {
         self.tree_fraction = clamp_tree_fraction(self.layout.term_cols, self.tree_fraction);
     }
 
+    /// Graph list top on screen: the last frame's painted top
+    /// ([`LayoutHit::graph_painted_top`]), which trails
+    /// [`Self::graph_scroll`] during a Ctrl-d / Ctrl-u glide. Falls back to
+    /// `graph_scroll` before any graph list paints.
+    pub(crate) fn graph_painted_top(&self) -> u16 {
+        self.layout.graph_painted_top.unwrap_or(self.graph_scroll)
+    }
+
     /// Whether the graph list paints its vertical scrollbar: the painted
     /// lines overflow the list, or it has left the top. Mirrors the widget
     /// from the line count the last frame recorded, so a pan key does not
@@ -5669,20 +5787,29 @@ impl AppState {
     }
 
     pub(crate) fn sync_graph_scroll(&mut self) {
-        let Some(model) = self.graph.as_ref() else {
-            return;
-        };
-        let glyphs = if self.ascii { &ASCII } else { &UNICODE };
-        let painted = paint_model(model, glyphs, None);
-        let Some(idx) = painted
-            .iter()
-            .position(|line| line.row_index == Some(self.graph_cursor) && line.selectable)
-        else {
+        let Some((idx, line_count)) = self.graph_cursor_painted() else {
             return;
         };
         let list_h = self.graph_chrome().list_height.max(1) as usize;
-        let (start, _) = visible_window(painted.len(), idx, list_h);
+        let (start, _) = visible_window(line_count, idx, list_h);
         self.graph_scroll = start as u16;
+    }
+
+    /// Painted graph line of the cursor row, the line [`Self::graph_scroll`]
+    /// counts in. `None` with no graph or no selectable cursor line.
+    pub(crate) fn graph_cursor_line(&self) -> Option<usize> {
+        self.graph_cursor_painted().map(|(line, _)| line)
+    }
+
+    /// The cursor row's painted line and the painted line count.
+    fn graph_cursor_painted(&self) -> Option<(usize, usize)> {
+        let model = self.graph.as_ref()?;
+        let glyphs = if self.ascii { &ASCII } else { &UNICODE };
+        let painted = paint_model(model, glyphs, None);
+        let idx = painted
+            .iter()
+            .position(|line| line.row_index == Some(self.graph_cursor) && line.selectable)?;
+        Some((idx, painted.len()))
     }
 
     fn sync_diff_scroll(&mut self) {
@@ -8077,6 +8204,11 @@ mod tests {
         assert_eq!(app.dispatch(Action::ConfirmNo), Effect::None);
         assert!(app.confirm.is_none());
         assert_eq!(app.status, "push cancelled");
+        // A cancel is not a one-shot ack: it stays on the status line and
+        // never moves to a toast.
+        assert_ne!(app.status.kind(), StatusKind::Ok);
+        app.route_ack_to_toast(std::time::Instant::now());
+        assert_eq!(app.status, "push cancelled");
     }
 
     #[test]
@@ -8291,6 +8423,65 @@ mod tests {
             "the clock restarts once help closes"
         );
         assert!(app.expire_status(late + ttl));
+    }
+
+    /// Draw `app` once into a 100x30 test terminal.
+    fn draw_once(app: &mut AppState) {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::render::draw(frame, app))
+            .unwrap();
+    }
+
+    fn toast_texts(app: &AppState) -> Vec<String> {
+        app.toasts
+            .visible(Instant::now())
+            .map(|(toast, _)| toast.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn ok_status_moves_to_a_toast_on_draw() {
+        let mut app = state();
+        app.status = StatusMessage::ok("Fetched 3 repos");
+        assert!(app.toasts.is_empty());
+        draw_once(&mut app);
+        assert!(app.status.is_empty(), "the ack left the status slot");
+        assert_eq!(toast_texts(&app), ["Fetched 3 repos"]);
+        // The next draw does not push it twice.
+        draw_once(&mut app);
+        assert_eq!(toast_texts(&app), ["Fetched 3 repos"]);
+    }
+
+    #[test]
+    fn error_warn_info_progress_stay_in_status_line() {
+        for status in [
+            StatusMessage::error("fetch failed"),
+            StatusMessage::warn("nothing to push"),
+            StatusMessage::info("showing ignored repos"),
+            StatusMessage::progress("Fetching 1/3…"),
+        ] {
+            let mut app = state();
+            let kind = status.kind();
+            let text = status.to_string();
+            app.status = status;
+            draw_once(&mut app);
+            assert_eq!(app.status, text.as_str(), "{kind:?} stays in the slot");
+            assert_eq!(app.status.kind(), kind);
+            assert!(app.toasts.is_empty(), "{kind:?} makes no toast");
+        }
+    }
+
+    #[test]
+    fn overlay_status_row_keeps_its_ok_text() {
+        let mut app = state();
+        assert_eq!(app.dispatch(Action::SearchStart), Effect::None);
+        assert!(status_uses_status_text(&app));
+        app.status = StatusMessage::ok("Checked out main");
+        draw_once(&mut app);
+        assert_eq!(app.status, "Checked out main", "the overlay row keeps it");
+        assert!(app.toasts.is_empty());
     }
 
     #[test]

@@ -63,6 +63,23 @@ fn syntect_theme_name(id: ThemeId) -> EmbeddedThemeName {
         ThemeId::Everforest => EmbeddedThemeName::Base16OceanDark,
         ThemeId::OneDark => EmbeddedThemeName::TwoDark,
         ThemeId::GithubDarkDimmed => EmbeddedThemeName::OneHalfDark,
+        // Light twins take a light embedded theme. Tokyo Night Day, Dracula
+        // Light (Alucard), Catppuccin Latte, Slate Light, Nord Light, Rosé
+        // Pine Dawn, Kanagawa Lotus, and Everforest Light have no embedded
+        // twin: each takes the closest light theme by surface hue and tone.
+        ThemeId::TokyoNightDay => EmbeddedThemeName::ColdarkCold,
+        ThemeId::MonokaiLight => EmbeddedThemeName::MonokaiExtendedLight,
+        ThemeId::DraculaLight => EmbeddedThemeName::InspiredGithub,
+        ThemeId::GruvboxLight => EmbeddedThemeName::GruvboxLight,
+        ThemeId::CatppuccinLatte => EmbeddedThemeName::OneHalfLight,
+        ThemeId::SlateLight => EmbeddedThemeName::ColdarkCold,
+        ThemeId::SolarizedLight => EmbeddedThemeName::SolarizedLight,
+        ThemeId::NordLight => EmbeddedThemeName::Base16OceanLight,
+        ThemeId::RosePineDawn => EmbeddedThemeName::InspiredGithub,
+        ThemeId::KanagawaLotus => EmbeddedThemeName::GruvboxLight,
+        ThemeId::EverforestLight => EmbeddedThemeName::GruvboxLight,
+        ThemeId::OneLight => EmbeddedThemeName::OneHalfLight,
+        ThemeId::GithubLight => EmbeddedThemeName::Github,
     }
 }
 
@@ -653,7 +670,9 @@ fn srgb_lin(c: u8) -> f64 {
     }
 }
 
-fn relative_luminance(color: Color) -> Option<f64> {
+/// WCAG 2 relative luminance (0.0 black to 1.0 white) of a 24-bit colour.
+/// `None` for a colour that is not [`Color::Rgb`].
+pub(crate) fn relative_luminance(color: Color) -> Option<f64> {
     let Color::Rgb(r, g, b) = color else {
         return None;
     };
@@ -945,9 +964,10 @@ mod tests {
         }
     }
 
-    /// Every built-in theme maps to a dark embedded syntax theme, and its
-    /// token colours stay at or above the floor on that theme's own diff row
-    /// and changed-word backgrounds (or fall back to the default text).
+    /// Every built-in theme (dark and light) maps to an embedded syntax theme
+    /// of its own polarity, and its token colours stay at or above the floor
+    /// on that theme's own diff row and changed-word backgrounds (or fall
+    /// back to the default text).
     #[test]
     fn every_theme_maps_to_a_dark_syntax_theme_and_keeps_the_row_floor() {
         use crate::tui::theme::THEME_IDS;
@@ -968,9 +988,10 @@ mod tests {
             let bg = syn.settings.background.expect("embedded theme background");
             let bg = Color::Rgb(bg.r, bg.g, bg.b);
             let bg_l = relative_luminance(bg).expect("rgb");
-            assert!(
-                bg_l < 0.1,
-                "{id:?} syntax theme background {bg:?} must be dark"
+            assert_eq!(
+                bg_l > 0.5,
+                id.is_light(),
+                "{id:?} syntax theme background {bg:?} (luminance {bg_l:.3}) must match the theme polarity"
             );
             let pal = id.palette();
             let bgs = DiffBackgrounds {
@@ -991,6 +1012,48 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Light twins map to the light embedded themes listed in
+    /// `docs/diff-rendering.md`; dark themes keep a dark one. Polarity comes
+    /// from the embedded theme's own background.
+    #[test]
+    fn every_theme_maps_to_a_syntect_theme_of_its_polarity() {
+        use crate::tui::theme::{DARK_THEME_IDS, LIGHT_THEME_IDS};
+        use EmbeddedThemeName as N;
+        let light = [
+            (ThemeId::TokyoNightDay, N::ColdarkCold),
+            (ThemeId::MonokaiLight, N::MonokaiExtendedLight),
+            (ThemeId::DraculaLight, N::InspiredGithub),
+            (ThemeId::GruvboxLight, N::GruvboxLight),
+            (ThemeId::CatppuccinLatte, N::OneHalfLight),
+            (ThemeId::SlateLight, N::ColdarkCold),
+            (ThemeId::SolarizedLight, N::SolarizedLight),
+            (ThemeId::NordLight, N::Base16OceanLight),
+            (ThemeId::RosePineDawn, N::InspiredGithub),
+            (ThemeId::KanagawaLotus, N::GruvboxLight),
+            (ThemeId::EverforestLight, N::GruvboxLight),
+            (ThemeId::OneLight, N::OneHalfLight),
+            (ThemeId::GithubLight, N::Github),
+        ];
+        assert_eq!(light.map(|(id, _)| id), LIGHT_THEME_IDS);
+        for (id, name) in light {
+            assert_eq!(syntect_theme_name(id), name, "{id:?}");
+        }
+        let luminance = |id: ThemeId| {
+            let bg = theme_set()
+                .get(syntect_theme_name(id))
+                .settings
+                .background
+                .expect("embedded theme background");
+            relative_luminance(Color::Rgb(bg.r, bg.g, bg.b)).expect("rgb")
+        };
+        for id in LIGHT_THEME_IDS {
+            assert!(luminance(id) > 0.5, "{id:?} must map to a light theme");
+        }
+        for id in DARK_THEME_IDS {
+            assert!(luminance(id) < 0.1, "{id:?} must map to a dark theme");
         }
     }
 

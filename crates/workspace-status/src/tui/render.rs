@@ -1,6 +1,7 @@
 //! Ratatui paint for the tree, graph / diff pane, status, and help overlay.
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
@@ -19,8 +20,11 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use super::action::SearchFilesOption;
+use super::activity::{row_activity_key, sparkline, SPARK_MIN_TREE_COLS};
+use super::anim::{glide_step, spinner_glyph, GlidePane};
 use super::chrome::{
     breadcrumb_line, breadcrumb_rows, ctrl_c_prompt_line, ctrl_c_prompt_rows, dialog_height,
     dialog_rect, dialog_width, export_shows_status, help_tab, open_dialog, status_line, DialogKind,
@@ -50,7 +54,7 @@ use super::help::{
     help_version_label, wrap_help_footer, HELP_LEGEND_HEAD_ROWS, HELP_LEGEND_TITLE,
     HELP_SEARCH_ESC_HINT,
 };
-use super::hyperlink::LinkHit;
+use super::hyperlink::{file_url, local_host, LinkHit};
 use super::icons::{
     comment_mark_cols, glyph, icon_branch, icon_comment, icon_comment_resolved, icon_diff,
     icon_merged_into_default, icon_move, icon_open_vs_default, truncate_visible, IconKind,
@@ -92,12 +96,15 @@ use super::tabs::{
     compare_picker_empty, file_gutter_width, file_too_large, file_view_gutter_width,
     ComparePickerState, ExplorerPreview, FileTab, EXPLORER_FOLDER_HINT, FILE_IS_BINARY,
 };
-use super::theme::{hex_color, BackgroundMode, Palette, Pill, ThemeId};
+use super::theme::{hex_color, mix_toward, BackgroundMode, Palette, Pill, ThemeId};
+use super::toast::ToastTick;
 use super::tree::{
     file_change_from_name_status, file_change_segments, painted_row_segments, pr_badge_kind,
     pr_badge_mark, visible_window, workspace_trailing_fit, NodeKind, NodeSegments, SegRole,
     TextSeg, VisibleRow,
 };
+use super::undercurl::{cut_link_cells, drop_undercurls_under, underlined_runs, UndercurlHit};
+use super::watch::FlashKind;
 use crate::file_index::{FileIndex, FileRead};
 use crate::file_search::{SearchHit, SearchOptions};
 use crate::helpers::{is_detached_head_branch, visible_width};
@@ -128,6 +135,29 @@ fn pane_title(name: &str) -> String {
 
 fn muted_copy(text: &'static str, palette: Palette) -> Line<'static> {
     Line::from(Span::styled(text, Style::default().fg(palette.muted)))
+}
+
+/// `text` behind the current spinner frame (`⠋ loading graph…`). Marks
+/// the frame animating so the loop redraws on the spinner tick.
+fn loading_line(state: &mut AppState, text: &str) -> String {
+    spinner_text(state.anim_epoch, state.ascii, &mut state.layout, text)
+}
+
+/// [`loading_line`] for a paint site that holds a borrow of another
+/// `state` field: takes the spinner clock, glyph set, and layout apart.
+fn spinner_text(epoch: Instant, ascii: bool, layout: &mut LayoutHit, text: &str) -> String {
+    layout.animating = true;
+    format!("{} {text}", spinner_glyph(epoch, Instant::now(), ascii))
+}
+
+/// Foreground of spinner-prefixed loading copy: muted, or the terminal
+/// foreground under `NO_COLOR`.
+fn loading_fg(no_color: bool, palette: Palette) -> Color {
+    if no_color {
+        Color::Reset
+    } else {
+        palette.muted
+    }
 }
 
 /// Flash → focused cursor → inactive cursor → search match.
@@ -164,7 +194,16 @@ fn selection_marker(selected: bool, focused: bool) -> &'static str {
 
 /// Draw one frame. Updates `state.layout` for mouse hits.
 pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
+    draw_at(frame, state, Instant::now());
+}
+
+/// [`draw`] with the frame clock pinned to `now`: a scroll glide paints
+/// its step for that instant.
+pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant) {
+    state.frame_now = now;
     state.prune_expired_flashes();
+    // One-shot acks leave the status slot for a toast before anything paints.
+    state.route_ack_to_toast(Instant::now());
     // Every frame starts with no icon, link, or search option chip; only a
     // pane or dialog that paints one records it again, so a hidden badge
     // never opens a PR or a popover and a closed dialog's chip never
@@ -172,6 +211,11 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.layout.icon_hits.clear();
     state.layout.search_option_hits.clear();
     state.layout.links.clear();
+    state.layout.undercurls.clear();
+    // A painter that shows a time-based frame sets these again.
+    state.layout.animating = false;
+    state.layout.gliding = false;
+    state.layout.wake_ms = None;
     state.layout.popover = None;
     let area = frame.area();
     state.too_small = area.width < MIN_TERM_COLS || area.height < MIN_TERM_ROWS;
@@ -205,6 +249,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.layout.graph_scrollbar_y = 0;
     state.layout.graph_scrollbar_height = 0;
     state.layout.graph_content_len = 0;
+    state.layout.graph_painted_top = None;
     state.layout.graph_hscrollbar_y = None;
     state.layout.graph_hscrollbar_x = 0;
     state.layout.graph_hscrollbar_width = 0;
@@ -257,6 +302,9 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     if let Some(kind) = open_dialog(state) {
         let width = dialog_width(chunks[1], kind);
         let rect = dialog_rect(chunks[1], width, dialog_height(state, kind, width));
+        // Everything outside the box recedes. The copy frame below keeps
+        // the dim: only colours change, so drag-copy reads the same text.
+        dim_backdrop(frame.buffer_mut(), area, rect, palette, state.no_color);
         match kind {
             DialogKind::Help => {
                 let max = draw_help(frame, rect, state);
@@ -276,24 +324,218 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
             DialogKind::QuickOpen => draw_quick_open(frame, rect, state),
             DialogKind::SearchFiles => draw_search_files(frame, rect, state),
         }
-        drop_links_under(&mut state.layout.links, rect);
+        drop_hits_under(&mut state.layout, rect);
+        // The curls left are outside the box: they recede with the cells.
+        recede_undercurls(&mut state.layout.undercurls, palette);
     }
 
     // The icon popover hangs over the panes and any dialog.
     draw_popover(frame, chunks[1], state);
 
     // Keep the frame as painted so a mouse release copies what is on screen,
-    // then reverse the selected cells on top of it.
+    // then reverse the selected cells on top of it. The copy is taken before
+    // the toasts: a drag over a toast copies the pane text under it.
     state.painted_frame = frame.buffer_mut().clone();
+
+    // Toasts paint last, over any dialog, popover, or backdrop, so they
+    // stay crisp. Keep this after every overlay.
+    draw_toasts(frame, chunks[1], state);
+
+    // Links are final now. A cell that is both linked and curled keeps its
+    // link (and the plain underline); the curl writer skips it.
+    state.layout.undercurls = cut_link_cells(&state.layout.undercurls, &state.layout.links);
+
     if let Some(selection) = state.text_selection.as_ref() {
         selection.highlight(frame.buffer_mut());
     }
 }
 
-/// Drop each link in `links` that overlaps `rect`: a box painted there
-/// hides its cells, so the OSC 8 overlay must not print them as a link.
-fn drop_links_under(links: &mut Vec<LinkHit>, rect: Rect) {
-    links.retain(|link| !rect.intersects(Rect::new(link.x, link.y, link.width, 1)));
+/// Widest a toast row may be (columns).
+const TOAST_MAX_COLS: u16 = 48;
+
+/// Toast stack in the bottom-right of `pane_area`, newest on the bottom
+/// row, one row each: ` ✓ text ` (ASCII ` ok text `).
+///
+/// Fg is `repo` on the add-flash ramp step for the toast's fade strength.
+/// Under `NO_COLOR` the row is reversed terminal colours with no fade.
+/// While a toast fades the frame is marked animating, so the loop ticks.
+/// While every toast holds full strength it asks for one wake at the first
+/// fade start (`NO_COLOR`: at the first expiry) and no frame ticks.
+fn draw_toasts(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
+    let now = Instant::now();
+    if state.toasts.is_empty() || pane_area.width < 4 || pane_area.height < 3 {
+        return;
+    }
+    let palette = state.theme.palette();
+    let mark = if state.ascii { " ok " } else { " ✓ " };
+    let cap = TOAST_MAX_COLS.min(pane_area.width - 2);
+    // Inside the pane border: one column in from the right, one row up.
+    let bottom = pane_area.bottom() - 2;
+    let rows = usize::from(pane_area.height - 2);
+    let toasts: Vec<(String, f32)> = state
+        .toasts
+        .visible(now)
+        .map(|(toast, strength)| (toast.text.clone(), strength))
+        .collect();
+    // Cell widths as ratatui paints them: `visible_width` counts `✓` as
+    // two columns, which would leave a blank cell at the right edge.
+    let body_max = usize::from(cap).saturating_sub(UnicodeWidthStr::width(mark) + 1);
+    for (offset, (text, strength)) in toasts.iter().rev().take(rows).enumerate() {
+        let label = format!("{mark}{} ", fit_with_ellipsis(text, body_max));
+        let width = (UnicodeWidthStr::width(label.as_str()) as u16).min(cap);
+        let rect = Rect::new(
+            pane_area.right() - 1 - width,
+            bottom - offset as u16,
+            width,
+            1,
+        );
+        let style = if state.no_color {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            let Some(bg) = palette.flash_bg_for(FlashKind::Add, *strength) else {
+                continue;
+            };
+            Style::default().fg(palette.repo).bg(bg)
+        };
+        frame.render_widget(Clear, rect);
+        frame.render_widget(Paragraph::new(Span::styled(label, style)), rect);
+        drop_hits_under(&mut state.layout, rect);
+    }
+    match state.toasts.next_tick(now, state.no_color) {
+        ToastTick::Frames => state.layout.animating = true,
+        ToastTick::WakeIn(ms) => {
+            state.layout.wake_ms = Some(state.layout.wake_ms.map_or(ms, |at| at.min(ms)));
+        }
+        ToastTick::Idle => {}
+    }
+}
+
+/// How far (percent) each cell behind a centered dialog blends toward the
+/// theme `surface`.
+pub(crate) const BACKDROP_PERCENT: i32 = 50;
+
+/// Dim every cell of `area` outside `keep` so the dialog in `keep` stands
+/// out and the rest of the screen recedes.
+///
+/// An RGB fg or bg moves [`BACKDROP_PERCENT`] toward `palette.surface`.
+/// A non-RGB fg (`Reset`, indexed) gets [`Modifier::DIM`] instead; a
+/// non-RGB bg is the terminal's own fill and stays (SGR faint only dims the
+/// fg). Under `no_color` no colour changes: every cell gets `DIM` only.
+/// Text never changes.
+fn dim_backdrop(buf: &mut Buffer, area: Rect, keep: Rect, palette: Palette, no_color: bool) {
+    let area = area.intersection(buf.area);
+    let surface_rgb = matches!(palette.surface, Color::Rgb(..));
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if keep.contains(Position::new(x, y)) {
+                continue;
+            }
+            let cell = &mut buf[(x, y)];
+            if no_color {
+                cell.modifier.insert(Modifier::DIM);
+                continue;
+            }
+            if surface_rgb && matches!(cell.fg, Color::Rgb(..)) {
+                cell.fg = mix_toward(cell.fg, palette.surface, BACKDROP_PERCENT);
+            } else {
+                cell.modifier.insert(Modifier::DIM);
+            }
+            if surface_rgb && matches!(cell.bg, Color::Rgb(..)) {
+                cell.bg = mix_toward(cell.bg, palette.surface, BACKDROP_PERCENT);
+            }
+        }
+    }
+}
+
+/// Recede the curly underlines behind an open dialog the way
+/// [`dim_backdrop`] recedes their cells: each RGB curl colour moves
+/// [`BACKDROP_PERCENT`] toward `palette.surface`.
+///
+/// With a non-RGB surface or curl colour there is no mix to make, so the
+/// curls go; the cells keep their plain underline.
+fn recede_undercurls(hits: &mut Vec<UndercurlHit>, palette: Palette) {
+    if !matches!(palette.surface, Color::Rgb(..)) {
+        hits.clear();
+        return;
+    }
+    hits.retain_mut(|hit| {
+        if !matches!(hit.color, Color::Rgb(..)) {
+            return false;
+        }
+        hit.color = mix_toward(hit.color, palette.surface, BACKDROP_PERCENT);
+        true
+    });
+}
+
+/// Drop each link and curly-underline span in `layout` that overlaps
+/// `rect`: a box painted there hides its cells, so the post-draw writers
+/// (OSC 8, undercurl) must not print them again.
+fn drop_hits_under(layout: &mut LayoutHit, rect: Rect) {
+    layout
+        .links
+        .retain(|link| !rect.intersects(Rect::new(link.x, link.y, link.width, 1)));
+    drop_undercurls_under(&mut layout.undercurls, rect);
+}
+
+/// `file://` URL of `rel` in checkout `repo` (both relative to the
+/// workspace root `state.cwd`).
+///
+/// `rel` can be the C-quoted form git prints for a name with a space or a
+/// non-ASCII byte (`"my notes.txt"`, `"\303\251.rs"`); the link uses the
+/// real name. The shown path is not changed.
+fn file_link(state: &AppState, repo: &str, rel: &str) -> String {
+    let rel = crate::git::unquote_c_path_bytes(rel);
+    #[cfg(unix)]
+    let rel = {
+        use std::os::unix::ffi::OsStrExt;
+        PathBuf::from(std::ffi::OsStr::from_bytes(&rel))
+    };
+    #[cfg(not(unix))]
+    let rel = PathBuf::from(String::from_utf8_lossy(&rel).into_owned());
+    file_url(local_host(), &state.cwd.join(repo).join(rel))
+}
+
+/// True when the tree file change is a deletion with no file left on disk:
+/// deleted in the worktree, or staged as deleted with no worktree change.
+fn file_change_is_deleted(file: &crate::snapshot::FileChange) -> bool {
+    let unstaged = file.unstaged_status.as_deref();
+    unstaged == Some("D") || (unstaged.is_none() && file.staged_status.as_deref() == Some("D"))
+}
+
+/// Link over the rightmost `needle` painted in buffer row `y`, columns
+/// `x0..x1`, or `None` when the row does not show it.
+///
+/// Matches painted cell symbols, so a hash the widget dropped for room
+/// gets no link.
+fn painted_text_link(
+    buf: &Buffer,
+    y: u16,
+    x0: u16,
+    x1: u16,
+    needle: &str,
+    url: String,
+) -> Option<LinkHit> {
+    let area = buf.area;
+    if needle.is_empty() || y < area.top() || y >= area.bottom() {
+        return None;
+    }
+    let (x0, x1) = (x0.max(area.left()), x1.min(area.right()));
+    let mut text = String::new();
+    let mut starts: Vec<(usize, u16)> = Vec::new();
+    for x in x0..x1 {
+        starts.push((text.len(), x));
+        text.push_str(buf[(x, y)].symbol());
+    }
+    let at = text.rfind(needle)?;
+    let x = starts.iter().find(|(start, _)| *start == at)?.1;
+    let end = at + needle.len();
+    let last = starts.iter().rev().find(|(start, _)| *start < end)?.1;
+    Some(LinkHit {
+        y,
+        x,
+        width: last - x + 1,
+        url,
+    })
 }
 
 /// Tree / graph / files pane on the left and graph / files / diff on the
@@ -491,6 +733,53 @@ fn file_view_scroll(
     top
 }
 
+/// First line to paint so `cursor` sits near the vertical middle of
+/// `height` rows (Ctrl-d / Ctrl-u, [`FileTab::recenter`]).
+///
+/// At most half the rows go above the cursor, and the top never passes the
+/// one that shows the last of `line_count` lines on the bottom row, as
+/// `tree::list_viewport_start` does for the tree. Reads at most two
+/// screens of lines.
+///
+/// [`FileTab::recenter`]: super::tabs::FileTab::recenter
+fn file_view_middle_top(
+    cursor: usize,
+    line_count: usize,
+    height: usize,
+    rows_of: impl Fn(usize) -> usize,
+) -> usize {
+    let height = height.max(1);
+    let budget = (height / 2).min(height.saturating_sub(rows_of(cursor)));
+    let mut top = cursor;
+    let mut above = 0usize;
+    while top > 0 {
+        let rows = rows_of(top - 1);
+        if above + rows > budget {
+            break;
+        }
+        above += rows;
+        top -= 1;
+    }
+    let last = line_count.saturating_sub(1);
+    let max_top = (last + 1).saturating_sub(file_lines_ending_at(last, height, rows_of));
+    top.min(max_top)
+}
+
+/// File lines counted back from `cursor` (included) whose painted rows fit
+/// in `height`. At least 1.
+fn file_lines_ending_at(cursor: usize, height: usize, rows_of: impl Fn(usize) -> usize) -> usize {
+    let mut used = rows_of(cursor);
+    let mut count = 1;
+    for line in (0..cursor).rev() {
+        used += rows_of(line);
+        if used > height {
+            break;
+        }
+        count += 1;
+    }
+    count
+}
+
 /// The active read-only file body (an Explorer inner file tab of a clean
 /// file) inside `pane.inner`: line numbers and highlighted
 /// code, or a loading / binary / too-large / empty notice.
@@ -509,7 +798,15 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
         return;
     };
     let notice = match tab.body.as_deref() {
-        None => Some((LOADING_FILE.to_string(), palette.muted)),
+        None => Some((
+            spinner_text(
+                state.anim_epoch,
+                state.ascii,
+                &mut state.layout,
+                LOADING_FILE,
+            ),
+            loading_fg(state.no_color, palette),
+        )),
         Some(FileRead::Binary) => Some((FILE_IS_BINARY.to_string(), palette.muted)),
         Some(FileRead::TooLarge { bytes }) => Some((file_too_large(*bytes), palette.muted)),
         Some(FileRead::Failed(err)) => Some((err.clone(), palette.deleted)),
@@ -544,7 +841,30 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
             1
         }
     };
-    let scroll = file_view_scroll(tab.scroll, tab.cursor, height, rows_of);
+    // `tab.scroll` keeps the jump top (it is sticky: the next frame
+    // starts from it); only the painted window glides. `j` / `k` move the
+    // top only as far as the cursor needs; Ctrl-d / Ctrl-u put the cursor
+    // near the middle, so the glide has rows to cover.
+    let target = if tab.recenter {
+        file_view_middle_top(tab.cursor, lines.len(), height, rows_of)
+    } else {
+        file_view_scroll(tab.scroll, tab.cursor, height, rows_of)
+    };
+    let scroll = if state.glide_pending(GlidePane::FileView) {
+        let span = file_lines_ending_at(tab.cursor, height, rows_of);
+        let (scroll, gliding) = glide_step(
+            &mut state.scroll_glide,
+            GlidePane::FileView,
+            target,
+            tab.cursor,
+            span,
+            state.frame_now,
+        );
+        state.layout.gliding |= gliding;
+        scroll
+    } else {
+        target
+    };
     let mut end = scroll;
     let mut used = 0usize;
     while end < lines.len() && used < height {
@@ -575,6 +895,15 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
             row_match_bg(selected, true, hit, None, palette, search.bg)
         };
         let match_fg = (hit && !selected).then_some(search.fg);
+        let n = u32::try_from(line + 1).unwrap_or(u32::MAX);
+        let comment = state.file_line_comment(n);
+        // Every painted row of a line with an open comment underlines its
+        // code; the runs get the curly upgrade after the draw.
+        let underline = if comment == Some(false) {
+            Modifier::UNDERLINED
+        } else {
+            Modifier::empty()
+        };
         let code = spans.get(line - scroll).map(Vec::as_slice).unwrap_or(&[]);
         let starts = if wrap {
             wrap_col_starts_capped(text, code_w, row_cap)
@@ -586,8 +915,6 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
                 break;
             }
             let number = if part == 0 {
-                let n = u32::try_from(line + 1).unwrap_or(u32::MAX);
-                let comment = state.file_line_comment(n);
                 format!(
                     "{} ",
                     format_line_gutter(Some(n), digits, comment, state.ascii)
@@ -601,7 +928,8 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
             for span in slice_styled_cols(code, start, code_w) {
                 used += visible_width(&span.text);
                 let fg = match_fg.unwrap_or(span.fg);
-                row.push(Span::styled(span.text, with_bg(Style::default().fg(fg))));
+                let style = Style::default().fg(fg).add_modifier(underline);
+                row.push(Span::styled(span.text, with_bg(style)));
             }
             if bg.is_some() && used < code_w {
                 row.push(Span::styled(
@@ -619,9 +947,14 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
         }
     }
     frame.render_widget(Paragraph::new(painted), inner);
+    let curls = underlined_runs(frame.buffer_mut(), inner, palette.comment_underline());
+    state.layout.undercurls.extend(curls);
     state.layout.file_view_row_lines = row_lines;
+    // Store the jump top, not a glide step: the next frame keeps gliding
+    // toward it, and the sticky rule starts from it once the glide ends.
     if let Some(tab) = state.tabs.active_file_view_mut() {
-        tab.scroll = scroll;
+        tab.scroll = target;
+        tab.recenter = false;
     }
 }
 
@@ -1007,6 +1340,28 @@ fn draw_explorer_tree(
     } else {
         HashSet::new()
     };
+    let loading_text = if rows
+        .iter()
+        .skip(start)
+        .take(height)
+        .any(|row| row.placeholder)
+    {
+        loading_line(state, LOADING_FILE)
+    } else {
+        LOADING_FILE.to_string()
+    };
+    let loading = TextSeg {
+        text: loading_text,
+        role: if state.no_color {
+            SegRole::Plain
+        } else {
+            SegRole::Muted
+        },
+        hex: None,
+        bold: false,
+        dim: false,
+        icon: None,
+    };
     let lines: Vec<Line> = rows
         .iter()
         .enumerate()
@@ -1017,7 +1372,7 @@ fn draw_explorer_tree(
                 row.depth,
                 row.is_dir,
                 !row.expanded,
-                &explorer_row_segments(row, status, state.ascii),
+                &explorer_row_segments(row, status, state.ascii, &loading),
                 area.width as usize,
                 Some(index) == cursor,
                 focused,
@@ -1038,8 +1393,13 @@ fn draw_explorer_tree(
 /// A changed file paints in its status colour with its letter badge
 /// (`??` for an untracked file); a folder with changes under it gets a
 /// `●` in the modified colour. Ignored entries are muted and dim; a
-/// loading row says so.
-fn explorer_row_segments(row: &ExplorerRow, status: &ExplorerStatus, ascii: bool) -> NodeSegments {
+/// loading row paints `loading` (the spinner-prefixed copy and its role).
+fn explorer_row_segments(
+    row: &ExplorerRow,
+    status: &ExplorerStatus,
+    ascii: bool,
+    loading: &TextSeg,
+) -> NodeSegments {
     let seg = |text: &str, role: SegRole, dim: bool| TextSeg {
         text: text.to_string(),
         role,
@@ -1050,7 +1410,7 @@ fn explorer_row_segments(row: &ExplorerRow, status: &ExplorerStatus, ascii: bool
     };
     if row.placeholder {
         return NodeSegments {
-            segments: vec![seg(LOADING_FILE, SegRole::Muted, false)],
+            segments: vec![loading.clone()],
             trailing: Vec::new(),
         };
     }
@@ -1142,7 +1502,16 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let painted_cursor = focus_id
         .and_then(|id| painted.iter().position(|row| row.id == id))
         .unwrap_or(0);
-    let (start, _) = visible_window(painted.len(), painted_cursor, height);
+    let (target, _) = visible_window(painted.len(), painted_cursor, height);
+    let (start, gliding) = glide_step(
+        &mut state.scroll_glide,
+        GlidePane::Tree,
+        target,
+        painted_cursor,
+        height,
+        state.frame_now,
+    );
+    state.layout.gliding |= gliding;
     state.layout.list_offset = start;
     let search = state.theme.pills().filter;
     let match_ids: HashSet<String> = if state.search_target == SearchPane::Tree {
@@ -1154,9 +1523,43 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     };
     let mut lines = Vec::new();
     let mut hits = Vec::new();
+    let mut links = Vec::new();
+    let now = Instant::now();
+    let running = &state.remote_activity.running;
+    let running_families: HashSet<String> = running
+        .iter()
+        .map(|checkout| {
+            state
+                .snapshot
+                .repos
+                .iter()
+                .find(|snap| &snap.repo == checkout)
+                .and_then(|snap| snap.primary_repo.clone())
+                .unwrap_or_else(|| checkout.clone())
+        })
+        .collect();
     for (y, row) in (area.y..).zip(painted.iter().skip(start).take(height)) {
         let (viewed, commented, resolved, pr) = state.tree_row_marks(row);
-        let (line, icons) = paint_tree_row(
+        let spinner = tree_row_runs_remote(row, &state.remote_activity.running, &running_families)
+            .then(|| spinner_glyph(state.anim_epoch, now, state.ascii));
+        state.layout.animating |= spinner.is_some();
+        // Commit-activity bars: repo rows only, once the worker has
+        // counted, and only when the pane leaves the label room.
+        let bars = (width >= SPARK_MIN_TREE_COLS)
+            .then(|| row_activity_key(row))
+            .flatten()
+            .and_then(|key| state.activity.get(key))
+            .and_then(|days| sparkline(days, state.ascii));
+        let decor = TreeRowDecor {
+            viewed,
+            commented,
+            resolved,
+            pr,
+            spinner,
+            sparkline: bars,
+            no_color: state.no_color,
+        };
+        let (line, icons, label) = paint_tree_row(
             row,
             width,
             Some(row.id.as_str()) == focus_id,
@@ -1165,14 +1568,25 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             match_ids.contains(&row.id),
             search,
             state.ascii,
-            viewed,
-            commented,
-            resolved,
-            pr,
+            decor,
             palette,
             state.left_col_offset as usize,
         );
         lines.push(line);
+        // A file row's label links to the file on disk; a deleted file has
+        // none.
+        if let (NodeKind::File, Some(repo), Some(file), Some((x, w))) =
+            (row.kind, row.repo.as_deref(), row.file.as_ref(), label)
+        {
+            if !file_change_is_deleted(file) {
+                links.push(LinkHit {
+                    y,
+                    x: area.x.saturating_add(u16::try_from(x).unwrap_or(u16::MAX)),
+                    width: u16::try_from(w).unwrap_or(u16::MAX),
+                    url: file_link(state, repo, &file.path),
+                });
+            }
+        }
         for (kind, x, w) in icons {
             hits.push(IconHit {
                 y,
@@ -1184,6 +1598,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         }
     }
     state.layout.icon_hits.extend(hits);
+    state.layout.links.extend(links);
     frame.render_widget(Paragraph::new(lines), area);
 }
 
@@ -1191,9 +1606,60 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
 /// and width.
 type IconSpan = (IconKind, usize, usize);
 
+/// Painted label run of a row: column offset from the row start, and
+/// width.
+type LabelSpan = (usize, usize);
+
+/// Per-row marks and live decorations a tree row paints beside its own
+/// segments.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct TreeRowDecor {
+    /// File row is marked reviewed.
+    viewed: bool,
+    /// Row has a comment.
+    commented: bool,
+    /// Every comment on the row is resolved.
+    resolved: bool,
+    /// PR badge state of the row's branch.
+    pr: Option<PrState>,
+    /// Spinner frame while a fetch / pull / push runs on the row's
+    /// checkout. Paints ahead of the marks, after the sparkline.
+    spinner: Option<&'static str>,
+    /// Commit-activity bars of a repo row ([`sparkline`]). Paints first in
+    /// the trailing run, ahead of the spinner and the marks: the run is
+    /// right-aligned, so the bars take label room and the marks never move.
+    sparkline: Option<String>,
+    /// `NO_COLOR`: the spinner and the sparkline take the terminal
+    /// foreground.
+    no_color: bool,
+}
+
+/// A repo or checkout row with remote git in flight.
+///
+/// A checkout row, or a repo row of one checkout, spins while its own
+/// checkout runs (`running`). A family repo row (a primary with linked
+/// checkouts) spins while any member runs: `running_families` holds the
+/// family key (`primary_repo`, else the checkout) of each running
+/// checkout, and the family row's `repo` is that key.
+fn tree_row_runs_remote(
+    row: &VisibleRow,
+    running: &HashSet<String>,
+    running_families: &HashSet<String>,
+) -> bool {
+    let Some(repo) = row.repo.as_ref() else {
+        return false;
+    };
+    match row.kind {
+        NodeKind::Repo if row.chrome.is_family => running_families.contains(repo),
+        NodeKind::Repo | NodeKind::Checkout => running.contains(repo),
+        _ => false,
+    }
+}
+
 /// Paint one tree row. Also returns an [`IconSpan`] for each segment the
 /// row paints with a catalog icon tag ([`TextSeg::icon`]) that is still on
-/// screen after `col_offset`, the label budget, and the row `width`.
+/// screen after `col_offset`, the label budget, and the row `width`, and
+/// the painted [`LabelSpan`] of the label run.
 fn paint_tree_row(
     row: &VisibleRow,
     width: usize,
@@ -1203,16 +1669,45 @@ fn paint_tree_row(
     search_match: bool,
     search: Pill,
     ascii: bool,
-    viewed: bool,
-    commented: bool,
-    resolved: bool,
-    pr: Option<PrState>,
+    decor: TreeRowDecor,
     palette: Palette,
     col_offset: usize,
-) -> (Line<'static>, Vec<IconSpan>) {
+) -> (Line<'static>, Vec<IconSpan>, Option<LabelSpan>) {
     let segs_width =
         |segs: &[TextSeg]| -> usize { segs.iter().map(|s| visible_width(&s.text)).sum() };
-    let mut segs = painted_row_segments(row, ascii, viewed, commented, resolved, pr);
+    let mut segs = painted_row_segments(
+        row,
+        ascii,
+        decor.viewed,
+        decor.commented,
+        decor.resolved,
+        decor.pr,
+    );
+    // The spinner, then the bars left of it, lead the trailing run: each is
+    // a bare token one space before the rest, as the run packs its marks.
+    // The run is right-aligned, so they come out of the label budget and
+    // the marks keep their columns when a fetch starts or the counts land.
+    let live_role = if decor.no_color {
+        SegRole::Plain
+    } else {
+        SegRole::Muted
+    };
+    let live = [decor.spinner.map(str::to_string), decor.sparkline];
+    for text in live.into_iter().flatten() {
+        let seg = |text: String, role: SegRole| TextSeg {
+            text,
+            role,
+            hex: None,
+            bold: false,
+            dim: false,
+            icon: None,
+        };
+        if !segs.trailing.is_empty() {
+            segs.trailing
+                .insert(0, seg(" ".to_string(), SegRole::Muted));
+        }
+        segs.trailing.insert(0, seg(text, live_role));
+    }
     if row.kind == NodeKind::Workspace {
         // The summary gives way before the name. Same prefix as
         // `paint_segmented_row` (edge, indent, chevron); comment marks
@@ -1235,6 +1730,7 @@ fn paint_tree_row(
         segs.trailing.extend(summary);
     }
     let icons = segmented_icon_spans(row.depth, &segs, width, col_offset);
+    let label = segmented_label_span(row.depth, &segs, width, col_offset);
     let line = paint_segmented_row(
         row.depth,
         row.foldable,
@@ -1250,7 +1746,7 @@ fn paint_tree_row(
         palette,
         col_offset,
     );
-    (line, icons)
+    (line, icons, label)
 }
 
 /// Painted span of every icon segment of a row that
@@ -1313,6 +1809,24 @@ fn segmented_icon_spans(
         col += seg_width;
     }
     spans
+}
+
+/// Painted label run of a row that [`paint_segmented_row`] paints `width`
+/// columns wide at `col_offset`, clipped to `width`. `None` when no label
+/// cell is on screen.
+fn segmented_label_span(
+    depth: usize,
+    segs: &NodeSegments,
+    width: usize,
+    col_offset: usize,
+) -> Option<LabelSpan> {
+    let layout = segmented_row_layout(depth, segs, width);
+    let label_width: usize = slice_segs(&segs.segments, col_offset, layout.label_budget)
+        .iter()
+        .map(|s| visible_width(&s.text))
+        .sum();
+    let end = (layout.prefix_width + label_width).min(width);
+    (layout.prefix_width < end).then(|| (layout.prefix_width, end - layout.prefix_width))
 }
 
 /// `seg` as leading spaces, the text between, and trailing spaces, each
@@ -1512,6 +2026,7 @@ fn seg_role_color(role: SegRole, palette: Palette) -> Color {
         SegRole::Viewed => palette.viewed,
         SegRole::BranchDefault => palette.branch_default,
         SegRole::BranchFeature => palette.branch_feature,
+        SegRole::Plain => Color::Reset,
     }
 }
 
@@ -1595,12 +2110,21 @@ fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     }
     // A focused repo always has a graph load in flight until the graph
     // lands (a file diff clears the graph it replaced).
-    let copy = if state.focused_graph_repo().is_some() {
-        LOADING_GRAPH
+    let (copy, style) = if state.focused_graph_repo().is_some() {
+        // NO_COLOR: the terminal foreground, never a fill's colour.
+        let style = if state.no_color {
+            Style::default().fg(Color::Reset)
+        } else {
+            Style::default()
+        };
+        (loading_line(state, LOADING_GRAPH), style)
     } else {
-        "focus a repo for the graph, or a file for its diff"
+        (
+            "focus a repo for the graph, or a file for its diff".to_string(),
+            Style::default(),
+        )
     };
-    frame.render_widget(Paragraph::new(copy), area);
+    frame.render_widget(Paragraph::new(Span::styled(copy, style)), area);
 }
 
 /// Folder summary in the diff pane: `dir/` and its totals, then one row per
@@ -1712,9 +2236,28 @@ fn draw_folder_summary(
     frame.render_widget(Paragraph::new(lines), body);
 }
 
+/// Graph list top to paint in a pane `area_height` rows tall:
+/// `graph_scroll`, or the step of a live Ctrl-d / Ctrl-u glide toward it.
+fn graph_glide_scroll(state: &mut AppState, area_height: u16) -> u16 {
+    if !state.glide_pending(GlidePane::Graph) {
+        return state.graph_scroll;
+    }
+    let target = usize::from(state.graph_scroll);
+    let height = usize::from(state.graph_chrome_in(area_height).list_height);
+    let cursor = state.graph_cursor_line().unwrap_or(target);
+    let now = state.frame_now;
+    let top = state.glide_start(GlidePane::Graph, target, cursor, height, now);
+    u16::try_from(top).unwrap_or(state.graph_scroll)
+}
+
 fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offset: u16) {
     if area.width == 0 || area.height == 0 {
         return;
+    }
+    // The painted top: `graph_scroll` itself stays the jump top.
+    let scroll = graph_glide_scroll(state, area.height);
+    if state.graph.is_some() {
+        state.layout.graph_painted_top = Some(scroll);
     }
     let Some(model) = state.graph.as_ref() else {
         frame.render_widget(Paragraph::new("focus a repo for the graph"), area);
@@ -1741,7 +2284,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         .ascii(state.ascii)
         .selected(Some(state.graph_cursor))
         .cursor_bar(graph_focused)
-        .scroll(state.graph_scroll)
+        .scroll(scroll)
         .col_offset(col_offset)
         .search_matches(
             &matches,
@@ -1808,11 +2351,76 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
             })
         })
         .collect();
+    let links = graph_commit_links(frame.buffer_mut(), area, state, &rows, &spans);
     state.layout.icon_hits.extend(hits);
+    state.layout.links.extend(links);
     record_graph_scrollbar(state, area, col_offset, &badges);
     if state.background == BackgroundMode::Paint {
         bleed_graph_scrollbar_column(frame, &state.layout);
     }
+}
+
+/// One link per painted graph commit row, over its short hash, to the
+/// commit page on the forge of the graph's checkout. The selected commit's
+/// hash in the selection footer links too.
+///
+/// A commit row is found by its node icon span. Its hash (the
+/// right-anchored meta) is the rightmost `short_id` painted on the node
+/// line or on a spacer line under it, above the next row's first icon and
+/// the footer. No remote known for the checkout gives no link.
+fn graph_commit_links(
+    buf: &Buffer,
+    area: Rect,
+    state: &AppState,
+    rows: &[GraphRow],
+    spans: &[workspace_status_graph::IconSpan],
+) -> Vec<LinkHit> {
+    let Some((checkout, _)) = state.graph_identity.as_ref() else {
+        return Vec::new();
+    };
+    let checkout = std::path::Path::new(checkout);
+    let chrome = state.graph_chrome_in(area.height);
+    let list_bottom = area
+        .y
+        .saturating_add(u16::from(chrome.header))
+        .saturating_add(chrome.list_height)
+        .min(area.bottom());
+    let hash_link = |id: &str, lines: std::ops::Range<u16>| {
+        let url = state.commit_link(checkout, id)?;
+        lines.into_iter().find_map(|y| {
+            painted_text_link(buf, y, area.x, area.right(), short_id(id), url.clone())
+        })
+    };
+    let mut links: Vec<LinkHit> = spans
+        .iter()
+        .filter(|span| {
+            matches!(
+                span.kind,
+                GraphIconKind::CommitNode | GraphIconKind::HeadNode
+            )
+        })
+        .filter_map(|span| {
+            let index = span.row_index?;
+            let Some(GraphRow::Commit { commit, .. }) = rows.get(index) else {
+                return None;
+            };
+            let next_row = spans
+                .iter()
+                .filter(|other| other.y > span.y && other.row_index != Some(index))
+                .map(|other| other.y)
+                .min()
+                .unwrap_or(list_bottom)
+                .min(list_bottom);
+            hash_link(&commit.id, span.y..next_row)
+        })
+        .collect();
+    if chrome.footer && chrome.footer_height > 0 {
+        if let Some(GraphRow::Commit { commit, .. }) = rows.get(state.graph_cursor) {
+            let top = area.bottom().saturating_sub(chrome.footer_height);
+            links.extend(hash_link(&commit.id, top..area.bottom()));
+        }
+    }
+    links
 }
 
 /// Flat graph list, before [`bleed_flat_pad`]: the widget paints rows one
@@ -1911,7 +2519,8 @@ fn record_graph_scrollbar(
     // The widget already painted this frame; count without a second paint.
     let content_len = painted_line_count(model);
     state.layout.graph_content_len = content_len;
-    let vscroll = graph_vscroll_visible(content_len, chrome.list_height, state.graph_scroll);
+    // The painted top, so the bar matches the rows during a glide.
+    let vscroll = graph_vscroll_visible(content_len, chrome.list_height, state.graph_painted_top());
     let hscroll = graph_hscroll_visible(col_offset);
     let list_top = area.y.saturating_add(u16::from(chrome.header));
     let list_height = chrome.list_height;
@@ -2041,6 +2650,24 @@ fn draw_commit_detail(
         height: body_h,
     };
     frame.render_widget(Paragraph::new(footer_lines), footer_area);
+    // The meta row (second body row) starts with the commit's short hash:
+    // link it to the commit page.
+    let link = match state.commit_drill_source() {
+        Some((repo, super::drill::CommitFileSource::Commit { commit_id })) if body_h >= 2 => state
+            .commit_link(std::path::Path::new(repo), commit_id)
+            .and_then(|url| {
+                painted_text_link(
+                    frame.buffer_mut(),
+                    footer_area.y + 1,
+                    footer_area.x,
+                    footer_area.right(),
+                    short_id(commit_id),
+                    url,
+                )
+            }),
+        _ => None,
+    };
+    state.layout.links.extend(link);
 }
 
 fn draw_commit_file_list(
@@ -2067,26 +2694,38 @@ fn draw_commit_file_list(
                 );
                 return;
             }
-            let copy = if tab.loading {
-                LOADING_FILES
+            let (copy, fg) = if tab.loading {
+                let text = spinner_text(
+                    state.anim_epoch,
+                    state.ascii,
+                    &mut state.layout,
+                    LOADING_FILES,
+                );
+                (text, loading_fg(state.no_color, palette))
             } else {
-                tab.empty_files_copy()
+                (tab.empty_files_copy().to_string(), palette.muted)
             };
-            frame.render_widget(Paragraph::new(muted_copy(copy, palette)), area);
+            let line = Span::styled(copy, Style::default().fg(fg));
+            frame.render_widget(Paragraph::new(line), area);
             return;
         }
         // Commit-file lists have no row filter: empty after the load means
         // the source has no files.
-        let copy = if state.commit_files_loading {
-            LOADING_FILES
+        let (copy, fg) = if state.commit_files_loading {
+            (
+                loading_line(state, LOADING_FILES),
+                loading_fg(state.no_color, palette),
+            )
         } else {
-            match state.commit_drill_source().map(|(_, source)| source) {
+            let copy = match state.commit_drill_source().map(|(_, source)| source) {
                 Some(super::drill::CommitFileSource::Stash { .. }) => NO_FILES_IN_STASH,
                 Some(super::drill::CommitFileSource::Worktree) => NO_FILES_IN_WORKTREE,
                 _ => NO_FILES_IN_COMMIT,
-            }
+            };
+            (copy.to_string(), palette.muted)
         };
-        frame.render_widget(Paragraph::new(muted_copy(copy, palette)), area);
+        let line = Span::styled(copy, Style::default().fg(fg));
+        frame.render_widget(Paragraph::new(line), area);
         return;
     }
     let height = area.height as usize;
@@ -2113,6 +2752,10 @@ fn draw_commit_file_list(
     let mut lines = Vec::new();
     let mut hits = Vec::new();
     let comment_scope = state.commit_file_comment_scope();
+    let mut links = Vec::new();
+    let link_repo = state
+        .commit_drill_source()
+        .map(|(repo, _)| repo.to_string());
     for (y, row) in (area.y..).zip(rows.iter().skip(start).take(height)) {
         let segs = state.commit_file_row_paint_segments_in(row, comment_scope);
         let search_match = searching_files
@@ -2125,6 +2768,24 @@ fn draw_commit_file_list(
                 width: u16::try_from(w).unwrap_or(u16::MAX),
                 kind,
                 target: IconTarget::CommitFileRow(row.id.clone()),
+            });
+        }
+        // A file row's label links to the file in the checkout; a deleted
+        // file has none.
+        let deleted = row
+            .file
+            .as_ref()
+            .is_some_and(|file| file.status.starts_with('D'));
+        if let (true, Some(repo), Some((x, w))) = (
+            row.is_file() && !deleted,
+            link_repo.as_deref(),
+            segmented_label_span(row.depth, &segs, width, col_offset),
+        ) {
+            links.push(LinkHit {
+                y,
+                x: area.x.saturating_add(u16::try_from(x).unwrap_or(u16::MAX)),
+                width: u16::try_from(w).unwrap_or(u16::MAX),
+                url: file_link(state, repo, &row.path),
             });
         }
         lines.push(paint_segmented_row(
@@ -2144,6 +2805,7 @@ fn draw_commit_file_list(
         ));
     }
     state.layout.icon_hits.extend(hits);
+    state.layout.links.extend(links);
     frame.render_widget(Paragraph::new(lines), area);
 }
 
@@ -2163,6 +2825,24 @@ fn commit_file_search_match_paths(state: &AppState) -> HashSet<String> {
 fn commit_file_label_matches(label: &str, query: &str) -> bool {
     let q = query.trim().to_lowercase();
     !q.is_empty() && label.to_lowercase().contains(&q)
+}
+
+/// Logical rows of a wrapped diff, counted back from `cursor` (included),
+/// whose visual rows fit in `view_h`. At least 1.
+fn wrap_rows_ending_at(heights: &[usize], cursor: usize, view_h: usize) -> usize {
+    let Some(&own) = heights.get(cursor) else {
+        return 1;
+    };
+    let mut used = own.max(1);
+    let mut count = 1;
+    for h in heights[..cursor].iter().rev() {
+        used += (*h).max(1);
+        if used > view_h {
+            break;
+        }
+        count += 1;
+    }
+    count
 }
 
 fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
@@ -2191,8 +2871,10 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let line_h = list_h.saturating_sub(h_rows).max(1) as usize;
     let gutter = gutter_width(&rows);
     let gutter_with_mark = gutter.saturating_add(comment_mark_cols(state.ascii));
-    // Viewport start and the visual rows the whole diff paints.
-    let (start, content_rows) = if wrap {
+    // Viewport start (a logical row), the logical rows that fit on screen
+    // ending at the cursor (what a glide keeps the cursor inside), and the
+    // visual rows the whole diff paints.
+    let (target, cursor_span, content_rows) = if wrap {
         let heights = diff_wrap_row_heights(
             &rows,
             diff_row_content_width(line_width as usize) as u16,
@@ -2201,13 +2883,20 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             state.diff_split_fraction,
         );
         let start = wrap_viewport_start(&heights, state.diff_cursor, line_h);
-        (start, heights.iter().map(|h| (*h).max(1)).sum::<usize>())
+        (
+            start,
+            wrap_rows_ending_at(&heights, state.diff_cursor, line_h),
+            heights.iter().map(|h| (*h).max(1)).sum::<usize>(),
+        )
     } else {
         (
             visible_window(rows.len(), state.diff_cursor, line_h).0,
+            line_h,
             rows.len(),
         )
     };
+    let now = state.frame_now;
+    let start = state.glide_start(GlidePane::Diff, target, state.diff_cursor, cursor_span, now);
     state.diff_scroll = start as u16;
     let skip = start;
     let vscroll = graph_vscroll_visible(content_rows, line_h as u16, state.diff_scroll);
@@ -2234,9 +2923,34 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         .add_modifier(Modifier::BOLD);
     // Break the title anywhere by display columns so the row count
     // matches `diff_pane_header_rows`; the extras follow on the last row.
-    let mut header_lines: Vec<Line> = wrap_cols(title, area.width as usize)
+    let title_chunks: Vec<String> = wrap_cols(title, area.width as usize)
         .into_iter()
         .take(header_h as usize)
+        .collect();
+    // The `repo/path` part of the title links to the file on disk.
+    let title_link = state.open_diff_target().and_then(|(repo, rel, _)| {
+        let linked = format!("{repo}/{rel}");
+        title
+            .starts_with(&linked)
+            .then(|| (visible_width(&linked), file_link(state, repo, rel)))
+    });
+    if let Some((mut left, url)) = title_link {
+        for (y, chunk) in (area.y..).zip(&title_chunks) {
+            let width = visible_width(chunk).min(left);
+            if width == 0 {
+                break;
+            }
+            state.layout.links.push(LinkHit {
+                y,
+                x: area.x,
+                width: u16::try_from(width).unwrap_or(u16::MAX),
+                url: url.clone(),
+            });
+            left -= width;
+        }
+    }
+    let mut header_lines: Vec<Line> = title_chunks
+        .into_iter()
         .map(|chunk| Line::from(Span::styled(chunk, heading)))
         .collect();
     if let Some(last) = header_lines.last_mut() {
@@ -2264,7 +2978,8 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         let msg = if let Some(tab) = state.tabs.active_compare() {
             tab.error.clone().unwrap_or_else(|| tab.empty_diff_copy())
         } else if state.explorer_diff_loading() {
-            LOADING_FILE.to_string()
+            color = loading_fg(state.no_color, palette);
+            loading_line(state, LOADING_FILE)
         } else if path.is_empty() {
             "select a dirty file".to_string()
         } else if let Some(err) = state.current_diff_content().error.as_deref() {
@@ -2370,6 +3085,10 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         height: line_h as u16,
     };
     frame.render_widget(Paragraph::new(painted), lines_area);
+    // Only commented code is underlined in the diff rows: those runs get
+    // the curly upgrade after the draw.
+    let curls = underlined_runs(frame.buffer_mut(), lines_area, palette.comment_underline());
+    state.layout.undercurls.extend(curls);
     if state.background == BackgroundMode::Paint {
         bleed_diff_row_edges(frame, lines_area, area.right());
     }
@@ -2631,14 +3350,15 @@ fn put_line_annotation(
     let mut style = pad.style;
     let rest = pad_w - 2 - fitted.width();
     spans.pop();
+    // Italic marks the note as metadata. It is a modifier, not a colour, so
+    // NO_COLOR keeps it; terminals without italics paint plain text.
+    let note = |style: Style| style.fg(palette.muted).add_modifier(Modifier::ITALIC);
+    spans.push(Span::styled("  ", style));
     if on_cursor_bar {
         // The two-column gap keeps the pad's bg; the note and the rest drop it.
-        spans.push(Span::styled("  ", style));
         style.bg = None;
-        spans.push(Span::styled(fitted, style.fg(palette.muted)));
-    } else {
-        spans.push(Span::styled(format!("  {fitted}"), style.fg(palette.muted)));
     }
+    spans.push(Span::styled(fitted, note(style)));
     if rest > 0 {
         spans.push(Span::styled(" ".repeat(rest), style));
     }
@@ -2778,10 +3498,14 @@ fn paint_cell_spans(
     let mark_w = comment_mark_cols(ascii);
     let code_w = cell_code_width(width, gutter.saturating_add(mark_w));
     let first = !wrap || wrap_part == 0;
-    let comment = if first {
-        cell.line_no.and_then(|n| state.diff_line_comment(n))
+    let line_comment = cell.line_no.and_then(|n| state.diff_line_comment(n));
+    let comment = if first { line_comment } else { None };
+    // Every painted row of a line with an open comment underlines its code
+    // (`draw_diff_pane` records the runs for the curly upgrade).
+    let underline = if line_comment == Some(false) {
+        Modifier::UNDERLINED
     } else {
-        None
+        Modifier::empty()
     };
     let line_no = format_line_gutter(
         if first { cell.line_no } else { None },
@@ -2842,7 +3566,7 @@ fn paint_cell_spans(
         };
         spans.push(Span::styled(
             part.text,
-            with_row_bg(Style::default().fg(fg), bg),
+            with_row_bg(Style::default().fg(fg).add_modifier(underline), bg),
         ));
     }
     spans.push(Span::styled(
@@ -5189,7 +5913,12 @@ fn draw_search_files(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             .padding(Padding::left(1));
         let preview_inner = block.inner(preview_area);
         frame.render_widget(block, preview_area);
-        let lines = search_preview_lines(dialog, index, palette, theme, preview_inner);
+        let (epoch, ascii) = (state.anim_epoch, state.ascii);
+        let fg = loading_fg(state.no_color, palette);
+        let layout = &mut state.layout;
+        let mut loading = |text: &str| (spinner_text(epoch, ascii, layout, text), fg);
+        let lines =
+            search_preview_lines(dialog, index, palette, theme, preview_inner, &mut loading);
         frame.render_widget(Paragraph::new(lines), preview_inner);
     }
 }
@@ -5533,13 +6262,15 @@ fn search_preview_spans(
 /// around the hit line (centered when the file allows), syntax-highlighted
 /// with a line-number gutter. The hit line has the cursor background; every
 /// hit of that file in view has its matches in the search colours. A
-/// binary, too large, or unreadable file is one dim line.
+/// binary, too large, or unreadable file is one dim line. A file still
+/// loading shows `loading` of [`PREVIEW_LOADING`] (the spinner copy and its fg).
 fn search_preview_lines(
     dialog: &SearchFilesState,
     index: &FileIndex,
     palette: Palette,
     theme: ThemeId,
     area: Rect,
+    loading: &mut dyn FnMut(&str) -> (String, Color),
 ) -> Vec<Line<'static>> {
     let width = usize::from(area.width);
     let height = usize::from(area.height);
@@ -5575,10 +6306,8 @@ fn search_preview_lines(
     };
     let (gen, lines) = match body {
         None => {
-            out.push(notice(
-                PREVIEW_LOADING.to_string(),
-                Style::default().fg(palette.muted),
-            ));
+            let (text, fg) = loading(PREVIEW_LOADING);
+            out.push(notice(text, Style::default().fg(fg)));
             return out;
         }
         Some((_, FileRead::Binary)) => {
@@ -5992,7 +6721,7 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
         }
     }
     frame.render_widget(Clear, rect);
-    drop_links_under(&mut state.layout.links, rect);
+    drop_hits_under(&mut state.layout, rect);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     let shown_rows = (start..start + shown).chain(body..rows.len());
@@ -10570,10 +11299,7 @@ mod tests {
                 false,
                 search_bg_unused(),
                 true,
-                false,
-                false,
-                false,
-                None,
+                TreeRowDecor::default(),
                 palette,
                 col_offset,
             )
@@ -10749,7 +11475,7 @@ mod tests {
         pr: Option<PrState>,
     ) -> (String, Vec<IconSpan>) {
         let palette = crate::tui::theme::ThemeId::TokyoNight.palette();
-        let (line, icons) = paint_tree_row(
+        let (line, icons, _) = paint_tree_row(
             row,
             width,
             false,
@@ -10758,10 +11484,10 @@ mod tests {
             false,
             search_bg_unused(),
             true,
-            false,
-            false,
-            false,
-            pr,
+            TreeRowDecor {
+                pr,
+                ..TreeRowDecor::default()
+            },
             palette,
             0,
         );
@@ -10867,7 +11593,7 @@ mod tests {
             (&dir, true, "\"", IconKind::Comment),
             (&section, true, "\"", IconKind::Comment),
         ] {
-            let (line, icons) = paint_tree_row(
+            let (line, icons, _) = paint_tree_row(
                 row,
                 width,
                 false,
@@ -10876,10 +11602,10 @@ mod tests {
                 false,
                 search_bg_unused(),
                 true,
-                false,
-                commented,
-                false,
-                None,
+                TreeRowDecor {
+                    commented,
+                    ..TreeRowDecor::default()
+                },
                 palette,
                 0,
             );
@@ -12314,7 +13040,8 @@ mod tests {
     /// popover, and the too-small notice. Pane title rows sit on their
     /// role colour (`sidebar` left, `surface` right), no pane
     /// cell carries another pane's role, chrome rows end on `chrome`, and a
-    /// popup's border sits on `panel` with no pane role inside it.
+    /// popup's border sits on `panel` with no pane role inside it. Behind
+    /// an open dialog each role is the backdrop dim of itself.
     #[test]
     fn paint_mode_sets_a_background_on_every_cell_for_every_theme() {
         let mut screens = paint_sweep_screens();
@@ -12374,18 +13101,33 @@ mod tests {
                 }
                 let outside = |x: u16, y: u16| popup.is_none_or(|p| !p.contains((x, y).into()));
                 let pane_h = state.layout.pane_height;
+                // An open dialog dims every role outside its box (the popover does not).
+                let backdrop = open_dialog(state).is_some();
+                let role_bg = |role: Color| {
+                    if backdrop {
+                        dimmed(role, palette)
+                    } else {
+                        role
+                    }
+                };
                 let panes: Vec<(Rect, Color)> = if state.is_explorer_tab() {
                     let (left, right) = explorer_pane_rects(state);
-                    vec![(left, palette.sidebar), (right, palette.surface)]
+                    vec![
+                        (left, role_bg(palette.sidebar)),
+                        (right, role_bg(palette.surface)),
+                    ]
                 } else {
                     let (left, right) = pane_rects(state, *cols);
-                    vec![(left, palette.sidebar), (right, palette.surface)]
+                    vec![
+                        (left, role_bg(palette.sidebar)),
+                        (right, role_bg(palette.surface)),
+                    ]
                 };
                 let roles = [
-                    palette.sidebar,
-                    palette.surface,
-                    palette.chrome,
-                    palette.panel,
+                    role_bg(palette.sidebar),
+                    role_bg(palette.surface),
+                    role_bg(palette.chrome),
+                    role_bg(palette.panel),
                 ];
                 for (pane, role) in panes {
                     for y in pane.top()..pane.bottom() {
@@ -12413,7 +13155,7 @@ mod tests {
                 for y in chrome_rows {
                     assert_eq!(
                         buf[(*cols - 1, y)].bg,
-                        palette.chrome,
+                        role_bg(palette.chrome),
                         "{} chrome",
                         at(*cols - 1, y)
                     );
@@ -12975,6 +13717,954 @@ mod tests {
         assert!(!empty.contains(LOADING_FILES), "{empty}");
     }
 
+    /// One dirty `app` checkout with a fetch in flight.
+    fn fetching_app_state(ascii: bool) -> AppState {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, ascii);
+        state.remote_activity.running.insert("app".into());
+        state
+    }
+
+    /// The painted tree row that contains `needle`.
+    fn tree_line_with(
+        terminal: &Terminal<TestBackend>,
+        state: &AppState,
+        needle: &str,
+    ) -> Option<String> {
+        let layout = &state.layout;
+        (layout.tree_y..layout.tree_y + layout.tree_height)
+            .map(|y| {
+                buffer_row(
+                    terminal,
+                    y,
+                    layout.tree_x,
+                    layout.tree_x + layout.tree_width,
+                )
+            })
+            .find(|row| row.contains(needle))
+    }
+
+    #[test]
+    fn tree_repo_row_paints_spinner_while_its_fetch_runs() {
+        use super::super::anim::SPINNER_FRAMES;
+        let mut state = fetching_app_state(false);
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let row = tree_line_with(&terminal, &state, "app").expect("app row");
+        assert!(
+            SPINNER_FRAMES.iter().any(|frame| row.contains(frame)),
+            "braille frame on the fetching row: {row:?}"
+        );
+        assert!(state.layout.animating, "a spinner frame keeps the tick on");
+
+        state.remote_activity.running.clear();
+        draw_state(&mut terminal, &mut state);
+        let row = tree_line_with(&terminal, &state, "app").expect("app row");
+        assert!(
+            !SPINNER_FRAMES.iter().any(|frame| row.contains(frame)),
+            "no spinner once the fetch ends: {row:?}"
+        );
+    }
+
+    #[test]
+    fn tree_spinner_uses_ascii_frame_in_ascii_mode() {
+        use super::super::anim::{SPINNER_FRAMES, SPINNER_FRAMES_ASCII};
+        let mut state = fetching_app_state(true);
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let row = tree_line_with(&terminal, &state, "app").expect("app row");
+        let after_name = &row[row.find("app").unwrap() + 3..];
+        assert!(
+            SPINNER_FRAMES_ASCII
+                .iter()
+                .any(|frame| after_name.contains(&format!("{frame} "))),
+            "ASCII frame on the fetching row: {row:?}"
+        );
+        assert!(
+            !SPINNER_FRAMES.iter().any(|frame| row.contains(frame)),
+            "no braille in ASCII mode: {row:?}"
+        );
+        assert!(state.layout.animating);
+    }
+
+    #[test]
+    fn loading_graph_text_has_spinner_prefix() {
+        use super::super::anim::SPINNER_FRAMES_ASCII;
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.cursor = state
+            .rows
+            .iter()
+            .position(|r| r.kind == NodeKind::Repo)
+            .expect("repo row");
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        assert!(
+            SPINNER_FRAMES_ASCII
+                .iter()
+                .any(|frame| text.contains(&format!("{frame} {LOADING_GRAPH}"))),
+            "{text}"
+        );
+        assert!(state.layout.animating, "loading copy keeps the tick on");
+    }
+
+    #[test]
+    fn idle_draw_leaves_layout_not_animating() {
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.cursor = 0;
+        state.layout.animating = true;
+        state.layout.gliding = true;
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        assert!(text.contains("focus a repo for the graph"), "{text}");
+        assert!(!state.layout.animating, "draw resets the frame flag");
+        assert!(!state.layout.gliding, "draw resets the glide flag");
+        assert_eq!(state.next_anim_tick_ms(), None, "idle: no timer redraw");
+    }
+
+    #[test]
+    fn ctrl_d_on_tree_glides_list_offset_over_frames() {
+        use super::super::anim::{GLIDE_FRAME_MS, GLIDE_MS};
+        let repos: Vec<RepoSnapshot> = (0..40).map(|i| repo(&format!("r{i:02}"), true)).collect();
+        let snapshot = build_workspace_snapshot(&repos, &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        assert!(state.smooth_scroll, "on by default");
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        state.cursor = 15;
+        draw_state(&mut terminal, &mut state);
+        let from = state.layout.list_offset;
+        assert!(from > 0, "the tree is scrolled before the chord");
+
+        // Ctrl-d: arm, then the unchanged `Move(5)` dispatch.
+        let t0 = Instant::now();
+        state.arm_scroll_glide(t0);
+        state.dispatch(Action::Move(5));
+        assert_eq!(state.cursor, 20, "the cursor moves at once");
+        let mut jump = state.clone();
+        jump.cancel_scroll_glide();
+        draw_state(&mut terminal, &mut jump);
+        let target = jump.layout.list_offset;
+        assert!(target > from, "the jump top {target} is below {from}");
+
+        let draw_at_ms = |state: &mut AppState, terminal: &mut Terminal<TestBackend>, ms| {
+            let now = t0 + std::time::Duration::from_millis(ms);
+            terminal.draw(|frame| draw_at(frame, state, now)).unwrap();
+        };
+        draw_at_ms(&mut state, &mut terminal, 0);
+        assert_eq!(state.layout.list_offset, from, "t=0 paints the old top");
+        assert!(state.layout.gliding);
+        assert_eq!(state.next_anim_tick_ms(), Some(GLIDE_FRAME_MS));
+
+        draw_at_ms(&mut state, &mut terminal, GLIDE_MS / 2);
+        let mid = state.layout.list_offset;
+        assert!(from < mid && mid < target, "{from} < {mid} < {target}");
+        assert!(state.layout.gliding, "mid-glide keeps the 16 ms tick");
+        assert_eq!(state.cursor, 20, "paint never moves the cursor");
+
+        draw_at_ms(&mut state, &mut terminal, GLIDE_MS);
+        assert_eq!(state.layout.list_offset, target, "lands on the jump top");
+        assert!(!state.layout.gliding);
+        assert_eq!(state.next_anim_tick_ms(), None, "idle again: no timer");
+    }
+
+    #[test]
+    fn ctrl_d_on_graph_glides_the_painted_rows_not_graph_scroll() {
+        use super::super::anim::GLIDE_MS;
+        let mut state = tall_graph_state();
+        state.focus = FocusPane::Right;
+        assert!(state.graph_pane_focused());
+        state.graph_cursor = 20;
+        state.sync_graph_scroll();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let from = state.graph_scroll;
+
+        let t0 = Instant::now();
+        state.arm_scroll_glide(t0);
+        state.dispatch(Action::Move(5));
+        let target = state.graph_scroll;
+        assert!(target > from, "Ctrl-d moved the jump top");
+        let mut jump = state.clone();
+        jump.cancel_scroll_glide();
+        let mut jump_terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut jump_terminal, &mut jump);
+
+        let mid = t0 + std::time::Duration::from_millis(GLIDE_MS / 2);
+        terminal
+            .draw(|frame| draw_at(frame, &mut state, mid))
+            .unwrap();
+        assert!(state.layout.gliding);
+        assert_eq!(
+            state.graph_scroll, target,
+            "graph_scroll keeps the jump top"
+        );
+        assert_ne!(
+            buffer_text(&terminal),
+            buffer_text(&jump_terminal),
+            "mid-glide paints rows above the jump view"
+        );
+
+        let end = t0 + std::time::Duration::from_millis(GLIDE_MS);
+        terminal
+            .draw(|frame| draw_at(frame, &mut state, end))
+            .unwrap();
+        assert!(!state.layout.gliding);
+        assert_eq!(buffer_text(&terminal), buffer_text(&jump_terminal));
+    }
+
+    /// Graph state focused on the right pane, a Ctrl-d glide armed and
+    /// dispatched (`Move(20)`), and a frame drawn halfway through the glide.
+    /// Returns the state, its terminal, and the painted and jump tops.
+    fn graph_mid_glide() -> (AppState, Terminal<TestBackend>, u16, u16) {
+        use super::super::anim::GLIDE_MS;
+        let mut state = tall_graph_state();
+        state.focus = FocusPane::Right;
+        state.graph_cursor = 10;
+        state.sync_graph_scroll();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let from = state.graph_scroll;
+        let t0 = Instant::now();
+        state.arm_scroll_glide(t0);
+        state.dispatch(Action::Move(20));
+        let target = state.graph_scroll;
+        let mid = t0 + std::time::Duration::from_millis(GLIDE_MS / 2);
+        terminal
+            .draw(|frame| draw_at(frame, &mut state, mid))
+            .unwrap();
+        assert!(state.layout.gliding);
+        let painted = state.layout.graph_painted_top.expect("graph list painted");
+        assert!(
+            from < painted && painted < target,
+            "mid-glide top: {from} < {painted} < {target}"
+        );
+        assert_eq!(
+            state.graph_scroll, target,
+            "graph_scroll keeps the jump top"
+        );
+        (state, terminal, painted, target)
+    }
+
+    /// A click on a graph row mid-glide selects the commit painted under
+    /// the pointer, not the one at that offset from the jump top.
+    #[test]
+    fn graph_click_mid_glide_selects_the_painted_row() {
+        let (mut state, _terminal, painted, target) = graph_mid_glide();
+        let glyphs = if state.ascii {
+            &workspace_status_graph::ASCII
+        } else {
+            &workspace_status_graph::UNICODE
+        };
+        let lines =
+            workspace_status_graph::paint_model(state.graph.as_ref().unwrap(), glyphs, None);
+        let list_top = state.layout.graph_scrollbar_y;
+        let (offset, expected) = (0..usize::from(state.layout.graph_scrollbar_height))
+            .find_map(|k| {
+                let on_screen = lines[usize::from(painted) + k].row_index?;
+                let at_jump = lines.get(usize::from(target) + k).and_then(|l| l.row_index);
+                (at_jump != Some(on_screen)).then_some((k, on_screen))
+            })
+            .expect("a painted commit row that differs from the jump view");
+        let row = list_top + u16::try_from(offset).unwrap();
+        // The event loop ends the glide before it dispatches the click.
+        state.cancel_scroll_glide();
+        state.dispatch(Action::Click {
+            col: state.layout.diff_content_x + 2,
+            row,
+        });
+        assert_eq!(state.graph_cursor, expected, "the commit under the pointer");
+    }
+
+    /// Mid-glide, the scrollbar thumb sits where the painted top puts it:
+    /// the bar, the thumb hit test, and a grab all follow the painted top.
+    #[test]
+    fn graph_scrollbar_mid_glide_follows_the_painted_top() {
+        use super::super::split::SplitDrag;
+        let (mut state, terminal, painted, target) = graph_mid_glide();
+        let x = state.layout.graph_scrollbar_x.expect("vertical scrollbar");
+        let list_top = state.layout.graph_scrollbar_y;
+        let height = state.layout.graph_scrollbar_height;
+        let content_len = state.layout.graph_content_len;
+        let thumb = |scroll| {
+            let (off, len) =
+                workspace_status_graph::graph_scrollbar_thumb(content_len, scroll, height)
+                    .expect("thumb");
+            off..off + len
+        };
+        let (on_screen, at_jump) = (thumb(painted), thumb(target));
+        let buf = terminal.backend().buffer();
+        let thumb_glyph = buf[(x, list_top + on_screen.start)].symbol().to_string();
+        for rel in 0..height {
+            let symbol = buf[(x, list_top + rel)].symbol();
+            assert_eq!(
+                symbol == thumb_glyph,
+                on_screen.contains(&rel),
+                "row {rel}: the bar paints the thumb at {on_screen:?}"
+            );
+        }
+        let rel = on_screen
+            .clone()
+            .find(|rel| !at_jump.contains(rel))
+            .expect("the painted thumb leaves a row the jump thumb does not cover");
+        state.cancel_scroll_glide();
+        state.dispatch(Action::Click {
+            col: x,
+            row: list_top + rel,
+        });
+        assert_eq!(
+            state.drag,
+            SplitDrag::GraphScrollbar {
+                origin_row: list_top + rel,
+                origin_scroll: painted,
+            },
+            "a press on the painted thumb grabs it"
+        );
+        assert_eq!(
+            state.graph_scroll, painted,
+            "the grab keeps the rows on screen"
+        );
+    }
+
+    /// A 200-line Explorer file view, the body focused, `j` walked past the
+    /// first screen so the cursor sits on the bottom row of the sticky
+    /// view. Returns the state, its terminal, and the painted top.
+    fn file_view_at_bottom_row() -> (AppState, Terminal<TestBackend>, usize) {
+        let lines: Vec<String> = (0..200).map(|i| format!("line {i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let mut state = file_view_state(&refs);
+        state.dispatch(Action::FocusRight);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let height = usize::from(state.layout.file_view_height);
+        for _ in 0..height + 10 {
+            state.dispatch(Action::Move(1));
+            draw_state(&mut terminal, &mut state);
+        }
+        let rows = state.layout.file_view_row_lines.clone();
+        let cursor = state.tabs.active_file_view().unwrap().cursor;
+        assert_eq!(
+            rows.last(),
+            Some(&cursor),
+            "j keeps the cursor on the bottom row"
+        );
+        // `k` / `j` inside the view keep the sticky top.
+        state.dispatch(Action::Move(-1));
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(state.layout.file_view_row_lines.first(), rows.first());
+        state.dispatch(Action::Move(1));
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(state.layout.file_view_row_lines.first(), rows.first());
+        (state, terminal, rows[0])
+    }
+
+    /// Ctrl-d on the file view puts the cursor near the middle and glides
+    /// there: a mid-glide frame paints a top strictly between the old and
+    /// the new one, the last frame lands on it, and `j` / `k` keep it.
+    #[test]
+    fn ctrl_d_on_file_view_glides_to_the_middle_top() {
+        use super::super::anim::{GLIDE_FRAME_MS, GLIDE_MS};
+        let (mut state, mut terminal, from) = file_view_at_bottom_row();
+        let height = usize::from(state.layout.file_view_height);
+        let t0 = Instant::now();
+        state.arm_scroll_glide(t0);
+        state.dispatch(Action::Move(5));
+        let cursor = state.tabs.active_file_view().unwrap().cursor;
+        let target = cursor - height / 2;
+        let top_at = |state: &mut AppState, terminal: &mut Terminal<TestBackend>, ms| {
+            let now = t0 + std::time::Duration::from_millis(ms);
+            terminal.draw(|frame| draw_at(frame, state, now)).unwrap();
+            state.layout.file_view_row_lines[0]
+        };
+
+        let first = top_at(&mut state, &mut terminal, 0);
+        assert!(
+            from < first && first < target,
+            "{from} < {first} < {target}"
+        );
+        assert!(state.layout.gliding);
+        assert_eq!(state.next_anim_tick_ms(), Some(GLIDE_FRAME_MS));
+        assert_eq!(
+            state.tabs.active_file_view().unwrap().scroll,
+            target,
+            "the tab keeps the jump top"
+        );
+
+        let mid = top_at(&mut state, &mut terminal, GLIDE_MS / 2);
+        assert!(first < mid && mid < target, "{first} < {mid} < {target}");
+        assert!(state.layout.gliding);
+
+        let end = top_at(&mut state, &mut terminal, GLIDE_MS);
+        assert_eq!(end, target, "lands on the middle top");
+        assert!(!state.layout.gliding);
+        // Only the glide tick counts: a fixture spinner still ticks at 80 ms.
+        assert_ne!(
+            state.next_anim_tick_ms(),
+            Some(GLIDE_FRAME_MS),
+            "no glide tick"
+        );
+        assert_eq!(state.layout.file_view_row_lines.len(), height);
+
+        state.dispatch(Action::Move(1));
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(
+            state.layout.file_view_row_lines[0], target,
+            "j keeps the top"
+        );
+    }
+
+    /// With `smoothScroll` off, Ctrl-d on the file view jumps to the same
+    /// middle top in one frame. A file that fits the view never glides.
+    #[test]
+    fn ctrl_d_on_file_view_without_glide_jumps_to_the_middle_top() {
+        let (mut state, mut terminal, _) = file_view_at_bottom_row();
+        state.smooth_scroll = false;
+        let height = usize::from(state.layout.file_view_height);
+        let t0 = Instant::now();
+        state.arm_scroll_glide(t0);
+        state.dispatch(Action::Move(5));
+        let cursor = state.tabs.active_file_view().unwrap().cursor;
+        terminal
+            .draw(|frame| draw_at(frame, &mut state, t0))
+            .unwrap();
+        assert_eq!(state.layout.file_view_row_lines[0], cursor - height / 2);
+        assert!(!state.layout.gliding);
+
+        let mut state = file_view_state(&["one", "two", "three", "four"]);
+        state.dispatch(Action::FocusRight);
+        draw_state(&mut terminal, &mut state);
+        state.arm_scroll_glide(t0);
+        state.dispatch(Action::Move(5));
+        terminal
+            .draw(|frame| draw_at(frame, &mut state, t0))
+            .unwrap();
+        assert_eq!(state.layout.file_view_row_lines.first(), Some(&0));
+        assert!(!state.layout.gliding, "no tick for a top that cannot move");
+        assert_ne!(
+            state.next_anim_tick_ms(),
+            Some(super::super::anim::GLIDE_FRAME_MS)
+        );
+    }
+
+    #[test]
+    fn ctrl_d_with_smooth_scroll_off_jumps_in_one_frame() {
+        let repos: Vec<RepoSnapshot> = (0..40).map(|i| repo(&format!("r{i:02}"), true)).collect();
+        let snapshot = build_workspace_snapshot(&repos, &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.smooth_scroll = false;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        state.cursor = 15;
+        draw_state(&mut terminal, &mut state);
+        let from = state.layout.list_offset;
+        let t0 = Instant::now();
+        state.arm_scroll_glide(t0);
+        state.dispatch(Action::Move(5));
+        terminal
+            .draw(|frame| draw_at(frame, &mut state, t0))
+            .unwrap();
+        assert!(state.layout.list_offset > from, "the first frame jumps");
+        assert!(!state.layout.gliding);
+        assert_eq!(state.next_anim_tick_ms(), None);
+    }
+
+    /// Fg of the first painted braille spinner cell inside `area`.
+    fn spinner_cell_fg(terminal: &Terminal<TestBackend>, area: Rect) -> Option<Color> {
+        use super::super::anim::SPINNER_FRAMES;
+        let buf = terminal.backend().buffer();
+        (area.y..area.bottom())
+            .flat_map(|y| (area.x..area.right()).map(move |x| (x, y)))
+            .map(|at| &buf[at])
+            .find(|cell| SPINNER_FRAMES.contains(&cell.symbol()))
+            .map(|cell| cell.fg)
+    }
+
+    #[test]
+    fn tree_spinner_has_no_fg_under_no_color() {
+        let mut state = fetching_app_state(false);
+        let muted = state.theme.palette().muted;
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let tree = Rect::new(
+            state.layout.tree_x,
+            state.layout.tree_y,
+            state.layout.tree_width,
+            state.layout.tree_height,
+        );
+        assert_eq!(spinner_cell_fg(&terminal, tree), Some(muted));
+
+        state.no_color = true;
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(
+            spinner_cell_fg(&terminal, tree),
+            Some(Color::Reset),
+            "NO_COLOR: the tree spinner takes the terminal foreground"
+        );
+    }
+
+    #[test]
+    fn pane_loading_spinner_has_no_fg_under_no_color() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, false);
+        let muted = state.theme.palette().muted;
+        state.begin_commit_files(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let whole = terminal.backend().buffer().area;
+        assert!(buffer_text(&terminal).contains(LOADING_FILES));
+        assert_eq!(spinner_cell_fg(&terminal, whole), Some(muted));
+
+        state.no_color = true;
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(
+            spinner_cell_fg(&terminal, whole),
+            Some(Color::Reset),
+            "NO_COLOR: the loading spinner takes the terminal foreground"
+        );
+    }
+
+    use super::super::status::StatusMessage;
+    use super::super::toast::TOAST_TTL_MS;
+
+    /// `(row y, row text)` of every painted row containing `needle`.
+    fn rows_with(terminal: &Terminal<TestBackend>, needle: &str) -> Vec<(u16, String)> {
+        buffer_text(terminal)
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains(needle))
+            .map(|(y, line)| (y as u16, line.to_string()))
+            .collect()
+    }
+
+    /// A one-repo `app` state with `status` set.
+    fn toast_state(status: StatusMessage, ascii: bool) -> AppState {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, ascii);
+        state.status = status;
+        state
+    }
+
+    const TOAST_W: u16 = 100;
+    const TOAST_H: u16 = 24;
+
+    #[test]
+    fn copied_ack_paints_bottom_right_toast_not_breadcrumb() {
+        use super::super::chrome::STATUS_COPIED;
+        let mut state = toast_state(StatusMessage::ok(STATUS_COPIED), false);
+        let mut terminal = Terminal::new(TestBackend::new(TOAST_W, TOAST_H)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let rows = rows_with(&terminal, "copied");
+        assert_eq!(rows.len(), 1, "one toast row, no breadcrumb copy: {rows:?}");
+        let (y, line) = &rows[0];
+        // Status row is H-1, breadcrumb H-2; the toast sits one row above
+        // the pane's bottom border.
+        assert_eq!(*y, TOAST_H - 4, "bottom of the panes, not the breadcrumb");
+        assert!(
+            line.trim_end_matches(['│', ' ']).ends_with("✓ copied"),
+            "right-aligned toast: {line:?}"
+        );
+        let buf = terminal.backend().buffer();
+        let x = TOAST_W - 3;
+        assert_eq!(
+            buf[(x, *y)].symbol(),
+            "d",
+            "ends one column in from the edge: {line:?}"
+        );
+        let palette = state.theme.palette();
+        assert_eq!(buf[(x, *y)].fg, palette.repo);
+        assert_eq!(buf[(x, *y)].bg, palette.flash_ramp[0], "full strength");
+        assert!(state.status.is_empty());
+    }
+
+    #[test]
+    fn toast_ascii_and_no_color_fallbacks() {
+        let mut state = toast_state(StatusMessage::ok("Fetched 3 repos"), true);
+        state.no_color = true;
+        let mut terminal = Terminal::new(TestBackend::new(TOAST_W, TOAST_H)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let rows = rows_with(&terminal, "ok Fetched 3 repos");
+        assert_eq!(rows.len(), 1, "ASCII mark ` ok `: {rows:?}");
+        assert!(!rows[0].1.contains('✓'));
+        let y = rows[0].0;
+        let buf = terminal.backend().buffer();
+        let cell = &buf[(TOAST_W - 3, y)];
+        assert_eq!(cell.symbol(), "s");
+        assert_eq!(cell.fg, Color::Reset, "NO_COLOR: no fg of its own");
+        assert_eq!(cell.bg, Color::Reset, "NO_COLOR: no bg of its own");
+        assert!(cell.modifier.contains(Modifier::REVERSED));
+
+        // NO_COLOR has no fade: a toast deep in its fade window still
+        // paints plain reversed cells.
+        state.toasts = Default::default();
+        state
+            .toasts
+            .push("late ack", toast_pushed_ago(TOAST_TTL_MS - 100));
+        draw_state(&mut terminal, &mut state);
+        let rows = rows_with(&terminal, "ok late ack");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let cell = &terminal.backend().buffer()[(TOAST_W - 3, rows[0].0)];
+        assert_eq!((cell.fg, cell.bg), (Color::Reset, Color::Reset));
+        assert!(cell.modifier.contains(Modifier::REVERSED));
+
+        // With colour the same toast sits on the last ramp step.
+        state.no_color = false;
+        state.toasts = Default::default();
+        state
+            .toasts
+            .push("late ack", toast_pushed_ago(TOAST_TTL_MS - 100));
+        draw_state(&mut terminal, &mut state);
+        let rows = rows_with(&terminal, "ok late ack");
+        let cell = &terminal.backend().buffer()[(TOAST_W - 3, rows[0].0)];
+        assert_eq!(cell.bg, state.theme.palette().flash_ramp[3]);
+    }
+
+    /// An instant `ms` before now, for a toast part way through its life.
+    fn toast_pushed_ago(ms: u64) -> Instant {
+        Instant::now()
+            .checked_sub(std::time::Duration::from_millis(ms))
+            .expect("host uptime exceeds the toast TTL")
+    }
+
+    #[test]
+    fn toast_ticks_only_while_it_fades() {
+        use super::super::anim::SPINNER_FRAME_MS;
+        use super::super::toast::TOAST_FADE_MS;
+        let fade_start = TOAST_TTL_MS - TOAST_FADE_MS;
+        let mut state = toast_state(StatusMessage::default(), false);
+        let mut terminal = Terminal::new(TestBackend::new(TOAST_W, TOAST_H)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert!(!state.layout.animating, "idle: no tick");
+        assert_eq!(state.next_anim_tick_ms(), None);
+
+        // Hold: one wake at fade start, no frame ticks.
+        state.toasts.push("Checked out main", toast_pushed_ago(500));
+        draw_state(&mut terminal, &mut state);
+        assert!(!state.layout.animating, "a holding toast does not tick");
+        let wake = state.next_anim_tick_ms().expect("a wake at fade start");
+        assert!(
+            (fade_start - 600..=fade_start - 500).contains(&wake),
+            "wake {wake} ms is the time until fade start, not {SPINNER_FRAME_MS}"
+        );
+
+        // A fresh ack also holds and wakes at fade start.
+        state.toasts = Default::default();
+        state.status = StatusMessage::ok("Checked out main");
+        draw_state(&mut terminal, &mut state);
+        assert!(!state.layout.animating);
+        let wake = state.next_anim_tick_ms().unwrap();
+        assert!((fade_start - 100..=fade_start).contains(&wake), "{wake}");
+
+        // Fade: frame ticks.
+        state.toasts = Default::default();
+        state
+            .toasts
+            .push("Checked out main", toast_pushed_ago(fade_start + 200));
+        draw_state(&mut terminal, &mut state);
+        assert!(state.layout.animating, "a fading toast ticks the loop");
+        assert_eq!(state.next_anim_tick_ms(), Some(SPINNER_FRAME_MS));
+
+        // NO_COLOR: no fade, one wake at expiry.
+        state.no_color = true;
+        draw_state(&mut terminal, &mut state);
+        assert!(!state.layout.animating, "NO_COLOR has no fade frames");
+        let wake = state.next_anim_tick_ms().unwrap();
+        assert!(
+            (TOAST_FADE_MS - 300..=TOAST_FADE_MS - 200).contains(&wake),
+            "{wake}"
+        );
+        state.no_color = false;
+
+        // Expired: pruned, no timer at all.
+        state.toasts = Default::default();
+        state
+            .toasts
+            .push("Checked out main", toast_pushed_ago(TOAST_TTL_MS));
+        draw_state(&mut terminal, &mut state);
+        assert!(state.toasts.is_empty(), "pruned at the TTL");
+        assert!(!state.layout.animating);
+        assert_eq!(state.next_anim_tick_ms(), None);
+        assert!(rows_with(&terminal, "Checked out main").is_empty());
+    }
+
+    /// The copy a mouse release reads (`painted_frame`) has no toast in it,
+    /// so a drag over a live toast copies the pane text under it.
+    #[test]
+    fn painted_frame_for_copy_has_no_toast() {
+        use super::super::chrome::STATUS_COPIED;
+        let mut state = toast_state(StatusMessage::ok(STATUS_COPIED), false);
+        let mut terminal = Terminal::new(TestBackend::new(TOAST_W, TOAST_H)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(rows_with(&terminal, "✓ copied").len(), 1, "drawn on screen");
+        let painted = &state.painted_frame;
+        let area = painted.area;
+        let copy_text: String = (area.y..area.bottom())
+            .flat_map(|y| (area.x..area.right()).map(move |x| (x, y)))
+            .map(|at| painted[at].symbol())
+            .collect();
+        assert!(!copy_text.contains("copied"), "no toast in painted_frame");
+    }
+
+    /// A primary `app` with a linked `wt` checkout: one family repo row
+    /// over two checkout rows.
+    fn family_state() -> AppState {
+        let mut wt = repo("wt", true);
+        wt.checkout_kind = crate::snapshot::CheckoutKind::Linked;
+        wt.primary_repo = Some("app".into());
+        let snapshot = build_workspace_snapshot(&[repo("app", true), wt], &[], false, &[]);
+        AppState::new(PathBuf::from("/tmp"), snapshot, true)
+    }
+
+    /// Painted text of the tree row with id `id`.
+    fn tree_row_text(terminal: &Terminal<TestBackend>, state: &AppState, id: &str) -> String {
+        let layout = &state.layout;
+        let index = state
+            .painted_tree_rows()
+            .iter()
+            .position(|row| row.id == id)
+            .unwrap_or_else(|| panic!("row {id}"));
+        let y = layout.tree_y + u16::try_from(index - layout.list_offset).unwrap();
+        buffer_row(
+            terminal,
+            y,
+            layout.tree_x,
+            layout.tree_x + layout.tree_width,
+        )
+    }
+
+    /// A workspace with one real `app` repo (one commit, made now). The
+    /// snapshot marks it dirty so its row sits outside the folded No
+    /// updates group.
+    fn activity_state(tag: &str, ascii: bool) -> (PathBuf, AppState) {
+        let root = crate::testutil::unique_dir(tag);
+        crate::testutil::init_repo(&root.join("app"));
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        (root.clone(), AppState::new(root, snapshot, ascii))
+    }
+
+    /// Id of the painted repo row of `app`.
+    fn app_repo_row_id(state: &AppState) -> String {
+        state
+            .painted_tree_rows()
+            .iter()
+            .find(|row| row.kind == NodeKind::Repo && row.repo.as_deref() == Some("app"))
+            .map(|row| row.id.clone())
+            .expect("app repo row")
+    }
+
+    /// Run every job the interpreter spawns on this thread and apply it.
+    fn run_interp_jobs(
+        interp: &mut super::super::effect::Interpreter,
+        state: &mut AppState,
+        opts: &super::super::app::TuiOpts,
+    ) {
+        loop {
+            let mut jobs = Vec::new();
+            interp.spawn_ready(state, opts, &mut |id, work| jobs.push((id, work)));
+            if jobs.is_empty() {
+                break;
+            }
+            for (id, work) in jobs {
+                interp.apply(state, opts, id, work());
+            }
+        }
+    }
+
+    fn activity_opts(state: &AppState) -> super::super::app::TuiOpts {
+        super::super::app::TuiOpts {
+            cwd: state.cwd.clone(),
+            snapshot: state.snapshot.clone(),
+            config: crate::config::WorkspaceStatusConfig::with_defaults(),
+            settings: crate::settings::Settings::resolve(&Default::default(), |_| None),
+            start_fetch: false,
+        }
+    }
+
+    /// The launch paints with no sparkline: the counts come from a worker
+    /// job the loop queues after that frame. Only the applied outcome
+    /// paints the bars on the repo row.
+    #[test]
+    fn first_paint_has_no_sparkline_then_shows_after_apply() {
+        use super::super::activity::activity_targets;
+        let today = "▁▁▁▁▁▁▁▁▁▁▁▁▁█";
+        let (root, mut state) = activity_state("ws-render-sparkline", false);
+        let mut terminal = Terminal::new(TestBackend::new(160, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert!(usize::from(state.layout.tree_width) >= SPARK_MIN_TREE_COLS);
+        let id = app_repo_row_id(&state);
+        let first = tree_row_text(&terminal, &state, &id);
+        assert!(!first.contains('▁'), "first paint: {first:?}");
+
+        let opts = activity_opts(&state);
+        let mut interp = super::super::effect::Interpreter::new();
+        let checkouts = activity_targets(&state.snapshot, None);
+        interp.schedule(
+            &mut state,
+            &opts,
+            Effect::LoadActivity { checkouts },
+            &Action::None,
+        );
+        draw_state(&mut terminal, &mut state);
+        let queued = tree_row_text(&terminal, &state, &id);
+        assert!(!queued.contains('▁'), "queued, not run: {queued:?}");
+
+        run_interp_jobs(&mut interp, &mut state, &opts);
+        draw_state(&mut terminal, &mut state);
+        let applied = tree_row_text(&terminal, &state, &id);
+        assert!(applied.contains(today), "bars on the row: {applied:?}");
+        // The bars take the muted fg.
+        let row_y = (state.layout.tree_y..state.layout.tree_y + 16)
+            .find(|&y| {
+                buffer_row(
+                    &terminal,
+                    y,
+                    state.layout.tree_x,
+                    state.layout.tree_x + state.layout.tree_width,
+                ) == applied
+            })
+            .expect("row on screen");
+        let bar_x = (state.layout.tree_x..state.layout.tree_x + state.layout.tree_width)
+            .rev()
+            .find(|&x| terminal.backend().buffer()[(x, row_y)].symbol() == "█")
+            .expect("top bar");
+        let palette = state.theme.palette();
+        assert_eq!(
+            terminal.backend().buffer()[(bar_x, row_y)].fg,
+            palette.muted
+        );
+
+        // NO_COLOR: the bars take the terminal foreground.
+        state.no_color = true;
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(terminal.backend().buffer()[(bar_x, row_y)].fg, Color::Reset);
+
+        // ASCII glyphs: ASCII bars.
+        state.ascii = true;
+        draw_state(&mut terminal, &mut state);
+        let ascii = tree_row_text(&terminal, &state, &id);
+        assert!(ascii.contains("_____________#"), "ascii bars: {ascii:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The bars land between the label and the marks: the repo row's
+    /// right-aligned marks keep their columns when the counts arrive.
+    #[test]
+    fn sparkline_keeps_repo_row_marks_in_place() {
+        let (root, mut state) = activity_state("ws-render-sparkline-marks", true);
+        let mut terminal = Terminal::new(TestBackend::new(160, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let id = app_repo_row_id(&state);
+        let marks: String = state
+            .painted_tree_rows()
+            .iter()
+            .find(|row| row.id == id)
+            .expect("app row")
+            .trailing_segs
+            .iter()
+            .map(|seg| seg.text.as_str())
+            .collect();
+        assert!(!marks.trim().is_empty(), "the repo row has marks");
+        // ASCII glyph mode: one column per char.
+        let marks_col = |text: &str| -> usize {
+            let at = text.rfind(marks.as_str()).expect("marks on the row");
+            text[..at].chars().count()
+        };
+        let before = tree_row_text(&terminal, &state, &id);
+
+        let mut days = [0u32; super::super::activity::ACTIVITY_DAYS];
+        days[super::super::activity::ACTIVITY_DAYS - 1] = 2;
+        state.activity.insert("app".into(), days);
+        draw_state(&mut terminal, &mut state);
+        let after = tree_row_text(&terminal, &state, &id);
+        assert!(after.contains("_____________#"), "bars painted: {after:?}");
+        assert_eq!(
+            marks_col(&after),
+            marks_col(&before),
+            "marks moved:\n{before:?}\n{after:?}"
+        );
+        let bars_col = after.find("_____________#").unwrap();
+        assert!(bars_col < after.rfind(marks.as_str()).unwrap());
+        // The packed run: bars, one space, then the marks flush right.
+        assert!(
+            after.contains(&format!("_____________# {marks}")),
+            "one space between the bars and the marks: {after:?}"
+        );
+        assert!(
+            after.trim_end().ends_with(marks.as_str()),
+            "marks stay flush right: {after:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn narrow_tree_omits_sparkline() {
+        let (root, mut state) = activity_state("ws-render-sparkline-narrow", false);
+        let mut days = [0u32; super::super::activity::ACTIVITY_DAYS];
+        days[super::super::activity::ACTIVITY_DAYS - 1] = 3;
+        state.activity.insert("app".into(), days);
+
+        let mut wide = Terminal::new(TestBackend::new(160, 16)).unwrap();
+        draw_state(&mut wide, &mut state);
+        assert!(usize::from(state.layout.tree_width) >= SPARK_MIN_TREE_COLS);
+        let id = app_repo_row_id(&state);
+        assert!(tree_row_text(&wide, &state, &id).contains('█'));
+
+        let mut narrow = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        draw_state(&mut narrow, &mut state);
+        assert!(
+            usize::from(state.layout.tree_width) < SPARK_MIN_TREE_COLS,
+            "tree width {}",
+            state.layout.tree_width
+        );
+        let text = tree_row_text(&narrow, &state, &id);
+        assert!(!text.contains('█') && !text.contains('▁'), "{text:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn family_repo_row_spins_while_a_linked_checkout_runs() {
+        use super::super::anim::SPINNER_FRAMES_ASCII;
+        let spins = |text: &str| {
+            SPINNER_FRAMES_ASCII.iter().any(|frame| {
+                text.ends_with(&format!("{frame} ")) || text.contains(&format!(" {frame} "))
+            })
+        };
+        let mut state = family_state();
+        let mut terminal = Terminal::new(TestBackend::new(120, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert!(
+            state
+                .painted_tree_rows()
+                .iter()
+                .any(|row| row.id == "repo:app" && row.chrome.is_family),
+            "fixture paints a family row"
+        );
+        let idle_family = tree_row_text(&terminal, &state, "repo:app");
+        let idle_wt = tree_row_text(&terminal, &state, "checkout:wt");
+        let idle_app = tree_row_text(&terminal, &state, "checkout:app");
+
+        state.remote_activity.running.insert("wt".into());
+        draw_state(&mut terminal, &mut state);
+        let family = tree_row_text(&terminal, &state, "repo:app");
+        let wt = tree_row_text(&terminal, &state, "checkout:wt");
+        let app = tree_row_text(&terminal, &state, "checkout:app");
+        assert!(
+            !spins(&idle_family) && spins(&family),
+            "family row spins for its linked checkout:\n{idle_family}\n{family}"
+        );
+        assert!(
+            !spins(&idle_wt) && spins(&wt),
+            "wt row spins:\n{idle_wt}\n{wt}"
+        );
+        assert_eq!(app, idle_app, "the idle primary checkout row stays still");
+        assert!(state.layout.animating);
+    }
+
     /// A failed `git diff` names git's reason; a focused repo whose graph
     /// is still loading says so instead of asking to focus a repo.
     #[test]
@@ -13099,6 +14789,279 @@ mod tests {
             after.contains("\"10 │") && !after.contains(" 10 │"),
             "comment mark should occupy the reserved column:\n{after}"
         );
+    }
+
+    /// `app` with `README.md` open in the diff pane: one hunk of context
+    /// lines `line 10`, `line 11`, … (new-file line `n` reads `line n`).
+    fn context_diff_state(lines: u32) -> AppState {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.cursor = state
+            .rows
+            .iter()
+            .position(|r| r.kind == NodeKind::File)
+            .expect("file row");
+        let mut diff = vec![format!("@@ -10,{lines} +10,{lines} @@")];
+        diff.extend((10..10 + lines).map(|n| format!(" line {n}")));
+        state.set_diff(
+            "app".into(),
+            "README.md".into(),
+            super::super::diff::DiffContent::from_lines(diff),
+        );
+        state
+    }
+
+    /// Open a worktree comment on new-file `line` of `app/README.md`.
+    fn comment_readme_line(state: &mut AppState, line: u32) {
+        use crate::tui::comments::{put_comment, CommentKey};
+        state.comment_store = put_comment(
+            &state.comment_store,
+            CommentKey::WorktreeLine {
+                repo: "app".into(),
+                branch: "main".into(),
+                path: "README.md".into(),
+                line,
+                end_line: line,
+            },
+            "look here",
+        );
+    }
+
+    /// The painted text under `hit`.
+    fn undercurl_text(
+        terminal: &Terminal<TestBackend>,
+        hit: &crate::tui::undercurl::UndercurlHit,
+    ) -> String {
+        let buf = terminal.backend().buffer();
+        (hit.x..hit.x + hit.width)
+            .map(|x| buf[(x, hit.y)].symbol())
+            .collect()
+    }
+
+    /// Screen row whose text contains `needle`.
+    fn row_with(terminal: &Terminal<TestBackend>, needle: &str) -> u16 {
+        let buf = terminal.backend().buffer();
+        (0..buf.area().height)
+            .find(|&y| buf_line(buf, y).contains(needle))
+            .unwrap_or_else(|| panic!("no row with {needle:?}:\n{}", buffer_text(terminal)))
+    }
+
+    /// Columns of row `y` painted with [`Modifier::UNDERLINED`].
+    fn underlined_cols(terminal: &Terminal<TestBackend>, y: u16) -> Vec<u16> {
+        let buf = terminal.backend().buffer();
+        (0..buf.area().width)
+            .filter(|&x| buf[(x, y)].modifier.contains(Modifier::UNDERLINED))
+            .collect()
+    }
+
+    #[test]
+    fn commented_diff_line_is_underlined_and_records_undercurl_hit() {
+        let mut state = context_diff_state(3);
+        comment_readme_line(&mut state, 11);
+        let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+        draw_state(&mut terminal, &mut state);
+
+        let y = row_with(&terminal, "line 11");
+        let x = find_cell_col(terminal.backend().buffer(), y, "line 11").unwrap();
+        // The code is underlined (the fallback every terminal shows); the
+        // gutter, mark, and pad are not.
+        assert_eq!(
+            underlined_cols(&terminal, y),
+            (x..x + 7).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            state.layout.undercurls,
+            vec![crate::tui::undercurl::UndercurlHit {
+                y,
+                x,
+                width: 7,
+                color: state.theme.palette().comment_underline(),
+            }]
+        );
+        assert_eq!(
+            undercurl_text(&terminal, &state.layout.undercurls[0]),
+            "line 11"
+        );
+    }
+
+    #[test]
+    fn uncommented_line_has_no_underline() {
+        let mut state = context_diff_state(3);
+        let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert!(state.layout.undercurls.is_empty());
+        for needle in ["line 10", "line 11", "line 12"] {
+            let y = row_with(&terminal, needle);
+            assert!(underlined_cols(&terminal, y).is_empty(), "{needle}");
+        }
+
+        comment_readme_line(&mut state, 11);
+        draw_state(&mut terminal, &mut state);
+        for needle in ["line 10", "line 12"] {
+            let y = row_with(&terminal, needle);
+            assert!(underlined_cols(&terminal, y).is_empty(), "{needle}");
+            assert!(state.layout.undercurls.iter().all(|hit| hit.y != y));
+        }
+        // A resolved comment keeps its mark but draws no underline.
+        state.comment_store = crate::tui::comments::put_comment_entry(
+            &state.comment_store,
+            crate::tui::comments::CommentKey::WorktreeLine {
+                repo: "app".into(),
+                branch: "main".into(),
+                path: "README.md".into(),
+                line: 11,
+                end_line: 11,
+            },
+            "done",
+            true,
+        );
+        draw_state(&mut terminal, &mut state);
+        assert!(state.layout.undercurls.is_empty());
+        assert!(underlined_cols(&terminal, row_with(&terminal, "line 11")).is_empty());
+    }
+
+    #[test]
+    fn file_view_comment_line_records_undercurl_hit() {
+        let mut state = file_view_state(&["one", "two", "three"]);
+        state.line_blame.set_enabled(false);
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert!(state.layout.undercurls.is_empty());
+
+        // `;` on line 2 and save.
+        state.dispatch(Action::FocusRight);
+        state.dispatch(Action::Move(1));
+        state.dispatch(Action::CommentStart);
+        let key = state.comment.take().expect("comment prompt").key;
+        state.comment_store =
+            crate::tui::comments::put_comment_entry(&state.comment_store, key, "note", false);
+        draw_state(&mut terminal, &mut state);
+
+        let y = state.layout.file_view_y + 1;
+        assert_eq!(
+            state.layout.undercurls.len(),
+            1,
+            "{:?}",
+            state.layout.undercurls
+        );
+        let hit = &state.layout.undercurls[0];
+        assert_eq!(
+            (hit.y, hit.color),
+            (y, state.theme.palette().comment_underline())
+        );
+        assert_eq!(undercurl_text(&terminal, hit), "two");
+        assert_eq!(
+            underlined_cols(&terminal, y),
+            (hit.x..hit.x + hit.width).collect::<Vec<_>>()
+        );
+        for other in [y - 1, y + 1] {
+            assert!(underlined_cols(&terminal, other).is_empty(), "row {other}");
+        }
+    }
+
+    #[test]
+    fn undercurl_hit_dropped_under_dialog() {
+        let lines = 30;
+        let mut state = context_diff_state(lines);
+        for line in 10..10 + lines {
+            comment_readme_line(&mut state, line);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let before = state.layout.undercurls.clone();
+        assert_eq!(before.len(), lines as usize, "{before:?}");
+
+        state.help_open = true;
+        draw_state(&mut terminal, &mut state);
+        let after = &state.layout.undercurls;
+        assert!(after.len() < before.len(), "help covers curls: {after:?}");
+        // A curl left sits on underlined code the dialog did not cover; a
+        // dropped one is under the dialog box.
+        let buf = terminal.backend().buffer();
+        for hit in &before {
+            let underlined = (hit.x..hit.x + hit.width)
+                .all(|x| buf[(x, hit.y)].modifier.contains(Modifier::UNDERLINED));
+            assert_eq!(
+                curl_spans(after).contains(&(hit.y, hit.x, hit.width)),
+                underlined,
+                "{hit:?}: {}",
+                buf_line(buf, hit.y)
+            );
+        }
+
+        state.help_open = false;
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(state.layout.undercurls, before);
+    }
+
+    /// `(y, x, width)` of each hit, colour left out.
+    fn curl_spans(hits: &[crate::tui::undercurl::UndercurlHit]) -> Vec<(u16, u16, u16)> {
+        hits.iter().map(|hit| (hit.y, hit.x, hit.width)).collect()
+    }
+
+    #[test]
+    fn undercurl_recedes_behind_dialog() {
+        // Tall enough that help leaves commented rows above or below its box.
+        let lines = 90;
+        let mut state = context_diff_state(lines);
+        for line in 10..10 + lines {
+            comment_readme_line(&mut state, line);
+        }
+        let palette = state.theme.palette();
+        let full = palette.comment_underline();
+        let receded = mix_toward(full, palette.surface, BACKDROP_PERCENT);
+        assert_ne!(receded, full);
+        let mut terminal = Terminal::new(TestBackend::new(120, 100)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let before = curl_spans(&state.layout.undercurls);
+        assert!(state.layout.undercurls.iter().all(|hit| hit.color == full));
+
+        state.help_open = true;
+        draw_state(&mut terminal, &mut state);
+        let after = &state.layout.undercurls;
+        assert!(
+            !after.is_empty() && after.len() < before.len(),
+            "help leaves some curls outside its box: {} of {}",
+            after.len(),
+            before.len()
+        );
+        assert!(after.iter().all(|hit| hit.color == receded), "{after:?}");
+        assert!(curl_spans(after).iter().all(|span| before.contains(span)));
+
+        state.help_open = false;
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(curl_spans(&state.layout.undercurls), before);
+        assert!(state.layout.undercurls.iter().all(|hit| hit.color == full));
+    }
+
+    #[test]
+    fn undercurl_without_rgb_surface_or_colour_drops_behind_dialog() {
+        let hit = |color| crate::tui::undercurl::UndercurlHit {
+            y: 1,
+            x: 2,
+            width: 3,
+            color,
+        };
+        let palette = ThemeId::TokyoNight.palette();
+        let mut hits = vec![hit(Color::Rgb(200, 100, 50)), hit(Color::Indexed(3))];
+        recede_undercurls(&mut hits, palette);
+        assert_eq!(
+            hits,
+            vec![hit(mix_toward(
+                Color::Rgb(200, 100, 50),
+                palette.surface,
+                BACKDROP_PERCENT
+            ))]
+        );
+        let mut hits = vec![hit(Color::Rgb(200, 100, 50))];
+        recede_undercurls(
+            &mut hits,
+            Palette {
+                surface: Color::Reset,
+                ..palette
+            },
+        );
+        assert!(hits.is_empty());
     }
 
     #[test]
@@ -15043,6 +17006,52 @@ mod tests {
     }
 
     #[test]
+    fn line_blame_annotation_is_italic_muted() {
+        for no_color in [false, true] {
+            let mut state = two_pane_diff_state();
+            state.no_color = no_color;
+            state.diff_mode = DiffMode::Inline;
+            state.set_diff(
+                "app".into(),
+                "README.md".into(),
+                super::super::diff::DiffContent::from_unified(
+                    "@@ -1,3 +1,3 @@\n keep one\n-old line\n+new line\n keep two\n",
+                ),
+            );
+            state.focus = FocusPane::Right;
+            let palette = state.theme.palette();
+            let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            // A context row (plain pad) and an add row (flat cursor bar).
+            for (row, note) in [
+                ("keep one", "· aaa1111 · fix the parser"),
+                ("new line", "You · uncommitted"),
+            ] {
+                state.diff_cursor = diff_row_index(&state, row);
+                if row == "keep one" {
+                    cache_focused_blame(&mut state, "fix the parser");
+                }
+                draw_state(&mut terminal, &mut state);
+                let buf = terminal.backend().buffer();
+                let text = buffer_text(&terminal);
+                let y = first_row_with(buf, row).expect("focused row");
+                for cell in needle_cells(buf, y, note) {
+                    assert_eq!(cell.fg, palette.muted, "{row} no_color={no_color}:\n{text}");
+                    assert!(
+                        cell.modifier.contains(Modifier::ITALIC),
+                        "{row} no_color={no_color}: note is italic:\n{text}"
+                    );
+                }
+                let code_end = needle_cols(buf, y, row).last().copied().unwrap();
+                assert!(
+                    !buf[(code_end, y)].modifier.contains(Modifier::ITALIC),
+                    "{row}: code text stays upright:\n{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn focused_diff_row_ends_with_the_dimmed_blame_annotation() {
         for mode in [DiffMode::Inline, DiffMode::SideBySide] {
             let mut state = two_pane_diff_state();
@@ -15656,7 +17665,7 @@ mod tests {
         let (mut shown, mut cut) = (0, 0);
         for width in 8..48 {
             for col_offset in [0, 2, 9] {
-                let (line, icons) = paint_tree_row(
+                let (line, icons, _) = paint_tree_row(
                     &row,
                     width,
                     false,
@@ -15665,10 +17674,10 @@ mod tests {
                     false,
                     search_bg_unused(),
                     true,
-                    false,
-                    false,
-                    false,
-                    Some(PrState::Open),
+                    TreeRowDecor {
+                        pr: Some(PrState::Open),
+                        ..TreeRowDecor::default()
+                    },
                     palette,
                     col_offset,
                 );
@@ -15795,6 +17804,316 @@ mod tests {
             .open_or_focus("app".into(), "main".into(), "HEAD".into());
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         assert!(state.layout.links.is_empty());
+    }
+
+    // ── OSC 8 links on commit hashes and file paths ───────────────────────
+
+    const LINK_SHA: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// Land a PR lookup that resolved `remote` for checkout `app` on
+    /// `main`, as the badge worker does.
+    fn resolve_app_remote(state: &mut AppState, remote: &str) {
+        let _ = state.due_pr_lookups();
+        assert!(state.apply_pr_lookup(
+            Path::new("app"),
+            "main",
+            Some(remote.into()),
+            PrLookup::NoPr
+        ));
+    }
+
+    /// Painted text under `link`.
+    fn link_text(
+        terminal: &Terminal<TestBackend>,
+        link: &crate::tui::hyperlink::LinkHit,
+    ) -> String {
+        region_text(terminal, link.x, link.y, link.width, 1)
+            .trim_end_matches('\n')
+            .to_string()
+    }
+
+    /// The one link to `url`, or a panic naming every link and the screen.
+    fn only_link_to(
+        state: &AppState,
+        terminal: &Terminal<TestBackend>,
+        url: &str,
+    ) -> crate::tui::hyperlink::LinkHit {
+        let found: Vec<_> = state
+            .layout
+            .links
+            .iter()
+            .filter(|link| link.url == url)
+            .cloned()
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "one link to {url}: {:?}\n{}",
+            state.layout.links,
+            buffer_text(terminal)
+        );
+        found[0].clone()
+    }
+
+    /// Graph of checkout `app` (one commit) in the right pane.
+    fn graph_link_state() -> AppState {
+        let mut state = two_pane_graph_state();
+        state.graph_identity = Some(("app".into(), LINK_SHA.into()));
+        state
+    }
+
+    #[test]
+    fn graph_commit_hash_links_to_forge_commit_page() {
+        let mut state = graph_link_state();
+        resolve_app_remote(&mut state, "git@github.com:example/demo.git");
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let url = format!("https://github.com/example/demo/commit/{LINK_SHA}");
+        let link = only_link_to(&state, &terminal, &url);
+        assert_eq!(link_text(&terminal, &link), "aaa1111");
+        assert!(link.x >= state.layout.right_x, "{link:?}");
+        // The hash sits on the spacer line right under the node line.
+        let node_row = buf_line(terminal.backend().buffer(), link.y - 1);
+        assert!(node_row.contains("seed graph"), "{node_row}");
+
+        // Select the commit: the selection footer hash links too.
+        state.graph_cursor = 1;
+        draw_state(&mut terminal, &mut state);
+        let links: Vec<_> = state
+            .layout
+            .links
+            .iter()
+            .filter(|l| l.url == url)
+            .cloned()
+            .collect();
+        assert_eq!(links.len(), 2, "{links:?}\n{}", buffer_text(&terminal));
+        assert!(links[1].y > link.y, "{links:?}");
+        assert_eq!(link_text(&terminal, &links[1]), "aaa1111");
+    }
+
+    #[test]
+    fn graph_hash_has_no_link_without_known_remote() {
+        // No lookup landed yet, a checkout without a remote, and a remote on
+        // a forge with no commit page.
+        for remote in [None, Some("git@bitbucket.org:example/demo.git")] {
+            let mut state = graph_link_state();
+            if let Some(remote) = remote {
+                resolve_app_remote(&mut state, remote);
+            }
+            let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let text = buffer_text(&terminal);
+            assert!(text.contains("aaa1111"), "hash painted:\n{text}");
+            assert!(
+                !state
+                    .layout
+                    .links
+                    .iter()
+                    .any(|link| link.url.contains("/commit/")),
+                "{remote:?}: {:?}",
+                state.layout.links
+            );
+        }
+    }
+
+    #[test]
+    fn commit_detail_footer_hash_links_to_forge_commit_page() {
+        let mut state = two_pane_commit_diff_state();
+        state.graph_identity = Some(("app".into(), LINK_SHA.into()));
+        resolve_app_remote(&mut state, "https://gitlab.com/group/sub/demo.git");
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let url = format!("https://gitlab.com/group/sub/demo/-/commit/{LINK_SHA}");
+        let link = only_link_to(&state, &terminal, &url);
+        assert_eq!(link_text(&terminal, &link), "aaa1111");
+        let l = &state.layout;
+        assert!(
+            link.y > l.files_list_y + l.files_list_height && link.x < l.right_x,
+            "the footer under the left file list: {link:?}"
+        );
+    }
+
+    #[test]
+    fn tree_file_row_links_to_percent_encoded_file_url() {
+        let mut row = repo("app", true);
+        row.changes[0].path = "docs/a b#é.md".into();
+        let snapshot = build_workspace_snapshot(&[row], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/work space"), snapshot, true);
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let url = crate::tui::hyperlink::file_url(
+            crate::tui::hyperlink::local_host(),
+            Path::new("/work space/app/docs/a b#é.md"),
+        );
+        assert!(
+            url.ends_with("/work%20space/app/docs/a%20b%23%C3%A9.md"),
+            "{url}"
+        );
+        let link = only_link_to(&state, &terminal, &url);
+        assert!(link.x < state.layout.right_x, "tree pane: {link:?}");
+        let text = link_text(&terminal, &link);
+        assert!(text.contains("a b#é.md"), "{text:?}");
+        // Repo and folder rows get no path link.
+        assert!(
+            state
+                .layout
+                .links
+                .iter()
+                .all(|link| link.url == url || !link.url.starts_with("file://")),
+            "{:?}",
+            state.layout.links
+        );
+    }
+
+    /// Every `file://` link URL of the frame.
+    fn file_link_urls(state: &AppState) -> Vec<String> {
+        state
+            .layout
+            .links
+            .iter()
+            .filter(|link| link.url.starts_with("file://"))
+            .map(|link| link.url.clone())
+            .collect()
+    }
+
+    #[test]
+    fn quoted_tree_file_rows_links_to_the_unquoted_file_url() {
+        let mut row = repo("app", true);
+        let change = row.changes[0].clone();
+        row.changes = [r#""my notes.txt""#, r#""\303\251.rs""#]
+            .into_iter()
+            .map(|path| FileChange {
+                path: path.into(),
+                ..change.clone()
+            })
+            .collect();
+        let snapshot = build_workspace_snapshot(&[row], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let urls = file_link_urls(&state);
+        for want in ["/tmp/app/my%20notes.txt", "/tmp/app/%C3%A9.rs"] {
+            assert!(
+                urls.iter().any(|url| url.ends_with(want)),
+                "{want} in {urls:?}"
+            );
+        }
+        assert!(urls.iter().all(|url| !url.contains("%22")), "{urls:?}");
+    }
+
+    #[test]
+    fn deleted_file_rows_get_no_links_to_files() {
+        let mut row = repo("app", true);
+        let change = row.changes[0].clone();
+        row.changes = vec![
+            FileChange {
+                path: "gone.txt".into(),
+                unstaged_status: Some("D".into()),
+                ..change.clone()
+            },
+            FileChange {
+                path: "staged-gone.txt".into(),
+                staged_status: Some("D".into()),
+                unstaged_status: None,
+                ..change.clone()
+            },
+            change,
+        ];
+        let snapshot = build_workspace_snapshot(&[row], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        for name in ["gone.txt", "staged-gone.txt", "README.md"] {
+            assert!(text.contains(name), "{name} painted:\n{text}");
+        }
+        let urls = file_link_urls(&state);
+        assert!(
+            urls.iter().any(|url| url.ends_with("/tmp/app/README.md")),
+            "{urls:?}"
+        );
+        assert!(
+            urls.iter().all(|url| !url.ends_with("gone.txt")),
+            "{urls:?}"
+        );
+
+        state.open_commit_files(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: LINK_SHA.into(),
+            },
+            ["D", "M"]
+                .into_iter()
+                .map(|status| super::super::drill::CommitFile {
+                    status: status.into(),
+                    path: format!("commit-{status}.rs"),
+                    old_path: None,
+                    stat: None,
+                })
+                .collect(),
+        );
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        for name in ["commit-D.rs", "commit-M.rs"] {
+            assert!(text.contains(name), "{name} painted:\n{text}");
+        }
+        let urls = file_link_urls(&state);
+        assert!(
+            urls.iter().any(|url| url.ends_with("/tmp/app/commit-M.rs")),
+            "{urls:?}"
+        );
+        assert!(
+            urls.iter().all(|url| !url.ends_with("commit-D.rs")),
+            "{urls:?}"
+        );
+    }
+
+    #[test]
+    fn commit_file_row_links_to_file_url() {
+        let mut state = two_pane_graph_state();
+        state.open_commit_files(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: LINK_SHA.into(),
+            },
+            vec![super::super::drill::CommitFile {
+                status: "M".into(),
+                path: "src/my file.rs".into(),
+                old_path: None,
+                stat: None,
+            }],
+        );
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let url = crate::tui::hyperlink::file_url(
+            crate::tui::hyperlink::local_host(),
+            Path::new("/tmp/app/src/my file.rs"),
+        );
+        assert!(url.ends_with("/tmp/app/src/my%20file.rs"), "{url}");
+        let link = only_link_to(&state, &terminal, &url);
+        assert!(link.x >= state.layout.right_x, "files pane: {link:?}");
+        let text = link_text(&terminal, &link);
+        assert!(text.contains("my file.rs"), "{text:?}");
+    }
+
+    #[test]
+    fn diff_title_path_links_to_file_url() {
+        let mut state = two_pane_diff_state();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let url = crate::tui::hyperlink::file_url(
+            crate::tui::hyperlink::local_host(),
+            Path::new("/tmp/app/README.md"),
+        );
+        let links: Vec<_> = state
+            .layout
+            .links
+            .iter()
+            .filter(|link| link.url == url && link.x >= state.layout.right_x)
+            .cloned()
+            .collect();
+        assert_eq!(links.len(), 1, "{:?}", state.layout.links);
+        assert_eq!(link_text(&terminal, &links[0]), "app/README.md");
     }
 
     /// Link spans in `links` that overlap `rect`.
@@ -16053,7 +18372,7 @@ mod tests {
         let (mut both, mut sync_only) = (0, 0);
         for width in 6..60 {
             for col_offset in [0, 3, 11, 40] {
-                let (line, icons) = paint_tree_row(
+                let (line, icons, _) = paint_tree_row(
                     &row,
                     width,
                     false,
@@ -16062,10 +18381,10 @@ mod tests {
                     false,
                     search_bg_unused(),
                     true,
-                    false,
-                    false,
-                    false,
-                    Some(PrState::Merged),
+                    TreeRowDecor {
+                        pr: Some(PrState::Merged),
+                        ..TreeRowDecor::default()
+                    },
                     palette,
                     col_offset,
                 );
@@ -16147,7 +18466,7 @@ mod tests {
                 .collect();
             for width in 6..72 {
                 for col_offset in [0, 3, 11, 40] {
-                    let (line, icons) = paint_tree_row(
+                    let (line, icons, _) = paint_tree_row(
                         row,
                         width,
                         false,
@@ -16156,10 +18475,7 @@ mod tests {
                         false,
                         search_bg_unused(),
                         true,
-                        false,
-                        false,
-                        false,
-                        None,
+                        TreeRowDecor::default(),
                         palette,
                         col_offset,
                     );
@@ -16827,5 +19143,295 @@ mod tests {
         assert_eq!(buf[(hits[0].x, hits[0].y)].symbol(), "P");
         let row = buf_line(buf, hits[0].y);
         assert!(row.contains("graph-pane feat"), "label end in view: {row}");
+    }
+
+    /// The box `draw` paints for the open dialog on a `cols`-wide frame.
+    fn open_dialog_box(state: &AppState, cols: u16) -> Rect {
+        let kind = open_dialog(state).expect("a dialog is open");
+        let panes = Rect::new(0, 1, cols, state.layout.pane_height);
+        let width = dialog_width(panes, kind);
+        dialog_rect(panes, width, dialog_height(state, kind, width))
+    }
+
+    /// `color` moved [`BACKDROP_PERCENT`] toward `surface`.
+    fn dimmed(color: Color, palette: Palette) -> Color {
+        mix_toward(color, palette.surface, BACKDROP_PERCENT)
+    }
+
+    /// Every pane cell outside `keep` whose glyph and colours are RGB in
+    /// both frames moved 50% toward `surface`; at least one changed.
+    fn assert_panes_dimmed(
+        before: &Buffer,
+        after: &Buffer,
+        panes: Rect,
+        keep: Rect,
+        palette: Palette,
+    ) {
+        let mut checked = 0;
+        let mut moved = 0;
+        for y in panes.top()..panes.bottom() {
+            for x in panes.left()..panes.right() {
+                if keep.contains(Position::new(x, y)) {
+                    continue;
+                }
+                let (was, now) = (&before[(x, y)], &after[(x, y)]);
+                if was.symbol() != now.symbol()
+                    || !matches!(was.fg, Color::Rgb(..))
+                    || !matches!(was.bg, Color::Rgb(..))
+                {
+                    continue;
+                }
+                checked += 1;
+                assert_eq!(
+                    (now.fg, now.bg),
+                    (dimmed(was.fg, palette), dimmed(was.bg, palette)),
+                    "cell ({x}, {y}) {:?} must recede 50% toward surface",
+                    was.symbol()
+                );
+                assert!(!now.modifier.contains(Modifier::DIM), "({x}, {y})");
+                if now.fg != was.fg || now.bg != was.bg {
+                    moved += 1;
+                }
+            }
+        }
+        assert!(checked > 0 && moved > 0, "checked {checked}, moved {moved}");
+    }
+
+    /// The center of `keep` holds the dialog's own undimmed panel colour.
+    fn assert_dialog_crisp(after: &Buffer, keep: Rect, palette: Palette) {
+        let cell = &after[(keep.x + keep.width / 2, keep.y + keep.height / 2)];
+        assert_eq!(cell.bg, palette.panel, "dialog cell keeps its panel bg");
+        assert!(!cell.modifier.contains(Modifier::DIM));
+    }
+
+    fn painted_state() -> AppState {
+        let snapshot = build_workspace_snapshot(
+            &[repo("app", true), repo("lib", false), repo("web", true)],
+            &[],
+            false,
+            &[],
+        );
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.background = BackgroundMode::Paint;
+        state
+    }
+
+    #[test]
+    fn open_palette_dims_cells_outside_the_dialog() {
+        use crate::tui::action::QuickOpenEntry;
+        let mut state = painted_state();
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let before = terminal.backend().buffer().clone();
+
+        state.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
+        assert_eq!(open_dialog(&state), Some(DialogKind::QuickOpen));
+        draw_state(&mut terminal, &mut state);
+        let after = terminal.backend().buffer().clone();
+        let keep = open_dialog_box(&state, 120);
+        let panes = Rect::new(0, 1, 120, state.layout.pane_height);
+        assert_panes_dimmed(&before, &after, panes, keep, palette);
+        assert_dialog_crisp(&after, keep, palette);
+        // The tab strip recedes too: the whole frame dims, not just panes.
+        let tab = &after[(119, 0)];
+        assert_eq!(tab.bg, dimmed(before[(119, 0)].bg, palette));
+        // The copy frame holds the dimmed cells; its text is unchanged.
+        assert_eq!(state.painted_frame, after);
+    }
+
+    #[test]
+    fn confirm_and_help_dim_the_backdrop() {
+        for open in ["confirm", "help"] {
+            let mut state = painted_state();
+            let palette = state.theme.palette();
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let before = terminal.backend().buffer().clone();
+            if open == "confirm" {
+                state.confirm = Some(PendingConfirm::StashDrop {
+                    repo: "app".into(),
+                    stash_ref: "stash@{0}".into(),
+                });
+            } else {
+                state.help_open = true;
+            }
+            draw_state(&mut terminal, &mut state);
+            let after = terminal.backend().buffer().clone();
+            let keep = open_dialog_box(&state, 120);
+            let panes = Rect::new(0, 1, 120, state.layout.pane_height);
+            assert!(keep.width < 120, "{open}: box leaves a backdrop");
+            assert_panes_dimmed(&before, &after, panes, keep, palette);
+            assert_dialog_crisp(&after, keep, palette);
+        }
+    }
+
+    /// The y/N push confirm is a centered confirm box: the panes behind it
+    /// recede and the box keeps its own colours.
+    #[test]
+    fn push_confirm_dims_the_backdrop() {
+        let mut state = painted_state();
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let before = terminal.backend().buffer().clone();
+        state.confirm = Some(PendingConfirm::Push {
+            repo: "app".into(),
+            branch: "main".into(),
+            remote: "origin".into(),
+            publish: false,
+            ahead_behind: Some((1, 0)),
+        });
+        assert_eq!(open_dialog(&state), Some(DialogKind::Confirm));
+        draw_state(&mut terminal, &mut state);
+        let after = terminal.backend().buffer().clone();
+        assert!(
+            buffer_text(&terminal).contains("Push main → origin (1 commit)?"),
+            "{}",
+            buffer_text(&terminal)
+        );
+        let keep = open_dialog_box(&state, 120);
+        let panes = Rect::new(0, 1, 120, state.layout.pane_height);
+        assert!(keep.width < 120, "box leaves a backdrop");
+        assert_panes_dimmed(&before, &after, panes, keep, palette);
+        assert_dialog_crisp(&after, keep, palette);
+    }
+
+    /// The search dialog dims what is behind it, but its own option chips
+    /// sit inside the box: the hovered chip keeps its full hover colours.
+    #[test]
+    fn search_dialog_dims_the_backdrop_but_not_its_hovered_chip() {
+        let mut state = search_files_state(false);
+        state.background = BackgroundMode::Paint;
+        let palette = state.theme.palette();
+        let terminal = draw_search(&mut state, 120, 30);
+        let (y, xs) = painted_chip_xs(&terminal);
+        // The same frame with the dialog closed is the undimmed backdrop.
+        let dialog = state.search_files.take();
+        let before = draw_search(&mut state, 120, 30).backend().buffer().clone();
+        state.search_files = dialog;
+        draw_search(&mut state, 120, 30);
+        assert!(state.set_pointer(Some((xs[0].1 + 1, y))));
+        let terminal = draw_search(&mut state, 120, 30);
+        let after = terminal.backend().buffer().clone();
+        let keep = open_dialog_box(&state, 120);
+        assert!(keep.contains(Position::new(xs[0].1, y)), "chip in the box");
+        let chip = &after[(xs[0].1 + 1, y)];
+        assert_eq!(chip.fg, palette.cursor, "hovered chip fg is not dimmed");
+        assert_eq!(chip.bg, palette.cursor_bg, "hovered chip bg is not dimmed");
+        assert!(chip.modifier.contains(Modifier::UNDERLINED));
+        assert!(!chip.modifier.contains(Modifier::DIM));
+        let panes = Rect::new(0, 1, 120, state.layout.pane_height);
+        assert_panes_dimmed(&before, &after, panes, keep, palette);
+    }
+
+    #[test]
+    fn backdrop_falls_back_to_dim_modifier_without_rgb_or_with_no_color() {
+        let palette = ThemeId::TokyoNight.palette();
+        let rgb = Color::Rgb(200, 100, 50);
+        let fresh = || {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 3, 1));
+            buf[(0, 0)].set_fg(rgb).set_bg(rgb);
+            buf[(1, 0)].set_fg(Color::Indexed(7)).set_bg(Color::Reset);
+            buf[(2, 0)].set_fg(rgb).set_bg(rgb);
+            buf
+        };
+        let keep = Rect::new(2, 0, 1, 1);
+
+        let mut buf = fresh();
+        let area = buf.area;
+        dim_backdrop(&mut buf, area, keep, palette, false);
+        assert_eq!(buf[(0, 0)].fg, dimmed(rgb, palette));
+        assert_eq!(buf[(0, 0)].bg, dimmed(rgb, palette));
+        assert!(!buf[(0, 0)].modifier.contains(Modifier::DIM));
+        // Indexed fg: SGR faint; the terminal's own bg stays.
+        assert_eq!(buf[(1, 0)].fg, Color::Indexed(7));
+        assert_eq!(buf[(1, 0)].bg, Color::Reset);
+        assert!(buf[(1, 0)].modifier.contains(Modifier::DIM));
+        assert_eq!(buf[(2, 0)], fresh()[(2, 0)], "kept cell is untouched");
+
+        // NO_COLOR: no colour moves, every backdrop cell gets DIM.
+        let mut buf = fresh();
+        let area = buf.area;
+        dim_backdrop(&mut buf, area, keep, palette, true);
+        for x in 0..2 {
+            assert_eq!(buf[(x, 0)].fg, fresh()[(x, 0)].fg);
+            assert_eq!(buf[(x, 0)].bg, fresh()[(x, 0)].bg);
+            assert!(buf[(x, 0)].modifier.contains(Modifier::DIM));
+        }
+        assert_eq!(buf[(2, 0)], fresh()[(2, 0)]);
+
+        // Live frame: NO_COLOR and terminal fills dim through the modifier.
+        for (no_color, background) in [
+            (true, BackgroundMode::Paint),
+            (false, BackgroundMode::Terminal),
+        ] {
+            let mut state = painted_state();
+            state.no_color = no_color;
+            state.background = background;
+            state.help_open = true;
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let keep = open_dialog_box(&state, 120);
+            let buf = terminal.backend().buffer();
+            let outside = &buf[(0, keep.y)];
+            assert!(
+                outside.modifier.contains(Modifier::DIM) || matches!(outside.fg, Color::Rgb(..)),
+                "{no_color} {background:?}: {outside:?}"
+            );
+            if no_color {
+                assert!(outside.modifier.contains(Modifier::DIM));
+            } else {
+                assert_eq!(outside.bg, Color::Reset, "terminal fill stays");
+            }
+            let inside = &buf[(keep.x + keep.width / 2, keep.y + keep.height / 2)];
+            assert!(!inside.modifier.contains(Modifier::DIM));
+        }
+    }
+
+    #[test]
+    fn closed_dialog_leaves_no_backdrop() {
+        let mut state = painted_state();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let before = terminal.backend().buffer().clone();
+        state.help_open = true;
+        draw_state(&mut terminal, &mut state);
+        // Open: the status row recedes under the backdrop.
+        let palette = state.theme.palette();
+        assert_eq!(
+            terminal.backend().buffer()[(119, 29)].bg,
+            dimmed(palette.chrome, palette)
+        );
+        state.help_open = false;
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(terminal.backend().buffer(), &before);
+    }
+
+    /// A PR badge link outside a small confirm box stays, and the OSC 8
+    /// reprint reads its dimmed cell from the finished buffer.
+    #[test]
+    fn badge_link_outside_the_dialog_reprints_dimmed() {
+        use crate::tui::hyperlink::link_cells;
+        let mut state = pr_state(&[branch_repo("app", "feature")], true);
+        set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+        let palette = state.theme.palette();
+        let mut terminal = pr_terminal();
+        draw_state(&mut terminal, &mut state);
+        let link = state.layout.links[0].clone();
+        let was = terminal.backend().buffer()[(link.x, link.y)].clone();
+
+        state.confirm = Some(PendingConfirm::StashDrop {
+            repo: "app".into(),
+            stash_ref: "stash@{0}".into(),
+        });
+        draw_state(&mut terminal, &mut state);
+        let keep = open_dialog_box(&state, 120);
+        assert!(!keep.contains(Position::new(link.x, link.y)));
+        assert_eq!(state.layout.links, vec![link.clone()]);
+        let cells = link_cells(terminal.backend().buffer(), &state.layout.links);
+        let reprint = format!("{cells:?}");
+        let want = format!("{:?}", dimmed(was.fg, palette));
+        assert!(reprint.contains(&want), "{want} in {reprint}");
     }
 }

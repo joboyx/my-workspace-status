@@ -1,9 +1,9 @@
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    after_readme_name, crumb_row, has_stage_hint, has_unstage_hint, idle_dirty_readme_unstaged,
-    no_wrong_overlays, pane_unstaged_readme, readme_unstaged_badge, status_row, tree_cursor_on,
-    tree_has, GIT_WAIT, SETTLE_MS, WAIT,
+    ack_rows, after_ack, after_readme_name, has_stage_hint, has_unstage_hint,
+    idle_dirty_readme_unstaged, no_wrong_overlays, pane_unstaged_readme, readme_unstaged_badge,
+    status_row, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 /// Trailing staged `S `, not `M ` / `MS`, not reviewed `*`.
@@ -19,9 +19,10 @@ fn pane_staged_readme(screen: &str) -> bool {
         && screen.contains("+dirty")
 }
 
-/// `s` staged the focused dirty file. File stays. Not Space. Not stash.
+/// `s` staged the focused dirty file. File stays. Not Space. Not stash. The
+/// wait checks the `staged README.md` toast (`after_ack`).
 fn documented_s_staged(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
+    let crumb = ack_rows(screen);
     let status = status_row(screen);
     tree_cursor_on(screen, "README.md")
         && !tree_cursor_on(screen, "app")
@@ -33,12 +34,12 @@ fn documented_s_staged(screen: &str) -> bool {
         && !has_stage_hint(screen)
         && status.contains(" tree")
         && status.contains(" split")
-        && crumb.contains("staged README.md")
         && !crumb.contains("unstaged")
         && no_wrong_overlays(screen)
 }
 
-/// `u` restored unstaged. Same file. Not a no-op after stage.
+/// `u` restored unstaged. Same file. Not a no-op after stage. The wait
+/// checks the `unstaged README.md` toast (`after_ack`).
 fn documented_u_unstaged(screen: &str) -> bool {
     let status = status_row(screen);
     tree_cursor_on(screen, "README.md")
@@ -51,7 +52,6 @@ fn documented_u_unstaged(screen: &str) -> bool {
         && !has_unstage_hint(screen)
         && status.contains(" tree")
         && status.contains(" split")
-        && crumb_row(screen).contains("unstaged README.md")
         && no_wrong_overlays(screen)
 }
 
@@ -81,7 +81,7 @@ fn pty_stage_and_unstage_dirty_file() {
 
     tui.key('s');
     tui.wait_pred(
-        documented_s_staged,
+        after_ack("staged README.md", documented_s_staged),
         "s stages focused README: tree S, pane STAGED, unstage hint, staged toast",
         GIT_WAIT,
     );
@@ -94,7 +94,7 @@ fn pty_stage_and_unstage_dirty_file() {
 
     tui.key('u');
     tui.wait_pred(
-        documented_u_unstaged,
+        after_ack("unstaged README.md", documented_u_unstaged),
         "u unstages the same README: tree M, pane UNSTAGED, stage hint",
         GIT_WAIT,
     );

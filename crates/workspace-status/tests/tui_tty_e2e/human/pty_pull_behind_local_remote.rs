@@ -1,9 +1,9 @@
 use crate::harness::PtySession;
 use crate::seed::behind_workspace;
 use crate::support::{
-    crumb_row, graph_subject_line, graph_subject_meta_line, has_fetch_hint, has_pull_hint,
-    panes_tree_focused_graph_unfocused, status_row, syncbox_row_behind, syncbox_row_current,
-    tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
+    ack_rows, after_ack, crumb_row, graph_subject_line, graph_subject_meta_line, has_fetch_hint,
+    has_pull_hint, panes_tree_focused_graph_unfocused, status_row, syncbox_row_behind,
+    syncbox_row_current, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 fn no_wrong_pull_overlays(screen: &str) -> bool {
@@ -15,12 +15,11 @@ fn no_wrong_pull_overlays(screen: &str) -> bool {
         && !screen.contains("pop stash")
 }
 
-fn crumb_pulled_one(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
-    crumb.contains("Pulled 1 repo")
-        && !crumb.contains("failed")
-        && !crumb.contains("Fetched")
-        && !crumb.contains("Pushed")
+/// No failure and no fetch / push ack. The `Pulled 1 repo` toast is checked by
+/// the wait (`after_ack`), since it can expire before the reload lands.
+fn no_stray_remote_ack(screen: &str) -> bool {
+    let crumb = ack_rows(screen);
+    !crumb.contains("failed") && !crumb.contains("Fetched") && !crumb.contains("Pushed")
 }
 
 /// Origin tip is a remote-only commit. HEAD is still the seed.
@@ -92,7 +91,7 @@ fn documented_p_pulled(screen: &str) -> bool {
         && screen.contains("Working tree clean")
         && origin_tip_is_head(screen)
         && seed_is_ancestor_not_head(screen)
-        && crumb_pulled_one(screen)
+        && no_stray_remote_ack(screen)
         && crumb_row(screen).contains("workspace › syncbox")
         && !crumb_row(screen).contains("[syncbox]")
         && has_fetch_hint(screen)
@@ -130,7 +129,7 @@ fn pty_pull_behind_local_remote() {
 
     tui.key('p');
     tui.wait_pred(
-        documented_p_pulled,
+        after_ack("Pulled 1 repo", documented_p_pulled),
         "p pulls: Pulled 1 repo, HEAD origin-tip-commit [+=main], no v1, pull hint gone",
         GIT_WAIT,
     );

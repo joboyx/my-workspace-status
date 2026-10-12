@@ -1,9 +1,10 @@
 use crate::harness::PtySession;
 use crate::seed::ahead_workspace;
 use crate::support::{
-    after_syncbox_name, crumb_row, graph_subject_line, graph_subject_meta_line, has_fetch_hint,
-    has_pull_hint, line_on_branch, panes_tree_focused_graph_unfocused, status_row,
-    syncbox_row_current, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
+    ack_rows, after_ack, after_syncbox_name, crumb_row, graph_subject_line,
+    graph_subject_meta_line, has_fetch_hint, has_pull_hint, line_on_branch,
+    panes_tree_focused_graph_unfocused, status_row, syncbox_row_current, tree_cursor_on, tree_has,
+    GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 /// Trailing ASCII ahead-by-1 (`^1`) on the syncbox tree row.
@@ -26,12 +27,11 @@ fn no_wrong_push_overlays(screen: &str) -> bool {
         && !screen.contains("pop stash")
 }
 
-fn crumb_pushed_one(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
-    crumb.contains("Pushed 1 repo")
-        && !crumb.contains("failed")
-        && !crumb.contains("Fetched")
-        && !crumb.contains("Pulled")
+/// No failure and no fetch / pull ack. The `Pushed 1 repo` toast is checked by
+/// the wait (`after_ack`), since it can expire before the reload lands.
+fn no_stray_remote_ack(screen: &str) -> bool {
+    let crumb = ack_rows(screen);
+    !crumb.contains("failed") && !crumb.contains("Fetched") && !crumb.contains("Pulled")
 }
 
 /// HEAD is the local ahead tip. Origin still sits on the seed.
@@ -102,7 +102,6 @@ fn push_confirm_open_nothing_pushed(screen: &str) -> bool {
         && screen.contains("git push, no --force")
         && !screen.contains("Pushed")
         && !screen.contains("Pushing")
-        && !crumb_row(screen).contains("Pushed")
         && no_wrong_push_overlays(screen)
 }
 
@@ -120,7 +119,7 @@ fn documented_shift_p_pushed(screen: &str) -> bool {
         && screen.contains("Working tree clean")
         && ahead_tip_is_head_and_origin(screen)
         && seed_is_ancestor_no_origin_chip(screen)
-        && crumb_pushed_one(screen)
+        && no_stray_remote_ack(screen)
         && crumb_row(screen).contains("workspace › syncbox")
         && !crumb_row(screen).contains("[syncbox]")
         && has_fetch_hint(screen)
@@ -175,7 +174,7 @@ fn pty_shift_p_csi_u_pushes_ahead() {
 
     tui.key('y');
     tui.wait_pred(
-        documented_shift_p_pushed,
+        after_ack("Pushed 1 repo", documented_shift_p_pushed),
         "Shift+P pushes: Pushed 1 repo, HEAD ahead-tip-commit [+=main], no ^1, push hint gone",
         GIT_WAIT,
     );

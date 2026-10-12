@@ -4,6 +4,8 @@
 //! `--plain`, `--json`, `-v`, `-p`, or `-d`.
 
 mod action;
+mod activity;
+pub mod anim;
 mod app;
 mod branches;
 mod chrome;
@@ -44,10 +46,14 @@ mod state;
 mod status;
 pub(crate) mod syntax;
 mod tabs;
+mod term_bg;
+mod term_progress;
 pub(crate) mod theme;
 pub(crate) mod theme_store;
+mod toast;
 mod tree;
 pub(crate) mod tty;
+pub(crate) mod undercurl;
 pub(crate) mod viewed;
 pub(crate) mod watch;
 mod word_diff;

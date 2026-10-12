@@ -4,9 +4,9 @@ use std::process::{Command, Stdio};
 use crate::harness::PtySession;
 use crate::seed::{focus_workspace, git_env};
 use crate::support::{
-    crumb_row, focusbox_graph_left_full, has_fetch_hint, line_on_branch, no_mouse_toggle_toast,
-    status_row, title_has_files, tree_cursor_on, tree_has, tree_has_branch, tree_line_containing,
-    tree_pane_focused, GIT_WAIT, SETTLE_MS, WAIT,
+    ack_rows, after_ack, focusbox_graph_left_full, has_fetch_hint, line_on_branch,
+    no_mouse_toggle_toast, status_row, title_has_files, tree_cursor_on, tree_has, tree_has_branch,
+    tree_line_containing, tree_pane_focused, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 fn git_stdout(repo: &Path, args: &[&str]) -> String {
@@ -122,9 +122,9 @@ fn tree_picker_checkout_chrome(screen: &str) -> bool {
         && !screen.contains("Enter create")
         && !screen.contains("Create branch at")
         && !screen.contains("Checkout at")
-        && !crumb_row(screen).contains("Checked out")
-        && !crumb_row(screen).contains("created ")
-        && !crumb_row(screen).contains("Already on")
+        && !ack_rows(screen).contains("Checked out")
+        && !ack_rows(screen).contains("created ")
+        && !ack_rows(screen).contains("Already on")
         && screen.contains("keep-leaf-commit")
         && screen.contains("main-leaf-commit")
         && no_wrong_picker_overlays(screen)
@@ -147,11 +147,10 @@ fn tree_picker_filtered_to_main(screen: &str) -> bool {
 
 /// Picker Enter ran `git checkout` of selected `main`. Not create. Not already-on.
 fn documented_tree_picker_enter_checkout(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
+    let crumb = ack_rows(screen);
     let status = status_row(screen);
     tree_pane_focused(screen)
         && tree_cursor_on(screen, "focusbox")
-        && crumb.contains("Checked out main")
         && !crumb.contains("created ")
         && !crumb.contains("Already on")
         && !crumb.contains("failed")
@@ -183,8 +182,8 @@ fn idle_focusbox_picker_closed(screen: &str) -> bool {
         && !screen.contains("Branch ")
         && !screen.contains("Enter checkout")
         && !screen.contains("filter:")
-        && !crumb_row(screen).contains("Checked out")
-        && !crumb_row(screen).contains("created ")
+        && !ack_rows(screen).contains("Checked out")
+        && !ack_rows(screen).contains("created ")
         && status.contains(" tree")
         && !status.contains(" split")
         && status.contains("branch")
@@ -266,7 +265,7 @@ fn pty_tree_b_picker_enter_checkout() {
 
     tui.enter();
     tui.wait_pred(
-        documented_tree_picker_enter_checkout,
+        after_ack("Checked out main", documented_tree_picker_enter_checkout),
         "Enter checks out main: Checked out main, tree on main, [+main], picker closed",
         GIT_WAIT,
     );

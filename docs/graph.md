@@ -31,6 +31,7 @@ clones only that row (the focused-row lookups use it).
 | `IconSpan` | Painted cells of one graph icon (`GraphIconKind`, row index or `None` for the sync header, x, y, width, `part`, chip `target`), from `render_with_icon_spans` |
 | `GraphIconKind` | Commit / HEAD / stash node, uncommitted glyph, worktree glyph, open / resolved comment mark, row badge, local / default / remote / tag chip, checkout-and-sync mark run, detached `[HEAD]`, `[+N]`, sync header, footer more-lines hint |
 | `LabelPart` | One styled run: text, `LabelKind`, and `target` (`PartTarget`: the chip the run belongs to, or `None`) |
+| `meta_columns_parts` | The right-meta runs of a spacer: ` hash` (`Meta`), ` date` (`MetaDate`), ` author` (`MetaAuthor`). `meta_columns_text` is their text |
 | `PartTarget` | Chip identity: `Chip(refs)` (one ref, or a local branch and its same-name remote), `Marks { branch, checkout, remote }`, `DetachedHead`, `Overflow(hidden chips)` |
 | `GraphLabelPalette` | Label colours: subject, meta, chips, overflow, worktree glyph, dirty uncommitted glyph, open and resolved comment marks, sync header ahead and behind counts |
 | `graph_scrollbar_thumb` | Thumb offset/length matching a painted bar (TUI hit-test, vertical or horizontal) |
@@ -159,6 +160,13 @@ subject, `[ignored]` is meta, and `[HEAD]` is the head mark. On a commit
 spacer the worktree mark text stays meta. `LabelKind::icon` maps a part to
 its `GraphIconKind` and `part`.
 
+The right-meta date and author columns of a commit or stash spacer are
+`LabelKind::MetaDate` and `LabelKind::MetaAuthor` (`meta_columns_parts`).
+They paint in `meta` with `Modifier::ITALIC`; the hash stays plain `Meta`,
+so its cells (and the TUI's hash link) do not change. Italic is a
+modifier, not a colour or a glyph: it stays under `NO_COLOR` and in ASCII
+mode, and a terminal without italics shows plain text.
+
 ## Visible rows
 
 1. A working-tree row when `uncommitted` is `Some(has_changes)`. A loaded
@@ -239,7 +247,8 @@ other strings):
 Footer paint reuses the commit-spacer chip runs (`LabelKind`: HEAD /
 default / local / remote / tag) and their `target`s. A worktree row's
 branch run is a local branch chip. `GraphWidget::label_palette` colours
-those the same as the row chips. Hash, parents, date, and author stay `meta`.
+those the same as the row chips. Hash and parents stay `meta`; author and
+date are `MetaAuthor` / `MetaDate` (meta colour, italic), as on the spacer.
 Do not flatten the footer to one colour.
 
 The sync header is `branch` then the ahead / behind marks
