@@ -433,8 +433,27 @@ fn drop_links_under(links: &mut Vec<LinkHit>, rect: Rect) {
 
 /// `file://` URL of `rel` in checkout `repo` (both relative to the
 /// workspace root `state.cwd`).
+///
+/// `rel` can be the C-quoted form git prints for a name with a space or a
+/// non-ASCII byte (`"my notes.txt"`, `"\303\251.rs"`); the link uses the
+/// real name. The shown path is not changed.
 fn file_link(state: &AppState, repo: &str, rel: &str) -> String {
+    let rel = crate::git::unquote_c_path_bytes(rel);
+    #[cfg(unix)]
+    let rel = {
+        use std::os::unix::ffi::OsStrExt;
+        PathBuf::from(std::ffi::OsStr::from_bytes(&rel))
+    };
+    #[cfg(not(unix))]
+    let rel = PathBuf::from(String::from_utf8_lossy(&rel).into_owned());
     file_url(local_host(), &state.cwd.join(repo).join(rel))
+}
+
+/// True when the tree file change is a deletion with no file left on disk:
+/// deleted in the worktree, or staged as deleted with no worktree change.
+fn file_change_is_deleted(file: &crate::snapshot::FileChange) -> bool {
+    let unstaged = file.unstaged_status.as_deref();
+    unstaged == Some("D") || (unstaged.is_none() && file.staged_status.as_deref() == Some("D"))
 }
 
 /// Link over the rightmost `needle` painted in buffer row `y`, columns
@@ -1408,16 +1427,19 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             state.left_col_offset as usize,
         );
         lines.push(line);
-        // A file row's label links to the file on disk.
+        // A file row's label links to the file on disk; a deleted file has
+        // none.
         if let (NodeKind::File, Some(repo), Some(file), Some((x, w))) =
             (row.kind, row.repo.as_deref(), row.file.as_ref(), label)
         {
-            links.push(LinkHit {
-                y,
-                x: area.x.saturating_add(u16::try_from(x).unwrap_or(u16::MAX)),
-                width: u16::try_from(w).unwrap_or(u16::MAX),
-                url: file_link(state, repo, &file.path),
-            });
+            if !file_change_is_deleted(file) {
+                links.push(LinkHit {
+                    y,
+                    x: area.x.saturating_add(u16::try_from(x).unwrap_or(u16::MAX)),
+                    width: u16::try_from(w).unwrap_or(u16::MAX),
+                    url: file_link(state, repo, &file.path),
+                });
+            }
         }
         for (kind, x, w) in icons {
             hits.push(IconHit {
@@ -2539,9 +2561,14 @@ fn draw_commit_file_list(
                 target: IconTarget::CommitFileRow(row.id.clone()),
             });
         }
-        // A file row's label links to the file in the checkout.
+        // A file row's label links to the file in the checkout; a deleted
+        // file has none.
+        let deleted = row
+            .file
+            .as_ref()
+            .is_some_and(|file| file.status.starts_with('D'));
         if let (true, Some(repo), Some((x, w))) = (
-            row.is_file(),
+            row.is_file() && !deleted,
             link_repo.as_deref(),
             segmented_label_span(row.depth, &segs, width, col_offset),
         ) {
@@ -16156,6 +16183,109 @@ mod tests {
                 .all(|link| link.url == url || !link.url.starts_with("file://")),
             "{:?}",
             state.layout.links
+        );
+    }
+
+    /// Every `file://` link URL of the frame.
+    fn file_link_urls(state: &AppState) -> Vec<String> {
+        state
+            .layout
+            .links
+            .iter()
+            .filter(|link| link.url.starts_with("file://"))
+            .map(|link| link.url.clone())
+            .collect()
+    }
+
+    #[test]
+    fn quoted_tree_file_rows_links_to_the_unquoted_file_url() {
+        let mut row = repo("app", true);
+        let change = row.changes[0].clone();
+        row.changes = [r#""my notes.txt""#, r#""\303\251.rs""#]
+            .into_iter()
+            .map(|path| FileChange {
+                path: path.into(),
+                ..change.clone()
+            })
+            .collect();
+        let snapshot = build_workspace_snapshot(&[row], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let urls = file_link_urls(&state);
+        for want in ["/tmp/app/my%20notes.txt", "/tmp/app/%C3%A9.rs"] {
+            assert!(
+                urls.iter().any(|url| url.ends_with(want)),
+                "{want} in {urls:?}"
+            );
+        }
+        assert!(urls.iter().all(|url| !url.contains("%22")), "{urls:?}");
+    }
+
+    #[test]
+    fn deleted_file_rows_get_no_links_to_files() {
+        let mut row = repo("app", true);
+        let change = row.changes[0].clone();
+        row.changes = vec![
+            FileChange {
+                path: "gone.txt".into(),
+                unstaged_status: Some("D".into()),
+                ..change.clone()
+            },
+            FileChange {
+                path: "staged-gone.txt".into(),
+                staged_status: Some("D".into()),
+                unstaged_status: None,
+                ..change.clone()
+            },
+            change,
+        ];
+        let snapshot = build_workspace_snapshot(&[row], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        for name in ["gone.txt", "staged-gone.txt", "README.md"] {
+            assert!(text.contains(name), "{name} painted:\n{text}");
+        }
+        let urls = file_link_urls(&state);
+        assert!(
+            urls.iter().any(|url| url.ends_with("/tmp/app/README.md")),
+            "{urls:?}"
+        );
+        assert!(
+            urls.iter().all(|url| !url.ends_with("gone.txt")),
+            "{urls:?}"
+        );
+
+        state.open_commit_files(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: LINK_SHA.into(),
+            },
+            ["D", "M"]
+                .into_iter()
+                .map(|status| super::super::drill::CommitFile {
+                    status: status.into(),
+                    path: format!("commit-{status}.rs"),
+                    old_path: None,
+                    stat: None,
+                })
+                .collect(),
+        );
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        for name in ["commit-D.rs", "commit-M.rs"] {
+            assert!(text.contains(name), "{name} painted:\n{text}");
+        }
+        let urls = file_link_urls(&state);
+        assert!(
+            urls.iter().any(|url| url.ends_with("/tmp/app/commit-M.rs")),
+            "{urls:?}"
+        );
+        assert!(
+            urls.iter().all(|url| !url.ends_with("commit-D.rs")),
+            "{urls:?}"
         );
     }
 

@@ -258,8 +258,13 @@ impl AppState {
     /// The forge comes from the remote URL the PR badge lookup already
     /// resolved for the checkout ([`PrCache::remote_for`]); no git runs
     /// here. No resolved remote, or a remote that is not GitHub or GitLab,
-    /// gives no link.
+    /// gives no link. An id that is not a full SHA-1 or SHA-256 hex id (an
+    /// abbreviated one) gives no link either.
     pub(crate) fn commit_link(&self, checkout: &Path, sha: &str) -> Option<String> {
+        let full = matches!(sha.len(), 40 | 64) && sha.bytes().all(|b| b.is_ascii_hexdigit());
+        if !full {
+            return None;
+        }
         let remote = self.pr_cache.remote_for(checkout)?;
         Some(commit_url(&parse_remote(remote)?, sha))
     }
@@ -773,6 +778,25 @@ mod tests {
         assert!(app.status.is_empty(), "a background failure stays silent");
         assert!(app.apply_pr_lookup(path, "feature", None, PrLookup::NoPr));
         assert_eq!(app.pr_badge(path), None, "no remote");
+    }
+
+    #[test]
+    fn commit_link_needs_a_resolved_remote_and_a_full_id() {
+        const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+        let mut app = app_with(&[repo("app", "feature")], &[]);
+        let path = Path::new("app");
+        let _ = app.due_pr_lookups();
+        assert_eq!(app.commit_link(path, SHA), None, "lookup in flight");
+        assert!(app.apply_pr_lookup(path, "feature", Some(REMOTE.into()), PrLookup::NoPr));
+        assert_eq!(
+            app.commit_link(path, SHA).as_deref(),
+            Some("https://github.com/octo/demo/commit/0123456789abcdef0123456789abcdef01234567")
+        );
+        let sha256 = "ab".repeat(32);
+        assert!(app.commit_link(path, &sha256).is_some(), "SHA-256 id");
+        for short in ["0123456", &SHA[..39], "HEAD", &"g".repeat(40)] {
+            assert_eq!(app.commit_link(path, short), None, "{short}");
+        }
     }
 
     #[test]

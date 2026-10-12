@@ -8,7 +8,7 @@ use crate::seed::daily_workspace;
 use crate::support::WAIT;
 
 /// A file row whose name has a space links to its `file://` URL, the space
-/// percent-encoded.
+/// percent-encoded and the quotes git puts around that name left out.
 #[test]
 fn pty_file_row_emits_osc8_file_link() {
     let (_root, workspace) = daily_workspace();
@@ -22,8 +22,8 @@ fn pty_file_row_emits_osc8_file_link() {
             .filter_map(|tail| tail.split_once("\x1b\\").map(|(url, _)| url.to_string()))
             .find(|url| {
                 url.starts_with("file://")
-                    && url.contains("/app/")
-                    && url.contains("my%20notes.txt")
+                    && url.contains("/app/my%20notes.txt")
+                    && !url.contains("%22")
             })
     };
     tui.wait_pred(

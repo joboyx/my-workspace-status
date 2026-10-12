@@ -1444,11 +1444,26 @@ pub fn parse_blame_porcelain(stdout: &str) -> Option<LineBlame> {
 /// any non-ASCII byte unless `core.quotePath=false`). Octal escapes are
 /// raw bytes, decoded as UTF-8 (lossy). An unquoted value is returned as is.
 fn unquote_c_path(value: &str) -> String {
+    match value
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    {
+        Some(_) => String::from_utf8_lossy(&unquote_c_path_bytes(value)).into_owned(),
+        None => value.to_string(),
+    }
+}
+
+/// Raw bytes of a path git may have C-quoted (`"a b"`, `"\303\251.rs"`).
+///
+/// A value in surrounding `"` has its escapes decoded (`\"`, `\\`, `\t`,
+/// `\n`, the other C letter escapes, and 1-3 digit octal bytes). Any other
+/// value comes back as its own bytes, untouched.
+pub(crate) fn unquote_c_path_bytes(value: &str) -> Vec<u8> {
     let Some(inner) = value
         .strip_prefix('"')
         .and_then(|rest| rest.strip_suffix('"'))
     else {
-        return value.to_string();
+        return value.as_bytes().to_vec();
     };
     let mut bytes = Vec::with_capacity(inner.len());
     let mut iter = inner.bytes().peekable();
@@ -1486,7 +1501,7 @@ fn unquote_c_path(value: &str) -> String {
         };
         bytes.push(decoded);
     }
-    String::from_utf8_lossy(&bytes).into_owned()
+    bytes
 }
 
 /// Blame line `line` (1-based) of `path` in `rev`.
@@ -2939,6 +2954,11 @@ filename new.txt
         assert_eq!(unquote_c_path(r#""a \"q\" b\\c\td""#), "a \"q\" b\\c\td");
         assert_eq!(unquote_c_path("plain name.txt"), "plain name.txt");
         assert_eq!(unquote_c_path("naïve.txt"), "naïve.txt");
+        assert_eq!(unquote_c_path_bytes(r#""my notes.txt""#), b"my notes.txt");
+        assert_eq!(unquote_c_path_bytes(r#""\303\251.rs""#), "é.rs".as_bytes());
+        // A lone invalid byte stays raw (no lossy replacement).
+        assert_eq!(unquote_c_path_bytes(r#""a\377""#), b"a\xff");
+        assert_eq!(unquote_c_path_bytes("plain \"x.rs"), b"plain \"x.rs");
         let porcelain = "63b08ad4823cc8096b108736af6268306d1c5328 1 1 1\n\
             previous 3ef72304f100a91bb7f85a6f16253820cd51d07d \"old\\303\\251.txt\"\n\
             filename \"na\\303\\257ve.txt\"\n\tx\n";
