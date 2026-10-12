@@ -533,6 +533,67 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         "Theme: GitHub Dark Dimmed",
         ["github-dark-dimmed", "github", "dark", "dimmed"]
     ),
+    theme_row!(
+        TokyoNightDay,
+        "Theme: Tokyo Night Day",
+        ["tokyo-night-day", "tokyo", "night", "day"]
+    ),
+    theme_row!(
+        MonokaiLight,
+        "Theme: Monokai Light",
+        ["monokai-light", "monokai", "light"]
+    ),
+    theme_row!(
+        DraculaLight,
+        "Theme: Dracula Light",
+        ["dracula-light", "dracula", "light"]
+    ),
+    theme_row!(
+        GruvboxLight,
+        "Theme: Gruvbox Light",
+        ["gruvbox-light", "gruvbox", "light"]
+    ),
+    theme_row!(
+        CatppuccinLatte,
+        "Theme: Catppuccin Latte",
+        ["catppuccin-latte", "catppuccin", "latte"]
+    ),
+    theme_row!(
+        SlateLight,
+        "Theme: Slate Light",
+        ["slate-light", "slate", "light"]
+    ),
+    theme_row!(
+        SolarizedLight,
+        "Theme: Solarized Light",
+        ["solarized-light", "solarized", "light"]
+    ),
+    theme_row!(
+        NordLight,
+        "Theme: Nord Light",
+        ["nord-light", "nord", "light"]
+    ),
+    theme_row!(
+        RosePineDawn,
+        "Theme: Rosé Pine Dawn",
+        ["rose-pine-dawn", "rosé", "pine", "dawn"]
+    ),
+    theme_row!(
+        KanagawaLotus,
+        "Theme: Kanagawa Lotus",
+        ["kanagawa-lotus", "kanagawa", "lotus"]
+    ),
+    theme_row!(
+        EverforestLight,
+        "Theme: Everforest Light",
+        ["everforest-light", "everforest", "light"]
+    ),
+    theme_row!(OneLight, "Theme: One Light", ["one-light", "one", "light"]),
+    theme_row!(
+        GithubLight,
+        "Theme: GitHub Light",
+        ["github-light", "github", "light"]
+    ),
     PaletteCommand {
         title: "Flat / tree",
         keys: "t",
@@ -1588,6 +1649,33 @@ mod tests {
             assert!(titles(query).contains(&title), "{query} -> {title}");
         }
         assert_eq!(titles("close app"), vec!["Quit"]);
+    }
+
+    /// A dark theme's slug or name lands on the dark row, and the light
+    /// twin's slug lands on the twin, though both rows match the shorter
+    /// query.
+    #[test]
+    fn twin_theme_queries_land_on_the_named_polarity() {
+        for (query, want) in [
+            ("nord", "Theme: Nord"),
+            ("nord-light", "Theme: Nord Light"),
+            ("slate", "Theme: Slate"),
+            ("slate-light", "Theme: Slate Light"),
+            ("tokyo-night", "Theme: Tokyo Night"),
+            ("tokyo-night-day", "Theme: Tokyo Night Day"),
+            ("rose-pine-dawn", "Theme: Rosé Pine Dawn"),
+            ("github-light", "Theme: GitHub Light"),
+        ] {
+            let mut palette = CommandPaletteState::new();
+            palette.set_filter(query);
+            let visible = palette.visible();
+            let landing = palette.landing_rows(false);
+            assert_eq!(
+                landing.first().map(|&index| visible[index].title),
+                Some(want),
+                "{query}"
+            );
+        }
     }
 
     /// An alias-only hit never takes the cursor from a row the query names.

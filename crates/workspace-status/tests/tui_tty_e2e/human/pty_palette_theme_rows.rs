@@ -1,14 +1,15 @@
 use std::fs;
 use std::path::Path;
 
-use crate::harness::{user_config_file, PtySession, BASELINE_USER_CONFIG};
+use crate::harness::{user_config_file, PtySession, BASELINE_USER_CONFIG, COLS, ROWS};
 use crate::seed::daily_workspace;
 use crate::support::{
     apply_palette_theme, open_command_palette, type_palette_filter, GIT_WAIT, WAIT,
 };
 
 /// Painted chrome for one built-in theme. Surfaces / pills / headings are
-/// unique across the built-ins so a no-op or a wrong row cannot pass.
+/// unique across the built-ins (Monokai and Monokai Light share a mode
+/// pill), so a no-op or a wrong row cannot pass.
 struct ThemeChrome {
     id: &'static str,
     label: &'static str,
@@ -19,8 +20,9 @@ struct ThemeChrome {
 }
 
 /// Every built-in theme in `THEME_IDS` order (the palette `Theme: …` row
-/// order). The apply test walks it from Monokai and wraps to Tokyo Night.
-const THEMES: [ThemeChrome; 13] = [
+/// order): the 13 dark themes, then their light twins. The apply test
+/// walks it from Monokai through every light twin and wraps to Tokyo Night.
+const THEMES: [ThemeChrome; 26] = [
     ThemeChrome {
         id: "tokyo-night",
         label: "Tokyo Night",
@@ -125,6 +127,110 @@ const THEMES: [ThemeChrome; 13] = [
         heading: (0x96, 0xd0, 0xff),
         muted: (0x9e, 0xa8, 0xb3),
     },
+    ThemeChrome {
+        id: "tokyo-night-day",
+        label: "Tokyo Night Day",
+        surface: (0xe1, 0xe2, 0xe7),
+        pill: (0x13, 0x59, 0xb8),
+        heading: (0x00, 0x63, 0x85),
+        muted: (0x47, 0x57, 0x8f),
+    },
+    ThemeChrome {
+        id: "monokai-light",
+        label: "Monokai Light",
+        surface: (0xfa, 0xfa, 0xf5),
+        pill: (0x49, 0x48, 0x3e),
+        heading: (0x16, 0x70, 0x87),
+        muted: (0x65, 0x62, 0x51),
+    },
+    ThemeChrome {
+        id: "dracula-light",
+        label: "Dracula Light",
+        surface: (0xff, 0xfb, 0xeb),
+        pill: (0x64, 0x4a, 0xc9),
+        heading: (0x03, 0x6a, 0x96),
+        muted: (0x6a, 0x64, 0x49),
+    },
+    ThemeChrome {
+        id: "gruvbox-light",
+        label: "Gruvbox Light",
+        surface: (0xfb, 0xf1, 0xc7),
+        pill: (0xad, 0x39, 0x03),
+        heading: (0x07, 0x66, 0x78),
+        muted: (0x67, 0x5c, 0x53),
+    },
+    ThemeChrome {
+        id: "catppuccin-latte",
+        label: "Catppuccin Latte",
+        surface: (0xef, 0xf1, 0xf5),
+        pill: (0x0a, 0x55, 0xea),
+        heading: (0x03, 0x6a, 0x93),
+        muted: (0x5c, 0x5f, 0x72),
+    },
+    ThemeChrome {
+        id: "slate-light",
+        label: "Slate Light",
+        surface: (0xf5, 0xf7, 0xfa),
+        pill: (0x2f, 0x63, 0xa8),
+        heading: (0x1c, 0x70, 0x83),
+        muted: (0x59, 0x63, 0x72),
+    },
+    ThemeChrome {
+        id: "solarized-light",
+        label: "Solarized Light",
+        surface: (0xfd, 0xf6, 0xe3),
+        pill: (0x1e, 0x6d, 0xa5),
+        heading: (0x1e, 0x74, 0x6d),
+        muted: (0x55, 0x68, 0x6e),
+    },
+    ThemeChrome {
+        id: "nord-light",
+        label: "Nord Light",
+        surface: (0xec, 0xef, 0xf4),
+        pill: (0x46, 0x64, 0x88),
+        heading: (0x39, 0x68, 0x75),
+        muted: (0x4c, 0x56, 0x6a),
+    },
+    ThemeChrome {
+        id: "rose-pine-dawn",
+        label: "Rosé Pine Dawn",
+        surface: (0xfa, 0xf4, 0xed),
+        pill: (0x28, 0x69, 0x83),
+        heading: (0xb0, 0x3c, 0x37),
+        muted: (0x62, 0x5e, 0x79),
+    },
+    ThemeChrome {
+        id: "kanagawa-lotus",
+        label: "Kanagawa Lotus",
+        surface: (0xf2, 0xec, 0xbc),
+        pill: (0x46, 0x60, 0x8d),
+        heading: (0x38, 0x65, 0x75),
+        muted: (0x5d, 0x5c, 0x55),
+    },
+    ThemeChrome {
+        id: "everforest-light",
+        label: "Everforest Light",
+        surface: (0xff, 0xfb, 0xef),
+        pill: (0x2c, 0x70, 0x96),
+        heading: (0x26, 0x77, 0x58),
+        muted: (0x5f, 0x6c, 0x5e),
+    },
+    ThemeChrome {
+        id: "one-light",
+        label: "One Light",
+        surface: (0xfa, 0xfa, 0xfa),
+        pill: (0x12, 0x58, 0xef),
+        heading: (0x01, 0x6d, 0x9c),
+        muted: (0x63, 0x66, 0x70),
+    },
+    ThemeChrome {
+        id: "github-light",
+        label: "GitHub Light",
+        surface: (0xff, 0xff, 0xff),
+        pill: (0x09, 0x69, 0xda),
+        heading: (0x05, 0x50, 0xae),
+        muted: (0x59, 0x63, 0x6e),
+    },
 ];
 
 impl ThemeChrome {
@@ -132,6 +238,54 @@ impl ThemeChrome {
     fn toast(&self) -> String {
         format!("theme: {}", self.label)
     }
+
+    /// The screen names this theme's status, not a longer label that
+    /// starts with it (`theme: Nord` is not `theme: Nord Light`).
+    fn toast_on(&self, screen: &str) -> bool {
+        let toast = self.toast();
+        screen.lines().any(|line| {
+            line.match_indices(&toast).any(|(at, _)| {
+                let tail = &line[at..];
+                !THEMES.iter().any(|other| {
+                    other.label.len() > self.label.len() && tail.starts_with(&other.toast())
+                })
+            })
+        })
+    }
+
+    /// The four chrome colours, by role, with the cell layer each role
+    /// paints: surface and mode pill are backgrounds, heading and muted are
+    /// text.
+    fn roles(&self) -> [(&'static str, Layer, (u8, u8, u8)); 4] {
+        [
+            ("surface", Layer::Bg, self.surface),
+            ("mode pill", Layer::Bg, self.pill),
+            ("heading", Layer::Fg, self.heading),
+            ("muted", Layer::Fg, self.muted),
+        ]
+    }
+}
+
+/// Cell layer a chrome colour paints.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Layer {
+    Fg,
+    Bg,
+}
+
+/// Some cell paints `rgb` on `layer`.
+///
+/// Layer-aware, so a light twin's surface is not mistaken for a dark
+/// theme's text of the same colour (Nord text is Nord Light's surface).
+fn paints(tui: &PtySession, layer: Layer, rgb: (u8, u8, u8)) -> bool {
+    (0..ROWS).any(|row| {
+        (0..COLS).any(|col| {
+            tui.cell_paint(row, col).is_some_and(|cell| match layer {
+                Layer::Fg => cell.fg == Some(rgb),
+                Layer::Bg => cell.bg == Some(rgb),
+            })
+        })
+    })
 }
 
 /// Tokyo Night graph lane 0 (`DEFAULT_LANE_COLORS[0]` / dir). Absent from
@@ -194,11 +348,11 @@ fn wait_theme_chrome(tui: &PtySession, theme: &ThemeChrome, expect_toast: bool) 
     tui.wait_pred(
         |screen| {
             theme_is_tree_not_flat(screen)
-                && (!expect_toast || screen.contains(&toast))
+                && (!expect_toast || theme.toast_on(screen))
                 && THEMES
                     .iter()
                     .filter(|other| other.id != theme.id)
-                    .all(|other| !screen.contains(&other.toast()))
+                    .all(|other| !other.toast_on(screen))
         },
         &format!(
             "{} chrome: tree pill, not Flat paths{}",
@@ -215,15 +369,16 @@ fn wait_theme_chrome(tui: &PtySession, theme: &ThemeChrome, expect_toast: bool) 
     tui.wait_has_rgb(theme.pill.0, theme.pill.1, theme.pill.2, WAIT);
     tui.wait_has_rgb(theme.heading.0, theme.heading.1, theme.heading.2, WAIT);
     tui.wait_has_rgb(theme.muted.0, theme.muted.1, theme.muted.2, WAIT);
+    let own = theme.roles();
     for other in THEMES.iter().filter(|other| other.id != theme.id) {
-        for (role, (r, g, b)) in [
-            ("surface", other.surface),
-            ("mode pill", other.pill),
-            ("heading", other.heading),
-            ("muted", other.muted),
-        ] {
+        for (role, layer, rgb) in other.roles() {
+            // A colour this theme paints on the same layer itself (a shared
+            // mode pill) is no sign of the other theme.
+            if own.iter().any(|&(_, l, c)| l == layer && c == rgb) {
+                continue;
+            }
             assert!(
-                !tui.has_rgb(r, g, b),
+                !paints(tui, layer, rgb),
                 "{} {role} must not remain after {}:\n{}",
                 other.id,
                 theme.id,
@@ -292,7 +447,9 @@ fn assert_store_names(theme_store: &Path, theme: &ThemeChrome) {
 /// applies it and saves it as the last-used theme. Launch seed
 /// `WS_STATUS_THEME=tokyo-night`, with the merger graph focused so lane
 /// colours are on screen. Each step types the theme slug after `:` and
-/// presses Enter, walking Monokai → … → GitHub Dark Dimmed → Tokyo Night.
+/// presses Enter, walking Monokai → … → GitHub Dark Dimmed → Tokyo Night
+/// Day → … → GitHub Light → Tokyo Night: every dark theme and every light
+/// twin.
 /// Toast, surface, mode pill, heading, muted (line numbers / graph meta),
 /// and graph lane 0 must all match that theme, and the cell colours must
 /// change. A no-op, a wrong row, or a toast-only step cannot pass. Each
@@ -378,7 +535,7 @@ fn pty_palette_theme_row_previews_and_esc_restores() {
     open_command_palette(&mut tui);
     type_palette_filter(&mut tui, "dracula");
     tui.wait_pred(
-        |screen| screen.contains("Theme: Dracula") && !screen.contains(&dracula.toast()),
+        |screen| screen.contains("Theme: Dracula") && !dracula.toast_on(screen),
         "palette filters to Theme: Dracula; no apply toast yet",
         WAIT,
     );

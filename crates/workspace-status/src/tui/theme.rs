@@ -98,34 +98,16 @@ pub const LIGHT_THEME_IDS: [ThemeId; 13] = [
 
 /// Every built-in theme in palette row order (`Theme: …` rows):
 /// [`DARK_THEME_IDS`], then [`LIGHT_THEME_IDS`].
-pub const THEME_IDS: [ThemeId; 26] = [
-    ThemeId::TokyoNight,
-    ThemeId::Monokai,
-    ThemeId::Dracula,
-    ThemeId::GruvboxDark,
-    ThemeId::CatppuccinMocha,
-    ThemeId::Slate,
-    ThemeId::SolarizedDark,
-    ThemeId::Nord,
-    ThemeId::RosePine,
-    ThemeId::Kanagawa,
-    ThemeId::Everforest,
-    ThemeId::OneDark,
-    ThemeId::GithubDarkDimmed,
-    ThemeId::TokyoNightDay,
-    ThemeId::MonokaiLight,
-    ThemeId::DraculaLight,
-    ThemeId::GruvboxLight,
-    ThemeId::CatppuccinLatte,
-    ThemeId::SlateLight,
-    ThemeId::SolarizedLight,
-    ThemeId::NordLight,
-    ThemeId::RosePineDawn,
-    ThemeId::KanagawaLotus,
-    ThemeId::EverforestLight,
-    ThemeId::OneLight,
-    ThemeId::GithubLight,
-];
+pub const THEME_IDS: [ThemeId; 26] = {
+    let mut all = [ThemeId::TokyoNight; 26];
+    let mut i = 0;
+    while i < DARK_THEME_IDS.len() {
+        all[i] = DARK_THEME_IDS[i];
+        all[DARK_THEME_IDS.len() + i] = LIGHT_THEME_IDS[i];
+        i += 1;
+    }
+    all
+};
 
 /// Default when no `WS_STATUS_THEME`, last-used state, or config `theme`
 /// key sets a theme.
