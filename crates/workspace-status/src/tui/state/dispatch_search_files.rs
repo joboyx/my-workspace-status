@@ -1643,7 +1643,7 @@ mod tests {
         app.dispatch(Action::SearchFilesSubmit);
         assert_eq!(app.status, NO_SEARCH_MATCHES);
         app.dispatch(Action::SearchFilesToggleOption(SearchFilesOption::Regex));
-        assert!(app.status.is_empty(), "Alt-r drops the old miss");
+        assert!(app.status.is_empty(), "a regex toggle drops the old miss");
         assert!(matches!(
             dialog(&app).status()[0],
             SearchStatus::InvalidRegex(_)

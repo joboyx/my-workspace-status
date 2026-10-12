@@ -1,10 +1,10 @@
 use crate::harness::{left_tree, PtySession};
 use crate::seed::daily_workspace;
 use crate::support::{
-    crumb_row, documented_launch_first_paint, no_updates_group_folded, no_wrong_overlays,
-    pane_unstaged_readme, panes_tree_focused_diff_unfocused, panes_tree_unfocused_diff_focused,
-    status_row, tree_cursor_on, tree_dir_collapsed, tree_dir_expanded, tree_has,
-    tree_line_containing, SETTLE_MS, WAIT,
+    crumb_row, documented_launch_first_paint, line_on_branch, no_updates_group_folded,
+    no_wrong_overlays, pane_unstaged_readme, panes_tree_focused_diff_unfocused,
+    panes_tree_unfocused_diff_focused, status_row, tree_cursor_on, tree_dir_collapsed,
+    tree_dir_expanded, tree_has, tree_line_containing, SETTLE_MS, WAIT,
 };
 
 fn tree_readme_rows(screen: &str) -> usize {
@@ -26,7 +26,7 @@ fn notes_ignored_repo_row(screen: &str) -> bool {
     line.contains("notes")
         && line.contains('@')
         && line.contains('~')
-        && line.contains("& main")
+        && line_on_branch(&line, "main")
         && !line.contains("[ignored]")
         && !line.contains("No updates")
         && tree_dir_expanded(screen, "notes")

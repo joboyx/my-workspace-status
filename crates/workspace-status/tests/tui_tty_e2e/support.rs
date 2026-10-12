@@ -97,6 +97,49 @@ pub fn tree_cleared_ahead_behind(screen: &str) -> bool {
     !left.contains("v1") && !left.contains("^1")
 }
 
+/// Tree row `line` paints `branch` as its branch.
+///
+/// A checkout row paints the ASCII branch glyph before the name
+/// (`& main`). A flat repo row paints the branch text after the repo name
+/// (`app  main`) and the branch glyph in its right-aligned icons.
+pub fn line_on_branch(line: &str, branch: &str) -> bool {
+    if line.contains(&format!("& {branch} ")) {
+        return true;
+    }
+    let text = format!("  {branch} ");
+    line.match_indices(&text)
+        .any(|(at, _)| line[at + text.len()..].contains('&'))
+}
+
+/// Words after `name` on a tree row: the right-aligned icon run (pane
+/// border cut off).
+pub fn row_icons_after(line: &str, name: &str) -> Vec<String> {
+    let Some(at) = line.find(name) else {
+        return Vec::new();
+    };
+    line[at + name.len()..]
+        .split_whitespace()
+        .filter(|word| *word != "│")
+        .map(str::to_string)
+        .collect()
+}
+
+/// ASCII merge mark (`M` merged, `o` open) of the tree row that paints
+/// `name`: the first icon of its right-aligned run.
+pub fn merge_mark_after(line: &str, name: &str) -> Option<String> {
+    row_icons_after(line, name)
+        .into_iter()
+        .next()
+        .filter(|word| word == "M" || word == "o")
+}
+
+/// Some left-tree row paints `branch` as its branch ([`line_on_branch`]).
+pub fn tree_has_branch(screen: &str, branch: &str) -> bool {
+    left_tree(screen)
+        .lines()
+        .any(|line| line_on_branch(line, branch))
+}
+
 pub fn tree_has(screen: &str, needle: &str) -> bool {
     left_tree(screen).contains(needle)
 }
@@ -155,7 +198,7 @@ pub fn documented_launch_first_paint(screen: &str) -> bool {
         && left.contains("# workspace")
         && left.contains("1 changed · all current")
         && tree_has(screen, "app")
-        && tree_has(screen, "& main")
+        && tree_has_branch(screen, "main")
         && tree_has(screen, "README.md")
         && tree_has(screen, "merger")
         && tree_has(screen, "feature/graph")
@@ -706,7 +749,7 @@ pub fn after_syncbox_name(screen: &str) -> Option<String> {
 /// Trailing clean `.` on the syncbox row after it lands in No updates.
 pub fn syncbox_row_current(screen: &str) -> bool {
     after_syncbox_name(screen).is_some_and(|after| {
-        after.contains("& main")
+        line_on_branch(&after, "main")
             && after.contains('.')
             && !after.contains("^1")
             && !after.contains("v1")
@@ -717,7 +760,8 @@ pub fn syncbox_row_current(screen: &str) -> bool {
 ///
 /// A `v1` on the graph header or a full-screen substring must not pass.
 pub fn syncbox_row_behind(screen: &str) -> bool {
-    after_syncbox_name(screen).is_some_and(|after| after.contains("v1") && after.contains("& main"))
+    after_syncbox_name(screen)
+        .is_some_and(|after| after.contains("v1") && line_on_branch(&after, "main"))
 }
 
 /// Cells after `name` on the left-tree row (branch + sync mark).
@@ -730,13 +774,13 @@ pub fn after_repo_name(screen: &str, name: &str) -> Option<String> {
 /// Trailing ASCII behind-by-1 (`v1`) on the named left-tree repo row.
 pub fn repo_row_behind(screen: &str, name: &str) -> bool {
     after_repo_name(screen, name)
-        .is_some_and(|after| after.contains("v1") && after.contains("& main"))
+        .is_some_and(|after| after.contains("v1") && line_on_branch(&after, "main"))
 }
 
 /// Trailing in-sync mark on the named left-tree repo row (No updates `.`).
 pub fn repo_row_in_sync(screen: &str, name: &str) -> bool {
     after_repo_name(screen, name).is_some_and(|after| {
-        after.contains("& main")
+        line_on_branch(&after, "main")
             && after.contains('.')
             && !after.contains("^1")
             && !after.contains("v1")
@@ -1238,6 +1282,33 @@ pub fn type_palette_filter(tui: &mut PtySession, query: &str) {
             tui.wait_ms(VISUAL_KEY_GAP_MS);
         }
     }
+}
+
+/// `:` opens the command palette; wait for its empty `>▏` query so the
+/// next typed keys land in the filter.
+pub fn open_command_palette(tui: &mut PtySession) {
+    tui.key(':');
+    tui.wait_contains(">▏", WAIT);
+}
+
+/// Apply a built-in theme the documented way: `:` opens the command
+/// palette, `query` (a slug such as `nord`) filters it to the
+/// `Theme: {label}` row, and Enter applies that row.
+///
+/// Returns once the palette is closed and the status shows
+/// `theme: {label}`. Enter on any other row cannot pass.
+pub fn apply_palette_theme(tui: &mut PtySession, query: &str, label: &str) {
+    let row = format!("Theme: {label}");
+    let toast = format!("theme: {label}");
+    open_command_palette(tui);
+    type_palette_filter(tui, query);
+    tui.wait_contains(&row, WAIT);
+    tui.enter();
+    tui.wait_pred(
+        |screen| screen.contains(&toast) && !screen.contains(&row),
+        &format!("Enter on `{row}` closes the palette and shows `{toast}`"),
+        WAIT,
+    );
 }
 
 /// The compare tab shows the regions.txt diff with the diff pane focused.

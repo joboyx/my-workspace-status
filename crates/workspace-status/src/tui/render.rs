@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use super::action::SearchFilesOption;
 use super::activity::{row_activity_key, sparkline, SPARK_MIN_TREE_COLS};
 use super::anim::{glide_step, spinner_glyph, GlidePane};
 use super::chrome::{
@@ -72,11 +73,12 @@ use super::quick_open::{
 };
 use super::search::{
     collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids,
-    explorer_row_match_indices, slice_cols, wrap_col_starts, wrap_col_starts_capped, wrap_cols,
-    SearchPane,
+    explorer_row_match_indices, list_prefix_cols, slice_cols, wrap_col_starts,
+    wrap_col_starts_capped, wrap_cols, SearchPane,
 };
 use super::search_files::{
-    search_row_shows_status, SearchFilesState, SearchRow, SearchZone, SEARCH_PREVIEW_MIN_COLS,
+    option_is_on, option_tooltip, search_row_shows_status, SearchFilesState, SearchRow, SearchZone,
+    SEARCH_PREVIEW_MIN_COLS,
 };
 use super::split::{
     diff_paint_width, diff_split_rule_x, pane_widths, side_by_side_column_widths, DiffMode,
@@ -202,9 +204,12 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
     state.prune_expired_flashes();
     // One-shot acks leave the status slot for a toast before anything paints.
     state.route_ack_to_toast(Instant::now());
-    // Every frame starts with no icon or link; only a pane that paints one
-    // records it again, so a hidden badge never opens a PR or a popover.
+    // Every frame starts with no icon, link, or search option chip; only a
+    // pane or dialog that paints one records it again, so a hidden badge
+    // never opens a PR or a popover and a closed dialog's chip never
+    // toggles an option.
     state.layout.icon_hits.clear();
+    state.layout.search_option_hits.clear();
     state.layout.links.clear();
     state.layout.undercurls.clear();
     // A painter that shows a time-based frame sets these again.
@@ -1375,7 +1380,7 @@ fn explorer_row_segments(
     }
     if row.is_dir {
         let dirty = status.dir_dirty(&row.rel);
-        let dot = if ascii { "* " } else { "● " };
+        let dot = if ascii { "*" } else { "●" };
         return NodeSegments {
             segments: vec![seg(&row.name, SegRole::Dir, false)],
             trailing: if dirty {
@@ -1686,8 +1691,13 @@ fn paint_tree_row(
             .saturating_sub(name_width)
             .saturating_sub(marks_width);
         segs.trailing.truncate(marks);
-        segs.trailing
-            .extend(workspace_trailing_fit(&row.chrome, room));
+        let summary = workspace_trailing_fit(&row.chrome, room);
+        if summary.is_empty() && segs.trailing.last().is_some_and(|seg| seg.text == " ") {
+            // No summary fits: drop the space after the marks so the last
+            // mark stays in the last column.
+            segs.trailing.pop();
+        }
+        segs.trailing.extend(summary);
     }
     let icons = segmented_icon_spans(row.depth, &segs, width, col_offset);
     let label = segmented_label_span(row.depth, &segs, width, col_offset);
@@ -1714,15 +1724,16 @@ fn paint_tree_row(
 ///
 /// A span covers the glyph columns only: spaces at either end of the
 /// segment text stay out. Label icons pan and clip like the label; trailing
-/// icons clip at the row width. An icon with no cell on screen has no
-/// span.
+/// icons stay flush right and clip from the left with the trailing run. An
+/// icon with no cell on screen has no span.
 fn segmented_icon_spans(
     depth: usize,
     segs: &NodeSegments,
     width: usize,
     col_offset: usize,
 ) -> Vec<IconSpan> {
-    let (prefix_width, label_budget) = segmented_label_area(depth, segs, width);
+    let layout = segmented_row_layout(depth, segs, width);
+    let (prefix_width, label_budget) = (layout.prefix_width, layout.label_budget);
     let mut spans = Vec::new();
     for (index, seg) in segs.segments.iter().enumerate() {
         let Some(kind) = seg.icon else {
@@ -1745,22 +1756,27 @@ fn segmented_icon_spans(
             spans.push((kind, x, w));
         }
     }
-    let label = slice_segs(&segs.segments, col_offset, label_budget.max(1));
-    let label_width: usize = label.iter().map(|s| visible_width(&s.text)).sum();
-    let trailing_width: usize = segs.trailing.iter().map(|s| visible_width(&s.text)).sum();
-    let pad = usize::from(trailing_width > 0);
-    let mut x = prefix_width + label_width + pad + label_budget.saturating_sub(label_width);
+    // Trailing columns are counted on the full run; the first
+    // `trailing_skip` of them are cut off at the left.
+    let mut col = 0;
     for seg in &segs.trailing {
         let seg_width = visible_width(&seg.text);
         if let Some(kind) = seg.icon {
             let (lead, core, _) = split_seg_padding(seg);
-            let start = x + visible_width(&lead.text);
-            let shown = clipped_width(&core.text, width.saturating_sub(start));
+            let core_start = col + visible_width(&lead.text);
+            let core_width = visible_width(&core.text);
+            // The run is cut at its left only, so what shows is a suffix
+            // of the glyph text, less the spaces a cut leaves at its start
+            // (`2 wt` cut after `2` is two columns).
+            let cut = layout.trailing_skip.saturating_sub(core_start);
+            let shown = slice_cols(&core.text, cut, core_width);
+            let shown = visible_width(shown.trim_start_matches(' '));
             if shown > 0 {
-                spans.push((kind, start, shown));
+                let start = core_start + core_width - shown - layout.trailing_skip;
+                spans.push((kind, layout.trailing_x + start, shown));
             }
         }
-        x += seg_width;
+        col += seg_width;
     }
     spans
 }
@@ -1774,27 +1790,13 @@ fn segmented_label_span(
     width: usize,
     col_offset: usize,
 ) -> Option<LabelSpan> {
-    let (prefix_width, label_budget) = segmented_label_area(depth, segs, width);
-    let label_width: usize = slice_segs(&segs.segments, col_offset, label_budget.max(1))
+    let layout = segmented_row_layout(depth, segs, width);
+    let label_width: usize = slice_segs(&segs.segments, col_offset, layout.label_budget)
         .iter()
         .map(|s| visible_width(&s.text))
         .sum();
-    let end = (prefix_width + label_width).min(width);
-    (prefix_width < end).then(|| (prefix_width, end - prefix_width))
-}
-
-/// Columns of `text` that fit in `room`, less the spaces a cut leaves at
-/// the end (`2 wt` cut after `2 ` is one column).
-fn clipped_width(text: &str, room: usize) -> usize {
-    let (mut used, mut end) = (0, 0);
-    for (at, ch) in text.char_indices() {
-        used += visible_width(ch.encode_utf8(&mut [0; 4]));
-        if used > room {
-            break;
-        }
-        end = at + ch.len_utf8();
-    }
-    visible_width(text[..end].trim_end())
+    let end = (layout.prefix_width + label_width).min(width);
+    (layout.prefix_width < end).then(|| (layout.prefix_width, end - layout.prefix_width))
 }
 
 /// `seg` as leading spaces, the text between, and trailing spaces, each
@@ -1814,17 +1816,51 @@ fn split_seg_padding(seg: &TextSeg) -> (TextSeg, TextSeg, TextSeg) {
     )
 }
 
-/// Prefix width (edge, indent, chevron) and label budget of a row that
-/// [`paint_segmented_row`] paints `width` columns wide.
-fn segmented_label_area(depth: usize, segs: &NodeSegments, width: usize) -> (usize, usize) {
+/// Columns of a row that [`paint_segmented_row`] paints `width` columns
+/// wide.
+struct SegmentedRowLayout {
+    /// Edge marker, indent, and chevron.
+    prefix_width: usize,
+    /// Columns the label may paint.
+    label_budget: usize,
+    /// Trailing run as painted, flush with the right edge.
+    trailing: Vec<TextSeg>,
+    /// Row column where the painted trailing run starts.
+    trailing_x: usize,
+    /// Columns cut off the left of the trailing run.
+    trailing_skip: usize,
+}
+
+/// Lay out a segmented row `width` columns wide.
+///
+/// The trailing run sits flush right after a one-column pad and the label
+/// gets the columns left after the prefix. When the trailing run alone is
+/// wider than the room after the prefix, the label gets no columns and the
+/// run is cut from the left, so its right edge stays on screen. A wide
+/// glyph cut by that edge drops whole, and a space fills its column.
+fn segmented_row_layout(depth: usize, segs: &NodeSegments, width: usize) -> SegmentedRowLayout {
+    let prefix_width = list_prefix_cols(depth);
+    let room = width.saturating_sub(prefix_width);
     let trailing_width: usize = segs.trailing.iter().map(|s| visible_width(&s.text)).sum();
     let pad = usize::from(trailing_width > 0);
-    let prefix_width = 1 + 2 * depth + 2;
-    let label_budget = width
-        .saturating_sub(prefix_width)
-        .saturating_sub(trailing_width)
-        .saturating_sub(pad);
-    (prefix_width, label_budget)
+    if trailing_width + pad <= room {
+        return SegmentedRowLayout {
+            prefix_width,
+            label_budget: room - trailing_width - pad,
+            trailing: segs.trailing.clone(),
+            trailing_x: prefix_width + room - trailing_width,
+            trailing_skip: 0,
+        };
+    }
+    let trailing = slice_segs(&segs.trailing, trailing_width - room, room);
+    let shown: usize = trailing.iter().map(|s| visible_width(&s.text)).sum();
+    SegmentedRowLayout {
+        prefix_width,
+        label_budget: 0,
+        trailing,
+        trailing_x: prefix_width + room - shown,
+        trailing_skip: trailing_width - shown,
+    }
 }
 
 /// Painted span (column offset from the row start, width) of label
@@ -1842,7 +1878,7 @@ fn painted_seg_span(
     // Slice exactly as paint does, so a wide glyph cut by the offset
     // moves the span the same way it moves the painted cells.
     let painted_width = |end: usize| -> usize {
-        slice_segs(&segs[..end], col_offset, label_budget.max(1))
+        slice_segs(&segs[..end], col_offset, label_budget)
             .iter()
             .map(|s| visible_width(&s.text))
             .sum()
@@ -1871,9 +1907,7 @@ fn paint_segmented_row(
     // A search-match row paints its text in the filter foreground: the
     // filter background can equal a segment colour (branch names).
     let match_fg = (flash.is_none() && !selected && search_match).then_some(search.fg);
-    let trailing_text: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
-    let trailing_width = visible_width(&trailing_text);
-    let pad = usize::from(trailing_width > 0);
+    let layout = segmented_row_layout(depth, segs, width);
 
     let mut spans: Vec<Span> = Vec::new();
     let edge = selection_marker(selected, focused);
@@ -1895,17 +1929,18 @@ fn paint_segmented_row(
         Style::default().fg(palette.muted),
         bg,
     ));
-    let (_, label_budget) = segmented_label_area(depth, segs, width);
-    let label = slice_segs(&segs.segments, col_offset, label_budget.max(1));
+    let label = slice_segs(&segs.segments, col_offset, layout.label_budget);
     let label_width: usize = label.iter().map(|s| visible_width(&s.text)).sum();
     for seg in &label {
         spans.push(styled_span(&seg.text, seg_style(seg, palette), bg));
     }
-    let gap = pad + label_budget.saturating_sub(label_width);
+    let gap = layout
+        .trailing_x
+        .saturating_sub(layout.prefix_width + label_width);
     if gap > 0 {
         spans.push(styled_span(&" ".repeat(gap), Style::default(), bg));
     }
-    for seg in &segs.trailing {
+    for seg in &layout.trailing {
         spans.push(styled_span(&seg.text, seg_style(seg, palette), bg));
     }
     let used: usize = spans
@@ -3728,10 +3763,12 @@ fn help_visual_cell_spans(
 }
 
 fn key_chip(key: &str, bg: Color, fg: Color) -> Span<'static> {
-    Span::styled(
-        format!(" {key} "),
-        Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
-    )
+    Span::styled(format!(" {key} "), key_chip_style(bg, fg))
+}
+
+/// Style of a filled key chip: bold `fg` on `bg`.
+fn key_chip_style(bg: Color, fg: Color) -> Style {
+    Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD)
 }
 
 fn help_spans_width(spans: &[Span<'_>]) -> usize {
@@ -4479,6 +4516,61 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             ];
             (accent, lines)
         }
+        PendingConfirm::Push {
+            branch,
+            remote,
+            publish,
+            ahead_behind,
+            ..
+        } => {
+            let accent = palette.modified;
+            let mut title = vec![
+                Span::styled(
+                    "Push ",
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(branch.clone(), Style::default().fg(palette.file)),
+                Span::styled(" → ", Style::default().fg(palette.muted)),
+                Span::styled(remote.clone(), Style::default().fg(palette.file)),
+            ];
+            if let Some((ahead, _)) = ahead_behind {
+                let noun = if *ahead == 1 { "commit" } else { "commits" };
+                title.push(Span::styled(
+                    format!(" ({ahead} {noun})"),
+                    Style::default().fg(palette.muted),
+                ));
+            }
+            title.push(Span::styled("?", Style::default().fg(accent)));
+            let mut details = Vec::new();
+            if *publish {
+                details.push(format!(
+                    "  creates the remote branch {remote}/{branch} (git push -u)"
+                ));
+            }
+            if let Some((ahead, behind)) = ahead_behind.filter(|(_, behind)| *behind > 0) {
+                details.push(format!(
+                    "  diverged (ahead {ahead}, behind {behind}) · git may reject the push"
+                ));
+            }
+            if details.is_empty() {
+                details.push("  git push, no --force".to_string());
+            }
+            let mut lines = vec![Line::from(title)];
+            lines.extend(
+                details
+                    .into_iter()
+                    .map(|d| Line::from(Span::styled(d, Style::default().fg(palette.muted)))),
+            );
+            lines.push(confirm_action_row(
+                "y",
+                "push",
+                None,
+                accent,
+                palette.muted,
+                panel,
+            ));
+            (accent, lines)
+        }
     };
     if area.width == 0 || area.height == 0 {
         return;
@@ -4771,9 +4863,11 @@ fn draw_tab_strip(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                 state.layout.tab_close_hits.push((close_x, close_w, index));
             }
             // Hover comes from this paint's box, never from a stored index.
-            // A clipped close has no box, so it never paints hovered.
+            // A clipped close has no box, so it never paints hovered. The
+            // open search dialog keeps the pointer for its chips, so
+            // pane_pointer hides it from the strip then.
             let hovered = close_painted
-                && state.pointer.is_some_and(|(col, row)| {
+                && state.pane_pointer().is_some_and(|(col, row)| {
                     row == area.y && col >= close_x && col < close_x.saturating_add(close_w)
                 });
             let close_style = if hovered {
@@ -5656,17 +5750,36 @@ fn draw_search_files(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     };
     let accent = palette.cursor;
     let muted = Style::default().fg(palette.muted);
-    let block = overlay_block(accent, panel)
-        .title(Span::styled(
-            dialog.title(),
-            Style::default()
-                .fg(palette.heading)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .title_top(search_option_chips(dialog.options, palette, panel).right_aligned());
+    let title = Span::styled(
+        dialog.title(),
+        Style::default()
+            .fg(palette.heading)
+            .add_modifier(Modifier::BOLD),
+    );
+    // Record the chip boxes before paint, so the hover this frame paints
+    // comes from the same boxes a click hits.
+    let chip_xs = search_option_chip_xs(area, u16::try_from(title.width()).unwrap_or(u16::MAX));
+    state.layout.search_option_y = area.y;
+    state.layout.search_option_hits = chip_xs
+        .iter()
+        .map(|&(x, option)| (x, SEARCH_OPTION_CHIP_W, option))
+        .collect();
+    let hovered = state.hovered_search_option();
+    let block = overlay_block(accent, panel).title(title);
     frame.render_widget(Clear, area);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let chips = search_option_chips(dialog.options, hovered, palette, panel);
+    let buf = frame.buffer_mut();
+    for (i, &(x, option)) in chip_xs.iter().enumerate() {
+        if i > 0 {
+            // The gap between two chips is blank, not border.
+            buf[(x - 1, area.y)].set_symbol(" ");
+        }
+        if let Some((_, chip)) = chips.iter().find(|(o, _)| *o == option) {
+            buf.set_span(x, area.y, chip, SEARCH_OPTION_CHIP_W);
+        }
+    }
     if inner.width == 0 || inner.height == 0 {
         return;
     }
@@ -5705,7 +5818,12 @@ fn draw_search_files(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         frame.render_widget(Paragraph::new(clamp_line(status, width)), row_at(1));
     }
     if h >= 3 {
-        let footer = Line::from(Span::styled(dialog.footer_hints(), muted));
+        // A hovered chip says what it is and what a click does instead.
+        let footer = match hovered {
+            Some(option) => option_tooltip(option, dialog.options),
+            None => dialog.footer_hints(state.mouse_enabled),
+        };
+        let footer = Line::from(Span::styled(footer, muted));
         frame.render_widget(
             Paragraph::new(fit_list_dialog_footer(footer, width)),
             row_at(h - 1),
@@ -5776,24 +5894,81 @@ fn clamp_line(line: Line<'static>, width: usize) -> Line<'static> {
     Line::from(clamp_spans(line.spans, width))
 }
 
-/// Top-border chips for the match options: `Aa` case, `ab` whole word,
-/// `.*` regex. An option that is on paints as a filled chip, an off one
-/// as muted text.
-fn search_option_chips(options: SearchOptions, palette: Palette, surface: Color) -> Line<'static> {
-    let chip = |label: &str, on: bool| {
-        if on {
-            key_chip(label, palette.cursor, surface)
-        } else {
-            Span::styled(format!(" {label} "), Style::default().fg(palette.muted))
+/// Match option chips on the search dialog's top border, left to right:
+/// `Aa` case, `ab` whole word, `.*` regex.
+const SEARCH_OPTION_LABELS: [(SearchFilesOption, &str); 3] = [
+    (SearchFilesOption::Case, "Aa"),
+    (SearchFilesOption::WholeWord, "ab"),
+    (SearchFilesOption::Regex, ".*"),
+];
+
+/// Cells one option chip takes: its two-cell label and a space each side.
+const SEARCH_OPTION_CHIP_W: u16 = 4;
+
+/// Left column of each option chip on the top border of the search dialog
+/// box `area`, whose left title is `title_width` cells wide.
+///
+/// The chips sit right-aligned inside the corner, one blank cell apart,
+/// as a right-aligned border title would. The title wins the row: a chip
+/// that would not leave one blank cell after the title is left out, from
+/// the left, so a narrow box keeps the rightmost chips whole.
+fn search_option_chip_xs(area: Rect, title_width: u16) -> Vec<(u16, SearchFilesOption)> {
+    // First free cell: past the left corner, the title, and one blank.
+    let min_x = area.x.saturating_add(title_width).saturating_add(2);
+    // Past the last chip cell: the right corner.
+    let mut end = area.right().saturating_sub(1);
+    let mut xs = Vec::new();
+    for &(option, _) in SEARCH_OPTION_LABELS.iter().rev() {
+        let Some(x) = end.checked_sub(SEARCH_OPTION_CHIP_W) else {
+            break;
+        };
+        if x < min_x {
+            break;
         }
+        xs.push((x, option));
+        end = x.saturating_sub(1);
+    }
+    xs.reverse();
+    xs
+}
+
+/// Style of one option chip. Fill tells on from off; underline marks the
+/// chip under the pointer, so both read without colour alone.
+///
+/// On: a filled accent chip ([`key_chip_style`]). Off: muted text, no fill.
+/// Off and hovered: accent text on the highlighted-row background, a
+/// fill other than on. On and hovered: the filled chip.
+fn search_option_chip_style(on: bool, hovered: bool, palette: Palette, surface: Color) -> Style {
+    let style = match (on, hovered) {
+        (true, _) => key_chip_style(palette.cursor, surface),
+        (false, false) => Style::default().fg(palette.muted),
+        (false, true) => Style::default().fg(palette.cursor).bg(palette.cursor_bg),
     };
-    Line::from(vec![
-        chip("Aa", options.case_sensitive),
-        Span::raw(" "),
-        chip("ab", options.whole_word),
-        Span::raw(" "),
-        chip(".*", options.regex),
-    ])
+    if hovered {
+        style.add_modifier(Modifier::UNDERLINED)
+    } else {
+        style
+    }
+}
+
+/// Top-border chips for the match options, in [`SEARCH_OPTION_LABELS`]
+/// order, each ` label ` in [`search_option_chip_style`]: filled when the
+/// option is on, underlined when it is `hovered`.
+fn search_option_chips(
+    options: SearchOptions,
+    hovered: Option<SearchFilesOption>,
+    palette: Palette,
+    surface: Color,
+) -> [(SearchFilesOption, Span<'static>); 3] {
+    SEARCH_OPTION_LABELS.map(|(option, label)| {
+        let style = search_option_chip_style(
+            option_is_on(options, option),
+            hovered == Some(option),
+            palette,
+            surface,
+        );
+        (option, Span::styled(format!(" {label} "), style))
+    })
 }
 
 /// Status row of the search dialog: its [`SearchStatus`] parts joined by
@@ -10011,7 +10186,7 @@ mod tests {
         assert!(text.contains("push ahead"), "{text}");
         assert!(text.contains("remove linked worktree"), "{text}");
         assert!(text.contains("search focused pane"), "{text}");
-        assert!(text.contains("cycle theme"), "{text}");
+        assert!(!text.contains("cycle theme"), "{text}");
         assert!(text.contains("Staged split"), "{text}");
         assert!(text.contains("/ search help"), "{text}");
         assert!(text.contains("MOVE"), "{text}");
@@ -10710,6 +10885,62 @@ mod tests {
     }
 
     #[test]
+    fn push_confirm_names_branch_remote_count_and_risk() {
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut paint = |publish: bool, ahead_behind: Option<(u32, u32)>| {
+            state.confirm = Some(PendingConfirm::Push {
+                repo: "app".into(),
+                branch: "feature/x".into(),
+                remote: "origin".into(),
+                publish,
+                ahead_behind,
+            });
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            buffer_text(&terminal)
+        };
+
+        let text = paint(false, Some((3, 0)));
+        assert!(
+            text.contains("Push feature/x → origin (3 commits)?"),
+            "{text}"
+        );
+        assert!(text.contains("git push, no --force"), "{text}");
+        assert!(!text.contains("creates the remote branch"), "{text}");
+        assert!(!text.contains("diverged"), "{text}");
+        assert!(text.contains(" y  push"), "{text}");
+        assert!(text.contains(" n   Esc  cancel"), "{text}");
+
+        let text = paint(false, Some((1, 0)));
+        assert!(
+            text.contains("Push feature/x → origin (1 commit)?"),
+            "{text}"
+        );
+
+        // First publish: no upstream, so no count.
+        let text = paint(true, None);
+        assert!(text.contains("Push feature/x → origin?"), "{text}");
+        assert!(
+            text.contains("creates the remote branch origin/feature/x (git push -u)"),
+            "{text}"
+        );
+        assert!(!text.contains("no --force"), "{text}");
+
+        let text = paint(false, Some((2, 5)));
+        assert!(
+            text.contains("Push feature/x → origin (2 commits)?"),
+            "{text}"
+        );
+        assert!(
+            text.contains("diverged (ahead 2, behind 5) · git may reject the push"),
+            "{text}"
+        );
+        assert!(!text.contains("no --force"), "{text}");
+    }
+
+    #[test]
     fn compare_revert_confirms_name_the_merge_base_and_deletions() {
         let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
@@ -11200,6 +11431,248 @@ mod tests {
         assert!(
             !panned.contains("very-long"),
             "pan hides the name prefix while trailing status stays:\n{panned}"
+        );
+    }
+
+    /// Paint `row` with a PR badge; the line text and its icon spans.
+    fn paint_row_icons(
+        row: &VisibleRow,
+        width: usize,
+        pr: Option<PrState>,
+    ) -> (String, Vec<IconSpan>) {
+        let palette = crate::tui::theme::ThemeId::TokyoNight.palette();
+        let (line, icons) = paint_tree_row(
+            row,
+            width,
+            false,
+            false,
+            None,
+            false,
+            search_bg_unused(),
+            true,
+            false,
+            false,
+            false,
+            pr,
+            palette,
+            0,
+        );
+        (line_text(&line), icons)
+    }
+
+    /// Long repo row (ignored, ahead) and long linked checkout row (open
+    /// vs default, ahead): both paint icons that follow the name.
+    fn icon_after_name_rows() -> (VisibleRow, VisibleRow) {
+        const NAME: &str = "services/very-long-repo-name-that-must-clip";
+        let mut ignored = repo(NAME, true);
+        ignored.sync_status = SyncStatus::Ahead;
+        ignored.sync_note = "ahead by 2".into();
+        let mut primary = repo("app", true);
+        primary.branch = "main".into();
+        let mut linked = repo("app/.worktrees/feat", true);
+        linked.checkout_kind = CheckoutKind::Linked;
+        linked.primary_repo = Some("app".into());
+        linked.branch = "feature/very-long-linked-branch-name".into();
+        linked.sync_status = SyncStatus::Ahead;
+        linked.sync_note = "ahead by 1".into();
+        linked.merged_into_default = Some(false);
+        let built =
+            build_workspace_snapshot(&[ignored, primary, linked], &[NAME.into()], true, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let find = |id: &str| rows.iter().find(|r| r.id == id).expect(id).clone();
+        (
+            find(&format!("repo:{NAME}")),
+            find("checkout:app/.worktrees/feat"),
+        )
+    }
+
+    #[test]
+    fn narrow_rows_clip_the_name_and_keep_icons_after_it_flush_right() {
+        let (repo_row, checkout) = icon_after_name_rows();
+        for (row, pr, trail, glyphs, clipped) in [
+            (
+                &repo_row,
+                None,
+                "~ & @ ^2 1",
+                vec![(IconKind::Ignored, '~'), (IconKind::Branch, '&')],
+                "must-clip",
+            ),
+            (
+                &checkout,
+                Some(PrState::Open),
+                "o P ^1 1",
+                vec![(IconKind::OpenVsDefault, 'o'), (IconKind::PrOpen, 'P')],
+                "branch-name",
+            ),
+        ] {
+            let width = 30;
+            let (text, icons) = paint_row_icons(row, width, pr);
+            assert_eq!(text.chars().count(), width, "{text}");
+            assert!(text.ends_with(trail), "icons sit flush right:\n{text}");
+            assert!(!text.contains(clipped), "the name clips:\n{text}");
+            let start = width - trail.len();
+            for (kind, glyph) in glyphs {
+                let x = start + trail.find(glyph).expect("glyph");
+                assert!(
+                    icons.contains(&(kind, x, 1)),
+                    "{kind:?} hit at {x}: {icons:?}\n{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn packed_trailing_run_ends_in_the_last_column() {
+        // Clean, up to date, on a feature branch: outside No updates, so
+        // the row paints no sync mark and the repo glyph is its last icon.
+        let mut feature = repo("app", false);
+        feature.branch = "feature/side".into();
+        feature.sync_status = SyncStatus::UpToDate;
+        let mut docs = repo("docs", true);
+        docs.changes[0].path = "guide/intro.md".into();
+        // A staged change too, so the repo splits into sections.
+        docs.has_staged = true;
+        docs.changes.push(FileChange {
+            path: "guide/setup.md".into(),
+            staged_status: Some("A".into()),
+            unstaged_status: None,
+            untracked: false,
+            old_path: None,
+        });
+        let built = build_workspace_snapshot(&[feature, docs], &[], true, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let find = |pred: &dyn Fn(&VisibleRow) -> bool| {
+            rows.iter()
+                .find(|row| pred(row))
+                .unwrap_or_else(|| panic!("{:?}", rows.iter().map(|r| &r.id).collect::<Vec<_>>()))
+                .clone()
+        };
+        let feature = find(&|row| row.id == "repo:app");
+        let dir = find(&|row| row.kind == NodeKind::Dir);
+        let section = find(&|row| row.kind == NodeKind::Section);
+        let palette = crate::tui::theme::ThemeId::TokyoNight.palette();
+        let width = 30;
+        for (row, commented, tail, kind) in [
+            (&feature, false, "& @", IconKind::Repo),
+            (&dir, true, "\"", IconKind::Comment),
+            (&section, true, "\"", IconKind::Comment),
+        ] {
+            let (line, icons) = paint_tree_row(
+                row,
+                width,
+                false,
+                false,
+                None,
+                false,
+                search_bg_unused(),
+                true,
+                false,
+                commented,
+                false,
+                None,
+                palette,
+                0,
+            );
+            let text = line_text(&line);
+            let what = format!("{}: {text:?} {icons:?}", row.id);
+            assert_eq!(text.chars().count(), width, "{what}");
+            assert!(text.ends_with(tail), "last icon in the last column: {what}");
+            assert!(
+                icons.contains(&(kind, width - 1, 1)),
+                "hit on the last column: {what}"
+            );
+        }
+    }
+
+    #[test]
+    fn trailing_run_wider_than_the_room_clips_from_the_left() {
+        let (row, _) = icon_after_name_rows();
+        let trail = "~ & @ ^2 1";
+        // Depth 1: edge, indent, chevron take five columns.
+        let prefix = 5;
+        for room in 0..trail.len() {
+            let width = prefix + room;
+            let (text, icons) = paint_row_icons(&row, width, None);
+            let what = format!("width {width}: {text:?} {icons:?}");
+            assert_eq!(text.chars().count(), width, "{what}");
+            assert_eq!(
+                &text[prefix..],
+                &trail[trail.len() - room..],
+                "right edge of the run stays on screen: {what}"
+            );
+            assert!(!text.contains("services"), "{what}");
+            for &(kind, x, w) in &icons {
+                assert!(x >= prefix && x + w <= width, "{kind:?} {what}");
+                let cells = &text[x..x + w];
+                assert!(
+                    !cells.starts_with(' ') && !cells.ends_with(' '),
+                    "{kind:?} span is the glyph only: {what}"
+                );
+            }
+            let kinds: Vec<IconKind> = icons.iter().map(|icon| icon.0).collect();
+            assert!(
+                !kinds.contains(&IconKind::Ignored),
+                "the leftmost icon is cut first: {what}"
+            );
+            assert_eq!(
+                kinds.contains(&IconKind::Repo),
+                room >= 6,
+                "an icon cut off records no hit: {what}"
+            );
+            if room == 3 {
+                // `^2` cut to `2`: the hit covers the visible column only.
+                assert!(icons.contains(&(IconKind::Ahead, prefix, 1)), "{what}");
+            }
+        }
+    }
+
+    #[test]
+    fn left_cut_wide_glyph_leaves_a_space_and_keeps_the_right_edge() {
+        let segs = NodeSegments {
+            segments: vec![TextSeg {
+                text: "name".into(),
+                role: SegRole::Repo,
+                hex: None,
+                bold: false,
+                dim: false,
+                icon: None,
+            }],
+            trailing: vec![TextSeg {
+                text: "界1".into(),
+                role: SegRole::Muted,
+                hex: None,
+                bold: false,
+                dim: false,
+                icon: Some(IconKind::ChangeCount),
+            }],
+        };
+        let palette = crate::tui::theme::ThemeId::TokyoNight.palette();
+        // Depth 0 prefix is three columns; two are left for a three-column run.
+        let width = 5;
+        let line = paint_segmented_row(
+            0,
+            false,
+            false,
+            &segs,
+            width,
+            false,
+            false,
+            None,
+            false,
+            search_bg_unused(),
+            true,
+            palette,
+            0,
+        );
+        let text = line_text(&line);
+        assert_eq!(visible_width(&text), width, "{text:?}");
+        assert!(text.ends_with(" 1"), "{text:?}");
+        assert!(!text.contains("name") && !text.contains('界'), "{text:?}");
+        assert_eq!(
+            segmented_icon_spans(0, &segs, width, 0),
+            vec![(IconKind::ChangeCount, 4, 1)]
         );
     }
 
@@ -14962,7 +15435,7 @@ mod tests {
         ];
         assert!(rows.windows(2).all(|w| w[0] < w[1]), "{rows:?}\n{text}");
         assert!(
-            text.contains("↑↓ move · Enter open · Tab all repos · Alt-c/w/r · Esc close"),
+            text.contains("↑↓ move · Enter open · Tab all repos · Esc close"),
             "{text}"
         );
         assert_eq!(
@@ -14975,7 +15448,7 @@ mod tests {
         search_dialog(&mut state).zone = SearchZone::Results;
         let text = buffer_text(&draw_search(&mut state, 120, 30));
         assert!(
-            text.contains("j/k move · Enter open · e edit · Tab all repos · Alt-c/w/r · Esc close"),
+            text.contains("j/k move · Enter open · e edit · Tab all repos · Esc close"),
             "{text}"
         );
 
@@ -15019,6 +15492,251 @@ mod tests {
             let cell = &buf[(x, y as u16)];
             assert_eq!(cell.bg == palette.cursor, on, "{chip}: {cell:?}");
             assert_eq!(cell.modifier.contains(Modifier::BOLD), on, "{chip}");
+        }
+    }
+
+    /// Left-button press at (`col`, `row`), as crossterm decodes it.
+    fn left_click(col: u16, row: u16) -> crossterm::event::Event {
+        use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    /// Top-border row and first cell (the leading space) of each painted
+    /// option chip, read from the buffer.
+    fn painted_chip_xs(terminal: &Terminal<TestBackend>) -> (u16, [(SearchFilesOption, u16); 3]) {
+        let y = row_of(&buffer_text(terminal), "Search · ");
+        let xs =
+            SEARCH_OPTION_LABELS.map(|(option, label)| (option, cells_x(terminal, y, label) - 1));
+        (y as u16, xs)
+    }
+
+    #[test]
+    fn search_files_chip_boxes_match_the_painted_labels() {
+        let mut state = search_files_state(false);
+        let terminal = draw_search(&mut state, 120, 30);
+        let buf = terminal.backend().buffer();
+        let (y, xs) = painted_chip_xs(&terminal);
+        assert_eq!(state.layout.search_option_y, y);
+        let hits: Vec<_> = xs
+            .iter()
+            .map(|&(option, x)| (x, SEARCH_OPTION_CHIP_W, option))
+            .collect();
+        assert_eq!(state.layout.search_option_hits, hits);
+        for &(_, x) in &xs {
+            assert_eq!(buf[(x, y)].symbol(), " ", "leading pad in the box");
+            assert_eq!(buf[(x + 3, y)].symbol(), " ", "trailing pad in the box");
+        }
+        let (_, right_x) = xs[2];
+        assert_eq!(
+            buf[(right_x + 4, y)].symbol(),
+            "╮",
+            "the last chip ends at the right corner"
+        );
+        assert_eq!(xs[1].1, xs[0].1 + 5, "one gap cell between chips");
+        assert_eq!(xs[2].1, xs[1].1 + 5);
+
+        // A closed dialog leaves no box behind.
+        state.search_files = None;
+        draw_search(&mut state, 120, 30);
+        assert!(state.layout.search_option_hits.is_empty());
+    }
+
+    #[test]
+    fn search_option_chips_leave_out_what_would_touch_the_title() {
+        use SearchFilesOption::{Case, Regex, WholeWord};
+        let area = Rect::new(2, 1, 40, 10);
+        assert_eq!(
+            search_option_chip_xs(area, 12),
+            vec![(27, Case), (32, WholeWord), (37, Regex)],
+            "right-aligned inside the corner at x = 41"
+        );
+        // A 24-cell title ends at x = 2 + 24 = 26; `Aa` at 27 would touch it.
+        assert_eq!(
+            search_option_chip_xs(area, 24),
+            vec![(32, WholeWord), (37, Regex)]
+        );
+        assert_eq!(
+            search_option_chip_xs(area, 23),
+            search_option_chip_xs(area, 12),
+            "one blank cell after the title is enough"
+        );
+        assert!(search_option_chip_xs(Rect::new(0, 0, 4, 3), 0).is_empty());
+        assert!(search_option_chip_xs(area, u16::MAX).is_empty());
+    }
+
+    #[test]
+    fn search_files_click_on_a_chip_toggles_only_that_option_and_searches() {
+        use super::super::app::map_event;
+        for (i, (option, _)) in SEARCH_OPTION_LABELS.into_iter().enumerate() {
+            let mut state = search_files_state(false);
+            let terminal = draw_search(&mut state, 120, 30);
+            let (y, xs) = painted_chip_xs(&terminal);
+            let x = xs[i].1;
+            // First cell of the box turns it on, last cell turns it off.
+            for (col, on) in [(x, true), (x + SEARCH_OPTION_CHIP_W - 1, false)] {
+                let action = map_event(&state, &left_click(col, y));
+                assert_eq!(
+                    action,
+                    Action::SearchFilesToggleOption(option),
+                    "{option:?}"
+                );
+                match state.dispatch(action) {
+                    Effect::SearchFilesChunk { options, .. } => {
+                        assert_eq!(option_is_on(options, option), on, "{option:?}");
+                    }
+                    other => panic!("{option:?}: expected a search, got {other:?}"),
+                }
+                let options = search_dialog(&mut state).options;
+                for (other, _) in SEARCH_OPTION_LABELS {
+                    let want = other == option && on;
+                    assert_eq!(option_is_on(options, other), want, "{option:?} → {other:?}");
+                }
+                draw_search(&mut state, 120, 30);
+            }
+        }
+    }
+
+    #[test]
+    fn search_files_click_off_the_chips_does_nothing() {
+        use super::super::app::map_event;
+        let mut state = search_files_state(false);
+        let terminal = draw_search(&mut state, 120, 30);
+        let (y, xs) = painted_chip_xs(&terminal);
+        let gap = xs[0].1 + SEARCH_OPTION_CHIP_W;
+        for (col, row, what) in [
+            (gap, y, "gap between chips"),
+            (xs[0].1 - 1, y, "border left of Aa"),
+            (xs[2].1 + SEARCH_OPTION_CHIP_W, y, "right corner"),
+            (xs[0].1, y + 1, "query row under Aa"),
+            (30, y + 5, "dialog body"),
+            (0, 0, "tab strip outside the dialog"),
+            (xs[0].1, y - 1, "pane row above the dialog"),
+        ] {
+            let action = map_event(&state, &left_click(col, row));
+            assert_eq!(action, Action::None, "{what}");
+            assert_eq!(state.dispatch(action), Effect::None, "{what}");
+            assert!(state.search_files.is_some(), "{what}: dialog stays open");
+            assert_eq!(
+                search_dialog(&mut state).options,
+                SearchOptions::default(),
+                "{what}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_files_hovered_chip_paints_hover_and_the_footer_tooltip() {
+        let mut state = search_files_state(false);
+        let palette = state.theme.palette();
+        let terminal = draw_search(&mut state, 120, 30);
+        let (y, xs) = painted_chip_xs(&terminal);
+        search_dialog(&mut state).options.whole_word = true;
+        assert!(state.set_pointer(Some((xs[1].1 + 2, y))));
+        let terminal = draw_search(&mut state, 120, 30);
+        let buf = terminal.backend().buffer();
+        let text = buffer_text(&terminal);
+        for (i, (option, _)) in SEARCH_OPTION_LABELS.into_iter().enumerate() {
+            let hovered = i == 1;
+            for dx in 0..SEARCH_OPTION_CHIP_W {
+                let cell = &buf[(xs[i].1 + dx, y)];
+                assert_eq!(
+                    cell.modifier.contains(Modifier::UNDERLINED),
+                    hovered,
+                    "{option:?} cell {dx}"
+                );
+            }
+        }
+        let hovered_on = &buf[(xs[1].1 + 1, y)];
+        assert_eq!(hovered_on.bg, palette.cursor, "on stays filled under hover");
+        assert!(
+            text.contains("Whole word: on · click to turn off"),
+            "{text}"
+        );
+        assert!(!text.contains("Esc close"), "tooltip replaces the hints");
+
+        assert!(state.set_pointer(Some((xs[0].1, y))));
+        let terminal = draw_search(&mut state, 120, 30);
+        let buf = terminal.backend().buffer();
+        let off_hovered = &buf[(xs[0].1 + 1, y)];
+        assert_eq!(off_hovered.fg, palette.cursor);
+        assert_eq!(
+            off_hovered.bg, palette.cursor_bg,
+            "a light fill, not the on fill"
+        );
+        assert!(off_hovered.modifier.contains(Modifier::UNDERLINED));
+        assert!(buffer_text(&terminal).contains("Match case: off · click to turn on"));
+
+        assert!(state.set_pointer(Some((xs[0].1 + SEARCH_OPTION_CHIP_W, y))));
+        let text = buffer_text(&draw_search(&mut state, 120, 30));
+        assert!(
+            text.contains("↑↓ move · Enter open · Tab all repos · Esc close"),
+            "{text}"
+        );
+        assert!(!text.contains("click to turn"), "{text}");
+    }
+
+    #[test]
+    fn search_files_footer_says_the_chips_need_mouse_capture() {
+        use crate::tui::search_files::MOUSE_OFF_HINT;
+        let mut state = search_files_state(false);
+        let palette = state.theme.palette();
+        search_dialog(&mut state).options.regex = true;
+        state.mouse_enabled = false;
+        let terminal = draw_search(&mut state, 120, 30);
+        let text = buffer_text(&terminal);
+        let footer = row_of(&text, "Esc close");
+        assert!(
+            text.lines().nth(footer).unwrap().contains(MOUSE_OFF_HINT),
+            "{text}"
+        );
+        let (y, xs) = painted_chip_xs(&terminal);
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(xs[2].1 + 1, y)].bg, palette.cursor, "on stays filled");
+        assert_eq!(buf[(xs[0].1 + 1, y)].bg, palette.panel, "off stays plain");
+
+        state.mouse_enabled = true;
+        let text = buffer_text(&draw_search(&mut state, 120, 30));
+        assert!(!text.contains(MOUSE_OFF_HINT), "{text}");
+    }
+
+    #[test]
+    fn search_option_chip_styles_stay_distinct_in_every_theme() {
+        for id in crate::tui::theme::THEME_IDS {
+            let palette = id.palette();
+            let surface = palette.panel;
+            let style = |on, hovered| search_option_chip_style(on, hovered, palette, surface);
+            let styles = [
+                style(false, false),
+                style(false, true),
+                style(true, false),
+                style(true, true),
+            ];
+            for (i, a) in styles.iter().enumerate() {
+                for b in &styles[i + 1..] {
+                    assert_ne!(a, b, "{id:?}: {a:?} vs {b:?}");
+                }
+            }
+            // Fill tells on from off, hovered or not. Off paints on the
+            // dialog panel.
+            let bg = |style: Style| style.bg.unwrap_or(surface);
+            for hovered in [false, true] {
+                assert_ne!(
+                    bg(style(true, hovered)),
+                    bg(style(false, hovered)),
+                    "{id:?} hovered {hovered}"
+                );
+            }
+            assert_ne!(bg(style(false, false)), bg(style(false, true)), "{id:?}");
+            // Underline is the hover cue in both states.
+            for on in [false, true] {
+                assert!(!style(on, false).add_modifier.contains(Modifier::UNDERLINED));
+                assert!(style(on, true).add_modifier.contains(Modifier::UNDERLINED));
+            }
         }
     }
 
@@ -16509,8 +17227,8 @@ mod tests {
     }
 
     #[test]
-    fn tree_pr_badge_paints_after_the_branch_and_records_its_cell() {
-        use crate::tui::icons::{icon_pr_approved, icon_pr_merged, icon_pr_open};
+    fn tree_pr_badge_paints_after_the_branch_glyph_and_records_its_cell() {
+        use crate::tui::icons::{icon_branch, icon_pr_approved, icon_pr_merged, icon_pr_open};
         let palette = ThemeId::TokyoNight.palette();
         let cases = [
             (
@@ -16536,7 +17254,12 @@ mod tests {
                 let y = tree_row_y(&state, "repo:app");
                 let branch_x = find_cell_col(buf, y, "feature")
                     .unwrap_or_else(|| panic!("{what}: branch on\n{}", buf_line(buf, y)));
-                let x = branch_x + 8;
+                // Trailing run `<branch glyph> <badge> <repo glyph> ...`,
+                // flush right; the branch text stays in the label.
+                let glyph_x = (branch_x + 7..state.layout.tree_width)
+                    .find(|&x| buf[(x, y)].symbol() == icon_branch(ascii))
+                    .unwrap_or_else(|| panic!("{what}: branch glyph on\n{}", buf_line(buf, y)));
+                let x = glyph_x + 2;
                 assert_eq!(
                     state.layout.pr_badge_hits(),
                     vec![PrBadgeHit {
@@ -16635,28 +17358,22 @@ mod tests {
     }
 
     #[test]
-    fn tree_pr_badge_hit_follows_hscroll_and_drops_when_cut() {
+    fn tree_pr_badge_hit_stays_put_under_hscroll() {
         let mut state = pr_state(&[branch_repo("app", "feature")], true);
         set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
         let mut terminal = pr_terminal();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let x = state.layout.pr_badge_hits()[0].x;
 
-        state.left_col_offset = 3;
-        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-        assert_eq!(state.layout.pr_badge_hits().len(), 1);
-        let hit = state.layout.pr_badge_hits()[0].clone();
-        assert_eq!(hit.x, x - 3);
-        assert_eq!(terminal.backend().buffer()[(hit.x, hit.y)].symbol(), "P");
-
-        // Scrolled past the badge: nothing painted, nothing recorded.
-        state.left_col_offset = 40;
-        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-        assert!(state.layout.pr_badge_hits().is_empty());
-        let buf = terminal.backend().buffer();
-        let row = buf_line(buf, tree_row_y(&state, "repo:app"));
-        let tree: String = row.chars().take(state.layout.tree_width as usize).collect();
-        assert!(!tree.contains('P'), "{row}");
+        // Pan moves the label only; the trailing run keeps its cells.
+        for offset in [3, 40] {
+            state.left_col_offset = offset;
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            assert_eq!(state.layout.pr_badge_hits().len(), 1, "offset {offset}");
+            let hit = state.layout.pr_badge_hits()[0].clone();
+            assert_eq!(hit.x, x, "offset {offset}");
+            assert_eq!(terminal.backend().buffer()[(hit.x, hit.y)].symbol(), "P");
+        }
     }
 
     #[test]
@@ -16729,7 +17446,7 @@ mod tests {
         assert_eq!(pr_opened(&effect), want);
         assert_eq!(state.rows[state.cursor].id, "repo:app");
 
-        // One column left is the branch text: a plain click.
+        // One column left is the separator space: a plain click.
         let effect = state.dispatch(Action::CtrlClick {
             col: hit.x - 1,
             row: hit.y,
@@ -17264,9 +17981,14 @@ mod tests {
         );
         let buf = terminal.backend().buffer();
         let row = buf_line(buf, hit.y);
-        let label_x = find_cell_col(buf, hit.y, "app/.worktrees/feat feat P")
-            .unwrap_or_else(|| panic!("worktree label then badge:\n{row}"));
-        assert_eq!(hit.x, label_x + 25);
+        let label_x = find_cell_col(buf, hit.y, "app/.worktrees/feat feat ")
+            .unwrap_or_else(|| panic!("worktree label:\n{row}"));
+        // Flush right in the graph pane, left of its border; blank between.
+        assert_eq!(hit.x, graph_badge_edge_x(buf), "{row}");
+        assert!(
+            (label_x + 24..hit.x).all(|x| buf[(x, hit.y)].symbol() == " "),
+            "{row}"
+        );
         assert_eq!(buf[(hit.x, hit.y)].symbol(), "P");
         assert_eq!(buf[(hit.x, hit.y)].fg, state.theme.palette().branch_feature);
         // The graph badge glyph links to the full PR URL.
@@ -17396,7 +18118,8 @@ mod tests {
                     assert!(x + w <= width, "{what}");
                     let cells: String = text[x..x + w].iter().collect();
                     match kind {
-                        IconKind::Behind => assert!("v12".starts_with(&cells), "{what}"),
+                        // A narrow pane cuts the trailing run from the left.
+                        IconKind::Behind => assert!("v12".ends_with(&cells), "{what}"),
                         IconKind::PrMerged => assert_eq!(cells, "m", "{what}"),
                         IconKind::Branch => assert_eq!(cells, "&", "{what}"),
                         IconKind::Repo => assert_eq!(cells, "@", "{what}"),
@@ -17522,7 +18245,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_mark_paints_its_own_colour_and_hit_after_the_branch() {
+    fn merge_mark_paints_its_own_colour_and_hit_in_the_trailing_run() {
         let mut state = branch_rows_state();
         let mut terminal = pr_terminal();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
@@ -17545,11 +18268,7 @@ mod tests {
             ),
         ] {
             let y = tree_row_y(&state, id);
-            let x = find_cell_col(buf, y, branch).expect("branch") + branch.len() as u16 + 1;
-            assert_eq!(buf[(x - 1, y)].symbol(), " ", "{id}");
-            assert_eq!(buf[(x, y)].symbol(), mark, "{id}");
-            assert_eq!(buf[(x, y)].fg, fg, "{id}: the mark's own role");
-            assert_ne!(buf[(x - 2, y)].fg, fg, "{id}: the branch keeps its colour");
+            let branch_end = find_cell_col(buf, y, branch).expect("branch") + branch.len() as u16;
             let hit = state
                 .layout
                 .icon_hits
@@ -17557,10 +18276,16 @@ mod tests {
                 .find(|hit| hit.kind == kind)
                 .cloned()
                 .expect("merge hit");
-            assert_eq!(
-                (hit.x, hit.y, hit.width),
-                (x, y, 1),
-                "{id}: glyph cell only"
+            let x = hit.x;
+            assert_eq!((hit.y, hit.width), (y, 1), "{id}: glyph cell only");
+            assert!(x > branch_end + 1, "{id}: the mark trails the branch text");
+            assert_eq!(buf[(x - 1, y)].symbol(), " ", "{id}");
+            assert_eq!(buf[(x, y)].symbol(), mark, "{id}");
+            assert_eq!(buf[(x, y)].fg, fg, "{id}: the mark's own role");
+            assert_ne!(
+                buf[(branch_end - 1, y)].fg,
+                fg,
+                "{id}: the branch keeps its colour"
             );
         }
     }
@@ -18056,6 +18781,13 @@ mod tests {
         assert_eq!(buf[(chip_end - 2, open_y)].symbol(), "g");
     }
 
+    /// Column of a graph worktree badge: the last graph column, left of the
+    /// right pane border on the last screen column (no vertical scrollbar
+    /// in these fixtures).
+    fn graph_badge_edge_x(buf: &ratatui::buffer::Buffer) -> u16 {
+        buf.area.right() - 2
+    }
+
     fn graph_badge_hits(state: &AppState) -> Vec<PrBadgeHit> {
         state
             .layout
@@ -18078,8 +18810,8 @@ mod tests {
         let y = (0..24)
             .find(|y| find_cell_col(buf, *y, "app/.worktrees/wt old").is_some())
             .expect("stale worktree row");
-        let x = find_cell_col(buf, y, "app/.worktrees/wt old").unwrap() + 22;
-        assert_eq!(buf[(x, y)].symbol(), " ", "no badge after the stale label");
+        let x = graph_badge_edge_x(buf);
+        assert_eq!(buf[(x, y)].symbol(), " ", "no badge on the stale row");
         // The tree row shows the snapshot branch, so it keeps its badge.
         assert_eq!(state.layout.pr_badge_hits().len(), 1);
 
@@ -18102,31 +18834,39 @@ mod tests {
         let mut state = pr_graph_state("app/.worktrees/wt", "feat", true);
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         assert_eq!(graph_badge_hits(&state).len(), 1);
+        assert_eq!(graph_badge_hits(&state)[0].x, x);
     }
 
     #[test]
-    fn graph_pan_reaches_the_badge_on_a_clipped_worktree_label() {
+    fn graph_badge_stays_in_view_while_pan_reaches_a_clipped_label_end() {
         let linked = "app/.worktrees/a-linked-worktree-path-that-runs-well-past-the-graph-pane";
         let pan_max = |with_pr: bool| {
             let mut state = pr_graph_state(linked, "feat", with_pr);
             let mut terminal = pr_terminal();
             terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-            assert!(graph_badge_hits(&state).is_empty(), "clipped at offset 0");
+            let unpanned = graph_badge_hits(&state);
             state.mouse_pan(state.layout.right_x + 1, 10_000);
             let offset = state.right_col_offset;
             terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-            (offset, state, terminal)
+            (offset, unpanned, state, terminal)
         };
-        let (plain, _, _) = pan_max(false);
-        let (badged, state, terminal) = pan_max(true);
+        let (plain, none, _, _) = pan_max(false);
+        assert!(none.is_empty());
+        let (badged, unpanned, state, terminal) = pan_max(true);
         assert!(plain > 0);
-        assert_eq!(badged, plain + 2, "pan reaches the space and glyph");
-        let hits = graph_badge_hits(&state);
-        assert_eq!(hits.len(), 1, "badge in view at the pan max");
         assert_eq!(
-            terminal.backend().buffer()[(hits[0].x, hits[0].y)].symbol(),
-            "P"
+            badged,
+            plain + 2,
+            "the space and glyph narrow the label viewport"
         );
+        // The label clips; the badge does not, panned or not.
+        assert_eq!(unpanned.len(), 1, "badge in view at offset 0");
+        let hits = graph_badge_hits(&state);
+        assert_eq!(hits, unpanned, "badge stays put at the pan max");
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(hits[0].x, hits[0].y)].symbol(), "P");
+        let row = buf_line(buf, hits[0].y);
+        assert!(row.contains("graph-pane feat"), "label end in view: {row}");
     }
 
     /// The box `draw` paints for the open dialog on a `cols`-wide frame.

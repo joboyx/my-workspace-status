@@ -619,15 +619,42 @@ pub fn remove_untracked_file(cwd: &Path, file_path: &str) -> Result<(), String> 
     exec_git_checked(&["clean", "-f", "--", file_path], cwd)
 }
 
-/// `git push --quiet`. First publish uses `git push -u <remote> HEAD`.
-pub fn push_quiet(cwd: &Path) -> Result<(), String> {
+/// What [`push_quiet`] will do in a checkout, read before it runs.
+///
+/// The TUI push confirm names this branch and remote, and says when the
+/// push creates the remote branch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PushPlan {
+    /// Current branch (`git branch --show-current`).
+    pub branch: String,
+    /// Remote the push goes to: `branch.<branch>.remote`, else the first
+    /// configured remote, else `origin`.
+    pub remote: String,
+    /// True when the push publishes the branch (`git push -u <remote> HEAD`):
+    /// no upstream yet, or the upstream is not `<remote>/<branch>`.
+    pub publish: bool,
+}
+
+/// Read the [`PushPlan`] for `cwd`. `Err` on a detached HEAD.
+pub fn push_plan(cwd: &Path) -> Result<PushPlan, String> {
     let branch = exec_git(&["branch", "--show-current"], cwd);
     if branch.is_empty() {
         return Err("detached HEAD cannot push".into());
     }
-    if needs_upstream_publish(cwd, &branch) {
-        let remote = push_remote_name(cwd, &branch);
-        exec_git_checked(&["push", "-u", &remote, "HEAD", "--quiet"], cwd)
+    let publish = needs_upstream_publish(cwd, &branch);
+    let remote = push_remote_name(cwd, &branch);
+    Ok(PushPlan {
+        branch,
+        remote,
+        publish,
+    })
+}
+
+/// `git push --quiet`. First publish uses `git push -u <remote> HEAD`.
+pub fn push_quiet(cwd: &Path) -> Result<(), String> {
+    let plan = push_plan(cwd)?;
+    if plan.publish {
+        exec_git_checked(&["push", "-u", &plan.remote, "HEAD", "--quiet"], cwd)
     } else {
         exec_git_checked(&["push", "--quiet"], cwd)
     }
@@ -2674,6 +2701,51 @@ keep-z
         git(&dir, &["checkout", "-q", "--detach"]);
         assert_eq!(push_quiet(&dir).unwrap_err(), "detached HEAD cannot push");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn push_plan_names_branch_remote_and_first_publish() {
+        let root = unique_dir("ws-git-push-plan");
+        let up = root.join("up");
+        let down = root.join("down");
+        init_repo(&up);
+        git(
+            &root,
+            &["clone", "-q", up.to_str().unwrap(), down.to_str().unwrap()],
+        );
+        git(&down, &["config", "user.name", "workspace-status test"]);
+        git(
+            &down,
+            &[
+                "config",
+                "user.email",
+                "workspace-status-test@example.invalid",
+            ],
+        );
+        fs::write(down.join("README.md"), "# ahead\n").unwrap();
+        git(&down, &["commit", "-qam", "ahead"]);
+        assert_eq!(
+            push_plan(&down),
+            Ok(PushPlan {
+                branch: "main".into(),
+                remote: "origin".into(),
+                publish: false,
+            })
+        );
+
+        git(&down, &["checkout", "-q", "-b", "feature/x"]);
+        assert_eq!(
+            push_plan(&down),
+            Ok(PushPlan {
+                branch: "feature/x".into(),
+                remote: "origin".into(),
+                publish: true,
+            })
+        );
+
+        git(&down, &["checkout", "-q", "--detach"]);
+        assert_eq!(push_plan(&down), Err("detached HEAD cannot push".into()));
+        let _ = fs::remove_dir_all(&root);
     }
 
     fn commit_file(dir: &std::path::Path, path: &str, text: &str, msg: &str) -> String {

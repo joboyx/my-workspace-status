@@ -36,12 +36,12 @@ use workspace_status_graph::{
 use crate::config::ViewDefaults;
 use crate::settings::Settings;
 use crate::snapshot::{
-    carry_status_failed_local_branches, CheckoutKind, FileChange, WorkspaceSnapshot,
+    carry_status_failed_local_branches, CheckoutKind, FileChange, SyncStatus, WorkspaceSnapshot,
 };
 
 #[cfg(test)]
 use super::action::Action;
-use super::action::{Effect, ExternalDiffKind};
+use super::action::{Effect, ExternalDiffKind, SearchFilesOption};
 use super::activity::ACTIVITY_DAYS;
 use super::anim::{next_tick_ms, AnimNeeds, RemoteActivity, ScrollGlide};
 use super::branches::{
@@ -84,7 +84,7 @@ use super::keys::{expire_stale_g_chord_echo, GChordEchoState, InputMode, DOUBLE_
 use super::line_blame::{GraphReveal, LineBlameState};
 use super::ops::{
     collect_write_files, format_running_op, op_is_kind_noop, op_kind_noop_reason, op_targets,
-    push_targets, refresh_target, Op, RevertScope, RunningOp, ScopedFile,
+    push_targets, refresh_target, snapshot_pushable, Op, RevertScope, RunningOp, ScopedFile,
 };
 use super::popover::{IconTarget, PopoverState};
 use super::quick_open::QuickOpenState;
@@ -114,7 +114,7 @@ use super::tabs::{
     COMPARE_STILL_LOADING, FOCUS_A_COMMIT_TO_DIFF, ROOT_COMMIT_HAS_NO_PARENT,
     SWITCH_TO_WORKSPACE_TAB, WORKSPACE_TAB_CANNOT_CLOSE,
 };
-use super::theme::{cycle_theme_id, BackgroundMode, ThemeId};
+use super::theme::{BackgroundMode, ThemeId};
 use super::theme_store::save_last_theme;
 use super::toast::ToastStack;
 use super::tree::{
@@ -134,7 +134,7 @@ use super::watch::{
     prune_ghosts, tree_signatures, FlashKind, FlashStamp, GhostRow, GraphFlashDecision,
     GraphFlashMeta,
 };
-use crate::git::FULL_DIFF_CONTEXT_LINES;
+use crate::git::{PushPlan, FULL_DIFF_CONTEXT_LINES};
 
 /// Status for a key drained while a git write runs and the job has no name.
 pub(crate) const BUSY_WRITE_RUNNING: &str = "busy: a git write is running";
@@ -380,6 +380,13 @@ pub struct LayoutHit {
     /// ticks before it: a toast at full strength wakes the loop when its
     /// fade starts (under `NO_COLOR`, when it expires).
     pub wake_ms: Option<u64>,
+    /// Row of the search-in-files dialog's top border, where its option
+    /// chips paint.
+    pub search_option_y: u16,
+    /// Option chip hit boxes `(x, width, option)` on
+    /// [`Self::search_option_y`], each chip with its padding spaces.
+    /// Rebuilt every paint; empty when the dialog did not paint its chips.
+    pub search_option_hits: Vec<(u16, u16, SearchFilesOption)>,
 }
 
 impl Default for LayoutHit {
@@ -445,6 +452,8 @@ impl Default for LayoutHit {
             animating: false,
             gliding: false,
             wake_ms: None,
+            search_option_y: 0,
+            search_option_hits: Vec::new(),
         }
     }
 }
@@ -485,13 +494,15 @@ pub struct PopoverHit {
     pub lines: Vec<(u16, usize)>,
 }
 
-fn hit_tab_box(hits: &[(u16, u16, usize)], tab_y: u16, col: u16, row: u16) -> Option<usize> {
-    if row != tab_y {
+/// The value of the box in `hits` (`(x, width, value)` on row `y`) that
+/// covers cell (`col`, `row`).
+fn hit_row_box<T: Copy>(hits: &[(u16, u16, T)], y: u16, col: u16, row: u16) -> Option<T> {
+    if row != y {
         return None;
     }
     hits.iter()
         .find(|(x, width, _)| col >= *x && col < x.saturating_add(*width))
-        .map(|(_, _, index)| *index)
+        .map(|(_, _, value)| *value)
 }
 
 /// Cursor, scroll, and folds saved when `/` opens. Every query change and
@@ -579,6 +590,23 @@ pub enum PendingConfirm {
         label: String,
         into: String,
     },
+    /// `P` on a checkout with commits to push: `y` runs the push.
+    ///
+    /// Branch, remote, and `publish` come from [`crate::git::push_plan`],
+    /// read off the loop thread before the box opens.
+    Push {
+        /// Checkout path (snapshot `repo`).
+        repo: String,
+        /// Branch the push sends.
+        branch: String,
+        /// Remote the push goes to.
+        remote: String,
+        /// True when the push creates the remote branch (`git push -u`).
+        publish: bool,
+        /// Commits ahead of, then behind, the upstream from the snapshot
+        /// sync note; `None` with no upstream or no parsable count.
+        ahead_behind: Option<(u32, u32)>,
+    },
     /// Compare-tab highlight `x`: put the merge-base lines back for the
     /// highlighted rows of the committed compare diff (worktree only).
     ///
@@ -614,6 +642,25 @@ impl PendingConfirm {
             self,
             Self::CompareRevertRange { .. } | Self::CompareRevertFile { .. }
         )
+    }
+}
+
+/// Ahead / behind counts for the push confirm, from the snapshot sync note
+/// (`ahead by N commits`, `diverged (ahead A, behind B)`).
+///
+/// `None` with no upstream or a note in another shape.
+fn push_ahead_behind(sync: SyncStatus, note: &str) -> Option<(u32, u32)> {
+    match sync {
+        SyncStatus::Ahead => {
+            let n = note.strip_prefix("ahead by ")?.strip_suffix(" commits")?;
+            Some((n.parse().ok()?, 0))
+        }
+        SyncStatus::Diverged => {
+            let inner = note.strip_prefix("diverged (ahead ")?.strip_suffix(')')?;
+            let (ahead, behind) = inner.split_once(", behind ")?;
+            Some((ahead.parse().ok()?, behind.parse().ok()?))
+        }
+        _ => None,
     }
 }
 
@@ -748,7 +795,8 @@ pub struct AppState {
     pub viewed_path: PathBuf,
     pub comment_store: CommentStore,
     pub comment_path: PathBuf,
-    /// Last-used theme store that `T` writes (see [`crate::tui::theme_store`]).
+    /// Last-used theme store that a palette `Theme: …` row writes (see
+    /// [`crate::tui::theme_store`]).
     pub theme_path: PathBuf,
     pub comment: Option<CommentPrompt>,
     pub comment_export: Option<CommentExport>,
@@ -819,6 +867,10 @@ pub struct AppState {
     pub quick_open: Option<QuickOpenState>,
     /// Session counter for Quick Open index and score generations.
     quick_open_gen: u64,
+    /// Theme active when Quick Open opened, while it is open. Focusing a
+    /// palette `Theme: …` row previews that theme in [`Self::theme`]; any
+    /// close but Enter on a theme row restores this one.
+    theme_before_preview: Option<ThemeId>,
     /// Open search-in-files dialog (Ctrl-f).
     pub search_files: Option<SearchFilesState>,
     /// Last closed search-in-files dialog, restored by the next Ctrl-f in
@@ -878,8 +930,9 @@ pub struct AppState {
     pub background: BackgroundMode,
     pub mouse_enabled: bool,
     /// Last pointer cell `(col, row)` from any-event motion. `None` when
-    /// unknown or mouse capture is off. Paint derives the tab `[✗]` hover
-    /// from it, so a stale layout never keeps a stale highlight.
+    /// unknown or mouse capture is off. Paint derives the tab `[✗]` and
+    /// search option chip hover from it, so a stale layout never keeps a
+    /// stale highlight.
     pub pointer: Option<(u16, u16)>,
     /// Open icon popover: a hover peek or a pinned popover.
     pub popover: Option<PopoverState>,
@@ -1078,6 +1131,7 @@ impl AppState {
             create_branch: None,
             quick_open: None,
             quick_open_gen: 0,
+            theme_before_preview: None,
             search_files: None,
             search_files_parked: None,
             search_files_gen: 0,
@@ -2373,9 +2427,12 @@ impl AppState {
         self.commit_file_signatures = commit_file_signatures(&repo, &source, &unfolded);
     }
 
-    /// `T`: next theme in this session, saved as the last-used theme.
-    fn cycle_theme(&mut self) -> Effect {
-        self.theme = cycle_theme_id(self.theme);
+    /// Enter on a palette `Theme: …` row: apply `id` in this session and
+    /// save it as the last-used theme. It ends any palette preview, so no
+    /// later close puts the old theme back.
+    fn set_theme(&mut self, id: ThemeId) -> Effect {
+        self.theme_before_preview = None;
+        self.theme = id;
         self.status = format!("theme: {}", self.theme.label()).into();
         if let Err(err) = save_last_theme(&self.theme_path, self.theme) {
             self.status = StatusMessage::error(persist_failed_status("theme", err));
@@ -4467,6 +4524,15 @@ impl AppState {
                 ));
                 Effect::DefaultBranch { repos }
             }
+            // The push confirm offers only y / n: `Y` keeps it open.
+            Some(pending @ PendingConfirm::Push { .. }) if clean => {
+                self.confirm = Some(pending);
+                Effect::None
+            }
+            Some(PendingConfirm::Push { repo, .. }) => {
+                self.status = StatusMessage::progress(format_running_op(RunningOp::Push, 0, 1));
+                Effect::Push { repos: vec![repo] }
+            }
             // Compare confirms offer only y / n: `Y` keeps them open.
             Some(pending) if pending.is_compare_owned() && clean => {
                 self.confirm = Some(pending);
@@ -5062,8 +5128,10 @@ impl AppState {
     }
 
     fn push_effect(&mut self) -> Effect {
+        // `push_targets` holds at most the focused checkout. The confirm
+        // opens once git names the branch and remote (`open_push_confirm`).
         let targets = push_targets(&self.snapshot, self.focused_row(), self.show_ignored);
-        if targets.is_empty() {
+        let Some(repo) = targets.into_iter().next() else {
             let on_checkout = self
                 .focused_row()
                 .is_some_and(|row| matches!(row.kind, NodeKind::Repo | NodeKind::Checkout));
@@ -5073,9 +5141,47 @@ impl AppState {
                 "focus a repo or checkout to push"
             });
             return Effect::None;
+        };
+        Effect::PreparePush { repo }
+    }
+
+    /// Open the push confirm after git read the [`PushPlan`] for `repo`.
+    ///
+    /// `Err` (detached HEAD) puts the reason on the status line. A checkout
+    /// the snapshot no longer shows as pushable says `nothing to push`.
+    /// A confirm already open stays as is. Otherwise the box names the branch, the remote, and the commit
+    /// count from the snapshot; `y` returns [`Effect::Push`].
+    pub fn open_push_confirm(&mut self, repo: String, plan: Result<PushPlan, String>) {
+        // Another confirm opened while git read the plan: keep that one.
+        if self.confirm.is_some() {
+            return;
         }
-        self.status = StatusMessage::progress(format_running_op(RunningOp::Push, 0, targets.len()));
-        Effect::Push { repos: targets }
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(reason) => {
+                self.status = StatusMessage::error(reason);
+                return;
+            }
+        };
+        let Some(snap) = self
+            .snapshot
+            .repos
+            .iter()
+            .find(|r| r.repo == repo && snapshot_pushable(r))
+        else {
+            self.status = StatusMessage::warn("nothing to push");
+            return;
+        };
+        let ahead_behind = push_ahead_behind(snap.sync_status, &snap.sync_note);
+        self.help_open = false;
+        self.cancel_mouse_drag();
+        self.confirm = Some(PendingConfirm::Push {
+            repo,
+            branch: plan.branch,
+            remote: plan.remote,
+            publish: plan.publish,
+            ahead_behind,
+        });
     }
 
     fn begin_stash_menu(&mut self) -> Effect {
@@ -5962,25 +6068,55 @@ impl AppState {
     }
 
     fn hit_tab(&self, col: u16, row: u16) -> Option<usize> {
-        hit_tab_box(&self.layout.tab_hits, self.layout.tab_y, col, row)
+        hit_row_box(&self.layout.tab_hits, self.layout.tab_y, col, row)
     }
 
     fn hit_tab_close(&self, col: u16, row: u16) -> Option<usize> {
-        hit_tab_box(&self.layout.tab_close_hits, self.layout.tab_y, col, row)
+        hit_row_box(&self.layout.tab_close_hits, self.layout.tab_y, col, row)
     }
 
-    /// Tab index whose `[✗]` sits under [`Self::pointer`] in the last paint.
+    /// Tab index whose `[✗]` sits under [`Self::pane_pointer`] in the last
+    /// paint (none while the search-in-files dialog is open).
     pub fn hovered_tab_close(&self) -> Option<usize> {
-        let (col, row) = self.pointer?;
+        let (col, row) = self.pane_pointer()?;
         self.hit_tab_close(col, row)
+    }
+
+    /// [`Self::pointer`] for hover on the tab strip and the panes: `None`
+    /// while the search-in-files dialog is open.
+    ///
+    /// The dialog keeps the pointer for its option chips. It covers the
+    /// panes, so a tab `[✗]` or an icon under the pointer must not hover
+    /// or arm the icon peek then.
+    pub(crate) fn pane_pointer(&self) -> Option<(u16, u16)> {
+        self.pointer.filter(|_| self.search_files.is_none())
+    }
+
+    /// Search-in-files option chip painted at (`col`, `row`) in the last
+    /// paint, while the dialog is open.
+    pub fn search_option_at(&self, col: u16, row: u16) -> Option<SearchFilesOption> {
+        self.search_files.as_ref()?;
+        hit_row_box(
+            &self.layout.search_option_hits,
+            self.layout.search_option_y,
+            col,
+            row,
+        )
+    }
+
+    /// Search-in-files option chip under [`Self::pointer`] in the last
+    /// paint, while the dialog is open.
+    pub fn hovered_search_option(&self) -> Option<SearchFilesOption> {
+        let (col, row) = self.pointer?;
+        self.search_option_at(col, row)
     }
 
     /// Store the pointer from any-event motion.
     ///
-    /// Returns `true` when the hovered tab `[✗]` or the hovered icon
-    /// changed, so the live loop redraws only then. Arms or drops the icon
-    /// peek dwell and leave grace ([`Self::peek_remaining_ms`]). Ignored
-    /// while mouse capture is off. Chords, status, and effects are
+    /// Returns `true` when the hovered tab `[✗]`, icon, or search option
+    /// chip changed, so the live loop redraws only then. Arms or drops the
+    /// icon peek dwell and leave grace ([`Self::peek_remaining_ms`]).
+    /// Ignored while mouse capture is off. Chords, status, and effects are
     /// untouched.
     pub fn set_pointer(&mut self, pointer: Option<(u16, u16)>) -> bool {
         self.set_pointer_at(pointer, Instant::now())
@@ -5991,10 +6127,13 @@ impl AppState {
         let pointer = pointer.filter(|_| self.mouse_enabled);
         let before = self.hovered_tab_close();
         let icon_before = self.hovered_icon().cloned();
+        let chip_before = self.hovered_search_option();
         self.pointer = pointer;
         let icon = self.hovered_icon().cloned();
         self.track_peek(icon.as_ref(), now);
-        self.hovered_tab_close() != before || icon != icon_before
+        self.hovered_tab_close() != before
+            || icon != icon_before
+            || self.hovered_search_option() != chip_before
     }
 
     fn park_active_session(&mut self) {
@@ -7951,11 +8090,177 @@ mod tests {
         assert_eq!(app.dispatch(Action::Push), Effect::None);
         assert!(app.status.contains("nothing to push"));
         focus_repo(&mut app, "lib");
-        match app.dispatch(Action::Push) {
-            Effect::Push { repos } => assert_eq!(repos, vec!["lib"]),
+        assert_eq!(confirm_and_push(&mut app, Action::Push, "lib"), vec!["lib"]);
+    }
+
+    fn push_plan_ok(branch: &str, publish: bool) -> Result<PushPlan, String> {
+        Ok(PushPlan {
+            branch: branch.into(),
+            remote: "origin".into(),
+            publish,
+        })
+    }
+
+    /// `action` asks git for the push plan of `repo` (no push yet); the
+    /// plan opens the confirm; `y` returns the push and its targets.
+    fn confirm_and_push(app: &mut AppState, action: Action, repo: &str) -> Vec<String> {
+        assert_eq!(
+            app.dispatch(action),
+            Effect::PreparePush { repo: repo.into() }
+        );
+        assert!(app.confirm.is_none(), "the confirm waits for the plan");
+        app.open_push_confirm(repo.into(), push_plan_ok("main", false));
+        assert!(
+            matches!(app.confirm, Some(PendingConfirm::Push { .. })),
+            "{:?}",
+            app.confirm
+        );
+        let repos = match app.dispatch(Action::ConfirmYes) {
+            Effect::Push { repos } => repos,
             other => panic!("{other:?}"),
-        }
+        };
+        assert!(app.confirm.is_none());
         assert_eq!(app.status, "Pushing 0/1…");
+        repos
+    }
+
+    /// One checkout `app` on `main`, ahead of its upstream, focused.
+    fn ahead_app(sync: SyncStatus, note: &str) -> AppState {
+        let mut ahead = repo("app", false);
+        ahead.sync_status = sync;
+        ahead.sync_note = note.into();
+        let snapshot = build_workspace_snapshot(&[ahead], &[], false, &[]);
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        focus_repo(&mut app, "app");
+        app
+    }
+
+    #[test]
+    fn push_opens_a_confirm_and_only_y_pushes() {
+        let mut app = ahead_app(SyncStatus::Ahead, "ahead by 3 commits");
+        assert_eq!(
+            app.dispatch(Action::Push),
+            Effect::PreparePush { repo: "app".into() }
+        );
+        app.help_open = true;
+        app.open_push_confirm("app".into(), push_plan_ok("main", false));
+        assert!(!app.help_open, "the confirm closes help");
+        assert_eq!(
+            app.confirm,
+            Some(PendingConfirm::Push {
+                repo: "app".into(),
+                branch: "main".into(),
+                remote: "origin".into(),
+                publish: false,
+                ahead_behind: Some((3, 0)),
+            })
+        );
+        assert_eq!(app.confirm.as_ref().map(|c| c.accept_key()), Some('y'));
+        assert!(!app.confirm.as_ref().unwrap().is_compare_owned());
+
+        // Enter does not accept: it names the key.
+        assert_eq!(app.dispatch(Action::ConfirmEnter), Effect::None);
+        assert!(app.confirm.is_some());
+        assert_eq!(app.status, "press y to confirm · n or Esc to cancel");
+        // `Y` is not offered: the box stays open.
+        assert_eq!(app.dispatch(Action::ConfirmYesClean), Effect::None);
+        assert!(app.confirm.is_some());
+        // `y` pushes the focused checkout.
+        assert_eq!(
+            app.dispatch(Action::ConfirmYes),
+            Effect::Push {
+                repos: vec!["app".into()]
+            }
+        );
+        assert!(app.confirm.is_none());
+        assert_eq!(app.status, "Pushing 0/1…");
+    }
+
+    #[test]
+    fn push_confirm_n_cancels() {
+        let mut app = ahead_app(SyncStatus::Ahead, "ahead by 1 commits");
+        app.open_push_confirm("app".into(), push_plan_ok("main", false));
+        assert!(app.confirm.is_some());
+        assert_eq!(app.dispatch(Action::ConfirmNo), Effect::None);
+        assert!(app.confirm.is_none());
+        assert_eq!(app.status, "push cancelled");
+    }
+
+    #[test]
+    fn push_with_nothing_to_push_opens_no_confirm() {
+        let mut app = ahead_app(SyncStatus::Ahead, "ahead by 1 commits");
+        app.cursor = 0;
+        assert_eq!(app.focused_row().map(|r| r.kind), Some(NodeKind::Workspace));
+        assert_eq!(app.dispatch(Action::Push), Effect::None);
+        assert_eq!(app.status, "focus a repo or checkout to push");
+        assert!(app.confirm.is_none());
+
+        let mut in_sync = repo("app", false);
+        in_sync.sync_status = SyncStatus::UpToDate;
+        let snapshot = build_workspace_snapshot(&[in_sync], &[], false, &[]);
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        app.folds.remove("group:no-updates");
+        app.rebuild_rows();
+        focus_repo(&mut app, "app");
+        assert_eq!(app.dispatch(Action::Push), Effect::None);
+        assert_eq!(app.status, "nothing to push");
+        assert!(app.confirm.is_none());
+    }
+
+    #[test]
+    fn push_confirm_refuses_detached_head_and_a_stale_snapshot() {
+        let mut app = ahead_app(SyncStatus::Ahead, "ahead by 1 commits");
+        app.open_push_confirm("app".into(), Err("detached HEAD cannot push".into()));
+        assert!(app.confirm.is_none());
+        assert_eq!(app.status, "detached HEAD cannot push");
+        assert_eq!(app.status.kind(), StatusKind::Error);
+
+        // A reload between `P` and the plan found nothing left to push.
+        app.snapshot.repos[0].sync_status = SyncStatus::UpToDate;
+        app.open_push_confirm("app".into(), push_plan_ok("main", false));
+        assert!(app.confirm.is_none());
+        assert_eq!(app.status, "nothing to push");
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+    }
+
+    #[test]
+    fn push_plan_does_not_replace_an_open_confirm() {
+        let mut app = ahead_app(SyncStatus::Ahead, "ahead by 1 commits");
+        let drop = PendingConfirm::StashDrop {
+            repo: "app".into(),
+            stash_ref: "stash@{0}".into(),
+        };
+        app.confirm = Some(drop.clone());
+        app.open_push_confirm("app".into(), push_plan_ok("main", false));
+        assert_eq!(app.confirm, Some(drop));
+    }
+
+    #[test]
+    fn push_confirm_counts_come_from_the_sync_note() {
+        assert_eq!(
+            push_ahead_behind(SyncStatus::Ahead, "ahead by 3 commits"),
+            Some((3, 0))
+        );
+        assert_eq!(
+            push_ahead_behind(SyncStatus::Diverged, "diverged (ahead 2, behind 5)"),
+            Some((2, 5))
+        );
+        assert_eq!(push_ahead_behind(SyncStatus::NoUpstream, ""), None);
+        assert_eq!(push_ahead_behind(SyncStatus::Ahead, "ahead 1"), None);
+        assert_eq!(
+            push_ahead_behind(SyncStatus::Diverged, "diverged (ahead x, behind 1)"),
+            None
+        );
+    }
+
+    #[test]
+    fn palette_push_goes_through_the_confirm() {
+        let mut app = ahead_app(SyncStatus::Ahead, "ahead by 1 commits");
+        palette_select(&mut app, "Push");
+        assert_eq!(
+            confirm_and_push(&mut app, Action::QuickOpenSubmit, "app"),
+            vec!["app"]
+        );
     }
 
     #[test]
@@ -10971,6 +11276,63 @@ mod tests {
     }
 
     #[test]
+    fn pointer_on_search_chips_reports_hover_and_hides_the_tab_close() {
+        let mut app = state();
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+        app.layout.tab_y = 0;
+        app.layout.tab_close_hits = vec![(28, 3, 1)];
+        app.layout.search_option_y = 2;
+        app.layout.search_option_hits = vec![
+            (80, 4, SearchFilesOption::Case),
+            (85, 4, SearchFilesOption::WholeWord),
+            (90, 4, SearchFilesOption::Regex),
+        ];
+        assert!(
+            !app.set_pointer(Some((80, 2))),
+            "no dialog: its boxes do not hover"
+        );
+        assert_eq!(app.hovered_search_option(), None);
+        assert_eq!(app.search_option_at(80, 2), None);
+        app.set_pointer(Some((0, 5)));
+
+        app.dispatch(Action::ToggleSearchFiles);
+        assert!(app.search_files.is_some());
+        assert!(
+            app.set_pointer(Some((80, 2))),
+            "the open dialog hovers the chip under the pointer"
+        );
+        assert_eq!(app.hovered_search_option(), Some(SearchFilesOption::Case));
+        assert!(!app.set_pointer(Some((83, 2))), "same chip, last cell");
+        assert!(app.set_pointer(Some((84, 2))), "gap between chips");
+        assert_eq!(app.hovered_search_option(), None);
+        assert!(app.set_pointer(Some((85, 2))));
+        assert_eq!(
+            app.hovered_search_option(),
+            Some(SearchFilesOption::WholeWord)
+        );
+        assert!(app.set_pointer(Some((93, 2))), "onto the next chip");
+        assert_eq!(app.hovered_search_option(), Some(SearchFilesOption::Regex));
+        assert!(app.set_pointer(Some((93, 3))), "row below leaves the chip");
+        assert_eq!(app.hovered_search_option(), None);
+
+        assert!(
+            !app.set_pointer(Some((29, 0))),
+            "the tab strip does not hover under the dialog"
+        );
+        assert_eq!(app.hovered_tab_close(), None);
+        assert_eq!(app.pointer, Some((29, 0)), "the dialog keeps the pointer");
+
+        app.dispatch(Action::SearchFilesCancel);
+        assert_eq!(app.hovered_tab_close(), Some(1), "closed: the strip hovers");
+        assert_eq!(
+            app.search_option_at(80, 2),
+            None,
+            "a closed dialog's boxes never hit"
+        );
+    }
+
+    #[test]
     fn toggle_mouse_clears_pointer_and_off_ignores_motion() {
         let mut app = state();
         app.tabs
@@ -11290,25 +11652,21 @@ mod tests {
         app.cursor = 0;
         assert_eq!(app.dispatch(Action::Push), Effect::None);
         focus_repo(&mut app, "app");
-        match app.dispatch(Action::Push) {
-            Effect::Push { repos } => {
-                assert_eq!(repos, vec!["app"]);
-                assert!(!repos
-                    .iter()
-                    .any(|r| r.contains("worktrees") || r == "notes"));
-            }
-            other => panic!("{other:?}"),
-        }
+        let repos = confirm_and_push(&mut app, Action::Push, "app");
+        assert_eq!(repos, vec!["app"]);
+        assert!(!repos
+            .iter()
+            .any(|r| r.contains("worktrees") || r == "notes"));
         let wt = app
             .rows
             .iter()
             .position(|r| r.repo.as_deref() == Some(".worktrees/app/feat"));
         if let Some(idx) = wt {
             app.cursor = idx;
-            match app.dispatch(Action::Push) {
-                Effect::Push { repos } => assert_eq!(repos, vec![".worktrees/app/feat"]),
-                other => panic!("{other:?}"),
-            }
+            assert_eq!(
+                confirm_and_push(&mut app, Action::Push, ".worktrees/app/feat"),
+                vec![".worktrees/app/feat"]
+            );
         }
         app.dispatch(Action::ToggleShowIgnored);
         let notes = app
@@ -11317,10 +11675,10 @@ mod tests {
             .position(|r| r.repo.as_deref() == Some("notes"))
             .expect("notes");
         app.cursor = notes;
-        match app.dispatch(Action::Push) {
-            Effect::Push { repos } => assert_eq!(repos, vec!["notes"]),
-            other => panic!("{other:?}"),
-        }
+        assert_eq!(
+            confirm_and_push(&mut app, Action::Push, "notes"),
+            vec!["notes"]
+        );
     }
 
     #[test]
@@ -14833,27 +15191,6 @@ mod tests {
         assert_eq!(app.right_col_offset, panned, "mouse off ignores hscroll");
     }
 
-    #[test]
-    fn theme_cycle_wraps_through_every_theme() {
-        let mut app = state();
-        app.theme = ThemeId::TokyoNight;
-        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
-        assert_eq!(app.theme, ThemeId::Monokai);
-        assert!(app.status.contains("Monokai"));
-        for _ in 2..crate::tui::theme::DARK_THEME_IDS.len() {
-            app.dispatch(Action::CycleTheme);
-        }
-        assert_eq!(app.theme, ThemeId::GithubDarkDimmed);
-        assert!(app.status.contains("GitHub Dark Dimmed"));
-        app.dispatch(Action::CycleTheme);
-        assert_eq!(app.theme, ThemeId::TokyoNight);
-        assert_eq!(
-            theme_id_from(Some("gruvbox-dark"), None, None),
-            ThemeId::GruvboxDark
-        );
-        assert_eq!(theme_id_from(Some("nope"), None, None), ThemeId::Slate);
-    }
-
     /// State whose theme store is `state/theme.json` in a fresh temp dir.
     fn state_with_theme_store(prefix: &str) -> (AppState, PathBuf) {
         let dir = crate::testutil::unique_dir(prefix);
@@ -14862,51 +15199,66 @@ mod tests {
         (app, dir)
     }
 
+    /// Open Quick Open in commands mode (`:`) and type `query`.
+    fn palette_type(app: &mut AppState, query: &str) {
+        use super::super::action::QuickOpenEntry;
+        app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
+        for c in query.chars() {
+            app.dispatch(Action::QuickOpenChar(c));
+        }
+    }
+
+    /// Title of the highlighted palette row.
+    fn palette_focus(app: &AppState) -> Option<String> {
+        app.command_palette()
+            .and_then(|palette| palette.selected())
+            .map(|command| command.title.to_string())
+    }
+
+    fn backspace(app: &mut AppState, count: usize) {
+        for _ in 0..count {
+            app.dispatch(Action::QuickOpenBackspace);
+        }
+    }
+
     #[test]
-    fn theme_cycle_saves_new_theme_to_store() {
-        let (mut app, dir) = state_with_theme_store("ws-theme-cycle-save");
+    fn set_theme_applies_saves_and_names_the_theme() {
+        let (mut app, dir) = state_with_theme_store("ws-theme-set-save");
         app.theme = ThemeId::TokyoNight;
-        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
-        assert_eq!(app.theme, ThemeId::Monokai);
-        assert_eq!(load_last_theme(&app.theme_path), Some(ThemeId::Monokai));
-        assert_eq!(app.status.kind(), StatusKind::Info);
-        app.dispatch(Action::CycleTheme);
-        assert_eq!(load_last_theme(&app.theme_path), Some(app.theme));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn theme_cycle_wrap_saves_tokyo_night() {
-        let (mut app, dir) = state_with_theme_store("ws-theme-cycle-wrap");
-        app.theme = ThemeId::GithubDarkDimmed;
-        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
-        assert_eq!(app.theme, ThemeId::TokyoNight);
-        assert_eq!(load_last_theme(&app.theme_path), Some(ThemeId::TokyoNight));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn theme_cycle_to_slate_saves_slate() {
-        let (mut app, dir) = state_with_theme_store("ws-theme-cycle-slate");
-        app.theme = *crate::tui::theme::THEME_IDS
-            .iter()
-            .find(|&&id| cycle_theme_id(id) == ThemeId::Slate)
-            .expect("some theme cycles to Slate");
-        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
+        assert_eq!(app.dispatch(Action::SetTheme(ThemeId::Slate)), Effect::None);
         assert_eq!(app.theme, ThemeId::Slate);
+        assert_eq!(app.status, "theme: Slate");
+        assert_eq!(app.status.kind(), StatusKind::Info);
         let text = std::fs::read_to_string(&app.theme_path).expect("store written");
         assert!(text.contains("\"slate\""), "store names slate: {text}");
         assert_eq!(load_last_theme(&app.theme_path), Some(ThemeId::Slate));
+        assert_eq!(
+            app.dispatch(Action::SetTheme(ThemeId::GithubDarkDimmed)),
+            Effect::None
+        );
+        assert_eq!(app.status, "theme: GitHub Dark Dimmed");
+        assert_eq!(
+            load_last_theme(&app.theme_path),
+            Some(ThemeId::GithubDarkDimmed)
+        );
+        assert_eq!(
+            theme_id_from(Some("gruvbox-dark"), None, None),
+            ThemeId::GruvboxDark
+        );
+        assert_eq!(theme_id_from(Some("nope"), None, None), ThemeId::Slate);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn theme_cycle_names_save_failure_when_unwritable() {
+    fn set_theme_names_save_failure_when_unwritable() {
         let mut app = state();
         app.theme = ThemeId::TokyoNight;
         let (root, path) = unwritable_store_path("ws-theme-save-fail");
         app.theme_path = path;
-        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
+        assert_eq!(
+            app.dispatch(Action::SetTheme(ThemeId::Monokai)),
+            Effect::None
+        );
         assert_eq!(app.theme, ThemeId::Monokai, "session theme still changes");
         assert_eq!(app.status.kind(), StatusKind::Error);
         assert!(
@@ -14918,13 +15270,16 @@ mod tests {
     }
 
     #[test]
-    fn theme_cycle_leaves_foreign_store_file_unchanged() {
+    fn set_theme_leaves_foreign_store_file_unchanged() {
         let (mut app, dir) = state_with_theme_store("ws-theme-foreign");
         std::fs::create_dir_all(app.theme_path.parent().unwrap()).unwrap();
         let foreign = b"{\"editor\": \"vim\"}\n";
         std::fs::write(&app.theme_path, foreign).unwrap();
         app.theme = ThemeId::TokyoNight;
-        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
+        assert_eq!(
+            app.dispatch(Action::SetTheme(ThemeId::Monokai)),
+            Effect::None
+        );
         assert_eq!(app.theme, ThemeId::Monokai, "session theme still changes");
         assert_eq!(std::fs::read(&app.theme_path).unwrap(), foreign);
         assert_eq!(app.status.kind(), StatusKind::Error);
@@ -14933,6 +15288,156 @@ mod tests {
             "foreign store must surface an error: {}",
             app.status
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn palette_moves_preview_theme_rows_and_restore_on_other_rows() {
+        let (mut app, dir) = state_with_theme_store("ws-theme-preview-move");
+        app.theme = ThemeId::Slate;
+        palette_type(&mut app, "");
+        assert_eq!(app.theme, ThemeId::Slate, "open lands on a non-theme row");
+        let palette = app.command_palette().expect("palette open");
+        let tokyo = palette
+            .rows()
+            .iter()
+            .position(|command| command.title == "Theme: Tokyo Night")
+            .expect("Tokyo Night row");
+        let delta = tokyo as i32 - palette.cursor as i32;
+        app.dispatch(Action::QuickOpenMove(delta));
+        assert_eq!(palette_focus(&app).as_deref(), Some("Theme: Tokyo Night"));
+        assert_eq!(app.theme, ThemeId::TokyoNight);
+        app.dispatch(Action::QuickOpenMove(1));
+        assert_eq!(app.theme, ThemeId::Monokai);
+        app.dispatch(Action::QuickOpenMove(-2));
+        assert_eq!(palette_focus(&app).as_deref(), Some("Icon popover"));
+        assert_eq!(app.theme, ThemeId::Slate, "a non-theme row restores");
+        app.dispatch(Action::QuickOpenMove(1));
+        assert_eq!(app.theme, ThemeId::TokyoNight);
+        assert!(!app.theme_path.exists(), "a preview never saves");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn palette_typing_previews_the_focused_theme_row() {
+        let (mut app, dir) = state_with_theme_store("ws-theme-preview-type");
+        app.theme = ThemeId::Slate;
+        palette_type(&mut app, "nord");
+        assert_eq!(palette_focus(&app).as_deref(), Some("Theme: Nord"));
+        assert_eq!(app.theme, ThemeId::Nord);
+        backspace(&mut app, "nord".len());
+        app.dispatch(Action::QuickOpenChar('q'));
+        app.dispatch(Action::QuickOpenChar('u'));
+        app.dispatch(Action::QuickOpenChar('i'));
+        app.dispatch(Action::QuickOpenChar('t'));
+        assert_eq!(palette_focus(&app).as_deref(), Some("Quit"));
+        assert_eq!(app.theme, ThemeId::Slate, "typing onto Quit restores");
+        backspace(&mut app, "quit".len());
+        for c in "dracula".chars() {
+            app.dispatch(Action::QuickOpenChar(c));
+        }
+        assert_eq!(app.theme, ThemeId::Dracula);
+        // Backspace over `>` leaves commands mode for files mode.
+        backspace(&mut app, "dracula".len() + 1);
+        assert!(app.quick_open.is_some());
+        assert!(app.command_palette().is_none(), "files mode");
+        assert_eq!(app.theme, ThemeId::Slate, "files mode restores");
+        assert!(!app.theme_path.exists(), "a preview never saves");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn palette_esc_and_toggle_close_restore_the_open_time_theme() {
+        use super::super::action::QuickOpenEntry;
+        let (mut app, dir) = state_with_theme_store("ws-theme-preview-close");
+        app.theme = ThemeId::Kanagawa;
+        // Several previews in a row; Esc goes back to the theme before the
+        // first one, not to an earlier preview.
+        palette_type(&mut app, "dracula");
+        assert_eq!(app.theme, ThemeId::Dracula);
+        backspace(&mut app, "dracula".len());
+        for c in "nord".chars() {
+            app.dispatch(Action::QuickOpenChar(c));
+        }
+        assert_eq!(app.theme, ThemeId::Nord);
+        app.dispatch(Action::QuickOpenCancel);
+        assert!(app.quick_open.is_none());
+        assert_eq!(app.theme, ThemeId::Kanagawa, "Esc restores");
+
+        palette_type(&mut app, "everforest");
+        assert_eq!(app.theme, ThemeId::Everforest);
+        app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
+        assert!(app.quick_open.is_none());
+        assert_eq!(app.theme, ThemeId::Kanagawa, "toggle close restores");
+
+        // Files entry, then `>` into commands on the first keystroke.
+        app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Files));
+        for c in ">one".chars() {
+            app.dispatch(Action::QuickOpenChar(c));
+        }
+        assert_eq!(palette_focus(&app).as_deref(), Some("Theme: One Dark"));
+        assert_eq!(app.theme, ThemeId::OneDark);
+        app.dispatch(Action::QuickOpenCancel);
+        assert_eq!(app.theme, ThemeId::Kanagawa, "Esc after a files entry");
+        assert!(!app.theme_path.exists(), "a close never saves");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn palette_enter_on_a_theme_row_applies_and_saves_it() {
+        let (mut app, dir) = state_with_theme_store("ws-theme-preview-enter");
+        app.theme = ThemeId::Slate;
+        palette_type(&mut app, "nord");
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
+        assert!(app.quick_open.is_none());
+        assert_eq!(app.theme, ThemeId::Nord);
+        assert_eq!(app.status, "theme: Nord");
+        assert_eq!(load_last_theme(&app.theme_path), Some(ThemeId::Nord));
+        // The applied theme is the new open-time theme.
+        palette_type(&mut app, "dracula");
+        assert_eq!(app.theme, ThemeId::Dracula);
+        app.dispatch(Action::QuickOpenCancel);
+        assert_eq!(app.theme, ThemeId::Nord);
+        assert_eq!(load_last_theme(&app.theme_path), Some(ThemeId::Nord));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn palette_enter_on_a_theme_row_keeps_it_when_the_save_fails() {
+        let mut app = state();
+        app.theme = ThemeId::Slate;
+        let (root, path) = unwritable_store_path("ws-theme-preview-fail");
+        app.theme_path = path;
+        palette_type(&mut app, "rose-pine");
+        assert_eq!(palette_focus(&app).as_deref(), Some("Theme: Rosé Pine"));
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
+        assert!(app.quick_open.is_none());
+        assert_eq!(app.theme, ThemeId::RosePine, "applied in this session");
+        assert_eq!(app.status.kind(), StatusKind::Error);
+        assert!(
+            app.status.contains("theme save failed"),
+            "failed persist must name the theme store: {}",
+            app.status
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn palette_enter_on_another_row_after_a_preview_restores_and_saves_nothing() {
+        let (mut app, dir) = state_with_theme_store("ws-theme-preview-other");
+        app.theme = ThemeId::Slate;
+        palette_type(&mut app, "nord");
+        assert_eq!(app.theme, ThemeId::Nord);
+        backspace(&mut app, "nord".len());
+        for c in "keymap".chars() {
+            app.dispatch(Action::QuickOpenChar(c));
+        }
+        assert_eq!(palette_focus(&app).as_deref(), Some("Keymap help"));
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
+        assert!(app.quick_open.is_none());
+        assert!(app.help_open, "Keymap help ran");
+        assert_eq!(app.theme, ThemeId::Slate);
+        assert!(!app.theme_path.exists(), "nothing saved");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -17104,8 +17609,11 @@ mod tests {
         assert_eq!(app.status, ESC_EXITS_HIGHLIGHT);
         assert_eq!(app.status.kind(), StatusKind::Warn);
         assert!(app.diff_visual_anchor.is_some(), "highlight stays");
-        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
-        assert!(app.diff_visual_anchor.is_some(), "T keeps the highlight");
+        assert_eq!(app.dispatch(Action::SetTheme(ThemeId::Nord)), Effect::None);
+        assert!(
+            app.diff_visual_anchor.is_some(),
+            "a theme row keeps the highlight"
+        );
         assert_eq!(app.dispatch(Action::Quit), Effect::Quit);
     }
 
@@ -17817,7 +18325,7 @@ diff --git a/README.md b/README.md
                 "{title}"
             );
         }
-        for title in ["Cycle theme", "Comment"] {
+        for title in ["Theme: Nord", "Comment"] {
             assert_eq!(palette_reason(&app, title), None, "{title}");
         }
         palette_select(&mut app, "Fetch remotes");

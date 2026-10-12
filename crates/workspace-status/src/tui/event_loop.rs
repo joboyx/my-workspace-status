@@ -33,7 +33,7 @@ use super::event_pump::{
 use super::hyperlink::{link_cells, write_links};
 use super::keys::{drop_g_chord_echo, held_nav_key, is_half_page_chord, KeyStrokeOrigin};
 use super::render::draw;
-use super::state::AppState;
+use super::state::{AppState, PendingConfirm};
 use super::status::StatusMessage;
 use super::term_progress::{progress_for, TermProgress};
 use super::tty::{poll_event, read_event_origin};
@@ -435,8 +435,9 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
     if let Some(pointer) = pointer_motion(&event, &action) {
         // Any-event motion (DECSET 1003) arrives on every cell the pointer
         // crosses. Store it without dispatch: no chord reset, no status,
-        // no effect. Redraw only when the hovered tab `[✗]` or icon
-        // changes. The icon peek dwell and grace run on `peek_remain`.
+        // no effect. Redraw only when the hovered tab `[✗]`, icon, or
+        // search option chip changes. The icon peek dwell and grace run on
+        // `peek_remain`.
         if ctx.state.set_pointer(pointer) {
             ctx.presenter.mark();
         }
@@ -450,16 +451,22 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
         ctx.state.cancel_scroll_glide();
     }
     if ctx.interp.busy_for_writes() {
-        let palette_submit = match action {
+        let inner_action = match action {
             Action::QuickOpenSubmit => ctx
                 .state
                 .command_palette()
                 .and_then(|palette| palette.selected_action()),
             Action::PopoverRun => ctx.state.popover_run_action(),
             Action::Release => ctx.state.popover_release_action(),
+            // `Y` only keeps the push box open, so Handle is safe for it too.
+            Action::ConfirmYes | Action::ConfirmYesClean
+                if matches!(ctx.state.confirm, Some(PendingConfirm::Push { .. })) =>
+            {
+                Some(Action::Push)
+            }
             _ => None,
         };
-        match classify_busy_dispatch(&action, palette_submit.as_ref()) {
+        match classify_busy_dispatch(&action, inner_action.as_ref()) {
             BusyAction::Quit => {
                 // `q` mid-write arms the same press-again window as Ctrl-C.
                 if matches!(ctx.state.quit_while_busy(Instant::now()), Effect::Quit) {
@@ -518,8 +525,11 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
 
 /// Pointer update for buttonless motion, or `None` for any other input.
 ///
-/// [`Action::PointerMove`] stores the cell. Motion inside an overlay maps to
-/// [`Action::None`]; it clears the pointer so no `[✗]` hover shows there.
+/// [`Action::PointerMove`] stores the cell. The search-in-files dialog maps
+/// motion to it too and keeps the pointer for its option chip hover (the
+/// tab `[✗]` and icons ignore it while the dialog is open). Motion inside
+/// any other overlay maps to [`Action::None`]; it clears the pointer so no
+/// `[✗]` hover shows there.
 fn pointer_motion(event: &crossterm::event::Event, action: &Action) -> Option<Option<(u16, u16)>> {
     match action {
         Action::PointerMove { col, row } => Some(Some((*col, *row))),

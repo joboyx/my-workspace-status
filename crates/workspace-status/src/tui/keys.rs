@@ -6,7 +6,7 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
-use super::action::{Action, QuickOpenEntry, SearchFilesOption};
+use super::action::{Action, QuickOpenEntry};
 
 /// Rows PgUp / PgDn scroll the `?` help body.
 ///
@@ -269,6 +269,13 @@ pub fn event_to_action_ex(
 /// `hl_folds` is true when `h` / `l` / arrows fold the focused row: the
 /// workspace tree, or a folder row of a focused commit-file list. Other
 /// rows and panes pass false so those keys pan.
+///
+/// In the search-in-files dialog the mouse only reaches the option chips:
+/// a left click without Ctrl is [`Action::Click`] (`app::map_event` turns
+/// it into [`Action::SearchFilesToggleOption`] on a chip and drops it
+/// elsewhere), motion is [`Action::PointerMove`] for their hover, and any
+/// other mouse event is [`Action::None`]. Prompts, menus, and the other
+/// list dialogs drop the mouse.
 pub fn event_to_action_with(
     event: &Event,
     mode: InputMode,
@@ -307,10 +314,28 @@ pub fn event_to_action_with(
                     | InputMode::CreateBranch
                     | InputMode::Comment
                     | InputMode::CommentExport
-                    | InputMode::QuickOpen
-                    | InputMode::SearchFiles { .. },
+                    | InputMode::QuickOpen,
             ) {
                 Action::None
+            } else if matches!(mode, InputMode::SearchFiles { .. }) {
+                // Only the option chips on the border take the mouse:
+                // `app::map_event` keeps a left click only on a chip, and
+                // motion feeds their hover. Anything else does nothing.
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left)
+                        if !mouse.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        Action::Click {
+                            col: mouse.column,
+                            row: mouse.row,
+                        }
+                    }
+                    MouseEventKind::Moved => Action::PointerMove {
+                        col: mouse.column,
+                        row: mouse.row,
+                    },
+                    _ => Action::None,
+                }
             } else if mode == InputMode::Popover
                 && mouse.kind == MouseEventKind::Down(MouseButton::Right)
             {
@@ -911,15 +936,16 @@ fn quick_open_key_action(key: KeyEvent) -> Action {
 ///
 /// Both zones: list moves and PgUp / PgDn move the highlight (and enter
 /// the results zone), Enter opens the highlighted hit, Tab widens to all
-/// repos, Alt-c / Alt-w / Alt-r flip case / whole word / regex, Esc
-/// closes. The query zone types every other printable key. The results
-/// zone also moves on `j` / `k` and edits on `e`; any other printable key
-/// or Backspace goes back to the query and applies there.
+/// repos, Esc closes. The query zone types every other printable key
+/// without a command modifier. The results zone also moves on `j` / `k`
+/// and edits on `e`; any other printable key or Backspace goes back to the
+/// query and applies there. No key flips a match option: a click on an
+/// option chip does (see [`event_to_action_with`]), so an Alt chord stays
+/// [`Action::None`] here.
 fn search_files_key_action(key: KeyEvent, results: bool) -> Action {
     if let Some(delta) = list_overlay_move(key) {
         return Action::SearchFilesMove(delta);
     }
-    let alt_only = key.modifiers.difference(KeyModifiers::SHIFT) == KeyModifiers::ALT;
     match key.code {
         KeyCode::Esc => Action::SearchFilesCancel,
         KeyCode::Enter => Action::SearchFilesSubmit,
@@ -927,12 +953,6 @@ fn search_files_key_action(key: KeyEvent, results: bool) -> Action {
         KeyCode::PageDown => Action::SearchFilesPage(1),
         KeyCode::PageUp => Action::SearchFilesPage(-1),
         KeyCode::Backspace => Action::SearchFilesBackspace,
-        KeyCode::Char(c) if alt_only => match c.to_ascii_lowercase() {
-            'c' => Action::SearchFilesToggleOption(SearchFilesOption::Case),
-            'w' => Action::SearchFilesToggleOption(SearchFilesOption::WholeWord),
-            'r' => Action::SearchFilesToggleOption(SearchFilesOption::Regex),
-            _ => Action::None,
-        },
         KeyCode::Char('j') if results && key.modifiers.is_empty() => Action::SearchFilesMove(1),
         KeyCode::Char('k') if results && key.modifiers.is_empty() => Action::SearchFilesMove(-1),
         KeyCode::Char('e') if results && key.modifiers.is_empty() => Action::SearchFilesEdit,
@@ -947,7 +967,7 @@ fn search_files_key_action(key: KeyEvent, results: bool) -> Action {
 /// Ctrl-d move the head (and extend or shrink the range). `;` comments that
 /// range. `s` / `u` stage / unstage the highlighted add/del lines. `x`
 /// reverts them from the worktree (after a confirm). `'` copies an entity
-/// reference for the highlighted span. `?`, `q`, `T`, and `m` act as in
+/// reference for the highlighted span. `?`, `q`, and `m` act as in
 /// normal mode. Esc or a second `V` leaves highlight without commenting.
 /// Any other key is [`Action::DiffVisualUnmapped`] so the status can say
 /// how to leave; an unbound modifier chord on a non-character key is
@@ -969,7 +989,6 @@ fn diff_visual_key(key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Char('?') => Action::ToggleHelp,
         KeyCode::Char('q') => Action::Quit,
-        KeyCode::Char('T') => Action::CycleTheme,
         KeyCode::Char('m') => Action::ToggleMouse,
         KeyCode::Char('g') => Action::ArmGChord,
         KeyCode::Char('G') | KeyCode::End => Action::MoveToEnd,
@@ -1044,7 +1063,6 @@ fn normal_key(
         }
     }
     match key.code {
-        KeyCode::Char('T') => Action::CycleTheme,
         KeyCode::Char('t') => Action::ToggleTreeMode,
         KeyCode::Char('q') => Action::Quit,
         KeyCode::Char('?') => Action::ToggleHelp,
@@ -2187,8 +2205,8 @@ mod tests {
         for (event, want) in [
             (key(KeyCode::Char('?')), Action::ToggleHelp),
             (key(KeyCode::Char('q')), Action::Quit),
-            (key(KeyCode::Char('T')), Action::CycleTheme),
             (key(KeyCode::Char('m')), Action::ToggleMouse),
+            (key(KeyCode::Char('T')), Action::DiffVisualUnmapped),
             (key(KeyCode::Char('g')), Action::ArmGChord),
             (key(KeyCode::Char('G')), Action::MoveToEnd),
             (key(KeyCode::Home), Action::MoveToStart),
@@ -2263,9 +2281,25 @@ mod tests {
 
     #[test]
     fn theme_and_reviewed_keys() {
+        // Themes are palette rows only: bare `T` and CSI-u Shift+T are unbound.
+        for event in [
+            key(KeyCode::Char('T')),
+            shift(KeyCode::Char('t')),
+            shift(KeyCode::Char('T')),
+        ] {
+            assert_eq!(
+                event_to_action(&event, normal(), false, false),
+                Action::None,
+                "{event:?}"
+            );
+        }
+        let pending = InputMode::GPending {
+            search_active: false,
+        };
         assert_eq!(
-            event_to_action(&key(KeyCode::Char('T')), normal(), false, false),
-            Action::CycleTheme
+            event_to_action(&key(KeyCode::Char('T')), pending, false, false),
+            Action::PreviousTab,
+            "gT still goes to the previous tab"
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('t')), normal(), false, false),
@@ -2617,7 +2651,8 @@ mod tests {
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('T')), normal(), false, false),
-            Action::CycleTheme
+            Action::None,
+            "bare T sets no theme; gT is the only T binding"
         );
     }
 
@@ -3621,19 +3656,26 @@ mod tests {
         assert_eq!(at(ctrl(KeyCode::Char('f'))), Action::ToggleSearchFiles);
         assert_eq!(at(ctrl(KeyCode::Char('c'))), Action::CtrlC);
         assert_eq!(at(key(KeyCode::Enter)), Action::SearchFilesSubmit);
-        for (c, option) in [
-            ('c', SearchFilesOption::Case),
-            ('w', SearchFilesOption::WholeWord),
-            ('r', SearchFilesOption::Regex),
-        ] {
-            assert_eq!(
-                at(with_mods(c, KeyModifiers::ALT)),
-                Action::SearchFilesToggleOption(option),
-                "Alt-{c}"
-            );
-        }
         assert_eq!(at(with_mods('x', KeyModifiers::ALT)), Action::None);
         assert_eq!(at(ctrl(KeyCode::Char('x'))), Action::None);
+    }
+
+    #[test]
+    fn search_files_alt_c_w_r_do_nothing_in_either_zone() {
+        // Alt chords can close the terminal window on some hosts, so no Alt
+        // chord toggles an option (the chips take a click) or types.
+        let alt_shift = KeyModifiers::ALT | KeyModifiers::SHIFT;
+        for results in [false, true] {
+            for c in ['c', 'w', 'r', 'C', 'W', 'R'] {
+                for mods in [KeyModifiers::ALT, alt_shift] {
+                    assert_eq!(
+                        event_to_action(&with_mods(c, mods), search_files(results), false, false),
+                        Action::None,
+                        "{mods:?} {c} (results zone: {results})"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -3650,21 +3692,63 @@ mod tests {
         assert_eq!(at(key(KeyCode::Enter)), Action::SearchFilesSubmit);
         assert_eq!(at(key(KeyCode::Backspace)), Action::SearchFilesBackspace);
         assert_eq!(at(key(KeyCode::Tab)), Action::SearchFilesToggleScope);
-        assert_eq!(
-            at(with_mods('r', KeyModifiers::ALT)),
-            Action::SearchFilesToggleOption(SearchFilesOption::Regex)
-        );
         assert_eq!(at(key(KeyCode::Esc)), Action::SearchFilesCancel);
     }
 
     #[test]
-    fn search_files_swallows_the_mouse_and_repeats_typing() {
+    fn search_files_mouse_maps_left_click_and_motion_only() {
         use crate::tui::tty::{decode_sgr_mouse, sgr_mouse_report, SGR_POINTER_MOVE};
         let moved = decode_sgr_mouse(&sgr_mouse_report(SGR_POINTER_MOVE, 30, 0)).unwrap();
+        let mouse = |kind: MouseEventKind, modifiers: KeyModifiers| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column: 30,
+                row: 2,
+                modifiers,
+            })
+        };
+        for results in [false, true] {
+            let at = |event: &Event| event_to_action(event, search_files(results), false, false);
+            assert_eq!(at(&moved), Action::PointerMove { col: 30, row: 0 });
+            assert_eq!(
+                at(&mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    KeyModifiers::NONE
+                )),
+                Action::Click { col: 30, row: 2 }
+            );
+            for (kind, modifiers) in [
+                (
+                    MouseEventKind::Down(MouseButton::Left),
+                    KeyModifiers::CONTROL,
+                ),
+                (MouseEventKind::Down(MouseButton::Right), KeyModifiers::NONE),
+                (
+                    MouseEventKind::Down(MouseButton::Middle),
+                    KeyModifiers::NONE,
+                ),
+                (MouseEventKind::Up(MouseButton::Left), KeyModifiers::NONE),
+                (MouseEventKind::Drag(MouseButton::Left), KeyModifiers::NONE),
+                (MouseEventKind::ScrollDown, KeyModifiers::NONE),
+                (MouseEventKind::ScrollUp, KeyModifiers::SHIFT),
+                (MouseEventKind::ScrollLeft, KeyModifiers::NONE),
+            ] {
+                assert_eq!(
+                    at(&mouse(kind, modifiers)),
+                    Action::None,
+                    "{kind:?} {modifiers:?}"
+                );
+            }
+        }
+        // Quick Open still drops every mouse event.
         assert_eq!(
-            event_to_action(&moved, search_files(false), false, false),
+            event_to_action(&moved, InputMode::QuickOpen, false, false),
             Action::None
         );
+    }
+
+    #[test]
+    fn search_files_repeats_typing_but_not_enter_or_e() {
         assert_eq!(
             event_to_action(
                 &key_kind(KeyCode::Char('a'), KeyEventKind::Repeat),
@@ -3862,7 +3946,7 @@ mod tests {
         };
         let n = normal();
         let rows: Vec<(InputMode, u8, KeyCode, Action)> = vec![
-            (n, 0, Char('T'), Action::CycleTheme),
+            (n, 0, Char('T'), Action::None),
             (n, 0, Char('t'), Action::ToggleTreeMode),
             (n, 0, Char('q'), Action::Quit),
             (n, 0, Char('?'), Action::ToggleHelp),

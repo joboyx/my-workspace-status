@@ -52,7 +52,7 @@ fn raw_gg(tui: &mut PtySession) {
 /// Two raw `g` bytes must `MoveToStart`. Raw `gt` / `gT` must switch tabs.
 ///
 /// A no-op `gg` stays on the mid-list row. A wrong-key `gt` / `gT` fires
-/// Flat paths or a theme cycle. This path is two Presses, not CSI-u.
+/// Flat paths or a theme toast. This path is two Presses, not CSI-u.
 #[test]
 fn pty_raw_gg_jumps_and_gt_stays_tab_switch() {
     let (_root, workspace) = compare_ahead_workspace();
@@ -141,7 +141,7 @@ fn pty_raw_gg_jumps_and_gt_stays_tab_switch() {
     tui.key('T');
     tui.wait_pred(
         |screen| on_compare_origin_main(screen) && !tree_or_theme_fired(screen),
-        "raw gT from vs main is PreviousTab, not CycleTheme",
+        "raw gT from vs main is PreviousTab and sets no theme",
         WAIT,
     );
 }

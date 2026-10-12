@@ -9,7 +9,7 @@ use crate::support::{apply_current_keep_graph_focus, graph_focus_cleared_full, G
 /// ancestors of those tips. `O` restores `--all`. Shift+O is CSI-u
 /// (`CSI 111 ; 2 : 1 u` press, `: 3` release), not a raw `'O'` byte. A
 /// no-op, an Enter files drill, `/` SEARCH, overlay Enter on `main`, or
-/// another Shift binding (stash / theme / `G`) cannot pass.
+/// another Shift binding (stash / `G`) cannot pass.
 /// Unmark-then-Enter stays on `pty_graph_focus_unmark_enter_clears`.
 #[test]
 fn pty_graph_branch_focus_overlay() {

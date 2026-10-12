@@ -1,8 +1,9 @@
 //! Persist the last-used TUI theme in a state file.
 //!
-//! The theme that `T` picks is state, not config: it lives in its own JSON
-//! file (`$XDG_STATE_HOME/my-workspace-status/theme.json`) and the user
-//! config file is never written. [`crate::settings::Settings`] loads it at
+//! The theme that a palette `Theme: …` row sets is state, not config: it
+//! lives in its own JSON file
+//! (`$XDG_STATE_HOME/my-workspace-status/theme.json`) and the user config
+//! file is never written. [`crate::settings::Settings`] loads it at
 //! launch; see [`super::theme::theme_id_from`] for the precedence.
 
 use std::fs;

@@ -4,9 +4,9 @@ use std::process::{Command, Stdio};
 use crate::harness::PtySession;
 use crate::seed::{git_env, worktree_workspace};
 use crate::support::{
-    ack_rows, after_ack, crumb_row, no_mouse_toggle_toast, status_row, title_has_files,
-    tree_cursor_on, tree_has, tree_line_containing, tree_line_has_leading_worktree_icon,
-    tree_pane_focused, GIT_WAIT, SETTLE_MS, WAIT,
+    ack_rows, after_ack, crumb_row, merge_mark_after, no_mouse_toggle_toast, status_row,
+    title_has_files, tree_cursor_on, tree_has, tree_line_containing,
+    tree_line_has_leading_worktree_icon, tree_pane_focused, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 const LINKED_PATH: &str = "app/.worktrees/feat";
@@ -62,7 +62,7 @@ fn family_and_linked_on_tree(screen: &str) -> bool {
         && tree_has(screen, "2 wt")
         && linked.is_some_and(|line| {
             tree_line_has_leading_worktree_icon(&line, LINKED_BRANCH)
-                && line.contains("linked-open o")
+                && merge_mark_after(&line, LINKED_BRANCH).as_deref() == Some("o")
         })
 }
 

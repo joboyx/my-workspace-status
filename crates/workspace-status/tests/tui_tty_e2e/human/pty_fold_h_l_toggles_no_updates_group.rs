@@ -1,9 +1,9 @@
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    crumb_row, idle_dirty_readme_unstaged, no_updates_group_folded, no_wrong_overlays, status_row,
-    tree_cursor_on, tree_dir_collapsed, tree_dir_expanded, tree_has, tree_line_containing,
-    GIT_WAIT, WAIT,
+    crumb_row, idle_dirty_readme_unstaged, line_on_branch, no_updates_group_folded,
+    no_wrong_overlays, status_row, tree_cursor_on, tree_dir_collapsed, tree_dir_expanded, tree_has,
+    tree_line_containing, GIT_WAIT, WAIT,
 };
 
 /// Open No-updates group: expanded chevron, `lib` on the tree.
@@ -19,7 +19,7 @@ fn no_updates_group_open(screen: &str) -> bool {
         && line.contains('v')
         && line.contains('1')
         && lib.contains('@')
-        && lib.contains("& main")
+        && line_on_branch(&lib, "main")
 }
 
 fn fold_hl_no_wrong_chrome(screen: &str) -> bool {

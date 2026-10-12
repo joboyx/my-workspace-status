@@ -64,7 +64,7 @@ fn on_compare_local_main(screen: &str) -> bool {
         && !screen.contains("# workspace")
 }
 
-/// ToggleTreeMode toast / pill, or CycleTheme toast.
+/// ToggleTreeMode toast / pill, or a `theme:` toast (no key sets a theme).
 fn tree_or_theme_fired(screen: &str) -> bool {
     let crumb = crumb_row(screen);
     let status = status_row(screen);
@@ -77,7 +77,7 @@ fn tree_or_theme_fired(screen: &str) -> bool {
 /// On a compare tab, typeless CSI-u `gt` / `gT` must change the active tab.
 ///
 /// A strip label or `COMMITTED` text from another tab is not enough.
-/// `ToggleTreeMode` (`Flat paths` / ` flat`) or `CycleTheme`
+/// `ToggleTreeMode` (`Flat paths` / ` flat`) or a theme toast
 /// (`theme:`) must fail. Start on the last compare (user POV), not after a
 /// raw-`g` jump that hid the VTE release-as-press hole.
 #[test]
@@ -104,7 +104,7 @@ fn pty_compare_gt_chords_and_gg() {
     tui.shift_letter('T');
     tui.wait_pred(
         |screen| on_compare_local_main(screen) && !tree_or_theme_fired(screen),
-        "gT from Workspace is PreviousTab back to vs main, not CycleTheme",
+        "gT from Workspace is PreviousTab back to vs main and sets no theme",
         WAIT,
     );
 

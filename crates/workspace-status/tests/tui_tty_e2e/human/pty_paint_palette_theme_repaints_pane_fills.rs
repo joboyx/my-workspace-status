@@ -1,11 +1,11 @@
 use crate::harness::{PtySession, UserConfig, COLS, ROWS};
 use crate::seed::daily_workspace;
 use crate::support::{
-    crumb_row, flat_join_col, flat_pane_last_row, FLAT_TITLE_ROW, SLATE_CHROME, SLATE_SIDEBAR,
-    SLATE_SURFACE, WAIT,
+    apply_palette_theme, crumb_row, flat_join_col, flat_pane_last_row, FLAT_TITLE_ROW,
+    SLATE_CHROME, SLATE_SIDEBAR, SLATE_SURFACE, WAIT,
 };
 
-/// Solarized Dark, the theme after Slate in the `T` cycle. It sets no
+/// Solarized Dark, the palette row after Slate. It sets no
 /// sidebar / chrome, so those follow the default rule: `surface` mixed 22%
 /// (sidebar) and 38% (chrome) toward black.
 const SOLARIZED_SURFACE: (u8, u8, u8) = (0x00, 0x2b, 0x36);
@@ -35,18 +35,19 @@ fn pane_fills(
         && bg_at(tui, ROWS - 1, COLS - 1) == Some(chrome)
 }
 
-/// Shift+T in paint mode repaints the pane fills with the next theme.
+/// A palette theme row in paint mode repaints the pane fills.
 ///
-/// Docs: `T` cycles the colour theme; in paint mode each theme fills the
-/// left pane with `sidebar`, the right pane with `surface`, and the bars
-/// with `chrome`.
+/// Docs: a palette `Theme: <name>` row sets the colour theme; in paint
+/// mode each theme fills the left pane with `sidebar`, the right pane with
+/// `surface`, and the bars with `chrome`.
 ///
-/// Live PTY on the shipped look (no user config, Slate): CSI-u Shift+T
-/// toasts `theme: Solarized Dark`, and the left, right and chrome cells take
-/// Solarized's fills. No Slate fill remains. A toast-only no-op, or a theme
-/// that changes text but keeps the pane fills, cannot pass.
+/// Live PTY on the shipped look (no user config, Slate): `:`
+/// `solarized-dark` Enter toasts `theme: Solarized Dark`, and the left,
+/// right and chrome cells take Solarized's fills. No Slate fill remains. A
+/// toast-only no-op, or a theme that changes text but keeps the pane
+/// fills, cannot pass.
 #[test]
-fn pty_paint_shift_t_repaints_pane_fills() {
+fn pty_paint_palette_theme_repaints_pane_fills() {
     let (_root, workspace) = daily_workspace();
     let mut tui = PtySession::open_size_with_config(&workspace, COLS, ROWS, &[], UserConfig::Own);
     tui.wait_pred(
@@ -59,7 +60,7 @@ fn pty_paint_shift_t_repaints_pane_fills() {
         WAIT,
     );
 
-    tui.shift_letter('T');
+    apply_palette_theme(&mut tui, "solarized-dark", "Solarized Dark");
     tui.wait_pred(
         |screen| {
             screen.contains("theme: Solarized Dark")
@@ -68,7 +69,7 @@ fn pty_paint_shift_t_repaints_pane_fills() {
                     .iter()
                     .all(|&(r, g, b)| !tui.has_rgb(r, g, b))
         },
-        "Shift+T: Solarized Dark toast, Solarized sidebar / surface / chrome fills, \
+        "Theme: Solarized Dark row: toast, Solarized sidebar / surface / chrome fills, \
          and no Slate fill left",
         WAIT,
     );

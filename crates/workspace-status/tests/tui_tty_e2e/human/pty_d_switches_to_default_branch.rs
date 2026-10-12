@@ -6,8 +6,9 @@ use crate::harness::PtySession;
 use crate::seed::{daily_workspace, focus_workspace, git_env};
 use crate::support::{
     ack_rows, after_ack, crumb_row, documented_launch_first_paint, focusbox_graph_left_full,
-    has_fetch_hint, launch_status_chrome, not_files_search_or_stash, status_row, title_has_files,
-    tree_cursor_on, tree_has, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
+    has_fetch_hint, launch_status_chrome, line_on_branch, not_files_search_or_stash, status_row,
+    title_has_files, tree_cursor_on, tree_has, tree_has_branch, tree_line_containing, GIT_WAIT,
+    SETTLE_MS, WAIT,
 };
 
 fn git_stdout(repo: &Path, args: &[&str]) -> String {
@@ -74,13 +75,13 @@ fn has_default_branch_hint(screen: &str) -> bool {
 fn focusbox_tree_on_keep(screen: &str) -> bool {
     tree_has(screen, "feature/keep")
         && tree_line_containing(screen, "focusbox")
-            .is_some_and(|line| line.contains("feature/keep") && !line.contains("& main"))
+            .is_some_and(|line| line.contains("feature/keep") && !line_on_branch(&line, "main"))
 }
 
 fn focusbox_tree_on_main(screen: &str) -> bool {
-    tree_has(screen, "& main")
+    tree_has_branch(screen, "main")
         && tree_line_containing(screen, "focusbox")
-            .is_some_and(|line| line.contains("& main") && !line.contains("feature/keep"))
+            .is_some_and(|line| line_on_branch(&line, "main") && !line.contains("feature/keep"))
         && !tree_has(screen, "feature/keep")
 }
 
@@ -136,7 +137,7 @@ fn idle_focusbox_on_keep(screen: &str) -> bool {
         && focusbox_tree_on_keep(screen)
         && keep_is_checked_out(screen)
         && !tree_has(screen, "No updates")
-        && !tree_has(screen, "& main")
+        && !tree_has_branch(screen, "main")
         && has_default_branch_hint(screen)
         && has_fetch_hint(screen)
         && status.contains(" tree")
@@ -147,7 +148,7 @@ fn idle_focusbox_on_keep(screen: &str) -> bool {
         && no_wrong_d_overlays(screen)
 }
 
-/// Checkout paint after `d`: tree `& main`, graph chip `[+main]`.
+/// Checkout paint after `d`: tree branch `main`, graph chip `[+main]`.
 fn switched_checkout_paint(screen: &str) -> bool {
     let status = status_row(screen);
     tree_cursor_on(screen, "focusbox")
@@ -225,7 +226,7 @@ fn documented_d_file_row_says_why(screen: &str) -> bool {
 ///
 /// Live PTY after first paint (cursor already on `focusbox`,
 /// `feature/keep`): raw `d` ran `git checkout` of `main`. Git HEAD is
-/// `main` / `main-leaf-commit`. Tree shows `& main` and leaves
+/// `main` / `main-leaf-commit`. Tree shows branch `main` and leaves
 /// `feature/keep`. Graph shows `main-leaf-commit` and `[+main]` (not a
 /// gutter `@` on that subject row). Toast is `Switched 1 repo`. The `d`
 /// hint goes. A second `d` toasts
@@ -254,7 +255,7 @@ fn pty_d_switches_to_default_branch() {
     tui.key('d');
     tui.wait_pred(
         after_ack("Switched 1 repo", documented_d_switched_to_main),
-        "d checks out main: Switched 1 repo, tree & main, [+main]",
+        "d checks out main: Switched 1 repo, tree on main, [+main]",
         GIT_WAIT,
     );
     tui.wait_ms(SETTLE_MS);

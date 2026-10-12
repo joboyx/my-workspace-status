@@ -543,10 +543,13 @@ impl AppState {
         painted.rect.contains(Position::new(col, row))
     }
 
-    /// The painted icon under [`Self::pointer`]. An icon under the painted
-    /// popover is not hovered.
+    /// The painted icon under [`Self::pane_pointer`]. An icon under the
+    /// painted popover, or under the open search-in-files dialog, is not
+    /// hovered.
     pub fn hovered_icon(&self) -> Option<&IconHit> {
-        let (col, row) = self.pointer?;
+        // The search dialog keeps the pointer for its chips; pane_pointer
+        // hides it from the icons the dialog covers, so no peek arms.
+        let (col, row) = self.pane_pointer()?;
         if self.pointer_in_popover() {
             return None;
         }
@@ -1054,6 +1057,24 @@ mod tests {
         assert!(!app.expire_peek(t2 + ms(PEEK_GRACE_MS - 1)));
         assert!(app.expire_peek(t2 + ms(PEEK_GRACE_MS)));
         assert!(app.popover.is_none(), "grace ended");
+    }
+
+    #[test]
+    fn icons_under_the_search_dialog_do_not_hover_or_arm_a_peek() {
+        let mut app = app();
+        app.dispatch(Action::ToggleSearchFiles);
+        paint(&mut app);
+        let hit = sync_hit(&app, "repo:app");
+        let t0 = Instant::now();
+        assert!(
+            !app.set_pointer_at(Some((hit.x, hit.y)), t0),
+            "no icon hover under the dialog"
+        );
+        assert!(app.hovered_icon().is_none());
+        assert_eq!(app.peek_remaining_ms(t0), None, "no dwell armed");
+
+        app.dispatch(Action::SearchFilesCancel);
+        assert!(app.hovered_icon().is_some(), "closed: the icon hovers");
     }
 
     #[test]

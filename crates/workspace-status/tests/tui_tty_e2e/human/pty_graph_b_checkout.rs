@@ -5,8 +5,8 @@ use crate::harness::PtySession;
 use crate::seed::{focus_workspace, git_env};
 use crate::support::{
     ack_rows, after_ack, crumb_row, focusbox_graph_left_full, graph_cursor_on, graph_pane_focused,
-    graph_subject_meta_line, no_mouse_toggle_toast, status_row, title_has_files, tree_has,
-    tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
+    graph_subject_meta_line, line_on_branch, no_mouse_toggle_toast, status_row, title_has_files,
+    tree_has, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 const BRANCH: &str = "topic/noise";
@@ -90,7 +90,9 @@ fn focusbox_tree_on_keep(screen: &str) -> bool {
 fn focusbox_tree_on_noise(screen: &str) -> bool {
     tree_has(screen, BRANCH)
         && tree_line_containing(screen, "focusbox").is_some_and(|line| {
-            line.contains(BRANCH) && !line.contains("feature/keep") && !line.contains("& main")
+            line.contains(BRANCH)
+                && !line.contains("feature/keep")
+                && !line_on_branch(&line, "main")
         })
 }
 

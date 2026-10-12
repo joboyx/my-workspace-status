@@ -88,14 +88,21 @@ pub fn classify_busy_action(action: &Action) -> BusyAction {
 /// highlighted catalog action, [`Action::PopoverRun`] the focused popover
 /// action, and an [`Action::Release`] on a pinned popover action line runs
 /// that line, so busy classification uses that inner action when
-/// provided. Quick Open nav / typing stay [`BusyAction::Handle`]. Submit
-/// with no inner action (files mode, empty list, a field line) stays Handle
-/// (same as [`classify_busy_action`]).
-pub fn classify_busy_dispatch(action: &Action, palette_submit: Option<&Action>) -> BusyAction {
-    match (action, palette_submit) {
-        (Action::QuickOpenSubmit | Action::PopoverRun | Action::Release, Some(inner)) => {
-            classify_busy_action(inner)
-        }
+/// provided. `y` / `Y` on the push confirm pass [`Action::Push`] as the
+/// inner action: a push is a remote op, not an exclusive write. Quick Open
+/// nav / typing stay [`BusyAction::Handle`]. Submit with no inner action
+/// (files mode, empty list, a field line) stays Handle (same as
+/// [`classify_busy_action`]).
+pub fn classify_busy_dispatch(action: &Action, inner_action: Option<&Action>) -> BusyAction {
+    match (action, inner_action) {
+        (
+            Action::QuickOpenSubmit
+            | Action::PopoverRun
+            | Action::Release
+            | Action::ConfirmYes
+            | Action::ConfirmYesClean,
+            Some(inner),
+        ) => classify_busy_action(inner),
         _ => classify_busy_action(action),
     }
 }
@@ -338,6 +345,27 @@ mod tests {
         assert_eq!(
             classify_busy_dispatch(&Action::QuickOpenSubmit, None),
             BusyAction::Handle
+        );
+    }
+
+    /// `y` on the push confirm stays live during a write; other confirms drain.
+    #[test]
+    fn push_confirm_yes_classifies_as_push() {
+        assert_eq!(
+            classify_busy_dispatch(&Action::ConfirmYes, Some(&Action::Push)),
+            BusyAction::Handle
+        );
+        assert_eq!(
+            classify_busy_dispatch(&Action::ConfirmYesClean, Some(&Action::Push)),
+            BusyAction::Handle
+        );
+        assert_eq!(
+            classify_busy_dispatch(&Action::ConfirmYes, None),
+            BusyAction::Ignore
+        );
+        assert_eq!(
+            classify_busy_dispatch(&Action::ConfirmYesClean, None),
+            BusyAction::Ignore
         );
     }
 

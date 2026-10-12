@@ -30,17 +30,14 @@ fn help_lists_t_and_i(screen: &str) -> bool {
                 && line.contains("inline / split")
                 && line.contains("wrap")
                 && !line.contains("flat / tree")
-                && !line.contains("cycle theme")
         })
         && screen.lines().any(|line| {
             line.contains("t")
                 && line.contains("flat / tree")
                 && !line.contains("inline / split")
-                && !line.contains("cycle theme")
         })
-        && screen.lines().any(|line| {
-            line.contains("T") && line.contains("cycle theme") && !line.contains("flat / tree")
-        })
+        // Themes are palette rows: no `T` cycle theme line sits next to `t`.
+        && !screen.contains("cycle theme")
 }
 
 fn cursor_on_src_dir(screen: &str) -> bool {
@@ -221,7 +218,7 @@ fn pty_t_and_i_toggle_view_modes() {
     tui.key('?');
     tui.wait_pred(
         help_lists_t_and_i,
-        "help VIEW lists i inline/split and t flat/tree as distinct from T theme",
+        "help VIEW lists i inline/split and t flat/tree as distinct rows, no T theme row",
         WAIT,
     );
     tui.esc();

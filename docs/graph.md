@@ -35,7 +35,7 @@ clones only that row (the focused-row lookups use it).
 | `PartTarget` | Chip identity: `Chip(refs)` (one ref, or a local branch and its same-name remote), `Marks { branch, checkout, remote }`, `DetachedHead`, `Overflow(hidden chips)` |
 | `GraphLabelPalette` | Label colours: subject, meta, chips, overflow, worktree glyph, dirty uncommitted glyph, open and resolved comment marks, sync header ahead and behind counts |
 | `graph_scrollbar_thumb` | Thumb offset/length matching a painted bar (TUI hit-test, vertical or horizontal) |
-| `graph_col_max` | Max `col_offset` for the longest label in the pane, counting the space and glyph of each `row_badges` entry |
+| `graph_col_max` | Max `col_offset` that brings the end of the longest label into the pane; a `row_badges` row has the glyph and one space less room |
 | `graph_vscroll_visible` / `graph_hscroll_visible` | Show the vertical bar whenever the painted lines overflow the list (or it has left the top); the horizontal bar only after leaving the left edge |
 | `Action` | `ToggleShowIgnored` and `SetShowIgnored` |
 | `Effect` | `None` today. Dispatch stays pure. |
@@ -57,7 +57,7 @@ reads the count the last frame recorded (`graph_content_len`).
 uses the full lane model; every row shares the same left-aligned clip. `GraphWidget::lane_colors` colours each
 gutter cell from `GraphCell.color_lane`; an empty slice uses
 `DEFAULT_LANE_COLORS`. The TUI passes the active built-in theme's eight
-colours (`T` cycles).
+colours (palette `Theme: <name>` rows set it).
 `GraphWidget::search_matches` paints the filter/search background on
 selectable visible-row indexes and paints their rails, comment mark, and
 label in the filter foreground, so lane, chip, and cursor colours that
@@ -88,15 +88,24 @@ The widget does not use reverse video for the cursor.
 `GraphWidget::col_offset` skips label columns (gutter stays put) so long
 subjects can pan without growing the row.
 `GraphWidget::row_badges` takes `(visible-row index, glyph, colour)`
-entries and paints the glyph one space after the label of those selectable
-rows. The badge pans and clips with the label (`col_offset`, pane width).
-It does not change the gutter, and rows that are not listed reserve no
-column. A search-match row paints the badge in the filter foreground.
+entries and paints the glyph flush right on those selectable rows: in the
+last columns before the vertical scrollbar column, the same right edge that
+bounds the label. The label gets the columns left of the badge less one
+space and clips there, so a narrow pane cuts the label, never the badge.
+When the room after the gutter and comment mark is narrower than the glyph,
+the glyph keeps its right edge and drops what does not fit from the left (a
+one-column glyph fits or is left out). `col_offset` pans the label only; the
+badge stays at the right edge. The badge does not change the gutter, and
+rows that are not listed reserve no column. The gap between the label and
+the badge keeps the row background (selection, flash, search match). A
+search-match row paints the badge in the filter foreground.
 `GraphWidget::render_with_icon_spans` returns one `GraphIconKind::Badge`
 span per badge that is on screen, so the caller can hit-test it (see
-**Icon spans**). A badge that is scrolled out, panned past, clipped, or under the
-horizontal scrollbar is left out. Pass the same entries to `graph_col_max`
-so panning can bring a badge on a long label into view. The TUI badges
+**Icon spans**). A badge that is scrolled out, left out for lack of room, or
+under the horizontal scrollbar has no span. Pass the same entries to
+`graph_col_max`: it measures a badged row against the label viewport less
+the glyph and space, so panning can bring the end of a long label into view
+left of the badge. The TUI badges
 `GraphRow::Worktree` rows whose painted branch is the checkout's current
 branch and that have a known PR (open, approved, or merged), and records
 the spans for Ctrl+click. A graph loaded before a branch switch paints the
@@ -107,7 +116,8 @@ old branch and gets no badge. Commit rows get no badge.
 `GraphWidget::render_with_icon_spans` paints like `render` and returns one
 `IconSpan` per graph icon on screen, top to bottom: the sync header, then
 per list line in paint order (node, comment mark, label glyphs and chips
-left to right, badge), then the selection footer's chips and hint.
+left to right, then the badge at the right edge), then the selection
+footer's chips and hint.
 
 | `GraphIconKind` | Where |
 | --- | --- |
@@ -115,7 +125,7 @@ left to right, badge), then the selection footer's chips and hint.
 | `Uncommitted` | The `○` / `o` glyph that starts the uncommitted row label |
 | `Worktree` | The worktree glyph that starts a worktree row label, and each worktree mark on a commit spacer. `part` is the index into that commit row's `worktrees` (`0` on a worktree row). The span's `row_index` is the commit row. |
 | `Comment` / `ResolvedComment` | The comment mark after the gutter |
-| `Badge` | A `row_badges` glyph |
+| `Badge` | A `row_badges` glyph, flush right in the label area. It does not pan. |
 | `LocalChip` / `DefaultChip` / `RemoteChip` / `TagChip` | A ref chip on a commit spacer or in the selection footer. `target` is its `PartTarget::Chip` |
 | `ChipMarks` | The checkout and sync marks inside a branch chip. One run, so one span: `target` is `PartTarget::Marks` with both flags |
 | `DetachedHeadChip` | Detached `[HEAD]` |

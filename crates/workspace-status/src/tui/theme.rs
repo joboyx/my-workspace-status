@@ -5,10 +5,10 @@
 //! the theme surface and on the `sidebar`, `chrome`, and `panel`
 //! backgrounds. Launch seed is `WS_STATUS_THEME`, then the last-used theme
 //! from the state file, then the config `theme` key, then
-//! [`DEFAULT_THEME_ID`] (Slate) ([`theme_id_from`]). `T` cycles the theme
-//! inside its own list ([`DARK_THEME_IDS`] or [`LIGHT_THEME_IDS`]), so it
-//! never flips light / dark. The last-used theme lives in its own state
-//! file ([`super::theme_store`]), never in the config file.
+//! [`DEFAULT_THEME_ID`] (Slate) ([`theme_id_from`]). The command palette
+//! has a `Theme: …` row per theme, dark then light ([`THEME_IDS`]):
+//! focusing one previews it, Enter sets it. The last-used theme lives in
+//! its own state file ([`super::theme_store`]), never in the config file.
 
 use ratatui::style::Color;
 
@@ -60,7 +60,8 @@ pub enum ThemeId {
     GithubLight,
 }
 
-/// Dark themes in `T` cycle order.
+/// Dark themes in palette row order. [`THEME_IDS`] lists them first,
+/// then [`LIGHT_THEME_IDS`].
 pub const DARK_THEME_IDS: [ThemeId; 13] = [
     ThemeId::TokyoNight,
     ThemeId::Monokai,
@@ -77,7 +78,7 @@ pub const DARK_THEME_IDS: [ThemeId; 13] = [
     ThemeId::GithubDarkDimmed,
 ];
 
-/// Light themes in `T` cycle order: index `i` is the twin of
+/// Light themes in palette row order: index `i` is the twin of
 /// `DARK_THEME_IDS[i]`.
 pub const LIGHT_THEME_IDS: [ThemeId; 13] = [
     ThemeId::TokyoNightDay,
@@ -95,7 +96,8 @@ pub const LIGHT_THEME_IDS: [ThemeId; 13] = [
     ThemeId::GithubLight,
 ];
 
-/// Every built-in theme: [`DARK_THEME_IDS`], then [`LIGHT_THEME_IDS`].
+/// Every built-in theme in palette row order (`Theme: …` rows):
+/// [`DARK_THEME_IDS`], then [`LIGHT_THEME_IDS`].
 pub const THEME_IDS: [ThemeId; 26] = [
     ThemeId::TokyoNight,
     ThemeId::Monokai,
@@ -537,7 +539,7 @@ impl ThemeId {
         }
     }
 
-    /// Graph gutter colours for `T`.
+    /// Graph gutter colours of this theme.
     pub fn lane_colors(self) -> [Color; 8] {
         self.theme().lane_colors.map(hex_color)
     }
@@ -1948,22 +1950,6 @@ pub fn theme_id_from(
         .unwrap_or(DEFAULT_THEME_ID)
 }
 
-/// Next theme id in the current theme's own list ([`DARK_THEME_IDS`] or
-/// [`LIGHT_THEME_IDS`], wraps), so `T` never flips light / dark.
-pub fn cycle_theme_id(current: ThemeId) -> ThemeId {
-    let dark = current.dark_variant();
-    let index = DARK_THEME_IDS
-        .iter()
-        .position(|id| *id == dark)
-        .unwrap_or(0);
-    let next = DARK_THEME_IDS[(index + 1) % DARK_THEME_IDS.len()];
-    if current.is_light() {
-        next.light_variant()
-    } else {
-        next
-    }
-}
-
 /// Parse `#rrggbb` into a ratatui colour. Invalid hex falls back to white.
 pub fn hex_color(hex: &str) -> Color {
     let bytes = hex.strip_prefix('#').unwrap_or(hex);
@@ -2087,7 +2073,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cycle_order_and_wrap() {
+    fn theme_ids_order_slugs_and_labels() {
         let order = [
             ThemeId::TokyoNight,
             ThemeId::Monokai,
@@ -2163,22 +2149,6 @@ mod tests {
         for id in THEME_IDS {
             assert_eq!(id.theme().id, id, "{id:?} preset id");
         }
-        for list in [DARK_THEME_IDS, LIGHT_THEME_IDS] {
-            let mut id = list[0];
-            let mut seen = Vec::new();
-            for _ in 0..list.len() {
-                id = cycle_theme_id(id);
-                seen.push(id);
-            }
-            let mut expected = list[1..].to_vec();
-            expected.push(list[0]);
-            assert_eq!(seen, expected, "T walks its list once and wraps");
-        }
-        assert_eq!(
-            cycle_theme_id(ThemeId::GithubDarkDimmed),
-            ThemeId::TokyoNight
-        );
-        assert_eq!(cycle_theme_id(ThemeId::GithubLight), ThemeId::TokyoNightDay);
     }
 
     #[test]
@@ -2276,19 +2246,6 @@ mod tests {
             let surface_l = relative_luminance(hex_color(theme.surface));
             assert!(surface_l > 0.5, "{id:?} surface must be light");
         }
-    }
-
-    #[test]
-    fn cycle_stays_within_polarity() {
-        for id in THEME_IDS {
-            let mut next = id;
-            for _ in 0..DARK_THEME_IDS.len() {
-                next = cycle_theme_id(next);
-                assert_eq!(next.is_light(), id.is_light(), "{id:?} -> {next:?}");
-            }
-            assert_eq!(next, id, "{id:?} wraps after one lap of its list");
-        }
-        assert_eq!(cycle_theme_id(ThemeId::SlateLight), ThemeId::SolarizedLight);
     }
 
     #[test]

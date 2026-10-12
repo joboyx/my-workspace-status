@@ -3,10 +3,10 @@ use std::path::Path;
 
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
-use crate::support::WAIT;
+use crate::support::{apply_palette_theme, WAIT};
 
 /// Painted chrome for the themes these tests launch into. Values match
-/// `pty_shift_t_csi_u_cycles_theme`; each is unique across the built-ins.
+/// `pty_palette_theme_rows`; each is unique across the built-ins.
 struct ThemeChrome {
     id: &'static str,
     surface: (u8, u8, u8),
@@ -74,15 +74,15 @@ fn seed_theme_store(path: &Path, theme: &str) {
     .unwrap();
 }
 
-/// Operator repro: `T` picks a theme, quit, relaunch, the theme is kept.
+/// A palette theme row picks a theme; quit, relaunch, the theme is kept.
 ///
 /// The baseline user config theme is Tokyo Night and no `WS_STATUS_THEME`
-/// is set. One CSI-u Shift+T cycles to Monokai, which the store at the
+/// is set. `:` `monokai` Enter applies Monokai, which the store at the
 /// shared `WS_STATUS_THEME_STORE` path must hold. `q` quits. A second
 /// launch with the same store must paint Monokai, not the config Tokyo
-/// Night and not the Slate default. A session-only `T` cannot pass.
+/// Night and not the Slate default. A session-only apply cannot pass.
 #[test]
-fn pty_theme_cycle_survives_restart() {
+fn pty_palette_theme_survives_restart() {
     let (_root, workspace) = daily_workspace();
     let theme_store = workspace.join(".e2e-state").join("theme-restart.json");
     let store = theme_store.to_str().expect("utf-8 store path");
@@ -90,21 +90,20 @@ fn pty_theme_cycle_survives_restart() {
 
     let mut first = PtySession::open_with_env(&workspace, &env);
     wait_active_theme(&first, &TOKYO_NIGHT);
-    first.shift_letter('T');
-    first.wait_contains("theme: Monokai", WAIT);
+    apply_palette_theme(&mut first, "monokai", "Monokai");
     wait_active_theme(&first, &MONOKAI);
     first.key('q');
     first.wait_exit(WAIT);
 
     let stored = fs::read_to_string(&theme_store).unwrap_or_else(|err| {
         panic!(
-            "`T` must save the theme store {}: {err}",
+            "Enter on `Theme: Monokai` must save the theme store {}: {err}",
             theme_store.display()
         )
     });
     assert!(
         stored.contains("\"monokai\""),
-        "store must hold the cycled theme monokai:\n{stored}"
+        "store must hold the applied theme monokai:\n{stored}"
     );
 
     // `first` stays bound: its Drop removes the fixture root.
@@ -137,6 +136,6 @@ fn pty_theme_env_beats_stored_theme() {
     assert_eq!(
         fs::read(&theme_store).unwrap(),
         seeded,
-        "a launch without `T` must leave the theme store unchanged"
+        "a launch with no palette theme pick must leave the theme store unchanged"
     );
 }

@@ -3,7 +3,7 @@ use std::fs;
 use crate::harness::{assert_contains, PtySession};
 use crate::seed::{git, watch_ahead_workspace};
 use crate::support::{
-    after_syncbox_name, crumb_row, graph_subject_line, graph_subject_meta_line,
+    after_syncbox_name, crumb_row, graph_subject_line, graph_subject_meta_line, line_on_branch,
     panes_tree_focused_graph_unfocused, status_row, tree_cursor_on, tree_has, GIT_WAIT, WAIT,
 };
 
@@ -15,7 +15,7 @@ fn refresh_now_toast(screen: &str) -> bool {
 /// Trailing ASCII ahead-by-N (`^N`) on the syncbox tree row.
 fn syncbox_row_ahead_n(screen: &str, n: &str) -> bool {
     after_syncbox_name(screen)
-        .is_some_and(|after| after.contains(&format!("^{n}")) && after.contains("& main"))
+        .is_some_and(|after| after.contains(&format!("^{n}")) && line_on_branch(&after, "main"))
 }
 
 /// HEAD is the local ahead tip. Origin still sits on the seed.

@@ -161,7 +161,7 @@ pub struct GraphWidget<'a> {
     resolved_comment_rows: &'a [usize],
     /// Glyph for [`Self::resolved_comment_rows`]. Empty uses `'`.
     resolved_comment_glyph: &'a str,
-    /// `(row index, glyph, colour)` painted after the row label.
+    /// `(row index, glyph, colour)` painted at the row's right edge.
     row_badges: &'a [(usize, &'a str, Color)],
     cursor_fg: Color,
     cursor_bg: Option<Color>,
@@ -322,15 +322,18 @@ impl<'a> GraphWidget<'a> {
         self
     }
 
-    /// Paint a badge glyph after the label of selectable rows.
+    /// Paint a badge glyph at the right edge of selectable rows.
     ///
     /// Each entry is a [`GraphModel::visible_rows`] index, the glyph (one
-    /// column), and its colour. The badge follows the label after one space
-    /// and scrolls and clips with it ([`Self::col_offset`], pane width). The
-    /// gutter is not touched. Spacers and rows not listed get no badge and
-    /// reserve no column. A search-match row paints the glyph in the search
-    /// foreground, like its label. The [`GraphIconKind::Badge`] spans of
-    /// [`Self::render_with_icon_spans`] tell where each badge landed.
+    /// column), and its colour. The badge sits flush right in the label
+    /// area (left of the vertical scrollbar column). The label gets the
+    /// columns left of it less one space and clips first, so a narrow pane
+    /// never cuts the badge. [`Self::col_offset`] pans the label only; the
+    /// badge stays put. The gutter is not touched. Spacers and rows not
+    /// listed get no badge and reserve no column. A search-match row paints
+    /// the glyph in the search foreground, like its label. The
+    /// [`GraphIconKind::Badge`] spans of [`Self::render_with_icon_spans`]
+    /// tell where each badge landed.
     pub fn row_badges(mut self, badges: &'a [(usize, &'a str, Color)]) -> Self {
         self.row_badges = badges;
         self
@@ -470,8 +473,8 @@ pub fn graph_hscroll_visible(col_offset: u16) -> bool {
 ///
 /// `vscroll` is true when the 1-column vertical bar is reserved. `badges`
 /// are the [`GraphWidget::row_badges`] entries (the colour is not read): a
-/// badged row counts its label plus the space and glyph, so pan can reach
-/// the badge.
+/// badged row's label viewport loses the glyph and one space at the right
+/// edge, so pan can bring the end of its label in view left of the badge.
 pub fn graph_col_max(
     model: &GraphModel,
     ascii: bool,
@@ -491,7 +494,7 @@ pub fn graph_col_max(
         .saturating_sub(1)
         .saturating_sub(cap)
         .saturating_sub(1);
-    let longest = model
+    model
         .visible_rows()
         .iter()
         .enumerate()
@@ -499,12 +502,17 @@ pub fn graph_col_max(
             let badge = badges
                 .iter()
                 .find(|(idx, _, _)| *idx == index)
-                .map_or(0, |(_, glyph, _)| 1 + Span::raw(*glyph).width());
-            format_label(row, glyphs).chars().count() + badge
+                .map(|(_, glyph, _)| Span::raw(*glyph).width())
+                .filter(|w| *w > 0)
+                .map_or(0, |w| w + 1);
+            let viewport = label_viewport.saturating_sub(badge).max(1);
+            format_label(row, glyphs)
+                .chars()
+                .count()
+                .saturating_sub(viewport)
         })
         .max()
-        .unwrap_or(0);
-    longest.saturating_sub(label_viewport.max(1))
+        .unwrap_or(0)
 }
 
 impl Widget for GraphWidget<'_> {
@@ -517,8 +525,8 @@ impl GraphWidget<'_> {
     /// Paint like [`Widget::render`] and return the painted cells of every
     /// graph icon that is on screen, in paint order (top to bottom: the
     /// sync header, then per list line: node, comment mark, label glyphs and
-    /// chips left to right, badge; then the selection footer's chips and
-    /// its more-lines hint).
+    /// chips left to right, the badge at the right edge; then the selection
+    /// footer's chips and its more-lines hint).
     ///
     /// Icons are the selectable line's node cell, the comment mark, the
     /// uncommitted and worktree glyphs (worktree rows and spacer worktree
@@ -528,7 +536,8 @@ impl GraphWidget<'_> {
     /// and junctions are not icons.
     /// An icon scrolled out of the list, cut by [`Self::col_offset`],
     /// clipped by the gutter cap or the pane width, or under the horizontal
-    /// scrollbar row is left out. Callers use the spans for mouse hit tests.
+    /// scrollbar row is left out. The badge does not pan, so the offset
+    /// never cuts it. Callers use the spans for mouse hit tests.
     pub fn render_with_icon_spans(self, area: Rect, buf: &mut Buffer) -> Vec<IconSpan> {
         let mut icon_spans = Vec::new();
         if area.width == 0 || area.height == 0 {
@@ -1092,52 +1101,54 @@ fn put_painted_line(
             col = col.saturating_add(1);
         }
     }
-    let label_w = end.saturating_sub(col);
-    if label_w == 0 {
-        return icons;
-    }
-    let sliced = slice_line_label(line, col_offset as usize, label_w as usize);
-    let mut spans = label_spans(&sliced, palette, fallback);
-    if let Some(fg) = match_fg {
-        for span in &mut spans {
-            span.style = span.style.fg(fg);
+    let room = end.saturating_sub(col);
+    // The badge sits flush right; the label gets the room left of it and
+    // one space, so a narrow pane clips the label, never the badge.
+    let badge = badge
+        .map(|(glyph, color)| (fit_badge_glyph(glyph, room), color))
+        .filter(|((glyph, _), _)| !glyph.is_empty());
+    let label_w = match badge {
+        Some(((_, glyph_w), _)) => room.saturating_sub(glyph_w.saturating_add(1)),
+        None => room,
+    };
+    if label_w > 0 {
+        let sliced = slice_line_label(line, col_offset as usize, label_w as usize);
+        let mut spans = label_spans(&sliced, palette, fallback);
+        if let Some(fg) = match_fg {
+            for span in &mut spans {
+                span.style = span.style.fg(fg);
+            }
         }
+        let painted = Line::from(spans);
+        let painted_w = u16::try_from(painted.width())
+            .unwrap_or(u16::MAX)
+            .min(label_w);
+        painted
+            .style(row_style)
+            .render(Rect::new(col, y, label_w, 1), buf);
+        icons.extend(label_icons(
+            line,
+            &sliced,
+            col,
+            col_offset as usize,
+            painted_w,
+        ));
     }
-    let painted = Line::from(spans);
-    let painted_w = u16::try_from(painted.width())
-        .unwrap_or(u16::MAX)
-        .min(label_w);
-    painted
-        .style(row_style)
-        .render(Rect::new(col, y, label_w, 1), buf);
-    icons.extend(label_icons(
-        line,
-        &sliced,
-        col,
-        col_offset as usize,
-        painted_w,
-    ));
-    let Some((glyph, color)) = badge else {
+    let Some(((glyph, glyph_w), color)) = badge else {
         return icons;
     };
-    // Label slicing counts chars: one space after the label, then the glyph.
-    let label_chars = line.label.chars().count();
-    let gap = match (col_offset as usize).cmp(&(label_chars + 1)) {
-        std::cmp::Ordering::Less => 1,
-        std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater => return icons,
-    };
-    let glyph_x = col.saturating_add(painted_w).saturating_add(gap);
-    let glyph_w = u16::try_from(Span::raw(glyph).width()).unwrap_or(u16::MAX);
-    if glyph.is_empty() || glyph_w == 0 || glyph_x.saturating_add(glyph_w) > end {
-        return icons;
+    let glyph_x = end.saturating_sub(glyph_w);
+    // The space and any label cells the label left blank keep the row
+    // background (selection, flash, search).
+    for gap_x in col.saturating_add(label_w)..glyph_x {
+        buf[(gap_x, y)].set_symbol(" ");
+        buf[(gap_x, y)].set_style(row_style);
     }
     let mut style = Style::default().fg(match_fg.unwrap_or(color));
     if let Some(bg) = row_bg {
         style = style.bg(bg);
     }
-    buf[(glyph_x, y)].set_symbol(glyph);
-    buf[(glyph_x, y)].set_style(style);
+    buf.set_stringn(glyph_x, y, glyph, usize::from(glyph_w), style);
     icons.push(LineIcon {
         kind: GraphIconKind::Badge,
         part: None,
@@ -1146,6 +1157,23 @@ fn put_painted_line(
         target: None,
     });
     icons
+}
+
+/// The tail of a badge `glyph` that fits in `room` columns, and its width.
+///
+/// A badge too wide for the room drops chars from the left, so its right
+/// edge stays put. An empty or zero-width glyph comes back empty.
+fn fit_badge_glyph(glyph: &str, room: u16) -> (&str, u16) {
+    let mut rest = glyph;
+    loop {
+        let w = u16::try_from(Span::raw(rest).width()).unwrap_or(u16::MAX);
+        if w <= room {
+            return if w == 0 { ("", 0) } else { (rest, w) };
+        }
+        let mut chars = rest.chars();
+        chars.next();
+        rest = chars.as_str();
+    }
 }
 
 /// Icons among the label parts of `line` that are wholly on screen.
@@ -3301,7 +3329,7 @@ mod tests {
     }
 
     #[test]
-    fn row_badge_paints_after_the_label_and_reports_its_cell() {
+    fn row_badge_paints_at_the_right_edge_and_reports_its_cell() {
         let (model, worktree_row) = badge_model();
         let badges = [(worktree_row, "P", Color::Green)];
         let (plain, none) = render_badges(&model, 80, 0, &[]);
@@ -3311,10 +3339,9 @@ mod tests {
         let span = &spans[0];
         assert_eq!((span.row_index, span.width), (Some(worktree_row), 1));
         let line = buf_row(&buf, span.y);
-        let label = "app/.worktrees/feat feature/graph";
-        let at = line.find(label).expect("worktree label") + label.len();
-        // One column per char on this row (the worktree mark is one column).
-        assert_eq!(usize::from(span.x), line[..at].chars().count() + 1);
+        assert!(line.contains("app/.worktrees/feat feature/graph"), "{line}");
+        // Flush right: the last column of the pane (no vertical bar here).
+        assert_eq!(span.x, 79);
         assert_eq!(buf[(span.x, span.y)].symbol(), "P");
         assert_eq!(buf[(span.x, span.y)].fg, Color::Green);
         assert_eq!(buf[(span.x - 1, span.y)].symbol(), " ");
@@ -3329,7 +3356,7 @@ mod tests {
     }
 
     #[test]
-    fn col_max_counts_the_badge_so_pan_can_reach_it() {
+    fn col_max_pans_the_label_end_into_view_left_of_the_badge() {
         let model = GraphModel {
             commits: vec![commit(
                 "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -3353,15 +3380,22 @@ mod tests {
         let plain = graph_col_max(&model, false, width, false, &[]);
         let badged = graph_col_max(&model, false, width, false, &badges);
         assert!(plain > 0, "the worktree label overflows the pane");
-        assert_eq!(badged, plain + 2, "space and glyph");
+        assert_eq!(badged, plain + 2, "the badge and space narrow the viewport");
         assert_eq!(
             graph_col_max(&model, false, width, false, &[(row + 9, "P", Color::Green)]),
             plain
         );
-        // Panned to the max, the badge is painted and reported.
+        // Panned to the max, the label end is in view left of the badge (the
+        // limit counts the full gutter cap, so it may pan a little further).
         let (buf, spans) = render_badges(&model, width, badged as u16, &badges);
         assert_eq!(spans.len(), 1, "{spans:?}");
-        assert_eq!(buf[(spans[0].x, spans[0].y)].symbol(), "P");
+        let (x, y) = (spans[0].x, spans[0].y);
+        assert_eq!(x, width - 1);
+        assert_eq!(buf[(x, y)].symbol(), "P");
+        assert_eq!(buf[(x - 1, y)].symbol(), " ");
+        let line = buf_row(&buf, y);
+        let label = line.strip_suffix('P').expect("badge last").trim_end();
+        assert!(label.ends_with("feature/graph"), "{line}");
     }
 
     #[test]
@@ -3407,7 +3441,7 @@ mod tests {
     }
 
     #[test]
-    fn row_badge_skips_unlisted_rows_and_clips_with_the_label() {
+    fn row_badge_skips_unlisted_rows() {
         let (model, worktree_row) = badge_model();
         let badges = [(worktree_row, "P", Color::Green)];
         let (buf, _) = render_badges(&model, 80, 0, &badges);
@@ -3418,24 +3452,77 @@ mod tests {
             !buf_row(&buf, commit_y).contains('P'),
             "commit row unbadged"
         );
+    }
 
-        let (_, spans) = render_badges(&model, 80, 0, &badges);
-        let full = spans[0].x;
-        // Panned: the badge moves left with the label.
-        let (buf, spans) = render_badges(&model, 80, 4, &badges);
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].x, full - 4);
-        assert_eq!(buf[(spans[0].x, spans[0].y)].symbol(), "P");
-        // Panned past the badge: nothing painted or reported.
-        let (buf, spans) = render_badges(&model, 80, 200, &badges);
-        assert!(spans.is_empty(), "{spans:?}");
-        assert!((0..buf.area.height).all(|y| !buf_row(&buf, y).contains('P')));
-        // Too narrow for the badge after the label: not reported.
-        let (buf, spans) = render_badges(&model, full, 0, &badges);
-        assert!(spans.is_empty(), "{spans:?}");
-        assert!((0..buf.area.height).all(|y| !buf_row(&buf, y).contains('P')));
-        let (_, spans) = render_badges(&model, full + 2, 0, &badges);
-        assert_eq!(spans.len(), 1, "fits at the last column");
+    #[test]
+    fn row_badge_stays_at_the_right_edge_under_pan() {
+        let (model, worktree_row) = badge_model();
+        let badges = [(worktree_row, "P", Color::Green)];
+        let width = 80;
+        // Pan moves the label only, even past its end.
+        for col_offset in [0, 4, 200] {
+            let (buf, spans) = render_badges(&model, width, col_offset, &badges);
+            assert_eq!(spans.len(), 1, "offset {col_offset}: {spans:?}");
+            let span = &spans[0];
+            assert_eq!((span.x, span.width), (width - 1, 1), "offset {col_offset}");
+            assert_eq!(buf[(span.x, span.y)].symbol(), "P", "offset {col_offset}");
+        }
+        let (buf, spans) = render_badges(&model, width, 4, &badges);
+        let line = buf_row(&buf, spans[0].y);
+        assert!(line.contains("worktrees/feat"), "{line}");
+        assert!(!line.contains("app/"), "{line}");
+    }
+
+    #[test]
+    fn row_badge_on_a_narrow_pane_clips_the_label_not_the_badge() {
+        let (model, worktree_row) = badge_model();
+        let badges = [(worktree_row, "P", Color::Green)];
+        let width = 20;
+        let (plain, _) = render_badges(&model, width, 0, &[]);
+        let (buf, spans) = render_badges(&model, width, 0, &badges);
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        let span = &spans[0];
+        assert_eq!((span.x, span.width), (width - 1, 1));
+        assert_eq!(buf[(span.x, span.y)].symbol(), "P");
+        assert_eq!(buf[(span.x - 1, span.y)].symbol(), " ");
+        let line = buf_row(&buf, span.y);
+        assert!(line.contains("app/"), "{line}");
+        assert!(!line.contains("graph"), "the label clips: {line}");
+        // Left of the space the label is the unbadged label, cut earlier.
+        for x in 0..span.x - 1 {
+            assert_eq!(buf[(x, span.y)], plain[(x, span.y)], "cell {x}");
+        }
+        assert_ne!(plain[(span.x, span.y)].symbol(), " ", "label ran on");
+    }
+
+    #[test]
+    fn row_badge_gap_keeps_the_row_background() {
+        let (model, worktree_row) = badge_model();
+        let badges = [(worktree_row, "P", Color::Green)];
+        for width in [20, 80] {
+            let mut buf = Buffer::empty(Rect::new(0, 0, width, 12));
+            let spans = badge_spans(
+                GraphWidget::new(&model)
+                    .now_unix(NOW)
+                    .selected(Some(worktree_row))
+                    .cursor_style(Color::Cyan, Color::Blue)
+                    .row_badges(&badges)
+                    .render_with_icon_spans(buf.area, &mut buf),
+            );
+            let span = &spans[0];
+            for x in 0..width {
+                assert_eq!(buf[(x, span.y)].bg, Color::Blue, "width {width} cell {x}");
+            }
+        }
+    }
+
+    #[test]
+    fn fit_badge_glyph_keeps_the_right_edge() {
+        assert_eq!(fit_badge_glyph("P", 1), ("P", 1));
+        assert_eq!(fit_badge_glyph("P", 0), ("", 0));
+        assert_eq!(fit_badge_glyph("", 4), ("", 0));
+        assert_eq!(fit_badge_glyph("ab", 1), ("b", 1));
+        assert_eq!(fit_badge_glyph("\u{754c}", 1), ("", 0));
     }
 
     #[test]

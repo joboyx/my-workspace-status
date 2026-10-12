@@ -30,9 +30,9 @@ use crate::git::{
     apply_cached_patch, apply_worktree_patch_reverse, blame_line, create_branch_at,
     create_branch_checkout, exec_git_checked, latest_stash_ref, list_compare_picker_branches,
     list_compare_picker_commits, list_local_branches, previous_line_change, pull_quiet_detailed,
-    push_quiet, remote_url_for_branch, remove_untracked_file, remove_worktree, revert_compare_file,
-    revert_compare_patch, revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop,
-    stash_push, unstage_file, COMPARE_REVERT_ABORTED,
+    push_plan, push_quiet, remote_url_for_branch, remove_untracked_file, remove_worktree,
+    revert_compare_file, revert_compare_patch, revert_tracked_file, stage_file, stash_apply,
+    stash_drop, stash_pop, stash_push, unstage_file, PushPlan, COMPARE_REVERT_ABORTED,
 };
 use crate::snapshot::RepoSnapshot;
 
@@ -117,6 +117,11 @@ pub(crate) enum JobOutcome {
         gen: u64,
         repo: String,
         latest: Option<String>,
+    },
+    PreparePush {
+        gen: u64,
+        repo: String,
+        plan: Result<PushPlan, String>,
     },
     PrepareBranches {
         gen: u64,
@@ -649,6 +654,8 @@ fn overlay_write_checkouts(state: &AppState, action: &Action) -> Vec<String> {
                 vec![primary.clone(), path.clone()]
             }
             Some(PendingConfirm::SwitchToDefault { repos }) => repos.clone(),
+            // Push goes on the per-gitdir remote queue; it is not an exclusive write.
+            Some(PendingConfirm::Push { .. }) => Vec::new(),
             // `Y` keeps a compare confirm open, so it writes nothing.
             Some(
                 PendingConfirm::CompareRevertRange { target, .. }
@@ -711,6 +718,7 @@ pub(crate) struct Interpreter {
     remote: RemoteQueue,
     default_queue: VecDeque<String>,
     prepare_stash: Option<(u64, String)>,
+    prepare_push: Option<(u64, String)>,
     prepare_branches: Option<(u64, String, bool)>,
     prepare_compare: Option<(u64, String, ComparePickerKind)>,
     checkout: Option<(String, String, Option<String>, String)>,
@@ -812,6 +820,7 @@ impl Interpreter {
             remote: RemoteQueue::new(),
             default_queue: VecDeque::new(),
             prepare_stash: None,
+            prepare_push: None,
             prepare_branches: None,
             prepare_compare: None,
             checkout: None,
@@ -1254,6 +1263,11 @@ impl Interpreter {
             Effect::PrepareStashMenu { repo } => {
                 let gen = self.sched.request_prepare_stash();
                 self.prepare_stash = Some((gen, repo));
+                self.sched.enqueue_user(UserTag::Prepare);
+            }
+            Effect::PreparePush { repo } => {
+                let gen = self.sched.request_prepare_push();
+                self.prepare_push = Some((gen, repo));
                 self.sched.enqueue_user(UserTag::Prepare);
             }
             Effect::PrepareBranchPicker { repo } => {
@@ -1997,6 +2011,19 @@ impl Interpreter {
                     && state.tabs.is_workspace()
                 {
                     state.open_stash_menu(repo, latest);
+                    self.mark();
+                }
+            }
+            JobOutcome::PreparePush { gen, repo, plan } => {
+                self.sched.note_user_done(UserTag::Prepare);
+                let accepted = self.sched.accept_prepare_push_result(gen);
+                let current = state.focused_checkout_path();
+                // Push runs only from the Workspace tab (compare and Explorer tabs refuse it).
+                if accepted
+                    && current.as_deref() == Some(repo.as_str())
+                    && state.tabs.is_workspace()
+                {
+                    state.open_push_confirm(repo, plan);
                     self.mark();
                 }
             }
@@ -2917,6 +2944,17 @@ impl Interpreter {
                         Box::new(move || {
                             let latest = latest_stash_ref(&dir);
                             JobOutcome::PrepareStash { gen, repo, latest }
+                        }),
+                    );
+                    return;
+                }
+                if let Some((gen, repo)) = self.prepare_push.take() {
+                    let dir = opts.cwd.join(&repo);
+                    spawn(
+                        id,
+                        Box::new(move || {
+                            let plan = push_plan(&dir);
+                            JobOutcome::PreparePush { gen, repo, plan }
                         }),
                     );
                     return;
@@ -4749,6 +4787,113 @@ mod tests {
         assert!(
             state.stash_menu.is_none(),
             "PrepareStash must not open the stash menu on a compare tab"
+        );
+    }
+
+    fn push_plan_ok() -> Result<PushPlan, String> {
+        Ok(PushPlan {
+            branch: "main".into(),
+            remote: "origin".into(),
+            publish: true,
+        })
+    }
+
+    #[test]
+    fn prepare_push_reads_the_plan_on_the_pool_then_opens_the_confirm() {
+        let (root, mut state) = git_app_state("ws-effect-prepare-push", "feature/x", false);
+        focus_repo(&mut state, "app");
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::PreparePush { repo: "app".into() },
+            &Action::Push,
+        );
+        assert!(state.confirm.is_none(), "no git on the loop thread");
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 1, "one Prepare job");
+        for (id, work) in jobs {
+            let outcome = work();
+            assert!(matches!(outcome, JobOutcome::PreparePush { .. }));
+            apply_id(&mut interp, &mut state, id, outcome);
+        }
+        assert_eq!(
+            state.confirm,
+            Some(PendingConfirm::Push {
+                repo: "app".into(),
+                branch: "feature/x".into(),
+                remote: "origin".into(),
+                publish: true,
+                ahead_behind: None,
+            })
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn late_or_stale_prepare_push_does_not_open_the_confirm() {
+        let mut state = fixture_state();
+        focus_repo(&mut state, "lib");
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_prepare_push();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::PreparePush {
+                gen,
+                repo: "app".into(),
+                plan: push_plan_ok(),
+            },
+        );
+        assert!(state.confirm.is_none(), "focus moved off app");
+
+        focus_repo(&mut state, "app");
+        let old = interp.sched.request_prepare_push();
+        let _latest = interp.sched.request_prepare_push();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::PreparePush {
+                gen: old,
+                repo: "app".into(),
+                plan: push_plan_ok(),
+            },
+        );
+        assert!(state.confirm.is_none(), "stale gen");
+
+        let _ = open_compare_tab(&mut state);
+        let gen = interp.sched.request_prepare_push();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::PreparePush {
+                gen,
+                repo: "app".into(),
+                plan: push_plan_ok(),
+            },
+        );
+        assert!(state.confirm.is_none(), "compare tab");
+    }
+
+    #[test]
+    fn matching_prepare_push_opens_the_confirm() {
+        let mut state = fixture_state();
+        focus_repo(&mut state, "app");
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_prepare_push();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::PreparePush {
+                gen,
+                repo: "app".into(),
+                plan: push_plan_ok(),
+            },
+        );
+        assert!(
+            matches!(state.confirm, Some(PendingConfirm::Push { .. })),
+            "{:?}",
+            state.confirm
         );
     }
 
