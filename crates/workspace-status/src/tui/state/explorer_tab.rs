@@ -690,25 +690,28 @@ impl AppState {
     /// is one. A folder row, no row, or a row that only stands in for a
     /// cursor path not listed yet leaves the inner tabs as they are.
     fn explorer_sync_preview(&mut self, tab_id: u64) -> Effect {
-        let Some(tab) = self.tabs.get_explorer_id(tab_id) else {
+        let Some(row) = self.explorer_resolved_cursor_row(tab_id) else {
             return Effect::None;
         };
-        let rows = tab.tree.rows(&self.explorer_status(&tab.checkout));
-        let Some(row) = tab.tree.cursor_index(&rows).map(|index| &rows[index]) else {
-            return Effect::None;
-        };
-        // While the cursor path is not listed yet, `cursor_index` stands in
-        // an ancestor or the first row: never preview that.
-        if row.is_dir
-            || tab
-                .tree
-                .cursor_rel()
-                .is_some_and(|cursor| cursor != row.rel)
-        {
+        if row.is_dir {
             return Effect::None;
         }
-        let rel = row.rel.clone();
-        self.explorer_show_file(tab_id, &rel, false)
+        self.explorer_show_file(tab_id, &row.rel, false)
+    }
+
+    /// The tree cursor row of tab `tab_id` when it is the stored cursor
+    /// path (or, with no stored cursor yet, the first row). `None` while
+    /// the cursor path is not listed yet: `cursor_index` then stands in an
+    /// ancestor or the first row, which must never preview.
+    fn explorer_resolved_cursor_row(&self, tab_id: u64) -> Option<ExplorerRow> {
+        let tab = self.tabs.get_explorer_id(tab_id)?;
+        let rows = tab.tree.rows(&self.explorer_status(&tab.checkout));
+        let index = tab.tree.cursor_index(&rows)?;
+        let row = rows.into_iter().nth(index)?;
+        tab.tree
+            .cursor_rel()
+            .is_none_or(|cursor| cursor == row.rel)
+            .then_some(row)
     }
 
     /// Make `rel` the active inner file tab of `tab_id`.
@@ -936,8 +939,9 @@ impl AppState {
     ///
     /// `None` (dropped) when the tab closed or a newer listing of that
     /// folder was requested. A read error lists the folder empty and, on
-    /// the active tab, says why. Otherwise returns the preview load the
-    /// new rows call for ([`Effect::None`] when the preview stands).
+    /// the active tab, says why. Otherwise returns the preview load of the
+    /// cursor file when this listing is what made the cursor row resolve
+    /// ([`Effect::None`] in every other case).
     pub(crate) fn apply_explorer_dir(
         &mut self,
         tab_id: u64,
@@ -963,8 +967,17 @@ impl AppState {
                 Vec::new()
             }
         };
+        // Sync only when this listing is what lets the cursor row resolve
+        // (a reveal or a new tab waiting on it). A listing that lands while
+        // the cursor row already shows (a status re-list, `r`, a folder
+        // opened earlier) leaves the inner tabs alone, so a file tab closed
+        // with Ctrl-w does not come back on its own.
+        let resolved_before = self.explorer_resolved_cursor_row(tab_id).is_some();
         let tab = self.tabs.get_explorer_id_mut(tab_id)?;
         tab.tree.apply_listing(rel_dir, entries);
+        if resolved_before {
+            return Some(Effect::None);
+        }
         Some(self.explorer_sync_preview(tab_id))
     }
 
@@ -2117,5 +2130,115 @@ mod tests {
         let file = app.tabs.active_file_view().expect("a file body");
         assert_eq!(file.lines(), ["# app", "text"]);
         assert_eq!(file.generation, gen);
+    }
+
+    /// After Ctrl-w empties the inner tabs, no listing brings a file tab
+    /// back: not one in flight since before the close, not `r`, not a
+    /// status re-list.
+    #[test]
+    fn listing_after_ctrl_w_empties_the_inner_tabs_previews_nothing() {
+        let mut app = state();
+        open_root(&mut app);
+        // src/ opens, its listing still in flight.
+        let in_flight = app.dispatch(Action::FoldOpen);
+        assert_eq!(dir_loads(&flat(in_flight.clone())), ["src"]);
+        // Root rows now: src, (loading), target, new.txt, README.md.
+        load_of(&app.dispatch(Action::MoveToEnd));
+        assert_eq!(cursor_rel(&app), "README.md");
+        app.dispatch(Action::CloseTab);
+        assert!(inners(&app).is_empty());
+        assert!(app.is_explorer_tab());
+        let no_preview = |effects: &[Effect]| {
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::LoadExplorerPreview { .. }))
+        };
+
+        let follow = land(&mut app, in_flight);
+        assert!(no_preview(&follow), "in-flight listing: {follow:?}");
+        assert!(inners(&app).is_empty());
+
+        let refresh = app.dispatch(Action::Refresh);
+        let follow = land(&mut app, refresh);
+        assert!(no_preview(&follow), "`r`: {follow:?}");
+        assert!(inners(&app).is_empty());
+
+        let mut changes = app.snapshot.repos[0].changes.clone();
+        changes.push(change("src/fresh.rs", None, true));
+        let snap = repo("app", CheckoutKind::Primary, None, changes);
+        crate::tui::app::apply_one_repo_snapshot(&mut app, "app", Some(snap));
+        let relist = app.explorer_status_relist("app").expect("a re-list of src");
+        let follow = land(&mut app, relist);
+        assert!(no_preview(&follow), "status re-list: {follow:?}");
+        assert!(inners(&app).is_empty());
+        assert_eq!(cursor_rel(&app), "README.md");
+
+        app.dispatch(Action::CloseTab);
+        assert!(
+            app.tabs.is_workspace(),
+            "Ctrl-w now closes the Explorer tab"
+        );
+    }
+
+    /// G3: a reveal whose cursor path is not listed yet resolves the
+    /// cursor to a stand-in row. When that row is a file, nothing previews
+    /// and the inner tabs stay until the real listing lands; then the
+    /// revealed file previews.
+    #[test]
+    fn reveal_onto_a_fallback_file_row_previews_only_the_revealed_file() {
+        let mut app = state();
+        focus(&mut app, NodeKind::Repo, Some("app"), None);
+        let Effect::LoadExplorerDir { tab_id, req, .. } = app.dispatch(Action::ExplorerReveal)
+        else {
+            panic!("a root listing");
+        };
+        // A root of files only: the first row is a file.
+        let follow = app
+            .apply_explorer_dir(tab_id, req, "", Ok(vec![entry("README.md", false, false)]))
+            .expect("fresh listing");
+        assert_eq!(
+            load_of(&follow).2,
+            "README.md",
+            "no stored cursor: first row"
+        );
+        assert_eq!(inners(&app), [preview("README.md")]);
+
+        let app_repo = app
+            .snapshot
+            .repos
+            .iter()
+            .position(|repo| repo.repo == "app")
+            .unwrap();
+        app.snapshot.repos[app_repo]
+            .changes
+            .push(change("fresh.txt", None, true));
+        app.rebuild_rows();
+        app.dispatch(Action::JumpToTab(1));
+        focus(&mut app, NodeKind::File, Some("app"), Some("fresh.txt"));
+        let effects = flat(app.dispatch(Action::ExplorerReveal));
+        assert_eq!(dir_loads(&effects), [""], "the stale root lists again");
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::LoadExplorerPreview { .. })),
+            "the stand-in row README.md must not preview: {effects:?}"
+        );
+        let (rows, cursor) = app.explorer_rows().unwrap();
+        assert_eq!(rows[cursor.unwrap()].rel, "README.md", "the stand-in row");
+        assert_eq!(inners(&app), [preview("README.md")], "unchanged");
+        assert_eq!(active_rel(&app).as_deref(), Some("README.md"));
+
+        let Some(Effect::LoadExplorerDir { req, .. }) = effects.first().cloned() else {
+            panic!("{effects:?}");
+        };
+        let listing = vec![
+            entry("fresh.txt", false, false),
+            entry("README.md", false, false),
+        ];
+        let follow = app
+            .apply_explorer_dir(tab_id, req, "", Ok(listing))
+            .expect("fresh listing");
+        assert_eq!(load_of(&follow).2, "fresh.txt");
+        assert_eq!(inners(&app), [preview("fresh.txt")]);
     }
 }
