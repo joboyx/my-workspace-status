@@ -150,7 +150,7 @@ impl AppState {
         let Some(model) = self.graph.as_ref() else {
             return 0;
         };
-        // Same badges the graph paints, so pan can reach them.
+        // Same badges the graph paints: a badged row has less label room.
         let badges: Vec<(usize, &str, Color)> = self
             .graph_pr_badges()
             .into_iter()

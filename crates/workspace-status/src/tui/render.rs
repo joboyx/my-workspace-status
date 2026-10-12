@@ -15869,9 +15869,14 @@ mod tests {
         );
         let buf = terminal.backend().buffer();
         let row = buf_line(buf, hit.y);
-        let label_x = find_cell_col(buf, hit.y, "app/.worktrees/feat feat P")
-            .unwrap_or_else(|| panic!("worktree label then badge:\n{row}"));
-        assert_eq!(hit.x, label_x + 25);
+        let label_x = find_cell_col(buf, hit.y, "app/.worktrees/feat feat ")
+            .unwrap_or_else(|| panic!("worktree label:\n{row}"));
+        // Flush right in the graph pane, left of its border; blank between.
+        assert_eq!(hit.x, graph_badge_edge_x(buf), "{row}");
+        assert!(
+            (label_x + 24..hit.x).all(|x| buf[(x, hit.y)].symbol() == " "),
+            "{row}"
+        );
         assert_eq!(buf[(hit.x, hit.y)].symbol(), "P");
         assert_eq!(buf[(hit.x, hit.y)].fg, state.theme.palette().branch_feature);
         // The graph badge glyph links to the full PR URL.
@@ -16667,6 +16672,13 @@ mod tests {
         assert_eq!(buf[(chip_end - 2, open_y)].symbol(), "g");
     }
 
+    /// Column of a graph worktree badge: the last graph column, left of the
+    /// right pane border on the last screen column (no vertical scrollbar
+    /// in these fixtures).
+    fn graph_badge_edge_x(buf: &ratatui::buffer::Buffer) -> u16 {
+        buf.area.right() - 2
+    }
+
     fn graph_badge_hits(state: &AppState) -> Vec<PrBadgeHit> {
         state
             .layout
@@ -16689,8 +16701,8 @@ mod tests {
         let y = (0..24)
             .find(|y| find_cell_col(buf, *y, "app/.worktrees/wt old").is_some())
             .expect("stale worktree row");
-        let x = find_cell_col(buf, y, "app/.worktrees/wt old").unwrap() + 22;
-        assert_eq!(buf[(x, y)].symbol(), " ", "no badge after the stale label");
+        let x = graph_badge_edge_x(buf);
+        assert_eq!(buf[(x, y)].symbol(), " ", "no badge on the stale row");
         // The tree row shows the snapshot branch, so it keeps its badge.
         assert_eq!(state.layout.pr_badge_hits().len(), 1);
 
@@ -16713,30 +16725,38 @@ mod tests {
         let mut state = pr_graph_state("app/.worktrees/wt", "feat", true);
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         assert_eq!(graph_badge_hits(&state).len(), 1);
+        assert_eq!(graph_badge_hits(&state)[0].x, x);
     }
 
     #[test]
-    fn graph_pan_reaches_the_badge_on_a_clipped_worktree_label() {
+    fn graph_badge_stays_in_view_while_pan_reaches_a_clipped_label_end() {
         let linked = "app/.worktrees/a-linked-worktree-path-that-runs-well-past-the-graph-pane";
         let pan_max = |with_pr: bool| {
             let mut state = pr_graph_state(linked, "feat", with_pr);
             let mut terminal = pr_terminal();
             terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-            assert!(graph_badge_hits(&state).is_empty(), "clipped at offset 0");
+            let unpanned = graph_badge_hits(&state);
             state.mouse_pan(state.layout.right_x + 1, 10_000);
             let offset = state.right_col_offset;
             terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-            (offset, state, terminal)
+            (offset, unpanned, state, terminal)
         };
-        let (plain, _, _) = pan_max(false);
-        let (badged, state, terminal) = pan_max(true);
+        let (plain, none, _, _) = pan_max(false);
+        assert!(none.is_empty());
+        let (badged, unpanned, state, terminal) = pan_max(true);
         assert!(plain > 0);
-        assert_eq!(badged, plain + 2, "pan reaches the space and glyph");
-        let hits = graph_badge_hits(&state);
-        assert_eq!(hits.len(), 1, "badge in view at the pan max");
         assert_eq!(
-            terminal.backend().buffer()[(hits[0].x, hits[0].y)].symbol(),
-            "P"
+            badged,
+            plain + 2,
+            "the space and glyph narrow the label viewport"
         );
+        // The label clips; the badge does not, panned or not.
+        assert_eq!(unpanned.len(), 1, "badge in view at offset 0");
+        let hits = graph_badge_hits(&state);
+        assert_eq!(hits, unpanned, "badge stays put at the pan max");
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(hits[0].x, hits[0].y)].symbol(), "P");
+        let row = buf_line(buf, hits[0].y);
+        assert!(row.contains("graph-pane feat"), "label end in view: {row}");
     }
 }
