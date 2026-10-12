@@ -74,6 +74,7 @@ use super::gates::{
     REVIEWED_MARKS_ARE_FOR_TREE_FILES,
 };
 use super::graph_focus::GraphFocusPickerState;
+use super::hyperlink::LinkHit;
 use super::icons::{comment_mark_cols, IconKind};
 use super::keys::{expire_stale_g_chord_echo, GChordEchoState, InputMode, DOUBLE_TAP_MS};
 use super::line_blame::{GraphReveal, LineBlameState};
@@ -306,6 +307,11 @@ pub struct LayoutHit {
     /// Empty when no row shows an icon. [`Self::pr_badge_hits`] reads the
     /// PR badges from it.
     pub icon_hits: Vec<IconHit>,
+    /// Hyperlink spans a pane paints itself, rebuilt every paint.
+    ///
+    /// PR badges are not here: [`AppState::hyperlinks`] adds them from
+    /// [`Self::pr_badge_hits`].
+    pub links: Vec<LinkHit>,
     /// The popover painted last frame, if any.
     pub popover: Option<PopoverHit>,
     /// First tab the strip painted. Kept across paints so the window only
@@ -391,6 +397,7 @@ impl Default for LayoutHit {
             tab_hits: Vec::new(),
             tab_close_hits: Vec::new(),
             icon_hits: Vec::new(),
+            links: Vec::new(),
             popover: None,
             tab_scroll: 0,
             help_scroll_max: 0,

@@ -159,9 +159,10 @@ fn selection_marker(selected: bool, focused: bool) -> &'static str {
 /// Draw one frame. Updates `state.layout` for mouse hits.
 pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.prune_expired_flashes();
-    // Every frame starts with no icon; only a pane that paints one records
-    // it again, so a hidden badge never opens a PR or a popover.
+    // Every frame starts with no icon or link; only a pane that paints one
+    // records it again, so a hidden badge never opens a PR or a popover.
     state.layout.icon_hits.clear();
+    state.layout.links.clear();
     state.layout.popover = None;
     let area = frame.area();
     state.too_small = area.width < MIN_TERM_COLS || area.height < MIN_TERM_ROWS;
@@ -14727,6 +14728,46 @@ mod tests {
         let mut tiny = Terminal::new(TestBackend::new(20, 5)).unwrap();
         tiny.draw(|frame| draw(frame, &mut state)).unwrap();
         assert!(state.layout.pr_badge_hits().is_empty());
+    }
+
+    #[test]
+    fn pr_badge_links_to_the_full_pr_url() {
+        use crate::tui::hyperlink::LinkHit;
+        let url = "https://github.com/acme/widgets-with-a-rather-long-name/pull/12345";
+        let mut state = pr_state(
+            &[branch_repo("app", "feature"), branch_repo("lib", "main")],
+            true,
+        );
+        set_pr(
+            &mut state,
+            "app",
+            "feature",
+            PrLookup::Found(PullRequest {
+                number: 12345,
+                url: url.into(),
+                state: PrState::Open,
+            }),
+        );
+        let mut terminal = pr_terminal();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let hit = state.layout.pr_badge_hits()[0].clone();
+        assert_eq!(
+            state.hyperlinks(),
+            vec![LinkHit {
+                y: hit.y,
+                x: hit.x,
+                width: hit.width,
+                url: url.into(),
+            }]
+        );
+        assert_eq!(terminal.backend().buffer()[(hit.x, hit.y)].symbol(), "P");
+
+        // A frame that paints no badge links nothing.
+        state
+            .tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert!(state.hyperlinks().is_empty());
     }
 
     #[test]

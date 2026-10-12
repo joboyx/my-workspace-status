@@ -24,6 +24,7 @@ mod gates;
 mod graph_focus;
 mod graph_load;
 mod help;
+mod hyperlink;
 mod icons;
 mod keys;
 mod line_blame;

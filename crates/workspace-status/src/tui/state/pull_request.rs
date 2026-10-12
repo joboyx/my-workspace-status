@@ -25,6 +25,7 @@ use crate::helpers::is_counted_local_branch;
 
 use super::super::action::Effect;
 use super::super::gates::ListFocusTarget;
+use super::super::hyperlink::LinkHit;
 use super::super::popover::IconTarget;
 use super::super::pull_request::{
     lookup_failed_status, no_pr_status, PrDetailLookup, PrLookup, PrState, PullRequest,
@@ -208,6 +209,26 @@ impl AppState {
             }
         };
         super::popover::then(selected, open)
+    }
+
+    /// Hyperlinks the last frame painted, for the OSC 8 overlay.
+    ///
+    /// Each painted PR badge glyph links to the full URL of its PR, then
+    /// come the spans panes recorded in [`LayoutHit::links`]. A badge whose
+    /// PR is no longer cached gets no link.
+    ///
+    /// [`LayoutHit::links`]: super::LayoutHit::links
+    pub(crate) fn hyperlinks(&self) -> Vec<LinkHit> {
+        let badges = self.layout.pr_badge_hits().into_iter().filter_map(|hit| {
+            let pr = self.pull_request_for(&hit.repo)?;
+            Some(LinkHit {
+                y: hit.y,
+                x: hit.x,
+                width: hit.width,
+                url: pr.url.clone(),
+            })
+        });
+        badges.chain(self.layout.links.iter().cloned()).collect()
     }
 
     /// The PR the badge of checkout `repo` shows, under the same rule as
