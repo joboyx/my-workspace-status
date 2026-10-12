@@ -43,8 +43,8 @@ use super::super::split::SplitDrag;
 use super::super::status::StatusMessage;
 use super::super::tabs::{
     ExplorerPreview, ExplorerTab, OpenFile, ParkedSearch, EXPLORER_DIFFS_SHOW_WHOLE_FILE,
-    EXPLORER_FILE_TABS_ONLY, EXPLORER_TAB_READ_ONLY, FILE_DELETED, NO_EXPLORER_FILE_TABS,
-    ONLY_WORKSPACE_TAB_OPEN, SWITCH_TO_WORKSPACE_TAB, TAB_TO_THE_FILE_PANE,
+    EXPLORER_FILE_TABS_ONLY, EXPLORER_TAB_READ_ONLY, FILE_DELETED, FOCUS_A_TREE_ROW_TO_EXPLORE,
+    NO_EXPLORER_FILE_TABS, ONLY_WORKSPACE_TAB_OPEN, SWITCH_TO_WORKSPACE_TAB, TAB_TO_THE_FILE_PANE,
 };
 use super::super::tree::{dir_path_from_id, NodeKind};
 use super::super::watch::{file_disk_token, GONE_DISK_TOKEN};
@@ -111,20 +111,42 @@ impl AppState {
     }
 
     /// `-`: parent folder on an Explorer tab; on the Workspace tab with the
-    /// tree focused, open or focus the focused row's checkout Explorer and
-    /// reveal the row; anywhere else (another pane, where the commit
-    /// message shows, a row with no checkout, a compare tab), shrink the
-    /// commit message ([`Action::ResizeCommitMsg`]).
+    /// tree focused on a row in a checkout, open or focus that checkout's
+    /// Explorer and reveal the row. Anywhere else (another pane, a
+    /// workspace or group row, a compare tab) it refuses with the
+    /// [`Self::explorer_open_target`] copy on the status line.
     pub(super) fn explorer_reveal(&mut self) -> Effect {
         if self.is_explorer_tab() {
             return self.explorer_to_parent();
         }
-        if self.tabs.is_workspace() && self.list_focus_target() == ListFocusTarget::Tree {
-            if let Some((checkout, target)) = self.explorer_reveal_target() {
-                return self.open_explorer_tab(checkout, target);
+        match self.explorer_open_target() {
+            Ok((checkout, target)) => self.open_explorer_tab(checkout, target),
+            Err(reason) => {
+                self.status = StatusMessage::warn(reason);
+                Effect::None
             }
         }
-        self.dispatch(Action::ResizeCommitMsg(-1))
+    }
+
+    /// Checkout and target Open in Explorer (`-` off an Explorer tab)
+    /// opens, or why it refuses.
+    ///
+    /// The one Open in Explorer gate: [`Self::explorer_reveal`] puts the
+    /// reason on the status line and `palette_disabled_reason` paints it on
+    /// the palette row, so the key and the row give the same copy. Any tab
+    /// but Workspace (an Explorer tab included, where `-` is the parent
+    /// folder) refuses with [`SWITCH_TO_WORKSPACE_TAB`]; on the Workspace
+    /// tab a pane other than the tree, or a workspace or group row, refuses
+    /// with [`FOCUS_A_TREE_ROW_TO_EXPLORE`].
+    pub(crate) fn explorer_open_target(&self) -> Result<(String, ExplorerTarget), &'static str> {
+        if !self.tabs.is_workspace() {
+            return Err(SWITCH_TO_WORKSPACE_TAB);
+        }
+        if self.list_focus_target() != ListFocusTarget::Tree {
+            return Err(FOCUS_A_TREE_ROW_TO_EXPLORE);
+        }
+        self.explorer_reveal_target()
+            .ok_or(FOCUS_A_TREE_ROW_TO_EXPLORE)
     }
 
     /// Checkout and target of the focused Workspace tree row, or `None` for
@@ -252,7 +274,7 @@ impl AppState {
     /// tab ([`EXPLORER_TAB_READ_ONLY`]): a late checkout / merge result can
     /// open a confirm while an Explorer tab is active, and `y` there must
     /// not write (n / Esc still close it). The Workspace tree view keys
-    /// (`t`, `.`) and the commit-message rows (`M`, `+`) say
+    /// (`t`, `.`) and the commit-message rows (`M`, Shorter / Taller) say
     /// [`SWITCH_TO_WORKSPACE_TAB`]. Ctrl-o says
     /// [`EXPLORER_DIFFS_SHOW_WHOLE_FILE`] and never changes the context.
     /// The line keys `;` and `V` need the file pane focused
@@ -1843,6 +1865,7 @@ fn explorer_dir_loads(tab: &mut ExplorerTab, dirs: Vec<String>) -> Vec<Effect> {
 mod tests {
     use std::path::PathBuf;
 
+    use super::super::super::action::QuickOpenEntry;
     use super::super::super::command_palette::PALETTE_COMMANDS;
     use super::super::super::quick_open::QuickOpenScope;
     use super::super::super::tabs::WORKSPACE_TAB_CANNOT_CLOSE;
@@ -2115,30 +2138,102 @@ mod tests {
         assert!(tab(&app).tree.is_expanded("src/tui"));
     }
 
-    #[test]
-    fn minus_off_a_checkout_shrinks_the_commit_message() {
-        let mut app = state();
-        let lines = app.commit_msg_lines;
-        focus(&mut app, NodeKind::Workspace, None, None);
-        assert_eq!(app.dispatch(Action::ExplorerReveal), Effect::None);
-        assert_eq!(app.commit_msg_lines, lines - 1);
-        assert!(app.tabs.is_workspace(), "no Explorer tab");
-        assert_eq!(app.tabs.len(), 1);
+    /// The Open in Explorer palette row.
+    fn open_in_explorer_row() -> &'static PaletteCommand {
+        PALETTE_COMMANDS
+            .iter()
+            .find(|command| command.action == Action::ExplorerReveal)
+            .expect("Open in Explorer row")
+    }
 
-        // With the right pane focused `-` sizes the commit message there.
+    /// Run palette row `title` from Quick Open commands mode.
+    fn run_palette_row(app: &mut AppState, title: &str) -> Effect {
+        app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
+        for c in title.chars() {
+            app.dispatch(Action::QuickOpenChar(c));
+        }
+        let palette = app.command_palette_mut().expect("palette open");
+        palette.cursor = palette
+            .visible()
+            .iter()
+            .position(|command| command.title == title)
+            .unwrap_or_else(|| panic!("palette row {title}"));
+        app.dispatch(Action::QuickOpenSubmit)
+    }
+
+    /// Off the Explorer-open rows `-` and the palette row refuse with the
+    /// same copy: no Explorer tab, no commit-message resize.
+    fn assert_minus_refuses(app: &mut AppState, want: &str, what: &str) {
+        let lines = app.commit_msg_lines;
+        let tabs = app.tabs.len();
+        let active = app.tabs.active;
+        assert_eq!(
+            app.palette_disabled_reason(open_in_explorer_row())
+                .as_deref(),
+            Some(want),
+            "palette: {what}"
+        );
+        app.status.clear();
+        assert_eq!(app.dispatch(Action::ExplorerReveal), Effect::None, "{what}");
+        assert_eq!(&*app.status, want, "status: {what}");
+        assert_eq!(app.status.kind(), StatusKind::Warn, "{what}");
+        assert_eq!(app.commit_msg_lines, lines, "no resize: {what}");
+        assert_eq!(app.tabs.len(), tabs, "no new tab: {what}");
+        assert_eq!(app.tabs.active, active, "same tab: {what}");
+    }
+
+    #[test]
+    fn minus_off_a_checkout_tree_row_refuses_like_the_palette_row() {
+        let mut app = state();
+        focus(&mut app, NodeKind::Workspace, None, None);
+        assert_minus_refuses(&mut app, FOCUS_A_TREE_ROW_TO_EXPLORE, "workspace row");
+
+        // The graph pane is not the tree.
         focus(&mut app, NodeKind::Repo, Some("app"), None);
         app.focus = FocusPane::Right;
-        app.dispatch(Action::ExplorerReveal);
-        assert_eq!(app.commit_msg_lines, lines - 2);
-        assert_eq!(app.tabs.len(), 1, "no Explorer tab from the graph pane");
+        assert_eq!(app.list_focus_target(), ListFocusTarget::Graph);
+        assert_minus_refuses(&mut app, FOCUS_A_TREE_ROW_TO_EXPLORE, "graph pane");
         app.focus = FocusPane::Left;
-        let lines = lines - 1;
 
-        // A compare tab keeps today's `-`.
         app.open_compare_tab("app".into(), "main".into(), "HEAD".into());
-        app.dispatch(Action::ExplorerReveal);
-        assert_eq!(app.commit_msg_lines, lines - 2);
         assert!(app.is_compare_tab());
+        assert_minus_refuses(&mut app, SWITCH_TO_WORKSPACE_TAB, "compare tab");
+    }
+
+    /// On an Explorer tab `-` is the parent folder, a different action, so
+    /// the palette row is off there and never dispatches.
+    #[test]
+    fn open_in_explorer_row_is_off_on_an_explorer_tab() {
+        let mut app = state();
+        open_root(&mut app);
+        assert_eq!(
+            app.palette_disabled_reason(open_in_explorer_row())
+                .as_deref(),
+            Some(SWITCH_TO_WORKSPACE_TAB)
+        );
+        let lines = app.commit_msg_lines;
+        assert_eq!(run_palette_row(&mut app, "Open in Explorer"), Effect::None);
+        assert_eq!(&*app.status, SWITCH_TO_WORKSPACE_TAB);
+        assert!(app.quick_open.is_some(), "a disabled row keeps the palette");
+        assert_eq!(app.commit_msg_lines, lines);
+        assert_eq!(app.tabs.len(), 2);
+    }
+
+    #[test]
+    fn open_in_explorer_row_opens_the_checkout_from_a_tree_row() {
+        let mut app = state();
+        focus(
+            &mut app,
+            NodeKind::Checkout,
+            Some("app/.worktrees/feat"),
+            None,
+        );
+        assert_eq!(app.palette_disabled_reason(open_in_explorer_row()), None);
+        let effect = run_palette_row(&mut app, "Open in Explorer");
+        assert!(app.quick_open.is_none(), "the palette closes");
+        assert_eq!(dir_loads(&flat(effect)), [""], "a new tab lists its root");
+        assert!(app.is_explorer_tab());
+        assert_eq!(tab(&app).checkout, "app/.worktrees/feat");
         assert_eq!(app.tabs.len(), 2);
     }
 
@@ -2210,7 +2305,7 @@ mod tests {
     }
 
     #[test]
-    fn t_dot_m_plus_and_git_writes_still_refuse() {
+    fn t_dot_m_msg_rows_and_git_writes_still_refuse() {
         let mut app = state();
         open_root(&mut app);
         app.open_loaded_inner_file("app", "README.md", &["# app"]);
@@ -2239,6 +2334,7 @@ mod tests {
                 Action::ToggleTreeMode,
                 Action::ToggleShowIgnored,
                 Action::ToggleCommitMsgExpand,
+                Action::ResizeCommitMsg(-1),
                 Action::ResizeCommitMsg(1),
             ] {
                 assert_refused(&mut app, action, SWITCH_TO_WORKSPACE_TAB);
@@ -4173,5 +4269,129 @@ mod tests {
         assert_eq!(cursor_rel(&app), "new.txt");
         let text = copied(&mut app);
         assert!(text.contains("new.txt"), "{text}");
+    }
+
+    /// Go to line from the Explorer tree jumps in the preview: a changed
+    /// file's diff by its new-side line, a clean file's body by line. A
+    /// folder row or a body still loading has no lines.
+    #[test]
+    fn go_to_line_jumps_in_the_preview_from_the_tree() {
+        use super::super::go_to_line::NO_LINES_TO_GO_TO;
+        use crate::tui::diff::{DiffContent, DiffRow};
+        let mut app = state();
+        open_root(&mut app);
+        assert_eq!(cursor_rel(&app), "src");
+        assert_eq!(app.go_to_line_refusal().as_deref(), Some(NO_LINES_TO_GO_TO));
+        assert_eq!(app.dispatch(Action::GoToLine(2)), Effect::None);
+        assert_eq!(app.status, NO_LINES_TO_GO_TO);
+        assert_eq!(app.focus, FocusPane::Left, "a refusal moves nothing");
+
+        // new.txt is untracked: its preview is a diff.
+        let Effect::LoadExplorerPreview {
+            tab_id,
+            gen,
+            change: Some(_),
+            ..
+        } = app.dispatch(Action::Move(2))
+        else {
+            panic!("new.txt diff preview");
+        };
+        let diff = DiffContent::from_unified("@@ -0,0 +1,3 @@\n+one\n+two\n+three\n");
+        assert!(app.apply_explorer_preview(tab_id, gen, ExplorerPreviewBody::Diff(diff)));
+        assert_eq!(app.dispatch(Action::GoToLine(2)), Effect::None);
+        assert_eq!(app.focus, FocusPane::Right, "the jump focuses the preview");
+        let row_text = |app: &AppState| match &app.current_diff_rows()[app.diff_cursor] {
+            DiffRow::Line { left, .. } => left.text.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(row_text(&app), "two");
+        app.dispatch(Action::GoToLine(40));
+        assert_eq!(row_text(&app), "three", "clamped to the last line");
+
+        // README.md is clean: its preview is the file body.
+        app.dispatch(Action::FocusLeft);
+        let Effect::LoadExplorerPreview {
+            tab_id,
+            gen,
+            change: None,
+            ..
+        } = app.dispatch(Action::MoveToEnd)
+        else {
+            panic!("README.md body preview");
+        };
+        assert_eq!(
+            app.go_to_line_refusal().as_deref(),
+            Some(NO_LINES_TO_GO_TO),
+            "still loading"
+        );
+        let lines: Vec<String> = (1..=30).map(|n| format!("line {n}")).collect();
+        let body = ExplorerPreviewBody::File(FileRead::Text { lines, max_cols: 7 });
+        assert!(app.apply_explorer_preview(tab_id, gen, body));
+        assert_eq!(app.go_to_line_refusal(), None);
+        app.dispatch(Action::GoToLine(12));
+        assert_eq!(app.focus, FocusPane::Right);
+        let cursor = |app: &AppState| app.tabs.active_file_view().expect("body").cursor;
+        assert_eq!(cursor(&app), 11);
+        app.dispatch(Action::GoToLine(0));
+        assert_eq!(cursor(&app), 0, "below 1 is line 1");
+        assert_eq!(cursor_rel(&app), "README.md", "the tree did not move");
+    }
+
+    /// A pinned inner file keeps showing while the tree sits on a folder
+    /// row, so go to line still lands in it; closing the last inner file
+    /// leaves no lines to go to.
+    #[test]
+    fn go_to_line_lands_in_the_active_inner_file_from_a_folder_row() {
+        use super::super::go_to_line::NO_LINES_TO_GO_TO;
+        let mut app = state();
+        open_root(&mut app);
+        let lines: Vec<String> = (1..=20).map(|n| format!("line {n}")).collect();
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+        app.open_loaded_inner_file("app", "README.md", &lines);
+        app.dispatch(Action::FocusLeft);
+        app.dispatch(Action::MoveToStart);
+        assert_eq!(cursor_rel(&app), "src", "a folder row");
+        assert_eq!(active_rel(&app).as_deref(), Some("README.md"));
+        assert_eq!(app.go_to_line_refusal(), None);
+        assert_eq!(app.dispatch(Action::GoToLine(7)), Effect::None);
+        assert_eq!(app.focus, FocusPane::Right, "the jump focuses the file");
+        assert_eq!(app.tabs.active_file_view().map(|file| file.cursor), Some(6));
+
+        app.dispatch(Action::CloseTab);
+        assert!(tab(&app).files.is_empty(), "no inner file left");
+        assert_eq!(app.go_to_line_refusal().as_deref(), Some(NO_LINES_TO_GO_TO));
+    }
+
+    /// The Search in files and Go to file palette rows run on an Explorer
+    /// tab (their keys work there); Open in Explorer is off.
+    #[test]
+    fn explorer_palette_rows_from_main_follow_the_explorer_gates() {
+        let mut app = state();
+        open_root(&mut app);
+        app.open_loaded_inner_file("app", "README.md", &["# app"]);
+        let reason = |app: &AppState, title: &str| {
+            let command = PALETTE_COMMANDS
+                .iter()
+                .find(|command| command.title == title)
+                .unwrap_or_else(|| panic!("palette row {title}"));
+            app.palette_disabled_reason(command)
+        };
+        for focus in [FocusPane::Left, FocusPane::Right] {
+            app.focus = focus;
+            assert_eq!(reason(&app, "Search in files"), None, "{focus:?}");
+            assert_eq!(reason(&app, "Go to file"), None, "{focus:?}");
+            assert_eq!(
+                reason(&app, "Open in Explorer").as_deref(),
+                Some(SWITCH_TO_WORKSPACE_TAB),
+                "{focus:?}"
+            );
+            for title in ["Shorter commit message", "Taller commit message"] {
+                assert_eq!(
+                    reason(&app, title).as_deref(),
+                    Some(SWITCH_TO_WORKSPACE_TAB),
+                    "{title} {focus:?}"
+                );
+            }
+        }
     }
 }

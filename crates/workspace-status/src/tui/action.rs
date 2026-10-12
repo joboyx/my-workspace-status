@@ -98,17 +98,18 @@ pub enum Action {
     ToggleDiffMode,
     /// Toggle soft word-wrap on file diffs (`\`).
     ///
-    /// Session-only, like theme and mouse. Wrap uses display columns.
+    /// Session-only, like mouse. Wrap uses display columns.
     /// Horizontal pan is a no-op while wrap is on.
     ToggleDiffWrap,
     /// Toggle expand of the selected commit / stash message (`M`).
     ///
-    /// Session-only, like wrap and theme. Graph list rows stay one line.
+    /// Session-only, like wrap and mouse. Graph list rows stay one line.
     /// The graph selection footer and the commit-files footer wrap the
     /// full subject plus body when this is on.
     ToggleCommitMsgExpand,
     /// Change the expanded commit-message footer height by this many
-    /// message rows (`-` / `+`, `=` same as `+`).
+    /// message rows. Palette only (Shorter / Taller commit message): no key
+    /// is bound.
     ///
     /// Session-only, like `<` / `>`. `viewDefaults.commitMessageLines` sets
     /// the launch value. Clamped to 1..=20 rows. The footer keeps this height
@@ -117,9 +118,10 @@ pub enum Action {
     /// `-`. On an Explorer tab: move the tree cursor to the parent folder.
     /// On the Workspace tab with the tree focused on a row in a checkout
     /// (repo, worktree, folder, or file row): open or focus that checkout's
-    /// Explorer tab and reveal the row. Anywhere else (a workspace or group
-    /// row, another pane, a compare tab) it is
-    /// [`Self::ResizeCommitMsg`]`(-1)`.
+    /// Explorer tab and reveal the row (also the Open in Explorer palette
+    /// row). Anywhere else (a workspace or group row, another pane, a
+    /// compare tab) it refuses with a warning on the status line;
+    /// the palette row is disabled there and on an Explorer tab.
     ExplorerReveal,
     /// Toggle the current-line blame annotation (`B`).
     ///
@@ -340,6 +342,13 @@ pub enum Action {
     /// `]` on an Explorer tab: activate the next inner file tab (wrapping)
     /// and select its file in the tree.
     NextFileTab,
+    /**
+     * Put the focused line view's cursor on this 1-based line (`:<n>` in
+     * Quick Open commands mode).
+     *
+     * `0` means line 1; a line past the end means the last line.
+     */
+    GoToLine(usize),
     /// Move the compare picker highlight.
     ComparePickerMove(i32),
     /// Append a compare picker filter character.

@@ -42,7 +42,7 @@ This is the glance I wanted instead. Left pane is the workspace tree (repos, wor
 
 ![Help overlay](docs/images/08-help.gif)
 
-**Quick Open** — `Ctrl-p` or `F` goes to a file: fuzzy match in the focused repo or worktree (all repos on the workspace row), Enter opens it in that checkout's Explorer tab: a file tree with the open files as tabs beside it (`-` on a tree row opens it too). `:` lists commands (`>` already typed; Backspace over it returns to files): type a name or an alias (`compare`, `checkout`). Every letter types; disabled rows say why. `Ctrl-f` (or `#` first in Quick Open) searches the text of those files instead; Enter opens the hit line there, where `n` / `N` step the matches.
+**Quick Open** — `Ctrl-p` or `F` goes to a file: fuzzy match in the focused repo or worktree (all repos on the workspace row), Enter opens it in that checkout's Explorer tab: a file tree with the open files as tabs beside it (`-` on a tree row opens it too). `:` lists commands (`>` already typed; Backspace over it returns to files): type a name or an alias (`compare`, `checkout`), or a number (`:42`) to go to that line. Every letter types; disabled rows say why. `Ctrl-f` (or `#` first in Quick Open) searches the text of those files instead; Enter opens the hit line there, where `n` / `N` step the matches.
 
 ![Command palette](docs/images/09-palette.gif)
 
@@ -174,7 +174,7 @@ The TUI uses the terminal **alternate screen** (DEC 1049, same idea as Vim/less)
 
 Requirements, keymap, and layout details: [docs/configuration.md](./docs/configuration.md).
 
-Themes: 13 built-in dark themes. Pick one with `WS_STATUS_THEME` or the config `theme` key; `T` cycles them for the session.
+Themes: 13 built-in dark themes. Pick one with `WS_STATUS_THEME` or the config `theme` key; `T` cycles them, and the next launch keeps the last one unless `WS_STATUS_THEME` is set to a known theme (saved in `$XDG_STATE_HOME/my-workspace-status/theme.json`, never in the config file).
 Slate (`slate`, the default), Tokyo Night (`tokyo-night`), Monokai (`monokai`), Dracula (`dracula`), Gruvbox Dark (`gruvbox-dark`), Catppuccin Mocha (`catppuccin-mocha`), Solarized Dark (`solarized-dark`), Nord (`nord`), Rosé Pine (`rose-pine`), Kanagawa (`kanagawa`), Everforest (`everforest`), One Dark (`one-dark`), GitHub Dark Dimmed (`github-dark-dimmed`).
 
 Known limits: macOS PageUp needs the terminal to deliver the key (`Fn+Up` / mapped PageUp); search `/` is armed with Enter before `n` / `N` step matches.

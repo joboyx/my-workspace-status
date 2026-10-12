@@ -6,12 +6,33 @@ use crate::support::{
     crumb_row, graph_cursor_on, no_wrong_overlays, panes_files_focused,
     panes_files_unfocused_diff_focused, panes_tree_focused_graph_unfocused,
     panes_tree_unfocused_graph_focused, right_pane, status_row, title_has_diff, title_has_files,
-    title_has_graph, tree_cursor_on, tree_has, tree_inactive_selection_on, SETTLE_MS, WAIT,
+    title_has_graph, tree_cursor_on, tree_has, tree_inactive_selection_on, type_palette_filter,
+    SETTLE_MS, WAIT,
 };
 
 const REPO: &str = "longmsg";
 /// xterm SGR button for wheel up (`ScrollUp`, `Cb` 64).
 const SGR_WHEEL_UP: u8 = 64;
+
+/// `:` opens Quick Open commands; once the empty filter (`>▏`) paints,
+/// type `query` (with a gap after nav letters, which a burst can drop),
+/// wait for row `title`, then Enter runs it.
+fn run_palette_row(tui: &mut PtySession, query: &str, title: &str) {
+    tui.key(':');
+    tui.wait_pred(
+        |screen| screen.contains("Enter run") && screen.contains(">▏"),
+        "`:` opens Quick Open commands",
+        WAIT,
+    );
+    type_palette_filter(tui, query);
+    let filter = format!(">{query}");
+    tui.wait_pred(
+        |screen| screen.contains(title) && screen.contains(&filter),
+        &format!("palette filter `{query}` shows `{title}`"),
+        WAIT,
+    );
+    tui.enter();
+}
 
 fn help_lists_expand(screen: &str) -> bool {
     let compact = screen.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -189,7 +210,8 @@ fn diff_msg_collapsed(screen: &str) -> bool {
 /// but not `UNIQUE_MSG_BODY_TAIL`. Wheel down over the footer brings the
 /// tail in without moving the list cursor; wheel up goes back. `j` onto the
 /// one-line `root` commit keeps the footer top row (fixed height), with the
-/// footer rule right above it; `+` / `-` move both by one row with
+/// footer rule right above it; `-` there refuses and keeps the height; the
+/// Taller / Shorter commit message palette rows move both by one row with
 /// `msg lines <N>`. `M` hides the
 /// body (`msg off`), `M` again shows it (`msg on`). Enter (depth 1) keeps
 /// expand on the left graph footer; the right files pane shows no message,
@@ -284,24 +306,38 @@ fn pty_commit_msg_expand_toggle() {
     );
     assert_eq!(footer_top(&tui.screen(), "nnnn"), Some(long_top));
 
-    // `+` grows the footer by one row, `-` shrinks it back.
-    tui.key('+');
+    // `-` on the graph pane refuses (it opens Explorer only from a tree
+    // row) and leaves the footer alone.
+    tui.key('-');
+    tui.wait_pred(
+        |screen| {
+            screen.contains("focus a checkout")
+                && footer_top(screen, "nnnn") == Some(long_top)
+                && !crumb_row(screen).contains("msg lines")
+        },
+        "- on the graph refuses and keeps the footer height",
+        WAIT,
+    );
+
+    // Taller commit message (palette) grows the footer by one row,
+    // Shorter shrinks it back.
+    run_palette_row(&mut tui, "taller", "Taller commit message");
     tui.wait_pred(
         |screen| {
             crumb_row(screen).contains("msg lines 5")
                 && footer_top(screen, "nnnn") == Some(long_top - 1)
                 && rule_above(screen, long_top - 1)
         },
-        "+ grows the footer by one message row",
+        "Taller commit message grows the footer by one message row",
         WAIT,
     );
-    tui.key('-');
+    run_palette_row(&mut tui, "shorter", "Shorter commit message");
     tui.wait_pred(
         |screen| {
             crumb_row(screen).contains("msg lines 4")
                 && footer_top(screen, "nnnn") == Some(long_top)
         },
-        "- shrinks the footer back",
+        "Shorter commit message shrinks the footer back",
         WAIT,
     );
 

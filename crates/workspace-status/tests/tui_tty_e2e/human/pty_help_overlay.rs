@@ -45,7 +45,7 @@ const HELP_GIT_ROWS: &[(&str, &str)] = &[
 
 const HELP_VIEW_ROWS: &[(&str, &str)] = &[
     ("i \\ M B", "inline / split · wrap · msg · blame"),
-    ("< > - +", "tree width · msg rows (= is +)"),
+    ("< >", "tree width"),
     ("t", "flat / tree · Staged split"),
     (".", "show / hide ignored repos"),
     ("T", "cycle theme"),
@@ -60,7 +60,10 @@ const HELP_VIEW_ROWS: &[(&str, &str)] = &[
     ("'", "copy entity reference"),
     ("Esc", "back / unfocus · right-click · never quit"),
     ("Enter dblclick", "focus right / drill"),
-    (": Ctrl-p F", "commands · go to file (> first switches)"),
+    (
+        ": Ctrl-p F",
+        "commands · :<n> go to line · go to file (> first switches)",
+    ),
     ("?", "help"),
     ("Tab", "other pane"),
     ("q", "quit"),

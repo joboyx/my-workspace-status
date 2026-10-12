@@ -55,6 +55,9 @@ pub const EXPLORER_DIFFS_SHOW_WHOLE_FILE: &str = "Explorer diffs always show the
 /// Copy for a line key (`;`, `V`, the blame actions) on an Explorer tab
 /// while the tree has focus.
 pub const TAB_TO_THE_FILE_PANE: &str = "Tab to the file pane first";
+/// `-` and Open in Explorer refusal on the Workspace tab when the tree is
+/// not focused on a repo, checkout, section, folder, or file row.
+pub const FOCUS_A_TREE_ROW_TO_EXPLORE: &str = "focus a checkout, folder, or file in the tree";
 
 /// `gt` / `gT` and the Next / Previous tab palette rows with no compare tab.
 pub const ONLY_WORKSPACE_TAB_OPEN: &str = "only the Workspace tab is open";

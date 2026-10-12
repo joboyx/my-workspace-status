@@ -1064,7 +1064,6 @@ fn normal_key(
         KeyCode::Char('\\') => Action::ToggleDiffWrap,
         KeyCode::Char('M') => Action::ToggleCommitMsgExpand,
         KeyCode::Char('-') => Action::ExplorerReveal,
-        KeyCode::Char('+') | KeyCode::Char('=') => Action::ResizeCommitMsg(1),
         KeyCode::Char('B') => Action::ToggleLineBlame,
         KeyCode::Char('A') => Action::BlameMenu,
         KeyCode::Char('m') => Action::ToggleMouse,
@@ -1229,14 +1228,15 @@ mod tests {
         );
     }
 
-    /// `-` is [`Action::ExplorerReveal`] (dispatch picks Explorer or the
-    /// commit-message shrink); `+` / `=` grow the commit message.
+    /// `-` is [`Action::ExplorerReveal`] (dispatch opens Explorer, goes to
+    /// the parent folder, or refuses); `+` / `=` are unbound. The commit
+    /// message height is the palette rows only.
     #[test]
-    fn minus_plus_equals_resize_the_commit_message_in_normal_mode_only() {
+    fn minus_is_explorer_and_plus_equals_are_unbound_in_normal_mode() {
         for (code, want) in [
             (KeyCode::Char('-'), Action::ExplorerReveal),
-            (KeyCode::Char('+'), Action::ResizeCommitMsg(1)),
-            (KeyCode::Char('='), Action::ResizeCommitMsg(1)),
+            (KeyCode::Char('+'), Action::None),
+            (KeyCode::Char('='), Action::None),
         ] {
             assert_eq!(event_to_action(&key(code), normal(), false, false), want);
             assert_eq!(event_to_action(&key(code), normal(), true, true), want);
@@ -1244,7 +1244,7 @@ mod tests {
         // Terminals may report `+` with Shift held.
         assert_eq!(
             event_to_action(&shift(KeyCode::Char('+')), normal(), false, false),
-            Action::ResizeCommitMsg(1)
+            Action::None
         );
         assert_eq!(
             event_to_action(
@@ -3862,8 +3862,6 @@ mod tests {
             (n, 0, Char('\\'), Action::ToggleDiffWrap),
             (n, 0, Char('M'), Action::ToggleCommitMsgExpand),
             (n, 0, Char('-'), Action::ExplorerReveal),
-            (n, 0, Char('+'), Action::ResizeCommitMsg(1)),
-            (n, 0, Char('='), Action::ResizeCommitMsg(1)),
             (n, 0, Char('B'), Action::ToggleLineBlame),
             (n, 0, Char('A'), Action::BlameMenu),
             (n, 0, Char('m'), Action::ToggleMouse),

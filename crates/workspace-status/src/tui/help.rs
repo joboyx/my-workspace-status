@@ -95,8 +95,8 @@ macro_rules! move_group {
     };
 }
 
-/// The Workspace and compare VIEW column, with the `$sizes` rows (pane
-/// and message sizes) after the first one and the `$ignored` rows after
+/// The Workspace and compare VIEW column, with the `$sizes` rows (tree
+/// width) after the first one and the `$ignored` rows after
 /// `t`, the order the Workspace tab has always painted.
 macro_rules! view_group {
     ($($sizes:expr),*; $($ignored:expr),*) => {
@@ -163,7 +163,7 @@ macro_rules! view_group {
                 },
                 HelpEntry {
                     keys: ": Ctrl-p F",
-                    desc: "commands · go to file (> first switches)",
+                    desc: "commands · :<n> go to line · go to file (> first switches)",
                 },
                 HelpEntry {
                     keys: "?",
@@ -196,10 +196,11 @@ const HELP_DASH_EXPLORER: HelpEntry = HelpEntry {
     desc: "Explorer tab",
 };
 
-/// `< > - +` on the Workspace and compare tabs (VIEW).
+/// `< >` on the Workspace and compare tabs (VIEW). The commit message
+/// height has no key: the palette rows set it.
 const HELP_PANE_SIZES: HelpEntry = HelpEntry {
-    keys: "< > - +",
-    desc: "tree width · msg rows (= is +)",
+    keys: "< >",
+    desc: "tree width",
 };
 
 /// `.` everywhere but the Explorer tab (VIEW).
@@ -215,7 +216,7 @@ pub const HELP_TAB_MOVE_GROUP: HelpGroup = move_group!();
 /// their Explorer meaning.
 ///
 /// It leaves out the shared rows the Explorer refuses or handles another
-/// way: `t`, `.`, `M`, `- +`, `o O`, `Ctrl-o` (the Explorer diff is always
+/// way: `t`, `.`, `M`, `o O`, `Ctrl-o` (the Explorer diff is always
 /// the whole file), `gh`, and the Workspace Enter (focus right / drill).
 /// The file keys (`B`, `; V y '`), `Tab`, `< >`, and Enter (pin) are in
 /// [`HELP_EXPLORER_GROUP`].
@@ -248,7 +249,7 @@ pub const HELP_EXPLORER_VIEW_GROUP: HelpGroup = HelpGroup {
         },
         HelpEntry {
             keys: ": Ctrl-p F",
-            desc: "commands · go to file (> first switches)",
+            desc: "commands · :<n> go to line · go to file (> first switches)",
         },
         HelpEntry {
             keys: "?",
@@ -525,7 +526,7 @@ pub const HELP_EXPLORER_GROUP: HelpGroup = HelpGroup {
             desc: "Workspace tab only",
         },
         HelpEntry {
-            keys: "t . M +",
+            keys: "t . M",
             desc: "Workspace tab only",
         },
     ],
@@ -1299,7 +1300,7 @@ mod tests {
         assert!(view_keys.contains(&"'"));
         assert!(!view_keys.contains(&"y '"));
         assert!(view_keys.contains(&"Esc"));
-        assert!(view_keys.contains(&"< > - +"));
+        assert!(view_keys.contains(&"< >"));
         assert_eq!(
             HELP_GROUPS[2]
                 .entries
@@ -1558,14 +1559,21 @@ mod tests {
         assert_eq!(help_groups(HelpTab::Explorer)[1].title, "EXPLORER");
         assert_eq!(help_groups(HelpTab::Explorer)[0], HELP_TAB_MOVE_GROUP);
         assert_eq!(help_groups(HelpTab::Explorer)[2], HELP_EXPLORER_VIEW_GROUP);
-        // `-` is the parent folder here: no Workspace `-` row, no msg rows.
+        // `-` is the parent folder here: no Workspace `-` row. `< >` is
+        // listed once, in EXPLORER, not as the shared VIEW row.
         for group in help_groups(HelpTab::Explorer) {
             for entry in group.entries {
                 assert_ne!(entry.desc, HELP_DASH_EXPLORER.desc, "{entry:?}");
-                assert_ne!(entry.keys, HELP_PANE_SIZES.keys, "{entry:?}");
                 assert_ne!(entry.keys, ".", "no ignored-repo toggle: {entry:?}");
             }
         }
+        assert!(!HELP_EXPLORER_VIEW_GROUP.entries.contains(&HELP_PANE_SIZES));
+        let tree_width_rows = help_groups(HelpTab::Explorer)
+            .iter()
+            .flat_map(|g| g.entries.iter())
+            .filter(|entry| entry.keys == HELP_PANE_SIZES.keys)
+            .count();
+        assert_eq!(tree_width_rows, 1, "`< >` once, in EXPLORER");
         let rows: Vec<String> = HELP_EXPLORER_GROUP
             .entries
             .iter()
@@ -1594,7 +1602,7 @@ mod tests {
             "Ctrl-o diffs always show the whole file",
             "s u x S Workspace tab only",
             "f p P d Workspace tab only",
-            "t . M + Workspace tab only",
+            "t . M Workspace tab only",
         ] {
             assert!(
                 rows.iter()
@@ -1609,9 +1617,9 @@ mod tests {
     }
 
     /// The Explorer help columns list no key the Explorer refuses or
-    /// handles another way: no `t` / `.` / `M` / `o O` row, no `Ctrl-o`
-    /// toggle, no `s u x` in a highlight row, no `gh`, and no Workspace
-    /// Enter (focus right / drill).
+    /// handles another way: no `t` / `.` / `M` / `o O` row, no `+` / `=`
+    /// row, no `Ctrl-o` toggle, no `s u x` in a highlight row, no `gh`, and
+    /// no Workspace Enter (focus right / drill).
     #[test]
     fn explorer_help_lists_no_refused_keys() {
         let entries: Vec<&HelpEntry> = help_groups(HelpTab::Explorer)
@@ -1620,7 +1628,7 @@ mod tests {
             .collect();
         for entry in &entries {
             let keys: Vec<&str> = entry.keys.split(' ').collect();
-            let refused_row = keys.iter().all(|k| ["t", ".", "M", "+"].contains(k))
+            let refused_row = keys.iter().all(|k| ["t", ".", "M"].contains(k))
                 || keys
                     .iter()
                     .all(|k| ["s", "u", "x", "S", "f", "p", "P", "d"].contains(k));
@@ -1630,6 +1638,9 @@ mod tests {
                     "{key} only as a Workspace tab only row: {entry:?}"
                 );
             }
+            // `+` / `=` are unbound on every tab (the commit message height
+            // is palette only), so no row may name them.
+            assert!(!keys.contains(&"+") && !keys.contains(&"="), "{entry:?}");
             if refused_row {
                 assert_eq!(entry.desc, "Workspace tab only", "{entry:?}");
             }

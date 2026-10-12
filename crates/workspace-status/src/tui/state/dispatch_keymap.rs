@@ -486,7 +486,12 @@ impl AppState {
 
     /// Why palette row `command` cannot run, or `None` if Enter should dispatch.
     ///
+    /// The synthetic go-to-line row answers from
+    /// [`Self::go_to_line_refusal`] alone, on every tab and in highlight.
     /// `[` / `]` rows: [`Self::file_tab_cycle_reason`] on every tab.
+    /// Open in Explorer checks [`Self::explorer_open_target`] first, on
+    /// every tab (on an Explorer tab `-` is the parent folder, a different
+    /// action, so the row is off there).
     /// On an Explorer tab: [`Self::explorer_tab_refusal`], the blame gate,
     /// then [`Self::explorer_tab_palette_reason`].
     /// Otherwise: compare refusal ([`Self::compare_refusal`], which also gates
@@ -496,8 +501,16 @@ impl AppState {
     /// revert), then the action gate.
     pub(crate) fn palette_disabled_reason(&self, command: &PaletteCommand) -> Option<String> {
         let action = &command.action;
+        if matches!(action, Action::GoToLine(_)) {
+            return self.go_to_line_refusal();
+        }
         if matches!(action, Action::PreviousFileTab | Action::NextFileTab) {
             return self.file_tab_cycle_reason();
+        }
+        if matches!(action, Action::ExplorerReveal) {
+            if let Err(reason) = self.explorer_open_target() {
+                return Some(reason.into());
+            }
         }
         if self.is_explorer_tab() {
             return self

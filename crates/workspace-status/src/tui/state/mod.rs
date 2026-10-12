@@ -8,6 +8,7 @@ mod dispatch_search_files;
 mod dispatch_write;
 mod explorer_tab;
 mod file_view;
+mod go_to_line;
 mod line_blame;
 mod pan;
 mod popover;
@@ -74,6 +75,7 @@ use super::gates::{
     REVIEWED_MARKS_ARE_FOR_TREE_FILES,
 };
 use super::graph_focus::GraphFocusPickerState;
+use super::hyperlink::LinkHit;
 use super::icons::{comment_mark_cols, IconKind};
 use super::keys::{expire_stale_g_chord_echo, GChordEchoState, InputMode, DOUBLE_TAP_MS};
 use super::line_blame::{GraphReveal, LineBlameState};
@@ -110,6 +112,7 @@ use super::tabs::{
     SWITCH_TO_WORKSPACE_TAB, WORKSPACE_TAB_CANNOT_CLOSE,
 };
 use super::theme::{cycle_theme_id, BackgroundMode, ThemeId};
+use super::theme_store::save_last_theme;
 use super::tree::{
     build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, visible_for_tree,
     visible_window, workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
@@ -309,6 +312,13 @@ pub struct LayoutHit {
     /// Empty when no row shows an icon. [`Self::pr_badge_hits`] reads the
     /// PR badges from it.
     pub icon_hits: Vec<IconHit>,
+    /// Hyperlink spans of the frame, rebuilt every paint: the OSC 8 overlay
+    /// prints exactly these.
+    ///
+    /// Each painted PR badge glyph (from [`AppState::pr_badge_links`]), then
+    /// the popover URL line. A dialog or the popover drops the links under
+    /// its box before it records its own.
+    pub links: Vec<LinkHit>,
     /// The popover painted last frame, if any.
     pub popover: Option<PopoverHit>,
     /// First tab the strip painted. Kept across paints so the window only
@@ -395,6 +405,7 @@ impl Default for LayoutHit {
             tab_hits: Vec::new(),
             tab_close_hits: Vec::new(),
             icon_hits: Vec::new(),
+            links: Vec::new(),
             popover: None,
             tab_scroll: 0,
             help_scroll_max: 0,
@@ -709,6 +720,8 @@ pub struct AppState {
     pub viewed_path: PathBuf,
     pub comment_store: CommentStore,
     pub comment_path: PathBuf,
+    /// Last-used theme store that `T` writes (see [`crate::tui::theme_store`]).
+    pub theme_path: PathBuf,
     pub comment: Option<CommentPrompt>,
     pub comment_export: Option<CommentExport>,
     /// Visual-line anchor on a focused file diff (`V`). Cursor is the other end.
@@ -786,7 +799,8 @@ pub struct AppState {
     /// Message rows of the expanded commit-message footer (graph pane and
     /// commit-files pane). The footer keeps this height whatever the
     /// selected message is. `viewDefaults.commitMessageLines` sets the launch
-    /// value; `-` / `+` change it for this session (no XDG store). Always in
+    /// value; the Shorter / Taller commit message palette rows change it for
+    /// this session (no XDG store). Always in
     /// [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`].
     pub commit_msg_lines: usize,
     /// Scroll of an expanded message taller than the graph footer, keyed by
@@ -864,8 +878,8 @@ fn unix_now() -> i64 {
 }
 
 impl AppState {
-    /// TUI launch state: glyphs, theme, and the viewed / comment store paths
-    /// come from the resolved `settings`.
+    /// TUI launch state: glyphs, theme, and the viewed / comment / theme store
+    /// paths come from the resolved `settings`.
     pub fn launch(cwd: PathBuf, snapshot: WorkspaceSnapshot, settings: &Settings) -> Self {
         Self::build(
             cwd,
@@ -873,6 +887,7 @@ impl AppState {
             settings.ascii,
             settings.viewed_store.clone(),
             settings.comment_store.clone(),
+            settings.theme_store.clone(),
             settings.theme,
         )
     }
@@ -884,7 +899,8 @@ impl AppState {
         Self::with_viewed_path(cwd, snapshot, ascii, default_viewed_path())
     }
 
-    /// Test state with `viewed_path`; the comment store sits next to it.
+    /// Test state with `viewed_path`; the comment and theme stores sit next
+    /// to it.
     ///
     /// Pins Tokyo Night and [`BackgroundMode::Terminal`], the v0.1.244 look
     /// (theme, boxed panes, no fills), so render tests keep proving that mode
@@ -899,12 +915,14 @@ impl AppState {
         viewed_path: PathBuf,
     ) -> Self {
         let comment_path = viewed_path.with_file_name("comments.json");
+        let theme_path = viewed_path.with_file_name("theme.json");
         let mut state = Self::build(
             cwd,
             snapshot,
             ascii,
             viewed_path,
             comment_path,
+            theme_path,
             ThemeId::TokyoNight,
         );
         state.background = BackgroundMode::Terminal;
@@ -917,6 +935,7 @@ impl AppState {
         ascii: bool,
         viewed_path: PathBuf,
         comment_path: PathBuf,
+        theme_path: PathBuf,
         theme: ThemeId,
     ) -> Self {
         let show_ignored = snapshot.show_ignored;
@@ -965,6 +984,7 @@ impl AppState {
             viewed_path,
             comment_store,
             comment_path,
+            theme_path,
             comment: None,
             comment_export: None,
             diff_visual_anchor: None,
@@ -2255,9 +2275,13 @@ impl AppState {
         self.commit_file_signatures = commit_file_signatures(&repo, &source, &unfolded);
     }
 
+    /// `T`: next theme in this session, saved as the last-used theme.
     fn cycle_theme(&mut self) -> Effect {
         self.theme = cycle_theme_id(self.theme);
         self.status = format!("theme: {}", self.theme.label()).into();
+        if let Err(err) = save_last_theme(&self.theme_path, self.theme) {
+            self.status = StatusMessage::error(persist_failed_status("theme", err));
+        }
         Effect::None
     }
 
@@ -3046,8 +3070,8 @@ impl AppState {
         Effect::None
     }
 
-    /// `-` / `+`: change the expanded commit-message footer by `delta` rows
-    /// for this session, clamped to
+    /// Shorter / Taller commit message (palette only): change the expanded
+    /// commit-message footer by `delta` rows for this session, clamped to
     /// [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`].
     fn resize_commit_msg(&mut self, delta: i32) -> Effect {
         let next = (self.commit_msg_lines as i64).saturating_add(i64::from(delta));
@@ -6711,16 +6735,11 @@ enum FoldOp {
     Open,
 }
 
-/// Unique temp viewed-store path per test state.
+/// Viewed-store path in a unique temp dir per test state, so the sibling
+/// comment and theme stores are unique too.
 #[cfg(test)]
 fn default_viewed_path() -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static N: AtomicU64 = AtomicU64::new(0);
-    std::env::temp_dir().join(format!(
-        "ws-viewed-test-{}-{}.json",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    ))
+    crate::testutil::unique_dir("ws-state-test").join("viewed.json")
 }
 
 /// Idle / breadcrumb toast when a persist write returns [`std::io::Error`].
@@ -6784,6 +6803,7 @@ mod tests {
         DIFF_SPLIT_FRACTION, MIN_PANE_COLS,
     };
     use crate::tui::status::StatusKind;
+    use crate::tui::theme_store::load_last_theme;
     use crate::tui::watch::watch_interval_ms;
     use workspace_status_graph::{Commit, GraphModel, GraphRef, Stash};
 
@@ -14648,7 +14668,7 @@ mod tests {
     }
 
     #[test]
-    fn theme_cycle_wraps_and_stays_in_session() {
+    fn theme_cycle_wraps_through_every_theme() {
         let mut app = state();
         app.theme = ThemeId::TokyoNight;
         assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
@@ -14662,10 +14682,92 @@ mod tests {
         app.dispatch(Action::CycleTheme);
         assert_eq!(app.theme, ThemeId::TokyoNight);
         assert_eq!(
-            theme_id_from(Some("gruvbox-dark"), None),
+            theme_id_from(Some("gruvbox-dark"), None, None),
             ThemeId::GruvboxDark
         );
-        assert_eq!(theme_id_from(Some("nope"), None), ThemeId::Slate);
+        assert_eq!(theme_id_from(Some("nope"), None, None), ThemeId::Slate);
+    }
+
+    /// State whose theme store is `state/theme.json` in a fresh temp dir.
+    fn state_with_theme_store(prefix: &str) -> (AppState, PathBuf) {
+        let dir = crate::testutil::unique_dir(prefix);
+        let mut app = state();
+        app.theme_path = dir.join("state").join("theme.json");
+        (app, dir)
+    }
+
+    #[test]
+    fn theme_cycle_saves_new_theme_to_store() {
+        let (mut app, dir) = state_with_theme_store("ws-theme-cycle-save");
+        app.theme = ThemeId::TokyoNight;
+        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
+        assert_eq!(app.theme, ThemeId::Monokai);
+        assert_eq!(load_last_theme(&app.theme_path), Some(ThemeId::Monokai));
+        assert_eq!(app.status.kind(), StatusKind::Info);
+        app.dispatch(Action::CycleTheme);
+        assert_eq!(load_last_theme(&app.theme_path), Some(app.theme));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_cycle_wrap_saves_tokyo_night() {
+        let (mut app, dir) = state_with_theme_store("ws-theme-cycle-wrap");
+        app.theme = ThemeId::GithubDarkDimmed;
+        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
+        assert_eq!(app.theme, ThemeId::TokyoNight);
+        assert_eq!(load_last_theme(&app.theme_path), Some(ThemeId::TokyoNight));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_cycle_to_slate_saves_slate() {
+        let (mut app, dir) = state_with_theme_store("ws-theme-cycle-slate");
+        app.theme = *crate::tui::theme::THEME_IDS
+            .iter()
+            .find(|&&id| cycle_theme_id(id) == ThemeId::Slate)
+            .expect("some theme cycles to Slate");
+        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
+        assert_eq!(app.theme, ThemeId::Slate);
+        let text = std::fs::read_to_string(&app.theme_path).expect("store written");
+        assert!(text.contains("\"slate\""), "store names slate: {text}");
+        assert_eq!(load_last_theme(&app.theme_path), Some(ThemeId::Slate));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_cycle_names_save_failure_when_unwritable() {
+        let mut app = state();
+        app.theme = ThemeId::TokyoNight;
+        let (root, path) = unwritable_store_path("ws-theme-save-fail");
+        app.theme_path = path;
+        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
+        assert_eq!(app.theme, ThemeId::Monokai, "session theme still changes");
+        assert_eq!(app.status.kind(), StatusKind::Error);
+        assert!(
+            app.status.contains("theme save failed"),
+            "failed persist must name the theme store: {}",
+            app.status
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn theme_cycle_leaves_foreign_store_file_unchanged() {
+        let (mut app, dir) = state_with_theme_store("ws-theme-foreign");
+        std::fs::create_dir_all(app.theme_path.parent().unwrap()).unwrap();
+        let foreign = b"{\"editor\": \"vim\"}\n";
+        std::fs::write(&app.theme_path, foreign).unwrap();
+        app.theme = ThemeId::TokyoNight;
+        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
+        assert_eq!(app.theme, ThemeId::Monokai, "session theme still changes");
+        assert_eq!(std::fs::read(&app.theme_path).unwrap(), foreign);
+        assert_eq!(app.status.kind(), StatusKind::Error);
+        assert!(
+            app.status.contains("theme save failed"),
+            "foreign store must surface an error: {}",
+            app.status
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn tree_repo() -> RepoSnapshot {
@@ -14798,10 +14900,13 @@ mod tests {
     fn launch_with_no_env_and_no_config_paints_background() {
         let viewed = default_viewed_path();
         let comments = viewed.with_extension("comments.json");
+        let theme = viewed.with_extension("theme.json");
         let (viewed_s, comments_s) = (viewed.display().to_string(), comments.display().to_string());
+        let theme_s = theme.display().to_string();
         let settings = Settings::resolve(&Default::default(), |key| match key {
             "WS_STATUS_VIEWED_STORE" => Some(viewed_s.clone()),
             "WS_STATUS_COMMENT_STORE" => Some(comments_s.clone()),
+            "WS_STATUS_THEME_STORE" => Some(theme_s.clone()),
             _ => None,
         });
         let snapshot = build_workspace_snapshot(&[tree_repo()], &[], false, &[]);
@@ -16700,6 +16805,130 @@ mod tests {
         assert_eq!(app.input_mode(), InputMode::DiffVisual);
     }
 
+    /// Text of the diff row under the cursor (inline layout: the left cell).
+    fn diff_cursor_text(app: &AppState) -> String {
+        match &app.current_diff_rows()[app.diff_cursor] {
+            DiffRow::Line { left, .. } => left.text.clone(),
+            other => panic!("cursor off a line row: {other:?}"),
+        }
+    }
+
+    /// Go to `line`, then the text of the diff row it landed on.
+    fn go_to_diff_line(app: &mut AppState, line: usize) -> String {
+        assert_eq!(app.dispatch(Action::GoToLine(line)), Effect::None);
+        assert!(app.diff_scroll as usize <= app.diff_cursor, "kept in view");
+        diff_cursor_text(app)
+    }
+
+    /// `two_hunk_readme` new lines: keep-a 1, keep-b 2, ALPHA-NEW 3,
+    /// keep-c 4, then keep-x 20, keep-y 21, OMEGA-NEW 22, keep-z 23.
+    #[test]
+    fn go_to_line_in_the_workspace_diff_takes_the_new_side_or_the_nearest_row() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        assert_eq!(app.go_to_line_refusal(), None);
+        assert_eq!(go_to_diff_line(&mut app, 21), "keep-y");
+        assert_eq!(
+            go_to_diff_line(&mut app, 3),
+            "ALPHA-NEW",
+            "new line 3, not old line 3"
+        );
+        assert_eq!(go_to_diff_line(&mut app, 10), "keep-c", "nearest row");
+        assert_eq!(go_to_diff_line(&mut app, 15), "keep-x", "nearest row");
+        assert_eq!(go_to_diff_line(&mut app, 0), "keep-a", "below 1 is line 1");
+        assert_eq!(go_to_diff_line(&mut app, 9999), "keep-z", "the last line");
+    }
+
+    #[test]
+    fn go_to_line_counts_deleted_rows_by_old_line_without_a_new_side() {
+        let mut app = state();
+        let deleted = DiffContent::from_unified("@@ -1,3 +0,0 @@\n-gone-a\n-gone-b\n-gone-c\n");
+        focus_readme_diff(&mut app, deleted);
+        assert_eq!(go_to_diff_line(&mut app, 2), "gone-b");
+        assert_eq!(go_to_diff_line(&mut app, 300), "gone-c");
+    }
+
+    /// Only a focused file diff with numbered lines is a line view on the
+    /// Workspace tab.
+    #[test]
+    fn go_to_line_refuses_off_a_focused_diff_with_lines() {
+        let mut app = state();
+        focus_readme_diff(&mut app, binary_readme());
+        assert_eq!(
+            app.go_to_line_refusal().as_deref(),
+            Some(super::go_to_line::NO_LINES_TO_GO_TO)
+        );
+        focus_readme_diff(&mut app, two_hunk_readme());
+        app.focus = FocusPane::Left;
+        assert_eq!(app.go_to_line_refusal().as_deref(), Some(FOCUS_A_FILE_DIFF));
+        let cursor = app.diff_cursor;
+        assert_eq!(app.dispatch(Action::GoToLine(20)), Effect::None);
+        assert_eq!(app.status, FOCUS_A_FILE_DIFF);
+        assert_eq!(app.diff_cursor, cursor, "nothing moved");
+    }
+
+    #[test]
+    fn go_to_line_in_a_compare_diff() {
+        let mut app = state();
+        compare_tab_with_added_lines(&mut app);
+        assert_eq!(go_to_diff_line(&mut app, 3), "more");
+        assert_eq!(go_to_diff_line(&mut app, 99), "keep");
+        app.focus = FocusPane::Left;
+        assert_eq!(
+            app.go_to_line_refusal().as_deref(),
+            Some(FOCUS_A_FILE_DIFF),
+            "the compare file list"
+        );
+    }
+
+    #[test]
+    fn go_to_line_in_a_commit_and_a_stash_diff() {
+        let stash = CommitFileSource::Stash {
+            stash_ref: "stash@{0}".into(),
+        };
+        for source in [sample_commit_source(), stash] {
+            let mut app = state();
+            app.focus = FocusPane::Right;
+            app.open_commit_diff(
+                "app".into(),
+                source,
+                sample_commit_files(),
+                0,
+                "README.md".into(),
+                two_hunk_readme(),
+            );
+            assert_eq!(go_to_diff_line(&mut app, 22), "OMEGA-NEW");
+            app.focus = FocusPane::Left;
+            assert_eq!(
+                app.go_to_line_refusal().as_deref(),
+                Some(FOCUS_A_FILE_DIFF),
+                "the commit file list"
+            );
+        }
+    }
+
+    /// `:` over a `V` range still lists the row; the jump moves the range
+    /// end and keeps the anchor, as `G` does.
+    #[test]
+    fn go_to_line_in_highlight_moves_the_head_and_keeps_the_anchor() {
+        use super::super::action::QuickOpenEntry;
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        highlight_alpha_new(&mut app);
+        let anchor = app.diff_visual_anchor;
+        app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
+        for c in "22".chars() {
+            app.dispatch(Action::QuickOpenChar(c));
+        }
+        let palette = app.command_palette().expect("commands mode");
+        assert_eq!(palette.selected_action(), Some(Action::GoToLine(22)));
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
+        assert!(app.quick_open.is_none());
+        assert_eq!(diff_cursor_text(&app), "OMEGA-NEW");
+        assert_eq!(app.diff_visual_anchor, anchor);
+        assert!(app.diff_visual_contains(app.diff_cursor));
+    }
+
     #[test]
     fn highlight_unmapped_key_says_esc_exits() {
         let mut app = state();
@@ -17519,6 +17748,48 @@ diff --git a/README.md b/README.md
         assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::Quit);
     }
 
+    /// Go to file closes commands mode, then opens Quick Open again in
+    /// files mode, as `Ctrl-p` / `F` do.
+    #[test]
+    fn palette_go_to_file_opens_quick_open_in_files_mode() {
+        use super::super::quick_open::QuickOpenMode;
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        palette_select(&mut app, "Go to file");
+        assert_eq!(palette_reason(&app, "Go to file"), None);
+        let effect = app.dispatch(Action::QuickOpenSubmit);
+        assert!(
+            matches!(effect, Effect::LoadFileIndex { .. }),
+            "files mode loads the index: {effect:?}"
+        );
+        let quick = app.quick_open.as_ref().expect("Quick Open stays up");
+        assert_eq!(quick.mode(), QuickOpenMode::Files);
+        assert_eq!(quick.query, "", "no `>`: files mode");
+        assert_eq!(app.input_mode(), InputMode::QuickOpen);
+    }
+
+    /// Search in files closes the palette and opens the search-in-files
+    /// dialog, as `Ctrl-f` does.
+    #[test]
+    fn palette_search_in_files_opens_the_search_dialog() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        palette_select(&mut app, "Search in files");
+        assert_eq!(palette_reason(&app, "Search in files"), None);
+        let effect = app.dispatch(Action::QuickOpenSubmit);
+        assert!(
+            matches!(effect, Effect::LoadSearchIndex { .. }),
+            "the dialog loads its index: {effect:?}"
+        );
+        assert!(app.quick_open.is_none(), "the palette closes");
+        assert!(app.search_files.is_some(), "the search dialog opens");
+        assert!(
+            matches!(app.input_mode(), InputMode::SearchFiles { .. }),
+            "{:?}",
+            app.input_mode()
+        );
+    }
+
     #[test]
     fn palette_fold_subtree_folds_an_open_parent_and_its_children_like_zz() {
         let mut app = tree_app();
@@ -17733,6 +18004,31 @@ diff --git a/README.md b/README.md
         assert_eq!(app.dispatch(Action::CopyEntityReference), Effect::None);
         assert_eq!(app.status, "no copy target");
         assert!(app.comment_export.is_none());
+    }
+
+    /// A group row has no checkout: `-` and the Open in Explorer row refuse
+    /// with the same copy, and `-` does not resize the commit message.
+    #[test]
+    fn open_in_explorer_refuses_on_a_group_row() {
+        use super::super::tabs::FOCUS_A_TREE_ROW_TO_EXPLORE;
+        let mut app = state();
+        app.folds.remove("group:no-updates");
+        app.rebuild_rows();
+        app.cursor = app
+            .rows
+            .iter()
+            .position(|r| r.kind == NodeKind::Group)
+            .expect("group");
+        let lines = app.commit_msg_lines;
+        assert_eq!(
+            palette_reason(&app, "Open in Explorer").as_deref(),
+            Some(FOCUS_A_TREE_ROW_TO_EXPLORE)
+        );
+        assert_eq!(app.dispatch(Action::ExplorerReveal), Effect::None);
+        assert_eq!(app.status, FOCUS_A_TREE_ROW_TO_EXPLORE);
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+        assert_eq!(app.commit_msg_lines, lines);
+        assert!(app.tabs.is_workspace());
     }
 
     #[test]

@@ -259,19 +259,21 @@ impl AppState {
     /// paint first do not take the cursor while they are disabled. Landing
     /// rows are [`CommandPaletteState::landing_rows`]: a row found only by
     /// an alias never takes the cursor from an in-scope row found by its
-    /// name, even a disabled one. Moves still go over every row.
+    /// name, even a disabled one. The go-to-line row (`:42`), while it
+    /// shows, is the only landing row, so Enter runs it or says why not.
+    /// Moves still go over every row.
     fn land_palette_cursor(&mut self) {
         let highlighted = self.diff_visual_anchor.is_some();
-        let Some((visible, landing)) = self
+        let Some((rows, landing)) = self
             .command_palette()
-            .map(|p| (p.visible(), p.landing_rows(highlighted)))
+            .map(|p| (p.rows(), p.landing_rows(highlighted)))
         else {
             return;
         };
         let cursor = landing
             .iter()
             .copied()
-            .find(|&index| self.palette_disabled_reason(visible[index]).is_none())
+            .find(|&index| self.palette_disabled_reason(&rows[index]).is_none())
             .or_else(|| landing.first().copied())
             .unwrap_or(0);
         if let Some(palette) = self.command_palette_mut() {
@@ -331,7 +333,7 @@ impl AppState {
         else {
             return Effect::None;
         };
-        if let Some(reason) = self.palette_disabled_reason(command) {
+        if let Some(reason) = self.palette_disabled_reason(&command) {
             self.status = StatusMessage::warn(reason.clone());
             if let Some(palette) = self.command_palette_mut() {
                 palette.shown_reason = Some(reason);
@@ -1018,5 +1020,109 @@ mod tests {
         assert_eq!(quick(&app).mode(), QuickOpenMode::Files);
         assert!(app.status.is_empty(), "{}", app.status);
         assert_eq!(quick(&app).commands.shown_reason, None);
+    }
+
+    /// Open clean `app/src/lib.rs` as an Explorer inner file tab with
+    /// `count` loaded lines, the way Quick Open does.
+    fn inner_file_with_lines(app: &mut AppState, count: usize) {
+        let lines: Vec<String> = (1..=count).map(|n| format!("line {n}")).collect();
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+        app.open_loaded_inner_file("app", "src/lib.rs", &lines);
+    }
+
+    fn file_cursor(app: &AppState) -> usize {
+        app.tabs.active_file_view().expect("inner file").cursor
+    }
+
+    /// `:42` puts `Go to line 42` on top as the landing row; Enter closes
+    /// Quick Open and moves the Explorer inner file's own cursor.
+    #[test]
+    fn colon_digits_land_on_go_to_line_and_enter_jumps() {
+        use super::super::super::command_palette::PalettePaintRow;
+        let mut app = family_state();
+        inner_file_with_lines(&mut app, 50);
+        let tabs = app.tabs.len();
+        press(&mut app, ':');
+        press(&mut app, '4');
+        let palette = app.command_palette().expect("commands mode");
+        assert_eq!(
+            palette.paint_rows()[0],
+            PalettePaintRow::GoToLine { line: 4 }
+        );
+        press(&mut app, '2');
+        let palette = app.command_palette().expect("commands mode");
+        assert_eq!(
+            palette.paint_rows()[0],
+            PalettePaintRow::GoToLine { line: 42 }
+        );
+        assert_eq!(palette.cursor, 0, "the landing row");
+        assert_eq!(palette.selected_action(), Some(Action::GoToLine(42)));
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
+        assert!(app.quick_open.is_none(), "Enter closes first");
+        assert_eq!(file_cursor(&app), 41, "1-based line 42");
+        assert_eq!(app.tabs.len(), tabs, "no second tab");
+
+        // Leading zeros drop; `:0` clamps to line 1, `:9999` to the last.
+        for (typed, want) in [("007", 6), ("0", 0), ("9999", 49)] {
+            press(&mut app, ':');
+            for c in typed.chars() {
+                press(&mut app, c);
+            }
+            app.dispatch(Action::QuickOpenSubmit);
+            assert_eq!(file_cursor(&app), want, ":{typed}");
+        }
+    }
+
+    /// Only digits (trimmed at both ends) show the row; catalog filtering
+    /// is unchanged.
+    #[test]
+    fn non_digit_filters_do_not_show_go_to_line() {
+        let mut app = family_state();
+        app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
+        let go_to_line = |app: &AppState| app.command_palette().and_then(|p| p.go_to_line());
+        assert_eq!(go_to_line(&app), None, "`>` alone");
+        type_text(&mut app, " ");
+        assert_eq!(go_to_line(&app), None, "a blank filter");
+        type_text(&mut app, "42 ");
+        assert_eq!(go_to_line(&app), Some(42), "spaces trim at both ends");
+        type_text(&mut app, "2");
+        assert_eq!(go_to_line(&app), None, "`4 2`");
+        app.dispatch(Action::QuickOpenBackspace);
+        app.dispatch(Action::QuickOpenBackspace);
+        type_text(&mut app, "x");
+        assert_eq!(go_to_line(&app), None, "`42x`");
+        app.dispatch(Action::QuickOpenCancel);
+        app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
+        type_text(&mut app, "line");
+        assert_eq!(go_to_line(&app), None, "`line`");
+        let palette = app.command_palette().expect("commands mode");
+        assert_eq!(palette.rows().len(), palette.visible().len());
+    }
+
+    /// On the workspace tree the row still shows, disabled: Enter keeps
+    /// Quick Open open and puts the reason on the status line.
+    #[test]
+    fn go_to_line_on_the_tree_is_disabled_and_stays_open() {
+        use super::super::super::gates::FOCUS_A_FILE_DIFF;
+        let mut app = family_state();
+        focus_row(&mut app, NodeKind::Checkout, Some("app"));
+        let cursor = app.cursor;
+        app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
+        type_text(&mut app, "12");
+        let palette = app.command_palette().expect("commands mode");
+        assert_eq!(palette.cursor, 0, "a disabled row still lands");
+        let row = palette.selected().expect("the go-to-line row");
+        assert_eq!(
+            app.palette_disabled_reason(&row).as_deref(),
+            Some(FOCUS_A_FILE_DIFF)
+        );
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
+        assert!(app.quick_open.is_some(), "stays open");
+        assert_eq!(app.status, FOCUS_A_FILE_DIFF);
+        assert_eq!(
+            quick(&app).commands.shown_reason.as_deref(),
+            Some(FOCUS_A_FILE_DIFF)
+        );
+        assert_eq!(app.cursor, cursor, "the tree did not move");
     }
 }

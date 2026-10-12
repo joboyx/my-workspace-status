@@ -156,6 +156,9 @@ pub enum PopoverLine {
         /// in (a branch name, a sync count, a status side), else
         /// [`SegRole::File`].
         role: SegRole,
+        /// True when the value is a URL the painted value text links to
+        /// (OSC 8). The link keeps the full value when the text is cut.
+        link: bool,
     },
     /// An existing command: title and key chip from the palette catalog.
     /// Enter or a click runs its [`Action`].
@@ -728,6 +731,17 @@ fn role_field(label: &'static str, value: impl Into<String>, role: SegRole) -> P
         label,
         value: value.into(),
         role,
+        link: false,
+    }
+}
+
+/// A field whose value is a URL: the painted value links to it.
+fn link_field(label: &'static str, url: impl Into<String>) -> PopoverLine {
+    PopoverLine::Field {
+        label,
+        value: url.into(),
+        role: SegRole::File,
+        link: true,
     }
 }
 
@@ -1081,7 +1095,7 @@ fn pr_section(state: &AppState, repo: &Path, now_unix: i64) -> Option<PopoverSec
             }
         }
     }
-    lines.push(field("url", pr.url.clone()));
+    lines.push(link_field("url", pr.url.clone()));
     lines.extend(PopoverLine::action(&Action::OpenPullRequest));
     Some(PopoverSection {
         icon: kind,

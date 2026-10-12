@@ -29,6 +29,7 @@ use super::event_pump::{
     action_triggers_graph_autoload, classify_busy_dispatch, overlay_blocks_background_ticks,
     BusyAction,
 };
+use super::hyperlink::{link_cells, write_links};
 use super::keys::{drop_g_chord_echo, held_nav_key, KeyStrokeOrigin};
 use super::render::draw;
 use super::state::AppState;
@@ -214,7 +215,7 @@ pub async fn run(
 ) -> Result<(), u8> {
     let input = InputBridge::spawn();
     let mut presenter = Presenter::new();
-    terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
+    draw_frame(terminal, state)?;
     presenter.painted();
 
     let mut ctx = LoopCtx {
@@ -339,9 +340,7 @@ pub async fn run(
             _ = sleep_ms(present_remain) => {
                 ctx.state.prune_expired_flashes();
                 if ctx.presenter.should_draw() || ctx.state.has_active_flashes() {
-                    ctx.terminal
-                        .draw(|frame| draw(frame, ctx.state))
-                        .map_err(|_| 1u8)?;
+                    draw_frame(ctx.terminal, ctx.state)?;
                     ctx.presenter.painted();
                     if ctx.state.has_active_flashes() {
                         ctx.presenter.mark();
@@ -352,6 +351,19 @@ pub async fn run(
     }
     ctx.input.shutdown();
     Ok(())
+}
+
+/// Draw one frame, then paint its hyperlinks over it (OSC 8).
+///
+/// The links are printed again on every frame: a diff that rewrites a
+/// linked cell clears its link, and this puts it back.
+fn draw_frame(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    state: &mut AppState,
+) -> Result<(), u8> {
+    let completed = terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
+    let links = link_cells(completed.buffer, &state.layout.links);
+    write_links(terminal.backend_mut(), &links).map_err(|_| 1u8)
 }
 
 async fn sleep_ms(ms: u64) {
@@ -391,8 +403,7 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
             Action::QuickOpenSubmit => ctx
                 .state
                 .command_palette()
-                .and_then(|palette| palette.selected_action())
-                .cloned(),
+                .and_then(|palette| palette.selected_action()),
             Action::PopoverRun => ctx.state.popover_run_action(),
             Action::Release => ctx.state.popover_release_action(),
             _ => None,

@@ -185,7 +185,7 @@ moving between commits never changes the list height:
   to `COMMIT_MSG_LINES_MAX` (20)). Collapsed requests 2. The request
   counts the rule (N + 2 expanded, 3 collapsed). The TUI passes
   its session N (`AppState::commit_msg_lines`: `viewDefaults.commitMessageLines`,
-  then `-` / `+`) to both the widget and `graph_footer_request`.
+  then the Shorter / Taller commit message palette rows) to both the widget and `graph_footer_request`.
 - `graph_chrome_budget_for` clamps the rows under the rule to at most
   half the pane (never under 2), adds the rule row, and leaves the list
   at least one row. `GraphChromeBudget::footer_height` counts the rule;

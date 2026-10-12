@@ -104,6 +104,8 @@ A focused file-diff row (section, hunk, or line) paints the same cursor bar as o
 
 `row_line_ref(content, mode, row)` gives the source line behind a painted row: section, kind (add / del / context), and old / new line numbers. It walks the same row list as `build_diff_rows`, so `row` is the diff cursor. A split row that pairs a deleted and an added line gives the added (new-side) line; a row with only a deleted line gives that line. Section labels, hunk headers, `\ No newline` and binary markers, and error rows give none. The file path comes from the caller.
 
+`row_for_line(content, mode, line)` goes the other way, for go to line (`:<n>`): it gives the painted row for 1-based `line`. Each row counts by its `row_line_ref` new-side number. Deleted-only rows count by their old-side number only when no row in the diff has a new side (a deleted file). With no row on `line`, the nearest row wins, and the earlier row wins a tie: in a Workspace diff with STAGED and UNSTAGED sections, a line in both lands in STAGED. A diff with no numbered row (empty, binary, failed) gives none.
+
 ## Current-line blame
 
 With line blame on (`B`, `viewDefaults.lineBlame`), the focused line ends with a dimmed (`palette.muted`) note: `{author}, {age} · {sha7} · {subject}`. Rules:

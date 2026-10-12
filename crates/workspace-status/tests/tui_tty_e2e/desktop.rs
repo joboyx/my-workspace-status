@@ -64,6 +64,10 @@ impl DesktopSession {
         fs::create_dir_all(&state_home).unwrap();
         let update_store = state_home.join("update-check.json");
         write_fresh_update_check(&update_store);
+        // Empty theme store each launch: a last-used theme (operator or an
+        // earlier launch) cannot beat the baseline config theme.
+        let theme_store = state_home.join("theme.json");
+        let _ = fs::remove_file(&theme_store);
         // Temp user config dir with the harness baseline file: an operator
         // user config file cannot change the fixture's settings.
         let config_home = workspace.join(".e2e-config");
@@ -74,7 +78,8 @@ impl DesktopSession {
         let launcher = stage.join("run-tui.sh");
         let mut script = String::from("#!/usr/bin/env bash\nset -euo pipefail\n");
         script.push_str(
-            "unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE\n",
+            "unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE \
+             WS_STATUS_THEME\n",
         );
         script.push_str("export TERM=xterm-256color COLORTERM=truecolor\n");
         script.push_str("export LANG=C.UTF-8 LC_ALL=C.UTF-8\n");
@@ -99,6 +104,10 @@ impl DesktopSession {
         script.push_str(&format!(
             "export WS_STATUS_COMMENT_STORE={}\n",
             sh_quote(&state_home.join("comments.json"))
+        ));
+        script.push_str(&format!(
+            "export WS_STATUS_THEME_STORE={}\n",
+            sh_quote(&theme_store)
         ));
         for (k, v) in git_env() {
             script.push_str(&format!("export {k}={}\n", sh_quote_str(v)));
