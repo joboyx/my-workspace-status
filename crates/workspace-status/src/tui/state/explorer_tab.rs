@@ -4421,8 +4421,40 @@ mod tests {
         assert_eq!(app.go_to_line_refusal().as_deref(), Some(NO_LINES_TO_GO_TO));
     }
 
-    /// The Search in files and Go to file palette rows run on an Explorer
-    /// tab (their keys work there); Open in Explorer is off.
+    /// A `Theme: …` row previews over an Explorer inner file, Esc puts the
+    /// open-time theme back, and Enter applies it with the file still open.
+    #[test]
+    fn explorer_inner_file_previews_and_applies_a_palette_theme_row() {
+        use crate::tui::theme::ThemeId;
+        let mut app = state();
+        open_root(&mut app);
+        app.open_loaded_inner_file("app", "README.md", &["# app"]);
+        app.focus = FocusPane::Right;
+        let before = app.theme;
+        assert_ne!(before, ThemeId::Nord);
+        let type_nord = |app: &mut AppState| {
+            app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
+            for c in "nord".chars() {
+                app.dispatch(Action::QuickOpenChar(c));
+            }
+        };
+        type_nord(&mut app);
+        assert_eq!(app.theme, ThemeId::Nord, "focus previews the row");
+        app.dispatch(Action::QuickOpenCancel);
+        assert_eq!(app.theme, before, "Esc restores the open-time theme");
+
+        type_nord(&mut app);
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
+        assert!(app.quick_open.is_none());
+        assert_eq!(app.theme, ThemeId::Nord);
+        assert_eq!(app.status, "theme: Nord");
+        assert_eq!(active_rel(&app).as_deref(), Some("README.md"));
+        assert_eq!(app.focus, FocusPane::Right);
+    }
+
+    /// The Search in files, Go to file, and `Theme: …` palette rows run on
+    /// an Explorer tab (with or without its file pane focused); Open in
+    /// Explorer is off.
     #[test]
     fn explorer_palette_rows_from_main_follow_the_explorer_gates() {
         let mut app = state();
@@ -4439,6 +4471,7 @@ mod tests {
             app.focus = focus;
             assert_eq!(reason(&app, "Search in files"), None, "{focus:?}");
             assert_eq!(reason(&app, "Go to file"), None, "{focus:?}");
+            assert_eq!(reason(&app, "Theme: Nord"), None, "{focus:?}");
             assert_eq!(
                 reason(&app, "Open in Explorer").as_deref(),
                 Some(SWITCH_TO_WORKSPACE_TAB),
