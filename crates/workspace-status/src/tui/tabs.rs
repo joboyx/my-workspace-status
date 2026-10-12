@@ -679,8 +679,9 @@ pub struct InnerFile {
     /// [`ExplorerTab::preview_gen`]). A result for another one is dropped.
     pub gen: u64,
     /// Live-reload token as of the last load issued: the file's disk token
-    /// (`size:mtimeMs`, or `gone`) and its snapshot change. `None` until
-    /// the first live-reload check records it.
+    /// (`size:mtimeMs`, or `gone`) and its snapshot change. Recorded when
+    /// each load is issued (open, `r`, editor return) and by each
+    /// live-reload check that moves it; `None` only before the first.
     pub stamp: Option<String>,
     /// 0-based line the cursor goes to once the load in flight lands (a
     /// search-in-files hit). On a diff view it maps to the row whose new

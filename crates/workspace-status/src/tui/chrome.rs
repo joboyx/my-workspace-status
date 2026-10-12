@@ -1066,13 +1066,21 @@ pub fn hint_row_kind(state: &AppState) -> HintRowKind {
 
 /// Display segments for the breadcrumb (workspace + drill frames).
 ///
-/// An Explorer tab reads `workspace › <checkout leaf> › <cursor row rel>`
-/// (as last painted; the tree selection follows the inner file tab).
+/// An Explorer tab reads `workspace › <checkout leaf> › <rel>`: with the
+/// right pane focused, the active inner file; with the tree focused, the
+/// tree cursor row as last painted (a folder row names the folder), else
+/// the active inner file.
 pub fn breadcrumb_segments(state: &AppState) -> Vec<String> {
     let mut out = vec![workspace_label(state)];
     if let Some(tab) = state.tabs.active_explorer() {
         out.push(checkout_leaf(&tab.checkout));
-        out.extend(tab.painted_rel.clone());
+        let inner = tab.active_inner().map(|inner| inner.rel.clone());
+        let rel = if state.focus == FocusPane::Right {
+            inner.or_else(|| tab.painted_rel.clone())
+        } else {
+            tab.painted_rel.clone().or(inner)
+        };
+        out.extend(rel);
         return out;
     }
     let mut seen_repo: Option<String> = None;

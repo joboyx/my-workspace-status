@@ -4486,9 +4486,8 @@ impl AppState {
                 .iter()
                 .find(|repo| repo.repo == tab.checkout)
                 .and_then(|repo| repo.primary_repo.as_deref());
-            let (rows, cursor) = self.explorer_rows()?;
-            let row = rows.into_iter().nth(cursor?).filter(|row| !row.is_dir)?;
-            return Some(EntityRef::file(&tab.checkout, primary, row.rel));
+            let rel = self.explorer_named_file()?;
+            return Some(EntityRef::file(&tab.checkout, primary, rel));
         }
         match self.list_focus_target() {
             ListFocusTarget::None => {

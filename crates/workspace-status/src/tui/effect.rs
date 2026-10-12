@@ -6542,16 +6542,32 @@ mod tests {
             ["fresh", "lines"]
         );
 
-        // Ctrl-w closes the inner tab, then the Explorer tab.
-        state.dispatch(Action::CloseTab);
-        state.dispatch(Action::CloseTab);
-        let gone = JobOutcome::ExplorerPreview {
+        // A late result for the replaced generation changes nothing.
+        let stale = |gen| JobOutcome::ExplorerPreview {
             tab_id,
-            gen: first_gen,
+            gen,
             body: ExplorerPreviewBody::File(FileRead::Binary),
         };
-        apply(&mut interp, &mut state, gone);
-        assert!(state.tabs.is_workspace(), "a closed tab takes no result");
+        apply(&mut interp, &mut state, stale(first_gen));
+        assert_eq!(
+            state.tabs.active_file_view().unwrap().lines(),
+            ["fresh", "lines"],
+            "the stale result is dropped"
+        );
+
+        // Ctrl-w closes the inner tab, then the Explorer tab; a result for
+        // the closed tab is dropped.
+        let live_gen = state.tabs.active_file_view().unwrap().generation;
+        state.dispatch(Action::CloseTab);
+        state.dispatch(Action::CloseTab);
+        assert!(state.tabs.is_workspace());
+        assert!(!state.apply_explorer_preview(
+            tab_id,
+            live_gen,
+            ExplorerPreviewBody::File(FileRead::Binary)
+        ));
+        apply(&mut interp, &mut state, stale(live_gen));
+        assert!(state.tabs.get_explorer_id(tab_id).is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 

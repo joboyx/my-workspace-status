@@ -30,7 +30,7 @@ use crate::snapshot::FileChange;
 
 use super::super::action::{Action, Effect};
 use super::super::command_palette::{CommandScope, PaletteCommand};
-use super::super::diff::row_for_new_line;
+use super::super::diff::{row_for_new_line, row_line_ref};
 use super::super::effect::ExplorerPreviewBody;
 use super::super::event_pump::overlay_blocks_background_ticks;
 use super::super::explorer::{ExplorerEntry, ExplorerRow, ExplorerStatus};
@@ -178,10 +178,7 @@ impl AppState {
         let Some((mut effects, tab_id)) = self.explorer_open_and_reveal(checkout, &target) else {
             return Effect::None;
         };
-        let load = self.explorer_show_file(tab_id, &rel, true);
-        let reload = self.explorer_reload_if_shown(&load);
-        push_effect(&mut effects, load);
-        push_effect(&mut effects, reload);
+        push_effect(&mut effects, self.explorer_show_file(tab_id, &rel, true));
         self.focus = FocusPane::Left;
         if let Some(line) = line {
             self.explorer_line_target(tab_id, line, search);
@@ -190,8 +187,8 @@ impl AppState {
     }
 
     /// [`Self::active_explorer_live_reload`] when `load` is
-    /// [`Effect::None`]: the inner tab now showing was already open, so
-    /// its file may have moved while it was not checked.
+    /// [`Effect::None`]: a reused Explorer tab whose cursor row showed no
+    /// file (a folder) still checks the inner tab it shows.
     fn explorer_reload_if_shown(&mut self, load: &Effect) -> Effect {
         if *load == Effect::None {
             self.active_explorer_live_reload()
@@ -446,6 +443,22 @@ impl AppState {
         self.explorer_sync_preview(tab_id)
     }
 
+    /// The file the active Explorer tab names (copy reference): with the
+    /// right pane focused, the active inner file; with the tree focused,
+    /// the tree's file row, else (a folder row, or a cursor row not listed
+    /// yet) the active inner file. `None` with neither.
+    pub(super) fn explorer_named_file(&self) -> Option<String> {
+        let tab = self.tabs.active_explorer()?;
+        let inner = || tab.active_inner().map(|inner| inner.rel.clone());
+        if self.focus == FocusPane::Right {
+            return inner();
+        }
+        self.explorer_resolved_cursor_row(tab.id)
+            .filter(|row| !row.is_dir)
+            .map(|row| row.rel)
+            .or_else(inner)
+    }
+
     /// The tree cursor row of the active Explorer tab.
     fn explorer_cursor_row(&self) -> Option<ExplorerRow> {
         let (rows, cursor) = self.explorer_rows()?;
@@ -654,36 +667,66 @@ impl AppState {
         single_or_batch(effects)
     }
 
-    /// `e`: open the focused file in the editor, at the file view's line
-    /// when the active inner tab shows that file's text.
+    /// `e`: open a file in the editor.
+    ///
+    /// With the right pane focused: the active inner file, at the file
+    /// view's cursor line (a text body) or at the new-file line of the diff
+    /// cursor row (a row with one). With the tree focused: the tree's file
+    /// row, at the file view's cursor line only when that row is the
+    /// active inner file showing text. A folder row (or a cursor row not
+    /// listed yet) refuses with the folder-summary copy.
     fn edit_explorer(&mut self) -> Effect {
-        let Some(row) = self.explorer_cursor_row().filter(|row| !row.is_dir) else {
-            self.status = StatusMessage::warn(FOCUS_A_FILE_TO_EDIT);
-            return Effect::None;
-        };
         let Some(tab) = self.tabs.active_explorer() else {
             return Effect::None;
         };
-        let line = match tab.active_inner().map(|inner| &inner.view) {
-            Some(ExplorerPreview::File(file))
-                if file.rel == row.rel
-                    && matches!(file.body.as_deref(), Some(FileRead::Text { .. })) =>
-            {
-                Some(u32::try_from(file.cursor + 1).unwrap_or(u32::MAX))
-            }
-            _ => None,
+        let right = self.focus == FocusPane::Right;
+        let rel = if right {
+            tab.active_inner().map(|inner| inner.rel.clone())
+        } else {
+            self.explorer_resolved_cursor_row(tab.id)
+                .filter(|row| !row.is_dir)
+                .map(|row| row.rel)
+        };
+        let Some(rel) = rel else {
+            self.status = StatusMessage::warn(FOCUS_A_FILE_TO_EDIT);
+            return Effect::None;
+        };
+        let to_line = |n: usize| u32::try_from(n + 1).unwrap_or(u32::MAX);
+        let line = match tab.active_inner().filter(|inner| inner.rel == rel) {
+            Some(inner) => match &inner.view {
+                ExplorerPreview::File(file)
+                    if matches!(file.body.as_deref(), Some(FileRead::Text { .. })) =>
+                {
+                    Some(to_line(file.cursor))
+                }
+                ExplorerPreview::Diff {
+                    content,
+                    loading: false,
+                    ..
+                } if right => row_line_ref(content, self.diff_layout(), self.diff_cursor)
+                    .and_then(|line| line.new_no),
+                _ => None,
+            },
+            None => None,
         };
         let repo = tab.checkout.clone();
-        self.status = StatusMessage::progress(format!("opening {}…", row.rel));
+        self.status = StatusMessage::progress(format!("opening {rel}…"));
         Effect::EditFile {
             repo,
-            path: row.rel,
+            path: rel,
             line,
         }
     }
 
     /// Reload the active Explorer tab's active inner file tab when the
-    /// editor just saved its file.
+    /// editor just saved its file (`repo` / `path`); `None` for any other
+    /// file.
+    ///
+    /// Only the active inner tab of the active Explorer tab reloads here.
+    /// An inactive inner tab of that path (or one in an Explorer tab that
+    /// is not active) is left to the live-reload check, which runs when it
+    /// shows again (`[` / `]`, a tree move, Ctrl-w, a tab switch) and after
+    /// each status load ([`Self::explorer_live_reload`]).
     pub(crate) fn reload_explorer_after_edit(&mut self, repo: &str, path: &str) -> Option<Effect> {
         let tab = self.tabs.active_explorer()?;
         if tab.checkout != repo || tab.active_inner()?.rel != path {
@@ -790,11 +833,13 @@ impl AppState {
 
     /// Make `rel` the active inner file tab of `tab_id`.
     ///
-    /// An existing inner tab of `rel` is shown as it is (no reload); with
-    /// `pin` it is pinned. Otherwise a new tab loads: unpinned, it replaces
-    /// the preview tab in place, or is inserted right after the active tab
-    /// when there is no preview; pinned, it is inserted right after the
-    /// active tab. Returns that load ([`Effect::LoadExplorerPreview`]).
+    /// An existing inner tab of `rel` is shown as it is; with `pin` it is
+    /// pinned. It loads again only when it was hidden and its file moved
+    /// ([`Self::explorer_check_shown`]). Otherwise a new tab loads:
+    /// unpinned, it replaces the preview tab in place, or is inserted right
+    /// after the active tab when there is no preview; pinned, it is
+    /// inserted right after the active tab. Returns that load
+    /// ([`Effect::LoadExplorerPreview`]).
     fn explorer_show_file(&mut self, tab_id: u64, rel: &str, pin: bool) -> Effect {
         let Some(checkout) = self
             .tabs
@@ -846,11 +891,33 @@ impl AppState {
         }
         tab.active_file = Some(index);
         self.explorer_load_inner(tab_id, before);
+        if load == Effect::None {
+            return self.explorer_check_shown(tab_id, before);
+        }
         load
     }
 
+    /// The live-reload check ([`Self::explorer_live_reload`]) of the inner
+    /// tab that now shows on tab `tab_id`, when that tab is the active
+    /// Explorer tab and the active inner tab changed (`before` is the
+    /// generation of the one shown before): an inner tab that was hidden
+    /// may have missed disk edits. [`Effect::None`] otherwise.
+    fn explorer_check_shown(&mut self, tab_id: u64, before: Option<u64>) -> Effect {
+        let shown = self
+            .tabs
+            .active_explorer()
+            .filter(|tab| tab.id == tab_id)
+            .and_then(ExplorerTab::active_inner)
+            .map(|inner| inner.gen);
+        if shown.is_none() || shown == before {
+            return Effect::None;
+        }
+        self.active_explorer_live_reload()
+    }
+
     /// `[` / `]`: activate the inner file tab `delta` away (wrapping) and
-    /// select its file in the tree. Which tab is the preview stays.
+    /// select its file in the tree. Which tab is the preview stays. The
+    /// tab that now shows gets the live-reload check.
     fn explorer_cycle_inner(&mut self, delta: isize) -> Effect {
         if let Some(reason) = self.file_tab_cycle_reason() {
             self.status = StatusMessage::warn(reason);
@@ -868,13 +935,13 @@ impl AppState {
             tab.active_file = Some(next);
         }
         self.explorer_load_inner(tab_id, before);
-        self.explorer_reveal_active(tab_id)
+        self.explorer_reveal_and_check(tab_id, before)
     }
 
     /// Ctrl-w on an Explorer tab: close the active inner file tab and
     /// activate its left neighbour (else the first tab), selected in the
-    /// tree. `None` with no inner tab, so the shared router closes the
-    /// Explorer tab.
+    /// tree, with the live-reload check. `None` with no inner tab, so the
+    /// shared router closes the Explorer tab.
     fn explorer_close_inner(&mut self) -> Option<Effect> {
         let tab = self.tabs.active_explorer_mut()?;
         let index = tab.active_file?;
@@ -882,7 +949,16 @@ impl AppState {
         let before = Some(tab.files.remove(index).gen);
         tab.active_file = (!tab.files.is_empty()).then(|| index.saturating_sub(1));
         self.explorer_load_inner(tab_id, before);
-        Some(self.explorer_reveal_active(tab_id))
+        Some(self.explorer_reveal_and_check(tab_id, before))
+    }
+
+    /// [`Self::explorer_reveal_active`] plus the live-reload check of the
+    /// inner tab that now shows ([`Self::explorer_check_shown`]).
+    fn explorer_reveal_and_check(&mut self, tab_id: u64, before: Option<u64>) -> Effect {
+        let mut effects = Vec::new();
+        push_effect(&mut effects, self.explorer_reveal_active(tab_id));
+        push_effect(&mut effects, self.explorer_check_shown(tab_id, before));
+        single_or_batch(effects)
     }
 
     /// Reveal and select the active inner tab's file in tab `tab_id`'s
@@ -2991,5 +3067,199 @@ mod tests {
         assert!(app.explorer_diff().is_some(), "content kept");
         assert_eq!(app.explorer_live_reload("app"), None, "gone recorded");
         let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    fn edit_of(effect: Effect) -> (String, Option<u32>) {
+        match effect {
+            Effect::EditFile { repo, path, line } => {
+                assert_eq!(repo, "app");
+                (path, line)
+            }
+            other => panic!("an editor launch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn e_opens_the_active_inner_file_at_its_line() {
+        // Focus right on a clean file: its cursor line.
+        let mut app = state();
+        app.open_loaded_inner_file("app", "README.md", &["a", "b", "c", "d"]);
+        app.dispatch(Action::FocusRight);
+        app.dispatch(Action::Move(2));
+        assert_eq!(
+            edit_of(app.dispatch(Action::Edit)),
+            ("README.md".into(), Some(3))
+        );
+        assert_eq!(&*app.status, "opening README.md…");
+
+        // A binary body opens with no line.
+        let effect = app.open_file_in_explorer("app".into(), "logo.png".into(), None, None);
+        let (tab_id, gen) = file_load(&effect);
+        assert!(app.apply_explorer_preview(
+            tab_id,
+            gen,
+            ExplorerPreviewBody::File(FileRead::Binary)
+        ));
+        app.dispatch(Action::FocusRight);
+        assert_eq!(
+            edit_of(app.dispatch(Action::Edit)),
+            ("logo.png".into(), None)
+        );
+
+        // A diff: the new-file line of the cursor row; a hunk header has none.
+        let effect = app.open_file_in_explorer("app".into(), "src/tui/app.rs".into(), None, None);
+        let (tab_id, gen) = file_load(&effect);
+        let diff = super::super::super::diff::DiffContent::from_unified(
+            "@@ -1,2 +1,2 @@\n one\n-old\n+new\n",
+        );
+        assert!(app.apply_explorer_preview(tab_id, gen, ExplorerPreviewBody::Diff(diff)));
+        app.dispatch(Action::FocusRight);
+        // UNSTAGED 0, hunk 1, `one` 2, `-old` 3, `+new` 4.
+        app.diff_cursor = 4;
+        assert_eq!(
+            edit_of(app.dispatch(Action::Edit)),
+            ("src/tui/app.rs".into(), Some(2))
+        );
+        app.diff_cursor = 1;
+        assert_eq!(
+            edit_of(app.dispatch(Action::Edit)),
+            ("src/tui/app.rs".into(), None)
+        );
+    }
+
+    #[test]
+    fn e_with_the_tree_focused_edits_the_tree_row() {
+        let mut app = state();
+        let open = app.open_file_in_explorer("app".into(), "README.md".into(), None, None);
+        let (tab_id, gen) = file_load(&open);
+        land(&mut app, open);
+        assert!(app.apply_explorer_preview(tab_id, gen, text(&["a", "b", "c"])));
+        app.dispatch(Action::FocusRight);
+        app.dispatch(Action::Move(2));
+        app.dispatch(Action::FocusLeft);
+        assert_eq!(
+            edit_of(app.dispatch(Action::Edit)),
+            ("README.md".into(), Some(3)),
+            "the tree row is the active inner file: its line"
+        );
+        // Another file row: that file, with no line.
+        app.tabs
+            .active_explorer_mut()
+            .unwrap()
+            .tree
+            .set_cursor_rel("new.txt");
+        assert_eq!(
+            edit_of(app.dispatch(Action::Edit)),
+            ("new.txt".into(), None)
+        );
+        // A folder row refuses.
+        app.tabs
+            .active_explorer_mut()
+            .unwrap()
+            .tree
+            .set_cursor_rel("src");
+        assert_eq!(app.dispatch(Action::Edit), Effect::None);
+        assert_eq!(&*app.status, FOCUS_A_FILE_TO_EDIT);
+    }
+
+    #[test]
+    fn editor_return_reloads_only_the_active_inner_file() {
+        let mut app = state();
+        assert!(app.reload_explorer_after_edit("app", "README.md").is_none());
+        let (_, readme) = app.open_loaded_inner_file("app", "README.md", &["# app"]);
+        assert!(app.reload_explorer_after_edit("app", "other.md").is_none());
+        assert!(app.reload_explorer_after_edit("lib", "README.md").is_none());
+        let reload = app
+            .reload_explorer_after_edit("app", "README.md")
+            .expect("the active inner file reloads");
+        match reload {
+            Effect::LoadExplorerPreview { path, gen, .. } => {
+                assert_eq!(path, "README.md");
+                assert!(gen > readme, "a new generation");
+            }
+            other => panic!("{other:?}"),
+        }
+        // An inner tab that is not active is left to the live-reload check
+        // that runs when it shows again.
+        app.open_loaded_inner_file("app", "src/lib.rs", &["lib"]);
+        assert!(app.reload_explorer_after_edit("app", "README.md").is_none());
+    }
+
+    #[test]
+    fn showing_an_open_inner_tab_runs_the_live_reload_check() {
+        let (mut app, cwd) = disk_state(&["n1"]);
+        std::fs::write(cwd.join("app/other.txt"), "o1").expect("write other");
+        app.open_loaded_inner_file("app", "notes.txt", &["n1"]);
+        app.open_loaded_inner_file("app", "other.txt", &["o1"]);
+        assert_eq!(inners(&app), [pinned("notes.txt"), pinned("other.txt")]);
+
+        // `]` onto notes.txt after a disk edit: a silent reload.
+        write_notes(&cwd, &["n1", "n2"]);
+        assert_eq!(
+            app.explorer_live_reload("app"),
+            None,
+            "other.txt is unchanged"
+        );
+        let shown = app.dispatch(Action::NextFileTab);
+        assert_eq!(active_rel(&app).as_deref(), Some("notes.txt"));
+        assert!(has_file_load(&shown), "{shown:?}");
+        assert_eq!(file_lines(&app), ["n1"], "the old body stays painted");
+        assert!(
+            !has_file_load(&app.dispatch(Action::PreviousFileTab)),
+            "other.txt did not move"
+        );
+
+        // Ctrl-w onto notes.txt after another edit.
+        write_notes(&cwd, &["n1", "n2", "n3"]);
+        let shown = app.dispatch(Action::CloseTab);
+        assert_eq!(active_rel(&app).as_deref(), Some("notes.txt"));
+        assert!(has_file_load(&shown), "{shown:?}");
+
+        // A Quick Open of the open file checks it too.
+        app.open_loaded_inner_file("app", "other.txt", &["o1"]);
+        write_notes(&cwd, &["n1", "n2", "n3", "n4"]);
+        let open = app.open_file_in_explorer("app".into(), "notes.txt".into(), None, None);
+        assert!(has_file_load(&open), "{open:?}");
+        assert_eq!(inners(&app).len(), 2, "no duplicate");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn breadcrumb_and_copy_reference_name_the_active_inner_file() {
+        use crate::tui::chrome::breadcrumb_segments;
+        let mut app = state();
+        open_root(&mut app);
+        let (tab_id, gen, ..) = load_of(&app.dispatch(Action::MoveToEnd));
+        assert!(app.apply_explorer_preview(tab_id, gen, text(&["# app"])));
+        app.dispatch(Action::MoveToStart);
+        assert_eq!(cursor_rel(&app), "src", "the tree cursor sits on a folder");
+        app.tabs.active_explorer_mut().unwrap().painted_rel = Some("src".into());
+        let copied = |app: &mut AppState| match app.dispatch(Action::CopyEntityReference) {
+            Effect::CopyClipboard { text, .. } => text,
+            other => panic!("a copy, got {other:?}"),
+        };
+
+        // Tree focused: the breadcrumb names the folder row; a copy names
+        // the open file (a folder has no file reference).
+        assert_eq!(breadcrumb_segments(&app)[1..], ["app", "src"]);
+        let text = copied(&mut app);
+        assert!(text.contains("README.md"), "{text}");
+
+        // File pane focused: both name the active inner file.
+        app.dispatch(Action::FocusRight);
+        assert_eq!(app.focus, FocusPane::Right);
+        assert_eq!(breadcrumb_segments(&app)[1..], ["app", "README.md"]);
+        let text = copied(&mut app);
+        assert!(
+            text.contains("README.md") && !text.contains("src"),
+            "{text}"
+        );
+
+        // Tree focused on a file row: that row.
+        app.dispatch(Action::FocusLeft);
+        load_of(&app.dispatch(Action::Move(2)));
+        assert_eq!(cursor_rel(&app), "new.txt");
+        let text = copied(&mut app);
+        assert!(text.contains("new.txt"), "{text}");
     }
 }
