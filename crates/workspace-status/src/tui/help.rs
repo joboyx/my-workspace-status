@@ -164,7 +164,7 @@ macro_rules! view_group {
                 },
                 HelpEntry {
                     keys: ": Ctrl-p F",
-                    desc: "commands · go to file (> first switches)",
+                    desc: "commands · :<n> go to line · go to file (> first switches)",
                 },
                 HelpEntry {
                     keys: "?",

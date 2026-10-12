@@ -60,7 +60,10 @@ const HELP_VIEW_ROWS: &[(&str, &str)] = &[
     ("'", "copy entity reference"),
     ("Esc", "back / unfocus · right-click · never quit"),
     ("Enter dblclick", "focus right / drill"),
-    (": Ctrl-p F", "commands · go to file (> first switches)"),
+    (
+        ": Ctrl-p F",
+        "commands · :<n> go to line · go to file (> first switches)",
+    ),
     ("?", "help"),
     ("Tab", "other pane"),
     ("q", "quit"),

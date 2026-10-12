@@ -1720,4 +1720,70 @@ mod tests {
         let relist = flat(status_load(&mut app, more).expect("a root re-list"));
         assert_eq!(dir_loads(&relist), [""]);
     }
+
+    /// Go to line from the Explorer tree jumps in the preview: a changed
+    /// file's diff by its new-side line, a clean file's body by line. A
+    /// folder row or a body still loading has no lines.
+    #[test]
+    fn go_to_line_jumps_in_the_preview_from_the_tree() {
+        use super::super::go_to_line::NO_LINES_TO_GO_TO;
+        use crate::tui::diff::{DiffContent, DiffRow};
+        let mut app = state();
+        open_root(&mut app);
+        assert_eq!(cursor_rel(&app), "src");
+        assert_eq!(app.go_to_line_refusal().as_deref(), Some(NO_LINES_TO_GO_TO));
+        assert_eq!(app.dispatch(Action::GoToLine(2)), Effect::None);
+        assert_eq!(app.status, NO_LINES_TO_GO_TO);
+        assert_eq!(app.focus, FocusPane::Left, "a refusal moves nothing");
+
+        // new.txt is untracked: its preview is a diff.
+        let Effect::LoadExplorerPreview {
+            tab_id,
+            gen,
+            change: Some(_),
+            ..
+        } = app.dispatch(Action::Move(2))
+        else {
+            panic!("new.txt diff preview");
+        };
+        let diff = DiffContent::from_unified("@@ -0,0 +1,3 @@\n+one\n+two\n+three\n");
+        assert!(app.apply_explorer_preview(tab_id, gen, ExplorerPreviewBody::Diff(diff)));
+        assert_eq!(app.dispatch(Action::GoToLine(2)), Effect::None);
+        assert_eq!(app.focus, FocusPane::Right, "the jump focuses the preview");
+        let row_text = |app: &AppState| match &app.current_diff_rows()[app.diff_cursor] {
+            DiffRow::Line { left, .. } => left.text.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(row_text(&app), "two");
+        app.dispatch(Action::GoToLine(40));
+        assert_eq!(row_text(&app), "three", "clamped to the last line");
+
+        // README.md is clean: its preview is the file body.
+        app.dispatch(Action::FocusLeft);
+        let Effect::LoadExplorerPreview {
+            tab_id,
+            gen,
+            change: None,
+            ..
+        } = app.dispatch(Action::MoveToEnd)
+        else {
+            panic!("README.md body preview");
+        };
+        assert_eq!(
+            app.go_to_line_refusal().as_deref(),
+            Some(NO_LINES_TO_GO_TO),
+            "still loading"
+        );
+        let lines: Vec<String> = (1..=30).map(|n| format!("line {n}")).collect();
+        let body = ExplorerPreviewBody::File(FileRead::Text { lines, max_cols: 7 });
+        assert!(app.apply_explorer_preview(tab_id, gen, body));
+        assert_eq!(app.go_to_line_refusal(), None);
+        app.dispatch(Action::GoToLine(12));
+        assert_eq!(app.focus, FocusPane::Right);
+        let cursor = |app: &AppState| app.tabs.active_file_view().expect("body").cursor;
+        assert_eq!(cursor(&app), 11);
+        app.dispatch(Action::GoToLine(0));
+        assert_eq!(cursor(&app), 0, "below 1 is line 1");
+        assert_eq!(cursor_rel(&app), "README.md", "the tree did not move");
+    }
 }

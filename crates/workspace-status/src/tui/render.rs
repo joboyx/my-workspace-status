@@ -25,7 +25,9 @@ use super::chrome::{
     dialog_rect, dialog_width, export_shows_status, help_tab, open_dialog, status_line, DialogKind,
     LIST_OVERLAY_MAX_ROWS,
 };
-use super::command_palette::{CommandPaletteState, PalettePaintRow};
+use super::command_palette::{
+    go_to_line_command, go_to_line_title, CommandPaletteState, PaletteCommand, PalettePaintRow,
+};
 use super::comments::{
     comment_overlay_footer_save, graph_row_comments_resolved, graph_row_has_comment, CommentPrompt,
     COMMENT_OVERLAY_FOOTER_EDIT,
@@ -4536,7 +4538,7 @@ fn draw_quick_open(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         let commands = &quick.commands;
         let reason = commands
             .selected()
-            .and_then(|command| state.palette_disabled_reason(command));
+            .and_then(|command| state.palette_disabled_reason(&command));
         let footer = match reason {
             Some(why) => format!("Enter run · Esc close · {why}"),
             None => "Enter run · Esc close".into(),
@@ -4659,8 +4661,9 @@ fn quick_open_file_rows(
     rows
 }
 
-/// Commands-mode rows: group headers, command titles, key chips, and the
-/// disabled reason at the right edge when it fits.
+/// Commands-mode rows: the go-to-line row while it shows, group headers,
+/// command titles, key chips, and the disabled reason at the right edge
+/// when it fits.
 fn quick_open_command_rows(
     state: &AppState,
     palette: &CommandPaletteState,
@@ -4668,10 +4671,9 @@ fn quick_open_command_rows(
     inner_width: usize,
 ) -> Vec<Line<'static>> {
     let palette_theme = state.theme.palette();
-    let accent = palette_theme.cursor;
-    let panel = palette_theme.panel;
     let paint_rows = palette.paint_rows();
     let cursor_paint = paint_rows.iter().position(|row| match row {
+        PalettePaintRow::GoToLine { .. } => palette.cursor == 0,
         PalettePaintRow::Command { index, .. } => *index == palette.cursor,
         _ => false,
     });
@@ -4706,88 +4708,118 @@ fn quick_open_command_rows(
                             .add_modifier(Modifier::BOLD),
                     )));
                 }
-                PalettePaintRow::Command { command, index } => {
-                    let selected = index == palette.cursor;
-                    let reason = state.palette_disabled_reason(command);
-                    let disabled = reason.is_some();
-                    let cursor = if selected { "❯ " } else { "  " };
-                    let row_bg = if selected {
-                        palette_theme.cursor_bg
-                    } else {
-                        palette_theme.panel
-                    };
-                    let mut style = Style::default()
-                        .fg(if selected {
-                            palette_theme.file
-                        } else {
-                            palette_theme.muted
-                        })
-                        .bg(row_bg);
-                    if disabled {
-                        style = style.add_modifier(Modifier::DIM);
-                    }
-                    let dim = if disabled {
-                        Modifier::DIM
-                    } else {
-                        Modifier::empty()
-                    };
-                    let mut spans = vec![
-                        Span::styled(
-                            cursor.to_string(),
-                            Style::default()
-                                .fg(if selected {
-                                    accent
-                                } else {
-                                    palette_theme.muted
-                                })
-                                .bg(row_bg),
-                        ),
-                        Span::styled(command.title.to_string(), style),
-                    ];
-                    // Palette-only rows (Diff … in new tab, Blame: …) have no key.
-                    if !command.keys.is_empty() {
-                        spans.push(Span::raw(" "));
-                        spans.push(key_chip(
-                            command.keys,
-                            if disabled {
-                                palette_theme.muted
-                            } else {
-                                accent
-                            },
-                            panel,
-                        ));
-                    }
-                    if !header_painted {
-                        spans.push(Span::styled(
-                            format!("  {}", command.group.title()),
-                            Style::default()
-                                .fg(palette_theme.muted)
-                                .bg(row_bg)
-                                .add_modifier(dim),
-                        ));
-                    }
-                    // The reason sits dimmed at the right edge when it fits,
-                    // so every disabled row says why, not only the cursor row.
-                    if let Some(why) = reason.as_deref() {
-                        let used = help_spans_width(&spans);
-                        let room = inner_width.saturating_sub(used);
-                        let need = visible_width(why) + 2;
-                        if room >= need {
-                            spans.push(Span::styled(
-                                format!("{}{why}", " ".repeat(room - need + 2)),
-                                Style::default()
-                                    .fg(palette_theme.muted)
-                                    .bg(row_bg)
-                                    .add_modifier(Modifier::DIM),
-                            ));
-                        }
-                    }
-                    lines.push(Line::from(spans));
-                }
+                // The synthetic row sits above every group: no label.
+                PalettePaintRow::GoToLine { line } => lines.push(palette_command_line(
+                    state,
+                    &go_to_line_command(line),
+                    &go_to_line_title(line),
+                    palette.cursor == 0,
+                    false,
+                    inner_width,
+                )),
+                PalettePaintRow::Command { command, index } => lines.push(palette_command_line(
+                    state,
+                    command,
+                    command.title,
+                    index == palette.cursor,
+                    !header_painted,
+                    inner_width,
+                )),
             }
         }
     }
     lines
+}
+
+/// One commands-mode row: cursor mark, `title`, key chip, the group label
+/// when `group_label`, and the disabled reason at the right edge when it
+/// fits.
+fn palette_command_line(
+    state: &AppState,
+    command: &PaletteCommand,
+    title: &str,
+    selected: bool,
+    group_label: bool,
+    inner_width: usize,
+) -> Line<'static> {
+    let palette_theme = state.theme.palette();
+    let accent = palette_theme.cursor;
+    let panel = palette_theme.panel;
+    let reason = state.palette_disabled_reason(command);
+    let disabled = reason.is_some();
+    let cursor = if selected { "❯ " } else { "  " };
+    let row_bg = if selected {
+        palette_theme.cursor_bg
+    } else {
+        palette_theme.panel
+    };
+    let mut style = Style::default()
+        .fg(if selected {
+            palette_theme.file
+        } else {
+            palette_theme.muted
+        })
+        .bg(row_bg);
+    if disabled {
+        style = style.add_modifier(Modifier::DIM);
+    }
+    let dim = if disabled {
+        Modifier::DIM
+    } else {
+        Modifier::empty()
+    };
+    let mut spans = vec![
+        Span::styled(
+            cursor.to_string(),
+            Style::default()
+                .fg(if selected {
+                    accent
+                } else {
+                    palette_theme.muted
+                })
+                .bg(row_bg),
+        ),
+        Span::styled(title.to_string(), style),
+    ];
+    // Palette-only rows (Diff … in new tab, Blame: …) have no key.
+    if !command.keys.is_empty() {
+        spans.push(Span::raw(" "));
+        spans.push(key_chip(
+            command.keys,
+            if disabled {
+                palette_theme.muted
+            } else {
+                accent
+            },
+            panel,
+        ));
+    }
+    if group_label {
+        spans.push(Span::styled(
+            format!("  {}", command.group.title()),
+            Style::default()
+                .fg(palette_theme.muted)
+                .bg(row_bg)
+                .add_modifier(dim),
+        ));
+    }
+    // The reason sits dimmed at the right edge when it fits, so every
+    // disabled row says why, not only the cursor row.
+    if let Some(why) = reason.as_deref() {
+        let used = help_spans_width(&spans);
+        let room = inner_width.saturating_sub(used);
+        let need = visible_width(why) + 2;
+        if room >= need {
+            spans.push(Span::styled(
+                format!("{}{why}", " ".repeat(room - need + 2)),
+                Style::default()
+                    .fg(palette_theme.muted)
+                    .bg(row_bg)
+                    .add_modifier(Modifier::DIM),
+            ));
+        }
+    }
+    Line::from(spans)
 }
 
 /// Search-in-files preview body while its read runs.

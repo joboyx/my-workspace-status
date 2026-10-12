@@ -1,8 +1,12 @@
 //! The commands mode of Quick Open (`:`, or `>` typed first in files mode).
 //!
 //! Filter is case-insensitive substring on title, key chips, group, and
-//! aliases (`exit` finds Quit, `compare` the Diff … in new tab rows).
+//! aliases (`exit` finds Quit, `compare` the Diff … in new tab rows). A
+//! filter of digits only (`:42`) adds a synthetic `Go to line 42` row on
+//! top ([`go_to_line_target`]); it is not a catalog row.
 //! Execute is close-then-dispatch through [`super::state::AppState::dispatch`].
+
+use std::borrow::Cow;
 
 use super::action::{Action, QuickOpenEntry};
 
@@ -688,12 +692,53 @@ pub fn visible_groups(query: &str) -> Vec<CommandGroup> {
     out
 }
 
+/// Title of the synthetic go-to-line row; the painted row adds the line
+/// ([`go_to_line_title`]).
+pub const GO_TO_LINE_TITLE: &str = "Go to line";
+
+/// Line the synthetic go-to-line row jumps to, or `None` when `filter`
+/// does not ask for one.
+///
+/// `filter` (the [`super::quick_open::commands_filter`] text) must be one
+/// or more ASCII digits once trimmed at both ends: `42` and `042` give 42,
+/// while a blank filter, `42x`, `line`, and `4 2` give `None`. A number too
+/// large for `usize` saturates; the jump clamps it to the last line anyway.
+pub fn go_to_line_target(filter: &str) -> Option<usize> {
+    let digits = filter.trim();
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(digits.parse().unwrap_or(usize::MAX))
+}
+
+/// Painted title of the go-to-line row for `line`: `Go to line 42`.
+pub fn go_to_line_title(line: usize) -> String {
+    format!("{GO_TO_LINE_TITLE} {line}")
+}
+
+/// The synthetic go-to-line row for `line`, shaped like a catalog row.
+///
+/// It is not in [`PALETTE_COMMANDS`]: commands mode adds it above the
+/// catalog rows while the filter is all digits ([`go_to_line_target`]).
+/// It has no key chip and runs in any highlight mode.
+pub fn go_to_line_command(line: usize) -> PaletteCommand {
+    PaletteCommand {
+        title: GO_TO_LINE_TITLE,
+        keys: "",
+        group: CommandGroup::Move,
+        action: Action::GoToLine(line),
+        aliases: &[],
+        scope: CommandScope::Any,
+    }
+}
+
 /// Interactive palette state (filter + highlight).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CommandPaletteState {
     /// Filter query (substring).
     pub filter: String,
-    /// Highlight index into [`Self::visible`].
+    /// Highlight index into [`Self::rows`]: the go-to-line row is index 0
+    /// while it shows, and the [`Self::visible`] rows follow it.
     pub cursor: usize,
     /// Disabled-row reason that Enter put on the status line. Closing the
     /// palette clears the status while it still shows this text.
@@ -711,22 +756,49 @@ impl CommandPaletteState {
         }
     }
 
-    /// Commands that match the current filter, table order.
+    /// Catalog commands that match the current filter, table order.
     pub fn visible(&self) -> Vec<&'static PaletteCommand> {
         filter_commands(&self.filter)
     }
 
-    /// Indexes into [`Self::visible`] that the cursor may land on after a
+    /// Line of the synthetic go-to-line row, `Some` while the filter is all
+    /// digits ([`go_to_line_target`]).
+    pub fn go_to_line(&self) -> Option<usize> {
+        go_to_line_target(&self.filter)
+    }
+
+    /// Cursor index of the first [`Self::visible`] row: 1 while the
+    /// go-to-line row sits above the catalog rows, else 0.
+    fn catalog_start(&self) -> usize {
+        usize::from(self.go_to_line().is_some())
+    }
+
+    /// Every row in cursor order: the go-to-line row while it shows, then
+    /// [`Self::visible`].
+    pub fn rows(&self) -> Vec<Cow<'static, PaletteCommand>> {
+        self.go_to_line()
+            .map(|line| Cow::Owned(go_to_line_command(line)))
+            .into_iter()
+            .chain(self.visible().into_iter().map(Cow::Borrowed))
+            .collect()
+    }
+
+    /// Indexes into [`Self::rows`] that the cursor may land on after a
     /// filter change. `highlighted` is true while a diff range is
     /// highlighted.
     ///
-    /// Rows the filter finds by title, key chips, or group, and whose scope
-    /// fits the highlight mode, outrank rows it finds only by an alias:
-    /// typing `pull` lands on Pull behind, not on a row that has a
-    /// `pull request` alias. With no such row, every visible row may take
-    /// the cursor (`exit` outside a highlight lands on Quit, not on Exit
-    /// highlight).
+    /// The go-to-line row, while it shows, is the only landing row, enabled
+    /// or not: Enter on `:42` runs it or says why it cannot.
+    /// Otherwise rows the filter finds by title, key chips, or group, and
+    /// whose scope fits the highlight mode, outrank rows it finds only by
+    /// an alias: typing `pull` lands on Pull behind, not on a row that has
+    /// a `pull request` alias. With no such row, every visible row may
+    /// take the cursor (`exit` outside a highlight lands on Quit, not on
+    /// Exit highlight).
     pub fn landing_rows(&self, highlighted: bool) -> Vec<usize> {
+        if self.go_to_line().is_some() {
+            return vec![0];
+        }
         let visible = self.visible();
         let q = self.filter.trim().to_ascii_lowercase();
         let named: Vec<usize> = visible
@@ -744,19 +816,29 @@ impl CommandPaletteState {
         }
     }
 
-    /// Highlighted command, if the filtered list is non-empty.
-    pub fn selected(&self) -> Option<&'static PaletteCommand> {
-        self.visible().get(self.cursor).copied()
+    /// Highlighted row, if [`Self::rows`] is non-empty.
+    pub fn selected(&self) -> Option<Cow<'static, PaletteCommand>> {
+        let start = self.catalog_start();
+        match (self.go_to_line(), self.cursor.checked_sub(start)) {
+            (Some(line), None) => Some(Cow::Owned(go_to_line_command(line))),
+            (_, Some(index)) => self.visible().get(index).copied().map(Cow::Borrowed),
+            (None, None) => None,
+        }
     }
 
-    /// Mapped [`Action`] for the highlighted command, if any.
-    pub fn selected_action(&self) -> Option<&Action> {
-        self.selected().map(|command| &command.action)
+    /// Mapped [`Action`] for the highlighted row, if any.
+    pub fn selected_action(&self) -> Option<Action> {
+        self.selected().map(|command| command.action.clone())
+    }
+
+    /// Row count of [`Self::rows`].
+    fn len(&self) -> usize {
+        self.catalog_start() + self.visible().len()
     }
 
     /// Move the highlight by `delta`, clamped like the branch picker.
     pub fn move_cursor(&mut self, delta: i32) {
-        let len = self.visible().len();
+        let len = self.len();
         if len == 0 {
             self.cursor = 0;
             return;
@@ -772,7 +854,7 @@ impl CommandPaletteState {
     }
 
     fn clamp_cursor(&mut self) {
-        let len = self.visible().len();
+        let len = self.len();
         if len == 0 {
             self.cursor = 0;
         } else {
@@ -780,10 +862,15 @@ impl CommandPaletteState {
         }
     }
 
-    /// Group headers plus commands in table order (empty groups omitted when filtering).
+    /// The go-to-line row while it shows, then group headers plus commands
+    /// in table order (empty groups omitted when filtering).
     pub fn paint_rows(&self) -> Vec<PalettePaintRow> {
-        let visible = self.visible();
         let mut out = Vec::new();
+        if let Some(line) = self.go_to_line() {
+            out.push(PalettePaintRow::GoToLine { line });
+        }
+        let start = self.catalog_start();
+        let visible = self.visible();
         if visible.is_empty() {
             if self.filter.trim().is_empty() {
                 for group in GROUP_ORDER {
@@ -798,21 +885,30 @@ impl CommandPaletteState {
                 out.push(PalettePaintRow::Header(command.group.title()));
                 last = Some(command.group);
             }
-            out.push(PalettePaintRow::Command { command, index });
+            out.push(PalettePaintRow::Command {
+                command,
+                index: start + index,
+            });
         }
         out
     }
 }
 
-/// One painted palette line (group header or command).
+/// One painted palette line (group header, go-to-line row, or command).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PalettePaintRow {
     /// HIGHLIGHT / MOVE / GIT / VIEW heading.
     Header(&'static str),
-    /// Catalog row. `index` is into [`CommandPaletteState::visible`].
+    /// The synthetic go-to-line row ([`go_to_line_command`]), cursor index
+    /// 0. It paints above every header, with no group label.
+    GoToLine {
+        /// Line the row jumps to, as typed (leading zeros dropped).
+        line: usize,
+    },
+    /// Catalog row. `index` is into [`CommandPaletteState::rows`].
     Command {
         command: &'static PaletteCommand,
-        /// Index into [`CommandPaletteState::visible`].
+        /// Index into [`CommandPaletteState::rows`].
         index: usize,
     },
 }
@@ -1499,7 +1595,7 @@ mod tests {
             .into_iter()
             .filter_map(|row| match row {
                 PalettePaintRow::Header(title) => Some(title),
-                PalettePaintRow::Command { .. } => None,
+                _ => None,
             })
             .collect();
         assert_eq!(headers, vec!["HIGHLIGHT", "MOVE", "GIT", "VIEW"]);
@@ -1529,5 +1625,63 @@ mod tests {
         assert_eq!(palette.selected().map(|c| c.title), Some("Keymap help"));
         palette.move_cursor(-20);
         assert_eq!(palette.selected().map(|c| c.title), Some("Keymap help"));
+    }
+
+    #[test]
+    fn digits_only_filter_asks_for_go_to_line() {
+        for (filter, want) in [
+            ("42", Some(42)),
+            ("042", Some(42)),
+            ("42 ", Some(42)),
+            ("  7", Some(7)),
+            ("0", Some(0)),
+            ("99999999999999999999999", Some(usize::MAX)),
+            ("", None),
+            ("   ", None),
+            ("42x", None),
+            ("line", None),
+            ("4 2", None),
+            ("-4", None),
+        ] {
+            assert_eq!(go_to_line_target(filter), want, "{filter:?}");
+        }
+        assert_eq!(go_to_line_title(42), "Go to line 42");
+    }
+
+    /// The row sits above the catalog rows and shifts their cursor index.
+    #[test]
+    fn go_to_line_row_is_cursor_zero_and_the_only_landing_row() {
+        let mut palette = CommandPaletteState::new();
+        palette.set_filter("042");
+        assert_eq!(palette.go_to_line(), Some(42));
+        assert_eq!(palette.landing_rows(false), vec![0]);
+        assert_eq!(palette.landing_rows(true), vec![0]);
+        let selected = palette.selected().expect("the go-to-line row");
+        assert_eq!(selected.action, Action::GoToLine(42));
+        assert_eq!(selected.title, GO_TO_LINE_TITLE);
+        assert_eq!(palette.selected_action(), Some(Action::GoToLine(42)));
+        assert_eq!(
+            palette.paint_rows(),
+            vec![PalettePaintRow::GoToLine { line: 42 }]
+        );
+        assert_eq!(palette.rows().len(), 1, "no catalog row has a digit");
+        palette.move_cursor(5);
+        assert_eq!(palette.cursor, 0, "a lone row clamps the cursor");
+        // Not a catalog row: the 67-row catalog never lists it.
+        assert!(PALETTE_COMMANDS
+            .iter()
+            .all(|command| !matches!(command.action, Action::GoToLine(_))));
+
+        palette.set_filter("42x");
+        assert_eq!(palette.go_to_line(), None);
+        assert!(palette.rows().is_empty());
+        assert!(palette.selected().is_none());
+        palette.set_filter("");
+        assert_eq!(palette.go_to_line(), None);
+        assert_eq!(palette.rows().len(), PALETTE_COMMANDS.len());
+        assert_eq!(
+            palette.selected().map(|c| c.title),
+            Some(PALETTE_COMMANDS[0].title)
+        );
     }
 }
