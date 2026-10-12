@@ -141,7 +141,18 @@ fn pty_paint_explorer_tab_is_flat() {
         (last, 0, SLATE_SIDEBAR, "tree body"),
         (last, join - 1, SLATE_SIDEBAR, "tree last column"),
         (FLAT_TITLE_ROW, join, SLATE_SURFACE, "preview title row"),
-        (FLAT_BODY_ROW, join, SLATE_SURFACE, "preview first body row"),
+        (
+            FLAT_BODY_ROW,
+            join,
+            SLATE_SURFACE,
+            "preview inner tab row pad",
+        ),
+        (
+            FLAT_BODY_ROW + 1,
+            join,
+            SLATE_SURFACE,
+            "preview first body row",
+        ),
         (last, join, SLATE_SURFACE, "preview body"),
         (last, COLS - 1, SLATE_SURFACE, "preview last column"),
         (ROWS - 1, COLS - 1, SLATE_CHROME, "status row"),
@@ -196,7 +207,9 @@ fn pty_paint_explorer_tab_is_flat() {
         tui.screen()
     );
 
-    tui.sgr_click(join, FLAT_BODY_ROW);
+    // The preview's first content row is its inner tab row; the body
+    // starts below it.
+    tui.sgr_click(join, FLAT_BODY_ROW + 1);
     tui.wait_pred(
         |_| {
             title_rule(&tui, join, COLS, true, SLATE_SURFACE)

@@ -9,7 +9,7 @@
 //! the next chunk. A query edit only arms the debounce
 //! ([`AppState::search_files_due_ms`]); the live loop fires it through
 //! [`AppState::fire_search_files_due`]. Enter and `e` park the dialog and
-//! open the highlighted hit in a file tab or in `$EDITOR`.
+//! open the highlighted hit in its checkout's Explorer tab or in `$EDITOR`.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -304,8 +304,10 @@ impl AppState {
         ))
     }
 
-    /// Enter: park the dialog, then open or focus the highlighted hit's
-    /// file tab with its cursor on the hit line.
+    /// Enter: park the dialog, then open the highlighted hit's file in its
+    /// checkout's Explorer tab ([`Self::open_file_in_explorer`]) with the
+    /// cursor on the hit line (the diff row of that line for a changed
+    /// file).
     ///
     /// A literal search also arms the in-file search on the searched text,
     /// so `n` / `N` step its matches; a regex search does not (the in-file
@@ -326,7 +328,7 @@ impl AppState {
             .map(|dialog| dialog.hits_query.clone());
         self.close_search_files();
         let line = usize::try_from(line.saturating_sub(1)).unwrap_or(usize::MAX);
-        self.open_file_tab_at_line(checkout, rel, line, search)
+        self.open_file_in_explorer(checkout, rel, Some(line), search)
     }
 
     /// `e`: park the dialog and open the highlighted hit's file in the
@@ -524,6 +526,7 @@ mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     use super::super::super::action::QuickOpenEntry;
+    use super::super::super::effect::ExplorerPreviewBody;
     use super::super::super::keys::event_to_action;
     use super::super::super::quick_open::QuickOpenScope;
     use super::super::super::search::SearchPane;
@@ -746,8 +749,8 @@ mod tests {
             "a compare tab scopes to its checkout"
         );
 
-        app.open_file_tab("lib".into(), "src/lib.rs".into());
-        assert!(app.is_file_tab());
+        app.open_loaded_inner_file("lib", "src/lib.rs", &["fn lib() {}"]);
+        assert!(app.is_explorer_tab());
         assert_eq!(
             opened(&mut app),
             (
@@ -755,7 +758,7 @@ mod tests {
                 "Search · lib".to_string(),
                 single("lib")
             ),
-            "a file tab scopes to its checkout"
+            "an Explorer tab scopes to its checkout"
         );
     }
 
@@ -1171,7 +1174,39 @@ mod tests {
     }
 
     fn file_cursor(app: &AppState) -> usize {
-        app.tabs.active_file().expect("file tab").cursor
+        app.tabs.active_file_view().expect("a file view").cursor
+    }
+
+    /// `(tab_id, gen, checkout, rel)` of the inner file load in `effect` (a
+    /// batch with the Explorer folder listings).
+    fn inner_load(effect: Effect) -> (u64, u64, String, String) {
+        let effects = match effect {
+            Effect::Batch(effects) => effects,
+            other => vec![other],
+        };
+        effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::LoadExplorerPreview {
+                    tab_id,
+                    gen,
+                    repo,
+                    path,
+                    ..
+                } => Some((tab_id, gen, repo, path)),
+                _ => None,
+            })
+            .expect("an inner file load")
+    }
+
+    /// Land `lines` as the clean body of inner load `gen` of `tab_id`.
+    fn land_body(app: &mut AppState, tab_id: u64, gen: u64, lines: &[&str]) -> bool {
+        app.apply_explorer_preview(tab_id, gen, ExplorerPreviewBody::File(text(lines)))
+    }
+
+    /// Inner file tabs of the active Explorer tab.
+    fn inner_count(app: &AppState) -> usize {
+        app.tabs.active_explorer().map_or(0, |tab| tab.files.len())
     }
 
     #[test]
@@ -1180,15 +1215,7 @@ mod tests {
         let gen = open_and_search(&mut app, "foo");
         app.apply_search_chunk(gen, chunk(vec![hit(1, 2), hit(1, 4)], None));
         app.dispatch(Action::SearchFilesMove(1));
-        let Effect::LoadFileTab {
-            tab_id,
-            gen,
-            repo,
-            path,
-        } = app.dispatch(Action::SearchFilesSubmit)
-        else {
-            panic!("expected a new file tab load");
-        };
+        let (tab_id, gen, repo, path) = inner_load(app.dispatch(Action::SearchFilesSubmit));
         assert_eq!((repo.as_str(), path.as_str()), ("app", "src/main.rs"));
         assert!(app.search_files.is_none(), "Enter closes the dialog");
         assert_eq!(
@@ -1196,8 +1223,9 @@ mod tests {
             Some(1),
             "Enter parks it for the next Ctrl-f"
         );
-        assert!(app.is_file_tab());
-        assert!(app.apply_file_tab(tab_id, gen, text(&MAIN_RS)));
+        assert!(app.is_explorer_tab());
+        assert_eq!(app.tabs.labels(), ["Workspace", "Explorer · app"]);
+        assert!(land_body(&mut app, tab_id, gen, &MAIN_RS));
         assert_eq!(file_cursor(&app), 3, "line 4 is cursor 3");
         assert!(app.search_active);
         assert_eq!(app.search_query, "foo");
@@ -1215,13 +1243,9 @@ mod tests {
             type_text(&mut app, "x");
             search_gen(Some(fire(&mut app)))
         };
-        app.apply_search_chunk(gen, chunk(vec![hit(0, 40)], None));
-        let Effect::LoadFileTab { tab_id, gen, .. } = app.dispatch(Action::SearchFilesSubmit)
-        else {
-            panic!("expected a new file tab load");
-        };
-        app.apply_file_tab(tab_id, gen, text(&["a", "b"]));
-        assert_eq!(file_cursor(&app), 1);
+        app.apply_search_chunk(gen, chunk(vec![hit(1, 40)], None));
+        app.dispatch(Action::SearchFilesSubmit);
+        assert_eq!(file_cursor(&app), 5);
         assert_eq!(app.search_hit, None, "past the end is no hit");
     }
 
@@ -1233,11 +1257,8 @@ mod tests {
             app.dispatch(Action::SearchFilesToggleOption(SearchFilesOption::Regex)),
         ));
         app.apply_search_chunk(gen, chunk(vec![hit(1, 4)], None));
-        let Effect::LoadFileTab { tab_id, gen, .. } = app.dispatch(Action::SearchFilesSubmit)
-        else {
-            panic!("expected a new file tab load");
-        };
-        app.apply_file_tab(tab_id, gen, text(&MAIN_RS));
+        let (tab_id, gen, ..) = inner_load(app.dispatch(Action::SearchFilesSubmit));
+        land_body(&mut app, tab_id, gen, &MAIN_RS);
         assert_eq!(file_cursor(&app), 3);
         assert!(!app.search_active, "in-file search is plain text only");
         assert_eq!(app.search_hit, None);
@@ -1246,25 +1267,24 @@ mod tests {
     #[test]
     fn enter_on_an_open_tab_moves_its_cursor() {
         let mut app = family_state();
-        let Effect::LoadFileTab { tab_id, gen, .. } =
-            app.open_file_tab("app".into(), "src/main.rs".into())
-        else {
-            panic!("expected a load");
-        };
-        app.apply_file_tab(tab_id, gen, text(&MAIN_RS));
+        app.open_loaded_inner_file("app", "src/main.rs", &MAIN_RS);
         assert_eq!(file_cursor(&app), 0);
         let tabs = app.tabs.len();
 
-        // On a file tab the dialog scopes to its checkout, `app`.
+        // On an Explorer tab the dialog scopes to its checkout, `app`.
         let (gen, roots) = open(&mut app);
         assert_eq!(roots[0].checkout, "app");
         app.apply_search_index(gen, index_of(&["README.md", "src/main.rs"]));
         type_text(&mut app, "bar");
         let gen = search_gen(Some(fire(&mut app)));
         app.apply_search_chunk(gen, chunk(vec![hit(1, 5)], None));
-        app.dispatch(Action::SearchFilesSubmit);
+        assert_eq!(
+            app.dispatch(Action::SearchFilesSubmit),
+            Effect::None,
+            "the open inner tab shows without a reload"
+        );
         assert_eq!(app.tabs.len(), tabs, "the open tab is reused");
-        assert_eq!(app.tabs.active_file().map(|tab| tab.id), Some(tab_id));
+        assert_eq!(inner_count(&app), 1, "and its inner file tab");
         assert_eq!(file_cursor(&app), 4);
         assert_eq!(app.search_query, "bar");
         assert_eq!(app.search_hit, Some(4));
@@ -1287,7 +1307,7 @@ mod tests {
         assert!(app.search_files.is_none(), "`e` closes the dialog");
         assert!(app.search_files_parked.is_some(), "`e` parks it");
         assert_eq!(app.status, "opening src/main.rs…");
-        assert!(!app.is_file_tab(), "no file tab for `e`");
+        assert!(app.tabs.is_workspace(), "no Explorer tab for `e`");
     }
 
     #[test]
@@ -1453,11 +1473,8 @@ mod tests {
         let state = dialog(&app);
         assert!(state.stale && state.searching, "`foox` has no hit in yet");
         assert_eq!(state.hits_query, "foo");
-        let Effect::LoadFileTab { tab_id, gen, .. } = app.dispatch(Action::SearchFilesSubmit)
-        else {
-            panic!("expected a new file tab load");
-        };
-        app.apply_file_tab(tab_id, gen, text(&MAIN_RS));
+        let (tab_id, gen, ..) = inner_load(app.dispatch(Action::SearchFilesSubmit));
+        land_body(&mut app, tab_id, gen, &MAIN_RS);
         assert_eq!(app.search_query, "foo", "not the newer `foox`");
         assert_eq!(app.search_hit, Some(3));
     }
@@ -1481,12 +1498,7 @@ mod tests {
     #[test]
     fn regex_enter_on_an_open_tab_clears_its_older_search() {
         let mut app = family_state();
-        let Effect::LoadFileTab { tab_id, gen, .. } =
-            app.open_file_tab("app".into(), "src/main.rs".into())
-        else {
-            panic!("expected a load");
-        };
-        app.apply_file_tab(tab_id, gen, text(&MAIN_RS));
+        app.open_loaded_inner_file("app", "src/main.rs", &MAIN_RS);
         app.search_active = true;
         app.search_query = "main".into();
         app.search_target = SearchPane::File;
@@ -1501,7 +1513,7 @@ mod tests {
         ));
         app.apply_search_chunk(gen, chunk(vec![hit(1, 5)], None));
         app.dispatch(Action::SearchFilesSubmit);
-        assert_eq!(app.tabs.active_file().map(|tab| tab.id), Some(tab_id));
+        assert_eq!(inner_count(&app), 1, "the open inner tab is reused");
         assert_eq!(file_cursor(&app), 4);
         assert!(!app.search_active, "the `main` search is gone");
         assert_eq!(app.search_hit, None);

@@ -534,8 +534,8 @@ fn schedule_edit(ctx: &mut LoopCtx<'_>, repo: String, path: String, line: Option
         }
         Ok(()) => {
             ctx.state.status = StatusMessage::ok(format!("edited {path}"));
-            // A file tab showing this file reads it again.
-            if let Some(reload) = ctx.state.reload_file_tab_after_edit(&repo, &path) {
+            // An Explorer inner file tab showing this file reads it again.
+            if let Some(reload) = ctx.state.reload_explorer_after_edit(&repo, &path) {
                 ctx.interp
                     .schedule(ctx.state, ctx.opts, reload, &Action::None);
             }

@@ -106,7 +106,7 @@ pub struct Palette {
     pub cursor_bg: Color,
     /// Selected-row background on an unfocused list. Darker than [`Self::cursor_bg`].
     pub cursor_bg_inactive: Color,
-    /// Pane surface (background): the right pane and the file tab. The base
+    /// Pane surface (background): the right pane. The base
     /// that [`Self::cursor_tint`] measures the cursor shift from.
     pub surface: Color,
     /// Left pane background (tree, graph, files list). [`Theme::sidebar`],

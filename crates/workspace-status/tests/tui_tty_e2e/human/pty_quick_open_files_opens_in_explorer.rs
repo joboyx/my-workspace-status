@@ -1,6 +1,9 @@
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
-use crate::support::{tree_cursor_on, tree_has, GIT_WAIT, WAIT};
+use crate::support::{right_pane, tree_cursor_on, tree_has, GIT_WAIT, WAIT};
+
+/// Strip label of the `app` checkout's Explorer tab.
+const EXPLORER_APP: &str = "Explorer · app";
 
 /// Same gap as `pty_workspace_command_palette`. A same-letter `h`/`j`/`k`/`l`
 /// burst is dropped by `discard_held_nav_backlog` after the first press.
@@ -51,14 +54,16 @@ fn hit_row_on(screen: &str, needle: &str) -> bool {
         .any(|line| line.contains('❯') && line.contains(needle))
 }
 
-/// `F` (CSI-u Shift+F), type `readme`, Enter opens `app/README.md` in a
-/// new read-only tab.
+/// `F` (CSI-u Shift+F), type `readme`, Enter opens `app/README.md` in the
+/// `Explorer · app` tab as a pinned inner file tab: the tree selects the
+/// file and keeps focus, and the right pane shows its whole-file diff (the
+/// seed leaves it modified).
 ///
 /// Fail if `F` paints the commands list, if no `❯ README.md` hit row shows,
-/// or if Enter leaves the overlay up, keeps the Workspace tab active, or
-/// paints a tab without the file body.
+/// or if Enter leaves the overlay up, keeps the Workspace tab active, adds
+/// a top-level README.md tab, or paints no diff of the file.
 #[test]
-fn pty_shift_f_quick_open_opens_file_tab() {
+fn pty_shift_f_quick_open_opens_file_in_explorer() {
     let (_root, workspace) = daily_workspace();
     let mut tui = PtySession::open(&workspace);
     wait_first_paint(&tui);
@@ -79,17 +84,19 @@ fn pty_shift_f_quick_open_opens_file_tab() {
     tui.wait_pred(
         |screen| {
             let tab_strip = screen.lines().next().unwrap_or_default();
-            // The Workspace diff header also reads `app/README.md`; the
-            // file tab paints it as the pane title on the top border.
-            tab_strip.contains("README.md")
-                && screen
-                    .lines()
-                    .any(|line| line.trim_start().starts_with("┌app/README.md"))
-                && screen.contains("# app")
-                && screen.contains("dirty")
+            let title_row = screen.lines().nth(1).unwrap_or_default();
+            let right = right_pane(screen);
+            tab_strip.contains(EXPLORER_APP)
+                && !tab_strip.contains("README.md")
+                && title_row.starts_with("┌app─")
+                && title_row.contains("┐┌diff")
+                && tree_cursor_on(screen, "README.md")
+                && right.contains("README.md")
+                && right.contains("@@")
+                && right.contains("dirty")
                 && !screen.contains("Go to file")
         },
-        "Enter opens a README.md tab titled app/README.md with the file body; Quick Open closes",
+        "Enter opens README.md in Explorer · app: tree cursor on it, its diff on the right; Quick Open closes",
         GIT_WAIT,
     );
 }

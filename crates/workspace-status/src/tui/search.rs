@@ -4,7 +4,9 @@
 //! ancestors so the row is visible. Hidden ignored repos stay out of tree
 //! search unless shown (`.` / `-a`). Graph search matches subject, body, author,
 //! painted (relative or local) or UTC time, branch and tag names, and sha. Commit-file search
-//! matches paths. Diff search matches painted line text.
+//! matches paths. Diff search matches painted line text. Explorer tree search
+//! matches the names of the visible rows (a closed folder's rows are not
+//! searched; folders also list lazily).
 //!
 //! Like vim `/`, a step lands on the first match after the pane cursor
 //! (`N`: the last one before it) and wraps at the ends.
@@ -16,6 +18,7 @@ use workspace_status_graph::{format_relative_date, format_utc_timestamp, short_i
 
 use super::commit_files::CommitFileRow;
 use super::drill::CommitFile;
+use super::explorer::ExplorerRow;
 use super::tree::{flatten, TreeNode};
 use crate::helpers::visible_width;
 
@@ -27,15 +30,17 @@ pub enum SearchPane {
     Graph,
     CommitFiles,
     Diff,
-    /// The active file tab's lines.
+    /// The active file view's lines (an Explorer inner file tab).
     File,
+    /// The listed rows of the active Explorer tab's tree.
+    ExplorerTree,
 }
 
 impl SearchPane {
     /// Title of the pane the search is bound to, as its box paints it.
     pub fn title(self) -> &'static str {
         match self {
-            Self::Tree => "tree",
+            Self::Tree | Self::ExplorerTree => "tree",
             Self::Graph => "graph",
             Self::CommitFiles => "files",
             Self::Diff => "diff",
@@ -56,6 +61,22 @@ pub fn match_indices(labels: &[&str], query: &str) -> Vec<usize> {
         .filter(|(_, label)| label.to_lowercase().contains(&q))
         .map(|(i, _)| i)
         .collect()
+}
+
+/// Indices of the Explorer `rows` whose name matches `query`, as
+/// [`match_indices`] does. A loading placeholder row never matches.
+pub fn explorer_row_match_indices(rows: &[ExplorerRow], query: &str) -> Vec<usize> {
+    let labels: Vec<&str> = rows
+        .iter()
+        .map(|row| {
+            if row.placeholder {
+                ""
+            } else {
+                row.name.as_str()
+            }
+        })
+        .collect();
+    match_indices(&labels, query)
 }
 
 /// Match a search step landed on.
@@ -544,6 +565,29 @@ mod tests {
 
     fn landed(target: usize, wrapped: bool) -> Option<SearchLanding<usize>> {
         Some(SearchLanding { target, wrapped })
+    }
+
+    #[test]
+    fn explorer_rows_match_by_name_and_skip_placeholders() {
+        let row = |rel: &str, name: &str, placeholder: bool| ExplorerRow {
+            rel: rel.into(),
+            name: name.into(),
+            depth: 0,
+            is_dir: false,
+            expanded: false,
+            ignored: false,
+            placeholder,
+        };
+        let rows = [
+            row("src", "src", false),
+            row("src", "", true),
+            row("README.md", "README.md", false),
+            row("docs/readme.txt", "readme.txt", false),
+        ];
+        assert_eq!(explorer_row_match_indices(&rows, "README"), [2, 3]);
+        assert_eq!(explorer_row_match_indices(&rows, "src"), [0]);
+        assert!(explorer_row_match_indices(&rows, "  ").is_empty());
+        assert_eq!(SearchPane::ExplorerTree.title(), "tree");
     }
 
     #[test]

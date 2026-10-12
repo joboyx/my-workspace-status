@@ -67,8 +67,9 @@ use super::quick_open::{
     files_row_shows_status, FileIndexState, QuickOpenMode, QuickOpenScope, QuickOpenState,
 };
 use super::search::{
-    collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids, slice_cols,
-    wrap_col_starts, wrap_col_starts_capped, wrap_cols, SearchPane,
+    collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids,
+    explorer_row_match_indices, slice_cols, wrap_col_starts, wrap_col_starts_capped, wrap_cols,
+    SearchPane,
 };
 use super::search_files::{
     search_row_shows_status, SearchFilesState, SearchRow, SearchZone, SEARCH_PREVIEW_MIN_COLS,
@@ -86,8 +87,8 @@ use super::syntax::{
     CachedDiffSyntax, CodeSpan, DiffBackgrounds, DiffSyntaxKey,
 };
 use super::tabs::{
-    compare_picker_empty, file_gutter_width, file_too_large, ComparePickerState, ExplorerPreview,
-    FileTab, EXPLORER_FOLDER_HINT, FILE_IS_BINARY,
+    compare_picker_empty, file_gutter_width, file_too_large, file_view_gutter_width,
+    ComparePickerState, ExplorerPreview, FileTab, EXPLORER_FOLDER_HINT, FILE_IS_BINARY,
 };
 use super::theme::{hex_color, BackgroundMode, Palette, Pill, ThemeId};
 use super::tree::{
@@ -220,9 +221,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.layout.file_view_rows = Rect::default();
     state.layout.term_cols = area.width;
     state.layout.pane_height = chunks[1].height;
-    if state.is_file_tab() {
-        draw_file_tab(frame, chunks[1], state);
-    } else if state.is_explorer_tab() {
+    if state.is_explorer_tab() {
         draw_explorer_tab(frame, chunks[1], state);
     } else {
         draw_panes(frame, chunks[1], state);
@@ -403,13 +402,13 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
     }
 }
 
-/// File tab body copy while it loads.
+/// File view body copy while it loads.
 const LOADING_FILE: &str = "loading…";
 /// Explorer tree copy for a checkout with no entries.
 const EMPTY_FOLDER: &str = "empty folder";
 /// Explorer badge of an untracked file (the Workspace tree says `A`).
 const UNTRACKED_BADGE: &str = "??";
-/// File tab body for an empty file.
+/// File view body for an empty file.
 const EMPTY_FILE: &str = "empty file";
 
 /// Syntax spans of one file-tab window: tab id, load generation, theme,
@@ -487,21 +486,8 @@ fn file_view_scroll(
     top
 }
 
-/// The active file tab: one pane over the full width (boxed or flat, see
-/// [`draw_pane_chrome`]), titled with `<checkout>/<rel>` (snapshot `repo`
-/// path), with line numbers and highlighted code.
-fn draw_file_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
-    let palette = state.theme.palette();
-    let Some(tab) = state.tabs.active_file() else {
-        return;
-    };
-    let pane = draw_pane_chrome(frame, area, &tab.display, true, palette.surface, state);
-    draw_file_body(frame, pane, state);
-    bleed_flat_pad(frame, pane);
-}
-
-/// The active read-only file body (a file tab, or an Explorer tab's
-/// clean-file preview) inside `pane.inner`: line numbers and highlighted
+/// The active read-only file body (an Explorer inner file tab of a clean
+/// file) inside `pane.inner`: line numbers and highlighted
 /// code, or a loading / binary / too-large / empty notice.
 fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
     let palette = state.theme.palette();
@@ -538,7 +524,9 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
     }
     let lines = tab.lines();
     let height = inner.height as usize;
-    let gutter = file_gutter_width(lines.len());
+    // Comment mark, line number, one blank column.
+    let digits = file_gutter_width(lines.len()) - 1;
+    let gutter = file_view_gutter_width(lines.len(), state.ascii);
     let code_w = (inner.width as usize).saturating_sub(gutter).max(1);
     let wrap = state.diff_wrap;
     // A row count past the view height is never needed, so a 2 MiB
@@ -568,12 +556,19 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
     let gutter_style = diff_gutter_style(palette);
     let col_offset = if wrap { 0 } else { tab.col_offset as usize };
     let blame = state.painted_line_annotation();
+    // A `V` range paints like the highlighted rows of a diff.
+    let visual = state.file_visual_range();
     let mut painted: Vec<Line> = Vec::with_capacity(height);
     let mut row_lines = Vec::with_capacity(height);
     for (line, text) in lines.iter().enumerate().take(end).skip(scroll) {
         let selected = line == tab.cursor;
         let hit = hits.binary_search(&line).is_ok();
-        let bg = row_match_bg(selected, true, hit, None, palette, search.bg);
+        let in_visual = visual.is_some_and(|(lo, hi)| (lo..=hi).contains(&line));
+        let bg = if in_visual && !selected {
+            Some(palette.cursor_bg)
+        } else {
+            row_match_bg(selected, true, hit, None, palette, search.bg)
+        };
         let match_fg = (hit && !selected).then_some(search.fg);
         let code = spans.get(line - scroll).map(Vec::as_slice).unwrap_or(&[]);
         let starts = if wrap {
@@ -586,7 +581,12 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
                 break;
             }
             let number = if part == 0 {
-                format!("{:>width$} ", line + 1, width = gutter - 1)
+                let n = u32::try_from(line + 1).unwrap_or(u32::MAX);
+                let comment = state.file_line_comment(n);
+                format!(
+                    "{} ",
+                    format_line_gutter(Some(n), digits, comment, state.ascii)
+                )
             } else {
                 " ".repeat(gutter)
             };
@@ -620,9 +620,9 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
     }
 }
 
-/// Pane chrome shared by the left pane, the right pane, the file tab, and
-/// the Explorer tab's two panes (so the Workspace, compare, file, and
-/// Explorer tabs look the same).
+/// Pane chrome shared by the left pane, the right pane, and the Explorer
+/// tab's two panes (so the Workspace, compare, and Explorer tabs look the
+/// same).
 ///
 /// [`BackgroundMode::Terminal`]: a boxed [`Block`] with the title in
 /// `heading` and a [`pane_border`] colour that shows focus (the v0.1.244
@@ -790,13 +790,16 @@ fn fill_bg(frame: &mut Frame<'_>, area: Rect, bg: Color) {
 }
 
 /// The active Explorer tab: the checkout's file tree on the left (titled
-/// with the checkout path, on `sidebar` in paint mode) and the focused
-/// file's preview on the right (on `surface`) — the worktree diff of a
-/// changed file, the body of a clean one, or a short hint on a folder.
-/// Both panes go through [`draw_pane_chrome`], so they are boxed or flat
-/// as the Workspace panes are. `explorer_tree` / `explorer_preview` record
-/// the content rects, `explorer_tree_rows` / `explorer_preview_rows` the
-/// full-width rows (pad cells included when flat).
+/// with the checkout path, on `sidebar` in paint mode) and the inner file
+/// tabs on the right (on `surface`): a row of inner tab labels
+/// ([`draw_explorer_file_tabs`]) over the active one — the whole-file
+/// worktree diff of a changed file or the body of a clean one. With no
+/// inner tab, a folder row shows a short hint. Both panes go through
+/// [`draw_pane_chrome`], so they are boxed or flat as the Workspace panes
+/// are. `explorer_tree` / `explorer_preview` record the content rects
+/// (the preview below the inner tab row), `explorer_tree_rows` /
+/// `explorer_preview_rows` the full-width rows (pad cells included when
+/// flat).
 fn draw_explorer_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let widths = pane_widths(area.width, state.tree_fraction);
     let panes = Layout::default()
@@ -810,11 +813,12 @@ fn draw_explorer_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let Some(tab) = state.tabs.active_explorer() else {
         return;
     };
-    let preview_title = match &tab.preview {
-        ExplorerPreview::None => "preview".to_string(),
-        ExplorerPreview::Diff { .. } => "diff".to_string(),
-        ExplorerPreview::File(file) => file.display.clone(),
+    let preview_title = match tab.active_inner().map(|inner| &inner.view) {
+        None => "preview".to_string(),
+        Some(ExplorerPreview::Diff { .. }) => "diff".to_string(),
+        Some(ExplorerPreview::File(file)) => file.display.clone(),
     };
+    let has_files = !tab.files.is_empty();
     // One status index and one row walk per frame, shared by the tree,
     // the folder hint, and the breadcrumb.
     let status = state.explorer_status(&tab.checkout);
@@ -846,28 +850,124 @@ fn draw_explorer_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         palette.surface,
         state,
     );
-    let right_inner = right_pane.inner;
+    let mut body_pane = right_pane;
+    if has_files && right_pane.inner.height > 0 {
+        draw_explorer_file_tabs(
+            frame,
+            Rect {
+                height: 1,
+                ..right_pane.inner
+            },
+            state,
+        );
+        for rect in [&mut body_pane.inner, &mut body_pane.rows] {
+            rect.y += 1;
+            rect.height -= 1;
+        }
+    }
+    let right_inner = body_pane.inner;
     state.layout.explorer_preview = right_inner;
-    state.layout.explorer_preview_rows = right_pane.rows;
+    state.layout.explorer_preview_rows = body_pane.rows;
     state.layout.right_x = panes[1].x;
     state.layout.right_y = right_inner.y;
     state.layout.diff_content_x = right_inner.x;
     state.layout.diff_pane_width = right_inner.width;
     state.layout.diff_pane_height = right_inner.height;
     state.layout.diff_split_rule_x = None;
+    // The inner tab row keeps the pane fill in its pad cells; only the
+    // body rows bleed.
     if right_inner.width == 0 || right_inner.height == 0 {
+        bleed_flat_pad(frame, body_pane);
         return;
     }
-    match state.tabs.active_explorer().map(|tab| &tab.preview) {
-        Some(ExplorerPreview::Diff { .. }) => draw_diff_pane(frame, right_inner, state),
-        Some(ExplorerPreview::File(_)) => draw_file_body(frame, right_pane, state),
-        _ if folder => frame.render_widget(
+    let view = state
+        .tabs
+        .active_explorer()
+        .and_then(|tab| tab.active_inner())
+        .map(|inner| matches!(inner.view, ExplorerPreview::File(_)));
+    match view {
+        Some(false) => draw_diff_pane(frame, right_inner, state),
+        Some(true) => draw_file_body(frame, body_pane, state),
+        None if folder => frame.render_widget(
             Paragraph::new(muted_copy(EXPLORER_FOLDER_HINT, palette)),
             right_inner,
         ),
-        _ => {}
+        None => {}
     }
-    bleed_flat_pad(frame, right_pane);
+    bleed_flat_pad(frame, body_pane);
+}
+
+/// The active Explorer tab's inner file tab row in `area` (one row): each
+/// tab's file name between blanks, [`TAB_SEPARATOR`] between tabs. The
+/// active tab paints as the active top-level tab does; the preview tab
+/// (unpinned) is italic and dim. The row scrolls so the active tab shows,
+/// with the strip's overflow markers for hidden tabs.
+fn draw_explorer_file_tabs(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let Some(tab) = state.tabs.active_explorer() else {
+        return;
+    };
+    if area.width == 0 || tab.files.is_empty() {
+        return;
+    }
+    let palette = state.theme.palette();
+    let muted = Style::default().fg(palette.muted);
+    let sep_w = painted_width(TAB_SEPARATOR);
+    let texts: Vec<String> = tab
+        .files
+        .iter()
+        .map(|file| format!(" {} ", file.label()))
+        .collect();
+    let costs: Vec<u16> = texts
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            let sep = if index > 0 { sep_w } else { 0 };
+            painted_width(text).saturating_add(sep)
+        })
+        .collect();
+    let active = tab.active_file.unwrap_or(0);
+    let window = tab_window(&costs, area.width, 0, active);
+    let mut spans = Vec::new();
+    if window.start > 0 {
+        spans.push(Span::styled(tab_left_marker(window.start), muted));
+    }
+    let painted = tab.files.iter().zip(texts).enumerate();
+    for (index, (file, text)) in painted.take(window.end).skip(window.start) {
+        // As in the top strip: `tab_window` counts a separator before
+        // every tab after the first.
+        if index > 0 {
+            spans.push(Span::styled(TAB_SEPARATOR, muted));
+        }
+        let mut style = if index == active {
+            Style::default()
+                .fg(palette.cursor)
+                .bg(palette.cursor_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            muted
+        };
+        if !file.pinned {
+            style = style
+                .remove_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::ITALIC | Modifier::DIM);
+        }
+        spans.push(Span::styled(text, style));
+    }
+    let mut line_area = area;
+    if window.end < tab.files.len() {
+        let marker = tab_right_marker(tab.files.len() - window.end);
+        let width = painted_width(&marker).min(area.width);
+        line_area.width = area.width - width;
+        frame.render_widget(
+            Paragraph::new(Span::styled(marker, muted)),
+            Rect {
+                x: area.right() - width,
+                width,
+                ..area
+            },
+        );
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), line_area);
 }
 
 /// Explorer tree `rows` (the cursor on `cursor`) inside `area`, keeping
@@ -895,6 +995,13 @@ fn draw_explorer_tree(
     }
     let focused = state.focus == FocusPane::Left;
     let search = state.theme.pills().filter;
+    let matches: HashSet<usize> = if state.search_target == SearchPane::ExplorerTree {
+        explorer_row_match_indices(rows, &state.search_query)
+            .into_iter()
+            .collect()
+    } else {
+        HashSet::new()
+    };
     let lines: Vec<Line> = rows
         .iter()
         .enumerate()
@@ -910,7 +1017,7 @@ fn draw_explorer_tree(
                 Some(index) == cursor,
                 focused,
                 None,
-                false,
+                matches.contains(&index),
                 search,
                 state.ascii,
                 palette,
@@ -3147,7 +3254,8 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) -> usize {
     let palette = state.theme.palette();
     let pills = state.theme.pills();
     let panel = palette.panel;
-    // A compare tab swaps GIT for the COMPARE column, a file tab for FILE.
+    // A compare tab swaps GIT for the COMPARE column, an Explorer tab for
+    // EXPLORER.
     let groups = help_groups(help_tab(state));
     let mut lines: Vec<Line> = Vec::new();
 
@@ -10839,15 +10947,21 @@ mod tests {
     /// Outer rects of the Explorer tree and preview panes in a flat
     /// frame: the recorded full-width row rects grown by their title row.
     fn explorer_pane_rects(state: &AppState) -> (Rect, Rect) {
-        let grow = |rows: Rect| Rect {
-            y: rows.y - FLAT_CHROME_ROWS,
-            height: rows.height + FLAT_CHROME_ROWS,
-            ..rows
+        let tree = state.layout.explorer_tree_rows;
+        let left = Rect {
+            y: tree.y - FLAT_CHROME_ROWS,
+            height: tree.height + FLAT_CHROME_ROWS,
+            ..tree
         };
-        (
-            grow(state.layout.explorer_tree_rows),
-            grow(state.layout.explorer_preview_rows),
-        )
+        // The preview rows start below the inner tab row, if any; both
+        // panes share the top.
+        let preview = state.layout.explorer_preview_rows;
+        let right = Rect {
+            x: preview.x,
+            width: preview.width,
+            ..left
+        };
+        (left, right)
     }
 
     const BORDER_GLYPHS: &[&str] = &["│", "─", "┌", "┐", "└", "┘", "╭", "╮", "╰", "╯", "├", "┤"];
@@ -11605,10 +11719,6 @@ mod tests {
                 screens.push((format!("{label} / {focus:?}"), state, 120, 30));
             }
         }
-        // One pane: focus does not change the file tab.
-        let file_tab = painted(file_tab_state(&["# app", "dirty"]));
-        screens.push(("file tab".into(), file_tab, 120, 30));
-
         let branch = |name: &str, current: bool| LocalBranch {
             name: name.into(),
             current,
@@ -11729,7 +11839,7 @@ mod tests {
     /// Paint mode leaves no cell on the terminal background, for every
     /// theme and screen: panes, chrome rows, each dialog, the icon
     /// popover, and the too-small notice. Pane title rows sit on their
-    /// role colour (`sidebar` left, `surface` right and file tab), no pane
+    /// role colour (`sidebar` left, `surface` right), no pane
     /// cell carries another pane's role, chrome rows end on `chrome`, and a
     /// popup's border sits on `panel` with no pane role inside it.
     #[test]
@@ -11791,9 +11901,7 @@ mod tests {
                 }
                 let outside = |x: u16, y: u16| popup.is_none_or(|p| !p.contains((x, y).into()));
                 let pane_h = state.layout.pane_height;
-                let panes: Vec<(Rect, Color)> = if state.is_file_tab() {
-                    vec![(Rect::new(0, 1, *cols, pane_h), palette.surface)]
-                } else if state.is_explorer_tab() {
+                let panes: Vec<(Rect, Color)> = if state.is_explorer_tab() {
                     let (left, right) = explorer_pane_rects(state);
                     vec![(left, palette.sidebar), (right, palette.surface)]
                 } else {
@@ -11926,41 +12034,6 @@ mod tests {
         }
     }
 
-    /// The file tab paints flat in paint mode: the title row on
-    /// `surface`, code inside the pad columns (from column 1), last row
-    /// used. The cursor line's background runs into both pad cells.
-    #[test]
-    fn paint_mode_file_tab_is_flat() {
-        let mut state = painted(file_tab_state(&["# app", "dirty"]));
-        let palette = state.theme.palette();
-        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
-        draw_state(&mut terminal, &mut state);
-        let pane = Rect::new(0, 1, 80, state.layout.pane_height);
-        let buf = terminal.backend().buffer();
-        assert_eq!(pane_edge_borders(buf, pane), vec![]);
-        assert_flat_title_row(buf, pane, "app/README.md", true, palette.surface, palette);
-        assert!(
-            buf_line(buf, 2).starts_with(" 1 # app"),
-            "{}",
-            buf_line(buf, 2)
-        );
-        assert_eq!((state.layout.file_view_x, state.layout.file_view_y), (1, 2));
-        assert_eq!(state.layout.file_view_width, 78);
-        assert_eq!(state.layout.file_view_height, pane.height - 1);
-        assert_eq!(
-            state.layout.file_view_rows,
-            Rect::new(0, 2, 80, pane.height - 1)
-        );
-        let bottom = pane.y + pane.height - 1;
-        assert_eq!(buf[(40, bottom)].bg, palette.surface);
-        // Line 1 holds the cursor: its background reaches both pane edges.
-        for x in [0, 79] {
-            assert_eq!(buf[(x, 2)].symbol(), " ", "pad x={x}");
-            assert_eq!(buf[(x, 2)].bg, palette.cursor_bg, "pad x={x}");
-        }
-        assert_eq!(buf[(0, 3)].bg, palette.surface, "plain row pad");
-    }
-
     /// Explorer flat pads: a press on either pad cell of a tree row
     /// selects that row (no pane divider on this tab), the bar sits on the
     /// pane edge, and a press on the preview's pad cell picks the file
@@ -12019,23 +12092,6 @@ mod tests {
         assert_eq!(state.tabs.active_file_view().unwrap().cursor, 5);
     }
 
-    /// A press on a file tab's pad cell picks the line on that row.
-    #[test]
-    fn paint_mode_file_tab_pad_click_picks_the_line() {
-        let mut state = painted(file_tab_state(&["one", "two", "three"]));
-        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
-        draw_state(&mut terminal, &mut state);
-        let y = state.layout.file_view_y;
-        for (col, line) in [(0, 2), (79, 1)] {
-            state.dispatch(Action::Click {
-                col,
-                row: y + line as u16,
-            });
-            state.dispatch(Action::Release);
-            assert_eq!(state.tabs.active_file().unwrap().cursor, line, "col {col}");
-        }
-    }
-
     /// The compare tab uses the same flat chrome: file list on `sidebar`,
     /// diff on `surface`, no border glyphs.
     #[test]
@@ -12086,10 +12142,15 @@ mod tests {
             assert_eq!(pane_edge_borders(buf, right), vec![], "preview edges");
             assert_flat_title_row(buf, left, &checkout, true, palette.sidebar, palette);
             assert_flat_title_row(buf, right, "app/new.txt", false, palette.surface, palette);
-            let body: String = (right.x..right.right())
+            let tabs: String = (right.x..right.right())
                 .map(|x| buf[(x, right.y + 1)].symbol())
                 .collect();
-            assert!(body.starts_with("  1 line 1"), "{body}");
+            assert!(tabs.starts_with("  new.txt "), "inner tab row: {tabs}");
+            let body: String = (right.x..right.right())
+                .map(|x| buf[(x, right.y + 2)].symbol())
+                .collect();
+            // Pad, the reserved comment mark column, then the number.
+            assert!(body.starts_with("   1 line 1"), "{body}");
             let bottom = left.bottom() - 1;
             assert_eq!(buf[(left.right() - 2, bottom)].bg, palette.sidebar);
             assert_eq!(buf[(right.right() - 2, bottom)].bg, palette.surface);
@@ -12100,17 +12161,18 @@ mod tests {
             (layout.explorer_tree.x, layout.explorer_tree.width),
             (left.x + pad, left.width - 2 * pad)
         );
+        // Title row, then the inner tab row, then the body.
         assert_eq!(
             (layout.file_view_x, layout.file_view_y),
-            (right.x + pad, right.y + 1)
+            (right.x + pad, right.y + 2)
         );
         assert_eq!(layout.file_view_width, right.width - 2 * pad);
-        assert_eq!(layout.file_view_height, right.height - 1);
+        assert_eq!(layout.file_view_height, right.height - 2);
         assert_eq!(layout.right_x, right.x);
-        assert_eq!(layout.right_y, right.y + 1);
+        assert_eq!(layout.right_y, right.y + 2);
         assert_eq!(layout.diff_content_x, right.x + pad);
         assert_eq!(layout.diff_pane_width, right.width - 2 * pad);
-        assert_eq!(layout.diff_pane_height, right.height - 1);
+        assert_eq!(layout.diff_pane_height, right.height - 2);
 
         state.dispatch(Action::FocusRight);
         assert_eq!(state.focus, FocusPane::Right);
@@ -12130,11 +12192,8 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
         draw_state(&mut terminal, &mut state);
         let (left, right) = explorer_pane_rects(&state);
-        let file_cursor = |state: &AppState| match state.tabs.active_explorer().map(|t| &t.preview)
-        {
-            Some(ExplorerPreview::File(file)) => file.cursor,
-            other => panic!("file preview, got {other:?}"),
-        };
+        let file_cursor =
+            |state: &AppState| state.tabs.active_file_view().expect("file preview").cursor;
         let painted_rel = |state: &AppState| {
             state
                 .tabs
@@ -12142,22 +12201,21 @@ mod tests {
                 .and_then(|tab| tab.painted_rel.clone())
         };
 
-        // The preview's title row is not the body.
-        state.dispatch(Action::Click {
-            col: right.x,
-            row: right.y,
-        });
-        assert_eq!(state.focus, FocusPane::Left, "title row");
+        // The preview's title row and inner tab row are not the body.
+        for row in [right.y, right.y + 1] {
+            state.dispatch(Action::Click { col: right.x, row });
+            assert_eq!(state.focus, FocusPane::Left, "row {row}");
+        }
         // Its first column, third body row, takes focus and that line.
         state.dispatch(Action::Click {
             col: right.x,
-            row: right.y + 3,
+            row: right.y + 4,
         });
         assert_eq!(state.focus, FocusPane::Right);
         assert_eq!(file_cursor(&state), 2);
         state.dispatch(Action::ScrollWheel {
             col: right.x,
-            row: right.y + 1,
+            row: right.y + 2,
             delta: 1,
             horizontal: false,
         });
@@ -12206,18 +12264,66 @@ mod tests {
         let tree = state.layout.explorer_tree;
         let preview = state.layout.explorer_preview;
         assert_eq!((tree.x, tree.y), (1, 2));
-        assert_eq!(preview.y, 2);
+        assert_eq!(preview.y, 3, "below the inner tab row");
         let buf = terminal.backend().buffer();
+        assert!(
+            buf_line(buf, 2).contains("││ new.txt "),
+            "inner tab row inside the box: {}",
+            buf_line(buf, 2)
+        );
         assert_eq!(buf[(0, 1)].symbol(), "┌");
         assert_eq!(buf[(0, 1)].fg, palette.heading, "focused border");
         assert_eq!(buf[(preview.x - 1, 1)].symbol(), "┌");
         assert_eq!(buf[(preview.x - 1, 1)].fg, palette.border_dim);
         assert_eq!(state.layout.right_x, preview.x - 1);
         assert_eq!(state.layout.diff_content_x, preview.x);
-        assert_eq!(state.layout.right_y, 2);
+        assert_eq!(state.layout.right_y, 3);
         for (x, y) in [(119, 0), (tree.x + 2, tree.bottom() - 1), (118, 12)] {
             assert_eq!(buf[(x, y)].bg, Color::Reset, "no fill at ({x},{y})");
         }
+    }
+
+    /// The inner tab row: the preview tab's label is italic and dim, a
+    /// pinned one is not; the active label takes the active-tab colours.
+    #[test]
+    fn explorer_inner_tab_row_marks_the_preview_italic_and_dim() {
+        let mut state = explorer_preview_state("new.txt", None);
+        state.focus = FocusPane::Left;
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        let label_style = |terminal: &Terminal<TestBackend>, state: &AppState, name: &str| {
+            let buf = terminal.backend().buffer();
+            let y = state.layout.explorer_preview.y - 1;
+            let x = find_cell_col(buf, y, name)
+                .filter(|x| *x >= state.layout.explorer_preview.x)
+                .unwrap_or_else(|| panic!("no {name} label: {}", buf_line(buf, y)));
+            buf[(x, y)].style()
+        };
+        draw_state(&mut terminal, &mut state);
+        let preview = label_style(&terminal, &state, "new.txt");
+        assert!(
+            preview
+                .add_modifier
+                .contains(Modifier::ITALIC | Modifier::DIM),
+            "{preview:?}"
+        );
+        assert_eq!(preview.bg, Some(palette.cursor_bg), "active");
+
+        state.dispatch(Action::NavEnter);
+        state.dispatch(Action::MoveToEnd);
+        draw_state(&mut terminal, &mut state);
+        let kept = label_style(&terminal, &state, "new.txt");
+        assert!(!kept.add_modifier.contains(Modifier::ITALIC), "{kept:?}");
+        assert!(!kept.add_modifier.contains(Modifier::DIM), "{kept:?}");
+        assert_eq!(kept.fg, Some(palette.muted), "inactive");
+        let readme = label_style(&terminal, &state, "README.md");
+        assert!(
+            readme
+                .add_modifier
+                .contains(Modifier::ITALIC | Modifier::DIM),
+            "the new preview: {readme:?}"
+        );
+        assert_eq!(readme.bg, Some(palette.cursor_bg), "active");
     }
 
     /// Below the minimum size, paint mode puts the notice on `surface`.
@@ -13900,57 +14006,13 @@ mod tests {
         assert!(!pane.contains("No committed changes"), "{pane}");
     }
 
-    /// `app` with a file tab on `README.md` loaded as `lines`.
-    fn file_tab_state(lines: &[&str]) -> AppState {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+    /// A clean `app` with its Explorer tab showing `README.md` as a pinned
+    /// inner file tab loaded as `lines`; the tree keeps focus.
+    fn file_view_state(lines: &[&str]) -> AppState {
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
-        let Effect::LoadFileTab { tab_id, gen, .. } =
-            state.open_file_tab("app".into(), "README.md".into())
-        else {
-            panic!("expected a load");
-        };
-        let body = FileRead::Text {
-            lines: lines.iter().map(|line| (*line).to_string()).collect(),
-            max_cols: lines.iter().map(|line| line.len()).max().unwrap_or(0),
-        };
-        assert!(state.apply_file_tab(tab_id, gen, body));
+        state.open_loaded_inner_file("app", "README.md", lines);
         state
-    }
-
-    #[test]
-    fn file_tab_paints_full_width_pane_titled_with_path() {
-        let mut state = file_tab_state(&["# app", "dirty"]);
-        let backend = TestBackend::new(80, 16);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-        let buf = terminal.backend().buffer();
-        let top = buf_line(buf, 1);
-        let corners: Vec<(usize, char)> = top
-            .chars()
-            .enumerate()
-            .filter(|(_, c)| matches!(c, '╭' | '╮' | '┌' | '┐'))
-            .collect();
-        assert_eq!(corners.len(), 2, "one border pair:\n{top}");
-        assert_eq!(corners[0].0, 0, "{top}");
-        assert_eq!(corners[1].0, 79, "{top}");
-        assert!(top.contains("app/README.md"), "{top}");
-        assert!(
-            buf_line(buf, 2).starts_with("│1 # app"),
-            "{}",
-            buf_line(buf, 2)
-        );
-        assert!(
-            buf_line(buf, 3).starts_with("│2 dirty"),
-            "{}",
-            buf_line(buf, 3)
-        );
-        assert_eq!(state.layout.file_view_x, 1);
-        assert_eq!(state.layout.file_view_y, 2);
-        assert_eq!(state.layout.file_view_width, 78);
-        assert_eq!(state.layout.file_view_row_lines, vec![0, 1]);
-        let crumb = buffer_text(&terminal);
-        assert!(crumb.contains("app › README.md"), "{crumb}");
-        assert!(crumb.contains("edit") && crumb.contains("quit"), "{crumb}");
     }
 
     /// `app` with an Explorer tab at its root, listed as: `src/` (with a
@@ -14087,6 +14149,36 @@ mod tests {
         assert!(crumb.contains("parent"), "{crumb}");
     }
 
+    /// A `/` search on the Explorer tree paints its matching rows in the
+    /// search style; the cursor row keeps the cursor colour.
+    #[test]
+    fn explorer_tree_paints_search_matches() {
+        let mut state = explorer_state();
+        state.dispatch(Action::SearchStart);
+        state.dispatch(Action::SearchChar('t'));
+        // `t` matches target/ (the cursor lands there) and new.txt.
+        let palette = state.theme.palette();
+        let search_bg = state.theme.pills().filter.bg;
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let buf = terminal.backend().buffer();
+        let tree = state.layout.explorer_tree;
+        let bg_of = |name: &str| {
+            let (x, y) = (tree.y..tree.bottom())
+                .find_map(|y| {
+                    find_cell_col(buf, y, name)
+                        .filter(|x| *x < tree.right())
+                        .map(|x| (x, y))
+                })
+                .unwrap_or_else(|| panic!("no {name} row"));
+            buf[(x, y)].style().bg
+        };
+        assert_eq!(bg_of("new.txt"), Some(search_bg));
+        assert_eq!(bg_of("target"), Some(palette.cursor_bg));
+        assert_ne!(bg_of("README.md"), Some(search_bg));
+        assert_ne!(bg_of("src"), Some(search_bg));
+    }
+
     /// The Explorer preview paints a changed file with the diff pane and a
     /// clean file with the file-tab body.
     #[test]
@@ -14153,7 +14245,8 @@ mod tests {
         assert!(state.apply_explorer_preview(tab_id, gen, ExplorerPreviewBody::File(body)));
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let pane = text(&terminal);
-        assert!(pane.starts_with("1 hello"), "{pane}");
+        // The comment mark column is reserved before the number.
+        assert!(pane.starts_with(" 1 hello"), "{pane}");
         let buf = terminal.backend().buffer();
         assert!(
             buf_line(buf, 1).contains("app/new.txt"),
@@ -14288,29 +14381,116 @@ mod tests {
     }
 
     #[test]
-    fn file_tab_cursor_line_ends_with_the_blame_annotation() {
-        let mut state = file_tab_state(&["# app", "dirty"]);
+    fn explorer_file_cursor_line_ends_with_the_blame_annotation() {
+        let mut state = file_view_state(&["# app", "dirty"]);
         let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
         draw_state(&mut terminal, &mut state);
+        assert_eq!(state.line_blame_want(), None, "the tree has focus");
+        state.dispatch(Action::FocusRight);
         cache_focused_blame(&mut state, "seed");
         draw_state(&mut terminal, &mut state);
         let buf = terminal.backend().buffer();
+        let y = state.layout.file_view_y;
         assert!(
-            buf_line(buf, 2).contains(" · aaa1111 · seed"),
+            buf_line(buf, y).contains(" · aaa1111 · seed"),
             "{}",
-            buf_line(buf, 2)
+            buf_line(buf, y)
         );
-        assert!(!buf_line(buf, 3).contains("aaa1111"));
+        assert!(!buf_line(buf, y + 1).contains("aaa1111"));
         state.dispatch(Action::ToggleLineBlame);
         draw_state(&mut terminal, &mut state);
         assert!(!buffer_text(&terminal).contains("aaa1111"), "B hides it");
     }
 
     #[test]
+    fn explorer_file_view_paints_a_comment_mark_on_its_line() {
+        let mut state = file_view_state(&["one", "two", "three"]);
+        state.line_blame.set_enabled(false);
+        state.ascii = true;
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let (x, y) = (state.layout.file_view_x, state.layout.file_view_y);
+        let row = |terminal: &Terminal<TestBackend>, line: u16| -> String {
+            buf_line(terminal.backend().buffer(), y + line)
+                .chars()
+                .skip(usize::from(x))
+                .collect()
+        };
+        // The mark column is reserved before any comment: text never moves.
+        assert!(
+            row(&terminal, 1).starts_with(" 2 two"),
+            "{}",
+            row(&terminal, 1)
+        );
+
+        // `;` on line 2 and save.
+        state.dispatch(Action::FocusRight);
+        state.dispatch(Action::Move(1));
+        state.dispatch(Action::CommentStart);
+        let key = state.comment.take().expect("comment prompt").key;
+        state.comment_store =
+            crate::tui::comments::put_comment_entry(&state.comment_store, key, "note", false);
+        draw_state(&mut terminal, &mut state);
+        let mark = crate::tui::icons::icon_comment(true);
+        assert!(
+            row(&terminal, 1).starts_with(&format!("{mark}2 two")),
+            "{}",
+            row(&terminal, 1)
+        );
+        for line in [0, 2] {
+            assert!(
+                !row(&terminal, line).starts_with(mark),
+                "line {}: {}",
+                line + 1,
+                row(&terminal, line)
+            );
+        }
+        assert_eq!(state.layout.file_view_row_lines[..3], [0, 1, 2]);
+    }
+
+    #[test]
+    fn explorer_file_view_paints_the_v_range() {
+        let mut state = file_view_state(&["one", "two", "three", "four"]);
+        state.line_blame.set_enabled(false);
+        state.dispatch(Action::FocusRight);
+        state.dispatch(Action::Move(1));
+        assert_eq!(state.dispatch(Action::DiffVisualStart), Effect::None);
+        state.dispatch(Action::Move(1));
+        assert_eq!(state.file_visual_range(), Some((1, 2)));
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let palette = state.theme.palette();
+        let buf = terminal.backend().buffer();
+        let (x, y) = (state.layout.file_view_x + 8, state.layout.file_view_y);
+        assert_ne!(buf[(x, y)].bg, palette.cursor_bg, "line 1 is outside");
+        assert_eq!(buf[(x, y + 1)].bg, palette.cursor_bg, "anchor line");
+        assert_eq!(buf[(x, y + 2)].bg, palette.cursor_bg, "cursor line");
+        assert_ne!(buf[(x, y + 3)].bg, palette.cursor_bg, "line 4 is outside");
+        state.dispatch(Action::DiffVisualCancel);
+        draw_state(&mut terminal, &mut state);
+        let buf = terminal.backend().buffer();
+        assert_ne!(buf[(x, y + 1)].bg, palette.cursor_bg, "Esc drops the range");
+        assert_eq!(
+            buf[(x, y + 2)].bg,
+            palette.cursor_bg,
+            "the cursor line stays"
+        );
+    }
+
+    #[test]
     fn blame_menu_shows_the_annotation_and_one_row_per_action() {
-        let mut state = file_tab_state(&["# app", "dirty"]);
+        let mut state = two_pane_diff_state();
+        state.set_diff(
+            "app".into(),
+            "README.md".into(),
+            super::super::diff::DiffContent::from_unified(
+                "@@ -1,2 +1,2 @@\n keep one\n-old line\n+new line\n",
+            ),
+        );
+        state.focus = FocusPane::Right;
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
         draw_state(&mut terminal, &mut state);
+        state.diff_cursor = diff_row_index(&state, "keep one");
         cache_focused_blame(&mut state, "seed the app");
         assert_eq!(state.dispatch(Action::BlameMenu), Effect::None);
         assert_eq!(open_dialog(&state), Some(DialogKind::BlameMenu));
@@ -14337,32 +14517,36 @@ mod tests {
     }
 
     #[test]
-    fn file_tab_wraps_and_keeps_the_cursor_in_view() {
+    fn file_view_wraps_and_keeps_the_cursor_in_view() {
         let lines: Vec<String> = (0..30).map(|i| format!("line {i}")).collect();
         let mut refs: Vec<&str> = lines.iter().map(String::as_str).collect();
         let long = "w".repeat(150);
         refs[25] = &long;
-        let mut state = file_tab_state(&refs);
+        let mut state = file_view_state(&refs);
         assert!(
             state.diff_wrap,
-            "a file tab opens wrapped (diff wrap default)"
+            "a file view opens wrapped (diff wrap default)"
         );
+        state.dispatch(Action::FocusRight);
         state.dispatch(Action::MoveToEnd);
         let backend = TestBackend::new(80, 16);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let rows = state.layout.file_view_row_lines.clone();
         assert_eq!(rows.last(), Some(&29), "cursor line paints: {rows:?}");
-        assert_eq!(
-            rows.iter().filter(|&&line| line == 25).count(),
-            2,
-            "the long line wraps onto two rows: {rows:?}"
+        assert!(
+            rows.iter().filter(|&&line| line == 25).count() > 1,
+            "the long line wraps onto more rows: {rows:?}"
         );
         let buf = terminal.backend().buffer();
         let second = rows.iter().position(|&line| line == 25).unwrap() + 1;
-        let continuation = buf_line(buf, state.layout.file_view_y + second as u16);
+        let continuation: String = buf_line(buf, state.layout.file_view_y + second as u16)
+            .chars()
+            .skip(usize::from(state.layout.file_view_x))
+            .collect();
+        // Blank mark column, two digit columns, and the separator.
         assert!(
-            continuation.starts_with("│   w"),
+            continuation.starts_with("    w"),
             "blank gutter: {continuation}"
         );
 
@@ -14370,7 +14554,7 @@ mod tests {
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let rows = state.layout.file_view_row_lines.clone();
         assert_eq!(rows.last(), Some(&29), "{rows:?}");
-        let scroll = state.tabs.active_file().unwrap().scroll;
+        let scroll = state.tabs.active_file_view().unwrap().scroll;
         assert_eq!(rows.first(), Some(&scroll));
         assert_eq!(
             rows.iter().filter(|&&line| line == 25).count(),
@@ -14380,24 +14564,34 @@ mod tests {
     }
 
     #[test]
-    fn file_tab_paints_binary_and_loading_notices() {
-        let mut state = file_tab_state(&["x"]);
-        let id = state.tabs.active_file().unwrap().id;
-        let Effect::LoadFileTab { gen, .. } = state.dispatch(Action::Refresh) else {
-            panic!("r reloads");
+    fn file_view_paints_binary_and_loading_notices() {
+        use crate::tui::effect::ExplorerPreviewBody;
+        let mut state = file_view_state(&["x"]);
+        let id = state.tabs.active_file_view().unwrap().id;
+        let reload = state.dispatch(Action::Refresh);
+        let gen = match reload {
+            Effect::Batch(effects) => effects
+                .into_iter()
+                .find_map(|effect| match effect {
+                    Effect::LoadExplorerPreview { gen, .. } => Some(gen),
+                    _ => None,
+                })
+                .expect("r reloads the file"),
+            Effect::LoadExplorerPreview { gen, .. } => gen,
+            other => panic!("r reloads: {other:?}"),
         };
         let backend = TestBackend::new(80, 16);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         assert!(buffer_text(&terminal).contains("loading…"));
-        state.apply_file_tab(id, gen, FileRead::Binary);
+        state.apply_explorer_preview(id, gen, ExplorerPreviewBody::File(FileRead::Binary));
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         assert!(buffer_text(&terminal).contains(FILE_IS_BINARY));
     }
 
     #[test]
-    fn compare_tab_opened_after_file_tab_paints_right() {
-        let mut state = file_tab_state(&["# app"]);
+    fn compare_tab_opened_after_an_explorer_file_paints_right() {
+        let mut state = file_view_state(&["# app"]);
         state
             .tabs
             .open_or_focus("app".into(), "main".into(), "HEAD".into());
@@ -14422,7 +14616,10 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("README.md"), "file tab label: {text}");
+        assert!(
+            text.contains("Explorer · app"),
+            "Explorer tab label: {text}"
+        );
         assert!(text.contains("app ↔ main"), "{text}");
         assert!(text.contains("compare-only.md"), "{text}");
         assert!(text.contains("new compare"), "{text}");
@@ -14431,12 +14628,12 @@ mod tests {
     }
 
     #[test]
-    fn file_tab_wrap_scan_of_a_huge_line_is_bounded_by_the_view() {
+    fn file_view_wrap_scan_of_a_huge_line_is_bounded_by_the_view() {
         let huge = "m".repeat(1024 * 1024);
-        let mut state = file_tab_state(&[huge.as_str(), "tail"]);
+        let mut state = file_view_state(&[huge.as_str(), "tail"]);
         assert!(
             state.diff_wrap,
-            "a file tab opens wrapped (diff wrap default)"
+            "a file view opens wrapped (diff wrap default)"
         );
         let backend = TestBackend::new(80, 16);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -14448,7 +14645,8 @@ mod tests {
             rows.iter().all(|&line| line == 0),
             "the long line fills the view"
         );
-        let code_w = usize::from(state.layout.file_view_width) - file_gutter_width(2);
+        let code_w =
+            usize::from(state.layout.file_view_width) - file_view_gutter_width(2, state.ascii);
         let capped = wrap_col_starts_capped(&huge, code_w, height + 1);
         assert_eq!(
             capped.len(),
@@ -14459,17 +14657,17 @@ mod tests {
         assert!(buf_line(terminal.backend().buffer(), state.layout.file_view_y).contains("mmmm"));
     }
 
-    /// On a file tab help paints MOVE / FILE / VIEW at the rows
-    /// `help_status_lines(box, HelpTab::File)` reserves.
+    /// On an Explorer tab help paints MOVE / EXPLORER / VIEW at the rows
+    /// `help_status_lines(box, HelpTab::Explorer)` reserves.
     #[test]
-    fn file_help_paints_its_reserved_rows() {
+    fn explorer_help_paints_its_reserved_rows() {
         use super::super::chrome::{dialog_height, dialog_rect, dialog_width, DialogKind};
         use super::super::help::{
             help_body_line_count, help_legend_line_count, help_status_lines, HelpTab,
-            HELP_FILE_GROUPS,
+            HELP_EXPLORER_GROUPS,
         };
         for cols in [68u16, 104, 144] {
-            let mut state = file_tab_state(&["# app"]);
+            let mut state = file_view_state(&["# app"]);
             state.help_open = true;
             let mut terminal = Terminal::new(TestBackend::new(cols, 200)).unwrap();
             terminal.draw(|frame| draw(frame, &mut state)).unwrap();
@@ -14477,8 +14675,8 @@ mod tests {
             let lines: Vec<&str> = text.lines().collect();
             let header = lines
                 .iter()
-                .position(|l| l.contains("MOVE") && l.contains("FILE") && l.contains("VIEW"))
-                .unwrap_or_else(|| panic!("{cols} cols, file help header:\n{text}"));
+                .position(|l| l.contains("MOVE") && l.contains("EXPLORER") && l.contains("VIEW"))
+                .unwrap_or_else(|| panic!("{cols} cols, Explorer help header:\n{text}"));
             let top = header - 1;
             let box_w = cols - 4;
             let panes = Rect::new(0, 1, cols, state.layout.pane_height);
@@ -14488,12 +14686,12 @@ mod tests {
             let bottom = (header..lines.len())
                 .find(|&y| buffer_row(&terminal, y as u16, 2, 3) == "╰")
                 .unwrap_or_else(|| panic!("{cols} cols, help bottom border:\n{text}"));
-            let reserved = usize::from(help_status_lines(box_w, HelpTab::File));
+            let reserved = usize::from(help_status_lines(box_w, HelpTab::Explorer));
             assert_eq!(bottom + 1 - top, reserved, "{cols} cols:\n{text}");
             let inner = help_inner_width(usize::from(box_w));
             let body = help_body_line_count(
-                HELP_FILE_GROUPS,
-                &help_column_widths(HELP_FILE_GROUPS, inner),
+                HELP_EXPLORER_GROUPS,
+                &help_column_widths(HELP_EXPLORER_GROUPS, inner),
             ) + help_legend_line_count(inner);
             let footer_rows = help_idle_footer_lines(inner).len();
             assert_eq!(
@@ -14502,7 +14700,7 @@ mod tests {
                 "{cols} cols:\n{text}"
             );
             assert_eq!(state.layout.help_scroll_max, 0, "{cols} cols fits");
-            for needle in ["editor at line", "reload", "(1=Workspace)"] {
+            for needle in ["re-list folders", "parent folder", "(1=Workspace)"] {
                 assert!(text.contains(needle), "{cols} cols {needle}:\n{text}");
             }
             assert!(!text.contains("COMPARE"), "{cols} cols:\n{text}");

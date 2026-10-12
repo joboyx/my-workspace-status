@@ -6,7 +6,7 @@
 //! `grep-searcher` walks the lines. No ignore engine is involved; the index
 //! already applied git's ignore rules.
 //!
-//! Skip rules match the file tab ([`crate::file_index::read_text_file`]):
+//! Skip rules match the file view ([`crate::file_index::read_text_file`]):
 //! a file over [`MAX_FILE_BYTES`], or with a NUL in its first 8000 bytes,
 //! is skipped and counted in [`SearchChunk::skipped`]. A file that is gone
 //! or unreadable since the index was built, or is not a regular file, is
@@ -67,7 +67,7 @@ pub struct SearchHit {
     /// 1-based line number in the file.
     pub line: u32,
     /// Paintable line text: lossy UTF-8, no line terminator, tabs expanded
-    /// and control characters replaced as the file tab does, at most
+    /// and control characters replaced as the file view does, at most
     /// [`MAX_HIT_LINE_BYTES`] bytes (cut on a char boundary).
     pub text: String,
     /// Byte ranges `(start, end)` in `text` of every match on the line, in
@@ -189,7 +189,7 @@ enum Searchable {
     Gone,
 }
 
-/// Read `path` for search, with the file tab's size and binary rules.
+/// Read `path` for search, with the file view's size and binary rules.
 fn read_searchable(path: &Path) -> Searchable {
     // `metadata` follows symlinks; check the target before `open`, which
     // blocks on a FIFO and never ends on a device such as `/dev/zero`.
@@ -258,7 +258,7 @@ fn search_file(
 /// `line` is the raw line as the searcher reports it, terminator included;
 /// `matches` are byte ranges into it. Each source unit (a char, or one
 /// invalid UTF-8 sequence that lossy decoding turns into U+FFFD) goes
-/// through the file tab's per-char sanitizer. Units stop before the one
+/// through the file view's per-char sanitizer. Units stop before the one
 /// that would push the text past [`MAX_HIT_LINE_BYTES`].
 fn hit_text(line: &[u8], matches: &[(usize, usize)]) -> (String, Vec<(u32, u32)>) {
     let line = line.strip_suffix(b"\n").unwrap_or(line);

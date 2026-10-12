@@ -207,6 +207,22 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
+        title: "Previous file tab",
+        keys: "[",
+        group: CommandGroup::Move,
+        action: Action::PreviousFileTab,
+        aliases: &["explorer file", "switch file"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "Next file tab",
+        keys: "]",
+        group: CommandGroup::Move,
+        action: Action::NextFileTab,
+        aliases: &["explorer file", "switch file"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
         title: "Open in Explorer",
         keys: "-",
         group: CommandGroup::Move,
@@ -1066,6 +1082,20 @@ mod tests {
                 CommandScope::NoHighlight,
             ),
             (
+                "Previous file tab",
+                "[",
+                CommandGroup::Move,
+                Action::PreviousFileTab,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Next file tab",
+                "]",
+                CommandGroup::Move,
+                Action::NextFileTab,
+                CommandScope::NoHighlight,
+            ),
+            (
                 "Open in Explorer",
                 "-",
                 CommandGroup::Move,
@@ -1443,7 +1473,7 @@ mod tests {
             .filter(|command| !matches!(command.action, Action::SetTheme(_)))
             .collect();
         assert_eq!(rows.len(), wanted.len());
-        assert_eq!(wanted.len(), 66);
+        assert_eq!(wanted.len(), 68);
         assert_eq!(PALETTE_COMMANDS.len(), wanted.len() + THEME_IDS.len());
         for (i, (title, keys, group, action, scope)) in wanted.iter().enumerate() {
             let command = rows[i];
@@ -1760,7 +1790,7 @@ mod tests {
         assert_eq!(palette.rows().len(), 1, "no catalog row has a digit");
         palette.move_cursor(5);
         assert_eq!(palette.cursor, 0, "a lone row clamps the cursor");
-        // Not a catalog row: the 67-row catalog never lists it.
+        // Not a catalog row: the 81-row catalog never lists it.
         assert!(PALETTE_COMMANDS
             .iter()
             .all(|command| !matches!(command.action, Action::GoToLine(_))));

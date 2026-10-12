@@ -1,8 +1,8 @@
 //! Current-line blame: which line has focus, what it asks git, and what
 //! the pane paints at its end.
 //!
-//! Only a focused line asks: the active file tab's cursor line, or the
-//! focused file-diff row while the right pane drives the diff. Moving
+//! Only a focused line asks: the Explorer file view's cursor line, or the
+//! focused file-diff row, while the right pane has focus. Moving
 //! through the tree, graph, or file lists never asks. The question is a
 //! [`BlameKey`]; the interpreter runs it on the blocking pool and lands
 //! the answer through [`AppState::apply_line_blame`].
@@ -24,7 +24,7 @@ use super::super::line_blame::{
 use super::super::search::unfold_ancestors;
 use super::super::split::DiffMode;
 use super::super::status::StatusMessage;
-use super::super::tabs::{WorktreeFile, ROOT_COMMIT_HAS_NO_PARENT};
+use super::super::tabs::{WorktreeFile, ROOT_COMMIT_HAS_NO_PARENT, TAB_TO_THE_FILE_PANE};
 use super::super::tree::NodeKind;
 use super::super::watch::graph_row_id;
 use super::{single_or_batch, AppState, FocusPane};
@@ -128,7 +128,8 @@ impl AppState {
     /// The one blame gate. [`Self::dispatch`] puts the reason on the
     /// status line and `palette_disabled_reason` paints it on the row, so
     /// a key and a palette row give the same copy. The actions run on the
-    /// Workspace, compare, and file tabs.
+    /// Workspace, compare, and Explorer tabs; on an Explorer tab the file
+    /// pane must have focus ([`TAB_TO_THE_FILE_PANE`]).
     pub(crate) fn blame_refusal(&self, action: &Action) -> Option<String> {
         if !matches!(
             action,
@@ -184,7 +185,10 @@ impl AppState {
         if !self.line_blame.enabled {
             return Err(BLAME_IS_OFF);
         }
-        if let Some(tab) = self.tabs.active_file() {
+        if self.is_explorer_tab() && self.list_focus_target() != ListFocusTarget::None {
+            return Err(TAB_TO_THE_FILE_PANE);
+        }
+        if let Some(tab) = self.tabs.active_file_view() {
             if tab.body.is_none() {
                 return Err(BLAME_STILL_LOADING);
             }
@@ -232,10 +236,10 @@ impl AppState {
         self.open_worktree_compare_tab(repo, blame.sha, WorktreeFile { path, old_path })
     }
 
-    /// The focused line's file on disk: the file tab's file, else the open
+    /// The focused line's file on disk: the file view's file, else the open
     /// diff's path.
     fn blamed_disk_path(&self) -> Option<String> {
-        if let Some(tab) = self.tabs.active_file() {
+        if let Some(tab) = self.tabs.active_file_view() {
             return Some(tab.rel.clone());
         }
         self.open_diff_target().map(|(_, path, _)| path.to_string())
@@ -460,12 +464,15 @@ impl AppState {
     }
 
     fn focused_blame(&self) -> Option<(FocusedBlame, BlameSide)> {
-        // The Explorer preview paints no line blame.
-        if !self.line_blame.enabled || self.is_explorer_tab() {
+        if !self.line_blame.enabled {
             return None;
         }
-        if self.is_file_tab() {
-            let tab = self.tabs.active_file()?;
+        // On an Explorer tab only the focused right pane blames: a tree
+        // move never asks git.
+        if self.is_explorer_tab() && self.list_focus_target() != ListFocusTarget::None {
+            return None;
+        }
+        if let Some(tab) = self.tabs.active_file_view() {
             if tab.cursor >= tab.lines().len() {
                 return None;
             }
@@ -619,6 +626,7 @@ mod tests {
     use super::super::super::command_palette::PALETTE_COMMANDS;
     use super::super::super::diff::DiffContent;
     use super::super::super::drill::CommitFile;
+    use super::super::super::effect::ExplorerPreviewBody;
     use super::super::super::keys::InputMode;
     use super::super::super::selection::TextSelection;
     use super::*;
@@ -884,48 +892,6 @@ mod tests {
     }
 
     #[test]
-    fn file_tab_blames_the_cursor_line_of_the_working_tree() {
-        let mut app = state();
-        let Effect::LoadFileTab { tab_id, gen, .. } =
-            app.open_file_tab("app".into(), "src/lib.rs".into())
-        else {
-            panic!("expected a load");
-        };
-        assert_eq!(app.line_blame_want(), None, "still loading");
-        let lines = ["one", "two", "three"];
-        assert!(app.apply_file_tab(
-            tab_id,
-            gen,
-            FileRead::Text {
-                lines: lines.iter().map(|l| l.to_string()).collect(),
-                max_cols: 5,
-            }
-        ));
-        app.tabs.active_file_mut().unwrap().cursor = 2;
-        let key = app.line_blame_want().expect("cursor line asks");
-        assert_eq!(
-            (key.repo.as_str(), &key.rev, key.path.as_str(), key.line),
-            ("app", &BlameRev::Worktree, "src/lib.rs", 3)
-        );
-        let epoch = key.epoch;
-        let reload = app.tabs.active_file_mut().unwrap().bump_generation();
-        assert!(app.apply_file_tab(
-            tab_id,
-            reload,
-            FileRead::Text {
-                lines: lines.iter().map(|l| l.to_string()).collect(),
-                max_cols: 5,
-            }
-        ));
-        app.tabs.active_file_mut().unwrap().cursor = 2;
-        assert_ne!(
-            app.line_blame_want().unwrap().epoch,
-            epoch,
-            "a reload asks again"
-        );
-    }
-
-    #[test]
     fn annotation_loads_then_shows_the_cached_answer() {
         let mut app = worktree_diff("", BODY, false);
         app.diff_cursor = 2;
@@ -986,12 +952,141 @@ mod tests {
         assert_eq!(app.status, "line blame on");
         assert_eq!(app.line_blame.cached(&key), None, "off dropped the cache");
 
-        // The toggle runs on a file tab too.
-        let _ = app.open_file_tab("app".into(), "src/lib.rs".into());
-        assert!(app.is_file_tab());
+        // The toggle runs on an Explorer file view too.
+        app.open_loaded_inner_file("app", "src/lib.rs", &["fn lib() {}"]);
+        assert!(app.tabs.active_file_view().is_some());
         app.dispatch(Action::ToggleLineBlame);
         assert_eq!(app.status, "line blame off");
         assert!(!app.line_blame.enabled);
+    }
+
+    #[test]
+    fn line_blame_on_by_default_in_explorer_file_and_diff() {
+        // Clean file: the file view's cursor line blames the working tree.
+        let mut app = state();
+        assert!(app.line_blame.enabled, "on by default");
+        let (tab_id, _) = app.open_loaded_inner_file("app", "src/lib.rs", &["one", "two", "three"]);
+        assert_eq!(app.focus, FocusPane::Left);
+        assert_eq!(app.line_blame_want(), None, "the tree never asks");
+        app.dispatch(Action::FocusRight);
+        app.dispatch(Action::Move(2));
+        let key = app.line_blame_want().expect("cursor line asks");
+        assert_eq!(
+            (key.repo.as_str(), &key.rev, key.path.as_str(), key.line),
+            ("app", &BlameRev::Worktree, "src/lib.rs", 3)
+        );
+        // `r` loads again at a new generation: the same line asks again.
+        let reload = app.dispatch(Action::Refresh);
+        let gen = match reload {
+            Effect::Batch(effects) => effects
+                .into_iter()
+                .find_map(|effect| match effect {
+                    Effect::LoadExplorerPreview { gen, .. } => Some(gen),
+                    _ => None,
+                })
+                .expect("a reload"),
+            Effect::LoadExplorerPreview { gen, .. } => gen,
+            other => panic!("expected a reload, got {other:?}"),
+        };
+        let lines = ["one", "two", "three"].map(String::from).to_vec();
+        assert!(app.apply_explorer_preview(
+            tab_id,
+            gen,
+            ExplorerPreviewBody::File(FileRead::Text { lines, max_cols: 5 })
+        ));
+        let again = app.line_blame_want().expect("cursor line asks");
+        assert_eq!(again.line, 3, "the cursor line stays");
+        assert_ne!(again.epoch, key.epoch, "a reload asks again");
+        app.dispatch(Action::FocusLeft);
+        assert_eq!(app.line_blame_want(), None, "back on the tree");
+
+        // Changed file: the whole-file diff blames like the Workspace diff.
+        let mut app = state();
+        app.open_loaded_inner_diff("app", "README.md", DiffContent::from_unified(BODY));
+        assert_eq!(app.line_blame_want(), None, "the tree never asks");
+        app.dispatch(Action::FocusRight);
+        assert_eq!(
+            rev_line_path(at(&mut app, 2)),
+            Some((BlameRev::Worktree, 1, "README.md".into()))
+        );
+        assert_eq!(
+            rev_line_path(at(&mut app, 3)),
+            Some((commit("HEAD"), 2, "README.md".into()))
+        );
+        app.diff_cursor = 4;
+        assert_eq!(app.line_blame_want(), None, "an added line needs no git");
+        assert_eq!(
+            app.painted_line_annotation(),
+            Some((UNCOMMITTED_TEXT.into(), BlameSide::New))
+        );
+        app.dispatch(Action::ToggleLineBlame);
+        assert_eq!(app.painted_line_annotation(), None, "B turns it off");
+    }
+
+    #[test]
+    fn blame_menu_and_actions_run_on_inner_file() {
+        let mut app = state();
+        app.open_loaded_inner_file("app", "src/lib.rs", &["a"]);
+        // The tree has focus: every blame action and `A` say so.
+        assert_blame_refused(&mut app, TAB_TO_THE_FILE_PANE);
+        app.status.clear();
+        assert_eq!(app.dispatch(Action::BlameMenu), Effect::None);
+        assert_eq!(app.status, TAB_TO_THE_FILE_PANE);
+        assert!(!app.blame_menu);
+        app.dispatch(Action::FocusRight);
+        assert_blame_refused(&mut app, BLAME_STILL_LOADING);
+        answer(&mut app, Some(blamed(SHA)));
+        for (title, _) in BLAME_ACTIONS {
+            assert_eq!(palette_reason(&app, title), None, "{title}");
+        }
+
+        // `A` then `c`: the commit's changes, in the inner file's checkout.
+        assert_eq!(app.dispatch(Action::BlameMenu), Effect::None);
+        assert!(app.blame_menu);
+        expect_parent_tab(app.dispatch(Action::BlameMenuChar('c')), SHA);
+        assert!(!app.blame_menu);
+        assert_eq!(app.tabs.active_compare().unwrap().label(), "app ↔ aaa1111^");
+
+        // Back on the Explorer: the file at that commit against the disk.
+        assert_eq!(app.activate_tab(1), Effect::None);
+        assert!(app.is_explorer_tab());
+        assert_eq!(app.focus, FocusPane::Right, "the pane focus is parked");
+        let effect = app.dispatch(Action::BlameCommitVsWorktree);
+        expect_worktree_tab(
+            &app,
+            effect,
+            SHA,
+            disk_file("src/lib.rs", Some("README.md")),
+        );
+
+        // Previous change searches from the inner file's checkout.
+        assert_eq!(app.activate_tab(1), Effect::None);
+        match app.dispatch(Action::BlamePreviousChange) {
+            Effect::LoadBlamePrevious { repo, blame, .. } => {
+                assert_eq!((repo.as_str(), blame.sha.as_str()), ("app", SHA));
+            }
+            other => panic!("expected a previous-change load, got {other:?}"),
+        }
+
+        // Reveal goes to the Workspace graph of the checkout, which always
+        // loads again when it comes from another tab.
+        assert_eq!(
+            app.dispatch(Action::BlameRevealGraph),
+            Effect::LoadRightPane
+        );
+        assert!(app.tabs.is_workspace());
+        assert_eq!(
+            app.graph_reveal.as_ref().map(|reveal| reveal.sha.as_str()),
+            Some(SHA)
+        );
+
+        // A changed inner file: the diff line's blame.
+        let mut app = state();
+        app.open_loaded_inner_diff("app", "README.md", DiffContent::from_unified(BODY));
+        app.dispatch(Action::FocusRight);
+        app.diff_cursor = 2;
+        answer(&mut app, Some(blamed(OTHER)));
+        expect_parent_tab(app.dispatch(Action::BlameCommitVsParent), OTHER);
     }
 
     #[test]
@@ -1152,7 +1247,7 @@ mod tests {
     }
 
     #[test]
-    fn blame_vs_parent_opens_a_pinned_tab_from_drill_compare_and_file_tab() {
+    fn blame_vs_parent_opens_a_pinned_tab_from_drill_and_compare() {
         // Commit drill: the added line blames the drilled commit.
         let mut app = state();
         app.open_commit_diff(
@@ -1204,21 +1299,9 @@ mod tests {
         assert_eq!(app.tabs.compare_count(), 2);
         assert_eq!(app.tabs.active_compare().unwrap().label(), "app ↔ ddd4444^");
 
-        // A file tab: the cursor line's blame, same checkout.
-        let Effect::LoadFileTab { tab_id, gen, .. } =
-            app.open_file_tab("app".into(), "README.md".into())
-        else {
-            panic!("expected a load");
-        };
-        assert_blame_refused(&mut app, BLAME_STILL_LOADING);
-        assert!(app.apply_file_tab(
-            tab_id,
-            gen,
-            FileRead::Text {
-                lines: vec!["a".into(), "c".into()],
-                max_cols: 1,
-            }
-        ));
+        // The first compare tab again: its line blames the drilled commit,
+        // so the open focuses that commit's tab.
+        app.dispatch(Action::JumpToTab(2));
         answer(&mut app, Some(blamed(SHA)));
         assert_eq!(app.dispatch(Action::BlameCommitVsParent), Effect::None);
         assert_eq!(app.tabs.compare_count(), 2, "focuses the drill's tab");
@@ -1349,21 +1432,23 @@ mod tests {
         app
     }
 
-    /// Open a file tab of `src/lib.rs` whose cursor line blames `sha`.
-    fn file_tab_blamed(app: &mut AppState, sha: &str) {
-        let Effect::LoadFileTab { tab_id, gen, .. } =
-            app.open_file_tab("app".into(), "src/lib.rs".into())
-        else {
-            panic!("expected a load");
-        };
-        assert!(app.apply_file_tab(
-            tab_id,
-            gen,
-            FileRead::Text {
-                lines: vec!["a".into()],
-                max_cols: 1,
-            }
-        ));
+    /// Open the pinned compare tab `OTHER^...OTHER` of `app` on a
+    /// `README.md` diff whose focused line blames `sha`.
+    fn compare_tab_blamed(app: &mut AppState, sha: &str) {
+        let _ = app.open_compare_tab("app".into(), format!("{OTHER}^"), OTHER.into());
+        let tab = app.tabs.active_compare_mut().unwrap();
+        tab.source = Some(CommitFileSource::Compare {
+            base_ref: format!("{OTHER}^"),
+            head_ref: OTHER.into(),
+            base_tip: "bbb".into(),
+            merge_base: "bbb".into(),
+            head: OTHER.into(),
+        });
+        tab.files = vec![readme_row("M", None)];
+        tab.path = Some("README.md".into());
+        tab.content = DiffContent::from_compare_lines(BODY.lines().map(String::from).collect());
+        app.focus = FocusPane::Right;
+        app.diff_cursor = 2;
         answer(app, Some(blamed(sha)));
     }
 
@@ -1371,7 +1456,7 @@ mod tests {
     fn blame_reveal_from_a_dir_row_selects_a_loaded_commit_at_once() {
         for has_more in [false, true] {
             let mut app = dir_row_state(&[OTHER, SHA], has_more);
-            file_tab_blamed(&mut app, SHA);
+            compare_tab_blamed(&mut app, SHA);
             assert_eq!(
                 app.dispatch(Action::BlameRevealGraph),
                 Effect::LoadRightPane
@@ -1395,7 +1480,7 @@ mod tests {
     #[test]
     fn blame_reveal_after_a_cursor_move_waits_for_the_graph_load() {
         let mut app = dir_row_state(&[OTHER], false);
-        file_tab_blamed(&mut app, SHA);
+        compare_tab_blamed(&mut app, SHA);
         assert_eq!(
             app.dispatch(Action::BlameRevealGraph),
             Effect::LoadRightPane
@@ -1475,7 +1560,7 @@ mod tests {
     }
 
     #[test]
-    fn blame_reveal_from_a_file_tab_goes_to_workspace_and_widens_to_the_cap() {
+    fn blame_reveal_from_a_compare_tab_goes_to_workspace_and_widens_to_the_cap() {
         let mut app = state();
         app.cursor = app
             .rows
@@ -1483,20 +1568,7 @@ mod tests {
             .position(|row| row.id == "repo:app")
             .unwrap();
         app.set_graph(graph_with(&[OTHER], true), "app".into(), OTHER.into());
-        let Effect::LoadFileTab { tab_id, gen, .. } =
-            app.open_file_tab("app".into(), "README.md".into())
-        else {
-            panic!("expected a load");
-        };
-        assert!(app.apply_file_tab(
-            tab_id,
-            gen,
-            FileRead::Text {
-                lines: vec!["a".into()],
-                max_cols: 1,
-            }
-        ));
-        answer(&mut app, Some(blamed(SHA)));
+        compare_tab_blamed(&mut app, SHA);
         app.graph_branch_focus = Some(("app".into(), vec!["main".into()]));
         assert_eq!(
             app.dispatch(Action::BlameRevealGraph),
@@ -1537,7 +1609,7 @@ mod tests {
     }
 
     #[test]
-    fn blame_reveal_from_a_file_tab_finds_a_commit_only_the_reload_has() {
+    fn blame_reveal_from_a_compare_tab_finds_a_commit_only_the_reload_has() {
         for has_more in [false, true] {
             let mut app = state();
             app.cursor = app
@@ -1546,7 +1618,7 @@ mod tests {
                 .position(|row| row.id == "repo:app")
                 .unwrap();
             app.set_graph(graph_with(&[OTHER], has_more), "app".into(), OTHER.into());
-            file_tab_on_readme_blamed(&mut app, SHA);
+            compare_tab_blamed(&mut app, SHA);
             assert_eq!(
                 app.dispatch(Action::BlameRevealGraph),
                 Effect::LoadRightPane
@@ -1562,7 +1634,8 @@ mod tests {
                 app.status
             );
 
-            // A commit made while the file tab was active is in the reload.
+            // A commit made while the compare tab was active is in the
+            // reload.
             app.set_graph(
                 graph_with(&[SHA, OTHER], has_more),
                 "app".into(),
@@ -1578,24 +1651,6 @@ mod tests {
                 app.status
             );
         }
-    }
-
-    /// Open a file tab of `README.md` whose cursor line blames `sha`.
-    fn file_tab_on_readme_blamed(app: &mut AppState, sha: &str) {
-        let Effect::LoadFileTab { tab_id, gen, .. } =
-            app.open_file_tab("app".into(), "README.md".into())
-        else {
-            panic!("expected a load");
-        };
-        assert!(app.apply_file_tab(
-            tab_id,
-            gen,
-            FileRead::Text {
-                lines: vec!["a".into()],
-                max_cols: 1,
-            }
-        ));
-        answer(app, Some(blamed(sha)));
     }
 
     #[test]
@@ -1746,7 +1801,7 @@ mod tests {
     }
 
     #[test]
-    fn blame_vs_worktree_from_drill_compare_and_file_tab_keeps_the_commit_path() {
+    fn blame_vs_worktree_from_drill_and_compare_keeps_the_commit_path() {
         // Commit drill of a rename: the line blames OLD.md at the commit.
         let mut app = state();
         app.open_commit_diff(
@@ -1791,30 +1846,6 @@ mod tests {
         let effect = app.dispatch(Action::BlameCommitVsWorktree);
         expect_worktree_tab(&app, effect, OTHER, disk_file("README.md", None));
         assert_eq!(app.tabs.compare_count(), 2);
-
-        // A file tab: its own file.
-        let Effect::LoadFileTab { tab_id, gen, .. } =
-            app.open_file_tab("app".into(), "src/lib.rs".into())
-        else {
-            panic!("expected a load");
-        };
-        assert!(app.apply_file_tab(
-            tab_id,
-            gen,
-            FileRead::Text {
-                lines: vec!["a".into()],
-                max_cols: 1,
-            }
-        ));
-        answer(
-            &mut app,
-            Some(LineBlame {
-                filename: "src/lib.rs".into(),
-                ..blamed(SHA)
-            }),
-        );
-        let effect = app.dispatch(Action::BlameCommitVsWorktree);
-        expect_worktree_tab(&app, effect, SHA, disk_file("src/lib.rs", None));
     }
 
     #[test]
@@ -2097,9 +2128,9 @@ mod tests {
     }
 
     #[test]
-    fn blame_menu_runs_on_a_file_tab() {
+    fn blame_menu_runs_on_a_compare_tab() {
         let mut app = dir_row_state(&[OTHER, SHA], false);
-        file_tab_blamed(&mut app, SHA);
+        compare_tab_blamed(&mut app, SHA);
         assert_eq!(app.dispatch(Action::BlameMenu), Effect::None);
         assert!(app.blame_menu);
         expect_parent_tab(app.dispatch(Action::BlameMenuChar('c')), SHA);

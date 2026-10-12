@@ -111,6 +111,11 @@ fn folder_preview(screen: &str) -> bool {
     title_row(screen).contains("┐┌preview") && right_pane(screen).contains(FOLDER_HINT)
 }
 
+/// Right pane is the diff of the untracked `src/fresh.rs`.
+fn fresh_diff_preview(screen: &str) -> bool {
+    title_row(screen).contains("┐┌diff") && right_pane(screen).contains(FRESH_BODY)
+}
+
 /// Launch on the seeded workspace with the Workspace tree cursor on the
 /// first changed file, `src/edit.rs`.
 fn launch(workspace: &Path) -> PtySession {
@@ -146,8 +151,10 @@ fn open_explorer_on_edit(tui: &mut PtySession) {
 }
 
 /// `-` opens the Explorer on a changed file; `j` / `k`, `h` / `l`, Enter,
-/// Esc, and `-` walk the tree and switch the preview between the diff of a
-/// changed file, the body of a clean file, and the folder hint.
+/// Tab, Esc, and `-` walk the tree. A file row shows its diff (changed) or
+/// body (clean) as an inner file tab; Enter keeps the tree focused; a
+/// folder row keeps the file shown; with every inner tab closed (Ctrl-w)
+/// a folder row shows the folder hint.
 ///
 /// Also checks the status marks (`M`, `??`, the ASCII folder dot `*`) and
 /// that the ignored `node_modules/` lists. Fail if a key moves the wrong
@@ -196,26 +203,37 @@ fn pty_explorer_minus_opens_and_walks_tree() {
     tui.enter();
     tui.wait_pred(
         |screen| {
+            explorer_cursor_on(screen, "kept.rs")
+                && kept_file_preview(screen)
+                && status_line(screen).contains("parent")
+        },
+        "Enter on a file keeps it shown and the tree focused",
+        WAIT,
+    );
+
+    tui.tab();
+    tui.wait_pred(
+        |screen| {
             on_explorer(screen)
                 && tree_inactive_selection_on(screen, "kept.rs")
                 && !tree_cursor_on(screen, "kept.rs")
                 && kept_file_preview(screen)
         },
-        "Enter on a file focuses the preview (tree shows the unfocused bar)",
+        "Tab focuses the file (tree shows the unfocused bar)",
         WAIT,
     );
 
     tui.esc();
     tui.wait_pred(
         |screen| explorer_cursor_on(screen, "kept.rs") && kept_file_preview(screen),
-        "Esc in the preview returns focus to the tree on kept.rs",
+        "Esc in the file returns focus to the tree on kept.rs",
         WAIT,
     );
 
-    tui.enter();
+    tui.tab();
     tui.wait_pred(
         |screen| tree_inactive_selection_on(screen, "kept.rs") && kept_file_preview(screen),
-        "Enter focuses the preview again",
+        "Tab focuses the file again",
         WAIT,
     );
     tui.key('h');
@@ -227,9 +245,9 @@ fn pty_explorer_minus_opens_and_walks_tree() {
 
     tui.key('k');
     tui.wait_pred(
-        |screen| explorer_cursor_on(screen, "fresh.rs"),
-        "`k` moves back up to src/fresh.rs",
-        WAIT,
+        |screen| explorer_cursor_on(screen, "fresh.rs") && fresh_diff_preview(screen),
+        "`k` moves back up to src/fresh.rs and previews it beside the kept kept.rs",
+        GIT_WAIT,
     );
 
     tui.key('h');
@@ -237,9 +255,9 @@ fn pty_explorer_minus_opens_and_walks_tree() {
         |screen| {
             explorer_cursor_on(screen, "src")
                 && tree_has(screen, "edit.rs")
-                && folder_preview(screen)
+                && fresh_diff_preview(screen)
         },
-        "`h` on a file jumps to its folder src (still open, folder hint)",
+        "`h` on a file jumps to its folder src (still open, fresh.rs still shown)",
         WAIT,
     );
 
@@ -310,7 +328,7 @@ fn pty_explorer_minus_opens_and_walks_tree() {
     );
     tui.key('j');
     tui.wait_pred(
-        |screen| explorer_cursor_on(screen, "dep") && folder_preview(screen),
+        |screen| explorer_cursor_on(screen, "dep") && fresh_diff_preview(screen),
         "`j` moves to node_modules/dep",
         WAIT,
     );
@@ -320,7 +338,7 @@ fn pty_explorer_minus_opens_and_walks_tree() {
         |screen| {
             explorer_cursor_on(screen, "node_modules")
                 && tree_has(screen, "dep")
-                && folder_preview(screen)
+                && fresh_diff_preview(screen)
         },
         "`-` on the Explorer tab jumps to the parent folder node_modules",
         WAIT,
@@ -330,6 +348,20 @@ fn pty_explorer_minus_opens_and_walks_tree() {
         explorer_tab_count(&screen),
         1,
         "`-` on the Explorer tab must not open a second tab:\n{screen}"
+    );
+
+    tui.send_bytes(&[CTRL_W]);
+    tui.wait_pred(
+        |screen| explorer_cursor_on(screen, "kept.rs") && kept_file_preview(screen),
+        "Ctrl-w closes the fresh.rs tab; kept.rs shows and is selected",
+        WAIT,
+    );
+    tui.send_bytes(&[CTRL_W]);
+    tui.key('h');
+    tui.wait_pred(
+        |screen| explorer_cursor_on(screen, "src") && folder_preview(screen),
+        "with no file tab left, the folder row src shows the folder hint",
+        WAIT,
     );
 }
 
@@ -408,14 +440,26 @@ fn pty_explorer_reuses_tab_switches_and_refuses_stage() {
     );
 }
 
-/// `Ctrl-w` closes the Explorer tab; on the Workspace tab it refuses with
-/// `Workspace tab cannot be closed` and the app keeps running until `q`.
+/// `Ctrl-w` closes the Explorer's file tab, then the Explorer tab; on the
+/// Workspace tab it refuses with `Workspace tab cannot be closed` and the
+/// app keeps running until `q`.
 #[test]
 fn pty_explorer_ctrl_w_closes_tab_not_workspace() {
     let (_root, workspace) = daily_workspace();
     seed_explorer_files(&workspace);
     let mut tui = launch(&workspace);
     open_explorer_on_edit(&mut tui);
+
+    tui.send_bytes(&[CTRL_W]);
+    tui.wait_pred(
+        |screen| {
+            explorer_cursor_on(screen, "edit.rs")
+                && title_row(screen).contains("┐┌preview")
+                && !right_pane(screen).contains(EDIT_AFTER)
+        },
+        "Ctrl-w first closes the edit.rs file tab (the Explorer tab stays)",
+        WAIT,
+    );
 
     tui.send_bytes(&[CTRL_W]);
     tui.wait_pred(

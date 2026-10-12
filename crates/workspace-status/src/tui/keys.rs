@@ -1069,6 +1069,8 @@ fn normal_key(
         KeyCode::Char('V') => Action::DiffVisualStart,
         KeyCode::Char('y') => Action::ExportComments,
         KeyCode::Char('\'') => Action::CopyEntityReference,
+        KeyCode::Char('[') => Action::PreviousFileTab,
+        KeyCode::Char(']') => Action::NextFileTab,
         // With no armed search these still dispatch so the status can say why.
         KeyCode::Char('n') => Action::SearchNext,
         KeyCode::Char('N') => Action::SearchPrev,

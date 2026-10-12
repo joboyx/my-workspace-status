@@ -342,8 +342,9 @@ mod tests {
     }
 
     /// The search-in-files dialog only reads files, so every key in it
-    /// stays live while a git write runs, Enter (open a file tab) too. `e`
-    /// launches the editor, so it waits like [`Action::Edit`].
+    /// stays live while a git write runs, Enter (open the hit in the
+    /// Explorer) too. `e` launches the editor, so it waits like
+    /// [`Action::Edit`].
     #[test]
     fn search_files_actions_stay_live_while_busy() {
         use super::super::action::SearchFilesOption;
