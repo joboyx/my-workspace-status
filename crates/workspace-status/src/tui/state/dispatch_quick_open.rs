@@ -104,6 +104,7 @@ impl AppState {
                         QuickOpenMode::Files => quick.move_file_cursor(delta),
                     }
                 }
+                self.sync_theme_preview();
                 Effect::None
             }
             Action::QuickOpenChar(c) => {
@@ -144,9 +145,13 @@ impl AppState {
         }
         let scope = self.quick_open_scope();
         self.quick_open = Some(QuickOpenState::new(entry, scope));
+        // Files mode can turn into commands mode (`>`), so both entries
+        // keep the theme that a preview would replace.
+        self.theme_before_preview = Some(self.theme);
         match entry {
             QuickOpenEntry::Commands => {
                 self.land_palette_cursor();
+                self.sync_theme_preview();
                 Effect::None
             }
             QuickOpenEntry::Files => self.ensure_file_index(),
@@ -155,13 +160,41 @@ impl AppState {
 
     /// Close the overlay with no run. A disabled-row reason that Enter put
     /// on the status line goes too, so it does not linger after the close.
+    /// A previewed theme goes back to the theme active on open.
     fn close_quick_open(&mut self) {
+        self.end_theme_preview();
         let shown = self
             .quick_open
             .take()
             .and_then(|quick| quick.commands.shown_reason);
         if shown.is_some_and(|reason| self.status == reason) {
             self.status.clear();
+        }
+    }
+
+    /// Paint the highlighted palette `Theme: …` row's theme, else the theme
+    /// active when Quick Open opened. Runs after open, each move, and each
+    /// query edit. It never saves: only Enter on the row
+    /// ([`Action::SetTheme`]) does.
+    fn sync_theme_preview(&mut self) {
+        let Some(committed) = self.theme_before_preview else {
+            return;
+        };
+        let focused = self
+            .command_palette()
+            .and_then(|palette| palette.selected())
+            .and_then(|command| match command.action {
+                Action::SetTheme(id) => Some(id),
+                _ => None,
+            });
+        self.theme = focused.unwrap_or(committed);
+    }
+
+    /// Put back the theme active when Quick Open opened and drop the
+    /// snapshot. Every close calls this before it runs anything.
+    fn end_theme_preview(&mut self) {
+        if let Some(committed) = self.theme_before_preview.take() {
+            self.theme = committed;
         }
     }
 
@@ -222,6 +255,7 @@ impl AppState {
                     quick.commands.set_filter(commands_filter(&quick.query));
                 }
                 self.land_palette_cursor();
+                self.sync_theme_preview();
                 Effect::None
             }
             QuickOpenMode::Files => {
@@ -229,6 +263,8 @@ impl AppState {
                 if self.status == NO_FILE_MATCHES {
                     self.status.clear();
                 }
+                // Backspace over `>` leaves commands mode and its preview.
+                self.sync_theme_preview();
                 self.request_file_score()
             }
         }
@@ -328,6 +364,9 @@ impl AppState {
 
     /// Commands-mode Enter: close, then dispatch the highlighted command, or
     /// show why it is disabled and stay open.
+    ///
+    /// The close puts back the theme active on open; a `Theme: …` row then
+    /// applies and saves its theme through [`Action::SetTheme`].
     fn submit_command(&mut self) -> Effect {
         let Some(command) = self
             .command_palette()
@@ -347,6 +386,7 @@ impl AppState {
             Action::FocusRight if self.focus == FocusPane::Right => Action::FocusLeft,
             ref action => action.clone(),
         };
+        self.end_theme_preview();
         self.quick_open = None;
         self.dispatch_palette_action(action)
     }

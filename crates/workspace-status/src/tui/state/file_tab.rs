@@ -942,7 +942,7 @@ mod tests {
         }
         for title in [
             "Wrap / unwrap",
-            "Cycle theme",
+            "Theme: Nord",
             "Toggle mouse",
             "Keymap help",
             "Quit",

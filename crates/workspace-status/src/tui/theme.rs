@@ -4,7 +4,8 @@
 //! stay readable on the theme surface and on the `sidebar`, `chrome`, and
 //! `panel` backgrounds. Launch seed is `WS_STATUS_THEME`, then the
 //! last-used theme from the state file, then the config `theme` key, then
-//! [`DEFAULT_THEME_ID`] (Slate) ([`theme_id_from`]). `T` cycles the theme.
+//! [`DEFAULT_THEME_ID`] (Slate) ([`theme_id_from`]). The command palette
+//! has a `Theme: …` row per theme: focusing one previews it, Enter sets it.
 //! The last-used theme lives in its own state file
 //! ([`super::theme_store`]), never in the config file.
 
@@ -32,7 +33,7 @@ pub enum ThemeId {
     GithubDarkDimmed,
 }
 
-/// Cycle order for `T`.
+/// Built-in themes in palette row order (`Theme: …` rows).
 pub const THEME_IDS: [ThemeId; 13] = [
     ThemeId::TokyoNight,
     ThemeId::Monokai,
@@ -372,7 +373,7 @@ impl ThemeId {
         }
     }
 
-    /// Graph gutter colours for `T`.
+    /// Graph gutter colours of this theme.
     pub fn lane_colors(self) -> [Color; 8] {
         self.theme().lane_colors.map(hex_color)
     }
@@ -1100,12 +1101,6 @@ pub fn theme_id_from(
         .unwrap_or(DEFAULT_THEME_ID)
 }
 
-/// Next theme id in `THEME_IDS` order (wraps).
-pub fn cycle_theme_id(current: ThemeId) -> ThemeId {
-    let index = THEME_IDS.iter().position(|id| *id == current).unwrap_or(0);
-    THEME_IDS[(index + 1) % THEME_IDS.len()]
-}
-
 /// Parse `#rrggbb` into a ratatui colour. Invalid hex falls back to white.
 pub fn hex_color(hex: &str) -> Color {
     let bytes = hex.strip_prefix('#').unwrap_or(hex);
@@ -1220,7 +1215,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cycle_order_and_wrap() {
+    fn theme_ids_order_slugs_and_labels() {
         let order = [
             ThemeId::TokyoNight,
             ThemeId::Monokai,
@@ -1275,19 +1270,6 @@ mod tests {
         for id in THEME_IDS {
             assert_eq!(id.theme().id, id, "{id:?} preset id");
         }
-        let mut id = ThemeId::TokyoNight;
-        let mut seen = Vec::new();
-        for _ in 0..THEME_IDS.len() {
-            id = cycle_theme_id(id);
-            seen.push(id);
-        }
-        let mut expected = order[1..].to_vec();
-        expected.push(ThemeId::TokyoNight);
-        assert_eq!(seen, expected, "T walks every theme once and wraps");
-        assert_eq!(
-            cycle_theme_id(ThemeId::GithubDarkDimmed),
-            ThemeId::TokyoNight
-        );
     }
 
     #[test]

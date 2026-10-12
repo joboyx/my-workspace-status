@@ -367,7 +367,7 @@ impl AppState {
                 self.status = "focus cancelled".into();
                 Effect::None
             }
-            Action::CycleTheme => self.cycle_theme(),
+            Action::SetTheme(id) => self.set_theme(id),
             Action::DiffVisualStart => self.begin_diff_visual(),
             Action::DiffVisualCancel => self.cancel_diff_visual(),
             Action::DiffVisualUnmapped => {

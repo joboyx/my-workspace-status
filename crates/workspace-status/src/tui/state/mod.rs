@@ -111,7 +111,7 @@ use super::tabs::{
     COMPARE_STILL_LOADING, FOCUS_A_COMMIT_TO_DIFF, ROOT_COMMIT_HAS_NO_PARENT,
     SWITCH_TO_WORKSPACE_TAB, WORKSPACE_TAB_CANNOT_CLOSE,
 };
-use super::theme::{cycle_theme_id, BackgroundMode, ThemeId};
+use super::theme::{BackgroundMode, ThemeId};
 use super::theme_store::save_last_theme;
 use super::tree::{
     build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, visible_for_tree,
@@ -714,7 +714,8 @@ pub struct AppState {
     pub viewed_path: PathBuf,
     pub comment_store: CommentStore,
     pub comment_path: PathBuf,
-    /// Last-used theme store that `T` writes (see [`crate::tui::theme_store`]).
+    /// Last-used theme store that a palette `Theme: …` row writes (see
+    /// [`crate::tui::theme_store`]).
     pub theme_path: PathBuf,
     pub comment: Option<CommentPrompt>,
     pub comment_export: Option<CommentExport>,
@@ -760,6 +761,10 @@ pub struct AppState {
     pub quick_open: Option<QuickOpenState>,
     /// Session counter for Quick Open index and score generations.
     quick_open_gen: u64,
+    /// Theme active when Quick Open opened, while it is open. Focusing a
+    /// palette `Theme: …` row previews that theme in [`Self::theme`]; any
+    /// close but Enter on a theme row restores this one.
+    theme_before_preview: Option<ThemeId>,
     /// Open search-in-files dialog (Ctrl-f).
     pub search_files: Option<SearchFilesState>,
     /// Last closed search-in-files dialog, restored by the next Ctrl-f in
@@ -1006,6 +1011,7 @@ impl AppState {
             create_branch: None,
             quick_open: None,
             quick_open_gen: 0,
+            theme_before_preview: None,
             search_files: None,
             search_files_parked: None,
             search_files_gen: 0,
@@ -2252,9 +2258,12 @@ impl AppState {
         self.commit_file_signatures = commit_file_signatures(&repo, &source, &unfolded);
     }
 
-    /// `T`: next theme in this session, saved as the last-used theme.
-    fn cycle_theme(&mut self) -> Effect {
-        self.theme = cycle_theme_id(self.theme);
+    /// Enter on a palette `Theme: …` row: apply `id` in this session and
+    /// save it as the last-used theme. It ends any palette preview, so no
+    /// later close puts the old theme back.
+    fn set_theme(&mut self, id: ThemeId) -> Effect {
+        self.theme_before_preview = None;
+        self.theme = id;
         self.status = format!("theme: {}", self.theme.label()).into();
         if let Err(err) = save_last_theme(&self.theme_path, self.theme) {
             self.status = StatusMessage::error(persist_failed_status("theme", err));
@@ -14583,27 +14592,6 @@ mod tests {
         assert_eq!(app.right_col_offset, panned, "mouse off ignores hscroll");
     }
 
-    #[test]
-    fn theme_cycle_wraps_through_every_theme() {
-        let mut app = state();
-        app.theme = ThemeId::TokyoNight;
-        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
-        assert_eq!(app.theme, ThemeId::Monokai);
-        assert!(app.status.contains("Monokai"));
-        for _ in 2..crate::tui::theme::THEME_IDS.len() {
-            app.dispatch(Action::CycleTheme);
-        }
-        assert_eq!(app.theme, ThemeId::GithubDarkDimmed);
-        assert!(app.status.contains("GitHub Dark Dimmed"));
-        app.dispatch(Action::CycleTheme);
-        assert_eq!(app.theme, ThemeId::TokyoNight);
-        assert_eq!(
-            theme_id_from(Some("gruvbox-dark"), None, None),
-            ThemeId::GruvboxDark
-        );
-        assert_eq!(theme_id_from(Some("nope"), None, None), ThemeId::Slate);
-    }
-
     /// State whose theme store is `state/theme.json` in a fresh temp dir.
     fn state_with_theme_store(prefix: &str) -> (AppState, PathBuf) {
         let dir = crate::testutil::unique_dir(prefix);
@@ -14612,51 +14600,66 @@ mod tests {
         (app, dir)
     }
 
+    /// Open Quick Open in commands mode (`:`) and type `query`.
+    fn palette_type(app: &mut AppState, query: &str) {
+        use super::super::action::QuickOpenEntry;
+        app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
+        for c in query.chars() {
+            app.dispatch(Action::QuickOpenChar(c));
+        }
+    }
+
+    /// Title of the highlighted palette row.
+    fn palette_focus(app: &AppState) -> Option<String> {
+        app.command_palette()
+            .and_then(|palette| palette.selected())
+            .map(|command| command.title.to_string())
+    }
+
+    fn backspace(app: &mut AppState, count: usize) {
+        for _ in 0..count {
+            app.dispatch(Action::QuickOpenBackspace);
+        }
+    }
+
     #[test]
-    fn theme_cycle_saves_new_theme_to_store() {
-        let (mut app, dir) = state_with_theme_store("ws-theme-cycle-save");
+    fn set_theme_applies_saves_and_names_the_theme() {
+        let (mut app, dir) = state_with_theme_store("ws-theme-set-save");
         app.theme = ThemeId::TokyoNight;
-        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
-        assert_eq!(app.theme, ThemeId::Monokai);
-        assert_eq!(load_last_theme(&app.theme_path), Some(ThemeId::Monokai));
-        assert_eq!(app.status.kind(), StatusKind::Info);
-        app.dispatch(Action::CycleTheme);
-        assert_eq!(load_last_theme(&app.theme_path), Some(app.theme));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn theme_cycle_wrap_saves_tokyo_night() {
-        let (mut app, dir) = state_with_theme_store("ws-theme-cycle-wrap");
-        app.theme = ThemeId::GithubDarkDimmed;
-        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
-        assert_eq!(app.theme, ThemeId::TokyoNight);
-        assert_eq!(load_last_theme(&app.theme_path), Some(ThemeId::TokyoNight));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn theme_cycle_to_slate_saves_slate() {
-        let (mut app, dir) = state_with_theme_store("ws-theme-cycle-slate");
-        app.theme = *crate::tui::theme::THEME_IDS
-            .iter()
-            .find(|&&id| cycle_theme_id(id) == ThemeId::Slate)
-            .expect("some theme cycles to Slate");
-        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
+        assert_eq!(app.dispatch(Action::SetTheme(ThemeId::Slate)), Effect::None);
         assert_eq!(app.theme, ThemeId::Slate);
+        assert_eq!(app.status, "theme: Slate");
+        assert_eq!(app.status.kind(), StatusKind::Info);
         let text = std::fs::read_to_string(&app.theme_path).expect("store written");
         assert!(text.contains("\"slate\""), "store names slate: {text}");
         assert_eq!(load_last_theme(&app.theme_path), Some(ThemeId::Slate));
+        assert_eq!(
+            app.dispatch(Action::SetTheme(ThemeId::GithubDarkDimmed)),
+            Effect::None
+        );
+        assert_eq!(app.status, "theme: GitHub Dark Dimmed");
+        assert_eq!(
+            load_last_theme(&app.theme_path),
+            Some(ThemeId::GithubDarkDimmed)
+        );
+        assert_eq!(
+            theme_id_from(Some("gruvbox-dark"), None, None),
+            ThemeId::GruvboxDark
+        );
+        assert_eq!(theme_id_from(Some("nope"), None, None), ThemeId::Slate);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn theme_cycle_names_save_failure_when_unwritable() {
+    fn set_theme_names_save_failure_when_unwritable() {
         let mut app = state();
         app.theme = ThemeId::TokyoNight;
         let (root, path) = unwritable_store_path("ws-theme-save-fail");
         app.theme_path = path;
-        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
+        assert_eq!(
+            app.dispatch(Action::SetTheme(ThemeId::Monokai)),
+            Effect::None
+        );
         assert_eq!(app.theme, ThemeId::Monokai, "session theme still changes");
         assert_eq!(app.status.kind(), StatusKind::Error);
         assert!(
@@ -14668,13 +14671,16 @@ mod tests {
     }
 
     #[test]
-    fn theme_cycle_leaves_foreign_store_file_unchanged() {
+    fn set_theme_leaves_foreign_store_file_unchanged() {
         let (mut app, dir) = state_with_theme_store("ws-theme-foreign");
         std::fs::create_dir_all(app.theme_path.parent().unwrap()).unwrap();
         let foreign = b"{\"editor\": \"vim\"}\n";
         std::fs::write(&app.theme_path, foreign).unwrap();
         app.theme = ThemeId::TokyoNight;
-        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
+        assert_eq!(
+            app.dispatch(Action::SetTheme(ThemeId::Monokai)),
+            Effect::None
+        );
         assert_eq!(app.theme, ThemeId::Monokai, "session theme still changes");
         assert_eq!(std::fs::read(&app.theme_path).unwrap(), foreign);
         assert_eq!(app.status.kind(), StatusKind::Error);
@@ -14683,6 +14689,156 @@ mod tests {
             "foreign store must surface an error: {}",
             app.status
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn palette_moves_preview_theme_rows_and_restore_on_other_rows() {
+        let (mut app, dir) = state_with_theme_store("ws-theme-preview-move");
+        app.theme = ThemeId::Slate;
+        palette_type(&mut app, "");
+        assert_eq!(app.theme, ThemeId::Slate, "open lands on a non-theme row");
+        let palette = app.command_palette().expect("palette open");
+        let tokyo = palette
+            .rows()
+            .iter()
+            .position(|command| command.title == "Theme: Tokyo Night")
+            .expect("Tokyo Night row");
+        let delta = tokyo as i32 - palette.cursor as i32;
+        app.dispatch(Action::QuickOpenMove(delta));
+        assert_eq!(palette_focus(&app).as_deref(), Some("Theme: Tokyo Night"));
+        assert_eq!(app.theme, ThemeId::TokyoNight);
+        app.dispatch(Action::QuickOpenMove(1));
+        assert_eq!(app.theme, ThemeId::Monokai);
+        app.dispatch(Action::QuickOpenMove(-2));
+        assert_eq!(palette_focus(&app).as_deref(), Some("Icon popover"));
+        assert_eq!(app.theme, ThemeId::Slate, "a non-theme row restores");
+        app.dispatch(Action::QuickOpenMove(1));
+        assert_eq!(app.theme, ThemeId::TokyoNight);
+        assert!(!app.theme_path.exists(), "a preview never saves");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn palette_typing_previews_the_focused_theme_row() {
+        let (mut app, dir) = state_with_theme_store("ws-theme-preview-type");
+        app.theme = ThemeId::Slate;
+        palette_type(&mut app, "nord");
+        assert_eq!(palette_focus(&app).as_deref(), Some("Theme: Nord"));
+        assert_eq!(app.theme, ThemeId::Nord);
+        backspace(&mut app, "nord".len());
+        app.dispatch(Action::QuickOpenChar('q'));
+        app.dispatch(Action::QuickOpenChar('u'));
+        app.dispatch(Action::QuickOpenChar('i'));
+        app.dispatch(Action::QuickOpenChar('t'));
+        assert_eq!(palette_focus(&app).as_deref(), Some("Quit"));
+        assert_eq!(app.theme, ThemeId::Slate, "typing onto Quit restores");
+        backspace(&mut app, "quit".len());
+        for c in "dracula".chars() {
+            app.dispatch(Action::QuickOpenChar(c));
+        }
+        assert_eq!(app.theme, ThemeId::Dracula);
+        // Backspace over `>` leaves commands mode for files mode.
+        backspace(&mut app, "dracula".len() + 1);
+        assert!(app.quick_open.is_some());
+        assert!(app.command_palette().is_none(), "files mode");
+        assert_eq!(app.theme, ThemeId::Slate, "files mode restores");
+        assert!(!app.theme_path.exists(), "a preview never saves");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn palette_esc_and_toggle_close_restore_the_open_time_theme() {
+        use super::super::action::QuickOpenEntry;
+        let (mut app, dir) = state_with_theme_store("ws-theme-preview-close");
+        app.theme = ThemeId::Kanagawa;
+        // Several previews in a row; Esc goes back to the theme before the
+        // first one, not to an earlier preview.
+        palette_type(&mut app, "dracula");
+        assert_eq!(app.theme, ThemeId::Dracula);
+        backspace(&mut app, "dracula".len());
+        for c in "nord".chars() {
+            app.dispatch(Action::QuickOpenChar(c));
+        }
+        assert_eq!(app.theme, ThemeId::Nord);
+        app.dispatch(Action::QuickOpenCancel);
+        assert!(app.quick_open.is_none());
+        assert_eq!(app.theme, ThemeId::Kanagawa, "Esc restores");
+
+        palette_type(&mut app, "everforest");
+        assert_eq!(app.theme, ThemeId::Everforest);
+        app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
+        assert!(app.quick_open.is_none());
+        assert_eq!(app.theme, ThemeId::Kanagawa, "toggle close restores");
+
+        // Files entry, then `>` into commands on the first keystroke.
+        app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Files));
+        for c in ">one".chars() {
+            app.dispatch(Action::QuickOpenChar(c));
+        }
+        assert_eq!(palette_focus(&app).as_deref(), Some("Theme: One Dark"));
+        assert_eq!(app.theme, ThemeId::OneDark);
+        app.dispatch(Action::QuickOpenCancel);
+        assert_eq!(app.theme, ThemeId::Kanagawa, "Esc after a files entry");
+        assert!(!app.theme_path.exists(), "a close never saves");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn palette_enter_on_a_theme_row_applies_and_saves_it() {
+        let (mut app, dir) = state_with_theme_store("ws-theme-preview-enter");
+        app.theme = ThemeId::Slate;
+        palette_type(&mut app, "nord");
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
+        assert!(app.quick_open.is_none());
+        assert_eq!(app.theme, ThemeId::Nord);
+        assert_eq!(app.status, "theme: Nord");
+        assert_eq!(load_last_theme(&app.theme_path), Some(ThemeId::Nord));
+        // The applied theme is the new open-time theme.
+        palette_type(&mut app, "dracula");
+        assert_eq!(app.theme, ThemeId::Dracula);
+        app.dispatch(Action::QuickOpenCancel);
+        assert_eq!(app.theme, ThemeId::Nord);
+        assert_eq!(load_last_theme(&app.theme_path), Some(ThemeId::Nord));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn palette_enter_on_a_theme_row_keeps_it_when_the_save_fails() {
+        let mut app = state();
+        app.theme = ThemeId::Slate;
+        let (root, path) = unwritable_store_path("ws-theme-preview-fail");
+        app.theme_path = path;
+        palette_type(&mut app, "rose-pine");
+        assert_eq!(palette_focus(&app).as_deref(), Some("Theme: Rosé Pine"));
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
+        assert!(app.quick_open.is_none());
+        assert_eq!(app.theme, ThemeId::RosePine, "applied in this session");
+        assert_eq!(app.status.kind(), StatusKind::Error);
+        assert!(
+            app.status.contains("theme save failed"),
+            "failed persist must name the theme store: {}",
+            app.status
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn palette_enter_on_another_row_after_a_preview_restores_and_saves_nothing() {
+        let (mut app, dir) = state_with_theme_store("ws-theme-preview-other");
+        app.theme = ThemeId::Slate;
+        palette_type(&mut app, "nord");
+        assert_eq!(app.theme, ThemeId::Nord);
+        backspace(&mut app, "nord".len());
+        for c in "keymap".chars() {
+            app.dispatch(Action::QuickOpenChar(c));
+        }
+        assert_eq!(palette_focus(&app).as_deref(), Some("Keymap help"));
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
+        assert!(app.quick_open.is_none());
+        assert!(app.help_open, "Keymap help ran");
+        assert_eq!(app.theme, ThemeId::Slate);
+        assert!(!app.theme_path.exists(), "nothing saved");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -16854,8 +17010,11 @@ mod tests {
         assert_eq!(app.status, ESC_EXITS_HIGHLIGHT);
         assert_eq!(app.status.kind(), StatusKind::Warn);
         assert!(app.diff_visual_anchor.is_some(), "highlight stays");
-        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
-        assert!(app.diff_visual_anchor.is_some(), "T keeps the highlight");
+        assert_eq!(app.dispatch(Action::SetTheme(ThemeId::Nord)), Effect::None);
+        assert!(
+            app.diff_visual_anchor.is_some(),
+            "a theme row keeps the highlight"
+        );
         assert_eq!(app.dispatch(Action::Quit), Effect::Quit);
     }
 
@@ -17563,7 +17722,7 @@ diff --git a/README.md b/README.md
                 "{title}"
             );
         }
-        for title in ["Cycle theme", "Comment"] {
+        for title in ["Theme: Nord", "Comment"] {
             assert_eq!(palette_reason(&app, title), None, "{title}");
         }
         palette_select(&mut app, "Fetch remotes");

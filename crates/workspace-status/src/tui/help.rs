@@ -115,10 +115,6 @@ macro_rules! view_group {
                 },
                 $($ignored,)*
                 HelpEntry {
-                    keys: "T",
-                    desc: "cycle theme",
-                },
-                HelpEntry {
                     keys: "Ctrl-o",
                     desc: "full-file · keep hunk in view",
                 },
@@ -1236,7 +1232,10 @@ mod tests {
         assert!(view_keys.contains(&"PgUp PgDn"));
         assert!(view_keys.contains(&"Ctrl-u Ctrl-d"));
         assert!(view_keys.contains(&"."));
-        assert!(view_keys.contains(&"T"));
+        assert!(
+            !view_keys.contains(&"T"),
+            "themes are palette rows, not a key"
+        );
         assert!(view_keys.contains(&"gh"), "the icon popover chord");
         assert!(view_keys.contains(&"i \\ M B"));
         assert!(!view_keys.contains(&"i \\"));

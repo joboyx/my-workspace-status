@@ -938,7 +938,7 @@ fn search_files_key_action(key: KeyEvent, results: bool) -> Action {
 /// Ctrl-d move the head (and extend or shrink the range). `;` comments that
 /// range. `s` / `u` stage / unstage the highlighted add/del lines. `x`
 /// reverts them from the worktree (after a confirm). `'` copies an entity
-/// reference for the highlighted span. `?`, `q`, `T`, and `m` act as in
+/// reference for the highlighted span. `?`, `q`, and `m` act as in
 /// normal mode. Esc or a second `V` leaves highlight without commenting.
 /// Any other key is [`Action::DiffVisualUnmapped`] so the status can say
 /// how to leave; an unbound modifier chord on a non-character key is
@@ -960,7 +960,6 @@ fn diff_visual_key(key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Char('?') => Action::ToggleHelp,
         KeyCode::Char('q') => Action::Quit,
-        KeyCode::Char('T') => Action::CycleTheme,
         KeyCode::Char('m') => Action::ToggleMouse,
         KeyCode::Char('g') => Action::ArmGChord,
         KeyCode::Char('G') | KeyCode::End => Action::MoveToEnd,
@@ -1035,7 +1034,6 @@ fn normal_key(
         }
     }
     match key.code {
-        KeyCode::Char('T') => Action::CycleTheme,
         KeyCode::Char('t') => Action::ToggleTreeMode,
         KeyCode::Char('q') => Action::Quit,
         KeyCode::Char('?') => Action::ToggleHelp,
@@ -2176,8 +2174,8 @@ mod tests {
         for (event, want) in [
             (key(KeyCode::Char('?')), Action::ToggleHelp),
             (key(KeyCode::Char('q')), Action::Quit),
-            (key(KeyCode::Char('T')), Action::CycleTheme),
             (key(KeyCode::Char('m')), Action::ToggleMouse),
+            (key(KeyCode::Char('T')), Action::DiffVisualUnmapped),
             (key(KeyCode::Char('g')), Action::ArmGChord),
             (key(KeyCode::Char('G')), Action::MoveToEnd),
             (key(KeyCode::Home), Action::MoveToStart),
@@ -2252,9 +2250,25 @@ mod tests {
 
     #[test]
     fn theme_and_reviewed_keys() {
+        // Themes are palette rows only: bare `T` and CSI-u Shift+T are unbound.
+        for event in [
+            key(KeyCode::Char('T')),
+            shift(KeyCode::Char('t')),
+            shift(KeyCode::Char('T')),
+        ] {
+            assert_eq!(
+                event_to_action(&event, normal(), false, false),
+                Action::None,
+                "{event:?}"
+            );
+        }
+        let pending = InputMode::GPending {
+            search_active: false,
+        };
         assert_eq!(
-            event_to_action(&key(KeyCode::Char('T')), normal(), false, false),
-            Action::CycleTheme
+            event_to_action(&key(KeyCode::Char('T')), pending, false, false),
+            Action::PreviousTab,
+            "gT still goes to the previous tab"
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('t')), normal(), false, false),
@@ -2574,7 +2588,8 @@ mod tests {
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('T')), normal(), false, false),
-            Action::CycleTheme
+            Action::None,
+            "bare T sets no theme; gT is the only T binding"
         );
     }
 
@@ -3819,7 +3834,7 @@ mod tests {
         };
         let n = normal();
         let rows: Vec<(InputMode, u8, KeyCode, Action)> = vec![
-            (n, 0, Char('T'), Action::CycleTheme),
+            (n, 0, Char('T'), Action::None),
             (n, 0, Char('t'), Action::ToggleTreeMode),
             (n, 0, Char('q'), Action::Quit),
             (n, 0, Char('?'), Action::ToggleHelp),
