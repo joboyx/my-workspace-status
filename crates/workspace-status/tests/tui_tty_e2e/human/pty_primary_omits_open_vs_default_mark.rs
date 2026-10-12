@@ -1,7 +1,7 @@
 use crate::harness::PtySession;
 use crate::seed::worktree_workspace;
 use crate::support::{
-    crumb_row, merge_mark_after, no_mouse_toggle_toast, tree_cursor_on, tree_has,
+    crumb_row, merge_mark_after, no_mouse_toggle_toast, row_icons_after, tree_cursor_on, tree_has,
     tree_line_containing, tree_line_has_leading_worktree_icon, tree_pane_focused, WAIT,
 };
 
@@ -36,7 +36,9 @@ fn linked_row_keeps_open_mark(screen: &str) -> bool {
     tree_line_containing(screen, LINKED).is_some_and(|line| {
         tree_line_has_leading_worktree_icon(&line, LINKED)
             && merge_mark_after(&line, LINKED).as_deref() == Some("o")
-            && merge_mark_after(&line, LINKED).as_deref() != Some("M")
+            && !row_icons_after(&line, LINKED)
+                .iter()
+                .any(|icon| icon == "M")
     })
 }
 

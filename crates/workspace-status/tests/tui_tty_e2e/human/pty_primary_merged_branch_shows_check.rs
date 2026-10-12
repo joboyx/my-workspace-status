@@ -1,7 +1,7 @@
 use crate::harness::PtySession;
 use crate::seed::primary_merged_workspace;
 use crate::support::{
-    crumb_row, merge_mark_after, no_mouse_toggle_toast, tree_cursor_on, tree_has,
+    crumb_row, merge_mark_after, no_mouse_toggle_toast, row_icons_after, tree_cursor_on, tree_has,
     tree_line_containing, tree_line_has_leading_worktree_icon, tree_pane_focused, WAIT,
 };
 
@@ -24,7 +24,9 @@ fn primary_row_is_merged(screen: &str) -> bool {
     tree_line_containing(screen, PRIMARY).is_some_and(|line| {
         line.contains('&')
             && merge_mark_after(&line, PRIMARY).as_deref() == Some("M")
-            && merge_mark_after(&line, PRIMARY).as_deref() != Some("o")
+            && !row_icons_after(&line, PRIMARY)
+                .iter()
+                .any(|icon| icon == "o")
             && !line.contains('L')
             && !line.contains('o')
     })
@@ -35,7 +37,9 @@ fn linked_merged_row_is_merged(screen: &str) -> bool {
     tree_line_containing(screen, LINKED_MERGED).is_some_and(|line| {
         tree_line_has_leading_worktree_icon(&line, LINKED_MERGED)
             && merge_mark_after(&line, LINKED_MERGED).as_deref() == Some("M")
-            && merge_mark_after(&line, LINKED_MERGED).as_deref() != Some("o")
+            && !row_icons_after(&line, LINKED_MERGED)
+                .iter()
+                .any(|icon| icon == "o")
     })
 }
 
@@ -44,7 +48,9 @@ fn just_created_row_is_open(screen: &str) -> bool {
     tree_line_containing(screen, JUST_CREATED).is_some_and(|line| {
         tree_line_has_leading_worktree_icon(&line, JUST_CREATED)
             && merge_mark_after(&line, JUST_CREATED).as_deref() == Some("o")
-            && merge_mark_after(&line, JUST_CREATED).as_deref() != Some("M")
+            && !row_icons_after(&line, JUST_CREATED)
+                .iter()
+                .any(|icon| icon == "M")
     })
 }
 

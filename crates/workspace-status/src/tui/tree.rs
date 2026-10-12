@@ -853,9 +853,9 @@ fn tagged(seg: TextSeg, kind: IconKind) -> TextSeg {
     }
 }
 
-/// Muted `  N` change count on a repo or checkout row.
+/// Muted `N` change count on a repo or checkout row.
 fn change_count_seg(count: usize) -> TextSeg {
-    icon_text_seg(format!("  {count}"), SegRole::Muted, IconKind::ChangeCount)
+    icon_text_seg(count.to_string(), SegRole::Muted, IconKind::ChangeCount)
 }
 
 /// Catalog kind of the sync mark for `status`.
@@ -879,12 +879,10 @@ pub fn show_clean_check(in_no_updates: bool) -> bool {
 
 /// Pin a repo glyph on the trailing run so a narrow pane can clip the
 /// name without dropping that kind mark. Linked-worktree glyphs stay on
-/// the left, immediately before the name. One space after the glyph,
-/// same tightness as the viewed eye before a badge.
-fn with_repo_kind_icon(mut trailing: Vec<TextSeg>, glyph: &str, role: SegRole) -> Vec<TextSeg> {
-    let mut marked = vec![tagged(icon_seg(glyph, role), IconKind::Repo)];
-    marked.append(&mut trailing);
-    marked
+/// the left, immediately before the name. One space separates the glyph
+/// from the rest of the run.
+fn with_repo_kind_icon(trailing: Vec<TextSeg>, glyph: &str, role: SegRole) -> Vec<TextSeg> {
+    with_leading_icons(vec![icon_text_seg(glyph, role, IconKind::Repo)], trailing)
 }
 
 fn repo_kind_role(ignored: bool) -> SegRole {
@@ -1085,19 +1083,27 @@ fn ignored_seg(ascii: bool) -> TextSeg {
 ///
 /// These are the row icons that follow the name in paint order. On the
 /// right-aligned trailing run a narrow pane clips the name, not them.
+/// Every item of the run is a bare token, so the run packs flush right
+/// with no padding at either end.
 fn with_leading_icons(icons: Vec<TextSeg>, mut trailing: Vec<TextSeg>) -> Vec<TextSeg> {
     let mut run = Vec::new();
     for icon in icons {
-        if !run.is_empty() {
-            run.push(text_seg(" ", SegRole::Muted));
-        }
-        run.push(icon);
+        push_trailing_item(&mut run, icon);
     }
     if !run.is_empty() && !trailing.is_empty() {
         run.push(text_seg(" ", SegRole::Muted));
     }
     run.append(&mut trailing);
     run
+}
+
+/// Append the bare token `item` to the trailing `run`, one space after the
+/// run's last item.
+fn push_trailing_item(run: &mut Vec<TextSeg>, item: TextSeg) {
+    if !run.is_empty() {
+        run.push(text_seg(" ", SegRole::Muted));
+    }
+    run.push(item);
 }
 
 fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegments {
@@ -1121,14 +1127,16 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
             icon: None,
         }];
         let mut trailing = sync_trailing(&node.chrome, in_no_updates, ascii);
-        let wt_prefix = if trailing.is_empty() { "" } else { "  " };
-        trailing.push(icon_text_seg(
-            format!("{wt_prefix}{wt_count} wt"),
-            SegRole::Muted,
-            IconKind::WorktreeCount,
-        ));
+        push_trailing_item(
+            &mut trailing,
+            icon_text_seg(
+                format!("{wt_count} wt"),
+                SegRole::Muted,
+                IconKind::WorktreeCount,
+            ),
+        );
         if node.chrome.change_count > 0 {
-            trailing.push(change_count_seg(node.chrome.change_count));
+            push_trailing_item(&mut trailing, change_count_seg(node.chrome.change_count));
         }
         trailing = with_repo_kind_icon(trailing, icon_repo(ascii), repo_kind_role(node.ignored));
         let ignored = node.ignored.then(|| ignored_seg(ascii));
@@ -1189,7 +1197,7 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
 
     let mut trailing = sync_trailing(&node.chrome, in_no_updates, ascii);
     if node.chrome.change_count > 0 {
-        trailing.push(change_count_seg(node.chrome.change_count));
+        push_trailing_item(&mut trailing, change_count_seg(node.chrome.change_count));
     }
     if !linked {
         trailing = with_repo_kind_icon(trailing, icon_repo(ascii), kind_role);
@@ -1247,7 +1255,7 @@ fn checkout_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeS
     ];
     let mut trailing = sync_trailing(&node.chrome, in_no_updates, ascii);
     if node.chrome.change_count > 0 {
-        trailing.push(change_count_seg(node.chrome.change_count));
+        push_trailing_item(&mut trailing, change_count_seg(node.chrome.change_count));
     }
     NodeSegments {
         segments,
@@ -1347,10 +1355,11 @@ pub fn node_segments(
 
 /// Prepend `icon_comment` (`"` / nf-fa-comment) when `commented`.
 /// Resolved comments use `icon_comment_resolved` (`'` / nf-fa-comment-o)
-/// and muted chrome. Uncommented rows keep `trailing` unchanged. Tree
+/// and muted chrome. One space separates the mark from the rest of the
+/// run. Uncommented rows keep `trailing` unchanged. Tree
 /// and commit-file lists share this so the mark is the same trailing chrome.
 pub fn with_comment_mark(
-    mut trailing: Vec<TextSeg>,
+    trailing: Vec<TextSeg>,
     ascii: bool,
     commented: bool,
     resolved: bool,
@@ -1367,19 +1376,7 @@ pub fn with_comment_mark(
     } else {
         (icon_comment(ascii), SegRole::Heading, IconKind::Comment)
     };
-    let mut marked = vec![
-        TextSeg {
-            text: glyph.to_string(),
-            role,
-            hex: None,
-            bold: false,
-            dim: false,
-            icon: Some(kind),
-        },
-        text_seg(" ", SegRole::Muted),
-    ];
-    marked.append(&mut trailing);
-    marked
+    with_leading_icons(vec![icon_text_seg(glyph, role, kind)], trailing)
 }
 
 /// [`painted_row_segments`] with no PR badge.
@@ -1396,23 +1393,15 @@ pub fn row_segments(
 
 /// Prepend the viewed eye (`icon_viewed`, bold [`SegRole::Viewed`]) to
 /// `trailing` when `viewed`. Workspace tree and compare file rows share it.
-pub fn with_viewed_mark(mut trailing: Vec<TextSeg>, ascii: bool, viewed: bool) -> Vec<TextSeg> {
+pub fn with_viewed_mark(trailing: Vec<TextSeg>, ascii: bool, viewed: bool) -> Vec<TextSeg> {
     if !viewed {
         return trailing;
     }
-    let mut marked = vec![
-        TextSeg {
-            text: icon_viewed(ascii).to_string(),
-            role: SegRole::Viewed,
-            hex: None,
-            bold: true,
-            dim: false,
-            icon: Some(IconKind::Viewed),
-        },
-        text_seg(" ", SegRole::Muted),
-    ];
-    marked.append(&mut trailing);
-    marked
+    let eye = TextSeg {
+        bold: true,
+        ..icon_text_seg(icon_viewed(ascii), SegRole::Viewed, IconKind::Viewed)
+    };
+    with_leading_icons(vec![eye], trailing)
 }
 
 /// Glyph and colour role of the PR badge for `state`.
@@ -2321,7 +2310,7 @@ mod tests {
         assert_eq!(checkout.trailing_segs[0].text, "o");
         assert_eq!(checkout.trailing_segs[0].role, SegRole::Muted);
         assert_eq!(checkout.segments[0].icon, Some(IconKind::LinkedWorktree));
-        assert_eq!(checkout.trailing, "o ^1  1");
+        assert_eq!(checkout.trailing, "o ^1 1");
     }
 
     #[test]
@@ -2354,10 +2343,10 @@ mod tests {
             .position(|seg| seg.icon == Some(IconKind::Repo))
             .expect("repo glyph");
         assert_eq!(
-            app.trailing_segs[kind_at].text, "@ ",
-            "glyph keeps its space"
+            app.trailing_segs[kind_at].text, "@",
+            "the glyph is a bare token"
         );
-        assert_eq!(trail, "& @ ^2  1", "branch glyph, then the repo glyph");
+        assert_eq!(trail, "& @ ^2 1", "branch glyph, then the repo glyph");
         assert_eq!(
             segment_icons(&row_segments(app, true, false, false, false)),
             vec![
@@ -2414,12 +2403,17 @@ mod tests {
         assert_eq!(
             tagged_segs(&row("repo:app")),
             vec![
-                (K::Repo, s("@ ")),
+                (K::Repo, s("@")),
                 (K::Behind, s("v3")),
-                (K::WorktreeCount, s("  2 wt")),
-                (K::ChangeCount, s("  2")),
+                (K::WorktreeCount, s("2 wt")),
+                (K::ChangeCount, s("2")),
             ],
             "family: repo glyph, sync, worktree count, change count"
+        );
+        assert_eq!(
+            row("repo:app").trailing,
+            "@ v3 2 wt 2",
+            "bare tokens, one space apart"
         );
         assert_eq!(
             tagged_segs(&row("checkout:app")),
@@ -2427,7 +2421,7 @@ mod tests {
                 (K::Branch, s("& ")),
                 (K::MergedIntoDefault, s("M")),
                 (K::NoUpstream, s("?")),
-                (K::ChangeCount, s("  2")),
+                (K::ChangeCount, s("2")),
             ]
         );
         let merged = row("checkout:app");
@@ -2437,16 +2431,16 @@ mod tests {
             .find(|seg| seg.icon == Some(K::MergedIntoDefault))
             .expect("merge mark");
         assert_eq!(mark.role, SegRole::Added, "merged paints in the added role");
-        assert_eq!(merged.label, "& feature/landed  M ?  2");
+        assert_eq!(merged.label, "& feature/landed  M ? 2");
         assert_eq!(
             tagged_segs(&row("repo:notes"))
                 .iter()
                 .map(|(_, text)| text.as_str())
                 .collect::<String>(),
-            "~&@ ?  1",
+            "~&@?1",
             "ignored and branch glyphs lead the trailing run"
         );
-        assert_eq!(row("repo:notes").trailing, "~ & @ ?  1");
+        assert_eq!(row("repo:notes").trailing, "~ & @ ? 1");
         assert_eq!(
             tagged_segs(&row("checkout:app/.worktrees/feat")),
             vec![
@@ -2459,18 +2453,23 @@ mod tests {
             tagged_segs(&row("repo:broken")),
             vec![
                 (K::Branch, s("&")),
-                (K::Repo, s("@ ")),
+                (K::Repo, s("@")),
                 (K::StatusFailed, s("!")),
             ]
+        );
+        assert_eq!(
+            row("repo:broken").trailing,
+            format!("& @ ! {STATUS_FAILED_NOTE}"),
+            "the words stay one space after their glyph"
         );
         assert_eq!(
             tagged_segs(&row("repo:notes")),
             vec![
                 (K::Ignored, s("~")),
                 (K::Branch, s("&")),
-                (K::Repo, s("@ ")),
+                (K::Repo, s("@")),
                 (K::NoUpstream, s("?")),
-                (K::ChangeCount, s("  1")),
+                (K::ChangeCount, s("1")),
             ]
         );
         assert_eq!(
@@ -2479,7 +2478,7 @@ mod tests {
         );
         assert_eq!(
             tagged_segs(&row("repo:idle")),
-            vec![(K::Branch, s("&")), (K::Repo, s("@ ")), (K::Clean, s("."))]
+            vec![(K::Branch, s("&")), (K::Repo, s("@")), (K::Clean, s("."))]
         );
         let group = row("group:no-updates");
         assert_eq!(

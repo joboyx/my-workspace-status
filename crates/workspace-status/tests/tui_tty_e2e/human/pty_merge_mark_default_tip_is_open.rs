@@ -1,8 +1,9 @@
 use crate::harness::PtySession;
 use crate::seed::merge_mark_workspace;
 use crate::support::{
-    crumb_row, merge_mark_after, no_mouse_toggle_toast, status_row, tree_cursor_on, tree_has,
-    tree_line_containing, tree_line_has_leading_worktree_icon, tree_pane_focused, SETTLE_MS, WAIT,
+    crumb_row, merge_mark_after, no_mouse_toggle_toast, row_icons_after, status_row,
+    tree_cursor_on, tree_has, tree_line_containing, tree_line_has_leading_worktree_icon,
+    tree_pane_focused, SETTLE_MS, WAIT,
 };
 
 const JUST_CREATED: &str = "feature/just-created";
@@ -31,7 +32,9 @@ fn just_created_row_is_open(screen: &str) -> bool {
     tree_line_containing(screen, JUST_CREATED).is_some_and(|line| {
         tree_line_has_leading_worktree_icon(&line, JUST_CREATED)
             && merge_mark_after(&line, JUST_CREATED).as_deref() == Some("o")
-            && merge_mark_after(&line, JUST_CREATED).as_deref() != Some("M")
+            && !row_icons_after(&line, JUST_CREATED)
+                .iter()
+                .any(|icon| icon == "M")
     })
 }
 
@@ -40,7 +43,9 @@ fn landed_row_is_merged(screen: &str) -> bool {
     tree_line_containing(screen, LANDED).is_some_and(|line| {
         tree_line_has_leading_worktree_icon(&line, LANDED)
             && merge_mark_after(&line, LANDED).as_deref() == Some("M")
-            && merge_mark_after(&line, LANDED).as_deref() != Some("o")
+            && !row_icons_after(&line, LANDED)
+                .iter()
+                .any(|icon| icon == "o")
     })
 }
 

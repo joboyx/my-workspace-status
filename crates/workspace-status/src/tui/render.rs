@@ -1062,7 +1062,7 @@ fn explorer_row_segments(row: &ExplorerRow, status: &ExplorerStatus, ascii: bool
     }
     if row.is_dir {
         let dirty = status.dir_dirty(&row.rel);
-        let dot = if ascii { "* " } else { "● " };
+        let dot = if ascii { "*" } else { "●" };
         return NodeSegments {
             segments: vec![seg(&row.name, SegRole::Dir, false)],
             trailing: if dirty {
@@ -1226,8 +1226,13 @@ fn paint_tree_row(
             .saturating_sub(name_width)
             .saturating_sub(marks_width);
         segs.trailing.truncate(marks);
-        segs.trailing
-            .extend(workspace_trailing_fit(&row.chrome, room));
+        let summary = workspace_trailing_fit(&row.chrome, room);
+        if summary.is_empty() && segs.trailing.last().is_some_and(|seg| seg.text == " ") {
+            // No summary fits: drop the space after the marks so the last
+            // mark stays in the last column.
+            segs.trailing.pop();
+        }
+        segs.trailing.extend(summary);
     }
     let icons = segmented_icon_spans(row.depth, &segs, width, col_offset);
     let line = paint_segmented_row(
@@ -10797,14 +10802,14 @@ mod tests {
             (
                 &repo_row,
                 None,
-                "~ & @ ^2  1",
+                "~ & @ ^2 1",
                 vec![(IconKind::Ignored, '~'), (IconKind::Branch, '&')],
                 "must-clip",
             ),
             (
                 &checkout,
                 Some(PrState::Open),
-                "o P ^1  1",
+                "o P ^1 1",
                 vec![(IconKind::OpenVsDefault, 'o'), (IconKind::PrOpen, 'P')],
                 "branch-name",
             ),
@@ -10826,9 +10831,73 @@ mod tests {
     }
 
     #[test]
+    fn packed_trailing_run_ends_in_the_last_column() {
+        // Clean, up to date, on a feature branch: outside No updates, so
+        // the row paints no sync mark and the repo glyph is its last icon.
+        let mut feature = repo("app", false);
+        feature.branch = "feature/side".into();
+        feature.sync_status = SyncStatus::UpToDate;
+        let mut docs = repo("docs", true);
+        docs.changes[0].path = "guide/intro.md".into();
+        // A staged change too, so the repo splits into sections.
+        docs.has_staged = true;
+        docs.changes.push(FileChange {
+            path: "guide/setup.md".into(),
+            staged_status: Some("A".into()),
+            unstaged_status: None,
+            untracked: false,
+            old_path: None,
+        });
+        let built = build_workspace_snapshot(&[feature, docs], &[], true, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let find = |pred: &dyn Fn(&VisibleRow) -> bool| {
+            rows.iter()
+                .find(|row| pred(row))
+                .unwrap_or_else(|| panic!("{:?}", rows.iter().map(|r| &r.id).collect::<Vec<_>>()))
+                .clone()
+        };
+        let feature = find(&|row| row.id == "repo:app");
+        let dir = find(&|row| row.kind == NodeKind::Dir);
+        let section = find(&|row| row.kind == NodeKind::Section);
+        let palette = crate::tui::theme::ThemeId::TokyoNight.palette();
+        let width = 30;
+        for (row, commented, tail, kind) in [
+            (&feature, false, "& @", IconKind::Repo),
+            (&dir, true, "\"", IconKind::Comment),
+            (&section, true, "\"", IconKind::Comment),
+        ] {
+            let (line, icons) = paint_tree_row(
+                row,
+                width,
+                false,
+                false,
+                None,
+                false,
+                search_bg_unused(),
+                true,
+                false,
+                commented,
+                false,
+                None,
+                palette,
+                0,
+            );
+            let text = line_text(&line);
+            let what = format!("{}: {text:?} {icons:?}", row.id);
+            assert_eq!(text.chars().count(), width, "{what}");
+            assert!(text.ends_with(tail), "last icon in the last column: {what}");
+            assert!(
+                icons.contains(&(kind, width - 1, 1)),
+                "hit on the last column: {what}"
+            );
+        }
+    }
+
+    #[test]
     fn trailing_run_wider_than_the_room_clips_from_the_left() {
         let (row, _) = icon_after_name_rows();
-        let trail = "~ & @ ^2  1";
+        let trail = "~ & @ ^2 1";
         // Depth 1: edge, indent, chevron take five columns.
         let prefix = 5;
         for room in 0..trail.len() {
@@ -10857,10 +10926,10 @@ mod tests {
             );
             assert_eq!(
                 kinds.contains(&IconKind::Repo),
-                room >= 7,
+                room >= 6,
                 "an icon cut off records no hit: {what}"
             );
-            if room == 4 {
+            if room == 3 {
                 // `^2` cut to `2`: the hit covers the visible column only.
                 assert!(icons.contains(&(IconKind::Ahead, prefix, 1)), "{what}");
             }
