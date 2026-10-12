@@ -270,6 +270,11 @@ pub struct LayoutHit {
     pub graph_scrollbar_height: u16,
     /// Painted graph line count.
     pub graph_content_len: usize,
+    /// Graph list top the last frame painted: `graph_scroll`, or the step
+    /// of a live Ctrl-d / Ctrl-u glide. `None` when no graph list painted.
+    /// Graph row clicks and the scrollbar thumb read it, as the tree reads
+    /// [`Self::list_offset`].
+    pub graph_painted_top: Option<u16>,
     /// 0-based graph horizontal scrollbar row when the bar is painted.
     pub graph_hscrollbar_y: Option<u16>,
     /// 0-based first column of the graph horizontal scrollbar track.
@@ -413,6 +418,7 @@ impl Default for LayoutHit {
             graph_scrollbar_y: 0,
             graph_scrollbar_height: 0,
             graph_content_len: 0,
+            graph_painted_top: None,
             graph_hscrollbar_y: None,
             graph_hscrollbar_x: 0,
             graph_hscrollbar_width: 0,
@@ -2692,7 +2698,7 @@ impl AppState {
             graph_scrollbar_y: self.layout.graph_scrollbar_y,
             graph_scrollbar_height: self.layout.graph_scrollbar_height,
             graph_content_len: self.layout.graph_content_len,
-            graph_scroll: self.graph_scroll,
+            graph_scroll: self.graph_painted_top(),
             graph_hscrollbar_y: self.layout.graph_hscrollbar_y,
             graph_hscrollbar_x: self.layout.graph_hscrollbar_x,
             graph_hscrollbar_width: self.layout.graph_hscrollbar_width,
@@ -2779,6 +2785,9 @@ impl AppState {
             }
             SplitHit::GraphThumb => {
                 self.focus_graph_pane();
+                // The press ended any glide: keep the rows on screen, so a
+                // grab mid-glide does not jump to the glide's target.
+                self.graph_scroll = self.graph_painted_top();
                 self.drag = SplitDrag::GraphScrollbar {
                     origin_row: row,
                     origin_scroll: self.graph_scroll,
@@ -3001,7 +3010,10 @@ impl AppState {
         }
         let glyphs = if self.ascii { &ASCII } else { &UNICODE };
         let painted = paint_model(model, glyphs, None);
-        let Some(line) = painted.get(self.graph_scroll as usize + offset) else {
+        // Hit-test the rows on screen: mid-glide they sit above or below
+        // the jump top in `graph_scroll`.
+        let top = usize::from(self.graph_painted_top());
+        let Some(line) = painted.get(top + offset) else {
             return Effect::None;
         };
         if let Some(idx) = line.row_index {
@@ -5751,6 +5763,14 @@ impl AppState {
     fn apply_terminal_size(&mut self, cols: u16) {
         self.layout.term_cols = cols.max(1);
         self.tree_fraction = clamp_tree_fraction(self.layout.term_cols, self.tree_fraction);
+    }
+
+    /// Graph list top on screen: the last frame's painted top
+    /// ([`LayoutHit::graph_painted_top`]), which trails
+    /// [`Self::graph_scroll`] during a Ctrl-d / Ctrl-u glide. Falls back to
+    /// `graph_scroll` before any graph list paints.
+    pub(crate) fn graph_painted_top(&self) -> u16 {
+        self.layout.graph_painted_top.unwrap_or(self.graph_scroll)
     }
 
     /// Whether the graph list paints its vertical scrollbar: the painted

@@ -249,6 +249,7 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
     state.layout.graph_scrollbar_y = 0;
     state.layout.graph_scrollbar_height = 0;
     state.layout.graph_content_len = 0;
+    state.layout.graph_painted_top = None;
     state.layout.graph_hscrollbar_y = None;
     state.layout.graph_hscrollbar_x = 0;
     state.layout.graph_hscrollbar_width = 0;
@@ -2214,6 +2215,9 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
     }
     // The painted top: `graph_scroll` itself stays the jump top.
     let scroll = graph_glide_scroll(state, area.height);
+    if state.graph.is_some() {
+        state.layout.graph_painted_top = Some(scroll);
+    }
     let Some(model) = state.graph.as_ref() else {
         frame.render_widget(Paragraph::new("focus a repo for the graph"), area);
         return;
@@ -2474,7 +2478,8 @@ fn record_graph_scrollbar(
     // The widget already painted this frame; count without a second paint.
     let content_len = painted_line_count(model);
     state.layout.graph_content_len = content_len;
-    let vscroll = graph_vscroll_visible(content_len, chrome.list_height, state.graph_scroll);
+    // The painted top, so the bar matches the rows during a glide.
+    let vscroll = graph_vscroll_visible(content_len, chrome.list_height, state.graph_painted_top());
     let hscroll = graph_hscroll_visible(col_offset);
     let list_top = area.y.saturating_add(u16::from(chrome.header));
     let list_height = chrome.list_height;
@@ -13867,6 +13872,119 @@ mod tests {
             .unwrap();
         assert!(!state.layout.gliding);
         assert_eq!(buffer_text(&terminal), buffer_text(&jump_terminal));
+    }
+
+    /// Graph state focused on the right pane, a Ctrl-d glide armed and
+    /// dispatched (`Move(20)`), and a frame drawn halfway through the glide.
+    /// Returns the state, its terminal, and the painted and jump tops.
+    fn graph_mid_glide() -> (AppState, Terminal<TestBackend>, u16, u16) {
+        use super::super::anim::GLIDE_MS;
+        let mut state = tall_graph_state();
+        state.focus = FocusPane::Right;
+        state.graph_cursor = 10;
+        state.sync_graph_scroll();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let from = state.graph_scroll;
+        let t0 = Instant::now();
+        state.arm_scroll_glide(t0);
+        state.dispatch(Action::Move(20));
+        let target = state.graph_scroll;
+        let mid = t0 + std::time::Duration::from_millis(GLIDE_MS / 2);
+        terminal
+            .draw(|frame| draw_at(frame, &mut state, mid))
+            .unwrap();
+        assert!(state.layout.gliding);
+        let painted = state.layout.graph_painted_top.expect("graph list painted");
+        assert!(
+            from < painted && painted < target,
+            "mid-glide top: {from} < {painted} < {target}"
+        );
+        assert_eq!(
+            state.graph_scroll, target,
+            "graph_scroll keeps the jump top"
+        );
+        (state, terminal, painted, target)
+    }
+
+    /// A click on a graph row mid-glide selects the commit painted under
+    /// the pointer, not the one at that offset from the jump top.
+    #[test]
+    fn graph_click_mid_glide_selects_the_painted_row() {
+        let (mut state, _terminal, painted, target) = graph_mid_glide();
+        let glyphs = if state.ascii {
+            &workspace_status_graph::ASCII
+        } else {
+            &workspace_status_graph::UNICODE
+        };
+        let lines =
+            workspace_status_graph::paint_model(state.graph.as_ref().unwrap(), glyphs, None);
+        let list_top = state.layout.graph_scrollbar_y;
+        let (offset, expected) = (0..usize::from(state.layout.graph_scrollbar_height))
+            .find_map(|k| {
+                let on_screen = lines[usize::from(painted) + k].row_index?;
+                let at_jump = lines.get(usize::from(target) + k).and_then(|l| l.row_index);
+                (at_jump != Some(on_screen)).then_some((k, on_screen))
+            })
+            .expect("a painted commit row that differs from the jump view");
+        let row = list_top + u16::try_from(offset).unwrap();
+        // The event loop ends the glide before it dispatches the click.
+        state.cancel_scroll_glide();
+        state.dispatch(Action::Click {
+            col: state.layout.diff_content_x + 2,
+            row,
+        });
+        assert_eq!(state.graph_cursor, expected, "the commit under the pointer");
+    }
+
+    /// Mid-glide, the scrollbar thumb sits where the painted top puts it:
+    /// the bar, the thumb hit test, and a grab all follow the painted top.
+    #[test]
+    fn graph_scrollbar_mid_glide_follows_the_painted_top() {
+        use super::super::split::SplitDrag;
+        let (mut state, terminal, painted, target) = graph_mid_glide();
+        let x = state.layout.graph_scrollbar_x.expect("vertical scrollbar");
+        let list_top = state.layout.graph_scrollbar_y;
+        let height = state.layout.graph_scrollbar_height;
+        let content_len = state.layout.graph_content_len;
+        let thumb = |scroll| {
+            let (off, len) =
+                workspace_status_graph::graph_scrollbar_thumb(content_len, scroll, height)
+                    .expect("thumb");
+            off..off + len
+        };
+        let (on_screen, at_jump) = (thumb(painted), thumb(target));
+        let buf = terminal.backend().buffer();
+        let thumb_glyph = buf[(x, list_top + on_screen.start)].symbol().to_string();
+        for rel in 0..height {
+            let symbol = buf[(x, list_top + rel)].symbol();
+            assert_eq!(
+                symbol == thumb_glyph,
+                on_screen.contains(&rel),
+                "row {rel}: the bar paints the thumb at {on_screen:?}"
+            );
+        }
+        let rel = on_screen
+            .clone()
+            .find(|rel| !at_jump.contains(rel))
+            .expect("the painted thumb leaves a row the jump thumb does not cover");
+        state.cancel_scroll_glide();
+        state.dispatch(Action::Click {
+            col: x,
+            row: list_top + rel,
+        });
+        assert_eq!(
+            state.drag,
+            SplitDrag::GraphScrollbar {
+                origin_row: list_top + rel,
+                origin_scroll: painted,
+            },
+            "a press on the painted thumb grabs it"
+        );
+        assert_eq!(
+            state.graph_scroll, painted,
+            "the grab keeps the rows on screen"
+        );
     }
 
     #[test]
