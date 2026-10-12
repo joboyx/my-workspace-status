@@ -37,6 +37,7 @@ use crate::git::{
 use crate::snapshot::RepoSnapshot;
 
 use super::action::{Action, Effect, ExternalDiffKind};
+use super::anim::{BatchProgress, RemoteActivity};
 use super::app::{
     apply_checkout_compute, apply_merge_compute, apply_one_repo_snapshot, apply_right_pane_load,
     commit_diff_list, compute_checkout, compute_commit_diff, compute_commit_files,
@@ -1728,6 +1729,7 @@ impl Interpreter {
                 SpawnKind::UserWork { tag } => self.spawn_user(state, opts, id, tag, spawn),
             }
         }
+        self.publish_remote_activity(state);
     }
 
     /// Apply one worker result. May enqueue follow-up jobs, then the
@@ -1741,6 +1743,56 @@ impl Interpreter {
     ) {
         self.apply_outcome(state, opts, id, outcome);
         self.after_change(state);
+        self.publish_remote_activity(state);
+    }
+
+    /// Copy the remote queue into [`AppState::remote_activity`] for paint.
+    ///
+    /// `running` holds each checkout with a fetch / pull / push in flight.
+    /// `batch` sums the key-started waves that still have work and span two
+    /// or more repos; the background fetch tick stays silent, the same rule
+    /// as [`Self::paint_remote_running`]. Marks a redraw when it changes.
+    fn publish_remote_activity(&mut self, state: &mut AppState) {
+        let running = self
+            .remote
+            .occupy
+            .values()
+            .filter_map(|occ| match occ {
+                OccupyReason::Remote(job) => Some(job.checkout.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut batch: Option<BatchProgress> = None;
+        for kind in [RunningOp::Fetch, RunningOp::Pull, RunningOp::Push] {
+            let Some(wave) = self.remote.wave(kind) else {
+                continue;
+            };
+            let inflight = self
+                .remote
+                .occupy
+                .values()
+                .filter(|occ| matches!(occ, OccupyReason::Remote(job) if job.kind == kind))
+                .count();
+            let pending = self
+                .remote
+                .pending
+                .iter()
+                .filter(|job| job.kind == kind)
+                .count();
+            let done = wave.done();
+            if !wave.foreground || inflight + pending == 0 || done + inflight + pending < 2 {
+                continue;
+            }
+            let sum = batch.get_or_insert_with(BatchProgress::default);
+            sum.done += done;
+            sum.total += done + inflight + pending;
+            sum.failed |= wave.tally.has_failure();
+        }
+        let next = RemoteActivity { running, batch };
+        if state.remote_activity != next {
+            state.remote_activity = next;
+            self.mark();
+        }
     }
 
     fn apply_outcome(
@@ -5037,6 +5089,93 @@ mod tests {
         wt.primary_repo = Some("app".into());
         let snapshot = build_workspace_snapshot(&[repo("app", false), wt], &[], false, &[]);
         AppState::new(PathBuf::from("/tmp"), snapshot, true)
+    }
+
+    #[test]
+    fn publish_remote_activity_tracks_running_fetch_checkouts() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into(), "notes".into()],
+            },
+            &Action::Fetch,
+        );
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 2);
+        let running: HashSet<String> = ["app".to_string(), "notes".to_string()].into();
+        assert_eq!(state.remote_activity.running, running);
+        assert_eq!(
+            state.remote_activity.batch,
+            Some(BatchProgress {
+                done: 0,
+                total: 2,
+                failed: false,
+            })
+        );
+        assert!(interp.take_dirty(), "a new spinner asks for a redraw");
+
+        apply_id(
+            &mut interp,
+            &mut state,
+            jobs[0].0,
+            JobOutcome::BulkRemote {
+                kind: RunningOp::Fetch,
+                result: RepoOpResult::Failed("no remote".into()),
+                repo: "app".into(),
+            },
+        );
+        assert_eq!(
+            state.remote_activity.running,
+            HashSet::from(["notes".to_string()])
+        );
+        assert_eq!(
+            state.remote_activity.batch,
+            Some(BatchProgress {
+                done: 1,
+                total: 2,
+                failed: true,
+            })
+        );
+
+        apply_id(
+            &mut interp,
+            &mut state,
+            jobs[1].0,
+            JobOutcome::BulkRemote {
+                kind: RunningOp::Fetch,
+                result: RepoOpResult::Ok,
+                repo: "notes".into(),
+            },
+        );
+        assert_eq!(state.remote_activity, RemoteActivity::default());
+    }
+
+    #[test]
+    fn background_fetch_tick_sets_no_batch_progress() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into(), "notes".into()],
+            },
+            &Action::FetchTick,
+        );
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(
+            state.remote_activity.running.len(),
+            2,
+            "background fetches still spin their rows"
+        );
+        assert_eq!(
+            state.remote_activity.batch, None,
+            "the fetch tick paints no progress"
+        );
     }
 
     #[test]

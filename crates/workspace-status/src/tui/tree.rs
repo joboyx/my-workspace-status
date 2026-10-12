@@ -99,6 +99,8 @@ pub enum SegRole {
     Viewed,
     BranchDefault,
     BranchFeature,
+    /// Terminal default foreground: no colour of its own (`NO_COLOR`).
+    Plain,
 }
 
 impl From<StatusColorRole> for SegRole {

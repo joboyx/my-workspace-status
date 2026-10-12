@@ -35,7 +35,7 @@ use super::render::draw;
 use super::state::AppState;
 use super::status::StatusMessage;
 use super::tty::{poll_event, read_event_origin};
-use super::watch::{watch_remain_ms, FLASH_TICK_MS};
+use super::watch::watch_remain_ms;
 
 const INPUT_BATCH: usize = 8;
 
@@ -157,24 +157,26 @@ impl Presenter {
         self.dirty = true;
     }
 
-    fn remain_ms(&self, flashes: bool) -> u64 {
-        if flashes {
-            return FLASH_TICK_MS.min(self.dirty_remain());
-        }
-        if !self.dirty {
-            return u64::MAX;
-        }
-        self.dirty_remain()
+    /// Milliseconds until the next draw: the draw floor when dirty, else
+    /// the animation tick `anim_tick` after the last draw
+    /// ([`AppState::next_anim_tick_ms`]). `u64::MAX` when clean and idle.
+    fn remain_ms(&self, anim_tick: Option<u64>) -> u64 {
+        let elapsed = self.elapsed_ms();
+        let floor = DRAW_MIN_MS.saturating_sub(elapsed);
+        let dirty = if self.dirty { floor } else { u64::MAX };
+        let tick = anim_tick.map_or(u64::MAX, |tick| tick.saturating_sub(elapsed).max(floor));
+        dirty.min(tick)
     }
 
-    /// Milliseconds until the next draw is allowed; `0` once one is due.
-    fn dirty_remain(&self) -> u64 {
-        let elapsed = self.last_draw.elapsed().as_millis() as u64;
-        DRAW_MIN_MS.saturating_sub(elapsed)
+    fn elapsed_ms(&self) -> u64 {
+        self.last_draw.elapsed().as_millis() as u64
     }
 
-    fn should_draw(&self) -> bool {
-        self.dirty && self.last_draw.elapsed().as_millis() as u64 >= DRAW_MIN_MS
+    /// A draw is due: past the draw floor, and dirty or one animation tick
+    /// since the last draw.
+    fn should_draw(&self, anim_tick: Option<u64>) -> bool {
+        let elapsed = self.elapsed_ms();
+        elapsed >= DRAW_MIN_MS && (self.dirty || anim_tick.is_some_and(|tick| elapsed >= tick))
     }
 
     fn painted(&mut self) {
@@ -266,7 +268,7 @@ pub async fn run(
         let status_remain = ctx.state.status_expiry_ms(now).unwrap_or(u64::MAX);
         let peek_remain = ctx.state.peek_remaining_ms(now).unwrap_or(u64::MAX);
         let search_remain = ctx.state.search_files_due_ms(now).unwrap_or(u64::MAX);
-        let present_remain = ctx.presenter.remain_ms(ctx.state.has_active_flashes());
+        let present_remain = ctx.presenter.remain_ms(ctx.state.next_anim_tick_ms());
         let join_empty = ctx.join.is_empty();
 
         tokio::select! {
@@ -338,13 +340,17 @@ pub async fn run(
                 }
             }
             _ = sleep_ms(present_remain) => {
+                let flashing = ctx.state.has_active_flashes();
                 ctx.state.prune_expired_flashes();
-                if ctx.presenter.should_draw() || ctx.state.has_active_flashes() {
+                if flashing && !ctx.state.has_active_flashes() {
+                    // The last flash ended: one more frame clears its tint.
+                    ctx.presenter.mark();
+                }
+                // Animation frames redraw on their own tick (spinner,
+                // flash, glide); idle draws only when dirty.
+                if ctx.presenter.should_draw(ctx.state.next_anim_tick_ms()) {
                     draw_frame(ctx.terminal, ctx.state)?;
                     ctx.presenter.painted();
-                    if ctx.state.has_active_flashes() {
-                        ctx.presenter.mark();
-                    }
                 }
             }
         }
@@ -498,6 +504,10 @@ fn spawn_joinset(ctx: &mut LoopCtx<'_>) {
     interp.spawn_ready(state, opts, &mut |id, work| {
         join.spawn_blocking(move || (id, work()));
     });
+    // A started remote shows its row spinner and progress at once.
+    if ctx.interp.take_dirty() {
+        ctx.presenter.mark();
+    }
 }
 
 fn schedule_edit(ctx: &mut LoopCtx<'_>, repo: String, path: String, line: Option<u32>) {
@@ -626,6 +636,51 @@ mod tests {
             row: 0,
             modifiers: KeyModifiers::NONE,
         })
+    }
+
+    /// A clean presenter whose last draw was `ago_ms` back.
+    fn clean_presenter(ago_ms: u64) -> Presenter {
+        Presenter {
+            dirty: false,
+            last_draw: Instant::now() - Duration::from_millis(ago_ms),
+        }
+    }
+
+    #[test]
+    fn presenter_has_no_timer_when_clean_and_not_animating() {
+        let presenter = clean_presenter(10_000);
+        assert_eq!(presenter.remain_ms(None), u64::MAX);
+        assert!(!presenter.should_draw(None));
+        let mut dirty = clean_presenter(10_000);
+        dirty.mark();
+        assert_eq!(dirty.remain_ms(None), 0, "dirty past the floor draws now");
+        assert!(dirty.should_draw(None));
+    }
+
+    #[test]
+    fn presenter_ticks_at_spinner_rate_while_animating() {
+        use super::super::anim::SPINNER_FRAME_MS;
+        let tick = Some(SPINNER_FRAME_MS);
+        let mut presenter = clean_presenter(0);
+        presenter.painted();
+        let remain = presenter.remain_ms(tick);
+        assert!(
+            remain > DRAW_MIN_MS && remain <= SPINNER_FRAME_MS,
+            "just painted: next frame one spinner tick away, not at the draw floor ({remain})"
+        );
+        assert!(!presenter.should_draw(tick), "no draw before the tick");
+
+        let due = clean_presenter(SPINNER_FRAME_MS);
+        assert_eq!(due.remain_ms(tick), 0);
+        assert!(due.should_draw(tick), "one tick after the last draw");
+        assert!(!due.should_draw(None), "the same clean presenter idles");
+
+        let mut fresh = clean_presenter(0);
+        fresh.painted();
+        assert!(
+            fresh.remain_ms(Some(1)) >= DRAW_MIN_MS - 1,
+            "a tick never beats the draw floor"
+        );
     }
 
     #[test]

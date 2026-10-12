@@ -19,6 +19,8 @@ mod human;
 #[cfg(unix)]
 mod pty_live_g_chords;
 #[cfg(unix)]
+mod pty_spinner;
+#[cfg(unix)]
 mod seed;
 #[cfg(unix)]
 mod slow_git;

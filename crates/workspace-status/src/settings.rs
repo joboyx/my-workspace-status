@@ -54,6 +54,9 @@ pub struct Settings {
     pub(crate) theme_store: PathBuf,
     /// Git binary (`WORKSPACE_STATUS_GIT` / `git`).
     pub(crate) git: PathBuf,
+    /// `NO_COLOR` is set and non-empty (no-color.org). Env only, no config
+    /// key. The new visuals paint without colour; the rest keeps the theme.
+    pub(crate) no_color: bool,
 }
 
 impl Settings {
@@ -91,8 +94,17 @@ impl Settings {
             viewed_store: viewed_store_path_from_env(&mut get, keys.viewed_store.as_deref()),
             theme_store,
             git: resolve_git_binary(get("WORKSPACE_STATUS_GIT").as_deref(), keys.git.as_deref()),
+            no_color: no_color(get(NO_COLOR_ENV).as_deref()),
         }
     }
+}
+
+/// The standard no-colour env var (<https://no-color.org>).
+const NO_COLOR_ENV: &str = "NO_COLOR";
+
+/// `NO_COLOR` is on when it is set to any non-empty value.
+fn no_color(env_value: Option<&str>) -> bool {
+    env_value.is_some_and(|value| !value.is_empty())
 }
 
 /// ASCII glyphs from `WS_STATUS_GLYPHS` (`env_value`) and the config `glyphs`
@@ -193,6 +205,7 @@ mod tests {
                 viewed_store: PathBuf::from("/cfg/viewed.json"),
                 theme_store: PathBuf::from("/cfg/theme.json"),
                 git: PathBuf::from("/cfg/git"),
+                no_color: false,
             }
         );
     }
@@ -227,6 +240,7 @@ mod tests {
                 viewed_store: PathBuf::from("/env/viewed.json"),
                 theme_store: PathBuf::from("/env/theme.json"),
                 git: PathBuf::from("/env/git"),
+                no_color: false,
             }
         );
     }
@@ -325,6 +339,20 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert_eq!(fs::read_to_string(&user_file).unwrap(), config_json);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn no_color_env_non_empty_turns_on() {
+        for value in ["1", "0", "true", "anything"] {
+            let got = Settings::resolve(&all_keys(), env_of(&[("NO_COLOR", value)]));
+            assert!(got.no_color, "NO_COLOR={value:?} turns no-colour on");
+        }
+    }
+
+    #[test]
+    fn no_color_empty_is_off() {
+        assert!(!Settings::resolve(&all_keys(), env_of(&[("NO_COLOR", "")])).no_color);
+        assert!(!Settings::resolve(&all_keys(), env_of(&[])).no_color);
     }
 
     #[test]

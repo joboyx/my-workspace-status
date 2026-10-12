@@ -4,6 +4,7 @@
 //! `--plain`, `--json`, `-v`, `-p`, or `-d`.
 
 mod action;
+pub mod anim;
 mod app;
 mod branches;
 mod chrome;

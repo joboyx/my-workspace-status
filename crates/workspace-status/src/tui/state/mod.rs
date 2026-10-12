@@ -41,6 +41,7 @@ use crate::snapshot::{
 #[cfg(test)]
 use super::action::Action;
 use super::action::{Effect, ExternalDiffKind};
+use super::anim::{next_tick_ms, AnimNeeds, RemoteActivity};
 use super::branches::{
     branch_name_error, can_open_branch_picker, checkoutable_branch_names, merge_rev_for_commit,
     BranchPickerState, CreateBranchState, DIRTY_WORKTREE_STATUS,
@@ -359,6 +360,12 @@ pub struct LayoutHit {
     /// Results rows the search-in-files dialog painted last; PgUp / PgDn
     /// move by it.
     pub search_files_rows: u16,
+    /// The last draw painted a time-based frame (a spinner or a toast).
+    /// [`AppState::next_anim_tick_ms`] keeps redrawing while it holds.
+    pub animating: bool,
+    /// The last draw painted a scroll glide step; redraws at the draw floor
+    /// while it holds.
+    pub gliding: bool,
 }
 
 impl Default for LayoutHit {
@@ -420,6 +427,8 @@ impl Default for LayoutHit {
             explorer_tree_rows: Rect::default(),
             explorer_preview_rows: Rect::default(),
             search_files_rows: 0,
+            animating: false,
+            gliding: false,
         }
     }
 }
@@ -733,6 +742,13 @@ pub struct AppState {
     diff_visual_rows: Option<Vec<DiffRow>>,
     pub layout: LayoutHit,
     pub ascii: bool,
+    /// `NO_COLOR` is set: the new visuals (spinner, toasts, …) paint with no
+    /// colour of their own. The rest of the TUI keeps its palette.
+    pub no_color: bool,
+    /// Spinner clock: every spinner frame counts from this instant.
+    pub anim_epoch: Instant,
+    /// Remote git work in flight, published by the interpreter for paint.
+    pub remote_activity: RemoteActivity,
     pub search_mode: bool,
     pub search_active: bool,
     pub search_query: String,
@@ -878,10 +894,10 @@ fn unix_now() -> i64 {
 }
 
 impl AppState {
-    /// TUI launch state: glyphs, theme, and the viewed / comment / theme store
-    /// paths come from the resolved `settings`.
+    /// TUI launch state: glyphs, theme, `NO_COLOR`, and the viewed /
+    /// comment / theme store paths come from the resolved `settings`.
     pub fn launch(cwd: PathBuf, snapshot: WorkspaceSnapshot, settings: &Settings) -> Self {
-        Self::build(
+        let mut state = Self::build(
             cwd,
             snapshot,
             settings.ascii,
@@ -889,7 +905,9 @@ impl AppState {
             settings.comment_store.clone(),
             settings.theme_store.clone(),
             settings.theme,
-        )
+        );
+        state.no_color = settings.no_color;
+        state
     }
 
     /// Test state with a unique temp viewed store, Tokyo Night, and
@@ -991,6 +1009,9 @@ impl AppState {
             diff_visual_rows: None,
             layout: LayoutHit::default(),
             ascii,
+            no_color: false,
+            anim_epoch: Instant::now(),
+            remote_activity: RemoteActivity::default(),
             search_mode: false,
             search_active: false,
             search_query: String::new(),
@@ -2172,6 +2193,17 @@ impl AppState {
         !self.flashes.is_empty()
             || !self.tree_ghosts.is_empty()
             || !self.commit_file_ghosts.is_empty()
+    }
+
+    /// Milliseconds between timer redraws while something animates: a
+    /// decaying flash, a spinner or toast frame, or a scroll glide painted
+    /// last frame. `None` when idle, so no timer redraw runs.
+    pub fn next_anim_tick_ms(&self) -> Option<u64> {
+        next_tick_ms(AnimNeeds {
+            flashes: self.has_active_flashes(),
+            frames: self.layout.animating,
+            glide: self.layout.gliding,
+        })
     }
 
     /// Fade colour for a row id, if it is still flashing.
