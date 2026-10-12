@@ -31,7 +31,7 @@ use super::super::split::SplitDrag;
 use super::super::status::StatusMessage;
 use super::super::tabs::{
     ExplorerPreview, ExplorerTab, OpenFile, EXPLORER_HAS_NO_SEARCH, EXPLORER_TAB_READ_ONLY,
-    ONLY_WORKSPACE_TAB_OPEN, SWITCH_TO_WORKSPACE_TAB,
+    FOCUS_A_TREE_ROW_TO_EXPLORE, ONLY_WORKSPACE_TAB_OPEN, SWITCH_TO_WORKSPACE_TAB,
 };
 use super::super::tree::{dir_path_from_id, NodeKind};
 use super::{single_or_batch, AppState, FocusPane, NO_SEARCH_ARMED};
@@ -93,20 +93,42 @@ impl AppState {
     }
 
     /// `-`: parent folder on an Explorer tab; on the Workspace tab with the
-    /// tree focused, open or focus the focused row's checkout Explorer and
-    /// reveal the row; anywhere else (another pane, where the commit
-    /// message shows, a row with no checkout, a compare or file tab),
-    /// shrink the commit message ([`Action::ResizeCommitMsg`]).
+    /// tree focused on a row in a checkout, open or focus that checkout's
+    /// Explorer and reveal the row. Anywhere else (another pane, a
+    /// workspace or group row, a compare or file tab) it refuses with the
+    /// [`Self::explorer_open_target`] copy on the status line.
     pub(super) fn explorer_reveal(&mut self) -> Effect {
         if self.is_explorer_tab() {
             return self.explorer_to_parent();
         }
-        if self.tabs.is_workspace() && self.list_focus_target() == ListFocusTarget::Tree {
-            if let Some((checkout, target)) = self.explorer_reveal_target() {
-                return self.open_explorer_tab(checkout, target);
+        match self.explorer_open_target() {
+            Ok((checkout, target)) => self.open_explorer_tab(checkout, target),
+            Err(reason) => {
+                self.status = StatusMessage::warn(reason);
+                Effect::None
             }
         }
-        self.dispatch(Action::ResizeCommitMsg(-1))
+    }
+
+    /// Checkout and target Open in Explorer (`-` off an Explorer tab)
+    /// opens, or why it refuses.
+    ///
+    /// The one Open in Explorer gate: [`Self::explorer_reveal`] puts the
+    /// reason on the status line and `palette_disabled_reason` paints it on
+    /// the palette row, so the key and the row give the same copy. Any tab
+    /// but Workspace (an Explorer tab included, where `-` is the parent
+    /// folder) refuses with [`SWITCH_TO_WORKSPACE_TAB`]; on the Workspace
+    /// tab a pane other than the tree, or a workspace or group row, refuses
+    /// with [`FOCUS_A_TREE_ROW_TO_EXPLORE`].
+    pub(crate) fn explorer_open_target(&self) -> Result<(String, ExplorerTarget), &'static str> {
+        if !self.tabs.is_workspace() {
+            return Err(SWITCH_TO_WORKSPACE_TAB);
+        }
+        if self.list_focus_target() != ListFocusTarget::Tree {
+            return Err(FOCUS_A_TREE_ROW_TO_EXPLORE);
+        }
+        self.explorer_reveal_target()
+            .ok_or(FOCUS_A_TREE_ROW_TO_EXPLORE)
     }
 
     /// Checkout and target of the focused Workspace tree row, or `None` for
@@ -940,6 +962,7 @@ fn explorer_dir_loads(tab: &mut ExplorerTab, dirs: Vec<String>) -> Vec<Effect> {
 mod tests {
     use std::path::PathBuf;
 
+    use super::super::super::action::QuickOpenEntry;
     use super::super::super::command_palette::PALETTE_COMMANDS;
     use super::super::super::quick_open::QuickOpenScope;
     use super::super::super::tabs::WORKSPACE_TAB_CANNOT_CLOSE;
@@ -1212,38 +1235,107 @@ mod tests {
         assert!(tab(&app).tree.is_expanded("src/tui"));
     }
 
-    #[test]
-    fn minus_off_a_checkout_shrinks_the_commit_message() {
-        let mut app = state();
-        let lines = app.commit_msg_lines;
-        focus(&mut app, NodeKind::Workspace, None, None);
-        assert_eq!(app.dispatch(Action::ExplorerReveal), Effect::None);
-        assert_eq!(app.commit_msg_lines, lines - 1);
-        assert!(app.tabs.is_workspace(), "no Explorer tab");
-        assert_eq!(app.tabs.len(), 1);
+    /// The Open in Explorer palette row.
+    fn open_in_explorer_row() -> &'static PaletteCommand {
+        PALETTE_COMMANDS
+            .iter()
+            .find(|command| command.action == Action::ExplorerReveal)
+            .expect("Open in Explorer row")
+    }
 
-        // With the right pane focused `-` sizes the commit message there.
+    /// Run palette row `title` from Quick Open commands mode.
+    fn run_palette_row(app: &mut AppState, title: &str) -> Effect {
+        app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
+        for c in title.chars() {
+            app.dispatch(Action::QuickOpenChar(c));
+        }
+        let palette = app.command_palette_mut().expect("palette open");
+        palette.cursor = palette
+            .visible()
+            .iter()
+            .position(|command| command.title == title)
+            .unwrap_or_else(|| panic!("palette row {title}"));
+        app.dispatch(Action::QuickOpenSubmit)
+    }
+
+    /// Off the Explorer-open rows `-` and the palette row refuse with the
+    /// same copy: no Explorer tab, no commit-message resize.
+    fn assert_minus_refuses(app: &mut AppState, want: &str, what: &str) {
+        let lines = app.commit_msg_lines;
+        let tabs = app.tabs.len();
+        let active = app.tabs.active;
+        assert_eq!(
+            app.palette_disabled_reason(open_in_explorer_row())
+                .as_deref(),
+            Some(want),
+            "palette: {what}"
+        );
+        app.status.clear();
+        assert_eq!(app.dispatch(Action::ExplorerReveal), Effect::None, "{what}");
+        assert_eq!(&*app.status, want, "status: {what}");
+        assert_eq!(app.status.kind(), StatusKind::Warn, "{what}");
+        assert_eq!(app.commit_msg_lines, lines, "no resize: {what}");
+        assert_eq!(app.tabs.len(), tabs, "no new tab: {what}");
+        assert_eq!(app.tabs.active, active, "same tab: {what}");
+    }
+
+    #[test]
+    fn minus_off_a_checkout_tree_row_refuses_like_the_palette_row() {
+        let mut app = state();
+        focus(&mut app, NodeKind::Workspace, None, None);
+        assert_minus_refuses(&mut app, FOCUS_A_TREE_ROW_TO_EXPLORE, "workspace row");
+
+        // The graph pane is not the tree.
         focus(&mut app, NodeKind::Repo, Some("app"), None);
         app.focus = FocusPane::Right;
-        app.dispatch(Action::ExplorerReveal);
-        assert_eq!(app.commit_msg_lines, lines - 2);
-        assert_eq!(app.tabs.len(), 1, "no Explorer tab from the graph pane");
+        assert_eq!(app.list_focus_target(), ListFocusTarget::Graph);
+        assert_minus_refuses(&mut app, FOCUS_A_TREE_ROW_TO_EXPLORE, "graph pane");
         app.focus = FocusPane::Left;
-        let lines = lines - 1;
 
-        // A compare tab keeps today's `-`.
         app.open_compare_tab("app".into(), "main".into(), "HEAD".into());
-        app.dispatch(Action::ExplorerReveal);
-        assert_eq!(app.commit_msg_lines, lines - 2);
         assert!(app.is_compare_tab());
-        assert_eq!(app.tabs.len(), 2);
+        assert_minus_refuses(&mut app, SWITCH_TO_WORKSPACE_TAB, "compare tab");
 
-        // A file tab ignores it, as it ignores the commit-message keys.
         app.open_file_tab("app".into(), "README.md".into());
-        assert_eq!(app.dispatch(Action::ExplorerReveal), Effect::None);
-        assert_eq!(app.commit_msg_lines, lines - 2);
         assert!(app.is_file_tab());
-        assert_eq!(app.tabs.len(), 3);
+        assert_minus_refuses(&mut app, SWITCH_TO_WORKSPACE_TAB, "file tab");
+    }
+
+    /// On an Explorer tab `-` is the parent folder, a different action, so
+    /// the palette row is off there and never dispatches.
+    #[test]
+    fn open_in_explorer_row_is_off_on_an_explorer_tab() {
+        let mut app = state();
+        open_root(&mut app);
+        assert_eq!(
+            app.palette_disabled_reason(open_in_explorer_row())
+                .as_deref(),
+            Some(SWITCH_TO_WORKSPACE_TAB)
+        );
+        let lines = app.commit_msg_lines;
+        assert_eq!(run_palette_row(&mut app, "Open in Explorer"), Effect::None);
+        assert_eq!(&*app.status, SWITCH_TO_WORKSPACE_TAB);
+        assert!(app.quick_open.is_some(), "a disabled row keeps the palette");
+        assert_eq!(app.commit_msg_lines, lines);
+        assert_eq!(app.tabs.len(), 2);
+    }
+
+    #[test]
+    fn open_in_explorer_row_opens_the_checkout_from_a_tree_row() {
+        let mut app = state();
+        focus(
+            &mut app,
+            NodeKind::Checkout,
+            Some("app/.worktrees/feat"),
+            None,
+        );
+        assert_eq!(app.palette_disabled_reason(open_in_explorer_row()), None);
+        let effect = run_palette_row(&mut app, "Open in Explorer");
+        assert!(app.quick_open.is_none(), "the palette closes");
+        assert_eq!(dir_loads(&flat(effect)), [""], "a new tab lists its root");
+        assert!(app.is_explorer_tab());
+        assert_eq!(tab(&app).checkout, "app/.worktrees/feat");
+        assert_eq!(app.tabs.len(), 2);
     }
 
     #[test]

@@ -96,8 +96,8 @@ macro_rules! move_group {
     };
 }
 
-/// The VIEW column: the rows every tab paints, with the `$sizes` rows (pane
-/// and message sizes) after the first one and the `$ignored` rows after
+/// The VIEW column: the rows every tab paints, with the `$sizes` rows (tree
+/// width) after the first one and the `$ignored` rows after
 /// `t`, the order the Workspace tab has always painted.
 macro_rules! view_group {
     ($($sizes:expr),*; $($ignored:expr),*) => {
@@ -197,10 +197,11 @@ const HELP_DASH_EXPLORER: HelpEntry = HelpEntry {
     desc: "Explorer tab",
 };
 
-/// `< > - +` on the Workspace, compare, and file tabs (VIEW).
+/// `< >` on the Workspace, compare, and file tabs (VIEW). The commit
+/// message height has no key: the palette rows set it.
 const HELP_PANE_SIZES: HelpEntry = HelpEntry {
-    keys: "< > - +",
-    desc: "tree width · msg rows (= is +)",
+    keys: "< >",
+    desc: "tree width",
 };
 
 /// `.` everywhere but the Explorer tab (VIEW).
@@ -213,7 +214,7 @@ const HELP_IGNORED_REPOS: HelpEntry = HelpEntry {
 pub const HELP_TAB_MOVE_GROUP: HelpGroup = move_group!();
 
 /// VIEW on the Explorer tab: no pane-size or ignored-repo rows (`-` is the
-/// parent folder there; `<`, `>`, `+`, and `.` do nothing).
+/// parent folder there; `<`, `>`, and `.` do nothing).
 pub const HELP_EXPLORER_VIEW_GROUP: HelpGroup = view_group!(;);
 
 /// Short key list shown in the `?` overlay, grouped the same.
@@ -1256,7 +1257,7 @@ mod tests {
         assert!(view_keys.contains(&"'"));
         assert!(!view_keys.contains(&"y '"));
         assert!(view_keys.contains(&"Esc"));
-        assert!(view_keys.contains(&"< > - +"));
+        assert!(view_keys.contains(&"< >"));
         assert_eq!(
             HELP_GROUPS[2]
                 .entries
@@ -1548,7 +1549,7 @@ mod tests {
         assert_eq!(help_groups(HelpTab::Explorer)[1].title, "EXPLORER");
         assert_eq!(help_groups(HelpTab::Explorer)[0], HELP_TAB_MOVE_GROUP);
         assert_eq!(help_groups(HelpTab::Explorer)[2], HELP_EXPLORER_VIEW_GROUP);
-        // `-` is the parent folder here: no Workspace `-` row, no msg rows.
+        // `-` is the parent folder here: no Workspace `-` row, no tree width.
         for group in help_groups(HelpTab::Explorer) {
             for entry in group.entries {
                 assert_ne!(entry.desc, HELP_DASH_EXPLORER.desc, "{entry:?}");

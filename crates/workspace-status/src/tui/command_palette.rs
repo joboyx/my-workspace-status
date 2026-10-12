@@ -4,7 +4,7 @@
 //! aliases (`exit` finds Quit, `compare` the Diff … in new tab rows).
 //! Execute is close-then-dispatch through [`super::state::AppState::dispatch`].
 
-use super::action::Action;
+use super::action::{Action, QuickOpenEntry};
 
 /// Palette group names (HIGHLIGHT, then the help columns MOVE / GIT / VIEW).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,6 +133,14 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
+        title: "Search in files",
+        keys: "Ctrl-f",
+        group: CommandGroup::Move,
+        action: Action::ToggleSearchFiles,
+        aliases: &["find in files", "grep", "text search"],
+        scope: CommandScope::Any,
+    },
+    PaletteCommand {
         title: "Fold row",
         keys: "z",
         group: CommandGroup::Move,
@@ -171,6 +179,14 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         group: CommandGroup::Move,
         action: Action::PreviousTab,
         aliases: &["switch tab"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "Open in Explorer",
+        keys: "-",
+        group: CommandGroup::Move,
+        action: Action::ExplorerReveal,
+        aliases: &["browse", "file tree"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -420,6 +436,14 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
+        title: "Go to file",
+        keys: "Ctrl-p F",
+        group: CommandGroup::View,
+        action: Action::ToggleQuickOpen(QuickOpenEntry::Files),
+        aliases: &["open file", "quick open", "fuzzy find"],
+        scope: CommandScope::Any,
+    },
+    PaletteCommand {
         title: "Keymap help",
         keys: "?",
         group: CommandGroup::View,
@@ -501,7 +525,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     },
     PaletteCommand {
         title: "Shorter commit message",
-        keys: "-",
+        keys: "",
         group: CommandGroup::View,
         action: Action::ResizeCommitMsg(-1),
         aliases: &["message height", "msg lines", "shrink"],
@@ -509,7 +533,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     },
     PaletteCommand {
         title: "Taller commit message",
-        keys: "+",
+        keys: "",
         group: CommandGroup::View,
         action: Action::ResizeCommitMsg(1),
         aliases: &["message height", "msg lines", "grow"],
@@ -857,6 +881,13 @@ mod tests {
                 CommandScope::NoHighlight,
             ),
             (
+                "Search in files",
+                "Ctrl-f",
+                CommandGroup::Move,
+                Action::ToggleSearchFiles,
+                CommandScope::Any,
+            ),
+            (
                 "Fold row",
                 "z",
                 CommandGroup::Move,
@@ -889,6 +920,13 @@ mod tests {
                 "gT",
                 CommandGroup::Move,
                 Action::PreviousTab,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Open in Explorer",
+                "-",
+                CommandGroup::Move,
+                Action::ExplorerReveal,
                 CommandScope::NoHighlight,
             ),
             (
@@ -1102,6 +1140,13 @@ mod tests {
                 CommandScope::NoHighlight,
             ),
             (
+                "Go to file",
+                "Ctrl-p F",
+                CommandGroup::View,
+                Action::ToggleQuickOpen(QuickOpenEntry::Files),
+                CommandScope::Any,
+            ),
+            (
                 "Keymap help",
                 "?",
                 CommandGroup::View,
@@ -1173,14 +1218,14 @@ mod tests {
             ),
             (
                 "Shorter commit message",
-                "-",
+                "",
                 CommandGroup::View,
                 Action::ResizeCommitMsg(-1),
                 CommandScope::NoHighlight,
             ),
             (
                 "Taller commit message",
-                "+",
+                "",
                 CommandGroup::View,
                 Action::ResizeCommitMsg(1),
                 CommandScope::NoHighlight,
@@ -1257,6 +1302,7 @@ mod tests {
             ),
         ];
         assert_eq!(PALETTE_COMMANDS.len(), wanted.len());
+        assert_eq!(wanted.len(), 67);
         for (i, (title, keys, group, action, scope)) in wanted.iter().enumerate() {
             let command = &PALETTE_COMMANDS[i];
             assert_eq!(command.title, *title, "row {i}");
