@@ -5101,7 +5101,7 @@ fn draw_search_files(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         // A hovered chip says what it is and what a click does instead.
         let footer = match hovered {
             Some(option) => option_tooltip(option, dialog.options),
-            None => dialog.footer_hints(),
+            None => dialog.footer_hints(state.mouse_enabled),
         };
         let footer = Line::from(Span::styled(footer, muted));
         frame.render_widget(
@@ -13719,6 +13719,30 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("click to turn"), "{text}");
+    }
+
+    #[test]
+    fn search_files_footer_says_the_chips_need_mouse_capture() {
+        use crate::tui::search_files::MOUSE_OFF_HINT;
+        let mut state = search_files_state(false);
+        let palette = state.theme.palette();
+        search_dialog(&mut state).options.regex = true;
+        state.mouse_enabled = false;
+        let terminal = draw_search(&mut state, 120, 30);
+        let text = buffer_text(&terminal);
+        let footer = row_of(&text, "Esc close");
+        assert!(
+            text.lines().nth(footer).unwrap().contains(MOUSE_OFF_HINT),
+            "{text}"
+        );
+        let (y, xs) = painted_chip_xs(&terminal);
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(xs[2].1 + 1, y)].bg, palette.cursor, "on stays filled");
+        assert_eq!(buf[(xs[0].1 + 1, y)].bg, palette.panel, "off stays plain");
+
+        state.mouse_enabled = true;
+        let text = buffer_text(&draw_search(&mut state, 120, 30));
+        assert!(!text.contains(MOUSE_OFF_HINT), "{text}");
     }
 
     #[test]

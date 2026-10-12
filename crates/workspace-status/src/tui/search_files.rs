@@ -24,6 +24,11 @@ pub const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
 /// Warning when Enter or `e` finds no highlighted hit to open.
 pub const NO_SEARCH_MATCHES: &str = "no matches";
 
+/// Footer hint while mouse capture is off: the option chips only take a
+/// click, and `m` (outside the dialog, where it does not type) turns
+/// capture back on.
+pub const MOUSE_OFF_HINT: &str = "mouse off: m outside to click chips";
+
 /// Wall time one search chunk may spend on the blocking pool before it
 /// returns its hits and the next chunk is scheduled.
 pub const SEARCH_CHUNK_BUDGET: Duration = Duration::from_millis(30);
@@ -351,8 +356,10 @@ impl SearchFilesState {
     /// names the checkout it goes back to; with focus on the workspace Tab
     /// changes nothing and has no hint. The option chips take a click, so
     /// they have no key hint; paint shows [`option_tooltip`] here instead
-    /// while the pointer is on one.
-    pub fn footer_hints(&self) -> String {
+    /// while the pointer is on one. With mouse capture off (`mouse` false)
+    /// no click arrives, so [`MOUSE_OFF_HINT`] comes just before `Esc
+    /// close` and says how to turn it on.
+    pub fn footer_hints(&self, mouse: bool) -> String {
         let results = self.zone == SearchZone::Results;
         let mut hints = vec![if results { "j/k move" } else { "↑↓ move" }.to_string()];
         hints.push("Enter open".into());
@@ -363,6 +370,9 @@ impl SearchFilesState {
             (QuickOpenScope::Workspace, _) => {}
             (_, false) => hints.push("Tab all repos".into()),
             (focused, true) => hints.push(format!("Tab {}", scope_label(focused))),
+        }
+        if !mouse {
+            hints.push(MOUSE_OFF_HINT.into());
         }
         hints.push("Esc close".into());
         hints.join(" · ")
@@ -608,20 +618,28 @@ mod tests {
             SearchOptions::default(),
         );
         assert_eq!(
-            state.footer_hints(),
+            state.footer_hints(true),
             "↑↓ move · Enter open · Tab all repos · Esc close"
+        );
+        assert_eq!(
+            state.footer_hints(false),
+            "↑↓ move · Enter open · Tab all repos · mouse off: m outside to click chips · Esc close"
         );
         state.zone = SearchZone::Results;
         assert_eq!(
-            state.footer_hints(),
+            state.footer_hints(true),
             "j/k move · Enter open · e edit · Tab all repos · Esc close"
         );
+        assert_eq!(
+            state.footer_hints(false),
+            "j/k move · Enter open · e edit · Tab all repos · mouse off: m outside to click chips · Esc close"
+        );
         state.widened = true;
-        assert!(state.footer_hints().contains("Tab web ·"));
+        assert!(state.footer_hints(true).contains("Tab web ·"));
         state.focused = QuickOpenScope::Workspace;
         state.widened = false;
         assert!(
-            !state.footer_hints().contains("Tab"),
+            !state.footer_hints(true).contains("Tab"),
             "Tab has nothing to do"
         );
     }
