@@ -50,7 +50,8 @@ pub enum GlyphSet {
 /// Light or dark theme pick from the `themeMode` key.
 ///
 /// The pick swaps the resolved theme for its twin of the other polarity
-/// ([`ThemeId::twin`]). The store still saves the slug the user picked with `T`.
+/// ([`ThemeId::twin`]). The store still saves the slug last applied from a
+/// palette `Theme: …` row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeMode {
     /// `"auto"` (the default): ask the terminal for its background colour at
