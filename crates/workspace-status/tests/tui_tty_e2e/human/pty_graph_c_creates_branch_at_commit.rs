@@ -1,7 +1,7 @@
 use crate::harness::PtySession;
 use crate::seed::focus_workspace;
 use crate::support::{
-    ack_rows, focusbox_graph_left_full, graph_cursor_on, graph_pane_focused,
+    ack_rows, crumb_row, focusbox_graph_left_full, graph_cursor_on, graph_pane_focused,
     graph_subject_meta_line, no_mouse_toggle_toast, status_row, title_has_files, tree_has,
     tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
@@ -58,12 +58,13 @@ fn focusbox_diverged_graph_body(screen: &str) -> bool {
 /// Tab focused the graph. HEAD is still `keep-leaf-commit`. Create is idle.
 fn graph_focused_diverged_before_create(screen: &str) -> bool {
     let status = status_row(screen);
-    let crumb = ack_rows(screen);
+    let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
     graph_pane_focused(screen)
         && tree_has(screen, "focusbox")
         && focusbox_diverged_graph_body(screen)
         && crumb.contains("workspace › [focusbox]")
-        && !crumb.contains(&format!("created {BRANCH}"))
+        && !acks.contains(&format!("created {BRANCH}"))
         && status.contains("drill")
         && status.contains("Esc")
         && (status.contains("← tree") || status.contains("Esc   clear"))

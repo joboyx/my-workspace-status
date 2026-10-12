@@ -104,25 +104,28 @@ fn main_is_checked_out(screen: &str) -> bool {
 /// Breadcrumb after a clean switch: no failure. The `Switched 1 repo` toast is
 /// checked by the wait (`after_ack`), since it can expire before the reload lands.
 fn crumb_switched_one(screen: &str) -> bool {
-    let crumb = ack_rows(screen);
-    !crumb.contains("failed")
-        && !crumb.contains("no non-default")
+    let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
+    !acks.contains("failed")
+        && !acks.contains("no non-default")
         && crumb.contains("workspace › focusbox")
-        && !crumb.contains("[focusbox]")
+        && !acks.contains("[focusbox]")
 }
 
 fn crumb_already_on_default(screen: &str) -> bool {
-    let crumb = ack_rows(screen);
+    let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
     crumb.contains("no non-default branches to switch")
-        && !crumb.contains("Switched")
-        && !crumb.contains("failed")
+        && !acks.contains("Switched")
+        && !acks.contains("failed")
         && crumb.contains("workspace › focusbox")
 }
 
 fn crumb_dirty_skip(screen: &str) -> bool {
-    let crumb = ack_rows(screen);
+    let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
     crumb.contains("Switched 1 repo (1 skipped: dirty)")
-        && !crumb.contains("no non-default")
+        && !acks.contains("no non-default")
         && crumb.contains("workspace › focusbox")
 }
 
@@ -200,12 +203,13 @@ fn daily_first_paint_on_readme(screen: &str) -> bool {
 /// File-row `d` on daily README. Says why on the breadcrumb and switches
 /// nothing. `app` stays on `main`. `merger` stays off default.
 fn documented_d_file_row_says_why(screen: &str) -> bool {
-    let crumb = ack_rows(screen);
+    let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
     crumb.trim_start().starts_with("workspace")
         && crumb.contains("focus a repo or checkout to switch to default")
         && launch_status_chrome(screen)
-        && !crumb_row(screen).contains("Switched")
-        && !crumb_row(screen).contains("no non-default")
+        && !acks.contains("Switched")
+        && !acks.contains("no non-default")
         && !ack_rows(screen).contains("failed")
         && tree_has(screen, "feature/graph")
         && tree_cursor_on(screen, "README.md")

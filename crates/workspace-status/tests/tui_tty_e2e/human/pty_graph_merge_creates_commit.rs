@@ -1,8 +1,9 @@
 use crate::harness::PtySession;
 use crate::seed::focus_workspace;
 use crate::support::{
-    ack_rows, after_ack, graph_cursor_on, graph_pane_focused, no_mouse_toggle_toast, status_row,
-    title_has_files, tree_cursor_on, tree_has, tree_pane_focused, GIT_WAIT, SETTLE_MS, WAIT,
+    ack_rows, after_ack, crumb_row, graph_cursor_on, graph_pane_focused, no_mouse_toggle_toast,
+    status_row, title_has_files, tree_cursor_on, tree_has, tree_pane_focused, GIT_WAIT, SETTLE_MS,
+    WAIT,
 };
 
 fn no_merge_confirm(screen: &str) -> bool {
@@ -33,13 +34,14 @@ fn focusbox_diverged_graph_body(screen: &str) -> bool {
 /// First paint: focusbox on the tree. Graph `m` has not run.
 fn idle_focusbox_before_graph_merge(screen: &str) -> bool {
     let status = status_row(screen);
-    let crumb = ack_rows(screen);
+    let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
     tree_cursor_on(screen, "focusbox")
         && tree_pane_focused(screen)
         && tree_has(screen, "feature/keep")
         && crumb.contains("workspace › focusbox")
-        && !crumb.contains("[focusbox]")
-        && !crumb.contains("Merged")
+        && !acks.contains("[focusbox]")
+        && !acks.contains("Merged")
         && status.contains("focus right")
         && !status.contains("drill")
         && !screen.contains("Merge branch")
@@ -50,13 +52,14 @@ fn idle_focusbox_before_graph_merge(screen: &str) -> bool {
 /// Tab focused the graph. HEAD is still `keep-leaf-commit`. Merge is idle.
 fn graph_focused_diverged_before_merge(screen: &str) -> bool {
     let status = status_row(screen);
-    let crumb = ack_rows(screen);
+    let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
     graph_pane_focused(screen)
         && tree_has(screen, "focusbox")
         && focusbox_diverged_graph_body(screen)
         && crumb.contains("workspace › [focusbox]")
-        && !crumb.contains("Merged")
-        && !crumb.contains("Fast-forwarded")
+        && !acks.contains("Merged")
+        && !acks.contains("Fast-forwarded")
         && status.contains("drill")
         && status.contains("Esc")
         && (status.contains("← tree") || status.contains("Esc   clear"))

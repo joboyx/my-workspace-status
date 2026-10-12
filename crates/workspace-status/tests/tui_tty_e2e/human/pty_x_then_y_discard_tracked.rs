@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use crate::harness::{left_tree, PtySession};
 use crate::seed::{daily_workspace, git_env};
 use crate::support::{
-    ack_rows, after_ack, has_stage_hint, no_wrong_overlays, pane_unstaged_readme,
+    ack_rows, after_ack, crumb_row, has_stage_hint, no_wrong_overlays, pane_unstaged_readme,
     readme_unstaged_badge, status_row, tree_cursor_on, tree_has, tree_line_containing, GIT_WAIT,
     SETTLE_MS, WAIT,
 };
@@ -82,7 +82,8 @@ fn mixed_dirty_readme_and_untracked(screen: &str) -> bool {
 
 /// Tree-focused expanded `app`. Mixed dirty files stay. Graph loaded.
 fn app_repo_mixed_dirty(screen: &str) -> bool {
-    let crumb = ack_rows(screen);
+    let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
     tree_cursor_on(screen, "app")
         && !tree_cursor_on(screen, "README.md")
         && !tree_cursor_on(screen, UNTRACKED)
@@ -93,7 +94,7 @@ fn app_repo_mixed_dirty(screen: &str) -> bool {
         && screen.contains("uncommitted changes")
         && !screen.contains("UNSTAGED")
         && crumb.contains("workspace › app")
-        && !crumb.contains("[app]")
+        && !acks.contains("[app]")
         && no_wrong_revert_overlays(screen)
         && no_y_apply_or_delete(screen)
 }
@@ -128,7 +129,8 @@ fn documented_revert_confirm_mixed_y_keeps(screen: &str) -> bool {
 /// `Y` would toast counts, drop `new.txt`, and leave `0 changed`. The wait
 /// checks the `reverted README.md` toast (`after_ack`).
 fn documented_y_discarded_tracked_kept_untracked(screen: &str) -> bool {
-    let crumb = ack_rows(screen);
+    let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
     let status = status_row(screen);
     let left = left_tree(screen);
     tree_cursor_on(screen, "app")
@@ -147,10 +149,10 @@ fn documented_y_discarded_tracked_kept_untracked(screen: &str) -> bool {
         && !readme_unstaged_badge(screen)
         && !pane_unstaged_readme(screen)
         && crumb.contains("workspace › app")
-        && !crumb.contains("reverted 1 tracked")
-        && !crumb.contains("1 untracked")
-        && !crumb.contains("revert cancelled")
-        && !crumb.contains("deleted")
+        && !acks.contains("reverted 1 tracked")
+        && !acks.contains("1 untracked")
+        && !acks.contains("revert cancelled")
+        && !acks.contains("deleted")
         && !screen.contains("Revert app?")
         && !screen.contains("Revert README.md?")
         && !screen.contains("revert + delete untracked")

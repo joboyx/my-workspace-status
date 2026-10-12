@@ -88,23 +88,25 @@ fn idle_family_before_remove(screen: &str) -> bool {
 
 /// Family-row `W` refuses. Overlay stays closed. Linked checkout stays.
 fn family_w_refuses_without_confirm(screen: &str) -> bool {
-    let crumb = ack_rows(screen);
+    let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
     family_tree_idle(screen)
         && crumb.contains("Focus a linked worktree to remove")
-        && !crumb.contains("removed worktree")
+        && !acks.contains("removed worktree")
 }
 
 /// Cursor on the linked checkout. Hint `W` is remove. Overlay closed.
 fn linked_ready_to_remove(screen: &str) -> bool {
     let status = status_row(screen);
-    let crumb = ack_rows(screen);
+    let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
     tree_pane_focused(screen)
         && tree_cursor_on(screen, LINKED_BRANCH)
         && !tree_cursor_on(screen, "app")
         && !tree_cursor_on(screen, PRIMARY_BRANCH)
         && family_and_linked_on_tree(screen)
         && crumb.contains("workspace › feat")
-        && !crumb.contains("removed worktree")
+        && !acks.contains("removed worktree")
         && status.contains("W")
         && status.contains("remove worktree")
         && no_remove_confirm(screen)

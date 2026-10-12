@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use crate::harness::PtySession;
 use crate::seed::{focus_workspace, git_env};
 use crate::support::{
-    ack_rows, after_ack, focusbox_graph_left_full, graph_cursor_on, graph_pane_focused,
+    ack_rows, after_ack, crumb_row, focusbox_graph_left_full, graph_cursor_on, graph_pane_focused,
     graph_subject_meta_line, no_mouse_toggle_toast, status_row, title_has_files, tree_has,
     tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
@@ -125,16 +125,17 @@ fn focusbox_diverged_graph_body(screen: &str) -> bool {
 /// Tab focused the graph. HEAD is still `keep-leaf-commit`. Checkout is idle.
 fn graph_focused_diverged_before_checkout(screen: &str) -> bool {
     let status = status_row(screen);
-    let crumb = ack_rows(screen);
+    let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
     graph_pane_focused(screen)
         && tree_has(screen, "focusbox")
         && focusbox_tree_on_keep(screen)
         && keep_is_checked_out(screen)
         && focusbox_diverged_graph_body(screen)
         && crumb.contains("workspace › [focusbox]")
-        && !crumb.contains("Checked out")
-        && !crumb.contains("Switched")
-        && !crumb.contains("Already on")
+        && !acks.contains("Checked out")
+        && !acks.contains("Switched")
+        && !acks.contains("Already on")
         && status.contains("drill")
         && status.contains("Esc")
         && (status.contains("← tree") || status.contains("Esc   clear"))

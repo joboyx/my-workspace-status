@@ -361,12 +361,16 @@ pub struct LayoutHit {
     /// Results rows the search-in-files dialog painted last; PgUp / PgDn
     /// move by it.
     pub search_files_rows: u16,
-    /// The last draw painted a time-based frame (a spinner or a toast).
+    /// The last draw painted a time-based frame (a spinner or a fading toast).
     /// [`AppState::next_anim_tick_ms`] keeps redrawing while it holds.
     pub animating: bool,
     /// The last draw painted a scroll glide step; redraws at the draw floor
     /// while it holds.
     pub gliding: bool,
+    /// One redraw wanted this many ms after the last draw, with no frame
+    /// ticks before it: a toast at full strength wakes the loop when its
+    /// fade starts (under `NO_COLOR`, when it expires).
+    pub wake_ms: Option<u64>,
 }
 
 impl Default for LayoutHit {
@@ -430,6 +434,7 @@ impl Default for LayoutHit {
             search_files_rows: 0,
             animating: false,
             gliding: false,
+            wake_ms: None,
         }
     }
 }
@@ -2220,13 +2225,15 @@ impl AppState {
     }
 
     /// Milliseconds between timer redraws while something animates: a
-    /// decaying flash, a spinner or toast frame, or a scroll glide painted
-    /// last frame. `None` when idle, so no timer redraw runs.
+    /// decaying flash, a spinner or fading toast frame, or a scroll glide painted
+    /// last frame, or the one wake a holding toast asked for. `None` when
+    /// idle, so no timer redraw runs.
     pub fn next_anim_tick_ms(&self) -> Option<u64> {
         next_tick_ms(AnimNeeds {
             flashes: self.has_active_flashes(),
             frames: self.layout.animating,
             glide: self.layout.gliding,
+            wake_ms: self.layout.wake_ms,
         })
     }
 

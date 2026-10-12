@@ -1,8 +1,9 @@
 use crate::harness::{PtySession, ROWS};
 use crate::seed::daily_workspace;
 use crate::support::{
-    ack_rows, has_stage_hint, idle_dirty_readme_unstaged, no_wrong_overlays, pane_unstaged_readme,
-    readme_unstaged_badge, status_row, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
+    ack_rows, crumb_row, has_stage_hint, idle_dirty_readme_unstaged, no_wrong_overlays,
+    pane_unstaged_readme, readme_unstaged_badge, status_row, tree_cursor_on, tree_has, GIT_WAIT,
+    SETTLE_MS, WAIT,
 };
 
 fn no_y_revert_path(screen: &str) -> bool {
@@ -50,11 +51,12 @@ fn documented_revert_confirm_armed(screen: &str) -> bool {
 
 /// `n` closed the confirm. Toast is cancel. README is still unstaged.
 fn documented_revert_n_cancelled(screen: &str) -> bool {
-    let crumb = ack_rows(screen);
+    let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
     let status = status_row(screen);
     dirty_readme_still_focused(screen)
         && crumb.contains("revert cancelled")
-        && !crumb.contains("reverted")
+        && !acks.contains("reverted")
         && !screen.contains("Revert README.md?")
         && !screen.contains("revert + delete untracked")
         && !screen.contains("1 tracked file")

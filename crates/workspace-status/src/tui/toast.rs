@@ -69,6 +69,44 @@ impl ToastStack {
     }
 }
 
+/// The redraw the toast stack needs after a frame painted at `now`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToastTick {
+    /// No toast left: no timer redraw.
+    Idle,
+    /// A toast is fading: redraw on every animation frame.
+    Frames,
+    /// Every toast holds full strength: redraw once, this many ms from
+    /// now, when the first fade starts (under `NO_COLOR`, when the first
+    /// toast expires).
+    WakeIn(u64),
+}
+
+impl ToastStack {
+    /// What the loop must do after a frame painted at `now`. `no_color`
+    /// toasts have no fade, so they only wake at their expiry.
+    pub fn next_tick(&self, now: Instant, no_color: bool) -> ToastTick {
+        let mut wake: Option<u64> = None;
+        for toast in &self.items {
+            let age = now.saturating_duration_since(toast.at).as_millis() as u64;
+            if age >= TOAST_TTL_MS {
+                continue;
+            }
+            let until = if no_color {
+                TOAST_TTL_MS - age
+            } else {
+                let fade_start = TOAST_TTL_MS - TOAST_FADE_MS;
+                if age >= fade_start {
+                    return ToastTick::Frames;
+                }
+                fade_start - age
+            };
+            wake = Some(wake.map_or(until, |ms| ms.min(until)));
+        }
+        wake.map_or(ToastTick::Idle, ToastTick::WakeIn)
+    }
+}
+
 /// Fade strength of a toast `age` old: 1.0 until the fade window, then
 /// linear down to 0.0 at [`TOAST_TTL_MS`].
 pub fn toast_strength(age: Duration) -> f32 {
@@ -127,6 +165,53 @@ mod tests {
         assert!(!stack.is_empty(), "still fading");
         stack.prune(at(TOAST_TTL_MS));
         assert!(stack.is_empty(), "pruned at the TTL");
+    }
+
+    #[test]
+    fn hold_wakes_once_at_fade_start_fade_ticks_frames_expiry_is_idle() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let fade_start = TOAST_TTL_MS - TOAST_FADE_MS;
+        let mut stack = ToastStack::default();
+        assert_eq!(stack.next_tick(t0, false), ToastTick::Idle);
+        stack.push("copied", t0);
+        assert_eq!(stack.next_tick(at(0), false), ToastTick::WakeIn(fade_start));
+        assert_eq!(
+            stack.next_tick(at(500), false),
+            ToastTick::WakeIn(fade_start - 500),
+            "one wake at fade start, not a frame tick"
+        );
+        assert_eq!(stack.next_tick(at(fade_start), false), ToastTick::Frames);
+        assert_eq!(
+            stack.next_tick(at(TOAST_TTL_MS - 1), false),
+            ToastTick::Frames
+        );
+        assert_eq!(stack.next_tick(at(TOAST_TTL_MS), false), ToastTick::Idle);
+
+        // A newer holding toast does not hide an older one's fade.
+        stack.push("Fetched 1 repo", at(fade_start));
+        assert_eq!(
+            stack.next_tick(at(fade_start + 10), false),
+            ToastTick::Frames
+        );
+        // Once the older one is gone, the newer one wakes at its own fade.
+        assert_eq!(
+            stack.next_tick(at(TOAST_TTL_MS), false),
+            ToastTick::WakeIn(fade_start - (TOAST_TTL_MS - fade_start))
+        );
+
+        // NO_COLOR: no fade, one wake at expiry.
+        let mut plain = ToastStack::default();
+        plain.push("copied", t0);
+        assert_eq!(
+            plain.next_tick(at(500), true),
+            ToastTick::WakeIn(TOAST_TTL_MS - 500)
+        );
+        assert_eq!(
+            plain.next_tick(at(TOAST_TTL_MS - 100), true),
+            ToastTick::WakeIn(100)
+        );
+        assert_eq!(plain.next_tick(at(TOAST_TTL_MS), true), ToastTick::Idle);
     }
 
     #[test]

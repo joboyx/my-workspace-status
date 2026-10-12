@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use crate::harness::{left_tree, PtySession};
 use crate::seed::{daily_workspace, git_env};
 use crate::support::{
-    ack_rows, after_ack, has_stage_hint, no_wrong_overlays, pane_unstaged_readme,
+    ack_rows, after_ack, crumb_row, has_stage_hint, no_wrong_overlays, pane_unstaged_readme,
     readme_unstaged_badge, status_row, tree_cursor_on, tree_has, tree_line_containing, GIT_WAIT,
     SETTLE_MS, WAIT,
 };
@@ -92,7 +92,8 @@ fn documented_help_lists_y_revert_delete(screen: &str) -> bool {
 
 /// Tree-focused expanded `app`. Mixed dirty files stay. Graph loaded.
 fn app_repo_mixed_dirty(screen: &str) -> bool {
-    let crumb = ack_rows(screen);
+    let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
     tree_cursor_on(screen, "app")
         && !tree_cursor_on(screen, "README.md")
         && !tree_cursor_on(screen, UNTRACKED)
@@ -103,7 +104,7 @@ fn app_repo_mixed_dirty(screen: &str) -> bool {
         && screen.contains("uncommitted changes")
         && !screen.contains("UNSTAGED")
         && crumb.contains("workspace › app")
-        && !crumb.contains("[app]")
+        && !acks.contains("[app]")
         && no_wrong_revert_overlays(screen)
         && no_y_apply_path(screen)
 }

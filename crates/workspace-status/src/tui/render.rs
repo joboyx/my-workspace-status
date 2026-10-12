@@ -93,6 +93,7 @@ use super::tabs::{
     ComparePickerState, ExplorerPreview, FileTab, EXPLORER_FOLDER_HINT, FILE_IS_BINARY,
 };
 use super::theme::{hex_color, BackgroundMode, Palette, Pill, ThemeId};
+use super::toast::ToastTick;
 use super::tree::{
     file_change_from_name_status, file_change_segments, painted_row_segments, pr_badge_kind,
     pr_badge_mark, visible_window, workspace_trailing_fit, NodeKind, NodeSegments, SegRole,
@@ -198,6 +199,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     // A painter that shows a time-based frame sets these again.
     state.layout.animating = false;
     state.layout.gliding = false;
+    state.layout.wake_ms = None;
     state.layout.popover = None;
     let area = frame.area();
     state.too_small = area.width < MIN_TERM_COLS || area.height < MIN_TERM_ROWS;
@@ -308,13 +310,15 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     // The icon popover hangs over the panes and any dialog.
     draw_popover(frame, chunks[1], state);
 
+    // Keep the frame as painted so a mouse release copies what is on screen,
+    // then reverse the selected cells on top of it. The copy is taken before
+    // the toasts: a drag over a toast copies the pane text under it.
+    state.painted_frame = frame.buffer_mut().clone();
+
     // Toasts paint last, over any dialog, popover, or backdrop, so they
     // stay crisp. Keep this after every overlay.
     draw_toasts(frame, chunks[1], state);
 
-    // Keep the frame as painted so a mouse release copies what is on screen,
-    // then reverse the selected cells on top of it.
-    state.painted_frame = frame.buffer_mut().clone();
     if let Some(selection) = state.text_selection.as_ref() {
         selection.highlight(frame.buffer_mut());
     }
@@ -328,7 +332,9 @@ const TOAST_MAX_COLS: u16 = 48;
 ///
 /// Fg is `repo` on the add-flash ramp step for the toast's fade strength.
 /// Under `NO_COLOR` the row is reversed terminal colours with no fade.
-/// Marks the frame animating while a toast shows, so the loop ticks.
+/// While a toast fades the frame is marked animating, so the loop ticks.
+/// While every toast holds full strength it asks for one wake at the first
+/// fade start (`NO_COLOR`: at the first expiry) and no frame ticks.
 fn draw_toasts(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
     let now = Instant::now();
     if state.toasts.is_empty() || pane_area.width < 4 || pane_area.height < 3 {
@@ -368,7 +374,13 @@ fn draw_toasts(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
         frame.render_widget(Clear, rect);
         frame.render_widget(Paragraph::new(Span::styled(label, style)), rect);
         drop_links_under(&mut state.layout.links, rect);
-        state.layout.animating = true;
+    }
+    match state.toasts.next_tick(now, state.no_color) {
+        ToastTick::Frames => state.layout.animating = true,
+        ToastTick::WakeIn(ms) => {
+            state.layout.wake_ms = Some(state.layout.wake_ms.map_or(ms, |at| at.min(ms)));
+        }
+        ToastTick::Idle => {}
     }
 }
 
@@ -13004,19 +13016,55 @@ mod tests {
     }
 
     #[test]
-    fn toast_marks_layout_animating() {
+    fn toast_ticks_only_while_it_fades() {
+        use super::super::anim::SPINNER_FRAME_MS;
+        use super::super::toast::TOAST_FADE_MS;
+        let fade_start = TOAST_TTL_MS - TOAST_FADE_MS;
         let mut state = toast_state(StatusMessage::default(), false);
         let mut terminal = Terminal::new(TestBackend::new(TOAST_W, TOAST_H)).unwrap();
         draw_state(&mut terminal, &mut state);
         assert!(!state.layout.animating, "idle: no tick");
         assert_eq!(state.next_anim_tick_ms(), None);
 
+        // Hold: one wake at fade start, no frame ticks.
+        state.toasts.push("Checked out main", toast_pushed_ago(500));
+        draw_state(&mut terminal, &mut state);
+        assert!(!state.layout.animating, "a holding toast does not tick");
+        let wake = state.next_anim_tick_ms().expect("a wake at fade start");
+        assert!(
+            (fade_start - 600..=fade_start - 500).contains(&wake),
+            "wake {wake} ms is the time until fade start, not {SPINNER_FRAME_MS}"
+        );
+
+        // A fresh ack also holds and wakes at fade start.
+        state.toasts = Default::default();
         state.status = StatusMessage::ok("Checked out main");
         draw_state(&mut terminal, &mut state);
-        assert!(state.layout.animating, "a showing toast ticks the loop");
-        assert!(state.next_anim_tick_ms().is_some());
+        assert!(!state.layout.animating);
+        let wake = state.next_anim_tick_ms().unwrap();
+        assert!((fade_start - 100..=fade_start).contains(&wake), "{wake}");
 
-        // A toast whose time ran out is pruned and stops the tick.
+        // Fade: frame ticks.
+        state.toasts = Default::default();
+        state
+            .toasts
+            .push("Checked out main", toast_pushed_ago(fade_start + 200));
+        draw_state(&mut terminal, &mut state);
+        assert!(state.layout.animating, "a fading toast ticks the loop");
+        assert_eq!(state.next_anim_tick_ms(), Some(SPINNER_FRAME_MS));
+
+        // NO_COLOR: no fade, one wake at expiry.
+        state.no_color = true;
+        draw_state(&mut terminal, &mut state);
+        assert!(!state.layout.animating, "NO_COLOR has no fade frames");
+        let wake = state.next_anim_tick_ms().unwrap();
+        assert!(
+            (TOAST_FADE_MS - 300..=TOAST_FADE_MS - 200).contains(&wake),
+            "{wake}"
+        );
+        state.no_color = false;
+
+        // Expired: pruned, no timer at all.
         state.toasts = Default::default();
         state
             .toasts
@@ -13026,6 +13074,24 @@ mod tests {
         assert!(!state.layout.animating);
         assert_eq!(state.next_anim_tick_ms(), None);
         assert!(rows_with(&terminal, "Checked out main").is_empty());
+    }
+
+    /// The copy a mouse release reads (`painted_frame`) has no toast in it,
+    /// so a drag over a live toast copies the pane text under it.
+    #[test]
+    fn painted_frame_for_copy_has_no_toast() {
+        use super::super::chrome::STATUS_COPIED;
+        let mut state = toast_state(StatusMessage::ok(STATUS_COPIED), false);
+        let mut terminal = Terminal::new(TestBackend::new(TOAST_W, TOAST_H)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(rows_with(&terminal, "✓ copied").len(), 1, "drawn on screen");
+        let painted = &state.painted_frame;
+        let area = painted.area;
+        let copy_text: String = (area.y..area.bottom())
+            .flat_map(|y| (area.x..area.right()).map(move |x| (x, y)))
+            .map(|at| painted[at].symbol())
+            .collect();
+        assert!(!copy_text.contains("copied"), "no toast in painted_frame");
     }
 
     /// A primary `app` with a linked `wt` checkout: one family repo row

@@ -44,15 +44,19 @@ pub fn spinner_glyph(epoch: Instant, now: Instant, ascii: bool) -> &'static str 
 pub struct AnimNeeds {
     /// A row flash or ghost is still decaying.
     pub flashes: bool,
-    /// A spinner or toast frame was painted.
+    /// A spinner or fading toast frame was painted.
     pub frames: bool,
     /// A scroll glide is in progress.
     pub glide: bool,
+    /// One redraw wanted this many ms after the last draw, with no frame
+    /// ticks before it (a toast holding full strength until its fade).
+    pub wake_ms: Option<u64>,
 }
 
-/// Milliseconds between timer redraws for `needs`: the fastest active
-/// need ([`GLIDE_FRAME_MS`], [`SPINNER_FRAME_MS`], `FLASH_TICK_MS`).
-/// `None` when nothing animates, so the loop sleeps until input or a job.
+/// Milliseconds until the next timer redraw for `needs`: the fastest active
+/// need ([`GLIDE_FRAME_MS`], [`SPINNER_FRAME_MS`], `FLASH_TICK_MS`) or the
+/// one-shot `wake_ms`, whichever is sooner. `None` when nothing animates
+/// and no wake is due, so the loop sleeps until input or a job.
 pub fn next_tick_ms(needs: AnimNeeds) -> Option<u64> {
     [
         (needs.glide, GLIDE_FRAME_MS),
@@ -62,6 +66,7 @@ pub fn next_tick_ms(needs: AnimNeeds) -> Option<u64> {
     .into_iter()
     .filter(|(on, _)| *on)
     .map(|(_, ms)| ms)
+    .chain(needs.wake_ms)
     .min()
 }
 
@@ -134,6 +139,7 @@ mod tests {
             flashes,
             frames,
             glide,
+            wake_ms: None,
         };
         assert_eq!(next_tick_ms(needs(true, false, false)), Some(FLASH_TICK_MS));
         assert_eq!(
@@ -146,5 +152,18 @@ mod tests {
         );
         assert_eq!(next_tick_ms(needs(true, true, true)), Some(GLIDE_FRAME_MS));
         assert_eq!(next_tick_ms(needs(false, false, true)), Some(16));
+    }
+
+    #[test]
+    fn a_wake_alone_is_one_deadline_and_frames_beat_a_later_wake() {
+        let wake = |wake_ms, frames| AnimNeeds {
+            frames,
+            wake_ms,
+            ..AnimNeeds::default()
+        };
+        assert_eq!(next_tick_ms(wake(Some(1700), false)), Some(1700));
+        assert_eq!(next_tick_ms(wake(Some(5), true)), Some(5));
+        assert_eq!(next_tick_ms(wake(Some(1700), true)), Some(SPINNER_FRAME_MS));
+        assert_eq!(next_tick_ms(wake(None, false)), None);
     }
 }

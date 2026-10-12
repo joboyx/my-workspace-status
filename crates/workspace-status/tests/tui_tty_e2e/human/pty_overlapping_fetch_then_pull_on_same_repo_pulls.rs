@@ -55,10 +55,10 @@ fn cursor_on_syncbox_in_sync(screen: &str) -> bool {
 }
 
 fn pulled_without_lock(screen: &str) -> bool {
-    let crumb = ack_rows(screen);
+    let acks = ack_rows(screen);
     screen.contains("Pulled")
-        && (crumb.contains("Pulled 1 repo") || crumb.contains("Pulled"))
-        && !crumb.contains("failed")
+        && (acks.contains("Pulled 1 repo") || acks.contains("Pulled"))
+        && !acks.contains("failed")
         && !screen.contains("index.lock")
         && no_lock_or_search(screen)
 }

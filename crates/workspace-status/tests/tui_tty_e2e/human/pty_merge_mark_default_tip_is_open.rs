@@ -98,10 +98,11 @@ fn just_created_remove_confirm_open(screen: &str) -> bool {
 
 /// `n` closed confirm. Toast is cancel. Default-tip stays open. Landed stays merged.
 fn documented_cancel_keeps_open_default_tip(screen: &str) -> bool {
-    let crumb = ack_rows(screen);
+    let crumb = crumb_row(screen);
+    let acks = ack_rows(screen);
     just_created_ready_to_remove(screen)
         && crumb.contains("remove worktree cancelled")
-        && !crumb.contains("removed worktree")
+        && !acks.contains("removed worktree")
         && !screen.contains("Remove worktree ")
 }
 
