@@ -18987,6 +18987,65 @@ mod tests {
         }
     }
 
+    /// The y/N push confirm is a centered confirm box: the panes behind it
+    /// recede and the box keeps its own colours.
+    #[test]
+    fn push_confirm_dims_the_backdrop() {
+        let mut state = painted_state();
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let before = terminal.backend().buffer().clone();
+        state.confirm = Some(PendingConfirm::Push {
+            repo: "app".into(),
+            branch: "main".into(),
+            remote: "origin".into(),
+            publish: false,
+            ahead_behind: Some((1, 0)),
+        });
+        assert_eq!(open_dialog(&state), Some(DialogKind::Confirm));
+        draw_state(&mut terminal, &mut state);
+        let after = terminal.backend().buffer().clone();
+        assert!(
+            buffer_text(&terminal).contains("Push main → origin (1 commit)?"),
+            "{}",
+            buffer_text(&terminal)
+        );
+        let keep = open_dialog_box(&state, 120);
+        let panes = Rect::new(0, 1, 120, state.layout.pane_height);
+        assert!(keep.width < 120, "box leaves a backdrop");
+        assert_panes_dimmed(&before, &after, panes, keep, palette);
+        assert_dialog_crisp(&after, keep, palette);
+    }
+
+    /// The search dialog dims what is behind it, but its own option chips
+    /// sit inside the box: the hovered chip keeps its full hover colours.
+    #[test]
+    fn search_dialog_dims_the_backdrop_but_not_its_hovered_chip() {
+        let mut state = search_files_state(false);
+        state.background = BackgroundMode::Paint;
+        let palette = state.theme.palette();
+        let terminal = draw_search(&mut state, 120, 30);
+        let (y, xs) = painted_chip_xs(&terminal);
+        // The same frame with the dialog closed is the undimmed backdrop.
+        let dialog = state.search_files.take();
+        let before = draw_search(&mut state, 120, 30).backend().buffer().clone();
+        state.search_files = dialog;
+        draw_search(&mut state, 120, 30);
+        assert!(state.set_pointer(Some((xs[0].1 + 1, y))));
+        let terminal = draw_search(&mut state, 120, 30);
+        let after = terminal.backend().buffer().clone();
+        let keep = open_dialog_box(&state, 120);
+        assert!(keep.contains(Position::new(xs[0].1, y)), "chip in the box");
+        let chip = &after[(xs[0].1 + 1, y)];
+        assert_eq!(chip.fg, palette.cursor, "hovered chip fg is not dimmed");
+        assert_eq!(chip.bg, palette.cursor_bg, "hovered chip bg is not dimmed");
+        assert!(chip.modifier.contains(Modifier::UNDERLINED));
+        assert!(!chip.modifier.contains(Modifier::DIM));
+        let panes = Rect::new(0, 1, 120, state.layout.pane_height);
+        assert_panes_dimmed(&before, &after, panes, keep, palette);
+    }
+
     #[test]
     fn backdrop_falls_back_to_dim_modifier_without_rgb_or_with_no_color() {
         let palette = ThemeId::TokyoNight.palette();

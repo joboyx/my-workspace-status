@@ -8184,6 +8184,11 @@ mod tests {
         assert_eq!(app.dispatch(Action::ConfirmNo), Effect::None);
         assert!(app.confirm.is_none());
         assert_eq!(app.status, "push cancelled");
+        // A cancel is not a one-shot ack: it stays on the status line and
+        // never moves to a toast.
+        assert_ne!(app.status.kind(), StatusKind::Ok);
+        app.route_ack_to_toast(std::time::Instant::now());
+        assert_eq!(app.status, "push cancelled");
     }
 
     #[test]
