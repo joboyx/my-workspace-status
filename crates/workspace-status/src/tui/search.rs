@@ -5,8 +5,8 @@
 //! search unless shown (`.` / `-a`). Graph search matches subject, body, author,
 //! painted (relative or local) or UTC time, branch and tag names, and sha. Commit-file search
 //! matches paths. Diff search matches painted line text. Explorer tree search
-//! matches the names of the listed rows (folders list lazily, so a closed
-//! folder that was never opened has no rows to match).
+//! matches the names of the visible rows (a closed folder's rows are not
+//! searched; folders also list lazily).
 //!
 //! Like vim `/`, a step lands on the first match after the pane cursor
 //! (`N`: the last one before it) and wraps at the ends.

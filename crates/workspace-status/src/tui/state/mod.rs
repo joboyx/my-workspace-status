@@ -3437,6 +3437,7 @@ impl AppState {
     /// depends on the query. `1` / `-1` (`n` / `N`) step from the pane's
     /// cursor. A step that wraps says which way, after the match status.
     fn apply_search(&mut self, dir: i32) -> Effect {
+        let explorer_before = self.explorer_search_anchor_rel();
         if dir == 0 {
             if let Some(origin) = self.search_origin.clone() {
                 self.put_pane_at_search_origin(origin);
@@ -3457,7 +3458,7 @@ impl AppState {
                 SEARCH_WRAPPED_TO_TOP
             });
         }
-        self.search_pane_effect()
+        self.search_pane_effect(explorer_before)
     }
 
     /// Diff row indices whose search text contains `query` (case-folded),
@@ -3563,8 +3564,9 @@ impl AppState {
         let Some(origin) = self.search_origin.take() else {
             return Effect::None;
         };
+        let explorer_before = self.explorer_search_anchor_rel();
         self.put_pane_at_search_origin(origin);
-        self.search_pane_effect()
+        self.search_pane_effect(explorer_before)
     }
 
     /// Cursor, scroll, and folds of the bound pane back to `origin`.
@@ -3609,13 +3611,21 @@ impl AppState {
     }
 
     /// Load that follows the bound pane's cursor after a search move. An
-    /// Explorer tree move previews its row, as `j` / `k` do.
-    fn search_pane_effect(&mut self) -> Effect {
+    /// Explorer tree move previews its row, as `j` / `k` do; a step that
+    /// left the tree cursor on `explorer_before` (no match, or the only
+    /// match) previews nothing, so it cannot open a preview tab.
+    fn search_pane_effect(&mut self, explorer_before: Option<String>) -> Effect {
         match self.search_target {
             SearchPane::Tree => Effect::LoadRightPane,
             SearchPane::Graph => self.follow_graph_files(),
             SearchPane::CommitFiles => self.maybe_load_focused_commit_diff(),
-            SearchPane::ExplorerTree => self.explorer_tree_search_preview(),
+            SearchPane::ExplorerTree => {
+                if self.explorer_search_anchor_rel() == explorer_before {
+                    Effect::None
+                } else {
+                    self.explorer_tree_search_preview()
+                }
+            }
             SearchPane::Diff | SearchPane::File => Effect::None,
         }
     }

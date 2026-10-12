@@ -351,6 +351,9 @@ impl AppState {
     pub(super) fn dispatch_explorer_tab(&mut self, action: &Action) -> Option<Effect> {
         let preview = self.focus == FocusPane::Right;
         let effect = match *action {
+            // Esc (or a right click) on an armed search clears it first,
+            // through the shared Esc path.
+            Action::NavEsc | Action::BackClick if self.search_active => return None,
             Action::Move(delta) if preview => self.explorer_preview_move(i64::from(delta)),
             Action::Move(delta) => self.explorer_move(delta as isize),
             Action::MoveToStart if preview => self.explorer_preview_edge(false),
@@ -2114,6 +2117,75 @@ mod tests {
             Some("src/lib.rs")
         );
         assert_eq!(tab.files.len(), 1);
+    }
+
+    #[test]
+    fn esc_clears_an_armed_explorer_search() {
+        let mut app = state();
+        app.mouse_enabled = true;
+        open_src(&mut app);
+        app.dispatch(Action::SearchStart);
+        type_query(&mut app, ".");
+        app.dispatch(Action::SearchSubmit);
+        assert!(app.search_is_armed());
+        assert_eq!(cursor_rel(&app), "src/lib.rs");
+        assert_eq!(app.dispatch(Action::NavEsc), Effect::None);
+        assert!(!app.search_is_armed());
+        assert_eq!(&*app.status, "search cleared");
+        assert_eq!(app.search_match_position(), None, "no match highlight");
+        assert_eq!(cursor_rel(&app), "src/lib.rs", "the cursor stays");
+        assert_eq!(app.focus, FocusPane::Left);
+
+        // A right click clears it the same way.
+        app.dispatch(Action::SearchStart);
+        type_query(&mut app, "readme");
+        app.dispatch(Action::SearchSubmit);
+        assert!(app.search_is_armed());
+        app.dispatch(Action::BackClick);
+        assert!(!app.search_is_armed());
+        assert_eq!(cursor_rel(&app), "README.md");
+
+        // An armed file search: the first Esc clears it, the next one
+        // gives focus back to the tree.
+        app.open_loaded_inner_file("app", "notes.txt", &["alpha", "beta"]);
+        app.dispatch(Action::FocusRight);
+        app.dispatch(Action::SearchStart);
+        type_query(&mut app, "beta");
+        app.dispatch(Action::SearchSubmit);
+        assert_eq!(app.search_target, SearchPane::File);
+        assert!(app.search_is_armed());
+        app.dispatch(Action::NavEsc);
+        assert!(!app.search_is_armed());
+        assert_eq!(app.focus, FocusPane::Right);
+        assert_eq!(app.tabs.active_file_view().map(|file| file.cursor), Some(1));
+        app.dispatch(Action::NavEsc);
+        assert_eq!(app.focus, FocusPane::Left);
+    }
+
+    #[test]
+    fn a_tree_search_step_that_stays_put_opens_no_preview_tab() {
+        let mut app = state();
+        open_root(&mut app);
+        app.dispatch(Action::Move(3));
+        assert_eq!(cursor_rel(&app), "README.md");
+        app.dispatch(Action::CloseTab);
+        assert!(tab(&app).files.is_empty(), "Ctrl-w closed the preview");
+
+        app.dispatch(Action::SearchStart);
+        assert_eq!(type_query(&mut app, "qqq"), Effect::None);
+        assert_eq!(app.dispatch(Action::SearchSubmit), Effect::None);
+        assert!(app.search_is_armed());
+        assert_eq!(app.dispatch(Action::SearchNext), Effect::None);
+        assert_eq!(app.dispatch(Action::SearchPrev), Effect::None);
+        assert_eq!(&*app.status, super::super::SEARCH_NO_MATCH);
+        assert_eq!(cursor_rel(&app), "README.md");
+        assert!(tab(&app).files.is_empty(), "no match opens no preview tab");
+
+        // A step that moves the cursor still previews.
+        app.dispatch(Action::SearchStart);
+        type_query(&mut app, "new");
+        assert_eq!(cursor_rel(&app), "new.txt");
+        assert_eq!(tab(&app).files.len(), 1);
     }
 
     #[test]
