@@ -733,6 +733,38 @@ fn file_view_scroll(
     top
 }
 
+/// First line to paint so `cursor` sits near the vertical middle of
+/// `height` rows (Ctrl-d / Ctrl-u, [`FileTab::recenter`]).
+///
+/// At most half the rows go above the cursor, and the top never passes the
+/// one that shows the last of `line_count` lines on the bottom row, as
+/// `tree::list_viewport_start` does for the tree. Reads at most two
+/// screens of lines.
+///
+/// [`FileTab::recenter`]: super::tabs::FileTab::recenter
+fn file_view_middle_top(
+    cursor: usize,
+    line_count: usize,
+    height: usize,
+    rows_of: impl Fn(usize) -> usize,
+) -> usize {
+    let height = height.max(1);
+    let budget = (height / 2).min(height.saturating_sub(rows_of(cursor)));
+    let mut top = cursor;
+    let mut above = 0usize;
+    while top > 0 {
+        let rows = rows_of(top - 1);
+        if above + rows > budget {
+            break;
+        }
+        above += rows;
+        top -= 1;
+    }
+    let last = line_count.saturating_sub(1);
+    let max_top = (last + 1).saturating_sub(file_lines_ending_at(last, height, rows_of));
+    top.min(max_top)
+}
+
 /// File lines counted back from `cursor` (included) whose painted rows fit
 /// in `height`. At least 1.
 fn file_lines_ending_at(cursor: usize, height: usize, rows_of: impl Fn(usize) -> usize) -> usize {
@@ -810,8 +842,14 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
         }
     };
     // `tab.scroll` keeps the jump top (it is sticky: the next frame
-    // starts from it); only the painted window glides.
-    let target = file_view_scroll(tab.scroll, tab.cursor, height, rows_of);
+    // starts from it); only the painted window glides. `j` / `k` move the
+    // top only as far as the cursor needs; Ctrl-d / Ctrl-u put the cursor
+    // near the middle, so the glide has rows to cover.
+    let target = if tab.recenter {
+        file_view_middle_top(tab.cursor, lines.len(), height, rows_of)
+    } else {
+        file_view_scroll(tab.scroll, tab.cursor, height, rows_of)
+    };
     let scroll = if state.glide_pending(GlidePane::FileView) {
         let span = file_lines_ending_at(tab.cursor, height, rows_of);
         let (scroll, gliding) = glide_step(
@@ -912,8 +950,11 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
     let curls = underlined_runs(frame.buffer_mut(), inner, palette.comment_underline());
     state.layout.undercurls.extend(curls);
     state.layout.file_view_row_lines = row_lines;
+    // Store the jump top, not a glide step: the next frame keeps gliding
+    // toward it, and the sticky rule starts from it once the glide ends.
     if let Some(tab) = state.tabs.active_file_view_mut() {
-        tab.scroll = scroll;
+        tab.scroll = target;
+        tab.recenter = false;
     }
 }
 
@@ -13984,6 +14025,126 @@ mod tests {
         assert_eq!(
             state.graph_scroll, painted,
             "the grab keeps the rows on screen"
+        );
+    }
+
+    /// A 200-line Explorer file view, the body focused, `j` walked past the
+    /// first screen so the cursor sits on the bottom row of the sticky
+    /// view. Returns the state, its terminal, and the painted top.
+    fn file_view_at_bottom_row() -> (AppState, Terminal<TestBackend>, usize) {
+        let lines: Vec<String> = (0..200).map(|i| format!("line {i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let mut state = file_view_state(&refs);
+        state.dispatch(Action::FocusRight);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let height = usize::from(state.layout.file_view_height);
+        for _ in 0..height + 10 {
+            state.dispatch(Action::Move(1));
+            draw_state(&mut terminal, &mut state);
+        }
+        let rows = state.layout.file_view_row_lines.clone();
+        let cursor = state.tabs.active_file_view().unwrap().cursor;
+        assert_eq!(
+            rows.last(),
+            Some(&cursor),
+            "j keeps the cursor on the bottom row"
+        );
+        // `k` / `j` inside the view keep the sticky top.
+        state.dispatch(Action::Move(-1));
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(state.layout.file_view_row_lines.first(), rows.first());
+        state.dispatch(Action::Move(1));
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(state.layout.file_view_row_lines.first(), rows.first());
+        (state, terminal, rows[0])
+    }
+
+    /// Ctrl-d on the file view puts the cursor near the middle and glides
+    /// there: a mid-glide frame paints a top strictly between the old and
+    /// the new one, the last frame lands on it, and `j` / `k` keep it.
+    #[test]
+    fn ctrl_d_on_file_view_glides_to_the_middle_top() {
+        use super::super::anim::{GLIDE_FRAME_MS, GLIDE_MS};
+        let (mut state, mut terminal, from) = file_view_at_bottom_row();
+        let height = usize::from(state.layout.file_view_height);
+        let t0 = Instant::now();
+        state.arm_scroll_glide(t0);
+        state.dispatch(Action::Move(5));
+        let cursor = state.tabs.active_file_view().unwrap().cursor;
+        let target = cursor - height / 2;
+        let top_at = |state: &mut AppState, terminal: &mut Terminal<TestBackend>, ms| {
+            let now = t0 + std::time::Duration::from_millis(ms);
+            terminal.draw(|frame| draw_at(frame, state, now)).unwrap();
+            state.layout.file_view_row_lines[0]
+        };
+
+        let first = top_at(&mut state, &mut terminal, 0);
+        assert!(
+            from < first && first < target,
+            "{from} < {first} < {target}"
+        );
+        assert!(state.layout.gliding);
+        assert_eq!(state.next_anim_tick_ms(), Some(GLIDE_FRAME_MS));
+        assert_eq!(
+            state.tabs.active_file_view().unwrap().scroll,
+            target,
+            "the tab keeps the jump top"
+        );
+
+        let mid = top_at(&mut state, &mut terminal, GLIDE_MS / 2);
+        assert!(first < mid && mid < target, "{first} < {mid} < {target}");
+        assert!(state.layout.gliding);
+
+        let end = top_at(&mut state, &mut terminal, GLIDE_MS);
+        assert_eq!(end, target, "lands on the middle top");
+        assert!(!state.layout.gliding);
+        // Only the glide tick counts: a fixture spinner still ticks at 80 ms.
+        assert_ne!(
+            state.next_anim_tick_ms(),
+            Some(GLIDE_FRAME_MS),
+            "no glide tick"
+        );
+        assert_eq!(state.layout.file_view_row_lines.len(), height);
+
+        state.dispatch(Action::Move(1));
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(
+            state.layout.file_view_row_lines[0], target,
+            "j keeps the top"
+        );
+    }
+
+    /// With `smoothScroll` off, Ctrl-d on the file view jumps to the same
+    /// middle top in one frame. A file that fits the view never glides.
+    #[test]
+    fn ctrl_d_on_file_view_without_glide_jumps_to_the_middle_top() {
+        let (mut state, mut terminal, _) = file_view_at_bottom_row();
+        state.smooth_scroll = false;
+        let height = usize::from(state.layout.file_view_height);
+        let t0 = Instant::now();
+        state.arm_scroll_glide(t0);
+        state.dispatch(Action::Move(5));
+        let cursor = state.tabs.active_file_view().unwrap().cursor;
+        terminal
+            .draw(|frame| draw_at(frame, &mut state, t0))
+            .unwrap();
+        assert_eq!(state.layout.file_view_row_lines[0], cursor - height / 2);
+        assert!(!state.layout.gliding);
+
+        let mut state = file_view_state(&["one", "two", "three", "four"]);
+        state.dispatch(Action::FocusRight);
+        draw_state(&mut terminal, &mut state);
+        state.arm_scroll_glide(t0);
+        state.dispatch(Action::Move(5));
+        terminal
+            .draw(|frame| draw_at(frame, &mut state, t0))
+            .unwrap();
+        assert_eq!(state.layout.file_view_row_lines.first(), Some(&0));
+        assert!(!state.layout.gliding, "no tick for a top that cannot move");
+        assert_ne!(
+            state.next_anim_tick_ms(),
+            Some(super::super::anim::GLIDE_FRAME_MS)
         );
     }
 

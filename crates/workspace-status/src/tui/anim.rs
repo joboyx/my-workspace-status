@@ -71,8 +71,9 @@ pub struct ScrollGlide {
 /// step (the loop then ticks at [`GLIDE_FRAME_MS`]). With no glide on
 /// `pane` in `glide` the top is `target`. While the glide runs the top is
 /// `from + (target - from) * ease_out_cubic(t)`, clamped so `cursor` stays
-/// inside `[top, top + height)`. At `t >= 1`, or when the top does not
-/// move, `glide` is cleared and `target` comes back.
+/// inside `[top, top + height)`. At `t >= 1`, when the top does not move,
+/// or once that clamp puts the top on `target`, `glide` is cleared and
+/// `target` comes back as a plain (not glide) frame.
 pub fn glide_step(
     glide: &mut Option<ScrollGlide>,
     pane: GlidePane,
@@ -97,6 +98,12 @@ pub fn glide_step(
     let top = eased
         .max((cursor + 1).saturating_sub(height.max(1)))
         .min(cursor);
+    if top == target {
+        // The cursor clamp already lands on the jump top: no step is left
+        // to paint, so the loop must not tick for it.
+        *glide = None;
+        return (target, false);
+    }
     *glide = Some(ScrollGlide { last: top, ..live });
     (top, true)
 }
@@ -224,6 +231,35 @@ mod tests {
             "strictly increasing"
         );
         assert_eq!(GLIDE_MS, 3 * GLIDE_FRAME_MS, "three frames at the floor");
+    }
+
+    /// A glide whose cursor clamp already puts the top on the jump top
+    /// paints that top as a plain frame and ends: no tick runs for a frame
+    /// that would not change.
+    #[test]
+    fn glide_step_pinned_on_target_ends_without_a_tick() {
+        let t0 = Instant::now();
+        let mut glide = Some(ScrollGlide {
+            pane: GlidePane::FileView,
+            from: 0,
+            started: t0,
+            last: 0,
+        });
+        // Cursor 29 in a 10-line view keeps the top at 20 or more: the
+        // jump top 20 is the only top that shows it.
+        let step = glide_step(&mut glide, GlidePane::FileView, 20, 29, 10, t0);
+        assert_eq!(step, (20, false));
+        assert_eq!(glide, None, "the glide ends");
+
+        // With room to move, the same glide paints a step and ticks.
+        let mut glide = Some(ScrollGlide {
+            pane: GlidePane::FileView,
+            from: 0,
+            started: t0,
+            last: 0,
+        });
+        let (top, gliding) = glide_step(&mut glide, GlidePane::FileView, 20, 25, 10, t0);
+        assert!(top < 20 && gliding, "top {top} glides");
     }
 
     #[test]

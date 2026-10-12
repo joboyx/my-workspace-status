@@ -412,7 +412,14 @@ impl AppState {
             Action::NavEsc | Action::BackClick if self.search_active => return None,
             // A right click in a `V` highlight leaves it, as on the Workspace.
             Action::BackClick if self.diff_visual_anchor.is_some() => return None,
-            Action::Move(delta) if preview => self.explorer_preview_move(i64::from(delta)),
+            Action::Move(delta) if preview => {
+                // Only Ctrl-d / Ctrl-u map to a `Move` of more than one
+                // row (Page keys and the wheel come in other actions).
+                if delta.unsigned_abs() > 1 {
+                    self.recenter_file_view();
+                }
+                self.explorer_preview_move(i64::from(delta))
+            }
             Action::Move(delta) => self.explorer_move(delta as isize),
             Action::MoveToStart if preview => self.explorer_preview_edge(false),
             Action::MoveToStart => self.explorer_move(isize::MIN / 2),
