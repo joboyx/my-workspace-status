@@ -391,8 +391,9 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
     if let Some(pointer) = pointer_motion(&event, &action) {
         // Any-event motion (DECSET 1003) arrives on every cell the pointer
         // crosses. Store it without dispatch: no chord reset, no status,
-        // no effect. Redraw only when the hovered tab `[✗]` or icon
-        // changes. The icon peek dwell and grace run on `peek_remain`.
+        // no effect. Redraw only when the hovered tab `[✗]`, icon, or
+        // search option chip changes. The icon peek dwell and grace run on
+        // `peek_remain`.
         if ctx.state.set_pointer(pointer) {
             ctx.presenter.mark();
         }
@@ -473,8 +474,11 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
 
 /// Pointer update for buttonless motion, or `None` for any other input.
 ///
-/// [`Action::PointerMove`] stores the cell. Motion inside an overlay maps to
-/// [`Action::None`]; it clears the pointer so no `[✗]` hover shows there.
+/// [`Action::PointerMove`] stores the cell. The search-in-files dialog maps
+/// motion to it too and keeps the pointer for its option chip hover (the
+/// tab `[✗]` and icons ignore it while the dialog is open). Motion inside
+/// any other overlay maps to [`Action::None`]; it clears the pointer so no
+/// `[✗]` hover shows there.
 fn pointer_motion(event: &crossterm::event::Event, action: &Action) -> Option<Option<(u16, u16)>> {
     match action {
         Action::PointerMove { col, row } => Some(Some((*col, *row))),

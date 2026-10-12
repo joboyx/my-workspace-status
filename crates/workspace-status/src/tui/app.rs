@@ -48,7 +48,7 @@ use super::graph_load::{
     load_graph_model, load_graph_model_window, refresh_graph_limit, GraphIdentity,
 };
 use super::keys::KeyStrokeOrigin;
-use super::keys::{event_to_action_with, is_held_nav_backlog};
+use super::keys::{event_to_action_with, is_held_nav_backlog, InputMode};
 use super::state::AppState;
 use super::status::StatusMessage;
 use super::tabs::{
@@ -138,6 +138,10 @@ pub(crate) fn terminal_size_rect() -> Rect {
     Rect::new(0, 0, cols.max(1), rows.max(1))
 }
 
+/// Map one terminal event to an [`Action`] for `state`: its input mode,
+/// focus, and last paint. A left click in the search-in-files dialog maps
+/// to [`Action::SearchFilesToggleOption`] on an option chip and to
+/// [`Action::None`] anywhere else.
 pub(crate) fn map_event(state: &AppState, event: &crossterm::event::Event) -> Action {
     use crossterm::event::{Event, KeyCode, KeyModifiers};
     // Below the minimum size only the resize notice paints. Panes,
@@ -160,15 +164,25 @@ pub(crate) fn map_event(state: &AppState, event: &crossterm::event::Event) -> Ac
             return Action::None;
         }
     }
-    event_to_action_with(
+    let mode = state.input_mode();
+    let action = event_to_action_with(
         event,
-        state.input_mode(),
+        mode,
         state.right_is_diff(),
         matches!(state.focus, super::state::FocusPane::Right),
         state.graph_stash_focused(),
         state.graph_commit_focused(),
         state.hl_folds(),
-    )
+    );
+    match action {
+        // In the search-in-files dialog a click only toggles the option
+        // chip under it. A raw click must never reach dispatch there: the
+        // normal-mode click handlers would act on the panes under the box.
+        Action::Click { col, row } if matches!(mode, InputMode::SearchFiles { .. }) => state
+            .search_option_at(col, row)
+            .map_or(Action::None, Action::SearchFilesToggleOption),
+        action => action,
+    }
 }
 
 pub(crate) fn apply_terminal_resize(

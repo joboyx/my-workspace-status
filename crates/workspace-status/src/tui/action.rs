@@ -73,7 +73,8 @@ pub enum Action {
     /// Pointer motion with no button held (any-event tracking, DECSET 1003).
     ///
     /// The live loop handles it before busy gating and dispatch: it stores
-    /// the pointer and redraws only when the hovered tab `[✗]` changes.
+    /// the pointer and redraws only when the hovered tab `[✗]`, icon, or
+    /// search option chip changes.
     /// [`super::state::AppState::dispatch`] treats it as a no-op that keeps
     /// `g` / `z` chords armed.
     PointerMove {
@@ -290,7 +291,8 @@ pub enum Action {
     SearchFilesPage(i32),
     /// Tab: widen the dialog to all repos, or back to the focused scope.
     SearchFilesToggleScope,
-    /// Alt-c / Alt-w / Alt-r: flip one match option and search again.
+    /// A click on an option chip (`Aa` / `ab` / `.*`): flip that match
+    /// option and search again.
     SearchFilesToggleOption(SearchFilesOption),
     /// Esc close. The dialog is parked for the next Ctrl-f.
     SearchFilesCancel,
@@ -387,11 +389,11 @@ pub enum QuickOpenEntry {
 /// Match option chip of the search-in-files dialog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchFilesOption {
-    /// `Alt-c`: match case exactly (off is smart case).
+    /// `Aa` chip: match case exactly (off is smart case).
     Case,
-    /// `Alt-w`: whole words only.
+    /// `ab` chip: whole words only.
     WholeWord,
-    /// `Alt-r`: the query is a regular expression (off is literal text).
+    /// `.*` chip: the query is a regular expression (off is literal text).
     Regex,
 }
 
