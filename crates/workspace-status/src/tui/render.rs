@@ -1,6 +1,7 @@
 //! Ratatui paint for the tree, graph / diff pane, status, and help overlay.
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
@@ -92,7 +93,7 @@ use super::tabs::{
     compare_picker_empty, file_gutter_width, file_too_large, file_view_gutter_width,
     ComparePickerState, ExplorerPreview, FileTab, EXPLORER_FOLDER_HINT, FILE_IS_BINARY,
 };
-use super::theme::{hex_color, BackgroundMode, Palette, Pill, ThemeId};
+use super::theme::{hex_color, mix_toward, BackgroundMode, Palette, Pill, ThemeId};
 use super::toast::ToastTick;
 use super::tree::{
     file_change_from_name_status, file_change_segments, painted_row_segments, pr_badge_kind,
@@ -285,6 +286,9 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     if let Some(kind) = open_dialog(state) {
         let width = dialog_width(chunks[1], kind);
         let rect = dialog_rect(chunks[1], width, dialog_height(state, kind, width));
+        // Everything outside the box recedes. The copy frame below keeps
+        // the dim: only colours change, so drag-copy reads the same text.
+        dim_backdrop(frame.buffer_mut(), area, rect, palette, state.no_color);
         match kind {
             DialogKind::Help => {
                 let max = draw_help(frame, rect, state);
@@ -381,6 +385,43 @@ fn draw_toasts(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
             state.layout.wake_ms = Some(state.layout.wake_ms.map_or(ms, |at| at.min(ms)));
         }
         ToastTick::Idle => {}
+    }
+}
+
+/// How far (percent) each cell behind a centered dialog blends toward the
+/// theme `surface`.
+pub(crate) const BACKDROP_PERCENT: i32 = 50;
+
+/// Dim every cell of `area` outside `keep` so the dialog in `keep` stands
+/// out and the rest of the screen recedes.
+///
+/// An RGB fg or bg moves [`BACKDROP_PERCENT`] toward `palette.surface`.
+/// A non-RGB fg (`Reset`, indexed) gets [`Modifier::DIM`] instead; a
+/// non-RGB bg is the terminal's own fill and stays (SGR faint only dims the
+/// fg). Under `no_color` no colour changes: every cell gets `DIM` only.
+/// Text never changes.
+fn dim_backdrop(buf: &mut Buffer, area: Rect, keep: Rect, palette: Palette, no_color: bool) {
+    let area = area.intersection(buf.area);
+    let surface_rgb = matches!(palette.surface, Color::Rgb(..));
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if keep.contains(Position::new(x, y)) {
+                continue;
+            }
+            let cell = &mut buf[(x, y)];
+            if no_color {
+                cell.modifier.insert(Modifier::DIM);
+                continue;
+            }
+            if surface_rgb && matches!(cell.fg, Color::Rgb(..)) {
+                cell.fg = mix_toward(cell.fg, palette.surface, BACKDROP_PERCENT);
+            } else {
+                cell.modifier.insert(Modifier::DIM);
+            }
+            if surface_rgb && matches!(cell.bg, Color::Rgb(..)) {
+                cell.bg = mix_toward(cell.bg, palette.surface, BACKDROP_PERCENT);
+            }
+        }
     }
 }
 
@@ -12084,7 +12125,8 @@ mod tests {
     /// popover, and the too-small notice. Pane title rows sit on their
     /// role colour (`sidebar` left, `surface` right), no pane
     /// cell carries another pane's role, chrome rows end on `chrome`, and a
-    /// popup's border sits on `panel` with no pane role inside it.
+    /// popup's border sits on `panel` with no pane role inside it. Behind
+    /// an open dialog each role is the backdrop dim of itself.
     #[test]
     fn paint_mode_sets_a_background_on_every_cell_for_every_theme() {
         let mut screens = paint_sweep_screens();
@@ -12144,18 +12186,33 @@ mod tests {
                 }
                 let outside = |x: u16, y: u16| popup.is_none_or(|p| !p.contains((x, y).into()));
                 let pane_h = state.layout.pane_height;
+                // An open dialog dims every role outside its box (the popover does not).
+                let backdrop = open_dialog(state).is_some();
+                let role_bg = |role: Color| {
+                    if backdrop {
+                        dimmed(role, palette)
+                    } else {
+                        role
+                    }
+                };
                 let panes: Vec<(Rect, Color)> = if state.is_explorer_tab() {
                     let (left, right) = explorer_pane_rects(state);
-                    vec![(left, palette.sidebar), (right, palette.surface)]
+                    vec![
+                        (left, role_bg(palette.sidebar)),
+                        (right, role_bg(palette.surface)),
+                    ]
                 } else {
                     let (left, right) = pane_rects(state, *cols);
-                    vec![(left, palette.sidebar), (right, palette.surface)]
+                    vec![
+                        (left, role_bg(palette.sidebar)),
+                        (right, role_bg(palette.surface)),
+                    ]
                 };
                 let roles = [
-                    palette.sidebar,
-                    palette.surface,
-                    palette.chrome,
-                    palette.panel,
+                    role_bg(palette.sidebar),
+                    role_bg(palette.surface),
+                    role_bg(palette.chrome),
+                    role_bg(palette.panel),
                 ];
                 for (pane, role) in panes {
                     for y in pane.top()..pane.bottom() {
@@ -12183,7 +12240,7 @@ mod tests {
                 for y in chrome_rows {
                     assert_eq!(
                         buf[(*cols - 1, y)].bg,
-                        palette.chrome,
+                        role_bg(palette.chrome),
                         "{} chrome",
                         at(*cols - 1, y)
                     );
@@ -16742,5 +16799,236 @@ mod tests {
             terminal.backend().buffer()[(hits[0].x, hits[0].y)].symbol(),
             "P"
         );
+    }
+
+    /// The box `draw` paints for the open dialog on a `cols`-wide frame.
+    fn open_dialog_box(state: &AppState, cols: u16) -> Rect {
+        let kind = open_dialog(state).expect("a dialog is open");
+        let panes = Rect::new(0, 1, cols, state.layout.pane_height);
+        let width = dialog_width(panes, kind);
+        dialog_rect(panes, width, dialog_height(state, kind, width))
+    }
+
+    /// `color` moved [`BACKDROP_PERCENT`] toward `surface`.
+    fn dimmed(color: Color, palette: Palette) -> Color {
+        mix_toward(color, palette.surface, BACKDROP_PERCENT)
+    }
+
+    /// Every pane cell outside `keep` whose glyph and colours are RGB in
+    /// both frames moved 50% toward `surface`; at least one changed.
+    fn assert_panes_dimmed(
+        before: &Buffer,
+        after: &Buffer,
+        panes: Rect,
+        keep: Rect,
+        palette: Palette,
+    ) {
+        let mut checked = 0;
+        let mut moved = 0;
+        for y in panes.top()..panes.bottom() {
+            for x in panes.left()..panes.right() {
+                if keep.contains(Position::new(x, y)) {
+                    continue;
+                }
+                let (was, now) = (&before[(x, y)], &after[(x, y)]);
+                if was.symbol() != now.symbol()
+                    || !matches!(was.fg, Color::Rgb(..))
+                    || !matches!(was.bg, Color::Rgb(..))
+                {
+                    continue;
+                }
+                checked += 1;
+                assert_eq!(
+                    (now.fg, now.bg),
+                    (dimmed(was.fg, palette), dimmed(was.bg, palette)),
+                    "cell ({x}, {y}) {:?} must recede 50% toward surface",
+                    was.symbol()
+                );
+                assert!(!now.modifier.contains(Modifier::DIM), "({x}, {y})");
+                if now.fg != was.fg || now.bg != was.bg {
+                    moved += 1;
+                }
+            }
+        }
+        assert!(checked > 0 && moved > 0, "checked {checked}, moved {moved}");
+    }
+
+    /// The center of `keep` holds the dialog's own undimmed panel colour.
+    fn assert_dialog_crisp(after: &Buffer, keep: Rect, palette: Palette) {
+        let cell = &after[(keep.x + keep.width / 2, keep.y + keep.height / 2)];
+        assert_eq!(cell.bg, palette.panel, "dialog cell keeps its panel bg");
+        assert!(!cell.modifier.contains(Modifier::DIM));
+    }
+
+    fn painted_state() -> AppState {
+        let snapshot = build_workspace_snapshot(
+            &[repo("app", true), repo("lib", false), repo("web", true)],
+            &[],
+            false,
+            &[],
+        );
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.background = BackgroundMode::Paint;
+        state
+    }
+
+    #[test]
+    fn open_palette_dims_cells_outside_the_dialog() {
+        use crate::tui::action::QuickOpenEntry;
+        let mut state = painted_state();
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let before = terminal.backend().buffer().clone();
+
+        state.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
+        assert_eq!(open_dialog(&state), Some(DialogKind::QuickOpen));
+        draw_state(&mut terminal, &mut state);
+        let after = terminal.backend().buffer().clone();
+        let keep = open_dialog_box(&state, 120);
+        let panes = Rect::new(0, 1, 120, state.layout.pane_height);
+        assert_panes_dimmed(&before, &after, panes, keep, palette);
+        assert_dialog_crisp(&after, keep, palette);
+        // The tab strip recedes too: the whole frame dims, not just panes.
+        let tab = &after[(119, 0)];
+        assert_eq!(tab.bg, dimmed(before[(119, 0)].bg, palette));
+        // The copy frame holds the dimmed cells; its text is unchanged.
+        assert_eq!(state.painted_frame, after);
+    }
+
+    #[test]
+    fn confirm_and_help_dim_the_backdrop() {
+        for open in ["confirm", "help"] {
+            let mut state = painted_state();
+            let palette = state.theme.palette();
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let before = terminal.backend().buffer().clone();
+            if open == "confirm" {
+                state.confirm = Some(PendingConfirm::StashDrop {
+                    repo: "app".into(),
+                    stash_ref: "stash@{0}".into(),
+                });
+            } else {
+                state.help_open = true;
+            }
+            draw_state(&mut terminal, &mut state);
+            let after = terminal.backend().buffer().clone();
+            let keep = open_dialog_box(&state, 120);
+            let panes = Rect::new(0, 1, 120, state.layout.pane_height);
+            assert!(keep.width < 120, "{open}: box leaves a backdrop");
+            assert_panes_dimmed(&before, &after, panes, keep, palette);
+            assert_dialog_crisp(&after, keep, palette);
+        }
+    }
+
+    #[test]
+    fn backdrop_falls_back_to_dim_modifier_without_rgb_or_with_no_color() {
+        let palette = ThemeId::TokyoNight.palette();
+        let rgb = Color::Rgb(200, 100, 50);
+        let fresh = || {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 3, 1));
+            buf[(0, 0)].set_fg(rgb).set_bg(rgb);
+            buf[(1, 0)].set_fg(Color::Indexed(7)).set_bg(Color::Reset);
+            buf[(2, 0)].set_fg(rgb).set_bg(rgb);
+            buf
+        };
+        let keep = Rect::new(2, 0, 1, 1);
+
+        let mut buf = fresh();
+        let area = buf.area;
+        dim_backdrop(&mut buf, area, keep, palette, false);
+        assert_eq!(buf[(0, 0)].fg, dimmed(rgb, palette));
+        assert_eq!(buf[(0, 0)].bg, dimmed(rgb, palette));
+        assert!(!buf[(0, 0)].modifier.contains(Modifier::DIM));
+        // Indexed fg: SGR faint; the terminal's own bg stays.
+        assert_eq!(buf[(1, 0)].fg, Color::Indexed(7));
+        assert_eq!(buf[(1, 0)].bg, Color::Reset);
+        assert!(buf[(1, 0)].modifier.contains(Modifier::DIM));
+        assert_eq!(buf[(2, 0)], fresh()[(2, 0)], "kept cell is untouched");
+
+        // NO_COLOR: no colour moves, every backdrop cell gets DIM.
+        let mut buf = fresh();
+        let area = buf.area;
+        dim_backdrop(&mut buf, area, keep, palette, true);
+        for x in 0..2 {
+            assert_eq!(buf[(x, 0)].fg, fresh()[(x, 0)].fg);
+            assert_eq!(buf[(x, 0)].bg, fresh()[(x, 0)].bg);
+            assert!(buf[(x, 0)].modifier.contains(Modifier::DIM));
+        }
+        assert_eq!(buf[(2, 0)], fresh()[(2, 0)]);
+
+        // Live frame: NO_COLOR and terminal fills dim through the modifier.
+        for (no_color, background) in [
+            (true, BackgroundMode::Paint),
+            (false, BackgroundMode::Terminal),
+        ] {
+            let mut state = painted_state();
+            state.no_color = no_color;
+            state.background = background;
+            state.help_open = true;
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let keep = open_dialog_box(&state, 120);
+            let buf = terminal.backend().buffer();
+            let outside = &buf[(0, keep.y)];
+            assert!(
+                outside.modifier.contains(Modifier::DIM) || matches!(outside.fg, Color::Rgb(..)),
+                "{no_color} {background:?}: {outside:?}"
+            );
+            if no_color {
+                assert!(outside.modifier.contains(Modifier::DIM));
+            } else {
+                assert_eq!(outside.bg, Color::Reset, "terminal fill stays");
+            }
+            let inside = &buf[(keep.x + keep.width / 2, keep.y + keep.height / 2)];
+            assert!(!inside.modifier.contains(Modifier::DIM));
+        }
+    }
+
+    #[test]
+    fn closed_dialog_leaves_no_backdrop() {
+        let mut state = painted_state();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let before = terminal.backend().buffer().clone();
+        state.help_open = true;
+        draw_state(&mut terminal, &mut state);
+        // Open: the status row recedes under the backdrop.
+        let palette = state.theme.palette();
+        assert_eq!(
+            terminal.backend().buffer()[(119, 29)].bg,
+            dimmed(palette.chrome, palette)
+        );
+        state.help_open = false;
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(terminal.backend().buffer(), &before);
+    }
+
+    /// A PR badge link outside a small confirm box stays, and the OSC 8
+    /// reprint reads its dimmed cell from the finished buffer.
+    #[test]
+    fn badge_link_outside_the_dialog_reprints_dimmed() {
+        use crate::tui::hyperlink::link_cells;
+        let mut state = pr_state(&[branch_repo("app", "feature")], true);
+        set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+        let palette = state.theme.palette();
+        let mut terminal = pr_terminal();
+        draw_state(&mut terminal, &mut state);
+        let link = state.layout.links[0].clone();
+        let was = terminal.backend().buffer()[(link.x, link.y)].clone();
+
+        state.confirm = Some(PendingConfirm::StashDrop {
+            repo: "app".into(),
+            stash_ref: "stash@{0}".into(),
+        });
+        draw_state(&mut terminal, &mut state);
+        let keep = open_dialog_box(&state, 120);
+        assert!(!keep.contains(Position::new(link.x, link.y)));
+        assert_eq!(state.layout.links, vec![link.clone()]);
+        let cells = link_cells(terminal.backend().buffer(), &state.layout.links);
+        let reprint = format!("{cells:?}");
+        let want = format!("{:?}", dimmed(was.fg, palette));
+        assert!(reprint.contains(&want), "{want} in {reprint}");
     }
 }

@@ -2426,6 +2426,33 @@ mod tests {
         }
     }
 
+    /// The dialog backdrop is meant to recede, so it has no contrast floor;
+    /// it only has to show. Muted text and every pane role move visibly
+    /// toward `surface` on every theme.
+    #[test]
+    fn backdrop_dim_is_visible_on_every_theme() {
+        use crate::tui::render::BACKDROP_PERCENT;
+        for id in THEME_IDS {
+            let palette = id.palette();
+            assert!(
+                matches!(palette.surface, Color::Rgb(..)),
+                "{id:?} surface is RGB"
+            );
+            for (name, color) in [
+                ("muted", palette.muted),
+                ("file", palette.file),
+                ("sidebar", palette.sidebar),
+                ("chrome", palette.chrome),
+            ] {
+                assert_ne!(
+                    mix_toward(color, palette.surface, BACKDROP_PERCENT),
+                    color,
+                    "{id:?} {name} must dim"
+                );
+            }
+        }
+    }
+
     #[test]
     fn mix_toward_rounds_per_channel_and_skips_non_rgb() {
         let base = Color::Rgb(10, 100, 200);
