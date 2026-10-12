@@ -56,7 +56,8 @@ The keys below apply to both files. A missing file means nothing is ignored and 
   "watchMs": 3000,
   "fetchMs": 300000,
   "fetchConcurrency": 10,
-  "updateCheck": true
+  "updateCheck": true,
+  "termProgress": true
 }
 ```
 
@@ -80,7 +81,7 @@ User file only (a workspace file that sets these keys fails to load):
 | `editor`          | no                         | unset (`vim` at resolve)      | Command string for TUI `e` (same shape as `$EDITOR`). Overrides `$VISUAL` / `$EDITOR`.         |
 | `diffTool`        | no                         | unset (`vimdiff` at resolve) | Command string for TUI `E`. No `$EDITOR` / `$VISUAL` / `$GIT_EXTERNAL_DIFF` fallback.          |
 | `viewDefaults`    | no                         | `{}` (in-app defaults)        | TUI launch view modes. See [`viewDefaults`](#viewdefaults)                                     |
-| `theme`, `themeMode`, `glyphs`, `watchMs`, `fetchMs`, `fetchConcurrency`, `updateCheck` | no | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
+| `theme`, `themeMode`, `glyphs`, `watchMs`, `fetchMs`, `fetchConcurrency`, `updateCheck`, `termProgress` | no | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
 | `updateCheckStore`, `commentStore`, `viewedStore`, `themeStore`, `git` | no; user file or env only | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
 
 ### `ignoredRepos`
@@ -170,6 +171,7 @@ These top-level keys set the same settings as the env vars in [Environment varia
 | `fetchMs` | `WS_STATUS_FETCH_MS` | integer >= 0. `0` turns the background fetch off. `1` to `29999` clamp up to `30000`, like the env var |
 | `fetchConcurrency` | `WS_STATUS_FETCH_CONCURRENCY` | integer >= 1 |
 | `updateCheck` | `WS_STATUS_UPDATE_CHECK` | `true` \| `false`. `false` turns the TUI-startup release check off |
+| `termProgress` | `WS_STATUS_TERM_PROGRESS` | `true` \| `false`. `false` turns the OSC 9;4 terminal progress off |
 | `updateCheckStore` | `WS_STATUS_UPDATE_CHECK_STORE` | path. User file or env only |
 | `commentStore` | `WS_STATUS_COMMENT_STORE` | path. User file or env only |
 | `viewedStore` | `WS_STATUS_VIEWED_STORE` | path. User file or env only |
@@ -245,6 +247,7 @@ Optional object. It sets the TUI view modes at launch. Each key is optional. An 
 | `WS_STATUS_THEME_STORE` | `themeStore` (user file only) | `$XDG_STATE_HOME/my-workspace-status/theme.json` | State file for the last-used TUI theme: `{"version": 1, "theme": "<slug>"}`. `T` and the palette `Cycle theme` command write it on every cycle, Slate included. The config file is never written. Launch order: a known `WS_STATUS_THEME`, then this file, then config `theme`, then `slate`. A missing, unreadable, corrupt, other-version, or unknown-slug file falls through. A save creates a missing file and its parent dirs. An existing file that is not this store is left unchanged: the save fails, the status line shows `theme save failed: <error>`, and the theme still changes for the session. `--plain` / `--json` never write it. Tests, desktop e2e, and `scripts/capture-demo-stills.sh` must set this to a temp file. CI: `crates/workspace-status/tests/release_watch.rs`. |
 | `WS_STATUS_UPDATE_CHECK_STORE` | `updateCheckStore` (user file only) | `$XDG_STATE_HOME/my-workspace-status/update-check.json` | Last GitHub Release check time for the TUI startup prompt (`lastCheckUnix`). An existing file that is not this store is never overwritten: the save is skipped and stderr shows `update-check save failed: <path>: not an update-check store, left unchanged`; startup goes on. Tests, desktop e2e, and `scripts/capture-demo-stills.sh` must set this to a temp file with a fresh `lastCheckUnix`. A TTY launch without that override writes the default XDG file. A TTY `ws` launch checks at most every 6 hours; `--plain` / `--json` / `--update` never read or write it. CI: `crates/workspace-status/tests/release_watch.rs`. |
 | `WS_STATUS_UPDATE_CHECK` | `updateCheck` | unset (check on) | `0`, `false`, or `off` turns off the TUI-startup GitHub Release check: no fetch, no prompt, no store write. `1`, `true`, or `on` turns it on. Any other value is ignored and falls through to config `updateCheck`, then on. |
+| `WS_STATUS_TERM_PROGRESS` | `termProgress` | unset (progress on) | Terminal progress (OSC 9;4, `ESC ] 9 ; 4 ; <state> ; <percent> BEL`) while a key-started fetch, pull, or push runs over two or more repos (for example `f` or `p` on the workspace row). Terminals that support it show the bar in the tab or taskbar; others ignore it. The bar is normal (`1`) with the percent of repos done, and error (`2`) once a repo in the batch fails. A single-repo fetch and the background fetch tick write nothing. The TUI clears the bar (`ESC ] 9 ; 4 ; 0 ; 0 BEL`) when the batch ends and on every exit: quit, Ctrl-C, an error, and a panic. `0`, `false`, or `off` turns it off: the TUI writes no OSC 9;4 at all. `1`, `true`, or `on` turns it on. Any other value falls through to config `termProgress`, then on. Some older terminals show any OSC 9 as a desktop notification; turn it off there. |
 | `WORKSPACE_STATUS_GITHUB_TOKEN` | — (secret; a workspace file may be committed) | unset | Optional Bearer token for GitHub Releases API (`curl`). Used by the TUI startup check and by `ws --update` when fetching notes. Unset is fine for the public repo rate limit. |
 | `WS_STATUS_DEV_BUILD` | — (build time) | unset                                                   | **Build time** (`option_env!`, `DEV_BUILD` in `lib.rs`). `scripts/install-dev.sh` sets it to the short git sha, plus `-dirty` for a dirty tree. A dev build shows `-dev (sha)` in `--version` and the help footer, skips the TUI-startup release prompt, and makes `--update` exec `workspace-status-update-dev` with no release notes. Has no effect at run time. |
 | `WS_DEV_BIN_DIR` | — (`scripts/install-dev.sh` only) | `$HOME/.local/bin`                                      | `scripts/install-dev.sh` only: where `ws-dev`, `workspace-status-dev`, and `workspace-status-update-dev` go (and what `--uninstall` cleans). The generated `workspace-status-update-dev` keeps the directory it was installed with. |

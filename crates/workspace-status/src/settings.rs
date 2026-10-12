@@ -60,6 +60,9 @@ pub struct Settings {
     /// `NO_COLOR` is set and non-empty (no-color.org). Env only, no config
     /// key. The new visuals paint without colour; the rest keeps the theme.
     pub(crate) no_color: bool,
+    /// OSC 9;4 terminal progress for multi-repo batches
+    /// (`WS_STATUS_TERM_PROGRESS` / `termProgress`), default on.
+    pub(crate) term_progress: bool,
 }
 
 impl Settings {
@@ -99,9 +102,26 @@ impl Settings {
             theme_store,
             git: resolve_git_binary(get("WORKSPACE_STATUS_GIT").as_deref(), keys.git.as_deref()),
             no_color: no_color(get(NO_COLOR_ENV).as_deref()),
+            term_progress: env_bool(get(TERM_PROGRESS_ENV).as_deref())
+                .or(keys.term_progress)
+                .unwrap_or(true),
         }
     }
 }
+
+/// Boolean env value: `0`, `false`, or `off` is false; `1`, `true`, or `on`
+/// is true (trimmed, any case). Unset or any other value is `None`, so the
+/// caller falls through to the config value, then the default.
+pub(crate) fn env_bool(raw: Option<&str>) -> Option<bool> {
+    match raw?.trim().to_ascii_lowercase().as_str() {
+        "0" | "false" | "off" => Some(false),
+        "1" | "true" | "on" => Some(true),
+        _ => None,
+    }
+}
+
+/// Env var for the `termProgress` key.
+const TERM_PROGRESS_ENV: &str = "WS_STATUS_TERM_PROGRESS";
 
 /// The standard no-colour env var (<https://no-color.org>).
 const NO_COLOR_ENV: &str = "NO_COLOR";
@@ -175,6 +195,7 @@ mod tests {
             viewed_store: Some(PathBuf::from("/cfg/viewed.json")),
             theme_store: Some(PathBuf::from("/cfg/theme.json")),
             git: Some(PathBuf::from("/cfg/git")),
+            term_progress: Some(false),
         }
     }
 
@@ -208,6 +229,7 @@ mod tests {
             Path::new("/xdg/state/my-workspace-status/theme.json")
         );
         assert_eq!(got.git, resolve_git_binary(None, None));
+        assert!(got.term_progress, "terminal progress is on by default");
     }
 
     #[test]
@@ -229,6 +251,7 @@ mod tests {
                 theme_store: PathBuf::from("/cfg/theme.json"),
                 git: PathBuf::from("/cfg/git"),
                 no_color: false,
+                term_progress: false,
             }
         );
     }
@@ -248,6 +271,7 @@ mod tests {
             ("WS_STATUS_VIEWED_STORE", "/env/viewed.json"),
             ("WS_STATUS_THEME_STORE", "/env/theme.json"),
             ("WORKSPACE_STATUS_GIT", "/env/git"),
+            ("WS_STATUS_TERM_PROGRESS", "on"),
         ];
         let got = Settings::resolve(&all_keys(), env_of(&env));
         assert_eq!(
@@ -266,6 +290,7 @@ mod tests {
                 theme_store: PathBuf::from("/env/theme.json"),
                 git: PathBuf::from("/env/git"),
                 no_color: false,
+                term_progress: true,
             }
         );
     }
@@ -285,6 +310,7 @@ mod tests {
             ("WS_STATUS_VIEWED_STORE", " "),
             ("WS_STATUS_THEME_STORE", "  "),
             ("WORKSPACE_STATUS_GIT", ""),
+            ("WS_STATUS_TERM_PROGRESS", "maybe"),
         ];
         let got = Settings::resolve(&all_keys(), env_of(&env));
         assert_eq!(got, Settings::resolve(&all_keys(), env_of(&[])));
@@ -423,6 +449,41 @@ mod tests {
             ThemeMode::Light,
             "env light beats config dark"
         );
+    }
+
+    #[test]
+    fn term_progress_env_beats_config_default_on() {
+        let resolve = |config: Option<bool>, env: &[(&str, &str)]| {
+            let keys = RuntimeKeys {
+                term_progress: config,
+                ..RuntimeKeys::default()
+            };
+            Settings::resolve(&keys, env_of(env)).term_progress
+        };
+        assert!(resolve(None, &[]), "default on");
+        assert!(!resolve(Some(false), &[]), "config off applies without env");
+        for off in ["0", "false", "OFF", " off "] {
+            assert!(
+                !resolve(Some(true), &[("WS_STATUS_TERM_PROGRESS", off)]),
+                "env {off:?} beats config on"
+            );
+        }
+        for on in ["1", "true", "On"] {
+            assert!(
+                resolve(Some(false), &[("WS_STATUS_TERM_PROGRESS", on)]),
+                "env {on:?} beats config off"
+            );
+        }
+        for unknown in ["", "yes", "2"] {
+            assert!(
+                !resolve(Some(false), &[("WS_STATUS_TERM_PROGRESS", unknown)]),
+                "env {unknown:?} falls through to config"
+            );
+            assert!(
+                resolve(None, &[("WS_STATUS_TERM_PROGRESS", unknown)]),
+                "env {unknown:?} falls through to the default"
+            );
+        }
     }
 
     #[test]

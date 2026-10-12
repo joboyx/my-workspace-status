@@ -94,6 +94,9 @@ pub struct RuntimeKeys {
     pub theme_store: Option<PathBuf>,
     /// `git` (`WORKSPACE_STATUS_GIT`): git binary path or command name.
     pub git: Option<PathBuf>,
+    /// `termProgress` (`WS_STATUS_TERM_PROGRESS`): OSC 9;4 terminal progress
+    /// for multi-repo batches on or off.
+    pub term_progress: Option<bool>,
 }
 
 impl RuntimeKeys {
@@ -112,6 +115,7 @@ impl RuntimeKeys {
             viewed_store: over.viewed_store.or(self.viewed_store),
             theme_store: over.theme_store.or(self.theme_store),
             git: over.git.or(self.git),
+            term_progress: over.term_progress.or(self.term_progress),
         }
     }
 }
@@ -179,6 +183,7 @@ struct RawConfig {
     viewed_store: Option<serde_json::Value>,
     theme_store: Option<serde_json::Value>,
     git: Option<serde_json::Value>,
+    term_progress: Option<serde_json::Value>,
 }
 
 fn normalize_ignored(repos: &[String]) -> Vec<String> {
@@ -561,6 +566,7 @@ fn parse_runtime_keys(
         viewed_store: parse_path_key(file, "viewedStore", parsed.viewed_store.take(), home)?,
         theme_store: parse_path_key(file, "themeStore", parsed.theme_store.take(), home)?,
         git: parse_git_key(file, parsed.git.take(), home)?,
+        term_progress: parse_bool_key(file, "termProgress", parsed.term_progress.take())?,
     })
 }
 
@@ -1543,7 +1549,7 @@ mod tests {
     fn runtime_keys_parse_valid_values() {
         let cfg = load_layered_home(
             Some(
-                r#"{"theme":" dracula ","themeMode":"light","glyphs":"ascii","watchMs":0,"fetchMs":60000,"fetchConcurrency":4,"updateCheck":false,"updateCheckStore":"~/state/update-check.json","commentStore":"/var/ws/comments.json","viewedStore":"~/viewed.json","themeStore":"~/state/theme.json","git":"git-wrapper"}"#,
+                r#"{"theme":" dracula ","themeMode":"light","glyphs":"ascii","watchMs":0,"fetchMs":60000,"fetchConcurrency":4,"updateCheck":false,"updateCheckStore":"~/state/update-check.json","commentStore":"/var/ws/comments.json","viewedStore":"~/viewed.json","themeStore":"~/state/theme.json","git":"git-wrapper","termProgress":false}"#,
             ),
             None,
             Some("/home/demo"),
@@ -1564,6 +1570,7 @@ mod tests {
                 viewed_store: Some(PathBuf::from("/home/demo/viewed.json")),
                 theme_store: Some(PathBuf::from("/home/demo/state/theme.json")),
                 git: Some(PathBuf::from("git-wrapper")),
+                term_progress: Some(false),
             }
         );
         assert_eq!(
@@ -1631,6 +1638,11 @@ mod tests {
                 "must be an integer >= 1".to_string(),
             ),
             ("updateCheck", "0", "must be true or false".to_string()),
+            (
+                "termProgress",
+                r#""off""#,
+                "must be true or false".to_string(),
+            ),
             (
                 "updateCheck",
                 r#""false""#,

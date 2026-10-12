@@ -5,11 +5,13 @@
 //! pane/compute helpers.
 
 use std::collections::BTreeSet;
-use std::io::{self, stdout};
+use std::io::{self, stdout, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crossterm::cursor::Show;
 use crossterm::event::{
     KeyEvent, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
@@ -56,6 +58,7 @@ use super::tabs::{
     HEAD_HAS_NO_COMMIT,
 };
 use super::term_bg::{is_light_background, pick_theme, query_background, QUERY_TIMEOUT};
+use super::term_progress::PROGRESS_CLEAR;
 use super::tty::{disable_mouse, enable_mouse, poll_event, read_event, read_event_origin};
 #[cfg(test)]
 use super::watch::{checkout_watch_identities, watch_needs_pane_reload};
@@ -71,10 +74,16 @@ pub struct TuiOpts {
 }
 
 /// Open the alternate screen and run until quit.
+///
+/// Every exit restores the terminal and clears the OSC 9;4 progress:
+/// quit, an error return, and a panic on this thread (panic hook).
 pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
+    let progress = opts.settings.term_progress;
+    install_panic_hook(progress, stdout);
     let mut state = AppState::launch(opts.cwd.clone(), opts.snapshot.clone(), &opts.settings);
     state.apply_view_defaults(&opts.config.view_defaults);
     enable_raw_mode().map_err(|_| 1u8)?;
+    TERMINAL_SET_UP.store(true, Ordering::SeqCst);
     // Raw mode keeps the terminal's reply off the screen. The input thread
     // starts later in `event_loop::run`, so this read cannot race it.
     let mode = opts.settings.theme_mode;
@@ -85,7 +94,7 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
     state.theme = pick_theme(state.theme, mode, light_bg);
     let mut out = stdout();
     if execute!(out, EnterAlternateScreen).is_err() || enable_mouse(&mut out).is_err() {
-        let _ = disable_raw_mode();
+        restore_terminal(progress);
         return Err(1);
     }
     push_keyboard_enhancement();
@@ -98,7 +107,7 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
     ) {
         Ok(t) => t,
         Err(_) => {
-            restore_terminal();
+            restore_terminal(progress);
             return Err(1);
         }
     };
@@ -109,7 +118,7 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
         Ok(rt) => rt.block_on(super::event_loop::run(&mut terminal, &mut state, &opts)),
         Err(_) => Err(1),
     };
-    restore_terminal();
+    restore_terminal(progress);
     let _ = terminal.show_cursor();
     // The runtime drop waits for workers that are still running (a git
     // fetch, say). Drop it only once the terminal is back to normal.
@@ -117,11 +126,52 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
     result
 }
 
-fn restore_terminal() {
+/// True while `run_tui` has the terminal in raw mode. The panic hook
+/// restores only then, so a panic after the TUI closed leaves the shell
+/// alone and the restore runs once.
+static TERMINAL_SET_UP: AtomicBool = AtomicBool::new(false);
+
+/// Give the terminal back on stdout; `progress` is the `termProgress`
+/// setting.
+fn restore_terminal(progress: bool) {
+    TERMINAL_SET_UP.store(false, Ordering::SeqCst);
+    restore_terminal_to(&mut stdout(), progress);
+}
+
+/// Clear the OSC 9;4 progress first (when `progress` is on), then leave raw
+/// mode, mouse capture, the keyboard protocol, and the alternate screen, and
+/// show the cursor. Each step is safe on a terminal that was never set up.
+fn restore_terminal_to<W: Write>(out: &mut W, progress: bool) {
+    if progress {
+        let _ = out.write_all(PROGRESS_CLEAR.as_bytes());
+    }
     let _ = disable_raw_mode();
-    let mut end = stdout();
-    let _ = disable_mouse(&mut end);
-    let _ = execute!(end, PopKeyboardEnhancementFlags, LeaveAlternateScreen);
+    let _ = disable_mouse(out);
+    let _ = execute!(out, PopKeyboardEnhancementFlags, LeaveAlternateScreen, Show);
+}
+
+/// Chain a panic hook that restores the terminal to `target()` before the
+/// previous hook prints the panic, so the message lands on the normal
+/// screen with raw mode off.
+///
+/// It acts only for a panic on the thread that installed it (the TUI
+/// thread) while [`TERMINAL_SET_UP`] is set. A worker panic that Tokio
+/// catches leaves the running TUI alone.
+fn install_panic_hook<W, F>(progress: bool, target: F)
+where
+    W: Write,
+    F: Fn() -> W + Send + Sync + 'static,
+{
+    let tui_thread = std::thread::current().id();
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().id() == tui_thread
+            && TERMINAL_SET_UP.swap(false, Ordering::SeqCst)
+        {
+            restore_terminal_to(&mut target(), progress);
+        }
+        prev(info);
+    }));
 }
 
 fn keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
@@ -1156,6 +1206,66 @@ mod tests {
             default_tip_ref: None,
             local_branches: Vec::new(),
         }
+    }
+
+    fn restore_bytes(progress: bool) -> String {
+        let mut out = Vec::new();
+        restore_terminal_to(&mut out, progress);
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn restore_sequence_clears_progress_first() {
+        let on = restore_bytes(true);
+        assert!(
+            on.starts_with(PROGRESS_CLEAR),
+            "progress clear comes first: {on:?}"
+        );
+        assert!(on.contains("\x1b[?1049l"), "leaves the alt screen: {on:?}");
+        assert!(on.contains("\x1b[?25h"), "shows the cursor: {on:?}");
+        let off = restore_bytes(false);
+        assert!(
+            !off.contains("\x1b]9;4;"),
+            "termProgress off writes no OSC 9;4: {off:?}"
+        );
+        assert_eq!(on, format!("{PROGRESS_CLEAR}{off}"));
+    }
+
+    /// Test writer that appends to a shared buffer.
+    struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for SharedBuf {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn panic_hook_restores_terminal_and_clears_progress() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&seen);
+        install_panic_hook(true, move || SharedBuf(std::sync::Arc::clone(&sink)));
+        TERMINAL_SET_UP.store(true, Ordering::SeqCst);
+        let caught = std::panic::catch_unwind(|| panic!("boom in the TUI thread"));
+        // Put the default hook back for the other tests.
+        drop(std::panic::take_hook());
+        assert!(caught.is_err());
+        let out = String::from_utf8(seen.lock().unwrap().clone()).unwrap();
+        assert!(
+            out.starts_with(PROGRESS_CLEAR),
+            "hook clears progress first: {out:?}"
+        );
+        assert!(out.contains("\x1b[?1049l"), "hook leaves the alt screen");
+        assert!(out.contains("\x1b[?25h"), "hook shows the cursor");
+        assert!(
+            !TERMINAL_SET_UP.load(Ordering::SeqCst),
+            "the hook restores once"
+        );
     }
 
     #[test]

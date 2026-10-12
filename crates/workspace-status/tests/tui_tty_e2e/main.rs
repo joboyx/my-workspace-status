@@ -21,6 +21,8 @@ mod pty_live_g_chords;
 #[cfg(unix)]
 mod pty_spinner;
 #[cfg(unix)]
+mod pty_term_progress;
+#[cfg(unix)]
 mod pty_theme_mode;
 #[cfg(unix)]
 mod seed;

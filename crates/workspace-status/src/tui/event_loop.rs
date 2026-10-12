@@ -34,6 +34,7 @@ use super::keys::{drop_g_chord_echo, held_nav_key, KeyStrokeOrigin};
 use super::render::draw;
 use super::state::AppState;
 use super::status::StatusMessage;
+use super::term_progress::{progress_for, TermProgress};
 use super::tty::{poll_event, read_event_origin};
 use super::watch::watch_remain_ms;
 
@@ -205,6 +206,8 @@ struct LoopCtx<'a> {
     last_fetch: Instant,
     watch_ms: u64,
     fetch_ms: u64,
+    /// OSC 9;4 progress the terminal shows for the current batch.
+    progress: TermProgress,
     quit: bool,
 }
 
@@ -225,7 +228,8 @@ pub async fn run(
 ) -> Result<(), u8> {
     let input = InputBridge::spawn();
     let mut presenter = Presenter::new();
-    draw_frame(terminal, state)?;
+    let mut progress = TermProgress::new(opts.settings.term_progress);
+    draw_frame(terminal, state, &mut progress)?;
     presenter.painted();
 
     let mut ctx = LoopCtx {
@@ -240,6 +244,7 @@ pub async fn run(
         last_fetch: Instant::now(),
         watch_ms: opts.settings.watch_ms,
         fetch_ms: opts.settings.fetch_ms,
+        progress,
         quit: false,
     };
     ctx.interp
@@ -357,7 +362,7 @@ pub async fn run(
                 // Animation frames redraw on their own tick (spinner,
                 // flash, glide); idle draws only when dirty.
                 if ctx.presenter.should_draw(ctx.state.next_anim_tick_ms()) {
-                    draw_frame(ctx.terminal, ctx.state)?;
+                    draw_frame(ctx.terminal, ctx.state, &mut ctx.progress)?;
                     ctx.presenter.painted();
                 }
             }
@@ -367,17 +372,26 @@ pub async fn run(
     Ok(())
 }
 
-/// Draw one frame, then paint its hyperlinks over it (OSC 8).
+/// Draw one frame, then paint its hyperlinks over it (OSC 8), then write
+/// the batch's terminal progress (OSC 9;4) when it changed.
 ///
 /// The links are printed again on every frame: a diff that rewrites a
-/// linked cell clears its link, and this puts it back.
+/// linked cell clears its link, and this puts it back. A batch that ends
+/// sets `batch` to `None`, so the next frame writes the clear state.
 fn draw_frame(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
+    progress: &mut TermProgress,
 ) -> Result<(), u8> {
     let completed = terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
     let links = link_cells(completed.buffer, &state.layout.links);
-    write_links(terminal.backend_mut(), &links).map_err(|_| 1u8)
+    write_links(terminal.backend_mut(), &links).map_err(|_| 1u8)?;
+    progress
+        .write_if_changed(
+            terminal.backend_mut(),
+            progress_for(state.remote_activity.batch.as_ref()),
+        )
+        .map_err(|_| 1u8)
 }
 
 async fn sleep_ms(ms: u64) {

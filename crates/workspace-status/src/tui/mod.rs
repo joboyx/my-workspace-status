@@ -46,6 +46,7 @@ mod status;
 pub(crate) mod syntax;
 mod tabs;
 mod term_bg;
+mod term_progress;
 pub(crate) mod theme;
 pub(crate) mod theme_store;
 mod tree;

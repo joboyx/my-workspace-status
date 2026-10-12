@@ -235,6 +235,7 @@ impl PtySession {
                     | "WS_STATUS_WORKSPACE"
                     | "WS_STATUS_THEME"
                     | "WS_STATUS_THEME_MODE"
+                    | "WS_STATUS_TERM_PROGRESS"
                     | "VISUAL"
             ) {
                 continue;
@@ -245,7 +246,8 @@ impl PtySession {
         // above does not drop these; remove them so the TTY paints colour
         // and the fixture cwd wins over an operator WS_STATUS_WORKSPACE.
         // An operator WS_STATUS_THEME or WS_STATUS_THEME_MODE would beat the
-        // baseline config theme or theme mode.
+        // baseline config theme or theme mode, and an operator
+        // WS_STATUS_TERM_PROGRESS would turn off the default-on progress.
         // `e` reads $VISUAL before $EDITOR, so an operator VISUAL would
         // outrank the stub EDITOR a test passes.
         cmd.env_remove("NO_COLOR");
@@ -253,6 +255,7 @@ impl PtySession {
         cmd.env_remove("WS_STATUS_WORKSPACE");
         cmd.env_remove("WS_STATUS_THEME");
         cmd.env_remove("WS_STATUS_THEME_MODE");
+        cmd.env_remove("WS_STATUS_TERM_PROGRESS");
         cmd.env_remove("VISUAL");
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
