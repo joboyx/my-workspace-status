@@ -2,9 +2,11 @@
 //!
 //! Palettes are dark. Secondary tokens (`muted`, line numbers, graph meta)
 //! stay readable on the theme surface and on the `sidebar`, `chrome`, and
-//! `panel` backgrounds. Launch seed is `WS_STATUS_THEME`, then the config
-//! `theme` key, then [`DEFAULT_THEME_ID`] (Slate).
-//! `T` cycles in the current session only. There is no theme file.
+//! `panel` backgrounds. Launch seed is `WS_STATUS_THEME`, then the
+//! last-used theme from the state file, then the config `theme` key, then
+//! [`DEFAULT_THEME_ID`] (Slate) ([`theme_id_from`]). `T` cycles the theme.
+//! The last-used theme lives in its own state file
+//! ([`super::theme_store`]), never in the config file.
 
 use ratatui::style::Color;
 
@@ -47,7 +49,8 @@ pub const THEME_IDS: [ThemeId; 13] = [
     ThemeId::GithubDarkDimmed,
 ];
 
-/// Default when neither `WS_STATUS_THEME` nor the config `theme` key sets a theme.
+/// Default when no `WS_STATUS_THEME`, last-used state, or config `theme`
+/// key sets a theme.
 pub const DEFAULT_THEME_ID: ThemeId = ThemeId::Slate;
 
 /// Default `sidebar` rule: the surface mixed this many percent toward black.
@@ -1081,12 +1084,18 @@ pub fn parse_theme_id(raw: &str) -> Option<ThemeId> {
     THEME_IDS.into_iter().find(|id| id.as_str() == raw)
 }
 
-/// Launch theme: a known `WS_STATUS_THEME` slug wins, then the config
+/// Launch theme: a known `WS_STATUS_THEME` slug wins, then `last_used` (the
+/// state file, see [`super::theme_store::load_last_theme`]), then the config
 /// `theme` key, then [`DEFAULT_THEME_ID`]. An unset or unknown env value
-/// falls through to the config value.
-pub fn theme_id_from(env_value: Option<&str>, config: Option<ThemeId>) -> ThemeId {
+/// falls through to the last-used value, then the config value.
+pub fn theme_id_from(
+    env_value: Option<&str>,
+    last_used: Option<ThemeId>,
+    config: Option<ThemeId>,
+) -> ThemeId {
     env_value
         .and_then(parse_theme_id)
+        .or(last_used)
         .or(config)
         .unwrap_or(DEFAULT_THEME_ID)
 }
@@ -1282,19 +1291,42 @@ mod tests {
     }
 
     #[test]
-    fn theme_env_beats_config_and_unknown_env_falls_through() {
-        assert_eq!(
-            theme_id_from(None, Some(ThemeId::Dracula)),
-            ThemeId::Dracula
+    fn theme_precedence_env_then_last_used_then_config_then_slate() {
+        use ThemeId::{Dracula, Monokai, Nord, Slate};
+        /// (env, last used, config, want)
+        type Case = (
+            Option<&'static str>,
+            Option<ThemeId>,
+            Option<ThemeId>,
+            ThemeId,
         );
-        assert_eq!(
-            theme_id_from(Some("monokai"), Some(ThemeId::Dracula)),
-            ThemeId::Monokai
-        );
-        for bad in ["", "nope", " monokai"] {
+        let table: [Case; 14] = [
+            (Some("monokai"), Some(Nord), Some(Dracula), Monokai),
+            (Some("monokai"), None, Some(Dracula), Monokai),
+            (Some("monokai"), Some(Nord), None, Monokai),
+            (Some("monokai"), None, None, Monokai),
+            (Some("slate"), Some(Nord), Some(Dracula), Slate),
+            (None, Some(Nord), Some(Dracula), Nord),
+            (None, Some(Slate), Some(Dracula), Slate),
+            (None, Some(Nord), None, Nord),
+            (None, None, Some(Dracula), Dracula),
+            (None, None, None, Slate),
+            (Some("nope"), Some(Nord), Some(Dracula), Nord),
+            (Some("nope"), None, Some(Dracula), Dracula),
+            (Some(""), None, None, Slate),
+            (Some(" monokai"), Some(Nord), Some(Dracula), Nord),
+        ];
+        for (env, last_used, config, want) in table {
             assert_eq!(
-                theme_id_from(Some(bad), Some(ThemeId::Dracula)),
-                ThemeId::Dracula,
+                theme_id_from(env, last_used, config),
+                want,
+                "env {env:?}, last used {last_used:?}, config {config:?}"
+            );
+        }
+        for bad in ["", "nope", " monokai", "Monokai"] {
+            assert_eq!(
+                theme_id_from(Some(bad), None, Some(Dracula)),
+                Dracula,
                 "env {bad:?}"
             );
         }
@@ -1302,13 +1334,13 @@ mod tests {
 
     #[test]
     fn resolve_known_and_fallback() {
-        assert_eq!(theme_id_from(None, None), ThemeId::Slate);
-        assert_eq!(theme_id_from(Some(""), None), ThemeId::Slate);
-        assert_eq!(theme_id_from(Some("nope"), None), ThemeId::Slate);
+        assert_eq!(theme_id_from(None, None, None), ThemeId::Slate);
+        assert_eq!(theme_id_from(Some(""), None, None), ThemeId::Slate);
+        assert_eq!(theme_id_from(Some("nope"), None, None), ThemeId::Slate);
         assert_eq!(parse_theme_id("solarized"), None, "exact slug only");
         assert_eq!(parse_theme_id("Dracula"), None, "case-sensitive");
         for id in THEME_IDS {
-            assert_eq!(theme_id_from(Some(id.as_str()), None), id);
+            assert_eq!(theme_id_from(Some(id.as_str()), None, None), id);
             assert_eq!(parse_theme_id(id.as_str()), Some(id));
             assert!(!id.label().is_empty());
             assert!(id.theme().surface.starts_with('#'));

@@ -9,7 +9,10 @@
 //! git writes away from the fixture. A TTY spawn that inherits
 //! `XDG_CONFIG_HOME` / `HOME` reads the operator user config file
 //! (`my-workspace-status/config.json`), which can change the fixture's
-//! settings. These tests fail until those hazards stay fixed. Recipe:
+//! settings. A TTY spawn without `WS_STATUS_THEME_STORE` reads and, on `T`,
+//! writes `$XDG_STATE_HOME/my-workspace-status/theme.json` (the operator
+//! last-used theme), which can beat the fixture's config theme. These tests
+//! fail until those hazards stay fixed. Recipe:
 //! [docs/architecture.md](../../../docs/architecture.md).
 
 const RELEASE_YML: &str = include_str!("../../../.github/workflows/release.yml");
@@ -22,6 +25,10 @@ const DESKTOP_HARNESS: &str = include_str!("tui_tty_e2e/desktop.rs");
 fn assigns_update_check_store(src: &str) -> bool {
     src.contains("env(\"WS_STATUS_UPDATE_CHECK_STORE\"")
         || src.contains("export WS_STATUS_UPDATE_CHECK_STORE=")
+}
+
+fn assigns_theme_store(src: &str) -> bool {
+    src.contains("env(\"WS_STATUS_THEME_STORE\"") || src.contains("export WS_STATUS_THEME_STORE=")
 }
 
 fn assigns_user_config_home(src: &str) -> bool {
@@ -58,6 +65,18 @@ fn isolated_store_assignment_rejects_comment_only() {
     assert!(!isolates_workspace_env("export WS_STATUS_WORKSPACE=/tmp"));
     assert!(isolates_workspace_env(
         "cmd.env_remove(\"WS_STATUS_WORKSPACE\");"
+    ));
+    assert!(!assigns_theme_store(""));
+    assert!(!assigns_theme_store(
+        "# Isolates WS_STATUS_THEME_STORE under tmp"
+    ));
+    assert!(!assigns_theme_store("WS_STATUS_THEME_STORE"));
+    assert!(!assigns_theme_store("unset WS_STATUS_THEME_STORE"));
+    assert!(assigns_theme_store(
+        "export WS_STATUS_THEME_STORE=/tmp/theme.json"
+    ));
+    assert!(assigns_theme_store(
+        "cmd.env(\"WS_STATUS_THEME_STORE\", &theme_store);"
     ));
     assert!(!assigns_user_config_home(""));
     assert!(!assigns_user_config_home("# Points XDG_CONFIG_HOME at tmp"));
@@ -181,6 +200,21 @@ fn tty_spawn_paths_isolate_workspace_env() {
             isolates_workspace_env(src),
             "{label} launches a TTY TUI and must drop parent WS_STATUS_WORKSPACE \
              (or the spawn uses the operator workspace instead of the fixture)"
+        );
+    }
+}
+
+#[test]
+fn tty_spawn_paths_isolate_theme_store() {
+    for (label, src) in [
+        ("tui_tty_e2e/harness.rs", PTY_HARNESS),
+        ("tui_tty_e2e/desktop.rs", DESKTOP_HARNESS),
+        ("scripts/capture-demo-stills.sh", STILLS_SH),
+    ] {
+        assert!(
+            assigns_theme_store(src),
+            "{label} launches a TTY TUI and must assign WS_STATUS_THEME_STORE \
+             (or the operator last-used theme file is read and written)"
         );
     }
 }

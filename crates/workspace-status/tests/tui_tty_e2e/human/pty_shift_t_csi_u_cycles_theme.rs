@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use crate::harness::PtySession;
+use crate::harness::{user_config_file, PtySession, BASELINE_USER_CONFIG};
 use crate::seed::daily_workspace;
 use crate::support::{GIT_WAIT, WAIT};
 
@@ -215,20 +215,16 @@ fn wait_graph_lanes_match_theme(tui: &PtySession, theme: &ThemeChrome) {
     );
 }
 
-fn assert_no_theme_store(dir: &Path) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries {
-        let name = entry.unwrap().file_name();
-        let s = name.to_string_lossy();
-        assert!(
-            !s.to_ascii_lowercase().contains("theme"),
-            "`T` is session-only; must not write {}:\n{}",
-            dir.join(&*s).display(),
-            s
-        );
-    }
+/// `T` saves to the last-used theme store; it never rewrites the user
+/// config file.
+fn assert_config_unchanged(config_home: &Path) {
+    let config = user_config_file(config_home);
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        BASELINE_USER_CONFIG,
+        "`T` must not rewrite the user config file {}",
+        config.display()
+    );
 }
 
 /// CSI-u Shift+T cycles the documented colour theme. Raw `'T'` / `'t'` are
@@ -240,17 +236,21 @@ fn assert_no_theme_store(dir: &Path) {
 /// Slate → Solarized Dark → Nord → Rosé Pine → Kanagawa → Everforest →
 /// One Dark → GitHub Dark Dimmed → Tokyo Night. Toast, surface, mode pill, heading, muted (line numbers /
 /// graph meta), and graph lane 0 must all match that id. A no-op, a skipped
-/// id, or lowercase `t` cannot pass. There is no theme file.
+/// id, or lowercase `t` cannot pass. Each cycle saves the id to the
+/// last-used theme store (Tokyo Night again after the wrap); the user
+/// config file stays byte-identical.
 #[test]
 fn pty_shift_t_csi_u_cycles_theme() {
     let (_root, workspace) = daily_workspace();
     let config_home = workspace.join(".e2e-config");
     fs::create_dir_all(&config_home).unwrap();
+    let theme_store = workspace.join(".e2e-state").join("theme.json");
     let mut tui = PtySession::open_with_env(
         &workspace,
         &[
             ("WS_STATUS_THEME", "tokyo-night"),
             ("XDG_CONFIG_HOME", config_home.to_str().unwrap()),
+            ("WS_STATUS_THEME_STORE", theme_store.to_str().unwrap()),
         ],
     );
     tui.wait_contains(" tree", WAIT);
@@ -302,8 +302,12 @@ fn pty_shift_t_csi_u_cycles_theme() {
         );
     }
 
-    assert_no_theme_store(&workspace.join(".e2e-state"));
-    assert_no_theme_store(&config_home);
+    let stored = fs::read_to_string(&theme_store).unwrap();
+    assert!(
+        stored.contains("\"tokyo-night\""),
+        "the wrap back to Tokyo Night must be the saved theme:\n{stored}"
+    );
+    assert_config_unchanged(&config_home);
 
     let (_root2, seeded) = daily_workspace();
     let mut seeded_tui = PtySession::open_with_env(&seeded, &[("WS_STATUS_THEME", "dracula")]);
