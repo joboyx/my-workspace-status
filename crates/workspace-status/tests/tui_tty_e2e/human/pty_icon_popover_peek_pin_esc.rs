@@ -1,8 +1,8 @@
 use crate::harness::{tree_row_containing, PtySession};
 use crate::seed::{behind_workspace, daily_workspace, primary_merged_workspace};
 use crate::support::{
-    crumb_row, documented_space_reviewed, idle_dirty_readme_unreviewed, syncbox_row_behind,
-    tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
+    crumb_row, documented_space_reviewed, idle_dirty_readme_unreviewed, merge_mark_after,
+    syncbox_row_behind, tree_cursor_on, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 /// SGR pointer motion with no button held (`3 | 32`, any-event tracking).
@@ -123,11 +123,13 @@ fn no_popover(screen: &str) -> bool {
     !screen.contains(PINNED_FOOTER) && !screen.contains(MERGED_MEANING)
 }
 
-/// 0-based cell of the `M` merge mark after the primary branch name.
+/// 0-based cell of the `M` merge mark: the first icon right of the
+/// primary branch name.
 fn merge_mark_cell(screen: &str) -> Option<(u16, u16)> {
     let row = tree_row_containing(screen, PRIMARY)?;
     let line = screen.lines().nth(usize::from(row))?;
-    let at = line.find(&format!("{PRIMARY} M"))? + PRIMARY.len() + 1;
+    let name = line.find(PRIMARY)? + PRIMARY.len();
+    let at = name + line[name..].find(" M")? + 1;
     // ASCII glyph mode: one column per char.
     Some((line[..at].chars().count() as u16, row))
 }
@@ -136,11 +138,12 @@ fn merge_mark_cell(screen: &str) -> Option<(u16, u16)> {
 /// its own icon.
 ///
 /// Docs: every icon on a branch-level tree row has a popover. `gh` pins
-/// one section per icon of the focused row. The merge mark after a branch
+/// one section per icon of the focused row. The merge mark of a branch
 /// is its own icon: a click on it pins its popover alone.
 ///
-/// Live PTY on the merged family seed: `j` focuses `& feature/primary-merged
-/// M`. `gh` paints the branch section (meaning, `feature branch`, Branch
+/// Live PTY on the merged family seed: `j` focuses `& feature/primary-merged`
+/// (merge mark `M` in its right-aligned icons). `gh` paints the branch
+/// section (meaning, `feature branch`, Branch
 /// picker), the merge mark section (meaning, Diff vs default), and the
 /// no-upstream section, with the pinned footer. Esc closes it. A click on
 /// the `M` cell pins the merge mark popover alone (`vs main`). Esc closes.
@@ -149,7 +152,11 @@ fn pty_icon_popover_gh_on_a_checkout_row_lists_branch_merge_and_sync() {
     let (_root, workspace) = primary_merged_workspace();
     let mut tui = PtySession::open_size(&workspace, 120, 40);
     tui.wait_pred(
-        |screen| tree_cursor_on(screen, "app") && tree_has(screen, &format!("{PRIMARY} M")),
+        |screen| {
+            tree_cursor_on(screen, "app")
+                && tree_line_containing(screen, PRIMARY)
+                    .is_some_and(|line| merge_mark_after(&line, PRIMARY).as_deref() == Some("M"))
+        },
         "first paint: family with the merged primary checkout",
         WAIT,
     );

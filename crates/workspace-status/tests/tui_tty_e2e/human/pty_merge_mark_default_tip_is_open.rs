@@ -1,8 +1,9 @@
 use crate::harness::PtySession;
 use crate::seed::merge_mark_workspace;
 use crate::support::{
-    crumb_row, no_mouse_toggle_toast, status_row, tree_cursor_on, tree_has, tree_line_containing,
-    tree_line_has_leading_worktree_icon, tree_pane_focused, SETTLE_MS, WAIT,
+    crumb_row, merge_mark_after, no_mouse_toggle_toast, row_icons_after, status_row,
+    tree_cursor_on, tree_has, tree_line_containing, tree_line_has_leading_worktree_icon,
+    tree_pane_focused, SETTLE_MS, WAIT,
 };
 
 const JUST_CREATED: &str = "feature/just-created";
@@ -26,21 +27,25 @@ fn no_wrong_overlays(screen: &str) -> bool {
         && no_mouse_toggle_toast(screen)
 }
 
-/// ASCII linked row: `L feature/just-created o`. Checkmark `M` is the bug.
+/// ASCII linked row: `L feature/just-created … o`. Checkmark `M` is the bug.
 fn just_created_row_is_open(screen: &str) -> bool {
     tree_line_containing(screen, JUST_CREATED).is_some_and(|line| {
         tree_line_has_leading_worktree_icon(&line, JUST_CREATED)
-            && line.contains(&format!("{JUST_CREATED} o"))
-            && !line.contains(&format!("{JUST_CREATED} M"))
+            && merge_mark_after(&line, JUST_CREATED).as_deref() == Some("o")
+            && !row_icons_after(&line, JUST_CREATED)
+                .iter()
+                .any(|icon| icon == "M")
     })
 }
 
-/// ASCII linked row whose unique commits landed: `L feature/landed M`.
+/// ASCII linked row whose unique commits landed: `L feature/landed … M`.
 fn landed_row_is_merged(screen: &str) -> bool {
     tree_line_containing(screen, LANDED).is_some_and(|line| {
         tree_line_has_leading_worktree_icon(&line, LANDED)
-            && line.contains(&format!("{LANDED} M"))
-            && !line.contains(&format!("{LANDED} o"))
+            && merge_mark_after(&line, LANDED).as_deref() == Some("M")
+            && !row_icons_after(&line, LANDED)
+                .iter()
+                .any(|icon| icon == "o")
     })
 }
 
@@ -112,8 +117,8 @@ fn documented_cancel_keeps_open_default_tip(screen: &str) -> bool {
 /// confirm uses the same flag (`merged into default` / `NOT merged into
 /// default`). Linked extras only.
 ///
-/// Live PTY: first paint shows `L feature/just-created o` and
-/// `L feature/landed M`. `j` `j` `j` land on the default-tip row with
+/// Live PTY: first paint shows `L feature/just-created … o` and
+/// `L feature/landed … M`. `j` `j` `j` land on the default-tip row with
 /// `remove worktree (open)`. `W` paints `NOT merged into default`. `n`
 /// cancels. A checkmark on the default-tip row, a missing check on
 /// `feature/landed`, overlay-only, or a no-op that never paints `o`/`M`

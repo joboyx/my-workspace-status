@@ -5,7 +5,7 @@ use crate::seed::daily_workspace;
 use crate::support::{
     documented_launch_first_paint, launch_breadcrumb_workspace_app,
     launch_panes_left_tree_right_diff, launch_status_chrome, no_wrong_overlays, title_has_files,
-    tree_cursor_on, tree_has, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
+    tree_cursor_on, tree_has, tree_has_branch, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 const MARKER: &str = "r-live.txt";
@@ -34,7 +34,7 @@ fn documented_r_refreshed_app_dirty_file(screen: &str) -> bool {
         && left.contains("2 changed · all current")
         && !left.contains("1 changed")
         && tree_has(screen, "app")
-        && tree_has(screen, "& main")
+        && tree_has_branch(screen, "main")
         && tree_has(screen, "README.md")
         && tree_has(screen, "merger")
         && tree_has(screen, "No updates")

@@ -4,9 +4,9 @@ use std::process::{Command, Stdio};
 use crate::harness::PtySession;
 use crate::seed::{focus_workspace, git_env};
 use crate::support::{
-    crumb_row, focusbox_graph_left_full, has_fetch_hint, no_mouse_toggle_toast, status_row,
-    title_has_files, tree_cursor_on, tree_has, tree_line_containing, tree_pane_focused, GIT_WAIT,
-    SETTLE_MS, WAIT,
+    crumb_row, focusbox_graph_left_full, has_fetch_hint, line_on_branch, no_mouse_toggle_toast,
+    status_row, title_has_files, tree_cursor_on, tree_has, tree_has_branch, tree_line_containing,
+    tree_pane_focused, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 fn git_stdout(repo: &Path, args: &[&str]) -> String {
@@ -76,13 +76,13 @@ fn no_wrong_picker_overlays(screen: &str) -> bool {
 fn focusbox_on_keep(screen: &str) -> bool {
     tree_has(screen, "feature/keep")
         && tree_line_containing(screen, "focusbox")
-            .is_some_and(|line| line.contains("feature/keep") && !line.contains("& main"))
+            .is_some_and(|line| line.contains("feature/keep") && !line_on_branch(&line, "main"))
 }
 
 fn focusbox_tree_on_main(screen: &str) -> bool {
-    tree_has(screen, "& main")
+    tree_has_branch(screen, "main")
         && tree_line_containing(screen, "focusbox")
-            .is_some_and(|line| line.contains("& main") && !line.contains("feature/keep"))
+            .is_some_and(|line| line_on_branch(&line, "main") && !line.contains("feature/keep"))
         && !tree_has(screen, "feature/keep")
 }
 
@@ -267,7 +267,7 @@ fn pty_tree_b_picker_enter_checkout() {
     tui.enter();
     tui.wait_pred(
         documented_tree_picker_enter_checkout,
-        "Enter checks out main: Checked out main, tree & main, [+main], picker closed",
+        "Enter checks out main: Checked out main, tree on main, [+main], picker closed",
         GIT_WAIT,
     );
     tui.wait_ms(SETTLE_MS);

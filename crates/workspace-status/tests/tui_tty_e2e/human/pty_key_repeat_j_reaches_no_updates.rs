@@ -1,9 +1,9 @@
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    documented_launch_first_paint, no_updates_group_folded, no_wrong_overlays, status_row,
-    tree_cursor_on, tree_dir_collapsed, tree_dir_expanded, tree_has, tree_line_containing,
-    GIT_WAIT, SETTLE_MS, WAIT,
+    documented_launch_first_paint, line_on_branch, no_updates_group_folded, no_wrong_overlays,
+    status_row, tree_cursor_on, tree_dir_collapsed, tree_dir_expanded, tree_has,
+    tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 fn help_lists_j_k_down_up(screen: &str) -> bool {
@@ -38,7 +38,7 @@ fn no_updates_group_open(screen: &str) -> bool {
         && line.contains('v')
         && line.contains('1')
         && lib.contains('@')
-        && lib.contains("& main")
+        && line_on_branch(&lib, "main")
 }
 
 fn on_workspace_root(screen: &str) -> bool {
