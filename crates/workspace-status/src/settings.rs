@@ -21,6 +21,7 @@ use crate::tui::comments::comment_store_path_from_env;
 use crate::tui::fetch::fetch_interval_ms;
 use crate::tui::theme::{theme_id_from, ThemeId};
 use crate::tui::theme_store::{load_last_theme, theme_store_path_from_env};
+use crate::tui::undercurl::undercurl_enabled;
 use crate::tui::viewed::viewed_store_path_from_env;
 use crate::tui::watch::watch_interval_ms;
 use crate::update_check::{
@@ -60,6 +61,10 @@ pub struct Settings {
     /// `NO_COLOR` is set and non-empty (no-color.org). Env only, no config
     /// key. The new visuals paint without colour; the rest keeps the theme.
     pub(crate) no_color: bool,
+    /// Curly coloured underline on commented lines: `COLORTERM` is
+    /// `truecolor` / `24bit` and neither `NO_COLOR` nor ASCII glyphs is on
+    /// ([`crate::tui::undercurl::undercurl_enabled`]). Env only, no config key.
+    pub(crate) undercurl: bool,
     /// OSC 9;4 terminal progress for multi-repo batches
     /// (`WS_STATUS_TERM_PROGRESS` / `termProgress`), default on.
     pub(crate) term_progress: bool,
@@ -78,6 +83,8 @@ impl Settings {
         F: FnMut(&str) -> Option<String>,
     {
         let theme_store = theme_store_path_from_env(&mut get, keys.theme_store.as_deref());
+        let ascii = glyphs_ascii(get("WS_STATUS_GLYPHS").as_deref(), keys.glyphs);
+        let no_color = no_color(get(NO_COLOR_ENV).as_deref());
         Settings {
             theme: theme_id_from(
                 get("WS_STATUS_THEME").as_deref(),
@@ -85,7 +92,7 @@ impl Settings {
                 keys.theme,
             ),
             theme_mode: theme_mode(get(THEME_MODE_ENV).as_deref(), keys.theme_mode),
-            ascii: glyphs_ascii(get("WS_STATUS_GLYPHS").as_deref(), keys.glyphs),
+            ascii,
             watch_ms: watch_interval_ms(get("WS_STATUS_WATCH_MS").as_deref(), keys.watch_ms),
             fetch_ms: fetch_interval_ms(get("WS_STATUS_FETCH_MS").as_deref(), keys.fetch_ms),
             fetch_concurrency: fetch_concurrency(
@@ -101,7 +108,8 @@ impl Settings {
             viewed_store: viewed_store_path_from_env(&mut get, keys.viewed_store.as_deref()),
             theme_store,
             git: resolve_git_binary(get("WORKSPACE_STATUS_GIT").as_deref(), keys.git.as_deref()),
-            no_color: no_color(get(NO_COLOR_ENV).as_deref()),
+            no_color,
+            undercurl: undercurl_enabled(no_color, ascii, get(COLORTERM_ENV).as_deref()),
             term_progress: env_bool(get(TERM_PROGRESS_ENV).as_deref())
                 .or(keys.term_progress)
                 .unwrap_or(true),
@@ -122,6 +130,10 @@ pub(crate) fn env_bool(raw: Option<&str>) -> Option<bool> {
 
 /// Env var for the `termProgress` key.
 const TERM_PROGRESS_ENV: &str = "WS_STATUS_TERM_PROGRESS";
+
+/// Terminal colour depth the emulator advertises; `truecolor` or `24bit`
+/// turns on the curly underline.
+const COLORTERM_ENV: &str = "COLORTERM";
 
 /// The standard no-colour env var (<https://no-color.org>).
 const NO_COLOR_ENV: &str = "NO_COLOR";
@@ -251,6 +263,7 @@ mod tests {
                 theme_store: PathBuf::from("/cfg/theme.json"),
                 git: PathBuf::from("/cfg/git"),
                 no_color: false,
+                undercurl: false,
                 term_progress: false,
             }
         );
@@ -290,6 +303,7 @@ mod tests {
                 theme_store: PathBuf::from("/env/theme.json"),
                 git: PathBuf::from("/env/git"),
                 no_color: false,
+                undercurl: false,
                 term_progress: true,
             }
         );
@@ -405,6 +419,31 @@ mod tests {
     fn no_color_empty_is_off() {
         assert!(!Settings::resolve(&all_keys(), env_of(&[("NO_COLOR", "")])).no_color);
         assert!(!Settings::resolve(&all_keys(), env_of(&[])).no_color);
+    }
+
+    #[test]
+    fn undercurl_needs_truecolor_and_no_fallback() {
+        let keys = |glyphs| RuntimeKeys {
+            glyphs,
+            ..RuntimeKeys::default()
+        };
+        let on = |keys: &RuntimeKeys, env: &[(&str, &str)]| {
+            Settings::resolve(keys, env_of(env)).undercurl
+        };
+        let nerd = keys(None);
+        assert!(on(&nerd, &[("COLORTERM", "truecolor")]));
+        assert!(on(&nerd, &[("COLORTERM", "24bit")]));
+        assert!(!on(&nerd, &[]), "no COLORTERM");
+        assert!(!on(&nerd, &[("COLORTERM", "256color")]));
+        assert!(!on(&nerd, &[("COLORTERM", "truecolor"), ("NO_COLOR", "1")]));
+        assert!(!on(
+            &nerd,
+            &[("COLORTERM", "truecolor"), ("WS_STATUS_GLYPHS", "ascii")]
+        ));
+        assert!(!on(
+            &keys(Some(GlyphSet::Ascii)),
+            &[("COLORTERM", "truecolor")]
+        ));
     }
 
     #[test]

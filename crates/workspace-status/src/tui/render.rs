@@ -100,6 +100,7 @@ use super::tree::{
     pr_badge_mark, visible_window, workspace_trailing_fit, NodeKind, NodeSegments, SegRole,
     TextSeg, VisibleRow,
 };
+use super::undercurl::{cut_link_cells, drop_undercurls_under, underlined_runs};
 use super::watch::FlashKind;
 use crate::file_index::{FileIndex, FileRead};
 use crate::file_search::{SearchHit, SearchOptions};
@@ -197,6 +198,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     // records it again, so a hidden badge never opens a PR or a popover.
     state.layout.icon_hits.clear();
     state.layout.links.clear();
+    state.layout.undercurls.clear();
     // A painter that shows a time-based frame sets these again.
     state.layout.animating = false;
     state.layout.gliding = false;
@@ -308,7 +310,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
             DialogKind::QuickOpen => draw_quick_open(frame, rect, state),
             DialogKind::SearchFiles => draw_search_files(frame, rect, state),
         }
-        drop_links_under(&mut state.layout.links, rect);
+        drop_hits_under(&mut state.layout, rect);
     }
 
     // The icon popover hangs over the panes and any dialog.
@@ -322,6 +324,10 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     // Toasts paint last, over any dialog, popover, or backdrop, so they
     // stay crisp. Keep this after every overlay.
     draw_toasts(frame, chunks[1], state);
+
+    // Links are final now. A cell that is both linked and curled keeps its
+    // link (and the plain underline); the curl writer skips it.
+    state.layout.undercurls = cut_link_cells(&state.layout.undercurls, &state.layout.links);
 
     if let Some(selection) = state.text_selection.as_ref() {
         selection.highlight(frame.buffer_mut());
@@ -377,7 +383,7 @@ fn draw_toasts(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
         };
         frame.render_widget(Clear, rect);
         frame.render_widget(Paragraph::new(Span::styled(label, style)), rect);
-        drop_links_under(&mut state.layout.links, rect);
+        drop_hits_under(&mut state.layout, rect);
     }
     match state.toasts.next_tick(now, state.no_color) {
         ToastTick::Frames => state.layout.animating = true,
@@ -425,10 +431,14 @@ fn dim_backdrop(buf: &mut Buffer, area: Rect, keep: Rect, palette: Palette, no_c
     }
 }
 
-/// Drop each link in `links` that overlaps `rect`: a box painted there
-/// hides its cells, so the OSC 8 overlay must not print them as a link.
-fn drop_links_under(links: &mut Vec<LinkHit>, rect: Rect) {
-    links.retain(|link| !rect.intersects(Rect::new(link.x, link.y, link.width, 1)));
+/// Drop each link and curly-underline span in `layout` that overlaps
+/// `rect`: a box painted there hides its cells, so the post-draw writers
+/// (OSC 8, undercurl) must not print them again.
+fn drop_hits_under(layout: &mut LayoutHit, rect: Rect) {
+    layout
+        .links
+        .retain(|link| !rect.intersects(Rect::new(link.x, link.y, link.width, 1)));
+    drop_undercurls_under(&mut layout.undercurls, rect);
 }
 
 /// `file://` URL of `rel` in checkout `repo` (both relative to the
@@ -779,6 +789,15 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
             row_match_bg(selected, true, hit, None, palette, search.bg)
         };
         let match_fg = (hit && !selected).then_some(search.fg);
+        let n = u32::try_from(line + 1).unwrap_or(u32::MAX);
+        let comment = state.file_line_comment(n);
+        // Every painted row of a line with an open comment underlines its
+        // code; the runs get the curly upgrade after the draw.
+        let underline = if comment == Some(false) {
+            Modifier::UNDERLINED
+        } else {
+            Modifier::empty()
+        };
         let code = spans.get(line - scroll).map(Vec::as_slice).unwrap_or(&[]);
         let starts = if wrap {
             wrap_col_starts_capped(text, code_w, row_cap)
@@ -790,8 +809,6 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
                 break;
             }
             let number = if part == 0 {
-                let n = u32::try_from(line + 1).unwrap_or(u32::MAX);
-                let comment = state.file_line_comment(n);
                 format!(
                     "{} ",
                     format_line_gutter(Some(n), digits, comment, state.ascii)
@@ -805,7 +822,8 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
             for span in slice_styled_cols(code, start, code_w) {
                 used += visible_width(&span.text);
                 let fg = match_fg.unwrap_or(span.fg);
-                row.push(Span::styled(span.text, with_bg(Style::default().fg(fg))));
+                let style = Style::default().fg(fg).add_modifier(underline);
+                row.push(Span::styled(span.text, with_bg(style)));
             }
             if bg.is_some() && used < code_w {
                 row.push(Span::styled(
@@ -823,6 +841,8 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
         }
     }
     frame.render_widget(Paragraph::new(painted), inner);
+    let curls = underlined_runs(frame.buffer_mut(), inner, palette.comment_underline());
+    state.layout.undercurls.extend(curls);
     state.layout.file_view_row_lines = row_lines;
     if let Some(tab) = state.tabs.active_file_view_mut() {
         tab.scroll = scroll;
@@ -2849,6 +2869,10 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         height: line_h as u16,
     };
     frame.render_widget(Paragraph::new(painted), lines_area);
+    // Only commented code is underlined in the diff rows: those runs get
+    // the curly upgrade after the draw.
+    let curls = underlined_runs(frame.buffer_mut(), lines_area, palette.comment_underline());
+    state.layout.undercurls.extend(curls);
     if state.background == BackgroundMode::Paint {
         bleed_diff_row_edges(frame, lines_area, area.right());
     }
@@ -3257,10 +3281,14 @@ fn paint_cell_spans(
     let mark_w = comment_mark_cols(ascii);
     let code_w = cell_code_width(width, gutter.saturating_add(mark_w));
     let first = !wrap || wrap_part == 0;
-    let comment = if first {
-        cell.line_no.and_then(|n| state.diff_line_comment(n))
+    let line_comment = cell.line_no.and_then(|n| state.diff_line_comment(n));
+    let comment = if first { line_comment } else { None };
+    // Every painted row of a line with an open comment underlines its code
+    // (`draw_diff_pane` records the runs for the curly upgrade).
+    let underline = if line_comment == Some(false) {
+        Modifier::UNDERLINED
     } else {
-        None
+        Modifier::empty()
     };
     let line_no = format_line_gutter(
         if first { cell.line_no } else { None },
@@ -3321,7 +3349,7 @@ fn paint_cell_spans(
         };
         spans.push(Span::styled(
             part.text,
-            with_row_bg(Style::default().fg(fg), bg),
+            with_row_bg(Style::default().fg(fg).add_modifier(underline), bg),
         ));
     }
     spans.push(Span::styled(
@@ -6336,7 +6364,7 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
         }
     }
     frame.render_widget(Clear, rect);
-    drop_links_under(&mut state.layout.links, rect);
+    drop_hits_under(&mut state.layout, rect);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     let shown_rows = (start..start + shown).chain(body..rows.len());
@@ -13573,6 +13601,209 @@ mod tests {
             after.contains("\"10 │") && !after.contains(" 10 │"),
             "comment mark should occupy the reserved column:\n{after}"
         );
+    }
+
+    /// `app` with `README.md` open in the diff pane: one hunk of context
+    /// lines `line 10`, `line 11`, … (new-file line `n` reads `line n`).
+    fn context_diff_state(lines: u32) -> AppState {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.cursor = state
+            .rows
+            .iter()
+            .position(|r| r.kind == NodeKind::File)
+            .expect("file row");
+        let mut diff = vec![format!("@@ -10,{lines} +10,{lines} @@")];
+        diff.extend((10..10 + lines).map(|n| format!(" line {n}")));
+        state.set_diff(
+            "app".into(),
+            "README.md".into(),
+            super::super::diff::DiffContent::from_lines(diff),
+        );
+        state
+    }
+
+    /// Open a worktree comment on new-file `line` of `app/README.md`.
+    fn comment_readme_line(state: &mut AppState, line: u32) {
+        use crate::tui::comments::{put_comment, CommentKey};
+        state.comment_store = put_comment(
+            &state.comment_store,
+            CommentKey::WorktreeLine {
+                repo: "app".into(),
+                branch: "main".into(),
+                path: "README.md".into(),
+                line,
+                end_line: line,
+            },
+            "look here",
+        );
+    }
+
+    /// The painted text under `hit`.
+    fn undercurl_text(
+        terminal: &Terminal<TestBackend>,
+        hit: &crate::tui::undercurl::UndercurlHit,
+    ) -> String {
+        let buf = terminal.backend().buffer();
+        (hit.x..hit.x + hit.width)
+            .map(|x| buf[(x, hit.y)].symbol())
+            .collect()
+    }
+
+    /// Screen row whose text contains `needle`.
+    fn row_with(terminal: &Terminal<TestBackend>, needle: &str) -> u16 {
+        let buf = terminal.backend().buffer();
+        (0..buf.area().height)
+            .find(|&y| buf_line(buf, y).contains(needle))
+            .unwrap_or_else(|| panic!("no row with {needle:?}:\n{}", buffer_text(terminal)))
+    }
+
+    /// Columns of row `y` painted with [`Modifier::UNDERLINED`].
+    fn underlined_cols(terminal: &Terminal<TestBackend>, y: u16) -> Vec<u16> {
+        let buf = terminal.backend().buffer();
+        (0..buf.area().width)
+            .filter(|&x| buf[(x, y)].modifier.contains(Modifier::UNDERLINED))
+            .collect()
+    }
+
+    #[test]
+    fn commented_diff_line_is_underlined_and_records_undercurl_hit() {
+        let mut state = context_diff_state(3);
+        comment_readme_line(&mut state, 11);
+        let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+        draw_state(&mut terminal, &mut state);
+
+        let y = row_with(&terminal, "line 11");
+        let x = find_cell_col(terminal.backend().buffer(), y, "line 11").unwrap();
+        // The code is underlined (the fallback every terminal shows); the
+        // gutter, mark, and pad are not.
+        assert_eq!(
+            underlined_cols(&terminal, y),
+            (x..x + 7).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            state.layout.undercurls,
+            vec![crate::tui::undercurl::UndercurlHit {
+                y,
+                x,
+                width: 7,
+                color: state.theme.palette().comment_underline(),
+            }]
+        );
+        assert_eq!(
+            undercurl_text(&terminal, &state.layout.undercurls[0]),
+            "line 11"
+        );
+    }
+
+    #[test]
+    fn uncommented_line_has_no_underline() {
+        let mut state = context_diff_state(3);
+        let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert!(state.layout.undercurls.is_empty());
+        for needle in ["line 10", "line 11", "line 12"] {
+            let y = row_with(&terminal, needle);
+            assert!(underlined_cols(&terminal, y).is_empty(), "{needle}");
+        }
+
+        comment_readme_line(&mut state, 11);
+        draw_state(&mut terminal, &mut state);
+        for needle in ["line 10", "line 12"] {
+            let y = row_with(&terminal, needle);
+            assert!(underlined_cols(&terminal, y).is_empty(), "{needle}");
+            assert!(state.layout.undercurls.iter().all(|hit| hit.y != y));
+        }
+        // A resolved comment keeps its mark but draws no underline.
+        state.comment_store = crate::tui::comments::put_comment_entry(
+            &state.comment_store,
+            crate::tui::comments::CommentKey::WorktreeLine {
+                repo: "app".into(),
+                branch: "main".into(),
+                path: "README.md".into(),
+                line: 11,
+                end_line: 11,
+            },
+            "done",
+            true,
+        );
+        draw_state(&mut terminal, &mut state);
+        assert!(state.layout.undercurls.is_empty());
+        assert!(underlined_cols(&terminal, row_with(&terminal, "line 11")).is_empty());
+    }
+
+    #[test]
+    fn file_view_comment_line_records_undercurl_hit() {
+        let mut state = file_view_state(&["one", "two", "three"]);
+        state.line_blame.set_enabled(false);
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert!(state.layout.undercurls.is_empty());
+
+        // `;` on line 2 and save.
+        state.dispatch(Action::FocusRight);
+        state.dispatch(Action::Move(1));
+        state.dispatch(Action::CommentStart);
+        let key = state.comment.take().expect("comment prompt").key;
+        state.comment_store =
+            crate::tui::comments::put_comment_entry(&state.comment_store, key, "note", false);
+        draw_state(&mut terminal, &mut state);
+
+        let y = state.layout.file_view_y + 1;
+        assert_eq!(
+            state.layout.undercurls.len(),
+            1,
+            "{:?}",
+            state.layout.undercurls
+        );
+        let hit = &state.layout.undercurls[0];
+        assert_eq!(
+            (hit.y, hit.color),
+            (y, state.theme.palette().comment_underline())
+        );
+        assert_eq!(undercurl_text(&terminal, hit), "two");
+        assert_eq!(
+            underlined_cols(&terminal, y),
+            (hit.x..hit.x + hit.width).collect::<Vec<_>>()
+        );
+        for other in [y - 1, y + 1] {
+            assert!(underlined_cols(&terminal, other).is_empty(), "row {other}");
+        }
+    }
+
+    #[test]
+    fn undercurl_hit_dropped_under_dialog() {
+        let lines = 30;
+        let mut state = context_diff_state(lines);
+        for line in 10..10 + lines {
+            comment_readme_line(&mut state, line);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let before = state.layout.undercurls.clone();
+        assert_eq!(before.len(), lines as usize, "{before:?}");
+
+        state.help_open = true;
+        draw_state(&mut terminal, &mut state);
+        let after = &state.layout.undercurls;
+        assert!(after.len() < before.len(), "help covers curls: {after:?}");
+        // A curl left sits on underlined code the dialog did not cover; a
+        // dropped one is under the dialog box.
+        let buf = terminal.backend().buffer();
+        for hit in &before {
+            let underlined = (hit.x..hit.x + hit.width)
+                .all(|x| buf[(x, hit.y)].modifier.contains(Modifier::UNDERLINED));
+            assert_eq!(
+                after.contains(hit),
+                underlined,
+                "{hit:?}: {}",
+                buf_line(buf, hit.y)
+            );
+        }
+
+        state.help_open = false;
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(state.layout.undercurls, before);
     }
 
     #[test]

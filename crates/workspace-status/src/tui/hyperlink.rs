@@ -19,7 +19,8 @@ use crossterm::cursor::{RestorePosition, SavePosition};
 use crossterm::queue;
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::buffer::{Buffer, Cell};
-use unicode_width::UnicodeWidthStr;
+
+use super::undercurl::span_cells;
 
 /// A screen span that links to a URL.
 ///
@@ -125,33 +126,14 @@ fn read_host_name() -> String {
 /// Read the cells of each link in `links` from `buffer`.
 ///
 /// A link with an unsafe URL, or whose span is off the buffer, is left out.
-/// The span is clipped to the buffer. A wide glyph is read once: the cells it
-/// covers after the first are skipped, as is a cell with `skip` set, the
-/// same way ratatui's diff skips them.
+/// The span is clipped to the buffer and read with [`span_cells`]: a wide
+/// glyph once, skip cells left out.
 pub(crate) fn link_cells(buffer: &Buffer, links: &[LinkHit]) -> Vec<LinkCells> {
-    let area = buffer.area;
     links
         .iter()
         .filter(|link| is_safe_url(&link.url))
         .filter_map(|link| {
-            if link.y < area.top() || link.y >= area.bottom() {
-                return None;
-            }
-            let start = link.x.max(area.left());
-            let end = link.x.saturating_add(link.width).min(area.right());
-            let mut cells = Vec::new();
-            let mut to_skip = 0usize;
-            for x in start..end {
-                let cell = &buffer[(x, link.y)];
-                if to_skip == 0 && !cell.skip {
-                    cells.push((x, link.y, cell.clone()));
-                }
-                to_skip = if to_skip > 0 {
-                    to_skip - 1
-                } else {
-                    cell.symbol().width().saturating_sub(1)
-                };
-            }
+            let cells = span_cells(buffer, link.y, link.x, link.width);
             (!cells.is_empty()).then(|| LinkCells {
                 url: link.url.clone(),
                 cells,
@@ -189,6 +171,7 @@ mod tests {
     use super::*;
     use ratatui::layout::Rect;
     use ratatui::style::Style;
+    use unicode_width::UnicodeWidthStr;
 
     const FULL: &str = "https://github.com/acme/widgets/pull/12345";
 

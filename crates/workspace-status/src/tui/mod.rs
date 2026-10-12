@@ -52,6 +52,7 @@ pub(crate) mod theme_store;
 mod toast;
 mod tree;
 pub(crate) mod tty;
+pub(crate) mod undercurl;
 pub(crate) mod viewed;
 pub(crate) mod watch;
 mod word_diff;

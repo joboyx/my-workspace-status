@@ -2013,6 +2013,15 @@ pub(crate) fn mix_toward(base: Color, target: Color, percent: i32) -> Color {
 }
 
 impl Palette {
+    /// Underline colour under the code of a line with an open comment (the
+    /// curly underline, SGR 58).
+    ///
+    /// The comment accent: `heading`, the colour of the graph's open-comment
+    /// mark and the comment dialog title.
+    pub fn comment_underline(self) -> Color {
+        self.heading
+    }
+
     /// Tint `bg` with a cursor overlay instead of replacing it.
     ///
     /// Adds 3/4 of the theme's own cursor shift (`cursor - surface`) to
@@ -2734,6 +2743,36 @@ mod tests {
             muteds.len(),
             "muted hexes must stay unique for TTY e2e theme chrome: {muteds:?}"
         );
+    }
+
+    /// The curly underline under commented code is a non-text mark: it
+    /// meets the WCAG 3:1 non-text floor on every row background a diff or
+    /// file-view code line can have (the surface, the add / remove rows,
+    /// the cursor bar), on every theme, light twins included. Changed-word
+    /// highlights are left out: they are short runs inside a row, and
+    /// several dark themes put every accent under 3:1 on them.
+    #[test]
+    fn comment_underline_meets_non_text_floor_on_row_backgrounds() {
+        const NON_TEXT: f64 = 3.0;
+        assert_eq!(THEME_IDS.len(), 26);
+        for id in THEME_IDS {
+            let pal = id.palette();
+            let curl = pal.comment_underline();
+            assert_ne!(curl, pal.surface, "{id:?} curl must differ from surface");
+            assert_ne!(curl, pal.repo, "{id:?} curl must differ from code text");
+            for (name, bg) in [
+                ("surface", pal.surface),
+                ("diff_add_bg", pal.diff_add_bg),
+                ("diff_del_bg", pal.diff_del_bg),
+                ("cursor_bg", pal.cursor_bg),
+            ] {
+                let ratio = contrast_ratio(curl, bg);
+                assert!(
+                    ratio >= NON_TEXT,
+                    "{id:?} comment underline on {name} contrast {ratio:.2} < {NON_TEXT}"
+                );
+            }
+        }
     }
 
     /// Icon popover and `?` legend text. Popups paint on `panel`; the

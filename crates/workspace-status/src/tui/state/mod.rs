@@ -119,6 +119,7 @@ use super::tree::{
     build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, visible_for_tree,
     visible_window, workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
 };
+use super::undercurl::UndercurlHit;
 use super::viewed::{
     collect_current_fingerprints, fingerprint_file_change, load_viewed_store, reconcile_viewed,
     save_viewed_store, toggle_viewed, viewed_identity, viewed_row_ids, workspace_store_id,
@@ -321,6 +322,12 @@ pub struct LayoutHit {
     /// the popover URL line. A dialog or the popover drops the links under
     /// its box before it records its own.
     pub links: Vec<LinkHit>,
+    /// Curly-underline spans of the frame, rebuilt every paint: the code
+    /// columns of each painted row of a line with an open comment, in the
+    /// diff pane and the file view. A dialog, the popover, or a toast drops
+    /// the spans under its box, and link cells are cut out at the end of
+    /// the paint. The post-draw writer prints exactly these.
+    pub undercurls: Vec<UndercurlHit>,
     /// The popover painted last frame, if any.
     pub popover: Option<PopoverHit>,
     /// First tab the strip painted. Kept across paints so the window only
@@ -418,6 +425,7 @@ impl Default for LayoutHit {
             tab_close_hits: Vec::new(),
             icon_hits: Vec::new(),
             links: Vec::new(),
+            undercurls: Vec::new(),
             popover: None,
             tab_scroll: 0,
             help_scroll_max: 0,
@@ -754,6 +762,10 @@ pub struct AppState {
     /// `NO_COLOR` is set: the new visuals (spinner, toasts, …) paint with no
     /// colour of their own. The rest of the TUI keeps its palette.
     pub no_color: bool,
+    /// The terminal gets the curly underline on commented lines
+    /// ([`crate::tui::undercurl::undercurl_enabled`], resolved at launch).
+    /// Off, those lines keep the plain underline the frame paints.
+    pub undercurl: bool,
     /// Spinner clock: every spinner frame counts from this instant.
     pub anim_epoch: Instant,
     /// Remote git work in flight, published by the interpreter for paint.
@@ -916,6 +928,7 @@ impl AppState {
             settings.theme,
         );
         state.no_color = settings.no_color;
+        state.undercurl = settings.undercurl;
         state
     }
 
@@ -1020,6 +1033,7 @@ impl AppState {
             layout: LayoutHit::default(),
             ascii,
             no_color: false,
+            undercurl: false,
             anim_epoch: Instant::now(),
             remote_activity: RemoteActivity::default(),
             search_mode: false,

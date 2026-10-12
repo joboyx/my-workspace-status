@@ -36,6 +36,7 @@ use super::state::AppState;
 use super::status::StatusMessage;
 use super::term_progress::{progress_for, TermProgress};
 use super::tty::{poll_event, read_event_origin};
+use super::undercurl::{undercurl_cells, write_undercurls};
 use super::watch::watch_remain_ms;
 
 const INPUT_BATCH: usize = 8;
@@ -372,12 +373,15 @@ pub async fn run(
     Ok(())
 }
 
-/// Draw one frame, then paint its hyperlinks over it (OSC 8), then write
-/// the batch's terminal progress (OSC 9;4) when it changed.
+/// Draw one frame, then paint its hyperlinks over it (OSC 8), then its
+/// curly underlines (SGR 4:3 + 58), then write the batch's terminal
+/// progress (OSC 9;4) when it changed.
 ///
-/// The links are printed again on every frame: a diff that rewrites a
-/// linked cell clears its link, and this puts it back. A batch that ends
-/// sets `batch` to `None`, so the next frame writes the clear state.
+/// The links and curls are printed again on every frame: a diff that
+/// rewrites such a cell clears its link or curl, and this puts it back.
+/// Link cells and curl cells never overlap (`draw` cuts link cells out of
+/// the curls), so the two writers' order does not matter. A batch that
+/// ends sets `batch` to `None`, so the next frame writes the clear state.
 fn draw_frame(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
@@ -385,7 +389,9 @@ fn draw_frame(
 ) -> Result<(), u8> {
     let completed = terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
     let links = link_cells(completed.buffer, &state.layout.links);
+    let curls = undercurl_cells(completed.buffer, &state.layout.undercurls);
     write_links(terminal.backend_mut(), &links).map_err(|_| 1u8)?;
+    write_undercurls(terminal.backend_mut(), &curls, state.undercurl).map_err(|_| 1u8)?;
     progress
         .write_if_changed(
             terminal.backend_mut(),
