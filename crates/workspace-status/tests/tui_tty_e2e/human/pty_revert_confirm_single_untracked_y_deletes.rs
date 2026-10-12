@@ -3,8 +3,8 @@ use std::fs;
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    crumb_row, no_wrong_overlays, readme_unstaged_badge, tree_cursor_on, tree_has, GIT_WAIT,
-    SETTLE_MS, WAIT,
+    ack_rows, after_ack, no_wrong_overlays, readme_unstaged_badge, tree_cursor_on, tree_has,
+    GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 const UNTRACKED: &str = "new.txt";
@@ -31,14 +31,14 @@ fn single_untracked_confirm_armed(screen: &str) -> bool {
         && !chips.contains(" Y ")
         && !chips.contains("revert")
         && !chips.contains("delete untracked")
-        && !crumb_row(screen).contains(&format!("deleted {UNTRACKED}"))
+        && !ack_rows(screen).contains(&format!("deleted {UNTRACKED}"))
         && no_wrong_overlays(screen)
 }
 
 /// `y` deleted the untracked file. Overlay gone. Tracked README still dirty.
+/// The wait checks the `deleted <file>` toast (`after_ack`).
 fn untracked_deleted(screen: &str) -> bool {
-    crumb_row(screen).contains(&format!("deleted {UNTRACKED}"))
-        && !screen.contains(&format!("Revert {UNTRACKED}?"))
+    !screen.contains(&format!("Revert {UNTRACKED}?"))
         && !tree_has(screen, UNTRACKED)
         && tree_has(screen, "README.md")
         && readme_unstaged_badge(screen)
@@ -99,7 +99,7 @@ fn pty_revert_confirm_single_untracked_y_deletes() {
 
     tui.letter_press('y');
     tui.wait_pred(
-        untracked_deleted,
+        after_ack(&format!("deleted {UNTRACKED}"), untracked_deleted),
         "y deletes new.txt; overlay gone; README still dirty",
         GIT_WAIT,
     );

@@ -1,7 +1,7 @@
 use crate::harness::{tree_row_containing, PtySession};
 use crate::seed::{compare_regions_workspace, COMPARE_ADDED_FILE, REGIONS_ALPHA, REGIONS_OMEGA};
 use crate::support::{
-    compare_regions_diff_focused, crumb_row, open_compare_regions_diff, right_of_split, right_pane,
+    ack_rows, compare_regions_diff_focused, open_compare_regions_diff, right_of_split, right_pane,
     GIT_WAIT, RIGHT_PANE_COL, VISUAL_KEY_GAP_MS, WAIT,
 };
 
@@ -174,7 +174,7 @@ fn pty_compare_drag_select_copies_pane_text() {
         tui.screen()
     );
     tui.wait_pred(
-        |screen| crumb_row(screen).contains("copied"),
+        |screen| ack_rows(screen).contains("copied"),
         "diff drag release flashes the copied toast",
         WAIT,
     );

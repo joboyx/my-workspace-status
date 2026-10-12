@@ -1,7 +1,7 @@
 use crate::harness::{tree_row_containing, PtySession};
 use crate::seed::{behind_workspace, daily_workspace, primary_merged_workspace};
 use crate::support::{
-    crumb_row, documented_space_reviewed, idle_dirty_readme_unreviewed, syncbox_row_behind,
+    ack_rows, documented_space_reviewed, idle_dirty_readme_unreviewed, syncbox_row_behind,
     tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
@@ -80,7 +80,7 @@ fn pty_icon_popover_peek_pin_esc() {
     );
     tui.enter();
     tui.wait_pred(
-        |screen| closed(screen) && crumb_row(screen).contains("Fetched 1 repo"),
+        |screen| closed(screen) && ack_rows(screen).contains("Fetched 1 repo"),
         "Enter closes the popover and runs fetch",
         GIT_WAIT,
     );

@@ -2,7 +2,8 @@
 //!
 //! [`StatusKind::Info`] and [`StatusKind::Ok`] expire after [`STATUS_TTL_MS`]
 //! once they show in the slot. Progress, warn, and error stay until another
-//! message replaces them. A plain `String` / `&str` converts to an info
+//! message replaces them. An ok message leaves the slot for a toast
+//! ([`super::toast`]) on the next draw. A plain `String` / `&str` converts to an info
 //! message, so `state.status = "…".into()` keeps working.
 
 use std::fmt;
@@ -24,7 +25,8 @@ pub enum StatusKind {
     Info,
     /// Work in flight (`Fetching 1/3…`, `reverting foo…`). Stays until replaced.
     Progress,
-    /// A finished action (`Fetched 3 repos`). Expires.
+    /// A finished action (`Fetched 3 repos`). Expires. `draw` moves it to a
+    /// toast ([`super::toast`]) unless an overlay paints it as its own row.
     Ok,
     /// A refusal or a key that did nothing (`busy: …`, `nothing to push`). Stays.
     Warn,

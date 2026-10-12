@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use crate::seed::ahead_workspace;
 use crate::slow_git::{open_with_slow_git, wait_slow_git_started, SlowFetchPullGit};
-use crate::support::{after_syncbox_name, crumb_row, tree_cursor_on, GIT_WAIT, WAIT};
+use crate::support::{after_ack, after_syncbox_name, tree_cursor_on, GIT_WAIT, WAIT};
 
 /// ASCII spinner frames (the harness runs `WS_STATUS_GLYPHS=ascii`).
 const ASCII_FRAMES: [char; 4] = ['|', '/', '-', '\\'];
@@ -62,7 +62,7 @@ fn pty_fetch_shows_spinner_on_repo_row_then_clears() {
     );
 
     tui.wait_pred(
-        |screen| crumb_row(screen).contains("Fetched 1 repo") && !syncbox_row_spins(screen),
+        after_ack("Fetched 1 repo", |screen| !syncbox_row_spins(screen)),
         "spinner clears once the fetch lands",
         GIT_WAIT,
     );

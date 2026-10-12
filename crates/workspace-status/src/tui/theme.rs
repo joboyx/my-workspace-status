@@ -2562,6 +2562,24 @@ mod tests {
         (hue, sat)
     }
 
+    /// Toasts paint `repo` text on the add-flash ramp as they fade. Every
+    /// step must keep the text readable, on dark and light themes.
+    #[test]
+    fn toast_text_meets_floor_on_every_flash_step() {
+        const TOAST_FLOOR: f64 = 3.0;
+        assert_eq!(THEME_IDS.len(), 26);
+        for id in THEME_IDS {
+            let pal = id.palette();
+            for (step, bg) in pal.flash_ramp.into_iter().enumerate() {
+                let ratio = contrast_ratio(pal.repo, bg);
+                assert!(
+                    ratio >= TOAST_FLOOR,
+                    "{id:?} toast repo on flash_ramp[{step}] contrast {ratio:.2} < {TOAST_FLOOR}"
+                );
+            }
+        }
+    }
+
     /// Minimum contrast between a changed-word bg and its row bg.
     const WORD_VS_ROW_FLOOR: f64 = 1.25;
 

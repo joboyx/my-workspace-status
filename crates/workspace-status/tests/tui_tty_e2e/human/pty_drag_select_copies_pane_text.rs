@@ -1,6 +1,6 @@
 use crate::harness::{tree_row_containing, PtySession};
 use crate::seed::daily_workspace;
-use crate::support::{crumb_row, documented_launch_first_paint, RIGHT_PANE_COL, SETTLE_MS, WAIT};
+use crate::support::{ack_rows, documented_launch_first_paint, RIGHT_PANE_COL, SETTLE_MS, WAIT};
 
 /// xterm SGR left-button drag (`Cb` 0 + motion bit 32).
 const SGR_LEFT_DRAG: u8 = 32;
@@ -74,7 +74,7 @@ fn pty_drag_select_copies_pane_text() {
         tui.screen()
     );
     tui.wait_pred(
-        |screen| crumb_row(screen).contains("copied"),
+        |screen| ack_rows(screen).contains("copied"),
         "release flashes the copied toast",
         WAIT,
     );

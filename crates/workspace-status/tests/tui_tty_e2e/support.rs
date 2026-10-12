@@ -613,6 +613,44 @@ pub fn crumb_row(screen: &str) -> &str {
     screen_line_from_end(screen, 1)
 }
 
+/// Toast stack in the bottom-right of the panes: one-shot acks such as
+/// `Fetched 1 repo`, `copied`, or `staged README.md`. Reads the text after
+/// the ASCII ` ok ` mark on the three pane rows above the pane's bottom
+/// row (status is last, breadcrumb above it), newest last.
+pub fn toast_rows(screen: &str) -> String {
+    (3..=5)
+        .rev()
+        .filter_map(|from_end| {
+            let line = screen_line_from_end(screen, from_end);
+            line.rfind(" ok ").map(|at| line[at + 4..].trim_end())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Breadcrumb row plus [`toast_rows`]: where a finished op's ack (toast)
+/// or a refusal / failure (breadcrumb) shows.
+pub fn ack_rows(screen: &str) -> String {
+    format!("{}\n{}", crumb_row(screen), toast_rows(screen))
+}
+
+/// Wait predicate: true once `ack` has shown in [`ack_rows`] on some polled
+/// screen and `pred` holds on the current one. Use one per wait.
+///
+/// A toast lives 2.5 s. Under load the reload that `pred` waits for (tree
+/// marks, graph rows) can land after the toast is gone, so the ack and the
+/// end state need not share one frame. A "paint holds" re-check after the
+/// wait uses `pred` alone.
+pub fn after_ack<'a>(ack: &'a str, pred: impl Fn(&str) -> bool + 'a) -> impl Fn(&str) -> bool + 'a {
+    let seen = std::cell::Cell::new(false);
+    move |screen| {
+        if ack_rows(screen).contains(ack) {
+            seen.set(true);
+        }
+        seen.get() && pred(screen)
+    }
+}
+
 /// Trailing `M ` badge, not staged `S `, not reviewed `*`.
 pub fn readme_unstaged_badge(screen: &str) -> bool {
     after_readme_name(screen)
@@ -861,7 +899,7 @@ pub fn graph_stash_still_listed(screen: &str) -> bool {
 
 /// Pull, apply-only, drop-only, or stash-push toasts. Graph pop is `popped`.
 pub fn no_pull_or_other_stash_write(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
+    let crumb = ack_rows(screen);
     !crumb.contains("Pulled")
         && !crumb.contains("applied")
         && !crumb.contains("dropped")
@@ -886,7 +924,7 @@ pub fn graph_focused_merger_stash_listed(screen: &str) -> bool {
         && graph_pane_focused(screen)
         && graph_stash_still_listed(screen)
         && !tree_has(screen, "wip.txt")
-        && !crumb_row(screen).contains("popped")
+        && !ack_rows(screen).contains("popped")
         && no_pull_or_other_stash_write(screen)
         && no_wrong_stash_pop_overlays(screen)
 }
@@ -911,8 +949,8 @@ pub fn stash_row_ready_to_pop(screen: &str) -> bool {
 }
 
 /// Graph `p` popped `stash@{0}`: apply + drop. Apply-only / drop-only fail.
+/// The wait checks the `popped stash@{0}` toast (`after_ack`).
 pub fn documented_graph_stash_pop(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
     let status = status_row(screen);
     graph_pane_focused(screen)
         && tree_has(screen, "merger")
@@ -920,7 +958,6 @@ pub fn documented_graph_stash_pop(screen: &str) -> bool {
         && !graph_stash_still_listed(screen)
         && screen.contains("uncommitted changes")
         && !screen.contains("working tree clean")
-        && crumb.contains("popped stash@{0}")
         && no_pull_or_other_stash_write(screen)
         && !status.contains("pop stash")
         && !status.contains("apply stash")
@@ -937,7 +974,7 @@ pub fn no_stash_wrong_ops(screen: &str) -> bool {
         && !screen.contains("MOVE")
         && !screen.contains("WIP on graph")
         && !screen.contains("popped")
-        && !crumb_row(screen).contains("staged")
+        && !ack_rows(screen).contains("staged")
 }
 
 /// App graph lists `stash@{0}` (`WIP on main`). Merger stash cannot pass.
@@ -975,9 +1012,10 @@ pub fn stash_create_overlay_open(screen: &str) -> bool {
         && !screen.contains("WIP on main")
 }
 
-/// Overlay `s` created a path-scoped stash. README left the tree.
+/// Overlay `s` created a path-scoped stash. README left the tree. The wait
+/// checks the `Stashed 1 file` toast (`after_ack`).
 pub fn documented_stash_created(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
+    let crumb = ack_rows(screen);
     tree_cursor_on(screen, "No updates")
         && !tree_cursor_on(screen, "README.md")
         && !tree_cursor_on(screen, "app")
@@ -985,7 +1023,6 @@ pub fn documented_stash_created(screen: &str) -> bool {
         && !tree_has(screen, "app")
         && tree_has(screen, "No updates")
         && tree_has(screen, "0 changed")
-        && crumb.contains("Stashed 1 file")
         && !screen.contains("Stash app")
         && !screen.contains(STASH_CREATE_OP_ROW)
         && !screen.contains("UNSTAGED")
@@ -1045,9 +1082,10 @@ pub fn app_graph_stash_row_focused(screen: &str) -> bool {
         && no_stash_wrong_ops(screen)
 }
 
-/// Graph `a` applied. README is dirty again. Stash stays (not pop).
+/// Graph `a` applied. README is dirty again. Stash stays (not pop). The wait
+/// checks the `applied stash@{0}` toast (`after_ack`).
 pub fn documented_stash_applied(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
+    let crumb = ack_rows(screen);
     graph_pane_focused(screen)
         && tree_has(screen, "README.md")
         && tree_has(screen, "app")
@@ -1057,7 +1095,6 @@ pub fn documented_stash_applied(screen: &str) -> bool {
         && graph_cursor_on(screen, "WIP on main")
         && app_stash_on_graph(screen)
         && has_graph_stash_hints(screen)
-        && crumb.contains("applied stash@{0}")
         && !crumb.contains("popped")
         && !crumb.contains("dropped")
         && !crumb.contains("Stashed")
@@ -1080,9 +1117,10 @@ pub fn stash_drop_confirm_open(screen: &str) -> bool {
         && !screen.contains("popped")
 }
 
-/// Confirm `y` dropped the stash. Dirty README stays. Not pop.
+/// Confirm `y` dropped the stash. Dirty README stays. Not pop. The wait
+/// checks the `dropped stash@{0}` toast (`after_ack`).
 pub fn documented_stash_dropped(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
+    let crumb = ack_rows(screen);
     let status = status_row(screen);
     graph_pane_focused(screen)
         && tree_has(screen, "README.md")
@@ -1095,7 +1133,6 @@ pub fn documented_stash_dropped(screen: &str) -> bool {
         && !screen.contains("Drop stash@{0}?")
         && !status.contains("apply stash")
         && !status.contains("drop stash")
-        && crumb.contains("dropped stash@{0}")
         && !crumb.contains("popped")
         && !crumb.contains("applied")
         && no_stash_wrong_ops(screen)

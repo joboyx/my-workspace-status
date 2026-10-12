@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::harness::PtySession;
 use crate::seed::{compare_regions_workspace, git_stdout, COMPARE_ADDED_FILE, REGIONS_OMEGA};
 use crate::support::{
-    compare_regions_diff_focused, crumb_row, open_compare_regions_diff, tree_cursor_on,
+    ack_rows, compare_regions_diff_focused, crumb_row, open_compare_regions_diff, tree_cursor_on,
     type_palette_filter, GIT_WAIT, SETTLE_MS, VISUAL_KEY_GAP_MS, WAIT,
 };
 
@@ -127,7 +127,7 @@ fn pty_compare_v_x_y_reverts_range_to_merge_base() {
     tui.wait_pred(
         |screen| {
             confirm_closed(screen)
-                && crumb_row(screen).contains("reverted range regions.txt to merge base")
+                && ack_rows(screen).contains("reverted range regions.txt to merge base")
         },
         "y reverts the range (status names the merge base)",
         GIT_WAIT,
@@ -192,7 +192,7 @@ fn pty_compare_x_restores_modified_file_to_merge_base() {
     tui.wait_pred(
         |screen| {
             confirm_closed(screen)
-                && crumb_row(screen).contains("reverted regions.txt to merge base")
+                && ack_rows(screen).contains("reverted regions.txt to merge base")
         },
         "y restores regions.txt from the merge base",
         GIT_WAIT,
@@ -240,7 +240,7 @@ fn pty_compare_x_deletes_file_added_on_head() {
     );
     tui.letter_press('y');
     tui.wait_pred(
-        |screen| confirm_closed(screen) && crumb_row(screen).contains("deleted summary.txt"),
+        |screen| confirm_closed(screen) && ack_rows(screen).contains("deleted summary.txt"),
         "y deletes summary.txt",
         GIT_WAIT,
     );

@@ -5,8 +5,9 @@ use std::process::{Command, Stdio};
 use crate::harness::{left_tree, PtySession};
 use crate::seed::{daily_workspace, git_env};
 use crate::support::{
-    crumb_row, has_stage_hint, no_wrong_overlays, pane_unstaged_readme, readme_unstaged_badge,
-    status_row, tree_cursor_on, tree_has, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
+    ack_rows, after_ack, has_stage_hint, no_wrong_overlays, pane_unstaged_readme,
+    readme_unstaged_badge, status_row, tree_cursor_on, tree_has, tree_line_containing, GIT_WAIT,
+    SETTLE_MS, WAIT,
 };
 
 const UNTRACKED: &str = "new.txt";
@@ -91,7 +92,7 @@ fn documented_help_lists_y_revert_delete(screen: &str) -> bool {
 
 /// Tree-focused expanded `app`. Mixed dirty files stay. Graph loaded.
 fn app_repo_mixed_dirty(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
+    let crumb = ack_rows(screen);
     tree_cursor_on(screen, "app")
         && !tree_cursor_on(screen, "README.md")
         && !tree_cursor_on(screen, UNTRACKED)
@@ -130,12 +131,12 @@ fn documented_revert_confirm_mixed_y_deletes(screen: &str) -> bool {
         && no_y_apply_path(screen)
 }
 
-/// CSI-u Shift+Y applied mixed revert+delete. Overlay gone. Toast is counts.
+/// CSI-u Shift+Y applied mixed revert+delete. Overlay gone. The wait checks
+/// the counts toast (`after_ack`).
 fn documented_y_reverted_and_deleted(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
+    let crumb = ack_rows(screen);
     let status = status_row(screen);
-    crumb.contains("reverted 1 tracked, 1 untracked")
-        && !crumb.contains("revert cancelled")
+    !crumb.contains("revert cancelled")
         && !crumb.contains("reverted README")
         && !crumb.contains(&format!("deleted {UNTRACKED}"))
         && !screen.contains("Revert app?")
@@ -252,7 +253,10 @@ fn pty_y_revert_and_delete() {
 
     tui.shift_letter('Y');
     tui.wait_pred(
-        documented_y_reverted_and_deleted,
+        after_ack(
+            "reverted 1 tracked, 1 untracked",
+            documented_y_reverted_and_deleted,
+        ),
         "CSI-u Shift+Y: reverted 1 tracked, 1 untracked; overlay gone; new.txt off tree",
         GIT_WAIT,
     );

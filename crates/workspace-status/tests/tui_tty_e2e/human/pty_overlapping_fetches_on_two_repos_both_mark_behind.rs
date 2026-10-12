@@ -4,9 +4,9 @@ use crate::harness::PtySession;
 use crate::seed::two_unfetched_behind_workspace;
 use crate::slow_git::{open_with_slow_git, wait_slow_git_started, SlowFetchPullGit};
 use crate::support::{
-    crumb_row, has_fetch_hint, panes_tree_focused_graph_unfocused, repo_row_behind,
-    repo_row_in_sync, status_row, tree_cursor_on, tree_dir_collapsed, tree_dir_expanded, tree_has,
-    tree_line_containing, GIT_WAIT, WAIT,
+    ack_rows, after_ack, crumb_row, has_fetch_hint, panes_tree_focused_graph_unfocused,
+    repo_row_behind, repo_row_in_sync, status_row, tree_cursor_on, tree_dir_collapsed,
+    tree_dir_expanded, tree_has, tree_line_containing, GIT_WAIT, WAIT,
 };
 
 fn no_wrong_fetch_overlays(screen: &str) -> bool {
@@ -76,15 +76,16 @@ fn cursor_on_beta_while_fetching(screen: &str) -> bool {
         && (crumb_row(screen).contains("Fetching") || screen.contains("Fetching"))
 }
 
+/// Both repos marked behind, no lock, no failure. The `Fetched` ack is
+/// checked by the wait (`after_ack`), since its toast can expire before the
+/// second reload lands.
 fn both_repos_behind_after_overlap(screen: &str) -> bool {
     repo_row_behind(screen, "alpha")
         && repo_row_behind(screen, "beta")
         && tree_has(screen, "2 behind")
         && !tree_has(screen, "all current")
         && !screen.contains("index.lock")
-        && !crumb_row(screen).contains("failed")
-        && (crumb_row(screen).contains("Fetched 2 repos")
-            || (screen.contains("Fetched") && repo_row_behind(screen, "beta")))
+        && !ack_rows(screen).contains("failed")
 }
 
 fn unfold_no_updates_onto_alpha(tui: &mut PtySession) {
@@ -152,7 +153,7 @@ fn pty_overlapping_fetches_on_two_repos_both_mark_behind() {
     tui.key('f');
 
     tui.wait_pred(
-        both_repos_behind_after_overlap,
+        after_ack("Fetched", both_repos_behind_after_overlap),
         "both alpha and beta mark v1 / 2 behind after overlapping fetches",
         GIT_WAIT,
     );
@@ -167,7 +168,7 @@ fn pty_overlapping_fetches_on_two_repos_both_mark_behind() {
         "beta fetch must run (Fetched 1 repo only + beta in-sync is red); screen:\n{screen}"
     );
     assert!(
-        !(crumb_row(&screen).contains("Fetched 1 repo") && repo_row_in_sync(&screen, "beta")),
+        !(ack_rows(&screen).contains("Fetched 1 repo") && repo_row_in_sync(&screen, "beta")),
         "second fetch never ran: Fetched 1 repo and beta still in-sync; screen:\n{screen}"
     );
     assert!(

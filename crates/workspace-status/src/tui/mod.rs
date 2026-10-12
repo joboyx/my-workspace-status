@@ -49,6 +49,7 @@ mod term_bg;
 mod term_progress;
 pub(crate) mod theme;
 pub(crate) mod theme_store;
+mod toast;
 mod tree;
 pub(crate) mod tty;
 pub(crate) mod viewed;

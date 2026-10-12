@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use crate::harness::PtySession;
 use crate::seed::{focus_workspace, git_env};
 use crate::support::{
-    crumb_row, focusbox_graph_left_full, graph_cursor_on, graph_pane_focused,
+    ack_rows, after_ack, focusbox_graph_left_full, graph_cursor_on, graph_pane_focused,
     graph_subject_meta_line, no_mouse_toggle_toast, status_row, title_has_files, tree_has,
     tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
@@ -125,7 +125,7 @@ fn focusbox_diverged_graph_body(screen: &str) -> bool {
 /// Tab focused the graph. HEAD is still `keep-leaf-commit`. Checkout is idle.
 fn graph_focused_diverged_before_checkout(screen: &str) -> bool {
     let status = status_row(screen);
-    let crumb = crumb_row(screen);
+    let crumb = ack_rows(screen);
     graph_pane_focused(screen)
         && tree_has(screen, "focusbox")
         && focusbox_tree_on_keep(screen)
@@ -160,11 +160,10 @@ fn noise_leaf_ready_to_checkout(screen: &str) -> bool {
 /// resets the list cursor to the working-tree row. Stay on that paint.
 /// Cursor still on `keep-leaf-commit` is a no-op.
 fn documented_graph_b_checkout(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
+    let crumb = ack_rows(screen);
     let status = status_row(screen);
     graph_pane_focused(screen)
         && tree_has(screen, "focusbox")
-        && crumb.contains(&format!("Checked out {BRANCH}"))
         && !crumb.contains("failed")
         && !crumb.contains("Switched")
         && !crumb.contains("Already on")
@@ -266,7 +265,10 @@ fn pty_graph_b_checkout() {
 
     tui.key('b');
     tui.wait_pred(
-        documented_graph_b_checkout,
+        after_ack(
+            &format!("Checked out {BRANCH}"),
+            documented_graph_b_checkout,
+        ),
         "graph b checks out topic/noise at noise-leaf-commit (not picker, not d, not no-op)",
         GIT_WAIT,
     );

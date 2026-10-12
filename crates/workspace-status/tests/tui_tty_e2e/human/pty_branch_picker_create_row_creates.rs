@@ -1,7 +1,7 @@
 use crate::harness::PtySession;
 use crate::seed::focus_workspace;
 use crate::support::{
-    crumb_row, focusbox_graph_left_full, graph_subject_meta_line, no_mouse_toggle_toast,
+    ack_rows, after_ack, focusbox_graph_left_full, graph_subject_meta_line, no_mouse_toggle_toast,
     status_row, title_has_files, tree_cursor_on, tree_has, tree_line_containing, tree_pane_focused,
     GIT_WAIT, SETTLE_MS, WAIT,
 };
@@ -84,11 +84,10 @@ fn tree_picker_open_on_keep(screen: &str) -> bool {
 
 /// The create row + Enter ran `checkout -b` at HEAD. Not graph `c`, not tree-file `c`.
 fn documented_picker_create_checkout(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
+    let crumb = ack_rows(screen);
     let status = status_row(screen);
     tree_pane_focused(screen)
         && tree_cursor_on(screen, "focusbox")
-        && crumb.contains(&format!("created {BRANCH}"))
         && !crumb.contains(&format!("created {BRANCH} at"))
         && !crumb.contains("failed")
         && !crumb.contains("Switched")
@@ -159,7 +158,10 @@ fn pty_branch_picker_create_row_creates() {
 
     tui.enter();
     tui.wait_pred(
-        documented_picker_create_checkout,
+        after_ack(
+            &format!("created {BRANCH}"),
+            documented_picker_create_checkout,
+        ),
         "Enter on the create row creates the branch at HEAD and checks it out",
         GIT_WAIT,
     );

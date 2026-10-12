@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crate::harness::PtySession;
 use crate::seed::two_unfetched_behind_workspace;
 use crate::slow_git::{wait_slow_git_started, SlowFetchPullGit};
-use crate::support::{crumb_row, tree_cursor_on, GIT_WAIT, WAIT};
+use crate::support::{ack_rows, tree_cursor_on, GIT_WAIT, WAIT};
 
 /// Start of every OSC 9;4 sequence.
 const OSC_9_4: &[u8] = b"\x1b]9;4;";
@@ -91,7 +91,7 @@ fn pty_fetch_all_emits_progress_and_quit_clears_it() {
         thread::sleep(Duration::from_millis(25));
     }
     assert!(
-        !crumb_row(&tui.screen()).contains("Fetched"),
+        !ack_rows(&tui.screen()).contains("Fetched"),
         "q must land while the batch is in flight; screen:\n{}",
         tui.screen()
     );
@@ -129,7 +129,7 @@ fn pty_term_progress_off_writes_no_osc_9_4() {
     let (_root, slow, mut tui) = open_two_repos(&[("WS_STATUS_TERM_PROGRESS", "0")]);
     fetch_all(&mut tui, &slow);
     tui.wait_pred(
-        |screen| crumb_row(screen).contains("Fetched"),
+        |screen| ack_rows(screen).contains("Fetched"),
         "the fetch-all lands",
         GIT_WAIT,
     );

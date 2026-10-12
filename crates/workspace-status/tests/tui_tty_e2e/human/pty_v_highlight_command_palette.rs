@@ -1,7 +1,7 @@
 use crate::harness::PtySession;
 use crate::seed::{regions_diff, two_hunk_regions_workspace, REGIONS_ALPHA, REGIONS_OMEGA};
 use crate::support::{
-    crumb_row, open_regions_first_hunk_highlight, regions_highlight_active, revert_range_confirm,
+    ack_rows, open_regions_first_hunk_highlight, regions_highlight_active, revert_range_confirm,
     GIT_WAIT, SETTLE_MS, VISUAL_KEY_GAP_MS, WAIT,
 };
 
@@ -140,7 +140,7 @@ fn pty_v_colon_palette_stages_highlighted_range() {
     );
     tui.enter();
     tui.wait_pred(
-        |screen| crumb_row(screen).contains("staged range regions.txt") && !palette_open(screen),
+        |screen| ack_rows(screen).contains("staged range regions.txt") && !palette_open(screen),
         "Enter stages the highlighted range (staged range toast)",
         GIT_WAIT,
     );

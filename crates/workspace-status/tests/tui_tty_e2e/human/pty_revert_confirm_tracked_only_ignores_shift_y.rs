@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    crumb_row, idle_dirty_readme_unstaged, no_wrong_overlays, pane_unstaged_readme,
+    after_ack, idle_dirty_readme_unstaged, no_wrong_overlays, pane_unstaged_readme,
     readme_unstaged_badge, tree_cursor_on, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
@@ -36,10 +36,10 @@ fn tracked_only_confirm_armed(screen: &str) -> bool {
         && no_wrong_overlays(screen)
 }
 
-/// `y` restored README. Overlay gone. Toast names the file.
+/// `y` restored README. Overlay gone. The wait checks the toast that names
+/// the file (`after_ack`).
 fn readme_reverted(screen: &str) -> bool {
-    crumb_row(screen).contains("reverted README.md")
-        && !screen.contains("Revert README.md?")
+    !screen.contains("Revert README.md?")
         && !screen.contains("1 tracked file")
         && !readme_unstaged_badge(screen)
         && !pane_unstaged_readme(screen)
@@ -98,7 +98,7 @@ fn pty_revert_confirm_tracked_only_ignores_shift_y() {
 
     tui.letter_press('y');
     tui.wait_pred(
-        readme_reverted,
+        after_ack("reverted README.md", readme_reverted),
         "y reverts README; overlay gone; toast reverted README.md",
         GIT_WAIT,
     );

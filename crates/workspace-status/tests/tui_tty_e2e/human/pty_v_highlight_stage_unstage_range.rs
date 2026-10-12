@@ -3,8 +3,8 @@ use std::path::Path;
 use crate::harness::PtySession;
 use crate::seed::{regions_diff, two_hunk_regions_workspace, REGIONS_ALPHA, REGIONS_OMEGA};
 use crate::support::{
-    crumb_row, panes_tree_unfocused_diff_focused, regions_diff_focused, regions_first_paint,
-    regions_highlight_active, GIT_WAIT, SETTLE_MS, VISUAL_KEY_GAP_MS, WAIT,
+    ack_rows, after_ack, panes_tree_unfocused_diff_focused, regions_diff_focused,
+    regions_first_paint, regions_highlight_active, GIT_WAIT, SETTLE_MS, VISUAL_KEY_GAP_MS, WAIT,
 };
 
 const ALPHA: &str = REGIONS_ALPHA;
@@ -16,14 +16,14 @@ fn csi_u_letter(tui: &mut PtySession, letter: char) {
     tui.csi_u(codepoint, 1, 3);
 }
 
-fn staged_range_toast(screen: &str) -> bool {
-    crumb_row(screen).contains("staged range")
-        && !screen.contains("VISUAL")
-        && screen.contains("STAGED")
+/// VISUAL off and the STAGED section painted. The wait checks the `staged range`
+/// toast (`after_ack`), since it can expire before the diff reload lands.
+fn range_staged(screen: &str) -> bool {
+    !screen.contains("VISUAL") && screen.contains("STAGED")
 }
 
 fn unstaged_range_toast(screen: &str) -> bool {
-    crumb_row(screen).contains("unstaged range") && !screen.contains("VISUAL")
+    ack_rows(screen).contains("unstaged range") && !screen.contains("VISUAL")
 }
 
 fn repo_cached(workspace: &Path) -> String {
@@ -79,7 +79,7 @@ fn pty_v_s_stages_one_hunk_u_unstages_that_range() {
     highlight_first_hunk(&mut tui);
     tui.key('s');
     tui.wait_pred(
-        staged_range_toast,
+        after_ack("staged range", range_staged),
         "s stages the highlighted range (VISUAL off, staged range toast)",
         GIT_WAIT,
     );

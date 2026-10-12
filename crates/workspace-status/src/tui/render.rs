@@ -98,6 +98,7 @@ use super::tree::{
     pr_badge_mark, visible_window, workspace_trailing_fit, NodeKind, NodeSegments, SegRole,
     TextSeg, VisibleRow,
 };
+use super::watch::FlashKind;
 use crate::file_index::{FileIndex, FileRead};
 use crate::file_search::{SearchHit, SearchOptions};
 use crate::helpers::{is_detached_head_branch, visible_width};
@@ -188,6 +189,8 @@ fn selection_marker(selected: bool, focused: bool) -> &'static str {
 /// Draw one frame. Updates `state.layout` for mouse hits.
 pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.prune_expired_flashes();
+    // One-shot acks leave the status slot for a toast before anything paints.
+    state.route_ack_to_toast(Instant::now());
     // Every frame starts with no icon or link; only a pane that paints one
     // records it again, so a hidden badge never opens a PR or a popover.
     state.layout.icon_hits.clear();
@@ -305,11 +308,67 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     // The icon popover hangs over the panes and any dialog.
     draw_popover(frame, chunks[1], state);
 
+    // Toasts paint last, over any dialog, popover, or backdrop, so they
+    // stay crisp. Keep this after every overlay.
+    draw_toasts(frame, chunks[1], state);
+
     // Keep the frame as painted so a mouse release copies what is on screen,
     // then reverse the selected cells on top of it.
     state.painted_frame = frame.buffer_mut().clone();
     if let Some(selection) = state.text_selection.as_ref() {
         selection.highlight(frame.buffer_mut());
+    }
+}
+
+/// Widest a toast row may be (columns).
+const TOAST_MAX_COLS: u16 = 48;
+
+/// Toast stack in the bottom-right of `pane_area`, newest on the bottom
+/// row, one row each: ` ✓ text ` (ASCII ` ok text `).
+///
+/// Fg is `repo` on the add-flash ramp step for the toast's fade strength.
+/// Under `NO_COLOR` the row is reversed terminal colours with no fade.
+/// Marks the frame animating while a toast shows, so the loop ticks.
+fn draw_toasts(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
+    let now = Instant::now();
+    if state.toasts.is_empty() || pane_area.width < 4 || pane_area.height < 3 {
+        return;
+    }
+    let palette = state.theme.palette();
+    let mark = if state.ascii { " ok " } else { " ✓ " };
+    let cap = TOAST_MAX_COLS.min(pane_area.width - 2);
+    // Inside the pane border: one column in from the right, one row up.
+    let bottom = pane_area.bottom() - 2;
+    let rows = usize::from(pane_area.height - 2);
+    let toasts: Vec<(String, f32)> = state
+        .toasts
+        .visible(now)
+        .map(|(toast, strength)| (toast.text.clone(), strength))
+        .collect();
+    // Cell widths as ratatui paints them: `visible_width` counts `✓` as
+    // two columns, which would leave a blank cell at the right edge.
+    let body_max = usize::from(cap).saturating_sub(UnicodeWidthStr::width(mark) + 1);
+    for (offset, (text, strength)) in toasts.iter().rev().take(rows).enumerate() {
+        let label = format!("{mark}{} ", fit_with_ellipsis(text, body_max));
+        let width = (UnicodeWidthStr::width(label.as_str()) as u16).min(cap);
+        let rect = Rect::new(
+            pane_area.right() - 1 - width,
+            bottom - offset as u16,
+            width,
+            1,
+        );
+        let style = if state.no_color {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            let Some(bg) = palette.flash_bg_for(FlashKind::Add, *strength) else {
+                continue;
+            };
+            Style::default().fg(palette.repo).bg(bg)
+        };
+        frame.render_widget(Clear, rect);
+        frame.render_widget(Paragraph::new(Span::styled(label, style)), rect);
+        drop_links_under(&mut state.layout.links, rect);
+        state.layout.animating = true;
     }
 }
 
@@ -12840,6 +12899,133 @@ mod tests {
             Some(Color::Reset),
             "NO_COLOR: the loading spinner takes the terminal foreground"
         );
+    }
+
+    use super::super::status::StatusMessage;
+    use super::super::toast::TOAST_TTL_MS;
+
+    /// `(row y, row text)` of every painted row containing `needle`.
+    fn rows_with(terminal: &Terminal<TestBackend>, needle: &str) -> Vec<(u16, String)> {
+        buffer_text(terminal)
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains(needle))
+            .map(|(y, line)| (y as u16, line.to_string()))
+            .collect()
+    }
+
+    /// A one-repo `app` state with `status` set.
+    fn toast_state(status: StatusMessage, ascii: bool) -> AppState {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, ascii);
+        state.status = status;
+        state
+    }
+
+    const TOAST_W: u16 = 100;
+    const TOAST_H: u16 = 24;
+
+    #[test]
+    fn copied_ack_paints_bottom_right_toast_not_breadcrumb() {
+        use super::super::chrome::STATUS_COPIED;
+        let mut state = toast_state(StatusMessage::ok(STATUS_COPIED), false);
+        let mut terminal = Terminal::new(TestBackend::new(TOAST_W, TOAST_H)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let rows = rows_with(&terminal, "copied");
+        assert_eq!(rows.len(), 1, "one toast row, no breadcrumb copy: {rows:?}");
+        let (y, line) = &rows[0];
+        // Status row is H-1, breadcrumb H-2; the toast sits one row above
+        // the pane's bottom border.
+        assert_eq!(*y, TOAST_H - 4, "bottom of the panes, not the breadcrumb");
+        assert!(
+            line.trim_end_matches(['│', ' ']).ends_with("✓ copied"),
+            "right-aligned toast: {line:?}"
+        );
+        let buf = terminal.backend().buffer();
+        let x = TOAST_W - 3;
+        assert_eq!(
+            buf[(x, *y)].symbol(),
+            "d",
+            "ends one column in from the edge: {line:?}"
+        );
+        let palette = state.theme.palette();
+        assert_eq!(buf[(x, *y)].fg, palette.repo);
+        assert_eq!(buf[(x, *y)].bg, palette.flash_ramp[0], "full strength");
+        assert!(state.status.is_empty());
+    }
+
+    #[test]
+    fn toast_ascii_and_no_color_fallbacks() {
+        let mut state = toast_state(StatusMessage::ok("Fetched 3 repos"), true);
+        state.no_color = true;
+        let mut terminal = Terminal::new(TestBackend::new(TOAST_W, TOAST_H)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let rows = rows_with(&terminal, "ok Fetched 3 repos");
+        assert_eq!(rows.len(), 1, "ASCII mark ` ok `: {rows:?}");
+        assert!(!rows[0].1.contains('✓'));
+        let y = rows[0].0;
+        let buf = terminal.backend().buffer();
+        let cell = &buf[(TOAST_W - 3, y)];
+        assert_eq!(cell.symbol(), "s");
+        assert_eq!(cell.fg, Color::Reset, "NO_COLOR: no fg of its own");
+        assert_eq!(cell.bg, Color::Reset, "NO_COLOR: no bg of its own");
+        assert!(cell.modifier.contains(Modifier::REVERSED));
+
+        // NO_COLOR has no fade: a toast deep in its fade window still
+        // paints plain reversed cells.
+        state.toasts = Default::default();
+        state
+            .toasts
+            .push("late ack", toast_pushed_ago(TOAST_TTL_MS - 100));
+        draw_state(&mut terminal, &mut state);
+        let rows = rows_with(&terminal, "ok late ack");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let cell = &terminal.backend().buffer()[(TOAST_W - 3, rows[0].0)];
+        assert_eq!((cell.fg, cell.bg), (Color::Reset, Color::Reset));
+        assert!(cell.modifier.contains(Modifier::REVERSED));
+
+        // With colour the same toast sits on the last ramp step.
+        state.no_color = false;
+        state.toasts = Default::default();
+        state
+            .toasts
+            .push("late ack", toast_pushed_ago(TOAST_TTL_MS - 100));
+        draw_state(&mut terminal, &mut state);
+        let rows = rows_with(&terminal, "ok late ack");
+        let cell = &terminal.backend().buffer()[(TOAST_W - 3, rows[0].0)];
+        assert_eq!(cell.bg, state.theme.palette().flash_ramp[3]);
+    }
+
+    /// An instant `ms` before now, for a toast part way through its life.
+    fn toast_pushed_ago(ms: u64) -> Instant {
+        Instant::now()
+            .checked_sub(std::time::Duration::from_millis(ms))
+            .expect("host uptime exceeds the toast TTL")
+    }
+
+    #[test]
+    fn toast_marks_layout_animating() {
+        let mut state = toast_state(StatusMessage::default(), false);
+        let mut terminal = Terminal::new(TestBackend::new(TOAST_W, TOAST_H)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert!(!state.layout.animating, "idle: no tick");
+        assert_eq!(state.next_anim_tick_ms(), None);
+
+        state.status = StatusMessage::ok("Checked out main");
+        draw_state(&mut terminal, &mut state);
+        assert!(state.layout.animating, "a showing toast ticks the loop");
+        assert!(state.next_anim_tick_ms().is_some());
+
+        // A toast whose time ran out is pruned and stops the tick.
+        state.toasts = Default::default();
+        state
+            .toasts
+            .push("Checked out main", toast_pushed_ago(TOAST_TTL_MS));
+        draw_state(&mut terminal, &mut state);
+        assert!(state.toasts.is_empty(), "pruned at the TTL");
+        assert!(!state.layout.animating);
+        assert_eq!(state.next_anim_tick_ms(), None);
+        assert!(rows_with(&terminal, "Checked out main").is_empty());
     }
 
     /// A primary `app` with a linked `wt` checkout: one family repo row

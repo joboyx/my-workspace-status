@@ -1,7 +1,7 @@
 use crate::harness::PtySession;
 use crate::seed::focus_workspace;
 use crate::support::{
-    crumb_row, graph_cursor_on, graph_pane_focused, no_mouse_toggle_toast, status_row,
+    ack_rows, after_ack, graph_cursor_on, graph_pane_focused, no_mouse_toggle_toast, status_row,
     title_has_files, tree_cursor_on, tree_has, tree_pane_focused, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
@@ -33,7 +33,7 @@ fn focusbox_diverged_graph_body(screen: &str) -> bool {
 /// First paint: focusbox on the tree. Graph `m` has not run.
 fn idle_focusbox_before_graph_merge(screen: &str) -> bool {
     let status = status_row(screen);
-    let crumb = crumb_row(screen);
+    let crumb = ack_rows(screen);
     tree_cursor_on(screen, "focusbox")
         && tree_pane_focused(screen)
         && tree_has(screen, "feature/keep")
@@ -50,7 +50,7 @@ fn idle_focusbox_before_graph_merge(screen: &str) -> bool {
 /// Tab focused the graph. HEAD is still `keep-leaf-commit`. Merge is idle.
 fn graph_focused_diverged_before_merge(screen: &str) -> bool {
     let status = status_row(screen);
-    let crumb = crumb_row(screen);
+    let crumb = ack_rows(screen);
     graph_pane_focused(screen)
         && tree_has(screen, "focusbox")
         && focusbox_diverged_graph_body(screen)
@@ -100,7 +100,7 @@ fn merge_into_head_confirm(screen: &str) -> bool {
 
 /// `y` created a merge commit into HEAD. Fast-forward / no-op cannot pass.
 fn documented_graph_merge_commit(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
+    let crumb = ack_rows(screen);
     let status = status_row(screen);
     graph_pane_focused(screen)
         && screen.contains("Merge branch 'main' into feature/keep")
@@ -109,7 +109,6 @@ fn documented_graph_merge_commit(screen: &str) -> bool {
         && screen.contains("[+feature/keep]")
         && (screen.contains("working tree clean") || screen.contains("Working tree clean"))
         && tree_has(screen, "feature/keep")
-        && crumb.contains("Merged main")
         && !crumb.contains("failed")
         && !crumb.contains("Fast-forwarded")
         && !crumb.contains("Already up to date")
@@ -179,7 +178,7 @@ fn pty_graph_merge_creates_commit() {
 
     tui.key('y');
     tui.wait_pred(
-        documented_graph_merge_commit,
+        after_ack("Merged main", documented_graph_merge_commit),
         "y creates merge commit into HEAD: Merge branch 'main' into feature/keep, Merged main",
         GIT_WAIT,
     );

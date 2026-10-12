@@ -104,7 +104,7 @@ use super::stash::{
     checkout_path, resolve_stash_menu_key, row_is_hidden_ignored, stash_dirty_for_row,
     stash_ops_for_context, StashMenuKeyResult, StashOp, StashOpId, StashOpsContext,
 };
-use super::status::StatusMessage;
+use super::status::{StatusKind, StatusMessage};
 use super::tabs::{
     compare_file_dirty, compare_range_label, CommitPickerState, ComparePickerKind,
     ComparePickerState, OpenCompare, TabStrip, WorktreeFile, CANNOT_REVERT_COMMITTED_DIFF,
@@ -114,6 +114,7 @@ use super::tabs::{
 };
 use super::theme::{cycle_theme_id, BackgroundMode, ThemeId};
 use super::theme_store::save_last_theme;
+use super::toast::ToastStack;
 use super::tree::{
     build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, visible_for_tree,
     visible_window, workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
@@ -707,6 +708,9 @@ pub struct AppState {
     pub focus: FocusPane,
     /// Breadcrumb trailing slot / overlay status row ([`StatusMessage`]).
     pub status: StatusMessage,
+    /// One-shot acks painted bottom-right. Filled from an ok `status` by
+    /// [`Self::route_ack_to_toast`] at the top of each draw.
+    pub toasts: ToastStack,
     pub graph: Option<GraphModel>,
     pub graph_identity: Option<(String, String)>,
     pub graph_scroll: u16,
@@ -984,6 +988,7 @@ impl AppState {
             help_scroll: 0,
             focus: FocusPane::Left,
             status: StatusMessage::default(),
+            toasts: ToastStack::default(),
             graph: None,
             graph_identity: None,
             graph_scroll: 0,
@@ -2175,6 +2180,25 @@ impl AppState {
             return false;
         }
         self.status.expire(now)
+    }
+
+    /// Move a one-shot ack ([`StatusKind::Ok`]) from the status slot to a
+    /// toast pushed at `now`, and drop toasts whose time ran out.
+    ///
+    /// Info, progress, warn, and error stay in the slot. An ok message also
+    /// stays while an overlay paints `status` as its own row
+    /// (`status_uses_status_text`). `draw` calls this first, so dispatch
+    /// and state tests still see the ack in `status`.
+    pub fn route_ack_to_toast(&mut self, now: Instant) {
+        self.toasts.prune(now);
+        if self.status.kind() != StatusKind::Ok || status_uses_status_text(self) {
+            return;
+        }
+        let text = self.status.trim();
+        if !text.is_empty() {
+            self.toasts.push(text, now);
+        }
+        self.status.clear();
     }
 
     fn prune_flash_state(&mut self, now: Instant) {
@@ -8018,6 +8042,65 @@ mod tests {
             "the clock restarts once help closes"
         );
         assert!(app.expire_status(late + ttl));
+    }
+
+    /// Draw `app` once into a 100x30 test terminal.
+    fn draw_once(app: &mut AppState) {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::render::draw(frame, app))
+            .unwrap();
+    }
+
+    fn toast_texts(app: &AppState) -> Vec<String> {
+        app.toasts
+            .visible(Instant::now())
+            .map(|(toast, _)| toast.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn ok_status_moves_to_a_toast_on_draw() {
+        let mut app = state();
+        app.status = StatusMessage::ok("Fetched 3 repos");
+        assert!(app.toasts.is_empty());
+        draw_once(&mut app);
+        assert!(app.status.is_empty(), "the ack left the status slot");
+        assert_eq!(toast_texts(&app), ["Fetched 3 repos"]);
+        // The next draw does not push it twice.
+        draw_once(&mut app);
+        assert_eq!(toast_texts(&app), ["Fetched 3 repos"]);
+    }
+
+    #[test]
+    fn error_warn_info_progress_stay_in_status_line() {
+        for status in [
+            StatusMessage::error("fetch failed"),
+            StatusMessage::warn("nothing to push"),
+            StatusMessage::info("showing ignored repos"),
+            StatusMessage::progress("Fetching 1/3…"),
+        ] {
+            let mut app = state();
+            let kind = status.kind();
+            let text = status.to_string();
+            app.status = status;
+            draw_once(&mut app);
+            assert_eq!(app.status, text.as_str(), "{kind:?} stays in the slot");
+            assert_eq!(app.status.kind(), kind);
+            assert!(app.toasts.is_empty(), "{kind:?} makes no toast");
+        }
+    }
+
+    #[test]
+    fn overlay_status_row_keeps_its_ok_text() {
+        let mut app = state();
+        assert_eq!(app.dispatch(Action::SearchStart), Effect::None);
+        assert!(status_uses_status_text(&app));
+        app.status = StatusMessage::ok("Checked out main");
+        draw_once(&mut app);
+        assert_eq!(app.status, "Checked out main", "the overlay row keeps it");
+        assert!(app.toasts.is_empty());
     }
 
     #[test]

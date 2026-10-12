@@ -1,8 +1,8 @@
 use crate::harness::PtySession;
 use crate::seed::merge_mark_workspace;
 use crate::support::{
-    crumb_row, no_mouse_toggle_toast, status_row, tree_cursor_on, tree_has, tree_line_containing,
-    tree_line_has_leading_worktree_icon, tree_pane_focused, SETTLE_MS, WAIT,
+    ack_rows, crumb_row, no_mouse_toggle_toast, status_row, tree_cursor_on, tree_has,
+    tree_line_containing, tree_line_has_leading_worktree_icon, tree_pane_focused, SETTLE_MS, WAIT,
 };
 
 const JUST_CREATED: &str = "feature/just-created";
@@ -98,7 +98,7 @@ fn just_created_remove_confirm_open(screen: &str) -> bool {
 
 /// `n` closed confirm. Toast is cancel. Default-tip stays open. Landed stays merged.
 fn documented_cancel_keeps_open_default_tip(screen: &str) -> bool {
-    let crumb = crumb_row(screen);
+    let crumb = ack_rows(screen);
     just_created_ready_to_remove(screen)
         && crumb.contains("remove worktree cancelled")
         && !crumb.contains("removed worktree")
