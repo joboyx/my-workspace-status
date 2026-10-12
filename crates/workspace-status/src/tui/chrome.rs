@@ -1313,6 +1313,7 @@ pub fn explorer_tab_hint_segments() -> Vec<HintSegment> {
     vec![
         hint("l h", "open/close", false),
         hint("-", "parent", false),
+        hint("[ ]", "file tabs", false),
         hint("e", "edit", false),
         hint("r", "reload", false),
         hint("F", "go to file", false),
@@ -2403,6 +2404,7 @@ mod tests {
         for chip in [
             "open/close",
             "parent",
+            "[ ]   file tabs",
             "edit",
             "reload",
             "go to file",

@@ -212,7 +212,8 @@ const HELP_IGNORED_REPOS: HelpEntry = HelpEntry {
 pub const HELP_TAB_MOVE_GROUP: HelpGroup = move_group!();
 
 /// VIEW on the Explorer tab: no pane-size or ignored-repo rows (`-` is the
-/// parent folder there; `<`, `>`, `+`, and `.` do nothing).
+/// parent folder there, `< >` are in [`HELP_EXPLORER_GROUP`], and `+` and
+/// `.` need the Workspace tab).
 pub const HELP_EXPLORER_VIEW_GROUP: HelpGroup = view_group!(;);
 
 /// Short key list shown in the `?` overlay, grouped the same.
@@ -380,11 +381,28 @@ pub const HELP_COMPARE_GROUPS: &[HelpGroup] =
 /// Explorer-tab column that takes the place of GIT while an Explorer tab
 /// is active.
 ///
-/// Lists the tree and preview keys, the row marks, and the git keys that
-/// stay on the Workspace tab. The tab-close chip is the tab bar glyph.
+/// Lists the tree keys, the inner file tab keys (preview, pin, switch,
+/// close), the keys that act on the shown file, the row marks, and what
+/// stays on the Workspace tab. The tab-close chip is the tab bar glyph.
 pub const HELP_EXPLORER_GROUP: HelpGroup = HelpGroup {
     title: "EXPLORER",
     entries: &[
+        HelpEntry {
+            keys: "j k",
+            desc: "preview file (dim italic tab)",
+        },
+        HelpEntry {
+            keys: "Enter",
+            desc: "folder open / close · file: pin tab",
+        },
+        HelpEntry {
+            keys: "[ ]",
+            desc: "prev / next file tab (selects it in tree)",
+        },
+        HelpEntry {
+            keys: "Ctrl-w",
+            desc: "close file tab · none left: Explorer tab",
+        },
         HelpEntry {
             keys: "l h",
             desc: "open / close folder · h on a file: parent",
@@ -394,20 +412,40 @@ pub const HELP_EXPLORER_GROUP: HelpGroup = HelpGroup {
             desc: "parent folder",
         },
         HelpEntry {
-            keys: "Enter",
-            desc: "folder open / close · file: preview",
+            keys: "Tab",
+            desc: "tree / file pane",
         },
         HelpEntry {
             keys: "Esc h",
-            desc: "preview back to tree",
+            desc: "file pane back to tree",
         },
         HelpEntry {
-            keys: "?? ●",
-            desc: "untracked · changes inside (dim: ignored)",
+            keys: "/ n N",
+            desc: "search tree rows (file pane: its lines)",
         },
         HelpEntry {
-            keys: "e",
-            desc: "editor (at preview line)",
+            keys: "zz",
+            desc: "toggle folder subtree",
+        },
+        HelpEntry {
+            keys: "< >",
+            desc: "tree width",
+        },
+        HelpEntry {
+            keys: "B A",
+            desc: "line blame · blame menu (file pane)",
+        },
+        HelpEntry {
+            keys: "; V y",
+            desc: "comment · highlight (file pane) · copy comments",
+        },
+        HelpEntry {
+            keys: "space",
+            desc: "mark changed file reviewed",
+        },
+        HelpEntry {
+            keys: "e E",
+            desc: "editor (at line) · diff tool",
         },
         HelpEntry {
             keys: "'",
@@ -415,11 +453,19 @@ pub const HELP_EXPLORER_GROUP: HelpGroup = HelpGroup {
         },
         HelpEntry {
             keys: "r",
-            desc: "re-list folders · reload preview",
+            desc: "re-list folders · reload file",
+        },
+        HelpEntry {
+            keys: "?? ●",
+            desc: "untracked · changes inside (dim: ignored)",
         },
         HelpEntry {
             keys: super::render::TAB_CLOSE_GLYPH,
-            desc: "close tab (Ctrl-w or :)",
+            desc: "close Explorer tab",
+        },
+        HelpEntry {
+            keys: "Ctrl-o",
+            desc: "diffs always show the whole file",
         },
         HelpEntry {
             keys: "s u x S",
@@ -427,6 +473,10 @@ pub const HELP_EXPLORER_GROUP: HelpGroup = HelpGroup {
         },
         HelpEntry {
             keys: "f p P d",
+            desc: "Workspace tab only",
+        },
+        HelpEntry {
+            keys: "t . M +",
             desc: "Workspace tab only",
         },
     ],
@@ -1452,7 +1502,8 @@ mod tests {
     }
 
     /// An Explorer tab paints MOVE / EXPLORER / VIEW; EXPLORER lists the
-    /// tree and preview keys and the git keys that need the Workspace tab.
+    /// tree keys, the inner file tab keys, the keys that act on the shown
+    /// file, and the keys that need the Workspace tab.
     #[test]
     fn explorer_column_lists_tree_keys() {
         assert_eq!(help_groups(HelpTab::Explorer)[1].title, "EXPLORER");
@@ -1472,16 +1523,29 @@ mod tests {
             .map(|e| help_entry_label(e.keys, e.desc))
             .collect();
         for needle in [
+            "j k preview file",
+            "Enter folder open / close · file: pin tab",
+            "[ ] prev / next file tab",
+            "Ctrl-w close file tab · none left: Explorer tab",
             "l h open / close folder",
             "- parent folder",
-            "Enter folder open / close",
-            "Esc h preview back to tree",
+            "Tab tree / file pane",
+            "Esc h file pane back to tree",
+            "/ n N search tree rows",
+            "zz toggle folder subtree",
+            "< > tree width",
+            "B A line blame · blame menu",
+            "; V y comment",
+            "space mark changed file reviewed",
+            "e E editor (at line) · diff tool",
+            "' copy reference",
+            "r re-list folders · reload file",
             "?? ● untracked",
-            "e editor",
-            "r re-list folders",
-            "close tab (Ctrl-w or :)",
+            "close Explorer tab",
+            "Ctrl-o diffs always show the whole file",
             "s u x S Workspace tab only",
             "f p P d Workspace tab only",
+            "t . M + Workspace tab only",
         ] {
             assert!(
                 rows.iter()

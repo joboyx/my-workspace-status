@@ -38,7 +38,7 @@ Diff cells clip and pad by **display columns**, not Unicode scalar count. Clip u
 
 ## Highlighting
 
-Syntax highlighting uses `two-face` (syntect). Language comes from the file path (basename, then extension). A compare tab uses that tab's active file path, not a parked Workspace drill or `diff_path`. An unknown path uses Plain Text and the theme `repo` foreground. Tokens set **foreground** only. The file tab viewer's `syntax::highlight_file_window` shares this syntect setup (syntax set, theme map, `MAX_HIGHLIGHT_CHARS` budget) and feeds one stream from 200 lines above its window.
+Syntax highlighting uses `two-face` (syntect). Language comes from the file path (basename, then extension). A compare tab uses that tab's active file path, not a parked Workspace drill or `diff_path`. An unknown path uses Plain Text and the theme `repo` foreground. Tokens set **foreground** only. The Explorer file view's `syntax::highlight_file_window` shares this syntect setup (syntax set, theme map, `MAX_HIGHLIGHT_CHARS` budget) and feeds one stream from 200 lines above its window.
 
 Add and del rows keep `palette.diffAddBg` / `palette.diffDelBg` on the gutter, sign, code, and pad. The `+` / `-` signs stay `added` / `deleted` (bold). Cursor, visual-line, and unfocused selected overlays tint that row background under the code and pad (see word highlight below); the gutter and sign take the flat cursor bar and keep their colours. A search overlay replaces the row background. A syntax colour that fails a contrast floor of 3.0 against the add/del background falls back to `repo`. Syntect parse state is kept across lines inside one hunk (old-file vs new-file streams) so a JSON property line after `{` still gets token colours. A section label or hunk header starts a new pair of highlighters. Paint highlights the visible viewport. Lines above the viewport in the same hunk still feed parse state. Paint reuses the last span list when the file path, theme, viewport, and diff text stay the same. A watch or compare reload that replaces same-length text still computes new spans.
 
@@ -108,7 +108,7 @@ A focused file-diff row (section, hunk, or line) paints the same cursor bar as o
 
 With line blame on (`B`, `viewDefaults.lineBlame`), the focused line ends with a dimmed (`palette.muted`) note: `{author}, {age} · {sha7} · {subject}`. Rules:
 
-- Only the focused row of a focused diff pane, or the cursor line of a file tab. A row the cursor is not on, and a diff whose pane does not have focus, paint none.
+- Only the focused row of a focused diff pane, or the cursor line of an Explorer file while its pane has focus. A row the cursor is not on, and a diff whose pane does not have focus, paint none.
 - It paints as `"  " + text` inside the row's trailing blank pad and keeps the pad's width, so row heights, the gutter, wrap, and the pan range do not change. With wrap on it goes on the last wrap row of the cell. No pad (the code fills the width or is panned across it) or fewer than 12 free columns paints none. A cut text ends in `…`; the subject is cut first.
 - Split mode paints it in the blamed side's cell: the new (right) cell for an added or context line, the old (left) cell for a deleted line.
 - An added line in UNSTAGED reads `You · uncommitted`, and in STAGED `You · staged`, with no git call. NEW (untracked), binary, meta, hunk, and error rows paint none. While git runs, and when git has no blame for the line, the row paints none.
@@ -131,7 +131,7 @@ When wrap is off, long diff lines clip to the pane. The cursor bar uses one colu
 
 ## Full-file view
 
-`Ctrl-o` on a file row — or on a focused file **diff** — toggles unlimited unified context (`FULL_DIFF_CONTEXT_LINES`, `-U999999`) so hunks expand to the whole file. `Esc` or a second `Ctrl-o` restores the default-context diff. Untracked (`NEW`) files already synthesise full content and ignore this flag.
+`Ctrl-o` on a file row — or on a focused file **diff** — toggles unlimited unified context (`FULL_DIFF_CONTEXT_LINES`, `-U999999`) so hunks expand to the whole file. `Esc` or a second `Ctrl-o` restores the default-context diff. Untracked (`NEW`) files already synthesise full content and ignore this flag. An Explorer tab always loads a changed file with `FULL_DIFF_CONTEXT_LINES` (the header shows the full-context marker); `Ctrl-o` there only says `Explorer diffs always show the whole file`.
 
 Toggling full-file does **not** open an editor (`e` does). After the new rows load, scroll recenters on the prior hunk/change anchor.
 
