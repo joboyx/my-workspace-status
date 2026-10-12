@@ -3071,9 +3071,17 @@ filename new.txt
         init_repo(&dir);
         assert_eq!(remote_url_for_branch(&dir, "main"), None, "no remote yet");
 
+        // Not github.com: hosts (Claude Code cloud sessions among them) can
+        // inject `url.<base>.insteadOf` rewrites through `GIT_CONFIG_COUNT`,
+        // which `git remote get-url` honors and `git_env` does not clear.
         git(
             &dir,
-            &["remote", "add", "origin", "git@github.com:octo/demo.git"],
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@example.invalid:octo/demo.git",
+            ],
         );
         git(
             &dir,
@@ -3086,7 +3094,7 @@ filename new.txt
         );
         assert_eq!(
             remote_url_for_branch(&dir, "main").as_deref(),
-            Some("git@github.com:octo/demo.git"),
+            Some("git@example.invalid:octo/demo.git"),
             "no branch remote: first remote"
         );
 
