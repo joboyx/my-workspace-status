@@ -981,21 +981,30 @@ impl AppState {
     }
 
     /// Reload the active Explorer tab's active inner file tab when the
-    /// editor just saved its file (`repo` / `path`); `None` for any other
-    /// file.
+    /// editor returns from its file (`repo` / `path`); `None` for any other
+    /// file, and `None` when the file did not move on disk.
     ///
-    /// Only the active inner tab of the active Explorer tab reloads here.
-    /// An inactive inner tab of that path (or one in an Explorer tab that
-    /// is not active) is left to the live-reload check, which runs when it
-    /// shows again (`[` / `]`, a tree move, Ctrl-w, a tab switch) and after
-    /// each status load ([`Self::explorer_live_reload`]).
+    /// This is the live-reload check ([`Self::explorer_live_reload`]): a
+    /// save reloads quietly and keeps the painted content, the file cursor,
+    /// and the diff cursor (clamped when the diff got shorter), so the view
+    /// stays on the line the editor opened. An exit without a save moves no
+    /// stamp and reloads nothing. The check sees a save through the disk
+    /// token (`size:mtimeMs`), so a save that keeps both the size and the
+    /// millisecond mtime of the last load is missed, as on the watch poll;
+    /// `r` reloads by hand. The status load after the edit still catches a
+    /// clean / changed flip.
+    ///
+    /// Only the active inner tab of the active Explorer tab is checked
+    /// here. An inactive inner tab of that path (or one in an Explorer tab
+    /// that is not active) is left to the same check when it shows again
+    /// (`[` / `]`, a tree move, Ctrl-w, a tab switch) and after each status
+    /// load.
     pub(crate) fn reload_explorer_after_edit(&mut self, repo: &str, path: &str) -> Option<Effect> {
         let tab = self.tabs.active_explorer()?;
         if tab.checkout != repo || tab.active_inner()?.rel != path {
             return None;
         }
-        let tab_id = tab.id;
-        Some(self.explorer_reload_active(tab_id))
+        self.explorer_live_reload(repo)
     }
 
     /// Load the active inner file tab of `tab_id` again at a new
@@ -4172,25 +4181,75 @@ mod tests {
 
     #[test]
     fn editor_return_reloads_only_the_active_inner_file() {
-        let mut app = state();
-        assert!(app.reload_explorer_after_edit("app", "README.md").is_none());
-        let (_, readme) = app.open_loaded_inner_file("app", "README.md", &["# app"]);
-        assert!(app.reload_explorer_after_edit("app", "other.md").is_none());
-        assert!(app.reload_explorer_after_edit("lib", "README.md").is_none());
+        let (mut app, cwd) = disk_state(&["alpha", "beta"]);
+        assert!(app.reload_explorer_after_edit("app", "notes.txt").is_none());
+        let (tab_id, gen) = app.open_loaded_inner_file("app", "notes.txt", &["alpha", "beta"]);
+        app.tabs.active_file_view_mut().expect("a file view").cursor = 1;
+
+        // An exit without a save moves no stamp: nothing reloads.
+        assert!(app.reload_explorer_after_edit("app", "notes.txt").is_none());
+
+        write_notes(&cwd, &["alpha", "beta", "gamma"]);
+        assert!(app.reload_explorer_after_edit("app", "other.txt").is_none());
+        assert!(app.reload_explorer_after_edit("lib", "notes.txt").is_none());
+
+        // A save reloads quietly: the old body stays painted and the line
+        // cursor stays.
         let reload = app
-            .reload_explorer_after_edit("app", "README.md")
+            .reload_explorer_after_edit("app", "notes.txt")
             .expect("the active inner file reloads");
-        match reload {
-            Effect::LoadExplorerPreview { path, gen, .. } => {
-                assert_eq!(path, "README.md");
-                assert!(gen > readme, "a new generation");
-            }
-            other => panic!("{other:?}"),
-        }
+        let (_, saved) = file_load(&reload);
+        assert!(saved > gen, "a new generation");
+        assert_eq!(file_lines(&app), ["alpha", "beta"], "old body stays");
+        assert!(app.reload_explorer_after_edit("app", "notes.txt").is_none());
+        assert!(app.apply_explorer_preview(tab_id, saved, text(&["alpha", "beta", "gamma"])));
+        assert_eq!(file_lines(&app), ["alpha", "beta", "gamma"]);
+        assert_eq!(app.tabs.active_file_view().unwrap().cursor, 1);
+
         // An inner tab that is not active is left to the live-reload check
         // that runs when it shows again.
-        app.open_loaded_inner_file("app", "src/lib.rs", &["lib"]);
-        assert!(app.reload_explorer_after_edit("app", "README.md").is_none());
+        std::fs::write(cwd.join("app/other.txt"), "o1").expect("write other");
+        app.open_loaded_inner_file("app", "other.txt", &["o1"]);
+        write_notes(&cwd, &["alpha"]);
+        assert!(app.reload_explorer_after_edit("app", "notes.txt").is_none());
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn editor_return_keeps_the_inner_diff_cursor() {
+        use super::super::super::diff::DiffContent;
+        let (mut app, cwd) = disk_state(&["a", "c", "d"]);
+        app.diff_mode = super::super::super::split::DiffMode::Inline;
+        let mut changes = app.snapshot.repos[0].changes.clone();
+        changes.push(change("notes.txt", Some("M"), false));
+        set_changes(&mut app, changes);
+        // Inline rows: 0 label, 1 hunk, 2 ` a`, 3 `-b`, 4 `+c`, 5 `+d`.
+        let (tab_id, _) = app.open_loaded_inner_diff(
+            "app",
+            "notes.txt",
+            DiffContent::from_unified("@@ -1,2 +1,3 @@\n a\n-b\n+c\n+d\n"),
+        );
+        app.diff_cursor = 4;
+
+        // `e` on the diff row, a save, then the editor returns.
+        write_notes(&cwd, &["a", "c", "d", "e"]);
+        let reload = app
+            .reload_explorer_after_edit("app", "notes.txt")
+            .expect("the saved file reloads");
+        match &reload {
+            Effect::LoadExplorerPreview { change, .. } => assert!(change.is_some()),
+            other => panic!("{other:?}"),
+        }
+        assert!(!app.explorer_diff_loading(), "the old diff stays painted");
+        assert_eq!(app.diff_cursor, 4, "the cursor row stays while it loads");
+        assert!(app.status.is_empty(), "silent: {}", &*app.status);
+
+        let (_, gen) = file_load(&reload);
+        let diff = DiffContent::from_unified("@@ -1,2 +1,4 @@\n a\n-b\n+c\n+d\n+e\n");
+        assert!(app.apply_explorer_preview(tab_id, gen, ExplorerPreviewBody::Diff(diff)));
+        assert!(app.explorer_diff().is_some());
+        assert_eq!(app.diff_cursor, 4, "the cursor row stays on the new diff");
+        let _ = std::fs::remove_dir_all(&cwd);
     }
 
     #[test]
