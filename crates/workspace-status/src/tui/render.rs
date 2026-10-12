@@ -100,7 +100,7 @@ use super::tree::{
     pr_badge_mark, visible_window, workspace_trailing_fit, NodeKind, NodeSegments, SegRole,
     TextSeg, VisibleRow,
 };
-use super::undercurl::{cut_link_cells, drop_undercurls_under, underlined_runs};
+use super::undercurl::{cut_link_cells, drop_undercurls_under, underlined_runs, UndercurlHit};
 use super::watch::FlashKind;
 use crate::file_index::{FileIndex, FileRead};
 use crate::file_search::{SearchHit, SearchOptions};
@@ -311,6 +311,8 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
             DialogKind::SearchFiles => draw_search_files(frame, rect, state),
         }
         drop_hits_under(&mut state.layout, rect);
+        // The curls left are outside the box: they recede with the cells.
+        recede_undercurls(&mut state.layout.undercurls, palette);
     }
 
     // The icon popover hangs over the panes and any dialog.
@@ -429,6 +431,26 @@ fn dim_backdrop(buf: &mut Buffer, area: Rect, keep: Rect, palette: Palette, no_c
             }
         }
     }
+}
+
+/// Recede the curly underlines behind an open dialog the way
+/// [`dim_backdrop`] recedes their cells: each RGB curl colour moves
+/// [`BACKDROP_PERCENT`] toward `palette.surface`.
+///
+/// With a non-RGB surface or curl colour there is no mix to make, so the
+/// curls go; the cells keep their plain underline.
+fn recede_undercurls(hits: &mut Vec<UndercurlHit>, palette: Palette) {
+    if !matches!(palette.surface, Color::Rgb(..)) {
+        hits.clear();
+        return;
+    }
+    hits.retain_mut(|hit| {
+        if !matches!(hit.color, Color::Rgb(..)) {
+            return false;
+        }
+        hit.color = mix_toward(hit.color, palette.surface, BACKDROP_PERCENT);
+        true
+    });
 }
 
 /// Drop each link and curly-underline span in `layout` that overlaps
@@ -13794,7 +13816,7 @@ mod tests {
             let underlined = (hit.x..hit.x + hit.width)
                 .all(|x| buf[(x, hit.y)].modifier.contains(Modifier::UNDERLINED));
             assert_eq!(
-                after.contains(hit),
+                curl_spans(after).contains(&(hit.y, hit.x, hit.width)),
                 underlined,
                 "{hit:?}: {}",
                 buf_line(buf, hit.y)
@@ -13804,6 +13826,76 @@ mod tests {
         state.help_open = false;
         draw_state(&mut terminal, &mut state);
         assert_eq!(state.layout.undercurls, before);
+    }
+
+    /// `(y, x, width)` of each hit, colour left out.
+    fn curl_spans(hits: &[crate::tui::undercurl::UndercurlHit]) -> Vec<(u16, u16, u16)> {
+        hits.iter().map(|hit| (hit.y, hit.x, hit.width)).collect()
+    }
+
+    #[test]
+    fn undercurl_recedes_behind_dialog() {
+        // Tall enough that help leaves commented rows above or below its box.
+        let lines = 90;
+        let mut state = context_diff_state(lines);
+        for line in 10..10 + lines {
+            comment_readme_line(&mut state, line);
+        }
+        let palette = state.theme.palette();
+        let full = palette.comment_underline();
+        let receded = mix_toward(full, palette.surface, BACKDROP_PERCENT);
+        assert_ne!(receded, full);
+        let mut terminal = Terminal::new(TestBackend::new(120, 100)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let before = curl_spans(&state.layout.undercurls);
+        assert!(state.layout.undercurls.iter().all(|hit| hit.color == full));
+
+        state.help_open = true;
+        draw_state(&mut terminal, &mut state);
+        let after = &state.layout.undercurls;
+        assert!(
+            !after.is_empty() && after.len() < before.len(),
+            "help leaves some curls outside its box: {} of {}",
+            after.len(),
+            before.len()
+        );
+        assert!(after.iter().all(|hit| hit.color == receded), "{after:?}");
+        assert!(curl_spans(after).iter().all(|span| before.contains(span)));
+
+        state.help_open = false;
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(curl_spans(&state.layout.undercurls), before);
+        assert!(state.layout.undercurls.iter().all(|hit| hit.color == full));
+    }
+
+    #[test]
+    fn undercurl_without_rgb_surface_or_colour_drops_behind_dialog() {
+        let hit = |color| crate::tui::undercurl::UndercurlHit {
+            y: 1,
+            x: 2,
+            width: 3,
+            color,
+        };
+        let palette = ThemeId::TokyoNight.palette();
+        let mut hits = vec![hit(Color::Rgb(200, 100, 50)), hit(Color::Indexed(3))];
+        recede_undercurls(&mut hits, palette);
+        assert_eq!(
+            hits,
+            vec![hit(mix_toward(
+                Color::Rgb(200, 100, 50),
+                palette.surface,
+                BACKDROP_PERCENT
+            ))]
+        );
+        let mut hits = vec![hit(Color::Rgb(200, 100, 50))];
+        recede_undercurls(
+            &mut hits,
+            Palette {
+                surface: Color::Reset,
+                ..palette
+            },
+        );
+        assert!(hits.is_empty());
     }
 
     #[test]

@@ -273,6 +273,21 @@ mod tests {
         hit(y, x, x + width, CURL)
     }
 
+    /// Every `ESC [ <row> ; <col> H` cursor move in `out`, 1-based.
+    fn cursor_moves(out: &str) -> Vec<(u16, u16)> {
+        out.split("\x1b[")
+            .skip(1)
+            .filter_map(|seq| {
+                let end = seq.find(|c: char| !c.is_ascii_digit() && c != ';')?;
+                if !seq[end..].starts_with('H') {
+                    return None;
+                }
+                let (row, col) = seq[..end].split_once(';')?;
+                Some((row.parse().ok()?, col.parse().ok()?))
+            })
+            .collect()
+    }
+
     fn painted(buffer: &Buffer, hits: &[UndercurlHit], enabled: bool) -> String {
         let mut out = Vec::new();
         write_undercurls(&mut out, &undercurl_cells(buffer, hits), enabled).unwrap();
@@ -304,7 +319,7 @@ mod tests {
         assert!(!out.contains("\x1b[4m"), "{out:?}");
         // Cursor: saved first, moved to the run, restored last.
         assert!(out.starts_with("\x1b7"), "{out:?}");
-        assert!(out.contains("\x1b[2;4H"), "{out:?}");
+        assert_eq!(cursor_moves(&out), vec![(2, 4)], "{out:?}");
         assert!(out.ends_with("\x1b8"), "{out:?}");
     }
 
@@ -341,7 +356,21 @@ mod tests {
         let out = painted(&buffer, &[curl(0, 0, 4)], true);
         assert_eq!(out.matches('界').count(), 1, "{out:?}");
         // The wide glyph moves the cursor two columns: no extra MoveTo.
-        assert_eq!(out.matches('H').count(), 1, "{out:?}");
+        assert_eq!(cursor_moves(&out), vec![(1, 1)], "{out:?}");
+    }
+
+    #[test]
+    fn reset_colours_write_the_terminal_defaults() {
+        // An unpainted cell (terminal background mode): fg and bg `Reset`.
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 10, 1));
+        buffer.set_string(2, 0, "x", Style::default());
+        assert_eq!(buffer[(2, 0)].bg, Color::Reset);
+        let out = painted(&buffer, &[curl(0, 2, 1)], true);
+        let bg_at = out.find("\x1b[49m").unwrap_or_else(|| panic!("{out:?}"));
+        let fg_at = out.find("\x1b[39m").unwrap_or_else(|| panic!("{out:?}"));
+        let text_at = out.find('x').unwrap();
+        assert!(bg_at < text_at && fg_at < text_at, "{out:?}");
+        assert!(out.contains("\x1b[4:3m"), "{out:?}");
     }
 
     #[test]
