@@ -24,6 +24,23 @@ fn desktop_xfce_shift_p_pushes_ahead() {
     tui.wait_contains("push", WAIT);
     tui.wait_ms(SETTLE_MS);
     tui.key("shift+p");
+    let confirm_open_nothing_pushed = |screen: &str| {
+        screen.contains("Push main → origin (1 commit)?")
+            && !screen.contains("Pushed")
+            && !screen.contains("Pushing")
+    };
+    tui.wait_pred(
+        confirm_open_nothing_pushed,
+        "Shift+P opens the push confirm and pushes nothing",
+        GIT_WAIT,
+    );
+    tui.wait_ms(SETTLE_MS);
+    tui.wait_pred(
+        confirm_open_nothing_pushed,
+        "the confirm holds: no push until y",
+        WAIT,
+    );
+    tui.key("y");
     tui.wait_pred(
         |screen| op_finished(screen, "Pushed"),
         "Pushed 1 repo without failure",

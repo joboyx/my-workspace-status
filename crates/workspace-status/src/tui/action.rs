@@ -511,6 +511,11 @@ pub enum Effect {
     Push {
         repos: Vec<String>,
     },
+    /// `P`: read the branch, remote, and first-publish flag off the loop
+    /// thread, then open the push confirm for `repo`.
+    PreparePush {
+        repo: String,
+    },
     PrepareStashMenu {
         repo: String,
     },

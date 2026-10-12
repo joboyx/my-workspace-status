@@ -3789,6 +3789,61 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             ];
             (accent, lines)
         }
+        PendingConfirm::Push {
+            branch,
+            remote,
+            publish,
+            ahead_behind,
+            ..
+        } => {
+            let accent = palette.modified;
+            let mut title = vec![
+                Span::styled(
+                    "Push ",
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(branch.clone(), Style::default().fg(palette.file)),
+                Span::styled(" → ", Style::default().fg(palette.muted)),
+                Span::styled(remote.clone(), Style::default().fg(palette.file)),
+            ];
+            if let Some((ahead, _)) = ahead_behind {
+                let noun = if *ahead == 1 { "commit" } else { "commits" };
+                title.push(Span::styled(
+                    format!(" ({ahead} {noun})"),
+                    Style::default().fg(palette.muted),
+                ));
+            }
+            title.push(Span::styled("?", Style::default().fg(accent)));
+            let mut details = Vec::new();
+            if *publish {
+                details.push(format!(
+                    "  creates the remote branch {remote}/{branch} (git push -u)"
+                ));
+            }
+            if let Some((ahead, behind)) = ahead_behind.filter(|(_, behind)| *behind > 0) {
+                details.push(format!(
+                    "  diverged (ahead {ahead}, behind {behind}) · git may reject the push"
+                ));
+            }
+            if details.is_empty() {
+                details.push("  git push, no --force".to_string());
+            }
+            let mut lines = vec![Line::from(title)];
+            lines.extend(
+                details
+                    .into_iter()
+                    .map(|d| Line::from(Span::styled(d, Style::default().fg(palette.muted)))),
+            );
+            lines.push(confirm_action_row(
+                "y",
+                "push",
+                None,
+                accent,
+                palette.muted,
+                panel,
+            ));
+            (accent, lines)
+        }
     };
     if area.width == 0 || area.height == 0 {
         return;
@@ -10012,6 +10067,62 @@ mod tests {
         assert!(text.contains("fast-forward"), "{text}");
         assert!(text.contains("merge commit"), "{text}");
         assert!(!text.contains("? y/n"), "{text}");
+    }
+
+    #[test]
+    fn push_confirm_names_branch_remote_count_and_risk() {
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut paint = |publish: bool, ahead_behind: Option<(u32, u32)>| {
+            state.confirm = Some(PendingConfirm::Push {
+                repo: "app".into(),
+                branch: "feature/x".into(),
+                remote: "origin".into(),
+                publish,
+                ahead_behind,
+            });
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            buffer_text(&terminal)
+        };
+
+        let text = paint(false, Some((3, 0)));
+        assert!(
+            text.contains("Push feature/x → origin (3 commits)?"),
+            "{text}"
+        );
+        assert!(text.contains("git push, no --force"), "{text}");
+        assert!(!text.contains("creates the remote branch"), "{text}");
+        assert!(!text.contains("diverged"), "{text}");
+        assert!(text.contains(" y  push"), "{text}");
+        assert!(text.contains(" n   Esc  cancel"), "{text}");
+
+        let text = paint(false, Some((1, 0)));
+        assert!(
+            text.contains("Push feature/x → origin (1 commit)?"),
+            "{text}"
+        );
+
+        // First publish: no upstream, so no count.
+        let text = paint(true, None);
+        assert!(text.contains("Push feature/x → origin?"), "{text}");
+        assert!(
+            text.contains("creates the remote branch origin/feature/x (git push -u)"),
+            "{text}"
+        );
+        assert!(!text.contains("no --force"), "{text}");
+
+        let text = paint(false, Some((2, 5)));
+        assert!(
+            text.contains("Push feature/x → origin (2 commits)?"),
+            "{text}"
+        );
+        assert!(
+            text.contains("diverged (ahead 2, behind 5) · git may reject the push"),
+            "{text}"
+        );
+        assert!(!text.contains("no --force"), "{text}");
     }
 
     #[test]

@@ -34,7 +34,8 @@ Every git subprocess also runs with `GIT_OPTIONAL_LOCKS=0` (set by `git::git_pro
 | `pull_quiet_detailed(cwd)` | when dirty: `stash push -m …` → `pull --quiet` → `stash pop`; else `pull --quiet` | `PullQuietResult` | Auto-stash tracked local changes around pull; pop always runs after pull. `stash_pop_failed` when that pop conflicted (stash kept); `error` holds git's reason when the stash push or pull failed |
 | `pull_quiet(cwd)` | delegates to `pull_quiet_detailed` | boolean (`result.ok`) | |
 | `remote_url_for_branch(cwd, branch)` | `config --get branch.<branch>.remote`, else `remote`, then `remote get-url <name>` | `Option<String>` | Remote URL for the PR lookup. The remote is the one push uses: `branch.<branch>.remote`, else the first remote, else `origin`. `get-url` applies `url.<base>.insteadOf`. `None` when that remote does not exist or prints nothing. |
-| `push_quiet(cwd)` | `push --quiet`, or `push -u <remote> HEAD --quiet` when no/wrong upstream | `Result` | TUI `P`. No force, no auto-stash; first publish uses `-u`; diverged remotes may fail |
+| `push_plan(cwd)` | `branch --show-current`, `rev-parse --abbrev-ref @{upstream}`, `config --get branch.<branch>.remote`, else `remote` (first), else `origin` | `Result<PushPlan>` | Branch, remote, and `publish` (no upstream, or upstream is not `<remote>/<branch>`). Read before the TUI `P` confirm opens and again by `push_quiet`. `Err("detached HEAD cannot push")` on a detached HEAD |
+| `push_quiet(cwd)` | `push --quiet`, or `push -u <remote> HEAD --quiet` when `push_plan` says `publish` | `Result` | TUI `P`, after the `y` confirm. No force, no auto-stash; first publish uses `-u`; diverged remotes may fail |
 | `FULL_DIFF_CONTEXT_LINES` | — | `999_999` | Large enough `-U` value to keep a typical source file in one hunk. |
 | `git_diff_args(base, path, context)` | inserts `-U<n>` and `-- <path>` | argv | Shared builder for worktree / cached / commit / stash diffs. |
 | `stage_file` / `unstage_file` | `add -- <path>` / `restore --staged -- <path>` | `Result` | TUI `s` / `u` whole file |
@@ -117,7 +118,7 @@ A commit-vs-working-tree tab (`Blame: diff commit to working tree`) resolves its
 | --- | --- |
 | `collect_write_files` | File nodes under the focused row: `[file]` / dir subtree (Changes dirs use `#unstaged`; Staged dirs are unsuffixed; no section chrome keeps every dirty file under the dir) / section header (checkout files on that side) / checkout files / flat-repo files; empty for family containers, workspace, and group. |
 | `op_targets` | Checkout paths for `f` / `p` / `d`. Workspace and family rows yield primary checkouts only. Group is empty (`op_is_kind_noop`). A linked worktree is included only when that row is focused. Hidden ignored repos are omitted. |
-| `push_targets` | Focused visible repo or checkout for `P`. Never on workspace, group, file, dir, or section. |
+| `push_targets` | Focused visible repo or checkout for `P`. Never on workspace, group, file, dir, or section. `P` returns `Effect::PreparePush` for it: a blocking-pool job runs `push_plan`, then the `y`/`n` confirm opens if focus is still on that checkout. `y` runs `push_quiet` on the same target. |
 | `background_fetch_targets` | Snapshot paths for the TUI background fetch timer. Hidden ignored checkouts are omitted. When ignored repos are shown, every snapshot path is included, including linked worktrees. Manual `f` stays on `op_targets`. |
 | `refresh_target` | Workspace / No-updates → whole snapshot; otherwise the focused checkout path. |
 
@@ -247,9 +248,11 @@ The compare diff covers commits only, so it does not change after a revert. The 
 | Stash drop (`D` in the stash menu or on a graph stash row) | `y`/`n` boxed confirm | only from git's object store (`git fsck --unreachable`) until it is pruned |
 | Stash pop (`p`) | none | yes — on a conflict git keeps the stash, so nothing is lost |
 | Compare `x` (whole file or highlighted lines) | `y`/`n` boxed confirm (`Y` not offered) | yes — the guard requires the file to match HEAD, so `git restore` brings it back |
-| `P` push | none | yes — never forces; a diverged remote makes the push fail |
+| `P` push | `y`/`n` boxed confirm (`Y` not offered): `Push <branch> → <remote> (N commits)?` | yes — never forces; a diverged remote makes the push fail |
 
-Revert, compare `x`, stash drop, origin-out-of-sync graph checkout, graph merge, worktree remove, and multi-repo `d` use modal overlays, so no other key can act while one is up. Only the key the box shows (`y`, or `Y` where offered) accepts. Enter never confirms; it says which key does. `n` / Esc cancel.
+Revert, compare `x`, stash drop, origin-out-of-sync graph checkout, graph merge, push, worktree remove, and multi-repo `d` use modal overlays, so no other key can act while one is up. Only the key the box shows (`y`, or `Y` where offered) accepts. Enter never confirms; it says which key does. `n` / Esc cancel.
+
+**Push confirm (`P`).** The title reads `Push <branch> → <remote> (N commits)?` (`1 commit`; no count on a first publish). The count is the snapshot ahead count. Detail line: `creates the remote branch <remote>/<branch> (git push -u)` on a first publish; `diverged (ahead A, behind B) · git may reject the push` when behind; otherwise `git push, no --force`. The action row is `y push`. `n` / Esc say `push cancelled`. No box opens, and nothing is written, for a workspace, group, or file row (`focus a repo or checkout to push`), a checkout with nothing to push (`nothing to push`), a detached HEAD the snapshot shows (`nothing to push`), or a HEAD detached since the last refresh (`detached HEAD cannot push`). The box names `branch.<branch>.remote` (else the first remote); a `pushRemote` / `remote.pushDefault` setting can send a plain `git push` elsewhere. A `push_plan` result that arrives after focus moved is dropped.
 
 ## Write serialisation
 

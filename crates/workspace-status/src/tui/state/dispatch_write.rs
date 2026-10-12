@@ -34,6 +34,7 @@ impl AppState {
                         PendingConfirm::RemoveWorktree { .. } => "remove worktree cancelled".into(),
                         PendingConfirm::MergeIntoHead { .. } => "merge cancelled".into(),
                         PendingConfirm::SwitchToDefault { .. } => "switch cancelled".into(),
+                        PendingConfirm::Push { .. } => "push cancelled".into(),
                     };
                 }
                 Effect::None

@@ -135,6 +135,8 @@ pub struct Scheduler {
     commit_diff_latest: u64,
     next_prepare_stash_id: u64,
     prepare_stash_latest: u64,
+    next_prepare_push_id: u64,
+    prepare_push_latest: u64,
     next_prepare_branches_id: u64,
     prepare_branches_latest: u64,
     next_prepare_compare_id: u64,
@@ -183,6 +185,8 @@ impl Scheduler {
             commit_diff_latest: 0,
             next_prepare_stash_id: 1,
             prepare_stash_latest: 0,
+            next_prepare_push_id: 1,
+            prepare_push_latest: 0,
             next_prepare_branches_id: 1,
             prepare_branches_latest: 0,
             next_prepare_compare_id: 1,
@@ -469,6 +473,19 @@ impl Scheduler {
     /// True when `gen` is still the latest stash-menu request.
     pub fn accept_prepare_stash_result(&self, gen: u64) -> bool {
         gen == self.prepare_stash_latest
+    }
+
+    /// Bump the push-confirm generation on each `PreparePush`.
+    pub fn request_prepare_push(&mut self) -> u64 {
+        let id = self.next_prepare_push_id;
+        self.next_prepare_push_id += 1;
+        self.prepare_push_latest = id;
+        id
+    }
+
+    /// True when `gen` is still the latest push-confirm request.
+    pub fn accept_prepare_push_result(&self, gen: u64) -> bool {
+        gen == self.prepare_push_latest
     }
 
     /// Bump on each `PrepareBranchPicker` / `PrepareGraphFocusPicker`.
@@ -809,6 +826,16 @@ mod tests {
         assert_ne!(first, second);
         assert!(!s.accept_prepare_stash_result(first));
         assert!(s.accept_prepare_stash_result(second));
+    }
+
+    #[test]
+    fn stale_prepare_push_id_is_rejected() {
+        let mut s = Scheduler::new(4);
+        let first = s.request_prepare_push();
+        let second = s.request_prepare_push();
+        assert_ne!(first, second);
+        assert!(!s.accept_prepare_push_result(first));
+        assert!(s.accept_prepare_push_result(second));
     }
 
     #[test]

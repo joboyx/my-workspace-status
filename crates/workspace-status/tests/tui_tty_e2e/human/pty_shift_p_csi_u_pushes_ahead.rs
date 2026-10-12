@@ -95,7 +95,17 @@ fn idle_ahead_syncbox(screen: &str) -> bool {
         && no_wrong_push_overlays(screen)
 }
 
-/// CSI-u Shift+P pushed the focused ahead checkout. Origin matches HEAD.
+/// Shift+P opened the y/N push confirm. Nothing pushed yet.
+fn push_confirm_open_nothing_pushed(screen: &str) -> bool {
+    screen.contains("Push main → origin (1 commit)?")
+        && screen.contains("git push, no --force")
+        && !screen.contains("Pushed")
+        && !screen.contains("Pushing")
+        && !crumb_row(screen).contains("Pushed")
+        && no_wrong_push_overlays(screen)
+}
+
+/// `y` on the push confirm pushed the focused ahead checkout. Origin matches HEAD.
 fn documented_shift_p_pushed(screen: &str) -> bool {
     let status = status_row(screen);
     tree_cursor_on(screen, "syncbox")
@@ -125,8 +135,10 @@ fn documented_shift_p_pushed(screen: &str) -> bool {
 /// CSI-u Shift+P pushes an ahead checkout against a local bare origin.
 ///
 /// Docs: Help GIT `P` = push ahead/diverged/new. Configuration: repo /
-/// checkout only (not workspace). Live PTY after first paint (cursor
-/// already on `syncbox`) did that push: tree drops `^1` / `1 ahead`
+/// checkout only (not workspace). Shift+P first opens a y/N confirm that
+/// names the branch, remote, and commit count; nothing pushes until `y`.
+/// Live PTY after first paint (cursor already on `syncbox`) then `y` did
+/// that push: tree drops `^1` / `1 ahead`
 /// (`all current`, No updates), graph HEAD stays `ahead-tip-commit`
 /// (`@`, `[+=main]`), seed loses `[origin/main]`, push hint goes,
 /// `Pushed 1 repo`. Not `f` fetch. Not `p` pull. Not a raw `P` byte.
@@ -148,6 +160,19 @@ fn pty_shift_p_csi_u_pushes_ahead() {
     );
 
     tui.shift_letter('P');
+    tui.wait_pred(
+        push_confirm_open_nothing_pushed,
+        "Shift+P opens the push confirm (Push main → origin (1 commit)?) and pushes nothing",
+        GIT_WAIT,
+    );
+    tui.wait_ms(SETTLE_MS);
+    tui.wait_pred(
+        push_confirm_open_nothing_pushed,
+        "the confirm holds: no push until y",
+        WAIT,
+    );
+
+    tui.key('y');
     tui.wait_pred(
         documented_shift_p_pushed,
         "Shift+P pushes: Pushed 1 repo, HEAD ahead-tip-commit [+=main], no ^1, push hint gone",
