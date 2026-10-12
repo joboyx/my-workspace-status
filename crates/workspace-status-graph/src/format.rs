@@ -136,8 +136,14 @@ impl PartTarget {
 pub enum LabelKind {
     /// Commit / stash subject (stronger than meta).
     Subject,
-    /// Hash, date, author, worktree marks, padding.
+    /// Hash, worktree marks, separators, padding.
     Meta,
+    /// Relative date column of a commit / stash row, or the date run of
+    /// the selection footer. Meta colour, painted italic.
+    MetaDate,
+    /// Author column of a commit row, or the author run of the selection
+    /// footer. Meta colour, painted italic.
+    MetaAuthor,
     /// Detached `[HEAD]` / checkout glyph.
     ChipHead,
     /// Local (or merged) non-default branch chip.
@@ -446,20 +452,32 @@ pub struct MetaCols {
 /// Right-anchored ` hash date author` string; drop order hash → date → author.
 /// Empty author omits the author column even when `cols.author` is true.
 pub fn meta_columns_text(hash: &str, date: &str, author: &str, cols: MetaCols) -> String {
-    let mut meta = String::new();
+    parts_text(&meta_columns_parts(hash, date, author, cols))
+}
+
+/// Styled runs of [`meta_columns_text`]: ` hash` as [`LabelKind::Meta`],
+/// ` date` as [`LabelKind::MetaDate`], ` author` as
+/// [`LabelKind::MetaAuthor`]. Each run carries its leading space. Columns
+/// that `cols` drops (and an empty author) emit no run.
+pub fn meta_columns_parts(hash: &str, date: &str, author: &str, cols: MetaCols) -> Vec<LabelPart> {
+    let mut parts = Vec::new();
+    let mut push = |text: &str, kind| {
+        parts.push(LabelPart {
+            text: format!(" {text}"),
+            kind,
+            target: None,
+        });
+    };
     if cols.hash {
-        meta.push(' ');
-        meta.push_str(hash);
+        push(hash, LabelKind::Meta);
     }
     if cols.date {
-        meta.push(' ');
-        meta.push_str(date);
+        push(date, LabelKind::MetaDate);
     }
     if cols.author && !author.is_empty() {
-        meta.push(' ');
-        meta.push_str(author);
+        push(author, LabelKind::MetaAuthor);
     }
-    meta
+    parts
 }
 
 /// Choose which right-meta columns fit beside a left flex region.
@@ -661,8 +679,9 @@ fn assemble_spacer_parts(
         return Vec::new();
     }
     let cols = pick_meta_columns(available, hash, date, author, MIN_LEFT_KEEP);
-    let meta = meta_columns_text(hash, date, author, cols);
-    let ref_budget = available.saturating_sub(meta.chars().count());
+    let meta = meta_columns_parts(hash, date, author, cols);
+    let meta_len = parts_width(&meta);
+    let ref_budget = available.saturating_sub(meta_len);
     let mut left = join_chip_groups(prefix);
     let prefix_w = parts_width(&left);
     let gap = usize::from(!left.is_empty() && !overflowable.is_empty());
@@ -679,7 +698,6 @@ fn assemble_spacer_parts(
         left.extend(chips);
     }
     let left_len = parts_width(&left);
-    let meta_len = meta.chars().count();
     if meta.is_empty() {
         pad_parts_right(&mut left, available);
         return clamp_parts_to_width(left, available);
@@ -692,13 +710,7 @@ fn assemble_spacer_parts(
             target: None,
         });
     }
-    if !meta.is_empty() {
-        left.push(LabelPart {
-            text: meta,
-            kind: LabelKind::Meta,
-            target: None,
-        });
-    }
+    left.extend(meta);
     clamp_parts_to_width(left, available)
 }
 
@@ -1740,6 +1752,58 @@ mod tests {
         let hash_at = line.find("aaa1111").expect("hash");
         let ref_at = line.find("[main]").expect("ref");
         assert!(ref_at < hash_at, "refs left of meta: {line}");
+    }
+
+    #[test]
+    fn spacer_meta_tags_date_and_author_parts() {
+        let GraphRow::Commit {
+            commit,
+            is_head,
+            worktrees,
+        } = sample_commit_row()
+        else {
+            panic!("commit row");
+        };
+        let (text, parts) = assemble_commit_spacer(CommitSpacerOpts {
+            commit: &commit,
+            is_head,
+            worktrees: &worktrees,
+            head_branch: Some("main"),
+            glyphs: &UNICODE,
+            available: 120,
+            date_width: 4,
+            author_width: 12,
+            now_unix: 1_700_000_000,
+            default_branch_override: None,
+        });
+        assert_eq!(parts_text(&parts), text);
+        let kind_of = |text: &str| {
+            parts
+                .iter()
+                .find(|p| p.text == text)
+                .map(|p| p.kind)
+                .unwrap_or_else(|| panic!("{text}: {parts:?}"))
+        };
+        assert_eq!(kind_of(" aaa1111"), LabelKind::Meta);
+        assert_eq!(kind_of(" 1h  "), LabelKind::MetaDate);
+        assert_eq!(kind_of(" Ada Lovelace"), LabelKind::MetaAuthor);
+    }
+
+    #[test]
+    fn meta_columns_text_unchanged_by_parts() {
+        let cols = |hash, date, author| MetaCols { hash, date, author };
+        for (c, author, want) in [
+            (cols(true, true, true), "Ada", " abcdefg 12d  Ada"),
+            (cols(false, true, true), "Ada", " 12d  Ada"),
+            (cols(false, false, true), "Ada", " Ada"),
+            (cols(true, true, true), "", " abcdefg 12d "),
+            (cols(false, false, false), "Ada", ""),
+        ] {
+            assert_eq!(meta_columns_text("abcdefg", "12d ", author, c), want);
+            let parts = meta_columns_parts("abcdefg", "12d ", author, c);
+            assert_eq!(parts_text(&parts), want, "{parts:?}");
+            assert!(parts.iter().all(|p| p.target.is_none()), "{parts:?}");
+        }
     }
 
     #[test]

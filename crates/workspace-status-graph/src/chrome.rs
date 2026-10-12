@@ -180,8 +180,10 @@ pub fn selection_detail_lines(
 
 /// Styled selection-footer runs. Chip kinds match the commit spacer so
 /// [`crate::GraphWidget::label_palette`] can reuse row colours (HEAD /
-/// default / local / remote / tag). Hash, parents, date, and author stay
-/// [`LabelKind::Meta`]. Commit meta order: chips · hash · parents · author · date.
+/// default / local / remote / tag). Hash and parents stay
+/// [`LabelKind::Meta`]; the author run is [`LabelKind::MetaAuthor`] and
+/// the date run [`LabelKind::MetaDate`] (italic, same colour as meta).
+/// Commit meta order: chips · hash · parents · author · date.
 pub fn selection_detail_parts(
     model: &GraphModel,
     selection: GraphFooterSelection<'_>,
@@ -215,7 +217,7 @@ pub fn selection_detail_parts(
             let meta = join_meta_groups([
                 vec![meta_part(stash.stash_ref.clone())],
                 vec![meta_part(short_id(&stash.id).to_string())],
-                vec![meta_part(format_relative_date(
+                vec![date_part(format_relative_date(
                     stash.author_date_unix,
                     now_unix,
                 ))],
@@ -269,10 +271,10 @@ pub fn selection_detail_parts(
             groups.push(vec![meta_part(short_id(&commit.id).to_string())]);
             groups.push(vec![meta_part(parents_text(&commit.parents))]);
             if !commit.author_name.is_empty() {
-                groups.push(vec![meta_part(commit.author_name.clone())]);
+                groups.push(vec![author_part(commit.author_name.clone())]);
             }
             if commit.author_date_unix > 0 {
-                groups.push(vec![meta_part(format_relative_date(
+                groups.push(vec![date_part(format_relative_date(
                     commit.author_date_unix,
                     now_unix,
                 ))]);
@@ -393,6 +395,20 @@ fn meta_part(text: String) -> LabelPart {
         text,
         kind: LabelKind::Meta,
         target: None,
+    }
+}
+
+fn date_part(text: String) -> LabelPart {
+    LabelPart {
+        kind: LabelKind::MetaDate,
+        ..meta_part(text)
+    }
+}
+
+fn author_part(text: String) -> LabelPart {
+    LabelPart {
+        kind: LabelKind::MetaAuthor,
+        ..meta_part(text)
     }
 }
 
@@ -814,6 +830,60 @@ mod tests {
     }
 
     #[test]
+    fn footer_author_and_date_are_italic_kinds() {
+        let commit = Commit {
+            id: "abcdefghhhh".into(),
+            subject: "topic".into(),
+            author_name: "Ada".into(),
+            author_date_unix: 1_700_000_000 - 120,
+            ..Commit::default()
+        };
+        let model = GraphModel {
+            commits: vec![commit.clone()],
+            ..GraphModel::default()
+        };
+        let row = GraphRow::Commit {
+            commit,
+            is_head: false,
+            worktrees: Vec::new(),
+        };
+        let [_, meta] = selection_detail_parts(
+            &model,
+            GraphFooterSelection::Row(&row),
+            &UNICODE,
+            80,
+            1_700_000_000,
+        );
+        let kind_of = |text: &str| {
+            meta.iter()
+                .find(|p| p.text == text)
+                .map(|p| p.kind)
+                .unwrap_or_else(|| panic!("{text}: {meta:?}"))
+        };
+        assert_eq!(kind_of("Ada"), LabelKind::MetaAuthor);
+        assert_eq!(kind_of("2m"), LabelKind::MetaDate);
+        assert_eq!(kind_of("abcdefg"), LabelKind::Meta);
+
+        let stash = Stash {
+            id: "1234567890".into(),
+            stash_ref: "stash@{0}".into(),
+            subject: "wip".into(),
+            author_date_unix: 1_700_000_000 - 120,
+            ..Stash::default()
+        };
+        let stash_row = GraphRow::Stash(stash);
+        let [_, meta] = selection_detail_parts(
+            &model,
+            GraphFooterSelection::Row(&stash_row),
+            &UNICODE,
+            80,
+            1_700_000_000,
+        );
+        let date = meta.iter().find(|p| p.text == "2m");
+        assert_eq!(date.map(|p| p.kind), Some(LabelKind::MetaDate), "{meta:?}");
+    }
+
+    #[test]
     fn footer_commit_parts_reuse_row_chip_kinds() {
         let commit = Commit {
             id: "abcdefghhhh".into(),
@@ -883,8 +953,8 @@ mod tests {
             "HEAD checkout mark: {meta:?}"
         );
         assert!(
-            kinds_for("Ada").iter().all(|k| *k == LabelKind::Meta),
-            "author stays meta: {meta:?}"
+            kinds_for("Ada").iter().all(|k| *k == LabelKind::MetaAuthor),
+            "author is the italic author kind: {meta:?}"
         );
         let hash_kinds = kinds_for("abcdefg");
         assert!(

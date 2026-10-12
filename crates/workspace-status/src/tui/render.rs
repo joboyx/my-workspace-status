@@ -3156,14 +3156,15 @@ fn put_line_annotation(
     let mut style = pad.style;
     let rest = pad_w - 2 - fitted.width();
     spans.pop();
+    // Italic marks the note as metadata. It is a modifier, not a colour, so
+    // NO_COLOR keeps it; terminals without italics paint plain text.
+    let note = |style: Style| style.fg(palette.muted).add_modifier(Modifier::ITALIC);
+    spans.push(Span::styled("  ", style));
     if on_cursor_bar {
         // The two-column gap keeps the pad's bg; the note and the rest drop it.
-        spans.push(Span::styled("  ", style));
         style.bg = None;
-        spans.push(Span::styled(fitted, style.fg(palette.muted)));
-    } else {
-        spans.push(Span::styled(format!("  {fitted}"), style.fg(palette.muted)));
     }
+    spans.push(Span::styled(fitted, note(style)));
     if rest > 0 {
         spans.push(Span::styled(" ".repeat(rest), style));
     }
@@ -15591,6 +15592,52 @@ mod tests {
                 (" ", palette.cursor_bg),
                 "{id:?} pad after the note:\n{text}"
             );
+        }
+    }
+
+    #[test]
+    fn line_blame_annotation_is_italic_muted() {
+        for no_color in [false, true] {
+            let mut state = two_pane_diff_state();
+            state.no_color = no_color;
+            state.diff_mode = DiffMode::Inline;
+            state.set_diff(
+                "app".into(),
+                "README.md".into(),
+                super::super::diff::DiffContent::from_unified(
+                    "@@ -1,3 +1,3 @@\n keep one\n-old line\n+new line\n keep two\n",
+                ),
+            );
+            state.focus = FocusPane::Right;
+            let palette = state.theme.palette();
+            let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            // A context row (plain pad) and an add row (flat cursor bar).
+            for (row, note) in [
+                ("keep one", "· aaa1111 · fix the parser"),
+                ("new line", "You · uncommitted"),
+            ] {
+                state.diff_cursor = diff_row_index(&state, row);
+                if row == "keep one" {
+                    cache_focused_blame(&mut state, "fix the parser");
+                }
+                draw_state(&mut terminal, &mut state);
+                let buf = terminal.backend().buffer();
+                let text = buffer_text(&terminal);
+                let y = first_row_with(buf, row).expect("focused row");
+                for cell in needle_cells(buf, y, note) {
+                    assert_eq!(cell.fg, palette.muted, "{row} no_color={no_color}:\n{text}");
+                    assert!(
+                        cell.modifier.contains(Modifier::ITALIC),
+                        "{row} no_color={no_color}: note is italic:\n{text}"
+                    );
+                }
+                let code_end = needle_cols(buf, y, row).last().copied().unwrap();
+                assert!(
+                    !buf[(code_end, y)].modifier.contains(Modifier::ITALIC),
+                    "{row}: code text stays upright:\n{text}"
+                );
+            }
         }
     }
 

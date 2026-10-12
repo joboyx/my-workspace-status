@@ -1261,7 +1261,7 @@ fn label_spans(
 fn label_kind_color(kind: LabelKind, pal: GraphLabelPalette) -> Color {
     match kind {
         LabelKind::Subject => pal.subject,
-        LabelKind::Meta => pal.meta,
+        LabelKind::Meta | LabelKind::MetaDate | LabelKind::MetaAuthor => pal.meta,
         LabelKind::ChipHead => pal.head_mark,
         LabelKind::ChipLocal => pal.branch_local,
         LabelKind::ChipDefault => pal.branch_default,
@@ -1293,8 +1293,14 @@ fn spans_from_parts(
             .iter()
             .map(|p| {
                 let mut style = Style::default().fg(label_kind_color(p.kind, pal));
-                if p.kind == LabelKind::Overflow {
-                    style = style.add_modifier(Modifier::BOLD);
+                match p.kind {
+                    LabelKind::Overflow => style = style.add_modifier(Modifier::BOLD),
+                    // Italic is a modifier, not a colour: it stays under
+                    // NO_COLOR, and terminals without italics show plain text.
+                    LabelKind::MetaDate | LabelKind::MetaAuthor => {
+                        style = style.add_modifier(Modifier::ITALIC);
+                    }
+                    _ => {}
                 }
                 Span::styled(p.text.clone(), style)
             })
@@ -3799,6 +3805,68 @@ mod tests {
         assert!(
             !overflow_uses_meta,
             "overflow must not use muted meta colour"
+        );
+    }
+
+    #[test]
+    fn date_and_author_cells_paint_italic_hash_does_not() {
+        let commit = Commit {
+            id: "abc1234ffffffffffffffffffffffffffffffff".into(),
+            subject: "topic".into(),
+            author_name: "Ada Lovelace".into(),
+            author_date_unix: NOW - 120,
+            ..Commit::default()
+        };
+        let model = GraphModel {
+            commits: vec![commit],
+            uncommitted: Some(false),
+            window: 1,
+            ..GraphModel::default()
+        };
+        let pal = test_label_palette();
+        let (w, h) = (80u16, 10u16);
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .ascii(true)
+                    .now_unix(NOW)
+                    .label_palette(pal)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut seen = [0usize; 3];
+        for y in 0..h {
+            let cells: Vec<(u16, &str)> = (0..w)
+                .map(|x| (x, buffer[(x, y)].symbol()))
+                .filter(|(_, s)| !s.is_empty())
+                .collect();
+            let text: String = cells.iter().map(|(_, s)| *s).collect();
+            for (i, (needle, italic)) in [("abc1234", false), ("2m", true), ("Ada Lovelace", true)]
+                .into_iter()
+                .enumerate()
+            {
+                let Some(byte) = text.find(needle) else {
+                    continue;
+                };
+                seen[i] += 1;
+                let start = text[..byte].chars().count();
+                for (x, _) in &cells[start..start + needle.chars().count()] {
+                    let cell = &buffer[(*x, y)];
+                    assert_eq!(
+                        cell.modifier.contains(Modifier::ITALIC),
+                        italic,
+                        "{needle:?} at ({x},{y}) in {text:?}"
+                    );
+                    assert_eq!(cell.fg, pal.meta, "{needle:?} keeps the meta colour");
+                }
+            }
+        }
+        assert!(
+            seen.iter().all(|n| *n > 0),
+            "hash/date/author painted: {seen:?}"
         );
     }
 

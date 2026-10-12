@@ -33,10 +33,10 @@ pub use format::{
     assemble_commit_spacer, assemble_stash_spacer, format_commit_message, format_commit_ref_chips,
     format_commit_ref_chips_with, format_commit_spacer, format_commit_subject, format_label,
     format_local_timestamp, format_relative_date, format_row, format_stash_spacer, format_sync,
-    format_utc_timestamp, meta_column_widths, meta_column_widths_with_stashes, meta_columns_text,
-    overflow_chip_text, pick_meta_columns, short_id, wrap_commit_message, CommitSpacerOpts,
-    LabelKind, LabelPart, MetaCols, PartTarget, StashSpacerOpts, COMMIT_MSG_LINES_DEFAULT,
-    COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN, RELATIVE_DATE_LIMIT_SECS,
+    format_utc_timestamp, meta_column_widths, meta_column_widths_with_stashes, meta_columns_parts,
+    meta_columns_text, overflow_chip_text, pick_meta_columns, short_id, wrap_commit_message,
+    CommitSpacerOpts, LabelKind, LabelPart, MetaCols, PartTarget, StashSpacerOpts,
+    COMMIT_MSG_LINES_DEFAULT, COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN, RELATIVE_DATE_LIMIT_SECS,
 };
 pub use glyphs::{GlyphSet, ASCII, CELL_W, UNICODE};
 pub use gutter::{
