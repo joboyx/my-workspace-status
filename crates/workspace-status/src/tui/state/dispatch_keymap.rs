@@ -444,6 +444,13 @@ impl AppState {
             Action::NextTab => self.activate_relative_tab(1),
             Action::PreviousTab => self.activate_relative_tab(-1),
             Action::JumpToTab(n) => self.jump_to_tab(n),
+            // An Explorer tab answers `[` / `]` before this router.
+            Action::PreviousFileTab | Action::NextFileTab => {
+                if let Some(reason) = self.file_tab_cycle_reason() {
+                    self.status = StatusMessage::warn(reason);
+                }
+                Effect::None
+            }
             Action::ComparePickerMove(delta) => {
                 if let Some(picker) = self.compare_picker.as_mut() {
                     picker.move_cursor(delta);
@@ -479,6 +486,7 @@ impl AppState {
 
     /// Why palette row `command` cannot run, or `None` if Enter should dispatch.
     ///
+    /// `[` / `]` rows: [`Self::file_tab_cycle_reason`] on every tab.
     /// On an Explorer tab: [`Self::explorer_tab_refusal`], then
     /// [`Self::explorer_tab_palette_reason`].
     /// On a file tab: [`Self::file_tab_refusal`], the blame gate
@@ -490,6 +498,9 @@ impl AppState {
     /// revert), then the action gate.
     pub(crate) fn palette_disabled_reason(&self, command: &PaletteCommand) -> Option<String> {
         let action = &command.action;
+        if matches!(action, Action::PreviousFileTab | Action::NextFileTab) {
+            return self.file_tab_cycle_reason();
+        }
         if self.is_explorer_tab() {
             return self
                 .explorer_tab_refusal(action)

@@ -174,6 +174,22 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
+        title: "Previous file tab",
+        keys: "[",
+        group: CommandGroup::Move,
+        action: Action::PreviousFileTab,
+        aliases: &["explorer file", "switch file"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "Next file tab",
+        keys: "]",
+        group: CommandGroup::Move,
+        action: Action::NextFileTab,
+        aliases: &["explorer file", "switch file"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
         title: "Stage",
         keys: "s",
         group: CommandGroup::Git,
@@ -889,6 +905,20 @@ mod tests {
                 "gT",
                 CommandGroup::Move,
                 Action::PreviousTab,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Previous file tab",
+                "[",
+                CommandGroup::Move,
+                Action::PreviousFileTab,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Next file tab",
+                "]",
+                CommandGroup::Move,
+                Action::NextFileTab,
                 CommandScope::NoHighlight,
             ),
             (

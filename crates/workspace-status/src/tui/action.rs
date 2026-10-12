@@ -334,6 +334,12 @@ pub enum Action {
     PreviousTab,
     /// Absolute tab index. `1` is Workspace.
     JumpToTab(u8),
+    /// `[` on an Explorer tab: activate the previous inner file tab
+    /// (wrapping) and select its file in the tree.
+    PreviousFileTab,
+    /// `]` on an Explorer tab: activate the next inner file tab (wrapping)
+    /// and select its file in the tree.
+    NextFileTab,
     /// Move the compare picker highlight.
     ComparePickerMove(i32),
     /// Append a compare picker filter character.
@@ -655,10 +661,11 @@ pub enum Effect {
         /// asked.
         parent_ignored: bool,
     },
-    /// Load the Explorer preview of one file on the blocking pool: the
-    /// worktree diff of a changed file (`change` set, the Workspace diff
-    /// pane's load) or the body of a clean one. `gen` is the tab's preview
-    /// generation; a stale result is dropped.
+    /// Load one Explorer inner file tab on the blocking pool: the
+    /// whole-file worktree diff of a changed file (`change` set, the
+    /// Workspace diff pane's load at full context) or the body of a clean
+    /// one. `gen` is the inner tab's load generation; a stale result is
+    /// dropped.
     LoadExplorerPreview {
         tab_id: u64,
         gen: u64,
@@ -668,8 +675,6 @@ pub enum Effect {
         path: String,
         /// Snapshot change of a changed file; `None` reads the file.
         change: Option<crate::snapshot::FileChange>,
-        /// Diff context (`-U`) of a changed file, as the Workspace pane.
-        context: Option<u32>,
     },
     /// Look up the PR of `branch` on a worker, then open it in the browser.
     ///

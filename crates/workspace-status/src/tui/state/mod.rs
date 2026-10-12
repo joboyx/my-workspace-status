@@ -3752,8 +3752,12 @@ impl AppState {
     }
 
     /// Context for the file currently shown in the right pane.
-    /// Survives tree focus so a reload does not drop unlimited `-U`.
+    /// Survives tree focus so a reload does not drop unlimited `-U`. An
+    /// Explorer diff always loads the whole file.
     pub fn diff_context_lines(&self) -> Option<u32> {
+        if self.is_explorer_tab() {
+            return self.explorer_diff().map(|_| FULL_DIFF_CONTEXT_LINES);
+        }
         let id = self.displayed_diff_id()?;
         self.diff_context_for(&id)
     }

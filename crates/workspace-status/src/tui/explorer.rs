@@ -566,7 +566,6 @@ impl ExplorerTree {
     }
 
     /// Rel path of the focused row as stored. `None` before the first move.
-    #[cfg(test)]
     pub fn cursor_rel(&self) -> Option<&str> {
         self.cursor.as_deref()
     }

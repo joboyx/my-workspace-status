@@ -45,6 +45,10 @@ pub const EXPLORER_TAB_READ_ONLY: &str = "Explorer tab is read-only · switch to
 pub const EXPLORER_HAS_NO_SEARCH: &str = "no search on the Explorer tab · Ctrl-f searches files";
 /// Explorer preview copy on a folder row.
 pub const EXPLORER_FOLDER_HINT: &str = "folder · l / Enter opens or closes it";
+/// `[` / `]` copy off an Explorer tab (status line and palette row).
+pub const EXPLORER_FILE_TABS_ONLY: &str = "[ ] switch Explorer file tabs";
+/// `[` / `]` copy on an Explorer tab with no inner file tab.
+pub const NO_EXPLORER_FILE_TABS: &str = "no file tabs open";
 
 /// `gt` / `gT` and the Next / Previous tab palette rows with no compare tab.
 pub const ONLY_WORKSPACE_TAB_OPEN: &str = "only the Workspace tab is open";
@@ -675,13 +679,11 @@ impl FileTab {
     }
 }
 
-/// What the Explorer preview pane shows for the focused tree row.
+/// What an Explorer inner file tab shows.
 #[derive(Clone, Debug)]
 pub enum ExplorerPreview {
-    /// A folder row, or no row: the pane paints a short hint.
-    None,
-    /// A file with git changes: its worktree diff, the same load as the
-    /// Workspace tab's diff pane.
+    /// A file with git changes: its worktree diff over the whole file
+    /// (every line, as with `Ctrl-o` on the Workspace diff).
     Diff {
         /// Path relative to the checkout.
         rel: String,
@@ -692,23 +694,42 @@ pub enum ExplorerPreview {
     },
     /// A clean file: a read-only body, painted like a file tab. Its
     /// [`FileTab::id`] is the Explorer tab id and its
-    /// [`FileTab::generation`] the preview generation.
+    /// [`FileTab::generation`] the inner tab's load generation.
     File(FileTab),
 }
 
-impl ExplorerPreview {
-    /// Path of the previewed file, `None` for [`Self::None`].
-    pub fn rel(&self) -> Option<&str> {
-        match self {
-            Self::None => None,
-            Self::Diff { rel, .. } => Some(rel),
-            Self::File(tab) => Some(&tab.rel),
-        }
+/// One inner file tab of an Explorer tab (VS Code preview-tab rules).
+///
+/// At most one inner tab of a tab is the preview (`pinned == false`): a
+/// tree move onto another file replaces it in place. Enter pins it.
+#[derive(Clone, Debug)]
+pub struct InnerFile {
+    /// Path relative to the checkout. Identity within the Explorer tab.
+    pub rel: String,
+    /// False for the one reusable preview tab.
+    pub pinned: bool,
+    /// What the right pane paints while this tab is active.
+    pub view: ExplorerPreview,
+    /// Load generation of [`Self::view`] (from the tab-wide
+    /// [`ExplorerTab::preview_gen`]). A result for another one is dropped.
+    pub gen: u64,
+    /// Parked diff cursor of a diff view while another inner tab is active.
+    pub diff_cursor: usize,
+    /// Parked diff scroll of a diff view.
+    pub diff_scroll: u16,
+    /// Parked diff pan of a diff view.
+    pub diff_col_offset: u16,
+}
+
+impl InnerFile {
+    /// Strip label: the file name of [`Self::rel`].
+    pub fn label(&self) -> String {
+        checkout_leaf(&self.rel)
     }
 }
 
-/// One session-only Explorer tab: a file tree of one checkout beside a
-/// preview of the focused file.
+/// One session-only Explorer tab: a file tree of one checkout beside the
+/// inner file tabs it opened.
 #[derive(Clone, Debug)]
 pub struct ExplorerTab {
     /// Stable id for in-flight loads (shared counter with other tabs).
@@ -727,23 +748,20 @@ pub struct ExplorerTab {
     /// poll. Only the path that first finds a folder stale is marked;
     /// pruned to the live status paths.
     pub status_relisted: HashSet<String>,
-    /// Preview of the focused row.
-    pub preview: ExplorerPreview,
-    /// Preview load generation. A result for an older one is dropped.
+    /// Inner file tabs in paint order.
+    pub files: Vec<InnerFile>,
+    /// Index into [`Self::files`] of the active inner tab. `None` exactly
+    /// when [`Self::files`] is empty.
+    pub active_file: Option<usize>,
+    /// Last load generation handed out (monotonic over the tab's life).
     pub preview_gen: u64,
     /// First painted tree row.
     pub tree_scroll: usize,
     /// Rel path of the cursor row in the last paint (the breadcrumb reads
     /// it, so a frame walks the tree once).
     pub painted_rel: Option<String>,
-    /// Parked pane focus: true when the preview has focus.
+    /// Parked pane focus: true when the right pane has focus.
     pub focus_preview: bool,
-    /// Parked diff cursor of a diff preview.
-    pub diff_cursor: usize,
-    /// Parked diff scroll of a diff preview.
-    pub diff_scroll: u16,
-    /// Parked diff pan of a diff preview.
-    pub diff_col_offset: u16,
 }
 
 impl ExplorerTab {
@@ -755,14 +773,12 @@ impl ExplorerTab {
             dir_reqs: HashMap::new(),
             dir_req: 0,
             status_relisted: HashSet::new(),
-            preview: ExplorerPreview::None,
+            files: Vec::new(),
+            active_file: None,
             preview_gen: 0,
             tree_scroll: 0,
             painted_rel: None,
             focus_preview: false,
-            diff_cursor: 0,
-            diff_scroll: 0,
-            diff_col_offset: 0,
         }
     }
 
@@ -778,15 +794,66 @@ impl ExplorerTab {
         self.dir_req
     }
 
-    /// Show `preview` for a new load and return its generation.
-    pub fn next_preview(&mut self, preview: ExplorerPreview) -> u64 {
+    /// The active inner file tab.
+    pub fn active_inner(&self) -> Option<&InnerFile> {
+        self.files.get(self.active_file?)
+    }
+
+    /// Mutable [`Self::active_inner`].
+    pub fn active_inner_mut(&mut self) -> Option<&mut InnerFile> {
+        self.files.get_mut(self.active_file?)
+    }
+
+    /// Index of the inner tab of `rel`.
+    pub fn find_inner(&self, rel: &str) -> Option<usize> {
+        self.files.iter().position(|file| file.rel == rel)
+    }
+
+    /// Index of the one preview (unpinned) inner tab.
+    pub fn preview_index(&self) -> Option<usize> {
+        self.files.iter().position(|file| !file.pinned)
+    }
+
+    /// The inner tab whose load generation is `gen`.
+    pub fn inner_by_gen_mut(&mut self, gen: u64) -> Option<&mut InnerFile> {
+        self.files.iter_mut().find(|file| file.gen == gen)
+    }
+
+    /// True while some inner tab still waits for (or shows) load `gen`.
+    pub fn has_gen(&self, gen: u64) -> bool {
+        self.files.iter().any(|file| file.gen == gen)
+    }
+
+    /// A new inner tab of `rel` at a fresh load generation: a loading
+    /// diff view when `changed`, else a loading file body.
+    pub fn new_inner(&mut self, rel: &str, changed: bool, pinned: bool) -> InnerFile {
+        let gen = self.next_gen();
+        InnerFile {
+            rel: rel.to_string(),
+            pinned,
+            view: self.loading_view(rel, changed, gen),
+            gen,
+            diff_cursor: 0,
+            diff_scroll: 0,
+            diff_col_offset: 0,
+        }
+    }
+
+    /// Take the next load generation.
+    pub fn next_gen(&mut self) -> u64 {
         self.preview_gen = self.preview_gen.saturating_add(1);
-        self.preview = preview;
         self.preview_gen
     }
 
-    /// A clean-file preview of `rel`, loading, at generation `gen`.
-    pub fn file_preview(&self, rel: &str, gen: u64) -> ExplorerPreview {
+    /// A loading view of `rel` at generation `gen`.
+    pub fn loading_view(&self, rel: &str, changed: bool, gen: u64) -> ExplorerPreview {
+        if changed {
+            return ExplorerPreview::Diff {
+                rel: rel.to_string(),
+                content: DiffContent::default(),
+                loading: true,
+            };
+        }
         let display = format!("{}/{rel}", self.checkout);
         let mut file = FileTab::new(self.id, self.checkout.clone(), rel.to_string(), display);
         file.generation = gen;
@@ -941,14 +1008,14 @@ impl TabStrip {
     }
 
     /// The read-only file body the active tab paints: a file tab, or the
-    /// clean-file preview of an Explorer tab.
+    /// active inner file tab of an Explorer tab when it shows a clean file.
     pub fn active_file_view(&self) -> Option<&FileTab> {
         match self.active_tab()? {
             SessionTab::File(tab) => Some(tab),
-            SessionTab::Explorer(ExplorerTab {
-                preview: ExplorerPreview::File(tab),
-                ..
-            }) => Some(tab),
+            SessionTab::Explorer(tab) => match &tab.active_inner()?.view {
+                ExplorerPreview::File(file) => Some(file),
+                ExplorerPreview::Diff { .. } => None,
+            },
             _ => None,
         }
     }
@@ -957,10 +1024,10 @@ impl TabStrip {
     pub fn active_file_view_mut(&mut self) -> Option<&mut FileTab> {
         match self.active_tab_mut()? {
             SessionTab::File(tab) => Some(tab),
-            SessionTab::Explorer(ExplorerTab {
-                preview: ExplorerPreview::File(tab),
-                ..
-            }) => Some(tab),
+            SessionTab::Explorer(tab) => match &mut tab.active_inner_mut()?.view {
+                ExplorerPreview::File(file) => Some(file),
+                ExplorerPreview::Diff { .. } => None,
+            },
             _ => None,
         }
     }

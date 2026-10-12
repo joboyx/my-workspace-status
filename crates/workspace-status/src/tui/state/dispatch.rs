@@ -373,6 +373,8 @@ impl AppState {
             | Action::NextTab
             | Action::PreviousTab
             | Action::JumpToTab(_)
+            | Action::PreviousFileTab
+            | Action::NextFileTab
             | Action::ComparePickerMove(_)
             | Action::ComparePickerChar(_)
             | Action::ComparePickerBackspace
