@@ -20,6 +20,7 @@ Every git subprocess also runs with `GIT_OPTIONAL_LOCKS=0` (set by `git::git_pro
 | `diff_worktree_vs_commit_file_ctx` | `diff [-U<n>] -M <base> -- [<old>] <path>` (`git_worktree_compare_diff_args`) | `Result<lines>` | Commit against the working tree for one path. Empty stdout is `(no diff)`. |
 | `blame_line(cwd, rev, path, line)` | `-c blame.showRoot=false -c core.quotePath=false blame --porcelain -L <n>,<n> [<rev> \| --contents -] -- <path>` | `Result<Option<LineBlame>>` | Who last changed one line. See **Line blame**. |
 | `previous_line_change(cwd, blamed)` | `diff -U0 -M <prev> <sha> -- [<prev-path>] <path>`, then `blame_line` at `<prev>` | `Result<PreviousLineChange>` | The change before the blamed commit. See **Line blame**. |
+| `commit_times_since(cwd, days)` | `log --branches --since=<days+1>.days.ago --format=%ct` | `Vec<i64>` (committer unix times) | Tree commit-activity sparkline. Local branches only, so it shows local work, not commits a fetch brought in. Any failure is an empty list (no bars). See **Commit activity**. |
 | `list_compare_picker_branches` | `for-each-ref` on `refs/heads/` + `refs/remotes/origin/` | `Result<LocalBranch[]>` | Drops `origin/HEAD` and the current local. No checkout. |
 | `list_compare_picker_commits` | `log --format=%H%x09%s --max-count=<limit+1> HEAD --` | `Result<AncestorCommit[]>` | Diff vs commit picker. Read-only. Drops the first row (HEAD), so a root HEAD lists none and at most `limit` rows remain. `limit` is `COMPARE_PICKER_COMMIT_LIMIT` (10,000 newest ancestors). Does not use `HEAD^@`: on a root commit it expands to nothing and `git log` falls back to HEAD. |
 | `list_checkout_files(cwd)` | `ls-files -z --cached --others --exclude-standard -- . ':(exclude,glob)**/target/**' ':(exclude,glob)**/node_modules/**'` | `Result<paths>` | Read-only. Quick Open file index (`file_index.rs` `build_file_index`), run on the blocking pool, never the event thread. Tracked plus untracked, minus ignored. The exclude pathspecs keep `target/` and `node_modules/` trees at any depth (root included) out of git's own walk, even when tracked. The caller still drops `.git` / `target` / `node_modules` components as a backstop and paths that are missing or a directory (deleted-but-indexed files, submodules), and stops at `MAX_INDEX_ENTRIES` (200,000). Failure is git's reason line; that checkout lists nothing. |
@@ -185,6 +186,17 @@ git -c blame.showRoot=false -c core.quotePath=false blame --porcelain -L <n>,<n>
 - **Previous line change.** Porcelain `previous <prev> <prev-path>` names the commit blame looked at before `<sha>` and the file's path there (`<sha>^` for a non-merge commit). No `previous` means the commit added the file. `diff -U0 -M <prev> <sha> -- <prev-path> <path>` maps the line back (`map_line_to_parent`): a line inside a hunk maps to the old line at the same offset when the old side is that long; a line outside every hunk shifts by the hunks above it. No old line means the commit added the line. Then `blame -L <m>,<m> <prev> -- <prev-path>` gives the earlier commit.
 - **When the TUI runs it.** Once per focused line that has no cached answer, on the blocking pool (`UserTag::LineBlame`). One job runs at a time; cursor moves while it runs replace the waiting line, so fast `j` / `k` never queue a blame per row. See [tui-model.md](./tui-model.md).
 - **Why not `git log -L`.** Line-log walks the full history of the range before it prints the first commit. On a large repo that is slow, and only one step back is needed.
+
+## Commit activity (`git.rs` `commit_times_since`, `tui/activity.rs`)
+
+```
+git log --branches --since=15.days.ago --format=%ct
+```
+
+- **What it counts.** Commits reachable from any local branch (`refs/heads/*`) with a committer date in the window. Remote-tracking refs, tags, and stashes stay out, so the bars show local work. A linked worktree shares refs with its primary, so a family counts once, in the primary checkout.
+- **Buckets.** `bucket_days` puts each time in one of 14 day buckets, counted back from now in whole 86 400 s steps (today is the last bucket). The extra day in `--since` covers the oldest bucket in full; anything older is dropped.
+- **When the TUI runs it.** One `UserTag::Activity` job walks every repo one after another (`load_activity`), on the blocking pool behind all user jobs (background queue). It is queued after the first frame, again for the repos a finished Pull wave touched, and on a full reload (`r`). There is no timer. Never on the draw / event thread (guard `tty_event_loop_must_not_call_sync_pane_git`).
+- **Lock safety.** Runs through `exec_git_stdout`, so `GIT_OPTIONAL_LOCKS=0` applies like every other spawn. `git log` takes no index lock.
 
 ## Non-obvious semantics
 

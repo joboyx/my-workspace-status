@@ -1042,6 +1042,25 @@ pub fn exec_git_stdout(args: &[&str], cwd: &Path) -> Result<String, String> {
     }
 }
 
+/// Committer times (unix seconds) of the commits on local branches in the
+/// last `days` days, newest first.
+///
+/// Runs `git log --branches --since=<days+1>.days.ago --format=%ct`. Local
+/// branches only: the count shows local work, not commits other people
+/// pushed and a fetch brought in. The extra day covers the oldest bucket in
+/// full; the caller drops anything older. A repo git cannot read (no
+/// commits, not a repo) has no activity: the result is empty.
+pub fn commit_times_since(cwd: &Path, days: u32) -> Vec<i64> {
+    let since = format!("--since={}.days.ago", u64::from(days) + 1);
+    exec_git_stdout(&["log", "--branches", &since, "--format=%ct"], cwd)
+        .map(|out| {
+            out.lines()
+                .filter_map(|line| line.trim().parse().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Files git would show in a checkout: tracked plus untracked, minus ignored.
 ///
 /// Runs `ls-files -z --cached --others --exclude-standard`, so `.gitignore`,
@@ -3051,6 +3070,70 @@ filename new.txt
             None,
             "configured remote that does not exist"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn commit_times_since_lists_recent_local_commits() {
+        let dir = unique_dir("ws-git-commit-times");
+        init_repo_empty(&dir);
+        assert!(
+            commit_times_since(&dir, 14).is_empty(),
+            "no commits: no activity"
+        );
+        fs::write(dir.join("README.md"), "# seed\n").unwrap();
+        git(&dir, &["add", "README.md"]);
+        git(&dir, &["commit", "-q", "-m", "seed"]);
+        git(&dir, &["checkout", "-q", "-b", "side"]);
+        fs::write(dir.join("side.txt"), "side\n").unwrap();
+        git(&dir, &["add", "side.txt"]);
+        git(&dir, &["commit", "-q", "-m", "side"]);
+        git(&dir, &["checkout", "-q", "main"]);
+
+        let capture = |args: &[&str], env: &[(&str, &str)]| -> String {
+            let mut cmd = Command::new(git_binary());
+            cmd.args(args).current_dir(&dir);
+            for (k, v) in crate::testutil::git_env() {
+                cmd.env(k, v);
+            }
+            for (k, v) in env {
+                cmd.env(k, v);
+            }
+            let out = cmd.output().expect("git runs");
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        // A commit 40 days old on a local branch is out of the window.
+        let old_date = "@1000000000 +0000";
+        let old = capture(
+            &["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "old"],
+            &[
+                ("GIT_AUTHOR_DATE", old_date),
+                ("GIT_COMMITTER_DATE", old_date),
+            ],
+        );
+        git(&dir, &["update-ref", "refs/heads/old", &old]);
+        // A fresh commit only a remote-tracking ref holds is not local work.
+        let fetched = capture(
+            &["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "fetched"],
+            &[],
+        );
+        git(
+            &dir,
+            &["update-ref", "refs/remotes/origin/feature", &fetched],
+        );
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let times = commit_times_since(&dir, 14);
+        assert_eq!(times.len(), 2, "seed on main and side only: {times:?}");
+        assert!(
+            times.iter().all(|t| (now - 600..=now + 600).contains(t)),
+            "{times:?} vs {now}"
+        );
+        assert!(commit_times_since(&dir.join("missing"), 14).is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 }

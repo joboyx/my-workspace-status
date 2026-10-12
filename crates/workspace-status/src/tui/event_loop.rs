@@ -18,6 +18,7 @@ use tokio::task::JoinSet;
 use tokio::time::{sleep, Duration as TokioDuration};
 
 use super::action::{Action, Effect, ExternalDiffKind};
+use super::activity::activity_targets;
 use super::app::{
     apply_terminal_resize, discard_held_nav_backlog, map_event, run_blocking_editor,
     sync_mouse_capture, TuiOpts,
@@ -257,6 +258,13 @@ pub async fn run(
     };
     ctx.interp
         .schedule(ctx.state, ctx.opts, lookups, &Action::None);
+    // Sparkline counts run on a low-priority worker after the first frame,
+    // so they never hold up the first paint or user work.
+    let activity = Effect::LoadActivity {
+        checkouts: activity_targets(&ctx.state.snapshot, None),
+    };
+    ctx.interp
+        .schedule(ctx.state, ctx.opts, activity, &Action::None);
     if opts.start_fetch {
         let effect = ctx.state.dispatch(Action::Fetch);
         ctx.interp

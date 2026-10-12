@@ -693,6 +693,12 @@ pub enum Effect {
         /// Checkout path (snapshot `repo`) and the branch to look up.
         targets: Vec<(PathBuf, String)>,
     },
+    /// Count the last 14 days of local-branch commits of each repo for the
+    /// tree sparklines, on one low-priority worker job.
+    LoadActivity {
+        /// Activity keys (primary checkout paths) to count, in order.
+        checkouts: Vec<String>,
+    },
     /// Fetch the popover detail of PR `number` for `branch` of checkout
     /// `repo` at `remote` on a worker.
     ///

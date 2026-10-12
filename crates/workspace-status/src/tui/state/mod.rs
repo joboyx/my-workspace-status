@@ -41,6 +41,7 @@ use crate::snapshot::{
 #[cfg(test)]
 use super::action::Action;
 use super::action::{Effect, ExternalDiffKind};
+use super::activity::ACTIVITY_DAYS;
 use super::anim::{next_tick_ms, AnimNeeds, RemoteActivity};
 use super::branches::{
     branch_name_error, can_open_branch_picker, checkoutable_branch_names, merge_rev_for_commit,
@@ -770,6 +771,10 @@ pub struct AppState {
     pub anim_epoch: Instant,
     /// Remote git work in flight, published by the interpreter for paint.
     pub remote_activity: RemoteActivity,
+    /// Day commit counts (last [`ACTIVITY_DAYS`] days, today last) per
+    /// activity key, from the low-priority [`Effect::LoadActivity`] worker.
+    /// Empty until that job lands; the tree paints no sparkline before.
+    pub activity: HashMap<String, [u32; ACTIVITY_DAYS]>,
     pub search_mode: bool,
     pub search_active: bool,
     pub search_query: String,
@@ -1036,6 +1041,7 @@ impl AppState {
             undercurl: false,
             anim_epoch: Instant::now(),
             remote_activity: RemoteActivity::default(),
+            activity: HashMap::new(),
             search_mode: false,
             search_active: false,
             search_query: String::new(),

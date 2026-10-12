@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use super::activity::{row_activity_key, sparkline, SPARK_MIN_TREE_COLS};
 use super::anim::spinner_glyph;
 use super::chrome::{
     breadcrumb_line, breadcrumb_rows, ctrl_c_prompt_line, ctrl_c_prompt_rows, dialog_height,
@@ -1447,12 +1448,20 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         let spinner = tree_row_runs_remote(row, &state.remote_activity.running, &running_families)
             .then(|| spinner_glyph(state.anim_epoch, now, state.ascii));
         state.layout.animating |= spinner.is_some();
+        // Commit-activity bars: repo rows only, once the worker has
+        // counted, and only when the pane leaves the label room.
+        let bars = (width >= SPARK_MIN_TREE_COLS)
+            .then(|| row_activity_key(row))
+            .flatten()
+            .and_then(|key| state.activity.get(key))
+            .and_then(|days| sparkline(days, state.ascii));
         let decor = TreeRowDecor {
             viewed,
             commented,
             resolved,
             pr,
             spinner,
+            sparkline: bars,
             no_color: state.no_color,
         };
         let (line, icons, label) = paint_tree_row(
@@ -1508,7 +1517,7 @@ type LabelSpan = (usize, usize);
 
 /// Per-row marks and live decorations a tree row paints beside its own
 /// segments.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct TreeRowDecor {
     /// File row is marked reviewed.
     viewed: bool,
@@ -1521,7 +1530,11 @@ struct TreeRowDecor {
     /// Spinner frame while a fetch / pull / push runs on the row's
     /// checkout. Paints first in the trailing run.
     spinner: Option<&'static str>,
-    /// `NO_COLOR`: the spinner takes the terminal foreground.
+    /// Commit-activity bars of a repo row ([`sparkline`]). Paints last in
+    /// the trailing run.
+    sparkline: Option<String>,
+    /// `NO_COLOR`: the spinner and the sparkline take the terminal
+    /// foreground.
     no_color: bool,
 }
 
@@ -1590,6 +1603,20 @@ fn paint_tree_row(
                 icon: None,
             },
         );
+    }
+    if let Some(bars) = decor.sparkline {
+        segs.trailing.push(TextSeg {
+            text: format!(" {bars} "),
+            role: if decor.no_color {
+                SegRole::Plain
+            } else {
+                SegRole::Muted
+            },
+            hex: None,
+            bold: false,
+            dim: false,
+            icon: None,
+        });
     }
     if row.kind == NodeKind::Workspace {
         // The summary gives way before the name. Same prefix as
@@ -13459,6 +13486,151 @@ mod tests {
             layout.tree_x,
             layout.tree_x + layout.tree_width,
         )
+    }
+
+    /// A workspace with one real `app` repo (one commit, made now). The
+    /// snapshot marks it dirty so its row sits outside the folded No
+    /// updates group.
+    fn activity_state(tag: &str, ascii: bool) -> (PathBuf, AppState) {
+        let root = crate::testutil::unique_dir(tag);
+        crate::testutil::init_repo(&root.join("app"));
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        (root.clone(), AppState::new(root, snapshot, ascii))
+    }
+
+    /// Id of the painted repo row of `app`.
+    fn app_repo_row_id(state: &AppState) -> String {
+        state
+            .painted_tree_rows()
+            .iter()
+            .find(|row| row.kind == NodeKind::Repo && row.repo.as_deref() == Some("app"))
+            .map(|row| row.id.clone())
+            .expect("app repo row")
+    }
+
+    /// Run every job the interpreter spawns on this thread and apply it.
+    fn run_interp_jobs(
+        interp: &mut super::super::effect::Interpreter,
+        state: &mut AppState,
+        opts: &super::super::app::TuiOpts,
+    ) {
+        loop {
+            let mut jobs = Vec::new();
+            interp.spawn_ready(state, opts, &mut |id, work| jobs.push((id, work)));
+            if jobs.is_empty() {
+                break;
+            }
+            for (id, work) in jobs {
+                interp.apply(state, opts, id, work());
+            }
+        }
+    }
+
+    fn activity_opts(state: &AppState) -> super::super::app::TuiOpts {
+        super::super::app::TuiOpts {
+            cwd: state.cwd.clone(),
+            snapshot: state.snapshot.clone(),
+            config: crate::config::WorkspaceStatusConfig::with_defaults(),
+            settings: crate::settings::Settings::resolve(&Default::default(), |_| None),
+            start_fetch: false,
+        }
+    }
+
+    /// The launch paints with no sparkline: the counts come from a worker
+    /// job the loop queues after that frame. Only the applied outcome
+    /// paints the bars, at the end of the repo row.
+    #[test]
+    fn first_paint_has_no_sparkline_then_shows_after_apply() {
+        use super::super::activity::activity_targets;
+        let today = "▁▁▁▁▁▁▁▁▁▁▁▁▁█";
+        let (root, mut state) = activity_state("ws-render-sparkline", false);
+        let mut terminal = Terminal::new(TestBackend::new(160, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert!(usize::from(state.layout.tree_width) >= SPARK_MIN_TREE_COLS);
+        let id = app_repo_row_id(&state);
+        let first = tree_row_text(&terminal, &state, &id);
+        assert!(!first.contains('▁'), "first paint: {first:?}");
+
+        let opts = activity_opts(&state);
+        let mut interp = super::super::effect::Interpreter::new();
+        let checkouts = activity_targets(&state.snapshot, None);
+        interp.schedule(
+            &mut state,
+            &opts,
+            Effect::LoadActivity { checkouts },
+            &Action::None,
+        );
+        draw_state(&mut terminal, &mut state);
+        let queued = tree_row_text(&terminal, &state, &id);
+        assert!(!queued.contains('▁'), "queued, not run: {queued:?}");
+
+        run_interp_jobs(&mut interp, &mut state, &opts);
+        draw_state(&mut terminal, &mut state);
+        let applied = tree_row_text(&terminal, &state, &id);
+        assert!(
+            applied.trim_end().ends_with(today),
+            "bars end the row: {applied:?}"
+        );
+        // The bars take the muted fg.
+        let row_y = (state.layout.tree_y..state.layout.tree_y + 16)
+            .find(|&y| {
+                buffer_row(
+                    &terminal,
+                    y,
+                    state.layout.tree_x,
+                    state.layout.tree_x + state.layout.tree_width,
+                ) == applied
+            })
+            .expect("row on screen");
+        let bar_x = (state.layout.tree_x..state.layout.tree_x + state.layout.tree_width)
+            .rev()
+            .find(|&x| terminal.backend().buffer()[(x, row_y)].symbol() == "█")
+            .expect("top bar");
+        let palette = state.theme.palette();
+        assert_eq!(
+            terminal.backend().buffer()[(bar_x, row_y)].fg,
+            palette.muted
+        );
+
+        // NO_COLOR: the bars take the terminal foreground.
+        state.no_color = true;
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(terminal.backend().buffer()[(bar_x, row_y)].fg, Color::Reset);
+
+        // ASCII glyphs: ASCII bars.
+        state.ascii = true;
+        draw_state(&mut terminal, &mut state);
+        let ascii = tree_row_text(&terminal, &state, &id);
+        assert!(
+            ascii.trim_end().ends_with("_____________#"),
+            "ascii bars: {ascii:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn narrow_tree_omits_sparkline() {
+        let (root, mut state) = activity_state("ws-render-sparkline-narrow", false);
+        let mut days = [0u32; super::super::activity::ACTIVITY_DAYS];
+        days[super::super::activity::ACTIVITY_DAYS - 1] = 3;
+        state.activity.insert("app".into(), days);
+
+        let mut wide = Terminal::new(TestBackend::new(160, 16)).unwrap();
+        draw_state(&mut wide, &mut state);
+        assert!(usize::from(state.layout.tree_width) >= SPARK_MIN_TREE_COLS);
+        let id = app_repo_row_id(&state);
+        assert!(tree_row_text(&wide, &state, &id).contains('█'));
+
+        let mut narrow = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        draw_state(&mut narrow, &mut state);
+        assert!(
+            usize::from(state.layout.tree_width) < SPARK_MIN_TREE_COLS,
+            "tree width {}",
+            state.layout.tree_width
+        );
+        let text = tree_row_text(&narrow, &state, &id);
+        assert!(!text.contains('█') && !text.contains('▁'), "{text:?}");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
