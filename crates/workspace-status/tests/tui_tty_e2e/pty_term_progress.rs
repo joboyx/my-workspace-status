@@ -106,6 +106,23 @@ fn pty_fetch_all_emits_progress_and_quit_clears_it() {
     );
 }
 
+/// Progress on (the default), no batch: launch and `q` write no OSC 9;4 at
+/// all. Fail if the exit writes a clear for a bar that never showed (a
+/// terminal that shows OSC 9 as a notification would pop one per quit).
+#[test]
+fn pty_quit_without_batch_writes_no_osc_9_4() {
+    let (_root, _slow, mut tui) = open_two_repos(&[]);
+    tui.wait_contains("No updates", WAIT);
+    tui.key('q');
+    tui.wait_exit(WAIT);
+    let raw = settle_raw(&tui);
+    assert!(
+        !raw.windows(OSC_9_4.len()).any(|w| w == OSC_9_4),
+        "no batch: no OSC 9;4; states: {:?}",
+        progress_states(&raw)
+    );
+}
+
 /// `WS_STATUS_TERM_PROGRESS=0`: a full fetch-all and quit write no OSC 9;4.
 #[test]
 fn pty_term_progress_off_writes_no_osc_9_4() {

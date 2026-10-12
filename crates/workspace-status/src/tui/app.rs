@@ -58,7 +58,7 @@ use super::tabs::{
     HEAD_HAS_NO_COMMIT,
 };
 use super::term_bg::{is_light_background, pick_theme, query_background, QUERY_TIMEOUT};
-use super::term_progress::PROGRESS_CLEAR;
+use super::term_progress::{PROGRESS_CLEAR, PROGRESS_SHOWN};
 use super::tty::{disable_mouse, enable_mouse, poll_event, read_event, read_event_origin};
 #[cfg(test)]
 use super::watch::{checkout_watch_identities, watch_needs_pane_reload};
@@ -75,11 +75,10 @@ pub struct TuiOpts {
 
 /// Open the alternate screen and run until quit.
 ///
-/// Every exit restores the terminal and clears the OSC 9;4 progress:
+/// Every exit restores the terminal and clears a shown OSC 9;4 bar:
 /// quit, an error return, and a panic on this thread (panic hook).
 pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
-    let progress = opts.settings.term_progress;
-    install_panic_hook(progress, stdout);
+    install_panic_hook(&PROGRESS_SHOWN, stdout);
     let mut state = AppState::launch(opts.cwd.clone(), opts.snapshot.clone(), &opts.settings);
     state.apply_view_defaults(&opts.config.view_defaults);
     enable_raw_mode().map_err(|_| 1u8)?;
@@ -94,7 +93,7 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
     state.theme = pick_theme(state.theme, mode, light_bg);
     let mut out = stdout();
     if execute!(out, EnterAlternateScreen).is_err() || enable_mouse(&mut out).is_err() {
-        restore_terminal(progress);
+        restore_terminal();
         return Err(1);
     }
     push_keyboard_enhancement();
@@ -107,7 +106,7 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
     ) {
         Ok(t) => t,
         Err(_) => {
-            restore_terminal(progress);
+            restore_terminal();
             return Err(1);
         }
     };
@@ -118,7 +117,7 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
         Ok(rt) => rt.block_on(super::event_loop::run(&mut terminal, &mut state, &opts)),
         Err(_) => Err(1),
     };
-    restore_terminal(progress);
+    restore_terminal();
     let _ = terminal.show_cursor();
     // The runtime drop waits for workers that are still running (a git
     // fetch, say). Drop it only once the terminal is back to normal.
@@ -131,18 +130,21 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
 /// alone and the restore runs once.
 static TERMINAL_SET_UP: AtomicBool = AtomicBool::new(false);
 
-/// Give the terminal back on stdout; `progress` is the `termProgress`
-/// setting.
-fn restore_terminal(progress: bool) {
+/// Give the terminal back on stdout. Clears the OSC 9;4 bar only when one
+/// shows ([`PROGRESS_SHOWN`]).
+fn restore_terminal() {
     TERMINAL_SET_UP.store(false, Ordering::SeqCst);
-    restore_terminal_to(&mut stdout(), progress);
+    restore_terminal_to(&mut stdout(), PROGRESS_SHOWN.swap(false, Ordering::SeqCst));
 }
 
-/// Clear the OSC 9;4 progress first (when `progress` is on), then leave raw
+/// Clear the OSC 9;4 bar first (when `clear_progress`), then leave raw
 /// mode, mouse capture, the keyboard protocol, and the alternate screen, and
 /// show the cursor. Each step is safe on a terminal that was never set up.
-fn restore_terminal_to<W: Write>(out: &mut W, progress: bool) {
-    if progress {
+///
+/// With no bar shown it writes no OSC 9;4: some terminals show any OSC 9
+/// as a desktop notification.
+fn restore_terminal_to<W: Write>(out: &mut W, clear_progress: bool) {
+    if clear_progress {
         let _ = out.write_all(PROGRESS_CLEAR.as_bytes());
     }
     let _ = disable_raw_mode();
@@ -156,8 +158,9 @@ fn restore_terminal_to<W: Write>(out: &mut W, progress: bool) {
 ///
 /// It acts only for a panic on the thread that installed it (the TUI
 /// thread) while [`TERMINAL_SET_UP`] is set. A worker panic that Tokio
-/// catches leaves the running TUI alone.
-fn install_panic_hook<W, F>(progress: bool, target: F)
+/// catches leaves the running TUI alone. It clears the OSC 9;4 bar only
+/// while `shown` is set ([`PROGRESS_SHOWN`] outside tests).
+fn install_panic_hook<W, F>(shown: &'static AtomicBool, target: F)
 where
     W: Write,
     F: Fn() -> W + Send + Sync + 'static,
@@ -168,7 +171,7 @@ where
         if std::thread::current().id() == tui_thread
             && TERMINAL_SET_UP.swap(false, Ordering::SeqCst)
         {
-            restore_terminal_to(&mut target(), progress);
+            restore_terminal_to(&mut target(), shown.swap(false, Ordering::SeqCst));
         }
         prev(info);
     }));
@@ -1182,6 +1185,7 @@ mod tests {
     use crate::tui::branches::DIRTY_WORKTREE_STATUS;
     use crate::tui::state::PendingConfirm;
     use crate::tui::status::StatusKind;
+    use crate::tui::term_progress::{ProgressState, TermProgress};
     use std::fs;
     use std::process::Command;
     use std::sync::mpsc;
@@ -1208,27 +1212,52 @@ mod tests {
         }
     }
 
-    fn restore_bytes(progress: bool) -> String {
+    /// Restore bytes as `restore_terminal` writes them, with `shown` as
+    /// the shown-bar flag.
+    fn restore_bytes(shown: &AtomicBool) -> String {
         let mut out = Vec::new();
-        restore_terminal_to(&mut out, progress);
+        restore_terminal_to(&mut out, shown.swap(false, Ordering::SeqCst));
         String::from_utf8(out).unwrap()
     }
 
     #[test]
     fn restore_sequence_clears_progress_first() {
-        let on = restore_bytes(true);
+        static SHOWN: AtomicBool = AtomicBool::new(false);
+        let mut progress = TermProgress::with_flag(true, &SHOWN);
+        let mut sink = Vec::new();
+
+        let idle = restore_bytes(&SHOWN);
         assert!(
-            on.starts_with(PROGRESS_CLEAR),
-            "progress clear comes first: {on:?}"
+            !idle.contains("\x1b]9;4;"),
+            "no bar shown: no OSC 9;4 at all: {idle:?}"
         );
-        assert!(on.contains("\x1b[?1049l"), "leaves the alt screen: {on:?}");
-        assert!(on.contains("\x1b[?25h"), "shows the cursor: {on:?}");
-        let off = restore_bytes(false);
         assert!(
-            !off.contains("\x1b]9;4;"),
-            "termProgress off writes no OSC 9;4: {off:?}"
+            idle.contains("\x1b[?1049l"),
+            "leaves the alt screen: {idle:?}"
         );
-        assert_eq!(on, format!("{PROGRESS_CLEAR}{off}"));
+        assert!(idle.contains("\x1b[?25h"), "shows the cursor: {idle:?}");
+
+        progress
+            .write_if_changed(&mut sink, ProgressState::Normal(50))
+            .unwrap();
+        let shown = restore_bytes(&SHOWN);
+        assert!(
+            shown.starts_with(PROGRESS_CLEAR),
+            "a shown bar is cleared first: {shown:?}"
+        );
+        assert_eq!(shown, format!("{PROGRESS_CLEAR}{idle}"));
+
+        progress
+            .write_if_changed(&mut sink, ProgressState::Error(50))
+            .unwrap();
+        progress
+            .write_if_changed(&mut sink, ProgressState::Clear)
+            .unwrap();
+        assert_eq!(
+            restore_bytes(&SHOWN),
+            idle,
+            "a batch that already cleared its bar writes no second clear"
+        );
     }
 
     /// Test writer that appends to a shared buffer.
@@ -1247,9 +1276,13 @@ mod tests {
 
     #[test]
     fn panic_hook_restores_terminal_and_clears_progress() {
+        static SHOWN: AtomicBool = AtomicBool::new(false);
+        TermProgress::with_flag(true, &SHOWN)
+            .write_if_changed(&mut Vec::new(), ProgressState::Normal(0))
+            .unwrap();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = std::sync::Arc::clone(&seen);
-        install_panic_hook(true, move || SharedBuf(std::sync::Arc::clone(&sink)));
+        install_panic_hook(&SHOWN, move || SharedBuf(std::sync::Arc::clone(&sink)));
         TERMINAL_SET_UP.store(true, Ordering::SeqCst);
         let caught = std::panic::catch_unwind(|| panic!("boom in the TUI thread"));
         // Put the default hook back for the other tests.
@@ -1258,7 +1291,7 @@ mod tests {
         let out = String::from_utf8(seen.lock().unwrap().clone()).unwrap();
         assert!(
             out.starts_with(PROGRESS_CLEAR),
-            "hook clears progress first: {out:?}"
+            "hook clears the shown bar first: {out:?}"
         );
         assert!(out.contains("\x1b[?1049l"), "hook leaves the alt screen");
         assert!(out.contains("\x1b[?25h"), "hook shows the cursor");
@@ -1266,6 +1299,7 @@ mod tests {
             !TERMINAL_SET_UP.load(Ordering::SeqCst),
             "the hook restores once"
         );
+        assert!(!SHOWN.load(Ordering::SeqCst), "the bar is gone");
     }
 
     #[test]

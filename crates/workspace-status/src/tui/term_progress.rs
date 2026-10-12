@@ -4,14 +4,22 @@
 //! Ghostty) show the bar in the tab or taskbar. Others ignore the
 //! sequence. Ratatui cannot emit it, so `draw_frame` writes it after each
 //! frame, and only when the state changes. `restore_terminal` writes
-//! [`PROGRESS_CLEAR`] on exit.
+//! [`PROGRESS_CLEAR`] on exit only while a bar shows ([`PROGRESS_SHOWN`]):
+//! some terminals show any OSC 9 as a desktop notification, so a launch
+//! with no batch writes no OSC 9;4 at all.
 
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::anim::BatchProgress;
 
 /// OSC 9;4 sequence that removes the terminal progress bar.
 pub const PROGRESS_CLEAR: &str = "\x1b]9;4;0;0\x07";
+
+/// True while the terminal shows a progress bar: the last state a
+/// [`TermProgress::new`] writer wrote was not [`ProgressState::Clear`].
+/// The exit restore and the panic hook write [`PROGRESS_CLEAR`] only then.
+pub static PROGRESS_SHOWN: AtomicBool = AtomicBool::new(false);
 
 /// One terminal progress state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,14 +64,24 @@ pub struct TermProgress {
     enabled: bool,
     /// The state the terminal shows now.
     last: ProgressState,
+    /// Set while `last` is not clear; [`PROGRESS_SHOWN`] outside tests.
+    shown: &'static AtomicBool,
 }
 
 impl TermProgress {
-    /// A writer that starts from a terminal with no progress bar.
+    /// A writer that starts from a terminal with no progress bar and keeps
+    /// [`PROGRESS_SHOWN`] up to date.
     pub fn new(enabled: bool) -> Self {
+        Self::with_flag(enabled, &PROGRESS_SHOWN)
+    }
+
+    /// [`Self::new`] that keeps `shown` instead of [`PROGRESS_SHOWN`], so a
+    /// test does not share the process-wide flag.
+    pub(super) fn with_flag(enabled: bool, shown: &'static AtomicBool) -> Self {
         Self {
             enabled,
             last: ProgressState::Clear,
+            shown,
         }
     }
 
@@ -80,6 +98,8 @@ impl TermProgress {
         out.write_all(osc_9_4(next).as_bytes())?;
         out.flush()?;
         self.last = next;
+        self.shown
+            .store(next != ProgressState::Clear, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -132,22 +152,29 @@ mod tests {
 
     #[test]
     fn writer_emits_only_on_change() {
-        let mut progress = TermProgress::new(true);
+        static WRITER_SHOWN: AtomicBool = AtomicBool::new(false);
+        let mut progress = TermProgress::with_flag(true, &WRITER_SHOWN);
         let mut out = Vec::new();
         progress
             .write_if_changed(&mut out, ProgressState::Clear)
             .unwrap();
         assert!(out.is_empty(), "the terminal starts clear");
-        for state in [
-            ProgressState::Normal(0),
-            ProgressState::Normal(0),
-            ProgressState::Normal(50),
-            ProgressState::Error(50),
-            ProgressState::Error(50),
-            ProgressState::Clear,
-            ProgressState::Clear,
+        assert!(!WRITER_SHOWN.load(Ordering::SeqCst));
+        for (state, shown) in [
+            (ProgressState::Normal(0), true),
+            (ProgressState::Normal(0), true),
+            (ProgressState::Normal(50), true),
+            (ProgressState::Error(50), true),
+            (ProgressState::Error(50), true),
+            (ProgressState::Clear, false),
+            (ProgressState::Clear, false),
         ] {
             progress.write_if_changed(&mut out, state).unwrap();
+            assert_eq!(
+                WRITER_SHOWN.load(Ordering::SeqCst),
+                shown,
+                "shown flag after {state:?}"
+            );
         }
         assert_eq!(
             String::from_utf8(out).unwrap(),
@@ -157,7 +184,8 @@ mod tests {
 
     #[test]
     fn disabled_writer_emits_nothing() {
-        let mut progress = TermProgress::new(false);
+        static DISABLED_SHOWN: AtomicBool = AtomicBool::new(false);
+        let mut progress = TermProgress::with_flag(false, &DISABLED_SHOWN);
         let mut out = Vec::new();
         for state in [
             ProgressState::Normal(10),
@@ -167,5 +195,9 @@ mod tests {
             progress.write_if_changed(&mut out, state).unwrap();
         }
         assert!(out.is_empty());
+        assert!(
+            !DISABLED_SHOWN.load(Ordering::SeqCst),
+            "a disabled writer never shows a bar"
+        );
     }
 }
