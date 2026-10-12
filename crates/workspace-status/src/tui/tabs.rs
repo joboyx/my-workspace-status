@@ -45,6 +45,9 @@ pub const EXPLORER_TAB_READ_ONLY: &str = "Explorer tab is read-only · switch to
 pub const EXPLORER_HAS_NO_SEARCH: &str = "no search on the Explorer tab · Ctrl-f searches files";
 /// Explorer preview copy on a folder row.
 pub const EXPLORER_FOLDER_HINT: &str = "folder · l / Enter opens or closes it";
+/// `-` and Open in Explorer refusal on the Workspace tab when the tree is
+/// not focused on a repo, checkout, section, folder, or file row.
+pub const FOCUS_A_TREE_ROW_TO_EXPLORE: &str = "focus a checkout, folder, or file in the tree";
 
 /// `gt` / `gT` and the Next / Previous tab palette rows with no compare tab.
 pub const ONLY_WORKSPACE_TAB_OPEN: &str = "only the Workspace tab is open";

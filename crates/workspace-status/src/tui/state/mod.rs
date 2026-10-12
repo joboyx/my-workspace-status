@@ -792,7 +792,8 @@ pub struct AppState {
     /// Message rows of the expanded commit-message footer (graph pane and
     /// commit-files pane). The footer keeps this height whatever the
     /// selected message is. `viewDefaults.commitMessageLines` sets the launch
-    /// value; `-` / `+` change it for this session (no XDG store). Always in
+    /// value; the Shorter / Taller commit message palette rows change it for
+    /// this session (no XDG store). Always in
     /// [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`].
     pub commit_msg_lines: usize,
     /// Scroll of an expanded message taller than the graph footer, keyed by
@@ -3045,8 +3046,8 @@ impl AppState {
         Effect::None
     }
 
-    /// `-` / `+`: change the expanded commit-message footer by `delta` rows
-    /// for this session, clamped to
+    /// Shorter / Taller commit message (palette only): change the expanded
+    /// commit-message footer by `delta` rows for this session, clamped to
     /// [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`].
     fn resize_commit_msg(&mut self, delta: i32) -> Effect {
         let next = (self.commit_msg_lines as i64).saturating_add(i64::from(delta));
@@ -17534,6 +17535,48 @@ diff --git a/README.md b/README.md
         assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::Quit);
     }
 
+    /// Go to file closes commands mode, then opens Quick Open again in
+    /// files mode, as `Ctrl-p` / `F` do.
+    #[test]
+    fn palette_go_to_file_opens_quick_open_in_files_mode() {
+        use super::super::quick_open::QuickOpenMode;
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        palette_select(&mut app, "Go to file");
+        assert_eq!(palette_reason(&app, "Go to file"), None);
+        let effect = app.dispatch(Action::QuickOpenSubmit);
+        assert!(
+            matches!(effect, Effect::LoadFileIndex { .. }),
+            "files mode loads the index: {effect:?}"
+        );
+        let quick = app.quick_open.as_ref().expect("Quick Open stays up");
+        assert_eq!(quick.mode(), QuickOpenMode::Files);
+        assert_eq!(quick.query, "", "no `>`: files mode");
+        assert_eq!(app.input_mode(), InputMode::QuickOpen);
+    }
+
+    /// Search in files closes the palette and opens the search-in-files
+    /// dialog, as `Ctrl-f` does.
+    #[test]
+    fn palette_search_in_files_opens_the_search_dialog() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        palette_select(&mut app, "Search in files");
+        assert_eq!(palette_reason(&app, "Search in files"), None);
+        let effect = app.dispatch(Action::QuickOpenSubmit);
+        assert!(
+            matches!(effect, Effect::LoadSearchIndex { .. }),
+            "the dialog loads its index: {effect:?}"
+        );
+        assert!(app.quick_open.is_none(), "the palette closes");
+        assert!(app.search_files.is_some(), "the search dialog opens");
+        assert!(
+            matches!(app.input_mode(), InputMode::SearchFiles { .. }),
+            "{:?}",
+            app.input_mode()
+        );
+    }
+
     #[test]
     fn palette_fold_subtree_folds_an_open_parent_and_its_children_like_zz() {
         let mut app = tree_app();
@@ -17748,6 +17791,31 @@ diff --git a/README.md b/README.md
         assert_eq!(app.dispatch(Action::CopyEntityReference), Effect::None);
         assert_eq!(app.status, "no copy target");
         assert!(app.comment_export.is_none());
+    }
+
+    /// A group row has no checkout: `-` and the Open in Explorer row refuse
+    /// with the same copy, and `-` does not resize the commit message.
+    #[test]
+    fn open_in_explorer_refuses_on_a_group_row() {
+        use super::super::tabs::FOCUS_A_TREE_ROW_TO_EXPLORE;
+        let mut app = state();
+        app.folds.remove("group:no-updates");
+        app.rebuild_rows();
+        app.cursor = app
+            .rows
+            .iter()
+            .position(|r| r.kind == NodeKind::Group)
+            .expect("group");
+        let lines = app.commit_msg_lines;
+        assert_eq!(
+            palette_reason(&app, "Open in Explorer").as_deref(),
+            Some(FOCUS_A_TREE_ROW_TO_EXPLORE)
+        );
+        assert_eq!(app.dispatch(Action::ExplorerReveal), Effect::None);
+        assert_eq!(app.status, FOCUS_A_TREE_ROW_TO_EXPLORE);
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+        assert_eq!(app.commit_msg_lines, lines);
+        assert!(app.tabs.is_workspace());
     }
 
     #[test]

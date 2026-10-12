@@ -479,6 +479,9 @@ impl AppState {
 
     /// Why palette row `command` cannot run, or `None` if Enter should dispatch.
     ///
+    /// Open in Explorer checks [`Self::explorer_open_target`] first, on
+    /// every tab (on an Explorer tab `-` is the parent folder, a different
+    /// action, so the row is off there).
     /// On an Explorer tab: [`Self::explorer_tab_refusal`], then
     /// [`Self::explorer_tab_palette_reason`].
     /// On a file tab: [`Self::file_tab_refusal`], the blame gate
@@ -490,6 +493,11 @@ impl AppState {
     /// revert), then the action gate.
     pub(crate) fn palette_disabled_reason(&self, command: &PaletteCommand) -> Option<String> {
         let action = &command.action;
+        if matches!(action, Action::ExplorerReveal) {
+            if let Err(reason) = self.explorer_open_target() {
+                return Some(reason.into());
+            }
+        }
         if self.is_explorer_tab() {
             return self
                 .explorer_tab_refusal(action)

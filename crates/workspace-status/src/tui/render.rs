@@ -7868,7 +7868,7 @@ mod tests {
 
     /// The depth-2 commit-files footer keeps one fixed height whatever the
     /// message: a one-line subject pads, a long body clips with `…`, in
-    /// both expand states, and `+` grows it by one row.
+    /// both expand states, and one more message line grows it by one row.
     #[test]
     fn depth_2_left_footer_height_is_fixed_for_short_and_long_messages() {
         let long = (0..30)

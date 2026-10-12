@@ -108,7 +108,8 @@ pub enum Action {
     /// full subject plus body when this is on.
     ToggleCommitMsgExpand,
     /// Change the expanded commit-message footer height by this many
-    /// message rows (`-` / `+`, `=` same as `+`).
+    /// message rows. Palette only (Shorter / Taller commit message): no key
+    /// is bound.
     ///
     /// Session-only, like `<` / `>`. `viewDefaults.commitMessageLines` sets
     /// the launch value. Clamped to 1..=20 rows. The footer keeps this height
@@ -117,9 +118,10 @@ pub enum Action {
     /// `-`. On an Explorer tab: move the tree cursor to the parent folder.
     /// On the Workspace tab with the tree focused on a row in a checkout
     /// (repo, worktree, folder, or file row): open or focus that checkout's
-    /// Explorer tab and reveal the row. Anywhere else (a workspace or group
-    /// row, another pane, a compare or file tab) it is
-    /// [`Self::ResizeCommitMsg`]`(-1)`, which a file tab ignores.
+    /// Explorer tab and reveal the row (also the Open in Explorer palette
+    /// row). Anywhere else (a workspace or group row, another pane, a
+    /// compare or file tab) it refuses with a warning on the status line;
+    /// the palette row is disabled there and on an Explorer tab.
     ExplorerReveal,
     /// Toggle the current-line blame annotation (`B`).
     ///
