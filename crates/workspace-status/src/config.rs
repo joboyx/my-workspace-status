@@ -97,6 +97,9 @@ pub struct RuntimeKeys {
     /// `termProgress` (`WS_STATUS_TERM_PROGRESS`): OSC 9;4 terminal progress
     /// for multi-repo batches on or off.
     pub term_progress: Option<bool>,
+    /// `smoothScroll` (`WS_STATUS_SMOOTH_SCROLL`): Ctrl-d / Ctrl-u glide the
+    /// viewport (on) or jump (off).
+    pub smooth_scroll: Option<bool>,
 }
 
 impl RuntimeKeys {
@@ -116,6 +119,7 @@ impl RuntimeKeys {
             theme_store: over.theme_store.or(self.theme_store),
             git: over.git.or(self.git),
             term_progress: over.term_progress.or(self.term_progress),
+            smooth_scroll: over.smooth_scroll.or(self.smooth_scroll),
         }
     }
 }
@@ -184,6 +188,7 @@ struct RawConfig {
     theme_store: Option<serde_json::Value>,
     git: Option<serde_json::Value>,
     term_progress: Option<serde_json::Value>,
+    smooth_scroll: Option<serde_json::Value>,
 }
 
 fn normalize_ignored(repos: &[String]) -> Vec<String> {
@@ -567,6 +572,7 @@ fn parse_runtime_keys(
         theme_store: parse_path_key(file, "themeStore", parsed.theme_store.take(), home)?,
         git: parse_git_key(file, parsed.git.take(), home)?,
         term_progress: parse_bool_key(file, "termProgress", parsed.term_progress.take())?,
+        smooth_scroll: parse_bool_key(file, "smoothScroll", parsed.smooth_scroll.take())?,
     })
 }
 
@@ -1549,7 +1555,7 @@ mod tests {
     fn runtime_keys_parse_valid_values() {
         let cfg = load_layered_home(
             Some(
-                r#"{"theme":" dracula ","themeMode":"light","glyphs":"ascii","watchMs":0,"fetchMs":60000,"fetchConcurrency":4,"updateCheck":false,"updateCheckStore":"~/state/update-check.json","commentStore":"/var/ws/comments.json","viewedStore":"~/viewed.json","themeStore":"~/state/theme.json","git":"git-wrapper","termProgress":false}"#,
+                r#"{"theme":" dracula ","themeMode":"light","glyphs":"ascii","watchMs":0,"fetchMs":60000,"fetchConcurrency":4,"updateCheck":false,"updateCheckStore":"~/state/update-check.json","commentStore":"/var/ws/comments.json","viewedStore":"~/viewed.json","themeStore":"~/state/theme.json","git":"git-wrapper","termProgress":false,"smoothScroll":false}"#,
             ),
             None,
             Some("/home/demo"),
@@ -1571,6 +1577,7 @@ mod tests {
                 theme_store: Some(PathBuf::from("/home/demo/state/theme.json")),
                 git: Some(PathBuf::from("git-wrapper")),
                 term_progress: Some(false),
+                smooth_scroll: Some(false),
             }
         );
         assert_eq!(
@@ -1594,6 +1601,19 @@ mod tests {
                 "git: {raw}"
             );
         }
+    }
+
+    #[test]
+    fn smooth_scroll_config_false_turns_it_off() {
+        let smooth = |raw: &str| {
+            let keys = load_runtime_key("smoothScroll", raw).unwrap();
+            // A state dir that does not exist: no last-used theme is read.
+            let env = |key: &str| (key == "XDG_STATE_HOME").then(|| "/nonexistent/state".into());
+            crate::settings::Settings::resolve(&keys, env).smooth_scroll
+        };
+        assert!(!smooth("false"), "config false turns the glide off");
+        assert!(smooth("true"));
+        assert!(smooth("null"), "an unset key keeps the default on");
     }
 
     #[test]
@@ -1643,6 +1663,7 @@ mod tests {
                 r#""off""#,
                 "must be true or false".to_string(),
             ),
+            ("smoothScroll", "0", "must be true or false".to_string()),
             (
                 "updateCheck",
                 r#""false""#,

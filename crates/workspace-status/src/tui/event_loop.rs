@@ -31,7 +31,7 @@ use super::event_pump::{
     BusyAction,
 };
 use super::hyperlink::{link_cells, write_links};
-use super::keys::{drop_g_chord_echo, held_nav_key, KeyStrokeOrigin};
+use super::keys::{drop_g_chord_echo, held_nav_key, is_half_page_chord, KeyStrokeOrigin};
 use super::render::draw;
 use super::state::AppState;
 use super::status::StatusMessage;
@@ -441,6 +441,13 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
             ctx.presenter.mark();
         }
         return;
+    }
+    // Ctrl-d / Ctrl-u still dispatch `Move(±5)`; only paint glides the
+    // viewport to the new top. Any other input ends a live glide.
+    if is_half_page_chord(&event) && matches!(action, Action::Move(_)) {
+        ctx.state.arm_scroll_glide(Instant::now());
+    } else if action != Action::None {
+        ctx.state.cancel_scroll_glide();
     }
     if ctx.interp.busy_for_writes() {
         let palette_submit = match action {

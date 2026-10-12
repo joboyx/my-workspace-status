@@ -25,6 +25,87 @@ pub const SPINNER_FRAME_MS: u64 = 80;
 /// the loop allows.
 pub const GLIDE_FRAME_MS: u64 = 16;
 
+/// Length of one Ctrl-d / Ctrl-u viewport glide: 3 frames at
+/// [`GLIDE_FRAME_MS`].
+pub const GLIDE_MS: u64 = 48;
+
+/// Ease-out cubic: `1 - (1 - t)^3` for `t` clamped to `0.0..=1.0`. Starts
+/// fast, settles slowly; `0` at the start, `1` at the end.
+pub fn ease_out_cubic(t: f32) -> f32 {
+    let rest = 1.0 - t.clamp(0.0, 1.0);
+    1.0 - rest * rest * rest
+}
+
+/// The pane whose viewport top a [`ScrollGlide`] moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlidePane {
+    /// Workspace tree ([`super::state::LayoutHit::list_offset`]).
+    Tree,
+    /// Commit graph list (`AppState::graph_scroll`).
+    Graph,
+    /// File diff (`AppState::diff_scroll`).
+    Diff,
+    /// Explorer file view (the file tab's `scroll`).
+    FileView,
+}
+
+/// A live viewport glide after Ctrl-d / Ctrl-u. Visual only: the cursor
+/// already sits on its new row; paint moves the viewport top from `from`
+/// to the new top over [`GLIDE_MS`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScrollGlide {
+    /// Pane the glide moves.
+    pub pane: GlidePane,
+    /// Viewport top painted when the chord came in.
+    pub from: usize,
+    /// When the chord came in.
+    pub started: Instant,
+    /// Viewport top the last glide frame painted, so a chord mid-glide
+    /// starts from what is on screen.
+    pub last: usize,
+}
+
+/// One glide frame for `pane` at `now`, toward the jump top `target`.
+///
+/// Returns the viewport top to paint and whether this frame is a glide
+/// step (the loop then ticks at [`GLIDE_FRAME_MS`]). With no glide on
+/// `pane` in `glide` the top is `target`. While the glide runs the top is
+/// `from + (target - from) * ease_out_cubic(t)`, clamped so `cursor` stays
+/// inside `[top, top + height)`. At `t >= 1`, or when the top does not
+/// move, `glide` is cleared and `target` comes back.
+pub fn glide_step(
+    glide: &mut Option<ScrollGlide>,
+    pane: GlidePane,
+    target: usize,
+    cursor: usize,
+    height: usize,
+    now: Instant,
+) -> (usize, bool) {
+    let Some(live) = glide.filter(|live| live.pane == pane) else {
+        return (target, false);
+    };
+    let elapsed = glide_elapsed_ms(&live, now);
+    if elapsed >= GLIDE_MS || live.from == target {
+        *glide = None;
+        return (target, false);
+    }
+    let t = elapsed as f32 / GLIDE_MS as f32;
+    let span = target as f32 - live.from as f32;
+    let eased = (live.from as f32 + span * ease_out_cubic(t))
+        .round()
+        .max(0.0) as usize;
+    let top = eased
+        .max((cursor + 1).saturating_sub(height.max(1)))
+        .min(cursor);
+    *glide = Some(ScrollGlide { last: top, ..live });
+    (top, true)
+}
+
+/// Milliseconds since `glide` started (0 for a clock before the start).
+pub fn glide_elapsed_ms(glide: &ScrollGlide, now: Instant) -> u64 {
+    now.saturating_duration_since(glide.started).as_millis() as u64
+}
+
 /// Spinner frame for `now`, counted from `epoch`.
 ///
 /// Frame index is `elapsed_ms / SPINNER_FRAME_MS % len`. `ascii` picks
@@ -126,6 +207,23 @@ mod tests {
             .collect();
         assert_eq!(seen, ["|", "/", "-", "\\", "|"]);
         assert!(seen.iter().all(|glyph| glyph.is_ascii()));
+    }
+
+    #[test]
+    fn ease_out_cubic_starts_at_zero_ends_at_one_and_is_monotonic() {
+        assert_eq!(ease_out_cubic(0.0), 0.0);
+        assert_eq!(ease_out_cubic(1.0), 1.0);
+        assert_eq!(ease_out_cubic(-1.0), 0.0, "clamped below");
+        assert_eq!(ease_out_cubic(2.0), 1.0, "clamped above");
+        assert!(ease_out_cubic(0.5) > 0.5, "ease-out runs ahead of linear");
+        let samples: Vec<f32> = (0..=100)
+            .map(|i| ease_out_cubic(i as f32 / 100.0))
+            .collect();
+        assert!(
+            samples.windows(2).all(|pair| pair[0] < pair[1]),
+            "strictly increasing"
+        );
+        assert_eq!(GLIDE_MS, 3 * GLIDE_FRAME_MS, "three frames at the floor");
     }
 
     #[test]

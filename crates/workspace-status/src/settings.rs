@@ -68,6 +68,9 @@ pub struct Settings {
     /// OSC 9;4 terminal progress for multi-repo batches
     /// (`WS_STATUS_TERM_PROGRESS` / `termProgress`), default on.
     pub(crate) term_progress: bool,
+    /// Ctrl-d / Ctrl-u glide the viewport over a few frames
+    /// (`WS_STATUS_SMOOTH_SCROLL` / `smoothScroll`), default on. Off jumps.
+    pub(crate) smooth_scroll: bool,
 }
 
 impl Settings {
@@ -113,6 +116,9 @@ impl Settings {
             term_progress: env_bool(get(TERM_PROGRESS_ENV).as_deref())
                 .or(keys.term_progress)
                 .unwrap_or(true),
+            smooth_scroll: env_bool(get(SMOOTH_SCROLL_ENV).as_deref())
+                .or(keys.smooth_scroll)
+                .unwrap_or(true),
         }
     }
 }
@@ -130,6 +136,9 @@ pub(crate) fn env_bool(raw: Option<&str>) -> Option<bool> {
 
 /// Env var for the `termProgress` key.
 const TERM_PROGRESS_ENV: &str = "WS_STATUS_TERM_PROGRESS";
+
+/// Env var for the `smoothScroll` key.
+const SMOOTH_SCROLL_ENV: &str = "WS_STATUS_SMOOTH_SCROLL";
 
 /// Terminal colour depth the emulator advertises; `truecolor` or `24bit`
 /// turns on the curly underline.
@@ -208,6 +217,7 @@ mod tests {
             theme_store: Some(PathBuf::from("/cfg/theme.json")),
             git: Some(PathBuf::from("/cfg/git")),
             term_progress: Some(false),
+            smooth_scroll: Some(false),
         }
     }
 
@@ -242,6 +252,7 @@ mod tests {
         );
         assert_eq!(got.git, resolve_git_binary(None, None));
         assert!(got.term_progress, "terminal progress is on by default");
+        assert!(got.smooth_scroll, "smooth scroll is on by default");
     }
 
     #[test]
@@ -265,6 +276,7 @@ mod tests {
                 no_color: false,
                 undercurl: false,
                 term_progress: false,
+                smooth_scroll: false,
             }
         );
     }
@@ -285,6 +297,7 @@ mod tests {
             ("WS_STATUS_THEME_STORE", "/env/theme.json"),
             ("WORKSPACE_STATUS_GIT", "/env/git"),
             ("WS_STATUS_TERM_PROGRESS", "on"),
+            ("WS_STATUS_SMOOTH_SCROLL", "1"),
         ];
         let got = Settings::resolve(&all_keys(), env_of(&env));
         assert_eq!(
@@ -305,6 +318,7 @@ mod tests {
                 no_color: false,
                 undercurl: false,
                 term_progress: true,
+                smooth_scroll: true,
             }
         );
     }
@@ -325,6 +339,7 @@ mod tests {
             ("WS_STATUS_THEME_STORE", "  "),
             ("WORKSPACE_STATUS_GIT", ""),
             ("WS_STATUS_TERM_PROGRESS", "maybe"),
+            ("WS_STATUS_SMOOTH_SCROLL", "maybe"),
         ];
         let got = Settings::resolve(&all_keys(), env_of(&env));
         assert_eq!(got, Settings::resolve(&all_keys(), env_of(&[])));
@@ -523,6 +538,35 @@ mod tests {
                 "env {unknown:?} falls through to the default"
             );
         }
+    }
+
+    #[test]
+    fn smooth_scroll_env_beats_config() {
+        let resolve = |config: Option<bool>, env: &[(&str, &str)]| {
+            let keys = RuntimeKeys {
+                smooth_scroll: config,
+                ..RuntimeKeys::default()
+            };
+            Settings::resolve(&keys, env_of(env)).smooth_scroll
+        };
+        assert!(resolve(None, &[]), "default on");
+        assert!(!resolve(Some(false), &[]), "config off applies without env");
+        for off in ["0", "false", "OFF"] {
+            assert!(
+                !resolve(Some(true), &[("WS_STATUS_SMOOTH_SCROLL", off)]),
+                "env {off:?} beats config on"
+            );
+        }
+        for on in ["1", "true", "on"] {
+            assert!(
+                resolve(Some(false), &[("WS_STATUS_SMOOTH_SCROLL", on)]),
+                "env {on:?} beats config off"
+            );
+        }
+        assert!(
+            !resolve(Some(false), &[("WS_STATUS_SMOOTH_SCROLL", "yes")]),
+            "an unknown env value falls through to config"
+        );
     }
 
     #[test]

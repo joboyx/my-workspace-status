@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::activity::{row_activity_key, sparkline, SPARK_MIN_TREE_COLS};
-use super::anim::spinner_glyph;
+use super::anim::{glide_step, spinner_glyph, GlidePane};
 use super::chrome::{
     breadcrumb_line, breadcrumb_rows, ctrl_c_prompt_line, ctrl_c_prompt_rows, dialog_height,
     dialog_rect, dialog_width, export_shows_status, help_tab, open_dialog, status_line, DialogKind,
@@ -192,6 +192,13 @@ fn selection_marker(selected: bool, focused: bool) -> &'static str {
 
 /// Draw one frame. Updates `state.layout` for mouse hits.
 pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
+    draw_at(frame, state, Instant::now());
+}
+
+/// [`draw`] with the frame clock pinned to `now`: a scroll glide paints
+/// its step for that instant.
+pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant) {
+    state.frame_now = now;
     state.prune_expired_flashes();
     // One-shot acks leave the status slot for a toast before anything paints.
     state.route_ack_to_toast(Instant::now());
@@ -720,6 +727,21 @@ fn file_view_scroll(
     top
 }
 
+/// File lines counted back from `cursor` (included) whose painted rows fit
+/// in `height`. At least 1.
+fn file_lines_ending_at(cursor: usize, height: usize, rows_of: impl Fn(usize) -> usize) -> usize {
+    let mut used = rows_of(cursor);
+    let mut count = 1;
+    for line in (0..cursor).rev() {
+        used += rows_of(line);
+        if used > height {
+            break;
+        }
+        count += 1;
+    }
+    count
+}
+
 /// The active read-only file body (an Explorer inner file tab of a clean
 /// file) inside `pane.inner`: line numbers and highlighted
 /// code, or a loading / binary / too-large / empty notice.
@@ -781,7 +803,24 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
             1
         }
     };
-    let scroll = file_view_scroll(tab.scroll, tab.cursor, height, rows_of);
+    // `tab.scroll` keeps the jump top (it is sticky: the next frame
+    // starts from it); only the painted window glides.
+    let target = file_view_scroll(tab.scroll, tab.cursor, height, rows_of);
+    let scroll = if state.glide_pending(GlidePane::FileView) {
+        let span = file_lines_ending_at(tab.cursor, height, rows_of);
+        let (scroll, gliding) = glide_step(
+            &mut state.scroll_glide,
+            GlidePane::FileView,
+            target,
+            tab.cursor,
+            span,
+            state.frame_now,
+        );
+        state.layout.gliding |= gliding;
+        scroll
+    } else {
+        target
+    };
     let mut end = scroll;
     let mut used = 0usize;
     while end < lines.len() && used < height {
@@ -1416,7 +1455,16 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let painted_cursor = focus_id
         .and_then(|id| painted.iter().position(|row| row.id == id))
         .unwrap_or(0);
-    let (start, _) = visible_window(painted.len(), painted_cursor, height);
+    let (target, _) = visible_window(painted.len(), painted_cursor, height);
+    let (start, gliding) = glide_step(
+        &mut state.scroll_glide,
+        GlidePane::Tree,
+        target,
+        painted_cursor,
+        height,
+        state.frame_now,
+    );
+    state.layout.gliding |= gliding;
     state.layout.list_offset = start;
     let search = state.theme.pills().filter;
     let match_ids: HashSet<String> = if state.search_target == SearchPane::Tree {
@@ -2123,10 +2171,26 @@ fn draw_folder_summary(
     frame.render_widget(Paragraph::new(lines), body);
 }
 
+/// Graph list top to paint in a pane `area_height` rows tall:
+/// `graph_scroll`, or the step of a live Ctrl-d / Ctrl-u glide toward it.
+fn graph_glide_scroll(state: &mut AppState, area_height: u16) -> u16 {
+    if !state.glide_pending(GlidePane::Graph) {
+        return state.graph_scroll;
+    }
+    let target = usize::from(state.graph_scroll);
+    let height = usize::from(state.graph_chrome_in(area_height).list_height);
+    let cursor = state.graph_cursor_line().unwrap_or(target);
+    let now = state.frame_now;
+    let top = state.glide_start(GlidePane::Graph, target, cursor, height, now);
+    u16::try_from(top).unwrap_or(state.graph_scroll)
+}
+
 fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offset: u16) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    // The painted top: `graph_scroll` itself stays the jump top.
+    let scroll = graph_glide_scroll(state, area.height);
     let Some(model) = state.graph.as_ref() else {
         frame.render_widget(Paragraph::new("focus a repo for the graph"), area);
         return;
@@ -2152,7 +2216,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         .ascii(state.ascii)
         .selected(Some(state.graph_cursor))
         .cursor_bar(graph_focused)
-        .scroll(state.graph_scroll)
+        .scroll(scroll)
         .col_offset(col_offset)
         .search_matches(
             &matches,
@@ -2694,6 +2758,24 @@ fn commit_file_label_matches(label: &str, query: &str) -> bool {
     !q.is_empty() && label.to_lowercase().contains(&q)
 }
 
+/// Logical rows of a wrapped diff, counted back from `cursor` (included),
+/// whose visual rows fit in `view_h`. At least 1.
+fn wrap_rows_ending_at(heights: &[usize], cursor: usize, view_h: usize) -> usize {
+    let Some(&own) = heights.get(cursor) else {
+        return 1;
+    };
+    let mut used = own.max(1);
+    let mut count = 1;
+    for h in heights[..cursor].iter().rev() {
+        used += (*h).max(1);
+        if used > view_h {
+            break;
+        }
+        count += 1;
+    }
+    count
+}
+
 fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -2720,8 +2802,10 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let line_h = list_h.saturating_sub(h_rows).max(1) as usize;
     let gutter = gutter_width(&rows);
     let gutter_with_mark = gutter.saturating_add(comment_mark_cols(state.ascii));
-    // Viewport start and the visual rows the whole diff paints.
-    let (start, content_rows) = if wrap {
+    // Viewport start (a logical row), the logical rows that fit on screen
+    // ending at the cursor (what a glide keeps the cursor inside), and the
+    // visual rows the whole diff paints.
+    let (target, cursor_span, content_rows) = if wrap {
         let heights = diff_wrap_row_heights(
             &rows,
             diff_row_content_width(line_width as usize) as u16,
@@ -2730,13 +2814,20 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             state.diff_split_fraction,
         );
         let start = wrap_viewport_start(&heights, state.diff_cursor, line_h);
-        (start, heights.iter().map(|h| (*h).max(1)).sum::<usize>())
+        (
+            start,
+            wrap_rows_ending_at(&heights, state.diff_cursor, line_h),
+            heights.iter().map(|h| (*h).max(1)).sum::<usize>(),
+        )
     } else {
         (
             visible_window(rows.len(), state.diff_cursor, line_h).0,
+            line_h,
             rows.len(),
         )
     };
+    let now = state.frame_now;
+    let start = state.glide_start(GlidePane::Diff, target, state.diff_cursor, cursor_span, now);
     state.diff_scroll = start as u16;
     let skip = start;
     let vscroll = graph_vscroll_visible(content_rows, line_h as u16, state.diff_scroll);
@@ -13225,6 +13316,117 @@ mod tests {
         assert!(!state.layout.animating, "draw resets the frame flag");
         assert!(!state.layout.gliding, "draw resets the glide flag");
         assert_eq!(state.next_anim_tick_ms(), None, "idle: no timer redraw");
+    }
+
+    #[test]
+    fn ctrl_d_on_tree_glides_list_offset_over_frames() {
+        use super::super::anim::{GLIDE_FRAME_MS, GLIDE_MS};
+        let repos: Vec<RepoSnapshot> = (0..40).map(|i| repo(&format!("r{i:02}"), true)).collect();
+        let snapshot = build_workspace_snapshot(&repos, &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        assert!(state.smooth_scroll, "on by default");
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        state.cursor = 15;
+        draw_state(&mut terminal, &mut state);
+        let from = state.layout.list_offset;
+        assert!(from > 0, "the tree is scrolled before the chord");
+
+        // Ctrl-d: arm, then the unchanged `Move(5)` dispatch.
+        let t0 = Instant::now();
+        state.arm_scroll_glide(t0);
+        state.dispatch(Action::Move(5));
+        assert_eq!(state.cursor, 20, "the cursor moves at once");
+        let mut jump = state.clone();
+        jump.cancel_scroll_glide();
+        draw_state(&mut terminal, &mut jump);
+        let target = jump.layout.list_offset;
+        assert!(target > from, "the jump top {target} is below {from}");
+
+        let draw_at_ms = |state: &mut AppState, terminal: &mut Terminal<TestBackend>, ms| {
+            let now = t0 + std::time::Duration::from_millis(ms);
+            terminal.draw(|frame| draw_at(frame, state, now)).unwrap();
+        };
+        draw_at_ms(&mut state, &mut terminal, 0);
+        assert_eq!(state.layout.list_offset, from, "t=0 paints the old top");
+        assert!(state.layout.gliding);
+        assert_eq!(state.next_anim_tick_ms(), Some(GLIDE_FRAME_MS));
+
+        draw_at_ms(&mut state, &mut terminal, GLIDE_MS / 2);
+        let mid = state.layout.list_offset;
+        assert!(from < mid && mid < target, "{from} < {mid} < {target}");
+        assert!(state.layout.gliding, "mid-glide keeps the 16 ms tick");
+        assert_eq!(state.cursor, 20, "paint never moves the cursor");
+
+        draw_at_ms(&mut state, &mut terminal, GLIDE_MS);
+        assert_eq!(state.layout.list_offset, target, "lands on the jump top");
+        assert!(!state.layout.gliding);
+        assert_eq!(state.next_anim_tick_ms(), None, "idle again: no timer");
+    }
+
+    #[test]
+    fn ctrl_d_on_graph_glides_the_painted_rows_not_graph_scroll() {
+        use super::super::anim::GLIDE_MS;
+        let mut state = tall_graph_state();
+        state.focus = FocusPane::Right;
+        assert!(state.graph_pane_focused());
+        state.graph_cursor = 20;
+        state.sync_graph_scroll();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let from = state.graph_scroll;
+
+        let t0 = Instant::now();
+        state.arm_scroll_glide(t0);
+        state.dispatch(Action::Move(5));
+        let target = state.graph_scroll;
+        assert!(target > from, "Ctrl-d moved the jump top");
+        let mut jump = state.clone();
+        jump.cancel_scroll_glide();
+        let mut jump_terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut jump_terminal, &mut jump);
+
+        let mid = t0 + std::time::Duration::from_millis(GLIDE_MS / 2);
+        terminal
+            .draw(|frame| draw_at(frame, &mut state, mid))
+            .unwrap();
+        assert!(state.layout.gliding);
+        assert_eq!(
+            state.graph_scroll, target,
+            "graph_scroll keeps the jump top"
+        );
+        assert_ne!(
+            buffer_text(&terminal),
+            buffer_text(&jump_terminal),
+            "mid-glide paints rows above the jump view"
+        );
+
+        let end = t0 + std::time::Duration::from_millis(GLIDE_MS);
+        terminal
+            .draw(|frame| draw_at(frame, &mut state, end))
+            .unwrap();
+        assert!(!state.layout.gliding);
+        assert_eq!(buffer_text(&terminal), buffer_text(&jump_terminal));
+    }
+
+    #[test]
+    fn ctrl_d_with_smooth_scroll_off_jumps_in_one_frame() {
+        let repos: Vec<RepoSnapshot> = (0..40).map(|i| repo(&format!("r{i:02}"), true)).collect();
+        let snapshot = build_workspace_snapshot(&repos, &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.smooth_scroll = false;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        state.cursor = 15;
+        draw_state(&mut terminal, &mut state);
+        let from = state.layout.list_offset;
+        let t0 = Instant::now();
+        state.arm_scroll_glide(t0);
+        state.dispatch(Action::Move(5));
+        terminal
+            .draw(|frame| draw_at(frame, &mut state, t0))
+            .unwrap();
+        assert!(state.layout.list_offset > from, "the first frame jumps");
+        assert!(!state.layout.gliding);
+        assert_eq!(state.next_anim_tick_ms(), None);
     }
 
     /// Fg of the first painted braille spinner cell inside `area`.

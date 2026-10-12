@@ -13,6 +13,7 @@ mod line_blame;
 mod pan;
 mod popover;
 mod pull_request;
+mod scroll_glide;
 
 pub(crate) use pull_request::PrDetailState;
 
@@ -42,7 +43,7 @@ use crate::snapshot::{
 use super::action::Action;
 use super::action::{Effect, ExternalDiffKind};
 use super::activity::ACTIVITY_DAYS;
-use super::anim::{next_tick_ms, AnimNeeds, RemoteActivity};
+use super::anim::{next_tick_ms, AnimNeeds, RemoteActivity, ScrollGlide};
 use super::branches::{
     branch_name_error, can_open_branch_picker, checkoutable_branch_names, merge_rev_for_commit,
     BranchPickerState, CreateBranchState, DIRTY_WORKTREE_STATUS,
@@ -769,6 +770,15 @@ pub struct AppState {
     pub undercurl: bool,
     /// Spinner clock: every spinner frame counts from this instant.
     pub anim_epoch: Instant,
+    /// Ctrl-d / Ctrl-u glide the viewport (`smoothScroll`, default on).
+    /// Off, the viewport jumps as the cursor moves.
+    pub smooth_scroll: bool,
+    /// The live Ctrl-d / Ctrl-u viewport glide, if any
+    /// ([`Self::arm_scroll_glide`], [`Self::glide_start`]).
+    pub(crate) scroll_glide: Option<ScrollGlide>,
+    /// Clock of the frame being drawn, set at the top of each draw. Glide
+    /// painters read it so one frame uses one instant.
+    pub(crate) frame_now: Instant,
     /// Remote git work in flight, published by the interpreter for paint.
     pub remote_activity: RemoteActivity,
     /// Day commit counts (last [`ACTIVITY_DAYS`] days, today last) per
@@ -935,6 +945,7 @@ impl AppState {
         );
         state.no_color = settings.no_color;
         state.undercurl = settings.undercurl;
+        state.smooth_scroll = settings.smooth_scroll;
         state
     }
 
@@ -1041,6 +1052,9 @@ impl AppState {
             no_color: false,
             undercurl: false,
             anim_epoch: Instant::now(),
+            smooth_scroll: true,
+            scroll_glide: None,
+            frame_now: Instant::now(),
             remote_activity: RemoteActivity::default(),
             activity: HashMap::new(),
             search_mode: false,
@@ -5647,20 +5661,29 @@ impl AppState {
     }
 
     pub(crate) fn sync_graph_scroll(&mut self) {
-        let Some(model) = self.graph.as_ref() else {
-            return;
-        };
-        let glyphs = if self.ascii { &ASCII } else { &UNICODE };
-        let painted = paint_model(model, glyphs, None);
-        let Some(idx) = painted
-            .iter()
-            .position(|line| line.row_index == Some(self.graph_cursor) && line.selectable)
-        else {
+        let Some((idx, line_count)) = self.graph_cursor_painted() else {
             return;
         };
         let list_h = self.graph_chrome().list_height.max(1) as usize;
-        let (start, _) = visible_window(painted.len(), idx, list_h);
+        let (start, _) = visible_window(line_count, idx, list_h);
         self.graph_scroll = start as u16;
+    }
+
+    /// Painted graph line of the cursor row, the line [`Self::graph_scroll`]
+    /// counts in. `None` with no graph or no selectable cursor line.
+    pub(crate) fn graph_cursor_line(&self) -> Option<usize> {
+        self.graph_cursor_painted().map(|(line, _)| line)
+    }
+
+    /// The cursor row's painted line and the painted line count.
+    fn graph_cursor_painted(&self) -> Option<(usize, usize)> {
+        let model = self.graph.as_ref()?;
+        let glyphs = if self.ascii { &ASCII } else { &UNICODE };
+        let painted = paint_model(model, glyphs, None);
+        let idx = painted
+            .iter()
+            .position(|line| line.row_index == Some(self.graph_cursor) && line.selectable)?;
+        Some((idx, painted.len()))
     }
 
     fn sync_diff_scroll(&mut self) {

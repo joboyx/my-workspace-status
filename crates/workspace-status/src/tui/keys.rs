@@ -427,6 +427,15 @@ fn is_ctrl_chord(key: KeyEvent, c: char) -> bool {
             .intersects(COMMAND_MODIFIERS.difference(KeyModifiers::CONTROL))
 }
 
+/// True for a Ctrl-u or Ctrl-d press (or key repeat), the half-page keys
+/// that glide the viewport ([`is_ctrl_chord`] rules). A release is false.
+pub(crate) fn is_half_page_chord(event: &Event) -> bool {
+    let Event::Key(key) = event else {
+        return false;
+    };
+    key.kind != KeyEventKind::Release && (is_ctrl_chord(*key, 'u') || is_ctrl_chord(*key, 'd'))
+}
+
 /// Windows `event::read` reports a character typed with AltGr (`\`, `@`,
 /// `{` on many European layouts) as that character plus Ctrl+Alt.
 ///
@@ -2507,6 +2516,38 @@ mod tests {
             event_to_action(&key(KeyCode::PageDown), normal(), false, false),
             Action::PageMove(1)
         );
+    }
+
+    #[test]
+    fn half_page_chord_detects_ctrl_d_and_ctrl_u_only() {
+        assert!(is_half_page_chord(&ctrl(KeyCode::Char('d'))));
+        assert!(is_half_page_chord(&ctrl(KeyCode::Char('u'))));
+        let repeat = Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Repeat,
+        ));
+        assert!(is_half_page_chord(&repeat), "a held Ctrl-d keeps gliding");
+        let release = Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Release,
+        ));
+        assert!(!is_half_page_chord(&release), "a release is not a press");
+        for other in [
+            key(KeyCode::Char('d')),
+            key(KeyCode::Char('u')),
+            ctrl(KeyCode::Char('o')),
+            ctrl(KeyCode::Char('w')),
+            key(KeyCode::PageDown),
+            Event::Key(KeyEvent::new(
+                KeyCode::Char('d'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            )),
+            Event::Resize(80, 24),
+        ] {
+            assert!(!is_half_page_chord(&other), "{other:?}");
+        }
     }
 
     #[test]
