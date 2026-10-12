@@ -7,7 +7,7 @@ mod dispatch_quick_open;
 mod dispatch_search_files;
 mod dispatch_write;
 mod explorer_tab;
-mod file_tab;
+mod file_view;
 mod line_blame;
 mod pan;
 mod popover;
@@ -299,7 +299,7 @@ pub struct LayoutHit {
     ///
     /// An overflow marker (`‹N` / `N›`) maps to its nearest hidden tab.
     pub tab_hits: Vec<(u16, u16, usize)>,
-    /// Close `[✗]` hit boxes for compare and file tabs. Workspace never has one.
+    /// Close `[✗]` hit boxes for compare and Explorer tabs. Workspace never has one.
     pub tab_close_hits: Vec<(u16, u16, usize)>,
     /// Icon spans painted on tree and graph rows, rebuilt every paint.
     ///
@@ -314,20 +314,21 @@ pub struct LayoutHit {
     /// Max help body scroll the last paint allowed. `0` when help is closed
     /// or every body row fits.
     pub help_scroll_max: usize,
-    /// 0-based first column of the painted file tab body (gutter included).
+    /// 0-based first column of the painted file view body (gutter included).
     pub file_view_x: u16,
-    /// 0-based first row of the painted file tab body.
+    /// 0-based first row of the painted file view body.
     pub file_view_y: u16,
-    /// File tab body width, gutter included.
+    /// File view body width, gutter included.
     pub file_view_width: u16,
-    /// File tab body height in rows.
+    /// File view body height in rows.
     pub file_view_height: u16,
     /// The file body's rows across the full pane width: the flat pad cells
     /// beside [`Self::file_view_x`]..[`Self::file_view_width`] included
     /// (the body itself when boxed). A press here picks the row.
     pub file_view_rows: Rect,
     /// 0-based file line painted on each body row from
-    /// [`Self::file_view_y`] (a wrapped line repeats). Empty off a file tab.
+    /// [`Self::file_view_y`] (a wrapped line repeats). Empty when no file
+    /// view paints.
     pub file_view_row_lines: Vec<usize>,
     /// Inner area of the painted Explorer tree pane (empty off an Explorer
     /// tab).
@@ -472,7 +473,7 @@ struct SearchOrigin {
     file_scroll: usize,
 }
 
-/// Workspace chrome parked while a compare or file tab is active.
+/// Workspace chrome parked while a compare or Explorer tab is active.
 #[derive(Clone, Debug)]
 struct WorkspacePark {
     focus: FocusPane,
@@ -754,7 +755,7 @@ pub struct AppState {
     pub search_files_parked: Option<SearchFilesState>,
     /// Session counter for search-in-files index and search generations.
     search_files_gen: u64,
-    /// Permanent Workspace plus session compare and file tabs.
+    /// Permanent Workspace plus session compare and Explorer tabs.
     pub tabs: TabStrip,
     pub compare_picker: Option<ComparePickerState>,
     /// Checkout waiting for [`Effect::PrepareComparePicker`]. Cleared on open or abandon.
@@ -826,7 +827,7 @@ pub struct AppState {
     /// Diff search hits for one (content, layout, query), so the status
     /// pill and the diff paint do not rebuild every diff row each frame.
     diff_search_memo: RefCell<Option<DiffSearchMemo>>,
-    /// File tab search hits for one (tab id, load generation, case-folded
+    /// File view search hits for one (tab id, load generation, case-folded
     /// query), so the status pill and the paint do not rescan the file.
     file_search_memo: RefCell<Option<FileSearchMemo>>,
     /// Last Explorer status index: checkout, fingerprint of its snapshot
@@ -1174,15 +1175,13 @@ impl AppState {
     }
 
     pub fn graph_stash_focused(&self) -> bool {
-        !self.is_file_tab()
-            && !self.is_explorer_tab()
+        !self.is_explorer_tab()
             && self.graph_pane_focused()
             && self.focused_graph_stash_ref().is_some()
     }
 
     pub fn graph_commit_focused(&self) -> bool {
-        !self.is_file_tab()
-            && !self.is_explorer_tab()
+        !self.is_explorer_tab()
             && self.graph_pane_focused()
             && matches!(self.focused_graph_row(), Some(GraphRow::Commit { .. }))
     }
@@ -1194,11 +1193,6 @@ impl AppState {
     /// True when a compare tab is active.
     pub fn is_compare_tab(&self) -> bool {
         self.tabs.active_compare().is_some()
-    }
-
-    /// True when a read-only file tab is active.
-    pub fn is_file_tab(&self) -> bool {
-        self.tabs.active_file().is_some()
     }
 
     /// ViewStack depth: 0 workspace or compare, 1 commit files, 2 commit diff.
@@ -1217,9 +1211,6 @@ impl AppState {
     /// tree, or a folder row of a focused commit-file list. File rows and
     /// other panes pan.
     pub(crate) fn hl_folds(&self) -> bool {
-        if self.is_file_tab() {
-            return false;
-        }
         // Tree: open / close a folder. Preview: `h` goes back to the tree.
         if self.is_explorer_tab() {
             return true;
@@ -3354,9 +3345,6 @@ impl AppState {
     }
 
     fn current_search_pane(&self) -> SearchPane {
-        if self.is_file_tab() {
-            return SearchPane::File;
-        }
         match self.list_focus_target() {
             ListFocusTarget::Tree => SearchPane::Tree,
             ListFocusTarget::Graph => SearchPane::Graph,
@@ -3534,7 +3522,7 @@ impl AppState {
                 let hits = self.file_search_hits(query);
                 let pos = self
                     .tabs
-                    .active_file()
+                    .active_file_view()
                     .and_then(|tab| hits.binary_search(&tab.cursor).ok());
                 return Some((pos.map(|p| p + 1), hits.len()));
             }
@@ -3554,8 +3542,8 @@ impl AppState {
             commit_file_folds: self.commit_file_folds.clone(),
             diff_cursor: self.diff_cursor,
             diff_scroll: self.diff_scroll,
-            file_cursor: self.tabs.active_file().map_or(0, |tab| tab.cursor),
-            file_scroll: self.tabs.active_file().map_or(0, |tab| tab.scroll),
+            file_cursor: self.tabs.active_file_view().map_or(0, |tab| tab.cursor),
+            file_scroll: self.tabs.active_file_view().map_or(0, |tab| tab.scroll),
         });
     }
 
@@ -3594,7 +3582,7 @@ impl AppState {
                 self.diff_scroll = origin.diff_scroll;
             }
             SearchPane::File => {
-                if let Some(tab) = self.tabs.active_file_mut() {
+                if let Some(tab) = self.tabs.active_file_view_mut() {
                     tab.cursor = origin.file_cursor;
                     tab.scroll = origin.file_scroll;
                 }
@@ -4501,15 +4489,6 @@ impl AppState {
             let (rows, cursor) = self.explorer_rows()?;
             let row = rows.into_iter().nth(cursor?).filter(|row| !row.is_dir)?;
             return Some(EntityRef::file(&tab.checkout, primary, row.rel));
-        }
-        if let Some(tab) = self.tabs.active_file() {
-            let primary = self
-                .snapshot
-                .repos
-                .iter()
-                .find(|repo| repo.repo == tab.checkout)
-                .and_then(|repo| repo.primary_repo.as_deref());
-            return Some(EntityRef::file(&tab.checkout, primary, tab.rel.clone()));
         }
         match self.list_focus_target() {
             ListFocusTarget::None => {
@@ -5777,14 +5756,6 @@ impl AppState {
         if self.park_explorer_session() {
             return;
         }
-        // A file tab owns only its search; Workspace stays parked.
-        if let Some(tab) = self.tabs.active_file_mut() {
-            tab.search_mode = self.search_mode;
-            tab.search_active = self.search_active;
-            tab.search_query = self.search_query.clone();
-            tab.search_hit = self.search_hit;
-            return;
-        }
         if let Some(tab) = self.tabs.active_compare_mut() {
             tab.focus_right = self.focus == FocusPane::Right;
             tab.search_mode = self.search_mode;
@@ -5818,14 +5789,6 @@ impl AppState {
 
     fn apply_active_session(&mut self) {
         if self.apply_explorer_session() {
-            return;
-        }
-        if let Some(tab) = self.tabs.active_file() {
-            self.search_mode = tab.search_mode;
-            self.search_active = tab.search_active;
-            self.search_query = tab.search_query.clone();
-            self.search_target = SearchPane::File;
-            self.search_hit = tab.search_hit;
             return;
         }
         if let Some(tab) = self.tabs.active_compare() {
@@ -5881,10 +5844,11 @@ impl AppState {
         self.park_active_session();
         self.tabs.active = index;
         self.apply_active_session();
-        // A working-tree or file tab may have missed watch reloads while
-        // inactive. Only one tab is active, so at most one check reloads.
+        // A working-tree tab or an Explorer inner file tab may have missed
+        // watch reloads while inactive. Only one tab is active, so at most
+        // one check reloads.
         match self.active_worktree_compare_reload() {
-            Effect::None => self.active_file_tab_live_reload(),
+            Effect::None => self.active_explorer_live_reload(),
             reload => reload,
         }
     }
@@ -6081,7 +6045,7 @@ impl AppState {
         self.open_compare_tab(repo, format!("{commit_id}^"), commit_id)
     }
 
-    /// Close the active compare, file, or Explorer tab (Workspace refuses).
+    /// Close the active compare or Explorer tab (Workspace refuses).
     pub(crate) fn close_active_tab(&mut self) -> Effect {
         self.close_tab_at(self.tabs.active)
     }
@@ -6102,8 +6066,9 @@ impl AppState {
         self.clear_tab_transients();
         if closing_active {
             self.apply_active_session();
-            // A file tab that becomes active may have missed watch reloads.
-            return self.active_file_tab_live_reload();
+            // An Explorer inner file tab that becomes active may have
+            // missed watch reloads.
+            return self.active_explorer_live_reload();
         }
         Effect::None
     }
@@ -17247,17 +17212,21 @@ diff --git a/README.md b/README.md
         app.apply_file_score(gen, score_files(&index, &query, MAX_RESULTS));
 
         let effect = app.dispatch(Action::QuickOpenSubmit);
+        let Effect::Batch(effects) = &effect else {
+            panic!("folder listings and the file load: {effect:?}");
+        };
         assert!(
-            matches!(effect, Effect::LoadFileTab { ref repo, ref path, .. }
-                if repo == "app" && path == "src/lib.rs"),
+            effects.iter().any(|effect| matches!(effect,
+                Effect::LoadExplorerPreview { repo, path, .. }
+                    if repo == "app" && path == "src/lib.rs")),
             "{effect:?}"
         );
-        assert!(app.tabs.active_file().is_some(), "the file tab is active");
+        assert!(app.is_explorer_tab(), "the Explorer tab is active");
         assert_eq!(app.diff_visual_anchor, None, "the range is dropped");
         assert_ne!(app.input_mode(), InputMode::DiffVisual);
 
         app.dispatch(Action::JumpToTab(1));
-        assert!(app.tabs.active_file().is_none(), "back on Workspace");
+        assert!(app.tabs.is_workspace(), "back on Workspace");
         assert_eq!(
             app.diff_visual_anchor, None,
             "the range does not come back with the Workspace tab"

@@ -34,7 +34,7 @@ pub const MAX_INDEX_ENTRIES: usize = 200_000;
 /// Most hits one Quick Open query returns.
 pub const MAX_RESULTS: usize = 200;
 
-/// Largest file [`read_text_file`] loads for the file tab (2 MiB).
+/// Largest file [`read_text_file`] loads for the file view (2 MiB).
 pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Bytes [`read_text_file`] checks for a NUL before it calls a file binary.
@@ -272,7 +272,7 @@ pub enum FileRead {
     Failed(String),
 }
 
-/// Read `path` as plain text for the file tab, refusing files over `max_bytes`.
+/// Read `path` as plain text for the file view, refusing files over `max_bytes`.
 ///
 /// Only a regular file (after following symlinks) is read, and never more
 /// than `max_bytes + 1` bytes, so a device, FIFO, or growing file cannot
@@ -332,13 +332,13 @@ fn paintable_line(line: &str) -> String {
     out
 }
 
-/// Append one source character to a paintable line, the way the file tab
+/// Append one source character to a paintable line, the way the file view
 /// paints it.
 ///
 /// `col` is the terminal column `out` ends at; it advances by what was
 /// appended. `\t` becomes spaces up to the next multiple of 4 columns, and
 /// any other control character becomes U+FFFD. Search in files builds its
-/// hit lines char by char through this, so a hit line and the file tab line
+/// hit lines char by char through this, so a hit line and the file view line
 /// read the same.
 pub(crate) fn push_paintable_char(out: &mut String, col: &mut usize, ch: char) {
     if ch == '\t' {

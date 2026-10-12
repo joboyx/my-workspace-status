@@ -489,8 +489,6 @@ impl AppState {
     /// `[` / `]` rows: [`Self::file_tab_cycle_reason`] on every tab.
     /// On an Explorer tab: [`Self::explorer_tab_refusal`], then
     /// [`Self::explorer_tab_palette_reason`].
-    /// On a file tab: [`Self::file_tab_refusal`], the blame gate
-    /// ([`Self::blame_refusal`]), then [`Self::file_tab_palette_reason`].
     /// Otherwise: compare refusal ([`Self::compare_refusal`], which also gates
     /// the compare open commands on every tab), the blame gate, folder-summary refusal
     /// ([`Self::summary_refusal`]), then the row's
@@ -505,12 +503,6 @@ impl AppState {
             return self
                 .explorer_tab_refusal(action)
                 .or_else(|| self.explorer_tab_palette_reason(command));
-        }
-        if self.is_file_tab() {
-            return self
-                .file_tab_refusal(action)
-                .or_else(|| self.blame_refusal(action))
-                .or_else(|| self.file_tab_palette_reason(command));
         }
         if let Some(reason) = self
             .compare_refusal(action)

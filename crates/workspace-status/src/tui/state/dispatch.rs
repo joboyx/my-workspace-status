@@ -174,8 +174,7 @@ impl AppState {
         if matches!(action, Action::ExplorerReveal) {
             return self.explorer_reveal();
         }
-        // An Explorer tab answers its own keys and refuses writes, like a
-        // file tab below.
+        // An Explorer tab answers its own keys and refuses writes.
         let explorer_tab = self.is_explorer_tab();
         if explorer_tab {
             if let Some(reason) = self.explorer_tab_refusal(&action) {
@@ -186,19 +185,8 @@ impl AppState {
                 return effect;
             }
         }
-        // A file tab answers its own keys and refuses writes; the Workspace
-        // gates below read the parked tree, so it (and an Explorer tab)
-        // skips them.
-        let file_tab = self.is_file_tab() || explorer_tab;
-        if self.is_file_tab() {
-            if let Some(reason) = self.file_tab_refusal(&action) {
-                self.status = StatusMessage::warn(reason);
-                return Effect::None;
-            }
-            if let Some(effect) = self.dispatch_file_tab(&action) {
-                return effect;
-            }
-        }
+        // The Workspace gates below read the parked tree, so an Explorer
+        // tab skips them.
         if let Some(reason) = self
             .compare_refusal(&action)
             .or_else(|| self.blame_refusal(&action))
@@ -206,7 +194,7 @@ impl AppState {
             self.status = StatusMessage::warn(reason);
             return Effect::None;
         }
-        if let Some(reason) = self.summary_refusal(&action).filter(|_| !file_tab) {
+        if let Some(reason) = self.summary_refusal(&action).filter(|_| !explorer_tab) {
             self.status = StatusMessage::warn(reason);
             return Effect::None;
         }
@@ -214,7 +202,7 @@ impl AppState {
             && matches!(action, Action::Stage | Action::Unstage | Action::Revert);
         // Compare `x` also runs from the focused diff (the open file).
         let visual_write = visual_write || self.compare_revert_runs(&action);
-        let noop = !file_tab
+        let noop = !explorer_tab
             && dispatch_is_noop(
                 &action,
                 self.nav_depth(),

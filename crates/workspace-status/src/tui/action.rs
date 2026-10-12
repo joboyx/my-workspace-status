@@ -118,13 +118,13 @@ pub enum Action {
     /// On the Workspace tab with the tree focused on a row in a checkout
     /// (repo, worktree, folder, or file row): open or focus that checkout's
     /// Explorer tab and reveal the row. Anywhere else (a workspace or group
-    /// row, another pane, a compare or file tab) it is
-    /// [`Self::ResizeCommitMsg`]`(-1)`, which a file tab ignores.
+    /// row, another pane, a compare tab) it is
+    /// [`Self::ResizeCommitMsg`]`(-1)`.
     ExplorerReveal,
     /// Toggle the current-line blame annotation (`B`).
     ///
     /// Session-only, like wrap. `viewDefaults.lineBlame` sets the launch
-    /// value. Runs on file tabs too.
+    /// value. Runs on Explorer tabs too.
     ToggleLineBlame,
     /// Mouse wheel. Positive `delta` is down / right.
     ///
@@ -482,8 +482,9 @@ pub enum Effect {
         repo: String,
         /// Path relative to the checkout.
         path: String,
-        /// 1-based line to open at, when the editor takes one. A file tab
-        /// passes its cursor line; every other producer passes `None`.
+        /// 1-based line to open at, when the editor takes one. An Explorer
+        /// file view and a search-in-files hit pass their line; every other
+        /// producer passes `None`.
         line: Option<u32>,
     },
     /// Open LEFT/RIGHT in the configured external diff tool (`E`).
@@ -636,16 +637,6 @@ pub enum Effect {
         options: crate::file_search::SearchOptions,
         start: usize,
         room: usize,
-    },
-    /// Read one file tab's body on the blocking pool. `gen` is the tab's
-    /// load generation; a stale result is dropped.
-    LoadFileTab {
-        tab_id: u64,
-        gen: u64,
-        /// Checkout path (snapshot `repo`).
-        repo: String,
-        /// Path relative to the checkout.
-        path: String,
     },
     /// List one Explorer folder on the blocking pool
     /// ([`super::explorer::list_dir`]). `req` is the folder's newest

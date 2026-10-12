@@ -1,10 +1,11 @@
-//! Session tab strip: permanent Workspace plus compare, file, and Explorer
-//! tabs.
+//! Session tab strip: permanent Workspace plus compare and Explorer tabs.
 //!
 //! Compare identity is `(checkout_path, base_ref, head_ref, worktree_file)`
-//! (`worktree_file` only on a commit-vs-working-tree tab); file identity
-//! is `(checkout, rel)`; Explorer identity is the checkout. All kinds share
-//! one strip in creation order and one id counter. Tabs are session-only.
+//! (`worktree_file` only on a commit-vs-working-tree tab); Explorer
+//! identity is the checkout. A file opens as an inner file tab of its
+//! checkout's Explorer tab ([`InnerFile`]), never as a strip tab. All kinds
+//! share one strip in creation order and one id counter. Tabs are
+//! session-only.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -52,15 +53,15 @@ pub const NO_EXPLORER_FILE_TABS: &str = "no file tabs open";
 
 /// `gt` / `gT` and the Next / Previous tab palette rows with no compare tab.
 pub const ONLY_WORKSPACE_TAB_OPEN: &str = "only the Workspace tab is open";
-/// Mutation disable copy on a compare or file tab.
+/// Mutation disable copy on a compare or Explorer tab.
 pub const SWITCH_TO_WORKSPACE_TAB: &str = "Switch to Workspace tab";
-/// File tab body for a file with a NUL byte near the start.
+/// File view body for a file with a NUL byte near the start.
 pub const FILE_IS_BINARY: &str = "binary file — e opens it in the editor";
-/// Status when the watch poll finds the active file tab's file gone. The
-/// tab stays open on the last content.
+/// Status when the watch poll finds the active Explorer inner file gone.
+/// The inner tab stays open on the last content.
 pub const FILE_DELETED: &str = "file deleted";
 
-/// File tab body for a file over the 2 MiB read cap:
+/// File view body for a file over the 2 MiB read cap:
 /// `file is over 2 MiB (X.Y MiB) — e opens it in the editor`.
 pub fn file_too_large(bytes: u64) -> String {
     let mib = bytes as f64 / (1024.0 * 1024.0);
@@ -581,16 +582,17 @@ impl CompareTab {
     }
 }
 
-/// Columns of the file tab line-number gutter: the digits of
+/// Columns of the file view line-number gutter: the digits of
 /// `line_count` plus one blank separator column.
 pub fn file_gutter_width(line_count: usize) -> usize {
     line_count.max(1).to_string().len() + 1
 }
 
-/// One session-only read-only file tab.
+/// A read-only file body: the view of an Explorer inner file tab whose
+/// file is clean ([`ExplorerPreview::File`]).
 #[derive(Clone, Debug)]
 pub struct FileTab {
-    /// Stable id for in-flight loads (shared counter with compare tabs).
+    /// Id of the Explorer tab that holds this view.
     pub id: u64,
     /// Checkout path (same string as snapshot `repo`).
     pub checkout: String,
@@ -600,33 +602,21 @@ pub struct FileTab {
     /// checkout).
     pub display: String,
     /// Loaded body. `None` while an open / `r` / editor-return load is in
-    /// flight; a watch reload keeps the old body until the new one lands.
+    /// flight; a live reload keeps the old body until the new one lands.
     pub body: Option<Arc<FileRead>>,
-    /// Load generation. A result for an older generation is dropped.
+    /// Load generation (the inner tab's [`InnerFile::gen`]).
     pub generation: u64,
     /// Generation [`Self::body`] loaded at, `None` without a body. It
-    /// trails [`Self::generation`] while a watch reload is in flight, so
+    /// trails [`Self::generation`] while a live reload is in flight, so
     /// memos keyed by it (search hits, line blame) stay with the painted
     /// body.
     pub body_generation: Option<u64>,
-    /// Disk token of the file when the last load was issued: `size:mtimeMs`,
-    /// or `gone` when missing. `None` before the first load. The watch poll
-    /// reads the file again only when the token moved.
-    pub disk_stamp: Option<String>,
     /// Focused 0-based line.
     pub cursor: usize,
     /// First painted line.
     pub scroll: usize,
     /// Horizontal pan of the code columns.
     pub col_offset: u16,
-    /// Parked `/` typing state while another tab is active.
-    pub search_mode: bool,
-    /// Parked armed-search flag.
-    pub search_active: bool,
-    /// Parked search query.
-    pub search_query: String,
-    /// Line of the last search match.
-    pub search_hit: Option<usize>,
 }
 
 impl FileTab {
@@ -639,20 +629,10 @@ impl FileTab {
             body: None,
             generation: 0,
             body_generation: None,
-            disk_stamp: None,
             cursor: 0,
             scroll: 0,
             col_offset: 0,
-            search_mode: false,
-            search_active: false,
-            search_query: String::new(),
-            search_hit: None,
         }
-    }
-
-    /// Strip label: the file name of [`Self::rel`].
-    pub fn label(&self) -> String {
-        checkout_leaf(&self.rel)
     }
 
     /// Painted lines. Empty unless the body loaded as text.
@@ -661,21 +641,6 @@ impl FileTab {
             Some(FileRead::Text { lines, .. }) => lines,
             _ => &[],
         }
-    }
-
-    /// Bump the load generation and drop the body (loading again).
-    pub fn bump_generation(&mut self) -> u64 {
-        self.generation = self.generation.saturating_add(1);
-        self.body = None;
-        self.body_generation = None;
-        self.generation
-    }
-
-    /// Bump the load generation and keep the painted body until the new
-    /// read lands (a silent watch reload: no loading flash).
-    pub fn bump_generation_keep_body(&mut self) -> u64 {
-        self.generation = self.generation.saturating_add(1);
-        self.generation
     }
 }
 
@@ -692,7 +657,7 @@ pub enum ExplorerPreview {
         /// True while the load is in flight.
         loading: bool,
     },
-    /// A clean file: a read-only body, painted like a file tab. Its
+    /// A clean file: a read-only body. Its
     /// [`FileTab::id`] is the Explorer tab id and its
     /// [`FileTab::generation`] the inner tab's load generation.
     File(FileTab),
@@ -713,6 +678,14 @@ pub struct InnerFile {
     /// Load generation of [`Self::view`] (from the tab-wide
     /// [`ExplorerTab::preview_gen`]). A result for another one is dropped.
     pub gen: u64,
+    /// Live-reload token as of the last load issued: the file's disk token
+    /// (`size:mtimeMs`, or `gone`) and its snapshot change. `None` until
+    /// the first live-reload check records it.
+    pub stamp: Option<String>,
+    /// 0-based line the cursor goes to once the load in flight lands (a
+    /// search-in-files hit). On a diff view it maps to the row whose new
+    /// line number is `line + 1`.
+    pub pending_line: Option<usize>,
     /// Parked diff cursor of a diff view while another inner tab is active.
     pub diff_cursor: usize,
     /// Parked diff scroll of a diff view.
@@ -833,6 +806,8 @@ impl ExplorerTab {
             pinned,
             view: self.loading_view(rel, changed, gen),
             gen,
+            stamp: None,
+            pending_line: None,
             diff_cursor: 0,
             diff_scroll: 0,
             diff_col_offset: 0,
@@ -861,14 +836,12 @@ impl ExplorerTab {
     }
 }
 
-/// One tab after Workspace: a compare, file, or Explorer tab.
+/// One tab after Workspace: a compare or Explorer tab.
 #[derive(Clone, Debug)]
 pub enum SessionTab {
     /// Committed-range compare tab.
     Compare(CompareTab),
-    /// Read-only file viewer tab.
-    File(FileTab),
-    /// File tree of one checkout.
+    /// File tree of one checkout and its inner file tabs.
     Explorer(ExplorerTab),
 }
 
@@ -877,7 +850,6 @@ impl SessionTab {
     pub fn label(&self) -> String {
         match self {
             Self::Compare(tab) => tab.label(),
-            Self::File(tab) => tab.label(),
             Self::Explorer(tab) => tab.label(),
         }
     }
@@ -894,22 +866,6 @@ impl SessionTab {
     pub fn as_compare_mut(&mut self) -> Option<&mut CompareTab> {
         match self {
             Self::Compare(tab) => Some(tab),
-            _ => None,
-        }
-    }
-
-    /// The file tab, if this is one.
-    pub fn as_file(&self) -> Option<&FileTab> {
-        match self {
-            Self::File(tab) => Some(tab),
-            _ => None,
-        }
-    }
-
-    /// Mutable [`Self::as_file`].
-    pub fn as_file_mut(&mut self) -> Option<&mut FileTab> {
-        match self {
-            Self::File(tab) => Some(tab),
             _ => None,
         }
     }
@@ -931,8 +887,7 @@ impl SessionTab {
     }
 }
 
-/// Permanent Workspace plus compare, file, and Explorer tabs in creation
-/// order.
+/// Permanent Workspace plus compare and Explorer tabs in creation order.
 #[derive(Clone, Debug)]
 pub struct TabStrip {
     /// 0 is Workspace. Session tabs follow.
@@ -987,16 +942,6 @@ impl TabStrip {
         self.active_tab_mut().and_then(SessionTab::as_compare_mut)
     }
 
-    /// Active file tab, if any.
-    pub fn active_file(&self) -> Option<&FileTab> {
-        self.active_tab().and_then(SessionTab::as_file)
-    }
-
-    /// Mutable active file tab, if any.
-    pub fn active_file_mut(&mut self) -> Option<&mut FileTab> {
-        self.active_tab_mut().and_then(SessionTab::as_file_mut)
-    }
-
     /// Active Explorer tab, if any.
     pub fn active_explorer(&self) -> Option<&ExplorerTab> {
         self.active_tab().and_then(SessionTab::as_explorer)
@@ -1007,28 +952,20 @@ impl TabStrip {
         self.active_tab_mut().and_then(SessionTab::as_explorer_mut)
     }
 
-    /// The read-only file body the active tab paints: a file tab, or the
-    /// active inner file tab of an Explorer tab when it shows a clean file.
+    /// The read-only file body the active tab paints: the active inner
+    /// file tab of an Explorer tab when it shows a clean file.
     pub fn active_file_view(&self) -> Option<&FileTab> {
-        match self.active_tab()? {
-            SessionTab::File(tab) => Some(tab),
-            SessionTab::Explorer(tab) => match &tab.active_inner()?.view {
-                ExplorerPreview::File(file) => Some(file),
-                ExplorerPreview::Diff { .. } => None,
-            },
-            _ => None,
+        match &self.active_explorer()?.active_inner()?.view {
+            ExplorerPreview::File(file) => Some(file),
+            ExplorerPreview::Diff { .. } => None,
         }
     }
 
     /// Mutable [`Self::active_file_view`].
     pub fn active_file_view_mut(&mut self) -> Option<&mut FileTab> {
-        match self.active_tab_mut()? {
-            SessionTab::File(tab) => Some(tab),
-            SessionTab::Explorer(tab) => match &mut tab.active_inner_mut()?.view {
-                ExplorerPreview::File(file) => Some(file),
-                ExplorerPreview::Diff { .. } => None,
-            },
-            _ => None,
+        match &mut self.active_explorer_mut()?.active_inner_mut()?.view {
+            ExplorerPreview::File(file) => Some(file),
+            ExplorerPreview::Diff { .. } => None,
         }
     }
 
@@ -1079,17 +1016,6 @@ impl TabStrip {
                         && tab.head_ref == head_ref
                         && tab.worktree_file.as_ref() == worktree_file
                 })
-            })
-            .map(|i| i + 1)
-    }
-
-    /// Find a file tab by identity. `0` is never returned (Workspace).
-    pub fn find_file(&self, checkout: &str, rel: &str) -> Option<usize> {
-        self.tabs
-            .iter()
-            .position(|tab| {
-                tab.as_file()
-                    .is_some_and(|tab| tab.checkout == checkout && tab.rel == rel)
             })
             .map(|i| i + 1)
     }
@@ -1157,25 +1083,6 @@ impl TabStrip {
         )));
         self.active = self.tabs.len();
         OpenCompare::Created(id)
-    }
-
-    /// Focus the file tab for `(checkout, rel)` or append a new one that
-    /// paints `display` as its pane title.
-    pub fn open_or_focus_file(
-        &mut self,
-        checkout: String,
-        rel: String,
-        display: String,
-    ) -> OpenFile {
-        if let Some(index) = self.find_file(&checkout, &rel) {
-            self.active = index;
-            return OpenFile::Focused;
-        }
-        let id = self.take_id();
-        self.tabs
-            .push(SessionTab::File(FileTab::new(id, checkout, rel, display)));
-        self.active = self.tabs.len();
-        OpenFile::Created(id)
     }
 
     /// Focus the Explorer tab of `checkout` or append a new one.
@@ -1267,23 +1174,6 @@ impl TabStrip {
             .find(|tab| tab.id == id)
     }
 
-    #[cfg(test)]
-    /// File tab by stable id.
-    pub fn get_file_id(&self, id: u64) -> Option<&FileTab> {
-        self.tabs
-            .iter()
-            .filter_map(SessionTab::as_file)
-            .find(|tab| tab.id == id)
-    }
-
-    /// Mutable file tab by stable id.
-    pub fn get_file_id_mut(&mut self, id: u64) -> Option<&mut FileTab> {
-        self.tabs
-            .iter_mut()
-            .filter_map(SessionTab::as_file_mut)
-            .find(|tab| tab.id == id)
-    }
-
     /// Explorer tab by stable id.
     pub fn get_explorer_id(&self, id: u64) -> Option<&ExplorerTab> {
         self.tabs
@@ -1301,8 +1191,7 @@ impl TabStrip {
     }
 }
 
-/// Result of [`TabStrip::open_or_focus_file`] and
-/// [`TabStrip::open_or_focus_explorer`].
+/// Result of [`TabStrip::open_or_focus_explorer`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenFile {
     /// Existing identity. State is unchanged.
@@ -1388,49 +1277,40 @@ mod tests {
     }
 
     #[test]
-    fn file_tab_identity_reopen_focuses() {
-        let mut tabs = TabStrip::default();
-        let open = |tabs: &mut TabStrip| {
-            tabs.open_or_focus_file("app".into(), "src/main.rs".into(), "app/src/main.rs".into())
-        };
-        assert_eq!(open(&mut tabs), OpenFile::Created(1));
-        tabs.active_file_mut().unwrap().cursor = 4;
-        tabs.active = 0;
-        assert_eq!(open(&mut tabs), OpenFile::Focused);
-        assert_eq!(tabs.active, 1);
-        assert_eq!(tabs.active_file().unwrap().cursor, 4);
-        assert_eq!(tabs.labels()[1], "main.rs");
-        assert_eq!(
-            tabs.open_or_focus_file("lib".into(), "src/main.rs".into(), "lib/src/main.rs".into()),
-            OpenFile::Created(2),
-            "same path in another checkout is another tab"
-        );
-    }
-
-    #[test]
     fn strip_keeps_creation_order_across_kinds() {
         let mut tabs = TabStrip::default();
-        tabs.open_or_focus_file("app".into(), "README.md".into(), "app/README.md".into());
+        assert_eq!(
+            tabs.open_or_focus_explorer("app".into()),
+            OpenFile::Created(1)
+        );
         assert_eq!(
             tabs.open_or_focus("app".into(), "main".into(), COMPARE_HEAD_REF.into()),
             OpenCompare::Created(2),
             "one id counter for both kinds"
         );
-        assert_eq!(tabs.labels(), vec!["Workspace", "README.md", "app ↔ main"]);
+        assert_eq!(
+            tabs.labels(),
+            vec!["Workspace", "Explorer · app", "app ↔ main"]
+        );
         tabs.active = 1;
         assert!(tabs.active_compare().is_none());
-        assert!(tabs.active_file().is_some());
+        assert!(tabs.active_explorer().is_some());
         tabs.active = 2;
         assert!(tabs.active_compare().is_some());
-        assert!(tabs.active_file().is_none());
+        assert!(tabs.active_explorer().is_none());
         assert_eq!(tabs.find("app", "main", COMPARE_HEAD_REF), Some(2));
         assert_eq!(
             tabs.get_id(2).map(|tab| tab.base_ref.as_str()),
             Some("main")
         );
-        assert!(tabs.get_id(1).is_none(), "id 1 is the file tab");
+        assert!(tabs.get_id(1).is_none(), "id 1 is the Explorer tab");
+        assert_eq!(
+            tabs.open_or_focus_explorer("app".into()),
+            OpenFile::Focused,
+            "one Explorer tab per checkout"
+        );
+        assert_eq!(tabs.active, 1);
 
-        tabs.active = 1;
         assert!(tabs.close_at(1));
         assert!(tabs.is_workspace(), "closing the active tab activates left");
         assert_eq!(tabs.labels(), vec!["Workspace", "app ↔ main"]);
@@ -1439,18 +1319,22 @@ mod tests {
     }
 
     #[test]
-    fn file_tab_lines_and_too_large_copy() {
+    fn file_view_lines_and_too_large_copy() {
         let mut tabs = TabStrip::default();
-        tabs.open_or_focus_file("app".into(), "a.txt".into(), "app/a.txt".into());
-        let tab = tabs.active_file_mut().unwrap();
-        assert!(tab.lines().is_empty(), "loading");
-        tab.body = Some(Arc::new(FileRead::Text {
+        tabs.open_or_focus_explorer("app".into());
+        let explorer = tabs.active_explorer_mut().unwrap();
+        let inner = explorer.new_inner("a.txt", false, true);
+        explorer.files.push(inner);
+        explorer.active_file = Some(0);
+        assert_eq!(tabs.active_explorer().unwrap().files[0].label(), "a.txt");
+        let file = tabs.active_file_view_mut().expect("a clean file view");
+        assert_eq!(file.display, "app/a.txt");
+        assert!(file.lines().is_empty(), "loading");
+        file.body = Some(Arc::new(FileRead::Text {
             lines: vec!["one".into(), "two".into()],
             max_cols: 3,
         }));
-        assert_eq!(tab.lines(), ["one", "two"]);
-        assert_eq!(tab.bump_generation(), 1);
-        assert!(tab.body.is_none());
+        assert_eq!(file.lines(), ["one", "two"]);
         assert_eq!(
             file_too_large(3 * 1024 * 1024 + 512 * 1024),
             "file is over 2 MiB (3.5 MiB) — e opens it in the editor"

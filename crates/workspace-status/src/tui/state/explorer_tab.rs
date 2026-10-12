@@ -1,11 +1,14 @@
-//! Explorer tabs: open / reveal, keys, refusals, and pool loads.
+//! Explorer tabs: open / reveal, keys, refusals, live reload, and pool
+//! loads.
 //!
 //! An Explorer tab shows one checkout as a lazy file tree
 //! ([`super::super::explorer::ExplorerTree`]) beside inner file tabs
 //! ([`super::super::tabs::InnerFile`]): the whole-file worktree diff of a
-//! changed file, or the read-only body of a clean one. Inner tabs follow
-//! VS Code preview rules:
-//! a tree move onto a file replaces the one preview tab, Enter pins it,
+//! changed file, or the read-only body of a clean one. Every file open
+//! lands here ([`AppState::open_file_in_explorer`]); there is no top-level
+//! file tab. Inner tabs follow VS Code preview rules:
+//! a tree move onto a file replaces the one preview tab, Enter (or an
+//! explicit open: Quick Open, a search-in-files hit) pins it,
 //! `[` / `]` switch tabs, Ctrl-w closes one. Folder listings leave as
 //! [`Effect::LoadExplorerDir`] and land through
 //! [`AppState::apply_explorer_dir`]; file loads leave as
@@ -27,18 +30,22 @@ use crate::snapshot::FileChange;
 
 use super::super::action::{Action, Effect};
 use super::super::command_palette::{CommandScope, PaletteCommand};
+use super::super::diff::row_for_new_line;
 use super::super::effect::ExplorerPreviewBody;
+use super::super::event_pump::overlay_blocks_background_ticks;
 use super::super::explorer::{ExplorerEntry, ExplorerRow, ExplorerStatus};
 use super::super::gates::ListFocusTarget;
+use super::super::search::SearchPane;
 use super::super::selection::TextSelection;
 use super::super::split::SplitDrag;
 use super::super::status::StatusMessage;
 use super::super::tabs::{
     ExplorerPreview, ExplorerTab, OpenFile, EXPLORER_FILE_TABS_ONLY, EXPLORER_HAS_NO_SEARCH,
-    EXPLORER_TAB_READ_ONLY, NO_EXPLORER_FILE_TABS, ONLY_WORKSPACE_TAB_OPEN,
+    EXPLORER_TAB_READ_ONLY, FILE_DELETED, NO_EXPLORER_FILE_TABS, ONLY_WORKSPACE_TAB_OPEN,
     SWITCH_TO_WORKSPACE_TAB,
 };
 use super::super::tree::{dir_path_from_id, NodeKind};
+use super::super::watch::{file_disk_token, GONE_DISK_TOKEN};
 use super::{single_or_batch, AppState, FocusPane, NO_SEARCH_ARMED};
 
 /// `e` refusal on an Explorer folder row (the folder-summary copy).
@@ -100,8 +107,8 @@ impl AppState {
     /// `-`: parent folder on an Explorer tab; on the Workspace tab with the
     /// tree focused, open or focus the focused row's checkout Explorer and
     /// reveal the row; anywhere else (another pane, where the commit
-    /// message shows, a row with no checkout, a compare or file tab),
-    /// shrink the commit message ([`Action::ResizeCommitMsg`]).
+    /// message shows, a row with no checkout, a compare tab), shrink the
+    /// commit message ([`Action::ResizeCommitMsg`]).
     pub(super) fn explorer_reveal(&mut self) -> Effect {
         if self.is_explorer_tab() {
             return self.explorer_to_parent();
@@ -135,19 +142,81 @@ impl AppState {
     /// Open or focus the Explorer tab of `checkout` and reveal `target`.
     ///
     /// Parks the active tab's session first. Returns the folder listings
-    /// still missing (root first) and the preview load of the cursor row.
+    /// still missing (root first) and the preview load of the cursor row
+    /// (a tree move: a file previews, it is not pinned), else the live
+    /// reload of the active inner file tab when its file moved.
     pub(crate) fn open_explorer_tab(&mut self, checkout: String, target: ExplorerTarget) -> Effect {
+        let Some((mut effects, tab_id)) = self.explorer_open_and_reveal(checkout, &target) else {
+            return Effect::None;
+        };
+        let preview = self.explorer_sync_preview(tab_id);
+        let reload = self.explorer_reload_if_shown(&preview);
+        push_effect(&mut effects, preview);
+        push_effect(&mut effects, reload);
+        single_or_batch(effects)
+    }
+
+    /// Open `rel` of `checkout` in that checkout's Explorer tab (opened or
+    /// reused) as a pinned inner file tab, the explicit open of Quick Open
+    /// and search in files.
+    ///
+    /// The tree reveals and selects `rel`; that is cosmetic, as the
+    /// listings may land after the file load. The tree keeps focus. An
+    /// inner tab of `rel` that is already open is activated and pinned (no
+    /// reload unless its file moved). With `line`, the cursor lands on that
+    /// 0-based line once the file shows ([`Self::explorer_line_target`]);
+    /// `search` then arms the in-file search on it. Returns the folder
+    /// listings still missing and the file load.
+    pub(crate) fn open_file_in_explorer(
+        &mut self,
+        checkout: String,
+        rel: String,
+        line: Option<usize>,
+        search: Option<String>,
+    ) -> Effect {
+        let target = ExplorerTarget::File(rel.clone());
+        let Some((mut effects, tab_id)) = self.explorer_open_and_reveal(checkout, &target) else {
+            return Effect::None;
+        };
+        let load = self.explorer_show_file(tab_id, &rel, true);
+        let reload = self.explorer_reload_if_shown(&load);
+        push_effect(&mut effects, load);
+        push_effect(&mut effects, reload);
+        self.focus = FocusPane::Left;
+        if let Some(line) = line {
+            self.explorer_line_target(tab_id, line, search);
+        }
+        single_or_batch(effects)
+    }
+
+    /// [`Self::active_explorer_live_reload`] when `load` is
+    /// [`Effect::None`]: the inner tab now showing was already open, so
+    /// its file may have moved while it was not checked.
+    fn explorer_reload_if_shown(&mut self, load: &Effect) -> Effect {
+        if *load == Effect::None {
+            self.active_explorer_live_reload()
+        } else {
+            Effect::None
+        }
+    }
+
+    /// Open or focus the Explorer tab of `checkout` and reveal `target` in
+    /// its tree, without touching the inner file tabs. Returns the folder
+    /// listings still missing (root first) and the tab id.
+    fn explorer_open_and_reveal(
+        &mut self,
+        checkout: String,
+        target: &ExplorerTarget,
+    ) -> Option<(Vec<Effect>, u64)> {
         let before = self.tabs.active;
         self.park_active_session();
         let opened = self.tabs.open_or_focus_explorer(checkout);
         if self.tabs.active != before {
             self.clear_tab_transients();
         }
-        let Some(tab) = self.tabs.active_explorer_mut() else {
-            return Effect::None;
-        };
+        let tab = self.tabs.active_explorer_mut()?;
         let mut dirs: Vec<String> = tab.tree.expand("").into_iter().collect();
-        let (rel, is_dir) = match &target {
+        let (rel, is_dir) = match target {
             ExplorerTarget::Root => ("", true),
             ExplorerTarget::Dir(rel) => (rel.as_str(), true),
             ExplorerTarget::File(rel) => (rel.as_str(), false),
@@ -164,22 +233,22 @@ impl AppState {
                 dirs.push(dir);
             }
         }
-        if target != ExplorerTarget::Root || opened != OpenFile::Focused {
+        if *target != ExplorerTarget::Root || opened != OpenFile::Focused {
             tab.focus_preview = false;
         }
-        let mut effects = explorer_dir_loads(tab, dirs);
+        let effects = explorer_dir_loads(tab, dirs);
         let tab_id = tab.id;
         self.apply_active_session();
-        push_effect(&mut effects, self.explorer_sync_preview(tab_id));
-        single_or_batch(effects)
+        Some((effects, tab_id))
     }
 
     /// Why `action` refuses on the active Explorer tab, or `None` (also off
     /// an Explorer tab).
     ///
-    /// The file tab's list ([`Self::file_tab_refusal`]) plus the blame
-    /// actions: git writes, comments, highlight, diff-only keys, compare
-    /// opens, and a confirm need the Workspace tab. [`Self::dispatch`] puts
+    /// Git writes, comments, highlight, diff-only keys, compare opens, the
+    /// blame actions, and a confirm need the Workspace tab: a late checkout
+    /// / merge result can open a confirm while an Explorer tab is active,
+    /// and `y` there must not write (n / Esc still close it). [`Self::dispatch`] puts
     /// the reason on the status line; `palette_disabled_reason` shows the
     /// same copy on the row.
     pub(crate) fn explorer_tab_refusal(&self, action: &Action) -> Option<String> {
@@ -240,7 +309,10 @@ impl AppState {
         }
         match command.action {
             Action::SearchStart => Some(EXPLORER_HAS_NO_SEARCH.into()),
-            Action::SearchNext | Action::SearchPrev => Some(NO_SEARCH_ARMED.into()),
+            // A search-in-files hit arms the in-file search: `n` / `N` step it.
+            Action::SearchNext | Action::SearchPrev => {
+                (!self.search_is_armed()).then(|| NO_SEARCH_ARMED.into())
+            }
             Action::NextTab | Action::PreviousTab => {
                 (self.tabs.len() <= 1).then(|| ONLY_WORKSPACE_TAB_OPEN.into())
             }
@@ -612,7 +684,7 @@ impl AppState {
 
     /// Reload the active Explorer tab's active inner file tab when the
     /// editor just saved its file.
-    pub(super) fn reload_explorer_after_edit(&mut self, repo: &str, path: &str) -> Option<Effect> {
+    pub(crate) fn reload_explorer_after_edit(&mut self, repo: &str, path: &str) -> Option<Effect> {
         let tab = self.tabs.active_explorer()?;
         if tab.checkout != repo || tab.active_inner()?.rel != path {
             return None;
@@ -634,6 +706,7 @@ impl AppState {
         };
         let checkout = tab.checkout.clone();
         let change = self.explorer_change(&checkout, &rel);
+        let stamp = self.explorer_stamp(&checkout, &rel, change.as_ref()).1;
         let active = self.active_explorer_id() == Some(tab_id);
         let Some(tab) = self.tabs.get_explorer_id_mut(tab_id) else {
             return Effect::None;
@@ -643,6 +716,7 @@ impl AppState {
         let Some(inner) = tab.active_inner_mut() else {
             return Effect::None;
         };
+        inner.stamp = Some(stamp);
         if let (ExplorerPreview::File(new), ExplorerPreview::File(old)) = (&mut view, &inner.view) {
             new.cursor = old.cursor;
             new.scroll = old.scroll;
@@ -731,6 +805,13 @@ impl AppState {
         };
         let change = self.explorer_change(&checkout, rel);
         let before = self.explorer_park_inner(tab_id);
+        let known = self
+            .tabs
+            .get_explorer_id(tab_id)
+            .is_some_and(|tab| tab.find_inner(rel).is_some());
+        // Taken before the read: a change between the stat and the read
+        // costs at most one extra reload.
+        let stamp = (!known).then(|| self.explorer_stamp(&checkout, rel, change.as_ref()).1);
         let Some(tab) = self.tabs.get_explorer_id_mut(tab_id) else {
             return Effect::None;
         };
@@ -738,7 +819,8 @@ impl AppState {
         let index = match tab.find_inner(rel) {
             Some(index) => index,
             None => {
-                let inner = tab.new_inner(rel, change.is_some(), pin);
+                let mut inner = tab.new_inner(rel, change.is_some(), pin);
+                inner.stamp = stamp;
                 load = Effect::LoadExplorerPreview {
                     tab_id,
                     gen: inner.gen,
@@ -970,7 +1052,7 @@ impl AppState {
         // Sync only when this listing is what lets the cursor row resolve
         // (a reveal or a new tab waiting on it). A listing that lands while
         // the cursor row already shows (a status re-list, `r`, a folder
-        // opened earlier) leaves the inner tabs alone, so a file tab closed
+        // opened earlier) leaves the inner tabs alone, so an inner tab closed
         // with Ctrl-w does not come back on its own.
         let resolved_before = self.explorer_resolved_cursor_row(tab_id).is_some();
         let tab = self.tabs.get_explorer_id_mut(tab_id)?;
@@ -986,13 +1068,24 @@ impl AppState {
     ///
     /// Dropped (false) when the tab closed, no inner tab has that
     /// generation (closed, replaced, or reloaded since), or the body kind
-    /// does not match the view (a diff for a file body).
+    /// does not match the view (a diff for a file body). A failed read
+    /// while the view still paints a body (a silent live reload) keeps that
+    /// body; if the file is gone, the next poll reports it deleted. A file
+    /// view keeps its cursor and scroll line numbers, clamped to the new
+    /// line count. A pending line target lands
+    /// ([`Self::explorer_apply_pending_line`]).
     pub(crate) fn apply_explorer_preview(
         &mut self,
         tab_id: u64,
         gen: u64,
         body: ExplorerPreviewBody,
     ) -> bool {
+        let active = self
+            .tabs
+            .active_explorer()
+            .filter(|tab| tab.id == tab_id)
+            .and_then(ExplorerTab::active_inner)
+            .is_some_and(|inner| inner.gen == gen);
         let Some(inner) = self
             .tabs
             .get_explorer_id_mut(tab_id)
@@ -1011,15 +1104,232 @@ impl AppState {
                 *loading = false;
             }
             (ExplorerPreview::File(file), ExplorerPreviewBody::File(read)) => {
+                if matches!(read, FileRead::Failed(_)) && file.body.is_some() {
+                    return false;
+                }
                 file.body = Some(Arc::new(read));
                 file.body_generation = Some(gen);
                 let len = file.lines().len();
                 file.cursor = file.cursor.min(len.saturating_sub(1));
                 file.scroll = file.scroll.min(file.cursor);
+                if active && self.search_hit.is_some_and(|hit| hit >= len) {
+                    self.search_hit = None;
+                }
             }
             _ => return false,
         }
+        // A live reload keeps the diff cursor row; a shorter diff clamps it.
+        if active && self.diff_cursor > 0 && self.explorer_diff().is_some() {
+            let rows = self.current_diff_rows().len();
+            if self.diff_cursor >= rows {
+                self.sync_diff_scroll();
+            }
+        }
+        self.explorer_apply_pending_line(tab_id, gen);
         true
+    }
+
+    /// Point the active inner file tab of `tab_id` at 0-based `line` (a
+    /// search-in-files hit).
+    ///
+    /// With `search`, the in-file search is armed on that text for the
+    /// pane the view paints (the file body, or the diff of a changed file),
+    /// as if `/` and Enter had landed on `line`, so `n` / `N` step its
+    /// matches from there. Without it any armed search is cleared. The
+    /// cursor moves now when the view has loaded, else when the load lands
+    /// ([`InnerFile::pending_line`](super::super::tabs::InnerFile::pending_line)).
+    fn explorer_line_target(&mut self, tab_id: u64, line: usize, search: Option<String>) {
+        let Some(inner) = self
+            .tabs
+            .get_explorer_id_mut(tab_id)
+            .and_then(ExplorerTab::active_inner_mut)
+        else {
+            return;
+        };
+        inner.pending_line = Some(line);
+        let gen = inner.gen;
+        let pane = match inner.view {
+            ExplorerPreview::File(_) => SearchPane::File,
+            ExplorerPreview::Diff { .. } => SearchPane::Diff,
+        };
+        self.search_mode = false;
+        self.search_origin = None;
+        self.search_hit = None;
+        match search {
+            Some(query) => {
+                self.search_active = true;
+                self.search_query = query;
+                self.search_target = pane;
+            }
+            None => {
+                self.search_active = false;
+                self.search_query.clear();
+            }
+        }
+        self.explorer_apply_pending_line(tab_id, gen);
+    }
+
+    /// Move the inner tab of `tab_id` at load `gen` to its pending line
+    /// once its view has loaded.
+    ///
+    /// A file body clamps the line to its length. A diff takes the row
+    /// whose new line number is `line + 1`, unstaged section first (the
+    /// top when no row shows it). On the active inner tab of the active
+    /// Explorer tab the live diff cursor moves, and an armed search on that
+    /// pane takes the row as its current hit (none for a line the view
+    /// does not have); another inner tab keeps the row in its parked
+    /// cursor.
+    fn explorer_apply_pending_line(&mut self, tab_id: u64, gen: u64) {
+        let active = self
+            .tabs
+            .active_explorer()
+            .filter(|tab| tab.id == tab_id)
+            .and_then(ExplorerTab::active_inner)
+            .is_some_and(|inner| inner.gen == gen);
+        let mode = self.diff_layout();
+        let Some(inner) = self
+            .tabs
+            .get_explorer_id_mut(tab_id)
+            .and_then(|tab| tab.inner_by_gen_mut(gen))
+        else {
+            return;
+        };
+        let Some(line) = inner.pending_line else {
+            return;
+        };
+        let (pane, hit) = match &mut inner.view {
+            ExplorerPreview::File(file) => {
+                if file.body.is_none() {
+                    return;
+                }
+                let len = file.lines().len();
+                file.cursor = line.min(len.saturating_sub(1));
+                // A line past the end clamps; it is no search hit.
+                (SearchPane::File, (line < len).then_some(file.cursor))
+            }
+            ExplorerPreview::Diff {
+                content, loading, ..
+            } => {
+                if *loading {
+                    return;
+                }
+                let new_line = u32::try_from(line.saturating_add(1)).unwrap_or(u32::MAX);
+                let row = row_for_new_line(content, mode, new_line);
+                if !active {
+                    inner.diff_cursor = row.unwrap_or(0);
+                    inner.diff_scroll = u16::try_from(inner.diff_cursor).unwrap_or(u16::MAX);
+                }
+                (SearchPane::Diff, row)
+            }
+        };
+        inner.pending_line = None;
+        if !active {
+            return;
+        }
+        if pane == SearchPane::Diff {
+            self.diff_cursor = hit.unwrap_or(0);
+            self.sync_diff_scroll();
+        }
+        if self.search_active && self.search_target == pane {
+            self.search_hit = hit;
+        }
+    }
+
+    /// Live-reload token of `rel` in `checkout`: its disk token (one
+    /// `stat`) and the stamp (that token plus its snapshot `change`, so a
+    /// stage, commit, or clean / changed flip moves it too).
+    fn explorer_stamp(
+        &self,
+        checkout: &str,
+        rel: &str,
+        change: Option<&FileChange>,
+    ) -> (String, String) {
+        let disk = file_disk_token(&self.cwd, checkout, rel);
+        let stamp = format!("{disk}|{change:?}");
+        (disk, stamp)
+    }
+
+    /// Silent reload of the active inner file tab of the active Explorer
+    /// tab of `checkout` when its stamp ([`Self::explorer_stamp`]) moved
+    /// since the last load.
+    ///
+    /// Runs after each checkout status load (the watch poll), when an
+    /// Explorer tab becomes active, and when an open inner tab shows again.
+    /// Background tabs are not checked. The same kind of view keeps its
+    /// painted content until the new load lands, with no status; a file
+    /// that turned changed (or clean) swaps to a loading view of the other
+    /// kind. A deleted file keeps the last content and warns
+    /// [`FILE_DELETED`]. While an overlay holds input nothing is checked or
+    /// recorded, so the next poll catches the change. One `stat`; no git.
+    pub(crate) fn explorer_live_reload(&mut self, checkout: &str) -> Option<Effect> {
+        if overlay_blocks_background_ticks(self.input_mode()) {
+            return None;
+        }
+        let tab = self.tabs.active_explorer()?;
+        if tab.checkout != checkout {
+            return None;
+        }
+        let (tab_id, rel) = (tab.id, tab.active_inner()?.rel.clone());
+        let change = self.explorer_change(checkout, &rel);
+        let (disk, stamp) = self.explorer_stamp(checkout, &rel, change.as_ref());
+        let tab = self.tabs.active_explorer_mut()?;
+        let inner = tab.active_inner_mut()?;
+        if inner.stamp.as_deref() == Some(stamp.as_str()) {
+            return None;
+        }
+        inner.stamp = Some(stamp);
+        if disk == GONE_DISK_TOKEN {
+            let has_content = match &inner.view {
+                ExplorerPreview::File(file) => file
+                    .body
+                    .as_deref()
+                    .is_some_and(|body| !matches!(body, FileRead::Failed(_))),
+                ExplorerPreview::Diff { loading, .. } => !loading,
+            };
+            if has_content {
+                self.status = StatusMessage::warn(FILE_DELETED);
+            }
+            return None;
+        }
+        let changed = change.is_some();
+        let same_kind = matches!(
+            (&inner.view, changed),
+            (ExplorerPreview::Diff { .. }, true) | (ExplorerPreview::File(_), false)
+        );
+        let gen = tab.next_gen();
+        let flipped = (!same_kind).then(|| tab.loading_view(&rel, changed, gen));
+        let inner = tab.active_inner_mut()?;
+        inner.gen = gen;
+        match flipped {
+            Some(view) => {
+                inner.view = view;
+                (inner.diff_cursor, inner.diff_scroll, inner.diff_col_offset) = (0, 0, 0);
+                (self.diff_cursor, self.diff_scroll, self.diff_col_offset) = (0, 0, 0);
+                self.clear_diff_visual();
+                self.clear_explorer_search();
+            }
+            None => {
+                if let ExplorerPreview::File(file) = &mut inner.view {
+                    file.generation = gen;
+                }
+            }
+        }
+        Some(Effect::LoadExplorerPreview {
+            tab_id,
+            gen,
+            repo: checkout.to_string(),
+            path: rel,
+            change,
+        })
+    }
+
+    /// [`Self::explorer_live_reload`] for the active Explorer tab's
+    /// checkout, or [`Effect::None`] off an Explorer tab.
+    pub(super) fn active_explorer_live_reload(&mut self) -> Effect {
+        let Some(checkout) = self.tabs.active_explorer().map(|tab| tab.checkout.clone()) else {
+            return Effect::None;
+        };
+        self.explorer_live_reload(&checkout).unwrap_or(Effect::None)
     }
 
     /// True while the active Explorer tab's active inner diff is loading.
@@ -1075,6 +1385,44 @@ impl AppState {
             });
         self.clear_explorer_search();
         true
+    }
+}
+
+#[cfg(test)]
+impl AppState {
+    /// Open `rel` of `checkout` the way Quick Open does (a pinned inner file
+    /// tab of the checkout's Explorer tab) and land `lines` as its clean
+    /// body. The folder listings are left in flight. Returns the Explorer
+    /// tab id and the load generation.
+    pub(crate) fn open_loaded_inner_file(
+        &mut self,
+        checkout: &str,
+        rel: &str,
+        lines: &[&str],
+    ) -> (u64, u64) {
+        let effect = self.open_file_in_explorer(checkout.into(), rel.into(), None, None);
+        let effects = match effect {
+            Effect::Batch(effects) => effects,
+            other => vec![other],
+        };
+        let (tab_id, gen) = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::LoadExplorerPreview {
+                    tab_id,
+                    gen,
+                    change: None,
+                    ..
+                } => Some((*tab_id, *gen)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("a clean file load of {rel}: {effects:?}"));
+        let body = FileRead::Text {
+            lines: lines.iter().map(|line| (*line).to_string()).collect(),
+            max_cols: lines.iter().map(|line| line.len()).max().unwrap_or(0),
+        };
+        assert!(self.apply_explorer_preview(tab_id, gen, ExplorerPreviewBody::File(body)));
+        (tab_id, gen)
     }
 }
 
@@ -1427,13 +1775,6 @@ mod tests {
         assert_eq!(app.commit_msg_lines, lines - 2);
         assert!(app.is_compare_tab());
         assert_eq!(app.tabs.len(), 2);
-
-        // A file tab ignores it, as it ignores the commit-message keys.
-        app.open_file_tab("app".into(), "README.md".into());
-        assert_eq!(app.dispatch(Action::ExplorerReveal), Effect::None);
-        assert_eq!(app.commit_msg_lines, lines - 2);
-        assert!(app.is_file_tab());
-        assert_eq!(app.tabs.len(), 3);
     }
 
     #[test]
@@ -1465,13 +1806,13 @@ mod tests {
         assert_eq!(&*app.status, WORKSPACE_TAB_CANNOT_CLOSE);
         assert_eq!(app.status.kind(), StatusKind::Warn);
 
-        app.open_file_tab("app".into(), "README.md".into());
+        app.open_compare_tab("app".into(), "main".into(), "HEAD".into());
         app.dispatch(Action::JumpToTab(1));
         open_root(&mut app);
         assert_eq!(app.tabs.active, 2);
         app.dispatch(Action::CloseTab);
         assert_eq!(app.tabs.len(), 2);
-        assert!(app.is_file_tab(), "the left neighbour is active");
+        assert!(app.is_compare_tab(), "the left neighbour is active");
         assert!(app.tabs.find_explorer("app").is_none());
     }
 
@@ -2240,5 +2581,415 @@ mod tests {
             .expect("fresh listing");
         assert_eq!(load_of(&follow).2, "fresh.txt");
         assert_eq!(inners(&app), [preview("fresh.txt")]);
+    }
+
+    /// Quick Open (files) over `paths` of `checkout`, with `hits` (entry
+    /// indices) scored.
+    fn quick_open_with(app: &mut AppState, checkout: &str, paths: &[&str], hits: &[usize]) {
+        use super::super::super::action::QuickOpenEntry;
+        use super::super::super::quick_open::{FileIndexState, QuickOpenState};
+        use crate::file_index::{FileEntry, FileHit, FileIndex, IndexRoot};
+        let mut quick = QuickOpenState::new(QuickOpenEntry::Files, app.quick_open_scope());
+        quick.index = FileIndexState::Ready(Arc::new(FileIndex {
+            roots: vec![IndexRoot {
+                checkout: checkout.into(),
+                prefix: String::new(),
+            }],
+            entries: paths
+                .iter()
+                .map(|path| FileEntry {
+                    root: 0,
+                    display: (*path).to_string(),
+                    rel_start: 0,
+                })
+                .collect(),
+            truncated: false,
+            errors: Vec::new(),
+        }));
+        quick.hits = hits
+            .iter()
+            .map(|&entry| FileHit {
+                entry,
+                score: 1,
+                indices: Vec::new(),
+            })
+            .collect();
+        app.quick_open = Some(quick);
+    }
+
+    fn has_file_load(effect: &Effect) -> bool {
+        flat(effect.clone())
+            .iter()
+            .any(|effect| matches!(effect, Effect::LoadExplorerPreview { .. }))
+    }
+
+    /// The inner file load of `effect`: `(tab_id, gen)`.
+    fn file_load(effect: &Effect) -> (u64, u64) {
+        flat(effect.clone())
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::LoadExplorerPreview { tab_id, gen, .. } => Some((*tab_id, *gen)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("an inner file load: {effect:?}"))
+    }
+
+    fn text(lines: &[&str]) -> ExplorerPreviewBody {
+        ExplorerPreviewBody::File(FileRead::Text {
+            lines: lines.iter().map(|line| (*line).to_string()).collect(),
+            max_cols: lines.iter().map(|line| line.len()).max().unwrap_or(0),
+        })
+    }
+
+    #[test]
+    fn quick_open_from_workspace_pins_in_explorer() {
+        let mut app = state();
+        focus(&mut app, NodeKind::Repo, Some("app"), None);
+        app.focus = FocusPane::Right;
+        quick_open_with(&mut app, "app", &["README.md", "src/lib.rs"], &[1, 0]);
+        let effect = app.dispatch(Action::QuickOpenSubmit);
+        assert!(app.quick_open.is_none(), "Enter closes the overlay");
+        assert!(app.is_explorer_tab());
+        assert_eq!(tab(&app).checkout, "app");
+        assert_eq!(
+            dir_loads(&flat(effect.clone())),
+            ["", "src"],
+            "the tree reveals the file"
+        );
+        assert!(has_file_load(&effect), "{effect:?}");
+        assert_eq!(
+            inners(&app),
+            [pinned("src/lib.rs")],
+            "pinned, not a preview"
+        );
+        assert_eq!(app.focus, FocusPane::Left, "the tree keeps focus");
+        assert_eq!(tab(&app).tree.cursor_rel(), Some("src/lib.rs"));
+        // Once the listings land the tree row of the file is selected, and
+        // the open inner tab is not loaded twice.
+        let follow = land(&mut app, effect);
+        let loads = |follow: &[Effect]| {
+            follow
+                .iter()
+                .filter(|effect| matches!(effect, Effect::LoadExplorerPreview { .. }))
+                .count()
+        };
+        assert_eq!(loads(&follow), 1, "only the open's own load: {follow:?}");
+        assert_eq!(cursor_rel(&app), "src/lib.rs");
+        assert_eq!(inners(&app), [pinned("src/lib.rs")]);
+    }
+
+    #[test]
+    fn quick_open_from_compare_tab_routes_to_checkout_explorer() {
+        let mut app = state();
+        app.open_compare_tab("lib".into(), "main".into(), "HEAD".into());
+        assert_eq!(
+            app.quick_open_scope(),
+            QuickOpenScope::Checkout("lib".into())
+        );
+        quick_open_with(&mut app, "lib", &["lib.rs", "README.md"], &[1]);
+        let effect = app.dispatch(Action::QuickOpenSubmit);
+        assert!(has_file_load(&effect), "{effect:?}");
+        assert_eq!(
+            app.tabs.labels(),
+            ["Workspace", "lib ↔ main", "Explorer · lib"]
+        );
+        assert_eq!(tab(&app).checkout, "lib");
+        assert_eq!(inners(&app), [pinned("README.md")]);
+        assert_eq!(app.focus, FocusPane::Left);
+        assert_eq!(
+            app.quick_open_scope(),
+            QuickOpenScope::Checkout("lib".into()),
+            "Quick Open on the Explorer tab keeps to its checkout"
+        );
+    }
+
+    #[test]
+    fn reopen_same_file_reuses_inner_tab() {
+        let mut app = state();
+        let first = app.open_file_in_explorer("app".into(), "README.md".into(), None, None);
+        let (tab_id, gen) = file_load(&first);
+        assert!(app.apply_explorer_preview(tab_id, gen, text(&["# app"])));
+        app.dispatch(Action::JumpToTab(1));
+        let again = app.open_file_in_explorer("app".into(), "README.md".into(), None, None);
+        assert!(!has_file_load(&again), "already open and loaded: {again:?}");
+        assert_eq!(app.tabs.len(), 2, "one Explorer tab");
+        assert_eq!(inners(&app), [pinned("README.md")], "one inner tab");
+
+        // A tree preview of the file is promoted, not duplicated.
+        let mut app = state();
+        open_root(&mut app);
+        load_of(&app.dispatch(Action::MoveToEnd));
+        assert_eq!(inners(&app), [preview("README.md")]);
+        app.dispatch(Action::JumpToTab(1));
+        let open = app.open_file_in_explorer("app".into(), "README.md".into(), None, None);
+        assert!(!has_file_load(&open), "{open:?}");
+        assert_eq!(inners(&app), [pinned("README.md")]);
+    }
+
+    #[test]
+    fn search_hit_lands_on_line_in_clean_file_and_arms_n() {
+        let mut app = state();
+        let effect = app.open_file_in_explorer(
+            "app".into(),
+            "README.md".into(),
+            Some(3),
+            Some("foo".into()),
+        );
+        let (tab_id, gen) = file_load(&effect);
+        // Armed before the load lands, and still armed after the folder
+        // listings land first.
+        let follow = land(&mut app, effect);
+        assert_eq!(
+            follow,
+            [Effect::LoadExplorerPreview {
+                tab_id,
+                gen,
+                repo: "app".into(),
+                path: "README.md".into(),
+                change: None,
+            }],
+            "only the open's own load"
+        );
+        assert!(app.search_is_armed());
+        assert_eq!(app.search_target, SearchPane::File);
+        assert_eq!(app.search_query, "foo");
+        assert_eq!(tab(&app).active_inner().unwrap().pending_line, Some(3));
+
+        let lines = ["foo", "x", "foo", "foo bar", "y", "foo"];
+        assert!(app.apply_explorer_preview(tab_id, gen, text(&lines)));
+        let cursor = |app: &AppState| app.tabs.active_file_view().unwrap().cursor;
+        assert_eq!(cursor(&app), 3);
+        assert_eq!(app.search_hit, Some(3));
+        assert_eq!(tab(&app).active_inner().unwrap().pending_line, None);
+        assert_eq!(app.focus, FocusPane::Left, "the tree keeps focus");
+        app.dispatch(Action::SearchNext);
+        assert_eq!(cursor(&app), 5, "`n` steps from the hit line");
+        app.dispatch(Action::SearchPrev);
+        assert_eq!(cursor(&app), 3);
+        let next = PALETTE_COMMANDS
+            .iter()
+            .find(|command| command.action == Action::SearchNext)
+            .expect("next match row");
+        assert_eq!(app.palette_disabled_reason(next), None);
+    }
+
+    #[test]
+    fn search_hit_lands_on_diff_row_in_changed_file() {
+        let mut app = state();
+        // `src/tui/app.rs` is modified in `app`: it opens as a diff.
+        let effect = app.open_file_in_explorer(
+            "app".into(),
+            "src/tui/app.rs".into(),
+            Some(1),
+            Some("two".into()),
+        );
+        let (tab_id, gen) = file_load(&effect);
+        assert!(app.explorer_diff_loading());
+        assert_eq!(app.search_target, SearchPane::Diff);
+        assert!(app.search_is_armed());
+        // Rows: STAGED 0, hunk 1, `one` 2, `-two` 3; UNSTAGED 4, hunk 5,
+        // `one` 6, `+two` 7, `three two` 8.
+        let diff = super::super::super::diff::DiffContent {
+            staged: "@@ -1,2 +1 @@\n one\n-two\n".into(),
+            unstaged: "@@ -1 +1,3 @@\n one\n+two\n+three two\n".into(),
+            ..Default::default()
+        };
+        assert!(app.apply_explorer_preview(tab_id, gen, ExplorerPreviewBody::Diff(diff)));
+        assert_eq!(app.diff_cursor, 7, "line 2 of the file, unstaged first");
+        assert_eq!(app.search_hit, Some(7));
+        app.dispatch(Action::SearchNext);
+        assert_eq!(app.diff_cursor, 8, "`n` steps from the hit row");
+        app.dispatch(Action::SearchPrev);
+        assert_eq!(app.diff_cursor, 7);
+
+        // Without a query the cursor still lands; nothing is armed.
+        let mut app = state();
+        let effect = app.open_file_in_explorer("app".into(), "new.txt".into(), Some(0), None);
+        let (tab_id, gen) = file_load(&effect);
+        let diff = super::super::super::diff::DiffContent::from_unified("@@ -0,0 +1 @@\n+new\n");
+        assert!(app.apply_explorer_preview(tab_id, gen, ExplorerPreviewBody::Diff(diff)));
+        assert_eq!(app.diff_cursor, 2);
+        assert!(!app.search_is_armed());
+    }
+
+    #[test]
+    fn no_session_tab_is_a_file_tab() {
+        let mut app = state();
+        focus(&mut app, NodeKind::Repo, Some("app"), None);
+        quick_open_with(&mut app, "app", &["README.md"], &[0]);
+        app.dispatch(Action::QuickOpenSubmit);
+        app.dispatch(Action::JumpToTab(1));
+        focus(&mut app, NodeKind::Repo, Some("app"), None);
+        quick_open_with(&mut app, "app", &["src/lib.rs"], &[0]);
+        app.dispatch(Action::QuickOpenSubmit);
+        app.open_file_in_explorer("app".into(), "new.txt".into(), Some(0), Some("x".into()));
+        assert_eq!(app.tabs.labels(), ["Workspace", "Explorer · app"]);
+        assert_eq!(
+            inners(&app),
+            [pinned("README.md"), pinned("src/lib.rs"), pinned("new.txt")]
+        );
+    }
+
+    #[test]
+    fn late_checkout_confirm_cannot_write_from_an_explorer_tab() {
+        let mut app = state();
+        app.open_loaded_inner_file("app", "README.md", &["# app"]);
+        crate::tui::app::apply_checkout_compute(
+            &mut app,
+            "app".into(),
+            crate::tui::app::CheckoutCompute::Confirm {
+                local_branch: "main".into(),
+                remote_ref: "origin/main".into(),
+                ahead_behind: Some((0, 1)),
+            },
+        );
+        assert!(app.confirm.is_some(), "the late result opens its confirm");
+        for action in [Action::ConfirmYes, Action::ConfirmYesClean] {
+            app.status.clear();
+            assert_eq!(app.dispatch(action.clone()), Effect::None, "{action:?}");
+            assert_eq!(&*app.status, EXPLORER_TAB_READ_ONLY, "{action:?}");
+            assert!(app.confirm.is_some(), "{action:?} does not consume it");
+        }
+        assert_eq!(app.dispatch(Action::ConfirmNo), Effect::None);
+        assert!(app.confirm.is_none(), "n still closes it");
+    }
+
+    #[test]
+    fn closing_the_explorer_tab_restores_the_workspace_session() {
+        let mut app = state();
+        app.focus = FocusPane::Right;
+        app.search_active = true;
+        app.search_query = "readme".into();
+        app.search_target = SearchPane::Tree;
+        app.diff_cursor = 7;
+        app.open_loaded_inner_file("app", "README.md", &["# app"]);
+        assert!(!app.search_active, "the Explorer tab has no search");
+        app.dispatch(Action::CloseTab);
+        app.dispatch(Action::CloseTab);
+        assert!(app.tabs.is_workspace());
+        assert_eq!(app.focus, FocusPane::Right);
+        assert!(app.search_active);
+        assert_eq!(app.search_query, "readme");
+        assert_eq!(app.search_target, SearchPane::Tree);
+        assert_eq!(app.diff_cursor, 7);
+    }
+
+    /// A state whose cwd is a fresh temp dir with `app/notes.txt`.
+    fn disk_state(lines: &[&str]) -> (AppState, PathBuf) {
+        let cwd = crate::testutil::unique_dir("ws-explorer-live");
+        std::fs::create_dir_all(cwd.join("app")).expect("app dir");
+        write_notes(&cwd, lines);
+        let mut app = state();
+        app.cwd = cwd.clone();
+        (app, cwd)
+    }
+
+    /// Write `lines` to `app/notes.txt`. Callers change the line count (so
+    /// the size) on every rewrite, so the disk token moves whatever the
+    /// mtime granularity.
+    fn write_notes(cwd: &std::path::Path, lines: &[&str]) {
+        std::fs::write(cwd.join("app/notes.txt"), lines.join("\n")).expect("write file");
+    }
+
+    fn file_lines(app: &AppState) -> Vec<String> {
+        app.tabs
+            .active_file_view()
+            .expect("a file view")
+            .lines()
+            .to_vec()
+    }
+
+    fn set_changes(app: &mut AppState, changes: Vec<FileChange>) {
+        let snap = repo("app", CheckoutKind::Primary, None, changes);
+        crate::tui::app::apply_one_repo_snapshot(app, "app", Some(snap));
+    }
+
+    #[test]
+    fn explorer_live_reload_on_disk_and_status_change() {
+        let (mut app, cwd) = disk_state(&["alpha", "beta"]);
+        let (tab_id, gen) = app.open_loaded_inner_file("app", "notes.txt", &["alpha", "beta"]);
+        assert!(
+            tab(&app).active_inner().unwrap().stamp.is_some(),
+            "open stamps"
+        );
+        for _ in 0..3 {
+            assert_eq!(app.explorer_live_reload("app"), None, "unchanged");
+        }
+        assert_eq!(app.explorer_live_reload("lib"), None, "another checkout");
+        app.dispatch(Action::FocusRight);
+        app.dispatch(Action::MoveToEnd);
+
+        // A disk edit reloads quietly: the old body stays painted.
+        write_notes(&cwd, &["beta", "alpha", "beta"]);
+        let reload = app.explorer_live_reload("app").expect("a reload");
+        let (_, disk_gen) = file_load(&reload);
+        assert!(disk_gen > gen);
+        assert_eq!(file_lines(&app), ["alpha", "beta"], "old body stays");
+        assert!(app.status.is_empty(), "silent: {}", &*app.status);
+        assert_eq!(app.explorer_live_reload("app"), None, "stamp recorded");
+        assert!(app.apply_explorer_preview(tab_id, disk_gen, text(&["beta", "alpha", "beta"])));
+        assert_eq!(file_lines(&app), ["beta", "alpha", "beta"]);
+        assert_eq!(
+            app.tabs.active_file_view().unwrap().cursor,
+            1,
+            "the cursor keeps its line"
+        );
+
+        // A failed silent read keeps the body.
+        write_notes(&cwd, &["one"]);
+        let (_, failed) = file_load(&app.explorer_live_reload("app").expect("a reload"));
+        assert!(!app.apply_explorer_preview(
+            tab_id,
+            failed,
+            ExplorerPreviewBody::File(FileRead::Failed("gone".into()))
+        ));
+        assert_eq!(file_lines(&app), ["beta", "alpha", "beta"]);
+
+        // While an overlay holds input nothing is checked or recorded.
+        write_notes(&cwd, &["one", "two"]);
+        let stamp = tab(&app).active_inner().unwrap().stamp.clone();
+        quick_open_with(&mut app, "app", &["notes.txt"], &[0]);
+        assert_eq!(app.explorer_live_reload("app"), None);
+        assert_eq!(tab(&app).active_inner().unwrap().stamp, stamp);
+        app.dispatch(Action::QuickOpenCancel);
+
+        // A status change that makes the file changed swaps in a diff.
+        let mut changes = app.snapshot.repos[0].changes.clone();
+        changes.push(change("notes.txt", Some("M"), false));
+        set_changes(&mut app, changes);
+        let reload = app.explorer_live_reload("app").expect("a reload");
+        match &reload {
+            Effect::LoadExplorerPreview { change, .. } => assert!(change.is_some()),
+            other => panic!("{other:?}"),
+        }
+        assert!(app.explorer_diff_loading(), "a loading diff view");
+        let (_, diff_gen) = file_load(&reload);
+        let diff =
+            super::super::super::diff::DiffContent::from_unified("@@ -1 +1,2 @@\n one\n+two\n");
+        assert!(app.apply_explorer_preview(tab_id, diff_gen, ExplorerPreviewBody::Diff(diff)));
+        assert!(app.explorer_diff().is_some());
+
+        // Background tabs wait; activating the tab checks once.
+        app.dispatch(Action::JumpToTab(1));
+        write_notes(&cwd, &["one", "two", "three"]);
+        assert_eq!(app.explorer_live_reload("app"), None, "not active");
+        let back = app.dispatch(Action::JumpToTab(2));
+        assert!(has_file_load(&back), "{back:?}");
+        assert_eq!(app.dispatch(Action::JumpToTab(1)), Effect::None);
+        assert_eq!(app.dispatch(Action::JumpToTab(2)), Effect::None, "once");
+        let (_, gen) = file_load(&back);
+        let diff = super::super::super::diff::DiffContent::from_unified(
+            "@@ -1 +1,3 @@\n one\n+two\n+three\n",
+        );
+        assert!(app.apply_explorer_preview(tab_id, gen, ExplorerPreviewBody::Diff(diff)));
+
+        // A deleted file keeps the last content and says so.
+        std::fs::remove_file(cwd.join("app/notes.txt")).expect("delete");
+        assert_eq!(app.explorer_live_reload("app"), None, "nothing to read");
+        assert_eq!(&*app.status, FILE_DELETED);
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+        assert!(app.explorer_diff().is_some(), "content kept");
+        assert_eq!(app.explorer_live_reload("app"), None, "gone recorded");
+        let _ = std::fs::remove_dir_all(&cwd);
     }
 }

@@ -4,7 +4,8 @@
 //! [`Effect::ScoreFiles`] and come back through [`AppState::apply_file_index`]
 //! / [`AppState::apply_file_score`], which drop any result whose generation
 //! is no longer the overlay's latest. Files-mode Enter opens the picked file
-//! in a file tab; an Enter that arrives before the query's score waits for it.
+//! as a pinned inner file tab of its checkout's Explorer tab; an Enter that
+//! arrives before the query's score waits for it.
 
 use std::sync::Arc;
 
@@ -48,15 +49,11 @@ impl AppState {
 
     /// Checkouts Quick Open lists for the focused context.
     ///
-    /// The active file or Explorer tab's checkout; the active compare tab's
-    /// checkout;
-    /// else the focused row's checkout
+    /// The active Explorer tab's checkout; the active compare tab's
+    /// checkout; else the focused row's checkout
     /// ([`Self::focused_checkout_path`]); else (workspace row, group) the
     /// whole workspace.
     pub(crate) fn quick_open_scope(&self) -> QuickOpenScope {
-        if let Some(tab) = self.tabs.active_file() {
-            return QuickOpenScope::Checkout(tab.checkout.clone());
-        }
         if let Some(tab) = self.tabs.active_explorer() {
             return QuickOpenScope::Checkout(tab.checkout.clone());
         }
@@ -290,8 +287,9 @@ impl AppState {
         }
     }
 
-    /// Files-mode Enter: close, then open or focus the highlighted file in
-    /// a file tab. Warns `no file matches` without a hit.
+    /// Files-mode Enter: close, then open the highlighted file in its
+    /// checkout's Explorer tab ([`Self::open_file_in_explorer`]). Warns `no
+    /// file matches` without a hit.
     ///
     /// While the index loads or the latest score is pending the hits are
     /// stale, so Enter waits ([`QuickOpenState::submit_on_ready`]) and
@@ -315,7 +313,7 @@ impl AppState {
         match pick {
             Some((checkout, rel)) => {
                 self.close_quick_open();
-                self.open_file_tab(checkout, rel)
+                self.open_file_in_explorer(checkout, rel, None, None)
             }
             None => {
                 self.status = StatusMessage::warn(NO_FILE_MATCHES);
@@ -401,7 +399,8 @@ impl AppState {
     /// overlay is open and `gen` is its latest score request.
     ///
     /// `None` when the result was dropped; `Some(follow-up)` when accepted.
-    /// The follow-up is the waiting Enter's [`Effect::LoadFileTab`] (see
+    /// The follow-up is the waiting Enter's open of the picked file in its
+    /// checkout's Explorer tab (see
     /// [`QuickOpenState::submit_on_ready`]), else [`Effect::None`].
     pub(crate) fn apply_file_score(&mut self, gen: u64, hits: Vec<FileHit>) -> Option<Effect> {
         let quick = self
@@ -768,14 +767,14 @@ mod tests {
         assert_eq!(hits.len(), 1, "{hits:?}");
         app.apply_file_score(gen, hits);
         let effect = app.dispatch(Action::QuickOpenSubmit);
-        assert!(
-            matches!(effect, Effect::LoadFileTab { ref repo, ref path, .. }
-                if repo == legacy && path == "README.md"),
+        assert_eq!(
+            file_load(&effect),
+            Some((legacy.to_string(), "README.md".to_string())),
             "{effect:?}"
         );
-        let tab = app.tabs.active_file().expect("file tab");
+        let tab = app.tabs.active_explorer().expect("Explorer tab");
         assert_eq!(tab.checkout, legacy);
-        assert_eq!(tab.display, "legacy/web/README.md");
+        assert_eq!(opened_rel(&app), "README.md");
         let _ = std::fs::remove_dir_all(&cwd);
     }
 
@@ -853,8 +852,25 @@ mod tests {
         }
     }
 
+    /// Rel of the active Explorer tab's active inner file tab.
     fn opened_rel(app: &AppState) -> &str {
-        app.tabs.active_file().map_or("", |tab| tab.rel.as_str())
+        app.tabs
+            .active_explorer()
+            .and_then(|tab| tab.active_inner())
+            .map_or("", |inner| inner.rel.as_str())
+    }
+
+    /// `(checkout, rel)` of the inner file load in `effect` (a batch with
+    /// the Explorer folder listings).
+    fn file_load(effect: &Effect) -> Option<(String, String)> {
+        let effects = match effect {
+            Effect::Batch(effects) => effects.as_slice(),
+            other => std::slice::from_ref(other),
+        };
+        effects.iter().find_map(|effect| match effect {
+            Effect::LoadExplorerPreview { repo, path, .. } => Some((repo.clone(), path.clone())),
+            _ => None,
+        })
     }
 
     #[test]
@@ -874,10 +890,11 @@ mod tests {
         app.dispatch(Action::QuickOpenMove(1));
         let effect = app.dispatch(Action::QuickOpenSubmit);
         assert!(app.quick_open.is_none());
-        assert!(app.is_file_tab());
+        assert!(app.is_explorer_tab());
         assert_eq!(opened_rel(&app), "src/main.rs");
-        assert!(
-            matches!(effect, Effect::LoadFileTab { ref path, .. } if path == "src/main.rs"),
+        assert_eq!(
+            file_load(&effect).map(|(_, rel)| rel).as_deref(),
+            Some("src/main.rs"),
             "{effect:?}"
         );
     }
@@ -895,9 +912,10 @@ mod tests {
         assert!(app.status.is_empty(), "no miss warning on stale hits");
         assert_eq!(app.apply_file_score(old, vec![hit(0)]), None, "stale score");
         assert!(app.quick_open.is_some());
-        let follow = app.apply_file_score(new, vec![hit(1)]);
-        assert!(
-            matches!(follow, Some(Effect::LoadFileTab { ref path, .. }) if path == "src/main.rs"),
+        let follow = app.apply_file_score(new, vec![hit(1)]).expect("accepted");
+        assert_eq!(
+            file_load(&follow).map(|(_, rel)| rel).as_deref(),
+            Some("src/main.rs"),
             "{follow:?}"
         );
         assert!(app.quick_open.is_none());
@@ -913,11 +931,8 @@ mod tests {
         assert!(app.status.is_empty(), "no miss warning while indexing");
         let score = score_gen(app.apply_file_index(gen, index_of(&["README.md"])));
         assert!(app.quick_open.is_some(), "still waiting for the score");
-        let follow = app.apply_file_score(score, vec![hit(0)]);
-        assert!(
-            matches!(follow, Some(Effect::LoadFileTab { .. })),
-            "{follow:?}"
-        );
+        let follow = app.apply_file_score(score, vec![hit(0)]).expect("accepted");
+        assert!(file_load(&follow).is_some(), "{follow:?}");
         assert_eq!(opened_rel(&app), "README.md");
 
         // A waiting Enter with no hit warns once the score lands.

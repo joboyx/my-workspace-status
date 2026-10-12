@@ -27,7 +27,7 @@ pub enum SearchPane {
     Graph,
     CommitFiles,
     Diff,
-    /// The active file tab's lines.
+    /// The active file view's lines (an Explorer inner file tab).
     File,
 }
 

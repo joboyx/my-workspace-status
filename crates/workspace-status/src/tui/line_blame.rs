@@ -116,7 +116,7 @@ pub struct BlameKey {
     /// 1-based line in that revision's file.
     pub line: u32,
     /// Content version the line number belongs to: the diff fingerprint
-    /// for worktree and stash diffs, the load generation for a file tab,
+    /// for worktree and stash diffs, the load generation for a file view,
     /// `0` for a fixed commit. A reload with new text asks again.
     pub epoch: u64,
 }
