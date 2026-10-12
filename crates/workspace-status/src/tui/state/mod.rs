@@ -6640,16 +6640,11 @@ enum FoldOp {
     Open,
 }
 
-/// Unique temp viewed-store path per test state.
+/// Viewed-store path in a unique temp dir per test state, so the sibling
+/// comment and theme stores are unique too.
 #[cfg(test)]
 fn default_viewed_path() -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static N: AtomicU64 = AtomicU64::new(0);
-    std::env::temp_dir().join(format!(
-        "ws-viewed-test-{}-{}.json",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    ))
+    crate::testutil::unique_dir("ws-state-test").join("viewed.json")
 }
 
 /// Idle / breadcrumb toast when a persist write returns [`std::io::Error`].
