@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use super::drill::CommitFileSource;
+use super::theme::ThemeId;
 
 /// User or system input that changes TUI state.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -247,7 +248,11 @@ pub enum Action {
     GraphFocusToggle,
     GraphFocusSubmit,
     GraphFocusCancel,
-    CycleTheme,
+    /// Apply this theme and save it as the last-used theme.
+    ///
+    /// Enter on a palette `Theme: …` row. Focusing that row only previews
+    /// the theme; it does not dispatch this action.
+    SetTheme(ThemeId),
     ToggleMouse,
     /// Open or close the Quick Open overlay (`:` commands, Ctrl-p / `F` files).
     ///

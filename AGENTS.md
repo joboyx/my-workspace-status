@@ -37,7 +37,7 @@ PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` also unset `WS_STATUS
 
 They also point `XDG_CONFIG_HOME` at a temp dir (PTY and desktop e2e write a fixed baseline config file there, see [docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md)), so the operator user config file (`$XDG_CONFIG_HOME/my-workspace-status/config.json`, else `~/.config/...`) cannot change the fixture's settings. CLI integration tests that run the binary do the same. CI: `tty_spawn_paths_isolate_user_config`.
 
-They also point `WS_STATUS_THEME_STORE` at a temp file with no last-used theme, so the operator theme state file (`$XDG_STATE_HOME/my-workspace-status/theme.json`) cannot beat the fixture theme and `T` does not write it. The PTY harness uses a new `.e2e-state/theme-<n>.json` for each spawn unless the test passes `WS_STATUS_THEME_STORE`; the desktop harness and the demo script remove their file before each launch. They also drop a parent `WS_STATUS_THEME`. CI: `tty_spawn_paths_isolate_theme_store`.
+They also point `WS_STATUS_THEME_STORE` at a temp file with no last-used theme, so the operator theme state file (`$XDG_STATE_HOME/my-workspace-status/theme.json`) cannot beat the fixture theme and a palette theme pick does not write it. The PTY harness uses a new `.e2e-state/theme-<n>.json` for each spawn unless the test passes `WS_STATUS_THEME_STORE`; the desktop harness and the demo script remove their file before each launch. They also drop a parent `WS_STATUS_THEME`. CI: `tty_spawn_paths_isolate_theme_store`.
 
 Env table: [docs/configuration.md](./docs/configuration.md).
 

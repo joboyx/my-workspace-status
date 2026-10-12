@@ -78,7 +78,7 @@ fn on_compare_tab(screen: &str) -> bool {
     on_compare_origin_main(screen) || on_compare_local_main(screen)
 }
 
-/// ToggleTreeMode toast / pill, or CycleTheme toast.
+/// ToggleTreeMode toast / pill, or a `theme:` toast (no key sets a theme).
 fn tree_or_theme_fired(screen: &str) -> bool {
     let crumb = crumb_row(screen);
     let status = status_row(screen);

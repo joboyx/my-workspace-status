@@ -59,7 +59,7 @@ Both go away when DEST is wiped.
     unset NO_COLOR FORCE_COLOR
     WS_STATUS_WATCH_MS=0 WS_STATUS_FETCH_MS=0 workspace-status
 
-- Theme: default Slate, background `paint` (flat painted panes). Do not press `T`. To show another theme, use `WS_STATUS_STILLS_THEME` (see above).
+- Theme: default Slate, background `paint` (flat painted panes). Do not pick a `Theme:` row in the command palette. To show another theme, use `WS_STATUS_STILLS_THEME` (see above).
 - Font: `MesloLGS NF` 13 (romkatv/powerlevel10k-media). Do not set `WS_STATUS_GLYPHS=ascii` when that font is present. Set it only if the font is missing. Do not use MesloLGM Nerd Font Mono — it letter-spaces in xfce4-terminal (VTE sizes cells off the widest Nerd glyph).
 - Graph dates: operator local timezone (relative through 3 hours, then `YYYY-MM-DD HH:MM`). Seed timestamps are Asia/Manila (UTC+8). `capture-demo-stills.sh` sets `TZ=Asia/Manila` so clips match that clock.
 - Some hosts export `NO_COLOR=1`, which paints the first frame gray. Unset `NO_COLOR` and `FORCE_COLOR` before launch.
@@ -191,6 +191,6 @@ Mid still: `/auth 1/2` after the wrap.
 - Fetch / pull / push in-flight (`f`, `p`, `P`)
 - Completing a confirm with `y` (clips 06 and 11 show the overlay and cancel with `n`)
 - Creating a branch (Enter on the `+ create branch` row, or graph `c`) — clip 10 shows the row and closes with Esc
-- Theme cycle (`T`) — stay on the theme the run starts with (Slate for the README set)
+- Palette `Theme:` rows — stay on the theme the run starts with (Slate for the README set)
 - Watch poll (already disabled)
 - `V` line-range stage — the PTY e2e proves it on a separate two-hunk fixture, not on this seed

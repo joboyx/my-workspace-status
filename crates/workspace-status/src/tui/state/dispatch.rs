@@ -317,7 +317,7 @@ impl AppState {
             | Action::GraphFocusToggle
             | Action::GraphFocusSubmit
             | Action::GraphFocusCancel
-            | Action::CycleTheme
+            | Action::SetTheme(_)
             | Action::DiffVisualStart
             | Action::DiffVisualCancel
             | Action::DiffVisualUnmapped

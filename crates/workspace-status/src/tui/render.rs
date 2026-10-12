@@ -9316,7 +9316,7 @@ mod tests {
         assert!(text.contains("push ahead"), "{text}");
         assert!(text.contains("remove linked worktree"), "{text}");
         assert!(text.contains("search focused pane"), "{text}");
-        assert!(text.contains("cycle theme"), "{text}");
+        assert!(!text.contains("cycle theme"), "{text}");
         assert!(text.contains("Staged split"), "{text}");
         assert!(text.contains("/ search help"), "{text}");
         assert!(text.contains("MOVE"), "{text}");

@@ -143,7 +143,7 @@ fn pty_typeless_one_report_gg_and_gt() {
     tui.csi_u_typeless_shift('t');
     tui.wait_pred(
         |screen| on_compare_origin_main(screen) && !tree_or_theme_fired(screen),
-        "typeless gT is PreviousTab, not CycleTheme",
+        "typeless gT is PreviousTab and sets no theme",
         WAIT,
     );
 }

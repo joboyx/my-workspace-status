@@ -5,10 +5,13 @@
 //! filter of digits only (`:42`) adds a synthetic `Go to line 42` row on
 //! top ([`go_to_line_target`]); it is not a catalog row.
 //! Execute is close-then-dispatch through [`super::state::AppState::dispatch`].
+//! Each built-in theme has a `Theme: {label}` row: focusing it previews
+//! that theme, and only Enter on it applies and saves it.
 
 use std::borrow::Cow;
 
 use super::action::{Action, QuickOpenEntry};
+use super::theme::ThemeId;
 
 /// Palette group names (HIGHLIGHT, then the help columns MOVE / GIT / VIEW).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +79,24 @@ pub struct PaletteCommand {
     pub aliases: &'static [&'static str],
     /// Highlight mode in which the row is enabled.
     pub scope: CommandScope,
+}
+
+/// A `Theme: {label}` row for one built-in theme.
+///
+/// Focusing the row previews the theme; Enter applies and saves it
+/// ([`Action::SetTheme`]). Aliases are `theme`, `color`, `colour`, then the
+/// words passed in: the slug and each lowercase word of the label.
+macro_rules! theme_row {
+    ($id:ident, $title:literal, [$($word:literal),+ $(,)?]) => {
+        PaletteCommand {
+            title: $title,
+            keys: "",
+            group: CommandGroup::View,
+            action: Action::SetTheme(ThemeId::$id),
+            aliases: &["theme", "color", "colour", $($word),+],
+            scope: CommandScope::Any,
+        }
+    };
 }
 
 /// Named commands only. Pointer / overlay-internal actions stay out.
@@ -479,14 +500,39 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         aliases: &["icons", "details"],
         scope: CommandScope::NoHighlight,
     },
-    PaletteCommand {
-        title: "Cycle theme",
-        keys: "T",
-        group: CommandGroup::View,
-        action: Action::CycleTheme,
-        aliases: &["theme", "color", "colour"],
-        scope: CommandScope::Any,
-    },
+    theme_row!(
+        TokyoNight,
+        "Theme: Tokyo Night",
+        ["tokyo-night", "tokyo", "night"]
+    ),
+    theme_row!(Monokai, "Theme: Monokai", ["monokai"]),
+    theme_row!(Dracula, "Theme: Dracula", ["dracula"]),
+    theme_row!(
+        GruvboxDark,
+        "Theme: Gruvbox Dark",
+        ["gruvbox-dark", "gruvbox", "dark"]
+    ),
+    theme_row!(
+        CatppuccinMocha,
+        "Theme: Catppuccin Mocha",
+        ["catppuccin-mocha", "catppuccin", "mocha"]
+    ),
+    theme_row!(Slate, "Theme: Slate", ["slate"]),
+    theme_row!(
+        SolarizedDark,
+        "Theme: Solarized Dark",
+        ["solarized-dark", "solarized", "dark"]
+    ),
+    theme_row!(Nord, "Theme: Nord", ["nord"]),
+    theme_row!(RosePine, "Theme: Rosé Pine", ["rose-pine", "rosé", "pine"]),
+    theme_row!(Kanagawa, "Theme: Kanagawa", ["kanagawa"]),
+    theme_row!(Everforest, "Theme: Everforest", ["everforest"]),
+    theme_row!(OneDark, "Theme: One Dark", ["one-dark", "one", "dark"]),
+    theme_row!(
+        GithubDarkDimmed,
+        "Theme: GitHub Dark Dimmed",
+        ["github-dark-dimmed", "github", "dark", "dimmed"]
+    ),
     PaletteCommand {
         title: "Flat / tree",
         keys: "t",
@@ -931,6 +977,7 @@ pub enum PalettePaintRow {
 
 #[cfg(test)]
 mod tests {
+    use super::super::theme::THEME_IDS;
     use super::*;
 
     fn titles(query: &str) -> Vec<&'static str> {
@@ -1287,13 +1334,6 @@ mod tests {
                 CommandScope::NoHighlight,
             ),
             (
-                "Cycle theme",
-                "T",
-                CommandGroup::View,
-                Action::CycleTheme,
-                CommandScope::Any,
-            ),
-            (
                 "Flat / tree",
                 "t",
                 CommandGroup::View,
@@ -1427,16 +1467,64 @@ mod tests {
                 CommandScope::Any,
             ),
         ];
-        assert_eq!(PALETTE_COMMANDS.len(), wanted.len());
-        assert_eq!(wanted.len(), 69);
+        // The `Theme: …` rows have their own test.
+        let rows: Vec<&PaletteCommand> = PALETTE_COMMANDS
+            .iter()
+            .filter(|command| !matches!(command.action, Action::SetTheme(_)))
+            .collect();
+        assert_eq!(rows.len(), wanted.len());
+        assert_eq!(wanted.len(), 68);
+        assert_eq!(PALETTE_COMMANDS.len(), wanted.len() + THEME_IDS.len());
         for (i, (title, keys, group, action, scope)) in wanted.iter().enumerate() {
-            let command = &PALETTE_COMMANDS[i];
+            let command = rows[i];
             assert_eq!(command.title, *title, "row {i}");
             assert_eq!(command.keys, *keys, "{title}");
             assert_eq!(command.group, *group, "{title}");
             assert_eq!(command.action, *action, "{title}");
             assert_eq!(command.scope, *scope, "{title}");
         }
+    }
+
+    /// One `Theme: {label}` row per theme, in `THEME_IDS` order,
+    /// after Icon popover, before Flat / tree.
+    #[test]
+    fn theme_rows_follow_theme_ids_after_icon_popover() {
+        let start = PALETTE_COMMANDS
+            .iter()
+            .position(|command| command.title == "Icon popover")
+            .expect("Icon popover row")
+            + 1;
+        let rows = &PALETTE_COMMANDS[start..start + THEME_IDS.len()];
+        assert_eq!(
+            PALETTE_COMMANDS[start + THEME_IDS.len()].title,
+            "Flat / tree"
+        );
+        for (command, id) in rows.iter().zip(THEME_IDS) {
+            assert_eq!(command.title, format!("Theme: {}", id.label()));
+            assert_eq!(command.keys, "", "{}", command.title);
+            assert_eq!(command.group, CommandGroup::View, "{}", command.title);
+            assert_eq!(command.scope, CommandScope::Any, "{}", command.title);
+            assert_eq!(command.action, Action::SetTheme(id), "{}", command.title);
+            let words = ["theme", "color", "colour", id.as_str()]
+                .into_iter()
+                .map(str::to_string)
+                .chain(id.label().split_whitespace().map(str::to_lowercase));
+            for word in words {
+                assert!(
+                    command.aliases.contains(&word.as_str()),
+                    "{} lacks alias {word}",
+                    command.title
+                );
+            }
+        }
+        assert_eq!(
+            PALETTE_COMMANDS
+                .iter()
+                .filter(|command| matches!(command.action, Action::SetTheme(_)))
+                .count(),
+            THEME_IDS.len(),
+            "no theme row outside the block"
+        );
     }
 
     #[test]
@@ -1468,8 +1556,13 @@ mod tests {
             ("restore", "Revert"),
             ("checkout", "Branch picker"),
             ("switch", "Branch picker"),
-            ("theme", "Cycle theme"),
-            ("color", "Cycle theme"),
+            ("theme", "Theme: Nord"),
+            ("color", "Theme: Tokyo Night"),
+            ("colour", "Theme: Dracula"),
+            ("tokyo-night", "Theme: Tokyo Night"),
+            ("night", "Theme: Tokyo Night"),
+            ("dracula", "Theme: Dracula"),
+            ("github-dark-dimmed", "Theme: GitHub Dark Dimmed"),
             ("mouse", "Toggle mouse"),
             ("reload", "Refresh"),
             ("unstage", "Unstage"),
@@ -1697,7 +1790,7 @@ mod tests {
         assert_eq!(palette.rows().len(), 1, "no catalog row has a digit");
         palette.move_cursor(5);
         assert_eq!(palette.cursor, 0, "a lone row clamps the cursor");
-        // Not a catalog row: the 69-row catalog never lists it.
+        // Not a catalog row: the 81-row catalog never lists it.
         assert!(PALETTE_COMMANDS
             .iter()
             .all(|command| !matches!(command.action, Action::GoToLine(_))));

@@ -114,10 +114,6 @@ macro_rules! view_group {
                 },
                 $($ignored,)*
                 HelpEntry {
-                    keys: "T",
-                    desc: "cycle theme",
-                },
-                HelpEntry {
                     keys: "Ctrl-o",
                     desc: "full-file · keep hunk in view",
                 },
@@ -226,10 +222,6 @@ pub const HELP_EXPLORER_VIEW_GROUP: HelpGroup = HelpGroup {
         HelpEntry {
             keys: "i \\",
             desc: "inline / split · wrap (file pane)",
-        },
-        HelpEntry {
-            keys: "T",
-            desc: "cycle theme",
         },
         HelpEntry {
             keys: "PgUp PgDn",
@@ -1279,7 +1271,10 @@ mod tests {
         assert!(view_keys.contains(&"PgUp PgDn"));
         assert!(view_keys.contains(&"Ctrl-u Ctrl-d"));
         assert!(view_keys.contains(&"."));
-        assert!(view_keys.contains(&"T"));
+        assert!(
+            !view_keys.contains(&"T"),
+            "themes are palette rows, not a key"
+        );
         assert!(view_keys.contains(&"gh"), "the icon popover chord");
         assert!(view_keys.contains(&"i \\ M B"));
         assert!(!view_keys.contains(&"i \\"));
@@ -1618,7 +1613,8 @@ mod tests {
 
     /// The Explorer help columns list no key the Explorer refuses or
     /// handles another way: no `t` / `.` / `M` / `o O` row, no `+` / `=`
-    /// row, no `Ctrl-o` toggle, no `s u x` in a highlight row, no `gh`, and
+    /// row, no `Ctrl-o` toggle, no `s u x` in a highlight row, no `gh`, no
+    /// `T` theme row (themes are palette rows), and
     /// no Workspace Enter (focus right / drill).
     #[test]
     fn explorer_help_lists_no_refused_keys() {
@@ -1649,6 +1645,9 @@ mod tests {
             }
             assert!(!entry.desc.contains("focus right / drill"), "{entry:?}");
             assert!(!entry.desc.contains("s / u / x"), "{entry:?}");
+            // Themes are palette rows, not a key.
+            assert_ne!(entry.keys, "T", "{entry:?}");
+            assert!(!entry.desc.contains("theme"), "{entry:?}");
         }
         // The shared MOVE rows name the Workspace panes where a key is a
         // no-op; the EXPLORER and VIEW columns name none.
