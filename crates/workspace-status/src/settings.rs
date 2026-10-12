@@ -312,7 +312,7 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
         let config_json = format!(
             "{}\n",
-            serde_json::json!({"theme": "dracula", "themeStore": user_file})
+            serde_json::json!({"version": 1, "theme": "dracula", "themeStore": user_file})
         );
         fs::write(&user_file, &config_json).unwrap();
         let keys = load_config_files(Some(&user_file), &workspace)

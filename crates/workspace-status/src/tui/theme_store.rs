@@ -21,7 +21,12 @@ pub const THEME_STORE_VERSION: u32 = 1;
 const STORE_FILE_NAME: &str = "theme.json";
 
 /// On-disk shape: `{"version": 1, "theme": "<slug>"}`.
+///
+/// Exactly these two keys. An object with any other key (for example a
+/// config file that also has `version` and `theme`) is not a store: load
+/// ignores it and save leaves it unchanged.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoreFile {
     version: u32,
     theme: String,
@@ -61,8 +66,9 @@ where
 
 /// Last-used theme from the store at `path`.
 ///
-/// `None` when the file is missing or unreadable, is not valid store JSON,
-/// has another version, or names an unknown theme slug.
+/// `None` when the file is missing or unreadable, is not valid store JSON
+/// (extra keys included), has another version, or names an unknown theme
+/// slug.
 pub fn load_last_theme(path: &Path) -> Option<ThemeId> {
     let text = fs::read_to_string(path).ok()?;
     let parsed: StoreFile = serde_json::from_str(&text).ok()?;
@@ -72,8 +78,8 @@ pub fn load_last_theme(path: &Path) -> Option<ThemeId> {
     parse_theme_id(&parsed.theme)
 }
 
-/// True when `bytes` are a UTF-8 JSON object with the store fields (any
-/// version, any slug).
+/// True when `bytes` are a UTF-8 JSON object with exactly the store fields
+/// (any version, any slug).
 fn is_store_file(bytes: &[u8]) -> bool {
     serde_json::from_slice::<serde_json::Value>(bytes)
         .ok()
@@ -84,11 +90,11 @@ fn is_store_file(bytes: &[u8]) -> bool {
 /// Persist `theme` as the last-used theme.
 ///
 /// A missing file (and its parent directories) is created. An existing file
-/// must parse as this store (any version, any slug); otherwise it is left
-/// byte-identical and the result is an [`io::ErrorKind::InvalidData`] error
-/// (like the viewed and comment stores, a config path that names some other
-/// file never overwrites it). The write takes the sibling lock and replaces
-/// the file atomically.
+/// must parse as this store (exactly `version` and `theme`, any version, any
+/// slug); otherwise it is left byte-identical and the result is an
+/// [`io::ErrorKind::InvalidData`] error (like the viewed and comment stores,
+/// a config path that names some other file never overwrites it). The write
+/// takes the sibling lock and replaces the file atomically.
 pub fn save_last_theme(path: &Path, theme: ThemeId) -> io::Result<()> {
     persist_with_lock(path, |existing| {
         if existing.is_some_and(|bytes| !is_store_file(bytes)) {
@@ -228,6 +234,7 @@ mod tests {
             "{\"version\":1,\"theme\":\"Dracula\"}\n",
             "{\"version\":2,\"theme\":\"dracula\"}\n",
             "{\"version\":0,\"theme\":\"dracula\"}\n",
+            "{\"version\":1,\"theme\":\"dracula\",\"ignoredRepos\":[]}\n",
         ] {
             fs::write(&path, body).unwrap();
             assert_eq!(load_last_theme(&path), None, "{body:?}");
@@ -248,6 +255,7 @@ mod tests {
             "",
             "[1, 2]\n",
             "{\"version\":\"1\",\"theme\":\"dracula\"}\n",
+            "{\"version\":1,\"theme\":\"dracula\",\"ignoredRepos\":[]}\n",
         ] {
             fs::write(&path, body).unwrap();
             let err = save_last_theme(&path, ThemeId::Monokai).unwrap_err();
