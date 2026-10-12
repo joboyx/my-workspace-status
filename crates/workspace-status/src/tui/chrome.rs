@@ -583,6 +583,8 @@ pub fn dialog_height(state: &AppState, kind: DialogKind, width: u16) -> u16 {
             Some(
                 super::state::PendingConfirm::CheckoutOutOfSync { .. }
                 | super::state::PendingConfirm::MergeIntoHead { .. }
+                // Title, up to two detail lines, chips; one spare for a wrap.
+                | super::state::PendingConfirm::Push { .. }
                 | super::state::PendingConfirm::CompareRevertRange { .. }
                 | super::state::PendingConfirm::CompareRevertFile { .. },
             ) => 7,
@@ -2231,6 +2233,14 @@ mod tests {
             rev: "topic".into(),
             label: "topic".into(),
             into: "main".into(),
+        });
+        assert_eq!(dialog_height(&app, DialogKind::Confirm, 96), 7);
+        app.confirm = Some(super::super::state::PendingConfirm::Push {
+            repo: "app".into(),
+            branch: "main".into(),
+            remote: "origin".into(),
+            publish: true,
+            ahead_behind: Some((2, 1)),
         });
         assert_eq!(dialog_height(&app, DialogKind::Confirm, 96), 7);
     }

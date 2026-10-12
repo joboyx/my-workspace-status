@@ -32,7 +32,7 @@ use super::event_pump::{
 use super::hyperlink::{link_cells, write_links};
 use super::keys::{drop_g_chord_echo, held_nav_key, KeyStrokeOrigin};
 use super::render::draw;
-use super::state::AppState;
+use super::state::{AppState, PendingConfirm};
 use super::status::StatusMessage;
 use super::tty::{poll_event, read_event_origin};
 use super::watch::{watch_remain_ms, FLASH_TICK_MS};
@@ -399,16 +399,22 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
         return;
     }
     if ctx.interp.busy_for_writes() {
-        let palette_submit = match action {
+        let inner_action = match action {
             Action::QuickOpenSubmit => ctx
                 .state
                 .command_palette()
                 .and_then(|palette| palette.selected_action()),
             Action::PopoverRun => ctx.state.popover_run_action(),
             Action::Release => ctx.state.popover_release_action(),
+            // `Y` only keeps the push box open, so Handle is safe for it too.
+            Action::ConfirmYes | Action::ConfirmYesClean
+                if matches!(ctx.state.confirm, Some(PendingConfirm::Push { .. })) =>
+            {
+                Some(Action::Push)
+            }
             _ => None,
         };
-        match classify_busy_dispatch(&action, palette_submit.as_ref()) {
+        match classify_busy_dispatch(&action, inner_action.as_ref()) {
             BusyAction::Quit => {
                 // `q` mid-write arms the same press-again window as Ctrl-C.
                 if matches!(ctx.state.quit_while_busy(Instant::now()), Effect::Quit) {

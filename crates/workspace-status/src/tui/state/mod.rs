@@ -35,7 +35,7 @@ use workspace_status_graph::{
 use crate::config::ViewDefaults;
 use crate::settings::Settings;
 use crate::snapshot::{
-    carry_status_failed_local_branches, CheckoutKind, FileChange, WorkspaceSnapshot,
+    carry_status_failed_local_branches, CheckoutKind, FileChange, SyncStatus, WorkspaceSnapshot,
 };
 
 #[cfg(test)]
@@ -81,7 +81,7 @@ use super::keys::{expire_stale_g_chord_echo, GChordEchoState, InputMode, DOUBLE_
 use super::line_blame::{GraphReveal, LineBlameState};
 use super::ops::{
     collect_write_files, format_running_op, op_is_kind_noop, op_kind_noop_reason, op_targets,
-    push_targets, refresh_target, Op, RevertScope, RunningOp, ScopedFile,
+    push_targets, refresh_target, snapshot_pushable, Op, RevertScope, RunningOp, ScopedFile,
 };
 use super::popover::{IconTarget, PopoverState};
 use super::quick_open::QuickOpenState;
@@ -129,7 +129,7 @@ use super::watch::{
     prune_ghosts, tree_signatures, FlashKind, FlashStamp, GhostRow, GraphFlashDecision,
     GraphFlashMeta,
 };
-use crate::git::FULL_DIFF_CONTEXT_LINES;
+use crate::git::{PushPlan, FULL_DIFF_CONTEXT_LINES};
 
 /// Status for a key drained while a git write runs and the job has no name.
 pub(crate) const BUSY_WRITE_RUNNING: &str = "busy: a git write is running";
@@ -554,6 +554,23 @@ pub enum PendingConfirm {
         label: String,
         into: String,
     },
+    /// `P` on a checkout with commits to push: `y` runs the push.
+    ///
+    /// Branch, remote, and `publish` come from [`crate::git::push_plan`],
+    /// read off the loop thread before the box opens.
+    Push {
+        /// Checkout path (snapshot `repo`).
+        repo: String,
+        /// Branch the push sends.
+        branch: String,
+        /// Remote the push goes to.
+        remote: String,
+        /// True when the push creates the remote branch (`git push -u`).
+        publish: bool,
+        /// Commits ahead of, then behind, the upstream from the snapshot
+        /// sync note; `None` with no upstream or no parsable count.
+        ahead_behind: Option<(u32, u32)>,
+    },
     /// Compare-tab highlight `x`: put the merge-base lines back for the
     /// highlighted rows of the committed compare diff (worktree only).
     ///
@@ -589,6 +606,25 @@ impl PendingConfirm {
             self,
             Self::CompareRevertRange { .. } | Self::CompareRevertFile { .. }
         )
+    }
+}
+
+/// Ahead / behind counts for the push confirm, from the snapshot sync note
+/// (`ahead by N commits`, `diverged (ahead A, behind B)`).
+///
+/// `None` with no upstream or a note in another shape.
+fn push_ahead_behind(sync: SyncStatus, note: &str) -> Option<(u32, u32)> {
+    match sync {
+        SyncStatus::Ahead => {
+            let n = note.strip_prefix("ahead by ")?.strip_suffix(" commits")?;
+            Some((n.parse().ok()?, 0))
+        }
+        SyncStatus::Diverged => {
+            let inner = note.strip_prefix("diverged (ahead ")?.strip_suffix(')')?;
+            let (ahead, behind) = inner.split_once(", behind ")?;
+            Some((ahead.parse().ok()?, behind.parse().ok()?))
+        }
+        _ => None,
     }
 }
 
@@ -4378,6 +4414,15 @@ impl AppState {
                 ));
                 Effect::DefaultBranch { repos }
             }
+            // The push confirm offers only y / n: `Y` keeps it open.
+            Some(pending @ PendingConfirm::Push { .. }) if clean => {
+                self.confirm = Some(pending);
+                Effect::None
+            }
+            Some(PendingConfirm::Push { repo, .. }) => {
+                self.status = StatusMessage::progress(format_running_op(RunningOp::Push, 0, 1));
+                Effect::Push { repos: vec![repo] }
+            }
             // Compare confirms offer only y / n: `Y` keeps them open.
             Some(pending) if pending.is_compare_owned() && clean => {
                 self.confirm = Some(pending);
@@ -4973,8 +5018,10 @@ impl AppState {
     }
 
     fn push_effect(&mut self) -> Effect {
+        // `push_targets` holds at most the focused checkout. The confirm
+        // opens once git names the branch and remote (`open_push_confirm`).
         let targets = push_targets(&self.snapshot, self.focused_row(), self.show_ignored);
-        if targets.is_empty() {
+        let Some(repo) = targets.into_iter().next() else {
             let on_checkout = self
                 .focused_row()
                 .is_some_and(|row| matches!(row.kind, NodeKind::Repo | NodeKind::Checkout));
@@ -4984,9 +5031,47 @@ impl AppState {
                 "focus a repo or checkout to push"
             });
             return Effect::None;
+        };
+        Effect::PreparePush { repo }
+    }
+
+    /// Open the push confirm after git read the [`PushPlan`] for `repo`.
+    ///
+    /// `Err` (detached HEAD) puts the reason on the status line. A checkout
+    /// the snapshot no longer shows as pushable says `nothing to push`.
+    /// A confirm already open stays as is. Otherwise the box names the branch, the remote, and the commit
+    /// count from the snapshot; `y` returns [`Effect::Push`].
+    pub fn open_push_confirm(&mut self, repo: String, plan: Result<PushPlan, String>) {
+        // Another confirm opened while git read the plan: keep that one.
+        if self.confirm.is_some() {
+            return;
         }
-        self.status = StatusMessage::progress(format_running_op(RunningOp::Push, 0, targets.len()));
-        Effect::Push { repos: targets }
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(reason) => {
+                self.status = StatusMessage::error(reason);
+                return;
+            }
+        };
+        let Some(snap) = self
+            .snapshot
+            .repos
+            .iter()
+            .find(|r| r.repo == repo && snapshot_pushable(r))
+        else {
+            self.status = StatusMessage::warn("nothing to push");
+            return;
+        };
+        let ahead_behind = push_ahead_behind(snap.sync_status, &snap.sync_note);
+        self.help_open = false;
+        self.cancel_mouse_drag();
+        self.confirm = Some(PendingConfirm::Push {
+            repo,
+            branch: plan.branch,
+            remote: plan.remote,
+            publish: plan.publish,
+            ahead_behind,
+        });
     }
 
     fn begin_stash_menu(&mut self) -> Effect {
@@ -7853,11 +7938,177 @@ mod tests {
         assert_eq!(app.dispatch(Action::Push), Effect::None);
         assert!(app.status.contains("nothing to push"));
         focus_repo(&mut app, "lib");
-        match app.dispatch(Action::Push) {
-            Effect::Push { repos } => assert_eq!(repos, vec!["lib"]),
+        assert_eq!(confirm_and_push(&mut app, Action::Push, "lib"), vec!["lib"]);
+    }
+
+    fn push_plan_ok(branch: &str, publish: bool) -> Result<PushPlan, String> {
+        Ok(PushPlan {
+            branch: branch.into(),
+            remote: "origin".into(),
+            publish,
+        })
+    }
+
+    /// `action` asks git for the push plan of `repo` (no push yet); the
+    /// plan opens the confirm; `y` returns the push and its targets.
+    fn confirm_and_push(app: &mut AppState, action: Action, repo: &str) -> Vec<String> {
+        assert_eq!(
+            app.dispatch(action),
+            Effect::PreparePush { repo: repo.into() }
+        );
+        assert!(app.confirm.is_none(), "the confirm waits for the plan");
+        app.open_push_confirm(repo.into(), push_plan_ok("main", false));
+        assert!(
+            matches!(app.confirm, Some(PendingConfirm::Push { .. })),
+            "{:?}",
+            app.confirm
+        );
+        let repos = match app.dispatch(Action::ConfirmYes) {
+            Effect::Push { repos } => repos,
             other => panic!("{other:?}"),
-        }
+        };
+        assert!(app.confirm.is_none());
         assert_eq!(app.status, "Pushing 0/1…");
+        repos
+    }
+
+    /// One checkout `app` on `main`, ahead of its upstream, focused.
+    fn ahead_app(sync: SyncStatus, note: &str) -> AppState {
+        let mut ahead = repo("app", false);
+        ahead.sync_status = sync;
+        ahead.sync_note = note.into();
+        let snapshot = build_workspace_snapshot(&[ahead], &[], false, &[]);
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        focus_repo(&mut app, "app");
+        app
+    }
+
+    #[test]
+    fn push_opens_a_confirm_and_only_y_pushes() {
+        let mut app = ahead_app(SyncStatus::Ahead, "ahead by 3 commits");
+        assert_eq!(
+            app.dispatch(Action::Push),
+            Effect::PreparePush { repo: "app".into() }
+        );
+        app.help_open = true;
+        app.open_push_confirm("app".into(), push_plan_ok("main", false));
+        assert!(!app.help_open, "the confirm closes help");
+        assert_eq!(
+            app.confirm,
+            Some(PendingConfirm::Push {
+                repo: "app".into(),
+                branch: "main".into(),
+                remote: "origin".into(),
+                publish: false,
+                ahead_behind: Some((3, 0)),
+            })
+        );
+        assert_eq!(app.confirm.as_ref().map(|c| c.accept_key()), Some('y'));
+        assert!(!app.confirm.as_ref().unwrap().is_compare_owned());
+
+        // Enter does not accept: it names the key.
+        assert_eq!(app.dispatch(Action::ConfirmEnter), Effect::None);
+        assert!(app.confirm.is_some());
+        assert_eq!(app.status, "press y to confirm · n or Esc to cancel");
+        // `Y` is not offered: the box stays open.
+        assert_eq!(app.dispatch(Action::ConfirmYesClean), Effect::None);
+        assert!(app.confirm.is_some());
+        // `y` pushes the focused checkout.
+        assert_eq!(
+            app.dispatch(Action::ConfirmYes),
+            Effect::Push {
+                repos: vec!["app".into()]
+            }
+        );
+        assert!(app.confirm.is_none());
+        assert_eq!(app.status, "Pushing 0/1…");
+    }
+
+    #[test]
+    fn push_confirm_n_cancels() {
+        let mut app = ahead_app(SyncStatus::Ahead, "ahead by 1 commits");
+        app.open_push_confirm("app".into(), push_plan_ok("main", false));
+        assert!(app.confirm.is_some());
+        assert_eq!(app.dispatch(Action::ConfirmNo), Effect::None);
+        assert!(app.confirm.is_none());
+        assert_eq!(app.status, "push cancelled");
+    }
+
+    #[test]
+    fn push_with_nothing_to_push_opens_no_confirm() {
+        let mut app = ahead_app(SyncStatus::Ahead, "ahead by 1 commits");
+        app.cursor = 0;
+        assert_eq!(app.focused_row().map(|r| r.kind), Some(NodeKind::Workspace));
+        assert_eq!(app.dispatch(Action::Push), Effect::None);
+        assert_eq!(app.status, "focus a repo or checkout to push");
+        assert!(app.confirm.is_none());
+
+        let mut in_sync = repo("app", false);
+        in_sync.sync_status = SyncStatus::UpToDate;
+        let snapshot = build_workspace_snapshot(&[in_sync], &[], false, &[]);
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        app.folds.remove("group:no-updates");
+        app.rebuild_rows();
+        focus_repo(&mut app, "app");
+        assert_eq!(app.dispatch(Action::Push), Effect::None);
+        assert_eq!(app.status, "nothing to push");
+        assert!(app.confirm.is_none());
+    }
+
+    #[test]
+    fn push_confirm_refuses_detached_head_and_a_stale_snapshot() {
+        let mut app = ahead_app(SyncStatus::Ahead, "ahead by 1 commits");
+        app.open_push_confirm("app".into(), Err("detached HEAD cannot push".into()));
+        assert!(app.confirm.is_none());
+        assert_eq!(app.status, "detached HEAD cannot push");
+        assert_eq!(app.status.kind(), StatusKind::Error);
+
+        // A reload between `P` and the plan found nothing left to push.
+        app.snapshot.repos[0].sync_status = SyncStatus::UpToDate;
+        app.open_push_confirm("app".into(), push_plan_ok("main", false));
+        assert!(app.confirm.is_none());
+        assert_eq!(app.status, "nothing to push");
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+    }
+
+    #[test]
+    fn push_plan_does_not_replace_an_open_confirm() {
+        let mut app = ahead_app(SyncStatus::Ahead, "ahead by 1 commits");
+        let drop = PendingConfirm::StashDrop {
+            repo: "app".into(),
+            stash_ref: "stash@{0}".into(),
+        };
+        app.confirm = Some(drop.clone());
+        app.open_push_confirm("app".into(), push_plan_ok("main", false));
+        assert_eq!(app.confirm, Some(drop));
+    }
+
+    #[test]
+    fn push_confirm_counts_come_from_the_sync_note() {
+        assert_eq!(
+            push_ahead_behind(SyncStatus::Ahead, "ahead by 3 commits"),
+            Some((3, 0))
+        );
+        assert_eq!(
+            push_ahead_behind(SyncStatus::Diverged, "diverged (ahead 2, behind 5)"),
+            Some((2, 5))
+        );
+        assert_eq!(push_ahead_behind(SyncStatus::NoUpstream, ""), None);
+        assert_eq!(push_ahead_behind(SyncStatus::Ahead, "ahead 1"), None);
+        assert_eq!(
+            push_ahead_behind(SyncStatus::Diverged, "diverged (ahead x, behind 1)"),
+            None
+        );
+    }
+
+    #[test]
+    fn palette_push_goes_through_the_confirm() {
+        let mut app = ahead_app(SyncStatus::Ahead, "ahead by 1 commits");
+        palette_select(&mut app, "Push");
+        assert_eq!(
+            confirm_and_push(&mut app, Action::QuickOpenSubmit, "app"),
+            vec!["app"]
+        );
     }
 
     #[test]
@@ -11133,25 +11384,21 @@ mod tests {
         app.cursor = 0;
         assert_eq!(app.dispatch(Action::Push), Effect::None);
         focus_repo(&mut app, "app");
-        match app.dispatch(Action::Push) {
-            Effect::Push { repos } => {
-                assert_eq!(repos, vec!["app"]);
-                assert!(!repos
-                    .iter()
-                    .any(|r| r.contains("worktrees") || r == "notes"));
-            }
-            other => panic!("{other:?}"),
-        }
+        let repos = confirm_and_push(&mut app, Action::Push, "app");
+        assert_eq!(repos, vec!["app"]);
+        assert!(!repos
+            .iter()
+            .any(|r| r.contains("worktrees") || r == "notes"));
         let wt = app
             .rows
             .iter()
             .position(|r| r.repo.as_deref() == Some(".worktrees/app/feat"));
         if let Some(idx) = wt {
             app.cursor = idx;
-            match app.dispatch(Action::Push) {
-                Effect::Push { repos } => assert_eq!(repos, vec![".worktrees/app/feat"]),
-                other => panic!("{other:?}"),
-            }
+            assert_eq!(
+                confirm_and_push(&mut app, Action::Push, ".worktrees/app/feat"),
+                vec![".worktrees/app/feat"]
+            );
         }
         app.dispatch(Action::ToggleShowIgnored);
         let notes = app
@@ -11160,10 +11407,10 @@ mod tests {
             .position(|r| r.repo.as_deref() == Some("notes"))
             .expect("notes");
         app.cursor = notes;
-        match app.dispatch(Action::Push) {
-            Effect::Push { repos } => assert_eq!(repos, vec!["notes"]),
-            other => panic!("{other:?}"),
-        }
+        assert_eq!(
+            confirm_and_push(&mut app, Action::Push, "notes"),
+            vec!["notes"]
+        );
     }
 
     #[test]
