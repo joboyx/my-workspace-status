@@ -64,8 +64,9 @@ use super::quick_open::{
     files_row_shows_status, FileIndexState, QuickOpenMode, QuickOpenScope, QuickOpenState,
 };
 use super::search::{
-    collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids, slice_cols,
-    wrap_col_starts, wrap_col_starts_capped, wrap_cols, SearchPane,
+    collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids,
+    explorer_row_match_indices, slice_cols, wrap_col_starts, wrap_col_starts_capped, wrap_cols,
+    SearchPane,
 };
 use super::search_files::{
     search_row_shows_status, SearchFilesState, SearchRow, SearchZone, SEARCH_PREVIEW_MIN_COLS,
@@ -964,6 +965,13 @@ fn draw_explorer_tree(
     }
     let focused = state.focus == FocusPane::Left;
     let search = state.theme.pills().filter;
+    let matches: HashSet<usize> = if state.search_target == SearchPane::ExplorerTree {
+        explorer_row_match_indices(rows, &state.search_query)
+            .into_iter()
+            .collect()
+    } else {
+        HashSet::new()
+    };
     let lines: Vec<Line> = rows
         .iter()
         .enumerate()
@@ -979,7 +987,7 @@ fn draw_explorer_tree(
                 Some(index) == cursor,
                 focused,
                 None,
-                false,
+                matches.contains(&index),
                 search,
                 state.ascii,
                 palette,
@@ -14011,6 +14019,36 @@ mod tests {
         let crumb = buffer_text(&terminal);
         assert!(crumb.contains("app › src"), "{crumb}");
         assert!(crumb.contains("parent"), "{crumb}");
+    }
+
+    /// A `/` search on the Explorer tree paints its matching rows in the
+    /// search style; the cursor row keeps the cursor colour.
+    #[test]
+    fn explorer_tree_paints_search_matches() {
+        let mut state = explorer_state();
+        state.dispatch(Action::SearchStart);
+        state.dispatch(Action::SearchChar('t'));
+        // `t` matches target/ (the cursor lands there) and new.txt.
+        let palette = state.theme.palette();
+        let search_bg = state.theme.pills().filter.bg;
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let buf = terminal.backend().buffer();
+        let tree = state.layout.explorer_tree;
+        let bg_of = |name: &str| {
+            let (x, y) = (tree.y..tree.bottom())
+                .find_map(|y| {
+                    find_cell_col(buf, y, name)
+                        .filter(|x| *x < tree.right())
+                        .map(|x| (x, y))
+                })
+                .unwrap_or_else(|| panic!("no {name} row"));
+            buf[(x, y)].style().bg
+        };
+        assert_eq!(bg_of("new.txt"), Some(search_bg));
+        assert_eq!(bg_of("target"), Some(palette.cursor_bg));
+        assert_ne!(bg_of("README.md"), Some(search_bg));
+        assert_ne!(bg_of("src"), Some(search_bg));
     }
 
     /// The Explorer preview paints a changed file with the diff pane and a

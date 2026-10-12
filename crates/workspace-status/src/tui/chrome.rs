@@ -1320,7 +1320,8 @@ pub fn explorer_tab_hint_segments() -> Vec<HintSegment> {
 }
 
 /// Idle row on an Explorer tab: `wrap` and armed-search pills,
-/// `? help`, `hints`, then the pinned `q quit`.
+/// `? help` (`z…` while a `zz` is pending), `hints`, then the pinned
+/// `q quit`.
 fn viewer_status_line(
     state: &AppState,
     palette: Palette,
@@ -1336,8 +1337,9 @@ fn viewer_status_line(
     if let Some(label) = search_pill_label(state) {
         spans.push(pill_span(&label, pills.filter));
     }
+    let message = if z_pending(state) { " z…" } else { " ? help" };
     spans.push(Span::styled(
-        " ? help".to_string(),
+        message.to_string(),
         Style::default().fg(palette.file),
     ));
     push_hint_pieces(&mut spans, hints, palette, surface, width);
@@ -2354,6 +2356,22 @@ mod tests {
 
     fn line_plain(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn explorer_status_line_shows_the_tree_search_and_a_pending_z() {
+        let mut app = state();
+        app.open_loaded_inner_file("app", "src/main.rs", &["fn main() {}"]);
+        app.diff_wrap = false;
+        app.search_target = crate::tui::search::SearchPane::ExplorerTree;
+        app.search_active = true;
+        app.search_query = "main".into();
+        let row = line_plain(&status_line(&app, 160));
+        assert!(row.contains("/main") && row.contains("· tree"), "{row}");
+        app.search_active = false;
+        app.z_pending_at = Some(std::time::Instant::now());
+        let row = line_plain(&status_line(&app, 160));
+        assert!(row.starts_with(" z…"), "{row}");
     }
 
     #[test]

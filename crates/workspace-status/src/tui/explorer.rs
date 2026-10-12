@@ -12,7 +12,7 @@
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::Path;
 use std::process::Stdio;
@@ -406,6 +406,61 @@ impl ExplorerTree {
         } else {
             self.expand(rel_dir)
         }
+    }
+
+    /// Collapse every expanded folder under `rel_dir` (`rel_dir` itself
+    /// keeps its state), shallowest first, so a cursor inside one moves up
+    /// to the outermost collapsed folder. Listings stay cached.
+    pub fn collapse_subtree(&mut self, rel_dir: &str) {
+        let mut inner: Vec<String> = self
+            .expanded
+            .iter()
+            .filter(|rel| is_under(rel, rel_dir))
+            .cloned()
+            .collect();
+        inner.sort_by_key(|rel| rel.matches('/').count());
+        for rel in inner {
+            self.collapse(&rel);
+        }
+    }
+
+    /// Expand the folders under `rel_dir` one listing level past what is
+    /// cached (`zz` on an open folder).
+    ///
+    /// Every descendant folder with a listing (cached or in flight) is
+    /// expanded, and the walk goes on through the cached ones. A listed,
+    /// non-ignored child folder with no listing yet is expanded and
+    /// requested; the caller loads the returned folders, shallowest first.
+    /// An ignored folder with no listing is left closed, so one `zz` never
+    /// walks a whole `target/` or `node_modules/`. Each `zz` thus opens one
+    /// more level.
+    pub fn expand_subtree(&mut self, rel_dir: &str) -> Vec<String> {
+        let mut to_load = Vec::new();
+        let mut queue = VecDeque::from([rel_dir.to_string()]);
+        while let Some(dir) = queue.pop_front() {
+            let Some(Listing::Loaded { entries, .. }) = self.listings.get(&dir) else {
+                continue;
+            };
+            let child_dirs: Vec<(String, bool)> = entries
+                .iter()
+                .filter(|entry| entry.is_dir)
+                .map(|entry| (join_rel(&dir, &entry.name), entry.ignored))
+                .collect();
+            for (child, ignored) in child_dirs {
+                match self.listings.get(&child) {
+                    Some(Listing::Loaded { .. }) => {
+                        self.expanded.insert(child.clone());
+                        queue.push_back(child);
+                    }
+                    Some(Listing::Loading) => {
+                        self.expanded.insert(child);
+                    }
+                    None if !ignored => to_load.extend(self.expand(&child)),
+                    None => {}
+                }
+            }
+        }
+        to_load
     }
 
     /// Expand every ancestor folder of `rel_path` (and `rel_path` itself
@@ -870,6 +925,86 @@ mod tests {
         tree.set_cursor_rel("a/b.rs");
         tree.collapse("a");
         assert_eq!(tree.cursor_rel(), Some("a"));
+    }
+
+    #[test]
+    fn collapse_subtree_closes_every_open_descendant() {
+        let status = ExplorerStatus::default();
+        let mut tree = ExplorerTree::new();
+        tree.expand("");
+        tree.apply_listing("", vec![entry("a", true), entry("z.rs", false)]);
+        tree.expand("a");
+        tree.apply_listing("a", vec![entry("b", true), entry("a.rs", false)]);
+        tree.expand("a/b");
+        tree.apply_listing("a/b", vec![entry("c", true)]);
+        tree.expand("a/b/c");
+        tree.apply_listing("a/b/c", vec![entry("deep.rs", false)]);
+        tree.set_cursor_rel("a/b/c/deep.rs");
+
+        tree.collapse_subtree("a");
+        assert!(tree.is_expanded("a"), "the folder itself keeps its state");
+        assert!(!tree.is_expanded("a/b") && !tree.is_expanded("a/b/c"));
+        assert_eq!(
+            tree.cursor_rel(),
+            Some("a/b"),
+            "cursor moves to the outer fold"
+        );
+        assert_eq!(
+            rels(&tree.rows(&status)),
+            vec![
+                ("a".into(), 0),
+                ("a/b".into(), 1),
+                ("a/a.rs".into(), 1),
+                ("z.rs".into(), 0)
+            ]
+        );
+        assert_eq!(tree.expand("a/b/c"), None, "listings stay cached");
+    }
+
+    #[test]
+    fn expand_subtree_opens_cached_folders_and_lists_one_level_more() {
+        let status = ExplorerStatus::default();
+        let mut tree = ExplorerTree::new();
+        tree.expand("");
+        tree.apply_listing("", vec![entry("a", true)]);
+        tree.expand("a");
+        tree.apply_listing(
+            "a",
+            vec![
+                entry("b", true),
+                ExplorerEntry {
+                    name: "target".into(),
+                    is_dir: true,
+                    ignored: true,
+                },
+                entry("x", true),
+            ],
+        );
+        // First zz: the children have no listing yet; the ignored one stays shut.
+        assert_eq!(tree.expand_subtree("a"), ["a/b", "a/x"]);
+        assert!(tree.is_expanded("a/b") && tree.is_expanded("a/x"));
+        assert!(!tree.is_expanded("a/target"));
+        assert_eq!(tree.expand_subtree("a"), Vec::<String>::new(), "in flight");
+        tree.apply_listing("a/b", vec![entry("c", true), entry("b.rs", false)]);
+        tree.apply_listing("a/x", Vec::new());
+
+        // Close the subtree, then the next zz goes one level deeper.
+        tree.collapse_subtree("a");
+        assert_eq!(tree.expand_subtree("a"), ["a/b/c"]);
+        assert!(tree.is_expanded("a/b") && tree.is_expanded("a/b/c"));
+        let rows = rels(&tree.rows(&status));
+        assert_eq!(
+            rows,
+            vec![
+                ("a".into(), 0),
+                ("a/b".into(), 1),
+                ("a/b/c".into(), 2),
+                ("a/b/c".into(), 3),
+                ("a/b/b.rs".into(), 2),
+                ("a/target".into(), 1),
+                ("a/x".into(), 1),
+            ]
+        );
     }
 
     #[test]

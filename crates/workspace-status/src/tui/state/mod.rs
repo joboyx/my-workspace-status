@@ -85,8 +85,8 @@ use super::popover::{IconTarget, PopoverState};
 use super::quick_open::QuickOpenState;
 use super::search::{
     collect_graph_match_indices, collect_match_ids, commit_file_row_match_indices,
-    focus_commit_file_search, focus_diff_search, focus_graph_search, focus_tree_search,
-    match_diff_line_indices, SearchPane,
+    explorer_row_match_indices, focus_commit_file_search, focus_diff_search, focus_graph_search,
+    focus_tree_search, match_diff_line_indices, SearchPane,
 };
 use super::search_files::{SearchFilesState, SearchZone};
 use super::selection::TextSelection;
@@ -471,6 +471,8 @@ struct SearchOrigin {
     diff_scroll: u16,
     file_cursor: usize,
     file_scroll: usize,
+    /// Cursor rel of the active Explorer tab's tree.
+    explorer_cursor: Option<String>,
 }
 
 /// Workspace chrome parked while a compare or Explorer tab is active.
@@ -3345,6 +3347,9 @@ impl AppState {
     }
 
     fn current_search_pane(&self) -> SearchPane {
+        if self.is_explorer_tab() {
+            return self.explorer_search_pane();
+        }
         match self.list_focus_target() {
             ListFocusTarget::Tree => SearchPane::Tree,
             ListFocusTarget::Graph => SearchPane::Graph,
@@ -3443,6 +3448,7 @@ impl AppState {
             SearchPane::CommitFiles => self.apply_commit_file_search(dir),
             SearchPane::Diff => self.apply_diff_search(dir),
             SearchPane::File => self.apply_file_search(dir),
+            SearchPane::ExplorerTree => self.apply_explorer_tree_search(dir),
         };
         if wrapped {
             self.status = StatusMessage::info(if dir < 0 {
@@ -3526,6 +3532,10 @@ impl AppState {
                     .and_then(|tab| hits.binary_search(&tab.cursor).ok());
                 return Some((pos.map(|p| p + 1), hits.len()));
             }
+            SearchPane::ExplorerTree => {
+                let (rows, cursor) = self.explorer_rows()?;
+                (cursor, explorer_row_match_indices(&rows, query))
+            }
         };
         let pos = current.and_then(|cur| hits.iter().position(|hit| *hit == cur));
         Some((pos.map(|p| p + 1), hits.len()))
@@ -3544,6 +3554,7 @@ impl AppState {
             diff_scroll: self.diff_scroll,
             file_cursor: self.tabs.active_file_view().map_or(0, |tab| tab.cursor),
             file_scroll: self.tabs.active_file_view().map_or(0, |tab| tab.scroll),
+            explorer_cursor: self.explorer_search_anchor_rel(),
         });
     }
 
@@ -3587,15 +3598,24 @@ impl AppState {
                     tab.scroll = origin.file_scroll;
                 }
             }
+            SearchPane::ExplorerTree => {
+                if let (Some(tab), Some(rel)) =
+                    (self.tabs.active_explorer_mut(), origin.explorer_cursor)
+                {
+                    tab.tree.set_cursor_rel(&rel);
+                }
+            }
         }
     }
 
-    /// Load that follows the bound pane's cursor after a search move.
-    fn search_pane_effect(&self) -> Effect {
+    /// Load that follows the bound pane's cursor after a search move. An
+    /// Explorer tree move previews its row, as `j` / `k` do.
+    fn search_pane_effect(&mut self) -> Effect {
         match self.search_target {
             SearchPane::Tree => Effect::LoadRightPane,
             SearchPane::Graph => self.follow_graph_files(),
             SearchPane::CommitFiles => self.maybe_load_focused_commit_diff(),
+            SearchPane::ExplorerTree => self.explorer_tree_search_preview(),
             SearchPane::Diff | SearchPane::File => Effect::None,
         }
     }

@@ -22,6 +22,7 @@ use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use ratatui::layout::Rect;
 
@@ -35,18 +36,18 @@ use super::super::effect::ExplorerPreviewBody;
 use super::super::event_pump::overlay_blocks_background_ticks;
 use super::super::explorer::{ExplorerEntry, ExplorerRow, ExplorerStatus};
 use super::super::gates::ListFocusTarget;
-use super::super::search::SearchPane;
+use super::super::search::{explorer_row_match_indices, step_from_anchor, SearchPane};
 use super::super::selection::TextSelection;
 use super::super::split::SplitDrag;
 use super::super::status::StatusMessage;
 use super::super::tabs::{
-    ExplorerPreview, ExplorerTab, OpenFile, EXPLORER_FILE_TABS_ONLY, EXPLORER_HAS_NO_SEARCH,
+    ExplorerPreview, ExplorerTab, OpenFile, ParkedSearch, EXPLORER_FILE_TABS_ONLY,
     EXPLORER_TAB_READ_ONLY, FILE_DELETED, NO_EXPLORER_FILE_TABS, ONLY_WORKSPACE_TAB_OPEN,
     SWITCH_TO_WORKSPACE_TAB,
 };
 use super::super::tree::{dir_path_from_id, NodeKind};
 use super::super::watch::{file_disk_token, GONE_DISK_TOKEN};
-use super::{single_or_batch, AppState, FocusPane, NO_SEARCH_ARMED};
+use super::{single_or_batch, AppState, FocusPane, NO_SEARCH_ARMED, Z_FOLDS_TREE_ROWS};
 
 /// `e` refusal on an Explorer folder row (the folder-summary copy).
 const FOCUS_A_FILE_TO_EDIT: &str = "focus a file to edit";
@@ -245,12 +246,23 @@ impl AppState {
     /// Git writes, comments, highlight, diff-only keys, compare opens, the
     /// blame actions, and a confirm need the Workspace tab: a late checkout
     /// / merge result can open a confirm while an Explorer tab is active,
-    /// and `y` there must not write (n / Esc still close it). [`Self::dispatch`] puts
-    /// the reason on the status line; `palette_disabled_reason` shows the
-    /// same copy on the row.
+    /// and `y` there must not write (n / Esc still close it). The Workspace
+    /// tree view keys (`t`, `.`) and the commit-message rows (`M`, `+`)
+    /// say [`SWITCH_TO_WORKSPACE_TAB`]. [`Self::dispatch`] puts the reason
+    /// on the status line; `palette_disabled_reason` shows the same copy on
+    /// the row.
     pub(crate) fn explorer_tab_refusal(&self, action: &Action) -> Option<String> {
         if !self.is_explorer_tab() {
             return None;
+        }
+        if matches!(
+            action,
+            Action::ToggleTreeMode
+                | Action::ToggleShowIgnored
+                | Action::ToggleCommitMsgExpand
+                | Action::ResizeCommitMsg(_)
+        ) {
+            return Some(SWITCH_TO_WORKSPACE_TAB.into());
         }
         matches!(
             action,
@@ -298,27 +310,22 @@ impl AppState {
     }
 
     /// Palette row reason on an Explorer tab after
-    /// [`Self::explorer_tab_refusal`]: Workspace view rows say they need
-    /// the Workspace tab; search rows say there is no search.
+    /// [`Self::explorer_tab_refusal`]: `n` / `N` need an armed search, the
+    /// subtree fold needs the tree focused, the tab moves need another tab.
     pub(crate) fn explorer_tab_palette_reason(&self, command: &PaletteCommand) -> Option<String> {
         if command.scope == CommandScope::Highlight {
             return Some("highlight diff lines first (V)".into());
         }
         match command.action {
-            Action::SearchStart => Some(EXPLORER_HAS_NO_SEARCH.into()),
-            // A search-in-files hit arms the in-file search: `n` / `N` step it.
             Action::SearchNext | Action::SearchPrev => {
                 (!self.search_is_armed()).then(|| NO_SEARCH_ARMED.into())
             }
             Action::NextTab | Action::PreviousTab => {
                 (self.tabs.len() <= 1).then(|| ONLY_WORKSPACE_TAB_OPEN.into())
             }
-            Action::FoldToggleSubtree
-            | Action::ToggleTreeMode
-            | Action::ToggleShowIgnored
-            | Action::ResizeTree(_)
-            | Action::ToggleCommitMsgExpand
-            | Action::ResizeCommitMsg(_) => Some(SWITCH_TO_WORKSPACE_TAB.into()),
+            Action::FoldToggleSubtree => {
+                (self.focus == FocusPane::Right).then(|| Z_FOLDS_TREE_ROWS.into())
+            }
             _ => None,
         }
     }
@@ -392,6 +399,11 @@ impl AppState {
             Action::FoldClose => self.explorer_close_or_parent(),
             Action::FoldOpen if !preview => self.explorer_fold(FoldKind::Open),
             Action::FoldToggle if !preview => self.explorer_fold(FoldKind::Toggle),
+            Action::FoldToggleSubtree if !preview => self.explorer_fold_subtree(),
+            Action::FoldToggleSubtree => {
+                self.status = StatusMessage::warn(Z_FOLDS_TREE_ROWS);
+                Effect::None
+            }
             Action::NavEnter if !preview => self.explorer_enter(),
             Action::FocusRight => {
                 self.explorer_focus_preview();
@@ -406,22 +418,12 @@ impl AppState {
             Action::PreviousFileTab => self.explorer_cycle_inner(-1),
             Action::NextFileTab => self.explorer_cycle_inner(1),
             Action::CloseTab => return self.explorer_close_inner(),
-            Action::SearchStart if !self.help_open => {
-                self.status = StatusMessage::warn(EXPLORER_HAS_NO_SEARCH);
-                Effect::None
-            }
             Action::PanDiff(_)
             | Action::NavEnter
             | Action::NavEsc
             | Action::BackClick
             | Action::FoldOpen
-            | Action::FoldToggle
-            | Action::FoldToggleSubtree
-            | Action::ToggleTreeMode
-            | Action::ToggleShowIgnored
-            | Action::ToggleCommitMsgExpand
-            | Action::ResizeCommitMsg(_)
-            | Action::ResizeTree(_) => Effect::None,
+            | Action::FoldToggle => Effect::None,
             _ => return None,
         };
         Some(effect)
@@ -466,12 +468,89 @@ impl AppState {
     }
 
     /// `l`, `z`: open (or toggle) the focused folder. A file row does
-    /// nothing.
+    /// nothing. `z` on a folder arms `zz`, as on the Workspace tree.
     fn explorer_fold(&mut self, kind: FoldKind) -> Effect {
         let Some(row) = self.explorer_cursor_row().filter(|row| row.is_dir) else {
             return Effect::None;
         };
+        if kind == FoldKind::Toggle {
+            self.z_pending_at = Some(Instant::now());
+        }
         self.explorer_fold_dir(&row.rel, kind)
+    }
+
+    /// `zz` (the second `z`): bring the focused folder's subtree in line
+    /// with the folder, as the Workspace tree does. A closed folder closes
+    /// every open folder under it; an open one opens its cached subfolders
+    /// and lists the next level ([`ExplorerTree::expand_subtree`]). A file
+    /// row does nothing.
+    ///
+    /// [`ExplorerTree::expand_subtree`]: super::super::explorer::ExplorerTree::expand_subtree
+    fn explorer_fold_subtree(&mut self) -> Effect {
+        let Some(row) = self.explorer_cursor_row().filter(|row| row.is_dir) else {
+            return Effect::None;
+        };
+        let Some(tab) = self.tabs.active_explorer_mut() else {
+            return Effect::None;
+        };
+        tab.tree.set_cursor_rel(&row.rel);
+        if !tab.tree.is_expanded(&row.rel) {
+            tab.tree.collapse_subtree(&row.rel);
+            return Effect::None;
+        }
+        let loads = tab.tree.expand_subtree(&row.rel);
+        single_or_batch(explorer_dir_loads(tab, loads))
+    }
+
+    /// Pane `/` binds to on an Explorer tab: the tree when it has focus,
+    /// else the active inner file's body or diff.
+    pub(super) fn explorer_search_pane(&self) -> SearchPane {
+        if self.focus == FocusPane::Left {
+            return SearchPane::ExplorerTree;
+        }
+        match self.explorer_view() {
+            Some(ExplorerPreview::File(_)) => SearchPane::File,
+            Some(ExplorerPreview::Diff { .. }) => SearchPane::Diff,
+            None => SearchPane::ExplorerTree,
+        }
+    }
+
+    /// Tree cursor rel `/` returns to on Esc: the stored cursor, else the
+    /// painted cursor row.
+    pub(super) fn explorer_search_anchor_rel(&self) -> Option<String> {
+        let tab = self.tabs.active_explorer()?;
+        tab.tree
+            .cursor_rel()
+            .map(str::to_string)
+            .or_else(|| self.explorer_cursor_row().map(|row| row.rel))
+    }
+
+    /// Explorer tree search step from the cursor row over the listed rows.
+    /// Returns true when it wrapped. The caller previews the landed row
+    /// ([`Self::explorer_tree_search_preview`]).
+    pub(super) fn apply_explorer_tree_search(&mut self, dir: i32) -> bool {
+        let landing = self.explorer_rows().and_then(|(rows, cursor)| {
+            let hits = explorer_row_match_indices(&rows, &self.search_query);
+            step_from_anchor(&hits, cursor, dir).map(|landing| (rows, landing))
+        });
+        let Some((rows, landing)) = landing else {
+            self.set_search_status(false);
+            return false;
+        };
+        if let Some(tab) = self.tabs.active_explorer_mut() {
+            tab.tree.set_cursor_rel(&rows[landing.target].rel);
+        }
+        self.set_search_status(true);
+        landing.wrapped
+    }
+
+    /// Preview the tree cursor row after a search move, as a tree move does
+    /// (VS Code preview rules; nothing is pinned).
+    pub(super) fn explorer_tree_search_preview(&mut self) -> Effect {
+        match self.active_explorer_id() {
+            Some(tab_id) => self.explorer_sync_preview(tab_id),
+            None => Effect::None,
+        }
     }
 
     fn explorer_fold_dir(&mut self, rel: &str, kind: FoldKind) -> Effect {
@@ -1012,8 +1091,13 @@ impl AppState {
         }
     }
 
-    /// Drop a typed or armed `/` search.
+    /// Drop a typed or armed `/` search of the inner file (its body or
+    /// diff). A tree search stays: it is bound to the tree, not to the file
+    /// it previews.
     fn clear_explorer_search(&mut self) {
+        if self.search_target == SearchPane::ExplorerTree {
+            return;
+        }
         self.search_mode = false;
         self.search_active = false;
         self.search_query.clear();
@@ -1428,23 +1512,31 @@ impl AppState {
         }
     }
 
-    /// Park the active Explorer tab's pane focus, and its diff view in the
-    /// active inner tab. Returns false off an Explorer tab.
+    /// Park the active Explorer tab's pane focus and `/` search, and its
+    /// diff view in the active inner tab. Returns false off an Explorer
+    /// tab.
     pub(super) fn park_explorer_session(&mut self) -> bool {
         let Some(tab_id) = self.active_explorer_id() else {
             return false;
         };
         let focus_preview = self.focus == FocusPane::Right;
+        let search = ParkedSearch {
+            mode: self.search_mode,
+            active: self.search_active,
+            query: self.search_query.clone(),
+            target: self.search_target,
+            hit: self.search_hit,
+        };
         self.explorer_park_inner(tab_id);
         if let Some(tab) = self.tabs.active_explorer_mut() {
             tab.focus_preview = focus_preview;
+            tab.search = search;
         }
         true
     }
 
-    /// Restore the active Explorer tab's pane focus and its active inner
-    /// tab's diff view. No `/` search stays armed. Returns false off an
-    /// Explorer tab.
+    /// Restore the active Explorer tab's pane focus, its `/` search, and
+    /// its active inner tab's diff view. Returns false off an Explorer tab.
     pub(super) fn apply_explorer_session(&mut self) -> bool {
         let Some(tab) = self.tabs.active_explorer() else {
             return false;
@@ -1459,7 +1551,13 @@ impl AppState {
             .map_or((0, 0, 0), |inner| {
                 (inner.diff_cursor, inner.diff_scroll, inner.diff_col_offset)
             });
-        self.clear_explorer_search();
+        let search = tab.search.clone();
+        self.search_mode = search.mode;
+        self.search_active = search.active;
+        self.search_query = search.query;
+        self.search_target = search.target;
+        self.search_hit = search.hit;
+        self.search_origin = None;
         true
     }
 }
@@ -1922,9 +2020,289 @@ mod tests {
             app.palette_disabled_reason(stage).as_deref(),
             Some(EXPLORER_TAB_READ_ONLY)
         );
+    }
+
+    /// Open `app` at its root, then open `src` (listing landed).
+    /// Rows: src/, src/tui/, src/lib.rs, target/, new.txt, README.md.
+    fn open_src(app: &mut AppState) {
+        open_root(app);
+        let open = app.dispatch(Action::FoldOpen);
+        land(app, open);
+        assert_eq!(cursor_rel(app), "src");
+    }
+
+    /// Type `query` into an open `/` prompt; returns the last key's effect.
+    fn type_query(app: &mut AppState, query: &str) -> Effect {
+        query
+            .chars()
+            .map(|c| app.dispatch(Action::SearchChar(c)))
+            .last()
+            .unwrap_or(Effect::None)
+    }
+
+    /// The path of a preview load.
+    fn preview_path(effect: &Effect) -> Option<&str> {
+        match effect {
+            Effect::LoadExplorerPreview { path, .. } => Some(path.as_str()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn slash_searches_explorer_rows_and_n_steps_with_preview() {
+        let mut app = state();
+        open_src(&mut app);
+        assert_eq!(app.dispatch(Action::SearchStart), Effect::None);
+        assert!(app.search_mode);
+        assert_eq!(app.search_target, SearchPane::ExplorerTree);
+        assert_eq!(app.search_target.title(), "tree");
+
+        // Typing steps from the `/` origin (src): the first match after it.
+        let typed = type_query(&mut app, ".");
+        assert_eq!(cursor_rel(&app), "src/lib.rs");
+        assert_eq!(preview_path(&typed), Some("src/lib.rs"), "a hit previews");
+        assert_eq!(app.search_match_position(), Some((Some(1), 3)));
+        app.dispatch(Action::SearchSubmit);
+        assert!(app.search_is_armed());
+
+        let next = app.dispatch(Action::SearchNext);
+        assert_eq!(cursor_rel(&app), "new.txt");
+        assert_eq!(preview_path(&next), Some("new.txt"));
+        app.dispatch(Action::SearchNext);
+        assert_eq!(cursor_rel(&app), "README.md");
+        assert_eq!(app.search_match_position(), Some((Some(3), 3)));
+        app.dispatch(Action::SearchNext);
+        assert_eq!(cursor_rel(&app), "src/lib.rs", "n wraps to the top");
+        assert_eq!(&*app.status, super::super::SEARCH_WRAPPED_TO_TOP);
+        app.dispatch(Action::SearchPrev);
+        assert_eq!(cursor_rel(&app), "README.md", "N wraps to the bottom");
+
+        // VS Code preview rules: one reusable preview tab, nothing pinned.
+        let tab = tab(&app);
+        assert_eq!(tab.files.len(), 1);
+        assert_eq!(
+            tab.active_inner().map(|inner| inner.rel.as_str()),
+            Some("README.md")
+        );
+        assert!(!tab.files[0].pinned);
+        assert_eq!(app.focus, FocusPane::Left, "the tree keeps focus");
+
+        // A query with no listed match warns and leaves the cursor.
         app.dispatch(Action::SearchStart);
-        assert_eq!(&*app.status, EXPLORER_HAS_NO_SEARCH);
-        assert!(!app.search_mode);
+        type_query(&mut app, "app.rs");
+        assert_eq!(cursor_rel(&app), "README.md", "src/tui is not listed yet");
+        assert_eq!(&*app.status, super::super::SEARCH_NO_MATCH);
+    }
+
+    #[test]
+    fn esc_restores_explorer_tree_cursor() {
+        let mut app = state();
+        open_src(&mut app);
+        app.dispatch(Action::Move(2));
+        assert_eq!(cursor_rel(&app), "src/lib.rs");
+        app.dispatch(Action::SearchStart);
+        type_query(&mut app, "readme");
+        assert_eq!(cursor_rel(&app), "README.md");
+        let esc = app.dispatch(Action::SearchCancel);
+        assert_eq!(cursor_rel(&app), "src/lib.rs", "Esc puts the cursor back");
+        assert!(!app.search_mode && !app.search_active);
+        // The search hit replaced the preview tab; the origin row previews again.
+        assert_eq!(preview_path(&esc), Some("src/lib.rs"));
+        let tab = tab(&app);
+        assert_eq!(
+            tab.active_inner().map(|inner| inner.rel.as_str()),
+            Some("src/lib.rs")
+        );
+        assert_eq!(tab.files.len(), 1);
+    }
+
+    #[test]
+    fn slash_binds_the_inner_file_pane_when_the_right_pane_has_focus() {
+        let mut app = state();
+        app.open_loaded_inner_file("app", "notes.txt", &["alpha", "beta", "alphabet"]);
+        app.dispatch(Action::FocusRight);
+        assert_eq!(app.focus, FocusPane::Right);
+        app.dispatch(Action::SearchStart);
+        assert_eq!(app.search_target, SearchPane::File);
+        type_query(&mut app, "alpha");
+        app.dispatch(Action::SearchSubmit);
+        assert_eq!(app.tabs.active_file_view().map(|file| file.cursor), Some(2));
+
+        app.dispatch(Action::FocusLeft);
+        app.dispatch(Action::SearchStart);
+        assert_eq!(app.search_target, SearchPane::ExplorerTree);
+        app.dispatch(Action::SearchCancel);
+
+        // A changed file shows its diff: `/` binds the diff.
+        let effect = app.open_file_in_explorer("app".into(), "new.txt".into(), None, None);
+        let gen = flat(effect)
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::LoadExplorerPreview {
+                    gen,
+                    change: Some(_),
+                    ..
+                } => Some(*gen),
+                _ => None,
+            })
+            .expect("a diff load");
+        let tab_id = tab(&app).id;
+        let diff = super::super::super::diff::DiffContent::from_unified("@@ -0,0 +1 @@\n+new\n");
+        assert!(app.apply_explorer_preview(tab_id, gen, ExplorerPreviewBody::Diff(diff)));
+        app.dispatch(Action::FocusRight);
+        app.dispatch(Action::SearchStart);
+        assert_eq!(app.search_target, SearchPane::Diff);
+    }
+
+    #[test]
+    fn explorer_tree_search_is_parked_per_tab_and_survives_previews() {
+        let mut app = state();
+        open_src(&mut app);
+        app.dispatch(Action::SearchStart);
+        type_query(&mut app, ".");
+        app.dispatch(Action::SearchSubmit);
+        // Previews change the active inner tab; the tree search stays.
+        app.dispatch(Action::SearchNext);
+        app.dispatch(Action::Move(1));
+        assert!(app.search_is_armed());
+        assert_eq!(app.search_target, SearchPane::ExplorerTree);
+
+        // Workspace has its own search; the Explorer's comes back.
+        app.dispatch(Action::JumpToTab(1));
+        assert!(app.tabs.is_workspace());
+        assert!(!app.search_active, "the Workspace search was never armed");
+        app.dispatch(Action::JumpToTab(2));
+        assert!(app.is_explorer_tab());
+        assert!(app.search_is_armed());
+        assert_eq!(app.search_query, ".");
+        assert_eq!(app.search_target, SearchPane::ExplorerTree);
+        app.dispatch(Action::SearchNext);
+        assert_eq!(cursor_rel(&app), "src/lib.rs", "n wraps from README.md");
+
+        // An in-file search still drops when the active inner file changes.
+        app.dispatch(Action::FocusRight);
+        app.dispatch(Action::SearchStart);
+        type_query(&mut app, "x");
+        app.dispatch(Action::SearchSubmit);
+        assert_eq!(app.search_target, SearchPane::File);
+        assert!(app.search_active);
+        app.dispatch(Action::FocusLeft);
+        app.dispatch(Action::Move(2));
+        assert_eq!(cursor_rel(&app), "new.txt");
+        assert!(!app.search_active, "the file search cleared");
+    }
+
+    #[test]
+    fn zz_collapses_and_expands_subtree() {
+        let mut app = state();
+        open_root(&mut app);
+        assert_eq!(cursor_rel(&app), "src");
+        // First z opens src (listing landed); the second opens one level more.
+        let first = app.dispatch(Action::FoldToggle);
+        assert!(app.z_pending_at.is_some(), "z on a folder arms zz");
+        land(&mut app, first);
+        assert!(tab(&app).tree.is_expanded("src"));
+        let deeper = app.dispatch(Action::FoldToggleSubtree);
+        assert_eq!(dir_loads(&flat(deeper.clone())), ["src/tui"]);
+        land(&mut app, deeper);
+        assert!(tab(&app).tree.is_expanded("src/tui"));
+        let rows = app.explorer_rows().expect("rows").0;
+        assert!(rows.iter().any(|row| row.rel == "src/tui/app.rs"));
+
+        // zz on the open folder: z closes it, the second z closes the subtree.
+        app.dispatch(Action::FoldToggle);
+        assert!(!tab(&app).tree.is_expanded("src"));
+        assert_eq!(app.dispatch(Action::FoldToggleSubtree), Effect::None);
+        assert!(!tab(&app).tree.is_expanded("src/tui"));
+        assert_eq!(cursor_rel(&app), "src");
+
+        // zz again: every cached folder opens at once, nothing to list.
+        app.dispatch(Action::FoldToggle);
+        assert_eq!(app.dispatch(Action::FoldToggleSubtree), Effect::None);
+        assert!(tab(&app).tree.is_expanded("src/tui"));
+
+        // On the ignored `target/`, zz lists nothing below it.
+        app.dispatch(Action::FoldToggle);
+        app.dispatch(Action::Move(1));
+        assert_eq!(cursor_rel(&app), "target");
+        let open = app.dispatch(Action::FoldToggle);
+        land(&mut app, open);
+        assert_eq!(app.dispatch(Action::FoldToggleSubtree), Effect::None);
+
+        // A file row arms no zz; the right pane says z folds tree rows.
+        app.dispatch(Action::Move(1));
+        app.dispatch(Action::FoldToggle);
+        assert!(app.z_pending_at.is_none());
+        app.open_loaded_inner_file("app", "README.md", &["# app"]);
+        app.dispatch(Action::FocusRight);
+        app.dispatch(Action::FoldToggleSubtree);
+        assert_eq!(&*app.status, super::super::Z_FOLDS_TREE_ROWS);
+    }
+
+    #[test]
+    fn angle_brackets_resize_shared_tree_fraction() {
+        use super::super::super::split::pane_widths;
+        let mut app = state();
+        app.layout.term_cols = 140;
+        let width = |app: &AppState| pane_widths(140, app.tree_fraction).tree_width;
+        open_root(&mut app);
+        assert_eq!(width(&app), 56);
+        assert_eq!(app.dispatch(Action::ResizeTree(1)), Effect::None);
+        assert_eq!(width(&app), 63);
+        app.dispatch(Action::ResizeTree(-1));
+        app.dispatch(Action::ResizeTree(-1));
+        assert_eq!(width(&app), 49);
+        app.dispatch(Action::JumpToTab(1));
+        assert_eq!(width(&app), 49, "one split for every tab");
+    }
+
+    #[test]
+    fn explorer_palette_enables_search_fold_and_resize_rows() {
+        let mut app = state();
+        open_root(&mut app);
+        let reason = |app: &AppState, action: Action| {
+            let command = PALETTE_COMMANDS
+                .iter()
+                .find(|command| command.action == action)
+                .unwrap_or_else(|| panic!("palette row for {action:?}"));
+            app.palette_disabled_reason(command)
+        };
+        for action in [
+            Action::SearchStart,
+            Action::FoldToggleSubtree,
+            Action::ResizeTree(-1),
+            Action::ResizeTree(1),
+        ] {
+            assert_eq!(reason(&app, action.clone()), None, "{action:?}");
+        }
+        assert_eq!(
+            reason(&app, Action::SearchNext).as_deref(),
+            Some(NO_SEARCH_ARMED)
+        );
+        // `t`, `.`, `M`, `+`: the row and the key give the same copy.
+        for action in [
+            Action::ToggleTreeMode,
+            Action::ToggleShowIgnored,
+            Action::ToggleCommitMsgExpand,
+            Action::ResizeCommitMsg(1),
+        ] {
+            assert_eq!(
+                reason(&app, action.clone()).as_deref(),
+                Some(SWITCH_TO_WORKSPACE_TAB),
+                "{action:?}"
+            );
+            app.status.clear();
+            assert_eq!(app.dispatch(action.clone()), Effect::None, "{action:?}");
+            assert_eq!(&*app.status, SWITCH_TO_WORKSPACE_TAB, "{action:?}");
+            assert_eq!(app.status.kind(), StatusKind::Warn, "{action:?}");
+        }
+        // `-` stays the parent folder.
+        let open = app.dispatch(Action::FoldOpen);
+        land(&mut app, open);
+        app.dispatch(Action::Move(1));
+        assert_eq!(cursor_rel(&app), "src/tui");
+        app.dispatch(Action::ExplorerReveal);
+        assert_eq!(cursor_rel(&app), "src");
     }
 
     #[test]

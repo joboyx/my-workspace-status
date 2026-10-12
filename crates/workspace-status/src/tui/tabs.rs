@@ -16,6 +16,7 @@ use crate::file_index::FileRead;
 use super::diff::DiffContent;
 use super::drill::{CommitFile, CommitFileSource};
 use super::explorer::ExplorerTree;
+use super::search::SearchPane;
 
 /// Palette / overlay copy when the focused row is not a compare target.
 pub const FOCUS_A_CHECKOUT: &str = "Focus a checkout to compare";
@@ -42,8 +43,6 @@ pub const WORKSPACE_TAB_CANNOT_CLOSE: &str = "Workspace tab cannot be closed";
 /// Refusal copy for git writes and Workspace-only actions on an Explorer
 /// tab.
 pub const EXPLORER_TAB_READ_ONLY: &str = "Explorer tab is read-only · switch to Workspace tab";
-/// Refusal copy for `/` on an Explorer tab.
-pub const EXPLORER_HAS_NO_SEARCH: &str = "no search on the Explorer tab · Ctrl-f searches files";
 /// Explorer preview copy on a folder row.
 pub const EXPLORER_FOLDER_HINT: &str = "folder · l / Enter opens or closes it";
 /// `[` / `]` copy off an Explorer tab (status line and palette row).
@@ -702,6 +701,22 @@ impl InnerFile {
     }
 }
 
+/// `/` search of an Explorer tab, parked while another tab is active.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ParkedSearch {
+    /// The `/` prompt was open.
+    pub mode: bool,
+    /// A query was armed (`n` / `N` step it).
+    pub active: bool,
+    /// Typed or armed query.
+    pub query: String,
+    /// Pane the search is bound to: the tree, or the inner file's body or
+    /// diff.
+    pub target: SearchPane,
+    /// Current diff or file match.
+    pub hit: Option<usize>,
+}
+
 /// One session-only Explorer tab: a file tree of one checkout beside the
 /// inner file tabs it opened.
 #[derive(Clone, Debug)]
@@ -736,6 +751,8 @@ pub struct ExplorerTab {
     pub painted_rel: Option<String>,
     /// Parked pane focus: true when the right pane has focus.
     pub focus_preview: bool,
+    /// Parked `/` search.
+    pub search: ParkedSearch,
 }
 
 impl ExplorerTab {
@@ -753,6 +770,7 @@ impl ExplorerTab {
             tree_scroll: 0,
             painted_rel: None,
             focus_preview: false,
+            search: ParkedSearch::default(),
         }
     }
 
