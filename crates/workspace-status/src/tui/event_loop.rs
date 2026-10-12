@@ -362,7 +362,7 @@ fn draw_frame(
     state: &mut AppState,
 ) -> Result<(), u8> {
     let completed = terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
-    let links = link_cells(completed.buffer, &state.hyperlinks());
+    let links = link_cells(completed.buffer, &state.layout.links);
     write_links(terminal.backend_mut(), &links).map_err(|_| 1u8)
 }
 

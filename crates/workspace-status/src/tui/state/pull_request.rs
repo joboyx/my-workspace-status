@@ -211,24 +211,26 @@ impl AppState {
         super::popover::then(selected, open)
     }
 
-    /// Hyperlinks the last frame painted, for the OSC 8 overlay.
+    /// One link per PR badge glyph painted so far this frame, to the full
+    /// URL of its PR, for [`LayoutHit::links`].
     ///
-    /// Each painted PR badge glyph links to the full URL of its PR, then
-    /// come the spans panes recorded in [`LayoutHit::links`]. A badge whose
-    /// PR is no longer cached gets no link.
+    /// A badge whose PR is no longer cached gets no link.
     ///
     /// [`LayoutHit::links`]: super::LayoutHit::links
-    pub(crate) fn hyperlinks(&self) -> Vec<LinkHit> {
-        let badges = self.layout.pr_badge_hits().into_iter().filter_map(|hit| {
-            let pr = self.pull_request_for(&hit.repo)?;
-            Some(LinkHit {
-                y: hit.y,
-                x: hit.x,
-                width: hit.width,
-                url: pr.url.clone(),
+    pub(crate) fn pr_badge_links(&self) -> Vec<LinkHit> {
+        self.layout
+            .pr_badge_hits()
+            .into_iter()
+            .filter_map(|hit| {
+                let pr = self.pull_request_for(&hit.repo)?;
+                Some(LinkHit {
+                    y: hit.y,
+                    x: hit.x,
+                    width: hit.width,
+                    url: pr.url.clone(),
+                })
             })
-        });
-        badges.chain(self.layout.links.iter().cloned()).collect()
+            .collect()
     }
 
     /// The PR the badge of checkout `repo` shows, under the same rule as

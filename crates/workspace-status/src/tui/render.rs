@@ -241,6 +241,11 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         chunks[4],
     );
 
+    // Each painted PR badge glyph links to its full PR URL. A box painted
+    // over the panes below drops the links it covers.
+    let badge_links = state.pr_badge_links();
+    state.layout.links.extend(badge_links);
+
     // Dialogs paint last: a fixed-height box centered over the panes.
     state.layout.help_scroll_max = 0;
     if let Some(kind) = open_dialog(state) {
@@ -265,6 +270,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
             DialogKind::QuickOpen => draw_quick_open(frame, rect, state),
             DialogKind::SearchFiles => draw_search_files(frame, rect, state),
         }
+        drop_links_under(&mut state.layout.links, rect);
     }
 
     // The icon popover hangs over the panes and any dialog.
@@ -276,6 +282,12 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     if let Some(selection) = state.text_selection.as_ref() {
         selection.highlight(frame.buffer_mut());
     }
+}
+
+/// Drop each link in `links` that overlaps `rect`: a box painted there
+/// hides its cells, so the OSC 8 overlay must not print them as a link.
+fn drop_links_under(links: &mut Vec<LinkHit>, rect: Rect) {
+    links.retain(|link| !rect.intersects(Rect::new(link.x, link.y, link.width, 1)));
 }
 
 /// Tree / graph / files pane on the left and graph / files / diff on the
@@ -5665,6 +5677,7 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
         }
     }
     frame.render_widget(Clear, rect);
+    drop_links_under(&mut state.layout.links, rect);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     let shown_rows = (start..start + shown).chain(body..rows.len());
@@ -14784,7 +14797,7 @@ mod tests {
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let hit = state.layout.pr_badge_hits()[0].clone();
         assert_eq!(
-            state.hyperlinks(),
+            state.layout.links,
             vec![LinkHit {
                 y: hit.y,
                 x: hit.x,
@@ -14799,7 +14812,82 @@ mod tests {
             .tabs
             .open_or_focus("app".into(), "main".into(), "HEAD".into());
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-        assert!(state.hyperlinks().is_empty());
+        assert!(state.layout.links.is_empty());
+    }
+
+    /// Link spans in `links` that overlap `rect`.
+    fn links_in(
+        links: &[crate::tui::hyperlink::LinkHit],
+        rect: Rect,
+    ) -> Vec<crate::tui::hyperlink::LinkHit> {
+        links
+            .iter()
+            .filter(|link| rect.intersects(Rect::new(link.x, link.y, link.width, 1)))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn dialog_drops_the_badge_links_it_covers() {
+        let mut state = pr_state(&[branch_repo("app", "feature")], true);
+        set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+        let mut terminal = pr_terminal();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let before = state.layout.links.clone();
+        assert_eq!(before.len(), 1, "{before:?}");
+        let (x, y) = (before[0].x, before[0].y);
+        let badge_cell = terminal.backend().buffer()[(x, y)].clone();
+
+        state.help_open = true;
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        // The badge still records its hit under help; only its link goes.
+        assert_eq!(state.layout.pr_badge_hits().len(), 1);
+        assert_ne!(
+            terminal.backend().buffer()[(x, y)],
+            badge_cell,
+            "help must paint over the badge"
+        );
+        assert!(state.layout.links.is_empty(), "{:?}", state.layout.links);
+
+        state.help_open = false;
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert_eq!(state.layout.links, before);
+    }
+
+    #[test]
+    fn popover_drops_the_badge_links_it_covers() {
+        let url = "https://github.com/octo/demo/pull/7";
+        let repos: Vec<RepoSnapshot> = ["app", "bbb", "ccc", "ddd"]
+            .iter()
+            .map(|name| branch_repo(name, "feature"))
+            .collect();
+        let mut state = pr_state(&repos, true);
+        for name in ["app", "bbb", "ccc", "ddd"] {
+            set_pr(&mut state, name, "feature", found_pr(PrState::Open));
+        }
+        focus_tree_row(&mut state, "repo:app");
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let _ = state.dispatch(Action::PopoverOpenFocused);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let hit = state.layout.popover.clone().expect("pinned");
+        let covered = state
+            .layout
+            .pr_badge_hits()
+            .into_iter()
+            .filter(|badge| {
+                hit.rect
+                    .intersects(Rect::new(badge.x, badge.y, badge.width, 1))
+            })
+            .count();
+        assert!(covered > 0, "the popover {:?} must cover a badge", hit.rect);
+        // Only the popover's own URL line links inside its box.
+        let inside = links_in(&state.layout.links, hit.rect);
+        assert_eq!(inside.len(), 1, "{inside:?}");
+        assert_eq!(inside[0].url, url);
+        assert!(hit
+            .inner
+            .contains(ratatui::layout::Position::new(inside[0].x, inside[0].y)));
     }
 
     #[test]
@@ -14873,6 +14961,20 @@ mod tests {
         assert_eq!(hit.x, label_x + 25);
         assert_eq!(buf[(hit.x, hit.y)].symbol(), "P");
         assert_eq!(buf[(hit.x, hit.y)].fg, state.theme.palette().branch_feature);
+        // The graph badge glyph links to the full PR URL.
+        assert!(
+            state
+                .layout
+                .links
+                .contains(&crate::tui::hyperlink::LinkHit {
+                    y: hit.y,
+                    x: hit.x,
+                    width: 1,
+                    url: "https://github.com/octo/demo/pull/7".into(),
+                }),
+            "{:?}",
+            state.layout.links
+        );
         let commit_y = (0..24)
             .find(|y| buf_line(buf, *y).contains("seed graph"))
             .expect("commit row");
@@ -15476,12 +15578,14 @@ mod tests {
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let _ = state.dispatch(Action::PopoverOpenFocused);
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-        // The URL line is the one link the popover records; the overlay
-        // also gets it (after any badge link).
-        assert_eq!(state.layout.links.len(), 1, "{:?}", state.layout.links);
-        let link = state.layout.links[0].clone();
-        assert_eq!(state.hyperlinks().last(), Some(&link));
-        let inner = state.layout.popover.as_ref().expect("pinned").inner;
+        // The URL line is the one link inside the popover; it comes after
+        // the badge links.
+        let popover = state.layout.popover.clone().expect("pinned");
+        let inside = links_in(&state.layout.links, popover.rect);
+        assert_eq!(inside.len(), 1, "{:?}", state.layout.links);
+        let link = inside[0].clone();
+        assert_eq!(state.layout.links.last(), Some(&link));
+        let inner = popover.inner;
         assert!(inner.contains(ratatui::layout::Position::new(link.x, link.y)));
         assert!(link.x + link.width <= inner.right());
         let buf = terminal.backend().buffer();

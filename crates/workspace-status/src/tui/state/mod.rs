@@ -307,10 +307,12 @@ pub struct LayoutHit {
     /// Empty when no row shows an icon. [`Self::pr_badge_hits`] reads the
     /// PR badges from it.
     pub icon_hits: Vec<IconHit>,
-    /// Hyperlink spans a pane paints itself, rebuilt every paint.
+    /// Hyperlink spans of the frame, rebuilt every paint: the OSC 8 overlay
+    /// prints exactly these.
     ///
-    /// PR badges are not here: [`AppState::hyperlinks`] adds them from
-    /// [`Self::pr_badge_hits`].
+    /// Each painted PR badge glyph (from [`AppState::pr_badge_links`]), then
+    /// the popover URL line. A dialog or the popover drops the links under
+    /// its box before it records its own.
     pub links: Vec<LinkHit>,
     /// The popover painted last frame, if any.
     pub popover: Option<PopoverHit>,
