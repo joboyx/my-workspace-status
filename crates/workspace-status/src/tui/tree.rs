@@ -133,7 +133,7 @@ pub struct VisibleRow {
     pub trailing: String,
     /// Left run used by paint (linked-worktree / branch / file/folder glyphs + name).
     pub segments: Vec<TextSeg>,
-    /// Right run used by paint (repo kind, badge / sync / counts).
+    /// Right run used by paint (icons after the name, repo kind, sync / counts).
     pub trailing_segs: Vec<TextSeg>,
     pub repo: Option<String>,
     pub primary_repo: Option<String>,
@@ -1059,10 +1059,9 @@ pub fn is_merge_mark_kind(kind: IconKind) -> bool {
     matches!(kind, IconKind::MergedIntoDefault | IconKind::OpenVsDefault)
 }
 
-/// The merge mark segment after a branch name: ` <glyph>`, its own tagged
-/// segment so it takes its own colour (`Added` merged, `Muted` open) and
-/// its own icon hit. `None` when the row paints no mark. The painted text
-/// is the same as when the mark was part of the branch segment.
+/// The merge mark glyph of a repo or checkout row, its own tagged segment
+/// so it takes its own colour (`Added` merged, `Muted` open) and its own
+/// icon hit. `None` when the row paints no mark.
 fn merge_mark_seg(node: &TreeNode, ascii: bool) -> Option<TextSeg> {
     let mark = checkout_merge_mark(node, ascii);
     if mark.is_empty() {
@@ -1073,7 +1072,32 @@ fn merge_mark_seg(node: &TreeNode, ascii: bool) -> Option<TextSeg> {
     } else {
         (IconKind::OpenVsDefault, SegRole::Muted)
     };
-    Some(icon_text_seg(format!(" {mark}"), role, kind))
+    Some(icon_text_seg(mark, role, kind))
+}
+
+/// Ignored glyph of a repo row (muted).
+fn ignored_seg(ascii: bool) -> TextSeg {
+    icon_text_seg(icon_ignored(ascii), SegRole::Muted, IconKind::Ignored)
+}
+
+/// Put `icons` (bare glyph segments) at the start of the trailing run,
+/// one space between neighbours and one space before the rest of the run.
+///
+/// These are the row icons that follow the name in paint order. On the
+/// right-aligned trailing run a narrow pane clips the name, not them.
+fn with_leading_icons(icons: Vec<TextSeg>, mut trailing: Vec<TextSeg>) -> Vec<TextSeg> {
+    let mut run = Vec::new();
+    for icon in icons {
+        if !run.is_empty() {
+            run.push(text_seg(" ", SegRole::Muted));
+        }
+        run.push(icon);
+    }
+    if !run.is_empty() && !trailing.is_empty() {
+        run.push(text_seg(" ", SegRole::Muted));
+    }
+    run.append(&mut trailing);
+    run
 }
 
 fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegments {
@@ -1088,7 +1112,7 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
             .iter()
             .filter(|c| c.kind == NodeKind::Checkout)
             .count();
-        let mut segments = vec![TextSeg {
+        let segments = vec![TextSeg {
             text: node.chrome.path.clone(),
             role: name_role,
             hex: None,
@@ -1096,13 +1120,6 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
             dim: false,
             icon: None,
         }];
-        if node.ignored {
-            segments.push(icon_text_seg(
-                format!(" {}", icon_ignored(ascii)),
-                SegRole::Muted,
-                IconKind::Ignored,
-            ));
-        }
         let mut trailing = sync_trailing(&node.chrome, in_no_updates, ascii);
         let wt_prefix = if trailing.is_empty() { "" } else { "  " };
         trailing.push(icon_text_seg(
@@ -1114,6 +1131,8 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
             trailing.push(change_count_seg(node.chrome.change_count));
         }
         trailing = with_repo_kind_icon(trailing, icon_repo(ascii), repo_kind_role(node.ignored));
+        let ignored = node.ignored.then(|| ignored_seg(ascii));
+        trailing = with_leading_icons(ignored.into_iter().collect(), trailing);
         return NodeSegments { segments, trailing };
     }
 
@@ -1165,19 +1184,8 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
             icon: None,
         });
     }
-    if node.ignored {
-        segments.push(tagged(
-            icon_seg(&format!(" {}", icon_ignored(ascii)), SegRole::Muted),
-            IconKind::Ignored,
-        ));
-    }
     segments.push(text_seg("  ", SegRole::Muted));
-    segments.push(tagged(
-        icon_seg(icon_branch(ascii), branch_role),
-        IconKind::Branch,
-    ));
     segments.push(text_seg(node.chrome.branch.clone(), branch_role));
-    segments.extend(merge);
 
     let mut trailing = sync_trailing(&node.chrome, in_no_updates, ascii);
     if node.chrome.change_count > 0 {
@@ -1186,7 +1194,21 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
     if !linked {
         trailing = with_repo_kind_icon(trailing, icon_repo(ascii), kind_role);
     }
-    NodeSegments { segments, trailing }
+    // Icons that follow the name in paint order, then the old trailing run.
+    let mut icons = Vec::new();
+    if node.ignored {
+        icons.push(ignored_seg(ascii));
+    }
+    icons.push(icon_text_seg(
+        icon_branch(ascii),
+        branch_role,
+        IconKind::Branch,
+    ));
+    icons.extend(merge);
+    NodeSegments {
+        segments,
+        trailing: with_leading_icons(icons, trailing),
+    }
 }
 
 fn checkout_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegments {
@@ -1212,7 +1234,7 @@ fn checkout_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeS
     } else {
         node.chrome.branch.clone()
     };
-    let mut segments = vec![
+    let segments = vec![
         tagged(icon_seg(row_icon, SegRole::Heading), row_kind),
         TextSeg {
             text: main_label,
@@ -1223,12 +1245,14 @@ fn checkout_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeS
             icon: None,
         },
     ];
-    segments.extend(merge);
     let mut trailing = sync_trailing(&node.chrome, in_no_updates, ascii);
     if node.chrome.change_count > 0 {
         trailing.push(change_count_seg(node.chrome.change_count));
     }
-    NodeSegments { segments, trailing }
+    NodeSegments {
+        segments,
+        trailing: with_leading_icons(merge.into_iter().collect(), trailing),
+    }
 }
 
 fn workspace_segments(node: &TreeNode, ascii: bool) -> NodeSegments {
@@ -1358,12 +1382,8 @@ pub fn with_comment_mark(
     marked
 }
 
-/// Segments for a flattened row. Viewed eye is prepended on dirty file rows
-/// using `icon_viewed` — nf-fa-eye `U+F06E` / `*`. Paint is bold
-/// [`SegRole::Viewed`] (teal/cyan), not muted and not the clean check.
-/// Comment mark uses `icon_comment` (`"` / nf-fa-comment) on rows that have
-/// a live comment, or `icon_comment_resolved` (`'` / nf-fa-comment-o) when
-/// every comment on that row is resolved.
+/// [`painted_row_segments`] with no PR badge.
+#[cfg(test)]
 pub fn row_segments(
     row: &VisibleRow,
     ascii: bool,
@@ -1371,11 +1391,7 @@ pub fn row_segments(
     commented: bool,
     resolved: bool,
 ) -> NodeSegments {
-    let trailing = with_comment_mark(row.trailing_segs.clone(), ascii, commented, resolved);
-    NodeSegments {
-        segments: row.segments.clone(),
-        trailing: with_viewed_mark(trailing, ascii, viewed && row.kind == NodeKind::File),
-    }
+    painted_row_segments(row, ascii, viewed, commented, resolved, None)
 }
 
 /// Prepend the viewed eye (`icon_viewed`, bold [`SegRole::Viewed`]) to
@@ -1434,35 +1450,62 @@ pub fn pr_badge_repo(row: &VisibleRow) -> Option<&str> {
     }
 }
 
-/// Insert the PR badge (a space, then the glyph) right after the branch
-/// segment of a repo or checkout row, after its merge mark when it has one.
+/// Insert the PR badge glyph into the trailing run of a repo or checkout
+/// row, at its paint-order slot: after the merge mark, else after the repo
+/// row's branch glyph, else at the start of the run. One space separates
+/// it from its neighbours.
 ///
-/// Returns the index of the glyph segment, or `None` when `state` is `None`
-/// or the row paints no branch. Tree rows are built without PR state, so
-/// paint adds the badge per frame.
+/// Returns the index of the glyph in `segs.trailing`, or `None` when
+/// `state` is `None` or the label paints no branch text. Tree rows are
+/// built without PR state, so paint adds the badge per frame, before the
+/// comment and viewed marks.
 pub fn with_pr_badge(
-    segments: &mut Vec<TextSeg>,
+    segs: &mut NodeSegments,
     ascii: bool,
     state: Option<PrState>,
 ) -> Option<usize> {
     let state = state?;
-    let branch = segments
+    let paints_branch = segs
+        .segments
         .iter()
-        .rposition(|seg| matches!(seg.role, SegRole::BranchDefault | SegRole::BranchFeature))?;
+        .any(|seg| matches!(seg.role, SegRole::BranchDefault | SegRole::BranchFeature));
+    if !paints_branch {
+        return None;
+    }
     let (glyph, role) = pr_badge_mark(ascii, state);
-    let merge = segments
-        .get(branch + 1)
-        .and_then(|seg| seg.icon)
-        .is_some_and(is_merge_mark_kind);
-    let at = branch + 1 + usize::from(merge);
-    segments.insert(at, text_seg(" ", SegRole::Muted));
-    segments.insert(at + 1, icon_text_seg(glyph, role, pr_badge_kind(state)));
-    Some(at + 1)
+    let badge = icon_text_seg(glyph, role, pr_badge_kind(state));
+    let trailing = &mut segs.trailing;
+    let anchor = trailing.iter().rposition(|seg| {
+        seg.icon
+            .is_some_and(|kind| kind == IconKind::Branch || is_merge_mark_kind(kind))
+    });
+    match anchor {
+        Some(anchor) => {
+            trailing.insert(anchor + 1, text_seg(" ", SegRole::Muted));
+            trailing.insert(anchor + 2, badge);
+            Some(anchor + 2)
+        }
+        None => {
+            if !trailing.is_empty() {
+                trailing.insert(0, text_seg(" ", SegRole::Muted));
+            }
+            trailing.insert(0, badge);
+            Some(0)
+        }
+    }
 }
 
-/// Every segment one tree row paints: [`row_segments`] plus the PR badge.
+/// Every segment one tree row paints: the row's segments plus the PR
+/// badge, the comment mark, and the viewed eye.
 ///
-/// Paint and `gh` both read this, so the icons `gh` lists are the icons
+/// The viewed eye is prepended on dirty file rows using `icon_viewed` —
+/// nf-fa-eye `U+F06E` / `*`. Paint is bold [`SegRole::Viewed`] (teal/cyan),
+/// not muted and not the clean check. The comment mark uses `icon_comment`
+/// (`"` / nf-fa-comment) on rows that have a live comment, or
+/// `icon_comment_resolved` (`'` / nf-fa-comment-o) when every comment on
+/// that row is resolved. Both go ahead of the PR badge.
+///
+/// Paint, pan, and `gh` read this, so the icons `gh` lists are the icons
 /// the row paints, in paint order (label first, then the trailing run).
 pub fn painted_row_segments(
     row: &VisibleRow,
@@ -1472,11 +1515,18 @@ pub fn painted_row_segments(
     resolved: bool,
     pr: Option<PrState>,
 ) -> NodeSegments {
-    let mut segs = row_segments(row, ascii, viewed, commented, resolved);
+    let mut segs = NodeSegments {
+        segments: row.segments.clone(),
+        trailing: row.trailing_segs.clone(),
+    };
     if pr_badge_repo(row).is_some() {
-        with_pr_badge(&mut segs.segments, ascii, pr);
+        with_pr_badge(&mut segs, ascii, pr);
     }
-    segs
+    let trailing = with_comment_mark(segs.trailing, ascii, commented, resolved);
+    NodeSegments {
+        segments: segs.segments,
+        trailing: with_viewed_mark(trailing, ascii, viewed && row.kind == NodeKind::File),
+    }
 }
 
 /// Icons of `segs` in paint order: the label, then the trailing run. A
@@ -1585,15 +1635,11 @@ mod tests {
             "status failed is not a sync mark; only its glyph is an icon"
         );
 
-        let mut segments = vec![
-            text_seg("app", SegRole::Repo),
-            text_seg("feature", SegRole::BranchFeature),
-        ];
-        let at = with_pr_badge(&mut segments, true, Some(PrState::Approved)).expect("badge");
-        assert_eq!(segments[at].icon, Some(IconKind::PrApproved));
-        assert_eq!(segments[at].text, "A");
-        let segs = NodeSegments {
-            segments,
+        let mut segs = NodeSegments {
+            segments: vec![
+                text_seg("app", SegRole::Repo),
+                text_seg("feature", SegRole::BranchFeature),
+            ],
             trailing: sync_trailing(
                 &NodeChrome {
                     sync_status: Some(SyncStatus::Behind),
@@ -1604,11 +1650,26 @@ mod tests {
                 true,
             ),
         };
+        let at = with_pr_badge(&mut segs, true, Some(PrState::Approved)).expect("badge");
+        assert_eq!(at, 0, "no merge mark: the badge leads the trailing run");
+        assert_eq!(segs.trailing[at].icon, Some(IconKind::PrApproved));
+        let trailing: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(trailing, "A v1", "one space between the badge and sync");
         assert_eq!(
             segment_icons(&segs),
             vec![IconKind::PrApproved, IconKind::Behind],
             "label first, then the trailing run"
         );
+        let mut no_branch = NodeSegments {
+            segments: vec![text_seg("app", SegRole::Repo)],
+            trailing: Vec::new(),
+        };
+        assert_eq!(
+            with_pr_badge(&mut no_branch, true, Some(PrState::Open)),
+            None,
+            "a row that paints no branch text gets no badge"
+        );
+        assert!(no_branch.trailing.is_empty());
     }
 
     fn repo(name: &str, ignored_dirty: bool, linked: bool) -> RepoSnapshot {
@@ -2153,7 +2214,7 @@ mod tests {
         let rows = flatten_with(&tree, &HashSet::new(), true);
         let app = rows.iter().find(|r| r.id == "repo:app").expect("repo:app");
         assert!(
-            trailing_starts_with_glyph(app, icon_repo(true)),
+            trailing_has_glyph(app, icon_repo(true)),
             "flat primary repo glyph sits in trailing, got {}",
             app.trailing
         );
@@ -2163,7 +2224,7 @@ mod tests {
         );
         assert!(
             !left_has_glyph(app, icon_linked_worktree(true))
-                && !trailing_starts_with_glyph(app, icon_linked_worktree(true)),
+                && !trailing_has_glyph(app, icon_linked_worktree(true)),
             "flat primary must not use the linked-worktree glyph, got left {:?} trailing {}",
             app.segments.first().map(|s| s.text.as_str()),
             app.trailing
@@ -2172,6 +2233,10 @@ mod tests {
 
     fn left_has_glyph(row: &VisibleRow, glyph: &str) -> bool {
         row.segments.iter().any(|s| s.text.trim() == glyph)
+    }
+
+    fn trailing_has_glyph(row: &VisibleRow, glyph: &str) -> bool {
+        row.trailing_segs.iter().any(|s| s.text.trim() == glyph)
     }
 
     fn trailing_starts_with_glyph(row: &VisibleRow, glyph: &str) -> bool {
@@ -2236,19 +2301,27 @@ mod tests {
             comment < ahead,
             "comment mark stays ahead of status in trailing, got {trail}"
         );
-        // The open mark is its own muted segment right after the branch;
-        // the painted label is the same text as one `branch o` segment.
-        let at = checkout
-            .segments
-            .iter()
-            .position(|seg| seg.icon == Some(IconKind::OpenVsDefault))
-            .expect("merge mark segment");
-        assert_eq!(checkout.segments[at].text, " o");
-        assert_eq!(checkout.segments[at].role, SegRole::Muted);
-        assert_eq!(checkout.segments[at - 1].text, "feature/login-page");
-        assert!(checkout.label.contains("feature/login-page o"));
+        // The open mark follows the name in paint order, so it leads the
+        // trailing run as its own muted segment; the label ends at the name.
+        assert!(
+            checkout
+                .segments
+                .iter()
+                .all(|seg| seg.icon != Some(IconKind::OpenVsDefault)),
+            "merge mark leaves the label"
+        );
+        assert_eq!(
+            checkout.segments.last().map(|seg| seg.text.as_str()),
+            Some("feature/login-page")
+        );
+        assert_eq!(
+            checkout.trailing_segs[0].icon,
+            Some(IconKind::OpenVsDefault)
+        );
+        assert_eq!(checkout.trailing_segs[0].text, "o");
+        assert_eq!(checkout.trailing_segs[0].role, SegRole::Muted);
         assert_eq!(checkout.segments[0].icon, Some(IconKind::LinkedWorktree));
-        assert_eq!(checkout.trailing, "^1  1");
+        assert_eq!(checkout.trailing, "o ^1  1");
     }
 
     #[test]
@@ -2275,8 +2348,16 @@ mod tests {
             comment < kind,
             "comment mark stays ahead of the kind glyph, got {marked}"
         );
-        assert_eq!(app.trailing_segs[0].icon, Some(IconKind::Repo));
-        assert_eq!(app.trailing_segs[0].text, "@ ", "glyph keeps its space");
+        let kind_at = app
+            .trailing_segs
+            .iter()
+            .position(|seg| seg.icon == Some(IconKind::Repo))
+            .expect("repo glyph");
+        assert_eq!(
+            app.trailing_segs[kind_at].text, "@ ",
+            "glyph keeps its space"
+        );
+        assert_eq!(trail, "& @ ^2  1", "branch glyph, then the repo glyph");
         assert_eq!(
             segment_icons(&row_segments(app, true, false, false, false)),
             vec![
@@ -2344,35 +2425,40 @@ mod tests {
             tagged_segs(&row("checkout:app")),
             vec![
                 (K::Branch, s("& ")),
-                (K::MergedIntoDefault, s(" M")),
+                (K::MergedIntoDefault, s("M")),
                 (K::NoUpstream, s("?")),
                 (K::ChangeCount, s("  2")),
             ]
         );
         let merged = row("checkout:app");
         let mark = merged
-            .segments
+            .trailing_segs
             .iter()
             .find(|seg| seg.icon == Some(K::MergedIntoDefault))
             .expect("merge mark");
         assert_eq!(mark.role, SegRole::Added, "merged paints in the added role");
-        assert!(
-            merged.label.starts_with("& feature/landed M"),
-            "{}",
-            merged.label
+        assert_eq!(merged.label, "& feature/landed  M ?  2");
+        assert_eq!(
+            tagged_segs(&row("repo:notes"))
+                .iter()
+                .map(|(_, text)| text.as_str())
+                .collect::<String>(),
+            "~&@ ?  1",
+            "ignored and branch glyphs lead the trailing run"
         );
+        assert_eq!(row("repo:notes").trailing, "~ & @ ?  1");
         assert_eq!(
             tagged_segs(&row("checkout:app/.worktrees/feat")),
             vec![
                 (K::LinkedWorktree, s("L ")),
-                (K::OpenVsDefault, s(" o")),
+                (K::OpenVsDefault, s("o")),
                 (K::Behind, s("v3")),
             ]
         );
         assert_eq!(
             tagged_segs(&row("repo:broken")),
             vec![
-                (K::Branch, s("& ")),
+                (K::Branch, s("&")),
                 (K::Repo, s("@ ")),
                 (K::StatusFailed, s("!")),
             ]
@@ -2380,8 +2466,8 @@ mod tests {
         assert_eq!(
             tagged_segs(&row("repo:notes")),
             vec![
-                (K::Ignored, s(" ~ ")),
-                (K::Branch, s("& ")),
+                (K::Ignored, s("~")),
+                (K::Branch, s("&")),
                 (K::Repo, s("@ ")),
                 (K::NoUpstream, s("?")),
                 (K::ChangeCount, s("  1")),
@@ -2393,7 +2479,7 @@ mod tests {
         );
         assert_eq!(
             tagged_segs(&row("repo:idle")),
-            vec![(K::Branch, s("& ")), (K::Repo, s("@ ")), (K::Clean, s("."))]
+            vec![(K::Branch, s("&")), (K::Repo, s("@ ")), (K::Clean, s("."))]
         );
         let group = row("group:no-updates");
         assert_eq!(
@@ -2414,7 +2500,12 @@ mod tests {
         let row = rows.iter().find(|r| r.id == "repo:app").expect("repo:app");
         let segs = painted_row_segments(row, true, false, false, false, Some(PrState::Open));
         let left: String = segs.segments.iter().map(|seg| seg.text.as_str()).collect();
-        assert!(left.ends_with("feature/landed M P"), "{left}");
+        assert!(left.ends_with("  feature/landed"), "{left}");
+        let trail: String = segs.trailing.iter().map(|seg| seg.text.as_str()).collect();
+        assert_eq!(
+            trail, "& M P @ ?",
+            "branch glyph, merge mark, PR badge, repo"
+        );
         assert_eq!(
             segment_icons(&segs),
             vec![
@@ -2423,6 +2514,38 @@ mod tests {
                 IconKind::PrOpen,
                 IconKind::Repo,
                 IconKind::NoUpstream,
+            ]
+        );
+    }
+
+    #[test]
+    fn checkout_pr_badge_follows_the_open_mark_behind_the_comment_mark() {
+        let mut primary = dirty_repo("app", &["src/a.ts"]);
+        primary.branch = "main".into();
+        let mut linked = repo("app/.worktrees/feat", false, true);
+        linked.branch = "feature/side".into();
+        linked.sync_status = SyncStatus::Ahead;
+        linked.merged_into_default = Some(false);
+        linked.sync_note = "ahead by 1".into();
+        let built = build_workspace_snapshot(&[primary, linked], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let row = rows
+            .iter()
+            .find(|r| r.id == "checkout:app/.worktrees/feat")
+            .expect("linked checkout");
+        let segs = painted_row_segments(row, true, false, true, false, Some(PrState::Merged));
+        let trail: String = segs.trailing.iter().map(|seg| seg.text.as_str()).collect();
+        // Open mark, then the badge; the comment mark stays first.
+        assert_eq!(trail, "\" o m ^1");
+        assert_eq!(
+            segment_icons(&segs),
+            vec![
+                IconKind::LinkedWorktree,
+                IconKind::Comment,
+                IconKind::OpenVsDefault,
+                IconKind::PrMerged,
+                IconKind::Ahead,
             ]
         );
     }

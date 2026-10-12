@@ -69,8 +69,8 @@ use super::quick_open::{
 };
 use super::search::{
     collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids,
-    explorer_row_match_indices, slice_cols, wrap_col_starts, wrap_col_starts_capped, wrap_cols,
-    SearchPane,
+    explorer_row_match_indices, list_prefix_cols, slice_cols, wrap_col_starts,
+    wrap_col_starts_capped, wrap_cols, SearchPane,
 };
 use super::search_files::{
     option_is_on, option_tooltip, search_row_shows_status, SearchFilesState, SearchRow, SearchZone,
@@ -1253,15 +1253,16 @@ fn paint_tree_row(
 ///
 /// A span covers the glyph columns only: spaces at either end of the
 /// segment text stay out. Label icons pan and clip like the label; trailing
-/// icons clip at the row width. An icon with no cell on screen has no
-/// span.
+/// icons stay flush right and clip from the left with the trailing run. An
+/// icon with no cell on screen has no span.
 fn segmented_icon_spans(
     depth: usize,
     segs: &NodeSegments,
     width: usize,
     col_offset: usize,
 ) -> Vec<IconSpan> {
-    let (prefix_width, label_budget) = segmented_label_area(depth, segs, width);
+    let layout = segmented_row_layout(depth, segs, width);
+    let (prefix_width, label_budget) = (layout.prefix_width, layout.label_budget);
     let mut spans = Vec::new();
     for (index, seg) in segs.segments.iter().enumerate() {
         let Some(kind) = seg.icon else {
@@ -1284,38 +1285,29 @@ fn segmented_icon_spans(
             spans.push((kind, x, w));
         }
     }
-    let label = slice_segs(&segs.segments, col_offset, label_budget.max(1));
-    let label_width: usize = label.iter().map(|s| visible_width(&s.text)).sum();
-    let trailing_width: usize = segs.trailing.iter().map(|s| visible_width(&s.text)).sum();
-    let pad = usize::from(trailing_width > 0);
-    let mut x = prefix_width + label_width + pad + label_budget.saturating_sub(label_width);
+    // Trailing columns are counted on the full run; the first
+    // `trailing_skip` of them are cut off at the left.
+    let mut col = 0;
     for seg in &segs.trailing {
         let seg_width = visible_width(&seg.text);
         if let Some(kind) = seg.icon {
             let (lead, core, _) = split_seg_padding(seg);
-            let start = x + visible_width(&lead.text);
-            let shown = clipped_width(&core.text, width.saturating_sub(start));
+            let core_start = col + visible_width(&lead.text);
+            let core_width = visible_width(&core.text);
+            // The run is cut at its left only, so what shows is a suffix
+            // of the glyph text, less the spaces a cut leaves at its start
+            // (`2 wt` cut after `2` is two columns).
+            let cut = layout.trailing_skip.saturating_sub(core_start);
+            let shown = slice_cols(&core.text, cut, core_width);
+            let shown = visible_width(shown.trim_start_matches(' '));
             if shown > 0 {
-                spans.push((kind, start, shown));
+                let start = core_start + core_width - shown - layout.trailing_skip;
+                spans.push((kind, layout.trailing_x + start, shown));
             }
         }
-        x += seg_width;
+        col += seg_width;
     }
     spans
-}
-
-/// Columns of `text` that fit in `room`, less the spaces a cut leaves at
-/// the end (`2 wt` cut after `2 ` is one column).
-fn clipped_width(text: &str, room: usize) -> usize {
-    let (mut used, mut end) = (0, 0);
-    for (at, ch) in text.char_indices() {
-        used += visible_width(ch.encode_utf8(&mut [0; 4]));
-        if used > room {
-            break;
-        }
-        end = at + ch.len_utf8();
-    }
-    visible_width(text[..end].trim_end())
 }
 
 /// `seg` as leading spaces, the text between, and trailing spaces, each
@@ -1335,17 +1327,51 @@ fn split_seg_padding(seg: &TextSeg) -> (TextSeg, TextSeg, TextSeg) {
     )
 }
 
-/// Prefix width (edge, indent, chevron) and label budget of a row that
-/// [`paint_segmented_row`] paints `width` columns wide.
-fn segmented_label_area(depth: usize, segs: &NodeSegments, width: usize) -> (usize, usize) {
+/// Columns of a row that [`paint_segmented_row`] paints `width` columns
+/// wide.
+struct SegmentedRowLayout {
+    /// Edge marker, indent, and chevron.
+    prefix_width: usize,
+    /// Columns the label may paint.
+    label_budget: usize,
+    /// Trailing run as painted, flush with the right edge.
+    trailing: Vec<TextSeg>,
+    /// Row column where the painted trailing run starts.
+    trailing_x: usize,
+    /// Columns cut off the left of the trailing run.
+    trailing_skip: usize,
+}
+
+/// Lay out a segmented row `width` columns wide.
+///
+/// The trailing run sits flush right after a one-column pad and the label
+/// gets the columns left after the prefix. When the trailing run alone is
+/// wider than the room after the prefix, the label gets no columns and the
+/// run is cut from the left, so its right edge stays on screen. A wide
+/// glyph cut by that edge drops whole, and a space fills its column.
+fn segmented_row_layout(depth: usize, segs: &NodeSegments, width: usize) -> SegmentedRowLayout {
+    let prefix_width = list_prefix_cols(depth);
+    let room = width.saturating_sub(prefix_width);
     let trailing_width: usize = segs.trailing.iter().map(|s| visible_width(&s.text)).sum();
     let pad = usize::from(trailing_width > 0);
-    let prefix_width = 1 + 2 * depth + 2;
-    let label_budget = width
-        .saturating_sub(prefix_width)
-        .saturating_sub(trailing_width)
-        .saturating_sub(pad);
-    (prefix_width, label_budget)
+    if trailing_width + pad <= room {
+        return SegmentedRowLayout {
+            prefix_width,
+            label_budget: room - trailing_width - pad,
+            trailing: segs.trailing.clone(),
+            trailing_x: prefix_width + room - trailing_width,
+            trailing_skip: 0,
+        };
+    }
+    let trailing = slice_segs(&segs.trailing, trailing_width - room, room);
+    let shown: usize = trailing.iter().map(|s| visible_width(&s.text)).sum();
+    SegmentedRowLayout {
+        prefix_width,
+        label_budget: 0,
+        trailing,
+        trailing_x: prefix_width + room - shown,
+        trailing_skip: trailing_width - shown,
+    }
 }
 
 /// Painted span (column offset from the row start, width) of label
@@ -1363,7 +1389,7 @@ fn painted_seg_span(
     // Slice exactly as paint does, so a wide glyph cut by the offset
     // moves the span the same way it moves the painted cells.
     let painted_width = |end: usize| -> usize {
-        slice_segs(&segs[..end], col_offset, label_budget.max(1))
+        slice_segs(&segs[..end], col_offset, label_budget)
             .iter()
             .map(|s| visible_width(&s.text))
             .sum()
@@ -1392,9 +1418,7 @@ fn paint_segmented_row(
     // A search-match row paints its text in the filter foreground: the
     // filter background can equal a segment colour (branch names).
     let match_fg = (flash.is_none() && !selected && search_match).then_some(search.fg);
-    let trailing_text: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
-    let trailing_width = visible_width(&trailing_text);
-    let pad = usize::from(trailing_width > 0);
+    let layout = segmented_row_layout(depth, segs, width);
 
     let mut spans: Vec<Span> = Vec::new();
     let edge = selection_marker(selected, focused);
@@ -1416,17 +1440,18 @@ fn paint_segmented_row(
         Style::default().fg(palette.muted),
         bg,
     ));
-    let (_, label_budget) = segmented_label_area(depth, segs, width);
-    let label = slice_segs(&segs.segments, col_offset, label_budget.max(1));
+    let label = slice_segs(&segs.segments, col_offset, layout.label_budget);
     let label_width: usize = label.iter().map(|s| visible_width(&s.text)).sum();
     for seg in &label {
         spans.push(styled_span(&seg.text, seg_style(seg, palette), bg));
     }
-    let gap = pad + label_budget.saturating_sub(label_width);
+    let gap = layout
+        .trailing_x
+        .saturating_sub(layout.prefix_width + label_width);
     if gap > 0 {
         spans.push(styled_span(&" ".repeat(gap), Style::default(), bg));
     }
-    for seg in &segs.trailing {
+    for seg in &layout.trailing {
         spans.push(styled_span(&seg.text, seg_style(seg, palette), bg));
     }
     let used: usize = spans
@@ -10712,6 +10737,184 @@ mod tests {
         );
     }
 
+    /// Paint `row` with a PR badge; the line text and its icon spans.
+    fn paint_row_icons(
+        row: &VisibleRow,
+        width: usize,
+        pr: Option<PrState>,
+    ) -> (String, Vec<IconSpan>) {
+        let palette = crate::tui::theme::ThemeId::TokyoNight.palette();
+        let (line, icons) = paint_tree_row(
+            row,
+            width,
+            false,
+            false,
+            None,
+            false,
+            search_bg_unused(),
+            true,
+            false,
+            false,
+            false,
+            pr,
+            palette,
+            0,
+        );
+        (line_text(&line), icons)
+    }
+
+    /// Long repo row (ignored, ahead) and long linked checkout row (open
+    /// vs default, ahead): both paint icons that follow the name.
+    fn icon_after_name_rows() -> (VisibleRow, VisibleRow) {
+        const NAME: &str = "services/very-long-repo-name-that-must-clip";
+        let mut ignored = repo(NAME, true);
+        ignored.sync_status = SyncStatus::Ahead;
+        ignored.sync_note = "ahead by 2".into();
+        let mut primary = repo("app", true);
+        primary.branch = "main".into();
+        let mut linked = repo("app/.worktrees/feat", true);
+        linked.checkout_kind = CheckoutKind::Linked;
+        linked.primary_repo = Some("app".into());
+        linked.branch = "feature/very-long-linked-branch-name".into();
+        linked.sync_status = SyncStatus::Ahead;
+        linked.sync_note = "ahead by 1".into();
+        linked.merged_into_default = Some(false);
+        let built =
+            build_workspace_snapshot(&[ignored, primary, linked], &[NAME.into()], true, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let find = |id: &str| rows.iter().find(|r| r.id == id).expect(id).clone();
+        (
+            find(&format!("repo:{NAME}")),
+            find("checkout:app/.worktrees/feat"),
+        )
+    }
+
+    #[test]
+    fn narrow_rows_clip_the_name_and_keep_icons_after_it_flush_right() {
+        let (repo_row, checkout) = icon_after_name_rows();
+        for (row, pr, trail, glyphs, clipped) in [
+            (
+                &repo_row,
+                None,
+                "~ & @ ^2  1",
+                vec![(IconKind::Ignored, '~'), (IconKind::Branch, '&')],
+                "must-clip",
+            ),
+            (
+                &checkout,
+                Some(PrState::Open),
+                "o P ^1  1",
+                vec![(IconKind::OpenVsDefault, 'o'), (IconKind::PrOpen, 'P')],
+                "branch-name",
+            ),
+        ] {
+            let width = 30;
+            let (text, icons) = paint_row_icons(row, width, pr);
+            assert_eq!(text.chars().count(), width, "{text}");
+            assert!(text.ends_with(trail), "icons sit flush right:\n{text}");
+            assert!(!text.contains(clipped), "the name clips:\n{text}");
+            let start = width - trail.len();
+            for (kind, glyph) in glyphs {
+                let x = start + trail.find(glyph).expect("glyph");
+                assert!(
+                    icons.contains(&(kind, x, 1)),
+                    "{kind:?} hit at {x}: {icons:?}\n{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn trailing_run_wider_than_the_room_clips_from_the_left() {
+        let (row, _) = icon_after_name_rows();
+        let trail = "~ & @ ^2  1";
+        // Depth 1: edge, indent, chevron take five columns.
+        let prefix = 5;
+        for room in 0..trail.len() {
+            let width = prefix + room;
+            let (text, icons) = paint_row_icons(&row, width, None);
+            let what = format!("width {width}: {text:?} {icons:?}");
+            assert_eq!(text.chars().count(), width, "{what}");
+            assert_eq!(
+                &text[prefix..],
+                &trail[trail.len() - room..],
+                "right edge of the run stays on screen: {what}"
+            );
+            assert!(!text.contains("services"), "{what}");
+            for &(kind, x, w) in &icons {
+                assert!(x >= prefix && x + w <= width, "{kind:?} {what}");
+                let cells = &text[x..x + w];
+                assert!(
+                    !cells.starts_with(' ') && !cells.ends_with(' '),
+                    "{kind:?} span is the glyph only: {what}"
+                );
+            }
+            let kinds: Vec<IconKind> = icons.iter().map(|icon| icon.0).collect();
+            assert!(
+                !kinds.contains(&IconKind::Ignored),
+                "the leftmost icon is cut first: {what}"
+            );
+            assert_eq!(
+                kinds.contains(&IconKind::Repo),
+                room >= 7,
+                "an icon cut off records no hit: {what}"
+            );
+            if room == 4 {
+                // `^2` cut to `2`: the hit covers the visible column only.
+                assert!(icons.contains(&(IconKind::Ahead, prefix, 1)), "{what}");
+            }
+        }
+    }
+
+    #[test]
+    fn left_cut_wide_glyph_leaves_a_space_and_keeps_the_right_edge() {
+        let segs = NodeSegments {
+            segments: vec![TextSeg {
+                text: "name".into(),
+                role: SegRole::Repo,
+                hex: None,
+                bold: false,
+                dim: false,
+                icon: None,
+            }],
+            trailing: vec![TextSeg {
+                text: "界1".into(),
+                role: SegRole::Muted,
+                hex: None,
+                bold: false,
+                dim: false,
+                icon: Some(IconKind::ChangeCount),
+            }],
+        };
+        let palette = crate::tui::theme::ThemeId::TokyoNight.palette();
+        // Depth 0 prefix is three columns; two are left for a three-column run.
+        let width = 5;
+        let line = paint_segmented_row(
+            0,
+            false,
+            false,
+            &segs,
+            width,
+            false,
+            false,
+            None,
+            false,
+            search_bg_unused(),
+            true,
+            palette,
+            0,
+        );
+        let text = line_text(&line);
+        assert_eq!(visible_width(&text), width, "{text:?}");
+        assert!(text.ends_with(" 1"), "{text:?}");
+        assert!(!text.contains("name") && !text.contains('界'), "{text:?}");
+        assert_eq!(
+            segmented_icon_spans(0, &segs, width, 0),
+            vec![(IconKind::ChangeCount, 4, 1)]
+        );
+    }
+
     #[test]
     fn narrow_file_row_keeps_status_badge_when_name_clips() {
         let mut snap = repo("app", true);
@@ -15222,8 +15425,8 @@ mod tests {
     }
 
     #[test]
-    fn tree_pr_badge_paints_after_the_branch_and_records_its_cell() {
-        use crate::tui::icons::{icon_pr_approved, icon_pr_merged, icon_pr_open};
+    fn tree_pr_badge_paints_after_the_branch_glyph_and_records_its_cell() {
+        use crate::tui::icons::{icon_branch, icon_pr_approved, icon_pr_merged, icon_pr_open};
         let palette = ThemeId::TokyoNight.palette();
         let cases = [
             (
@@ -15249,7 +15452,12 @@ mod tests {
                 let y = tree_row_y(&state, "repo:app");
                 let branch_x = find_cell_col(buf, y, "feature")
                     .unwrap_or_else(|| panic!("{what}: branch on\n{}", buf_line(buf, y)));
-                let x = branch_x + 8;
+                // Trailing run `<branch glyph> <badge> <repo glyph> ...`,
+                // flush right; the branch text stays in the label.
+                let glyph_x = (branch_x + 7..state.layout.tree_width)
+                    .find(|&x| buf[(x, y)].symbol() == icon_branch(ascii))
+                    .unwrap_or_else(|| panic!("{what}: branch glyph on\n{}", buf_line(buf, y)));
+                let x = glyph_x + 2;
                 assert_eq!(
                     state.layout.pr_badge_hits(),
                     vec![PrBadgeHit {
@@ -15348,28 +15556,22 @@ mod tests {
     }
 
     #[test]
-    fn tree_pr_badge_hit_follows_hscroll_and_drops_when_cut() {
+    fn tree_pr_badge_hit_stays_put_under_hscroll() {
         let mut state = pr_state(&[branch_repo("app", "feature")], true);
         set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
         let mut terminal = pr_terminal();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let x = state.layout.pr_badge_hits()[0].x;
 
-        state.left_col_offset = 3;
-        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-        assert_eq!(state.layout.pr_badge_hits().len(), 1);
-        let hit = state.layout.pr_badge_hits()[0].clone();
-        assert_eq!(hit.x, x - 3);
-        assert_eq!(terminal.backend().buffer()[(hit.x, hit.y)].symbol(), "P");
-
-        // Scrolled past the badge: nothing painted, nothing recorded.
-        state.left_col_offset = 40;
-        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-        assert!(state.layout.pr_badge_hits().is_empty());
-        let buf = terminal.backend().buffer();
-        let row = buf_line(buf, tree_row_y(&state, "repo:app"));
-        let tree: String = row.chars().take(state.layout.tree_width as usize).collect();
-        assert!(!tree.contains('P'), "{row}");
+        // Pan moves the label only; the trailing run keeps its cells.
+        for offset in [3, 40] {
+            state.left_col_offset = offset;
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            assert_eq!(state.layout.pr_badge_hits().len(), 1, "offset {offset}");
+            let hit = state.layout.pr_badge_hits()[0].clone();
+            assert_eq!(hit.x, x, "offset {offset}");
+            assert_eq!(terminal.backend().buffer()[(hit.x, hit.y)].symbol(), "P");
+        }
     }
 
     #[test]
@@ -15442,7 +15644,7 @@ mod tests {
         assert_eq!(pr_opened(&effect), want);
         assert_eq!(state.rows[state.cursor].id, "repo:app");
 
-        // One column left is the branch text: a plain click.
+        // One column left is the separator space: a plain click.
         let effect = state.dispatch(Action::CtrlClick {
             col: hit.x - 1,
             row: hit.y,
@@ -15799,7 +16001,8 @@ mod tests {
                     assert!(x + w <= width, "{what}");
                     let cells: String = text[x..x + w].iter().collect();
                     match kind {
-                        IconKind::Behind => assert!("v12".starts_with(&cells), "{what}"),
+                        // A narrow pane cuts the trailing run from the left.
+                        IconKind::Behind => assert!("v12".ends_with(&cells), "{what}"),
                         IconKind::PrMerged => assert_eq!(cells, "m", "{what}"),
                         IconKind::Branch => assert_eq!(cells, "&", "{what}"),
                         IconKind::Repo => assert_eq!(cells, "@", "{what}"),
@@ -15928,7 +16131,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_mark_paints_its_own_colour_and_hit_after_the_branch() {
+    fn merge_mark_paints_its_own_colour_and_hit_in_the_trailing_run() {
         let mut state = branch_rows_state();
         let mut terminal = pr_terminal();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
@@ -15951,11 +16154,7 @@ mod tests {
             ),
         ] {
             let y = tree_row_y(&state, id);
-            let x = find_cell_col(buf, y, branch).expect("branch") + branch.len() as u16 + 1;
-            assert_eq!(buf[(x - 1, y)].symbol(), " ", "{id}");
-            assert_eq!(buf[(x, y)].symbol(), mark, "{id}");
-            assert_eq!(buf[(x, y)].fg, fg, "{id}: the mark's own role");
-            assert_ne!(buf[(x - 2, y)].fg, fg, "{id}: the branch keeps its colour");
+            let branch_end = find_cell_col(buf, y, branch).expect("branch") + branch.len() as u16;
             let hit = state
                 .layout
                 .icon_hits
@@ -15963,10 +16162,16 @@ mod tests {
                 .find(|hit| hit.kind == kind)
                 .cloned()
                 .expect("merge hit");
-            assert_eq!(
-                (hit.x, hit.y, hit.width),
-                (x, y, 1),
-                "{id}: glyph cell only"
+            let x = hit.x;
+            assert_eq!((hit.y, hit.width), (y, 1), "{id}: glyph cell only");
+            assert!(x > branch_end + 1, "{id}: the mark trails the branch text");
+            assert_eq!(buf[(x - 1, y)].symbol(), " ", "{id}");
+            assert_eq!(buf[(x, y)].symbol(), mark, "{id}");
+            assert_eq!(buf[(x, y)].fg, fg, "{id}: the mark's own role");
+            assert_ne!(
+                buf[(branch_end - 1, y)].fg,
+                fg,
+                "{id}: the branch keeps its colour"
             );
         }
     }

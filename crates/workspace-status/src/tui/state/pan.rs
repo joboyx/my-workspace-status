@@ -1,24 +1,16 @@
 //! Horizontal pan for tree, graph, commit-file, and file-diff panes.
 
-use std::path::Path;
-
 use ratatui::style::Color;
 use workspace_status_graph::{graph_col_max, graph_hscroll_visible};
 
 use super::super::action::{Action, Effect};
-use super::super::comments::{
-    commit_file_row_comments_resolved, commit_file_row_has_comment, tree_row_comments_resolved,
-    tree_row_has_comment,
-};
+use super::super::comments::{commit_file_row_comments_resolved, commit_file_row_has_comment};
 use super::super::diff::{cell_code_width, diff_row_content_width, gutter_width, DiffRow};
 use super::super::gates::ListFocusTarget;
 use super::super::icons::comment_mark_cols;
 use super::super::search::{apply_pan, list_row_pan_max, max_col_offset};
 use super::super::split::diff_paint_width;
-use super::super::tree::{
-    pr_badge_mark, pr_badge_repo, row_segments, with_comment_mark, with_pr_badge, with_viewed_mark,
-    NodeKind,
-};
+use super::super::tree::{pr_badge_mark, with_comment_mark, with_viewed_mark};
 use super::{AppState, FocusPane};
 use crate::helpers::visible_width;
 
@@ -98,14 +90,8 @@ impl AppState {
         self.rows
             .iter()
             .map(|row| {
-                let viewed = row.kind == NodeKind::File && self.reviewed.contains(&row.id);
-                let commented = tree_row_has_comment(&self.comment_store, &self.snapshot, row);
-                let resolved = commented
-                    && tree_row_comments_resolved(&self.comment_store, &self.snapshot, row);
-                let mut segs = row_segments(row, self.ascii, viewed, commented, resolved);
-                // A painted PR badge widens the label, so pan can reach it.
-                let pr = pr_badge_repo(row).and_then(|repo| self.pr_badge(Path::new(repo)));
-                with_pr_badge(&mut segs.segments, self.ascii, pr);
+                // The painted marks and PR badge widen the trailing run.
+                let segs = self.tree_row_paint_segments(row);
                 let label: usize = segs.segments.iter().map(|s| visible_width(&s.text)).sum();
                 let trailing: usize = segs.trailing.iter().map(|s| visible_width(&s.text)).sum();
                 list_row_pan_max(label, row.depth, trailing, width)

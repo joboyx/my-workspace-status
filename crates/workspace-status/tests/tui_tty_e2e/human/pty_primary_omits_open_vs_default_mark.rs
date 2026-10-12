@@ -1,8 +1,8 @@
 use crate::harness::PtySession;
 use crate::seed::worktree_workspace;
 use crate::support::{
-    crumb_row, no_mouse_toggle_toast, tree_cursor_on, tree_has, tree_line_containing,
-    tree_line_has_leading_worktree_icon, tree_pane_focused, WAIT,
+    crumb_row, merge_mark_after, no_mouse_toggle_toast, tree_cursor_on, tree_has,
+    tree_line_containing, tree_line_has_leading_worktree_icon, tree_pane_focused, WAIT,
 };
 
 const PRIMARY: &str = "feature/primary-open";
@@ -26,17 +26,17 @@ fn primary_row_omits_open_mark(screen: &str) -> bool {
         line.contains('&')
             && line.contains(PRIMARY)
             && !line.contains('L')
-            && !line.contains(&format!("{PRIMARY} o"))
-            && !line.contains(&format!("{PRIMARY} M"))
+            && merge_mark_after(&line, PRIMARY).as_deref() != Some("o")
+            && merge_mark_after(&line, PRIMARY).as_deref() != Some("M")
     })
 }
 
-/// ASCII linked extra: `L feature/linked-open o`. Merged `M` is the bug.
+/// ASCII linked extra: `L feature/linked-open … o`. Merged `M` is the bug.
 fn linked_row_keeps_open_mark(screen: &str) -> bool {
     tree_line_containing(screen, LINKED).is_some_and(|line| {
         tree_line_has_leading_worktree_icon(&line, LINKED)
-            && line.contains(&format!("{LINKED} o"))
-            && !line.contains(&format!("{LINKED} M"))
+            && merge_mark_after(&line, LINKED).as_deref() == Some("o")
+            && merge_mark_after(&line, LINKED).as_deref() != Some("M")
     })
 }
 
@@ -64,8 +64,8 @@ fn family_tree_idle(screen: &str) -> bool {
 /// Docs: nested primary uses `&` and omits open-vs-default `o`; linked extra
 /// keeps `L` plus `o`; merged `M` must not appear on these open rows.
 ///
-/// Live PTY: first paint shows `& feature/primary-open` (no `feature/primary-open o`)
-/// and `L feature/linked-open o`. The primary row has no `L`. Idle tree, no
+/// Live PTY: first paint shows `& feature/primary-open` (no trailing `o`)
+/// and `L feature/linked-open … o`. The primary row has no `L`. Idle tree, no
 /// overlays. A no-op or a primary painted like a linked open row cannot pass.
 #[test]
 fn pty_primary_omits_open_vs_default_mark() {

@@ -1,9 +1,9 @@
 use crate::harness::PtySession;
 use crate::seed::focus_workspace;
 use crate::support::{
-    crumb_row, focusbox_graph_left_full, graph_subject_meta_line, no_mouse_toggle_toast,
-    status_row, title_has_files, tree_cursor_on, tree_has, tree_line_containing, tree_pane_focused,
-    GIT_WAIT, SETTLE_MS, WAIT,
+    crumb_row, focusbox_graph_left_full, graph_subject_meta_line, line_on_branch,
+    no_mouse_toggle_toast, status_row, title_has_files, tree_cursor_on, tree_has,
+    tree_line_containing, tree_pane_focused, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 /// `j`, `k`, and `C` used to move or open a prompt; in the picker they type.
@@ -31,7 +31,9 @@ fn focusbox_on_keep(screen: &str) -> bool {
 fn focusbox_checked_out_new_branch(screen: &str) -> bool {
     tree_has(screen, BRANCH)
         && tree_line_containing(screen, "focusbox").is_some_and(|line| {
-            line.contains(BRANCH) && !line.contains("feature/keep") && !line.contains("& main")
+            line.contains(BRANCH)
+                && !line.contains("feature/keep")
+                && !line_on_branch(&line, "main")
         })
 }
 

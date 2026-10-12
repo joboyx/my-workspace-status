@@ -2,13 +2,14 @@ use crate::harness::PtySession;
 use crate::seed::ahead_workspace;
 use crate::support::{
     after_syncbox_name, crumb_row, graph_subject_line, graph_subject_meta_line, has_fetch_hint,
-    has_pull_hint, panes_tree_focused_graph_unfocused, status_row, syncbox_row_current,
-    tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
+    has_pull_hint, line_on_branch, panes_tree_focused_graph_unfocused, status_row,
+    syncbox_row_current, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 /// Trailing ASCII ahead-by-1 (`^1`) on the syncbox tree row.
 fn syncbox_row_ahead(screen: &str) -> bool {
-    after_syncbox_name(screen).is_some_and(|after| after.contains("^1") && after.contains("& main"))
+    after_syncbox_name(screen)
+        .is_some_and(|after| after.contains("^1") && line_on_branch(&after, "main"))
 }
 
 fn has_push_hint(screen: &str) -> bool {
