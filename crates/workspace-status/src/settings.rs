@@ -14,7 +14,7 @@
 use std::env;
 use std::path::PathBuf;
 
-use crate::config::{GlyphSet, RuntimeKeys};
+use crate::config::{GlyphSet, RuntimeKeys, ThemeMode};
 use crate::git::resolve_git_binary;
 use crate::parallel::fetch_concurrency;
 use crate::tui::comments::comment_store_path_from_env;
@@ -33,6 +33,9 @@ pub struct Settings {
     /// Launch theme: `WS_STATUS_THEME`, then the last-used theme in
     /// [`Self::theme_store`], then config `theme`, then Slate.
     pub(crate) theme: ThemeId,
+    /// Light or dark pick at startup (`WS_STATUS_THEME_MODE` / `themeMode`),
+    /// default [`ThemeMode::Auto`]. See [`crate::tui::term_bg::pick_theme`].
+    pub(crate) theme_mode: ThemeMode,
     /// ASCII glyphs instead of Nerd Font glyphs (`WS_STATUS_GLYPHS` / `glyphs`).
     pub(crate) ascii: bool,
     /// Live-refresh poll period in ms, `0` off (`WS_STATUS_WATCH_MS` / `watchMs`).
@@ -78,6 +81,7 @@ impl Settings {
                 load_last_theme(&theme_store),
                 keys.theme,
             ),
+            theme_mode: theme_mode(get(THEME_MODE_ENV).as_deref(), keys.theme_mode),
             ascii: glyphs_ascii(get("WS_STATUS_GLYPHS").as_deref(), keys.glyphs),
             watch_ms: watch_interval_ms(get("WS_STATUS_WATCH_MS").as_deref(), keys.watch_ms),
             fetch_ms: fetch_interval_ms(get("WS_STATUS_FETCH_MS").as_deref(), keys.fetch_ms),
@@ -105,6 +109,22 @@ const NO_COLOR_ENV: &str = "NO_COLOR";
 /// `NO_COLOR` is on when it is set to any non-empty value.
 fn no_color(env_value: Option<&str>) -> bool {
     env_value.is_some_and(|value| !value.is_empty())
+}
+
+/// Env var for the `themeMode` key.
+const THEME_MODE_ENV: &str = "WS_STATUS_THEME_MODE";
+
+/// Theme mode from `WS_STATUS_THEME_MODE` (`env_value`) and the config
+/// `themeMode` value. Env `auto`, `dark`, or `light` (exact) wins; any other
+/// env value falls through to `config`, then [`ThemeMode::Auto`].
+fn theme_mode(env_value: Option<&str>, config: Option<ThemeMode>) -> ThemeMode {
+    let from_env = match env_value {
+        Some("auto") => Some(ThemeMode::Auto),
+        Some("dark") => Some(ThemeMode::Dark),
+        Some("light") => Some(ThemeMode::Light),
+        _ => None,
+    };
+    from_env.or(config).unwrap_or(ThemeMode::Auto)
 }
 
 /// ASCII glyphs from `WS_STATUS_GLYPHS` (`env_value`) and the config `glyphs`
@@ -144,6 +164,7 @@ mod tests {
     fn all_keys() -> RuntimeKeys {
         RuntimeKeys {
             theme: Some(ThemeId::Dracula),
+            theme_mode: Some(ThemeMode::Light),
             glyphs: Some(GlyphSet::Ascii),
             watch_ms: Some(4000),
             fetch_ms: Some(0),
@@ -164,6 +185,7 @@ mod tests {
             env_of(&[("XDG_STATE_HOME", "/xdg/state")]),
         );
         assert_eq!(got.theme, DEFAULT_THEME_ID);
+        assert_eq!(got.theme_mode, ThemeMode::Auto);
         assert!(!got.ascii);
         assert_eq!(got.watch_ms, DEFAULT_WATCH_MS);
         assert_eq!(got.fetch_ms, DEFAULT_FETCH_MS);
@@ -195,6 +217,7 @@ mod tests {
             got,
             Settings {
                 theme: ThemeId::Dracula,
+                theme_mode: ThemeMode::Light,
                 ascii: true,
                 watch_ms: 4000,
                 fetch_ms: 0,
@@ -214,6 +237,7 @@ mod tests {
     fn valid_env_wins_over_config() {
         let env = [
             ("WS_STATUS_THEME", "monokai"),
+            ("WS_STATUS_THEME_MODE", "dark"),
             ("WS_STATUS_GLYPHS", "nerd"),
             ("WS_STATUS_WATCH_MS", "0"),
             ("WS_STATUS_FETCH_MS", "600000"),
@@ -230,6 +254,7 @@ mod tests {
             got,
             Settings {
                 theme: ThemeId::Monokai,
+                theme_mode: ThemeMode::Dark,
                 ascii: false,
                 watch_ms: 0,
                 fetch_ms: 600_000,
@@ -249,6 +274,7 @@ mod tests {
     fn invalid_env_falls_through_to_config() {
         let env = [
             ("WS_STATUS_THEME", "solarized"),
+            ("WS_STATUS_THEME_MODE", "Dark"),
             ("WS_STATUS_GLYPHS", "ASCII"),
             ("WS_STATUS_WATCH_MS", "-1"),
             ("WS_STATUS_FETCH_MS", "soon"),
@@ -353,6 +379,69 @@ mod tests {
     fn no_color_empty_is_off() {
         assert!(!Settings::resolve(&all_keys(), env_of(&[("NO_COLOR", "")])).no_color);
         assert!(!Settings::resolve(&all_keys(), env_of(&[])).no_color);
+    }
+
+    #[test]
+    fn theme_mode_env_beats_config_and_defaults_to_auto() {
+        let config = |mode: Option<ThemeMode>| RuntimeKeys {
+            theme_mode: mode,
+            ..RuntimeKeys::default()
+        };
+        let resolve = |keys: &RuntimeKeys, env: &[(&str, &str)]| {
+            Settings::resolve(keys, env_of(env)).theme_mode
+        };
+        assert_eq!(resolve(&config(None), &[]), ThemeMode::Auto, "default");
+        assert_eq!(
+            resolve(&config(Some(ThemeMode::Light)), &[]),
+            ThemeMode::Light,
+            "config applies without env"
+        );
+        for (env, want) in [
+            ("auto", ThemeMode::Auto),
+            ("dark", ThemeMode::Dark),
+            ("light", ThemeMode::Light),
+        ] {
+            assert_eq!(
+                resolve(
+                    &config(Some(ThemeMode::Light)),
+                    &[("WS_STATUS_THEME_MODE", env)]
+                ),
+                want,
+                "env {env} beats config light"
+            );
+            assert_eq!(
+                resolve(&config(None), &[("WS_STATUS_THEME_MODE", env)]),
+                want,
+                "env {env} without config"
+            );
+        }
+        assert_eq!(
+            resolve(
+                &config(Some(ThemeMode::Dark)),
+                &[("WS_STATUS_THEME_MODE", "light")]
+            ),
+            ThemeMode::Light,
+            "env light beats config dark"
+        );
+    }
+
+    #[test]
+    fn unknown_theme_mode_env_falls_through() {
+        for env in ["", " dark", "Light", "system", "1"] {
+            let got = Settings::resolve(
+                &RuntimeKeys {
+                    theme_mode: Some(ThemeMode::Dark),
+                    ..RuntimeKeys::default()
+                },
+                env_of(&[("WS_STATUS_THEME_MODE", env)]),
+            );
+            assert_eq!(got.theme_mode, ThemeMode::Dark, "env {env:?} -> config");
+            let got = Settings::resolve(
+                &RuntimeKeys::default(),
+                env_of(&[("WS_STATUS_THEME_MODE", env)]),
+            );
+            assert_eq!(got.theme_mode, ThemeMode::Auto, "env {env:?} -> default");
+        }
     }
 
     #[test]

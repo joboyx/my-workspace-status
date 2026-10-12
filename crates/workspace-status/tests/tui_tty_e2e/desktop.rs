@@ -79,7 +79,7 @@ impl DesktopSession {
         let mut script = String::from("#!/usr/bin/env bash\nset -euo pipefail\n");
         script.push_str(
             "unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE \
-             WS_STATUS_THEME\n",
+             WS_STATUS_THEME WS_STATUS_THEME_MODE\n",
         );
         script.push_str("export TERM=xterm-256color COLORTERM=truecolor\n");
         script.push_str("export LANG=C.UTF-8 LC_ALL=C.UTF-8\n");

@@ -22,7 +22,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
-use crate::config::WorkspaceStatusConfig;
+use crate::config::{ThemeMode, WorkspaceStatusConfig};
 use crate::discovery::{collect_snapshots, process_repo, RepoCheckoutMeta};
 use crate::git::{
     ahead_behind, checkout_branch, diff_commit_file_ctx, diff_compare_file_ctx,
@@ -55,6 +55,7 @@ use super::tabs::{
     base_ref_not_found, head_ref_not_found, no_merge_base, WorktreeFile, COMPARE_HEAD_REF,
     HEAD_HAS_NO_COMMIT,
 };
+use super::term_bg::{is_light_background, pick_theme, query_background, QUERY_TIMEOUT};
 use super::tty::{disable_mouse, enable_mouse, poll_event, read_event, read_event_origin};
 #[cfg(test)]
 use super::watch::{checkout_watch_identities, watch_needs_pane_reload};
@@ -74,6 +75,14 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
     let mut state = AppState::launch(opts.cwd.clone(), opts.snapshot.clone(), &opts.settings);
     state.apply_view_defaults(&opts.config.view_defaults);
     enable_raw_mode().map_err(|_| 1u8)?;
+    // Raw mode keeps the terminal's reply off the screen. The input thread
+    // starts later in `event_loop::run`, so this read cannot race it.
+    let mode = opts.settings.theme_mode;
+    let light_bg = match mode {
+        ThemeMode::Auto => query_background(QUERY_TIMEOUT).map(is_light_background),
+        ThemeMode::Dark | ThemeMode::Light => None,
+    };
+    state.theme = pick_theme(state.theme, mode, light_bg);
     let mut out = stdout();
     if execute!(out, EnterAlternateScreen).is_err() || enable_mouse(&mut out).is_err() {
         let _ = disable_raw_mode();

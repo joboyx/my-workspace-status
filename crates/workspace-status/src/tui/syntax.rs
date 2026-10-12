@@ -670,7 +670,9 @@ fn srgb_lin(c: u8) -> f64 {
     }
 }
 
-fn relative_luminance(color: Color) -> Option<f64> {
+/// WCAG 2 relative luminance (0.0 black to 1.0 white) of a 24-bit colour.
+/// `None` for a colour that is not [`Color::Rgb`].
+pub(crate) fn relative_luminance(color: Color) -> Option<f64> {
     let Color::Rgb(r, g, b) = color else {
         return None;
     };

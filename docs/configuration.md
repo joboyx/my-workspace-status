@@ -2,7 +2,7 @@
 
 Precedence for a setting: CLI flag > environment variable > config file > built-in default.
 
-The TUI theme has one more step: the last-used theme (a state file that `T` writes) sits between `WS_STATUS_THEME` and config `theme`. See [`WS_STATUS_THEME_STORE`](#environment-variables).
+The TUI theme has one more step: the last-used theme (a state file that `T` writes) sits between `WS_STATUS_THEME` and config `theme`. See [`WS_STATUS_THEME_STORE`](#environment-variables). Then `themeMode` may swap the resolved theme for its light or dark twin at launch. See [`WS_STATUS_THEME_MODE`](#environment-variables).
 
 An env value that the env parser accepts wins. An env value that it ignores (unset, blank, unknown, or non-numeric) falls through to the config value, then to the default. With no config keys set, each env var works as before. The binary resolves these settings once at startup, before the TUI-startup update check and the first git call (`crates/workspace-status/src/settings.rs`). `--plain` and `--json` use them too (`git`, `fetchConcurrency`).
 
@@ -51,6 +51,7 @@ The keys below apply to both files. A missing file means nothing is ignored and 
     "wrap": "unwrap"
   },
   "theme": "dracula",
+  "themeMode": "auto",
   "glyphs": "nerd",
   "watchMs": 3000,
   "fetchMs": 300000,
@@ -79,7 +80,7 @@ User file only (a workspace file that sets these keys fails to load):
 | `editor`          | no                         | unset (`vim` at resolve)      | Command string for TUI `e` (same shape as `$EDITOR`). Overrides `$VISUAL` / `$EDITOR`.         |
 | `diffTool`        | no                         | unset (`vimdiff` at resolve) | Command string for TUI `E`. No `$EDITOR` / `$VISUAL` / `$GIT_EXTERNAL_DIFF` fallback.          |
 | `viewDefaults`    | no                         | `{}` (in-app defaults)        | TUI launch view modes. See [`viewDefaults`](#viewdefaults)                                     |
-| `theme`, `glyphs`, `watchMs`, `fetchMs`, `fetchConcurrency`, `updateCheck` | no | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
+| `theme`, `themeMode`, `glyphs`, `watchMs`, `fetchMs`, `fetchConcurrency`, `updateCheck` | no | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
 | `updateCheckStore`, `commentStore`, `viewedStore`, `themeStore`, `git` | no; user file or env only | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
 
 ### `ignoredRepos`
@@ -163,6 +164,7 @@ These top-level keys set the same settings as the env vars in [Environment varia
 | Key | Env var | Value |
 | --- | --- | --- |
 | `theme` | `WS_STATUS_THEME` | one of `"tokyo-night"`, `"monokai"`, `"dracula"`, `"gruvbox-dark"`, `"catppuccin-mocha"`, `"slate"`, `"solarized-dark"`, `"nord"`, `"rose-pine"`, `"kanagawa"`, `"everforest"`, `"one-dark"`, `"github-dark-dimmed"`, or a light twin: `"tokyo-night-day"`, `"monokai-light"`, `"dracula-light"`, `"gruvbox-light"`, `"catppuccin-latte"`, `"slate-light"`, `"solarized-light"`, `"nord-light"`, `"rose-pine-dawn"`, `"kanagawa-lotus"`, `"everforest-light"`, `"one-light"`, `"github-light"` |
+| `themeMode` | `WS_STATUS_THEME_MODE` | `"auto"` \| `"dark"` \| `"light"` |
 | `glyphs` | `WS_STATUS_GLYPHS` | `"nerd"` \| `"ascii"` |
 | `watchMs` | `WS_STATUS_WATCH_MS` | integer >= 0. `0` turns the poll off. `1` to `499` clamp up to `500`, like the env var |
 | `fetchMs` | `WS_STATUS_FETCH_MS` | integer >= 0. `0` turns the background fetch off. `1` to `29999` clamp up to `30000`, like the env var |
@@ -232,6 +234,7 @@ Optional object. It sets the TUI view modes at launch. Each key is optional. An 
 | `WS_STATUS_FETCH_MS` | `fetchMs` | `300000` (`DEFAULT_FETCH_MS`)                           | Background `git fetch` period for the TUI. `0` disables. Values below `MIN_FETCH_MS` (30000) are clamped up when enabled. Non-numeric, negative, or empty falls through to config `fetchMs`, then the default. The tick paints no progress or summary line; it writes the status slot only when a repo fails. |
 | `WS_STATUS_FETCH_CONCURRENCY` | `fetchConcurrency` | `10` (`FETCH_CONCURRENCY`)                            | In-flight cap for independent per-repo fetch / pull / push on the TTY Scheduler JoinSet, and for CLI `collect_snapshots` / `process_repo`. Remotes queue per gitdir when that gitdir is occupied. Missing, empty, `0`, negative, or non-numeric falls through to config `fetchConcurrency`, then 10. Exclusive writes (stage, commit, merge into HEAD) stay serial. |
 | `WS_STATUS_THEME` | `theme` | `slate`                                                 | Built-in TUI theme id. Dark: `tokyo-night`, `monokai`, `dracula`, `gruvbox-dark`, `catppuccin-mocha`, `slate`, `solarized-dark`, `nord`, `rose-pine`, `kanagawa`, `everforest`, `one-dark`, `github-dark-dimmed`. Light twins, in the same order: `tokyo-night-day`, `monokai-light`, `dracula-light`, `gruvbox-light`, `catppuccin-latte`, `slate-light`, `solarized-light`, `nord-light`, `rose-pine-dawn`, `kanagawa-lotus`, `everforest-light`, `one-light`, `github-light`. Unknown values fall through to the last-used theme (`WS_STATUS_THEME_STORE`), then config `theme`, then `slate`. Seeds the TUI at launch. `T` cycles inside the current theme's list (dark or light, 13 themes each), so it never flips light / dark, and saves each pick as the last-used theme. See [Theme tokens](#theme-tokens) and **Theme flash tokens**. |
+| `WS_STATUS_THEME_MODE` | `themeMode` | `auto` | Light or dark pick at TUI launch. `auto`: after raw mode and before the first frame, the TUI asks the terminal for its background colour (OSC 11, then a DA1 request so a terminal that does not report its background answers at once). The wait stops on the reply and never passes 150 ms. A light background (WCAG relative luminance 0.18 or more, where black and white text have about the same contrast) picks the light twin of the resolved theme; a dark one picks the dark twin. A terminal that does not answer keeps the resolved theme. Keys typed during the wait are not lost. `dark` / `light` always pick that twin and send no query. Why `auto` is the default: on a dark terminal it keeps the dark look, on a light terminal it picks the twin instead of painting a dark block, and with no answer nothing changes, so the look changes only when the terminal says it is light. The pick is for this launch: `T` cycles inside the picked list, and the store saves only what `T` picks. Not a TTY, or Windows: no query (`auto` keeps the resolved theme). Any other value falls through to config `themeMode`, then `auto`. PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` pin it to `dark` (CI: `tty_spawn_paths_pin_theme_mode`). |
 | `EDITOR` | — (system var; use `editor`) | unset                                                   | Used for `e` when config `editor` and `VISUAL` are unset or blank. Blank values are ignored. May include fixed args (`code --wait`, `nvim -p`); simple quoting is supported for paths with spaces. |
 | `VISUAL` | — (system var; use `editor`) | unset                                                   | Fallback editor for `e` when config `editor` is omitted or blank; wins over `EDITOR` (same argv parsing).                                                                                         |
 | _(editor fallback)_ | `editor` | `vim`                                                   | When config `editor`, `VISUAL`, and `EDITOR` are all unset/blank, `resolve_editor` returns `vim`.                                                                                                 |
@@ -305,6 +308,7 @@ On many macOS setups there is no dedicated PageUp key. `Fn+Up` and `Fn+Down` oft
 | Message rows     | 4 rows in the expanded commit-message footer, whatever the message length. `viewDefaults.commitMessageLines` overrides at launch (1 to 20)        | palette (no key)                                     |
 | Line blame       | On. `viewDefaults.lineBlame` overrides at launch                                                                                                  | `B`                                                  |
 | Theme            | Slate. `WS_STATUS_THEME`, the last-used theme, or config `theme` overrides at launch                                                              | `T` cycles / `WS_STATUS_THEME`                       |
+| Theme mode       | Auto: the light or dark twin that matches the terminal background; no answer keeps the theme. `WS_STATUS_THEME_MODE` or config `themeMode` overrides | —                                                    |
 | Background       | Paint: theme colours fill the panes and chrome rows. `viewDefaults.background` overrides at launch                                                | —                                                    |
 | Live refresh     | On, 3 s                                                                                                                                           | `WS_STATUS_WATCH_MS=0`                               |
 | Background fetch | On, 5 min                                                                                                                                         | `WS_STATUS_FETCH_MS=0`                               |
@@ -316,7 +320,7 @@ Split falls back to inline when the diff's painted width (the right pane less it
 
 ## Theme tokens
 
-Built-in palettes live in `crates/workspace-status/src/tui/theme.rs`: 13 dark themes, then a light twin of each with its own slug. The first paint uses a known `WS_STATUS_THEME`, else the last-used theme, else config `theme`, else Slate. `T` cycles inside the current list (the 13 dark rows or the 13 light rows of the tables below, in that order), so it never flips light / dark, and saves each pick to the theme state file (`WS_STATUS_THEME_STORE`). The config file is never written.
+Built-in palettes live in `crates/workspace-status/src/tui/theme.rs`: 13 dark themes, then a light twin of each with its own slug. The first paint uses a known `WS_STATUS_THEME`, else the last-used theme, else config `theme`, else Slate. Then `themeMode` (`WS_STATUS_THEME_MODE`, default `auto`) may swap it for its twin to match the terminal background. `T` cycles inside the current list (the 13 dark rows or the 13 light rows of the tables below, in that order), so it never flips light / dark, and saves each pick to the theme state file (`WS_STATUS_THEME_STORE`). The config file is never written.
 
 Besides `surface` (the right pane and the Explorer file pane), each theme has three background roles. A theme can set each one; otherwise the default rule applies. Each mix is per RGB channel, `surface + (target - surface) × percent / 100`, rounded to the nearest integer.
 

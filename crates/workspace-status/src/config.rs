@@ -47,6 +47,22 @@ pub enum GlyphSet {
     Ascii,
 }
 
+/// Light or dark theme pick from the `themeMode` key.
+///
+/// The pick swaps the resolved theme for its twin of the other polarity
+/// ([`ThemeId::twin`]). The store still saves the slug the user picked with `T`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeMode {
+    /// `"auto"` (the default): ask the terminal for its background colour at
+    /// startup and pick the light or dark variant to match. A terminal that
+    /// does not answer keeps the resolved theme.
+    Auto,
+    /// `"dark"`: always the dark variant of the resolved theme.
+    Dark,
+    /// `"light"`: always the light variant of the resolved theme.
+    Light,
+}
+
 /// Config keys that an env var can also set.
 ///
 /// Each field is `None` when no file sets the key. [`crate::settings::Settings`]
@@ -56,6 +72,8 @@ pub enum GlyphSet {
 pub struct RuntimeKeys {
     /// `theme` (`WS_STATUS_THEME`): a built-in theme id.
     pub theme: Option<ThemeId>,
+    /// `themeMode` (`WS_STATUS_THEME_MODE`): `"auto"`, `"dark"`, or `"light"`.
+    pub theme_mode: Option<ThemeMode>,
     /// `glyphs` (`WS_STATUS_GLYPHS`): `"nerd"` or `"ascii"`.
     pub glyphs: Option<GlyphSet>,
     /// `watchMs` (`WS_STATUS_WATCH_MS`): live-refresh poll period, `0` turns it off.
@@ -83,6 +101,7 @@ impl RuntimeKeys {
     fn overlay(self, over: RuntimeKeys) -> RuntimeKeys {
         RuntimeKeys {
             theme: over.theme.or(self.theme),
+            theme_mode: over.theme_mode.or(self.theme_mode),
             glyphs: over.glyphs.or(self.glyphs),
             watch_ms: over.watch_ms.or(self.watch_ms),
             fetch_ms: over.fetch_ms.or(self.fetch_ms),
@@ -149,6 +168,7 @@ struct RawConfig {
     diff_tool: Option<serde_json::Value>,
     view_defaults: Option<serde_json::Value>,
     theme: Option<serde_json::Value>,
+    theme_mode: Option<serde_json::Value>,
     glyphs: Option<serde_json::Value>,
     watch_ms: Option<serde_json::Value>,
     fetch_ms: Option<serde_json::Value>,
@@ -505,6 +525,16 @@ fn parse_runtime_keys(
 ) -> Result<RuntimeKeys, String> {
     Ok(RuntimeKeys {
         theme: parse_theme_key(file, parsed.theme.take())?,
+        theme_mode: parse_choice_key(
+            file,
+            "themeMode",
+            parsed.theme_mode.take(),
+            &[
+                ("auto", ThemeMode::Auto),
+                ("dark", ThemeMode::Dark),
+                ("light", ThemeMode::Light),
+            ],
+        )?,
         glyphs: parse_choice_key(
             file,
             "glyphs",
@@ -1473,10 +1503,47 @@ mod tests {
     }
 
     #[test]
+    fn theme_mode_key_parses_and_rejects_bad_values() {
+        for (raw, want) in [
+            (r#""auto""#, ThemeMode::Auto),
+            (r#""dark""#, ThemeMode::Dark),
+            (r#"" light ""#, ThemeMode::Light),
+        ] {
+            assert_eq!(
+                load_runtime_key("themeMode", raw).unwrap().theme_mode,
+                Some(want),
+                "{raw}"
+            );
+        }
+        assert_eq!(
+            load_runtime_key("themeMode", "null").unwrap().theme_mode,
+            None
+        );
+        for raw in [r#""Dark""#, r#""system""#, r#""""#, "true"] {
+            assert_eq!(
+                load_runtime_key("themeMode", raw).unwrap_err(),
+                r#"<user> themeMode must be one of "auto", "dark", "light""#,
+                "{raw}"
+            );
+        }
+        let cfg = load_layered_home(
+            Some(r#"{"themeMode":"light"}"#),
+            Some(r#"{"ignoredRepos":[],"themeMode":"dark"}"#),
+            Some("/home/demo"),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.runtime.theme_mode,
+            Some(ThemeMode::Dark),
+            "workspace wins"
+        );
+    }
+
+    #[test]
     fn runtime_keys_parse_valid_values() {
         let cfg = load_layered_home(
             Some(
-                r#"{"theme":" dracula ","glyphs":"ascii","watchMs":0,"fetchMs":60000,"fetchConcurrency":4,"updateCheck":false,"updateCheckStore":"~/state/update-check.json","commentStore":"/var/ws/comments.json","viewedStore":"~/viewed.json","themeStore":"~/state/theme.json","git":"git-wrapper"}"#,
+                r#"{"theme":" dracula ","themeMode":"light","glyphs":"ascii","watchMs":0,"fetchMs":60000,"fetchConcurrency":4,"updateCheck":false,"updateCheckStore":"~/state/update-check.json","commentStore":"/var/ws/comments.json","viewedStore":"~/viewed.json","themeStore":"~/state/theme.json","git":"git-wrapper"}"#,
             ),
             None,
             Some("/home/demo"),
@@ -1486,6 +1553,7 @@ mod tests {
             cfg.runtime,
             RuntimeKeys {
                 theme: Some(ThemeId::Dracula),
+                theme_mode: Some(ThemeMode::Light),
                 glyphs: Some(GlyphSet::Ascii),
                 watch_ms: Some(0),
                 fetch_ms: Some(60000),

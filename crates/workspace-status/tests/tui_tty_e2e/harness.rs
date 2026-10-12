@@ -43,10 +43,12 @@ static THEME_STORE_SEQ: AtomicU64 = AtomicU64::new(0);
 /// (Tokyo Night, boxed panes on the terminal background). Existing PTY and
 /// desktop tests assert that look, so a change to the shipped defaults does
 /// not move them. `WS_STATUS_THEME` in a test's env still beats this theme.
-/// A spawn starts with an empty theme store, so a last-used theme cannot
+/// `themeMode` `dark` keeps the terminal background out of it: the desktop
+/// xterm is white, and `auto` would pick the light twin there.
+/// `WS_STATUS_THEME_MODE` in a test's env beats this pin. A spawn starts with an empty theme store, so a last-used theme cannot
 /// beat it unless the test passes a seeded `WS_STATUS_THEME_STORE`.
 pub const BASELINE_USER_CONFIG: &str =
-    "{\"theme\":\"tokyo-night\",\"viewDefaults\":{\"background\":\"terminal\"}}\n";
+    "{\"theme\":\"tokyo-night\",\"themeMode\":\"dark\",\"viewDefaults\":{\"background\":\"terminal\"}}\n";
 
 /// Which user config file a spawn starts with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,13 +60,42 @@ pub enum UserConfig {
     Own,
 }
 
+/// Spawn choices past the size and env ([`PtySession::spawn`]).
+struct SpawnOpts {
+    /// Update-check store `lastCheckUnix`; `None` writes "now".
+    last_check_unix: Option<u64>,
+    /// Wait for the first tree paint before returning.
+    wait_ready: bool,
+    /// Which user config file the spawn starts with.
+    user_config: UserConfig,
+    /// Bytes the reader thread writes back when the child asks OSC 11.
+    bg_reply: Option<Vec<u8>>,
+}
+
+impl Default for SpawnOpts {
+    fn default() -> Self {
+        Self {
+            last_check_unix: None,
+            wait_ready: true,
+            user_config: UserConfig::Baseline,
+            bg_reply: None,
+        }
+    }
+}
+
+/// OSC 11 background query the TUI writes at startup in `themeMode` `auto`.
+const OSC11_QUERY: &[u8] = b"\x1b]11;?";
+
 pub struct PtySession {
     child: Box<dyn portable_pty::Child + Send>,
-    writer: Box<dyn Write + Send>,
+    /// PTY master writer. The reader thread shares it to answer OSC 11.
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
     parser: Arc<Mutex<vt100::Parser>>,
     /// Decoded OSC 52 clipboard texts (`ESC ] 52 ; c ; <base64> BEL` / ST).
     clipboard: Arc<Mutex<Vec<String>>>,
+    /// Every byte the child wrote, in order (see [`Self::raw_output`]).
+    raw: Arc<Mutex<Vec<u8>>>,
     root: PathBuf,
     cols: u16,
     rows: u16,
@@ -111,7 +142,36 @@ impl PtySession {
         extra_env: &[(&str, &str)],
         user_config: UserConfig,
     ) -> Self {
-        Self::spawn(workspace, cols, rows, extra_env, None, true, user_config)
+        Self::spawn(
+            workspace,
+            cols,
+            rows,
+            extra_env,
+            SpawnOpts {
+                user_config,
+                ..SpawnOpts::default()
+            },
+        )
+    }
+
+    /// Spawn with a terminal that answers the OSC 11 background query.
+    ///
+    /// When the child writes `ESC ] 11 ; ?`, the reader thread writes
+    /// `ESC ] 11 ; rgb:<rgb> BEL` back on the PTY, like a terminal with that
+    /// background. `rgb` is the reply body after `rgb:`, such as
+    /// `ffff/ffff/ffff`. The baseline config pins `themeMode` to `dark`, so
+    /// pass `WS_STATUS_THEME_MODE=auto` in `extra_env` to make the child ask.
+    pub fn open_with_bg_reply(workspace: &Path, extra_env: &[(&str, &str)], rgb: &str) -> Self {
+        Self::spawn(
+            workspace,
+            COLS,
+            ROWS,
+            extra_env,
+            SpawnOpts {
+                bg_reply: Some(format!("\x1b]11;rgb:{rgb}\x07").into_bytes()),
+                ..SpawnOpts::default()
+            },
+        )
     }
 
     /// Spawn without waiting for the TUI. Used when the GitHub Release
@@ -126,9 +186,11 @@ impl PtySession {
             COLS,
             ROWS,
             extra_env,
-            Some(last_check_unix),
-            false,
-            UserConfig::Baseline,
+            SpawnOpts {
+                last_check_unix: Some(last_check_unix),
+                wait_ready: false,
+                ..SpawnOpts::default()
+            },
         )
     }
 
@@ -137,10 +199,14 @@ impl PtySession {
         cols: u16,
         rows: u16,
         extra_env: &[(&str, &str)],
-        last_check_unix: Option<u64>,
-        wait_ready: bool,
-        user_config: UserConfig,
+        opts: SpawnOpts,
     ) -> Self {
+        let SpawnOpts {
+            last_check_unix,
+            wait_ready,
+            user_config,
+            bg_reply,
+        } = opts;
         assert!(
             workspace.is_dir(),
             "workspace must exist: {}",
@@ -168,6 +234,7 @@ impl PtySession {
                     | "CLICOLOR_FORCE"
                     | "WS_STATUS_WORKSPACE"
                     | "WS_STATUS_THEME"
+                    | "WS_STATUS_THEME_MODE"
                     | "VISUAL"
             ) {
                 continue;
@@ -177,13 +244,15 @@ impl PtySession {
         // CommandBuilder starts with the parent env. Skipping the copy
         // above does not drop these; remove them so the TTY paints colour
         // and the fixture cwd wins over an operator WS_STATUS_WORKSPACE.
-        // An operator WS_STATUS_THEME would beat the baseline config theme.
+        // An operator WS_STATUS_THEME or WS_STATUS_THEME_MODE would beat the
+        // baseline config theme or theme mode.
         // `e` reads $VISUAL before $EDITOR, so an operator VISUAL would
         // outrank the stub EDITOR a test passes.
         cmd.env_remove("NO_COLOR");
         cmd.env_remove("FORCE_COLOR");
         cmd.env_remove("WS_STATUS_WORKSPACE");
         cmd.env_remove("WS_STATUS_THEME");
+        cmd.env_remove("WS_STATUS_THEME_MODE");
         cmd.env_remove("VISUAL");
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
@@ -243,11 +312,15 @@ impl PtySession {
             .spawn_command(cmd)
             .expect("spawn workspace-status");
         let mut reader = pair.master.try_clone_reader().expect("clone pty reader");
-        let writer = pair.master.take_writer().expect("pty writer");
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
+            Arc::new(Mutex::new(pair.master.take_writer().expect("pty writer")));
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
         let clipboard = Arc::new(Mutex::new(Vec::<String>::new()));
+        let raw = Arc::new(Mutex::new(Vec::<u8>::new()));
         let parser_thread = Arc::clone(&parser);
         let clipboard_thread = Arc::clone(&clipboard);
+        let raw_thread = Arc::clone(&raw);
+        let writer_thread = Arc::clone(&writer);
         thread::spawn(move || {
             let mut buf = [0u8; 8192];
             let mut pending = Vec::new();
@@ -257,6 +330,14 @@ impl PtySession {
                     Ok(n) => {
                         let chunk = &buf[..n];
                         push_osc52(&mut pending, chunk, &clipboard_thread);
+                        let queries = push_raw(&raw_thread, chunk);
+                        if let Some(reply) = &bg_reply {
+                            let mut writer = writer_thread.lock().unwrap();
+                            for _ in 0..queries {
+                                let _ = writer.write_all(reply);
+                            }
+                            let _ = writer.flush();
+                        }
                         parser_thread.lock().unwrap().process(chunk);
                     }
                     Err(_) => break,
@@ -270,6 +351,7 @@ impl PtySession {
             master: pair.master,
             parser,
             clipboard,
+            raw,
             root: workspace
                 .parent()
                 .map(Path::to_path_buf)
@@ -289,8 +371,9 @@ impl PtySession {
     }
 
     pub fn send_bytes(&mut self, bytes: &[u8]) {
-        self.writer.write_all(bytes).expect("write pty");
-        self.writer.flush().expect("flush pty");
+        let mut writer = self.writer.lock().unwrap();
+        writer.write_all(bytes).expect("write pty");
+        writer.flush().expect("flush pty");
     }
 
     pub fn key(&mut self, c: char) {
@@ -592,6 +675,14 @@ impl PtySession {
     /// these payloads (`ESC ] 52 ; c ; <base64> BEL` or ST).
     pub fn clipboard_payloads(&self) -> Vec<String> {
         self.clipboard.lock().unwrap().clone()
+    }
+
+    /// Every byte the child has written to the PTY so far, escapes included.
+    ///
+    /// `vt100` drops sequences it does not model (OSC 11, OSC 8, OSC 9;4)
+    /// from [`Self::screen`]. Claims about those bytes read this tap.
+    pub fn raw_output(&self) -> Vec<u8> {
+        self.raw.lock().unwrap().clone()
     }
 
     /// Most recent decoded OSC 52 clipboard text.
@@ -991,6 +1082,18 @@ impl Drop for PtySession {
         let _ = self.child.kill();
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+/// Append `chunk` to the raw tap and count the OSC 11 queries it completes.
+/// A query split across reads counts once, in the read that ends it.
+fn push_raw(raw: &Arc<Mutex<Vec<u8>>>, chunk: &[u8]) -> usize {
+    let mut raw = raw.lock().unwrap();
+    let from = raw.len().saturating_sub(OSC11_QUERY.len() - 1);
+    raw.extend_from_slice(chunk);
+    raw[from..]
+        .windows(OSC11_QUERY.len())
+        .filter(|w| *w == OSC11_QUERY)
+        .count()
 }
 
 const OSC52_INTRO: &[u8] = b"\x1b]52;";

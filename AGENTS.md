@@ -39,6 +39,8 @@ They also point `XDG_CONFIG_HOME` at a temp dir (PTY and desktop e2e write a fix
 
 They also point `WS_STATUS_THEME_STORE` at a temp file with no last-used theme, so the operator theme state file (`$XDG_STATE_HOME/my-workspace-status/theme.json`) cannot beat the fixture theme and `T` does not write it. The PTY harness uses a new `.e2e-state/theme-<n>.json` for each spawn unless the test passes `WS_STATUS_THEME_STORE`; the desktop harness and the demo script remove their file before each launch. They also drop a parent `WS_STATUS_THEME`. CI: `tty_spawn_paths_isolate_theme_store`.
 
+They also pin `themeMode` to `dark` and drop a parent `WS_STATUS_THEME_MODE`, so the terminal background cannot swap the fixture theme for its light twin (the desktop xterm is white). PTY and desktop e2e pin it in the baseline config file; the demo script exports `WS_STATUS_THEME_MODE` (`WS_STATUS_STILLS_THEME_MODE`, default `dark`). CI: `tty_spawn_paths_pin_theme_mode`.
+
 Env table: [docs/configuration.md](./docs/configuration.md).
 
 ## `dist generate`
@@ -105,7 +107,7 @@ per-module copy.
 - Exported Rust items need rustdoc (`///` or `//!`).
 - The plain-text report is a user-facing contract — changing it means updating `SAMPLE_OUTPUT.md` and the snapshot e2e suite.
 - TTY event loop: do not run git or other blocking I/O on the draw/event thread. The live path is `tui/event_loop.rs` (current-thread Tokio, dedicated input thread, `spawn_blocking` on a `JoinSet`) through `tui/effect.rs`. Fetch / pull / push enqueue on a per-gitdir remote queue (`RemoteQueue`) under the resolved `fetchConcurrency` cap (`WS_STATUS_FETCH_CONCURRENCY` > config > 10). Exclusive writes stay serial. While an exclusive write or default-branch job is in flight, nav / pane switch / cancel / remotes stay live (`BusyAction::Handle`); keys that would start another exclusive write are drained (`Ignore`). An exclusive write on a gitdir that already has a remote dispatches, then `schedule` refuses with breadcrumb `busy`. `E` blob/temp prepare is `UserTag::DiffPrepare` on that pool; `blob_bytes` must not run on the loop thread. Guard: `tty_event_loop_must_not_call_sync_pane_git` in `tui/event_pump.rs`.
-- After `dist generate`, restore `workflow_dispatch` and host git-cliff on `release.yml`. TTY demo clips and e2e must set `WS_STATUS_UPDATE_CHECK_STORE`, `WS_STATUS_THEME_STORE`, and `XDG_CONFIG_HOME`. Guards: `tty_spawn_paths_isolate_update_check_store`, `tty_spawn_paths_isolate_theme_store`, and `tty_spawn_paths_isolate_user_config` in `tests/release_watch.rs`.
+- After `dist generate`, restore `workflow_dispatch` and host git-cliff on `release.yml`. TTY demo clips and e2e must set `WS_STATUS_UPDATE_CHECK_STORE`, `WS_STATUS_THEME_STORE`, and `XDG_CONFIG_HOME`, and pin `themeMode` to `dark`. Guards: `tty_spawn_paths_isolate_update_check_store`, `tty_spawn_paths_isolate_theme_store`, `tty_spawn_paths_isolate_user_config`, and `tty_spawn_paths_pin_theme_mode` in `tests/release_watch.rs`.
 - This repository is public. Do not commit private workspace paths, personal hostnames, unpublished ticket keys, customer/project names from private work, chat transcripts, screenshots of private work, tokens, or credentials. Use `scripts/seed-demo-workspace.sh` for examples and demo clips.
 
 ## Demo / screenshots

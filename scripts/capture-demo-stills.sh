@@ -32,11 +32,15 @@
 #                                "theme" in the isolated user config file.
 #   WS_STATUS_STILLS_BACKGROUND  paint or terminal. Written as
 #                                "viewDefaults.background" in that file.
+#   WS_STATUS_STILLS_THEME_MODE  dark (default) or light. Exported as
+#                                WS_STATUS_THEME_MODE, so the terminal background
+#                                never picks the twin; light shows the light twin.
 #   WS_STATUS_STILLS_GIFS        1 (default) or 0. With 0 the run is stills-only:
 #                                no GIF is copied out, and the PNG stills replace
 #                                the whole WS_STATUS_STILLS_OUT directory.
-# The launcher unsets WS_STATUS_THEME, so a parent shell cannot change the theme
-# of a run. Use WS_STATUS_STILLS_THEME instead.
+# The launcher unsets WS_STATUS_THEME and sets WS_STATUS_THEME_MODE, so a parent
+# shell cannot change the theme of a run. Use WS_STATUS_STILLS_THEME and
+# WS_STATUS_STILLS_THEME_MODE instead.
 #
 # Self-contained for a Cursor Cloud Agent Linux VM: installs MesloLGS NF,
 # xvfb, xfce4-terminal, xdotool, and ffmpeg when missing. Fails loudly instead
@@ -69,6 +73,7 @@ OUT_REL="$(realpath -m --relative-to="$REPO_ROOT" -- "$REPO_ROOT/$OUT_RAW")"
 OUT_DIR="$REPO_ROOT/$OUT_REL"
 STILLS_THEME="${WS_STATUS_STILLS_THEME:-}"
 STILLS_BACKGROUND="${WS_STATUS_STILLS_BACKGROUND:-}"
+STILLS_THEME_MODE="${WS_STATUS_STILLS_THEME_MODE:-dark}"
 STILLS_CLIPS="${WS_STATUS_STILLS_CLIPS:-}"
 # Split on commas and blanks into an array; read -a does no glob expansion.
 CLIP_TOKENS=()
@@ -140,8 +145,8 @@ have() { command -v "$1" >/dev/null 2>&1; }
 check_knobs() {
   local tok name found protected sub
   if [[ "$OUT_REL" == "$README_OUT" ]]; then
-    if [[ -n "$STILLS_THEME$STILLS_BACKGROUND$STILLS_CLIPS" || "$STILLS_GIFS" != 1 ]]; then
-      die "WS_STATUS_STILLS_THEME/BACKGROUND/CLIPS/GIFS need WS_STATUS_STILLS_OUT (a directory under $README_OUT/), so the README clips and stills stay the default set"
+    if [[ -n "$STILLS_THEME$STILLS_BACKGROUND$STILLS_CLIPS" || "$STILLS_GIFS" != 1 || "$STILLS_THEME_MODE" != dark ]]; then
+      die "WS_STATUS_STILLS_THEME/THEME_MODE/BACKGROUND/CLIPS/GIFS need WS_STATUS_STILLS_OUT (a directory under $README_OUT/), so the README clips and stills stay the default set"
     fi
   else
     [[ "$OUT_RAW" != /* ]] \
@@ -166,6 +171,8 @@ check_knobs() {
   fi
   [[ "$STILLS_GIFS" == 0 || "$STILLS_GIFS" == 1 ]] \
     || die "WS_STATUS_STILLS_GIFS must be 0 or 1 (got '$STILLS_GIFS')"
+  [[ "$STILLS_THEME_MODE" == dark || "$STILLS_THEME_MODE" == light ]] \
+    || die "WS_STATUS_STILLS_THEME_MODE must be dark or light (got '$STILLS_THEME_MODE')"
   [[ -z "$STILLS_BACKGROUND" || "$STILLS_BACKGROUND" == paint || "$STILLS_BACKGROUND" == terminal ]] \
     || die "WS_STATUS_STILLS_BACKGROUND must be paint or terminal (got '$STILLS_BACKGROUND')"
   # The binary checks the slug against its theme list (see check_config).
@@ -282,7 +289,7 @@ write_helpers() {
 #!/usr/bin/env bash
 # Cloud Agent shells export NO_COLOR=1; a gray first frame means it leaked in.
 # WS_STATUS_THEME would beat the config theme; WS_STATUS_STILLS_THEME sets it.
-unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE WS_STATUS_THEME
+unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE WS_STATUS_THEME WS_STATUS_THEME_MODE
 export WS_STATUS_WATCH_MS=0
 export WS_STATUS_FETCH_MS=0
 export XDG_STATE_HOME=$(printf '%q' "$STATE_DIR")
@@ -291,6 +298,8 @@ export XDG_CONFIG_HOME=$(printf '%q' "$CONFIG_DIR")
 export WS_STATUS_VIEWED_STORE=$(printf '%q' "$VIEWED_STORE")
 export WS_STATUS_COMMENT_STORE=$(printf '%q' "$COMMENT_STORE")
 export WS_STATUS_THEME_STORE=$(printf '%q' "$THEME_STORE")
+# Pin light/dark: themeMode auto would follow the terminal background.
+export WS_STATUS_THEME_MODE=$(printf '%q' "$STILLS_THEME_MODE")
 # Start each launch with no last-used theme, so the config theme paints.
 rm -f -- "\$WS_STATUS_THEME_STORE"
 # Seed timestamps are Asia/Manila; pin TZ so clips match that clock.
@@ -749,7 +758,7 @@ seed() {
 cd "$REPO_ROOT"
 check_knobs
 # Cloud Agent / CI shells often export these; they paint a gray first frame.
-unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE WS_STATUS_THEME
+unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE WS_STATUS_THEME WS_STATUS_THEME_MODE
 export NO_AT_BRIDGE=1
 export GTK_A11Y=none
 export TZ=Asia/Manila
