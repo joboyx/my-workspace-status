@@ -620,9 +620,9 @@ impl PtySession {
         }
     }
 
-    /// Fingerprint of every cell fg/bg. Theme cycle must change it.
+    /// Fingerprint of every cell fg/bg. A theme change must change it.
     ///
-    /// `screen()` is glyphs only. A colour-only `T` paint can keep the same
+    /// `screen()` is glyphs only. A colour-only theme paint can keep the same
     /// text and still fail this.
     pub fn color_fingerprint(&self) -> String {
         let parser = self.parser.lock().unwrap();

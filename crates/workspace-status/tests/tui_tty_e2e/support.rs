@@ -1203,6 +1203,33 @@ pub fn type_palette_filter(tui: &mut PtySession, query: &str) {
     }
 }
 
+/// `:` opens the command palette; wait for its empty `>▏` query so the
+/// next typed keys land in the filter.
+pub fn open_command_palette(tui: &mut PtySession) {
+    tui.key(':');
+    tui.wait_contains(">▏", WAIT);
+}
+
+/// Apply a built-in theme the documented way: `:` opens the command
+/// palette, `query` (a slug such as `nord`) filters it to the
+/// `Theme: {label}` row, and Enter applies that row.
+///
+/// Returns once the palette is closed and the status shows
+/// `theme: {label}`. Enter on any other row cannot pass.
+pub fn apply_palette_theme(tui: &mut PtySession, query: &str, label: &str) {
+    let row = format!("Theme: {label}");
+    let toast = format!("theme: {label}");
+    open_command_palette(tui);
+    type_palette_filter(tui, query);
+    tui.wait_contains(&row, WAIT);
+    tui.enter();
+    tui.wait_pred(
+        |screen| screen.contains(&toast) && !screen.contains(&row),
+        &format!("Enter on `{row}` closes the palette and shows `{toast}`"),
+        WAIT,
+    );
+}
+
 /// The compare tab shows the regions.txt diff with the diff pane focused.
 pub fn compare_regions_diff_focused(screen: &str) -> bool {
     screen.contains("app ↔ origin/main")

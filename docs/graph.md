@@ -56,7 +56,7 @@ reads the count the last frame recorded (`graph_content_len`).
 uses the full lane model; every row shares the same left-aligned clip. `GraphWidget::lane_colors` colours each
 gutter cell from `GraphCell.color_lane`; an empty slice uses
 `DEFAULT_LANE_COLORS`. The TUI passes the active built-in theme's eight
-colours (`T` cycles).
+colours (palette `Theme: <name>` rows set it).
 `GraphWidget::search_matches` paints the filter/search background on
 selectable visible-row indexes and paints their rails, comment mark, and
 label in the filter foreground, so lane, chip, and cursor colours that

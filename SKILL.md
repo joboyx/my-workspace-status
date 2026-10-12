@@ -87,7 +87,6 @@ Live TUI keymap (full overlay detail in [docs/configuration.md](./docs/configura
 | `gg` / `G`                            | first / last visible row on the focused list; on a focused **diff**, scroll to start / end                                                             |
 | `t`                                   | flat ↔ directory tree (view-mode; works when right-focused)                                                                                            |
 | `.`                                   | show / hide ignored repos (view-mode; works whether the app started with `-a`)                                                                         |
-| `T`                                   | cycle built-in colour theme                                                                                                                            |
 | Focus file                            | load diff (lazy)                                                                                                                                       |
 | `s` / `u` / `x`                       | stage / unstage / revert (`x` confirms; untracked deletes from disk). On a `V` highlight, `s` / `u` apply only that range, not the whole file           |
 | `S`                                   | stash menu (Shift+s; `s` stays stage)                                                                                                                  |

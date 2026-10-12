@@ -20,13 +20,11 @@ fn search_prompt_has_query(screen: &str, query: &str) -> bool {
         && (query.is_empty() || !status.contains(&format!("/{query}")))
 }
 
-/// Global Shift+letter bindings that must not fire while `/` is typing.
+/// Global Shift+letter bindings, and any theme toast, that must not fire
+/// while `/` is typing.
 fn search_did_not_fire_global_shift(screen: &str) -> bool {
     !screen.contains("Stash ")
-        && !screen.contains("theme: Monokai")
-        && !screen.contains("theme: Dracula")
-        && !screen.contains("theme: Gruvbox")
-        && !screen.contains("theme: Catppuccin")
+        && !screen.contains("theme: ")
         && !screen.contains("Flat paths")
         && !screen.contains("Focus branches")
         && !screen.contains("full graph")
@@ -36,8 +34,9 @@ fn search_did_not_fire_global_shift(screen: &str) -> bool {
 ///
 /// Docs + help: `/` search, characters append while typing. Global
 /// Shift+O clears graph focus, Shift+S opens stash, Shift+G jumps to
-/// the last row, Shift+T cycles theme. Those must not fire. Raw `'O'`
-/// is a different path. Enter-arm / pane search stay on other tests.
+/// the last row. Those must not fire. Shift+T is bound to nothing and must
+/// set no theme. Raw `'O'` is a different path. Enter-arm / pane search
+/// stay on other tests.
 #[test]
 fn pty_shift_letters_csi_u_type_into_search() {
     let (_root, workspace) = daily_workspace();
@@ -61,10 +60,10 @@ fn pty_shift_letters_csi_u_type_into_search() {
                 && screen.contains("search focused")
                 && screen.contains("stash menu")
                 && screen.contains("top / bottom")
-                && screen.contains("cycle theme")
                 && screen.contains("focus branches")
+                && !screen.contains("cycle theme")
         },
-        "help lists / search and the global Shift+O/S/G/T bindings",
+        "help lists / search and the global Shift+O/S/G bindings, no theme key",
         WAIT,
     );
     tui.esc();
@@ -138,7 +137,7 @@ fn pty_shift_letters_csi_u_type_into_search() {
                 && !screen.contains("/OSGT")
                 && !screen.contains("osgt▏")
         },
-        "CSI-u Shift+T types T; it must not cycle theme or arm the query",
+        "CSI-u Shift+T types T; it must not set a theme or arm the query",
         WAIT,
     );
 

@@ -48,7 +48,6 @@ const HELP_VIEW_ROWS: &[(&str, &str)] = &[
     ("< >", "tree width"),
     ("t", "flat / tree · Staged split"),
     (".", "show / hide ignored repos"),
-    ("T", "cycle theme"),
     ("Ctrl-o", "full-file · keep hunk in view"),
     ("o O", "focus branches / clear (graph · repo)"),
     ("PgUp PgDn", "page focused pane"),
@@ -190,12 +189,18 @@ fn documented_help_overlay(screen: &str) -> bool {
     // Group membership: page keys stay VIEW; git writes stay GIT.
     if move_c.contains("page focused pane")
         || move_c.contains("stage scope")
-        || move_c.contains("cycle theme")
         || git_c.contains("down / up")
-        || git_c.contains("cycle theme")
         || view_c.contains("stage scope")
         || view_c.contains("down / up")
         || view_c.contains("open in editor · open in diff tool")
+    {
+        return false;
+    }
+    // Themes are palette `Theme: …` rows; no help row (old `T` cycle theme)
+    // names a theme key.
+    if [&move_c, &git_c, &view_c]
+        .iter()
+        .any(|column| column.contains("theme"))
     {
         return false;
     }
@@ -228,7 +233,8 @@ fn help_legend_bottom(screen: &str) -> bool {
 /// PgDn scrolls the `ICONS` legend under it into view.
 ///
 /// Fail if `?` is a no-op, if the groups are wrong, if a documented key
-/// row is missing (including a clipped last GIT wrap), or if the legend
+/// row is missing (including a clipped last GIT wrap), if a row still names
+/// a theme key (themes are palette rows, not `T`), or if the legend
 /// is missing or cannot be scrolled to. Help `/` search and Enter-arm
 /// stay on `pty_help_enter_does_not_arm_pane_search`.
 #[test]
