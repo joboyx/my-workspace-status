@@ -52,7 +52,7 @@ use super::help::{
     help_version_label, wrap_help_footer, HELP_LEGEND_HEAD_ROWS, HELP_LEGEND_TITLE,
     HELP_SEARCH_ESC_HINT,
 };
-use super::hyperlink::LinkHit;
+use super::hyperlink::{file_url, local_host, LinkHit};
 use super::icons::{
     comment_mark_cols, glyph, icon_branch, icon_comment, icon_comment_resolved, icon_diff,
     icon_merged_into_default, icon_move, icon_open_vs_default, truncate_visible, IconKind,
@@ -429,6 +429,48 @@ fn dim_backdrop(buf: &mut Buffer, area: Rect, keep: Rect, palette: Palette, no_c
 /// hides its cells, so the OSC 8 overlay must not print them as a link.
 fn drop_links_under(links: &mut Vec<LinkHit>, rect: Rect) {
     links.retain(|link| !rect.intersects(Rect::new(link.x, link.y, link.width, 1)));
+}
+
+/// `file://` URL of `rel` in checkout `repo` (both relative to the
+/// workspace root `state.cwd`).
+fn file_link(state: &AppState, repo: &str, rel: &str) -> String {
+    file_url(local_host(), &state.cwd.join(repo).join(rel))
+}
+
+/// Link over the rightmost `needle` painted in buffer row `y`, columns
+/// `x0..x1`, or `None` when the row does not show it.
+///
+/// Matches painted cell symbols, so a hash the widget dropped for room
+/// gets no link.
+fn painted_text_link(
+    buf: &Buffer,
+    y: u16,
+    x0: u16,
+    x1: u16,
+    needle: &str,
+    url: String,
+) -> Option<LinkHit> {
+    let area = buf.area;
+    if needle.is_empty() || y < area.top() || y >= area.bottom() {
+        return None;
+    }
+    let (x0, x1) = (x0.max(area.left()), x1.min(area.right()));
+    let mut text = String::new();
+    let mut starts: Vec<(usize, u16)> = Vec::new();
+    for x in x0..x1 {
+        starts.push((text.len(), x));
+        text.push_str(buf[(x, y)].symbol());
+    }
+    let at = text.rfind(needle)?;
+    let x = starts.iter().find(|(start, _)| *start == at)?.1;
+    let end = at + needle.len();
+    let last = starts.iter().rev().find(|(start, _)| *start < end)?.1;
+    Some(LinkHit {
+        y,
+        x,
+        width: last - x + 1,
+        url,
+    })
 }
 
 /// Tree / graph / files pane on the left and graph / files / diff on the
@@ -1324,6 +1366,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     };
     let mut lines = Vec::new();
     let mut hits = Vec::new();
+    let mut links = Vec::new();
     let now = Instant::now();
     let running = &state.remote_activity.running;
     let running_families: HashSet<String> = running
@@ -1351,7 +1394,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             spinner,
             no_color: state.no_color,
         };
-        let (line, icons) = paint_tree_row(
+        let (line, icons, label) = paint_tree_row(
             row,
             width,
             Some(row.id.as_str()) == focus_id,
@@ -1365,6 +1408,17 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             state.left_col_offset as usize,
         );
         lines.push(line);
+        // A file row's label links to the file on disk.
+        if let (NodeKind::File, Some(repo), Some(file), Some((x, w))) =
+            (row.kind, row.repo.as_deref(), row.file.as_ref(), label)
+        {
+            links.push(LinkHit {
+                y,
+                x: area.x.saturating_add(u16::try_from(x).unwrap_or(u16::MAX)),
+                width: u16::try_from(w).unwrap_or(u16::MAX),
+                url: file_link(state, repo, &file.path),
+            });
+        }
         for (kind, x, w) in icons {
             hits.push(IconHit {
                 y,
@@ -1376,12 +1430,17 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         }
     }
     state.layout.icon_hits.extend(hits);
+    state.layout.links.extend(links);
     frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// Painted icon of a row: catalog kind, column offset from the row start,
 /// and width.
 type IconSpan = (IconKind, usize, usize);
+
+/// Painted label run of a row: column offset from the row start, and
+/// width.
+type LabelSpan = (usize, usize);
 
 /// Per-row marks and live decorations a tree row paints beside its own
 /// segments.
@@ -1426,7 +1485,8 @@ fn tree_row_runs_remote(
 
 /// Paint one tree row. Also returns an [`IconSpan`] for each segment the
 /// row paints with a catalog icon tag ([`TextSeg::icon`]) that is still on
-/// screen after `col_offset`, the label budget, and the row `width`.
+/// screen after `col_offset`, the label budget, and the row `width`, and
+/// the painted [`LabelSpan`] of the label run.
 fn paint_tree_row(
     row: &VisibleRow,
     width: usize,
@@ -1439,7 +1499,7 @@ fn paint_tree_row(
     decor: TreeRowDecor,
     palette: Palette,
     col_offset: usize,
-) -> (Line<'static>, Vec<IconSpan>) {
+) -> (Line<'static>, Vec<IconSpan>, Option<LabelSpan>) {
     let segs_width =
         |segs: &[TextSeg]| -> usize { segs.iter().map(|s| visible_width(&s.text)).sum() };
     let mut segs = painted_row_segments(
@@ -1484,6 +1544,7 @@ fn paint_tree_row(
             .extend(workspace_trailing_fit(&row.chrome, room));
     }
     let icons = segmented_icon_spans(row.depth, &segs, width, col_offset);
+    let label = segmented_label_span(row.depth, &segs, width, col_offset);
     let line = paint_segmented_row(
         row.depth,
         row.foldable,
@@ -1499,7 +1560,7 @@ fn paint_tree_row(
         palette,
         col_offset,
     );
-    (line, icons)
+    (line, icons, label)
 }
 
 /// Painted span of every icon segment of a row that
@@ -1556,6 +1617,24 @@ fn segmented_icon_spans(
         x += seg_width;
     }
     spans
+}
+
+/// Painted label run of a row that [`paint_segmented_row`] paints `width`
+/// columns wide at `col_offset`, clipped to `width`. `None` when no label
+/// cell is on screen.
+fn segmented_label_span(
+    depth: usize,
+    segs: &NodeSegments,
+    width: usize,
+    col_offset: usize,
+) -> Option<LabelSpan> {
+    let (prefix_width, label_budget) = segmented_label_area(depth, segs, width);
+    let label_width: usize = slice_segs(&segs.segments, col_offset, label_budget.max(1))
+        .iter()
+        .map(|s| visible_width(&s.text))
+        .sum();
+    let end = (prefix_width + label_width).min(width);
+    (prefix_width < end).then(|| (prefix_width, end - prefix_width))
 }
 
 /// Columns of `text` that fit in `room`, less the spaces a cut leaves at
@@ -2042,11 +2121,76 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
             })
         })
         .collect();
+    let links = graph_commit_links(frame.buffer_mut(), area, state, &rows, &spans);
     state.layout.icon_hits.extend(hits);
+    state.layout.links.extend(links);
     record_graph_scrollbar(state, area, col_offset, &badges);
     if state.background == BackgroundMode::Paint {
         bleed_graph_scrollbar_column(frame, &state.layout);
     }
+}
+
+/// One link per painted graph commit row, over its short hash, to the
+/// commit page on the forge of the graph's checkout. The selected commit's
+/// hash in the selection footer links too.
+///
+/// A commit row is found by its node icon span. Its hash (the
+/// right-anchored meta) is the rightmost `short_id` painted on the node
+/// line or on a spacer line under it, above the next row's first icon and
+/// the footer. No remote known for the checkout gives no link.
+fn graph_commit_links(
+    buf: &Buffer,
+    area: Rect,
+    state: &AppState,
+    rows: &[GraphRow],
+    spans: &[workspace_status_graph::IconSpan],
+) -> Vec<LinkHit> {
+    let Some((checkout, _)) = state.graph_identity.as_ref() else {
+        return Vec::new();
+    };
+    let checkout = std::path::Path::new(checkout);
+    let chrome = state.graph_chrome_in(area.height);
+    let list_bottom = area
+        .y
+        .saturating_add(u16::from(chrome.header))
+        .saturating_add(chrome.list_height)
+        .min(area.bottom());
+    let hash_link = |id: &str, lines: std::ops::Range<u16>| {
+        let url = state.commit_link(checkout, id)?;
+        lines.into_iter().find_map(|y| {
+            painted_text_link(buf, y, area.x, area.right(), short_id(id), url.clone())
+        })
+    };
+    let mut links: Vec<LinkHit> = spans
+        .iter()
+        .filter(|span| {
+            matches!(
+                span.kind,
+                GraphIconKind::CommitNode | GraphIconKind::HeadNode
+            )
+        })
+        .filter_map(|span| {
+            let index = span.row_index?;
+            let Some(GraphRow::Commit { commit, .. }) = rows.get(index) else {
+                return None;
+            };
+            let next_row = spans
+                .iter()
+                .filter(|other| other.y > span.y && other.row_index != Some(index))
+                .map(|other| other.y)
+                .min()
+                .unwrap_or(list_bottom)
+                .min(list_bottom);
+            hash_link(&commit.id, span.y..next_row)
+        })
+        .collect();
+    if chrome.footer && chrome.footer_height > 0 {
+        if let Some(GraphRow::Commit { commit, .. }) = rows.get(state.graph_cursor) {
+            let top = area.bottom().saturating_sub(chrome.footer_height);
+            links.extend(hash_link(&commit.id, top..area.bottom()));
+        }
+    }
+    links
 }
 
 /// Flat graph list, before [`bleed_flat_pad`]: the widget paints rows one
@@ -2275,6 +2419,24 @@ fn draw_commit_detail(
         height: body_h,
     };
     frame.render_widget(Paragraph::new(footer_lines), footer_area);
+    // The meta row (second body row) starts with the commit's short hash:
+    // link it to the commit page.
+    let link = match state.commit_drill_source() {
+        Some((repo, super::drill::CommitFileSource::Commit { commit_id })) if body_h >= 2 => state
+            .commit_link(std::path::Path::new(repo), commit_id)
+            .and_then(|url| {
+                painted_text_link(
+                    frame.buffer_mut(),
+                    footer_area.y + 1,
+                    footer_area.x,
+                    footer_area.right(),
+                    short_id(commit_id),
+                    url,
+                )
+            }),
+        _ => None,
+    };
+    state.layout.links.extend(link);
 }
 
 fn draw_commit_file_list(
@@ -2359,6 +2521,10 @@ fn draw_commit_file_list(
     let mut lines = Vec::new();
     let mut hits = Vec::new();
     let comment_scope = state.commit_file_comment_scope();
+    let mut links = Vec::new();
+    let link_repo = state
+        .commit_drill_source()
+        .map(|(repo, _)| repo.to_string());
     for (y, row) in (area.y..).zip(rows.iter().skip(start).take(height)) {
         let segs = state.commit_file_row_paint_segments_in(row, comment_scope);
         let search_match = searching_files
@@ -2371,6 +2537,19 @@ fn draw_commit_file_list(
                 width: u16::try_from(w).unwrap_or(u16::MAX),
                 kind,
                 target: IconTarget::CommitFileRow(row.id.clone()),
+            });
+        }
+        // A file row's label links to the file in the checkout.
+        if let (true, Some(repo), Some((x, w))) = (
+            row.is_file(),
+            link_repo.as_deref(),
+            segmented_label_span(row.depth, &segs, width, col_offset),
+        ) {
+            links.push(LinkHit {
+                y,
+                x: area.x.saturating_add(u16::try_from(x).unwrap_or(u16::MAX)),
+                width: u16::try_from(w).unwrap_or(u16::MAX),
+                url: file_link(state, repo, &row.path),
             });
         }
         lines.push(paint_segmented_row(
@@ -2390,6 +2569,7 @@ fn draw_commit_file_list(
         ));
     }
     state.layout.icon_hits.extend(hits);
+    state.layout.links.extend(links);
     frame.render_widget(Paragraph::new(lines), area);
 }
 
@@ -2480,9 +2660,34 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         .add_modifier(Modifier::BOLD);
     // Break the title anywhere by display columns so the row count
     // matches `diff_pane_header_rows`; the extras follow on the last row.
-    let mut header_lines: Vec<Line> = wrap_cols(title, area.width as usize)
+    let title_chunks: Vec<String> = wrap_cols(title, area.width as usize)
         .into_iter()
         .take(header_h as usize)
+        .collect();
+    // The `repo/path` part of the title links to the file on disk.
+    let title_link = state.open_diff_target().and_then(|(repo, rel, _)| {
+        let linked = format!("{repo}/{rel}");
+        title
+            .starts_with(&linked)
+            .then(|| (visible_width(&linked), file_link(state, repo, rel)))
+    });
+    if let Some((mut left, url)) = title_link {
+        for (y, chunk) in (area.y..).zip(&title_chunks) {
+            let width = visible_width(chunk).min(left);
+            if width == 0 {
+                break;
+            }
+            state.layout.links.push(LinkHit {
+                y,
+                x: area.x,
+                width: u16::try_from(width).unwrap_or(u16::MAX),
+                url: url.clone(),
+            });
+            left -= width;
+        }
+    }
+    let mut header_lines: Vec<Line> = title_chunks
+        .into_iter()
         .map(|chunk| Line::from(Span::styled(chunk, heading)))
         .collect();
     if let Some(last) = header_lines.last_mut() {
@@ -15654,7 +15859,7 @@ mod tests {
         let (mut shown, mut cut) = (0, 0);
         for width in 8..48 {
             for col_offset in [0, 2, 9] {
-                let (line, icons) = paint_tree_row(
+                let (line, icons, _) = paint_tree_row(
                     &row,
                     width,
                     false,
@@ -15793,6 +15998,213 @@ mod tests {
             .open_or_focus("app".into(), "main".into(), "HEAD".into());
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         assert!(state.layout.links.is_empty());
+    }
+
+    // ── OSC 8 links on commit hashes and file paths ───────────────────────
+
+    const LINK_SHA: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// Land a PR lookup that resolved `remote` for checkout `app` on
+    /// `main`, as the badge worker does.
+    fn resolve_app_remote(state: &mut AppState, remote: &str) {
+        let _ = state.due_pr_lookups();
+        assert!(state.apply_pr_lookup(
+            Path::new("app"),
+            "main",
+            Some(remote.into()),
+            PrLookup::NoPr
+        ));
+    }
+
+    /// Painted text under `link`.
+    fn link_text(
+        terminal: &Terminal<TestBackend>,
+        link: &crate::tui::hyperlink::LinkHit,
+    ) -> String {
+        region_text(terminal, link.x, link.y, link.width, 1)
+            .trim_end_matches('\n')
+            .to_string()
+    }
+
+    /// The one link to `url`, or a panic naming every link and the screen.
+    fn only_link_to(
+        state: &AppState,
+        terminal: &Terminal<TestBackend>,
+        url: &str,
+    ) -> crate::tui::hyperlink::LinkHit {
+        let found: Vec<_> = state
+            .layout
+            .links
+            .iter()
+            .filter(|link| link.url == url)
+            .cloned()
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "one link to {url}: {:?}\n{}",
+            state.layout.links,
+            buffer_text(terminal)
+        );
+        found[0].clone()
+    }
+
+    /// Graph of checkout `app` (one commit) in the right pane.
+    fn graph_link_state() -> AppState {
+        let mut state = two_pane_graph_state();
+        state.graph_identity = Some(("app".into(), LINK_SHA.into()));
+        state
+    }
+
+    #[test]
+    fn graph_commit_hash_links_to_forge_commit_page() {
+        let mut state = graph_link_state();
+        resolve_app_remote(&mut state, "git@github.com:example/demo.git");
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let url = format!("https://github.com/example/demo/commit/{LINK_SHA}");
+        let link = only_link_to(&state, &terminal, &url);
+        assert_eq!(link_text(&terminal, &link), "aaa1111");
+        assert!(link.x >= state.layout.right_x, "{link:?}");
+        // The hash sits on the spacer line right under the node line.
+        let node_row = buf_line(terminal.backend().buffer(), link.y - 1);
+        assert!(node_row.contains("seed graph"), "{node_row}");
+
+        // Select the commit: the selection footer hash links too.
+        state.graph_cursor = 1;
+        draw_state(&mut terminal, &mut state);
+        let links: Vec<_> = state
+            .layout
+            .links
+            .iter()
+            .filter(|l| l.url == url)
+            .cloned()
+            .collect();
+        assert_eq!(links.len(), 2, "{links:?}\n{}", buffer_text(&terminal));
+        assert!(links[1].y > link.y, "{links:?}");
+        assert_eq!(link_text(&terminal, &links[1]), "aaa1111");
+    }
+
+    #[test]
+    fn graph_hash_has_no_link_without_known_remote() {
+        // No lookup landed yet, a checkout without a remote, and a remote on
+        // a forge with no commit page.
+        for remote in [None, Some("git@bitbucket.org:example/demo.git")] {
+            let mut state = graph_link_state();
+            if let Some(remote) = remote {
+                resolve_app_remote(&mut state, remote);
+            }
+            let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let text = buffer_text(&terminal);
+            assert!(text.contains("aaa1111"), "hash painted:\n{text}");
+            assert!(
+                !state
+                    .layout
+                    .links
+                    .iter()
+                    .any(|link| link.url.contains("/commit/")),
+                "{remote:?}: {:?}",
+                state.layout.links
+            );
+        }
+    }
+
+    #[test]
+    fn commit_detail_footer_hash_links_to_forge_commit_page() {
+        let mut state = two_pane_commit_diff_state();
+        state.graph_identity = Some(("app".into(), LINK_SHA.into()));
+        resolve_app_remote(&mut state, "https://gitlab.com/group/sub/demo.git");
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let url = format!("https://gitlab.com/group/sub/demo/-/commit/{LINK_SHA}");
+        let link = only_link_to(&state, &terminal, &url);
+        assert_eq!(link_text(&terminal, &link), "aaa1111");
+        let l = &state.layout;
+        assert!(
+            link.y > l.files_list_y + l.files_list_height && link.x < l.right_x,
+            "the footer under the left file list: {link:?}"
+        );
+    }
+
+    #[test]
+    fn tree_file_row_links_to_percent_encoded_file_url() {
+        let mut row = repo("app", true);
+        row.changes[0].path = "docs/a b#é.md".into();
+        let snapshot = build_workspace_snapshot(&[row], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/work space"), snapshot, true);
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let url = crate::tui::hyperlink::file_url(
+            crate::tui::hyperlink::local_host(),
+            Path::new("/work space/app/docs/a b#é.md"),
+        );
+        assert!(
+            url.ends_with("/work%20space/app/docs/a%20b%23%C3%A9.md"),
+            "{url}"
+        );
+        let link = only_link_to(&state, &terminal, &url);
+        assert!(link.x < state.layout.right_x, "tree pane: {link:?}");
+        let text = link_text(&terminal, &link);
+        assert!(text.contains("a b#é.md"), "{text:?}");
+        // Repo and folder rows get no path link.
+        assert!(
+            state
+                .layout
+                .links
+                .iter()
+                .all(|link| link.url == url || !link.url.starts_with("file://")),
+            "{:?}",
+            state.layout.links
+        );
+    }
+
+    #[test]
+    fn commit_file_row_links_to_file_url() {
+        let mut state = two_pane_graph_state();
+        state.open_commit_files(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: LINK_SHA.into(),
+            },
+            vec![super::super::drill::CommitFile {
+                status: "M".into(),
+                path: "src/my file.rs".into(),
+                old_path: None,
+                stat: None,
+            }],
+        );
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let url = crate::tui::hyperlink::file_url(
+            crate::tui::hyperlink::local_host(),
+            Path::new("/tmp/app/src/my file.rs"),
+        );
+        assert!(url.ends_with("/tmp/app/src/my%20file.rs"), "{url}");
+        let link = only_link_to(&state, &terminal, &url);
+        assert!(link.x >= state.layout.right_x, "files pane: {link:?}");
+        let text = link_text(&terminal, &link);
+        assert!(text.contains("my file.rs"), "{text:?}");
+    }
+
+    #[test]
+    fn diff_title_path_links_to_file_url() {
+        let mut state = two_pane_diff_state();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let url = crate::tui::hyperlink::file_url(
+            crate::tui::hyperlink::local_host(),
+            Path::new("/tmp/app/README.md"),
+        );
+        let links: Vec<_> = state
+            .layout
+            .links
+            .iter()
+            .filter(|link| link.url == url && link.x >= state.layout.right_x)
+            .cloned()
+            .collect();
+        assert_eq!(links.len(), 1, "{:?}", state.layout.links);
+        assert_eq!(link_text(&terminal, &links[0]), "app/README.md");
     }
 
     /// Link spans in `links` that overlap `rect`.
@@ -16046,7 +16458,7 @@ mod tests {
         let (mut both, mut sync_only) = (0, 0);
         for width in 6..60 {
             for col_offset in [0, 3, 11, 40] {
-                let (line, icons) = paint_tree_row(
+                let (line, icons, _) = paint_tree_row(
                     &row,
                     width,
                     false,
@@ -16139,7 +16551,7 @@ mod tests {
                 .collect();
             for width in 6..72 {
                 for col_offset in [0, 3, 11, 40] {
-                    let (line, icons) = paint_tree_row(
+                    let (line, icons, _) = paint_tree_row(
                         row,
                         width,
                         false,

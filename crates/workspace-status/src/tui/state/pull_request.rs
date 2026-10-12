@@ -28,8 +28,8 @@ use super::super::gates::ListFocusTarget;
 use super::super::hyperlink::LinkHit;
 use super::super::popover::IconTarget;
 use super::super::pull_request::{
-    lookup_failed_status, no_pr_status, PrDetailLookup, PrLookup, PrState, PullRequest,
-    PullRequestDetail, NO_PR_FOR_ROW, OPEN_FAILED,
+    commit_url, lookup_failed_status, no_pr_status, parse_remote, PrDetailLookup, PrLookup,
+    PrState, PullRequest, PullRequestDetail, NO_PR_FOR_ROW, OPEN_FAILED,
 };
 use super::super::status::StatusMessage;
 use super::super::tree::NodeKind;
@@ -98,6 +98,13 @@ pub(crate) struct PrCache {
 }
 
 impl PrCache {
+    /// Remote URL the PR lookup resolved for checkout `checkout`.
+    ///
+    /// `None` before the lookup lands, and when the checkout has no remote.
+    pub(crate) fn remote_for(&self, checkout: &Path) -> Option<&str> {
+        self.checkouts.get(checkout)?.remote.as_deref()
+    }
+
     /// Drop answers and details that no checkout points at any more.
     fn prune_answers(&mut self) {
         let live: HashSet<(&str, &str)> = self
@@ -244,6 +251,17 @@ impl AppState {
             BranchPr::Ready(Some(pr)) => Some(pr),
             BranchPr::Ready(None) | BranchPr::Failed => None,
         }
+    }
+
+    /// Web page of commit `sha` (full id) in checkout `checkout`, or `None`.
+    ///
+    /// The forge comes from the remote URL the PR badge lookup already
+    /// resolved for the checkout ([`PrCache::remote_for`]); no git runs
+    /// here. No resolved remote, or a remote that is not GitHub or GitLab,
+    /// gives no link.
+    pub(crate) fn commit_link(&self, checkout: &Path, sha: &str) -> Option<String> {
+        let remote = self.pr_cache.remote_for(checkout)?;
+        Some(commit_url(&parse_remote(remote)?, sha))
     }
 
     /// PR state for the badge of checkout `repo`.

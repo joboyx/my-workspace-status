@@ -237,6 +237,19 @@ pub fn parse_remote(url: &str) -> Option<ForgeRepo> {
     })
 }
 
+/// Web page of commit `sha` in `repo`.
+///
+/// GitHub: `https://{host}/{path}/commit/{sha}`. GitLab:
+/// `https://{host}/{path}/-/commit/{sha}`. Pass the full commit id, not
+/// the short one shown on screen.
+pub fn commit_url(repo: &ForgeRepo, sha: &str) -> String {
+    let sep = match repo.forge {
+        Forge::GitHub => "",
+        Forge::GitLab => "-/",
+    };
+    format!("https://{}/{}/{sep}commit/{sha}", repo.host, repo.path)
+}
+
 /// Percent-encode everything except RFC 3986 unreserved characters.
 ///
 /// `/` becomes `%2F`, which GitLab needs for a project path in the API.
@@ -1065,6 +1078,21 @@ mod tests {
         assert_eq!(
             parse_remote("git@github.example.com:octo/demo.git"),
             Some(repo(Forge::GitHub, "github.example.com", "octo/demo"))
+        );
+    }
+
+    #[test]
+    fn commit_url_for_github_and_gitlab_subgroups() {
+        const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+        let github = parse_remote("git@github.com:example/demo.git").unwrap();
+        assert_eq!(
+            commit_url(&github, SHA),
+            format!("https://github.com/example/demo/commit/{SHA}")
+        );
+        let gitlab = parse_remote("https://gitlab.com/group/sub/demo.git").unwrap();
+        assert_eq!(
+            commit_url(&gitlab, SHA),
+            format!("https://gitlab.com/group/sub/demo/-/commit/{SHA}")
         );
     }
 
