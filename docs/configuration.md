@@ -337,7 +337,7 @@ Besides `surface` (the right pane and the Explorer file pane), each theme has th
 | `palette.chrome` | Tab strip, breadcrumb, ctrl-c prompt, and key-chip footer rows | `surface` mixed 38% toward black |
 | `palette.panel` | Popups | `surface` mixed 5% toward white |
 
-Every text role meets its contrast floor on `surface`, `sidebar`, `chrome`, and `panel` (`theme.rs` tests), on light themes too. Monokai, Dracula, and Gruvbox Dark set a smaller `panel` lift (4%, 3%, 2% toward white) because the 5% rule drops their popup text below the floor. The default rule darkens and lightens a dark surface, so every light theme sets `sidebar`, `chrome`, and `panel` itself.
+Every text role meets its contrast floor on `surface`, `sidebar`, `chrome`, and `panel` (`theme.rs` tests), on light themes too. Monokai, Dracula, and Gruvbox Dark set a smaller `panel` lift (4%, 3%, 2% toward white) because the 5% rule drops their popup text below the floor. The default rule darkens and lightens a dark surface, so every light theme sets `sidebar`, `chrome`, and `panel` itself. Graph lane colours keep a 3:1 contrast on `sidebar` and `surface` on every theme (`lane_colors_meet_floor_on_sidebar_and_surface`); the light twins darken their upstream lane hues as far as that floor needs.
 
 Behind an open dialog (help, confirm, pickers, Quick Open and the command palette, search in files) every cell outside the box recedes: its fg and bg mix 50% toward `surface` by the same rule. This backdrop is meant to recede, so it has no contrast floor; a `theme.rs` test checks the mix visibly moves `muted`, `file`, `sidebar`, and `chrome` on every theme. A non-RGB fg gets the DIM modifier instead. Under `NO_COLOR` the backdrop is the DIM modifier only.
 

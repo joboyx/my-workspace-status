@@ -1282,7 +1282,7 @@ const TOKYO_NIGHT_DAY: Theme = Theme {
         filter_fg: "#e1e2e7",
     },
     lane_colors: [
-        "#2e7de9", "#9854f1", "#007197", "#587539", "#8c6c3e", "#f52a65", "#b15c00", "#118c74",
+        "#2d7ae4", "#9854f1", "#007197", "#587539", "#8c6c3e", "#eb2861", "#b15c00", "#118c74",
     ],
 };
 
@@ -1334,7 +1334,7 @@ const MONOKAI_LIGHT: Theme = Theme {
         filter_fg: "#fafaf5",
     },
     lane_colors: [
-        "#1c8ca8", "#7058be", "#269d69", "#cc7a0a", "#e14775", "#e16032", "#49483e", "#2a9d8f",
+        "#1c8ca8", "#7058be", "#269d69", "#c6760a", "#e14775", "#e16032", "#49483e", "#299a8c",
     ],
 };
 
@@ -1438,7 +1438,7 @@ const GRUVBOX_LIGHT: Theme = Theme {
         filter_fg: "#fbf1c7",
     },
     lane_colors: [
-        "#076678", "#8f3f71", "#79740e", "#b57614", "#9d0006", "#af3a03", "#427b58", "#b5811c",
+        "#076678", "#8f3f71", "#79740e", "#b57614", "#9d0006", "#af3a03", "#427b58", "#aa791a",
     ],
 };
 
@@ -1490,7 +1490,7 @@ const CATPPUCCIN_LATTE: Theme = Theme {
         filter_fg: "#eff1f5",
     },
     lane_colors: [
-        "#1e66f5", "#8839ef", "#3f9e2b", "#c07a19", "#d20f39", "#f05801", "#0494cd", "#e44fbc",
+        "#1e66f5", "#8839ef", "#3c9829", "#ba7618", "#d20f39", "#e65401", "#048ec5", "#db4cb4",
     ],
 };
 
@@ -1594,7 +1594,7 @@ const SOLARIZED_LIGHT: Theme = Theme {
         filter_fg: "#fdf6e3",
     },
     lane_colors: [
-        "#268bd2", "#6c71c4", "#299e95", "#839700", "#b38700", "#dc322f", "#cb4b16", "#d33682",
+        "#268bd2", "#6c71c4", "#27988f", "#7f9200", "#ac8200", "#dc322f", "#cb4b16", "#d33682",
     ],
 };
 
@@ -1646,7 +1646,7 @@ const NORD_LIGHT: Theme = Theme {
         filter_fg: "#eceff4",
     },
     lane_colors: [
-        "#5e81ac", "#a87ca0", "#4c8a9b", "#6a8a4f", "#a07a2c", "#bf616a", "#c87257", "#4f8a89",
+        "#5e81ac", "#a3789b", "#4c8a9b", "#6a8a4f", "#a07a2c", "#bf616a", "#c26f54", "#4f8a89",
     ],
 };
 
@@ -1698,7 +1698,7 @@ const ROSE_PINE_DAWN: Theme = Theme {
         filter_fg: "#faf4ed",
     },
     lane_colors: [
-        "#286983", "#907aa9", "#d2716d", "#56949f", "#c87c15", "#b4637a", "#c0786a", "#4f9a8a",
+        "#286983", "#907aa9", "#c86b68", "#53909a", "#be7614", "#b4637a", "#ba7467", "#4b9283",
     ],
 };
 
@@ -1750,7 +1750,7 @@ const KANAGAWA_LOTUS: Theme = Theme {
         filter_fg: "#f2ecbc",
     },
     lane_colors: [
-        "#4d699b", "#624c83", "#4e8ca2", "#6f894e", "#836f4a", "#c84053", "#cc6d00", "#597b75",
+        "#4d699b", "#624c83", "#498297", "#69824a", "#836f4a", "#c84053", "#bc6400", "#597b75",
     ],
 };
 
@@ -1802,7 +1802,7 @@ const EVERFOREST_LIGHT: Theme = Theme {
         filter_fg: "#fffbef",
     },
     lane_colors: [
-        "#3a94c5", "#de66b8", "#34a47a", "#889b01", "#bc8700", "#f85552", "#ed6a0b", "#4b9f5a",
+        "#3991c1", "#d361af", "#319a73", "#809201", "#b38000", "#f15250", "#e1650a", "#499a57",
     ],
 };
 
@@ -1854,7 +1854,7 @@ const ONE_LIGHT: Theme = Theme {
         filter_fg: "#fafafa",
     },
     lane_colors: [
-        "#4078f2", "#a626a4", "#0184bc", "#50a14f", "#c18401", "#e45649", "#986801", "#0f9a86",
+        "#4078f2", "#a626a4", "#0184bc", "#4d9b4c", "#b97f01", "#e45649", "#986801", "#0f9a86",
     ],
 };
 
@@ -2535,6 +2535,31 @@ mod tests {
             60.0 * ((r - g) / delta + 4.0)
         };
         (hue, sat)
+    }
+
+    /// Graph lanes paint on the left pane (`sidebar`) and on the right pane
+    /// (`surface`). Every lane colour must reach the 3:1 non-text floor on
+    /// both, so a light terminal still shows each rail and node.
+    #[test]
+    fn lane_colors_meet_floor_on_sidebar_and_surface() {
+        const LANE_FLOOR: f64 = 3.0;
+        let mut failures = Vec::new();
+        for id in THEME_IDS {
+            let pal = id.palette();
+            for (lane, fg) in id.lane_colors().into_iter().enumerate() {
+                for (role, bg) in [("sidebar", pal.sidebar), ("surface", pal.surface)] {
+                    let ratio = contrast_ratio(fg, bg);
+                    if ratio < LANE_FLOOR {
+                        failures.push(format!("{id:?} lane[{lane}] {fg:?} on {role} {ratio:.2}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "lanes below {LANE_FLOOR}:1:\n{}",
+            failures.join("\n")
+        );
     }
 
     /// Toasts paint `repo` text on the add-flash ramp as they fade. Every
