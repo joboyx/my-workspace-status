@@ -14706,7 +14706,7 @@ mod tests {
         assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
         assert_eq!(app.theme, ThemeId::Monokai);
         assert!(app.status.contains("Monokai"));
-        for _ in 2..crate::tui::theme::THEME_IDS.len() {
+        for _ in 2..crate::tui::theme::DARK_THEME_IDS.len() {
             app.dispatch(Action::CycleTheme);
         }
         assert_eq!(app.theme, ThemeId::GithubDarkDimmed);

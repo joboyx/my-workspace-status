@@ -1448,6 +1448,31 @@ mod tests {
     }
 
     #[test]
+    fn config_theme_accepts_light_slugs() {
+        for (slug, id) in [
+            ("tokyo-night-day", ThemeId::TokyoNightDay),
+            ("solarized-light", ThemeId::SolarizedLight),
+            ("catppuccin-latte", ThemeId::CatppuccinLatte),
+            ("github-light", ThemeId::GithubLight),
+        ] {
+            assert_eq!(
+                load_runtime_key("theme", &format!(r#""{slug}""#))
+                    .unwrap()
+                    .theme,
+                Some(id),
+                "{slug}"
+            );
+        }
+        let cfg = load_layered_home(
+            Some(r#"{"theme":"one-light"}"#),
+            Some(r#"{"ignoredRepos":[],"theme":"rose-pine-dawn"}"#),
+            Some("/home/demo"),
+        )
+        .unwrap();
+        assert_eq!(cfg.runtime.theme, Some(ThemeId::RosePineDawn));
+    }
+
+    #[test]
     fn runtime_keys_parse_valid_values() {
         let cfg = load_layered_home(
             Some(
@@ -1498,12 +1523,12 @@ mod tests {
 
     #[test]
     fn runtime_keys_bad_values_name_the_file_key_and_choices() {
-        let themes = r#"must be one of "tokyo-night", "monokai", "dracula", "gruvbox-dark", "catppuccin-mocha", "slate", "solarized-dark", "nord", "rose-pine", "kanagawa", "everforest", "one-dark", "github-dark-dimmed""#;
+        let themes = r#"must be one of "tokyo-night", "monokai", "dracula", "gruvbox-dark", "catppuccin-mocha", "slate", "solarized-dark", "nord", "rose-pine", "kanagawa", "everforest", "one-dark", "github-dark-dimmed", "tokyo-night-day", "monokai-light", "dracula-light", "gruvbox-light", "catppuccin-latte", "slate-light", "solarized-light", "nord-light", "rose-pine-dawn", "kanagawa-lotus", "everforest-light", "one-light", "github-light""#;
         let path_rule = "must be an absolute path or a path that starts with ~/";
         let git_rule =
             "must be an absolute path, a path that starts with ~/, or a command name without /";
         let cases: Vec<(&str, &str, String)> = vec![
-            ("theme", r#""solarized-light""#, themes.to_string()),
+            ("theme", r#""solarized""#, themes.to_string()),
             ("theme", r#""Dracula""#, themes.to_string()),
             ("theme", r#""""#, themes.to_string()),
             ("theme", "1", themes.to_string()),

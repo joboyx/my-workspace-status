@@ -174,8 +174,9 @@ The TUI uses the terminal **alternate screen** (DEC 1049, same idea as Vim/less)
 
 Requirements, keymap, and layout details: [docs/configuration.md](./docs/configuration.md).
 
-Themes: 13 built-in dark themes. Pick one with `WS_STATUS_THEME` or the config `theme` key; `T` cycles them, and the next launch keeps the last one unless `WS_STATUS_THEME` is set to a known theme (saved in `$XDG_STATE_HOME/my-workspace-status/theme.json`, never in the config file).
+Themes: 13 built-in dark themes, each with a light twin. Pick one with `WS_STATUS_THEME` or the config `theme` key; `T` cycles inside the dark or the light list, and the next launch keeps the last one unless `WS_STATUS_THEME` is set to a known theme (saved in `$XDG_STATE_HOME/my-workspace-status/theme.json`, never in the config file).
 Slate (`slate`, the default), Tokyo Night (`tokyo-night`), Monokai (`monokai`), Dracula (`dracula`), Gruvbox Dark (`gruvbox-dark`), Catppuccin Mocha (`catppuccin-mocha`), Solarized Dark (`solarized-dark`), Nord (`nord`), Rosé Pine (`rose-pine`), Kanagawa (`kanagawa`), Everforest (`everforest`), One Dark (`one-dark`), GitHub Dark Dimmed (`github-dark-dimmed`).
+Light twins: Tokyo Night Day (`tokyo-night-day`), Monokai Light (`monokai-light`), Dracula Light (`dracula-light`), Gruvbox Light (`gruvbox-light`), Catppuccin Latte (`catppuccin-latte`), Slate Light (`slate-light`), Solarized Light (`solarized-light`), Nord Light (`nord-light`), Rosé Pine Dawn (`rose-pine-dawn`), Kanagawa Lotus (`kanagawa-lotus`), Everforest Light (`everforest-light`), One Light (`one-light`), GitHub Light (`github-light`).
 
 Known limits: macOS PageUp needs the terminal to deliver the key (`Fn+Up` / mapped PageUp); search `/` is armed with Enter before `n` / `N` step matches.
 

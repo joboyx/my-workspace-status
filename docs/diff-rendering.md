@@ -30,7 +30,7 @@ A commit-vs-working-tree compare tab uses `DiffContent::from_worktree_compare_li
 `parse_unified_diff` skips file-level headers (`diff --git`, `index`, `---`, `+++`) until the first `@@`, tracks 1-based `old_no` / `new_no` per line, turns `\ No newline at end of file` into a `meta` line, and turns a `Binary files … differ` line into a single meta hunk with no header. Empty input returns no hunks, which is how "no diff" is detected upstream. A worktree `git diff` that fails keeps git's reason line in `DiffContent::error`, and the pane paints `git diff failed: <reason>` instead of `(no diff)`. When the other side loaded (staged ok, unstaged failed), `build_diff_rows` ends with a `DiffRow::Error` row carrying that text in the `deleted` colour.
 
 Gutter width sizes the line-number column from the widest number present, minimum 2. A one-column comment mark sits to the left of that number column on every numbered cell, whether or not a comment exists, so adding a comment does not shift the numbers. Open comments paint `"` / nf-fa-comment. Resolved comments paint `'` / nf-fa-comment-o.
-Line numbers and the gutter rule use the theme `muted` colour without DIM so they stay readable on a dark terminal.
+Line numbers and the gutter rule use the theme `muted` colour without DIM so they stay readable on the theme surface, dark or light.
 
 ## Display columns
 
@@ -39,6 +39,24 @@ Diff cells clip and pad by **display columns**, not Unicode scalar count. Clip u
 ## Highlighting
 
 Syntax highlighting uses `two-face` (syntect). Language comes from the file path (basename, then extension). A compare tab uses that tab's active file path, not a parked Workspace drill or `diff_path`. An unknown path uses Plain Text and the theme `repo` foreground. Tokens set **foreground** only. The Explorer file view's `syntax::highlight_file_window` shares this syntect setup (syntax set, theme map, `MAX_HIGHLIGHT_CHARS` budget) and feeds one stream from 200 lines above its window.
+
+Each UI theme maps to one embedded syntax theme of the same polarity (`syntax.rs` `syntect_theme_name`). A theme with no embedded twin takes the closest one by surface hue and tone.
+
+| Dark theme | Syntax theme | Light twin | Syntax theme |
+| --- | --- | --- | --- |
+| Tokyo Night | `Nord` | Tokyo Night Day | `ColdarkCold` |
+| Monokai | `MonokaiExtended` | Monokai Light | `MonokaiExtendedLight` |
+| Dracula | `Dracula` | Dracula Light | `InspiredGithub` |
+| Gruvbox Dark | `GruvboxDark` | Gruvbox Light | `GruvboxLight` |
+| Catppuccin Mocha | `Base16MochaDark` | Catppuccin Latte | `OneHalfLight` |
+| Slate | `ColdarkDark` | Slate Light | `ColdarkCold` |
+| Solarized Dark | `SolarizedDark` | Solarized Light | `SolarizedLight` |
+| Nord | `Nord` | Nord Light | `Base16OceanLight` |
+| Rosé Pine | `Dracula` | Rosé Pine Dawn | `InspiredGithub` |
+| Kanagawa | `Dracula` | Kanagawa Lotus | `GruvboxLight` |
+| Everforest | `Base16OceanDark` | Everforest Light | `GruvboxLight` |
+| One Dark | `TwoDark` | One Light | `OneHalfLight` |
+| GitHub Dark Dimmed | `OneHalfDark` | GitHub Light | `Github` |
 
 Add and del rows keep `palette.diffAddBg` / `palette.diffDelBg` on the gutter, sign, code, and pad. The `+` / `-` signs stay `added` / `deleted` (bold). Cursor, visual-line, and unfocused selected overlays tint that row background under the code and pad (see word highlight below); the gutter and sign take the flat cursor bar and keep their colours. A search overlay replaces the row background. A syntax colour that fails a contrast floor of 3.0 against the add/del background falls back to `repo`. Syntect parse state is kept across lines inside one hunk (old-file vs new-file streams) so a JSON property line after `{` still gets token colours. A section label or hunk header starts a new pair of highlighters. Paint highlights the visible viewport. Lines above the viewport in the same hunk still feed parse state. Paint reuses the last span list when the file path, theme, viewport, and diff text stay the same. A watch or compare reload that replaces same-length text still computes new spans.
 

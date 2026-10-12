@@ -162,7 +162,7 @@ These top-level keys set the same settings as the env vars in [Environment varia
 
 | Key | Env var | Value |
 | --- | --- | --- |
-| `theme` | `WS_STATUS_THEME` | one of `"tokyo-night"`, `"monokai"`, `"dracula"`, `"gruvbox-dark"`, `"catppuccin-mocha"`, `"slate"`, `"solarized-dark"`, `"nord"`, `"rose-pine"`, `"kanagawa"`, `"everforest"`, `"one-dark"`, `"github-dark-dimmed"` |
+| `theme` | `WS_STATUS_THEME` | one of `"tokyo-night"`, `"monokai"`, `"dracula"`, `"gruvbox-dark"`, `"catppuccin-mocha"`, `"slate"`, `"solarized-dark"`, `"nord"`, `"rose-pine"`, `"kanagawa"`, `"everforest"`, `"one-dark"`, `"github-dark-dimmed"`, or a light twin: `"tokyo-night-day"`, `"monokai-light"`, `"dracula-light"`, `"gruvbox-light"`, `"catppuccin-latte"`, `"slate-light"`, `"solarized-light"`, `"nord-light"`, `"rose-pine-dawn"`, `"kanagawa-lotus"`, `"everforest-light"`, `"one-light"`, `"github-light"` |
 | `glyphs` | `WS_STATUS_GLYPHS` | `"nerd"` \| `"ascii"` |
 | `watchMs` | `WS_STATUS_WATCH_MS` | integer >= 0. `0` turns the poll off. `1` to `499` clamp up to `500`, like the env var |
 | `fetchMs` | `WS_STATUS_FETCH_MS` | integer >= 0. `0` turns the background fetch off. `1` to `29999` clamp up to `30000`, like the env var |
@@ -231,7 +231,7 @@ Optional object. It sets the TUI view modes at launch. Each key is optional. An 
 | `WS_STATUS_WATCH_MS` | `watchMs` | `3000` (`DEFAULT_WATCH_MS`)                             | Live-refresh poll period. `0` disables the poll. Values below `MIN_WATCH_MS` (500) are clamped up. Non-numeric, negative, or empty falls through to config `watchMs`, then the default. File, graph, and commit-file rows flash (~800ms background fade) on add/update/remove of the same row identity. Add is green (`flash` / `flash_ramp`), update is amber (`flash_update` / `flash_update_ramp`), remove is red/magenta (`flash_remove` / `flash_remove_ramp`). Flash background wins over cursor and search. The cursor bar stays. File signatures use status letter or worktree `size:mtimeMs`. Chrome identity includes `HEAD` and `sync_note` so a new local commit or ahead 2→3 reloads status / graph without `r`. The active file of an Explorer tab reads again when its `size:mtimeMs` or its git status moved. A disjoint identity set (repo switch / first paint) seeds and does not flash. The TUI polls local git only (no fetch) and keeps fold, focus, and scroll. Unchanged polls skip the right-pane `git log` / diff reload. The next tick is scheduled from the start of the interval, not after collect finishes. The live loop applies each checkout as it finishes; keys cannot starve the tick. |
 | `WS_STATUS_FETCH_MS` | `fetchMs` | `300000` (`DEFAULT_FETCH_MS`)                           | Background `git fetch` period for the TUI. `0` disables. Values below `MIN_FETCH_MS` (30000) are clamped up when enabled. Non-numeric, negative, or empty falls through to config `fetchMs`, then the default. The tick paints no progress or summary line; it writes the status slot only when a repo fails. |
 | `WS_STATUS_FETCH_CONCURRENCY` | `fetchConcurrency` | `10` (`FETCH_CONCURRENCY`)                            | In-flight cap for independent per-repo fetch / pull / push on the TTY Scheduler JoinSet, and for CLI `collect_snapshots` / `process_repo`. Remotes queue per gitdir when that gitdir is occupied. Missing, empty, `0`, negative, or non-numeric falls through to config `fetchConcurrency`, then 10. Exclusive writes (stage, commit, merge into HEAD) stay serial. |
-| `WS_STATUS_THEME` | `theme` | `slate`                                                 | Built-in TUI theme id: `tokyo-night`, `monokai`, `dracula`, `gruvbox-dark`, `catppuccin-mocha`, `slate`, `solarized-dark`, `nord`, `rose-pine`, `kanagawa`, `everforest`, `one-dark`, `github-dark-dimmed`. Unknown values fall through to the last-used theme (`WS_STATUS_THEME_STORE`), then config `theme`, then `slate`. Seeds the TUI at launch. `T` cycles the same list and saves each pick as the last-used theme. All palettes are dark. See [Theme tokens](#theme-tokens) and **Theme flash tokens**. |
+| `WS_STATUS_THEME` | `theme` | `slate`                                                 | Built-in TUI theme id. Dark: `tokyo-night`, `monokai`, `dracula`, `gruvbox-dark`, `catppuccin-mocha`, `slate`, `solarized-dark`, `nord`, `rose-pine`, `kanagawa`, `everforest`, `one-dark`, `github-dark-dimmed`. Light twins, in the same order: `tokyo-night-day`, `monokai-light`, `dracula-light`, `gruvbox-light`, `catppuccin-latte`, `slate-light`, `solarized-light`, `nord-light`, `rose-pine-dawn`, `kanagawa-lotus`, `everforest-light`, `one-light`, `github-light`. Unknown values fall through to the last-used theme (`WS_STATUS_THEME_STORE`), then config `theme`, then `slate`. Seeds the TUI at launch. `T` cycles inside the current theme's list (dark or light, 13 themes each), so it never flips light / dark, and saves each pick as the last-used theme. See [Theme tokens](#theme-tokens) and **Theme flash tokens**. |
 | `EDITOR` | — (system var; use `editor`) | unset                                                   | Used for `e` when config `editor` and `VISUAL` are unset or blank. Blank values are ignored. May include fixed args (`code --wait`, `nvim -p`); simple quoting is supported for paths with spaces. |
 | `VISUAL` | — (system var; use `editor`) | unset                                                   | Fallback editor for `e` when config `editor` is omitted or blank; wins over `EDITOR` (same argv parsing).                                                                                         |
 | _(editor fallback)_ | `editor` | `vim`                                                   | When config `editor`, `VISUAL`, and `EDITOR` are all unset/blank, `resolve_editor` returns `vim`.                                                                                                 |
@@ -252,7 +252,7 @@ A **Config key** sets the same setting from a config file; a valid env var wins 
 
 ### Theme flash tokens
 
-Each built-in palette keeps three four-step flash ramps. Each step is `surface` mixed 42%, 28%, 16%, then 8% toward the accent, so the row stays readable.
+Each built-in palette keeps three four-step flash ramps. On a dark theme each step is `surface` mixed 42%, 28%, 16%, then 8% toward the accent, so the row stays readable. A light theme's darkened accents would make that mix muddy, so its peak is a light tint of the accent hue (for add and remove, `diffAddWordBg` / `diffDelWordBg`), and the steps are `surface` mixed 100%, 70%, 40%, then 15% toward that peak.
 
 | Kind | Peak / ramp | Accent source |
 | --- | --- | --- |
@@ -316,7 +316,7 @@ Split falls back to inline when the diff's painted width (the right pane less it
 
 ## Theme tokens
 
-Built-in palettes live in `crates/workspace-status/src/tui/theme.rs`. The first paint uses a known `WS_STATUS_THEME`, else the last-used theme, else config `theme`, else Slate. `T` cycles the same list, in the order of the tables below, and saves each pick to the theme state file (`WS_STATUS_THEME_STORE`). The config file is never written.
+Built-in palettes live in `crates/workspace-status/src/tui/theme.rs`: 13 dark themes, then a light twin of each with its own slug. The first paint uses a known `WS_STATUS_THEME`, else the last-used theme, else config `theme`, else Slate. `T` cycles inside the current list (the 13 dark rows or the 13 light rows of the tables below, in that order), so it never flips light / dark, and saves each pick to the theme state file (`WS_STATUS_THEME_STORE`). The config file is never written.
 
 Besides `surface` (the right pane and the Explorer file pane), each theme has three background roles. A theme can set each one; otherwise the default rule applies. Each mix is per RGB channel, `surface + (target - surface) × percent / 100`, rounded to the nearest integer.
 
@@ -326,7 +326,7 @@ Besides `surface` (the right pane and the Explorer file pane), each theme has th
 | `palette.chrome` | Tab strip, breadcrumb, ctrl-c prompt, and key-chip footer rows | `surface` mixed 38% toward black |
 | `palette.panel` | Popups | `surface` mixed 5% toward white |
 
-Every text role meets its contrast floor on `surface`, `sidebar`, `chrome`, and `panel` (`theme.rs` tests). Monokai, Dracula, and Gruvbox Dark set a smaller `panel` lift (4%, 3%, 2% toward white) because the 5% rule drops their popup text below the floor.
+Every text role meets its contrast floor on `surface`, `sidebar`, `chrome`, and `panel` (`theme.rs` tests), on light themes too. Monokai, Dracula, and Gruvbox Dark set a smaller `panel` lift (4%, 3%, 2% toward white) because the 5% rule drops their popup text below the floor. The default rule darkens and lightens a dark surface, so every light theme sets `sidebar`, `chrome`, and `panel` itself.
 
 | Theme | slug | surface | sidebar | chrome | panel |
 | --- | --- | --- | --- | --- | --- |
@@ -343,8 +343,21 @@ Every text role meets its contrast floor on `surface`, `sidebar`, `chrome`, and 
 | Everforest | `everforest` | `#2d353b` | `#232a2e` | `#1c2125` (rule) | `#343f44` |
 | One Dark | `one-dark` | `#282c34` | `#21252b` | `#1b1e23` | `#2c313c` |
 | GitHub Dark Dimmed | `github-dark-dimmed` | `#22272e` | `#1c2128` | `#171b21` | `#2d333b` |
+| Tokyo Night Day | `tokyo-night-day` | `#e1e2e7` | `#d9dbe2` | `#d0d5e3` | `#eaebef` |
+| Monokai Light | `monokai-light` | `#fafaf5` | `#f0f0eb` | `#e6e6e1` | `#f5f5f0` |
+| Dracula Light | `dracula-light` | `#fffbeb` | `#f4f0de` | `#ece8d4` | `#faf6e6` |
+| Gruvbox Light | `gruvbox-light` | `#fbf1c7` | `#f2e5bc` | `#ebdbb2` | `#fdf7dd` |
+| Catppuccin Latte | `catppuccin-latte` | `#eff1f5` | `#e6e9ef` | `#dce0e8` | `#f5f7f9` |
+| Slate Light | `slate-light` | `#f5f7fa` | `#eceff4` | `#e3e7ed` | `#f9fafc` |
+| Solarized Light | `solarized-light` | `#fdf6e3` | `#f5eedb` | `#eee8d5` | `#fefaee` |
+| Nord Light | `nord-light` | `#eceff4` | `#e5e9f0` | `#d8dee9` | `#f4f5f8` |
+| Rosé Pine Dawn | `rose-pine-dawn` | `#faf4ed` | `#f2e9e1` | `#ebe1d8` | `#fffaf3` |
+| Kanagawa Lotus | `kanagawa-lotus` | `#f2ecbc` | `#e7dba0` | `#e5ddb0` | `#f5f0cc` |
+| Everforest Light | `everforest-light` | `#fffbef` | `#f4f0d9` | `#efebd4` | `#faf6ea` |
+| One Light | `one-light` | `#fafafa` | `#f0f0f1` | `#e5e5e6` | `#f5f5f5` |
+| GitHub Light | `github-light` | `#ffffff` | `#f6f8fa` | `#eff2f5` | `#fafbfc` |
 
-With `viewDefaults.background` `"terminal"` (boxed panes), unfocused pane borders use `palette.borderDim`. That token is a near-surface dark gray. It is darker than that theme's `muted`. Focused pane borders use `palette.heading`. With `"paint"` (flat panes, no borders), each pane has one title row: a blank cell, the title, a blank cell, then a `▁` rule (`_` in ASCII mode) to the pane edge. The focused pane has a `heading`, bold title and a `palette.cursor` rule; the unfocused pane has a `muted` title and a `palette.borderDim` rule. Titles are not underlined. Content is inset one column on each side, and each row's background (selection, flash, diff) runs to both pane edges. Paint mode draws the side-by-side diff rule in `borderDim`. Pane body text stays full brightness. The TUI does not DIM body text because a pane is unfocused. The selected row on an unfocused list keeps a thinner `▏` marker and `palette.cursorBgInactive` (between that theme's surface and `cursorBg`). The focused list still uses `▌` / `cursorBg`.
+With `viewDefaults.background` `"terminal"` (boxed panes), unfocused pane borders use `palette.borderDim`. That token is a near-surface gray with less contrast on the surface than that theme's `muted`. Focused pane borders use `palette.heading`. With `"paint"` (flat panes, no borders), each pane has one title row: a blank cell, the title, a blank cell, then a `▁` rule (`_` in ASCII mode) to the pane edge. The focused pane has a `heading`, bold title and a `palette.cursor` rule; the unfocused pane has a `muted` title and a `palette.borderDim` rule. Titles are not underlined. Content is inset one column on each side, and each row's background (selection, flash, diff) runs to both pane edges. Paint mode draws the side-by-side diff rule in `borderDim`. Pane body text stays full brightness. The TUI does not DIM body text because a pane is unfocused. The selected row on an unfocused list keeps a thinner `▏` marker and `palette.cursorBgInactive` (between that theme's surface and `cursorBg`). The focused list still uses `▌` / `cursorBg`.
 
 | Theme | surface | muted | `palette.borderDim` |
 | --- | --- | --- | --- |
@@ -361,8 +374,21 @@ With `viewDefaults.background` `"terminal"` (boxed panes), unfocused pane border
 | Everforest | `#2d353b` | `#aeb8b0` | `#475258` |
 | One Dark | `#282c34` | `#a6abb4` | `#3e4451` |
 | GitHub Dark Dimmed | `#22272e` | `#9ea8b3` | `#444c56` |
+| Tokyo Night Day | `#e1e2e7` | `#47578f` | `#bec1ca` |
+| Monokai Light | `#fafaf5` | `#656251` | `#d0d0cb` |
+| Dracula Light | `#fffbeb` | `#6a6449` | `#d2cfc2` |
+| Gruvbox Light | `#fbf1c7` | `#675c53` | `#d5ccaa` |
+| Catppuccin Latte | `#eff1f5` | `#5c5f72` | `#ced1d9` |
+| Slate Light | `#f5f7fa` | `#596372` | `#cacdd2` |
+| Solarized Light | `#fdf6e3` | `#55686e` | `#ccd0c3` |
+| Nord Light | `#eceff4` | `#4c566a` | `#c6cad0` |
+| Rosé Pine Dawn | `#faf4ed` | `#625e79` | `#d9d4d6` |
+| Kanagawa Lotus | `#f2ecbc` | `#5d5c55` | `#cfcaac` |
+| Everforest Light | `#fffbef` | `#5f6c5e` | `#dcdbd3` |
+| One Light | `#fafafa` | `#636670` | `#d3d4d5` |
+| GitHub Light | `#ffffff` | `#59636e` | `#d2d3d4` |
 
-The compare-tab close `[✗]` (U+2717, ballot x) uses `palette.tabClose` at rest. That neutral dark gray is darker than `muted` and stays readable on the surface and on `cursorBg` (the active tab). Under the pointer it uses `palette.tabCloseHover`, red (the theme's `deleted` color), in bold.
+The compare-tab close `[✗]` (U+2717, ballot x) uses `palette.tabClose` at rest. That neutral gray is dimmer than `muted` (less contrast on the surface) and stays readable on the surface and on `cursorBg` (the active tab). Under the pointer it uses `palette.tabCloseHover`, red (the theme's `deleted` color), in bold.
 
 | Theme | `palette.tabClose` | `palette.tabCloseHover` |
 | --- | --- | --- |
@@ -379,6 +405,19 @@ The compare-tab close `[✗]` (U+2717, ballot x) uses `palette.tabClose` at rest
 | Everforest | `#858585` | `#e78183` |
 | One Dark | `#7c7c7c` | `#e06c75` |
 | GitHub Dark Dimmed | `#797979` | `#f47067` |
+| Tokyo Night Day | `#808080` | `#c60940` |
+| Monokai Light | `#8b8b8b` | `#d32257` |
+| Dracula Light | `#8d8d8d` | `#cb3a2a` |
+| Gruvbox Light | `#868686` | `#9d0006` |
+| Catppuccin Latte | `#888888` | `#d20f39` |
+| Slate Light | `#8b8b8b` | `#c03a3a` |
+| Solarized Light | `#8e8e8e` | `#d82824` |
+| Nord Light | `#898989` | `#b04751` |
+| Rosé Pine Dawn | `#8a8a8a` | `#a85169` |
+| Kanagawa Lotus | `#848484` | `#ba3648` |
+| Everforest Light | `#919191` | `#e30d09` |
+| One Light | `#909090` | `#d12e1f` |
+| GitHub Light | `#909090` | `#d1242f` |
 
 Graph ref chips: default-branch names use `palette.branchDefault` (distinct from `muted`). Checkout / detached marks use per-theme high-contrast `palette.headMark` (Nerd Font crosshairs / `[HEAD]`). Synced chips put Nerd Font exchange before the branch name. Marks are PUA icons so MesloLGS NF keeps 1-cell metrics. The graph selection footer reuses those same chip colours; it is not a single muted wash. The graph sync header paints the branch in `palette.branchDefault` or `palette.branchFeature`, the ahead count in `palette.added`, the behind count in `palette.deleted` (the tree's sync colours and glyphs), and `no-upstream` in `palette.muted`.
 
@@ -461,7 +500,7 @@ Explorer tab (opened by `-` on a Workspace tree row in a checkout, or by opening
 - `Ctrl-p` / `F` / `:` and `Ctrl-f` scope to its checkout. Git writes (`s` / `u` / `x`, stash, fetch / pull / push, branch, worktree) and the Diff … commands say `Explorer tab is read-only · switch to Workspace tab`, on a key press and in the palette; `t`, `.`, `M`, and the commit message height palette rows (Shorter / Taller commit message) say `Switch to Workspace tab`; `Ctrl-o` says `Explorer diffs always show the whole file`.
 - The two panes look like the Workspace panes: flat on `sidebar` (tree) and `surface` (file) in paint mode, boxed with `viewDefaults.background` `"terminal"`.
 
-Mouse (when enabled): left-click a tab in the strip to switch; click `[✗]` on a compare or Explorer tab to close it (Workspace never closes); left-click any list row the keyboard can select (workspace tree, graph, commit files) to focus that pane and select it; **click the diff** to focus the right pane and select the hit row; click a fold chevron to toggle fold; double-click a list row (not the chevron) to run Enter (focus right / drill); right-click anywhere outside an overlay to step back like Esc; wheel over a list (tree, graph, commit files, or file-diff) moves that list's cursor (±1). The viewport keeps the focused row near the vertical middle. Graph scrollbar drag still scrolls the viewport without moving the cursor. File-diff horizontal thumb drag pans without moving `diff_cursor`. **horizontal wheel** (and Shift-wheel) pans the pane under the pointer without moving the focused row, including the workspace tree. Trackpad hscroll is SGR `66`/`67`. The live loop enables click, button-event, and any-event (DECSET 1003) tracking, rxvt 1015, and SGR (`tui/tty.rs`). Some terminals add the motion bit to wheel reports under any-event tracking; the Unix reader decodes those as the plain wheel. The Unix reader otherwise decodes SGR, X10, and 1015 the same way as crossterm 0.28. The compare-tab `[✗]` paints in `palette.tabClose`, a neutral dark gray darker than `muted`. Pointer motion over it paints `palette.tabCloseHover` (red, the theme's `deleted` color, bold). The TUI redraws only when that hover changes. When a file diff has long lines, that report over the left pane pans the diff; short tree paths still pan the tree when the painted diff fits. Keyboard `h` / `l` still fold the tree. Drag the divider to resize. Drag the graph scrollbar thumbs or a file-diff horizontal thumb to scroll / pan; click the track to jump toward that position (`hit_split` / `SplitDrag`, same stack as the pane and in-diff splitters). Tree and commit-file lists pan with the wheel and keys only; they do not paint an h-bar. Graph and file-diff vertical bars show whenever the content overflows, at the top too. Graph and file-diff horizontal bars show only after the viewport leaves the left edge.
+Mouse (when enabled): left-click a tab in the strip to switch; click `[✗]` on a compare or Explorer tab to close it (Workspace never closes); left-click any list row the keyboard can select (workspace tree, graph, commit files) to focus that pane and select it; **click the diff** to focus the right pane and select the hit row; click a fold chevron to toggle fold; double-click a list row (not the chevron) to run Enter (focus right / drill); right-click anywhere outside an overlay to step back like Esc; wheel over a list (tree, graph, commit files, or file-diff) moves that list's cursor (±1). The viewport keeps the focused row near the vertical middle. Graph scrollbar drag still scrolls the viewport without moving the cursor. File-diff horizontal thumb drag pans without moving `diff_cursor`. **horizontal wheel** (and Shift-wheel) pans the pane under the pointer without moving the focused row, including the workspace tree. Trackpad hscroll is SGR `66`/`67`. The live loop enables click, button-event, and any-event (DECSET 1003) tracking, rxvt 1015, and SGR (`tui/tty.rs`). Some terminals add the motion bit to wheel reports under any-event tracking; the Unix reader decodes those as the plain wheel. The Unix reader otherwise decodes SGR, X10, and 1015 the same way as crossterm 0.28. The compare-tab `[✗]` paints in `palette.tabClose`, a neutral gray dimmer than `muted`. Pointer motion over it paints `palette.tabCloseHover` (red, the theme's `deleted` color, bold). The TUI redraws only when that hover changes. When a file diff has long lines, that report over the left pane pans the diff; short tree paths still pan the tree when the painted diff fits. Keyboard `h` / `l` still fold the tree. Drag the divider to resize. Drag the graph scrollbar thumbs or a file-diff horizontal thumb to scroll / pan; click the track to jump toward that position (`hit_split` / `SplitDrag`, same stack as the pane and in-diff splitters). Tree and commit-file lists pan with the wheel and keys only; they do not paint an h-bar. Graph and file-diff vertical bars show whenever the content overflows, at the top too. Graph and file-diff horizontal bars show only after the viewport leaves the left edge.
 
 Ctrl+click (left button) on a PR badge in the tree or the graph selects that row like a plain click and opens its PR. Ctrl+click anywhere else behaves like a plain click.
 

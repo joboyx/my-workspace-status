@@ -1,18 +1,20 @@
 //! Built-in TUI colour themes.
 //!
-//! Palettes are dark. Secondary tokens (`muted`, line numbers, graph meta)
-//! stay readable on the theme surface and on the `sidebar`, `chrome`, and
-//! `panel` backgrounds. Launch seed is `WS_STATUS_THEME`, then the
-//! last-used theme from the state file, then the config `theme` key, then
-//! [`DEFAULT_THEME_ID`] (Slate) ([`theme_id_from`]). `T` cycles the theme.
-//! The last-used theme lives in its own state file
-//! ([`super::theme_store`]), never in the config file.
+//! Thirteen dark palettes, each with a light twin ([`ThemeId::twin`]).
+//! Secondary tokens (`muted`, line numbers, graph meta) stay readable on
+//! the theme surface and on the `sidebar`, `chrome`, and `panel`
+//! backgrounds. Launch seed is `WS_STATUS_THEME`, then the last-used theme
+//! from the state file, then the config `theme` key, then
+//! [`DEFAULT_THEME_ID`] (Slate) ([`theme_id_from`]). `T` cycles the theme
+//! inside its own list ([`DARK_THEME_IDS`] or [`LIGHT_THEME_IDS`]), so it
+//! never flips light / dark. The last-used theme lives in its own state
+//! file ([`super::theme_store`]), never in the config file.
 
 use ratatui::style::Color;
 
 use super::watch::FlashKind;
 
-/// Built-in dark theme identifiers.
+/// Built-in theme identifiers: thirteen dark themes and their light twins.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ThemeId {
     TokyoNight,
@@ -30,10 +32,36 @@ pub enum ThemeId {
     Everforest,
     OneDark,
     GithubDarkDimmed,
+    /// Light twin of [`Self::TokyoNight`].
+    TokyoNightDay,
+    /// Light twin of [`Self::Monokai`].
+    MonokaiLight,
+    /// Light twin of [`Self::Dracula`] (the Alucard palette).
+    DraculaLight,
+    /// Light twin of [`Self::GruvboxDark`].
+    GruvboxLight,
+    /// Light twin of [`Self::CatppuccinMocha`].
+    CatppuccinLatte,
+    /// Light twin of [`Self::Slate`].
+    SlateLight,
+    /// Light twin of [`Self::SolarizedDark`].
+    SolarizedLight,
+    /// Light twin of [`Self::Nord`].
+    NordLight,
+    /// Light twin of [`Self::RosePine`].
+    RosePineDawn,
+    /// Light twin of [`Self::Kanagawa`].
+    KanagawaLotus,
+    /// Light twin of [`Self::Everforest`].
+    EverforestLight,
+    /// Light twin of [`Self::OneDark`].
+    OneLight,
+    /// Light twin of [`Self::GithubDarkDimmed`].
+    GithubLight,
 }
 
-/// Cycle order for `T`.
-pub const THEME_IDS: [ThemeId; 13] = [
+/// Dark themes in `T` cycle order.
+pub const DARK_THEME_IDS: [ThemeId; 13] = [
     ThemeId::TokyoNight,
     ThemeId::Monokai,
     ThemeId::Dracula,
@@ -47,6 +75,54 @@ pub const THEME_IDS: [ThemeId; 13] = [
     ThemeId::Everforest,
     ThemeId::OneDark,
     ThemeId::GithubDarkDimmed,
+];
+
+/// Light themes in `T` cycle order: index `i` is the twin of
+/// `DARK_THEME_IDS[i]`.
+pub const LIGHT_THEME_IDS: [ThemeId; 13] = [
+    ThemeId::TokyoNightDay,
+    ThemeId::MonokaiLight,
+    ThemeId::DraculaLight,
+    ThemeId::GruvboxLight,
+    ThemeId::CatppuccinLatte,
+    ThemeId::SlateLight,
+    ThemeId::SolarizedLight,
+    ThemeId::NordLight,
+    ThemeId::RosePineDawn,
+    ThemeId::KanagawaLotus,
+    ThemeId::EverforestLight,
+    ThemeId::OneLight,
+    ThemeId::GithubLight,
+];
+
+/// Every built-in theme: [`DARK_THEME_IDS`], then [`LIGHT_THEME_IDS`].
+pub const THEME_IDS: [ThemeId; 26] = [
+    ThemeId::TokyoNight,
+    ThemeId::Monokai,
+    ThemeId::Dracula,
+    ThemeId::GruvboxDark,
+    ThemeId::CatppuccinMocha,
+    ThemeId::Slate,
+    ThemeId::SolarizedDark,
+    ThemeId::Nord,
+    ThemeId::RosePine,
+    ThemeId::Kanagawa,
+    ThemeId::Everforest,
+    ThemeId::OneDark,
+    ThemeId::GithubDarkDimmed,
+    ThemeId::TokyoNightDay,
+    ThemeId::MonokaiLight,
+    ThemeId::DraculaLight,
+    ThemeId::GruvboxLight,
+    ThemeId::CatppuccinLatte,
+    ThemeId::SlateLight,
+    ThemeId::SolarizedLight,
+    ThemeId::NordLight,
+    ThemeId::RosePineDawn,
+    ThemeId::KanagawaLotus,
+    ThemeId::EverforestLight,
+    ThemeId::OneLight,
+    ThemeId::GithubLight,
 ];
 
 /// Default when no `WS_STATUS_THEME`, last-used state, or config `theme`
@@ -84,11 +160,12 @@ pub struct Palette {
     pub dir: Color,
     pub file: Color,
     pub muted: Color,
-    /// Unfocused pane border. Near-surface dark gray. Darker than [`Self::muted`].
+    /// Unfocused pane border. Near-surface gray: less contrast on the surface
+    /// than [`Self::muted`].
     pub border_dim: Color,
-    /// Idle compare-tab close `[✗]`. Neutral dark gray, darker than
-    /// [`Self::muted`], still readable on the surface and on
-    /// [`Self::cursor_bg`] (active tab).
+    /// Idle compare-tab close `[✗]`. Neutral gray, dimmer (less contrast on
+    /// the surface) than [`Self::muted`], still readable on the surface and
+    /// on [`Self::cursor_bg`] (active tab).
     pub tab_close: Color,
     /// Hovered compare-tab close `[✗]`. Red, the theme's [`Self::deleted`].
     pub tab_close_hover: Color,
@@ -96,14 +173,15 @@ pub struct Palette {
     pub modified: Color,
     pub deleted: Color,
     pub renamed: Color,
-    /// Reviewed eye (`ICON_VIEWED`). Teal/cyan on dark surfaces.
+    /// Reviewed eye (`ICON_VIEWED`). Teal/cyan.
     pub viewed: Color,
     pub branch_default: Color,
     pub branch_feature: Color,
     pub head_mark: Color,
     pub cursor: Color,
     pub cursor_bg: Color,
-    /// Selected-row background on an unfocused list. Darker than [`Self::cursor_bg`].
+    /// Selected-row background on an unfocused list. Between the surface and
+    /// [`Self::cursor_bg`] (a weaker shift).
     pub cursor_bg_inactive: Color,
     /// Pane surface (background): the right pane. The base
     /// that [`Self::cursor_tint`] measures the cursor shift from.
@@ -159,9 +237,10 @@ pub struct ThemePalette {
     pub file: &'static str,
     pub muted: &'static str,
     /// Unfocused pane border hex (`palette.borderDim` in docs). Near-surface
-    /// dark gray. Darker than [`Self::muted`]. Not a readable-text token.
+    /// gray, less contrast on the surface than [`Self::muted`]. Not a
+    /// readable-text token.
     pub border_dim: &'static str,
-    /// Idle compare-tab close `[✗]` hex. Neutral dark gray, darker than
+    /// Idle compare-tab close `[✗]` hex. Neutral gray, dimmer than
     /// [`Self::muted`].
     pub tab_close: &'static str,
     /// Hovered compare-tab close `[✗]` hex. Red, the theme's `deleted` hex.
@@ -170,14 +249,15 @@ pub struct ThemePalette {
     pub modified: &'static str,
     pub deleted: &'static str,
     pub renamed: &'static str,
-    /// Reviewed eye hex. Teal/cyan on dark surfaces.
+    /// Reviewed eye hex. Teal/cyan.
     pub viewed: &'static str,
     pub branch_default: &'static str,
     pub branch_feature: &'static str,
     pub head_mark: &'static str,
     pub cursor: &'static str,
     pub cursor_bg: &'static str,
-    /// Unfocused selected-row background hex. Darker than [`Self::cursor_bg`].
+    /// Unfocused selected-row background hex. Between the surface and
+    /// [`Self::cursor_bg`].
     pub cursor_bg_inactive: &'static str,
     pub diff_hunk: &'static str,
     /// Add-line row background hex (`palette.diffAddBg` in docs).
@@ -222,13 +302,15 @@ pub struct Theme {
     pub label: &'static str,
     pub surface: &'static str,
     /// Left pane background hex. `None` uses the default rule: the surface
-    /// mixed 22% toward black.
+    /// mixed 22% toward black. Light presets must set it: the default rule
+    /// suits dark surfaces only.
     pub sidebar: Option<&'static str>,
     /// Tab strip, breadcrumb, prompt, and footer row background hex. `None`
-    /// uses the default rule: the surface mixed 38% toward black.
+    /// uses the default rule: the surface mixed 38% toward black. Light
+    /// presets must set it.
     pub chrome: Option<&'static str>,
     /// Popup background hex. `None` uses the default rule: the surface mixed
-    /// 5% toward white.
+    /// 5% toward white. Light presets must set it.
     pub panel: Option<&'static str>,
     pub palette: ThemePalette,
     pub pill: ThemePill,
@@ -268,6 +350,76 @@ impl ThemeId {
             ThemeId::Everforest => "everforest",
             ThemeId::OneDark => "one-dark",
             ThemeId::GithubDarkDimmed => "github-dark-dimmed",
+            ThemeId::TokyoNightDay => "tokyo-night-day",
+            ThemeId::MonokaiLight => "monokai-light",
+            ThemeId::DraculaLight => "dracula-light",
+            ThemeId::GruvboxLight => "gruvbox-light",
+            ThemeId::CatppuccinLatte => "catppuccin-latte",
+            ThemeId::SlateLight => "slate-light",
+            ThemeId::SolarizedLight => "solarized-light",
+            ThemeId::NordLight => "nord-light",
+            ThemeId::RosePineDawn => "rose-pine-dawn",
+            ThemeId::KanagawaLotus => "kanagawa-lotus",
+            ThemeId::EverforestLight => "everforest-light",
+            ThemeId::OneLight => "one-light",
+            ThemeId::GithubLight => "github-light",
+        }
+    }
+
+    /// True for a light theme (one of [`LIGHT_THEME_IDS`]).
+    pub fn is_light(self) -> bool {
+        LIGHT_THEME_IDS.contains(&self)
+    }
+
+    /// The same theme in the other polarity: dark to light and light to
+    /// dark. `twin(twin(x)) == x`.
+    pub fn twin(self) -> ThemeId {
+        use ThemeId::*;
+        match self {
+            TokyoNight => TokyoNightDay,
+            Monokai => MonokaiLight,
+            Dracula => DraculaLight,
+            GruvboxDark => GruvboxLight,
+            CatppuccinMocha => CatppuccinLatte,
+            Slate => SlateLight,
+            SolarizedDark => SolarizedLight,
+            Nord => NordLight,
+            RosePine => RosePineDawn,
+            Kanagawa => KanagawaLotus,
+            Everforest => EverforestLight,
+            OneDark => OneLight,
+            GithubDarkDimmed => GithubLight,
+            TokyoNightDay => TokyoNight,
+            MonokaiLight => Monokai,
+            DraculaLight => Dracula,
+            GruvboxLight => GruvboxDark,
+            CatppuccinLatte => CatppuccinMocha,
+            SlateLight => Slate,
+            SolarizedLight => SolarizedDark,
+            NordLight => Nord,
+            RosePineDawn => RosePine,
+            KanagawaLotus => Kanagawa,
+            EverforestLight => Everforest,
+            OneLight => OneDark,
+            GithubLight => GithubDarkDimmed,
+        }
+    }
+
+    /// The dark theme of this pair: `self` when dark, else its twin.
+    pub fn dark_variant(self) -> ThemeId {
+        if self.is_light() {
+            self.twin()
+        } else {
+            self
+        }
+    }
+
+    /// The light theme of this pair: `self` when light, else its twin.
+    pub fn light_variant(self) -> ThemeId {
+        if self.is_light() {
+            self
+        } else {
+            self.twin()
         }
     }
 
@@ -369,6 +521,19 @@ impl ThemeId {
             ThemeId::Everforest => EVERFOREST,
             ThemeId::OneDark => ONE_DARK,
             ThemeId::GithubDarkDimmed => GITHUB_DARK_DIMMED,
+            ThemeId::TokyoNightDay => TOKYO_NIGHT_DAY,
+            ThemeId::MonokaiLight => MONOKAI_LIGHT,
+            ThemeId::DraculaLight => DRACULA_LIGHT,
+            ThemeId::GruvboxLight => GRUVBOX_LIGHT,
+            ThemeId::CatppuccinLatte => CATPPUCCIN_LATTE,
+            ThemeId::SlateLight => SLATE_LIGHT,
+            ThemeId::SolarizedLight => SOLARIZED_LIGHT,
+            ThemeId::NordLight => NORD_LIGHT,
+            ThemeId::RosePineDawn => ROSE_PINE_DAWN,
+            ThemeId::KanagawaLotus => KANAGAWA_LOTUS,
+            ThemeId::EverforestLight => EVERFOREST_LIGHT,
+            ThemeId::OneLight => ONE_LIGHT,
+            ThemeId::GithubLight => GITHUB_LIGHT,
         }
     }
 
@@ -1078,8 +1243,691 @@ const GITHUB_DARK_DIMMED: Theme = Theme {
         "#6cb6ff", "#dcbdfb", "#96d0ff", "#6bc46d", "#daaa3f", "#f47067", "#f69d50", "#56d4dd",
     ],
 };
+// Light twins. Accents start from each upstream light palette (Tokyo Night
+// Day, Catppuccin Latte, Gruvbox light, Solarized light, Rosé Pine Dawn,
+// Kanagawa Lotus, Everforest light, Atom One Light, GitHub Light, Dracula
+// Alucard; Slate, Nord, and Monokai light are hand-made) and are darkened
+// only as far as the contrast tests below need. Every light preset sets
+// `sidebar`, `chrome`, and `panel`: the default rule suits dark surfaces.
 
-/// Built-in theme id for an exact slug (`tokyo-night`). `None` when unknown.
+const TOKYO_NIGHT_DAY: Theme = Theme {
+    id: ThemeId::TokyoNightDay,
+    label: "Tokyo Night Day",
+    surface: "#e1e2e7",
+    sidebar: Some("#d9dbe2"),
+    chrome: Some("#d0d5e3"),
+    panel: Some("#eaebef"),
+    palette: ThemePalette {
+        heading: "#006385",
+        repo: "#343b58",
+        dir: "#1359b8",
+        file: "#3258af",
+        muted: "#47578f",
+        border_dim: "#bec1ca",
+        tab_close: "#808080",
+        tab_close_hover: "#c60940",
+        added: "#4b6330",
+        modified: "#715732",
+        deleted: "#c60940",
+        renamed: "#006385",
+        viewed: "#0c6453",
+        branch_default: "#1359b8",
+        branch_feature: "#761bec",
+        head_mark: "#715732",
+        cursor: "#1359b8",
+        cursor_bg: "#c4d2e7",
+        cursor_bg_inactive: "#d2dae7",
+        diff_hunk: "#006385",
+        diff_add_bg: "#e4f2d3",
+        diff_del_bg: "#f2d3dc",
+        diff_add_word_bg: "#bbdf92",
+        diff_del_word_bg: "#e9b4c3",
+        flash: "#bbdf92",
+        flash_ramp: ["#bbdf92", "#c6e0ab", "#d2e1c5", "#dbe2da"],
+        flash_update: "#dfbf92",
+        flash_update_ramp: ["#dfbf92", "#e0c9ab", "#e0d4c5", "#e1ddda"],
+        flash_remove: "#e9b4c3",
+        flash_remove_ramp: ["#e9b4c3", "#e7c2ce", "#e4d0d9", "#e2dbe2"],
+    },
+    pill: ThemePill {
+        mode_bg: "#1359b8",
+        mode_fg: "#e1e2e7",
+        diff_bg: "#b4c4dd",
+        diff_fg: "#343b58",
+        filter_bg: "#761bec",
+        filter_fg: "#e1e2e7",
+    },
+    lane_colors: [
+        "#2e7de9", "#9854f1", "#007197", "#587539", "#8c6c3e", "#f52a65", "#b15c00", "#118c74",
+    ],
+};
+
+const MONOKAI_LIGHT: Theme = Theme {
+    id: ThemeId::MonokaiLight,
+    label: "Monokai Light",
+    surface: "#fafaf5",
+    sidebar: Some("#f0f0eb"),
+    chrome: Some("#e6e6e1"),
+    panel: Some("#f5f5f0"),
+    palette: ThemePalette {
+        heading: "#167087",
+        repo: "#272822",
+        dir: "#167087",
+        file: "#49483e",
+        muted: "#656251",
+        border_dim: "#d0d0cb",
+        tab_close: "#8b8b8b",
+        tab_close_hover: "#d32257",
+        added: "#1c744e",
+        modified: "#945807",
+        deleted: "#d32257",
+        renamed: "#167087",
+        viewed: "#1d6d63",
+        branch_default: "#167087",
+        branch_feature: "#6d55bd",
+        head_mark: "#1c744e",
+        cursor: "#49483e",
+        cursor_bg: "#deded8",
+        cursor_bg_inactive: "#ecece6",
+        diff_hunk: "#167087",
+        diff_add_bg: "#ddf5eb",
+        diff_del_bg: "#f5dde5",
+        diff_add_word_bg: "#9ee3c5",
+        diff_del_word_bg: "#ecbecc",
+        flash: "#9ee3c5",
+        flash_ramp: ["#9ee3c5", "#baead3", "#d5f1e2", "#ecf7ee"],
+        flash_update: "#e3c69e",
+        flash_update_ramp: ["#e3c69e", "#ead6b8", "#f1e5d2", "#f7f2e8"],
+        flash_remove: "#ecbecc",
+        flash_remove_ramp: ["#ecbecc", "#f0d0d8", "#f4e2e5", "#f8f1ef"],
+    },
+    pill: ThemePill {
+        mode_bg: "#49483e",
+        mode_fg: "#fafaf5",
+        diff_bg: "#d3d3cd",
+        diff_fg: "#272822",
+        filter_bg: "#6d55bd",
+        filter_fg: "#fafaf5",
+    },
+    lane_colors: [
+        "#1c8ca8", "#7058be", "#269d69", "#cc7a0a", "#e14775", "#e16032", "#49483e", "#2a9d8f",
+    ],
+};
+
+const DRACULA_LIGHT: Theme = Theme {
+    id: ThemeId::DraculaLight,
+    label: "Dracula Light",
+    surface: "#fffbeb",
+    sidebar: Some("#f4f0de"),
+    chrome: Some("#ece8d4"),
+    panel: Some("#faf6e6"),
+    palette: ThemePalette {
+        heading: "#036a96",
+        repo: "#1f1f1f",
+        dir: "#644ac9",
+        file: "#1f1f1f",
+        muted: "#6a6449",
+        border_dim: "#d2cfc2",
+        tab_close: "#8d8d8d",
+        tab_close_hover: "#cb3a2a",
+        added: "#14710a",
+        modified: "#796513",
+        deleted: "#cb3a2a",
+        renamed: "#036a96",
+        viewed: "#0a6f64",
+        branch_default: "#644ac9",
+        branch_feature: "#644ac9",
+        head_mark: "#14710a",
+        cursor: "#644ac9",
+        cursor_bg: "#e6dfe6",
+        cursor_bg_inactive: "#f2ede8",
+        diff_hunk: "#036a96",
+        diff_add_bg: "#e0f5dd",
+        diff_del_bg: "#f5e0dd",
+        diff_add_word_bg: "#a9e4a2",
+        diff_del_word_bg: "#ecc2be",
+        flash: "#a9e4a2",
+        flash_ramp: ["#a9e4a2", "#c3ebb8", "#ddf2ce", "#f2f8e0"],
+        flash_update: "#e4d7a2",
+        flash_update_ramp: ["#e4d7a2", "#ece2b8", "#f4edce", "#fbf6e0"],
+        flash_remove: "#ecc2be",
+        flash_remove_ramp: ["#ecc2be", "#f2d3cb", "#f7e4d9", "#fcf2e4"],
+    },
+    pill: ThemePill {
+        mode_bg: "#644ac9",
+        mode_fg: "#fffbeb",
+        diff_bg: "#ddd4e4",
+        diff_fg: "#1f1f1f",
+        filter_bg: "#644ac9",
+        filter_fg: "#fffbeb",
+    },
+    lane_colors: [
+        "#036a96", "#644ac9", "#14710a", "#846e15", "#cb3a2a", "#a34d14", "#a3144d", "#635d9f",
+    ],
+};
+
+const GRUVBOX_LIGHT: Theme = Theme {
+    id: ThemeId::GruvboxLight,
+    label: "Gruvbox Light",
+    surface: "#fbf1c7",
+    sidebar: Some("#f2e5bc"),
+    chrome: Some("#ebdbb2"),
+    panel: Some("#fdf7dd"),
+    palette: ThemePalette {
+        heading: "#076678",
+        repo: "#3c3836",
+        dir: "#396b4d",
+        file: "#3c3836",
+        muted: "#675c53",
+        border_dim: "#d5ccaa",
+        tab_close: "#868686",
+        tab_close_hover: "#9d0006",
+        added: "#67620c",
+        modified: "#85570f",
+        deleted: "#9d0006",
+        renamed: "#076678",
+        viewed: "#406725",
+        branch_default: "#076678",
+        branch_feature: "#8f3f71",
+        head_mark: "#ad3903",
+        cursor: "#ad3903",
+        cursor_bg: "#efd4a8",
+        cursor_bg_inactive: "#f5e2b7",
+        diff_hunk: "#076678",
+        diff_add_bg: "#f1efce",
+        diff_del_bg: "#f1ced0",
+        diff_add_word_bg: "#dbd681",
+        diff_del_word_bg: "#e7abad",
+        flash: "#dbd681",
+        flash_ramp: ["#dbd681", "#e5de96", "#eee6ab", "#f6edbc"],
+        flash_update: "#dbb881",
+        flash_update_ramp: ["#dbb881", "#e5c996", "#eedaab", "#f6e8bc"],
+        flash_remove: "#e7abad",
+        flash_remove_ramp: ["#e7abad", "#edc0b5", "#f3d5bd", "#f8e6c3"],
+    },
+    pill: ThemePill {
+        mode_bg: "#ad3903",
+        mode_fg: "#fbf1c7",
+        diff_bg: "#eac99c",
+        diff_fg: "#3c3836",
+        filter_bg: "#8f3f71",
+        filter_fg: "#fbf1c7",
+    },
+    lane_colors: [
+        "#076678", "#8f3f71", "#79740e", "#b57614", "#9d0006", "#af3a03", "#427b58", "#b5811c",
+    ],
+};
+
+const CATPPUCCIN_LATTE: Theme = Theme {
+    id: ThemeId::CatppuccinLatte,
+    label: "Catppuccin Latte",
+    surface: "#eff1f5",
+    sidebar: Some("#e6e9ef"),
+    chrome: Some("#dce0e8"),
+    panel: Some("#f5f7f9"),
+    palette: ThemePalette {
+        heading: "#036a93",
+        repo: "#4c4f69",
+        dir: "#0a55ea",
+        file: "#4c4f69",
+        muted: "#5c5f72",
+        border_dim: "#ced1d9",
+        tab_close: "#888888",
+        tab_close_hover: "#d20f39",
+        added: "#2d711e",
+        modified: "#8a5812",
+        deleted: "#d20f39",
+        renamed: "#036a93",
+        viewed: "#11696e",
+        branch_default: "#0a55ea",
+        branch_feature: "#7f2aee",
+        head_mark: "#8a5812",
+        cursor: "#0a55ea",
+        cursor_bg: "#cedbf5",
+        cursor_bg_inactive: "#dee6f5",
+        diff_hunk: "#036a93",
+        diff_add_bg: "#e2f5dd",
+        diff_del_bg: "#f5dde3",
+        diff_add_word_bg: "#aee4a2",
+        diff_del_word_bg: "#ecbec8",
+        flash: "#aee4a2",
+        flash_ramp: ["#aee4a2", "#c1e8bb", "#d5ecd4", "#e5efe9"],
+        flash_update: "#e4c8a2",
+        flash_update_ramp: ["#e4c8a2", "#e7d4bb", "#ebe1d4", "#edebe9"],
+        flash_remove: "#ecbec8",
+        flash_remove_ramp: ["#ecbec8", "#edcdd5", "#eedde3", "#efe9ee"],
+    },
+    pill: ThemePill {
+        mode_bg: "#0a55ea",
+        mode_fg: "#eff1f5",
+        diff_bg: "#bdcff3",
+        diff_fg: "#4c4f69",
+        filter_bg: "#7f2aee",
+        filter_fg: "#eff1f5",
+    },
+    lane_colors: [
+        "#1e66f5", "#8839ef", "#3f9e2b", "#c07a19", "#d20f39", "#f05801", "#0494cd", "#e44fbc",
+    ],
+};
+
+const SLATE_LIGHT: Theme = Theme {
+    id: ThemeId::SlateLight,
+    label: "Slate Light",
+    surface: "#f5f7fa",
+    sidebar: Some("#eceff4"),
+    chrome: Some("#e3e7ed"),
+    panel: Some("#f9fafc"),
+    palette: ThemePalette {
+        heading: "#1c7083",
+        repo: "#1f2733",
+        dir: "#2f63a8",
+        file: "#3a4555",
+        muted: "#596372",
+        border_dim: "#cacdd2",
+        tab_close: "#8b8b8b",
+        tab_close_hover: "#c03a3a",
+        added: "#2c7443",
+        modified: "#865f12",
+        deleted: "#c03a3a",
+        renamed: "#1c7083",
+        viewed: "#146d6a",
+        branch_default: "#2f63a8",
+        branch_feature: "#6b4fb0",
+        head_mark: "#865f12",
+        cursor: "#2f63a8",
+        cursor_bg: "#d5dfed",
+        cursor_bg_inactive: "#e5ebf3",
+        diff_hunk: "#1c7083",
+        diff_add_bg: "#ddf5e5",
+        diff_del_bg: "#f5dddd",
+        diff_add_word_bg: "#a2e4b7",
+        diff_del_word_bg: "#ecbebe",
+        flash: "#a2e4b7",
+        flash_ramp: ["#a2e4b7", "#bbeacb", "#d4efdf", "#e9f4f0"],
+        flash_update: "#e4cea2",
+        flash_update_ramp: ["#e4cea2", "#e9dabc", "#eee7d7", "#f2f1ed"],
+        flash_remove: "#ecbebe",
+        flash_remove_ramp: ["#ecbebe", "#efcfd0", "#f1e0e2", "#f4eef1"],
+    },
+    pill: ThemePill {
+        mode_bg: "#2f63a8",
+        mode_fg: "#f5f7fa",
+        diff_bg: "#c9d6e8",
+        diff_fg: "#1f2733",
+        filter_bg: "#6b4fb0",
+        filter_fg: "#f5f7fa",
+    },
+    lane_colors: [
+        "#2f63a8", "#6b4fb0", "#1f7a8f", "#2f7d48", "#8a6212", "#c03a3a", "#b0592a", "#18807c",
+    ],
+};
+
+const SOLARIZED_LIGHT: Theme = Theme {
+    id: ThemeId::SolarizedLight,
+    label: "Solarized Light",
+    surface: "#fdf6e3",
+    sidebar: Some("#f5eedb"),
+    chrome: Some("#eee8d5"),
+    panel: Some("#fefaee"),
+    palette: ThemePalette {
+        heading: "#1e746d",
+        repo: "#073642",
+        dir: "#1e6da5",
+        file: "#566c73",
+        muted: "#55686e",
+        border_dim: "#ccd0c3",
+        tab_close: "#8e8e8e",
+        tab_close_hover: "#d82824",
+        added: "#606e00",
+        modified: "#826200",
+        deleted: "#d82824",
+        renamed: "#1e746d",
+        viewed: "#2a7150",
+        branch_default: "#1e6da5",
+        branch_feature: "#595fbc",
+        head_mark: "#826200",
+        cursor: "#1e6da5",
+        cursor_bg: "#dbe5e0",
+        cursor_bg_inactive: "#ecede1",
+        diff_hunk: "#1e746d",
+        diff_add_bg: "#f2f5dd",
+        diff_del_bg: "#f5dedd",
+        diff_add_word_bg: "#d6df92",
+        diff_del_word_bg: "#ecbfbe",
+        flash: "#d6df92",
+        flash_ramp: ["#d6df92", "#e2e6aa", "#ededc3", "#f7f3d7"],
+        flash_update: "#dfcc92",
+        flash_update_ramp: ["#dfcc92", "#e8d9aa", "#f1e5c3", "#f8f0d7"],
+        flash_remove: "#ecbfbe",
+        flash_remove_ramp: ["#ecbfbe", "#f1cfc9", "#f6e0d4", "#faeedd"],
+    },
+    pill: ThemePill {
+        mode_bg: "#1e6da5",
+        mode_fg: "#fdf6e3",
+        diff_bg: "#ccd8d5",
+        diff_fg: "#073642",
+        filter_bg: "#595fbc",
+        filter_fg: "#fdf6e3",
+    },
+    lane_colors: [
+        "#268bd2", "#6c71c4", "#299e95", "#839700", "#b38700", "#dc322f", "#cb4b16", "#d33682",
+    ],
+};
+
+const NORD_LIGHT: Theme = Theme {
+    id: ThemeId::NordLight,
+    label: "Nord Light",
+    surface: "#eceff4",
+    sidebar: Some("#e5e9f0"),
+    chrome: Some("#d8dee9"),
+    panel: Some("#f4f5f8"),
+    palette: ThemePalette {
+        heading: "#396875",
+        repo: "#2e3440",
+        dir: "#466488",
+        file: "#3b4252",
+        muted: "#4c566a",
+        border_dim: "#c6cad0",
+        tab_close: "#898989",
+        tab_close_hover: "#b04751",
+        added: "#50683c",
+        modified: "#7a5d21",
+        deleted: "#b04751",
+        renamed: "#396875",
+        viewed: "#3c6868",
+        branch_default: "#466488",
+        branch_feature: "#7b5674",
+        head_mark: "#7a5d21",
+        cursor: "#466488",
+        cursor_bg: "#d5dde8",
+        cursor_bg_inactive: "#e0e6ee",
+        diff_hunk: "#396875",
+        diff_add_bg: "#e8f5dd",
+        diff_del_bg: "#f5dde0",
+        diff_add_word_bg: "#bce29c",
+        diff_del_word_bg: "#ecbec2",
+        flash: "#bce29c",
+        flash_ramp: ["#bce29c", "#cae6b6", "#d9ead1", "#e5ede7"],
+        flash_update: "#e2cb9c",
+        flash_update_ramp: ["#e2cb9c", "#e5d6b6", "#e8e1d1", "#eaeae7"],
+        flash_remove: "#ecbec2",
+        flash_remove_ramp: ["#ecbec2", "#eccdd1", "#ecdbe0", "#ece8ec"],
+    },
+    pill: ThemePill {
+        mode_bg: "#466488",
+        mode_fg: "#eceff4",
+        diff_bg: "#c7d0dc",
+        diff_fg: "#2e3440",
+        filter_bg: "#7b5674",
+        filter_fg: "#eceff4",
+    },
+    lane_colors: [
+        "#5e81ac", "#a87ca0", "#4c8a9b", "#6a8a4f", "#a07a2c", "#bf616a", "#c87257", "#4f8a89",
+    ],
+};
+
+const ROSE_PINE_DAWN: Theme = Theme {
+    id: ThemeId::RosePineDawn,
+    label: "Rosé Pine Dawn",
+    surface: "#faf4ed",
+    sidebar: Some("#f2e9e1"),
+    chrome: Some("#ebe1d8"),
+    panel: Some("#fffaf3"),
+    palette: ThemePalette {
+        heading: "#b03c37",
+        repo: "#575279",
+        dir: "#3e6b73",
+        file: "#575279",
+        muted: "#625e79",
+        border_dim: "#d9d4d6",
+        tab_close: "#8a8a8a",
+        tab_close_hover: "#a85169",
+        added: "#3e6b73",
+        modified: "#8f590f",
+        deleted: "#a85169",
+        renamed: "#b03c37",
+        viewed: "#36695f",
+        branch_default: "#3e6b73",
+        branch_feature: "#725b8d",
+        head_mark: "#8f590f",
+        cursor: "#286983",
+        cursor_bg: "#d8dedc",
+        cursor_bg_inactive: "#e9e9e4",
+        diff_hunk: "#b03c37",
+        diff_add_bg: "#ddf2f5",
+        diff_del_bg: "#f5dde4",
+        diff_add_word_bg: "#a8dce6",
+        diff_del_word_bg: "#ecbecb",
+        flash: "#a8dce6",
+        flash_ramp: ["#a8dce6", "#c1e3e8", "#d9eaea", "#eef0ec"],
+        flash_update: "#e6cca8",
+        flash_update_ramp: ["#e6cca8", "#ecd8bd", "#f2e4d1", "#f7eee3"],
+        flash_remove: "#ecbecb",
+        flash_remove_ramp: ["#ecbecb", "#f0ced5", "#f4dedf", "#f8ece8"],
+    },
+    pill: ThemePill {
+        mode_bg: "#286983",
+        mode_fg: "#faf4ed",
+        diff_bg: "#ccd5d6",
+        diff_fg: "#575279",
+        filter_bg: "#725b8d",
+        filter_fg: "#faf4ed",
+    },
+    lane_colors: [
+        "#286983", "#907aa9", "#d2716d", "#56949f", "#c87c15", "#b4637a", "#c0786a", "#4f9a8a",
+    ],
+};
+
+const KANAGAWA_LOTUS: Theme = Theme {
+    id: ThemeId::KanagawaLotus,
+    label: "Kanagawa Lotus",
+    surface: "#f2ecbc",
+    sidebar: Some("#e7dba0"),
+    chrome: Some("#e5ddb0"),
+    panel: Some("#f5f0cc"),
+    palette: ThemePalette {
+        heading: "#386575",
+        repo: "#43436c",
+        dir: "#46608d",
+        file: "#545464",
+        muted: "#5d5c55",
+        border_dim: "#cfcaac",
+        tab_close: "#848484",
+        tab_close_hover: "#ba3648",
+        added: "#526539",
+        modified: "#645f35",
+        deleted: "#ba3648",
+        renamed: "#386575",
+        viewed: "#46615c",
+        branch_default: "#46608d",
+        branch_feature: "#624c83",
+        head_mark: "#6e5d3e",
+        cursor: "#46608d",
+        cursor_bg: "#d8d7b7",
+        cursor_bg_inactive: "#e5e1b9",
+        diff_hunk: "#386575",
+        diff_add_bg: "#d9ecbf",
+        diff_del_bg: "#ecbfc5",
+        diff_add_word_bg: "#b2d97e",
+        diff_del_word_bg: "#e4a1aa",
+        flash: "#b2d97e",
+        flash_ramp: ["#b2d97e", "#c5df91", "#d8e4a3", "#e8e9b3"],
+        flash_update: "#d9d07e",
+        flash_update_ramp: ["#d9d07e", "#e0d891", "#e8e1a3", "#eee8b3"],
+        flash_remove: "#e4a1aa",
+        flash_remove_ramp: ["#e4a1aa", "#e8b7af", "#ecceb5", "#f0e1b9"],
+    },
+    pill: ThemePill {
+        mode_bg: "#46608d",
+        mode_fg: "#f2ecbc",
+        diff_bg: "#cccdb2",
+        diff_fg: "#43436c",
+        filter_bg: "#624c83",
+        filter_fg: "#f2ecbc",
+    },
+    lane_colors: [
+        "#4d699b", "#624c83", "#4e8ca2", "#6f894e", "#836f4a", "#c84053", "#cc6d00", "#597b75",
+    ],
+};
+
+const EVERFOREST_LIGHT: Theme = Theme {
+    id: ThemeId::EverforestLight,
+    label: "Everforest Light",
+    surface: "#fffbef",
+    sidebar: Some("#f4f0d9"),
+    chrome: Some("#efebd4"),
+    panel: Some("#faf6ea"),
+    palette: ThemePalette {
+        heading: "#267758",
+        repo: "#4f5b62",
+        dir: "#2c7096",
+        file: "#5c6a72",
+        muted: "#5f6c5e",
+        border_dim: "#dcdbd3",
+        tab_close: "#919191",
+        tab_close_hover: "#e30d09",
+        added: "#627001",
+        modified: "#896300",
+        deleted: "#e30d09",
+        renamed: "#267758",
+        viewed: "#377542",
+        branch_default: "#2c7096",
+        branch_feature: "#bc288e",
+        head_mark: "#896300",
+        cursor: "#2c7096",
+        cursor_bg: "#dfebe8",
+        cursor_bg_inactive: "#eff3eb",
+        diff_hunk: "#267758",
+        diff_add_bg: "#f2f5dd",
+        diff_del_bg: "#f5dedd",
+        diff_add_word_bg: "#d6df92",
+        diff_del_word_bg: "#ecbfbe",
+        flash: "#d6df92",
+        flash_ramp: ["#d6df92", "#e2e7ae", "#eff0ca", "#f9f7e1"],
+        flash_update: "#dfca92",
+        flash_update_ramp: ["#dfca92", "#e9d9ae", "#f2e7ca", "#faf4e1"],
+        flash_remove: "#ecbfbe",
+        flash_remove_ramp: ["#ecbfbe", "#f2d1cd", "#f7e3db", "#fcf2e8"],
+    },
+    pill: ThemePill {
+        mode_bg: "#2c7096",
+        mode_fg: "#fffbef",
+        diff_bg: "#d1dcdb",
+        diff_fg: "#4f5b62",
+        filter_bg: "#bc288e",
+        filter_fg: "#fffbef",
+    },
+    lane_colors: [
+        "#3a94c5", "#de66b8", "#34a47a", "#889b01", "#bc8700", "#f85552", "#ed6a0b", "#4b9f5a",
+    ],
+};
+
+const ONE_LIGHT: Theme = Theme {
+    id: ThemeId::OneLight,
+    label: "One Light",
+    surface: "#fafafa",
+    sidebar: Some("#f0f0f1"),
+    chrome: Some("#e5e5e6"),
+    panel: Some("#f5f5f5"),
+    palette: ThemePalette {
+        heading: "#016d9c",
+        repo: "#383a42",
+        dir: "#1258ef",
+        file: "#383a42",
+        muted: "#636670",
+        border_dim: "#d3d4d5",
+        tab_close: "#909090",
+        tab_close_hover: "#d12e1f",
+        added: "#397238",
+        modified: "#8a5e01",
+        deleted: "#d12e1f",
+        renamed: "#016d9c",
+        viewed: "#0b7364",
+        branch_default: "#1258ef",
+        branch_feature: "#a626a4",
+        head_mark: "#8a5e01",
+        cursor: "#1258ef",
+        cursor_bg: "#dce5f9",
+        cursor_bg_inactive: "#ebeff9",
+        diff_hunk: "#016d9c",
+        diff_add_bg: "#def5dd",
+        diff_del_bg: "#f5dfdd",
+        diff_add_word_bg: "#a3e4a2",
+        diff_del_word_bg: "#ebbeba",
+        flash: "#a3e4a2",
+        flash_ramp: ["#a3e4a2", "#bdebbc", "#d7f1d7", "#edf7ed"],
+        flash_update: "#e4cfa2",
+        flash_update_ramp: ["#e4cfa2", "#ebdcbc", "#f1e9d7", "#f7f4ed"],
+        flash_remove: "#ebbeba",
+        flash_remove_ramp: ["#ebbeba", "#efd0cd", "#f4e2e0", "#f8f1f0"],
+    },
+    pill: ThemePill {
+        mode_bg: "#1258ef",
+        mode_fg: "#fafafa",
+        diff_bg: "#c7d6f8",
+        diff_fg: "#383a42",
+        filter_bg: "#a626a4",
+        filter_fg: "#fafafa",
+    },
+    lane_colors: [
+        "#4078f2", "#a626a4", "#0184bc", "#50a14f", "#c18401", "#e45649", "#986801", "#0f9a86",
+    ],
+};
+
+const GITHUB_LIGHT: Theme = Theme {
+    id: ThemeId::GithubLight,
+    label: "GitHub Light",
+    surface: "#ffffff",
+    sidebar: Some("#f6f8fa"),
+    chrome: Some("#eff2f5"),
+    panel: Some("#fafbfc"),
+    palette: ThemePalette {
+        heading: "#0550ae",
+        repo: "#1f2328",
+        dir: "#0969da",
+        file: "#1f2328",
+        muted: "#59636e",
+        border_dim: "#d2d3d4",
+        tab_close: "#909090",
+        tab_close_hover: "#d1242f",
+        added: "#1a7f37",
+        modified: "#966400",
+        deleted: "#d1242f",
+        renamed: "#0550ae",
+        viewed: "#197177",
+        branch_default: "#0969da",
+        branch_feature: "#814edf",
+        head_mark: "#966400",
+        cursor: "#0969da",
+        cursor_bg: "#d8e7f9",
+        cursor_bg_inactive: "#ebf3fc",
+        diff_hunk: "#0550ae",
+        diff_add_bg: "#ddf5e4",
+        diff_del_bg: "#f5dddf",
+        diff_add_word_bg: "#a2e4b5",
+        diff_del_word_bg: "#ecbec1",
+        flash: "#a2e4b5",
+        flash_ramp: ["#a2e4b5", "#beeccb", "#daf4e1", "#f1fbf4"],
+        flash_update: "#e4cea2",
+        flash_update_ramp: ["#e4cea2", "#ecddbe", "#f4ebda", "#fbf8f1"],
+        flash_remove: "#ecbec1",
+        flash_remove_ramp: ["#ecbec1", "#f2d1d4", "#f7e5e6", "#fcf5f6"],
+    },
+    pill: ThemePill {
+        mode_bg: "#0969da",
+        mode_fg: "#ffffff",
+        diff_bg: "#c9def7",
+        diff_fg: "#1f2328",
+        filter_bg: "#814edf",
+        filter_fg: "#ffffff",
+    },
+    lane_colors: [
+        "#0969da", "#8250df", "#0550ae", "#1a7f37", "#9a6700", "#d1242f", "#bc4c00", "#1b7c83",
+    ],
+};
+
+/// Built-in theme id (dark or light) for an exact slug (`tokyo-night`,
+/// `tokyo-night-day`). `None` when unknown.
 pub fn parse_theme_id(raw: &str) -> Option<ThemeId> {
     THEME_IDS.into_iter().find(|id| id.as_str() == raw)
 }
@@ -1100,10 +1948,20 @@ pub fn theme_id_from(
         .unwrap_or(DEFAULT_THEME_ID)
 }
 
-/// Next theme id in `THEME_IDS` order (wraps).
+/// Next theme id in the current theme's own list ([`DARK_THEME_IDS`] or
+/// [`LIGHT_THEME_IDS`], wraps), so `T` never flips light / dark.
 pub fn cycle_theme_id(current: ThemeId) -> ThemeId {
-    let index = THEME_IDS.iter().position(|id| *id == current).unwrap_or(0);
-    THEME_IDS[(index + 1) % THEME_IDS.len()]
+    let dark = current.dark_variant();
+    let index = DARK_THEME_IDS
+        .iter()
+        .position(|id| *id == dark)
+        .unwrap_or(0);
+    let next = DARK_THEME_IDS[(index + 1) % DARK_THEME_IDS.len()];
+    if current.is_light() {
+        next.light_variant()
+    } else {
+        next
+    }
 }
 
 /// Parse `#rrggbb` into a ratatui colour. Invalid hex falls back to white.
@@ -1143,7 +2001,7 @@ fn div_round(num: i32, den: i32) -> i32 {
 /// Mix `base` toward `target` by `percent` per RGB channel:
 /// `base + (target - base) * percent / 100`, rounded to nearest. Non-RGB
 /// input returns `base` unchanged.
-fn mix_toward(base: Color, target: Color, percent: i32) -> Color {
+pub(crate) fn mix_toward(base: Color, target: Color, percent: i32) -> Color {
     let (Color::Rgb(r, g, b), Color::Rgb(tr, tg, tb)) = (base, target) else {
         return base;
     };
@@ -1236,10 +2094,12 @@ mod tests {
             ThemeId::OneDark,
             ThemeId::GithubDarkDimmed,
         ];
-        assert_eq!(THEME_IDS, order);
+        assert_eq!(DARK_THEME_IDS, order);
+        assert_eq!(THEME_IDS[..13], DARK_THEME_IDS, "dark themes first");
+        assert_eq!(THEME_IDS[13..], LIGHT_THEME_IDS, "then the light twins");
         assert_eq!(DEFAULT_THEME_ID, ThemeId::Slate);
         assert_eq!(ThemeId::default(), DEFAULT_THEME_ID);
-        let slugs: Vec<_> = THEME_IDS.iter().map(|id| id.as_str()).collect();
+        let slugs: Vec<_> = DARK_THEME_IDS.iter().map(|id| id.as_str()).collect();
         assert_eq!(
             slugs,
             [
@@ -1258,7 +2118,7 @@ mod tests {
                 "github-dark-dimmed",
             ]
         );
-        let labels: Vec<_> = THEME_IDS.iter().map(|id| id.label()).collect();
+        let labels: Vec<_> = DARK_THEME_IDS.iter().map(|id| id.label()).collect();
         assert_eq!(
             labels[5..],
             [
@@ -1272,22 +2132,154 @@ mod tests {
                 "GitHub Dark Dimmed",
             ]
         );
+        let labels: Vec<_> = LIGHT_THEME_IDS.iter().map(|id| id.label()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Tokyo Night Day",
+                "Monokai Light",
+                "Dracula Light",
+                "Gruvbox Light",
+                "Catppuccin Latte",
+                "Slate Light",
+                "Solarized Light",
+                "Nord Light",
+                "Rosé Pine Dawn",
+                "Kanagawa Lotus",
+                "Everforest Light",
+                "One Light",
+                "GitHub Light",
+            ]
+        );
         for id in THEME_IDS {
             assert_eq!(id.theme().id, id, "{id:?} preset id");
         }
-        let mut id = ThemeId::TokyoNight;
-        let mut seen = Vec::new();
-        for _ in 0..THEME_IDS.len() {
-            id = cycle_theme_id(id);
-            seen.push(id);
+        for list in [DARK_THEME_IDS, LIGHT_THEME_IDS] {
+            let mut id = list[0];
+            let mut seen = Vec::new();
+            for _ in 0..list.len() {
+                id = cycle_theme_id(id);
+                seen.push(id);
+            }
+            let mut expected = list[1..].to_vec();
+            expected.push(list[0]);
+            assert_eq!(seen, expected, "T walks its list once and wraps");
         }
-        let mut expected = order[1..].to_vec();
-        expected.push(ThemeId::TokyoNight);
-        assert_eq!(seen, expected, "T walks every theme once and wraps");
         assert_eq!(
             cycle_theme_id(ThemeId::GithubDarkDimmed),
             ThemeId::TokyoNight
         );
+        assert_eq!(cycle_theme_id(ThemeId::GithubLight), ThemeId::TokyoNightDay);
+    }
+
+    #[test]
+    fn every_dark_theme_has_a_light_twin_with_its_own_slug() {
+        for (dark, light) in DARK_THEME_IDS.into_iter().zip(LIGHT_THEME_IDS) {
+            assert!(!dark.is_light(), "{dark:?}");
+            assert!(light.is_light(), "{light:?}");
+            assert_eq!(dark.twin(), light, "{dark:?} twin");
+            assert_eq!(light.twin(), dark, "{light:?} twin");
+            assert_eq!((dark.dark_variant(), dark.light_variant()), (dark, light));
+            assert_eq!((light.dark_variant(), light.light_variant()), (dark, light));
+            assert_ne!(dark.as_str(), light.as_str());
+        }
+        let slugs: std::collections::HashSet<_> = THEME_IDS.iter().map(|id| id.as_str()).collect();
+        assert_eq!(slugs.len(), 26, "every theme has its own slug");
+        let labels: std::collections::HashSet<_> = THEME_IDS.iter().map(|id| id.label()).collect();
+        assert_eq!(labels.len(), 26, "every theme has its own label");
+        for id in THEME_IDS {
+            assert_eq!(id.is_light(), LIGHT_THEME_IDS.contains(&id), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn twin_is_an_involution() {
+        for id in THEME_IDS {
+            assert_ne!(id.twin(), id, "{id:?}");
+            assert_ne!(id.twin().is_light(), id.is_light(), "{id:?}");
+            assert_eq!(id.twin().twin(), id, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn existing_dark_slugs_still_parse() {
+        use ThemeId::*;
+        for (slug, id) in [
+            ("tokyo-night", TokyoNight),
+            ("monokai", Monokai),
+            ("dracula", Dracula),
+            ("gruvbox-dark", GruvboxDark),
+            ("catppuccin-mocha", CatppuccinMocha),
+            ("slate", Slate),
+            ("solarized-dark", SolarizedDark),
+            ("nord", Nord),
+            ("rose-pine", RosePine),
+            ("kanagawa", Kanagawa),
+            ("everforest", Everforest),
+            ("one-dark", OneDark),
+            ("github-dark-dimmed", GithubDarkDimmed),
+        ] {
+            assert_eq!(parse_theme_id(slug), Some(id), "{slug}");
+            assert!(!id.is_light(), "{slug}");
+        }
+    }
+
+    #[test]
+    fn light_slugs_parse() {
+        use ThemeId::*;
+        for (slug, id) in [
+            ("tokyo-night-day", TokyoNightDay),
+            ("monokai-light", MonokaiLight),
+            ("dracula-light", DraculaLight),
+            ("gruvbox-light", GruvboxLight),
+            ("catppuccin-latte", CatppuccinLatte),
+            ("slate-light", SlateLight),
+            ("solarized-light", SolarizedLight),
+            ("nord-light", NordLight),
+            ("rose-pine-dawn", RosePineDawn),
+            ("kanagawa-lotus", KanagawaLotus),
+            ("everforest-light", EverforestLight),
+            ("one-light", OneLight),
+            ("github-light", GithubLight),
+        ] {
+            assert_eq!(parse_theme_id(slug), Some(id), "{slug}");
+            assert_eq!(theme_id_from(Some(slug), None, None), id, "{slug}");
+            assert!(id.is_light(), "{slug}");
+        }
+    }
+
+    /// The default role rule darkens and lightens a dark surface, so every
+    /// light preset sets `sidebar`, `chrome`, and `panel` itself, each a
+    /// distinct background from the surface and from each other.
+    #[test]
+    fn light_themes_set_their_own_background_roles() {
+        for id in LIGHT_THEME_IDS {
+            let theme = id.theme();
+            let (Some(sidebar), Some(chrome), Some(panel)) =
+                (theme.sidebar, theme.chrome, theme.panel)
+            else {
+                panic!("{id:?} must set sidebar, chrome, and panel");
+            };
+            let roles: std::collections::HashSet<_> = [theme.surface, sidebar, chrome, panel]
+                .into_iter()
+                .collect();
+            assert_eq!(roles.len(), 4, "{id:?} background roles must differ");
+            let surface_l = relative_luminance(hex_color(theme.surface));
+            assert!(surface_l > 0.5, "{id:?} surface must be light");
+        }
+    }
+
+    #[test]
+    fn cycle_stays_within_polarity() {
+        for id in THEME_IDS {
+            let mut next = id;
+            for _ in 0..DARK_THEME_IDS.len() {
+                next = cycle_theme_id(next);
+                assert_eq!(next.is_light(), id.is_light(), "{id:?} -> {next:?}");
+            }
+            assert_eq!(next, id, "{id:?} wraps after one lap of its list");
+        }
+        assert_eq!(cycle_theme_id(ThemeId::SlateLight), ThemeId::SolarizedLight);
     }
 
     #[test]
@@ -1573,6 +2565,9 @@ mod tests {
     /// Minimum contrast between a changed-word bg and its row bg.
     const WORD_VS_ROW_FLOOR: f64 = 1.25;
 
+    /// Text roles meet AA on the surface of every theme, dark and light (the
+    /// name predates the light twins). `muted` stays unique across all of
+    /// them for the TTY e2e chrome checks.
     #[test]
     fn dark_surface_foregrounds_meet_aa_contrast() {
         const AA: f64 = 4.5;
@@ -1838,9 +2833,11 @@ mod tests {
         );
     }
 
+    /// `border_dim` is a near-surface rule: less contrast on the surface than
+    /// `muted` on dark and light themes alike. Hexes are locked and unique.
     #[test]
     fn border_dim_is_unique_and_darker_than_muted() {
-        const LOCKED: [(ThemeId, &str); 13] = [
+        const LOCKED: [(ThemeId, &str); 26] = [
             (ThemeId::TokyoNight, "#3b4261"),
             (ThemeId::Monokai, "#49483e"),
             (ThemeId::Dracula, "#44475a"),
@@ -1854,6 +2851,19 @@ mod tests {
             (ThemeId::Everforest, "#475258"),
             (ThemeId::OneDark, "#3e4451"),
             (ThemeId::GithubDarkDimmed, "#444c56"),
+            (ThemeId::TokyoNightDay, "#bec1ca"),
+            (ThemeId::MonokaiLight, "#d0d0cb"),
+            (ThemeId::DraculaLight, "#d2cfc2"),
+            (ThemeId::GruvboxLight, "#d5ccaa"),
+            (ThemeId::CatppuccinLatte, "#ced1d9"),
+            (ThemeId::SlateLight, "#cacdd2"),
+            (ThemeId::SolarizedLight, "#ccd0c3"),
+            (ThemeId::NordLight, "#c6cad0"),
+            (ThemeId::RosePineDawn, "#d9d4d6"),
+            (ThemeId::KanagawaLotus, "#cfcaac"),
+            (ThemeId::EverforestLight, "#dcdbd3"),
+            (ThemeId::OneLight, "#d3d4d5"),
+            (ThemeId::GithubLight, "#d2d3d4"),
         ];
         assert_eq!(LOCKED.map(|(id, _)| id), THEME_IDS);
         let mut hexes = Vec::new();
@@ -1862,11 +2872,11 @@ mod tests {
             assert_eq!(theme.palette.border_dim, hex, "{id:?} borderDim hex");
             let pal = id.palette();
             assert_eq!(pal.border_dim, hex_color(hex), "{id:?} palette.border_dim");
-            let dim_l = relative_luminance(pal.border_dim);
-            let muted_l = relative_luminance(pal.muted);
+            let dim = contrast_ratio(pal.border_dim, pal.surface);
+            let muted = contrast_ratio(pal.muted, pal.surface);
             assert!(
-                dim_l < muted_l,
-                "{id:?} luminance(border_dim)={dim_l:.4} must be < luminance(muted)={muted_l:.4}"
+                dim < muted,
+                "{id:?} contrast(border_dim, surface)={dim:.2} must be < contrast(muted, surface)={muted:.2}"
             );
             hexes.push(hex);
         }
@@ -1878,11 +2888,13 @@ mod tests {
         );
     }
 
-    /// Idle `[✗]` is a neutral dark gray (R=G=B) that reads dimmer than the
-    /// `muted` tab label, yet stays legible on the active tab. Floors:
-    /// `muted`/`tab_close` contrast >= 1.5 (visibly darker), `tab_close` >= 2.5
+    /// Idle `[✗]` is a neutral gray (R=G=B) that reads dimmer than the
+    /// `muted` tab label (less contrast on the surface, on dark and light
+    /// themes alike), yet stays legible on the active tab. Floors:
+    /// `muted`/`tab_close` contrast >= 1.5 (visibly dimmer), `tab_close` >= 2.5
     /// on `cursor_bg` and >= 3.0 on the surface. Hover is the theme's `deleted`
-    /// red on every (dark) theme: >= 2.5 on `cursor_bg`.
+    /// red on every theme: >= 2.5 on `cursor_bg`, and more contrast on the
+    /// surface than the idle gray.
     #[test]
     fn tab_close_is_dimmer_than_muted_and_hover_is_red() {
         const DIMMER_THAN_MUTED: f64 = 1.5;
@@ -1892,10 +2904,10 @@ mod tests {
         for id in THEME_IDS {
             let pal = id.palette();
             let surface = hex_color(id.theme().surface);
-            let close_l = relative_luminance(pal.tab_close);
+            let close_on_surface = contrast_ratio(pal.tab_close, surface);
             assert!(
-                close_l < relative_luminance(pal.muted),
-                "{id:?} tab_close must be darker than muted"
+                close_on_surface < contrast_ratio(pal.muted, surface),
+                "{id:?} tab_close must have less contrast on the surface than muted"
             );
             assert_eq!(
                 pal.tab_close_hover, pal.deleted,
@@ -1918,11 +2930,7 @@ mod tests {
                     contrast_ratio(pal.tab_close, pal.cursor_bg),
                     ON_CURSOR_BG,
                 ),
-                (
-                    "tab_close on surface",
-                    contrast_ratio(pal.tab_close, surface),
-                    ON_SURFACE,
-                ),
+                ("tab_close on surface", close_on_surface, ON_SURFACE),
                 (
                     "tab_close_hover on cursor_bg",
                     contrast_ratio(pal.tab_close_hover, pal.cursor_bg),
@@ -1932,15 +2940,18 @@ mod tests {
                 assert!(ratio >= floor, "{id:?} {name} {ratio:.2} < {floor}");
             }
             assert!(
-                relative_luminance(pal.tab_close_hover) > relative_luminance(pal.tab_close),
-                "{id:?} tab_close_hover must be brighter than tab_close"
+                contrast_ratio(pal.tab_close_hover, surface) > close_on_surface,
+                "{id:?} tab_close_hover must stand out more on the surface than tab_close"
             );
         }
     }
 
+    /// The unfocused selection bar is a weaker shift than the focused one:
+    /// its luminance sits strictly between the surface and `cursor_bg`, on
+    /// dark and light themes alike. Hexes are locked and unique.
     #[test]
     fn cursor_bg_inactive_is_darker_than_cursor_bg() {
-        const LOCKED: [(ThemeId, &str); 13] = [
+        const LOCKED: [(ThemeId, &str); 26] = [
             (ThemeId::TokyoNight, "#21273e"),
             (ThemeId::Monokai, "#32322a"),
             (ThemeId::Dracula, "#363848"),
@@ -1954,6 +2965,19 @@ mod tests {
             (ThemeId::Everforest, "#344045"),
             (ThemeId::OneDark, "#2d3643"),
             (ThemeId::GithubDarkDimmed, "#28323f"),
+            (ThemeId::TokyoNightDay, "#d2dae7"),
+            (ThemeId::MonokaiLight, "#ecece6"),
+            (ThemeId::DraculaLight, "#f2ede8"),
+            (ThemeId::GruvboxLight, "#f5e2b7"),
+            (ThemeId::CatppuccinLatte, "#dee6f5"),
+            (ThemeId::SlateLight, "#e5ebf3"),
+            (ThemeId::SolarizedLight, "#ecede1"),
+            (ThemeId::NordLight, "#e0e6ee"),
+            (ThemeId::RosePineDawn, "#e9e9e4"),
+            (ThemeId::KanagawaLotus, "#e5e1b9"),
+            (ThemeId::EverforestLight, "#eff3eb"),
+            (ThemeId::OneLight, "#ebeff9"),
+            (ThemeId::GithubLight, "#ebf3fc"),
         ];
         assert_eq!(LOCKED.map(|(id, _)| id), THEME_IDS);
         let mut hexes = Vec::new();
@@ -1976,13 +3000,10 @@ mod tests {
             let inactive_l = relative_luminance(pal.cursor_bg_inactive);
             let cursor_l = relative_luminance(pal.cursor_bg);
             let surface_l = relative_luminance(hex_color(theme.surface));
+            let (lo, hi) = (cursor_l.min(surface_l), cursor_l.max(surface_l));
             assert!(
-                inactive_l < cursor_l,
-                "{id:?} luminance(cursor_bg_inactive)={inactive_l:.4} must be < luminance(cursor_bg)={cursor_l:.4}"
-            );
-            assert!(
-                inactive_l > surface_l,
-                "{id:?} luminance(cursor_bg_inactive)={inactive_l:.4} must be > luminance(surface)={surface_l:.4}"
+                lo < inactive_l && inactive_l < hi,
+                "{id:?} luminance(cursor_bg_inactive)={inactive_l:.4} must sit strictly between surface={surface_l:.4} and cursor_bg={cursor_l:.4}"
             );
             hexes.push(hex);
         }
