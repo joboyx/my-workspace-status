@@ -2393,6 +2393,15 @@ mod tests {
         assert_eq!(app.input_mode(), InputMode::DiffVisual);
         app.dispatch(Action::Move(1));
         assert_eq!(app.file_visual_range(), Some((1, 2)));
+        // `'` in the highlight copies its span, in the diff range format.
+        let Effect::CopyClipboard { text, .. } = app.dispatch(Action::CopyEntityReference) else {
+            panic!("expected a copy");
+        };
+        assert_eq!(
+            text,
+            "kind: diff\nrepo: app\npath: README.md\nlines: 2-3\nsource: worktree\nside: new\n"
+        );
+        assert_eq!(app.file_visual_range(), Some((1, 2)), "the copy keeps it");
         app.dispatch(Action::CommentStart);
         assert_eq!(prompt_key(&app), Some(readme(2, 3)));
         assert_eq!(

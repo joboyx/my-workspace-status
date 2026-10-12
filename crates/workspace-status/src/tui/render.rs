@@ -84,8 +84,8 @@ use super::syntax::{
     CachedDiffSyntax, CodeSpan, DiffBackgrounds, DiffSyntaxKey,
 };
 use super::tabs::{
-    compare_picker_empty, file_gutter_width, file_too_large, ComparePickerState, ExplorerPreview,
-    FileTab, EXPLORER_FOLDER_HINT, FILE_IS_BINARY,
+    compare_picker_empty, file_gutter_width, file_too_large, file_view_gutter_width,
+    ComparePickerState, ExplorerPreview, FileTab, EXPLORER_FOLDER_HINT, FILE_IS_BINARY,
 };
 use super::theme::{hex_color, BackgroundMode, Palette, Pill, ThemeId};
 use super::tree::{
@@ -508,7 +508,9 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
     }
     let lines = tab.lines();
     let height = inner.height as usize;
-    let gutter = file_gutter_width(lines.len());
+    // Comment mark, line number, one blank column.
+    let digits = file_gutter_width(lines.len()) - 1;
+    let gutter = file_view_gutter_width(lines.len(), state.ascii);
     let code_w = (inner.width as usize).saturating_sub(gutter).max(1);
     let wrap = state.diff_wrap;
     // A row count past the view height is never needed, so a 2 MiB
@@ -563,7 +565,12 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
                 break;
             }
             let number = if part == 0 {
-                format!("{:>width$} ", line + 1, width = gutter - 1)
+                let n = u32::try_from(line + 1).unwrap_or(u32::MAX);
+                let comment = state.file_line_comment(n);
+                format!(
+                    "{} ",
+                    format_line_gutter(Some(n), digits, comment, state.ascii)
+                )
             } else {
                 " ".repeat(gutter)
             };
@@ -12064,7 +12071,8 @@ mod tests {
             let body: String = (right.x..right.right())
                 .map(|x| buf[(x, right.y + 2)].symbol())
                 .collect();
-            assert!(body.starts_with("  1 line 1"), "{body}");
+            // Pad, the reserved comment mark column, then the number.
+            assert!(body.starts_with("   1 line 1"), "{body}");
             let bottom = left.bottom() - 1;
             assert_eq!(buf[(left.right() - 2, bottom)].bg, palette.sidebar);
             assert_eq!(buf[(right.right() - 2, bottom)].bg, palette.surface);
@@ -14124,7 +14132,8 @@ mod tests {
         assert!(state.apply_explorer_preview(tab_id, gen, ExplorerPreviewBody::File(body)));
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let pane = text(&terminal);
-        assert!(pane.starts_with("1 hello"), "{pane}");
+        // The comment mark column is reserved before the number.
+        assert!(pane.starts_with(" 1 hello"), "{pane}");
         let buf = terminal.backend().buffer();
         assert!(
             buf_line(buf, 1).contains("app/new.txt"),
@@ -14281,6 +14290,52 @@ mod tests {
     }
 
     #[test]
+    fn explorer_file_view_paints_a_comment_mark_on_its_line() {
+        let mut state = file_view_state(&["one", "two", "three"]);
+        state.line_blame.set_enabled(false);
+        state.ascii = true;
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let (x, y) = (state.layout.file_view_x, state.layout.file_view_y);
+        let row = |terminal: &Terminal<TestBackend>, line: u16| -> String {
+            buf_line(terminal.backend().buffer(), y + line)
+                .chars()
+                .skip(usize::from(x))
+                .collect()
+        };
+        // The mark column is reserved before any comment: text never moves.
+        assert!(
+            row(&terminal, 1).starts_with(" 2 two"),
+            "{}",
+            row(&terminal, 1)
+        );
+
+        // `;` on line 2 and save.
+        state.dispatch(Action::FocusRight);
+        state.dispatch(Action::Move(1));
+        state.dispatch(Action::CommentStart);
+        let key = state.comment.take().expect("comment prompt").key;
+        state.comment_store =
+            crate::tui::comments::put_comment_entry(&state.comment_store, key, "note", false);
+        draw_state(&mut terminal, &mut state);
+        let mark = crate::tui::icons::icon_comment(true);
+        assert!(
+            row(&terminal, 1).starts_with(&format!("{mark}2 two")),
+            "{}",
+            row(&terminal, 1)
+        );
+        for line in [0, 2] {
+            assert!(
+                !row(&terminal, line).starts_with(mark),
+                "line {}: {}",
+                line + 1,
+                row(&terminal, line)
+            );
+        }
+        assert_eq!(state.layout.file_view_row_lines[..3], [0, 1, 2]);
+    }
+
+    #[test]
     fn explorer_file_view_paints_the_v_range() {
         let mut state = file_view_state(&["one", "two", "three", "four"]);
         state.line_blame.set_enabled(false);
@@ -14376,8 +14431,9 @@ mod tests {
             .chars()
             .skip(usize::from(state.layout.file_view_x))
             .collect();
+        // Blank mark column, two digit columns, and the separator.
         assert!(
-            continuation.starts_with("   w"),
+            continuation.starts_with("    w"),
             "blank gutter: {continuation}"
         );
 
@@ -14476,7 +14532,8 @@ mod tests {
             rows.iter().all(|&line| line == 0),
             "the long line fills the view"
         );
-        let code_w = usize::from(state.layout.file_view_width) - file_gutter_width(2);
+        let code_w =
+            usize::from(state.layout.file_view_width) - file_view_gutter_width(2, state.ascii);
         let capped = wrap_col_starts_capped(&huge, code_w, height + 1);
         assert_eq!(
             capped.len(),

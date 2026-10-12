@@ -16,6 +16,7 @@ use crate::file_index::FileRead;
 use super::diff::DiffContent;
 use super::drill::{CommitFile, CommitFileSource};
 use super::explorer::ExplorerTree;
+use super::icons::comment_mark_cols;
 use super::search::SearchPane;
 
 /// Palette / overlay copy when the focused row is not a compare target.
@@ -590,6 +591,13 @@ impl CompareTab {
 /// `line_count` plus one blank separator column.
 pub fn file_gutter_width(line_count: usize) -> usize {
     line_count.max(1).to_string().len() + 1
+}
+
+/// Columns of the Explorer file view gutter: the comment mark column
+/// ([`comment_mark_cols`], always reserved as in the diff gutter, so a new
+/// comment never shifts the text) plus [`file_gutter_width`].
+pub fn file_view_gutter_width(line_count: usize, ascii: bool) -> usize {
+    comment_mark_cols(ascii) + file_gutter_width(line_count)
 }
 
 /// A read-only file body: the view of an Explorer inner file tab whose

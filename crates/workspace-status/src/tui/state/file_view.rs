@@ -14,7 +14,7 @@ use crate::file_index::FileRead;
 use super::super::search::{apply_pan, match_diff_line_indices, step_from_anchor};
 use super::super::selection::TextSelection;
 use super::super::split::SplitDrag;
-use super::super::tabs::file_gutter_width;
+use super::super::tabs::file_view_gutter_width;
 use super::{AppState, FileSearchMemo};
 
 impl AppState {
@@ -48,7 +48,8 @@ impl AppState {
             Some(FileRead::Text { max_cols, .. }) => *max_cols,
             _ => 0,
         };
-        let code_w = view.saturating_sub(file_gutter_width(tab.lines().len()));
+        let gutter = file_view_gutter_width(tab.lines().len(), self.ascii);
+        let code_w = view.saturating_sub(gutter);
         tab.col_offset = apply_pan(tab.col_offset, delta, max_cols.saturating_sub(code_w));
     }
 

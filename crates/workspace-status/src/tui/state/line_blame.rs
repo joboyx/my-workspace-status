@@ -1068,8 +1068,12 @@ mod tests {
             other => panic!("expected a previous-change load, got {other:?}"),
         }
 
-        // Reveal goes to the Workspace graph of the checkout.
-        app.dispatch(Action::BlameRevealGraph);
+        // Reveal goes to the Workspace graph of the checkout, which always
+        // loads again when it comes from another tab.
+        assert_eq!(
+            app.dispatch(Action::BlameRevealGraph),
+            Effect::LoadRightPane
+        );
         assert!(app.tabs.is_workspace());
         assert_eq!(
             app.graph_reveal.as_ref().map(|reveal| reveal.sha.as_str()),

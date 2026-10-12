@@ -1360,6 +1360,24 @@ impl AppState {
         )
     }
 
+    /// Comment state of 1-based `line` of the active Explorer File view,
+    /// as [`Self::diff_line_comment`] reads a diff line: the working-tree
+    /// line comments of that checkout's branch and file.
+    pub(crate) fn file_line_comment(&self, line: u32) -> Option<bool> {
+        let tab = self.tabs.active_explorer()?;
+        let file = self.tabs.active_file_view()?;
+        let snap = self.snapshot.repos.iter().find(|r| r.repo == tab.checkout);
+        diff_line_comment_state(
+            &self.comment_store,
+            &tab.checkout,
+            snap.and_then(|r| r.primary_repo.as_deref()),
+            snap.map(|r| r.branch.as_str()),
+            &file.rel,
+            None,
+            line,
+        )
+    }
+
     fn files_list_origin_x(&self) -> u16 {
         if self.is_compare_tab() || self.drill.is_diff() {
             self.layout.tree_x
@@ -4536,6 +4554,29 @@ impl AppState {
         let explorer_diff_line =
             self.list_focus_target() == ListFocusTarget::None && self.explorer_diff().is_some();
         if let Some(tab) = self.tabs.active_explorer().filter(|_| !explorer_diff_line) {
+            // A `V` range on a clean file copies its span, as a diff range
+            // does: the working-tree file is the new side.
+            if let (Some((lo, hi)), Some(file)) =
+                (self.file_visual_range(), self.tabs.active_file_view())
+            {
+                let line = |n: usize| u32::try_from(n + 1).ok();
+                return resolve_entity_reference(
+                    &self.snapshot,
+                    None,
+                    None,
+                    None,
+                    true,
+                    Some(&tab.checkout),
+                    Some(&file.rel),
+                    None,
+                    line(lo),
+                    line(hi),
+                    DiffSide::New,
+                    None,
+                    None,
+                    None,
+                );
+            }
             let primary = self
                 .snapshot
                 .repos
