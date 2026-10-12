@@ -674,22 +674,66 @@ pub struct RowLineRef {
 /// markers, error rows, and out-of-range rows give `None`.
 pub fn row_line_ref(content: &DiffContent, mode: DiffMode, row: usize) -> Option<RowLineRef> {
     let rows = annotated_diff_rows(content, mode);
-    let (
-        _,
-        RowBind::Line {
-            section,
-            hunk,
-            parsed,
-        },
-    ) = rows.get(row)?
-    else {
+    let (_, bind) = rows.get(row)?;
+    let RowBind::Line { section, .. } = bind else {
         return None;
     };
     let text = match section {
         DiffSection::Staged => &content.staged,
         _ => &content.unstaged,
     };
-    let hunks = parse_unified_diff(text);
+    bind_line_ref(bind, &parse_unified_diff(text))
+}
+
+/// Painted row that go to line `line` (1-based) lands on, or `None` when
+/// no row of `content` shows a source line (empty, binary, or failed diff).
+///
+/// A row counts by its [`row_line_ref`] new-side number. Deleted-only rows
+/// count by their old-side number only when no row has a new side (a
+/// deleted file). With no row on `line` the nearest row wins, the earlier
+/// one on a tie, so a line between hunks lands next to it and a line past
+/// the end lands on the last numbered row.
+pub fn row_for_line(content: &DiffContent, mode: DiffMode, line: u32) -> Option<usize> {
+    let staged = parse_unified_diff(&content.staged);
+    let unstaged = parse_unified_diff(&content.unstaged);
+    let refs: Vec<(usize, RowLineRef)> = annotated_diff_rows(content, mode)
+        .iter()
+        .enumerate()
+        .filter_map(|(row, (_, bind))| {
+            let hunks = match bind {
+                RowBind::Line {
+                    section: DiffSection::Staged,
+                    ..
+                } => &staged,
+                _ => &unstaged,
+            };
+            bind_line_ref(bind, hunks).map(|line_ref| (row, line_ref))
+        })
+        .collect();
+    let has_new_side = refs.iter().any(|(_, line_ref)| line_ref.new_no.is_some());
+    refs.iter()
+        .filter_map(|(row, line_ref)| {
+            let number = if has_new_side {
+                line_ref.new_no
+            } else {
+                line_ref.old_no
+            }?;
+            Some((number.abs_diff(line), *row))
+        })
+        .min()
+        .map(|(_, row)| row)
+}
+
+/// [`RowLineRef`] of one annotated row, read from its section's `hunks`.
+fn bind_line_ref(bind: &RowBind, hunks: &[Hunk]) -> Option<RowLineRef> {
+    let RowBind::Line {
+        section,
+        hunk,
+        parsed,
+    } = bind
+    else {
+        return None;
+    };
     let lines = &hunks.get(*hunk)?.lines;
     let picked: Vec<&ParsedLine> = parsed.iter().filter_map(|&i| lines.get(i)).collect();
     let line = picked
@@ -1558,6 +1602,46 @@ index 1111111..2222222 100644
         assert_eq!(
             row_line_ref(&fixture, DiffMode::SideBySide, 2),
             line_ref(s, DiffCellKind::Ctx, Some(10), Some(10))
+        );
+    }
+
+    /// FIXTURE rows: 2 ctx 10, 3 del 11, 4 add 11, 5 ctx 12, 6 add 13.
+    #[test]
+    fn row_for_line_matches_the_new_side_else_the_nearest_row() {
+        let content = DiffContent::from_unified(FIXTURE);
+        let at = |line| row_for_line(&content, DiffMode::Inline, line);
+        assert_eq!(at(10), Some(2));
+        assert_eq!(at(11), Some(4), "the added line, not the deleted old 11");
+        assert_eq!(at(13), Some(6));
+        assert_eq!(at(1), Some(2), "before the hunk: its first row");
+        assert_eq!(at(9999), Some(6), "past the end: the last numbered row");
+        let two_hunks = DiffContent::from_unified(
+            "@@ -1,2 +1,2 @@\n a\n-b\n+B\n@@ -20,2 +20,2 @@\n y\n-z\n+Z\n",
+        );
+        let at = |line| row_for_line(&two_hunks, DiffMode::Inline, line);
+        // Rows: 0 label, 1 hunk, 2 a(1), 3 -b, 4 +B(2), 5 hunk, 6 y(20), 7 -z, 8 +Z(21).
+        assert_eq!(at(5), Some(4), "between hunks: nearer the first");
+        assert_eq!(at(18), Some(6), "between hunks: nearer the second");
+        assert_eq!(at(11), Some(4), "a tie takes the earlier row");
+        let split = |line| row_for_line(&content, DiffMode::SideBySide, line);
+        assert_eq!(
+            row_line_ref(&content, DiffMode::SideBySide, split(11).unwrap())
+                .and_then(|line_ref| line_ref.new_no),
+            Some(11)
+        );
+    }
+
+    #[test]
+    fn row_for_line_counts_deleted_rows_only_without_a_new_side() {
+        let deleted = DiffContent::from_unified("@@ -1,3 +0,0 @@\n-a\n-b\n-c\n");
+        let at = |line| row_for_line(&deleted, DiffMode::Inline, line);
+        assert_eq!(at(2), Some(3), "old line 2");
+        assert_eq!(at(50), Some(4));
+        let binary = DiffContent::from_unified("Binary files a/x and b/x differ\n");
+        assert_eq!(row_for_line(&binary, DiffMode::Inline, 1), None);
+        assert_eq!(
+            row_for_line(&DiffContent::default(), DiffMode::Inline, 1),
+            None
         );
     }
 

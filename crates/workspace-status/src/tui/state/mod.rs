@@ -8,6 +8,7 @@ mod dispatch_search_files;
 mod dispatch_write;
 mod explorer_tab;
 mod file_tab;
+mod go_to_line;
 mod line_blame;
 mod pan;
 mod popover;
@@ -16718,6 +16719,130 @@ mod tests {
         assert_eq!(app.diff_visual_anchor, Some(anchor));
         assert!(app.g_pending_at.is_none());
         assert_eq!(app.input_mode(), InputMode::DiffVisual);
+    }
+
+    /// Text of the diff row under the cursor (inline layout: the left cell).
+    fn diff_cursor_text(app: &AppState) -> String {
+        match &app.current_diff_rows()[app.diff_cursor] {
+            DiffRow::Line { left, .. } => left.text.clone(),
+            other => panic!("cursor off a line row: {other:?}"),
+        }
+    }
+
+    /// Go to `line`, then the text of the diff row it landed on.
+    fn go_to_diff_line(app: &mut AppState, line: usize) -> String {
+        assert_eq!(app.dispatch(Action::GoToLine(line)), Effect::None);
+        assert!(app.diff_scroll as usize <= app.diff_cursor, "kept in view");
+        diff_cursor_text(app)
+    }
+
+    /// `two_hunk_readme` new lines: keep-a 1, keep-b 2, ALPHA-NEW 3,
+    /// keep-c 4, then keep-x 20, keep-y 21, OMEGA-NEW 22, keep-z 23.
+    #[test]
+    fn go_to_line_in_the_workspace_diff_takes_the_new_side_or_the_nearest_row() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        assert_eq!(app.go_to_line_refusal(), None);
+        assert_eq!(go_to_diff_line(&mut app, 21), "keep-y");
+        assert_eq!(
+            go_to_diff_line(&mut app, 3),
+            "ALPHA-NEW",
+            "new line 3, not old line 3"
+        );
+        assert_eq!(go_to_diff_line(&mut app, 10), "keep-c", "nearest row");
+        assert_eq!(go_to_diff_line(&mut app, 15), "keep-x", "nearest row");
+        assert_eq!(go_to_diff_line(&mut app, 0), "keep-a", "below 1 is line 1");
+        assert_eq!(go_to_diff_line(&mut app, 9999), "keep-z", "the last line");
+    }
+
+    #[test]
+    fn go_to_line_counts_deleted_rows_by_old_line_without_a_new_side() {
+        let mut app = state();
+        let deleted = DiffContent::from_unified("@@ -1,3 +0,0 @@\n-gone-a\n-gone-b\n-gone-c\n");
+        focus_readme_diff(&mut app, deleted);
+        assert_eq!(go_to_diff_line(&mut app, 2), "gone-b");
+        assert_eq!(go_to_diff_line(&mut app, 300), "gone-c");
+    }
+
+    /// Only a focused file diff with numbered lines is a line view on the
+    /// Workspace tab.
+    #[test]
+    fn go_to_line_refuses_off_a_focused_diff_with_lines() {
+        let mut app = state();
+        focus_readme_diff(&mut app, binary_readme());
+        assert_eq!(
+            app.go_to_line_refusal().as_deref(),
+            Some(super::go_to_line::NO_LINES_TO_GO_TO)
+        );
+        focus_readme_diff(&mut app, two_hunk_readme());
+        app.focus = FocusPane::Left;
+        assert_eq!(app.go_to_line_refusal().as_deref(), Some(FOCUS_A_FILE_DIFF));
+        let cursor = app.diff_cursor;
+        assert_eq!(app.dispatch(Action::GoToLine(20)), Effect::None);
+        assert_eq!(app.status, FOCUS_A_FILE_DIFF);
+        assert_eq!(app.diff_cursor, cursor, "nothing moved");
+    }
+
+    #[test]
+    fn go_to_line_in_a_compare_diff() {
+        let mut app = state();
+        compare_tab_with_added_lines(&mut app);
+        assert_eq!(go_to_diff_line(&mut app, 3), "more");
+        assert_eq!(go_to_diff_line(&mut app, 99), "keep");
+        app.focus = FocusPane::Left;
+        assert_eq!(
+            app.go_to_line_refusal().as_deref(),
+            Some(FOCUS_A_FILE_DIFF),
+            "the compare file list"
+        );
+    }
+
+    #[test]
+    fn go_to_line_in_a_commit_and_a_stash_diff() {
+        let stash = CommitFileSource::Stash {
+            stash_ref: "stash@{0}".into(),
+        };
+        for source in [sample_commit_source(), stash] {
+            let mut app = state();
+            app.focus = FocusPane::Right;
+            app.open_commit_diff(
+                "app".into(),
+                source,
+                sample_commit_files(),
+                0,
+                "README.md".into(),
+                two_hunk_readme(),
+            );
+            assert_eq!(go_to_diff_line(&mut app, 22), "OMEGA-NEW");
+            app.focus = FocusPane::Left;
+            assert_eq!(
+                app.go_to_line_refusal().as_deref(),
+                Some(FOCUS_A_FILE_DIFF),
+                "the commit file list"
+            );
+        }
+    }
+
+    /// `:` over a `V` range still lists the row; the jump moves the range
+    /// end and keeps the anchor, as `G` does.
+    #[test]
+    fn go_to_line_in_highlight_moves_the_head_and_keeps_the_anchor() {
+        use super::super::action::QuickOpenEntry;
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        highlight_alpha_new(&mut app);
+        let anchor = app.diff_visual_anchor;
+        app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
+        for c in "22".chars() {
+            app.dispatch(Action::QuickOpenChar(c));
+        }
+        let palette = app.command_palette().expect("commands mode");
+        assert_eq!(palette.selected_action(), Some(Action::GoToLine(22)));
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
+        assert!(app.quick_open.is_none());
+        assert_eq!(diff_cursor_text(&app), "OMEGA-NEW");
+        assert_eq!(app.diff_visual_anchor, anchor);
+        assert!(app.diff_visual_contains(app.diff_cursor));
     }
 
     #[test]

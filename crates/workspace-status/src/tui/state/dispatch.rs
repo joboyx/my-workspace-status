@@ -239,6 +239,7 @@ impl AppState {
                 self.dispatch_hscroll(action)
             }
             action @ (Action::NavEnter | Action::NavEsc) => self.dispatch_drill(action),
+            Action::GoToLine(line) => self.go_to_line(line),
             action @ (Action::PopoverOpenFocused
             | Action::PopoverMove(_)
             | Action::PopoverRun

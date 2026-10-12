@@ -403,8 +403,7 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
             Action::QuickOpenSubmit => ctx
                 .state
                 .command_palette()
-                .and_then(|palette| palette.selected_action())
-                .cloned(),
+                .and_then(|palette| palette.selected_action()),
             Action::PopoverRun => ctx.state.popover_run_action(),
             Action::Release => ctx.state.popover_release_action(),
             _ => None,

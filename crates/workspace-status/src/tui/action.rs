@@ -336,6 +336,13 @@ pub enum Action {
     PreviousTab,
     /// Absolute tab index. `1` is Workspace.
     JumpToTab(u8),
+    /**
+     * Put the focused line view's cursor on this 1-based line (`:<n>` in
+     * Quick Open commands mode).
+     *
+     * `0` means line 1; a line past the end means the last line.
+     */
+    GoToLine(usize),
     /// Move the compare picker highlight.
     ComparePickerMove(i32),
     /// Append a compare picker filter character.
