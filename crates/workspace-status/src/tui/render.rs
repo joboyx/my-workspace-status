@@ -47,6 +47,7 @@ use super::help::{
     help_version_label, wrap_help_footer, HELP_LEGEND_HEAD_ROWS, HELP_LEGEND_TITLE,
     HELP_SEARCH_ESC_HINT,
 };
+use super::hyperlink::LinkHit;
 use super::icons::{
     comment_mark_cols, glyph, icon_branch, icon_comment, icon_comment_resolved, icon_diff,
     icon_merged_into_default, icon_move, icon_open_vs_default, truncate_visible, IconKind,
@@ -159,9 +160,10 @@ fn selection_marker(selected: bool, focused: bool) -> &'static str {
 /// Draw one frame. Updates `state.layout` for mouse hits.
 pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.prune_expired_flashes();
-    // Every frame starts with no icon; only a pane that paints one records
-    // it again, so a hidden badge never opens a PR or a popover.
+    // Every frame starts with no icon or link; only a pane that paints one
+    // records it again, so a hidden badge never opens a PR or a popover.
     state.layout.icon_hits.clear();
+    state.layout.links.clear();
     state.layout.popover = None;
     let area = frame.area();
     state.too_small = area.width < MIN_TERM_COLS || area.height < MIN_TERM_ROWS;
@@ -239,6 +241,11 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         chunks[4],
     );
 
+    // Each painted PR badge glyph links to its full PR URL. A box painted
+    // over the panes below drops the links it covers.
+    let badge_links = state.pr_badge_links();
+    state.layout.links.extend(badge_links);
+
     // Dialogs paint last: a fixed-height box centered over the panes.
     state.layout.help_scroll_max = 0;
     if let Some(kind) = open_dialog(state) {
@@ -263,6 +270,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
             DialogKind::QuickOpen => draw_quick_open(frame, rect, state),
             DialogKind::SearchFiles => draw_search_files(frame, rect, state),
         }
+        drop_links_under(&mut state.layout.links, rect);
     }
 
     // The icon popover hangs over the panes and any dialog.
@@ -274,6 +282,12 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     if let Some(selection) = state.text_selection.as_ref() {
         selection.highlight(frame.buffer_mut());
     }
+}
+
+/// Drop each link in `links` that overlaps `rect`: a box painted there
+/// hides its cells, so the OSC 8 overlay must not print them as a link.
+fn drop_links_under(links: &mut Vec<LinkHit>, rect: Rect) {
+    links.retain(|link| !rect.intersects(Rect::new(link.x, link.y, link.width, 1)));
 }
 
 /// Tree / graph / files pane on the left and graph / files / diff on the
@@ -5513,6 +5527,9 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
     let height = u16::try_from(rows.len() + 2).unwrap_or(u16::MAX);
     let rect = popover_rect(anchor, bounds, width, height);
 
+    // Per line: the painted value of a link field, as (inner column,
+    // width, full URL), for the OSC 8 overlay.
+    let mut line_links: Vec<Option<(usize, usize, String)>> = vec![None; lines.len()];
     let painted: Vec<Line<'static>> = rows
         .iter()
         .map(|row| match *row {
@@ -5555,13 +5572,28 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
                     PopoverLine::Note(text) => {
                         spans.push(Span::styled(text.clone(), muted));
                     }
-                    PopoverLine::Field { label, value, role } => {
+                    PopoverLine::Field {
+                        label,
+                        value,
+                        role,
+                        link,
+                    } => {
                         let pad = label_width(index).saturating_sub(visible_width(label));
                         spans.push(Span::styled(format!("{label}{} ", " ".repeat(pad)), muted));
-                        spans.push(Span::styled(
-                            value.clone(),
-                            Style::default().fg(seg_role_color(*role, palette)),
-                        ));
+                        let style = Style::default().fg(seg_role_color(*role, palette));
+                        if *link {
+                            // A cut URL ends in `…`; the link keeps the
+                            // full URL.
+                            let x = help_spans_width(&spans);
+                            let room = inner_width.saturating_sub(x);
+                            if room > 0 {
+                                let shown = fit_with_ellipsis(value, room);
+                                line_links[index] = Some((x, visible_width(&shown), value.clone()));
+                                spans.push(Span::styled(shown, style));
+                            }
+                        } else {
+                            spans.push(Span::styled(value.clone(), style));
+                        }
                     }
                     PopoverLine::Action(command) => {
                         let reason = reasons[index].as_deref();
@@ -5645,6 +5677,7 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
         }
     }
     frame.render_widget(Clear, rect);
+    drop_links_under(&mut state.layout.links, rect);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     let shown_rows = (start..start + shown).chain(body..rows.len());
@@ -5665,6 +5698,19 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
         if let PopoverRow::Line(index) = *row {
             if lines[index].focusable() {
                 hit_lines.push((y, index));
+            }
+            if let Some((x, width, url)) = line_links[index].take() {
+                let width = width.min(usize::from(inner.width).saturating_sub(x));
+                if let (Ok(x), Ok(width)) = (u16::try_from(x), u16::try_from(width)) {
+                    if width > 0 {
+                        state.layout.links.push(LinkHit {
+                            y,
+                            x: inner.x + x,
+                            width,
+                            url,
+                        });
+                    }
+                }
             }
         }
     }
@@ -14730,6 +14776,121 @@ mod tests {
     }
 
     #[test]
+    fn pr_badge_links_to_the_full_pr_url() {
+        use crate::tui::hyperlink::LinkHit;
+        let url = "https://github.com/acme/widgets-with-a-rather-long-name/pull/12345";
+        let mut state = pr_state(
+            &[branch_repo("app", "feature"), branch_repo("lib", "main")],
+            true,
+        );
+        set_pr(
+            &mut state,
+            "app",
+            "feature",
+            PrLookup::Found(PullRequest {
+                number: 12345,
+                url: url.into(),
+                state: PrState::Open,
+            }),
+        );
+        let mut terminal = pr_terminal();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let hit = state.layout.pr_badge_hits()[0].clone();
+        assert_eq!(
+            state.layout.links,
+            vec![LinkHit {
+                y: hit.y,
+                x: hit.x,
+                width: hit.width,
+                url: url.into(),
+            }]
+        );
+        assert_eq!(terminal.backend().buffer()[(hit.x, hit.y)].symbol(), "P");
+
+        // A frame that paints no badge links nothing.
+        state
+            .tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert!(state.layout.links.is_empty());
+    }
+
+    /// Link spans in `links` that overlap `rect`.
+    fn links_in(
+        links: &[crate::tui::hyperlink::LinkHit],
+        rect: Rect,
+    ) -> Vec<crate::tui::hyperlink::LinkHit> {
+        links
+            .iter()
+            .filter(|link| rect.intersects(Rect::new(link.x, link.y, link.width, 1)))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn dialog_drops_the_badge_links_it_covers() {
+        let mut state = pr_state(&[branch_repo("app", "feature")], true);
+        set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+        let mut terminal = pr_terminal();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let before = state.layout.links.clone();
+        assert_eq!(before.len(), 1, "{before:?}");
+        let (x, y) = (before[0].x, before[0].y);
+        let badge_cell = terminal.backend().buffer()[(x, y)].clone();
+
+        state.help_open = true;
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        // The badge still records its hit under help; only its link goes.
+        assert_eq!(state.layout.pr_badge_hits().len(), 1);
+        assert_ne!(
+            terminal.backend().buffer()[(x, y)],
+            badge_cell,
+            "help must paint over the badge"
+        );
+        assert!(state.layout.links.is_empty(), "{:?}", state.layout.links);
+
+        state.help_open = false;
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert_eq!(state.layout.links, before);
+    }
+
+    #[test]
+    fn popover_drops_the_badge_links_it_covers() {
+        let url = "https://github.com/octo/demo/pull/7";
+        let repos: Vec<RepoSnapshot> = ["app", "bbb", "ccc", "ddd"]
+            .iter()
+            .map(|name| branch_repo(name, "feature"))
+            .collect();
+        let mut state = pr_state(&repos, true);
+        for name in ["app", "bbb", "ccc", "ddd"] {
+            set_pr(&mut state, name, "feature", found_pr(PrState::Open));
+        }
+        focus_tree_row(&mut state, "repo:app");
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let _ = state.dispatch(Action::PopoverOpenFocused);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let hit = state.layout.popover.clone().expect("pinned");
+        let covered = state
+            .layout
+            .pr_badge_hits()
+            .into_iter()
+            .filter(|badge| {
+                hit.rect
+                    .intersects(Rect::new(badge.x, badge.y, badge.width, 1))
+            })
+            .count();
+        assert!(covered > 0, "the popover {:?} must cover a badge", hit.rect);
+        // Only the popover's own URL line links inside its box.
+        let inside = links_in(&state.layout.links, hit.rect);
+        assert_eq!(inside.len(), 1, "{inside:?}");
+        assert_eq!(inside[0].url, url);
+        assert!(hit
+            .inner
+            .contains(ratatui::layout::Position::new(inside[0].x, inside[0].y)));
+    }
+
+    #[test]
     fn graph_worktree_badge_paints_and_ctrl_click_opens_its_pr() {
         use workspace_status_graph::Worktree;
         const HEAD: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -14800,6 +14961,20 @@ mod tests {
         assert_eq!(hit.x, label_x + 25);
         assert_eq!(buf[(hit.x, hit.y)].symbol(), "P");
         assert_eq!(buf[(hit.x, hit.y)].fg, state.theme.palette().branch_feature);
+        // The graph badge glyph links to the full PR URL.
+        assert!(
+            state
+                .layout
+                .links
+                .contains(&crate::tui::hyperlink::LinkHit {
+                    y: hit.y,
+                    x: hit.x,
+                    width: 1,
+                    url: "https://github.com/octo/demo/pull/7".into(),
+                }),
+            "{:?}",
+            state.layout.links
+        );
         let commit_y = (0..24)
             .find(|y| buf_line(buf, *y).contains("seed graph"))
             .expect("commit row");
@@ -15382,6 +15557,64 @@ mod tests {
             assert!(text.contains(want), "{want:?} in\n{text}");
         }
         assert!(!text.contains("loading…"), "{text}");
+    }
+
+    /// The painted text under the popover's URL link and the link itself,
+    /// for a pinned PR popover with `url` on a `cols`-wide terminal.
+    fn pr_popover_url_link(url: &str, cols: u16) -> (String, crate::tui::hyperlink::LinkHit) {
+        let mut state = pr_state(&[branch_repo("app", "feature")], false);
+        set_pr(
+            &mut state,
+            "app",
+            "feature",
+            PrLookup::Found(PullRequest {
+                number: 7,
+                url: url.into(),
+                state: PrState::Open,
+            }),
+        );
+        focus_tree_row(&mut state, "repo:app");
+        let mut terminal = Terminal::new(TestBackend::new(cols, 40)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let _ = state.dispatch(Action::PopoverOpenFocused);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        // The URL line is the one link inside the popover; it comes after
+        // the badge links.
+        let popover = state.layout.popover.clone().expect("pinned");
+        let inside = links_in(&state.layout.links, popover.rect);
+        assert_eq!(inside.len(), 1, "{:?}", state.layout.links);
+        let link = inside[0].clone();
+        assert_eq!(state.layout.links.last(), Some(&link));
+        let inner = popover.inner;
+        assert!(inner.contains(ratatui::layout::Position::new(link.x, link.y)));
+        assert!(link.x + link.width <= inner.right());
+        let buf = terminal.backend().buffer();
+        let text: String = (link.x..link.x + link.width)
+            .map(|x| buf[(x, link.y)].symbol())
+            .collect();
+        (text, link)
+    }
+
+    #[test]
+    fn pr_popover_url_line_links_to_the_full_url_when_cut() {
+        let url = format!(
+            "https://github.com/acme/widgets-with-a-rather-long-name/pull/{}",
+            "9".repeat(40)
+        );
+        let (text, link) = pr_popover_url_link(&url, 60);
+        assert_eq!(link.url, url, "the link keeps the full URL");
+        assert!(text.ends_with('…'), "{text:?}");
+        let kept = text.trim_end_matches('…');
+        assert!(url.starts_with(kept) && kept.len() < url.len(), "{text:?}");
+        assert_eq!(usize::from(link.width), visible_width(&text));
+    }
+
+    #[test]
+    fn pr_popover_url_line_links_the_whole_url_when_it_fits() {
+        let url = "https://github.com/octo/demo/pull/7";
+        let (text, link) = pr_popover_url_link(url, 120);
+        assert_eq!(text, url);
+        assert_eq!(link.url, url);
     }
 
     #[test]

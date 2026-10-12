@@ -25,6 +25,7 @@ use crate::helpers::is_counted_local_branch;
 
 use super::super::action::Effect;
 use super::super::gates::ListFocusTarget;
+use super::super::hyperlink::LinkHit;
 use super::super::popover::IconTarget;
 use super::super::pull_request::{
     lookup_failed_status, no_pr_status, PrDetailLookup, PrLookup, PrState, PullRequest,
@@ -208,6 +209,28 @@ impl AppState {
             }
         };
         super::popover::then(selected, open)
+    }
+
+    /// One link per PR badge glyph painted so far this frame, to the full
+    /// URL of its PR, for [`LayoutHit::links`].
+    ///
+    /// A badge whose PR is no longer cached gets no link.
+    ///
+    /// [`LayoutHit::links`]: super::LayoutHit::links
+    pub(crate) fn pr_badge_links(&self) -> Vec<LinkHit> {
+        self.layout
+            .pr_badge_hits()
+            .into_iter()
+            .filter_map(|hit| {
+                let pr = self.pull_request_for(&hit.repo)?;
+                Some(LinkHit {
+                    y: hit.y,
+                    x: hit.x,
+                    width: hit.width,
+                    url: pr.url.clone(),
+                })
+            })
+            .collect()
     }
 
     /// The PR the badge of checkout `repo` shows, under the same rule as
