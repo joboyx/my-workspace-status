@@ -12748,6 +12748,41 @@ mod tests {
         }
     }
 
+    /// `:42` paints `Go to line 42` as the first list row with the cursor;
+    /// on the Workspace tree it is disabled, and the row and the footer
+    /// both say why.
+    #[test]
+    fn palette_go_to_line_row_paints_first_with_its_reason() {
+        use crate::tui::action::{Action, QuickOpenEntry};
+        use crate::tui::gates::FOCUS_A_FILE_DIFF;
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
+        for c in "42".chars() {
+            state.dispatch(Action::QuickOpenChar(c));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        let lines: Vec<&str> = text.lines().collect();
+        let prompt = lines
+            .iter()
+            .position(|line| line.contains("> 42") || line.contains(">42"))
+            .unwrap_or_else(|| panic!("no prompt row:\n{text}"));
+        let first = lines[prompt + 1..]
+            .iter()
+            .map(|line| line.trim_matches(['│', ' ']))
+            .find(|line| !line.is_empty() && !line.chars().all(|c| c == '─'))
+            .unwrap_or_else(|| panic!("no list row:\n{text}"));
+        assert!(first.starts_with("❯ Go to line 42"), "{first}\n{text}");
+        assert!(first.ends_with(FOCUS_A_FILE_DIFF), "{first}");
+        let footer = lines
+            .iter()
+            .find(|line| line.contains("Enter run · Esc close"))
+            .unwrap_or_else(|| panic!("no footer:\n{text}"));
+        assert!(footer.contains(FOCUS_A_FILE_DIFF), "{footer}");
+    }
+
     /// A palette window scrolled into the middle of a group lost that
     /// group's header, so its top rows keep the group label.
     #[test]

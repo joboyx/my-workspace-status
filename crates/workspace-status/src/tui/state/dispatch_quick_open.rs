@@ -1028,7 +1028,7 @@ mod tests {
     /// Quick Open and moves the file tab's own cursor.
     #[test]
     fn colon_digits_land_on_go_to_line_and_enter_jumps() {
-        use super::super::super::command_palette::{go_to_line_title, PalettePaintRow};
+        use super::super::super::command_palette::PalettePaintRow;
         let mut app = family_state();
         file_tab_with_lines(&mut app, 50);
         let tabs = app.tabs.len();
@@ -1045,7 +1045,6 @@ mod tests {
             palette.paint_rows()[0],
             PalettePaintRow::GoToLine { line: 42 }
         );
-        assert_eq!(go_to_line_title(42), "Go to line 42");
         assert_eq!(palette.cursor, 0, "the landing row");
         assert_eq!(palette.selected_action(), Some(Action::GoToLine(42)));
         assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
