@@ -29,28 +29,33 @@ use ratatui::layout::Rect;
 use crate::file_index::FileRead;
 use crate::snapshot::FileChange;
 
-use super::super::action::{Action, Effect};
+use super::super::action::{Action, Effect, ExternalDiffKind};
 use super::super::command_palette::{CommandScope, PaletteCommand};
+use super::super::comments::{covering_line_comment, resolve_comment_target, CommentKey};
 use super::super::diff::{row_for_new_line, row_line_ref};
 use super::super::effect::ExplorerPreviewBody;
 use super::super::event_pump::overlay_blocks_background_ticks;
 use super::super::explorer::{ExplorerEntry, ExplorerRow, ExplorerStatus};
-use super::super::gates::ListFocusTarget;
+use super::super::gates::{ListFocusTarget, FOCUS_A_FILE_TO_MARK_REVIEWED};
 use super::super::search::{explorer_row_match_indices, step_from_anchor, SearchPane};
 use super::super::selection::TextSelection;
 use super::super::split::SplitDrag;
 use super::super::status::StatusMessage;
 use super::super::tabs::{
-    ExplorerPreview, ExplorerTab, OpenFile, ParkedSearch, EXPLORER_FILE_TABS_ONLY,
-    EXPLORER_TAB_READ_ONLY, FILE_DELETED, NO_EXPLORER_FILE_TABS, ONLY_WORKSPACE_TAB_OPEN,
-    SWITCH_TO_WORKSPACE_TAB,
+    ExplorerPreview, ExplorerTab, OpenFile, ParkedSearch, EXPLORER_DIFFS_SHOW_WHOLE_FILE,
+    EXPLORER_FILE_TABS_ONLY, EXPLORER_TAB_READ_ONLY, FILE_DELETED, NO_EXPLORER_FILE_TABS,
+    ONLY_WORKSPACE_TAB_OPEN, SWITCH_TO_WORKSPACE_TAB, TAB_TO_THE_FILE_PANE,
 };
 use super::super::tree::{dir_path_from_id, NodeKind};
 use super::super::watch::{file_disk_token, GONE_DISK_TOKEN};
-use super::{single_or_batch, AppState, FocusPane, NO_SEARCH_ARMED, Z_FOLDS_TREE_ROWS};
+use super::{
+    single_or_batch, AppState, FocusPane, NO_HIGHLIGHT_TARGET, NO_SEARCH_ARMED, Z_FOLDS_TREE_ROWS,
+};
 
 /// `e` refusal on an Explorer folder row (the folder-summary copy).
 const FOCUS_A_FILE_TO_EDIT: &str = "focus a file to edit";
+/// `E` refusal with no changed inner file (the Workspace copy).
+const FOCUS_A_FILE_TO_DIFF: &str = "focus a file to diff";
 
 /// Where `-` puts the Explorer cursor.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -243,26 +248,34 @@ impl AppState {
     /// Why `action` refuses on the active Explorer tab, or `None` (also off
     /// an Explorer tab).
     ///
-    /// Git writes, comments, highlight, diff-only keys, compare opens, the
-    /// blame actions, and a confirm need the Workspace tab: a late checkout
-    /// / merge result can open a confirm while an Explorer tab is active,
-    /// and `y` there must not write (n / Esc still close it). The Workspace
-    /// tree view keys (`t`, `.`) and the commit-message rows (`M`, `+`)
-    /// say [`SWITCH_TO_WORKSPACE_TAB`]. [`Self::dispatch`] puts the reason
-    /// on the status line; `palette_disabled_reason` shows the same copy on
-    /// the row.
+    /// Git writes, diff compare opens, and a confirm need the Workspace
+    /// tab ([`EXPLORER_TAB_READ_ONLY`]): a late checkout / merge result can
+    /// open a confirm while an Explorer tab is active, and `y` there must
+    /// not write (n / Esc still close it). The Workspace tree view keys
+    /// (`t`, `.`) and the commit-message rows (`M`, `+`) say
+    /// [`SWITCH_TO_WORKSPACE_TAB`]. Ctrl-o says
+    /// [`EXPLORER_DIFFS_SHOW_WHOLE_FILE`] and never changes the context.
+    /// The line keys `;` and `V` need the file pane focused
+    /// ([`TAB_TO_THE_FILE_PANE`]). The file keys (`space`, `E`, `y`, `'`,
+    /// the blame actions) run on the active inner file. [`Self::dispatch`]
+    /// puts the reason on the status line; `palette_disabled_reason` shows
+    /// the same copy on the row.
     pub(crate) fn explorer_tab_refusal(&self, action: &Action) -> Option<String> {
         if !self.is_explorer_tab() {
             return None;
         }
-        if matches!(
-            action,
+        match action {
             Action::ToggleTreeMode
-                | Action::ToggleShowIgnored
-                | Action::ToggleCommitMsgExpand
-                | Action::ResizeCommitMsg(_)
-        ) {
-            return Some(SWITCH_TO_WORKSPACE_TAB.into());
+            | Action::ToggleShowIgnored
+            | Action::ToggleCommitMsgExpand
+            | Action::ResizeCommitMsg(_) => return Some(SWITCH_TO_WORKSPACE_TAB.into()),
+            Action::ToggleFullContext => return Some(EXPLORER_DIFFS_SHOW_WHOLE_FILE.into()),
+            Action::CommentStart | Action::DiffVisualStart
+                if self.list_focus_target() != ListFocusTarget::None =>
+            {
+                return Some(TAB_TO_THE_FILE_PANE.into());
+            }
+            _ => {}
         }
         matches!(
             action,
@@ -288,21 +301,10 @@ impl AppState {
                 | Action::GraphFocusBranches
                 | Action::GraphFocusClear
                 | Action::GraphFocusSubmit
-                | Action::ToggleReviewed
-                | Action::CommentStart
-                | Action::ExportComments
-                | Action::DiffVisualStart
-                | Action::ExternalDiff
-                | Action::ToggleFullContext
                 | Action::CompareVsDefault
                 | Action::CompareVsBranch
                 | Action::CompareVsCommit
                 | Action::CompareCommitVsParent
-                | Action::BlameCommitVsParent
-                | Action::BlamePreviousChange
-                | Action::BlameCommitVsWorktree
-                | Action::BlameRevealGraph
-                | Action::BlameMenu
                 | Action::ConfirmYes
                 | Action::ConfirmYesClean
         )
@@ -310,11 +312,20 @@ impl AppState {
     }
 
     /// Palette row reason on an Explorer tab after
-    /// [`Self::explorer_tab_refusal`]: `n` / `N` need an armed search, the
-    /// subtree fold needs the tree focused, the tab moves need another tab.
+    /// [`Self::explorer_tab_refusal`] and the blame gate
+    /// ([`Self::blame_refusal`]): the row's highlight scope, then the
+    /// row's own check, with the copy its key gives. `n` / `N` need an
+    /// armed search, the subtree fold needs the tree focused, the tab moves
+    /// need another tab; `space` and `E` need a changed inner file; `;`,
+    /// `V`, and `'` need a target.
     pub(crate) fn explorer_tab_palette_reason(&self, command: &PaletteCommand) -> Option<String> {
-        if command.scope == CommandScope::Highlight {
-            return Some("highlight diff lines first (V)".into());
+        let highlighted = self.diff_visual_anchor.is_some();
+        match (command.scope, highlighted) {
+            (CommandScope::NoHighlight, true) => return Some("exit highlight first (Esc)".into()),
+            (CommandScope::Highlight, false) => {
+                return Some("highlight diff lines first (V)".into())
+            }
+            _ => {}
         }
         match command.action {
             Action::SearchNext | Action::SearchPrev => {
@@ -326,6 +337,29 @@ impl AppState {
             Action::FoldToggleSubtree => {
                 (self.focus == FocusPane::Right).then(|| Z_FOLDS_TREE_ROWS.into())
             }
+            Action::ToggleReviewed => self
+                .explorer_active_change()
+                .is_none()
+                .then(|| FOCUS_A_FILE_TO_MARK_REVIEWED.into()),
+            Action::ExternalDiff => self
+                .explorer_active_change()
+                .is_none()
+                .then(|| FOCUS_A_FILE_TO_DIFF.into()),
+            Action::CommentStart => self
+                .current_comment_target()
+                .is_none()
+                .then(|| "no comment target".into()),
+            Action::DiffVisualStart => {
+                let empty = match self.tabs.active_file_view() {
+                    Some(file) => file.lines().is_empty(),
+                    None => self.current_diff_rows().is_empty(),
+                };
+                empty.then(|| NO_HIGHLIGHT_TARGET.into())
+            }
+            Action::CopyEntityReference => self
+                .current_entity_reference()
+                .is_none()
+                .then(|| "no copy target".into()),
             _ => None,
         }
     }
@@ -354,6 +388,8 @@ impl AppState {
             // Esc (or a right click) on an armed search clears it first,
             // through the shared Esc path.
             Action::NavEsc | Action::BackClick if self.search_active => return None,
+            // A right click in a `V` highlight leaves it, as on the Workspace.
+            Action::BackClick if self.diff_visual_anchor.is_some() => return None,
             Action::Move(delta) if preview => self.explorer_preview_move(i64::from(delta)),
             Action::Move(delta) => self.explorer_move(delta as isize),
             Action::MoveToStart if preview => self.explorer_preview_edge(false),
@@ -413,11 +449,23 @@ impl AppState {
                 Effect::None
             }
             Action::FocusLeft => {
+                self.clear_diff_visual();
                 self.focus = FocusPane::Left;
                 Effect::None
             }
+            // Highlight has no GPending mode: its second `g` lands here.
+            Action::ArmGChord
+                if preview
+                    && self.diff_visual_anchor.is_some()
+                    && self.chord_pending(self.g_pending_at) =>
+            {
+                self.g_pending_at = None;
+                self.explorer_preview_edge(false)
+            }
             Action::Refresh => self.refresh_explorer(),
             Action::Edit => self.edit_explorer(),
+            Action::ToggleReviewed => self.explorer_toggle_reviewed(),
+            Action::ExternalDiff => self.explorer_external_diff(),
             Action::PreviousFileTab => self.explorer_cycle_inner(-1),
             Action::NextFileTab => self.explorer_cycle_inner(1),
             Action::CloseTab => return self.explorer_close_inner(),
@@ -430,6 +478,115 @@ impl AppState {
             _ => return None,
         };
         Some(effect)
+    }
+
+    /// Checkout and snapshot change of the active Explorer tab's active
+    /// inner file; `None` for a clean file or with no inner tab.
+    fn explorer_active_change(&self) -> Option<(String, FileChange)> {
+        let tab = self.tabs.active_explorer()?;
+        let rel = &tab.active_inner()?.rel;
+        let change = self.explorer_change(&tab.checkout, rel)?;
+        Some((tab.checkout.clone(), change))
+    }
+
+    /// `space`: toggle the reviewed mark of the active inner file (the
+    /// Workspace tree's mark of the same file). A clean file, or no inner
+    /// tab, says [`FOCUS_A_FILE_TO_MARK_REVIEWED`]. The Explorer paints no
+    /// mark, so the status line says which way it went.
+    fn explorer_toggle_reviewed(&mut self) -> Effect {
+        let Some((checkout, change)) = self.explorer_active_change() else {
+            self.status = StatusMessage::warn(FOCUS_A_FILE_TO_MARK_REVIEWED);
+            return Effect::None;
+        };
+        let before = self.status.clone();
+        let Some(marked) = self.toggle_viewed_for(&checkout, &change.path) else {
+            return Effect::None;
+        };
+        // A failed save already put its error on the status line.
+        if self.status == before {
+            self.status = StatusMessage::info(if marked {
+                "marked reviewed"
+            } else {
+                "reviewed mark cleared"
+            });
+        }
+        Effect::None
+    }
+
+    /// `E`: the external diff tool on the active inner file's worktree
+    /// change. A clean file, or no inner tab, says
+    /// [`FOCUS_A_FILE_TO_DIFF`].
+    fn explorer_external_diff(&mut self) -> Effect {
+        let Some((repo, _)) = self.explorer_active_change() else {
+            self.status = StatusMessage::warn(FOCUS_A_FILE_TO_DIFF);
+            return Effect::None;
+        };
+        let Some(path) = self
+            .tabs
+            .active_explorer()
+            .and_then(ExplorerTab::active_inner)
+            .map(|inner| inner.rel.clone())
+        else {
+            return Effect::None;
+        };
+        self.status = StatusMessage::progress(format!("opening diff {path}…"));
+        Effect::ExternalDiff {
+            repo,
+            path,
+            kind: ExternalDiffKind::Worktree,
+        }
+    }
+
+    /// Comment target of an Explorer tab when it is not a diff line:
+    /// `Some(None)` with the tree focused (no target; the Workspace row is
+    /// parked) or a File view with no line, `Some(Some(key))` for the File
+    /// view's cursor line (or the `V` range) as a working-tree line
+    /// comment. `None` for a focused inner diff, which keys its line the
+    /// Workspace way.
+    pub(super) fn explorer_file_comment_target(&self) -> Option<Option<CommentKey>> {
+        let tab = self.tabs.active_explorer()?;
+        if self.list_focus_target() != ListFocusTarget::None {
+            return Some(None);
+        }
+        let file = self.tabs.active_file_view()?;
+        let Some((lo, hi)) = self
+            .file_visual_range()
+            .or_else(|| (file.cursor < file.lines().len()).then_some((file.cursor, file.cursor)))
+        else {
+            return Some(None);
+        };
+        let line = |n: usize| u32::try_from(n + 1).ok();
+        let key = resolve_comment_target(
+            &self.snapshot,
+            None,
+            None,
+            None,
+            true,
+            Some(&tab.checkout),
+            Some(&file.rel),
+            None,
+            line(lo),
+            line(hi),
+        );
+        let visual = self.diff_visual_anchor.is_some();
+        Some(key.map(|key| {
+            if visual {
+                key
+            } else {
+                covering_line_comment(&self.comment_store, &key).unwrap_or(key)
+            }
+        }))
+    }
+
+    /// Inclusive 0-based line range of a `V` highlight on the active
+    /// Explorer File view (anchor to cursor, clamped to the loaded lines),
+    /// or `None` without one.
+    pub(crate) fn file_visual_range(&self) -> Option<(usize, usize)> {
+        let anchor = self.diff_visual_anchor?;
+        let file = self.tabs.active_file_view()?;
+        let last = file.lines().len().checked_sub(1)?;
+        let (anchor, cursor) = (anchor.min(last), file.cursor.min(last));
+        Some((anchor.min(cursor), anchor.max(cursor)))
     }
 
     /// Move the tree cursor `delta` rows and preview the new row.
@@ -702,6 +859,7 @@ impl AppState {
         let tree = self.layout.explorer_tree;
         if self.layout.explorer_tree_rows.contains(at) {
             self.text_selection = TextSelection::arm(tree, col, row);
+            self.clear_diff_visual();
             self.focus = FocusPane::Left;
             let Some((rows, _)) = self.explorer_rows() else {
                 return Effect::None;
@@ -1601,6 +1759,36 @@ impl AppState {
         assert!(self.apply_explorer_preview(tab_id, gen, ExplorerPreviewBody::File(body)));
         (tab_id, gen)
     }
+
+    /// Open changed `rel` of `checkout` the way Quick Open does and land
+    /// `diff` as its whole-file diff. Returns the Explorer tab id and the
+    /// load generation.
+    pub(crate) fn open_loaded_inner_diff(
+        &mut self,
+        checkout: &str,
+        rel: &str,
+        diff: super::super::diff::DiffContent,
+    ) -> (u64, u64) {
+        let effect = self.open_file_in_explorer(checkout.into(), rel.into(), None, None);
+        let effects = match effect {
+            Effect::Batch(effects) => effects,
+            other => vec![other],
+        };
+        let (tab_id, gen) = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::LoadExplorerPreview {
+                    tab_id,
+                    gen,
+                    change: Some(_),
+                    ..
+                } => Some((*tab_id, *gen)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("a diff load of {rel}: {effects:?}"));
+        assert!(self.apply_explorer_preview(tab_id, gen, ExplorerPreviewBody::Diff(diff)));
+        (tab_id, gen)
+    }
 }
 
 /// What `l` / `z` / Enter does to a folder.
@@ -1993,36 +2181,301 @@ mod tests {
         assert!(app.tabs.find_explorer("app").is_none());
     }
 
+    /// Palette reason of the first row that runs `action`.
+    fn palette_reason(app: &AppState, action: Action) -> Option<String> {
+        let command = PALETTE_COMMANDS
+            .iter()
+            .find(|command| command.action == action)
+            .unwrap_or_else(|| panic!("palette row for {action:?}"));
+        app.palette_disabled_reason(command)
+    }
+
+    /// `action` refuses with `reason` on its key and on its palette row
+    /// (when it has one), as a warning.
+    fn assert_refused(app: &mut AppState, action: Action, reason: &str) {
+        if PALETTE_COMMANDS
+            .iter()
+            .any(|command| command.action == action)
+        {
+            assert_eq!(
+                palette_reason(app, action.clone()).as_deref(),
+                Some(reason),
+                "{action:?}"
+            );
+        }
+        app.status.clear();
+        assert_eq!(app.dispatch(action.clone()), Effect::None, "{action:?}");
+        assert_eq!(&*app.status, reason, "{action:?}");
+        assert_eq!(app.status.kind(), StatusKind::Warn, "{action:?}");
+    }
+
     #[test]
-    fn git_writes_refuse_with_the_explorer_copy() {
+    fn t_dot_m_plus_and_git_writes_still_refuse() {
         let mut app = state();
         open_root(&mut app);
-        for action in [
-            Action::Stage,
-            Action::Unstage,
-            Action::Revert,
-            Action::Push,
-            Action::Fetch,
-            Action::StashMenu,
-            Action::BlameMenu,
-            Action::ExternalDiff,
-            Action::CommentStart,
-            Action::ToggleReviewed,
-            Action::GraphCheckout,
-        ] {
-            app.status.clear();
-            assert_eq!(app.dispatch(action.clone()), Effect::None, "{action:?}");
-            assert_eq!(&*app.status, EXPLORER_TAB_READ_ONLY, "{action:?}");
-            assert_eq!(app.status.kind(), StatusKind::Warn, "{action:?}");
+        app.open_loaded_inner_file("app", "README.md", &["# app"]);
+        for focus in [FocusPane::Left, FocusPane::Right] {
+            app.focus = focus;
+            for action in [
+                Action::Stage,
+                Action::Unstage,
+                Action::Revert,
+                Action::Push,
+                Action::Pull,
+                Action::Fetch,
+                Action::DefaultBranch,
+                Action::Branch,
+                Action::RemoveWorktree,
+                Action::StashMenu,
+                Action::GraphCheckout,
+                Action::GraphMerge,
+                Action::CompareVsDefault,
+                Action::CompareVsBranch,
+                Action::CompareCommitVsParent,
+            ] {
+                assert_refused(&mut app, action, EXPLORER_TAB_READ_ONLY);
+            }
+            for action in [
+                Action::ToggleTreeMode,
+                Action::ToggleShowIgnored,
+                Action::ToggleCommitMsgExpand,
+                Action::ResizeCommitMsg(1),
+            ] {
+                assert_refused(&mut app, action, SWITCH_TO_WORKSPACE_TAB);
+            }
         }
-        let stage = PALETTE_COMMANDS
-            .iter()
-            .find(|command| command.action == Action::Stage)
-            .expect("stage row");
-        assert_eq!(
-            app.palette_disabled_reason(stage).as_deref(),
-            Some(EXPLORER_TAB_READ_ONLY)
+        assert_eq!(app.tabs.len(), 2, "no compare tab opened");
+    }
+
+    #[test]
+    fn ctrl_o_refuses_and_never_toggles_full_context() {
+        let mut app = state();
+        app.full_context.insert("file:keep".into());
+        let before = app.full_context.clone();
+        app.open_loaded_inner_diff(
+            "app",
+            "src/tui/app.rs",
+            super::super::super::diff::DiffContent::from_unified("@@ -1 +1 @@\n-a\n+b\n"),
         );
+        for focus in [FocusPane::Left, FocusPane::Right] {
+            app.focus = focus;
+            assert_refused(
+                &mut app,
+                Action::ToggleFullContext,
+                EXPLORER_DIFFS_SHOW_WHOLE_FILE,
+            );
+            assert_eq!(app.full_context, before, "{focus:?}");
+        }
+        app.open_loaded_inner_file("app", "README.md", &["# app"]);
+        assert_refused(
+            &mut app,
+            Action::ToggleFullContext,
+            EXPLORER_DIFFS_SHOW_WHOLE_FILE,
+        );
+        assert_eq!(app.full_context, before);
+    }
+
+    /// `state()` with the Workspace tree on `lib`'s changed `lib.rs`, then
+    /// `app`'s changed `src/tui/app.rs` open in its Explorer (inline
+    /// rows: 0 label, 1 hunk, 2 ` a` (1,1), 3 `-b` (2,-), 4 `+c` (-,2)).
+    fn changed_inner_state() -> AppState {
+        let mut app = state();
+        app.diff_mode = super::super::super::split::DiffMode::Inline;
+        focus(&mut app, NodeKind::File, Some("lib"), Some("lib.rs"));
+        app.open_loaded_inner_diff(
+            "app",
+            "src/tui/app.rs",
+            super::super::super::diff::DiffContent::from_unified("@@ -1,2 +1,2 @@\n a\n-b\n+c\n"),
+        );
+        app
+    }
+
+    #[test]
+    fn space_marks_changed_inner_file_reviewed() {
+        use super::super::super::viewed::viewed_identity;
+        let mut app = changed_inner_state();
+        let identity = viewed_identity("app", "src/tui/app.rs");
+        for (focus, marked, status) in [
+            (FocusPane::Left, true, "marked reviewed"),
+            (FocusPane::Right, false, "reviewed mark cleared"),
+        ] {
+            app.focus = focus;
+            assert_eq!(palette_reason(&app, Action::ToggleReviewed), None);
+            assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
+            assert_eq!(
+                app.viewed_store.contains_key(&identity),
+                marked,
+                "{focus:?}"
+            );
+            assert_eq!(&*app.status, status);
+            assert!(
+                !app.viewed_store
+                    .contains_key(&viewed_identity("lib", "lib.rs")),
+                "never the parked Workspace row"
+            );
+        }
+        // A clean file has no change to mark.
+        app.open_loaded_inner_file("app", "README.md", &["# app"]);
+        assert_refused(
+            &mut app,
+            Action::ToggleReviewed,
+            FOCUS_A_FILE_TO_MARK_REVIEWED,
+        );
+        assert!(app.viewed_store.is_empty());
+    }
+
+    #[test]
+    fn e_diffs_inner_file() {
+        let mut app = changed_inner_state();
+        for focus in [FocusPane::Left, FocusPane::Right] {
+            app.focus = focus;
+            assert_eq!(palette_reason(&app, Action::ExternalDiff), None);
+            assert_eq!(
+                app.dispatch(Action::ExternalDiff),
+                Effect::ExternalDiff {
+                    repo: "app".into(),
+                    path: "src/tui/app.rs".into(),
+                    kind: ExternalDiffKind::Worktree,
+                },
+                "{focus:?}"
+            );
+        }
+        app.open_loaded_inner_file("app", "README.md", &["# app"]);
+        assert_refused(&mut app, Action::ExternalDiff, FOCUS_A_FILE_TO_DIFF);
+        // No inner file at all.
+        let mut app = state();
+        open_root(&mut app);
+        assert!(tab(&app).files.is_empty());
+        assert_refused(&mut app, Action::ExternalDiff, FOCUS_A_FILE_TO_DIFF);
+        assert_refused(
+            &mut app,
+            Action::ToggleReviewed,
+            FOCUS_A_FILE_TO_MARK_REVIEWED,
+        );
+    }
+
+    #[test]
+    fn comment_and_export_target_inner_file_not_workspace_row() {
+        use super::super::super::comments::{
+            format_entity_reference, put_comment_entry, EntityRef,
+        };
+        use super::super::super::keys::InputMode;
+        let readme = |line, end_line| CommentKey::WorktreeLine {
+            repo: "app".into(),
+            branch: "main".into(),
+            path: "README.md".into(),
+            line,
+            end_line,
+        };
+        let prompt_key = |app: &AppState| app.comment.as_ref().map(|prompt| prompt.key.clone());
+        let mut app = state();
+        focus(&mut app, NodeKind::File, Some("lib"), Some("lib.rs"));
+        app.open_loaded_inner_file("app", "README.md", &["a", "b", "c"]);
+
+        // The tree has focus: `;` and `V` say to Tab over.
+        for action in [Action::CommentStart, Action::DiffVisualStart] {
+            assert_refused(&mut app, action, TAB_TO_THE_FILE_PANE);
+        }
+        assert_eq!(prompt_key(&app), None);
+        assert_eq!(app.diff_visual_anchor, None);
+
+        // `;` on the clean file: a working-tree line comment.
+        app.dispatch(Action::FocusRight);
+        app.dispatch(Action::Move(1));
+        assert_eq!(palette_reason(&app, Action::CommentStart), None);
+        app.dispatch(Action::CommentStart);
+        assert_eq!(prompt_key(&app), Some(readme(2, 2)));
+        app.dispatch(Action::CommentCancel);
+
+        // `V` `j` `;`: the highlighted lines.
+        assert_eq!(palette_reason(&app, Action::DiffVisualStart), None);
+        app.dispatch(Action::DiffVisualStart);
+        assert_eq!(app.input_mode(), InputMode::DiffVisual);
+        app.dispatch(Action::Move(1));
+        assert_eq!(app.file_visual_range(), Some((1, 2)));
+        app.dispatch(Action::CommentStart);
+        assert_eq!(prompt_key(&app), Some(readme(2, 3)));
+        assert_eq!(
+            app.diff_visual_anchor, None,
+            "the comment ends the highlight"
+        );
+        app.dispatch(Action::CommentCancel);
+
+        // `y` exports the inner file's comments only, from either pane.
+        app.comment_store =
+            put_comment_entry(&app.comment_store, readme(2, 3), "readme note", false);
+        let lib = CommentKey::WorktreeLine {
+            repo: "lib".into(),
+            branch: "main".into(),
+            path: "lib.rs".into(),
+            line: 1,
+            end_line: 1,
+        };
+        app.comment_store = put_comment_entry(&app.comment_store, lib, "lib note", false);
+        for focus in [FocusPane::Right, FocusPane::Left] {
+            app.focus = focus;
+            let Effect::CopyClipboard { text, .. } = app.dispatch(Action::ExportComments) else {
+                panic!("expected an export");
+            };
+            assert!(text.contains("readme note"), "{text}");
+            assert!(!text.contains("lib note"), "{text}");
+            app.dispatch(Action::ExportCommentsCancel);
+        }
+
+        // `'` on the file pane names the inner file.
+        app.focus = FocusPane::Right;
+        let Effect::CopyClipboard { text, .. } = app.dispatch(Action::CopyEntityReference) else {
+            panic!("expected a copy");
+        };
+        assert_eq!(
+            text,
+            format_entity_reference(&EntityRef::file("app", None, "README.md"))
+        );
+
+        // A changed inner file: `;` and `'` key the diff line.
+        let mut app = changed_inner_state();
+        assert_refused(&mut app, Action::CommentStart, TAB_TO_THE_FILE_PANE);
+        app.dispatch(Action::FocusRight);
+        app.diff_cursor = 4;
+        app.dispatch(Action::CommentStart);
+        assert_eq!(
+            prompt_key(&app),
+            Some(CommentKey::WorktreeLine {
+                repo: "app".into(),
+                branch: "main".into(),
+                path: "src/tui/app.rs".into(),
+                line: 2,
+                end_line: 2,
+            })
+        );
+        app.dispatch(Action::CommentCancel);
+        let Effect::CopyClipboard { text, .. } = app.dispatch(Action::CopyEntityReference) else {
+            panic!("expected a copy");
+        };
+        assert!(text.starts_with("kind: diff\n"), "{text}");
+        assert!(text.contains("path: src/tui/app.rs\n"), "{text}");
+        assert!(text.contains("lines: 2\n"), "{text}");
+        // `V` highlights diff rows, as on the Workspace.
+        app.diff_cursor = 2;
+        app.dispatch(Action::DiffVisualStart);
+        assert_eq!(app.diff_visual_anchor, Some(2));
+        app.dispatch(Action::Move(2));
+        app.dispatch(Action::CommentStart);
+        assert_eq!(
+            prompt_key(&app).map(|key| match key {
+                CommentKey::WorktreeLine { line, end_line, .. } => (line, end_line),
+                other => panic!("{other:?}"),
+            }),
+            Some((1, 2))
+        );
+        // The tree names the tree row, not the Workspace row.
+        app.dispatch(Action::CommentCancel);
+        app.focus = FocusPane::Left;
+        let Effect::CopyClipboard { text, .. } = app.dispatch(Action::CopyEntityReference) else {
+            panic!("expected a copy");
+        };
+        assert!(text.contains("path: src/tui/app.rs\n"), "{text}");
+        assert!(text.starts_with("kind: file\n"), "{text}");
     }
 
     /// Open `app` at its root, then open `src` (listing landed).

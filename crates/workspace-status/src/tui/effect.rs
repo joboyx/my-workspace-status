@@ -6810,6 +6810,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn explorer_file_view_blames_the_focused_line_with_git() {
+        let root = crate::testutil::unique_dir("ws-effect-explorer-blame");
+        let dir = root.join("app");
+        crate::testutil::init_repo(&dir);
+        std::fs::write(dir.join("README.md"), "a\nb\nc\n").unwrap();
+        crate::testutil::git(&dir, &["commit", "-q", "-am", "three lines"]);
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(root.clone(), snapshot, true);
+        state.open_loaded_inner_file("app", "README.md", &["a", "b", "c"]);
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(&mut interp, &mut state, Effect::None, &Action::Move(1));
+        assert!(
+            capture_jobs(&mut interp, &mut state).is_empty(),
+            "the tree has focus: no git"
+        );
+        let effect = state.dispatch(Action::FocusRight);
+        schedule_effect(&mut interp, &mut state, effect, &Action::FocusRight);
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 1, "the cursor line asks once");
+        for (id, work) in jobs {
+            apply_id(&mut interp, &mut state, id, work());
+        }
+        let (text, side) = state.painted_line_annotation().expect("annotation");
+        assert_eq!(side, BlameSide::New);
+        assert!(text.ends_with(" · three lines"), "{text}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn older_page(ids: &[&str]) -> GraphModel {
         GraphModel {
             has_more: true,

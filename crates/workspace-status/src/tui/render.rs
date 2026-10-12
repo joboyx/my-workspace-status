@@ -538,12 +538,19 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
     let gutter_style = diff_gutter_style(palette);
     let col_offset = if wrap { 0 } else { tab.col_offset as usize };
     let blame = state.painted_line_annotation();
+    // A `V` range paints like the highlighted rows of a diff.
+    let visual = state.file_visual_range();
     let mut painted: Vec<Line> = Vec::with_capacity(height);
     let mut row_lines = Vec::with_capacity(height);
     for (line, text) in lines.iter().enumerate().take(end).skip(scroll) {
         let selected = line == tab.cursor;
         let hit = hits.binary_search(&line).is_ok();
-        let bg = row_match_bg(selected, true, hit, None, palette, search.bg);
+        let in_visual = visual.is_some_and(|(lo, hi)| (lo..=hi).contains(&line));
+        let bg = if in_visual && !selected {
+            Some(palette.cursor_bg)
+        } else {
+            row_match_bg(selected, true, hit, None, palette, search.bg)
+        };
         let match_fg = (hit && !selected).then_some(search.fg);
         let code = spans.get(line - scroll).map(Vec::as_slice).unwrap_or(&[]);
         let starts = if wrap {
@@ -14249,6 +14256,57 @@ mod tests {
             draw_state(&mut terminal, &mut state);
             assert!(!buffer_text(&terminal).contains("aaa1111"), "{mode:?}");
         }
+    }
+
+    #[test]
+    fn explorer_file_cursor_line_ends_with_the_blame_annotation() {
+        let mut state = file_view_state(&["# app", "dirty"]);
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(state.line_blame_want(), None, "the tree has focus");
+        state.dispatch(Action::FocusRight);
+        cache_focused_blame(&mut state, "seed");
+        draw_state(&mut terminal, &mut state);
+        let buf = terminal.backend().buffer();
+        let y = state.layout.file_view_y;
+        assert!(
+            buf_line(buf, y).contains(" · aaa1111 · seed"),
+            "{}",
+            buf_line(buf, y)
+        );
+        assert!(!buf_line(buf, y + 1).contains("aaa1111"));
+        state.dispatch(Action::ToggleLineBlame);
+        draw_state(&mut terminal, &mut state);
+        assert!(!buffer_text(&terminal).contains("aaa1111"), "B hides it");
+    }
+
+    #[test]
+    fn explorer_file_view_paints_the_v_range() {
+        let mut state = file_view_state(&["one", "two", "three", "four"]);
+        state.line_blame.set_enabled(false);
+        state.dispatch(Action::FocusRight);
+        state.dispatch(Action::Move(1));
+        assert_eq!(state.dispatch(Action::DiffVisualStart), Effect::None);
+        state.dispatch(Action::Move(1));
+        assert_eq!(state.file_visual_range(), Some((1, 2)));
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let palette = state.theme.palette();
+        let buf = terminal.backend().buffer();
+        let (x, y) = (state.layout.file_view_x + 8, state.layout.file_view_y);
+        assert_ne!(buf[(x, y)].bg, palette.cursor_bg, "line 1 is outside");
+        assert_eq!(buf[(x, y + 1)].bg, palette.cursor_bg, "anchor line");
+        assert_eq!(buf[(x, y + 2)].bg, palette.cursor_bg, "cursor line");
+        assert_ne!(buf[(x, y + 3)].bg, palette.cursor_bg, "line 4 is outside");
+        state.dispatch(Action::DiffVisualCancel);
+        draw_state(&mut terminal, &mut state);
+        let buf = terminal.backend().buffer();
+        assert_ne!(buf[(x, y + 1)].bg, palette.cursor_bg, "Esc drops the range");
+        assert_eq!(
+            buf[(x, y + 2)].bg,
+            palette.cursor_bg,
+            "the cursor line stays"
+        );
     }
 
     #[test]

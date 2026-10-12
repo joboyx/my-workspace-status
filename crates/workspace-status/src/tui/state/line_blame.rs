@@ -1,8 +1,8 @@
 //! Current-line blame: which line has focus, what it asks git, and what
 //! the pane paints at its end.
 //!
-//! Only a focused line asks: the active file view's cursor line, or the
-//! focused file-diff row while the right pane drives the diff. Moving
+//! Only a focused line asks: the Explorer file view's cursor line, or the
+//! focused file-diff row, while the right pane has focus. Moving
 //! through the tree, graph, or file lists never asks. The question is a
 //! [`BlameKey`]; the interpreter runs it on the blocking pool and lands
 //! the answer through [`AppState::apply_line_blame`].
@@ -24,7 +24,7 @@ use super::super::line_blame::{
 use super::super::search::unfold_ancestors;
 use super::super::split::DiffMode;
 use super::super::status::StatusMessage;
-use super::super::tabs::{WorktreeFile, ROOT_COMMIT_HAS_NO_PARENT};
+use super::super::tabs::{WorktreeFile, ROOT_COMMIT_HAS_NO_PARENT, TAB_TO_THE_FILE_PANE};
 use super::super::tree::NodeKind;
 use super::super::watch::graph_row_id;
 use super::{single_or_batch, AppState, FocusPane};
@@ -128,7 +128,8 @@ impl AppState {
     /// The one blame gate. [`Self::dispatch`] puts the reason on the
     /// status line and `palette_disabled_reason` paints it on the row, so
     /// a key and a palette row give the same copy. The actions run on the
-    /// Workspace and compare tabs.
+    /// Workspace, compare, and Explorer tabs; on an Explorer tab the file
+    /// pane must have focus ([`TAB_TO_THE_FILE_PANE`]).
     pub(crate) fn blame_refusal(&self, action: &Action) -> Option<String> {
         if !matches!(
             action,
@@ -183,6 +184,9 @@ impl AppState {
     fn blamed_line(&self) -> Result<(String, LineBlame), &'static str> {
         if !self.line_blame.enabled {
             return Err(BLAME_IS_OFF);
+        }
+        if self.is_explorer_tab() && self.list_focus_target() != ListFocusTarget::None {
+            return Err(TAB_TO_THE_FILE_PANE);
         }
         if let Some(tab) = self.tabs.active_file_view() {
             if tab.body.is_none() {
@@ -460,8 +464,12 @@ impl AppState {
     }
 
     fn focused_blame(&self) -> Option<(FocusedBlame, BlameSide)> {
-        // The Explorer preview paints no line blame.
-        if !self.line_blame.enabled || self.is_explorer_tab() {
+        if !self.line_blame.enabled {
+            return None;
+        }
+        // On an Explorer tab only the focused right pane blames: a tree
+        // move never asks git.
+        if self.is_explorer_tab() && self.list_focus_target() != ListFocusTarget::None {
             return None;
         }
         if let Some(tab) = self.tabs.active_file_view() {
@@ -618,10 +626,12 @@ mod tests {
     use super::super::super::command_palette::PALETTE_COMMANDS;
     use super::super::super::diff::DiffContent;
     use super::super::super::drill::CommitFile;
+    use super::super::super::effect::ExplorerPreviewBody;
     use super::super::super::keys::InputMode;
     use super::super::super::selection::TextSelection;
     use super::*;
     use crate::config::ViewDefaults;
+    use crate::file_index::FileRead;
     use crate::snapshot::{
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
     };
@@ -948,6 +958,131 @@ mod tests {
         app.dispatch(Action::ToggleLineBlame);
         assert_eq!(app.status, "line blame off");
         assert!(!app.line_blame.enabled);
+    }
+
+    #[test]
+    fn line_blame_on_by_default_in_explorer_file_and_diff() {
+        // Clean file: the file view's cursor line blames the working tree.
+        let mut app = state();
+        assert!(app.line_blame.enabled, "on by default");
+        let (tab_id, _) = app.open_loaded_inner_file("app", "src/lib.rs", &["one", "two", "three"]);
+        assert_eq!(app.focus, FocusPane::Left);
+        assert_eq!(app.line_blame_want(), None, "the tree never asks");
+        app.dispatch(Action::FocusRight);
+        app.dispatch(Action::Move(2));
+        let key = app.line_blame_want().expect("cursor line asks");
+        assert_eq!(
+            (key.repo.as_str(), &key.rev, key.path.as_str(), key.line),
+            ("app", &BlameRev::Worktree, "src/lib.rs", 3)
+        );
+        // `r` loads again at a new generation: the same line asks again.
+        let reload = app.dispatch(Action::Refresh);
+        let gen = match reload {
+            Effect::Batch(effects) => effects
+                .into_iter()
+                .find_map(|effect| match effect {
+                    Effect::LoadExplorerPreview { gen, .. } => Some(gen),
+                    _ => None,
+                })
+                .expect("a reload"),
+            Effect::LoadExplorerPreview { gen, .. } => gen,
+            other => panic!("expected a reload, got {other:?}"),
+        };
+        let lines = ["one", "two", "three"].map(String::from).to_vec();
+        assert!(app.apply_explorer_preview(
+            tab_id,
+            gen,
+            ExplorerPreviewBody::File(FileRead::Text { lines, max_cols: 5 })
+        ));
+        let again = app.line_blame_want().expect("cursor line asks");
+        assert_eq!(again.line, 3, "the cursor line stays");
+        assert_ne!(again.epoch, key.epoch, "a reload asks again");
+        app.dispatch(Action::FocusLeft);
+        assert_eq!(app.line_blame_want(), None, "back on the tree");
+
+        // Changed file: the whole-file diff blames like the Workspace diff.
+        let mut app = state();
+        app.open_loaded_inner_diff("app", "README.md", DiffContent::from_unified(BODY));
+        assert_eq!(app.line_blame_want(), None, "the tree never asks");
+        app.dispatch(Action::FocusRight);
+        assert_eq!(
+            rev_line_path(at(&mut app, 2)),
+            Some((BlameRev::Worktree, 1, "README.md".into()))
+        );
+        assert_eq!(
+            rev_line_path(at(&mut app, 3)),
+            Some((commit("HEAD"), 2, "README.md".into()))
+        );
+        app.diff_cursor = 4;
+        assert_eq!(app.line_blame_want(), None, "an added line needs no git");
+        assert_eq!(
+            app.painted_line_annotation(),
+            Some((UNCOMMITTED_TEXT.into(), BlameSide::New))
+        );
+        app.dispatch(Action::ToggleLineBlame);
+        assert_eq!(app.painted_line_annotation(), None, "B turns it off");
+    }
+
+    #[test]
+    fn blame_menu_and_actions_run_on_inner_file() {
+        let mut app = state();
+        app.open_loaded_inner_file("app", "src/lib.rs", &["a"]);
+        // The tree has focus: every blame action and `A` say so.
+        assert_blame_refused(&mut app, TAB_TO_THE_FILE_PANE);
+        app.status.clear();
+        assert_eq!(app.dispatch(Action::BlameMenu), Effect::None);
+        assert_eq!(app.status, TAB_TO_THE_FILE_PANE);
+        assert!(!app.blame_menu);
+        app.dispatch(Action::FocusRight);
+        assert_blame_refused(&mut app, BLAME_STILL_LOADING);
+        answer(&mut app, Some(blamed(SHA)));
+        for (title, _) in BLAME_ACTIONS {
+            assert_eq!(palette_reason(&app, title), None, "{title}");
+        }
+
+        // `A` then `c`: the commit's changes, in the inner file's checkout.
+        assert_eq!(app.dispatch(Action::BlameMenu), Effect::None);
+        assert!(app.blame_menu);
+        expect_parent_tab(app.dispatch(Action::BlameMenuChar('c')), SHA);
+        assert!(!app.blame_menu);
+        assert_eq!(app.tabs.active_compare().unwrap().label(), "app ↔ aaa1111^");
+
+        // Back on the Explorer: the file at that commit against the disk.
+        assert_eq!(app.activate_tab(1), Effect::None);
+        assert!(app.is_explorer_tab());
+        assert_eq!(app.focus, FocusPane::Right, "the pane focus is parked");
+        let effect = app.dispatch(Action::BlameCommitVsWorktree);
+        expect_worktree_tab(
+            &app,
+            effect,
+            SHA,
+            disk_file("src/lib.rs", Some("README.md")),
+        );
+
+        // Previous change searches from the inner file's checkout.
+        assert_eq!(app.activate_tab(1), Effect::None);
+        match app.dispatch(Action::BlamePreviousChange) {
+            Effect::LoadBlamePrevious { repo, blame, .. } => {
+                assert_eq!((repo.as_str(), blame.sha.as_str()), ("app", SHA));
+            }
+            other => panic!("expected a previous-change load, got {other:?}"),
+        }
+
+        // Reveal goes to the Workspace graph of the checkout.
+        app.dispatch(Action::BlameRevealGraph);
+        assert!(app.tabs.is_workspace());
+        assert_eq!(
+            app.graph_reveal.as_ref().map(|reveal| reveal.sha.as_str()),
+            Some(SHA)
+        );
+
+        // A changed inner file: the diff line's blame.
+        let mut app = state();
+        app.open_loaded_inner_diff("app", "README.md", DiffContent::from_unified(BODY));
+        app.dispatch(Action::FocusRight);
+        app.diff_cursor = 2;
+        answer(&mut app, Some(blamed(OTHER)));
+        expect_parent_tab(app.dispatch(Action::BlameCommitVsParent), OTHER);
     }
 
     #[test]

@@ -49,6 +49,11 @@ pub const EXPLORER_FOLDER_HINT: &str = "folder · l / Enter opens or closes it";
 pub const EXPLORER_FILE_TABS_ONLY: &str = "[ ] switch Explorer file tabs";
 /// `[` / `]` copy on an Explorer tab with no inner file tab.
 pub const NO_EXPLORER_FILE_TABS: &str = "no file tabs open";
+/// Ctrl-o copy on an Explorer tab: its diffs are always the whole file.
+pub const EXPLORER_DIFFS_SHOW_WHOLE_FILE: &str = "Explorer diffs always show the whole file";
+/// Copy for a line key (`;`, `V`, the blame actions) on an Explorer tab
+/// while the tree has focus.
+pub const TAB_TO_THE_FILE_PANE: &str = "Tab to the file pane first";
 
 /// `gt` / `gT` and the Next / Previous tab palette rows with no compare tab.
 pub const ONLY_WORKSPACE_TAB_OPEN: &str = "only the Workspace tab is open";

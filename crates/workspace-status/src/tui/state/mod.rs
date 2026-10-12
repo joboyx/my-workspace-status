@@ -161,6 +161,9 @@ pub(crate) const Z_FOLDS_TREE_ROWS: &str = "z folds tree rows";
 /// Unmapped key during `V` highlight.
 pub(crate) const ESC_EXITS_HIGHLIGHT: &str = "Esc exits highlight";
 
+/// `V` on a pane with no line to highlight.
+pub(crate) const NO_HIGHLIGHT_TARGET: &str = "no highlight target";
+
 /// Which pane has keyboard focus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FocusPane {
@@ -1231,8 +1234,17 @@ impl AppState {
     /// Depth 0 left is the workspace tree; depth 1 left is the graph; depth 2
     /// left is the commit-file list. Right at depth 2 (and depth 0 file diffs)
     /// is `None` so `j`/`k` move the focused file-diff row. The viewport keeps
-    /// that row near the vertical middle.
+    /// that row near the vertical middle. An Explorer tab is `None` while
+    /// the right pane drives its active inner file, else `Tree` (its own
+    /// tree, never the parked Workspace one).
     pub(crate) fn list_focus_target(&self) -> ListFocusTarget {
+        if let Some(tab) = self.tabs.active_explorer() {
+            return if self.focus == FocusPane::Right && tab.active_inner().is_some() {
+                ListFocusTarget::None
+            } else {
+                ListFocusTarget::Tree
+            };
+        }
         if self.is_compare_tab() {
             return if self.focus == FocusPane::Left {
                 ListFocusTarget::CommitFiles
@@ -4380,16 +4392,22 @@ impl AppState {
         let Some(file) = row.file.as_ref() else {
             return Effect::None;
         };
-        let Some(full) = self
+        self.toggle_viewed_for(repo, &file.path);
+        Effect::None
+    }
+
+    /// Toggle the persisted reviewed mark of changed file `path` in
+    /// checkout `repo` and save the store. Returns the new mark (`true`
+    /// when now reviewed), or `None` when the snapshot lists no change for
+    /// it (nothing is written).
+    pub(super) fn toggle_viewed_for(&mut self, repo: &str, path: &str) -> Option<bool> {
+        let full = self
             .snapshot
             .repos
             .iter()
             .find(|r| r.repo == repo)
-            .and_then(|r| r.changes.iter().find(|c| c.path == file.path))
-        else {
-            return Effect::None;
-        };
-        let identity = viewed_identity(repo, &file.path);
+            .and_then(|r| r.changes.iter().find(|c| c.path == path))?;
+        let identity = viewed_identity(repo, path);
         let fingerprint = fingerprint_file_change(&self.cwd, repo, full);
         self.viewed_store = toggle_viewed(&self.viewed_store, &identity, &fingerprint);
         if let Err(err) = save_viewed_store(
@@ -4400,7 +4418,7 @@ impl AppState {
             self.status = StatusMessage::error(persist_failed_status("viewed", err));
         }
         self.reviewed = viewed_row_ids(&self.snapshot, &self.viewed_store, &self.cwd);
-        Effect::None
+        Some(self.viewed_store.contains_key(&identity))
     }
 
     /// Space on a compare tab: session-only mark on the focused committed file.
@@ -4447,6 +4465,11 @@ impl AppState {
     }
 
     fn current_comment_target(&self) -> Option<CommentKey> {
+        if self.tabs.active_explorer().is_some() {
+            if let Some(key) = self.explorer_file_comment_target() {
+                return key;
+            }
+        }
         match self.list_focus_target() {
             ListFocusTarget::None => {
                 let (repo, path, source) = self.open_diff_target()?;
@@ -4509,7 +4532,10 @@ impl AppState {
     }
 
     fn current_entity_reference(&self) -> Option<EntityRef> {
-        if let Some(tab) = self.tabs.active_explorer() {
+        // A focused Explorer diff names its line, as on the Workspace.
+        let explorer_diff_line =
+            self.list_focus_target() == ListFocusTarget::None && self.explorer_diff().is_some();
+        if let Some(tab) = self.tabs.active_explorer().filter(|_| !explorer_diff_line) {
             let primary = self
                 .snapshot
                 .repos
@@ -4667,14 +4693,20 @@ impl AppState {
         if self.list_focus_target() != ListFocusTarget::None {
             return Effect::None;
         }
-        if self.current_diff_rows().is_empty() {
-            self.status = StatusMessage::warn("no highlight target");
+        // A clean Explorer file anchors on a file line index, a diff on
+        // its row.
+        let anchor = match self.tabs.active_file_view() {
+            Some(file) => (!file.lines().is_empty()).then_some(file.cursor),
+            None => (!self.current_diff_rows().is_empty()).then_some(self.diff_cursor),
+        };
+        let Some(anchor) = anchor else {
+            self.status = StatusMessage::warn(NO_HIGHLIGHT_TARGET);
             return Effect::None;
-        }
+        };
         self.cancel_mouse_drag();
         self.help_open = false;
         self.comment_export = None;
-        self.diff_visual_anchor = Some(self.diff_cursor);
+        self.diff_visual_anchor = Some(anchor);
         self.diff_visual_rows = Some(self.current_diff_rows());
         self.status.clear();
         Effect::None
@@ -4755,6 +4787,19 @@ impl AppState {
     }
 
     fn scoped_comment_store(&self) -> CommentStore {
+        // An Explorer tab exports its active inner file, never the parked
+        // Workspace row.
+        if let Some(tab) = self.tabs.active_explorer() {
+            let Some(inner) = tab.active_inner() else {
+                return CommentStore::new();
+            };
+            let list = CommentExportList::Diff {
+                repo: &tab.checkout,
+                path: &inner.rel,
+                source: None,
+            };
+            return comments_in_focus_scope(&self.comment_store, &self.snapshot, &self.tree, list);
+        }
         let graph_repo = self.focused_graph_repo();
         let graph_row = self.focused_graph_row();
         let commit_file = self.focused_commit_file_row();

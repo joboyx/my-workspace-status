@@ -487,8 +487,8 @@ impl AppState {
     /// Why palette row `command` cannot run, or `None` if Enter should dispatch.
     ///
     /// `[` / `]` rows: [`Self::file_tab_cycle_reason`] on every tab.
-    /// On an Explorer tab: [`Self::explorer_tab_refusal`], then
-    /// [`Self::explorer_tab_palette_reason`].
+    /// On an Explorer tab: [`Self::explorer_tab_refusal`], the blame gate,
+    /// then [`Self::explorer_tab_palette_reason`].
     /// Otherwise: compare refusal ([`Self::compare_refusal`], which also gates
     /// the compare open commands on every tab), the blame gate, folder-summary refusal
     /// ([`Self::summary_refusal`]), then the row's
@@ -502,6 +502,7 @@ impl AppState {
         if self.is_explorer_tab() {
             return self
                 .explorer_tab_refusal(action)
+                .or_else(|| self.blame_refusal(action))
                 .or_else(|| self.explorer_tab_palette_reason(command));
         }
         if let Some(reason) = self
@@ -650,7 +651,7 @@ impl AppState {
                 if self.list_focus_target() != ListFocusTarget::None {
                     Some(FOCUS_A_FILE_DIFF.into())
                 } else if self.current_diff_rows().is_empty() {
-                    Some("no highlight target".into())
+                    Some(super::NO_HIGHLIGHT_TARGET.into())
                 } else {
                     None
                 }
