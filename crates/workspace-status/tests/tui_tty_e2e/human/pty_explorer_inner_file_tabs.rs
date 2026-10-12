@@ -33,6 +33,7 @@ const MID_BODY: &str = "pub fn mid_body() {}";
 const NEXT_BODY: &str = "pub fn next_body() {}";
 /// Screen row of the Explorer's inner file tab row (under the strip and
 /// the pane title row).
+// Assumes the harness's fixed baseline chrome: boxed panes (`BASELINE_USER_CONFIG`).
 const INNER_TAB_ROW: u16 = 2;
 
 /// Add to `app` of the daily seed: `src/long.rs` (16 lines, committed,

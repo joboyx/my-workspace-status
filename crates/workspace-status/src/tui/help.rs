@@ -95,7 +95,7 @@ macro_rules! move_group {
     };
 }
 
-/// The VIEW column: the rows every tab paints, with the `$sizes` rows (pane
+/// The Workspace and compare VIEW column, with the `$sizes` rows (pane
 /// and message sizes) after the first one and the `$ignored` rows after
 /// `t`, the order the Workspace tab has always painted.
 macro_rules! view_group {
@@ -211,10 +211,59 @@ const HELP_IGNORED_REPOS: HelpEntry = HelpEntry {
 /// MOVE on every tab but Workspace: no `-` Explorer row.
 pub const HELP_TAB_MOVE_GROUP: HelpGroup = move_group!();
 
-/// VIEW on the Explorer tab: no pane-size or ignored-repo rows (`-` is the
-/// parent folder there, `< >` are in [`HELP_EXPLORER_GROUP`], and `+` and
-/// `.` need the Workspace tab).
-pub const HELP_EXPLORER_VIEW_GROUP: HelpGroup = view_group!(;);
+/// VIEW on the Explorer tab: only the view keys that work there, with
+/// their Explorer meaning.
+///
+/// It leaves out the shared rows the Explorer refuses or handles another
+/// way: `t`, `.`, `M`, `- +`, `o O`, `Ctrl-o` (the Explorer diff is always
+/// the whole file), `gh`, and the Workspace Enter (focus right / drill).
+/// The file keys (`B`, `; V y '`), `Tab`, `< >`, and Enter (pin) are in
+/// [`HELP_EXPLORER_GROUP`].
+pub const HELP_EXPLORER_VIEW_GROUP: HelpGroup = HelpGroup {
+    title: "VIEW",
+    entries: &[
+        HelpEntry {
+            keys: "i \\",
+            desc: "inline / split · wrap (file pane)",
+        },
+        HelpEntry {
+            keys: "T",
+            desc: "cycle theme",
+        },
+        HelpEntry {
+            keys: "PgUp PgDn",
+            desc: "page focused pane",
+        },
+        HelpEntry {
+            keys: "Ctrl-u Ctrl-d",
+            desc: "page focused ±5",
+        },
+        HelpEntry {
+            keys: "m",
+            desc: "mouse on/off",
+        },
+        HelpEntry {
+            keys: "Esc",
+            desc: "clear search · back to tree · never quit",
+        },
+        HelpEntry {
+            keys: ": Ctrl-p F",
+            desc: "commands · go to file (> first switches)",
+        },
+        HelpEntry {
+            keys: "?",
+            desc: "help",
+        },
+        HelpEntry {
+            keys: "q",
+            desc: "quit",
+        },
+        HelpEntry {
+            keys: "Ctrl-c Ctrl-c",
+            desc: "quit (press twice)",
+        },
+    ],
+};
 
 /// Short key list shown in the `?` overlay, grouped the same.
 pub const HELP_GROUPS: &[HelpGroup] = &[
@@ -1557,6 +1606,55 @@ mod tests {
             help_entries().any(|e| e.keys == "-"),
             "MOVE lists - on Workspace"
         );
+    }
+
+    /// The Explorer help columns list no key the Explorer refuses or
+    /// handles another way: no `t` / `.` / `M` / `o O` row, no `Ctrl-o`
+    /// toggle, no `s u x` in a highlight row, no `gh`, and no Workspace
+    /// Enter (focus right / drill).
+    #[test]
+    fn explorer_help_lists_no_refused_keys() {
+        let entries: Vec<&HelpEntry> = help_groups(HelpTab::Explorer)
+            .iter()
+            .flat_map(|g| g.entries.iter())
+            .collect();
+        for entry in &entries {
+            let keys: Vec<&str> = entry.keys.split(' ').collect();
+            let refused_row = keys.iter().all(|k| ["t", ".", "M", "+"].contains(k))
+                || keys
+                    .iter()
+                    .all(|k| ["s", "u", "x", "S", "f", "p", "P", "d"].contains(k));
+            for key in ["t", ".", "M", "o", "O", "gh"] {
+                assert!(
+                    !keys.contains(&key) || refused_row,
+                    "{key} only as a Workspace tab only row: {entry:?}"
+                );
+            }
+            if refused_row {
+                assert_eq!(entry.desc, "Workspace tab only", "{entry:?}");
+            }
+            if entry.keys == "Ctrl-o" {
+                assert_eq!(entry.desc, "diffs always show the whole file");
+            }
+            assert!(!entry.desc.contains("focus right / drill"), "{entry:?}");
+            assert!(!entry.desc.contains("s / u / x"), "{entry:?}");
+        }
+        // The shared MOVE rows name the Workspace panes where a key is a
+        // no-op; the EXPLORER and VIEW columns name none.
+        for entry in help_groups(HelpTab::Explorer)[1..]
+            .iter()
+            .flat_map(|g| g.entries.iter())
+        {
+            assert!(!entry.desc.contains("graph"), "{entry:?}");
+        }
+        assert_eq!(
+            entries.iter().filter(|e| e.keys == "Ctrl-o").count(),
+            1,
+            "one Ctrl-o row (the EXPLORER note)"
+        );
+        // The Workspace and compare VIEW columns keep their rows.
+        assert!(HELP_GROUPS[2].entries.iter().any(|e| e.keys == "t"));
+        assert_eq!(HELP_COMPARE_GROUPS[2], HELP_GROUPS[2]);
     }
 
     /// A compare tab paints MOVE / COMPARE / VIEW; COMPARE lists what acts
