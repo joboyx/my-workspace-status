@@ -20,6 +20,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use super::action::SearchFilesOption;
 use super::chrome::{
     breadcrumb_line, breadcrumb_rows, ctrl_c_prompt_line, ctrl_c_prompt_rows, dialog_height,
     dialog_rect, dialog_width, export_shows_status, help_tab, open_dialog, status_line, DialogKind,
@@ -72,7 +73,8 @@ use super::search::{
     SearchPane,
 };
 use super::search_files::{
-    search_row_shows_status, SearchFilesState, SearchRow, SearchZone, SEARCH_PREVIEW_MIN_COLS,
+    option_is_on, option_tooltip, search_row_shows_status, SearchFilesState, SearchRow, SearchZone,
+    SEARCH_PREVIEW_MIN_COLS,
 };
 use super::split::{
     diff_paint_width, diff_split_rule_x, pane_widths, side_by_side_column_widths, DiffMode,
@@ -163,9 +165,12 @@ fn selection_marker(selected: bool, focused: bool) -> &'static str {
 /// Draw one frame. Updates `state.layout` for mouse hits.
 pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.prune_expired_flashes();
-    // Every frame starts with no icon or link; only a pane that paints one
-    // records it again, so a hidden badge never opens a PR or a popover.
+    // Every frame starts with no icon, link, or search option chip; only a
+    // pane or dialog that paints one records it again, so a hidden badge
+    // never opens a PR or a popover and a closed dialog's chip never
+    // toggles an option.
     state.layout.icon_hits.clear();
+    state.layout.search_option_hits.clear();
     state.layout.links.clear();
     state.layout.popover = None;
     let area = frame.area();
@@ -3038,10 +3043,12 @@ fn help_visual_cell_spans(
 }
 
 fn key_chip(key: &str, bg: Color, fg: Color) -> Span<'static> {
-    Span::styled(
-        format!(" {key} "),
-        Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
-    )
+    Span::styled(format!(" {key} "), key_chip_style(bg, fg))
+}
+
+/// Style of a filled key chip: bold `fg` on `bg`.
+fn key_chip_style(bg: Color, fg: Color) -> Style {
+    Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD)
 }
 
 fn help_spans_width(spans: &[Span<'_>]) -> usize {
@@ -4136,9 +4143,11 @@ fn draw_tab_strip(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                 state.layout.tab_close_hits.push((close_x, close_w, index));
             }
             // Hover comes from this paint's box, never from a stored index.
-            // A clipped close has no box, so it never paints hovered.
+            // A clipped close has no box, so it never paints hovered. The
+            // open search dialog keeps the pointer for its chips, so
+            // pane_pointer hides it from the strip then.
             let hovered = close_painted
-                && state.pointer.is_some_and(|(col, row)| {
+                && state.pane_pointer().is_some_and(|(col, row)| {
                     row == area.y && col >= close_x && col < close_x.saturating_add(close_w)
                 });
             let close_style = if hovered {
@@ -5021,17 +5030,36 @@ fn draw_search_files(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     };
     let accent = palette.cursor;
     let muted = Style::default().fg(palette.muted);
-    let block = overlay_block(accent, panel)
-        .title(Span::styled(
-            dialog.title(),
-            Style::default()
-                .fg(palette.heading)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .title_top(search_option_chips(dialog.options, palette, panel).right_aligned());
+    let title = Span::styled(
+        dialog.title(),
+        Style::default()
+            .fg(palette.heading)
+            .add_modifier(Modifier::BOLD),
+    );
+    // Record the chip boxes before paint, so the hover this frame paints
+    // comes from the same boxes a click hits.
+    let chip_xs = search_option_chip_xs(area, u16::try_from(title.width()).unwrap_or(u16::MAX));
+    state.layout.search_option_y = area.y;
+    state.layout.search_option_hits = chip_xs
+        .iter()
+        .map(|&(x, option)| (x, SEARCH_OPTION_CHIP_W, option))
+        .collect();
+    let hovered = state.hovered_search_option();
+    let block = overlay_block(accent, panel).title(title);
     frame.render_widget(Clear, area);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let chips = search_option_chips(dialog.options, hovered, palette, panel);
+    let buf = frame.buffer_mut();
+    for (i, &(x, option)) in chip_xs.iter().enumerate() {
+        if i > 0 {
+            // The gap between two chips is blank, not border.
+            buf[(x - 1, area.y)].set_symbol(" ");
+        }
+        if let Some((_, chip)) = chips.iter().find(|(o, _)| *o == option) {
+            buf.set_span(x, area.y, chip, SEARCH_OPTION_CHIP_W);
+        }
+    }
     if inner.width == 0 || inner.height == 0 {
         return;
     }
@@ -5070,7 +5098,12 @@ fn draw_search_files(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         frame.render_widget(Paragraph::new(clamp_line(status, width)), row_at(1));
     }
     if h >= 3 {
-        let footer = Line::from(Span::styled(dialog.footer_hints(), muted));
+        // A hovered chip says what it is and what a click does instead.
+        let footer = match hovered {
+            Some(option) => option_tooltip(option, dialog.options),
+            None => dialog.footer_hints(),
+        };
+        let footer = Line::from(Span::styled(footer, muted));
         frame.render_widget(
             Paragraph::new(fit_list_dialog_footer(footer, width)),
             row_at(h - 1),
@@ -5136,24 +5169,81 @@ fn clamp_line(line: Line<'static>, width: usize) -> Line<'static> {
     Line::from(clamp_spans(line.spans, width))
 }
 
-/// Top-border chips for the match options: `Aa` case, `ab` whole word,
-/// `.*` regex. An option that is on paints as a filled chip, an off one
-/// as muted text.
-fn search_option_chips(options: SearchOptions, palette: Palette, surface: Color) -> Line<'static> {
-    let chip = |label: &str, on: bool| {
-        if on {
-            key_chip(label, palette.cursor, surface)
-        } else {
-            Span::styled(format!(" {label} "), Style::default().fg(palette.muted))
+/// Match option chips on the search dialog's top border, left to right:
+/// `Aa` case, `ab` whole word, `.*` regex.
+const SEARCH_OPTION_LABELS: [(SearchFilesOption, &str); 3] = [
+    (SearchFilesOption::Case, "Aa"),
+    (SearchFilesOption::WholeWord, "ab"),
+    (SearchFilesOption::Regex, ".*"),
+];
+
+/// Cells one option chip takes: its two-cell label and a space each side.
+const SEARCH_OPTION_CHIP_W: u16 = 4;
+
+/// Left column of each option chip on the top border of the search dialog
+/// box `area`, whose left title is `title_width` cells wide.
+///
+/// The chips sit right-aligned inside the corner, one blank cell apart,
+/// as a right-aligned border title would. The title wins the row: a chip
+/// that would not leave one blank cell after the title is left out, from
+/// the left, so a narrow box keeps the rightmost chips whole.
+fn search_option_chip_xs(area: Rect, title_width: u16) -> Vec<(u16, SearchFilesOption)> {
+    // First free cell: past the left corner, the title, and one blank.
+    let min_x = area.x.saturating_add(title_width).saturating_add(2);
+    // Past the last chip cell: the right corner.
+    let mut end = area.right().saturating_sub(1);
+    let mut xs = Vec::new();
+    for &(option, _) in SEARCH_OPTION_LABELS.iter().rev() {
+        let Some(x) = end.checked_sub(SEARCH_OPTION_CHIP_W) else {
+            break;
+        };
+        if x < min_x {
+            break;
         }
+        xs.push((x, option));
+        end = x.saturating_sub(1);
+    }
+    xs.reverse();
+    xs
+}
+
+/// Style of one option chip. Fill tells on from off; underline marks the
+/// chip under the pointer, so both read without colour alone.
+///
+/// On: a filled accent chip ([`key_chip_style`]). Off: muted text, no fill.
+/// Off and hovered: accent text on the highlighted-row background, a
+/// fill other than on. On and hovered: the filled chip.
+fn search_option_chip_style(on: bool, hovered: bool, palette: Palette, surface: Color) -> Style {
+    let style = match (on, hovered) {
+        (true, _) => key_chip_style(palette.cursor, surface),
+        (false, false) => Style::default().fg(palette.muted),
+        (false, true) => Style::default().fg(palette.cursor).bg(palette.cursor_bg),
     };
-    Line::from(vec![
-        chip("Aa", options.case_sensitive),
-        Span::raw(" "),
-        chip("ab", options.whole_word),
-        Span::raw(" "),
-        chip(".*", options.regex),
-    ])
+    if hovered {
+        style.add_modifier(Modifier::UNDERLINED)
+    } else {
+        style
+    }
+}
+
+/// Top-border chips for the match options, in [`SEARCH_OPTION_LABELS`]
+/// order, each ` label ` in [`search_option_chip_style`]: filled when the
+/// option is on, underlined when it is `hovered`.
+fn search_option_chips(
+    options: SearchOptions,
+    hovered: Option<SearchFilesOption>,
+    palette: Palette,
+    surface: Color,
+) -> [(SearchFilesOption, Span<'static>); 3] {
+    SEARCH_OPTION_LABELS.map(|(option, label)| {
+        let style = search_option_chip_style(
+            option_is_on(options, option),
+            hovered == Some(option),
+            palette,
+            surface,
+        );
+        (option, Span::styled(format!(" {label} "), style))
+    })
 }
 
 /// Status row of the search dialog: its [`SearchStatus`] parts joined by
@@ -13386,7 +13476,7 @@ mod tests {
         ];
         assert!(rows.windows(2).all(|w| w[0] < w[1]), "{rows:?}\n{text}");
         assert!(
-            text.contains("↑↓ move · Enter open · Tab all repos · Alt-c/w/r · Esc close"),
+            text.contains("↑↓ move · Enter open · Tab all repos · Esc close"),
             "{text}"
         );
         assert_eq!(
@@ -13399,7 +13489,7 @@ mod tests {
         search_dialog(&mut state).zone = SearchZone::Results;
         let text = buffer_text(&draw_search(&mut state, 120, 30));
         assert!(
-            text.contains("j/k move · Enter open · e edit · Tab all repos · Alt-c/w/r · Esc close"),
+            text.contains("j/k move · Enter open · e edit · Tab all repos · Esc close"),
             "{text}"
         );
 
@@ -13443,6 +13533,227 @@ mod tests {
             let cell = &buf[(x, y as u16)];
             assert_eq!(cell.bg == palette.cursor, on, "{chip}: {cell:?}");
             assert_eq!(cell.modifier.contains(Modifier::BOLD), on, "{chip}");
+        }
+    }
+
+    /// Left-button press at (`col`, `row`), as crossterm decodes it.
+    fn left_click(col: u16, row: u16) -> crossterm::event::Event {
+        use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    /// Top-border row and first cell (the leading space) of each painted
+    /// option chip, read from the buffer.
+    fn painted_chip_xs(terminal: &Terminal<TestBackend>) -> (u16, [(SearchFilesOption, u16); 3]) {
+        let y = row_of(&buffer_text(terminal), "Search · ");
+        let xs =
+            SEARCH_OPTION_LABELS.map(|(option, label)| (option, cells_x(terminal, y, label) - 1));
+        (y as u16, xs)
+    }
+
+    #[test]
+    fn search_files_chip_boxes_match_the_painted_labels() {
+        let mut state = search_files_state(false);
+        let terminal = draw_search(&mut state, 120, 30);
+        let buf = terminal.backend().buffer();
+        let (y, xs) = painted_chip_xs(&terminal);
+        assert_eq!(state.layout.search_option_y, y);
+        let hits: Vec<_> = xs
+            .iter()
+            .map(|&(option, x)| (x, SEARCH_OPTION_CHIP_W, option))
+            .collect();
+        assert_eq!(state.layout.search_option_hits, hits);
+        for &(_, x) in &xs {
+            assert_eq!(buf[(x, y)].symbol(), " ", "leading pad in the box");
+            assert_eq!(buf[(x + 3, y)].symbol(), " ", "trailing pad in the box");
+        }
+        let (_, right_x) = xs[2];
+        assert_eq!(
+            buf[(right_x + 4, y)].symbol(),
+            "╮",
+            "the last chip ends at the right corner"
+        );
+        assert_eq!(xs[1].1, xs[0].1 + 5, "one gap cell between chips");
+        assert_eq!(xs[2].1, xs[1].1 + 5);
+
+        // A closed dialog leaves no box behind.
+        state.search_files = None;
+        draw_search(&mut state, 120, 30);
+        assert!(state.layout.search_option_hits.is_empty());
+    }
+
+    #[test]
+    fn search_option_chips_leave_out_what_would_touch_the_title() {
+        use SearchFilesOption::{Case, Regex, WholeWord};
+        let area = Rect::new(2, 1, 40, 10);
+        assert_eq!(
+            search_option_chip_xs(area, 12),
+            vec![(27, Case), (32, WholeWord), (37, Regex)],
+            "right-aligned inside the corner at x = 41"
+        );
+        // A 24-cell title ends at x = 2 + 24 = 26; `Aa` at 27 would touch it.
+        assert_eq!(
+            search_option_chip_xs(area, 24),
+            vec![(32, WholeWord), (37, Regex)]
+        );
+        assert_eq!(
+            search_option_chip_xs(area, 23),
+            search_option_chip_xs(area, 12),
+            "one blank cell after the title is enough"
+        );
+        assert!(search_option_chip_xs(Rect::new(0, 0, 4, 3), 0).is_empty());
+        assert!(search_option_chip_xs(area, u16::MAX).is_empty());
+    }
+
+    #[test]
+    fn search_files_click_on_a_chip_toggles_only_that_option_and_searches() {
+        use super::super::app::map_event;
+        for (i, (option, _)) in SEARCH_OPTION_LABELS.into_iter().enumerate() {
+            let mut state = search_files_state(false);
+            let terminal = draw_search(&mut state, 120, 30);
+            let (y, xs) = painted_chip_xs(&terminal);
+            let x = xs[i].1;
+            // First cell of the box turns it on, last cell turns it off.
+            for (col, on) in [(x, true), (x + SEARCH_OPTION_CHIP_W - 1, false)] {
+                let action = map_event(&state, &left_click(col, y));
+                assert_eq!(
+                    action,
+                    Action::SearchFilesToggleOption(option),
+                    "{option:?}"
+                );
+                match state.dispatch(action) {
+                    Effect::SearchFilesChunk { options, .. } => {
+                        assert_eq!(option_is_on(options, option), on, "{option:?}");
+                    }
+                    other => panic!("{option:?}: expected a search, got {other:?}"),
+                }
+                let options = search_dialog(&mut state).options;
+                for (other, _) in SEARCH_OPTION_LABELS {
+                    let want = other == option && on;
+                    assert_eq!(option_is_on(options, other), want, "{option:?} → {other:?}");
+                }
+                draw_search(&mut state, 120, 30);
+            }
+        }
+    }
+
+    #[test]
+    fn search_files_click_off_the_chips_does_nothing() {
+        use super::super::app::map_event;
+        let mut state = search_files_state(false);
+        let terminal = draw_search(&mut state, 120, 30);
+        let (y, xs) = painted_chip_xs(&terminal);
+        let gap = xs[0].1 + SEARCH_OPTION_CHIP_W;
+        for (col, row, what) in [
+            (gap, y, "gap between chips"),
+            (xs[0].1 - 1, y, "border left of Aa"),
+            (xs[2].1 + SEARCH_OPTION_CHIP_W, y, "right corner"),
+            (xs[0].1, y + 1, "query row under Aa"),
+            (30, y + 5, "dialog body"),
+            (0, 0, "tab strip outside the dialog"),
+            (xs[0].1, y - 1, "pane row above the dialog"),
+        ] {
+            let action = map_event(&state, &left_click(col, row));
+            assert_eq!(action, Action::None, "{what}");
+            assert_eq!(state.dispatch(action), Effect::None, "{what}");
+            assert!(state.search_files.is_some(), "{what}: dialog stays open");
+            assert_eq!(
+                search_dialog(&mut state).options,
+                SearchOptions::default(),
+                "{what}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_files_hovered_chip_paints_hover_and_the_footer_tooltip() {
+        let mut state = search_files_state(false);
+        let palette = state.theme.palette();
+        let terminal = draw_search(&mut state, 120, 30);
+        let (y, xs) = painted_chip_xs(&terminal);
+        search_dialog(&mut state).options.whole_word = true;
+        assert!(state.set_pointer(Some((xs[1].1 + 2, y))));
+        let terminal = draw_search(&mut state, 120, 30);
+        let buf = terminal.backend().buffer();
+        let text = buffer_text(&terminal);
+        for (i, (option, _)) in SEARCH_OPTION_LABELS.into_iter().enumerate() {
+            let hovered = i == 1;
+            for dx in 0..SEARCH_OPTION_CHIP_W {
+                let cell = &buf[(xs[i].1 + dx, y)];
+                assert_eq!(
+                    cell.modifier.contains(Modifier::UNDERLINED),
+                    hovered,
+                    "{option:?} cell {dx}"
+                );
+            }
+        }
+        let hovered_on = &buf[(xs[1].1 + 1, y)];
+        assert_eq!(hovered_on.bg, palette.cursor, "on stays filled under hover");
+        assert!(
+            text.contains("Whole word: on · click to turn off"),
+            "{text}"
+        );
+        assert!(!text.contains("Esc close"), "tooltip replaces the hints");
+
+        assert!(state.set_pointer(Some((xs[0].1, y))));
+        let terminal = draw_search(&mut state, 120, 30);
+        let buf = terminal.backend().buffer();
+        let off_hovered = &buf[(xs[0].1 + 1, y)];
+        assert_eq!(off_hovered.fg, palette.cursor);
+        assert_eq!(
+            off_hovered.bg, palette.cursor_bg,
+            "a light fill, not the on fill"
+        );
+        assert!(off_hovered.modifier.contains(Modifier::UNDERLINED));
+        assert!(buffer_text(&terminal).contains("Match case: off · click to turn on"));
+
+        assert!(state.set_pointer(Some((xs[0].1 + SEARCH_OPTION_CHIP_W, y))));
+        let text = buffer_text(&draw_search(&mut state, 120, 30));
+        assert!(
+            text.contains("↑↓ move · Enter open · Tab all repos · Esc close"),
+            "{text}"
+        );
+        assert!(!text.contains("click to turn"), "{text}");
+    }
+
+    #[test]
+    fn search_option_chip_styles_stay_distinct_in_every_theme() {
+        for id in crate::tui::theme::THEME_IDS {
+            let palette = id.palette();
+            let surface = palette.panel;
+            let style = |on, hovered| search_option_chip_style(on, hovered, palette, surface);
+            let styles = [
+                style(false, false),
+                style(false, true),
+                style(true, false),
+                style(true, true),
+            ];
+            for (i, a) in styles.iter().enumerate() {
+                for b in &styles[i + 1..] {
+                    assert_ne!(a, b, "{id:?}: {a:?} vs {b:?}");
+                }
+            }
+            // Fill tells on from off, hovered or not. Off paints on the
+            // dialog panel.
+            let bg = |style: Style| style.bg.unwrap_or(surface);
+            for hovered in [false, true] {
+                assert_ne!(
+                    bg(style(true, hovered)),
+                    bg(style(false, hovered)),
+                    "{id:?} hovered {hovered}"
+                );
+            }
+            assert_ne!(bg(style(false, false)), bg(style(false, true)), "{id:?}");
+            // Underline is the hover cue in both states.
+            for on in [false, true] {
+                assert!(!style(on, false).add_modifier.contains(Modifier::UNDERLINED));
+                assert!(style(on, true).add_modifier.contains(Modifier::UNDERLINED));
+            }
         }
     }
 

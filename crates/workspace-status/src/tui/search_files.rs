@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use crate::file_index::FileRead;
 use crate::file_search::{build_matcher, SearchHit, SearchOptions, MAX_SEARCH_HITS};
 
+use super::action::SearchFilesOption;
 use super::ctrl_c_exit::is_ctrl_c_exit_prompt;
 use super::quick_open::{FileIndexState, QuickOpenScope};
 use super::tabs::checkout_leaf;
@@ -132,6 +133,32 @@ pub fn scope_label(scope: &QuickOpenScope) -> String {
         QuickOpenScope::Workspace => "all repos".to_string(),
         QuickOpenScope::Checkout(path) => checkout_leaf(path),
     }
+}
+
+/// True when `option` is on in `options`.
+pub fn option_is_on(options: SearchOptions, option: SearchFilesOption) -> bool {
+    match option {
+        SearchFilesOption::Case => options.case_sensitive,
+        SearchFilesOption::WholeWord => options.whole_word,
+        SearchFilesOption::Regex => options.regex,
+    }
+}
+
+/// Footer tooltip while the pointer is on the chip of `option`: its name,
+/// whether it is on, and what a click does, e.g.
+/// `Match case: off · click to turn on`.
+pub fn option_tooltip(option: SearchFilesOption, options: SearchOptions) -> String {
+    let name = match option {
+        SearchFilesOption::Case => "Match case",
+        SearchFilesOption::WholeWord => "Whole word",
+        SearchFilesOption::Regex => "Regex",
+    };
+    let (now, next) = if option_is_on(options, option) {
+        ("on", "off")
+    } else {
+        ("off", "on")
+    };
+    format!("{name}: {now} · click to turn {next}")
 }
 
 /// Why `query` cannot search under `options`, or `None` when it can (an
@@ -319,10 +346,12 @@ impl SearchFilesState {
 
     /// Footer hints for the zone the keys drive, ` · `-separated.
     ///
-    /// Query zone: `↑↓ move · Enter open · Tab all repos · Alt-c/w/r · Esc
-    /// close`. The results zone moves on `j/k` and adds `e edit`. Once
-    /// widened, Tab names the checkout it goes back to; with focus on the
-    /// workspace Tab changes nothing and has no hint.
+    /// Query zone: `↑↓ move · Enter open · Tab all repos · Esc close`. The
+    /// results zone moves on `j/k` and adds `e edit`. Once widened, Tab
+    /// names the checkout it goes back to; with focus on the workspace Tab
+    /// changes nothing and has no hint. The option chips take a click, so
+    /// they have no key hint; paint shows [`option_tooltip`] here instead
+    /// while the pointer is on one.
     pub fn footer_hints(&self) -> String {
         let results = self.zone == SearchZone::Results;
         let mut hints = vec![if results { "j/k move" } else { "↑↓ move" }.to_string()];
@@ -335,7 +364,6 @@ impl SearchFilesState {
             (_, false) => hints.push("Tab all repos".into()),
             (focused, true) => hints.push(format!("Tab {}", scope_label(focused))),
         }
-        hints.push("Alt-c/w/r".into());
         hints.push("Esc close".into());
         hints.join(" · ")
     }
@@ -581,12 +609,12 @@ mod tests {
         );
         assert_eq!(
             state.footer_hints(),
-            "↑↓ move · Enter open · Tab all repos · Alt-c/w/r · Esc close"
+            "↑↓ move · Enter open · Tab all repos · Esc close"
         );
         state.zone = SearchZone::Results;
         assert_eq!(
             state.footer_hints(),
-            "j/k move · Enter open · e edit · Tab all repos · Alt-c/w/r · Esc close"
+            "j/k move · Enter open · e edit · Tab all repos · Esc close"
         );
         state.widened = true;
         assert!(state.footer_hints().contains("Tab web ·"));
@@ -595,6 +623,36 @@ mod tests {
         assert!(
             !state.footer_hints().contains("Tab"),
             "Tab has nothing to do"
+        );
+    }
+
+    #[test]
+    fn option_tooltip_names_the_option_its_state_and_the_click() {
+        let options = SearchOptions {
+            case_sensitive: false,
+            whole_word: true,
+            regex: false,
+        };
+        assert_eq!(
+            option_tooltip(SearchFilesOption::Case, options),
+            "Match case: off · click to turn on"
+        );
+        assert_eq!(
+            option_tooltip(SearchFilesOption::WholeWord, options),
+            "Whole word: on · click to turn off"
+        );
+        assert_eq!(
+            option_tooltip(SearchFilesOption::Regex, options),
+            "Regex: off · click to turn on"
+        );
+        let all_on = SearchOptions {
+            case_sensitive: true,
+            whole_word: true,
+            regex: true,
+        };
+        assert_eq!(
+            option_tooltip(SearchFilesOption::Regex, all_on),
+            "Regex: on · click to turn off"
         );
     }
 

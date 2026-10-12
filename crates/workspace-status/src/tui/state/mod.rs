@@ -40,7 +40,7 @@ use crate::snapshot::{
 
 #[cfg(test)]
 use super::action::Action;
-use super::action::{Effect, ExternalDiffKind};
+use super::action::{Effect, ExternalDiffKind, SearchFilesOption};
 use super::branches::{
     branch_name_error, can_open_branch_picker, checkoutable_branch_names, merge_rev_for_commit,
     BranchPickerState, CreateBranchState, DIRTY_WORKTREE_STATUS,
@@ -359,6 +359,13 @@ pub struct LayoutHit {
     /// Results rows the search-in-files dialog painted last; PgUp / PgDn
     /// move by it.
     pub search_files_rows: u16,
+    /// Row of the search-in-files dialog's top border, where its option
+    /// chips paint.
+    pub search_option_y: u16,
+    /// Option chip hit boxes `(x, width, option)` on
+    /// [`Self::search_option_y`], each chip with its padding spaces.
+    /// Rebuilt every paint; empty when the dialog did not paint its chips.
+    pub search_option_hits: Vec<(u16, u16, SearchFilesOption)>,
 }
 
 impl Default for LayoutHit {
@@ -420,6 +427,8 @@ impl Default for LayoutHit {
             explorer_tree_rows: Rect::default(),
             explorer_preview_rows: Rect::default(),
             search_files_rows: 0,
+            search_option_y: 0,
+            search_option_hits: Vec::new(),
         }
     }
 }
@@ -460,13 +469,15 @@ pub struct PopoverHit {
     pub lines: Vec<(u16, usize)>,
 }
 
-fn hit_tab_box(hits: &[(u16, u16, usize)], tab_y: u16, col: u16, row: u16) -> Option<usize> {
-    if row != tab_y {
+/// The value of the box in `hits` (`(x, width, value)` on row `y`) that
+/// covers cell (`col`, `row`).
+fn hit_row_box<T: Copy>(hits: &[(u16, u16, T)], y: u16, col: u16, row: u16) -> Option<T> {
+    if row != y {
         return None;
     }
     hits.iter()
         .find(|(x, width, _)| col >= *x && col < x.saturating_add(*width))
-        .map(|(_, _, index)| *index)
+        .map(|(_, _, value)| *value)
 }
 
 /// Cursor, scroll, and folds saved when `/` opens. Every query change and
@@ -866,8 +877,9 @@ pub struct AppState {
     pub background: BackgroundMode,
     pub mouse_enabled: bool,
     /// Last pointer cell `(col, row)` from any-event motion. `None` when
-    /// unknown or mouse capture is off. Paint derives the tab `[✗]` hover
-    /// from it, so a stale layout never keeps a stale highlight.
+    /// unknown or mouse capture is off. Paint derives the tab `[✗]` and
+    /// search option chip hover from it, so a stale layout never keeps a
+    /// stale highlight.
     pub pointer: Option<(u16, u16)>,
     /// Open icon popover: a hover peek or a pinned popover.
     pub popover: Option<PopoverState>,
@@ -5949,25 +5961,55 @@ impl AppState {
     }
 
     fn hit_tab(&self, col: u16, row: u16) -> Option<usize> {
-        hit_tab_box(&self.layout.tab_hits, self.layout.tab_y, col, row)
+        hit_row_box(&self.layout.tab_hits, self.layout.tab_y, col, row)
     }
 
     fn hit_tab_close(&self, col: u16, row: u16) -> Option<usize> {
-        hit_tab_box(&self.layout.tab_close_hits, self.layout.tab_y, col, row)
+        hit_row_box(&self.layout.tab_close_hits, self.layout.tab_y, col, row)
     }
 
-    /// Tab index whose `[✗]` sits under [`Self::pointer`] in the last paint.
+    /// Tab index whose `[✗]` sits under [`Self::pane_pointer`] in the last
+    /// paint (none while the search-in-files dialog is open).
     pub fn hovered_tab_close(&self) -> Option<usize> {
-        let (col, row) = self.pointer?;
+        let (col, row) = self.pane_pointer()?;
         self.hit_tab_close(col, row)
+    }
+
+    /// [`Self::pointer`] for hover on the tab strip and the panes: `None`
+    /// while the search-in-files dialog is open.
+    ///
+    /// The dialog keeps the pointer for its option chips. It covers the
+    /// panes, so a tab `[✗]` or an icon under the pointer must not hover
+    /// or arm the icon peek then.
+    pub(crate) fn pane_pointer(&self) -> Option<(u16, u16)> {
+        self.pointer.filter(|_| self.search_files.is_none())
+    }
+
+    /// Search-in-files option chip painted at (`col`, `row`) in the last
+    /// paint, while the dialog is open.
+    pub fn search_option_at(&self, col: u16, row: u16) -> Option<SearchFilesOption> {
+        self.search_files.as_ref()?;
+        hit_row_box(
+            &self.layout.search_option_hits,
+            self.layout.search_option_y,
+            col,
+            row,
+        )
+    }
+
+    /// Search-in-files option chip under [`Self::pointer`] in the last
+    /// paint, while the dialog is open.
+    pub fn hovered_search_option(&self) -> Option<SearchFilesOption> {
+        let (col, row) = self.pointer?;
+        self.search_option_at(col, row)
     }
 
     /// Store the pointer from any-event motion.
     ///
-    /// Returns `true` when the hovered tab `[✗]` or the hovered icon
-    /// changed, so the live loop redraws only then. Arms or drops the icon
-    /// peek dwell and leave grace ([`Self::peek_remaining_ms`]). Ignored
-    /// while mouse capture is off. Chords, status, and effects are
+    /// Returns `true` when the hovered tab `[✗]`, icon, or search option
+    /// chip changed, so the live loop redraws only then. Arms or drops the
+    /// icon peek dwell and leave grace ([`Self::peek_remaining_ms`]).
+    /// Ignored while mouse capture is off. Chords, status, and effects are
     /// untouched.
     pub fn set_pointer(&mut self, pointer: Option<(u16, u16)>) -> bool {
         self.set_pointer_at(pointer, Instant::now())
@@ -5978,10 +6020,13 @@ impl AppState {
         let pointer = pointer.filter(|_| self.mouse_enabled);
         let before = self.hovered_tab_close();
         let icon_before = self.hovered_icon().cloned();
+        let chip_before = self.hovered_search_option();
         self.pointer = pointer;
         let icon = self.hovered_icon().cloned();
         self.track_peek(icon.as_ref(), now);
-        self.hovered_tab_close() != before || icon != icon_before
+        self.hovered_tab_close() != before
+            || icon != icon_before
+            || self.hovered_search_option() != chip_before
     }
 
     fn park_active_session(&mut self) {
@@ -11062,6 +11107,63 @@ mod tests {
         assert_eq!(app.g_pending_at, Some(armed), "g chord stays armed");
         assert_eq!(app.status, "keep");
         assert_eq!(app.pointer, None, "dispatch does not store the pointer");
+    }
+
+    #[test]
+    fn pointer_on_search_chips_reports_hover_and_hides_the_tab_close() {
+        let mut app = state();
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+        app.layout.tab_y = 0;
+        app.layout.tab_close_hits = vec![(28, 3, 1)];
+        app.layout.search_option_y = 2;
+        app.layout.search_option_hits = vec![
+            (80, 4, SearchFilesOption::Case),
+            (85, 4, SearchFilesOption::WholeWord),
+            (90, 4, SearchFilesOption::Regex),
+        ];
+        assert!(
+            !app.set_pointer(Some((80, 2))),
+            "no dialog: its boxes do not hover"
+        );
+        assert_eq!(app.hovered_search_option(), None);
+        assert_eq!(app.search_option_at(80, 2), None);
+        app.set_pointer(Some((0, 5)));
+
+        app.dispatch(Action::ToggleSearchFiles);
+        assert!(app.search_files.is_some());
+        assert!(
+            app.set_pointer(Some((80, 2))),
+            "the open dialog hovers the chip under the pointer"
+        );
+        assert_eq!(app.hovered_search_option(), Some(SearchFilesOption::Case));
+        assert!(!app.set_pointer(Some((83, 2))), "same chip, last cell");
+        assert!(app.set_pointer(Some((84, 2))), "gap between chips");
+        assert_eq!(app.hovered_search_option(), None);
+        assert!(app.set_pointer(Some((85, 2))));
+        assert_eq!(
+            app.hovered_search_option(),
+            Some(SearchFilesOption::WholeWord)
+        );
+        assert!(app.set_pointer(Some((93, 2))), "onto the next chip");
+        assert_eq!(app.hovered_search_option(), Some(SearchFilesOption::Regex));
+        assert!(app.set_pointer(Some((93, 3))), "row below leaves the chip");
+        assert_eq!(app.hovered_search_option(), None);
+
+        assert!(
+            !app.set_pointer(Some((29, 0))),
+            "the tab strip does not hover under the dialog"
+        );
+        assert_eq!(app.hovered_tab_close(), None);
+        assert_eq!(app.pointer, Some((29, 0)), "the dialog keeps the pointer");
+
+        app.dispatch(Action::SearchFilesCancel);
+        assert_eq!(app.hovered_tab_close(), Some(1), "closed: the strip hovers");
+        assert_eq!(
+            app.search_option_at(80, 2),
+            None,
+            "a closed dialog's boxes never hit"
+        );
     }
 
     #[test]
