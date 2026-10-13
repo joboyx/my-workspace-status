@@ -137,12 +137,6 @@ impl AppState {
         doctor.checks = Some(checks);
         true
     }
-
-    /// Remote URLs of the loaded checkouts, as the PR badge lookups
-    /// resolved them. The Doctor reads forges from these; no git runs.
-    pub(crate) fn doctor_remote_urls(&self) -> Vec<String> {
-        self.pr_cache.remote_urls()
-    }
 }
 
 #[cfg(test)]

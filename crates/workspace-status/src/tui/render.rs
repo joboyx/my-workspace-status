@@ -219,6 +219,9 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
     state.layout.wake_ms = None;
     state.layout.popover = None;
     let area = frame.area();
+    // The whole frame, also when it is too small to paint (the Doctor
+    // reports this size).
+    state.layout.term_cols = area.width;
     state.layout.term_rows = area.height;
     state.too_small = area.width < MIN_TERM_COLS || area.height < MIN_TERM_ROWS;
     if state.too_small {
@@ -271,7 +274,6 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
     state.layout.explorer_tree_rows = Rect::default();
     state.layout.explorer_preview_rows = Rect::default();
     state.layout.file_view_rows = Rect::default();
-    state.layout.term_cols = area.width;
     state.layout.pane_height = chunks[1].height;
     if state.is_explorer_tab() {
         draw_explorer_tab(frame, chunks[1], state);
@@ -19865,5 +19867,16 @@ mod tests {
         assert_eq!(doctor_scroll_top(0, 6..14, 20, 5), 6, "taller: its top");
         assert_eq!(doctor_scroll_top(18, 16..17, 20, 5), 15, "not past the end");
         assert_eq!(doctor_scroll_top(3, 0..1, 20, 0), 0);
+    }
+
+    /// A frame too small to paint still records its size, so a Doctor
+    /// re-run reports the real terminal, not the last size that fit.
+    #[test]
+    fn too_small_frame_records_the_terminal_size() {
+        let mut state = doctor_state();
+        let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert!(state.too_small);
+        assert_eq!((state.layout.term_cols, state.layout.term_rows), (40, 10));
     }
 }

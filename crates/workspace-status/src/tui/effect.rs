@@ -632,11 +632,15 @@ impl SearchChunkJob {
 
 /// Owned Doctor probe inputs, copied out of the state and the launch
 /// options on the event thread ([`Effect::RunDoctor`]).
+#[derive(Debug)]
 struct DoctorJob {
     term_cols: u16,
     term_rows: u16,
     mouse_enabled: bool,
-    remote_urls: Vec<String>,
+    /// Every loaded checkout (ignored ones too), as an absolute path and
+    /// the branch the snapshot names (detached or empty is fine: the
+    /// remote lookup then takes the first remote).
+    checkouts: Vec<(PathBuf, String)>,
     settings: Settings,
     editor_config: Option<String>,
     diff_tool_config: Option<String>,
@@ -644,10 +648,45 @@ struct DoctorJob {
 }
 
 impl DoctorJob {
+    /// Copy the probe inputs out of `state` and `opts`. Runs on the event
+    /// thread, so it reads memory only: no git, no file.
+    fn new(state: &AppState, opts: &TuiOpts) -> Self {
+        Self {
+            term_cols: state.layout.term_cols,
+            term_rows: state.layout.term_rows,
+            mouse_enabled: state.mouse_enabled,
+            checkouts: state
+                .snapshot
+                .repos
+                .iter()
+                .map(|row| (opts.cwd.join(&row.repo), row.branch.clone()))
+                .collect(),
+            settings: opts.settings.clone(),
+            editor_config: opts.config.editor.clone(),
+            diff_tool_config: opts.config.diff_tool.clone(),
+            workspace_root: opts.cwd.clone(),
+        }
+    }
+
+    /// Remote URLs of the checkouts, read with read-only git
+    /// ([`remote_url_for_branch`]), without duplicates. Blocks.
+    fn remote_urls(&self) -> Vec<String> {
+        let mut urls: Vec<String> = Vec::new();
+        for (dir, branch) in &self.checkouts {
+            if let Some(url) = remote_url_for_branch(dir, branch) {
+                if !urls.contains(&url) {
+                    urls.push(url);
+                }
+            }
+        }
+        urls
+    }
+
     /// Probe the setup and build the rows. Blocks (PATH scan, read-only
     /// commands, file reads), so it runs only on a worker. Writes nothing.
     fn run(self) -> Vec<Check> {
         let user_config = user_config_path();
+        let remote_urls = self.remote_urls();
         let probe = doctor::collect(&CollectInputs {
             term_cols: self.term_cols,
             term_rows: self.term_rows,
@@ -655,7 +694,7 @@ impl DoctorJob {
             mouse_enabled: self.mouse_enabled,
             editor_config: self.editor_config.as_deref(),
             diff_tool_config: self.diff_tool_config.as_deref(),
-            remote_urls: &self.remote_urls,
+            remote_urls: &remote_urls,
             workspace_root: &self.workspace_root,
             user_config: user_config.as_deref(),
         });
@@ -3339,17 +3378,9 @@ impl Interpreter {
                     self.sched.note_job_finished(id);
                     return;
                 };
-                // Owned copies: `collect` borrows, and runs on the worker.
-                let inputs = DoctorJob {
-                    term_cols: state.layout.term_cols,
-                    term_rows: state.layout.term_rows,
-                    mouse_enabled: state.mouse_enabled,
-                    remote_urls: state.doctor_remote_urls(),
-                    settings: opts.settings.clone(),
-                    editor_config: opts.config.editor.clone(),
-                    diff_tool_config: opts.config.diff_tool.clone(),
-                    workspace_root: opts.cwd.clone(),
-                };
+                // Owned copies: `collect` borrows, and the remote
+                // lookups and probe run on the worker.
+                let inputs = DoctorJob::new(state, opts);
                 spawn(
                     id,
                     Box::new(move || JobOutcome::Doctor {
@@ -7657,6 +7688,61 @@ mod tests {
         );
         assert!(state.doctor.is_none());
         assert!(capture_jobs(&mut interp, &mut state).is_empty());
+    }
+
+    /// The job copies every loaded checkout (an ignored one and a detached
+    /// one too) on the event thread, and only its worker side runs git:
+    /// the remote URLs come from each checkout's own config, deduplicated,
+    /// whether or not any PR badge lookup ran.
+    #[test]
+    fn doctor_job_carries_every_checkout_and_reads_remotes_with_git() {
+        let root = crate::testutil::unique_dir("ws-effect-doctor-remotes");
+        for name in ["app", "lib", "wt", "plain"] {
+            crate::testutil::init_repo(&root.join(name));
+        }
+        let remote = |name: &str, remote: &str, url: &str| {
+            crate::testutil::git(&root.join(name), &["remote", "add", remote, url]);
+        };
+        remote("app", "origin", "https://github.com/octo/app.git");
+        remote("lib", "upstream", "https://gitlab.com/octo/lib.git");
+        // Same remote as `app`: listed once.
+        remote("wt", "origin", "https://github.com/octo/app.git");
+        let mut detached = repo("wt", false);
+        detached.branch = "HEAD".into();
+        let snapshot = build_workspace_snapshot(
+            &[
+                repo("app", false),
+                repo("lib", false),
+                detached,
+                repo("plain", false),
+            ],
+            &["lib".into()],
+            false,
+            &[],
+        );
+        let state = AppState::new(root.clone(), snapshot, true);
+        let job = DoctorJob::new(&state, &opts(&state));
+        let mut checkouts = job.checkouts.clone();
+        checkouts.sort();
+        assert_eq!(
+            checkouts,
+            vec![
+                (root.join("app"), "main".to_string()),
+                (root.join("lib"), "main".to_string()),
+                (root.join("plain"), "main".to_string()),
+                (root.join("wt"), "HEAD".to_string()),
+            ]
+        );
+        let mut urls = job.remote_urls();
+        urls.sort();
+        assert_eq!(
+            urls,
+            vec![
+                "https://github.com/octo/app.git".to_string(),
+                "https://gitlab.com/octo/lib.git".to_string(),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

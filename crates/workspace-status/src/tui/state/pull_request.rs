@@ -105,15 +105,6 @@ impl PrCache {
         self.checkouts.get(checkout)?.remote.as_deref()
     }
 
-    /// Every remote URL a PR lookup resolved, one per checkout that has
-    /// one (duplicates kept, any order). No git runs here.
-    pub(super) fn remote_urls(&self) -> Vec<String> {
-        self.checkouts
-            .values()
-            .filter_map(|checkout| checkout.remote.clone())
-            .collect()
-    }
-
     /// Drop answers and details that no checkout points at any more.
     fn prune_answers(&mut self) {
         let live: HashSet<(&str, &str)> = self
