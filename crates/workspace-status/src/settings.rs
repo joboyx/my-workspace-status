@@ -7,9 +7,10 @@
 //! default. `cli.rs` resolves [`Settings`] after it loads the config and
 //! before the update check and the first git call, then passes it on.
 //!
-//! The launch theme also reads the last-used theme state file
-//! ([`crate::tui::theme_store`]) between the env var and the config value.
-//! Resolve only reads that file; it never creates or writes it.
+//! The launch theme and the activity sparkline also read the UI-state file
+//! ([`crate::tui::ui_state_store`]); its last-used theme sits between the
+//! env var and the config value. Resolve only reads that file; it never
+//! creates or writes it.
 
 use std::env;
 use std::path::PathBuf;
@@ -20,7 +21,7 @@ use crate::parallel::fetch_concurrency;
 use crate::tui::comments::comment_store_path_from_env;
 use crate::tui::fetch::fetch_interval_ms;
 use crate::tui::theme::{theme_id_from, ThemeId};
-use crate::tui::theme_store::{load_last_theme, theme_store_path_from_env};
+use crate::tui::ui_state_store::{load_ui_state, ui_store_path_from_env};
 use crate::tui::undercurl::undercurl_enabled;
 use crate::tui::viewed::viewed_store_path_from_env;
 use crate::tui::watch::watch_interval_ms;
@@ -32,7 +33,7 @@ use crate::update_check::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     /// Launch theme: `WS_STATUS_THEME`, then the last-used theme in
-    /// [`Self::theme_store`], then config `theme`, then Slate.
+    /// [`Self::ui_store`], then config `theme`, then Slate.
     pub(crate) theme: ThemeId,
     /// Light or dark pick at startup (`WS_STATUS_THEME_MODE` / `themeMode`),
     /// default [`ThemeMode::Auto`]. See [`crate::tui::term_bg::pick_theme`].
@@ -54,8 +55,12 @@ pub struct Settings {
     pub(crate) comment_store: PathBuf,
     /// Viewed-marks JSON file (`WS_STATUS_VIEWED_STORE` / `viewedStore`).
     pub(crate) viewed_store: PathBuf,
-    /// Last-used theme JSON file (`WS_STATUS_THEME_STORE` / `themeStore`).
-    pub(crate) theme_store: PathBuf,
+    /// UI-state JSON file: last-used theme and activity sparkline
+    /// (`WS_STATUS_UI_STORE` / `uiStore`).
+    pub(crate) ui_store: PathBuf,
+    /// Paint the tree commit-activity sparkline: the [`Self::ui_store`]
+    /// value, default off. No env var or config key.
+    pub(crate) activity_sparkline: bool,
     /// Git binary (`WORKSPACE_STATUS_GIT` / `git`).
     pub(crate) git: PathBuf,
     /// `NO_COLOR` is set and non-empty (no-color.org). Env only, no config
@@ -85,13 +90,14 @@ impl Settings {
     where
         F: FnMut(&str) -> Option<String>,
     {
-        let theme_store = theme_store_path_from_env(&mut get, keys.theme_store.as_deref());
+        let ui_store = ui_store_path_from_env(&mut get, keys.ui_store.as_deref());
+        let ui_state = load_ui_state(&ui_store);
         let ascii = glyphs_ascii(get("WS_STATUS_GLYPHS").as_deref(), keys.glyphs);
         let no_color = no_color(get(NO_COLOR_ENV).as_deref());
         Settings {
             theme: theme_id_from(
                 get("WS_STATUS_THEME").as_deref(),
-                load_last_theme(&theme_store),
+                ui_state.theme,
                 keys.theme,
             ),
             theme_mode: theme_mode(get(THEME_MODE_ENV).as_deref(), keys.theme_mode),
@@ -109,7 +115,8 @@ impl Settings {
             ),
             comment_store: comment_store_path_from_env(&mut get, keys.comment_store.as_deref()),
             viewed_store: viewed_store_path_from_env(&mut get, keys.viewed_store.as_deref()),
-            theme_store,
+            ui_store,
+            activity_sparkline: ui_state.activity_sparkline,
             git: resolve_git_binary(get("WORKSPACE_STATUS_GIT").as_deref(), keys.git.as_deref()),
             no_color,
             undercurl: undercurl_enabled(no_color, ascii, get(COLORTERM_ENV).as_deref()),
@@ -188,7 +195,7 @@ mod tests {
     use crate::testutil::unique_dir;
     use crate::tui::fetch::DEFAULT_FETCH_MS;
     use crate::tui::theme::DEFAULT_THEME_ID;
-    use crate::tui::theme_store::save_last_theme;
+    use crate::tui::ui_state_store::{save_activity_sparkline, save_theme};
     use crate::tui::watch::DEFAULT_WATCH_MS;
     use std::fs;
     use std::path::Path;
@@ -214,7 +221,7 @@ mod tests {
             update_check_store: Some(PathBuf::from("/cfg/update-check.json")),
             comment_store: Some(PathBuf::from("/cfg/comments.json")),
             viewed_store: Some(PathBuf::from("/cfg/viewed.json")),
-            theme_store: Some(PathBuf::from("/cfg/theme.json")),
+            ui_store: Some(PathBuf::from("/cfg/ui-state.json")),
             git: Some(PathBuf::from("/cfg/git")),
             term_progress: Some(false),
             smooth_scroll: Some(false),
@@ -247,12 +254,16 @@ mod tests {
             Path::new("/xdg/state/my-workspace-status/viewed-files.json")
         );
         assert_eq!(
-            got.theme_store,
-            Path::new("/xdg/state/my-workspace-status/theme.json")
+            got.ui_store,
+            Path::new("/xdg/state/my-workspace-status/ui-state.json")
         );
         assert_eq!(got.git, resolve_git_binary(None, None));
         assert!(got.term_progress, "terminal progress is on by default");
         assert!(got.smooth_scroll, "smooth scroll is on by default");
+        assert!(
+            !got.activity_sparkline,
+            "activity sparkline is off by default"
+        );
     }
 
     #[test]
@@ -271,7 +282,8 @@ mod tests {
                 update_check_store: PathBuf::from("/cfg/update-check.json"),
                 comment_store: PathBuf::from("/cfg/comments.json"),
                 viewed_store: PathBuf::from("/cfg/viewed.json"),
-                theme_store: PathBuf::from("/cfg/theme.json"),
+                ui_store: PathBuf::from("/cfg/ui-state.json"),
+                activity_sparkline: false,
                 git: PathBuf::from("/cfg/git"),
                 no_color: false,
                 undercurl: false,
@@ -294,7 +306,7 @@ mod tests {
             ("WS_STATUS_UPDATE_CHECK_STORE", "/env/update-check.json"),
             ("WS_STATUS_COMMENT_STORE", "/env/comments.json"),
             ("WS_STATUS_VIEWED_STORE", "/env/viewed.json"),
-            ("WS_STATUS_THEME_STORE", "/env/theme.json"),
+            ("WS_STATUS_UI_STORE", "/env/ui-state.json"),
             ("WORKSPACE_STATUS_GIT", "/env/git"),
             ("WS_STATUS_TERM_PROGRESS", "on"),
             ("WS_STATUS_SMOOTH_SCROLL", "1"),
@@ -313,7 +325,8 @@ mod tests {
                 update_check_store: PathBuf::from("/env/update-check.json"),
                 comment_store: PathBuf::from("/env/comments.json"),
                 viewed_store: PathBuf::from("/env/viewed.json"),
-                theme_store: PathBuf::from("/env/theme.json"),
+                ui_store: PathBuf::from("/env/ui-state.json"),
+                activity_sparkline: false,
                 git: PathBuf::from("/env/git"),
                 no_color: false,
                 undercurl: false,
@@ -336,7 +349,7 @@ mod tests {
             ("WS_STATUS_UPDATE_CHECK_STORE", "  "),
             ("WS_STATUS_COMMENT_STORE", ""),
             ("WS_STATUS_VIEWED_STORE", " "),
-            ("WS_STATUS_THEME_STORE", "  "),
+            ("WS_STATUS_UI_STORE", "  "),
             ("WORKSPACE_STATUS_GIT", ""),
             ("WS_STATUS_TERM_PROGRESS", "maybe"),
             ("WS_STATUS_SMOOTH_SCROLL", "maybe"),
@@ -358,22 +371,22 @@ mod tests {
             .unwrap()
             .runtime;
         assert_eq!(keys.theme, Some(ThemeId::Dracula));
-        let store = root.join("state").join("theme.json");
+        let store = root.join("state").join("ui-state.json");
         let store_s = store.display().to_string();
         let resolve = |theme_env: Option<&str>| {
             Settings::resolve(&keys, |key| match key {
-                "WS_STATUS_THEME_STORE" => Some(store_s.clone()),
+                "WS_STATUS_UI_STORE" => Some(store_s.clone()),
                 "WS_STATUS_THEME" => theme_env.map(str::to_string),
                 _ => None,
             })
         };
 
         let first = resolve(None);
-        assert_eq!(first.theme_store, store);
+        assert_eq!(first.ui_store, store);
         assert_eq!(first.theme, ThemeId::Dracula, "no state: config applies");
         assert!(!store.exists(), "resolve never creates the store");
 
-        save_last_theme(&first.theme_store, ThemeId::Nord).unwrap();
+        save_theme(&first.ui_store, ThemeId::Nord).unwrap();
         assert_eq!(resolve(None).theme, ThemeId::Nord, "state beats config");
         assert_eq!(
             resolve(Some("nope")).theme,
@@ -385,38 +398,50 @@ mod tests {
             ThemeId::Monokai,
             "known env beats state"
         );
-        save_last_theme(&first.theme_store, ThemeId::Slate).unwrap();
+        save_theme(&first.ui_store, ThemeId::Slate).unwrap();
         assert_eq!(
             resolve(None).theme,
             ThemeId::Slate,
             "a saved Slate beats config"
         );
+        assert!(
+            !resolve(None).activity_sparkline,
+            "a theme save keeps it off"
+        );
+        save_activity_sparkline(&first.ui_store, true).unwrap();
+        let on = resolve(None);
+        assert!(on.activity_sparkline, "the stored sparkline loads");
+        assert_eq!(on.theme, ThemeId::Slate, "a sparkline save keeps the theme");
         assert_eq!(
             fs::read(&user_file).unwrap(),
             config_bytes,
-            "theme saves never rewrite the config file"
+            "store saves never rewrite the config file"
         );
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn theme_store_naming_the_config_file_never_rewrites_it() {
+    fn ui_store_naming_the_config_file_never_rewrites_it() {
         let root = unique_dir("ws-settings-theme-foreign");
         let user_file = root.join("config.json");
         let workspace = root.join("workspace");
         fs::create_dir_all(&workspace).unwrap();
         let config_json = format!(
             "{}\n",
-            serde_json::json!({"version": 1, "theme": "dracula", "themeStore": user_file})
+            serde_json::json!({"version": 1, "theme": "dracula", "uiStore": user_file})
         );
         fs::write(&user_file, &config_json).unwrap();
         let keys = load_config_files(Some(&user_file), &workspace)
             .unwrap()
             .runtime;
         let settings = Settings::resolve(&keys, |_| None);
-        assert_eq!(settings.theme_store, user_file);
+        assert_eq!(settings.ui_store, user_file);
         assert_eq!(settings.theme, ThemeId::Dracula, "config is not a store");
-        let err = save_last_theme(&settings.theme_store, ThemeId::Monokai).unwrap_err();
+        assert!(!settings.activity_sparkline, "config is not a store");
+        let err = save_theme(&settings.ui_store, ThemeId::Monokai).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(fs::read_to_string(&user_file).unwrap(), config_json);
+        let err = save_activity_sparkline(&settings.ui_store, true).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert_eq!(fs::read_to_string(&user_file).unwrap(), config_json);
         let _ = fs::remove_dir_all(root);

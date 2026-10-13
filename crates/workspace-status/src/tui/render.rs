@@ -1543,9 +1543,10 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         let spinner = tree_row_runs_remote(row, &state.remote_activity.running, &running_families)
             .then(|| spinner_glyph(state.anim_epoch, now, state.ascii));
         state.layout.animating |= spinner.is_some();
-        // Commit-activity bars: repo rows only, once the worker has
-        // counted, and only when the pane leaves the label room.
-        let bars = (width >= SPARK_MIN_TREE_COLS)
+        // Commit-activity bars: repo rows only, while the sparkline is on,
+        // once the worker has counted, and only when the pane leaves the
+        // label room. Off, the label keeps the bar columns.
+        let bars = (state.activity_sparkline && width >= SPARK_MIN_TREE_COLS)
             .then(|| row_activity_key(row))
             .flatten()
             .and_then(|key| state.activity.get(key))
@@ -14493,6 +14494,7 @@ mod tests {
         use super::super::activity::activity_targets;
         let today = "▁▁▁▁▁▁▁▁▁▁▁▁▁█";
         let (root, mut state) = activity_state("ws-render-sparkline", false);
+        state.activity_sparkline = true;
         let mut terminal = Terminal::new(TestBackend::new(160, 16)).unwrap();
         draw_state(&mut terminal, &mut state);
         assert!(usize::from(state.layout.tree_width) >= SPARK_MIN_TREE_COLS);
@@ -14556,6 +14558,7 @@ mod tests {
     #[test]
     fn sparkline_keeps_repo_row_marks_in_place() {
         let (root, mut state) = activity_state("ws-render-sparkline-marks", true);
+        state.activity_sparkline = true;
         let mut terminal = Terminal::new(TestBackend::new(160, 16)).unwrap();
         draw_state(&mut terminal, &mut state);
         let id = app_repo_row_id(&state);
@@ -14604,6 +14607,7 @@ mod tests {
     #[test]
     fn narrow_tree_omits_sparkline() {
         let (root, mut state) = activity_state("ws-render-sparkline-narrow", false);
+        state.activity_sparkline = true;
         let mut days = [0u32; super::super::activity::ACTIVITY_DAYS];
         days[super::super::activity::ACTIVITY_DAYS - 1] = 3;
         state.activity.insert("app".into(), days);
@@ -14623,6 +14627,67 @@ mod tests {
         );
         let text = tree_row_text(&narrow, &state, &id);
         assert!(!text.contains('█') && !text.contains('▁'), "{text:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Off (the launch default), counts on hand paint no bars: a repo label
+    /// too long for the pane gets the 15 bar columns back (14 bars and one
+    /// space), and the marks keep their columns.
+    #[test]
+    fn sparkline_off_paints_no_bars_and_gives_the_label_room() {
+        use super::super::activity::ACTIVITY_DAYS;
+        let name = "a-long-repository-name-that-does-not-fit-0123456789-abcdefghijklmnopqrstuvwxyz";
+        let root = crate::testutil::unique_dir("ws-render-sparkline-off");
+        let snapshot = build_workspace_snapshot(&[repo(name, true)], &[], false, &[]);
+        let mut state = AppState::new(root.clone(), snapshot, true);
+        assert!(!state.activity_sparkline, "off by default");
+        let mut days = [0u32; ACTIVITY_DAYS];
+        days[ACTIVITY_DAYS - 1] = 2;
+        state.activity.insert(name.into(), days);
+        let mut terminal = Terminal::new(TestBackend::new(160, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert!(usize::from(state.layout.tree_width) >= SPARK_MIN_TREE_COLS);
+        let row = state
+            .painted_tree_rows()
+            .iter()
+            .find(|row| row.kind == NodeKind::Repo && row.repo.as_deref() == Some(name))
+            .expect("repo row")
+            .clone();
+        let marks: String = row
+            .trailing_segs
+            .iter()
+            .map(|seg| seg.text.as_str())
+            .collect();
+        assert!(!marks.trim().is_empty(), "the repo row has marks");
+        // ASCII glyph mode: one column per char.
+        let marks_col = |text: &str| -> usize {
+            let at = text.rfind(marks.as_str()).expect("marks on the row");
+            text[..at].chars().count()
+        };
+        // Longest prefix of the repo name the row shows.
+        let shown = |text: &str| -> usize {
+            (1..=name.len())
+                .rev()
+                .find(|&len| text.contains(&name[..len]))
+                .unwrap_or(0)
+        };
+        let off = tree_row_text(&terminal, &state, &row.id);
+        assert!(
+            !off.contains("_____________#"),
+            "no bars while off: {off:?}"
+        );
+        assert!(shown(&off) < name.len(), "the label is cut: {off:?}");
+
+        state.activity_sparkline = true;
+        draw_state(&mut terminal, &mut state);
+        let on = tree_row_text(&terminal, &state, &row.id);
+        assert!(on.contains("_____________#"), "bars while on: {on:?}");
+        assert_eq!(
+            shown(&off),
+            shown(&on) + 15,
+            "off gives the label 15 columns:\n{on:?}\n{off:?}"
+        );
+        assert_eq!(marks_col(&off), marks_col(&on), "marks moved");
         let _ = std::fs::remove_dir_all(root);
     }
 

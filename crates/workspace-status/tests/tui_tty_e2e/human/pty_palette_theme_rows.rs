@@ -414,7 +414,7 @@ fn wait_graph_lanes_match_theme(tui: &PtySession, theme: &ThemeChrome) {
     );
 }
 
-/// Palette theme rows save to the last-used theme store; they never
+/// Palette theme rows save to the UI-state store; they never
 /// rewrite the user config file.
 fn assert_config_unchanged(config_home: &Path) {
     let config = user_config_file(config_home);
@@ -426,17 +426,21 @@ fn assert_config_unchanged(config_home: &Path) {
     );
 }
 
-fn assert_store_names(theme_store: &Path, theme: &ThemeChrome) {
-    let stored = fs::read_to_string(theme_store).unwrap_or_else(|err| {
+fn assert_store_names(ui_store: &Path, theme: &ThemeChrome) {
+    let stored = fs::read_to_string(ui_store).unwrap_or_else(|err| {
         panic!(
-            "Enter on `Theme: {}` must save the theme store {}: {err}",
+            "Enter on `Theme: {}` must save the UI-state store {}: {err}",
             theme.label,
-            theme_store.display()
+            ui_store.display()
         )
     });
-    assert!(
-        stored.contains(&format!("\"{}\"", theme.id)),
-        "theme store must name {} after Enter on its row:\n{stored}",
+    assert_eq!(
+        stored,
+        format!(
+            "{{\n  \"version\": 1,\n  \"theme\": \"{}\",\n  \"activitySparkline\": false\n}}\n",
+            theme.id
+        ),
+        "UI-state store must name {} after Enter on its row",
         theme.id
     );
 }
@@ -453,20 +457,20 @@ fn assert_store_names(theme_store: &Path, theme: &ThemeChrome) {
 /// Toast, surface, mode pill, heading, muted (line numbers / graph meta),
 /// and graph lane 0 must all match that theme, and the cell colours must
 /// change. A no-op, a wrong row, or a toast-only step cannot pass. Each
-/// step saves its id to the theme store; the user config file stays
+/// step saves its id to the UI-state store; the user config file stays
 /// byte-identical.
 #[test]
 fn pty_palette_theme_rows_apply_every_theme() {
     let (_root, workspace) = daily_workspace();
     let config_home = workspace.join(".e2e-config");
     fs::create_dir_all(&config_home).unwrap();
-    let theme_store = workspace.join(".e2e-state").join("theme.json");
+    let ui_store = workspace.join(".e2e-state").join("ui-state.json");
     let mut tui = PtySession::open_with_env(
         &workspace,
         &[
             ("WS_STATUS_THEME", "tokyo-night"),
             ("XDG_CONFIG_HOME", config_home.to_str().unwrap()),
-            ("WS_STATUS_THEME_STORE", theme_store.to_str().unwrap()),
+            ("WS_STATUS_UI_STORE", ui_store.to_str().unwrap()),
         ],
     );
     tui.wait_contains(" tree", WAIT);
@@ -490,7 +494,7 @@ fn pty_palette_theme_rows_apply_every_theme() {
             theme.id,
             tui.screen()
         );
-        assert_store_names(&theme_store, theme);
+        assert_store_names(&ui_store, theme);
     }
     assert_config_unchanged(&config_home);
 }
@@ -501,7 +505,7 @@ fn pty_palette_theme_rows_apply_every_theme() {
 /// Docs: moving over `Theme: …` rows previews them, typing that moves the
 /// focus follows the same rule, Esc restores the theme active when the
 /// palette opened, and only Enter saves. Launch on Tokyo Night with an
-/// empty theme store and focus the merger graph:
+/// empty UI-state store and focus the merger graph:
 ///
 /// 1. `:` `dracula` paints Dracula with the palette open, no toast.
 /// 2. `x` leaves no row focused: Tokyo Night again. Backspace: Dracula.
@@ -516,12 +520,12 @@ fn pty_palette_theme_rows_apply_every_theme() {
 #[test]
 fn pty_palette_theme_row_previews_and_esc_restores() {
     let (_root, workspace) = daily_workspace();
-    let theme_store = workspace.join(".e2e-state").join("theme-preview.json");
+    let ui_store = workspace.join(".e2e-state").join("ui-state-preview.json");
     let mut tui = PtySession::open_with_env(
         &workspace,
         &[
             ("WS_STATUS_THEME", "tokyo-night"),
-            ("WS_STATUS_THEME_STORE", theme_store.to_str().unwrap()),
+            ("WS_STATUS_UI_STORE", ui_store.to_str().unwrap()),
         ],
     );
     let tokyo = theme_by_id("tokyo-night");
@@ -571,9 +575,9 @@ fn pty_palette_theme_row_previews_and_esc_restores() {
     );
     wait_theme_chrome(&tui, tokyo, false);
     assert!(
-        !theme_store.exists(),
-        "preview and Esc must not save the theme store {}",
-        theme_store.display()
+        !ui_store.exists(),
+        "preview and Esc must not save the UI-state store {}",
+        ui_store.display()
     );
 
     open_command_palette(&mut tui);
@@ -593,12 +597,12 @@ fn pty_palette_theme_row_previews_and_esc_restores() {
     );
     wait_theme_chrome(&tui, tokyo, false);
     assert!(
-        !theme_store.exists(),
-        "a moved-over row must not save the theme store {}",
-        theme_store.display()
+        !ui_store.exists(),
+        "a moved-over row must not save the UI-state store {}",
+        ui_store.display()
     );
 
     apply_palette_theme(&mut tui, nord.id, nord.label);
     wait_theme_chrome(&tui, nord, true);
-    assert_store_names(&theme_store, nord);
+    assert_store_names(&ui_store, nord);
 }

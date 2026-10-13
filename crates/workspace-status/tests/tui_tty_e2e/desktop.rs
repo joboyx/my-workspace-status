@@ -64,10 +64,10 @@ impl DesktopSession {
         fs::create_dir_all(&state_home).unwrap();
         let update_store = state_home.join("update-check.json");
         write_fresh_update_check(&update_store);
-        // Empty theme store each launch: a last-used theme (operator or an
+        // Empty UI-state store each launch: a last-used theme (operator or an
         // earlier launch) cannot beat the baseline config theme.
-        let theme_store = state_home.join("theme.json");
-        let _ = fs::remove_file(&theme_store);
+        let ui_store = state_home.join("ui-state.json");
+        let _ = fs::remove_file(&ui_store);
         // Temp user config dir with the harness baseline file: an operator
         // user config file cannot change the fixture's settings.
         let config_home = workspace.join(".e2e-config");
@@ -106,8 +106,8 @@ impl DesktopSession {
             sh_quote(&state_home.join("comments.json"))
         ));
         script.push_str(&format!(
-            "export WS_STATUS_THEME_STORE={}\n",
-            sh_quote(&theme_store)
+            "export WS_STATUS_UI_STORE={}\n",
+            sh_quote(&ui_store)
         ));
         for (k, v) in git_env() {
             script.push_str(&format!("export {k}={}\n", sh_quote_str(v)));

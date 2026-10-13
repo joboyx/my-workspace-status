@@ -173,6 +173,7 @@ impl AppState {
                 };
                 Effect::None
             }
+            Action::ToggleActivitySparkline => self.toggle_activity_sparkline(),
             Action::SearchStart => {
                 self.cancel_mouse_drag();
                 self.clear_diff_visual();

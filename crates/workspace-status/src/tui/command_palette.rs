@@ -667,7 +667,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
-        title: "Line blame on / off",
+        title: "Toggle line blame",
         keys: "B",
         group: CommandGroup::View,
         action: Action::ToggleLineBlame,
@@ -680,6 +680,14 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         group: CommandGroup::View,
         action: Action::ToggleMouse,
         aliases: &["pointer", "click"],
+        scope: CommandScope::Any,
+    },
+    PaletteCommand {
+        title: "Toggle activity sparkline",
+        keys: "",
+        group: CommandGroup::View,
+        action: Action::ToggleActivitySparkline,
+        aliases: &["sparkline", "activity"],
         scope: CommandScope::Any,
     },
     PaletteCommand {
@@ -1458,7 +1466,7 @@ mod tests {
                 CommandScope::NoHighlight,
             ),
             (
-                "Line blame on / off",
+                "Toggle line blame",
                 "B",
                 CommandGroup::View,
                 Action::ToggleLineBlame,
@@ -1469,6 +1477,13 @@ mod tests {
                 "m",
                 CommandGroup::View,
                 Action::ToggleMouse,
+                CommandScope::Any,
+            ),
+            (
+                "Toggle activity sparkline",
+                "",
+                CommandGroup::View,
+                Action::ToggleActivitySparkline,
                 CommandScope::Any,
             ),
             (
@@ -1534,7 +1549,7 @@ mod tests {
             .filter(|command| !matches!(command.action, Action::SetTheme(_)))
             .collect();
         assert_eq!(rows.len(), wanted.len());
-        assert_eq!(wanted.len(), 68);
+        assert_eq!(wanted.len(), 69);
         assert_eq!(PALETTE_COMMANDS.len(), wanted.len() + THEME_IDS.len());
         for (i, (title, keys, group, action, scope)) in wanted.iter().enumerate() {
             let command = rows[i];
@@ -1625,6 +1640,8 @@ mod tests {
             ("dracula", "Theme: Dracula"),
             ("github-dark-dimmed", "Theme: GitHub Dark Dimmed"),
             ("mouse", "Toggle mouse"),
+            ("sparkline", "Toggle activity sparkline"),
+            ("activity", "Toggle activity sparkline"),
             ("reload", "Refresh"),
             ("unstage", "Unstage"),
             ("add", "Stage"),
@@ -1649,6 +1666,7 @@ mod tests {
             assert!(titles(query).contains(&title), "{query} -> {title}");
         }
         assert_eq!(titles("close app"), vec!["Quit"]);
+        assert_eq!(titles("sparkline"), vec!["Toggle activity sparkline"]);
     }
 
     /// A dark theme's slug or name lands on the dark row, and the light
@@ -1755,7 +1773,7 @@ mod tests {
             "Blame: open previous line change",
             "Blame: diff commit to working tree",
             "Blame: show commit in graph",
-            "Line blame on / off",
+            "Toggle line blame",
         ];
         assert_eq!(titles("blame"), blame_rows);
         assert_eq!(titles("gitlens"), blame_rows);
@@ -1769,6 +1787,14 @@ mod tests {
             .position(|t| *t == "Diff vs default in new tab")
             .unwrap();
         assert_eq!(catalog[diff - 4..diff], blame_rows[..4]);
+    }
+
+    /// Toggle rows say `Toggle …`, not `… on / off`.
+    #[test]
+    fn no_palette_title_says_on_off() {
+        for command in PALETTE_COMMANDS {
+            assert!(!command.title.contains("on / off"), "{}", command.title);
+        }
     }
 
     #[test]

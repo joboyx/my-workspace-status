@@ -14,7 +14,7 @@ The script rejects a clip and keeps the old GIF when the last or mid frame is gr
 
 The script runs Xvfb on `:99`. Set `WS_STATUS_STILLS_DISPLAY` to another number when `:99` is busy. It stops only the `xfce4-terminal` it started on that display.
 
-The README set uses the shipped defaults: theme Slate and `viewDefaults.background` `paint`. The script points `XDG_CONFIG_HOME` at `tmp/demo-stills-stage/config`, unsets `WS_STATUS_THEME`, and removes its own `WS_STATUS_THEME_STORE` file before each launch, so a parent shell, an operator config file, or a last-used theme cannot change the look. It also exports `WS_STATUS_THEME_MODE=dark`, so the default `themeMode` `auto` never asks the terminal and picks a twin from its background.
+The README set uses the shipped defaults: theme Slate, `viewDefaults.background` `paint`, and the activity sparkline off. The script points `XDG_CONFIG_HOME` at `tmp/demo-stills-stage/config`, unsets `WS_STATUS_THEME`, and removes its own `WS_STATUS_UI_STORE` file before each launch, so a parent shell, an operator config file, a last-used theme, or a saved activity sparkline cannot change the look. It also exports `WS_STATUS_THEME_MODE=dark`, so the default `themeMode` `auto` never asks the terminal and picks a twin from its background.
 
 ### Theme and background knobs
 
@@ -67,7 +67,7 @@ Both go away when DEST is wiped.
 - Terminal: at least 140x40. The default diff mode is split, but split needs a diff pane of 100 or more columns, so at 140 columns the diff paints `inline (too narrow)`. Only clip 13 widens the pane with `<`. Do not press `i`.
 - Watch and background fetch stay off so frames do not flicker.
 - Re-run the seed script after any write (`s` / `u` / `x`, stash apply/pop/drop, checkout, reviewed mark).
-- Reviewed marks live in `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (fallback `~/.local/state/my-workspace-status/viewed-files.json`). Delete that file if a `` / `*` survives a reseed. Comments live in `$XDG_STATE_HOME/my-workspace-status/comments.json`. `capture-demo-stills.sh` points `WS_STATUS_VIEWED_STORE`, `WS_STATUS_COMMENT_STORE`, `WS_STATUS_UPDATE_CHECK_STORE`, and `WS_STATUS_THEME_STORE` at `tmp/demo-stills-stage/state` so it does not write those operator files.
+- Reviewed marks live in `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (fallback `~/.local/state/my-workspace-status/viewed-files.json`). Delete that file if a `` / `*` survives a reseed. Comments live in `$XDG_STATE_HOME/my-workspace-status/comments.json`. `capture-demo-stills.sh` points `WS_STATUS_VIEWED_STORE`, `WS_STATUS_COMMENT_STORE`, `WS_STATUS_UPDATE_CHECK_STORE`, and `WS_STATUS_UI_STORE` at `tmp/demo-stills-stage/state` so it does not write those operator files.
 
 Each clip starts from a fresh launch. The first cursor is `app` → Staged → `src/session.ts` (`S`) with its diff on the right. Recording starts after the first paint. The script holds about 1 s before the first key, about 1 s after each step, and about 2 s at the end.
 

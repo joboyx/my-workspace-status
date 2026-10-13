@@ -48,10 +48,10 @@
 # scripts/with-desktop-session.sh (same session helper as desktop TTY e2e).
 #
 # Isolates XDG_STATE_HOME, WS_STATUS_UPDATE_CHECK_STORE,
-# WS_STATUS_VIEWED_STORE, WS_STATUS_COMMENT_STORE, and WS_STATUS_THEME_STORE
+# WS_STATUS_VIEWED_STORE, WS_STATUS_COMMENT_STORE, and WS_STATUS_UI_STORE
 # under tmp/demo-stills-stage/state so a TTY launch does not write the operator
-# last-check, reviewed-mark, comment, or last-used theme files. The launcher
-# removes the theme store before each launch, so a theme saved by an earlier
+# last-check, reviewed-mark, comment, or UI-state files. The launcher
+# removes the UI-state store before each launch, so a theme saved by an earlier
 # run cannot beat the clip's config theme. Points XDG_CONFIG_HOME at the
 # empty tmp/demo-stills-stage/config so an operator user config file cannot
 # change the clips. Unsets WS_STATUS_WORKSPACE so the seeded demo dir is the
@@ -91,7 +91,7 @@ CONFIG_DIR="$STAGE_DIR/config"
 UPDATE_STORE="$STATE_DIR/update-check.json"
 VIEWED_STORE="$STATE_DIR/viewed-files.json"
 COMMENT_STORE="$STATE_DIR/comments.json"
-THEME_STORE="$STATE_DIR/theme.json"
+UI_STORE="$STATE_DIR/ui-state.json"
 FONT_DIR="${HOME}/.local/share/fonts/MesloLGS-NF"
 BIN="$REPO_ROOT/target/release/workspace-status"
 LAUNCHER="$STAGE_DIR/run-tui.sh"
@@ -297,11 +297,11 @@ export WS_STATUS_UPDATE_CHECK_STORE=$(printf '%q' "$UPDATE_STORE")
 export XDG_CONFIG_HOME=$(printf '%q' "$CONFIG_DIR")
 export WS_STATUS_VIEWED_STORE=$(printf '%q' "$VIEWED_STORE")
 export WS_STATUS_COMMENT_STORE=$(printf '%q' "$COMMENT_STORE")
-export WS_STATUS_THEME_STORE=$(printf '%q' "$THEME_STORE")
+export WS_STATUS_UI_STORE=$(printf '%q' "$UI_STORE")
 # Pin light/dark: themeMode auto would follow the terminal background.
 export WS_STATUS_THEME_MODE=$(printf '%q' "$STILLS_THEME_MODE")
-# Start each launch with no last-used theme, so the config theme paints.
-rm -f -- "\$WS_STATUS_THEME_STORE"
+# Start each launch with no stored UI state, so the config theme paints.
+rm -f -- "\$WS_STATUS_UI_STORE"
 # Seed timestamps are Asia/Manila; pin TZ so clips match that clock.
 export TZ=Asia/Manila
 export TERM=xterm-256color

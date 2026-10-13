@@ -255,6 +255,12 @@ pub enum Action {
     /// the theme; it does not dispatch this action.
     SetTheme(ThemeId),
     ToggleMouse,
+    /// Show or hide the tree commit-activity sparkline (palette only, no
+    /// key).
+    ///
+    /// Saves the new value to the UI-state store at once. Turning it on
+    /// queues the activity count for every repo.
+    ToggleActivitySparkline,
     /// Open or close the Quick Open overlay (`:` commands, Ctrl-p / `F` files).
     ///
     /// [`QuickOpenEntry`] picks the starting mode on open. The keymap sends

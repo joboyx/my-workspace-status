@@ -298,6 +298,7 @@ impl AppState {
             | Action::ExplorerReveal
             | Action::ToggleLineBlame
             | Action::ToggleMouse
+            | Action::ToggleActivitySparkline
             | Action::SearchStart
             | Action::SearchChar(_)
             | Action::SearchBackspace

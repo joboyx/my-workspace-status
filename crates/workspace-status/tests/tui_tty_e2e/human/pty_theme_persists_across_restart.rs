@@ -64,29 +64,33 @@ fn wait_active_theme(tui: &PtySession, theme: &ThemeChrome) {
     }
 }
 
-/// Write a last-used theme store at `path` the way the binary saves it.
-fn seed_theme_store(path: &Path, theme: &str) {
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(
-        path,
-        format!("{{\n  \"version\": 1,\n  \"theme\": \"{theme}\"\n}}\n"),
+/// The UI-state store file the binary writes for a theme save on a fresh
+/// file: pretty JSON with the sparkline off and a trailing newline.
+fn ui_store_body(theme: &str) -> String {
+    format!(
+        "{{\n  \"version\": 1,\n  \"theme\": \"{theme}\",\n  \"activitySparkline\": false\n}}\n"
     )
-    .unwrap();
+}
+
+/// Write a UI-state store at `path` the way the binary saves it.
+fn seed_ui_store(path: &Path, theme: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, ui_store_body(theme)).unwrap();
 }
 
 /// A palette theme row picks a theme; quit, relaunch, the theme is kept.
 ///
 /// The baseline user config theme is Tokyo Night and no `WS_STATUS_THEME`
 /// is set. `:` `monokai` Enter applies Monokai, which the store at the
-/// shared `WS_STATUS_THEME_STORE` path must hold. `q` quits. A second
+/// shared `WS_STATUS_UI_STORE` path must hold. `q` quits. A second
 /// launch with the same store must paint Monokai, not the config Tokyo
 /// Night and not the Slate default. A session-only apply cannot pass.
 #[test]
 fn pty_palette_theme_survives_restart() {
     let (_root, workspace) = daily_workspace();
-    let theme_store = workspace.join(".e2e-state").join("theme-restart.json");
-    let store = theme_store.to_str().expect("utf-8 store path");
-    let env = [("WS_STATUS_THEME_STORE", store)];
+    let ui_store = workspace.join(".e2e-state").join("ui-state-restart.json");
+    let store = ui_store.to_str().expect("utf-8 store path");
+    let env = [("WS_STATUS_UI_STORE", store)];
 
     let mut first = PtySession::open_with_env(&workspace, &env);
     wait_active_theme(&first, &TOKYO_NIGHT);
@@ -95,15 +99,16 @@ fn pty_palette_theme_survives_restart() {
     first.key('q');
     first.wait_exit(WAIT);
 
-    let stored = fs::read_to_string(&theme_store).unwrap_or_else(|err| {
+    let stored = fs::read_to_string(&ui_store).unwrap_or_else(|err| {
         panic!(
-            "Enter on `Theme: Monokai` must save the theme store {}: {err}",
-            theme_store.display()
+            "Enter on `Theme: Monokai` must save the UI-state store {}: {err}",
+            ui_store.display()
         )
     });
-    assert!(
-        stored.contains("\"monokai\""),
-        "store must hold the applied theme monokai:\n{stored}"
+    assert_eq!(
+        stored,
+        ui_store_body("monokai"),
+        "store must hold the applied theme monokai and the sparkline off"
     );
 
     // `first` stays bound: its Drop removes the fixture root.
@@ -111,22 +116,22 @@ fn pty_palette_theme_survives_restart() {
     wait_active_theme(&restarted, &MONOKAI);
 }
 
-/// A known `WS_STATUS_THEME` beats the last-used theme store.
+/// A known `WS_STATUS_THEME` beats the UI-state store.
 ///
 /// The store holds Monokai. Launch with `WS_STATUS_THEME=dracula` must
 /// paint Dracula, and the launch itself must not rewrite the store.
 #[test]
 fn pty_theme_env_beats_stored_theme() {
     let (_root, workspace) = daily_workspace();
-    let theme_store = workspace.join(".e2e-state").join("theme-seeded.json");
-    seed_theme_store(&theme_store, "monokai");
-    let seeded = fs::read(&theme_store).unwrap();
-    let store = theme_store.to_str().expect("utf-8 store path");
+    let ui_store = workspace.join(".e2e-state").join("ui-state-seeded.json");
+    seed_ui_store(&ui_store, "monokai");
+    let seeded = fs::read(&ui_store).unwrap();
+    let store = ui_store.to_str().expect("utf-8 store path");
 
     let mut tui = PtySession::open_with_env(
         &workspace,
         &[
-            ("WS_STATUS_THEME_STORE", store),
+            ("WS_STATUS_UI_STORE", store),
             ("WS_STATUS_THEME", "dracula"),
         ],
     );
@@ -134,8 +139,8 @@ fn pty_theme_env_beats_stored_theme() {
     tui.key('q');
     tui.wait_exit(WAIT);
     assert_eq!(
-        fs::read(&theme_store).unwrap(),
+        fs::read(&ui_store).unwrap(),
         seeded,
-        "a launch with no palette theme pick must leave the theme store unchanged"
+        "a launch with no palette theme pick must leave the UI-state store unchanged"
     );
 }

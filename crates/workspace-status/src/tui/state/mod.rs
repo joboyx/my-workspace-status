@@ -42,7 +42,7 @@ use crate::snapshot::{
 #[cfg(test)]
 use super::action::Action;
 use super::action::{Effect, ExternalDiffKind, SearchFilesOption};
-use super::activity::ACTIVITY_DAYS;
+use super::activity::{activity_targets, ACTIVITY_DAYS};
 use super::anim::{next_tick_ms, AnimNeeds, RemoteActivity, ScrollGlide};
 use super::branches::{
     branch_name_error, can_open_branch_picker, checkoutable_branch_names, merge_rev_for_commit,
@@ -115,12 +115,12 @@ use super::tabs::{
     SWITCH_TO_WORKSPACE_TAB, WORKSPACE_TAB_CANNOT_CLOSE,
 };
 use super::theme::{BackgroundMode, ThemeId};
-use super::theme_store::save_last_theme;
 use super::toast::ToastStack;
 use super::tree::{
     build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, visible_for_tree,
     visible_window, workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
 };
+use super::ui_state_store::{save_activity_sparkline, save_theme};
 use super::undercurl::UndercurlHit;
 use super::viewed::{
     collect_current_fingerprints, fingerprint_file_change, load_viewed_store, reconcile_viewed,
@@ -801,9 +801,11 @@ pub struct AppState {
     pub viewed_path: PathBuf,
     pub comment_store: CommentStore,
     pub comment_path: PathBuf,
-    /// Last-used theme store that a palette `Theme: …` row writes (see
-    /// [`crate::tui::theme_store`]).
-    pub theme_path: PathBuf,
+    /// UI-state store path (see [`crate::tui::ui_state_store`]). The
+    /// palette `Theme: …` rows and Toggle activity sparkline write it;
+    /// [`crate::settings::Settings::resolve`] loads it at launch, not
+    /// `AppState`.
+    pub ui_store_path: PathBuf,
     pub comment: Option<CommentPrompt>,
     pub comment_export: Option<CommentExport>,
     /// Visual-line anchor on a focused file diff (`V`). Cursor is the other end.
@@ -827,6 +829,9 @@ pub struct AppState {
     /// Ctrl-d / Ctrl-u glide the viewport (`smoothScroll`, default on).
     /// Off, the viewport jumps as the cursor moves.
     pub smooth_scroll: bool,
+    /// Paint the tree commit-activity sparkline (the UI-state store value,
+    /// default off).
+    pub activity_sparkline: bool,
     /// The live Ctrl-d / Ctrl-u viewport glide, if any
     /// ([`Self::arm_scroll_glide`], [`Self::glide_start`]).
     pub(crate) scroll_glide: Option<ScrollGlide>,
@@ -991,7 +996,8 @@ fn unix_now() -> i64 {
 
 impl AppState {
     /// TUI launch state: glyphs, theme, `NO_COLOR`, and the viewed /
-    /// comment / theme store paths come from the resolved `settings`.
+    /// comment / UI-state store paths and the activity sparkline come from
+    /// the resolved `settings`.
     pub fn launch(cwd: PathBuf, snapshot: WorkspaceSnapshot, settings: &Settings) -> Self {
         let mut state = Self::build(
             cwd,
@@ -999,12 +1005,13 @@ impl AppState {
             settings.ascii,
             settings.viewed_store.clone(),
             settings.comment_store.clone(),
-            settings.theme_store.clone(),
+            settings.ui_store.clone(),
             settings.theme,
         );
         state.no_color = settings.no_color;
         state.undercurl = settings.undercurl;
         state.smooth_scroll = settings.smooth_scroll;
+        state.activity_sparkline = settings.activity_sparkline;
         state
     }
 
@@ -1015,7 +1022,7 @@ impl AppState {
         Self::with_viewed_path(cwd, snapshot, ascii, default_viewed_path())
     }
 
-    /// Test state with `viewed_path`; the comment and theme stores sit next
+    /// Test state with `viewed_path`; the comment and UI-state stores sit next
     /// to it.
     ///
     /// Pins Tokyo Night and [`BackgroundMode::Terminal`], the v0.1.244 look
@@ -1031,14 +1038,14 @@ impl AppState {
         viewed_path: PathBuf,
     ) -> Self {
         let comment_path = viewed_path.with_file_name("comments.json");
-        let theme_path = viewed_path.with_file_name("theme.json");
+        let ui_store_path = viewed_path.with_file_name("ui-state.json");
         let mut state = Self::build(
             cwd,
             snapshot,
             ascii,
             viewed_path,
             comment_path,
-            theme_path,
+            ui_store_path,
             ThemeId::TokyoNight,
         );
         state.background = BackgroundMode::Terminal;
@@ -1051,7 +1058,7 @@ impl AppState {
         ascii: bool,
         viewed_path: PathBuf,
         comment_path: PathBuf,
-        theme_path: PathBuf,
+        ui_store_path: PathBuf,
         theme: ThemeId,
     ) -> Self {
         let show_ignored = snapshot.show_ignored;
@@ -1101,7 +1108,7 @@ impl AppState {
             viewed_path,
             comment_store,
             comment_path,
-            theme_path,
+            ui_store_path,
             comment: None,
             comment_export: None,
             diff_visual_anchor: None,
@@ -1112,6 +1119,7 @@ impl AppState {
             undercurl: false,
             anim_epoch: Instant::now(),
             smooth_scroll: true,
+            activity_sparkline: false,
             scroll_glide: None,
             frame_now: Instant::now(),
             remote_activity: RemoteActivity::default(),
@@ -2440,10 +2448,34 @@ impl AppState {
         self.theme_before_preview = None;
         self.theme = id;
         self.status = format!("theme: {}", self.theme.label()).into();
-        if let Err(err) = save_last_theme(&self.theme_path, self.theme) {
+        if let Err(err) = save_theme(&self.ui_store_path, self.theme) {
             self.status = StatusMessage::error(persist_failed_status("theme", err));
         }
         Effect::None
+    }
+
+    /// Palette Toggle activity sparkline: flip the tree bars in this session
+    /// and save the new value to the UI-state store at once. A failed save
+    /// keeps the flip. Turning it on asks for the counts of every repo, so
+    /// the bars appear without a reload.
+    fn toggle_activity_sparkline(&mut self) -> Effect {
+        let on = !self.activity_sparkline;
+        self.activity_sparkline = on;
+        self.status = if on {
+            "Activity sparkline on".into()
+        } else {
+            "Activity sparkline off".into()
+        };
+        if let Err(err) = save_activity_sparkline(&self.ui_store_path, on) {
+            self.status = StatusMessage::error(persist_failed_status("sparkline", err));
+        }
+        if on {
+            Effect::LoadActivity {
+                checkouts: activity_targets(&self.snapshot, None),
+            }
+        } else {
+            Effect::None
+        }
     }
 
     fn op_effect(&mut self, op: Op) -> Effect {
@@ -7002,7 +7034,7 @@ enum FoldOp {
 }
 
 /// Viewed-store path in a unique temp dir per test state, so the sibling
-/// comment and theme stores are unique too.
+/// comment and UI-state stores are unique too.
 #[cfg(test)]
 fn default_viewed_path() -> PathBuf {
     crate::testutil::unique_dir("ws-state-test").join("viewed.json")
@@ -7069,7 +7101,7 @@ mod tests {
         DIFF_SPLIT_FRACTION, MIN_PANE_COLS,
     };
     use crate::tui::status::StatusKind;
-    use crate::tui::theme_store::load_last_theme;
+    use crate::tui::ui_state_store::load_ui_state;
     use crate::tui::watch::watch_interval_ms;
     use workspace_status_graph::{Commit, GraphModel, GraphRef, Stash};
 
@@ -15216,11 +15248,11 @@ mod tests {
         assert_eq!(app.right_col_offset, panned, "mouse off ignores hscroll");
     }
 
-    /// State whose theme store is `state/theme.json` in a fresh temp dir.
-    fn state_with_theme_store(prefix: &str) -> (AppState, PathBuf) {
+    /// State whose UI-state store is `state/ui-state.json` in a fresh temp dir.
+    fn state_with_ui_store(prefix: &str) -> (AppState, PathBuf) {
         let dir = crate::testutil::unique_dir(prefix);
         let mut app = state();
-        app.theme_path = dir.join("state").join("theme.json");
+        app.ui_store_path = dir.join("state").join("ui-state.json");
         (app, dir)
     }
 
@@ -15248,22 +15280,25 @@ mod tests {
 
     #[test]
     fn set_theme_applies_saves_and_names_the_theme() {
-        let (mut app, dir) = state_with_theme_store("ws-theme-set-save");
+        let (mut app, dir) = state_with_ui_store("ws-theme-set-save");
         app.theme = ThemeId::TokyoNight;
         assert_eq!(app.dispatch(Action::SetTheme(ThemeId::Slate)), Effect::None);
         assert_eq!(app.theme, ThemeId::Slate);
         assert_eq!(app.status, "theme: Slate");
         assert_eq!(app.status.kind(), StatusKind::Info);
-        let text = std::fs::read_to_string(&app.theme_path).expect("store written");
+        let text = std::fs::read_to_string(&app.ui_store_path).expect("store written");
         assert!(text.contains("\"slate\""), "store names slate: {text}");
-        assert_eq!(load_last_theme(&app.theme_path), Some(ThemeId::Slate));
+        assert_eq!(
+            load_ui_state(&app.ui_store_path).theme,
+            Some(ThemeId::Slate)
+        );
         assert_eq!(
             app.dispatch(Action::SetTheme(ThemeId::GithubDarkDimmed)),
             Effect::None
         );
         assert_eq!(app.status, "theme: GitHub Dark Dimmed");
         assert_eq!(
-            load_last_theme(&app.theme_path),
+            load_ui_state(&app.ui_store_path).theme,
             Some(ThemeId::GithubDarkDimmed)
         );
         assert_eq!(
@@ -15279,7 +15314,7 @@ mod tests {
         let mut app = state();
         app.theme = ThemeId::TokyoNight;
         let (root, path) = unwritable_store_path("ws-theme-save-fail");
-        app.theme_path = path;
+        app.ui_store_path = path;
         assert_eq!(
             app.dispatch(Action::SetTheme(ThemeId::Monokai)),
             Effect::None
@@ -15296,17 +15331,17 @@ mod tests {
 
     #[test]
     fn set_theme_leaves_foreign_store_file_unchanged() {
-        let (mut app, dir) = state_with_theme_store("ws-theme-foreign");
-        std::fs::create_dir_all(app.theme_path.parent().unwrap()).unwrap();
+        let (mut app, dir) = state_with_ui_store("ws-theme-foreign");
+        std::fs::create_dir_all(app.ui_store_path.parent().unwrap()).unwrap();
         let foreign = b"{\"editor\": \"vim\"}\n";
-        std::fs::write(&app.theme_path, foreign).unwrap();
+        std::fs::write(&app.ui_store_path, foreign).unwrap();
         app.theme = ThemeId::TokyoNight;
         assert_eq!(
             app.dispatch(Action::SetTheme(ThemeId::Monokai)),
             Effect::None
         );
         assert_eq!(app.theme, ThemeId::Monokai, "session theme still changes");
-        assert_eq!(std::fs::read(&app.theme_path).unwrap(), foreign);
+        assert_eq!(std::fs::read(&app.ui_store_path).unwrap(), foreign);
         assert_eq!(app.status.kind(), StatusKind::Error);
         assert!(
             app.status.contains("theme save failed"),
@@ -15317,8 +15352,103 @@ mod tests {
     }
 
     #[test]
+    fn set_theme_keeps_a_stored_activity_sparkline() {
+        let (mut app, dir) = state_with_ui_store("ws-theme-keeps-sparkline");
+        std::fs::create_dir_all(app.ui_store_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &app.ui_store_path,
+            "{\"version\": 1, \"theme\": \"dracula\", \"activitySparkline\": true}\n",
+        )
+        .unwrap();
+        assert_eq!(app.dispatch(Action::SetTheme(ThemeId::Nord)), Effect::None);
+        assert_eq!(app.status.kind(), StatusKind::Info);
+        assert_eq!(
+            std::fs::read_to_string(&app.ui_store_path).unwrap(),
+            "{\n  \"version\": 1,\n  \"theme\": \"nord\",\n  \"activitySparkline\": true\n}\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The toggle writes the store at once and keeps the stored theme; a
+    /// second toggle writes it back off.
+    #[test]
+    fn toggle_activity_sparkline_saves_at_once_and_keeps_the_theme() {
+        let (mut app, dir) = state_with_ui_store("ws-sparkline-toggle-save");
+        std::fs::create_dir_all(app.ui_store_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &app.ui_store_path,
+            "{\"version\": 1, \"theme\": \"dracula\"}\n",
+        )
+        .unwrap();
+        assert!(!app.activity_sparkline);
+        let effect = app.dispatch(Action::ToggleActivitySparkline);
+        assert!(app.activity_sparkline);
+        assert!(matches!(effect, Effect::LoadActivity { .. }), "{effect:?}");
+        assert_eq!(app.status, "Activity sparkline on");
+        assert_eq!(app.status.kind(), StatusKind::Info);
+        let stored = load_ui_state(&app.ui_store_path);
+        assert!(stored.activity_sparkline, "saved on");
+        assert_eq!(stored.theme, Some(ThemeId::Dracula), "theme kept");
+
+        assert_eq!(app.dispatch(Action::ToggleActivitySparkline), Effect::None);
+        assert!(!app.activity_sparkline);
+        assert_eq!(app.status, "Activity sparkline off");
+        let stored = load_ui_state(&app.ui_store_path);
+        assert!(!stored.activity_sparkline, "saved off");
+        assert_eq!(stored.theme, Some(ThemeId::Dracula), "theme kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed save names the sparkline store; the session still flips.
+    #[test]
+    fn toggle_activity_sparkline_names_save_failure_and_still_flips() {
+        let mut app = state();
+        let (root, path) = unwritable_store_path("ws-sparkline-save-fail");
+        app.ui_store_path = path;
+        let effect = app.dispatch(Action::ToggleActivitySparkline);
+        assert!(app.activity_sparkline, "session still flips");
+        assert!(matches!(effect, Effect::LoadActivity { .. }), "{effect:?}");
+        assert_eq!(app.status.kind(), StatusKind::Error);
+        assert!(
+            app.status.contains("sparkline save failed"),
+            "failed persist must name the sparkline: {}",
+            app.status
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn launch_takes_the_ui_store_path_and_its_sparkline() {
+        let dir = crate::testutil::unique_dir("ws-launch-ui-store");
+        let ui_store = dir.join("ui-state.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &ui_store,
+            "{\"version\": 1, \"theme\": \"nord\", \"activitySparkline\": true}\n",
+        )
+        .unwrap();
+        let (viewed_s, comments_s, ui_store_s) = (
+            dir.join("viewed.json").display().to_string(),
+            dir.join("comments.json").display().to_string(),
+            ui_store.display().to_string(),
+        );
+        let settings = Settings::resolve(&Default::default(), |key| match key {
+            "WS_STATUS_VIEWED_STORE" => Some(viewed_s.clone()),
+            "WS_STATUS_COMMENT_STORE" => Some(comments_s.clone()),
+            "WS_STATUS_UI_STORE" => Some(ui_store_s.clone()),
+            _ => None,
+        });
+        let snapshot = build_workspace_snapshot(&[tree_repo()], &[], false, &[]);
+        let app = AppState::launch(PathBuf::from("/tmp"), snapshot, &settings);
+        assert_eq!(app.ui_store_path, ui_store);
+        assert_eq!(app.theme, ThemeId::Nord);
+        assert!(app.activity_sparkline, "the stored sparkline loads on");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn palette_moves_preview_theme_rows_and_restore_on_other_rows() {
-        let (mut app, dir) = state_with_theme_store("ws-theme-preview-move");
+        let (mut app, dir) = state_with_ui_store("ws-theme-preview-move");
         app.theme = ThemeId::Slate;
         palette_type(&mut app, "");
         assert_eq!(app.theme, ThemeId::Slate, "open lands on a non-theme row");
@@ -15339,13 +15469,13 @@ mod tests {
         assert_eq!(app.theme, ThemeId::Slate, "a non-theme row restores");
         app.dispatch(Action::QuickOpenMove(1));
         assert_eq!(app.theme, ThemeId::TokyoNight);
-        assert!(!app.theme_path.exists(), "a preview never saves");
+        assert!(!app.ui_store_path.exists(), "a preview never saves");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn palette_typing_previews_the_focused_theme_row() {
-        let (mut app, dir) = state_with_theme_store("ws-theme-preview-type");
+        let (mut app, dir) = state_with_ui_store("ws-theme-preview-type");
         app.theme = ThemeId::Slate;
         palette_type(&mut app, "nord");
         assert_eq!(palette_focus(&app).as_deref(), Some("Theme: Nord"));
@@ -15367,14 +15497,14 @@ mod tests {
         assert!(app.quick_open.is_some());
         assert!(app.command_palette().is_none(), "files mode");
         assert_eq!(app.theme, ThemeId::Slate, "files mode restores");
-        assert!(!app.theme_path.exists(), "a preview never saves");
+        assert!(!app.ui_store_path.exists(), "a preview never saves");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn palette_esc_and_toggle_close_restore_the_open_time_theme() {
         use super::super::action::QuickOpenEntry;
-        let (mut app, dir) = state_with_theme_store("ws-theme-preview-close");
+        let (mut app, dir) = state_with_ui_store("ws-theme-preview-close");
         app.theme = ThemeId::Kanagawa;
         // Several previews in a row; Esc goes back to the theme before the
         // first one, not to an earlier preview.
@@ -15404,26 +15534,26 @@ mod tests {
         assert_eq!(app.theme, ThemeId::OneDark);
         app.dispatch(Action::QuickOpenCancel);
         assert_eq!(app.theme, ThemeId::Kanagawa, "Esc after a files entry");
-        assert!(!app.theme_path.exists(), "a close never saves");
+        assert!(!app.ui_store_path.exists(), "a close never saves");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn palette_enter_on_a_theme_row_applies_and_saves_it() {
-        let (mut app, dir) = state_with_theme_store("ws-theme-preview-enter");
+        let (mut app, dir) = state_with_ui_store("ws-theme-preview-enter");
         app.theme = ThemeId::Slate;
         palette_type(&mut app, "nord");
         assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
         assert!(app.quick_open.is_none());
         assert_eq!(app.theme, ThemeId::Nord);
         assert_eq!(app.status, "theme: Nord");
-        assert_eq!(load_last_theme(&app.theme_path), Some(ThemeId::Nord));
+        assert_eq!(load_ui_state(&app.ui_store_path).theme, Some(ThemeId::Nord));
         // The applied theme is the new open-time theme.
         palette_type(&mut app, "dracula");
         assert_eq!(app.theme, ThemeId::Dracula);
         app.dispatch(Action::QuickOpenCancel);
         assert_eq!(app.theme, ThemeId::Nord);
-        assert_eq!(load_last_theme(&app.theme_path), Some(ThemeId::Nord));
+        assert_eq!(load_ui_state(&app.ui_store_path).theme, Some(ThemeId::Nord));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -15432,7 +15562,7 @@ mod tests {
         let mut app = state();
         app.theme = ThemeId::Slate;
         let (root, path) = unwritable_store_path("ws-theme-preview-fail");
-        app.theme_path = path;
+        app.ui_store_path = path;
         palette_type(&mut app, "rose-pine");
         assert_eq!(palette_focus(&app).as_deref(), Some("Theme: Rosé Pine"));
         assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
@@ -15449,7 +15579,7 @@ mod tests {
 
     #[test]
     fn palette_enter_on_another_row_after_a_preview_restores_and_saves_nothing() {
-        let (mut app, dir) = state_with_theme_store("ws-theme-preview-other");
+        let (mut app, dir) = state_with_ui_store("ws-theme-preview-other");
         app.theme = ThemeId::Slate;
         palette_type(&mut app, "nord");
         assert_eq!(app.theme, ThemeId::Nord);
@@ -15462,7 +15592,7 @@ mod tests {
         assert!(app.quick_open.is_none());
         assert!(app.help_open, "Keymap help ran");
         assert_eq!(app.theme, ThemeId::Slate);
-        assert!(!app.theme_path.exists(), "nothing saved");
+        assert!(!app.ui_store_path.exists(), "nothing saved");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -15596,19 +15726,23 @@ mod tests {
     fn launch_with_no_env_and_no_config_paints_background() {
         let viewed = default_viewed_path();
         let comments = viewed.with_extension("comments.json");
-        let theme = viewed.with_extension("theme.json");
+        let ui_store = viewed.with_extension("ui-state.json");
         let (viewed_s, comments_s) = (viewed.display().to_string(), comments.display().to_string());
-        let theme_s = theme.display().to_string();
+        let ui_store_s = ui_store.display().to_string();
         let settings = Settings::resolve(&Default::default(), |key| match key {
             "WS_STATUS_VIEWED_STORE" => Some(viewed_s.clone()),
             "WS_STATUS_COMMENT_STORE" => Some(comments_s.clone()),
-            "WS_STATUS_THEME_STORE" => Some(theme_s.clone()),
+            "WS_STATUS_UI_STORE" => Some(ui_store_s.clone()),
             _ => None,
         });
         let snapshot = build_workspace_snapshot(&[tree_repo()], &[], false, &[]);
         let mut app = AppState::launch(PathBuf::from("/tmp"), snapshot, &settings);
         assert_eq!(app.background, BackgroundMode::Paint);
         assert_eq!(app.theme, ThemeId::Slate, "Slate is the launch default");
+        assert!(
+            !app.activity_sparkline,
+            "the activity sparkline launches off"
+        );
 
         app.apply_view_defaults(&ViewDefaults::default());
         assert_eq!(

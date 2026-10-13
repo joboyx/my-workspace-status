@@ -1530,7 +1530,7 @@ impl Interpreter {
                 self.pr_badges.extend(targets);
                 self.fill_pr_badge_slots();
             }
-            Effect::LoadActivity { checkouts } => self.queue_activity(checkouts),
+            Effect::LoadActivity { checkouts } => self.queue_activity(state, checkouts),
             Effect::LookupPullRequestDetail {
                 repo,
                 branch,
@@ -1592,8 +1592,13 @@ impl Interpreter {
     ///
     /// One low-priority [`UserTag::Activity`] slot per repo, so user jobs
     /// take the pool between repos. A key that already waits is not
-    /// queued again, so a reload and a Pull wave count a repo once.
-    fn queue_activity(&mut self, checkouts: Vec<String>) {
+    /// queued again, so a reload and a Pull wave count a repo once. While
+    /// the sparkline is off ([`AppState::activity_sparkline`]) nothing is
+    /// queued: the launch, a reload, and a Pull wave run no count.
+    fn queue_activity(&mut self, state: &AppState, checkouts: Vec<String>) {
+        if !state.activity_sparkline {
+            return;
+        }
         for key in checkouts {
             if !self.activity_pending.contains(&key) {
                 self.activity_pending.push_back(key);
@@ -1899,7 +1904,7 @@ impl Interpreter {
                 if decision == ApplyDecision::CollectionIdle
                     && std::mem::take(&mut self.activity_after_reload)
                 {
-                    self.queue_activity(activity_targets(&state.snapshot, None));
+                    self.queue_activity(state, activity_targets(&state.snapshot, None));
                 }
                 if focused.as_deref() == Some(path.as_str())
                     && focused_repo_needs_pane(&before_sigs, &before_snap, state, &path)
@@ -2699,7 +2704,7 @@ impl Interpreter {
         // A pull can bring commits onto local branches: recount the repos
         // this wave touched.
         if kind == RunningOp::Pull {
-            self.queue_activity(activity_targets(&state.snapshot, Some(&repos)));
+            self.queue_activity(state, activity_targets(&state.snapshot, Some(&repos)));
         }
         if !quiet {
             state.status = completed_op_status(kind, &tally);
@@ -3252,10 +3257,13 @@ impl Interpreter {
             }
             UserTag::Activity => {
                 // One repo per job, so user work takes the slot between
-                // repos. After quit nothing more starts.
+                // repos. After quit, or once the sparkline is off, nothing
+                // more starts.
                 let key = self.activity_pending.pop_front();
                 let cancel = Arc::clone(&self.activity_cancel);
-                let Some(key) = key.filter(|_| !cancel.load(Ordering::Relaxed)) else {
+                let Some(key) =
+                    key.filter(|_| state.activity_sparkline && !cancel.load(Ordering::Relaxed))
+                else {
                     self.sched.note_job_finished(id);
                     return;
                 };
@@ -7159,6 +7167,7 @@ mod tests {
     #[test]
     fn launch_schedules_activity_on_a_worker_not_inline() {
         let (root, mut state) = git_app_state("ws-effect-activity", "main", false);
+        state.activity_sparkline = true;
         let mut interp = Interpreter::with_cap(1);
         let checkouts = activity_targets(&state.snapshot, None);
         assert_eq!(checkouts, vec!["app".to_string()]);
@@ -7195,6 +7204,7 @@ mod tests {
     #[test]
     fn activity_jobs_yield_the_slot_to_user_work_between_repos() {
         let (root, mut state) = two_repo_state("ws-effect-activity-yield");
+        state.activity_sparkline = true;
         let mut interp = Interpreter::with_cap(1);
         let checkouts = activity_targets(&state.snapshot, None);
         schedule_effect(
@@ -7244,6 +7254,7 @@ mod tests {
     #[test]
     fn quit_flag_stops_the_activity_walk_before_the_next_repo() {
         let (root, mut state) = two_repo_state("ws-effect-activity-quit");
+        state.activity_sparkline = true;
         let mut interp = Interpreter::with_cap(1);
         let checkouts = activity_targets(&state.snapshot, None);
         schedule_effect(
@@ -7276,6 +7287,7 @@ mod tests {
     #[test]
     fn reload_counts_activity_when_the_snapshot_lands() {
         let (root, mut state) = git_app_state("ws-effect-activity-reload", "main", false);
+        state.activity_sparkline = true;
         crate::testutil::init_repo(&root.join("lib"));
         let mut interp = Interpreter::with_cap(4);
         let effect = state.dispatch(Action::Refresh);
@@ -7303,6 +7315,7 @@ mod tests {
     #[test]
     fn finished_pull_wave_recounts_activity_of_its_repos() {
         let (root, mut state) = git_app_state("ws-effect-activity-pull", "main", false);
+        state.activity_sparkline = true;
         let mut interp = Interpreter::with_cap(4);
         schedule_effect(
             &mut interp,
@@ -7323,6 +7336,128 @@ mod tests {
             .get("app")
             .expect("the pulled repo is counted");
         assert!(days[ACTIVITY_DAYS - 1] >= 1, "{days:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Run spawned jobs until none is left (at most `rounds` passes).
+    fn drain_jobs(interp: &mut Interpreter, state: &mut AppState, rounds: usize) {
+        for _ in 0..rounds {
+            let jobs = capture_jobs(interp, state);
+            if jobs.is_empty() {
+                return;
+            }
+            for (id, work) in jobs {
+                let outcome = work();
+                apply_id(interp, state, id, outcome);
+            }
+        }
+    }
+
+    /// Off (the launch default): the launch ask, a landed `r` reload, and a
+    /// finished Pull wave queue no activity count and run no git for it.
+    #[test]
+    fn sparkline_off_queues_no_activity_on_launch_reload_or_pull() {
+        let (root, mut state) = git_app_state("ws-effect-activity-off", "main", false);
+        assert!(!state.activity_sparkline, "off by default");
+        let mut interp = Interpreter::with_cap(4);
+        let checkouts = activity_targets(&state.snapshot, None);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::LoadActivity { checkouts },
+            &Action::None,
+        );
+        assert_eq!(interp.sched.queued_user_tag(UserTag::Activity), 0, "launch");
+
+        let effect = state.dispatch(Action::Refresh);
+        schedule_effect(&mut interp, &mut state, effect, &Action::Refresh);
+        drain_jobs(&mut interp, &mut state, 20);
+        assert!(!interp.activity_after_reload, "the reload landed");
+        assert_eq!(interp.sched.queued_user_tag(UserTag::Activity), 0, "reload");
+
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Pull {
+                repos: vec!["app".into()],
+            },
+            &Action::Pull,
+        );
+        drain_jobs(&mut interp, &mut state, 20);
+        assert!(!interp.kind_live(RunningOp::Pull), "the pull wave finished");
+        assert_eq!(interp.sched.queued_user_tag(UserTag::Activity), 0, "pull");
+        assert!(interp.activity_pending.is_empty());
+        assert!(state.activity.is_empty(), "no count ran");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Toggling the sparkline on mid-session queues one count per repo, so
+    /// the bars appear without a reload; toggling it off queues nothing.
+    #[test]
+    fn toggle_sparkline_on_queues_one_count_per_repo() {
+        let (root, mut state) = two_repo_state("ws-effect-activity-toggle");
+        state.ui_store_path = root.join("state").join("ui-state.json");
+        let mut interp = Interpreter::with_cap(1);
+        let effect = state.dispatch(Action::ToggleActivitySparkline);
+        assert!(state.activity_sparkline);
+        assert_eq!(
+            effect,
+            Effect::LoadActivity {
+                checkouts: vec!["app".to_string(), "lib".to_string()],
+            }
+        );
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            effect,
+            &Action::ToggleActivitySparkline,
+        );
+        assert_eq!(interp.sched.queued_user_tag(UserTag::Activity), 2);
+        drain_jobs(&mut interp, &mut state, 10);
+        assert!(state.activity.contains_key("app") && state.activity.contains_key("lib"));
+
+        let effect = state.dispatch(Action::ToggleActivitySparkline);
+        assert!(!state.activity_sparkline);
+        assert_eq!(effect, Effect::None);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            effect,
+            &Action::ToggleActivitySparkline,
+        );
+        assert_eq!(interp.sched.queued_user_tag(UserTag::Activity), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Toggling off before the queued counts start: their slots finish
+    /// and run no git, so no bars fill while the sparkline is off.
+    #[test]
+    fn toggle_sparkline_off_drops_counts_still_queued() {
+        let (root, mut state) = two_repo_state("ws-effect-activity-toggle-off");
+        state.ui_store_path = root.join("state").join("ui-state.json");
+        let mut interp = Interpreter::with_cap(1);
+        let effect = state.dispatch(Action::ToggleActivitySparkline);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            effect,
+            &Action::ToggleActivitySparkline,
+        );
+        assert_eq!(interp.sched.queued_user_tag(UserTag::Activity), 2);
+
+        let effect = state.dispatch(Action::ToggleActivitySparkline);
+        assert!(!state.activity_sparkline);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            effect,
+            &Action::ToggleActivitySparkline,
+        );
+        drain_jobs(&mut interp, &mut state, 10);
+        assert!(state.activity.is_empty(), "no count ran");
+        assert!(interp.activity_pending.is_empty());
+        assert_eq!(interp.sched.queued_user_tag(UserTag::Activity), 0);
+        assert!(capture_jobs(&mut interp, &mut state).is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 
