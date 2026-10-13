@@ -91,8 +91,9 @@ pub struct RuntimeKeys {
     pub comment_store: Option<PathBuf>,
     /// `viewedStore` (`WS_STATUS_VIEWED_STORE`): TUI viewed-marks JSON file.
     pub viewed_store: Option<PathBuf>,
-    /// `themeStore` (`WS_STATUS_THEME_STORE`): last-used TUI theme JSON file.
-    pub theme_store: Option<PathBuf>,
+    /// `uiStore` (`WS_STATUS_UI_STORE`): TUI view-state JSON file (last-used
+    /// theme, activity sparkline).
+    pub ui_store: Option<PathBuf>,
     /// `git` (`WORKSPACE_STATUS_GIT`): git binary path or command name.
     pub git: Option<PathBuf>,
     /// `termProgress` (`WS_STATUS_TERM_PROGRESS`): OSC 9;4 terminal progress
@@ -117,7 +118,7 @@ impl RuntimeKeys {
             update_check_store: over.update_check_store.or(self.update_check_store),
             comment_store: over.comment_store.or(self.comment_store),
             viewed_store: over.viewed_store.or(self.viewed_store),
-            theme_store: over.theme_store.or(self.theme_store),
+            ui_store: over.ui_store.or(self.ui_store),
             git: over.git.or(self.git),
             term_progress: over.term_progress.or(self.term_progress),
             smooth_scroll: over.smooth_scroll.or(self.smooth_scroll),
@@ -186,7 +187,7 @@ struct RawConfig {
     update_check_store: Option<serde_json::Value>,
     comment_store: Option<serde_json::Value>,
     viewed_store: Option<serde_json::Value>,
-    theme_store: Option<serde_json::Value>,
+    ui_store: Option<serde_json::Value>,
     git: Option<serde_json::Value>,
     term_progress: Option<serde_json::Value>,
     smooth_scroll: Option<serde_json::Value>,
@@ -478,7 +479,7 @@ fn expand_config_path(
 }
 
 /// Parse a store path key (`updateCheckStore`, `commentStore`,
-/// `viewedStore`, `themeStore`): absolute, or `~/...` expanded with `home`.
+/// `viewedStore`, `uiStore`): absolute, or `~/...` expanded with `home`.
 fn parse_path_key(
     file: &str,
     key: &str,
@@ -570,7 +571,7 @@ fn parse_runtime_keys(
         )?,
         comment_store: parse_path_key(file, "commentStore", parsed.comment_store.take(), home)?,
         viewed_store: parse_path_key(file, "viewedStore", parsed.viewed_store.take(), home)?,
-        theme_store: parse_path_key(file, "themeStore", parsed.theme_store.take(), home)?,
+        ui_store: parse_path_key(file, "uiStore", parsed.ui_store.take(), home)?,
         git: parse_git_key(file, parsed.git.take(), home)?,
         term_progress: parse_bool_key(file, "termProgress", parsed.term_progress.take())?,
         smooth_scroll: parse_bool_key(file, "smoothScroll", parsed.smooth_scroll.take())?,
@@ -624,7 +625,7 @@ const USER_ONLY_KEYS: [(&str, &str); 5] = [
     ("updateCheckStore", "WS_STATUS_UPDATE_CHECK_STORE"),
     ("commentStore", "WS_STATUS_COMMENT_STORE"),
     ("viewedStore", "WS_STATUS_VIEWED_STORE"),
-    ("themeStore", "WS_STATUS_THEME_STORE"),
+    ("uiStore", "WS_STATUS_UI_STORE"),
 ];
 
 /// Fail when the workspace file sets a [`USER_ONLY_KEYS`] key. `null`
@@ -643,7 +644,7 @@ fn reject_user_only_keys(
         parsed.update_check_store.is_some(),
         parsed.comment_store.is_some(),
         parsed.viewed_store.is_some(),
-        parsed.theme_store.is_some(),
+        parsed.ui_store.is_some(),
     ];
     match USER_ONLY_KEYS.iter().zip(set).find(|(_, is_set)| *is_set) {
         Some(((key, env_var), _)) => Err(format!(
@@ -772,7 +773,7 @@ where
 ///
 /// Path keys that start with `~/` expand with `$HOME`. The workspace file
 /// must not set `git`, `updateCheckStore`, `commentStore`, `viewedStore`, or
-/// `themeStore` (it can be committed to a repo); those keys are user-file only.
+/// `uiStore` (it can be committed to a repo); those keys are user-file only.
 pub fn load_config_files(
     user_file: Option<&Path>,
     workspace_root: &Path,
@@ -1556,7 +1557,7 @@ mod tests {
     fn runtime_keys_parse_valid_values() {
         let cfg = load_layered_home(
             Some(
-                r#"{"theme":" dracula ","themeMode":"light","glyphs":"ascii","watchMs":0,"fetchMs":60000,"fetchConcurrency":4,"updateCheck":false,"updateCheckStore":"~/state/update-check.json","commentStore":"/var/ws/comments.json","viewedStore":"~/viewed.json","themeStore":"~/state/theme.json","git":"git-wrapper","termProgress":false,"smoothScroll":false}"#,
+                r#"{"theme":" dracula ","themeMode":"light","glyphs":"ascii","watchMs":0,"fetchMs":60000,"fetchConcurrency":4,"updateCheck":false,"updateCheckStore":"~/state/update-check.json","commentStore":"/var/ws/comments.json","viewedStore":"~/viewed.json","uiStore":"~/state/ui-state.json","git":"git-wrapper","termProgress":false,"smoothScroll":false}"#,
             ),
             None,
             Some("/home/demo"),
@@ -1575,7 +1576,7 @@ mod tests {
                 update_check_store: Some(PathBuf::from("/home/demo/state/update-check.json")),
                 comment_store: Some(PathBuf::from("/var/ws/comments.json")),
                 viewed_store: Some(PathBuf::from("/home/demo/viewed.json")),
-                theme_store: Some(PathBuf::from("/home/demo/state/theme.json")),
+                ui_store: Some(PathBuf::from("/home/demo/state/ui-state.json")),
                 git: Some(PathBuf::from("git-wrapper")),
                 term_progress: Some(false),
                 smooth_scroll: Some(false),
@@ -1683,9 +1684,9 @@ mod tests {
             ),
             ("commentStore", "1", path_rule.to_string()),
             ("viewedStore", r#""~viewed.json""#, path_rule.to_string()),
-            ("themeStore", r#""theme.json""#, path_rule.to_string()),
-            ("themeStore", r#""  ""#, path_rule.to_string()),
-            ("themeStore", "true", path_rule.to_string()),
+            ("uiStore", r#""ui-state.json""#, path_rule.to_string()),
+            ("uiStore", r#""  ""#, path_rule.to_string()),
+            ("uiStore", "true", path_rule.to_string()),
             ("git", r#""bin/git""#, git_rule.to_string()),
             ("git", r#""./git""#, git_rule.to_string()),
             ("git", r#""~""#, git_rule.to_string()),
@@ -1796,7 +1797,7 @@ mod tests {
                 "WS_STATUS_COMMENT_STORE",
             ),
             ("viewedStore", r#""/tmp/v.json""#, "WS_STATUS_VIEWED_STORE"),
-            ("themeStore", r#""~/theme.json""#, "WS_STATUS_THEME_STORE"),
+            ("uiStore", r#""~/ui-state.json""#, "WS_STATUS_UI_STORE"),
         ] {
             let workspace_json = format!(r#"{{"ignoredRepos":[],"{key}":{raw}}}"#);
             let (root, user_file, workspace) = layered(None, Some(&workspace_json));
@@ -1823,7 +1824,7 @@ mod tests {
         }
         let cfg = load_layered(
             None,
-            Some(r#"{"ignoredRepos":[],"git":null,"commentStore":null,"themeStore":null}"#),
+            Some(r#"{"ignoredRepos":[],"git":null,"commentStore":null,"uiStore":null}"#),
         )
         .unwrap();
         assert_eq!(
@@ -1837,7 +1838,7 @@ mod tests {
     fn user_file_sets_user_only_keys_under_a_workspace_file() {
         let cfg = load_layered_home(
             Some(
-                r#"{"git":"git-wrapper","updateCheckStore":"~/u.json","commentStore":"/c.json","viewedStore":"/v.json","themeStore":"~/t.json"}"#,
+                r#"{"git":"git-wrapper","updateCheckStore":"~/u.json","commentStore":"/c.json","viewedStore":"/v.json","uiStore":"~/ui.json"}"#,
             ),
             Some(r#"{"ignoredRepos":[],"theme":"monokai"}"#),
             Some("/home/demo"),
@@ -1851,9 +1852,27 @@ mod tests {
         assert_eq!(cfg.runtime.comment_store, Some(PathBuf::from("/c.json")));
         assert_eq!(cfg.runtime.viewed_store, Some(PathBuf::from("/v.json")));
         assert_eq!(
-            cfg.runtime.theme_store,
-            Some(PathBuf::from("/home/demo/t.json"))
+            cfg.runtime.ui_store,
+            Some(PathBuf::from("/home/demo/ui.json"))
         );
         assert_eq!(cfg.runtime.theme, Some(ThemeId::Monokai));
+    }
+
+    #[test]
+    fn user_file_with_a_leftover_theme_store_key_ignores_it() {
+        let cfg = load_layered_home(
+            Some(r#"{"theme":"nord","themeStore":"~/state/theme.json"}"#),
+            Some(r#"{"ignoredRepos":[]}"#),
+            Some("/home/demo"),
+        )
+        .unwrap();
+        assert_eq!(cfg.runtime.ui_store, None, "themeStore is not uiStore");
+        assert_eq!(
+            cfg.runtime,
+            RuntimeKeys {
+                theme: Some(ThemeId::Nord),
+                ..RuntimeKeys::default()
+            }
+        );
     }
 }

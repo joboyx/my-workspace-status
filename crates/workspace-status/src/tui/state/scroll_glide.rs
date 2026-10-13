@@ -220,7 +220,7 @@ mod tests {
         let stores = [
             ("WS_STATUS_VIEWED_STORE", dir.join("viewed.json")),
             ("WS_STATUS_COMMENT_STORE", dir.join("comments.json")),
-            ("WS_STATUS_THEME_STORE", dir.join("theme.json")),
+            ("WS_STATUS_UI_STORE", dir.join("ui-state.json")),
         ];
         let settings = Settings::resolve(&Default::default(), |key| {
             stores

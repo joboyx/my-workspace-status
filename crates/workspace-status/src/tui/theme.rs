@@ -8,7 +8,7 @@
 //! [`DEFAULT_THEME_ID`] (Slate) ([`theme_id_from`]). The command palette
 //! has a `Theme: …` row per theme, dark then light ([`THEME_IDS`]):
 //! focusing one previews it, Enter sets it. The last-used theme lives in
-//! its own state file ([`super::theme_store`]), never in the config file.
+//! the UI-state file ([`super::ui_state_store`]), never in the config file.
 
 use ratatui::style::Color;
 
@@ -1917,9 +1917,9 @@ pub fn parse_theme_id(raw: &str) -> Option<ThemeId> {
 }
 
 /// Launch theme: a known `WS_STATUS_THEME` slug wins, then `last_used` (the
-/// state file, see [`super::theme_store::load_last_theme`]), then the config
-/// `theme` key, then [`DEFAULT_THEME_ID`]. An unset or unknown env value
-/// falls through to the last-used value, then the config value.
+/// UI-state file, see [`super::ui_state_store::load_ui_state`]), then the
+/// config `theme` key, then [`DEFAULT_THEME_ID`]. An unset or unknown env
+/// value falls through to the last-used value, then the config value.
 pub fn theme_id_from(
     env_value: Option<&str>,
     last_used: Option<ThemeId>,
