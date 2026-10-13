@@ -25,9 +25,9 @@ fn still_tokyo_tree(tui: &PtySession, screen: &str) -> bool {
 ///
 /// Docs: themes are palette `Theme: …` rows; bare `T` does nothing and
 /// only `gT` uses `T`. Help has no `cycle theme` row. Launch seed
-/// `WS_STATUS_THEME=tokyo-night` with an empty theme store. Shift+T and
+/// `WS_STATUS_THEME=tokyo-night` with an empty UI-state store. Shift+T and
 /// raw `T` must keep Tokyo Night painted, paint no Monokai (the old next
-/// theme), show no `theme:` toast, write no theme store, and leave the
+/// theme), show no `theme:` toast, write no UI-state store, and leave the
 /// user config file byte-identical. Lowercase `t` after them still
 /// flattens the tree, so the keys were read and the TUI is live.
 #[test]
@@ -35,13 +35,13 @@ fn pty_shift_t_does_not_cycle_theme() {
     let (_root, workspace) = daily_workspace();
     let config_home = workspace.join(".e2e-config");
     fs::create_dir_all(&config_home).unwrap();
-    let theme_store = workspace.join(".e2e-state").join("theme.json");
+    let ui_store = workspace.join(".e2e-state").join("ui-state.json");
     let mut tui = PtySession::open_with_env(
         &workspace,
         &[
             ("WS_STATUS_THEME", "tokyo-night"),
             ("XDG_CONFIG_HOME", config_home.to_str().unwrap()),
-            ("WS_STATUS_THEME_STORE", theme_store.to_str().unwrap()),
+            ("WS_STATUS_UI_STORE", ui_store.to_str().unwrap()),
         ],
     );
     tui.wait_contains("README.md", WAIT);
@@ -89,9 +89,9 @@ fn pty_shift_t_does_not_cycle_theme() {
         WAIT,
     );
     assert!(
-        !theme_store.exists(),
-        "`T` must not write the theme store {}",
-        theme_store.display()
+        !ui_store.exists(),
+        "`T` must not write the UI-state store {}",
+        ui_store.display()
     );
     let config = user_config_file(&config_home);
     assert_eq!(

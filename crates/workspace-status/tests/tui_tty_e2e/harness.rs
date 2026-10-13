@@ -35,9 +35,9 @@ pub const SGR_WHEEL_RIGHT_MOTION: u8 = 67 | 32;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(12);
 
-/// Process-wide spawn counter for the default theme store file name, so
+/// Process-wide spawn counter for the default UI-state store file name, so
 /// each spawn starts with no last-used theme.
-static THEME_STORE_SEQ: AtomicU64 = AtomicU64::new(0);
+static UI_STORE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// User config the harness writes before a spawn: the v0.1.244 look
 /// (Tokyo Night, boxed panes on the terminal background). Existing PTY and
@@ -45,8 +45,8 @@ static THEME_STORE_SEQ: AtomicU64 = AtomicU64::new(0);
 /// not move them. `WS_STATUS_THEME` in a test's env still beats this theme.
 /// `themeMode` `dark` keeps the terminal background out of it: the desktop
 /// xterm is white, and `auto` would pick the light twin there.
-/// `WS_STATUS_THEME_MODE` in a test's env beats this pin. A spawn starts with an empty theme store, so a last-used theme cannot
-/// beat it unless the test passes a seeded `WS_STATUS_THEME_STORE`.
+/// `WS_STATUS_THEME_MODE` in a test's env beats this pin. A spawn starts with an empty UI-state store, so a last-used theme cannot
+/// beat it unless the test passes a seeded `WS_STATUS_UI_STORE`.
 pub const BASELINE_USER_CONFIG: &str =
     "{\"theme\":\"tokyo-night\",\"themeMode\":\"dark\",\"viewDefaults\":{\"background\":\"terminal\"}}\n";
 
@@ -114,11 +114,11 @@ impl PtySession {
     ///
     /// Existing tests keep `WS_STATUS_WATCH_MS=0` / `WS_STATUS_FETCH_MS=0`
     /// unless an override is passed here. `WS_STATUS_COMMENT_STORE`,
-    /// `WS_STATUS_VIEWED_STORE`, and `WS_STATUS_THEME_STORE` in `extra_env`
+    /// `WS_STATUS_VIEWED_STORE`, and `WS_STATUS_UI_STORE` in `extra_env`
     /// replace the `.e2e-state` defaults. Tests that omit those keys still
-    /// use those defaults. The default theme store is a new file for each
+    /// use those defaults. The default UI-state store is a new file for each
     /// spawn: a `T` cycle in one spawn reaches a later spawn only when the
-    /// test passes the same `WS_STATUS_THEME_STORE` to both. A parent
+    /// test passes the same `WS_STATUS_UI_STORE` to both. A parent
     /// `WS_STATUS_THEME` is dropped; pass it here to seed a theme.
     pub fn open_with_env(workspace: &Path, extra_env: &[(&str, &str)]) -> Self {
         Self::open_size_with_env(workspace, COLS, ROWS, extra_env)
@@ -284,13 +284,13 @@ impl PtySession {
         if !extra_has("WS_STATUS_COMMENT_STORE") {
             cmd.env("WS_STATUS_COMMENT_STORE", state_home.join("comments.json"));
         }
-        // New theme store file per spawn: an operator last-used theme cannot
+        // New UI-state store file per spawn: an operator last-used theme cannot
         // leak in, `T` never writes the operator file, and one spawn's
         // theme does not reach the next unless the test passes one path.
-        if !extra_has("WS_STATUS_THEME_STORE") {
-            let seq = THEME_STORE_SEQ.fetch_add(1, Ordering::Relaxed);
-            let theme_store = state_home.join(format!("theme-{seq}.json"));
-            cmd.env("WS_STATUS_THEME_STORE", &theme_store);
+        if !extra_has("WS_STATUS_UI_STORE") {
+            let seq = UI_STORE_SEQ.fetch_add(1, Ordering::Relaxed);
+            let ui_store = state_home.join(format!("ui-state-{seq}.json"));
+            cmd.env("WS_STATUS_UI_STORE", &ui_store);
         }
         let update_store = state_home.join("update-check.json");
         write_update_check(&update_store, last_check_unix);
