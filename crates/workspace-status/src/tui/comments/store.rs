@@ -399,6 +399,17 @@ fn parse_comment_workspaces(text: &str) -> io::Result<BTreeMap<String, CommentSt
     }
 }
 
+/// Check the bytes of a present comment store file the way
+/// [`save_comment_store`] does before it merges: UTF-8, then version-1 or
+/// version-2 store JSON. `Err` says why a save would refuse the file and
+/// leave it unchanged. Read-only: it never touches the file.
+pub(crate) fn check_comment_store_bytes(bytes: &[u8]) -> Result<(), String> {
+    let text = std::str::from_utf8(bytes).map_err(|err| err.to_string())?;
+    parse_comment_workspaces(text)
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+}
+
 fn load_comment_workspaces(text: &str) -> BTreeMap<String, CommentStore> {
     parse_comment_workspaces(text).unwrap_or_default()
 }
