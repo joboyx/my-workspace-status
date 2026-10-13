@@ -157,10 +157,6 @@ pub fn save_theme(path: &Path, theme: ThemeId) -> io::Result<()> {
 /// With no stored theme the file holds no `theme` key, so the session theme
 /// is not pinned. See [`update_store`] for the create, foreign-file, and lock
 /// rules.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the palette sparkline toggle is its first caller")
-)]
 pub fn save_activity_sparkline(path: &Path, on: bool) -> io::Result<()> {
     update_store(path, |file| file.activity_sparkline = on)
 }

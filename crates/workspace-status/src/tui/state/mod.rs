@@ -42,7 +42,7 @@ use crate::snapshot::{
 #[cfg(test)]
 use super::action::Action;
 use super::action::{Effect, ExternalDiffKind, SearchFilesOption};
-use super::activity::ACTIVITY_DAYS;
+use super::activity::{activity_targets, ACTIVITY_DAYS};
 use super::anim::{next_tick_ms, AnimNeeds, RemoteActivity, ScrollGlide};
 use super::branches::{
     branch_name_error, can_open_branch_picker, checkoutable_branch_names, merge_rev_for_commit,
@@ -120,7 +120,7 @@ use super::tree::{
     build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, visible_for_tree,
     visible_window, workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
 };
-use super::ui_state_store::save_theme;
+use super::ui_state_store::{save_activity_sparkline, save_theme};
 use super::undercurl::UndercurlHit;
 use super::viewed::{
     collect_current_fingerprints, fingerprint_file_change, load_viewed_store, reconcile_viewed,
@@ -801,9 +801,10 @@ pub struct AppState {
     pub viewed_path: PathBuf,
     pub comment_store: CommentStore,
     pub comment_path: PathBuf,
-    /// UI-state store that a palette `Theme: …` row writes and the launch
-    /// theme and activity sparkline load from (see
-    /// [`crate::tui::ui_state_store`]).
+    /// UI-state store path (see [`crate::tui::ui_state_store`]). The
+    /// palette `Theme: …` rows and Toggle activity sparkline write it;
+    /// [`crate::settings::Settings::resolve`] loads it at launch, not
+    /// `AppState`.
     pub ui_store_path: PathBuf,
     pub comment: Option<CommentPrompt>,
     pub comment_export: Option<CommentExport>,
@@ -2451,6 +2452,30 @@ impl AppState {
             self.status = StatusMessage::error(persist_failed_status("theme", err));
         }
         Effect::None
+    }
+
+    /// Palette Toggle activity sparkline: flip the tree bars in this session
+    /// and save the new value to the UI-state store at once. A failed save
+    /// keeps the flip. Turning it on asks for the counts of every repo, so
+    /// the bars appear without a reload.
+    fn toggle_activity_sparkline(&mut self) -> Effect {
+        let on = !self.activity_sparkline;
+        self.activity_sparkline = on;
+        self.status = if on {
+            "Activity sparkline on".into()
+        } else {
+            "Activity sparkline off".into()
+        };
+        if let Err(err) = save_activity_sparkline(&self.ui_store_path, on) {
+            self.status = StatusMessage::error(persist_failed_status("sparkline", err));
+        }
+        if on {
+            Effect::LoadActivity {
+                checkouts: activity_targets(&self.snapshot, None),
+            }
+        } else {
+            Effect::None
+        }
     }
 
     fn op_effect(&mut self, op: Op) -> Effect {
@@ -15342,6 +15367,54 @@ mod tests {
             "{\n  \"version\": 1,\n  \"theme\": \"nord\",\n  \"activitySparkline\": true\n}\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The toggle writes the store at once and keeps the stored theme; a
+    /// second toggle writes it back off.
+    #[test]
+    fn toggle_activity_sparkline_saves_at_once_and_keeps_the_theme() {
+        let (mut app, dir) = state_with_ui_store("ws-sparkline-toggle-save");
+        std::fs::create_dir_all(app.ui_store_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &app.ui_store_path,
+            "{\"version\": 1, \"theme\": \"dracula\"}\n",
+        )
+        .unwrap();
+        assert!(!app.activity_sparkline);
+        let effect = app.dispatch(Action::ToggleActivitySparkline);
+        assert!(app.activity_sparkline);
+        assert!(matches!(effect, Effect::LoadActivity { .. }), "{effect:?}");
+        assert_eq!(app.status, "Activity sparkline on");
+        assert_eq!(app.status.kind(), StatusKind::Info);
+        let stored = load_ui_state(&app.ui_store_path);
+        assert!(stored.activity_sparkline, "saved on");
+        assert_eq!(stored.theme, Some(ThemeId::Dracula), "theme kept");
+
+        assert_eq!(app.dispatch(Action::ToggleActivitySparkline), Effect::None);
+        assert!(!app.activity_sparkline);
+        assert_eq!(app.status, "Activity sparkline off");
+        let stored = load_ui_state(&app.ui_store_path);
+        assert!(!stored.activity_sparkline, "saved off");
+        assert_eq!(stored.theme, Some(ThemeId::Dracula), "theme kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed save names the sparkline store; the session still flips.
+    #[test]
+    fn toggle_activity_sparkline_names_save_failure_and_still_flips() {
+        let mut app = state();
+        let (root, path) = unwritable_store_path("ws-sparkline-save-fail");
+        app.ui_store_path = path;
+        let effect = app.dispatch(Action::ToggleActivitySparkline);
+        assert!(app.activity_sparkline, "session still flips");
+        assert!(matches!(effect, Effect::LoadActivity { .. }), "{effect:?}");
+        assert_eq!(app.status.kind(), StatusKind::Error);
+        assert!(
+            app.status.contains("sparkline save failed"),
+            "failed persist must name the sparkline: {}",
+            app.status
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

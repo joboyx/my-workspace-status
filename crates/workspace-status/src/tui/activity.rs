@@ -7,6 +7,10 @@
 //! The jobs never run on the draw / event thread: the loop queues them
 //! after the first frame, after a Pull wave, and when a full reload (`r`)
 //! lands.
+//!
+//! The sparkline is off by default (palette Toggle activity sparkline,
+//! saved in the UI-state store). The jobs run and the bars paint only
+//! while it is on; turning it on queues a count for every repo.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
