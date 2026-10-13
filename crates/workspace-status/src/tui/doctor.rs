@@ -125,7 +125,7 @@ pub struct GitProbe {
     pub path: String,
     /// True when `WORKSPACE_STATUS_GIT` or config `git` set it.
     pub explicit: bool,
-    /// First line of `<git> --version`, or why it did not run.
+    /// Trimmed stdout of `<git> --version`, or why it did not run.
     pub version: Result<String, String>,
 }
 
@@ -632,8 +632,8 @@ fn hyperlinks(p: &Probe) -> Check {
             CheckGroup::Terminal,
             NAME,
             CheckStatus::Ok,
-            "tmux terminal-features has hyperlinks: links on PR badges, commit hashes and \
-             paths pass through.",
+            "tmux terminal-features has a hyperlinks entry: tmux passes the OSC 8 links on PR \
+             badges, commit hashes and paths when that entry matches this terminal.",
             None,
         ),
         Some(_) => row(
@@ -1114,6 +1114,41 @@ fn rust_toolchain(p: &Probe) -> Option<Check> {
 
 /* ── FILES ──────────────────────────────────────────────────────────────── */
 
+/// A character that can continue a path component.
+fn is_name_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '~')
+}
+
+/// `text` with each whole-path occurrence of `home` shown as `~`.
+///
+/// An occurrence counts only when it starts a path (not after a name
+/// character or a separator) and ends at a separator or where the path
+/// ends, so `HOME=/home/u` leaves `/home/user2/x` alone.
+fn tilde_text(text: &str, home: &str) -> String {
+    let home = home.trim_end_matches(['/', '\\']);
+    if home.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = 0;
+    for (at, _) in text.match_indices(home) {
+        if at < rest {
+            continue;
+        }
+        let before = text[..at].chars().next_back();
+        let after = text[at + home.len()..].chars().next();
+        let starts = before.is_none_or(|c| !is_name_char(c) && c != '/' && c != '\\');
+        let ends = after.is_none_or(|c| c == '/' || c == '\\' || !is_name_char(c));
+        if starts && ends {
+            out.push_str(&text[rest..at]);
+            out.push('~');
+            rest = at + home.len();
+        }
+    }
+    out.push_str(&text[rest..]);
+    out
+}
+
 fn config_files(p: &Probe) -> Check {
     const NAME: &str = "Config files";
     let describe = |file: &FileProbe| {
@@ -1125,10 +1160,10 @@ fn config_files(p: &Probe) -> Check {
         format!("{} {state}", p.tilde(&file.path))
     };
     if let Some(error) = &p.config.error {
-        let mut text = error.clone();
-        if let Some(home) = p.var("HOME") {
-            text = text.replace(home, "~");
-        }
+        let text = match p.var("HOME") {
+            Some(home) => tilde_text(error, home),
+            None => error.clone(),
+        };
         return row(
             CheckGroup::Files,
             NAME,
@@ -1284,7 +1319,6 @@ where
     let var = |key: &str| env.get(key).map(String::as_str).filter(|v| !v.is_empty());
 
     let path_var = get("PATH");
-    let pathext = get("PATHEXT").map(|value| value.to_string_lossy().into_owned());
     let editor_program = program_of(&resolve_editor(
         inputs.editor_config.filter(|v| !v.trim().is_empty()),
         var("VISUAL"),
@@ -1296,7 +1330,7 @@ where
         .iter()
         .map(|cmd| cmd.to_string())
         .chain([editor_program, diff_program, browser])
-        .filter(|cmd| find_on_path(cmd, path_var.as_deref(), pathext.as_deref(), os).is_some())
+        .filter(|cmd| find_on_path(cmd, path_var.as_deref(), os).is_some())
         .collect();
 
     let settings = inputs.settings;
@@ -1417,56 +1451,47 @@ fn run_read_only(program: &std::ffi::OsStr, args: &[&str]) -> Result<String, Str
         .map_or_else(|| output.status.to_string(), str::to_string))
 }
 
-/// Windows `PATHEXT` when the variable is unset.
-const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
+/// True when the file name of `cmd` (after the last separator) has an
+/// extension, as `Path::extension` reads it: a `.` that is not the first
+/// character.
+fn has_extension(cmd: &str, os: Os) -> bool {
+    let name = if os == Os::Windows {
+        cmd.rsplit(['/', '\\']).next()
+    } else {
+        cmd.rsplit('/').next()
+    };
+    name.and_then(|name| name.rfind('.'))
+        .is_some_and(|dot| dot > 0)
+}
 
-/// Find `cmd` the way a shell would: a name with a path separator is
-/// checked as a path; a bare name is looked up in each `PATH` entry. On
-/// Windows a name without a `PATHEXT` extension is tried with each one.
-fn find_on_path(
-    cmd: &str,
-    path_var: Option<&std::ffi::OsStr>,
-    pathext: Option<&str>,
-    os: Os,
-) -> Option<PathBuf> {
+/// Find `cmd` the way Rust std `Command::new` starts it, so a found
+/// program is one the app can really spawn.
+///
+/// A name with a path separator is checked as a path; a bare name is looked
+/// up in each `PATH` entry. On Windows, std does not use `PATHEXT`: a bare
+/// name with no extension is tried only as `<name>.exe` (so a `code.cmd`
+/// shim does not count), a name with an extension is used as is, and a path
+/// with no extension gets `.exe` only when the bare path is not there.
+fn find_on_path(cmd: &str, path_var: Option<&std::ffi::OsStr>, os: Os) -> Option<PathBuf> {
     if cmd.is_empty() {
         return None;
     }
-    let names: Vec<String> = if os == Os::Windows {
-        let exts: Vec<&str> = pathext
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or(DEFAULT_PATHEXT)
-            .split(';')
-            .map(str::trim)
-            .filter(|ext| !ext.is_empty())
-            .collect();
-        let lower = cmd.to_ascii_lowercase();
-        if exts
-            .iter()
-            .any(|ext| lower.ends_with(&ext.to_ascii_lowercase()))
-        {
-            vec![cmd.to_string()]
-        } else {
-            exts.iter().map(|ext| format!("{cmd}{ext}")).collect()
-        }
-    } else {
-        vec![cmd.to_string()]
-    };
-    let has_separator = cmd.contains('/') || (os == Os::Windows && cmd.contains('\\'));
+    let windows = os == Os::Windows;
+    let has_separator = cmd.contains('/') || (windows && cmd.contains('\\'));
+    let exe_name = (windows && !has_extension(cmd, os)).then(|| format!("{cmd}.exe"));
     if has_separator {
-        return names
-            .iter()
+        let bare = PathBuf::from(cmd);
+        if is_executable(&bare) {
+            return Some(bare);
+        }
+        return exe_name
             .map(PathBuf::from)
-            .find(|candidate| is_executable(candidate));
+            .filter(|candidate| is_executable(candidate));
     }
+    let name = exe_name.unwrap_or_else(|| cmd.to_string());
     std::env::split_paths(path_var?)
         .filter(|dir| !dir.as_os_str().is_empty())
-        .flat_map(|dir| {
-            names
-                .iter()
-                .map(move |name| dir.join(name))
-                .collect::<Vec<_>>()
-        })
+        .map(|dir| dir.join(&name))
         .find(|candidate| is_executable(candidate))
 }
 
@@ -2187,60 +2212,119 @@ mod tests {
         }
     }
 
+    /// File name of a fake executable `name` that the host's std
+    /// `Command::new(name)` would start (`name.exe` on Windows).
+    fn host_exe(name: &str) -> String {
+        if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.to_string()
+        }
+    }
+
     #[test]
     fn find_on_path_uses_path_entries_and_paths() {
+        let os = Os::current();
         let dir = unique_dir("ws-doctor-path");
         let a = dir.join("a");
         let b = dir.join("b");
         fs::create_dir_all(&a).unwrap();
         fs::create_dir_all(&b).unwrap();
-        make_exec(&b.join("fake-tool"));
+        let tool = b.join(host_exe("fake-tool"));
+        make_exec(&tool);
         fs::write(a.join("plain-file"), b"").unwrap();
-        fs::create_dir_all(a.join("a-dir")).unwrap();
+        fs::create_dir_all(a.join(host_exe("a-dir"))).unwrap();
         let path = std::env::join_paths([&a, &b]).unwrap();
         assert_eq!(
-            find_on_path("fake-tool", Some(&path), None, Os::Linux),
-            Some(b.join("fake-tool"))
+            find_on_path("fake-tool", Some(&path), os),
+            Some(tool.clone())
         );
-        assert_eq!(find_on_path("missing", Some(&path), None, Os::Linux), None);
-        assert_eq!(find_on_path("a-dir", Some(&path), None, Os::Linux), None);
+        assert_eq!(find_on_path("missing", Some(&path), os), None);
+        assert_eq!(find_on_path("a-dir", Some(&path), os), None);
         #[cfg(unix)]
         assert_eq!(
-            find_on_path("plain-file", Some(&path), None, Os::Linux),
+            find_on_path("plain-file", Some(&path), os),
             None,
             "no execute bit"
         );
-        assert_eq!(find_on_path("fake-tool", None, None, Os::Linux), None);
-        let direct = b.join("fake-tool").display().to_string();
-        assert!(find_on_path(&direct, None, None, Os::Linux).is_some());
-        assert_eq!(find_on_path("", Some(&path), None, Os::Linux), None);
+        assert_eq!(find_on_path("fake-tool", None, os), None);
+        let direct = tool.display().to_string();
+        assert_eq!(find_on_path(&direct, None, os), Some(tool.clone()));
+        assert_eq!(find_on_path("", Some(&path), os), None);
         fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn find_on_path_honours_pathext_on_windows() {
-        let dir = unique_dir("ws-doctor-pathext");
+    fn find_on_path_mirrors_std_command_on_windows() {
+        let dir = unique_dir("ws-doctor-winexe");
         fs::create_dir_all(&dir).unwrap();
-        make_exec(&dir.join("tool.CMD"));
+        make_exec(&dir.join("tool.exe"));
+        make_exec(&dir.join("shim.cmd"));
+        make_exec(&dir.join("bare"));
         let path = std::env::join_paths([&dir]).unwrap();
+        let win = Os::Windows;
         assert_eq!(
-            find_on_path("tool", Some(&path), Some(".EXE;.CMD"), Os::Windows),
-            Some(dir.join("tool.CMD"))
+            find_on_path("tool", Some(&path), win),
+            Some(dir.join("tool.exe")),
+            "a bare name is tried as <name>.exe"
         );
         assert_eq!(
-            find_on_path("tool", Some(&path), Some(".EXE"), Os::Windows),
-            None
+            find_on_path("shim", Some(&path), win),
+            None,
+            "no PATHEXT: a .cmd shim is not what Command::new starts"
         );
         assert_eq!(
-            find_on_path("tool.CMD", Some(&path), Some(".EXE;.CMD"), Os::Windows),
-            Some(dir.join("tool.CMD"))
+            find_on_path("shim.cmd", Some(&path), win),
+            Some(dir.join("shim.cmd")),
+            "a name with an extension is used as is"
         );
         assert_eq!(
-            find_on_path("tool", Some(&path), None, Os::Windows),
-            Some(dir.join("tool.CMD")),
-            "default PATHEXT"
+            find_on_path("bare", Some(&path), win),
+            None,
+            "a bare name never matches a file without .exe"
         );
+        // A path: as is when it is there, else `.exe` when it has no extension.
+        let as_path = |name: &str| dir.join(name).display().to_string();
+        assert_eq!(
+            find_on_path(&as_path("bare"), None, win),
+            Some(dir.join("bare"))
+        );
+        assert_eq!(
+            find_on_path(&as_path("tool"), None, win),
+            Some(dir.join("tool.exe"))
+        );
+        assert_eq!(find_on_path(&as_path("shim"), None, win), None);
+        assert_eq!(find_on_path(&as_path("tool.dll"), None, win), None);
+        // Unix never appends `.exe`.
+        assert_eq!(find_on_path("tool", Some(&path), Os::Linux), None);
+        assert!(has_extension("C:\\bin\\tool.exe", win));
+        assert!(!has_extension("C:\\bin.d\\tool", win));
+        assert!(!has_extension(".hidden", win));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn tilde_text_replaces_only_whole_home_paths() {
+        let home = "/home/user";
+        assert_eq!(
+            tilde_text("/home/user/.config/x.json glyphs must be", home),
+            "~/.config/x.json glyphs must be"
+        );
+        assert_eq!(tilde_text("/home/user2/x", home), "/home/user2/x");
+        assert_eq!(tilde_text("/srv/home/user/x", home), "/srv/home/user/x");
+        assert_eq!(tilde_text("/home/user: denied", home), "~: denied");
+        assert_eq!(tilde_text("/home/user", "/home/user/"), "~");
+        assert_eq!(
+            tilde_text("a /home/user/x and /home/user/y", home),
+            "a ~/x and ~/y"
+        );
+        assert_eq!(tilde_text("/x", ""), "/x");
+        let mut p = base(Os::Linux);
+        set(&mut p, "HOME", "/home/u");
+        p.config.error = Some("/home/user2/config.json is not valid".to_string());
+        assert!(get(&p, "Config files")
+            .why
+            .starts_with("/home/user2/config.json"));
     }
 
     #[test]
@@ -2312,7 +2396,7 @@ mod tests {
         for sub in [&workspace, &state, &bin] {
             fs::create_dir_all(sub).unwrap();
         }
-        make_exec(&bin.join("gh"));
+        make_exec(&bin.join(host_exe("gh")));
         let user = dir.join("config.json");
         fs::write(&user, br#"{"glyphs":"ascii"}"#).unwrap();
         fs::write(workspace.join(CONFIG_FILENAME), br#"{"ignoredRepos":[]}"#).unwrap();
