@@ -17,6 +17,8 @@ mod harness;
 #[cfg(unix)]
 mod human;
 #[cfg(unix)]
+mod pty_doctor;
+#[cfg(unix)]
 mod pty_hyperlinks;
 #[cfg(unix)]
 mod pty_live_g_chords;
