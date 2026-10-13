@@ -200,6 +200,7 @@ mod tests {
         assert!(overlay_blocks_background_ticks(InputMode::CreateBranch));
         assert!(overlay_blocks_background_ticks(InputMode::Comment));
         assert!(overlay_blocks_background_ticks(InputMode::CommentExport));
+        assert!(overlay_blocks_background_ticks(InputMode::Doctor));
         assert!(!overlay_blocks_background_ticks(InputMode::Normal {
             search_active: false
         }));

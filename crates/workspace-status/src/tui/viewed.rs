@@ -232,6 +232,17 @@ fn parse_viewed_workspaces(text: &str) -> io::Result<BTreeMap<String, ViewedStor
     }
 }
 
+/// Check the bytes of a present viewed store file the way
+/// [`save_viewed_store`] does before it merges: UTF-8, then version-1 or
+/// version-2 store JSON. `Err` says why a save would refuse the file and
+/// leave it unchanged. Read-only: it never touches the file.
+pub(crate) fn check_viewed_store_bytes(bytes: &[u8]) -> Result<(), String> {
+    let text = std::str::from_utf8(bytes).map_err(|err| err.to_string())?;
+    parse_viewed_workspaces(text)
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+}
+
 fn load_viewed_workspaces(text: &str) -> BTreeMap<String, ViewedStore> {
     parse_viewed_workspaces(text).unwrap_or_default()
 }

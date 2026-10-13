@@ -15,6 +15,7 @@ mod commit_files;
 mod ctrl_c_exit;
 mod diff;
 pub(crate) mod diff_tool;
+pub(crate) mod doctor;
 mod drill;
 pub(crate) mod editor;
 mod effect;

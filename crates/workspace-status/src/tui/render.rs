@@ -43,6 +43,7 @@ use super::diff::{
     diff_pane_mode_label, diff_row_content_width, diff_wrap_row_heights, gutter_width,
     section_header, wrap_viewport_start, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
 };
+use super::doctor::{summary as doctor_summary, Check, CheckGroup, CheckStatus};
 use super::drill::DrillView;
 use super::explorer::{ExplorerRow, ExplorerStatus};
 use super::gates::ListFocusTarget;
@@ -51,8 +52,8 @@ use super::help::{
     help_entry_matches, help_entry_visual_lines, help_groups, help_idle_footer,
     help_idle_footer_lines, help_inner_width, help_key_width, help_legend_glyph_width,
     help_legend_layout, help_legend_matches, help_legend_name_width, help_legend_visual_lines,
-    help_version_label, wrap_help_footer, HELP_LEGEND_HEAD_ROWS, HELP_LEGEND_TITLE,
-    HELP_SEARCH_ESC_HINT,
+    help_version_label, wrap_help_description, wrap_help_footer, HELP_LEGEND_HEAD_ROWS,
+    HELP_LEGEND_TITLE, HELP_SEARCH_ESC_HINT,
 };
 use super::hyperlink::{file_url, local_host, LinkHit};
 use super::icons::{
@@ -218,6 +219,10 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
     state.layout.wake_ms = None;
     state.layout.popover = None;
     let area = frame.area();
+    // The whole frame, also when it is too small to paint (the Doctor
+    // reports this size).
+    state.layout.term_cols = area.width;
+    state.layout.term_rows = area.height;
     state.too_small = area.width < MIN_TERM_COLS || area.height < MIN_TERM_ROWS;
     if state.too_small {
         draw_too_small(frame, area, state);
@@ -269,7 +274,6 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
     state.layout.explorer_tree_rows = Rect::default();
     state.layout.explorer_preview_rows = Rect::default();
     state.layout.file_view_rows = Rect::default();
-    state.layout.term_cols = area.width;
     state.layout.pane_height = chunks[1].height;
     if state.is_explorer_tab() {
         draw_explorer_tab(frame, chunks[1], state);
@@ -323,6 +327,12 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
             DialogKind::GraphFocusPicker => draw_graph_focus_picker(frame, rect, state),
             DialogKind::QuickOpen => draw_quick_open(frame, rect, state),
             DialogKind::SearchFiles => draw_search_files(frame, rect, state),
+            DialogKind::Doctor => {
+                let top = draw_doctor(frame, rect, state);
+                if let Some(doctor) = state.doctor.as_mut() {
+                    doctor.scroll = top;
+                }
+            }
         }
         drop_hits_under(&mut state.layout, rect);
         // The curls left are outside the box: they recede with the cells.
@@ -4688,6 +4698,245 @@ fn draw_blame_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         Paragraph::new(lines).block(overlay_block(accent, panel)),
         area,
     );
+}
+
+/// Doctor dialog title.
+const DOCTOR_TITLE: &str = "Doctor · setup checkup";
+
+/// Doctor footer chips.
+const DOCTOR_FOOTER: &str = "j/k move · y copy fix · r re-run · Esc close";
+
+/// Columns before a Doctor row's name and under it: the cursor mark (2),
+/// the status chip (4), and a space.
+const DOCTOR_INDENT: usize = 7;
+
+/// Section header the Doctor paints above `group`'s rows.
+fn doctor_group_title(group: CheckGroup) -> &'static str {
+    match group {
+        CheckGroup::Terminal => "TERMINAL",
+        CheckGroup::Tools => "TOOLS",
+        CheckGroup::Files => "FILES",
+    }
+}
+
+/// Status chip text, so a row reads without colour, and its theme colour.
+fn doctor_status_chip(status: CheckStatus, palette: Palette) -> (&'static str, Color) {
+    match status {
+        CheckStatus::Ok => ("ok", palette.added),
+        CheckStatus::Warn => ("warn", palette.modified),
+        CheckStatus::Fail => ("fail", palette.deleted),
+    }
+}
+
+/// `<n> ok · <n> warn · <n> fail`, each count in its chip colour.
+fn doctor_summary_line(checks: &[Check], palette: Palette) -> Line<'static> {
+    let counts = doctor_summary(checks);
+    let sep = || Span::styled(" · ", Style::default().fg(palette.muted));
+    let part = |n: usize, status: CheckStatus| {
+        let (label, color) = doctor_status_chip(status, palette);
+        Span::styled(format!("{n} {label}"), Style::default().fg(color))
+    };
+    Line::from(vec![
+        part(counts.ok, CheckStatus::Ok),
+        sep(),
+        part(counts.warn, CheckStatus::Warn),
+        sep(),
+        part(counts.fail, CheckStatus::Fail),
+    ])
+}
+
+/// Doctor body: a header per group, then per row its name line (cursor
+/// mark, status chip, name), the wrapped why, the fix hint, and the copy
+/// line. Returns the lines and the cursor row's line range, which starts at
+/// its group header when the row is the first of its group.
+fn doctor_body_lines(
+    checks: &[Check],
+    cursor: usize,
+    width: usize,
+    ascii: bool,
+    palette: Palette,
+) -> (Vec<Line<'static>>, std::ops::Range<usize>) {
+    let text_width = width.saturating_sub(DOCTOR_INDENT).max(1);
+    let indent = " ".repeat(DOCTOR_INDENT);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut focused = 0..0;
+    let mut group = None;
+    for (index, check) in checks.iter().enumerate() {
+        let start = lines.len();
+        if group != Some(check.group) {
+            group = Some(check.group);
+            lines.push(Line::from(Span::styled(
+                doctor_group_title(check.group),
+                Style::default()
+                    .fg(palette.heading)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        }
+        let selected = index == cursor;
+        let bg = if selected {
+            palette.cursor_bg
+        } else {
+            palette.panel
+        };
+        let mark = match (selected, ascii) {
+            (false, _) => "  ",
+            (true, true) => "> ",
+            (true, false) => "❯ ",
+        };
+        let (chip, color) = doctor_status_chip(check.status, palette);
+        let name = format!(" {}", check.name);
+        let used = DOCTOR_INDENT - 1 + visible_width(&name);
+        lines.push(Line::from(vec![
+            Span::styled(mark, Style::default().fg(palette.cursor).bg(bg)),
+            Span::styled(
+                format!("{chip:<4}"),
+                Style::default()
+                    .fg(color)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(name, Style::default().fg(palette.file).bg(bg)),
+            // The cursor bar runs to the box edge.
+            Span::styled(
+                " ".repeat(width.saturating_sub(used)),
+                Style::default().bg(bg),
+            ),
+        ]));
+        let mut text = |body: &str, style: Style| {
+            for row in wrap_help_description(body, text_width) {
+                lines.push(Line::from(vec![
+                    Span::raw(indent.clone()),
+                    Span::styled(row, style),
+                ]));
+            }
+        };
+        text(&check.why, Style::default().fg(palette.repo));
+        if let Some(fix) = check.fix.as_ref() {
+            if let Some(hint) = fix.hint.as_deref() {
+                text(hint, Style::default().fg(palette.muted));
+            }
+            if let Some(copy) = fix.copy.as_deref() {
+                // The paste line keeps its spaces: cut by columns, not words.
+                let code = Style::default()
+                    .fg(palette.cursor)
+                    .bg(palette.cursor_bg_inactive);
+                for row in wrap_cols(copy, text_width) {
+                    lines.push(Line::from(vec![
+                        Span::raw(indent.clone()),
+                        Span::styled(row, code),
+                    ]));
+                }
+            }
+        }
+        if selected {
+            focused = start..lines.len();
+        }
+    }
+    (lines, focused)
+}
+
+/// First body line to paint so `focused` stays in view.
+///
+/// Starts from the last paint's `top` and moves only as far as it must; a
+/// row taller than the view shows its top. Never scrolls past the end.
+fn doctor_scroll_top(
+    top: usize,
+    focused: std::ops::Range<usize>,
+    total: usize,
+    view: usize,
+) -> usize {
+    if view == 0 {
+        return 0;
+    }
+    let mut top = top.min(total.saturating_sub(view));
+    if focused.start < top || focused.len() > view {
+        top = focused.start;
+    } else if focused.end > top + view {
+        top = focused.end - view;
+    }
+    top
+}
+
+/// Doctor setup checkup: title, summary (or `checking…`), the rows under
+/// TERMINAL / TOOLS / FILES headers scrolled to keep the cursor row in
+/// view, and the key footer. Returns the first body line painted, for
+/// the overlay's `scroll`.
+fn draw_doctor(frame: &mut Frame<'_>, area: Rect, state: &AppState) -> usize {
+    let Some(doctor) = state.doctor.as_ref() else {
+        return 0;
+    };
+    if area.width == 0 || area.height == 0 {
+        return doctor.scroll;
+    }
+    let palette = state.theme.palette();
+    let accent = palette.heading;
+    let block = overlay_block(accent, palette.panel);
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return doctor.scroll;
+    }
+    let width = usize::from(inner.width);
+    let summary = match doctor.checks.as_deref() {
+        Some(checks) => doctor_summary_line(checks, palette),
+        None => Line::from(Span::styled(
+            "checking…",
+            Style::default().fg(palette.muted),
+        )),
+    };
+    let head = vec![
+        Line::from(Span::styled(
+            DOCTOR_TITLE,
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )),
+        summary,
+    ];
+    let (body, focused) = doctor
+        .checks
+        .as_deref()
+        .map(|checks| doctor_body_lines(checks, doctor.cursor, width, state.ascii, palette))
+        .unwrap_or_default();
+    let footer = fit_list_dialog_footer(
+        Line::from(Span::styled(
+            DOCTOR_FOOTER,
+            Style::default().fg(palette.muted),
+        )),
+        width,
+    );
+    let head_h = (head.len() as u16).min(inner.height);
+    let footer_h = u16::from(inner.height > head_h);
+    let body_h = inner.height - head_h - footer_h;
+    let top = doctor_scroll_top(doctor.scroll, focused, body.len(), usize::from(body_h));
+    frame.render_widget(
+        Paragraph::new(head),
+        Rect {
+            height: head_h,
+            ..inner
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(
+            body.into_iter()
+                .skip(top)
+                .take(usize::from(body_h))
+                .collect::<Vec<_>>(),
+        ),
+        Rect {
+            y: inner.y + head_h,
+            height: body_h,
+            ..inner
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(footer),
+        Rect {
+            y: inner.y + head_h + body_h,
+            height: footer_h,
+            ..inner
+        },
+    );
+    top
 }
 
 /// Compare-tab close control as painted and hit-tested: brackets around
@@ -19464,5 +19713,168 @@ mod tests {
         let reprint = format!("{cells:?}");
         let want = format!("{:?}", dimmed(was.fg, palette));
         assert!(reprint.contains(&want), "{want} in {reprint}");
+    }
+
+    /// Rows like a real run: every group, a wrapped why, a hint, a copy
+    /// line, and all three statuses.
+    fn doctor_rows() -> Vec<Check> {
+        use crate::tui::doctor::Fix;
+        let row = |group, name, status, why: &str, fix: Option<Fix>| Check {
+            group,
+            name,
+            status,
+            why: why.into(),
+            fix,
+        };
+        let fix = |hint: &str, copy: &str| {
+            Some(Fix {
+                hint: Some(hint.into()),
+                copy: Some(copy.into()),
+            })
+        };
+        vec![
+            row(
+                CheckGroup::Terminal,
+                "Terminal size",
+                CheckStatus::Ok,
+                "80x24.",
+                None,
+            ),
+            row(
+                CheckGroup::Terminal,
+                "Colour",
+                CheckStatus::Warn,
+                "The terminal did not advertise 24-bit colour; theme colours are RGB and the \
+                 curly comment underline stays a plain underline.",
+                fix(
+                    "Only when the terminal really shows 24-bit colour.",
+                    "export COLORTERM=truecolor",
+                ),
+            ),
+            row(
+                CheckGroup::Tools,
+                "git",
+                CheckStatus::Fail,
+                "git did not run.",
+                fix("Install git.", "sudo apt install git"),
+            ),
+            row(
+                CheckGroup::Tools,
+                "curl (release check)",
+                CheckStatus::Ok,
+                "curl found.",
+                None,
+            ),
+            row(
+                CheckGroup::Files,
+                "Config files",
+                CheckStatus::Ok,
+                "~/.config/my-workspace-status/config.json not present.",
+                None,
+            ),
+            row(
+                CheckGroup::Files,
+                "State files",
+                CheckStatus::Ok,
+                "All four stores read.",
+                None,
+            ),
+        ]
+    }
+
+    fn doctor_state() -> AppState {
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let Effect::RunDoctor { gen } = state.dispatch(Action::OpenDoctor) else {
+            panic!("open asks for a probe");
+        };
+        assert!(state.apply_doctor(gen, doctor_rows()));
+        state
+    }
+
+    /// 80x24, ASCII glyphs: title, summary, group headers, rows with a
+    /// readable chip, the copy line, the footer, and the `>` cursor mark.
+    #[test]
+    fn doctor_paints_title_summary_groups_rows_and_footer_at_80x24() {
+        let mut state = doctor_state();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(open_dialog(&state), Some(DialogKind::Doctor));
+        let text = buffer_text(&terminal);
+        let summary = "4 ok · 1 warn · 1 fail";
+        for want in [
+            DOCTOR_TITLE,
+            summary,
+            "TERMINAL",
+            "TOOLS",
+            "> ok   Terminal size",
+            "  warn Colour",
+            "export COLORTERM=truecolor",
+            "  fail git",
+            DOCTOR_FOOTER,
+        ] {
+            assert!(text.contains(want), "{want:?}\n{text}");
+        }
+        assert!(!text.contains('❯'), "ASCII cursor mark\n{text}");
+    }
+
+    /// While the probe runs the dialog says `checking…` and paints no row.
+    #[test]
+    fn doctor_paints_checking_until_the_probe_answers() {
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, false);
+        state.dispatch(Action::OpenDoctor);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        assert!(text.contains(DOCTOR_TITLE), "{text}");
+        assert!(text.contains("checking…"), "{text}");
+        assert!(!text.contains("TERMINAL"), "{text}");
+    }
+
+    /// At the minimum terminal size the box still paints its title and
+    /// footer, and moving to the last row scrolls it into view.
+    #[test]
+    fn doctor_scrolls_to_the_cursor_at_the_minimum_size() {
+        let mut state = doctor_state();
+        let mut terminal = Terminal::new(TestBackend::new(MIN_TERM_COLS, MIN_TERM_ROWS)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Doctor"), "{text}");
+        assert!(text.contains("Esc close"), "{text}");
+        assert!(!text.contains("State files"), "{text}");
+        state.dispatch(Action::DoctorBottom);
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        assert!(text.contains("> ok   State files"), "{text}");
+        assert!(state.doctor.as_ref().unwrap().scroll > 0);
+        // Back to the top: the first group header shows again.
+        state.dispatch(Action::DoctorTop);
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        assert!(text.contains("TERMINAL"), "{text}");
+        assert_eq!(state.doctor.as_ref().unwrap().scroll, 0);
+    }
+
+    /// Keep the cursor row in view, moving the window only as far as it must.
+    #[test]
+    fn doctor_scroll_top_moves_the_least() {
+        assert_eq!(doctor_scroll_top(0, 2..4, 20, 5), 0, "in view");
+        assert_eq!(doctor_scroll_top(0, 6..9, 20, 5), 4, "down to the end");
+        assert_eq!(doctor_scroll_top(10, 6..9, 20, 5), 6, "up to the start");
+        assert_eq!(doctor_scroll_top(0, 6..14, 20, 5), 6, "taller: its top");
+        assert_eq!(doctor_scroll_top(18, 16..17, 20, 5), 15, "not past the end");
+        assert_eq!(doctor_scroll_top(3, 0..1, 20, 0), 0);
+    }
+
+    /// A frame too small to paint still records its size, so a Doctor
+    /// re-run reports the real terminal, not the last size that fit.
+    #[test]
+    fn too_small_frame_records_the_terminal_size() {
+        let mut state = doctor_state();
+        let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert!(state.too_small);
+        assert_eq!((state.layout.term_cols, state.layout.term_rows), (40, 10));
     }
 }

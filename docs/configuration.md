@@ -294,6 +294,39 @@ VS Code and Cursor resolve the terminal font on the client, independently of the
 
 A missing Nerd Font only affects glyphs. It does not change which keys the terminal sends.
 
+## Doctor setup checkup
+
+The `:` palette row `Doctor: setup checkup` (aliases `doctor`, `checkup`, `setup`, `health`) opens a dialog that checks the setup the TUI needs. Each row has a status (`ok` / `warn` / `fail`), a name, what was found, and, when there is one, a hint and a fix line. The head shows `<n> ok · <n> warn · <n> fail`, or `checking…` while the probe runs.
+
+The Doctor only reports. It does not change a file, a setting, the config, the theme, the UI-state file, or the environment. The probe reads environment variables, `PATH`, the config and state files, and runs only `<git> --version`, `rustc --version` (dev build), `tmux show-options -gv <option>` (inside tmux), and, in each loaded checkout, the read-only remote lookups `git config --get branch.<branch>.remote`, `git remote`, and `git remote get-url <remote>`. The one write is `y`, which copies the focused row's fix line to the clipboard (the same path as Copy entity reference).
+
+Keys: `j` / `k` or arrows move, PgUp / PgDn and Ctrl-u / Ctrl-d move 5 rows, `g` / Home and `G` / End go to the first / last row, `y` copies the fix line (`no fix to copy` when the row has none), `r` runs the probe again, Esc / `q` close. Ctrl-c keeps its quit chord; other keys and the mouse do nothing while it is open.
+
+Fix lines use the OS form: `export NAME=value` on Linux and macOS, `$env:NAME = "value"` in PowerShell on Windows. A program counts as found when the app could start it by that name: a name with a path separator is checked as a path, a bare name is looked up on `PATH` (on Windows as `<name>.exe`).
+
+| Row | Ok | Warn | Fail |
+| --- | --- | --- | --- |
+| Terminal size | 100+ columns and 12+ rows | under 100 columns: search in files hides its file preview | under 46×12: the panes do not paint |
+| UTF-8 locale (not on Windows) | first set of `LC_ALL`, `LC_CTYPE`, `LANG` names UTF-8 | unset or not UTF-8: tmux swaps the box-drawing characters for `_`; fix sets that variable to `C.UTF-8` (macOS `en_US.UTF-8`) | — |
+| Colour | `NO_COLOR` set, or `COLORTERM` is `truecolor` / `24bit` | otherwise: theme colours are RGB; fix `export COLORTERM=truecolor` | — |
+| Nerd Font glyphs | ASCII glyphs (`WS_STATUS_GLYPHS=ascii` or config `glyphs`) | always in Nerd mode: the app cannot see the terminal font, so the row shows sample glyphs to check; fix is the VS Code font setting under VS Code, else `export WS_STATUS_GLYPHS=ascii` | — |
+| Hyperlinks (OSC 8) | outside tmux (the terminal cannot be asked); inside tmux when `terminal-features` has `hyperlinks` | inside tmux without it, or options not readable; fix `set -as terminal-features ",*:hyperlinks"` | — |
+| Clipboard | Linux: `wl-copy` with `WAYLAND_DISPLAY` or `xclip` with `DISPLAY`; macOS: `pbcopy`; Windows: always (OSC 52 only) | no host tool: only OSC 52; inside tmux, `set-clipboard` not `on`, fix `set -g set-clipboard on` | — |
+| Mouse | mouse off, or on outside tmux, or tmux `mouse` is `on` | mouse on inside tmux with tmux `mouse` not `on`; fix `set -g mouse on` | — |
+| git | `<git> --version` runs | WSL with a git path that ends in `.exe`; fix `export WORKSPACE_STATUS_GIT=/usr/bin/git` | `<git> --version` fails |
+| Editor (e) | the `e` program (config `editor`, `VISUAL`, `EDITOR`, `vim`) is found | not found; fix names the first of `nvim`, `vim`, `nano`, `code`, `cursor` (Windows also `notepad`) found | — |
+| Diff tool (E) | the `diffTool` program (default `vimdiff`) is found | not found; fix `"diffTool": "code --diff --wait"` (or `cursor`) when one is found | — |
+| Browser opener (gx, Open PR) | the `BROWSER` program, else `open` (macOS) / `cmd` (Windows) / `xdg-open`, is found | not found | — |
+| Forge CLIs (PR badges) | no GitHub or GitLab remote, or `gh` / `glab` found for each forge in use (login is not checked) | a needed CLI is missing | — |
+| curl (release check; not on a dev build) | `curl` found | missing: the startup release check and `ws --update` notes need it | — |
+| Rust toolchain (dev build only) | `rustc --version` is 1.85 or later | older or missing; fix `rustup update stable` | — |
+| Config files | both files load (each shown as `loaded` or `not present`) | — | the config loader refuses a file; the row shows its error |
+| State files | each store file is missing (created on first save) or one its store accepts | — | a present file its store refuses: saves will fail; fix moves it aside with `mv` (Windows `Move-Item`) |
+
+The State files row checks the comment, viewed, and UI-state stores, and the update-check store only when the startup release check runs (release build, `updateCheck` on).
+
+Terminal size, mouse, the environment, and the loaded repos' remotes are read when the probe runs; the Config files and State files rows re-read the files. The glyph mode, git binary, store paths, `editor`, and `diffTool` are the values resolved at launch.
+
 ## Alternate screen
 
 The TUI uses the terminal alternate screen (DEC 1049) while it is mounted. Normal quit writes leave sequences and shows the cursor. `SIGKILL` (`kill -9`) cannot run those hooks. After SIGKILL, reset the terminal if the primary buffer stays hidden.
@@ -464,6 +497,7 @@ See [tui-rust.md](./tui-rust.md) for the same keys with layout notes. In Normal,
 | `A`                                        | blame menu on a focused committed line: `c` commit changes, `p` previous line change, `w` commit vs working tree, `g` show in graph. Enter runs `c`, Esc / `q` close. Same refusals as the palette `Blame:` rows |
 | `M`                                        | collapse ↔ expand the selected commit / stash message. Expanded by default; `viewDefaults.commitMessage` sets the launch state. The toggle changes this session only. Graph list rows stay one line. Expanded, the graph selection footer and the commit-files footer (bottom of the depth-2 left pane, under the file list) wrap subject plus body (`msg on` / `msg off`) into a fixed N message rows (Shorter / Taller commit message in the palette): a short message leaves blank rows, so moving between commits never changes the list height. Collapsed is a fixed 2 rows. A full-width rule (`▁`, `_` with ASCII glyphs) tops both footers. Wheel over an overflowing graph footer scrolls the message; while lines are hidden below, its last message row ends with `<K>` (`v<K>` with ASCII glyphs; not the behind glyph). The commit-files footer clips a long message with `…`. Arrows and `j` / `k` stay on the list. Graph `m` stays merge / mouse |
 | `:` Shorter / Taller commit message        | one fewer / one more message row in the expanded commit-message footer (graph and commit-files panes), clamped to 1–20. Palette only: `-`, `+`, and `=` do not resize it. Status `msg lines <N>`, also at the clamp. Default 4; `viewDefaults.commitMessageLines` sets the launch value. The rows change this session only. The focused graph row stays in view. On an Explorer tab these palette rows say `Switch to Workspace tab` |
+| `:` Doctor: setup checkup                  | report-only checklist of the terminal, tools, and files the TUI needs; `y` copies the focused fix line, `r` re-runs, Esc / `q` close. See [Doctor setup checkup](#doctor-setup-checkup) |
 | `-` (Explorer)                             | Workspace tab, tree focused, on a repo, worktree, folder, or file row: open or focus that checkout's Explorer tab (a family repo row is its primary checkout; a linked worktree row is that worktree) and reveal the row: a file row selects the file with its folders open and previews it, a folder row opens that folder, a checkout row opens at the root. On an Explorer tab: jump to the parent folder. Elsewhere (workspace or group row, graph or diff pane) `-` refuses with `focus a checkout, folder, or file in the tree`; on a compare tab it says `Switch to Workspace tab`. It never resizes the commit message. Palette: Open in Explorer (`-` chip) shows the same reasons, and `Switch to Workspace tab` on an Explorer tab |
 | `[` / `]`                                  | Explorer tab: previous / next file tab inside it (wraps), and select that file in the tree. Off an Explorer tab it says `[ ] switch Explorer file tabs`; with no file tab, `no file tabs open` |
 | `r`                                        | refresh the focused repo; the whole workspace when on the workspace row or the "No updates" group                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |

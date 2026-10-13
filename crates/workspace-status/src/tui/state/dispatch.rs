@@ -233,6 +233,14 @@ impl AppState {
             | Action::PopoverRun
             | Action::PopoverCopyLine
             | Action::PopoverClose) => self.dispatch_popover(action),
+            // Report-only, from every tab: no gate above refuses these.
+            action @ (Action::OpenDoctor
+            | Action::DoctorMove(_)
+            | Action::DoctorTop
+            | Action::DoctorBottom
+            | Action::DoctorCopy
+            | Action::DoctorRerun
+            | Action::DoctorClose) => self.dispatch_doctor(action),
             action @ (Action::Fetch
             | Action::Pull
             | Action::DefaultBranch

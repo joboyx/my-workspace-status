@@ -261,6 +261,25 @@ pub enum Action {
     /// Saves the new value to the UI-state store at once. Turning it on
     /// queues the activity count for every repo.
     ToggleActivitySparkline,
+    /// Open the Doctor setup checkup (palette only, no key).
+    ///
+    /// The overlay opens in a checking state and asks for
+    /// [`Effect::RunDoctor`]: the probe runs on a blocking worker. Report
+    /// only: opening writes nothing.
+    OpenDoctor,
+    /// Move the Doctor cursor by this many rows (`j` / `k`, arrows, page
+    /// keys). Clamped to the rows.
+    DoctorMove(i32),
+    /// Doctor cursor to the first row (`g`).
+    DoctorTop,
+    /// Doctor cursor to the last row (`G`).
+    DoctorBottom,
+    /// `y` in the Doctor: copy the focused row's fix line.
+    DoctorCopy,
+    /// `r` in the Doctor: run the probe again.
+    DoctorRerun,
+    /// Esc / `q` in the Doctor: close it. A probe still running is dropped.
+    DoctorClose,
     /// Open or close the Quick Open overlay (`:` commands, Ctrl-p / `F` files).
     ///
     /// [`QuickOpenEntry`] picks the starting mode on open. The keymap sends
@@ -733,6 +752,14 @@ pub enum Effect {
         number: u64,
         /// Request id; only the answer to the newest request lands.
         request: u64,
+    },
+    /// Run the Doctor probe for request `gen` on a blocking worker.
+    ///
+    /// Latest-only: a newer request replaces one still queued, and the
+    /// answer lands only while the open Doctor waits for `gen`.
+    RunDoctor {
+        /// Request id ([`super::state::AppState::doctor_awaits`]).
+        gen: u64,
     },
     /// Copy `text` to the clipboard (OSC 52 / host tool).
     CopyClipboard {

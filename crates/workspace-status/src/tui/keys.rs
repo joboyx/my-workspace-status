@@ -13,6 +13,11 @@ use super::action::{Action, QuickOpenEntry};
 /// The help dialog has no page height of its own in the key map.
 pub const HELP_PAGE_ROWS: i32 = 10;
 
+/// Check rows PgUp / PgDn and Ctrl-u / Ctrl-d move the Doctor cursor.
+///
+/// Doctor rows wrap to a few lines each, so a page is a few rows.
+pub const DOCTOR_PAGE_ROWS: i32 = 5;
+
 /// Window for `zz` / `gg` after the first key.
 pub const DOUBLE_TAP_MS: u64 = 400;
 
@@ -110,6 +115,10 @@ pub enum InputMode {
     /// Enter runs, `y` copies the focused line, Esc closes. The mouse stays
     /// live (click, drag-select, wheel). A hover peek is not a mode.
     Popover,
+    /// Doctor setup checkup overlay: `j` / `k` / arrows / page keys / `g` /
+    /// `G` move, `y` copies the focused fix line, `r` re-runs, Esc / `q`
+    /// close. Every other key is swallowed.
+    Doctor,
 }
 
 fn same_g_chord_key(last: Option<(KeyCode, KeyModifiers)>, key: &KeyEvent) -> bool {
@@ -314,7 +323,8 @@ pub fn event_to_action_with(
                     | InputMode::CreateBranch
                     | InputMode::Comment
                     | InputMode::CommentExport
-                    | InputMode::QuickOpen,
+                    | InputMode::QuickOpen
+                    | InputMode::Doctor,
             ) {
                 Action::None
             } else if matches!(mode, InputMode::SearchFiles { .. }) {
@@ -577,7 +587,8 @@ fn repeat_maps_to_action(key: KeyEvent, mode: InputMode) -> bool {
         | InputMode::StashMenu
         | InputMode::BlameMenu
         | InputMode::CommentExport
-        | InputMode::Popover => false,
+        | InputMode::Popover
+        | InputMode::Doctor => false,
     }
 }
 
@@ -856,6 +867,7 @@ fn key_to_action(
             KeyCode::Esc => Action::PopoverClose,
             _ => Action::None,
         },
+        InputMode::Doctor => doctor_key_action(key),
         InputMode::QuickOpen => quick_open_key_action(key),
         InputMode::SearchFiles { results } => search_files_key_action(key, results),
         InputMode::DiffVisual => diff_visual_key(key),
@@ -914,6 +926,31 @@ fn list_overlay_move(key: KeyEvent) -> Option<i32> {
         KeyCode::Char('n' | 'j') if ctrl => Some(1),
         KeyCode::Char('p' | 'k') if ctrl => Some(-1),
         _ => None,
+    }
+}
+
+/// Keys inside the Doctor overlay. Anything else is swallowed.
+///
+/// Ctrl-d / Ctrl-u page like PgDn / PgUp; any other chord does nothing.
+fn doctor_key_action(key: KeyEvent) -> Action {
+    if is_ctrl_chord(key, 'd') {
+        return Action::DoctorMove(DOCTOR_PAGE_ROWS);
+    }
+    if is_ctrl_chord(key, 'u') {
+        return Action::DoctorMove(-DOCTOR_PAGE_ROWS);
+    }
+    match key.code {
+        _ if is_unbound_chord(key) => Action::None,
+        KeyCode::Char('j') | KeyCode::Down => Action::DoctorMove(1),
+        KeyCode::Char('k') | KeyCode::Up => Action::DoctorMove(-1),
+        KeyCode::PageDown => Action::DoctorMove(DOCTOR_PAGE_ROWS),
+        KeyCode::PageUp => Action::DoctorMove(-DOCTOR_PAGE_ROWS),
+        KeyCode::Char('g') | KeyCode::Home => Action::DoctorTop,
+        KeyCode::Char('G') | KeyCode::End => Action::DoctorBottom,
+        KeyCode::Char('y') => Action::DoctorCopy,
+        KeyCode::Char('r') => Action::DoctorRerun,
+        KeyCode::Esc | KeyCode::Char('q') => Action::DoctorClose,
+        _ => Action::None,
     }
 }
 
@@ -2937,6 +2974,45 @@ mod tests {
         ] {
             assert_eq!(at(event.clone()), want, "{event:?}");
         }
+    }
+
+    #[test]
+    fn doctor_mode_keys_move_copy_rerun_close_and_swallow_the_rest() {
+        let at = |event: Event| event_to_action(&event, InputMode::Doctor, false, false);
+        let page = DOCTOR_PAGE_ROWS;
+        for (event, want) in [
+            (key(KeyCode::Char('j')), Action::DoctorMove(1)),
+            (key(KeyCode::Down), Action::DoctorMove(1)),
+            (key(KeyCode::Char('k')), Action::DoctorMove(-1)),
+            (key(KeyCode::Up), Action::DoctorMove(-1)),
+            (key(KeyCode::PageDown), Action::DoctorMove(page)),
+            (key(KeyCode::PageUp), Action::DoctorMove(-page)),
+            (ctrl(KeyCode::Char('d')), Action::DoctorMove(page)),
+            (ctrl(KeyCode::Char('u')), Action::DoctorMove(-page)),
+            (key(KeyCode::Char('g')), Action::DoctorTop),
+            (shift(KeyCode::Char('G')), Action::DoctorBottom),
+            (key(KeyCode::Char('y')), Action::DoctorCopy),
+            (key(KeyCode::Char('r')), Action::DoctorRerun),
+            (key(KeyCode::Esc), Action::DoctorClose),
+            (key(KeyCode::Char('q')), Action::DoctorClose),
+            // Swallowed: no pane key, opener, or chord leaks through.
+            (key(KeyCode::Enter), Action::None),
+            (key(KeyCode::Char('m')), Action::None),
+            (key(KeyCode::Char('?')), Action::None),
+            (key(KeyCode::Char(':')), Action::None),
+            (shift(KeyCode::Char('F')), Action::None),
+            (ctrl(KeyCode::Char('p')), Action::None),
+            (ctrl(KeyCode::Char('f')), Action::None),
+            (ctrl(KeyCode::Char('y')), Action::None),
+            (ctrl(KeyCode::Char('c')), Action::CtrlC),
+        ] {
+            assert_eq!(at(event.clone()), want, "{event:?}");
+        }
+        let wheel = mouse(MouseEventKind::ScrollDown, 40, 4);
+        assert_eq!(
+            event_to_action(&wheel, InputMode::Doctor, false, false),
+            Action::None
+        );
     }
 
     #[test]

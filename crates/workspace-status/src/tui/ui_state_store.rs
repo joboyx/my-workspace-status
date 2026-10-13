@@ -95,6 +95,15 @@ fn parse_store(bytes: &[u8]) -> Option<StoreFile> {
         .and_then(|value| serde_json::from_value::<StoreFile>(value).ok())
 }
 
+/// Check the bytes of a present store file the way [`update_store`] does
+/// before a save: they must parse as this store (any version). `Err` says
+/// why a save would refuse the file and leave it unchanged. Read-only.
+pub(crate) fn check_ui_state_bytes(bytes: &[u8]) -> Result<(), String> {
+    parse_store(bytes)
+        .map(|_| ())
+        .ok_or_else(|| "not a UI-state store".to_string())
+}
+
 /// View state from the store at `path`.
 ///
 /// [`UiState::default`] when the file is missing or unreadable, is not valid

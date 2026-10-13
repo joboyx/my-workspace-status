@@ -480,6 +480,8 @@ pub enum DialogKind {
     QuickOpen,
     /// Search in files (Ctrl-f): query, results, and the preview pane.
     SearchFiles,
+    /// Doctor setup checkup: one row per check, scrolled at the cursor.
+    Doctor,
 }
 
 /// The dialog that paints this frame, or `None` when only the panes and
@@ -487,7 +489,7 @@ pub enum DialogKind {
 ///
 /// Same order as the render if-chain: help, confirm, stash, blame menu,
 /// create branch, comment, export, then the list pickers, the palette, and
-/// search in files.
+/// search in files, then the Doctor.
 pub fn open_dialog(state: &AppState) -> Option<DialogKind> {
     if state.help_open {
         Some(DialogKind::Help)
@@ -513,6 +515,8 @@ pub fn open_dialog(state: &AppState) -> Option<DialogKind> {
         Some(DialogKind::QuickOpen)
     } else if state.search_files.is_some() {
         Some(DialogKind::SearchFiles)
+    } else if state.doctor.is_some() {
+        Some(DialogKind::Doctor)
     } else {
         None
     }
@@ -609,6 +613,8 @@ pub fn dialog_height(state: &AppState, kind: DialogKind, width: u16) -> u16 {
         // The pane area less one row above and below: results and preview
         // use every row they get.
         DialogKind::SearchFiles => state.layout.pane_height.saturating_sub(2),
+        // The rows wrap and scroll: every pane row but one above and below.
+        DialogKind::Doctor => state.layout.pane_height.saturating_sub(2),
     }
 }
 

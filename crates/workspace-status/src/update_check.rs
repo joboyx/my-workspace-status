@@ -270,6 +270,19 @@ fn is_store_file(text: &str) -> bool {
         .is_some_and(|value| serde_json::from_value::<StoreFile>(value).is_ok())
 }
 
+/// Check the bytes of a present store file the way [`save_last_check`] does
+/// before it writes: UTF-8 text that parses as the update-check store (any
+/// version). `Err` says why a save would refuse the file and leave it
+/// unchanged. Read-only.
+pub(crate) fn check_update_check_store_bytes(bytes: &[u8]) -> Result<(), String> {
+    let text = std::str::from_utf8(bytes).map_err(|err| err.to_string())?;
+    if is_store_file(text) {
+        Ok(())
+    } else {
+        Err("not an update-check store".to_string())
+    }
+}
+
 /// Persist `now` as the last-check time (success or failure).
 ///
 /// A missing file is created. An existing file must parse as the
