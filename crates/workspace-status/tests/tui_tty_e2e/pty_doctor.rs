@@ -144,10 +144,13 @@ fn pty_doctor_opens_from_palette_fills_rows_and_writes_no_ui_state() {
         WAIT,
     );
 
+    // Not a re-run check (the rows are already filled): it checks that the
+    // app stays up and the rows and the cursor survive `r`. The unit tests
+    // cover the re-run itself.
     tui.key('r');
     tui.wait_pred(
         |screen| doctor_filled_with(screen, "git") && cursor_on(screen, "git"),
-        "r re-runs the probe; the rows come back and the cursor stays",
+        "after r the rows are still painted and the cursor is still on git",
         WAIT,
     );
 

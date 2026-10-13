@@ -4728,8 +4728,7 @@ fn doctor_status_chip(status: CheckStatus, palette: Palette) -> (&'static str, C
     }
 }
 
-/// `<n> ok · <n> warn · <n> fail`, each count in its chip colour. Same
-/// text as the doctor `Summary` `Display`.
+/// `<n> ok · <n> warn · <n> fail`, each count in its chip colour.
 fn doctor_summary_line(checks: &[Check], palette: Palette) -> Line<'static> {
     let counts = doctor_summary(checks);
     let sep = || Span::styled(" · ", Style::default().fg(palette.muted));
@@ -19802,11 +19801,10 @@ mod tests {
         draw_state(&mut terminal, &mut state);
         assert_eq!(open_dialog(&state), Some(DialogKind::Doctor));
         let text = buffer_text(&terminal);
-        let summary = crate::tui::doctor::summary(&doctor_rows()).to_string();
-        assert_eq!(summary, "4 ok · 1 warn · 1 fail");
+        let summary = "4 ok · 1 warn · 1 fail";
         for want in [
             DOCTOR_TITLE,
-            summary.as_str(),
+            summary,
             "TERMINAL",
             "TOOLS",
             "> ok   Terminal size",

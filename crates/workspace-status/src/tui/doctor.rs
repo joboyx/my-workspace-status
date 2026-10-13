@@ -14,7 +14,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -329,16 +328,6 @@ pub struct Summary {
     pub warn: usize,
     /// Rows with [`CheckStatus::Fail`].
     pub fail: usize,
-}
-
-impl fmt::Display for Summary {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} ok · {} warn · {} fail",
-            self.ok, self.warn, self.fail
-        )
-    }
 }
 
 /// Count `checks` by status.
@@ -2177,7 +2166,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_counts_and_formats() {
+    fn summary_counts_by_status() {
         let mut p = base(Os::Linux);
         p.term_cols = 10;
         p.ascii = false;
@@ -2190,7 +2179,6 @@ mod tests {
                 fail: 1
             }
         );
-        assert_eq!(got.to_string(), "13 ok · 1 warn · 1 fail");
     }
 
     #[test]

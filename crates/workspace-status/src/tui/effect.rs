@@ -7703,10 +7703,10 @@ mod tests {
         let remote = |name: &str, remote: &str, url: &str| {
             crate::testutil::git(&root.join(name), &["remote", "add", remote, url]);
         };
-        remote("app", "origin", "https://github.com/octo/app.git");
-        remote("lib", "upstream", "https://gitlab.com/octo/lib.git");
+        remote("app", "origin", "https://example.invalid/octo/app.git");
+        remote("lib", "upstream", "https://example.invalid/octo/lib.git");
         // Same remote as `app`: listed once.
-        remote("wt", "origin", "https://github.com/octo/app.git");
+        remote("wt", "origin", "https://example.invalid/octo/app.git");
         let mut detached = repo("wt", false);
         detached.branch = "HEAD".into();
         let snapshot = build_workspace_snapshot(
@@ -7738,8 +7738,8 @@ mod tests {
         assert_eq!(
             urls,
             vec![
-                "https://github.com/octo/app.git".to_string(),
-                "https://gitlab.com/octo/lib.git".to_string(),
+                "https://example.invalid/octo/app.git".to_string(),
+                "https://example.invalid/octo/lib.git".to_string(),
             ]
         );
         let _ = std::fs::remove_dir_all(root);
