@@ -747,6 +747,14 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::Any,
     },
     PaletteCommand {
+        title: "Doctor: setup checkup",
+        keys: "",
+        group: CommandGroup::View,
+        action: Action::OpenDoctor,
+        aliases: &["doctor", "checkup", "setup", "health"],
+        scope: CommandScope::Any,
+    },
+    PaletteCommand {
         title: "Quit",
         keys: "q",
         group: CommandGroup::View,
@@ -1536,6 +1544,13 @@ mod tests {
                 CommandScope::Any,
             ),
             (
+                "Doctor: setup checkup",
+                "",
+                CommandGroup::View,
+                Action::OpenDoctor,
+                CommandScope::Any,
+            ),
+            (
                 "Quit",
                 "q",
                 CommandGroup::View,
@@ -1549,7 +1564,7 @@ mod tests {
             .filter(|command| !matches!(command.action, Action::SetTheme(_)))
             .collect();
         assert_eq!(rows.len(), wanted.len());
-        assert_eq!(wanted.len(), 69);
+        assert_eq!(wanted.len(), 70);
         assert_eq!(PALETTE_COMMANDS.len(), wanted.len() + THEME_IDS.len());
         for (i, (title, keys, group, action, scope)) in wanted.iter().enumerate() {
             let command = rows[i];
@@ -1667,6 +1682,21 @@ mod tests {
         }
         assert_eq!(titles("close app"), vec!["Quit"]);
         assert_eq!(titles("sparkline"), vec!["Toggle activity sparkline"]);
+    }
+
+    /// The Doctor is a VIEW row with no key that runs from anywhere, and
+    /// each of its aliases finds it.
+    #[test]
+    fn doctor_row_is_found_by_each_alias() {
+        let row = command_for(&Action::OpenDoctor).expect("Doctor row");
+        assert_eq!(row.title, "Doctor: setup checkup");
+        assert_eq!(row.keys, "");
+        assert_eq!(row.group, CommandGroup::View);
+        assert_eq!(row.scope, CommandScope::Any);
+        for query in ["doctor", "checkup", "setup", "health", "DOCTOR"] {
+            assert!(titles(query).contains(&"Doctor: setup checkup"), "{query}");
+        }
+        assert_eq!(titles("doctor"), vec!["Doctor: setup checkup"]);
     }
 
     /// A dark theme's slug or name lands on the dark row, and the light

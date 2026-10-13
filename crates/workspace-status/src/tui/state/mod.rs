@@ -6,6 +6,7 @@ mod dispatch_keymap;
 mod dispatch_quick_open;
 mod dispatch_search_files;
 mod dispatch_write;
+mod doctor;
 mod explorer_tab;
 mod file_view;
 mod go_to_line;
@@ -243,6 +244,8 @@ pub struct LayoutHit {
     pub right_x: u16,
     pub list_offset: usize,
     pub term_cols: u16,
+    /// Terminal height in rows at the last paint (the whole frame).
+    pub term_rows: u16,
     pub pane_height: u16,
     pub outer_tree_width: u16,
     pub diff_pane_width: u16,
@@ -404,6 +407,7 @@ impl Default for LayoutHit {
             right_x: 40,
             list_offset: 0,
             term_cols: 120,
+            term_rows: 24,
             pane_height: 22,
             outer_tree_width: 48,
             diff_pane_width: 70,
@@ -869,6 +873,10 @@ pub struct AppState {
     /// The `A` blame-actions menu is open. Its header reads the focused
     /// line's annotation live, so it holds no copy of the blame.
     pub blame_menu: bool,
+    /// The Doctor setup checkup overlay (palette `Doctor: setup checkup`).
+    pub doctor: Option<doctor::DoctorOverlay>,
+    /// Last Doctor probe request id; only the newest answer lands.
+    doctor_gen: u64,
     pub branch_picker: Option<BranchPickerState>,
     pub graph_focus_picker: Option<GraphFocusPickerState>,
     /// Per-repo local branch names whose ancestors the graph shows. `None` = `--all`.
@@ -1139,6 +1147,8 @@ impl AppState {
             stash_menu: None,
             stash_repo: None,
             blame_menu: false,
+            doctor: None,
+            doctor_gen: 0,
             branch_picker: None,
             graph_focus_picker: None,
             graph_branch_focus: None,
@@ -1278,6 +1288,8 @@ impl AppState {
             } else {
                 InputMode::Help
             }
+        } else if self.doctor.is_some() {
+            InputMode::Doctor
         } else if self.popover_pinned() {
             InputMode::Popover
         } else if self.search_mode {

@@ -20,6 +20,7 @@ use std::sync::Arc;
 use workspace_status_graph::LOADING_OLDER;
 
 use crate::actions::{switch_repo_to_default_branch, SwitchOutcome};
+use crate::config::user_config_path;
 use crate::discovery::{discover_checkouts, process_repo, RepoCheckoutMeta};
 use crate::file_index::{
     build_file_index, read_text_file, score_files, FileHit, FileIndex, FileRead, IndexRoot,
@@ -34,6 +35,7 @@ use crate::git::{
     revert_compare_file, revert_compare_patch, revert_tracked_file, stage_file, stash_apply,
     stash_drop, stash_pop, stash_push, unstage_file, PushPlan, COMPARE_REVERT_ABORTED,
 };
+use crate::settings::Settings;
 use crate::snapshot::RepoSnapshot;
 
 use super::action::{Action, Effect, ExternalDiffKind};
@@ -52,6 +54,7 @@ use super::comments;
 use super::diff_tool::{
     prepare_rev_diff_paths, prepare_worktree_diff, resolve_diff_tool, PreparedDiff,
 };
+use super::doctor::{self, Check, CollectInputs};
 use super::drill::{CommitFileSource, DrillView};
 #[cfg(test)]
 use super::event_pump::action_triggers_graph_autoload;
@@ -231,6 +234,11 @@ pub(crate) enum JobOutcome {
         tab_id: u64,
         gen: u64,
         body: ExplorerPreviewBody,
+    },
+    /// Doctor rows for probe request `gen`.
+    Doctor {
+        gen: u64,
+        checks: Vec<Check>,
     },
     /// `git blame -L n,n` answer for one focused line.
     LineBlame {
@@ -622,6 +630,39 @@ impl SearchChunkJob {
     }
 }
 
+/// Owned Doctor probe inputs, copied out of the state and the launch
+/// options on the event thread ([`Effect::RunDoctor`]).
+struct DoctorJob {
+    term_cols: u16,
+    term_rows: u16,
+    mouse_enabled: bool,
+    remote_urls: Vec<String>,
+    settings: Settings,
+    editor_config: Option<String>,
+    diff_tool_config: Option<String>,
+    workspace_root: PathBuf,
+}
+
+impl DoctorJob {
+    /// Probe the setup and build the rows. Blocks (PATH scan, read-only
+    /// commands, file reads), so it runs only on a worker. Writes nothing.
+    fn run(self) -> Vec<Check> {
+        let user_config = user_config_path();
+        let probe = doctor::collect(&CollectInputs {
+            term_cols: self.term_cols,
+            term_rows: self.term_rows,
+            settings: &self.settings,
+            mouse_enabled: self.mouse_enabled,
+            editor_config: self.editor_config.as_deref(),
+            diff_tool_config: self.diff_tool_config.as_deref(),
+            remote_urls: &self.remote_urls,
+            workspace_root: &self.workspace_root,
+            user_config: user_config.as_deref(),
+        });
+        doctor::checks(&probe)
+    }
+}
+
 /// Occupancy key: linked checkouts use `primary_repo`, else the checkout path.
 fn gitdir_key(state: &AppState, checkout: &str) -> String {
     state
@@ -769,6 +810,10 @@ pub(crate) struct Interpreter {
     line_blame_slot: Option<BlameKey>,
     /// A [`UserTag::LineBlame`] job is queued or running.
     line_blame_inflight: bool,
+    /// Latest Doctor probe request; a newer one replaces it before spawn.
+    doctor_slot: Option<u64>,
+    /// A [`UserTag::Doctor`] job is queued or running.
+    doctor_inflight: bool,
     /// Latest blame previous-change request; a newer one replaces it
     /// before spawn.
     blame_previous: Option<(u64, String, Box<crate::git::LineBlame>)>,
@@ -849,6 +894,8 @@ impl Interpreter {
             search_live: Arc::new(AtomicU64::new(0)),
             line_blame_slot: None,
             line_blame_inflight: false,
+            doctor_slot: None,
+            doctor_inflight: false,
             blame_previous: None,
             pr_opens: VecDeque::new(),
             pr_badges: VecDeque::new(),
@@ -1547,6 +1594,10 @@ impl Interpreter {
                 });
                 self.fill_pr_badge_slots();
             }
+            Effect::RunDoctor { gen } => {
+                self.doctor_slot = Some(gen);
+                self.queue_doctor();
+            }
             Effect::CopyClipboard { text, announce } => {
                 let ok = comments::copy_to_clipboard(&text);
                 // `y` opens the export overlay right before this copy; its
@@ -1631,6 +1682,19 @@ impl Interpreter {
         if !self.line_blame_inflight {
             self.line_blame_inflight = true;
             self.sched.enqueue_user(UserTag::LineBlame);
+        }
+    }
+
+    /// Queue one [`UserTag::Doctor`] slot for the request in
+    /// `doctor_slot`.
+    ///
+    /// Latest-only, like the line blame: at most one job is queued or
+    /// running, and the slot holds the newest request. Its apply calls this
+    /// again, so a re-run asked while a probe ran gets its own probe next.
+    fn queue_doctor(&mut self) {
+        if self.doctor_slot.is_some() && !self.doctor_inflight {
+            self.doctor_inflight = true;
+            self.sched.enqueue_user(UserTag::Doctor);
         }
     }
 
@@ -2266,6 +2330,14 @@ impl Interpreter {
                         self.mark();
                     }
                 }
+            }
+            JobOutcome::Doctor { gen, checks } => {
+                self.doctor_inflight = false;
+                // A closed or re-run Doctor drops this answer.
+                if state.apply_doctor(gen, checks) {
+                    self.mark();
+                }
+                self.queue_doctor();
             }
             JobOutcome::LineBlame { key, result } => {
                 self.line_blame_inflight = false;
@@ -3252,6 +3324,37 @@ impl Interpreter {
                     Box::new(move || {
                         let result = blame_line(&dir, &key.rev, &key.path, key.line);
                         JobOutcome::LineBlame { key, result }
+                    }),
+                );
+            }
+            UserTag::Doctor => {
+                // Nothing to probe when the Doctor closed or a newer
+                // request already took the slot.
+                let Some(gen) = self
+                    .doctor_slot
+                    .take()
+                    .filter(|gen| state.doctor_awaits(*gen))
+                else {
+                    self.doctor_inflight = false;
+                    self.sched.note_job_finished(id);
+                    return;
+                };
+                // Owned copies: `collect` borrows, and runs on the worker.
+                let inputs = DoctorJob {
+                    term_cols: state.layout.term_cols,
+                    term_rows: state.layout.term_rows,
+                    mouse_enabled: state.mouse_enabled,
+                    remote_urls: state.doctor_remote_urls(),
+                    settings: opts.settings.clone(),
+                    editor_config: opts.config.editor.clone(),
+                    diff_tool_config: opts.config.diff_tool.clone(),
+                    workspace_root: opts.cwd.clone(),
+                };
+                spawn(
+                    id,
+                    Box::new(move || JobOutcome::Doctor {
+                        gen,
+                        checks: inputs.run(),
                     }),
                 );
             }
@@ -7459,6 +7562,101 @@ mod tests {
         assert_eq!(interp.sched.queued_user_tag(UserTag::Activity), 0);
         assert!(capture_jobs(&mut interp, &mut state).is_empty());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn doctor_row(name: &'static str) -> Check {
+        Check {
+            group: crate::tui::doctor::CheckGroup::Tools,
+            name,
+            status: crate::tui::doctor::CheckStatus::Ok,
+            why: "found.".into(),
+            fix: None,
+        }
+    }
+
+    /// Open queues one probe job; a re-run before spawn keeps it at one
+    /// (latest-only). The worker answer fills the rows. The probe closure
+    /// is never run here: it reads the real host setup.
+    #[test]
+    fn doctor_opens_with_one_latest_only_probe_and_its_answer_lands() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        let effect = state.dispatch(Action::OpenDoctor);
+        assert_eq!(effect, Effect::RunDoctor { gen: 1 });
+        schedule_effect(&mut interp, &mut state, effect, &Action::OpenDoctor);
+        assert_eq!(interp.sched.queued_user_tag(UserTag::Doctor), 1);
+        let effect = state.dispatch(Action::DoctorRerun);
+        schedule_effect(&mut interp, &mut state, effect, &Action::DoctorRerun);
+        assert_eq!(
+            interp.sched.queued_user_tag(UserTag::Doctor),
+            1,
+            "a re-run replaces the queued request"
+        );
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 1, "one probe");
+        assert_eq!(interp.doctor_slot, None, "the job took the newest request");
+        let (id, _probe) = jobs.into_iter().next().unwrap();
+        apply_id(
+            &mut interp,
+            &mut state,
+            id,
+            JobOutcome::Doctor {
+                gen: 2,
+                checks: vec![doctor_row("git"), doctor_row("curl")],
+            },
+        );
+        let doctor = state.doctor.as_ref().expect("open");
+        assert_eq!(doctor.checks.as_ref().map(Vec::len), Some(2));
+        assert!(!interp.doctor_inflight);
+        assert!(capture_jobs(&mut interp, &mut state).is_empty(), "idle");
+    }
+
+    /// A re-run while a probe runs queues the next probe when the first
+    /// lands, and the first answer is dropped. A Doctor closed before the
+    /// spawn runs nothing, and a late answer after close changes nothing.
+    #[test]
+    fn doctor_drops_stale_answers_and_spawns_nothing_once_closed() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        let effect = state.dispatch(Action::OpenDoctor);
+        schedule_effect(&mut interp, &mut state, effect, &Action::OpenDoctor);
+        let (first, _probe) = capture_jobs(&mut interp, &mut state).pop().unwrap();
+        let effect = state.dispatch(Action::DoctorRerun);
+        schedule_effect(&mut interp, &mut state, effect, &Action::DoctorRerun);
+        assert_eq!(
+            interp.sched.queued_user_tag(UserTag::Doctor),
+            0,
+            "one probe at a time"
+        );
+        let stale = JobOutcome::Doctor {
+            gen: 1,
+            checks: vec![doctor_row("old")],
+        };
+        apply_id(&mut interp, &mut state, first, stale);
+        assert_eq!(state.doctor.as_ref().unwrap().checks, None, "stale");
+        assert_eq!(interp.sched.queued_user_tag(UserTag::Doctor), 1, "next");
+
+        // Closed before the queued probe spawns: no work starts.
+        state.dispatch(Action::DoctorClose);
+        assert!(capture_jobs(&mut interp, &mut state).is_empty());
+        assert!(!interp.doctor_inflight);
+
+        // Closed while a probe runs: its answer changes nothing.
+        let effect = state.dispatch(Action::OpenDoctor);
+        schedule_effect(&mut interp, &mut state, effect, &Action::OpenDoctor);
+        let (id, _probe) = capture_jobs(&mut interp, &mut state).pop().unwrap();
+        state.dispatch(Action::DoctorClose);
+        apply_id(
+            &mut interp,
+            &mut state,
+            id,
+            JobOutcome::Doctor {
+                gen: 3,
+                checks: vec![doctor_row("late")],
+            },
+        );
+        assert!(state.doctor.is_none());
+        assert!(capture_jobs(&mut interp, &mut state).is_empty());
     }
 
     #[test]

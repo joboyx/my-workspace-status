@@ -61,6 +61,9 @@ pub enum UserTag {
     SearchFiles,
     /// Focused-line `git blame -L n,n` (latest-only slot).
     LineBlame,
+    /// Doctor setup probe: PATH scan, read-only commands, config and store
+    /// reads (latest-only slot).
+    Doctor,
     /// Forge PR lookup for a row badge, or a `gx` lookup then browser open.
     PullRequest,
     /// Commit-activity counts for the tree sparklines. Low priority: it
