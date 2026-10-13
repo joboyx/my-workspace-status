@@ -3257,10 +3257,13 @@ impl Interpreter {
             }
             UserTag::Activity => {
                 // One repo per job, so user work takes the slot between
-                // repos. After quit nothing more starts.
+                // repos. After quit, or once the sparkline is off, nothing
+                // more starts.
                 let key = self.activity_pending.pop_front();
                 let cancel = Arc::clone(&self.activity_cancel);
-                let Some(key) = key.filter(|_| !cancel.load(Ordering::Relaxed)) else {
+                let Some(key) =
+                    key.filter(|_| state.activity_sparkline && !cancel.load(Ordering::Relaxed))
+                else {
                     self.sched.note_job_finished(id);
                     return;
                 };
@@ -7423,6 +7426,38 @@ mod tests {
             &Action::ToggleActivitySparkline,
         );
         assert_eq!(interp.sched.queued_user_tag(UserTag::Activity), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Toggling off before the queued counts start: their slots finish
+    /// and run no git, so no bars fill while the sparkline is off.
+    #[test]
+    fn toggle_sparkline_off_drops_counts_still_queued() {
+        let (root, mut state) = two_repo_state("ws-effect-activity-toggle-off");
+        state.ui_store_path = root.join("state").join("ui-state.json");
+        let mut interp = Interpreter::with_cap(1);
+        let effect = state.dispatch(Action::ToggleActivitySparkline);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            effect,
+            &Action::ToggleActivitySparkline,
+        );
+        assert_eq!(interp.sched.queued_user_tag(UserTag::Activity), 2);
+
+        let effect = state.dispatch(Action::ToggleActivitySparkline);
+        assert!(!state.activity_sparkline);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            effect,
+            &Action::ToggleActivitySparkline,
+        );
+        drain_jobs(&mut interp, &mut state, 10);
+        assert!(state.activity.is_empty(), "no count ran");
+        assert!(interp.activity_pending.is_empty());
+        assert_eq!(interp.sched.queued_user_tag(UserTag::Activity), 0);
+        assert!(capture_jobs(&mut interp, &mut state).is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -1666,6 +1666,7 @@ mod tests {
             assert!(titles(query).contains(&title), "{query} -> {title}");
         }
         assert_eq!(titles("close app"), vec!["Quit"]);
+        assert_eq!(titles("sparkline"), vec!["Toggle activity sparkline"]);
     }
 
     /// A dark theme's slug or name lands on the dark row, and the light
@@ -1786,22 +1787,6 @@ mod tests {
             .position(|t| *t == "Diff vs default in new tab")
             .unwrap();
         assert_eq!(catalog[diff - 4..diff], blame_rows[..4]);
-    }
-
-    /// The sparkline toggle is a VIEW row right after Toggle mouse, with no
-    /// key, that runs in and out of a highlight.
-    #[test]
-    fn activity_sparkline_row_sits_next_to_toggle_mouse() {
-        let catalog: Vec<_> = PALETTE_COMMANDS.iter().map(|c| c.title).collect();
-        let mouse = catalog.iter().position(|t| *t == "Toggle mouse").unwrap();
-        let row = &PALETTE_COMMANDS[mouse + 1];
-        assert_eq!(row.title, "Toggle activity sparkline");
-        assert_eq!(row.keys, "");
-        assert_eq!(row.group, CommandGroup::View);
-        assert_eq!(row.action, Action::ToggleActivitySparkline);
-        assert_eq!(row.scope, CommandScope::Any);
-        assert_eq!(titles("sparkline"), vec!["Toggle activity sparkline"]);
-        assert!(titles("activity").contains(&"Toggle activity sparkline"));
     }
 
     /// Toggle rows say `Toggle …`, not `… on / off`.

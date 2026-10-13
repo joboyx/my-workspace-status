@@ -7034,7 +7034,7 @@ enum FoldOp {
 }
 
 /// Viewed-store path in a unique temp dir per test state, so the sibling
-/// comment and theme stores are unique too.
+/// comment and UI-state stores are unique too.
 #[cfg(test)]
 fn default_viewed_path() -> PathBuf {
     crate::testutil::unique_dir("ws-state-test").join("viewed.json")

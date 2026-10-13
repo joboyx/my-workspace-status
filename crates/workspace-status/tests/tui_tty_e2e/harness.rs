@@ -45,8 +45,9 @@ static UI_STORE_SEQ: AtomicU64 = AtomicU64::new(0);
 /// not move them. `WS_STATUS_THEME` in a test's env still beats this theme.
 /// `themeMode` `dark` keeps the terminal background out of it: the desktop
 /// xterm is white, and `auto` would pick the light twin there.
-/// `WS_STATUS_THEME_MODE` in a test's env beats this pin. A spawn starts with an empty UI-state store, so a last-used theme cannot
-/// beat it unless the test passes a seeded `WS_STATUS_UI_STORE`.
+/// `WS_STATUS_THEME_MODE` in a test's env beats this pin. A spawn starts
+/// with an empty UI-state store, so a last-used theme cannot beat it unless
+/// the test passes a seeded `WS_STATUS_UI_STORE`.
 pub const BASELINE_USER_CONFIG: &str =
     "{\"theme\":\"tokyo-night\",\"themeMode\":\"dark\",\"viewDefaults\":{\"background\":\"terminal\"}}\n";
 
