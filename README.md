@@ -173,6 +173,7 @@ A non-TTY run without those flags prints `--plain`.
 The TUI uses the terminal **alternate screen** (DEC 1049, same idea as Vim/less) while running, so frames do not remain in primary scrollback after a normal exit. Before `$EDITOR` (`e`) it leaves that buffer and re-enters on return. `SIGKILL` skips that restore.
 
 Requirements, keymap, and layout details: [docs/configuration.md](./docs/configuration.md).
+To check the setup from inside the TUI, run `Doctor: setup checkup` from the command palette (`:`).
 
 Themes: 13 built-in dark themes, each with a light twin. Pick one with `WS_STATUS_THEME`, the config `theme` key, or a `Theme: <name>` row in the command palette (`:`). Moving over the rows previews each theme; Enter applies it, and Esc puts the old one back. The next launch keeps the last applied theme unless `WS_STATUS_THEME` is set to a known theme (saved in `$XDG_STATE_HOME/my-workspace-status/ui-state.json`, never in the config file). At launch, `themeMode` (default `auto`) picks the light or dark twin that matches the terminal background.
 Slate (`slate`, the default), Tokyo Night (`tokyo-night`), Monokai (`monokai`), Dracula (`dracula`), Gruvbox Dark (`gruvbox-dark`), Catppuccin Mocha (`catppuccin-mocha`), Solarized Dark (`solarized-dark`), Nord (`nord`), Rosé Pine (`rose-pine`), Kanagawa (`kanagawa`), Everforest (`everforest`), One Dark (`one-dark`), GitHub Dark Dimmed (`github-dark-dimmed`).

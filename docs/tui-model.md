@@ -195,6 +195,17 @@ Model and content: `tui/popover.rs`. State, keys, and clicks: `tui/state/popover
 - **Mouse while pinned.** A press inside the box arms a `TextSelection` on its text area and focuses the line under it; the release runs an action line unless the press became a drag (the drag copies instead). A press outside closes it and does nothing else.
 - **Close.** `PopoverClose`, a click outside, an owner mismatch (another row, pane, or tab; the row went away), or a dialog that opens (`chrome::open_dialog`, for example a picker that loads after the key or a confirm from an effect). Paint drops a stale popover.
 
+## Doctor setup checkup
+
+Check engine: `tui/doctor.rs`. Overlay state and keys: `tui/state/doctor.rs`. Paint: `render::draw_doctor`. User-facing rows and rules: [configuration.md](./configuration.md) → **Doctor setup checkup**.
+
+- **Opener.** Palette row `Doctor: setup checkup` (`CommandGroup::View`, no key, aliases `doctor` / `checkup` / `setup` / `health`, `CommandScope::Any`) runs `Action::OpenDoctor`. No tab, compare, or Explorer gate names the Doctor actions, so it opens from every tab. They route through `AppState::dispatch_doctor`.
+- **State.** `AppState.doctor: Option<DoctorOverlay>` with `gen` (the probe request whose answer may land), `checks` (`None` while the probe runs, painted as `checking…`), `cursor`, and `scroll` (the first body line the last paint showed). `AppState.doctor_gen` counts requests.
+- **Probe request.** `OpenDoctor` and `DoctorRerun` bump `doctor_gen`, set `checks` to `None` (the cursor stays), and return `Effect::RunDoctor { gen }`. `apply_doctor` fills the rows only while `doctor_awaits(gen)`: an answer for a closed Doctor or an older request is dropped. The cursor clamps to the new row count.
+- **`InputMode::Doctor`** while `doctor` is open. `input_mode` ranks it after help and before the pinned popover. `overlay_blocks_background_ticks` is true for it, as for help. Keys (`keys::doctor_key_action`): `j` / Down and `k` / Up → `DoctorMove(±1)`; PgDn / PgUp and Ctrl-d / Ctrl-u → `DoctorMove(±DOCTOR_PAGE_ROWS)` (5); `g` / Home → `DoctorTop`; `G` / End → `DoctorBottom`; `y` → `DoctorCopy`; `r` → `DoctorRerun`; Esc / `q` → `DoctorClose`; Ctrl-c stays `CtrlC`. Every other key, the Quick Open openers, and every mouse event (the wheel too) map to `Action::None`.
+- **Copy.** `DoctorCopy` returns `Effect::CopyClipboard { text, announce: true }` with the focused row's `fix.copy` (the Copy entity reference path, toast `copied`). With no copy line, or while checking, it sets the warn `no fix to copy` and returns no effect.
+- **Report only.** No Doctor action writes a file, a setting, or the UI-state store. The only effects are `RunDoctor` and the `y` copy.
+
 ## Editor
 
 - **Detached GUI** (`cursor`, `code`, `code-insiders`, `codium`, `gvim`, including `--wait`): spawn detached while the TUI stays mounted. Fold, focus, scroll, search, and `show_ignored` stay in `AppState`. File-status updates come from the live watch poll.
