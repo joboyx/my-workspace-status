@@ -31,9 +31,14 @@ pub fn git(cwd: &Path, args: &[&str]) {
 
 /// Run `git` in `cwd` and return trimmed stdout. Panics on non-zero exit.
 pub fn git_stdout(cwd: &Path, args: &[&str]) -> String {
+    git_stdout_env(cwd, args, &[])
+}
+
+/// [`git_stdout`] with `extra` env on top of [`git_env`].
+fn git_stdout_env(cwd: &Path, args: &[&str], extra: &[(&str, &str)]) -> String {
     let mut cmd = Command::new("git");
     cmd.args(args).current_dir(cwd);
-    for (k, v) in git_env() {
+    for (k, v) in git_env().into_iter().chain(extra.iter().copied()) {
         cmd.env(k, v);
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -125,24 +130,42 @@ pub fn seed_merge_graph(workspace: &Path, name: &str) {
 }
 
 /// Diverging local branches for graph focus (`o`).
+///
+/// Every commit shares one timestamp. Graph rows sort by commit date, so a
+/// wall-clock second ticking between `keep-leaf-commit` and
+/// `main-leaf-commit` used to drop the keep leaf below the other tips,
+/// where the branch picker overlay hides it (flaky
+/// `pty_branch_picker_create_row_creates` on CI).
 pub fn seed_branch_focus_graph(workspace: &Path, name: &str) {
     let repo = workspace.join(name);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let date = format!("@{now} +0000");
+    let pinned = [
+        ("GIT_AUTHOR_DATE", date.as_str()),
+        ("GIT_COMMITTER_DATE", date.as_str()),
+    ];
+    let commit = |msg: &str| {
+        git_stdout_env(&repo, &["commit", "-q", "-m", msg], &pinned);
+    };
     init_repo(&repo, "main");
     fs::write(repo.join("README.md"), "# focus-root-commit\n").unwrap();
     git(&repo, &["add", "README.md"]);
-    git(&repo, &["commit", "-q", "-m", "focus-root-commit"]);
+    commit("focus-root-commit");
     git(&repo, &["checkout", "-q", "-b", "feature/keep"]);
     fs::write(repo.join("keep.txt"), "keep\n").unwrap();
     git(&repo, &["add", "keep.txt"]);
-    git(&repo, &["commit", "-q", "-m", "keep-leaf-commit"]);
+    commit("keep-leaf-commit");
     git(&repo, &["checkout", "-q", "main"]);
     fs::write(repo.join("main.txt"), "main\n").unwrap();
     git(&repo, &["add", "main.txt"]);
-    git(&repo, &["commit", "-q", "-m", "main-leaf-commit"]);
+    commit("main-leaf-commit");
     git(&repo, &["checkout", "-q", "-b", "topic/noise", "HEAD~1"]);
     fs::write(repo.join("noise.txt"), "noise\n").unwrap();
     git(&repo, &["add", "noise.txt"]);
-    git(&repo, &["commit", "-q", "-m", "noise-leaf-commit"]);
+    commit("noise-leaf-commit");
     git(&repo, &["checkout", "-q", "feature/keep"]);
 }
 
