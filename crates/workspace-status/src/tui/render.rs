@@ -495,13 +495,6 @@ fn file_link(state: &AppState, repo: &str, rel: &str) -> String {
     file_url(local_host(), &state.cwd.join(repo).join(rel))
 }
 
-/// True when the tree file change is a deletion with no file left on disk:
-/// deleted in the worktree, or staged as deleted with no worktree change.
-fn file_change_is_deleted(file: &crate::snapshot::FileChange) -> bool {
-    let unstaged = file.unstaged_status.as_deref();
-    unstaged == Some("D") || (unstaged.is_none() && file.staged_status.as_deref() == Some("D"))
-}
-
 /// Link over the rightmost `needle` painted in buffer row `y`, columns
 /// `x0..x1`, or `None` when the row does not show it.
 ///
@@ -1523,7 +1516,6 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     };
     let mut lines = Vec::new();
     let mut hits = Vec::new();
-    let mut links = Vec::new();
     let now = Instant::now();
     let running = &state.remote_activity.running;
     let running_families: HashSet<String> = running
@@ -1560,7 +1552,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             sparkline: bars,
             no_color: state.no_color,
         };
-        let (line, icons, label) = paint_tree_row(
+        let (line, icons) = paint_tree_row(
             row,
             width,
             Some(row.id.as_str()) == focus_id,
@@ -1574,20 +1566,6 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             state.left_col_offset as usize,
         );
         lines.push(line);
-        // A file row's label links to the file on disk; a deleted file has
-        // none.
-        if let (NodeKind::File, Some(repo), Some(file), Some((x, w))) =
-            (row.kind, row.repo.as_deref(), row.file.as_ref(), label)
-        {
-            if !file_change_is_deleted(file) {
-                links.push(LinkHit {
-                    y,
-                    x: area.x.saturating_add(u16::try_from(x).unwrap_or(u16::MAX)),
-                    width: u16::try_from(w).unwrap_or(u16::MAX),
-                    url: file_link(state, repo, &file.path),
-                });
-            }
-        }
         for (kind, x, w) in icons {
             hits.push(IconHit {
                 y,
@@ -1599,7 +1577,6 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         }
     }
     state.layout.icon_hits.extend(hits);
-    state.layout.links.extend(links);
     frame.render_widget(Paragraph::new(lines), area);
 }
 
@@ -1659,8 +1636,7 @@ fn tree_row_runs_remote(
 
 /// Paint one tree row. Also returns an [`IconSpan`] for each segment the
 /// row paints with a catalog icon tag ([`TextSeg::icon`]) that is still on
-/// screen after `col_offset`, the label budget, and the row `width`, and
-/// the painted [`LabelSpan`] of the label run.
+/// screen after `col_offset`, the label budget, and the row `width`.
 fn paint_tree_row(
     row: &VisibleRow,
     width: usize,
@@ -1673,7 +1649,7 @@ fn paint_tree_row(
     decor: TreeRowDecor,
     palette: Palette,
     col_offset: usize,
-) -> (Line<'static>, Vec<IconSpan>, Option<LabelSpan>) {
+) -> (Line<'static>, Vec<IconSpan>) {
     let segs_width =
         |segs: &[TextSeg]| -> usize { segs.iter().map(|s| visible_width(&s.text)).sum() };
     let mut segs = painted_row_segments(
@@ -1731,7 +1707,6 @@ fn paint_tree_row(
         segs.trailing.extend(summary);
     }
     let icons = segmented_icon_spans(row.depth, &segs, width, col_offset);
-    let label = segmented_label_span(row.depth, &segs, width, col_offset);
     let line = paint_segmented_row(
         row.depth,
         row.foldable,
@@ -1747,7 +1722,7 @@ fn paint_tree_row(
         palette,
         col_offset,
     );
-    (line, icons, label)
+    (line, icons)
 }
 
 /// Painted span of every icon segment of a row that
@@ -11476,7 +11451,7 @@ mod tests {
         pr: Option<PrState>,
     ) -> (String, Vec<IconSpan>) {
         let palette = crate::tui::theme::ThemeId::TokyoNight.palette();
-        let (line, icons, _) = paint_tree_row(
+        let (line, icons) = paint_tree_row(
             row,
             width,
             false,
@@ -11594,7 +11569,7 @@ mod tests {
             (&dir, true, "\"", IconKind::Comment),
             (&section, true, "\"", IconKind::Comment),
         ] {
-            let (line, icons, _) = paint_tree_row(
+            let (line, icons) = paint_tree_row(
                 row,
                 width,
                 false,
@@ -17730,7 +17705,7 @@ mod tests {
         let (mut shown, mut cut) = (0, 0);
         for width in 8..48 {
             for col_offset in [0, 2, 9] {
-                let (line, icons, _) = paint_tree_row(
+                let (line, icons) = paint_tree_row(
                     &row,
                     width,
                     false,
@@ -17998,36 +17973,29 @@ mod tests {
         );
     }
 
+    /// `file://` links painted in the tree pane (left of the right pane).
+    fn tree_file_links(state: &AppState) -> Vec<LinkHit> {
+        state
+            .layout
+            .links
+            .iter()
+            .filter(|link| link.url.starts_with("file://") && link.x < state.layout.right_x)
+            .cloned()
+            .collect()
+    }
+
     #[test]
-    fn tree_file_row_links_to_percent_encoded_file_url() {
+    fn tree_file_rows_have_no_file_links() {
         let mut row = repo("app", true);
         row.changes[0].path = "docs/a b#é.md".into();
         let snapshot = build_workspace_snapshot(&[row], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/work space"), snapshot, true);
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
         draw_state(&mut terminal, &mut state);
-        let url = crate::tui::hyperlink::file_url(
-            crate::tui::hyperlink::local_host(),
-            Path::new("/work space/app/docs/a b#é.md"),
-        );
-        assert!(
-            url.ends_with("/work%20space/app/docs/a%20b%23%C3%A9.md"),
-            "{url}"
-        );
-        let link = only_link_to(&state, &terminal, &url);
-        assert!(link.x < state.layout.right_x, "tree pane: {link:?}");
-        let text = link_text(&terminal, &link);
-        assert!(text.contains("a b#é.md"), "{text:?}");
-        // Repo and folder rows get no path link.
-        assert!(
-            state
-                .layout
-                .links
-                .iter()
-                .all(|link| link.url == url || !link.url.starts_with("file://")),
-            "{:?}",
-            state.layout.links
-        );
+        let text = buffer_text(&terminal);
+        assert!(text.contains("a b#é.md"), "file name painted:\n{text}");
+        let links = tree_file_links(&state);
+        assert!(links.is_empty(), "{links:?}");
     }
 
     /// Every `file://` link URL of the frame.
@@ -18042,18 +18010,23 @@ mod tests {
     }
 
     #[test]
-    fn quoted_tree_file_rows_links_to_the_unquoted_file_url() {
-        let mut row = repo("app", true);
-        let change = row.changes[0].clone();
-        row.changes = [r#""my notes.txt""#, r#""\303\251.rs""#]
-            .into_iter()
-            .map(|path| FileChange {
-                path: path.into(),
-                ..change.clone()
-            })
-            .collect();
-        let snapshot = build_workspace_snapshot(&[row], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+    fn quoted_commit_file_rows_link_to_the_unquoted_file_url() {
+        let mut state = two_pane_graph_state();
+        state.open_commit_files(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: LINK_SHA.into(),
+            },
+            [r#""my notes.txt""#, r#""\303\251.rs""#]
+                .into_iter()
+                .map(|path| super::super::drill::CommitFile {
+                    status: "M".into(),
+                    path: path.into(),
+                    old_path: None,
+                    stat: None,
+                })
+                .collect(),
+        );
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
         draw_state(&mut terminal, &mut state);
         let urls = file_link_urls(&state);
@@ -18067,7 +18040,7 @@ mod tests {
     }
 
     #[test]
-    fn deleted_file_rows_get_no_links_to_files() {
+    fn tree_and_deleted_commit_file_rows_get_no_links_to_files() {
         let mut row = repo("app", true);
         let change = row.changes[0].clone();
         row.changes = vec![
@@ -18093,14 +18066,7 @@ mod tests {
             assert!(text.contains(name), "{name} painted:\n{text}");
         }
         let urls = file_link_urls(&state);
-        assert!(
-            urls.iter().any(|url| url.ends_with("/tmp/app/README.md")),
-            "{urls:?}"
-        );
-        assert!(
-            urls.iter().all(|url| !url.ends_with("gone.txt")),
-            "{urls:?}"
-        );
+        assert!(urls.is_empty(), "{urls:?}");
 
         state.open_commit_files(
             "app".into(),
@@ -18437,7 +18403,7 @@ mod tests {
         let (mut both, mut sync_only) = (0, 0);
         for width in 6..60 {
             for col_offset in [0, 3, 11, 40] {
-                let (line, icons, _) = paint_tree_row(
+                let (line, icons) = paint_tree_row(
                     &row,
                     width,
                     false,
@@ -18531,7 +18497,7 @@ mod tests {
                 .collect();
             for width in 6..72 {
                 for col_offset in [0, 3, 11, 40] {
-                    let (line, icons, _) = paint_tree_row(
+                    let (line, icons) = paint_tree_row(
                         row,
                         width,
                         false,
