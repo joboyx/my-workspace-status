@@ -1504,7 +1504,7 @@ fn unquote_c_path(value: &str) -> String {
 /// A value in surrounding `"` has its escapes decoded (`\"`, `\\`, `\t`,
 /// `\n`, the other C letter escapes, and 1-3 digit octal bytes). Any other
 /// value comes back as its own bytes, untouched.
-pub(crate) fn unquote_c_path_bytes(value: &str) -> Vec<u8> {
+fn unquote_c_path_bytes(value: &str) -> Vec<u8> {
     let Some(inner) = value
         .strip_prefix('"')
         .and_then(|rest| rest.strip_suffix('"'))
