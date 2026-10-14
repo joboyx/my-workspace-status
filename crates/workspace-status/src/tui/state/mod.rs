@@ -6608,6 +6608,7 @@ impl AppState {
                 Err(err) => {
                     tab.error = Some(err);
                     tab.files.clear();
+                    tab.patch_keys.clear();
                     tab.source = None;
                     tab.path = None;
                     tab.content = DiffContent::default();
@@ -6627,6 +6628,7 @@ impl AppState {
                 .clone()
                 .filter(|path| load.files.iter().any(|file| &file.path == path));
             tab.files = load.files;
+            tab.patch_keys = load.patch_keys;
             (
                 load.source,
                 keep,
@@ -9058,6 +9060,10 @@ mod tests {
                     stat: None,
                 })
                 .collect(),
+            patch_keys: paths
+                .iter()
+                .map(|path| ((*path).to_string(), format!("key:{path}")))
+                .collect(),
             head: Some("ccc".into()),
             base_tip: "bbb".into(),
         }
@@ -9593,6 +9599,7 @@ mod tests {
             old_path: None,
             stat: None,
         }];
+        tab.patch_keys = [("src/view.rs".to_string(), "key:src/view.rs".to_string())].into();
     }
 
     #[test]

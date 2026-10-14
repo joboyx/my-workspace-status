@@ -3838,6 +3838,7 @@ mod tests {
         CompareRangeLoad {
             source: compare_source(),
             files: files.iter().map(|path| commit_file(path)).collect(),
+            patch_keys: Default::default(),
             head: Some("ccc".into()),
             base_tip: "bbb".into(),
         }

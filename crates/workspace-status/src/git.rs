@@ -1173,6 +1173,76 @@ pub fn list_compare_name_status(
     Ok(files)
 }
 
+/// Patch key per path of `base...HEAD`, from `diff --raw --no-abbrev
+/// --find-renames`.
+///
+/// The key holds the old and new modes, the old and new blob ids, the
+/// status letter and the path(s). Two keys are equal only when the patch
+/// for that path is the same, whatever commits produced it. Keyed by the
+/// new path, spelled as [`list_compare_name_status`] lists it: no `-z`, so
+/// git quotes unusual paths the same way in both. A failed git call gives
+/// an empty map; the file list does not depend on it.
+pub fn list_compare_patch_keys(
+    cwd: &Path,
+    base_sha: &str,
+    head_sha: &str,
+) -> std::collections::HashMap<String, String> {
+    let range = format!("{base_sha}...{head_sha}");
+    let raw = exec_git_stdout(
+        &[
+            "diff",
+            "--raw",
+            "--no-abbrev",
+            "--find-renames",
+            &range,
+            "--",
+        ],
+        cwd,
+    )
+    .unwrap_or_default();
+    parse_raw_patch_keys(&raw)
+}
+
+/// Parse newline `git diff --raw` output into new path → patch key.
+///
+/// A row is `:<old mode> <new mode> <old id> <new id> <status>[score]\t<path>`.
+/// A rename or copy row ends `\t<old path>\t<new path>`. Paths stay as git
+/// prints them (quoted when unusual), like [`parse_name_status_lines`]. The
+/// similarity score is left out of the key: the blob ids already fix it.
+fn parse_raw_patch_keys(stdout: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for line in stdout.lines() {
+        let Some(line) = line.strip_prefix(':') else {
+            continue;
+        };
+        let mut parts = line.split('\t');
+        let meta = parts.next().unwrap_or("");
+        let fields: Vec<&str> = meta.split(' ').collect();
+        let [old_mode, new_mode, old_id, new_id, status] = fields[..] else {
+            continue;
+        };
+        let Some(letter) = status.chars().next() else {
+            continue;
+        };
+        let Some(first) = parts.next().filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        let (old_path, path) = if matches!(letter, 'R' | 'C') {
+            let Some(new) = parts.next().filter(|p| !p.is_empty()) else {
+                continue;
+            };
+            (first, new)
+        } else {
+            (first, first)
+        };
+        out.insert(
+            path.to_string(),
+            format!("{old_mode} {new_mode} {old_id} {new_id} {letter}\0{old_path}\0{path}"),
+        );
+    }
+    out
+}
+
 /// `git diff` argv for one compare path, with optional rename old path.
 pub fn git_compare_diff_args(
     base_sha: &str,
@@ -2342,6 +2412,85 @@ keep-z
         assert_eq!(stat_of(&files, "new.txt"), counts(2, 0));
         assert_eq!(stat_of(&files, "RENAMED.md"), counts(0, 0));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compare_patch_keys_follow_the_file_diff_not_the_commits() {
+        let dir = unique_dir("ws-git-patch-keys");
+        init_repo(&dir);
+        let base = exec_git(&["rev-parse", "HEAD"], &dir);
+        fs::write(dir.join("a.txt"), "a\n").unwrap();
+        fs::write(dir.join("b.txt"), "b\n").unwrap();
+        git(&dir, &["mv", "README.md", "RENAMED.md"]);
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "one"]);
+        let head1 = exec_git(&["rev-parse", "HEAD"], &dir);
+        let keys1 = list_compare_patch_keys(&dir, &base, &head1);
+        assert!(keys1
+            .get("RENAMED.md")
+            .is_some_and(|k| k.contains("README.md")));
+
+        fs::write(dir.join("b.txt"), "b2\n").unwrap();
+        git(&dir, &["commit", "-q", "-am", "two"]);
+        let head2 = exec_git(&["rev-parse", "HEAD"], &dir);
+        let keys2 = list_compare_patch_keys(&dir, &base, &head2);
+        assert_eq!(keys1.get("a.txt"), keys2.get("a.txt"), "untouched file");
+        assert_eq!(keys1.get("RENAMED.md"), keys2.get("RENAMED.md"));
+        assert!(keys2.contains_key("b.txt"));
+        assert_ne!(keys1.get("b.txt"), keys2.get("b.txt"), "edited file");
+
+        fs::write(dir.join("b.txt"), "b\n").unwrap();
+        git(&dir, &["commit", "-q", "-am", "revert"]);
+        let head3 = exec_git(&["rev-parse", "HEAD"], &dir);
+        let keys3 = list_compare_patch_keys(&dir, &base, &head3);
+        assert_eq!(keys1.get("b.txt"), keys3.get("b.txt"), "same diff again");
+
+        assert!(list_compare_patch_keys(&dir, "nope", &head3).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compare_patch_keys_spell_paths_like_the_compare_list() {
+        let dir = unique_dir("ws-git-patch-keys-quoted");
+        init_repo(&dir);
+        git(&dir, &["config", "core.quotePath", "true"]);
+        let base = exec_git(&["rev-parse", "HEAD"], &dir);
+        fs::write(dir.join("é.txt"), "e\n").unwrap();
+        fs::write(dir.join("tab\there.txt"), "t\n").unwrap();
+        fs::write(dir.join("plain.txt"), "p\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "odd names"]);
+        let head = exec_git(&["rev-parse", "HEAD"], &dir);
+        let files = list_compare_name_status(&dir, &base, &head).unwrap();
+        let keys = list_compare_patch_keys(&dir, &base, &head);
+        assert_eq!(files.len(), 3, "{files:?}");
+        assert!(
+            files.iter().any(|f| f.path.starts_with('"')),
+            "git quotes an unusual path: {files:?}"
+        );
+        for file in &files {
+            assert!(keys.contains_key(&file.path), "{} in {keys:?}", file.path);
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_raw_patch_keys_reads_plain_and_rename_rows() {
+        let z = "1".repeat(40);
+        let o = "0".repeat(40);
+        let raw = format!(
+            ":100644 100644 {o} {z} M\tsrc/a.rs\n:100644 100644 {o} {z} R087\told.rs\tnew.rs\n"
+        );
+        let keys = parse_raw_patch_keys(&raw);
+        assert_eq!(keys.len(), 2);
+        assert_eq!(
+            keys["src/a.rs"],
+            format!("100644 100644 {o} {z} M\0src/a.rs\0src/a.rs")
+        );
+        assert_eq!(
+            keys["new.rs"],
+            format!("100644 100644 {o} {z} R\0old.rs\0new.rs")
+        );
     }
 
     #[test]

@@ -438,10 +438,16 @@ pub struct CompareTab {
     pub loading: bool,
     /// Latest `LoadCompareDiff` request for this tab.
     pub diff_req: u64,
-    /// Session-only reviewed marks: path → range key at mark time.
+    /// Path → patch key of the loaded compare list (blob pair, modes,
+    /// status and paths of that file's patch). Empty for a
+    /// commit-vs-working-tree tab.
+    pub patch_keys: HashMap<String, String>,
+    /// Session-only reviewed marks: path → that file's patch key at mark time.
     ///
-    /// A mark paints only while that key matches the loaded range. Stale
-    /// entries stay hidden, not removed.
+    /// A mark paints only while the file's current patch key matches it,
+    /// so new commits that leave the file's diff unchanged keep it. Stale
+    /// entries stay hidden, not removed: a later identical diff paints the
+    /// mark again.
     pub reviewed: HashMap<String, String>,
 }
 
@@ -484,6 +490,7 @@ impl CompareTab {
             last_base_tip: None,
             loading: true,
             diff_req: 0,
+            patch_keys: HashMap::new(),
             reviewed: HashMap::new(),
         }
     }
@@ -552,34 +559,33 @@ impl CompareTab {
             .then_some(path.as_str())
     }
 
-    /// Range key of the loaded list when `path` is in it, else `None`.
+    /// Patch key of `path` when it is listed in a loaded `base...HEAD`
+    /// compare and has a key, else `None`.
     ///
-    /// Merge base + HEAD. A new HEAD or merge base changes it, so a mark
-    /// stops painting. A base tip that moves without a new merge base keeps it.
-    fn reviewed_range(&self, path: &str) -> Option<String> {
-        let Some(CommitFileSource::Compare {
-            merge_base, head, ..
-        }) = self.source.as_ref()
-        else {
+    /// The key is that file's patch, not the commit ids: a new HEAD or
+    /// merge base that leaves the file's diff unchanged keeps it.
+    fn reviewed_key(&self, path: &str) -> Option<&String> {
+        let Some(CommitFileSource::Compare { .. }) = self.source.as_ref() else {
             return None;
         };
-        self.files
-            .iter()
-            .any(|file| file.path == path)
-            .then(|| format!("{merge_base}\0{head}"))
+        if !self.files.iter().any(|file| file.path == path) {
+            return None;
+        }
+        self.patch_keys.get(path)
     }
 
-    /// True when `path` is marked reviewed for the loaded range.
+    /// True when `path` is marked reviewed and its diff is the one marked.
     pub fn is_reviewed(&self, path: &str) -> bool {
         let Some(marked) = self.reviewed.get(path) else {
             return false;
         };
-        self.reviewed_range(path).as_ref() == Some(marked)
+        self.reviewed_key(path) == Some(marked)
     }
 
-    /// Toggle the reviewed mark on `path`. No-op when `path` is not listed.
+    /// Toggle the reviewed mark on `path`. No-op when `path` is not listed
+    /// or has no patch key. A stale mark is marked again with the new key.
     pub fn toggle_reviewed(&mut self, path: &str) {
-        let Some(now) = self.reviewed_range(path) else {
+        let Some(now) = self.reviewed_key(path).cloned() else {
             return;
         };
         if self.reviewed.get(path) == Some(&now) {
@@ -1481,7 +1487,18 @@ mod tests {
         );
     }
 
-    fn loaded_tab(merge_base: &str, head: &str, base_tip: &str) -> CompareTab {
+    /// How a test load lists `src/a.rs`.
+    enum FileA {
+        /// Listed with this patch key.
+        Keyed(&'static str),
+        /// Listed without a patch key.
+        NoKey,
+        /// Not in the list.
+        Absent,
+    }
+
+    /// Tab loaded on `merge_base...head` with `src/a.rs` as `file_a`.
+    fn loaded_tab(merge_base: &str, head: &str, base_tip: &str, file_a: FileA) -> CompareTab {
         let mut tab = CompareTab::new(
             1,
             "app".into(),
@@ -1490,6 +1507,12 @@ mod tests {
             None,
             true,
         );
+        reload(&mut tab, merge_base, head, base_tip, file_a);
+        tab
+    }
+
+    /// Replace the loaded range as `apply_compare_range` does, keeping marks.
+    fn reload(tab: &mut CompareTab, merge_base: &str, head: &str, base_tip: &str, file_a: FileA) {
         tab.source = Some(CommitFileSource::Compare {
             base_ref: "main".into(),
             head_ref: "HEAD".into(),
@@ -1497,18 +1520,25 @@ mod tests {
             merge_base: merge_base.into(),
             head: head.into(),
         });
-        tab.files = vec![CommitFile {
+        tab.files.clear();
+        tab.patch_keys.clear();
+        if matches!(file_a, FileA::Absent) {
+            return;
+        }
+        tab.files.push(CommitFile {
             status: "M".into(),
             path: "src/a.rs".into(),
             old_path: None,
             stat: None,
-        }];
-        tab
+        });
+        if let FileA::Keyed(key) = file_a {
+            tab.patch_keys.insert("src/a.rs".into(), key.into());
+        }
     }
 
     #[test]
     fn reviewed_toggles_on_listed_file_only() {
-        let mut tab = loaded_tab("aaa", "ccc", "bbb");
+        let mut tab = loaded_tab("aaa", "ccc", "bbb", FileA::Keyed("k1"));
         tab.toggle_reviewed("src/missing.rs");
         assert!(tab.reviewed.is_empty());
         tab.toggle_reviewed("src/a.rs");
@@ -1518,20 +1548,57 @@ mod tests {
     }
 
     #[test]
-    fn reviewed_survives_base_tip_move_but_not_new_head() {
-        let mut tab = loaded_tab("aaa", "ccc", "bbb");
+    fn reviewed_needs_a_patch_key() {
+        let mut tab = loaded_tab("aaa", "ccc", "bbb", FileA::NoKey);
         tab.toggle_reviewed("src/a.rs");
-        let marks = tab.reviewed.clone();
+        assert!(tab.reviewed.is_empty());
+        assert!(!tab.is_reviewed("src/a.rs"));
+    }
 
-        let mut moved_tip = loaded_tab("aaa", "ccc", "bbb2");
-        moved_tip.reviewed = marks.clone();
-        assert!(moved_tip.is_reviewed("src/a.rs"));
+    #[test]
+    fn reviewed_follows_the_file_patch_not_the_commits() {
+        let mut tab = loaded_tab("aaa", "ccc", "bbb", FileA::Keyed("k1"));
+        tab.toggle_reviewed("src/a.rs");
 
-        let mut new_head = loaded_tab("aaa", "ddd", "bbb");
-        new_head.reviewed = marks;
-        assert!(!new_head.is_reviewed("src/a.rs"));
-        new_head.toggle_reviewed("src/a.rs");
-        assert!(new_head.is_reviewed("src/a.rs"), "stale mark re-marks");
+        reload(&mut tab, "aaa", "ccc", "bbb2", FileA::Keyed("k1"));
+        assert!(tab.is_reviewed("src/a.rs"), "base tip move, same diff");
+
+        reload(&mut tab, "aaa", "ddd", "bbb2", FileA::Keyed("k1"));
+        assert!(tab.is_reviewed("src/a.rs"), "new HEAD, same diff");
+
+        reload(&mut tab, "aa2", "eee", "bbb3", FileA::Keyed("k1"));
+        assert!(tab.is_reviewed("src/a.rs"), "new merge base, same diff");
+
+        reload(&mut tab, "aa2", "fff", "bbb3", FileA::Keyed("k2"));
+        assert!(!tab.is_reviewed("src/a.rs"), "new HEAD, changed diff");
+
+        reload(&mut tab, "aa2", "ggg", "bbb3", FileA::Keyed("k1"));
+        assert!(tab.is_reviewed("src/a.rs"), "reverted to the marked diff");
+    }
+
+    #[test]
+    fn reviewed_comes_back_when_the_file_returns_with_the_same_diff() {
+        let mut tab = loaded_tab("aaa", "ccc", "bbb", FileA::Keyed("k1"));
+        tab.toggle_reviewed("src/a.rs");
+
+        reload(&mut tab, "aaa", "ddd", "bbb", FileA::Absent);
+        assert!(!tab.is_reviewed("src/a.rs"));
+        assert!(tab.reviewed.contains_key("src/a.rs"), "stale mark kept");
+
+        reload(&mut tab, "aaa", "eee", "bbb", FileA::Keyed("k1"));
+        assert!(tab.is_reviewed("src/a.rs"));
+    }
+
+    #[test]
+    fn toggle_on_a_stale_mark_marks_the_new_diff() {
+        let mut tab = loaded_tab("aaa", "ccc", "bbb", FileA::Keyed("k1"));
+        tab.toggle_reviewed("src/a.rs");
+        reload(&mut tab, "aaa", "ddd", "bbb", FileA::Keyed("k2"));
+        assert!(!tab.is_reviewed("src/a.rs"));
+        tab.toggle_reviewed("src/a.rs");
+        assert!(tab.is_reviewed("src/a.rs"), "stale mark re-marks");
+        reload(&mut tab, "aaa", "eee", "bbb", FileA::Keyed("k1"));
+        assert!(!tab.is_reviewed("src/a.rs"), "mark now holds the new diff");
     }
 
     #[test]

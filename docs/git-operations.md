@@ -15,6 +15,7 @@ Every git subprocess also runs with `GIT_OPTIONAL_LOCKS=0` (set by `git::git_pro
 | `rev_parse_commit` | `rev-parse --verify --quiet <ref>^{commit}` | `Result<Option<SHA>>` | Missing ref is `Ok(None)`. Other failures are `Err`. |
 | `merge_base` | `merge-base <a> <b>` | `Result<Option<SHA>>` | Unrelated histories are `Ok(None)`. |
 | `list_compare_name_status` | `diff --name-status --find-renames <base>...<head> --`, then `diff --numstat -z --find-renames <base>...<head> --` | `Result<NameStatus[]>` | Committed three-dot file list. The numstat call fills `stat` (added / deleted lines). Its failure leaves `stat` `None`; the list still loads. |
+| `list_compare_patch_keys` | `diff --raw --no-abbrev --find-renames <base>...<head> --` | `path → key` map | Patch key per compare path: old and new mode, old and new blob id, status letter, and paths. Same key means the same patch for that file. No `-z`, so paths are quoted the same way as the name-status list. A compare reviewed mark keys on it. Failure gives an empty map; the list still loads and those files cannot be marked. |
 | `diff_compare_file_ctx` | `diff <base>...<head> -- <path>` | `Result<lines>` | One compare path. Empty stdout is `(no diff)`. |
 | `list_worktree_vs_commit_name_status` | `diff --name-status -M <base> -- [<old>] <path>`, then `diff --numstat -z -M <base> -- [<old>] <path>` | `Result<NameStatus[]>` | One path, commit against the working tree. Empty list when they match. |
 | `diff_worktree_vs_commit_file_ctx` | `diff [-U<n>] -M <base> -- [<old>] <path>` (`git_worktree_compare_diff_args`) | `Result<lines>` | Commit against the working tree for one path. Empty stdout is `(no diff)`. |
@@ -104,6 +105,7 @@ git rev-parse --verify --quiet <head-ref>^{commit}
 git rev-parse --verify --quiet <base-ref>^{commit}
 git merge-base <base-sha> <head-sha>
 git diff --name-status --find-renames <base-sha>...<head-sha> --
+git diff --raw --no-abbrev --find-renames <base-sha>...<head-sha> --
 git diff <base-sha>...<head-sha> -- <path>
 ```
 

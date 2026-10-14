@@ -8357,6 +8357,8 @@ mod tests {
                 merge_base: "ccc".into(),
                 head: "ddd".into(),
             });
+        state.tabs.active_compare_mut().unwrap().patch_keys =
+            [("pack.json".to_string(), "key:pack.json".to_string())].into();
         let eye = super::super::icons::icon_viewed(false);
         let backend = TestBackend::new(120, 24);
         let mut terminal = Terminal::new(backend).unwrap();

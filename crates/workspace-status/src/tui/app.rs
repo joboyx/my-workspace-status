@@ -4,7 +4,7 @@
 //! live in [`super::effect`]. This module keeps `run_tui` terminal setup and
 //! pane/compute helpers.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{self, stdout, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -29,9 +29,10 @@ use crate::discovery::{collect_snapshots, process_repo, RepoCheckoutMeta};
 use crate::git::{
     ahead_behind, checkout_branch, diff_commit_file_ctx, diff_compare_file_ctx,
     diff_stash_file_ctx, diff_worktree_vs_commit_file_ctx, fast_forward_to_remote_ref,
-    git_diff_args, list_commit_name_status, list_compare_name_status, list_stash_name_status,
-    list_worktree_name_status, list_worktree_vs_commit_name_status, merge_base, merge_into_head,
-    repo_has_local_changes, rev_parse_commit, rev_parse_quiet, MergeIntoHeadResult, NameStatus,
+    git_diff_args, list_commit_name_status, list_compare_name_status, list_compare_patch_keys,
+    list_stash_name_status, list_worktree_name_status, list_worktree_vs_commit_name_status,
+    merge_base, merge_into_head, repo_has_local_changes, rev_parse_commit, rev_parse_quiet,
+    MergeIntoHeadResult, NameStatus,
 };
 use crate::settings::Settings;
 use crate::snapshot::{
@@ -751,6 +752,9 @@ pub(crate) struct CompareRangeLoad {
     pub source: CommitFileSource,
     /// Committed `base...HEAD` paths.
     pub files: Vec<super::drill::CommitFile>,
+    /// Path → patch key from [`list_compare_patch_keys`]. Empty for a
+    /// commit-vs-working-tree load, and when the raw diff call failed.
+    pub patch_keys: HashMap<String, String>,
     /// HEAD SHA at load time. `None` for a commit-vs-working-tree load,
     /// which is never probed.
     pub head: Option<String>,
@@ -780,6 +784,7 @@ pub(crate) fn compute_worktree_compare_range(
             old_path: file.old_path.clone(),
         },
         files,
+        patch_keys: HashMap::new(),
         head: None,
         base_tip: base,
     })
@@ -808,6 +813,7 @@ pub(crate) fn compute_compare_range(
         .into_iter()
         .map(Into::into)
         .collect();
+    let patch_keys = list_compare_patch_keys(dir, &base_tip, &head);
     Ok(CompareRangeLoad {
         source: CommitFileSource::Compare {
             base_ref: base_ref.to_string(),
@@ -817,6 +823,7 @@ pub(crate) fn compute_compare_range(
             head: head.clone(),
         },
         files,
+        patch_keys,
         head: Some(head),
         base_tip,
     })
