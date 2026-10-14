@@ -603,7 +603,7 @@ fn hyperlinks(p: &Probe) -> Check {
             CheckGroup::Terminal,
             NAME,
             CheckStatus::Ok,
-            "Sent on PR badges, commit hashes and paths; the terminal cannot be asked whether \
+            "Sent on PR badges and commit hashes; the terminal cannot be asked whether \
              it honours OSC 8 — a terminal that ignores them shows plain text.",
             None,
         );
@@ -622,14 +622,14 @@ fn hyperlinks(p: &Probe) -> Check {
             NAME,
             CheckStatus::Ok,
             "tmux terminal-features has a hyperlinks entry: tmux passes the OSC 8 links on PR \
-             badges, commit hashes and paths when that entry matches this terminal.",
+             badges and commit hashes when that entry matches this terminal.",
             None,
         ),
         Some(_) => row(
             CheckGroup::Terminal,
             NAME,
             CheckStatus::Warn,
-            "tmux drops OSC 8 links (PR badges, commit hashes, paths): terminal-features has \
+            "tmux drops OSC 8 links (PR badges, commit hashes): terminal-features has \
              no hyperlinks entry.",
             hint_copy(ADD, COPY),
         ),

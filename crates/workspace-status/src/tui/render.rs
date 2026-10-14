@@ -55,7 +55,7 @@ use super::help::{
     help_version_label, wrap_help_description, wrap_help_footer, HELP_LEGEND_HEAD_ROWS,
     HELP_LEGEND_TITLE, HELP_SEARCH_ESC_HINT,
 };
-use super::hyperlink::{file_url, local_host, LinkHit};
+use super::hyperlink::LinkHit;
 use super::icons::{
     comment_mark_cols, glyph, icon_branch, icon_comment, icon_comment_resolved, icon_diff,
     icon_merged_into_default, icon_move, icon_open_vs_default, truncate_visible, IconKind,
@@ -485,24 +485,6 @@ fn drop_hits_under(layout: &mut LayoutHit, rect: Rect) {
         .links
         .retain(|link| !rect.intersects(Rect::new(link.x, link.y, link.width, 1)));
     drop_undercurls_under(&mut layout.undercurls, rect);
-}
-
-/// `file://` URL of `rel` in checkout `repo` (both relative to the
-/// workspace root `state.cwd`).
-///
-/// `rel` can be the C-quoted form git prints for a name with a space or a
-/// non-ASCII byte (`"my notes.txt"`, `"\303\251.rs"`); the link uses the
-/// real name. The shown path is not changed.
-fn file_link(state: &AppState, repo: &str, rel: &str) -> String {
-    let rel = crate::git::unquote_c_path_bytes(rel);
-    #[cfg(unix)]
-    let rel = {
-        use std::os::unix::ffi::OsStrExt;
-        PathBuf::from(std::ffi::OsStr::from_bytes(&rel))
-    };
-    #[cfg(not(unix))]
-    let rel = PathBuf::from(String::from_utf8_lossy(&rel).into_owned());
-    file_url(local_host(), &state.cwd.join(repo).join(rel))
 }
 
 /// Link over the rightmost `needle` painted in buffer row `y`, columns
@@ -1594,10 +1576,6 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
 /// and width.
 type IconSpan = (IconKind, usize, usize);
 
-/// Painted label run of a row: column offset from the row start, and
-/// width.
-type LabelSpan = (usize, usize);
-
 /// Per-row marks and live decorations a tree row paints beside its own
 /// segments.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1795,24 +1773,6 @@ fn segmented_icon_spans(
         col += seg_width;
     }
     spans
-}
-
-/// Painted label run of a row that [`paint_segmented_row`] paints `width`
-/// columns wide at `col_offset`, clipped to `width`. `None` when no label
-/// cell is on screen.
-fn segmented_label_span(
-    depth: usize,
-    segs: &NodeSegments,
-    width: usize,
-    col_offset: usize,
-) -> Option<LabelSpan> {
-    let layout = segmented_row_layout(depth, segs, width);
-    let label_width: usize = slice_segs(&segs.segments, col_offset, layout.label_budget)
-        .iter()
-        .map(|s| visible_width(&s.text))
-        .sum();
-    let end = (layout.prefix_width + label_width).min(width);
-    (layout.prefix_width < end).then(|| (layout.prefix_width, end - layout.prefix_width))
 }
 
 /// `seg` as leading spaces, the text between, and trailing spaces, each
@@ -2738,10 +2698,6 @@ fn draw_commit_file_list(
     let mut lines = Vec::new();
     let mut hits = Vec::new();
     let comment_scope = state.commit_file_comment_scope();
-    let mut links = Vec::new();
-    let link_repo = state
-        .commit_drill_source()
-        .map(|(repo, _)| repo.to_string());
     for (y, row) in (area.y..).zip(rows.iter().skip(start).take(height)) {
         let segs = state.commit_file_row_paint_segments_in(row, comment_scope);
         let search_match = searching_files
@@ -2754,24 +2710,6 @@ fn draw_commit_file_list(
                 width: u16::try_from(w).unwrap_or(u16::MAX),
                 kind,
                 target: IconTarget::CommitFileRow(row.id.clone()),
-            });
-        }
-        // A file row's label links to the file in the checkout; a deleted
-        // file has none.
-        let deleted = row
-            .file
-            .as_ref()
-            .is_some_and(|file| file.status.starts_with('D'));
-        if let (true, Some(repo), Some((x, w))) = (
-            row.is_file() && !deleted,
-            link_repo.as_deref(),
-            segmented_label_span(row.depth, &segs, width, col_offset),
-        ) {
-            links.push(LinkHit {
-                y,
-                x: area.x.saturating_add(u16::try_from(x).unwrap_or(u16::MAX)),
-                width: u16::try_from(w).unwrap_or(u16::MAX),
-                url: file_link(state, repo, &row.path),
             });
         }
         lines.push(paint_segmented_row(
@@ -2791,7 +2729,6 @@ fn draw_commit_file_list(
         ));
     }
     state.layout.icon_hits.extend(hits);
-    state.layout.links.extend(links);
     frame.render_widget(Paragraph::new(lines), area);
 }
 
@@ -2913,28 +2850,6 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         .into_iter()
         .take(header_h as usize)
         .collect();
-    // The `repo/path` part of the title links to the file on disk.
-    let title_link = state.open_diff_target().and_then(|(repo, rel, _)| {
-        let linked = format!("{repo}/{rel}");
-        title
-            .starts_with(&linked)
-            .then(|| (visible_width(&linked), file_link(state, repo, rel)))
-    });
-    if let Some((mut left, url)) = title_link {
-        for (y, chunk) in (area.y..).zip(&title_chunks) {
-            let width = visible_width(chunk).min(left);
-            if width == 0 {
-                break;
-            }
-            state.layout.links.push(LinkHit {
-                y,
-                x: area.x,
-                width: u16::try_from(width).unwrap_or(u16::MAX),
-                url: url.clone(),
-            });
-            left -= width;
-        }
-    }
     let mut header_lines: Vec<Line> = title_chunks
         .into_iter()
         .map(|chunk| Line::from(Span::styled(chunk, heading)))
@@ -18095,7 +18010,7 @@ mod tests {
         assert!(state.layout.links.is_empty());
     }
 
-    // ── OSC 8 links on commit hashes and file paths ───────────────────────
+    // ── OSC 8 links on commit hashes ──────────────────────────────────────
 
     const LINK_SHA: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -18222,31 +18137,6 @@ mod tests {
         );
     }
 
-    /// `file://` links painted in the tree pane (left of the right pane).
-    fn tree_file_links(state: &AppState) -> Vec<LinkHit> {
-        state
-            .layout
-            .links
-            .iter()
-            .filter(|link| link.url.starts_with("file://") && link.x < state.layout.right_x)
-            .cloned()
-            .collect()
-    }
-
-    #[test]
-    fn tree_file_rows_have_no_file_links() {
-        let mut row = repo("app", true);
-        row.changes[0].path = "docs/a b#é.md".into();
-        let snapshot = build_workspace_snapshot(&[row], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/work space"), snapshot, true);
-        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
-        draw_state(&mut terminal, &mut state);
-        let text = buffer_text(&terminal);
-        assert!(text.contains("a b#é.md"), "file name painted:\n{text}");
-        let links = tree_file_links(&state);
-        assert!(links.is_empty(), "{links:?}");
-    }
-
     /// Every `file://` link URL of the frame.
     fn file_link_urls(state: &AppState) -> Vec<String> {
         state
@@ -18258,142 +18148,71 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn quoted_commit_file_rows_link_to_the_unquoted_file_url() {
+    /// Commit-files list of `app` at [`LINK_SHA`] with one file per path,
+    /// each with status `M`, except `commit-D.rs` (deleted).
+    fn commit_files_state(paths: &[&str]) -> AppState {
         let mut state = two_pane_graph_state();
         state.open_commit_files(
             "app".into(),
             super::super::drill::CommitFileSource::Commit {
                 commit_id: LINK_SHA.into(),
             },
-            [r#""my notes.txt""#, r#""\303\251.rs""#]
-                .into_iter()
+            paths
+                .iter()
                 .map(|path| super::super::drill::CommitFile {
-                    status: "M".into(),
-                    path: path.into(),
+                    status: if *path == "commit-D.rs" { "D" } else { "M" }.into(),
+                    path: (*path).into(),
                     old_path: None,
                     stat: None,
                 })
                 .collect(),
         );
-        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
-        draw_state(&mut terminal, &mut state);
-        let urls = file_link_urls(&state);
-        for want in ["/tmp/app/my%20notes.txt", "/tmp/app/%C3%A9.rs"] {
-            assert!(
-                urls.iter().any(|url| url.ends_with(want)),
-                "{want} in {urls:?}"
-            );
-        }
-        assert!(urls.iter().all(|url| !url.contains("%22")), "{urls:?}");
+        state
     }
 
+    /// No surface links a file name: the tree, the commit-files list (a
+    /// C-quoted, a spaced, and a deleted path), the inline diff title, the
+    /// compare tab's file list and diff title, and the Explorer tree and
+    /// preview all paint their names with no `file://` link.
     #[test]
-    fn tree_and_deleted_commit_file_rows_get_no_links_to_files() {
-        let mut row = repo("app", true);
-        let change = row.changes[0].clone();
-        row.changes = vec![
-            FileChange {
-                path: "gone.txt".into(),
-                unstaged_status: Some("D".into()),
-                ..change.clone()
-            },
-            FileChange {
-                path: "staged-gone.txt".into(),
-                staged_status: Some("D".into()),
-                unstaged_status: None,
-                ..change.clone()
-            },
-            change,
+    fn no_surface_links_a_file() {
+        let mut tree = repo("app", true);
+        tree.changes[0].path = "docs/a b#é.md".into();
+        let snapshot = build_workspace_snapshot(&[tree], &[], false, &[]);
+        let tree = AppState::new(PathBuf::from("/work space"), snapshot, true);
+        let surfaces: Vec<(&str, AppState, &[&str])> = vec![
+            ("tree", tree, &["a b#é.md"]),
+            (
+                "commit files",
+                commit_files_state(&[r#""my notes.txt""#, "src/my file.rs", "commit-D.rs"]),
+                &["my notes.txt", "my file.rs", "commit-D.rs"],
+            ),
+            (
+                "inline diff title",
+                two_pane_diff_state(),
+                &["app/README.md"],
+            ),
+            (
+                "compare tab",
+                summary_compare_state(summary_files()),
+                &["README.md", "src/a.rs"],
+            ),
+            (
+                "explorer diff",
+                explorer_preview_state("README.md", Some("@@ -1 +1 @@\n-# seed\n+# dirty\n")),
+                &["README.md", "new.txt"],
+            ),
         ];
-        let snapshot = build_workspace_snapshot(&[row], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
-        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
-        draw_state(&mut terminal, &mut state);
-        let text = buffer_text(&terminal);
-        for name in ["gone.txt", "staged-gone.txt", "README.md"] {
-            assert!(text.contains(name), "{name} painted:\n{text}");
+        for (label, mut state, names) in surfaces {
+            let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let text = buffer_text(&terminal);
+            for name in names {
+                assert!(text.contains(name), "{label}: {name} painted:\n{text}");
+            }
+            let urls = file_link_urls(&state);
+            assert!(urls.is_empty(), "{label}: {urls:?}");
         }
-        let urls = file_link_urls(&state);
-        assert!(urls.is_empty(), "{urls:?}");
-
-        state.open_commit_files(
-            "app".into(),
-            super::super::drill::CommitFileSource::Commit {
-                commit_id: LINK_SHA.into(),
-            },
-            ["D", "M"]
-                .into_iter()
-                .map(|status| super::super::drill::CommitFile {
-                    status: status.into(),
-                    path: format!("commit-{status}.rs"),
-                    old_path: None,
-                    stat: None,
-                })
-                .collect(),
-        );
-        draw_state(&mut terminal, &mut state);
-        let text = buffer_text(&terminal);
-        for name in ["commit-D.rs", "commit-M.rs"] {
-            assert!(text.contains(name), "{name} painted:\n{text}");
-        }
-        let urls = file_link_urls(&state);
-        assert!(
-            urls.iter().any(|url| url.ends_with("/tmp/app/commit-M.rs")),
-            "{urls:?}"
-        );
-        assert!(
-            urls.iter().all(|url| !url.ends_with("commit-D.rs")),
-            "{urls:?}"
-        );
-    }
-
-    #[test]
-    fn commit_file_row_links_to_file_url() {
-        let mut state = two_pane_graph_state();
-        state.open_commit_files(
-            "app".into(),
-            super::super::drill::CommitFileSource::Commit {
-                commit_id: LINK_SHA.into(),
-            },
-            vec![super::super::drill::CommitFile {
-                status: "M".into(),
-                path: "src/my file.rs".into(),
-                old_path: None,
-                stat: None,
-            }],
-        );
-        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
-        draw_state(&mut terminal, &mut state);
-        let url = crate::tui::hyperlink::file_url(
-            crate::tui::hyperlink::local_host(),
-            Path::new("/tmp/app/src/my file.rs"),
-        );
-        assert!(url.ends_with("/tmp/app/src/my%20file.rs"), "{url}");
-        let link = only_link_to(&state, &terminal, &url);
-        assert!(link.x >= state.layout.right_x, "files pane: {link:?}");
-        let text = link_text(&terminal, &link);
-        assert!(text.contains("my file.rs"), "{text:?}");
-    }
-
-    #[test]
-    fn diff_title_path_links_to_file_url() {
-        let mut state = two_pane_diff_state();
-        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
-        draw_state(&mut terminal, &mut state);
-        let url = crate::tui::hyperlink::file_url(
-            crate::tui::hyperlink::local_host(),
-            Path::new("/tmp/app/README.md"),
-        );
-        let links: Vec<_> = state
-            .layout
-            .links
-            .iter()
-            .filter(|link| link.url == url && link.x >= state.layout.right_x)
-            .cloned()
-            .collect();
-        assert_eq!(links.len(), 1, "{:?}", state.layout.links);
-        assert_eq!(link_text(&terminal, &links[0]), "app/README.md");
     }
 
     /// Link spans in `links` that overlap `rect`.
