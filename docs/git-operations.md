@@ -8,7 +8,7 @@ Every git subprocess also runs with `GIT_OPTIONAL_LOCKS=0` (set by `git::git_pro
 
 ## Subprocess deadlines
 
-Every git process `ws` starts is built by `git::git_process` and run by one bounded runner, `git::git_output` (`git_output_within` takes an explicit limit). Do not call `output()` or `spawn()` on a git command. A new git spawn must use the same pair. Every other network spawn has its own time limit (see **Other limits**), and a new one must have one too. The runner puts two bounds on each git run, so a stalled network cannot hold a worker forever.
+Every git process `ws` starts is built by `git::git_process` and run by one bounded runner, `git::git_output` (`git_output_within` takes an explicit limit). Do not call `output()` or `spawn()` on a git command. A new git spawn must use the same pair. Every other background network spawn has its own time limit (see **Other limits**), and a new one must have one too. The one exception is the `ws --update` self-update sidecar (`update.rs`): it runs in the foreground with the terminal, so the user can stop it with Ctrl-C. The runner puts two bounds on each git run, so a stalled network cannot hold a worker forever.
 
 **SSH deadline.** For a remote subcommand (`fetch`, `pull`, `push`, `ls-remote`, `clone`; global options such as `-C <dir>` or `-c k=v` before it are skipped) the runner sets:
 
@@ -20,8 +20,9 @@ GIT_SSH_COMMAND="ssh -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAli
 - `~/.ssh/config` still applies (`IdentityFile`, `ProxyJump`, other host settings). A command-line `-o` wins over the same option in that file.
 - `ConnectTimeout=10` ends a TCP connect that gets no answer. The keepalives drop a session that goes silent mid-transfer after about 30 s.
 - `BatchMode=yes` means ssh never prompts. An unknown host key, or a key that needs a passphrase with no agent, fails at once with ssh's reason. git runs in its own process group, so a prompt could not be answered anyway.
+- A custom ssh command (the user's `GIT_SSH_COMMAND` or `core.sshCommand`) gets no `BatchMode`. If it prompts on the terminal, the system stops it, because git is not in the terminal's foreground group. That run then ends at the 120 s limit.
 
-**Wall-clock deadline.** Remote git is killed after 120 s (`REMOTE_GIT_TIME_LIMIT`). Other git is killed after 60 s (`LOCAL_GIT_TIME_LIMIT`). This limit also catches a stalled HTTPS transfer or a credential helper that waits for input. On Unix git leads its own process group, and the whole group (ssh included) gets `SIGKILL`. The error is:
+**Wall-clock deadline.** Remote git is stopped after 120 s (`REMOTE_GIT_TIME_LIMIT`). Other git is stopped after 60 s (`LOCAL_GIT_TIME_LIMIT`). This limit also catches a stalled HTTPS transfer or a credential helper that waits for input. On Unix git leads its own process group. The whole group (ssh included) first gets `SIGTERM`, so git removes its lockfiles (`.git/index.lock`, ref locks). If git has not exited after 2 s (`GIT_TERM_GRACE`), the group gets `SIGKILL`. Hooks and filters (`pre-push`, `post-checkout`, an LFS smudge) run inside git and share its limit. A `pre-push` hook that runs longer than 120 s makes a TUI push fail with the timeout text. The error is:
 
 - `git <sub> timed out after <N>s: the remote did not answer` for remote git.
 - `git <sub> timed out after <N>s` for other git.
@@ -34,7 +35,7 @@ If git exits but a process it started keeps stdout or stderr open, the runner ki
 - TUI fetch / pull / push: the repo counts as failed. The wave finishes, and the status names the first failed repo, for example `Fetched 2 repos (2 failed: app — git fetch timed out after 120s: the remote did not answer, +1 more)` (`tui/ops.rs` `format_completed_op`).
 - Discovery fetch (`process_repo` with `do_fetch`, used by headless `--fetch`) stays non-fatal. A timeout still gives the local snapshot, with stale remote refs.
 - First paint never fetches. `cli.rs` calls `collect_full_snapshot` with `do_fetch = false`. `--fetch` on a TTY only starts the background queue.
-- Headless mode: a terminal Ctrl-C stops `ws` but not a running git child, because git is in its own process group. That child still ends at its deadline.
+- `ws` exit: git is in its own process group, so a terminal Ctrl-C or hang-up does not reach it. `ws` stops it instead. On TUI quit, `run_tui` calls `git::stop_running_git` after it restores the terminal: `SIGTERM` to every running git group, `SIGKILL` after 2 s, and no new git starts (`git <sub> not started: ws is exiting`). On Unix, a handler for `SIGINT`, `SIGTERM` and `SIGHUP` (`git::stop_git_on_exit_signals`, installed by `cli_main`) sends `SIGTERM` to every running git group, then `ws` exits from the signal as usual.
 
 **Why.** A TTY `ws` ran about ten background `git fetch` jobs whose ssh had no connect timeout. The remote host dropped the packets, so each socket stayed in `SYN-SENT` to port 22 for about ten minutes. `ws` had no process deadline, and the fetches held every worker slot, so the UI did not move. Other hosts, and the forge's HTTPS, answered at once. Now ssh ends such a connect after 10 s, the wall clock is the backstop, and remote jobs have their own Scheduler lane (see **Write serialisation**).
 

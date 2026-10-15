@@ -11,14 +11,21 @@
 //!   of waiting on a prompt), unless the user set their own ssh command
 //!   (see `default_ssh_command`).
 //! - **Wall-clock deadline.** A run that takes longer than its time limit
-//!   (120 s remote, 60 s local) is killed and returns an `io::Error` of kind
-//!   `TimedOut`. On Unix the kill reaches the whole process group, so `ssh`
-//!   and other helpers that git started die with it.
+//!   (120 s remote, 60 s local) is stopped and returns an `io::Error` of
+//!   kind `TimedOut`. On Unix the stop reaches the whole process group, so
+//!   `ssh` and other helpers that git started end with it: `SIGTERM` first
+//!   (git removes its lockfiles), `SIGKILL` two seconds later.
+//!
+//! Git leads its own process group, so a terminal `SIGINT` / `SIGHUP` does
+//! not reach it. `ws` ends running git itself on the way out:
+//! [`stop_running_git`] on TUI quit, and the handler from
+//! `stop_git_on_exit_signals` on `SIGINT` / `SIGTERM` / `SIGHUP`.
 
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{mpsc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -288,35 +295,189 @@ fn wait_until(child: &mut Child, deadline: Instant) -> io::Result<Option<ExitSta
     }
 }
 
-/// Send `SIGKILL` to process group `pgid` (Unix; a no-op elsewhere).
-fn kill_group(pgid: u32) {
+/// Slots in [`RUNNING_GIT_GROUPS`]. `ws` caps parallel git work well below
+/// this; a run that finds every slot taken still runs, unregistered.
+const MAX_TRACKED_GIT_GROUPS: usize = 256;
+
+/// Process groups of the git runs in flight, one per slot, `0` for a free
+/// slot. Plain atomics, so the exit-signal handler can read them safely.
+/// A run registers its group right after spawn and clears it right after
+/// reap. A run that finds no free slot is not registered: the stop paths
+/// cannot reach it, and it still ends at its own deadline.
+static RUNNING_GIT_GROUPS: [AtomicI32; MAX_TRACKED_GIT_GROUPS] =
+    [const { AtomicI32::new(0) }; MAX_TRACKED_GIT_GROUPS];
+
+/// Set once `ws` is exiting ([`stop_running_git`]). The runner then starts
+/// no new git.
+static GIT_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// How long git gets to exit after `SIGTERM` (at its time limit, or when
+/// `ws` exits) before its group gets `SIGKILL`. Git's `SIGTERM` handlers
+/// remove the lockfiles they hold (`.git/index.lock`, ref locks); a
+/// `SIGKILL` leaves them behind and blocks every later write in that repo.
+/// Two seconds is plenty for that cleanup.
+const GIT_TERM_GRACE: Duration = Duration::from_secs(2);
+
+/// A slot in [`RUNNING_GIT_GROUPS`] that holds one run's process group. It
+/// frees the slot on drop.
+struct TrackedGroup(Option<&'static AtomicI32>);
+
+impl TrackedGroup {
+    /// Register `pgid` in the first free slot (none when all are taken).
+    fn register(pgid: u32) -> Self {
+        let slot = i32::try_from(pgid)
+            .ok()
+            .filter(|pgid| *pgid > 0)
+            .and_then(|pgid| {
+                RUNNING_GIT_GROUPS.iter().find(|slot| {
+                    slot.compare_exchange(0, pgid, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                })
+            });
+        Self(slot)
+    }
+}
+
+impl Drop for TrackedGroup {
+    fn drop(&mut self) {
+        if let Some(slot) = self.0.take() {
+            slot.store(0, Ordering::SeqCst);
+        }
+    }
+}
+
+/// True while `pgid` holds a slot in [`RUNNING_GIT_GROUPS`].
+#[cfg(test)]
+fn is_tracked(pgid: i32) -> bool {
+    RUNNING_GIT_GROUPS
+        .iter()
+        .any(|slot| slot.load(Ordering::SeqCst) == pgid)
+}
+
+/// Send `signal` to process group `pgid`.
+#[cfg(unix)]
+fn signal_group(pgid: i32, signal: libc::c_int) {
+    if pgid > 0 {
+        // SAFETY: a plain syscall with no pointers. `pgid` is a group
+        // `process_group(0)` made for a git child. While the child is not
+        // reaped (timeout, stop) the id is still ours. Where git is already
+        // reaped (post-exit pipe holder, a slot not yet cleared) the id is
+        // not guaranteed ours, but Linux keeps a pid allocated while it is
+        // in use as a pgid, and reuse in that short window would need a
+        // full pid wrap plus the new process leading its own group.
+        unsafe {
+            libc::kill(-pgid, signal);
+        }
+    }
+}
+
+/// End a git that is still running and reap it. Unix: `SIGTERM` to its
+/// group first, so git removes its lockfiles; `SIGKILL` to the group when
+/// git has not exited after [`GIT_TERM_GRACE`]. Elsewhere: kill git.
+fn stop_child(child: &mut Child) {
     #[cfg(unix)]
     {
-        if let Ok(pgid) = libc::pid_t::try_from(pgid) {
-            // SAFETY: a plain syscall with no pointers. `pgid` is the group
-            // `process_group(0)` made for a git child. On the timeout path
-            // the child is not reaped yet, so the id is still ours. On the
-            // post-exit path git is reaped and the id is not guaranteed
-            // ours: the kill fires only when a pipe is still open after the
-            // grace (so a process of the group most likely still runs, and
-            // Linux keeps a pid allocated while it is in use as a pgid), and
-            // reuse within that ~400 ms window would need a full pid wrap
-            // plus the new process leading its own group.
+        let pgid = i32::try_from(child.id()).unwrap_or(0);
+        signal_group(pgid, libc::SIGTERM);
+        if let Ok(Some(_)) = wait_until(child, Instant::now() + GIT_TERM_GRACE) {
+            return;
+        }
+        signal_group(pgid, libc::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// `SIGTERM` every group in `slots`, wait up to `grace` for the slots to
+/// clear (their runs reap git and free them), then `SIGKILL` what is left.
+fn stop_groups(slots: &[AtomicI32], grace: Duration) {
+    #[cfg(unix)]
+    for slot in slots {
+        signal_group(slot.load(Ordering::SeqCst), libc::SIGTERM);
+    }
+    let deadline = Instant::now() + grace;
+    while slots.iter().any(|slot| slot.load(Ordering::SeqCst) != 0) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    #[cfg(unix)]
+    for slot in slots {
+        signal_group(slot.load(Ordering::SeqCst), libc::SIGKILL);
+    }
+}
+
+/// Stop every git run in flight and refuse new ones: `ws` is exiting.
+///
+/// Sets the shutdown flag (the runner then fails new runs with `git <sub>
+/// not started: ws is exiting`), sends `SIGTERM` to every registered git
+/// process group, waits up to two seconds for them to exit, then sends
+/// `SIGKILL` to what is left. Git runs in its own process group, so a
+/// terminal `SIGINT` / `SIGHUP` does not reach it; this is how `ws` ends
+/// its git on the way out. It sleeps, so it is not for a signal handler.
+/// On non-Unix targets it only sets the flag.
+pub(crate) fn stop_running_git() {
+    GIT_SHUTDOWN.store(true, Ordering::SeqCst);
+    stop_groups(&RUNNING_GIT_GROUPS, GIT_TERM_GRACE);
+}
+
+/// `Err` when `exiting` (the shutdown flag) is set: no new git may start.
+fn check_may_start(exiting: bool, sub: Option<&str>) -> io::Result<()> {
+    if exiting {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            format!("{} not started: ws is exiting", git_label(sub)),
+        ));
+    }
+    Ok(())
+}
+
+/// Make `SIGINT`, `SIGTERM` and `SIGHUP` stop running git before `ws`
+/// dies. Call it once at CLI startup, never from tests.
+///
+/// The handler sends `SIGTERM` to every registered git process group, then
+/// restores the default action and raises the signal again, so `ws` exits
+/// with the usual status. A signal whose handler is not the default (an
+/// ignored `SIGHUP` under `nohup`, say) is left alone.
+#[cfg(unix)]
+pub(crate) fn stop_git_on_exit_signals() {
+    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        // SAFETY: `sigaction` with zeroed, then filled, structs; the
+        // handler only calls async-signal-safe functions.
+        unsafe {
+            let mut current: libc::sigaction = std::mem::zeroed();
+            if libc::sigaction(signal, std::ptr::null(), &mut current) != 0
+                || current.sa_sigaction != libc::SIG_DFL
+            {
+                continue;
+            }
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction =
+                on_exit_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            action.sa_flags = libc::SA_RESETHAND;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(signal, &action, std::ptr::null_mut());
+        }
+    }
+}
+
+/// The exit-signal handler: async-signal-safe calls only (atomic loads,
+/// `kill`, `signal`, `raise`).
+#[cfg(unix)]
+extern "C" fn on_exit_signal(signal: libc::c_int) {
+    for slot in &RUNNING_GIT_GROUPS {
+        let pgid = slot.load(Ordering::SeqCst);
+        if pgid > 0 {
+            // SAFETY: a plain syscall with no pointers (see `signal_group`).
             unsafe {
-                libc::kill(-pgid, libc::SIGKILL);
+                libc::kill(-pgid, libc::SIGTERM);
             }
         }
     }
-    #[cfg(not(unix))]
-    let _ = pgid;
-}
-
-/// Kill `child` and every process in its group (`ssh`, helpers), then reap
-/// it.
-fn kill_process_group(child: &mut Child) {
-    kill_group(child.id());
-    let _ = child.kill();
-    let _ = child.wait();
+    // SAFETY: both are async-signal-safe; the signal is blocked while this
+    // handler runs, so it is delivered with the default action on return.
+    unsafe {
+        libc::signal(signal, libc::SIG_DFL);
+        libc::raise(signal);
+    }
 }
 
 /// `git <sub>`, or `git` when the argv has no subcommand.
@@ -384,13 +545,17 @@ pub(crate) fn git_output(cmd: Command, stdin: Option<&[u8]>) -> io::Result<Outpu
 /// `stdin` means git exited before it read all of it; the exit status then
 /// says why, so that is not an `Err`. A remote run also gets the ssh
 /// deadline ([`default_ssh_command`]); its `core.sshCommand` lookup counts
-/// against `limit`. On Unix git leads its own process group, so the kill at
-/// `limit` reaches `ssh` too.
+/// against `limit`. On Unix git leads its own process group, so the stop at
+/// `limit` (`SIGTERM`, then `SIGKILL` after [`GIT_TERM_GRACE`]) reaches
+/// `ssh` too. The group is registered for [`stop_running_git`] while git
+/// runs.
 ///
 /// `Err` of kind `TimedOut` at `limit`, with the message `git <sub> timed
 /// out after <N>s`, plus `: the remote did not answer` for a remote run.
-/// When git exits but a process it started keeps stdout or stderr open,
-/// that process group is killed and the run returns git's own status.
+/// `Err` of kind `Interrupted` (`git <sub> not started: ws is exiting`)
+/// once [`stop_running_git`] ran. When git exits but a process it started
+/// keeps stdout or stderr open, that process group is killed and the run
+/// returns git's own status.
 pub(crate) fn git_output_within(
     cmd: Command,
     stdin: Option<&[u8]>,
@@ -414,6 +579,7 @@ fn run_bounded(
     let limit = limit.unwrap_or_else(|| git_time_limit(&argv));
     let remote = is_remote_git(&argv);
     let sub = git_subcommand(&argv);
+    check_may_start(GIT_SHUTDOWN.load(Ordering::SeqCst), sub)?;
     // The deadline starts before the ssh config lookup, so the lookup
     // cannot stretch a remote run past `limit`.
     let deadline = Instant::now() + limit;
@@ -432,6 +598,13 @@ fn run_bounded(
     }
     let mut child = cmd.spawn()?;
     let pgid = child.id();
+    let tracked = TrackedGroup::register(pgid);
+    // A stop that ran between the check above and the registration did not
+    // see this group: end it here.
+    if let Err(err) = check_may_start(GIT_SHUTDOWN.load(Ordering::SeqCst), sub) {
+        stop_child(&mut child);
+        return Err(err);
+    }
     // Write and read on their own threads: git answers as it reads, so a
     // full stdout pipe must not stall the stdin write, and a stalled git
     // must not stall this thread past `deadline`.
@@ -453,14 +626,16 @@ fn run_bounded(
     let status = match wait_until(&mut child, deadline) {
         Ok(Some(status)) => status,
         Ok(None) => {
-            kill_process_group(&mut child);
+            stop_child(&mut child);
             return Err(timed_out(sub, limit, remote));
         }
         Err(err) => {
-            kill_process_group(&mut child);
+            stop_child(&mut child);
             return Err(err);
         }
     };
+    // Git is reaped: its group id may be reused from here on.
+    drop(tracked);
     // Git exited. A process it left behind may still hold a pipe open:
     // give the pipes a short grace, then kill git's group (where such a
     // process lives) and give them one more.
@@ -472,8 +647,9 @@ fn run_bounded(
         if out.is_some() && err.is_some() {
             break;
         }
+        #[cfg(unix)]
         if round == 0 {
-            kill_group(pgid);
+            signal_group(i32::try_from(pgid).unwrap_or(0), libc::SIGKILL);
         }
     }
     let (Some(out), Some(err)) = (out, err) else {
@@ -492,6 +668,13 @@ fn run_bounded(
         stdout,
         stderr,
     })
+}
+
+/// Run `bin --version` through the runner (null stdin, captured output,
+/// the local time limit), in this process's directory. The doctor report
+/// uses it to probe the configured git binary.
+pub(crate) fn git_version_output(bin: &Path) -> io::Result<Output> {
+    git_output(git_command(bin, &["--version"], Path::new(".")), None)
 }
 
 /// Read `pipe` to its end.
@@ -2580,6 +2763,164 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "git status exited but a process it started kept its output open"
+        );
+    }
+
+    /// Wait up to 10 s for a fake git to record its pid in `pid_file`.
+    #[cfg(unix)]
+    fn wait_for_pid(pid_file: &Path) -> libc::pid_t {
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(pid) = recorded_pid(pid_file) {
+                return pid;
+            }
+            assert!(
+                std::time::Instant::now() < give_up,
+                "the fake git never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Shell line that records the script's own pid (its process group,
+    /// since git leads its group) in `pid_file` by rename.
+    #[cfg(unix)]
+    fn record_own_pid(pid_file: &Path) -> String {
+        let pid_file = pid_file.display();
+        format!("echo $$ > '{pid_file}.tmp' && mv '{pid_file}.tmp' '{pid_file}'\n")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timed_out_git_gets_sigterm_first_and_frees_its_group_slot() {
+        let (dir, bin) = fake_git("ws-git-term-first", "");
+        let pid_file = dir.join("git.pid");
+        let marker = dir.join("cleaned");
+        // Like git, the script cleans up on SIGTERM. The pid is recorded
+        // after the trap is set, so a recorded pid means the trap was live
+        // when the stop came.
+        let script = format!(
+            "#!/bin/sh\ntrap 'echo cleaned > \"{}\"; exit 143' TERM\n{}sleep 30 &\nwait\n",
+            marker.display(),
+            record_own_pid(&pid_file)
+        );
+        fs::write(&bin, script).unwrap();
+        for bound in [500, 3000].map(std::time::Duration::from_millis) {
+            let started = std::time::Instant::now();
+            let err = output_retrying_busy(|| git_command(&bin, &["checkout"], &dir), bound)
+                .expect_err("a stalled git times out");
+            let Some(pid) = recorded_pid(&pid_file) else {
+                continue;
+            };
+            assert!(
+                started.elapsed() < bound + GIT_TERM_GRACE + std::time::Duration::from_secs(2),
+                "returned after {:?}",
+                started.elapsed()
+            );
+            assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+            assert_eq!(
+                fs::read_to_string(&marker).unwrap_or_default().trim(),
+                "cleaned",
+                "git got SIGTERM and ran its cleanup before the kill"
+            );
+            assert!(!is_tracked(pid), "the group slot is free after a timeout");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+        panic!("the fake git never started");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn running_git_holds_a_group_slot_until_it_is_reaped() {
+        let (dir, bin) = fake_git("ws-git-slot", "");
+        let pid_file = dir.join("git.pid");
+        let go = dir.join("go");
+        let script = format!(
+            "#!/bin/sh\n{}i=0\nwhile [ ! -e '{}' ] && [ $i -lt 1000 ]; do sleep 0.01; i=$((i+1)); done\necho ok\n",
+            record_own_pid(&pid_file),
+            go.display()
+        );
+        fs::write(&bin, script).unwrap();
+        let run = {
+            let (dir, bin) = (dir.clone(), bin.clone());
+            std::thread::spawn(move || {
+                output_retrying_busy(
+                    || git_command(&bin, &["status"], &dir),
+                    LOCAL_GIT_TIME_LIMIT,
+                )
+            })
+        };
+        let pid = wait_for_pid(&pid_file);
+        assert!(is_tracked(pid), "a running git holds a group slot");
+        fs::write(&go, "").unwrap();
+        let out = run.join().unwrap().expect("fake git runs");
+        assert!(out.status.success(), "{out:?}");
+        assert!(!is_tracked(pid), "the group slot is free after git exits");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_that_cannot_start_returns_the_spawn_error() {
+        // The group registers only after a spawn succeeds, so a spawn error
+        // holds no slot.
+        let dir = std::env::temp_dir();
+        let err = git_output_within(
+            git_command(Path::new("/nonexistent/ws-no-git"), &["status"], &dir),
+            None,
+            LOCAL_GIT_TIME_LIMIT,
+        )
+        .expect_err("a missing binary does not start");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_groups_ends_a_running_git_promptly() {
+        let (dir, bin) = fake_git("ws-git-stop", "");
+        let pid_file = dir.join("git.pid");
+        let script = format!("#!/bin/sh\n{}sleep 30 &\nwait\n", record_own_pid(&pid_file));
+        fs::write(&bin, script).unwrap();
+        // A registry of this test's own group only: the global one also
+        // holds the groups of tests that run in parallel.
+        let slots = std::sync::Arc::new([AtomicI32::new(0)]);
+        let run = {
+            let (dir, bin, slots) = (dir.clone(), bin.clone(), slots.clone());
+            std::thread::spawn(move || {
+                let result = output_retrying_busy(
+                    || git_command(&bin, &["status"], &dir),
+                    LOCAL_GIT_TIME_LIMIT,
+                );
+                slots[0].store(0, Ordering::SeqCst);
+                result
+            })
+        };
+        let pid = wait_for_pid(&pid_file);
+        slots[0].store(pid, Ordering::SeqCst);
+        let started = std::time::Instant::now();
+        stop_groups(&slots[..], GIT_TERM_GRACE);
+        assert!(
+            started.elapsed() < GIT_TERM_GRACE,
+            "git ended at SIGTERM, before the grace ran out: {:?}",
+            started.elapsed()
+        );
+        match run.join().unwrap() {
+            Ok(out) => assert!(!out.status.success(), "a stopped git fails: {out:?}"),
+            Err(err) => assert_ne!(err.kind(), io::ErrorKind::TimedOut, "{err}"),
+        }
+        assert!(!is_tracked(pid), "the group slot is free after the stop");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_may_start_refuses_new_git_once_ws_is_exiting() {
+        assert!(check_may_start(false, Some("fetch")).is_ok());
+        let err = check_may_start(true, Some("fetch")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(err.to_string(), "git fetch not started: ws is exiting");
+        assert_eq!(
+            check_may_start(true, None).unwrap_err().to_string(),
+            "git not started: ws is exiting"
         );
     }
 
