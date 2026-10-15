@@ -23,6 +23,7 @@ mod event_loop;
 mod event_pump;
 pub(crate) mod explorer;
 pub(crate) mod fetch;
+pub(crate) mod fetch_claim;
 mod gates;
 mod graph_focus;
 mod graph_load;
