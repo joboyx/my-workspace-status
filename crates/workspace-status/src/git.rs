@@ -388,20 +388,35 @@ fn stop_child(child: &mut Child) {
     let _ = child.wait();
 }
 
-/// `SIGTERM` every group in `slots`, wait up to `grace` for the slots to
-/// clear (their runs reap git and free them), then `SIGKILL` what is left.
+/// `SIGTERM` every group in `slots`, wait up to `grace` for those groups to
+/// leave their slots (their runs reap git and free them), then `SIGKILL`
+/// the ones still there. A group that registers after the `SIGTERM` pass
+/// is left alone: it is a run allowed while `ws` exits (an auto-stash
+/// restore), and a `SIGKILL` could cut it off halfway.
 fn stop_groups(slots: &[AtomicI32], grace: Duration) {
+    let stopped: Vec<i32> = slots
+        .iter()
+        .map(|slot| slot.load(Ordering::SeqCst))
+        .filter(|pgid| *pgid > 0)
+        .collect();
     #[cfg(unix)]
-    for slot in slots {
-        signal_group(slot.load(Ordering::SeqCst), libc::SIGTERM);
+    for &pgid in &stopped {
+        signal_group(pgid, libc::SIGTERM);
     }
+    let still_running = || -> Vec<i32> {
+        slots
+            .iter()
+            .map(|slot| slot.load(Ordering::SeqCst))
+            .filter(|pgid| stopped.contains(pgid))
+            .collect()
+    };
     let deadline = Instant::now() + grace;
-    while slots.iter().any(|slot| slot.load(Ordering::SeqCst) != 0) && Instant::now() < deadline {
+    while !still_running().is_empty() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
     #[cfg(unix)]
-    for slot in slots {
-        signal_group(slot.load(Ordering::SeqCst), libc::SIGKILL);
+    for pgid in still_running() {
+        signal_group(pgid, libc::SIGKILL);
     }
 }
 
@@ -413,15 +428,19 @@ fn stop_groups(slots: &[AtomicI32], grace: Duration) {
 /// `SIGKILL` to what is left. Git runs in its own process group, so a
 /// terminal `SIGINT` / `SIGHUP` does not reach it; this is how `ws` ends
 /// its git on the way out. It sleeps, so it is not for a signal handler.
-/// On non-Unix targets it only sets the flag.
+/// On non-Unix targets it only sets the flag. The auto-stash pop after a
+/// stopped pull still runs ([`run_restoring_user_work`]), so the user's
+/// changes come back.
 pub(crate) fn stop_running_git() {
     GIT_SHUTDOWN.store(true, Ordering::SeqCst);
     stop_groups(&RUNNING_GIT_GROUPS, GIT_TERM_GRACE);
 }
 
 /// `Err` when `exiting` (the shutdown flag) is set: no new git may start.
-fn check_may_start(exiting: bool, sub: Option<&str>) -> io::Result<()> {
-    if exiting {
+/// A run that `restores_user_work` (an auto-stash pop) may still start:
+/// skipping it would leave the user's changes in a stash entry.
+fn check_may_start(exiting: bool, restores_user_work: bool, sub: Option<&str>) -> io::Result<()> {
+    if exiting && !restores_user_work {
         return Err(io::Error::new(
             io::ErrorKind::Interrupted,
             format!("{} not started: ws is exiting", git_label(sub)),
@@ -534,7 +553,7 @@ fn take_output(
 ///
 /// See [`git_output_within`] for the run itself.
 pub(crate) fn git_output(cmd: Command, stdin: Option<&[u8]>) -> io::Result<Output> {
-    run_bounded(cmd, stdin, None)
+    run_bounded(cmd, stdin, None, false)
 }
 
 /// Run a git `cmd` from [`git_process`] / [`git_command`], killed after
@@ -561,15 +580,18 @@ pub(crate) fn git_output_within(
     stdin: Option<&[u8]>,
     limit: Duration,
 ) -> io::Result<Output> {
-    run_bounded(cmd, stdin, Some(limit))
+    run_bounded(cmd, stdin, Some(limit), false)
 }
 
 /// The run behind [`git_output`] and [`git_output_within`]. `limit` `None`
-/// picks the limit from the argv.
+/// picks the limit from the argv. `restores_user_work` lets the run start
+/// while `ws` exits ([`check_may_start`]); the deadlines and the group
+/// registration apply all the same.
 fn run_bounded(
     mut cmd: Command,
     stdin: Option<&[u8]>,
     limit: Option<Duration>,
+    restores_user_work: bool,
 ) -> io::Result<Output> {
     let args: Vec<String> = cmd
         .get_args()
@@ -579,7 +601,7 @@ fn run_bounded(
     let limit = limit.unwrap_or_else(|| git_time_limit(&argv));
     let remote = is_remote_git(&argv);
     let sub = git_subcommand(&argv);
-    check_may_start(GIT_SHUTDOWN.load(Ordering::SeqCst), sub)?;
+    check_may_start(GIT_SHUTDOWN.load(Ordering::SeqCst), restores_user_work, sub)?;
     // The deadline starts before the ssh config lookup, so the lookup
     // cannot stretch a remote run past `limit`.
     let deadline = Instant::now() + limit;
@@ -601,7 +623,8 @@ fn run_bounded(
     let tracked = TrackedGroup::register(pgid);
     // A stop that ran between the check above and the registration did not
     // see this group: end it here.
-    if let Err(err) = check_may_start(GIT_SHUTDOWN.load(Ordering::SeqCst), sub) {
+    if let Err(err) = check_may_start(GIT_SHUTDOWN.load(Ordering::SeqCst), restores_user_work, sub)
+    {
         stop_child(&mut child);
         return Err(err);
     }
@@ -686,6 +709,15 @@ fn read_all(pipe: &mut impl Read) -> io::Result<Vec<u8>> {
 
 fn run(args: &[&str], cwd: &Path) -> io::Result<Output> {
     git_output(git_command(git_binary(), args, cwd), None)
+}
+
+/// Like [`run`], but the run starts even while `ws` exits. Only for git
+/// that puts the user's work back (the auto-stash pop after a pull): a quit
+/// during the pull must not leave their changes in a stash entry. The time
+/// limit, the `SIGTERM` / `SIGKILL` stop and the group registration still
+/// apply.
+fn run_restoring_user_work(args: &[&str], cwd: &Path) -> io::Result<Output> {
+    run_bounded(git_command(git_binary(), args, cwd), None, None, true)
 }
 
 /// Run git with `stdin` piped: the `git apply` wrappers and index blame.
@@ -941,10 +973,13 @@ pub fn pull_quiet_detailed(cwd: &Path) -> PullQuietResult {
     }
 
     let pulled = exec_git_checked(&["pull", "--quiet"], cwd);
-    let mut stash_pop_failed = false;
-    if stashed && exec_git_status(&["stash", "pop", "--quiet"], cwd) != 0 {
-        stash_pop_failed = true;
-    }
+    // The pop runs even when a quit stopped the pull: it gives the user's
+    // changes back.
+    let stash_pop_failed = stashed
+        && !matches!(
+            run_restoring_user_work(&["stash", "pop", "--quiet"], cwd),
+            Ok(out) if out.status.success()
+        );
     PullQuietResult {
         ok: pulled.is_ok() && !stash_pop_failed,
         stashed,
@@ -2914,14 +2949,123 @@ mod tests {
 
     #[test]
     fn check_may_start_refuses_new_git_once_ws_is_exiting() {
-        assert!(check_may_start(false, Some("fetch")).is_ok());
-        let err = check_may_start(true, Some("fetch")).unwrap_err();
+        assert!(check_may_start(false, false, Some("fetch")).is_ok());
+        let err = check_may_start(true, false, Some("fetch")).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Interrupted);
         assert_eq!(err.to_string(), "git fetch not started: ws is exiting");
         assert_eq!(
-            check_may_start(true, None).unwrap_err().to_string(),
+            check_may_start(true, false, None).unwrap_err().to_string(),
             "git not started: ws is exiting"
         );
+        assert!(
+            check_may_start(true, true, Some("stash")).is_ok(),
+            "a run that restores the user's work still starts while ws exits"
+        );
+        assert!(check_may_start(false, true, Some("stash")).is_ok());
+    }
+
+    /// Set in the child process that
+    /// [`quit_during_pull_still_restores_the_auto_stash`] starts. The child
+    /// sets the process-wide shutdown flag, which would break every other
+    /// test in a shared test process.
+    const EXITING_CHILD_ENV: &str = "WS_STATUS_TEST_EXITING_CHILD";
+
+    #[cfg(unix)]
+    #[test]
+    fn quit_during_pull_still_restores_the_auto_stash() {
+        if std::env::var_os(EXITING_CHILD_ENV).is_some() {
+            quit_during_pull_in_this_process();
+            return;
+        }
+        let name = "git::tests::quit_during_pull_still_restores_the_auto_stash";
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env(EXITING_CHILD_ENV, "1")
+            .output()
+            .expect("the test binary runs");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "child test failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Body of [`quit_during_pull_still_restores_the_auto_stash`], run in a
+    /// child process: a quit (`stop_running_git`) while the pull of a dirty
+    /// repo hangs must still pop the auto-stash.
+    #[cfg(unix)]
+    fn quit_during_pull_in_this_process() {
+        let root = unique_dir("ws-git-quit-pull");
+        let up = root.join("up");
+        let down = root.join("down");
+        init_repo(&up);
+        git(
+            &root,
+            &["clone", "-q", up.to_str().unwrap(), down.to_str().unwrap()],
+        );
+        git(&down, &["config", "user.name", "workspace-status test"]);
+        git(
+            &down,
+            &[
+                "config",
+                "user.email",
+                "workspace-status-test@example.invalid",
+            ],
+        );
+        // The pull hangs: the remote's upload-pack never answers.
+        let (_, hang) = fake_git("ws-git-quit-pull-upload-pack", "#!/bin/sh\nsleep 30\n");
+        git(
+            &down,
+            &["config", "remote.origin.uploadpack", hang.to_str().unwrap()],
+        );
+        fs::write(down.join("README.md"), "# local edit\n").unwrap();
+
+        let pull = {
+            let down = down.clone();
+            std::thread::spawn(move || pull_quiet_detailed(&down))
+        };
+        // Wait for the auto-stash, then for the pull to be under way.
+        let stash_count = || {
+            let out = Command::new(git_binary())
+                .args(["stash", "list"])
+                .current_dir(&down)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).lines().count()
+        };
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while stash_count() == 0 {
+            assert!(std::time::Instant::now() < give_up, "no auto-stash");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        let started = std::time::Instant::now();
+        stop_running_git();
+        let result = pull.join().unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "quit waited {:?}",
+            started.elapsed()
+        );
+        assert!(result.stashed, "{result:?}");
+        assert!(
+            result.error.is_some(),
+            "the stopped pull failed: {result:?}"
+        );
+        assert!(!result.stash_pop_failed, "the pop ran: {result:?}");
+        assert_eq!(
+            fs::read_to_string(down.join("README.md")).unwrap(),
+            "# local edit\n",
+            "the user's change is back in the worktree"
+        );
+        assert_eq!(stash_count(), 0, "no auto-stash entry is left");
+        // Other git is still refused.
+        let refused = exec_git_checked(&["status"], &down).unwrap_err();
+        assert_eq!(refused, "git status not started: ws is exiting");
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(hang.parent().unwrap());
     }
 
     #[test]
