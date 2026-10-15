@@ -2,10 +2,10 @@
 //!
 //! Every `ws` instance in one workspace shares one scheduled background
 //! fetch. An instance runs it only while it holds a non-blocking lock on a
-//! per-workspace claim file and the last completed background fetch for that
-//! workspace is older than its own interval. When the fetch ends, the claim
-//! writes the outcome (generation, failed flag, completion time) to one JSON
-//! file under the state directory
+//! per-workspace claim file and the last background fetch for that workspace
+//! started at least its own interval ago (a failed one still counts). When
+//! the fetch ends, the claim writes the outcome (generation, failed flag,
+//! start time) to one JSON file under the state directory
 //! (`$XDG_STATE_HOME/my-workspace-status/background-fetch.json`), keyed by
 //! [`super::viewed::workspace_store_id`]. The other instances read that
 //! record to show the same outcome.
@@ -16,6 +16,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 
 use super::persist::{persist_with_lock, try_lock_sibling};
@@ -26,9 +27,14 @@ const BACKGROUND_FETCH_STORE_VERSION: u32 = 1;
 /// File name under the state directory.
 const STORE_FILE_NAME: &str = "background-fetch.json";
 
+/// Slack (ms) on the interval check. The tick timer restarts just before
+/// the claim reads the wall clock, so the next tick can land a little short
+/// of one interval after the recorded start.
+const INTERVAL_TOLERANCE_MS: u64 = 1000;
+
 /// On-disk shape:
 /// `{"version": 1, "workspaces": {"<id>": {"generation": 1, "failed": false,
-/// "completedUnixMs": 0}}}`.
+/// "startedUnixMs": 0}}}`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct StoreFile {
     version: u32,
@@ -44,8 +50,9 @@ pub(crate) struct BackgroundFetchRecord {
     pub(crate) generation: u64,
     /// True when that fetch failed for at least one repository.
     pub(crate) failed: bool,
-    /// Wall-clock completion time in Unix milliseconds.
-    pub(crate) completed_unix_ms: u64,
+    /// Wall-clock time the fetch was claimed (started), in Unix
+    /// milliseconds. The next claim counts the interval from it.
+    pub(crate) started_unix_ms: u64,
 }
 
 /// Resolve the store path from an env lookup.
@@ -115,15 +122,31 @@ pub(crate) fn load_background_fetch_record(
     parse_store(&bytes)?.workspaces.get(workspace_id).copied()
 }
 
+/// The locked claim file. Drop unlocks it explicitly before the close: a
+/// child process forked at that moment (git, on a worker thread) still holds
+/// a copy of the descriptor until its exec, and a close alone would leave the
+/// lock held through that copy.
+#[derive(Debug)]
+struct HeldLock(fs::File);
+
+impl Drop for HeldLock {
+    fn drop(&mut self) {
+        // Nothing to recover; the close below releases it at the latest.
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
 /// Exclusive right to run the scheduled background fetch for one workspace.
 ///
 /// Holds the locked claim file; dropping the claim (or the process dying)
 /// releases it. [`Self::finish`] records the outcome, then releases it.
 #[derive(Debug)]
 pub(crate) struct BackgroundFetchClaim {
-    lock: fs::File,
+    lock: HeldLock,
     store_path: PathBuf,
     workspace_id: String,
+    /// Wall-clock claim time in Unix ms; [`Self::finish`] records it.
+    started_unix_ms: u64,
 }
 
 /// Try to claim the scheduled background fetch for `workspace_id`.
@@ -131,9 +154,11 @@ pub(crate) struct BackgroundFetchClaim {
 /// Takes a non-blocking exclusive lock on the sibling file
 /// `<path>.<workspace_id>.claim.lock` (parent directories are created).
 /// `Ok(None)` when another instance holds the lock, or when the record shows
-/// a completion at or before `now_unix_ms` that is less than `interval_ms`
-/// old; the lock is released in that case. A completion time in the future
-/// does not block the claim. Other I/O errors return `Err`.
+/// a start at or before `now_unix_ms` that is less than `interval_ms` old,
+/// less [`INTERVAL_TOLERANCE_MS`] of timer jitter; the lock is released in
+/// that case. A failed fetch counts too. A start time in the future does not
+/// block the claim. Other I/O errors return `Err`. The claim keeps
+/// `now_unix_ms` as its start time.
 ///
 /// `interval_ms == 0` always claims: the caller skips the call when the
 /// background fetch is off. `workspace_id` must be a
@@ -146,12 +171,14 @@ pub(crate) fn try_claim_background_fetch(
     now_unix_ms: u64,
 ) -> io::Result<Option<BackgroundFetchClaim>> {
     let suffix = format!(".{workspace_id}.claim.lock");
-    let Some(lock) = try_lock_sibling(path, &suffix)? else {
+    let Some(lock) = try_lock_sibling(path, &suffix)?.map(HeldLock) else {
         return Ok(None);
     };
     if let Some(record) = load_background_fetch_record(path, workspace_id) {
-        let completed = record.completed_unix_ms;
-        if completed <= now_unix_ms && now_unix_ms - completed < interval_ms {
+        let started = record.started_unix_ms;
+        if started <= now_unix_ms
+            && (now_unix_ms - started).saturating_add(INTERVAL_TOLERANCE_MS) < interval_ms
+        {
             return Ok(None);
         }
     }
@@ -159,6 +186,7 @@ pub(crate) fn try_claim_background_fetch(
         lock,
         store_path: path.to_path_buf(),
         workspace_id: workspace_id.to_string(),
+        started_unix_ms: now_unix_ms,
     }))
 }
 
@@ -166,13 +194,13 @@ impl BackgroundFetchClaim {
     /// Record the outcome of the claimed fetch, then release the claim.
     ///
     /// Under the store lock ([`persist_with_lock`]), writes generation =
-    /// stored generation + 1 (or 1), `failed`, and `completedUnixMs =
-    /// now_unix_ms` for this workspace and keeps every other workspace
-    /// entry. Returns the new generation. A present store file that does not
-    /// parse as a version-1 store is left byte-identical and the result is an
+    /// stored generation + 1 (or 1), `failed`, and `startedUnixMs` = the
+    /// claim time for this workspace and keeps every other workspace entry.
+    /// Returns the new generation. A present store file that does not parse
+    /// as a version-1 store is left byte-identical and the result is an
     /// [`io::ErrorKind::InvalidData`] error. The claim is released on every
     /// path.
-    pub(crate) fn finish(self, failed: bool, now_unix_ms: u64) -> io::Result<u64> {
+    pub(crate) fn finish(self, failed: bool) -> io::Result<u64> {
         let mut generation = 0;
         persist_with_lock(&self.store_path, |existing| {
             let mut file = match existing {
@@ -195,7 +223,7 @@ impl BackgroundFetchClaim {
                 BackgroundFetchRecord {
                     generation,
                     failed,
-                    completed_unix_ms: now_unix_ms,
+                    started_unix_ms: self.started_unix_ms,
                 },
             );
             let mut body = serde_json::to_vec_pretty(&file).map_err(io::Error::other)?;
@@ -230,11 +258,11 @@ mod tests {
         fs::write(path, serde_json::to_vec(&file).unwrap()).unwrap();
     }
 
-    fn done_at(completed_unix_ms: u64) -> BackgroundFetchRecord {
+    fn started_at(started_unix_ms: u64) -> BackgroundFetchRecord {
         BackgroundFetchRecord {
             generation: 3,
             failed: false,
-            completed_unix_ms,
+            started_unix_ms,
         }
     }
 
@@ -297,15 +325,15 @@ mod tests {
     }
 
     #[test]
-    fn fetch_claim_recent_completion_returns_none_and_releases() {
+    fn fetch_claim_recent_start_returns_none_and_releases() {
         let (dir, path) = temp_store();
         let now = 100 * MIN;
-        write_record(&path, "ws-a", done_at(now - 2 * MIN));
+        write_record(&path, "ws-a", started_at(now - 2 * MIN));
         assert!(
             try_claim_background_fetch(&path, "ws-a", 5 * MIN, now)
                 .unwrap()
                 .is_none(),
-            "completion within the interval blocks the claim"
+            "a start within the interval blocks the claim"
         );
         assert!(
             try_claim_background_fetch(&path, "ws-a", 2 * MIN, now)
@@ -317,17 +345,17 @@ mod tests {
     }
 
     #[test]
-    fn fetch_claim_stale_completion_returns_some() {
+    fn fetch_claim_stale_start_returns_some() {
         let (dir, path) = temp_store();
         let now = 100 * MIN;
-        write_record(&path, "ws-a", done_at(now - 5 * MIN));
+        write_record(&path, "ws-a", started_at(now - 5 * MIN));
         assert!(
             try_claim_background_fetch(&path, "ws-a", 5 * MIN, now)
                 .unwrap()
                 .is_some(),
-            "completion exactly one interval old is stale"
+            "a start exactly one interval old is stale"
         );
-        write_record(&path, "ws-a", done_at(now - 6 * MIN));
+        write_record(&path, "ws-a", started_at(now - 6 * MIN));
         assert!(try_claim_background_fetch(&path, "ws-a", 5 * MIN, now)
             .unwrap()
             .is_some());
@@ -335,15 +363,67 @@ mod tests {
     }
 
     #[test]
-    fn fetch_claim_future_completion_returns_some() {
+    fn fetch_claim_interval_boundary_allows_timer_jitter() {
+        let (dir, path) = temp_store();
+        let started = 100 * MIN;
+        let interval = 5 * MIN;
+        write_record(&path, "ws-a", started_at(started));
+        assert!(
+            try_claim_background_fetch(&path, "ws-a", interval, started + interval - 1)
+                .unwrap()
+                .is_some(),
+            "a tick one timer period after the start, a little early, fetches"
+        );
+        assert!(
+            try_claim_background_fetch(
+                &path,
+                "ws-a",
+                interval,
+                started + interval - INTERVAL_TOLERANCE_MS
+            )
+            .unwrap()
+            .is_some(),
+            "interval less the tolerance fetches"
+        );
+        assert!(
+            try_claim_background_fetch(
+                &path,
+                "ws-a",
+                interval,
+                started + interval - INTERVAL_TOLERANCE_MS - 1
+            )
+            .unwrap()
+            .is_none(),
+            "one ms earlier skips"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn fetch_claim_records_the_claim_time_not_the_finish_time() {
+        let (dir, path) = temp_store();
+        let started = 100 * MIN;
+        let claim = try_claim_background_fetch(&path, "ws-a", 5 * MIN, started)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.finish(true).unwrap(), 1);
+        assert_eq!(
+            load_background_fetch_record(&path, "ws-a").map(|record| record.started_unix_ms),
+            Some(started)
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn fetch_claim_future_start_returns_some() {
         let (dir, path) = temp_store();
         let now = 100 * MIN;
-        write_record(&path, "ws-a", done_at(now + MIN));
+        write_record(&path, "ws-a", started_at(now + MIN));
         assert!(
             try_claim_background_fetch(&path, "ws-a", 5 * MIN, now)
                 .unwrap()
                 .is_some(),
-            "a completion time in the future counts as stale"
+            "a start time in the future counts as stale"
         );
         let _ = fs::remove_dir_all(dir);
     }
@@ -368,7 +448,7 @@ mod tests {
         let b = try_claim_background_fetch(&path, "ws-b", MIN, now)
             .unwrap()
             .expect("ws-b claims while ws-a holds its own claim");
-        b.finish(false, now).unwrap();
+        b.finish(false).unwrap();
         assert!(
             try_claim_background_fetch(&path, "ws-a", MIN, now)
                 .unwrap()
@@ -385,20 +465,20 @@ mod tests {
         let other = BackgroundFetchRecord {
             generation: 7,
             failed: true,
-            completed_unix_ms: now - MIN,
+            started_unix_ms: now - MIN,
         };
         write_record(&path, "ws-b", other);
 
         let claim = try_claim_background_fetch(&path, "ws-a", MIN, now)
             .unwrap()
             .unwrap();
-        assert_eq!(claim.finish(true, now).unwrap(), 1, "first generation");
+        assert_eq!(claim.finish(true).unwrap(), 1, "first generation");
         assert_eq!(
             load_background_fetch_record(&path, "ws-a"),
             Some(BackgroundFetchRecord {
                 generation: 1,
                 failed: true,
-                completed_unix_ms: now,
+                started_unix_ms: now,
             })
         );
 
@@ -406,13 +486,13 @@ mod tests {
         let claim = try_claim_background_fetch(&path, "ws-a", MIN, later)
             .unwrap()
             .expect("finish released the claim");
-        assert_eq!(claim.finish(false, later).unwrap(), 2);
+        assert_eq!(claim.finish(false).unwrap(), 2);
         assert_eq!(
             load_background_fetch_record(&path, "ws-a"),
             Some(BackgroundFetchRecord {
                 generation: 2,
                 failed: false,
-                completed_unix_ms: later,
+                started_unix_ms: later,
             })
         );
         assert_eq!(
@@ -423,7 +503,7 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             format!(
-                "{{\n  \"version\": 1,\n  \"workspaces\": {{\n    \"ws-a\": {{\n      \"generation\": 2,\n      \"failed\": false,\n      \"completedUnixMs\": {later}\n    }},\n    \"ws-b\": {{\n      \"generation\": 7,\n      \"failed\": true,\n      \"completedUnixMs\": {}\n    }}\n  }}\n}}\n",
+                "{{\n  \"version\": 1,\n  \"workspaces\": {{\n    \"ws-a\": {{\n      \"generation\": 2,\n      \"failed\": false,\n      \"startedUnixMs\": {later}\n    }},\n    \"ws-b\": {{\n      \"generation\": 7,\n      \"failed\": true,\n      \"startedUnixMs\": {}\n    }}\n  }}\n}}\n",
                 now - MIN
             )
         );
@@ -459,7 +539,7 @@ mod tests {
             let claim = try_claim_background_fetch(&path, "ws-a", 5 * MIN, now)
                 .unwrap()
                 .expect("an unreadable record does not block the claim");
-            let err = claim.finish(true, now).unwrap_err();
+            let err = claim.finish(true).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{body:?}");
             assert_eq!(fs::read_to_string(&path).unwrap(), body, "{body:?}");
             assert!(

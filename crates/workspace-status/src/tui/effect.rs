@@ -59,7 +59,7 @@ use super::drill::{CommitFileSource, DrillView};
 #[cfg(test)]
 use super::event_pump::action_triggers_graph_autoload;
 use super::explorer::{list_dir, ExplorerEntry};
-use super::fetch_claim::{try_claim_background_fetch, unix_now_ms, BackgroundFetchClaim};
+use super::fetch_claim::{try_claim_background_fetch, BackgroundFetchClaim};
 use super::graph_load::{
     autoload_limit, autoload_skip, load_graph_model_window, merge_autoload, should_autoload,
     GraphIdentity, ShouldAutoload,
@@ -2878,7 +2878,7 @@ impl Interpreter {
         if let Some(claim) = claim {
             let failed = tally.has_failure();
             // A failed record write has no recovery; the claim is released.
-            if let Ok(generation) = claim.finish(failed, unix_now_ms()) {
+            if let Ok(generation) = claim.finish(failed) {
                 state.note_background_fetch_outcome(generation, failed);
             }
         }
@@ -3614,7 +3614,9 @@ mod tests {
     use crate::tui::app::{CompareRangeLoad, MergeCompute, TuiOpts};
     use crate::tui::diff::DiffContent;
     use crate::tui::drill::{CommitFile, CommitFileSource, DrillView};
-    use crate::tui::fetch_claim::{load_background_fetch_record, BackgroundFetchRecord};
+    use crate::tui::fetch_claim::{
+        load_background_fetch_record, unix_now_ms, BackgroundFetchRecord,
+    };
     use crate::tui::graph_load::GraphIdentity;
     use crate::tui::line_blame::BlameSide;
     use crate::tui::state::{AppState, FocusPane};
@@ -6474,8 +6476,9 @@ mod tests {
         assert_eq!(state.status, "", "no status change");
         assert!(!interp.take_dirty());
 
-        assert_eq!(other.finish(true, now).unwrap(), 1);
-        background_tick(&mut interp, &mut state, now + 1);
+        assert_eq!(other.finish(true).unwrap(), 1);
+        // This instance's own tick lands shortly after the other start.
+        background_tick(&mut interp, &mut state, now + 2_000);
         assert!(
             capture_jobs(&mut interp, &mut state).is_empty(),
             "a background fetch inside this instance's interval is not run again"
@@ -6512,7 +6515,10 @@ mod tests {
         let record = fetch_record(&state).expect("the wave end writes the record");
         assert_eq!(record.generation, 1);
         assert!(record.failed);
-        assert!((start..=unix_now_ms()).contains(&record.completed_unix_ms));
+        assert_eq!(
+            record.started_unix_ms, start,
+            "the claim time, not the wave end"
+        );
         assert!(interp.fetch_claim.is_none());
         let detailed = state.status.clone();
         assert!(
@@ -6532,10 +6538,13 @@ mod tests {
         // The wave end queued follow-up loads (snapshot reload); leave
         // them unrun so only the next fetch jobs are captured below.
         let _ = capture_jobs(&mut interp, &mut state);
-        let later = record.completed_unix_ms + FETCH_MS;
+        // The timer fires one period after the previous tick started, so
+        // the wave length must not push this tick into a skip.
+        let later = start + FETCH_MS;
         background_tick(&mut interp, &mut state, later);
         let jobs = capture_jobs(&mut interp, &mut state);
-        assert_eq!(jobs.len(), 2, "the claim was released");
+        assert_eq!(jobs.len(), 2, "the next timer tick fetches again");
+        assert!(interp.fetch_claim.is_some(), "and claims again");
         finish_fetches(&mut interp, &mut state, jobs, None);
         let record = fetch_record(&state).unwrap();
         assert_eq!(record.generation, 2);

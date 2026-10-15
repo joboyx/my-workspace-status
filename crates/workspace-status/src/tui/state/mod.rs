@@ -816,7 +816,7 @@ pub struct AppState {
     /// by [`Self::open_background_fetch_store`].
     pub(crate) fetch_store_path: PathBuf,
     /// Newest background-fetch generation this instance has applied or
-    /// written. A record at or below it is not applied again.
+    /// written. A record with this generation is not applied again.
     fetch_applied_generation: u64,
     /// The status this instance showed for the latest background fetch
     /// failure. A later success clears the status only while it still
@@ -5209,15 +5209,16 @@ impl AppState {
     ///
     /// A failure shows the error `fetch failed`. A success clears the
     /// status only while it still shows this instance's last failure stamp.
-    /// No progress or summary line. A generation already applied changes
-    /// nothing, so a newer local status is never stamped over.
+    /// No progress or summary line. The generation already applied changes
+    /// nothing, so a newer local status is never stamped over. Any other
+    /// generation applies, a lower one too: the store was deleted or reset.
     pub(crate) fn apply_background_fetch_record(&mut self) -> bool {
         let Some(record) =
             load_background_fetch_record(&self.fetch_store_path, &workspace_store_id(&self.cwd))
         else {
             return false;
         };
-        if record.generation <= self.fetch_applied_generation {
+        if record.generation == self.fetch_applied_generation {
             return false;
         }
         if record.failed {
@@ -12868,7 +12869,7 @@ mod tests {
         )
         .unwrap()
         .expect("the other instance claims")
-        .finish(failed, now)
+        .finish(failed)
         .unwrap()
     }
 
@@ -12916,6 +12917,22 @@ mod tests {
             StatusKind::Warn,
             "same text, other kind: not the stamp"
         );
+    }
+
+    #[test]
+    fn background_fetch_record_after_a_store_reset_applies() {
+        let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
+        app.note_background_fetch_outcome(5, false);
+        assert_eq!(record_other_instance_fetch(&app, true, 10), 1, "new store");
+        assert!(app.apply_background_fetch_record());
+        assert_eq!(app.status, "fetch failed");
+        assert_eq!(app.status.kind(), StatusKind::Error);
+        app.status = StatusMessage::error("push failed");
+        assert!(
+            !app.apply_background_fetch_record(),
+            "the same generation is still not applied again"
+        );
+        assert_eq!(app.status, "push failed");
     }
 
     #[test]
