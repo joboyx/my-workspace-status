@@ -6627,6 +6627,47 @@ mod tests {
     }
 
     #[test]
+    fn timed_out_fetch_wave_finishes_with_the_timeout_reason() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into(), "notes".into()],
+            },
+            &Action::Fetch,
+        );
+        assert!(state.status.starts_with("Fetching"), "{}", state.status);
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 2);
+        for ((id, _), repo) in jobs.iter().zip(["app", "notes"]) {
+            apply_id(
+                &mut interp,
+                &mut state,
+                *id,
+                JobOutcome::BulkRemote {
+                    kind: RunningOp::Fetch,
+                    result: RepoOpResult::Failed(
+                        "git fetch timed out after 120s: the remote did not answer".into(),
+                    ),
+                    repo: repo.into(),
+                },
+            );
+        }
+        assert!(!state.status.starts_with("Fetching"), "{}", state.status);
+        assert!(interp.occupied_gitdirs().is_empty());
+        assert_eq!(state.status.kind(), StatusKind::Error);
+        let text = state.status.to_string();
+        assert!(text.contains("timed out"), "{text}");
+        assert!(text.contains("the remote did not answer"), "{text}");
+        assert!(
+            text.contains("2 failed: app — git fetch timed out after 120s"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn pane_reload_after_quiet_background_fetch_keeps_an_unread_error() {
         let mut state = fixture_state();
         let mut interp = Interpreter::with_cap(4);

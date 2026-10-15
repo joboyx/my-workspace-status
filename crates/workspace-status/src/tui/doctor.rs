@@ -30,7 +30,7 @@ use super::split::{MIN_TERM_COLS, MIN_TERM_ROWS};
 use super::ui_state_store::check_ui_state_bytes;
 use super::viewed::check_viewed_store_bytes;
 use crate::config::{load_config_files, CONFIG_FILENAME};
-use crate::git::resolve_git_binary;
+use crate::git::{git_version_output, resolve_git_binary};
 use crate::settings::Settings;
 use crate::update_check::check_update_check_store_bytes;
 
@@ -1339,7 +1339,9 @@ where
         || (config_result.is_err() && settings.git != resolve_git_binary(None, None));
     let git_path = settings.git.display().to_string();
     let git = GitProbe {
-        version: run_read_only(settings.git.as_os_str(), &["--version"]),
+        // Through the git runner, so the probe has the same deadline as every
+        // other git spawn.
+        version: read_only_answer(git_version_output(&settings.git)),
         path: git_path,
         explicit,
     };
@@ -1422,19 +1424,26 @@ fn tmux_option(name: &str) -> Option<String> {
     run_read_only("tmux".as_ref(), &["show-options", "-gv", name]).ok()
 }
 
-/// Run a read-only command with a null stdin and captured output.
+/// Run a read-only command with a null stdin and captured output, and read
+/// its answer ([`read_only_answer`]).
+fn run_read_only(program: &std::ffi::OsStr, args: &[&str]) -> Result<String, String> {
+    read_only_answer(
+        Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output(),
+    )
+}
+
+/// The answer of a read-only command run.
 ///
 /// `Ok` is the trimmed stdout of a successful run (the first line for a
 /// one-line answer, every line for a list). `Err` is the first stderr line,
 /// the exit status, or the spawn error.
-fn run_read_only(program: &std::ffi::OsStr, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|err| err.to_string())?;
+fn read_only_answer(output: io::Result<std::process::Output>) -> Result<String, String> {
+    let output = output.map_err(|err| err.to_string())?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
     }

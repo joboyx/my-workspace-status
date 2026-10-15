@@ -154,6 +154,10 @@ pub fn cli_main() -> ExitCode {
     if cli.update {
         return run_self_update();
     }
+    // Git runs in its own process group, out of reach of a terminal signal:
+    // make SIGINT / SIGTERM / SIGHUP stop it before ws exits.
+    #[cfg(unix)]
+    crate::git::stop_git_on_exit_signals();
     let cwd = match env::current_dir() {
         Ok(p) => p,
         Err(err) => {

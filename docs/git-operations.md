@@ -2,9 +2,47 @@
 
 Every git subprocess the tool runs. `<git>` is `git_binary()` (`WORKSPACE_STATUS_GIT`, else `/usr/bin/git` when it exists, else `git`).
 
-Most wrappers in this file attach stdin to `/dev/null` and set `GIT_TERMINAL_PROMPT=0`. That keeps git from inheriting the TUI's raw-mode TTY (a credential prompt would otherwise deadlock: the parent waits on `output()`, the child waits on stdin). `apply_cached_patch` and `apply_worktree_patch_reverse` are the exceptions: they write the unified patch to git's stdin (`git apply --cached` / `git apply --reverse --cached` / `git apply --reverse`). `merge_into_head` also sets `GIT_EDITOR=true` and `GIT_MERGE_AUTOEDIT=no`.
+Most wrappers in this file attach stdin to `/dev/null` and set `GIT_TERMINAL_PROMPT=0`. That keeps git from inheriting the TUI's raw-mode TTY (a credential prompt would otherwise deadlock: the parent waits on git, the child waits on stdin). `apply_cached_patch` and `apply_worktree_patch_reverse` are the exceptions: they write the unified patch to git's stdin (`git apply --cached` / `git apply --reverse --cached` / `git apply --reverse`). `merge_into_head` also sets `GIT_EDITOR=true` and `GIT_MERGE_AUTOEDIT=no`.
 
 Every git subprocess also runs with `GIT_OPTIONAL_LOCKS=0` (set by `git::git_process`, the shared constructor `git_command` and `run_with_stdin` build on). `ws` polls every repo's status on a timer, and plain `git status` can take `.git/index.lock` to write a refreshed index; with several `ws` instances running, or a user/agent running `git add` / `commit` / `checkout` at the same time, that collides and fails with `Unable to create '.git/index.lock': File exists`. `GIT_OPTIONAL_LOCKS=0` tells git to skip that optional lock (see git-status(1), "BACKGROUND REFRESH"). It only affects optional locks — write commands still take the locks they need — so it is safe on every spawn, read or write.
+
+## Subprocess deadlines
+
+Every git process `ws` starts is built by `git::git_process` and run by one bounded runner, `git::git_output` (`git_output_within` takes an explicit limit). Do not call `output()` or `spawn()` on a git command. A new git spawn must use the same pair. Every other background network spawn has its own time limit (see **Other limits**), and a new one must have one too. The one exception is the `ws --update` self-update sidecar (`update.rs`): it runs in the foreground with the terminal, so the user can stop it with Ctrl-C. The runner puts two bounds on each git run, so a stalled network cannot hold a worker forever.
+
+**SSH deadline.** For a remote subcommand (`fetch`, `pull`, `push`, `ls-remote`, `clone`; global options such as `-C <dir>` or `-c k=v` before it are skipped) the runner sets:
+
+```
+GIT_SSH_COMMAND="ssh -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 -o BatchMode=yes"
+```
+
+- It sets it only when `GIT_SSH_COMMAND` and `GIT_SSH` are unset (or empty) and `git config --get core.sshCommand` is unset. A custom ssh command is never replaced. A failed `core.sshCommand` lookup leaves ssh alone.
+- `~/.ssh/config` still applies (`IdentityFile`, `ProxyJump`, other host settings). A command-line `-o` wins over the same option in that file.
+- `ConnectTimeout=10` ends a TCP connect that gets no answer. The keepalives drop a session that goes silent mid-transfer after about 30 s.
+- `BatchMode=yes` means ssh never prompts. An unknown host key, or a key that needs a passphrase with no agent, fails at once with ssh's reason. git runs in its own process group, so a prompt could not be answered anyway.
+- A custom ssh command (the user's `GIT_SSH_COMMAND` or `core.sshCommand`) gets no `BatchMode`. If it prompts on the terminal, the system stops it, because git is not in the terminal's foreground group. That run then ends at the 120 s limit.
+
+**Wall-clock deadline.** Remote git is stopped after 120 s (`REMOTE_GIT_TIME_LIMIT`). Other git is stopped after 60 s (`LOCAL_GIT_TIME_LIMIT`). This limit also catches a stalled HTTPS transfer or a credential helper that waits for input. On Unix git leads its own process group. The whole group (ssh included) first gets `SIGTERM`, so git removes its lockfiles (`.git/index.lock`, ref locks). If git has not exited after 2 s (`GIT_TERM_GRACE`), the group gets `SIGKILL`. Hooks and filters (`pre-push`, `post-checkout`, an LFS smudge) run inside git and share its limit. A `pre-push` hook that runs longer than 120 s makes a TUI push fail with the timeout text. The error is:
+
+- `git <sub> timed out after <N>s: the remote did not answer` for remote git.
+- `git <sub> timed out after <N>s` for other git.
+
+If git exits but a process it started keeps stdout or stderr open, the runner kills git's process group after a short grace and returns git's real exit status. If the pipe still stays open, the error is `git <sub> exited but a process it started kept its output open`.
+
+**What callers see.** A timeout is a failure. It is never a hang and never a success.
+
+- `exec_git_checked` and `exec_git_stdout` return the error text above. `exec_git` returns `""`. `exec_git_status` returns `-1`.
+- TUI fetch / pull / push: the repo counts as failed. The wave finishes, and the status names the first failed repo, for example `Fetched 2 repos (2 failed: app — git fetch timed out after 120s: the remote did not answer, +1 more)` (`tui/ops.rs` `format_completed_op`).
+- Discovery fetch (`process_repo` with `do_fetch`, used by headless `--fetch`) stays non-fatal. A timeout still gives the local snapshot, with stale remote refs.
+- First paint never fetches. `cli.rs` calls `collect_full_snapshot` with `do_fetch = false`. `--fetch` on a TTY only starts the background queue.
+- `ws` exit: git is in its own process group, so a terminal Ctrl-C or hang-up does not reach it. `ws` stops it instead. On TUI quit, `run_tui` calls `git::stop_running_git` after it restores the terminal: `SIGTERM` to every running git group, `SIGKILL` after 2 s, and no new git starts (`git <sub> not started: ws is exiting`). One exception: the auto-stash pop after a pull still runs while `ws` exits, so a quit during a pull gives the local changes back. On Unix, a handler for `SIGINT`, `SIGTERM` and `SIGHUP` (`git::stop_git_on_exit_signals`, installed by `cli_main`) sends `SIGTERM` to every running git group, then `ws` exits from the signal as usual.
+
+**Why.** A TTY `ws` ran about ten background `git fetch` jobs whose ssh had no connect timeout. The remote host dropped the packets, so each socket stayed in `SYN-SENT` to port 22 for about ten minutes. `ws` had no process deadline, and the fetches held every worker slot, so the UI did not move. Other hosts, and the forge's HTTPS, answered at once. Now ssh ends such a connect after 10 s, the wall clock is the backstop, and remote jobs have their own Scheduler lane (see **Write serialisation**).
+
+**Other limits.** These spawns are not git. Their limits are shorter on purpose. Do not raise them to match the git limits.
+
+- Update check: `curl --max-time 4` (`update_check.rs`). The release list for `--update` uses `--max-time 8` (`update.rs`).
+- Forge CLI (`gh` / `glab`): 20 s, `CLI_TIME_LIMIT` (`tui/pull_request.rs`).
 
 ## `crates/workspace-status/src/git.rs`
 
@@ -25,9 +63,9 @@ Every git subprocess also runs with `GIT_OPTIONAL_LOCKS=0` (set by `git::git_pro
 | `list_compare_picker_branches` | `for-each-ref` on `refs/heads/` + `refs/remotes/origin/` | `Result<LocalBranch[]>` | Drops `origin/HEAD` and the current local. No checkout. |
 | `list_compare_picker_commits` | `log --format=%H%x09%s --max-count=<limit+1> HEAD --` | `Result<AncestorCommit[]>` | Diff vs commit picker. Read-only. Drops the first row (HEAD), so a root HEAD lists none and at most `limit` rows remain. `limit` is `COMPARE_PICKER_COMMIT_LIMIT` (10,000 newest ancestors). Does not use `HEAD^@`: on a root commit it expands to nothing and `git log` falls back to HEAD. |
 | `list_checkout_files(cwd)` | `ls-files -z --cached --others --exclude-standard -- . ':(exclude,glob)**/target/**' ':(exclude,glob)**/node_modules/**'` | `Result<paths>` | Read-only. Quick Open file index (`file_index.rs` `build_file_index`), run on the blocking pool, never the event thread. Tracked plus untracked, minus ignored. The exclude pathspecs keep `target/` and `node_modules/` trees at any depth (root included) out of git's own walk, even when tracked. The caller still drops `.git` / `target` / `node_modules` components as a backstop and paths that are missing or a directory (deleted-but-indexed files, submodules), and stops at `MAX_INDEX_ENTRIES` (200,000). Failure is git's reason line; that checkout lists nothing. |
-| `explorer::list_dir` → `check_ignore(checkout, rels)` | `check-ignore -z --stdin` in the checkout, one NUL-separated path per child of the listed folder on stdin (a root-level name that starts with `:` gets a `./` prefix so git reads it literally); `GIT_LITERAL_PATHSPECS` / `GIT_GLOB_PATHSPECS` / `GIT_ICASE_PATHSPECS` are removed from its environment | `Option<set of ignored paths>`; exit 1 is an empty set | Read-only. Explorer tab folder listing (`tui/explorer.rs`), run on the blocking pool, never the event thread. Not run for a folder that is itself ignored (every child is). Any other failure (no git, a nested repository, a broken index) returns `None`: the folder still lists with nothing marked ignored. |
-| `exec_git_status(args, cwd)` | `<git> <args>` | exit code, `-1` on throw | Generic write / predicate. |
-| `exec_git_checked(args, cwd)` | `<git> <args>` | `Result<(), String>` | Surfaces failure to the caller. `Err` is git's reason line (`git_reason_line`: a push `! [rejected]` line, else the first `fatal:` / `error:` stderr line without its tag, else the first non-`hint:` stderr line, else a stdout `CONFLICT` line), or `git <sub> exited with code N` when git printed none. TUI writes show it as `<op> failed: <reason>` (`stash pop failed: …`). `exec_git_stdout` and the patch-on-stdin wrappers return the same one line. |
+| `explorer::list_dir` → `check_ignore(checkout, rels)` | `check-ignore -z --stdin` in the checkout, one NUL-separated path per child of the listed folder on stdin (a root-level name that starts with `:` gets a `./` prefix so git reads it literally); `GIT_LITERAL_PATHSPECS` / `GIT_GLOB_PATHSPECS` / `GIT_ICASE_PATHSPECS` are removed from its environment | `Option<set of ignored paths>`; exit 1 is an empty set | Read-only. Explorer tab folder listing (`tui/explorer.rs`), run on the blocking pool, never the event thread. Not run for a folder that is itself ignored (every child is). Any other failure (no git, a nested repository, a broken index, a timeout) returns `None`: the folder still lists with nothing marked ignored. |
+| `exec_git_status(args, cwd)` | `<git> <args>` | exit code, `-1` when git did not start, timed out, or was killed by a signal | Generic write / predicate. |
+| `exec_git_checked(args, cwd)` | `<git> <args>` | `Result<(), String>` | Surfaces failure to the caller. `Err` is git's reason line (`git_reason_line`: a push `! [rejected]` line, else the first `fatal:` / `error:` stderr line without its tag, else the first non-`hint:` stderr line, else a stdout `CONFLICT` line), or `git <sub> exited with code N` when git printed none, or the timeout text (see **Subprocess deadlines**). TUI writes show it as `<op> failed: <reason>` (`stash pop failed: …`). `exec_git_stdout` and the patch-on-stdin wrappers return the same one line. |
 | `repo_has_local_changes(cwd)` | `diff --quiet`, then `diff --cached --quiet` | boolean | True when either exits non-zero. Untracked files are **not** counted. |
 | `rev_parse_quiet(ref, cwd)` | `rev-parse --verify --quiet <ref>` | SHA string, or `None` when missing | Graph checkout SHA compare (`refs/heads/<local>` vs `refs/remotes/origin/<local>`) |
 | `checkout_branch(branch, cwd)` | `checkout <branch> --quiet`, falling back to `checkout -b <branch> origin/<branch> --quiet` | boolean | Second form creates a local tracking branch when the branch only exists on the remote. |
@@ -73,7 +111,7 @@ Every wrapper that takes a path puts `--` before it, so a file named `-f` or `HE
 | Call | Command |
 | --- | --- |
 | `expand_repos_with_linked_worktrees` | `worktree list --porcelain` per main checkout |
-| `process_repo` (when `do_fetch`) | `fetch --quiet` — failure is caught and ignored; stale refs are better than no output |
+| `process_repo` (when `do_fetch`) | `fetch --quiet` — failure (a timeout too) is caught and ignored; stale refs are better than no output |
 | `process_repo` | `status --porcelain=v1 --branch --ahead-behind --untracked-files=all` |
 | `process_repo` (merge probe) | `resolve_default_branch_name` + `resolve_default_branch_tip_ref` + `merge-base --is-ancestor HEAD <tip>` + same-commit SHA compare. Same-commit as the default tip is open, not merged. |
 
@@ -275,7 +313,7 @@ Revert, compare `x`, stash drop, origin-out-of-sync graph checkout, graph merge,
 
 Independent per-repo `git fetch`, `pull`, and `push` share one remote queue per gitdir. Manual `f` / `p` / `P` and the background fetch tick use that queue in `tui/effect.rs` (`RemoteQueue`). Occupy key is snapshot `primary_repo` when set. Otherwise the key is the checkout path. Linked worktrees of one repo share that key.
 
-The Scheduler JoinSet starts a job when that gitdir is free. Cap is the resolved `fetchConcurrency` setting (default 10). Override with `WS_STATUS_FETCH_CONCURRENCY` or the config key `fetchConcurrency`. `CappedBatch` is CLI `collect_snapshots` and tests. The live TTY path is Scheduler JoinSet `spawn_blocking`.
+The Scheduler JoinSet starts a job when that gitdir is free. The Scheduler has two in-flight lanes (`tui/scheduler.rs` `spawn_next`). Remote jobs (`UserTag::BulkRemote`: fetch / pull / push) use one lane. Every other worker job (pane loads, `process_repo` status, writes, pickers) uses the other. Each lane's cap is the resolved `fetchConcurrency` setting (default 10). Override with `WS_STATUS_FETCH_CONCURRENCY` or the config key `fetchConcurrency`. A queued remote job whose lane is full does not block a job of the other lane behind it, so remotes that hang cannot take every worker slot. `CappedBatch` is CLI `collect_snapshots` and tests. The live TTY path is Scheduler JoinSet `spawn_blocking`.
 
 Pending jobs coalesce on that checkout only. A second `f` / `p` / `P` enqueues. Duplicate Fetch stays one pending job. A pending Fetch becomes Pull, and Pull drops a later Fetch. Push stays in FIFO order with Fetch and Pull. An inflight same-kind job does not queue a duplicate.
 
@@ -287,6 +325,6 @@ If `p` lands during an inflight fetch on that gitdir, dispatch may set `nothing 
 
 Progress is `Fetching n/N…` as each checkout finishes. Mixed kinds paint `Fetching 1 · Pulling 1…` or `Fetching 1/2 · queued 1`. After a kind finishes, the slot is `Fetched N repos`, with ` (N failed: <first repo> — <git reason>)` (`, +N more` when several failed) and ` (N skipped: dirty)` for a `d` that left a dirty repo alone. A pull whose auto-stash pop conflicted reads `<repo>: pulled, but restoring local changes conflicted — resolve, then check git stash list` instead (error; the stash entry is kept). Repos that worked are not listed. A clean finish (`Fetched N repos`, nothing failed or skipped) is an ok ack and shows as a toast in the bottom-right of the panes; a line with a failure (error) or a skip (warn) stays in the breadcrumb slot until replaced.
 
-Quit drops remotes that have not started. In-flight git is unchanged.
+Quit drops remotes that have not started. In-flight git is stopped once the terminal is restored (`git::stop_running_git`: `SIGTERM`, then `SIGKILL` after 2 s).
 
-Watch/status collect (`discover_checkouts` / `process_repo`) uses the same JoinSet cap. A live tick is not one-repo-at-a-time. There is no inotify.
+Watch/status collect (`discover_checkouts` / `process_repo`) uses the non-remote lane, so a stalled fetch does not hold it up. A live tick is not one-repo-at-a-time. There is no inotify.
