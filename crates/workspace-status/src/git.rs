@@ -1,15 +1,72 @@
 //! Git subprocess helpers. Prefer `/usr/bin/git` so WSL does not pick git.exe.
+//!
+//! Every git process `ws` starts must be built by [`git_process`] (the one
+//! constructor) and run by [`git_output`] (the one runner). The runner puts
+//! two bounds on each run, so a stalled network cannot hold a worker
+//! forever:
+//!
+//! - **SSH deadline.** A remote command (`fetch`, `pull`, `push`,
+//!   `ls-remote`, `clone`) gets a `GIT_SSH_COMMAND` with `ConnectTimeout`,
+//!   `ServerAliveInterval` and `BatchMode=yes` (ssh fails at once instead
+//!   of waiting on a prompt), unless the user set their own ssh command
+//!   (see `default_ssh_command`).
+//! - **Wall-clock deadline.** A run that takes longer than its time limit
+//!   (120 s remote, 60 s local) is killed and returns an `io::Error` of kind
+//!   `TimedOut`. On Unix the kill reaches the whole process group, so `ssh`
+//!   and other helpers that git started die with it.
 
-use std::io::Write;
+use std::ffi::{OsStr, OsString};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::sync::{mpsc, OnceLock};
+use std::time::{Duration, Instant};
 
 /// The git binary for this process. [`init_git_binary`] sets it once at
 /// startup from the resolved settings. A process that never calls it (unit
 /// tests, library use) resolves it on the first git call from
 /// `WORKSPACE_STATUS_GIT` alone.
 static GIT_BINARY: OnceLock<PathBuf> = OnceLock::new();
+
+/// Seconds ssh waits for the TCP connection to the remote. ssh has no
+/// connect timeout by default, so a host that drops SYN packets (a closed
+/// VPN, a filtering firewall) holds `git fetch` until the kernel gives up,
+/// many minutes later. Ten seconds is long enough for a slow working link.
+const SSH_CONNECT_TIMEOUT_SECS: u64 = 10;
+
+/// Seconds between ssh keepalive probes on a connected session. With
+/// [`SSH_SERVER_ALIVE_COUNT_MAX`], a connection that goes silent mid-transfer
+/// fails after about 30 s instead of waiting on TCP retransmits.
+const SSH_SERVER_ALIVE_INTERVAL_SECS: u64 = 15;
+
+/// Unanswered keepalive probes before ssh drops the connection. Two probes
+/// let one lost packet pass without a false failure.
+const SSH_SERVER_ALIVE_COUNT_MAX: u32 = 2;
+
+/// Longest a remote git command (`fetch`, `pull`, `push`, `ls-remote`,
+/// `clone`) may run before it is killed. The ssh options catch a dead
+/// connection; this limit also catches a stalled https transfer or a
+/// credential helper that waits for input. Two minutes leaves room for a
+/// large fetch on a slow link.
+const REMOTE_GIT_TIME_LIMIT: Duration = Duration::from_secs(120);
+
+/// Longest a local git command may run before it is killed. Local commands
+/// usually finish in milliseconds; a minute covers a large repository on a
+/// slow disk and still frees a worker held by a hook or a stuck filesystem.
+const LOCAL_GIT_TIME_LIMIT: Duration = Duration::from_secs(60);
+
+/// Longest pause between two exit checks of a running git. The pause starts
+/// at 1 ms and doubles, so a fast git call returns fast.
+const MAX_EXIT_POLL_PAUSE: Duration = Duration::from_millis(25);
+
+/// How long git's output pipes may stay open after git exits, before and
+/// again after the kill of its process group.
+const PIPE_CLOSE_GRACE: Duration = Duration::from_millis(200);
+
+/// Global options before the subcommand that take their value as the next
+/// argument (`git -C dir fetch`).
+const GLOBAL_OPTIONS_WITH_VALUE: [&str; 5] =
+    ["-c", "-C", "--git-dir", "--work-tree", "--namespace"];
 
 /// The git binary: the value [`init_git_binary`] set, else
 /// [`resolve_git_binary`] from `WORKSPACE_STATUS_GIT` with no config value.
@@ -52,6 +109,10 @@ pub fn resolve_git_binary(env_value: Option<&str>, config: Option<&Path>) -> Pat
 
 /// Build a git subprocess for `bin`, with the env every `ws` git spawn needs.
 ///
+/// This is the one constructor for git processes. Run the result with
+/// [`git_output`] (never `output()` / `spawn()` directly), so the SSH and
+/// wall-clock deadlines apply to it.
+///
 /// `GIT_OPTIONAL_LOCKS=0` stops git from taking `.git/index.lock` for
 /// background refreshes (git-status(1), "BACKGROUND REFRESH"). `ws` polls
 /// every repo every few seconds; without this, a poll can collide with a
@@ -69,7 +130,8 @@ pub(crate) fn git_process(bin: &Path) -> Command {
 ///
 /// Stdin is `/dev/null` so a credential prompt cannot deadlock against the
 /// event loop. `GIT_TERMINAL_PROMPT=0` fails fast instead of waiting on a
-/// hidden prompt.
+/// hidden prompt. Run the result with [`git_output`] so both deadlines
+/// apply.
 fn git_command(bin: &Path, args: &[&str], cwd: &Path) -> Command {
     let mut cmd = git_process(bin);
     cmd.args(args)
@@ -81,39 +143,374 @@ fn git_command(bin: &Path, args: &[&str], cwd: &Path) -> Command {
     cmd
 }
 
-fn run(args: &[&str], cwd: &Path) -> std::io::Result<std::process::Output> {
-    git_command(git_binary(), args, cwd).output()
+/// The git subcommand in `args`: the first argument that is not a global
+/// option (`-c k=v`, `-C dir`, `--no-pager`, …) or an option's value.
+fn git_subcommand<'a>(args: &[&'a str]) -> Option<&'a str> {
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if GLOBAL_OPTIONS_WITH_VALUE.contains(arg) {
+            rest.next();
+        } else if !arg.starts_with('-') {
+            return Some(arg);
+        }
+    }
+    None
+}
+
+/// True when `args` run a git subcommand that talks to a remote.
+fn is_remote_git(args: &[&str]) -> bool {
+    matches!(
+        git_subcommand(args),
+        Some("fetch" | "pull" | "push" | "ls-remote" | "clone")
+    )
+}
+
+/// The wall-clock limit for a git run with `args`.
+fn git_time_limit(args: &[&str]) -> Duration {
+    if is_remote_git(args) {
+        REMOTE_GIT_TIME_LIMIT
+    } else {
+        LOCAL_GIT_TIME_LIMIT
+    }
+}
+
+/// The `GIT_SSH_COMMAND` value for a remote git run, or `None` to leave
+/// ssh as the user set it.
+///
+/// `None` when any of `GIT_SSH_COMMAND` / `GIT_SSH` (env, non-empty) or
+/// `core.sshCommand` (git config) is set: a custom ssh command is never
+/// replaced. Otherwise plain `ssh` with a connect timeout, keepalives and
+/// `BatchMode=yes`. Git leads its own process group, so an ssh prompt on
+/// `/dev/tty` (an unknown host key, a passphrase with no agent) would be
+/// stopped by `SIGTTIN` and sit until the time limit; `BatchMode` makes ssh
+/// fail at once with its own reason instead, the same intent as
+/// `GIT_TERMINAL_PROMPT=0`. Plain `ssh -o …` still reads `~/.ssh/config`,
+/// so `IdentityFile`, `ProxyJump` and other host settings stay in force.
+fn default_ssh_command(
+    env_ssh_command: Option<&OsStr>,
+    env_ssh: Option<&OsStr>,
+    config_ssh_command: Option<&str>,
+) -> Option<String> {
+    let env_set = |value: Option<&OsStr>| value.is_some_and(|v| !v.is_empty());
+    if env_set(env_ssh_command)
+        || env_set(env_ssh)
+        || config_ssh_command.is_some_and(|v| !v.trim().is_empty())
+    {
+        return None;
+    }
+    Some(format!(
+        "ssh -o ConnectTimeout={SSH_CONNECT_TIMEOUT_SECS} \
+         -o ServerAliveInterval={SSH_SERVER_ALIVE_INTERVAL_SECS} \
+         -o ServerAliveCountMax={SSH_SERVER_ALIVE_COUNT_MAX} \
+         -o BatchMode=yes"
+    ))
+}
+
+/// The value `key` will have in `cmd`'s child: the command's own setting
+/// (or removal) first, else this process's env.
+fn child_env(cmd: &Command, key: &str) -> Option<OsString> {
+    match cmd.get_envs().find(|(name, _)| *name == key) {
+        Some((_, value)) => value.map(OsStr::to_os_string),
+        None => std::env::var_os(key),
+    }
+}
+
+/// `core.sshCommand` as `cmd`'s git binary sees it in `cmd`'s directory
+/// (global and repository config), looked up within `limit`.
+///
+/// `Ok(None)` when it is unset (exit 1) or empty. `Err` when the lookup
+/// did not answer cleanly (timeout, spawn error, any other exit): the
+/// caller then cannot tell whether a custom ssh command is set.
+fn configured_ssh_command(cmd: &Command, limit: Duration) -> io::Result<Option<String>> {
+    let mut probe = git_process(Path::new(cmd.get_program()));
+    probe
+        .args(["config", "--get", "core.sshCommand"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env("GIT_TERMINAL_PROMPT", "0");
+    if let Some(dir) = cmd.get_current_dir() {
+        probe.current_dir(dir);
+    }
+    let out = git_output_within(probe, None, limit)?;
+    let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    match out.status.code() {
+        Some(0) => Ok((!value.is_empty()).then_some(value)),
+        Some(1) => Ok(None),
+        _ => Err(io::Error::other(format!(
+            "git config --get core.sshCommand exited with {}",
+            out.status
+        ))),
+    }
+}
+
+/// Give a remote git run the ssh deadline, unless the user set their own
+/// ssh command ([`default_ssh_command`]) or the `core.sshCommand` lookup
+/// fails within `probe_limit` (then the env is left alone).
+fn apply_ssh_deadline(cmd: &mut Command, probe_limit: Duration) {
+    let env_ssh_command = child_env(cmd, "GIT_SSH_COMMAND");
+    let env_ssh = child_env(cmd, "GIT_SSH");
+    let env_ssh_command = env_ssh_command.as_deref();
+    let env_ssh = env_ssh.as_deref();
+    // Skip the config lookup when the env already decides.
+    if default_ssh_command(env_ssh_command, env_ssh, None).is_none() {
+        return;
+    }
+    let Ok(config) = configured_ssh_command(cmd, probe_limit) else {
+        return;
+    };
+    if let Some(ssh) = default_ssh_command(env_ssh_command, env_ssh, config.as_deref()) {
+        cmd.env("GIT_SSH_COMMAND", ssh);
+    }
+}
+
+/// Run `job` on its own thread; the receiver gets its result.
+fn on_own_thread<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'static) -> mpsc::Receiver<T> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(job());
+    });
+    rx
+}
+
+/// Poll `child` until it exits (`Some`) or `deadline` passes (`None`).
+fn wait_until(child: &mut Child, deadline: Instant) -> io::Result<Option<ExitStatus>> {
+    let mut pause = Duration::from_millis(1);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(pause.min(deadline - now));
+        pause = (pause * 2).min(MAX_EXIT_POLL_PAUSE);
+    }
+}
+
+/// Send `SIGKILL` to process group `pgid` (Unix; a no-op elsewhere).
+fn kill_group(pgid: u32) {
+    #[cfg(unix)]
+    {
+        if let Ok(pgid) = libc::pid_t::try_from(pgid) {
+            // SAFETY: a plain syscall with no pointers. `pgid` is the group
+            // `process_group(0)` made for a git child. On the timeout path
+            // the child is not reaped yet, so the id is still ours. On the
+            // post-exit path git is reaped and the id is not guaranteed
+            // ours: the kill fires only when a pipe is still open after the
+            // grace (so a process of the group most likely still runs, and
+            // Linux keeps a pid allocated while it is in use as a pgid), and
+            // reuse within that ~400 ms window would need a full pid wrap
+            // plus the new process leading its own group.
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = pgid;
+}
+
+/// Kill `child` and every process in its group (`ssh`, helpers), then reap
+/// it.
+fn kill_process_group(child: &mut Child) {
+    kill_group(child.id());
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// `git <sub>`, or `git` when the argv has no subcommand.
+fn git_label(sub: Option<&str>) -> String {
+    sub.map_or_else(|| "git".to_string(), |sub| format!("git {sub}"))
+}
+
+/// The error for a git run killed at its time limit.
+fn timed_out(sub: Option<&str>, limit: Duration, remote: bool) -> io::Error {
+    let label = git_label(sub);
+    let secs = limit.as_secs();
+    let message = if remote {
+        format!("{label} timed out after {secs}s: the remote did not answer")
+    } else {
+        format!("{label} timed out after {secs}s")
+    };
+    io::Error::new(io::ErrorKind::TimedOut, message)
+}
+
+/// The error for a git that exited while a process outside its group kept
+/// its stdout or stderr open.
+fn output_held_open(sub: Option<&str>) -> io::Error {
+    io::Error::other(format!(
+        "{} exited but a process it started kept its output open",
+        git_label(sub)
+    ))
+}
+
+/// Take the result of an output reader into `slot` if it arrives by
+/// `until`. A missing pipe (not piped) is an empty output.
+fn take_output(
+    slot: &mut Option<io::Result<Vec<u8>>>,
+    reader: Option<&mpsc::Receiver<io::Result<Vec<u8>>>>,
+    until: Instant,
+) {
+    if slot.is_some() {
+        return;
+    }
+    let Some(reader) = reader else {
+        *slot = Some(Ok(Vec::new()));
+        return;
+    };
+    match reader.recv_timeout(until.saturating_duration_since(Instant::now())) {
+        Ok(read) => *slot = Some(read),
+        Err(mpsc::RecvTimeoutError::Timeout) => {}
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            *slot = Some(Err(io::Error::other("git output reader stopped")));
+        }
+    }
+}
+
+/// Run a git `cmd` from [`git_process`] / [`git_command`] under both
+/// deadlines, with the time limit picked from its argv (remote or local).
+///
+/// See [`git_output_within`] for the run itself.
+pub(crate) fn git_output(cmd: Command, stdin: Option<&[u8]>) -> io::Result<Output> {
+    run_bounded(cmd, stdin, None)
+}
+
+/// Run a git `cmd` from [`git_process`] / [`git_command`], killed after
+/// `limit`.
+///
+/// Stdin gets `stdin` through a pipe, or `/dev/null` when it is `None`;
+/// stdout and stderr keep the caller's setting. A broken pipe while writing
+/// `stdin` means git exited before it read all of it; the exit status then
+/// says why, so that is not an `Err`. A remote run also gets the ssh
+/// deadline ([`default_ssh_command`]); its `core.sshCommand` lookup counts
+/// against `limit`. On Unix git leads its own process group, so the kill at
+/// `limit` reaches `ssh` too.
+///
+/// `Err` of kind `TimedOut` at `limit`, with the message `git <sub> timed
+/// out after <N>s`, plus `: the remote did not answer` for a remote run.
+/// When git exits but a process it started keeps stdout or stderr open,
+/// that process group is killed and the run returns git's own status.
+pub(crate) fn git_output_within(
+    cmd: Command,
+    stdin: Option<&[u8]>,
+    limit: Duration,
+) -> io::Result<Output> {
+    run_bounded(cmd, stdin, Some(limit))
+}
+
+/// The run behind [`git_output`] and [`git_output_within`]. `limit` `None`
+/// picks the limit from the argv.
+fn run_bounded(
+    mut cmd: Command,
+    stdin: Option<&[u8]>,
+    limit: Option<Duration>,
+) -> io::Result<Output> {
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let limit = limit.unwrap_or_else(|| git_time_limit(&argv));
+    let remote = is_remote_git(&argv);
+    let sub = git_subcommand(&argv);
+    // The deadline starts before the ssh config lookup, so the lookup
+    // cannot stretch a remote run past `limit`.
+    let deadline = Instant::now() + limit;
+    if remote {
+        apply_ssh_deadline(&mut cmd, deadline.saturating_duration_since(Instant::now()));
+    }
+    cmd.stdin(if stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = cmd.spawn()?;
+    let pgid = child.id();
+    // Write and read on their own threads: git answers as it reads, so a
+    // full stdout pipe must not stall the stdin write, and a stalled git
+    // must not stall this thread past `deadline`.
+    let writer = match (stdin, child.stdin.take()) {
+        (Some(bytes), Some(mut pipe)) => {
+            let bytes = bytes.to_vec();
+            Some(on_own_thread(move || pipe.write_all(&bytes)))
+        }
+        _ => None,
+    };
+    let stdout = child
+        .stdout
+        .take()
+        .map(|mut pipe| on_own_thread(move || read_all(&mut pipe)));
+    let stderr = child
+        .stderr
+        .take()
+        .map(|mut pipe| on_own_thread(move || read_all(&mut pipe)));
+    let status = match wait_until(&mut child, deadline) {
+        Ok(Some(status)) => status,
+        Ok(None) => {
+            kill_process_group(&mut child);
+            return Err(timed_out(sub, limit, remote));
+        }
+        Err(err) => {
+            kill_process_group(&mut child);
+            return Err(err);
+        }
+    };
+    // Git exited. A process it left behind may still hold a pipe open:
+    // give the pipes a short grace, then kill git's group (where such a
+    // process lives) and give them one more.
+    let (mut out, mut err) = (None, None);
+    for round in 0..2 {
+        let until = Instant::now() + PIPE_CLOSE_GRACE;
+        take_output(&mut out, stdout.as_ref(), until);
+        take_output(&mut err, stderr.as_ref(), until);
+        if out.is_some() && err.is_some() {
+            break;
+        }
+        if round == 0 {
+            kill_group(pgid);
+        }
+    }
+    let (Some(out), Some(err)) = (out, err) else {
+        return Err(output_held_open(sub));
+    };
+    let (stdout, stderr) = (out?, err?);
+    let write_err = writer
+        .and_then(|rx| rx.recv_timeout(PIPE_CLOSE_GRACE).ok())
+        .and_then(Result::err)
+        .filter(|err| err.kind() != io::ErrorKind::BrokenPipe);
+    if let Some(err) = write_err {
+        return Err(err);
+    }
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Read `pipe` to its end.
+fn read_all(pipe: &mut impl Read) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    pipe.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn run(args: &[&str], cwd: &Path) -> io::Result<Output> {
+    git_output(git_command(git_binary(), args, cwd), None)
 }
 
 /// Run git with `stdin` piped: the `git apply` wrappers and index blame.
 ///
 /// A broken pipe while writing means git exited before it read all of
 /// `stdin`; the exit status then says why, so that is not an `Err`.
-fn run_with_stdin(
-    args: &[&str],
-    cwd: &Path,
-    stdin: &[u8],
-) -> std::io::Result<std::process::Output> {
-    let mut cmd = git_process(git_binary());
-    cmd.args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("GIT_TERMINAL_PROMPT", "0");
-    let mut child = cmd.spawn()?;
-    let write_err = match child.stdin.take() {
-        Some(mut pipe) => pipe
-            .write_all(stdin)
-            .err()
-            .filter(|err| err.kind() != std::io::ErrorKind::BrokenPipe),
-        None => None,
-    };
-    let out = child.wait_with_output()?;
-    if let Some(err) = write_err {
-        return Err(err);
-    }
-    Ok(out)
+fn run_with_stdin(args: &[&str], cwd: &Path, stdin: &[u8]) -> io::Result<Output> {
+    git_output(git_command(git_binary(), args, cwd), Some(stdin))
 }
 
 /// Run git and return trimmed stdout. Empty string on failure.
@@ -124,7 +521,8 @@ pub fn exec_git(args: &[&str], cwd: &Path) -> String {
     }
 }
 
-/// Run git and return the exit code (`-1` when the process did not start).
+/// Run git and return the exit code (`-1` when the process did not start,
+/// timed out, or was killed by a signal).
 pub fn exec_git_status(args: &[&str], cwd: &Path) -> i32 {
     match run(args, cwd) {
         Ok(out) => out.status.code().unwrap_or(-1),
@@ -272,11 +670,11 @@ pub enum MergeIntoHeadResult {
     Failed(String),
 }
 
-fn run_merge(args: &[&str], cwd: &Path) -> std::io::Result<std::process::Output> {
+fn run_merge(args: &[&str], cwd: &Path) -> io::Result<Output> {
     let mut cmd = git_command(git_binary(), args, cwd);
     cmd.env("GIT_EDITOR", "true")
         .env("GIT_MERGE_AUTOEDIT", "no");
-    cmd.output()
+    git_output(cmd, None)
 }
 
 fn merge_failed_message(out: &std::process::Output) -> String {
@@ -1873,6 +2271,316 @@ mod tests {
         let out = run_with_stdin(&["hash-object", "--stdin"], &dir, b"probe\n")
             .expect("run_with_stdin spawns");
         assert!(out.status.success(), "hash-object failed: {out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim().len(),
+            40,
+            "stdin reached git through the bounded runner: {out:?}"
+        );
+    }
+
+    /// Write an executable fake git `script` into a new temp dir.
+    fn fake_git(name: &str, script: &str) -> (PathBuf, PathBuf) {
+        let dir = unique_dir(name);
+        fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("fake-git");
+        fs::write(&bin, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        (dir, bin)
+    }
+
+    /// Run `cmd()` under `limit`, retrying while write + chmod + exec
+    /// returns ETXTBSY on a busy runner.
+    fn output_retrying_busy(
+        cmd: impl Fn() -> Command,
+        limit: std::time::Duration,
+    ) -> io::Result<Output> {
+        for _ in 0..8 {
+            match git_output_within(cmd(), None, limit) {
+                Err(err) if err.kind() == io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                other => return other,
+            }
+        }
+        git_output_within(cmd(), None, limit)
+    }
+
+    #[test]
+    fn git_subcommand_skips_global_options_and_spots_remote_commands() {
+        for remote in [
+            &["fetch"][..],
+            &["-c", "x=y", "fetch"],
+            &["-C", "dir", "--no-pager", "pull", "--ff-only"],
+            &["push", "origin", "main"],
+            &["pull"],
+            &["ls-remote", "origin"],
+            &["clone", "url"],
+        ] {
+            assert!(is_remote_git(remote), "{remote:?} is remote");
+            assert_eq!(git_time_limit(remote), REMOTE_GIT_TIME_LIMIT);
+        }
+        for local in [
+            &["status"][..],
+            &["config", "--get", "core.sshCommand"],
+            &["remote", "get-url", "origin"],
+            &["-c", "fetch.x=y", "log"],
+            &[],
+        ] {
+            assert!(!is_remote_git(local), "{local:?} is local");
+            assert_eq!(git_time_limit(local), LOCAL_GIT_TIME_LIMIT);
+        }
+        assert_eq!(git_subcommand(&["-c", "k=v", "fetch"]), Some("fetch"));
+        assert_eq!(git_subcommand(&["--no-pager"]), None);
+    }
+
+    #[test]
+    fn default_ssh_command_adds_timeouts_only_when_no_custom_ssh_is_set() {
+        let ssh = default_ssh_command(None, None, None).expect("default ssh command");
+        assert_eq!(
+            ssh,
+            "ssh -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 \
+             -o BatchMode=yes"
+        );
+        let empty = Some(OsStr::new(""));
+        assert_eq!(
+            default_ssh_command(empty, empty, Some(" ")),
+            Some(ssh),
+            "empty values do not count as set"
+        );
+        let custom = Some(OsStr::new("my-ssh"));
+        assert_eq!(default_ssh_command(custom, None, None), None);
+        assert_eq!(default_ssh_command(None, custom, None), None);
+        assert_eq!(default_ssh_command(None, None, Some("my-ssh -i key")), None);
+    }
+
+    #[test]
+    fn remote_git_gets_ssh_connect_timeout_unless_a_custom_ssh_is_set() {
+        // `config` answers the `core.sshCommand` lookup; `envs` go on the
+        // command after the operator's ssh env is cleared from it (the
+        // process env is not touched).
+        let probe = |name: &str, config: &str, envs: &[(&str, &str)]| {
+            let script = format!(
+                "#!/bin/sh\nif [ \"$1\" = config ]; then {config}; fi\n\
+                 printf 'ssh=%s\\n' \"${{GIT_SSH_COMMAND-}}\"\n"
+            );
+            let (dir, bin) = fake_git(name, &script);
+            let out = output_retrying_busy(
+                || {
+                    let mut cmd = git_command(&bin, &["fetch", "--quiet"], &dir);
+                    cmd.env_remove("GIT_SSH_COMMAND").env_remove("GIT_SSH");
+                    cmd.envs(envs.iter().copied());
+                    cmd
+                },
+                REMOTE_GIT_TIME_LIMIT,
+            )
+            .expect("fake git runs");
+            let _ = fs::remove_dir_all(&dir);
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert_eq!(
+            probe("ws-git-ssh-default", "exit 1", &[]),
+            format!("ssh={}", default_ssh_command(None, None, None).unwrap()),
+            "remote git gets the ssh deadline"
+        );
+        assert_eq!(
+            probe("ws-git-ssh-config", "echo 'my-ssh -i key'; exit 0", &[]),
+            "ssh=",
+            "core.sshCommand must not be replaced"
+        );
+        assert_eq!(
+            probe("ws-git-ssh-config-fails", "exit 2", &[]),
+            "ssh=",
+            "a failed core.sshCommand lookup leaves the env alone"
+        );
+        assert_eq!(
+            probe(
+                "ws-git-ssh-env-command",
+                "exit 1",
+                &[("GIT_SSH_COMMAND", "my-ssh")]
+            ),
+            "ssh=my-ssh",
+            "GIT_SSH_COMMAND must not be replaced"
+        );
+        assert_eq!(
+            probe("ws-git-ssh-env-ssh", "exit 1", &[("GIT_SSH", "my-ssh")]),
+            "ssh=",
+            "GIT_SSH must not get a GIT_SSH_COMMAND on top"
+        );
+    }
+
+    /// True while `pid` exists and is not a zombie. A killed orphan stays a
+    /// zombie until init reaps it, and init may never reap in a container.
+    #[cfg(unix)]
+    fn process_runs(pid: libc::pid_t) -> bool {
+        // SAFETY: signal 0 only checks that the process exists.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return false;
+        }
+        // Linux: the state letter follows the `(comm)` field.
+        match fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat
+                .rsplit_once(')')
+                .is_none_or(|(_, rest)| !rest.trim_start().starts_with('Z')),
+            Err(_) => true,
+        }
+    }
+
+    /// The pid a fake git wrote to `pid_file` (atomically, by rename).
+    #[cfg(unix)]
+    fn recorded_pid(pid_file: &Path) -> Option<libc::pid_t> {
+        fs::read_to_string(pid_file).ok()?.trim().parse().ok()
+    }
+
+    /// Fail unless `pid` is gone within a few seconds.
+    #[cfg(unix)]
+    fn assert_gone_soon(pid: libc::pid_t, what: &str) {
+        let gone_by = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while process_runs(pid) {
+            assert!(std::time::Instant::now() < gone_by, "{what} still runs");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// Shell lines that start `sleep 30` in the background, in git's
+    /// process group, and record its pid in `pid_file` by rename.
+    #[cfg(unix)]
+    fn background_sleep(pid_file: &Path) -> String {
+        let pid_file = pid_file.display();
+        format!("sleep 30 &\necho $! > '{pid_file}.tmp' && mv '{pid_file}.tmp' '{pid_file}'\n")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stalled_git_is_killed_with_its_process_group_at_the_time_limit() {
+        let run = |name: &str, args: &[&str]| {
+            let (dir, bin) = fake_git(name, "");
+            let pid_file = dir.join("sleep.pid");
+            let script = format!(
+                "#!/bin/sh\nif [ \"$1\" = config ]; then exit 1; fi\n{}wait\n",
+                background_sleep(&pid_file)
+            );
+            fs::write(&bin, script).unwrap();
+            // A busy host may not start the script within the short bound;
+            // retry with a longer one so the group-kill check always runs.
+            for bound in [500, 3000].map(std::time::Duration::from_millis) {
+                let started = std::time::Instant::now();
+                let err = output_retrying_busy(|| git_command(&bin, args, &dir), bound)
+                    .expect_err("a stalled git times out");
+                assert!(
+                    started.elapsed() < bound + std::time::Duration::from_secs(4),
+                    "returned after {:?}",
+                    started.elapsed()
+                );
+                let Some(pid) = recorded_pid(&pid_file) else {
+                    continue;
+                };
+                // The background `sleep` shares git's process group, so the
+                // kill reaches it. It may need a moment to be reaped.
+                assert_gone_soon(pid, "the child of a killed git");
+                let _ = fs::remove_dir_all(&dir);
+                return (err, bound.as_secs());
+            }
+            panic!("the fake git never started");
+        };
+        let (local, secs) = run("ws-git-stall-local", &["status"]);
+        assert_eq!(local.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(
+            local.to_string(),
+            format!("git status timed out after {secs}s")
+        );
+        let (remote, secs) = run("ws-git-stall-remote", &["fetch", "--quiet"]);
+        assert_eq!(remote.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(
+            remote.to_string(),
+            format!("git fetch timed out after {secs}s: the remote did not answer")
+        );
+        assert_eq!(
+            timed_out(None, std::time::Duration::from_secs(5), false).to_string(),
+            "git timed out after 5s",
+            "no subcommand: no `git git`"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_that_exits_returns_its_status_while_a_child_holds_its_output() {
+        let (dir, bin) = fake_git("ws-git-pipe-holder", "");
+        let pid_file = dir.join("sleep.pid");
+        // The background `sleep` inherits stdout and stderr and keeps them
+        // open after git exits.
+        let script = format!(
+            "#!/bin/sh\n{}echo done\nexit 0\n",
+            background_sleep(&pid_file)
+        );
+        fs::write(&bin, script).unwrap();
+        let started = std::time::Instant::now();
+        let out = output_retrying_busy(
+            || git_command(&bin, &["status"], &dir),
+            LOCAL_GIT_TIME_LIMIT,
+        )
+        .expect("an exited git is not an error");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "returned after {:?}",
+            started.elapsed()
+        );
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "done");
+        let pid = recorded_pid(&pid_file).expect("git wrote the pid before it exited");
+        assert_gone_soon(pid, "the pipe holder in git's group");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn git_that_exits_while_an_escaped_process_holds_its_output_is_a_distinct_error() {
+        if !Path::new("/usr/bin/setsid").exists() {
+            eprintln!("skipped: /usr/bin/setsid is missing, so no process can leave git's group");
+            return;
+        }
+        let (dir, bin) = fake_git("ws-git-pipe-escape", "");
+        let pid_file = dir.join("sleep.pid");
+        let pid = pid_file.display();
+        // `setsid` moves the holder out of git's group, so the kill cannot
+        // reach it. The holder records its pid only after it moved, and git
+        // waits for that record (up to 5 s) before it exits, so the group
+        // kill after git exits cannot catch the holder still in the group.
+        let script = format!(
+            "#!/bin/sh\n\
+             /usr/bin/setsid sh -c 'echo $$ > \"{pid}.tmp\" && mv \"{pid}.tmp\" \"{pid}\"; \
+             exec sleep 30' &\n\
+             i=0\n\
+             while [ ! -s '{pid}' ] && [ $i -lt 500 ]; do sleep 0.01; i=$((i+1)); done\n\
+             exit 0\n"
+        );
+        fs::write(&bin, script).unwrap();
+        let started = std::time::Instant::now();
+        let err = output_retrying_busy(
+            || git_command(&bin, &["status"], &dir),
+            LOCAL_GIT_TIME_LIMIT,
+        )
+        .expect_err("an output held open is an error");
+        if let Some(pid) = recorded_pid(&pid_file) {
+            // SAFETY: a plain syscall; `pid` is the `sleep` this test started.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "returned after {:?}",
+            started.elapsed()
+        );
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert_eq!(
+            err.to_string(),
+            "git status exited but a process it started kept its output open"
+        );
     }
 
     #[test]
