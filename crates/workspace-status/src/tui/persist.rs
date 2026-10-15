@@ -60,3 +60,28 @@ pub(crate) fn persist_with_lock(
     }
     write_result
 }
+
+/// Non-blocking exclusive lock on the sibling file `<file_path><suffix>`.
+///
+/// Creates the parent directories and the lock file when missing (the lock
+/// file carries no bytes). `Ok(Some(file))` holds the lock until the file is
+/// dropped; the OS also drops it when the process dies. `Ok(None)` means
+/// another open file description holds it. Other I/O errors return `Err`.
+pub(crate) fn try_lock_sibling(file_path: &Path, suffix: &str) -> io::Result<Option<fs::File>> {
+    if let Some(parent) = file_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(sibling_suffix(file_path, suffix))?;
+    if lock_file.try_lock_exclusive()? {
+        Ok(Some(lock_file))
+    } else {
+        Ok(None)
+    }
+}
