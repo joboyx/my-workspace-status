@@ -120,7 +120,12 @@ pub enum ApplyDecision {
 }
 
 /// Caps, generations, and queues for the live loop.
+///
+/// Remote fetch / pull / push slots ([`UserTag::BulkRemote`]) and all other
+/// jobs have separate in-flight caps of the same size, so remotes that hang
+/// on the network cannot block pane loads, status, writes, or pickers.
 pub struct Scheduler {
+    /// In-flight cap for each lane: remote jobs, and every other job.
     cap: usize,
     next_job_id: u64,
     next_collection_gen: u64,
@@ -169,6 +174,10 @@ struct Inflight {
 
 impl Scheduler {
     /// `cap` is the resolved `fetchConcurrency` setting (default 10).
+    ///
+    /// It bounds in-flight remote fetch / pull / push jobs, and separately
+    /// bounds every other job. Remote jobs do not use the other lane's slots,
+    /// so a slow remote cannot stop the UI from loading panes or status.
     pub fn new(cap: usize) -> Self {
         Self {
             cap: cap.max(1),
@@ -558,35 +567,67 @@ impl Scheduler {
         }
     }
 
-    /// Next job under the cap. User queue first, then background status.
+    /// Next job under its lane's cap. User queue first, then background status.
+    ///
+    /// Remote jobs and all other jobs have separate caps. A queued remote job
+    /// whose lane is full is skipped, and the next job of the other lane
+    /// behind it may start, so stalled remotes cannot hold up the UI. Within
+    /// each lane the queue order does not change. A queued default-branch
+    /// switch waits for the one in flight; only remote slots and background
+    /// status pass it.
     pub fn spawn_next(&mut self) -> Option<SpawnRequest> {
-        if self.inflight.len() >= self.cap {
-            return None;
-        }
-        let kind = self
-            .user_queue
-            .pop_front()
-            .or_else(|| self.status_queue.pop_front())?;
-        if let SpawnKind::UserWork {
-            tag: UserTag::DefaultBranch,
-        } = &kind
-        {
-            if self.inflight.values().any(|job| {
-                matches!(
-                    job.kind,
-                    SpawnKind::UserWork {
-                        tag: UserTag::DefaultBranch
-                    }
-                )
-            }) {
-                self.user_queue.push_front(kind);
-                if self.status_queue.is_empty() {
-                    return None;
+        let remote_inflight = self
+            .inflight
+            .values()
+            .filter(|job| is_bulk_remote(&job.kind))
+            .count();
+        let remote_open = remote_inflight < self.cap;
+        let local_open = self.inflight.len() - remote_inflight < self.cap;
+        let default_branch_inflight = self.inflight.values().any(|job| {
+            matches!(
+                job.kind,
+                SpawnKind::UserWork {
+                    tag: UserTag::DefaultBranch
                 }
-                let kind = self.status_queue.pop_front()?;
-                return Some(self.take_inflight(kind));
+            )
+        });
+        let mut user_local_open = local_open;
+        let mut pick = None;
+        for (idx, kind) in self.user_queue.iter().enumerate() {
+            if is_bulk_remote(kind) {
+                if remote_open {
+                    pick = Some(idx);
+                    break;
+                }
+            } else if user_local_open {
+                let blocked_default_branch = default_branch_inflight
+                    && matches!(
+                        kind,
+                        SpawnKind::UserWork {
+                            tag: UserTag::DefaultBranch
+                        }
+                    );
+                if !blocked_default_branch {
+                    pick = Some(idx);
+                    break;
+                }
+                // Nothing in the user queue passes a waiting default-branch
+                // switch except remote jobs; background status still may.
+                user_local_open = false;
             }
         }
+        if let Some(idx) = pick {
+            let kind = self.user_queue.remove(idx)?;
+            return Some(self.take_inflight(kind));
+        }
+        let idx = self.status_queue.iter().position(|kind| {
+            if is_bulk_remote(kind) {
+                remote_open
+            } else {
+                local_open
+            }
+        })?;
+        let kind = self.status_queue.remove(idx)?;
         Some(self.take_inflight(kind))
     }
 
@@ -624,6 +665,16 @@ impl Scheduler {
         }
         out
     }
+}
+
+/// True for a remote fetch / pull / push slot, which uses the remote lane.
+fn is_bulk_remote(kind: &SpawnKind) -> bool {
+    matches!(
+        kind,
+        SpawnKind::UserWork {
+            tag: UserTag::BulkRemote
+        }
+    )
 }
 
 #[cfg(test)]
@@ -887,6 +938,103 @@ mod tests {
         s.note_user_done(UserTag::BulkRemote);
         s.enqueue_user(UserTag::Write);
         assert!(s.busy_for_writes());
+    }
+
+    #[test]
+    fn full_remote_lane_leaves_pane_and_status_slots_free() {
+        let mut s = Scheduler::new(3);
+        for _ in 0..3 {
+            s.enqueue_user(UserTag::BulkRemote);
+        }
+        let remotes = s.spawn_ready();
+        assert_eq!(remotes.len(), 3);
+        assert!(remotes.iter().all(|req| is_bulk_remote(&req.kind)));
+
+        s.enqueue_user(UserTag::BulkRemote);
+        s.on_reload_repo("r0".into());
+        s.request_pane();
+        let next = s.spawn_ready();
+        assert_eq!(next.len(), 2, "pane and status still start: {next:?}");
+        assert!(next
+            .iter()
+            .any(|req| matches!(req.kind, SpawnKind::LoadPane { .. })));
+        assert!(next
+            .iter()
+            .any(|req| matches!(&req.kind, SpawnKind::ProcessRepo { path, .. } if path == "r0")));
+        assert_eq!(s.queued_user_tag(UserTag::BulkRemote), 1);
+
+        s.note_job_finished(remotes[0].id);
+        let freed = s.spawn_next().expect("a remote slot is free");
+        assert!(is_bulk_remote(&freed.kind));
+        assert_eq!(s.queued_user_tag(UserTag::BulkRemote), 0);
+    }
+
+    #[test]
+    fn queued_remote_behind_full_lane_does_not_block_a_pane_load() {
+        let mut s = Scheduler::new(2);
+        s.enqueue_user(UserTag::BulkRemote);
+        s.enqueue_user(UserTag::BulkRemote);
+        assert_eq!(s.spawn_ready().len(), 2);
+
+        s.enqueue_user(UserTag::BulkRemote);
+        s.enqueue_user(UserTag::Pane);
+        let next = s.spawn_next().expect("pane slot spawns");
+        assert_eq!(next.kind, SpawnKind::UserWork { tag: UserTag::Pane });
+        assert!(s.spawn_next().is_none());
+        assert_eq!(s.queued_user_tag(UserTag::BulkRemote), 1);
+    }
+
+    #[test]
+    fn non_remote_jobs_still_stop_at_cap() {
+        let mut s = Scheduler::new(2);
+        s.enqueue_user(UserTag::BulkRemote);
+        for _ in 0..3 {
+            s.enqueue_user(UserTag::Prepare);
+        }
+        let spawned = s.spawn_ready();
+        assert_eq!(spawned.len(), 3, "one remote plus two local: {spawned:?}");
+        assert_eq!(
+            spawned
+                .iter()
+                .filter(|req| !is_bulk_remote(&req.kind))
+                .count(),
+            2
+        );
+        assert_eq!(s.queued_user_tag(UserTag::Prepare), 1);
+        assert!(s.spawn_next().is_none());
+    }
+
+    #[test]
+    fn waiting_default_branch_lets_only_remote_and_background_status_pass() {
+        let mut s = Scheduler::new(4);
+        s.enqueue_user(UserTag::DefaultBranch);
+        let first = s.spawn_ready();
+        assert_eq!(first.len(), 1);
+        s.enqueue_user(UserTag::DefaultBranch);
+        s.enqueue_user(UserTag::Prepare);
+        s.enqueue_user(UserTag::BulkRemote);
+        s.enqueue_background(UserTag::Activity);
+        let next = s.spawn_ready();
+        assert_eq!(
+            next.iter().map(|req| req.kind.clone()).collect::<Vec<_>>(),
+            vec![
+                SpawnKind::UserWork {
+                    tag: UserTag::BulkRemote
+                },
+                SpawnKind::UserWork {
+                    tag: UserTag::Activity
+                },
+            ]
+        );
+        assert_eq!(s.queued_user_tag(UserTag::Prepare), 1);
+        s.note_job_finished(first[0].id);
+        let after = s.spawn_next().expect("second switch starts");
+        assert_eq!(
+            after.kind,
+            SpawnKind::UserWork {
+                tag: UserTag::DefaultBranch
+            }
+        );
     }
 
     #[test]

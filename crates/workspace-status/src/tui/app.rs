@@ -121,7 +121,10 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
     restore_terminal();
     let _ = terminal.show_cursor();
     // The runtime drop waits for workers that are still running (a git
-    // fetch, say). Drop it only once the terminal is back to normal.
+    // fetch, say). Stop their git first (SIGTERM, then SIGKILL after a
+    // short grace) so quit returns promptly, and drop the runtime only once
+    // the terminal is back to normal.
+    crate::git::stop_running_git();
     drop(rt);
     result
 }

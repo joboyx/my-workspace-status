@@ -13,11 +13,10 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::Write;
 use std::path::Path;
 use std::process::Stdio;
 
-use crate::git::{git_binary, git_process};
+use crate::git::{git_binary, git_output, git_process};
 use crate::snapshot::FileChange;
 
 use super::icons::{status_letter_from_change, FileStatusLetter};
@@ -99,7 +98,6 @@ fn check_ignore(checkout: &Path, rels: &[String]) -> Option<HashSet<String>> {
     let mut cmd = git_process(git_binary());
     cmd.args(["check-ignore", "-z", "--stdin"])
         .current_dir(checkout)
-        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -108,7 +106,6 @@ fn check_ignore(checkout: &Path, rels: &[String]) -> Option<HashSet<String>> {
         .env_remove("GIT_LITERAL_PATHSPECS")
         .env_remove("GIT_GLOB_PATHSPECS")
         .env_remove("GIT_ICASE_PATHSPECS");
-    let mut child = cmd.spawn().ok()?;
     let mut input = Vec::new();
     for rel in rels {
         // git always parses a leading `:` as pathspec magic, and
@@ -121,17 +118,10 @@ fn check_ignore(checkout: &Path, rels: &[String]) -> Option<HashSet<String>> {
         input.extend_from_slice(rel.as_bytes());
         input.push(0);
     }
-    let mut stdin = child.stdin.take()?;
-    // Write on a second thread: git answers as it reads, so a large folder
-    // could fill the stdout pipe while we still block on stdin.
-    let out = std::thread::scope(|scope| {
-        scope.spawn(move || {
-            // A write error means git exited early; its status says why.
-            let _ = stdin.write_all(&input);
-        });
-        child.wait_with_output()
-    })
-    .ok()?;
+    // The runner writes stdin on its own thread (git answers as it reads,
+    // so a large folder could fill the stdout pipe while we still write)
+    // and kills git at the local time limit.
+    let out = git_output(cmd, Some(&input)).ok()?;
     match out.status.code() {
         Some(0) => Some(
             out.stdout
