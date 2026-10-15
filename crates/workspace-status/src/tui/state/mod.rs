@@ -74,6 +74,7 @@ use super::drill::{
 };
 use super::explorer::ExplorerStatus;
 use super::fetch::background_fetch_targets;
+use super::fetch_claim::load_background_fetch_record;
 use super::gates::{
     ListFocusTarget, FOCUS_A_FILE_DIFF, FOCUS_A_FILE_TO_MARK_REVIEWED,
     REVIEWED_MARKS_ARE_FOR_TREE_FILES,
@@ -810,6 +811,17 @@ pub struct AppState {
     /// [`crate::settings::Settings::resolve`] loads it at launch, not
     /// `AppState`.
     pub ui_store_path: PathBuf,
+    /// Shared background-fetch store ([`crate::tui::fetch_claim`]). The
+    /// scheduled fetch claims it and each watch tick reads its record; set
+    /// by [`Self::open_background_fetch_store`].
+    pub(crate) fetch_store_path: PathBuf,
+    /// Newest background-fetch generation this instance has applied or
+    /// written. A record at or below it is not applied again.
+    fetch_applied_generation: u64,
+    /// The status this instance showed for the latest background fetch
+    /// failure. A later success clears the status only while it still
+    /// equals this stamp (text and kind).
+    fetch_failure_stamp: Option<StatusMessage>,
     pub comment: Option<CommentPrompt>,
     pub comment_export: Option<CommentExport>,
     /// Visual-line anchor on a focused file diff (`V`). Cursor is the other end.
@@ -1004,8 +1016,8 @@ fn unix_now() -> i64 {
 
 impl AppState {
     /// TUI launch state: glyphs, theme, `NO_COLOR`, and the viewed /
-    /// comment / UI-state store paths and the activity sparkline come from
-    /// the resolved `settings`.
+    /// comment / UI-state / background-fetch store paths and the activity
+    /// sparkline come from the resolved `settings`.
     pub fn launch(cwd: PathBuf, snapshot: WorkspaceSnapshot, settings: &Settings) -> Self {
         let mut state = Self::build(
             cwd,
@@ -1020,6 +1032,7 @@ impl AppState {
         state.undercurl = settings.undercurl;
         state.smooth_scroll = settings.smooth_scroll;
         state.activity_sparkline = settings.activity_sparkline;
+        state.open_background_fetch_store(settings.fetch_store.clone());
         state
     }
 
@@ -1030,8 +1043,8 @@ impl AppState {
         Self::with_viewed_path(cwd, snapshot, ascii, default_viewed_path())
     }
 
-    /// Test state with `viewed_path`; the comment and UI-state stores sit next
-    /// to it.
+    /// Test state with `viewed_path`; the comment, UI-state, and
+    /// background-fetch stores sit next to it.
     ///
     /// Pins Tokyo Night and [`BackgroundMode::Terminal`], the v0.1.244 look
     /// (theme, boxed panes, no fills), so render tests keep proving that mode
@@ -1057,6 +1070,8 @@ impl AppState {
             ThemeId::TokyoNight,
         );
         state.background = BackgroundMode::Terminal;
+        let fetch_store = state.viewed_path.with_file_name("background-fetch.json");
+        state.open_background_fetch_store(fetch_store);
         state
     }
 
@@ -1117,6 +1132,9 @@ impl AppState {
             comment_store,
             comment_path,
             ui_store_path,
+            fetch_store_path: PathBuf::new(),
+            fetch_applied_generation: 0,
+            fetch_failure_stamp: None,
             comment: None,
             comment_export: None,
             diff_visual_anchor: None,
@@ -5173,6 +5191,58 @@ impl AppState {
         }
         // The background tick paints nothing unless a repo fails.
         Effect::Fetch { repos: targets }
+    }
+
+    /// Use the shared background-fetch store at `path` and start from its
+    /// current generation for this workspace, so an outcome recorded before
+    /// launch never paints.
+    pub(crate) fn open_background_fetch_store(&mut self, path: PathBuf) {
+        self.fetch_applied_generation =
+            load_background_fetch_record(&path, &workspace_store_id(&self.cwd))
+                .map_or(0, |record| record.generation);
+        self.fetch_failure_stamp = None;
+        self.fetch_store_path = path;
+    }
+
+    /// Apply a background-fetch outcome that another instance recorded
+    /// since this one last applied or wrote one. Returns true when it did.
+    ///
+    /// A failure shows the error `fetch failed`. A success clears the
+    /// status only while it still shows this instance's last failure stamp.
+    /// No progress or summary line. A generation already applied changes
+    /// nothing, so a newer local status is never stamped over.
+    pub(crate) fn apply_background_fetch_record(&mut self) -> bool {
+        let Some(record) =
+            load_background_fetch_record(&self.fetch_store_path, &workspace_store_id(&self.cwd))
+        else {
+            return false;
+        };
+        if record.generation <= self.fetch_applied_generation {
+            return false;
+        }
+        if record.failed {
+            self.status = StatusMessage::error("fetch failed");
+        }
+        self.note_background_fetch_outcome(record.generation, record.failed);
+        true
+    }
+
+    /// Mark background-fetch `generation` as applied here.
+    ///
+    /// `failed`: the current status (the one just painted for that fetch)
+    /// becomes the failure stamp. Ok: the status clears if it still equals
+    /// the stamp (text and kind), and the stamp is forgotten.
+    pub(crate) fn note_background_fetch_outcome(&mut self, generation: u64, failed: bool) {
+        self.fetch_applied_generation = generation;
+        if failed {
+            self.fetch_failure_stamp = Some(self.status.clone());
+        } else if self
+            .fetch_failure_stamp
+            .take()
+            .is_some_and(|stamp| stamp == self.status)
+        {
+            self.status.clear();
+        }
     }
 
     fn focused_checkout_if_shown(&self) -> Option<String> {
@@ -12785,6 +12855,80 @@ mod tests {
             app.show_ignored = false;
             assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
         }
+    }
+
+    /// Record a background fetch outcome in `app`'s store the way another
+    /// `ws` instance in the same workspace does: claim, then finish.
+    fn record_other_instance_fetch(app: &AppState, failed: bool, now: u64) -> u64 {
+        crate::tui::fetch_claim::try_claim_background_fetch(
+            &app.fetch_store_path,
+            &workspace_store_id(&app.cwd),
+            1,
+            now,
+        )
+        .unwrap()
+        .expect("the other instance claims")
+        .finish(failed, now)
+        .unwrap()
+    }
+
+    #[test]
+    fn background_fetch_record_paints_fetch_failed_once_per_generation() {
+        let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
+        assert!(!app.apply_background_fetch_record(), "no record yet");
+        assert_eq!(record_other_instance_fetch(&app, true, 10), 1);
+        assert!(app.apply_background_fetch_record());
+        assert_eq!(app.status, "fetch failed");
+        assert_eq!(app.status.kind(), StatusKind::Error);
+
+        app.status = StatusMessage::error("push failed");
+        assert!(
+            !app.apply_background_fetch_record(),
+            "the same generation is not applied again"
+        );
+        assert_eq!(app.status, "push failed", "a newer local status stays");
+    }
+
+    #[test]
+    fn background_fetch_record_success_clears_only_its_own_stamp() {
+        let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
+        record_other_instance_fetch(&app, true, 10);
+        assert!(app.apply_background_fetch_record());
+        assert_eq!(app.status, "fetch failed");
+        record_other_instance_fetch(&app, false, 20);
+        assert!(app.apply_background_fetch_record());
+        assert_eq!(app.status, "", "a later success clears the shared failure");
+
+        record_other_instance_fetch(&app, true, 30);
+        assert!(app.apply_background_fetch_record());
+        app.status = StatusMessage::error("push failed");
+        record_other_instance_fetch(&app, false, 40);
+        assert!(app.apply_background_fetch_record());
+        assert_eq!(app.status, "push failed", "an unrelated status stays");
+
+        record_other_instance_fetch(&app, true, 50);
+        assert!(app.apply_background_fetch_record());
+        app.status = StatusMessage::warn("fetch failed");
+        record_other_instance_fetch(&app, false, 60);
+        assert!(app.apply_background_fetch_record());
+        assert_eq!(
+            app.status.kind(),
+            StatusKind::Warn,
+            "same text, other kind: not the stamp"
+        );
+    }
+
+    #[test]
+    fn background_fetch_record_from_before_launch_paints_nothing() {
+        let first = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
+        record_other_instance_fetch(&first, true, 10);
+        let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
+        app.open_background_fetch_store(first.fetch_store_path.clone());
+        assert!(!app.apply_background_fetch_record(), "seeded at launch");
+        assert_eq!(app.status, "");
+        record_other_instance_fetch(&first, true, 20);
+        assert!(app.apply_background_fetch_record());
+        assert_eq!(app.status, "fetch failed", "a later generation applies");
     }
 
     #[test]

@@ -59,6 +59,7 @@ use super::drill::{CommitFileSource, DrillView};
 #[cfg(test)]
 use super::event_pump::action_triggers_graph_autoload;
 use super::explorer::{list_dir, ExplorerEntry};
+use super::fetch_claim::{try_claim_background_fetch, unix_now_ms, BackgroundFetchClaim};
 use super::graph_load::{
     autoload_limit, autoload_skip, load_graph_model_window, merge_autoload, should_autoload,
     GraphIdentity, ShouldAutoload,
@@ -77,6 +78,7 @@ use super::stash::{resolve_stash_menu_key, StashMenuKeyResult, StashOpId};
 use super::state::{revert_scope, AppState, PendingConfirm};
 use super::status::StatusMessage;
 use super::tabs::{ComparePickerKind, ComparePickerRows, WorktreeFile};
+use super::viewed::workspace_store_id;
 
 /// Blocking work that produces one [`JobOutcome`].
 pub(crate) type JobWork = Box<dyn FnOnce() -> JobOutcome + Send>;
@@ -883,6 +885,10 @@ pub(crate) struct Interpreter {
     exclusive_inflight: HashMap<u64, Vec<String>>,
     /// Name of the exclusive write or default-branch job on a worker.
     running_write: Option<&'static str>,
+    /// Workspace claim of the scheduled background fetch this instance
+    /// runs. Held while that fetch wave is live; the wave end records its
+    /// outcome and releases it.
+    fetch_claim: Option<BackgroundFetchClaim>,
     dirty: bool,
 }
 
@@ -948,6 +954,7 @@ impl Interpreter {
             activity_after_reload: false,
             exclusive_inflight: HashMap::new(),
             running_write: None,
+            fetch_claim: None,
             dirty: false,
         }
     }
@@ -1084,6 +1091,48 @@ impl Interpreter {
     ) {
         self.schedule_effect(state, opts, effect, action);
         self.after_change(state);
+    }
+
+    /// Run the scheduled background fetch tick unless another `ws` instance
+    /// in this workspace runs it.
+    ///
+    /// `fetch_ms == 0` and a claim this instance already holds skip it. Else
+    /// it tries the workspace claim ([`try_claim_background_fetch`]) with
+    /// `fetch_ms` and wall-clock `now_unix_ms`. No claim (another instance
+    /// holds it, or the last background fetch is recent): no fetch, no
+    /// status change. Claimed: dispatch [`Action::FetchTick`]; keep the claim
+    /// while its fetch wave is live, else drop it (released, no record). The
+    /// claim cannot be tried (I/O error): fetch as before, with no claim and
+    /// no record.
+    pub(crate) fn background_fetch_tick(
+        &mut self,
+        state: &mut AppState,
+        opts: &TuiOpts,
+        fetch_ms: u64,
+        now_unix_ms: u64,
+    ) {
+        if fetch_ms == 0 || self.fetch_claim.is_some() {
+            return;
+        }
+        let workspace_id = workspace_store_id(&state.cwd);
+        let claim = match try_claim_background_fetch(
+            &state.fetch_store_path,
+            &workspace_id,
+            fetch_ms,
+            now_unix_ms,
+        ) {
+            Ok(None) => return,
+            Ok(Some(claim)) => Some(claim),
+            // A permanent stop of the background fetch is worse than a
+            // duplicate one: fetch without dedupe.
+            Err(_) => None,
+        };
+        let effect = state.dispatch(Action::FetchTick);
+        let fetches = matches!(effect, Effect::Fetch { .. });
+        self.schedule(state, opts, effect, &Action::FetchTick);
+        if fetches && self.kind_live(RunningOp::Fetch) {
+            self.fetch_claim = claim;
+        }
     }
 
     fn schedule_effect(
@@ -2801,6 +2850,12 @@ impl Interpreter {
         if self.kind_live(kind) {
             return false;
         }
+        // No fetch is live: the claimed wave ends here. An early return
+        // drops (releases) the claim with no record.
+        let claim = match kind {
+            RunningOp::Fetch => self.fetch_claim.take(),
+            _ => None,
+        };
         let Some(wave) = self.remote.wave_mut(kind) else {
             return false;
         };
@@ -2819,6 +2874,13 @@ impl Interpreter {
         }
         if !quiet {
             state.status = completed_op_status(kind, &tally);
+        }
+        if let Some(claim) = claim {
+            let failed = tally.has_failure();
+            // A failed record write has no recovery; the claim is released.
+            if let Ok(generation) = claim.finish(failed, unix_now_ms()) {
+                state.note_background_fetch_outcome(generation, failed);
+            }
         }
         self.sched.on_reload_snapshot(state.focused_checkout_path());
         if state.tabs.is_workspace() {
@@ -3541,6 +3603,7 @@ impl Interpreter {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
 
     use workspace_status_graph::{Commit, GraphModel, GraphRow};
@@ -3551,6 +3614,7 @@ mod tests {
     use crate::tui::app::{CompareRangeLoad, MergeCompute, TuiOpts};
     use crate::tui::diff::DiffContent;
     use crate::tui::drill::{CommitFile, CommitFileSource, DrillView};
+    use crate::tui::fetch_claim::{load_background_fetch_record, BackgroundFetchRecord};
     use crate::tui::graph_load::GraphIdentity;
     use crate::tui::line_blame::BlameSide;
     use crate::tui::state::{AppState, FocusPane};
@@ -6334,6 +6398,223 @@ mod tests {
             "Fetched 1 repo (1 failed: app — could not read from remote repository)"
         );
         assert_eq!(state.status.kind(), StatusKind::Error);
+    }
+
+    const FETCH_MS: u64 = 300_000;
+
+    /// The claim as another `ws` instance in `state`'s workspace takes it:
+    /// a second open of the same lock file.
+    fn other_instance_claim(state: &AppState, now: u64) -> Option<BackgroundFetchClaim> {
+        try_claim_background_fetch(
+            &state.fetch_store_path,
+            &workspace_store_id(&state.cwd),
+            1,
+            now,
+        )
+        .unwrap()
+    }
+
+    fn fetch_record(state: &AppState) -> Option<BackgroundFetchRecord> {
+        load_background_fetch_record(&state.fetch_store_path, &workspace_store_id(&state.cwd))
+    }
+
+    fn background_tick(interp: &mut Interpreter, state: &mut AppState, now: u64) {
+        let tui_opts = opts(state);
+        interp.background_fetch_tick(state, &tui_opts, FETCH_MS, now);
+    }
+
+    /// Apply every captured fetch job; `failed` names the repo that fails.
+    fn finish_fetches(
+        interp: &mut Interpreter,
+        state: &mut AppState,
+        jobs: Vec<(u64, JobWork)>,
+        failed: Option<&str>,
+    ) {
+        for (id, _) in jobs {
+            let repo = interp
+                .remote
+                .occupy
+                .values()
+                .find_map(|occ| match occ {
+                    OccupyReason::Remote(inf) => Some(inf.checkout.clone()),
+                    _ => None,
+                })
+                .expect("a running fetch");
+            let result = if failed == Some(repo.as_str()) {
+                RepoOpResult::Failed("could not read from remote repository".into())
+            } else {
+                RepoOpResult::Ok
+            };
+            apply_id(
+                interp,
+                state,
+                id,
+                JobOutcome::BulkRemote {
+                    kind: RunningOp::Fetch,
+                    result,
+                    repo,
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn background_fetch_tick_skips_while_another_instance_holds_the_claim() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        let now = unix_now_ms();
+        let other = other_instance_claim(&state, now).expect("the other instance claims");
+        background_tick(&mut interp, &mut state, now);
+        assert!(
+            capture_jobs(&mut interp, &mut state).is_empty(),
+            "no git fetch"
+        );
+        assert!(interp.pending_remotes().is_empty());
+        assert!(interp.fetch_claim.is_none());
+        assert_eq!(state.status, "", "no status change");
+        assert!(!interp.take_dirty());
+
+        assert_eq!(other.finish(true, now).unwrap(), 1);
+        background_tick(&mut interp, &mut state, now + 1);
+        assert!(
+            capture_jobs(&mut interp, &mut state).is_empty(),
+            "a background fetch inside this instance's interval is not run again"
+        );
+        assert!(state.apply_background_fetch_record());
+        assert_eq!(state.status, "fetch failed");
+        assert_eq!(state.status.kind(), StatusKind::Error);
+        assert!(capture_jobs(&mut interp, &mut state).is_empty());
+    }
+
+    #[test]
+    fn claimed_background_fetch_records_failure_then_success() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(8);
+        let start = unix_now_ms();
+        background_tick(&mut interp, &mut state, start);
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 2, "app and lib fetch");
+        assert!(
+            interp.fetch_claim.is_some(),
+            "the live wave holds the claim"
+        );
+        assert!(
+            other_instance_claim(&state, start).is_none(),
+            "another instance cannot claim while the wave runs"
+        );
+        background_tick(&mut interp, &mut state, start + FETCH_MS);
+        assert!(
+            capture_jobs(&mut interp, &mut state).is_empty(),
+            "a held claim skips the next tick"
+        );
+
+        finish_fetches(&mut interp, &mut state, jobs, Some("app"));
+        let record = fetch_record(&state).expect("the wave end writes the record");
+        assert_eq!(record.generation, 1);
+        assert!(record.failed);
+        assert!((start..=unix_now_ms()).contains(&record.completed_unix_ms));
+        assert!(interp.fetch_claim.is_none());
+        let detailed = state.status.clone();
+        assert!(
+            detailed.starts_with("Fetched 2 repos (1 failed: app"),
+            "{detailed}"
+        );
+        assert_eq!(detailed.kind(), StatusKind::Error);
+        assert!(
+            !state.apply_background_fetch_record(),
+            "the runner's own watch tick does not repaint"
+        );
+        assert_eq!(
+            state.status, detailed,
+            "the runner keeps the detailed status"
+        );
+
+        // The wave end queued follow-up loads (snapshot reload); leave
+        // them unrun so only the next fetch jobs are captured below.
+        let _ = capture_jobs(&mut interp, &mut state);
+        let later = record.completed_unix_ms + FETCH_MS;
+        background_tick(&mut interp, &mut state, later);
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 2, "the claim was released");
+        finish_fetches(&mut interp, &mut state, jobs, None);
+        let record = fetch_record(&state).unwrap();
+        assert_eq!(record.generation, 2);
+        assert!(!record.failed);
+        assert_eq!(
+            state.status, "",
+            "the success clears the runner's own stamp"
+        );
+        assert!(!state.apply_background_fetch_record());
+        assert!(other_instance_claim(&state, later + FETCH_MS).is_some());
+    }
+
+    #[test]
+    fn manual_fetch_wave_writes_no_record() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        let jobs = capture_jobs(&mut interp, &mut state);
+        finish_fetches(&mut interp, &mut state, jobs, Some("app"));
+        assert!(state.status.starts_with("Fetched 1 repo (1 failed"));
+        assert_eq!(fetch_record(&state), None);
+        assert!(!state.fetch_store_path.exists());
+    }
+
+    #[test]
+    fn background_fetch_tick_off_never_claims() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        let tui_opts = opts(&state);
+        interp.background_fetch_tick(&mut state, &tui_opts, 0, unix_now_ms());
+        assert!(capture_jobs(&mut interp, &mut state).is_empty());
+        let dir = state.fetch_store_path.parent().unwrap();
+        let claim_files = fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_name().to_string_lossy().contains("claim"))
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(claim_files, 0, "no claim lock file in {dir:?}");
+    }
+
+    #[test]
+    fn background_fetch_tick_with_nothing_to_fetch_releases_the_claim() {
+        let snapshot = build_workspace_snapshot(&[], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut interp = Interpreter::with_cap(4);
+        let now = unix_now_ms();
+        background_tick(&mut interp, &mut state, now);
+        assert!(capture_jobs(&mut interp, &mut state).is_empty());
+        assert!(interp.fetch_claim.is_none());
+        assert!(other_instance_claim(&state, now).is_some(), "released");
+        assert_eq!(fetch_record(&state), None, "no record");
+    }
+
+    #[test]
+    fn background_fetch_tick_fetches_without_claim_when_the_store_is_unusable() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        let blocker = crate::testutil::unique_dir("ws-fetch-tick-blocked");
+        fs::create_dir_all(&blocker).unwrap();
+        let not_a_dir = blocker.join("not-a-dir");
+        fs::write(&not_a_dir, "x").unwrap();
+        state.fetch_store_path = not_a_dir.join("background-fetch.json");
+        background_tick(&mut interp, &mut state, unix_now_ms());
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 2, "fetches as before, without dedupe");
+        assert!(interp.fetch_claim.is_none());
+        finish_fetches(&mut interp, &mut state, jobs, None);
+        assert_eq!(state.status, "", "a quiet background success");
+        let _ = fs::remove_dir_all(blocker);
     }
 
     #[test]

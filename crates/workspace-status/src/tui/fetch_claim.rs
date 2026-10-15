@@ -14,13 +14,14 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 use super::persist::{persist_with_lock, try_lock_sibling};
 
 /// On-disk store version written by save. Load accepts only this version.
-pub(crate) const BACKGROUND_FETCH_STORE_VERSION: u32 = 1;
+const BACKGROUND_FETCH_STORE_VERSION: u32 = 1;
 
 /// File name under the state directory.
 const STORE_FILE_NAME: &str = "background-fetch.json";
@@ -82,6 +83,26 @@ fn parse_store(bytes: &[u8]) -> Option<StoreFile> {
         .filter(|file| file.version == BACKGROUND_FETCH_STORE_VERSION)
 }
 
+/// Check the bytes of a present store file the way
+/// [`BackgroundFetchClaim::finish`] does before a save: they must parse as a
+/// version-1 store. `Err` says why a save would refuse the file and leave it
+/// unchanged. Read-only.
+pub(crate) fn check_background_fetch_store_bytes(bytes: &[u8]) -> Result<(), String> {
+    parse_store(bytes)
+        .map(|_| ())
+        .ok_or_else(|| "not a background-fetch store".to_string())
+}
+
+/// Wall-clock time now in Unix milliseconds (`0` before the epoch).
+///
+/// The claim and the record compare times across processes, so they use
+/// this clock, not [`std::time::Instant`].
+pub(crate) fn unix_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64)
+}
+
 /// The record for `workspace_id` in the store at `path`.
 ///
 /// `None` when the file is missing or unreadable, is not a version-1 store,
@@ -113,6 +134,11 @@ pub(crate) struct BackgroundFetchClaim {
 /// a completion at or before `now_unix_ms` that is less than `interval_ms`
 /// old; the lock is released in that case. A completion time in the future
 /// does not block the claim. Other I/O errors return `Err`.
+///
+/// `interval_ms == 0` always claims: the caller skips the call when the
+/// background fetch is off. `workspace_id` must be a
+/// [`super::viewed::workspace_store_id`] hex string, because it is part of
+/// the lock file name. `now_unix_ms` is wall-clock time ([`unix_now_ms`]).
 pub(crate) fn try_claim_background_fetch(
     path: &Path,
     workspace_id: &str,

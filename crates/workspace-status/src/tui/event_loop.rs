@@ -30,6 +30,7 @@ use super::event_pump::{
     action_triggers_graph_autoload, classify_busy_dispatch, overlay_blocks_background_ticks,
     BusyAction,
 };
+use super::fetch_claim::unix_now_ms;
 use super::hyperlink::{link_cells, write_links};
 use super::keys::{drop_g_chord_echo, held_nav_key, is_half_page_chord, KeyStrokeOrigin};
 use super::render::draw;
@@ -320,6 +321,10 @@ pub async fn run(
             _ = sleep_ms(watch_remain) => {
                 ctx.last_watch = Instant::now();
                 if !overlay_blocks_background_ticks(ctx.state.input_mode()) {
+                    // A background fetch another instance ran shows here.
+                    if ctx.state.apply_background_fetch_record() {
+                        ctx.presenter.mark();
+                    }
                     let effect = ctx.state.dispatch(Action::WatchTick);
                     ctx.interp.schedule(ctx.state, ctx.opts, effect, &Action::WatchTick);
                     if ctx.interp.take_dirty() {
@@ -330,8 +335,8 @@ pub async fn run(
             _ = sleep_ms(fetch_remain) => {
                 ctx.last_fetch = Instant::now();
                 if !overlay_blocks_background_ticks(ctx.state.input_mode()) {
-                    let effect = ctx.state.dispatch(Action::FetchTick);
-                    ctx.interp.schedule(ctx.state, ctx.opts, effect, &Action::FetchTick);
+                    ctx.interp
+                        .background_fetch_tick(ctx.state, ctx.opts, ctx.fetch_ms, unix_now_ms());
                     if ctx.interp.take_dirty() {
                         ctx.presenter.mark();
                     }

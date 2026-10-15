@@ -22,6 +22,7 @@ use std::process::{Command, Stdio};
 use super::comments::check_comment_store_bytes;
 use super::diff_tool::resolve_diff_tool;
 use super::editor::{parse_editor_argv, resolve_editor};
+use super::fetch_claim::check_background_fetch_store_bytes;
 use super::icons::{IconKind, REQUIRED_FONT};
 use super::pull_request::{browser_command, parse_remote, Forge};
 use super::search_files::SEARCH_PREVIEW_MIN_COLS;
@@ -172,6 +173,8 @@ pub enum StoreKind {
     UiState,
     /// Update-check store (`WS_STATUS_UPDATE_CHECK_STORE` / `updateCheckStore`).
     UpdateCheck,
+    /// Shared background-fetch claim and outcome store (no env or config key).
+    BackgroundFetch,
 }
 
 impl StoreKind {
@@ -182,6 +185,7 @@ impl StoreKind {
             StoreKind::Viewed => "viewed",
             StoreKind::UiState => "UI state",
             StoreKind::UpdateCheck => "update check",
+            StoreKind::BackgroundFetch => "background fetch",
         }
     }
 
@@ -192,6 +196,7 @@ impl StoreKind {
             StoreKind::Viewed => check_viewed_store_bytes(bytes),
             StoreKind::UiState => check_ui_state_bytes(bytes),
             StoreKind::UpdateCheck => check_update_check_store_bytes(bytes),
+            StoreKind::BackgroundFetch => check_background_fetch_store_bytes(bytes),
         }
     }
 }
@@ -1369,6 +1374,7 @@ where
         (StoreKind::Viewed, &settings.viewed_store),
         (StoreKind::UiState, &settings.ui_store),
         (StoreKind::UpdateCheck, &settings.update_check_store),
+        (StoreKind::BackgroundFetch, &settings.fetch_store),
     ]
     .into_iter()
     .map(|(kind, path)| StoreProbe {
@@ -1558,6 +1564,7 @@ mod tests {
                 (StoreKind::Viewed, "viewed-files.json"),
                 (StoreKind::UiState, "ui-state.json"),
                 (StoreKind::UpdateCheck, "update-check.json"),
+                (StoreKind::BackgroundFetch, "background-fetch.json"),
             ]
             .into_iter()
             .map(|(kind, name)| StoreProbe {
@@ -2325,6 +2332,7 @@ mod tests {
             StoreKind::Viewed,
             StoreKind::UiState,
             StoreKind::UpdateCheck,
+            StoreKind::BackgroundFetch,
         ] {
             assert_eq!(read_store(kind, &missing), StoreRead::Missing);
             let bad = dir.join("bad.json");
@@ -2348,6 +2356,10 @@ mod tests {
             (StoreKind::Viewed, r#"{"version":2,"workspaces":{}}"#),
             (StoreKind::UiState, r#"{"version":1,"theme":"slate"}"#),
             (StoreKind::UpdateCheck, r#"{"version":1,"lastCheckUnix":0}"#),
+            (
+                StoreKind::BackgroundFetch,
+                r#"{"version":1,"workspaces":{}}"#,
+            ),
         ];
         for (kind, text) in good {
             let path = dir.join("good.json");
@@ -2400,7 +2412,8 @@ mod tests {
             glyphs: Some(crate::config::GlyphSet::Ascii),
             ..RuntimeKeys::default()
         };
-        let settings = Settings::resolve(&keys, |_| None);
+        let mut settings = Settings::resolve(&keys, |_| None);
+        settings.fetch_store = state.join("background-fetch.json");
         let before = [snapshot(&dir), snapshot(&workspace), snapshot(&state)];
         let remotes = vec![
             "git@github.com:octo/demo.git".to_string(),
@@ -2447,6 +2460,7 @@ mod tests {
         assert_eq!(reads[1], (StoreKind::Viewed, StoreRead::Missing));
         assert_eq!(reads[2], (StoreKind::UiState, StoreRead::Valid));
         assert_eq!(reads[3], (StoreKind::UpdateCheck, StoreRead::Missing));
+        assert_eq!(reads[4], (StoreKind::BackgroundFetch, StoreRead::Missing));
         let rows = checks(&probe);
         assert_eq!(
             find(&rows, "State files").unwrap().status,

@@ -20,6 +20,7 @@ use crate::git::resolve_git_binary;
 use crate::parallel::fetch_concurrency;
 use crate::tui::comments::comment_store_path_from_env;
 use crate::tui::fetch::fetch_interval_ms;
+use crate::tui::fetch_claim::background_fetch_store_path_from_env;
 use crate::tui::theme::{theme_id_from, ThemeId};
 use crate::tui::ui_state_store::{load_ui_state, ui_store_path_from_env};
 use crate::tui::undercurl::undercurl_enabled;
@@ -61,6 +62,10 @@ pub struct Settings {
     /// Paint the tree commit-activity sparkline: the [`Self::ui_store`]
     /// value, default off. No env var or config key.
     pub(crate) activity_sparkline: bool,
+    /// Shared background-fetch claim and outcome JSON file
+    /// ([`crate::tui::fetch_claim`]): `$XDG_STATE_HOME/my-workspace-status/
+    /// background-fetch.json`. No env var or config key.
+    pub(crate) fetch_store: PathBuf,
     /// Git binary (`WORKSPACE_STATUS_GIT` / `git`).
     pub(crate) git: PathBuf,
     /// `NO_COLOR` is set and non-empty (no-color.org). Env only, no config
@@ -117,6 +122,7 @@ impl Settings {
             viewed_store: viewed_store_path_from_env(&mut get, keys.viewed_store.as_deref()),
             ui_store,
             activity_sparkline: ui_state.activity_sparkline,
+            fetch_store: background_fetch_store_path_from_env(&mut get),
             git: resolve_git_binary(get("WORKSPACE_STATUS_GIT").as_deref(), keys.git.as_deref()),
             no_color,
             undercurl: undercurl_enabled(no_color, ascii, get(COLORTERM_ENV).as_deref()),
@@ -257,6 +263,10 @@ mod tests {
             got.ui_store,
             Path::new("/xdg/state/my-workspace-status/ui-state.json")
         );
+        assert_eq!(
+            got.fetch_store,
+            Path::new("/xdg/state/my-workspace-status/background-fetch.json")
+        );
         assert_eq!(got.git, resolve_git_binary(None, None));
         assert!(got.term_progress, "terminal progress is on by default");
         assert!(got.smooth_scroll, "smooth scroll is on by default");
@@ -284,6 +294,9 @@ mod tests {
                 viewed_store: PathBuf::from("/cfg/viewed.json"),
                 ui_store: PathBuf::from("/cfg/ui-state.json"),
                 activity_sparkline: false,
+                fetch_store: PathBuf::from(
+                    "/.local/state/my-workspace-status/background-fetch.json"
+                ),
                 git: PathBuf::from("/cfg/git"),
                 no_color: false,
                 undercurl: false,
@@ -327,6 +340,9 @@ mod tests {
                 viewed_store: PathBuf::from("/env/viewed.json"),
                 ui_store: PathBuf::from("/env/ui-state.json"),
                 activity_sparkline: false,
+                fetch_store: PathBuf::from(
+                    "/.local/state/my-workspace-status/background-fetch.json"
+                ),
                 git: PathBuf::from("/env/git"),
                 no_color: false,
                 undercurl: false,
