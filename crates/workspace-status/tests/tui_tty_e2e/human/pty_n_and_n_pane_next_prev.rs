@@ -65,7 +65,7 @@ fn pty_n_and_n_pane_next_prev() {
             screen.contains("MOVE")
                 && screen.contains("n   N")
                 && screen.contains("next / prev")
-                && screen.contains("match (after")
+                && screen.contains("(after Enter)")
                 && screen.contains("search focused")
                 && screen.contains("Tab")
                 && screen.contains("other pane")
@@ -76,7 +76,7 @@ fn pty_n_and_n_pane_next_prev() {
     tui.esc();
     tui.wait_pred(
         |screen| {
-            !screen.contains("match (after")
+            !screen.contains("(after Enter)")
                 && tree_has(screen, "README.md")
                 && screen.contains("focus right")
         },
