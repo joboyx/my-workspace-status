@@ -1372,23 +1372,6 @@ pub fn remote_url_for_branch(cwd: &Path, branch: &str) -> Option<String> {
     remote_url(cwd, &push_remote_name(cwd, branch))
 }
 
-/// Name of local `branch` on remote `remote`.
-///
-/// When `branch.<branch>.remote` is `remote` and `branch.<branch>.merge` is
-/// `refs/heads/<name>`, the upstream `<name>` (a branch can track a
-/// different name). Otherwise `branch` itself, the name a first push gives.
-pub fn remote_branch_name(cwd: &Path, branch: &str, remote: &str) -> String {
-    let remote_key = format!("branch.{branch}.remote");
-    let merge_key = format!("branch.{branch}.merge");
-    if exec_git(&["config", "--get", &remote_key], cwd) == remote {
-        let merge = exec_git(&["config", "--get", &merge_key], cwd);
-        if let Some(name) = merge.strip_prefix("refs/heads/").filter(|n| !n.is_empty()) {
-            return name.to_string();
-        }
-    }
-    branch.to_string()
-}
-
 /// True when the remote-tracking ref `refs/remotes/<remote>/<branch>`
 /// exists (`show-ref --verify --quiet`). Local only: it reads what the last
 /// fetch or push left.
@@ -4671,39 +4654,22 @@ filename new.txt
     }
 
     #[test]
-    fn remote_view_branch_presence_and_renamed_upstream() {
+    fn remote_view_branch_presence() {
         let (dir, bare) = repo_with_bare_origin("ws-git-remote-view-branch");
-        assert_eq!(remote_branch_name(&dir, "main", "origin"), "main");
         assert!(remote_branch_exists(&dir, "origin", "main"), "pushed");
+        assert!(!remote_branch_exists(&dir, "upstream", "main"), "no remote");
 
         git(&dir, &["branch", "local-only"]);
-        assert_eq!(
-            remote_branch_name(&dir, "local-only", "origin"),
-            "local-only"
-        );
         assert!(
             !remote_branch_exists(&dir, "origin", "local-only"),
             "unpushed"
         );
-
-        git(&dir, &["branch", "topic"]);
-        git(&dir, &["push", "-q", "origin", "topic:feature/renamed"]);
-        git(&dir, &["config", "branch.topic.remote", "origin"]);
-        git(
-            &dir,
-            &["config", "branch.topic.merge", "refs/heads/feature/renamed"],
+        git(&dir, &["push", "-q", "origin", "local-only:feature/x"]);
+        assert!(remote_branch_exists(&dir, "origin", "feature/x"));
+        assert!(
+            !remote_branch_exists(&dir, "origin", "local-only"),
+            "pushed under another name only"
         );
-        assert_eq!(
-            remote_branch_name(&dir, "topic", "origin"),
-            "feature/renamed",
-            "branch.<b>.merge names the upstream"
-        );
-        assert_eq!(
-            remote_branch_name(&dir, "topic", "upstream"),
-            "topic",
-            "merge config of another remote does not apply"
-        );
-        assert!(remote_branch_exists(&dir, "origin", "feature/renamed"));
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&bare);
     }

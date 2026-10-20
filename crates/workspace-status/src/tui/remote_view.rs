@@ -227,9 +227,10 @@ pub fn encode_path(path: &str) -> String {
 /// otherwise the push remote of the current branch
 /// ([`git::checkout_remote_name`]).
 ///
-/// Checks: a branch needs `refs/remotes/<remote>/<name on remote>`; a commit
-/// must be in some branch of the remote; a file or directory must exist in
-/// that remote revision; a tag is asked of the remote itself
+/// Checks: a branch needs `refs/remotes/<remote>/<branch>` (the same name,
+/// even when its upstream has another name); a commit must be in some
+/// branch of the remote; a file or directory must exist in that remote
+/// revision; a tag is asked of the remote itself
 /// ([`git::remote_has_tag`], the one network call). Every other check reads
 /// local refs only, as of the last fetch or push. Blocks.
 pub fn resolve(checkout: &Path, target: &RemoteTarget) -> Result<(ForgeRepo, RemotePage), String> {
@@ -311,11 +312,15 @@ fn forge_repo(checkout: &Path, remote: &str) -> Result<ForgeRepo, String> {
     parse_remote(&url).ok_or_else(|| not_forge_status(remote))
 }
 
-/// Name of local `branch` on `remote`, or the "not on remote" status.
+/// Local `branch` when `refs/remotes/<remote>/<branch>` exists, else the
+/// "not on remote" status.
+///
+/// The same-name rule of `push`: the upstream counts only under the local
+/// name. A branch that tracks another name (`git switch -c feature
+/// origin/main` tracks `main`) is not on the remote until `feature` is.
 fn remote_branch(checkout: &Path, remote: &str, branch: &str) -> Result<String, String> {
-    let name = git::remote_branch_name(checkout, branch, remote);
-    if git::remote_branch_exists(checkout, remote, &name) {
-        Ok(name)
+    if git::remote_branch_exists(checkout, remote, branch) {
+        Ok(branch.to_string())
     } else {
         Err(branch_not_on_remote_status(branch, remote))
     }
@@ -652,6 +657,45 @@ mod tests {
         assert_eq!(
             resolve(&dir, &RemoteTarget::RemoteBranch("upstream/main".into())),
             Err(NO_REMOTE.to_string())
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_branch_tracking_another_name_needs_its_own_name() {
+        let dir = repo_with_origin("ws-remote-view-tracking");
+        let repo = parse_remote("git@github.example.invalid:octo/demo.git").unwrap();
+        // As `git switch -c feature origin/main`: merge = refs/heads/main.
+        git(&dir, &["branch", "-q", "--track", "feature", "origin/main"]);
+        let merge = crate::git::exec_git(&["config", "branch.feature.merge"], &dir);
+        assert_eq!(merge, "refs/heads/main", "fixture tracks main");
+        let branch = RemoteTarget::Branch("feature".into());
+        let readme = RemoteTarget::File {
+            rev: FileRev::Branch("feature".into()),
+            path: "README.md".into(),
+            line: None,
+            dir: false,
+        };
+        assert_eq!(
+            resolve(&dir, &branch),
+            Err(branch_not_on_remote_status("feature", "origin")),
+            "never origin/main"
+        );
+        assert_eq!(
+            resolve(&dir, &readme),
+            Err(branch_not_on_remote_status("feature", "origin"))
+        );
+
+        git(&dir, &["update-ref", "refs/remotes/origin/feature", "HEAD"]);
+        let (got_repo, page) = resolve(&dir, &branch).expect("feature is on origin");
+        assert_eq!(got_repo, repo);
+        assert_eq!(
+            page_url(&repo, &page),
+            "https://github.example.invalid/octo/demo/tree/feature"
+        );
+        assert_eq!(
+            resolve(&dir, &readme),
+            Ok((repo.clone(), file("feature", "README.md", None)))
         );
         let _ = fs::remove_dir_all(&dir);
     }
