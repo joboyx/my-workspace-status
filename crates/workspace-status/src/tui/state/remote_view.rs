@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use workspace_status_graph::GraphRow;
+use workspace_status_graph::{GraphRow, PartTarget, RefKind, Worktree};
 
 use crate::helpers::is_counted_local_branch;
 
@@ -14,6 +14,8 @@ use super::super::action::Effect;
 use super::super::diff::{DiffCellKind, DiffRow};
 use super::super::drill::CommitFileSource;
 use super::super::gates::ListFocusTarget;
+use super::super::icons::IconKind;
+use super::super::popover::IconTarget;
 use super::super::remote_view::{
     opened_status, stash_local_only_status, FileRev, RemoteTarget, NOTHING_TO_VIEW, OPEN_FAILED,
     UNCOMMITTED_LOCAL_ONLY,
@@ -32,10 +34,6 @@ pub(super) enum RemoteFocus {
         /// The entity whose page opens.
         target: RemoteTarget,
     },
-    /// Open the PR of a branch (checkout, branch), as `gx` does.
-    // Only a PR badge in a popover gives this; drop the allow with that hook.
-    #[allow(dead_code)]
-    PullRequest(PathBuf, String),
     /// Nothing opens; the status line shows this text.
     Refuse(String),
 }
@@ -53,6 +51,27 @@ impl RemoteFocus {
     fn nothing() -> Self {
         Self::Refuse(NOTHING_TO_VIEW.to_string())
     }
+
+    /// The refusal text, or `None` when this opens (or checks) a page.
+    fn refusal(self) -> Option<String> {
+        match self {
+            Self::Refuse(text) => Some(text),
+            Self::View { .. } => None,
+        }
+    }
+}
+
+/// "View remotely" target of graph worktree `worktree`: its branch, else
+/// its HEAD commit when detached, in that worktree.
+fn worktree_focus(worktree: &Worktree) -> RemoteFocus {
+    let target = match (&worktree.branch, &worktree.head_id) {
+        (Some(branch), _) if is_counted_local_branch(branch) => {
+            RemoteTarget::Branch(branch.clone())
+        }
+        (_, Some(sha)) if !sha.is_empty() => RemoteTarget::Commit(sha.clone()),
+        _ => return RemoteFocus::nothing(),
+    };
+    RemoteFocus::view(worktree.path.as_str(), target)
 }
 
 impl AppState {
@@ -70,8 +89,15 @@ impl AppState {
     /// the tree row, or the open file at its cursor line, at the checkout
     /// branch. Every other row and surface has nothing to view.
     pub(super) fn remote_target_for_focus(&self) -> RemoteFocus {
+        self.remote_focus(true)
+    }
+
+    /// [`Self::remote_target_for_focus`]; with `line` false a diff target
+    /// has no line anchor, so no diff rows are built. The line never
+    /// decides a refusal, so the refusal gate passes false.
+    fn remote_focus(&self, line: bool) -> RemoteFocus {
         if self.is_explorer_tab() {
-            return self.remote_target_for_explorer();
+            return self.remote_target_for_explorer(line);
         }
         match self.list_focus_target() {
             ListFocusTarget::Tree => self.focused_row().map_or_else(RemoteFocus::nothing, |row| {
@@ -79,7 +105,7 @@ impl AppState {
             }),
             ListFocusTarget::Graph => self.remote_target_for_graph_row(),
             ListFocusTarget::CommitFiles => self.remote_target_for_commit_file(),
-            ListFocusTarget::None => self.remote_target_for_diff(),
+            ListFocusTarget::None => self.remote_target_for_diff(line),
         }
     }
 
@@ -87,10 +113,139 @@ impl AppState {
     /// row, or `None` when it opens (or checks) a page. Disables the
     /// palette row.
     pub(super) fn view_remotely_refusal(&self) -> Option<String> {
-        match self.remote_target_for_focus() {
-            RemoteFocus::Refuse(text) => Some(text),
-            RemoteFocus::View { .. } | RemoteFocus::PullRequest(..) => None,
+        self.remote_focus(false).refusal()
+    }
+
+    /// What the View remotely line of popover section `kind` on `target`
+    /// opens: the entity the section describes, not the focused row.
+    ///
+    /// A ref chip opens its tag (`Tag`), its remote-tracking branch
+    /// (`RemoteBranch`), or its local branch (`Branch`); a checkout or sync
+    /// mark run its branch; `[HEAD]` the commit of its row. Graph chips use
+    /// the graph's checkout ([`AppState::focused_graph_repo`]). A worktree
+    /// glyph opens that worktree's branch (or its HEAD commit when
+    /// detached), and the sync header HEAD's branch (HEAD's commit when
+    /// detached). The Branch and Linked worktree sections of a
+    /// one-checkout repo row open that checkout's branch (its HEAD commit
+    /// when detached), as a checkout row does; its Repo section opens the
+    /// repository home. Every other target is on the focused row:
+    /// [`Self::remote_target_for_focus`].
+    pub(super) fn remote_target_for_icon(
+        &self,
+        kind: IconKind,
+        target: &IconTarget,
+    ) -> RemoteFocus {
+        self.remote_focus_for_icon(kind, target, true)
+    }
+
+    /// [`Self::remote_target_for_icon`]; `line` as in [`Self::remote_focus`].
+    fn remote_focus_for_icon(
+        &self,
+        kind: IconKind,
+        target: &IconTarget,
+        line: bool,
+    ) -> RemoteFocus {
+        match target {
+            IconTarget::GraphChip { row, chip } => self.remote_target_for_chip(row, chip, line),
+            IconTarget::GraphWorktree(path) => self
+                .graph
+                .as_ref()
+                .and_then(|model| model.worktrees.iter().find(|wt| wt.path == *path))
+                .map_or_else(RemoteFocus::nothing, worktree_focus),
+            IconTarget::GraphSync => {
+                let model = self.graph.as_ref();
+                let branch = model
+                    .and_then(|model| model.sync.as_ref())
+                    .map(|sync| sync.branch.clone())
+                    .filter(|branch| is_counted_local_branch(branch));
+                let target = match (branch, model.and_then(|model| model.head_id.clone())) {
+                    (Some(branch), _) => RemoteTarget::Branch(branch),
+                    (None, Some(sha)) if !sha.is_empty() => RemoteTarget::Commit(sha),
+                    _ => return RemoteFocus::nothing(),
+                };
+                self.focused_graph_repo()
+                    .map_or_else(RemoteFocus::nothing, |checkout| {
+                        RemoteFocus::view(checkout, target)
+                    })
+            }
+            IconTarget::TreeRow(id)
+                if matches!(kind, IconKind::Branch | IconKind::LinkedWorktree) =>
+            {
+                // A one-checkout repo row paints its checkout's icons too.
+                let checkout = self
+                    .rows
+                    .iter()
+                    .find(|row| row.id == *id && row.kind == NodeKind::Repo)
+                    .and_then(|row| row.repo.as_deref());
+                match checkout {
+                    Some(checkout) => self.checkout_focus(checkout),
+                    None => self.remote_focus(line),
+                }
+            }
+            IconTarget::TreeRow(_)
+            | IconTarget::CommitFileRow(_)
+            | IconTarget::GraphRow(_)
+            | IconTarget::GraphMoreLines(_)
+            | IconTarget::PullRequest(_) => self.remote_focus(line),
         }
+    }
+
+    /// "View remotely" target of graph chip `chip` painted for the graph
+    /// row with [`graph_row_id`] `row`. `[+N]` falls back to the focused
+    /// row.
+    ///
+    /// [`graph_row_id`]: super::super::popover::graph_row_id
+    fn remote_target_for_chip(&self, row: &str, chip: &PartTarget, line: bool) -> RemoteFocus {
+        let target = match chip {
+            PartTarget::Chip(refs) => match refs.first() {
+                Some(chip_ref) => match chip_ref.kind {
+                    RefKind::Tag => RemoteTarget::Tag(chip_ref.name.clone()),
+                    RefKind::Remote => RemoteTarget::RemoteBranch(chip_ref.name.clone()),
+                    RefKind::Local => RemoteTarget::Branch(chip_ref.name.clone()),
+                },
+                None => return RemoteFocus::nothing(),
+            },
+            PartTarget::Marks { branch, .. } => RemoteTarget::Branch(branch.clone()),
+            PartTarget::DetachedHead => match self.graph_row_commit(row) {
+                Some(sha) => RemoteTarget::Commit(sha.to_string()),
+                None => return RemoteFocus::nothing(),
+            },
+            PartTarget::Overflow(_) => return self.remote_focus(line),
+        };
+        self.focused_graph_repo()
+            .map_or_else(RemoteFocus::nothing, |checkout| {
+                RemoteFocus::view(checkout, target)
+            })
+    }
+
+    /// Commit of the graph row with [`graph_row_id`] `row`: its own, or
+    /// HEAD for the uncommitted row (whose footer shows HEAD's chips).
+    /// `None` for a stash or worktree row, or a commit not in the graph.
+    /// Reads the model in place; no row list is built.
+    ///
+    /// [`graph_row_id`]: super::super::popover::graph_row_id
+    fn graph_row_commit(&self, row: &str) -> Option<&str> {
+        let model = self.graph.as_ref()?;
+        if row == "uncommitted" {
+            return model.uncommitted.and(model.head_id.as_deref());
+        }
+        let sha = row.strip_prefix("commit:")?;
+        model
+            .commits
+            .iter()
+            .find(|commit| commit.id == sha)
+            .map(|commit| commit.id.as_str())
+    }
+
+    /// The text the View remotely line of popover section `kind` on
+    /// `target` refuses with, or `None` ([`Self::view_remotely_refusal`]
+    /// for that section).
+    pub(super) fn view_remotely_refusal_at(
+        &self,
+        kind: IconKind,
+        target: &IconTarget,
+    ) -> Option<String> {
+        self.remote_focus_for_icon(kind, target, false).refusal()
     }
 
     /// "View remotely" target of the focused commit-file row: that file or
@@ -116,9 +271,9 @@ impl AppState {
     }
 
     /// "View remotely" target of the focused diff pane: the open file, with
-    /// the new-side line of the focused row. A folder summary in its place
-    /// opens that folder.
-    fn remote_target_for_diff(&self) -> RemoteFocus {
+    /// the new-side line of the focused row (with `line` true). A folder
+    /// summary in its place opens that folder.
+    fn remote_target_for_diff(&self, line: bool) -> RemoteFocus {
         if self.folder_summary().is_some() {
             return self.remote_target_for_commit_file();
         }
@@ -129,10 +284,13 @@ impl AppState {
             Ok(rev) => rev,
             Err(refuse) => return refuse,
         };
-        let line = self
-            .current_diff_rows()
-            .get(self.diff_cursor)
-            .and_then(new_side_line);
+        let line = if line {
+            self.current_diff_rows()
+                .get(self.diff_cursor)
+                .and_then(new_side_line)
+        } else {
+            None
+        };
         RemoteFocus::view(
             checkout,
             RemoteTarget::File {
@@ -146,14 +304,15 @@ impl AppState {
 
     /// "View remotely" target on an Explorer tab: a diff as in
     /// [`Self::remote_target_for_diff`]; the open file at its cursor line;
-    /// or, with the tree focused, its file or folder row.
-    fn remote_target_for_explorer(&self) -> RemoteFocus {
+    /// or, with the tree focused, its file or folder row. `line` as in
+    /// [`Self::remote_target_for_diff`].
+    fn remote_target_for_explorer(&self, line: bool) -> RemoteFocus {
         let Some(tab) = self.tabs.active_explorer() else {
             return RemoteFocus::nothing();
         };
         let (path, line, dir) = if self.list_focus_target() == ListFocusTarget::None {
             if self.explorer_diff().is_some() {
-                return self.remote_target_for_diff();
+                return self.remote_target_for_diff(line);
             }
             let Some(file) = self.tabs.active_file_view() else {
                 return RemoteFocus::nothing();
@@ -207,17 +366,7 @@ impl AppState {
         };
         let path = match row.kind {
             NodeKind::Repo => return RemoteFocus::view(checkout, RemoteTarget::Repo),
-            NodeKind::Checkout => {
-                return match self.checkout_rev(checkout) {
-                    Some(FileRev::Branch(branch)) => {
-                        RemoteFocus::view(checkout, RemoteTarget::Branch(branch))
-                    }
-                    Some(FileRev::Commit(sha)) => {
-                        RemoteFocus::view(checkout, RemoteTarget::Commit(sha))
-                    }
-                    None => RemoteFocus::nothing(),
-                };
-            }
+            NodeKind::Checkout => return self.checkout_focus(checkout),
             NodeKind::Dir if !row.chrome.path.is_empty() => Some(row.chrome.path.clone()),
             NodeKind::Dir => dir_path_from_id(&row.id, checkout),
             NodeKind::File => row
@@ -242,6 +391,18 @@ impl AppState {
         }
     }
 
+    /// "View remotely" target of checkout `checkout`: its branch, or its
+    /// HEAD commit when detached ([`Self::checkout_rev`]).
+    fn checkout_focus(&self, checkout: &str) -> RemoteFocus {
+        match self.checkout_rev(checkout) {
+            Some(FileRev::Branch(branch)) => {
+                RemoteFocus::view(checkout, RemoteTarget::Branch(branch))
+            }
+            Some(FileRev::Commit(sha)) => RemoteFocus::view(checkout, RemoteTarget::Commit(sha)),
+            None => RemoteFocus::nothing(),
+        }
+    }
+
     /// "View remotely" target of the focused graph row.
     fn remote_target_for_graph_row(&self) -> RemoteFocus {
         match self.focused_graph_row() {
@@ -249,16 +410,7 @@ impl AppState {
                 Some(checkout) => RemoteFocus::view(checkout, RemoteTarget::Commit(commit.id)),
                 None => RemoteFocus::nothing(),
             },
-            Some(GraphRow::Worktree(worktree)) => {
-                let target = match (worktree.branch, worktree.head_id) {
-                    (Some(branch), _) if is_counted_local_branch(&branch) => {
-                        RemoteTarget::Branch(branch)
-                    }
-                    (_, Some(sha)) if !sha.is_empty() => RemoteTarget::Commit(sha),
-                    _ => return RemoteFocus::nothing(),
-                };
-                RemoteFocus::view(worktree.path, target)
-            }
+            Some(GraphRow::Worktree(worktree)) => worktree_focus(&worktree),
             Some(GraphRow::Stash(stash)) => {
                 RemoteFocus::Refuse(stash_local_only_status(&stash.stash_ref))
             }
@@ -290,9 +442,22 @@ impl AppState {
     /// "View remotely": open the forge page of the focused entity, or say
     /// why there is none.
     pub(super) fn view_remotely(&mut self) -> Effect {
-        match self.remote_target_for_focus() {
+        let focus = self.remote_target_for_focus();
+        self.remote_focus_effect(focus)
+    }
+
+    /// The View remotely line of popover section `kind` on `target`: open
+    /// the page of the entity that section describes
+    /// ([`Self::remote_target_for_icon`]), or say why there is none.
+    pub(super) fn view_remotely_at(&mut self, kind: IconKind, target: &IconTarget) -> Effect {
+        let focus = self.remote_target_for_icon(kind, target);
+        self.remote_focus_effect(focus)
+    }
+
+    /// The effect of `focus`; a refusal sets the warn status instead.
+    fn remote_focus_effect(&mut self, focus: RemoteFocus) -> Effect {
+        match focus {
             RemoteFocus::View { checkout, target } => Effect::ViewRemotely { checkout, target },
-            RemoteFocus::PullRequest(repo, branch) => Effect::OpenPullRequest { repo, branch },
             RemoteFocus::Refuse(text) => {
                 self.status = StatusMessage::warn(text);
                 Effect::None
@@ -748,6 +913,20 @@ mod tests {
             gw(&mut app),
             view("app", file_line(head(), "src/lib.rs", Some(2)))
         );
+    }
+
+    #[test]
+    fn the_refusal_gate_builds_no_diff_rows() {
+        let mut app = tree_diff_app();
+        app.diff_cursor = diff_row(&app, "new");
+        app.diff_row_builds.set(0);
+        assert_eq!(palette_reason(&app), None);
+        assert_eq!(app.diff_row_builds.get(), 0, "the gate skips the line");
+        assert_eq!(
+            gw(&mut app),
+            view("app", file_line(feature(), "src/lib.rs", Some(2)))
+        );
+        assert_eq!(app.diff_row_builds.get(), 1, "gw reads the line");
     }
 
     #[test]

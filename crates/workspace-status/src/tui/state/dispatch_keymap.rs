@@ -486,6 +486,17 @@ impl AppState {
         }
     }
 
+    /// Scope refusal of `command`: a `NoHighlight` row while diff lines are
+    /// highlighted, or a `Highlight` row with none.
+    pub(super) fn palette_scope_refusal(&self, command: &PaletteCommand) -> Option<String> {
+        let highlighted = self.diff_visual_anchor.is_some();
+        match (command.scope, highlighted) {
+            (CommandScope::NoHighlight, true) => Some("exit highlight first (Esc)".into()),
+            (CommandScope::Highlight, false) => Some("highlight diff lines first (V)".into()),
+            _ => None,
+        }
+    }
+
     /// Why palette row `command` cannot run, or `None` if Enter should dispatch.
     ///
     /// The synthetic go-to-line row answers from
@@ -527,13 +538,8 @@ impl AppState {
         {
             return Some(reason);
         }
-        let highlighted = self.diff_visual_anchor.is_some();
-        match (command.scope, highlighted) {
-            (CommandScope::NoHighlight, true) => return Some("exit highlight first (Esc)".into()),
-            (CommandScope::Highlight, false) => {
-                return Some("highlight diff lines first (V)".into())
-            }
-            _ => {}
+        if let Some(reason) = self.palette_scope_refusal(command) {
+            return Some(reason);
         }
         if let Some(anchor) = self.diff_visual_anchor {
             let kind = match action {

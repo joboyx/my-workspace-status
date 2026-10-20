@@ -95,14 +95,10 @@ pub enum RemoteTarget {
     Branch(String),
     /// A remote-tracking branch by its short name, for example
     /// `origin/feature`.
-    // Only chip popover lines name this; drop the allow with that hook.
-    #[cfg_attr(not(test), allow(dead_code))]
     RemoteBranch(String),
     /// A commit, by its full id.
     Commit(String),
     /// A tag, by its name without `refs/tags/`.
-    // Only chip popover lines name this; drop the allow with that hook.
-    #[cfg_attr(not(test), allow(dead_code))]
     Tag(String),
     /// A file or directory, by its path from the repository root.
     File {

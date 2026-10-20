@@ -6646,9 +6646,11 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
         .iter()
         .zip(&line_section)
         .map(|(line, &section)| match line {
-            PopoverLine::Action(command) if gated[section] => {
-                state.palette_disabled_reason(command)
-            }
+            PopoverLine::Action(command) if gated[section] => state.popover_line_refusal(
+                command,
+                sections[section].icon,
+                &sections[section].target,
+            ),
             _ => None,
         })
         .collect();
@@ -18809,6 +18811,8 @@ mod tests {
             "changes 0 staged · 0 unstaged · 0 untracked",
             "Open PR",
             " gx ",
+            "View remotely",
+            " gw ",
             "? no upstream",
             "Push",
             " P ",
@@ -18818,8 +18822,9 @@ mod tests {
             assert!(text.contains(want), "{want:?} in\n{text}");
         }
         let palette = state.theme.palette();
-        // From the branch picker past the branch actions and the PR fields.
-        state.dispatch(Action::PopoverMove(6));
+        // From the branch picker past the branch actions (View remotely
+        // last) and the PR fields.
+        state.dispatch(Action::PopoverMove(7));
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let buf = &state.painted_frame;
         let open_y = (rect.y..rect.bottom())

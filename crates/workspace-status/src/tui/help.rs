@@ -386,6 +386,10 @@ pub const HELP_COMPARE_GROUP: HelpGroup = HelpGroup {
             desc: "editor · diff tool",
         },
         HelpEntry {
+            keys: "gw",
+            desc: "view on GitHub/GitLab",
+        },
+        HelpEntry {
             keys: "A",
             desc: "blame menu",
         },
@@ -1252,6 +1256,10 @@ mod tests {
             HELP_COMPARE_GROUP.entries.iter().any(|e| e.keys == "A"),
             "{}",
             HELP_COMPARE_GROUP.title
+        );
+        assert!(
+            HELP_COMPARE_GROUP.entries.iter().any(|e| e.keys == "gw"),
+            "gw works on a compare tab"
         );
         assert!(git_keys.contains(&"e E"));
         assert_eq!(
