@@ -413,7 +413,9 @@ fn load_refs(repo_dir: &Path) -> Vec<(String, GraphRef)> {
     let raw = exec_git(
         &[
             "for-each-ref",
-            "--format=%(objectname)%00%(refname)%00%(refname:short)",
+            // An annotated tag's %(objectname) is the tag object; %(*objectname)
+            // is the peeled commit. Empty for branches and lightweight tags.
+            "--format=%(if)%(*objectname)%(then)%(*objectname)%(else)%(objectname)%(end)%00%(refname)%00%(refname:short)",
             "refs/heads",
             "refs/remotes",
             "refs/tags",
@@ -818,7 +820,7 @@ mod live_git {
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use workspace_status_graph::GraphRow;
+    use workspace_status_graph::{format_commit_ref_chips, GraphRow, RefKind, ASCII};
 
     use crate::snapshot::{build_workspace_snapshot, CheckoutKind, RepoSnapshot, SyncStatus};
 
@@ -979,6 +981,57 @@ mod live_git {
                 Some(GraphRow::Uncommitted { has_changes: false })
             ),
             "clean loaded graph starts on the working-tree row, got {rows:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn annotated_and_lightweight_tags_key_to_their_commit() {
+        let (root, repo) = temp_workspace();
+        init_repo_empty(&repo);
+        commit_file(&repo, "a.txt", "1\n", "c1-light");
+        git(&repo, &["tag", "v-light"]);
+        commit_file(&repo, "a.txt", "2\n", "c2-annotated");
+        git(&repo, &["tag", "-a", "v-annotated", "-m", "release"]);
+        commit_file(&repo, "a.txt", "3\n", "c3-plain");
+        let snapshot = snapshot_app();
+        let (model, _) = load_graph_model_window(
+            root.join("workspace").as_path(),
+            &snapshot,
+            "app",
+            false,
+            0,
+            50,
+            &[],
+        );
+        let commit = |subject: &str| -> &Commit {
+            model
+                .commits
+                .iter()
+                .find(|c| c.subject == subject)
+                .unwrap_or_else(|| panic!("commit {subject} missing"))
+        };
+        for (subject, tag) in [("c1-light", "v-light"), ("c2-annotated", "v-annotated")] {
+            let c = commit(subject);
+            assert!(
+                c.refs
+                    .iter()
+                    .any(|r| r.name == tag && r.kind == RefKind::Tag),
+                "{tag} must key to {subject}, not a tag object: {:?}",
+                c.refs
+            );
+            let chips = format_commit_ref_chips(&c.refs, false, Some("main"), &ASCII);
+            assert!(
+                chips.contains(tag),
+                "{tag} chip text on {subject}: {chips:?}"
+            );
+        }
+        assert!(
+            !commit("c3-plain")
+                .refs
+                .iter()
+                .any(|r| r.kind == RefKind::Tag),
+            "untagged commit has no tag chip"
         );
         let _ = fs::remove_dir_all(&root);
     }
