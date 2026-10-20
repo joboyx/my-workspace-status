@@ -329,6 +329,10 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "open branch PR in browser",
             },
             HelpEntry {
+                keys: "gw",
+                desc: "view on GitHub/GitLab",
+            },
+            HelpEntry {
                 keys: "a p D",
                 desc: "focused stash apply/pop/drop",
             },
@@ -1257,6 +1261,14 @@ mod tests {
                 .find(|e| e.keys == "gx")
                 .map(|e| e.desc),
             Some("open branch PR in browser")
+        );
+        assert_eq!(
+            HELP_GROUPS[1]
+                .entries
+                .iter()
+                .find(|e| e.keys == "gw")
+                .map(|e| e.desc),
+            Some("view on GitHub/GitLab")
         );
         let move_keys: Vec<&str> = HELP_GROUPS[0].entries.iter().map(|e| e.keys).collect();
         let view_keys: Vec<&str> = HELP_GROUPS[2].entries.iter().map(|e| e.keys).collect();

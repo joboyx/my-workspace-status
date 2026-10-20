@@ -397,6 +397,14 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
+        title: "View remotely",
+        keys: "gw",
+        group: CommandGroup::Git,
+        action: Action::ViewRemotely,
+        aliases: &["browser", "web", "github", "gitlab", "open on remote"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
         title: "Blame: open commit changes",
         keys: "",
         group: CommandGroup::Git,
@@ -1320,6 +1328,13 @@ mod tests {
                 CommandScope::NoHighlight,
             ),
             (
+                "View remotely",
+                "gw",
+                CommandGroup::Git,
+                Action::ViewRemotely,
+                CommandScope::NoHighlight,
+            ),
+            (
                 "Blame: open commit changes",
                 "",
                 CommandGroup::Git,
@@ -1564,7 +1579,7 @@ mod tests {
             .filter(|command| !matches!(command.action, Action::SetTheme(_)))
             .collect();
         assert_eq!(rows.len(), wanted.len());
-        assert_eq!(wanted.len(), 70);
+        assert_eq!(wanted.len(), 71);
         assert_eq!(PALETTE_COMMANDS.len(), wanted.len() + THEME_IDS.len());
         for (i, (title, keys, group, action, scope)) in wanted.iter().enumerate() {
             let command = rows[i];

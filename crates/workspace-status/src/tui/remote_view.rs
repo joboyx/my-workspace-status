@@ -127,8 +127,6 @@ pub enum RemotePage {
     /// A commit page, by its full id.
     Commit(String),
     /// A tag page (GitHub release page, GitLab tag page).
-    // Only chip popover lines name this; drop the allow with that hook.
-    #[cfg_attr(not(test), allow(dead_code))]
     Tag(String),
     /// A file at `rev` (a remote branch name or a commit id).
     File {
@@ -239,16 +237,10 @@ pub fn encode_path(path: &str) -> String {
 /// ([`git::remote_has_tag`], the one network call). Every other check reads
 /// local refs only, as of the last fetch or push. Blocks.
 pub fn resolve(checkout: &Path, target: &RemoteTarget) -> Result<(ForgeRepo, RemotePage), String> {
-    if let RemoteTarget::RemoteBranch(short_ref) = target {
-        let (remote, branch) =
-            git::split_remote_ref(checkout, short_ref).ok_or_else(|| NO_REMOTE.to_string())?;
-        let repo = forge_repo(checkout, &remote)?;
-        if !git::remote_branch_exists(checkout, &remote, &branch) {
-            return Err(branch_not_on_remote_status(&branch, &remote));
-        }
-        return Ok((repo, RemotePage::Branch(branch)));
-    }
     let remote = match target {
+        RemoteTarget::RemoteBranch(short_ref) => git::split_remote_ref(checkout, short_ref)
+            .map(|(remote, _)| remote)
+            .ok_or_else(|| NO_REMOTE.to_string())?,
         RemoteTarget::Branch(branch)
         | RemoteTarget::File {
             rev: FileRev::Branch(branch),
@@ -262,7 +254,14 @@ pub fn resolve(checkout: &Path, target: &RemoteTarget) -> Result<(ForgeRepo, Rem
         RemoteTarget::Branch(branch) => {
             RemotePage::Branch(remote_branch(checkout, &remote, branch)?)
         }
-        RemoteTarget::RemoteBranch(_) => unreachable!("resolved above"),
+        RemoteTarget::RemoteBranch(short_ref) => {
+            // `split_remote_ref` matched `<remote>/<branch>`, branch not empty.
+            let branch = &short_ref[remote.len() + 1..];
+            if !git::remote_branch_exists(checkout, &remote, branch) {
+                return Err(branch_not_on_remote_status(branch, &remote));
+            }
+            RemotePage::Branch(branch.to_string())
+        }
         RemoteTarget::Commit(sha) => {
             remote_commit(checkout, &remote, sha)?;
             RemotePage::Commit(sha.clone())

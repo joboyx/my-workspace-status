@@ -210,16 +210,16 @@ pub enum Action {
     /// The target is a tree checkout row or a graph worktree row with a
     /// branch. Any other row sets the status `no PR for this row`.
     OpenPullRequest,
-    /// Open the forge web page of the focused entity in the browser.
+    /// Open the forge web page of the focused entity in the browser (`gw`).
     ///
     /// A repository row opens the repository home, a checkout or graph
     /// worktree row its branch, a graph commit its commit page, and a file
-    /// or directory row that path at the checkout branch. A worker checks
+    /// or directory row that path at the checkout branch (a file from a
+    /// commit or compare list at that commit). A focused diff or Explorer
+    /// file line adds its line anchor. A worker checks
     /// that the entity is on the remote first; when it is not, or the row
     /// has nothing with a web page (a stash, uncommitted changes, a group),
     /// the status line says so and nothing opens.
-    // No key or palette row sends this yet; drop the allow when one does.
-    #[cfg_attr(not(test), allow(dead_code))]
     ViewRemotely,
     /// Pin a popover over every icon of the focused row (`gh`).
     ///

@@ -11,6 +11,8 @@ use workspace_status_graph::GraphRow;
 use crate::helpers::is_counted_local_branch;
 
 use super::super::action::Effect;
+use super::super::diff::{DiffCellKind, DiffRow};
+use super::super::drill::CommitFileSource;
 use super::super::gates::ListFocusTarget;
 use super::super::remote_view::{
     opened_status, stash_local_only_status, FileRev, RemoteTarget, NOTHING_TO_VIEW, OPEN_FAILED,
@@ -60,19 +62,142 @@ impl AppState {
     /// a checkout row its branch, or its HEAD commit when detached; a file
     /// or directory row that path at the checkout branch (or HEAD commit).
     /// Graph: a commit row its commit; a worktree row its branch (or HEAD
-    /// commit). A stash or the uncommitted row is local only. Every other
-    /// row and surface has nothing to view.
+    /// commit). A stash or the uncommitted row is local only.
+    ///
+    /// Commit-file list (a drill or a compare tab): the file or folder at
+    /// [`Self::source_rev`]. Diff pane: its file at that revision, with the
+    /// new-side line of the focused row ([`new_side_line`]). Explorer tab:
+    /// the tree row, or the open file at its cursor line, at the checkout
+    /// branch. Every other row and surface has nothing to view.
     pub(super) fn remote_target_for_focus(&self) -> RemoteFocus {
-        if self.is_explorer_tab() || self.is_compare_tab() {
-            return RemoteFocus::nothing();
+        if self.is_explorer_tab() {
+            return self.remote_target_for_explorer();
         }
         match self.list_focus_target() {
             ListFocusTarget::Tree => self.focused_row().map_or_else(RemoteFocus::nothing, |row| {
                 self.remote_target_for_tree_row(row)
             }),
             ListFocusTarget::Graph => self.remote_target_for_graph_row(),
-            ListFocusTarget::CommitFiles | ListFocusTarget::None => RemoteFocus::nothing(),
+            ListFocusTarget::CommitFiles => self.remote_target_for_commit_file(),
+            ListFocusTarget::None => self.remote_target_for_diff(),
         }
+    }
+
+    /// The status text that "View remotely" refuses with on the focused
+    /// row, or `None` when it opens (or checks) a page. Disables the
+    /// palette row.
+    pub(super) fn view_remotely_refusal(&self) -> Option<String> {
+        match self.remote_target_for_focus() {
+            RemoteFocus::Refuse(text) => Some(text),
+            RemoteFocus::View { .. } | RemoteFocus::PullRequest(..) => None,
+        }
+    }
+
+    /// "View remotely" target of the focused commit-file row: that file or
+    /// folder, with no line.
+    fn remote_target_for_commit_file(&self) -> RemoteFocus {
+        let (Some((checkout, source)), Some(row)) =
+            (self.commit_drill_source(), self.focused_commit_file_row())
+        else {
+            return RemoteFocus::nothing();
+        };
+        match self.source_rev(checkout, Some(source)) {
+            Ok(rev) => RemoteFocus::view(
+                checkout,
+                RemoteTarget::File {
+                    rev,
+                    dir: row.is_dir(),
+                    path: row.path,
+                    line: None,
+                },
+            ),
+            Err(refuse) => refuse,
+        }
+    }
+
+    /// "View remotely" target of the focused diff pane: the open file, with
+    /// the new-side line of the focused row. A folder summary in its place
+    /// opens that folder.
+    fn remote_target_for_diff(&self) -> RemoteFocus {
+        if self.folder_summary().is_some() {
+            return self.remote_target_for_commit_file();
+        }
+        let Some((checkout, path, source)) = self.open_diff_target() else {
+            return RemoteFocus::nothing();
+        };
+        let rev = match self.source_rev(checkout, source) {
+            Ok(rev) => rev,
+            Err(refuse) => return refuse,
+        };
+        let line = self
+            .current_diff_rows()
+            .get(self.diff_cursor)
+            .and_then(new_side_line);
+        RemoteFocus::view(
+            checkout,
+            RemoteTarget::File {
+                rev,
+                path: path.to_string(),
+                line,
+                dir: false,
+            },
+        )
+    }
+
+    /// "View remotely" target on an Explorer tab: a diff as in
+    /// [`Self::remote_target_for_diff`]; the open file at its cursor line;
+    /// or, with the tree focused, its file or folder row.
+    fn remote_target_for_explorer(&self) -> RemoteFocus {
+        let Some(tab) = self.tabs.active_explorer() else {
+            return RemoteFocus::nothing();
+        };
+        let (path, line, dir) = if self.list_focus_target() == ListFocusTarget::None {
+            if self.explorer_diff().is_some() {
+                return self.remote_target_for_diff();
+            }
+            let Some(file) = self.tabs.active_file_view() else {
+                return RemoteFocus::nothing();
+            };
+            (file.rel.clone(), u32::try_from(file.cursor + 1).ok(), false)
+        } else {
+            match self
+                .explorer_resolved_cursor_row(tab.id)
+                .filter(|row| !row.placeholder)
+            {
+                Some(row) => (row.rel, None, row.is_dir),
+                None => return RemoteFocus::nothing(),
+            }
+        };
+        match self.checkout_rev(&tab.checkout) {
+            Some(rev) => RemoteFocus::view(
+                tab.checkout.as_str(),
+                RemoteTarget::File {
+                    rev,
+                    path,
+                    line,
+                    dir,
+                },
+            ),
+            None => RemoteFocus::nothing(),
+        }
+    }
+
+    /// Revision a file from `source` opens at: the commit of a commit drill
+    /// or a compare tab ([`CommitFileSource::line_commit`]); otherwise (the
+    /// worktree, or a commit-vs-working-tree tab) the checkout revision
+    /// ([`Self::checkout_rev`]). A stash is local only.
+    fn source_rev(
+        &self,
+        checkout: &str,
+        source: Option<&CommitFileSource>,
+    ) -> Result<FileRev, RemoteFocus> {
+        if let Some(CommitFileSource::Stash { stash_ref }) = source {
+            return Err(RemoteFocus::Refuse(stash_local_only_status(stash_ref)));
+        }
+        if let Some(sha) = source.and_then(CommitFileSource::line_commit) {
+            return Ok(FileRev::Commit(sha.to_string()));
+        }
+        self.checkout_rev(checkout).ok_or_else(RemoteFocus::nothing)
     }
 
     /// "View remotely" target of tree row `row`.
@@ -188,12 +313,32 @@ impl AppState {
     }
 }
 
+/// The new-side (post-image) line number of diff row `row`, for a line
+/// anchor: an added or context line in either layout. `None` for a row
+/// that shows only a deleted line, and for section, hunk, meta, and error
+/// rows. The cell number alone is not enough: an inline deleted row shows
+/// its old-side number.
+fn new_side_line(row: &DiffRow) -> Option<u32> {
+    let DiffRow::Line { left, right } = row else {
+        return None;
+    };
+    // Split rows keep the new side on the right; inline rows have one cell.
+    let cell = right.as_ref().unwrap_or(left);
+    matches!(cell.kind, DiffCellKind::Add | DiffCellKind::Ctx)
+        .then_some(cell.line_no)
+        .flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use workspace_status_graph::{Commit, GraphModel, Stash, Worktree};
 
+    use super::super::super::command_palette::PALETTE_COMMANDS;
+    use super::super::super::diff::{DiffCell, DiffContent};
+    use super::super::super::drill::{CommitFile, DrillView};
+    use super::super::super::split::DiffMode;
     use super::super::super::status::StatusKind;
     use super::super::FocusPane;
     use super::*;
@@ -358,13 +503,286 @@ mod tests {
         assert_refused(&mut app, NOTHING_TO_VIEW, "group");
     }
 
+    fn file_line(rev: FileRev, path: &str, line: Option<u32>) -> RemoteTarget {
+        RemoteTarget::File {
+            rev,
+            path: path.into(),
+            line,
+            dir: false,
+        }
+    }
+
+    fn feature() -> FileRev {
+        FileRev::Branch("feature".into())
+    }
+
+    /// Palette gate of the "View remotely" row.
+    fn palette_reason(app: &AppState) -> Option<String> {
+        let command = PALETTE_COMMANDS
+            .iter()
+            .find(|command| command.action == Action::ViewRemotely)
+            .expect("View remotely palette row");
+        app.palette_disabled_reason(command)
+    }
+
+    /// Index of the diff row whose cell (either side) shows `text`.
+    fn diff_row(app: &AppState, text: &str) -> usize {
+        app.current_diff_rows()
+            .iter()
+            .position(|row| match row {
+                DiffRow::Line { left, right } => {
+                    left.text == text || right.as_ref().is_some_and(|cell| cell.text == text)
+                }
+                _ => false,
+            })
+            .unwrap_or_else(|| panic!("no diff row {text}"))
+    }
+
+    /// `src/lib.rs` keeps `keep`, changes `old` to `new`, and drops `gone`.
+    const LIB_DIFF: &str = "@@ -1,4 +1,3 @@\n keep\n-old\n+new\n-gone\n tail\n";
+
+    /// Workspace `app` on `feature` with the `src/lib.rs` diff focused.
+    fn tree_diff_app() -> AppState {
+        let mut app = app_with(&[repo("app", "feature")]);
+        focus(&mut app, "file:app:src/lib.rs");
+        app.focus = FocusPane::Right;
+        app.set_diff(
+            "app".into(),
+            "src/lib.rs".into(),
+            DiffContent::from_unified(LIB_DIFF),
+        );
+        assert_eq!(app.list_focus_target(), ListFocusTarget::None);
+        app
+    }
+
     #[test]
-    fn explorer_tab_has_nothing_to_view_for_now() {
+    fn inline_diff_line_anchors_on_the_new_side_only() {
+        let mut app = tree_diff_app();
+        app.diff_mode = DiffMode::Inline;
+        let lib = |line| view("app", file_line(feature(), "src/lib.rs", line));
+        app.diff_cursor = diff_row(&app, "keep");
+        assert_eq!(gw(&mut app), lib(Some(1)), "context line");
+        app.diff_cursor = diff_row(&app, "new");
+        assert_eq!(gw(&mut app), lib(Some(2)), "added line");
+        app.diff_cursor = diff_row(&app, "tail");
+        assert_eq!(gw(&mut app), lib(Some(3)));
+        app.diff_cursor = diff_row(&app, "old");
+        assert_eq!(
+            gw(&mut app),
+            lib(None),
+            "a deleted line has no new-side line, though its cell shows old 2"
+        );
+        app.diff_cursor = 0;
+        assert_eq!(gw(&mut app), lib(None), "a section row");
+        assert!(app.status.is_empty());
+        assert_eq!(palette_reason(&app), None);
+    }
+
+    #[test]
+    fn split_diff_line_anchors_on_the_new_side_only() {
+        let mut app = tree_diff_app();
+        app.diff_mode = DiffMode::SideBySide;
+        app.layout.diff_pane_width = 200;
+        assert_eq!(app.diff_layout(), DiffMode::SideBySide);
+        let lib = |line| view("app", file_line(feature(), "src/lib.rs", line));
+        app.diff_cursor = diff_row(&app, "new");
+        assert_eq!(
+            app.diff_cursor,
+            diff_row(&app, "old"),
+            "old and new pair up"
+        );
+        assert_eq!(gw(&mut app), lib(Some(2)), "the pair opens the new line");
+        app.diff_cursor = diff_row(&app, "gone");
+        assert_eq!(gw(&mut app), lib(None), "a deletion-only row");
+        app.diff_cursor = diff_row(&app, "tail");
+        assert_eq!(gw(&mut app), lib(Some(3)));
+    }
+
+    fn lib_files() -> Vec<CommitFile> {
+        ["src/lib.rs", "src/main.rs"]
+            .into_iter()
+            .map(|path| CommitFile {
+                status: "M".into(),
+                path: path.into(),
+                old_path: None,
+                stat: None,
+            })
+            .collect()
+    }
+
+    /// A depth-2 drill of `source` in `app` with the `src/lib.rs` diff
+    /// open and focused.
+    fn drill_diff(app: &mut AppState, source: CommitFileSource) {
+        app.drill = DrillView::Diff {
+            repo: "app".into(),
+            source,
+            files: lib_files(),
+            file_cursor: 0,
+            path: "src/lib.rs".into(),
+            content: DiffContent::from_unified(LIB_DIFF),
+        };
+        app.focus = FocusPane::Right;
+        app.diff_mode = DiffMode::Inline;
+        focus_commit_file(app, "src/lib.rs", false);
+        app.diff_cursor = diff_row(app, "new");
+    }
+
+    /// Put the commit-file cursor on the file (or, with `dir`, folder) row
+    /// of `path`.
+    fn focus_commit_file(app: &mut AppState, path: &str, dir: bool) {
+        let row = app
+            .commit_file_rows()
+            .iter()
+            .position(|row| row.path == path && row.is_dir() == dir)
+            .unwrap_or_else(|| panic!("no commit-file row {path}"));
+        app.set_commit_file_cursor(row);
+    }
+
+    #[test]
+    fn commit_drill_diff_and_file_list_open_at_the_commit() {
+        let sha = "c".repeat(40);
         let mut app = app_with(&[repo("app", "feature")]);
         focus(&mut app, "repo:app");
-        app.open_loaded_inner_file("app", "README.md", &["# app"]);
-        assert!(app.is_explorer_tab());
-        assert_refused(&mut app, NOTHING_TO_VIEW, "Explorer file");
+        drill_diff(
+            &mut app,
+            CommitFileSource::Commit {
+                commit_id: sha.clone(),
+            },
+        );
+        let at_commit = || FileRev::Commit(sha.clone());
+        assert_eq!(
+            gw(&mut app),
+            view("app", file_line(at_commit(), "src/lib.rs", Some(2)))
+        );
+
+        // The commit-file list: a file row, then its folder row.
+        app.commit_tree_mode = true;
+        app.focus = FocusPane::Left;
+        assert_eq!(app.list_focus_target(), ListFocusTarget::CommitFiles);
+        assert_eq!(
+            gw(&mut app),
+            view("app", file_at(at_commit(), "src/lib.rs", false))
+        );
+        focus_commit_file(&mut app, "src", true);
+        assert_eq!(
+            gw(&mut app),
+            view("app", file_at(at_commit(), "src", true)),
+            "a folder row opens the folder page"
+        );
+        assert_eq!(palette_reason(&app), None);
+    }
+
+    #[test]
+    fn worktree_drill_opens_at_the_branch_and_stash_drill_is_local_only() {
+        let mut app = app_with(&[repo("app", "feature")]);
+        focus(&mut app, "repo:app");
+        drill_diff(&mut app, CommitFileSource::Worktree);
+        assert_eq!(
+            gw(&mut app),
+            view("app", file_line(feature(), "src/lib.rs", Some(2)))
+        );
+
+        drill_diff(
+            &mut app,
+            CommitFileSource::Stash {
+                stash_ref: "stash@{1}".into(),
+            },
+        );
+        assert_eq!(
+            palette_reason(&app).as_deref(),
+            Some("stash@{1} is local only")
+        );
+        assert_refused(&mut app, "stash@{1} is local only", "stash diff");
+        app.focus = FocusPane::Left;
+        assert_eq!(app.list_focus_target(), ListFocusTarget::CommitFiles);
+        assert_refused(&mut app, "stash@{1} is local only", "stash file list");
+    }
+
+    #[test]
+    fn compare_tab_files_and_diff_open_at_the_compare_head() {
+        let mut app = app_with(&[repo("app", "feature")]);
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+        app.focus = FocusPane::Left;
+        assert_refused(&mut app, NOTHING_TO_VIEW, "compare range still loading");
+
+        let tab = app.tabs.active_compare().expect("compare tab");
+        let (tab_id, gen) = (tab.id, tab.generation);
+        let source = CommitFileSource::Compare {
+            base_ref: "main".into(),
+            head_ref: "HEAD".into(),
+            base_tip: "b".repeat(40),
+            merge_base: "a".repeat(40),
+            head: "d".repeat(40),
+        };
+        let _ = app.apply_compare_range(
+            tab_id,
+            gen,
+            Ok(crate::tui::app::CompareRangeLoad {
+                source: source.clone(),
+                files: lib_files(),
+                patch_keys: Default::default(),
+                head: Some("d".repeat(40)),
+                base_tip: "b".repeat(40),
+            }),
+        );
+        focus_commit_file(&mut app, "src/lib.rs", false);
+        assert_eq!(app.list_focus_target(), ListFocusTarget::CommitFiles);
+        let head = || FileRev::Commit("d".repeat(40));
+        assert_eq!(
+            gw(&mut app),
+            view("app", file_at(head(), "src/lib.rs", false))
+        );
+
+        app.apply_compare_diff(
+            tab_id,
+            gen,
+            &source,
+            "src/lib.rs",
+            Ok(DiffContent::from_unified(LIB_DIFF)),
+        );
+        app.focus = FocusPane::Right;
+        app.diff_mode = DiffMode::Inline;
+        app.diff_cursor = diff_row(&app, "new");
+        assert_eq!(
+            gw(&mut app),
+            view("app", file_line(head(), "src/lib.rs", Some(2)))
+        );
+    }
+
+    #[test]
+    fn palette_row_is_off_where_gw_refuses() {
+        let mut app = app_with(&[repo("app", "feature")]);
+        app.cursor = 0;
+        assert_eq!(palette_reason(&app).as_deref(), Some(NOTHING_TO_VIEW));
+        focus(&mut app, "repo:app");
+        assert_eq!(palette_reason(&app), None);
+    }
+
+    #[test]
+    fn new_side_line_skips_old_only_and_non_line_rows() {
+        let cell = |kind, line_no| DiffCell {
+            kind,
+            text: String::new(),
+            line_no,
+        };
+        let inline = |kind, n| DiffRow::Line {
+            left: cell(kind, Some(n)),
+            right: None,
+        };
+        assert_eq!(new_side_line(&inline(DiffCellKind::Add, 4)), Some(4));
+        assert_eq!(new_side_line(&inline(DiffCellKind::Ctx, 5)), Some(5));
+        assert_eq!(new_side_line(&inline(DiffCellKind::Del, 6)), None);
+        assert_eq!(new_side_line(&inline(DiffCellKind::Meta, 7)), None);
+        let split = DiffRow::Line {
+            left: cell(DiffCellKind::Del, Some(8)),
+            right: Some(cell(DiffCellKind::Empty, None)),
+        };
+        assert_eq!(new_side_line(&split), None);
+        let hunk = DiffRow::Hunk {
+            text: "@@ -1 +1 @@".into(),
+        };
+        assert_eq!(new_side_line(&hunk), None);
     }
 
     #[test]

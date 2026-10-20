@@ -735,6 +735,7 @@ fn key_to_action(
             KeyCode::Char('t') if !has_command_modifier(key) => Action::NextTab,
             KeyCode::Char('T') if !has_command_modifier(key) => Action::PreviousTab,
             KeyCode::Char('x') if !has_command_modifier(key) => Action::OpenPullRequest,
+            KeyCode::Char('w') if !has_command_modifier(key) => Action::ViewRemotely,
             KeyCode::Char('h') if !has_command_modifier(key) => Action::PopoverOpenFocused,
             KeyCode::Char(c @ '1'..='9') if !has_command_modifier(key) => {
                 Action::JumpToTab(c as u8 - b'0')
@@ -2678,6 +2679,10 @@ mod tests {
             Action::OpenPullRequest
         );
         assert_eq!(
+            event_to_action(&key(KeyCode::Char('w')), pending, false, false),
+            Action::ViewRemotely
+        );
+        assert_eq!(
             event_to_action(&key(KeyCode::Char('x')), normal(), false, false),
             Action::Revert,
             "bare x stays revert"
@@ -3584,7 +3589,7 @@ mod tests {
                     "{mode:?} {event:?}"
                 );
             }
-            // Alt / Super chords stay unbound; plain `w` is unchanged.
+            // Alt / Super chords stay unbound.
             for mods in [
                 KeyModifiers::ALT,
                 KeyModifiers::CONTROL | KeyModifiers::ALT,
@@ -3596,9 +3601,15 @@ mod tests {
                     "{mode:?} {mods:?}"
                 );
             }
+            // Plain `w` is unbound, except `gw` (view remotely).
+            let plain_w = if matches!(mode, InputMode::GPending { .. }) {
+                Action::ViewRemotely
+            } else {
+                Action::None
+            };
             assert_eq!(
                 event_to_action(&key(KeyCode::Char('w')), mode, true, true),
-                Action::None,
+                plain_w,
                 "{mode:?} plain w"
             );
         }
@@ -4175,6 +4186,7 @@ mod tests {
             (pending_g(), 0, Char('t'), Action::NextTab),
             (pending_g(), 0, Char('T'), Action::PreviousTab),
             (pending_g(), 0, Char('x'), Action::OpenPullRequest),
+            (pending_g(), 0, Char('w'), Action::ViewRemotely),
             (pending_g(), 0, Char('1'), Action::JumpToTab(1)),
             (pending_g(), 0, Char('9'), Action::JumpToTab(9)),
             (pending_g(), 0, Char('p'), Action::Pull),

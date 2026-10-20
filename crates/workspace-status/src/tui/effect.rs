@@ -3527,6 +3527,13 @@ impl Interpreter {
                     spawn(
                         id,
                         Box::new(move || {
+                            // A job that starts after quit runs no git.
+                            if cancel.load(Ordering::Relaxed) {
+                                return JobOutcome::RemoteView {
+                                    page: Err(remote_view::OPEN_FAILED.to_string()),
+                                    opened: false,
+                                };
+                            }
                             let page = remote_view::resolve(&cwd.join(&checkout), &target)
                                 .map(|(repo, page)| remote_view::page_url(&repo, &page));
                             let opened = match &page {
@@ -8758,6 +8765,31 @@ mod tests {
                     if text == remote_view::NO_REMOTE
             ),
             "a missing checkout has no remote"
+        );
+        assert!(opened_urls().is_empty());
+    }
+
+    #[test]
+    fn view_remotely_job_after_quit_runs_no_check() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        interp.pr_opener = opener_ok;
+        let effect = Effect::ViewRemotely {
+            checkout: PathBuf::from("missing-view"),
+            target: RemoteTarget::Repo,
+        };
+        schedule_effect(&mut interp, &mut state, effect, &Action::None);
+        interp.cancel_pull_request_jobs();
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 1);
+        let outcomes: Vec<JobOutcome> = jobs.into_iter().map(|(_, work)| work()).collect();
+        assert!(
+            matches!(
+                &outcomes[0],
+                JobOutcome::RemoteView { page: Err(text), opened: false }
+                    if text == remote_view::OPEN_FAILED
+            ),
+            "the remote check (NO_REMOTE here) never runs"
         );
         assert!(opened_urls().is_empty());
     }

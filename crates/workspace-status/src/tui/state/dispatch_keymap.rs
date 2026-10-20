@@ -725,6 +725,7 @@ impl AppState {
                     Some("no copy target".into())
                 }
             }
+            Action::ViewRemotely => self.view_remotely_refusal(),
             Action::Branch => match self.focused_row() {
                 Some(row) if can_open_branch_picker(&self.snapshot, row) => None,
                 _ => Some("focus a checkout to pick a branch".into()),
