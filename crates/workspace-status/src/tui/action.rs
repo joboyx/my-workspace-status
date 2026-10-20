@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use super::drill::CommitFileSource;
+use super::remote_view::RemoteTarget;
 use super::theme::ThemeId;
 
 /// User or system input that changes TUI state.
@@ -209,6 +210,17 @@ pub enum Action {
     /// The target is a tree checkout row or a graph worktree row with a
     /// branch. Any other row sets the status `no PR for this row`.
     OpenPullRequest,
+    /// Open the forge web page of the focused entity in the browser.
+    ///
+    /// A repository row opens the repository home, a checkout or graph
+    /// worktree row its branch, a graph commit its commit page, and a file
+    /// or directory row that path at the checkout branch. A worker checks
+    /// that the entity is on the remote first; when it is not, or the row
+    /// has nothing with a web page (a stash, uncommitted changes, a group),
+    /// the status line says so and nothing opens.
+    // No key or palette row sends this yet; drop the allow when one does.
+    #[cfg_attr(not(test), allow(dead_code))]
+    ViewRemotely,
     /// Pin a popover over every icon of the focused row (`gh`).
     ///
     /// One section per icon, in paint order. A row with no icon sets the
@@ -722,6 +734,17 @@ pub enum Effect {
         repo: PathBuf,
         /// Branch checked out there.
         branch: String,
+    },
+    /// Check on a worker that `target` is on the remote of `checkout`, then
+    /// open its forge page in the browser.
+    ///
+    /// The status line reports the result: the opened page, or why nothing
+    /// opened ([`super::remote_view::resolve`]).
+    ViewRemotely {
+        /// Checkout path (snapshot `repo`).
+        checkout: PathBuf,
+        /// The entity whose page opens.
+        target: RemoteTarget,
     },
     /// Look up the PR of each `(checkout, branch)` for its row badge.
     ///

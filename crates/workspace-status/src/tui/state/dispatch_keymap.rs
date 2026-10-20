@@ -399,6 +399,7 @@ impl AppState {
             Action::ExportComments => self.export_comments(),
             Action::CopyEntityReference => self.copy_entity_reference(),
             Action::OpenPullRequest => self.open_pull_request(),
+            Action::ViewRemotely => self.view_remotely(),
             Action::ExportCommentsCancel => {
                 self.comment_export = None;
                 self.status.clear();

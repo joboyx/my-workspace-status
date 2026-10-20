@@ -62,6 +62,11 @@ pub fn file_not_on_remote_status(path: &str, place: &str) -> String {
     format!("file {path} is not on {place}")
 }
 
+/// Status line after the browser started for page `url`.
+pub fn opened_status(url: &str) -> String {
+    format!("opened {url}")
+}
+
 /// Status line for a stash entry such as `stash@{0}`.
 pub fn stash_local_only_status(stash_ref: &str) -> String {
     format!("{stash_ref} is local only")
@@ -90,10 +95,14 @@ pub enum RemoteTarget {
     Branch(String),
     /// A remote-tracking branch by its short name, for example
     /// `origin/feature`.
+    // Only chip popover lines name this; drop the allow with that hook.
+    #[cfg_attr(not(test), allow(dead_code))]
     RemoteBranch(String),
     /// A commit, by its full id.
     Commit(String),
     /// A tag, by its name without `refs/tags/`.
+    // Only chip popover lines name this; drop the allow with that hook.
+    #[cfg_attr(not(test), allow(dead_code))]
     Tag(String),
     /// A file or directory, by its path from the repository root.
     File {
@@ -118,6 +127,8 @@ pub enum RemotePage {
     /// A commit page, by its full id.
     Commit(String),
     /// A tag page (GitHub release page, GitLab tag page).
+    // Only chip popover lines name this; drop the allow with that hook.
+    #[cfg_attr(not(test), allow(dead_code))]
     Tag(String),
     /// A file at `rev` (a remote branch name or a commit id).
     File {
@@ -151,6 +162,9 @@ pub enum RemotePage {
 /// | tag | `/releases/tag/<t>` | `/-/tags/<t>` |
 /// | file | `/blob/<rev>/<path>[#L<n>]` | `/-/blob/<rev>/<path>[#L<n>]` |
 /// | dir | `/tree/<rev>/<path>` | `/-/tree/<rev>/<path>` |
+///
+/// A GitHub Markdown file (`.md`, `.markdown`) with a line gets `?plain=1`
+/// before the anchor, so the page shows the source and the anchor works.
 pub fn page_url(repo: &ForgeRepo, page: &RemotePage) -> String {
     let base = format!("https://{}/{}", repo.host, repo.path);
     let sep = match repo.forge {
@@ -166,9 +180,16 @@ pub fn page_url(repo: &ForgeRepo, page: &RemotePage) -> String {
             Forge::GitLab => format!("{base}/-/tags/{}", encode_path(tag)),
         },
         RemotePage::File { rev, path, line } => {
+            // GitHub renders Markdown and ignores a line anchor unless the
+            // page shows the source.
+            let plain = if line.is_some() && repo.forge == Forge::GitHub && is_markdown(path) {
+                "?plain=1"
+            } else {
+                ""
+            };
             let anchor = line.map(|n| format!("#L{n}")).unwrap_or_default();
             format!(
-                "{base}/{sep}blob/{}/{}{anchor}",
+                "{base}/{sep}blob/{}/{}{plain}{anchor}",
                 encode_path(rev),
                 encode_path(path)
             )
@@ -182,6 +203,14 @@ pub fn page_url(repo: &ForgeRepo, page: &RemotePage) -> String {
             encode_path(path)
         ),
     }
+}
+
+/// True when `path` names a Markdown file (`.md` or `.markdown`, any case).
+fn is_markdown(path: &str) -> bool {
+    let ext = path
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase());
+    matches!(ext.as_deref(), Some("md" | "markdown"))
 }
 
 /// Percent-encode each `/`-separated segment of `path` and keep the `/`.
@@ -210,33 +239,30 @@ pub fn encode_path(path: &str) -> String {
 /// ([`git::remote_has_tag`], the one network call). Every other check reads
 /// local refs only, as of the last fetch or push. Blocks.
 pub fn resolve(checkout: &Path, target: &RemoteTarget) -> Result<(ForgeRepo, RemotePage), String> {
-    let (remote, tracked) = match target {
-        RemoteTarget::RemoteBranch(short_ref) => {
-            let (remote, branch) =
-                git::split_remote_ref(checkout, short_ref).ok_or_else(|| NO_REMOTE.to_string())?;
-            (remote, Some(branch))
+    if let RemoteTarget::RemoteBranch(short_ref) = target {
+        let (remote, branch) =
+            git::split_remote_ref(checkout, short_ref).ok_or_else(|| NO_REMOTE.to_string())?;
+        let repo = forge_repo(checkout, &remote)?;
+        if !git::remote_branch_exists(checkout, &remote, &branch) {
+            return Err(branch_not_on_remote_status(&branch, &remote));
         }
+        return Ok((repo, RemotePage::Branch(branch)));
+    }
+    let remote = match target {
         RemoteTarget::Branch(branch)
         | RemoteTarget::File {
             rev: FileRev::Branch(branch),
             ..
-        } => (git::push_remote_name(checkout, branch), None),
-        _ => (git::checkout_remote_name(checkout), None),
+        } => git::push_remote_name(checkout, branch),
+        _ => git::checkout_remote_name(checkout),
     };
-    let url = git::remote_url(checkout, &remote).ok_or_else(|| NO_REMOTE.to_string())?;
-    let repo = parse_remote(&url).ok_or_else(|| not_forge_status(&remote))?;
+    let repo = forge_repo(checkout, &remote)?;
     let page = match target {
         RemoteTarget::Repo => RemotePage::Repo,
         RemoteTarget::Branch(branch) => {
             RemotePage::Branch(remote_branch(checkout, &remote, branch)?)
         }
-        RemoteTarget::RemoteBranch(short_ref) => {
-            let branch = tracked.unwrap_or_default();
-            if !git::remote_branch_exists(checkout, &remote, &branch) {
-                return Err(branch_not_on_remote_status(short_ref, &remote));
-            }
-            RemotePage::Branch(branch)
-        }
+        RemoteTarget::RemoteBranch(_) => unreachable!("resolved above"),
         RemoteTarget::Commit(sha) => {
             remote_commit(checkout, &remote, sha)?;
             RemotePage::Commit(sha.clone())
@@ -281,6 +307,13 @@ pub fn resolve(checkout: &Path, target: &RemoteTarget) -> Result<(ForgeRepo, Rem
         }
     };
     Ok((repo, page))
+}
+
+/// Forge repository of `remote`, or the status for no remote URL or a
+/// remote that is not on GitHub or GitLab.
+fn forge_repo(checkout: &Path, remote: &str) -> Result<ForgeRepo, String> {
+    let url = git::remote_url(checkout, remote).ok_or_else(|| NO_REMOTE.to_string())?;
+    parse_remote(&url).ok_or_else(|| not_forge_status(remote))
 }
 
 /// Name of local `branch` on `remote`, or the "not on remote" status.
@@ -408,8 +441,8 @@ mod tests {
         let base = "https://github.com/octo/demo";
         let cases = [
             (
-                file("feat/50% off", "docs/my notes#1.md", Some(3)),
-                format!("{base}/blob/feat/50%25%20off/docs/my%20notes%231.md#L3"),
+                file("feat/50% off", "docs/my notes#1.rs", Some(3)),
+                format!("{base}/blob/feat/50%25%20off/docs/my%20notes%231.rs#L3"),
             ),
             (
                 file("main", "src/café/ü.rs", None),
@@ -427,6 +460,39 @@ mod tests {
         for (page, want) in cases {
             assert_eq!(page_url(&github(), &page), want, "{page:?}");
         }
+    }
+
+    #[test]
+    fn page_url_shows_github_markdown_source_for_a_line_anchor() {
+        let base = "https://github.com/octo/demo";
+        let cases = [
+            (
+                file("main", "README.md", Some(4)),
+                format!("{base}/blob/main/README.md?plain=1#L4"),
+            ),
+            (
+                file("main", "docs/Guide.MARKDOWN", Some(1)),
+                format!("{base}/blob/main/docs/Guide.MARKDOWN?plain=1#L1"),
+            ),
+            // No line: the rendered page is the useful one.
+            (
+                file("main", "README.md", None),
+                format!("{base}/blob/main/README.md"),
+            ),
+            // Not Markdown: the source page already has line anchors.
+            (
+                file("main", "docs.md/a.rs", Some(2)),
+                format!("{base}/blob/main/docs.md/a.rs#L2"),
+            ),
+        ];
+        for (page, want) in cases {
+            assert_eq!(page_url(&github(), &page), want, "{page:?}");
+        }
+        assert_eq!(
+            page_url(&gitlab(), &file("main", "README.md", Some(4))),
+            "https://gitlab.example.com/group/sub/demo/-/blob/main/README.md#L4",
+            "GitLab keeps the plain anchor"
+        );
     }
 
     #[test]
@@ -582,6 +648,11 @@ mod tests {
         assert_eq!(
             resolve(&dir, &RemoteTarget::Branch("feature".into())),
             Err(branch_not_on_remote_status("feature", "origin"))
+        );
+        assert_eq!(
+            resolve(&dir, &RemoteTarget::RemoteBranch("origin/feature".into())),
+            Err("branch feature is not on origin".to_string()),
+            "the branch part, not origin/feature"
         );
         assert_eq!(
             resolve(&dir, &RemoteTarget::RemoteBranch("upstream/main".into())),

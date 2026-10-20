@@ -339,6 +339,7 @@ impl AppState {
             | Action::ExportCommentsCancel
             | Action::CopyEntityReference
             | Action::OpenPullRequest
+            | Action::ViewRemotely
             | Action::ToggleQuickOpen(_)
             | Action::QuickOpenMove(_)
             | Action::QuickOpenChar(_)
