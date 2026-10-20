@@ -253,7 +253,7 @@ pub fn commit_url(repo: &ForgeRepo, sha: &str) -> String {
 /// Percent-encode everything except RFC 3986 unreserved characters.
 ///
 /// `/` becomes `%2F`, which GitLab needs for a project path in the API.
-fn percent_encode(text: &str) -> String {
+pub(crate) fn percent_encode(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for byte in text.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {

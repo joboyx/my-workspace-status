@@ -9,6 +9,7 @@ use ratatui::layout::{Position, Rect};
 
 use super::super::action::{Action, Effect};
 use super::super::chrome::open_dialog;
+use super::super::command_palette::PaletteCommand;
 use super::super::comments::{
     commit_file_row_comments, commit_file_row_comments_resolved, commit_file_row_has_comment,
     graph_row_comments, tree_row_comments_resolved, tree_row_has_comment, CommentEntry,
@@ -485,32 +486,60 @@ impl AppState {
         }
     }
 
+    /// Gate reason of action line `command` in popover section `kind` on
+    /// `target`, or `None` when it runs.
+    ///
+    /// View remotely asks the section's own entity
+    /// ([`Self::view_remotely_refusal_at`]), so a tag chip in the
+    /// uncommitted row's footer is not refused as an uncommitted row.
+    /// Every other line asks the palette gate.
+    pub(crate) fn popover_line_refusal(
+        &self,
+        command: &PaletteCommand,
+        kind: IconKind,
+        target: &IconTarget,
+    ) -> Option<String> {
+        if command.action != Action::ViewRemotely {
+            return self.palette_disabled_reason(command);
+        }
+        self.palette_scope_refusal(command)
+            .or_else(|| self.view_remotely_refusal_at(kind, target))
+    }
+
     /// Run line `line` (Enter: the focused line) of the pinned popover.
     ///
     /// An action line closes the popover, then dispatches its action. A
     /// disabled one keeps the popover and shows the gate reason, like the
-    /// palette. Any other line does nothing.
+    /// palette ([`Self::popover_line_refusal`]). View remotely opens the
+    /// entity of the line's own section ([`Self::view_remotely_at`]), not
+    /// the focused row: a tag chip on a commit row opens the tag. Any other
+    /// line does nothing.
     fn run_popover_line(&mut self, line: Option<usize>) -> Effect {
         if !self.popover_pinned() {
             self.close_popover();
             return Effect::None;
         }
-        let line = match line {
-            Some(index) => {
-                let sections = self.open_popover_sections();
-                flat_lines(&sections).get(index).map(|line| (*line).clone())
-            }
-            None => self.focused_popover_line(),
+        let sections = self.open_popover_sections();
+        let index = match (line, self.popover.as_ref()) {
+            (Some(index), _) => Some(index),
+            (None, Some(popover)) => focused_line(&flat_lines(&sections), popover.focus_line),
+            (None, None) => None,
         };
-        let Some(PopoverLine::Action(command)) = line else {
+        let Some((_, section, PopoverLine::Action(command))) =
+            index.and_then(|index| section_lines(&sections).nth(index))
+        else {
             return Effect::None;
         };
-        if let Some(reason) = self.palette_disabled_reason(command) {
+        let (command, kind, target) = (*command, section.icon, section.target.clone());
+        if let Some(reason) = self.popover_line_refusal(command, kind, &target) {
             self.status = StatusMessage::warn(reason);
             return Effect::None;
         }
         self.close_popover();
-        self.dispatch_palette_action(command.action.clone())
+        match &command.action {
+            Action::ViewRemotely => self.view_remotely_at(kind, &target),
+            action => self.dispatch_palette_action(action.clone()),
+        }
     }
 
     /// `y`: copy the focused line of the pinned popover. It stays open.
@@ -856,10 +885,11 @@ mod tests {
     use super::super::super::event_pump::overlay_blocks_background_ticks;
     use super::super::super::keys::event_to_action;
     use super::super::super::pull_request::{PrLookup, PullRequest};
+    use super::super::super::remote_view::{RemoteTarget, NOTHING_TO_VIEW, UNCOMMITTED_LOCAL_ONLY};
     use super::super::super::render::draw;
     use super::super::FocusPane;
     use super::*;
-    use crate::helpers::STATUS_FAILED_NOTE;
+    use crate::helpers::{DETACHED_HEAD_BRANCH, STATUS_FAILED_NOTE};
     use crate::snapshot::{
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
     };
@@ -1593,6 +1623,7 @@ mod tests {
                         "Pull behind",
                         "Push",
                         "Branch picker",
+                        "View remotely",
                     ])
                 ),
                 (
@@ -1634,6 +1665,7 @@ mod tests {
                         "Default branch",
                         "Graph focus branches",
                         diff,
+                        "View remotely",
                     ])
                 ),
                 (
@@ -1668,6 +1700,7 @@ mod tests {
                         "Remove worktree",
                         diff,
                         "Copy entity reference",
+                        "View remotely",
                     ])
                 ),
                 (
@@ -1800,6 +1833,7 @@ mod tests {
                     "Open in editor",
                     "Open in diff tool",
                     "Copy entity reference",
+                    "View remotely",
                 ]),
             )
         };
@@ -2276,6 +2310,7 @@ mod tests {
                         "^1 v0",
                         title(Action::CompareCommitVsParent),
                         title(Action::GraphCreateBranch),
+                        title(Action::ViewRemotely),
                     ])
                 ),
                 (
@@ -2306,6 +2341,7 @@ mod tests {
                         title(Action::GraphFocusBranches),
                         title(Action::CompareVsBranch),
                         title(Action::GraphCheckout),
+                        title(Action::ViewRemotely),
                     ])
                 ),
                 (
@@ -2316,6 +2352,7 @@ mod tests {
                         title(Action::Pull),
                         title(Action::Push),
                         title(Action::Fetch),
+                        title(Action::ViewRemotely),
                     ])
                 ),
             ]
@@ -2368,6 +2405,7 @@ mod tests {
                     title(Action::GraphCreateBranch),
                     title(Action::GraphCheckout),
                     title(Action::GraphMerge),
+                    title(Action::ViewRemotely),
                 ])
             )]
         );
@@ -2382,6 +2420,7 @@ mod tests {
                     "app/.worktrees/old",
                     "old",
                     title(Action::OpenPullRequest),
+                    title(Action::ViewRemotely),
                     title(Action::RemoveWorktree),
                     title(Action::CopyEntityReference),
                 ])
@@ -2640,6 +2679,7 @@ mod tests {
                         title(Action::Pull),
                         title(Action::Push),
                         title(Action::Fetch),
+                        title(Action::ViewRemotely),
                     ])
                 ),
                 (
@@ -2680,7 +2720,8 @@ mod tests {
                     meaning(K::ChipTag),
                     "v0",
                     "tag",
-                    title(Action::GraphCheckout)
+                    title(Action::GraphCheckout),
+                    title(Action::ViewRemotely),
                 ])
             )]
         );
@@ -2706,6 +2747,7 @@ mod tests {
                     title(Action::Pull),
                     title(Action::Push),
                     title(Action::Fetch),
+                    title(Action::ViewRemotely),
                 ])
             )]
         );
@@ -2727,8 +2769,346 @@ mod tests {
                     "local branch",
                     title(Action::GraphFocusBranches),
                     title(Action::CompareVsBranch),
+                    title(Action::ViewRemotely),
                 ])
             )]
+        );
+    }
+
+    fn view(checkout: &str, target: RemoteTarget) -> Effect {
+        Effect::ViewRemotely {
+            checkout: PathBuf::from(checkout),
+            target,
+        }
+    }
+
+    /// Focus the View remotely line of the pinned popover.
+    fn focus_view_remotely_line(app: &mut AppState) {
+        let sections = app.open_popover_sections();
+        let line = flat_lines(&sections)
+            .iter()
+            .position(|line| line.copy_text() == title(Action::ViewRemotely))
+            .expect("View remotely line");
+        app.popover.as_mut().expect("pinned").focus_line = line;
+        assert_eq!(app.popover_run_action(), Some(Action::ViewRemotely));
+    }
+
+    /// The View remotely line opens its section's entity: a tag chip on a
+    /// commit row opens the tag, not the commit. Enter closes the popover.
+    #[test]
+    fn a_tag_chip_view_remotely_line_opens_the_tag_not_the_commit() {
+        let mut app = chip_graph_app();
+        focus(&mut app, "repo:app");
+        app.graph_cursor = 3;
+        paint(&mut app);
+        let root = format!("commit:{G_ROOT}");
+        let tag = chip_hit(&app, IconKind::ChipTag, &root);
+        app.pin_icon(&tag);
+        assert_eq!(title(Action::ViewRemotely), "View remotely");
+        focus_view_remotely_line(&mut app);
+        let mut twin = app.clone();
+        twin.close_popover();
+        assert_eq!(
+            twin.dispatch(Action::ViewRemotely),
+            view("app", RemoteTarget::Commit(G_ROOT.into())),
+            "the key on the row opens the commit"
+        );
+        assert_eq!(
+            app.dispatch(Action::PopoverRun),
+            view("app", RemoteTarget::Tag("v0".into()))
+        );
+        assert!(app.popover.is_none(), "Enter closes, then runs");
+    }
+
+    /// A release on the View remotely line runs it on the line's section,
+    /// as a press then release on any action line does.
+    #[test]
+    fn a_release_on_the_view_remotely_line_opens_the_section_target() {
+        use super::super::super::event_pump::{classify_busy_dispatch, BusyAction};
+        let mut app = graph_app();
+        focus(&mut app, "repo:app");
+        // The own row of worktree `app/.worktrees/old` on branch `old`.
+        app.graph_cursor = 4;
+        app.dispatch(Action::PopoverOpenFocused);
+        paint(&mut app);
+        let painted = app.layout.popover.clone().expect("painted");
+        let sections = app.open_popover_sections();
+        let lines = flat_lines(&sections);
+        let (y, _) = *painted
+            .lines
+            .iter()
+            .find(|(_, index)| lines[*index].copy_text() == title(Action::ViewRemotely))
+            .expect("View remotely line");
+        app.dispatch(Action::Click {
+            col: painted.inner.x + 2,
+            row: y,
+        });
+        assert_eq!(app.popover_release_action(), Some(Action::ViewRemotely));
+        assert_eq!(
+            classify_busy_dispatch(&Action::Release, app.popover_release_action().as_ref()),
+            BusyAction::Handle
+        );
+        assert_eq!(
+            app.dispatch(Action::Release),
+            view("app/.worktrees/old", RemoteTarget::Branch("old".into()))
+        );
+        assert!(app.popover.is_none());
+    }
+
+    /// The uncommitted row's footer shows HEAD's chips. The row itself is
+    /// local only, but a chip's View remotely line opens the chip's branch
+    /// and paints no gate reason.
+    #[test]
+    fn a_footer_chip_line_is_not_refused_as_the_uncommitted_row() {
+        let mut app = chip_graph_app();
+        focus(&mut app, "repo:app");
+        app.graph_cursor = 0;
+        paint(&mut app);
+        let footer = chip_hit(&app, IconKind::ChipLocal, "uncommitted");
+        app.pin_icon(&footer);
+        let command = command_for(&Action::ViewRemotely).expect("palette row");
+        assert_eq!(
+            app.palette_disabled_reason(command).as_deref(),
+            Some(UNCOMMITTED_LOCAL_ONLY),
+            "the list focus refuses"
+        );
+        assert_eq!(
+            app.popover_line_refusal(command, footer.kind, &footer.target),
+            None
+        );
+        paint(&mut app);
+        let line = popover_rows(&app)
+            .into_iter()
+            .find(|line| line.contains(command.title))
+            .expect("painted View remotely line");
+        assert!(!line.contains(UNCOMMITTED_LOCAL_ONLY), "{line:?}");
+        focus_view_remotely_line(&mut app);
+        assert_eq!(
+            app.dispatch(Action::PopoverRun),
+            view("app", RemoteTarget::Branch("feat".into()))
+        );
+
+        // A highlight still refuses it, like every NoHighlight line.
+        app.diff_visual_anchor = Some(0);
+        assert_eq!(
+            app.popover_line_refusal(command, footer.kind, &footer.target)
+                .as_deref(),
+            Some("exit highlight first (Esc)")
+        );
+    }
+
+    #[test]
+    fn every_icon_target_names_its_own_remote_entity() {
+        use IconKind as K;
+        let mut app = chip_graph_app();
+        focus(&mut app, "repo:app");
+        app.graph.as_mut().unwrap().commits[0]
+            .refs
+            .push(GraphRef::remote("origin/side"));
+        let head = format!("commit:{G_HEAD}");
+        let root = format!("commit:{G_ROOT}");
+        let chip = |chip: PartTarget, row: &str| IconTarget::GraphChip {
+            row: row.to_string(),
+            chip,
+        };
+        let at = |app: &mut AppState, kind: IconKind, target: IconTarget| {
+            app.status = StatusMessage::default();
+            app.view_remotely_at(kind, &target)
+        };
+        let remote = chip(
+            PartTarget::Chip(vec![GraphRef::remote("origin/side")]),
+            &head,
+        );
+        assert_eq!(
+            at(&mut app, K::ChipRemote, remote),
+            view("app", RemoteTarget::RemoteBranch("origin/side".into())),
+            "a remote-tracking chip"
+        );
+        let merged = chip(
+            PartTarget::Chip(vec![
+                GraphRef::local("main"),
+                GraphRef::remote("origin/main"),
+            ]),
+            &head,
+        );
+        assert_eq!(
+            at(&mut app, K::ChipDefault, merged),
+            view("app", RemoteTarget::Branch("main".into())),
+            "a local and remote chip opens the local branch"
+        );
+        let marks = PartTarget::Marks {
+            branch: "main".into(),
+            checkout: true,
+            remote: Some("origin/main".into()),
+        };
+        assert_eq!(
+            at(&mut app, K::ChipCheckout, chip(marks, &head)),
+            view("app", RemoteTarget::Branch("main".into())),
+            "a checkout mark run"
+        );
+        assert_eq!(
+            at(
+                &mut app,
+                K::ChipDetachedHead,
+                chip(PartTarget::DetachedHead, "uncommitted")
+            ),
+            view("app", RemoteTarget::Commit(G_HEAD.into())),
+            "[HEAD] in the uncommitted footer is HEAD's commit"
+        );
+        assert_eq!(
+            at(
+                &mut app,
+                K::ChipDetachedHead,
+                chip(PartTarget::DetachedHead, &root)
+            ),
+            view("app", RemoteTarget::Commit(G_ROOT.into())),
+            "[HEAD] on a commit row is that row's commit"
+        );
+        assert_eq!(
+            at(
+                &mut app,
+                K::LinkedWorktree,
+                IconTarget::GraphWorktree("app/.worktrees/feat".into())
+            ),
+            view("app/.worktrees/feat", RemoteTarget::Branch("feat".into())),
+            "a worktree mark opens that worktree's branch"
+        );
+        assert_eq!(
+            at(&mut app, K::Ahead, IconTarget::GraphSync),
+            view("app", RemoteTarget::Branch("main".into()))
+        );
+        // A target on the row itself is the focused row: HEAD's commit.
+        assert_eq!(
+            at(
+                &mut app,
+                K::GraphHeadCommit,
+                IconTarget::GraphRow(head.clone())
+            ),
+            view("app", RemoteTarget::Commit(G_HEAD.into()))
+        );
+        assert!(app.status.is_empty());
+        assert_eq!(
+            at(
+                &mut app,
+                K::LinkedWorktree,
+                IconTarget::GraphWorktree("gone".into())
+            ),
+            Effect::None
+        );
+        assert_eq!(app.status, NOTHING_TO_VIEW);
+        assert_eq!(
+            at(
+                &mut app,
+                K::ChipDetachedHead,
+                chip(PartTarget::DetachedHead, "stash:gone")
+            ),
+            Effect::None,
+            "[HEAD] on a row with no commit"
+        );
+
+        // A detached sync header opens HEAD's commit.
+        app.graph.as_mut().unwrap().sync.as_mut().unwrap().branch = DETACHED_HEAD_BRANCH.into();
+        assert_eq!(
+            at(&mut app, K::Ahead, IconTarget::GraphSync),
+            view("app", RemoteTarget::Commit(G_HEAD.into()))
+        );
+    }
+
+    /// Run the View remotely line of the pinned section painted as `kind`.
+    fn run_view_remotely_in(app: &mut AppState, kind: IconKind) -> Effect {
+        let sections = app.open_popover_sections();
+        let line = super::section_lines(&sections)
+            .position(|(_, section, line)| {
+                section.icon == kind && line.copy_text() == title(Action::ViewRemotely)
+            })
+            .unwrap_or_else(|| panic!("no View remotely line in {kind:?}"));
+        app.popover.as_mut().expect("pinned").focus_line = line;
+        app.dispatch(Action::PopoverRun)
+    }
+
+    /// A one-checkout repo row paints its checkout's Branch glyph next to
+    /// the Repo glyph: the Branch line opens the branch, the Repo line the
+    /// repository home.
+    #[test]
+    fn a_one_checkout_repo_row_opens_the_branch_or_the_repo_by_section() {
+        use IconKind as K;
+        let mut app = app();
+        let icons: Vec<IconKind> = gh_on(&mut app, "repo:lib")
+            .into_iter()
+            .map(|(icon, _)| icon)
+            .collect();
+        assert!(
+            icons.contains(&K::Branch) && icons.contains(&K::Repo),
+            "{icons:?}"
+        );
+        assert_eq!(
+            run_view_remotely_in(&mut app, K::Branch),
+            view("lib", RemoteTarget::Branch("feature".into()))
+        );
+        assert!(app.popover.is_none());
+        gh_on(&mut app, "repo:lib");
+        assert_eq!(
+            run_view_remotely_in(&mut app, K::Repo),
+            view("lib", RemoteTarget::Repo)
+        );
+        let command = command_for(&Action::ViewRemotely).expect("palette row");
+        let target = IconTarget::TreeRow("repo:lib".into());
+        assert_eq!(app.popover_line_refusal(command, K::Branch, &target), None);
+
+        // A repo row whose one checkout is a linked worktree paints the
+        // Linked worktree glyph: its line opens that checkout's branch.
+        let mut wt = repo("wt", SyncStatus::Ahead, "ahead by 1 commits");
+        wt.branch = "side".into();
+        wt.checkout_kind = CheckoutKind::Linked;
+        wt.primary_repo = Some("elsewhere".into());
+        let snapshot = build_workspace_snapshot(&[wt], &[], false, &[]);
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let row = app
+            .rows
+            .iter()
+            .find(|row| row.repo.as_deref() == Some("wt"));
+        let row = row.expect("wt row");
+        assert_eq!(row.kind, NodeKind::Repo);
+        let id = row.id.clone();
+        let sections = gh_on(&mut app, &id);
+        assert!(
+            sections.iter().any(|(icon, _)| *icon == K::LinkedWorktree),
+            "{id}: {sections:?}"
+        );
+        assert_eq!(
+            run_view_remotely_in(&mut app, K::LinkedWorktree),
+            view("wt", RemoteTarget::Branch("side".into()))
+        );
+    }
+
+    /// Each mark, `[HEAD]`, and sync section ends with View remotely, which
+    /// opens the branch or commit it names.
+    #[test]
+    fn marks_head_and_sync_sections_open_their_own_entity() {
+        use IconKind as K;
+        let mut app = chip_graph_app();
+        focus(&mut app, "repo:app");
+        app.graph_cursor = 2;
+        paint(&mut app);
+        let head = format!("commit:{G_HEAD}");
+        let checkout = chip_hit(&app, K::ChipCheckout, &head);
+        app.pin_icon(&checkout);
+        assert_eq!(
+            run_view_remotely_in(&mut app, K::ChipCheckout),
+            view("app", RemoteTarget::Branch("main".into()))
+        );
+        paint(&mut app);
+        let sync = app
+            .layout
+            .icon_hits
+            .iter()
+            .find(|hit| hit.target == IconTarget::GraphSync)
+            .cloned()
+            .expect("sync header hit");
+        app.pin_icon(&sync);
+        assert_eq!(
+            run_view_remotely_in(&mut app, sync.kind),
+            view("app", RemoteTarget::Branch("main".into()))
         );
     }
 
@@ -2821,6 +3201,7 @@ mod tests {
                     "detached at aaa1111",
                     title(Action::Branch),
                     title(Action::GraphCreateBranch),
+                    title(Action::ViewRemotely),
                 ])
             )]
         );

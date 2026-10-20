@@ -14,6 +14,7 @@ mod line_blame;
 mod pan;
 mod popover;
 mod pull_request;
+mod remote_view;
 mod scroll_glide;
 
 pub(crate) use pull_request::PrDetailState;

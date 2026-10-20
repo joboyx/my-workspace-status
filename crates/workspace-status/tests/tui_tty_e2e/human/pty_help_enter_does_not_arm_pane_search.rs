@@ -24,10 +24,17 @@ fn pane_search_prompt(screen: &str) -> bool {
         && screen.contains("n/N after Enter")
 }
 
+/// First painted row of the Esc help entry (`back / unfocus · right-click ·
+/// never quit`), which matches `/quit`. The VIEW column wraps `quit` onto
+/// its own row at the default size, so the needle is the part that stays
+/// on the first row; the search highlights the whole entry.
+const ESC_QUIT_ROW: &str = "right-click · never";
+
 /// Help columns wrap at their own widths inside the centered box, so each
 /// needle is a phrase that stays on one painted row at the default size
 /// (`search focused`, not `search focused pane`; `next / prev` and
-/// `match (after` sit on two rows).
+/// `(after Enter)`, since `match` moves between those two rows as the
+/// column widths change; see [`ESC_QUIT_ROW`]).
 fn help_overlay_open(screen: &str) -> bool {
     screen.contains("MOVE")
         && screen.contains("GIT")
@@ -35,9 +42,9 @@ fn help_overlay_open(screen: &str) -> bool {
         && screen.contains("stage scope")
         && screen.contains("search focused")
         && screen.contains("press twice")
-        && screen.contains("never quit")
+        && screen.contains(ESC_QUIT_ROW)
         && screen.contains("next / prev")
-        && screen.contains("match (after")
+        && screen.contains("(after Enter)")
 }
 
 fn help_searching(screen: &str, query: &str) -> bool {
@@ -51,16 +58,16 @@ fn help_searching(screen: &str, query: &str) -> bool {
 fn help_quit_rows_highlighted(tui: &PtySession) -> bool {
     let (r, g, b) = HELP_SEARCH_FILTER_BG;
     tui.needle_has_bg("press twice", r, g, b)
-        && tui.needle_has_bg("never quit", r, g, b)
+        && tui.needle_has_bg(ESC_QUIT_ROW, r, g, b)
         && needle_has_filter_fg(tui, "press twice")
-        && needle_has_filter_fg(tui, "never quit")
+        && needle_has_filter_fg(tui, ESC_QUIT_ROW)
         && tui.needle_lacks_bg("stage scope", r, g, b)
 }
 
 fn help_quit_rows_unhighlighted(tui: &PtySession) -> bool {
     let (r, g, b) = HELP_SEARCH_FILTER_BG;
     tui.needle_lacks_bg("press twice", r, g, b)
-        && tui.needle_lacks_bg("never quit", r, g, b)
+        && tui.needle_lacks_bg(ESC_QUIT_ROW, r, g, b)
         && tui.needle_lacks_bg("stage scope", r, g, b)
 }
 

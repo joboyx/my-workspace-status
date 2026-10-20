@@ -86,6 +86,7 @@ mod pty_graph_h_l_pans_long_subject;
 mod pty_graph_hscrollbar_thumb_drag;
 mod pty_graph_icon_popover;
 mod pty_graph_merge_creates_commit;
+mod pty_gw_views_focused_entity_remotely;
 mod pty_h_l_pan_graph_or_file_diff;
 mod pty_help_enter_does_not_arm_pane_search;
 mod pty_help_overlay;

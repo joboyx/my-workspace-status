@@ -339,7 +339,7 @@ impl AppState {
     /// row's own check, with the copy its key gives. `n` / `N` need an
     /// armed search, the subtree fold needs the tree focused, the tab moves
     /// need another tab; `space` and `E` need a changed inner file; `;`,
-    /// `V`, and `'` need a target.
+    /// `V`, `'`, and `gw` need a target.
     pub(crate) fn explorer_tab_palette_reason(&self, command: &PaletteCommand) -> Option<String> {
         let highlighted = self.diff_visual_anchor.is_some();
         match (command.scope, highlighted) {
@@ -382,6 +382,7 @@ impl AppState {
                 .current_entity_reference()
                 .is_none()
                 .then(|| "no copy target".into()),
+            Action::ViewRemotely => self.view_remotely_refusal(),
             _ => None,
         }
     }
@@ -1098,7 +1099,7 @@ impl AppState {
     /// path (or, with no stored cursor yet, the first row). `None` while
     /// the cursor path is not listed yet: `cursor_index` then stands in an
     /// ancestor or the first row, which must never preview.
-    fn explorer_resolved_cursor_row(&self, tab_id: u64) -> Option<ExplorerRow> {
+    pub(super) fn explorer_resolved_cursor_row(&self, tab_id: u64) -> Option<ExplorerRow> {
         let tab = self.tabs.get_explorer_id(tab_id)?;
         let rows = tab.tree.rows(&self.explorer_status(&tab.checkout));
         let index = tab.tree.cursor_index(&rows)?;
@@ -4296,6 +4297,57 @@ mod tests {
         assert!(has_file_load(&open), "{open:?}");
         assert_eq!(inners(&app).len(), 2, "no duplicate");
         let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn view_remotely_opens_the_tree_row_or_the_open_file_line() {
+        use super::super::super::remote_view::{FileRev, RemoteTarget};
+        let mut app = state();
+        open_root(&mut app);
+        let (tab_id, gen, ..) = load_of(&app.dispatch(Action::MoveToEnd));
+        assert!(app.apply_explorer_preview(tab_id, gen, text(&["# app", "", "more"])));
+        let page = |path: &str, line: Option<u32>, dir: bool| Effect::ViewRemotely {
+            checkout: PathBuf::from("app"),
+            target: RemoteTarget::File {
+                rev: FileRev::Branch("main".into()),
+                path: path.into(),
+                line,
+                dir,
+            },
+        };
+
+        // Tree focused: the file row, then a folder row.
+        assert_eq!(cursor_rel(&app), "README.md");
+        assert_eq!(
+            app.dispatch(Action::ViewRemotely),
+            page("README.md", None, false)
+        );
+        app.dispatch(Action::MoveToStart);
+        assert_eq!(cursor_rel(&app), "src");
+        assert_eq!(app.dispatch(Action::ViewRemotely), page("src", None, true));
+        assert_eq!(palette_reason(&app, Action::ViewRemotely), None);
+
+        // File pane focused: the open file at the cursor line (1-based).
+        app.dispatch(Action::FocusRight);
+        app.tabs.active_file_view_mut().expect("file view").cursor = 2;
+        assert_eq!(
+            app.dispatch(Action::ViewRemotely),
+            page("README.md", Some(3), false)
+        );
+
+        // A changed file's diff: the focused row's new-side line.
+        let diff = super::super::super::diff::DiffContent::from_unified("@@ -0,0 +1 @@\n+new\n");
+        app.open_loaded_inner_diff("app", "new.txt", diff);
+        app.focus = FocusPane::Right;
+        app.diff_cursor = app
+            .current_diff_rows()
+            .iter()
+            .position(|row| matches!(row, super::super::super::diff::DiffRow::Line { left, .. } if left.text == "new"))
+            .expect("added row");
+        assert_eq!(
+            app.dispatch(Action::ViewRemotely),
+            page("new.txt", Some(1), false)
+        );
     }
 
     #[test]

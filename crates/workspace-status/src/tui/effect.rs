@@ -72,6 +72,7 @@ use super::ops::{
 use super::pull_request::{lookup, lookup_detail, PrDetailLookup, PrLookup};
 #[cfg(not(test))]
 use super::pull_request::{open_in_browser, run_cli};
+use super::remote_view::{self, RemoteTarget};
 use super::scheduler::{ApplyDecision, Scheduler, SpawnKind, UserTag};
 use super::search_files::SEARCH_CHUNK_BUDGET;
 use super::stash::{resolve_stash_menu_key, StashMenuKeyResult, StashOpId};
@@ -276,6 +277,13 @@ pub(crate) enum JobOutcome {
         branch: String,
         remote: Option<String>,
         lookup: PrLookup,
+        opened: bool,
+    },
+    /// "View remotely" check, then the browser open. `page` is the page URL,
+    /// or the status line that says why there is none; `opened` is true
+    /// when the browser started for it.
+    RemoteView {
+        page: Result<String, String>,
         opened: bool,
     },
     /// Day commit counts of activity key `key` for its tree sparkline.
@@ -860,6 +868,9 @@ pub(crate) struct Interpreter {
     blame_previous: Option<(u64, String, Box<crate::git::LineBlame>)>,
     /// Queued `gx` opens: checkout, branch. Each has its own slot.
     pr_opens: VecDeque<(PathBuf, String)>,
+    /// Queued "View remotely" opens: checkout, target. Each has its own
+    /// [`UserTag::PullRequest`] slot and runs after the queued `gx` opens.
+    remote_views: VecDeque<(PathBuf, RemoteTarget)>,
     /// Queued badge lookups: checkout, branch.
     pr_badges: VecDeque<(PathBuf, String)>,
     /// Queued popover detail fetches. They run before waiting badge
@@ -943,6 +954,7 @@ impl Interpreter {
             doctor_inflight: false,
             blame_previous: None,
             pr_opens: VecDeque::new(),
+            remote_views: VecDeque::new(),
             pr_badges: VecDeque::new(),
             pr_details: VecDeque::new(),
             pr_badges_running: 0,
@@ -1659,6 +1671,10 @@ impl Interpreter {
             }
             Effect::OpenPullRequest { repo, branch } => {
                 self.pr_opens.push_back((repo, branch));
+                self.sched.enqueue_user(UserTag::PullRequest);
+            }
+            Effect::ViewRemotely { checkout, target } => {
+                self.remote_views.push_back((checkout, target));
                 self.sched.enqueue_user(UserTag::PullRequest);
             }
             Effect::LookupPullRequests { targets } => {
@@ -2481,6 +2497,10 @@ impl Interpreter {
                 state.apply_pr_open(&repo, &branch, remote, lookup, opened);
                 self.mark();
             }
+            JobOutcome::RemoteView { page, opened } => {
+                state.apply_remote_view(page, opened);
+                self.mark();
+            }
             JobOutcome::ComparePicker { gen, repo, result } => {
                 self.sched.note_user_done(UserTag::Prepare);
                 let accepted = self.sched.accept_prepare_compare_result(gen);
@@ -2547,12 +2567,12 @@ impl Interpreter {
     }
 
     /// Queue `UserTag::PullRequest` slots for waiting badge lookups and
-    /// detail fetches, up to [`PR_BADGE_LOOKUPS_MAX`] on workers. `gx` opens
-    /// queue their own slot.
+    /// detail fetches, up to [`PR_BADGE_LOOKUPS_MAX`] on workers. `gx` and
+    /// "View remotely" opens queue their own slot.
     fn fill_pr_badge_slots(&mut self) {
         let free = PR_BADGE_LOOKUPS_MAX.saturating_sub(self.pr_badges_running);
         let waiting = self.pr_badges.len() + self.pr_details.len();
-        let wanted = self.pr_opens.len() + waiting.min(free);
+        let wanted = self.pr_opens.len() + self.remote_views.len() + waiting.min(free);
         for _ in self.sched.queued_user_tag(UserTag::PullRequest)..wanted {
             self.sched.enqueue_user(UserTag::PullRequest);
         }
@@ -3498,6 +3518,31 @@ impl Interpreter {
                                 lookup,
                                 opened,
                             }
+                        }),
+                    );
+                    return;
+                }
+                if let Some((checkout, target)) = self.remote_views.pop_front() {
+                    let open = self.pr_opener;
+                    spawn(
+                        id,
+                        Box::new(move || {
+                            // A job that starts after quit runs no git.
+                            if cancel.load(Ordering::Relaxed) {
+                                return JobOutcome::RemoteView {
+                                    page: Err(remote_view::OPEN_FAILED.to_string()),
+                                    opened: false,
+                                };
+                            }
+                            let page = remote_view::resolve(&cwd.join(&checkout), &target)
+                                .map(|(repo, page)| remote_view::page_url(&repo, &page));
+                            let opened = match &page {
+                                Ok(url) if !cancel.load(Ordering::Relaxed) => {
+                                    open(url, &cancel).is_ok()
+                                }
+                                Ok(_) | Err(_) => false,
+                            };
+                            JobOutcome::RemoteView { page, opened }
                         }),
                     );
                     return;
@@ -8582,6 +8627,171 @@ mod tests {
             "a job after the cancel gets the set flag"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    const VIEW_REMOTE: &str = "git@github.example.invalid:octo/demo.git";
+    const VIEW_BASE: &str = "https://github.example.invalid/octo/demo";
+
+    /// Real checkout `app` on `feature` with a GitHub-looking `origin` and
+    /// `refs/remotes/origin/feature` at HEAD (a stand-in for a push), focused
+    /// in the tree.
+    fn view_app(tag: &str) -> (PathBuf, AppState) {
+        let (root, mut state) = git_app_state(tag, "feature", false);
+        let dir = root.join("app");
+        crate::testutil::git(&dir, &["remote", "add", "origin", VIEW_REMOTE]);
+        crate::testutil::git(&dir, &["update-ref", "refs/remotes/origin/feature", "HEAD"]);
+        focus_repo(&mut state, "app");
+        (root, state)
+    }
+
+    /// Show `rows` as the graph of the focused repo, focus it, and put the
+    /// cursor on the first row `pick` accepts.
+    fn focus_graph_row(state: &mut AppState, model: GraphModel, pick: fn(&GraphRow) -> bool) {
+        let at = model
+            .visible_rows()
+            .iter()
+            .position(pick)
+            .expect("graph row");
+        state.graph = Some(model);
+        state.focus = FocusPane::Right;
+        assert!(state.graph_pane_focused());
+        state.graph_cursor = at;
+    }
+
+    /// "View remotely" on the focused row with the fake opener.
+    fn run_view_remotely(state: &mut AppState) -> Effect {
+        let mut interp = Interpreter::with_cap(4);
+        interp.pr_cli = cli_must_not_run;
+        interp.pr_opener = opener_ok;
+        let effect = state.dispatch(Action::ViewRemotely);
+        let opts = opts(state);
+        interp.interpret_sync(state, &opts, effect.clone(), &Action::ViewRemotely);
+        effect
+    }
+
+    #[test]
+    fn view_remotely_opens_the_repository_home() {
+        let (root, mut state) = view_app("ws-effect-view-repo");
+        let _ = opened_urls();
+        run_view_remotely(&mut state);
+        assert_eq!(opened_urls(), vec![VIEW_BASE.to_string()]);
+        assert_eq!(state.status, format!("opened {VIEW_BASE}"));
+        assert_eq!(state.status.kind(), StatusKind::Ok);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn view_remotely_opens_a_pushed_graph_commit_and_refuses_an_unpushed_one() {
+        let (root, mut state) = view_app("ws-effect-view-commit");
+        let dir = root.join("app");
+        let pushed = crate::git::exec_git(&["rev-parse", "HEAD"], &dir);
+        let _ = opened_urls();
+        focus_graph_row(&mut state, mini_graph(&[&pushed]), |row| {
+            matches!(row, GraphRow::Commit { .. })
+        });
+        run_view_remotely(&mut state);
+        let want = format!("{VIEW_BASE}/commit/{pushed}");
+        assert_eq!(opened_urls(), vec![want.clone()]);
+        assert_eq!(state.status, format!("opened {want}"));
+
+        std::fs::write(dir.join("local.txt"), "local\n").unwrap();
+        crate::testutil::git(&dir, &["add", "local.txt"]);
+        crate::testutil::git(&dir, &["commit", "-q", "-m", "local"]);
+        let local = crate::git::exec_git(&["rev-parse", "HEAD"], &dir);
+        focus_graph_row(&mut state, mini_graph(&[&local, &pushed]), |row| {
+            matches!(row, GraphRow::Commit { .. })
+        });
+        run_view_remotely(&mut state);
+        assert_eq!(
+            state.status,
+            format!("commit {} is not on origin", &local[..7])
+        );
+        assert_eq!(state.status.kind(), StatusKind::Warn);
+        assert!(opened_urls().is_empty(), "nothing opens");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn view_remotely_on_a_stash_row_says_local_only_and_queues_nothing() {
+        let (root, mut state) = view_app("ws-effect-view-stash");
+        let mut model = mini_graph(&["a".repeat(40).as_str()]);
+        model.stashes = vec![workspace_status_graph::Stash {
+            id: "5".repeat(40),
+            stash_ref: "stash@{0}".into(),
+            parent_id: Some("a".repeat(40)),
+            ..Default::default()
+        }];
+        focus_graph_row(&mut state, model, |row| matches!(row, GraphRow::Stash(_)));
+        let mut interp = Interpreter::with_cap(4);
+        interp.pr_opener = opener_ok;
+        let effect = state.dispatch(Action::ViewRemotely);
+        assert_eq!(effect, Effect::None);
+        assert_eq!(state.status, "stash@{0} is local only");
+        assert_eq!(state.status.kind(), StatusKind::Warn);
+        let opts = opts(&state);
+        interp.schedule(&mut state, &opts, effect, &Action::ViewRemotely);
+        assert!(interp.remote_views.is_empty());
+        assert_eq!(interp.sched.queued_user_tag(UserTag::PullRequest), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn view_remotely_shares_the_pr_slot_after_queued_gx_opens() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(8);
+        interp.pr_cli = cli_must_not_run;
+        interp.pr_opener = opener_ok;
+        for effect in [
+            Effect::ViewRemotely {
+                checkout: PathBuf::from("missing-view"),
+                target: RemoteTarget::Repo,
+            },
+            Effect::OpenPullRequest {
+                repo: PathBuf::from("missing-open"),
+                branch: "feature".into(),
+            },
+        ] {
+            schedule_effect(&mut interp, &mut state, effect, &Action::None);
+        }
+        assert_eq!(interp.sched.queued_user_tag(UserTag::PullRequest), 2);
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 2, "each open has its own slot");
+        let outcomes: Vec<JobOutcome> = jobs.into_iter().map(|(_, work)| work()).collect();
+        assert!(matches!(outcomes[0], JobOutcome::PullRequestOpen { .. }));
+        assert!(
+            matches!(
+                &outcomes[1],
+                JobOutcome::RemoteView { page: Err(text), opened: false }
+                    if text == remote_view::NO_REMOTE
+            ),
+            "a missing checkout has no remote"
+        );
+        assert!(opened_urls().is_empty());
+    }
+
+    #[test]
+    fn view_remotely_job_after_quit_runs_no_check() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        interp.pr_opener = opener_ok;
+        let effect = Effect::ViewRemotely {
+            checkout: PathBuf::from("missing-view"),
+            target: RemoteTarget::Repo,
+        };
+        schedule_effect(&mut interp, &mut state, effect, &Action::None);
+        interp.cancel_pull_request_jobs();
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 1);
+        let outcomes: Vec<JobOutcome> = jobs.into_iter().map(|(_, work)| work()).collect();
+        assert!(
+            matches!(
+                &outcomes[0],
+                JobOutcome::RemoteView { page: Err(text), opened: false }
+                    if text == remote_view::OPEN_FAILED
+            ),
+            "the remote check (NO_REMOTE here) never runs"
+        );
+        assert!(opened_urls().is_empty());
     }
 
     #[test]

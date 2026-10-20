@@ -327,6 +327,11 @@ mod tests {
             classify_busy_action(&Action::OpenPullRequest),
             BusyAction::Handle
         );
+        // `gw` too: its remote check and browser open run on the pool.
+        assert_eq!(
+            classify_busy_action(&Action::ViewRemotely),
+            BusyAction::Handle
+        );
     }
 
     #[test]

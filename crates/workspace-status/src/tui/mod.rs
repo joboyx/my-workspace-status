@@ -37,6 +37,7 @@ pub(crate) mod persist;
 mod popover;
 mod pull_request;
 mod quick_open;
+mod remote_view;
 mod render;
 mod scheduler;
 pub(crate) mod search;

@@ -64,7 +64,8 @@ pub enum UserTag {
     /// Doctor setup probe: PATH scan, read-only commands, config and store
     /// reads (latest-only slot).
     Doctor,
-    /// Forge PR lookup for a row badge, or a `gx` lookup then browser open.
+    /// Forge PR lookup for a row badge, a `gx` lookup then browser open, or
+    /// a "View remotely" remote check then browser open.
     PullRequest,
     /// Commit-activity counts for the tree sparklines. Low priority: it
     /// waits behind every user job ([`Scheduler::enqueue_background`]).

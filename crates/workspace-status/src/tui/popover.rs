@@ -434,7 +434,13 @@ fn tree_section(state: &AppState, kind: IconKind, row: &VisibleRow) -> Option<Po
         }
         IconKind::Repo => {
             repo_fields(state, row, &mut lines);
-            vec![Action::Fetch, Action::Pull, Action::Push, Action::Branch]
+            vec![
+                Action::Fetch,
+                Action::Pull,
+                Action::Push,
+                Action::Branch,
+                Action::ViewRemotely,
+            ]
         }
         IconKind::LinkedWorktree => {
             worktree_fields(
@@ -452,6 +458,7 @@ fn tree_section(state: &AppState, kind: IconKind, row: &VisibleRow) -> Option<Po
                 Action::RemoveWorktree,
                 Action::CompareVsDefault,
                 Action::CopyEntityReference,
+                Action::ViewRemotely,
             ]
         }
         IconKind::Branch => {
@@ -461,6 +468,7 @@ fn tree_section(state: &AppState, kind: IconKind, row: &VisibleRow) -> Option<Po
                 Action::DefaultBranch,
                 Action::GraphFocusBranches,
                 Action::CompareVsDefault,
+                Action::ViewRemotely,
             ]
         }
         IconKind::MergedIntoDefault | IconKind::OpenVsDefault => {
@@ -634,6 +642,7 @@ fn file_fields(
                 Action::Edit,
                 Action::ExternalDiff,
                 Action::CopyEntityReference,
+                Action::ViewRemotely,
             ]
         }
         kind if is_status_kind(kind) => {
@@ -1262,7 +1271,11 @@ fn graph_row_section(
                     graph_sync_role(sync.status),
                 ));
             }
-            vec![Action::CompareCommitVsParent, Action::GraphCreateBranch]
+            vec![
+                Action::CompareCommitVsParent,
+                Action::GraphCreateBranch,
+                Action::ViewRemotely,
+            ]
         }
         GraphRow::Commit { commit, .. } => {
             commit_fields(commit, now_unix, &mut lines);
@@ -1271,6 +1284,7 @@ fn graph_row_section(
                 Action::GraphCreateBranch,
                 Action::GraphCheckout,
                 Action::GraphMerge,
+                Action::ViewRemotely,
             ]
         }
         GraphRow::Stash(stash) => {
@@ -1404,8 +1418,8 @@ fn graph_worktree<'a>(rows: &'a SectionRows<'_>, path: &str) -> Option<(&'a Work
 }
 
 /// Linked-worktree glyph on the graph: the shared worktree fields. On a
-/// worktree row, Open PR when a branch is checked out, Remove worktree,
-/// and Copy entity reference. A worktree mark on a commit spacer lists no
+/// worktree row, Open PR and View remotely when a branch is checked out,
+/// Remove worktree, and Copy entity reference. A worktree mark on a commit spacer lists no
 /// action: selecting it selects the commit row, so those keys would act on
 /// the commit, not on the worktree.
 fn graph_worktree_section(
@@ -1444,7 +1458,7 @@ fn graph_worktree_section(
             .as_deref()
             .is_some_and(|branch| !is_detached_head_branch(branch))
         {
-            actions.push(Action::OpenPullRequest);
+            actions.extend([Action::OpenPullRequest, Action::ViewRemotely]);
         }
         actions.extend([Action::RemoveWorktree, Action::CopyEntityReference]);
     }
@@ -1553,7 +1567,9 @@ fn chip_role(kind: IconKind) -> SegRole {
 /// uncommitted row shows HEAD's chips, where those keys would act on the
 /// uncommitted row instead. Pull, Push, Fetch, and the pickers act on the
 /// checkout; off the tree the gates refuse them, and the line shows dim
-/// with the reason.
+/// with the reason. View remotely on a ref chip, a mark run, or `[HEAD]`
+/// opens that ref's page (or HEAD's commit) on every row (see
+/// `AppState::remote_target_for_icon`).
 fn graph_chip_section(
     state: &AppState,
     rows: &SectionRows<'_>,
@@ -1582,7 +1598,12 @@ fn graph_chip_section(
             (
                 kind,
                 SegRole::Heading,
-                vec![Action::Pull, Action::Push, Action::Fetch],
+                vec![
+                    Action::Pull,
+                    Action::Push,
+                    Action::Fetch,
+                    Action::ViewRemotely,
+                ],
             )
         }
         (
@@ -1606,13 +1627,14 @@ fn graph_chip_section(
                 format!("in sync with {remote}"),
                 SegRole::Dir,
             ));
-            // With the checkout section above, its Pull / Push / Fetch
-            // cover the run. A synced branch that is not checked out only
-            // fetches: pull and push act on the checked-out branch.
+            // With the checkout section above, its Pull / Push / Fetch and
+            // View remotely cover the run. A synced branch that is not
+            // checked out only fetches (pull and push act on the
+            // checked-out branch) and opens that branch remotely.
             let actions = if *checkout {
                 Vec::new()
             } else {
-                vec![Action::Fetch]
+                vec![Action::Fetch, Action::ViewRemotely]
             };
             let role = if *checkout {
                 SegRole::Heading
@@ -1634,6 +1656,8 @@ fn graph_chip_section(
             if on_commit_row {
                 actions.push(Action::GraphCreateBranch);
             }
+            // Opens the commit of the row (HEAD), on every row.
+            actions.push(Action::ViewRemotely);
             (kind, SegRole::Heading, actions)
         }
         (IconKind::ChipOverflow, PartTarget::Overflow(hidden)) => {
@@ -1693,6 +1717,8 @@ fn graph_chip_section(
             if on_commit_row {
                 actions.push(Action::GraphCheckout);
             }
+            // Opens this ref's page, not the row's commit.
+            actions.push(Action::ViewRemotely);
             (kind, role, actions)
         }
         _ => return None,
@@ -1712,9 +1738,9 @@ fn graph_chip_section(
 }
 
 /// The graph sync header: branch, ahead and behind counts, and the state
-/// in words; Pull, Push, Fetch. The kind follows the live state
-/// ([`graph_sync_kind`]), so a pinned header popover shows a fetch that
-/// moved it.
+/// in words; Pull, Push, Fetch, View remotely (HEAD's branch). The kind
+/// follows the live state ([`graph_sync_kind`]), so a pinned header
+/// popover shows a fetch that moved it.
 fn graph_sync_section(state: &AppState) -> Option<PopoverSection> {
     let sync = state.graph.as_ref()?.sync.as_ref()?;
     let kind = graph_sync_kind(sync.status);
@@ -1754,9 +1780,14 @@ fn graph_sync_section(state: &AppState) -> Option<PopoverSection> {
     }
     lines.push(role_field("state", words, role));
     lines.extend(
-        [Action::Pull, Action::Push, Action::Fetch]
-            .iter()
-            .filter_map(PopoverLine::action),
+        [
+            Action::Pull,
+            Action::Push,
+            Action::Fetch,
+            Action::ViewRemotely,
+        ]
+        .iter()
+        .filter_map(PopoverLine::action),
     );
     Some(PopoverSection {
         icon: kind,
