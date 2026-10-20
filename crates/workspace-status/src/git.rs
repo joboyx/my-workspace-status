@@ -1295,14 +1295,23 @@ fn needs_upstream_publish(cwd: &Path, branch: &str) -> bool {
     &upstream[prefix.len()..] != branch
 }
 
-fn push_remote_name(cwd: &Path, branch: &str) -> String {
+/// Name of the remote `push` would use for `branch`.
+///
+/// `branch.<branch>.remote`, else the first configured remote (`git
+/// remote`), else `origin`. The name is not checked: it may name a remote
+/// that does not exist.
+pub fn push_remote_name(cwd: &Path, branch: &str) -> String {
     let key = format!("branch.{branch}.remote");
     let configured = exec_git(&["config", "--get", &key], cwd);
     if !configured.is_empty() {
         return configured;
     }
-    let remotes = exec_git(&["remote"], cwd);
-    remotes
+    first_remote_name(cwd)
+}
+
+/// The first configured remote (`git remote`), else `origin`.
+fn first_remote_name(cwd: &Path) -> String {
+    exec_git(&["remote"], cwd)
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
@@ -1310,18 +1319,123 @@ fn push_remote_name(cwd: &Path, branch: &str) -> String {
         .to_string()
 }
 
-/// Fetch URL of the remote that `branch` pushes to, or `None`.
+/// Name of the remote for an entity of the whole checkout (repo home,
+/// commit, tag).
 ///
-/// The remote is the one `push` would use: `branch.<branch>.remote`, else
-/// the first configured remote, else `origin`. The URL comes from
-/// `git remote get-url <name>`, so `url.<base>.insteadOf` rewrites apply.
-/// `None` when that remote does not exist or git prints no URL.
-pub fn remote_url_for_branch(cwd: &Path, branch: &str) -> Option<String> {
-    let remote = push_remote_name(cwd, branch);
-    exec_git_stdout(&["remote", "get-url", &remote], cwd)
+/// The push remote of the current branch (`symbolic-ref --short -q HEAD`,
+/// then [`push_remote_name`]). On a detached HEAD: the first configured
+/// remote, else `origin`. The name is not checked.
+pub fn checkout_remote_name(cwd: &Path) -> String {
+    let current = exec_git(&["symbolic-ref", "--short", "-q", "HEAD"], cwd);
+    if current.is_empty() {
+        first_remote_name(cwd)
+    } else {
+        push_remote_name(cwd, &current)
+    }
+}
+
+/// Split a remote-tracking short name such as `origin/feature/x` into the
+/// remote and the branch on it: `("origin", "feature/x")`.
+///
+/// The remote is the longest configured remote (`git remote`) whose name
+/// followed by `/` starts `short_ref`, so a remote named `team/a` wins over
+/// `team`. `None` when no configured remote matches or the branch part is
+/// empty.
+pub fn split_remote_ref(cwd: &Path, short_ref: &str) -> Option<(String, String)> {
+    exec_git(&["remote"], cwd)
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .filter_map(|name| {
+            let rest = short_ref.strip_prefix(name)?.strip_prefix('/')?;
+            (!rest.is_empty()).then(|| (name.to_string(), rest.to_string()))
+        })
+        .max_by_key(|(name, _)| name.len())
+}
+
+/// Fetch URL of remote `remote` (`git remote get-url <remote>`), or `None`.
+///
+/// `url.<base>.insteadOf` rewrites apply. `None` when the remote does not
+/// exist or git prints no URL.
+pub fn remote_url(cwd: &Path, remote: &str) -> Option<String> {
+    exec_git_stdout(&["remote", "get-url", remote], cwd)
         .ok()
         .map(|url| url.trim().to_string())
         .filter(|url| !url.is_empty())
+}
+
+/// Fetch URL of the remote that `branch` pushes to, or `None`.
+///
+/// The remote is the one `push` would use ([`push_remote_name`]). The URL
+/// comes from [`remote_url`].
+pub fn remote_url_for_branch(cwd: &Path, branch: &str) -> Option<String> {
+    remote_url(cwd, &push_remote_name(cwd, branch))
+}
+
+/// Name of local `branch` on remote `remote`.
+///
+/// When `branch.<branch>.remote` is `remote` and `branch.<branch>.merge` is
+/// `refs/heads/<name>`, the upstream `<name>` (a branch can track a
+/// different name). Otherwise `branch` itself, the name a first push gives.
+pub fn remote_branch_name(cwd: &Path, branch: &str, remote: &str) -> String {
+    let remote_key = format!("branch.{branch}.remote");
+    let merge_key = format!("branch.{branch}.merge");
+    if exec_git(&["config", "--get", &remote_key], cwd) == remote {
+        let merge = exec_git(&["config", "--get", &merge_key], cwd);
+        if let Some(name) = merge.strip_prefix("refs/heads/").filter(|n| !n.is_empty()) {
+            return name.to_string();
+        }
+    }
+    branch.to_string()
+}
+
+/// True when the remote-tracking ref `refs/remotes/<remote>/<branch>`
+/// exists (`show-ref --verify --quiet`). Local only: it reads what the last
+/// fetch or push left.
+pub fn remote_branch_exists(cwd: &Path, remote: &str, branch: &str) -> bool {
+    let full = format!("refs/remotes/{remote}/{branch}");
+    exec_git_status(&["show-ref", "--verify", "--quiet", &full], cwd) == 0
+}
+
+/// True when some remote-tracking branch of `remote` contains commit `sha`
+/// (`for-each-ref --count=1 --contains <sha> refs/remotes/<remote>/`).
+///
+/// Local only: it reads the remote-tracking refs. An unknown `sha` is
+/// `false`.
+pub fn commit_on_remote(cwd: &Path, remote: &str, sha: &str) -> bool {
+    let refs = format!("refs/remotes/{remote}/");
+    let args = [
+        "for-each-ref",
+        "--count=1",
+        "--contains",
+        sha,
+        "--format=%(refname)",
+        &refs,
+    ];
+    !exec_git(&args, cwd).is_empty()
+}
+
+/// True when `<rev>:<path>` names an object (`cat-file -e`): a file or a
+/// directory at `path` in `rev`. An empty `path` is the root tree.
+pub fn rev_has_path(cwd: &Path, rev: &str, path: &str) -> bool {
+    let spec = format!("{rev}:{path}");
+    exec_git_status(&["cat-file", "-e", &spec], cwd) == 0
+}
+
+/// Whether remote `remote` has tag `tag`, asked over the network with
+/// `ls-remote --tags --exit-code <remote> refs/tags/<tag>`.
+///
+/// `Some(true)` on exit 0, `Some(false)` on exit 2 (no matching ref),
+/// `None` when the check failed (no answer, auth failure, timeout). The run
+/// has the remote deadlines of [`git_output`].
+pub fn remote_has_tag(cwd: &Path, remote: &str, tag: &str) -> Option<bool> {
+    let pattern = format!("refs/tags/{tag}");
+    let args = ["ls-remote", "--tags", "--exit-code", remote, &pattern];
+    match exec_git_status(&args, cwd) {
+        0 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
 }
 
 /// Stash worktree changes. Includes untracked files (`-u`).
@@ -4493,6 +4607,166 @@ filename new.txt
             "configured remote that does not exist"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A repo with a local bare `origin` (by file path) that has `main`
+    /// pushed. Returns `(repo, bare)`.
+    fn repo_with_bare_origin(prefix: &str) -> (PathBuf, PathBuf) {
+        let dir = unique_dir(prefix);
+        let bare = unique_dir(&format!("{prefix}-bare"));
+        init_repo(&dir);
+        git(
+            &dir,
+            &["init", "-q", "--bare", bare.to_str().expect("utf-8 path")],
+        );
+        git(
+            &dir,
+            &[
+                "remote",
+                "add",
+                "origin",
+                bare.to_str().expect("utf-8 path"),
+            ],
+        );
+        git(&dir, &["push", "-q", "-u", "origin", "main"]);
+        (dir, bare)
+    }
+
+    #[test]
+    fn remote_view_remote_names_follow_branch_then_current_then_first() {
+        let dir = unique_dir("ws-git-remote-view-names");
+        init_repo(&dir);
+        assert_eq!(checkout_remote_name(&dir), "origin", "no remote: origin");
+        git(&dir, &["remote", "add", "team", "/srv/git/team.git"]);
+        // `git remote add` refuses a name nested under another remote, but a
+        // hand-written config can still hold both.
+        git(&dir, &["config", "remote.team/a.url", "/srv/git/a.git"]);
+        assert_eq!(checkout_remote_name(&dir), "team", "first remote");
+        git(&dir, &["config", "branch.main.remote", "team/a"]);
+        assert_eq!(
+            checkout_remote_name(&dir),
+            "team/a",
+            "current branch remote"
+        );
+        git(&dir, &["checkout", "-q", "--detach"]);
+        assert_eq!(checkout_remote_name(&dir), "team", "detached: first remote");
+
+        assert_eq!(
+            split_remote_ref(&dir, "team/a/feature/x"),
+            Some(("team/a".into(), "feature/x".into())),
+            "longest remote name wins"
+        );
+        assert_eq!(
+            split_remote_ref(&dir, "team/feature"),
+            Some(("team".into(), "feature".into()))
+        );
+        assert_eq!(split_remote_ref(&dir, "origin/main"), None);
+        assert_eq!(split_remote_ref(&dir, "team/"), None);
+        assert_eq!(
+            remote_url(&dir, "team").as_deref(),
+            Some("/srv/git/team.git")
+        );
+        assert_eq!(remote_url(&dir, "gone"), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remote_view_branch_presence_and_renamed_upstream() {
+        let (dir, bare) = repo_with_bare_origin("ws-git-remote-view-branch");
+        assert_eq!(remote_branch_name(&dir, "main", "origin"), "main");
+        assert!(remote_branch_exists(&dir, "origin", "main"), "pushed");
+
+        git(&dir, &["branch", "local-only"]);
+        assert_eq!(
+            remote_branch_name(&dir, "local-only", "origin"),
+            "local-only"
+        );
+        assert!(
+            !remote_branch_exists(&dir, "origin", "local-only"),
+            "unpushed"
+        );
+
+        git(&dir, &["branch", "topic"]);
+        git(&dir, &["push", "-q", "origin", "topic:feature/renamed"]);
+        git(&dir, &["config", "branch.topic.remote", "origin"]);
+        git(
+            &dir,
+            &["config", "branch.topic.merge", "refs/heads/feature/renamed"],
+        );
+        assert_eq!(
+            remote_branch_name(&dir, "topic", "origin"),
+            "feature/renamed",
+            "branch.<b>.merge names the upstream"
+        );
+        assert_eq!(
+            remote_branch_name(&dir, "topic", "upstream"),
+            "topic",
+            "merge config of another remote does not apply"
+        );
+        assert!(remote_branch_exists(&dir, "origin", "feature/renamed"));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&bare);
+    }
+
+    #[test]
+    fn remote_view_commit_and_path_presence() {
+        let (dir, bare) = repo_with_bare_origin("ws-git-remote-view-commit");
+        let pushed = exec_git(&["rev-parse", "HEAD"], &dir);
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("src/new.rs"), "fn main() {}\n").unwrap();
+        git(&dir, &["add", "src/new.rs"]);
+        git(&dir, &["commit", "-q", "-m", "local"]);
+        let local = exec_git(&["rev-parse", "HEAD"], &dir);
+
+        assert!(commit_on_remote(&dir, "origin", &pushed), "pushed commit");
+        assert!(!commit_on_remote(&dir, "origin", &local), "local commit");
+        assert!(!commit_on_remote(&dir, "originx", &pushed), "other remote");
+        assert!(
+            !commit_on_remote(&dir, "origin", "not-a-sha"),
+            "unknown rev"
+        );
+
+        let remote_main = "refs/remotes/origin/main";
+        assert!(rev_has_path(&dir, remote_main, "README.md"), "file");
+        assert!(rev_has_path(&dir, remote_main, ""), "root tree");
+        assert!(
+            !rev_has_path(&dir, remote_main, "src/new.rs"),
+            "missing file"
+        );
+        assert!(!rev_has_path(&dir, remote_main, "src"), "missing dir");
+        assert!(rev_has_path(&dir, &local, "src"), "dir at the local commit");
+        assert!(rev_has_path(&dir, &local, "src/new.rs"));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&bare);
+    }
+
+    #[test]
+    fn remote_view_tag_presence_asks_the_remote() {
+        let (dir, bare) = repo_with_bare_origin("ws-git-remote-view-tag");
+        git(&dir, &["tag", "v1"]);
+        git(&dir, &["tag", "-a", "v2", "-m", "annotated"]);
+        git(&dir, &["push", "-q", "origin", "v1", "v2"]);
+        git(&dir, &["tag", "local-only"]);
+
+        assert_eq!(remote_has_tag(&dir, "origin", "v1"), Some(true));
+        assert_eq!(
+            remote_has_tag(&dir, "origin", "v2"),
+            Some(true),
+            "annotated"
+        );
+        assert_eq!(remote_has_tag(&dir, "origin", "local-only"), Some(false));
+        assert_eq!(
+            remote_has_tag(&dir, "origin", "v"),
+            Some(false),
+            "no prefix match"
+        );
+        git(
+            &dir,
+            &["remote", "add", "gone", "/nonexistent/ws-remote.git"],
+        );
+        assert_eq!(remote_has_tag(&dir, "gone", "v1"), None, "check failed");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&bare);
     }
 
     #[test]

@@ -37,6 +37,9 @@ pub(crate) mod persist;
 mod popover;
 mod pull_request;
 mod quick_open;
+// TODO: wired in by the view-remotely action (Effect::ViewRemotely); drop the allow then.
+#[cfg_attr(not(test), allow(dead_code))]
+mod remote_view;
 mod render;
 mod scheduler;
 pub(crate) mod search;

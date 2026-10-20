@@ -200,6 +200,30 @@ The GitLab project path and the branch are percent-encoded (everything except le
 
 **Opening.** The URL comes from the forge's answer. Only `http://` and `https://` URLs without whitespace, control characters, or the `cmd.exe` syntax characters `&`, `|`, `^`, `%`, `<`, `>`, and `"` are handed to a command (the Windows opener runs through `cmd`; no forge PR URL contains them); anything else fails with `could not open PR`. The command is `$BROWSER` when it is set and not blank (first non-empty `:`-separated entry, split on whitespace, `%s` replaced by the URL, else the URL appended), else `open` on macOS, `cmd /c start "" <url>` on Windows, and `xdg-open` elsewhere. It runs with null stdio and, on Unix, in its own process group. A platform opener has 3 s to exit: a non-zero exit inside that window is `could not open PR`, and one still running after it counts as success (some `xdg-open` setups stay up while the browser runs). A `$BROWSER` command counts as success once it starts. A detached thread reaps the child, so no zombie stays. Quoting inside `$BROWSER` is not interpreted: arguments with spaces do not work.
 
+## View remotely (`tui/remote_view.rs`, `git.rs`)
+
+"View remotely" opens the forge web page of the focused entity: the repository home, a branch tree, a commit, a tag, or a file or directory at a revision. `remote_view::resolve` picks the remote, reads its forge with `parse_remote` (above), and checks that the entity is on that remote before `page_url` builds the URL. It never writes to git or to the forge, and it blocks, so it runs on a worker thread, never on the TTY event thread.
+
+**Commands.** Every probe is read-only and lives in `git.rs`. All but `remote_has_tag` read local refs and config only, so a branch or commit counts as "on the remote" as of the last fetch or push.
+
+| Function | Command | Returns | Purpose |
+| --- | --- | --- | --- |
+| `push_remote_name(cwd, branch)` | `config --get branch.<branch>.remote`, else `remote` (first), else `origin` | `String` | Remote for a branch, or a file at a branch. The name is not checked. |
+| `checkout_remote_name(cwd)` | `symbolic-ref --short -q HEAD`, then `push_remote_name`; detached HEAD: `remote` (first), else `origin` | `String` | Remote for the repository home, a commit, a tag, or a file at a commit. |
+| `split_remote_ref(cwd, short_ref)` | `remote` | `Option<(remote, branch)>` | `origin/feature/x` → `("origin", "feature/x")`. The longest remote name followed by `/` wins. |
+| `remote_url(cwd, remote)` | `remote get-url <remote>` | `Option<String>` | The URL for `parse_remote`. `insteadOf` rewrites apply. `None` → `no remote for this checkout`. |
+| `remote_branch_name(cwd, branch, remote)` | `config --get branch.<branch>.remote`, `config --get branch.<branch>.merge` | `String` | The upstream name when the branch tracks a branch of that remote under another name, else the local name. |
+| `remote_branch_exists(cwd, remote, branch)` | `show-ref --verify --quiet refs/remotes/<remote>/<branch>` | `bool` | Branch is on the remote. |
+| `commit_on_remote(cwd, remote, sha)` | `for-each-ref --count=1 --contains <sha> --format=%(refname) refs/remotes/<remote>/` | `bool` | Some remote-tracking branch of that remote contains the commit. An unknown id is `false`. |
+| `rev_has_path(cwd, rev, path)` | `cat-file -e <rev>:<path>` | `bool` | File or directory exists at the revision (`refs/remotes/<remote>/<branch>` or a commit id). An empty path is the root tree. |
+| `remote_has_tag(cwd, remote, tag)` | `ls-remote --tags --exit-code <remote> refs/tags/<tag>` | `Option<bool>` | Exit 0 → on the remote, exit 2 → not on it, anything else → `None` (`could not check tag <t> on <remote>`). The only probe that touches the network; it runs under the remote deadlines (**Subprocess deadlines**). |
+
+**Order.** Remote, then URL and forge, then the presence check. A remote that is not GitHub or GitLab is refused before any presence check, so it never runs `ls-remote`. A file at a commit needs the commit on the remote first, then `cat-file -e <sha>:<path>`.
+
+**URLs.** GitHub paths follow `https://<host>/<path>`; GitLab adds `-/`. Repo: no suffix. Branch: `/tree/<b>`. Commit: `commit_url`. Tag: GitHub `/releases/tag/<t>`, GitLab `/-/tags/<t>`. File: `/blob/<rev>/<path>`, plus `#L<n>` when a line is focused. Directory: `/tree/<rev>/<path>`. Branch, tag, revision, and path are percent-encoded per `/`-separated segment (`encode_path`), so `feature/x` keeps its `/` and a space becomes `%20`.
+
+**Refusals.** A status-line warning, and nothing opens: `no remote for this checkout`, `<remote> is not a GitHub or GitLab remote`, `branch <b> is not on <remote>`, `commit <short> is not on <remote>`, `tag <t> is not on <remote>`, `could not check tag <t> on <remote>`, `file <path> is not on <remote>/<branch>` (or `on <remote> at <short>` for a file at a commit).
+
 ## Graph load (`tui/graph_load.rs`)
 
 Default window is 300 (`DEFAULT_GRAPH_WINDOW`). `--exclude=refs/stash` precedes `--all`. Graph `o` replaces `--all` with the selected local tips (`refs/heads/<name>`).
