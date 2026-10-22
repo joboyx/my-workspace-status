@@ -14,7 +14,7 @@ use crate::git::{exec_git_stdout, git_diff_args};
 use crate::snapshot::FileChange;
 
 use super::search::wrap_col_starts;
-use super::split::{side_by_side_column_widths, DiffMode};
+use super::split::{side_by_side_column_widths, DiffMode, DIFF_CURSOR_BAR_COLS};
 use super::tree::list_viewport_start;
 
 /// Untracked files above ~1 MB are not previewed: binary ones get the
@@ -1315,7 +1315,9 @@ pub fn cell_sign(kind: DiffCellKind) -> char {
 
 /// Columns left for file-diff text after the cursor bar (`▌` / space).
 pub fn diff_row_content_width(pane_width: usize) -> usize {
-    pane_width.saturating_sub(1).max(1)
+    pane_width
+        .saturating_sub(usize::from(DIFF_CURSOR_BAR_COLS))
+        .max(1)
 }
 
 /// Code-column width inside one cell (`width - gutter - " │ " - sign`).

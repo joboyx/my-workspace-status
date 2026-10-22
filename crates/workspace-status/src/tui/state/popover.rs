@@ -565,7 +565,7 @@ impl AppState {
             .find(|hit| hit.contains(col, row))
     }
 
-    fn pointer_in_popover(&self) -> bool {
+    pub(super) fn pointer_in_popover(&self) -> bool {
         let (Some((col, row)), Some(painted)) = (self.pointer, self.layout.popover.as_ref()) else {
             return false;
         };

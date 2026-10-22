@@ -83,7 +83,7 @@ use super::search_files::{
 };
 use super::split::{
     diff_paint_width, diff_split_rule_x, pane_widths, side_by_side_column_widths, DiffMode,
-    MIN_PANE_COLS, MIN_TERM_COLS, MIN_TERM_ROWS,
+    ResizeEdge, MIN_PANE_COLS, MIN_TERM_COLS, MIN_TERM_ROWS,
 };
 use super::state::{
     revert_scope, AppState, CompareRevertTarget, FocusPane, IconHit, LayoutHit, PendingConfirm,
@@ -600,11 +600,15 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
         && state.folder_summary().is_none()
         && state.diff_layout() == DiffMode::SideBySide
     {
-        let split = side_by_side_column_widths(right_inner.width, state.diff_split_fraction);
-        Some(diff_split_rule_x(right_inner.x, split.left_width))
+        Some(diff_split_rule_x(
+            right_inner.x,
+            right_inner.width,
+            state.diff_split_fraction,
+        ))
     } else {
         None
     };
+    paint_resize_edge_hover(frame, state, panes[0], left_pane.rows, right_inner);
 
     state.layout.right_y = right_inner.y;
     if state.is_compare_tab() {
@@ -1062,6 +1066,76 @@ fn bleed_flat_pad(frame: &mut Frame<'_>, pane: PaneArea) {
         if rows.right() > inner.right() {
             let bg = buf[(last, y)].bg;
             buf[(rows.right() - 1, y)].set_bg(bg);
+        }
+    }
+}
+
+/// Flat-pane resize line glyph: a right one-eighth block hugs the pane
+/// join from the left pane's right pad cell.
+const RESIZE_EDGE_FLAT: &str = "▕";
+
+/// [`RESIZE_EDGE_FLAT`] in ASCII mode.
+const RESIZE_EDGE_FLAT_ASCII: &str = "|";
+
+/// Light the resize edge [`AppState::hovered_resize_edge`] names, in the
+/// focus accent (`cursor`), over the pane body rows only.
+///
+/// Pane divider: boxed panes recolour the left pane's right border glyph;
+/// flat panes paint [`RESIZE_EDGE_FLAT`] in the left pane's right pad cell
+/// and keep its background. The right pane's left pad cell carries the
+/// selected-row bar, so it never changes. Side-by-side RULE: the
+/// [`DIFF_RULE`] glyphs in the recorded RULE column take the accent.
+///
+/// `left` is the left pane's outer rect and `left_rows` its body rows
+/// ([`PaneArea::rows`]). Call after both panes paint and the layout
+/// records this frame's hit geometry.
+fn paint_resize_edge_hover(
+    frame: &mut Frame<'_>,
+    state: &AppState,
+    left: Rect,
+    left_rows: Rect,
+    right_inner: Rect,
+) {
+    let Some(edge) = state.hovered_resize_edge() else {
+        return;
+    };
+    let accent = state.theme.palette().cursor;
+    let buf = frame.buffer_mut();
+    match edge {
+        ResizeEdge::Pane => {
+            // The left pane's last column: its right border when boxed,
+            // its right pad cell when flat.
+            let Some(x) = left.right().checked_sub(1) else {
+                return;
+            };
+            let flat = state.background == BackgroundMode::Paint;
+            let glyph = if state.ascii {
+                RESIZE_EDGE_FLAT_ASCII
+            } else {
+                RESIZE_EDGE_FLAT
+            };
+            for y in left_rows.top()..left_rows.bottom() {
+                let cell = &mut buf[(x, y)];
+                if flat {
+                    cell.set_symbol(glyph);
+                }
+                cell.set_fg(accent);
+            }
+        }
+        ResizeEdge::DiffSplit => {
+            let Some(x) = state.layout.diff_split_rule_x else {
+                return;
+            };
+            if x < right_inner.left() || x >= right_inner.right() {
+                return;
+            }
+            let rule = DIFF_RULE.to_string();
+            for y in right_inner.top()..right_inner.bottom() {
+                let cell = &mut buf[(x, y)];
+                if cell.symbol() == rule {
+                    cell.set_fg(accent);
+                }
+            }
         }
     }
 }
@@ -12216,6 +12290,14 @@ mod tests {
         assert_ne!(a_bg, b_bg, "cursor and search-match paint must differ");
     }
 
+    /// In-diff split fractions from 5 % to 95 % in 5 % steps, plus a few
+    /// off-grid ones: every one must record the painted rule column.
+    fn rule_sweep() -> impl Iterator<Item = f64> {
+        (1..20)
+            .map(|step| f64::from(step) * 0.05)
+            .chain([0.33, 0.47, 0.618])
+    }
+
     #[test]
     fn recorded_split_rule_is_the_painted_rule_column() {
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
@@ -12235,7 +12317,7 @@ mod tests {
                 "+new line".into(),
             ]),
         );
-        for fraction in [0.3, 0.5, 0.7] {
+        for fraction in rule_sweep() {
             state.diff_split_fraction = fraction;
             let mut terminal = Terminal::new(TestBackend::new(220, 20)).unwrap();
             terminal.draw(|frame| draw(frame, &mut state)).unwrap();
@@ -12254,19 +12336,12 @@ mod tests {
                 })
                 .collect();
             assert_eq!(painted.len(), 1, "one split rule: {}", buf_line(buf, y));
-            // The paint sizes the columns from the row width (less the
-            // cursor bar and the scrollbar column), the layout from the pane
-            // width, so off the default fraction the two can be one column
-            // apart. The ±1 grab band still covers the painted rule.
-            if fraction == crate::tui::split::DIFF_SPLIT_FRACTION {
-                assert_eq!(painted[0], rule, "{}", buf_line(buf, y));
-            } else {
-                assert!(
-                    painted[0].abs_diff(rule) <= 1,
-                    "fraction {fraction}: painted {} recorded {rule}",
-                    painted[0]
-                );
-            }
+            assert_eq!(
+                painted[0],
+                rule,
+                "fraction {fraction}: {}",
+                buf_line(buf, y)
+            );
         }
     }
 
@@ -13710,7 +13785,7 @@ mod tests {
         let mut state = painted(two_pane_diff_state());
         state.diff_mode = crate::tui::split::DiffMode::SideBySide;
         let rule_fg = state.theme.palette().border_dim;
-        for fraction in [0.3, 0.5, 0.7] {
+        for fraction in rule_sweep() {
             state.diff_split_fraction = fraction;
             let mut terminal = Terminal::new(TestBackend::new(220, 20)).unwrap();
             draw_state(&mut terminal, &mut state);
@@ -13727,15 +13802,12 @@ mod tests {
                 .filter(|&x| buf[(x, y)].symbol() == rule_glyph && buf[(x, y)].fg == rule_fg)
                 .collect();
             assert_eq!(painted.len(), 1, "one split rule: {}", buf_line(buf, y));
-            if fraction == crate::tui::split::DIFF_SPLIT_FRACTION {
-                assert_eq!(painted[0], rule, "{}", buf_line(buf, y));
-            } else {
-                assert!(
-                    painted[0].abs_diff(rule) <= 1,
-                    "fraction {fraction}: painted {} recorded {rule}",
-                    painted[0]
-                );
-            }
+            assert_eq!(
+                painted[0],
+                rule,
+                "fraction {fraction}: {}",
+                buf_line(buf, y)
+            );
         }
 
         let mut state = painted(long_panning_diff_state(1));
@@ -13747,6 +13819,121 @@ mod tests {
             Some(last_pane_row),
             "flat diff h-bar on the pane's last row"
         );
+    }
+
+    /// Cells whose symbol or style differ between two frames.
+    fn changed_cells(
+        before: &ratatui::buffer::Buffer,
+        after: &ratatui::buffer::Buffer,
+    ) -> Vec<(u16, u16)> {
+        let area = before.area;
+        let mut out = Vec::new();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                if before[(x, y)] != after[(x, y)] {
+                    out.push((x, y));
+                }
+            }
+        }
+        out
+    }
+
+    /// Side-by-side two-pane diff on `background`, glyphs per `ascii`, one
+    /// un-hovered frame painted (the pointer in the tree body).
+    fn resize_hover_state(
+        background: BackgroundMode,
+        ascii: bool,
+    ) -> (AppState, Terminal<TestBackend>, ratatui::buffer::Buffer) {
+        let mut state = two_pane_diff_state();
+        state.background = background;
+        state.ascii = ascii;
+        state.diff_mode = crate::tui::split::DiffMode::SideBySide;
+        let mut terminal = Terminal::new(TestBackend::new(220, 20)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        state.pointer = Some((5, state.layout.tree_y + 1));
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(state.hovered_resize_edge(), None);
+        let idle = terminal.backend().buffer().clone();
+        (state, terminal, idle)
+    }
+
+    #[test]
+    fn hovered_pane_divider_lights_the_left_pane_edge_boxed_and_flat() {
+        for (background, ascii) in [
+            (BackgroundMode::Terminal, false),
+            (BackgroundMode::Terminal, true),
+            (BackgroundMode::Paint, false),
+            (BackgroundMode::Paint, true),
+        ] {
+            let label = format!("{background:?} ascii={ascii}");
+            let (mut state, mut terminal, idle) = resize_hover_state(background, ascii);
+            let accent = state.theme.palette().cursor;
+            let x = state.layout.outer_tree_width - 1;
+            let (top, height) = (state.layout.tree_y, state.layout.tree_height);
+            state.pointer = Some((x, top + 2));
+            assert_eq!(
+                state.hovered_resize_edge(),
+                Some(crate::tui::split::ResizeEdge::Pane),
+                "{label}"
+            );
+            draw_state(&mut terminal, &mut state);
+            let lit = terminal.backend().buffer().clone();
+            let want: Vec<(u16, u16)> = (top..top + height).map(|y| (x, y)).collect();
+            assert_eq!(changed_cells(&idle, &lit), want, "{label}: body rows only");
+            for &(x, y) in &want {
+                let (was, now) = (&idle[(x, y)], &lit[(x, y)]);
+                assert_eq!(now.fg, accent, "{label} ({x},{y})");
+                assert_eq!(now.bg, was.bg, "{label} ({x},{y}) keeps its fill");
+                let glyph = match (background, ascii) {
+                    (BackgroundMode::Terminal, _) => was.symbol(),
+                    (BackgroundMode::Paint, false) => RESIZE_EDGE_FLAT,
+                    (BackgroundMode::Paint, true) => RESIZE_EDGE_FLAT_ASCII,
+                };
+                assert_eq!(now.symbol(), glyph, "{label} ({x},{y})");
+            }
+            if background == BackgroundMode::Paint {
+                // The right pane's left pad cell carries the row bar: untouched.
+                assert!(want.iter().all(|&(cx, _)| cx < state.layout.right_x));
+            }
+
+            state.pointer = Some((5, top + 1));
+            draw_state(&mut terminal, &mut state);
+            assert_eq!(
+                terminal.backend().buffer(),
+                &idle,
+                "{label}: off the edge paints as before"
+            );
+        }
+    }
+
+    #[test]
+    fn hovered_side_by_side_rule_lights_the_rule_column_boxed_and_flat() {
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            let (mut state, mut terminal, idle) = resize_hover_state(background, false);
+            let accent = state.theme.palette().cursor;
+            let rule = state.layout.diff_split_rule_x.expect("rule");
+            let y = first_row_with(&idle, "old line").expect("diff row");
+            state.pointer = Some((rule + 1, y));
+            assert_eq!(
+                state.hovered_resize_edge(),
+                Some(crate::tui::split::ResizeEdge::DiffSplit),
+                "{background:?}"
+            );
+            draw_state(&mut terminal, &mut state);
+            let lit = terminal.backend().buffer().clone();
+            assert_eq!(
+                changed_cells(&idle, &lit),
+                vec![(rule, y)],
+                "{background:?}"
+            );
+            assert_eq!(lit[(rule, y)].symbol(), DIFF_RULE.to_string());
+            assert_eq!(lit[(rule, y)].fg, accent, "{background:?}");
+            assert_eq!(lit[(rule, y)].bg, idle[(rule, y)].bg, "{background:?}");
+
+            state.pointer = Some((rule + 2, y));
+            draw_state(&mut terminal, &mut state);
+            assert_eq!(terminal.backend().buffer(), &idle, "{background:?}");
+        }
     }
 
     #[test]

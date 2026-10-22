@@ -102,8 +102,8 @@ use super::split::{
     clamp_tree_fraction, diff_col_from_col, diff_col_from_delta, diff_paint_width, diff_pane_mode,
     diff_split_fraction_from_col, graph_col_from_col, graph_col_from_delta,
     graph_scroll_from_delta, graph_scroll_from_row, hit_split, pane_widths, step_tree_fraction,
-    tree_fraction_from_col, DiffMode, SplitDrag, SplitHit, SplitLayout, DIFF_SPLIT_FRACTION,
-    NARROW_SXS, TREE_WIDTH_FRACTION,
+    tree_fraction_from_col, DiffMode, ResizeEdge, SplitDrag, SplitHit, SplitLayout,
+    DIFF_SPLIT_FRACTION, NARROW_SXS, TREE_WIDTH_FRACTION,
 };
 use super::stash::{
     checkout_path, resolve_stash_menu_key, row_is_hidden_ignored, stash_dirty_for_row,
@@ -3126,6 +3126,12 @@ impl AppState {
     }
 
     fn drag_split(&mut self, col: u16, row: u16) -> Effect {
+        // Drag events carry the pointer, but only buttonless motion stores
+        // it: keep it current under a resize drag, so after the release the
+        // edge stays lit only while the pointer is still on it.
+        if self.drag.resize_edge().is_some() {
+            self.pointer = Some((col, row));
+        }
         match self.drag {
             // A flat pad press stays a row click while the pointer keeps to
             // its column (a vertical move too): the release clicks the
@@ -6228,6 +6234,45 @@ impl AppState {
         self.pointer.filter(|_| self.search_files.is_none())
     }
 
+    /// Resize edge to highlight: the edge an active drag moves, else the
+    /// edge under [`Self::pane_pointer`] in the last paint.
+    ///
+    /// `None` while mouse capture is off, on an Explorer tab (it has no
+    /// pane or RULE drag), below the minimum terminal size, while an
+    /// overlay takes the mouse (dialog, prompt, help, palette, pinned
+    /// popover), and with the pointer inside a hover popover. A press there
+    /// never reaches the edges, so they do not hover. Scrollbar hits are
+    /// not edges.
+    pub fn hovered_resize_edge(&self) -> Option<ResizeEdge> {
+        if !self.resize_edges_take_mouse() {
+            return None;
+        }
+        if let Some(edge) = self.drag.resize_edge() {
+            return Some(edge);
+        }
+        let (col, row) = self.pane_pointer()?;
+        if self.pointer_in_popover() {
+            return None;
+        }
+        hit_split(self.split_layout(), col, row).resize_edge()
+    }
+
+    /// True when a left press can land on a resize edge: mouse on, a
+    /// Workspace or compare tab with both panes painted, and an input mode
+    /// whose clicks reach [`Self::click_at`].
+    fn resize_edges_take_mouse(&self) -> bool {
+        self.mouse_enabled
+            && !self.too_small
+            && !self.is_explorer_tab()
+            && matches!(
+                self.input_mode(),
+                InputMode::Normal { .. }
+                    | InputMode::ZPending { .. }
+                    | InputMode::GPending { .. }
+                    | InputMode::DiffVisual
+            )
+    }
+
     /// Search-in-files option chip painted at (`col`, `row`) in the last
     /// paint, while the dialog is open.
     pub fn search_option_at(&self, col: u16, row: u16) -> Option<SearchFilesOption> {
@@ -6249,9 +6294,10 @@ impl AppState {
 
     /// Store the pointer from any-event motion.
     ///
-    /// Returns `true` when the hovered tab `[✗]`, icon, or search option
-    /// chip changed, so the live loop redraws only then. Arms or drops the
-    /// icon peek dwell and leave grace ([`Self::peek_remaining_ms`]).
+    /// Returns `true` when the hovered tab `[✗]`, icon, search option chip,
+    /// or resize edge ([`Self::hovered_resize_edge`]) changed, so the live
+    /// loop redraws only then. Arms or drops the icon peek dwell and leave
+    /// grace ([`Self::peek_remaining_ms`]).
     /// Ignored while mouse capture is off. Chords, status, and effects are
     /// untouched.
     pub fn set_pointer(&mut self, pointer: Option<(u16, u16)>) -> bool {
@@ -6264,12 +6310,14 @@ impl AppState {
         let before = self.hovered_tab_close();
         let icon_before = self.hovered_icon().cloned();
         let chip_before = self.hovered_search_option();
+        let edge_before = self.hovered_resize_edge();
         self.pointer = pointer;
         let icon = self.hovered_icon().cloned();
         self.track_peek(icon.as_ref(), now);
         self.hovered_tab_close() != before
             || icon != icon_before
             || self.hovered_search_option() != chip_before
+            || self.hovered_resize_edge() != edge_before
     }
 
     fn park_active_session(&mut self) {
@@ -7183,8 +7231,8 @@ mod tests {
     };
     use crate::testutil::init_repo;
     use crate::tui::split::{
-        diff_split_fraction_from_left_width, pane_widths, side_by_side_column_widths,
-        DIFF_SPLIT_FRACTION, MIN_PANE_COLS,
+        diff_split_fraction_from_left_width, diff_split_row_width, diff_split_rule_x, pane_widths,
+        side_by_side_column_widths, DIFF_SPLIT_FRACTION, MIN_PANE_COLS,
     };
     use crate::tui::status::StatusKind;
     use crate::tui::ui_state_store::load_ui_state;
@@ -14146,7 +14194,6 @@ mod tests {
     }
 
     fn wide_split_layout() -> super::LayoutHit {
-        let left = side_by_side_column_widths(110, DIFF_SPLIT_FRACTION).left_width;
         super::LayoutHit {
             term_cols: 160,
             pane_height: 22,
@@ -14154,7 +14201,7 @@ mod tests {
             right_x: 48,
             diff_pane_width: 110,
             diff_content_x: 50,
-            diff_split_rule_x: Some(50 + left),
+            diff_split_rule_x: Some(diff_split_rule_x(50, 110, DIFF_SPLIT_FRACTION)),
             ..super::LayoutHit::default()
         }
     }
@@ -14215,29 +14262,37 @@ mod tests {
         let content_x = match background {
             BackgroundMode::Terminal | BackgroundMode::Paint => 49,
         };
-        let left = side_by_side_column_widths(110, DIFF_SPLIT_FRACTION).left_width;
         super::LayoutHit {
             diff_content_x: content_x,
-            diff_split_rule_x: Some(content_x + left),
+            diff_split_rule_x: Some(diff_split_rule_x(content_x, 110, DIFF_SPLIT_FRACTION)),
             ..wide_split_layout()
         }
     }
 
     #[test]
     fn in_diff_drag_from_the_painted_rule_keeps_then_moves_the_split() {
+        // The rule splits the painted row: the pane less the scrollbar
+        // column and the cursor bar.
+        let row = diff_split_row_width(110);
         for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
             let mut app = state();
             app.background = background;
             app.layout = split_layout_for(background);
             let rule = app.layout.diff_split_rule_x.expect("rule");
+            let content_x = app.layout.diff_content_x;
             let left =
-                i32::from(side_by_side_column_widths(110, app.diff_split_fraction).left_width);
+                i32::from(side_by_side_column_widths(row, app.diff_split_fraction).left_width);
             app.dispatch(Action::Click { col: rule, row: 6 });
             assert_eq!(app.drag, SplitDrag::Diff, "{background:?}");
             assert_eq!(
                 app.diff_split_fraction,
-                diff_split_fraction_from_left_width(110, left),
+                diff_split_fraction_from_left_width(row, left),
                 "{background:?}: a press on the painted rule keeps the split"
+            );
+            assert_eq!(
+                diff_split_rule_x(content_x, 110, app.diff_split_fraction),
+                rule,
+                "{background:?}"
             );
             app.dispatch(Action::Drag {
                 col: rule + 6,
@@ -14245,10 +14300,138 @@ mod tests {
             });
             assert_eq!(
                 app.diff_split_fraction,
-                diff_split_fraction_from_left_width(110, left + 6),
+                diff_split_fraction_from_left_width(row, left + 6),
                 "{background:?}"
             );
+            assert_eq!(
+                diff_split_rule_x(content_x, 110, app.diff_split_fraction),
+                rule + 6,
+                "{background:?}: the rule follows the pointer"
+            );
         }
+    }
+
+    #[test]
+    fn resize_edge_hover_follows_the_pointer_and_redraws_only_on_change() {
+        let mut app = state();
+        app.layout = wide_split_layout();
+        let rule = app.layout.diff_split_rule_x.expect("rule");
+        assert!(!app.set_pointer(Some((10, 5))), "tree body: no edge");
+        assert_eq!(app.hovered_resize_edge(), None);
+        assert!(app.set_pointer(Some((47, 5))), "onto the pane divider");
+        assert_eq!(app.hovered_resize_edge(), Some(ResizeEdge::Pane));
+        assert!(!app.set_pointer(Some((46, 6))), "same edge: no redraw");
+        assert!(!app.set_pointer(Some((48, 7))), "same edge: no redraw");
+        assert_eq!(app.hovered_resize_edge(), Some(ResizeEdge::Pane));
+        assert!(app.set_pointer(Some((rule, 5))), "onto the diff rule");
+        assert_eq!(app.hovered_resize_edge(), Some(ResizeEdge::DiffSplit));
+        assert!(
+            !app.set_pointer(Some((rule + 1, 9))),
+            "same edge: no redraw"
+        );
+        assert!(app.set_pointer(Some((rule + 2, 9))), "off the rule");
+        assert_eq!(app.hovered_resize_edge(), None);
+        assert!(app.set_pointer(Some((47, 5))));
+        assert!(app.set_pointer(None), "pointer gone: edge gone");
+        assert_eq!(app.hovered_resize_edge(), None);
+        // The status row under the panes is no edge.
+        assert!(!app.set_pointer(Some((47, 23))));
+        assert_eq!(app.hovered_resize_edge(), None);
+    }
+
+    #[test]
+    fn scrollbar_hits_are_not_resize_edges() {
+        let mut app = state();
+        app.layout = super::LayoutHit {
+            // A left-pane graph scrollbar on the divider band's first column.
+            graph_scrollbar_x: Some(46),
+            graph_scrollbar_y: 2,
+            graph_scrollbar_height: 10,
+            graph_content_len: 40,
+            // A diff h-bar track starting on the divider band's last column.
+            diff_hscrollbar_y: Some(20),
+            diff_hscrollbar_x: 48,
+            diff_hscrollbar_width: 100,
+            diff_col_max: 40,
+            ..wide_split_layout()
+        };
+        for (col, row) in [(46, 2), (46, 11), (48, 20), (60, 20)] {
+            app.set_pointer(Some((col, row)));
+            assert_eq!(app.hovered_resize_edge(), None, "({col}, {row})");
+        }
+        // The same column under the scrollbar track is the divider again.
+        app.set_pointer(Some((46, 15)));
+        assert_eq!(app.hovered_resize_edge(), Some(ResizeEdge::Pane));
+    }
+
+    #[test]
+    fn resize_edge_hover_clears_under_overlays_mouse_off_and_explorer() {
+        use crate::file_search::SearchOptions;
+        use crate::tui::quick_open::QuickOpenScope;
+        let mut app = state();
+        app.layout = wide_split_layout();
+        app.set_pointer(Some((47, 5)));
+        assert_eq!(app.hovered_resize_edge(), Some(ResizeEdge::Pane));
+
+        app.help_open = true;
+        assert_eq!(app.hovered_resize_edge(), None, "help");
+        app.help_open = false;
+        app.search_files = Some(SearchFilesState::new(
+            QuickOpenScope::Workspace,
+            String::new(),
+            SearchOptions::default(),
+        ));
+        assert_eq!(app.hovered_resize_edge(), None, "search-in-files dialog");
+        app.search_files = None;
+        app.too_small = true;
+        assert_eq!(app.hovered_resize_edge(), None, "resize notice");
+        app.too_small = false;
+        assert_eq!(app.hovered_resize_edge(), Some(ResizeEdge::Pane));
+
+        app.dispatch(Action::ToggleMouse);
+        assert!(!app.mouse_enabled);
+        assert_eq!(app.hovered_resize_edge(), None, "mouse off");
+        assert!(!app.set_pointer(Some((47, 5))), "mouse off ignores motion");
+        assert_eq!(app.hovered_resize_edge(), None);
+        app.dispatch(Action::ToggleMouse);
+        app.set_pointer(Some((47, 5)));
+        assert_eq!(app.hovered_resize_edge(), Some(ResizeEdge::Pane));
+
+        app.open_explorer_tab("app".into(), super::explorer_tab::ExplorerTarget::Root);
+        assert!(app.is_explorer_tab());
+        app.layout = wide_split_layout();
+        assert_eq!(
+            app.hovered_resize_edge(),
+            None,
+            "Explorer has no pane or rule drag"
+        );
+    }
+
+    #[test]
+    fn resize_edge_stays_lit_while_dragging_and_ends_on_release() {
+        let mut app = state();
+        app.layout = wide_split_layout();
+        let rule = app.layout.diff_split_rule_x.expect("rule");
+        app.set_pointer(Some((rule, 6)));
+        app.dispatch(Action::Click { col: rule, row: 6 });
+        assert_eq!(app.drag, SplitDrag::Diff);
+        // Far past the clamp: the rule stops, the pointer leaves it.
+        app.dispatch(Action::Drag { col: 159, row: 6 });
+        assert_eq!(app.hovered_resize_edge(), Some(ResizeEdge::DiffSplit));
+        app.dispatch(Action::Release);
+        assert_eq!(app.drag, SplitDrag::None);
+        assert_eq!(app.hovered_resize_edge(), None, "release ends it");
+
+        app.set_pointer(Some((47, 6)));
+        app.dispatch(Action::Click { col: 47, row: 6 });
+        assert_eq!(app.drag, SplitDrag::Pane);
+        // Over the diff rule mid-drag: the dragged edge wins.
+        app.dispatch(Action::Drag { col: rule, row: 6 });
+        assert_eq!(app.hovered_resize_edge(), Some(ResizeEdge::Pane));
+        // Back onto the divider band, then release: still on the edge.
+        app.dispatch(Action::Drag { col: 46, row: 6 });
+        app.dispatch(Action::Release);
+        assert_eq!(app.hovered_resize_edge(), Some(ResizeEdge::Pane));
     }
 
     #[test]

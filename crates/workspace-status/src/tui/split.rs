@@ -69,6 +69,50 @@ pub enum SplitHit {
     Other,
 }
 
+/// A pane edge the mouse drags to resize, for the hover highlight.
+///
+/// Scrollbars are not resize edges: they scroll or pan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResizeEdge {
+    /// The tree / right pane divider ([`SplitHit::Pane`], [`SplitDrag::Pane`]).
+    Pane,
+    /// The side-by-side diff RULE ([`SplitHit::DiffSplit`], [`SplitDrag::Diff`]).
+    DiffSplit,
+}
+
+impl SplitHit {
+    /// The resize edge this hit lands on, or `None` for a scrollbar or
+    /// [`SplitHit::Other`].
+    pub fn resize_edge(self) -> Option<ResizeEdge> {
+        match self {
+            Self::Pane => Some(ResizeEdge::Pane),
+            Self::DiffSplit => Some(ResizeEdge::DiffSplit),
+            Self::GraphThumb
+            | Self::GraphTrack
+            | Self::GraphHThumb
+            | Self::GraphHTrack
+            | Self::DiffHThumb
+            | Self::DiffHTrack
+            | Self::Other => None,
+        }
+    }
+}
+
+impl SplitDrag {
+    /// The resize edge this drag moves, or `None` for a scrollbar drag or
+    /// no drag.
+    pub fn resize_edge(self) -> Option<ResizeEdge> {
+        match self {
+            Self::Pane => Some(ResizeEdge::Pane),
+            Self::Diff => Some(ResizeEdge::DiffSplit),
+            Self::None
+            | Self::GraphScrollbar { .. }
+            | Self::GraphHScrollbar { .. }
+            | Self::DiffHScrollbar { .. } => None,
+        }
+    }
+}
+
 /// Active left-button drag, if any.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SplitDrag {
@@ -269,13 +313,34 @@ pub fn step_tree_fraction(term_cols: u16, fraction: f64, steps: i32) -> f64 {
     tree_fraction_from_width(cols, target)
 }
 
-/// 0-based terminal column of the in-diff vertical RULE.
+/// Columns a file-diff row paints before its text: the cursor bar (`▌` /
+/// blank).
+pub const DIFF_CURSOR_BAR_COLS: u16 = 1;
+
+/// Width a side-by-side row splits (`left + RULE + right`) in a
+/// `pane_width`-column right pane: [`diff_paint_width`] less the
+/// [`DIFF_CURSOR_BAR_COLS`] cursor bar.
+///
+/// The row paint, the recorded RULE column ([`diff_split_rule_x`]), and a
+/// RULE drag ([`diff_split_fraction_from_col`]) all size the columns from
+/// this width, so the recorded column is the painted one at every fraction.
+pub fn diff_split_row_width(pane_width: u16) -> u16 {
+    diff_paint_width(pane_width)
+        .saturating_sub(DIFF_CURSOR_BAR_COLS)
+        .max(1)
+}
+
+/// 0-based terminal column of the in-diff vertical RULE as painted.
 ///
 /// `content_x` is the 0-based first content column of the right pane as
 /// painted (`LayoutHit::diff_content_x`), so the result is right for boxed
-/// and flat panes alike.
-pub fn diff_split_rule_x(content_x: u16, left_width: u16) -> u16 {
-    content_x.saturating_add(left_width)
+/// and flat panes alike. The RULE follows the cursor bar and the left
+/// column of a [`diff_split_row_width`]-wide row.
+pub fn diff_split_rule_x(content_x: u16, pane_width: u16, fraction: f64) -> u16 {
+    let left = side_by_side_column_widths(diff_split_row_width(pane_width), fraction).left_width;
+    content_x
+        .saturating_add(DIFF_CURSOR_BAR_COLS)
+        .saturating_add(left)
 }
 
 /// Clamp a left-column width so both sides stay ≥ [`MIN_DIFF_COL`] when possible.
@@ -300,16 +365,21 @@ pub fn diff_split_fraction_from_left_width(pane_width: u16, left_width: i32) -> 
 /// Map a 0-based mouse column onto an in-diff split fraction.
 ///
 /// `content_x` is the 0-based first content column of the right pane as
-/// painted; the inverse of [`diff_split_rule_x`].
+/// painted and `pane_width` its width; the inverse of
+/// [`diff_split_rule_x`], so the RULE lands under the pointer.
 pub fn diff_split_fraction_from_col(content_x: u16, pane_width: u16, col: u16) -> f64 {
-    diff_split_fraction_from_left_width(pane_width, i32::from(col) - i32::from(content_x))
+    let left = i32::from(col) - i32::from(content_x) - i32::from(DIFF_CURSOR_BAR_COLS);
+    diff_split_fraction_from_left_width(diff_split_row_width(pane_width), left)
 }
 
 /// Left / right column widths for one side-by-side diff row.
 pub fn side_by_side_column_widths(pane_width: u16, fraction: f64) -> SideBySideWidths {
     let inner = (i32::from(pane_width) - 1).max(1);
     let raw = finite_or(fraction, DIFF_SPLIT_FRACTION);
-    let desired = (inner as f64 * raw).floor() as i32;
+    // The epsilon keeps a width that went through
+    // [`diff_split_fraction_from_left_width`] on the same column, as in
+    // `fraction_cols`: a press on the RULE must not move it.
+    let desired = (inner as f64 * raw + 1e-9).floor() as i32;
     let left_width = clamp_diff_left_width(pane_width, desired);
     let right_width = (inner as u16).saturating_sub(left_width);
     SideBySideWidths {
@@ -1142,22 +1212,76 @@ mod tests {
         // Flat: content on the right pane's first column (48).
         for content_x in [49u16, 48] {
             for pane in [101u16, 110, 157] {
-                let left = side_by_side_column_widths(pane, DIFF_SPLIT_FRACTION).left_width;
-                let rule = diff_split_rule_x(content_x, left);
-                assert_eq!(rule, content_x + left, "x={content_x} pane={pane}");
-                let back = diff_split_fraction_from_col(content_x, pane, rule);
+                let row = diff_split_row_width(pane);
+                assert_eq!(row, pane - DIFF_VSCROLL_COLS - DIFF_CURSOR_BAR_COLS);
+                for step in 1..20 {
+                    let fraction = f64::from(step) * 0.05;
+                    let left = side_by_side_column_widths(row, fraction).left_width;
+                    let rule = diff_split_rule_x(content_x, pane, fraction);
+                    assert_eq!(
+                        rule,
+                        content_x + DIFF_CURSOR_BAR_COLS + left,
+                        "x={content_x} pane={pane} fraction={fraction}"
+                    );
+                    // A press on the rule keeps the split.
+                    let back = diff_split_fraction_from_col(content_x, pane, rule);
+                    assert_eq!(
+                        diff_split_rule_x(content_x, pane, back),
+                        rule,
+                        "x={content_x} pane={pane} fraction={fraction}"
+                    );
+                }
+                let left = side_by_side_column_widths(row, DIFF_SPLIT_FRACTION).left_width;
+                let rule = diff_split_rule_x(content_x, pane, DIFF_SPLIT_FRACTION);
+                // A drag 7 columns right of the rule asks for 7 more left
+                // columns, and the rule lands under the pointer.
+                let moved = diff_split_fraction_from_col(content_x, pane, rule + 7);
                 assert_eq!(
-                    side_by_side_column_widths(pane, back).left_width,
-                    left,
+                    moved,
+                    diff_split_fraction_from_left_width(row, i32::from(left) + 7),
                     "x={content_x} pane={pane}"
                 );
-                // A drag 7 columns right of the rule asks for 7 more left columns.
-                assert_eq!(
-                    diff_split_fraction_from_col(content_x, pane, rule + 7),
-                    diff_split_fraction_from_left_width(pane, i32::from(left) + 7),
-                    "x={content_x} pane={pane}"
-                );
+                assert_eq!(diff_split_rule_x(content_x, pane, moved), rule + 7);
             }
+        }
+    }
+
+    #[test]
+    fn only_the_pane_divider_and_diff_rule_are_resize_edges() {
+        assert_eq!(SplitHit::Pane.resize_edge(), Some(ResizeEdge::Pane));
+        assert_eq!(
+            SplitHit::DiffSplit.resize_edge(),
+            Some(ResizeEdge::DiffSplit)
+        );
+        for hit in [
+            SplitHit::GraphThumb,
+            SplitHit::GraphTrack,
+            SplitHit::GraphHThumb,
+            SplitHit::GraphHTrack,
+            SplitHit::DiffHThumb,
+            SplitHit::DiffHTrack,
+            SplitHit::Other,
+        ] {
+            assert_eq!(hit.resize_edge(), None, "{hit:?}");
+        }
+        assert_eq!(SplitDrag::Pane.resize_edge(), Some(ResizeEdge::Pane));
+        assert_eq!(SplitDrag::Diff.resize_edge(), Some(ResizeEdge::DiffSplit));
+        for drag in [
+            SplitDrag::None,
+            SplitDrag::GraphScrollbar {
+                origin_row: 0,
+                origin_scroll: 0,
+            },
+            SplitDrag::GraphHScrollbar {
+                origin_col: 0,
+                origin_offset: 0,
+            },
+            SplitDrag::DiffHScrollbar {
+                origin_col: 0,
+                origin_offset: 0,
+            },
+        ] {
+            assert_eq!(drag.resize_edge(), None, "{drag:?}");
         }
     }
 
@@ -1184,8 +1308,7 @@ mod tests {
 
     #[test]
     fn flat_rule_band_stays_rule_plus_minus_one() {
-        let left = side_by_side_column_widths(110, DIFF_SPLIT_FRACTION).left_width;
-        let rule = diff_split_rule_x(48, left);
+        let rule = diff_split_rule_x(48, 110, DIFF_SPLIT_FRACTION);
         let layout = flat_wide_layout(Some(rule));
         for col in [rule - 1, rule, rule + 1] {
             assert_eq!(hit_split(layout, col, 5), SplitHit::DiffSplit, "{col}");
