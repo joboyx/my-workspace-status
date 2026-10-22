@@ -279,11 +279,12 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
     state.layout.explorer_preview_rows = Rect::default();
     state.layout.file_view_rows = Rect::default();
     state.layout.pane_height = chunks[1].height;
-    if state.is_explorer_tab() {
+    let edge_area = if state.is_explorer_tab() {
         draw_explorer_tab(frame, chunks[1], state);
+        None
     } else {
-        draw_panes(frame, chunks[1], state);
-    }
+        Some(draw_panes(frame, chunks[1], state))
+    };
 
     frame.render_widget(
         Paragraph::new(breadcrumb_line(state, chunks[2].width)),
@@ -345,6 +346,11 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
 
     // The icon popover hangs over the panes and any dialog.
     draw_popover(frame, chunks[1], state);
+    // After the popover records its rect: the edge the pointer shape reads
+    // after this draw is the edge this frame lights.
+    if let Some(edge_area) = edge_area {
+        paint_resize_edge_hover(frame, state, edge_area);
+    }
 
     // Keep the frame as painted so a mouse release copies what is on screen,
     // then reverse the selected cells on top of it. The copy is taken before
@@ -527,9 +533,22 @@ fn painted_text_link(
     })
 }
 
+/// Pane geometry [`paint_resize_edge_hover`] lights, from [`draw_panes`].
+#[derive(Clone, Copy, Debug)]
+struct ResizeEdgeArea {
+    /// The left pane's outer rect.
+    left: Rect,
+    /// The left pane's body rows ([`PaneArea::rows`]).
+    left_rows: Rect,
+    /// The right pane's content rect ([`PaneArea::inner`]).
+    right_inner: Rect,
+}
+
 /// Tree / graph / files pane on the left and graph / files / diff on the
 /// right (Workspace and compare tabs), plus their layout for mouse hits.
-fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
+/// Returns the geometry the resize-edge highlight paints over, once the
+/// overlays have painted.
+fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) -> ResizeEdgeArea {
     let widths = pane_widths(pane_area.width, state.tree_fraction);
     let panes = Layout::default()
         .direction(Direction::Horizontal)
@@ -612,8 +631,6 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
     } else {
         None
     };
-    paint_resize_edge_hover(frame, state, panes[0], left_pane.rows, right_inner);
-
     state.layout.right_y = right_inner.y;
     if state.is_compare_tab() {
         let cursor = state.commit_files_cursor();
@@ -639,6 +656,11 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
         let painted_n = state.painted_commit_file_rows().len();
         let (start, _) = visible_window(painted_n, *cursor, list_h);
         state.layout.files_list_offset = start;
+    }
+    ResizeEdgeArea {
+        left: panes[0],
+        left_rows: left_pane.rows,
+        right_inner,
     }
 }
 
@@ -1093,19 +1115,21 @@ const RESIZE_EDGE_FLAT_ASCII: &str = "|";
 /// mode) takes the accent across the graph pane width; its glyph and
 /// background stay.
 ///
-/// `left` is the left pane's outer rect and `left_rows` its body rows
-/// ([`PaneArea::rows`]). Call after both panes paint and the layout
-/// records this frame's hit geometry.
-fn paint_resize_edge_hover(
-    frame: &mut Frame<'_>,
-    state: &AppState,
-    left: Rect,
-    left_rows: Rect,
-    right_inner: Rect,
-) {
+/// Call after the panes and the icon popover paint, so the layout holds
+/// this frame's hit geometry and popover rect: the edge lit here is the
+/// edge the pointer shape reads after the draw. A hover popover keeps its
+/// cells; a pointer inside it hovers no edge.
+fn paint_resize_edge_hover(frame: &mut Frame<'_>, state: &AppState, edges: ResizeEdgeArea) {
     let Some(edge) = state.hovered_resize_edge() else {
         return;
     };
+    let ResizeEdgeArea {
+        left,
+        left_rows,
+        right_inner,
+    } = edges;
+    let popover = state.layout.popover.as_ref().map(|hit| hit.rect);
+    let covered = |x: u16, y: u16| popover.is_some_and(|rect| rect.contains(Position::new(x, y)));
     let accent = state.theme.palette().cursor;
     let buf = frame.buffer_mut();
     match edge {
@@ -1121,7 +1145,7 @@ fn paint_resize_edge_hover(
             } else {
                 RESIZE_EDGE_FLAT
             };
-            for y in left_rows.top()..left_rows.bottom() {
+            for y in (left_rows.top()..left_rows.bottom()).filter(|&y| !covered(x, y)) {
                 let cell = &mut buf[(x, y)];
                 if flat {
                     cell.set_symbol(glyph);
@@ -1137,7 +1161,7 @@ fn paint_resize_edge_hover(
                 return;
             }
             let rule = DIFF_RULE.to_string();
-            for y in right_inner.top()..right_inner.bottom() {
+            for y in (right_inner.top()..right_inner.bottom()).filter(|&y| !covered(x, y)) {
                 let cell = &mut buf[(x, y)];
                 if cell.symbol() == rule {
                     cell.set_fg(accent);
@@ -1158,7 +1182,7 @@ fn paint_resize_edge_hover(
                 .commit_msg_rule_x
                 .saturating_add(state.layout.commit_msg_rule_width)
                 .min(area.right());
-            for x in x0..x1 {
+            for x in (x0..x1).filter(|&x| !covered(x, y)) {
                 buf[(x, y)].set_fg(accent);
             }
         }
@@ -19501,6 +19525,98 @@ mod tests {
         assert!(text.contains("Open PR"), "{text}");
         assert!(!text.contains("Esc close"), "{text}");
         assert!(!text.contains('❯'), "{text}");
+    }
+
+    /// A hover popover over the pane divider: with the pointer inside the
+    /// popover on the divider column, the frame paints no edge highlight
+    /// and the edge the pointer shape reads after the draw is `None`. With
+    /// the pointer on the divider below the popover, the body rows outside
+    /// the popover light and the popover cells stay as painted. Boxed and
+    /// flat.
+    #[test]
+    fn hover_popover_over_the_pane_divider_clears_its_highlight() {
+        use crate::tui::split::ResizeEdge;
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            let label = format!("{background:?}");
+            let mut state = pr_state(&[branch_repo("app", "feature")], false);
+            set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+            state.background = background;
+            // The narrowest tree pane: the badge's popover hangs across
+            // the divider.
+            state.tree_fraction = 0.0;
+            let mut terminal = pr_terminal();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let badge = state.layout.pr_badge_hits()[0].clone();
+            let at = std::time::Instant::now();
+            state.set_pointer_at(Some((badge.x, badge.y)), at);
+            assert!(state.expire_peek(at + std::time::Duration::from_secs(1)));
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let rect = state.layout.popover.as_ref().expect("peek").rect;
+            let x = state.layout.outer_tree_width - 1;
+            let (top, bottom) = (
+                state.layout.tree_y,
+                state.layout.tree_y + state.layout.tree_height,
+            );
+            assert!(
+                rect.left() <= x && x < rect.right(),
+                "{label}: popover {rect:?} spans the divider column {x}"
+            );
+            let y = rect.top().max(top) + 1;
+            assert!(y < rect.bottom().min(bottom), "{label}");
+            assert!(
+                bottom > rect.bottom(),
+                "{label}: body rows below the popover"
+            );
+            // The right pane's `loading graph…` spinner follows the wall
+            // clock, so its cells outside the popover are not compared.
+            let right_x = state.layout.right_x;
+            let changed = |before: &Buffer, after: &Buffer| -> Vec<(u16, u16)> {
+                changed_cells(before, after)
+                    .into_iter()
+                    .filter(|&(cx, cy)| cx < right_x || rect.contains(Position::new(cx, cy)))
+                    .collect()
+            };
+
+            // Pointer inside the popover, off the divider column.
+            state.set_pointer_at(Some((rect.left() + 1, y)), at);
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            assert!(state.popover.is_some(), "{label}: the peek stays");
+            assert_eq!(state.hovered_resize_edge(), None, "{label}");
+            let idle = terminal.backend().buffer().clone();
+
+            // Pointer inside the popover, on the divider column.
+            state.set_pointer_at(Some((x, y)), at);
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            assert_eq!(
+                state.hovered_resize_edge(),
+                None,
+                "{label}: the pointer shape stays default"
+            );
+            assert_eq!(
+                changed(&idle, terminal.backend().buffer()),
+                Vec::<(u16, u16)>::new(),
+                "{label}: no edge cell lights under a popover"
+            );
+
+            // Pointer on the divider below the popover: the edge lights,
+            // but not through the popover.
+            state.set_pointer_at(Some((x, bottom - 1)), at);
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            assert!(state.popover.is_some(), "{label}: the peek stays");
+            assert_eq!(
+                state.hovered_resize_edge(),
+                Some(ResizeEdge::Pane),
+                "{label}"
+            );
+            let lit = terminal.backend().buffer().clone();
+            let want: Vec<(u16, u16)> = (top..bottom)
+                .filter(|&cy| !rect.contains(Position::new(x, cy)))
+                .map(|cy| (x, cy))
+                .collect();
+            assert_eq!(changed(&idle, &lit), want, "{label}");
+            let accent = state.theme.palette().cursor;
+            assert!(want.iter().all(|&cell| lit[cell].fg == accent), "{label}");
+        }
     }
 
     #[test]
