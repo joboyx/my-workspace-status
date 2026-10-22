@@ -14034,6 +14034,78 @@ mod tests {
         }
     }
 
+    /// `hit_split` checks both graph scrollbars before the commit-message
+    /// rule, so a bar on the rule row would steal the press. The chrome
+    /// budget gives header + list + footer the whole pane, so the vertical
+    /// bar ends on the last list row and the horizontal bar is that row:
+    /// both stop one row above the rule. Right-pane graph (depth 0) and
+    /// left-pane graph (commit files), boxed and flat, with both bars shown.
+    #[test]
+    fn graph_scrollbars_never_take_the_commit_msg_rule_row() {
+        use crate::tui::split::ResizeEdge;
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            for side in ["right", "left"] {
+                let case = format!("{background:?} {side}");
+                let mut state = tall_graph_state();
+                if let Some(model) = state.graph.as_mut() {
+                    for commit in &mut model.commits {
+                        commit.subject = format!("{} {}", commit.subject, "wide ".repeat(40));
+                    }
+                }
+                if side == "left" {
+                    state.open_commit_files(
+                        "app".into(),
+                        super::super::drill::CommitFileSource::Commit {
+                            commit_id: format!("{:040x}", 1),
+                        },
+                        vec![super::super::drill::CommitFile {
+                            status: "M".into(),
+                            path: "README.md".into(),
+                            old_path: None,
+                            stat: None,
+                        }],
+                    );
+                }
+                state.background = background;
+                state.set_graph_col_offset(4);
+                let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let l = state.layout.clone();
+                let rule_y = l.commit_msg_rule_y.expect(&case);
+                let vbar_x = l.graph_scrollbar_x.expect(&case);
+                let hbar_y = l.graph_hscrollbar_y.expect(&case);
+                assert_eq!(
+                    l.graph_scrollbar_y + l.graph_scrollbar_height,
+                    rule_y,
+                    "{case}: v-bar ends right above the rule"
+                );
+                assert_eq!(
+                    hbar_y + 1,
+                    rule_y,
+                    "{case}: h-bar sits right above the rule"
+                );
+                // One row up, the bars are there and are not resize edges.
+                state.pointer = Some((vbar_x, rule_y - 1));
+                assert_eq!(state.hovered_resize_edge(), None, "{case}: v-bar cell");
+                // On the rule row every cell is the rule (the pane band wins
+                // where the two meet on a left-pane graph); no bar takes it.
+                for x in l.commit_msg_rule_x..l.commit_msg_rule_x + l.commit_msg_rule_width {
+                    state.pointer = Some((x, rule_y));
+                    let edge = state.hovered_resize_edge();
+                    assert!(
+                        matches!(edge, Some(ResizeEdge::CommitMsg | ResizeEdge::Pane)),
+                        "{case} x={x}: {edge:?}"
+                    );
+                }
+                state.pointer = Some((vbar_x, rule_y));
+                assert!(
+                    state.hovered_resize_edge().is_some(),
+                    "{case}: the v-bar column on the rule row"
+                );
+            }
+        }
+    }
+
     #[test]
     fn hovered_commit_msg_rule_lights_the_footer_rule_row_boxed_and_flat() {
         for (background, ascii) in [
