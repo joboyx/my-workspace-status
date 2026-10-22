@@ -11,9 +11,9 @@ use ratatui::widgets::{
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 use workspace_status_graph::{
-    footer_message_scroll_max, graph_col_max, graph_hscroll_visible, graph_vscroll_visible,
-    painted_line_count, short_id, GraphIconKind, GraphLabelPalette, GraphRow, GraphWidget,
-    FOOTER_RULE_ROWS,
+    commit_msg_lines_fit, footer_message_scroll_max, graph_col_max, graph_hscroll_visible,
+    graph_vscroll_visible, painted_line_count, short_id, GraphIconKind, GraphLabelPalette,
+    GraphRow, GraphWidget, COMMIT_MSG_LINES_MAX, FOOTER_RULE_ROWS,
 };
 
 use std::cell::RefCell;
@@ -83,7 +83,7 @@ use super::search_files::{
 };
 use super::split::{
     diff_paint_width, diff_split_rule_x, pane_widths, side_by_side_column_widths, DiffMode,
-    MIN_PANE_COLS, MIN_TERM_COLS, MIN_TERM_ROWS,
+    ResizeEdge, MIN_PANE_COLS, MIN_TERM_COLS, MIN_TERM_ROWS,
 };
 use super::state::{
     revert_scope, AppState, CompareRevertTarget, FocusPane, IconHit, LayoutHit, PendingConfirm,
@@ -261,6 +261,10 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
     state.layout.graph_col_max = 0;
     state.layout.graph_footer_y = None;
     state.layout.graph_footer_scroll_max = 0;
+    state.layout.commit_msg_rule_y = None;
+    state.layout.commit_msg_rule_x = 0;
+    state.layout.commit_msg_rule_width = 0;
+    state.layout.commit_msg_lines_fit = COMMIT_MSG_LINES_MAX;
     state.layout.diff_scrollbar_x = None;
     state.layout.diff_scrollbar_y = 0;
     state.layout.diff_scrollbar_height = 0;
@@ -275,11 +279,12 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
     state.layout.explorer_preview_rows = Rect::default();
     state.layout.file_view_rows = Rect::default();
     state.layout.pane_height = chunks[1].height;
-    if state.is_explorer_tab() {
+    let edge_area = if state.is_explorer_tab() {
         draw_explorer_tab(frame, chunks[1], state);
+        None
     } else {
-        draw_panes(frame, chunks[1], state);
-    }
+        Some(draw_panes(frame, chunks[1], state))
+    };
 
     frame.render_widget(
         Paragraph::new(breadcrumb_line(state, chunks[2].width)),
@@ -341,6 +346,11 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
 
     // The icon popover hangs over the panes and any dialog.
     draw_popover(frame, chunks[1], state);
+    // After the popover records its rect: the edge the pointer shape reads
+    // after this draw is the edge this frame lights.
+    if let Some(edge_area) = edge_area {
+        paint_resize_edge_hover(frame, state, edge_area);
+    }
 
     // Keep the frame as painted so a mouse release copies what is on screen,
     // then reverse the selected cells on top of it. The copy is taken before
@@ -523,9 +533,22 @@ fn painted_text_link(
     })
 }
 
+/// Pane geometry [`paint_resize_edge_hover`] lights, from [`draw_panes`].
+#[derive(Clone, Copy, Debug)]
+struct ResizeEdgeArea {
+    /// The left pane's outer rect.
+    left: Rect,
+    /// The left pane's body rows ([`PaneArea::rows`]).
+    left_rows: Rect,
+    /// The right pane's content rect ([`PaneArea::inner`]).
+    right_inner: Rect,
+}
+
 /// Tree / graph / files pane on the left and graph / files / diff on the
 /// right (Workspace and compare tabs), plus their layout for mouse hits.
-fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
+/// Returns the geometry the resize-edge highlight paints over, once the
+/// overlays have painted.
+fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) -> ResizeEdgeArea {
     let widths = pane_widths(pane_area.width, state.tree_fraction);
     let panes = Layout::default()
         .direction(Direction::Horizontal)
@@ -600,12 +623,14 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
         && state.folder_summary().is_none()
         && state.diff_layout() == DiffMode::SideBySide
     {
-        let split = side_by_side_column_widths(right_inner.width, state.diff_split_fraction);
-        Some(diff_split_rule_x(right_inner.x, split.left_width))
+        Some(diff_split_rule_x(
+            right_inner.x,
+            right_inner.width,
+            state.diff_split_fraction,
+        ))
     } else {
         None
     };
-
     state.layout.right_y = right_inner.y;
     if state.is_compare_tab() {
         let cursor = state.commit_files_cursor();
@@ -631,6 +656,11 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
         let painted_n = state.painted_commit_file_rows().len();
         let (start, _) = visible_window(painted_n, *cursor, list_h);
         state.layout.files_list_offset = start;
+    }
+    ResizeEdgeArea {
+        left: panes[0],
+        left_rows: left_pane.rows,
+        right_inner,
     }
 }
 
@@ -1062,6 +1092,99 @@ fn bleed_flat_pad(frame: &mut Frame<'_>, pane: PaneArea) {
         if rows.right() > inner.right() {
             let bg = buf[(last, y)].bg;
             buf[(rows.right() - 1, y)].set_bg(bg);
+        }
+    }
+}
+
+/// Flat-pane resize line glyph: a right one-eighth block hugs the pane
+/// join from the left pane's right pad cell.
+const RESIZE_EDGE_FLAT: &str = "▕";
+
+/// [`RESIZE_EDGE_FLAT`] in ASCII mode.
+const RESIZE_EDGE_FLAT_ASCII: &str = "|";
+
+/// Light the resize edge [`AppState::hovered_resize_edge`] names, in the
+/// focus accent (`cursor`), over the pane body rows only.
+///
+/// Pane divider: boxed panes recolour the left pane's right border glyph;
+/// flat panes paint [`RESIZE_EDGE_FLAT`] in the left pane's right pad cell
+/// and keep its background. The right pane's left pad cell carries the
+/// selected-row bar, so it never changes. Side-by-side RULE: the
+/// [`DIFF_RULE`] glyphs in the recorded RULE column take the accent.
+/// Commit-message footer: the recorded top rule row (`▁`, `_` in ASCII
+/// mode) takes the accent across the graph pane width; its glyph and
+/// background stay.
+///
+/// Call after the panes and the icon popover paint, so the layout holds
+/// this frame's hit geometry and popover rect: the edge lit here is the
+/// edge the pointer shape reads after the draw. A hover popover keeps its
+/// cells; a pointer inside it hovers no edge.
+fn paint_resize_edge_hover(frame: &mut Frame<'_>, state: &AppState, edges: ResizeEdgeArea) {
+    let Some(edge) = state.hovered_resize_edge() else {
+        return;
+    };
+    let ResizeEdgeArea {
+        left,
+        left_rows,
+        right_inner,
+    } = edges;
+    let popover = state.layout.popover.as_ref().map(|hit| hit.rect);
+    let covered = |x: u16, y: u16| popover.is_some_and(|rect| rect.contains(Position::new(x, y)));
+    let accent = state.theme.palette().cursor;
+    let buf = frame.buffer_mut();
+    match edge {
+        ResizeEdge::Pane => {
+            // The left pane's last column: its right border when boxed,
+            // its right pad cell when flat.
+            let Some(x) = left.right().checked_sub(1) else {
+                return;
+            };
+            let flat = state.background == BackgroundMode::Paint;
+            let glyph = if state.ascii {
+                RESIZE_EDGE_FLAT_ASCII
+            } else {
+                RESIZE_EDGE_FLAT
+            };
+            for y in (left_rows.top()..left_rows.bottom()).filter(|&y| !covered(x, y)) {
+                let cell = &mut buf[(x, y)];
+                if flat {
+                    cell.set_symbol(glyph);
+                }
+                cell.set_fg(accent);
+            }
+        }
+        ResizeEdge::DiffSplit => {
+            let Some(x) = state.layout.diff_split_rule_x else {
+                return;
+            };
+            if x < right_inner.left() || x >= right_inner.right() {
+                return;
+            }
+            let rule = DIFF_RULE.to_string();
+            for y in (right_inner.top()..right_inner.bottom()).filter(|&y| !covered(x, y)) {
+                let cell = &mut buf[(x, y)];
+                if cell.symbol() == rule {
+                    cell.set_fg(accent);
+                }
+            }
+        }
+        ResizeEdge::CommitMsg => {
+            let Some(y) = state.layout.commit_msg_rule_y else {
+                return;
+            };
+            let area = buf.area;
+            if y < area.top() || y >= area.bottom() {
+                return;
+            }
+            let x0 = state.layout.commit_msg_rule_x.max(area.left());
+            let x1 = state
+                .layout
+                .commit_msg_rule_x
+                .saturating_add(state.layout.commit_msg_rule_width)
+                .min(area.right());
+            for x in (x0..x1).filter(|&x| !covered(x, y)) {
+                buf[(x, y)].set_fg(accent);
+            }
         }
     }
 }
@@ -2301,6 +2424,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
     state.layout.icon_hits.extend(hits);
     state.layout.links.extend(links);
     record_graph_scrollbar(state, area, col_offset, &badges);
+    record_commit_msg_rule(state, area);
     if state.background == BackgroundMode::Paint {
         bleed_graph_scrollbar_column(frame, &state.layout);
     }
@@ -2444,6 +2568,24 @@ fn graph_search_matches(state: &AppState, rows: &[GraphRow]) -> Vec<usize> {
         return Vec::new();
     }
     collect_graph_match_indices(rows, &state.search_query)
+}
+
+/// Record the expanded graph commit-message footer's top rule, the
+/// [`ResizeEdge::CommitMsg`] edge, and the most message rows the pane
+/// shows, so a press on the rule arms its drag. A collapsed or unpainted
+/// footer records no rule.
+fn record_commit_msg_rule(state: &mut AppState, area: Rect) {
+    if state.graph.is_none() || !state.commit_msg_expand || area.width == 0 {
+        return;
+    }
+    let chrome = state.graph_chrome_in(area.height);
+    if !chrome.footer || chrome.footer_height == 0 {
+        return;
+    }
+    state.layout.commit_msg_rule_y = Some(area.bottom().saturating_sub(chrome.footer_height));
+    state.layout.commit_msg_rule_x = area.x;
+    state.layout.commit_msg_rule_width = area.width;
+    state.layout.commit_msg_lines_fit = commit_msg_lines_fit(area.height);
 }
 
 fn record_graph_scrollbar(
@@ -12216,6 +12358,14 @@ mod tests {
         assert_ne!(a_bg, b_bg, "cursor and search-match paint must differ");
     }
 
+    /// In-diff split fractions from 5 % to 95 % in 5 % steps, plus a few
+    /// off-grid ones: every one must record the painted rule column.
+    fn rule_sweep() -> impl Iterator<Item = f64> {
+        (1..20)
+            .map(|step| f64::from(step) * 0.05)
+            .chain([0.33, 0.47, 0.618])
+    }
+
     #[test]
     fn recorded_split_rule_is_the_painted_rule_column() {
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
@@ -12235,7 +12385,7 @@ mod tests {
                 "+new line".into(),
             ]),
         );
-        for fraction in [0.3, 0.5, 0.7] {
+        for fraction in rule_sweep() {
             state.diff_split_fraction = fraction;
             let mut terminal = Terminal::new(TestBackend::new(220, 20)).unwrap();
             terminal.draw(|frame| draw(frame, &mut state)).unwrap();
@@ -12254,19 +12404,12 @@ mod tests {
                 })
                 .collect();
             assert_eq!(painted.len(), 1, "one split rule: {}", buf_line(buf, y));
-            // The paint sizes the columns from the row width (less the
-            // cursor bar and the scrollbar column), the layout from the pane
-            // width, so off the default fraction the two can be one column
-            // apart. The ±1 grab band still covers the painted rule.
-            if fraction == crate::tui::split::DIFF_SPLIT_FRACTION {
-                assert_eq!(painted[0], rule, "{}", buf_line(buf, y));
-            } else {
-                assert!(
-                    painted[0].abs_diff(rule) <= 1,
-                    "fraction {fraction}: painted {} recorded {rule}",
-                    painted[0]
-                );
-            }
+            assert_eq!(
+                painted[0],
+                rule,
+                "fraction {fraction}: {}",
+                buf_line(buf, y)
+            );
         }
     }
 
@@ -13710,7 +13853,7 @@ mod tests {
         let mut state = painted(two_pane_diff_state());
         state.diff_mode = crate::tui::split::DiffMode::SideBySide;
         let rule_fg = state.theme.palette().border_dim;
-        for fraction in [0.3, 0.5, 0.7] {
+        for fraction in rule_sweep() {
             state.diff_split_fraction = fraction;
             let mut terminal = Terminal::new(TestBackend::new(220, 20)).unwrap();
             draw_state(&mut terminal, &mut state);
@@ -13727,15 +13870,12 @@ mod tests {
                 .filter(|&x| buf[(x, y)].symbol() == rule_glyph && buf[(x, y)].fg == rule_fg)
                 .collect();
             assert_eq!(painted.len(), 1, "one split rule: {}", buf_line(buf, y));
-            if fraction == crate::tui::split::DIFF_SPLIT_FRACTION {
-                assert_eq!(painted[0], rule, "{}", buf_line(buf, y));
-            } else {
-                assert!(
-                    painted[0].abs_diff(rule) <= 1,
-                    "fraction {fraction}: painted {} recorded {rule}",
-                    painted[0]
-                );
-            }
+            assert_eq!(
+                painted[0],
+                rule,
+                "fraction {fraction}: {}",
+                buf_line(buf, y)
+            );
         }
 
         let mut state = painted(long_panning_diff_state(1));
@@ -13747,6 +13887,346 @@ mod tests {
             Some(last_pane_row),
             "flat diff h-bar on the pane's last row"
         );
+    }
+
+    /// Cells whose symbol or style differ between two frames.
+    fn changed_cells(
+        before: &ratatui::buffer::Buffer,
+        after: &ratatui::buffer::Buffer,
+    ) -> Vec<(u16, u16)> {
+        let area = before.area;
+        let mut out = Vec::new();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                if before[(x, y)] != after[(x, y)] {
+                    out.push((x, y));
+                }
+            }
+        }
+        out
+    }
+
+    /// Side-by-side two-pane diff on `background`, glyphs per `ascii`, one
+    /// un-hovered frame painted (the pointer in the tree body).
+    fn resize_hover_state(
+        background: BackgroundMode,
+        ascii: bool,
+    ) -> (AppState, Terminal<TestBackend>, ratatui::buffer::Buffer) {
+        let mut state = two_pane_diff_state();
+        state.background = background;
+        state.ascii = ascii;
+        state.diff_mode = crate::tui::split::DiffMode::SideBySide;
+        let mut terminal = Terminal::new(TestBackend::new(220, 20)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        state.pointer = Some((5, state.layout.tree_y + 1));
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(state.hovered_resize_edge(), None);
+        let idle = terminal.backend().buffer().clone();
+        (state, terminal, idle)
+    }
+
+    #[test]
+    fn hovered_pane_divider_lights_the_left_pane_edge_boxed_and_flat() {
+        for (background, ascii) in [
+            (BackgroundMode::Terminal, false),
+            (BackgroundMode::Terminal, true),
+            (BackgroundMode::Paint, false),
+            (BackgroundMode::Paint, true),
+        ] {
+            let label = format!("{background:?} ascii={ascii}");
+            let (mut state, mut terminal, idle) = resize_hover_state(background, ascii);
+            let accent = state.theme.palette().cursor;
+            let x = state.layout.outer_tree_width - 1;
+            let (top, height) = (state.layout.tree_y, state.layout.tree_height);
+            state.pointer = Some((x, top + 2));
+            assert_eq!(
+                state.hovered_resize_edge(),
+                Some(crate::tui::split::ResizeEdge::Pane),
+                "{label}"
+            );
+            draw_state(&mut terminal, &mut state);
+            let lit = terminal.backend().buffer().clone();
+            let want: Vec<(u16, u16)> = (top..top + height).map(|y| (x, y)).collect();
+            assert_eq!(changed_cells(&idle, &lit), want, "{label}: body rows only");
+            for &(x, y) in &want {
+                let (was, now) = (&idle[(x, y)], &lit[(x, y)]);
+                assert_eq!(now.fg, accent, "{label} ({x},{y})");
+                assert_eq!(now.bg, was.bg, "{label} ({x},{y}) keeps its fill");
+                let glyph = match (background, ascii) {
+                    (BackgroundMode::Terminal, _) => was.symbol(),
+                    (BackgroundMode::Paint, false) => RESIZE_EDGE_FLAT,
+                    (BackgroundMode::Paint, true) => RESIZE_EDGE_FLAT_ASCII,
+                };
+                assert_eq!(now.symbol(), glyph, "{label} ({x},{y})");
+            }
+            if background == BackgroundMode::Paint {
+                // The right pane's left pad cell carries the row bar: untouched.
+                assert!(want.iter().all(|&(cx, _)| cx < state.layout.right_x));
+            }
+
+            state.pointer = Some((5, top + 1));
+            draw_state(&mut terminal, &mut state);
+            assert_eq!(
+                terminal.backend().buffer(),
+                &idle,
+                "{label}: off the edge paints as before"
+            );
+        }
+    }
+
+    #[test]
+    fn hovered_side_by_side_rule_lights_the_rule_column_boxed_and_flat() {
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            let (mut state, mut terminal, idle) = resize_hover_state(background, false);
+            let accent = state.theme.palette().cursor;
+            let rule = state.layout.diff_split_rule_x.expect("rule");
+            let y = first_row_with(&idle, "old line").expect("diff row");
+            state.pointer = Some((rule + 1, y));
+            assert_eq!(
+                state.hovered_resize_edge(),
+                Some(crate::tui::split::ResizeEdge::DiffSplit),
+                "{background:?}"
+            );
+            draw_state(&mut terminal, &mut state);
+            let lit = terminal.backend().buffer().clone();
+            assert_eq!(
+                changed_cells(&idle, &lit),
+                vec![(rule, y)],
+                "{background:?}"
+            );
+            assert_eq!(lit[(rule, y)].symbol(), DIFF_RULE.to_string());
+            assert_eq!(lit[(rule, y)].fg, accent, "{background:?}");
+            assert_eq!(lit[(rule, y)].bg, idle[(rule, y)].bg, "{background:?}");
+
+            state.pointer = Some((rule + 2, y));
+            draw_state(&mut terminal, &mut state);
+            assert_eq!(terminal.backend().buffer(), &idle, "{background:?}");
+        }
+    }
+
+    /// The expanded graph footer's top rule is recorded on the row and
+    /// columns it paints, for a right-pane graph and a left-pane graph
+    /// (commit files), boxed and flat, with the pane's row fit. A collapsed
+    /// footer records no rule.
+    #[test]
+    fn commit_msg_rule_is_recorded_where_the_graph_footer_rule_paints() {
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            for (side, mut state) in [
+                ("right", tall_graph_state()),
+                ("left", two_pane_files_state()),
+            ] {
+                let case = format!("{background:?} {side}");
+                state.background = background;
+                let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let l = state.layout.clone();
+                let (x, w, h) = if side == "right" {
+                    (l.diff_content_x, l.diff_pane_width, l.diff_pane_height)
+                } else {
+                    (l.tree_x, l.tree_width, l.tree_height)
+                };
+                let chrome = state.graph_chrome_in(h);
+                let top = if side == "right" { l.right_y } else { l.tree_y };
+                let y = l.commit_msg_rule_y.expect(&case);
+                assert_eq!(y, top + h - chrome.footer_height, "{case}");
+                assert_eq!(
+                    (l.commit_msg_rule_x, l.commit_msg_rule_width),
+                    (x, w),
+                    "{case}"
+                );
+                assert_eq!(l.commit_msg_lines_fit, commit_msg_lines_fit(h), "{case}");
+                let buf = terminal.backend().buffer();
+                for cx in x..x + w {
+                    assert_eq!(
+                        buf[(cx, y)].symbol(),
+                        footer_rule_glyph(state.ascii),
+                        "{case} x={cx}"
+                    );
+                }
+                state.pointer = Some((x + 3, y));
+                assert_eq!(
+                    state.hovered_resize_edge(),
+                    Some(crate::tui::split::ResizeEdge::CommitMsg),
+                    "{case}"
+                );
+
+                state.commit_msg_expand = false;
+                draw_state(&mut terminal, &mut state);
+                assert_eq!(state.layout.commit_msg_rule_y, None, "{case}: collapsed");
+                assert_eq!(state.hovered_resize_edge(), None, "{case}: collapsed");
+            }
+        }
+    }
+
+    /// `hit_split` checks both graph scrollbars before the commit-message
+    /// rule, so a bar on the rule row would steal the press. The chrome
+    /// budget gives header + list + footer the whole pane, so the vertical
+    /// bar ends on the last list row and the horizontal bar is that row:
+    /// both stop one row above the rule. Right-pane graph (depth 0) and
+    /// left-pane graph (commit files), boxed and flat, with both bars shown.
+    #[test]
+    fn graph_scrollbars_never_take_the_commit_msg_rule_row() {
+        use crate::tui::split::ResizeEdge;
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            for side in ["right", "left"] {
+                let case = format!("{background:?} {side}");
+                let mut state = tall_graph_state();
+                if let Some(model) = state.graph.as_mut() {
+                    for commit in &mut model.commits {
+                        commit.subject = format!("{} {}", commit.subject, "wide ".repeat(40));
+                    }
+                }
+                if side == "left" {
+                    state.open_commit_files(
+                        "app".into(),
+                        super::super::drill::CommitFileSource::Commit {
+                            commit_id: format!("{:040x}", 1),
+                        },
+                        vec![super::super::drill::CommitFile {
+                            status: "M".into(),
+                            path: "README.md".into(),
+                            old_path: None,
+                            stat: None,
+                        }],
+                    );
+                }
+                state.background = background;
+                state.set_graph_col_offset(4);
+                let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let l = state.layout.clone();
+                let rule_y = l.commit_msg_rule_y.expect(&case);
+                let vbar_x = l.graph_scrollbar_x.expect(&case);
+                let hbar_y = l.graph_hscrollbar_y.expect(&case);
+                assert_eq!(
+                    l.graph_scrollbar_y + l.graph_scrollbar_height,
+                    rule_y,
+                    "{case}: v-bar ends right above the rule"
+                );
+                assert_eq!(
+                    hbar_y + 1,
+                    rule_y,
+                    "{case}: h-bar sits right above the rule"
+                );
+                // One row up, the bars are there and are not resize edges.
+                state.pointer = Some((vbar_x, rule_y - 1));
+                assert_eq!(state.hovered_resize_edge(), None, "{case}: v-bar cell");
+                // On the rule row every cell is the rule (the pane band wins
+                // where the two meet on a left-pane graph); no bar takes it.
+                for x in l.commit_msg_rule_x..l.commit_msg_rule_x + l.commit_msg_rule_width {
+                    state.pointer = Some((x, rule_y));
+                    let edge = state.hovered_resize_edge();
+                    assert!(
+                        matches!(edge, Some(ResizeEdge::CommitMsg | ResizeEdge::Pane)),
+                        "{case} x={x}: {edge:?}"
+                    );
+                }
+                state.pointer = Some((vbar_x, rule_y));
+                assert!(
+                    state.hovered_resize_edge().is_some(),
+                    "{case}: the v-bar column on the rule row"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hovered_commit_msg_rule_lights_the_footer_rule_row_boxed_and_flat() {
+        for (background, ascii) in [
+            (BackgroundMode::Terminal, false),
+            (BackgroundMode::Terminal, true),
+            (BackgroundMode::Paint, false),
+            (BackgroundMode::Paint, true),
+        ] {
+            let label = format!("{background:?} ascii={ascii}");
+            let mut state = tall_graph_state();
+            state.background = background;
+            state.ascii = ascii;
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            state.pointer = Some((5, state.layout.tree_y + 1));
+            draw_state(&mut terminal, &mut state);
+            assert_eq!(state.hovered_resize_edge(), None, "{label}");
+            let idle = terminal.backend().buffer().clone();
+            let accent = state.theme.palette().cursor;
+            let y = state.layout.commit_msg_rule_y.expect("rule");
+            let (x, w) = (
+                state.layout.commit_msg_rule_x,
+                state.layout.commit_msg_rule_width,
+            );
+            state.pointer = Some((x + 4, y));
+            assert_eq!(
+                state.hovered_resize_edge(),
+                Some(crate::tui::split::ResizeEdge::CommitMsg),
+                "{label}"
+            );
+            draw_state(&mut terminal, &mut state);
+            let lit = terminal.backend().buffer().clone();
+            let want: Vec<(u16, u16)> = (x..x + w).map(|cx| (cx, y)).collect();
+            assert_eq!(
+                changed_cells(&idle, &lit),
+                want,
+                "{label}: the rule row only"
+            );
+            for &(cx, cy) in &want {
+                let (was, now) = (&idle[(cx, cy)], &lit[(cx, cy)]);
+                assert_eq!(now.fg, accent, "{label} ({cx},{cy})");
+                assert_eq!(now.bg, was.bg, "{label} ({cx},{cy}) keeps its fill");
+                assert_eq!(now.symbol(), footer_rule_glyph(ascii), "{label}");
+            }
+
+            state.pointer = Some((x + 4, y + 1));
+            draw_state(&mut terminal, &mut state);
+            assert_eq!(
+                terminal.backend().buffer(),
+                &idle,
+                "{label}: off the rule paints as before"
+            );
+        }
+    }
+
+    /// Through painted frames: a press on the footer rule and a drag up
+    /// move the rule with the pointer; the release saves the rows to the
+    /// UI-state store.
+    #[test]
+    fn dragging_the_painted_commit_msg_rule_moves_it_and_the_release_saves() {
+        let mut state = tall_graph_state();
+        let dir = crate::testutil::unique_dir("ws-render-msg-drag");
+        state.ui_store_path = dir.join("ui-state.json");
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let y0 = state.layout.commit_msg_rule_y.expect("rule");
+        let x = state.layout.commit_msg_rule_x + 3;
+        let lines = state.commit_msg_lines;
+        state.dispatch(Action::Click { col: x, row: y0 });
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(
+            state.layout.commit_msg_rule_y,
+            Some(y0),
+            "a press moves nothing"
+        );
+        state.dispatch(Action::Drag {
+            col: x,
+            row: y0 - 3,
+        });
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(state.commit_msg_lines, lines + 3);
+        assert_eq!(
+            state.layout.commit_msg_rule_y,
+            Some(y0 - 3),
+            "the rule follows the pointer"
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(x, y0 - 3)].symbol(),
+            footer_rule_glyph(state.ascii)
+        );
+        assert!(!state.ui_store_path.exists());
+        state.dispatch(Action::Release);
+        assert_eq!(
+            crate::tui::ui_state_store::load_ui_state(&state.ui_store_path).commit_msg_lines,
+            Some(lines + 3)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -19045,6 +19525,98 @@ mod tests {
         assert!(text.contains("Open PR"), "{text}");
         assert!(!text.contains("Esc close"), "{text}");
         assert!(!text.contains('❯'), "{text}");
+    }
+
+    /// A hover popover over the pane divider: with the pointer inside the
+    /// popover on the divider column, the frame paints no edge highlight
+    /// and the edge the pointer shape reads after the draw is `None`. With
+    /// the pointer on the divider below the popover, the body rows outside
+    /// the popover light and the popover cells stay as painted. Boxed and
+    /// flat.
+    #[test]
+    fn hover_popover_over_the_pane_divider_clears_its_highlight() {
+        use crate::tui::split::ResizeEdge;
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            let label = format!("{background:?}");
+            let mut state = pr_state(&[branch_repo("app", "feature")], false);
+            set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+            state.background = background;
+            // The narrowest tree pane: the badge's popover hangs across
+            // the divider.
+            state.tree_fraction = 0.0;
+            let mut terminal = pr_terminal();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let badge = state.layout.pr_badge_hits()[0].clone();
+            let at = std::time::Instant::now();
+            state.set_pointer_at(Some((badge.x, badge.y)), at);
+            assert!(state.expire_peek(at + std::time::Duration::from_secs(1)));
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let rect = state.layout.popover.as_ref().expect("peek").rect;
+            let x = state.layout.outer_tree_width - 1;
+            let (top, bottom) = (
+                state.layout.tree_y,
+                state.layout.tree_y + state.layout.tree_height,
+            );
+            assert!(
+                rect.left() <= x && x < rect.right(),
+                "{label}: popover {rect:?} spans the divider column {x}"
+            );
+            let y = rect.top().max(top) + 1;
+            assert!(y < rect.bottom().min(bottom), "{label}");
+            assert!(
+                bottom > rect.bottom(),
+                "{label}: body rows below the popover"
+            );
+            // The right pane's `loading graph…` spinner follows the wall
+            // clock, so its cells outside the popover are not compared.
+            let right_x = state.layout.right_x;
+            let changed = |before: &Buffer, after: &Buffer| -> Vec<(u16, u16)> {
+                changed_cells(before, after)
+                    .into_iter()
+                    .filter(|&(cx, cy)| cx < right_x || rect.contains(Position::new(cx, cy)))
+                    .collect()
+            };
+
+            // Pointer inside the popover, off the divider column.
+            state.set_pointer_at(Some((rect.left() + 1, y)), at);
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            assert!(state.popover.is_some(), "{label}: the peek stays");
+            assert_eq!(state.hovered_resize_edge(), None, "{label}");
+            let idle = terminal.backend().buffer().clone();
+
+            // Pointer inside the popover, on the divider column.
+            state.set_pointer_at(Some((x, y)), at);
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            assert_eq!(
+                state.hovered_resize_edge(),
+                None,
+                "{label}: the pointer shape stays default"
+            );
+            assert_eq!(
+                changed(&idle, terminal.backend().buffer()),
+                Vec::<(u16, u16)>::new(),
+                "{label}: no edge cell lights under a popover"
+            );
+
+            // Pointer on the divider below the popover: the edge lights,
+            // but not through the popover.
+            state.set_pointer_at(Some((x, bottom - 1)), at);
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            assert!(state.popover.is_some(), "{label}: the peek stays");
+            assert_eq!(
+                state.hovered_resize_edge(),
+                Some(ResizeEdge::Pane),
+                "{label}"
+            );
+            let lit = terminal.backend().buffer().clone();
+            let want: Vec<(u16, u16)> = (top..bottom)
+                .filter(|&cy| !rect.contains(Position::new(x, cy)))
+                .map(|cy| (x, cy))
+                .collect();
+            assert_eq!(changed(&idle, &lit), want, "{label}");
+            let accent = state.theme.palette().cursor;
+            assert!(want.iter().all(|&cell| lit[cell].fg == accent), "{label}");
+        }
     }
 
     #[test]

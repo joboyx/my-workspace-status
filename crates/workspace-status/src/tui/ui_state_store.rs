@@ -1,7 +1,9 @@
-//! Persist TUI view state (last-used theme, activity sparkline) in a state file.
+//! Persist TUI view state (last-used theme, activity sparkline, commit
+//! message rows) in a state file.
 //!
-//! The theme that a palette `Theme: …` row sets and the activity sparkline
-//! toggle are state, not config: they live in one JSON file
+//! The theme that a palette `Theme: …` row sets, the activity sparkline
+//! toggle, and the commit-message footer height a mouse drag sets are
+//! state, not config: they live in one JSON file
 //! (`$XDG_STATE_HOME/my-workspace-status/ui-state.json`) and the user config
 //! file is never written. [`crate::settings::Settings`] loads it at launch;
 //! see [`super::theme::theme_id_from`] for the theme precedence.
@@ -11,6 +13,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use workspace_status_graph::{COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN};
 
 use super::persist::persist_with_lock;
 use super::theme::{parse_theme_id, ThemeId};
@@ -22,13 +25,17 @@ pub const UI_STATE_STORE_VERSION: u32 = 1;
 const STORE_FILE_NAME: &str = "ui-state.json";
 
 /// On-disk shape:
-/// `{"version": 1, "theme": "<slug>", "activitySparkline": false}`.
+/// `{"version": 1, "theme": "<slug>", "activitySparkline": false,
+/// "commitMessageLines": 6}`.
 ///
-/// `version` is required; `theme` and `activitySparkline` are optional. An
-/// object with any other key (for example a config file that also has
-/// `version` and `theme`) is not a store: load ignores it and save leaves it
-/// unchanged. Save keeps the raw `theme` string, so an unknown slug survives
-/// a sparkline toggle.
+/// `version` is required; `theme`, `activitySparkline`, and
+/// `commitMessageLines` are optional. An object with any other key (for
+/// example a config file that also has `version` and `theme`) is not a
+/// store: load ignores it and save leaves it unchanged. Save keeps the raw
+/// `theme` string and the raw `commitMessageLines` JSON value, so an unknown
+/// slug or a bad row count survives a save of another key.
+/// `commitMessageLines` takes any JSON value here: a bad value is only that
+/// key unset ([`saved_commit_msg_lines`]), never the whole file foreign.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct StoreFile {
@@ -37,18 +44,34 @@ struct StoreFile {
     theme: Option<String>,
     #[serde(default)]
     activity_sparkline: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    commit_message_lines: Option<serde_json::Value>,
 }
 
 /// The view state the TUI restores at launch.
 ///
-/// The default (no theme, sparkline off) is what a missing, unreadable, or
-/// foreign file loads as.
+/// The default (no theme, sparkline off, no commit-message rows) is what a
+/// missing, unreadable, or foreign file loads as.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UiState {
     /// Last-used theme; `None` when none was saved or the slug is unknown.
     pub theme: Option<ThemeId>,
     /// Paint the tree commit-activity sparkline. Off unless saved on.
     pub activity_sparkline: bool,
+    /// Message rows of the expanded commit-message footer that the last
+    /// mouse drag of its edge saved. `None` when none was saved or the
+    /// saved value is not an integer in
+    /// [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`].
+    pub commit_msg_lines: Option<usize>,
+}
+
+/// The saved `commitMessageLines` when it is a JSON integer in
+/// [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`]; any other value
+/// reads as not saved.
+fn saved_commit_msg_lines(value: Option<&serde_json::Value>) -> Option<usize> {
+    let n = value?.as_u64()?;
+    let range = COMMIT_MSG_LINES_MIN as u64..=COMMIT_MSG_LINES_MAX as u64;
+    range.contains(&n).then_some(n as usize)
 }
 
 /// Resolve the store path from an env lookup and the config `uiStore` value.
@@ -108,8 +131,10 @@ pub(crate) fn check_ui_state_bytes(bytes: &[u8]) -> Result<(), String> {
 ///
 /// [`UiState::default`] when the file is missing or unreadable, is not valid
 /// store JSON (extra keys included), or has another version. An unknown
-/// theme slug loads as no theme and keeps `activitySparkline`; a missing
-/// `activitySparkline` is off.
+/// theme slug loads as no theme and keeps the other keys; a missing
+/// `activitySparkline` is off; a missing or bad `commitMessageLines` (not an
+/// integer in [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`]) loads as
+/// not saved and keeps the other keys.
 pub fn load_ui_state(path: &Path) -> UiState {
     let Some(parsed) = fs::read(path).ok().and_then(|bytes| parse_store(&bytes)) else {
         return UiState::default();
@@ -120,6 +145,7 @@ pub fn load_ui_state(path: &Path) -> UiState {
     UiState {
         theme: parsed.theme.as_deref().and_then(parse_theme_id),
         activity_sparkline: parsed.activity_sparkline,
+        commit_msg_lines: saved_commit_msg_lines(parsed.commit_message_lines.as_ref()),
     }
 }
 
@@ -170,6 +196,18 @@ pub fn save_activity_sparkline(path: &Path, on: bool) -> io::Result<()> {
     update_store(path, |file| file.activity_sparkline = on)
 }
 
+/// Persist the commit-message footer rows a drag of its edge set, and keep
+/// the stored `theme` (an unknown slug included) and `activitySparkline`.
+///
+/// `lines` is clamped to [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`].
+/// See [`update_store`] for the create, foreign-file, and lock rules.
+pub fn save_commit_msg_lines(path: &Path, lines: usize) -> io::Result<()> {
+    let lines = lines.clamp(COMMIT_MSG_LINES_MIN, COMMIT_MSG_LINES_MAX);
+    update_store(path, |file| {
+        file.commit_message_lines = Some(serde_json::Value::from(lines));
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,7 +215,7 @@ mod tests {
     use crate::tui::theme::THEME_IDS;
     use std::fs;
 
-    /// One of the two store saves, for tests that run both.
+    /// One of the store saves, for tests that run each.
     type Save = fn(&Path) -> io::Result<()>;
 
     fn temp_store() -> (PathBuf, PathBuf) {
@@ -252,7 +290,8 @@ mod tests {
                 load_ui_state(&path),
                 UiState {
                     theme: Some(id),
-                    activity_sparkline: false
+                    activity_sparkline: false,
+                    commit_msg_lines: None,
                 },
                 "{id:?}"
             );
@@ -282,7 +321,8 @@ mod tests {
             load_ui_state(&path),
             UiState {
                 theme: Some(ThemeId::Nord),
-                activity_sparkline: true
+                activity_sparkline: true,
+                commit_msg_lines: None,
             }
         );
         let _ = fs::remove_dir_all(dir);
@@ -298,7 +338,8 @@ mod tests {
             load_ui_state(&path),
             UiState {
                 theme: Some(ThemeId::Dracula),
-                activity_sparkline: true
+                activity_sparkline: true,
+                commit_msg_lines: None,
             }
         );
         save_activity_sparkline(&path, false).unwrap();
@@ -318,7 +359,8 @@ mod tests {
             load_ui_state(&path),
             UiState {
                 theme: None,
-                activity_sparkline: true
+                activity_sparkline: true,
+                commit_msg_lines: None,
             },
             "unknown slug is no theme; the sparkline still loads"
         );
@@ -338,7 +380,8 @@ mod tests {
             load_ui_state(&path),
             UiState {
                 theme: None,
-                activity_sparkline: true
+                activity_sparkline: true,
+                commit_msg_lines: None,
             }
         );
         let _ = fs::remove_dir_all(dir);
@@ -359,6 +402,7 @@ mod tests {
         for save in [
             (|p: &Path| save_theme(p, ThemeId::Nord)) as Save,
             |p: &Path| save_activity_sparkline(p, true),
+            |p: &Path| save_commit_msg_lines(p, 6),
         ] {
             let (dir, path) = temp_store();
             let path = path
@@ -401,7 +445,8 @@ mod tests {
             load_ui_state(&path),
             UiState {
                 theme: Some(ThemeId::Dracula),
-                activity_sparkline: false
+                activity_sparkline: false,
+                commit_msg_lines: None,
             },
             "compact, missing activitySparkline is off"
         );
@@ -410,7 +455,8 @@ mod tests {
             load_ui_state(&path),
             UiState {
                 theme: None,
-                activity_sparkline: true
+                activity_sparkline: true,
+                commit_msg_lines: None,
             },
             "no theme, sparkline on"
         );
@@ -421,9 +467,10 @@ mod tests {
     fn save_never_overwrites_a_file_that_is_not_the_store() {
         let (dir, path) = temp_store();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let saves: [(&str, Save); 2] = [
+        let saves: [(&str, Save); 3] = [
             ("theme", |p| save_theme(p, ThemeId::Monokai)),
             ("sparkline", |p| save_activity_sparkline(p, true)),
+            ("commit message lines", |p| save_commit_msg_lines(p, 6)),
         ];
         for (name, save) in saves {
             for body in [
@@ -475,6 +522,101 @@ mod tests {
                 Some(ThemeId::Kanagawa),
                 "{body:?}"
             );
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A drag's save writes `commitMessageLines` and keeps the theme (an
+    /// unknown slug too) and the sparkline; a theme or sparkline save keeps
+    /// the saved rows.
+    #[test]
+    fn commit_msg_lines_round_trip_and_keep_the_other_keys() {
+        let (dir, path) = temp_store();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "{\"version\":1,\"theme\":\"dracula\",\"activitySparkline\":true}\n",
+        )
+        .unwrap();
+        save_commit_msg_lines(&path, 7).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "{\n  \"version\": 1,\n  \"theme\": \"dracula\",\n  \"activitySparkline\": true,\n  \"commitMessageLines\": 7\n}\n"
+        );
+        assert_eq!(
+            load_ui_state(&path),
+            UiState {
+                theme: Some(ThemeId::Dracula),
+                activity_sparkline: true,
+                commit_msg_lines: Some(7),
+            }
+        );
+        save_theme(&path, ThemeId::Nord).unwrap();
+        save_activity_sparkline(&path, false).unwrap();
+        assert_eq!(
+            load_ui_state(&path),
+            UiState {
+                theme: Some(ThemeId::Nord),
+                activity_sparkline: false,
+                commit_msg_lines: Some(7),
+            },
+            "theme and sparkline saves keep the rows"
+        );
+
+        fs::write(&path, "{\"version\":1,\"theme\":\"solarized\"}\n").unwrap();
+        save_commit_msg_lines(&path, 3).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "{\n  \"version\": 1,\n  \"theme\": \"solarized\",\n  \"activitySparkline\": false,\n  \"commitMessageLines\": 3\n}\n",
+            "unknown slug kept as is"
+        );
+
+        for (lines, saved) in [(1, 1), (20, 20), (0, 1), (99, 20)] {
+            save_commit_msg_lines(&path, lines).unwrap();
+            assert_eq!(
+                load_ui_state(&path).commit_msg_lines,
+                Some(saved),
+                "{lines}"
+            );
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A `commitMessageLines` that is not an integer in 1..=20 loads as not
+    /// saved; the theme and sparkline still load, and a save of another key
+    /// keeps the bad value as is.
+    #[test]
+    fn bad_commit_msg_lines_is_unset_and_the_rest_still_loads() {
+        let (dir, path) = temp_store();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for bad in ["0", "21", "-1", "4.5", "\"6\"", "null", "true", "[6]", "{}"] {
+            let body = format!(
+                "{{\"version\":1,\"theme\":\"nord\",\"activitySparkline\":true,\"commitMessageLines\":{bad}}}\n"
+            );
+            fs::write(&path, &body).unwrap();
+            assert_eq!(
+                load_ui_state(&path),
+                UiState {
+                    theme: Some(ThemeId::Nord),
+                    activity_sparkline: true,
+                    commit_msg_lines: None,
+                },
+                "{bad}"
+            );
+            assert_eq!(check_ui_state_bytes(body.as_bytes()), Ok(()), "{bad}");
+            save_activity_sparkline(&path, false).unwrap();
+            let kept = fs::read_to_string(&path).unwrap();
+            if bad == "null" {
+                assert!(!kept.contains("commitMessageLines"), "{kept}");
+            } else {
+                let compact: String = kept.chars().filter(|c| !c.is_whitespace()).collect();
+                assert!(
+                    compact.contains(&format!("\"commitMessageLines\":{bad}")),
+                    "{bad}: kept as is: {kept}"
+                );
+            }
+            save_commit_msg_lines(&path, 5).unwrap();
+            assert_eq!(load_ui_state(&path).commit_msg_lines, Some(5), "{bad}");
         }
         let _ = fs::remove_dir_all(dir);
     }

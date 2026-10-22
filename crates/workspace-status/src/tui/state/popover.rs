@@ -565,7 +565,7 @@ impl AppState {
             .find(|hit| hit.contains(col, row))
     }
 
-    fn pointer_in_popover(&self) -> bool {
+    pub(super) fn pointer_in_popover(&self) -> bool {
         let (Some((col, row)), Some(painted)) = (self.pointer, self.layout.popover.as_ref()) else {
             return false;
         };
@@ -1445,6 +1445,35 @@ mod tests {
         let want = twin.dispatch(Action::Fetch);
         assert_eq!(app.dispatch(Action::Release), want);
         assert!(app.popover.is_none());
+    }
+
+    /// A pinned popover takes the mouse, so the pane divider does not
+    /// hover, even with the pointer outside the popover box; it hovers again
+    /// once the popover closes.
+    #[test]
+    fn a_pinned_popover_clears_the_resize_edge_hover() {
+        use super::super::super::split::ResizeEdge;
+        let mut app = app();
+        pin_sync(&mut app, "repo:app");
+        paint(&mut app);
+        assert_eq!(app.input_mode(), InputMode::Popover);
+        let painted = app.layout.popover.clone().expect("painted");
+        // The left pane's right border, on a body row under the popover.
+        let divider = (app.layout.outer_tree_width - 1, painted.rect.bottom() + 1);
+        assert!(
+            !painted
+                .rect
+                .contains(ratatui::layout::Position::new(divider.0, divider.1)),
+            "the pointer is outside the popover: {painted:?}"
+        );
+        app.set_pointer(Some(divider));
+        assert_eq!(app.hovered_resize_edge(), None, "pinned popover");
+        app.close_popover();
+        assert_eq!(
+            app.hovered_resize_edge(),
+            Some(ResizeEdge::Pane),
+            "the same cell hovers once the popover closes"
+        );
     }
 
     #[test]

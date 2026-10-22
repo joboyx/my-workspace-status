@@ -166,6 +166,22 @@ pub fn graph_chrome_budget_for(
     }
 }
 
+/// Most expanded-footer message rows a graph pane `height` rows tall shows,
+/// in [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`].
+///
+/// [`graph_chrome_budget_for`] caps the footer at half the pane and keeps
+/// one list row, so a larger request paints no more rows. A footer resize
+/// clamps here so it never stores rows the pane cannot show. The header
+/// does not change the footer, so it is left out.
+pub fn commit_msg_lines_fit(height: u16) -> usize {
+    let most = graph_footer_request(true, COMMIT_MSG_LINES_MAX);
+    // Body rows less the pinned meta row.
+    let rows = graph_chrome_budget_for(height, false, most)
+        .footer_body_height()
+        .saturating_sub(1);
+    usize::from(rows).clamp(COMMIT_MSG_LINES_MIN, COMMIT_MSG_LINES_MAX)
+}
+
 /// Two selection-detail lines (subject + meta). Truncated to `width`.
 pub fn selection_detail_lines(
     model: &GraphModel,
@@ -533,6 +549,39 @@ mod tests {
                 height - body - 1,
                 "{height}/{expand}/{n}"
             );
+        }
+    }
+
+    #[test]
+    fn commit_msg_lines_fit_is_the_most_rows_the_pane_shows() {
+        for (height, fit) in [
+            (1, 1),
+            (3, 1),
+            (8, 3),
+            (10, 4),
+            (12, 5),
+            (40, 19),
+            (44, 20),
+            (60, 20),
+        ] {
+            assert_eq!(commit_msg_lines_fit(height), fit, "{height}");
+        }
+        for height in 5..80 {
+            let fit = commit_msg_lines_fit(height);
+            let shown =
+                |n: usize| graph_chrome_budget_for(height, false, graph_footer_request(true, n));
+            assert_eq!(
+                usize::from(shown(fit).footer_body_height()) - 1,
+                fit,
+                "{height}: every fitted row shows"
+            );
+            if fit < COMMIT_MSG_LINES_MAX {
+                assert_eq!(
+                    shown(fit + 1),
+                    shown(fit),
+                    "{height}: one more row paints nothing"
+                );
+            }
         }
     }
 
