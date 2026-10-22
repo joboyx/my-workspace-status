@@ -343,6 +343,12 @@ Terminal size, mouse, the environment, and the loaded repos' remotes are read wh
 
 The TUI uses the terminal alternate screen (DEC 1049) while it is mounted. Normal quit writes leave sequences and shows the cursor. `SIGKILL` (`kill -9`) cannot run those hooks. After SIGKILL, reset the terminal if the primary buffer stays hidden.
 
+## Pointer shape
+
+With mouse capture on, the TUI asks the terminal for a resize pointer while the pointer rests on a resize edge or drags one: a left / right arrow (OSC 22 `ew-resize`) on the tree / right pane divider and the side-by-side diff rule, and an up / down arrow (`ns-resize`) on the top rule of the expanded commit-message footer. Leaving the edge, `m` (mouse off), `$EDITOR` or a blocking diff tool, quit, Ctrl-C, and a panic on the TUI thread put the default pointer back (`ESC ] 22 ; default ESC \`). A session that never rests on an edge writes no OSC 22.
+
+Terminals that take CSS pointer names in OSC 22 show the arrow: kitty 0.31 and later, foot 1.12 and later, and Ghostty. Terminals without OSC 22, for example GNOME Terminal and other VTE terminals, and Alacritty, ignore the sequence. xterm and iTerm2 implement OSC 22 with X11 cursor names, so the arrow may not show there. tmux drops the sequence, so a session inside tmux shows no arrow. The edge highlight shows in every terminal. There is no setting for the pointer shape.
+
 ## PageUp and PageDown on macOS
 
 PageUp and PageDown page the focused pane when the terminal sends the key to the process (crossterm `PageUp` / `PageDown`, including CSI `ESC [5~` / `ESC [6~`).

@@ -951,7 +951,7 @@ pub struct AppState {
     /// Message rows of the expanded commit-message footer (graph pane and
     /// commit-files pane). The footer keeps this height whatever the
     /// selected message is. Launch value: the UI-state store value a drag
-    /// saved ([`Self::saved_commit_msg_lines`]), else
+    /// saved (`saved_commit_msg_lines`), else
     /// `viewDefaults.commitMessageLines`, else
     /// [`COMMIT_MSG_LINES_DEFAULT`]. A drag of the graph footer's top rule
     /// changes it and saves it to the UI-state store on release; the

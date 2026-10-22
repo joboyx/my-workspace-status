@@ -595,8 +595,9 @@ fn is_commit_msg_rule(layout: SplitLayout, col: u16, row: u16) -> bool {
 /// Graph scrollbar (exact column, list track) wins over the pane divider
 /// band (3 columns boxed, 2 flat) so a left-pane graph thumb stays
 /// draggable. Horizontal graph track is next, then the file-diff horizontal
-/// bar, then pane, then the commit-message footer rule, then in-diff RULE. Boxed panes stop above the pane
-/// area's last row (the bottom border); flat panes include it.
+/// bar, then pane, then the commit-message footer rule, then in-diff RULE.
+/// Boxed panes stop above the pane area's last row (the bottom border);
+/// flat panes include it.
 pub fn hit_split(layout: SplitLayout, col: u16, row: u16) -> SplitHit {
     let x = col.saturating_add(1);
     let y = row.saturating_add(1);

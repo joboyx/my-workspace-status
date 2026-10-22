@@ -34,6 +34,7 @@ mod keys;
 mod line_blame;
 mod ops;
 pub(crate) mod persist;
+mod pointer_shape;
 mod popover;
 mod pull_request;
 mod quick_open;

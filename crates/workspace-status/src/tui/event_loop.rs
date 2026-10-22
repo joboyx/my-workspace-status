@@ -33,6 +33,7 @@ use super::event_pump::{
 use super::fetch_claim::unix_now_ms;
 use super::hyperlink::{link_cells, write_links};
 use super::keys::{drop_g_chord_echo, held_nav_key, is_half_page_chord, KeyStrokeOrigin};
+use super::pointer_shape::{shape_for, TermPointer};
 use super::render::draw;
 use super::state::{AppState, PendingConfirm};
 use super::status::StatusMessage;
@@ -211,6 +212,8 @@ struct LoopCtx<'a> {
     fetch_ms: u64,
     /// OSC 9;4 progress the terminal shows for the current batch.
     progress: TermProgress,
+    /// OSC 22 pointer shape the terminal shows over a resize edge.
+    pointer: TermPointer,
     quit: bool,
 }
 
@@ -234,7 +237,8 @@ pub async fn run(
     let input = InputBridge::spawn();
     let mut presenter = Presenter::new();
     let mut progress = TermProgress::new(opts.settings.term_progress);
-    draw_frame(terminal, state, &mut progress)?;
+    let mut pointer = TermPointer::default();
+    draw_frame(terminal, state, &mut progress, &mut pointer)?;
     presenter.painted();
 
     let mut ctx = LoopCtx {
@@ -250,6 +254,7 @@ pub async fn run(
         watch_ms: opts.settings.watch_ms,
         fetch_ms: opts.settings.fetch_ms,
         progress,
+        pointer,
         quit: false,
     };
     ctx.interp
@@ -378,7 +383,7 @@ pub async fn run(
                 // Animation frames redraw on their own tick (spinner,
                 // flash, glide); idle draws only when dirty.
                 if ctx.presenter.should_draw(ctx.state.next_anim_tick_ms()) {
-                    draw_frame(ctx.terminal, ctx.state, &mut ctx.progress)?;
+                    draw_frame(ctx.terminal, ctx.state, &mut ctx.progress, &mut ctx.pointer)?;
                     ctx.presenter.painted();
                 }
             }
@@ -390,17 +395,21 @@ pub async fn run(
 
 /// Draw one frame, then paint its hyperlinks over it (OSC 8), then its
 /// curly underlines (SGR 4:3 + 58), then write the batch's terminal
-/// progress (OSC 9;4) when it changed.
+/// progress (OSC 9;4) and the resize-edge pointer shape (OSC 22) when they
+/// changed.
 ///
 /// The links and curls are printed again on every frame: a diff that
 /// rewrites such a cell clears its link or curl, and this puts it back.
 /// Link cells and curl cells never overlap (`draw` cuts link cells out of
 /// the curls), so the two writers' order does not matter. A batch that
 /// ends sets `batch` to `None`, so the next frame writes the clear state.
+/// The pointer shape follows `hovered_resize_edge` on the layout this
+/// frame recorded.
 fn draw_frame(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
     progress: &mut TermProgress,
+    pointer: &mut TermPointer,
 ) -> Result<(), u8> {
     let completed = terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
     let links = link_cells(completed.buffer, &state.layout.links);
@@ -411,6 +420,12 @@ fn draw_frame(
         .write_if_changed(
             terminal.backend_mut(),
             progress_for(state.remote_activity.batch.as_ref()),
+        )
+        .map_err(|_| 1u8)?;
+    pointer
+        .write_if_changed(
+            terminal.backend_mut(),
+            shape_for(state.hovered_resize_edge()),
         )
         .map_err(|_| 1u8)
 }
@@ -595,7 +610,14 @@ fn schedule_edit(ctx: &mut LoopCtx<'_>, repo: String, path: String, line: Option
     }
     ctx.input.pause();
     let mouse = ctx.state.mouse_enabled;
-    let result = run_blocking_editor(ctx.terminal, &cmd, &args, &ctx.opts.cwd.join(&repo), mouse);
+    let result = run_blocking_editor(
+        ctx.terminal,
+        &mut ctx.pointer,
+        &cmd,
+        &args,
+        &ctx.opts.cwd.join(&repo),
+        mouse,
+    );
     ctx.input.resume();
     match result {
         Err(err) => {
@@ -662,7 +684,14 @@ fn launch_diff(ctx: &mut LoopCtx<'_>, launch: DiffLaunch) {
     }
     ctx.input.pause();
     let mouse = ctx.state.mouse_enabled;
-    let result = run_blocking_editor(ctx.terminal, &cmd, &args, &repo_abs, mouse);
+    let result = run_blocking_editor(
+        ctx.terminal,
+        &mut ctx.pointer,
+        &cmd,
+        &args,
+        &repo_abs,
+        mouse,
+    );
     ctx.input.resume();
     cleanup_prepared(&prepared);
     match result {

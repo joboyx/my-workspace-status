@@ -52,6 +52,7 @@ use super::graph_load::{
 };
 use super::keys::KeyStrokeOrigin;
 use super::keys::{event_to_action_with, is_held_nav_backlog, InputMode};
+use super::pointer_shape::{TermPointer, POINTER_RESET, POINTER_SET};
 use super::state::AppState;
 use super::status::StatusMessage;
 use super::tabs::{
@@ -76,10 +77,11 @@ pub struct TuiOpts {
 
 /// Open the alternate screen and run until quit.
 ///
-/// Every exit restores the terminal and clears a shown OSC 9;4 bar:
+/// Every exit restores the terminal, clears a shown OSC 9;4 bar, and puts
+/// back the default pointer after an OSC 22 resize shape:
 /// quit, an error return, and a panic on this thread (panic hook).
 pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
-    install_panic_hook(&PROGRESS_SHOWN, stdout);
+    install_panic_hook(&PROGRESS_SHOWN, &POINTER_SET, stdout);
     let mut state = AppState::launch(opts.cwd.clone(), opts.snapshot.clone(), &opts.settings);
     state.apply_view_defaults(&opts.config.view_defaults);
     enable_raw_mode().map_err(|_| 1u8)?;
@@ -135,21 +137,31 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
 static TERMINAL_SET_UP: AtomicBool = AtomicBool::new(false);
 
 /// Give the terminal back on stdout. Clears the OSC 9;4 bar only when one
-/// shows ([`PROGRESS_SHOWN`]).
+/// shows ([`PROGRESS_SHOWN`]), and resets the OSC 22 pointer only while a
+/// resize shape shows ([`POINTER_SET`]).
 fn restore_terminal() {
     TERMINAL_SET_UP.store(false, Ordering::SeqCst);
-    restore_terminal_to(&mut stdout(), PROGRESS_SHOWN.swap(false, Ordering::SeqCst));
+    restore_terminal_to(
+        &mut stdout(),
+        PROGRESS_SHOWN.swap(false, Ordering::SeqCst),
+        POINTER_SET.swap(false, Ordering::SeqCst),
+    );
 }
 
-/// Clear the OSC 9;4 bar first (when `clear_progress`), then leave raw
-/// mode, mouse capture, the keyboard protocol, and the alternate screen, and
-/// show the cursor. Each step is safe on a terminal that was never set up.
+/// Clear the OSC 9;4 bar first (when `clear_progress`), then put the
+/// default pointer back (when `reset_pointer`), then leave raw mode, mouse
+/// capture, the keyboard protocol, and the alternate screen, and show the
+/// cursor. Each step is safe on a terminal that was never set up.
 ///
 /// With no bar shown it writes no OSC 9;4: some terminals show any OSC 9
-/// as a desktop notification.
-fn restore_terminal_to<W: Write>(out: &mut W, clear_progress: bool) {
+/// as a desktop notification. With no resize shape shown it writes no
+/// OSC 22.
+fn restore_terminal_to<W: Write>(out: &mut W, clear_progress: bool, reset_pointer: bool) {
     if clear_progress {
         let _ = out.write_all(PROGRESS_CLEAR.as_bytes());
+    }
+    if reset_pointer {
+        let _ = out.write_all(POINTER_RESET.as_bytes());
     }
     let _ = disable_raw_mode();
     let _ = disable_mouse(out);
@@ -163,8 +175,10 @@ fn restore_terminal_to<W: Write>(out: &mut W, clear_progress: bool) {
 /// It acts only for a panic on the thread that installed it (the TUI
 /// thread) while [`TERMINAL_SET_UP`] is set. A worker panic that Tokio
 /// catches leaves the running TUI alone. It clears the OSC 9;4 bar only
-/// while `shown` is set ([`PROGRESS_SHOWN`] outside tests).
-fn install_panic_hook<W, F>(shown: &'static AtomicBool, target: F)
+/// while `shown` is set ([`PROGRESS_SHOWN`] outside tests), and resets the
+/// OSC 22 pointer only while `pointer_set` is set ([`POINTER_SET`] outside
+/// tests).
+fn install_panic_hook<W, F>(shown: &'static AtomicBool, pointer_set: &'static AtomicBool, target: F)
 where
     W: Write,
     F: Fn() -> W + Send + Sync + 'static,
@@ -175,7 +189,11 @@ where
         if std::thread::current().id() == tui_thread
             && TERMINAL_SET_UP.swap(false, Ordering::SeqCst)
         {
-            restore_terminal_to(&mut target(), shown.swap(false, Ordering::SeqCst));
+            restore_terminal_to(
+                &mut target(),
+                shown.swap(false, Ordering::SeqCst),
+                pointer_set.swap(false, Ordering::SeqCst),
+            );
         }
         prev(info);
     }));
@@ -984,13 +1002,19 @@ pub(crate) fn discard_held_nav_backlog(
     None
 }
 
+/// Hand the terminal to a blocking editor or diff tool, wait for it, then
+/// take the terminal back. The OSC 22 pointer goes back to the default
+/// first, so a resize shape does not stay while the other program runs;
+/// the next frame sends it again if the pointer still rests on an edge.
 pub(crate) fn run_blocking_editor(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    pointer: &mut TermPointer,
     cmd: &str,
     args: &[String],
     cwd: &Path,
     mouse_enabled: bool,
 ) -> Result<(), String> {
+    let _ = pointer.reset(terminal.backend_mut());
     let _ = disable_raw_mode();
     let mut out = stdout();
     let _ = disable_mouse(&mut out);
@@ -1207,6 +1231,7 @@ mod tests {
     use crate::testutil::{git, init_repo};
     use crate::tui::action::{Action, Effect};
     use crate::tui::branches::DIRTY_WORKTREE_STATUS;
+    use crate::tui::pointer_shape::PointerShape;
     use crate::tui::state::PendingConfirm;
     use crate::tui::status::StatusKind;
     use crate::tui::term_progress::{ProgressState, TermProgress};
@@ -1237,20 +1262,25 @@ mod tests {
     }
 
     /// Restore bytes as `restore_terminal` writes them, with `shown` as
-    /// the shown-bar flag.
-    fn restore_bytes(shown: &AtomicBool) -> String {
+    /// the shown-bar flag and `pointer_set` as the resize-pointer flag.
+    fn restore_bytes(shown: &AtomicBool, pointer_set: &AtomicBool) -> String {
         let mut out = Vec::new();
-        restore_terminal_to(&mut out, shown.swap(false, Ordering::SeqCst));
+        restore_terminal_to(
+            &mut out,
+            shown.swap(false, Ordering::SeqCst),
+            pointer_set.swap(false, Ordering::SeqCst),
+        );
         String::from_utf8(out).unwrap()
     }
 
     #[test]
     fn restore_sequence_clears_progress_first() {
         static SHOWN: AtomicBool = AtomicBool::new(false);
+        static NO_POINTER: AtomicBool = AtomicBool::new(false);
         let mut progress = TermProgress::with_flag(true, &SHOWN);
         let mut sink = Vec::new();
 
-        let idle = restore_bytes(&SHOWN);
+        let idle = restore_bytes(&SHOWN, &NO_POINTER);
         assert!(
             !idle.contains("\x1b]9;4;"),
             "no bar shown: no OSC 9;4 at all: {idle:?}"
@@ -1264,7 +1294,7 @@ mod tests {
         progress
             .write_if_changed(&mut sink, ProgressState::Normal(50))
             .unwrap();
-        let shown = restore_bytes(&SHOWN);
+        let shown = restore_bytes(&SHOWN, &NO_POINTER);
         assert!(
             shown.starts_with(PROGRESS_CLEAR),
             "a shown bar is cleared first: {shown:?}"
@@ -1278,9 +1308,59 @@ mod tests {
             .write_if_changed(&mut sink, ProgressState::Clear)
             .unwrap();
         assert_eq!(
-            restore_bytes(&SHOWN),
+            restore_bytes(&SHOWN, &NO_POINTER),
             idle,
             "a batch that already cleared its bar writes no second clear"
+        );
+    }
+
+    #[test]
+    fn restore_resets_the_pointer_only_after_a_resize_shape() {
+        static NO_BAR: AtomicBool = AtomicBool::new(false);
+        static POINTER: AtomicBool = AtomicBool::new(false);
+        let mut pointer = TermPointer::with_flag(&POINTER);
+        let mut sink = Vec::new();
+
+        let idle = restore_bytes(&NO_BAR, &POINTER);
+        assert!(
+            !idle.contains("\x1b]22;"),
+            "no resize shape shown: no OSC 22 at all: {idle:?}"
+        );
+
+        pointer
+            .write_if_changed(&mut sink, PointerShape::EwResize)
+            .unwrap();
+        assert_eq!(
+            restore_bytes(&NO_BAR, &POINTER),
+            format!("{POINTER_RESET}{idle}"),
+            "a shown resize shape is reset before the terminal leaves"
+        );
+        assert_eq!(
+            restore_bytes(&NO_BAR, &POINTER),
+            idle,
+            "the exit reset runs once"
+        );
+
+        pointer
+            .write_if_changed(&mut sink, PointerShape::NsResize)
+            .unwrap();
+        pointer
+            .write_if_changed(&mut sink, PointerShape::Default)
+            .unwrap();
+        assert_eq!(
+            restore_bytes(&NO_BAR, &POINTER),
+            idle,
+            "a pointer already back on the default writes no second reset"
+        );
+
+        pointer
+            .write_if_changed(&mut sink, PointerShape::NsResize)
+            .unwrap();
+        pointer.reset(&mut sink).unwrap();
+        assert_eq!(
+            restore_bytes(&NO_BAR, &POINTER),
+            idle,
+            "a suspend reset leaves nothing for the exit restore"
         );
     }
 
@@ -1301,12 +1381,18 @@ mod tests {
     #[test]
     fn panic_hook_restores_terminal_and_clears_progress() {
         static SHOWN: AtomicBool = AtomicBool::new(false);
+        static POINTER: AtomicBool = AtomicBool::new(false);
         TermProgress::with_flag(true, &SHOWN)
             .write_if_changed(&mut Vec::new(), ProgressState::Normal(0))
             .unwrap();
+        TermPointer::with_flag(&POINTER)
+            .write_if_changed(&mut Vec::new(), PointerShape::EwResize)
+            .unwrap();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = std::sync::Arc::clone(&seen);
-        install_panic_hook(&SHOWN, move || SharedBuf(std::sync::Arc::clone(&sink)));
+        install_panic_hook(&SHOWN, &POINTER, move || {
+            SharedBuf(std::sync::Arc::clone(&sink))
+        });
         TERMINAL_SET_UP.store(true, Ordering::SeqCst);
         let caught = std::panic::catch_unwind(|| panic!("boom in the TUI thread"));
         // Put the default hook back for the other tests.
@@ -1317,6 +1403,10 @@ mod tests {
             out.starts_with(PROGRESS_CLEAR),
             "hook clears the shown bar first: {out:?}"
         );
+        assert!(
+            out.starts_with(&format!("{PROGRESS_CLEAR}{POINTER_RESET}")),
+            "hook resets the resize pointer next: {out:?}"
+        );
         assert!(out.contains("\x1b[?1049l"), "hook leaves the alt screen");
         assert!(out.contains("\x1b[?25h"), "hook shows the cursor");
         assert!(
@@ -1324,6 +1414,7 @@ mod tests {
             "the hook restores once"
         );
         assert!(!SHOWN.load(Ordering::SeqCst), "the bar is gone");
+        assert!(!POINTER.load(Ordering::SeqCst), "the pointer is reset");
     }
 
     #[test]
