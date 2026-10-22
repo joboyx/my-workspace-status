@@ -114,9 +114,10 @@ pub enum Action {
     /// message rows. Palette only (Shorter / Taller commit message): no key
     /// is bound.
     ///
-    /// Session-only, like `<` / `>`. `viewDefaults.commitMessageLines` sets
-    /// the launch value. Clamped to 1..=20 rows. The footer keeps this height
-    /// whatever the selected message is.
+    /// Session-only, like `<` / `>`: nothing is saved. The launch value is
+    /// the UI-state store value a mouse drag of the footer's top rule saved,
+    /// else `viewDefaults.commitMessageLines`. Clamped to 1..=20 rows. The
+    /// footer keeps this height whatever the selected message is.
     ResizeCommitMsg(i32),
     /// `-`. On an Explorer tab: move the tree cursor to the parent folder.
     /// On the Workspace tab with the tree focused on a row in a checkout

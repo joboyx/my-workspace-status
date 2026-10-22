@@ -54,6 +54,8 @@ pub enum DiffMode {
 pub enum SplitHit {
     Pane,
     DiffSplit,
+    /// Top rule row of the expanded graph commit-message footer.
+    CommitMsg,
     /// Painted graph scrollbar thumb (`█`).
     GraphThumb,
     /// Graph scrollbar track (not the thumb).
@@ -78,39 +80,10 @@ pub enum ResizeEdge {
     Pane,
     /// The side-by-side diff RULE ([`SplitHit::DiffSplit`], [`SplitDrag::Diff`]).
     DiffSplit,
-}
-
-impl SplitHit {
-    /// The resize edge this hit lands on, or `None` for a scrollbar or
-    /// [`SplitHit::Other`].
-    pub fn resize_edge(self) -> Option<ResizeEdge> {
-        match self {
-            Self::Pane => Some(ResizeEdge::Pane),
-            Self::DiffSplit => Some(ResizeEdge::DiffSplit),
-            Self::GraphThumb
-            | Self::GraphTrack
-            | Self::GraphHThumb
-            | Self::GraphHTrack
-            | Self::DiffHThumb
-            | Self::DiffHTrack
-            | Self::Other => None,
-        }
-    }
-}
-
-impl SplitDrag {
-    /// The resize edge this drag moves, or `None` for a scrollbar drag or
-    /// no drag.
-    pub fn resize_edge(self) -> Option<ResizeEdge> {
-        match self {
-            Self::Pane => Some(ResizeEdge::Pane),
-            Self::Diff => Some(ResizeEdge::DiffSplit),
-            Self::None
-            | Self::GraphScrollbar { .. }
-            | Self::GraphHScrollbar { .. }
-            | Self::DiffHScrollbar { .. } => None,
-        }
-    }
+    /// The top rule of the expanded graph commit-message footer
+    /// ([`SplitHit::CommitMsg`], [`SplitDrag::CommitMsg`]). It moves up and
+    /// down, where the other edges move left and right.
+    CommitMsg,
 }
 
 /// Active left-button drag, if any.
@@ -120,6 +93,14 @@ pub enum SplitDrag {
     None,
     Pane,
     Diff,
+    /// Graph commit-message footer top rule. Row delta maps onto the footer
+    /// message rows: up adds rows, down removes them.
+    CommitMsg {
+        /// Mouse row at mouse-down.
+        origin_row: u16,
+        /// Commit-message rows at mouse-down.
+        origin_lines: usize,
+    },
     /// Graph list scrollbar. Row delta maps onto `graph_scroll`.
     GraphScrollbar {
         /// Mouse row at mouse-down (or after a track jump).
@@ -141,6 +122,41 @@ pub enum SplitDrag {
         /// Horizontal pan offset at that origin.
         origin_offset: u16,
     },
+}
+
+impl SplitHit {
+    /// The resize edge this hit lands on, or `None` for a scrollbar or
+    /// [`SplitHit::Other`].
+    pub fn resize_edge(self) -> Option<ResizeEdge> {
+        match self {
+            Self::Pane => Some(ResizeEdge::Pane),
+            Self::DiffSplit => Some(ResizeEdge::DiffSplit),
+            Self::CommitMsg => Some(ResizeEdge::CommitMsg),
+            Self::GraphThumb
+            | Self::GraphTrack
+            | Self::GraphHThumb
+            | Self::GraphHTrack
+            | Self::DiffHThumb
+            | Self::DiffHTrack
+            | Self::Other => None,
+        }
+    }
+}
+
+impl SplitDrag {
+    /// The resize edge this drag moves, or `None` for a scrollbar drag or
+    /// no drag.
+    pub fn resize_edge(self) -> Option<ResizeEdge> {
+        match self {
+            Self::Pane => Some(ResizeEdge::Pane),
+            Self::Diff => Some(ResizeEdge::DiffSplit),
+            Self::CommitMsg { .. } => Some(ResizeEdge::CommitMsg),
+            Self::None
+            | Self::GraphScrollbar { .. }
+            | Self::GraphHScrollbar { .. }
+            | Self::DiffHScrollbar { .. } => None,
+        }
+    }
 }
 
 /// Frozen pane widths from terminal columns + session fraction.
@@ -207,6 +223,13 @@ pub struct SplitLayout {
     pub diff_col_max: u16,
     /// Current file-diff horizontal pan (`diff_col_offset`).
     pub diff_col_offset: u16,
+    /// 0-based row of the expanded graph commit-message footer's top rule
+    /// when it is painted ([`SplitHit::CommitMsg`]).
+    pub commit_msg_rule_y: Option<u16>,
+    /// 0-based first column of that rule.
+    pub commit_msg_rule_x: u16,
+    /// Rule width (the graph pane width).
+    pub commit_msg_rule_width: u16,
 }
 
 /// One paired side-by-side row from a unified diff.
@@ -557,12 +580,22 @@ fn hit_diff_hscrollbar(layout: SplitLayout, col: u16, row: u16) -> Option<SplitH
     Some(SplitHit::DiffHTrack)
 }
 
+/// True when 0-based (`col`, `row`) is on the painted commit-message
+/// footer rule.
+fn is_commit_msg_rule(layout: SplitLayout, col: u16, row: u16) -> bool {
+    let Some(y) = layout.commit_msg_rule_y else {
+        return false;
+    };
+    let x = layout.commit_msg_rule_x;
+    row == y && col >= x && col < x.saturating_add(layout.commit_msg_rule_width)
+}
+
 /// Map a 0-based mouse cell onto a drag handle.
 ///
 /// Graph scrollbar (exact column, list track) wins over the pane divider
 /// band (3 columns boxed, 2 flat) so a left-pane graph thumb stays
 /// draggable. Horizontal graph track is next, then the file-diff horizontal
-/// bar, then pane, then in-diff RULE. Boxed panes stop above the pane
+/// bar, then pane, then the commit-message footer rule, then in-diff RULE. Boxed panes stop above the pane
 /// area's last row (the bottom border); flat panes include it.
 pub fn hit_split(layout: SplitLayout, col: u16, row: u16) -> SplitHit {
     let x = col.saturating_add(1);
@@ -591,6 +624,9 @@ pub fn hit_split(layout: SplitLayout, col: u16, row: u16) -> SplitHit {
     }
     if is_pane_divider(layout, x) {
         return SplitHit::Pane;
+    }
+    if is_commit_msg_rule(layout, col, row) {
+        return SplitHit::CommitMsg;
     }
     if let Some(rule_x) = layout.diff_split_rule_x {
         let rule_1based = rule_x.saturating_add(1);
@@ -853,6 +889,9 @@ mod tests {
             diff_hscrollbar_width: 0,
             diff_col_max: 0,
             diff_col_offset: 0,
+            commit_msg_rule_y: None,
+            commit_msg_rule_x: 0,
+            commit_msg_rule_width: 0,
         }
     }
 
@@ -881,6 +920,9 @@ mod tests {
             diff_hscrollbar_width: 0,
             diff_col_max: 0,
             diff_col_offset: 0,
+            commit_msg_rule_y: None,
+            commit_msg_rule_x: 0,
+            commit_msg_rule_width: 0,
         }
     }
 
@@ -937,6 +979,9 @@ mod tests {
             diff_hscrollbar_width: 0,
             diff_col_max: 0,
             diff_col_offset: 0,
+            commit_msg_rule_y: None,
+            commit_msg_rule_x: 0,
+            commit_msg_rule_width: 0,
         };
         assert_eq!(hit_split(layout, 47, 4), SplitHit::Pane);
     }
@@ -984,6 +1029,9 @@ mod tests {
             diff_hscrollbar_width: 0,
             diff_col_max: 0,
             diff_col_offset: 0,
+            commit_msg_rule_y: None,
+            commit_msg_rule_x: 0,
+            commit_msg_rule_width: 0,
         };
         assert!(
             matches!(
@@ -1247,11 +1295,15 @@ mod tests {
     }
 
     #[test]
-    fn only_the_pane_divider_and_diff_rule_are_resize_edges() {
+    fn only_the_pane_divider_diff_rule_and_commit_msg_rule_are_resize_edges() {
         assert_eq!(SplitHit::Pane.resize_edge(), Some(ResizeEdge::Pane));
         assert_eq!(
             SplitHit::DiffSplit.resize_edge(),
             Some(ResizeEdge::DiffSplit)
+        );
+        assert_eq!(
+            SplitHit::CommitMsg.resize_edge(),
+            Some(ResizeEdge::CommitMsg)
         );
         for hit in [
             SplitHit::GraphThumb,
@@ -1266,6 +1318,14 @@ mod tests {
         }
         assert_eq!(SplitDrag::Pane.resize_edge(), Some(ResizeEdge::Pane));
         assert_eq!(SplitDrag::Diff.resize_edge(), Some(ResizeEdge::DiffSplit));
+        assert_eq!(
+            SplitDrag::CommitMsg {
+                origin_row: 0,
+                origin_lines: 4,
+            }
+            .resize_edge(),
+            Some(ResizeEdge::CommitMsg)
+        );
         for drag in [
             SplitDrag::None,
             SplitDrag::GraphScrollbar {
@@ -1282,6 +1342,69 @@ mod tests {
             },
         ] {
             assert_eq!(drag.resize_edge(), None, "{drag:?}");
+        }
+    }
+
+    /// The painted commit-message footer rule is a resize edge across its
+    /// width on its one row; the pane divider band wins where they meet
+    /// (a left-pane graph), and no recorded rule means no edge.
+    #[test]
+    fn commit_msg_rule_row_is_the_commit_msg_edge() {
+        for flat in [false, true] {
+            let base = if flat {
+                flat_wide_layout(None)
+            } else {
+                wide_layout(None)
+            };
+            assert_eq!(hit_split(base, 10, 15), SplitHit::Other, "no rule");
+            let left = SplitLayout {
+                commit_msg_rule_y: Some(15),
+                commit_msg_rule_x: 1,
+                commit_msg_rule_width: 46,
+                ..base
+            };
+            for col in [1, 10, 45] {
+                assert_eq!(
+                    hit_split(left, col, 15),
+                    SplitHit::CommitMsg,
+                    "{flat} {col}"
+                );
+            }
+            assert_eq!(
+                hit_split(left, 0, 15),
+                SplitHit::Other,
+                "{flat}: left of it"
+            );
+            for row in [14, 16] {
+                assert_eq!(
+                    hit_split(left, 10, row),
+                    SplitHit::Other,
+                    "{flat} row {row}"
+                );
+            }
+            assert_eq!(
+                hit_split(left, 47, 15),
+                SplitHit::Pane,
+                "{flat}: the band wins"
+            );
+            let right = SplitLayout {
+                commit_msg_rule_y: Some(15),
+                commit_msg_rule_x: 50,
+                commit_msg_rule_width: 109,
+                ..base
+            };
+            for col in [50, 100, 158] {
+                assert_eq!(
+                    hit_split(right, col, 15),
+                    SplitHit::CommitMsg,
+                    "{flat} {col}"
+                );
+            }
+            assert_eq!(
+                hit_split(right, 159, 15),
+                SplitHit::Other,
+                "{flat}: past it"
+            );
         }
     }
 

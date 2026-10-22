@@ -123,7 +123,7 @@ use super::tree::{
     build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, visible_for_tree,
     visible_window, workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
 };
-use super::ui_state_store::{save_activity_sparkline, save_theme};
+use super::ui_state_store::{save_activity_sparkline, save_commit_msg_lines, save_theme};
 use super::undercurl::UndercurlHit;
 use super::viewed::{
     collect_current_fingerprints, fingerprint_file_change, load_viewed_store, reconcile_viewed,
@@ -300,6 +300,17 @@ pub struct LayoutHit {
     pub graph_footer_height: u16,
     /// Max message scroll for the painted footer.
     pub graph_footer_scroll_max: usize,
+    /// 0-based row of the graph commit-message footer's top rule when the
+    /// footer is expanded and painted: the [`ResizeEdge::CommitMsg`] edge.
+    pub commit_msg_rule_y: Option<u16>,
+    /// 0-based first column of that rule (the graph pane's first column).
+    pub commit_msg_rule_x: u16,
+    /// Rule width (the graph pane width).
+    pub commit_msg_rule_width: u16,
+    /// Most message rows the painted graph pane shows in its expanded
+    /// footer ([`workspace_status_graph::commit_msg_lines_fit`]). A drag of
+    /// the rule clamps here.
+    pub commit_msg_lines_fit: usize,
     /// 0-based diff scrollbar column when a file diff is painted.
     pub diff_scrollbar_x: Option<u16>,
     /// 0-based first row of the diff scrollbar track (body, not header).
@@ -434,6 +445,10 @@ impl Default for LayoutHit {
             graph_footer_width: 0,
             graph_footer_height: 0,
             graph_footer_scroll_max: 0,
+            commit_msg_rule_y: None,
+            commit_msg_rule_x: 0,
+            commit_msg_rule_width: 0,
+            commit_msg_lines_fit: COMMIT_MSG_LINES_MAX,
             diff_scrollbar_x: None,
             diff_scrollbar_y: 0,
             diff_scrollbar_height: 0,
@@ -935,11 +950,19 @@ pub struct AppState {
     pub commit_msg_expand: bool,
     /// Message rows of the expanded commit-message footer (graph pane and
     /// commit-files pane). The footer keeps this height whatever the
-    /// selected message is. `viewDefaults.commitMessageLines` sets the launch
-    /// value; the Shorter / Taller commit message palette rows change it for
-    /// this session (no XDG store). Always in
+    /// selected message is. Launch value: the UI-state store value a drag
+    /// saved ([`Self::saved_commit_msg_lines`]), else
+    /// `viewDefaults.commitMessageLines`, else
+    /// [`COMMIT_MSG_LINES_DEFAULT`]. A drag of the graph footer's top rule
+    /// changes it and saves it to the UI-state store on release; the
+    /// Shorter / Taller commit message palette rows change it for this
+    /// session only (no save). Always in
     /// [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`].
     pub commit_msg_lines: usize,
+    /// Commit-message rows the UI-state store held at launch (`None` when
+    /// none or a bad value). They beat `viewDefaults.commitMessageLines` in
+    /// [`Self::apply_view_defaults`].
+    saved_commit_msg_lines: Option<usize>,
     /// Scroll of an expanded message taller than the graph footer, keyed by
     /// the graph row identity it belongs to. Any other selection reads `0`.
     commit_msg_scroll: Option<(String, usize)>,
@@ -1033,6 +1056,10 @@ impl AppState {
         state.undercurl = settings.undercurl;
         state.smooth_scroll = settings.smooth_scroll;
         state.activity_sparkline = settings.activity_sparkline;
+        state.saved_commit_msg_lines = settings.commit_msg_lines;
+        if let Some(lines) = settings.commit_msg_lines {
+            state.commit_msg_lines = lines;
+        }
         state.open_background_fetch_store(settings.fetch_store.clone());
         state
     }
@@ -1195,6 +1222,7 @@ impl AppState {
             diff_wrap: true,
             commit_msg_expand: true,
             commit_msg_lines: COMMIT_MSG_LINES_DEFAULT,
+            saved_commit_msg_lines: None,
             commit_msg_scroll: None,
             drag: SplitDrag::None,
             pad_press: None,
@@ -1236,6 +1264,8 @@ impl AppState {
     /// tree, folds, rows, cursor, and signatures like the `t` toggle, with
     /// no status message. `commitTree` also sets the file list mode that
     /// each new compare tab opens in.
+    /// `commitMessageLines` applies only when the UI-state store held no
+    /// valid saved value at launch: saved > config > default.
     pub fn apply_view_defaults(&mut self, defaults: &ViewDefaults) {
         if let Some(tree) = defaults.tree {
             if tree != self.tree_mode {
@@ -1265,7 +1295,11 @@ impl AppState {
         if let Some(expand) = defaults.commit_message_expand {
             self.commit_msg_expand = expand;
         }
-        if let Some(lines) = defaults.commit_message_lines {
+        // A saved drag value beats the config baseline.
+        if let Some(lines) = self
+            .saved_commit_msg_lines
+            .or(defaults.commit_message_lines)
+        {
             self.commit_msg_lines = lines.clamp(COMMIT_MSG_LINES_MIN, COMMIT_MSG_LINES_MAX);
         }
         if let Some(on) = defaults.line_blame {
@@ -2776,6 +2810,9 @@ impl AppState {
             diff_hscrollbar_width: self.layout.diff_hscrollbar_width,
             diff_col_max: self.layout.diff_col_max,
             diff_col_offset: self.diff_col_offset,
+            commit_msg_rule_y: self.layout.commit_msg_rule_y,
+            commit_msg_rule_x: self.layout.commit_msg_rule_x,
+            commit_msg_rule_width: self.layout.commit_msg_rule_width,
         }
     }
 
@@ -2843,6 +2880,15 @@ impl AppState {
             SplitHit::DiffSplit => {
                 self.drag = SplitDrag::Diff;
                 self.apply_diff_fraction_from_col(col);
+                self.last_click = None;
+                return Effect::None;
+            }
+            SplitHit::CommitMsg => {
+                // Rows change only once the pointer moves off this row.
+                self.drag = SplitDrag::CommitMsg {
+                    origin_row: row,
+                    origin_lines: self.commit_msg_lines,
+                };
                 self.last_click = None;
                 return Effect::None;
             }
@@ -3146,6 +3192,10 @@ impl AppState {
                 self.apply_tree_fraction_from_col(col);
             }
             SplitDrag::Diff => self.apply_diff_fraction_from_col(col),
+            SplitDrag::CommitMsg {
+                origin_row,
+                origin_lines,
+            } => self.drag_commit_msg(origin_row, origin_lines, row),
             SplitDrag::GraphScrollbar {
                 origin_row,
                 origin_scroll,
@@ -3218,6 +3268,10 @@ impl AppState {
     }
 
     /// Drop any split / scrollbar drag and any text selection.
+    ///
+    /// A cancelled commit-message rule drag keeps the rows it reached for
+    /// this session (as a cancelled pane or RULE drag keeps its split) and
+    /// saves nothing: only a release saves.
     pub(crate) fn cancel_mouse_drag(&mut self) {
         self.drag = SplitDrag::None;
         self.pad_press = None;
@@ -3226,18 +3280,55 @@ impl AppState {
 
     /// Mouse release: ends any drag; a flat divider press still pending
     /// ([`Self::pad_press`], with the pane drag it armed) clicks the row
-    /// under it. Then [`Self::release_mouse`].
+    /// under it. A commit-message rule drag saves its rows
+    /// ([`Self::finish_commit_msg_drag`]). Then [`Self::release_mouse`].
     fn release_press(&mut self) -> Effect {
         let press = self
             .pad_press
             .take()
             .filter(|_| matches!(self.drag, SplitDrag::Pane));
+        if let SplitDrag::CommitMsg { origin_lines, .. } = self.drag {
+            self.finish_commit_msg_drag(origin_lines);
+        }
         self.drag = SplitDrag::None;
         let Some((col, row)) = press else {
             return self.release_mouse();
         };
         let clicked = self.click_row(col, row);
         popover::then(clicked, self.release_mouse())
+    }
+
+    /// A commit-message rule drag at `row`: [`commit_msg_lines_from_drag`]
+    /// against this frame's pane fit, then keep the focused graph row in
+    /// view as [`Self::resize_commit_msg`] does. Session only until release.
+    fn drag_commit_msg(&mut self, origin_row: u16, origin_lines: usize, row: u16) {
+        let next = commit_msg_lines_from_drag(
+            origin_lines,
+            origin_row,
+            row,
+            self.layout.commit_msg_lines_fit,
+        );
+        if next == self.commit_msg_lines {
+            return;
+        }
+        self.commit_msg_lines = next;
+        self.status = format!("msg lines {next}").into();
+        // The graph list height changed: keep the focused row in view.
+        self.sync_graph_scroll();
+    }
+
+    /// Release of a commit-message rule drag: save the rows to the UI-state
+    /// store when they differ from `origin_lines` (the rows at the press).
+    /// The config file is never written. A failed save keeps the rows for
+    /// this session and names the store in the status row, like the theme
+    /// and sparkline saves.
+    fn finish_commit_msg_drag(&mut self, origin_lines: usize) {
+        if self.commit_msg_lines == origin_lines {
+            return;
+        }
+        if let Err(err) = save_commit_msg_lines(&self.ui_store_path, self.commit_msg_lines) {
+            self.status = StatusMessage::error(persist_failed_status("commit message lines", err));
+        }
     }
 
     fn focus_graph_pane(&mut self) {
@@ -3308,7 +3399,8 @@ impl AppState {
 
     /// Shorter / Taller commit message (palette only): change the expanded
     /// commit-message footer by `delta` rows for this session, clamped to
-    /// [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`].
+    /// [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`]. Unlike a drag of
+    /// the footer rule, it saves nothing.
     fn resize_commit_msg(&mut self, delta: i32) -> Effect {
         let next = (self.commit_msg_lines as i64).saturating_add(i64::from(delta));
         self.commit_msg_lines =
@@ -6238,11 +6330,12 @@ impl AppState {
     /// edge under [`Self::pane_pointer`] in the last paint.
     ///
     /// `None` while mouse capture is off, on an Explorer tab (it has no
-    /// pane or RULE drag), below the minimum terminal size, while an
-    /// overlay takes the mouse (dialog, prompt, help, palette, pinned
-    /// popover), and with the pointer inside a hover popover. A press there
-    /// never reaches the edges, so they do not hover. Scrollbar hits are
-    /// not edges.
+    /// pane, RULE, or commit-message drag), below the minimum terminal
+    /// size, while an overlay takes the mouse (dialog, prompt, help,
+    /// palette, pinned popover), with the pointer inside a hover popover,
+    /// and on a painted tab label (a press there activates or closes the
+    /// tab). A press there never reaches the edges, so they do not hover.
+    /// Scrollbar hits are not edges.
     pub fn hovered_resize_edge(&self) -> Option<ResizeEdge> {
         if !self.resize_edges_take_mouse() {
             return None;
@@ -6251,7 +6344,11 @@ impl AppState {
             return Some(edge);
         }
         let (col, row) = self.pane_pointer()?;
-        if self.pointer_in_popover() {
+        // The same order as `click_at`: a tab takes the press first.
+        if self.pointer_in_popover()
+            || self.hit_tab_close(col, row).is_some()
+            || self.hit_tab(col, row).is_some()
+        {
             return None;
         }
         hit_split(self.split_layout(), col, row).resize_edge()
@@ -7172,6 +7269,26 @@ enum FoldOp {
 #[cfg(test)]
 fn default_viewed_path() -> PathBuf {
     crate::testutil::unique_dir("ws-state-test").join("viewed.json")
+}
+
+/// Commit-message rows for a drag of the footer rule from `origin_row`
+/// (pressed with `origin_lines` rows) to `row`, in a pane that shows at
+/// most `fit` rows ([`workspace_status_graph::commit_msg_lines_fit`]).
+///
+/// Up adds one row per row moved and down removes one, from
+/// `min(origin_lines, fit)` so the first row moved shows. The result is
+/// clamped to [`COMMIT_MSG_LINES_MIN`]..=`min(fit, COMMIT_MSG_LINES_MAX)`,
+/// so the list keeps the rows the footer budget gives it. Back on
+/// `origin_row` it is `origin_lines`, so a drag that ends where it began
+/// changes nothing (even rows a smaller pane cannot show).
+fn commit_msg_lines_from_drag(origin_lines: usize, origin_row: u16, row: u16, fit: usize) -> usize {
+    if row == origin_row {
+        return origin_lines;
+    }
+    let most = fit.clamp(COMMIT_MSG_LINES_MIN, COMMIT_MSG_LINES_MAX);
+    let base = origin_lines.min(most) as i64;
+    let next = base + i64::from(origin_row) - i64::from(row);
+    next.clamp(COMMIT_MSG_LINES_MIN as i64, most as i64) as usize
 }
 
 /// Idle / breadcrumb toast when a persist write returns [`std::io::Error`].
@@ -14434,6 +14551,468 @@ mod tests {
         assert_eq!(app.hovered_resize_edge(), Some(ResizeEdge::Pane));
     }
 
+    /// Row of the commit-message footer rule in [`commit_msg_layout`].
+    const MSG_RULE_Y: u16 = 15;
+
+    /// [`wide_split_layout`] with a right-pane graph whose expanded
+    /// footer rule sits on [`MSG_RULE_Y`], in a pane `pane_height` rows
+    /// tall.
+    fn commit_msg_layout(pane_height: u16) -> super::LayoutHit {
+        super::LayoutHit {
+            tree_height: pane_height,
+            diff_split_rule_x: None,
+            commit_msg_rule_y: Some(MSG_RULE_Y),
+            commit_msg_rule_x: 50,
+            commit_msg_rule_width: 109,
+            commit_msg_lines_fit: workspace_status_graph::commit_msg_lines_fit(pane_height),
+            ..wide_split_layout()
+        }
+    }
+
+    /// A right-pane graph of 40 commits with its footer rule recorded and
+    /// the UI-state store in a fresh temp dir.
+    fn commit_msg_drag_state(prefix: &str, pane_height: u16) -> (AppState, PathBuf) {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_linear_graph(&mut app, 40);
+        let dir = crate::testutil::unique_dir(prefix);
+        app.ui_store_path = dir.join("state").join("ui-state.json");
+        app.layout = commit_msg_layout(pane_height);
+        (app, dir)
+    }
+
+    #[test]
+    fn commit_msg_lines_from_drag_moves_one_row_per_row_and_clamps() {
+        // Up adds, down removes.
+        assert_eq!(commit_msg_lines_from_drag(4, 15, 13, 20), 6);
+        assert_eq!(commit_msg_lines_from_drag(4, 15, 17, 20), 2);
+        assert_eq!(commit_msg_lines_from_drag(4, 15, 0, 20), 19);
+        // Clamped to 1..=20 and to the pane fit.
+        assert_eq!(commit_msg_lines_from_drag(4, 15, 40, 20), 1);
+        assert_eq!(commit_msg_lines_from_drag(19, 15, 0, 20), 20);
+        assert_eq!(commit_msg_lines_from_drag(4, 15, 0, 6), 6);
+        assert_eq!(commit_msg_lines_from_drag(4, 15, 0, 0), 1, "fit under 1");
+        // More rows than the pane shows: the first row moved shows.
+        assert_eq!(commit_msg_lines_from_drag(20, 15, 16, 6), 5);
+        assert_eq!(commit_msg_lines_from_drag(20, 15, 14, 6), 6);
+        // Back on the press row: the rows at the press, even past the fit.
+        assert_eq!(commit_msg_lines_from_drag(20, 15, 15, 6), 20);
+        assert_eq!(commit_msg_lines_from_drag(4, 15, 15, 20), 4);
+    }
+
+    /// Press on the rule arms the drag and changes nothing; up adds rows,
+    /// down removes them, the focused row stays in view, and the release
+    /// saves the new rows to the UI-state store once.
+    #[test]
+    fn commit_msg_rule_drag_resizes_the_footer_and_release_saves_once() {
+        let (mut app, dir) = commit_msg_drag_state("ws-msg-drag-save", 40);
+        app.dispatch(Action::MoveToEnd);
+        assert_eq!(app.commit_msg_lines, COMMIT_MSG_LINES_DEFAULT);
+        let status = app.status.clone();
+        assert_eq!(
+            app.dispatch(Action::Click {
+                col: 60,
+                row: MSG_RULE_Y
+            }),
+            Effect::None
+        );
+        assert_eq!(
+            app.drag,
+            SplitDrag::CommitMsg {
+                origin_row: MSG_RULE_Y,
+                origin_lines: COMMIT_MSG_LINES_DEFAULT,
+            }
+        );
+        assert_eq!(app.commit_msg_lines, COMMIT_MSG_LINES_DEFAULT);
+        assert_eq!(app.status, status, "a press alone changes nothing");
+        // Along the press row: no change.
+        app.dispatch(Action::Drag {
+            col: 90,
+            row: MSG_RULE_Y,
+        });
+        assert_eq!(app.commit_msg_lines, COMMIT_MSG_LINES_DEFAULT);
+
+        let list_before = app.graph_chrome().list_height;
+        app.dispatch(Action::Drag {
+            col: 60,
+            row: MSG_RULE_Y - 3,
+        });
+        assert_eq!(app.commit_msg_lines, COMMIT_MSG_LINES_DEFAULT + 3);
+        assert_eq!(app.status, "msg lines 7");
+        assert_eq!(app.graph_chrome().list_height + 3, list_before);
+        let idx = painted_focus_index(&app);
+        let scroll = app.graph_scroll as usize;
+        let list_h = app.graph_chrome().list_height as usize;
+        assert!(
+            idx >= scroll && idx < scroll + list_h,
+            "focused painted row {idx} in view at {scroll}..{}",
+            scroll + list_h
+        );
+        app.dispatch(Action::Drag {
+            col: 60,
+            row: MSG_RULE_Y + 1,
+        });
+        assert_eq!(app.commit_msg_lines, COMMIT_MSG_LINES_DEFAULT - 1);
+        app.dispatch(Action::Drag {
+            col: 60,
+            row: MSG_RULE_Y - 2,
+        });
+        assert_eq!(app.commit_msg_lines, 6);
+        assert!(!app.ui_store_path.exists(), "nothing saved mid-drag");
+
+        assert_eq!(app.dispatch(Action::Release), Effect::None);
+        assert_eq!(app.drag, SplitDrag::None);
+        assert_eq!(app.commit_msg_lines, 6);
+        assert_eq!(load_ui_state(&app.ui_store_path).commit_msg_lines, Some(6));
+        let saved = std::fs::read(&app.ui_store_path).unwrap();
+
+        // A press and release, and a drag back to its start, write nothing.
+        std::fs::remove_file(&app.ui_store_path).unwrap();
+        app.dispatch(Action::Click {
+            col: 60,
+            row: MSG_RULE_Y,
+        });
+        app.dispatch(Action::Release);
+        app.dispatch(Action::Click {
+            col: 60,
+            row: MSG_RULE_Y,
+        });
+        app.dispatch(Action::Drag {
+            col: 60,
+            row: MSG_RULE_Y - 4,
+        });
+        app.dispatch(Action::Drag {
+            col: 60,
+            row: MSG_RULE_Y,
+        });
+        app.dispatch(Action::Release);
+        assert_eq!(app.commit_msg_lines, 6);
+        assert!(!app.ui_store_path.exists(), "no change, no save");
+        assert!(saved.ends_with(b"\"commitMessageLines\": 6\n}\n"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The drag stops at 1 and 20 rows, and at the rows a small pane
+    /// shows, so the list keeps the rows the footer budget gives it.
+    #[test]
+    fn commit_msg_rule_drag_clamps_to_the_range_and_the_pane_fit() {
+        let (mut app, dir) = commit_msg_drag_state("ws-msg-drag-clamp", 60);
+        assert_eq!(app.layout.commit_msg_lines_fit, COMMIT_MSG_LINES_MAX);
+        app.commit_msg_lines = 10;
+        app.dispatch(Action::Click {
+            col: 60,
+            row: MSG_RULE_Y,
+        });
+        app.dispatch(Action::Drag { col: 60, row: 0 });
+        assert_eq!(app.commit_msg_lines, COMMIT_MSG_LINES_MAX, "at 20");
+        app.dispatch(Action::Drag {
+            col: 60,
+            row: MSG_RULE_Y + 7,
+        });
+        assert_eq!(app.commit_msg_lines, 3);
+        app.dispatch(Action::Drag { col: 60, row: 40 });
+        assert_eq!(app.commit_msg_lines, COMMIT_MSG_LINES_MIN, "at 1");
+        app.dispatch(Action::Release);
+        assert_eq!(
+            load_ui_state(&app.ui_store_path).commit_msg_lines,
+            Some(COMMIT_MSG_LINES_MIN)
+        );
+
+        // A 12-row pane shows 5 message rows: the drag stops there.
+        app.layout = commit_msg_layout(12);
+        app.layout.commit_msg_rule_y = Some(8);
+        let fit = workspace_status_graph::commit_msg_lines_fit(12);
+        assert_eq!(fit, 5);
+        app.dispatch(Action::Click { col: 60, row: 8 });
+        app.dispatch(Action::Drag { col: 60, row: 0 });
+        assert_eq!(app.commit_msg_lines, fit);
+        let chrome = app.graph_chrome();
+        assert_eq!(usize::from(chrome.footer_body_height()) - 1, fit);
+        assert!(chrome.list_height >= 1);
+        app.dispatch(Action::Release);
+        assert_eq!(
+            load_ui_state(&app.ui_store_path).commit_msg_lines,
+            Some(fit)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A key that cancels the mouse drag mid-drag keeps the rows reached
+    /// and saves nothing, then or at the later release.
+    #[test]
+    fn commit_msg_rule_drag_cancel_keeps_the_rows_and_saves_nothing() {
+        let (mut app, dir) = commit_msg_drag_state("ws-msg-drag-cancel", 40);
+        app.dispatch(Action::Click {
+            col: 60,
+            row: MSG_RULE_Y,
+        });
+        app.dispatch(Action::Drag {
+            col: 60,
+            row: MSG_RULE_Y - 2,
+        });
+        assert_eq!(app.commit_msg_lines, COMMIT_MSG_LINES_DEFAULT + 2);
+        app.dispatch(Action::ToggleHelp);
+        assert_eq!(app.drag, SplitDrag::None);
+        assert_eq!(app.commit_msg_lines, COMMIT_MSG_LINES_DEFAULT + 2);
+        app.dispatch(Action::ToggleHelp);
+        app.dispatch(Action::Release);
+        assert!(!app.ui_store_path.exists(), "cancel saves nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed save keeps the dragged rows and names the store.
+    #[test]
+    fn commit_msg_rule_drag_names_save_failure_and_keeps_the_rows() {
+        let (mut app, dir) = commit_msg_drag_state("ws-msg-drag-fail", 40);
+        let (root, path) = unwritable_store_path("ws-msg-drag-save-fail");
+        app.ui_store_path = path;
+        app.dispatch(Action::Click {
+            col: 60,
+            row: MSG_RULE_Y,
+        });
+        app.dispatch(Action::Drag {
+            col: 60,
+            row: MSG_RULE_Y - 1,
+        });
+        app.dispatch(Action::Release);
+        assert_eq!(app.commit_msg_lines, COMMIT_MSG_LINES_DEFAULT + 1);
+        assert_eq!(app.status.kind(), StatusKind::Error);
+        assert!(
+            app.status.contains("commit message lines save failed"),
+            "{}",
+            app.status
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The commit-message rule hovers like the other edges: redraw only on
+    /// change, lit through its drag, and off on release away from it.
+    #[test]
+    fn commit_msg_rule_hovers_and_stays_lit_while_dragging() {
+        let (mut app, dir) = commit_msg_drag_state("ws-msg-hover", 40);
+        assert!(!app.set_pointer(Some((60, MSG_RULE_Y - 1))), "list row");
+        assert!(app.set_pointer(Some((60, MSG_RULE_Y))), "onto the rule");
+        assert_eq!(app.hovered_resize_edge(), Some(ResizeEdge::CommitMsg));
+        assert!(!app.set_pointer(Some((158, MSG_RULE_Y))), "same edge");
+        assert!(app.set_pointer(Some((47, MSG_RULE_Y))), "the band wins");
+        assert_eq!(app.hovered_resize_edge(), Some(ResizeEdge::Pane));
+        assert!(app.set_pointer(Some((60, MSG_RULE_Y + 1))), "footer body");
+        assert_eq!(app.hovered_resize_edge(), None);
+
+        app.set_pointer(Some((60, MSG_RULE_Y)));
+        app.dispatch(Action::Click {
+            col: 60,
+            row: MSG_RULE_Y,
+        });
+        app.dispatch(Action::Drag {
+            col: 60,
+            row: MSG_RULE_Y - 5,
+        });
+        assert_eq!(app.hovered_resize_edge(), Some(ResizeEdge::CommitMsg));
+        app.dispatch(Action::Release);
+        assert_eq!(app.hovered_resize_edge(), None, "released off the rule");
+
+        // No recorded rule (collapsed or no graph footer): no edge, and a
+        // press there is no drag.
+        app.layout.commit_msg_rule_y = None;
+        app.set_pointer(Some((60, MSG_RULE_Y)));
+        assert_eq!(app.hovered_resize_edge(), None);
+        app.dispatch(Action::Click {
+            col: 60,
+            row: MSG_RULE_Y,
+        });
+        assert_eq!(app.drag, SplitDrag::None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An Explorer tab refuses the commit-message resize: no edge hovers
+    /// and a press on a stale recorded rule does not drag it.
+    #[test]
+    fn explorer_tab_has_no_commit_msg_edge() {
+        let (mut app, dir) = commit_msg_drag_state("ws-msg-explorer", 40);
+        app.open_explorer_tab("app".into(), super::explorer_tab::ExplorerTarget::Root);
+        assert!(app.is_explorer_tab());
+        app.layout = commit_msg_layout(40);
+        app.set_pointer(Some((60, MSG_RULE_Y)));
+        assert_eq!(app.hovered_resize_edge(), None);
+        let lines = app.commit_msg_lines;
+        app.dispatch(Action::Click {
+            col: 60,
+            row: MSG_RULE_Y,
+        });
+        app.dispatch(Action::Drag { col: 60, row: 2 });
+        app.dispatch(Action::Release);
+        assert!(
+            !matches!(app.drag, SplitDrag::CommitMsg { .. }),
+            "{:?}",
+            app.drag
+        );
+        assert_eq!(app.commit_msg_lines, lines);
+        assert!(!app.ui_store_path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Launch rows: a valid saved drag value beats config
+    /// `viewDefaults.commitMessageLines`, which beats the default; a bad
+    /// saved value falls through to config and keeps the saved theme. A
+    /// drag saves to the UI-state file only: the config file keeps its
+    /// bytes.
+    #[test]
+    fn launch_commit_msg_lines_saved_beats_config_beats_default() {
+        use crate::config::load_config_files;
+        let dir = crate::testutil::unique_dir("ws-launch-msg-lines");
+        let config_file = dir.join("config").join("config.json");
+        let workspace = dir.join("workspace");
+        std::fs::create_dir_all(config_file.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let config_bytes = b"{\"viewDefaults\": {\"commitMessageLines\": 3}}\n";
+        std::fs::write(&config_file, config_bytes).unwrap();
+        let config = load_config_files(Some(&config_file), &workspace).unwrap();
+        assert_eq!(config.view_defaults.commit_message_lines, Some(3));
+        let ui_store = dir.join("state").join("ui-state.json");
+        let ui_store_s = ui_store.display().to_string();
+        let launch = |view_defaults: &ViewDefaults| {
+            let settings = Settings::resolve(&config.runtime, |key| match key {
+                "WS_STATUS_UI_STORE" => Some(ui_store_s.clone()),
+                _ => None,
+            });
+            let snapshot = build_workspace_snapshot(&[tree_repo()], &[], false, &[]);
+            let mut app = AppState::launch(PathBuf::from("/tmp"), snapshot, &settings);
+            app.apply_view_defaults(view_defaults);
+            app
+        };
+
+        assert_eq!(
+            launch(&ViewDefaults::default()).commit_msg_lines,
+            COMMIT_MSG_LINES_DEFAULT,
+            "nothing saved, no config: default"
+        );
+        assert_eq!(
+            launch(&config.view_defaults).commit_msg_lines,
+            3,
+            "nothing saved: config"
+        );
+
+        let mut app = launch(&config.view_defaults);
+        app.layout = commit_msg_layout(40);
+        app.dispatch(Action::Click {
+            col: 60,
+            row: MSG_RULE_Y,
+        });
+        app.dispatch(Action::Drag {
+            col: 60,
+            row: MSG_RULE_Y - 5,
+        });
+        app.dispatch(Action::Release);
+        assert_eq!(app.commit_msg_lines, 8);
+        assert_eq!(
+            std::fs::read(&config_file).unwrap(),
+            config_bytes,
+            "the config file is never written"
+        );
+        assert_eq!(
+            launch(&config.view_defaults).commit_msg_lines,
+            8,
+            "saved beats config"
+        );
+        assert_eq!(launch(&ViewDefaults::default()).commit_msg_lines, 8);
+
+        std::fs::write(
+            &ui_store,
+            "{\"version\": 1, \"theme\": \"nord\", \"activitySparkline\": true, \"commitMessageLines\": 42}\n",
+        )
+        .unwrap();
+        let bad = launch(&config.view_defaults);
+        assert_eq!(bad.commit_msg_lines, 3, "a bad saved value falls to config");
+        assert_eq!(bad.theme, ThemeId::Nord, "the rest of the store loads");
+        assert!(bad.activity_sparkline);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Hover matches what a press does: a tab label on the divider band
+    /// takes the press (it activates the tab), so it does not light the
+    /// edge; the strip cells past the labels still do, as a press there
+    /// starts a pane drag.
+    #[test]
+    fn tab_label_on_the_divider_band_does_not_hover_the_edge() {
+        let mut app = state();
+        app.layout = super::LayoutHit {
+            tab_y: 0,
+            tab_hits: vec![(40, 10, 0)],
+            tab_close_hits: vec![(48, 3, 0)],
+            ..wide_split_layout()
+        };
+        for col in [46, 47] {
+            app.set_pointer(Some((col, 0)));
+            assert_eq!(app.hovered_resize_edge(), None, "tab label at {col}");
+        }
+        app.set_pointer(Some((48, 0)));
+        assert_eq!(app.hovered_resize_edge(), None, "tab close");
+        app.layout.tab_hits = vec![(10, 10, 0)];
+        app.layout.tab_close_hits = vec![(20, 3, 0)];
+        app.set_pointer(Some((47, 0)));
+        assert_eq!(
+            app.hovered_resize_edge(),
+            Some(ResizeEdge::Pane),
+            "bare strip cell on the band"
+        );
+        app.dispatch(Action::Click { col: 47, row: 0 });
+        assert_eq!(app.drag, SplitDrag::Pane, "and a press there drags");
+        app.dispatch(Action::Release);
+
+        app.layout.tab_hits = vec![(40, 10, 0)];
+        app.dispatch(Action::Click { col: 47, row: 0 });
+        assert_eq!(app.drag, SplitDrag::None, "a press on the label is no drag");
+    }
+
+    /// Quick Open (and its command palette), a confirm dialog, and a
+    /// hover popover under the pointer clear the edge hover.
+    #[test]
+    fn resize_edge_hover_clears_under_quick_open_confirm_and_a_popover() {
+        use super::super::action::QuickOpenEntry;
+        let mut app = state();
+        app.layout = wide_split_layout();
+        app.set_pointer(Some((47, 5)));
+        assert_eq!(app.hovered_resize_edge(), Some(ResizeEdge::Pane));
+
+        for entry in [QuickOpenEntry::Files, QuickOpenEntry::Commands] {
+            app.dispatch(Action::ToggleQuickOpen(entry));
+            assert!(app.quick_open.is_some(), "{entry:?}");
+            assert_eq!(app.hovered_resize_edge(), None, "{entry:?}");
+            app.quick_open = None;
+            assert_eq!(app.hovered_resize_edge(), Some(ResizeEdge::Pane));
+        }
+
+        app.confirm = Some(PendingConfirm::SwitchToDefault {
+            repos: vec!["app".into()],
+        });
+        assert_eq!(app.input_mode(), InputMode::Confirm);
+        assert_eq!(app.hovered_resize_edge(), None, "confirm dialog");
+        app.confirm = None;
+        assert_eq!(app.hovered_resize_edge(), Some(ResizeEdge::Pane));
+
+        // A painted hover popover (not pinned) over the band.
+        app.layout.popover = Some(PopoverHit {
+            rect: Rect::new(40, 3, 20, 6),
+            inner: Rect::new(42, 4, 16, 4),
+            lines: Vec::new(),
+        });
+        assert_eq!(
+            app.input_mode(),
+            InputMode::Normal {
+                search_active: false
+            }
+        );
+        assert_eq!(app.hovered_resize_edge(), None, "pointer in the popover");
+        app.set_pointer(Some((47, 12)));
+        assert_eq!(
+            app.hovered_resize_edge(),
+            Some(ResizeEdge::Pane),
+            "below the popover"
+        );
+    }
+
     #[test]
     fn pane_divider_band_follows_the_background_mode() {
         // Boxed: last left content column (46) through the right pane's
@@ -17752,6 +18331,10 @@ mod tests {
         assert_eq!(app.commit_msg_lines, COMMIT_MSG_LINES_MAX - 1);
         assert_eq!(app.graph_chrome().footer_height, 3);
         assert!(!app.commit_msg_expand, "- / + never toggle expand");
+        assert!(
+            !app.ui_store_path.exists(),
+            "the palette resize is session-only: no UI-state save"
+        );
     }
 
     #[test]

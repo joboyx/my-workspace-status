@@ -202,8 +202,10 @@ moving between commits never changes the list height:
   `COMMIT_MSG_LINES_DEFAULT` = 4, clamped from `COMMIT_MSG_LINES_MIN` (1)
   to `COMMIT_MSG_LINES_MAX` (20)). Collapsed requests 2. The request
   counts the rule (N + 2 expanded, 3 collapsed). The TUI passes
-  its session N (`AppState::commit_msg_lines`: `viewDefaults.commitMessageLines`,
-  then the Shorter / Taller commit message palette rows) to both the widget and `graph_footer_request`.
+  its session N (`AppState::commit_msg_lines`: a UI-state value a drag of
+  the rule saved, else `viewDefaults.commitMessageLines`, then the Shorter /
+  Taller commit message palette rows or a drag of the rule) to both the
+  widget and `graph_footer_request`.
 - `graph_chrome_budget_for` clamps the rows under the rule to at most
   half the pane (never under 2), adds the rule row, and leaves the list
   at least one row. `GraphChromeBudget::footer_height` counts the rule;
@@ -211,7 +213,9 @@ moving between commits never changes the list height:
   `footer_message_scroll_max` takes. A pane under 3 rows drops the footer
   and its rule. The budget depends only on the pane and the
   request. The app calls the same `graph_footer_request`, so its layout
-  matches the paint.
+  matches the paint. `commit_msg_lines_fit(height)` is the most message
+  rows that budget shows in a pane `height` rows tall (1 to 20); a drag of
+  the rule clamps to it, so it never stores rows the pane cannot show.
 - The meta row is always on the footer's bottom row. A short message
   paints from the top and leaves blank rows above the meta row.
 - A taller message scrolls: `commit_msg_scroll` sets the first message

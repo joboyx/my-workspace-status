@@ -7,7 +7,8 @@
 //! default. `cli.rs` resolves [`Settings`] after it loads the config and
 //! before the update check and the first git call, then passes it on.
 //!
-//! The launch theme and the activity sparkline also read the UI-state file
+//! The launch theme, the activity sparkline, and the commit-message footer
+//! rows also read the UI-state file
 //! ([`crate::tui::ui_state_store`]); its last-used theme sits between the
 //! env var and the config value. Resolve only reads that file; it never
 //! creates or writes it.
@@ -62,6 +63,11 @@ pub struct Settings {
     /// Paint the tree commit-activity sparkline: the [`Self::ui_store`]
     /// value, default off. No env var or config key.
     pub(crate) activity_sparkline: bool,
+    /// Expanded commit-message footer rows a drag of its edge saved in
+    /// [`Self::ui_store`]: `None` when none was saved or the value is bad.
+    /// It beats config `viewDefaults.commitMessageLines`
+    /// ([`crate::tui::state::AppState::apply_view_defaults`]). No env var.
+    pub(crate) commit_msg_lines: Option<usize>,
     /// Shared background-fetch claim and outcome JSON file
     /// ([`crate::tui::fetch_claim`]): `$XDG_STATE_HOME/my-workspace-status/
     /// background-fetch.json`. No env var or config key.
@@ -122,6 +128,7 @@ impl Settings {
             viewed_store: viewed_store_path_from_env(&mut get, keys.viewed_store.as_deref()),
             ui_store,
             activity_sparkline: ui_state.activity_sparkline,
+            commit_msg_lines: ui_state.commit_msg_lines,
             fetch_store: background_fetch_store_path_from_env(&mut get),
             git: resolve_git_binary(get("WORKSPACE_STATUS_GIT").as_deref(), keys.git.as_deref()),
             no_color,
@@ -294,6 +301,7 @@ mod tests {
                 viewed_store: PathBuf::from("/cfg/viewed.json"),
                 ui_store: PathBuf::from("/cfg/ui-state.json"),
                 activity_sparkline: false,
+                commit_msg_lines: None,
                 fetch_store: PathBuf::from(
                     "/.local/state/my-workspace-status/background-fetch.json"
                 ),
@@ -340,6 +348,7 @@ mod tests {
                 viewed_store: PathBuf::from("/env/viewed.json"),
                 ui_store: PathBuf::from("/env/ui-state.json"),
                 activity_sparkline: false,
+                commit_msg_lines: None,
                 fetch_store: PathBuf::from(
                     "/.local/state/my-workspace-status/background-fetch.json"
                 ),
