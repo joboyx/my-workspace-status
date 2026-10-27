@@ -6,7 +6,7 @@ Snapshot fixture coverage lives in `crates/workspace-status/tests/snapshot_contr
 
 ## Workspace Config
 
-`workspace-status` reads `.workspace-status-config.json` from the current workspace root. Repos at or under a `hiddenPaths` entry are hidden from status checks, fetch, pull, and default-branch switching unless `-a` or `--all` is passed. Repos at or under an `ignoredPaths` entry are never discovered or shown, even with `-a`. Both lists hold paths relative to the workspace root. `maxDepth` (default `3`) is how many path segments below cwd to search for git repos. `defaultBranches` optionally maps a workspace-relative repo path to a sole default branch name; when set, classification, ordering, branch markers, and `--default-branch` / TUI `d` use that branch. Repos without an entry keep the previous behaviour (treat `main`/`master`/`develop` as default for classification; resolve switch target from git).
+`workspace-status` reads `.workspace-status-config.json` from the current workspace root. Repos at or under a `hiddenPaths` entry are hidden from status checks, fetch, pull, and default-branch switching unless `-a` or `--all` is passed. Repos at or under an `ignoredPaths` entry are never discovered or shown, even with `-a`, unless named on the command line. Both lists hold paths relative to the workspace root. `maxDepth` (default `3`) is how many path segments below cwd to search for git repos. `defaultBranches` optionally maps a workspace-relative repo path to a sole default branch name; when set, classification, ordering, branch markers, and `--default-branch` / TUI `d` use that branch. Repos without an entry keep the previous behaviour (treat `main`/`master`/`develop` as default for classification; resolve switch target from git).
 
 ```json
 {

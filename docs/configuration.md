@@ -76,15 +76,15 @@ User file only (a workspace file that sets these keys fails to load):
 }
 ```
 
-| Key               | Required                   | Default                       | Meaning                                                                                        |
-| ----------------- | -------------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------- |
-| `hiddenPaths`     | workspace file: yes; user file: no | `[]` when no file sets it     | Paths relative to the workspace root whose repos are hidden until `.` or `-a`                  |
-| `ignoredPaths`    | no                         | `[]` when no file sets it     | Paths relative to the workspace root whose repos are never discovered or shown                 |
-| `maxDepth`        | no                         | `3`                           | Walk depth for primary `.git` dirs/gitfiles (dot dirs skipped; linked via `git worktree list`) |
-| `defaultBranches` | no                         | `{}`                          | Map of workspace-relative repo path → sole default branch for that repo                        |
-| `editor`          | no                         | unset (`vim` at resolve)      | Command string for TUI `e` (same shape as `$EDITOR`). Overrides `$VISUAL` / `$EDITOR`.         |
-| `diffTool`        | no                         | unset (`vimdiff` at resolve) | Command string for TUI `E`. No `$EDITOR` / `$VISUAL` / `$GIT_EXTERNAL_DIFF` fallback.          |
-| `viewDefaults`    | no                         | `{}` (in-app defaults)        | TUI launch view modes. See [`viewDefaults`](#viewdefaults)                                     |
+| Key               | Required                           | Default                      | Meaning                                                                                        |
+| ----------------- | ---------------------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------- |
+| `hiddenPaths`     | workspace file: yes; user file: no | `[]` when no file sets it    | Paths relative to the workspace root whose repos are hidden until `.` or `-a`                  |
+| `ignoredPaths`    | no                                 | `[]` when no file sets it    | Paths relative to the workspace root whose repos are never shown, unless named on the CLI      |
+| `maxDepth`        | no                                 | `3`                          | Walk depth for primary `.git` dirs/gitfiles (dot dirs skipped; linked via `git worktree list`) |
+| `defaultBranches` | no                                 | `{}`                         | Map of workspace-relative repo path → sole default branch for that repo                        |
+| `editor`          | no                                 | unset (`vim` at resolve)     | Command string for TUI `e` (same shape as `$EDITOR`). Overrides `$VISUAL` / `$EDITOR`.         |
+| `diffTool`        | no                                 | unset (`vimdiff` at resolve) | Command string for TUI `E`. No `$EDITOR` / `$VISUAL` / `$GIT_EXTERNAL_DIFF` fallback.          |
+| `viewDefaults`    | no                                 | `{}` (in-app defaults)       | TUI launch view modes. See [`viewDefaults`](#viewdefaults)                                     |
 | `theme`, `themeMode`, `glyphs`, `watchMs`, `fetchMs`, `fetchConcurrency`, `updateCheck`, `termProgress`, `smoothScroll` | no | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
 | `updateCheckStore`, `commentStore`, `viewedStore`, `uiStore`, `git` | no; user file or env only | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
 
@@ -94,12 +94,18 @@ Both keys hold paths relative to the workspace root. Each entry is a repo folder
 
 On load, entries are trimmed, path-normalized (strip leading `./`, trailing `/`, unify `\` to `/`), de-duplicated, and sorted. `notes/`, `./notes`, and `notes` are the same entry.
 
-An entry that starts with `/`, `\`, or `~`, starts with a drive letter (`C:`), or has a `..` segment fails startup: `<file> <key> entries must be paths relative to the workspace root, without `..` (got "<entry>")`. A value that is not a string array fails with `<file> <key> must be a string array`. A typo that silently drops repos from a status report is worse than a crash.
+An entry that starts with `/`, `\`, or `~`, starts with a drive letter (`C:`), or has a `..` segment fails startup:
+
+```text
+<file> <key> entries must be paths relative to the workspace root, without `..` (got "<entry>")
+```
+
+A value that is not a string array fails with `<file> <key> must be a string array`. A typo that silently drops repos from a status report is worse than a crash.
 
 | Key | Repos at or under an entry | Shown by `.` / `-a` |
 | --- | --- | --- |
 | `hiddenPaths` | Discovered, but hidden by default. Out of the tree, `--plain` / `--json`, search, and workspace-level fetch, pull, and default-branch switching until shown. | Yes |
-| `ignoredPaths` | Never discovered, shown, fetched, pulled, or switched. Linked worktrees at or under an entry are dropped too. | No |
+| `ignoredPaths` | Never discovered, shown, fetched, pulled, or switched, unless named on the command line. Linked worktrees at or under an entry are dropped too. | No |
 
 When a path is under both lists, `ignoredPaths` wins. A repo named on the command line (`ws tmp/foo`) is shown even under either list.
 

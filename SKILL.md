@@ -25,7 +25,7 @@ You are helping the user review the status of all git repositories in the curren
 
 - Run `workspace-status` (short alias: `ws`) from PATH
 - **Always pass `--plain` or `--json` for agent runs.** On a TTY without one of those flags, the CLI opens an interactive TUI that waits for keyboard input and will hang the agent shell until killed. Do not rely on “non-TTY” alone — some harnesses allocate a TTY. Never use `-i` / `--tui` from an agent. `--plain` is the human renderer. `--json` prints the same workspace snapshot. See [docs/snapshot.md](./docs/snapshot.md).
-- The CLI reads `.workspace-status-config.json` from the current workspace root; repos at or under a `hiddenPaths` entry are hidden unless `-a` or `--all` is passed; repos under an `ignoredPaths` entry are never shown
+- The CLI reads `.workspace-status-config.json` from the current workspace root; repos at or under a `hiddenPaths` entry are hidden unless `-a` or `--all` is passed; repos under an `ignoredPaths` entry are never shown (unless named on the command line)
 - Optional `defaultBranches` map (repo path → branch) overrides the default branch for classification, markers, ordering, and `--default-branch` / TUI `d`; without an entry, defaults are derived as today
 - `maxDepth` (default **3**) controls how many path segments below cwd are searched for git repos (so `acme/packages/*` is included by default)
 - Optional `editor` for TUI `e` (same shape as `$EDITOR`). Omit the key or set `"editor": "vim"` for vim (the default). `"editor": "cursor"` opens Cursor IDE. Config overrides `$EDITOR` / `$VISUAL`.

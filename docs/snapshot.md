@@ -34,7 +34,7 @@ Paths are workspace-relative. The snapshot does not include the workspace root, 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `repo` | string | Workspace-relative checkout path. |
-| `hidden` | boolean | True when `repo` is at or under a `hiddenPaths` entry. |
+| `hidden` | boolean | True when `repo` is at or under a `hiddenPaths` entry. A linked worktree whose primary is hidden reports `false`: it is left out with its primary unless shown or named. A linked worktree that sits under a `hiddenPaths` entry while its primary does not reports `true`. |
 | `branch` | string | Current branch, or a detached / unknown label from git status. |
 | `syncStatus` | string | `up-to-date`, `no-upstream`, `behind`, `ahead`, or `diverged`. |
 | `syncNote` | string | Extra sync text (`ahead by 2`, `status failed`, empty). |
@@ -63,7 +63,7 @@ These fields cover branch, sync, checkout kind, merge-into-default, and file cha
 
 ## Visibility and ops
 
-Hidden repos stay out of `repos` and out of fetch, pull, and default-branch work unless they are shown. Repos under `ignoredPaths` are never shown, never in `repos`, and never touched by fetch, pull, or default-branch work.
+Hidden repos stay out of `repos` and out of fetch, pull, and default-branch work unless they are shown. Repos under `ignoredPaths` are never shown, never in `repos`, and never touched by fetch, pull, or default-branch work, unless you name them on the command line.
 
 Shown means:
 
