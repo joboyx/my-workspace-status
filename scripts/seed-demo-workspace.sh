@@ -113,7 +113,7 @@ add_origin() {
 # ---------------------------------------------------------------------------
 write_file "$WORKSPACE/.workspace-status-config.json" <<'EOF'
 {
-  "ignoredRepos": ["notes"],
+  "hiddenPaths": ["notes"],
   "editor": "vim"
 }
 EOF

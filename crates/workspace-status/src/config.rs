@@ -25,7 +25,13 @@ pub const USER_CONFIG_FILENAME: &str = "config.json";
 
 #[derive(Debug, Clone, Default)]
 pub struct WorkspaceStatusConfig {
-    pub ignored_repos: Vec<String>,
+    /// `hiddenPaths`: workspace-relative paths whose repos (at or under the
+    /// path) are discovered but hidden until `.` in the TUI or `-a` on the
+    /// CLI. Callers that show hidden repos clear this list before discovery.
+    pub hidden_paths: Vec<String>,
+    /// `ignoredPaths`: workspace-relative paths whose repos (at or under the
+    /// path) are never discovered, unless a repo is named on the command line.
+    pub ignored_paths: Vec<String>,
     pub max_depth: u32,
     pub default_branches: BTreeMap<String, String>,
     pub editor: Option<String>,
@@ -157,7 +163,8 @@ pub struct ViewDefaults {
 impl WorkspaceStatusConfig {
     pub fn with_defaults() -> Self {
         Self {
-            ignored_repos: Vec::new(),
+            hidden_paths: Vec::new(),
+            ignored_paths: Vec::new(),
             max_depth: DEFAULT_MAX_DEPTH,
             default_branches: BTreeMap::new(),
             editor: None,
@@ -171,7 +178,12 @@ impl WorkspaceStatusConfig {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawConfig {
+    /// Removed key. Kept only to fail with a pointer to the new keys; `null`
+    /// counts as set.
+    #[serde(default, deserialize_with = "deserialize_present")]
     ignored_repos: Option<serde_json::Value>,
+    hidden_paths: Option<serde_json::Value>,
+    ignored_paths: Option<serde_json::Value>,
     max_depth: Option<serde_json::Value>,
     default_branches: Option<serde_json::Value>,
     editor: Option<serde_json::Value>,
@@ -193,8 +205,34 @@ struct RawConfig {
     smooth_scroll: Option<serde_json::Value>,
 }
 
-fn normalize_ignored(repos: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = repos
+/// Deserialize a key that is present, `null` included, as `Some`.
+fn deserialize_present<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
+/// True when a path-list entry is not relative to the workspace root:
+/// it starts with `/`, `\`, `~`, or a Windows drive (`C:`), or it has a
+/// `..` segment.
+fn path_entry_is_invalid(raw: &str) -> bool {
+    let unified = raw.replace('\\', "/");
+    let mut chars = unified.chars();
+    let drive = matches!(
+        (chars.next(), chars.next()),
+        (Some(c), Some(':')) if c.is_ascii_alphabetic()
+    );
+    unified.starts_with('/')
+        || unified.starts_with('~')
+        || drive
+        || unified.split('/').any(|segment| segment == "..")
+}
+
+/// Normalize path-list entries: trim, strip `./`, unify separators, drop
+/// trailing `/`, drop blanks, then sort and dedupe.
+fn normalize_path_list(entries: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = entries
         .iter()
         .map(|r| normalize_filter_repo(r.trim()))
         .filter(|r| !r.is_empty())
@@ -333,7 +371,8 @@ impl ViewDefaults {
 /// not set that key, so the lower file or the built-in default applies.
 #[derive(Debug, Clone, Default)]
 struct ConfigFileSettings {
-    ignored_repos: Option<Vec<String>>,
+    hidden_paths: Option<Vec<String>>,
+    ignored_paths: Option<Vec<String>>,
     max_depth: Option<u32>,
     default_branches: Option<BTreeMap<String, String>>,
     editor: Option<String>,
@@ -345,7 +384,8 @@ struct ConfigFileSettings {
 impl ConfigFileSettings {
     /// Merge `over` on top of `self` (`self` is the user file, `over` the
     /// workspace file). A top-level key that `over` sets wins. `viewDefaults`
-    /// and `defaultBranches` merge per sub-key. `ignoredRepos` is replaced.
+    /// and `defaultBranches` merge per sub-key. `hiddenPaths` and
+    /// `ignoredPaths` are each replaced, not joined.
     fn overlay(self, over: ConfigFileSettings) -> ConfigFileSettings {
         let default_branches = match (self.default_branches, over.default_branches) {
             (Some(mut base), Some(top)) => {
@@ -355,7 +395,8 @@ impl ConfigFileSettings {
             (base, top) => top.or(base),
         };
         ConfigFileSettings {
-            ignored_repos: over.ignored_repos.or(self.ignored_repos),
+            hidden_paths: over.hidden_paths.or(self.hidden_paths),
+            ignored_paths: over.ignored_paths.or(self.ignored_paths),
             max_depth: over.max_depth.or(self.max_depth),
             default_branches,
             editor: over.editor.or(self.editor),
@@ -368,7 +409,8 @@ impl ConfigFileSettings {
     /// Fill each key that no file sets with its built-in default.
     fn into_config(self) -> WorkspaceStatusConfig {
         WorkspaceStatusConfig {
-            ignored_repos: self.ignored_repos.unwrap_or_default(),
+            hidden_paths: self.hidden_paths.unwrap_or_default(),
+            ignored_paths: self.ignored_paths.unwrap_or_default(),
             max_depth: self.max_depth.unwrap_or(DEFAULT_MAX_DEPTH),
             default_branches: self.default_branches.unwrap_or_default(),
             editor: self.editor,
@@ -578,34 +620,56 @@ fn parse_runtime_keys(
     })
 }
 
-/// Which config file is parsed. Only the workspace file must set `ignoredRepos`.
+/// Which config file is parsed. Only the workspace file must set `hiddenPaths`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConfigFileKind {
     User,
     Workspace,
 }
 
-/// Parse `ignoredRepos`. The workspace file requires it (`null` counts as
-/// missing); in the user file an omitted or `null` key is `None`.
-fn parse_ignored_repos(
+/// Fail when a file still sets the removed `ignoredRepos` key (`null` too).
+fn reject_ignored_repos(file: &str, value: Option<&serde_json::Value>) -> Result<(), String> {
+    match value {
+        None => Ok(()),
+        Some(_) => Err(format!(
+            "{file} ignoredRepos is no longer supported: use hiddenPaths (hidden by default) or ignoredPaths (never shown)"
+        )),
+    }
+}
+
+/// Parse one workspace-relative path list (`hiddenPaths`, `ignoredPaths`).
+///
+/// With `required`, an omitted or `null` key is an error; otherwise it is
+/// `None`. Each entry must be a string relative to the workspace root (see
+/// [`path_entry_is_invalid`]). The result is normalized, sorted, and
+/// deduped.
+fn parse_path_list(
     file: &str,
-    kind: ConfigFileKind,
+    key: &str,
+    required: bool,
     value: Option<serde_json::Value>,
 ) -> Result<Option<Vec<String>>, String> {
-    let missing = || format!("{file} must contain an ignoredRepos string array");
-    let repos = match value {
-        Some(serde_json::Value::Array(repos)) => repos,
-        None | Some(serde_json::Value::Null) if kind == ConfigFileKind::User => return Ok(None),
-        _ => return Err(missing()),
+    let entries = match value {
+        Some(serde_json::Value::Array(entries)) => entries,
+        None | Some(serde_json::Value::Null) if !required => return Ok(None),
+        None | Some(serde_json::Value::Null) => {
+            return Err(format!("{file} must contain a {key} string array"))
+        }
+        Some(_) => return Err(format!("{file} {key} must be a string array")),
     };
-    let mut ignored = Vec::new();
-    for repo in repos {
-        let Some(s) = repo.as_str() else {
-            return Err(format!("{file} ignoredRepos must contain only strings"));
+    let mut out = Vec::new();
+    for entry in entries {
+        let Some(s) = entry.as_str() else {
+            return Err(format!("{file} {key} must contain only strings"));
         };
-        ignored.push(s.to_string());
+        if path_entry_is_invalid(s.trim()) {
+            return Err(format!(
+                "{file} {key} entries must be paths relative to the workspace root, without `..` (got {s:?})"
+            ));
+        }
+        out.push(s.to_string());
     }
-    Ok(Some(normalize_ignored(&ignored)))
+    Ok(Some(normalize_path_list(&out)))
 }
 
 /// Inputs that every config file parse shares.
@@ -663,9 +727,16 @@ fn parse_config_file(
 ) -> Result<ConfigFileSettings, String> {
     let mut parsed: RawConfig = serde_json::from_str(text).map_err(|e| match kind {
         ConfigFileKind::User => format!("{file} is not a valid JSON object: {e}"),
-        ConfigFileKind::Workspace => format!("{file} must contain an ignoredRepos string array"),
+        ConfigFileKind::Workspace => format!("{file} must contain a hiddenPaths string array"),
     })?;
-    let ignored_repos = parse_ignored_repos(file, kind, parsed.ignored_repos.take())?;
+    reject_ignored_repos(file, parsed.ignored_repos.as_ref())?;
+    let hidden_paths = parse_path_list(
+        file,
+        "hiddenPaths",
+        kind == ConfigFileKind::Workspace,
+        parsed.hidden_paths.take(),
+    )?;
+    let ignored_paths = parse_path_list(file, "ignoredPaths", false, parsed.ignored_paths.take())?;
     reject_user_only_keys(file, kind, &parsed, ctx.user_file)?;
     let runtime = parse_runtime_keys(file, &mut parsed, ctx.home)?;
 
@@ -697,7 +768,8 @@ fn parse_config_file(
     };
 
     Ok(ConfigFileSettings {
-        ignored_repos,
+        hidden_paths,
+        ignored_paths,
         max_depth,
         default_branches,
         editor: parse_command_key(file, "editor", parsed.editor)?,
@@ -765,11 +837,13 @@ where
 /// missing file means no user config. The workspace file is
 /// [`CONFIG_FILENAME`] under `workspace_root`. The workspace file wins per
 /// top-level key; `viewDefaults` and `defaultBranches` merge per sub-key
-/// (workspace wins); `ignoredRepos` is replaced, not joined. Keys that no
-/// file sets keep the built-in defaults. `ignoredRepos` is required in the
-/// workspace file and optional in the user file. An invalid file is an error that
-/// names that file (the full path for the user file, [`CONFIG_FILENAME`]
-/// for the workspace file).
+/// (workspace wins); `hiddenPaths` and `ignoredPaths` are each replaced,
+/// not joined. Keys that no file sets keep the built-in defaults.
+/// `hiddenPaths` is required in the workspace file and optional in the user
+/// file; `ignoredPaths` is optional in both. The removed `ignoredRepos` key
+/// is an error in either file. An invalid file is an error that names that
+/// file (the full path for the user file, [`CONFIG_FILENAME`] for the
+/// workspace file).
 ///
 /// Path keys that start with `~/` expand with `$HOME`. The workspace file
 /// must not set `git`, `updateCheckStore`, `commentStore`, `viewedStore`, or
@@ -815,7 +889,7 @@ fn load_config_files_with_home(
 ///
 /// Reads the user config file at [`user_config_path`] and
 /// [`CONFIG_FILENAME`] under `cwd`; see [`load_config_files`] for the merge
-/// rules. With neither file: nothing is ignored and maxDepth is 3.
+/// rules. With neither file: nothing is hidden or ignored and maxDepth is 3.
 pub fn load_workspace_status_config(cwd: &Path) -> Result<WorkspaceStatusConfig, String> {
     load_config_files(user_config_path().as_deref(), cwd)
 }
@@ -837,14 +911,14 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         let cfg = load_config_files(None, &dir).unwrap();
-        assert!(cfg.ignored_repos.is_empty());
+        assert!(cfg.hidden_paths.is_empty());
         assert_eq!(cfg.max_depth, 3);
         assert_eq!(cfg.diff_tool, None);
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn loads_ignored_repos_sorted() {
+    fn loads_hidden_paths_sorted() {
         let dir = std::env::temp_dir().join(format!(
             "ws-config-ok-{}",
             SystemTime::now()
@@ -855,11 +929,11 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join(CONFIG_FILENAME),
-            r#"{"ignoredRepos":["notes","./vendor/"]}"#,
+            r#"{"hiddenPaths":["notes","./vendor/"]}"#,
         )
         .unwrap();
         let cfg = load_config_files(None, &dir).unwrap();
-        assert_eq!(cfg.ignored_repos, vec!["notes", "vendor"]);
+        assert_eq!(cfg.hidden_paths, vec!["notes", "vendor"]);
         assert_eq!(cfg.diff_tool, None);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -883,7 +957,7 @@ mod tests {
 
     #[test]
     fn omit_diff_tool_is_none() {
-        let dir = write_config("ws-config-omit-diff", r#"{"ignoredRepos":[]}"#);
+        let dir = write_config("ws-config-omit-diff", r#"{"hiddenPaths":[]}"#);
         let cfg = load_config_files(None, &dir).unwrap();
         assert_eq!(cfg.diff_tool, None);
         let _ = fs::remove_dir_all(&dir);
@@ -893,7 +967,7 @@ mod tests {
     fn diff_tool_vimdiff_is_kept() {
         let dir = write_config(
             "ws-config-diff-vim",
-            r#"{"ignoredRepos":[],"diffTool":"vimdiff"}"#,
+            r#"{"hiddenPaths":[],"diffTool":"vimdiff"}"#,
         );
         let cfg = load_config_files(None, &dir).unwrap();
         assert_eq!(cfg.diff_tool.as_deref(), Some("vimdiff"));
@@ -904,7 +978,7 @@ mod tests {
     fn blank_diff_tool_is_none() {
         let dir = write_config(
             "ws-config-diff-blank",
-            r#"{"ignoredRepos":[],"diffTool":"  "}"#,
+            r#"{"hiddenPaths":[],"diffTool":"  "}"#,
         );
         let cfg = load_config_files(None, &dir).unwrap();
         assert_eq!(cfg.diff_tool, None);
@@ -913,7 +987,7 @@ mod tests {
 
     #[test]
     fn non_string_diff_tool_is_error() {
-        let dir = write_config("ws-config-diff-bad", r#"{"ignoredRepos":[],"diffTool":1}"#);
+        let dir = write_config("ws-config-diff-bad", r#"{"hiddenPaths":[],"diffTool":1}"#);
         let err = load_config_files(None, &dir).unwrap_err();
         assert!(
             err.contains("diffTool must be a string"),
@@ -932,7 +1006,7 @@ mod tests {
     #[test]
     fn omitted_view_defaults_are_all_none() {
         assert_eq!(
-            load_view_defaults(r#"{"ignoredRepos":[]}"#).unwrap(),
+            load_view_defaults(r#"{"hiddenPaths":[]}"#).unwrap(),
             ViewDefaults::default()
         );
         assert_eq!(
@@ -944,7 +1018,7 @@ mod tests {
     #[test]
     fn empty_view_defaults_object_is_all_none() {
         assert_eq!(
-            load_view_defaults(r#"{"ignoredRepos":[],"viewDefaults":{}}"#).unwrap(),
+            load_view_defaults(r#"{"hiddenPaths":[],"viewDefaults":{}}"#).unwrap(),
             ViewDefaults::default()
         );
     }
@@ -952,7 +1026,7 @@ mod tests {
     #[test]
     fn view_defaults_first_values_are_true() {
         let got = load_view_defaults(
-            r#"{"ignoredRepos":[],"viewDefaults":{"tree":"tree","commitTree":"tree","diff":"split","wrap":"wrap","commitMessage":"expand","lineBlame":"show","background":"paint"}}"#,
+            r#"{"hiddenPaths":[],"viewDefaults":{"tree":"tree","commitTree":"tree","diff":"split","wrap":"wrap","commitMessage":"expand","lineBlame":"show","background":"paint"}}"#,
         )
         .unwrap();
         assert_eq!(
@@ -973,7 +1047,7 @@ mod tests {
     #[test]
     fn view_defaults_second_values_are_false() {
         let got = load_view_defaults(
-            r#"{"ignoredRepos":[],"viewDefaults":{"tree":"flat","commitTree":"flat","diff":"inline","wrap":"unwrap","commitMessage":"collapse","lineBlame":"hide","background":"terminal"}}"#,
+            r#"{"hiddenPaths":[],"viewDefaults":{"tree":"flat","commitTree":"flat","diff":"inline","wrap":"unwrap","commitMessage":"collapse","lineBlame":"hide","background":"terminal"}}"#,
         )
         .unwrap();
         assert_eq!(
@@ -993,15 +1067,14 @@ mod tests {
 
     #[test]
     fn view_defaults_value_is_trimmed() {
-        let got = load_view_defaults(r#"{"ignoredRepos":[],"viewDefaults":{"wrap":"  unwrap "}}"#)
+        let got = load_view_defaults(r#"{"hiddenPaths":[],"viewDefaults":{"wrap":"  unwrap "}}"#)
             .unwrap();
         assert_eq!(got.wrap, Some(false));
         assert_eq!(got.tree, None);
 
-        let got = load_view_defaults(
-            r#"{"ignoredRepos":[],"viewDefaults":{"background":" terminal  "}}"#,
-        )
-        .unwrap();
+        let got =
+            load_view_defaults(r#"{"hiddenPaths":[],"viewDefaults":{"background":" terminal  "}}"#)
+                .unwrap();
         assert_eq!(got.background, Some(BackgroundMode::Terminal));
         assert_eq!(got.wrap, None);
     }
@@ -1009,7 +1082,7 @@ mod tests {
     #[test]
     fn view_defaults_not_an_object_is_error() {
         for raw in [r#"[]"#, r#""wrap""#, "1"] {
-            let err = load_view_defaults(&format!(r#"{{"ignoredRepos":[],"viewDefaults":{raw}}}"#))
+            let err = load_view_defaults(&format!(r#"{{"hiddenPaths":[],"viewDefaults":{raw}}}"#))
                 .unwrap_err();
             assert_eq!(
                 err, ".workspace-status-config.json viewDefaults must be an object",
@@ -1039,7 +1112,7 @@ mod tests {
         ];
         for (key, raw, choices) in cases {
             let err = load_view_defaults(&format!(
-                r#"{{"ignoredRepos":[],"viewDefaults":{{"{key}":{raw}}}}}"#
+                r#"{{"hiddenPaths":[],"viewDefaults":{{"{key}":{raw}}}}}"#
             ))
             .unwrap_err();
             assert_eq!(
@@ -1054,14 +1127,14 @@ mod tests {
     fn view_defaults_commit_message_lines_accepts_min_max_and_default() {
         for n in [1usize, 4, 20] {
             let got = load_view_defaults(&format!(
-                r#"{{"ignoredRepos":[],"viewDefaults":{{"commitMessageLines":{n}}}}}"#
+                r#"{{"hiddenPaths":[],"viewDefaults":{{"commitMessageLines":{n}}}}}"#
             ))
             .unwrap();
             assert_eq!(got.commit_message_lines, Some(n));
             assert_eq!(got.commit_message_expand, None);
         }
         assert_eq!(
-            load_view_defaults(r#"{"ignoredRepos":[],"viewDefaults":{"wrap":"wrap"}}"#)
+            load_view_defaults(r#"{"hiddenPaths":[],"viewDefaults":{"wrap":"wrap"}}"#)
                 .unwrap()
                 .commit_message_lines,
             None,
@@ -1075,7 +1148,7 @@ mod tests {
             "0", "21", "-1", r#""8""#, "8.5", "8.0", "true", "null", "[8]",
         ] {
             let err = load_view_defaults(&format!(
-                r#"{{"ignoredRepos":[],"viewDefaults":{{"commitMessageLines":{raw}}}}}"#
+                r#"{{"hiddenPaths":[],"viewDefaults":{{"commitMessageLines":{raw}}}}}"#
             ))
             .unwrap_err();
             assert_eq!(
@@ -1089,7 +1162,7 @@ mod tests {
     #[test]
     fn view_defaults_unknown_key_is_error() {
         let err = load_view_defaults(
-            r#"{"ignoredRepos":[],"viewDefaults":{"wrap":"wrap","theme":"dark"}}"#,
+            r#"{"hiddenPaths":[],"viewDefaults":{"wrap":"wrap","theme":"dark"}}"#,
         )
         .unwrap_err();
         assert_eq!(
@@ -1098,7 +1171,7 @@ mod tests {
         );
 
         let err = load_view_defaults(
-            r#"{"ignoredRepos":[],"viewDefaults":{"background":"paint","backgroundColor":"paint"}}"#,
+            r#"{"hiddenPaths":[],"viewDefaults":{"background":"paint","backgroundColor":"paint"}}"#,
         )
         .unwrap_err();
         assert_eq!(
@@ -1153,7 +1226,7 @@ mod tests {
     #[test]
     fn layered_no_files_uses_defaults() {
         let cfg = load_layered(None, None).unwrap();
-        assert!(cfg.ignored_repos.is_empty());
+        assert!(cfg.hidden_paths.is_empty());
         assert_eq!(cfg.max_depth, DEFAULT_MAX_DEPTH);
         assert!(cfg.default_branches.is_empty());
         assert_eq!(cfg.editor, None);
@@ -1170,12 +1243,12 @@ mod tests {
     fn layered_user_file_only() {
         let cfg = load_layered(
             Some(
-                r#"{"ignoredRepos":["notes"],"maxDepth":2,"editor":"nvim","diffTool":"code --diff --wait","defaultBranches":{"app":"develop"},"viewDefaults":{"wrap":"unwrap"}}"#,
+                r#"{"hiddenPaths":["notes"],"maxDepth":2,"editor":"nvim","diffTool":"code --diff --wait","defaultBranches":{"app":"develop"},"viewDefaults":{"wrap":"unwrap"}}"#,
             ),
             None,
         )
         .unwrap();
-        assert_eq!(cfg.ignored_repos, vec!["notes"]);
+        assert_eq!(cfg.hidden_paths, vec!["notes"]);
         assert_eq!(cfg.max_depth, 2);
         assert_eq!(cfg.editor.as_deref(), Some("nvim"));
         assert_eq!(cfg.diff_tool.as_deref(), Some("code --diff --wait"));
@@ -1188,8 +1261,8 @@ mod tests {
 
     #[test]
     fn layered_workspace_file_only() {
-        let cfg = load_layered(None, Some(r#"{"ignoredRepos":["vendor"],"maxDepth":4}"#)).unwrap();
-        assert_eq!(cfg.ignored_repos, vec!["vendor"]);
+        let cfg = load_layered(None, Some(r#"{"hiddenPaths":["vendor"],"maxDepth":4}"#)).unwrap();
+        assert_eq!(cfg.hidden_paths, vec!["vendor"]);
         assert_eq!(cfg.max_depth, 4);
         assert_eq!(cfg.editor, None);
     }
@@ -1197,8 +1270,8 @@ mod tests {
     #[test]
     fn layered_workspace_wins_per_top_level_key() {
         let cfg = load_layered(
-            Some(r#"{"ignoredRepos":[],"maxDepth":2,"editor":"nvim","diffTool":"vimdiff"}"#),
-            Some(r#"{"ignoredRepos":[],"maxDepth":5,"diffTool":"  "}"#),
+            Some(r#"{"hiddenPaths":[],"maxDepth":2,"editor":"nvim","diffTool":"vimdiff"}"#),
+            Some(r#"{"hiddenPaths":[],"maxDepth":5,"diffTool":"  "}"#),
         )
         .unwrap();
         assert_eq!(cfg.max_depth, 5, "workspace maxDepth wins");
@@ -1218,10 +1291,10 @@ mod tests {
     fn layered_view_defaults_merge_per_sub_key() {
         let cfg = load_layered(
             Some(
-                r#"{"ignoredRepos":[],"viewDefaults":{"tree":"flat","wrap":"unwrap","commitMessageLines":12}}"#,
+                r#"{"hiddenPaths":[],"viewDefaults":{"tree":"flat","wrap":"unwrap","commitMessageLines":12}}"#,
             ),
             Some(
-                r#"{"ignoredRepos":[],"viewDefaults":{"wrap":"wrap","lineBlame":"hide","background":"terminal"}}"#,
+                r#"{"hiddenPaths":[],"viewDefaults":{"wrap":"wrap","lineBlame":"hide","background":"terminal"}}"#,
             ),
         )
         .unwrap();
@@ -1238,8 +1311,8 @@ mod tests {
         );
 
         let cfg = load_layered(
-            Some(r#"{"ignoredRepos":[],"viewDefaults":{"background":"terminal"}}"#),
-            Some(r#"{"ignoredRepos":[],"viewDefaults":{"wrap":"wrap"}}"#),
+            Some(r#"{"hiddenPaths":[],"viewDefaults":{"background":"terminal"}}"#),
+            Some(r#"{"hiddenPaths":[],"viewDefaults":{"wrap":"wrap"}}"#),
         )
         .unwrap();
         assert_eq!(
@@ -1252,8 +1325,8 @@ mod tests {
     #[test]
     fn layered_default_branches_merge_per_sub_key() {
         let cfg = load_layered(
-            Some(r#"{"ignoredRepos":[],"defaultBranches":{"app":"develop","lib":"main"}}"#),
-            Some(r#"{"ignoredRepos":[],"defaultBranches":{"./app/":"trunk","api":"dev"}}"#),
+            Some(r#"{"hiddenPaths":[],"defaultBranches":{"app":"develop","lib":"main"}}"#),
+            Some(r#"{"hiddenPaths":[],"defaultBranches":{"./app/":"trunk","api":"dev"}}"#),
         )
         .unwrap();
         let got: Vec<(&str, &str)> = cfg
@@ -1265,21 +1338,21 @@ mod tests {
     }
 
     #[test]
-    fn layered_ignored_repos_are_replaced_not_joined() {
+    fn layered_hidden_paths_are_replaced_not_joined() {
         let cfg = load_layered(
-            Some(r#"{"ignoredRepos":["notes","vendor"]}"#),
-            Some(r#"{"ignoredRepos":["scratch"]}"#),
+            Some(r#"{"hiddenPaths":["notes","vendor"]}"#),
+            Some(r#"{"hiddenPaths":["scratch"]}"#),
         )
         .unwrap();
-        assert_eq!(cfg.ignored_repos, vec!["scratch"]);
+        assert_eq!(cfg.hidden_paths, vec!["scratch"]);
 
         let cfg = load_layered(
-            Some(r#"{"ignoredRepos":["notes"]}"#),
-            Some(r#"{"ignoredRepos":[]}"#),
+            Some(r#"{"hiddenPaths":["notes"]}"#),
+            Some(r#"{"hiddenPaths":[]}"#),
         )
         .unwrap();
         assert!(
-            cfg.ignored_repos.is_empty(),
+            cfg.hidden_paths.is_empty(),
             "workspace [] clears the user list"
         );
     }
@@ -1288,32 +1361,32 @@ mod tests {
     fn layered_invalid_user_file_names_the_user_path() {
         let cases = [
             (
-                r#"{"ignoredRepos":"notes"}"#,
-                "must contain an ignoredRepos string array",
+                r#"{"hiddenPaths":"notes"}"#,
+                "hiddenPaths must be a string array",
             ),
             (
-                r#"{"ignoredRepos":{"notes":true}}"#,
-                "must contain an ignoredRepos string array",
+                r#"{"hiddenPaths":{"notes":true}}"#,
+                "hiddenPaths must be a string array",
             ),
             (
-                r#"{"ignoredRepos":["notes",1]}"#,
-                "ignoredRepos must contain only strings",
+                r#"{"hiddenPaths":["notes",1]}"#,
+                "hiddenPaths must contain only strings",
             ),
             (
-                r#"{"ignoredRepos":[],"maxDepth":0}"#,
+                r#"{"hiddenPaths":[],"maxDepth":0}"#,
                 "maxDepth must be a positive integer",
             ),
             (
-                r#"{"ignoredRepos":[],"viewDefaults":{"commitMessageLines":0}}"#,
+                r#"{"hiddenPaths":[],"viewDefaults":{"commitMessageLines":0}}"#,
                 "viewDefaults.commitMessageLines must be an integer from 1 to 20",
             ),
             (
-                r#"{"ignoredRepos":[],"viewDefaults":{"wrap":"on"}}"#,
+                r#"{"hiddenPaths":[],"viewDefaults":{"wrap":"on"}}"#,
                 r#"viewDefaults.wrap must be "wrap" or "unwrap""#,
             ),
         ];
         for (json, tail) in cases {
-            let (root, user_file, workspace) = layered(Some(json), Some(r#"{"ignoredRepos":[]}"#));
+            let (root, user_file, workspace) = layered(Some(json), Some(r#"{"hiddenPaths":[]}"#));
             let err = load_config_files(Some(&user_file), &workspace).unwrap_err();
             assert_eq!(err, format!("{} {tail}", user_file.display()), "{json}");
             let _ = fs::remove_dir_all(root);
@@ -1323,8 +1396,8 @@ mod tests {
     #[test]
     fn layered_invalid_workspace_file_names_the_workspace_file() {
         let err = load_layered(
-            Some(r#"{"ignoredRepos":[]}"#),
-            Some(r#"{"ignoredRepos":[],"editor":1}"#),
+            Some(r#"{"hiddenPaths":[]}"#),
+            Some(r#"{"hiddenPaths":[],"editor":1}"#),
         )
         .unwrap_err();
         assert_eq!(err, ".workspace-status-config.json editor must be a string");
@@ -1392,7 +1465,7 @@ mod tests {
             .join(USER_CONFIG_DIR)
             .join(USER_CONFIG_FILENAME);
         fs::create_dir_all(user_file.parent().unwrap()).unwrap();
-        fs::write(&user_file, r#"{"ignoredRepos":[],"maxDepth":7}"#).unwrap();
+        fs::write(&user_file, r#"{"hiddenPaths":[],"maxDepth":7}"#).unwrap();
         let home_str = home.to_string_lossy().to_string();
         let path = user_config_path_from_env(|key| match key {
             "XDG_CONFIG_HOME" => Some(String::new()),
@@ -1406,17 +1479,17 @@ mod tests {
     }
 
     #[test]
-    fn layered_user_file_without_ignored_repos_loads() {
+    fn layered_user_file_without_hidden_paths_loads() {
         for json in [
             r#"{"viewDefaults":{"wrap":"unwrap"}}"#,
-            r#"{"ignoredRepos":null,"viewDefaults":{"wrap":"unwrap"}}"#,
+            r#"{"hiddenPaths":null,"viewDefaults":{"wrap":"unwrap"}}"#,
         ] {
             let cfg = load_layered(Some(json), None).unwrap();
-            assert!(cfg.ignored_repos.is_empty(), "{json}");
+            assert!(cfg.hidden_paths.is_empty(), "{json}");
             assert_eq!(cfg.view_defaults.wrap, Some(false), "{json}");
 
-            let cfg = load_layered(Some(json), Some(r#"{"ignoredRepos":["vendor"]}"#)).unwrap();
-            assert_eq!(cfg.ignored_repos, vec!["vendor"], "{json}");
+            let cfg = load_layered(Some(json), Some(r#"{"hiddenPaths":["vendor"]}"#)).unwrap();
+            assert_eq!(cfg.hidden_paths, vec!["vendor"], "{json}");
             assert_eq!(cfg.view_defaults.wrap, Some(false), "{json}");
         }
         assert_eq!(
@@ -1426,19 +1499,167 @@ mod tests {
     }
 
     #[test]
-    fn layered_user_ignored_repos_apply_without_workspace_file() {
-        let cfg = load_layered(Some(r#"{"ignoredRepos":["./notes/","vendor"]}"#), None).unwrap();
-        assert_eq!(cfg.ignored_repos, vec!["notes", "vendor"]);
+    fn layered_user_hidden_paths_apply_without_workspace_file() {
+        let cfg = load_layered(Some(r#"{"hiddenPaths":["./notes/","vendor"]}"#), None).unwrap();
+        assert_eq!(cfg.hidden_paths, vec!["notes", "vendor"]);
     }
 
     #[test]
-    fn workspace_file_still_requires_ignored_repos() {
-        for json in [r#"{}"#, r#"{"ignoredRepos":null}"#, r#"{"maxDepth":2}"#] {
-            let err = load_layered(Some(r#"{"ignoredRepos":["notes"]}"#), Some(json)).unwrap_err();
+    fn workspace_file_still_requires_hidden_paths() {
+        for json in [r#"{}"#, r#"{"hiddenPaths":null}"#, r#"{"maxDepth":2}"#] {
+            let err = load_layered(Some(r#"{"hiddenPaths":["notes"]}"#), Some(json)).unwrap_err();
             assert_eq!(
-                err, ".workspace-status-config.json must contain an ignoredRepos string array",
+                err, ".workspace-status-config.json must contain a hiddenPaths string array",
                 "{json}"
             );
+        }
+    }
+
+    #[test]
+    fn ignored_paths_parse_and_normalize_in_both_files() {
+        let cfg = load_layered(
+            None,
+            Some(r#"{"hiddenPaths":["./notes/"],"ignoredPaths":[" tmp/ ","./vendor\\lib","tmp"]}"#),
+        )
+        .unwrap();
+        assert_eq!(cfg.hidden_paths, vec!["notes"]);
+        assert_eq!(cfg.ignored_paths, vec!["tmp", "vendor/lib"]);
+
+        let cfg = load_layered(Some(r#"{"ignoredPaths":["tmp"]}"#), None).unwrap();
+        assert!(cfg.hidden_paths.is_empty());
+        assert_eq!(cfg.ignored_paths, vec!["tmp"]);
+    }
+
+    #[test]
+    fn ignored_paths_is_optional_in_both_files() {
+        for json in [
+            r#"{"hiddenPaths":[]}"#,
+            r#"{"hiddenPaths":[],"ignoredPaths":null}"#,
+        ] {
+            let cfg = load_layered(Some(r#"{"ignoredPaths":null}"#), Some(json)).unwrap();
+            assert!(cfg.ignored_paths.is_empty(), "{json}");
+        }
+    }
+
+    #[test]
+    fn layered_ignored_paths_are_replaced_not_joined() {
+        let cfg = load_layered(
+            Some(r#"{"hiddenPaths":["notes"],"ignoredPaths":["tmp","vendor"]}"#),
+            Some(r#"{"hiddenPaths":["scratch"],"ignoredPaths":["build"]}"#),
+        )
+        .unwrap();
+        assert_eq!(cfg.hidden_paths, vec!["scratch"]);
+        assert_eq!(cfg.ignored_paths, vec!["build"]);
+
+        let cfg = load_layered(
+            Some(r#"{"ignoredPaths":["tmp"]}"#),
+            Some(r#"{"hiddenPaths":[],"ignoredPaths":[]}"#),
+        )
+        .unwrap();
+        assert!(
+            cfg.ignored_paths.is_empty(),
+            "workspace [] clears the user list"
+        );
+
+        let cfg = load_layered(
+            Some(r#"{"ignoredPaths":["tmp"]}"#),
+            Some(r#"{"hiddenPaths":["notes"]}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.ignored_paths,
+            vec!["tmp"],
+            "workspace file without ignoredPaths keeps the user list"
+        );
+    }
+
+    #[test]
+    fn path_list_entries_must_be_workspace_relative() {
+        for key in ["hiddenPaths", "ignoredPaths"] {
+            for raw in [
+                r#""/abs""#,
+                r#""\\share\\x""#,
+                r#""~/notes""#,
+                r#""C:\\work""#,
+                r#""c:/work""#,
+                r#""..""#,
+                r#""../sibling""#,
+                r#""tmp/../x""#,
+                r#""tmp\\..\\x""#,
+                r#"" /abs""#,
+            ] {
+                let json = if key == "hiddenPaths" {
+                    format!(r#"{{"hiddenPaths":[{raw}]}}"#)
+                } else {
+                    format!(r#"{{"hiddenPaths":[],"{key}":[{raw}]}}"#)
+                };
+                let err = load_layered(None, Some(&json)).unwrap_err();
+                assert!(
+                    err.starts_with(&format!(
+                        ".workspace-status-config.json {key} entries must be paths relative to the workspace root"
+                    )),
+                    "{json}: {err}"
+                );
+                let user_json = format!(r#"{{"{key}":[{raw}]}}"#);
+                let err = load_layered(Some(&user_json), None).unwrap_err();
+                assert!(
+                    err.contains(&format!(" {key} entries must be paths relative")),
+                    "{err}"
+                );
+            }
+        }
+        let cfg = load_layered(
+            None,
+            Some(r#"{"hiddenPaths":["a..b/x"],"ignoredPaths":["..hidden"]}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.hidden_paths,
+            vec!["a..b/x"],
+            "`..` inside a name is fine"
+        );
+        assert_eq!(cfg.ignored_paths, vec!["..hidden"]);
+    }
+
+    #[test]
+    fn path_list_rejects_non_string_entries() {
+        let err =
+            load_layered(None, Some(r#"{"hiddenPaths":[],"ignoredPaths":["tmp",1]}"#)).unwrap_err();
+        assert_eq!(
+            err,
+            ".workspace-status-config.json ignoredPaths must contain only strings"
+        );
+        let err =
+            load_layered(None, Some(r#"{"hiddenPaths":[],"ignoredPaths":"tmp"}"#)).unwrap_err();
+        assert_eq!(
+            err,
+            ".workspace-status-config.json ignoredPaths must be a string array"
+        );
+    }
+
+    #[test]
+    fn removed_ignored_repos_key_fails_in_both_files() {
+        let want_tail = "ignoredRepos is no longer supported: use hiddenPaths (hidden by default) or ignoredPaths (never shown)";
+        for json in [
+            r#"{"ignoredRepos":["notes"]}"#,
+            r#"{"ignoredRepos":[]}"#,
+            r#"{"ignoredRepos":null}"#,
+            r#"{"hiddenPaths":[],"ignoredRepos":["notes"]}"#,
+        ] {
+            let err = load_layered(None, Some(json)).unwrap_err();
+            assert_eq!(
+                err,
+                format!(".workspace-status-config.json {want_tail}"),
+                "{json}"
+            );
+            let (root, user_file, workspace) = layered(Some(json), None);
+            let err = load_config_files(Some(&user_file), &workspace).unwrap_err();
+            assert_eq!(
+                err,
+                format!("{} {want_tail}", user_file.display()),
+                "{json}"
+            );
+            let _ = fs::remove_dir_all(root);
         }
     }
 
@@ -1470,7 +1691,7 @@ mod tests {
             load_runtime_key("theme", "null").unwrap(),
             RuntimeKeys::default()
         );
-        let cfg = load_layered(None, Some(r#"{"ignoredRepos":[]}"#)).unwrap();
+        let cfg = load_layered(None, Some(r#"{"hiddenPaths":[]}"#)).unwrap();
         assert_eq!(cfg.runtime, RuntimeKeys::default());
         assert_eq!(
             WorkspaceStatusConfig::with_defaults().runtime,
@@ -1509,7 +1730,7 @@ mod tests {
         }
         let cfg = load_layered_home(
             Some(r#"{"theme":"one-light"}"#),
-            Some(r#"{"ignoredRepos":[],"theme":"rose-pine-dawn"}"#),
+            Some(r#"{"hiddenPaths":[],"theme":"rose-pine-dawn"}"#),
             Some("/home/demo"),
         )
         .unwrap();
@@ -1542,7 +1763,7 @@ mod tests {
         }
         let cfg = load_layered_home(
             Some(r#"{"themeMode":"light"}"#),
-            Some(r#"{"ignoredRepos":[],"themeMode":"dark"}"#),
+            Some(r#"{"hiddenPaths":[],"themeMode":"dark"}"#),
             Some("/home/demo"),
         )
         .unwrap();
@@ -1697,8 +1918,7 @@ mod tests {
             let err = load_runtime_key(key, raw).unwrap_err();
             assert_eq!(err, format!("<user> {key} {tail}"), "{key}: {raw}");
         }
-        let err =
-            load_layered(None, Some(r#"{"ignoredRepos":[],"glyphs":"unicode"}"#)).unwrap_err();
+        let err = load_layered(None, Some(r#"{"hiddenPaths":[],"glyphs":"unicode"}"#)).unwrap_err();
         assert_eq!(
             err,
             r#".workspace-status-config.json glyphs must be "nerd" or "ascii""#
@@ -1737,7 +1957,7 @@ mod tests {
     fn runtime_keys_merge_per_key_workspace_wins() {
         let cfg = load_layered_home(
             Some(r#"{"theme":"dracula","watchMs":4000,"git":"/opt/git"}"#),
-            Some(r#"{"ignoredRepos":[],"theme":"monokai","fetchMs":0}"#),
+            Some(r#"{"hiddenPaths":[],"theme":"monokai","fetchMs":0}"#),
             Some("/home/demo"),
         )
         .unwrap();
@@ -1759,7 +1979,7 @@ mod tests {
         }
         let err = load_layered(None, Some("{")).unwrap_err();
         assert_eq!(
-            err, ".workspace-status-config.json must contain an ignoredRepos string array",
+            err, ".workspace-status-config.json must contain a hiddenPaths string array",
             "workspace file keeps its message"
         );
     }
@@ -1799,7 +2019,7 @@ mod tests {
             ("viewedStore", r#""/tmp/v.json""#, "WS_STATUS_VIEWED_STORE"),
             ("uiStore", r#""~/ui-state.json""#, "WS_STATUS_UI_STORE"),
         ] {
-            let workspace_json = format!(r#"{{"ignoredRepos":[],"{key}":{raw}}}"#);
+            let workspace_json = format!(r#"{{"hiddenPaths":[],"{key}":{raw}}}"#);
             let (root, user_file, workspace) = layered(None, Some(&workspace_json));
             let err = load_config_files_with_home(Some(&user_file), &workspace, Some("/home/demo"))
                 .unwrap_err();
@@ -1824,7 +2044,7 @@ mod tests {
         }
         let cfg = load_layered(
             None,
-            Some(r#"{"ignoredRepos":[],"git":null,"commentStore":null,"uiStore":null}"#),
+            Some(r#"{"hiddenPaths":[],"git":null,"commentStore":null,"uiStore":null}"#),
         )
         .unwrap();
         assert_eq!(
@@ -1840,7 +2060,7 @@ mod tests {
             Some(
                 r#"{"git":"git-wrapper","updateCheckStore":"~/u.json","commentStore":"/c.json","viewedStore":"/v.json","uiStore":"~/ui.json"}"#,
             ),
-            Some(r#"{"ignoredRepos":[],"theme":"monokai"}"#),
+            Some(r#"{"hiddenPaths":[],"theme":"monokai"}"#),
             Some("/home/demo"),
         )
         .unwrap();
@@ -1862,7 +2082,7 @@ mod tests {
     fn user_file_with_a_leftover_theme_store_key_ignores_it() {
         let cfg = load_layered_home(
             Some(r#"{"theme":"nord","themeStore":"~/state/theme.json"}"#),
-            Some(r#"{"ignoredRepos":[]}"#),
+            Some(r#"{"hiddenPaths":[]}"#),
             Some("/home/demo"),
         )
         .unwrap();

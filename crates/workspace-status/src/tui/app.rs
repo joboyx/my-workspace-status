@@ -1097,7 +1097,8 @@ fn load_right_headless(state: &mut AppState) {
     apply_right_pane_load(state, payload);
 }
 
-/// Discover every repo (ignored included) so `.` can show them without a walk.
+/// Discover every repo that is not under `ignoredPaths` (hidden ones
+/// included) so `.` can show hidden repos without a walk.
 ///
 /// `fetch_concurrency` caps the per-repo git work (resolved
 /// `fetchConcurrency`).
@@ -1109,33 +1110,23 @@ pub fn collect_full_snapshot(
     do_fetch: bool,
     fetch_concurrency: usize,
 ) -> WorkspaceSnapshot {
-    let discover = WorkspaceStatusConfig {
-        ignored_repos: Vec::new(),
-        max_depth: config.max_depth,
-        default_branches: config.default_branches.clone(),
-        editor: config.editor.clone(),
-        diff_tool: config.diff_tool.clone(),
-        view_defaults: config.view_defaults,
-        runtime: config.runtime.clone(),
-    };
+    let discover = discover_config(config);
     let only: Option<BTreeSet<String>> = if filter_repos.is_empty() {
         None
     } else {
         Some(filter_repos.iter().cloned().collect())
     };
     let snapshots = collect_snapshots(cwd, do_fetch, &discover, only.as_ref(), fetch_concurrency);
-    build_workspace_snapshot(
-        &snapshots,
-        &config.ignored_repos,
-        show_ignored,
-        filter_repos,
-    )
+    build_workspace_snapshot(&snapshots, &config.hidden_paths, show_ignored, filter_repos)
 }
 
-/// Discovery config that still finds ignored repos so `.` can show them.
+/// Discovery config that still finds hidden repos so `.` can show them.
+///
+/// Clears only `hiddenPaths`; `ignoredPaths` stays a hard exclude.
 pub(crate) fn discover_config(config: &WorkspaceStatusConfig) -> WorkspaceStatusConfig {
     WorkspaceStatusConfig {
-        ignored_repos: Vec::new(),
+        hidden_paths: Vec::new(),
+        ignored_paths: config.ignored_paths.clone(),
         max_depth: config.max_depth,
         default_branches: config.default_branches.clone(),
         editor: config.editor.clone(),

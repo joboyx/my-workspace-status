@@ -76,7 +76,7 @@ fn pty_uppercase_e_detached_keeps_left_temp_until_exit() {
     );
     fs::write(
         workspace.join(".workspace-status-config.json"),
-        format!("{{\n  \"ignoredRepos\": [\"notes\"],\n  \"diffTool\": \"{tool}\"\n}}\n"),
+        format!("{{\n  \"hiddenPaths\": [\"notes\"],\n  \"diffTool\": \"{tool}\"\n}}\n"),
     )
     .unwrap();
     let marker_s = marker.display().to_string();

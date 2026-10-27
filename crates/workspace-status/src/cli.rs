@@ -217,7 +217,7 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
 
     let mut config = loaded.clone();
     if cli.all {
-        config.ignored_repos = Vec::new();
+        config.hidden_paths = Vec::new();
     }
 
     let flags = crate::tui::HeadlessFlags {
@@ -329,7 +329,7 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
     }
 
     let workspace =
-        build_workspace_snapshot(&snapshots, &loaded.ignored_repos, cli.all, &filter_repos);
+        build_workspace_snapshot(&snapshots, &loaded.hidden_paths, cli.all, &filter_repos);
     let published = visible_workspace_snapshot(&workspace);
 
     if force_json {

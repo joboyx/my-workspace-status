@@ -59,6 +59,7 @@ mod pty_diff_syntax_highlight_keeps_signs_and_row_bg;
 mod pty_diff_wrap_toggle;
 mod pty_divider_scrollbar_drag;
 mod pty_dot_hides_linked_of_ignored_primary;
+mod pty_dot_skips_ignored_paths;
 mod pty_dot_toggles_ignored_repos;
 mod pty_double_click_enters_on_hit_row;
 mod pty_drag_select_copies_pane_text;

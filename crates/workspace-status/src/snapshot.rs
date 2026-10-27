@@ -7,7 +7,7 @@ use serde::Serialize;
 use crate::helpers::{
     compare_repo_paths_for_display, get_branch_emoji, get_branch_kind, get_branch_priority,
     get_sync_priority, is_attention_sync_note, is_counted_local_branch, is_default_branch,
-    sorted_unique, BranchKind,
+    path_is_at_or_under, path_is_under_any, sorted_unique, BranchKind,
 };
 
 pub const WORKSPACE_SNAPSHOT_VERSION: u32 = 1;
@@ -188,10 +188,19 @@ fn serialize_file_change(change: &FileChange) -> FileChange {
     }
 }
 
-fn to_workspace_repo(snapshot: &RepoSnapshot, ignored: &BTreeSet<String>) -> WorkspaceRepoSnapshot {
+/// Build one workspace row. `hidden` is the `hiddenPaths` list.
+///
+/// The row is tagged `ignored` (hidden) when its path is at or under a
+/// hidden entry. A linked checkout whose primary is also hidden is not
+/// tagged: it hides with its primary (see [`checkout_is_hidden_ignored`]).
+fn to_workspace_repo(snapshot: &RepoSnapshot, hidden: &[String]) -> WorkspaceRepoSnapshot {
+    let primary_hidden = snapshot
+        .primary_repo
+        .as_deref()
+        .is_some_and(|primary| path_is_under_any(primary, hidden));
     WorkspaceRepoSnapshot {
         repo: snapshot.repo.clone(),
-        ignored: ignored.contains(&snapshot.repo),
+        ignored: !primary_hidden && path_is_under_any(&snapshot.repo, hidden),
         branch: snapshot.branch.clone(),
         sync_status: snapshot.sync_status,
         sync_note: snapshot.sync_note.clone(),
@@ -209,40 +218,47 @@ fn to_workspace_repo(snapshot: &RepoSnapshot, ignored: &BTreeSet<String>) -> Wor
     }
 }
 
+/// Build the workspace snapshot from discovered checkouts.
+///
+/// `hidden_paths` is the config `hiddenPaths` list: each row at or under an
+/// entry is tagged hidden (see [`to_workspace_repo`]). `show_ignored` and
+/// `filter_repos` decide what [`visible_workspace_snapshot`] keeps.
 pub fn build_workspace_snapshot(
     snapshots: &[RepoSnapshot],
-    ignored_repos: &[String],
+    hidden_paths: &[String],
     show_ignored: bool,
     filter_repos: &[String],
 ) -> WorkspaceSnapshot {
-    let ignored_repos = sorted_unique(ignored_repos.iter().cloned());
+    let hidden_paths = sorted_unique(hidden_paths.iter().cloned());
     let filter_repos = sorted_unique(filter_repos.iter().cloned());
-    let ignored_set: BTreeSet<String> = ignored_repos.iter().cloned().collect();
     let mut repos: Vec<RepoSnapshot> = snapshots.to_vec();
     repos.sort_by(compare_repo_paths_for_display);
+    let repos = repos
+        .iter()
+        .map(|s| to_workspace_repo(s, &hidden_paths))
+        .collect();
     WorkspaceSnapshot {
         version: WORKSPACE_SNAPSHOT_VERSION,
         show_ignored,
         filter_repos,
-        ignored_repos,
-        repos: repos
-            .iter()
-            .map(|s| to_workspace_repo(s, &ignored_set))
-            .collect(),
+        ignored_repos: hidden_paths,
+        repos,
     }
 }
 
-/// True when this checkout is on the ignore list, or its primary is.
+/// True when this checkout, or its primary, is at or under a `hidden` entry.
 ///
-/// Matches background-fetch hide: path or `primary_repo` on the list.
-/// Named-filter exceptions are applied by the caller, not here.
-pub(crate) fn checkout_is_hidden_ignored(repo: &WorkspaceRepoSnapshot, ignored: &[String]) -> bool {
-    if ignored.is_empty() {
-        return false;
-    }
-    ignored
-        .iter()
-        .any(|path| repo.repo == *path || repo.primary_repo.as_deref() == Some(path.as_str()))
+/// Matches background-fetch hide: path or `primary_repo` at or under an
+/// entry of the `hiddenPaths` list. Named-filter exceptions are applied by
+/// the caller, not here.
+pub(crate) fn checkout_is_hidden_ignored(repo: &WorkspaceRepoSnapshot, hidden: &[String]) -> bool {
+    hidden.iter().any(|entry| {
+        path_is_at_or_under(&repo.repo, entry)
+            || repo
+                .primary_repo
+                .as_deref()
+                .is_some_and(|primary| path_is_at_or_under(primary, entry))
+    })
 }
 
 /// Visible snapshot: hidden ignored stay out unless shown or named.
@@ -626,6 +642,49 @@ mod tests {
             vec!["app"]
         );
         assert_eq!(visible.ignored_repos, vec!["notes"]);
+    }
+
+    #[test]
+    fn hidden_folder_hides_each_repo_under_it() {
+        let mut primary = sample_repo("tmp/x", false);
+        primary.checkout_kind = CheckoutKind::Primary;
+        let mut child = sample_repo("tmp/x/.worktrees/f", false);
+        child.checkout_kind = CheckoutKind::Linked;
+        child.primary_repo = Some("tmp/x".into());
+        let mut outside = sample_repo("tmp/app-feat", false);
+        outside.checkout_kind = CheckoutKind::Linked;
+        outside.primary_repo = Some("app".into());
+        let built = build_workspace_snapshot(
+            &[
+                sample_repo("app", false),
+                sample_repo("tmpfoo", false),
+                primary,
+                child,
+                outside,
+            ],
+            &["tmp".to_string()],
+            false,
+            &[],
+        );
+        let tagged: Vec<(&str, bool)> = built
+            .repos
+            .iter()
+            .map(|r| (r.repo.as_str(), r.ignored))
+            .collect();
+        assert!(tagged.contains(&("tmp/x", true)));
+        assert!(
+            tagged.contains(&("tmp/x/.worktrees/f", false)),
+            "linked child of a hidden primary is not retagged"
+        );
+        assert!(
+            tagged.contains(&("tmp/app-feat", true)),
+            "a linked checkout hidden by its own path is tagged"
+        );
+        assert!(tagged.contains(&("tmpfoo", false)));
+        let visible = visible_workspace_snapshot(&built);
+        let mut names: Vec<&str> = visible.repos.iter().map(|r| r.repo.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["app", "tmpfoo"]);
     }
 
     #[test]

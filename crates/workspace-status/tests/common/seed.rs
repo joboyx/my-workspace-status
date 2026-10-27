@@ -389,7 +389,7 @@ pub fn daily_workspace() -> (PathBuf, PathBuf) {
     seed_merge_graph(&workspace, "merger");
     fs::write(
         workspace.join(".workspace-status-config.json"),
-        "{\n  \"ignoredRepos\": [\"notes\"]\n}\n",
+        "{\n  \"hiddenPaths\": [\"notes\"]\n}\n",
     )
     .unwrap();
     (root, workspace)
@@ -446,7 +446,7 @@ pub fn seed_primary_and_linked_family(workspace: &Path) {
 
 /// Off-default ignored primary `app` plus linked worktree, and a visible `lib`.
 ///
-/// Config `ignoredRepos: ["app"]`. Cold TUI start must hide the family; `.`
+/// Config `hiddenPaths: ["app"]`. Cold TUI start must hide the family; `.`
 /// shows it nested. `lib` stays on the tree so launch still paints a repo.
 pub fn ignored_primary_family_workspace() -> (PathBuf, PathBuf) {
     let (root, workspace) = new_workspace("ws-tui-e2e-ignored-primary");
@@ -454,7 +454,7 @@ pub fn ignored_primary_family_workspace() -> (PathBuf, PathBuf) {
     seed_repo(&workspace, "lib", "main", true);
     fs::write(
         workspace.join(".workspace-status-config.json"),
-        "{\n  \"ignoredRepos\": [\"app\"]\n}\n",
+        "{\n  \"hiddenPaths\": [\"app\"]\n}\n",
     )
     .unwrap();
     (root, workspace)

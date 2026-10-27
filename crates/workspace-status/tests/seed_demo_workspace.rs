@@ -156,7 +156,7 @@ fn seed_demo_workspace_state_and_snapshot() {
         &fs::read_to_string(dest.join(".workspace-status-config.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(config["ignoredRepos"], serde_json::json!(["notes"]));
+    assert_eq!(config["hiddenPaths"], serde_json::json!(["notes"]));
     assert_eq!(config["editor"], "vim");
     assert!(dest.join(".remotes/app.git").exists());
     assert!(dest.join(".scratch").is_dir());

@@ -33,6 +33,29 @@ pub fn normalize_filter_repo(arg: &str) -> String {
     s
 }
 
+/// True when workspace-relative `path` is `entry` or sits under it.
+///
+/// Both sides are normalized workspace-relative paths (`/` separators, no
+/// leading `./`, no trailing `/`). The match is by whole path segments:
+/// entry `tmp` matches `tmp` and `tmp/x/y`, never `tmpfoo`. An empty entry
+/// matches nothing. Config `hiddenPaths` and `ignoredPaths` use this rule.
+pub fn path_is_at_or_under(path: &str, entry: &str) -> bool {
+    if entry.is_empty() {
+        return false;
+    }
+    match path.strip_prefix(entry) {
+        Some(rest) => rest.is_empty() || rest.starts_with('/'),
+        None => false,
+    }
+}
+
+/// True when `path` is at or under any of `entries`. See [`path_is_at_or_under`].
+pub fn path_is_under_any<S: AsRef<str>>(path: &str, entries: &[S]) -> bool {
+    entries
+        .iter()
+        .any(|entry| path_is_at_or_under(path, entry.as_ref()))
+}
+
 /// Branch names [`is_default_branch`] treats as the default with no
 /// override, in the order a lookup of the default branch tries them.
 pub const DEFAULT_BRANCH_NAMES: [&str; 3] = ["main", "master", "develop"];
@@ -230,6 +253,20 @@ mod tests {
     fn normalize_strips_dot_slash_and_trailing_slash() {
         assert_eq!(normalize_filter_repo("./app/"), "app");
         assert_eq!(normalize_filter_repo("notes"), "notes");
+    }
+
+    #[test]
+    fn path_match_is_by_whole_segments() {
+        assert!(path_is_at_or_under("tmp", "tmp"));
+        assert!(path_is_at_or_under("tmp/x/y", "tmp"));
+        assert!(path_is_at_or_under("vendor/lib", "vendor/lib"));
+        assert!(!path_is_at_or_under("tmpfoo", "tmp"));
+        assert!(!path_is_at_or_under("tmpfoo/x", "tmp"));
+        assert!(!path_is_at_or_under("app/tmp", "tmp"), "never a bare name");
+        assert!(!path_is_at_or_under("tmp", "tmp/x"));
+        assert!(!path_is_at_or_under("tmp", ""));
+        assert!(path_is_under_any("tmp/x", &["notes", "tmp"]));
+        assert!(!path_is_under_any::<&str>("tmp/x", &[]));
     }
 
     #[test]
