@@ -433,7 +433,7 @@ pub fn graph_row_signature(row: &GraphRow) -> String {
             "worktree:{}|{}|{}",
             wt.branch.as_deref().unwrap_or(""),
             wt.head_id.as_deref().unwrap_or(""),
-            wt.ignored
+            wt.hidden
         ),
     }
 }
@@ -683,7 +683,7 @@ mod tests {
     ) -> WorkspaceRepoSnapshot {
         WorkspaceRepoSnapshot {
             repo: path.into(),
-            ignored: false,
+            hidden: false,
             branch: branch.into(),
             sync_status: status,
             sync_note: note.into(),
@@ -1129,7 +1129,7 @@ mod tests {
             path: "wt".into(),
             head_id: Some("aaa".into()),
             branch: Some("feature".into()),
-            ignored: false,
+            hidden: false,
             is_current: false,
         });
         assert!(graph_row_signature(&stash).starts_with("stash:"));

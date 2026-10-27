@@ -73,7 +73,7 @@ impl AppState {
     /// unlike the leaf). One checkout: that checkout, no prefix.
     pub(crate) fn quick_open_roots(&self, scope: &QuickOpenScope) -> Vec<IndexRoot> {
         match scope {
-            QuickOpenScope::Workspace => visible_snapshot(&self.snapshot, self.show_ignored)
+            QuickOpenScope::Workspace => visible_snapshot(&self.snapshot, self.show_hidden)
                 .repos
                 .into_iter()
                 .filter(|repo| repo.checkout_kind == CheckoutKind::Primary)

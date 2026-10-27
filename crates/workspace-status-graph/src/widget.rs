@@ -1388,12 +1388,12 @@ mod tests {
         }
     }
 
-    fn worktree(path: &str, head: &str, ignored: bool) -> Worktree {
+    fn worktree(path: &str, head: &str, hidden: bool) -> Worktree {
         Worktree {
             path: path.into(),
             head_id: Some(head.into()),
             branch: Some("feature/graph".into()),
-            ignored,
+            hidden,
             is_current: false,
         }
     }
@@ -2255,38 +2255,35 @@ mod tests {
     }
 
     #[test]
-    fn hidden_ignored_worktree_is_omitted() {
+    fn hidden_worktree_is_omitted() {
         let lines = render_lines(&sample_model(), 120, 16, false);
         let joined = lines.join("\n");
         assert!(
             !joined.contains("notes"),
-            "hidden ignored worktree leaked: {joined}"
+            "hidden worktree leaked: {joined}"
         );
-        assert!(
-            !joined.contains("[ignored]"),
-            "ignored mark leaked: {joined}"
-        );
+        assert!(!joined.contains("[hidden]"), "hidden mark leaked: {joined}");
     }
 
     #[test]
-    fn show_ignored_includes_hidden_worktree() {
+    fn show_hidden_includes_hidden_worktree() {
         let mut model = sample_model();
-        assert_eq!(model.dispatch(Action::SetShowIgnored(true)), Effect::None);
+        assert_eq!(model.dispatch(Action::SetShowHidden(true)), Effect::None);
         let lines = render_lines(&model, 120, 16, false);
         let joined = lines.join("\n");
         assert!(joined.contains("notes"), "expected notes path: {joined}");
         assert!(
-            joined.contains("[ignored]"),
-            "expected ignored mark: {joined}"
+            joined.contains("[hidden]"),
+            "expected hidden mark: {joined}"
         );
     }
 
     #[test]
-    fn toggle_show_ignored_flips_visibility() {
+    fn toggle_show_hidden_flips_visibility() {
         let mut model = sample_model();
-        assert!(!model.show_ignored);
-        assert_eq!(model.dispatch(Action::ToggleShowIgnored), Effect::None);
-        assert!(model.show_ignored);
+        assert!(!model.show_hidden);
+        assert_eq!(model.dispatch(Action::ToggleShowHidden), Effect::None);
+        assert!(model.show_hidden);
         let shown = model.visible_rows();
         assert!(
             shown.iter().any(|row| match row {
@@ -2295,10 +2292,10 @@ mod tests {
                 }
                 _ => false,
             }),
-            "toggle should attach the ignored worktree to HEAD"
+            "toggle should attach the hidden worktree to HEAD"
         );
-        model.dispatch(Action::ToggleShowIgnored);
-        assert!(!model.show_ignored);
+        model.dispatch(Action::ToggleShowHidden);
+        assert!(!model.show_hidden);
         let hidden = model.visible_rows();
         assert!(hidden.iter().all(|row| match row {
             crate::GraphRow::Commit { worktrees, .. } => {
@@ -2904,20 +2901,20 @@ mod tests {
                 path: "vendor/secret".into(),
                 head_id: None,
                 branch: None,
-                ignored: true,
+                hidden: true,
                 is_current: false,
             }],
             ..GraphModel::default()
         };
         assert!(model.visible_rows().is_empty());
-        model.show_ignored = true;
+        model.show_hidden = true;
         let rows = model.visible_rows();
         assert_eq!(rows.len(), 1);
         let lines = render_lines(&model, 40, 3, false);
         assert!(
             lines
                 .iter()
-                .any(|l| l.contains("vendor/secret") && l.contains("[ignored]")),
+                .any(|l| l.contains("vendor/secret") && l.contains("[hidden]")),
             "{lines:?}"
         );
     }
@@ -4134,7 +4131,7 @@ mod tests {
                 path: ".worktrees/recon".into(),
                 head_id: Some(id.into()),
                 branch: Some("main".into()),
-                ignored: false,
+                hidden: false,
                 is_current: true,
             }],
             uncommitted: Some(false),
@@ -4417,12 +4414,12 @@ mod tests {
         }
     }
 
-    /// Sample model with the ignored `notes` worktree shown: rows are
+    /// Sample model with the hidden `notes` worktree shown: rows are
     /// uncommitted (0), stash (1), HEAD commit with two worktree marks on
     /// its spacer (2), and the root commit (3).
     fn icon_model() -> GraphModel {
         GraphModel {
-            show_ignored: true,
+            show_hidden: true,
             ..sample_model()
         }
     }
@@ -4595,11 +4592,11 @@ mod tests {
                 path: "notes".into(),
                 head_id: Some("elsewhere".into()),
                 branch: None,
-                ignored: true,
+                hidden: true,
                 is_current: true,
             }],
             uncommitted: Some(true),
-            show_ignored: true,
+            show_hidden: true,
             ..GraphModel::default()
         };
         let render = |model: &GraphModel| {
@@ -4634,7 +4631,7 @@ mod tests {
         assert_eq!(buf[(wt.x + 2, wt.y)].fg, pal.subject, "path");
         let row = buf_row(&buf, wt.y);
         let col = |needle: &str| row[..row.find(needle).expect(needle)].chars().count() as u16;
-        assert_eq!(buf[(col("[ignored]") + 1, wt.y)].fg, pal.meta);
+        assert_eq!(buf[(col("[hidden]") + 1, wt.y)].fg, pal.meta);
         assert_eq!(buf[(col("[HEAD]") + 1, wt.y)].fg, pal.head_mark);
 
         let clean = GraphModel {

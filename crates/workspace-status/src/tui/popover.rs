@@ -430,7 +430,7 @@ fn tree_section(state: &AppState, kind: IconKind, row: &VisibleRow) -> Option<Po
     let actions: Vec<Action> = match kind {
         IconKind::Workspace => {
             workspace_fields(state, row, &mut lines);
-            vec![Action::Fetch, Action::Refresh, Action::ToggleShowIgnored]
+            vec![Action::Fetch, Action::Refresh, Action::ToggleShowHidden]
         }
         IconKind::Repo => {
             repo_fields(state, row, &mut lines);
@@ -450,7 +450,7 @@ fn tree_section(state: &AppState, kind: IconKind, row: &VisibleRow) -> Option<Po
                     branch: Some(&row.chrome.branch),
                     default_override: row.chrome.default_branch_override.as_deref(),
                     current: false,
-                    ignored: row.ignored,
+                    hidden: row.hidden,
                 },
                 &mut lines,
             );
@@ -490,7 +490,7 @@ fn tree_section(state: &AppState, kind: IconKind, row: &VisibleRow) -> Option<Po
         }
         kind if is_sync_kind(kind) => sync_fields(kind, &row.chrome.sync_note, &mut lines),
         IconKind::StatusFailed => vec![Action::Refresh],
-        IconKind::Ignored => vec![Action::ToggleShowIgnored],
+        IconKind::Hidden => vec![Action::ToggleShowHidden],
         IconKind::ChangeCount => {
             let counts = change_counts(state, &row_checkouts(state, row));
             change_count_fields(counts, &mut lines);
@@ -826,12 +826,12 @@ struct WorktreeFacts<'a> {
     default_override: Option<&'a str>,
     /// The graph's current checkout.
     current: bool,
-    /// Listed as ignored in config.
-    ignored: bool,
+    /// Listed as hidden in config.
+    hidden: bool,
 }
 
 /// Linked worktree: path, primary checkout, branch or detached, then
-/// `current` and `ignored` when they hold. The tree and the graph share
+/// `current` and `hidden` when they hold. The tree and the graph share
 /// it.
 fn worktree_fields(facts: &WorktreeFacts<'_>, lines: &mut Vec<PopoverLine>) {
     lines.push(field("path", facts.path));
@@ -847,8 +847,8 @@ fn worktree_fields(facts: &WorktreeFacts<'_>, lines: &mut Vec<PopoverLine>) {
     if facts.current {
         lines.push(field("checkout", "current"));
     }
-    if facts.ignored {
-        lines.push(role_field("config", "ignored", SegRole::Muted));
+    if facts.hidden {
+        lines.push(role_field("config", "hidden", SegRole::Muted));
     }
 }
 
@@ -1447,7 +1447,7 @@ fn graph_worktree_section(
                 .as_ref()
                 .and_then(|model| model.default_branch_override.as_deref()),
             current: worktree.is_current,
-            ignored: worktree.ignored,
+            hidden: worktree.hidden,
         },
         &mut lines,
     );
@@ -1933,7 +1933,7 @@ mod tests {
                     branch: Some(branch),
                     default_override,
                     current: false,
-                    ignored: false,
+                    hidden: false,
                 },
                 &mut lines,
             );

@@ -363,7 +363,7 @@ pub fn format_label(row: &GraphRow, glyphs: &GlyphSet) -> String {
 ///
 /// The uncommitted glyph and the worktree glyph are their own parts
 /// ([`LabelKind::UncommittedMark`], [`LabelKind::WorktreeMark`]). A
-/// worktree row paints `[ignored]` as meta and `[HEAD]` as the head mark.
+/// worktree row paints `[hidden]` as meta and `[HEAD]` as the head mark.
 /// Every other label is one subject run. The text is [`format_label`].
 pub(crate) fn format_label_parts(row: &GraphRow, glyphs: &GlyphSet) -> Vec<LabelPart> {
     match row {
@@ -1226,7 +1226,7 @@ fn worktree_mark(worktree: &Worktree, glyphs: &GlyphSet) -> String {
 }
 
 /// Worktree mark as parts: the glyph ([`LabelKind::WorktreeMark`] with
-/// `index`), ` path branch` as `text`, then `  [ignored]` as meta.
+/// `index`), ` path branch` as `text`, then `  [hidden]` as meta.
 fn worktree_mark_parts(
     worktree: &Worktree,
     glyphs: &GlyphSet,
@@ -1250,9 +1250,9 @@ fn worktree_mark_parts(
             target: None,
         },
     ];
-    if worktree.ignored {
+    if worktree.hidden {
         parts.push(LabelPart {
-            text: "  [ignored]".into(),
+            text: "  [hidden]".into(),
             kind: LabelKind::Meta,
             target: None,
         });
@@ -1702,7 +1702,7 @@ mod tests {
                 path: ".worktrees/feature/graph".into(),
                 head_id: Some("aaa1111bbbb".into()),
                 branch: Some("feature/graph".into()),
-                ignored: false,
+                hidden: false,
                 is_current: false,
             }],
         }
@@ -2013,14 +2013,14 @@ mod tests {
                 path: ".worktrees/recon".into(),
                 head_id: Some(commit.id.clone()),
                 branch: Some("main".into()),
-                ignored: false,
+                hidden: false,
                 is_current: true,
             },
             Worktree {
                 path: ".worktrees/other".into(),
                 head_id: Some(commit.id.clone()),
                 branch: Some("main".into()),
-                ignored: false,
+                hidden: false,
                 is_current: false,
             },
         ];
@@ -2058,22 +2058,22 @@ mod tests {
             path: "notes".into(),
             head_id: None,
             branch: None,
-            ignored: true,
+            hidden: true,
             is_current: false,
         });
-        assert_eq!(format_row(&row, &UNICODE), " notes  [ignored]");
-        assert_eq!(format_row(&row, &ASCII), "L notes  [ignored]");
+        assert_eq!(format_row(&row, &UNICODE), " notes  [hidden]");
+        assert_eq!(format_row(&row, &ASCII), "L notes  [hidden]");
         assert!(!format_row(&row, &UNICODE).contains("🔗"));
     }
 
     #[test]
     fn label_parts_split_the_row_glyph_and_keep_the_label_text() {
-        let worktree = |ignored, is_current, branch: Option<&str>| {
+        let worktree = |hidden, is_current, branch: Option<&str>| {
             GraphRow::Worktree(Worktree {
                 path: "notes".into(),
                 head_id: None,
                 branch: branch.map(Into::into),
-                ignored,
+                hidden,
                 is_current,
             })
         };
@@ -2122,7 +2122,7 @@ mod tests {
                                 .map(|part| part.kind)
                         };
                         assert_eq!(kind_of("notes"), Some(LabelKind::Subject));
-                        assert_eq!(kind_of("[ignored]"), wt.ignored.then_some(LabelKind::Meta));
+                        assert_eq!(kind_of("[hidden]"), wt.hidden.then_some(LabelKind::Meta));
                         assert_eq!(
                             kind_of("[HEAD]"),
                             wt.is_current.then_some(LabelKind::ChipHead)
@@ -2145,11 +2145,11 @@ mod tests {
             refs: vec!["feat".into()],
             ..Commit::default()
         };
-        let wt = |path: &str, branch: &str, ignored: bool| Worktree {
+        let wt = |path: &str, branch: &str, hidden: bool| Worktree {
             path: path.into(),
             head_id: Some("abcdefg".into()),
             branch: Some(branch.into()),
-            ignored,
+            hidden,
             is_current: false,
         };
         // `feat` is already a ref chip, so only `b` and `c` paint a mark.
@@ -2171,7 +2171,7 @@ mod tests {
             default_branch_override: None,
         });
         assert!(
-            text.starts_with("L b other L c notes  [ignored] [feat]"),
+            text.starts_with("L b other L c notes  [hidden] [feat]"),
             "{text}"
         );
         let marks: Vec<_> = parts.iter().filter_map(|part| part.kind.icon()).collect();
@@ -2182,7 +2182,7 @@ mod tests {
                 (crate::GraphIconKind::Worktree, Some(2)),
             ]
         );
-        for text in [" b other", " c notes", "  [ignored]"] {
+        for text in [" b other", " c notes", "  [hidden]"] {
             assert!(
                 parts
                     .iter()
@@ -2372,7 +2372,7 @@ mod tests {
             path: "notes".into(),
             head_id: Some(commit.id.clone()),
             branch: None,
-            ignored: false,
+            hidden: false,
             is_current: false,
         }];
         let (line, parts) = assemble_commit_spacer(CommitSpacerOpts {

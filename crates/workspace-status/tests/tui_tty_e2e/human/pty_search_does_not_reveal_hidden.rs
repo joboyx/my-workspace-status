@@ -18,10 +18,10 @@ fn search_prompt_has_no_match_query(screen: &str, query: &str) -> bool {
         && !status.contains(&format!("/{query}"))
 }
 
-/// Ignored `notes` is absent from the left tree and is not the cursor.
+/// Hidden `notes` is absent from the left tree and is not the cursor.
 ///
-/// Status / crumb `notes` must not count. A shown-ignored `notes` row with
-/// trailing `@` and the ignored glyph is the `.` path.
+/// Status / crumb `notes` must not count. A shown-hidden `notes` row with
+/// trailing `@` and the hidden glyph is the `.` path.
 fn hidden_notes_stay_out(screen: &str) -> bool {
     tree_line_containing(screen, "notes").is_none()
         && !tree_has(screen, "notes")
@@ -36,7 +36,7 @@ fn hidden_notes_stay_out(screen: &str) -> bool {
 /// `/n` / `/no` hit the visible No-updates group, but `notes` has no hit,
 /// so the tree returns to the `/` origin: the launch README cursor with
 /// No updates folded again. A filter that hides app/merger/README, a jump
-/// onto ignored `notes`, or a cursor left on No updates cannot pass.
+/// onto hidden `notes`, or a cursor left on No updates cannot pass.
 fn seed_tree_after_notes_query(screen: &str) -> bool {
     tree_has(screen, "README.md")
         && tree_has(screen, "app")
@@ -77,26 +77,26 @@ fn armed_notes_search_no_match(screen: &str) -> bool {
         && seed_tree_after_notes_query(screen)
 }
 
-/// `/notes` on a cold-start tree does not reveal hidden ignored `notes`.
+/// `/notes` on a cold-start tree does not reveal hidden `notes`.
 ///
 /// Docs + keymap: `/` search jumps among visible rows (including folded
-/// rows already in the tree). Ignored repos stay out until `.`. Daily
+/// rows already in the tree). Hidden repos stay out until `.`. Daily
 /// seed first paint hides `notes`. Typing `/notes` keeps SEARCH on the
 /// status row (`notes▏` + the preview's `no match`). Each character
 /// applies from the `/` origin: `n` and `no` hit the visible `No updates`
 /// group; `notes` itself has no visible hit, so the tree goes back to the
-/// launch README cursor with that group folded (vim incsearch). Ignored
+/// launch README cursor with that group folded (vim incsearch). Hidden
 /// `@ notes` is never inserted. Enter arms `/notes` with a `no match`
 /// breadcrumb toast. A no-op `/`, help search (`HELP  /notes`), `.`
-/// show-ignored, a jump onto `notes`, or a filter that hides
+/// show-hidden, a jump onto `notes`, or a filter that hides
 /// app/merger/README cannot pass.
 #[test]
-fn pty_search_does_not_reveal_hidden_ignored() {
+fn pty_search_does_not_reveal_hidden() {
     let (_root, workspace) = daily_workspace();
     let mut tui = PtySession::open(&workspace);
     tui.wait_pred(
         documented_launch_first_paint,
-        "first paint: ignored notes hidden (`.` has not run)",
+        "first paint: hidden notes hidden (`.` has not run)",
         WAIT,
     );
 
@@ -104,14 +104,14 @@ fn pty_search_does_not_reveal_hidden_ignored() {
     tui.keys("notes");
     tui.wait_pred(
         typing_notes_search_hidden,
-        "/notes types SEARCH notes▏ no match; ignored notes stay off the tree and cursor; no hit puts the cursor back on README (a no-op `/`, help `HELP  /notes`, or `.` `@ notes` cannot pass)",
+        "/notes types SEARCH notes▏ no match; hidden notes stay off the tree and cursor; no hit puts the cursor back on README (a no-op `/`, help `HELP  /notes`, or `.` `@ notes` cannot pass)",
         WAIT,
     );
 
     tui.enter();
     tui.wait_pred(
         armed_notes_search_no_match,
-        "Enter arms /notes; SEARCH closes; breadcrumb toasts no match; ignored notes still hidden",
+        "Enter arms /notes; SEARCH closes; breadcrumb toasts no match; hidden notes still hidden",
         WAIT,
     );
     tui.wait_ms(SETTLE_MS);

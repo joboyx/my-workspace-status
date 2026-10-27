@@ -20,7 +20,7 @@ pub const STATUS_TTL_MS: u64 = 4000;
 /// What a status message reports. Picks the paint color and the expiry.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StatusKind {
-    /// Neutral note (`showing ignored repos`). Expires.
+    /// Neutral note (`showing hidden repos`). Expires.
     #[default]
     Info,
     /// Work in flight (`Fetching 1/3…`, `reverting foo…`). Stays until replaced.

@@ -132,9 +132,9 @@ pub fn checkout_path(row: &VisibleRow) -> Option<String> {
     }
 }
 
-/// True when the focused row is a hidden ignored checkout.
-pub fn row_is_hidden_ignored(row: &VisibleRow, show_ignored: bool) -> bool {
-    row.ignored && !show_ignored
+/// True when the focused row is a hidden checkout.
+pub fn row_is_hidden(row: &VisibleRow, show_hidden: bool) -> bool {
+    row.hidden && !show_hidden
 }
 
 /// Dirty flag and optional pathspecs for a stash create on `row`.

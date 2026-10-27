@@ -726,7 +726,7 @@ pub fn nav_chrome_hint_segments(state: &AppState) -> Vec<HintSegment> {
     let mut out = Vec::new();
     let compare = state.is_compare_tab();
     if state.focus == FocusPane::Left {
-        if compare || !state.hidden_ignored_focus() {
+        if compare || !state.hidden_focus() {
             out.push(hint("Enter", "focus right", false));
         }
     } else if state.nav_enter_drills() {
@@ -915,19 +915,19 @@ fn scope_action_visible(
     }
     let focused = hint_tree_row(state);
     match action.id {
-        HintActionId::Stage => collect_write_files(&state.snapshot, focused, state.show_ignored)
+        HintActionId::Stage => collect_write_files(&state.snapshot, focused, state.show_hidden)
             .iter()
             .any(|file| file.change.unstaged_status.is_some() || file.change.untracked),
-        HintActionId::Unstage => collect_write_files(&state.snapshot, focused, state.show_ignored)
+        HintActionId::Unstage => collect_write_files(&state.snapshot, focused, state.show_hidden)
             .iter()
             .any(|file| file.change.staged_status.is_some()),
         HintActionId::Revert if state.is_compare_tab() => {
             state.compare_file_revert_refusal().is_none()
         }
-        HintActionId::Revert => collect_write_files(&state.snapshot, focused, state.show_ignored)
+        HintActionId::Revert => collect_write_files(&state.snapshot, focused, state.show_hidden)
             .iter()
             .any(|file| file.change.unstaged_status.is_some() || file.change.untracked),
-        HintActionId::Pull => op_targets(&state.snapshot, focused, state.show_ignored, Op::Pull)
+        HintActionId::Pull => op_targets(&state.snapshot, focused, state.show_hidden, Op::Pull)
             .into_iter()
             .any(|repo| {
                 state
@@ -936,13 +936,11 @@ fn scope_action_visible(
                     .iter()
                     .any(|row| row.repo == repo && row.sync_status == SyncStatus::Behind)
             }),
-        HintActionId::Push => {
-            !push_targets(&state.snapshot, focused, state.show_ignored).is_empty()
-        }
+        HintActionId::Push => !push_targets(&state.snapshot, focused, state.show_hidden).is_empty(),
         HintActionId::DefaultBranch => op_targets(
             &state.snapshot,
             focused,
-            state.show_ignored,
+            state.show_hidden,
             Op::DefaultBranch,
         )
         .into_iter()
@@ -963,7 +961,7 @@ fn scope_action_visible(
             } else if depth >= 1 {
                 true
             } else {
-                collect_write_files(&state.snapshot, focused, state.show_ignored)
+                collect_write_files(&state.snapshot, focused, state.show_hidden)
                     .iter()
                     .any(|file| {
                         file.change.staged_status.is_some()
@@ -2503,7 +2501,7 @@ mod tests {
         let mut app = state();
         let palette = app.theme.palette();
         for (status, want) in [
-            (StatusMessage::info("showing ignored repos"), palette.muted),
+            (StatusMessage::info("showing hidden repos"), palette.muted),
             (StatusMessage::progress("Fetching 1/2…"), palette.muted),
             (StatusMessage::ok("Fetched 2 repos"), palette.added),
             (StatusMessage::warn("nothing to push"), palette.modified),

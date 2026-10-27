@@ -3907,7 +3907,7 @@ fn icon_legend_color(kind: IconKind, palette: Palette) -> Color {
         K::GraphUncommitted | K::ChipTag => palette.modified,
         K::StatusRenamed | K::StatusCopied => palette.renamed,
         K::OpenVsDefault | K::PrMerged | K::NoUpstream | K::Clean | K::Synced => palette.muted,
-        K::Ignored | K::ChangeCount | K::WorktreeCount | K::CommentResolved => palette.muted,
+        K::Hidden | K::ChangeCount | K::WorktreeCount | K::CommentResolved => palette.muted,
         K::GraphMoreBelow | K::FoldExpanded | K::FoldCollapsed => palette.muted,
         K::CursorBarInactive => palette.muted,
         K::CursorBar => palette.cursor,
@@ -10501,7 +10501,7 @@ mod tests {
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("quit"), "{text}");
-        assert!(text.contains("show / hide ignored"), "{text}");
+        assert!(text.contains("show / hide hidden"), "{text}");
         assert!(text.contains("stash menu"), "{text}");
         assert!(text.contains("push ahead"), "{text}");
         assert!(text.contains("remove linked worktree"), "{text}");
@@ -11780,13 +11780,13 @@ mod tests {
         (line_text(&line), icons)
     }
 
-    /// Long repo row (ignored, ahead) and long linked checkout row (open
+    /// Long repo row (hidden, ahead) and long linked checkout row (open
     /// vs default, ahead): both paint icons that follow the name.
     fn icon_after_name_rows() -> (VisibleRow, VisibleRow) {
         const NAME: &str = "services/very-long-repo-name-that-must-clip";
-        let mut ignored = repo(NAME, true);
-        ignored.sync_status = SyncStatus::Ahead;
-        ignored.sync_note = "ahead by 2".into();
+        let mut hidden = repo(NAME, true);
+        hidden.sync_status = SyncStatus::Ahead;
+        hidden.sync_note = "ahead by 2".into();
         let mut primary = repo("app", true);
         primary.branch = "main".into();
         let mut linked = repo("app/.worktrees/feat", true);
@@ -11796,8 +11796,7 @@ mod tests {
         linked.sync_status = SyncStatus::Ahead;
         linked.sync_note = "ahead by 1".into();
         linked.merged_into_default = Some(false);
-        let built =
-            build_workspace_snapshot(&[ignored, primary, linked], &[NAME.into()], true, &[]);
+        let built = build_workspace_snapshot(&[hidden, primary, linked], &[NAME.into()], true, &[]);
         let tree = build_tree(&visible_for_tree(&built), true, "ws");
         let rows = flatten_with(&tree, &HashSet::new(), true);
         let find = |id: &str| rows.iter().find(|r| r.id == id).expect(id).clone();
@@ -11815,7 +11814,7 @@ mod tests {
                 &repo_row,
                 None,
                 "~ & @ ^2 1",
-                vec![(IconKind::Ignored, '~'), (IconKind::Branch, '&')],
+                vec![(IconKind::Hidden, '~'), (IconKind::Branch, '&')],
                 "must-clip",
             ),
             (
@@ -11933,7 +11932,7 @@ mod tests {
             }
             let kinds: Vec<IconKind> = icons.iter().map(|icon| icon.0).collect();
             assert!(
-                !kinds.contains(&IconKind::Ignored),
+                !kinds.contains(&IconKind::Hidden),
                 "the leftmost icon is cut first: {what}"
             );
             assert_eq!(
@@ -18809,14 +18808,14 @@ mod tests {
                     path: "app".into(),
                     head_id: Some(HEAD.into()),
                     branch: Some("main".into()),
-                    ignored: false,
+                    hidden: false,
                     is_current: true,
                 },
                 Worktree {
                     path: "app/.worktrees/feat".into(),
                     head_id: None,
                     branch: Some("feat".into()),
-                    ignored: false,
+                    hidden: false,
                     is_current: false,
                 },
             ],
@@ -18918,7 +18917,7 @@ mod tests {
                 path: linked.into(),
                 head_id: None,
                 branch: Some(graph_branch.into()),
-                ignored: false,
+                hidden: false,
                 is_current: false,
             }],
             ..GraphModel::default()
@@ -19010,7 +19009,7 @@ mod tests {
 
     /// Every branch-level icon kind on screen: a family with a merged
     /// primary and an open linked checkout, a repo whose status failed, an
-    /// ignored dirty repo, and an idle repo under an open No updates group.
+    /// hidden dirty repo, and an idle repo under an open No updates group.
     fn branch_rows_state() -> AppState {
         let mut primary = branch_repo("app", "feature/landed");
         primary.merged_into_default = Some(true);
@@ -19029,7 +19028,7 @@ mod tests {
             &[],
         );
         let mut state = AppState::new(PathBuf::from("/tmp/ws"), snapshot, true);
-        state.show_ignored = true;
+        state.show_hidden = true;
         state.folds.clear();
         state.rebuild_rows();
         state
@@ -19095,7 +19094,7 @@ mod tests {
             K::NoUpstream,
             K::Clean,
             K::StatusFailed,
-            K::Ignored,
+            K::Hidden,
             K::ChangeCount,
             K::WorktreeCount,
         ] {

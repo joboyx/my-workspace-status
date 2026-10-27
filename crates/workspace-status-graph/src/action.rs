@@ -6,10 +6,10 @@
 /// User or system input that changes graph view state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
-    /// Flip [`crate::GraphModel::show_ignored`].
-    ToggleShowIgnored,
-    /// Set [`crate::GraphModel::show_ignored`] to a fixed value.
-    SetShowIgnored(bool),
+    /// Flip [`crate::GraphModel::show_hidden`].
+    ToggleShowHidden,
+    /// Set [`crate::GraphModel::show_hidden`] to a fixed value.
+    SetShowHidden(bool),
 }
 
 /// Side effect requested after dispatch.

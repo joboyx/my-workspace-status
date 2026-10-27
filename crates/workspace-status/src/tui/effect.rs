@@ -1891,7 +1891,7 @@ impl Interpreter {
                 SpawnKind::ProcessRepo { gen, path, .. } => {
                     let cwd = opts.cwd.clone();
                     let snapshot = state.snapshot.clone();
-                    let show_ignored = state.show_ignored;
+                    let show_hidden = state.show_hidden;
                     let meta = self.metas.get(&path).cloned().or_else(|| {
                         snapshot.repos.iter().find(|r| r.repo == path).map(|row| {
                             (
@@ -1909,8 +1909,7 @@ impl Interpreter {
                             let snap = if let Some((meta, override_name)) = meta {
                                 process_repo(&path, &cwd, false, override_name.as_deref(), &meta)
                             } else {
-                                let next =
-                                    compute_reload_repo(&cwd, &snapshot, &path, show_ignored);
+                                let next = compute_reload_repo(&cwd, &snapshot, &path, show_hidden);
                                 next.repos
                                     .into_iter()
                                     .find(|row| row.repo == path)
@@ -2720,7 +2719,7 @@ impl Interpreter {
         let targets = op_targets(
             &state.snapshot,
             state.focused_row(),
-            state.show_ignored,
+            state.show_hidden,
             Op::Pull,
         );
         let follow: Vec<String> = targets
@@ -3603,7 +3602,7 @@ impl Interpreter {
                 let limit = autoload_limit(model);
                 let cwd = opts.cwd.clone();
                 let snapshot = state.snapshot.clone();
-                let show_ignored = state.show_ignored;
+                let show_hidden = state.show_hidden;
                 let focus = state.graph_focus_revs();
                 let repo = identity.repo.clone();
                 spawn(
@@ -3613,7 +3612,7 @@ impl Interpreter {
                             &cwd,
                             &snapshot,
                             &repo,
-                            show_ignored,
+                            show_hidden,
                             skip,
                             limit,
                             &focus,
@@ -6777,9 +6776,9 @@ mod tests {
         );
         assert_eq!(state.status, "2 files in aaa1111");
         assert_eq!(state.status.kind(), StatusKind::Info);
-        state.status = "showing ignored repos".into();
+        state.status = "showing hidden repos".into();
         state.open_commit_files("app".into(), source, vec![commit_file("README.md")]);
-        assert_eq!(state.status, "showing ignored repos");
+        assert_eq!(state.status, "showing hidden repos");
     }
 
     #[test]

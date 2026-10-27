@@ -106,7 +106,7 @@ use super::split::{
     DIFF_SPLIT_FRACTION, NARROW_SXS, TREE_WIDTH_FRACTION,
 };
 use super::stash::{
-    checkout_path, resolve_stash_menu_key, row_is_hidden_ignored, stash_dirty_for_row,
+    checkout_path, resolve_stash_menu_key, row_is_hidden, stash_dirty_for_row,
     stash_ops_for_context, StashMenuKeyResult, StashOp, StashOpId, StashOpsContext,
 };
 use super::status::{StatusKind, StatusMessage};
@@ -778,7 +778,7 @@ struct FileSearchMemo {
 pub struct AppState {
     pub cwd: PathBuf,
     pub snapshot: WorkspaceSnapshot,
-    pub show_ignored: bool,
+    pub show_hidden: bool,
     /// Workspace directory tree vs flat paths. Session-only. Default true.
     pub tree_mode: bool,
     /// Commit-file directory tree vs flat paths. Independent of `tree_mode`.
@@ -1112,10 +1112,10 @@ impl AppState {
         ui_store_path: PathBuf,
         theme: ThemeId,
     ) -> Self {
-        let show_ignored = snapshot.show_ignored;
+        let show_hidden = snapshot.show_hidden;
         let tree_mode = true;
         let commit_tree_mode = true;
-        let visible = visible_snapshot(&snapshot, show_ignored);
+        let visible = visible_snapshot(&snapshot, show_hidden);
         let tree = build_tree(&visible, tree_mode, &workspace_label_from_cwd(&cwd));
         let folds = default_folds(&tree);
         let rows = flatten_with(&tree, &folds, ascii);
@@ -1127,7 +1127,7 @@ impl AppState {
         let mut state = Self {
             cwd,
             snapshot,
-            show_ignored,
+            show_hidden,
             tree_mode,
             commit_tree_mode,
             commit_file_folds: HashSet::new(),
@@ -2153,7 +2153,7 @@ impl AppState {
     }
 
     fn visible_tree(&self) -> TreeNode {
-        let visible = visible_snapshot(&self.snapshot, self.show_ignored);
+        let visible = visible_snapshot(&self.snapshot, self.show_hidden);
         build_tree(
             &visible,
             self.tree_mode,
@@ -2228,7 +2228,7 @@ impl AppState {
     pub fn apply_snapshot(&mut self, snapshot: WorkspaceSnapshot) {
         let snapshot = carry_status_failed_local_branches(&self.snapshot, snapshot);
         self.snapshot = snapshot;
-        self.snapshot.show_ignored = self.show_ignored;
+        self.snapshot.show_hidden = self.show_hidden;
         self.rebuild_rows();
         self.signatures = tree_signatures(&self.tree, &self.cwd);
         self.reconcile_viewed_store();
@@ -2551,7 +2551,7 @@ impl AppState {
             self.status = StatusMessage::warn(op_kind_noop_reason(op));
             return Effect::None;
         }
-        let targets = op_targets(&self.snapshot, self.focused_row(), self.show_ignored, op);
+        let targets = op_targets(&self.snapshot, self.focused_row(), self.show_hidden, op);
         if targets.is_empty() {
             self.status = StatusMessage::warn("no visible repos for that op");
             return Effect::None;
@@ -4226,7 +4226,7 @@ impl AppState {
         if row.kind != NodeKind::File {
             return None;
         }
-        if row.ignored && !self.show_ignored {
+        if row.hidden && !self.show_hidden {
             return None;
         }
         Some((row.repo.clone()?, row.file.clone()?))
@@ -4348,7 +4348,7 @@ impl AppState {
     }
 
     fn file_write_effect(&mut self, write: FileWrite) -> Effect {
-        let scoped = collect_write_files(&self.snapshot, self.focused_row(), self.show_ignored);
+        let scoped = collect_write_files(&self.snapshot, self.focused_row(), self.show_hidden);
         let selected: Vec<ScopedFile> = scoped
             .into_iter()
             .filter(|file| match write {
@@ -4538,7 +4538,7 @@ impl AppState {
         if let Some(anchor) = self.diff_visual_anchor {
             return self.begin_revert_range(anchor);
         }
-        let scoped = collect_write_files(&self.snapshot, self.focused_row(), self.show_ignored);
+        let scoped = collect_write_files(&self.snapshot, self.focused_row(), self.show_hidden);
         let selected: Vec<ScopedFile> = scoped
             .into_iter()
             .filter(|file| is_revertible(&file.change))
@@ -5249,7 +5249,7 @@ impl AppState {
         let Some(row) = self.focused_row() else {
             return self.refuse_remove_worktree();
         };
-        if row_is_hidden_ignored(row, self.show_ignored) {
+        if row_is_hidden(row, self.show_hidden) {
             return Effect::None;
         }
         if !matches!(row.kind, NodeKind::Checkout | NodeKind::Repo) {
@@ -5284,7 +5284,7 @@ impl AppState {
     }
 
     fn fetch_tick_effect(&mut self) -> Effect {
-        let targets = background_fetch_targets(&self.snapshot, self.show_ignored);
+        let targets = background_fetch_targets(&self.snapshot, self.show_hidden);
         if targets.is_empty() {
             return Effect::None;
         }
@@ -5347,7 +5347,7 @@ impl AppState {
 
     fn focused_checkout_if_shown(&self) -> Option<String> {
         let row = self.focused_row()?;
-        if row_is_hidden_ignored(row, self.show_ignored) {
+        if row_is_hidden(row, self.show_hidden) {
             return None;
         }
         checkout_path(row)
@@ -5356,7 +5356,7 @@ impl AppState {
     fn push_effect(&mut self) -> Effect {
         // `push_targets` holds at most the focused checkout. The confirm
         // opens once git names the branch and remote (`open_push_confirm`).
-        let targets = push_targets(&self.snapshot, self.focused_row(), self.show_ignored);
+        let targets = push_targets(&self.snapshot, self.focused_row(), self.show_hidden);
         let Some(repo) = targets.into_iter().next() else {
             let on_checkout = self
                 .focused_row()
@@ -5531,7 +5531,7 @@ impl AppState {
             self.status = StatusMessage::warn("focus a repo to pick a branch");
             return Effect::None;
         };
-        if row_is_hidden_ignored(row, self.show_ignored) {
+        if row_is_hidden(row, self.show_hidden) {
             self.status = StatusMessage::warn("focus a visible repo to pick a branch");
             return Effect::None;
         }
@@ -5800,7 +5800,7 @@ impl AppState {
         if !self.graph_commit_focused() {
             return Effect::None;
         }
-        if self.hidden_ignored_focus() {
+        if self.hidden_focus() {
             self.status = StatusMessage::warn("focus a visible repo to checkout");
             return Effect::None;
         }
@@ -5846,7 +5846,7 @@ impl AppState {
         if !self.graph_commit_focused() {
             return Effect::None;
         }
-        if self.hidden_ignored_focus() {
+        if self.hidden_focus() {
             self.status = StatusMessage::warn("focus a visible repo to create a branch");
             return Effect::None;
         }
@@ -5871,7 +5871,7 @@ impl AppState {
         if !self.graph_commit_focused() {
             return Effect::None;
         }
-        if self.hidden_ignored_focus() {
+        if self.hidden_focus() {
             self.status = StatusMessage::warn("focus a visible repo to merge");
             return Effect::None;
         }
@@ -5915,10 +5915,10 @@ impl AppState {
             .is_some_and(|row| row.has_unstaged || row.has_staged)
     }
 
-    /// True when the focused tree row belongs to an ignored repo that `.` hides.
-    pub(crate) fn hidden_ignored_focus(&self) -> bool {
+    /// True when the focused tree row belongs to an hidden repo that `.` hides.
+    pub(crate) fn hidden_focus(&self) -> bool {
         self.focused_row()
-            .is_some_and(|row| row_is_hidden_ignored(row, self.show_ignored))
+            .is_some_and(|row| row_is_hidden(row, self.show_hidden))
     }
 
     pub fn focused_graph_row(&self) -> Option<GraphRow> {
@@ -6143,7 +6143,7 @@ impl AppState {
     /// Same checks as [`Self::nav_enter`] without the status copy. The
     /// `Enter drill` hint shows only when this holds.
     pub(crate) fn nav_enter_drills(&self) -> bool {
-        if self.is_compare_tab() || self.focus != FocusPane::Right || self.hidden_ignored_focus() {
+        if self.is_compare_tab() || self.focus != FocusPane::Right || self.hidden_focus() {
             return false;
         }
         match &self.drill {
@@ -6180,8 +6180,8 @@ impl AppState {
             }
             return Effect::None;
         }
-        if self.hidden_ignored_focus() {
-            self.status = StatusMessage::warn("hidden ignored stay out of drill");
+        if self.hidden_focus() {
+            self.status = StatusMessage::warn("hidden stay out of drill");
             return Effect::None;
         }
         if self.focus == FocusPane::Left {
@@ -6270,7 +6270,7 @@ impl AppState {
     }
 
     fn graph_stash_op(&mut self, id: StashOpId) -> Effect {
-        if self.hidden_ignored_focus() {
+        if self.hidden_focus() {
             return Effect::None;
         }
         let Some(stash_ref) = self.focused_graph_stash_ref() else {
@@ -6395,7 +6395,7 @@ impl AppState {
     /// or resize edge ([`Self::hovered_resize_edge`]) changed, so the live
     /// loop redraws only then. Arms or drops the icon peek dwell and leave
     /// grace ([`Self::peek_remaining_ms`]).
-    /// Ignored while mouse capture is off. Chords, status, and effects are
+    /// Hidden while mouse capture is off. Chords, status, and effects are
     /// untouched.
     pub fn set_pointer(&mut self, pointer: Option<(u16, u16)>) -> bool {
         self.set_pointer_at(pointer, Instant::now())
@@ -7328,9 +7328,9 @@ fn focus_ancestor_ids(id: &str) -> Vec<String> {
     ids
 }
 
-fn visible_snapshot(snapshot: &WorkspaceSnapshot, show_ignored: bool) -> WorkspaceSnapshot {
+fn visible_snapshot(snapshot: &WorkspaceSnapshot, show_hidden: bool) -> WorkspaceSnapshot {
     let mut copy = snapshot.clone();
-    copy.show_ignored = show_ignored;
+    copy.show_hidden = show_hidden;
     visible_for_tree(&copy)
 }
 
@@ -7409,12 +7409,12 @@ mod tests {
     fn ignore_toggle_shows_and_hides_notes() {
         let mut app = state();
         assert!(app.rows.iter().all(|r| !r.label.contains("notes")));
-        let effect = app.dispatch(Action::ToggleShowIgnored);
+        let effect = app.dispatch(Action::ToggleShowHidden);
         assert_eq!(effect, Effect::LoadRightPane);
-        assert!(app.show_ignored);
+        assert!(app.show_hidden);
         assert!(app.rows.iter().any(|r| r.label.contains("notes")));
-        app.dispatch(Action::ToggleShowIgnored);
-        assert!(!app.show_ignored);
+        app.dispatch(Action::ToggleShowHidden);
+        assert!(!app.show_hidden);
         assert!(app.rows.iter().all(|r| !r.label.contains("notes")));
     }
 
@@ -7445,15 +7445,15 @@ mod tests {
             &[],
         );
         assert!(
-            snapshot.repos.iter().any(|r| r.repo == "app" && r.ignored),
-            "primary stays tagged ignored"
+            snapshot.repos.iter().any(|r| r.repo == "app" && r.hidden),
+            "primary stays tagged hidden"
         );
         assert!(
             snapshot
                 .repos
                 .iter()
-                .any(|r| r.repo == "app/.worktrees/feat" && !r.ignored),
-            "linked child must not be retagged ignored"
+                .any(|r| r.repo == "app/.worktrees/feat" && !r.hidden),
+            "linked child must not be retagged hidden"
         );
         let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
         assert!(
@@ -7462,13 +7462,13 @@ mod tests {
         );
         assert!(
             ignored_primary_family_hidden(&app),
-            "cold start must hide ignored primary and its linked child, got {:?}",
+            "cold start must hide hidden primary and its linked child, got {:?}",
             app.rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
         );
 
-        let effect = app.dispatch(Action::ToggleShowIgnored);
+        let effect = app.dispatch(Action::ToggleShowHidden);
         assert_eq!(effect, Effect::LoadRightPane);
-        assert!(app.show_ignored);
+        assert!(app.show_hidden);
         assert!(app.rows.iter().any(|r| r.id == "repo:app"));
         assert!(app
             .rows
@@ -7483,8 +7483,8 @@ mod tests {
             .iter()
             .any(|r| r.label.contains("feature/linked-open")));
 
-        app.dispatch(Action::ToggleShowIgnored);
-        assert!(!app.show_ignored);
+        app.dispatch(Action::ToggleShowHidden);
+        assert!(!app.show_hidden);
         assert!(
             ignored_primary_family_hidden(&app),
             "second toggle must hide both again, got {:?}",
@@ -7493,7 +7493,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_ignored_skipped_on_workspace_fetch() {
+    fn hidden_skipped_on_workspace_fetch() {
         let mut app = state();
         app.cursor = 0;
         let effect = app.dispatch(Action::Fetch);
@@ -7597,7 +7597,7 @@ mod tests {
     #[test]
     fn shown_ignored_is_in_workspace_fetch() {
         let mut app = state();
-        app.dispatch(Action::ToggleShowIgnored);
+        app.dispatch(Action::ToggleShowHidden);
         app.cursor = 0;
         let effect = app.dispatch(Action::Fetch);
         match effect {
@@ -7877,7 +7877,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_default_branch_skips_default_and_hidden_ignored() {
+    fn workspace_default_branch_skips_default_and_hidden() {
         let mut app = state();
         app.cursor = 0;
         assert_eq!(app.dispatch(Action::DefaultBranch), Effect::None);
@@ -8658,7 +8658,7 @@ mod tests {
         let t0 = Instant::now();
         let ttl = Duration::from_millis(crate::tui::status::STATUS_TTL_MS);
         assert_eq!(
-            app.dispatch(Action::ToggleShowIgnored),
+            app.dispatch(Action::ToggleShowHidden),
             Effect::LoadRightPane
         );
         assert_eq!(app.status.kind(), StatusKind::Info);
@@ -8742,7 +8742,7 @@ mod tests {
         for status in [
             StatusMessage::error("fetch failed"),
             StatusMessage::warn("nothing to push"),
-            StatusMessage::info("showing ignored repos"),
+            StatusMessage::info("showing hidden repos"),
             StatusMessage::progress("Fetching 1/3…"),
         ] {
             let mut app = state();
@@ -8834,7 +8834,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_ignored_not_in_search_or_stage() {
+    fn hidden_not_in_search_or_stage() {
         let mut app = state();
         assert_eq!(app.dispatch(Action::SearchStart), Effect::None);
         for c in "notes".chars() {
@@ -8851,7 +8851,7 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        app.dispatch(Action::ToggleShowIgnored);
+        app.dispatch(Action::ToggleShowHidden);
         assert!(app.rows.iter().any(|r| r.label.contains("notes")));
         focus_file(&mut app, "README.md");
         // notes file is also README? notes has README.md in helper
@@ -11917,7 +11917,7 @@ mod tests {
     }
 
     #[test]
-    fn push_omits_hidden_ignored_and_unfocused_worktree() {
+    fn push_omits_hidden_and_unfocused_worktree() {
         use crate::snapshot::CheckoutKind;
         let snapshot = build_workspace_snapshot(
             &[
@@ -11981,7 +11981,7 @@ mod tests {
                 vec![".worktrees/app/feat"]
             );
         }
-        app.dispatch(Action::ToggleShowIgnored);
+        app.dispatch(Action::ToggleShowHidden);
         let notes = app
             .rows
             .iter()
@@ -12296,7 +12296,7 @@ mod tests {
             worktrees: Vec::new(),
             head_id: Some(id.into()),
             sync: None,
-            show_ignored: app.show_ignored,
+            show_hidden: app.show_hidden,
             uncommitted: None,
             ..GraphModel::default()
         };
@@ -12983,7 +12983,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_worktree_hidden_ignored_is_noop() {
+    fn remove_worktree_hidden_is_noop() {
         let snapshot = build_workspace_snapshot(
             &[RepoSnapshot {
                 repo: "notes/.worktrees/feat".into(),
@@ -13012,14 +13012,14 @@ mod tests {
             .iter()
             .all(|r| r.repo.as_deref() != Some("notes/.worktrees/feat")));
         assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
-        app.dispatch(Action::ToggleShowIgnored);
+        app.dispatch(Action::ToggleShowHidden);
         if let Some(idx) = app
             .rows
             .iter()
             .position(|r| r.repo.as_deref() == Some("notes/.worktrees/feat"))
         {
             app.cursor = idx;
-            app.show_ignored = false;
+            app.show_hidden = false;
             assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
         }
     }
@@ -13115,7 +13115,7 @@ mod tests {
     }
 
     #[test]
-    fn fetch_tick_includes_linked_worktrees_skips_hidden_ignored() {
+    fn fetch_tick_includes_linked_worktrees_skips_hidden() {
         let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
         match app.dispatch(Action::FetchTick) {
             Effect::Fetch { repos } => {
@@ -13401,7 +13401,7 @@ mod tests {
             worktrees: Vec::new(),
             head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
             sync: None,
-            show_ignored: app.show_ignored,
+            show_hidden: app.show_hidden,
             uncommitted: None,
             ..GraphModel::default()
         };
@@ -13834,25 +13834,25 @@ mod tests {
     }
 
     #[test]
-    fn hidden_ignored_is_not_drilled_unless_shown() {
+    fn hidden_is_not_drilled_unless_shown() {
         let mut app = state();
         assert!(app.rows.iter().all(|r| !r.label.contains("notes")));
         app.cursor = 0;
         app.focus = FocusPane::Right;
         install_graph(&mut app, Vec::new());
         // tree still on workspace / app, not hidden notes
-        app.dispatch(Action::ToggleShowIgnored);
+        app.dispatch(Action::ToggleShowHidden);
         let notes = app
             .rows
             .iter()
             .position(|r| r.repo.as_deref() == Some("notes"))
             .expect("notes");
         app.cursor = notes;
-        app.show_ignored = false;
+        app.show_hidden = false;
         app.focus = FocusPane::Right;
         assert_eq!(app.dispatch(Action::NavEnter), Effect::None);
-        assert!(app.status.contains("hidden ignored"));
-        app.show_ignored = true;
+        assert!(app.status.contains("hidden"));
+        app.show_hidden = true;
         app.rebuild_rows();
         let notes = app
             .rows
@@ -13993,7 +13993,7 @@ mod tests {
             ],
             stashes: vec![graph_stash("stash@{0}", "wip")],
             head_id: Some(CHILD_SHA.into()),
-            show_ignored: app.show_ignored,
+            show_hidden: app.show_hidden,
             uncommitted: Some(true),
             ..GraphModel::default()
         };
@@ -16825,7 +16825,7 @@ mod tests {
             worktrees: Vec::new(),
             head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
             sync: None,
-            show_ignored: app.show_ignored,
+            show_hidden: app.show_hidden,
             uncommitted: None,
             ..GraphModel::default()
         };
@@ -16870,7 +16870,7 @@ mod tests {
         let model = GraphModel {
             commits,
             head_id: Some(head.clone()),
-            show_ignored: app.show_ignored,
+            show_hidden: app.show_hidden,
             ..GraphModel::default()
         };
         app.set_graph(model, "app".into(), head);
@@ -16976,7 +16976,7 @@ mod tests {
             worktrees: Vec::new(),
             head_id: Some("aa11bb22cc33dd44ee55ff6677889900aabbccdd".into()),
             sync: None,
-            show_ignored: app.show_ignored,
+            show_hidden: app.show_hidden,
             uncommitted: None,
             ..GraphModel::default()
         };
@@ -18124,7 +18124,7 @@ mod tests {
             worktrees: Vec::new(),
             head_id: Some(head.clone()),
             sync: None,
-            show_ignored: app.show_ignored,
+            show_hidden: app.show_hidden,
             uncommitted: None,
             ..GraphModel::default()
         };

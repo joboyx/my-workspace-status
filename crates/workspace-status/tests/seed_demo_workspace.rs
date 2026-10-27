@@ -261,7 +261,7 @@ fn seed_demo_workspace_state_and_snapshot() {
         .iter()
         .find(|r| r["repo"] == "notes")
         .expect("notes present with --all");
-    assert_eq!(notes["ignored"], true);
+    assert_eq!(notes["hidden"], true);
     assert_eq!(notes["hasUnstaged"], true);
     let plain_all = run_status(&dest, &["--plain", "--all"]);
     let plain_all_text = String::from_utf8_lossy(&plain_all.stdout);

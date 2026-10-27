@@ -1,4 +1,4 @@
-//! Fixture e2e: temp workspace, Rust --json shape and --plain omit hidden ignored.
+//! Fixture e2e: temp workspace, Rust --json shape and --plain omit hidden repos.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -131,10 +131,10 @@ fn json_and_plain_match_snapshot_fixture() {
     let snapshot = run_json(&workspace, &["--json"]);
     let plain = run_plain(&workspace, &["--plain"]);
 
-    assert_eq!(snapshot["version"], 1);
-    assert_eq!(snapshot["showIgnored"], false);
+    assert_eq!(snapshot["version"], 2);
+    assert_eq!(snapshot["showHidden"], false);
     assert_eq!(snapshot["filterRepos"], serde_json::json!([]));
-    assert_eq!(snapshot["ignoredRepos"], serde_json::json!(["notes"]));
+    assert_eq!(snapshot["hiddenPaths"], serde_json::json!(["notes"]));
     let repos: Vec<&str> = snapshot["repos"]
         .as_array()
         .unwrap()
@@ -149,7 +149,7 @@ fn json_and_plain_match_snapshot_fixture() {
         .iter()
         .find(|r| r["repo"] == "app")
         .unwrap();
-    assert_eq!(app["ignored"], false);
+    assert_eq!(app["hidden"], false);
     assert_eq!(app["branch"], "main");
     assert_eq!(app["syncStatus"], "no-upstream");
     assert_eq!(app["checkoutKind"], "primary");
@@ -189,7 +189,7 @@ fn json_and_plain_match_snapshot_fixture() {
 }
 
 #[test]
-fn json_all_and_plain_all_include_ignored() {
+fn json_all_and_plain_all_include_hidden() {
     let (root, workspace) = fixture();
     let snapshot = run_json(&workspace, &["--json", "--all"]);
     let notes = snapshot["repos"]
@@ -198,8 +198,8 @@ fn json_all_and_plain_all_include_ignored() {
         .iter()
         .find(|r| r["repo"] == "notes")
         .expect("notes present");
-    assert_eq!(notes["ignored"], true);
-    assert_eq!(snapshot["showIgnored"], true);
+    assert_eq!(notes["hidden"], true);
+    assert_eq!(snapshot["showHidden"], true);
     assert_eq!(notes["hasUnstaged"], true);
 
     let plain = run_plain(&workspace, &["--plain", "--all"]);
@@ -225,7 +225,7 @@ fn json_fetch_stdout_stays_parseable() {
     let out = cmd.output().unwrap();
     assert!(out.status.success());
     let snapshot: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(snapshot["version"], 1);
+    assert_eq!(snapshot["version"], 2);
     let repos: Vec<&str> = snapshot["repos"]
         .as_array()
         .unwrap()
@@ -240,17 +240,17 @@ fn json_fetch_stdout_stays_parseable() {
 fn json_wins_over_plain() {
     let (root, workspace) = fixture();
     let snapshot = run_json(&workspace, &["--json", "--plain"]);
-    assert_eq!(snapshot["version"], 1);
+    assert_eq!(snapshot["version"], 2);
     let _ = fs::remove_dir_all(root);
 }
 
 #[test]
-fn named_filter_includes_ignored_and_unknown_exits() {
+fn named_filter_includes_hidden_and_unknown_exits() {
     let (root, workspace) = fixture();
     let snapshot = run_json(&workspace, &["--json", "notes"]);
     assert_eq!(snapshot["filterRepos"], serde_json::json!(["notes"]));
     assert_eq!(snapshot["repos"][0]["repo"], "notes");
-    assert_eq!(snapshot["repos"][0]["ignored"], true);
+    assert_eq!(snapshot["repos"][0]["hidden"], true);
 
     let mut cmd = Command::new(bin());
     cmd.args(["--json", "missing-repo"])
@@ -275,7 +275,7 @@ fn ws_alias_runs_same_binary() {
     let out = cmd.output().unwrap();
     assert!(out.status.success());
     let snapshot: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(snapshot["version"], 1);
+    assert_eq!(snapshot["version"], 2);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -377,7 +377,7 @@ fn user_config_file_layers_under_workspace_file() {
     };
 
     let snapshot = run_json(&workspace, &["--json"]);
-    assert_eq!(snapshot["ignoredRepos"], serde_json::json!(["notes"]));
+    assert_eq!(snapshot["hiddenPaths"], serde_json::json!(["notes"]));
     assert_eq!(repo_names(&snapshot), vec!["app", "lib"]);
 
     let all = run_json(&workspace, &["--json", "--all"]);
@@ -390,7 +390,7 @@ fn user_config_file_layers_under_workspace_file() {
     fs::write(&workspace_file, "{\"hiddenPaths\": [\"lib\"]}\n").unwrap();
     let snapshot = run_json(&workspace, &["--json"]);
     assert_eq!(
-        snapshot["ignoredRepos"],
+        snapshot["hiddenPaths"],
         serde_json::json!(["lib"]),
         "workspace hiddenPaths replaces the user list"
     );

@@ -1,4 +1,4 @@
-//! Fetch / pull / default targets. Hidden ignored stay out unless shown.
+//! Fetch / pull / default targets. Hidden stay out unless shown.
 
 use crate::helpers::{is_detached_head_branch, DETACHED_HEAD_BRANCH};
 use crate::snapshot::{
@@ -52,17 +52,17 @@ fn files_for_repo(snapshot: &WorkspaceSnapshot, repo: &str) -> Vec<ScopedFile> {
 /// `FileChange` the same way as tree rows (the other git side is cleared).
 /// Checkout and flat repo rows walk every dirty file in that checkout.
 /// Family containers, workspace, and group rows yield no files.
-/// Hidden ignored stay out unless shown. Linked worktrees are included
+/// Hidden stay out unless shown. Linked worktrees are included
 /// only when that checkout is focused.
 pub fn collect_write_files(
     snapshot: &WorkspaceSnapshot,
     focused: Option<&VisibleRow>,
-    show_ignored: bool,
+    show_hidden: bool,
 ) -> Vec<ScopedFile> {
     let Some(row) = focused else {
         return Vec::new();
     };
-    if row.ignored && !show_ignored {
+    if row.hidden && !show_hidden {
         return Vec::new();
     }
     match row.kind {
@@ -229,7 +229,7 @@ impl RevertScope {
     }
 }
 
-/// Workspace ops that must skip hidden ignored repos and unfocused worktrees.
+/// Workspace ops that must skip hidden repos and unfocused worktrees.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
     Fetch,
@@ -435,21 +435,21 @@ pub fn op_kind_noop_reason(op: Op) -> &'static str {
 /// Checkout paths that `op` may touch for the focused row.
 ///
 /// Workspace rows resolve to visible primaries. Group rows yield no
-/// targets. Hidden ignored repos are omitted
-/// unless `show_ignored` is true. Linked worktrees are omitted unless the
+/// targets. Hidden repos are omitted
+/// unless `show_hidden` is true. Linked worktrees are omitted unless the
 /// focused row is that worktree (or a file inside it). Pull and
 /// default-branch skip file, dir, section, and group rows; fetch
 /// still includes file, dir, and section, and skips group.
 pub fn op_targets(
     snapshot: &WorkspaceSnapshot,
     focused: Option<&VisibleRow>,
-    show_ignored: bool,
+    show_hidden: bool,
     op: Op,
 ) -> Vec<String> {
     let visible: Vec<&WorkspaceRepoSnapshot> = snapshot
         .repos
         .iter()
-        .filter(|repo| show_ignored || !repo.ignored)
+        .filter(|repo| show_hidden || !repo.hidden)
         .collect();
 
     let Some(row) = focused else {
@@ -514,12 +514,12 @@ pub fn refresh_target(focused: Option<&VisibleRow>) -> Option<String> {
 
 /// Push targets the focused visible checkout only.
 ///
-/// Workspace and group rows do not fan out. Hidden ignored stay out.
+/// Workspace and group rows do not fan out. Hidden stay out.
 /// A linked worktree is included only when that row is focused.
 pub fn push_targets(
     snapshot: &WorkspaceSnapshot,
     focused: Option<&VisibleRow>,
-    show_ignored: bool,
+    show_hidden: bool,
 ) -> Vec<String> {
     let Some(row) = focused else {
         return Vec::new();
@@ -534,7 +534,7 @@ pub fn push_targets(
             let visible: Vec<&WorkspaceRepoSnapshot> = snapshot
                 .repos
                 .iter()
-                .filter(|repo| show_ignored || !repo.ignored)
+                .filter(|repo| show_hidden || !repo.hidden)
                 .collect();
             let Some(repo) = row.repo.as_deref() else {
                 return Vec::new();
@@ -660,14 +660,14 @@ mod tests {
     }
 
     #[test]
-    fn workspace_fetch_skips_hidden_ignored_and_worktrees() {
+    fn workspace_fetch_skips_hidden_and_worktrees() {
         let snapshot = built();
         let targets = op_targets(&snapshot, Some(&workspace_row()), false, Op::Fetch);
         assert_eq!(targets, vec!["app"]);
     }
 
     #[test]
-    fn show_ignored_includes_notes_on_workspace_fetch() {
+    fn show_hidden_includes_notes_on_workspace_fetch() {
         let snapshot = built();
         let targets = op_targets(&snapshot, Some(&workspace_row()), true, Op::Fetch);
         assert_eq!(targets, vec!["app", "notes"]);
@@ -683,7 +683,7 @@ mod tests {
             );
             assert!(
                 op_targets(&snapshot, Some(&group_row()), true, op).is_empty(),
-                "{op:?} shown ignored"
+                "{op:?} shown hidden"
             );
         }
     }
@@ -714,10 +714,10 @@ mod tests {
     }
 
     #[test]
-    fn hidden_ignored_file_is_not_a_target() {
+    fn hidden_file_is_not_a_target() {
         let snapshot = built();
         let mut row = file_row("notes");
-        row.ignored = true;
+        row.hidden = true;
         let targets = op_targets(&snapshot, Some(&row), false, Op::DefaultBranch);
         assert!(targets.is_empty());
     }
@@ -726,7 +726,7 @@ mod tests {
     fn shown_ignored_file_is_a_target() {
         let snapshot = built();
         let mut row = file_row("notes");
-        row.ignored = true;
+        row.hidden = true;
         let targets = op_targets(&snapshot, Some(&row), true, Op::Fetch);
         assert_eq!(targets, vec!["notes"]);
     }
@@ -756,13 +756,13 @@ mod tests {
     }
 
     #[test]
-    fn push_skips_workspace_and_hidden_ignored() {
+    fn push_skips_workspace_and_hidden() {
         let snapshot = built_pushable();
         assert!(push_targets(&snapshot, Some(&workspace_row()), false).is_empty());
         let mut notes = repo_row("notes");
-        notes.ignored = true;
+        notes.hidden = true;
         assert!(push_targets(&snapshot, Some(&notes), false).is_empty());
-        notes.ignored = true;
+        notes.hidden = true;
         assert_eq!(push_targets(&snapshot, Some(&notes), true), vec!["notes"]);
     }
 
@@ -813,8 +813,8 @@ mod tests {
         assert!(push_targets(&snapshot, Some(&workspace_row()), false).is_empty());
     }
 
-    fn dirty(name: &str, ignored: bool, linked: bool, paths: &[&str]) -> RepoSnapshot {
-        let mut row = snap(name, ignored, linked, true);
+    fn dirty(name: &str, hidden: bool, linked: bool, paths: &[&str]) -> RepoSnapshot {
+        let mut row = snap(name, hidden, linked, true);
         row.has_unstaged = true;
         row.has_untracked = paths.iter().any(|p| *p != "README.md");
         row.changes = paths

@@ -611,10 +611,10 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
-        title: "Show ignored",
+        title: "Show hidden",
         keys: ".",
         group: CommandGroup::View,
-        action: Action::ToggleShowIgnored,
+        action: Action::ToggleShowHidden,
         aliases: &["hidden"],
         scope: CommandScope::NoHighlight,
     },
@@ -1433,10 +1433,10 @@ mod tests {
                 CommandScope::NoHighlight,
             ),
             (
-                "Show ignored",
+                "Show hidden",
                 ".",
                 CommandGroup::View,
-                Action::ToggleShowIgnored,
+                Action::ToggleShowHidden,
                 CommandScope::NoHighlight,
             ),
             (

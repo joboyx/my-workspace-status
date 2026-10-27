@@ -380,7 +380,7 @@ pub fn seed_compare_unrelated(workspace: &Path, name: &str) {
     git(&repo, &["commit", "-q", "-m", "unrelated"]);
 }
 
-/// Dirty `app`, clean `lib`, ignored `notes`, merge graph.
+/// Dirty `app`, clean `lib`, hidden `notes`, merge graph.
 pub fn daily_workspace() -> (PathBuf, PathBuf) {
     let (root, workspace) = new_workspace("ws-tui-e2e");
     seed_repo(&workspace, "app", "main", true);
@@ -444,12 +444,12 @@ pub fn seed_primary_and_linked_family(workspace: &Path) {
     git(&linked, &["commit", "-q", "-m", "linked open"]);
 }
 
-/// Off-default ignored primary `app` plus linked worktree, and a visible `lib`.
+/// Off-default hidden primary `app` plus linked worktree, and a visible `lib`.
 ///
 /// Config `hiddenPaths: ["app"]`. Cold TUI start must hide the family; `.`
 /// shows it nested. `lib` stays on the tree so launch still paints a repo.
-pub fn ignored_primary_family_workspace() -> (PathBuf, PathBuf) {
-    let (root, workspace) = new_workspace("ws-tui-e2e-ignored-primary");
+pub fn hidden_primary_family_workspace() -> (PathBuf, PathBuf) {
+    let (root, workspace) = new_workspace("ws-tui-e2e-hidden-primary");
     seed_primary_and_linked_family(&workspace);
     seed_repo(&workspace, "lib", "main", true);
     fs::write(

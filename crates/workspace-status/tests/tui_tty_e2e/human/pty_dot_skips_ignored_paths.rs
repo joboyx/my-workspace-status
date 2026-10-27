@@ -15,7 +15,7 @@ fn dot_shows_notes_not_scratch(screen: &str) -> bool {
     tree_has(screen, "notes")
         && heading.contains("2 changed · all current")
         && !heading.contains("3 changed")
-        && crumb_row(screen).contains("showing ignored repos")
+        && crumb_row(screen).contains("showing hidden repos")
         && !screen.contains("scratch")
         && !tree_has(screen, "tmp")
 }

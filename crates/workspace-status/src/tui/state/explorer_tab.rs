@@ -288,7 +288,7 @@ impl AppState {
         }
         match action {
             Action::ToggleTreeMode
-            | Action::ToggleShowIgnored
+            | Action::ToggleShowHidden
             | Action::ToggleCommitMsgExpand
             | Action::ResizeCommitMsg(_) => return Some(SWITCH_TO_WORKSPACE_TAB.into()),
             Action::ToggleFullContext => return Some(EXPLORER_DIFFS_SHOW_WHOLE_FILE.into()),
@@ -2349,7 +2349,7 @@ mod tests {
             }
             for action in [
                 Action::ToggleTreeMode,
-                Action::ToggleShowIgnored,
+                Action::ToggleShowHidden,
                 Action::ToggleCommitMsgExpand,
                 Action::ResizeCommitMsg(-1),
                 Action::ResizeCommitMsg(1),
@@ -2929,7 +2929,7 @@ mod tests {
         // `t`, `.`, `M`, `+`: the row and the key give the same copy.
         for action in [
             Action::ToggleTreeMode,
-            Action::ToggleShowIgnored,
+            Action::ToggleShowHidden,
             Action::ToggleCommitMsgExpand,
             Action::ResizeCommitMsg(1),
         ] {

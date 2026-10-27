@@ -287,7 +287,7 @@ impl AppState {
             | Action::ArmGChord
             | Action::FoldClose
             | Action::FoldOpen
-            | Action::ToggleShowIgnored
+            | Action::ToggleShowHidden
             | Action::ToggleTreeMode
             | Action::ToggleReviewed
             | Action::FocusLeft

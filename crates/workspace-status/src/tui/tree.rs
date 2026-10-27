@@ -14,8 +14,8 @@ use crate::snapshot::{
 
 use super::icons::{
     file_icon, icon_branch, icon_changes, icon_clean, icon_comment, icon_comment_resolved,
-    icon_folder, icon_ignored, icon_linked_worktree, icon_pr_approved, icon_pr_merged,
-    icon_pr_open, icon_repo, icon_staged, icon_status_failed, icon_viewed, icon_workspace,
+    icon_folder, icon_hidden, icon_linked_worktree, icon_pr_approved, icon_pr_merged, icon_pr_open,
+    icon_repo, icon_staged, icon_status_failed, icon_viewed, icon_workspace,
     status_letter_from_change, tui_file_badge, tui_merge_mark, tui_sync_mark, IconKind,
     StatusColorRole,
 };
@@ -63,7 +63,7 @@ pub struct TreeNode {
     /// Checkout path used for fetch / pull / default / graph.
     pub repo: Option<String>,
     pub primary_repo: Option<String>,
-    pub ignored: bool,
+    pub hidden: bool,
     pub file: Option<FileChange>,
     pub children: Vec<TreeNode>,
     pub chrome: NodeChrome,
@@ -139,7 +139,7 @@ pub struct VisibleRow {
     pub trailing_segs: Vec<TextSeg>,
     pub repo: Option<String>,
     pub primary_repo: Option<String>,
-    pub ignored: bool,
+    pub hidden: bool,
     pub file: Option<FileChange>,
     pub foldable: bool,
     pub folded: bool,
@@ -159,7 +159,7 @@ impl Default for VisibleRow {
             trailing_segs: Vec::new(),
             repo: None,
             primary_repo: None,
-            ignored: false,
+            hidden: false,
             file: None,
             foldable: false,
             folded: false,
@@ -169,7 +169,7 @@ impl Default for VisibleRow {
     }
 }
 
-/// Build the workspace tree from a snapshot (ignored repos may still be present).
+/// Build the workspace tree from a snapshot (hidden repos may still be present).
 /// `tree_mode` true is a directory trie. False is a flat path list.
 /// `workspace_label` is the root name (cwd basename).
 pub fn build_tree(
@@ -206,7 +206,7 @@ pub fn build_tree(
             label: "No updates".into(),
             repo: None,
             primary_repo: None,
-            ignored: false,
+            hidden: false,
             file: None,
             children: idle,
             chrome: NodeChrome::default(),
@@ -220,7 +220,7 @@ pub fn build_tree(
         label: workspace_label.to_string(),
         repo: None,
         primary_repo: None,
-        ignored: false,
+        hidden: false,
         file: None,
         children,
         chrome: NodeChrome {
@@ -342,7 +342,7 @@ fn family_container(
         .iter()
         .map(|m| repo_or_checkout(m, NodeKind::Checkout, tree_mode))
         .collect();
-    let ignored = members.iter().all(|m| m.ignored);
+    let hidden = members.iter().all(|m| m.hidden);
     let change_count = children.iter().map(|c| c.chrome.change_count).sum();
     let statuses: Vec<SyncStatus> = members.iter().map(|m| m.sync_status).collect();
     let worst = worst_sync_status(&statuses);
@@ -363,7 +363,7 @@ fn family_container(
         label: primary.to_string(),
         repo: Some(primary.to_string()),
         primary_repo: None,
-        ignored,
+        hidden,
         file: None,
         children,
         chrome: NodeChrome {
@@ -411,7 +411,7 @@ fn repo_or_checkout(repo: &WorkspaceRepoSnapshot, kind: NodeKind, tree_mode: boo
         label,
         repo: Some(repo.repo.clone()),
         primary_repo: repo.primary_repo.clone(),
-        ignored: repo.ignored,
+        hidden: repo.hidden,
         file: None,
         children: files,
         chrome: NodeChrome {
@@ -510,7 +510,7 @@ fn make_file_node(
         label: file_display_name(change),
         repo: Some(repo.repo.clone()),
         primary_repo: repo.primary_repo.clone(),
-        ignored: repo.ignored,
+        hidden: repo.hidden,
         file: Some(change.clone()),
         children: Vec::new(),
         chrome: NodeChrome {
@@ -550,7 +550,7 @@ fn materialize_dir(
             label: name,
             repo: Some(repo.repo.clone()),
             primary_repo: repo.primary_repo.clone(),
-            ignored: repo.ignored,
+            hidden: repo.hidden,
             file: None,
             children: materialize_dir(repo, &full_path, child, dual_files, changes_side),
             chrome: NodeChrome {
@@ -623,7 +623,7 @@ fn make_section_node(
         label: label.into(),
         repo: Some(repo.repo.clone()),
         primary_repo: repo.primary_repo.clone(),
-        ignored: repo.ignored,
+        hidden: repo.hidden,
         file: None,
         children,
         chrome: NodeChrome {
@@ -796,7 +796,7 @@ fn walk(
         trailing_segs: segs.trailing,
         repo: node.repo.clone(),
         primary_repo: node.primary_repo.clone(),
-        ignored: node.ignored,
+        hidden: node.hidden,
         file: node.file.clone(),
         foldable,
         folded,
@@ -887,8 +887,8 @@ fn with_repo_kind_icon(trailing: Vec<TextSeg>, glyph: &str, role: SegRole) -> Ve
     with_leading_icons(vec![icon_text_seg(glyph, role, IconKind::Repo)], trailing)
 }
 
-fn repo_kind_role(ignored: bool) -> SegRole {
-    if ignored {
+fn repo_kind_role(hidden: bool) -> SegRole {
+    if hidden {
         SegRole::Muted
     } else {
         SegRole::Heading
@@ -1075,9 +1075,9 @@ fn merge_mark_seg(node: &TreeNode, ascii: bool) -> Option<TextSeg> {
     Some(icon_text_seg(mark, role, kind))
 }
 
-/// Ignored glyph of a repo row (muted).
+/// Hidden glyph of a repo row (muted).
 fn ignored_seg(ascii: bool) -> TextSeg {
-    icon_text_seg(icon_ignored(ascii), SegRole::Muted, IconKind::Ignored)
+    icon_text_seg(icon_hidden(ascii), SegRole::Muted, IconKind::Hidden)
 }
 
 /// Put `icons` (bare glyph segments) at the start of the trailing run,
@@ -1109,7 +1109,7 @@ fn push_trailing_item(run: &mut Vec<TextSeg>, item: TextSeg) {
 }
 
 fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegments {
-    let name_role = if node.ignored {
+    let name_role = if node.hidden {
         SegRole::Muted
     } else {
         SegRole::Repo
@@ -1140,9 +1140,9 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
         if node.chrome.change_count > 0 {
             push_trailing_item(&mut trailing, change_count_seg(node.chrome.change_count));
         }
-        trailing = with_repo_kind_icon(trailing, icon_repo(ascii), repo_kind_role(node.ignored));
-        let ignored = node.ignored.then(|| ignored_seg(ascii));
-        trailing = with_leading_icons(ignored.into_iter().collect(), trailing);
+        trailing = with_repo_kind_icon(trailing, icon_repo(ascii), repo_kind_role(node.hidden));
+        let hidden = node.hidden.then(|| ignored_seg(ascii));
+        trailing = with_leading_icons(hidden.into_iter().collect(), trailing);
         return NodeSegments { segments, trailing };
     }
 
@@ -1158,7 +1158,7 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
     };
     // Linked extras only. The primary checkout is a normal repo glyph.
     let linked = node.chrome.checkout_kind == Some(CheckoutKind::Linked);
-    let kind_role = repo_kind_role(node.ignored);
+    let kind_role = repo_kind_role(node.hidden);
 
     let mut segments = Vec::new();
     if linked {
@@ -1206,7 +1206,7 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
     }
     // Icons that follow the name in paint order, then the old trailing run.
     let mut icons = Vec::new();
-    if node.ignored {
+    if node.hidden {
         icons.push(ignored_seg(ascii));
     }
     icons.push(icon_text_seg(
@@ -1538,8 +1538,8 @@ pub fn segment_icons(segs: &NodeSegments) -> Vec<IconKind> {
     kinds
 }
 
-/// Visible snapshot used for the tree: hidden ignored stay out, including
-/// linked worktrees of an ignored primary. They return with `.` / `-a`.
+/// Visible snapshot used for the tree: hidden stay out, including
+/// linked worktrees of an hidden primary. They return with `.` / `-a`.
 pub fn visible_for_tree(snapshot: &WorkspaceSnapshot) -> WorkspaceSnapshot {
     crate::snapshot::visible_workspace_snapshot(snapshot)
 }
@@ -1698,7 +1698,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_ignored_omitted_from_visible_tree() {
+    fn hidden_omitted_from_visible_tree() {
         let built = build_workspace_snapshot(
             &[repo("app", true, false), repo("notes", true, false)],
             &["notes".into()],
@@ -1712,7 +1712,7 @@ mod tests {
     }
 
     #[test]
-    fn show_ignored_includes_notes() {
+    fn show_hidden_includes_notes() {
         let built = build_workspace_snapshot(
             &[repo("app", true, false), repo("notes", true, false)],
             &["notes".into()],
@@ -1737,19 +1737,19 @@ mod tests {
     }
 
     #[test]
-    fn hidden_ignored_primary_omits_linked_child_from_visible_tree() {
+    fn hidden_primary_omits_linked_child_from_visible_tree() {
         let (primary, linked) = ignored_primary_and_linked_child();
         let built = build_workspace_snapshot(&[primary, linked], &["app".into()], false, &[]);
         assert!(
-            built.repos.iter().any(|r| r.repo == "app" && r.ignored),
-            "primary stays tagged ignored"
+            built.repos.iter().any(|r| r.repo == "app" && r.hidden),
+            "primary stays tagged hidden"
         );
         assert!(
             built
                 .repos
                 .iter()
-                .any(|r| r.repo == "app/.worktrees/feat" && !r.ignored),
-            "linked child must not be retagged ignored"
+                .any(|r| r.repo == "app/.worktrees/feat" && !r.hidden),
+            "linked child must not be retagged hidden"
         );
         let rows = tree_rows(&built);
         assert!(rows.iter().all(|r| r.id != "repo:app"));
@@ -1767,7 +1767,7 @@ mod tests {
     }
 
     #[test]
-    fn show_ignored_nests_linked_child_of_ignored_primary() {
+    fn show_hidden_nests_linked_child_of_ignored_primary() {
         let (primary, linked) = ignored_primary_and_linked_child();
         let built = build_workspace_snapshot(&[primary, linked], &["app".into()], true, &[]);
         let rows = tree_rows(&built);
@@ -2440,7 +2440,7 @@ mod tests {
                 .map(|(_, text)| text.as_str())
                 .collect::<String>(),
             "~&@?1",
-            "ignored and branch glyphs lead the trailing run"
+            "hidden and branch glyphs lead the trailing run"
         );
         assert_eq!(row("repo:notes").trailing, "~ & @ ? 1");
         assert_eq!(
@@ -2467,7 +2467,7 @@ mod tests {
         assert_eq!(
             tagged_segs(&row("repo:notes")),
             vec![
-                (K::Ignored, s("~")),
+                (K::Hidden, s("~")),
                 (K::Branch, s("&")),
                 (K::Repo, s("@")),
                 (K::NoUpstream, s("?")),
@@ -2661,8 +2661,8 @@ mod tests {
         let tree = build_tree(&visible_for_tree(&built), true, "ws");
         let rows = flatten_with(&tree, &HashSet::new(), true);
         let notes = rows.iter().find(|r| r.id == "repo:notes").expect("notes");
-        assert!(notes.label.contains(icon_ignored(true)), "{}", notes.label);
-        assert!(!notes.label.contains("[ignored]"));
+        assert!(notes.label.contains(icon_hidden(true)), "{}", notes.label);
+        assert!(!notes.label.contains("[hidden]"));
     }
 
     #[test]

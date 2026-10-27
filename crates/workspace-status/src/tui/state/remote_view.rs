@@ -972,7 +972,7 @@ mod tests {
             path: path.into(),
             head_id: head.map(str::to_string),
             branch: branch.map(str::to_string),
-            ignored: false,
+            hidden: false,
             is_current: false,
         };
         app.graph = Some(GraphModel {

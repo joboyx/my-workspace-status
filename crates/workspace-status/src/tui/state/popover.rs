@@ -1537,7 +1537,7 @@ mod tests {
     }
 
     /// A family (`app` primary merged and dirty, linked `feat` merged and
-    /// behind), a repo whose status failed, an ignored dirty repo shown,
+    /// behind), a repo whose status failed, an hidden dirty repo shown,
     /// and an idle repo under No updates.
     fn branch_rows_app() -> AppState {
         let mut primary = repo("app", SyncStatus::NoUpstream, "");
@@ -1589,7 +1589,7 @@ mod tests {
             &[],
         );
         let mut app = AppState::new(PathBuf::from("/tmp/ws"), snapshot, true);
-        app.show_ignored = true;
+        app.show_hidden = true;
         app.rebuild_rows();
         app
     }
@@ -1634,7 +1634,7 @@ mod tests {
                     "4 repos",
                     "Fetch remotes",
                     "Refresh",
-                    "Show ignored",
+                    "Show hidden",
                 ])
             )]
         );
@@ -1764,7 +1764,7 @@ mod tests {
         let notes = gh_on(&mut app, "repo:notes");
         assert_eq!(
             notes.first(),
-            Some(&(K::Ignored, texts(&[meaning(K::Ignored), "Show ignored"])))
+            Some(&(K::Hidden, texts(&[meaning(K::Hidden), "Show hidden"])))
         );
         assert_eq!(
             gh_on(&mut app, "group:no-updates"),
@@ -2229,7 +2229,7 @@ mod tests {
             path: path.into(),
             head_id: Some(head.into()),
             branch: Some(branch.into()),
-            ignored: false,
+            hidden: false,
             is_current: current,
         }
     }

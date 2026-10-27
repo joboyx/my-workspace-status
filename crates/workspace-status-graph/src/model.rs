@@ -12,14 +12,14 @@ pub struct GraphModel {
     pub commits: Vec<Commit>,
     /// Stash entries. Visible rows park each stash above its parent.
     pub stashes: Vec<Stash>,
-    /// Linked or extra worktrees. Ignored rows stay hidden unless shown.
+    /// Linked or extra worktrees. Hidden rows stay hidden unless shown.
     pub worktrees: Vec<Worktree>,
     /// Full SHA of `HEAD`. `None` when the checkout is empty.
     pub head_id: Option<String>,
     /// Current branch vs upstream.
     pub sync: Option<SyncState>,
-    /// When true, rows marked ignored stay in [`GraphModel::visible_rows`].
-    pub show_ignored: bool,
+    /// When true, rows marked hidden stay in [`GraphModel::visible_rows`].
+    pub show_hidden: bool,
     /// Working-tree row. `None` omits it (empty fixtures). A loaded graph
     /// always sets `Some(has_changes)` so the row stays on even when clean.
     pub uncommitted: Option<bool>,
@@ -173,8 +173,8 @@ pub struct Worktree {
     pub head_id: Option<String>,
     /// Checked-out branch, when not detached.
     pub branch: Option<String>,
-    /// True when config lists this path as ignored.
-    pub ignored: bool,
+    /// True when config lists this path as hidden.
+    pub hidden: bool,
     /// True when this is the current checkout.
     pub is_current: bool,
 }
@@ -247,11 +247,11 @@ impl GraphModel {
     /// Apply an [`Action`]. Dispatch is pure and returns an [`Effect`].
     pub fn dispatch(&mut self, action: Action) -> Effect {
         match action {
-            Action::ToggleShowIgnored => {
-                self.show_ignored = !self.show_ignored;
+            Action::ToggleShowHidden => {
+                self.show_hidden = !self.show_hidden;
             }
-            Action::SetShowIgnored(show) => {
-                self.show_ignored = show;
+            Action::SetShowHidden(show) => {
+                self.show_hidden = show;
             }
         }
         Effect::None
@@ -260,7 +260,7 @@ impl GraphModel {
     /// Rows the widget paints, newest first, after ignore filtering.
     ///
     /// Stashes sit immediately above their `parent_id` commit. Orphan stashes
-    /// sit after the uncommitted row. Hidden ignored worktrees are omitted.
+    /// sit after the uncommitted row. Hidden worktrees are omitted.
     pub fn visible_rows(&self) -> Vec<GraphRow> {
         self.visible_row_refs()
             .map(|row| self.owned_row(row))
@@ -295,7 +295,7 @@ impl GraphModel {
             .worktrees
             .iter()
             .filter(move |worktree| !in_window(worktree.head_id.as_deref()))
-            .filter(move |worktree| self.show_ignored || !worktree.ignored)
+            .filter(move |worktree| self.show_hidden || !worktree.hidden)
             .map(RowRef::Worktree);
         self.uncommitted
             .map(RowRef::Uncommitted)
@@ -317,7 +317,7 @@ impl GraphModel {
                     .worktrees
                     .iter()
                     .filter(|wt| wt.head_id.as_deref() == Some(commit.id.as_str()))
-                    .filter(|wt| self.show_ignored || !wt.ignored)
+                    .filter(|wt| self.show_hidden || !wt.hidden)
                     .cloned()
                     .collect(),
             },
@@ -341,12 +341,12 @@ mod tests {
         cap_commit_body, Commit, GraphModel, GraphRow, Stash, Worktree, COMMIT_BODY_MAX_BYTES,
     };
 
-    fn worktree(path: &str, head: Option<&str>, ignored: bool) -> Worktree {
+    fn worktree(path: &str, head: Option<&str>, hidden: bool) -> Worktree {
         Worktree {
             path: path.into(),
             head_id: head.map(Into::into),
             branch: None,
-            ignored,
+            hidden,
             is_current: false,
         }
     }
@@ -368,16 +368,16 @@ mod tests {
             worktrees: vec![
                 worktree("/w/on-c1", Some("c1"), false),
                 worktree("/w/orphan", Some("gone"), false),
-                worktree("/w/ignored", None, true),
+                worktree("/w/hidden", None, true),
             ],
             head_id: Some("c1".into()),
             uncommitted: Some(true),
             ..GraphModel::default()
         };
-        for show_ignored in [false, true] {
-            model.show_ignored = show_ignored;
+        for show_hidden in [false, true] {
+            model.show_hidden = show_hidden;
             let rows = model.visible_rows();
-            assert_eq!(rows.len(), if show_ignored { 7 } else { 6 });
+            assert_eq!(rows.len(), if show_hidden { 7 } else { 6 });
             assert!(matches!(
                 rows[0],
                 GraphRow::Uncommitted { has_changes: true }
