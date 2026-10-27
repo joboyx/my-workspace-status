@@ -114,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn background_targets_include_linked_worktrees_and_shown_ignored() {
+    fn background_targets_include_linked_worktrees_and_shown_hidden() {
         let snapshot = build_workspace_snapshot(
             &[
                 snap("app", None),

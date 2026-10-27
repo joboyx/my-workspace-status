@@ -1076,7 +1076,7 @@ fn merge_mark_seg(node: &TreeNode, ascii: bool) -> Option<TextSeg> {
 }
 
 /// Hidden glyph of a repo row (muted).
-fn ignored_seg(ascii: bool) -> TextSeg {
+fn hidden_seg(ascii: bool) -> TextSeg {
     icon_text_seg(icon_hidden(ascii), SegRole::Muted, IconKind::Hidden)
 }
 
@@ -1141,7 +1141,7 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
             push_trailing_item(&mut trailing, change_count_seg(node.chrome.change_count));
         }
         trailing = with_repo_kind_icon(trailing, icon_repo(ascii), repo_kind_role(node.hidden));
-        let hidden = node.hidden.then(|| ignored_seg(ascii));
+        let hidden = node.hidden.then(|| hidden_seg(ascii));
         trailing = with_leading_icons(hidden.into_iter().collect(), trailing);
         return NodeSegments { segments, trailing };
     }
@@ -1207,7 +1207,7 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
     // Icons that follow the name in paint order, then the old trailing run.
     let mut icons = Vec::new();
     if node.hidden {
-        icons.push(ignored_seg(ascii));
+        icons.push(hidden_seg(ascii));
     }
     icons.push(icon_text_seg(
         icon_branch(ascii),
@@ -1539,7 +1539,7 @@ pub fn segment_icons(segs: &NodeSegments) -> Vec<IconKind> {
 }
 
 /// Visible snapshot used for the tree: hidden stay out, including
-/// linked worktrees of an hidden primary. They return with `.` / `-a`.
+/// linked worktrees of a hidden primary. They return with `.` / `-a`.
 pub fn visible_for_tree(snapshot: &WorkspaceSnapshot) -> WorkspaceSnapshot {
     crate::snapshot::visible_workspace_snapshot(snapshot)
 }
@@ -1663,17 +1663,17 @@ mod tests {
         assert!(no_branch.trailing.is_empty());
     }
 
-    fn repo(name: &str, ignored_dirty: bool, linked: bool) -> RepoSnapshot {
+    fn repo(name: &str, with_change: bool, linked: bool) -> RepoSnapshot {
         RepoSnapshot {
             repo: name.into(),
             branch: "main".into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
             head: String::new(),
-            has_unstaged: ignored_dirty,
+            has_unstaged: with_change,
             has_staged: false,
             has_untracked: false,
-            changes: if ignored_dirty {
+            changes: if with_change {
                 vec![FileChange {
                     path: "README.md".into(),
                     staged_status: None,
@@ -1724,7 +1724,7 @@ mod tests {
         assert!(rows.iter().any(|r| r.label.contains("notes")));
     }
 
-    fn ignored_primary_and_linked_child() -> (RepoSnapshot, RepoSnapshot) {
+    fn hidden_primary_and_linked_child() -> (RepoSnapshot, RepoSnapshot) {
         let primary = repo("app", true, false);
         let mut linked = repo("app/.worktrees/feat", true, true);
         linked.branch = "feature/linked-open".into();
@@ -1738,7 +1738,7 @@ mod tests {
 
     #[test]
     fn hidden_primary_omits_linked_child_from_visible_tree() {
-        let (primary, linked) = ignored_primary_and_linked_child();
+        let (primary, linked) = hidden_primary_and_linked_child();
         let built = build_workspace_snapshot(&[primary, linked], &["app".into()], false, &[]);
         assert!(
             built.repos.iter().any(|r| r.repo == "app" && r.hidden),
@@ -1767,8 +1767,8 @@ mod tests {
     }
 
     #[test]
-    fn show_hidden_nests_linked_child_of_ignored_primary() {
-        let (primary, linked) = ignored_primary_and_linked_child();
+    fn show_hidden_nests_linked_child_of_hidden_primary() {
+        let (primary, linked) = hidden_primary_and_linked_child();
         let built = build_workspace_snapshot(&[primary, linked], &["app".into()], true, &[]);
         let rows = tree_rows(&built);
         let family = rows.iter().find(|r| r.id == "repo:app").expect("family");
@@ -1792,7 +1792,7 @@ mod tests {
     }
 
     #[test]
-    fn standalone_ignored_linked_path_omitted_until_shown() {
+    fn standalone_hidden_linked_path_omitted_until_shown() {
         let primary = repo("app", true, false);
         let mut linked = repo("app/.worktrees/feat", true, true);
         linked.branch = "feature/linked-open".into();
@@ -2651,7 +2651,7 @@ mod tests {
     }
 
     #[test]
-    fn ignored_uses_icon_not_bracket_text() {
+    fn hidden_uses_icon_not_bracket_text() {
         let built = build_workspace_snapshot(
             &[repo("app", true, false), repo("notes", true, false)],
             &["notes".into()],

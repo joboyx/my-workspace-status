@@ -2895,7 +2895,7 @@ mod tests {
     }
 
     #[test]
-    fn standalone_ignored_worktree_without_commit() {
+    fn standalone_hidden_worktree_without_commit() {
         let mut model = GraphModel {
             worktrees: vec![Worktree {
                 path: "vendor/secret".into(),

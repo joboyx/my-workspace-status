@@ -647,7 +647,7 @@ struct DoctorJob {
     term_cols: u16,
     term_rows: u16,
     mouse_enabled: bool,
-    /// Every loaded checkout (ignored ones too), as an absolute path and
+    /// Every loaded checkout (hidden ones too), as an absolute path and
     /// the branch the snapshot names (detached or empty is fine: the
     /// remote lookup then takes the first remote).
     checkouts: Vec<(PathBuf, String)>,
@@ -8066,7 +8066,7 @@ mod tests {
         assert!(capture_jobs(&mut interp, &mut state).is_empty());
     }
 
-    /// The job copies every loaded checkout (an ignored one and a detached
+    /// The job copies every loaded checkout (a hidden one and a detached
     /// one too) on the event thread, and only its worker side runs git:
     /// the remote URLs come from each checkout's own config, deduplicated,
     /// whether or not any PR badge lookup ran.

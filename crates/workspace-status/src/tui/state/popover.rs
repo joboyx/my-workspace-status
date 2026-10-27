@@ -1537,7 +1537,7 @@ mod tests {
     }
 
     /// A family (`app` primary merged and dirty, linked `feat` merged and
-    /// behind), a repo whose status failed, an hidden dirty repo shown,
+    /// behind), a repo whose status failed, a hidden dirty repo shown,
     /// and an idle repo under No updates.
     fn branch_rows_app() -> AppState {
         let mut primary = repo("app", SyncStatus::NoUpstream, "");

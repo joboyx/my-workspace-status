@@ -5915,7 +5915,7 @@ impl AppState {
             .is_some_and(|row| row.has_unstaged || row.has_staged)
     }
 
-    /// True when the focused tree row belongs to an hidden repo that `.` hides.
+    /// True when the focused tree row belongs to a hidden repo that `.` hides.
     pub(crate) fn hidden_focus(&self) -> bool {
         self.focused_row()
             .is_some_and(|row| row_is_hidden(row, self.show_hidden))
@@ -6395,7 +6395,7 @@ impl AppState {
     /// or resize edge ([`Self::hovered_resize_edge`]) changed, so the live
     /// loop redraws only then. Arms or drops the icon peek dwell and leave
     /// grace ([`Self::peek_remaining_ms`]).
-    /// Hidden while mouse capture is off. Chords, status, and effects are
+    /// Ignored while mouse capture is off. Chords, status, and effects are
     /// untouched.
     pub fn set_pointer(&mut self, pointer: Option<(u16, u16)>) -> bool {
         self.set_pointer_at(pointer, Instant::now())
@@ -7418,7 +7418,7 @@ mod tests {
         assert!(app.rows.iter().all(|r| !r.label.contains("notes")));
     }
 
-    fn ignored_primary_family_hidden(app: &AppState) -> bool {
+    fn hidden_primary_family_hidden(app: &AppState) -> bool {
         app.rows.iter().all(|r| r.id != "repo:app")
             && app.rows.iter().all(|r| r.id != "checkout:app")
             && app.rows.iter().all(|r| r.id != "repo:app/.worktrees/feat")
@@ -7433,7 +7433,7 @@ mod tests {
     }
 
     #[test]
-    fn ignore_toggle_hides_and_shows_linked_child_of_ignored_primary() {
+    fn dot_toggle_hides_and_shows_linked_child_of_hidden_primary() {
         let mut linked = repo("app/.worktrees/feat", true);
         linked.checkout_kind = CheckoutKind::Linked;
         linked.primary_repo = Some("app".into());
@@ -7461,7 +7461,7 @@ mod tests {
             "visible lib must still paint"
         );
         assert!(
-            ignored_primary_family_hidden(&app),
+            hidden_primary_family_hidden(&app),
             "cold start must hide hidden primary and its linked child, got {:?}",
             app.rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
         );
@@ -7486,7 +7486,7 @@ mod tests {
         app.dispatch(Action::ToggleShowHidden);
         assert!(!app.show_hidden);
         assert!(
-            ignored_primary_family_hidden(&app),
+            hidden_primary_family_hidden(&app),
             "second toggle must hide both again, got {:?}",
             app.rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
         );
@@ -7595,7 +7595,7 @@ mod tests {
     }
 
     #[test]
-    fn shown_ignored_is_in_workspace_fetch() {
+    fn shown_hidden_is_in_workspace_fetch() {
         let mut app = state();
         app.dispatch(Action::ToggleShowHidden);
         app.cursor = 0;
@@ -13851,7 +13851,7 @@ mod tests {
         app.show_hidden = false;
         app.focus = FocusPane::Right;
         assert_eq!(app.dispatch(Action::NavEnter), Effect::None);
-        assert!(app.status.contains("hidden"));
+        assert!(app.status.contains("stay out of drill"));
         app.show_hidden = true;
         app.rebuild_rows();
         let notes = app

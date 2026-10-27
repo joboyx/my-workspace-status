@@ -190,7 +190,7 @@ fn serialize_file_change(change: &FileChange) -> FileChange {
 
 /// Build one workspace row. `hidden` is the `hiddenPaths` list.
 ///
-/// The row is tagged `hidden` (hidden) when its path is at or under a
+/// The row is tagged `hidden` when its path is at or under a
 /// hidden entry. A linked checkout whose primary is also hidden is not
 /// tagged: it hides with its primary (see [`checkout_is_hidden`]).
 fn to_workspace_repo(snapshot: &RepoSnapshot, hidden: &[String]) -> WorkspaceRepoSnapshot {
@@ -263,7 +263,7 @@ pub(crate) fn checkout_is_hidden(repo: &WorkspaceRepoSnapshot, hidden: &[String]
 
 /// Visible snapshot: hidden stay out unless shown or named.
 ///
-/// Hidden includes linked children of an hidden primary. Do not
+/// Hidden includes linked children of a hidden primary. Do not
 /// retag those rows `hidden`; they still return with `show_hidden`.
 /// Naming a primary in `filter_repos` also keeps its linked children.
 pub fn visible_workspace_snapshot(snapshot: &WorkspaceSnapshot) -> WorkspaceSnapshot {
@@ -594,17 +594,17 @@ pub fn non_default_branch_repos(summary: &SummaryState) -> Vec<String> {
 mod tests {
     use super::*;
 
-    fn sample_repo(name: &str, ignored_change: bool) -> RepoSnapshot {
+    fn sample_repo(name: &str, with_change: bool) -> RepoSnapshot {
         RepoSnapshot {
             repo: name.to_string(),
             branch: "main".to_string(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
             head: String::new(),
-            has_unstaged: ignored_change,
+            has_unstaged: with_change,
             has_staged: false,
             has_untracked: false,
-            changes: if ignored_change {
+            changes: if with_change {
                 vec![FileChange {
                     path: "README.md".to_string(),
                     staged_status: None,
@@ -688,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn named_filter_includes_ignored_repo() {
+    fn named_filter_includes_hidden_repo() {
         let built = build_workspace_snapshot(
             &[sample_repo("notes", true)],
             &["notes".to_string()],
@@ -701,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn named_filter_includes_linked_children_of_ignored_primary() {
+    fn named_filter_includes_linked_children_of_hidden_primary() {
         let primary = sample_repo("app", true);
         let mut linked = sample_repo("app/.worktrees/feat", false);
         linked.checkout_kind = CheckoutKind::Linked;

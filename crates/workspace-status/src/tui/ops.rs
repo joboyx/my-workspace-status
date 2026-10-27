@@ -558,7 +558,7 @@ mod tests {
     use crate::snapshot::{build_workspace_snapshot, FileChange, RepoSnapshot, SyncStatus};
     use crate::tui::tree::VisibleRow;
 
-    fn snap(name: &str, _ignored: bool, linked: bool, behind: bool) -> RepoSnapshot {
+    fn snap(name: &str, _hidden: bool, linked: bool, behind: bool) -> RepoSnapshot {
         RepoSnapshot {
             repo: name.into(),
             branch: if behind {
@@ -723,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    fn shown_ignored_file_is_a_target() {
+    fn shown_hidden_file_is_a_target() {
         let snapshot = built();
         let mut row = file_row("notes");
         row.hidden = true;

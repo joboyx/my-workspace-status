@@ -80,10 +80,10 @@ fn documented_dot_hides_hidden_family(screen: &str) -> bool {
         && status.contains("focus right")
 }
 
-/// `.` hides linked worktrees of an hidden primary, then shows them nested.
+/// `.` hides linked worktrees of a hidden primary, then shows them nested.
 ///
 /// Docs: Help VIEW `.` = show / hide hidden repos. Hidden includes
-/// linked children of an hidden primary. They return with `.` / `-a` as a
+/// linked children of a hidden primary. They return with `.` / `-a` as a
 /// family (`2 wt`, `L` + branch), not a workspace-root `L` orphan.
 ///
 /// Live PTY after first paint: hidden `app` and `feature/linked-open` stay

@@ -2053,7 +2053,7 @@ mod tests {
     }
 
     #[test]
-    fn format_row_ignored_worktree() {
+    fn format_row_hidden_worktree() {
         let row = GraphRow::Worktree(Worktree {
             path: "notes".into(),
             head_id: None,
