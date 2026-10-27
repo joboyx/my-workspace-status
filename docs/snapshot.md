@@ -11,21 +11,21 @@ Agents must pass `--plain` or `--json`. A TTY without one of those flags opens t
 
 ```json
 {
-  "version": 1,
-  "showIgnored": false,
+  "version": 2,
+  "showHidden": false,
   "filterRepos": [],
-  "ignoredRepos": ["notes"],
+  "hiddenPaths": ["notes"],
   "repos": []
 }
 ```
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `version` | `1` | Contract version. Bump only for a breaking change. |
-| `showIgnored` | boolean | True when this run includes ignored repos (`-a` / `--all`). |
+| `version` | `2` | Contract version. Bump only for a breaking change. Version 2 renamed `showIgnored` to `showHidden`, `ignoredRepos` to `hiddenPaths`, and the repo field `ignored` to `hidden`. |
+| `showHidden` | boolean | True when this run includes hidden repos (`-a` / `--all`). |
 | `filterRepos` | string[] | Positional repo filters, sorted. Empty means all discovered repos. |
-| `ignoredRepos` | string[] | Paths from `.workspace-status-config.json`, sorted. |
-| `repos` | object[] | Ops-visible repos only. Hidden ignored repos are omitted. |
+| `hiddenPaths` | string[] | `hiddenPaths` entries from the config, sorted. `ignoredPaths` is not listed: those repos never appear. |
+| `repos` | object[] | Ops-visible repos only. Hidden repos are omitted. |
 
 Paths are workspace-relative. The snapshot does not include the workspace root, machine paths, or secrets.
 
@@ -34,7 +34,7 @@ Paths are workspace-relative. The snapshot does not include the workspace root, 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `repo` | string | Workspace-relative checkout path. |
-| `ignored` | boolean | True when `repo` is listed in `ignoredRepos`. |
+| `hidden` | boolean | True when `repo` is at or under a `hiddenPaths` entry. |
 | `branch` | string | Current branch, or a detached / unknown label from git status. |
 | `syncStatus` | string | `up-to-date`, `no-upstream`, `behind`, `ahead`, or `diverged`. |
 | `syncNote` | string | Extra sync text (`ahead by 2`, `status failed`, empty). |
@@ -63,14 +63,14 @@ These fields cover branch, sync, checkout kind, merge-into-default, and file cha
 
 ## Visibility and ops
 
-Hidden ignored repos stay out of `repos` and out of fetch, pull, and default-branch work unless they are shown.
+Hidden repos stay out of `repos` and out of fetch, pull, and default-branch work unless they are shown. Repos under `ignoredPaths` are never shown, never in `repos`, and never touched by fetch, pull, or default-branch work.
 
 Shown means:
 
-1. `-a` / `--all` (`showIgnored` is true), or
+1. `-a` / `--all` (`showHidden` is true), or
 2. the repo is named in `filterRepos`.
 
-Named filters still bypass `ignoredRepos`. The TUI can show hidden ignored repos with `.`. That toggle does not change `--plain` or `--json` unless you pass `-a`.
+Named filters still bypass `hiddenPaths` and `ignoredPaths`. The TUI can show hidden repos with `.`. That toggle does not change `--plain` or `--json` unless you pass `-a`.
 
 ## Flags
 
@@ -79,25 +79,25 @@ Named filters still bypass `ignoredRepos`. The TUI can show hidden ignored repos
 | `--plain` | Human text of this snapshot. Required for agents if you do not use `--json`. |
 | `--json` | Pretty-printed JSON of this snapshot on stdout. Progress from `--fetch`, `--pull`, or `--default-branch` goes to stderr. |
 | `-v` | Verbose table in the `--plain` renderer. Ignored by `--json`. |
-| `-a` | Include ignored repos in `repos`. |
+| `-a` | Include hidden repos in `repos`. Never includes `ignoredPaths`. |
 | `[REPO...]` | Limit `repos` to those paths. |
 
 `--json` and `--plain` both disable the TUI. If both are set, `--json` wins.
 
 ## Example
 
-A workspace with `app` dirty and `notes` ignored:
+A workspace with `app` dirty and `notes` hidden:
 
 ```json
 {
-  "version": 1,
-  "showIgnored": false,
+  "version": 2,
+  "showHidden": false,
   "filterRepos": [],
-  "ignoredRepos": ["notes"],
+  "hiddenPaths": ["notes"],
   "repos": [
     {
       "repo": "app",
-      "ignored": false,
+      "hidden": false,
       "branch": "main",
       "syncStatus": "up-to-date",
       "syncNote": "",

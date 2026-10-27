@@ -19,10 +19,10 @@ clones only that row (the focused-row lookups use it).
 
 | Type | Role |
 | --- | --- |
-| `GraphModel` | Commits, stashes, worktrees, HEAD id, sync, `show_ignored`, `uncommitted`, `skip` / `limit` / `has_more` / `window` |
+| `GraphModel` | Commits, stashes, worktrees, HEAD id, sync, `show_hidden`, `uncommitted`, `skip` / `limit` / `has_more` / `window` |
 | `Commit` | Id, subject, parents, refs, author name, author date |
 | `Stash` | Id, `stash@{n}`, subject, author name, author date, parent id (`stash^1`) |
-| `Worktree` | Path, HEAD id, branch, `ignored`, `is_current`. Linked extras only (`git worktree list` / `.git` gitfile). The main checkout (`.git` directory) is not marked. |
+| `Worktree` | Path, HEAD id, branch, `hidden`, `is_current`. Linked extras only (`git worktree list` / `.git` gitfile). The main checkout (`.git` directory) is not marked. |
 | `SyncState` | Branch, status, ahead, behind |
 | `GraphRow` | One visible row: uncommitted, stash, commit, or worktree |
 | `GraphCell` | One gutter column: glyph, colour lane, role |
@@ -37,7 +37,7 @@ clones only that row (the focused-row lookups use it).
 | `graph_scrollbar_thumb` | Thumb offset/length matching a painted bar (TUI hit-test, vertical or horizontal) |
 | `graph_col_max` | Max `col_offset` that brings the end of the longest label into the pane; a `row_badges` row has the glyph and one space less room |
 | `graph_vscroll_visible` / `graph_hscroll_visible` | Show the vertical bar whenever the painted lines overflow the list (or it has left the top); the horizontal bar only after leaving the left edge |
-| `Action` | `ToggleShowIgnored` and `SetShowIgnored` |
+| `Action` | `ToggleShowHidden` and `SetShowHidden` |
 | `Effect` | `None` today. Dispatch stays pure. |
 
 `GraphModel::dispatch` applies an `Action` and returns an `Effect`.
@@ -156,7 +156,7 @@ The label glyphs are their own `LabelPart`s, so the text of a line
 `LabelKind::UncommittedMark { dirty }` paints in `dirty` when the row has
 changes and in `meta` when clean. `LabelKind::WorktreeMark { worktree }`
 paints in `worktree`. On a worktree row the path and branch are the
-subject, `[ignored]` is meta, and `[HEAD]` is the head mark. On a commit
+subject, `[hidden]` is meta, and `[HEAD]` is the head mark. On a commit
 spacer the worktree mark text stays meta. `LabelKind::icon` maps a part to
 its `GraphIconKind` and `part`.
 
@@ -177,8 +177,8 @@ mode, and a terminal without italics shows plain text.
 4. Worktrees whose HEAD is a loaded commit attach to that commit row.
 5. Other worktrees become their own rows.
 
-Hidden ignored worktrees stay out of this list unless `show_ignored`
-is true. That matches the workspace snapshot rule: ignored checkouts
+Hidden worktrees stay out of this list unless `show_hidden`
+is true. That matches the workspace snapshot rule: hidden checkouts
 stay out of ops unless shown.
 
 ## Paint

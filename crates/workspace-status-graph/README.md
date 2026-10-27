@@ -10,7 +10,7 @@ on the spacer. A leftover chip whose name still partly fits is
 truncated with `…` (brackets stay). `[+N]` counts only chips that are
 fully hidden after that. The
 selection footer lists every ref in the same chip colours as the row.
-Hidden ignored worktree rows stay omitted unless `show_ignored` is true.
+Hidden worktree rows stay omitted unless `show_hidden` is true.
 
 See [docs/graph.md](../../docs/graph.md) for the widget contract.
 

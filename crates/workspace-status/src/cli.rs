@@ -50,7 +50,7 @@ That run does not open the TUI or apply repo filters. A dev build\n\
 (scripts/install-dev.sh) instead rebuilds and reinstalls its checkout."
 )]
 struct Cli {
-    /// Include ignored repos (`showIgnored`).
+    /// Include hidden repos (`hiddenPaths`). Never includes `ignoredPaths`.
     #[arg(short = 'a', long = "all")]
     all: bool,
 
@@ -90,7 +90,7 @@ struct Cli {
     #[arg(short = 'C', long = "workspace", value_name = "PATH")]
     workspace: Option<PathBuf>,
 
-    /// Optional workspace-relative repo filters. Named repos bypass ignoredRepos.
+    /// Optional workspace-relative repo filters. Named repos bypass hiddenPaths and ignoredPaths.
     #[arg(value_name = "REPO")]
     filter_repos: Vec<String>,
 }

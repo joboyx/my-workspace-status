@@ -34,9 +34,9 @@ This is the glance I wanted instead. Left pane is the workspace tree (repos, wor
 
 ![Stash](docs/images/06-stash.gif)
 
-**Ignored** — `.` shows or hides `notes` (`ignoredRepos`).
+**Hidden** — `.` shows or hides `notes` (`hiddenPaths`).
 
-![Show ignored](docs/images/07-show-ignored.gif)
+![Show hidden repos](docs/images/07-show-ignored.gif)
 
 **Help** — `?` opens MOVE / GIT / VIEW. On a compare or Explorer tab, a COMPARE or EXPLORER column replaces GIT: the keys that work there and the ones that need the Workspace tab.
 
@@ -133,7 +133,8 @@ An optional user file, `~/.config/my-workspace-status/config.json` (`$XDG_CONFIG
 
 ```json
 {
-  "ignoredRepos": ["notes"],
+  "hiddenPaths": ["notes"],
+  "ignoredPaths": ["tmp"],
   "maxDepth": 3,
   "defaultBranches": {
     "services/api": "develop"
@@ -147,16 +148,19 @@ An optional user file, `~/.config/my-workspace-status/config.json` (`$XDG_CONFIG
 }
 ```
 
-- `ignoredRepos` — skip those repos from discovery, status checks, fetch, pull, and default-branch switching
+- `hiddenPaths` — required in the workspace file. Repos at or under an entry are hidden: out of the tree, status checks, fetch, pull, and default-branch switching. `.` in the TUI or `-a` shows them.
+- `ignoredPaths` — optional. Repos (and linked worktrees) at or under an entry are never discovered, shown, fetched, pulled, or switched. `.` and `-a` do not bring them back. A path in both lists follows `ignoredPaths`.
+- Entries in both lists are paths relative to the workspace root: a repo folder, or a folder that holds repos (`tmp` matches `tmp` and `tmp/a/b`, not `tmpfoo`). Absolute paths and `..` fail startup. The workspace file replaces the user file list.
+- `ignoredRepos` is removed. A config that still has it fails startup: rename it to `hiddenPaths`, and add `ignoredPaths` for folders that must never show.
 - `maxDepth` — how many path segments below cwd to search for git repos (default **3**, so `group/app/module` is included)
 - `defaultBranches` — optional map of workspace-relative repo path → sole default branch. When set, that branch is used for classification, markers, ordering, and `--default-branch` / TUI `d`. When omitted for a repo, behaviour matches today (classification: `main`/`master`/`develop`; switch target from git).
 - `editor` — optional command for TUI `e` (same shape as `$EDITOR`). Omit the key or set `"editor": "vim"` for vim (the default). `"editor": "cursor"` opens Cursor IDE. Order: config `editor`, `$VISUAL`, `$EDITOR`, then vim (git's order).
 - `diffTool` — optional command for TUI `E` (default vimdiff). `"diffTool": "cursor --diff --wait"` opens Cursor and keeps HEAD temps until the CLI exits. No `$EDITOR` fallback.
 - `viewDefaults` — optional TUI launch modes: `tree` / `commitTree` (`tree` | `flat`), `diff` (`split` | `inline`), `wrap` (`wrap` | `unwrap`, default `wrap`), `commitMessage` (`expand` | `collapse`), `commitMessageLines` (integer 1 to 20, default 4), `lineBlame` (`show` | `hide`, default `show`), `background` (`paint` | `terminal`, default `paint`). Keys and values are checked; a typo is an error. Toggle keys change the session only. A mouse drag of the commit-message footer rule saves its rows in the UI-state file, and that saved value beats `commitMessageLines` at launch. Detail: [docs/configuration.md](docs/configuration.md).
 
-Pass `-a` or `--all` to include repos listed in `ignoredRepos` for that run (`maxDepth` is unchanged). In the TUI, `.` shows or hides those repos at runtime (starts shown with `-a`, hidden without it). Hidden ignored repos stay out of workspace operations unless you show them.
+Pass `-a` or `--all` to include repos under `hiddenPaths` for that run (`maxDepth` is unchanged; `ignoredPaths` stays excluded). In the TUI, `.` shows or hides those repos at runtime (starts shown with `-a`, hidden without it). Hidden repos stay out of workspace operations unless you show them.
 
-Pass one or more repo paths to limit output (e.g. `ws app vendor-docs`). Named repos are included even when listed in `ignoredRepos`. Named filters may also target linked paths under `.worktrees/` (same discovery as a full collect).
+Pass one or more repo paths to limit output (e.g. `ws app vendor-docs`). Named repos are included even when under `hiddenPaths` or `ignoredPaths`. Named filters may also target linked paths under `.worktrees/` (same discovery as a full collect).
 
 ## Plain report markers
 
@@ -230,8 +234,8 @@ Agent map of PTY vs desktop `#[ignore]`, plus `WS_STATUS_UPDATE_CHECK_STORE`: [A
 | Default branch switch | `--default-branch` switches clean non-default branches back to default and skips dirty repos                                                                                                    |
 | Symlinked / gitfile   | Symlinked directories and repos with a `.git` file (linked worktrees / some submodules) are discovered like regular repos                                                                       |
 | Linked worktrees      | `git worktree list` paths under cwd appear with `🔗`; Files column = dirty/clean; `✅`/`🌱` merge marks (`✅` only for a strict ancestor of the default tip); named filters accept `.worktrees/` paths |
-| Workspace config      | `ignoredRepos` skips configured repos; `maxDepth` (default 3) caps discovery depth; `defaultBranches` overrides per-repo default; `editor` sets TUI `e`; `diffTool` sets TUI `E`; `viewDefaults` sets TUI launch view modes; `--all` includes ignored repos |
-| Repo filter           | Positional repo paths limit output to named repos; named repos bypass `ignoredRepos`; unknown repos exit with an error                                                                          |
+| Workspace config      | `hiddenPaths` hides repos (shown by `.` or `-a`); `ignoredPaths` never shows them; `maxDepth` (default 3) caps discovery depth; `defaultBranches` overrides per-repo default; `editor` sets TUI `e`; `diffTool` sets TUI `E`; `viewDefaults` sets TUI launch view modes; `--all` includes hidden repos |
+| Repo filter           | Positional repo paths limit output to named repos; named repos bypass `hiddenPaths` and `ignoredPaths`; unknown repos exit with an error                                                                          |
 
 ### Scenario isolation
 

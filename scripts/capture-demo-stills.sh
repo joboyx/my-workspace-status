@@ -846,7 +846,7 @@ if want_clip 06-stash; then
   clip_commit 06-stash
 fi
 
-# 07 show / hide ignored repos.
+# 07 show / hide hidden repos.
 if want_clip 07-show-ignored; then
   launch_tui
   clip_start 07-show-ignored

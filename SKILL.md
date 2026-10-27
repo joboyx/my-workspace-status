@@ -25,12 +25,12 @@ You are helping the user review the status of all git repositories in the curren
 
 - Run `workspace-status` (short alias: `ws`) from PATH
 - **Always pass `--plain` or `--json` for agent runs.** On a TTY without one of those flags, the CLI opens an interactive TUI that waits for keyboard input and will hang the agent shell until killed. Do not rely on “non-TTY” alone — some harnesses allocate a TTY. Never use `-i` / `--tui` from an agent. `--plain` is the human renderer. `--json` prints the same workspace snapshot. See [docs/snapshot.md](./docs/snapshot.md).
-- The CLI reads `.workspace-status-config.json` from the current workspace root; repos in `ignoredRepos` are skipped unless `-a` or `--all` is passed
+- The CLI reads `.workspace-status-config.json` from the current workspace root; repos at or under a `hiddenPaths` entry are hidden unless `-a` or `--all` is passed; repos under an `ignoredPaths` entry are never shown
 - Optional `defaultBranches` map (repo path → branch) overrides the default branch for classification, markers, ordering, and `--default-branch` / TUI `d`; without an entry, defaults are derived as today
 - `maxDepth` (default **3**) controls how many path segments below cwd are searched for git repos (so `acme/packages/*` is included by default)
 - Optional `editor` for TUI `e` (same shape as `$EDITOR`). Omit the key or set `"editor": "vim"` for vim (the default). `"editor": "cursor"` opens Cursor IDE. Config overrides `$EDITOR` / `$VISUAL`.
 - Optional `diffTool` for TUI `E` (default vimdiff). `"diffTool": "cursor --diff --wait"` opens Cursor and keeps HEAD temps until the CLI exits. No `$EDITOR` fallback.
-- Pass one or more repo paths (e.g. `dotfiles`, `dotfiles notes`) to limit output to those repos; named repos are included even when listed in `ignoredRepos`
+- Pass one or more repo paths (e.g. `dotfiles`, `dotfiles notes`) to limit output to those repos; named repos are included even when under `hiddenPaths` or `ignoredPaths`
 - The CLI already formats its own output, so prefer showing it as-is
 - When changing the CLI or its output contract, keep `SAMPLE_OUTPUT.md` and `crates/workspace-status/tests/snapshot_contract.rs` in sync
 
@@ -60,8 +60,8 @@ The CLI produces:
 
 **Optional Flags:**
 
-- `[REPO...]`: Limit status to specific repos (relative to workspace root); bypasses `ignoredRepos` for named repos
-- `--all`: Include repos listed in `.workspace-status-config.json` `ignoredRepos`
+- `[REPO...]`: Limit status to specific repos (relative to workspace root); bypasses `hiddenPaths` and `ignoredPaths` for named repos
+- `--all`: Include repos under `.workspace-status-config.json` `hiddenPaths` (never `ignoredPaths`)
 - `--fetch`: Fetch from remotes before checking status (slower but more accurate)
 - `--verbose`: Show the aligned table before the summary
 - `--pull`: Pull repos that are behind their upstream (auto-stashes dirty worktrees, then reapplies)
@@ -75,7 +75,7 @@ The CLI produces:
 
 The TUI requires a **Nerd Font** — recommended `MesloLGM Nerd Font Mono` (the **Mono** variant; the proportional build breaks column alignment). In VS Code / Cursor set `terminal.integrated.fontFamily` in **User Settings**, since the terminal font is resolved on the client rather than in WSL. `WS_STATUS_GLYPHS=ascii` swaps in plain markers.
 
-Defaults: directory tree (`t` toggles flat), split diff (`i` toggles inline), wrap on (`\` toggles wrap), commit messages expanded (`M` collapses), line blame on (`B` hides the note at the end of the focused line), ignored repos hidden (`.` toggles; `-a` starts shown), and live refresh polling every 3s (`WS_STATUS_WATCH_MS=0` disables). `viewDefaults` in `.workspace-status-config.json` sets the launch tree, diff, wrap, commit-message, and line-blame modes; toggles change the session only. Tree status letters are `A` added, `M` modified, `S` staged, `MS` staged+modified, `D` deleted, `R` renamed, `C` copied, `U` conflicted. The emoji legend above applies to the plain report only.
+Defaults: directory tree (`t` toggles flat), split diff (`i` toggles inline), wrap on (`\` toggles wrap), commit messages expanded (`M` collapses), line blame on (`B` hides the note at the end of the focused line), hidden repos not shown (`.` toggles; `-a` starts shown), and live refresh polling every 3s (`WS_STATUS_WATCH_MS=0` disables). `viewDefaults` in `.workspace-status-config.json` sets the launch tree, diff, wrap, commit-message, and line-blame modes; toggles change the session only. Tree status letters are `A` added, `M` modified, `S` staged, `MS` staged+modified, `D` deleted, `R` renamed, `C` copied, `U` conflicted. The emoji legend above applies to the plain report only.
 
 Live TUI keymap (full overlay detail in [docs/configuration.md](./docs/configuration.md)):
 
@@ -86,7 +86,7 @@ Live TUI keymap (full overlay detail in [docs/configuration.md](./docs/configura
 | `z`                                   | toggle fold immediately; `zz` toggles subtree. No-op when the graph or a diff is focused                                                               |
 | `gg` / `G`                            | first / last visible row on the focused list; on a focused **diff**, scroll to start / end                                                             |
 | `t`                                   | flat ↔ directory tree (view-mode; works when right-focused)                                                                                            |
-| `.`                                   | show / hide ignored repos (view-mode; works whether the app started with `-a`)                                                                         |
+| `.`                                   | show / hide hidden repos (view-mode; works whether the app started with `-a`)                                                                         |
 | Focus file                            | load diff (lazy)                                                                                                                                       |
 | `s` / `u` / `x`                       | stage / unstage / revert (`x` confirms; untracked deletes from disk). On a `V` highlight, `s` / `u` apply only that range, not the whole file           |
 | `S`                                   | stash menu (Shift+s; `s` stays stage)                                                                                                                  |
