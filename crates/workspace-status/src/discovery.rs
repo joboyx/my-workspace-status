@@ -412,17 +412,22 @@ fn walk(
 
 /// Whether discovery keeps a linked worktree at `linked_rel` of `primary_rel`.
 ///
-/// With named repos, keep it when the worktree or its primary is named.
-/// Otherwise drop it when it is at or under any `excluded` entry
+/// With named repos, keep it when the worktree itself is named, or when its
+/// primary is named and the worktree is not at or under an `ignored`
+/// (`ignoredPaths`) entry: only a repo named on the command line wins over
+/// `ignoredPaths`. `hiddenPaths` does not drop a named primary's worktrees.
+/// Without named repos, drop it when it is at or under any `excluded` entry
 /// (`ignoredPaths`, plus `hiddenPaths` when they were not cleared).
 pub fn should_include_linked_worktree(
     linked_rel: &str,
     primary_rel: &str,
     excluded: &[String],
+    ignored: &[String],
     only_repos: Option<&BTreeSet<String>>,
 ) -> bool {
     if let Some(only) = only_repos {
-        return only.contains(linked_rel) || only.contains(primary_rel);
+        return only.contains(linked_rel)
+            || (only.contains(primary_rel) && !path_is_under_any(linked_rel, ignored));
     }
     !path_is_under_any(linked_rel, excluded)
 }
@@ -474,7 +479,13 @@ pub fn expand_repos_with_linked_worktrees(
             &primary_abs,
         );
         for (_abs, rel) in linked {
-            if !should_include_linked_worktree(&rel, primary, &excluded, only_repos) {
+            if !should_include_linked_worktree(
+                &rel,
+                primary,
+                &excluded,
+                &config.ignored_paths,
+                only_repos,
+            ) {
                 continue;
             }
             by_path.insert(
@@ -770,8 +781,24 @@ mod path_list_tests {
         let named: BTreeSet<String> = ["app".to_string()].into();
         assert_eq!(
             found(&root, &config(&[], &["tmp"]), Some(&named)),
+            vec!["app"],
+            "a named primary does not bring back a linked worktree under ignoredPaths"
+        );
+        assert_eq!(
+            found(&root, &config(&["tmp"], &[]), Some(&named)),
             vec!["app", "tmp/app-feat"],
-            "a named primary keeps its linked worktrees"
+            "a named primary keeps its linked worktrees under hiddenPaths"
+        );
+        let named_linked: BTreeSet<String> = ["tmp/app-feat".to_string()].into();
+        let loaded = config(&[], &["tmp"]);
+        assert_eq!(
+            found(&root, &loaded, Some(&named_linked)),
+            vec!["tmp/app-feat"],
+            "a linked worktree named itself wins over ignoredPaths"
+        );
+        assert_eq!(
+            validate_filter_repos(&root, &loaded, &["tmp/app-feat".to_string()]),
+            Ok(())
         );
         let _ = fs::remove_dir_all(root);
     }

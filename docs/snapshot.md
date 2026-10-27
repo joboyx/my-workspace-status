@@ -63,7 +63,7 @@ These fields cover branch, sync, checkout kind, merge-into-default, and file cha
 
 ## Visibility and ops
 
-Hidden repos stay out of `repos` and out of fetch, pull, and default-branch work unless they are shown. Repos under `ignoredPaths` are never shown, never in `repos`, and never touched by fetch, pull, or default-branch work, unless you name them on the command line.
+Hidden repos stay out of `repos` and out of fetch, pull, and default-branch work unless they are shown. Repos under `ignoredPaths` are never shown, never in `repos`, and never touched by fetch, pull, or default-branch work, unless you name them on the command line. Naming a primary does not bring back its linked worktrees under `ignoredPaths`.
 
 Shown means:
 

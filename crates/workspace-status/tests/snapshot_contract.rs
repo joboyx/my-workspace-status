@@ -638,6 +638,20 @@ fn named_repo_under_ignored_path_is_shown() {
 }
 
 #[test]
+fn named_primary_leaves_out_its_linked_worktree_under_ignored_path() {
+    let (root, workspace) = hidden_and_ignored_fixture();
+    git(
+        &workspace.join("app"),
+        &["worktree", "add", "-q", "-b", "feat", "../tmp/app-feat"],
+    );
+    let snapshot = run_json(&workspace, &["--json", "app"]);
+    assert_eq!(json_repo_names(&snapshot), vec!["app"]);
+    let snapshot = run_json(&workspace, &["--json", "tmp/app-feat"]);
+    assert_eq!(json_repo_names(&snapshot), vec!["tmp/app-feat"]);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn removed_ignored_repos_key_fails_startup() {
     let (root, workspace) = fixture();
     let workspace_file = workspace.join(".workspace-status-config.json");
