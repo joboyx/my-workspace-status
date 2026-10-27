@@ -11,7 +11,8 @@ use crate::git::{
     rev_parse_quiet,
 };
 use crate::helpers::{
-    is_default_branch, DETACHED_HEAD_BRANCH, STATUS_FAILED_NOTE, UNKNOWN_HEAD_BRANCH,
+    is_default_branch, path_is_under_any, DETACHED_HEAD_BRANCH, STATUS_FAILED_NOTE,
+    UNKNOWN_HEAD_BRANCH,
 };
 use crate::parallel::map_with_concurrency;
 use crate::snapshot::{CheckoutKind, FileChange, RepoSnapshot, SyncStatus};
@@ -318,25 +319,44 @@ fn merge_file_changes(changes: &PorcelainChanges) -> Vec<FileChange> {
     by_path.into_values().collect()
 }
 
+/// Paths the walk must skip when no repo is named: `ignoredPaths` always,
+/// plus `hiddenPaths` unless the caller cleared them to show hidden repos.
+fn excluded_paths(config: &WorkspaceStatusConfig) -> Vec<String> {
+    config
+        .hidden_paths
+        .iter()
+        .chain(config.ignored_paths.iter())
+        .cloned()
+        .collect()
+}
+
 fn should_include_repo(
     repo_path: &str,
-    ignored: &BTreeSet<String>,
+    excluded: &[String],
     only_repos: Option<&BTreeSet<String>>,
 ) -> bool {
     if let Some(only) = only_repos {
         return only.contains(repo_path);
     }
-    !ignored.contains(repo_path)
+    !path_is_under_any(repo_path, excluded)
 }
 
+/// Walk `cwd` up to `maxDepth` and return the workspace-relative primary
+/// repos, sorted.
+///
+/// With no named repos (`only_repos` is `None`), the walk never descends
+/// into or returns a path at or under an `ignoredPaths` or `hiddenPaths`
+/// entry (clear `hidden_paths` first to find hidden repos). With named
+/// repos, the walk only heads toward those names and both lists are
+/// ignored: a named repo wins.
 pub fn find_repos_with_config(
     cwd: &Path,
     config: &WorkspaceStatusConfig,
     only_repos: Option<&BTreeSet<String>>,
 ) -> Vec<String> {
-    let ignored: BTreeSet<String> = config.ignored_repos.iter().cloned().collect();
+    let excluded = excluded_paths(config);
     let mut dirs = Vec::new();
-    walk(cwd, "", config.max_depth, &ignored, only_repos, &mut dirs);
+    walk(cwd, "", config.max_depth, &excluded, only_repos, &mut dirs);
     dirs.sort();
     dirs
 }
@@ -345,7 +365,7 @@ fn walk(
     cwd: &Path,
     rel_parent: &str,
     max_depth: u32,
-    ignored: &BTreeSet<String>,
+    excluded: &[String],
     only_repos: Option<&BTreeSet<String>>,
     dirs: &mut Vec<String>,
 ) {
@@ -379,27 +399,37 @@ fn walk(
             if !can_reach_only_repo(&repo_path, only) {
                 continue;
             }
-        } else if ignored.contains(&repo_path) {
+        } else if path_is_under_any(&repo_path, excluded) {
             continue;
         }
         let full = abs_parent.join(&name);
-        if has_git_dir(&full) && should_include_repo(&repo_path, ignored, only_repos) {
+        if has_git_dir(&full) && should_include_repo(&repo_path, excluded, only_repos) {
             dirs.push(repo_path.clone());
         }
-        walk(cwd, &repo_path, max_depth, ignored, only_repos, dirs);
+        walk(cwd, &repo_path, max_depth, excluded, only_repos, dirs);
     }
 }
 
+/// Whether discovery keeps a linked worktree at `linked_rel` of `primary_rel`.
+///
+/// With named repos, keep it when the worktree itself is named, or when its
+/// primary is named and the worktree is not at or under an `ignored`
+/// (`ignoredPaths`) entry: only a repo named on the command line wins over
+/// `ignoredPaths`. `hiddenPaths` does not drop a named primary's worktrees.
+/// Without named repos, drop it when it is at or under any `excluded` entry
+/// (`ignoredPaths`, plus `hiddenPaths` when they were not cleared).
 pub fn should_include_linked_worktree(
     linked_rel: &str,
     primary_rel: &str,
-    ignored: &BTreeSet<String>,
+    excluded: &[String],
+    ignored: &[String],
     only_repos: Option<&BTreeSet<String>>,
 ) -> bool {
     if let Some(only) = only_repos {
-        return only.contains(linked_rel) || only.contains(primary_rel);
+        return only.contains(linked_rel)
+            || (only.contains(primary_rel) && !path_is_under_any(linked_rel, ignored));
     }
-    !ignored.contains(linked_rel)
+    !path_is_under_any(linked_rel, excluded)
 }
 
 pub fn expand_repos_with_linked_worktrees(
@@ -408,7 +438,7 @@ pub fn expand_repos_with_linked_worktrees(
     config: &WorkspaceStatusConfig,
     only_repos: Option<&BTreeSet<String>>,
 ) -> Vec<(String, RepoCheckoutMeta)> {
-    let ignored: BTreeSet<String> = config.ignored_repos.iter().cloned().collect();
+    let excluded = excluded_paths(config);
     let cwd_abs = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
 
     let mut listing_roots: BTreeSet<String> = walk_primaries.iter().cloned().collect();
@@ -449,7 +479,13 @@ pub fn expand_repos_with_linked_worktrees(
             &primary_abs,
         );
         for (_abs, rel) in linked {
-            if !should_include_linked_worktree(&rel, primary, &ignored, only_repos) {
+            if !should_include_linked_worktree(
+                &rel,
+                primary,
+                &excluded,
+                &config.ignored_paths,
+                only_repos,
+            ) {
                 continue;
             }
             by_path.insert(
@@ -613,7 +649,8 @@ pub fn collect_snapshots(
 /// Exit-style validation: `Err` lists the unknown repo name.
 ///
 /// `loaded` is the merged config from `load_workspace_status_config`. Named
-/// repos bypass `ignoredRepos`, so the walk here ignores nothing.
+/// repos bypass `hiddenPaths` and `ignoredPaths`, so the walk here clears
+/// both lists.
 pub fn validate_filter_repos(
     cwd: &Path,
     loaded: &WorkspaceStatusConfig,
@@ -623,7 +660,8 @@ pub fn validate_filter_repos(
         return Ok(());
     }
     let config = WorkspaceStatusConfig {
-        ignored_repos: Vec::new(),
+        hidden_paths: Vec::new(),
+        ignored_paths: Vec::new(),
         ..loaded.clone()
     };
     let walk_primaries = find_repos_with_config(cwd, &config, None);
@@ -660,5 +698,150 @@ mod tests {
         let parsed = parse_porcelain_change_lines(&[" M README.md", "?? new.txt"]);
         assert_eq!(parsed.unstaged[0].0, 'M');
         assert_eq!(parsed.untracked, vec!["new.txt"]);
+    }
+}
+
+#[cfg(test)]
+mod path_list_tests {
+    use super::*;
+    use crate::testutil::{git, init_repo, unique_dir};
+
+    /// Workspace with repos at each relative path in `repos`.
+    fn workspace(repos: &[&str]) -> std::path::PathBuf {
+        let root = unique_dir("ws-discovery-paths");
+        fs::create_dir_all(&root).unwrap();
+        for repo in repos {
+            init_repo(&root.join(repo));
+        }
+        root
+    }
+
+    fn config(hidden: &[&str], ignored: &[&str]) -> WorkspaceStatusConfig {
+        WorkspaceStatusConfig {
+            hidden_paths: hidden.iter().map(|s| s.to_string()).collect(),
+            ignored_paths: ignored.iter().map(|s| s.to_string()).collect(),
+            ..WorkspaceStatusConfig::with_defaults()
+        }
+    }
+
+    fn found(
+        root: &Path,
+        config: &WorkspaceStatusConfig,
+        only: Option<&BTreeSet<String>>,
+    ) -> Vec<String> {
+        discover_checkouts(root, config, only)
+            .into_iter()
+            .map(|(path, _, _)| path)
+            .collect()
+    }
+
+    #[test]
+    fn ignored_repo_folder_is_not_discovered() {
+        let root = workspace(&["app", "notes"]);
+        assert_eq!(found(&root, &config(&[], &["notes"]), None), vec!["app"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ignored_folder_hides_every_repo_under_it() {
+        let root = workspace(&["app", "tmp/a", "tmp/b/c"]);
+        assert_eq!(
+            found(&root, &config(&[], &[]), None),
+            vec!["app", "tmp/a", "tmp/b/c"]
+        );
+        assert_eq!(found(&root, &config(&[], &["tmp"]), None), vec!["app"]);
+        assert_eq!(found(&root, &config(&["tmp"], &[]), None), vec!["app"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn entry_matches_whole_segments_not_a_prefix() {
+        let root = workspace(&["tmp", "tmpfoo", "app/tmp"]);
+        assert_eq!(
+            found(&root, &config(&["tmp"], &["tmp"]), None),
+            vec!["app/tmp", "tmpfoo"]
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn linked_worktree_under_a_listed_path_is_dropped() {
+        let root = workspace(&["app"]);
+        fs::create_dir_all(root.join("tmp")).unwrap();
+        git(
+            &root.join("app"),
+            &["worktree", "add", "-q", "-b", "feat", "../tmp/app-feat"],
+        );
+        assert_eq!(
+            found(&root, &config(&[], &[]), None),
+            vec!["app", "tmp/app-feat"]
+        );
+        assert_eq!(found(&root, &config(&[], &["tmp"]), None), vec!["app"]);
+        assert_eq!(found(&root, &config(&["tmp"], &[]), None), vec!["app"]);
+        let named: BTreeSet<String> = ["app".to_string()].into();
+        assert_eq!(
+            found(&root, &config(&[], &["tmp"]), Some(&named)),
+            vec!["app"],
+            "a named primary does not bring back a linked worktree under ignoredPaths"
+        );
+        assert_eq!(
+            found(&root, &config(&["tmp"], &[]), Some(&named)),
+            vec!["app", "tmp/app-feat"],
+            "a named primary keeps its linked worktrees under hiddenPaths"
+        );
+        let named_linked: BTreeSet<String> = ["tmp/app-feat".to_string()].into();
+        let loaded = config(&[], &["tmp"]);
+        assert_eq!(
+            found(&root, &loaded, Some(&named_linked)),
+            vec!["tmp/app-feat"],
+            "a linked worktree named itself wins over ignoredPaths"
+        );
+        assert_eq!(
+            validate_filter_repos(&root, &loaded, &["tmp/app-feat".to_string()]),
+            Ok(())
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cleared_hidden_list_still_excludes_ignored_paths() {
+        let root = workspace(&["app", "notes", "tmp/a"]);
+        let loaded = config(&["notes"], &["tmp"]);
+        assert_eq!(found(&root, &loaded, None), vec!["app"]);
+        let show_hidden = WorkspaceStatusConfig {
+            hidden_paths: Vec::new(),
+            ..loaded
+        };
+        assert_eq!(found(&root, &show_hidden, None), vec!["app", "notes"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn named_repo_under_listed_path_is_found_and_validates() {
+        let root = workspace(&["app", "tmp/a", "notes"]);
+        let loaded = config(&["notes"], &["tmp"]);
+        let named: BTreeSet<String> = ["notes".to_string(), "tmp/a".to_string()].into();
+        assert_eq!(found(&root, &loaded, Some(&named)), vec!["notes", "tmp/a"]);
+        assert_eq!(
+            validate_filter_repos(&root, &loaded, &["tmp/a".to_string(), "notes".to_string()]),
+            Ok(())
+        );
+        assert_eq!(
+            validate_filter_repos(&root, &loaded, &["tmp/missing".to_string()]),
+            Err("tmp/missing".to_string())
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ignored_wins_over_hidden() {
+        let root = workspace(&["tmp/a", "tmp/b", "notes"]);
+        let loaded = config(&["tmp", "notes"], &["tmp/a", "notes"]);
+        let show_hidden = WorkspaceStatusConfig {
+            hidden_paths: Vec::new(),
+            ..loaded
+        };
+        assert_eq!(found(&root, &show_hidden, None), vec!["tmp/b"]);
+        let _ = fs::remove_dir_all(root);
     }
 }

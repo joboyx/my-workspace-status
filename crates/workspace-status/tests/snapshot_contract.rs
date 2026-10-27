@@ -1,4 +1,4 @@
-//! Fixture e2e: temp workspace, Rust --json shape and --plain omit hidden ignored.
+//! Fixture e2e: temp workspace, Rust --json shape and --plain omit hidden repos.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -69,7 +69,7 @@ fn fixture() -> (PathBuf, PathBuf) {
     seed_repo(&workspace, "notes", "main", true);
     fs::write(
         workspace.join(".workspace-status-config.json"),
-        "{\n  \"ignoredRepos\": [\"notes\"]\n}\n",
+        "{\n  \"hiddenPaths\": [\"notes\"]\n}\n",
     )
     .unwrap();
     (root, workspace)
@@ -131,10 +131,10 @@ fn json_and_plain_match_snapshot_fixture() {
     let snapshot = run_json(&workspace, &["--json"]);
     let plain = run_plain(&workspace, &["--plain"]);
 
-    assert_eq!(snapshot["version"], 1);
-    assert_eq!(snapshot["showIgnored"], false);
+    assert_eq!(snapshot["version"], 2);
+    assert_eq!(snapshot["showHidden"], false);
     assert_eq!(snapshot["filterRepos"], serde_json::json!([]));
-    assert_eq!(snapshot["ignoredRepos"], serde_json::json!(["notes"]));
+    assert_eq!(snapshot["hiddenPaths"], serde_json::json!(["notes"]));
     let repos: Vec<&str> = snapshot["repos"]
         .as_array()
         .unwrap()
@@ -149,7 +149,7 @@ fn json_and_plain_match_snapshot_fixture() {
         .iter()
         .find(|r| r["repo"] == "app")
         .unwrap();
-    assert_eq!(app["ignored"], false);
+    assert_eq!(app["hidden"], false);
     assert_eq!(app["branch"], "main");
     assert_eq!(app["syncStatus"], "no-upstream");
     assert_eq!(app["checkoutKind"], "primary");
@@ -189,7 +189,7 @@ fn json_and_plain_match_snapshot_fixture() {
 }
 
 #[test]
-fn json_all_and_plain_all_include_ignored() {
+fn json_all_and_plain_all_include_hidden() {
     let (root, workspace) = fixture();
     let snapshot = run_json(&workspace, &["--json", "--all"]);
     let notes = snapshot["repos"]
@@ -198,8 +198,8 @@ fn json_all_and_plain_all_include_ignored() {
         .iter()
         .find(|r| r["repo"] == "notes")
         .expect("notes present");
-    assert_eq!(notes["ignored"], true);
-    assert_eq!(snapshot["showIgnored"], true);
+    assert_eq!(notes["hidden"], true);
+    assert_eq!(snapshot["showHidden"], true);
     assert_eq!(notes["hasUnstaged"], true);
 
     let plain = run_plain(&workspace, &["--plain", "--all"]);
@@ -225,7 +225,7 @@ fn json_fetch_stdout_stays_parseable() {
     let out = cmd.output().unwrap();
     assert!(out.status.success());
     let snapshot: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(snapshot["version"], 1);
+    assert_eq!(snapshot["version"], 2);
     let repos: Vec<&str> = snapshot["repos"]
         .as_array()
         .unwrap()
@@ -240,17 +240,17 @@ fn json_fetch_stdout_stays_parseable() {
 fn json_wins_over_plain() {
     let (root, workspace) = fixture();
     let snapshot = run_json(&workspace, &["--json", "--plain"]);
-    assert_eq!(snapshot["version"], 1);
+    assert_eq!(snapshot["version"], 2);
     let _ = fs::remove_dir_all(root);
 }
 
 #[test]
-fn named_filter_includes_ignored_and_unknown_exits() {
+fn named_filter_includes_hidden_and_unknown_exits() {
     let (root, workspace) = fixture();
     let snapshot = run_json(&workspace, &["--json", "notes"]);
     assert_eq!(snapshot["filterRepos"], serde_json::json!(["notes"]));
     assert_eq!(snapshot["repos"][0]["repo"], "notes");
-    assert_eq!(snapshot["repos"][0]["ignored"], true);
+    assert_eq!(snapshot["repos"][0]["hidden"], true);
 
     let mut cmd = Command::new(bin());
     cmd.args(["--json", "missing-repo"])
@@ -275,7 +275,7 @@ fn ws_alias_runs_same_binary() {
     let out = cmd.output().unwrap();
     assert!(out.status.success());
     let snapshot: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(snapshot["version"], 1);
+    assert_eq!(snapshot["version"], 2);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -366,7 +366,7 @@ fn user_config_file_layers_under_workspace_file() {
         .join("my-workspace-status")
         .join("config.json");
     fs::create_dir_all(user_file.parent().unwrap()).unwrap();
-    fs::write(&user_file, "{\"ignoredRepos\": [\"notes\"]}\n").unwrap();
+    fs::write(&user_file, "{\"hiddenPaths\": [\"notes\"]}\n").unwrap();
     let repo_names = |snapshot: &serde_json::Value| -> Vec<String> {
         snapshot["repos"]
             .as_array()
@@ -377,26 +377,26 @@ fn user_config_file_layers_under_workspace_file() {
     };
 
     let snapshot = run_json(&workspace, &["--json"]);
-    assert_eq!(snapshot["ignoredRepos"], serde_json::json!(["notes"]));
+    assert_eq!(snapshot["hiddenPaths"], serde_json::json!(["notes"]));
     assert_eq!(repo_names(&snapshot), vec!["app", "lib"]);
 
     let all = run_json(&workspace, &["--json", "--all"]);
     assert_eq!(
         repo_names(&all),
         vec!["app", "lib", "notes"],
-        "-a clears ignoredRepos the user file set"
+        "-a clears hiddenPaths the user file set"
     );
 
-    fs::write(&workspace_file, "{\"ignoredRepos\": [\"lib\"]}\n").unwrap();
+    fs::write(&workspace_file, "{\"hiddenPaths\": [\"lib\"]}\n").unwrap();
     let snapshot = run_json(&workspace, &["--json"]);
     assert_eq!(
-        snapshot["ignoredRepos"],
+        snapshot["hiddenPaths"],
         serde_json::json!(["lib"]),
-        "workspace ignoredRepos replaces the user list"
+        "workspace hiddenPaths replaces the user list"
     );
     assert_eq!(repo_names(&snapshot), vec!["app", "notes"]);
 
-    fs::write(&user_file, "{\"ignoredRepos\": [], \"maxDepth\": 0}\n").unwrap();
+    fs::write(&user_file, "{\"hiddenPaths\": [], \"maxDepth\": 0}\n").unwrap();
     let mut cmd = Command::new(bin());
     cmd.args(["--json"])
         .current_dir(&workspace)
@@ -533,7 +533,7 @@ fn workspace_file_git_key_is_rejected() {
     .unwrap();
     fs::write(
         workspace.join(".workspace-status-config.json"),
-        "{\"ignoredRepos\": [], \"git\": \"sh\"}\n",
+        "{\"hiddenPaths\": [], \"git\": \"sh\"}\n",
     )
     .unwrap();
     let user_file = user_config_home(&workspace)
@@ -557,6 +557,144 @@ fn workspace_file_git_key_is_rejected() {
             "{args:?}"
         );
         assert!(!marker.exists(), "no repo file ran ({args:?})");
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Fixture plus dirty repos under `tmp/` and in `tmpfoo`, with
+/// `hiddenPaths: ["notes"]` and `ignoredPaths: ["tmp"]`. Dirty so a leak
+/// would show in `--plain`.
+fn hidden_and_ignored_fixture() -> (PathBuf, PathBuf) {
+    let (root, workspace) = fixture();
+    fs::create_dir_all(workspace.join("tmp/deep")).unwrap();
+    seed_repo(&workspace, "tmp/scratch", "main", true);
+    seed_repo(&workspace, "tmp/deep/x", "main", true);
+    seed_repo(&workspace, "tmpfoo", "main", true);
+    fs::write(
+        workspace.join(".workspace-status-config.json"),
+        "{\n  \"hiddenPaths\": [\"notes\"],\n  \"ignoredPaths\": [\"tmp\"]\n}\n",
+    )
+    .unwrap();
+    (root, workspace)
+}
+
+fn json_repo_names(snapshot: &serde_json::Value) -> Vec<String> {
+    snapshot["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["repo"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Run the binary, expect a non-zero exit, return trimmed stderr.
+fn run_fail(workspace: &Path, args: &[&str]) -> String {
+    let mut cmd = Command::new(bin());
+    cmd.args(args).current_dir(workspace).env("TERM", "dumb");
+    isolate_env(&mut cmd, workspace);
+    for (k, v) in git_env() {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("run binary");
+    assert!(
+        !out.status.success(),
+        "{args:?} must fail, stdout:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    String::from_utf8_lossy(&out.stderr).trim_end().to_string()
+}
+
+#[test]
+fn ignored_paths_stay_out_even_with_all() {
+    let (root, workspace) = hidden_and_ignored_fixture();
+    let snapshot = run_json(&workspace, &["--json"]);
+    assert_eq!(json_repo_names(&snapshot), vec!["app", "lib", "tmpfoo"]);
+
+    let all = run_json(&workspace, &["--json", "-a"]);
+    assert_eq!(
+        json_repo_names(&all),
+        vec!["app", "lib", "notes", "tmpfoo"],
+        "-a shows hiddenPaths repos, never ignoredPaths repos"
+    );
+
+    for args in [&["--plain"][..], &["--plain", "-a"][..]] {
+        let plain = run_plain(&workspace, args);
+        assert!(!plain.contains("scratch"), "{args:?}:\n{plain}");
+        assert!(!plain.contains("deep/x"), "{args:?}:\n{plain}");
+        assert!(plain.contains("tmpfoo"), "{args:?}:\n{plain}");
+    }
+    assert!(run_plain(&workspace, &["--plain", "-a"]).contains("notes"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn named_repo_under_ignored_path_is_shown() {
+    let (root, workspace) = hidden_and_ignored_fixture();
+    let snapshot = run_json(&workspace, &["--json", "tmp/scratch"]);
+    assert_eq!(json_repo_names(&snapshot), vec!["tmp/scratch"]);
+    let plain = run_plain(&workspace, &["--plain", "tmp/scratch"]);
+    assert!(plain.contains("tmp/scratch"), "{plain}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn named_primary_leaves_out_its_linked_worktree_under_ignored_path() {
+    let (root, workspace) = hidden_and_ignored_fixture();
+    git(
+        &workspace.join("app"),
+        &["worktree", "add", "-q", "-b", "feat", "../tmp/app-feat"],
+    );
+    let snapshot = run_json(&workspace, &["--json", "app"]);
+    assert_eq!(json_repo_names(&snapshot), vec!["app"]);
+    let snapshot = run_json(&workspace, &["--json", "tmp/app-feat"]);
+    assert_eq!(json_repo_names(&snapshot), vec!["tmp/app-feat"]);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn removed_ignored_repos_key_fails_startup() {
+    let (root, workspace) = fixture();
+    let workspace_file = workspace.join(".workspace-status-config.json");
+    let tail = "ignoredRepos is no longer supported: use hiddenPaths (hidden by default) or ignoredPaths (never shown)";
+    fs::write(&workspace_file, "{\"ignoredRepos\": [\"notes\"]}\n").unwrap();
+    for args in [&["--json"][..], &["--plain"][..]] {
+        assert_eq!(
+            run_fail(&workspace, args),
+            format!(".workspace-status-config.json {tail}"),
+            "{args:?}"
+        );
+    }
+
+    fs::write(&workspace_file, "{\"hiddenPaths\": []}\n").unwrap();
+    let user_file = user_config_home(&workspace)
+        .join("my-workspace-status")
+        .join("config.json");
+    fs::create_dir_all(user_file.parent().unwrap()).unwrap();
+    fs::write(&user_file, "{\"ignoredRepos\": [\"notes\"]}\n").unwrap();
+    assert_eq!(
+        run_fail(&workspace, &["--json"]),
+        format!("{} {tail}", user_file.display())
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn invalid_ignored_paths_entry_fails_startup() {
+    let (root, workspace) = fixture();
+    let workspace_file = workspace.join(".workspace-status-config.json");
+    for raw in ["../outside", "/abs", "~/notes", "C:\\\\work"] {
+        fs::write(
+            &workspace_file,
+            format!("{{\"hiddenPaths\": [], \"ignoredPaths\": [\"{raw}\"]}}\n"),
+        )
+        .unwrap();
+        let err = run_fail(&workspace, &["--json"]);
+        assert!(
+            err.starts_with(
+                ".workspace-status-config.json ignoredPaths entries must be paths relative to the workspace root"
+            ),
+            "{raw}: {err}"
+        );
     }
     let _ = fs::remove_dir_all(root);
 }

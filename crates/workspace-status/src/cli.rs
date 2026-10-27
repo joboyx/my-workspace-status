@@ -50,7 +50,7 @@ That run does not open the TUI or apply repo filters. A dev build\n\
 (scripts/install-dev.sh) instead rebuilds and reinstalls its checkout."
 )]
 struct Cli {
-    /// Include ignored repos (`showIgnored`).
+    /// Include hidden repos (`hiddenPaths`). Never includes `ignoredPaths`.
     #[arg(short = 'a', long = "all")]
     all: bool,
 
@@ -90,7 +90,7 @@ struct Cli {
     #[arg(short = 'C', long = "workspace", value_name = "PATH")]
     workspace: Option<PathBuf>,
 
-    /// Optional workspace-relative repo filters. Named repos bypass ignoredRepos.
+    /// Optional workspace-relative repo filters. Named repos bypass hiddenPaths and ignoredPaths.
     #[arg(value_name = "REPO")]
     filter_repos: Vec<String>,
 }
@@ -217,7 +217,7 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
 
     let mut config = loaded.clone();
     if cli.all {
-        config.ignored_repos = Vec::new();
+        config.hidden_paths = Vec::new();
     }
 
     let flags = crate::tui::HeadlessFlags {
@@ -329,7 +329,7 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
     }
 
     let workspace =
-        build_workspace_snapshot(&snapshots, &loaded.ignored_repos, cli.all, &filter_repos);
+        build_workspace_snapshot(&snapshots, &loaded.hidden_paths, cli.all, &filter_repos);
     let published = visible_workspace_snapshot(&workspace);
 
     if force_json {

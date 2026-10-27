@@ -156,7 +156,7 @@ fn seed_demo_workspace_state_and_snapshot() {
         &fs::read_to_string(dest.join(".workspace-status-config.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(config["ignoredRepos"], serde_json::json!(["notes"]));
+    assert_eq!(config["hiddenPaths"], serde_json::json!(["notes"]));
     assert_eq!(config["editor"], "vim");
     assert!(dest.join(".remotes/app.git").exists());
     assert!(dest.join(".scratch").is_dir());
@@ -261,7 +261,7 @@ fn seed_demo_workspace_state_and_snapshot() {
         .iter()
         .find(|r| r["repo"] == "notes")
         .expect("notes present with --all");
-    assert_eq!(notes["ignored"], true);
+    assert_eq!(notes["hidden"], true);
     assert_eq!(notes["hasUnstaged"], true);
     let plain_all = run_status(&dest, &["--plain", "--all"]);
     let plain_all_text = String::from_utf8_lossy(&plain_all.stdout);

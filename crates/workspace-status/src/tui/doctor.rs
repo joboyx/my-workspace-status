@@ -2408,7 +2408,7 @@ mod tests {
         make_exec(&bin.join(host_exe("gh")));
         let user = dir.join("config.json");
         fs::write(&user, br#"{"glyphs":"ascii"}"#).unwrap();
-        fs::write(workspace.join(CONFIG_FILENAME), br#"{"ignoredRepos":[]}"#).unwrap();
+        fs::write(workspace.join(CONFIG_FILENAME), br#"{"hiddenPaths":[]}"#).unwrap();
         // A corrupt comment store and a valid UI store; viewed and update
         // check stay missing and must not be created.
         fs::write(state.join("comments.json"), b"{ corrupt").unwrap();

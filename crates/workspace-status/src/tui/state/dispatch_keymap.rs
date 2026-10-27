@@ -93,14 +93,14 @@ impl AppState {
                 self.fold_op(FoldOp::Open);
                 Effect::None
             }
-            Action::ToggleShowIgnored => {
-                self.show_ignored = !self.show_ignored;
-                self.snapshot.show_ignored = self.show_ignored;
+            Action::ToggleShowHidden => {
+                self.show_hidden = !self.show_hidden;
+                self.snapshot.show_hidden = self.show_hidden;
                 self.rebuild_rows();
-                self.status = if self.show_ignored {
-                    "showing ignored repos".into()
+                self.status = if self.show_hidden {
+                    "showing hidden repos".into()
                 } else {
-                    "hiding ignored repos".into()
+                    "hiding hidden repos".into()
                 };
                 Effect::LoadRightPane
             }
@@ -598,7 +598,7 @@ impl AppState {
             }
             Action::Revert => {
                 let scoped =
-                    collect_write_files(&self.snapshot, self.focused_row(), self.show_ignored);
+                    collect_write_files(&self.snapshot, self.focused_row(), self.show_hidden);
                 let selected = scoped
                     .into_iter()
                     .filter(|file| super::is_revertible(&file.change))
@@ -768,7 +768,7 @@ impl AppState {
     }
 
     fn empty_file_write_reason(&self, write: FileWrite) -> Option<String> {
-        let scoped = collect_write_files(&self.snapshot, self.focused_row(), self.show_ignored);
+        let scoped = collect_write_files(&self.snapshot, self.focused_row(), self.show_hidden);
         let empty = scoped.iter().all(|file| match write {
             FileWrite::Stage => !super::is_stageable(&file.change),
             FileWrite::Unstage => !super::is_unstageable(&file.change),
@@ -780,7 +780,7 @@ impl AppState {
         let Some(row) = self.focused_row() else {
             return false;
         };
-        if super::super::stash::row_is_hidden_ignored(row, self.show_ignored) {
+        if super::super::stash::row_is_hidden(row, self.show_hidden) {
             return false;
         }
         if !matches!(

@@ -283,13 +283,13 @@ impl AppState {
     /// Syncs the cache with the snapshot. A checkout with a new or changed
     /// branch is returned. A checkout already looked up for its current
     /// branch is left alone. A checkout that vanished, has a detached HEAD,
-    /// or is a hidden ignored repo is dropped.
+    /// or is a hidden repo is dropped.
     pub(crate) fn due_pr_lookups(&mut self) -> Vec<(PathBuf, String)> {
         let wanted: Vec<(PathBuf, String)> = self
             .snapshot
             .repos
             .iter()
-            .filter(|row| self.show_ignored || !row.ignored)
+            .filter(|row| self.show_hidden || !row.hidden)
             .filter(|row| is_counted_local_branch(&row.branch))
             .map(|row| (PathBuf::from(&row.repo), row.branch.clone()))
             .collect();
@@ -618,9 +618,9 @@ mod tests {
         row
     }
 
-    fn app_with(repos: &[RepoSnapshot], ignored: &[&str]) -> AppState {
-        let ignored: Vec<String> = ignored.iter().map(|name| name.to_string()).collect();
-        let snapshot = build_workspace_snapshot(repos, &ignored, false, &[]);
+    fn app_with(repos: &[RepoSnapshot], hidden: &[&str]) -> AppState {
+        let hidden: Vec<String> = hidden.iter().map(|name| name.to_string()).collect();
+        let snapshot = build_workspace_snapshot(repos, &hidden, false, &[]);
         AppState::new(PathBuf::from("/tmp"), snapshot, true)
     }
 
@@ -724,7 +724,7 @@ mod tests {
             path: path.into(),
             head_id: None,
             branch: branch.map(str::to_string),
-            ignored: false,
+            hidden: false,
             is_current: false,
         };
         app.graph = Some(GraphModel {
@@ -829,7 +829,7 @@ mod tests {
     }
 
     #[test]
-    fn due_lookups_skip_detached_and_hidden_ignored_and_drop_vanished_checkouts() {
+    fn due_lookups_skip_detached_and_hidden_and_drop_vanished_checkouts() {
         let mut app = app_with(
             &[
                 repo("app", "feature"),

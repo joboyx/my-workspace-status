@@ -113,7 +113,7 @@ add_origin() {
 # ---------------------------------------------------------------------------
 write_file "$WORKSPACE/.workspace-status-config.json" <<'EOF'
 {
-  "ignoredRepos": ["notes"],
+  "hiddenPaths": ["notes"],
   "editor": "vim"
 }
 EOF
@@ -425,7 +425,7 @@ commit_all "$LIB" "seed lib"
 add_origin "$LIB" "lib"
 
 # ---------------------------------------------------------------------------
-# notes — ignored dirty repo (`.` reveals it)
+# notes — hidden dirty repo (`.` reveals it)
 # ---------------------------------------------------------------------------
 NOTES="$WORKSPACE/notes"
 init_repo "$NOTES"

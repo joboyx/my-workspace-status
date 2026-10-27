@@ -1,7 +1,7 @@
 //! Vim-style `/` search on the focused pane.
 //!
 //! Tree matches include folded rows. Focusing a tree match unfolds its
-//! ancestors so the row is visible. Hidden ignored repos stay out of tree
+//! ancestors so the row is visible. Hidden repos stay out of tree
 //! search unless shown (`.` / `-a`). Graph search matches subject, body, author,
 //! painted (relative or local) or UTC time, branch and tag names, and sha. Commit-file search
 //! matches paths. Diff search matches painted line text. Explorer tree search
@@ -549,7 +549,7 @@ mod tests {
         }
     }
 
-    fn tree(show_ignored: bool) -> crate::tui::tree::TreeNode {
+    fn tree(show_hidden: bool) -> crate::tui::tree::TreeNode {
         let built = build_workspace_snapshot(
             &[
                 repo("app", Some("README.md")),
@@ -557,7 +557,7 @@ mod tests {
                 repo("notes", Some("secret.md")),
             ],
             &["notes".into()],
-            show_ignored,
+            show_hidden,
             &[],
         );
         build_tree(&visible_for_tree(&built), true, "workspace")
@@ -651,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_ignored_is_not_a_search_hit() {
+    fn hidden_is_not_a_search_hit() {
         let hidden = tree(false);
         assert!(collect_match_ids(&hidden, "secret").is_empty());
         assert!(collect_match_ids(&hidden, "notes").is_empty());
@@ -760,7 +760,7 @@ mod tests {
             path: "feature-wt".into(),
             head_id: Some("ffeeddccbbaa99887766554433221100ffeeddcc".into()),
             branch: Some("feature/login-page".into()),
-            ignored: false,
+            hidden: false,
             is_current: false,
         })];
         assert_eq!(collect_graph_match_indices(&wt_rows, "feature-wt"), vec![0]);

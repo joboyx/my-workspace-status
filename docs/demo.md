@@ -78,7 +78,7 @@ Each clip starts from a fresh launch. The first cursor is `app` → Staged → `
 | `app` | Dirty `feature/auth-refresh`, ahead of origin. Staged `session.ts`, unstaged `auth.ts`, untracked `login.ts`. Linked worktree at `app/.worktrees/feat-login`. |
 | `services/api` | Dirty `feature/rate-limit`, diverged from origin. |
 | `lib` | Clean `main`. Folds under No updates. |
-| `notes` | Dirty and listed in `ignoredRepos`. Hidden until `.` or `-a`. |
+| `notes` | Dirty and listed in `hiddenPaths`. Hidden until `.` or `-a`. |
 | `merger` | `feature/reconciliation` with a merge commit, a stash, and a linked worktree at `merger/.worktrees/recon` on the same branch. |
 
 ## 01 — tree + live diff
@@ -123,11 +123,11 @@ Show: `Stash app` overlay (`s` stash, `Esc` cancel), then the boxed `Drop stash@
 
 Mid still: the drop confirm.
 
-## 07 — show ignored
+## 07 — show hidden
 
 Keys: `.`, pause, `.`.
 
-Show: ignored dirty `notes` (`inbox.md`) enters the tree (`showing ignored repos`), then hides again.
+Show: hidden dirty `notes` (`inbox.md`) enters the tree (`showing hidden repos`), then hides again.
 
 Mid still: `notes` shown.
 

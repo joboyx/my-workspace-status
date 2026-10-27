@@ -42,14 +42,14 @@ pub fn load_graph_model(
     cwd: &Path,
     snapshot: &WorkspaceSnapshot,
     repo: &str,
-    show_ignored: bool,
+    show_hidden: bool,
     focus_branches: &[String],
 ) -> (GraphModel, GraphIdentity) {
     load_graph_model_window(
         cwd,
         snapshot,
         repo,
-        show_ignored,
+        show_hidden,
         0,
         DEFAULT_GRAPH_WINDOW,
         focus_branches,
@@ -64,7 +64,7 @@ pub fn load_graph_model_window(
     cwd: &Path,
     snapshot: &WorkspaceSnapshot,
     repo: &str,
-    show_ignored: bool,
+    show_hidden: bool,
     skip: usize,
     limit: usize,
     focus_branches: &[String],
@@ -97,7 +97,7 @@ pub fn load_graph_model_window(
     let window = window_commits.len();
     let mut commits = window_commits;
     commits.extend(extra);
-    let mut worktrees = load_worktrees(cwd, &repo_dir, snapshot, row, &head, show_ignored);
+    let mut worktrees = load_worktrees(cwd, &repo_dir, snapshot, row, &head, show_hidden);
     if !focus_branches.is_empty() {
         let ids: HashSet<&str> = commits.iter().map(|c| c.id.as_str()).collect();
         stashes.retain(|stash| {
@@ -124,7 +124,7 @@ pub fn load_graph_model_window(
             Some(head.clone())
         },
         sync: Some(sync_from_snapshot(row)),
-        show_ignored,
+        show_hidden,
         uncommitted: Some(has_changes),
         skip,
         limit,
@@ -201,7 +201,7 @@ pub fn merge_autoload(current: &GraphModel, page: GraphModel) -> GraphModel {
         worktrees: page.worktrees,
         head_id: page.head_id,
         sync: page.sync,
-        show_ignored: current.show_ignored,
+        show_hidden: current.show_hidden,
         uncommitted: page.uncommitted.or(current.uncommitted),
         skip: current.skip,
         limit: autoload_limit(current),
@@ -492,12 +492,12 @@ fn load_worktrees(
     snapshot: &WorkspaceSnapshot,
     focused: &WorkspaceRepoSnapshot,
     head: &str,
-    show_ignored: bool,
+    show_hidden: bool,
 ) -> Vec<Worktree> {
     let porcelain = list_worktrees_porcelain(repo_dir);
     let entries = parse_worktree_list_porcelain(&porcelain);
     if entries.is_empty() {
-        return load_worktrees_from_snapshot(snapshot, focused, head, show_ignored);
+        return load_worktrees_from_snapshot(snapshot, focused, head, show_hidden);
     }
     let cwd_abs = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     let primary_rel = focused.primary_repo.as_deref().unwrap_or(&focused.repo);
@@ -508,20 +508,20 @@ fn load_worktrees(
         .filter(|entry| !entry.bare && is_linked_worktree_checkout(&entry.path))
         .filter_map(|entry| {
             let path = worktree_display_path(&entry.path, &cwd_abs, &primary_abs);
-            let ignored = snapshot
+            let hidden = snapshot
                 .repos
                 .iter()
                 .find(|repo| repo.repo == path)
-                .map(|repo| repo.ignored)
+                .map(|repo| repo.hidden)
                 .unwrap_or(false);
-            if !show_ignored && ignored {
+            if !show_hidden && hidden {
                 return None;
             }
             Some(Worktree {
                 path,
                 head_id: entry.head.filter(|h| !h.is_empty()),
                 branch: entry.branch.filter(|b| !b.is_empty()),
-                ignored,
+                hidden,
                 is_current: same_checkout(&entry.path, repo_dir),
             })
         })
@@ -533,7 +533,7 @@ fn load_worktrees_from_snapshot(
     snapshot: &WorkspaceSnapshot,
     focused: &WorkspaceRepoSnapshot,
     head: &str,
-    show_ignored: bool,
+    show_hidden: bool,
 ) -> Vec<Worktree> {
     let primary = focused.primary_repo.as_deref().unwrap_or(&focused.repo);
     snapshot
@@ -542,7 +542,7 @@ fn load_worktrees_from_snapshot(
         .filter(|repo| {
             repo.checkout_kind == CheckoutKind::Linked
                 && repo.primary_repo.as_deref() == Some(primary)
-                && (show_ignored || !repo.ignored)
+                && (show_hidden || !repo.hidden)
         })
         .map(|repo| Worktree {
             path: repo.repo.clone(),
@@ -552,7 +552,7 @@ fn load_worktrees_from_snapshot(
                 None
             },
             branch: Some(repo.branch.clone()),
-            ignored: repo.ignored,
+            hidden: repo.hidden,
             is_current: repo.repo == focused.repo,
         })
         .collect()

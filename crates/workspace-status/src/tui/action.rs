@@ -42,7 +42,7 @@ pub enum Action {
     ArmGChord,
     FoldClose,
     FoldOpen,
-    ToggleShowIgnored,
+    ToggleShowHidden,
     ToggleTreeMode,
     Fetch,
     Pull,

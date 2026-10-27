@@ -1104,7 +1104,7 @@ fn normal_key(
         KeyCode::Char('t') => Action::ToggleTreeMode,
         KeyCode::Char('q') => Action::Quit,
         KeyCode::Char('?') => Action::ToggleHelp,
-        KeyCode::Char('.') => Action::ToggleShowIgnored,
+        KeyCode::Char('.') => Action::ToggleShowHidden,
         KeyCode::Char('f') => Action::Fetch,
         KeyCode::Char('p') => Action::Pull,
         KeyCode::Char('d') => Action::DefaultBranch,
@@ -1414,7 +1414,7 @@ mod tests {
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('.')), normal(), false, false),
-            Action::ToggleShowIgnored
+            Action::ToggleShowHidden
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('f')), normal(), false, false),
@@ -4037,7 +4037,7 @@ mod tests {
             (n, 0, Char('t'), Action::ToggleTreeMode),
             (n, 0, Char('q'), Action::Quit),
             (n, 0, Char('?'), Action::ToggleHelp),
-            (n, 0, Char('.'), Action::ToggleShowIgnored),
+            (n, 0, Char('.'), Action::ToggleShowHidden),
             (
                 n,
                 0,

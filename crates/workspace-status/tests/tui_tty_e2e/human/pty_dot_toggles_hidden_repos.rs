@@ -18,8 +18,8 @@ fn workspace_heading(screen: &str) -> Option<String> {
     tree_line_containing(screen, "# workspace")
 }
 
-/// Daily seed after `.`: ignored `notes` is its own repo row, not a group child.
-fn notes_ignored_repo_row(screen: &str) -> bool {
+/// Daily seed after `.`: hidden `notes` is its own repo row, not a group child.
+fn notes_hidden_repo_row(screen: &str) -> bool {
     let Some(line) = tree_line_containing(screen, "notes") else {
         return false;
     };
@@ -27,7 +27,7 @@ fn notes_ignored_repo_row(screen: &str) -> bool {
         && line.contains('@')
         && line.contains('~')
         && line_on_branch(&line, "main")
-        && !line.contains("[ignored]")
+        && !line.contains("[hidden]")
         && !line.contains("No updates")
         && tree_dir_expanded(screen, "notes")
         && !tree_dir_collapsed(screen, "notes")
@@ -51,20 +51,20 @@ fn seed_tree_stays(screen: &str) -> bool {
         && no_wrong_overlays(screen)
 }
 
-/// Left-focused `.` showed ignored `notes`. Toast-only or No-updates cannot pass.
-fn documented_dot_shows_ignored_notes(screen: &str) -> bool {
+/// Left-focused `.` showed hidden `notes`. Toast-only or No-updates cannot pass.
+fn documented_dot_shows_hidden_notes(screen: &str) -> bool {
     let crumb = crumb_row(screen);
     let status = status_row(screen);
     let heading = workspace_heading(screen).unwrap_or_default();
     panes_tree_focused_diff_unfocused(screen)
         && tree_cursor_on(screen, "README.md")
         && seed_tree_stays(screen)
-        && notes_ignored_repo_row(screen)
+        && notes_hidden_repo_row(screen)
         && tree_readme_rows(screen) == 2
         && heading.contains("2 changed · all current")
         && !heading.contains("1 changed")
-        && crumb.contains("showing ignored repos")
-        && !crumb.contains("hiding ignored repos")
+        && crumb.contains("showing hidden repos")
+        && !crumb.contains("hiding hidden repos")
         && !crumb.contains("[workspace]")
         && crumb.contains("workspace › app")
         && status.contains("focus right")
@@ -74,7 +74,7 @@ fn documented_dot_shows_ignored_notes(screen: &str) -> bool {
 }
 
 /// Second `.` hid `notes`. Hide-only / still-shown cannot pass.
-fn documented_dot_hides_ignored_notes(screen: &str) -> bool {
+fn documented_dot_hides_hidden_notes(screen: &str) -> bool {
     let crumb = crumb_row(screen);
     let status = status_row(screen);
     let heading = workspace_heading(screen).unwrap_or_default();
@@ -86,8 +86,8 @@ fn documented_dot_hides_ignored_notes(screen: &str) -> bool {
         && tree_readme_rows(screen) == 1
         && heading.contains("1 changed · all current")
         && !heading.contains("2 changed")
-        && crumb.contains("hiding ignored repos")
-        && !crumb.contains("showing ignored repos")
+        && crumb.contains("hiding hidden repos")
+        && !crumb.contains("showing hidden repos")
         && !crumb.contains("[workspace]")
         && crumb.contains("workspace › app")
         && status.contains("focus right")
@@ -96,7 +96,7 @@ fn documented_dot_hides_ignored_notes(screen: &str) -> bool {
         && !status.contains("drill")
 }
 
-/// Tab focused the file-diff. Ignored `notes` stays hidden until `.`.
+/// Tab focused the file-diff. Hidden `notes` stays hidden until `.`.
 fn right_focused_notes_still_hidden(screen: &str) -> bool {
     let crumb = crumb_row(screen);
     let status = status_row(screen);
@@ -114,71 +114,71 @@ fn right_focused_notes_still_hidden(screen: &str) -> bool {
         && !status.contains("focus right")
 }
 
-/// Right-focused `.` still shows ignored `notes` (not a left-list action).
-fn documented_dot_shows_ignored_notes_right(screen: &str) -> bool {
+/// Right-focused `.` still shows hidden `notes` (not a left-list action).
+fn documented_dot_shows_hidden_notes_right(screen: &str) -> bool {
     let crumb = crumb_row(screen);
     let status = status_row(screen);
     let heading = workspace_heading(screen).unwrap_or_default();
     panes_tree_unfocused_diff_focused(screen)
         && seed_tree_stays(screen)
-        && notes_ignored_repo_row(screen)
+        && notes_hidden_repo_row(screen)
         && tree_readme_rows(screen) == 2
         && heading.contains("2 changed · all current")
         && !heading.contains("1 changed")
         && crumb.contains("workspace › [app]")
-        && crumb.contains("showing ignored repos")
-        && !crumb.contains("hiding ignored repos")
+        && crumb.contains("showing hidden repos")
+        && !crumb.contains("hiding hidden repos")
         && !status.contains("drill")
         && status.contains("Esc")
         && status.contains("← tree")
         && !status.contains("focus right")
 }
 
-/// `.` shows ignored repos on the tree, then hides them. Toggles either way.
+/// `.` shows hidden repos on the tree, then hides them. Toggles either way.
 ///
-/// Docs: Help VIEW `.` = show / hide ignored repos. Keymap: starts hidden
-/// unless `-a`, rebuilds the tree, works when right-focused. Ignored
-/// `notes` is a muted repo with the ignored glyph (`~` in ASCII), not
-/// `[ignored]` and not a No-updates child. After `.` it is not folded.
-/// Hidden ignored stay out of the tree.
+/// Docs: Help VIEW `.` = show / hide hidden repos. Keymap: starts hidden
+/// unless `-a`, rebuilds the tree, works when right-focused. Hidden
+/// `notes` is a muted repo with the hidden glyph (`~` in ASCII), not
+/// `[hidden]` and not a No-updates child. After `.` it is not folded.
+/// Hidden stay out of the tree.
 ///
 /// Live PTY after first paint: `.` inserts expanded `notes ~` with trailing `@` and its
 /// dirty README, bumps the workspace heading to `2 changed`, and toasts
-/// `showing ignored repos`. A second `.` removes that row and toasts
-/// `hiding ignored repos`. Tab then `.` still toggles. A no-op, hide-only,
+/// `showing hidden repos`. A second `.` removes that row and toasts
+/// `hiding hidden repos`. Tab then `.` still toggles. A no-op, hide-only,
 /// toast-only, or unfold-No-updates cannot pass.
 #[test]
-fn pty_dot_toggles_ignored_repos() {
+fn pty_dot_toggles_hidden_repos() {
     let (_root, workspace) = daily_workspace();
     let mut tui = PtySession::open(&workspace);
     tui.wait_pred(
         documented_launch_first_paint,
-        "first paint: ignored notes hidden (`.` has not run)",
+        "first paint: hidden notes hidden (`.` has not run)",
         WAIT,
     );
 
     tui.key('.');
     tui.wait_pred(
-        documented_dot_shows_ignored_notes,
-        "`.` shows ignored notes as `~` repo row; not No-updates; toast showing",
+        documented_dot_shows_hidden_notes,
+        "`.` shows hidden notes as `~` repo row; not No-updates; toast showing",
         WAIT,
     );
     tui.wait_ms(SETTLE_MS);
     tui.wait_pred(
-        documented_dot_shows_ignored_notes,
-        "shown ignored notes hold (not a flicker, toast-only, or group unfold)",
+        documented_dot_shows_hidden_notes,
+        "shown hidden notes hold (not a flicker, toast-only, or group unfold)",
         WAIT,
     );
 
     tui.key('.');
     tui.wait_pred(
-        documented_dot_hides_ignored_notes,
+        documented_dot_hides_hidden_notes,
         "second `.` hides notes; heading back to 1 changed; toast hiding",
         WAIT,
     );
     tui.wait_ms(SETTLE_MS);
     tui.wait_pred(
-        documented_dot_hides_ignored_notes,
+        documented_dot_hides_hidden_notes,
         "hidden notes hold (not a flicker or hide-only first press)",
         WAIT,
     );
@@ -191,13 +191,13 @@ fn pty_dot_toggles_ignored_repos() {
     );
     tui.key('.');
     tui.wait_pred(
-        documented_dot_shows_ignored_notes_right,
-        "right-focused `.` still shows ignored notes (not a left-list no-op)",
+        documented_dot_shows_hidden_notes_right,
+        "right-focused `.` still shows hidden notes (not a left-list no-op)",
         WAIT,
     );
     tui.wait_ms(SETTLE_MS);
     tui.wait_pred(
-        documented_dot_shows_ignored_notes_right,
+        documented_dot_shows_hidden_notes_right,
         "right-focused shown notes hold",
         WAIT,
     );

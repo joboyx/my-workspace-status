@@ -81,8 +81,8 @@ pub enum IconKind {
     Synced,
     /// `git status` failed for the checkout.
     StatusFailed,
-    /// Repo listed as ignored in config.
-    Ignored,
+    /// Repo listed as hidden in config.
+    Hidden,
     /// Muted count of changed paths on a repo or checkout row.
     ChangeCount,
     /// Muted `N wt` count of checkouts on a repo family row.
@@ -391,11 +391,11 @@ pub const ICON_CATALOG: &[IconSpec] = {
             TREE,
         ),
         row(
-            K::Ignored,
+            K::Hidden,
             "\u{f070}",
             "~",
-            "ignored",
-            "Ignored in config; . shows or hides it",
+            "hidden",
+            "Hidden in config (hiddenPaths); . shows or hides it",
             TREE,
         ),
         row(
@@ -704,8 +704,8 @@ pub fn icon_folder_open(ascii: bool) -> &'static str {
 pub fn icon_clean(ascii: bool) -> &'static str {
     IconKind::Clean.glyph(ascii)
 }
-pub fn icon_ignored(ascii: bool) -> &'static str {
-    IconKind::Ignored.glyph(ascii)
+pub fn icon_hidden(ascii: bool) -> &'static str {
+    IconKind::Hidden.glyph(ascii)
 }
 pub fn icon_ahead(ascii: bool) -> &'static str {
     IconKind::Ahead.glyph(ascii)
@@ -1240,7 +1240,7 @@ mod tests {
             icon_branch(true),
             icon_folder(true),
             icon_clean(true),
-            icon_ignored(true),
+            icon_hidden(true),
             icon_ahead(true),
             icon_behind(true),
             icon_diverged(true),
@@ -1266,7 +1266,7 @@ mod tests {
             icon_branch(false),
             icon_folder(false),
             icon_clean(false),
-            icon_ignored(false),
+            icon_hidden(false),
             icon_ahead(false),
             icon_behind(false),
             icon_diverged(false),
@@ -1344,7 +1344,7 @@ mod tests {
             (icon_folder, IconKind::Folder, "\u{f07b}", "/"),
             (icon_folder_open, IconKind::FolderOpen, "\u{f07c}", "/"),
             (icon_clean, IconKind::Clean, "\u{f00c}", "."),
-            (icon_ignored, IconKind::Ignored, "\u{f070}", "~"),
+            (icon_hidden, IconKind::Hidden, "\u{f070}", "~"),
             (icon_ahead, IconKind::Ahead, "\u{f062}", "^"),
             (icon_behind, IconKind::Behind, "\u{f063}", "v"),
             (icon_diverged, IconKind::Diverged, "\u{e727}", "Y"),
@@ -1493,7 +1493,7 @@ mod tests {
     }
 
     /// Glyphs that paint in the same place differ in both modes. A pair
-    /// that shares a glyph (ASCII `#` workspace and Staged, `~` ignored and
+    /// that shares a glyph (ASCII `#` workspace and Staged, `~` hidden and
     /// Changes, `o` open-vs-default and graph uncommitted) sits in
     /// different contexts, where position tells them apart.
     #[test]
@@ -1521,7 +1521,7 @@ mod tests {
                     K::NoUpstream,
                     K::Clean,
                     K::StatusFailed,
-                    K::Ignored,
+                    K::Hidden,
                     K::ChangeCount,
                     K::WorktreeCount,
                     K::Comment,
@@ -1614,7 +1614,7 @@ mod tests {
         }
         // The shared pairs named above, and the latent Clean / Synced clash.
         assert_eq!(K::Workspace.glyph(true), K::Staged.glyph(true));
-        assert_eq!(K::Ignored.glyph(true), K::Changes.glyph(true));
+        assert_eq!(K::Hidden.glyph(true), K::Changes.glyph(true));
         assert_eq!(
             K::OpenVsDefault.glyph(true),
             K::GraphUncommitted.glyph(true)

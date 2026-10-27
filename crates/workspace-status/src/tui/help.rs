@@ -200,9 +200,9 @@ const HELP_PANE_SIZES: HelpEntry = HelpEntry {
 };
 
 /// `.` everywhere but the Explorer tab (VIEW).
-const HELP_IGNORED_REPOS: HelpEntry = HelpEntry {
+const HELP_HIDDEN_REPOS: HelpEntry = HelpEntry {
     keys: ".",
-    desc: "show / hide ignored repos",
+    desc: "show / hide hidden repos",
 };
 
 /// MOVE on every tab but Workspace: no `-` Explorer row.
@@ -342,7 +342,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
         ],
     },
-    view_group!(HELP_PANE_SIZES; HELP_IGNORED_REPOS),
+    view_group!(HELP_PANE_SIZES; HELP_HIDDEN_REPOS),
 ];
 
 /// Compare-tab column that takes the place of GIT while a compare tab is active.
@@ -1579,7 +1579,7 @@ mod tests {
         for group in help_groups(HelpTab::Explorer) {
             for entry in group.entries {
                 assert_ne!(entry.desc, HELP_DASH_EXPLORER.desc, "{entry:?}");
-                assert_ne!(entry.keys, ".", "no ignored-repo toggle: {entry:?}");
+                assert_ne!(entry.keys, ".", "no hidden-repo toggle: {entry:?}");
             }
         }
         assert!(!HELP_EXPLORER_VIEW_GROUP.entries.contains(&HELP_PANE_SIZES));

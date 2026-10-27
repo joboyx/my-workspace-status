@@ -1772,7 +1772,7 @@ mod tests {
             label: "workspace".into(),
             repo: None,
             primary_repo: None,
-            ignored: false,
+            hidden: false,
             file: None,
             children: Vec::new(),
             chrome: NodeChrome::default(),
@@ -2593,7 +2593,7 @@ mod tests {
             path: "app".into(),
             head_id: None,
             branch: Some("main".into()),
-            ignored: false,
+            hidden: false,
             is_current: false,
         });
         match resolve_entity_reference(

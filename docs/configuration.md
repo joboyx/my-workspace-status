@@ -17,28 +17,30 @@ Two files use the same keys, except that `git`, `updateCheckStore`, `commentStor
 
 Merge rules:
 
-- A missing file sets nothing. With neither file, nothing is ignored and discovery uses the default depth.
+- A missing file sets nothing. With neither file, nothing is hidden or ignored and discovery uses the default depth.
 - A file that exists but cannot be read is an error in both files, not a missing file: `<file>: <io error>` (no permission, a directory), or `<file>: symlink target is missing: <io error>` for a dangling symlink.
-- A user file that is not valid JSON, or whose top level is not an object, is an error: `<path> is not a valid JSON object: <parser message>`. For the workspace file the error stays `.workspace-status-config.json must contain an ignoredRepos string array`.
+- A user file that is not valid JSON, or whose top level is not an object, is an error: `<path> is not a valid JSON object: <parser message>`. For the workspace file a missing `hiddenPaths` gives `.workspace-status-config.json must contain a hiddenPaths string array`.
 - The workspace file wins per top-level key. A key that the workspace file omits keeps the user file value.
 - `viewDefaults` and `defaultBranches` merge per sub-key. The workspace sub-key wins.
-- Arrays are replaced, not joined. A workspace `ignoredRepos` (also `[]`) replaces the user list.
+- Arrays are replaced, not joined. A workspace `hiddenPaths` or `ignoredPaths` (also `[]`) replaces the user list of the same name.
 - A `null` value, and a blank `editor` / `diffTool`, count as omitted, so the user file value applies.
 - Both files are strict. An invalid user file fails the same way as an invalid workspace file. The error starts with the file: the full path for the user file, `.workspace-status-config.json` for the workspace file. Example: `~/.config/my-workspace-status/config.json maxDepth must be a positive integer` (with your real home path).
-- `ignoredRepos` is required in the workspace file when that file exists. In the user file it is optional; an omitted or `null` user `ignoredRepos` sets nothing. A wrong type is an error in both files.
+- `hiddenPaths` is required in the workspace file when that file exists. In the user file it is optional; an omitted or `null` user `hiddenPaths` sets nothing. `ignoredPaths` is optional in both files. A wrong type is an error in both files.
+- The old key `ignoredRepos` (any value, also `null`) is an error in both files. See [Migrating from `ignoredRepos`](#migrating-from-ignoredrepos).
 - Nothing writes either file.
 
 PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` point `XDG_CONFIG_HOME` at a temp dir, so a user file cannot change their results. The PTY and desktop harnesses write a fixed baseline user file there (theme and `viewDefaults.background`, see [tui-tty-e2e.md](tui-tty-e2e.md)); the capture script leaves it empty unless its `WS_STATUS_STILLS_THEME` / `WS_STATUS_STILLS_BACKGROUND` knobs write `theme` / `viewDefaults.background` there (see [demo.md](demo.md)). CI guards those TTY spawn paths only: `tty_spawn_paths_isolate_user_config` in `crates/workspace-status/tests/release_watch.rs`. The CLI integration tests that run the binary (`snapshot_contract.rs`, `update.rs`, `seed_demo_workspace.rs`) also set `XDG_CONFIG_HOME`, but no CI guard checks them.
 
 ## `.workspace-status-config.json`
 
-The keys below apply to both files. A missing file means nothing is ignored and discovery uses the default depth.
+The keys below apply to both files. A missing file means nothing is hidden or ignored and discovery uses the default depth.
 
 `--plain` and `--json` read one workspace snapshot. See [snapshot.md](./snapshot.md).
 
 ```json
 {
-  "ignoredRepos": ["notes"],
+  "hiddenPaths": ["notes", "dotfiles"],
+  "ignoredPaths": ["tmp", "vendor/archive"],
   "maxDepth": 3,
   "defaultBranches": {
     "acme/acme-main": "develop"
@@ -74,22 +76,66 @@ User file only (a workspace file that sets these keys fails to load):
 }
 ```
 
-| Key               | Required                   | Default                       | Meaning                                                                                        |
-| ----------------- | -------------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------- |
-| `ignoredRepos`    | workspace file: yes; user file: no | `[]` when no file sets it     | Repo paths relative to the workspace root to skip                                              |
-| `maxDepth`        | no                         | `3`                           | Walk depth for primary `.git` dirs/gitfiles (dot dirs skipped; linked via `git worktree list`) |
-| `defaultBranches` | no                         | `{}`                          | Map of workspace-relative repo path → sole default branch for that repo                        |
-| `editor`          | no                         | unset (`vim` at resolve)      | Command string for TUI `e` (same shape as `$EDITOR`). Overrides `$VISUAL` / `$EDITOR`.         |
-| `diffTool`        | no                         | unset (`vimdiff` at resolve) | Command string for TUI `E`. No `$EDITOR` / `$VISUAL` / `$GIT_EXTERNAL_DIFF` fallback.          |
-| `viewDefaults`    | no                         | `{}` (in-app defaults)        | TUI launch view modes. See [`viewDefaults`](#viewdefaults)                                     |
+| Key               | Required                           | Default                      | Meaning                                                                                        |
+| ----------------- | ---------------------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------- |
+| `hiddenPaths`     | workspace file: yes; user file: no | `[]` when no file sets it    | Paths relative to the workspace root whose repos are hidden until `.` or `-a`                  |
+| `ignoredPaths`    | no                                 | `[]` when no file sets it    | Paths relative to the workspace root whose repos are never shown, unless named on the CLI      |
+| `maxDepth`        | no                                 | `3`                          | Walk depth for primary `.git` dirs/gitfiles (dot dirs skipped; linked via `git worktree list`) |
+| `defaultBranches` | no                                 | `{}`                         | Map of workspace-relative repo path → sole default branch for that repo                        |
+| `editor`          | no                                 | unset (`vim` at resolve)     | Command string for TUI `e` (same shape as `$EDITOR`). Overrides `$VISUAL` / `$EDITOR`.         |
+| `diffTool`        | no                                 | unset (`vimdiff` at resolve) | Command string for TUI `E`. No `$EDITOR` / `$VISUAL` / `$GIT_EXTERNAL_DIFF` fallback.          |
+| `viewDefaults`    | no                                 | `{}` (in-app defaults)       | TUI launch view modes. See [`viewDefaults`](#viewdefaults)                                     |
 | `theme`, `themeMode`, `glyphs`, `watchMs`, `fetchMs`, `fetchConcurrency`, `updateCheck`, `termProgress`, `smoothScroll` | no | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
 | `updateCheckStore`, `commentStore`, `viewedStore`, `uiStore`, `git` | no; user file or env only | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
 
-### `ignoredRepos`
+### `hiddenPaths` and `ignoredPaths`
 
-Entries are repo paths relative to the workspace root (`dotfiles`, `services/api`, `apps/web/packages/ui`). On load they are trimmed, path-normalized (strip leading `./`, trailing `/`, unify `\` to `/`), de-duplicated, and sorted — so `notes/`, `./notes`, and `notes` all match discovered `notes`. A malformed file throws rather than being ignored — a typo silently dropping repos from a status report is worse than a crash.
+Both keys hold paths relative to the workspace root. Each entry is a repo folder (`dotfiles`, `services/api`) or a folder that holds repos (`tmp`). A repo matches when its path equals the entry or sits under it, by whole path segments: `tmp` matches `tmp` and `tmp/a/b`, never `tmpfoo`. A bare repo name is not matched at any depth.
 
-Ignored repos are skipped by discovery (the ignored path and everything under it), so they are excluded from status, fetch, pull, and default-branch switching. Ignoring a primary also drops its linked worktrees under that path; a linked path can be listed on its own in `ignoredRepos`. The TUI still discovers ignored repos so `.` can show them. While they are hidden (no `-a`, or after `.` hides), the tree also omits linked worktrees of an ignored primary even when that linked row is `ignored=false`. They return with `.` / `-a` as a nested family. Workspace-level `f` / `p` / `P` / `d` skip those paths while they are hidden; when ignored repos are shown (`.` or launch `-a`), they follow the same primary / focused-worktree rule as other visible rows. Background fetch (`WS_STATUS_FETCH_MS`) is not focus-scoped: it fetches every snapshot except hidden ignored (linked worktrees included; shown ignored included).
+On load, entries are trimmed, path-normalized (strip leading `./`, trailing `/`, unify `\` to `/`), de-duplicated, and sorted. `notes/`, `./notes`, and `notes` are the same entry.
+
+An entry that starts with `/`, `\`, or `~`, starts with a drive letter (`C:`), or has a `..` segment fails startup:
+
+```text
+<file> <key> entries must be paths relative to the workspace root, without `..` (got "<entry>")
+```
+
+A value that is not a string array fails with `<file> <key> must be a string array`. A typo that silently drops repos from a status report is worse than a crash.
+
+| Key | Repos at or under an entry | Shown by `.` / `-a` |
+| --- | --- | --- |
+| `hiddenPaths` | Discovered, but hidden by default. Out of the tree, `--plain` / `--json`, search, and workspace-level fetch, pull, and default-branch switching until shown. | Yes |
+| `ignoredPaths` | Never discovered, shown, fetched, pulled, or switched, unless named on the command line. Linked worktrees at or under an entry are dropped too. | No |
+
+When a path is under both lists, `ignoredPaths` wins. A repo named on the command line (`ws tmp/foo`) is shown even under either list.
+
+Hidden repos behave like this:
+
+- The TUI discovers them so `.` can show them. While hidden (no `-a`, or after `.` hides), the tree also omits linked worktrees of a hidden primary, even when that linked row is `hidden=false`. They return with `.` / `-a` as a nested family.
+- Workspace-level `f` / `p` / `P` / `d` skip hidden paths. When hidden repos are shown (`.` or launch `-a`), they follow the same primary / focused-worktree rule as other visible rows.
+- Background fetch (`WS_STATUS_FETCH_MS`) is not focus-scoped. It fetches every snapshot except hidden ones (linked worktrees included; shown hidden repos included).
+
+Example with both keys:
+
+```json
+{
+  "hiddenPaths": ["notes", "dotfiles"],
+  "ignoredPaths": ["tmp", "vendor/archive"]
+}
+```
+
+#### Migrating from `ignoredRepos`
+
+Breaking change. The key `ignoredRepos` is removed. Any `ignoredRepos` key (also `null`) in the user file or the workspace file fails startup:
+
+```text
+<file> ignoredRepos is no longer supported: use hiddenPaths (hidden by default) or ignoredPaths (never shown)
+```
+
+- Rename `ignoredRepos` to `hiddenPaths`. Behavior is the same, except that entries now match by path segment and must be relative paths.
+- Add `ignoredPaths` for folders whose repos must never show.
+- The workspace file still needs a `hiddenPaths` array (use `[]` if you have none).
+- `--json` snapshot version 2 renames `showIgnored`, `ignoredRepos`, and `ignored` to `showHidden`, `hiddenPaths`, and `hidden`. See [snapshot.md](./snapshot.md).
 
 ### `maxDepth`
 
@@ -108,7 +154,7 @@ Nested repos under a parent repo are still discovered when depth allows (e.g. bo
 
 ### `defaultBranches`
 
-Optional object mapping workspace-relative repo paths to a single default branch name (e.g. `"acme/acme-main": "develop"`). Keys are normalized like `ignoredRepos` (trim, strip `./`, unify separators). When a repo has an entry:
+Optional object mapping workspace-relative repo paths to a single default branch name (e.g. `"acme/acme-main": "develop"`). Keys are normalized like `hiddenPaths` (trim, strip `./`, unify separators). When a repo has an entry:
 
 - Classification, summary Branches section, verbose ordering, and TUI branch markers / attention grouping treat **only** that branch as default (so `main` is non-default if the override is `develop`).
 - `--default-branch` and TUI `d` switch to that branch (not `origin/HEAD`).
@@ -154,10 +200,10 @@ Commit and stash file rows: LEFT is the first-parent blob (`rev^:path`), or an e
 
 | Override              | Effect                                                                                                                                                                                                       |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `-a` / `--all`        | `ignoredRepos` is replaced with `[]` for that run, whichever file set it; `maxDepth` / `defaultBranches` / `editor` / `diffTool` / `viewDefaults` from config are kept                                                                                |
-| Positional repo paths | Only those repos are processed, and they bypass `ignoredRepos` entirely. Naming a primary includes its linked children under cwd; naming a linked path (e.g. `app/.worktrees/feat`) includes only that path. |
+| `-a` / `--all`        | `hiddenPaths` is replaced with `[]` for that run, whichever file set it; `ignoredPaths` is kept; `maxDepth` / `defaultBranches` / `editor` / `diffTool` / `viewDefaults` from config are kept                                                                                |
+| Positional repo paths | Only those repos are processed, and they bypass `hiddenPaths` and `ignoredPaths` entirely. Naming a primary includes its linked children under cwd, except linked worktrees at or under an `ignoredPaths` entry; naming a linked path (e.g. `app/.worktrees/feat`) includes only that path. |
 
-The two overrides differ in the TUI. `-a` replaces the ignored list before the TUI sees it, so the ignored set is empty and the surfaced repos render and fold like any other repo — expanded, no muted name, no ignored glyph. Positional paths leave the loaded config intact, so a named repo that is also in `ignoredRepos` renders with a muted name plus the ignored glyph and starts collapsed.
+The two overrides differ in the TUI. `-a` replaces the hidden list before the TUI sees it, so the hidden set is empty and the surfaced repos render and fold like any other repo — expanded, no muted name, no hidden glyph. Positional paths leave the loaded config intact, so a named repo that is also under `hiddenPaths` renders with a muted name plus the hidden glyph and starts collapsed.
 
 ### Env-backed keys
 
@@ -225,7 +271,7 @@ Optional object. It sets the TUI view modes at launch. Each key is optional. An 
 - `commitTree` sets the commit file list in commit drills and in each new compare tab. A `t` toggle changes the current tab only. The next compare tab opens in the `commitTree` mode again.
 - `-a` / `--all` and positional repo paths keep `viewDefaults`.
 - `diff: "split"` does not force side-by-side in a narrow pane. The split to inline fallback below `NARROW_SXS` still applies (see **Defaults**).
-- There are no keys for mouse, ignored visibility, pane widths, or folds.
+- There are no keys for mouse, hidden-repo visibility, pane widths, or folds.
 
 ## Environment variables
 
@@ -371,8 +417,8 @@ On many macOS setups there is no dedicated PageUp key. `Fn+Up` and `Fn+Down` oft
 | Background       | Paint: theme colours fill the panes and chrome rows. `viewDefaults.background` overrides at launch                                                | —                                                    |
 | Live refresh     | On, 3 s                                                                                                                                           | `WS_STATUS_WATCH_MS=0`                               |
 | Background fetch | On, 5 min, one fetch per workspace across `ws` instances                                                                                          | `WS_STATUS_FETCH_MS=0`                               |
-| Initial folds    | The "No updates" group collapsed, plus any repo the TUI was given as ignored (positional args only — never under `-a` or after `.` shows ignored) | `z` / `h` / `l`                                      |
-| Ignored repos    | Hidden unless launched with `-a`                                                                                                                  | `.`                                                  |
+| Initial folds    | The "No updates" group collapsed, plus any repo the TUI was given as hidden (positional args only — never under `-a` or after `.` shows hidden repos) | `z` / `h` / `l`                                      |
+| Hidden repos     | Hidden unless launched with `-a`                                                                                                                  | `.`                                                  |
 | Initial cursor   | First file row, else first repo row, else the workspace row                                                                                       | —                                                    |
 
 Split falls back to inline when the diff's painted width (the right pane less its one-column scrollbar, `diff_paint_width` / `NARROW_SXS` in `tui/split.rs`) is below 100 columns; the diff header then reads `inline (too narrow)` and the status pill `split→inline`. Widen the right pane with `<` or a divider drag. Drag the in-diff RULE to resize columns for the rest of the session (resets on next launch).
@@ -503,9 +549,9 @@ See [tui-rust.md](./tui-rust.md) for the same keys with layout notes. In Normal,
 | `gt` / `gT` / `g1`–`g9`                    | next tab / previous tab / jump to tab. `1` is Workspace. Missing index is a silent no-op. Bare `t` stays tree/flat. Bare `T` does nothing. A typeless CSI-u echo of the same key is ignored |
 | `gx`                                       | open the PR of the focused branch row in the browser: a tree checkout row with a branch, or a graph worktree row with a branch. Other rows and a detached HEAD say `no PR for this row`. A branch with no open or merged PR says `no PR for <branch>`. Needs `gh` (GitHub) or `glab` (GitLab) installed and logged in; see **Pull request badges** below. Bare `x` stays revert. Also palette `Open PR` |
 | `gw`                                       | view the focused item on GitHub or GitLab in the browser: a repo row opens the repository home, a checkout or graph worktree row its branch (a detached HEAD its commit), a graph commit its commit page, a file or folder (tree, Explorer, commit-file or compare list) that path at the checkout branch, or at the commit for a commit drill or compare tab. A focused diff line or Explorer file line adds the line anchor (new side only). Checks the remote first from local refs (no `gh` / `glab` needed): `branch <b> is not on origin`, `commit <short> is not on origin`, `file <path> is not on origin/<b>` (at a commit: `file <path> is not on origin at <short>`), `no remote for this checkout`, `origin is not a GitHub or GitLab remote`. A stash or uncommitted row says it is local only; other rows say `nothing to view remotely on this row`. Bare `w` does nothing. Also palette `View remotely` |
-| `gh`                                       | pin the icon popover of the focused row: one section per icon the row paints (on workspace, repo, checkout, and No updates rows: every glyph, the merge mark, PR badge, sync mark, status failed, ignored, change count, and `N wt`; on section, folder, and file rows, including commit-file and compare file lists: the section and folder glyphs, file devicon, status letter, viewed eye, and comment mark; on graph rows: the commit, HEAD, or stash node, the comment mark, the uncommitted or worktree glyph, the PR badge, and the worktree marks and ref chips under a commit), clipped icons included. A row with no icon says `no icons on this row`. While it is open, `j` / `k` (or arrows) move between field and action lines, Enter runs the focused action (a disabled one keeps the popover open and shows why), `y` copies the focused line, and Esc or right-click closes it. Other keys do nothing. Watch and fetch ticks keep running. Changing the focused row closes it. The `:` palette row Icon popover does the same |
+| `gh`                                       | pin the icon popover of the focused row: one section per icon the row paints (on workspace, repo, checkout, and No updates rows: every glyph, the merge mark, PR badge, sync mark, status failed, hidden, change count, and `N wt`; on section, folder, and file rows, including commit-file and compare file lists: the section and folder glyphs, file devicon, status letter, viewed eye, and comment mark; on graph rows: the commit, HEAD, or stash node, the comment mark, the uncommitted or worktree glyph, the PR badge, and the worktree marks and ref chips under a commit), clipped icons included. A row with no icon says `no icons on this row`. While it is open, `j` / `k` (or arrows) move between field and action lines, Enter runs the focused action (a disabled one keeps the popover open and shows why), `y` copies the focused line, and Esc or right-click closes it. Other keys do nothing. Watch and fetch ticks keep running. Changing the focused row closes it. The `:` palette row Icon popover does the same |
 | `t`                                        | flat ↔ directory tree — workspace `treeMode` at depth 0; `commitTreeMode` at depth ≥ 1 (independent). View-mode like `i` (works when right-focused). Launch state comes from `viewDefaults.tree` / `viewDefaults.commitTree`; the toggle changes this session only                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `.`                                        | show / hide ignored repos. Starts shown when launched with `-a`, hidden otherwise. Toggles either way. Rebuilds the tree like `t`. Hidden ignored includes linked worktrees of an ignored primary; they return nested under the family. Not a left-list action (works when right-focused). Overlay / search / confirm swallow the key.                                                                                                                                                                                                                  |
+| `.`                                        | show / hide hidden repos (`hiddenPaths`; never `ignoredPaths`). Starts shown when launched with `-a`, hidden otherwise. Toggles either way. Rebuilds the tree like `t`. Hidden includes linked worktrees of a hidden primary; they return nested under the family. Not a left-list action (works when right-focused). Overlay / search / confirm swallow the key.                                                                                                                                                                                                                  |
 | Focus a file                               | load its diff (lazy, cached by mtime)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `s` / `u` / `x`                            | stage / unstage / revert — file, dir, or repo; `x` confirms with counts and shows only the keys that apply: tracked only `y`; tracked + untracked `y` (keeps untracked) or `Y` (also deletes untracked); one untracked file `y` deletes it; several untracked files `Y` deletes them. A key the box does not show does nothing. While `V` highlight is on a working-tree file diff, `s` / `u` stage / unstage only the highlighted add/del lines (or the hunk covering that range) via `git apply --cached`. They do not whole-file stage. `x` in that highlight discards only the highlighted unstaged add/del lines from the worktree via `git apply --reverse` after a `y` / `n` confirm. The index does not change. Fail closed if that range cannot become a valid patch. On a commit / stash / worktree drill diff they refuse with a breadcrumb (no `git apply`). On a compare tab `s` / `u` refuse; `x` on a file row or the open compare diff restores that file from the compare **merge base** in the worktree (an added file is deleted; the confirm says so), and `x` in a highlight reverts only those lines to the merge base. Compare `x` needs the file clean and HEAD still at the compare head, and asks `y` / `n` first. |                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `S`                                        | stash menu (Shift-s; `s` stays stage). Left pane only. Depth 0: dirty repo / checkout / dir / file (hidden on workspace, group, and family). Not at depth 2. Graph: uncommitted → stash; stash row → apply / pop / drop (and stash if dirty); commit → stash if dirty, apply/pop latest if stashes exist. Tree row on a clean checkout that has stashes → apply / pop of the latest stash. Overlay: `s` stash (`git stash push -u`; file/dir path-scoped, else whole tree), `a` apply stash, `p` pop stash, `D` drop stash (`d` works too; menu closes, then `y`/`n`/Esc confirm). The op chips paint once, inside the box. Enter runs the first listed op. Esc cancels. The box repeats the current status line (in its kind's color) above `Esc cancel`. Dirty checkout “commit or stash first” is actionable here. |
@@ -520,7 +566,7 @@ See [tui-rust.md](./tui-rust.md) for the same keys with layout notes. In Normal,
 | `-` (Explorer)                             | Workspace tab, tree focused, on a repo, worktree, folder, or file row: open or focus that checkout's Explorer tab (a family repo row is its primary checkout; a linked worktree row is that worktree) and reveal the row: a file row selects the file with its folders open and previews it, a folder row opens that folder, a checkout row opens at the root. On an Explorer tab: jump to the parent folder. Elsewhere (workspace or group row, graph or diff pane) `-` refuses with `focus a checkout, folder, or file in the tree`; on a compare tab it says `Switch to Workspace tab`. It never resizes the commit message. Palette: Open in Explorer (`-` chip) shows the same reasons, and `Switch to Workspace tab` on an Explorer tab |
 | `[` / `]`                                  | Explorer tab: previous / next file tab inside it (wraps), and select that file in the tree. Off an Explorer tab it says `[ ] switch Explorer file tabs`; with no file tab, `no file tabs open` |
 | `r`                                        | refresh the focused repo; the whole workspace when on the workspace row or the "No updates" group                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `f`                                        | `git fetch --quiet` for the focused checkout, or primary checkouts on the workspace / family row. Linked worktrees are included only when that worktree row is focused. Hidden ignored repos are skipped. Shown ignored repos follow the same primary / focused-worktree rule. The background fetch timer is separate: every snapshot except hidden ignored, including linked worktrees and shown ignored.                                                                                                                                                                                                              |
+| `f`                                        | `git fetch --quiet` for the focused checkout, or primary checkouts on the workspace / family row. Linked worktrees are included only when that worktree row is focused. Hidden repos are skipped. Shown hidden repos follow the same primary / focused-worktree rule. The background fetch timer is separate: every snapshot except hidden ones, including linked worktrees and shown hidden repos.                                                                                                                                                                                                              |
 | `p`                                        | pull: workspace / family → primary checkouts with `syncStatus` `behind`; focused checkout (including a linked worktree) → that path only. Dirty trees auto-stash around pull. On a file / dir / section row the status says `focus a repo or checkout to pull`. |
 | `P`                                        | push: repo/checkout when `ahead`, `diverged`, or `no-upstream`. Family → primary only. Focused linked worktree → that path. Not on workspace. Opens a `y`/`n` confirm first (`Push <branch> → <remote>?`); `y` runs `git push --quiet`, or `git push -u <remote> HEAD --quiet` when publishing a new/mis-tracked branch (no force)                                                                                                                                                                                                                                                                                                                                                        |
 | `W`                                        | remove the focused linked worktree after a boxed confirm (`y` / `n`; a dirty worktree says how many changed files are deleted and that the branch is kept). Unshifted `w` is not this action. Other rows refuse with `Focus a linked worktree to remove` |

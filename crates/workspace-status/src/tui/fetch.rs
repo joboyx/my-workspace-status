@@ -6,7 +6,7 @@
 //! `fetchConcurrency`, else `FETCH_CONCURRENCY` = 10) so independent gitdirs
 //! overlap.
 
-use crate::snapshot::{checkout_is_hidden_ignored, WorkspaceSnapshot};
+use crate::snapshot::{checkout_is_hidden, WorkspaceSnapshot};
 
 /// Default background-fetch period (5 minutes).
 pub const DEFAULT_FETCH_MS: u64 = 300_000;
@@ -30,14 +30,14 @@ pub fn fetch_interval_ms(raw: Option<&str>, config: Option<u64>) -> u64 {
 
 /// Snapshot paths the background fetch timer may touch.
 ///
-/// Every checkout except hidden ignored, including linked worktrees.
-/// When ignored repos are shown, those paths are included too.
+/// Every checkout except hidden, including linked worktrees.
+/// When hidden repos are shown, those paths are included too.
 /// Manual key `f` stays on [`super::ops::op_targets`] (focus-scoped).
-pub fn background_fetch_targets(snapshot: &WorkspaceSnapshot, show_ignored: bool) -> Vec<String> {
+pub fn background_fetch_targets(snapshot: &WorkspaceSnapshot, show_hidden: bool) -> Vec<String> {
     snapshot
         .repos
         .iter()
-        .filter(|repo| show_ignored || !checkout_is_hidden_ignored(repo, &snapshot.ignored_repos))
+        .filter(|repo| show_hidden || !checkout_is_hidden(repo, &snapshot.hidden_paths))
         .map(|repo| repo.repo.clone())
         .collect()
 }
@@ -114,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn background_targets_include_linked_worktrees_and_shown_ignored() {
+    fn background_targets_include_linked_worktrees_and_shown_hidden() {
         let snapshot = build_workspace_snapshot(
             &[
                 snap("app", None),

@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 
 pub use super::common::seed::{
     compare_ahead_workspace, daily_workspace, focus_workspace, git, git_env, git_stdout,
-    ignored_primary_family_workspace, primary_merged_workspace, seed_compare_no_default,
+    hidden_primary_family_workspace, primary_merged_workspace, seed_compare_no_default,
     seed_compare_unborn, seed_long_diff_file, seed_long_path_file, seed_long_subject_repo,
     seed_many_commit_files, seed_merge_mark_family, seed_multiline_message_repo,
     seed_primary_and_linked_family, seed_repo, seed_tall_graph, seed_two_tall_commit_files,
@@ -35,7 +35,7 @@ pub fn set_view_default(workspace: &Path, key: &str, value: &str) {
     let text = if path.exists() {
         fs::read_to_string(&path).expect("read workspace config")
     } else {
-        r#"{"ignoredRepos":[]}"#.to_string()
+        r#"{"hiddenPaths":[]}"#.to_string()
     };
     let mut config: serde_json::Value =
         serde_json::from_str(&text).expect("parse workspace config");
@@ -71,6 +71,19 @@ pub fn stream_workspace() -> (PathBuf, PathBuf) {
     let (root, workspace) = new_workspace("ws-tui-tty-stream");
     seed_repo(&workspace, "fast", "feature/fast", false);
     seed_repo(&workspace, "slow", "feature/slow", true);
+    (root, workspace)
+}
+
+/// Daily workspace plus dirty `tmp/scratch`, with `hiddenPaths: ["notes"]`
+/// and `ignoredPaths: ["tmp"]`. `.` shows `notes`; `tmp/scratch` never shows.
+pub fn hidden_and_ignored_workspace() -> (PathBuf, PathBuf) {
+    let (root, workspace) = daily_workspace();
+    seed_repo(&workspace, "tmp/scratch", "main", true);
+    fs::write(
+        workspace.join(".workspace-status-config.json"),
+        "{\n  \"hiddenPaths\": [\"notes\"],\n  \"ignoredPaths\": [\"tmp\"]\n}\n",
+    )
+    .unwrap();
     (root, workspace)
 }
 

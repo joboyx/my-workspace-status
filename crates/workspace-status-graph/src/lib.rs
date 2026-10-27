@@ -5,8 +5,8 @@
 //!
 //! Interactive and headless callers share [`GraphModel::visible_rows`] and
 //! the format helpers. Display differs: the widget paints a multi-lane
-//! gutter from the same model. Hidden ignored worktrees stay out of the
-//! visible row list unless [`GraphModel::show_ignored`] is true.
+//! gutter from the same model. Hidden worktrees stay out of the
+//! visible row list unless [`GraphModel::show_hidden`] is true.
 
 mod action;
 mod chrome;

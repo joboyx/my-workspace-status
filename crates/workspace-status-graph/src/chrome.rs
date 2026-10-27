@@ -1075,7 +1075,7 @@ mod tests {
             path: "app/.worktrees/feat".into(),
             head_id: None,
             branch: Some("feat".into()),
-            ignored: false,
+            hidden: false,
             is_current: false,
         });
         let [_, meta] =

@@ -72,7 +72,7 @@ fn pty_uppercase_e_opens_focused_file_in_diff_tool() {
     );
     fs::write(
         workspace.join(".workspace-status-config.json"),
-        format!("{{\n  \"ignoredRepos\": [\"notes\"],\n  \"diffTool\": \"{tool}\"\n}}\n"),
+        format!("{{\n  \"hiddenPaths\": [\"notes\"],\n  \"diffTool\": \"{tool}\"\n}}\n"),
     )
     .unwrap();
     let marker_s = marker.display().to_string();
