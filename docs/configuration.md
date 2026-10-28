@@ -19,7 +19,7 @@ Merge rules:
 
 - A missing file sets nothing. With neither file, nothing is hidden or ignored and discovery uses the default depth.
 - A file that exists but cannot be read is an error in both files, not a missing file: `<file>: <io error>` (no permission, a directory), or `<file>: symlink target is missing: <io error>` for a dangling symlink.
-- A user or workspace file that is not valid JSON, or whose top level is not an object, is an error: `<file> is not a valid JSON object: <parser message>`. The workspace file is labelled `.workspace-status-config.json`.
+- A user or workspace file that is not valid JSON, or whose top level is not an object, is an error: `<file> is not a valid JSON object: <parser message>`.
 - The workspace file wins per top-level key. A key that the workspace file omits keeps the user file value.
 - `viewDefaults` and `defaultBranches` merge per sub-key. The workspace sub-key wins.
 - Arrays are replaced, not joined. A workspace `hiddenPaths` or `ignoredPaths` (also `[]`) replaces the user list of the same name.

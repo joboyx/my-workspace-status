@@ -1507,17 +1507,14 @@ mod tests {
 
             let cfg = load_layered(None, Some(json)).unwrap();
             assert!(cfg.hidden_paths.is_empty(), "no default entries: {json}");
+            if json.contains("ignoredPaths") {
+                assert_eq!(cfg.ignored_paths, vec!["dotfiles", "notes"], "{json}");
+            }
         }
-        let cfg = load_layered(
-            None,
-            Some(r#"{"ignoredPaths":["dotfiles","notes"],"editor":"cursor"}"#),
-        )
-        .unwrap();
-        assert_eq!(cfg.ignored_paths, vec!["dotfiles", "notes"]);
     }
 
     #[test]
-    fn workspace_file_still_rejects_wrong_hidden_paths_type_and_ignored_repos() {
+    fn workspace_file_rejects_wrong_hidden_paths_type() {
         for json in [
             r#"{"hiddenPaths":"notes"}"#,
             r#"{"hiddenPaths":{}}"#,
@@ -1526,15 +1523,6 @@ mod tests {
             let err = load_layered(None, Some(json)).unwrap_err();
             assert!(
                 err.starts_with(".workspace-status-config.json hiddenPaths must "),
-                "{json}: {err}"
-            );
-        }
-        for json in [r#"{"ignoredRepos":["a"]}"#, r#"{"ignoredRepos":null}"#] {
-            let err = load_layered(None, Some(json)).unwrap_err();
-            assert!(
-                err.starts_with(
-                    ".workspace-status-config.json ignoredRepos is no longer supported"
-                ),
                 "{json}: {err}"
             );
         }
