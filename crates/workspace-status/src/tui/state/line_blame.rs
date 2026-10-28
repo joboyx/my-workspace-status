@@ -966,7 +966,8 @@ mod tests {
         let mut app = state();
         assert!(app.line_blame.enabled, "on by default");
         let (tab_id, _) = app.open_loaded_inner_file("app", "src/lib.rs", &["one", "two", "three"]);
-        assert_eq!(app.focus, FocusPane::Left);
+        assert_eq!(app.focus, FocusPane::Right, "the open focuses the file");
+        app.dispatch(Action::FocusLeft);
         assert_eq!(app.line_blame_want(), None, "the tree never asks");
         app.dispatch(Action::FocusRight);
         app.dispatch(Action::Move(2));
@@ -1027,6 +1028,7 @@ mod tests {
     fn blame_menu_and_actions_run_on_inner_file() {
         let mut app = state();
         app.open_loaded_inner_file("app", "src/lib.rs", &["a"]);
+        app.dispatch(Action::FocusLeft);
         // The tree has focus: every blame action and `A` say so.
         assert_blame_refused(&mut app, TAB_TO_THE_FILE_PANE);
         app.status.clear();

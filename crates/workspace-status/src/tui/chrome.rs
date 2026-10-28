@@ -2393,7 +2393,10 @@ mod tests {
     fn explorer_file_chrome_names_the_file_and_explorer_keys() {
         let mut app = state();
         app.open_loaded_inner_file("app", "src/main.rs", &["fn main() {}"]);
-        assert_eq!(app.focus, FocusPane::Left, "an open keeps the tree focused");
+        assert_eq!(app.focus, FocusPane::Right, "an open focuses the file");
+        // The tree hints below need the tree focused.
+        app.dispatch(crate::tui::action::Action::FocusLeft);
+        assert_eq!(app.focus, FocusPane::Left);
         // The paint records the tree cursor row, which follows the open.
         app.tabs.active_explorer_mut().unwrap().painted_rel = Some("src/main.rs".into());
         assert_eq!(

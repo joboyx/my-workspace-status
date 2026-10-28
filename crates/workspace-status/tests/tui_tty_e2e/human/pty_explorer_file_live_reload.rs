@@ -3,7 +3,9 @@ use std::path::Path;
 
 use crate::harness::PtySession;
 use crate::seed::{daily_workspace, git};
-use crate::support::{right_pane, tree_cursor_on, tree_has, GIT_WAIT, WAIT};
+use crate::support::{
+    right_pane, tree_cursor_on, tree_has, tree_inactive_selection_on, GIT_WAIT, WAIT,
+};
 
 /// Same gap as `pty_quick_open_files_opens_in_explorer`. A same-letter
 /// `h`/`j`/`k`/`l` burst is dropped by `discard_held_nav_backlog` after the
@@ -65,7 +67,8 @@ fn hit_row_on(screen: &str, needle: &str) -> bool {
 }
 
 /// [`LIVE_FILE`] shows in the `Explorer · app` tab: the strip names the
-/// Explorer tab (no top-level file tab), the tree selects the file, the
+/// Explorer tab (no top-level file tab), the tree selects the file (the
+/// unfocused `▏` bar: Quick Open focuses the file pane), the
 /// right pane names it (the file view title, or the diff header once the
 /// edit makes it modified), and Quick Open is closed.
 fn live_tab_active(screen: &str) -> bool {
@@ -73,7 +76,7 @@ fn live_tab_active(screen: &str) -> bool {
     let title_row = screen.lines().nth(1).unwrap_or_default();
     tab_strip.contains(EXPLORER_APP)
         && !tab_strip.contains(LIVE_FILE)
-        && tree_cursor_on(screen, LIVE_FILE)
+        && tree_inactive_selection_on(screen, LIVE_FILE)
         && (title_row.contains(LIVE_PATH) || right_pane(screen).contains(LIVE_PATH))
         && !screen.contains("Go to file")
 }

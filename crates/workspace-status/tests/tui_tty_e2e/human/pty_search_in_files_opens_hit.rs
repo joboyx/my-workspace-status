@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::harness::PtySession;
 use crate::seed::{daily_workspace, git};
-use crate::support::{tree_cursor_on, tree_has, GIT_WAIT, WAIT};
+use crate::support::{tree_cursor_on, tree_has, tree_inactive_selection_on, GIT_WAIT, WAIT};
 
 /// Clean, committed file under `app` with two hit lines for [`QUERY`].
 const SEARCH_FILE: &str = "search-me.txt";
@@ -19,6 +19,8 @@ const QUERY: &str = "zorbatron";
 const FIRST_HIT: &str = "alpha zorbatron";
 /// Line 4 of [`SEARCH_FILE`]: the second hit.
 const SECOND_HIT: &str = "omega zorbatron";
+/// Line 3 of [`SEARCH_FILE`], between the two hits.
+const MIDDLE_LINE: &str = "middle line";
 /// Tokyo Night (default theme) `cursor_bg` `#283457`: the file view paints
 /// it on the cursor row only.
 const CURSOR_BG: (u8, u8, u8) = (0x28, 0x34, 0x57);
@@ -29,7 +31,7 @@ fn seed_search_file(workspace: &Path) {
     let app = workspace.join("app");
     fs::write(
         app.join(SEARCH_FILE),
-        format!("first line\n{FIRST_HIT}\nmiddle line\n{SECOND_HIT}\n"),
+        format!("first line\n{FIRST_HIT}\n{MIDDLE_LINE}\n{SECOND_HIT}\n"),
     )
     .unwrap();
     git(&app, &["add", SEARCH_FILE]);
@@ -57,16 +59,19 @@ fn hit_row_on(screen: &str, needle: &str) -> bool {
         .any(|line| line.contains('❯') && line.contains(needle))
 }
 
-/// [`SEARCH_FILE`] shows in the `Explorer · app` tab: the strip names the
-/// Explorer tab (no top-level file tab), the right pane is titled with the
-/// file, the tree selects it, and the search dialog is closed.
+/// [`SEARCH_FILE`] shows in the `Explorer · app` tab with the file pane
+/// focused: the strip names the Explorer tab (no top-level file tab), the
+/// right pane is titled with the file, the tree selects it with the `▏`
+/// bar of an unfocused pane (not the bold `▌`), and the search dialog is
+/// closed.
 fn search_file_in_explorer(screen: &str) -> bool {
     let tab_strip = screen.lines().next().unwrap_or_default();
     let title_row = screen.lines().nth(1).unwrap_or_default();
     tab_strip.contains(EXPLORER_APP)
         && !tab_strip.contains(SEARCH_FILE)
         && title_row.contains(SEARCH_TITLE)
-        && tree_cursor_on(screen, SEARCH_FILE)
+        && tree_inactive_selection_on(screen, SEARCH_FILE)
+        && !tree_cursor_on(screen, SEARCH_FILE)
         && screen.contains(FIRST_HIT)
         && screen.contains(SECOND_HIT)
         && !screen.contains("Search · ")
@@ -79,11 +84,13 @@ fn on_cursor_row(tui: &PtySession, needle: &str) -> bool {
 
 /// Ctrl-f opens `Search · app`, typing [`QUERY`] lists the line 2 hit,
 /// Enter opens `app/search-me.txt` in the `Explorer · app` tab with the
-/// cursor on line 2, and `n` moves the cursor to the line 4 hit.
+/// file pane focused and its cursor on line 2, `n` moves the cursor to the
+/// line 4 hit, and `k` moves it up to line 3.
 ///
 /// Fail if Ctrl-f paints no search dialog, if no `❯ 2: alpha zorbatron`
-/// hit row shows, if Enter leaves the dialog up or puts the cursor on
-/// another line, or if `n` does not step to the next hit line.
+/// hit row shows, if Enter leaves the dialog up, leaves the tree focused,
+/// or puts the cursor on another line, or if `n` does not step to the next
+/// hit line.
 #[test]
 fn pty_search_in_files_enter_opens_hit_and_n_steps() {
     let (_root, workspace) = daily_workspace();
@@ -135,6 +142,17 @@ fn pty_search_in_files_enter_opens_hit_and_n_steps() {
                 && !on_cursor_row(&tui, FIRST_HIT)
         },
         "`n` moves the file view cursor to the next hit (line 4)",
+        WAIT,
+    );
+
+    tui.key('k');
+    tui.wait_pred(
+        |screen| {
+            search_file_in_explorer(screen)
+                && on_cursor_row(&tui, MIDDLE_LINE)
+                && !on_cursor_row(&tui, SECOND_HIT)
+        },
+        "`k` moves the focused file view cursor up to line 3, not the tree",
         WAIT,
     );
 }

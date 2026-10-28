@@ -8160,6 +8160,8 @@ mod tests {
         let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
         let mut state = AppState::new(root.clone(), snapshot, true);
         state.open_loaded_inner_file("app", "README.md", &["a", "b", "c"]);
+        // The open focuses the file; start from the tree.
+        state.dispatch(Action::FocusLeft);
         let mut interp = Interpreter::with_cap(4);
         schedule_effect(&mut interp, &mut state, Effect::None, &Action::Move(1));
         assert!(

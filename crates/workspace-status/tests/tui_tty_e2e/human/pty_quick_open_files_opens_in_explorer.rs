@@ -1,6 +1,8 @@
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
-use crate::support::{right_pane, tree_cursor_on, tree_has, GIT_WAIT, WAIT};
+use crate::support::{
+    right_pane, tree_cursor_on, tree_has, tree_inactive_selection_on, GIT_WAIT, SETTLE_MS, WAIT,
+};
 
 /// Strip label of the `app` checkout's Explorer tab.
 const EXPLORER_APP: &str = "Explorer · app";
@@ -54,14 +56,36 @@ fn hit_row_on(screen: &str, needle: &str) -> bool {
         .any(|line| line.contains('❯') && line.contains(needle))
 }
 
+/// The `Explorer · app` tab shows `app/README.md` with the file pane
+/// focused: the tree selects the file with the `▏` bar of an unfocused
+/// pane (not the bold `▌`), and the right pane shows its whole-file diff
+/// (the seed leaves it modified). No top-level README.md tab, no overlay.
+fn readme_diff_focused_in_explorer(screen: &str) -> bool {
+    let tab_strip = screen.lines().next().unwrap_or_default();
+    let title_row = screen.lines().nth(1).unwrap_or_default();
+    let right = right_pane(screen);
+    tab_strip.contains(EXPLORER_APP)
+        && !tab_strip.contains("README.md")
+        && title_row.starts_with("┌app─")
+        && title_row.contains("┐┌diff")
+        && tree_inactive_selection_on(screen, "README.md")
+        && !tree_cursor_on(screen, "README.md")
+        && right.contains("README.md")
+        && right.contains("@@")
+        && right.contains("dirty")
+        && !screen.contains("Go to file")
+}
+
 /// `F` (CSI-u Shift+F), type `readme`, Enter opens `app/README.md` in the
 /// `Explorer · app` tab as a pinned inner file tab: the tree selects the
-/// file and keeps focus, and the right pane shows its whole-file diff (the
-/// seed leaves it modified).
+/// file, and the right pane shows its whole-file diff (the seed leaves it
+/// modified) with focus. `j` then moves in the diff, not the tree, and Esc
+/// gives focus back to the tree on README.md.
 ///
 /// Fail if `F` paints the commands list, if no `❯ README.md` hit row shows,
 /// or if Enter leaves the overlay up, keeps the Workspace tab active, adds
-/// a top-level README.md tab, or paints no diff of the file.
+/// a top-level README.md tab, paints no diff of the file, or leaves the
+/// tree focused.
 #[test]
 fn pty_shift_f_quick_open_opens_file_in_explorer() {
     let (_root, workspace) = daily_workspace();
@@ -82,22 +106,32 @@ fn pty_shift_f_quick_open_opens_file_in_explorer() {
     );
     tui.enter();
     tui.wait_pred(
-        |screen| {
-            let tab_strip = screen.lines().next().unwrap_or_default();
-            let title_row = screen.lines().nth(1).unwrap_or_default();
-            let right = right_pane(screen);
-            tab_strip.contains(EXPLORER_APP)
-                && !tab_strip.contains("README.md")
-                && title_row.starts_with("┌app─")
-                && title_row.contains("┐┌diff")
-                && tree_cursor_on(screen, "README.md")
-                && right.contains("README.md")
-                && right.contains("@@")
-                && right.contains("dirty")
-                && !screen.contains("Go to file")
-        },
-        "Enter opens README.md in Explorer · app: tree cursor on it, its diff on the right; Quick Open closes",
+        readme_diff_focused_in_explorer,
+        "Enter opens README.md in Explorer · app: tree on it, its diff on the right with focus; Quick Open closes",
         GIT_WAIT,
+    );
+
+    tui.key('j');
+    tui.wait_ms(SETTLE_MS);
+    tui.wait_pred(
+        readme_diff_focused_in_explorer,
+        "`j` moves in the focused diff: the tree keeps README.md under the unfocused bar",
+        WAIT,
+    );
+
+    tui.esc();
+    tui.wait_pred(
+        |screen| {
+            screen
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .contains(EXPLORER_APP)
+                && tree_cursor_on(screen, "README.md")
+                && !tree_inactive_selection_on(screen, "README.md")
+        },
+        "Esc in the diff gives focus to the tree on README.md",
+        WAIT,
     );
 }
 
