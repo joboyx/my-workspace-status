@@ -698,3 +698,34 @@ fn invalid_ignored_paths_entry_fails_startup() {
     }
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn workspace_file_without_hidden_paths_starts() {
+    let (root, workspace) = fixture();
+    fs::write(
+        workspace.join(".workspace-status-config.json"),
+        "{\"ignoredPaths\": [\"lib\"], \"editor\": \"cursor\"}\n",
+    )
+    .unwrap();
+    let snapshot = run_json(&workspace, &["--json"]);
+    assert_eq!(json_repo_names(&snapshot), vec!["app", "notes"]);
+    assert_eq!(snapshot["hiddenPaths"], serde_json::json!([]));
+    let plain = run_plain(&workspace, &["--plain"]);
+    assert!(plain.contains("app"), "{plain}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn invalid_workspace_json_fails_startup_with_parser_error() {
+    let (root, workspace) = fixture();
+    let workspace_file = workspace.join(".workspace-status-config.json");
+    for raw in ["{", "[]"] {
+        fs::write(&workspace_file, raw).unwrap();
+        let err = run_fail(&workspace, &["--json"]);
+        assert!(
+            err.starts_with(".workspace-status-config.json is not a valid JSON object: "),
+            "{raw}: {err}"
+        );
+    }
+    let _ = fs::remove_dir_all(root);
+}
