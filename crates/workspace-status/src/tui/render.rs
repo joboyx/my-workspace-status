@@ -17375,7 +17375,8 @@ mod tests {
     }
 
     /// A clean `app` with its Explorer tab showing `README.md` as a pinned
-    /// inner file tab loaded as `lines`; the tree keeps focus.
+    /// inner file tab loaded as `lines`; the file pane has focus (as after
+    /// Quick Open).
     fn file_view_state(lines: &[&str]) -> AppState {
         let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
@@ -17797,6 +17798,8 @@ mod tests {
     #[test]
     fn explorer_file_cursor_line_ends_with_the_blame_annotation() {
         let mut state = file_view_state(&["# app", "dirty"]);
+        // The open focuses the file; start from the tree.
+        state.dispatch(Action::FocusLeft);
         let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
         draw_state(&mut terminal, &mut state);
         assert_eq!(state.line_blame_want(), None, "the tree has focus");

@@ -8,10 +8,10 @@
 //! lands here ([`AppState::open_file_in_explorer`]); there is no top-level
 //! file tab. Inner tabs follow VS Code preview rules:
 //! a tree move onto a file replaces the one preview tab, Enter (or an
-//! explicit open: Quick Open, a search-in-files hit) pins it,
-//! `[` / `]` switch tabs, Ctrl-w closes one. Folder listings leave as
-//! [`Effect::LoadExplorerDir`] and land through
-//! [`AppState::apply_explorer_dir`]; file loads leave as
+//! explicit open: Quick Open, a search-in-files hit) pins it, an explicit
+//! open also focuses the file pane, `[` / `]` switch tabs, Ctrl-w closes
+//! one. Folder listings leave as [`Effect::LoadExplorerDir`] and land
+//! through [`AppState::apply_explorer_dir`]; file loads leave as
 //! [`Effect::LoadExplorerPreview`] and land through
 //! [`AppState::apply_explorer_preview`]. Both drop a result for a closed tab
 //! or an older request. Status letters come from the live snapshot at paint
@@ -189,12 +189,14 @@ impl AppState {
     /// and search in files.
     ///
     /// The tree reveals and selects `rel`; that is cosmetic, as the
-    /// listings may land after the file load. The tree keeps focus. An
-    /// inner tab of `rel` that is already open is activated and pinned (no
-    /// reload unless its file moved). With `line`, the cursor lands on that
-    /// 0-based line once the file shows ([`Self::explorer_line_target`]);
-    /// `search` then arms the in-file search on it. Returns the folder
-    /// listings still missing and the file load.
+    /// listings may land after the file load. The file pane takes focus
+    /// (as Tab would), so the move keys and `/` act on the file; the focus
+    /// is parked with the tab like any pane focus. An inner tab of `rel`
+    /// that is already open is activated and pinned (no reload unless its
+    /// file moved). With `line`, the cursor lands on that 0-based line
+    /// once the file shows ([`Self::explorer_line_target`]); `search` then
+    /// arms the in-file search on it. Returns the folder listings still
+    /// missing and the file load.
     pub(crate) fn open_file_in_explorer(
         &mut self,
         checkout: String,
@@ -208,6 +210,7 @@ impl AppState {
         };
         push_effect(&mut effects, self.explorer_show_file(tab_id, &rel, true));
         self.focus = FocusPane::Left;
+        self.explorer_focus_preview();
         if let Some(line) = line {
             self.explorer_line_target(tab_id, line, search);
         }
@@ -1765,9 +1768,9 @@ impl AppState {
 #[cfg(test)]
 impl AppState {
     /// Open `rel` of `checkout` the way Quick Open does (a pinned inner file
-    /// tab of the checkout's Explorer tab) and land `lines` as its clean
-    /// body. The folder listings are left in flight. Returns the Explorer
-    /// tab id and the load generation.
+    /// tab of the checkout's Explorer tab, the file pane focused) and land
+    /// `lines` as its clean body. The folder listings are left in flight.
+    /// Returns the Explorer tab id and the load generation.
     pub(crate) fn open_loaded_inner_file(
         &mut self,
         checkout: &str,
@@ -2484,6 +2487,7 @@ mod tests {
         let mut app = state();
         focus(&mut app, NodeKind::File, Some("lib"), Some("lib.rs"));
         app.open_loaded_inner_file("app", "README.md", &["a", "b", "c"]);
+        app.dispatch(Action::FocusLeft);
 
         // The tree has focus: `;` and `V` say to Tab over.
         for action in [Action::CommentStart, Action::DiffVisualStart] {
@@ -2556,6 +2560,7 @@ mod tests {
 
         // A changed inner file: `;` and `'` key the diff line.
         let mut app = changed_inner_state();
+        app.dispatch(Action::FocusLeft);
         assert_refused(&mut app, Action::CommentStart, TAB_TO_THE_FILE_PANE);
         app.dispatch(Action::FocusRight);
         app.diff_cursor = 4;
@@ -3763,7 +3768,7 @@ mod tests {
             [pinned("src/lib.rs")],
             "pinned, not a preview"
         );
-        assert_eq!(app.focus, FocusPane::Left, "the tree keeps focus");
+        assert_eq!(app.focus, FocusPane::Right, "the file view takes focus");
         assert_eq!(tab(&app).tree.cursor_rel(), Some("src/lib.rs"));
         // Once the listings land the tree row of the file is selected, and
         // the open inner tab is not loaded twice.
@@ -3777,6 +3782,42 @@ mod tests {
         assert_eq!(loads(&follow), 1, "only the open's own load: {follow:?}");
         assert_eq!(cursor_rel(&app), "src/lib.rs");
         assert_eq!(inners(&app), [pinned("src/lib.rs")]);
+        assert_eq!(app.focus, FocusPane::Right, "the listings keep the focus");
+
+        // The file view focus is parked with the tab, like a Tab to it.
+        app.dispatch(Action::JumpToTab(1));
+        assert!(app.tabs.is_workspace());
+        app.focus = FocusPane::Left;
+        app.dispatch(Action::JumpToTab(2));
+        assert!(app.is_explorer_tab());
+        assert_eq!(app.focus, FocusPane::Right, "back on the file view");
+    }
+
+    #[test]
+    fn quick_open_on_an_explorer_tab_focuses_the_file_view() {
+        let mut app = state();
+        open_root(&mut app);
+        load_of(&app.dispatch(Action::MoveToEnd));
+        assert_eq!(inners(&app), [preview("README.md")]);
+        assert_eq!(app.focus, FocusPane::Left);
+
+        quick_open_with(&mut app, "app", &["README.md", "new.txt"], &[1]);
+        let effect = app.dispatch(Action::QuickOpenSubmit);
+        assert!(has_file_load(&effect), "{effect:?}");
+        assert_eq!(inners(&app), [preview("README.md"), pinned("new.txt")]);
+        assert_eq!(app.focus, FocusPane::Right, "the file view takes focus");
+        assert_eq!(cursor_rel(&app), "new.txt", "the tree selects the file");
+
+        // A file already open as an inner tab shows again with the file
+        // view focused, without a second tab or a reload.
+        app.dispatch(Action::FocusLeft);
+        quick_open_with(&mut app, "app", &["README.md", "new.txt"], &[0]);
+        let effect = app.dispatch(Action::QuickOpenSubmit);
+        assert!(!has_file_load(&effect), "{effect:?}");
+        assert_eq!(inners(&app), [pinned("README.md"), pinned("new.txt")]);
+        assert_eq!(active_rel(&app).as_deref(), Some("README.md"));
+        assert_eq!(app.focus, FocusPane::Right);
+        assert_eq!(cursor_rel(&app), "README.md");
     }
 
     #[test]
@@ -3796,7 +3837,7 @@ mod tests {
         );
         assert_eq!(tab(&app).checkout, "lib");
         assert_eq!(inners(&app), [pinned("README.md")]);
-        assert_eq!(app.focus, FocusPane::Left);
+        assert_eq!(app.focus, FocusPane::Right, "the file view takes focus");
         assert_eq!(
             app.quick_open_scope(),
             QuickOpenScope::Checkout("lib".into()),
@@ -3862,7 +3903,7 @@ mod tests {
         assert_eq!(cursor(&app), 3);
         assert_eq!(app.search_hit, Some(3));
         assert_eq!(tab(&app).active_inner().unwrap().pending_line, None);
-        assert_eq!(app.focus, FocusPane::Left, "the tree keeps focus");
+        assert_eq!(app.focus, FocusPane::Right, "the file view takes focus");
         app.dispatch(Action::SearchNext);
         assert_eq!(cursor(&app), 5, "`n` steps from the hit line");
         app.dispatch(Action::SearchPrev);
@@ -3898,6 +3939,7 @@ mod tests {
         assert!(app.apply_explorer_preview(tab_id, gen, ExplorerPreviewBody::Diff(diff)));
         assert_eq!(app.diff_cursor, 7, "line 2 of the file, unstaged first");
         assert_eq!(app.search_hit, Some(7));
+        assert_eq!(app.focus, FocusPane::Right, "the diff takes focus");
         app.dispatch(Action::SearchNext);
         assert_eq!(app.diff_cursor, 8, "`n` steps from the hit row");
         app.dispatch(Action::SearchPrev);

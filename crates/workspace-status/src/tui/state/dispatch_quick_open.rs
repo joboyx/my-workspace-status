@@ -326,8 +326,9 @@ impl AppState {
     }
 
     /// Files-mode Enter: close, then open the highlighted file in its
-    /// checkout's Explorer tab ([`Self::open_file_in_explorer`]). Warns `no
-    /// file matches` without a hit.
+    /// checkout's Explorer tab with the file pane focused
+    /// ([`Self::open_file_in_explorer`]). Warns `no file matches` without a
+    /// hit.
     ///
     /// While the index loads or the latest score is pending the hits are
     /// stale, so Enter waits ([`QuickOpenState::submit_on_ready`]) and
@@ -934,6 +935,7 @@ mod tests {
         assert!(app.quick_open.is_none());
         assert!(app.is_explorer_tab());
         assert_eq!(opened_rel(&app), "src/main.rs");
+        assert_eq!(app.focus, FocusPane::Right, "the file view takes focus");
         assert_eq!(
             file_load(&effect).map(|(_, rel)| rel).as_deref(),
             Some("src/main.rs"),
@@ -962,6 +964,11 @@ mod tests {
         );
         assert!(app.quick_open.is_none());
         assert_eq!(opened_rel(&app), "src/main.rs");
+        assert_eq!(
+            app.focus,
+            FocusPane::Right,
+            "the waiting Enter focuses the file view too"
+        );
     }
 
     #[test]
@@ -976,6 +983,7 @@ mod tests {
         let follow = app.apply_file_score(score, vec![hit(0)]).expect("accepted");
         assert!(file_load(&follow).is_some(), "{follow:?}");
         assert_eq!(opened_rel(&app), "README.md");
+        assert_eq!(app.focus, FocusPane::Right);
 
         // A waiting Enter with no hit warns once the score lands.
         let gen = open_files(&mut app);

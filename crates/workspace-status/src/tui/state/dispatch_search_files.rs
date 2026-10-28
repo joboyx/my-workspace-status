@@ -306,8 +306,8 @@ impl AppState {
 
     /// Enter: park the dialog, then open the highlighted hit's file in its
     /// checkout's Explorer tab ([`Self::open_file_in_explorer`]) with the
-    /// cursor on the hit line (the diff row of that line for a changed
-    /// file).
+    /// file pane focused and the cursor on the hit line (the diff row of
+    /// that line for a changed file).
     ///
     /// A literal search also arms the in-file search on the searched text,
     /// so `n` / `N` step its matches; a regex search does not (the in-file
@@ -533,6 +533,7 @@ mod tests {
     use super::super::super::search_files::{search_row_shows_status, SearchStatus};
     use super::super::super::status::StatusMessage;
     use super::super::super::tree::NodeKind;
+    use super::super::FocusPane;
     use super::*;
     use crate::file_index::{FileEntry, FileRead, IndexRoot};
     use crate::file_search::{SearchChunk, SearchHit};
@@ -1231,6 +1232,7 @@ mod tests {
         assert_eq!(app.search_query, "foo");
         assert_eq!(app.search_target, SearchPane::File);
         assert_eq!(app.search_hit, Some(3));
+        assert_eq!(app.focus, FocusPane::Right, "the file view takes focus");
 
         app.dispatch(Action::SearchNext);
         assert_eq!(file_cursor(&app), 5, "`n` steps to the next match");
@@ -1262,6 +1264,7 @@ mod tests {
         assert_eq!(file_cursor(&app), 3);
         assert!(!app.search_active, "in-file search is plain text only");
         assert_eq!(app.search_hit, None);
+        assert_eq!(app.focus, FocusPane::Right, "the file view takes focus");
     }
 
     #[test]
@@ -1269,6 +1272,7 @@ mod tests {
         let mut app = family_state();
         app.open_loaded_inner_file("app", "src/main.rs", &MAIN_RS);
         assert_eq!(file_cursor(&app), 0);
+        app.dispatch(Action::FocusLeft);
         let tabs = app.tabs.len();
 
         // On an Explorer tab the dialog scopes to its checkout, `app`.
@@ -1288,6 +1292,7 @@ mod tests {
         assert_eq!(file_cursor(&app), 4);
         assert_eq!(app.search_query, "bar");
         assert_eq!(app.search_hit, Some(4));
+        assert_eq!(app.focus, FocusPane::Right, "the tree hands focus over");
     }
 
     #[test]
@@ -1391,10 +1396,21 @@ mod tests {
         assert_eq!(dialog(&app).query, "bar");
         let gen = dialog(&app).index_gen;
         let follow = app.apply_search_index(gen, index_of(&["lib.rs"]));
-        match follow {
-            Some(Effect::SearchFilesChunk { query, .. }) => assert_eq!(query, "bar"),
+        let gen = match follow {
+            Some(Effect::SearchFilesChunk { query, gen, .. }) => {
+                assert_eq!(query, "bar");
+                gen
+            }
             other => panic!("searches as soon as the index lands, got {other:?}"),
-        }
+        };
+
+        // Enter on a hit opens it like a Ctrl-f search: the file view
+        // takes focus.
+        app.apply_search_chunk(gen, chunk(vec![hit(0, 1)], None));
+        let (_, _, _, path) = inner_load(app.dispatch(Action::SearchFilesSubmit));
+        assert_eq!(path, "lib.rs");
+        assert!(app.is_explorer_tab());
+        assert_eq!(app.focus, FocusPane::Right);
     }
 
     #[test]

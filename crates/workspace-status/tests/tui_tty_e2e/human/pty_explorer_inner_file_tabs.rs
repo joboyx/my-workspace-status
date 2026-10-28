@@ -92,6 +92,17 @@ fn explorer_tree_on(screen: &str, name: &str) -> bool {
         && !tree_inactive_selection_on(screen, name)
 }
 
+/// `Explorer · app` is active with the file pane focused: the tree selects
+/// `name` with the `▏` bar of an unfocused pane, not the bold `▌`.
+fn explorer_file_focused_on(screen: &str, name: &str) -> bool {
+    let strip = tab_strip(screen);
+    strip.contains(EXPLORER_APP)
+        && [LONG, MID, NEXT].iter().all(|file| !strip.contains(file))
+        && title_row(screen).starts_with("┌app─")
+        && tree_inactive_selection_on(screen, name)
+        && !tree_cursor_on(screen, name)
+}
+
 /// Right pane is the whole-file diff of `src/long.rs`: the changed line
 /// and a line far from the hunk.
 fn long_full_diff(screen: &str) -> bool {
@@ -156,15 +167,16 @@ fn quick_open_long(tui: &mut PtySession) {
 }
 
 /// Quick Open pins a changed file in its checkout's Explorer tab (no
-/// top-level file tab, tree focused on the file, whole-file diff); `j`
-/// onto clean files shows them in one preview tab that the next `j`
-/// replaces; Enter pins it; `[` goes back to the first file tab and
-/// selects it in the tree; `s` still refuses with the read-only copy.
+/// top-level file tab, the tree selects the file, the whole-file diff has
+/// focus); Esc gives focus to the tree; `j` onto clean files shows them in
+/// one preview tab that the next `j` replaces; Enter pins it; `[` goes
+/// back to the first file tab and selects it in the tree; `s` still
+/// refuses with the read-only copy.
 ///
-/// Fail if a file opens a top-level tab, the diff shows only the hunk,
-/// a tree move adds a second preview tab or keeps the replaced one, a pin
-/// leaves the label italic, `[` leaves the tree on another row, or `s`
-/// stages anything.
+/// Fail if a file opens a top-level tab, the diff shows only the hunk or
+/// opens without focus, a tree move adds a second preview tab or keeps the
+/// replaced one, a pin leaves the label italic, `[` leaves the tree on
+/// another row, or `s` stages anything.
 #[test]
 fn pty_explorer_inner_file_tabs_preview_pin_and_switch() {
     let (_root, workspace) = daily_workspace();
@@ -181,17 +193,24 @@ fn pty_explorer_inner_file_tabs_preview_pin_and_switch() {
     quick_open_long(&mut tui);
     tui.wait_pred(
         |screen| {
-            explorer_tree_on(screen, LONG)
+            explorer_file_focused_on(screen, LONG)
                 && long_full_diff(screen)
                 && inner_tab_row(screen).contains(LONG)
                 && !screen.contains("Go to file")
         },
-        "Enter opens long.rs in Explorer · app: tree focused on it, whole-file diff, one file tab",
+        "Enter opens long.rs in Explorer · app: tree on it, whole-file diff focused, one file tab",
         GIT_WAIT,
     );
     tui.wait_pred(
         |_| label_italic(&tui, LONG) == Some(false),
         "the Quick Open file tab is pinned (not italic)",
+        WAIT,
+    );
+
+    tui.esc();
+    tui.wait_pred(
+        |screen| explorer_tree_on(screen, LONG) && long_full_diff(screen),
+        "Esc in the diff gives focus to the tree on long.rs",
         WAIT,
     );
 
