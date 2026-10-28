@@ -136,8 +136,12 @@ fn pty_explorer_file_live_reload_paints_disk_edit() {
 
     append_marker(&workspace);
     tui.wait_pred(
-        |screen| live_tab_active(screen) && screen.contains(MARKER) && screen.contains(SEED_LINE),
-        "watch poll paints the appended marker in the Explorer without `r`",
+        |screen| {
+            live_tab_active(screen)
+                && right_pane(screen).contains(&format!("+{MARKER}"))
+                && screen.contains(SEED_LINE)
+        },
+        "watch poll paints the appended marker in the Explorer without `r`, as a `+` diff row",
         GIT_WAIT,
     );
 
@@ -145,10 +149,6 @@ fn pty_explorer_file_live_reload_paints_disk_edit() {
     assert!(
         live_tab_active(&screen),
         "the Explorer tab must keep showing app/live-reload.txt; screen:\n{screen}"
-    );
-    assert!(
-        right_pane(&screen).contains(&format!("+{MARKER}")),
-        "the modified file shows as a diff with the marker added; screen:\n{screen}"
     );
     crate::harness::assert_absent(&screen, LOADING);
     crate::harness::assert_absent(&screen, READ_FAILED);
