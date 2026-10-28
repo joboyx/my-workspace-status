@@ -19,13 +19,13 @@ Merge rules:
 
 - A missing file sets nothing. With neither file, nothing is hidden or ignored and discovery uses the default depth.
 - A file that exists but cannot be read is an error in both files, not a missing file: `<file>: <io error>` (no permission, a directory), or `<file>: symlink target is missing: <io error>` for a dangling symlink.
-- A user file that is not valid JSON, or whose top level is not an object, is an error: `<path> is not a valid JSON object: <parser message>`. For the workspace file a missing `hiddenPaths` gives `.workspace-status-config.json must contain a hiddenPaths string array`.
+- A user or workspace file that is not valid JSON, or whose top level is not an object, is an error: `<file> is not a valid JSON object: <parser message>`.
 - The workspace file wins per top-level key. A key that the workspace file omits keeps the user file value.
 - `viewDefaults` and `defaultBranches` merge per sub-key. The workspace sub-key wins.
 - Arrays are replaced, not joined. A workspace `hiddenPaths` or `ignoredPaths` (also `[]`) replaces the user list of the same name.
 - A `null` value, and a blank `editor` / `diffTool`, count as omitted, so the user file value applies.
 - Both files are strict. An invalid user file fails the same way as an invalid workspace file. The error starts with the file: the full path for the user file, `.workspace-status-config.json` for the workspace file. Example: `~/.config/my-workspace-status/config.json maxDepth must be a positive integer` (with your real home path).
-- `hiddenPaths` is required in the workspace file when that file exists. In the user file it is optional; an omitted or `null` user `hiddenPaths` sets nothing. `ignoredPaths` is optional in both files. A wrong type is an error in both files.
+- `hiddenPaths` and `ignoredPaths` are optional in both files. An omitted or `null` key sets nothing. A wrong type is an error in both files.
 - The old key `ignoredRepos` (any value, also `null`) is an error in both files. See [Migrating from `ignoredRepos`](#migrating-from-ignoredrepos).
 - Nothing writes either file.
 
@@ -78,7 +78,7 @@ User file only (a workspace file that sets these keys fails to load):
 
 | Key               | Required                           | Default                      | Meaning                                                                                        |
 | ----------------- | ---------------------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------- |
-| `hiddenPaths`     | workspace file: yes; user file: no | `[]` when no file sets it    | Paths relative to the workspace root whose repos are hidden until `.` or `-a`                  |
+| `hiddenPaths`     | no                                 | `[]` when no file sets it    | Paths relative to the workspace root whose repos are hidden until `.` or `-a`                  |
 | `ignoredPaths`    | no                                 | `[]` when no file sets it    | Paths relative to the workspace root whose repos are never shown, unless named on the CLI      |
 | `maxDepth`        | no                                 | `3`                          | Walk depth for primary `.git` dirs/gitfiles (dot dirs skipped; linked via `git worktree list`) |
 | `defaultBranches` | no                                 | `{}`                         | Map of workspace-relative repo path → sole default branch for that repo                        |
@@ -134,7 +134,7 @@ Breaking change. The key `ignoredRepos` is removed. Any `ignoredRepos` key (also
 
 - Rename `ignoredRepos` to `hiddenPaths`. Behavior is the same, except that entries now match by path segment and must be relative paths.
 - Add `ignoredPaths` for folders whose repos must never show.
-- The workspace file still needs a `hiddenPaths` array (use `[]` if you have none).
+- `hiddenPaths` is optional. Omit it when nothing is hidden.
 - `--json` snapshot version 2 renames `showIgnored`, `ignoredRepos`, and `ignored` to `showHidden`, `hiddenPaths`, and `hidden`. See [snapshot.md](./snapshot.md).
 
 ### `maxDepth`

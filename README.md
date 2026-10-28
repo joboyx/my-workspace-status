@@ -148,7 +148,7 @@ An optional user file, `~/.config/my-workspace-status/config.json` (`$XDG_CONFIG
 }
 ```
 
-- `hiddenPaths` — required in the workspace file. Repos at or under an entry are hidden: out of the tree, status checks, fetch, pull, and default-branch switching. `.` in the TUI or `-a` shows them.
+- `hiddenPaths` — optional. Repos at or under an entry are hidden: out of the tree, status checks, fetch, pull, and default-branch switching. `.` in the TUI or `-a` shows them.
 - `ignoredPaths` — optional. Repos (and linked worktrees) at or under an entry are never discovered, shown, fetched, pulled, or switched. `.` and `-a` do not bring them back; only naming one on the command line does. A path in both lists follows `ignoredPaths`.
 - Entries in both lists are paths relative to the workspace root: a repo folder, or a folder that holds repos (`tmp` matches `tmp` and `tmp/a/b`, not `tmpfoo`). Absolute paths and `..` fail startup. The workspace file replaces the user file list.
 - `ignoredRepos` is removed. A config that still has it fails startup: rename it to `hiddenPaths`, and add `ignoredPaths` for folders that must never show.

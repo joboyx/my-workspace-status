@@ -620,7 +620,7 @@ fn parse_runtime_keys(
     })
 }
 
-/// Which config file is parsed. Only the workspace file must set `hiddenPaths`.
+/// Which config file is parsed. The workspace file cannot set the user-only keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConfigFileKind {
     User,
@@ -639,22 +639,18 @@ fn reject_ignored_repos(file: &str, value: Option<&serde_json::Value>) -> Result
 
 /// Parse one workspace-relative path list (`hiddenPaths`, `ignoredPaths`).
 ///
-/// With `required`, an omitted or `null` key is an error; otherwise it is
-/// `None`. Each entry must be a string relative to the workspace root (see
+/// An omitted or `null` key is `None` (the file sets nothing). Each entry
+/// must be a string relative to the workspace root (see
 /// [`path_entry_is_invalid`]). The result is normalized, sorted, and
 /// deduped.
 fn parse_path_list(
     file: &str,
     key: &str,
-    required: bool,
     value: Option<serde_json::Value>,
 ) -> Result<Option<Vec<String>>, String> {
     let entries = match value {
         Some(serde_json::Value::Array(entries)) => entries,
-        None | Some(serde_json::Value::Null) if !required => return Ok(None),
-        None | Some(serde_json::Value::Null) => {
-            return Err(format!("{file} must contain a {key} string array"))
-        }
+        None | Some(serde_json::Value::Null) => return Ok(None),
         Some(_) => return Err(format!("{file} {key} must be a string array")),
     };
     let mut out = Vec::new();
@@ -725,18 +721,11 @@ fn parse_config_file(
     text: &str,
     ctx: &ParseContext,
 ) -> Result<ConfigFileSettings, String> {
-    let mut parsed: RawConfig = serde_json::from_str(text).map_err(|e| match kind {
-        ConfigFileKind::User => format!("{file} is not a valid JSON object: {e}"),
-        ConfigFileKind::Workspace => format!("{file} must contain a hiddenPaths string array"),
-    })?;
+    let mut parsed: RawConfig = serde_json::from_str(text)
+        .map_err(|e| format!("{file} is not a valid JSON object: {e}"))?;
     reject_ignored_repos(file, parsed.ignored_repos.as_ref())?;
-    let hidden_paths = parse_path_list(
-        file,
-        "hiddenPaths",
-        kind == ConfigFileKind::Workspace,
-        parsed.hidden_paths.take(),
-    )?;
-    let ignored_paths = parse_path_list(file, "ignoredPaths", false, parsed.ignored_paths.take())?;
+    let hidden_paths = parse_path_list(file, "hiddenPaths", parsed.hidden_paths.take())?;
+    let ignored_paths = parse_path_list(file, "ignoredPaths", parsed.ignored_paths.take())?;
     reject_user_only_keys(file, kind, &parsed, ctx.user_file)?;
     let runtime = parse_runtime_keys(file, &mut parsed, ctx.home)?;
 
@@ -839,9 +828,9 @@ where
 /// top-level key; `viewDefaults` and `defaultBranches` merge per sub-key
 /// (workspace wins); `hiddenPaths` and `ignoredPaths` are each replaced,
 /// not joined. Keys that no file sets keep the built-in defaults.
-/// `hiddenPaths` is required in the workspace file and optional in the user
-/// file; `ignoredPaths` is optional in both. The removed `ignoredRepos` key
-/// is an error in either file. An invalid file is an error that names that
+/// `hiddenPaths` and `ignoredPaths` are optional in both files; an omitted or
+/// `null` key sets nothing. The removed `ignoredRepos` key is an error in
+/// either file. An invalid file is an error that names that
 /// file (the full path for the user file, [`CONFIG_FILENAME`] for the
 /// workspace file).
 ///
@@ -1505,12 +1494,36 @@ mod tests {
     }
 
     #[test]
-    fn workspace_file_still_requires_hidden_paths() {
-        for json in [r#"{}"#, r#"{"hiddenPaths":null}"#, r#"{"maxDepth":2}"#] {
-            let err = load_layered(Some(r#"{"hiddenPaths":["notes"]}"#), Some(json)).unwrap_err();
-            assert_eq!(
-                err, ".workspace-status-config.json must contain a hiddenPaths string array",
-                "{json}"
+    fn workspace_file_hidden_paths_is_optional() {
+        for json in [
+            r#"{}"#,
+            r#"{"hiddenPaths":null}"#,
+            r#"{"maxDepth":2}"#,
+            r#"{"ignoredPaths":["dotfiles","notes"],"editor":"cursor","diffTool":"cursor --diff --wait"}"#,
+            r#"{"editor":"nvim"}"#,
+        ] {
+            let cfg = load_layered(Some(r#"{"hiddenPaths":["notes"]}"#), Some(json)).unwrap();
+            assert_eq!(cfg.hidden_paths, vec!["notes"], "user list kept: {json}");
+
+            let cfg = load_layered(None, Some(json)).unwrap();
+            assert!(cfg.hidden_paths.is_empty(), "no default entries: {json}");
+            if json.contains("ignoredPaths") {
+                assert_eq!(cfg.ignored_paths, vec!["dotfiles", "notes"], "{json}");
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_file_rejects_wrong_hidden_paths_type() {
+        for json in [
+            r#"{"hiddenPaths":"notes"}"#,
+            r#"{"hiddenPaths":{}}"#,
+            r#"{"hiddenPaths":[1]}"#,
+        ] {
+            let err = load_layered(None, Some(json)).unwrap_err();
+            assert!(
+                err.starts_with(".workspace-status-config.json hiddenPaths must "),
+                "{json}: {err}"
             );
         }
     }
@@ -1968,7 +1981,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_user_json_is_a_json_error_naming_the_path() {
+    fn invalid_json_is_a_json_error_naming_the_file() {
         for json in ["{", "[]", r#""notes""#, "{\"theme\": }"] {
             let (root, user_file, workspace) = layered(Some(json), None);
             let err = load_config_files(Some(&user_file), &workspace).unwrap_err();
@@ -1977,11 +1990,12 @@ mod tests {
             assert!(err.len() > prefix.len(), "{json}: serde message missing");
             let _ = fs::remove_dir_all(root);
         }
-        let err = load_layered(None, Some("{")).unwrap_err();
-        assert_eq!(
-            err, ".workspace-status-config.json must contain a hiddenPaths string array",
-            "workspace file keeps its message"
-        );
+        for json in ["{", "[]"] {
+            let err = load_layered(None, Some(json)).unwrap_err();
+            let prefix = ".workspace-status-config.json is not a valid JSON object: ";
+            assert!(err.starts_with(prefix), "{json}: {err}");
+            assert!(err.len() > prefix.len(), "{json}: serde message missing");
+        }
     }
 
     #[cfg(unix)]
