@@ -53,9 +53,9 @@ use super::super::pull_request::{
 use super::super::status::StatusMessage;
 use super::super::toast::{Toast, ToastMark, PR_TOAST_TTL_MS, TOAST_MAX};
 use super::super::tree::{
-    pr_badge_mark, NodeKind, PrBadge, PrTotals, SegRole, PR_REF_MIN_TREE_COLS,
+    pr_badge_mark, pr_badge_repo, NodeKind, PrBadge, PrTotals, SegRole, PR_REF_MIN_TREE_COLS,
 };
-use super::super::watch::FlashKind;
+use super::super::watch::{graph_row_identity, FlashKind};
 use super::AppState;
 
 /// What the forge said about the PR of one (remote URL, branch).
@@ -281,12 +281,12 @@ impl PrTransition {
 }
 
 /// The muted toast for the `more` PR changes of one alert batch past its
-/// first ones, pushed at `at`: `+<more> more PR changes · gp`.
+/// first ones, pushed at `at`: `+<more> more PR changes`.
 fn more_pr_changes_toast(more: usize, at: Instant) -> Toast {
     Toast {
         mark: ToastMark::None,
         text: format!("+{more} more PR changes"),
-        detail: "gp".into(),
+        detail: String::new(),
         role: SegRole::Muted,
         ttl_ms: PR_TOAST_TTL_MS,
         at,
@@ -446,6 +446,9 @@ pub(crate) struct PrCache {
     hosts: HashMap<String, HostHealth>,
     /// Transitions not yet drained by [`AppState::take_pr_transitions`].
     transitions: Vec<PrTransition>,
+    /// When the lookup that queued the oldest of [`Self::transitions`]
+    /// landed; `None` while the queue is empty.
+    transitions_since: Option<Instant>,
     /// How polling runs ([`crate::settings::Settings::pr_poll`]).
     poll: PrPollMode,
     /// A record shows an open PR with CI running or ready to merge, so the
@@ -624,6 +627,9 @@ impl PrCache {
             return;
         };
         self.note_seen(checkout, &remote, branch, pr.as_ref());
+        if self.transitions_since.is_none() && !self.transitions.is_empty() {
+            self.transitions_since = Some(now);
+        }
         self.set_answer((remote, branch.to_string()), BranchPr::Ready(pr));
     }
 }
@@ -1518,17 +1524,25 @@ impl AppState {
 
     /// Take the queued [`PrTransition`]s, oldest first.
     pub(crate) fn take_pr_transitions(&mut self) -> Vec<PrTransition> {
+        self.pr_cache.transitions_since = None;
         std::mem::take(&mut self.pr_cache.transitions)
     }
 
+    /// When the lookup that queued the oldest waiting [`PrTransition`]
+    /// landed; `None` when none waits.
+    pub(crate) fn pr_transitions_waiting_since(&self) -> Option<Instant> {
+        self.pr_cache.transitions_since
+    }
+
     /// Alert the queued PR changes as one batch pushed at `now`: a toast
-    /// per change, oldest first ([`PrTransition::toast`]), and a flash of
-    /// each checkout's tree rows on the remove ramp (CI failed, closed) or
-    /// the add ramp (ready to merge, merged).
+    /// per change, oldest first ([`PrTransition::toast`]), and a flash,
+    /// stamped at `now`, of each row that paints the checkout's PR badge
+    /// ([`Self::pr_badge_row_ids`]) on the remove ramp (CI failed, closed)
+    /// or the add ramp (ready to merge, merged).
     ///
     /// A batch of more than [`TOAST_MAX`] changes pushes the toasts of the
-    /// first `TOAST_MAX - 1` and then `+<n> more PR changes · gp`, so the
-    /// stack never drops one of its own toasts; every change still flashes.
+    /// first `TOAST_MAX - 1` and then `+<n> more PR changes`, so the stack
+    /// never drops one of its own toasts; every change still flashes.
     /// Returns true when the batch was not empty.
     pub(crate) fn alert_pr_transitions(&mut self, now: Instant) -> bool {
         let transitions = self.take_pr_transitions();
@@ -1544,11 +1558,44 @@ impl AppState {
             self.toasts
                 .push_with(more_pr_changes_toast(transitions.len() - shown, now));
         }
-        for transition in &transitions {
-            let checkout = transition.checkout.to_string_lossy().into_owned();
-            self.stamp_checkout_flashes_as(&[checkout], transition.flash_kind());
-        }
+        let stamps: Vec<(String, FlashKind)> = transitions
+            .iter()
+            .flat_map(|transition| {
+                let kind = transition.flash_kind();
+                self.pr_badge_row_ids(&transition.checkout)
+                    .into_iter()
+                    .map(move |id| (id, kind))
+            })
+            .collect();
+        self.prune_flash_state(now);
+        self.stamp_flashes(stamps, now);
         !transitions.is_empty()
+    }
+
+    /// Flash ids of the rows that paint the PR badge of checkout
+    /// `checkout`: its tree row ([`pr_badge_repo`]: a checkout row, or a
+    /// repo row with one checkout, never a family row), and its graph
+    /// worktree row when the graph paints a badge there
+    /// ([`Self::graph_pr_badges`]). A row folded out of view has no id here.
+    fn pr_badge_row_ids(&self, checkout: &Path) -> Vec<String> {
+        let tree = self
+            .rows
+            .iter()
+            .filter(|row| pr_badge_repo(row).is_some_and(|repo| Path::new(repo) == checkout))
+            .map(|row| row.id.clone());
+        let graph = match (self.graph_identity.as_ref(), self.graph.as_ref()) {
+            (Some((repo, _)), Some(model)) => {
+                let rows = model.visible_rows();
+                self.graph_pr_badges()
+                    .into_iter()
+                    .filter(|(_, path, _)| path == checkout)
+                    .filter_map(|(index, _, _)| rows.get(index))
+                    .map(|row| graph_row_identity(repo, row))
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        tree.chain(graph).collect()
     }
 }
 
@@ -3232,26 +3279,35 @@ mod tests {
                 }
                 assert_eq!(change.toast(false, at).at, at);
             }
-
-            // CI failed names the first failed check; any other change, and
-            // a CI failed PR with no named check, keeps the branch.
-            let named = |state| PullRequest {
-                head: branch.into(),
-                failed_check: Some("test (ubuntu-latest)".into()),
-                ..pr_on(remote, 318, state)
-            };
-            let failed = transition(named(CiFailed), CiRunning, State(CiFailed));
-            assert_eq!(
-                (failed.toast(false, at).text, failed.toast(false, at).detail),
-                (
-                    format!("{sign}318 CI failed"),
-                    "test (ubuntu-latest)".into()
-                ),
-                "{remote}"
-            );
-            let merged = transition(named(Merged), CiFailed, State(Merged));
-            assert_eq!(merged.toast(false, at).detail, branch, "{remote}");
         }
+
+        // GitHub names the first failed check on CI failed; any other
+        // change keeps the branch.
+        let named = |state| PullRequest {
+            head: branch.into(),
+            failed_check: Some("test (ubuntu-latest)".into()),
+            ..pr_on(GH_REMOTE, 318, state)
+        };
+        let failed = transition(named(CiFailed), CiRunning, State(CiFailed));
+        assert_eq!(
+            (failed.toast(false, at).text, failed.toast(false, at).detail),
+            ("#318 CI failed".into(), "test (ubuntu-latest)".into())
+        );
+        let merged = transition(named(Merged), CiFailed, State(Merged));
+        assert_eq!(merged.toast(false, at).detail, branch);
+
+        // A GitLab badge answer names no job (`failed_check` is `None`), so
+        // its CI failed toast names the branch.
+        let gitlab = PullRequest {
+            head: branch.into(),
+            ..pr_on(GL_REMOTE, 12, CiFailed)
+        };
+        assert_eq!(gitlab.failed_check, None);
+        let failed = transition(gitlab, CiRunning, State(CiFailed));
+        assert_eq!(
+            (failed.toast(false, at).text, failed.toast(false, at).detail),
+            ("!12 CI failed".into(), branch.into())
+        );
         assert_eq!(PR_TOAST_TTL_MS, 8000);
     }
 
@@ -3282,7 +3338,7 @@ mod tests {
             [
                 ("#1 CI failed".into(), "feature".into()),
                 ("#2 ready to merge".into(), "feature".into()),
-                ("+3 more PR changes".into(), "gp".into()),
+                ("+3 more PR changes".into(), String::new()),
             ]
         );
         let summary = app.toasts.visible(t0).last().unwrap().0.clone();
@@ -3291,7 +3347,7 @@ mod tests {
             (
                 ToastMark::None,
                 "+3 more PR changes".into(),
-                "gp".into(),
+                String::new(),
                 SegRole::Muted,
                 PR_TOAST_TTL_MS,
             ),
@@ -3335,8 +3391,9 @@ mod tests {
     #[test]
     fn a_pr_change_flashes_the_checkout_tree_row_on_the_remove_or_add_ramp() {
         use PrState::*;
-        // `app` is a repo row of its own; `api-wt` is a linked checkout row
-        // under the `api` family row.
+        // `app` is a repo row of its own. `api` (primary) and `api-wt`
+        // (linked) are checkout rows under the `repo:api` family row, which
+        // paints no badge and never flashes.
         let linked_wt = RepoSnapshot {
             sync_status: SyncStatus::UpToDate,
             ..linked("api-wt", "api", "feature")
@@ -3348,7 +3405,11 @@ mod tests {
             (Some(Merged), FlashKind::Add),
             (None, FlashKind::Remove),
         ] {
-            for (checkout, row) in [("app", "repo:app"), ("api-wt", "checkout:api-wt")] {
+            for (checkout, row) in [
+                ("app", "repo:app"),
+                ("api", "checkout:api"),
+                ("api-wt", "checkout:api-wt"),
+            ] {
                 let mut app = app_with(&repos, &[]);
                 let _ = app.due_pr_lookups();
                 let remote = gh(checkout);
@@ -3364,11 +3425,22 @@ mod tests {
                 });
                 land_pr(&mut app, checkout, &remote, lookup, Instant::now());
                 assert!(app.flashes.is_empty());
-                assert!(app.alert_pr_transitions(Instant::now()));
+                let at = Instant::now() + secs(1);
+                assert!(app.alert_pr_transitions(at));
                 assert_eq!(
                     flashed_rows(&app),
                     [(row.to_string(), kind)],
                     "{checkout}: {to:?}"
+                );
+                let stamps: Vec<(String, Instant)> = app
+                    .flashes
+                    .iter()
+                    .map(|(id, stamp)| (id.clone(), stamp.at))
+                    .collect();
+                assert_eq!(
+                    stamps,
+                    [(row.to_string(), at)],
+                    "{checkout}: only the badge row, stamped at the alert time"
                 );
             }
         }

@@ -419,6 +419,10 @@ const DEFAULT_PR_OPENER: PrUrlOpener = |_, _| Err(());
 /// pane loads are not starved. A `gx` open does not wait for this cap.
 const PR_BADGE_LOOKUPS_MAX: usize = 2;
 
+/// Longest a PR change waits for the badge lookups to go idle (ms): a
+/// landing after that alerts it even while lookups keep coming.
+const PR_ALERT_WAIT_MS: u64 = 2000;
+
 /// Live TTY launch after [`JobOutcome::DiffPrepared`].
 pub(crate) struct DiffLaunch {
     pub repo: String,
@@ -2630,13 +2634,22 @@ impl Interpreter {
     }
 
     /// Alert the PR changes that landed lookups queued
-    /// ([`AppState::alert_pr_transitions`]), once no badge lookup waits or
-    /// runs. The lookups of one poll cycle, one `r`, or the launch land one
-    /// by one under the cap, so they alert as one batch when the last one
-    /// lands; a `gx` lookup that lands with none out alerts at once.
+    /// ([`AppState::alert_pr_transitions`]) when no badge lookup waits or
+    /// runs, or when the oldest change has waited [`PR_ALERT_WAIT_MS`].
+    ///
+    /// The lookups of one poll cycle, one `r`, or the launch land one by
+    /// one under the cap, so they usually alert as one batch when the last
+    /// one lands. Cycles that overlap (a short poll period, many
+    /// checkouts, a slow forge) or a lookup that never lands keep the queue
+    /// busy; the wait bound still alerts at the next landing. A `gx`
+    /// lookup that lands with none out alerts at once.
     fn alert_pr_changes(&mut self, state: &mut AppState) {
+        let now = Instant::now();
         let idle = self.pr_badges.is_empty() && self.pr_badge_jobs.is_empty();
-        if idle && state.alert_pr_transitions(Instant::now()) {
+        let waited = state.pr_transitions_waiting_since().is_some_and(|since| {
+            now.saturating_duration_since(since).as_millis() >= u128::from(PR_ALERT_WAIT_MS)
+        });
+        if (idle || waited) && state.alert_pr_transitions(now) {
             self.mark();
         }
     }
@@ -9598,7 +9611,7 @@ mod tests {
             [
                 ("#1 CI failed".into(), "feature".into()),
                 ("#2 ready to merge".into(), "feature".into()),
-                ("+2 more PR changes".into(), "gp".into()),
+                ("+2 more PR changes".into(), String::new()),
             ]
         );
         assert!(interp.take_dirty(), "the alert asks for a frame");

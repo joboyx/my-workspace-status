@@ -15843,7 +15843,7 @@ mod tests {
             ToastMark::None,
             SegRole::Muted,
             "+3 more PR changes",
-            "gp",
+            "",
         ));
         let mut terminal = Terminal::new(TestBackend::new(TOAST_W, TOAST_H)).unwrap();
         draw_state(&mut terminal, &mut state);
@@ -15853,7 +15853,7 @@ mod tests {
         let rows = [
             (TOAST_H - 6, " ✕ #318 CI failed · test (ubuntu-latest) "),
             (TOAST_H - 5, " ✓ !12 merged · feature/ABC-123-retry-api "),
-            (TOAST_H - 4, " +3 more PR changes · gp "),
+            (TOAST_H - 4, " +3 more PR changes "),
         ];
         for (y, text) in rows {
             let width = text.chars().count() as u16;
@@ -15877,7 +15877,7 @@ mod tests {
         assert_eq!(buf[(x0 + 20, y)].fg, palette.muted);
         let (y, x0) = (TOAST_H - 5, TOAST_W - 1 - 42);
         assert_eq!(buf[(x0 + 1, y)].fg, palette.branch_feature);
-        let (y, x0) = (TOAST_H - 4, TOAST_W - 1 - 25);
+        let (y, x0) = (TOAST_H - 4, TOAST_W - 1 - 20);
         assert_eq!(buf[(x0 + 1, y)].symbol(), "+");
         assert_eq!(buf[(x0 + 1, y)].fg, palette.muted, "the summary is muted");
         assert!(!state.layout.animating, "holding: no frame ticks");
