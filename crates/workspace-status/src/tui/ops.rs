@@ -576,6 +576,7 @@ mod tests {
             } else {
                 String::new()
             },
+            upstream_rewrite: None,
             head: String::new(),
             has_unstaged: false,
             has_staged: false,

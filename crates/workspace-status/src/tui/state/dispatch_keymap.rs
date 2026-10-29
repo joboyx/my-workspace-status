@@ -15,9 +15,11 @@ use super::super::graph_focus::GRAPH_FOCUS_NEED_CONTEXT;
 use super::super::ops::{collect_write_files, op_is_kind_noop, op_kind_noop_reason, Op};
 use super::super::status::StatusMessage;
 use super::super::tabs::{
-    ComparePickerKind, NOT_ON_WORKTREE_COMPARE, ONLY_WORKSPACE_TAB_OPEN, WORKSPACE_TAB_CANNOT_CLOSE,
+    ComparePickerKind, NOT_ON_WORKTREE_COMPARE, ONLY_WORKSPACE_TAB_OPEN, PRS_TAB_ONLY,
+    WORKSPACE_TAB_CANNOT_CLOSE,
 };
 use super::super::tree::NodeKind;
+use super::pull_request::PrAction;
 use super::{AppState, FileWrite, FocusPane, FoldOp};
 
 impl AppState {
@@ -402,7 +404,15 @@ impl AppState {
             }
             Action::ExportComments => self.export_comments(),
             Action::CopyEntityReference => self.copy_entity_reference(),
-            Action::OpenPullRequest => self.open_pull_request(),
+            // In a pinned popover `gx` / `gc` act on its PR section.
+            Action::OpenPullRequest => self.run_pr_key(PrAction::Open),
+            Action::OpenPullRequestCi => self.run_pr_key(PrAction::OpenCi),
+            Action::CopyPullRequestUrl => self.run_pr_action(PrAction::CopyUrl),
+            Action::RefreshPullRequest => self.refresh_pull_request(),
+            Action::RefreshPullRequests => self.refresh_pull_requests(None),
+            Action::OpenPrsTab => self.open_prs_tab(),
+            // The PRs tab answers `Z` before this router.
+            Action::ToggleFinishedPrGroups => self.prs_toggle_finished(),
             Action::ViewRemotely => self.view_remotely(),
             Action::ExportCommentsCancel => {
                 self.comment_export = None;
@@ -419,7 +429,7 @@ impl AppState {
             | Action::QuickOpenChar(_)
             | Action::QuickOpenBackspace
             | Action::QuickOpenSubmit
-            | Action::QuickOpenCancel => self.dispatch_quick_open(action),
+            | Action::QuickOpenEscape => self.dispatch_quick_open(action),
             Action::ToggleSearchFiles
             | Action::SearchFilesChar(_)
             | Action::SearchFilesBackspace
@@ -427,7 +437,7 @@ impl AppState {
             | Action::SearchFilesPage(_)
             | Action::SearchFilesToggleScope
             | Action::SearchFilesToggleOption(_)
-            | Action::SearchFilesCancel
+            | Action::SearchFilesEscape
             | Action::SearchFilesSubmit
             | Action::SearchFilesEdit => self.dispatch_search_files(action),
             Action::CompareVsDefault => self.compare_vs_default(),
@@ -516,13 +526,27 @@ impl AppState {
     /// ([`Self::summary_refusal`]), then the row's
     /// highlight scope, then the range patch (highlighted stage / unstage /
     /// revert), then the action gate.
+    /// PRs tab runs on every tab. On the PRs tab every other row answers
+    /// from [`Self::prs_tab_palette_reason`]; off it, Fold finished PR
+    /// groups says [`PRS_TAB_ONLY`].
     pub(crate) fn palette_disabled_reason(&self, command: &PaletteCommand) -> Option<String> {
         let action = &command.action;
         if matches!(action, Action::GoToLine(_)) {
-            return self.go_to_line_refusal();
+            return self
+                .prs_tab_refusal(action)
+                .or_else(|| self.go_to_line_refusal());
         }
         if matches!(action, Action::PreviousFileTab | Action::NextFileTab) {
             return self.file_tab_cycle_reason();
+        }
+        if matches!(action, Action::OpenPrsTab) {
+            return None;
+        }
+        if self.is_prs_tab() {
+            return self.prs_tab_palette_reason(action);
+        }
+        if matches!(action, Action::ToggleFinishedPrGroups) {
+            return Some(PRS_TAB_ONLY.into());
         }
         if matches!(action, Action::ExplorerReveal) {
             if let Err(reason) = self.explorer_open_target() {

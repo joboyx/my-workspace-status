@@ -67,6 +67,9 @@ pub enum UserTag {
     /// Forge PR lookup for a row badge, a `gx` lookup then browser open, or
     /// a "View remotely" remote check then browser open.
     PullRequest,
+    /// PR title command fill for the PRs tab group headers (latest-only
+    /// slot).
+    PrTitles,
     /// Commit-activity counts for the tree sparklines. Low priority: it
     /// waits behind every user job ([`Scheduler::enqueue_background`]).
     Activity,

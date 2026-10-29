@@ -38,6 +38,7 @@ Paths are workspace-relative. The snapshot does not include the workspace root, 
 | `branch` | string | Current branch, or a detached / unknown label from git status. |
 | `syncStatus` | string | `up-to-date`, `no-upstream`, `behind`, `ahead`, or `diverged`. |
 | `syncNote` | string | Extra sync text (`ahead by 2`, `status failed`, empty). |
+| `upstreamRewrite` | object | Present only on a `diverged` branch whose upstream was force-pushed under it (see below). `syncStatus` and `syncNote` stay plain `diverged`. |
 | `checkoutKind` | string | `primary` or `linked`. |
 | `primaryRepo` | string | Present on linked checkouts. Path of the primary checkout. |
 | `mergedIntoDefault` | boolean or null | Whether HEAD is merged into the default branch. `true` only when HEAD is a strict ancestor of the default tip. Same-commit as that tip (a just-created branch) is `false`. `null` when not checked, on the default branch, or detached. |
@@ -47,7 +48,20 @@ Paths are workspace-relative. The snapshot does not include the workspace root, 
 | `hasUntracked` | boolean | Untracked files. |
 | `changes` | object[] | Per-path file changes, sorted by `path`. |
 
-Omitted optional keys: `primaryRepo`, `defaultBranchOverride`, and empty change flags on each file.
+Omitted optional keys: `primaryRepo`, `defaultBranchOverride`, `upstreamRewrite`, and empty change flags on each file.
+
+### `upstreamRewrite` object
+
+A maintainer force-pushed the upstream and dropped commits the local branch still holds. The snapshot worker classifies it only for a `diverged` branch whose upstream is a remote-tracking ref (a branch that tracks a local branch never gets the object), with `git merge-base --fork-point` over the upstream reflog. A branch with no reflog entry for the old upstream (a clone made after the rewrite, an expired reflog) is a normal divergence and has no object.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `upstream` | string | Upstream ref, for example `origin/main`. |
+| `forkPoint` | string | Full sha of the newest local commit that was once on the upstream. |
+| `dropped` | number | Local commits the upstream held and then dropped. |
+| `yours` | number | Local commits above `forkPoint`: work the old upstream never held. `0` means nothing of yours. |
+
+The local branch tip the classification used is kept for the TUI and omitted from `--json`. The plain report is unchanged.
 
 These fields cover branch, sync, checkout kind, merge-into-default, and file changes. They are not a full commit graph. `HEAD` is collected for TUI live-watch identity and is omitted from `--json`. Local `refs/heads` names are collected on the snapshot worker for TUI comment GC and are omitted from `--json`. When status fails, the TUI keeps the last good branch list for GC only if every checkout of that identity has an empty counted list. A successful sibling's live names win.
 

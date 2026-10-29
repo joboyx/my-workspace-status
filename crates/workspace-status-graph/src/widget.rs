@@ -96,6 +96,9 @@ pub enum GraphIconKind {
     OverflowChip,
     /// The sync header line: branch and ahead / behind marks.
     SyncHeader,
+    /// The [`GraphWidget::header_chip`] run, flush right on the sync header
+    /// line.
+    HeaderChip,
     /// The selection footer's `more lines below` hint.
     MoreBelow,
 }
@@ -110,7 +113,8 @@ pub struct IconSpan {
     pub kind: GraphIconKind,
     /// [`GraphModel::visible_rows`] index of the row. A spacer worktree
     /// mark or chip carries its commit row; a selection-footer chip or the
-    /// footer hint carries the selected row. `None` for the sync header.
+    /// footer hint carries the selected row. `None` for the sync header and
+    /// its chip.
     pub row_index: Option<usize>,
     /// First painted column of the glyph.
     pub x: u16,
@@ -127,6 +131,10 @@ pub struct IconSpan {
     /// the other kinds.
     pub target: Option<PartTarget>,
 }
+
+/// Blank columns between the sync header text and the
+/// [`GraphWidget::header_chip`] run.
+pub const HEADER_CHIP_GAP: usize = 2;
 
 /// Node icon of `row`'s selectable line: commit, HEAD, or stash.
 fn node_icon_kind(row: &GraphRow) -> Option<GraphIconKind> {
@@ -164,6 +172,8 @@ pub struct GraphWidget<'a> {
     resolved_comment_glyph: &'a str,
     /// `(row index, glyph, colour)` painted at the row's right edge.
     row_badges: &'a [(usize, &'a str, Color)],
+    /// Right-aligned run on the sync header line: candidates, widest first.
+    header_chip: &'a [Line<'a>],
     cursor_fg: Color,
     cursor_bg: Option<Color>,
     cursor_inactive_fg: Color,
@@ -210,6 +220,7 @@ impl<'a> GraphWidget<'a> {
             resolved_comment_rows: &[],
             resolved_comment_glyph: "'",
             row_badges: &[],
+            header_chip: &[],
             cursor_fg: Color::Cyan,
             cursor_bg: None,
             cursor_inactive_fg: Color::Gray,
@@ -326,17 +337,31 @@ impl<'a> GraphWidget<'a> {
     /// Paint a badge glyph at the right edge of selectable rows.
     ///
     /// Each entry is a [`GraphModel::visible_rows`] index, the glyph (one
-    /// column), and its colour. The badge sits flush right in the label
-    /// area (left of the vertical scrollbar column). The label gets the
-    /// columns left of it less one space and clips first, so a narrow pane
-    /// never cuts the badge. [`Self::col_offset`] pans the label only; the
-    /// badge stays put. The gutter is not touched. Spacers and rows not
-    /// listed get no badge and reserve no column. A search-match row paints
-    /// the glyph in the search foreground, like its label. The
-    /// [`GraphIconKind::Badge`] spans of [`Self::render_with_icon_spans`]
-    /// tell where each badge landed.
+    /// column), and its colour; the glyph paints bold. The badge sits flush
+    /// right in the label area (left of the vertical scrollbar column). The
+    /// label gets the columns left of it less one space and clips first, so
+    /// a narrow pane never cuts the badge. [`Self::col_offset`] pans the
+    /// label only; the badge stays put. The gutter is not touched. Spacers
+    /// and rows not listed get no badge and reserve no column. A
+    /// search-match row paints the glyph in the search foreground, like its
+    /// label. The [`GraphIconKind::Badge`] spans of
+    /// [`Self::render_with_icon_spans`] tell where each badge landed.
     pub fn row_badges(mut self, badges: &'a [(usize, &'a str, Color)]) -> Self {
         self.row_badges = badges;
+        self
+    }
+
+    /// Paint a run flush right on the sync header line, in its own styles.
+    ///
+    /// `candidates` go widest first. The first one that fits right of the
+    /// branch and sync marks, with [`HEADER_CHIP_GAP`] blank columns
+    /// between, paints so that it ends at the right edge of the area; the
+    /// sync text keeps its columns. None fits, or no sync header shows: no
+    /// run. The run does not pan. Its [`GraphIconKind::HeaderChip`] span of
+    /// [`Self::render_with_icon_spans`] tells where it landed; its width
+    /// tells which candidate.
+    pub fn header_chip(mut self, candidates: &'a [Line<'a>]) -> Self {
+        self.header_chip = candidates;
         self
     }
 
@@ -525,16 +550,16 @@ impl Widget for GraphWidget<'_> {
 impl GraphWidget<'_> {
     /// Paint like [`Widget::render`] and return the painted cells of every
     /// graph icon that is on screen, in paint order (top to bottom: the
-    /// sync header, then per list line: node, comment mark, label glyphs and
-    /// chips left to right, the badge at the right edge; then the selection
-    /// footer's chips and its more-lines hint).
+    /// sync header and its chip, then per list line: node, comment mark,
+    /// label glyphs and chips left to right, the badge at the right edge;
+    /// then the selection footer's chips and its more-lines hint).
     ///
     /// Icons are the selectable line's node cell, the comment mark, the
     /// uncommitted and worktree glyphs (worktree rows and spacer worktree
     /// marks), [`Self::row_badges`], the ref chips of commit spacers and of
     /// the selection footer (one span per chip run, see
-    /// [`LabelPart::target`]), the sync header, and the footer hint. Rails
-    /// and junctions are not icons.
+    /// [`LabelPart::target`]), the sync header, [`Self::header_chip`], and
+    /// the footer hint. Rails and junctions are not icons.
     /// An icon scrolled out of the list, cut by [`Self::col_offset`],
     /// clipped by the gutter cap or the pane width, or under the horizontal
     /// scrollbar row is left out. The badge does not pan, so the offset
@@ -612,7 +637,8 @@ impl GraphWidget<'_> {
                     self.label_palette,
                     fallback,
                 );
-                let width = u16::try_from(Span::raw(parts_text(&parts)).width())
+                let sync_width = Span::raw(parts_text(&parts)).width();
+                let width = u16::try_from(sync_width)
                     .unwrap_or(u16::MAX)
                     .min(area.width);
                 if width > 0 {
@@ -625,6 +651,24 @@ impl GraphWidget<'_> {
                         part: None,
                         target: None,
                     });
+                }
+                let room = usize::from(area.width).saturating_sub(sync_width + HEADER_CHIP_GAP);
+                if let Some(chip) = self.header_chip.iter().find(|chip| chip.width() <= room) {
+                    // `chip.width() <= room < area.width`, so it fits a u16.
+                    let chip_w = chip.width() as u16;
+                    let chip_x = area.right().saturating_sub(chip_w);
+                    chip.clone().render(Rect::new(chip_x, y, chip_w, 1), buf);
+                    if chip_w > 0 {
+                        icon_spans.push(IconSpan {
+                            kind: GraphIconKind::HeaderChip,
+                            row_index: None,
+                            x: chip_x,
+                            y,
+                            width: chip_w,
+                            part: None,
+                            target: None,
+                        });
+                    }
                 }
                 y = y.saturating_add(1);
             }
@@ -1123,7 +1167,9 @@ fn put_painted_line(
         buf[(gap_x, y)].set_symbol(" ");
         buf[(gap_x, y)].set_style(row_style);
     }
-    let mut style = Style::default().fg(match_fg.unwrap_or(color));
+    let mut style = Style::default()
+        .fg(match_fg.unwrap_or(color))
+        .add_modifier(Modifier::BOLD);
     if let Some(bg) = row_bg {
         style = style.bg(bg);
     }
@@ -3320,6 +3366,7 @@ mod tests {
         assert_eq!(span.x, 79);
         assert_eq!(buf[(span.x, span.y)].symbol(), "P");
         assert_eq!(buf[(span.x, span.y)].fg, Color::Green);
+        assert!(buf[(span.x, span.y)].modifier.contains(Modifier::BOLD));
         assert_eq!(buf[(span.x - 1, span.y)].symbol(), " ");
         // Only the badge cell differs: gutter, label and other rows stay put.
         for y in 0..buf.area.height {
@@ -4859,6 +4906,89 @@ mod tests {
             .now_unix(NOW)
             .render(buf.area, &mut buf);
         assert_eq!(buf[(0, 0)].fg, Color::Reset);
+    }
+
+    /// The first header chip candidate that fits paints flush right, two
+    /// columns clear of the sync text, and reports its cells; a narrow pane
+    /// takes a shorter one, then none. The sync text never moves.
+    #[test]
+    fn header_chip_paints_the_widest_candidate_that_fits_flush_right() {
+        let mut model = chip_model();
+        model.sync = Some(SyncState {
+            branch: "main".into(),
+            status: SyncStatus::Ahead,
+            ahead: 2,
+            behind: 0,
+        });
+        let red = Style::default().fg(Color::Red);
+        let candidates = [
+            Line::from(vec![
+                Span::styled("x #9", red),
+                Span::raw(" CI failed  > fix CI"),
+            ]),
+            Line::from(vec![Span::styled("x #9", red), Span::raw(" CI failed")]),
+            Line::from(Span::styled("x #9", red)),
+        ];
+        // `main ^2` is 7 columns wide (`^` is the Nerd arrow).
+        let sync = "main \u{f062}2";
+        let header = |width: u16| {
+            let mut buf = Buffer::empty(Rect::new(3, 1, width, 12));
+            let spans = GraphWidget::new(&model)
+                .now_unix(NOW)
+                .header_chip(&candidates)
+                .render_with_icon_spans(buf.area, &mut buf);
+            let row: String = (3..3 + width).map(|x| buf[(x, 1)].symbol()).collect();
+            let chip: Vec<IconSpan> = spans
+                .into_iter()
+                .filter(|span| span.kind == GraphIconKind::HeaderChip)
+                .collect();
+            (buf, row, chip)
+        };
+        let full = candidates[0].width() as u16;
+        for (width, want) in [
+            (60, Some("x #9 CI failed  > fix CI")),
+            (7 + 2 + full, Some("x #9 CI failed  > fix CI")),
+            (7 + 2 + full - 1, Some("x #9 CI failed")),
+            (7 + 2 + 4, Some("x #9")),
+            (7 + 2 + 3, None),
+        ] {
+            let (buf, row, chip) = header(width);
+            assert!(row.starts_with(sync), "{width}: {row:?}");
+            match want {
+                Some(text) => {
+                    assert!(row.ends_with(text), "{width}: {row:?}");
+                    let w = text.chars().count() as u16;
+                    assert_eq!(
+                        chip,
+                        vec![IconSpan {
+                            kind: GraphIconKind::HeaderChip,
+                            row_index: None,
+                            x: 3 + width - w,
+                            y: 1,
+                            width: w,
+                            part: None,
+                            target: None,
+                        }],
+                        "{width}"
+                    );
+                    assert_eq!(buf[(3 + width - w, 1)].fg, Color::Red, "{width}");
+                }
+                None => {
+                    assert!(chip.is_empty(), "{width}");
+                    assert_eq!(row.trim_end(), sync, "{width}");
+                }
+            }
+        }
+        // No sync header, no chip.
+        model.sync = None;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 60, 12));
+        let spans = GraphWidget::new(&model)
+            .now_unix(NOW)
+            .header_chip(&candidates)
+            .render_with_icon_spans(buf.area, &mut buf);
+        assert!(spans
+            .iter()
+            .all(|span| span.kind != GraphIconKind::HeaderChip));
     }
 
     #[test]

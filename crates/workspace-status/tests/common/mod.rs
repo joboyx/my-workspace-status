@@ -3,5 +3,7 @@
 //! `tui_tty_e2e` mods this directory. It is not a second harness.
 //! Demo GIF clips stay in `scripts/capture-demo-stills.sh`.
 
+pub mod fake_forge;
 pub mod hscroll;
+pub mod pr_scenarios;
 pub mod seed;

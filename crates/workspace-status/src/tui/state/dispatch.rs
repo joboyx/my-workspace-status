@@ -170,6 +170,17 @@ impl AppState {
         ) {
             self.g_pending_at = None;
         }
+        // The PRs tab answers its own keys and refuses writes and the
+        // Workspace pane keys, before any gate reads the parked tree.
+        if self.is_prs_tab() {
+            if let Some(reason) = self.prs_tab_refusal(&action) {
+                self.status = StatusMessage::warn(reason);
+                return Effect::None;
+            }
+            if let Some(effect) = self.dispatch_prs_tab(&action) {
+                return effect;
+            }
+        }
         // `-` picks its meaning from the tab and the focused row.
         if matches!(action, Action::ExplorerReveal) {
             return self.explorer_reveal();
@@ -233,6 +244,8 @@ impl AppState {
             | Action::PopoverRun
             | Action::PopoverCopyLine
             | Action::PopoverClose) => self.dispatch_popover(action),
+            // `dispatch` already ended the chord above.
+            Action::GChordCancel => Effect::None,
             // Report-only, from every tab: no gate above refuses these.
             action @ (Action::OpenDoctor
             | Action::DoctorMove(_)
@@ -339,13 +352,19 @@ impl AppState {
             | Action::ExportCommentsCancel
             | Action::CopyEntityReference
             | Action::OpenPullRequest
+            | Action::OpenPullRequestCi
+            | Action::CopyPullRequestUrl
+            | Action::RefreshPullRequest
+            | Action::RefreshPullRequests
+            | Action::OpenPrsTab
+            | Action::ToggleFinishedPrGroups
             | Action::ViewRemotely
             | Action::ToggleQuickOpen(_)
             | Action::QuickOpenMove(_)
             | Action::QuickOpenChar(_)
             | Action::QuickOpenBackspace
             | Action::QuickOpenSubmit
-            | Action::QuickOpenCancel
+            | Action::QuickOpenEscape
             | Action::ToggleSearchFiles
             | Action::SearchFilesChar(_)
             | Action::SearchFilesBackspace
@@ -353,7 +372,7 @@ impl AppState {
             | Action::SearchFilesPage(_)
             | Action::SearchFilesToggleScope
             | Action::SearchFilesToggleOption(_)
-            | Action::SearchFilesCancel
+            | Action::SearchFilesEscape
             | Action::SearchFilesSubmit
             | Action::SearchFilesEdit
             | Action::CompareVsDefault

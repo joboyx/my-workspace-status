@@ -60,4 +60,5 @@ pub use topology::{cells_text, CellRole, GraphCell};
 pub use widget::{
     graph_col_max, graph_hscroll_visible, graph_scrollbar_thumb, graph_vscroll_visible,
     paint_selection_footer, GraphIconKind, GraphLabelPalette, GraphWidget, IconSpan,
+    HEADER_CHIP_GAP,
 };

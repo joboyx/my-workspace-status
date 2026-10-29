@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use crate::git::UpstreamRewrite;
 use crate::helpers::{
     is_attention_sync_note, is_default_branch, is_detached_head_branch, visible_width,
     STATUS_FAILED_NOTE,
@@ -14,12 +15,11 @@ use crate::snapshot::{
 
 use super::icons::{
     file_icon, icon_branch, icon_changes, icon_clean, icon_comment, icon_comment_resolved,
-    icon_folder, icon_hidden, icon_linked_worktree, icon_pr_approved, icon_pr_merged, icon_pr_open,
-    icon_repo, icon_staged, icon_status_failed, icon_viewed, icon_workspace,
-    status_letter_from_change, tui_file_badge, tui_merge_mark, tui_sync_mark, IconKind,
-    StatusColorRole,
+    icon_folder, icon_hidden, icon_linked_worktree, icon_repo, icon_staged, icon_status_failed,
+    icon_viewed, icon_workspace, status_letter_from_change, tui_file_badge, tui_merge_mark,
+    tui_sync_mark, upstream_rewrite_short_text, IconKind, StatusColorRole,
 };
-use super::pull_request::PrState;
+use super::pr_status::PrState;
 
 /// Structural node kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +44,8 @@ pub struct NodeChrome {
     pub merged_into_default: Option<bool>,
     pub sync_status: Option<SyncStatus>,
     pub sync_note: String,
+    /// Set when this diverged branch's upstream was force-pushed under it.
+    pub upstream_rewrite: Option<UpstreamRewrite>,
     /// `HEAD` sha. Watch identity only; not painted.
     pub head: String,
     pub change_count: usize,
@@ -346,11 +348,11 @@ fn family_container(
     let change_count = children.iter().map(|c| c.chrome.change_count).sum();
     let statuses: Vec<SyncStatus> = members.iter().map(|m| m.sync_status).collect();
     let worst = worst_sync_status(&statuses);
-    let note_for_worst = members
-        .iter()
-        .find(|m| m.sync_status == worst)
+    let worst_member = members.iter().find(|m| m.sync_status == worst);
+    let note_for_worst = worst_member
         .map(|m| m.sync_note.clone())
         .unwrap_or_default();
+    let rewrite_for_worst = worst_member.and_then(|m| m.upstream_rewrite.clone());
     let primary_head = members
         .iter()
         .find(|m| m.checkout_kind == CheckoutKind::Primary)
@@ -370,6 +372,7 @@ fn family_container(
             path: primary.to_string(),
             sync_status: Some(worst),
             sync_note: note_for_worst,
+            upstream_rewrite: rewrite_for_worst,
             head: primary_head,
             change_count,
             is_family: true,
@@ -421,6 +424,7 @@ fn repo_or_checkout(repo: &WorkspaceRepoSnapshot, kind: NodeKind, tree_mode: boo
             merged_into_default: repo.merged_into_default,
             sync_status: Some(repo.sync_status),
             sync_note: repo.sync_note.clone(),
+            upstream_rewrite: repo.upstream_rewrite.clone(),
             head: repo.head.clone(),
             change_count: repo.changes.len(),
             default_branch_override: repo.default_branch_override.clone(),
@@ -933,11 +937,14 @@ fn sync_trailing(chrome: &NodeChrome, in_no_updates: bool, ascii: bool) -> Vec<T
         }
         return vec![icon_text_seg(icon_clean(ascii), role, kind)];
     }
-    vec![icon_text_seg(
-        tui_sync_mark(ascii, status, &chrome.sync_note),
-        role,
-        kind,
-    )]
+    let mark = icon_text_seg(tui_sync_mark(ascii, status, &chrome.sync_note), role, kind);
+    match &chrome.upstream_rewrite {
+        Some(rewrite) if status == SyncStatus::Diverged => vec![
+            mark,
+            text_seg(format!(" {}", upstream_rewrite_short_text(rewrite)), role),
+        ],
+        _ => vec![mark],
+    }
 }
 
 /// Single-sided name-status → FileChange.
@@ -1313,20 +1320,98 @@ fn workspace_segments(node: &TreeNode, ascii: bool) -> NodeSegments {
     }
 }
 
+/// PR counts of the workspace total on the workspace row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PrTotals {
+    /// PRs whose badge shows on a visible checkout (open and merged), each
+    /// counted once.
+    pub prs: usize,
+    /// Those PRs whose next action is the author's.
+    pub need_you: usize,
+}
+
+/// The workspace total for `totals`, widest first: `8 PRs · 2 need you`,
+/// then `2 need you` alone. `8 PRs` is muted, the `·` dim, and `2 need you`
+/// modified and bold. One reads `1 PR` and `1 needs you`. With no PR that
+/// needs you only `8 PRs`; with no PR nothing. The count of PRs that need
+/// the author is the part worth keeping, so it outlasts the PR count. A
+/// `narrow` tree shows only that part: `2 need you`, else `8 PRs`.
+fn pr_total_variants(totals: PrTotals, narrow: bool) -> Vec<Vec<TextSeg>> {
+    if totals.prs == 0 {
+        return Vec::new();
+    }
+    let noun = if totals.prs == 1 { "PR" } else { "PRs" };
+    let prs = text_seg(format!("{} {noun}", totals.prs), SegRole::Muted);
+    let verb = if totals.need_you == 1 {
+        "needs"
+    } else {
+        "need"
+    };
+    let need_you = TextSeg {
+        bold: true,
+        ..text_seg(format!("{} {verb} you", totals.need_you), SegRole::Modified)
+    };
+    let dot = TextSeg {
+        dim: true,
+        ..text_seg(" · ", SegRole::Muted)
+    };
+    match (totals.need_you > 0, narrow) {
+        (false, _) => vec![vec![prs]],
+        (true, true) => vec![vec![need_you]],
+        (true, false) => vec![vec![prs, dot, need_you.clone()], vec![need_you]],
+    }
+}
+
 /// Workspace root trailing summary that fits `room` columns (pad included)
-/// beside the name. The name is the row's identity, so the summary gives
-/// way first: `N changed · sync`, then `N changed`, then `N`, then nothing.
-pub(crate) fn workspace_trailing_fit(chrome: &NodeChrome, room: usize) -> Vec<TextSeg> {
+/// beside the name: `N changed · sync`, then two spaces and the PR total
+/// (`8 PRs · 2 need you`, see [`PrTotals`]). The name is the row's
+/// identity, so the summary gives way first. While any PR needs the author,
+/// `2 need you` is the part worth keeping: the `8 PRs` part goes first,
+/// then the change summary shortens beside `2 need you` (`N changed`, then
+/// `N`), then `2 need you` stands alone. After that, and when no PR needs
+/// the author, the PR total goes and `N changed · sync` goes to
+/// `N changed`, then `N`, then nothing. A `narrow` tree (under
+/// [`PR_REF_MIN_TREE_COLS`]) starts at the one-part total.
+///
+/// Returns the segments and the columns of the PR total that ends them
+/// (`0` when the summary that fits shows no PR total), so the caller can
+/// record the total's click area without reading it back from the text.
+pub(crate) fn workspace_trailing_fit(
+    chrome: &NodeChrome,
+    totals: PrTotals,
+    narrow: bool,
+    room: usize,
+) -> (Vec<TextSeg>, usize) {
     let n = chrome.change_count;
-    [
-        format!("{n} changed · {}", chrome.sync_summary),
-        format!("{n} changed"),
-        n.to_string(),
-    ]
-    .into_iter()
-    .find(|text| visible_width(text) < room)
-    .map(|text| vec![icon_text_seg(text, SegRole::Muted, IconKind::Workspace)])
-    .unwrap_or_default()
+    let summary = |text: String| vec![icon_text_seg(text, SegRole::Muted, IconKind::Workspace)];
+    let summaries = [
+        summary(format!("{n} changed · {}", chrome.sync_summary)),
+        summary(format!("{n} changed")),
+        summary(n.to_string()),
+    ];
+    let width =
+        |segs: &[TextSeg]| -> usize { segs.iter().map(|seg| visible_width(&seg.text)).sum() };
+    let beside = |summary: &[TextSeg], total: &[TextSeg]| {
+        let mut segs = summary.to_vec();
+        segs.push(text_seg(PR_BADGE_GAP, SegRole::Muted));
+        segs.extend_from_slice(total);
+        (segs, width(total))
+    };
+    let totals_variants = pr_total_variants(totals, narrow);
+    let mut candidates: Vec<(Vec<TextSeg>, usize)> = totals_variants
+        .iter()
+        .map(|total| beside(&summaries[0], total))
+        .collect();
+    // With a PR that needs the author the last variant is `2 need you`.
+    if let Some(need_you) = totals_variants.last().filter(|_| totals.need_you > 0) {
+        candidates.extend(summaries[1..].iter().map(|short| beside(short, need_you)));
+        candidates.push((need_you.clone(), width(need_you)));
+    }
+    candidates
+        .into_iter()
+        .chain(summaries.map(|summary| (summary, 0)))
+        .find(|(segs, _)| width(segs) < room)
+        .unwrap_or_default()
 }
 
 /// Styled segments for a tree node — the TUI's only label source.
@@ -1427,27 +1512,67 @@ pub fn with_viewed_mark(trailing: Vec<TextSeg>, ascii: bool, viewed: bool) -> Ve
     with_leading_icons(vec![eye], trailing)
 }
 
-/// Glyph and colour role of the PR badge for `state`.
-///
-/// Open is [`icon_pr_open`] in [`SegRole::BranchFeature`], approved is
-/// [`icon_pr_approved`] in [`SegRole::Added`], merged is [`icon_pr_merged`]
-/// in [`SegRole::Muted`] (done work steps back). The tree and the graph
-/// share this mapping.
+/// Glyph and colour role of the PR badge for `state`: the glyph of
+/// [`pr_badge_kind`], and the state colour ([`pr_badge_role`] of a fresh
+/// badge). The tree, the graph, the header chip, and the popover share this
+/// mapping.
 pub fn pr_badge_mark(ascii: bool, state: PrState) -> (&'static str, SegRole) {
+    (
+        pr_badge_kind(state).glyph(ascii),
+        pr_badge_role(state, false),
+    )
+}
+
+/// Colour role a PR mark in `state` paints in: [`SegRole::Muted`] when
+/// `stale`, else the state colour. CI failed is [`SegRole::Deleted`], ready
+/// to merge [`SegRole::Added`], CI running [`SegRole::Modified`], draft
+/// [`SegRole::Muted`], in review [`SegRole::BranchDefault`], and merged
+/// [`SegRole::BranchFeature`].
+pub fn pr_badge_role(state: PrState, stale: bool) -> SegRole {
+    if stale {
+        return SegRole::Muted;
+    }
     match state {
-        PrState::Open => (icon_pr_open(ascii), SegRole::BranchFeature),
-        PrState::Approved => (icon_pr_approved(ascii), SegRole::Added),
-        PrState::Merged => (icon_pr_merged(ascii), SegRole::Muted),
+        PrState::CiFailed => SegRole::Deleted,
+        PrState::Ready => SegRole::Added,
+        PrState::CiRunning => SegRole::Modified,
+        PrState::Draft => SegRole::Muted,
+        PrState::InReview => SegRole::BranchDefault,
+        PrState::Merged => SegRole::BranchFeature,
     }
 }
 
-/// Catalog kind of the PR badge for `state`.
+/// Catalog kind of the PR badge for `state`: one kind per state.
 pub fn pr_badge_kind(state: PrState) -> IconKind {
     match state {
-        PrState::Open => IconKind::PrOpen,
-        PrState::Approved => IconKind::PrApproved,
+        PrState::CiFailed => IconKind::PrCiFailed,
+        PrState::Ready => IconKind::PrReady,
+        PrState::CiRunning => IconKind::PrCiRunning,
+        PrState::Draft => IconKind::PrDraft,
+        PrState::InReview => IconKind::PrInReview,
         PrState::Merged => IconKind::PrMerged,
     }
+}
+
+/// Narrowest tree (columns) that paints PR refs. A narrower tree paints the
+/// badge glyph alone on every row, so the glyph column stays straight, and
+/// one part of the workspace PR total.
+pub const PR_REF_MIN_TREE_COLS: usize = 50;
+
+/// Blank columns between the rest of a trailing run and the PR badge (or
+/// the workspace PR total).
+const PR_BADGE_GAP: &str = "  ";
+
+/// What the PR badge of one tree row paints: `<ref> <glyph>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrBadge {
+    /// Badge state: picks the glyph and its colour ([`pr_badge_mark`]).
+    pub state: PrState,
+    /// `#318` (GitHub) or `!12` (GitLab). `None` paints the glyph alone (a
+    /// tree narrower than [`PR_REF_MIN_TREE_COLS`]).
+    pub ref_text: Option<String>,
+    /// The last successful lookup is old: the glyph paints muted too.
+    pub stale: bool,
 }
 
 /// Checkout path of a tree row that can carry a PR badge.
@@ -1462,21 +1587,26 @@ pub fn pr_badge_repo(row: &VisibleRow) -> Option<&str> {
     }
 }
 
-/// Insert the PR badge glyph into the trailing run of a repo or checkout
-/// row, at its paint-order slot: after the merge mark, else after the repo
-/// row's branch glyph, else at the start of the run. One space separates
-/// it from its neighbours.
+/// Append the PR badge `<ref> <glyph>` to the trailing run of a repo or
+/// checkout row, two spaces after the rest of the run. The run is
+/// right-aligned, so the glyph is the last cell of the row and every
+/// badge glyph shares one column.
+///
+/// The ref paints muted and the glyph bold in its state colour
+/// ([`pr_badge_role`]); a stale badge paints both muted. Both segments
+/// carry the badge's [`IconKind`], so hover, pin, Ctrl+click, and the link
+/// cover ref and glyph.
 ///
 /// Returns the index of the glyph in `segs.trailing`, or `None` when
-/// `state` is `None` or the label paints no branch text. Tree rows are
+/// `badge` is `None` or the label paints no branch text. Tree rows are
 /// built without PR state, so paint adds the badge per frame, before the
 /// comment and viewed marks.
 pub fn with_pr_badge(
     segs: &mut NodeSegments,
     ascii: bool,
-    state: Option<PrState>,
+    badge: Option<&PrBadge>,
 ) -> Option<usize> {
-    let state = state?;
+    let badge = badge?;
     let paints_branch = segs
         .segments
         .iter()
@@ -1484,26 +1614,70 @@ pub fn with_pr_badge(
     if !paints_branch {
         return None;
     }
-    let (glyph, role) = pr_badge_mark(ascii, state);
-    let badge = icon_text_seg(glyph, role, pr_badge_kind(state));
+    let kind = pr_badge_kind(badge.state);
+    let glyph = kind.glyph(ascii);
+    let role = pr_badge_role(badge.state, badge.stale);
     let trailing = &mut segs.trailing;
-    let anchor = trailing.iter().rposition(|seg| {
-        seg.icon
-            .is_some_and(|kind| kind == IconKind::Branch || is_merge_mark_kind(kind))
+    if !trailing.is_empty() {
+        trailing.push(text_seg(PR_BADGE_GAP, SegRole::Muted));
+    }
+    if let Some(ref_text) = &badge.ref_text {
+        trailing.push(icon_text_seg(ref_text.clone(), SegRole::Muted, kind));
+        trailing.push(text_seg(" ", SegRole::Muted));
+    }
+    trailing.push(TextSeg {
+        bold: true,
+        ..icon_text_seg(glyph, role, kind)
     });
-    match anchor {
-        Some(anchor) => {
-            trailing.insert(anchor + 1, text_seg(" ", SegRole::Muted));
-            trailing.insert(anchor + 2, badge);
-            Some(anchor + 2)
-        }
-        None => {
-            if !trailing.is_empty() {
-                trailing.insert(0, text_seg(" ", SegRole::Muted));
-            }
-            trailing.insert(0, badge);
-            Some(0)
-        }
+    Some(trailing.len() - 1)
+}
+
+/// Force-push text of a row too narrow for the whole short text
+/// ([`upstream_rewrite_short_text`]).
+const UPSTREAM_REWRITE_TINY_TEXT: &str = " force-pushed";
+
+/// Let the force-push text after a diverged mark give way before the
+/// row's name.
+///
+/// The name is the label up to its first segment with no icon: the repo
+/// name, or the branch of a checkout row. While the name and the trailing
+/// run fit in `room` columns (the row less its edge, indent, and chevron),
+/// the text stays whole and the rest of the label (the branch of a repo
+/// row) clips as usual. Past that the text drops to ` force-pushed`, then
+/// goes. So the run never has to cut the diverged mark off its left end to
+/// keep the PR glyph in the last column. The mark stays the click target,
+/// and its popover names the whole rewrite.
+///
+/// Paint and the tree pan limit call this on the same segments, before
+/// the spinner and the sparkline join the run, so a fetch that starts does
+/// not change the text.
+pub fn fit_upstream_rewrite_text(segs: &mut NodeSegments, chrome: &NodeChrome, room: usize) {
+    let Some(rewrite) = &chrome.upstream_rewrite else {
+        return;
+    };
+    let full = format!(" {}", upstream_rewrite_short_text(rewrite));
+    let Some(at) = segs
+        .trailing
+        .iter()
+        .position(|seg| seg.icon.is_none() && seg.text == full)
+    else {
+        return;
+    };
+    let cols = |segs: &[TextSeg]| -> usize { segs.iter().map(|s| visible_width(&s.text)).sum() };
+    let name_end = segs
+        .segments
+        .iter()
+        .position(|seg| seg.icon.is_none())
+        .map_or(segs.segments.len(), |at| at + 1);
+    // The name, the run less the text, and the one-column pad before it.
+    let rest = cols(&segs.segments[..name_end]) + cols(&segs.trailing) - visible_width(&full) + 1;
+    if rest + visible_width(&full) <= room {
+        return;
+    }
+    if rest + visible_width(UPSTREAM_REWRITE_TINY_TEXT) <= room {
+        segs.trailing[at].text = UPSTREAM_REWRITE_TINY_TEXT.to_string();
+    } else {
+        segs.trailing.remove(at);
     }
 }
 
@@ -1515,7 +1689,8 @@ pub fn with_pr_badge(
 /// not muted and not the clean check. The comment mark uses `icon_comment`
 /// (`"` / nf-fa-comment) on rows that have a live comment, or
 /// `icon_comment_resolved` (`'` / nf-fa-comment-o) when every comment on
-/// that row is resolved. Both go ahead of the PR badge.
+/// that row is resolved. Both lead the trailing run; the PR badge `pr`
+/// ends it ([`with_pr_badge`]).
 ///
 /// Paint, pan, and `gh` read this, so the icons `gh` lists are the icons
 /// the row paints, in paint order (label first, then the trailing run).
@@ -1525,7 +1700,7 @@ pub fn painted_row_segments(
     viewed: bool,
     commented: bool,
     resolved: bool,
-    pr: Option<PrState>,
+    pr: Option<&PrBadge>,
 ) -> NodeSegments {
     let mut segs = NodeSegments {
         segments: row.segments.clone(),
@@ -1627,6 +1802,7 @@ pub(crate) fn visible_window(row_count: usize, cursor: usize, height: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::UpstreamRewrite;
     use crate::snapshot::{
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
     };
@@ -1739,26 +1915,347 @@ mod tests {
                 true,
             ),
         };
-        let at = with_pr_badge(&mut segs, true, Some(PrState::Approved)).expect("badge");
-        assert_eq!(at, 0, "no merge mark: the badge leads the trailing run");
-        assert_eq!(segs.trailing[at].icon, Some(IconKind::PrApproved));
+        let at = with_pr_badge(&mut segs, true, Some(&badge(PrState::Ready, Some("#7"))))
+            .expect("badge");
+        assert_eq!(
+            at,
+            segs.trailing.len() - 1,
+            "the glyph ends the trailing run"
+        );
+        assert_eq!(segs.trailing[at].icon, Some(IconKind::PrReady));
         let trailing: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
-        assert_eq!(trailing, "A v1", "one space between the badge and sync");
+        assert_eq!(
+            trailing, "v1  #7 A",
+            "two spaces between sync and the badge"
+        );
         assert_eq!(
             segment_icons(&segs),
-            vec![IconKind::PrApproved, IconKind::Behind],
-            "label first, then the trailing run"
+            vec![IconKind::Behind, IconKind::PrReady],
+            "label first, then the trailing run; ref and glyph are one icon"
         );
         let mut no_branch = NodeSegments {
             segments: vec![text_seg("app", SegRole::Repo)],
             trailing: Vec::new(),
         };
         assert_eq!(
-            with_pr_badge(&mut no_branch, true, Some(PrState::Open)),
+            with_pr_badge(&mut no_branch, true, Some(&badge(PrState::InReview, None))),
             None,
             "a row that paints no branch text gets no badge"
         );
         assert!(no_branch.trailing.is_empty());
+    }
+
+    /// A fresh badge in `state` with `ref_text`.
+    fn badge(state: PrState, ref_text: Option<&str>) -> PrBadge {
+        PrBadge {
+            state,
+            ref_text: ref_text.map(str::to_string),
+            stale: false,
+        }
+    }
+
+    /// `<ref> <glyph>` ends the run: ref muted, glyph bold in the state
+    /// colour, both tagged; stale paints both muted; no ref paints the glyph
+    /// alone. GitHub and GitLab refs, both glyph modes.
+    #[test]
+    fn pr_badge_paints_its_ref_muted_and_its_glyph_bold_in_the_state_colour() {
+        let roles = [
+            (PrState::CiFailed, SegRole::Deleted, "✕", "x"),
+            (PrState::Ready, SegRole::Added, "◉", "A"),
+            (PrState::CiRunning, SegRole::Modified, "◐", "r"),
+            (PrState::Draft, SegRole::Muted, "◌", "d"),
+            (PrState::InReview, SegRole::BranchDefault, "○", "P"),
+            (PrState::Merged, SegRole::BranchFeature, "✓", "m"),
+        ];
+        for (state, role, nerd, letter) in roles {
+            for ascii in [false, true] {
+                let glyph = if ascii { letter } else { nerd };
+                for ref_text in [Some("#318"), Some("!12"), None] {
+                    for stale in [false, true] {
+                        let what = format!("{state:?} ascii={ascii} {ref_text:?} stale={stale}");
+                        let mut segs = NodeSegments {
+                            segments: vec![text_seg("feature", SegRole::BranchFeature)],
+                            trailing: vec![change_count_seg(3)],
+                        };
+                        let pr = PrBadge {
+                            stale,
+                            ..badge(state, ref_text)
+                        };
+                        let at = with_pr_badge(&mut segs, ascii, Some(&pr)).expect("badge");
+                        let texts: Vec<&str> =
+                            segs.trailing.iter().map(|seg| seg.text.as_str()).collect();
+                        let kind = pr_badge_kind(state);
+                        match ref_text {
+                            Some(r) => assert_eq!(texts, ["3", "  ", r, " ", glyph], "{what}"),
+                            None => assert_eq!(texts, ["3", "  ", glyph], "{what}"),
+                        }
+                        let mark = &segs.trailing[at];
+                        assert_eq!(at, segs.trailing.len() - 1, "{what}");
+                        assert_eq!(mark.icon, Some(kind), "{what}");
+                        assert!(mark.bold, "{what}");
+                        let want = if stale { SegRole::Muted } else { role };
+                        assert_eq!(mark.role, want, "{what}");
+                        if ref_text.is_some() {
+                            let r = &segs.trailing[at - 2];
+                            assert_eq!(
+                                (r.role, r.icon, r.bold),
+                                (SegRole::Muted, Some(kind), false)
+                            );
+                            assert_eq!(segs.trailing[at - 1].icon, None, "{what}: the gap");
+                        }
+                        assert_eq!(pr_badge_mark(ascii, state), (glyph, role), "{what}");
+                        assert_eq!(pr_badge_role(state, stale), want, "{what}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The workspace total sits after the change summary. While a PR needs
+    /// the author, `need you` outlasts the PR count and the change summary:
+    /// the PR count goes, then the summary shortens beside `need you`, then
+    /// `need you` stands alone, then the summary's own steps. With none to
+    /// act on, the PR count goes before the summary does.
+    #[test]
+    fn workspace_need_you_outlasts_the_pr_count_and_the_change_summary() {
+        let chrome = NodeChrome {
+            change_count: 4,
+            sync_summary: "2 behind".into(),
+            ..NodeChrome::default()
+        };
+        let text = |totals: PrTotals, narrow: bool, room: usize| -> String {
+            let (segs, total_cols) = workspace_trailing_fit(&chrome, totals, narrow, room);
+            let text: String = segs.iter().map(|seg| seg.text.as_str()).collect();
+            // The total's columns are the text after the gap, or the whole
+            // text when the total stands alone.
+            let total = [
+                "8 PRs · 2 need you",
+                "1 PR · 1 needs you",
+                "8 PRs",
+                "2 need you",
+                "1 needs you",
+            ]
+            .into_iter()
+            .find(|total| text.ends_with(total))
+            .map_or(0, visible_width);
+            assert_eq!(total_cols, total, "{text:?}");
+            text
+        };
+        let both = PrTotals {
+            prs: 8,
+            need_you: 2,
+        };
+        // `room` counts the one-column pad: a text fits when it is narrower.
+        let full = "4 changed · 2 behind  8 PRs · 2 need you";
+        let steps = [
+            (visible_width(full) + 1, full),
+            (visible_width(full), "4 changed · 2 behind  2 need you"),
+            (
+                visible_width("4 changed · 2 behind  2 need you"),
+                "4 changed  2 need you",
+            ),
+            (visible_width("4 changed  2 need you"), "4  2 need you"),
+            (visible_width("4  2 need you"), "2 need you"),
+            (visible_width("2 need you"), "4 changed"),
+            (visible_width("4 changed"), "4"),
+            (1, ""),
+        ];
+        for (room, want) in steps {
+            assert_eq!(text(both, false, room), want, "room {room}");
+        }
+        let none_need = PrTotals {
+            prs: 8,
+            need_you: 0,
+        };
+        assert_eq!(text(none_need, false, 80), "4 changed · 2 behind  8 PRs");
+        assert_eq!(text(none_need, true, 80), "4 changed · 2 behind  8 PRs");
+        // With nobody to act, the PR count is the only part and it goes
+        // before the summary does.
+        let tight = visible_width("4 changed · 2 behind  8 PRs");
+        assert_eq!(text(none_need, false, tight), "4 changed · 2 behind");
+        assert_eq!(
+            text(none_need, false, visible_width("4 changed · 2 behind")),
+            "4 changed",
+            "with none to act on, no short summary keeps the PR count"
+        );
+        assert_eq!(text(both, true, 80), "4 changed · 2 behind  2 need you");
+        assert_eq!(
+            text(
+                both,
+                true,
+                visible_width("4 changed · 2 behind  2 need you")
+            ),
+            "4 changed  2 need you",
+            "a narrow tree shortens the summary beside need you too"
+        );
+        let (short, _) =
+            workspace_trailing_fit(&chrome, both, false, visible_width("4 changed  2 need you"));
+        let short: Vec<(&str, SegRole, bool, Option<IconKind>)> = short
+            .iter()
+            .map(|seg| (seg.text.as_str(), seg.role, seg.bold, seg.icon))
+            .collect();
+        assert_eq!(
+            short,
+            [
+                ("4", SegRole::Muted, false, Some(IconKind::Workspace)),
+                ("  ", SegRole::Muted, false, None),
+                ("2 need you", SegRole::Modified, true, None),
+            ]
+        );
+        let one = PrTotals {
+            prs: 1,
+            need_you: 1,
+        };
+        assert_eq!(
+            text(one, false, 80),
+            "4 changed · 2 behind  1 PR · 1 needs you"
+        );
+        assert_eq!(text(one, true, 80), "4 changed · 2 behind  1 needs you");
+        assert_eq!(text(PrTotals::default(), false, 80), "4 changed · 2 behind");
+
+        let (segs, _) = workspace_trailing_fit(&chrome, both, false, 80);
+        let styles: Vec<(&str, SegRole, bool, bool, Option<IconKind>)> = segs
+            .iter()
+            .map(|seg| (seg.text.as_str(), seg.role, seg.bold, seg.dim, seg.icon))
+            .collect();
+        assert_eq!(
+            styles,
+            [
+                (
+                    "4 changed · 2 behind",
+                    SegRole::Muted,
+                    false,
+                    false,
+                    Some(IconKind::Workspace)
+                ),
+                ("  ", SegRole::Muted, false, false, None),
+                ("8 PRs", SegRole::Muted, false, false, None),
+                (" · ", SegRole::Muted, false, true, None),
+                ("2 need you", SegRole::Modified, true, false, None),
+            ]
+        );
+    }
+
+    fn force_pushed() -> UpstreamRewrite {
+        UpstreamRewrite {
+            upstream: "origin/main".into(),
+            fork_point: "f".repeat(40),
+            tip: "t".repeat(40),
+            yours: 0,
+            dropped: 2,
+        }
+    }
+
+    #[test]
+    fn diverged_mark_is_followed_by_the_force_push_text() {
+        let chrome = NodeChrome {
+            sync_status: Some(SyncStatus::Diverged),
+            sync_note: "diverged (ahead 2, behind 1)".into(),
+            upstream_rewrite: Some(force_pushed()),
+            ..NodeChrome::default()
+        };
+        let segs = sync_trailing(&chrome, false, true);
+        assert_eq!(segs.len(), 2, "{segs:?}");
+        assert_eq!(segs[0].text, "Y");
+        assert_eq!(segs[0].icon, Some(IconKind::Diverged));
+        assert_eq!(
+            segs[1].text, " force-pushed \u{b7} 2 dropped, 0 yours",
+            "short form: the popover names the upstream"
+        );
+        assert_eq!(segs[1].icon, None, "the text is not a second icon");
+        assert_eq!(segs[1].role, segs[0].role);
+
+        let plain = NodeChrome {
+            upstream_rewrite: None,
+            ..chrome
+        };
+        assert_eq!(sync_trailing(&plain, false, true).len(), 1);
+    }
+
+    #[test]
+    fn repo_row_carries_the_force_push_text_from_the_snapshot() {
+        let mut diverged = repo("ops", false, false);
+        diverged.sync_status = SyncStatus::Diverged;
+        diverged.sync_note = "diverged (ahead 2, behind 1)".into();
+        diverged.upstream_rewrite = Some(force_pushed());
+        let built = build_workspace_snapshot(&[diverged], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let row = rows.iter().find(|r| r.id == "repo:ops").expect("ops");
+        assert_eq!(row.chrome.upstream_rewrite, Some(force_pushed()));
+        assert!(
+            row.trailing
+                .contains("force-pushed \u{b7} 2 dropped, 0 yours")
+                && !row.trailing.contains("origin/main"),
+            "{}",
+            row.trailing
+        );
+        assert_eq!(
+            row.chrome.sync_note, "diverged (ahead 2, behind 1)",
+            "the sync note stays for the parsers"
+        );
+    }
+
+    /// The force-push text gives way before the row's name: whole while the
+    /// name and the run fit (the branch after the name clips first), then
+    /// ` force-pushed`, then gone. The PR glyph still ends the run, the
+    /// label is not touched, and a row with no rewrite is left alone.
+    #[test]
+    fn force_push_text_gives_way_before_the_name_and_the_pr_badge() {
+        let chrome = NodeChrome {
+            sync_status: Some(SyncStatus::Diverged),
+            sync_note: "diverged (ahead 2, behind 1)".into(),
+            upstream_rewrite: Some(force_pushed()),
+            ..NodeChrome::default()
+        };
+        let row = |chrome: &NodeChrome| {
+            let mut segs = NodeSegments {
+                segments: vec![
+                    text_seg("app", SegRole::Repo),
+                    text_seg("  feature", SegRole::BranchFeature),
+                ],
+                trailing: sync_trailing(chrome, false, true),
+            };
+            with_pr_badge(&mut segs, true, Some(&badge(PrState::CiFailed, Some("#7"))))
+                .expect("badge");
+            segs
+        };
+        let text = |segs: &NodeSegments| -> String {
+            segs.trailing.iter().map(|seg| seg.text.as_str()).collect()
+        };
+        let whole = text(&row(&chrome));
+        assert_eq!(whole, "Y force-pushed \u{b7} 2 dropped, 0 yours  #7 x");
+        // The name `app`, the run, and the one-column pad before the run.
+        // `  feature` is not counted: it clips before the text gives way.
+        let full = visible_width("app") + visible_width(&whole) + 1;
+        let tiny = full - visible_width(" \u{b7} 2 dropped, 0 yours");
+        for (room, want) in [
+            (full + 10, whole.as_str()),
+            (full, whole.as_str()),
+            (full - 1, "Y force-pushed  #7 x"),
+            (tiny, "Y force-pushed  #7 x"),
+            (tiny - 1, "Y  #7 x"),
+            (0, "Y  #7 x"),
+        ] {
+            let mut segs = row(&chrome);
+            fit_upstream_rewrite_text(&mut segs, &chrome, room);
+            assert_eq!(text(&segs), want, "room {room}");
+            assert_eq!(
+                segs.trailing.last().and_then(|seg| seg.icon),
+                Some(IconKind::PrCiFailed),
+                "room {room}: the glyph ends the run"
+            );
+            assert_eq!(segs.segments, row(&chrome).segments, "room {room}");
+        }
+
+        let plain = NodeChrome {
+            upstream_rewrite: None,
+            ..chrome.clone()
+        };
+        let mut segs = row(&plain);
+        let before = segs.clone();
+        fit_upstream_rewrite_text(&mut segs, &plain, 0);
+        assert_eq!(segs, before, "no rewrite: nothing to fit");
     }
 
     fn repo(name: &str, with_change: bool, linked: bool) -> RepoSnapshot {
@@ -1767,6 +2264,7 @@ mod tests {
             branch: "main".into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream_rewrite: None,
             head: String::new(),
             has_unstaged: with_change,
             has_staged: false,
@@ -2589,7 +3087,7 @@ mod tests {
     }
 
     #[test]
-    fn pr_badge_follows_the_merge_mark() {
+    fn pr_badge_ends_the_trailing_run_after_the_repo_and_sync_marks() {
         let mut primary = repo("app", false, false);
         primary.branch = "feature/landed".into();
         primary.merged_into_default = Some(true);
@@ -2597,28 +3095,29 @@ mod tests {
         let tree = build_tree(&visible_for_tree(&built), true, "ws");
         let rows = flatten_with(&tree, &HashSet::new(), true);
         let row = rows.iter().find(|r| r.id == "repo:app").expect("repo:app");
-        let segs = painted_row_segments(row, true, false, false, false, Some(PrState::Open));
+        let pr = badge(PrState::InReview, Some("#7"));
+        let segs = painted_row_segments(row, true, false, false, false, Some(&pr));
         let left: String = segs.segments.iter().map(|seg| seg.text.as_str()).collect();
         assert!(left.ends_with("  feature/landed"), "{left}");
         let trail: String = segs.trailing.iter().map(|seg| seg.text.as_str()).collect();
         assert_eq!(
-            trail, "& M P @ ?",
-            "branch glyph, merge mark, PR badge, repo"
+            trail, "& M @ ?  #7 P",
+            "branch glyph, merge mark, repo, sync, then the PR badge"
         );
         assert_eq!(
             segment_icons(&segs),
             vec![
                 IconKind::Branch,
                 IconKind::MergedIntoDefault,
-                IconKind::PrOpen,
                 IconKind::Repo,
                 IconKind::NoUpstream,
+                IconKind::PrInReview,
             ]
         );
     }
 
     #[test]
-    fn checkout_pr_badge_follows_the_open_mark_behind_the_comment_mark() {
+    fn checkout_pr_badge_ends_the_run_and_the_comment_mark_stays_first() {
         let mut primary = dirty_repo("app", &["src/a.ts"]);
         primary.branch = "main".into();
         let mut linked = repo("app/.worktrees/feat", false, true);
@@ -2633,18 +3132,19 @@ mod tests {
             .iter()
             .find(|r| r.id == "checkout:app/.worktrees/feat")
             .expect("linked checkout");
-        let segs = painted_row_segments(row, true, false, true, false, Some(PrState::Merged));
+        let pr = badge(PrState::Merged, Some("!12"));
+        let segs = painted_row_segments(row, true, false, true, false, Some(&pr));
         let trail: String = segs.trailing.iter().map(|seg| seg.text.as_str()).collect();
-        // Open mark, then the badge; the comment mark stays first.
-        assert_eq!(trail, "\" o m ^1");
+        // The comment mark stays first; the badge ends the run.
+        assert_eq!(trail, "\" o ^1  !12 m");
         assert_eq!(
             segment_icons(&segs),
             vec![
                 IconKind::LinkedWorktree,
                 IconKind::Comment,
                 IconKind::OpenVsDefault,
-                IconKind::PrMerged,
                 IconKind::Ahead,
+                IconKind::PrMerged,
             ]
         );
     }

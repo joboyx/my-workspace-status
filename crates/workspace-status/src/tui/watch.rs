@@ -13,7 +13,7 @@ use crate::snapshot::WorkspaceSnapshot;
 
 use super::commit_files::CommitFileRow;
 use super::drill::CommitFileSource;
-use super::icons::status_letter_from_change;
+use super::icons::{status_letter_from_change, upstream_rewrite_text};
 use super::tree::{NodeKind, TreeNode, VisibleRow};
 
 /// Default poll period.
@@ -76,11 +76,17 @@ pub fn checkout_watch_identity(repo: &WorkspaceRepoSnapshot) -> String {
             )
         })
         .collect();
+    let rewrite = repo
+        .upstream_rewrite
+        .as_ref()
+        .map(upstream_rewrite_text)
+        .unwrap_or_default();
     format!(
-        "{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}",
         repo.branch,
         repo.sync_status.as_str(),
         repo.sync_note,
+        rewrite,
         repo.head,
         dirty.join(";"),
     )
@@ -154,11 +160,16 @@ pub fn row_signature(row: &VisibleRow, cwd: &Path) -> String {
             format!("{}:{disk}", status.as_str())
         }
         _ => format!(
-            "chrome:{}:{}:{}:{}:{}:{}:{}",
+            "chrome:{}:{}:{}:{}:{}:{}:{}:{}",
             row.chrome.path,
             row.chrome.branch,
             row.chrome.sync_status.map(|s| s.as_str()).unwrap_or(""),
             row.chrome.sync_note,
+            row.chrome
+                .upstream_rewrite
+                .as_ref()
+                .map(upstream_rewrite_text)
+                .unwrap_or_default(),
             row.chrome.head,
             row.chrome.change_count,
             row.folded
@@ -555,6 +566,7 @@ pub fn checkout_flash_ids(path: &str) -> Vec<String> {
 mod tests {
     use super::super::tree::NodeChrome;
     use super::*;
+    use crate::git::UpstreamRewrite;
     use crate::snapshot::{CheckoutKind, FileChange, SyncStatus, WorkspaceRepoSnapshot};
     use std::path::PathBuf;
     use workspace_status_graph::{Commit, GraphRef, Stash, Worktree};
@@ -687,6 +699,7 @@ mod tests {
             branch: branch.into(),
             sync_status: status,
             sync_note: note.into(),
+            upstream_rewrite: None,
             head: head.into(),
             checkout_kind: CheckoutKind::Primary,
             primary_repo: None,
@@ -765,6 +778,35 @@ mod tests {
             row_signature(&ahead_two, cwd),
             row_signature(&ahead_three, cwd),
             "ahead 2→3 with the same SyncStatus must change chrome watch identity"
+        );
+    }
+
+    #[test]
+    fn chrome_and_checkout_signatures_move_on_a_force_push_classification() {
+        let cwd = Path::new("/nonexistent");
+        let note = "diverged (ahead 2, behind 1)";
+        let plain = chrome_row("alpha", "main", SyncStatus::Diverged, note, "aaa");
+        let mut rewritten = plain.clone();
+        rewritten.chrome.upstream_rewrite = Some(UpstreamRewrite {
+            upstream: "origin/main".into(),
+            fork_point: "f".repeat(40),
+            tip: "t".repeat(40),
+            yours: 0,
+            dropped: 2,
+        });
+        assert_ne!(
+            row_signature(&plain, cwd),
+            row_signature(&rewritten, cwd),
+            "a rewrite classification repaints the row"
+        );
+
+        let before = checkout_row("alpha", "main", SyncStatus::Diverged, note, "aaa", &[]);
+        let mut after = before.clone();
+        after.upstream_rewrite = rewritten.chrome.upstream_rewrite.clone();
+        assert_ne!(
+            checkout_watch_identity(&before),
+            checkout_watch_identity(&after),
+            "the checkout identity sees the classification"
         );
     }
 

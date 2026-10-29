@@ -360,7 +360,7 @@ impl AppState {
     /// unfolding its ancestors. `Some(true)` when the cursor moved,
     /// `Some(false)` when it was already there, `None` when the tree has
     /// no such row.
-    fn focus_checkout_row(&mut self, repo: &str) -> Option<bool> {
+    pub(super) fn focus_checkout_row(&mut self, repo: &str) -> Option<bool> {
         if self.focused_row().is_some_and(|row| {
             matches!(row.kind, NodeKind::Repo | NodeKind::Checkout)
                 && row.repo.as_deref() == Some(repo)
@@ -464,7 +464,8 @@ impl AppState {
     }
 
     fn focused_blame(&self) -> Option<(FocusedBlame, BlameSide)> {
-        if !self.line_blame.enabled {
+        // The PRs tab shows no line: the parked Workspace diff never blames.
+        if !self.line_blame.enabled || self.is_prs_tab() {
             return None;
         }
         // On an Explorer tab only the focused right pane blames: a tree
@@ -647,6 +648,7 @@ mod tests {
             branch: "main".into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream_rewrite: None,
             head: "abc".into(),
             has_unstaged: true,
             has_staged: false,

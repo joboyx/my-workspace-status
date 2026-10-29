@@ -21,7 +21,7 @@ CI runs the checks in `crates/workspace-status/src/parity_registry.rs` (part of 
 | `list_shift_keys_and_hwheel_pan_on_every_registry_list_surface` (`tui/render.rs`) | A `scrollbars` list surface (the list scrollbar tests' surfaces) is not a `horizontal-pan` surface, or one of them is not `supported` for `shift-keys`, `hwheel`, and `pan-limit` in each look; or on one of them Shift-→ does not pan the focused list or does not stop at its pan max, or the horizontal wheel over the list (the other pane focused) does not pan it, stops elsewhere than Shift-→, or moves its cursor. |
 | `tree_hwheel_pans_a_shown_file_view_that_can_pan_on_every_registry_tree_surface` (`tui/render.rs`) | The `horizontal-pan` tree surfaces (`tree`, `explorer-tree`) are not `supported` for `hwheel` in each look; or on one of them the horizontal wheel over the tree does not pan a shown file view that can pan (leaving the tree still), does not pan the tree once the view cannot pan, or Shift-→ with the tree focused pans anything but the tree. |
 | `line_click_picks_the_row_and_a_drag_selects_on_every_registry_surface` (`tui/render.rs`) | The `line-viewers` surfaces differ from the surfaces that test drives, or one of them is not `supported` for `click-row` in each look; or on one of them a click on a line does not move the line cursor there and focus the viewer, or a press-drag from it does not select text (copied on release) or moves the cursor again. |
-| `resize_edges_drag_and_hover_on_every_registry_surface` (`tui/render.rs`) | The `resize-edges` surfaces differ from the surfaces that test drives, or one of them is not `supported` for `divider`, `diff-rule`, and `hover` in each look; or on one of them the divider or the side-by-side RULE under the pointer does not hover and light, a drag does not widen the left pane or move the RULE (painted where it was dropped), or the release does not end the drag. |
+| `resize_edges_drag_and_hover_on_every_registry_surface` (`tui/render.rs`) | The `resize-edges` surfaces (except one that is `n/a` on every feature, with no edge to drive) differ from the surfaces that test drives, or one of them is not `supported` for `divider`, `diff-rule`, and `hover` in each look; or on one of them the divider or the side-by-side RULE under the pointer does not hover and light, a drag does not widen the left pane or move the RULE (painted where it was dropped), or the release does not end the drag. |
 | `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface` (`tui/render.rs`) | The `file-lists` (`row-icons`), `icon-popovers` (`icon-hits`, `focused-row`), `row-marks` (`reviewed`, `comment`), or `watch-flash` (`flash`) surfaces whose code anchors name `draw_tree` or `draw_explorer_tree` differ from the trees that test drives (`tree`, `explorer-tree`), or one of them is not `supported` in each look; or on one of them a file or folder row paints other icons, glyphs, or order than on the other tree, a hit is wider than its glyph (also panned), a reloaded row does not flash, a hover does not find the icon, a click on a glyph does not pin its section (or a folder glyph changes the fold), `gh` does not pin one section per icon, or a section differs from the other tree's. |
 | `line_gutter_comment_marks_peek_pin_and_gh_on_every_registry_surface` (`tui/render.rs`) | The `icon-popovers` surfaces whose code anchors name `draw_diff_pane` or `draw_file_body` differ from the surfaces that test drives, or one of them is not `supported` for `icon-hits` and `focused-row` in each look; or on one of them (each diff tab, inline and side by side, panned or not) a comment mark records no hit or a hit wider than its glyph, a hover does not peek the comments of that line only, a click does not select the line and pin with no text selection or RULE drag, or `gh` on the marked cursor line does not pin it. |
 
@@ -131,6 +131,8 @@ Vertical and horizontal scrollbars of lists and line viewers. The commit-message
 | `compare-diff` | Compare | - | right | boxed, flat | `draw_diff_pane`, `paint_vscrollbar`, `hit_vscrollbar`, `press_vscrollbar`, `scroll_diff_to`, `cursor_for_viewport_top`, `paint_hscrollbar`, `hit_hscrollbar`, `press_hscrollbar` | supported | supported | supported | supported |
 | `explorer-diff` | Explorer (changed file) | - | right | boxed, flat | `draw_diff_pane`, `explorer_click`, `press_split_hit`, `paint_vscrollbar`, `hit_vscrollbar`, `press_vscrollbar`, `scroll_diff_to`, `cursor_for_viewport_top`, `paint_hscrollbar`, `hit_hscrollbar`, `press_hscrollbar` | supported | supported | supported | supported |
 | `explorer-file` | Explorer (clean file) | - | right | boxed, flat | `draw_file_body`, `explorer_click`, `paint_vscrollbar`, `paint_hscrollbar`, `hit_vscrollbar`, `press_vscrollbar`, `scroll_file_view_to`, `cursor_for_viewport_top`, `file_view_scroll`, `hit_hscrollbar`, `press_hscrollbar`, `pan_max`, `pan_file_tab` | supported | supported | supported | supported |
+| `prs-list` | PRs | - | left | boxed, flat | `draw_prs_list` | gap: G25 | gap: G25 | n/a: PRs tab rows cut the title to fit and never pan | n/a: PRs tab rows cut the title to fit and never pan |
+| `prs-detail` | PRs | - | right | boxed, flat | `draw_prs_detail` | gap: G25 | gap: G25 | n/a: long values end in an ellipsis and never pan | n/a: long values end in an ellipsis and never pan |
 
 ### `search` — Pane search
 
@@ -156,6 +158,7 @@ Vertical and horizontal scrollbars of lists and line viewers. The commit-message
 | `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree`, `explorer_row_match_indices` | supported | supported | supported |
 | `explorer-diff` | Explorer (changed file) | - | right | boxed, flat | `draw_diff_pane`, `diff_search_hits` | supported | supported | supported |
 | `explorer-file` | Explorer (clean file) | - | right | boxed, flat | `draw_file_body`, `file_search_hits` | supported | supported | supported |
+| `prs-list` | PRs | - | left | boxed, flat | `prs_tab_refusal`, `draw_prs_list` | gap: G24 | gap: G24 | gap: G24 |
 
 ### `icon-popovers` — Icon popovers
 
@@ -163,8 +166,8 @@ Icons and marks on rows record an icon hit (`LayoutHit::icon_hits`): hover peeks
 
 | Feature | What | Tests |
 | --- | --- | --- |
-| `icon-hits` | The painted icons hover and pin their popover with the mouse. | `commit_file_rows_record_icon_hits`, `click_on_an_icon_selects_its_row_and_pins_without_a_double_click`, `line_gutter_comment_marks_peek_pin_and_gh_on_every_registry_surface`, `folder_summary_rows_paint_the_file_list_marks_flash_and_icon_hits`, `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface` |
-| `focused-row` | `gh` pins the focused row's popover. | `gh_pins_the_icon_popover_and_bare_h_still_folds`, `line_gutter_comment_marks_peek_pin_and_gh_on_every_registry_surface`, `line_comment_popover_closes_when_the_cursor_leaves_its_line`, `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface` |
+| `icon-hits` | The painted icons hover and pin their popover with the mouse. | `commit_file_rows_record_icon_hits`, `click_on_an_icon_selects_its_row_and_pins_without_a_double_click`, `line_gutter_comment_marks_peek_pin_and_gh_on_every_registry_surface`, `folder_summary_rows_paint_the_file_list_marks_flash_and_icon_hits`, `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface`, `the_mouse_selects_rows_folds_headers_and_opens_the_pr` |
+| `focused-row` | `gh` pins the focused row's popover. | `gh_pins_the_icon_popover_and_bare_h_still_folds`, `line_gutter_comment_marks_peek_pin_and_gh_on_every_registry_surface`, `line_comment_popover_closes_when_the_cursor_leaves_its_line`, `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface`, `gh_pins_the_popover_of_the_focused_pr_row` |
 | `folder-count` | A folder glyph's section counts the changed files under the folder in its list. | `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface`, `explorer_folder_popover_counts_distinct_changed_paths` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `icon-hits` | `focused-row` | `folder-count` |
@@ -176,9 +179,10 @@ Icons and marks on rows record an icon hit (`LayoutHit::icon_hits`): hover peeks
 | `files-d2` | Workspace | 2 | left | boxed, flat | `draw_commit_file_list`, `commit_file_row_paint_segments`, `focused_row_icons`, `commit_file_facts` | supported | supported | supported |
 | `compare-files` | Compare | - | left | boxed, flat | `draw_commit_file_list`, `commit_file_row_paint_segments`, `focused_row_icons`, `commit_file_facts` | supported | supported | supported |
 | `summary` | Workspace 2, Compare | - | right | boxed, flat | `draw_folder_summary`, `summary_row_paint_segments_in`, `summary_rows` | supported | n/a: the summary is never the focused list, so it has no focused row | n/a: the summary lists file rows only, with no folder glyph |
-| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree`, `explorer_row_paint_segments`, `explorer_row_marks`, `segmented_icon_spans`, `explorer_row_section`, `explorer_click_row`, `click_with`, `focused_row_icons`, `explorer_cursor_row_icons`, `popover_owner`, `changed_files_under` | supported | supported | n/a: I6, the Explorer has no Staged or Changes sections, so a folder counts its distinct changed paths |
+| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree`, `explorer_row_paint_segments`, `explorer_row_marks`, `segmented_icon_spans`, `explorer_row_section`, `explorer_click_row`, `click_with`, `focused_row_icons`, `explorer_cursor_row_icons`, `popover_owner`, `changed_files_under` | supported | supported | n/a: I7, the Explorer has no Staged or Changes sections, so a folder counts its distinct changed paths |
 | `diff-gutter` | Workspace, Compare, Explorer | 0, 2, - | right | boxed, flat | `draw_diff_pane`, `comment_mark_cols`, `diff_row_mark_hits`, `diff_row_gutter_cells`, `line_comment_mark`, `cursor_line_comment_icons`, `line_comments`, `line_comment_section`, `focused_row_icons`, `click_with`, `split_hit_at` | supported | supported | n/a: a line gutter has no folder glyph |
 | `file-gutter` | Explorer (clean file) | - | right | boxed, flat | `draw_file_body`, `format_line_gutter`, `line_mark_hit`, `line_comment_mark`, `cursor_line_comment_icons`, `line_comments`, `line_comment_section`, `focused_row_icons`, `click_with` | supported | supported | n/a: a line gutter has no folder glyph |
+| `prs-tab` | PRs | - | left | boxed, flat | `draw_prs_list`, `prs_pin_focused` | supported | supported | n/a: a PRs tab row is one PR, with no folder glyph |
 
 ### `resize-edges` — Mouse on resize edges
 
@@ -195,6 +199,7 @@ A press on a resize edge drags it: the tree / right pane divider and the in-diff
 | `workspace` | Workspace | any | both | boxed, flat | `click_at`, `press_split_hit`, `hit_split`, `resize_edges_take_mouse`, `hovered_resize_edge` | supported | supported | supported |
 | `compare` | Compare | - | both | boxed, flat | `click_at`, `press_split_hit`, `hit_split`, `resize_edges_take_mouse`, `hovered_resize_edge` | supported | supported | supported |
 | `explorer` | Explorer | - | both | boxed, flat | `explorer_click`, `press_split_hit`, `hit_split`, `resize_edges_take_mouse`, `hovered_resize_edge`, `draw_explorer_tab` | supported | supported | supported |
+| `prs-tab` | PRs | - | both | boxed, flat | `click_at`, `resize_edges_take_mouse`, `draw_prs_tab` | n/a: the detail pane takes a fixed third of the width | n/a: the PRs tab paints no diff | n/a: the PRs tab has no edge to drag |
 
 ### `horizontal-pan` — Horizontal pan
 
@@ -222,6 +227,7 @@ Long labels and lines pan sideways: Shift-←/→ and `h` / `l` on the focused p
 | `compare-diff` | Compare | - | right | boxed, flat | `pan_diff_content`, `diff_pan_max` | supported | supported | supported | supported |
 | `explorer-diff` | Explorer (changed file) | - | right | boxed, flat | `explorer_preview_pan`, `pan_diff_content` | supported | n/a: I2, `h` gives focus back to the tree and `l` does nothing | supported | supported |
 | `explorer-file` | Explorer (clean file) | - | right | boxed, flat | `explorer_preview_pan`, `pan_file_tab` | supported | n/a: I2, `h` gives focus back to the tree and `l` does nothing | supported | supported |
+| `prs-tab` | PRs | - | left, right | boxed, flat | `dispatch_prs_tab`, `row_segments` | n/a: PRs tab rows cut the title to fit and never pan | n/a: `h` and `l` do nothing on the PRs tab | n/a: PRs tab rows cut the title to fit and never pan | n/a: PRs tab rows cut the title to fit and never pan |
 
 ### `double-click` — Double-click
 
@@ -245,6 +251,7 @@ A second press on the same cell within 400 ms is Enter on that row.
 | `explorer-tree` | Explorer | - | left | boxed, flat | `explorer_click`, `explorer_click_row`, `note_row_press`, `explorer_enter` | supported |
 | `explorer-diff` | Explorer (changed file) | - | right | boxed, flat | `explorer_click`, `dispatch_explorer_tab` | n/a: Enter does nothing in the Explorer file pane |
 | `explorer-file` | Explorer (clean file) | - | right | boxed, flat | `explorer_click`, `dispatch_explorer_tab` | n/a: Enter does nothing in the Explorer file pane |
+| `prs-tab` | PRs | - | left | boxed, flat | `prs_click`, `dispatch_prs_tab` | n/a: Enter opens the PR in the browser, so a double-click only selects the row; on a group header the second press does not undo the fold |
 
 ### `row-marks` — Row marks
 
@@ -271,29 +278,73 @@ The reviewed eye and the comment mark (open or resolved) on a row or a line gutt
 
 ### `watch-flash` — Watch-reload flash
 
-A row that a watch reload adds or changes flashes and fades.
+A row that a watch reload adds or changes flashes and fades. The rows that show a checkout's PR also flash when its PR changes (`pr-change`), closed included.
 
 | Feature | What | Tests |
 | --- | --- | --- |
 | `flash` | A reloaded row flashes. | `flash_paints_node_and_spacer_cursor_wins`, `folder_summary_rows_paint_the_file_list_marks_flash_and_icon_hits`, `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface`, `explorer_rows_flash_on_a_watch_reload`, `explorer_folders_take_the_flash_of_the_workspace_row_that_shows_them` |
+| `pr-change` | When a checkout's PR turns CI failed, ready to merge, merged, or closed, each row that shows its PR flashes (the checkout's tree row, never a family row; its graph worktree row; its PRs tab row while that tab is open), closed included though its badge is gone: the remove ramp for CI failed and closed, the add ramp for ready to merge and merged. The PR badge glyph keeps its state colour. | `a_pr_change_flashes_the_checkout_tree_row_on_the_remove_or_add_ramp`, `a_pr_change_flash_keeps_the_badge_glyph_in_its_state_colour`, `a_pr_change_flashes_the_graph_worktree_row_at_depth_0_and_1`, `a_pr_change_flashes_its_row_on_the_prs_tab`, `a_pr_change_flashes_its_prs_tab_row` |
 
-| Surface | Tab | Depth | Pane | Looks | Code anchors | `flash` |
+| Surface | Tab | Depth | Pane | Looks | Code anchors | `flash` | `pr-change` |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `tree` | Workspace | 0 | left | boxed, flat | `draw_tree`, `flash_color`, `alert_pr_transitions` | supported | supported |
+| `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `draw_graph`, `graph_flash_rows`, `alert_pr_transitions` | supported | supported |
+| `graph-d1` | Workspace | 1 | left | boxed, flat | `draw_graph`, `graph_flash_rows`, `alert_pr_transitions` | supported | supported |
+| `files-d1` | Workspace | 1 | right | boxed, flat | `draw_commit_file_list`, `commit_file_flash_color` | supported | n/a: commit-file rows carry no PR |
+| `files-d2` | Workspace | 2 | left | boxed, flat | `draw_commit_file_list`, `commit_file_flash_color` | supported | n/a: commit-file rows carry no PR |
+| `compare-files` | Compare | - | left | boxed, flat | `draw_commit_file_list`, `commit_file_flash_color` | supported | n/a: compare file rows carry no PR |
+| `summary` | Workspace 2, Compare | - | right | boxed, flat | `draw_folder_summary`, `commit_file_flash_color` | supported | n/a: folder summary rows carry no PR |
+| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree`, `explorer_row_marks`, `explorer_row_flash_color`, `explorer_folder_flashes`, `flash_color`, `apply_watch_snapshot` | supported | n/a: Explorer rows carry no PR |
+| `prs-tab` | PRs | - | left | boxed, flat | `draw_prs_list`, `alert_pr_transitions`, `pr_row_ids` | n/a: PRs tab rows come from the PR cache, which no watch reload changes | supported |
+
+### `pr-status` — PR status marks
+
+The PR of a checkout's branch, in one of six states: the badge at the end of a workspace tree row (`<ref> <glyph>`), the badge flush right on a graph worktree row (glyph only), the chip flush right on the graph sync header (`<glyph> <ref> <state label>  ▸ <next action>`), and the PRs tab rows (`<glyph> <ref>` first, the state label in its own column; the next action on the group header), whose detail pane shows the PR popover lines (`popover::pr_detail_lines`). `tree::pr_badge_kind` and `tree::pr_badge_mark` give every surface the same glyph and colour role. Every mark opens the same PR popover (`popover::pr_section`), whose PR lines act on its own PR (`run_pr_action_at`).
+
+| Feature | What | Tests |
+| --- | --- | --- |
+| `badge` | The state glyph paints bold in its state colour, one column, in both glyph modes. | `tree_pr_badge_ends_at_the_pane_edge_in_every_state_look_and_forge`, `graph_worktree_badges_paint_each_state_and_stale_muted`, `graph_header_chip_reads_state_ref_label_and_next_action`, `the_prs_tab_paints_groups_rows_and_the_detail_in_both_looks`, `ascii_mode_paints_letters` |
+| `ref` | The PR ref (`#318` GitHub, `!12` GitLab) paints beside the glyph. | `tree_pr_badge_ends_at_the_pane_edge_in_every_state_look_and_forge`, `tree_pr_glyphs_share_one_column_and_refs_drop_on_a_narrow_tree`, `graph_header_chip_reads_state_ref_label_and_next_action`, `the_prs_tab_paints_groups_rows_and_the_detail_in_both_looks` |
+| `stale` | A PR whose last successful lookup is old paints muted, shape unchanged. | `stale_tree_pr_badge_paints_muted`, `graph_worktree_badges_paint_each_state_and_stale_muted`, `graph_header_chip_reads_state_ref_label_and_next_action`, `empty_loading_error_and_stale_states_use_their_copy` |
+| `link` | The painted PR mark is one icon hit (hover peek, click pin, Ctrl+click opens the PR) and one OSC 8 link to the PR. | `tree_pr_badge_ends_at_the_pane_edge_in_every_state_look_and_forge`, `ctrl_click_on_the_painted_tree_badge_opens_its_pr_only_there`, `graph_worktree_badge_paints_and_ctrl_click_opens_its_pr`, `graph_header_chip_paints_flush_right_and_links_its_ref_in_every_look`, `the_mouse_selects_rows_folds_headers_and_opens_the_pr`, `the_prs_tab_paints_groups_rows_and_the_detail_in_both_looks` |
+| `chip` | The state label and the next action (merged: the age) follow the ref; a narrower pane drops the next action, then the label. | `graph_header_chip_reads_state_ref_label_and_next_action`, `graph_header_chip_paints_flush_right_and_links_its_ref_in_every_look`, `header_chip_paints_the_widest_candidate_that_fits_flush_right` |
+| `popover` | The PR popover (peek or pin on the mark) shows `<glyph> PR · <state label>`, the PR lines, a rule, and Open PR, the CI page, Copy URL, and Refresh this PR (not on a merged PR); its PR lines act on that PR, whatever row has the focus. | `each_state_names_its_next_step_and_actions_on_both_forges`, `a_failed_github_pr_lists_every_line_in_order`, `a_ready_gitlab_mr_shows_its_pipeline_and_approvals`, `pr_popover_paints_its_heading_bold_ref_rule_and_clips_long_values`, `pr_popover_lines_act_on_their_own_pr_not_the_focused_graph_row`, `the_mouse_selects_rows_folds_headers_and_opens_the_pr`, `gh_pins_the_popover_of_the_focused_pr_row` |
+| `open-ci` | `gc` on the row or in the pinned PR popover, and the popover CI line, open the PR's CI page (GitHub the failed, running, or first check, else the checks tab; GitLab the head pipeline, else the pipelines tab). | `gc_on_a_tree_row_opens_the_known_ci_link_on_both_forges`, `gc_in_the_graph_opens_a_worktree_rows_ci_on_both_forges`, `the_popover_open_ci_line_runs_gc_on_both_forges`, `gc_looks_the_pr_up_then_opens_its_ci_page_on_both_forges`, `pr_popover_lines_act_on_their_own_pr_not_the_focused_graph_row`, `gx_and_gc_in_a_pinned_pr_popover_act_on_its_pr_on_both_forges`, `keys_act_on_the_focused_pr_and_its_first_checkout` |
+
+| Surface | Tab | Depth | Pane | Looks | Code anchors | `badge` | `ref` | `stale` | `link` | `chip` | `popover` | `open-ci` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `tree` | Workspace | 0 | left | boxed, flat | `draw_tree`, `tree_pr_badge`, `with_pr_badge`, `segmented_icon_spans`, `pr_badge_links`, `pr_section`, `run_pr_action` | supported | supported | supported | supported | n/a: I6, the graph header chip carries the label and the next action | supported | supported |
+| `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `draw_graph`, `graph_pr_badges`, `row_badges`, `pr_badge_links`, `pr_section`, `run_pr_action` | supported | n/a: I6, the worktree row is narrow and the header chip carries the ref | supported | supported | n/a: I6, the header chip carries the label and the next action | supported | supported |
+| `graph-d1` | Workspace | 1 | left | boxed, flat | `draw_graph`, `graph_pr_badges`, `row_badges`, `pr_badge_links`, `pr_section`, `run_pr_action` | supported | n/a: I6, the worktree row is narrow and the header chip carries the ref | supported | supported | n/a: I6, the header chip carries the label and the next action | supported | supported |
+| `graph-header` | Workspace | 0, 1 | right, left | boxed, flat | `draw_graph`, `graph_header_pr`, `graph_pr_chip`, `header_chip`, `pr_badge_links`, `pr_section`, `run_pr_action` | supported | supported | supported | supported | supported | supported | supported |
+| `prs-tab` | PRs | - | left, right | boxed, flat | `draw_prs_tab`, `draw_prs_list`, `row_segments`, `header_segments`, `draw_prs_detail`, `pr_detail_lines`, `pr_badge_links`, `dispatch_prs_tab`, `run_pr_action_on_checkout` | supported | supported | supported | supported | n/a: I6, the rows paint the state label in a fixed column and the group headers the next action | supported | supported |
+
+### `query-esc` — Esc clears the dialog query, then closes
+
+The query dialogs that paint over the panes: the search-in-files dialog (Ctrl-f, or `#` in Quick Open) and Quick Open in files and commands mode. Esc with typed text clears it through the same edit path as Backspace; Esc on an empty query (a bare `>` in commands mode) closes the dialog; a closed search dialog parks for the next Ctrl-f. The footer Esc chip reads `Esc clear` or `Esc close` to match. The filter pickers keep one-press Esc (I5).
+
+| Feature | What | Tests |
+| --- | --- | --- |
+| `two-step-esc` | Esc with a typed query clears it and keeps the dialog open; Esc on an empty query closes it. | `pty_search_in_files_esc_clears_query_then_closes`, `pty_quick_open_files_esc_clears_query_then_closes`, `pty_quick_open_commands_esc_keeps_prefix_then_closes`, `pty_quick_open_hash_search_esc_clears_query_then_closes`, `ctrl_f_toggles_and_esc_clears_then_parks`, `esc_from_the_results_zone_clears_the_query_and_its_hits`, `esc_clears_the_files_query_then_closes`, `esc_clears_commands_text_back_to_the_prefix_then_closes` |
+
+| Surface | Tab | Depth | Pane | Looks | Code anchors | `two-step-esc` |
 | --- | --- | --- | --- | --- | --- | --- |
-| `tree` | Workspace | 0 | left | boxed, flat | `draw_tree`, `flash_color` | supported |
-| `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `draw_graph`, `graph_flash_rows` | supported |
-| `graph-d1` | Workspace | 1 | left | boxed, flat | `draw_graph`, `graph_flash_rows` | supported |
-| `files-d1` | Workspace | 1 | right | boxed, flat | `draw_commit_file_list`, `commit_file_flash_color` | supported |
-| `files-d2` | Workspace | 2 | left | boxed, flat | `draw_commit_file_list`, `commit_file_flash_color` | supported |
-| `compare-files` | Compare | - | left | boxed, flat | `draw_commit_file_list`, `commit_file_flash_color` | supported |
-| `summary` | Workspace 2, Compare | - | right | boxed, flat | `draw_folder_summary`, `commit_file_flash_color` | supported |
-| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree`, `explorer_row_marks`, `explorer_row_flash_color`, `explorer_folder_flashes`, `flash_color`, `apply_watch_snapshot` | supported |
+| `search-files` | any | - | overlay | boxed, flat | `search_files_key_action`, `escape_search_files`, `search_files_edit`, `close_search_files`, `footer_hints` | supported |
+| `quick-open-files` | any | - | overlay | boxed, flat | `quick_open_key_action`, `escape_quick_open`, `quick_open_edit`, `close_quick_open`, `cleared_query`, `draw_quick_open` | supported |
+| `quick-open-commands` | any | - | overlay | boxed, flat | `quick_open_key_action`, `escape_quick_open`, `quick_open_edit`, `close_quick_open`, `cleared_query`, `sync_theme_preview`, `draw_quick_open` | supported |
+| `quick-open-search` | any | - | overlay | boxed, flat | `quick_open_edit`, `open_search_files_with`, `search_files_key_action`, `escape_search_files`, `search_files_edit` | supported |
+| `branch-picker` | any | - | overlay | boxed, flat | `key_to_action`, `dispatch_write`, `draw_branch_picker` | n/a: I5, one Esc closes a filter picker |
+| `compare-picker` | any | - | overlay | boxed, flat | `key_to_action`, `dispatch_keymap`, `draw_compare_picker` | n/a: I5, one Esc closes a filter picker |
+| `graph-focus-picker` | Workspace | - | overlay | boxed, flat | `key_to_action`, `dispatch_keymap`, `draw_graph_focus_picker` | n/a: I5, one Esc closes a filter picker |
 
 ## Open gaps
 
-Each open gap is tracked by its id. Fixing one turns its cells into `supported` (or `n/a: <reason>`) and removes its row here. No gap is open now: the table has no rows.
+Each open gap is tracked by its id. Fixing one turns its cells into `supported` (or `n/a: <reason>`) and removes its row here.
 
 | Gap | Component | Has it | Missing on |
 | --- | --- | --- | --- |
+| G24 | `search` | Workspace tree, graph, file lists, diffs, and the Explorer: `/` binds the focused pane, and `n` / `N` step | PRs tab list: `/`, `n`, and `N` say `PRs tab has no search` (`prs_tab_refusal`) |
+| G25 | `scrollbars` | Graph list, file diff, Workspace tree, commit-file lists, folder summary, Explorer tree, and Explorer clean-file view paint vertical scrollbars | PRs tab list and detail: `draw_prs_list` and `draw_prs_detail` paint no bar, and the detail does not scroll at all (lines past its height are cut) |
 
 ## Intentional differences
 
@@ -303,4 +354,6 @@ Each open gap is tracked by its id. Fixing one turns its cells into `supported` 
 | I2 | Explorer file pane: `h` gives focus back to the tree, `l` does nothing | `docs/tui-model.md` (Explorer keys) |
 | I3 | Clean-file view: `j` / `k` scroll at the edge, not the middle | `docs/tui-rust.md` (viewport rule), `docs/tui-model.md` (sticky file view top) |
 | I4 | Explorer: `??` untracked, `●` dirty folder, no `t` toggle, `Ctrl-o` refused | `docs/tui-model.md` (Explorer tabs) |
-| I6 | Explorer folder popover counts distinct changed paths; the Workspace counts per Staged / Changes section, since the Explorer has no sections | `docs/tui-model.md` (Explorer tabs) |
+| I5 | Filter pickers (branch, compare, graph focus): one Esc closes, typed filter or not. Quick Open and the search-in-files dialog take two presses with a typed query. | `docs/tui-rust.md` (picker key rule), `docs/tui-model.md` (Quick Open keys) |
+| I6 | PR status: the tree badge is `<ref> <glyph>`, a graph worktree row paints the glyph alone, and of the badges only the graph header chip paints the state label and the next action; the PRs tab paints the state label in a row column and the next action in the group header | `docs/tui-rust.md` (Pull request badge, PRs tab) |
+| I7 | Explorer folder popover counts distinct changed paths; the Workspace counts per Staged / Changes section, since the Explorer has no sections | `docs/tui-model.md` (Explorer tabs) |

@@ -1,0 +1,153 @@
+#!/bin/sh
+# Fake `glab` for e2e tests. Answers `glab api` GET calls from scenario files
+# under $WS_FAKE_FORGE_DIR. It reads the endpoint, not exact argv strings, so a
+# change to the query string does not matter. Format: README.md.
+
+dir=${WS_FAKE_FORGE_DIR:-}
+if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+  echo "fake forge: WS_FAKE_FORGE_DIR is not a directory" >&2
+  exit 1
+fi
+argv="glab $*"
+printf '%s\n' "$argv" >> "$dir/calls.log"
+
+# Print $1 with every / replaced by __ (a branch or project path as a file name).
+slug() {
+  rest=$1
+  out=
+  while :; do
+    case $rest in
+      */*)
+        out=$out${rest%%/*}__
+        rest=${rest#*/}
+        ;;
+      *)
+        out=$out$rest
+        break
+        ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# Print $1 with every %XX turned into its byte.
+urldecode() {
+  rest=$1
+  out=
+  while [ -n "$rest" ]; do
+    case $rest in
+      %[0-9A-Fa-f][0-9A-Fa-f]*)
+        hex=${rest#%}
+        hex=${hex%"${hex#??}"}
+        rest=${rest#%??}
+        out=$out$(printf "\\$(printf '%03o' "0x$hex")")
+        ;;
+      *)
+        out=$out${rest%"${rest#?}"}
+        rest=${rest#?}
+        ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# Print the decoded value of query parameter $1 from $query.
+query_param() {
+  rest=$query
+  while [ -n "$rest" ]; do
+    pair=${rest%%&*}
+    case $rest in
+      *\&*) rest=${rest#*&} ;;
+      *) rest= ;;
+    esac
+    case $pair in
+      "$1="*)
+        urldecode "${pair#*=}"
+        return
+        ;;
+    esac
+  done
+}
+
+# Answer from scenario file $1, or fail when it has no scenario. A scenario is
+# the .json file, or only its .exit file (a failing call with no output).
+serve() {
+  if [ ! -f "$1" ] && [ ! -f "$1.exit" ]; then
+    printf 'fake forge: no scenario for %s\n' "$argv" >&2
+    exit 1
+  fi
+  if [ -f "$1.stderr" ]; then
+    cat "$1.stderr" >&2
+  fi
+  if [ -f "$1" ]; then
+    cat "$1"
+  fi
+  code=0
+  if [ -f "$1.exit" ]; then
+    IFS= read -r code < "$1.exit"
+  fi
+  case $code in
+    '' | *[!0-9]*) code=1 ;;
+  esac
+  exit "$code"
+}
+
+no_scenario() {
+  printf 'fake forge: no scenario for %s\n' "$argv" >&2
+  exit 1
+}
+
+[ "${1:-}" = api ] || no_scenario
+shift
+
+# The first argument that is not a flag is the endpoint. `--hostname` is
+# accepted and ignored (the call log keeps it).
+endpoint=
+while [ $# -gt 0 ]; do
+  case $1 in
+    # Flags with a value: skip the value too.
+    --hostname | -X | --method | -H | --header | -F | --field | -f | --raw-field | --input)
+      [ $# -ge 2 ] && shift
+      ;;
+    -*) ;;
+    *)
+      [ -z "$endpoint" ] && endpoint=$1
+      ;;
+  esac
+  shift
+done
+
+endpoint=${endpoint#/}
+path=${endpoint%%\?*}
+query=
+case $endpoint in
+  *\?*) query=${endpoint#*\?} ;;
+esac
+
+case $path in
+  projects/*) ;;
+  *) no_scenario ;;
+esac
+path=${path#projects/}
+project=${path%%/*}
+resource=${path#"$project"}
+resource=${resource#/}
+base=$dir/glab/$(slug "$(urldecode "$project")")
+
+case $resource in
+  merge_requests)
+    serve "$base/mr-list/$(slug "$(query_param source_branch)").json"
+    ;;
+  merge_requests/*/approvals)
+    iid=${resource#merge_requests/}
+    serve "$base/mr/${iid%/approvals}-approvals.json"
+    ;;
+  merge_requests/*)
+    serve "$base/mr/${resource#merge_requests/}.json"
+    ;;
+  pipelines/*/jobs)
+    id=${resource#pipelines/}
+    serve "$base/pipeline-jobs/${id%/jobs}.json"
+    ;;
+esac
+no_scenario

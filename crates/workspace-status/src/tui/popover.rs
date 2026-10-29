@@ -10,8 +10,9 @@
 //! A click on an icon, a click inside a peek, or `gh` pins a popover. A
 //! pinned popover is [`super::keys::InputMode::Popover`]: `j` / `k` move
 //! between its field and action lines, Enter or a click runs the focused
-//! action, `y` copies the focused line, and a drag selects its text. Esc, a
-//! click outside it, or a change of the focused row closes it.
+//! action, `y` copies the focused line, `r` refreshes the PR of a PR
+//! section, and a drag selects its text. Esc, a click outside it, or a
+//! change of the focused row closes it.
 //!
 //! [`PopoverState`] keeps only what to describe (icon kind and target per
 //! section). Every frame rebuilds the sections from live state
@@ -22,6 +23,7 @@
 
 use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use ratatui::layout::Rect;
 use workspace_status_graph::{
@@ -29,6 +31,7 @@ use workspace_status_graph::{
     GraphRow, PartTarget, RefKind, Stash, SyncStatus, Worktree, ASCII, UNICODE,
 };
 
+use crate::git::UpstreamRewrite;
 use crate::helpers::{is_default_branch, is_detached_head_branch, DEFAULT_BRANCH_NAMES};
 use crate::snapshot::{CheckoutKind, FileChange, WorkspaceRepoSnapshot};
 
@@ -37,8 +40,12 @@ use super::command_palette::{command_for, PaletteCommand};
 use super::comments::{checkout_file_comments, tree_row_comments, CommentEntry};
 use super::commit_files::CommitFileRow;
 use super::gates::ListFocusTarget;
-use super::icons::{capture_count, file_type_name, spec, status_letter_from_change, IconKind};
-use super::pull_request::{ChecksSummary, PullRequestDetail};
+use super::icons::{
+    capture_count, file_type_name, spec, status_letter_from_change, upstream_rewrite_text, IconKind,
+};
+use super::line_blame::relative_age;
+use super::pr_status::{CheckBucket, ChecksSummary, PrState};
+use super::pull_request::{PrReview, PullRequestDetail, ReviewCount};
 use super::state::{AppState, PrDetailState};
 use super::tree::{
     file_change_from_name_status, find_node, is_merge_mark_kind, path_under_dir, pr_badge_kind,
@@ -167,7 +174,8 @@ pub enum PopoverLine {
     Note(String),
     /// A muted label and a value. `y` copies the value.
     Field {
-        /// Short lower-case label.
+        /// Short lower-case label; empty for a line that continues the
+        /// field above it.
         label: &'static str,
         /// Value text.
         value: String,
@@ -178,21 +186,69 @@ pub enum PopoverLine {
         /// True when the value is a URL the painted value text links to
         /// (OSC 8). The link keeps the full value when the text is cut.
         link: bool,
+        /// Length in bytes of the head of the value that paints bold: 0
+        /// for none, the value's length for all of it.
+        bold: usize,
+        /// A short mark painted before the value in its own colour (the
+        /// `✗` / `…` of a PR check name), while the value keeps
+        /// [`Self::Field::role`]. `y` copies the value alone.
+        mark: Option<(&'static str, SegRole)>,
     },
-    /// An existing command: title and key chip from the palette catalog.
-    /// Enter or a click runs its [`Action`].
-    Action(&'static PaletteCommand),
+    /// A horizontal rule between the fields and the actions. Not
+    /// focusable.
+    Rule,
+    /// An existing command: a title and a key chip. Enter or a click runs
+    /// its [`Action`].
+    Action {
+        /// The palette row: its action and gate.
+        command: &'static PaletteCommand,
+        /// Painted title: the palette title, or a section's own name for
+        /// it (the PR section names Open PR CI by its CI page).
+        title: &'static str,
+        /// Key chip: the palette row's keys, or a key that runs the action
+        /// only inside this popover (the PR section's `y` and `r`, whose
+        /// palette rows show no chip). Empty paints no chip.
+        keys: &'static str,
+    },
 }
 
 impl PopoverLine {
     /// The palette row of `action` as a line. `None` when no row runs it.
     pub fn action(action: &Action) -> Option<Self> {
-        command_for(action).map(Self::Action)
+        command_for(action).map(|command| Self::Action {
+            command,
+            title: command.title,
+            keys: command.keys,
+        })
+    }
+
+    /// The palette row of `action` as a line painted with `title`. `None`
+    /// when no row runs it.
+    pub fn titled_action(action: &Action, title: &'static str) -> Option<Self> {
+        command_for(action).map(|command| Self::Action {
+            command,
+            title,
+            keys: command.keys,
+        })
+    }
+
+    /// This line with the key chip `keys`, for a key that runs the action
+    /// only inside the popover. A line that is not an action stays as it
+    /// is.
+    pub fn with_keys(self, keys: &'static str) -> Self {
+        match self {
+            Self::Action { command, title, .. } => Self::Action {
+                command,
+                title,
+                keys,
+            },
+            line => line,
+        }
     }
 
     /// True for a line `j` / `k` can focus: a field or an action.
     pub fn focusable(&self) -> bool {
-        !matches!(self, Self::Text(_) | Self::Note(_))
+        !matches!(self, Self::Text(_) | Self::Note(_) | Self::Rule)
     }
 
     /// Text `y` copies: the value of a field, the title of an action.
@@ -200,7 +256,8 @@ impl PopoverLine {
         match self {
             Self::Text(text) | Self::Note(text) => text.clone(),
             Self::Field { value, .. } => value.clone(),
-            Self::Action(command) => command.title.to_string(),
+            Self::Rule => String::new(),
+            Self::Action { title, .. } => title.to_string(),
         }
     }
 }
@@ -208,14 +265,25 @@ impl PopoverLine {
 /// One icon's part of a popover.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PopoverSection {
-    /// Icon described. The heading paints its glyph and catalog name.
+    /// Icon described. The heading paints its glyph and
+    /// [`Self::heading`].
     pub icon: IconKind,
     /// Colour role of the glyph, as the row paints it.
     pub role: SegRole,
     /// What the icon is on.
     pub target: IconTarget,
+    /// Heading text after the glyph; `None` paints the catalog name.
+    pub title: Option<String>,
     /// The meaning first, then fields, then actions.
     pub lines: Vec<PopoverLine>,
+}
+
+impl PopoverSection {
+    /// Heading text after the glyph: [`Self::title`], else the catalog
+    /// name of [`Self::icon`].
+    pub fn heading(&self) -> &str {
+        self.title.as_deref().unwrap_or(self.icon.spec().name)
+    }
 }
 
 /// Target of icon `kind` painted on tree row `row`.
@@ -224,7 +292,7 @@ pub struct PopoverSection {
 /// row.
 pub fn tree_icon_target(kind: IconKind, row: &VisibleRow) -> IconTarget {
     match (kind, row.repo.as_deref()) {
-        (IconKind::PrOpen | IconKind::PrApproved | IconKind::PrMerged, Some(repo)) => {
+        (kind, Some(repo)) if kind.is_pull_request() => {
             IconTarget::PullRequest(PathBuf::from(repo))
         }
         _ => IconTarget::TreeRow(row.id.clone()),
@@ -246,9 +314,10 @@ pub fn graph_row_id(row: &GraphRow) -> String {
 
 /// Catalog kind and target of graph icon `kind` painted for `row`. `part`
 /// is the [`workspace_status_graph::IconSpan::part`] and `chip` its
-/// [`workspace_status_graph::IconSpan::target`]. `None` for a PR badge (its
-/// checkout comes from the badge list), the sync header and the footer
-/// hint (no row icon), and a worktree mark whose index is not on the row.
+/// [`workspace_status_graph::IconSpan::target`]. `None` for a PR badge or the
+/// header chip (their checkout comes from the badge list or the chip), the
+/// sync header and the footer hint (no row icon), and a worktree mark whose
+/// index is not on the row.
 ///
 /// A checkout / sync mark run is one icon: [`IconKind::ChipCheckout`] when
 /// HEAD is on its branch, else [`IconKind::ChipSynced`].
@@ -297,7 +366,10 @@ pub fn graph_icon(
             PartTarget::Marks { checkout: true, .. } => on_chip(IconKind::ChipCheckout),
             _ => on_chip(IconKind::ChipSynced),
         },
-        GraphIconKind::Badge | GraphIconKind::SyncHeader | GraphIconKind::MoreBelow => None,
+        GraphIconKind::Badge
+        | GraphIconKind::SyncHeader
+        | GraphIconKind::HeaderChip
+        | GraphIconKind::MoreBelow => None,
     }
 }
 
@@ -453,6 +525,7 @@ fn line_comment_section(target: &IconTarget, comments: &[&CommentEntry]) -> Opti
         icon: kind,
         role,
         target: target.clone(),
+        title: None,
         lines,
     })
 }
@@ -548,7 +621,12 @@ fn tree_section(state: &AppState, kind: IconKind, row: &VisibleRow) -> Option<Po
             group_fields(state, row, &mut lines);
             vec![Action::FoldToggle, Action::FoldToggleSubtree]
         }
-        kind if is_sync_kind(kind) => sync_fields(kind, &row.chrome.sync_note, &mut lines),
+        kind if is_sync_kind(kind) => sync_fields(
+            kind,
+            &row.chrome.sync_note,
+            row.chrome.upstream_rewrite.as_ref(),
+            &mut lines,
+        ),
         IconKind::StatusFailed => vec![Action::Refresh],
         IconKind::Hidden => vec![Action::ToggleShowHidden],
         IconKind::ChangeCount => {
@@ -578,6 +656,7 @@ fn tree_section(state: &AppState, kind: IconKind, row: &VisibleRow) -> Option<Po
         icon: kind,
         role: seg.role,
         target: IconTarget::TreeRow(row.id.clone()),
+        title: None,
         lines,
     })
 }
@@ -603,6 +682,7 @@ fn commit_file_section(
         icon: kind,
         role: seg.role,
         target: IconTarget::CommitFileRow(row.id.clone()),
+        title: None,
         lines,
     })
 }
@@ -640,6 +720,7 @@ fn explorer_row_section(state: &AppState, kind: IconKind, rel: &str) -> Option<P
         icon: kind,
         role: seg.role,
         target: IconTarget::ExplorerRow(rel.to_string()),
+        title: None,
         lines,
     })
 }
@@ -838,6 +919,8 @@ fn role_field(label: &'static str, value: impl Into<String>, role: SegRole) -> P
         value: value.into(),
         role,
         link: false,
+        bold: 0,
+        mark: None,
     }
 }
 
@@ -848,6 +931,25 @@ fn link_field(label: &'static str, url: impl Into<String>) -> PopoverLine {
         value: url.into(),
         role: SegRole::File,
         link: true,
+        bold: 0,
+        mark: None,
+    }
+}
+
+/// A field whose value paints in `role`, its first `bold` bytes bold.
+fn bold_field(
+    label: &'static str,
+    value: impl Into<String>,
+    role: SegRole,
+    bold: usize,
+) -> PopoverLine {
+    PopoverLine::Field {
+        label,
+        value: value.into(),
+        role,
+        link: false,
+        bold,
+        mark: None,
     }
 }
 
@@ -1115,8 +1217,14 @@ fn is_sync_kind(kind: IconKind) -> bool {
 }
 
 /// Sync mark fields from `sync_note` and its actions: Pull / Push /
-/// Fetch as the state calls for.
-fn sync_fields(kind: IconKind, note: &str, lines: &mut Vec<PopoverLine>) -> Vec<Action> {
+/// Fetch as the state calls for. A diverged branch whose upstream was
+/// force-pushed shows that text in place of the ahead / behind counts.
+fn sync_fields(
+    kind: IconKind,
+    note: &str,
+    rewrite: Option<&UpstreamRewrite>,
+    lines: &mut Vec<PopoverLine>,
+) -> Vec<Action> {
     match kind {
         IconKind::Ahead => {
             lines.push(role_field(
@@ -1139,7 +1247,8 @@ fn sync_fields(kind: IconKind, note: &str, lines: &mut Vec<PopoverLine>) -> Vec<
                 .strip_prefix("diverged (")
                 .and_then(|rest| rest.strip_suffix(')'))
                 .unwrap_or(note);
-            lines.push(role_field("sync", counts, SegRole::Modified));
+            let value = rewrite.map_or_else(|| counts.to_string(), upstream_rewrite_text);
+            lines.push(role_field("sync", value, SegRole::Modified));
             vec![Action::Fetch, Action::Pull, Action::Push]
         }
         IconKind::NoUpstream => {
@@ -1172,104 +1281,137 @@ pub const PR_DETAIL_LOADING: &str = "loading…";
 /// Shown when the PR detail fetch failed.
 pub const PR_DETAIL_FAILED: &str = "could not load details";
 
-/// PR badge: meaning, number, the fetched detail, URL (`y` copies it), and
-/// Open PR (`gx`).
+/// Title of the PR popover line that copies the PR URL.
+pub const PR_COPY_URL_TITLE: &str = "Copy URL";
+
+/// PR badge: the heading `<glyph> PR · <state label>`, the lines below in
+/// this order (each only when it has data), a rule, then the actions.
 ///
-/// The number and URL come from the badge answer at once. The detail adds
-/// the title, state and review, author, `head → base`, checks, and update
-/// time once it lands. While it loads, or when it failed, a muted line says
-/// so.
+/// | Line | Label | From |
+/// | --- | --- | --- |
+/// | ref and title (the title once the detail lands) | `number` | badge, detail |
+/// | `loading…` or `could not load details` | (note) | detail state |
+/// | forge state words, `DRAFT`, review decision | `state` | detail |
+/// | `▸ <next action>`, or `merged <age>` | `next` | badge |
+/// | author | `author` | detail |
+/// | `head → base` | `branch` | detail |
+/// | `after <base ref> (<base state>)` | `stack` | known PRs |
+/// | checks summary, or GitLab `pipeline <status>` | `checks` | detail |
+/// | failed, then running, check names (`+N more`) | (blank) | detail |
+/// | review count | `reviews` / `approvals` | detail |
+/// | blockers | `notes` | badge |
+/// | update time | `updated` | detail |
+/// | last successful lookup, and the last failure | `checked` | lookups |
+/// | URL (`y` copies it) | `url` | badge |
+///
+/// Actions: Open PR (`gx`), the CI page by its [`CiLinkKind::label`]
+/// (`gc`), Copy URL (`y`), and Refresh this PR (`r`) unless merged.
+///
+/// [`CiLinkKind::label`]: super::pr_status::CiLinkKind::label
 fn pr_section(state: &AppState, repo: &Path, now_unix: i64) -> Option<PopoverSection> {
     let pr = state.pull_request_for(repo)?;
     let (_, role) = pr_badge_mark(state.ascii, pr.state);
-    let kind = pr_badge_kind(pr.state);
-    let mut lines = vec![PopoverLine::Text(spec(kind).meaning.to_string())];
-    match state.pull_request_detail_for(repo) {
-        Some(PrDetailState::Ready(detail)) => {
-            pr_detail_fields(state.ascii, detail, role, now_unix, &mut lines)
-        }
-        other => {
-            lines.push(field("number", format!("#{}", pr.number)));
-            match other {
-                Some(PrDetailState::Loading(_)) => {
-                    lines.push(PopoverLine::Note(PR_DETAIL_LOADING.into()))
-                }
-                Some(PrDetailState::Failed) => {
-                    lines.push(PopoverLine::Note(PR_DETAIL_FAILED.into()))
-                }
-                Some(PrDetailState::Ready(_)) | None => {}
-            }
-        }
-    }
-    lines.push(link_field("url", pr.url.clone()));
+    let detail = match state.pull_request_detail_for(repo) {
+        Some(PrDetailState::Ready(detail)) => Some(detail),
+        _ => None,
+    };
+    let pr_ref = pr.ref_text();
+    let number = match detail.filter(|detail| !detail.title.is_empty()) {
+        Some(detail) => format!("{pr_ref} {}", detail.title),
+        None => pr_ref.clone(),
+    };
+    let mut lines = vec![bold_field("number", number, SegRole::Repo, pr_ref.len())];
+    lines.extend(pr_detail_lines(state, repo, now_unix));
+    lines.push(PopoverLine::Rule);
     lines.extend(PopoverLine::action(&Action::OpenPullRequest));
+    lines.extend(PopoverLine::titled_action(
+        &Action::OpenPullRequestCi,
+        pr.ci_link.kind.label(),
+    ));
+    // `y` and `r` run these only inside the pinned popover (the palette
+    // rows show no chip), so the lines carry the chip themselves.
+    lines.extend(
+        PopoverLine::titled_action(&Action::CopyPullRequestUrl, PR_COPY_URL_TITLE)
+            .map(|line| line.with_keys("y")),
+    );
+    if pr.state != PrState::Merged {
+        lines.extend(
+            PopoverLine::action(&Action::RefreshPullRequest).map(|line| line.with_keys("r")),
+        );
+    }
     Some(PopoverSection {
-        icon: kind,
+        icon: pr_badge_kind(pr.state),
         role,
         target: IconTarget::PullRequest(repo.to_path_buf()),
+        title: Some(format!("PR · {}", pr.state.label())),
         lines,
     })
 }
 
-/// Fields of a fetched PR detail: `#N title`, state (draft, review),
-/// author, branches, checks, and update time. Each optional one shows when
-/// the forge sent it. The state paints in the badge colour `badge`.
-fn pr_detail_fields(
-    ascii: bool,
-    detail: &PullRequestDetail,
-    badge: SegRole,
-    now_unix: i64,
-    lines: &mut Vec<PopoverLine>,
-) {
-    let number = format!("#{}", detail.number);
-    lines.push(field(
-        "number",
-        if detail.title.is_empty() {
-            number
-        } else {
-            format!("{number} {}", detail.title)
+/// The lines of the PR of checkout `repo` under its `number` line, as the
+/// PR popover and the PRs tab detail pane show them: the `loading…` or
+/// `could not load details` note, then `state` to `url` (see
+/// [`pr_section`]), each only when it has data. Empty when the checkout
+/// shows no PR.
+pub(crate) fn pr_detail_lines(state: &AppState, repo: &Path, now_unix: i64) -> Vec<PopoverLine> {
+    let Some(pr) = state.pull_request_for(repo) else {
+        return Vec::new();
+    };
+    let ascii = state.ascii;
+    let (_, role) = pr_badge_mark(ascii, pr.state);
+    let detail_state = state.pull_request_detail_for(repo);
+    let detail = match detail_state {
+        Some(PrDetailState::Ready(detail)) => Some(detail),
+        _ => None,
+    };
+    let stack_base = state.pr_stack_base(repo);
+    let mut lines = Vec::new();
+    match detail_state {
+        Some(PrDetailState::Loading(_)) => lines.push(PopoverLine::Note(PR_DETAIL_LOADING.into())),
+        Some(PrDetailState::Failed) => lines.push(PopoverLine::Note(PR_DETAIL_FAILED.into())),
+        Some(PrDetailState::Ready(_)) | None => {}
+    }
+    if let Some(detail) = detail {
+        lines.extend(pr_state_field(detail, role));
+    }
+    let next = match pr.next_action(stack_base) {
+        Some(next) => format!("{} {}", if ascii { ">" } else { "▸" }, next.text()),
+        None => match pr.updated_at {
+            Some(unix) => format!("merged {}", relative_age(now_unix, unix)),
+            None => "merged".into(),
         },
-    ));
-    let mut state = Vec::new();
-    if !detail.state.is_empty() {
-        state.push(detail.state.as_str());
+    };
+    let next_len = next.len();
+    lines.push(bold_field("next", next, role, next_len));
+    if let Some(detail) = detail {
+        if let Some(author) = &detail.author {
+            lines.push(field("author", author.clone()));
+        }
+        if let (Some(head), Some(base)) = (&detail.head, &detail.base) {
+            let arrow = if ascii { "->" } else { "→" };
+            lines.push(role_field(
+                "branch",
+                format!("{head} {arrow} {base}"),
+                SegRole::BranchFeature,
+            ));
+        }
     }
-    if detail.draft {
-        state.push("DRAFT");
-    }
-    if let Some(review) = detail.review {
-        state.push(review.label());
-    }
-    if !state.is_empty() {
-        lines.push(role_field("state", state.join(" · "), badge));
-    }
-    if let Some(author) = &detail.author {
-        lines.push(field("author", author.clone()));
-    }
-    if let (Some(head), Some(base)) = (&detail.head, &detail.base) {
-        let arrow = if ascii { "->" } else { "→" };
+    if let Some(base) = stack_base {
         lines.push(role_field(
-            "branch",
-            format!("{head} {arrow} {base}"),
-            SegRole::BranchFeature,
+            "stack",
+            format!("after {} ({})", base.ref_text(), base.state.label()),
+            SegRole::Modified,
         ));
     }
-    let checks = &detail.checks;
-    let checks_role = if checks.fail > 0 {
-        SegRole::Deleted
-    } else if checks.pending > 0 {
-        SegRole::Modified
-    } else if checks.pass > 0 {
-        SegRole::Added
-    } else {
-        SegRole::Muted
-    };
-    lines.push(role_field(
-        "checks",
-        checks_text(ascii, checks),
-        checks_role,
-    ));
-    if let Some(unix) = detail.updated_at {
+    if let Some(detail) = detail {
+        pr_check_fields(ascii, detail, &mut lines);
+        lines.extend(pr_review_field(detail));
+    }
+    let notes = pr.notes.texts();
+    if !notes.is_empty() {
+        lines.push(role_field("notes", notes.join(" · "), SegRole::Modified));
+    }
+    if let Some(unix) = detail.and_then(|detail| detail.updated_at) {
         let local = format_local_timestamp(unix);
         let relative = format_relative_date(unix, now_unix);
         lines.push(field(
@@ -1281,6 +1423,125 @@ fn pr_detail_fields(
             },
         ));
     }
+    lines.extend(pr_checked_field(state, repo, now_unix));
+    lines.push(link_field("url", pr.url.clone()));
+    lines
+}
+
+/// `state`: the forge state words, `DRAFT`, and the review decision, in
+/// the badge colour `badge`. `None` when the forge sent none of them.
+fn pr_state_field(detail: &PullRequestDetail, badge: SegRole) -> Option<PopoverLine> {
+    let mut state = Vec::new();
+    if !detail.state.is_empty() {
+        state.push(detail.state.as_str());
+    }
+    if detail.draft {
+        state.push("DRAFT");
+    }
+    if let Some(review) = detail.review {
+        state.push(review.label());
+    }
+    (!state.is_empty()).then(|| role_field("state", state.join(" · "), badge))
+}
+
+/// `checks`, then the named failed and running checks (blank label, at
+/// most [`super::pr_status::NAMED_CHECKS_MAX`]: a mark in the bucket colour,
+/// `✗` / `…`, then the plain name) and `+N more`.
+///
+/// GitHub sums the checks ([`checks_text`]); GitLab names its head
+/// pipeline status (`pipeline failed`). The colour follows the worst
+/// bucket: failed, running, passed, else muted. A check with no name is
+/// counted in `+N more`.
+fn pr_check_fields(ascii: bool, detail: &PullRequestDetail, lines: &mut Vec<PopoverLine>) {
+    let checks = &detail.checks;
+    let checks_role = if checks.fail > 0 {
+        SegRole::Deleted
+    } else if checks.pending > 0 {
+        SegRole::Modified
+    } else if checks.pass > 0 {
+        SegRole::Added
+    } else {
+        SegRole::Muted
+    };
+    let text = match detail.pipeline.as_deref() {
+        Some(status) => format!("pipeline {status}"),
+        None => checks_text(ascii, checks),
+    };
+    lines.push(role_field("checks", text, checks_role));
+    let mut more = detail.more_checks;
+    for check in &detail.check_names {
+        if check.name.is_empty() {
+            more += 1;
+            continue;
+        }
+        let mark = match (check.bucket, ascii) {
+            (CheckBucket::Fail, false) => ("✗", SegRole::Deleted),
+            (CheckBucket::Fail, true) => ("fail", SegRole::Deleted),
+            (CheckBucket::Pending, false) => ("…", SegRole::Modified),
+            (CheckBucket::Pending, true) => ("pending", SegRole::Modified),
+            (CheckBucket::Pass, false) => ("✓", SegRole::Added),
+            (CheckBucket::Pass, true) => ("pass", SegRole::Added),
+        };
+        // Only the mark takes the bucket colour; the name stays plain.
+        lines.push(PopoverLine::Field {
+            label: "",
+            value: check.name.clone(),
+            role: SegRole::File,
+            link: false,
+            bold: 0,
+            mark: Some(mark),
+        });
+    }
+    if more > 0 {
+        lines.push(role_field("", format!("+{more} more"), SegRole::Muted));
+    }
+}
+
+/// GitHub `reviews <n> approved · <decision>` (no decision: the count
+/// alone), or GitLab `approvals <given> of <required>`. Added when the
+/// review rule is met ([`PrReview::Approved`]), else modified. `None` when
+/// the forge sent no count.
+fn pr_review_field(detail: &PullRequestDetail) -> Option<PopoverLine> {
+    let role = if detail.review == Some(PrReview::Approved) {
+        SegRole::Added
+    } else {
+        SegRole::Modified
+    };
+    Some(match detail.reviews? {
+        ReviewCount::Approved(n) => {
+            let value = match detail.review {
+                Some(review) => format!("{n} approved · {}", review.label()),
+                None => format!("{n} approved"),
+            };
+            role_field("reviews", value, role)
+        }
+        ReviewCount::Approvals { given, required } => {
+            role_field("approvals", format!("{given} of {required}"), role)
+        }
+    })
+}
+
+/// `checked`: how long ago the last successful lookup of checkout `repo`
+/// landed, muted (`12m ago`). After a failed lookup it says so in the
+/// modified colour, with the CLI's reason when it gave one
+/// (`12m ago · last lookup failed: HTTP 401`). `None` with neither.
+fn pr_checked_field(state: &AppState, repo: &Path, now_unix: i64) -> Option<PopoverLine> {
+    let age = state.pr_checked_at(repo).map(|at| {
+        let secs = Instant::now().saturating_duration_since(at).as_secs();
+        relative_age(now_unix, now_unix.saturating_sub_unsigned(secs))
+    });
+    let Some(failure) = state.pr_lookup_failure(repo) else {
+        return age.map(|age| role_field("checked", age, SegRole::Muted));
+    };
+    let failed = match &failure.reason {
+        Some(reason) => format!("last lookup failed: {reason}"),
+        None => "last lookup failed".into(),
+    };
+    let value = match age {
+        Some(age) => format!("{age} · {failed}"),
+        None => failed,
+    };
+    Some(role_field("checked", value, SegRole::Modified))
 }
 
 /// `✓ P · ✗ F · … N` (ASCII: `P pass · F fail · N pending`), or `none`.
@@ -1414,6 +1675,7 @@ fn graph_row_section(
         icon: kind,
         role,
         target: IconTarget::GraphRow(id.to_string()),
+        title: None,
         lines,
     })
 }
@@ -1564,6 +1826,7 @@ fn graph_worktree_section(
         icon: IconKind::LinkedWorktree,
         role: SegRole::Heading,
         target: IconTarget::GraphWorktree(path.to_string()),
+        title: None,
         lines,
     })
 }
@@ -1841,6 +2104,7 @@ fn graph_chip_section(
             row: row_id.to_string(),
             chip: chip.clone(),
         },
+        title: None,
         lines,
     })
 }
@@ -1901,6 +2165,7 @@ fn graph_sync_section(state: &AppState) -> Option<PopoverSection> {
         icon: kind,
         role,
         target: IconTarget::GraphSync,
+        title: None,
         lines,
     })
 }
@@ -1956,6 +2221,7 @@ fn more_lines_section(below: usize, target: IconTarget) -> Option<PopoverSection
         icon: IconKind::GraphMoreBelow,
         role: SegRole::Muted,
         target,
+        title: None,
         lines,
     })
 }
@@ -1974,7 +2240,7 @@ pub fn flat_lines(sections: &[PopoverSection]) -> Vec<&PopoverLine> {
 pub fn landing_line(lines: &[&PopoverLine]) -> usize {
     lines
         .iter()
-        .position(|line| matches!(line, PopoverLine::Action(_)))
+        .position(|line| matches!(line, PopoverLine::Action { .. }))
         .or_else(|| lines.iter().position(|line| line.focusable()))
         .unwrap_or(0)
 }
@@ -2041,16 +2307,53 @@ mod tests {
     use crate::tui::command_palette::PALETTE_COMMANDS;
 
     fn action_line(title: &str) -> PopoverLine {
-        PopoverLine::Action(
-            PALETTE_COMMANDS
-                .iter()
-                .find(|command| command.title == title)
-                .expect("palette row"),
-        )
+        let command = PALETTE_COMMANDS
+            .iter()
+            .find(|command| command.title == title)
+            .expect("palette row");
+        PopoverLine::Action {
+            command,
+            title: command.title,
+            keys: command.keys,
+        }
     }
 
     fn field(value: &str) -> PopoverLine {
         super::field("x", value)
+    }
+
+    fn sync_value(lines: &[PopoverLine]) -> Option<&str> {
+        lines.iter().find_map(|line| match line {
+            PopoverLine::Field {
+                label: "sync",
+                value,
+                ..
+            } => Some(value.as_str()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn diverged_popover_shows_the_force_push_text_when_classified() {
+        let rewrite = crate::git::UpstreamRewrite {
+            upstream: "origin/main".into(),
+            fork_point: "f".repeat(40),
+            tip: "t".repeat(40),
+            yours: 1,
+            dropped: 2,
+        };
+        let note = "diverged (ahead 3, behind 1)";
+        let mut lines = Vec::new();
+        let actions = sync_fields(IconKind::Diverged, note, Some(&rewrite), &mut lines);
+        assert_eq!(
+            sync_value(&lines),
+            Some("origin/main was force-pushed \u{b7} 2 dropped, 1 yours")
+        );
+        assert_eq!(actions, vec![Action::Fetch, Action::Pull, Action::Push]);
+
+        let mut plain = Vec::new();
+        sync_fields(IconKind::Diverged, note, None, &mut plain);
+        assert_eq!(sync_value(&plain), Some("ahead 3, behind 1"));
     }
 
     #[test]
@@ -2144,6 +2447,638 @@ mod tests {
             Some(action_line("Push"))
         );
         assert_eq!(PopoverLine::action(&Action::PopoverClose), None);
+    }
+
+    // ---- PR section: field lines (number … url) and the actions ----
+
+    mod pr {
+        use std::path::{Path, PathBuf};
+        use std::time::{Duration, Instant};
+
+        use super::super::*;
+        use crate::snapshot::{build_workspace_snapshot, CheckoutKind, RepoSnapshot, SyncStatus};
+        use crate::tui::action::Effect;
+        use crate::tui::pr_status::{
+            checks_ci_link, pipeline_ci_link, Check, CiLink, CiLinkKind, PrNotes,
+        };
+        use crate::tui::pull_request::{Forge, PrDetailLookup, PrLookup, PullRequest};
+        use crate::tui::state::unix_now;
+
+        const GH_REMOTE: &str = "git@github.com:acme/app.git";
+        const GL_REMOTE: &str = "git@gitlab.com:acme/services/api.git";
+        const GH_PR: &str = "https://github.com/acme/app/pull/318";
+        const GL_MR: &str = "https://gitlab.com/acme/services/api/-/merge_requests/12";
+        const FAILED_JOB: &str = "https://github.com/acme/app/actions/runs/1/job/2";
+        const PIPELINE: &str = "https://gitlab.com/acme/services/api/-/pipelines/99";
+
+        /// Both forges, as (remote, a PR in `state` on it).
+        fn forges(state: PrState) -> [(&'static str, PullRequest); 2] {
+            [(GH_REMOTE, gh_pr(state)), (GL_REMOTE, gl_mr(state))]
+        }
+
+        fn gh_pr(state: PrState) -> PullRequest {
+            let mut pr = PullRequest::fixture(318, GH_PR, state);
+            pr.title = "Retry failed uploads with backoff".into();
+            pr.head = "feature/ABC-123-retry".into();
+            pr
+        }
+
+        fn gl_mr(state: PrState) -> PullRequest {
+            let mut pr = PullRequest::fixture(12, GL_MR, state);
+            pr.title = "Add the retry API".into();
+            pr.head = "feature/ABC-123-retry".into();
+            pr
+        }
+
+        fn checkout(name: &str, branch: &str) -> RepoSnapshot {
+            RepoSnapshot {
+                repo: name.into(),
+                branch: branch.into(),
+                sync_status: SyncStatus::UpToDate,
+                sync_note: String::new(),
+                upstream_rewrite: None,
+                head: "abc".into(),
+                has_unstaged: false,
+                has_staged: false,
+                has_untracked: false,
+                changes: Vec::new(),
+                checkout_kind: CheckoutKind::Primary,
+                primary_repo: None,
+                merged_into_default: None,
+                default_branch_override: None,
+                default_tip_ref: None,
+                local_branches: Vec::new(),
+            }
+        }
+
+        /// One checkout per PR (named `c<i>`, on the PR's head branch),
+        /// each PR the badge answer at `remote`, in ASCII mode.
+        fn app_with(remote: &str, prs: &[PullRequest]) -> AppState {
+            let names: Vec<String> = (0..prs.len()).map(|i| format!("c{i}")).collect();
+            let repos: Vec<RepoSnapshot> = names
+                .iter()
+                .zip(prs)
+                .map(|(name, pr)| checkout(name, &pr.head))
+                .collect();
+            let snapshot = build_workspace_snapshot(&repos, &[], false, &[]);
+            let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+            let _ = app.due_pr_lookups();
+            for (name, pr) in names.iter().zip(prs) {
+                assert!(app.apply_pr_lookup(
+                    Path::new(name),
+                    &pr.head,
+                    Some(remote.into()),
+                    PrLookup::Found(pr.clone()),
+                ));
+            }
+            app
+        }
+
+        /// What the popover holds open: a pinned PR section on checkout
+        /// `name`.
+        fn pin(app: &mut AppState, name: &str) -> (IconKind, IconTarget) {
+            let kind = pr_badge_kind(app.pr_badge(Path::new(name)).expect("badge"));
+            let target = (kind, IconTarget::PullRequest(PathBuf::from(name)));
+            app.popover = Some(PopoverState {
+                origin: PopoverOrigin::Pinned,
+                targets: vec![target.clone()],
+                anchor: None,
+                focus_line: 0,
+                owner: app.popover_owner(),
+            });
+            target
+        }
+
+        /// The PR section of checkout `name`, pinned: the detail fetch
+        /// asked for (left loading), and `detail` landed when given.
+        fn section_of(
+            app: &mut AppState,
+            name: &str,
+            detail: Option<PrDetailLookup>,
+        ) -> PopoverSection {
+            let target = pin(app, name);
+            let fetch = app.request_pr_details();
+            if let Some(detail) = detail {
+                let Effect::LookupPullRequestDetail {
+                    repo,
+                    branch,
+                    remote,
+                    number,
+                    request,
+                } = fetch
+                else {
+                    panic!("the pin asks for the detail: {fetch:?}");
+                };
+                assert!(app.apply_pr_detail(&repo, &branch, &remote, number, request, detail));
+            }
+            popover_sections(app, &[target], unix_now())
+                .pop()
+                .expect("PR section")
+        }
+
+        /// A line as text: `label: value` (`label: mark value` with a
+        /// mark), `(note)`, `---` for the rule, `[title] keys` for an
+        /// action.
+        fn line_text(line: &PopoverLine) -> String {
+            match line {
+                PopoverLine::Field {
+                    label,
+                    value,
+                    mark: Some((mark, _)),
+                    ..
+                } => format!("{label}: {mark} {value}"),
+                PopoverLine::Field { label, value, .. } => format!("{label}: {value}"),
+                PopoverLine::Text(text) | PopoverLine::Note(text) => format!("({text})"),
+                PopoverLine::Rule => "---".into(),
+                PopoverLine::Action { title, keys, .. } => format!("[{title}] {keys}"),
+            }
+        }
+
+        fn texts(section: &PopoverSection) -> Vec<String> {
+            section.lines.iter().map(line_text).collect()
+        }
+
+        /// The field whose [`line_text`] starts with `text`.
+        fn field_of<'a>(section: &'a PopoverSection, text: &str) -> &'a PopoverLine {
+            section
+                .lines
+                .iter()
+                .find(|line| {
+                    matches!(line, PopoverLine::Field { .. }) && line_text(line).starts_with(text)
+                })
+                .unwrap_or_else(|| panic!("no line {text:?} in {:?}", texts(section)))
+        }
+
+        /// Colour and bold head of the value of the field that starts with
+        /// `text`.
+        fn style_of(section: &PopoverSection, text: &str) -> (SegRole, usize) {
+            match field_of(section, text) {
+                PopoverLine::Field { role, bold, .. } => (*role, *bold),
+                _ => unreachable!("a field"),
+            }
+        }
+
+        /// Colour of the mark of the field that starts with `text`.
+        fn mark_role_of(section: &PopoverSection, text: &str) -> Option<SegRole> {
+            match field_of(section, text) {
+                PopoverLine::Field { mark, .. } => mark.map(|(_, role)| role),
+                _ => unreachable!("a field"),
+            }
+        }
+
+        fn actions(section: &PopoverSection) -> Vec<String> {
+            let lines = texts(section);
+            let rule = lines.iter().position(|line| line == "---").expect("rule");
+            lines[rule + 1..].to_vec()
+        }
+
+        fn check(bucket: CheckBucket, name: &str, url: Option<&str>) -> Check {
+            Check {
+                bucket,
+                name: name.into(),
+                url: url.map(str::to_string),
+            }
+        }
+
+        fn gh_detail() -> PullRequestDetail {
+            PullRequestDetail {
+                number: 318,
+                title: "Retry failed uploads with backoff".into(),
+                state: "OPEN".into(),
+                draft: false,
+                author: Some("octo-user".into()),
+                head: Some("feature/ABC-123-retry".into()),
+                base: Some("main".into()),
+                review: Some(PrReview::ReviewRequired),
+                reviews: Some(ReviewCount::Approved(1)),
+                checks: ChecksSummary {
+                    pass: 6,
+                    fail: 1,
+                    pending: 2,
+                },
+                pipeline: None,
+                check_names: vec![
+                    check(CheckBucket::Fail, "test (ubuntu-latest)", Some(FAILED_JOB)),
+                    check(CheckBucket::Pending, "build", None),
+                ],
+                more_checks: 1,
+                notes: PrNotes::default(),
+                ci_link: checks_ci_link(&[], GH_PR),
+                updated_at: Some(unix_now() - 2 * 3600),
+            }
+        }
+
+        fn gl_detail() -> PullRequestDetail {
+            PullRequestDetail {
+                number: 12,
+                title: "Add the retry API".into(),
+                state: "OPEN".into(),
+                draft: false,
+                author: Some("octo-user".into()),
+                head: Some("feature/ABC-123-retry".into()),
+                base: Some("main".into()),
+                review: Some(PrReview::Approved),
+                reviews: Some(ReviewCount::Approvals {
+                    given: 2,
+                    required: 2,
+                }),
+                checks: ChecksSummary {
+                    pass: 1,
+                    fail: 0,
+                    pending: 0,
+                },
+                pipeline: Some("success".into()),
+                check_names: Vec::new(),
+                more_checks: 0,
+                notes: PrNotes::default(),
+                ci_link: pipeline_ci_link(Some(PIPELINE), GL_MR),
+                updated_at: None,
+            }
+        }
+
+        #[test]
+        fn a_failed_github_pr_lists_every_line_in_order() {
+            let mut pr = gh_pr(PrState::CiFailed);
+            pr.failed_check = Some("test (ubuntu-latest)".into());
+            pr.ci_link = CiLink {
+                url: FAILED_JOB.into(),
+                kind: CiLinkKind::FailedCheck,
+            };
+            let mut app = app_with(GH_REMOTE, &[pr]);
+            let section = section_of(&mut app, "c0", Some(PrDetailLookup::Found(gh_detail())));
+            assert_eq!(section.heading(), "PR · CI failed");
+            assert_eq!(section.icon, IconKind::PrCiFailed);
+            assert_eq!(section.role, SegRole::Deleted);
+            let lines = texts(&section);
+            assert_eq!(
+                lines,
+                vec![
+                    "number: #318 Retry failed uploads with backoff",
+                    "state: OPEN · REVIEW_REQUIRED",
+                    "next: > fix CI",
+                    "author: octo-user",
+                    "branch: feature/ABC-123-retry -> main",
+                    "checks: 6 pass · 1 fail · 2 pending",
+                    ": fail test (ubuntu-latest)",
+                    ": pending build",
+                    ": +1 more",
+                    "reviews: 1 approved · REVIEW_REQUIRED",
+                    lines[10].as_str(),
+                    "checked: just now",
+                    "url: https://github.com/acme/app/pull/318",
+                    "---",
+                    "[Open PR] gx",
+                    "[Open failed check] gc",
+                    "[Copy URL] y",
+                    "[Refresh this PR] r",
+                ],
+            );
+            assert!(lines[10].starts_with("updated: ") && lines[10].ends_with(" (2h)"));
+            assert_eq!(style_of(&section, "number"), (SegRole::Repo, "#318".len()));
+            assert_eq!(style_of(&section, "state"), (SegRole::Deleted, 0));
+            assert_eq!(
+                style_of(&section, "next"),
+                (SegRole::Deleted, "> fix CI".len())
+            );
+            assert_eq!(style_of(&section, "branch"), (SegRole::BranchFeature, 0));
+            assert_eq!(style_of(&section, "checks"), (SegRole::Deleted, 0));
+            // The mark takes the bucket colour; the check name stays plain.
+            assert_eq!(style_of(&section, ": fail"), (SegRole::File, 0));
+            assert_eq!(mark_role_of(&section, ": fail"), Some(SegRole::Deleted));
+            assert_eq!(style_of(&section, ": pending"), (SegRole::File, 0));
+            assert_eq!(mark_role_of(&section, ": pending"), Some(SegRole::Modified));
+            assert_eq!(mark_role_of(&section, ": +1"), None);
+            assert_eq!(style_of(&section, ": +1"), (SegRole::Muted, 0));
+            assert_eq!(style_of(&section, "reviews"), (SegRole::Modified, 0));
+            assert_eq!(style_of(&section, "checked"), (SegRole::Muted, 0));
+
+            // Unicode glyph mode: the arrow, the next mark, and the check
+            // marks.
+            app.ascii = false;
+            let section = section_of(&mut app, "c0", None);
+            let lines = texts(&section);
+            for want in [
+                "next: ▸ fix CI",
+                "branch: feature/ABC-123-retry → main",
+                "checks: ✓ 6 · ✗ 1 · … 2",
+                ": ✗ test (ubuntu-latest)",
+                ": … build",
+            ] {
+                assert!(lines.iter().any(|line| line == want), "{want} in {lines:?}");
+            }
+        }
+
+        #[test]
+        fn a_ready_gitlab_mr_shows_its_pipeline_and_approvals() {
+            let mut mr = gl_mr(PrState::Ready);
+            mr.ci_link = pipeline_ci_link(Some(PIPELINE), GL_MR);
+            let mut app = app_with(GL_REMOTE, &[mr]);
+            let section = section_of(&mut app, "c0", Some(PrDetailLookup::Found(gl_detail())));
+            assert_eq!(section.heading(), "PR · ready to merge");
+            assert_eq!(section.icon, IconKind::PrReady);
+            assert_eq!(
+                texts(&section),
+                vec![
+                    "number: !12 Add the retry API",
+                    "state: OPEN · APPROVED",
+                    "next: > merge",
+                    "author: octo-user",
+                    "branch: feature/ABC-123-retry -> main",
+                    "checks: pipeline success",
+                    "approvals: 2 of 2",
+                    "checked: just now",
+                    "url: https://gitlab.com/acme/services/api/-/merge_requests/12",
+                    "---",
+                    "[Open PR] gx",
+                    "[Open pipeline] gc",
+                    "[Copy URL] y",
+                    "[Refresh this PR] r",
+                ]
+            );
+            assert_eq!(style_of(&section, "number"), (SegRole::Repo, "!12".len()));
+            assert_eq!(
+                style_of(&section, "next"),
+                (SegRole::Added, "> merge".len())
+            );
+            assert_eq!(style_of(&section, "checks"), (SegRole::Added, 0));
+            assert_eq!(style_of(&section, "approvals"), (SegRole::Added, 0));
+
+            // Approvals that do not meet the rules colour modified, even
+            // when the numbers match (an approver the rules do not count).
+            let mut not_met = gl_detail();
+            not_met.review = Some(PrReview::NotApproved);
+            not_met.reviews = Some(ReviewCount::Approvals {
+                given: 0,
+                required: 1,
+            });
+            not_met.pipeline = Some("failed".into());
+            not_met.checks = ChecksSummary {
+                pass: 0,
+                fail: 1,
+                pending: 0,
+            };
+            not_met.check_names = vec![check(CheckBucket::Fail, "rspec 1/2", None)];
+            let mut app = app_with(GL_REMOTE, &[gl_mr(PrState::CiFailed)]);
+            let section = section_of(&mut app, "c0", Some(PrDetailLookup::Found(not_met)));
+            assert_eq!(
+                style_of(&section, "approvals: 0 of 1"),
+                (SegRole::Modified, 0)
+            );
+            assert_eq!(
+                style_of(&section, "checks: pipeline failed"),
+                (SegRole::Deleted, 0)
+            );
+            // The mark takes the bucket colour; the job name stays plain.
+            assert_eq!(style_of(&section, ": fail rspec 1/2"), (SegRole::File, 0));
+            assert_eq!(
+                mark_role_of(&section, ": fail rspec 1/2"),
+                Some(SegRole::Deleted)
+            );
+        }
+
+        /// A forge that sent no approval count (GitLab with a missing
+        /// approvals field; GitHub likewise) shows no review line.
+        #[test]
+        fn no_review_count_drops_the_review_line_on_both_forges() {
+            for (remote, pr) in forges(PrState::InReview) {
+                let mut detail = if remote == GL_REMOTE {
+                    gl_detail()
+                } else {
+                    gh_detail()
+                };
+                detail.reviews = None;
+                let mut app = app_with(remote, &[pr]);
+                let section = section_of(&mut app, "c0", Some(PrDetailLookup::Found(detail)));
+                let lines = texts(&section);
+                assert!(
+                    !lines
+                        .iter()
+                        .any(|line| line.starts_with("approvals") || line.starts_with("reviews")),
+                    "{remote}: {lines:?}"
+                );
+                assert!(
+                    lines.iter().any(|line| line.starts_with("checks")),
+                    "{lines:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn github_reviews_leave_out_a_missing_decision_and_colour_by_approval() {
+            let mut app = app_with(GH_REMOTE, &[gh_pr(PrState::Ready)]);
+            let mut detail = gh_detail();
+            detail.review = None;
+            detail.reviews = Some(ReviewCount::Approved(0));
+            let section = section_of(&mut app, "c0", Some(PrDetailLookup::Found(detail)));
+            assert_eq!(
+                style_of(&section, "reviews: 0 approved"),
+                (SegRole::Modified, 0)
+            );
+            assert!(texts(&section).contains(&"reviews: 0 approved".to_string()));
+
+            let mut app = app_with(GH_REMOTE, &[gh_pr(PrState::Ready)]);
+            let mut detail = gh_detail();
+            detail.review = Some(PrReview::Approved);
+            detail.reviews = Some(ReviewCount::Approved(2));
+            let section = section_of(&mut app, "c0", Some(PrDetailLookup::Found(detail)));
+            assert_eq!(
+                style_of(&section, "reviews: 2 approved · APPROVED"),
+                (SegRole::Added, 0)
+            );
+        }
+
+        /// Every state on both forges: the heading, the next line, the CI
+        /// action, and Refresh this PR on open PRs only.
+        #[test]
+        fn each_state_names_its_next_step_and_actions_on_both_forges() {
+            for (state, label, next) in [
+                (PrState::CiFailed, "CI failed", "next: > fix CI"),
+                (PrState::Ready, "ready to merge", "next: > merge"),
+                (PrState::CiRunning, "CI running", "next: > wait for CI"),
+                (PrState::Draft, "draft", "next: > undraft"),
+                (PrState::InReview, "in review", "next: > get review"),
+                (PrState::Merged, "merged", "next: merged"),
+            ] {
+                for (remote, pr) in forges(state) {
+                    let ci = match pr.forge {
+                        Forge::GitHub => "[Open checks] gc",
+                        Forge::GitLab => "[Open pipeline] gc",
+                    };
+                    let mut app = app_with(remote, &[pr]);
+                    let section = section_of(&mut app, "c0", None);
+                    let what = format!("{state:?} at {remote}");
+                    assert_eq!(section.heading(), format!("PR · {label}"), "{what}");
+                    assert_eq!(section.icon, pr_badge_kind(state), "{what}");
+                    let lines = texts(&section);
+                    assert!(lines.contains(&next.to_string()), "{what}: {lines:?}");
+                    assert_eq!(
+                        lines[1], "(loading…)",
+                        "{what}: the note under the number line"
+                    );
+                    let mut want = vec!["[Open PR] gx", ci, "[Copy URL] y"];
+                    if state != PrState::Merged {
+                        want.push("[Refresh this PR] r");
+                    }
+                    assert_eq!(actions(&section), want, "{what}");
+                }
+            }
+        }
+
+        #[test]
+        fn a_merged_pr_says_when_and_keeps_its_ci_label_rule() {
+            for (remote, mut pr) in forges(PrState::Merged) {
+                pr.updated_at = Some(unix_now() - 3 * 3600);
+                if pr.forge == Forge::GitHub {
+                    pr.ci_link = CiLink {
+                        url: FAILED_JOB.into(),
+                        kind: CiLinkKind::FailedCheck,
+                    };
+                }
+                let github = pr.forge == Forge::GitHub;
+                let mut app = app_with(remote, &[pr]);
+                let section = section_of(&mut app, "c0", None);
+                assert_eq!(
+                    style_of(&section, "next: merged 3h ago"),
+                    (SegRole::BranchFeature, "merged 3h ago".len())
+                );
+                let ci = if github {
+                    "[Open failed check] gc"
+                } else {
+                    "[Open pipeline] gc"
+                };
+                assert_eq!(
+                    actions(&section),
+                    vec!["[Open PR] gx", ci, "[Copy URL] y"],
+                    "{remote}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_stacked_pr_names_its_base_and_merges_it_first() {
+            for remote in [GH_REMOTE, GL_REMOTE] {
+                let mut base = if remote == GH_REMOTE {
+                    gh_pr(PrState::CiFailed)
+                } else {
+                    gl_mr(PrState::CiFailed)
+                };
+                base.head = "feature/ABC-123-retry".into();
+                let mut top = if remote == GH_REMOTE {
+                    PullRequest::fixture(
+                        319,
+                        "https://github.com/acme/app/pull/319",
+                        PrState::Ready,
+                    )
+                } else {
+                    PullRequest::fixture(
+                        13,
+                        "https://gitlab.com/acme/services/api/-/merge_requests/13",
+                        PrState::Ready,
+                    )
+                };
+                top.head = "feature/ABC-125-retry-ui".into();
+                top.base = "feature/ABC-123-retry".into();
+                let base_ref = base.ref_text();
+                let mut app = app_with(remote, &[base, top]);
+                let section = section_of(&mut app, "c1", None);
+                let lines = texts(&section);
+                let stack = format!("stack: after {base_ref} (CI failed)");
+                assert!(lines.contains(&stack), "{lines:?}");
+                assert_eq!(style_of(&section, &stack), (SegRole::Modified, 0));
+                let next = format!("next: > merge {base_ref} first");
+                assert!(lines.contains(&next), "{lines:?}");
+                let at = |text: &str| lines.iter().position(|line| line.starts_with(text));
+                assert!(at("next") < at("stack") && at("stack") < at("checked"));
+
+                // The base itself is no stack.
+                let section = section_of(&mut app, "c0", None);
+                assert!(!texts(&section).iter().any(|line| line.starts_with("stack")));
+            }
+        }
+
+        #[test]
+        fn conflicts_and_threads_show_as_notes_and_the_next_step() {
+            for (remote, mut pr) in forges(PrState::InReview) {
+                pr.notes = PrNotes {
+                    conflicts: true,
+                    unresolved_threads: true,
+                    changes_requested: false,
+                };
+                let mut app = app_with(remote, &[pr]);
+                let section = section_of(&mut app, "c0", None);
+                let lines = texts(&section);
+                assert!(
+                    lines.contains(&"next: > fix conflicts".to_string()),
+                    "{lines:?}"
+                );
+                assert_eq!(
+                    style_of(&section, "notes: has conflicts · unresolved threads"),
+                    (SegRole::Modified, 0),
+                    "{remote}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_failing_lookup_keeps_the_pr_and_says_why_on_checked() {
+            for (remote, pr) in forges(PrState::CiRunning) {
+                let snapshot =
+                    build_workspace_snapshot(&[checkout("c0", &pr.head)], &[], false, &[]);
+                let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+                let _ = app.due_pr_lookups();
+                let then = Instant::now()
+                    .checked_sub(Duration::from_secs(12 * 60))
+                    .expect("clock");
+                let head = pr.head.clone();
+                assert!(app.apply_pr_lookup_at(
+                    Path::new("c0"),
+                    &head,
+                    Some(remote.into()),
+                    PrLookup::Found(pr),
+                    then,
+                ));
+                let section = section_of(&mut app, "c0", None);
+                assert_eq!(style_of(&section, "checked: 12m ago"), (SegRole::Muted, 0));
+
+                for (reason, want) in [
+                    (
+                        Some("HTTP 401: Bad credentials".to_string()),
+                        "checked: 12m ago · last lookup failed: HTTP 401: Bad credentials",
+                    ),
+                    (None, "checked: 12m ago · last lookup failed"),
+                ] {
+                    assert!(app.apply_pr_lookup(
+                        Path::new("c0"),
+                        &head,
+                        Some(remote.into()),
+                        PrLookup::Failed(reason),
+                    ));
+                    let section = popover_sections(
+                        &app,
+                        &app.popover.clone().expect("pinned").targets,
+                        unix_now(),
+                    )
+                    .pop()
+                    .expect("the badge stays, so does the section");
+                    let lines = texts(&section);
+                    assert!(lines.contains(&want.to_string()), "{remote}: {lines:?}");
+                    assert_eq!(style_of(&section, want), (SegRole::Modified, 0));
+                }
+            }
+        }
+
+        #[test]
+        fn a_failed_detail_keeps_the_badge_lines_and_says_so() {
+            for (remote, pr) in forges(PrState::InReview) {
+                let pr_ref = pr.ref_text();
+                let mut app = app_with(remote, &[pr]);
+                let section = section_of(&mut app, "c0", Some(PrDetailLookup::Failed(None)));
+                let lines = texts(&section);
+                assert_eq!(lines[0], format!("number: {pr_ref}"));
+                assert_eq!(lines[1], format!("({PR_DETAIL_FAILED})"));
+                assert_eq!(lines[2], "next: > get review");
+            }
+        }
     }
 
     #[test]

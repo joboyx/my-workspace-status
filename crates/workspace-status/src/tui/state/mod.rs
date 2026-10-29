@@ -13,11 +13,15 @@ mod go_to_line;
 mod line_blame;
 mod pan;
 mod popover;
+mod prs_tab;
 mod pull_request;
 mod remote_view;
 mod scroll_glide;
 mod summary;
 
+#[cfg(test)]
+pub(crate) use prs_tab::fixtures as prs_fixtures;
+pub(crate) use prs_tab::{prs_row_flash_id, PrsLine, PrsView, PRS_DETAIL_MIN_COLS};
 pub(crate) use pull_request::PrDetailState;
 
 use std::borrow::Cow;
@@ -39,7 +43,8 @@ use workspace_status_graph::{
 use crate::config::ViewDefaults;
 use crate::settings::Settings;
 use crate::snapshot::{
-    carry_status_failed_local_branches, CheckoutKind, FileChange, SyncStatus, WorkspaceSnapshot,
+    carry_status_failed_local_branches, CheckoutKind, FileChange, SyncStatus,
+    WorkspaceRepoSnapshot, WorkspaceSnapshot,
 };
 
 #[cfg(test)]
@@ -51,7 +56,10 @@ use super::branches::{
     branch_name_error, can_open_branch_picker, checkoutable_branch_names, merge_rev_for_commit,
     BranchPickerState, CreateBranchState, DIRTY_WORKTREE_STATUS,
 };
-use super::chrome::{diverged_pull_status, status_uses_status_text, STATUS_NO_COMMENTS};
+use super::chrome::{
+    diverged_pull_status, rebase_pull_status, rewritten_pull_status, status_uses_status_text,
+    STATUS_NO_COMMENTS,
+};
 use super::comments::{
     collect_live_set, comment_key_label, comments_in_focus_scope, covering_line_comment,
     diff_focus_side, diff_line_comment_state, export_markdown, format_entity_reference,
@@ -456,6 +464,23 @@ pub struct LayoutHit {
     /// [`Self::explorer_preview`]'s rows across the full pane width, as
     /// [`Self::explorer_tree_rows`].
     pub explorer_preview_rows: Rect,
+    /// Inner area of the painted PRs tab list pane (empty off the PRs tab
+    /// and while the narrow layout shows the detail).
+    pub prs_list: Rect,
+    /// The rows of the PRs tab list lines (below the error and loading
+    /// lines) across the full pane width, flat pad cells included. A press
+    /// or the wheel here hits a line; the first row is line
+    /// [`super::tabs::PrsTab::scroll`].
+    pub prs_list_rows: Rect,
+    /// Inner area of the painted PRs tab detail pane (empty when it does
+    /// not paint).
+    pub prs_detail: Rect,
+    /// [`Self::prs_detail`]'s rows across the full pane width.
+    pub prs_detail_rows: Rect,
+    /// Cells of the workspace PR total on the workspace row (`8 PRs · 2
+    /// need you`) when the tree painted it; a click there opens the PRs
+    /// tab.
+    pub pr_total_hit: Option<Rect>,
     /// Results rows the search-in-files dialog painted last; PgUp / PgDn
     /// move by it.
     pub search_files_rows: u16,
@@ -557,6 +582,11 @@ impl Default for LayoutHit {
             explorer_preview: Rect::default(),
             explorer_tree_rows: Rect::default(),
             explorer_preview_rows: Rect::default(),
+            prs_list: Rect::default(),
+            prs_list_rows: Rect::default(),
+            prs_detail: Rect::default(),
+            prs_detail_rows: Rect::default(),
+            pr_total_hit: None,
             search_files_rows: 0,
             animating: false,
             gliding: false,
@@ -735,6 +765,22 @@ pub enum PendingConfirm {
         /// Commits ahead of, then behind, the upstream from the snapshot
         /// sync note; `None` with no upstream or no parsable count.
         ahead_behind: Option<(u32, u32)>,
+    },
+    /// `p` on a diverged checkout whose upstream was force-pushed and holds
+    /// nothing of yours: `y` moves the branch to the upstream with a guarded
+    /// `git reset --keep` ([`crate::git::reset_keep_to_upstream`]).
+    ResetToUpstream {
+        /// Checkout path (snapshot `repo`).
+        repo: String,
+        /// Local branch the reset moves.
+        branch: String,
+        /// Upstream ref the branch moves to, for example `origin/main`.
+        upstream: String,
+        /// Branch tip the snapshot classified. The reset refuses when the
+        /// branch has moved since.
+        tip: String,
+        /// Commits the upstream dropped that the reset leaves behind.
+        dropped: usize,
     },
     /// Compare-tab highlight `x`: put the merge-base lines back for the
     /// highlighted rows of the committed compare diff (worktree only).
@@ -1112,6 +1158,8 @@ pub struct AppState {
     last_click: Option<(u16, u16, Instant)>,
     /// PR answers for branch-row badges, per checkout and (remote, branch).
     pr_cache: pull_request::PrCache,
+    /// PRs tab group titles from the title command, and its fill state.
+    pr_titles: prs_tab::PrTitles,
     /// Diff search hits for one (content, layout, query), so the status
     /// pill and the diff paint do not rebuild every diff row each frame.
     diff_search_memo: RefCell<Option<DiffSearchMemo>>,
@@ -1139,7 +1187,8 @@ pub struct AppState {
     pub(crate) diff_row_builds: std::cell::Cell<usize>,
 }
 
-fn unix_now() -> i64 {
+/// Wall clock now, in Unix seconds (0 before the epoch).
+pub(crate) fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -1163,6 +1212,8 @@ impl AppState {
         state.no_color = settings.no_color;
         state.undercurl = settings.undercurl;
         state.smooth_scroll = settings.smooth_scroll;
+        state.set_pr_poll_mode(settings.pr_poll);
+        state.pr_titles.command = settings.pr_title_command.clone();
         state.activity_sparkline = settings.activity_sparkline;
         state.saved_commit_msg_lines = settings.commit_msg_lines;
         if let Some(lines) = settings.commit_msg_lines {
@@ -1351,6 +1402,7 @@ impl AppState {
             ctrl_c_armed_until: None,
             last_click: None,
             pr_cache: pull_request::PrCache::default(),
+            pr_titles: prs_tab::PrTitles::default(),
             diff_search_memo: RefCell::new(None),
             file_search_memo: RefCell::new(None),
             explorer_status_memo: RefCell::new(None),
@@ -1453,7 +1505,11 @@ impl AppState {
         } else if self.doctor.is_some() {
             InputMode::Doctor
         } else if self.popover_pinned() {
-            InputMode::Popover
+            if self.chord_pending(self.g_pending_at) {
+                InputMode::PopoverGPending
+            } else {
+                InputMode::Popover
+            }
         } else if self.search_mode {
             InputMode::SearchPrompt
         } else if self.diff_visual_anchor.is_some()
@@ -1509,12 +1565,14 @@ impl AppState {
 
     pub fn graph_stash_focused(&self) -> bool {
         !self.is_explorer_tab()
+            && !self.is_prs_tab()
             && self.graph_pane_focused()
             && self.focused_graph_stash_ref().is_some()
     }
 
     pub fn graph_commit_focused(&self) -> bool {
         !self.is_explorer_tab()
+            && !self.is_prs_tab()
             && self.graph_pane_focused()
             && matches!(self.focused_graph_row(), Some(GraphRow::Commit { .. }))
     }
@@ -1566,6 +1624,10 @@ impl AppState {
     /// the right pane drives its active inner file, else `Tree` (its own
     /// tree, never the parked Workspace one).
     pub(crate) fn list_focus_target(&self) -> ListFocusTarget {
+        // The PRs tab list is none of the Workspace lists.
+        if self.is_prs_tab() {
+            return ListFocusTarget::None;
+        }
         if let Some(tab) = self.tabs.active_explorer() {
             return if self.focus == FocusPane::Right && tab.active_inner().is_some() {
                 ListFocusTarget::None
@@ -2828,8 +2890,7 @@ impl AppState {
                 let behind = with_sync(crate::snapshot::SyncStatus::Behind);
                 let diverged = with_sync(crate::snapshot::SyncStatus::Diverged);
                 if behind.is_empty() {
-                    self.status = StatusMessage::warn(diverged_pull_status(&diverged));
-                    Effect::None
+                    self.pull_nothing_behind(&diverged)
                 } else {
                     self.status = StatusMessage::progress(format_running_op(
                         RunningOp::Pull,
@@ -2870,6 +2931,61 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// `p` with nothing behind among the targets; `diverged` are the
+    /// diverged targets in row order.
+    ///
+    /// Exactly one target whose upstream was force-pushed with nothing of
+    /// yours opens the reset confirm. Several of them warn to focus one.
+    /// Otherwise the first one with your commits on top names the rebase.
+    /// Otherwise the plain [`diverged_pull_status`]. Only the confirm's `y`
+    /// writes.
+    fn pull_nothing_behind(&mut self, diverged: &[String]) -> Effect {
+        let rewrites: Vec<&WorkspaceRepoSnapshot> = diverged
+            .iter()
+            .filter_map(|repo| {
+                self.snapshot
+                    .repos
+                    .iter()
+                    .find(|r| r.repo == *repo && r.upstream_rewrite.is_some())
+            })
+            .collect();
+        let (nothing_yours, yours): (Vec<&WorkspaceRepoSnapshot>, Vec<&WorkspaceRepoSnapshot>) =
+            rewrites
+                .into_iter()
+                .partition(|r| r.upstream_rewrite.as_ref().is_some_and(|rw| rw.yours == 0));
+        match (nothing_yours.as_slice(), yours.first()) {
+            ([one], _) => {
+                let Some(rewrite) = one.upstream_rewrite.as_ref() else {
+                    return Effect::None;
+                };
+                let pending = PendingConfirm::ResetToUpstream {
+                    repo: one.repo.clone(),
+                    branch: one.branch.clone(),
+                    upstream: rewrite.upstream.clone(),
+                    tip: rewrite.tip.clone(),
+                    dropped: rewrite.dropped,
+                };
+                self.help_open = false;
+                self.cancel_mouse_drag();
+                self.confirm = Some(pending);
+            }
+            ([first, rest @ ..], _) => {
+                self.status = StatusMessage::warn(rewritten_pull_status(&first.repo, rest.len()));
+            }
+            ([], Some(first)) => {
+                if let Some(rewrite) = first.upstream_rewrite.as_ref() {
+                    self.status = StatusMessage::warn(rebase_pull_status(
+                        &first.repo,
+                        &first.branch,
+                        rewrite,
+                    ));
+                }
+            }
+            ([], None) => self.status = StatusMessage::warn(diverged_pull_status(diverged)),
+        }
+        Effect::None
     }
 
     fn refresh_effect(&self) -> Effect {
@@ -3168,7 +3284,8 @@ impl AppState {
         }
     }
 
-    /// Plain left press: tabs, dividers, scrollbars, then the row under it.
+    /// Plain left press: tabs, the PRs tab panes, the workspace PR total,
+    /// dividers, scrollbars, then the row under it.
     fn click_at(&mut self, col: u16, row: u16) -> Effect {
         self.text_selection = None;
         self.pad_press = None;
@@ -3177,6 +3294,18 @@ impl AppState {
         }
         if let Some(index) = self.hit_tab(col, row) {
             return self.activate_tab(index);
+        }
+        // The PRs tab has no divider or scrollbar: its panes take the press.
+        if self.is_prs_tab() {
+            return self.prs_click(col, row);
+        }
+        if self
+            .layout
+            .pr_total_hit
+            .is_some_and(|hit| hit.contains(ratatui::layout::Position::new(col, row)))
+        {
+            self.last_click = None;
+            return self.open_prs_tab();
         }
         if let Some(effect) = self.press_split_hit(col, row) {
             return effect;
@@ -5244,6 +5373,26 @@ impl AppState {
                 self.status = StatusMessage::progress(format_running_op(RunningOp::Push, 0, 1));
                 Effect::Push { repos: vec![repo] }
             }
+            // The reset confirm offers only y / n: `Y` keeps it open.
+            Some(pending @ PendingConfirm::ResetToUpstream { .. }) if clean => {
+                self.confirm = Some(pending);
+                Effect::None
+            }
+            Some(PendingConfirm::ResetToUpstream {
+                repo,
+                branch,
+                upstream,
+                tip,
+                ..
+            }) => {
+                self.status = StatusMessage::progress(format!("moving {branch} to {upstream}…"));
+                Effect::ResetToUpstream {
+                    repo,
+                    branch,
+                    upstream,
+                    tip,
+                }
+            }
             // Compare confirms offer only y / n: `Y` keeps them open.
             Some(pending) if pending.is_compare_owned() && clean => {
                 self.confirm = Some(pending);
@@ -6907,6 +7056,7 @@ impl AppState {
     fn resize_edges_take_mouse(&self) -> bool {
         self.mouse_enabled
             && !self.too_small
+            && !self.is_prs_tab()
             && matches!(
                 self.input_mode(),
                 InputMode::Normal { .. }
@@ -6968,6 +7118,11 @@ impl AppState {
         if self.park_explorer_session() {
             return;
         }
+        // The PRs tab keeps its view state in its own tab; the Workspace
+        // park stays as it was.
+        if self.is_prs_tab() {
+            return;
+        }
         if let Some(tab) = self.tabs.active_compare_mut() {
             tab.focus_right = self.focus == FocusPane::Right;
             tab.search_mode = self.search_mode;
@@ -7000,7 +7155,7 @@ impl AppState {
     }
 
     fn apply_active_session(&mut self) {
-        if self.apply_explorer_session() {
+        if self.apply_explorer_session() || self.apply_prs_session() {
             return;
         }
         if let Some(tab) = self.tabs.active_compare() {
@@ -7058,8 +7213,9 @@ impl AppState {
         self.apply_active_session();
         // A working-tree tab or an Explorer inner file tab may have missed
         // watch reloads while inactive. Only one tab is active, so at most
-        // one check reloads.
+        // one check reloads. The PRs tab asks for the details it lists.
         match self.active_worktree_compare_reload() {
+            Effect::None if self.is_prs_tab() => self.request_pr_details(),
             Effect::None => self.active_explorer_live_reload(),
             reload => reload,
         }
@@ -7939,6 +8095,7 @@ mod tests {
             branch: "main".into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream_rewrite: None,
             head: String::new(),
             has_unstaged: dirty,
             has_staged: false,
@@ -8464,6 +8621,7 @@ mod tests {
                 branch: "feature/x".into(),
                 sync_status: SyncStatus::NoUpstream,
                 sync_note: String::new(),
+                upstream_rewrite: None,
                 head: String::new(),
                 has_unstaged: false,
                 has_staged: false,
@@ -8495,6 +8653,7 @@ mod tests {
             branch: "main".into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream_rewrite: None,
             head: String::new(),
             has_unstaged: true,
             has_staged: false,
@@ -8669,6 +8828,7 @@ mod tests {
                     branch: "feature/x".into(),
                     sync_status: SyncStatus::NoUpstream,
                     sync_note: String::new(),
+                    upstream_rewrite: None,
                     head: String::new(),
                     has_unstaged: false,
                     has_staged: false,
@@ -8930,6 +9090,154 @@ mod tests {
         assert_eq!(app.dispatch(Action::Pull), Effect::None);
         assert_eq!(app.status, "app has diverged — pull it from a terminal");
         assert_eq!(app.status.kind(), StatusKind::Warn);
+        assert!(app.confirm.is_none());
+    }
+
+    const REWRITE_TIP: &str = "aaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const REWRITE_FORK_POINT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// A diverged checkout `name` on `main` whose `origin/main` was
+    /// force-pushed: `yours` commits of yours, `dropped` commits dropped.
+    fn rewritten_repo(name: &str, yours: usize, dropped: usize) -> RepoSnapshot {
+        let mut snap = repo(name, false);
+        snap.sync_status = SyncStatus::Diverged;
+        snap.sync_note = format!("diverged (ahead {}, behind 1)", yours + dropped);
+        snap.upstream_rewrite = Some(crate::git::UpstreamRewrite {
+            upstream: "origin/main".into(),
+            fork_point: REWRITE_FORK_POINT.into(),
+            tip: REWRITE_TIP.into(),
+            yours,
+            dropped,
+        });
+        snap
+    }
+
+    fn app_with(repos: &[RepoSnapshot]) -> AppState {
+        let snapshot = build_workspace_snapshot(repos, &[], false, &[]);
+        AppState::new(PathBuf::from("/tmp"), snapshot, true)
+    }
+
+    #[test]
+    fn pull_on_a_rewritten_upstream_with_nothing_of_yours_opens_the_reset_confirm() {
+        let mut app = app_with(&[rewritten_repo("app", 0, 2)]);
+        focus_repo(&mut app, "app");
+        app.help_open = true;
+        assert_eq!(app.dispatch(Action::Pull), Effect::None);
+        assert!(!app.help_open, "the confirm closes help");
+        assert_eq!(
+            app.confirm,
+            Some(PendingConfirm::ResetToUpstream {
+                repo: "app".into(),
+                branch: "main".into(),
+                upstream: "origin/main".into(),
+                tip: REWRITE_TIP.into(),
+                dropped: 2,
+            })
+        );
+        assert_eq!(app.confirm.as_ref().map(|c| c.accept_key()), Some('y'));
+        assert!(!app.confirm.as_ref().unwrap().is_compare_owned());
+
+        // Enter does not accept: it names the key.
+        assert_eq!(app.dispatch(Action::ConfirmEnter), Effect::None);
+        assert!(app.confirm.is_some());
+        assert_eq!(app.status, "press y to confirm · n or Esc to cancel");
+        // `Y` is not offered: the box stays open.
+        assert_eq!(app.dispatch(Action::ConfirmYesClean), Effect::None);
+        assert!(app.confirm.is_some());
+        // `y` asks for the guarded reset with the tip the box showed.
+        assert_eq!(
+            app.dispatch(Action::ConfirmYes),
+            Effect::ResetToUpstream {
+                repo: "app".into(),
+                branch: "main".into(),
+                upstream: "origin/main".into(),
+                tip: REWRITE_TIP.into(),
+            }
+        );
+        assert!(app.confirm.is_none());
+        assert_eq!(app.status, "moving main to origin/main…");
+        assert_eq!(app.status.kind(), StatusKind::Progress);
+    }
+
+    #[test]
+    fn reset_confirm_n_cancels_the_pull() {
+        let mut app = app_with(&[rewritten_repo("app", 0, 2)]);
+        focus_repo(&mut app, "app");
+        assert_eq!(app.dispatch(Action::Pull), Effect::None);
+        assert!(app.confirm.is_some());
+        assert_eq!(app.dispatch(Action::ConfirmNo), Effect::None);
+        assert!(app.confirm.is_none());
+        assert_eq!(app.status, "pull cancelled");
+    }
+
+    #[test]
+    fn pull_on_several_rewritten_upstreams_asks_to_focus_one() {
+        let mut app = app_with(&[
+            rewritten_repo("app", 0, 2),
+            rewritten_repo("lib", 0, 1),
+            rewritten_repo("web", 0, 3),
+        ]);
+        app.cursor = 0;
+        assert_eq!(app.focused_row().map(|r| r.kind), Some(NodeKind::Workspace));
+        assert_eq!(app.dispatch(Action::Pull), Effect::None);
+        assert!(app.confirm.is_none());
+        assert_eq!(
+            app.status,
+            "app (+2 more) upstream rewritten — focus one repo and press p"
+        );
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+    }
+
+    #[test]
+    fn pull_on_a_rewritten_upstream_under_your_commits_names_the_rebase() {
+        let mut app = app_with(&[rewritten_repo("app", 1, 2)]);
+        focus_repo(&mut app, "app");
+        assert_eq!(app.dispatch(Action::Pull), Effect::None);
+        assert!(app.confirm.is_none(), "no write for your commits");
+        assert_eq!(
+            app.status,
+            "app: origin/main was force-pushed under your 1 commit — run git rebase --onto origin/main 0123456789ab main"
+        );
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+
+        let mut app = app_with(&[rewritten_repo("app", 3, 2)]);
+        focus_repo(&mut app, "app");
+        assert_eq!(app.dispatch(Action::Pull), Effect::None);
+        assert_eq!(
+            app.status,
+            "app: origin/main was force-pushed under your 3 commits — run git rebase --onto origin/main 0123456789ab main"
+        );
+    }
+
+    #[test]
+    fn one_rewritten_upstream_with_nothing_of_yours_wins_over_your_commits() {
+        let mut app = app_with(&[rewritten_repo("app", 1, 2), rewritten_repo("lib", 0, 2)]);
+        app.cursor = 0;
+        assert_eq!(app.dispatch(Action::Pull), Effect::None);
+        assert!(
+            matches!(
+                &app.confirm,
+                Some(PendingConfirm::ResetToUpstream { repo, .. }) if repo == "lib"
+            ),
+            "{:?}",
+            app.confirm
+        );
+    }
+
+    #[test]
+    fn pull_with_a_behind_repo_still_pulls_and_skips_the_rewritten_one() {
+        let mut behind = repo("lib", false);
+        behind.sync_status = SyncStatus::Behind;
+        behind.sync_note = "behind by 1 commits".into();
+        let mut app = app_with(&[rewritten_repo("app", 0, 2), behind]);
+        app.cursor = 0;
+        assert_eq!(
+            app.dispatch(Action::Pull),
+            Effect::Pull {
+                repos: vec!["lib".into()]
+            }
+        );
+        assert!(app.confirm.is_none());
     }
 
     #[test]
@@ -12205,7 +12513,7 @@ mod tests {
         assert_eq!(app.hovered_tab_close(), None);
         assert_eq!(app.pointer, Some((29, 0)), "the dialog keeps the pointer");
 
-        app.dispatch(Action::SearchFilesCancel);
+        app.dispatch(Action::SearchFilesEscape);
         assert_eq!(app.hovered_tab_close(), Some(1), "closed: the strip hovers");
         assert_eq!(
             app.search_option_at(80, 2),
@@ -12496,6 +12804,7 @@ mod tests {
                     branch: "feature/x".into(),
                     sync_status: SyncStatus::Ahead,
                     sync_note: "ahead 1".into(),
+                    upstream_rewrite: None,
                     head: String::new(),
                     has_unstaged: false,
                     has_staged: false,
@@ -12513,6 +12822,7 @@ mod tests {
                     branch: "main".into(),
                     sync_status: SyncStatus::Ahead,
                     sync_note: "ahead 1".into(),
+                    upstream_rewrite: None,
                     head: String::new(),
                     has_unstaged: false,
                     has_staged: false,
@@ -13258,6 +13568,7 @@ mod tests {
                     branch: "feature/x".into(),
                     sync_status: SyncStatus::NoUpstream,
                     sync_note: String::new(),
+                    upstream_rewrite: None,
                     head: String::new(),
                     has_unstaged: false,
                     has_staged: false,
@@ -13478,6 +13789,7 @@ mod tests {
                     branch: "feature/x".into(),
                     sync_status: SyncStatus::NoUpstream,
                     sync_note: String::new(),
+                    upstream_rewrite: None,
                     head: String::new(),
                     has_unstaged: false,
                     has_staged: false,
@@ -13559,6 +13871,7 @@ mod tests {
                 branch: "feature/x".into(),
                 sync_status: SyncStatus::NoUpstream,
                 sync_note: String::new(),
+                upstream_rewrite: None,
                 head: String::new(),
                 has_unstaged: false,
                 has_staged: false,
@@ -13870,6 +14183,7 @@ mod tests {
             branch: "main".into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream_rewrite: None,
             head: String::new(),
             has_unstaged: true,
             has_staged: true,
@@ -17203,7 +17517,9 @@ mod tests {
             app.dispatch(Action::QuickOpenChar(c));
         }
         assert_eq!(app.theme, ThemeId::Nord);
-        app.dispatch(Action::QuickOpenCancel);
+        // Esc clears the typed filter, then closes.
+        app.dispatch(Action::QuickOpenEscape);
+        app.dispatch(Action::QuickOpenEscape);
         assert!(app.quick_open.is_none());
         assert_eq!(app.theme, ThemeId::Kanagawa, "Esc restores");
 
@@ -17220,7 +17536,10 @@ mod tests {
         }
         assert_eq!(palette_focus(&app).as_deref(), Some("Theme: One Dark"));
         assert_eq!(app.theme, ThemeId::OneDark);
-        app.dispatch(Action::QuickOpenCancel);
+        // Esc clears the typed filter, then closes.
+        app.dispatch(Action::QuickOpenEscape);
+        app.dispatch(Action::QuickOpenEscape);
+        assert!(app.quick_open.is_none());
         assert_eq!(app.theme, ThemeId::Kanagawa, "Esc after a files entry");
         assert!(!app.ui_store_path.exists(), "a close never saves");
         let _ = std::fs::remove_dir_all(&dir);
@@ -17239,7 +17558,10 @@ mod tests {
         // The applied theme is the new open-time theme.
         palette_type(&mut app, "dracula");
         assert_eq!(app.theme, ThemeId::Dracula);
-        app.dispatch(Action::QuickOpenCancel);
+        // Esc clears the typed filter, then closes.
+        app.dispatch(Action::QuickOpenEscape);
+        app.dispatch(Action::QuickOpenEscape);
+        assert!(app.quick_open.is_none());
         assert_eq!(app.theme, ThemeId::Nord);
         assert_eq!(load_ui_state(&app.ui_store_path).theme, Some(ThemeId::Nord));
         let _ = std::fs::remove_dir_all(&dir);
@@ -17290,6 +17612,7 @@ mod tests {
             branch: "main".into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream_rewrite: None,
             head: String::new(),
             has_unstaged: true,
             has_staged: false,
@@ -20166,7 +20489,7 @@ diff --git a/README.md b/README.md
             Some(">")
         );
         assert_eq!(app.diff_visual_anchor, anchor, "open keeps the anchor");
-        app.dispatch(Action::QuickOpenCancel);
+        app.dispatch(Action::QuickOpenEscape);
         assert!(app.quick_open.is_none());
         assert_eq!(app.diff_visual_anchor, anchor, "Esc keeps the anchor");
         assert_eq!(app.diff_cursor, cursor);
@@ -20512,7 +20835,9 @@ diff --git a/README.md b/README.md
         palette_select(&mut app, "Fetch remotes");
         assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
         assert_eq!(app.status, "exit highlight first (Esc)");
-        app.dispatch(Action::QuickOpenCancel);
+        // Esc clears the typed filter, then closes.
+        app.dispatch(Action::QuickOpenEscape);
+        app.dispatch(Action::QuickOpenEscape);
         assert_eq!(app.input_mode(), InputMode::DiffVisual);
         assert_eq!(app.status, "", "the reason does not linger in highlight");
 
@@ -20520,7 +20845,9 @@ diff --git a/README.md b/README.md
         // one, so this one lands while the palette is up.
         palette_select(&mut app, "Fetch remotes");
         app.status = "staged range README.md".into();
-        app.dispatch(Action::QuickOpenCancel);
+        // Esc clears the typed filter, then closes.
+        app.dispatch(Action::QuickOpenEscape);
+        app.dispatch(Action::QuickOpenEscape);
         assert_eq!(app.status, "staged range README.md");
     }
 

@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use super::drill::CommitFileSource;
+use super::pull_request::PrPage;
 use super::remote_view::RemoteTarget;
 use super::theme::ThemeId;
 
@@ -211,6 +212,31 @@ pub enum Action {
     /// The target is a tree checkout row or a graph worktree row with a
     /// branch. Any other row sets the status `no PR for this row`.
     OpenPullRequest,
+    /// Open the CI page of the PR of the focused branch row in the browser
+    /// (`gc`, palette Open PR CI).
+    ///
+    /// Same target rule as [`Self::OpenPullRequest`]. A PR the badge already
+    /// knows opens its [`super::pr_status::CiLink`] at once; with no answer
+    /// yet, a fresh lookup finds the PR first.
+    OpenPullRequestCi,
+    /// Copy the URL of the PR of the focused branch row (palette Copy PR
+    /// URL, the PR popover Copy URL line).
+    CopyPullRequestUrl,
+    /// Look the PR of the focused branch row up again now ("Refresh this
+    /// PR"; `r` inside a pinned PR popover).
+    ///
+    /// In a pinned popover it refreshes the PRs the popover shows and keeps
+    /// the popover open; a pinned popover with no PR section ignores it.
+    RefreshPullRequest,
+    /// Look the PR of every checkout with a GitHub or GitLab remote up
+    /// again now (palette Refresh PRs).
+    RefreshPullRequests,
+    /// Open the PRs tab, or focus it when it is open (`gp`, palette PRs
+    /// tab, a click on the workspace PR total).
+    OpenPrsTab,
+    /// Fold every finished group of the PRs tab, or unfold them all when
+    /// every one is folded (`Z` on the PRs tab).
+    ToggleFinishedPrGroups,
     /// Open the forge web page of the focused entity in the browser (`gw`).
     ///
     /// A repository row opens the repository home, a checkout or graph
@@ -238,6 +264,9 @@ pub enum Action {
     PopoverRun,
     /// Copy the focused line of the pinned popover (`y`).
     PopoverCopyLine,
+    /// End a pending `g` chord and do nothing else: a second key the
+    /// chord in a pinned popover does not bind (Esc, `j`, …).
+    GChordCancel,
     /// Close the pinned popover (Esc, right click).
     PopoverClose,
     NavEnter,
@@ -309,8 +338,12 @@ pub enum Action {
     /// Commands mode: close, then dispatch the highlighted enabled command.
     /// Files mode: act on the highlighted file hit.
     QuickOpenSubmit,
-    /// Esc close. No run.
-    QuickOpenCancel,
+    /// Esc: clear the typed query; on an empty query, close the overlay
+    /// with no run.
+    ///
+    /// Commands mode keeps its `>` prefix, so the first Esc goes back to
+    /// `>` and the next one closes.
+    QuickOpenEscape,
     /// Open or close the search-in-files dialog (Ctrl-f).
     ///
     /// Opening follows the focused scope and restores the last dialog when
@@ -332,8 +365,9 @@ pub enum Action {
     /// A click on an option chip (`Aa` / `ab` / `.*`): flip that match
     /// option and search again.
     SearchFilesToggleOption(SearchFilesOption),
-    /// Esc close. The dialog is parked for the next Ctrl-f.
-    SearchFilesCancel,
+    /// Esc: clear the typed query; on an empty query, close the dialog and
+    /// park it for the next Ctrl-f.
+    SearchFilesEscape,
     /// Enter: park the dialog and open the highlighted hit's file in a file
     /// tab at the hit line, with the in-file search armed on the query
     /// (literal mode only).
@@ -605,6 +639,18 @@ pub enum Effect {
         /// Overlay / status label for `rev`.
         label: String,
     },
+    /// Reset confirm `y`: move `branch` to `upstream` with a guarded
+    /// `git reset --keep`, as an exclusive write on the checkout's gitdir.
+    ResetToUpstream {
+        /// Checkout path (snapshot `repo`).
+        repo: String,
+        /// Local branch the reset moves.
+        branch: String,
+        /// Upstream ref the branch moves to, for example `origin/main`.
+        upstream: String,
+        /// Tip the confirm showed; the worker refuses when the branch moved.
+        tip: String,
+    },
     RemoveWorktree {
         primary: String,
         path: String,
@@ -726,7 +772,8 @@ pub enum Effect {
         /// Snapshot change of a changed file; `None` reads the file.
         change: Option<crate::snapshot::FileChange>,
     },
-    /// Look up the PR of `branch` on a worker, then open it in the browser.
+    /// Look up the PR of `branch` on a worker, then open its `page` in the
+    /// browser.
     ///
     /// The lookup is always fresh and also updates the PR cache. The status
     /// line reports the result.
@@ -735,6 +782,18 @@ pub enum Effect {
         repo: PathBuf,
         /// Branch checked out there.
         branch: String,
+        /// The PR page (`gx`) or its CI page (`gc`).
+        page: PrPage,
+    },
+    /// Open the CI page `url` of the known PR `pr_ref` in the browser on a
+    /// worker (`gc` on a row whose PR answer is known). No lookup runs.
+    ///
+    /// The status line reports the result.
+    OpenPullRequestCi {
+        /// `#318` (GitHub) or `!12` (GitLab), for the status line.
+        pr_ref: String,
+        /// The PR's [`super::pr_status::CiLink::url`].
+        url: String,
     },
     /// Check on a worker that `target` is on the remote of `checkout`, then
     /// open its forge page in the browser.
@@ -776,6 +835,17 @@ pub enum Effect {
         number: u64,
         /// Request id; only the answer to the newest request lands.
         request: u64,
+    },
+    /// Run the PR title command `cmd` for the ticket groups of `groups` on
+    /// a blocking worker ([`super::pr_groups::TitleCache::fill`]).
+    ///
+    /// Latest-only: a newer fill replaces one still queued. The titles
+    /// land as one batch and replace the ones on screen.
+    FillPrTitles {
+        /// The program to run (`prTitleCommand`).
+        cmd: PathBuf,
+        /// The groups of the PRs tab; only ticket groups run the command.
+        groups: Vec<super::pr_groups::PrGroup>,
     },
     /// Run the Doctor probe for request `gen` on a blocking worker.
     ///

@@ -18,6 +18,9 @@ pub const STATUS_COPY_FAILED: &str = "copy failed";
 /// Status text when `y` finds no comments in scope. Nothing is copied.
 pub const STATUS_NO_COMMENTS: &str = "no comments here";
 
+/// Breadcrumb segment of the PRs tab.
+const PRS_CRUMB: &str = "PRs";
+
 /// True when the comment-export overlay paints `status` as its own row.
 ///
 /// The copy result is already the overlay header, so `copied` /
@@ -47,8 +50,34 @@ pub fn diverged_pull_status(diverged: &[String]) -> String {
     }
 }
 
-/// True when `status` is what `p` sets when it found nothing to pull:
-/// [`STATUS_NOTHING_TO_PULL`] or a [`diverged_pull_status`] line.
+/// Status text `p` sets when nothing is behind and more than one target has a
+/// force-pushed upstream that holds nothing of yours. The reset confirm moves
+/// one branch at a time, so it names the first repo and the count of others.
+pub fn rewritten_pull_status(first: &str, more: usize) -> String {
+    format!("{first} (+{more} more) upstream rewritten — focus one repo and press p")
+}
+
+/// Status text `p` sets when nothing is behind and the first rewritten target
+/// has commits of yours on top of the dropped ones. `p` writes nothing; the
+/// line names the rebase that keeps your commits:
+/// `<repo>: <u> was force-pushed under your K commits — run git rebase --onto <u> <fork-point-12> <b>`.
+pub fn rebase_pull_status(repo: &str, branch: &str, rewrite: &UpstreamRewrite) -> String {
+    let noun = if rewrite.yours == 1 {
+        "commit"
+    } else {
+        "commits"
+    };
+    let fork_point = rewrite.fork_point.get(..12).unwrap_or(&rewrite.fork_point);
+    format!(
+        "{repo}: {u} was force-pushed under your {k} {noun} — run git rebase --onto {u} {fork_point} {branch}",
+        u = rewrite.upstream,
+        k = rewrite.yours,
+    )
+}
+
+/// True when `status` is what `p` sets when it found nothing to pull and
+/// wrote nothing: [`STATUS_NOTHING_TO_PULL`], a [`diverged_pull_status`]
+/// line, a [`rewritten_pull_status`] line, or a [`rebase_pull_status`] line.
 ///
 /// `effect.rs` then queues a pull behind an inflight fetch, so this check
 /// and that copy must agree.
@@ -56,6 +85,9 @@ pub fn is_idle_pull_status(status: &str) -> bool {
     status == STATUS_NOTHING_TO_PULL
         || status.ends_with(" has diverged — pull it from a terminal")
         || status.ends_with(" diverged — pull from a terminal")
+        || status.ends_with(" upstream rewritten — focus one repo and press p")
+        || (status.contains(" was force-pushed under your ")
+            && status.contains(" — run git rebase --onto "))
 }
 
 use ratatui::layout::Rect;
@@ -63,6 +95,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use workspace_status_graph::GraphRow;
 
+use crate::git::UpstreamRewrite;
 use crate::helpers::{is_default_branch, visible_width};
 use crate::snapshot::{CheckoutKind, SyncStatus};
 
@@ -555,7 +588,9 @@ pub fn dialog_width(area: Rect, kind: DialogKind) -> u16 {
 
 /// Which help columns the active tab paints.
 pub fn help_tab(state: &AppState) -> HelpTab {
-    if state.is_explorer_tab() {
+    if state.is_prs_tab() {
+        HelpTab::Prs
+    } else if state.is_explorer_tab() {
         HelpTab::Explorer
     } else if state.is_compare_tab() {
         HelpTab::Compare
@@ -589,6 +624,7 @@ pub fn dialog_height(state: &AppState, kind: DialogKind, width: u16) -> u16 {
                 | super::state::PendingConfirm::MergeIntoHead { .. }
                 // Title, up to two detail lines, chips; one spare for a wrap.
                 | super::state::PendingConfirm::Push { .. }
+                | super::state::PendingConfirm::ResetToUpstream { .. }
                 | super::state::PendingConfirm::CompareRevertRange { .. }
                 | super::state::PendingConfirm::CompareRevertFile { .. },
             ) => 7,
@@ -1075,9 +1111,15 @@ pub fn hint_row_kind(state: &AppState) -> HintRowKind {
 /// An Explorer tab reads `workspace › <checkout leaf> › <rel>`: with the
 /// right pane focused, the active inner file; with the tree focused, the
 /// tree cursor row as last painted (a folder row names the folder), else
-/// the active inner file.
+/// the active inner file. The PRs tab reads `workspace › PRs › <ref>` with
+/// the focused PR's ref.
 pub fn breadcrumb_segments(state: &AppState) -> Vec<String> {
     let mut out = vec![workspace_label(state)];
+    if let Some(view) = state.prs_view() {
+        out.push(PRS_CRUMB.into());
+        out.extend(view.focused().map(|row| row.pr.ref_text()));
+        return out;
+    }
     if let Some(tab) = state.tabs.active_explorer() {
         out.push(checkout_leaf(&tab.checkout));
         let inner = tab.active_inner().map(|inner| inner.rel.clone());
@@ -1310,7 +1352,38 @@ pub fn status_line(state: &AppState, width: u16) -> Line<'static> {
             &explorer_tab_hint_segments(),
         );
     }
+    if state.is_prs_tab() {
+        let mut spans = vec![Span::styled(
+            " ? help".to_string(),
+            Style::default().fg(palette.file),
+        )];
+        push_hint_pieces(
+            &mut spans,
+            &prs_tab_hint_segments(state.prs_narrow()),
+            palette,
+            surface,
+            width,
+        );
+        return Line::from(spans);
+    }
     idle_status_line(state, palette, pills, surface, width)
+}
+
+/// Hint chips on the PRs tab, in cut order (the last ones truncate
+/// first). A `narrow` frame adds `Tab` (list / detail).
+pub fn prs_tab_hint_segments(narrow: bool) -> Vec<HintSegment> {
+    let mut hints = vec![
+        hint("Enter", "open", false),
+        hint("gc", "CI", false),
+        hint("o", "show in tree", false),
+        hint("z Z", "fold", false),
+        hint("r", "refresh", false),
+        hint("y", "copy URL", false),
+    ];
+    if narrow {
+        hints.insert(1, hint("Tab", "list/detail", false));
+    }
+    hints
 }
 
 /// Hint chips on an Explorer tab, in cut order (the last ones truncate
@@ -1558,6 +1631,7 @@ mod tests {
             branch: "main".into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream_rewrite: None,
             head: String::new(),
             has_unstaged: dirty,
             has_staged: false,
@@ -2245,6 +2319,14 @@ mod tests {
             remote: "origin".into(),
             publish: true,
             ahead_behind: Some((2, 1)),
+        });
+        assert_eq!(dialog_height(&app, DialogKind::Confirm, 96), 7);
+        app.confirm = Some(super::super::state::PendingConfirm::ResetToUpstream {
+            repo: "app".into(),
+            branch: "main".into(),
+            upstream: "origin/main".into(),
+            tip: "a".repeat(40),
+            dropped: 2,
         });
         assert_eq!(dialog_height(&app, DialogKind::Confirm, 96), 7);
     }

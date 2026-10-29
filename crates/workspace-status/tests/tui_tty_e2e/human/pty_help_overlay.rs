@@ -40,6 +40,7 @@ const HELP_GIT_ROWS: &[(&str, &str)] = &[
     ("c", "create branch at graph commit (no checkout)"),
     ("W", "remove linked worktree"),
     ("r", "refresh now"),
+    ("gx gc", "open branch PR · its CI"),
     ("a p D", "focused stash apply/pop/drop"),
 ];
 

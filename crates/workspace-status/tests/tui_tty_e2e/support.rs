@@ -1284,6 +1284,18 @@ pub fn type_palette_filter(tui: &mut PtySession, query: &str) {
     }
 }
 
+/// Esc on a typed Quick Open commands filter: wait until the query row is
+/// back to the bare `>▏` with the palette still open (`Enter run`). The
+/// next Esc closes the palette.
+pub fn esc_clears_palette_filter(tui: &mut PtySession) {
+    tui.esc();
+    tui.wait_pred(
+        |screen| screen.contains("Enter run") && screen.contains(">▏"),
+        "Esc clears the typed palette filter back to `>` and keeps the palette open",
+        WAIT,
+    );
+}
+
 /// `:` opens the command palette; wait for its empty `>▏` query so the
 /// next typed keys land in the filter.
 pub fn open_command_palette(tui: &mut PtySession) {
