@@ -9,7 +9,8 @@ use crate::support::{open_command_palette, type_palette_filter, GIT_WAIT, WAIT};
 
 /// Four PRs that change in one batch raise two toasts and a summary
 /// (`docs/tui-rust.md`, **PR change toasts**: a batch of more than three
-/// changes shows the first two and `+N more PR changes`, with no key hint).
+/// changes shows the first two and `+N more PR changes · gp`, the key of the
+/// PRs tab).
 ///
 /// Seed: two GitHub checkouts (`#7`, `#8`) and two GitLab checkouts (`!5`,
 /// `!6`), all CI running, polling off. Once the four badges show, the test
@@ -18,9 +19,10 @@ use crate::support::{open_command_palette, type_palette_filter, GIT_WAIT, WAIT};
 /// batch. No poll timing is involved.
 ///
 /// Proof: the toast stack holds two `CI failed ·` toasts and the summary
-/// `+2 more PR changes`, and the summary carries no key hint. Reverting the
-/// batch cap shows four toasts (or a stack that pushes the others out);
-/// reverting the summary drops the text.
+/// `+2 more PR changes`, and the summary names `gp`, the key of the PRs tab
+/// that lists them all. Reverting the batch cap shows four toasts (or a
+/// stack that pushes the others out); reverting the summary drops the
+/// text.
 #[test]
 fn pty_pr_poll_many_changes_show_two_toasts_and_a_summary() {
     let (root, workspace) = named_workspace("ws-tui-tty-pr-summary", "ws");
@@ -74,12 +76,8 @@ fn pty_pr_poll_many_changes_show_two_toasts_and_a_summary() {
         "two alert toasts, not four:\n{toasts}"
     );
     assert!(
-        toasts.contains("+2 more PR changes"),
-        "the summary counts the two left out:\n{toasts}"
-    );
-    assert!(
-        !toasts.contains("gp"),
-        "the summary has no key hint:\n{toasts}"
+        toasts.contains("+2 more PR changes · gp"),
+        "the summary counts the two left out and names the PRs tab key:\n{toasts}"
     );
     tui.wait_pred(
         |_| {

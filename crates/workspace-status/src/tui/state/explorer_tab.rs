@@ -2070,7 +2070,7 @@ mod tests {
         assert_eq!(dir_loads(&flat(first)), [""], "a new tab lists its root");
         assert_eq!(app.tabs.len(), 2);
         assert_eq!(tab(&app).checkout, "app");
-        assert_eq!(app.tabs.labels()[1], "Explorer · app");
+        assert_eq!(app.tabs.labels(0)[1], "Explorer · app");
 
         app.dispatch(Action::JumpToTab(1));
         focus(
@@ -2093,7 +2093,7 @@ mod tests {
         app.dispatch(Action::ExplorerReveal);
         assert_eq!(app.tabs.len(), 3, "a linked worktree has its own tab");
         assert_eq!(tab(&app).checkout, "app/.worktrees/feat");
-        assert_eq!(app.tabs.labels()[2], "Explorer · feat");
+        assert_eq!(app.tabs.labels(0)[2], "Explorer · feat");
 
         app.dispatch(Action::JumpToTab(1));
         focus(&mut app, NodeKind::Repo, Some("lib"), None);
@@ -3833,7 +3833,7 @@ mod tests {
         let effect = app.dispatch(Action::QuickOpenSubmit);
         assert!(has_file_load(&effect), "{effect:?}");
         assert_eq!(
-            app.tabs.labels(),
+            app.tabs.labels(0),
             ["Workspace", "lib ↔ main", "Explorer · lib"]
         );
         assert_eq!(tab(&app).checkout, "lib");
@@ -3967,7 +3967,7 @@ mod tests {
         quick_open_with(&mut app, "app", &["src/lib.rs"], &[0]);
         app.dispatch(Action::QuickOpenSubmit);
         app.open_file_in_explorer("app".into(), "new.txt".into(), Some(0), Some("x".into()));
-        assert_eq!(app.tabs.labels(), ["Workspace", "Explorer · app"]);
+        assert_eq!(app.tabs.labels(0), ["Workspace", "Explorer · app"]);
         assert_eq!(
             inners(&app),
             [pinned("README.md"), pinned("src/lib.rs"), pinned("new.txt")]

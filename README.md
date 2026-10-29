@@ -38,7 +38,7 @@ This is the glance I wanted instead. Left pane is the workspace tree (repos, wor
 
 ![Show hidden repos](docs/images/07-show-ignored.gif)
 
-**Help** — `?` opens MOVE / GIT / VIEW. On a compare or Explorer tab, a COMPARE or EXPLORER column replaces GIT: the keys that work there and the ones that need the Workspace tab.
+**Help** — `?` opens MOVE / GIT / VIEW. On a compare, Explorer or PRs tab, a COMPARE, EXPLORER or PRS column replaces GIT: the keys that work there and the ones that need the Workspace tab.
 
 ![Help overlay](docs/images/08-help.gif)
 
@@ -129,7 +129,7 @@ Set `WS_STATUS_GLYPHS=ascii`, or `"glyphs": "ascii"` in a config file, for plain
 
 `workspace-status` reads `.workspace-status-config.json` from the workspace root. Pin that root with `-C` / `--workspace <path>` or `WS_STATUS_WORKSPACE` (CLI flag > env > process cwd). Missing or non-directory paths error; they do not fall back to cwd.
 
-An optional user file, `~/.config/my-workspace-status/config.json` (`$XDG_CONFIG_HOME` when set), uses the same keys. The workspace file wins per key; `viewDefaults` and `defaultBranches` merge per sub-key. Most `WS_STATUS_*` env vars also have a config key (`theme`, `themeMode`, `glyphs`, `watchMs`, `fetchMs`, `fetchConcurrency`, `updateCheck`, `termProgress`, `smoothScroll`, `prPolling`, the store paths, `git`); a valid env var wins over the key. The store paths and `git` are allowed only in the user file. See [docs/configuration.md](./docs/configuration.md).
+An optional user file, `~/.config/my-workspace-status/config.json` (`$XDG_CONFIG_HOME` when set), uses the same keys. The workspace file wins per key; `viewDefaults` and `defaultBranches` merge per sub-key. Most `WS_STATUS_*` env vars also have a config key (`theme`, `themeMode`, `glyphs`, `watchMs`, `fetchMs`, `fetchConcurrency`, `updateCheck`, `termProgress`, `smoothScroll`, `prPolling`, the store paths, `git`, `prTitleCommand`); a valid env var wins over the key. The store paths, `git`, and `prTitleCommand` are allowed only in the user file. See [docs/configuration.md](./docs/configuration.md).
 
 ```json
 {

@@ -1,11 +1,12 @@
-//! Session tab strip: permanent Workspace plus compare and Explorer tabs.
+//! Session tab strip: permanent Workspace plus compare, Explorer, and PRs
+//! tabs.
 //!
 //! Compare identity is `(checkout_path, base_ref, head_ref, worktree_file)`
 //! (`worktree_file` only on a commit-vs-working-tree tab); Explorer
 //! identity is the checkout. A file opens as an inner file tab of its
-//! checkout's Explorer tab ([`InnerFile`]), never as a strip tab. All kinds
-//! share one strip in creation order and one id counter. Tabs are
-//! session-only.
+//! checkout's Explorer tab ([`InnerFile`]), never as a strip tab. The PRs
+//! tab has one instance ([`PrsTab`]). All kinds share one strip in
+//! creation order and one id counter. Tabs are session-only.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -17,6 +18,7 @@ use super::diff::DiffContent;
 use super::drill::{CommitFile, CommitFileSource};
 use super::explorer::ExplorerTree;
 use super::icons::comment_mark_cols;
+use super::pr_groups::GroupKind;
 use super::search::SearchPane;
 
 /// Palette / overlay copy when the focused row is not a compare target.
@@ -883,21 +885,71 @@ impl ExplorerTab {
     }
 }
 
-/// One tab after Workspace: a compare or Explorer tab.
+/// Refusal copy for git writes and Workspace-only actions on the PRs tab.
+pub const PRS_TAB_READ_ONLY: &str = "PRs tab is read-only · switch to Workspace tab";
+/// `/`, `n`, and `N` on the PRs tab: its list has no pane search.
+pub const PRS_TAB_HAS_NO_SEARCH: &str = "PRs tab has no search";
+/// `Z` off the PRs tab (status line and palette row).
+pub const PRS_TAB_ONLY: &str = "PRs tab only (gp)";
+
+/// Strip label of the PRs tab for `listed` PRs: `PRs 8`, and `PRs 1` for
+/// one. The tab's name stays `PRs` whatever the count, like the palette row
+/// PRs tab.
+pub fn prs_tab_label(listed: usize) -> String {
+    format!("PRs {listed}")
+}
+
+/// A group of the PRs tab by identity: how its key was found, and the key.
+pub type PrGroupId = (GroupKind, String);
+
+/// A line of the PRs tab list by identity, so the cursor and the folds
+/// follow it when the list is rebuilt.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum PrsLineId {
+    /// The header of a group.
+    Group(PrGroupId),
+    /// The row of the PR with this web URL.
+    Pr(String),
+}
+
+/// The PRs tab: the PRs of the checked-out branches in groups, beside the
+/// detail of the focused one. One instance; the PRs themselves live in the
+/// PR cache, so this keeps only the view state.
+#[derive(Clone, Debug, Default)]
+pub struct PrsTab {
+    /// The line under the cursor; `None` before the first paint.
+    pub cursor: Option<PrsLineId>,
+    /// Index of [`Self::cursor`] in the last built list. When that line
+    /// goes away, the cursor stays at this index.
+    pub cursor_index: usize,
+    /// First list line the last paint showed. A click maps rows with it.
+    pub scroll: usize,
+    /// Groups the user folded (`true`) or unfolded (`false`). A group with
+    /// no entry follows the default: a finished group is folded when more
+    /// than [`super::pr_groups::FOLD_FINISHED_ABOVE`] PRs are listed.
+    pub folds: HashMap<PrGroupId, bool>,
+    /// Narrow layout: the detail pane shows instead of the list (`Tab`).
+    pub show_detail: bool,
+}
+
+/// One tab after Workspace: a compare, Explorer, or PRs tab.
 #[derive(Clone, Debug)]
 pub enum SessionTab {
     /// Committed-range compare tab.
     Compare(CompareTab),
     /// File tree of one checkout and its inner file tabs.
     Explorer(ExplorerTab),
+    /// The PRs of the checked-out branches.
+    Prs(PrsTab),
 }
 
 impl SessionTab {
-    /// Strip label.
-    pub fn label(&self) -> String {
+    /// Strip label; the PRs tab counts `prs_listed`.
+    pub fn label(&self, prs_listed: usize) -> String {
         match self {
             Self::Compare(tab) => tab.label(),
             Self::Explorer(tab) => tab.label(),
+            Self::Prs(_) => prs_tab_label(prs_listed),
         }
     }
 
@@ -932,9 +984,26 @@ impl SessionTab {
             _ => None,
         }
     }
+
+    /// The PRs tab, if this is it.
+    pub fn as_prs(&self) -> Option<&PrsTab> {
+        match self {
+            Self::Prs(tab) => Some(tab),
+            _ => None,
+        }
+    }
+
+    /// Mutable [`Self::as_prs`].
+    pub fn as_prs_mut(&mut self) -> Option<&mut PrsTab> {
+        match self {
+            Self::Prs(tab) => Some(tab),
+            _ => None,
+        }
+    }
 }
 
-/// Permanent Workspace plus compare and Explorer tabs in creation order.
+/// Permanent Workspace plus compare, Explorer, and PRs tabs in creation
+/// order.
 #[derive(Clone, Debug)]
 pub struct TabStrip {
     /// 0 is Workspace. Session tabs follow.
@@ -1032,11 +1101,43 @@ impl TabStrip {
         self.compare_tabs().count()
     }
 
-    /// Strip labels in paint order.
-    pub fn labels(&self) -> Vec<String> {
+    /// Strip labels in paint order; the PRs tab counts `prs_listed`
+    /// ([`prs_tab_label`]).
+    pub fn labels(&self, prs_listed: usize) -> Vec<String> {
         let mut out = vec!["Workspace".to_string()];
-        out.extend(self.tabs.iter().map(SessionTab::label));
+        out.extend(self.tabs.iter().map(|tab| tab.label(prs_listed)));
         out
+    }
+
+    /// Active PRs tab, if any.
+    pub fn active_prs(&self) -> Option<&PrsTab> {
+        self.active_tab().and_then(SessionTab::as_prs)
+    }
+
+    /// Mutable active PRs tab, if any.
+    pub fn active_prs_mut(&mut self) -> Option<&mut PrsTab> {
+        self.active_tab_mut().and_then(SessionTab::as_prs_mut)
+    }
+
+    /// Strip index of the PRs tab, when it is open. `0` is never returned
+    /// (Workspace).
+    pub fn find_prs(&self) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|tab| tab.as_prs().is_some())
+            .map(|i| i + 1)
+    }
+
+    /// Focus the PRs tab, or append it when it is not open. True when it
+    /// was appended.
+    pub fn open_or_focus_prs(&mut self) -> bool {
+        if let Some(index) = self.find_prs() {
+            self.active = index;
+            return false;
+        }
+        self.tabs.push(SessionTab::Prs(PrsTab::default()));
+        self.active = self.tabs.len();
+        true
     }
 
     #[cfg(test)]
@@ -1305,7 +1406,7 @@ mod tests {
         assert!(tabs.is_workspace());
         tabs.prev();
         assert_eq!(tabs.active, 2);
-        assert_eq!(tabs.labels()[1], "app ↔ a");
+        assert_eq!(tabs.labels(0)[1], "app ↔ a");
     }
 
     #[test]
@@ -1320,7 +1421,7 @@ mod tests {
         assert!(tabs.close_at(1));
         assert_eq!(tabs.active, 1);
         assert_eq!(tabs.compare_count(), 1);
-        assert_eq!(tabs.labels()[1], "app ↔ b");
+        assert_eq!(tabs.labels(0)[1], "app ↔ b");
     }
 
     #[test]
@@ -1336,7 +1437,7 @@ mod tests {
             "one id counter for both kinds"
         );
         assert_eq!(
-            tabs.labels(),
+            tabs.labels(0),
             vec!["Workspace", "Explorer · app", "app ↔ main"]
         );
         tabs.active = 1;
@@ -1360,7 +1461,7 @@ mod tests {
 
         assert!(tabs.close_at(1));
         assert!(tabs.is_workspace(), "closing the active tab activates left");
-        assert_eq!(tabs.labels(), vec!["Workspace", "app ↔ main"]);
+        assert_eq!(tabs.labels(0), vec!["Workspace", "app ↔ main"]);
         assert_eq!(tabs.compare_count(), 1);
         assert_eq!(tabs.find("app", "main", COMPARE_HEAD_REF), Some(1));
     }

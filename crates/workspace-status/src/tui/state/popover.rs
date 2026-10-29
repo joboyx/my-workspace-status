@@ -64,6 +64,8 @@ impl AppState {
     pub(crate) fn popover_owner(&self) -> PopoverOwner {
         let list = self.list_focus_target();
         let row = match list {
+            // The PRs tab list is no Workspace list: its cursor line.
+            _ if self.is_prs_tab() => self.prs_popover_owner_row().unwrap_or_default(),
             ListFocusTarget::Tree => self
                 .rows
                 .get(self.cursor)
@@ -390,7 +392,7 @@ impl AppState {
     }
 
     /// Pin a popover on `targets`. Returns the PR detail fetches it starts
-    /// ([`Self::request_popover_pr_details`]).
+    /// ([`Self::request_pr_details`]).
     ///
     /// The landing line is picked after the request, so it counts the
     /// `loading…` line the request adds.
@@ -404,7 +406,7 @@ impl AppState {
             focus_line: 0,
             owner: self.popover_owner(),
         });
-        let details = self.request_popover_pr_details();
+        let details = self.request_pr_details();
         let landing = landing_line(&flat_lines(&self.open_popover_sections()));
         if let Some(popover) = self.popover.as_mut() {
             popover.focus_line = landing;
@@ -679,7 +681,7 @@ impl AppState {
     }
 
     /// [`Self::expire_peek`], then the PR detail fetch of the peek it
-    /// opened ([`Self::request_popover_pr_details`]).
+    /// opened ([`Self::request_pr_details`]).
     ///
     /// The first value is true when the popover changed (the live loop
     /// redraws); the effect is what the loop schedules. A peek on a PR
@@ -688,7 +690,7 @@ impl AppState {
         if !self.expire_peek(now) {
             return (false, Effect::None);
         }
-        (true, self.request_popover_pr_details())
+        (true, self.request_pr_details())
     }
 
     /// Milliseconds until the next peek dwell or grace deadline, or `None`

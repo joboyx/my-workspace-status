@@ -231,6 +231,12 @@ pub enum Action {
     /// Look the PR of every checkout with a GitHub or GitLab remote up
     /// again now (palette Refresh PRs).
     RefreshPullRequests,
+    /// Open the PRs tab, or focus it when it is open (`gp`, palette PRs
+    /// tab, a click on the workspace PR total).
+    OpenPrsTab,
+    /// Fold every finished group of the PRs tab, or unfold them all when
+    /// every one is folded (`Z` on the PRs tab).
+    ToggleFinishedPrGroups,
     /// Open the forge web page of the focused entity in the browser (`gw`).
     ///
     /// A repository row opens the repository home, a checkout or graph
@@ -829,6 +835,17 @@ pub enum Effect {
         number: u64,
         /// Request id; only the answer to the newest request lands.
         request: u64,
+    },
+    /// Run the PR title command `cmd` for the ticket groups of `groups` on
+    /// a blocking worker ([`super::pr_groups::TitleCache::fill`]).
+    ///
+    /// Latest-only: a newer fill replaces one still queued. The titles
+    /// land as one batch and replace the ones on screen.
+    FillPrTitles {
+        /// The program to run (`prTitleCommand`).
+        cmd: PathBuf,
+        /// The groups of the PRs tab; only ticket groups run the command.
+        groups: Vec<super::pr_groups::PrGroup>,
     },
     /// Run the Doctor probe for request `gen` on a blocking worker.
     ///

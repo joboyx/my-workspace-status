@@ -13,10 +13,14 @@ mod go_to_line;
 mod line_blame;
 mod pan;
 mod popover;
+mod prs_tab;
 mod pull_request;
 mod remote_view;
 mod scroll_glide;
 
+#[cfg(test)]
+pub(crate) use prs_tab::fixtures as prs_fixtures;
+pub(crate) use prs_tab::{prs_row_flash_id, PrsLine, PrsView, PRS_DETAIL_MIN_COLS};
 pub(crate) use pull_request::PrDetailState;
 
 use std::cell::RefCell;
@@ -404,6 +408,23 @@ pub struct LayoutHit {
     /// [`Self::explorer_preview`]'s rows across the full pane width, as
     /// [`Self::explorer_tree_rows`].
     pub explorer_preview_rows: Rect,
+    /// Inner area of the painted PRs tab list pane (empty off the PRs tab
+    /// and while the narrow layout shows the detail).
+    pub prs_list: Rect,
+    /// The rows of the PRs tab list lines (below the error and loading
+    /// lines) across the full pane width, flat pad cells included. A press
+    /// or the wheel here hits a line; the first row is line
+    /// [`super::tabs::PrsTab::scroll`].
+    pub prs_list_rows: Rect,
+    /// Inner area of the painted PRs tab detail pane (empty when it does
+    /// not paint).
+    pub prs_detail: Rect,
+    /// [`Self::prs_detail`]'s rows across the full pane width.
+    pub prs_detail_rows: Rect,
+    /// Cells of the workspace PR total on the workspace row (`8 PRs · 2
+    /// need you`) when the tree painted it; a click there opens the PRs
+    /// tab.
+    pub pr_total_hit: Option<Rect>,
     /// Results rows the search-in-files dialog painted last; PgUp / PgDn
     /// move by it.
     pub search_files_rows: u16,
@@ -496,6 +517,11 @@ impl Default for LayoutHit {
             explorer_preview: Rect::default(),
             explorer_tree_rows: Rect::default(),
             explorer_preview_rows: Rect::default(),
+            prs_list: Rect::default(),
+            prs_list_rows: Rect::default(),
+            prs_detail: Rect::default(),
+            prs_detail_rows: Rect::default(),
+            pr_total_hit: None,
             search_files_rows: 0,
             animating: false,
             gliding: false,
@@ -1062,6 +1088,8 @@ pub struct AppState {
     last_click: Option<(u16, u16, Instant)>,
     /// PR answers for branch-row badges, per checkout and (remote, branch).
     pr_cache: pull_request::PrCache,
+    /// PRs tab group titles from the title command, and its fill state.
+    pr_titles: prs_tab::PrTitles,
     /// Diff search hits for one (content, layout, query), so the status
     /// pill and the diff paint do not rebuild every diff row each frame.
     diff_search_memo: RefCell<Option<DiffSearchMemo>>,
@@ -1115,6 +1143,7 @@ impl AppState {
         state.undercurl = settings.undercurl;
         state.smooth_scroll = settings.smooth_scroll;
         state.set_pr_poll_mode(settings.pr_poll);
+        state.pr_titles.command = settings.pr_title_command.clone();
         state.activity_sparkline = settings.activity_sparkline;
         state.saved_commit_msg_lines = settings.commit_msg_lines;
         if let Some(lines) = settings.commit_msg_lines {
@@ -1302,6 +1331,7 @@ impl AppState {
             ctrl_c_armed_until: None,
             last_click: None,
             pr_cache: pull_request::PrCache::default(),
+            pr_titles: prs_tab::PrTitles::default(),
             diff_search_memo: RefCell::new(None),
             file_search_memo: RefCell::new(None),
             explorer_status_memo: RefCell::new(None),
@@ -1464,12 +1494,14 @@ impl AppState {
 
     pub fn graph_stash_focused(&self) -> bool {
         !self.is_explorer_tab()
+            && !self.is_prs_tab()
             && self.graph_pane_focused()
             && self.focused_graph_stash_ref().is_some()
     }
 
     pub fn graph_commit_focused(&self) -> bool {
         !self.is_explorer_tab()
+            && !self.is_prs_tab()
             && self.graph_pane_focused()
             && matches!(self.focused_graph_row(), Some(GraphRow::Commit { .. }))
     }
@@ -1521,6 +1553,10 @@ impl AppState {
     /// the right pane drives its active inner file, else `Tree` (its own
     /// tree, never the parked Workspace one).
     pub(crate) fn list_focus_target(&self) -> ListFocusTarget {
+        // The PRs tab list is none of the Workspace lists.
+        if self.is_prs_tab() {
+            return ListFocusTarget::None;
+        }
         if let Some(tab) = self.tabs.active_explorer() {
             return if self.focus == FocusPane::Right && tab.active_inner().is_some() {
                 ListFocusTarget::None
@@ -3067,7 +3103,8 @@ impl AppState {
         popover::then(selected, details)
     }
 
-    /// Plain left press: tabs, dividers, scrollbars, then the row under it.
+    /// Plain left press: tabs, the PRs tab panes, the workspace PR total,
+    /// dividers, scrollbars, then the row under it.
     fn click_at(&mut self, col: u16, row: u16) -> Effect {
         self.text_selection = None;
         self.pad_press = None;
@@ -3076,6 +3113,18 @@ impl AppState {
         }
         if let Some(index) = self.hit_tab(col, row) {
             return self.activate_tab(index);
+        }
+        // The PRs tab has no divider or scrollbar: its panes take the press.
+        if self.is_prs_tab() {
+            return self.prs_click(col, row);
+        }
+        if self
+            .layout
+            .pr_total_hit
+            .is_some_and(|hit| hit.contains(ratatui::layout::Position::new(col, row)))
+        {
+            self.last_click = None;
+            return self.open_prs_tab();
         }
         match hit_split(self.split_layout(), col, row) {
             SplitHit::Pane if self.background == BackgroundMode::Paint => {
@@ -6596,6 +6645,7 @@ impl AppState {
         self.mouse_enabled
             && !self.too_small
             && !self.is_explorer_tab()
+            && !self.is_prs_tab()
             && matches!(
                 self.input_mode(),
                 InputMode::Normal { .. }
@@ -6657,6 +6707,11 @@ impl AppState {
         if self.park_explorer_session() {
             return;
         }
+        // The PRs tab keeps its view state in its own tab; the Workspace
+        // park stays as it was.
+        if self.is_prs_tab() {
+            return;
+        }
         if let Some(tab) = self.tabs.active_compare_mut() {
             tab.focus_right = self.focus == FocusPane::Right;
             tab.search_mode = self.search_mode;
@@ -6689,7 +6744,7 @@ impl AppState {
     }
 
     fn apply_active_session(&mut self) {
-        if self.apply_explorer_session() {
+        if self.apply_explorer_session() || self.apply_prs_session() {
             return;
         }
         if let Some(tab) = self.tabs.active_compare() {
@@ -6747,8 +6802,9 @@ impl AppState {
         self.apply_active_session();
         // A working-tree tab or an Explorer inner file tab may have missed
         // watch reloads while inactive. Only one tab is active, so at most
-        // one check reloads.
+        // one check reloads. The PRs tab asks for the details it lists.
         match self.active_worktree_compare_reload() {
+            Effect::None if self.is_prs_tab() => self.request_pr_details(),
             Effect::None => self.active_explorer_live_reload(),
             reload => reload,
         }

@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Prove a workspace-status change works. Picks the test layer that proves a claim, then drives the real TUI of this checkout in an isolated tmux run, offline with fake gh and glab answers or live against public repos, and saves screen captures as proof. Use when verifying a TUI, PR badge or forge change, reproducing a bug with evidence, or before you report a UI change done.
+description: Prove a workspace-status change works. Picks the test layer that proves a claim, then drives the real TUI of this checkout in an isolated tmux run, offline with fake gh and glab answers or live against public repos, and saves screen captures as proof. Use when verifying a TUI, PR badge, PRs tab or forge change, reproducing a bug with evidence, or before you report a UI change done.
 ---
 
 # Verify workspace-status
@@ -99,7 +99,9 @@ Scenario sets live in `.agents/skills/verify/scenarios/`. Apply sets with `scena
 | `github-failed`, `-ready`, `-running`, `-draft`, `-review`, `-merged` | PR #7 of `acme/app` in that state (list answer and `gh pr view` answer). Two checks: `lint` (listed first) and `test (ubuntu-latest)`. |
 | `gitlab-failed`, `-ready`, `-running`, `-draft`, `-review`, `-merged` | MR !5 of `acme/services/api` in that state (list, MR, approvals, and for failed or running the pipeline jobs). |
 | `github-none`, `gitlab-none` | The forge answers with an empty list: no PR. |
+| `context-none` | The `context` branches (`feature/login-page`, `feature/reconciliation`) answer an empty list. With `github-none` and `gitlab-none`, no seeded branch has a PR. |
 | `github-cli-fails`, `gitlab-cli-fails` | The CLI exits 1 with one stderr line. |
+| `prs-tab` | Every seeded branch gets a PR whose title carries a ticket key, for the PRs tab groups: #7 CI failed and #8 stacked on it (`ABC-123`), !5 CI running (`ABC-125`), #12 merged (`ABC-120`). List and detail answers. |
 
 `.agents/skills/verify/scenarios/<set>/` has the layout of a forge directory, so `scenario` is a copy that renames each file into place and removes a stale failure file. Add a set by adding a directory.
 
@@ -158,5 +160,6 @@ PASS, FAIL (quote what you saw), or SKIP (name the missing precondition). Never 
 | [pr-status](features/pr-status.md) | PR badge states on both forges, `gx` and `gc`, a scripted transition, a failing CLI, live recipe |
 | [tree-and-graph](features/tree-and-graph.md) | Badges in the tree and the graph pane, glyph column at wide and narrow widths |
 | [popovers](features/popovers.md) | The PR popover: lines, actions, `gc` and `r` from it |
+| [prs-tab](features/prs-tab.md) | The PRs tab (`gp`): group and row order, detail, `z` / `Z` folds, Enter / `gc` / `o` / `Ctrl-w`, narrow layout, a failing CLI, the empty state, the title command, Nerd glyphs |
 
-Each feature file lists steps, the screen text to expect, and what counts as PASS. Every check needs the PR status visuals (six states, ref beside the glyph, `gc`, polling, toasts); on an older build they are SKIP.
+Each feature file lists steps, the screen text to expect, and what counts as PASS. Every check needs the PR status visuals (six states, ref beside the glyph, `gc`, polling, toasts), and the `prs-tab` checks need the PRs tab; on an older build they are SKIP.

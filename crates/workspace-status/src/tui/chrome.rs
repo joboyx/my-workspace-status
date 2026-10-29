@@ -18,6 +18,9 @@ pub const STATUS_COPY_FAILED: &str = "copy failed";
 /// Status text when `y` finds no comments in scope. Nothing is copied.
 pub const STATUS_NO_COMMENTS: &str = "no comments here";
 
+/// Breadcrumb segment of the PRs tab.
+const PRS_CRUMB: &str = "PRs";
+
 /// True when the comment-export overlay paints `status` as its own row.
 ///
 /// The copy result is already the overlay header, so `copied` /
@@ -585,7 +588,9 @@ pub fn dialog_width(area: Rect, kind: DialogKind) -> u16 {
 
 /// Which help columns the active tab paints.
 pub fn help_tab(state: &AppState) -> HelpTab {
-    if state.is_explorer_tab() {
+    if state.is_prs_tab() {
+        HelpTab::Prs
+    } else if state.is_explorer_tab() {
         HelpTab::Explorer
     } else if state.is_compare_tab() {
         HelpTab::Compare
@@ -1106,9 +1111,15 @@ pub fn hint_row_kind(state: &AppState) -> HintRowKind {
 /// An Explorer tab reads `workspace › <checkout leaf> › <rel>`: with the
 /// right pane focused, the active inner file; with the tree focused, the
 /// tree cursor row as last painted (a folder row names the folder), else
-/// the active inner file.
+/// the active inner file. The PRs tab reads `workspace › PRs › <ref>` with
+/// the focused PR's ref.
 pub fn breadcrumb_segments(state: &AppState) -> Vec<String> {
     let mut out = vec![workspace_label(state)];
+    if let Some(view) = state.prs_view() {
+        out.push(PRS_CRUMB.into());
+        out.extend(view.focused().map(|row| row.pr.ref_text()));
+        return out;
+    }
     if let Some(tab) = state.tabs.active_explorer() {
         out.push(checkout_leaf(&tab.checkout));
         let inner = tab.active_inner().map(|inner| inner.rel.clone());
@@ -1341,7 +1352,38 @@ pub fn status_line(state: &AppState, width: u16) -> Line<'static> {
             &explorer_tab_hint_segments(),
         );
     }
+    if state.is_prs_tab() {
+        let mut spans = vec![Span::styled(
+            " ? help".to_string(),
+            Style::default().fg(palette.file),
+        )];
+        push_hint_pieces(
+            &mut spans,
+            &prs_tab_hint_segments(state.prs_narrow()),
+            palette,
+            surface,
+            width,
+        );
+        return Line::from(spans);
+    }
     idle_status_line(state, palette, pills, surface, width)
+}
+
+/// Hint chips on the PRs tab, in cut order (the last ones truncate
+/// first). A `narrow` frame adds `Tab` (list / detail).
+pub fn prs_tab_hint_segments(narrow: bool) -> Vec<HintSegment> {
+    let mut hints = vec![
+        hint("Enter", "open", false),
+        hint("gc", "CI", false),
+        hint("o", "show in tree", false),
+        hint("z Z", "fold", false),
+        hint("r", "refresh", false),
+        hint("y", "copy URL", false),
+    ];
+    if narrow {
+        hints.insert(1, hint("Tab", "list/detail", false));
+    }
+    hints
 }
 
 /// Hint chips on an Explorer tab, in cut order (the last ones truncate

@@ -1296,7 +1296,7 @@ mod tests {
             "Enter parks it for the next Ctrl-f"
         );
         assert!(app.is_explorer_tab());
-        assert_eq!(app.tabs.labels(), ["Workspace", "Explorer · app"]);
+        assert_eq!(app.tabs.labels(0), ["Workspace", "Explorer · app"]);
         assert!(land_body(&mut app, tab_id, gen, &MAIN_RS));
         assert_eq!(file_cursor(&app), 3, "line 4 is cursor 3");
         assert!(app.search_active);

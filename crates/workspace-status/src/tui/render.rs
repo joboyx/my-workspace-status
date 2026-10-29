@@ -111,6 +111,8 @@ use crate::file_index::{FileIndex, FileRead};
 use crate::file_search::{SearchHit, SearchOptions};
 use crate::helpers::{is_detached_head_branch, visible_width};
 
+mod prs_tab;
+
 /// Empty tree / empty commit-file list.
 const NO_MATCHING_ROWS: &str = "No matching rows";
 /// Right pane while the focused repo's graph loads.
@@ -280,10 +282,18 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
     state.layout.explorer_preview = Rect::default();
     state.layout.explorer_tree_rows = Rect::default();
     state.layout.explorer_preview_rows = Rect::default();
+    state.layout.prs_list = Rect::default();
+    state.layout.prs_list_rows = Rect::default();
+    state.layout.prs_detail = Rect::default();
+    state.layout.prs_detail_rows = Rect::default();
+    state.layout.pr_total_hit = None;
     state.layout.file_view_rows = Rect::default();
     state.layout.pane_height = chunks[1].height;
     let edge_area = if state.is_explorer_tab() {
         draw_explorer_tab(frame, chunks[1], state);
+        None
+    } else if state.is_prs_tab() {
+        prs_tab::draw_prs_tab(frame, chunks[1], state);
         None
     } else {
         Some(draw_panes(frame, chunks[1], state))
@@ -1729,7 +1739,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             sparkline: bars,
             no_color: state.no_color,
         };
-        let (line, icons) = paint_tree_row(
+        let (line, icons, total_cols) = paint_tree_row(
             row,
             width,
             Some(row.id.as_str()) == focus_id,
@@ -1743,6 +1753,13 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             state.left_col_offset as usize,
         );
         lines.push(line);
+        // The PR total ends the workspace row flush right; a click on it
+        // opens the PRs tab.
+        if let Ok(total_w) = u16::try_from(total_cols) {
+            if total_w > 0 && total_w <= area.width {
+                state.layout.pr_total_hit = Some(Rect::new(area.right() - total_w, y, total_w, 1));
+            }
+        }
         for (kind, x, w) in icons {
             hits.push(IconHit {
                 y,
@@ -1812,7 +1829,9 @@ fn tree_row_runs_remote(
 
 /// Paint one tree row. Also returns an [`IconSpan`] for each segment the
 /// row paints with a catalog icon tag ([`TextSeg::icon`]) that is still on
-/// screen after `col_offset`, the label budget, and the row `width`.
+/// screen after `col_offset`, the label budget, and the row `width`; and
+/// the columns of the workspace PR total, which ends the workspace row
+/// flush right (`0` when the row paints none).
 fn paint_tree_row(
     row: &VisibleRow,
     width: usize,
@@ -1825,9 +1844,10 @@ fn paint_tree_row(
     decor: TreeRowDecor,
     palette: Palette,
     col_offset: usize,
-) -> (Line<'static>, Vec<IconSpan>) {
+) -> (Line<'static>, Vec<IconSpan>, usize) {
     let segs_width =
         |segs: &[TextSeg]| -> usize { segs.iter().map(|s| visible_width(&s.text)).sum() };
+    let mut total_cols = 0;
     let mut segs = painted_row_segments(
         row,
         ascii,
@@ -1882,12 +1902,13 @@ fn paint_tree_row(
             .saturating_sub(marks_width);
         segs.trailing.truncate(marks);
         let narrow = width < PR_REF_MIN_TREE_COLS;
-        let summary = workspace_trailing_fit(&row.chrome, decor.pr_totals, narrow, room);
+        let (summary, cols) = workspace_trailing_fit(&row.chrome, decor.pr_totals, narrow, room);
         if summary.is_empty() && segs.trailing.last().is_some_and(|seg| seg.text == " ") {
             // No summary fits: drop the space after the marks so the last
             // mark stays in the last column.
             segs.trailing.pop();
         }
+        total_cols = cols;
         segs.trailing.extend(summary);
     }
     let icons = segmented_icon_spans(row.depth, &segs, width, col_offset);
@@ -1906,7 +1927,7 @@ fn paint_tree_row(
         palette,
         col_offset,
     );
-    (line, icons)
+    (line, icons, total_cols)
 }
 
 /// Painted span of every icon segment of a row that
@@ -5381,7 +5402,7 @@ fn draw_tab_strip(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         return;
     }
     let palette = state.theme.palette();
-    let labels = state.tabs.labels();
+    let labels = state.tab_labels();
     let active = state.tabs.active;
     let texts: Vec<String> = labels
         .iter()
@@ -10645,7 +10666,7 @@ mod tests {
         }
         let tab_hits = state.layout.tab_hits.clone();
         assert_eq!(tab_hits.len(), 3);
-        let labels = state.tabs.labels();
+        let labels = state.tab_labels();
         for (x, width, index) in tab_hits {
             assert_eq!(
                 row[x as usize], " ",
@@ -10785,7 +10806,7 @@ mod tests {
     /// cells, and every painted `[✗]` has a close hit box.
     fn assert_tab_hits_match_paint(state: &AppState, row: &[String]) {
         let line = row.concat();
-        let labels = state.tabs.labels();
+        let labels = state.tab_labels();
         let painted: Vec<usize> = state
             .layout
             .tab_hits
@@ -12654,7 +12675,7 @@ mod tests {
         pr: Option<PrBadge>,
     ) -> (String, Vec<IconSpan>) {
         let palette = crate::tui::theme::ThemeId::TokyoNight.palette();
-        let (line, icons) = paint_tree_row(
+        let (line, icons, _) = paint_tree_row(
             row,
             width,
             false,
@@ -12771,7 +12792,7 @@ mod tests {
             (&dir, true, "\"", IconKind::Comment),
             (&section, true, "\"", IconKind::Comment),
         ] {
-            let (line, icons) = paint_tree_row(
+            let (line, icons, _) = paint_tree_row(
                 row,
                 width,
                 false,
@@ -19849,7 +19870,7 @@ mod tests {
         let (mut whole, mut cut) = (0, 0);
         for width in 6..48 {
             for col_offset in [0, 2, 9] {
-                let (line, icons) = paint_tree_row(
+                let (line, icons, _) = paint_tree_row(
                     &row,
                     width,
                     false,
@@ -20571,7 +20592,7 @@ mod tests {
         let (mut both, mut badge_only) = (0, 0);
         for width in 6..60 {
             for col_offset in [0, 3, 11, 40] {
-                let (line, icons) = paint_tree_row(
+                let (line, icons, _) = paint_tree_row(
                     &row,
                     width,
                     false,
@@ -20667,7 +20688,7 @@ mod tests {
                 .collect();
             for width in 6..72 {
                 for col_offset in [0, 3, 11, 40] {
-                    let (line, icons) = paint_tree_row(
+                    let (line, icons, _) = paint_tree_row(
                         row,
                         width,
                         false,

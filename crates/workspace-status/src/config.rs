@@ -111,6 +111,9 @@ pub struct RuntimeKeys {
     /// `prPolling`: PR polling on or off. `WS_STATUS_PR_POLL_MS` (a period,
     /// `0` off) wins over it.
     pub pr_polling: Option<bool>,
+    /// `prTitleCommand` (`WS_STATUS_PR_TITLE_CMD`): program that names a
+    /// ticket key for the PRs tab group titles.
+    pub pr_title_command: Option<PathBuf>,
 }
 
 impl RuntimeKeys {
@@ -132,6 +135,7 @@ impl RuntimeKeys {
             term_progress: over.term_progress.or(self.term_progress),
             smooth_scroll: over.smooth_scroll.or(self.smooth_scroll),
             pr_polling: over.pr_polling.or(self.pr_polling),
+            pr_title_command: over.pr_title_command.or(self.pr_title_command),
         }
     }
 }
@@ -208,6 +212,7 @@ struct RawConfig {
     term_progress: Option<serde_json::Value>,
     smooth_scroll: Option<serde_json::Value>,
     pr_polling: Option<serde_json::Value>,
+    pr_title_command: Option<serde_json::Value>,
 }
 
 /// Deserialize a key that is present, `null` included, as `Some`.
@@ -547,20 +552,21 @@ fn parse_path_key(
         .ok_or_else(bad)
 }
 
-/// Parse `git`: an absolute path, `~/...` expanded with `home`, or a bare
-/// command name (no `/` or `\\`) that is looked up on `PATH`.
-fn parse_git_key(
+/// Parse a program key (`git`, `prTitleCommand`): an absolute path, `~/...`
+/// expanded with `home`, or a bare command name (no `/` or `\\`) that is
+/// looked up on `PATH`.
+fn parse_program_key(
     file: &str,
+    key: &str,
     value: Option<serde_json::Value>,
     home: Option<&str>,
 ) -> Result<Option<PathBuf>, String> {
-    const KEY: &str = "git";
     let Some(v) = value else {
         return Ok(None);
     };
     let bad = || {
         format!(
-            "{file} {KEY} must be an absolute path, a path that starts with ~/, or a command name without /"
+            "{file} {key} must be an absolute path, a path that starts with ~/, or a command name without /"
         )
     };
     let raw = v
@@ -571,7 +577,7 @@ fn parse_git_key(
     if !raw.contains(['/', '\\']) && !raw.starts_with('~') {
         return Ok(Some(PathBuf::from(raw)));
     }
-    expand_config_path(file, KEY, raw, home)?
+    expand_config_path(file, key, raw, home)?
         .map(Some)
         .ok_or_else(bad)
 }
@@ -619,10 +625,16 @@ fn parse_runtime_keys(
         comment_store: parse_path_key(file, "commentStore", parsed.comment_store.take(), home)?,
         viewed_store: parse_path_key(file, "viewedStore", parsed.viewed_store.take(), home)?,
         ui_store: parse_path_key(file, "uiStore", parsed.ui_store.take(), home)?,
-        git: parse_git_key(file, parsed.git.take(), home)?,
+        git: parse_program_key(file, "git", parsed.git.take(), home)?,
         term_progress: parse_bool_key(file, "termProgress", parsed.term_progress.take())?,
         smooth_scroll: parse_bool_key(file, "smoothScroll", parsed.smooth_scroll.take())?,
         pr_polling: parse_bool_key(file, "prPolling", parsed.pr_polling.take())?,
+        pr_title_command: parse_program_key(
+            file,
+            "prTitleCommand",
+            parsed.pr_title_command.take(),
+            home,
+        )?,
     })
 }
 
@@ -686,12 +698,13 @@ struct ParseContext<'a> {
 ///
 /// A workspace file can be committed to a repo, so only the user file (or
 /// the env var) may set these.
-const USER_ONLY_KEYS: [(&str, &str); 5] = [
+const USER_ONLY_KEYS: [(&str, &str); 6] = [
     ("git", "WORKSPACE_STATUS_GIT"),
     ("updateCheckStore", "WS_STATUS_UPDATE_CHECK_STORE"),
     ("commentStore", "WS_STATUS_COMMENT_STORE"),
     ("viewedStore", "WS_STATUS_VIEWED_STORE"),
     ("uiStore", "WS_STATUS_UI_STORE"),
+    ("prTitleCommand", "WS_STATUS_PR_TITLE_CMD"),
 ];
 
 /// Fail when the workspace file sets a [`USER_ONLY_KEYS`] key. `null`
@@ -711,6 +724,7 @@ fn reject_user_only_keys(
         parsed.comment_store.is_some(),
         parsed.viewed_store.is_some(),
         parsed.ui_store.is_some(),
+        parsed.pr_title_command.is_some(),
     ];
     match USER_ONLY_KEYS.iter().zip(set).find(|(_, is_set)| *is_set) {
         Some(((key, env_var), _)) => Err(format!(
@@ -841,8 +855,9 @@ where
 /// workspace file).
 ///
 /// Path keys that start with `~/` expand with `$HOME`. The workspace file
-/// must not set `git`, `updateCheckStore`, `commentStore`, `viewedStore`, or
-/// `uiStore` (it can be committed to a repo); those keys are user-file only.
+/// must not set `git`, `updateCheckStore`, `commentStore`, `viewedStore`,
+/// `uiStore`, or `prTitleCommand` (it can be committed to a repo); those
+/// keys are user-file only.
 pub fn load_config_files(
     user_file: Option<&Path>,
     workspace_root: &Path,
@@ -1797,7 +1812,7 @@ mod tests {
     fn runtime_keys_parse_valid_values() {
         let cfg = load_layered_home(
             Some(
-                r#"{"theme":" dracula ","themeMode":"light","glyphs":"ascii","watchMs":0,"fetchMs":60000,"fetchConcurrency":4,"updateCheck":false,"updateCheckStore":"~/state/update-check.json","commentStore":"/var/ws/comments.json","viewedStore":"~/viewed.json","uiStore":"~/state/ui-state.json","git":"git-wrapper","termProgress":false,"smoothScroll":false,"prPolling":false}"#,
+                r#"{"theme":" dracula ","themeMode":"light","glyphs":"ascii","watchMs":0,"fetchMs":60000,"fetchConcurrency":4,"updateCheck":false,"updateCheckStore":"~/state/update-check.json","commentStore":"/var/ws/comments.json","viewedStore":"~/viewed.json","uiStore":"~/state/ui-state.json","git":"git-wrapper","termProgress":false,"smoothScroll":false,"prPolling":false,"prTitleCommand":"~/bin/pr-title"}"#,
             ),
             None,
             Some("/home/demo"),
@@ -1821,12 +1836,25 @@ mod tests {
                 term_progress: Some(false),
                 smooth_scroll: Some(false),
                 pr_polling: Some(false),
+                pr_title_command: Some(PathBuf::from("/home/demo/bin/pr-title")),
             }
         );
         assert_eq!(
             load_runtime_key("prPolling", "true").unwrap().pr_polling,
             Some(true)
         );
+        for (raw, want) in [
+            (r#""/opt/bin/pr-title""#, "/opt/bin/pr-title"),
+            (r#""pr-title""#, "pr-title"),
+        ] {
+            assert_eq!(
+                load_runtime_key("prTitleCommand", raw)
+                    .unwrap()
+                    .pr_title_command,
+                Some(PathBuf::from(want)),
+                "prTitleCommand: {raw}"
+            );
+        }
         assert_eq!(
             load_runtime_key("glyphs", r#""nerd""#).unwrap().glyphs,
             Some(GlyphSet::Nerd)
@@ -1939,6 +1967,9 @@ mod tests {
             ("git", "[]", git_rule.to_string()),
             ("prPolling", "0", "must be true or false".to_string()),
             ("prPolling", r#""off""#, "must be true or false".to_string()),
+            ("prTitleCommand", r#""bin/pr-title""#, git_rule.to_string()),
+            ("prTitleCommand", r#""  ""#, git_rule.to_string()),
+            ("prTitleCommand", "true", git_rule.to_string()),
         ];
         for (key, raw, tail) in cases {
             let err = load_runtime_key(key, raw).unwrap_err();
@@ -2045,6 +2076,12 @@ mod tests {
             ),
             ("viewedStore", r#""/tmp/v.json""#, "WS_STATUS_VIEWED_STORE"),
             ("uiStore", r#""~/ui-state.json""#, "WS_STATUS_UI_STORE"),
+            (
+                "prTitleCommand",
+                r#""/usr/local/bin/pr-title""#,
+                "WS_STATUS_PR_TITLE_CMD",
+            ),
+            ("prTitleCommand", r#""sh""#, "WS_STATUS_PR_TITLE_CMD"),
         ] {
             let workspace_json = format!(r#"{{"hiddenPaths":[],"{key}":{raw}}}"#);
             let (root, user_file, workspace) = layered(None, Some(&workspace_json));
@@ -2071,7 +2108,9 @@ mod tests {
         }
         let cfg = load_layered(
             None,
-            Some(r#"{"hiddenPaths":[],"git":null,"commentStore":null,"uiStore":null}"#),
+            Some(
+                r#"{"hiddenPaths":[],"git":null,"commentStore":null,"uiStore":null,"prTitleCommand":null}"#,
+            ),
         )
         .unwrap();
         assert_eq!(
@@ -2099,13 +2138,17 @@ mod tests {
     fn user_file_sets_user_only_keys_under_a_workspace_file() {
         let cfg = load_layered_home(
             Some(
-                r#"{"git":"git-wrapper","updateCheckStore":"~/u.json","commentStore":"/c.json","viewedStore":"/v.json","uiStore":"~/ui.json"}"#,
+                r#"{"git":"git-wrapper","updateCheckStore":"~/u.json","commentStore":"/c.json","viewedStore":"/v.json","uiStore":"~/ui.json","prTitleCommand":"~/bin/pr-title"}"#,
             ),
             Some(r#"{"hiddenPaths":[],"theme":"monokai"}"#),
             Some("/home/demo"),
         )
         .unwrap();
         assert_eq!(cfg.runtime.git, Some(PathBuf::from("git-wrapper")));
+        assert_eq!(
+            cfg.runtime.pr_title_command,
+            Some(PathBuf::from("/home/demo/bin/pr-title"))
+        );
         assert_eq!(
             cfg.runtime.update_check_store,
             Some(PathBuf::from("/home/demo/u.json"))

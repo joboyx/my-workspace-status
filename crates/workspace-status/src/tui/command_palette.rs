@@ -231,6 +231,14 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
+        title: "Fold finished PR groups",
+        keys: "Z",
+        group: CommandGroup::Move,
+        action: Action::ToggleFinishedPrGroups,
+        aliases: &["merged", "collapse"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
         title: "Stage",
         keys: "s",
         group: CommandGroup::Git,
@@ -518,6 +526,14 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::CloseTab,
         aliases: &["close compare"],
         scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "PRs tab",
+        keys: "gp",
+        group: CommandGroup::Git,
+        action: Action::OpenPrsTab,
+        aliases: &["pull requests", "merge requests", "github", "gitlab"],
+        scope: CommandScope::Any,
     },
     PaletteCommand {
         title: "Mark reviewed",
@@ -1231,6 +1247,13 @@ mod tests {
                 CommandScope::NoHighlight,
             ),
             (
+                "Fold finished PR groups",
+                "Z",
+                CommandGroup::Move,
+                Action::ToggleFinishedPrGroups,
+                CommandScope::NoHighlight,
+            ),
+            (
                 "Stage",
                 "s",
                 CommandGroup::Git,
@@ -1469,6 +1492,13 @@ mod tests {
                 CommandScope::NoHighlight,
             ),
             (
+                "PRs tab",
+                "gp",
+                CommandGroup::Git,
+                Action::OpenPrsTab,
+                CommandScope::Any,
+            ),
+            (
                 "Mark reviewed",
                 "space",
                 CommandGroup::Git,
@@ -1650,7 +1680,7 @@ mod tests {
             .filter(|command| !matches!(command.action, Action::SetTheme(_)))
             .collect();
         assert_eq!(rows.len(), wanted.len());
-        assert_eq!(wanted.len(), 75);
+        assert_eq!(wanted.len(), 77);
         assert_eq!(PALETTE_COMMANDS.len(), wanted.len() + THEME_IDS.len());
         for (i, (title, keys, group, action, scope)) in wanted.iter().enumerate() {
             let command = rows[i];
@@ -1846,6 +1876,7 @@ mod tests {
             "Copy PR URL",
             "Refresh this PR",
             "Refresh PRs",
+            "PRs tab",
         ];
         assert_eq!(landing("pull request"), pr_rows);
         assert_eq!(landing("merge request"), pr_rows);
@@ -1853,6 +1884,8 @@ mod tests {
         assert!(landing("PR").contains(&"Open PR"));
         assert_eq!(landing("gx"), vec!["Open PR"]);
         assert_eq!(landing("gc"), vec!["Open PR CI"]);
+        assert_eq!(landing("gp"), vec!["PRs tab"]);
+        assert_eq!(landing("prs tab"), vec!["PRs tab"]);
         assert_eq!(landing("pipeline"), vec!["Open PR CI"]);
         assert!(!landing("merge").contains(&"Open PR"));
         assert_eq!(
