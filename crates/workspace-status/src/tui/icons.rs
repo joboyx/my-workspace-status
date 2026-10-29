@@ -2,7 +2,8 @@
 //!
 //! A patched Nerd Font is a hard requirement. `WS_STATUS_GLYPHS=ascii` falls
 //! back to plain markers. Every glyph occupies one terminal column: Nerd icons
-//! live in the private-use area. Do not add emoji or CJK codepoints.
+//! live in the private-use area, and the PR state marks are plain Unicode
+//! shapes with no emoji form. Do not add emoji or CJK codepoints.
 //!
 //! [`ICON_CATALOG`] owns every tree and graph icon: both glyphs, a short
 //! name, and a one-line meaning. The `icon_*` functions read it, and the
@@ -62,12 +63,21 @@ pub enum IconKind {
     MergedIntoDefault,
     /// HEAD is not merged into the default branch.
     OpenVsDefault,
-    /// Pull request open, not reported approved.
-    PrOpen,
-    /// Pull request open and approved.
-    PrApproved,
+    /// Pull request whose CI failed.
+    PrCiFailed,
+    /// Pull request ready to merge.
+    PrReady,
+    /// Pull request whose CI still runs.
+    PrCiRunning,
+    /// Draft pull request.
+    PrDraft,
+    /// Pull request open, in review.
+    PrInReview,
     /// Pull request merged.
     PrMerged,
+    /// Pull request closed without a merge. Only change alerts paint it:
+    /// a closed PR shows no badge.
+    PrClosed,
     /// Commits not pushed to upstream.
     Ahead,
     /// Upstream commits not pulled.
@@ -218,6 +228,20 @@ impl IconKind {
     pub fn glyph(self, ascii: bool) -> &'static str {
         self.spec().glyph(ascii)
     }
+
+    /// True for the PR state kinds: the six badge states and closed.
+    pub fn is_pull_request(self) -> bool {
+        matches!(
+            self,
+            Self::PrCiFailed
+                | Self::PrReady
+                | Self::PrCiRunning
+                | Self::PrDraft
+                | Self::PrInReview
+                | Self::PrMerged
+                | Self::PrClosed
+        )
+    }
 }
 
 /// Catalog row for `kind`.
@@ -309,29 +333,64 @@ pub const ICON_CATALOG: &[IconSpec] = {
             "HEAD is not merged into the default branch yet",
             TREE,
         ),
+        // PR states: plain Unicode shapes, no Nerd Font needed. The circle
+        // fill series reads as progress; `●` stays the graph commit node.
         row(
-            K::PrOpen,
-            "\u{f407}",
-            "P",
-            "PR open",
-            "Pull request is open",
+            K::PrCiFailed,
+            "\u{2715}", // ✕
+            "x",
+            "PR CI failed",
+            "Pull request: a CI check failed",
             TREE,
         ),
         row(
-            K::PrApproved,
-            "\u{f42e}",
+            K::PrReady,
+            "\u{25c9}", // ◉
             "A",
-            "PR approved",
-            "Pull request is open and approved",
+            "PR ready",
+            "Pull request is ready to merge now",
+            TREE,
+        ),
+        row(
+            K::PrCiRunning,
+            "\u{25d0}", // ◐
+            "r",
+            "PR CI running",
+            "Pull request: CI still runs",
+            TREE,
+        ),
+        row(
+            K::PrDraft,
+            "\u{25cc}", // ◌
+            "d",
+            "PR draft",
+            "Pull request is a draft",
+            TREE,
+        ),
+        row(
+            K::PrInReview,
+            "\u{25cb}", // ○
+            "P",
+            "PR in review",
+            "Pull request is open and waits for review",
             TREE,
         ),
         row(
             K::PrMerged,
-            "\u{f419}",
+            "\u{2713}", // ✓
             "m",
             "PR merged",
             "Pull request is merged",
             TREE,
+        ),
+        // Change alerts only: a closed PR shows no badge.
+        row(
+            K::PrClosed,
+            "\u{2298}", // ⊘
+            "c",
+            "PR closed",
+            "Pull request closed without a merge",
+            None,
         ),
         row(
             K::Ahead,
@@ -734,21 +793,6 @@ pub fn icon_merged_into_default(ascii: bool) -> &'static str {
 /// Includes a just-created branch whose HEAD matches the default tip.
 pub fn icon_open_vs_default(ascii: bool) -> &'static str {
     IconKind::OpenVsDefault.glyph(ascii)
-}
-/// PR badge: open, not reported approved. Nerd: nf-oct-git_pull_request
-/// (`U+F407`); ASCII: `P`.
-pub fn icon_pr_open(ascii: bool) -> &'static str {
-    IconKind::PrOpen.glyph(ascii)
-}
-/// PR badge: open and approved. Nerd: nf-oct-check (`U+F42E`); ASCII: `A`.
-///
-/// Distinct from [`icon_merged_into_default`].
-pub fn icon_pr_approved(ascii: bool) -> &'static str {
-    IconKind::PrApproved.glyph(ascii)
-}
-/// PR badge: merged. Nerd: nf-oct-git_merge (`U+F419`); ASCII: `m`.
-pub fn icon_pr_merged(ascii: bool) -> &'static str {
-    IconKind::PrMerged.glyph(ascii)
 }
 /// `ICON_STATUS_FAILED` nerd glyph: nf-fa-warning (`U+F071`).
 pub const ICON_STATUS_FAILED_NERD: &str = "\u{f071}";
@@ -1276,9 +1320,6 @@ mod tests {
             icon_comment_resolved(true),
             icon_staged(true),
             icon_changes(true),
-            icon_pr_open(true),
-            icon_pr_approved(true),
-            icon_pr_merged(true),
             ASCII_FILE_GLYPH,
         ];
         let nerd = [
@@ -1302,9 +1343,6 @@ mod tests {
             icon_comment_resolved(false),
             icon_staged(false),
             icon_changes(false),
-            icon_pr_open(false),
-            icon_pr_approved(false),
-            icon_pr_merged(false),
             CURSOR_BAR,
             CURSOR_BAR_INACTIVE,
             FOLD_EXPANDED,
@@ -1399,14 +1437,6 @@ mod tests {
             assert_eq!(f(true), ascii, "{kind:?}");
             assert_eq!(f(false), kind.glyph(false), "{kind:?}");
             assert_eq!(f(true), kind.glyph(true), "{kind:?}");
-        }
-        for (f, kind) in [
-            (icon_pr_open as IconFn, IconKind::PrOpen),
-            (icon_pr_approved, IconKind::PrApproved),
-            (icon_pr_merged, IconKind::PrMerged),
-        ] {
-            assert_eq!(f(false), kind.glyph(false));
-            assert_eq!(f(true), kind.glyph(true));
         }
         assert_eq!(IconKind::FileType.glyph(false), DEFAULT_FILE_GLYPH);
         assert_eq!(IconKind::FileType.glyph(true), ASCII_FILE_GLYPH);
@@ -1514,42 +1544,55 @@ mod tests {
         }
     }
 
+    /// The six PR badge kinds, in ladder order of the legend.
+    const PR_BADGES: [IconKind; 6] = [
+        IconKind::PrCiFailed,
+        IconKind::PrReady,
+        IconKind::PrCiRunning,
+        IconKind::PrDraft,
+        IconKind::PrInReview,
+        IconKind::PrMerged,
+    ];
+
     /// Glyphs that paint in the same place differ in both modes. A pair
     /// that shares a glyph (ASCII `#` workspace and Staged, `~` hidden and
-    /// Changes, `o` open-vs-default and graph uncommitted) sits in
-    /// different contexts, where position tells them apart.
+    /// Changes, `o` open-vs-default and graph uncommitted, `○` PR in review
+    /// and graph uncommitted) sits in different contexts, where position
+    /// tells them apart: the PR mark sits flush right on a worktree row or
+    /// in the sync header chip, the uncommitted glyph in the gutter.
     #[test]
     fn glyphs_are_unique_within_one_paint_context() {
         use IconKind as K;
-        let contexts: [(&str, &[IconKind]); 8] = [
+        let checkout_row = [
+            &[
+                K::Repo,
+                K::LinkedWorktree,
+                K::Branch,
+                K::MergedIntoDefault,
+                K::OpenVsDefault,
+                K::Ahead,
+                K::Behind,
+                K::Diverged,
+                K::NoUpstream,
+                K::Clean,
+                K::StatusFailed,
+                K::Hidden,
+                K::ChangeCount,
+                K::WorktreeCount,
+                K::Comment,
+                K::CommentResolved,
+            ][..],
+            &PR_BADGES,
+        ]
+        .concat();
+        let sync_header = [&[K::Ahead, K::Behind][..], &PR_BADGES].concat();
+        let toast = [&PR_BADGES[..], &[K::PrClosed]].concat();
+        let contexts: [(&str, &[IconKind]); 10] = [
             (
                 "tree workspace / group row",
                 &[K::Workspace, K::Clean, K::Comment, K::CommentResolved],
             ),
-            (
-                "tree repo / checkout row",
-                &[
-                    K::Repo,
-                    K::LinkedWorktree,
-                    K::Branch,
-                    K::MergedIntoDefault,
-                    K::OpenVsDefault,
-                    K::PrOpen,
-                    K::PrApproved,
-                    K::PrMerged,
-                    K::Ahead,
-                    K::Behind,
-                    K::Diverged,
-                    K::NoUpstream,
-                    K::Clean,
-                    K::StatusFailed,
-                    K::Hidden,
-                    K::ChangeCount,
-                    K::WorktreeCount,
-                    K::Comment,
-                    K::CommentResolved,
-                ],
-            ),
+            ("tree repo / checkout row", &checkout_row),
             ("tree section row", &[K::Staged, K::Changes]),
             (
                 "tree file / dir row",
@@ -1581,14 +1624,12 @@ mod tests {
                     K::ChipSynced,
                     K::ChipDetachedHead,
                     K::ChipOverflow,
-                    K::PrOpen,
-                    K::PrApproved,
-                    K::PrMerged,
                     K::Comment,
                     K::CommentResolved,
                 ],
             ),
-            ("graph sync header", &[K::Ahead, K::Behind]),
+            ("graph worktree row badge", &PR_BADGES),
+            ("graph sync header", &sync_header),
             (
                 "graph selection footer",
                 &[
@@ -1607,6 +1648,7 @@ mod tests {
                     K::CursorBarInactive,
                 ],
             ),
+            ("PR change toast", &toast),
         ];
         // Branch, default, remote, and tag chips share a bracketed sample;
         // the graph tells them apart by colour, so no glyph check applies.
@@ -1641,6 +1683,7 @@ mod tests {
             K::OpenVsDefault.glyph(true),
             K::GraphUncommitted.glyph(true)
         );
+        assert_eq!(K::PrInReview.glyph(false), K::GraphUncommitted.glyph(false));
         assert_eq!(K::Clean.glyph(false), K::Synced.glyph(false));
         assert_eq!(K::Synced.spec().group, None, "synced is not painted");
     }
@@ -1670,36 +1713,74 @@ mod tests {
         }
     }
 
+    /// The six badge states and closed: one glyph each, never a word, never
+    /// a mark another surface owns.
     #[test]
-    fn pr_badge_glyphs_are_distinct_and_never_words() {
-        assert_eq!(icon_pr_open(false), "\u{f407}");
-        assert_eq!(icon_pr_approved(false), "\u{f42e}");
-        assert_eq!(icon_pr_merged(false), "\u{f419}");
-        assert_eq!(
-            [
-                icon_pr_open(true),
-                icon_pr_approved(true),
-                icon_pr_merged(true)
-            ],
-            ["P", "A", "m"]
-        );
+    fn pr_state_glyphs_are_pinned_distinct_and_never_words() {
+        let kinds = [&PR_BADGES[..], &[IconKind::PrClosed]].concat();
+        let glyphs =
+            |ascii: bool| -> Vec<&str> { kinds.iter().map(|kind| kind.glyph(ascii)).collect() };
+        assert_eq!(glyphs(false), ["✕", "◉", "◐", "◌", "○", "✓", "⊘"]);
+        assert_eq!(glyphs(true), ["x", "A", "r", "d", "P", "m", "c"]);
         for ascii in [true, false] {
-            let marks = [
-                icon_pr_open(ascii),
-                icon_pr_approved(ascii),
-                icon_pr_merged(ascii),
-            ];
-            for mark in marks {
+            let marks = glyphs(ascii);
+            for mark in &marks {
                 assert_eq!(visible_width(mark), 1, "{mark:?}");
-                // Graph nodes and the tab close glyph.
+                // Graph commit node, stash tip, and the tab close glyph.
                 for taken in ["●", "◇", "✗"] {
-                    assert_ne!(mark, taken);
+                    assert_ne!(*mark, taken);
                 }
             }
-            assert_ne!(marks[0], marks[1]);
-            assert_ne!(marks[1], marks[2]);
-            assert_ne!(marks[0], marks[2]);
-            assert_ne!(icon_pr_approved(ascii), icon_merged_into_default(ascii));
+            let mut unique = marks.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(unique.len(), marks.len(), "ascii={ascii}: {marks:?}");
+            assert_ne!(
+                IconKind::PrReady.glyph(ascii),
+                icon_merged_into_default(ascii)
+            );
+        }
+        for kind in &kinds {
+            assert!(kind.is_pull_request(), "{kind:?}");
+        }
+        assert_eq!(
+            ICON_CATALOG
+                .iter()
+                .filter(|spec| spec.kind.is_pull_request())
+                .count(),
+            kinds.len()
+        );
+        // The legend lists the six badge states; closed only alerts.
+        for kind in PR_BADGES {
+            assert_eq!(kind.spec().group, Some(IconGroup::Tree), "{kind:?}");
+        }
+        assert_eq!(IconKind::PrClosed.spec().group, None);
+    }
+
+    /// Every PR glyph is one column as ratatui paints it (`Span::width`,
+    /// `unicode-width`) and as the layout counts it ([`visible_width`]),
+    /// and has no emoji form: one codepoint outside the pictograph planes,
+    /// still one column with the emoji selector U+FE0F after it (an
+    /// emoji-capable mark such as `✔` turns two columns wide).
+    #[test]
+    fn pr_state_glyphs_are_one_column_and_have_no_emoji_form() {
+        use ratatui::text::Span;
+        use unicode_width::UnicodeWidthStr;
+        assert_eq!(UnicodeWidthStr::width("✔\u{fe0f}"), 2, "the check bites");
+        for kind in [&PR_BADGES[..], &[IconKind::PrClosed]].concat() {
+            for ascii in [false, true] {
+                let glyph = kind.glyph(ascii);
+                let what = format!("{kind:?} ascii={ascii} {glyph:?}");
+                assert_eq!(UnicodeWidthStr::width(glyph), 1, "{what}");
+                assert_eq!(Span::raw(glyph).width(), 1, "{what}");
+                assert_eq!(visible_width(glyph), 1, "{what}");
+                assert_eq!(glyph.chars().count(), 1, "{what}");
+                let ch = glyph.chars().next().expect("glyph");
+                assert!(u32::from(ch) < 0x1f000, "{what}");
+                assert!(!has_wide_emoji(glyph), "{what}");
+                let selected = format!("{glyph}\u{fe0f}");
+                assert_eq!(UnicodeWidthStr::width(selected.as_str()), 1, "{what}");
+            }
         }
     }
 

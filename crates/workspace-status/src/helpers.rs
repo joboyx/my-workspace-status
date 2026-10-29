@@ -209,6 +209,11 @@ pub fn compare_repo_paths_for_display(a: &RepoSnapshot, b: &RepoSnapshot) -> std
 }
 
 /// Terminal display width.
+///
+/// The PR state marks `✓` (U+2713) and `✕` (U+2715) are one column: they
+/// have no emoji form, so every terminal draws them narrow, as
+/// `unicode-width` and ratatui count them. The rest of that dingbat block
+/// counts as two, including `✔` and `✖`, which have emoji forms.
 pub fn visible_width(value: &str) -> usize {
     let mut width = 0;
     for ch in value.chars() {
@@ -216,21 +221,23 @@ pub fn visible_width(value: &str) -> usize {
         if code == 0xfe0f || code == 0x200d {
             continue;
         }
-        let wide = (0x1100..=0x115f).contains(&code)
-            || code == 0x2329
-            || code == 0x232a
-            || (0x2190..=0x21ff).contains(&code)
-            || (0x2300..=0x23ff).contains(&code)
-            || (0x2600..=0x27bf).contains(&code)
-            || (0x2b00..=0x2bff).contains(&code)
-            || (0x2e80..=0xa4cf).contains(&code)
-            || (0xac00..=0xd7a3).contains(&code)
-            || (0xf900..=0xfaff).contains(&code)
-            || (0xfe10..=0xfe19).contains(&code)
-            || (0xfe30..=0xfe6f).contains(&code)
-            || (0xff00..=0xff60).contains(&code)
-            || (0xffe0..=0xffe6).contains(&code)
-            || (0x1f000..=0x1faff).contains(&code);
+        let text_mark = matches!(code, 0x2713 | 0x2715);
+        let wide = !text_mark
+            && ((0x1100..=0x115f).contains(&code)
+                || code == 0x2329
+                || code == 0x232a
+                || (0x2190..=0x21ff).contains(&code)
+                || (0x2300..=0x23ff).contains(&code)
+                || (0x2600..=0x27bf).contains(&code)
+                || (0x2b00..=0x2bff).contains(&code)
+                || (0x2e80..=0xa4cf).contains(&code)
+                || (0xac00..=0xd7a3).contains(&code)
+                || (0xf900..=0xfaff).contains(&code)
+                || (0xfe10..=0xfe19).contains(&code)
+                || (0xfe30..=0xfe6f).contains(&code)
+                || (0xff00..=0xff60).contains(&code)
+                || (0xffe0..=0xffe6).contains(&code)
+                || (0x1f000..=0x1faff).contains(&code));
         width += if wide { 2 } else { 1 };
     }
     width
@@ -248,6 +255,16 @@ pub fn sanitize_path(p: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pr_state_marks_are_one_column_and_emoji_capable_dingbats_stay_wide() {
+        assert_eq!(visible_width("✓"), 1);
+        assert_eq!(visible_width("✕ #318"), 6);
+        // Emoji forms keep their two columns, with or without U+FE0F.
+        for wide in ["✔", "✖", "✔\u{fe0f}", "✖\u{fe0f}", "☔"] {
+            assert_eq!(visible_width(wide), 2, "{wide:?}");
+        }
+    }
 
     #[test]
     fn normalize_strips_dot_slash_and_trailing_slash() {

@@ -33,7 +33,7 @@ const ESC_QUIT_ROW: &str = "right-click · never";
 /// Help columns wrap at their own widths inside the centered box, so each
 /// needle is a phrase that stays on one painted row at the default size
 /// (`search focused`, not `search focused pane`; `next / prev` and
-/// `(after Enter)`, since `match` moves between those two rows as the
+/// `(after`, since `match` and `Enter)` move between rows as the
 /// column widths change; see [`ESC_QUIT_ROW`]).
 fn help_overlay_open(screen: &str) -> bool {
     screen.contains("MOVE")
@@ -44,7 +44,7 @@ fn help_overlay_open(screen: &str) -> bool {
         && screen.contains("press twice")
         && screen.contains(ESC_QUIT_ROW)
         && screen.contains("next / prev")
-        && screen.contains("(after Enter)")
+        && screen.contains("(after")
 }
 
 fn help_searching(screen: &str, query: &str) -> bool {

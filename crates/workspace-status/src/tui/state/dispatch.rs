@@ -233,6 +233,8 @@ impl AppState {
             | Action::PopoverRun
             | Action::PopoverCopyLine
             | Action::PopoverClose) => self.dispatch_popover(action),
+            // `dispatch` already ended the chord above.
+            Action::GChordCancel => Effect::None,
             // Report-only, from every tab: no gate above refuses these.
             action @ (Action::OpenDoctor
             | Action::DoctorMove(_)
@@ -339,6 +341,10 @@ impl AppState {
             | Action::ExportCommentsCancel
             | Action::CopyEntityReference
             | Action::OpenPullRequest
+            | Action::OpenPullRequestCi
+            | Action::CopyPullRequestUrl
+            | Action::RefreshPullRequest
+            | Action::RefreshPullRequests
             | Action::ViewRemotely
             | Action::ToggleQuickOpen(_)
             | Action::QuickOpenMove(_)

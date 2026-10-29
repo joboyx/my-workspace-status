@@ -325,8 +325,8 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "refresh now",
             },
             HelpEntry {
-                keys: "gx",
-                desc: "open branch PR in browser",
+                keys: "gx gc",
+                desc: "open branch PR · its CI",
             },
             HelpEntry {
                 keys: "gw",
@@ -1266,9 +1266,9 @@ mod tests {
             HELP_GROUPS[1]
                 .entries
                 .iter()
-                .find(|e| e.keys == "gx")
+                .find(|e| e.keys == "gx gc")
                 .map(|e| e.desc),
-            Some("open branch PR in browser")
+            Some("open branch PR · its CI")
         );
         assert_eq!(
             HELP_GROUPS[1]
@@ -1753,7 +1753,28 @@ mod tests {
         ] {
             assert!(help_legend_specs().any(|s| s.kind == kind), "{kind:?}");
         }
-        for kind in [IconKind::Synced, IconKind::HelpMove, IconKind::FolderOpen] {
+        // The six PR states, in ladder order, under Tree; closed only alerts.
+        let pr_rows: Vec<(&str, &str, &str)> = help_legend_specs()
+            .filter(|s| s.kind.is_pull_request())
+            .map(|s| (s.nerd, s.ascii, s.name))
+            .collect();
+        assert_eq!(
+            pr_rows,
+            [
+                ("✕", "x", "PR CI failed"),
+                ("◉", "A", "PR ready"),
+                ("◐", "r", "PR CI running"),
+                ("◌", "d", "PR draft"),
+                ("○", "P", "PR in review"),
+                ("✓", "m", "PR merged"),
+            ]
+        );
+        for kind in [
+            IconKind::Synced,
+            IconKind::HelpMove,
+            IconKind::FolderOpen,
+            IconKind::PrClosed,
+        ] {
             assert!(!help_legend_specs().any(|s| s.kind == kind), "{kind:?}");
         }
         for inner in [42usize, 76, 96, 136, 296] {

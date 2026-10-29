@@ -1,32 +1,82 @@
-//! Toast stack: one-shot acks (`copied`, `Fetched 3 repos`) shown in the
+//! Toast stack: one-shot acks (`copied`, `Fetched 3 repos`) and PR change
+//! alerts (`✕ #318 CI failed · test (ubuntu-latest)`) shown in the
 //! bottom-right corner of the panes, fading out through the add-flash ramp.
 //!
 //! [`super::state::AppState::route_ack_to_toast`] moves a
 //! [`super::status::StatusKind::Ok`] status here at the top of each draw.
-//! Errors, warnings, progress, and info notes stay in the status slot.
+//! [`super::state::AppState::alert_pr_transitions`] pushes the PR change
+//! toasts. Errors, warnings, progress, and info notes stay in the status
+//! slot.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use super::tree::SegRole;
 use super::watch::FLASH_MS;
 
-/// How long a toast shows, fade included (ms).
+/// How long an acknowledgement toast shows, fade included (ms).
 pub const TOAST_TTL_MS: u64 = 2500;
 
-/// The last part of [`TOAST_TTL_MS`] in which the toast fades out (ms).
-/// Strength drops from 1.0 to 0.0 over this window.
+/// How long a PR change toast shows, fade included (ms).
+pub const PR_TOAST_TTL_MS: u64 = 8000;
+
+/// The last part of a toast's life in which it fades out (ms). Strength
+/// drops from 1.0 to 0.0 over this window, whatever the toast's TTL.
 pub const TOAST_FADE_MS: u64 = FLASH_MS;
 
 /// Most toasts on screen at once. A push past it drops the oldest.
 pub const TOAST_MAX: usize = 3;
 
-/// One acknowledgement and the instant it was pushed.
+/// The mark a toast paints before its text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToastMark {
+    /// The acknowledgement check ` ✓ ` (ASCII ` ok `), in the text colour.
+    Ack,
+    /// ` <glyph> `, bold in its own colour role: the state mark of a PR
+    /// change.
+    Glyph(&'static str, SegRole),
+    /// No mark: the text starts after one space.
+    None,
+}
+
+/// One toast and the instant it was pushed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Toast {
-    /// Text shown in the toast (`copied`, `Fetched 3 repos`).
+    /// Mark painted before the text.
+    pub mark: ToastMark,
+    /// Text shown in the toast (`copied`, `#318 CI failed`).
     pub text: String,
+    /// Muted tail painted after the text as ` · <detail>` (a failed check
+    /// or a branch); empty for none.
+    pub detail: String,
+    /// Colour role of the text: [`SegRole::Repo`], or [`SegRole::Muted`]
+    /// for a summary.
+    pub role: SegRole,
+    /// How long the toast shows, fade included (ms).
+    pub ttl_ms: u64,
     /// When the toast was pushed. Its TTL counts from here.
     pub at: Instant,
+}
+
+impl Toast {
+    /// An acknowledgement pushed at `at`: the ack mark and `text` in the
+    /// repo colour, for [`TOAST_TTL_MS`].
+    pub fn ack(text: impl Into<String>, at: Instant) -> Self {
+        Self {
+            mark: ToastMark::Ack,
+            text: text.into(),
+            detail: String::new(),
+            role: SegRole::Repo,
+            ttl_ms: TOAST_TTL_MS,
+            at,
+        }
+    }
+
+    /// Fade strength at `now`: 1.0 until the last [`TOAST_FADE_MS`] of its
+    /// TTL, then linear down to 0.0 at the TTL.
+    pub fn strength(&self, now: Instant) -> f32 {
+        toast_strength(now.saturating_duration_since(self.at), self.ttl_ms)
+    }
 }
 
 /// Live toasts, oldest first. At most [`TOAST_MAX`].
@@ -36,21 +86,24 @@ pub struct ToastStack {
 }
 
 impl ToastStack {
-    /// Add a toast pushed at `now`. Drops the oldest past [`TOAST_MAX`].
+    /// Add an acknowledgement pushed at `now` ([`Toast::ack`]). Drops the
+    /// oldest past [`TOAST_MAX`].
     pub fn push(&mut self, text: impl Into<String>, now: Instant) {
-        self.items.push_back(Toast {
-            text: text.into(),
-            at: now,
-        });
+        self.push_with(Toast::ack(text, now));
+    }
+
+    /// Add `toast`, pushed at its `at`. Drops the oldest past
+    /// [`TOAST_MAX`], whatever its kind.
+    pub fn push_with(&mut self, toast: Toast) {
+        self.items.push_back(toast);
         while self.items.len() > TOAST_MAX {
             self.items.pop_front();
         }
     }
 
-    /// Drop every toast whose [`TOAST_TTL_MS`] has run out at `now`.
+    /// Drop every toast whose own TTL has run out at `now`.
     pub fn prune(&mut self, now: Instant) {
-        self.items
-            .retain(|toast| toast_strength(now.saturating_duration_since(toast.at)) > 0.0);
+        self.items.retain(|toast| toast.strength(now) > 0.0);
     }
 
     /// True when no toast is held.
@@ -60,10 +113,10 @@ impl ToastStack {
 
     /// Toasts still showing at `now`, oldest first, each with its fade
     /// strength (1.0 = full, falling toward 0.0 in the last
-    /// [`TOAST_FADE_MS`]).
+    /// [`TOAST_FADE_MS`] of its TTL).
     pub fn visible(&self, now: Instant) -> impl Iterator<Item = (&Toast, f32)> {
         self.items.iter().filter_map(move |toast| {
-            let strength = toast_strength(now.saturating_duration_since(toast.at));
+            let strength = toast.strength(now);
             (strength > 0.0).then_some((toast, strength))
         })
     }
@@ -83,19 +136,20 @@ pub enum ToastTick {
 }
 
 impl ToastStack {
-    /// What the loop must do after a frame painted at `now`. `no_color`
-    /// toasts have no fade, so they only wake at their expiry.
+    /// What the loop must do after a frame painted at `now`, from each
+    /// toast's own TTL. `no_color` toasts have no fade, so they only wake
+    /// at their expiry.
     pub fn next_tick(&self, now: Instant, no_color: bool) -> ToastTick {
         let mut wake: Option<u64> = None;
         for toast in &self.items {
             let age = now.saturating_duration_since(toast.at).as_millis() as u64;
-            if age >= TOAST_TTL_MS {
+            if age >= toast.ttl_ms {
                 continue;
             }
             let until = if no_color {
-                TOAST_TTL_MS - age
+                toast.ttl_ms - age
             } else {
-                let fade_start = TOAST_TTL_MS - TOAST_FADE_MS;
+                let fade_start = toast.ttl_ms.saturating_sub(TOAST_FADE_MS);
                 if age >= fade_start {
                     return ToastTick::Frames;
                 }
@@ -107,12 +161,12 @@ impl ToastStack {
     }
 }
 
-/// Fade strength of a toast `age` old: 1.0 until the fade window, then
-/// linear down to 0.0 at [`TOAST_TTL_MS`].
-pub fn toast_strength(age: Duration) -> f32 {
+/// Fade strength of a toast `age` old that lives `ttl_ms`: 1.0 until the
+/// fade window, then linear down to 0.0 at `ttl_ms`.
+fn toast_strength(age: Duration, ttl_ms: u64) -> f32 {
     let ms = age.as_millis() as u64;
-    let fade_start = TOAST_TTL_MS - TOAST_FADE_MS;
-    if ms >= TOAST_TTL_MS {
+    let fade_start = ttl_ms.saturating_sub(TOAST_FADE_MS);
+    if ms >= ttl_ms {
         0.0
     } else if ms <= fade_start {
         1.0
@@ -126,6 +180,18 @@ mod tests {
     use super::super::theme::ThemeId;
     use super::super::watch::FlashKind;
     use super::*;
+
+    /// A PR change toast pushed at `at`, with the CI failed mark.
+    fn pr_toast(text: &str, at: Instant) -> Toast {
+        Toast {
+            mark: ToastMark::Glyph("✕", SegRole::Deleted),
+            text: text.into(),
+            detail: "feature".into(),
+            role: SegRole::Repo,
+            ttl_ms: PR_TOAST_TTL_MS,
+            at,
+        }
+    }
 
     #[test]
     fn toast_fades_through_the_flash_ramp_then_expires() {
@@ -227,5 +293,82 @@ mod tests {
             .collect();
         assert_eq!(TOAST_MAX, 3);
         assert_eq!(texts, ["b", "c", "d"], "oldest dropped, newest last");
+    }
+
+    #[test]
+    fn a_pr_toast_lives_8_s_with_the_ack_fade_beside_a_2_5_s_ack() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let pr_fade = PR_TOAST_TTL_MS - TOAST_FADE_MS;
+        let ack_fade = TOAST_TTL_MS - TOAST_FADE_MS;
+        assert_eq!((PR_TOAST_TTL_MS, TOAST_FADE_MS), (8000, 800));
+        let mut stack = ToastStack::default();
+        stack.push("copied", t0);
+        stack.push_with(pr_toast("#318 CI failed", t0));
+        let strengths = |ms: u64| -> Vec<(String, f32)> {
+            stack
+                .visible(at(ms))
+                .map(|(toast, s)| (toast.text.clone(), s))
+                .collect()
+        };
+        assert_eq!(
+            strengths(ack_fade),
+            [("copied".into(), 1.0), ("#318 CI failed".into(), 1.0)]
+        );
+        assert_eq!(
+            stack.next_tick(at(0), false),
+            ToastTick::WakeIn(ack_fade),
+            "the ack fades first"
+        );
+        assert_eq!(
+            strengths(TOAST_TTL_MS),
+            [("#318 CI failed".into(), 1.0)],
+            "the ack is gone at 2.5 s, the PR toast holds"
+        );
+        assert_eq!(
+            stack.next_tick(at(TOAST_TTL_MS), false),
+            ToastTick::WakeIn(pr_fade - TOAST_TTL_MS),
+            "then one wake at the PR toast's own fade start"
+        );
+        assert_eq!(strengths(pr_fade)[0].1, 1.0, "holds until 7.2 s");
+        let mid = strengths(PR_TOAST_TTL_MS - TOAST_FADE_MS / 2)[0].1;
+        assert!(mid > 0.4 && mid < 0.6, "half way through its fade: {mid}");
+        assert_eq!(stack.next_tick(at(pr_fade), false), ToastTick::Frames);
+        assert!(strengths(PR_TOAST_TTL_MS).is_empty(), "gone at 8 s");
+        assert_eq!(stack.next_tick(at(PR_TOAST_TTL_MS), false), ToastTick::Idle);
+
+        // NO_COLOR: one wake at its own expiry.
+        assert_eq!(
+            stack.next_tick(at(TOAST_TTL_MS), true),
+            ToastTick::WakeIn(PR_TOAST_TTL_MS - TOAST_TTL_MS)
+        );
+
+        stack.prune(at(TOAST_TTL_MS));
+        assert_eq!(stack.items.len(), 1, "the ack is pruned on its own TTL");
+        stack.prune(at(PR_TOAST_TTL_MS - 1));
+        assert!(!stack.is_empty(), "the PR toast still fades");
+        stack.prune(at(PR_TOAST_TTL_MS));
+        assert!(stack.is_empty(), "pruned at 8 s");
+    }
+
+    #[test]
+    fn a_push_past_three_drops_the_oldest_of_either_kind() {
+        let t0 = Instant::now();
+        let mut stack = ToastStack::default();
+        stack.push_with(pr_toast("#1 CI failed", t0));
+        stack.push("copied", t0);
+        stack.push_with(pr_toast("#2 CI failed", t0));
+        stack.push_with(pr_toast("#3 CI failed", t0));
+        let texts: Vec<&str> = stack
+            .visible(t0)
+            .map(|(toast, _)| toast.text.as_str())
+            .collect();
+        assert_eq!(texts, ["copied", "#2 CI failed", "#3 CI failed"]);
+        stack.push("staged README.md", t0);
+        let texts: Vec<&str> = stack
+            .visible(t0)
+            .map(|(toast, _)| toast.text.as_str())
+            .collect();
+        assert_eq!(texts, ["#2 CI failed", "#3 CI failed", "staged README.md"]);
     }
 }

@@ -24,12 +24,12 @@ use super::super::popover::{
     popover_sections, step_line, tree_icon_target, IconTarget, PopoverLine, PopoverOrigin,
     PopoverOwner, PopoverSection, PopoverState, PEEK_DWELL_MS, PEEK_GRACE_MS,
 };
-use super::super::pull_request::PrState;
+use super::super::search::list_prefix_cols;
 use super::super::selection::TextSelection;
 use super::super::status::StatusMessage;
 use super::super::tree::{
-    painted_row_segments, pr_badge_kind, pr_badge_repo, segment_icons, with_comment_mark,
-    with_viewed_mark, NodeKind, NodeSegments, VisibleRow,
+    fit_upstream_rewrite_text, painted_row_segments, pr_badge_kind, pr_badge_repo, segment_icons,
+    with_comment_mark, with_viewed_mark, NodeKind, NodeSegments, PrBadge, VisibleRow,
 };
 use super::{AppState, IconHit};
 use workspace_status_graph::{paint_model, GraphRow, ASCII, UNICODE};
@@ -47,8 +47,8 @@ pub(crate) struct PeekTimers {
     grace: Option<Instant>,
 }
 
-/// Viewed, commented, resolved, and PR badge state of one tree row.
-pub(crate) type TreeRowMarks = (bool, bool, bool, Option<PrState>);
+/// Viewed, commented, resolved, and PR badge of one tree row.
+pub(crate) type TreeRowMarks = (bool, bool, bool, Option<PrBadge>);
 
 /// Checkout, primary checkout, branch, and source of the shown commit-file
 /// list: the scope its line comments match in.
@@ -106,20 +106,33 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    /// Viewed, comment, and PR badge marks tree row `row` paints.
-    pub(crate) fn tree_row_marks(&self, row: &VisibleRow) -> TreeRowMarks {
+    /// Viewed, comment, and PR badge marks tree row `row` paints in a tree
+    /// `tree_width` columns wide at `now`.
+    pub(crate) fn tree_row_marks(
+        &self,
+        row: &VisibleRow,
+        tree_width: usize,
+        now: Instant,
+    ) -> TreeRowMarks {
         let viewed = row.kind == NodeKind::File && self.reviewed.contains(&row.id);
         let commented = tree_row_has_comment(&self.comment_store, &self.snapshot, row);
         let resolved =
             commented && tree_row_comments_resolved(&self.comment_store, &self.snapshot, row);
-        let pr = pr_badge_repo(row).and_then(|repo| self.pr_badge(Path::new(repo)));
+        let pr = pr_badge_repo(row)
+            .and_then(|repo| self.tree_pr_badge(Path::new(repo), tree_width, now));
         (viewed, commented, resolved, pr)
     }
 
-    /// Every segment tree row `row` paints this frame.
+    /// Every segment tree row `row` paints this frame, before the spinner
+    /// and the sparkline join the trailing run.
     pub(crate) fn tree_row_paint_segments(&self, row: &VisibleRow) -> NodeSegments {
-        let (viewed, commented, resolved, pr) = self.tree_row_marks(row);
-        painted_row_segments(row, self.ascii, viewed, commented, resolved, pr)
+        let width = usize::from(self.layout.tree_width);
+        let (viewed, commented, resolved, pr) = self.tree_row_marks(row, width, Instant::now());
+        let mut segs =
+            painted_row_segments(row, self.ascii, viewed, commented, resolved, pr.as_ref());
+        let room = width.saturating_sub(list_prefix_cols(row.depth));
+        fit_upstream_rewrite_text(&mut segs, &row.chrome, room);
+        segs
     }
 
     /// Scope the line comments of the shown commit-file list match in. A
@@ -471,8 +484,11 @@ impl AppState {
     /// gating classifies Enter as this action.
     pub(crate) fn popover_run_action(&self) -> Option<Action> {
         match self.focused_popover_line()? {
-            PopoverLine::Action(command) => Some(command.action.clone()),
-            PopoverLine::Text(_) | PopoverLine::Note(_) | PopoverLine::Field { .. } => None,
+            PopoverLine::Action { command, .. } => Some(command.action.clone()),
+            PopoverLine::Text(_)
+            | PopoverLine::Note(_)
+            | PopoverLine::Rule
+            | PopoverLine::Field { .. } => None,
         }
     }
 
@@ -486,8 +502,11 @@ impl AppState {
         }
         let sections = self.open_popover_sections();
         match flat_lines(&sections).get(line_index(&sections, press)?)? {
-            PopoverLine::Action(command) => Some(command.action.clone()),
-            PopoverLine::Text(_) | PopoverLine::Note(_) | PopoverLine::Field { .. } => None,
+            PopoverLine::Action { command, .. } => Some(command.action.clone()),
+            PopoverLine::Text(_)
+            | PopoverLine::Note(_)
+            | PopoverLine::Rule
+            | PopoverLine::Field { .. } => None,
         }
     }
 
@@ -517,8 +536,11 @@ impl AppState {
     /// disabled one keeps the popover and shows the gate reason, like the
     /// palette ([`Self::popover_line_refusal`]). View remotely opens the
     /// entity of the line's own section ([`Self::view_remotely_at`]), not
-    /// the focused row: a tag chip on a commit row opens the tag. Any other
-    /// line does nothing.
+    /// the focused row: a tag chip on a commit row opens the tag. The PR
+    /// lines of a PR section (Open PR, the CI page, Copy URL, Refresh this
+    /// PR) act on that section's PR ([`Self::run_pr_action_at`]), so the
+    /// graph header chip's popover acts on its checkout, not the focused
+    /// graph row. Any other line does nothing.
     fn run_popover_line(&mut self, line: Option<usize>) -> Effect {
         if !self.popover_pinned() {
             self.close_popover();
@@ -530,7 +552,7 @@ impl AppState {
             (None, Some(popover)) => focused_line(&flat_lines(&sections), popover.focus_line),
             (None, None) => None,
         };
-        let Some((_, section, PopoverLine::Action(command))) =
+        let Some((_, section, PopoverLine::Action { command, .. })) =
             index.and_then(|index| section_lines(&sections).nth(index))
         else {
             return Effect::None;
@@ -541,24 +563,45 @@ impl AppState {
             return Effect::None;
         }
         self.close_popover();
-        match &command.action {
-            Action::ViewRemotely => self.view_remotely_at(kind, &target),
-            action => self.dispatch_palette_action(action.clone()),
+        match (&command.action, &target) {
+            (Action::ViewRemotely, _) => self.view_remotely_at(kind, &target),
+            (action, IconTarget::PullRequest(repo)) => self
+                .run_pr_action_at(action, repo)
+                .unwrap_or_else(|| self.dispatch_palette_action(action.clone())),
+            (action, _) => self.dispatch_palette_action(action.clone()),
         }
     }
 
     /// `y`: copy the focused line of the pinned popover. It stays open.
+    ///
+    /// On the PR section's Copy URL line it copies the PR URL, as the
+    /// line's `y` chip says, not the line's title.
     fn copy_popover_line(&mut self) -> Effect {
         if !self.popover_pinned() {
             self.close_popover();
             return Effect::None;
         }
-        match self.focused_popover_line() {
-            Some(line) => Effect::CopyClipboard {
-                text: line.copy_text(),
-                announce: true,
-            },
-            None => Effect::None,
+        let sections = self.open_popover_sections();
+        let focus = self
+            .popover
+            .as_ref()
+            .and_then(|popover| focused_line(&flat_lines(&sections), popover.focus_line));
+        let Some((_, section, line)) = focus.and_then(|index| section_lines(&sections).nth(index))
+        else {
+            return Effect::None;
+        };
+        if let (PopoverLine::Action { command, .. }, IconTarget::PullRequest(repo)) =
+            (line, &section.target)
+        {
+            if command.action == Action::CopyPullRequestUrl {
+                if let Some(effect) = self.run_pr_action_at(&command.action, repo) {
+                    return effect;
+                }
+            }
+        }
+        Effect::CopyClipboard {
+            text: line.copy_text(),
+            announce: true,
         }
     }
 
@@ -827,15 +870,27 @@ impl AppState {
     }
 }
 
-/// What identifies a focusable popover line inside its section: `true`
-/// and the title for an action, `false` and the label for a field.
-pub(crate) type PopoverLineKey = (bool, &'static str);
+/// What identifies a focusable popover line inside its section.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PopoverLineKey {
+    /// A field by its label.
+    Field(&'static str),
+    /// A field with a blank label (one of the lines that continue the
+    /// field above it, such as the PR check names) by its value.
+    Continued(String),
+    /// An action by its palette title, so a section's own title for it
+    /// (a CI label that changes) keeps the focus.
+    Action(&'static str),
+}
 
 fn line_key(line: &PopoverLine) -> Option<PopoverLineKey> {
     match line {
-        PopoverLine::Field { label, .. } => Some((false, label)),
-        PopoverLine::Action(command) => Some((true, command.title)),
-        PopoverLine::Text(_) | PopoverLine::Note(_) => None,
+        PopoverLine::Field {
+            label: "", value, ..
+        } => Some(PopoverLineKey::Continued(value.clone())),
+        PopoverLine::Field { label, .. } => Some(PopoverLineKey::Field(label)),
+        PopoverLine::Action { command, .. } => Some(PopoverLineKey::Action(command.title)),
+        PopoverLine::Text(_) | PopoverLine::Note(_) | PopoverLine::Rule => None,
     }
 }
 
@@ -853,7 +908,9 @@ fn line_ref(sections: &[PopoverSection], index: usize) -> Option<PopoverLineRef>
 /// The [`flat_lines`] index of the line `key` names in `sections`.
 fn line_index(sections: &[PopoverSection], (target, key): &PopoverLineRef) -> Option<usize> {
     section_lines(sections)
-        .find(|(_, section, line)| section.target == *target && line_key(line) == Some(*key))
+        .find(|(_, section, line)| {
+            section.target == *target && line_key(line).as_ref() == Some(key)
+        })
         .map(|(index, _, _)| index)
 }
 
@@ -889,6 +946,7 @@ mod tests {
     use super::super::super::command_palette::command_for;
     use super::super::super::event_pump::overlay_blocks_background_ticks;
     use super::super::super::keys::event_to_action;
+    use super::super::super::pr_status::PrState;
     use super::super::super::pull_request::{PrLookup, PullRequest};
     use super::super::super::remote_view::{RemoteTarget, NOTHING_TO_VIEW, UNCOMMITTED_LOCAL_ONLY};
     use super::super::super::render::draw;
@@ -1292,11 +1350,11 @@ mod tests {
             Path::new("app"),
             "feature",
             Some(PR_REMOTE.into()),
-            PrLookup::Found(PullRequest {
-                number: 7,
-                url: "https://github.com/octo/demo/pull/7".into(),
-                state: PrState::Open,
-            }),
+            PrLookup::Found(PullRequest::fixture(
+                7,
+                "https://github.com/octo/demo/pull/7",
+                PrState::InReview,
+            )),
         ));
         focus(&mut app, "repo:app");
         assert_eq!(
@@ -1316,10 +1374,10 @@ mod tests {
             icons,
             vec![
                 IconKind::Branch,
-                IconKind::PrOpen,
                 IconKind::Repo,
                 IconKind::Behind,
                 IconKind::ChangeCount,
+                IconKind::PrInReview,
             ]
         );
         let titles = |lines: &[PopoverLine]| -> Vec<String> {
@@ -1327,17 +1385,23 @@ mod tests {
         };
         let lines = section_lines(&app);
         assert_eq!(
-            titles(&lines[1]),
+            titles(&lines[4]),
             vec![
-                IconKind::PrOpen.spec().meaning.to_string(),
-                "#7".into(),
+                "#7".to_string(),
                 "loading…".into(),
+                "> get review".into(),
+                "just now".into(),
                 "https://github.com/octo/demo/pull/7".into(),
+                String::new(),
                 "Open PR".into(),
+                "Open checks".into(),
+                "Copy URL".into(),
+                "Refresh this PR".into(),
             ]
         );
+        assert_eq!(sections[4].heading(), "PR · in review");
         assert_eq!(
-            titles(&lines[3]),
+            titles(&lines[2]),
             vec![
                 IconKind::Behind.spec().meaning.to_string(),
                 "2 commits to pull".into(),
@@ -2200,7 +2264,7 @@ mod tests {
         app.layout.icon_hits.insert(
             0,
             IconHit {
-                kind: IconKind::PrOpen,
+                kind: IconKind::PrInReview,
                 target: IconTarget::PullRequest(PathBuf::from("gone")),
                 ..hit.clone()
             },

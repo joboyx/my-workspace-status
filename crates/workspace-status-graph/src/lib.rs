@@ -59,5 +59,5 @@ pub use paint::{paint_model, paint_model_with, painted_line_count, PaintOpts, Pa
 pub use topology::{cells_text, CellRole, GraphCell};
 pub use widget::{
     graph_col_max, graph_hscroll_visible, graph_scrollbar_thumb, graph_vscroll_visible,
-    GraphIconKind, GraphLabelPalette, GraphWidget, IconSpan,
+    GraphIconKind, GraphLabelPalette, GraphWidget, IconSpan, HEADER_CHIP_GAP,
 };

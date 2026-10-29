@@ -39,6 +39,31 @@ cargo test --test tui_tty_e2e -- --ignored --nocapture --test-threads=1
 
 Packages (Debian/Ubuntu): `xvfb xfce4-terminal xterm xdotool dbus-x11 openbox`. `script` is util-linux. `scripts/with-desktop-session.sh` starts Xvfb when `DISPLAY` is unset, then dbus and Openbox (`scripts/openbox.xml`) so xdotool can focus the terminal. `scripts/capture-demo-stills.sh` sources the same helper. Do not invent a second screenshot pipeline. The Actions `tui-tty-desktop` job removes the image Chrome apt files (`google-chrome.list` and `google-chrome.sources`) before `apt-get update`. A hash mismatch on that index must not skip xfce or xterm.
 
+## Fake forge
+
+PR badge tests need `gh` and `glab` answers with no network and no login. `scripts/fake-forge/` holds POSIX `sh` stand-ins for both. They answer by flags and by the `glab api` endpoint, not by exact argv, so a longer `--json` field list or query string needs no change. Scenario file layout, failure files (`.exit`, `.stderr`), and the call log: `scripts/fake-forge/README.md`.
+
+`FakeForge` in `crates/workspace-status/tests/common/fake_forge.rs` wires them into a spawn:
+
+- `FakeForge::new(root)` makes a scenario directory and a `$BROWSER` recorder under `root`.
+- The setters (`github_pr_list`, `github_pr_view`, `gitlab_mr_list`, `gitlab_mr`, `gitlab_approvals`, `gitlab_pipeline_jobs`) write what the CLI prints (`Reply::Json`) or how it fails (`Reply::Fail`: exit code and stderr). Each write goes to a temporary name and is renamed, so a setter called while the app runs swaps the answer for the next call only.
+- `forge.env()` goes to `PtySession::open_with_env`: `PATH` with the scripts first, `WS_FAKE_FORGE_DIR`, and `BROWSER`. The update-check store, UI store, `XDG_CONFIG_HOME`, and theme mode isolation stay as in **Harness notes**.
+- `forge.calls()` gives the argv line of each CLI call. `forge.opened()` gives each URL the `$BROWSER` recorder got.
+- `set_origin(repo, url)` points a seeded repo's `origin` at a forge URL (`GITHUB_ORIGIN`, `GITLAB_ORIGIN`). Only `git remote` runs.
+
+`pty_fake_forge_shows_pr_badges` proves the harness against the shipped badge. The `fake_forge::tests` unit tests in the helper run the scripts directly.
+
+The PR status suite (`pty_pr_*`) adds two shared helpers:
+
+- `tests/common/pr_scenarios.rs` holds the answers of the six badge states (`Badge`) for a GitHub PR and a GitLab merge request, and of a closed one. `put_github` and `put_gitlab` move a branch to a state, also while the app runs: a transition test swaps the answers, presses no key, and waits for the next poll.
+- `tests/tui_tty_e2e/pr_support.rs` seeds the checkouts and reads the result off the cell grid: the badge column (the last content cell of the tree, in the boxed and the flat look), the ref left of it, its colours, the toast rows, the row flash, and the call log. `watch_quiet` proves an alert did not show by sampling the screen over a window.
+
+Tests that need polling pass `WS_STATUS_PR_POLL_MS` (300 ms, or 800 ms where a test needs a quiet gap between two poll cycles); the poll-off test passes `0`; the others leave it unset, so the default period (60 s or 180 s) never fires inside a test. The Tokyo Night colours of the baseline config are the oracle for glyph and flash colours.
+
+## Verify driver
+
+To watch the real binary run, against the same fake forge or against a live one, the verify skill drives it in a private tmux server: `.agents/skills/verify/SKILL.md` and `scripts/verify-tui.sh`. It is a test harness with the isolation rules of **Harness notes** (guarded by `crates/workspace-status/tests/release_watch.rs`), not the screenshot pipeline, and it does not replace a `pty_*` test.
+
 ## Harness notes
 
 - ASCII glyphs (`WS_STATUS_GLYPHS=ascii`) so CI does not depend on a Nerd Font. This is a test setting, not a product default. The spawn drops parent `NO_COLOR` / `FORCE_COLOR` so colour claims can paint.
@@ -46,6 +71,7 @@ Packages (Debian/Ubuntu): `xvfb xfce4-terminal xterm xdotool dbus-x11 openbox`. 
 - Isolated `XDG_STATE_HOME` plus a fresh `WS_STATUS_UPDATE_CHECK_STORE` so the GitHub Release prompt does not block mount and the operator XDG file is not written. CI: `crates/workspace-status/tests/release_watch.rs` (`tty_spawn_paths_isolate_update_check_store`). Demo GIF capture (`scripts/capture-demo-stills.sh`) uses the same isolation.
 - `open_with_env` overrides for `WS_STATUS_COMMENT_STORE` / `WS_STATUS_VIEWED_STORE` / `WS_STATUS_UI_STORE` win over `.e2e-state` defaults. Tests that omit those keys still use `.e2e-state/comments.json` and `.e2e-state/viewed-files.json`, and a new `.e2e-state/ui-state-<n>.json` for each spawn, so no spawn starts with a last-used theme or the activity sparkline on, and a palette theme pick or sparkline toggle in one spawn reaches a later spawn only when the test passes the same `WS_STATUS_UI_STORE` to both. The desktop harness and `scripts/capture-demo-stills.sh` remove their UI-state store before each launch. CI: `tty_spawn_paths_isolate_ui_store`, `tty_spawn_paths_drop_old_theme_store_name`.
 - Parent `WS_STATUS_WORKSPACE` is dropped so the fixture cwd is the workspace root. CI: `tty_spawn_paths_isolate_workspace_env`.
+- Parent `WS_STATUS_PR_POLL_MS` is dropped (PTY and desktop harness; the verify driver pins it to `0`), so a test that leaves it unset never polls; a test that wants polling passes it. CI: `tty_spawn_paths_drop_parent_pr_poll_period`.
 - `XDG_CONFIG_HOME` points at a `.e2e-config` dir in the fixture, so an operator user config file (`my-workspace-status/config.json`) cannot change the fixture's settings. `open_with_env` may override it. Demo GIF capture uses `tmp/demo-stills-stage/config`. CI: `tty_spawn_paths_isolate_user_config`.
 - Before each spawn, the PTY and desktop harnesses write `BASELINE_USER_CONFIG` (`harness.rs`) into that dir: `{"theme":"tokyo-night","themeMode":"dark","viewDefaults":{"background":"terminal"}}`, the v0.1.244 look. A change to the shipped default theme or background does not move the existing tests. `themeMode` `dark` keeps the terminal background out of the colours: the desktop xterm is white, and the default `auto` would pick the light twin there. A parent `WS_STATUS_THEME` or `WS_STATUS_THEME_MODE` is dropped; one the test passes still beats the file (CI: `tty_spawn_paths_pin_theme_mode`). When the config file already exists (the test wrote it), the harness keeps it unchanged: the test owns the whole file. `PtySession::open_size_with_config(..., UserConfig::Own)` writes no file, for tests of the shipped look.
 - Parent `VISUAL` is dropped. `e` reads `$VISUAL` before `$EDITOR`, so an operator value would outrank the stub `EDITOR` a test passes.

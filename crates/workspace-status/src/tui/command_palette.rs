@@ -397,6 +397,49 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
+        title: "Open PR CI",
+        keys: "gc",
+        group: CommandGroup::Git,
+        action: Action::OpenPullRequestCi,
+        aliases: &[
+            "checks",
+            "pipeline",
+            "pull request",
+            "merge request",
+            "browser",
+            "github",
+            "gitlab",
+        ],
+        scope: CommandScope::NoHighlight,
+    },
+    // `y` and `r` run these only inside a pinned PR popover; elsewhere
+    // those keys copy comments and refresh. So the rows show no chip, and
+    // the popover lines paint `y` and `r` themselves.
+    PaletteCommand {
+        title: "Copy PR URL",
+        keys: "",
+        group: CommandGroup::Git,
+        action: Action::CopyPullRequestUrl,
+        aliases: &["pull request", "merge request", "link", "yank"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "Refresh this PR",
+        keys: "",
+        group: CommandGroup::Git,
+        action: Action::RefreshPullRequest,
+        aliases: &["pull request", "merge request", "reload"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "Refresh PRs",
+        keys: "",
+        group: CommandGroup::Git,
+        action: Action::RefreshPullRequests,
+        aliases: &["pull requests", "merge requests", "reload"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
         title: "View remotely",
         keys: "gw",
         group: CommandGroup::Git,
@@ -1328,6 +1371,34 @@ mod tests {
                 CommandScope::NoHighlight,
             ),
             (
+                "Open PR CI",
+                "gc",
+                CommandGroup::Git,
+                Action::OpenPullRequestCi,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Copy PR URL",
+                "",
+                CommandGroup::Git,
+                Action::CopyPullRequestUrl,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Refresh this PR",
+                "",
+                CommandGroup::Git,
+                Action::RefreshPullRequest,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Refresh PRs",
+                "",
+                CommandGroup::Git,
+                Action::RefreshPullRequests,
+                CommandScope::NoHighlight,
+            ),
+            (
                 "View remotely",
                 "gw",
                 CommandGroup::Git,
@@ -1579,7 +1650,7 @@ mod tests {
             .filter(|command| !matches!(command.action, Action::SetTheme(_)))
             .collect();
         assert_eq!(rows.len(), wanted.len());
-        assert_eq!(wanted.len(), 71);
+        assert_eq!(wanted.len(), 75);
         assert_eq!(PALETTE_COMMANDS.len(), wanted.len() + THEME_IDS.len());
         for (i, (title, keys, group, action, scope)) in wanted.iter().enumerate() {
             let command = rows[i];
@@ -1692,6 +1763,16 @@ mod tests {
             ("browser", "Open PR"),
             ("github", "Open PR"),
             ("gitlab", "Open PR"),
+            ("checks", "Open PR CI"),
+            ("pipeline", "Open PR CI"),
+            ("merge request", "Open PR CI"),
+            ("link", "Copy PR URL"),
+            ("yank", "Copy PR URL"),
+            ("pull request", "Refresh this PR"),
+            ("reload", "Refresh this PR"),
+            ("reload", "Refresh PRs"),
+            ("pull requests", "Refresh PRs"),
+            ("merge requests", "Refresh PRs"),
         ] {
             assert!(titles(query).contains(&title), "{query} -> {title}");
         }
@@ -1757,11 +1838,22 @@ mod tests {
         let landing = |query: &str| landing_in(query, false);
         assert!(titles("pull").contains(&"Open PR"), "alias still finds it");
         assert!(!landing("pull").contains(&"Open PR"));
-        assert_eq!(landing("pull").first(), Some(&"Pull behind"));
-        assert_eq!(landing("pull request"), vec!["Open PR"]);
-        assert_eq!(landing("merge request"), vec!["Open PR"]);
+        assert_eq!(landing("pull"), vec!["Pull behind"], "only Pull names it");
+        // Every PR row only aliases these, so all of them land.
+        let pr_rows = vec![
+            "Open PR",
+            "Open PR CI",
+            "Copy PR URL",
+            "Refresh this PR",
+            "Refresh PRs",
+        ];
+        assert_eq!(landing("pull request"), pr_rows);
+        assert_eq!(landing("merge request"), pr_rows);
+        assert_eq!(landing("refresh pr"), vec!["Refresh PRs"]);
         assert!(landing("PR").contains(&"Open PR"));
         assert_eq!(landing("gx"), vec!["Open PR"]);
+        assert_eq!(landing("gc"), vec!["Open PR CI"]);
+        assert_eq!(landing("pipeline"), vec!["Open PR CI"]);
         assert!(!landing("merge").contains(&"Open PR"));
         assert_eq!(
             landing("").len(),

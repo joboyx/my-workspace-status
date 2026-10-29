@@ -2580,6 +2580,30 @@ mod tests {
         }
     }
 
+    /// A PR change toast holds on `panel`: its state glyph, `repo` text,
+    /// and `muted` detail stay readable there on dark and light themes.
+    /// (On the add-flash peak several of them fall under 2:1.)
+    #[test]
+    fn pr_toast_colors_meet_floor_on_the_panel() {
+        const TOAST_FLOOR: f64 = 3.0;
+        for id in THEME_IDS {
+            let pal = id.palette();
+            for (role, fg) in [
+                ("repo", pal.repo),
+                ("muted", pal.muted),
+                ("deleted", pal.deleted),
+                ("added", pal.added),
+                ("branch_feature", pal.branch_feature),
+            ] {
+                let ratio = contrast_ratio(fg, pal.panel);
+                assert!(
+                    ratio >= TOAST_FLOOR,
+                    "{id:?} PR toast {role} on panel contrast {ratio:.2} < {TOAST_FLOOR}"
+                );
+            }
+        }
+    }
+
     /// Minimum contrast between a changed-word bg and its row bg.
     const WORD_VS_ROW_FLOOR: f64 = 1.25;
 

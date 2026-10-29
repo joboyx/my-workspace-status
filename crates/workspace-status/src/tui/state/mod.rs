@@ -1089,7 +1089,8 @@ pub struct AppState {
     pub(crate) diff_row_builds: std::cell::Cell<usize>,
 }
 
-fn unix_now() -> i64 {
+/// Wall clock now, in Unix seconds (0 before the epoch).
+pub(crate) fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -1113,6 +1114,7 @@ impl AppState {
         state.no_color = settings.no_color;
         state.undercurl = settings.undercurl;
         state.smooth_scroll = settings.smooth_scroll;
+        state.set_pr_poll_mode(settings.pr_poll);
         state.activity_sparkline = settings.activity_sparkline;
         state.saved_commit_msg_lines = settings.commit_msg_lines;
         if let Some(lines) = settings.commit_msg_lines {
@@ -1402,7 +1404,11 @@ impl AppState {
         } else if self.doctor.is_some() {
             InputMode::Doctor
         } else if self.popover_pinned() {
-            InputMode::Popover
+            if self.chord_pending(self.g_pending_at) {
+                InputMode::PopoverGPending
+            } else {
+                InputMode::Popover
+            }
         } else if self.search_mode {
             InputMode::SearchPrompt
         } else if self.diff_visual_anchor.is_some()

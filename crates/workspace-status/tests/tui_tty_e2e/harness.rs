@@ -237,6 +237,7 @@ impl PtySession {
                     | "WS_STATUS_THEME"
                     | "WS_STATUS_THEME_MODE"
                     | "WS_STATUS_TERM_PROGRESS"
+                    | "WS_STATUS_PR_POLL_MS"
                     | "VISUAL"
             ) {
                 continue;
@@ -249,6 +250,8 @@ impl PtySession {
         // An operator WS_STATUS_THEME or WS_STATUS_THEME_MODE would beat the
         // baseline config theme or theme mode, and an operator
         // WS_STATUS_TERM_PROGRESS would turn off the default-on progress.
+        // An operator WS_STATUS_PR_POLL_MS would poll in a test that leaves
+        // it unset; a test that wants polling passes it.
         // `e` reads $VISUAL before $EDITOR, so an operator VISUAL would
         // outrank the stub EDITOR a test passes.
         cmd.env_remove("NO_COLOR");
@@ -257,6 +260,7 @@ impl PtySession {
         cmd.env_remove("WS_STATUS_THEME");
         cmd.env_remove("WS_STATUS_THEME_MODE");
         cmd.env_remove("WS_STATUS_TERM_PROGRESS");
+        cmd.env_remove("WS_STATUS_PR_POLL_MS");
         cmd.env_remove("VISUAL");
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");

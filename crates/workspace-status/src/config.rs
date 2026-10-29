@@ -108,6 +108,9 @@ pub struct RuntimeKeys {
     /// `smoothScroll` (`WS_STATUS_SMOOTH_SCROLL`): Ctrl-d / Ctrl-u glide the
     /// viewport (on) or jump (off).
     pub smooth_scroll: Option<bool>,
+    /// `prPolling`: PR polling on or off. `WS_STATUS_PR_POLL_MS` (a period,
+    /// `0` off) wins over it.
+    pub pr_polling: Option<bool>,
 }
 
 impl RuntimeKeys {
@@ -128,6 +131,7 @@ impl RuntimeKeys {
             git: over.git.or(self.git),
             term_progress: over.term_progress.or(self.term_progress),
             smooth_scroll: over.smooth_scroll.or(self.smooth_scroll),
+            pr_polling: over.pr_polling.or(self.pr_polling),
         }
     }
 }
@@ -203,6 +207,7 @@ struct RawConfig {
     git: Option<serde_json::Value>,
     term_progress: Option<serde_json::Value>,
     smooth_scroll: Option<serde_json::Value>,
+    pr_polling: Option<serde_json::Value>,
 }
 
 /// Deserialize a key that is present, `null` included, as `Some`.
@@ -617,6 +622,7 @@ fn parse_runtime_keys(
         git: parse_git_key(file, parsed.git.take(), home)?,
         term_progress: parse_bool_key(file, "termProgress", parsed.term_progress.take())?,
         smooth_scroll: parse_bool_key(file, "smoothScroll", parsed.smooth_scroll.take())?,
+        pr_polling: parse_bool_key(file, "prPolling", parsed.pr_polling.take())?,
     })
 }
 
@@ -1791,7 +1797,7 @@ mod tests {
     fn runtime_keys_parse_valid_values() {
         let cfg = load_layered_home(
             Some(
-                r#"{"theme":" dracula ","themeMode":"light","glyphs":"ascii","watchMs":0,"fetchMs":60000,"fetchConcurrency":4,"updateCheck":false,"updateCheckStore":"~/state/update-check.json","commentStore":"/var/ws/comments.json","viewedStore":"~/viewed.json","uiStore":"~/state/ui-state.json","git":"git-wrapper","termProgress":false,"smoothScroll":false}"#,
+                r#"{"theme":" dracula ","themeMode":"light","glyphs":"ascii","watchMs":0,"fetchMs":60000,"fetchConcurrency":4,"updateCheck":false,"updateCheckStore":"~/state/update-check.json","commentStore":"/var/ws/comments.json","viewedStore":"~/viewed.json","uiStore":"~/state/ui-state.json","git":"git-wrapper","termProgress":false,"smoothScroll":false,"prPolling":false}"#,
             ),
             None,
             Some("/home/demo"),
@@ -1814,7 +1820,12 @@ mod tests {
                 git: Some(PathBuf::from("git-wrapper")),
                 term_progress: Some(false),
                 smooth_scroll: Some(false),
+                pr_polling: Some(false),
             }
+        );
+        assert_eq!(
+            load_runtime_key("prPolling", "true").unwrap().pr_polling,
+            Some(true)
         );
         assert_eq!(
             load_runtime_key("glyphs", r#""nerd""#).unwrap().glyphs,
@@ -1926,6 +1937,8 @@ mod tests {
             ("git", r#""~""#, git_rule.to_string()),
             ("git", r#""   ""#, git_rule.to_string()),
             ("git", "[]", git_rule.to_string()),
+            ("prPolling", "0", "must be true or false".to_string()),
+            ("prPolling", r#""off""#, "must be true or false".to_string()),
         ];
         for (key, raw, tail) in cases {
             let err = load_runtime_key(key, raw).unwrap_err();
@@ -2066,6 +2079,20 @@ mod tests {
             RuntimeKeys::default(),
             "null counts as omitted"
         );
+    }
+
+    #[test]
+    fn pr_polling_is_allowed_in_either_file_and_the_workspace_wins() {
+        let cfg = load_layered(None, Some(r#"{"hiddenPaths":[],"prPolling":false}"#)).unwrap();
+        assert_eq!(cfg.runtime.pr_polling, Some(false), "workspace file");
+        let cfg = load_layered(Some(r#"{"prPolling":false}"#), None).unwrap();
+        assert_eq!(cfg.runtime.pr_polling, Some(false), "user file");
+        let cfg = load_layered(
+            Some(r#"{"prPolling":false}"#),
+            Some(r#"{"hiddenPaths":[],"prPolling":true}"#),
+        )
+        .unwrap();
+        assert_eq!(cfg.runtime.pr_polling, Some(true), "workspace wins");
     }
 
     #[test]

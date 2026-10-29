@@ -112,9 +112,15 @@ pub enum InputMode {
         results: bool,
     },
     /// Pinned icon popover (click on an icon, or `gh`): `j` / `k` move,
-    /// Enter runs, `y` copies the focused line, Esc closes. The mouse stays
-    /// live (click, drag-select, wheel). A hover peek is not a mode.
+    /// Enter runs, `y` copies the focused line, `r` refreshes the PR of a
+    /// PR section, `g` arms [`Self::PopoverGPending`], Esc closes. The
+    /// mouse stays live (click, drag-select, wheel). A hover peek is not a
+    /// mode.
     Popover,
+    /// `g` armed inside a pinned popover: `x` opens the PR of its PR
+    /// section and `c` its CI page, like `gx` / `gc` on the row. Any other
+    /// key (Esc, right click) only ends the chord; the popover stays.
+    PopoverGPending,
     /// Doctor setup checkup overlay: `j` / `k` / arrows / page keys / `g` /
     /// `G` move, `y` copies the focused fix line, `r` re-runs, Esc / `q`
     /// close. Every other key is swallowed.
@@ -126,11 +132,16 @@ fn same_g_chord_key(last: Option<(KeyCode, KeyModifiers)>, key: &KeyEvent) -> bo
 }
 
 fn records_g_chord_press(mode: InputMode, key: &KeyEvent) -> bool {
-    matches!(mode, InputMode::GPending { .. })
-        || (matches!(
-            mode,
-            InputMode::Normal { .. } | InputMode::ZPending { .. } | InputMode::DiffVisual
-        ) && matches!(key.code, KeyCode::Char('g')))
+    matches!(
+        mode,
+        InputMode::GPending { .. } | InputMode::PopoverGPending
+    ) || (matches!(
+        mode,
+        InputMode::Normal { .. }
+            | InputMode::ZPending { .. }
+            | InputMode::DiffVisual
+            | InputMode::Popover
+    ) && matches!(key.code, KeyCode::Char('g')))
 }
 
 #[cfg(test)]
@@ -353,7 +364,9 @@ pub fn event_to_action_with(
                 Action::PopoverClose
             } else if matches!(
                 mode,
-                InputMode::ZPending { .. } | InputMode::GPending { .. }
+                InputMode::ZPending { .. }
+                    | InputMode::GPending { .. }
+                    | InputMode::PopoverGPending
             ) && mouse.kind == MouseEventKind::Down(MouseButton::Right)
             {
                 // Right-click is Esc; in a pending chord, Esc only ends the chord.
@@ -588,6 +601,7 @@ fn repeat_maps_to_action(key: KeyEvent, mode: InputMode) -> bool {
         | InputMode::BlameMenu
         | InputMode::CommentExport
         | InputMode::Popover
+        | InputMode::PopoverGPending
         | InputMode::Doctor => false,
     }
 }
@@ -735,6 +749,7 @@ fn key_to_action(
             KeyCode::Char('t') if !has_command_modifier(key) => Action::NextTab,
             KeyCode::Char('T') if !has_command_modifier(key) => Action::PreviousTab,
             KeyCode::Char('x') if !has_command_modifier(key) => Action::OpenPullRequest,
+            KeyCode::Char('c') if !has_command_modifier(key) => Action::OpenPullRequestCi,
             KeyCode::Char('w') if !has_command_modifier(key) => Action::ViewRemotely,
             KeyCode::Char('h') if !has_command_modifier(key) => Action::PopoverOpenFocused,
             KeyCode::Char(c @ '1'..='9') if !has_command_modifier(key) => {
@@ -865,8 +880,19 @@ fn key_to_action(
             KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::PopoverMove(-1),
             KeyCode::Enter => Action::PopoverRun,
             KeyCode::Char('y') => Action::PopoverCopyLine,
+            // Refresh this PR; a popover with no PR section ignores it.
+            KeyCode::Char('r') => Action::RefreshPullRequest,
+            // `gx` / `gc` on the popover's PR section.
+            KeyCode::Char('g') => Action::ArmGChord,
             KeyCode::Esc => Action::PopoverClose,
             _ => Action::None,
+        },
+        // Only `x` and `c` complete the chord; any other key ends it and
+        // does nothing else (it never reaches the popover keys).
+        InputMode::PopoverGPending => match key.code {
+            KeyCode::Char('x') if !has_command_modifier(key) => Action::OpenPullRequest,
+            KeyCode::Char('c') if !has_command_modifier(key) => Action::OpenPullRequestCi,
+            _ => Action::GChordCancel,
         },
         InputMode::Doctor => doctor_key_action(key),
         InputMode::QuickOpen => quick_open_key_action(key),
@@ -2683,6 +2709,20 @@ mod tests {
             Action::ViewRemotely
         );
         assert_eq!(
+            event_to_action(&key(KeyCode::Char('c')), pending, false, false),
+            Action::OpenPullRequestCi
+        );
+        assert_eq!(
+            event_to_action_ex(&key(KeyCode::Char('c')), pending, false, true, false, true),
+            Action::OpenPullRequestCi,
+            "gc on a graph commit opens CI, not graph c (create branch)"
+        );
+        assert_eq!(
+            event_to_action_ex(&key(KeyCode::Char('c')), normal(), false, true, false, true),
+            Action::GraphCreateBranch,
+            "bare c on a graph commit still creates a branch"
+        );
+        assert_eq!(
             event_to_action(&key(KeyCode::Char('x')), normal(), false, false),
             Action::Revert,
             "bare x stays revert"
@@ -2969,16 +3009,59 @@ mod tests {
             (key(KeyCode::Up), Action::PopoverMove(-1)),
             (key(KeyCode::Enter), Action::PopoverRun),
             (key(KeyCode::Char('y')), Action::PopoverCopyLine),
+            (key(KeyCode::Char('r')), Action::RefreshPullRequest),
+            (key(KeyCode::Char('g')), Action::ArmGChord),
+            (key(KeyCode::Char('c')), Action::None),
+            (key(KeyCode::Char('x')), Action::None),
             (key(KeyCode::Esc), Action::PopoverClose),
             (key(KeyCode::Char('p')), Action::None),
             (key(KeyCode::Char('q')), Action::None),
             (key(KeyCode::Char(':')), Action::None),
             (ctrl(KeyCode::Char('j')), Action::None),
             (ctrl(KeyCode::Char('p')), Action::None),
+            (ctrl(KeyCode::Char('g')), Action::None),
             (ctrl(KeyCode::Char('c')), Action::CtrlC),
         ] {
             assert_eq!(at(event.clone()), want, "{event:?}");
         }
+    }
+
+    /// `g` in a pinned popover: `x` and `c` complete `gx` / `gc`; any
+    /// other key, Esc, and a right click only end the chord.
+    #[test]
+    fn popover_g_chord_keys() {
+        let mode = InputMode::PopoverGPending;
+        let at = |event: Event| event_to_action(&event, mode, false, false);
+        for (event, want) in [
+            (key(KeyCode::Char('x')), Action::OpenPullRequest),
+            (key(KeyCode::Char('c')), Action::OpenPullRequestCi),
+            (key(KeyCode::Esc), Action::GChordCancel),
+            (key(KeyCode::Char('j')), Action::GChordCancel),
+            (key(KeyCode::Enter), Action::GChordCancel),
+            (key(KeyCode::Char('y')), Action::GChordCancel),
+            (key(KeyCode::Char('g')), Action::GChordCancel),
+            (key(KeyCode::Char('w')), Action::GChordCancel),
+            (ctrl(KeyCode::Char('x')), Action::GChordCancel),
+            (ctrl(KeyCode::Char('c')), Action::CtrlC),
+            (
+                mouse(MouseEventKind::Down(MouseButton::Right), 4, 4),
+                Action::GChordCancel,
+            ),
+        ] {
+            assert_eq!(at(event.clone()), want, "{event:?}");
+        }
+        // The arming `g` and the second key both feed the echo guard.
+        let mut echo = GChordEchoState::default();
+        let g = key(KeyCode::Char('g'));
+        assert!(!drop_protocol_dup_g_chord_press(
+            &mut echo,
+            InputMode::Popover,
+            &g
+        ));
+        assert!(
+            drop_protocol_dup_g_chord_press(&mut echo, mode, &g),
+            "a typeless echo of the arming g is dropped"
+        );
     }
 
     #[test]
@@ -4186,6 +4269,7 @@ mod tests {
             (pending_g(), 0, Char('t'), Action::NextTab),
             (pending_g(), 0, Char('T'), Action::PreviousTab),
             (pending_g(), 0, Char('x'), Action::OpenPullRequest),
+            (pending_g(), 0, Char('c'), Action::OpenPullRequestCi),
             (pending_g(), 0, Char('w'), Action::ViewRemotely),
             (pending_g(), 0, Char('1'), Action::JumpToTab(1)),
             (pending_g(), 0, Char('9'), Action::JumpToTab(9)),

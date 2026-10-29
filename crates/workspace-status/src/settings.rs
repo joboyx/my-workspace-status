@@ -22,6 +22,7 @@ use crate::parallel::fetch_concurrency;
 use crate::tui::comments::comment_store_path_from_env;
 use crate::tui::fetch::fetch_interval_ms;
 use crate::tui::fetch_claim::background_fetch_store_path_from_env;
+use crate::tui::pr_poll::{pr_poll_mode, PrPollMode};
 use crate::tui::theme::{theme_id_from, ThemeId};
 use crate::tui::ui_state_store::{load_ui_state, ui_store_path_from_env};
 use crate::tui::undercurl::undercurl_enabled;
@@ -87,6 +88,9 @@ pub struct Settings {
     /// Ctrl-d / Ctrl-u glide the viewport over a few frames
     /// (`WS_STATUS_SMOOTH_SCROLL` / `smoothScroll`), default on. Off jumps.
     pub(crate) smooth_scroll: bool,
+    /// PR polling (`WS_STATUS_PR_POLL_MS` / `prPolling`), default hot / calm
+    /// ([`crate::tui::pr_poll::pr_poll_mode`]).
+    pub(crate) pr_poll: PrPollMode,
 }
 
 impl Settings {
@@ -139,9 +143,13 @@ impl Settings {
             smooth_scroll: env_bool(get(SMOOTH_SCROLL_ENV).as_deref())
                 .or(keys.smooth_scroll)
                 .unwrap_or(true),
+            pr_poll: pr_poll_mode(get(PR_POLL_ENV).as_deref(), keys.pr_polling),
         }
     }
 }
+
+/// Env var that overrides the PR poll period (`0` turns polling off).
+const PR_POLL_ENV: &str = "WS_STATUS_PR_POLL_MS";
 
 /// Boolean env value: `0`, `false`, or `off` is false; `1`, `true`, or `on`
 /// is true (trimmed, any case). Unset or any other value is `None`, so the
@@ -238,6 +246,7 @@ mod tests {
             git: Some(PathBuf::from("/cfg/git")),
             term_progress: Some(false),
             smooth_scroll: Some(false),
+            pr_polling: Some(false),
         }
     }
 
@@ -277,6 +286,7 @@ mod tests {
         assert_eq!(got.git, resolve_git_binary(None, None));
         assert!(got.term_progress, "terminal progress is on by default");
         assert!(got.smooth_scroll, "smooth scroll is on by default");
+        assert_eq!(got.pr_poll, PrPollMode::HotCalm, "PR polling is on");
         assert!(
             !got.activity_sparkline,
             "activity sparkline is off by default"
@@ -310,6 +320,7 @@ mod tests {
                 undercurl: false,
                 term_progress: false,
                 smooth_scroll: false,
+                pr_poll: PrPollMode::Off,
             }
         );
     }
@@ -331,6 +342,7 @@ mod tests {
             ("WORKSPACE_STATUS_GIT", "/env/git"),
             ("WS_STATUS_TERM_PROGRESS", "on"),
             ("WS_STATUS_SMOOTH_SCROLL", "1"),
+            ("WS_STATUS_PR_POLL_MS", "300"),
         ];
         let got = Settings::resolve(&all_keys(), env_of(&env));
         assert_eq!(
@@ -357,6 +369,7 @@ mod tests {
                 undercurl: false,
                 term_progress: true,
                 smooth_scroll: true,
+                pr_poll: PrPollMode::Every(300),
             }
         );
     }
@@ -378,6 +391,7 @@ mod tests {
             ("WORKSPACE_STATUS_GIT", ""),
             ("WS_STATUS_TERM_PROGRESS", "maybe"),
             ("WS_STATUS_SMOOTH_SCROLL", "maybe"),
+            ("WS_STATUS_PR_POLL_MS", "soon"),
         ];
         let got = Settings::resolve(&all_keys(), env_of(&env));
         assert_eq!(got, Settings::resolve(&all_keys(), env_of(&[])));
@@ -617,6 +631,40 @@ mod tests {
             !resolve(Some(false), &[("WS_STATUS_SMOOTH_SCROLL", "yes")]),
             "an unknown env value falls through to config"
         );
+    }
+
+    #[test]
+    fn pr_poll_env_beats_config() {
+        let resolve = |polling: Option<bool>, env: &[(&str, &str)]| {
+            let keys = RuntimeKeys {
+                pr_polling: polling,
+                ..RuntimeKeys::default()
+            };
+            Settings::resolve(&keys, env_of(env)).pr_poll
+        };
+        assert_eq!(resolve(None, &[]), PrPollMode::HotCalm);
+        assert_eq!(
+            resolve(Some(false), &[]),
+            PrPollMode::Off,
+            "config prPolling false"
+        );
+        assert_eq!(
+            resolve(Some(false), &[("WS_STATUS_PR_POLL_MS", "300")]),
+            PrPollMode::Every(300),
+            "a valid env period wins over config off"
+        );
+        assert_eq!(
+            resolve(Some(true), &[("WS_STATUS_PR_POLL_MS", "0")]),
+            PrPollMode::Off,
+            "env 0 wins over config on"
+        );
+        for bad in ["", "-1", "abc"] {
+            assert_eq!(
+                resolve(Some(false), &[("WS_STATUS_PR_POLL_MS", bad)]),
+                PrPollMode::Off,
+                "env {bad:?} falls through to config"
+            );
+        }
     }
 
     #[test]

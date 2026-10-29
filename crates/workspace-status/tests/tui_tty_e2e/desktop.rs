@@ -81,6 +81,8 @@ impl DesktopSession {
             "unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE \
              WS_STATUS_THEME WS_STATUS_THEME_MODE\n",
         );
+        // A parent PR poll period would poll the fixture's forge remotes.
+        script.push_str("unset WS_STATUS_PR_POLL_MS\n");
         script.push_str("export TERM=xterm-256color COLORTERM=truecolor\n");
         script.push_str("export LANG=C.UTF-8 LC_ALL=C.UTF-8\n");
         script.push_str("export WS_STATUS_GLYPHS=ascii\n");

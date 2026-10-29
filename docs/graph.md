@@ -28,8 +28,8 @@ clones only that row (the focused-row lookups use it).
 | `GraphCell` | One gutter column: glyph, colour lane, role |
 | `LaidOutCommit` | Lane assignment plus stem metadata for one commit |
 | `GraphWidget` | Ratatui `Widget` over a `GraphModel` |
-| `IconSpan` | Painted cells of one graph icon (`GraphIconKind`, row index or `None` for the sync header, x, y, width, `part`, chip `target`), from `render_with_icon_spans` |
-| `GraphIconKind` | Commit / HEAD / stash node, uncommitted glyph, worktree glyph, open / resolved comment mark, row badge, local / default / remote / tag chip, checkout-and-sync mark run, detached `[HEAD]`, `[+N]`, sync header, footer more-lines hint |
+| `IconSpan` | Painted cells of one graph icon (`GraphIconKind`, row index or `None` for the sync header and its chip, x, y, width, `part`, chip `target`), from `render_with_icon_spans` |
+| `GraphIconKind` | Commit / HEAD / stash node, uncommitted glyph, worktree glyph, open / resolved comment mark, row badge, local / default / remote / tag chip, checkout-and-sync mark run, detached `[HEAD]`, `[+N]`, sync header, header chip, footer more-lines hint |
 | `LabelPart` | One styled run: text, `LabelKind`, and `target` (`PartTarget`: the chip the run belongs to, or `None`) |
 | `meta_columns_parts` | The right-meta runs of a spacer: ` hash` (`Meta`), ` date` (`MetaDate`), ` author` (`MetaAuthor`). `meta_columns_text` is their text |
 | `PartTarget` | Chip identity: `Chip(refs)` (one ref, or a local branch and its same-name remote), `Marks { branch, checkout, remote }`, `DetachedHead`, `Overflow(hidden chips)` |
@@ -89,7 +89,7 @@ The widget does not use reverse video for the cursor.
 `GraphWidget::col_offset` skips label columns (gutter stays put) so long
 subjects can pan without growing the row.
 `GraphWidget::row_badges` takes `(visible-row index, glyph, colour)`
-entries and paints the glyph flush right on those selectable rows: in the
+entries and paints the glyph, bold, flush right on those selectable rows: in the
 last columns before the vertical scrollbar column, the same right edge that
 bounds the label. The label gets the columns left of the badge less one
 space and clips there, so a narrow pane cuts the label, never the badge.
@@ -108,15 +108,27 @@ under the horizontal scrollbar has no span. Pass the same entries to
 the glyph and space, so panning can bring the end of a long label into view
 left of the badge. The TUI badges
 `GraphRow::Worktree` rows whose painted branch is the checkout's current
-branch and that have a known PR (open, approved, or merged), and records
-the spans for Ctrl+click. A graph loaded before a branch switch paints the
-old branch and gets no badge. Commit rows get no badge.
+branch and that have a known PR (open or merged), in the glyph and colour of
+the PR state (muted when stale), and records the spans for Ctrl+click. A
+graph loaded before a branch switch paints the old branch and gets no badge.
+Commit rows get no badge.
+
+`GraphWidget::header_chip` takes candidate `Line`s, widest first, for a run
+flush right on the sync header line. The first candidate that fits right of
+the branch and sync marks, with `HEADER_CHIP_GAP` (2) blank columns between,
+paints in its own styles so that it ends at the right edge of the area; the
+sync text keeps its columns. When none fits, or no sync header shows, no run
+paints. The run does not pan. `render_with_icon_spans` returns one
+`GraphIconKind::HeaderChip` span over the painted run (its width tells which
+candidate). The TUI passes the PR chip of the graph's checkout (`<glyph> <ref>
+<state label>  ▸ <next action>`, then shorter forms) and turns the `<glyph>
+<ref>` head of the span into a PR icon hit and link.
 
 ### Icon spans
 
 `GraphWidget::render_with_icon_spans` paints like `render` and returns one
-`IconSpan` per graph icon on screen, top to bottom: the sync header, then
-per list line in paint order (node, comment mark, label glyphs and chips
+`IconSpan` per graph icon on screen, top to bottom: the sync header and its
+chip, then per list line in paint order (node, comment mark, label glyphs and chips
 left to right, then the badge at the right edge), then the selection
 footer's chips and hint.
 
@@ -132,6 +144,7 @@ footer's chips and hint.
 | `DetachedHeadChip` | Detached `[HEAD]` |
 | `OverflowChip` | `[+N]`. `target` is `PartTarget::Overflow` with the target of each hidden chip |
 | `SyncHeader` | The sync header text (branch and marks). `row_index` is `None` |
+| `HeaderChip` | The `header_chip` run, flush right on the sync header line. `row_index` is `None` |
 | `MoreBelow` | The footer's `<more_below><K>` hint, without its leading blank |
 
 Rails, junctions, spacer gutter cells, and blanks are chrome: they have

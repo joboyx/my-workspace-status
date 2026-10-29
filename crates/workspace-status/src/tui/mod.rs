@@ -36,6 +36,8 @@ mod ops;
 pub(crate) mod persist;
 mod pointer_shape;
 mod popover;
+pub(crate) mod pr_poll;
+mod pr_status;
 mod pull_request;
 mod quick_open;
 mod remote_view;
