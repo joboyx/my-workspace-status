@@ -220,6 +220,10 @@ impl IconHit {
     }
 }
 
+/// The plain left press of a tab kind (no popover, no icon): what a click
+/// on an icon runs to select its row before it pins.
+pub(super) type PlainClick = fn(&mut AppState, u16, u16) -> Effect;
+
 /// A painted PR badge: the PR view of an [`IconHit`].
 ///
 /// A tree repo / checkout row and a graph worktree row each record one
@@ -563,7 +567,8 @@ impl LayoutHit {
                 | IconTarget::GraphChip { .. }
                 | IconTarget::GraphSync
                 | IconTarget::GraphMoreLines(_)
-                | IconTarget::CommitDetailMoreLines(_) => None,
+                | IconTarget::CommitDetailMoreLines(_)
+                | IconTarget::LineComment { .. } => None,
             })
             .collect()
     }
@@ -1638,6 +1643,18 @@ impl AppState {
             } => Some((repo.as_str(), path.as_str(), Some(source))),
             _ => Some((self.diff_repo.as_deref()?, self.diff_path.as_deref()?, None)),
         }
+    }
+
+    /// Checkout, file path, and source of the line viewer in the right
+    /// pane: the active Explorer clean-file view (the worktree, source
+    /// `None`), else [`Self::open_diff_target`]. The line comments its
+    /// gutter marks are keyed to this scope.
+    pub(crate) fn line_viewer_target(&self) -> Option<(&str, &str, Option<&CommitFileSource>)> {
+        if let (Some(tab), Some(file)) = (self.tabs.active_explorer(), self.tabs.active_file_view())
+        {
+            return Some((tab.checkout.as_str(), file.rel.as_str(), None));
+        }
+        self.open_diff_target()
     }
 
     /// Comment state of diff `line` in the right pane: `None` when no line
@@ -3065,20 +3082,43 @@ impl AppState {
     /// the icon's popover; it never counts toward a double-click. Anything
     /// else is [`Self::click_at`].
     fn click(&mut self, col: u16, row: u16) -> Effect {
-        if let Some(effect) = self.popover_click(col, row) {
+        self.click_with(col, row, Self::click_at)
+    }
+
+    /// [`Self::click`] with `plain` as the plain click: [`Self::click_at`]
+    /// on a Workspace or compare tab, `explorer_click` on an Explorer tab.
+    pub(super) fn click_with(&mut self, col: u16, row: u16, plain: PlainClick) -> Effect {
+        if let Some(effect) = self.popover_click(col, row, plain) {
             return effect;
         }
         let Some(hit) = self.icon_hit_at(col, row).cloned() else {
-            return self.click_at(col, row);
+            return plain(self, col, row);
         };
         // Cleared before the select too, so an earlier press on this cell
         // (a Ctrl+click that found no PR) never makes this click a drill.
         self.last_click = None;
-        let selected = self.click_at(col, row);
+        let selected = plain(self, col, row);
         self.last_click = None;
         self.text_selection = None;
         let details = self.pin_icon(&hit);
         popover::then(selected, details)
+    }
+
+    /// True when (`col`, `row`) is on a painted line-gutter comment mark.
+    pub(super) fn on_line_comment_mark(&self, col: u16, row: u16) -> bool {
+        self.icon_hit_at(col, row)
+            .is_some_and(|hit| matches!(hit.target, IconTarget::LineComment { .. }))
+    }
+
+    /// The drag handle under (`col`, `row`) ([`hit_split`]). The in-diff
+    /// RULE's 3-column band covers the comment mark of the right cell next
+    /// to it: the mark wins, so a press there picks its row and pins
+    /// instead of moving the RULE.
+    fn split_hit_at(&self, col: u16, row: u16) -> SplitHit {
+        match hit_split(self.split_layout(), col, row) {
+            SplitHit::DiffSplit if self.on_line_comment_mark(col, row) => SplitHit::Other,
+            hit => hit,
+        }
     }
 
     /// Plain left press: tabs, dividers, scrollbars, then the row under it.
@@ -3091,7 +3131,7 @@ impl AppState {
         if let Some(index) = self.hit_tab(col, row) {
             return self.activate_tab(index);
         }
-        match hit_split(self.split_layout(), col, row) {
+        match self.split_hit_at(col, row) {
             SplitHit::Pane if self.background == BackgroundMode::Paint => {
                 // A flat divider press sits on a row's pad cell: resize only
                 // once the pointer moves, else the release clicks the row
@@ -6775,7 +6815,7 @@ impl AppState {
         {
             return None;
         }
-        hit_split(self.split_layout(), col, row).resize_edge()
+        self.split_hit_at(col, row).resize_edge()
     }
 
     /// True when a left press can land on a resize edge: mouse on, a

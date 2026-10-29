@@ -1293,6 +1293,24 @@ pub fn diff_line_comment_state(
     })
 }
 
+/// Line comments that cover painted diff `line`, in store order: the
+/// comments behind the mark [`diff_line_comment_state`] reads.
+pub fn diff_line_comments<'a>(
+    store: &'a CommentStore,
+    repo: &str,
+    primary: Option<&str>,
+    branch: Option<&str>,
+    path: &str,
+    source: Option<&CommitFileSource>,
+    line: u32,
+) -> Vec<&'a CommentEntry> {
+    store
+        .iter()
+        .filter(|(key, _)| diff_line_key_covers(repo, primary, branch, path, source, line, key))
+        .map(|(_, entry)| entry)
+        .collect()
+}
+
 fn diff_line_key_covers(
     repo: &str,
     primary: Option<&str>,

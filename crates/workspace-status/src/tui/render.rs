@@ -40,8 +40,9 @@ use super::comments::{
 use super::commit_files::FolderSummary;
 use super::diff::{
     cell_code_width, cell_sign, diff_failed_text, diff_pane_header, diff_pane_header_rows,
-    diff_pane_mode_label, diff_row_content_width, diff_wrap_row_heights, gutter_width,
-    section_header, wrap_viewport_start, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
+    diff_pane_mode_label, diff_row_content_width, diff_row_gutter_cells, diff_wrap_row_heights,
+    gutter_width, section_header, wrap_viewport_start, DiffCell, DiffCellKind, DiffRow,
+    DiffSection, DIFF_RULE,
 };
 use super::doctor::{summary as doctor_summary, Check, CheckGroup, CheckStatus};
 use super::drill::DrillView;
@@ -82,8 +83,8 @@ use super::search_files::{
 };
 use super::split::{
     diff_paint_width, diff_split_rule_x, list_hbar_rows, pane_widths, side_by_side_column_widths,
-    DiffMode, HScrollbar, HScrollbarLayout, ResizeEdge, VScrollbarLayout, MIN_PANE_COLS,
-    MIN_TERM_COLS, MIN_TERM_ROWS,
+    DiffMode, HScrollbar, HScrollbarLayout, ResizeEdge, VScrollbarLayout, DIFF_CURSOR_BAR_COLS,
+    MIN_PANE_COLS, MIN_TERM_COLS, MIN_TERM_ROWS,
 };
 use super::state::{
     revert_scope, AppState, CompareRevertTarget, FocusPane, IconHit, LayoutHit, PendingConfirm,
@@ -784,7 +785,9 @@ fn file_lines_ending_at(cursor: usize, height: usize, rows_of: impl Fn(usize) ->
 /// the vertical bar whether or not it shows, the bar paints there whenever
 /// the lines overflow (or the top is not the first line), and once the
 /// view pans off the left edge the horizontal bar takes the last row, left
-/// of the vertical bar's corner.
+/// of the vertical bar's corner (a 1-row body keeps its row and shows no
+/// horizontal bar). Each painted comment mark records an icon hit
+/// ([`IconTarget::LineComment`]).
 fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
     let palette = state.theme.palette();
     let inner = pane.inner;
@@ -845,9 +848,10 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
     };
     let lines = tab.lines();
     let col_offset = if wrap { 0 } else { tab.col_offset };
-    let hscroll = graph_hscroll_visible(col_offset);
-    // Line rows: not the horizontal bar row a panned view keeps.
-    let rows_h = inner.height.saturating_sub(u16::from(hscroll)).max(1);
+    // Line rows: not the horizontal bar row a panned view keeps. A 1-row
+    // body keeps its row and paints no bar, as a 1-row list does.
+    let hbar_rows = list_hbar_rows(inner.height, col_offset);
+    let rows_h = inner.height - hbar_rows;
     state.layout.file_view_height = rows_h;
     let height = usize::from(rows_h);
     // Comment mark, line number, one blank column.
@@ -901,6 +905,8 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
     let visual = state.file_visual_range();
     let mut painted: Vec<Line> = Vec::with_capacity(height);
     let mut row_lines = Vec::with_capacity(height);
+    let mut mark_hits = Vec::new();
+    let rows_right = inner.x.saturating_add(diff_paint_width(inner.width));
     for (line, text) in lines.iter().enumerate().take(end).skip(scroll) {
         let selected = line == tab.cursor;
         let hit = hits.binary_search(&line).is_ok();
@@ -929,6 +935,14 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
         for (part, &start) in starts.iter().enumerate() {
             if painted.len() >= height {
                 break;
+            }
+            if part == 0 {
+                // The mark is the gutter's first column; it does not pan.
+                let y = inner.y.saturating_add(painted.len() as u16);
+                let mark = state.line_comment_mark(n, comment);
+                mark_hits.extend(mark.and_then(|(kind, target)| {
+                    line_mark_hit(kind, target, inner.x, y, rows_right, state.ascii)
+                }));
             }
             let number = if part == 0 {
                 format!(
@@ -970,6 +984,7 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
         ..inner
     };
     frame.render_widget(Paragraph::new(painted), rows_area);
+    state.layout.icon_hits.extend(mark_hits);
     let curls = underlined_runs(frame.buffer_mut(), rows_area, palette.comment_underline());
     state.layout.undercurls.extend(curls);
     if state.background == BackgroundMode::Paint {
@@ -989,7 +1004,7 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
         let scroll_max = (last + 1).saturating_sub(file_lines_ending_at(last, height, rows_of));
         state.layout.file_view_vbar = paint_vscrollbar(buf, track, lines.len(), scroll, scroll_max);
     }
-    if hscroll && col_max > 0 {
+    if hbar_rows > 0 && col_max > 0 {
         let track = Rect {
             y: inner.bottom() - 1,
             width: inner.width.saturating_sub(u16::from(vscroll)).max(1),
@@ -3272,9 +3287,32 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         HashSet::new()
     };
     let search = state.theme.pills().filter;
+    // Comment marks sit in the first column of each cell's gutter: past
+    // the cursor bar, and for the right cell of a side-by-side row past
+    // the left cell and the RULE. The gutter does not pan.
+    let left_cell_x = body.x.saturating_add(DIFF_CURSOR_BAR_COLS);
+    let cell_xs = [
+        left_cell_x,
+        left_cell_x
+            .saturating_add(
+                side_by_side_column_widths(content_w, state.diff_split_fraction).left_width,
+            )
+            .saturating_add(1),
+    ];
+    let mut mark_hits = Vec::new();
     let mut painted: Vec<Line> = Vec::new();
     let mut i = skip;
     while painted.len() < line_h && i < rows.len() {
+        // A row's marks paint on its first visual line only.
+        let y = body.y.saturating_add(painted.len() as u16);
+        mark_hits.extend(diff_row_mark_hits(
+            state,
+            &rows[i],
+            split,
+            cell_xs,
+            y,
+            body.x.saturating_add(line_width),
+        ));
         let search_match = search_hits.contains(&i);
         let lines = paint_diff_row(
             &rows[i],
@@ -3306,6 +3344,7 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         height: line_h as u16,
     };
     frame.render_widget(Paragraph::new(painted), lines_area);
+    state.layout.icon_hits.extend(mark_hits);
     // Only commented code is underlined in the diff rows: those runs get
     // the curly upgrade after the draw.
     let curls = underlined_runs(frame.buffer_mut(), lines_area, palette.comment_underline());
@@ -3344,6 +3383,50 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         state.layout.diff_hscrollbar_width = hbar.width;
         state.layout.diff_col_max = hbar.col_max;
     }
+}
+
+/// Icon hits of the comment marks diff row `row` paints on screen row `y`:
+/// the mark glyph of each gutter cell whose line has a comment
+/// ([`AppState::diff_line_comment`]), the left cell's at `cell_xs[0]` and a
+/// side-by-side right cell's at `cell_xs[1]`. A mark that would end past
+/// `right` (the rows' right edge) records nothing.
+fn diff_row_mark_hits(
+    state: &AppState,
+    row: &DiffRow,
+    split: bool,
+    cell_xs: [u16; 2],
+    y: u16,
+    right: u16,
+) -> Vec<IconHit> {
+    diff_row_gutter_cells(row, split)
+        .into_iter()
+        .zip(cell_xs)
+        .filter_map(|(cell, x)| {
+            let line = cell.line_no?;
+            let (kind, target) = state.line_comment_mark(line, state.diff_line_comment(line))?;
+            line_mark_hit(kind, target, x, y, right, state.ascii)
+        })
+        .collect()
+}
+
+/// The icon hit of a line gutter comment mark of `kind` at (`x`, `y`): the
+/// glyph's columns only. `None` when the glyph would end past `right`.
+fn line_mark_hit(
+    kind: IconKind,
+    target: IconTarget,
+    x: u16,
+    y: u16,
+    right: u16,
+    ascii: bool,
+) -> Option<IconHit> {
+    let width = u16::try_from(visible_width(kind.glyph(ascii))).ok()?;
+    (x.saturating_add(width) <= right).then_some(IconHit {
+        y,
+        x,
+        width,
+        kind,
+        target,
+    })
 }
 
 /// Paint a 1-column vertical scrollbar in `track` for `content_len` lines
@@ -8579,6 +8662,453 @@ mod tests {
                     "{case}: back at the left edge the bar goes"
                 );
             }
+        }
+    }
+
+    /// Long line 2 so the view can pan; lines 1 to 4 are the same text in
+    /// [`GUTTER_DIFF`] and [`GUTTER_FILE`].
+    const GUTTER_LONG: &str = "new two xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+
+    /// A 4-line hunk whose line 3 (`ctx three`) is a context row: its
+    /// side-by-side row paints a gutter on both cells.
+    fn gutter_diff() -> String {
+        format!("@@ -1,4 +1,4 @@\n ctx one\n-old two\n+{GUTTER_LONG}\n ctx three\n ctx four\n")
+    }
+
+    /// The clean-file twin of [`gutter_diff`]'s new side.
+    const GUTTER_FILE: [&str; 4] = ["ctx one", GUTTER_LONG, "ctx three", "ctx four"];
+
+    /// One line viewer the gutter comment-mark test drives.
+    struct GutterSurface {
+        /// Surface id in the `icon-popovers` registry table.
+        id: &'static str,
+        /// Tab and pane the case runs on, for messages.
+        name: &'static str,
+        /// A state that shows [`gutter_diff`] (or [`GUTTER_FILE`]).
+        open: fn() -> AppState,
+    }
+
+    /// Every line viewer with a comment-mark gutter: the file diff
+    /// (`draw_diff_pane`) on each tab that paints one, and the Explorer
+    /// clean-file view (`draw_file_body`).
+    const GUTTER_SURFACES: [GutterSurface; 5] = [
+        GutterSurface {
+            id: "diff-gutter",
+            name: "workspace diff",
+            open: || {
+                let mut state = two_pane_diff_state();
+                state.set_diff(
+                    "app".into(),
+                    "README.md".into(),
+                    super::super::diff::DiffContent::from_unified(gutter_diff()),
+                );
+                state
+            },
+        },
+        GutterSurface {
+            id: "diff-gutter",
+            name: "depth-2 diff",
+            open: || {
+                let mut state = two_pane_files_state();
+                state.open_commit_diff(
+                    "app".into(),
+                    super::super::drill::CommitFileSource::Commit {
+                        commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                    },
+                    vec![super::super::drill::CommitFile {
+                        status: "M".into(),
+                        path: "README.md".into(),
+                        old_path: None,
+                        stat: None,
+                    }],
+                    0,
+                    "README.md".into(),
+                    super::super::diff::DiffContent::from_unified(gutter_diff()),
+                );
+                state
+            },
+        },
+        GutterSurface {
+            id: "diff-gutter",
+            name: "compare diff",
+            open: || {
+                let mut state = two_pane_diff_state();
+                state
+                    .tabs
+                    .open_or_focus("app".into(), "main".into(), "HEAD".into());
+                let tab = state.tabs.active_compare_mut().unwrap();
+                tab.loading = false;
+                tab.path = Some("README.md".into());
+                tab.files = vec![super::super::drill::CommitFile {
+                    status: "M".into(),
+                    path: "README.md".into(),
+                    old_path: None,
+                    stat: None,
+                }];
+                tab.source = Some(super::super::drill::CommitFileSource::Compare {
+                    base_ref: "main".into(),
+                    head_ref: "HEAD".into(),
+                    base_tip: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                    merge_base: "cccccccccccccccccccccccccccccccccccccccc".into(),
+                    head: "dddddddddddddddddddddddddddddddddddddddd".into(),
+                });
+                tab.content = super::super::diff::DiffContent::from_compare_lines(
+                    gutter_diff().lines().map(String::from).collect(),
+                );
+                state
+            },
+        },
+        GutterSurface {
+            id: "diff-gutter",
+            name: "explorer diff",
+            open: || explorer_preview_state("README.md", Some(&gutter_diff())),
+        },
+        GutterSurface {
+            id: "file-gutter",
+            name: "explorer clean file",
+            open: || file_view_state(&GUTTER_FILE),
+        },
+    ];
+
+    /// The cursor of the right pane's line viewer: the clean-file view's
+    /// line, else the diff row.
+    fn gutter_cursor(state: &AppState) -> usize {
+        match state.tabs.active_file_view() {
+            Some(file) => file.cursor,
+            None => state.diff_cursor,
+        }
+    }
+
+    /// Put the line viewer's cursor on the line or row whose text is
+    /// `text`, and return that index.
+    fn put_gutter_cursor(state: &mut AppState, text: &str) -> usize {
+        if let Some(file) = state.tabs.active_file_view_mut() {
+            let line = file
+                .lines()
+                .iter()
+                .position(|line| line == text)
+                .expect("file line");
+            file.cursor = line;
+            return line;
+        }
+        let row = state
+            .current_diff_rows()
+            .iter()
+            .position(|row| match row {
+                DiffRow::Line { left, right } => {
+                    left.text == text || right.as_ref().is_some_and(|cell| cell.text == text)
+                }
+                _ => false,
+            })
+            .expect("diff row");
+        state.diff_cursor = row;
+        row
+    }
+
+    /// Pan the line viewer `cols` columns.
+    fn pan_gutter_view(state: &mut AppState, cols: u16) {
+        match state.tabs.active_file_view_mut() {
+            Some(file) => file.col_offset = cols,
+            None => state.diff_col_offset = cols,
+        }
+    }
+
+    /// Save a `;` comment `body` on the line or row whose text is `text`,
+    /// through the key path (so it lands in the viewer's own scope).
+    fn comment_gutter_line(state: &mut AppState, text: &str, body: &str) {
+        state.focus = FocusPane::Right;
+        put_gutter_cursor(state, text);
+        state.dispatch(Action::CommentStart);
+        let key = state.comment.take().expect("comment prompt").key;
+        state.comment_store =
+            crate::tui::comments::put_comment_entry(&state.comment_store, key, body, false);
+    }
+
+    /// The line-gutter comment mark is an icon on every line viewer the
+    /// registry marks supported, in both looks, both glyph modes, inline
+    /// and side by side, and panned: its hit is the glyph cell only (one
+    /// per painted cell gutter, both cells of a side-by-side row) and stays
+    /// put while the code pans; a hover peeks and a click pins the
+    /// comment popover of that line only (the row comment popover's
+    /// fields and actions, filtered to the line), selects its row with no
+    /// text selection and no RULE drag; `gh` on the marked cursor line
+    /// pins it, and on an unmarked line says there is no icon.
+    #[test]
+    fn line_gutter_comment_marks_peek_pin_and_gh_on_every_registry_surface() {
+        let registry = crate::parity_registry::registry();
+        let popovers = registry
+            .components
+            .iter()
+            .find(|c| c.id == "icon-popovers")
+            .expect("icon-popovers component");
+        let gutter_ids: Vec<&str> = popovers
+            .surfaces
+            .iter()
+            .filter(|s| {
+                s.anchors
+                    .iter()
+                    .any(|a| a == "draw_diff_pane" || a == "draw_file_body")
+            })
+            .map(|s| s.id.as_str())
+            .collect();
+        let mut driven_ids: Vec<&str> = GUTTER_SURFACES.iter().map(|s| s.id).collect();
+        driven_ids.dedup();
+        assert_eq!(
+            gutter_ids, driven_ids,
+            "docs/parity.md `icon-popovers` gutter surfaces must match this test's"
+        );
+        let mut driven: Vec<(String, String)> = driven_ids
+            .iter()
+            .flat_map(|id| {
+                PANE_LOOKS
+                    .iter()
+                    .map(|(look, _)| (id.to_string(), look.to_string()))
+            })
+            .collect();
+        driven.sort();
+        for feature in ["icon-hits", "focused-row"] {
+            let supported: Vec<(String, String)> =
+                crate::parity_registry::supported_surface_looks("icon-popovers", feature)
+                    .into_iter()
+                    .filter(|(id, _)| gutter_ids.contains(&id.as_str()))
+                    .collect();
+            assert_eq!(
+                supported, driven,
+                "docs/parity.md `icon-popovers` / `{feature}` must mark every gutter surface and look"
+            );
+        }
+        let modes = [DiffMode::Inline, DiffMode::SideBySide];
+        for surface in &GUTTER_SURFACES {
+            let file = surface.id == "file-gutter";
+            let cases = PANE_LOOKS.into_iter().flat_map(|look| {
+                modes
+                    .into_iter()
+                    .take(if file { 1 } else { 2 })
+                    .flat_map(move |mode| [(look, mode, true), (look, mode, false)])
+            });
+            for ((look, background), mode, ascii) in cases {
+                let case = format!("{} {look} {mode:?} ascii {ascii}", surface.name);
+                let mut state = (surface.open)();
+                state.background = background;
+                state.ascii = ascii;
+                state.diff_wrap = false;
+                state.diff_mode = mode;
+                state.line_blame.set_enabled(false);
+                // The first paint sizes the pane, which picks the row layout.
+                let mut terminal = Terminal::new(TestBackend::new(200, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                comment_gutter_line(&mut state, "ctx one", "other");
+                comment_gutter_line(&mut state, "ctx three", "note");
+                let marked = put_gutter_cursor(&mut state, "ctx three");
+                draw_state(&mut terminal, &mut state);
+                if !file {
+                    assert_eq!(state.diff_layout(), mode, "{case}: layout");
+                }
+                let (checkout, path, _) = state.line_viewer_target().expect("line viewer");
+                let target = IconTarget::LineComment {
+                    checkout: checkout.to_string(),
+                    path: path.to_string(),
+                    line: 3,
+                };
+                let glyph = IconKind::Comment.glyph(ascii);
+                let hits_of = |state: &AppState, terminal: &Terminal<TestBackend>| {
+                    let buf = terminal.backend().buffer();
+                    state
+                        .layout
+                        .icon_hits
+                        .iter()
+                        .filter(|hit| hit.target == target)
+                        .map(|hit| {
+                            let cells: String = (hit.x..hit.x + hit.width)
+                                .map(|x| buf[(x, hit.y)].symbol().to_string())
+                                .collect();
+                            (hit.clone(), cells)
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let hits = hits_of(&state, &terminal);
+                let cells = if mode == DiffMode::SideBySide { 2 } else { 1 };
+                assert_eq!(hits.len(), cells, "{case}: one hit per cell gutter");
+                for (hit, text) in &hits {
+                    assert_eq!(hit.kind, IconKind::Comment, "{case}");
+                    assert_eq!((text.as_str(), hit.width), (glyph, 1), "{case}: glyph only");
+                }
+                assert!(
+                    state
+                        .layout
+                        .icon_hits
+                        .iter()
+                        .any(|hit| matches!(&hit.target, IconTarget::LineComment { line: 1, .. })),
+                    "{case}: the other line has its own mark"
+                );
+
+                // Panned: the bar shows, the code moves, the marks stay.
+                pan_gutter_view(&mut state, 5);
+                draw_state(&mut terminal, &mut state);
+                let bar_y = if file {
+                    state.layout.file_view_hbar.y
+                } else {
+                    state.layout.diff_hscrollbar_y
+                };
+                assert!(bar_y.is_some(), "{case}: panned view shows its bar");
+                assert_eq!(
+                    hits_of(&state, &terminal),
+                    hits,
+                    "{case}: pan keeps the marks"
+                );
+                pan_gutter_view(&mut state, 0);
+                draw_state(&mut terminal, &mut state);
+
+                // Hover: a peek of this line's comments only.
+                state.focus = FocusPane::Left;
+                draw_state(&mut terminal, &mut state);
+                let (hit, _) = hits.last().cloned().expect("a mark");
+                let at = std::time::Instant::now();
+                state.set_pointer_at(Some((hit.x, hit.y)), at);
+                assert_ne!(
+                    state.hovered_resize_edge(),
+                    Some(ResizeEdge::DiffSplit),
+                    "{case}: the mark is not the RULE's edge"
+                );
+                assert!(state.expire_peek(at + std::time::Duration::from_secs(1)));
+                let peek = state.popover.as_ref().expect("peek");
+                assert!(!peek.is_pinned(), "{case}: hover peeks");
+                assert_eq!(peek.targets, vec![(IconKind::Comment, target.clone())]);
+                let sections = state.open_popover_sections();
+                let want: Vec<PopoverLine> = [
+                    PopoverLine::Text(crate::tui::icons::spec(IconKind::Comment).meaning.into()),
+                    PopoverLine::Field {
+                        label: "comments",
+                        value: "1 open · 0 resolved".into(),
+                        role: SegRole::File,
+                        link: false,
+                    },
+                    PopoverLine::Field {
+                        label: "open",
+                        value: "note".into(),
+                        role: SegRole::File,
+                        link: false,
+                    },
+                ]
+                .into_iter()
+                .chain(
+                    [Action::CommentStart, Action::ExportComments]
+                        .iter()
+                        .filter_map(PopoverLine::action),
+                )
+                .collect();
+                assert_eq!(sections.len(), 1, "{case}");
+                assert_eq!(sections[0].lines, want, "{case}: this line's comment");
+                state.set_pointer_at(None, at);
+                state.close_popover();
+
+                // Click: select the row and pin, nothing else.
+                put_gutter_cursor(&mut state, "ctx four");
+                draw_state(&mut terminal, &mut state);
+                let fraction = state.diff_split_fraction;
+                state.dispatch(Action::Click {
+                    col: hit.x,
+                    row: hit.y,
+                });
+                assert!(state.popover_pinned(), "{case}: a click pins");
+                let pinned = state.popover.as_ref().unwrap();
+                assert_eq!(pinned.targets, vec![(IconKind::Comment, target.clone())]);
+                assert_eq!(gutter_cursor(&state), marked, "{case}: selects its row");
+                assert_eq!(state.focus, FocusPane::Right, "{case}: focuses the viewer");
+                assert!(state.text_selection.is_none(), "{case}: no text selection");
+                assert_eq!(state.drag, SplitDrag::None, "{case}: no drag");
+                assert_eq!(state.diff_split_fraction, fraction, "{case}: RULE stays");
+                draw_state(&mut terminal, &mut state);
+                assert!(state.layout.popover.is_some(), "{case}: the popover paints");
+                state.dispatch(Action::PopoverClose);
+                assert!(state.popover.is_none(), "{case}");
+
+                // `gh` on the marked line pins it; on a bare line it says so.
+                state.dispatch(Action::PopoverOpenFocused);
+                assert!(state.popover_pinned(), "{case}: gh pins");
+                let pinned = state.popover.as_ref().unwrap();
+                assert_eq!(pinned.targets, vec![(IconKind::Comment, target.clone())]);
+                draw_state(&mut terminal, &mut state);
+                assert_eq!(
+                    state.popover.as_ref().unwrap().anchor,
+                    Some(hits[0].0.rect()),
+                    "{case}: gh hangs from the mark"
+                );
+                state.dispatch(Action::PopoverClose);
+                put_gutter_cursor(&mut state, "ctx four");
+                state.dispatch(Action::PopoverOpenFocused);
+                assert!(state.popover.is_none(), "{case}: no mark, no popover");
+                assert_eq!(state.status, "no icons on this row", "{case}");
+
+                // Wrap on: the long line 2 takes more rows, the marks move
+                // down with line 3 and still pick it.
+                state.diff_wrap = true;
+                draw_state(&mut terminal, &mut state);
+                let wrapped = hits_of(&state, &terminal);
+                assert_eq!(wrapped.len(), cells, "{case} wrap: one hit per cell gutter");
+                let (hit, text) = wrapped.last().cloned().expect("a mark");
+                assert_eq!(text, glyph, "{case} wrap: glyph only");
+                assert!(hit.y > hits[0].0.y, "{case} wrap: line 2 wraps above it");
+                state.dispatch(Action::Click {
+                    col: hit.x,
+                    row: hit.y,
+                });
+                assert!(state.popover_pinned(), "{case} wrap: a click pins");
+                assert_eq!(
+                    gutter_cursor(&state),
+                    marked,
+                    "{case} wrap: selects its row"
+                );
+            }
+        }
+    }
+
+    /// A pinned line-mark popover closes when the viewer's cursor leaves
+    /// its line, as a row popover closes when its row loses the cursor.
+    #[test]
+    fn line_comment_popover_closes_when_the_cursor_leaves_its_line() {
+        for open in [GUTTER_SURFACES[0].open, GUTTER_SURFACES[4].open] {
+            let mut state = open();
+            let mut terminal = Terminal::new(TestBackend::new(200, 30)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            comment_gutter_line(&mut state, "ctx three", "note");
+            draw_state(&mut terminal, &mut state);
+            state.dispatch(Action::PopoverOpenFocused);
+            assert!(state.popover_pinned());
+            put_gutter_cursor(&mut state, "ctx four");
+            assert!(!state.popover_pinned(), "another line is another owner");
+            draw_state(&mut terminal, &mut state);
+            assert!(state.popover.is_none(), "paint drops it");
+        }
+    }
+
+    /// A clean file one row tall, panned, keeps its line row: the
+    /// horizontal bar does not paint over it, as a 1-row list keeps its
+    /// row. Two rows give the bar its own row.
+    #[test]
+    fn one_row_clean_file_view_keeps_its_row_when_panned() {
+        for height in [1, 2] {
+            let mut state = file_view_state(&GUTTER_FILE);
+            state.diff_wrap = false;
+            put_gutter_cursor(&mut state, GUTTER_LONG);
+            pan_gutter_view(&mut state, 3);
+            let body = Rect::new(0, 0, 80, height);
+            let pane = PaneArea {
+                inner: body,
+                rows: body,
+            };
+            let mut terminal = Terminal::new(TestBackend::new(80, height)).unwrap();
+            terminal
+                .draw(|frame| draw_file_body(frame, pane, &mut state))
+                .unwrap();
+            let bar = state.layout.file_view_hbar.y;
+            assert_eq!(state.layout.file_view_height, 1, "{height}: one line row");
+            assert_eq!(bar, (height == 2).then_some(1), "{height}: bar row");
+            let row = buf_line(terminal.backend().buffer(), 0);
+            assert!(
+                row.contains(" two xxx") && !row.contains("new"),
+                "{height}: line 2, panned: {row}"
+            );
         }
     }
 

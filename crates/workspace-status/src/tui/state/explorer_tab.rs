@@ -455,11 +455,14 @@ impl AppState {
                 delta,
                 horizontal,
             } => self.explorer_wheel(col, row, delta, horizontal),
+            // A click goes to an open popover first, and a click on an icon
+            // pins its popover, as on the Workspace. No Explorer icon is a PR
+            // badge, so Ctrl+click is a plain click.
             Action::Click { col, row } | Action::CtrlClick { col, row }
                 if row != self.layout.tab_y =>
             {
                 if self.mouse_enabled {
-                    self.explorer_click(col, row)
+                    self.click_with(col, row, Self::explorer_click)
                 } else {
                     Effect::None
                 }
@@ -906,7 +909,8 @@ impl AppState {
     /// Press in a pane: a tree row takes the cursor (a folder also opens or
     /// closes); the preview takes focus and, for a file body, the line. A
     /// flat pad cell counts as its row; a text selection arms only in the
-    /// inner area.
+    /// inner area. A press on a diff line's comment mark also picks that
+    /// row, as an icon click selects its row on the Workspace.
     fn explorer_click(&mut self, col: u16, row: u16) -> Effect {
         self.drag = SplitDrag::None;
         self.pad_press = None;
@@ -965,6 +969,9 @@ impl AppState {
             } else {
                 let pane: Rect = self.layout.explorer_preview;
                 self.text_selection = TextSelection::arm(pane, col, row);
+                if self.on_line_comment_mark(col, row) {
+                    self.click_diff(row);
+                }
             }
         }
         Effect::None

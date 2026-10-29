@@ -1331,6 +1331,20 @@ pub fn section_header(section: DiffSection) -> &'static str {
     }
 }
 
+/// Cells diff row `row` paints with a line gutter, in paint order: the
+/// left cell, then the right cell when the row paints side by side
+/// (`split`). Section, hunk, and error rows have none.
+pub fn diff_row_gutter_cells(row: &DiffRow, split: bool) -> Vec<&DiffCell> {
+    match row {
+        DiffRow::Line {
+            left,
+            right: Some(right),
+        } if split => vec![left, right],
+        DiffRow::Line { left, .. } => vec![left],
+        DiffRow::Section(_) | DiffRow::Hunk { .. } | DiffRow::Error { .. } => Vec::new(),
+    }
+}
+
 /// Sign glyph for a cell kind.
 pub fn cell_sign(kind: DiffCellKind) -> char {
     match kind {

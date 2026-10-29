@@ -95,6 +95,17 @@ pub enum IconTarget {
     /// commit or stash with this identity
     /// ([`AppState::commit_detail_msg_identity`]).
     CommitDetailMoreLines(String),
+    /// The comment mark on a line gutter of the right pane's line viewer:
+    /// a file diff (Workspace, compare, or Explorer changed file) or the
+    /// Explorer clean-file view ([`AppState::line_viewer_target`]).
+    LineComment {
+        /// Checkout of the viewer's file.
+        checkout: String,
+        /// Repo-relative path of the viewer's file.
+        path: String,
+        /// 1-based line number the gutter paints the mark beside.
+        line: u32,
+    },
 }
 
 /// How a popover opened.
@@ -114,8 +125,9 @@ pub struct PopoverOwner {
     pub tab: usize,
     /// Focused list.
     pub list: ListFocusTarget,
-    /// Focused tree row id, commit-file row id, [`graph_row_id`], or
-    /// empty.
+    /// Focused tree row id, commit-file row id, [`graph_row_id`], or, on
+    /// a focused line viewer, its cursor (`diff:<row>` on a file diff,
+    /// `file:<line>` on the clean-file view, both 0-based).
     pub row: String,
 }
 
@@ -399,7 +411,36 @@ fn section(
         IconTarget::GraphSync => graph_sync_section(state),
         IconTarget::GraphMoreLines(row) => graph_more_lines_section(state, rows, row),
         IconTarget::CommitDetailMoreLines(id) => commit_detail_more_lines_section(state, id),
+        IconTarget::LineComment {
+            checkout,
+            path,
+            line,
+        } => line_comment_section(target, &state.line_comments(checkout, path, *line)),
     }
+}
+
+/// Section of the comment mark on a line gutter: the comment fields over
+/// `comments`, the comments behind that line's mark, as a row comment
+/// mark lists its file's. `None` once the line has no comment (its mark
+/// went away). Open and resolved are one slot, as on a graph row.
+fn line_comment_section(target: &IconTarget, comments: &[&CommentEntry]) -> Option<PopoverSection> {
+    if comments.is_empty() {
+        return None;
+    }
+    let (kind, role) = if comments.iter().all(|entry| entry.resolved) {
+        (IconKind::CommentResolved, SegRole::Muted)
+    } else {
+        (IconKind::Comment, SegRole::Heading)
+    };
+    let mut lines = vec![PopoverLine::Text(spec(kind).meaning.to_string())];
+    let actions = comment_fields(comments, &mut lines);
+    lines.extend(actions.iter().filter_map(PopoverLine::action));
+    Some(PopoverSection {
+        icon: kind,
+        role,
+        target: target.clone(),
+        lines,
+    })
 }
 
 /// The segment of `segs` (every segment a row paints) that paints `kind`

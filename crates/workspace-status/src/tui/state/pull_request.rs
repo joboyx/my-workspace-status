@@ -198,7 +198,7 @@ impl AppState {
         let Some(repo) = badge else {
             return self.click(col, row);
         };
-        if let Some(effect) = self.popover_click(col, row) {
+        if let Some(effect) = self.popover_click(col, row, Self::click_at) {
             return effect;
         }
         let selected = self.click_at(col, row);

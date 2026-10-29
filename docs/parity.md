@@ -17,6 +17,7 @@ CI runs the checks in `crates/workspace-status/src/parity_registry.rs` (part of 
 | `commit_file_search_highlight_and_steps_agree_on_every_registry_surface` (`tui/render.rs`) | The `search` surfaces whose code anchors name `commit_file_search_match_ids` differ from the surfaces that test drives, or one of them is not `supported` for `agree` in each look; or on one of them the highlighted rows differ from the rows `n` / `N` visit and the pill counts, or a walk from a folded list changes the count. |
 | `diff_vertical_bar_drags_and_track_click_jumps_on_every_registry_surface` (`tui/render.rs`) | The `scrollbars` surfaces whose code anchors name `draw_diff_pane` differ from the surfaces that test drives, or one of them is not `supported` for `vbar-drag` in each look; or on one of them a press on the vertical thumb picks a row, arms a text selection, or jumps, a drag does not move the viewport (and the diff cursor with it) by the graph bar's math, the release does not end the drag, or a track click does not jump to the end or the top. |
 | `list_vertical_bar_drags_and_track_click_jumps_on_every_registry_surface`, `list_horizontal_bar_drags_and_track_click_jumps_on_every_registry_surface` (`tui/render.rs`) | The `scrollbars` surfaces whose code anchors name `draw_tree`, `draw_commit_file_list`, `draw_explorer_tree`, or `draw_file_body` (the clean-file view) differ from the surfaces those tests drive, or one of them (for the horizontal bar, one that pans) is not `supported` for `vbar` and `vbar-drag` (`hbar` and `hbar-drag`) in each look; or on one of them a bar does not paint where its rows leave room for it, a press on a thumb picks a row, a drag does not move the viewport (and the list cursor with it, asking for what the wheel asks for) or the pan by the graph bar's math, the horizontal bar clamps to another pan max than Shift-→ or hides the end of the longest row, the release does not end the drag, or a track click does not jump to the end or the start. |
+| `line_gutter_comment_marks_peek_pin_and_gh_on_every_registry_surface` (`tui/render.rs`) | The `icon-popovers` surfaces whose code anchors name `draw_diff_pane` or `draw_file_body` differ from the surfaces that test drives, or one of them is not `supported` for `icon-hits` and `focused-row` in each look; or on one of them (each diff tab, inline and side by side, panned or not) a comment mark records no hit or a hit wider than its glyph, a hover does not peek the comments of that line only, a click does not select the line and pin with no text selection or RULE drag, or `gh` on the marked cursor line does not pin it. |
 
 The `commit-footer` check is the pattern for other components: one test body that runs the same assertions on every surface the registry marks `supported`, and that compares its own surface list to `parity_registry::supported_surface_looks(component, feature)`.
 
@@ -151,12 +152,12 @@ Vertical and horizontal scrollbars of lists and line viewers. The commit-message
 
 ### `icon-popovers` — Icon popovers
 
-Icons and marks on rows record an icon hit (`LayoutHit::icon_hits`): hover peeks and a click pins the icon's popover. `gh` pins the focused row's popover.
+Icons and marks on rows record an icon hit (`LayoutHit::icon_hits`): hover peeks and a click pins the icon's popover. `gh` pins the focused row's popover. The comment mark on a line gutter (a file diff, the Explorer clean-file view) is an icon too (`IconTarget::LineComment`): its popover lists the comments of that line, and on a focused line viewer the cursor line is the focused row.
 
 | Feature | What | Tests |
 | --- | --- | --- |
-| `icon-hits` | The painted icons hover and pin their popover with the mouse. | `commit_file_rows_record_icon_hits`, `click_on_an_icon_selects_its_row_and_pins_without_a_double_click` |
-| `focused-row` | `gh` pins the focused row's popover. | `gh_pins_the_icon_popover_and_bare_h_still_folds` |
+| `icon-hits` | The painted icons hover and pin their popover with the mouse. | `commit_file_rows_record_icon_hits`, `click_on_an_icon_selects_its_row_and_pins_without_a_double_click`, `line_gutter_comment_marks_peek_pin_and_gh_on_every_registry_surface` |
+| `focused-row` | `gh` pins the focused row's popover. | `gh_pins_the_icon_popover_and_bare_h_still_folds`, `line_gutter_comment_marks_peek_pin_and_gh_on_every_registry_surface`, `line_comment_popover_closes_when_the_cursor_leaves_its_line` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `icon-hits` | `focused-row` |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -168,8 +169,8 @@ Icons and marks on rows record an icon hit (`LayoutHit::icon_hits`): hover peeks
 | `compare-files` | Compare | - | left | boxed, flat | `draw_commit_file_list`, `commit_file_row_paint_segments`, `focused_row_icons` | supported | supported |
 | `summary` | Workspace 2, Compare | - | right | boxed, flat | `draw_folder_summary` | gap: G9; `draw_folder_summary` records no icon hit | n/a: the summary is never the focused list, so it has no focused row |
 | `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree`, `explorer_row_segments`, `focused_row_icons` | gap: G15; Explorer rows record no icon hit | gap: G15; `focused_row_icons` is empty on an Explorer tab |
-| `diff-gutter` | Workspace, Compare, Explorer | 0, 2, - | right | boxed, flat | `draw_diff_pane`, `comment_mark_cols` | gap: G7 | gap: G7 |
-| `file-gutter` | Explorer (clean file) | - | right | boxed, flat | `draw_file_body`, `format_line_gutter` | gap: G7 | gap: G7 |
+| `diff-gutter` | Workspace, Compare, Explorer | 0, 2, - | right | boxed, flat | `draw_diff_pane`, `comment_mark_cols`, `diff_row_mark_hits`, `diff_row_gutter_cells`, `line_comment_mark`, `cursor_line_comment_icons`, `line_comments`, `line_comment_section`, `focused_row_icons`, `click_with`, `split_hit_at` | supported | supported |
+| `file-gutter` | Explorer (clean file) | - | right | boxed, flat | `draw_file_body`, `format_line_gutter`, `line_mark_hit`, `line_comment_mark`, `cursor_line_comment_icons`, `line_comments`, `line_comment_section`, `focused_row_icons`, `click_with` | supported | supported |
 
 ### `resize-edges` — Mouse on resize edges
 
@@ -284,10 +285,9 @@ Each open gap is tracked by its id. Fixing one turns its cells into `supported` 
 
 | Gap | Component | Has it | Missing on |
 | --- | --- | --- | --- |
-| G7 | `icon-popovers` | Comment marks on tree, graph, and commit-file rows open a popover | Diff gutter and clean-file gutter: `IconTarget` has no line variant |
 | G9 | `file-lists` | Commit-file and compare lists record icon hits and scroll | Folder summary: `draw_folder_summary` takes `&AppState`, records no icon hit, and folds overflow into `… N more` |
 | G11 | `resize-edges` | Workspace and compare tabs: divider drag, in-diff rule drag, diff horizontal thumb drag, edge hover | Explorer tab: `resize_edges_take_mouse` excludes it, `explorer_click` never calls `hit_split`, and `diff_split_rule_x` is forced to `None` |
-| G12 | `line-viewers` | Workspace and compare diffs: a click picks the row (`click_diff`) | Explorer pane on a changed file: `explorer_click` only arms a text selection |
+| G12 | `line-viewers` | Workspace and compare diffs: a click picks the row (`click_diff`) | Explorer pane on a changed file: `explorer_click` only arms a text selection (a press on a line comment mark is an icon click and picks its row) |
 | G13 | `horizontal-pan` | Workspace tree pans | Explorer tree: `PanDiff` with the tree focused does nothing, the horizontal wheel does nothing, and the paint uses offset 0 |
 | G14 | `double-click` | Workspace lists (`click_row`, `last_click`) | Explorer tree: no double-click handling in `explorer_click` |
 | G15 | `file-lists` | Workspace tree and commit-file lists: devicons, icon hits, popovers, `gh` | Explorer tree rows: `explorer_row_segments` sets `icon: None` and records no hit; `focused_row_icons` is empty on an Explorer tab |
