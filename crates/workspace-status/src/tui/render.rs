@@ -69,7 +69,7 @@ use super::popover::{
     flat_lines, focused_line, graph_icon, graph_row_id, graph_sync_kind, popover_rect,
     tree_icon_target, IconTarget, PopoverLine, POPOVER_FOOTER, POPOVER_MAX_WIDTH,
 };
-use super::pull_request::PrState;
+use super::pr_status::PrState;
 use super::quick_open::{
     files_row_shows_status, FileIndexState, QuickOpenMode, QuickOpenScope, QuickOpenState,
 };
@@ -12350,7 +12350,7 @@ mod tests {
             ),
             (
                 &checkout,
-                Some(PrState::Open),
+                Some(PrState::InReview),
                 "o P ^1 1",
                 vec![(IconKind::OpenVsDefault, 'o'), (IconKind::PrOpen, 'P')],
                 "branch-name",
@@ -13840,7 +13840,7 @@ mod tests {
         }
 
         let mut state = painted(pr_state(&[branch_repo("app", "feature")], false));
-        set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+        set_pr(&mut state, "app", "feature", found_pr(PrState::InReview));
         focus_tree_row(&mut state, "repo:app");
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         draw_state(&mut terminal, &mut state);
@@ -18685,11 +18685,11 @@ mod tests {
     }
 
     fn found_pr(state: PrState) -> PrLookup {
-        PrLookup::Found(PullRequest {
-            number: 7,
-            url: "https://github.com/octo/demo/pull/7".into(),
+        PrLookup::Found(PullRequest::fixture(
+            7,
+            "https://github.com/octo/demo/pull/7",
             state,
-        })
+        ))
     }
 
     fn pr_terminal() -> Terminal<TestBackend> {
@@ -18729,11 +18729,11 @@ mod tests {
         let palette = ThemeId::TokyoNight.palette();
         let cases = [
             (
-                PrState::Open,
+                PrState::InReview,
                 icon_pr_open as fn(bool) -> &'static str,
                 palette.branch_feature,
             ),
-            (PrState::Approved, icon_pr_approved, palette.added),
+            (PrState::Ready, icon_pr_approved, palette.added),
             (PrState::Merged, icon_pr_merged, palette.muted),
         ];
         for ascii in [true, false] {
@@ -18784,7 +18784,7 @@ mod tests {
     fn tree_pr_badge_needs_a_ready_pr() {
         for (lookup, what) in [
             (None, "in flight"),
-            (Some(PrLookup::Failed), "failed"),
+            (Some(PrLookup::Failed(None)), "failed"),
             (Some(PrLookup::NoPr), "no PR"),
         ] {
             let mut state = pr_state(&[branch_repo("app", "feature")], true);
@@ -18812,14 +18812,14 @@ mod tests {
             ],
             true,
         );
-        set_pr(&mut state, "fam", "main", found_pr(PrState::Open));
+        set_pr(&mut state, "fam", "main", found_pr(PrState::InReview));
         set_pr(
             &mut state,
             "fam/.worktrees/feat",
             "feat",
             found_pr(PrState::Merged),
         );
-        set_pr(&mut state, "dirty", "main", found_pr(PrState::Approved));
+        set_pr(&mut state, "dirty", "main", found_pr(PrState::Ready));
         let mut terminal = pr_terminal();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let mut got: Vec<(u16, PathBuf)> = state
@@ -18857,7 +18857,7 @@ mod tests {
     #[test]
     fn tree_pr_badge_hit_stays_put_under_hscroll() {
         let mut state = pr_state(&[branch_repo("app", "feature")], true);
-        set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+        set_pr(&mut state, "app", "feature", found_pr(PrState::InReview));
         let mut terminal = pr_terminal();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let x = state.layout.pr_badge_hits()[0].x;
@@ -18896,7 +18896,7 @@ mod tests {
                     search_bg_unused(),
                     true,
                     TreeRowDecor {
-                        pr: Some(PrState::Open),
+                        pr: Some(PrState::InReview),
                         ..TreeRowDecor::default()
                     },
                     palette,
@@ -18929,7 +18929,7 @@ mod tests {
     #[test]
     fn ctrl_click_on_the_painted_tree_badge_opens_its_pr_only_there() {
         let mut state = pr_state(&[branch_repo("app", "feature"), repo("lib", true)], true);
-        set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+        set_pr(&mut state, "app", "feature", found_pr(PrState::InReview));
         focus_tree_row(&mut state, "repo:lib");
         let mut terminal = pr_terminal();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
@@ -18961,7 +18961,7 @@ mod tests {
     #[test]
     fn pr_badge_hits_clear_when_the_frame_paints_no_badge() {
         let mut state = pr_state(&[branch_repo("app", "feature")], true);
-        set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+        set_pr(&mut state, "app", "feature", found_pr(PrState::InReview));
         let mut terminal = pr_terminal();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let hit = state.layout.pr_badge_hits()[0].clone();
@@ -18999,11 +18999,7 @@ mod tests {
             &mut state,
             "app",
             "feature",
-            PrLookup::Found(PullRequest {
-                number: 12345,
-                url: url.into(),
-                state: PrState::Open,
-            }),
+            PrLookup::Found(PullRequest::fixture(12345, url, PrState::InReview)),
         );
         let mut terminal = pr_terminal();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
@@ -19247,7 +19243,7 @@ mod tests {
     #[test]
     fn dialog_drops_the_badge_links_it_covers() {
         let mut state = pr_state(&[branch_repo("app", "feature")], true);
-        set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+        set_pr(&mut state, "app", "feature", found_pr(PrState::InReview));
         let mut terminal = pr_terminal();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let before = state.layout.links.clone();
@@ -19280,7 +19276,7 @@ mod tests {
             .collect();
         let mut state = pr_state(&repos, true);
         for name in ["app", "bbb", "ccc", "ddd"] {
-            set_pr(&mut state, name, "feature", found_pr(PrState::Open));
+            set_pr(&mut state, name, "feature", found_pr(PrState::InReview));
         }
         focus_tree_row(&mut state, "repo:app");
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
@@ -19318,12 +19314,12 @@ mod tests {
             ],
             true,
         );
-        set_pr(&mut state, "app", "main", found_pr(PrState::Approved));
+        set_pr(&mut state, "app", "main", found_pr(PrState::Ready));
         set_pr(
             &mut state,
             "app/.worktrees/feat",
             "feat",
-            found_pr(PrState::Open),
+            found_pr(PrState::InReview),
         );
         focus_tree_row(&mut state, "checkout:app");
         state.graph = Some(GraphModel {
@@ -19435,7 +19431,7 @@ mod tests {
             true,
         );
         if with_pr {
-            set_pr(&mut state, linked, "feat", found_pr(PrState::Open));
+            set_pr(&mut state, linked, "feat", found_pr(PrState::InReview));
         }
         focus_tree_row(&mut state, "checkout:app");
         state.graph = Some(GraphModel {
@@ -19787,7 +19783,7 @@ mod tests {
     #[test]
     fn pinned_popover_paints_its_sections_chips_and_footer() {
         let mut state = pr_state(&[branch_repo("app", "feature")], true);
-        set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+        set_pr(&mut state, "app", "feature", found_pr(PrState::InReview));
         focus_tree_row(&mut state, "repo:app");
         // Tall enough for every section of the row: no scroll.
         let mut terminal = Terminal::new(TestBackend::new(120, 60)).unwrap();
@@ -19873,12 +19869,11 @@ mod tests {
 
     #[test]
     fn pr_popover_shows_loading_then_the_detail() {
-        use crate::tui::pull_request::{
-            ChecksSummary, PrDetailLookup, PrReview, PullRequestDetail,
-        };
+        use crate::tui::pr_status::{checks_ci_link, ChecksSummary, PrNotes};
+        use crate::tui::pull_request::{PrDetailLookup, PrReview, PullRequestDetail};
         for ascii in [true, false] {
             let mut state = pr_state(&[branch_repo("app", "feature")], ascii);
-            set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+            set_pr(&mut state, "app", "feature", found_pr(PrState::InReview));
             focus_tree_row(&mut state, "repo:app");
             let mut terminal = Terminal::new(TestBackend::new(120, 60)).unwrap();
             terminal.draw(|frame| draw(frame, &mut state)).unwrap();
@@ -19925,11 +19920,17 @@ mod tests {
                     head: Some("feature".into()),
                     base: Some("main".into()),
                     review: Some(PrReview::ReviewRequired),
+                    reviews: None,
                     checks: ChecksSummary {
                         pass: 3,
                         fail: 1,
                         pending: 2,
                     },
+                    pipeline: None,
+                    check_names: Vec::new(),
+                    more_checks: 0,
+                    notes: PrNotes::default(),
+                    ci_link: checks_ci_link(&[], "https://github.com/octo/demo/pull/7"),
                     updated_at: Some(now - 2 * 3600),
                 }),
             ));
@@ -19959,7 +19960,7 @@ mod tests {
     fn pr_popover_says_when_the_detail_could_not_load() {
         use crate::tui::pull_request::PrDetailLookup;
         let mut state = pr_state(&[branch_repo("app", "feature")], true);
-        set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+        set_pr(&mut state, "app", "feature", found_pr(PrState::InReview));
         focus_tree_row(&mut state, "repo:app");
         let mut terminal = Terminal::new(TestBackend::new(120, 60)).unwrap();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
@@ -19970,7 +19971,7 @@ mod tests {
             PR_REMOTE,
             7,
             1,
-            PrDetailLookup::Failed
+            PrDetailLookup::Failed(None)
         ));
         let text = popover_text(&mut state, &mut terminal);
         for want in [
@@ -19992,11 +19993,7 @@ mod tests {
             &mut state,
             "app",
             "feature",
-            PrLookup::Found(PullRequest {
-                number: 7,
-                url: url.into(),
-                state: PrState::Open,
-            }),
+            PrLookup::Found(PullRequest::fixture(7, url, PrState::InReview)),
         );
         focus_tree_row(&mut state, "repo:app");
         let mut terminal = Terminal::new(TestBackend::new(cols, 40)).unwrap();
@@ -20045,7 +20042,7 @@ mod tests {
     #[test]
     fn peek_paints_no_footer_and_no_focus() {
         let mut state = pr_state(&[branch_repo("app", "feature")], true);
-        set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+        set_pr(&mut state, "app", "feature", found_pr(PrState::InReview));
         let mut terminal = pr_terminal();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let badge = state.layout.pr_badge_hits()[0].clone();
@@ -20072,7 +20069,7 @@ mod tests {
         for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
             let label = format!("{background:?}");
             let mut state = pr_state(&[branch_repo("app", "feature")], false);
-            set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+            set_pr(&mut state, "app", "feature", found_pr(PrState::InReview));
             state.background = background;
             // The narrowest tree pane: the badge's popover hangs across
             // the divider.
@@ -20192,7 +20189,7 @@ mod tests {
     #[test]
     fn a_cut_popover_counts_the_rows_below_and_values_take_their_role() {
         let mut state = pr_state(&[branch_repo("app", "feature")], true);
-        set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+        set_pr(&mut state, "app", "feature", found_pr(PrState::InReview));
         focus_tree_row(&mut state, "repo:app");
         let mut terminal = pr_terminal();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
@@ -20625,7 +20622,7 @@ mod tests {
     fn badge_link_outside_the_dialog_reprints_dimmed() {
         use crate::tui::hyperlink::link_cells;
         let mut state = pr_state(&[branch_repo("app", "feature")], true);
-        set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+        set_pr(&mut state, "app", "feature", found_pr(PrState::InReview));
         let palette = state.theme.palette();
         let mut terminal = pr_terminal();
         draw_state(&mut terminal, &mut state);

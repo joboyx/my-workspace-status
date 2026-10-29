@@ -19,7 +19,7 @@ use super::icons::{
     status_letter_from_change, tui_file_badge, tui_merge_mark, tui_sync_mark, IconKind,
     StatusColorRole,
 };
-use super::pull_request::PrState;
+use super::pr_status::PrState;
 
 /// Structural node kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1408,24 +1408,33 @@ pub fn with_viewed_mark(trailing: Vec<TextSeg>, ascii: bool, viewed: bool) -> Ve
 
 /// Glyph and colour role of the PR badge for `state`.
 ///
-/// Open is [`icon_pr_open`] in [`SegRole::BranchFeature`], approved is
+/// Same grouping as [`pr_badge_kind`]: ready to merge is
 /// [`icon_pr_approved`] in [`SegRole::Added`], merged is [`icon_pr_merged`]
-/// in [`SegRole::Muted`] (done work steps back). The tree and the graph
+/// in [`SegRole::Muted`] (done work steps back), and every other open state
+/// is [`icon_pr_open`] in [`SegRole::BranchFeature`]. The tree and the graph
 /// share this mapping.
 pub fn pr_badge_mark(ascii: bool, state: PrState) -> (&'static str, SegRole) {
     match state {
-        PrState::Open => (icon_pr_open(ascii), SegRole::BranchFeature),
-        PrState::Approved => (icon_pr_approved(ascii), SegRole::Added),
+        PrState::Ready => (icon_pr_approved(ascii), SegRole::Added),
         PrState::Merged => (icon_pr_merged(ascii), SegRole::Muted),
+        PrState::CiFailed | PrState::Draft | PrState::CiRunning | PrState::InReview => {
+            (icon_pr_open(ascii), SegRole::BranchFeature)
+        }
     }
 }
 
 /// Catalog kind of the PR badge for `state`.
+///
+/// Ready to merge is [`IconKind::PrApproved`], merged is
+/// [`IconKind::PrMerged`], and every other open state (CI failed, draft, CI
+/// running, in review) is [`IconKind::PrOpen`].
 pub fn pr_badge_kind(state: PrState) -> IconKind {
     match state {
-        PrState::Open => IconKind::PrOpen,
-        PrState::Approved => IconKind::PrApproved,
+        PrState::Ready => IconKind::PrApproved,
         PrState::Merged => IconKind::PrMerged,
+        PrState::CiFailed | PrState::Draft | PrState::CiRunning | PrState::InReview => {
+            IconKind::PrOpen
+        }
     }
 }
 
@@ -1641,7 +1650,7 @@ mod tests {
                 true,
             ),
         };
-        let at = with_pr_badge(&mut segs, true, Some(PrState::Approved)).expect("badge");
+        let at = with_pr_badge(&mut segs, true, Some(PrState::Ready)).expect("badge");
         assert_eq!(at, 0, "no merge mark: the badge leads the trailing run");
         assert_eq!(segs.trailing[at].icon, Some(IconKind::PrApproved));
         let trailing: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
@@ -1656,7 +1665,7 @@ mod tests {
             trailing: Vec::new(),
         };
         assert_eq!(
-            with_pr_badge(&mut no_branch, true, Some(PrState::Open)),
+            with_pr_badge(&mut no_branch, true, Some(PrState::InReview)),
             None,
             "a row that paints no branch text gets no badge"
         );
@@ -2499,7 +2508,7 @@ mod tests {
         let tree = build_tree(&visible_for_tree(&built), true, "ws");
         let rows = flatten_with(&tree, &HashSet::new(), true);
         let row = rows.iter().find(|r| r.id == "repo:app").expect("repo:app");
-        let segs = painted_row_segments(row, true, false, false, false, Some(PrState::Open));
+        let segs = painted_row_segments(row, true, false, false, false, Some(PrState::InReview));
         let left: String = segs.segments.iter().map(|seg| seg.text.as_str()).collect();
         assert!(left.ends_with("  feature/landed"), "{left}");
         let trail: String = segs.trailing.iter().map(|seg| seg.text.as_str()).collect();

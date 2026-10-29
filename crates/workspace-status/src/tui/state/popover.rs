@@ -24,7 +24,7 @@ use super::super::popover::{
     popover_sections, step_line, tree_icon_target, IconTarget, PopoverLine, PopoverOrigin,
     PopoverOwner, PopoverSection, PopoverState, PEEK_DWELL_MS, PEEK_GRACE_MS,
 };
-use super::super::pull_request::PrState;
+use super::super::pr_status::PrState;
 use super::super::selection::TextSelection;
 use super::super::status::StatusMessage;
 use super::super::tree::{
@@ -1291,11 +1291,11 @@ mod tests {
             Path::new("app"),
             "feature",
             Some(PR_REMOTE.into()),
-            PrLookup::Found(PullRequest {
-                number: 7,
-                url: "https://github.com/octo/demo/pull/7".into(),
-                state: PrState::Open,
-            }),
+            PrLookup::Found(PullRequest::fixture(
+                7,
+                "https://github.com/octo/demo/pull/7",
+                PrState::InReview,
+            )),
         ));
         focus(&mut app, "repo:app");
         assert_eq!(

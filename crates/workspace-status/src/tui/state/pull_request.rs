@@ -27,9 +27,10 @@ use super::super::action::Effect;
 use super::super::gates::ListFocusTarget;
 use super::super::hyperlink::LinkHit;
 use super::super::popover::IconTarget;
+use super::super::pr_status::PrState;
 use super::super::pull_request::{
     commit_url, lookup_failed_status, no_pr_status, parse_remote, PrDetailLookup, PrLookup,
-    PrState, PullRequest, PullRequestDetail, NO_PR_FOR_ROW, OPEN_FAILED,
+    PullRequest, PullRequestDetail, NO_PR_FOR_ROW, OPEN_FAILED,
 };
 use super::super::status::StatusMessage;
 use super::super::tree::NodeKind;
@@ -49,7 +50,7 @@ impl From<PrLookup> for BranchPr {
         match lookup {
             PrLookup::Found(pr) => Self::Ready(Some(pr)),
             PrLookup::NoPr => Self::Ready(None),
-            PrLookup::Failed => Self::Failed,
+            PrLookup::Failed(_) => Self::Failed,
         }
     }
 }
@@ -79,7 +80,7 @@ impl From<PrDetailLookup> for PrDetailState {
     fn from(lookup: PrDetailLookup) -> Self {
         match lookup {
             PrDetailLookup::Found(detail) => Self::Ready(detail),
-            PrDetailLookup::Failed => Self::Failed,
+            PrDetailLookup::Failed(_) => Self::Failed,
         }
     }
 }
@@ -391,7 +392,7 @@ impl AppState {
             PrLookup::Found(pr) if opened => StatusMessage::ok(format!("opened PR #{}", pr.number)),
             PrLookup::Found(_) => StatusMessage::error(OPEN_FAILED),
             PrLookup::NoPr => StatusMessage::warn(no_pr_status(branch)),
-            PrLookup::Failed => StatusMessage::error(lookup_failed_status(branch)),
+            PrLookup::Failed(_) => StatusMessage::error(lookup_failed_status(branch)),
         };
         if self.snapshot_branch(repo) == Some(branch) {
             self.pr_cache.checkouts.insert(
@@ -651,11 +652,11 @@ mod tests {
     }
 
     fn found(state: PrState) -> PrLookup {
-        PrLookup::Found(PullRequest {
-            number: 7,
-            url: "https://github.com/octo/demo/pull/7".into(),
+        PrLookup::Found(PullRequest::fixture(
+            7,
+            "https://github.com/octo/demo/pull/7",
             state,
-        })
+        ))
     }
 
     const REMOTE: &str = "git@github.com:octo/demo.git";
@@ -767,13 +768,13 @@ mod tests {
         );
         assert_eq!(app.pr_badge(path), None, "in flight");
 
-        for state in [PrState::Open, PrState::Approved, PrState::Merged] {
+        for state in [PrState::InReview, PrState::Ready, PrState::Merged] {
             assert!(app.apply_pr_lookup(path, "feature", Some(REMOTE.into()), found(state)));
             assert_eq!(app.pr_badge(path), Some(state));
         }
         assert!(app.apply_pr_lookup(path, "feature", Some(REMOTE.into()), PrLookup::NoPr));
         assert_eq!(app.pr_badge(path), None, "no PR");
-        assert!(app.apply_pr_lookup(path, "feature", Some(REMOTE.into()), PrLookup::Failed));
+        assert!(app.apply_pr_lookup(path, "feature", Some(REMOTE.into()), PrLookup::Failed(None)));
         assert_eq!(app.pr_badge(path), None, "failed lookup");
         assert!(app.status.is_empty(), "a background failure stays silent");
         assert!(app.apply_pr_lookup(path, "feature", None, PrLookup::NoPr));
@@ -805,7 +806,12 @@ mod tests {
         let path = Path::new("app");
         let _ = app.due_pr_lookups();
         apply_one_repo_snapshot(&mut app, "app", Some(repo("app", "other")));
-        assert!(!app.apply_pr_lookup(path, "feature", Some(REMOTE.into()), found(PrState::Open)));
+        assert!(!app.apply_pr_lookup(
+            path,
+            "feature",
+            Some(REMOTE.into()),
+            found(PrState::InReview)
+        ));
         assert_eq!(app.pr_badge(path), None);
         assert_eq!(
             app.due_pr_lookups(),
@@ -814,7 +820,7 @@ mod tests {
         );
 
         app.forget_pr_lookups(Some(path));
-        assert!(!app.apply_pr_lookup(path, "other", Some(REMOTE.into()), found(PrState::Open)));
+        assert!(!app.apply_pr_lookup(path, "other", Some(REMOTE.into()), found(PrState::InReview)));
         assert_eq!(app.pr_badge(path), None);
     }
 
@@ -823,7 +829,12 @@ mod tests {
         let mut app = app_with(&[repo("app", "feature")], &[]);
         let path = Path::new("app");
         let _ = app.due_pr_lookups();
-        assert!(app.apply_pr_lookup(path, "feature", Some(REMOTE.into()), found(PrState::Open)));
+        assert!(app.apply_pr_lookup(
+            path,
+            "feature",
+            Some(REMOTE.into()),
+            found(PrState::InReview)
+        ));
         apply_one_repo_snapshot(&mut app, "app", Some(repo("app", "other")));
         assert_eq!(app.pr_badge(path), None, "answer is for another branch");
     }
@@ -845,7 +856,12 @@ mod tests {
         assert!(app.due_pr_lookups().is_empty(), "same branch again: none");
 
         let path = Path::new("app");
-        assert!(app.apply_pr_lookup(path, "feature", Some(REMOTE.into()), found(PrState::Open)));
+        assert!(app.apply_pr_lookup(
+            path,
+            "feature",
+            Some(REMOTE.into()),
+            found(PrState::InReview)
+        ));
         apply_one_repo_snapshot(&mut app, "app", None);
         assert!(app.due_pr_lookups().is_empty());
         assert!(
@@ -1032,22 +1048,23 @@ mod tests {
     // ---- PR detail for the popover ----
 
     use super::super::super::popover::PEEK_DWELL_MS;
-    use super::super::super::pull_request::{ChecksSummary, PullRequestDetail};
+    use super::super::super::pr_status::{checks_ci_link, ChecksSummary, PrNotes};
+    use super::super::super::pull_request::PullRequestDetail;
 
     /// `app` on `feature` with a ready open PR #`number` in the badge cache.
     fn app_with_pr(number: u64) -> AppState {
         let mut app = app_with(&[repo("app", "feature"), repo("lib", "main")], &[]);
         let _ = app.due_pr_lookups();
-        set_answer(&mut app, number, PrState::Open);
+        set_answer(&mut app, number, PrState::InReview);
         app
     }
 
     fn set_answer(app: &mut AppState, number: u64, state: PrState) {
-        let pr = PullRequest {
+        let pr = PullRequest::fixture(
             number,
-            url: format!("https://github.com/octo/demo/pull/{number}"),
+            &format!("https://github.com/octo/demo/pull/{number}"),
             state,
-        };
+        );
         assert!(app.apply_pr_lookup(
             Path::new("app"),
             "feature",
@@ -1076,7 +1093,13 @@ mod tests {
             head: Some("feature".into()),
             base: Some("main".into()),
             review: None,
+            reviews: None,
             checks: ChecksSummary::default(),
+            pipeline: None,
+            check_names: Vec::new(),
+            more_checks: 0,
+            notes: PrNotes::default(),
+            ci_link: checks_ci_link(&[], &format!("https://github.com/octo/demo/pull/{number}")),
             updated_at: None,
         })
     }
@@ -1153,13 +1176,13 @@ mod tests {
         // A failure is cached too; it is not retried on the next pin.
         app.forget_pr_lookups(Some(Path::new("app")));
         let _ = app.due_pr_lookups();
-        set_answer(&mut app, 7, PrState::Open);
+        set_answer(&mut app, 7, PrState::InReview);
         assert_eq!(
             click_badge(&mut app),
             Effect::Batch(vec![Effect::LoadRightPane, fetch(7, 2)]),
             "a pin on a fresh answer asks"
         );
-        assert!(land(&mut app, "feature", 7, PrDetailLookup::Failed));
+        assert!(land(&mut app, "feature", 7, PrDetailLookup::Failed(None)));
         assert_eq!(detail_of(&app), Some(PrDetailState::Failed));
         assert_eq!(click_badge(&mut app), Effect::LoadRightPane);
     }
@@ -1212,20 +1235,20 @@ mod tests {
         // `r` while request 1 hangs, then a pin asks again.
         app.forget_pr_lookups(Some(Path::new("app")));
         let _ = app.due_pr_lookups();
-        set_answer(&mut app, 7, PrState::Open);
+        set_answer(&mut app, 7, PrState::InReview);
         assert_eq!(
             click_badge(&mut app),
             Effect::Batch(vec![Effect::LoadRightPane, fetch(7, 2)])
         );
         assert!(
-            !land_request(&mut app, "feature", 7, 1, PrDetailLookup::Failed),
+            !land_request(&mut app, "feature", 7, 1, PrDetailLookup::Failed(None)),
             "the old request times out late: dropped"
         );
         assert_eq!(detail_of(&app), Some(PrDetailState::Loading(2)));
         assert!(land_request(&mut app, "feature", 7, 2, pr_detail(7)));
         assert!(matches!(detail_of(&app), Some(PrDetailState::Ready(_))));
         assert!(
-            !land_request(&mut app, "feature", 7, 1, PrDetailLookup::Failed),
+            !land_request(&mut app, "feature", 7, 1, PrDetailLookup::Failed(None)),
             "and never replaces the fresh one"
         );
     }
@@ -1256,7 +1279,7 @@ mod tests {
             Path::new("app"),
             "feature",
             Some(REMOTE.into()),
-            found(PrState::Open),
+            found(PrState::InReview),
             true,
         );
         assert!(matches!(detail_of(&app), Some(PrDetailState::Ready(_))));
@@ -1264,7 +1287,7 @@ mod tests {
             Path::new("app"),
             "feature",
             Some(REMOTE.into()),
-            found(PrState::Approved),
+            found(PrState::Ready),
             true,
         );
         assert_eq!(detail_of(&app), None, "the answer changed under gx");
@@ -1279,7 +1302,7 @@ mod tests {
         app.forget_pr_lookups(Some(Path::new("app")));
         assert!(app.pr_cache.details.is_empty(), "r drops the detail");
         let _ = app.due_pr_lookups();
-        set_answer(&mut app, 7, PrState::Open);
+        set_answer(&mut app, 7, PrState::InReview);
         let _ = click_badge(&mut app);
         assert!(land(&mut app, "feature", 7, pr_detail(7)));
         app.forget_pr_lookups(None);
@@ -1287,7 +1310,7 @@ mod tests {
 
         // A branch switch drops the old branch's detail.
         let _ = app.due_pr_lookups();
-        set_answer(&mut app, 7, PrState::Open);
+        set_answer(&mut app, 7, PrState::InReview);
         let _ = click_badge(&mut app);
         assert!(land(&mut app, "feature", 7, pr_detail(7)));
         apply_one_repo_snapshot(&mut app, "app", Some(repo("app", "other")));
@@ -1311,7 +1334,7 @@ mod tests {
 
         let mut app = app_with_pr(7);
         let _ = click_badge(&mut app);
-        set_answer(&mut app, 8, PrState::Open);
+        set_answer(&mut app, 8, PrState::InReview);
         assert!(
             !land(&mut app, "feature", 7, pr_detail(7)),
             "another PR now"
@@ -1323,7 +1346,7 @@ mod tests {
         let _ = click_badge(&mut app);
         assert!(land(&mut app, "feature", 7, pr_detail(7)));
         assert!(
-            !land(&mut app, "feature", 7, PrDetailLookup::Failed),
+            !land(&mut app, "feature", 7, PrDetailLookup::Failed(None)),
             "a second answer does not replace the first"
         );
         assert!(matches!(detail_of(&app), Some(PrDetailState::Ready(_))));
@@ -1409,7 +1432,7 @@ mod tests {
         let _ = click_badge(&mut app);
         assert!(app.popover_pinned());
         // The detail is dropped while the popover stays pinned.
-        set_answer(&mut app, 7, PrState::Approved);
+        set_answer(&mut app, 7, PrState::Ready);
         assert_eq!(detail_of(&app), None);
         for tick in [Action::WatchTick, Action::FetchTick] {
             let effect = app.dispatch(tick.clone());

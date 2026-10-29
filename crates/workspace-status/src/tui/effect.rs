@@ -381,8 +381,9 @@ pub(crate) struct PrDetailJob {
     request: u64,
 }
 
-/// Forge CLI runner for PR lookups: argv and the quit flag in, stdout out.
-type PrCliRunner = fn(&[String], &AtomicBool) -> Result<String, ()>;
+/// Forge CLI runner for PR lookups: argv and the quit flag in, stdout or
+/// the failure reason out.
+type PrCliRunner = fn(&[String], &AtomicBool) -> Result<String, Option<String>>;
 
 /// Opens a PR URL in the operator's browser; stops waiting on the quit flag.
 type PrUrlOpener = fn(&str, &AtomicBool) -> Result<(), ()>;
@@ -394,7 +395,7 @@ const DEFAULT_PR_CLI: PrCliRunner = run_cli;
 /// Test builds never spawn `gh` / `glab`: the default fails without a
 /// spawn, and a test that needs an answer sets a fake.
 #[cfg(test)]
-const DEFAULT_PR_CLI: PrCliRunner = |_, _| Err(());
+const DEFAULT_PR_CLI: PrCliRunner = |_, _| Err(None);
 
 /// Browser opener a new [`Interpreter`] starts with.
 #[cfg(not(test))]
@@ -3508,7 +3509,7 @@ impl Interpreter {
                             let lookup = lookup(remote.as_deref(), &branch, &run);
                             let opened = match &lookup {
                                 PrLookup::Found(pr) => open(&pr.url, &cancel).is_ok(),
-                                PrLookup::NoPr | PrLookup::Failed => false,
+                                PrLookup::NoPr | PrLookup::Failed(_) => false,
                             };
                             JobOutcome::PullRequestOpen {
                                 repo,
@@ -8454,22 +8455,24 @@ mod tests {
         OPENED.with(|urls| urls.borrow_mut().drain(..).collect())
     }
 
-    fn gh_approved_pr(argv: &[String], _: &AtomicBool) -> Result<String, ()> {
+    fn gh_approved_pr(argv: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
         assert_eq!(argv.first().map(String::as_str), Some("gh"), "{argv:?}");
         Ok(format!(
             r#"[{{"number":7,"state":"OPEN","url":"{PR_URL}","headRefName":"feature","isCrossRepository":false,"reviewDecision":"APPROVED","updatedAt":"2026-01-02T00:00:00Z"}}]"#
         ))
     }
 
-    fn gh_no_pr(_: &[String], _: &AtomicBool) -> Result<String, ()> {
+    fn gh_no_pr(_: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
         Ok("[]".into())
     }
 
-    fn gh_fails(_: &[String], _: &AtomicBool) -> Result<String, ()> {
-        Err(())
+    fn gh_fails(_: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
+        Err(Some(
+            "HTTP 401: Bad credentials (https://api.github.com/graphql)".into(),
+        ))
     }
 
-    fn cli_must_not_run(argv: &[String], _: &AtomicBool) -> Result<String, ()> {
+    fn cli_must_not_run(argv: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
         panic!("no forge CLI expected: {argv:?}")
     }
 
@@ -8522,7 +8525,7 @@ mod tests {
         assert_eq!(opened_urls(), vec![PR_URL.to_string()]);
         assert_eq!(
             state.pr_badge(Path::new("app")),
-            Some(crate::tui::pull_request::PrState::Approved),
+            Some(crate::tui::pr_status::PrState::Ready),
             "the open's fresh answer feeds the badge"
         );
         let _ = std::fs::remove_dir_all(root);
@@ -8589,7 +8592,7 @@ mod tests {
         );
         let mut interp = Interpreter::with_cap(4);
         let live = AtomicBool::new(false);
-        assert_eq!((interp.pr_cli)(&["gh".to_string()], &live), Err(()));
+        assert_eq!((interp.pr_cli)(&["gh".to_string()], &live), Err(None));
         assert_eq!((interp.pr_opener)(PR_URL, &live), Err(()));
         let effect = state.dispatch(Action::OpenPullRequest);
         let opts = opts(&state);
@@ -8600,9 +8603,12 @@ mod tests {
 
     /// Answers "no PR" until the quit flag is set, then fails as a killed
     /// CLI would.
-    fn gh_no_pr_until_cancelled(_: &[String], cancel: &AtomicBool) -> Result<String, ()> {
+    fn gh_no_pr_until_cancelled(
+        _: &[String],
+        cancel: &AtomicBool,
+    ) -> Result<String, Option<String>> {
         if cancel.load(Ordering::Relaxed) {
-            Err(())
+            Err(None)
         } else {
             Ok("[]".into())
         }
@@ -8839,13 +8845,16 @@ mod tests {
 
     /// Answers `gh pr view` for PR 7 until the quit flag is set, then fails
     /// as a killed CLI would.
-    fn gh_view_until_cancelled(argv: &[String], cancel: &AtomicBool) -> Result<String, ()> {
+    fn gh_view_until_cancelled(
+        argv: &[String],
+        cancel: &AtomicBool,
+    ) -> Result<String, Option<String>> {
         assert_eq!(
             argv.get(..3),
             Some(&["gh".to_string(), "pr".into(), "view".into()][..])
         );
         if cancel.load(Ordering::Relaxed) {
-            return Err(());
+            return Err(None);
         }
         Ok(format!(
             r#"{{"number":7,"title":"Add login","state":"OPEN","url":"{PR_URL}","statusCheckRollup":[{{"status":"COMPLETED","conclusion":"SUCCESS"}}]}}"#
@@ -8861,11 +8870,11 @@ mod tests {
             Path::new("app"),
             "main",
             Some(DETAIL_REMOTE.into()),
-            PrLookup::Found(crate::tui::pull_request::PullRequest {
-                number: 7,
-                url: PR_URL.into(),
-                state: crate::tui::pull_request::PrState::Open,
-            }),
+            PrLookup::Found(crate::tui::pull_request::PullRequest::fixture(
+                7,
+                PR_URL,
+                crate::tui::pr_status::PrState::InReview,
+            )),
         ));
         focus_repo(&mut state, "app");
         let effect = state.dispatch(Action::PopoverOpenFocused);

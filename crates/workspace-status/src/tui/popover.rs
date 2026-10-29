@@ -38,7 +38,8 @@ use super::comments::{tree_row_comments, CommentEntry};
 use super::commit_files::CommitFileRow;
 use super::gates::ListFocusTarget;
 use super::icons::{capture_count, file_type_name, spec, status_letter_from_change, IconKind};
-use super::pull_request::{ChecksSummary, PullRequestDetail};
+use super::pr_status::ChecksSummary;
+use super::pull_request::PullRequestDetail;
 use super::state::{AppState, PrDetailState};
 use super::tree::{
     file_change_from_name_status, find_node, is_merge_mark_kind, path_under_dir, pr_badge_kind,
