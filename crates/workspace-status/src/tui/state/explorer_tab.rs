@@ -39,7 +39,9 @@ use super::super::explorer::{ExplorerEntry, ExplorerRow, ExplorerStatus};
 use super::super::gates::{ListFocusTarget, FOCUS_A_FILE_TO_MARK_REVIEWED};
 use super::super::search::{explorer_row_match_indices, step_from_anchor, SearchPane};
 use super::super::selection::TextSelection;
-use super::super::split::{hit_vscrollbar, SplitDrag, SplitHit, VScrollbar};
+use super::super::split::{
+    hit_hscrollbar, hit_vscrollbar, HScrollbar, SplitDrag, SplitHit, VScrollbar,
+};
 use super::super::status::StatusMessage;
 use super::super::tabs::{
     ExplorerPreview, ExplorerTab, OpenFile, ParkedSearch, EXPLORER_DIFFS_SHOW_WHOLE_FILE,
@@ -908,18 +910,26 @@ impl AppState {
     fn explorer_click(&mut self, col: u16, row: u16) -> Effect {
         self.drag = SplitDrag::None;
         self.pad_press = None;
-        // The tree's bar and a changed file's diff bar scroll like the
-        // Workspace bars: no row pick, no text selection.
+        // The tree's bar, a changed file's diff bar, and a clean file's
+        // bars scroll like the Workspace bars: no row pick, no text
+        // selection. A clean file's vertical bar wins its corner cell.
         let layout = self.split_layout();
         let bars = [
             (VScrollbar::ExplorerTree, layout.explorer_tree_vbar),
             (VScrollbar::Diff, layout.diff_vbar),
+            (VScrollbar::FileView, layout.file_view_vbar),
         ];
         for (bar, geometry) in bars {
             if let Some(hit) = hit_vscrollbar(bar, geometry, col, row) {
                 self.text_selection = None;
                 return self.press_vscrollbar(bar, hit == SplitHit::VThumb(bar), row);
             }
+        }
+        let bar = HScrollbar::FileView;
+        if let Some(hit) = hit_hscrollbar(bar, layout.file_view_hbar, col, row) {
+            self.text_selection = None;
+            self.press_hscrollbar(bar, hit == SplitHit::HThumb(bar), col);
+            return Effect::None;
         }
         let at = ratatui::layout::Position::new(col, row);
         let tree = self.layout.explorer_tree;

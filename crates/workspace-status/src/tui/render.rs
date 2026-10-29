@@ -95,7 +95,8 @@ use super::syntax::{
 };
 use super::tabs::{
     compare_picker_empty, file_gutter_width, file_too_large, file_view_gutter_width,
-    ComparePickerState, ExplorerPreview, FileTab, EXPLORER_FOLDER_HINT, FILE_IS_BINARY,
+    file_view_scroll, ComparePickerState, ExplorerPreview, FileTab, EXPLORER_FOLDER_HINT,
+    FILE_IS_BINARY,
 };
 use super::theme::{hex_color, mix_toward, BackgroundMode, Palette, Pill, ThemeId};
 use super::toast::ToastTick;
@@ -277,6 +278,8 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
     state.layout.explorer_tree_vbar = VScrollbarLayout::default();
     state.layout.tree_hbar = HScrollbarLayout::default();
     state.layout.files_hbar = HScrollbarLayout::default();
+    state.layout.file_view_vbar = VScrollbarLayout::default();
+    state.layout.file_view_hbar = HScrollbarLayout::default();
     state.layout.file_view_row_lines.clear();
     state.layout.explorer_tree = Rect::default();
     state.layout.explorer_preview = Rect::default();
@@ -724,44 +727,6 @@ fn file_window_spans(
     })
 }
 
-/// First line to paint so `cursor` shows in `height` rows.
-///
-/// Keeps `scroll` when the cursor already shows. `rows_of(line)` is the
-/// painted row count of a line (more than 1 only while wrap is on); the
-/// walk reads at most one screen of lines, never the whole file.
-fn file_view_scroll(
-    scroll: usize,
-    cursor: usize,
-    height: usize,
-    rows_of: impl Fn(usize) -> usize,
-) -> usize {
-    let height = height.max(1);
-    if cursor < scroll {
-        return cursor;
-    }
-    let mut used = 0usize;
-    for line in scroll..=cursor {
-        used += rows_of(line);
-        if used > height {
-            break;
-        }
-    }
-    if used <= height {
-        return scroll;
-    }
-    let mut top = cursor;
-    let mut used = rows_of(cursor);
-    while top > 0 {
-        let above = rows_of(top - 1);
-        if used + above > height {
-            break;
-        }
-        used += above;
-        top -= 1;
-    }
-    top
-}
-
 /// First line to paint so `cursor` sits near the vertical middle of
 /// `height` rows (Ctrl-d / Ctrl-u, [`FileTab::recenter`]).
 ///
@@ -812,6 +777,14 @@ fn file_lines_ending_at(cursor: usize, height: usize, rows_of: impl Fn(usize) ->
 /// The active read-only file body (an Explorer inner file tab of a clean
 /// file) inside `pane.inner`: line numbers and highlighted
 /// code, or a loading / binary / too-large / empty notice.
+///
+/// The text keeps the scrollbars of the Explorer changed-file diff
+/// (`draw_diff_pane`) in the same cells, so switching between a changed
+/// and a clean file does not move the chrome: the last column is kept for
+/// the vertical bar whether or not it shows, the bar paints there whenever
+/// the lines overflow (or the top is not the first line), and once the
+/// view pans off the left edge the horizontal bar takes the last row, left
+/// of the vertical bar's corner.
 fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
     let palette = state.theme.palette();
     let inner = pane.inner;
@@ -853,23 +826,38 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
         );
         return;
     }
+    let wrap = state.diff_wrap;
+    // The pan clamp of Shift-←/→ ([`FileTab::pan_max`]; it reads no file).
+    // A pan it no longer allows (the pane widened since the pan) drops to
+    // it here, as the next Shift-←/→ would clamp it; at 0 the view keeps
+    // no bar row. Wrap paints unpanned and keeps the pan for later.
+    let col_max = if wrap {
+        0
+    } else {
+        tab.pan_max(inner.width, state.ascii)
+    };
+    if !wrap && usize::from(tab.col_offset) > col_max {
+        let clamped = col_max.min(usize::from(u16::MAX)) as u16;
+        state.scroll_hbar_to(HScrollbar::FileView, clamped);
+    }
+    let Some(tab) = state.tabs.active_file_view() else {
+        return;
+    };
     let lines = tab.lines();
-    let height = inner.height as usize;
+    let col_offset = if wrap { 0 } else { tab.col_offset };
+    let hscroll = graph_hscroll_visible(col_offset);
+    // Line rows: not the horizontal bar row a panned view keeps.
+    let rows_h = inner.height.saturating_sub(u16::from(hscroll)).max(1);
+    state.layout.file_view_height = rows_h;
+    let height = usize::from(rows_h);
     // Comment mark, line number, one blank column.
     let digits = file_gutter_width(lines.len()) - 1;
     let gutter = file_view_gutter_width(lines.len(), state.ascii);
-    let code_w = (inner.width as usize).saturating_sub(gutter).max(1);
-    let wrap = state.diff_wrap;
+    let code_w = tab.code_width(inner.width, state.ascii);
     // A row count past the view height is never needed, so a 2 MiB
     // single-line file scans at most one screen of its text per call.
     let row_cap = height + 1;
-    let rows_of = |line: usize| {
-        if wrap {
-            wrap_col_starts_capped(&lines[line], code_w, row_cap).len()
-        } else {
-            1
-        }
-    };
+    let rows_of = |line: usize| tab.line_rows(line, code_w, wrap, row_cap);
     // `tab.scroll` keeps the jump top (it is sticky: the next frame
     // starts from it); only the painted window glides. `j` / `k` move the
     // top only as far as the cursor needs; Ctrl-d / Ctrl-u put the cursor
@@ -908,7 +896,6 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
     };
     let search = state.theme.pills().filter;
     let gutter_style = diff_gutter_style(palette);
-    let col_offset = if wrap { 0 } else { tab.col_offset as usize };
     let blame = state.painted_line_annotation();
     // A `V` range paints like the highlighted rows of a diff.
     let visual = state.file_visual_range();
@@ -937,7 +924,7 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
         let starts = if wrap {
             wrap_col_starts_capped(text, code_w, row_cap)
         } else {
-            vec![col_offset]
+            vec![usize::from(col_offset)]
         };
         for (part, &start) in starts.iter().enumerate() {
             if painted.len() >= height {
@@ -975,9 +962,42 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
             row_lines.push(line);
         }
     }
-    frame.render_widget(Paragraph::new(painted), inner);
-    let curls = underlined_runs(frame.buffer_mut(), inner, palette.comment_underline());
+    // The rows stop left of the vertical bar column and above the
+    // horizontal bar row, as the file diff's rows do.
+    let rows_area = Rect {
+        width: diff_paint_width(inner.width),
+        height: rows_h,
+        ..inner
+    };
+    frame.render_widget(Paragraph::new(painted), rows_area);
+    let curls = underlined_runs(frame.buffer_mut(), rows_area, palette.comment_underline());
     state.layout.undercurls.extend(curls);
+    if state.background == BackgroundMode::Paint {
+        bleed_diff_row_edges(frame, rows_area, inner.right());
+    }
+    let vscroll = scroll > 0 || end < lines.len() || used > height;
+    let buf = frame.buffer_mut();
+    if vscroll {
+        let track = Rect {
+            x: inner.right() - 1,
+            width: 1,
+            ..inner
+        };
+        // The top that shows the last line on the bottom row: a track
+        // click on the last row, or a drag to the end, shows it.
+        let last = lines.len() - 1;
+        let scroll_max = (last + 1).saturating_sub(file_lines_ending_at(last, height, rows_of));
+        state.layout.file_view_vbar = paint_vscrollbar(buf, track, lines.len(), scroll, scroll_max);
+    }
+    if hscroll && col_max > 0 {
+        let track = Rect {
+            y: inner.bottom() - 1,
+            width: inner.width.saturating_sub(u16::from(vscroll)).max(1),
+            height: 1,
+            ..inner
+        };
+        state.layout.file_view_hbar = paint_hscrollbar(buf, track, col_max, col_offset);
+    }
     state.layout.file_view_row_lines = row_lines;
     // Store the jump top, not a glide step: the next frame keeps gliding
     // toward it, and the sticky rule starts from it once the glide ends.
@@ -8031,7 +8051,7 @@ mod tests {
             .collect()
     }
 
-    /// One list surface the list scrollbar tests drive.
+    /// One list (or line viewer) surface the list scrollbar tests drive.
     struct ListBarSurface {
         /// Surface id in the `scrollbars` registry table.
         id: &'static str,
@@ -8052,8 +8072,10 @@ mod tests {
     }
 
     /// Every list surface that paints through `draw_tree`,
-    /// `draw_commit_file_list`, or `draw_explorer_tree`.
-    const LIST_BAR_SURFACES: [ListBarSurface; 5] = [
+    /// `draw_commit_file_list`, or `draw_explorer_tree`, and the Explorer
+    /// clean-file view (`draw_file_body`), whose lines scroll and pan the
+    /// same way.
+    const LIST_BAR_SURFACES: [ListBarSurface; 6] = [
         ListBarSurface {
             id: "tree",
             open: || {
@@ -8165,6 +8187,23 @@ mod tests {
             },
             moved: |effect| matches!(effect, Effect::LoadExplorerPreview { .. }),
         },
+        ListBarSurface {
+            id: "explorer-file",
+            open: || {
+                let names: Vec<String> = (0..BAR_LIST_ROWS).map(bar_list_name).collect();
+                let lines: Vec<&str> = names.iter().map(String::as_str).collect();
+                let mut state = file_view_state(&lines);
+                // Wrap off: the lines are wider than the pane, so they pan.
+                state.diff_wrap = false;
+                state
+            },
+            pane: FocusPane::Right,
+            vbar: VScrollbar::FileView,
+            hbar: Some(HScrollbar::FileView),
+            cursor: |state| state.tabs.active_file_view().expect("a file view").cursor,
+            // A clean-file wheel step moves the line cursor and loads nothing.
+            moved: |effect| *effect == Effect::None,
+        },
     ];
 
     /// The recorded vertical bar `bar` of a list.
@@ -8173,6 +8212,7 @@ mod tests {
             VScrollbar::Tree => state.layout.tree_vbar,
             VScrollbar::CommitFiles => state.layout.files_vbar,
             VScrollbar::ExplorerTree => state.layout.explorer_tree_vbar,
+            VScrollbar::FileView => state.layout.file_view_vbar,
             VScrollbar::Graph | VScrollbar::Diff => unreachable!("not a list bar"),
         }
     }
@@ -8182,21 +8222,30 @@ mod tests {
         match bar {
             HScrollbar::Tree => state.layout.tree_hbar,
             HScrollbar::CommitFiles => state.layout.files_hbar,
+            HScrollbar::FileView => state.layout.file_view_hbar,
             HScrollbar::Graph | HScrollbar::Diff => unreachable!("not a list bar"),
         }
     }
 
-    /// The pan offset of the list in `pane`.
-    fn list_pan(state: &AppState, pane: FocusPane) -> u16 {
-        if pane == FocusPane::Left {
+    /// The pan offset of `surface`'s list: the clean-file view's own pan,
+    /// else the pan of the list's pane.
+    fn list_pan(state: &AppState, surface: &ListBarSurface) -> u16 {
+        if surface.hbar == Some(HScrollbar::FileView) {
+            return state
+                .tabs
+                .active_file_view()
+                .expect("a file view")
+                .col_offset;
+        }
+        if surface.pane == FocusPane::Left {
             state.left_col_offset
         } else {
             state.right_col_offset
         }
     }
 
-    /// Check that [`LIST_BAR_SURFACES`] are the `scrollbars` list surfaces
-    /// of `docs/parity.md` (by their paint anchors), and that each of
+    /// Check that [`LIST_BAR_SURFACES`] are the `scrollbars` list and
+    /// clean-file surfaces of `docs/parity.md` (by their paint anchors), and that each of
     /// `features` marks `supported` exactly the `(surface, look)` pairs of
     /// the surfaces `driven` keeps.
     fn check_list_bar_registry(features: &[&str], driven: impl Fn(&ListBarSurface) -> bool) {
@@ -8213,7 +8262,10 @@ mod tests {
                 s.anchors.iter().any(|a| {
                     matches!(
                         a.as_str(),
-                        "draw_tree" | "draw_commit_file_list" | "draw_explorer_tree"
+                        "draw_tree"
+                            | "draw_commit_file_list"
+                            | "draw_explorer_tree"
+                            | "draw_file_body"
                     )
                 })
             })
@@ -8418,10 +8470,10 @@ mod tests {
                 for _ in 0..200 {
                     state.dispatch(Action::PanDiff(1));
                 }
-                let pan_max = list_pan(&state, surface.pane);
+                let pan_max = list_pan(&state, surface);
                 assert!(pan_max > 1, "{case}: the rows pan ({pan_max})");
                 state.dispatch(Action::PanDiff(1 - i32::from(pan_max)));
-                assert_eq!(list_pan(&state, surface.pane), 1, "{case}");
+                assert_eq!(list_pan(&state, surface), 1, "{case}");
                 draw_state(&mut terminal, &mut state);
                 let vbar = list_vbar(&state, surface.vbar);
                 let vx = vbar.x.unwrap_or_else(|| panic!("{case}: vertical bar"));
@@ -8469,7 +8521,7 @@ mod tests {
                 );
                 assert_eq!((surface.cursor)(&state), cursor, "{case}: picks no row");
                 assert_eq!(state.focus, surface.pane, "{case}: the list takes focus");
-                assert_eq!(list_pan(&state, surface.pane), 1, "{case}: grab, no jump");
+                assert_eq!(list_pan(&state, surface), 1, "{case}: grab, no jump");
                 assert_eq!(
                     state.drag,
                     SplitDrag::HScrollbar {
@@ -8486,7 +8538,7 @@ mod tests {
                 let max = usize::from(pan_max);
                 let want = (1 + 5 * max / usize::from(hbar.width - 1)).min(max);
                 assert_eq!(
-                    usize::from(list_pan(&state, surface.pane)),
+                    usize::from(list_pan(&state, surface)),
                     want,
                     "{case}: drag pans"
                 );
@@ -8500,7 +8552,7 @@ mod tests {
                 assert_ne!(buf[(end, hy)].symbol(), "█", "{case}: the end is track");
                 state.dispatch(Action::Click { col: end, row: hy });
                 state.dispatch(Action::Release);
-                assert_eq!(list_pan(&state, surface.pane), pan_max, "{case}: track end");
+                assert_eq!(list_pan(&state, surface), pan_max, "{case}: track end");
                 draw_state(&mut terminal, &mut state);
                 let buf = terminal.backend().buffer().clone();
                 let tails: Vec<String> = (vbar.y..hy)
@@ -8519,7 +8571,7 @@ mod tests {
                     row: hy,
                 });
                 state.dispatch(Action::Release);
-                assert_eq!(list_pan(&state, surface.pane), 0, "{case}: track start");
+                assert_eq!(list_pan(&state, surface), 0, "{case}: track start");
                 draw_state(&mut terminal, &mut state);
                 assert_eq!(
                     list_hbar(&state, hbar_id).y,
@@ -8549,12 +8601,12 @@ mod tests {
                     state.dispatch(Action::PanDiff(1));
                 }
                 draw_state(&mut terminal, &mut state);
-                assert!(list_pan(&state, surface.pane) > 0, "{case}: panned");
+                assert!(list_pan(&state, surface) > 0, "{case}: panned");
                 assert!(list_hbar(&state, hbar_id).y.is_some(), "{case}: bar shows");
 
                 let mut wide = Terminal::new(TestBackend::new(400, 30)).unwrap();
                 draw_state(&mut wide, &mut state);
-                assert_eq!(list_pan(&state, surface.pane), 0, "{case}: clamped to 0");
+                assert_eq!(list_pan(&state, surface), 0, "{case}: clamped to 0");
                 assert_eq!(list_hbar(&state, hbar_id).y, None, "{case}: no bar");
                 let vbar = list_vbar(&state, surface.vbar);
                 assert_eq!(
@@ -8563,6 +8615,170 @@ mod tests {
                     "{case}: no blank bar row is kept"
                 );
             }
+        }
+    }
+
+    /// Line `i` of the Explorer bar-alignment fixtures: wider than the
+    /// file pane, so a diff or a clean file of these lines pans.
+    fn wide_bar_line(i: usize) -> String {
+        format!("wide-{i:02}-{}", "w".repeat(100))
+    }
+
+    /// The bars of a clean file sit in the cells of a changed file's diff
+    /// bars, in both looks, so switching between them in the Explorer does
+    /// not move the chrome: the same vertical bar column and bottom row,
+    /// and, panned, the same horizontal bar row, start, and width. A short
+    /// clean file paints no bar and still leaves that column blank.
+    #[test]
+    fn explorer_clean_file_bars_sit_where_the_changed_file_diff_bars_sit() {
+        for (look, background) in PANE_LOOKS {
+            let lines: Vec<String> = (0..80).map(wide_bar_line).collect();
+            let mut unified = String::from("@@ -0,0 +1,80 @@\n");
+            for line in &lines {
+                unified.push_str(&format!("+{line}\n"));
+            }
+            let mut diff = explorer_preview_state("README.md", Some(&unified));
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            let mut file = file_view_state(&lines);
+            for state in [&mut diff, &mut file] {
+                state.background = background;
+                state.diff_wrap = false;
+                state.focus = FocusPane::Right;
+                state.dispatch(Action::PanDiff(3));
+            }
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            draw_state(&mut terminal, &mut diff);
+            let dv = diff.layout.diff_vbar;
+            let dh = (
+                diff.layout.diff_hscrollbar_y,
+                diff.layout.diff_hscrollbar_x,
+                diff.layout.diff_hscrollbar_width,
+            );
+            draw_state(&mut terminal, &mut file);
+            let (fv, fh) = (file.layout.file_view_vbar, file.layout.file_view_hbar);
+            assert!(
+                dv.x.is_some() && dh.0.is_some(),
+                "{look}: the diff bars paint"
+            );
+            assert_eq!(fv.x, dv.x, "{look}: the same vertical bar column");
+            assert_eq!(
+                fv.y + fv.height,
+                dv.y + dv.height,
+                "{look}: the same vertical bar bottom row"
+            );
+            assert_eq!(
+                (fh.y, fh.x, fh.width),
+                dh,
+                "{look}: the same horizontal bar row, start, and width"
+            );
+
+            let (one, two) = (wide_bar_line(0), wide_bar_line(1));
+            let mut short = file_view_state(&[one.as_str(), two.as_str()]);
+            short.background = background;
+            short.diff_wrap = false;
+            draw_state(&mut terminal, &mut short);
+            assert_eq!(short.layout.file_view_vbar.x, None, "{look}: lines fit");
+            let x = dv.x.expect("diff bar column");
+            let buf = terminal.backend().buffer().clone();
+            let (y, h) = (short.layout.file_view_y, short.layout.file_view_height);
+            for row in y..y + h {
+                assert_eq!(
+                    buf[(x, row)].symbol(),
+                    " ",
+                    "{look}: row {row} keeps the column"
+                );
+            }
+        }
+    }
+
+    /// A clean file whose lines wrap scrolls by its vertical bar in both
+    /// looks: the bar measures lines (the top line and the top that shows
+    /// the last line on the bottom row), a drag sets the painted top line by
+    /// the graph bar's math with the line cursor on the new viewport's edge,
+    /// and a track click on the last row shows the last line's last row.
+    #[test]
+    fn clean_file_vertical_bar_drags_wrapped_lines_in_both_looks() {
+        for (look, background) in PANE_LOOKS {
+            // Two painted rows a line: wider than the code columns, narrower
+            // than twice them.
+            let lines: Vec<String> = (0..40)
+                .map(|i| format!("wrap-{i:02}-{}", "y".repeat(90)))
+                .collect();
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            let mut state = file_view_state(&lines);
+            state.background = background;
+            assert!(state.diff_wrap, "{look}: the file view opens wrapped");
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let bar = state.layout.file_view_vbar;
+            let x = bar.x.unwrap_or_else(|| panic!("{look}: the bar paints"));
+            let per_screen = usize::from(state.layout.file_view_height) / 2;
+            assert_eq!(bar.content_len, 40, "{look}: the bar measures lines");
+            let max = usize::from(bar.scroll_max);
+            assert_eq!(
+                max,
+                40 - per_screen,
+                "{look}: the top that shows the last line"
+            );
+            assert_eq!(bar.scroll, 0, "{look}");
+
+            let buf = terminal.backend().buffer().clone();
+            let grab = (bar.y..bar.y + bar.height)
+                .find(|&r| buf[(x, r)].symbol() == "█")
+                .unwrap_or_else(|| panic!("{look}: a painted thumb"));
+            state.dispatch(Action::Click { col: x, row: grab });
+            assert_eq!(
+                state.tabs.active_file_view().unwrap().cursor,
+                0,
+                "{look}: a thumb press picks no line"
+            );
+            state.dispatch(Action::Drag {
+                col: x,
+                row: grab + 3,
+            });
+            state.dispatch(Action::Release);
+            let want = (3 * max / usize::from(bar.height - 1)).min(max);
+            assert!(want > 0, "{look}: the drag moves");
+            draw_state(&mut terminal, &mut state);
+            assert_eq!(
+                usize::from(state.layout.file_view_vbar.scroll),
+                want,
+                "{look}: drag scrolls"
+            );
+            let cursor = state.tabs.active_file_view().unwrap().cursor;
+            assert_eq!(
+                cursor,
+                want + per_screen - 1,
+                "{look}: a drag down leaves the cursor on the bottom line, as the wheel does"
+            );
+            assert!(
+                state.layout.file_view_row_lines.contains(&cursor),
+                "{look}: the cursor shows"
+            );
+
+            let bottom = bar.y + bar.height - 1;
+            state.dispatch(Action::Click {
+                col: x,
+                row: bottom,
+            });
+            state.dispatch(Action::Release);
+            draw_state(&mut terminal, &mut state);
+            assert_eq!(
+                usize::from(state.layout.file_view_vbar.scroll),
+                max,
+                "{look}"
+            );
+            let rows = &state.layout.file_view_row_lines;
+            assert_eq!(
+                rows.last(),
+                Some(&39),
+                "{look}: the last line ends the view"
+            );
+            assert_eq!(
+                rows.iter().filter(|&&line| line == 39).count(),
+                2,
+                "{look}: both rows of the last line show"
+            );
         }
     }
 
@@ -21040,8 +21256,16 @@ mod tests {
             rows.iter().all(|&line| line == 0),
             "the long line fills the view"
         );
-        let code_w =
-            usize::from(state.layout.file_view_width) - file_view_gutter_width(2, state.ascii);
+        // The painted code columns: the pane less the bar column and gutter.
+        let code_w = state
+            .tabs
+            .active_file_view()
+            .expect("a file view")
+            .code_width(state.layout.file_view_width, state.ascii);
+        assert_eq!(
+            code_w,
+            usize::from(state.layout.file_view_width) - 1 - file_view_gutter_width(2, state.ascii)
+        );
         let capped = wrap_col_starts_capped(&huge, code_w, height + 1);
         assert_eq!(
             capped.len(),

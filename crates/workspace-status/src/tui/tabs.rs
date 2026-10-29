@@ -19,7 +19,8 @@ use super::diff::DiffContent;
 use super::drill::{CommitFile, CommitFileSource};
 use super::explorer::ExplorerTree;
 use super::icons::comment_mark_cols;
-use super::search::SearchPane;
+use super::search::{wrap_col_starts_capped, SearchPane};
+use super::split::diff_paint_width;
 
 /// Palette / overlay copy when the focused row is not a compare target.
 pub const FOCUS_A_CHECKOUT: &str = "Focus a checkout to compare";
@@ -702,6 +703,84 @@ impl FileTab {
             _ => &[],
         }
     }
+
+    /// Code columns the body paints in a `view_width`-column pane: the
+    /// pane less the vertical scrollbar column ([`diff_paint_width`], kept
+    /// whether or not the bar shows, as the file diff keeps it, so the
+    /// chrome stays put between a changed and a clean file) and the
+    /// gutter ([`file_view_gutter_width`]). At least 1.
+    pub fn code_width(&self, view_width: u16, ascii: bool) -> usize {
+        usize::from(diff_paint_width(view_width))
+            .saturating_sub(file_view_gutter_width(self.lines().len(), ascii))
+            .max(1)
+    }
+
+    /// Largest code-column pan in a `view_width`-column pane: the widest
+    /// line less [`Self::code_width`], so the end of the longest line
+    /// shows. 0 unless the body is text. Shift-←/→, the horizontal wheel,
+    /// and the horizontal scrollbar all clamp here.
+    pub fn pan_max(&self, view_width: u16, ascii: bool) -> usize {
+        let max_cols = match self.body.as_deref() {
+            Some(FileRead::Text { max_cols, .. }) => *max_cols,
+            _ => 0,
+        };
+        max_cols.saturating_sub(self.code_width(view_width, ascii))
+    }
+
+    /// Painted rows of `line` in `code_w` code columns: 1 with wrap off,
+    /// else its wrapped rows, counted to at most `row_cap` so a very long
+    /// line scans at most that many rows of its text.
+    pub(crate) fn line_rows(
+        &self,
+        line: usize,
+        code_w: usize,
+        wrap: bool,
+        row_cap: usize,
+    ) -> usize {
+        match self.lines().get(line) {
+            Some(text) if wrap => wrap_col_starts_capped(text, code_w, row_cap).len(),
+            _ => 1,
+        }
+    }
+}
+
+/// First line to paint so `cursor` shows in `height` rows: the clean-file
+/// view's sticky top, which scrolls only at the edge.
+///
+/// Keeps `scroll` when the cursor already shows. `rows_of(line)` is the
+/// painted row count of a line (more than 1 only while wrap is on); the
+/// walk reads at most one screen of lines, never the whole file.
+pub(crate) fn file_view_scroll(
+    scroll: usize,
+    cursor: usize,
+    height: usize,
+    rows_of: impl Fn(usize) -> usize,
+) -> usize {
+    let height = height.max(1);
+    if cursor < scroll {
+        return cursor;
+    }
+    let mut used = 0usize;
+    for line in scroll..=cursor {
+        used += rows_of(line);
+        if used > height {
+            break;
+        }
+    }
+    if used <= height {
+        return scroll;
+    }
+    let mut top = cursor;
+    let mut used = rows_of(cursor);
+    while top > 0 {
+        let above = rows_of(top - 1);
+        if used + above > height {
+            break;
+        }
+        used += above;
+        top -= 1;
+    }
+    top
 }
 
 /// What an Explorer inner file tab shows.

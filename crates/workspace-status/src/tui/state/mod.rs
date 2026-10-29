@@ -364,6 +364,15 @@ pub struct LayoutHit {
     /// paint, with the list's pan clamp (`AppState::commit_file_max_col`);
     /// `split_layout` hit-tests with the live pan.
     pub files_hbar: HScrollbarLayout,
+    /// Explorer clean-file view vertical scrollbar from the last paint:
+    /// its column (`None` while the lines fit), the body rows it spans,
+    /// the line count, the painted top line, and the top that shows the
+    /// last line on the bottom row.
+    pub file_view_vbar: VScrollbarLayout,
+    /// Explorer clean-file view horizontal scrollbar from the last paint,
+    /// with the file's pan clamp ([`super::tabs::FileTab::pan_max`]);
+    /// `split_layout` hit-tests with the live pan.
+    pub file_view_hbar: HScrollbarLayout,
     /// Tab-strip row (always painted).
     pub tab_y: u16,
     /// Hit boxes `(x, width, tab_index)` for the painted strip.
@@ -402,9 +411,10 @@ pub struct LayoutHit {
     pub file_view_x: u16,
     /// 0-based first row of the painted file view body.
     pub file_view_y: u16,
-    /// File view body width, gutter included.
+    /// File view body width, gutter and vertical scrollbar column included.
     pub file_view_width: u16,
-    /// File view body height in rows.
+    /// File view line rows: the body height less the horizontal scrollbar
+    /// row a panned view keeps.
     pub file_view_height: u16,
     /// The file body's rows across the full pane width: the flat pad cells
     /// beside [`Self::file_view_x`]..[`Self::file_view_width`] included
@@ -503,6 +513,8 @@ impl Default for LayoutHit {
             explorer_tree_vbar: VScrollbarLayout::default(),
             tree_hbar: HScrollbarLayout::default(),
             files_hbar: HScrollbarLayout::default(),
+            file_view_vbar: VScrollbarLayout::default(),
+            file_view_hbar: HScrollbarLayout::default(),
             tab_y: 0,
             tab_hits: Vec::new(),
             tab_close_hits: Vec::new(),
@@ -3000,6 +3012,7 @@ impl AppState {
             tree_vbar: self.layout.tree_vbar,
             files_vbar: self.layout.files_vbar,
             explorer_tree_vbar: self.layout.explorer_tree_vbar,
+            file_view_vbar: self.layout.file_view_vbar,
             graph_hbar: HScrollbarLayout {
                 y: self.layout.graph_hscrollbar_y,
                 x: self.layout.graph_hscrollbar_x,
@@ -3021,6 +3034,10 @@ impl AppState {
             files_hbar: HScrollbarLayout {
                 col_offset: self.hbar_offset(HScrollbar::CommitFiles),
                 ..self.layout.files_hbar
+            },
+            file_view_hbar: HScrollbarLayout {
+                col_offset: self.hbar_offset(HScrollbar::FileView),
+                ..self.layout.file_view_hbar
             },
             commit_msg_rule_y: self.layout.commit_msg_rule_y,
             commit_msg_rule_x: self.layout.commit_msg_rule_x,
@@ -3506,7 +3523,7 @@ impl AppState {
         };
         match bar {
             VScrollbar::Graph => self.focus_graph_pane(),
-            VScrollbar::Diff => self.focus = FocusPane::Right,
+            VScrollbar::Diff | VScrollbar::FileView => self.focus = FocusPane::Right,
             VScrollbar::Tree | VScrollbar::ExplorerTree => self.focus = FocusPane::Left,
             VScrollbar::CommitFiles => self.focus = self.commit_files_pane(),
         }
@@ -3529,6 +3546,8 @@ impl AppState {
     /// it whose viewport starts at `top` ([`cursor_for_viewport_top`]), and
     /// a moved cursor asks for what the wheel asks for: the tree loads the
     /// right pane, a commit-file row its diff, an Explorer row its preview.
+    /// The clean-file view scrolls at the edge of its line cursor, so its
+    /// cursor moves to the nearest edge line of the new viewport.
     fn scroll_vbar_to(&mut self, bar: VScrollbar, top: u16) -> Effect {
         let top = usize::from(top);
         match bar {
@@ -3543,6 +3562,10 @@ impl AppState {
             VScrollbar::Tree => self.scroll_tree_to(top),
             VScrollbar::CommitFiles => self.scroll_commit_files_to(top),
             VScrollbar::ExplorerTree => self.scroll_explorer_tree_to(top),
+            VScrollbar::FileView => {
+                self.scroll_file_view_to(top);
+                Effect::None
+            }
         }
     }
 
@@ -3655,7 +3678,7 @@ impl AppState {
         };
         match bar {
             HScrollbar::Graph => self.focus_graph_pane(),
-            HScrollbar::Diff => self.focus = FocusPane::Right,
+            HScrollbar::Diff | HScrollbar::FileView => self.focus = FocusPane::Right,
             HScrollbar::Tree => self.focus = FocusPane::Left,
             HScrollbar::CommitFiles => self.focus = self.commit_files_pane(),
         }
@@ -3679,6 +3702,10 @@ impl AppState {
                 self.left_col_offset
             }
             HScrollbar::CommitFiles => self.right_col_offset,
+            HScrollbar::FileView => self
+                .tabs
+                .active_file_view()
+                .map_or(0, |file| file.col_offset),
         }
     }
 
@@ -3694,6 +3721,11 @@ impl AppState {
                 self.left_col_offset = offset;
             }
             HScrollbar::CommitFiles => self.right_col_offset = offset,
+            HScrollbar::FileView => {
+                if let Some(file) = self.tabs.active_file_view_mut() {
+                    file.col_offset = offset;
+                }
+            }
         }
     }
 
