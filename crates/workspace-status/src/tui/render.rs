@@ -9412,6 +9412,256 @@ mod tests {
         }
     }
 
+    /// Commit A, the two-pane fixtures' seed commit.
+    const FOOTER_COMMIT_A: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    /// Commit B, a second commit with its own long message.
+    const FOOTER_COMMIT_B: &str = "bbb2222cccccccccccccccccccccccccccccccccc";
+
+    /// One commit-message footer surface of the `commit-footer` registry
+    /// row (`docs/parity.md`) and how to drive it.
+    struct FooterSurface {
+        /// Surface id in the registry.
+        id: &'static str,
+        /// A state that shows commit A's long message on this surface.
+        open: fn() -> AppState,
+        /// Show the commit with full id `id` on this surface.
+        show_commit: fn(&mut AppState, &str),
+        /// The recorded wheel box.
+        footer_box: fn(&AppState) -> Option<FooterBox>,
+        /// The shown commit's message scroll offset.
+        scroll: fn(&AppState) -> usize,
+        /// Message lines below the shown ones (the hint's K).
+        lines_below: fn(&AppState) -> usize,
+        /// The list cursor the wheel over the footer must not move.
+        list_cursor: fn(&AppState) -> usize,
+    }
+
+    /// Give `state`'s graph a second commit (B) and a 30-line body on both
+    /// commits, so either message overflows its footer.
+    fn with_two_long_commits(mut state: AppState) -> AppState {
+        if let Some(model) = state.graph.as_mut() {
+            model.commits[0].body = footer_long_body(30);
+            let mut second = model.commits[0].clone();
+            second.id = FOOTER_COMMIT_B.into();
+            second.subject = "second graph".into();
+            second.refs = Vec::new();
+            model.commits.push(second);
+        }
+        state
+    }
+
+    /// Graph row of commit `id` (row 0 is the uncommitted row).
+    fn show_graph_commit(state: &mut AppState, id: &str) {
+        state.graph_cursor = if id == FOOTER_COMMIT_A { 1 } else { 2 };
+    }
+
+    /// Open the depth-2 commit diff of commit `id` on its one file.
+    fn show_drill_commit(state: &mut AppState, id: &str) {
+        state.open_commit_diff(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: id.into(),
+            },
+            vec![super::super::drill::CommitFile {
+                status: "M".into(),
+                path: "README.md".into(),
+                old_path: None,
+                stat: None,
+            }],
+            0,
+            "README.md".into(),
+            super::super::diff::DiffContent::from_lines(vec!["@@ -1,1 +1,1 @@".into()]),
+        );
+    }
+
+    /// The wheel box a commit-message footer records, and its scroll max.
+    struct FooterBox {
+        y: u16,
+        x: u16,
+        width: u16,
+        height: u16,
+        scroll_max: usize,
+    }
+
+    fn graph_footer_box(state: &AppState) -> Option<FooterBox> {
+        let l = &state.layout;
+        l.graph_footer_y.map(|y| FooterBox {
+            y,
+            x: l.graph_footer_x,
+            width: l.graph_footer_width,
+            height: l.graph_footer_height,
+            scroll_max: l.graph_footer_scroll_max,
+        })
+    }
+
+    fn commit_detail_footer_box(state: &AppState) -> Option<FooterBox> {
+        let l = &state.layout;
+        l.commit_detail_footer_y.map(|y| FooterBox {
+            y,
+            x: l.commit_detail_footer_x,
+            width: l.commit_detail_footer_width,
+            height: l.commit_detail_footer_height,
+            scroll_max: l.commit_detail_footer_scroll_max,
+        })
+    }
+
+    /// Every commit-message footer surface this test can drive.
+    const FOOTER_SURFACES: [FooterSurface; 3] = [
+        FooterSurface {
+            id: "graph-d0",
+            open: || {
+                let mut state = with_two_long_commits(two_pane_graph_state());
+                show_graph_commit(&mut state, FOOTER_COMMIT_A);
+                state
+            },
+            show_commit: show_graph_commit,
+            footer_box: graph_footer_box,
+            scroll: AppState::graph_footer_msg_scroll,
+            lines_below: AppState::graph_footer_lines_below,
+            list_cursor: |state| state.graph_cursor,
+        },
+        FooterSurface {
+            id: "graph-d1",
+            open: || {
+                let mut state = with_two_long_commits(two_pane_files_state());
+                show_graph_commit(&mut state, FOOTER_COMMIT_A);
+                state
+            },
+            show_commit: show_graph_commit,
+            footer_box: graph_footer_box,
+            scroll: AppState::graph_footer_msg_scroll,
+            lines_below: AppState::graph_footer_lines_below,
+            list_cursor: |state| state.graph_cursor,
+        },
+        FooterSurface {
+            id: "files-d2",
+            open: || with_two_long_commits(two_pane_commit_diff_state()),
+            show_commit: show_drill_commit,
+            footer_box: commit_detail_footer_box,
+            scroll: AppState::commit_detail_msg_scroll,
+            lines_below: AppState::commit_detail_footer_lines_below,
+            list_cursor: AppState::commit_files_cursor,
+        },
+    ];
+
+    /// The `commit-footer` message scroll behaves the same on every surface
+    /// `docs/parity.md` marks `supported` for `msg-scroll`, in every look
+    /// it names (boxed and flat panes): the wheel over the footer scrolls
+    /// the message and leaves the list cursor, a scrollbar sits on the
+    /// footer's last column, the ` <more_below><K>` hint sits left of it
+    /// and hits over its cells until the tail shows, and another commit
+    /// starts at the top while the first keeps its offset. The registry's
+    /// surface list and this test's must match, so a new footer surface
+    /// gets a test case, and a surface this test drives gets a registry
+    /// row.
+    #[test]
+    fn commit_footer_message_scroll_matches_on_every_registry_surface() {
+        let looks = [
+            ("boxed", BackgroundMode::Terminal),
+            ("flat", BackgroundMode::Paint),
+        ];
+        let mut driven: Vec<(String, String)> = FOOTER_SURFACES
+            .iter()
+            .flat_map(|s| looks.iter().map(|(look, _)| (s.id.into(), (*look).into())))
+            .collect();
+        driven.sort();
+        assert_eq!(
+            crate::parity_registry::supported_surface_looks("commit-footer", "msg-scroll"),
+            driven,
+            "docs/parity.md `commit-footer` / `msg-scroll` surfaces and looks must match this test's"
+        );
+        for surface in &FOOTER_SURFACES {
+            for (look, background) in looks {
+                let case = format!("{} {look}", surface.id);
+                let mut state = (surface.open)();
+                state.background = background;
+                let mut terminal = Terminal::new(TestBackend::new(80, 28)).unwrap();
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                let FooterBox {
+                    y,
+                    x,
+                    width,
+                    height,
+                    scroll_max: max,
+                } = (surface.footer_box)(&state)
+                    .unwrap_or_else(|| panic!("{case}: an overflowing footer records its box"));
+                assert!(max > 0, "{case}: the message overflows");
+                let bottom = y + height;
+                let bar_x = x + width - 1;
+                let hint = |state: &AppState| {
+                    state
+                        .layout
+                        .icon_hits
+                        .iter()
+                        .find(|hit| hit.kind == IconKind::GraphMoreBelow)
+                        .cloned()
+                };
+                let first = hint(&state).unwrap_or_else(|| panic!("{case}: hint hit"));
+                assert!((y..bottom).contains(&first.y), "{case}: hint in the box");
+                assert_eq!(
+                    first.x + first.width,
+                    bar_x,
+                    "{case}: hint ends left of the bar"
+                );
+                let buf = terminal.backend().buffer().clone();
+                let painted: String = (first.x..bar_x)
+                    .map(|col| buf[(col, first.y)].symbol().to_string())
+                    .collect();
+                let glyph = more_below_glyph(&state);
+                assert_eq!(painted, format!("{glyph}{max}"), "{case}: hint text");
+                assert_eq!((surface.lines_below)(&state), max, "{case}: K at the top");
+                assert!(
+                    is_scrollbar_cell(buf[(bar_x, first.y)].symbol()),
+                    "{case}: scrollbar on the footer's last column"
+                );
+
+                let cursor = (surface.list_cursor)(&state);
+                let wheel = |state: &mut AppState, delta: i32| {
+                    state.dispatch(Action::ScrollWheel {
+                        col: x + 2,
+                        row: first.y,
+                        delta,
+                        horizontal: false,
+                    })
+                };
+                assert_eq!(wheel(&mut state, 1), Effect::None, "{case}: no load");
+                assert_eq!((surface.scroll)(&state), 1, "{case}: wheel down scrolls");
+                assert_eq!(
+                    (surface.list_cursor)(&state),
+                    cursor,
+                    "{case}: cursor stays"
+                );
+                for _ in 0..max + 5 {
+                    wheel(&mut state, 1);
+                }
+                assert_eq!((surface.scroll)(&state), max, "{case}: clamped at the end");
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                assert!(
+                    hint(&state).is_none(),
+                    "{case}: no hint once the tail shows"
+                );
+                assert_eq!((surface.lines_below)(&state), 0, "{case}");
+                let buf = terminal.backend().buffer().clone();
+                assert!(
+                    (y..bottom).any(|row| is_scrollbar_cell(buf[(bar_x, row)].symbol())),
+                    "{case}: the bar stays at the end"
+                );
+
+                (surface.show_commit)(&mut state, FOOTER_COMMIT_B);
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                assert_eq!(
+                    (surface.scroll)(&state),
+                    0,
+                    "{case}: another commit starts at 0"
+                );
+                let other = hint(&state).unwrap_or_else(|| panic!("{case}: B's hint"));
+                assert_eq!(other.y, first.y, "{case}: B's hint row");
+                (surface.show_commit)(&mut state, FOOTER_COMMIT_A);
+                assert_eq!((surface.scroll)(&state), max, "{case}: A keeps its offset");
+            }
+        }
+    }
+
     /// A long message in the depth-2 commit-files footer scrolls like the
     /// graph selection footer: a 1-column scrollbar over the message rows
     /// and a muted ` <more_below><K>` hint on the last row, left of the
