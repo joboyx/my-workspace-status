@@ -907,11 +907,9 @@ impl AppState {
                 // A second Ctrl+click on the badge opens again; it is not
                 // a double-click that drills into the row.
                 self.last_click = None;
-                Effect::OpenPullRequest {
-                    repo,
-                    branch,
-                    page: PrPage::Pr,
-                }
+                // The same guard as `gx`: a badge painted before the
+                // checkout's default branch became known opens nothing.
+                self.run_pr_action_on(PrAction::Open, repo, branch)
             }
             None => {
                 self.status = StatusMessage::warn(NO_PR_FOR_ROW);
@@ -2489,6 +2487,29 @@ mod tests {
             assert_eq!(focused_id(&app), "repo:app", "col {col}");
             assert_eq!(app.focus, FocusPane::Left);
         }
+    }
+
+    #[test]
+    fn ctrl_click_on_a_stale_badge_of_a_default_branch_checkout_opens_nothing() {
+        // The badge was painted before the default branch became known.
+        let mut app = app_with(
+            &[
+                with_default(repo("app", "main"), "main"),
+                repo("lib", "feature"),
+            ],
+            &[],
+        );
+        let y = tree_y(&app, "repo:app");
+        badge_at(&mut app, "app", 20, y);
+        focus(&mut app, "repo:lib");
+        app.last_click = None;
+        assert_eq!(
+            app.dispatch(Action::CtrlClick { col: 20, row: y }),
+            Effect::LoadRightPane,
+            "the row is selected, no PR opens"
+        );
+        assert_eq!(focused_id(&app), "repo:app");
+        assert_eq!(app.status, "main is the default branch: no PR");
     }
 
     #[test]
