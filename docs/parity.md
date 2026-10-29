@@ -255,12 +255,12 @@ The reviewed eye and the comment mark (open or resolved) on a row or a line gutt
 
 ### `watch-flash` — Watch-reload flash
 
-A row that a watch reload adds or changes flashes and fades. The rows that paint a checkout's PR badge also flash when its PR changes (`pr-change`).
+A row that a watch reload adds or changes flashes and fades. The rows that show a checkout's PR also flash when its PR changes (`pr-change`), closed included.
 
 | Feature | What | Tests |
 | --- | --- | --- |
 | `flash` | A reloaded row flashes. | `flash_paints_node_and_spacer_cursor_wins` |
-| `pr-change` | When a checkout's PR turns CI failed, ready to merge, merged, or closed, each row that paints its PR badge flashes (the checkout's tree row, never a family row; its graph worktree row): the remove ramp for CI failed and closed, the add ramp for ready to merge and merged. The PR badge glyph keeps its state colour. | `a_pr_change_flashes_the_checkout_tree_row_on_the_remove_or_add_ramp`, `a_pr_change_flash_keeps_the_badge_glyph_in_its_state_colour`, `a_pr_change_flashes_the_graph_worktree_row_at_depth_0_and_1` |
+| `pr-change` | When a checkout's PR turns CI failed, ready to merge, merged, or closed, each row that shows its PR flashes (the checkout's tree row, never a family row; its graph worktree row), closed included though its badge is gone: the remove ramp for CI failed and closed, the add ramp for ready to merge and merged. The PR badge glyph keeps its state colour. | `a_pr_change_flashes_the_checkout_tree_row_on_the_remove_or_add_ramp`, `a_pr_change_flash_keeps_the_badge_glyph_in_its_state_colour`, `a_pr_change_flashes_the_graph_worktree_row_at_depth_0_and_1` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `flash` | `pr-change` |
 | --- | --- | --- | --- | --- | --- | --- | --- |
