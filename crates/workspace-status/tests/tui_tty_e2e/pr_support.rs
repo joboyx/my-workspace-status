@@ -200,7 +200,8 @@ pub fn forge_env<'a>(
 /// Where the tree paints its badge column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TreeEdge {
-    /// Column of the last tree cell that holds content: the badge glyph.
+    /// Column of the last cell inside the tree pane, where a badge glyph
+    /// sits. Read from the pane border, not from any row.
     pub glyph_col: u16,
     /// First screen row of the tree body.
     pub first_row: u16,
@@ -228,6 +229,15 @@ pub fn tree_edge(tui: &PtySession) -> Option<TreeEdge> {
         first_row: FLAT_BODY_ROW,
         last_row: flat_pane_last_row(tui),
     })
+}
+
+/// True when the boxed frame on screen was drawn for the current terminal
+/// size: the top right corner of the right pane is in the last column. After
+/// a resize the old frame stays on the grid until the app draws again, and
+/// its tree edge still reads as the old width.
+pub fn frame_fits_terminal(tui: &PtySession) -> bool {
+    let (cols, _) = tui.grid_size();
+    tui.grid_row_text(1, cols.saturating_sub(1)..cols) == "┐"
 }
 
 /// What the tree paints at the badge column of one row.
@@ -277,6 +287,25 @@ pub fn tree_row_text(tui: &PtySession, name: &str) -> Option<String> {
     (edge.first_row..=edge.last_row)
         .map(|row| tui.grid_row_text(row, 0..edge.glyph_col + 1))
         .find(|text| text.contains(name))
+}
+
+/// True when the tree row that paints `name` ends in `total`, two spaces
+/// after the rest of the row (the workspace row: `0 changed · all current
+/// 2 PRs · 2 need you`).
+pub fn total_is(tui: &PtySession, name: &str, total: &str) -> bool {
+    tree_row_text(tui, name).is_some_and(|row| row.trim_end().ends_with(&format!("  {total}")))
+}
+
+/// Column of the last painted (non-blank) cell of the tree row that paints
+/// `name`, read from the row's own cells and not from the pane edge. `None`
+/// when the row or the pane is not on screen.
+///
+/// A badge that is the last item of the trailing run puts this at the edge
+/// on every row; a badge that sits earlier in the run moves it per row.
+pub fn last_content_col(tui: &PtySession, name: &str) -> Option<u16> {
+    let text = tree_row_text(tui, name)?;
+    let trimmed = text.trim_end();
+    (!trimmed.is_empty()).then(|| trimmed.chars().count() as u16 - 1)
 }
 
 /// Foreground and bold flag of the first cell of `needle` on the tree row
@@ -387,6 +416,21 @@ pub const ALERT_WORDS: [&str; 5] = [
 pub fn has_alert(screen: &str) -> bool {
     let toasts = toast_text(screen);
     ALERT_WORDS.iter().any(|word| toasts.contains(word))
+}
+
+/// Sample the screen for `window` and panic the moment `holds` is false.
+/// Proves a state is kept over a window, which a single sample cannot.
+pub fn assert_holds_for(
+    tui: &PtySession,
+    holds: impl Fn(&PtySession) -> bool,
+    window: Duration,
+    what: &str,
+) {
+    let start = Instant::now();
+    while start.elapsed() < window {
+        assert!(holds(tui), "{what} did not hold:\n{}", tui.screen());
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 /// Watch the screen until `ready` holds, then for `quiet` longer, and panic

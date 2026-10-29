@@ -1,14 +1,17 @@
+use std::collections::BTreeSet;
 use std::fs;
 
 use crate::common::fake_forge::FakeForge;
 use crate::common::pr_scenarios::Badge;
 use crate::harness::{PtySession, UserConfig};
 use crate::pr_support::{
-    badge_is, forge_env, seed_checkouts, state_board, tree_badge, tree_edge, Forge, PrCheckout,
+    badge_is, forge_env, frame_fits_terminal, last_content_col, seed_checkouts, state_board,
+    tree_edge, Forge, PrCheckout,
 };
 use crate::support::GIT_WAIT;
 
-/// Narrowest tree (inner columns) that paints refs: spec §8.1.
+/// Narrowest tree (inner columns) that paints refs. A narrower tree paints
+/// the glyph alone on every row (`docs/tui-rust.md`, **Pull request badge**).
 const REF_MIN_COLS: u16 = 50;
 
 /// Two more checkouts whose rows carry other marks before the badge: a
@@ -31,8 +34,8 @@ fn extra_checkouts() -> Vec<(PrCheckout, Badge)> {
     ]
 }
 
-/// Every row of the board and the extras must show `want` as its badge: the
-/// ref (when `refs`) and the ASCII glyph, flush with the tree edge.
+/// Every row of the board and the extras must show its badge: the ref (when
+/// `refs`) and the ASCII glyph, flush with the tree edge.
 fn board_matches(tui: &PtySession, board: &[(PrCheckout, Badge)], refs: bool) -> bool {
     board.iter().all(|(checkout, badge)| {
         let ref_text = checkout.ref_text();
@@ -45,15 +48,15 @@ fn board_matches(tui: &PtySession, board: &[(PrCheckout, Badge)], refs: bool) ->
     })
 }
 
-/// All PR glyphs share one column, which is the tree's last content cell.
-fn glyph_columns(tui: &PtySession, board: &[(PrCheckout, Badge)]) -> Vec<u16> {
-    let mut cols: Vec<u16> = board
+/// Column of the last painted cell of every board row, read from each row's
+/// own cells and not from the pane edge. The badge is the last item of the
+/// trailing run, so a straight column is exactly one value; a badge that
+/// sits earlier in the run gives a different value per row.
+fn last_cells(tui: &PtySession, board: &[(PrCheckout, Badge)]) -> BTreeSet<u16> {
+    board
         .iter()
-        .filter_map(|(checkout, _)| tree_badge(tui, &checkout.dir))
-        .map(|badge| badge.col)
-        .collect();
-    cols.dedup();
-    cols
+        .filter_map(|(checkout, _)| last_content_col(tui, &checkout.dir))
+        .collect()
 }
 
 /// The board plus the extras, seeded and answered by the fake forge.
@@ -75,20 +78,48 @@ fn fixture(
     (root, workspace, forge, board)
 }
 
+/// One fresh launch at `cols` columns: the inner tree is `inner` columns
+/// (read off the cell grid), every row ends at the tree edge in one column,
+/// and the refs are on every row exactly when `inner` is 50 or more.
+///
+/// A fresh launch, not a resize: the split a resize leaves does not follow
+/// the width (the tree keeps the share it had), so only a launch gives a
+/// known inner width.
+fn launch_at(prefix: &str, cols: u16, inner: u16) {
+    let (_root, workspace, forge, board) = fixture(prefix);
+    let tui = PtySession::open_size_with_env(&workspace, cols, 36, &forge_env(&forge, &[]));
+    tui.wait_pred(
+        |_| {
+            frame_fits_terminal(&tui)
+                && tree_edge(&tui).is_some_and(|edge| {
+                    edge.glyph_col == inner
+                        && board_matches(&tui, &board, inner >= REF_MIN_COLS)
+                        && last_cells(&tui, &board) == BTreeSet::from([inner])
+                })
+        },
+        &format!(
+            "{cols} columns give an inner tree of {inner}: every row ends at the edge, refs {}",
+            if inner >= REF_MIN_COLS { "on" } else { "off" }
+        ),
+        GIT_WAIT,
+    );
+}
+
 /// The glyph column is straight at every tree width, and a tree under 50
-/// columns drops the refs on every row (AC2).
+/// columns drops the refs on every row.
 ///
 /// Seed: fourteen checkouts (six states on each forge, plus two dirty rows
 /// whose other marks differ), fake `gh` / `glab` answers per state.
 ///
-/// Proof: at 140 columns each row ends in `<ref> <glyph>` and every glyph
-/// is in one column, the last tree cell. The terminal then resizes through
-/// widths on both sides of the 50-column rule (the inner tree width is read
-/// off the cell grid): each time, the glyph column is still one column
-/// and the refs are on every row when the tree is 50 columns or wider, and
-/// on no row when narrower. Reverting the ref drop keeps refs on a narrow
-/// tree and fails the narrow wait; reverting the end-of-run placement moves
-/// the glyph column per row and fails the single-column check.
+/// Proof: at 140 columns each row ends in `<ref> <glyph>`. The terminal then
+/// resizes to 100 and 120 columns and back to 140. At each width the last
+/// painted cell of every row, read from the row itself, is the pane's last
+/// cell (one column), and the refs are on every row when the inner tree is
+/// 50 columns or wider and on no row when narrower. Reverting the ref drop
+/// keeps refs on a narrow tree and fails the narrow wait; moving the badge
+/// earlier in the trailing run gives each row its own last column and fails
+/// the single-column check. The 50-column boundary itself is the next two
+/// tests.
 #[test]
 fn pty_pr_glyph_column_straight_and_narrow_tree_drops_refs() {
     let (_root, workspace, forge, board) = fixture("ws-tui-tty-pr-column");
@@ -98,35 +129,55 @@ fn pty_pr_glyph_column_straight_and_narrow_tree_drops_refs() {
         "every row ends in `<ref> <glyph>` at 140 columns",
         GIT_WAIT,
     );
-    let wide = glyph_columns(&tui, &board);
-    assert_eq!(wide.len(), 1, "one glyph column at 140 columns: {wide:?}");
 
-    for cols in [128, 129, 130, 100, 120, 132, 140] {
+    for cols in [100, 120, 140] {
         tui.resize(cols, 36);
         // One sample must satisfy all of it: a frame that is half drawn
-        // cannot.
+        // cannot, and neither can the frame of the width before the resize.
         tui.wait_pred(
             |_| {
-                tree_edge(&tui).is_some_and(|edge| {
-                    board_matches(&tui, &board, edge.glyph_col >= REF_MIN_COLS)
-                        && glyph_columns(&tui, &board) == [edge.glyph_col]
-                })
+                frame_fits_terminal(&tui)
+                    && tree_edge(&tui).is_some_and(|edge| {
+                        board_matches(&tui, &board, edge.glyph_col >= REF_MIN_COLS)
+                            && last_cells(&tui, &board) == BTreeSet::from([edge.glyph_col])
+                    })
             },
             &format!(
-                "{cols} columns: one glyph column at the tree edge, refs on every row only when the tree is {REF_MIN_COLS}+ wide"
+                "{cols} columns: every row ends at the tree edge, refs on every row only when the tree is {REF_MIN_COLS}+ wide"
             ),
             GIT_WAIT,
         );
     }
 }
 
+/// A tree of 49 columns (128 terminal columns) drops the refs.
+///
+/// Seed and proof as `launch_at`: the grid confirms the inner width is 49,
+/// and every row ends in the glyph alone at the tree edge. A rule that
+/// lets refs in at 49 columns keeps them here and fails.
+#[test]
+fn pty_pr_tree_of_49_columns_drops_refs() {
+    launch_at("ws-tui-tty-pr-edge-49", 128, REF_MIN_COLS - 1);
+}
+
+/// A tree of exactly 50 columns (130 terminal columns) paints the refs.
+///
+/// Seed and proof as `launch_at`: the grid confirms the inner width is 50,
+/// and every row ends in `<ref> <glyph>` at the tree edge. A rule that
+/// needs 51 columns drops the refs here and fails.
+#[test]
+fn pty_pr_tree_of_50_columns_paints_refs() {
+    launch_at("ws-tui-tty-pr-edge-50", 130, REF_MIN_COLS);
+}
+
 /// The flat look (shipped defaults, no pane border) keeps one glyph column
-/// and drops the refs on a narrow tree (AC2, second look of the parity row).
+/// and drops the refs on a narrow tree.
 ///
 /// Seed: as the boxed test. Proof: at 140 columns every row ends in
-/// `<ref> <glyph>` in one column; at 100 columns every row ends in the glyph
-/// alone, still in one column. Reverting the flat edge placement or the ref
-/// drop fails the matching wait.
+/// `<ref> <glyph>`, and the last painted cell of every row is one column; at
+/// 100 columns every row ends in the glyph alone, still in one column.
+/// Reverting the flat edge placement or the ref drop fails the matching
+/// wait.
 #[test]
 fn pty_pr_glyph_column_straight_in_the_flat_look() {
     let (_root, workspace, forge, board) = fixture("ws-tui-tty-pr-column-flat");
@@ -138,14 +189,14 @@ fn pty_pr_glyph_column_straight_in_the_flat_look() {
         UserConfig::Own,
     );
     tui.wait_pred(
-        |_| board_matches(&tui, &board, true) && glyph_columns(&tui, &board).len() == 1,
-        "flat look, 140 columns: every row ends in `<ref> <glyph>`, one glyph column",
+        |_| board_matches(&tui, &board, true) && last_cells(&tui, &board).len() == 1,
+        "flat look, 140 columns: every row ends in `<ref> <glyph>`, one last column",
         GIT_WAIT,
     );
     tui.resize(100, 36);
     tui.wait_pred(
-        |_| board_matches(&tui, &board, false) && glyph_columns(&tui, &board).len() == 1,
-        "flat look, 100 columns: glyphs only, one glyph column",
+        |_| board_matches(&tui, &board, false) && last_cells(&tui, &board).len() == 1,
+        "flat look, 100 columns: glyphs only, one last column",
         GIT_WAIT,
     );
 }

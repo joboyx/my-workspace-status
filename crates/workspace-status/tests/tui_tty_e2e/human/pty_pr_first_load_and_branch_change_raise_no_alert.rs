@@ -12,8 +12,9 @@ use crate::support::GIT_WAIT;
 /// How long the screen must stay free of alerts: several poll periods.
 const QUIET: Duration = Duration::from_millis(1800);
 
-/// Opening a workspace and switching a checkout's branch raise no PR alert
-/// (AC6).
+/// Opening a workspace and switching a checkout's branch raise no PR alert:
+/// only a change of a PR already seen in this session alerts (`docs/tui-model.md`,
+/// **PR transitions**).
 ///
 /// Seed: `appbox` (GitHub) on `feature/auth-refresh` with `#7` CI failed,
 /// `apibox` (GitLab) on `feature/rate-limit` with `!5` ready, and `donebox`

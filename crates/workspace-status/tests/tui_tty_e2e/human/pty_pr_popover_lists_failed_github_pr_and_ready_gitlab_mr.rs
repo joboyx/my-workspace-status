@@ -46,7 +46,8 @@ fn popover_reads(screen: &str, header: &str, fields: &[&str], actions: &[&str]) 
 }
 
 /// A pinned PR popover lists its lines in order, for a failed GitHub PR and
-/// for a ready GitLab merge request (spec §8.4 and AC3's popover half).
+/// for a ready GitLab merge request (`docs/tui-rust.md`, **Pull request
+/// badge**, popover lines).
 ///
 /// Seed: `appbox` (GitHub `#7`, CI failed) and `apibox` (GitLab `!5`, ready
 /// to merge). A click on the badge pins the popover; the fake `gh pr view`

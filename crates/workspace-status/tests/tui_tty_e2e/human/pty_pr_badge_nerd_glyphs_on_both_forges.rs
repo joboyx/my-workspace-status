@@ -5,7 +5,8 @@ use crate::pr_support::{
 use crate::support::GIT_WAIT;
 
 /// In Nerd mode the six states paint their shapes `✕ ◉ ◐ ◌ ○ ✓`, one cell
-/// wide, flush with the tree edge, on both forges (AC1, Nerd glyph set).
+/// wide, flush with the tree edge, on both forges (`docs/tui-rust.md`,
+/// **Pull request badge**, Nerd glyph set).
 ///
 /// Seed: the twelve-checkout board of the ASCII test, launched with
 /// `WS_STATUS_GLYPHS=nerd`.

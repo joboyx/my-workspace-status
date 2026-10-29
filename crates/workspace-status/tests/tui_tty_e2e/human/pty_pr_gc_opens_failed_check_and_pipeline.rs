@@ -24,7 +24,8 @@ fn gc_opens(tui: &mut PtySession, forge: &FakeForge, ack: &str, want_url: &str) 
 }
 
 /// `gc` opens the failed check of a GitHub PR and the pipeline of a GitLab
-/// merge request, and says so (AC4).
+/// merge request, and says so (`docs/tui-rust.md`, **Pull request badge**,
+/// the CI link).
 ///
 /// Seed: `apibox` (GitLab `!5`, pipeline failed) above `appbox` (GitHub
 /// `#7`, checks `lint` passed and `test (ubuntu-latest)` failed), with the

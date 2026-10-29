@@ -5,17 +5,13 @@ use crate::common::pr_scenarios::Badge;
 use crate::harness::PtySession;
 use crate::pr_support::{
     badge_flashes, badge_is, click_badge, forge_env, named_workspace, seed_checkouts, toast_text,
-    tree_row_text, Forge, PrCheckout, ADD_RAMP, POLL_MS,
+    total_is, Forge, PrCheckout, ADD_RAMP, POLL_MS,
 };
 use crate::support::{tree_cursor_on, GIT_WAIT, WAIT};
 
-/// The workspace row ends in `total`.
-fn total_is(tui: &PtySession, total: &str) -> bool {
-    tree_row_text(tui, "# ws").is_some_and(|row| row.trim_end().ends_with(&format!("  {total}")))
-}
-
 /// A PR in review that turns ready to merge raises the alert on both
-/// forges (AC3, the review to ready half).
+/// forges: a toast, a row flash, the new badge, the new total, the graph
+/// chip and the popover (`docs/tui-rust.md`, **PR change toasts**).
 ///
 /// Seed: `apibox` (GitLab `!5`) and `appbox` (GitHub `#7`), both in review,
 /// polled every 300 ms. The test swaps both answers to ready to merge and
@@ -27,9 +23,10 @@ fn total_is(tui: &PtySession, total: &str) -> bool {
 /// feature/rate-limit`, the badge glyph cells sit on the add flash ramp in
 /// the frame that carries the toast, both rows end in `A`, the total reads
 /// `2 PRs · 2 need you`, the graph chip of the focused checkout reads `A
-/// <ref> ready to merge  > merge`, and the pinned popover reads `A PR ·
-/// ready to merge`. Reverting the ready alert leaves no toast; reverting
-/// the total update leaves `2 PRs`.
+/// <ref> ready to merge  > merge` (the whole chip, which a toast cannot
+/// contain), and the pinned popover reads `A PR · ready to merge`.
+/// Reverting the ready alert leaves no toast; reverting the total update
+/// leaves `2 PRs`.
 #[test]
 fn pty_pr_poll_review_to_ready_alerts_on_both_forges() {
     let (root, workspace) = named_workspace("ws-tui-tty-pr-ready", "ws");
@@ -50,7 +47,7 @@ fn pty_pr_poll_review_to_ready_alerts_on_both_forges() {
         |_| {
             badge_is(&tui, "appbox", Some("#7"), 'P')
                 && badge_is(&tui, "apibox", Some("!5"), 'P')
-                && total_is(&tui, "2 PRs")
+                && total_is(&tui, "# ws", "2 PRs")
         },
         "both checkouts show a PR in review and the total is `2 PRs`",
         GIT_WAIT,
@@ -91,17 +88,17 @@ fn pty_pr_poll_review_to_ready_alerts_on_both_forges() {
         |_| {
             badge_is(&tui, "appbox", Some("#7"), 'A')
                 && badge_is(&tui, "apibox", Some("!5"), 'A')
-                && total_is(&tui, "2 PRs · 2 need you")
+                && total_is(&tui, "# ws", "2 PRs · 2 need you")
         },
         "both rows end in `A` and the total reads `2 PRs · 2 need you`",
         WAIT,
     );
 
+    // The whole chip, with its two spaces and the next action, is matched:
+    // the toast text (`A !5 ready to merge · ...`) cannot contain it.
     tui.wait_pred(
         |screen| {
-            tree_cursor_on(screen, "apibox")
-                && screen.contains("A !5 ready to merge")
-                && screen.contains("> merge")
+            tree_cursor_on(screen, "apibox") && screen.contains("A !5 ready to merge  > merge")
         },
         "the graph chip of apibox reads `A !5 ready to merge  > merge`",
         WAIT,
@@ -109,9 +106,7 @@ fn pty_pr_poll_review_to_ready_alerts_on_both_forges() {
     tui.key('j');
     tui.wait_pred(
         |screen| {
-            tree_cursor_on(screen, "appbox")
-                && screen.contains("A #7 ready to merge")
-                && screen.contains("> merge")
+            tree_cursor_on(screen, "appbox") && screen.contains("A #7 ready to merge  > merge")
         },
         "the graph chip of appbox reads `A #7 ready to merge  > merge`",
         WAIT,

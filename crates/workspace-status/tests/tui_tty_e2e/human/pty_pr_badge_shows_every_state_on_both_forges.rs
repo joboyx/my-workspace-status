@@ -5,7 +5,8 @@ use crate::pr_support::{
 use crate::support::GIT_WAIT;
 
 /// Each of the six PR states paints its own glyph, colour and ref, on a
-/// GitHub checkout and on a GitLab checkout (AC1).
+/// GitHub checkout and on a GitLab checkout (`docs/tui-rust.md`, **Pull
+/// request badge**).
 ///
 /// Seed: twelve checkouts on one workspace, one per state on each forge
 /// (`gh-failed` is `#10`, `gl-failed` is `!20`, and so on). The fake `gh`

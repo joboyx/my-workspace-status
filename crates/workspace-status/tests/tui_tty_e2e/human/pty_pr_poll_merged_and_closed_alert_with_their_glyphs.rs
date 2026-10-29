@@ -104,7 +104,8 @@ fn merged_and_closed(prefix: &str, glyphs: &str, merged_on: Forge, merged: char,
 }
 
 /// A merged GitHub PR and a closed GitLab merge request alert with the
-/// ASCII glyphs (spec §7: into merged, and closed, whose badge goes away).
+/// ASCII glyphs (`docs/tui-rust.md`, **PR change toasts**: into merged, and
+/// closed, whose badge goes away).
 ///
 /// Seed: `appbox` (`#7`) and `apibox` (`!5`), both ready to merge, polled
 /// every 300 ms; the test swaps the GitHub PR to merged and the GitLab one
@@ -121,7 +122,7 @@ fn pty_pr_poll_github_merge_and_gitlab_close_alert_in_ascii() {
 }
 
 /// A merged GitLab merge request and a closed GitHub PR alert with the
-/// Nerd glyphs `✓` and `⊘` (spec §7 and §11).
+/// Nerd glyphs `✓` and `⊘` (`docs/tui-rust.md`, **PR change toasts**).
 ///
 /// Seed and proof as the ASCII test with the forges swapped: toasts
 /// `✓ !5 merged · feature/rate-limit` and `⊘ #7 closed ·

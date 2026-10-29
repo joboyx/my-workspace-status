@@ -27,7 +27,7 @@ fn calls_stay_at(forge: &FakeForge, count: usize) {
 }
 
 /// `WS_STATUS_PR_POLL_MS=0` turns polling off, and `r` still looks a PR up
-/// (AC8).
+/// (`docs/configuration.md`, `WS_STATUS_PR_POLL_MS`).
 ///
 /// Seed: `apibox` (GitLab `!5`) and `appbox` (GitHub `#7`), both in review,
 /// launched with `WS_STATUS_PR_POLL_MS=0`.
