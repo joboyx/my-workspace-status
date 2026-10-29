@@ -1176,7 +1176,13 @@ impl Interpreter {
         match effect {
             Effect::Quit => {}
             Effect::None => {
-                if matches!(action, Action::Pull) && is_idle_pull_status(&state.status) {
+                // The reset box `p` just opened sets no status, so it counts
+                // as idle too (a modal box cannot be open before `p` runs).
+                let reset_box =
+                    matches!(state.confirm, Some(PendingConfirm::ResetToUpstream { .. }));
+                if matches!(action, Action::Pull)
+                    && (reset_box || is_idle_pull_status(&state.status))
+                {
                     self.enqueue_pull_after_inflight_fetch(state);
                 }
             }
@@ -2747,7 +2753,8 @@ impl Interpreter {
     /// Queue pull when `p` lands during an inflight/pending fetch on that gitdir.
     ///
     /// Dispatch keeps idle in-sync `p` as [`Effect::None`] and status
-    /// `nothing behind to pull` (or a diverged line). An unfetched tracking
+    /// `nothing behind to pull` (or a diverged or upstream-rewrite line, or
+    /// it opened the reset box). An unfetched tracking
     /// checkout still looks in-sync, so that path would drop `p` while fetch
     /// occupies the gitdir. Other None Pull paths (right pane, compare tab,
     /// drill) must not follow. Diverged targets stay out: `p` never pulls
@@ -5925,6 +5932,54 @@ mod tests {
             "app: origin/main was force-pushed under your 1 commit — run git rebase --onto origin/main 0123456789ab main"
         ));
         assert!(!is_idle_pull_status("moving main to origin/main…"));
+    }
+
+    #[test]
+    fn workspace_pull_during_fetch_that_opens_the_reset_box_still_pulls_the_rest() {
+        let mut app = repo("app", false);
+        app.sync_status = SyncStatus::Diverged;
+        app.sync_note = "diverged (ahead 2, behind 1)".into();
+        app.upstream_rewrite = Some(crate::git::UpstreamRewrite {
+            upstream: "origin/main".into(),
+            fork_point: "a".repeat(40),
+            tip: "a".repeat(40),
+            yours: 0,
+            dropped: 2,
+        });
+        let mut lib = repo("lib", false);
+        lib.sync_status = SyncStatus::UpToDate;
+        // The leftover status must not change the outcome: a live
+        // `Fetching…` line and an idle line from an earlier `p` both queue.
+        for before in ["Fetching 0/2…", STATUS_NOTHING_TO_PULL] {
+            let snapshot = build_workspace_snapshot(&[app.clone(), lib.clone()], &[], false, &[]);
+            let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+            state.cursor = 0;
+            let mut interp = Interpreter::with_cap(4);
+            schedule_effect(
+                &mut interp,
+                &mut state,
+                Effect::Fetch {
+                    repos: vec!["app".into(), "lib".into()],
+                },
+                &Action::Fetch,
+            );
+            assert_eq!(capture_jobs(&mut interp, &mut state).len(), 2);
+            state.status = before.into();
+            let effect = state.dispatch(Action::Pull);
+            assert_eq!(effect, Effect::None);
+            assert!(
+                matches!(state.confirm, Some(PendingConfirm::ResetToUpstream { .. })),
+                "{before}: {:?}",
+                state.confirm
+            );
+            schedule_effect(&mut interp, &mut state, effect, &Action::Pull);
+            assert_eq!(
+                interp.pending_remotes(),
+                vec![(RunningOp::Pull, "lib".into())],
+                "{before}"
+            );
+            assert!(state.confirm.is_some(), "the box stays up");
+        }
     }
 
     #[test]
