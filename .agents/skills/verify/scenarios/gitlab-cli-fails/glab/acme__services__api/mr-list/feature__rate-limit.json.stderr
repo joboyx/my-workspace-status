@@ -1,0 +1,1 @@
+Get "https://gitlab.com/api/v4/projects/acme%2Fservices%2Fapi/merge_requests": dial tcp: lookup gitlab.com: no such host
