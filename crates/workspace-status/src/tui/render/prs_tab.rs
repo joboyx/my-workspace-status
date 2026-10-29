@@ -1262,6 +1262,162 @@ mod tests {
         }
     }
 
+    /// `app` with a failed PR (`#318`) and 11 checkouts without one, in
+    /// `background`: the 13 tree rows overflow the smallest frame
+    /// (`MIN_TERM_ROWS`) in both looks.
+    fn one_pr_among_thirteen_rows(background: BackgroundMode) -> AppState {
+        let mut repos = vec![checkout("app", "feature/ABC-123-retry")];
+        repos
+            .extend((1..=11).map(|n| checkout(&format!("repo-{n:02}"), &format!("feature/x-{n}"))));
+        let mut state = app_over(&repos, false);
+        let retry = pr(
+            GH_APP,
+            318,
+            PrState::CiFailed,
+            "feat(ABC-123): Retry failed uploads with backoff",
+            "feature/ABC-123-retry",
+            "main",
+        );
+        land(&mut state, "app", "feature/ABC-123-retry", GH_APP, retry);
+        state.background = background;
+        state
+    }
+
+    /// With the tree overflowing, its vertical bar takes the last column:
+    /// the total ends left of the bar, its first cell opens the PRs tab,
+    /// and a press on the bar's top cell grabs the bar instead.
+    #[test]
+    fn the_pr_total_hit_ends_left_of_the_tree_scrollbar() {
+        use super::super::super::split::{SplitDrag, VScrollbar};
+        for background in LOOKS {
+            let fresh = || {
+                let mut state = one_pr_among_thirteen_rows(background);
+                paint(&mut state, 200, MIN_TERM_ROWS);
+                state
+            };
+            let mut state = fresh();
+            let bar = state.layout.tree_vbar;
+            let bar_x = bar.x.expect("the tree overflows, so its bar paints");
+            let hit = state.layout.pr_total_hit.expect("the total painted");
+            assert_eq!(
+                hit.right(),
+                bar_x,
+                "{background:?}: the total ends at the bar"
+            );
+            assert_eq!(hit.y, bar.y, "{background:?}: the bar's top row");
+            state.dispatch(Action::Click {
+                col: bar_x,
+                row: bar.y,
+            });
+            assert!(
+                !state.is_prs_tab(),
+                "{background:?}: the bar takes the press"
+            );
+            assert!(
+                matches!(
+                    state.drag,
+                    SplitDrag::VScrollbar {
+                        bar: VScrollbar::Tree,
+                        ..
+                    }
+                ),
+                "{background:?}: the press grabs the tree bar: {:?}",
+                state.drag
+            );
+            let mut state = fresh();
+            state.dispatch(Action::Click {
+                col: hit.x,
+                row: hit.y,
+            });
+            assert!(
+                state.is_prs_tab(),
+                "{background:?}: the first cell opens it"
+            );
+        }
+    }
+
+    /// The PR ref drops on a tree narrower than `PR_REF_MIN_TREE_COLS`
+    /// painted columns. At a tree exactly that wide, the vertical bar's
+    /// column makes the rows one short: the paint drops the ref, and the
+    /// segments the pan clamp and `gh` read drop it too. With no bar the
+    /// ref paints and the segments keep it.
+    #[test]
+    fn tree_row_segments_drop_the_pr_ref_where_the_scrollbar_narrows_the_rows() {
+        for background in LOOKS {
+            for (rows, bar) in [(MIN_TERM_ROWS, true), (40, false)] {
+                let what = format!("{background:?} bar {bar}");
+                let cols = (40..=200)
+                    .find(|&cols| {
+                        let mut state = one_pr_among_thirteen_rows(background);
+                        paint(&mut state, cols, rows);
+                        usize::from(state.layout.tree_width) == PR_REF_MIN_TREE_COLS
+                    })
+                    .expect("a frame width gives the boundary tree width");
+                let mut state = one_pr_among_thirteen_rows(background);
+                let (_, text) = paint(&mut state, cols, rows);
+                assert_eq!(state.layout.tree_vbar.x.is_some(), bar, "{what}");
+                let row = state
+                    .rows
+                    .iter()
+                    .find(|row| crate::tui::tree::pr_badge_repo(row) == Some("app"))
+                    .expect("the app row")
+                    .clone();
+                let y = text
+                    .iter()
+                    .position(|line| line.contains("  app  "))
+                    .expect("the app row paints");
+                let left = usize::from(state.layout.tree_x);
+                let right = left + usize::from(state.layout.tree_width);
+                let painted: String = text[y].chars().skip(left).take(right - left).collect();
+                let segs = state.tree_row_paint_segments(&row);
+                let seg_text: String = segs
+                    .segments
+                    .iter()
+                    .chain(&segs.trailing)
+                    .map(|seg| seg.text.as_str())
+                    .collect();
+                assert_eq!(painted.contains("#318"), !bar, "{what}: {painted:?}");
+                assert_eq!(seg_text.contains("#318"), !bar, "{what}: {seg_text:?}");
+            }
+        }
+    }
+
+    /// The PRs tab has no resize edge (its `resize-edges` row is `n/a` on
+    /// every feature): no column hovers as an edge, and a press there arms
+    /// no divider drag, at the list / detail boundary or at the Workspace
+    /// divider's column of the frame before.
+    #[test]
+    fn the_prs_tab_has_no_resize_edge() {
+        use super::super::super::split::SplitDrag;
+        for background in LOOKS {
+            let mut state = workspace(false);
+            state.background = background;
+            paint(&mut state, 160, 30);
+            let workspace_divider = state.layout.outer_tree_width - 1;
+            state.dispatch(Action::OpenPrsTab);
+            paint(&mut state, 160, 30);
+            let list = state.layout.prs_list;
+            let detail = state.layout.prs_detail;
+            assert!(detail.width > 0, "{background:?}: the detail shows");
+            let y = list.y + 2;
+            for x in [
+                list.right().saturating_sub(1),
+                list.right(),
+                detail.x.saturating_sub(1),
+                detail.x,
+                workspace_divider,
+            ] {
+                let what = format!("{background:?} column {x}");
+                state.pointer = Some((x, y));
+                assert_eq!(state.hovered_resize_edge(), None, "{what}");
+                state.dispatch(Action::Click { col: x, row: y });
+                assert_eq!(state.drag, SplitDrag::None, "{what}: no drag");
+                state.dispatch(Action::Release);
+                assert!(state.is_prs_tab(), "{what}");
+            }
+        }
+    }
+
     /// At every frame width the hit covers exactly the painted total, so a
     /// row with room for one part keeps `2 need you` and its cells, on a
     /// wide and on a narrow tree, and a click on them opens the PRs tab.

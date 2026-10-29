@@ -107,7 +107,7 @@ impl AppState {
             .iter()
             .map(|row| {
                 // The painted marks and PR badge widen the trailing run.
-                let segs = self.tree_row_paint_segments(row);
+                let segs = self.tree_row_paint_segments_in(row, width);
                 let label: usize = segs.segments.iter().map(|s| visible_width(&s.text)).sum();
                 let trailing: usize = segs.trailing.iter().map(|s| visible_width(&s.text)).sum();
                 list_row_pan_max(label, row.depth, trailing, width)

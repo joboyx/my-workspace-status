@@ -1823,11 +1823,12 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             state.left_col_offset as usize,
         );
         lines.push(line);
-        // The PR total ends the workspace row flush right; a click on it
-        // opens the PRs tab.
+        // The PR total ends the workspace row flush right, left of the
+        // vertical bar's column; a click on it opens the PRs tab.
         if let Ok(total_w) = u16::try_from(total_cols) {
-            if total_w > 0 && total_w <= area.width {
-                state.layout.pr_total_hit = Some(Rect::new(area.right() - total_w, y, total_w, 1));
+            if total_w > 0 && total_w <= rows_area.width {
+                state.layout.pr_total_hit =
+                    Some(Rect::new(rows_area.right() - total_w, y, total_w, 1));
             }
         }
         for (kind, x, w) in icons {

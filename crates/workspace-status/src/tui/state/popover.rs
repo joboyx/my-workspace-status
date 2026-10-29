@@ -140,9 +140,22 @@ impl AppState {
     }
 
     /// Every segment tree row `row` paints this frame, before the spinner
-    /// and the sparkline join the trailing run.
+    /// and the sparkline join the trailing run: at the painted row width,
+    /// the tree's less the vertical bar's column while that bar shows.
     pub(crate) fn tree_row_paint_segments(&self, row: &VisibleRow) -> NodeSegments {
-        let width = usize::from(self.layout.tree_width);
+        let bar = u16::from(self.layout.tree_vbar.x.is_some());
+        let width = self.layout.tree_width.saturating_sub(bar);
+        self.tree_row_paint_segments_in(row, usize::from(width))
+    }
+
+    /// [`Self::tree_row_paint_segments`] for rows `width` columns wide, so
+    /// a PR ref or an upstream note the paint drops at that width drops
+    /// here too.
+    pub(crate) fn tree_row_paint_segments_in(
+        &self,
+        row: &VisibleRow,
+        width: usize,
+    ) -> NodeSegments {
         let (viewed, commented, resolved, pr) = self.tree_row_marks(row, width, Instant::now());
         let mut segs =
             painted_row_segments(row, self.ascii, viewed, commented, resolved, pr.as_ref());
@@ -322,11 +335,11 @@ impl AppState {
     /// Comment marks on the cursor line of the focused line viewer, in
     /// paint order: each gutter cell of the file diff's cursor row (both
     /// cells of a side-by-side row; one section per line), or the
-    /// clean-file view's cursor line. Empty when no line viewer has focus,
-    /// a folder summary stands in for the diff, or the line paints no
-    /// mark.
+    /// clean-file view's cursor line. Empty when no line viewer has focus
+    /// (the PRs tab has none, though its list is no Workspace list), a
+    /// folder summary stands in for the diff, or the line paints no mark.
     pub(crate) fn cursor_line_comment_icons(&self) -> Vec<(IconKind, IconTarget)> {
-        if self.list_focus_target() != ListFocusTarget::None {
+        if self.is_prs_tab() || self.list_focus_target() != ListFocusTarget::None {
             return Vec::new();
         }
         if let Some(file) = self.tabs.active_file_view() {
