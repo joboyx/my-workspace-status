@@ -2662,6 +2662,22 @@ mod tests {
                 "older GitLab {merge_status}"
             );
         }
+        // The MR call is fresher than the list: its status decides.
+        let pr = GlForge::new(&[gl_open(&[("detailed_merge_status", r#""unchecked""#)])])
+            .mr_fields(&[("detailed_merge_status", r#""mergeable""#)])
+            .found();
+        assert!(
+            pr.merge_state_settled,
+            "list unchecked, MR call mergeable: settled, so no flapping"
+        );
+        assert_eq!(pr.state, PrState::Ready);
+        let pr = GlForge::new(&[gl_open(&[("detailed_merge_status", r#""mergeable""#)])])
+            .mr_fields(&[("detailed_merge_status", r#""checking""#)])
+            .found();
+        assert!(
+            !pr.merge_state_settled,
+            "list mergeable, MR call checking: not settled"
+        );
         let merged = json_with(
             &gl_mr(20, "merged", "2026-03-01T00:00:00.000Z"),
             &[("detailed_merge_status", r#""checking""#)],
