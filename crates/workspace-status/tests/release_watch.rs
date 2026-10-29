@@ -15,13 +15,16 @@
 //! state: last-used theme and activity sparkline), which can beat the
 //! fixture's config theme or change its paint. The binary ignores the old
 //! `WS_STATUS_THEME_STORE`, so a spawn path must not keep naming it. These
-//! tests fail until those hazards stay fixed. Recipe:
+//! tests fail until those hazards stay fixed. The tmux driver of the verify
+//! skill (`scripts/verify-tui.sh`) is a TTY spawn path too, so it is in every
+//! loop below. Recipe:
 //! [docs/architecture.md](../../../docs/architecture.md).
 
 const RELEASE_YML: &str = include_str!("../../../.github/workflows/release.yml");
 const TAG_RELEASE_YML: &str = include_str!("../../../.github/workflows/tag-release.yml");
 const DIST_WORKSPACE: &str = include_str!("../../../dist-workspace.toml");
 const STILLS_SH: &str = include_str!("../../../scripts/capture-demo-stills.sh");
+const VERIFY_SH: &str = include_str!("../../../scripts/verify-tui.sh");
 const PTY_HARNESS: &str = include_str!("tui_tty_e2e/harness.rs");
 const DESKTOP_HARNESS: &str = include_str!("tui_tty_e2e/desktop.rs");
 
@@ -36,6 +39,14 @@ fn assigns_ui_store(src: &str) -> bool {
 
 fn assigns_user_config_home(src: &str) -> bool {
     src.contains("env(\"XDG_CONFIG_HOME\"") || src.contains("export XDG_CONFIG_HOME=")
+}
+
+/// True when a line of `src` is an `unset` command that names `var`.
+fn unsets_var(src: &str, var: &str) -> bool {
+    src.lines().any(|line| {
+        let mut words = line.split_whitespace();
+        words.next() == Some("unset") && words.any(|word| word == var)
+    })
 }
 
 fn isolates_workspace_env(src: &str) -> bool {
@@ -58,6 +69,14 @@ fn isolated_store_assignment_rejects_comment_only() {
     ));
     assert!(assigns_update_check_store(
         "cmd.env(\"WS_STATUS_UPDATE_CHECK_STORE\", &store);"
+    ));
+    assert!(!unsets_var("", "GH_TOKEN"));
+    assert!(!unsets_var("# unset GH_TOKEN", "GH_TOKEN"));
+    assert!(!unsets_var("export GH_TOKEN=x", "GH_TOKEN"));
+    assert!(!unsets_var("unset GH_TOKEN_OLD", "GH_TOKEN"));
+    assert!(unsets_var(
+        "unset NO_COLOR GH_TOKEN GITHUB_TOKEN",
+        "GH_TOKEN"
     ));
     assert!(!isolates_workspace_env(""));
     assert!(!isolates_workspace_env("# drop WS_STATUS_WORKSPACE"));
@@ -157,6 +176,7 @@ fn tty_spawn_paths_isolate_update_check_store() {
         ("tui_tty_e2e/harness.rs", PTY_HARNESS),
         ("tui_tty_e2e/desktop.rs", DESKTOP_HARNESS),
         ("scripts/capture-demo-stills.sh", STILLS_SH),
+        ("scripts/verify-tui.sh", VERIFY_SH),
     ] {
         assert!(
             assigns_update_check_store(src),
@@ -176,6 +196,10 @@ fn tty_spawn_paths_isolate_update_check_store() {
         STILLS_SH.contains("lastCheckUnix"),
         "capture-demo-stills.sh must stamp a fresh lastCheckUnix so the 6h window is not due"
     );
+    assert!(
+        VERIFY_SH.contains("lastCheckUnix"),
+        "verify-tui.sh must stamp a fresh lastCheckUnix so the 6h window is not due"
+    );
 }
 
 #[test]
@@ -184,6 +208,7 @@ fn tty_spawn_paths_isolate_user_config() {
         ("tui_tty_e2e/harness.rs", PTY_HARNESS),
         ("tui_tty_e2e/desktop.rs", DESKTOP_HARNESS),
         ("scripts/capture-demo-stills.sh", STILLS_SH),
+        ("scripts/verify-tui.sh", VERIFY_SH),
     ] {
         assert!(
             assigns_user_config_home(src),
@@ -199,6 +224,7 @@ fn tty_spawn_paths_isolate_workspace_env() {
         ("tui_tty_e2e/harness.rs", PTY_HARNESS),
         ("tui_tty_e2e/desktop.rs", DESKTOP_HARNESS),
         ("scripts/capture-demo-stills.sh", STILLS_SH),
+        ("scripts/verify-tui.sh", VERIFY_SH),
     ] {
         assert!(
             isolates_workspace_env(src),
@@ -214,6 +240,7 @@ fn tty_spawn_paths_isolate_ui_store() {
         ("tui_tty_e2e/harness.rs", PTY_HARNESS),
         ("tui_tty_e2e/desktop.rs", DESKTOP_HARNESS),
         ("scripts/capture-demo-stills.sh", STILLS_SH),
+        ("scripts/verify-tui.sh", VERIFY_SH),
     ] {
         assert!(
             assigns_ui_store(src),
@@ -229,6 +256,7 @@ fn tty_spawn_paths_drop_old_theme_store_name() {
         ("tui_tty_e2e/harness.rs", PTY_HARNESS),
         ("tui_tty_e2e/desktop.rs", DESKTOP_HARNESS),
         ("scripts/capture-demo-stills.sh", STILLS_SH),
+        ("scripts/verify-tui.sh", VERIFY_SH),
     ] {
         assert!(
             !src.contains("WS_STATUS_THEME_STORE"),
@@ -265,5 +293,44 @@ fn tty_spawn_paths_pin_theme_mode() {
         STILLS_SH.contains("STILLS_THEME_MODE=\"${WS_STATUS_STILLS_THEME_MODE:-dark}\"")
             && STILLS_SH.contains("export WS_STATUS_THEME_MODE="),
         "scripts/capture-demo-stills.sh must export WS_STATUS_THEME_MODE (default dark)"
+    );
+}
+
+#[test]
+fn verify_driver_isolates_forge_theme_and_git() {
+    // The verify driver (`scripts/verify-tui.sh`) shares the TTY spawn rules
+    // above through the loops; these are the pins only it adds.
+    for var in [
+        "WS_STATUS_THEME",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GITLAB_TOKEN",
+    ] {
+        assert!(
+            unsets_var(VERIFY_SH, var),
+            "scripts/verify-tui.sh must `unset {var}` (a parent value would change the look, \
+             or give a fake-forge run the operator's forge login)"
+        );
+    }
+    for pin in [
+        "export WS_STATUS_THEME_MODE=dark",
+        "export GIT_CONFIG_GLOBAL=/dev/null",
+        "export GIT_ALLOW_PROTOCOL=file",
+    ] {
+        assert!(
+            VERIFY_SH.contains(pin),
+            "scripts/verify-tui.sh must pin `{pin}` (dark theme twin; no operator git config; \
+             no git network from a fixture)"
+        );
+    }
+    assert!(
+        VERIFY_SH.contains("debug/workspace-status")
+            && !VERIFY_SH.contains("command -v workspace-status"),
+        "scripts/verify-tui.sh must run the checkout's own target/debug/workspace-status, \
+         never the installed one on PATH"
+    );
+    assert!(
+        VERIFY_SH.contains("export WS_FAKE_FORGE_DIR=") && VERIFY_SH.contains("/fake-forge:$PATH"),
+        "scripts/verify-tui.sh must put scripts/fake-forge first on PATH for --fake-forge"
     );
 }
