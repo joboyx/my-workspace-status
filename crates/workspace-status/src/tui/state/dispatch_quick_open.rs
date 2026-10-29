@@ -119,10 +119,7 @@ impl AppState {
                 self.quick_open_edit(query)
             }
             Action::QuickOpenSubmit => self.submit_quick_open(),
-            Action::QuickOpenCancel => {
-                self.close_quick_open();
-                Effect::None
-            }
+            Action::QuickOpenEscape => self.escape_quick_open(),
             _ => Effect::None,
         }
     }
@@ -153,6 +150,25 @@ impl AppState {
             }
             QuickOpenEntry::Files => self.ensure_file_index(),
         }
+    }
+
+    /// Esc: clear the typed query and keep the overlay open; on an empty
+    /// query, close with no run (`close_quick_open`).
+    ///
+    /// Commands mode keeps its `>` prefix: text after it clears back to
+    /// `>`, and a bare `>` closes. The cleared query goes through the same
+    /// edit path as Backspace, so the list, scores, and theme preview
+    /// follow it.
+    fn escape_quick_open(&mut self) -> Effect {
+        let Some(quick) = self.quick_open.as_ref() else {
+            return Effect::None;
+        };
+        if !quick.has_typed_query() {
+            self.close_quick_open();
+            return Effect::None;
+        }
+        let cleared = quick.cleared_query().to_string();
+        self.quick_open_edit(cleared)
     }
 
     /// Close the overlay with no run. A disabled-row reason that Enter put
@@ -753,7 +769,10 @@ mod tests {
         let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         let action = crate::tui::app::map_event(&app, &esc);
         app.dispatch(action);
-        assert!(app.quick_open.is_none(), "Esc closes Quick Open");
+        assert_eq!(quick(&app).query, ">", "the first Esc clears to `>`");
+        let action = crate::tui::app::map_event(&app, &esc);
+        app.dispatch(action);
+        assert!(app.quick_open.is_none(), "Esc on `>` closes Quick Open");
 
         press(&mut app, '<');
         assert!(app.tree_fraction < fraction, "`<` narrows the tree again");
@@ -826,13 +845,13 @@ mod tests {
         let mut app = family_state();
         focus_row(&mut app, NodeKind::Checkout, Some("app"));
         let old = open_files(&mut app);
-        app.dispatch(Action::QuickOpenCancel);
+        app.dispatch(Action::QuickOpenEscape);
         let gen = open_files(&mut app);
         assert_ne!(old, gen);
         assert_eq!(app.apply_file_index(old, index_of(&["a.rs"])), None);
         assert_eq!(quick(&app).index, FileIndexState::Loading, "old gen");
 
-        app.dispatch(Action::QuickOpenCancel);
+        app.dispatch(Action::QuickOpenEscape);
         assert_eq!(app.apply_file_index(gen, index_of(&["a.rs"])), None);
         assert!(
             app.quick_open.is_none(),
@@ -1028,7 +1047,7 @@ mod tests {
         open_files(&mut app);
         assert!(app.status.is_empty(), "{}", app.status);
         assert_eq!(quick(&app).file_status_text(), "indexing…");
-        app.dispatch(Action::QuickOpenCancel);
+        app.dispatch(Action::QuickOpenEscape);
 
         app.status = StatusMessage::info("Press Ctrl-c again to exit");
         open_files(&mut app);
@@ -1068,6 +1087,71 @@ mod tests {
         assert_eq!(quick(&app).mode(), QuickOpenMode::Files);
         assert!(app.status.is_empty(), "{}", app.status);
         assert_eq!(quick(&app).commands.shown_reason, None);
+    }
+
+    /// Files mode: Esc clears a typed query (and scores the empty one, as
+    /// Backspace would), then closes on the empty query.
+    #[test]
+    fn esc_clears_the_files_query_then_closes() {
+        let mut app = family_state();
+        focus_row(&mut app, NodeKind::Checkout, Some("app"));
+        let gen = open_files(&mut app);
+        let score = score_gen(app.apply_file_index(gen, index_of(&["README.md", "src/main.rs"])));
+        app.apply_file_score(score, vec![hit(0), hit(1)]);
+        score_gen(Some(type_text(&mut app, "main")));
+
+        let effect = app.dispatch(Action::QuickOpenEscape);
+        assert!(
+            matches!(&effect, Effect::ScoreFiles { query, .. } if query.is_empty()),
+            "{effect:?}"
+        );
+        assert_eq!(quick(&app).query, "", "Esc clears the typed query");
+        assert_eq!(quick(&app).mode(), QuickOpenMode::Files);
+
+        assert_eq!(app.dispatch(Action::QuickOpenEscape), Effect::None);
+        assert!(app.quick_open.is_none(), "Esc on an empty query closes");
+    }
+
+    /// Commands mode: Esc clears the text after `>` and keeps the `>`
+    /// (full list, theme preview ended), then a bare `>` closes with the
+    /// open-time theme back. A files entry that typed `>` behaves the same.
+    #[test]
+    fn esc_clears_commands_text_back_to_the_prefix_then_closes() {
+        use super::super::super::theme::ThemeId;
+        for entry in [QuickOpenEntry::Commands, QuickOpenEntry::Files] {
+            let mut app = family_state();
+            app.theme = ThemeId::Kanagawa;
+            app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
+            let full = app.command_palette().expect("commands").visible().len();
+            app.dispatch(Action::QuickOpenEscape);
+
+            app.dispatch(Action::ToggleQuickOpen(entry));
+            let typed = match entry {
+                QuickOpenEntry::Commands => "nord",
+                QuickOpenEntry::Files => ">nord",
+            };
+            type_text(&mut app, typed);
+            assert_eq!(
+                app.theme,
+                ThemeId::Nord,
+                "{entry:?}: the theme row previews"
+            );
+
+            assert_eq!(app.dispatch(Action::QuickOpenEscape), Effect::None);
+            assert_eq!(quick(&app).query, ">", "{entry:?}: the `>` stays");
+            assert_eq!(quick(&app).mode(), QuickOpenMode::Commands);
+            let palette = app.command_palette().expect("commands");
+            assert_eq!(palette.visible().len(), full, "{entry:?}: filter cleared");
+            assert_eq!(
+                app.theme,
+                ThemeId::Kanagawa,
+                "{entry:?}: no theme row in focus"
+            );
+
+            assert_eq!(app.dispatch(Action::QuickOpenEscape), Effect::None);
+            assert!(app.quick_open.is_none(), "{entry:?}: a bare `>` closes");
+            assert_eq!(app.theme, ThemeId::Kanagawa, "{entry:?}: close restores");
+        }
     }
 
     /// Open clean `app/src/lib.rs` as an Explorer inner file tab with
@@ -1139,7 +1223,9 @@ mod tests {
         app.dispatch(Action::QuickOpenBackspace);
         type_text(&mut app, "x");
         assert_eq!(go_to_line(&app), None, "`42x`");
-        app.dispatch(Action::QuickOpenCancel);
+        // Esc clears the typed filter, then closes.
+        app.dispatch(Action::QuickOpenEscape);
+        app.dispatch(Action::QuickOpenEscape);
         app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
         type_text(&mut app, "line");
         assert_eq!(go_to_line(&app), None, "`line`");

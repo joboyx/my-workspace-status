@@ -357,8 +357,9 @@ impl SearchFilesState {
     /// changes nothing and has no hint. The option chips take a click, so
     /// they have no key hint; paint shows [`option_tooltip`] here instead
     /// while the pointer is on one. With mouse capture off (`mouse` false)
-    /// no click arrives, so [`MOUSE_OFF_HINT`] comes just before `Esc
-    /// close` and says how to turn it on.
+    /// no click arrives, so [`MOUSE_OFF_HINT`] comes just before the Esc
+    /// hint and says how to turn it on. The Esc hint is `Esc clear` while
+    /// the query has text (Esc clears it first), else `Esc close`.
     pub fn footer_hints(&self, mouse: bool) -> String {
         let results = self.zone == SearchZone::Results;
         let mut hints = vec![if results { "j/k move" } else { "↑↓ move" }.to_string()];
@@ -374,7 +375,14 @@ impl SearchFilesState {
         if !mouse {
             hints.push(MOUSE_OFF_HINT.into());
         }
-        hints.push("Esc close".into());
+        hints.push(
+            if self.query.is_empty() {
+                "Esc close"
+            } else {
+                "Esc clear"
+            }
+            .into(),
+        );
         hints.join(" · ")
     }
 
@@ -634,6 +642,19 @@ mod tests {
             state.footer_hints(false),
             "j/k move · Enter open · e edit · Tab all repos · mouse off: m outside to click chips · Esc close"
         );
+        state.query = "main".into();
+        assert_eq!(
+            state.footer_hints(true),
+            "j/k move · Enter open · e edit · Tab all repos · Esc clear",
+            "a typed query: Esc clears it first"
+        );
+        state.zone = SearchZone::Query;
+        assert_eq!(
+            state.footer_hints(false),
+            "↑↓ move · Enter open · Tab all repos · mouse off: m outside to click chips · Esc clear"
+        );
+        state.query.clear();
+        assert!(state.footer_hints(true).ends_with("· Esc close"));
         state.widened = true;
         assert!(state.footer_hints(true).contains("Tab web ·"));
         state.focused = QuickOpenScope::Workspace;

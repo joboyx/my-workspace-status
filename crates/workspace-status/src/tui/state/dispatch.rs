@@ -345,7 +345,7 @@ impl AppState {
             | Action::QuickOpenChar(_)
             | Action::QuickOpenBackspace
             | Action::QuickOpenSubmit
-            | Action::QuickOpenCancel
+            | Action::QuickOpenEscape
             | Action::ToggleSearchFiles
             | Action::SearchFilesChar(_)
             | Action::SearchFilesBackspace
@@ -353,7 +353,7 @@ impl AppState {
             | Action::SearchFilesPage(_)
             | Action::SearchFilesToggleScope
             | Action::SearchFilesToggleOption(_)
-            | Action::SearchFilesCancel
+            | Action::SearchFilesEscape
             | Action::SearchFilesSubmit
             | Action::SearchFilesEdit
             | Action::CompareVsDefault

@@ -7051,8 +7051,9 @@ mod tests {
             other => panic!("expected the file text, got {other:?}"),
         }
 
-        // Below the preview width nothing is read.
-        state.dispatch(Action::SearchFilesCancel);
+        // Below the preview width nothing is read. Ctrl-f parks the dialog
+        // with its query (Esc would clear the query first).
+        state.dispatch(Action::ToggleSearchFiles);
         state.search_files_parked.as_mut().expect("parked").preview = None;
         state.layout.term_cols = crate::tui::search_files::SEARCH_PREVIEW_MIN_COLS - 1;
         let effect = state.dispatch(Action::ToggleSearchFiles);

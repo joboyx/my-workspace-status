@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use crate::harness::PtySession;
 use crate::seed::{compare_regions_workspace, git_stdout, COMPARE_ADDED_FILE, REGIONS_OMEGA};
 use crate::support::{
-    ack_rows, compare_regions_diff_focused, crumb_row, open_compare_regions_diff, tree_cursor_on,
-    type_palette_filter, GIT_WAIT, SETTLE_MS, VISUAL_KEY_GAP_MS, WAIT,
+    ack_rows, compare_regions_diff_focused, crumb_row, esc_clears_palette_filter,
+    open_compare_regions_diff, tree_cursor_on, type_palette_filter, GIT_WAIT, SETTLE_MS,
+    VISUAL_KEY_GAP_MS, WAIT,
 };
 
 const RANGE_CONFIRM: &str =
@@ -285,7 +286,7 @@ fn pty_compare_x_refuses_dirty_file() {
     tui.wait_pred(
         |screen| {
             screen.contains("❯ Revert")
-                && screen.contains(&format!("Enter run · Esc close · {DIRTY_REASON}"))
+                && screen.contains(&format!("Enter run · Esc clear · {DIRTY_REASON}"))
         },
         "the palette Revert row is disabled with the reason",
         WAIT,
@@ -297,6 +298,7 @@ fn pty_compare_x_refuses_dirty_file() {
         "Enter on the disabled row keeps the palette",
         WAIT,
     );
+    esc_clears_palette_filter(&mut tui);
     tui.esc();
     tui.wait_pred(
         |screen| !screen.contains("Enter run") && compare_regions_diff_focused(screen),

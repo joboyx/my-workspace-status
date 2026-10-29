@@ -309,8 +309,12 @@ pub enum Action {
     /// Commands mode: close, then dispatch the highlighted enabled command.
     /// Files mode: act on the highlighted file hit.
     QuickOpenSubmit,
-    /// Esc close. No run.
-    QuickOpenCancel,
+    /// Esc: clear the typed query; on an empty query, close the overlay
+    /// with no run.
+    ///
+    /// Commands mode keeps its `>` prefix, so the first Esc goes back to
+    /// `>` and the next one closes.
+    QuickOpenEscape,
     /// Open or close the search-in-files dialog (Ctrl-f).
     ///
     /// Opening follows the focused scope and restores the last dialog when
@@ -332,8 +336,9 @@ pub enum Action {
     /// A click on an option chip (`Aa` / `ab` / `.*`): flip that match
     /// option and search again.
     SearchFilesToggleOption(SearchFilesOption),
-    /// Esc close. The dialog is parked for the next Ctrl-f.
-    SearchFilesCancel,
+    /// Esc: clear the typed query; on an empty query, close the dialog and
+    /// park it for the next Ctrl-f.
+    SearchFilesEscape,
     /// Enter: park the dialog and open the highlighted hit's file in a file
     /// tab at the hit line, with the in-file search armed on the query
     /// (literal mode only).
