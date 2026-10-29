@@ -111,10 +111,8 @@ fn base_depth_2_msg_at_top(screen: &str) -> bool {
 
 /// Left-pane row up to its last inner column. [`left_tree`] already cuts
 /// the pane's right border at the `││` split; a row that still ends with
-/// `│` loses it here. Flat panes have no border: the cut there keeps the
-/// pane's blank right pad cell, which the trim drops.
+/// `│` loses it here.
 fn inner_row(row: &str) -> &str {
-    let row = row.trim_end();
     row.strip_suffix('\u{2502}').unwrap_or(row)
 }
 
@@ -197,7 +195,10 @@ impl Look {
     /// join is the title row's first blank after the left pane's title
     /// rule (` files ____ diff ____`): the right pane's first cell. Cells
     /// left of the join keep their columns, so [`left_footer_cell`] still
-    /// gives screen cells.
+    /// gives screen cells. The left part drops its trailing blanks (the
+    /// flat pane's right pad cell), so it ends on its last painted cell
+    /// the way a boxed row ends on its last inner column; the boxed
+    /// helpers read both unchanged.
     fn view(self, screen: &str) -> String {
         let Look::Flat = self else {
             return screen.to_string();
@@ -226,7 +227,7 @@ impl Look {
                 let cut = join.min(chars.len());
                 let left: String = chars[..cut].iter().collect();
                 let right: String = chars[cut..].iter().collect();
-                format!("{left:<join$}\u{2502}\u{2502}{right}")
+                format!("{}\u{2502}\u{2502}{right}", left.trim_end())
             })
             .collect::<Vec<_>>()
             .join("\n")
