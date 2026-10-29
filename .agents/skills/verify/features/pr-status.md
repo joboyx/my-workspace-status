@@ -1,6 +1,6 @@
 # PR status
 
-A checkout row in the tree shows the pull request of its branch: a GitHub PR through `gh`, a GitLab merge request through `glab`. User text says "PR" for both. The badge is the PR state; the final design has six states and the ref (`#7` on GitHub, `!5` on GitLab) left of the glyph, flush with the tree edge.
+A checkout row in the tree shows the pull request of its branch: a GitHub PR through `gh`, a GitLab merge request through `glab`. User text says "PR" for both. The badge is the PR state: six states, and the ref (`#7` on GitHub, `!5` on GitLab) left of the glyph, flush with the tree edge.
 
 | State | Set suffix | ASCII | Nerd | Ref on GitHub / GitLab |
 | --- | --- | --- | --- | --- |
@@ -11,7 +11,7 @@ A checkout row in the tree shows the pull request of its branch: a GitHub PR thr
 | in review | `review` | `P` | `○` | `#7 P` / `!5 P` |
 | merged | `merged` | `m` | `✓` | `#7 m` / `!5 m` |
 
-**Needs phase A** marks a check that needs the final PR status visuals. A build from before that (the badge has three states, `P` / `A` / `m`, and no ref) cannot pass it: report SKIP and name the missing piece. Today's build maps `failed`, `draft` and `review` to `P`, and `ready` and `running` to `A` (an approved PR whose CI still runs is not ready to merge in the final design, so `running` is the check that tells the two builds apart).
+Every check in this file needs the PR status visuals (six states, the ref beside the glyph, `gc`, polling, toasts). A build from before them (a three-state badge `P` / `A` / `m`, no ref) cannot pass: report SKIP and name the missing piece. The other feature files still mark such checks **needs phase A**.
 
 ## Setup
 
@@ -39,7 +39,8 @@ fresh() {
 }
 
 # Move the cursor: to the workspace row, to the app checkout row, to any row by its text.
-to_top() { $V keys "$RUN" g g && $V wait --cursor "$RUN" '# workspace'; }
+# Only to_top works with --env WS_STATUS_GLYPHS=nerd: the others wait on ASCII row text.
+to_top() { $V keys "$RUN" g g && $V wait --cursor "$RUN" 'workspace  '; }   # also in Nerd mode: the icon before the name differs
 to_app() { to_top && $V keys "$RUN" j && $V wait --cursor "$RUN" 'v app' && $V keys "$RUN" j && $V wait --cursor "$RUN" '& feature/auth-refresh'; }
 to_row() { $V keys "$RUN" / && $V keys -l "$RUN" "$1" && $V keys "$RUN" Enter && $V wait --cursor "$RUN" "$1" && $V keys "$RUN" Escape && $V wait "$RUN" 'search cleared'; }
 to_api() { to_row 'rate-limit'; }
@@ -87,14 +88,14 @@ The fake forge points `app` at `acme/app` (GitHub, PR #7, branch `feature/auth-r
 
 ```bash
 fresh context github-review gitlab-review -- --fake-forge "$FORGE"
-$V wait --regex "$RUN" 'feature/auth-refresh +P'      # today; final: wait "$RUN" '#7 P'
-$V wait --regex "$RUN" 'feature/rate-limit +& P'      # today; final: wait "$RUN" '!5 P'
+$V wait "$RUN" '#7 P'
+$V wait "$RUN" '!5 P'
 $V capture "$RUN" first-paint
 CALLS=$($V calls "$RUN")
 grep -q '^gh pr list ' <<<"$CALLS" && grep -q '^glab api ' <<<"$CALLS" && echo "PASS both CLIs were called"
 ```
 
-Expect, today: `app` row `feature/auth-refresh` has `P`; `services/api` row has `P`; the `app` worktree row `L feature/login-page` has `P`; both `merger` rows (`& feature/reconciliation`, `L feature/reconciliation`) have `m`. Final: the same rows end in `#7 P`, `!5 P`, `#8 P`, `#12 m`.
+Expect: the `app` row `feature/auth-refresh` ends in `#7 P`; the `services/api` row ends in `!5 P`; the `app` worktree row `L feature/login-page` ends in `#8 P`; both `merger` rows (`& feature/reconciliation`, `L feature/reconciliation`) end in `#12 m`.
 
 **PASS:** all five rows show the expected badge on the captured screen and the calls of this run include a `gh pr list` line and a `glab api` line.
 
@@ -102,29 +103,24 @@ Expect, today: `app` row `feature/auth-refresh` has `P`; `services/api` row has 
 
 Each `sweep` swaps both forges to one state, reloads every checkout (`r` on the workspace row), and waits for both badges. The order matters: next to each other, two states never show the same glyph, so a wait cannot pass on the badge of the step before. The swap is an overlay (no `--reset`), so no call finds a gap.
 
+Every pattern ends in "not a letter or digit". A change into ready to merge, merged or CI failed raises a toast that lives 8 s (`A !5 ready to merge · feature/rate-limit`), and `!5 r` is a prefix of `!5 ready`: without the boundary the next sweep would pass on the toast of the one before.
+
 ```bash
 sweep() { # sweep <state> <github-regex> <gitlab-regex>
   $V scenario "$FORGE" "github-$1" "gitlab-$1" && to_top && $V keys "$RUN" r &&
     $V wait --regex "$RUN" "$2" && $V wait --regex "$RUN" "$3" &&
     $V capture "$RUN" "state-$1" >/dev/null && echo "PASS $1" || echo "FAIL $1"
 }
-# Today's build:
-sweep ready   'feature/auth-refresh +A' 'feature/rate-limit +& A'
-sweep draft   'feature/auth-refresh +P' 'feature/rate-limit +& P'   # final: d
-sweep running 'feature/auth-refresh +A' 'feature/rate-limit +& A'   # final: r
-sweep failed  'feature/auth-refresh +P' 'feature/rate-limit +& P'   # final: x
-sweep merged  'feature/auth-refresh +m' 'feature/rate-limit +& m'
-sweep review  'feature/auth-refresh +P' 'feature/rate-limit +& P'
-# Final build (needs phase A): the same order with refs.
-sweep ready   '#7 A' '!5 A'
-sweep draft   '#7 d' '!5 d'
-sweep running '#7 r' '!5 r'
-sweep failed  '#7 x' '!5 x'
-sweep merged  '#7 m' '!5 m'
-sweep review  '#7 P' '!5 P'
+END='($|[^[:alnum:]])'
+sweep ready   "#7 A$END" "!5 A$END"
+sweep draft   "#7 d$END" "!5 d$END"
+sweep running "#7 r$END" "!5 r$END"
+sweep failed  "#7 x$END" "!5 x$END"
+sweep merged  "#7 m$END" "!5 m$END"
+sweep review  "#7 P$END" "!5 P$END"
 ```
 
-**PASS:** every sweep prints PASS for its column, and each saved capture shows no other state glyph on those two rows. The states `draft`, `running` and `failed` are **needs phase A** in their final form (`d`, `r`, `x`); on an older build they must show the `P` / `A` of the table at the top.
+**PASS:** every sweep prints PASS for its column, and each saved capture shows no other state glyph on those two rows (the `app` row `feature/auth-refresh` and the `services/api` row `feature/rate-limit`).
 
 ## PS3 `gx` opens the PR
 
@@ -139,7 +135,7 @@ tail -n 1 "$RUN/opened.log"        # https://gitlab.com/acme/services/api/-/merg
 
 **PASS:** the status line says `opened PR #7` / `opened PR #5`, and the last line of `opened.log` is the PR URL of that forge. No browser starts: the recorder only appends the URL.
 
-## PS4 `gc` opens the CI page (needs phase A)
+## PS4 `gc` opens the CI page
 
 `gc` on a checkout row opens the CI page of its PR. GitHub: the first failed check, else the first running check, else the first check with a link, else `<PR URL>/checks`. GitLab: the head pipeline, else `<MR URL>/pipelines`. The sets list `lint` before `test (ubuntu-latest)` on purpose, so "first failed" differs from "first listed".
 
@@ -152,18 +148,18 @@ tail -n 1 "$RUN/opened.log"        # https://gitlab.com/acme/services/api/-/merg
 | `gitlab-running` | `services/api` | `https://gitlab.com/acme/services/api/-/pipelines/9002` | `opened CI for !5` |
 | `gitlab-ready` | `services/api` | `https://gitlab.com/acme/services/api/-/pipelines/9003` | `opened CI for !5` |
 
-Steps per row: `$V scenario "$FORGE" <set>`, `to_top`, `r`, `wait` for the badge of that set, `to_app` or `to_api`, note the line count of `opened.log`, `$V keys "$RUN" g c`, `wait` for the status text of the row, then read `opened.log`. With `github-none`: `g c` says `no PR for feature/auth-refresh` and `opened.log` does not grow. A build before phase A leaves `opened.log` unchanged on `g c`: SKIP.
+Steps per row: `$V scenario "$FORGE" <set>`, `to_top`, `r`, `wait` for the badge of that set, `to_app` or `to_api`, note the line count of `opened.log`, `$V keys "$RUN" g c`, `wait` for the status text of the row, then read `opened.log`. With `github-none`: `g c` says `no PR for feature/auth-refresh` and `opened.log` does not grow.
 
 **PASS:** the status line shows the exact text of the row (`opened CI for #7` or `opened CI for !5`), `opened.log` grew by one line, and its last line equals the URL of the row.
 
 ## PS5 No PR
 
-The badge must be on the screen first, then go. The patterns end in "not a letter or digit", not in a space: in the final layout the glyph is flush with the tree edge, so a border can follow it.
+The badge must be on the screen first, then go. The patterns end in "not a letter or digit", not in a space: the glyph is flush with the tree edge, so a border can follow it, and a toast can start with the same letter (`#7 ready`).
 
 ```bash
-BADGE_GH='feature/auth-refresh +[xArdPm]($|[^[:alnum:]])'   # today
-BADGE_GL='feature/rate-limit +& [xArdPm]($|[^[:alnum:]])'
-# Final build (needs phase A): BADGE_GH='#7 [xArdPm]($|[^[:alnum:]])'  BADGE_GL='!5 [xArdPm]($|[^[:alnum:]])'
+fresh context github-review gitlab-review -- --fake-forge "$FORGE"
+BADGE_GH='#7 [xArdPm]($|[^[:alnum:]])'
+BADGE_GL='!5 [xArdPm]($|[^[:alnum:]])'
 $V wait --regex "$RUN" "$BADGE_GH" && $V wait --regex "$RUN" "$BADGE_GL"     # present before the swap
 $V scenario "$FORGE" github-none gitlab-none
 to_top && $V keys "$RUN" r
@@ -175,45 +171,71 @@ $V wait "$RUN" 'no PR for feature/auth-refresh'
 
 **PASS:** both badges were present, both are gone on the capture, and `gx` says `no PR for feature/auth-refresh`. A closed PR that was not merged counts as no PR; the sets have no closed PR, so only the empty list is proved here.
 
-## PS6 Scripted transition, toast and total (needs phase A)
+## PS6 Scripted transition, toast and total
 
-Polling needs a short interval: `WS_STATUS_PR_POLL_MS=1000`. The driver pins it to `0` (off) otherwise. An alert is a row flash plus a PR toast that lives 8 s; there is no alert on first load, on a branch change, or on the first lookup of a checkout.
+Polling needs a short interval: `WS_STATUS_PR_POLL_MS=1000`. The driver pins it to `0` (off) otherwise. An alert is a row flash plus a PR toast that lives 8 s; there is no alert on first load, on a branch change, or on the first lookup of a checkout. The recipe launches at `200x45`: the `need you` part of the workspace total gives way first when the row is short of room (the seeded `5 changed · 1 ahead, 1 diverged` summary leaves none at the default width).
 
 ```bash
-fresh context github-running gitlab-running -- --env WS_STATUS_PR_POLL_MS=1000 --fake-forge "$FORGE"
-$V wait "$RUN" '#7 r' && $V wait "$RUN" '!5 r'
+fresh context github-running gitlab-running -- --size 200x45 --env WS_STATUS_PR_POLL_MS=1000 --fake-forge "$FORGE"
+$V wait --regex "$RUN" '#7 r($|[^[:alnum:]])' && $V wait --regex "$RUN" '!5 r($|[^[:alnum:]])'
 $V capture "$RUN" t0-first-load                      # no toast here
 $V scenario "$FORGE" github-failed gitlab-failed     # no key: the poll finds it
-$V wait "$RUN" 'x #7 CI failed · test (ubuntu-latest)' 10
-$V wait "$RUN" 'x !5 CI failed' 10
+$V wait "$RUN" 'x #7 CI failed · test (ubuntu-latest)' 10     # GitHub names the failed check
+$V wait "$RUN" 'x !5 CI failed · feature/rate-limit' 10      # GitLab names the branch (the badge path reads no job)
 $V wait --regex "$RUN" 'PRs · 2 need you' 10
 $V capture "$RUN" t1-ci-failed
-$V wait --gone "$RUN" 'CI failed' 12                 # the toast is gone after 8 s
+$V wait --gone "$RUN" 'CI failed ·' 12              # the toasts are gone after 8 s
+$V scenario "$FORGE" github-review gitlab-review    # silent: no toast for review
+$V wait --regex "$RUN" '#7 P($|[^[:alnum:]])' && $V wait --regex "$RUN" '!5 P($|[^[:alnum:]])'
+$V capture "$RUN" t2-review
+$V scenario "$FORGE" github-ready gitlab-ready
+$V wait "$RUN" 'A #7 ready to merge · feature/auth-refresh' 10
+$V wait "$RUN" 'A !5 ready to merge · feature/rate-limit' 10
+$V capture "$RUN" t3-ready
+$V scenario "$FORGE" github-merged gitlab-merged
+$V wait "$RUN" 'm #7 merged · feature/auth-refresh' 10
+$V wait "$RUN" 'm !5 merged · feature/rate-limit' 10
+$V capture "$RUN" t4-merged
 ```
 
-Then: `github-review gitlab-review` (silent: badge `#7 P` / `!5 P`, no toast), `github-ready gitlab-ready` (toasts `A #7 ready to merge · feature/auth-refresh` and `A !5 ready to merge · feature/rate-limit`), `github-merged gitlab-merged` (toasts `m #7 merged · feature/auth-refresh` and `m !5 merged · feature/rate-limit`). On GitLab the text after `CI failed ·` is the first failed job or the branch.
+**PASS:** t0 holds no toast text (`CI failed`, `ready to merge`, `merged ·`); each toast text appears after its swap with no key pressed; the `review` step (t2) prints no toast; the total shows `2 need you` while both PRs are failed. The row flash is colour only: the `.ansi` captures t0 and t1 differ.
 
-**PASS:** t0 holds no toast text (`CI failed`, `ready to merge`, `merged`); each toast text appears after its swap with no key pressed; the `review` step prints no toast; the total shows `2 need you` while both PRs are failed. The row flash is colour only: compare the `.ansi` captures taken just before and just after a swap.
+## PS7 A failing CLI keeps the last badge
 
-## PS7 A failing CLI keeps the last badge (needs phase A)
+The fake CLIs exit 1 with a one-line stderr (`gh: HTTP 502`, `glab: HTTP 502`). The popover is 64 columns wide and ends a longer value in `…`, so the sets keep the line short. `gh` pins the popover of every mark on the row, and the PR section is the last: the recipe launches at `160x70` so the `services/api` row (branch, repo, diverged and change count sections before it) shows the whole PR section.
 
 ```bash
-fresh context github-review gitlab-review -- --env WS_STATUS_PR_POLL_MS=1000 --fake-forge "$FORGE"
+fresh context github-review gitlab-review -- --size 160x70 --env WS_STATUS_PR_POLL_MS=1000 --fake-forge "$FORGE"
 $V wait "$RUN" '#7 P' && $V wait "$RUN" '!5 P'
+$V capture "$RUN" before-fail
 $V scenario "$FORGE" github-cli-fails gitlab-cli-fails
 sleep 4                                              # a few polls; the one sleep in this file
 $V capture "$RUN" cli-fails
 to_app && $V keys "$RUN" g h                         # pin the popover
-$V wait "$RUN" 'last lookup failed: error connecting to api.github.com'
+$V wait "$RUN" 'last lookup failed: gh: HTTP 502'
+$V capture "$RUN" popover-github
+$V keys "$RUN" Escape && $V wait --gone "$RUN" 'last lookup failed'
+to_api && $V keys "$RUN" g h
+$V wait "$RUN" 'last lookup failed: glab: HTTP 502'
+$V capture "$RUN" popover-gitlab
 ```
 
-**PASS:** after the failing polls `#7 P` and `!5 P` are still on the screen (dimmed after the data is stale: compare `.ansi`), no toast appears, and the popover `checked` line carries the first stderr line of the fake CLI. Today's build hides the badge on a failed lookup and `gx` says `could not look up PR for feature/auth-refresh`: that is the behaviour the final design replaces.
+**PASS:** after the failing polls `#7 P` and `!5 P` are still on the screen, no toast appears, the glyphs are dimmed (the `.ansi` captures `before-fail` and `cli-fails` differ in the colour of the glyph: the data is stale after twice the poll period), and each popover `checked` line carries the first stderr line of its fake CLI.
 
-## PS8 Nerd glyph shapes (needs phase A)
+## PS8 Nerd glyph shapes
 
-`fresh context github-review gitlab-review -- --env WS_STATUS_GLYPHS=nerd --fake-forge "$FORGE"`, then run the PS2 sweeps with `'#7 ✕' '!5 ✕'`, `'#7 ◉' '!5 ◉'`, `'#7 ◐' '!5 ◐'`, `'#7 ◌' '!5 ◌'`, `'#7 ○' '!5 ○'`, `'#7 ✓' '!5 ✓'` in the order of PS2.
+```bash
+fresh context github-review gitlab-review -- --env WS_STATUS_GLYPHS=nerd --fake-forge "$FORGE"
+# sweep is the function of PS2
+sweep ready   '#7 ◉' '!5 ◉'
+sweep draft   '#7 ◌' '!5 ◌'
+sweep running '#7 ◐' '!5 ◐'
+sweep failed  '#7 ✕' '!5 ✕'
+sweep merged  '#7 ✓' '!5 ✓'
+sweep review  '#7 ○' '!5 ○'
+```
 
-**PASS:** each shape is on both rows, and the glyph is the last cell of the badge on a captured tree row.
+**PASS:** each sweep prints PASS, each shape is on both rows, and the glyph is the last cell of the badge on a captured tree row (`#7 ◉` then the end of the tree column).
 
 ## Live
 
@@ -247,7 +269,7 @@ $V wait --regex "$RUN" 'gl-merged .* m($|[^[:alnum:]])' 20
 $V capture "$RUN" live-badges
 ```
 
-Expect: the open PR rows get an open-PR badge (today `P` or `A`; final one of `x A r d P` with `#<n>` or `!<n>`), the merged rows get `m` (`#<n> m`). Then check `gx` on each row against the forge CLI itself, and stop the run:
+Expect: the open PR rows get an open-PR badge (one of `x A r d P`, with `#<n>` or `!<n>` before it), the merged rows get `m` (`#<n> m`). Then check `gx` on each row against the forge CLI itself, and stop the run:
 
 ```bash
 live_check() { # live_check <branch> <url the forge CLI gives for that branch>
@@ -264,12 +286,12 @@ live_check "$GL_MERGED" "$(gl_url "$GL_MERGED" merged)"
 $V stop "$RUN"
 ```
 
-**PASS:** the `live-badges` capture shows a badge of the right kind on every row (open or merged), and each `gx` URL equals the URL the forge CLI gives for that branch. SKIP, with the reason, when a CLI is missing or not logged in, when no same-repository PR of that kind exists, or when the network is down. Do not report a fake-forge run as the live result. **Needs phase A** for the state glyph and the ref; the live `#[ignore]` unit tests (`SKILL.md`, **Pick the layer**) check the same parse in code.
+**PASS:** the `live-badges` capture shows a badge of the right kind on every row (open or merged), and each `gx` URL equals the URL the forge CLI gives for that branch. SKIP, with the reason, when a CLI is missing or not logged in, when no same-repository PR of that kind exists, or when the network is down. Do not report a fake-forge run as the live result. The live `#[ignore]` unit tests (`SKILL.md`, **Pick the layer**) check the same parse in code.
 
 ## Gotchas
 
 - The first lookup runs at launch. Apply scenario sets **before** `launch` if the first paint matters; a later `scenario` needs `r` (or a poll) to show.
 - `r` on a checkout row reloads that checkout; on the workspace row it reloads every checkout.
-- `wait --regex` matches inside one screen line, and the tree row also carries the right pane text. Anchor on the branch name (`feature/auth-refresh +P`), not on `P` alone.
+- `wait --regex` matches inside one screen line, and the tree row also carries the right pane text. Anchor on the ref (`#7 P`) and end a one-letter glyph pattern with `($|[^[:alnum:]])`: a toast that lingers for 8 s can start with the same letters (`#7 ready`, `!5 merged`).
 - `fake forge: no scenario for ...` in `$V calls "$RUN"` means the app made a call no set answers (a new `gh` / `glab` call). Teach the fake in `scripts/fake-forge/` and add the file to the sets.
 - OSC 8 links on the badge are not in a tmux capture. The PTY e2e suite covers them.
