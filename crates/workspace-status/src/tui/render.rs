@@ -21411,6 +21411,7 @@ mod tests {
                     assert!(!state.popover_pinned(), "{case}: a peek is not pinned");
                     open_section(&state, "peek");
                     draw_state(&mut terminal, &mut state);
+                    assert!(state.popover.is_some(), "{case}: the peek survives paint");
 
                     // Click: pins it.
                     state.dispatch(Action::Click {
