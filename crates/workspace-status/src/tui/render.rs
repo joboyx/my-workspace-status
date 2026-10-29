@@ -81,8 +81,9 @@ use super::search_files::{
     SEARCH_PREVIEW_MIN_COLS,
 };
 use super::split::{
-    diff_paint_width, diff_split_rule_x, pane_widths, side_by_side_column_widths, DiffMode,
-    ResizeEdge, VScrollbarLayout, MIN_PANE_COLS, MIN_TERM_COLS, MIN_TERM_ROWS,
+    diff_paint_width, diff_split_rule_x, list_hbar_rows, pane_widths, side_by_side_column_widths,
+    DiffMode, HScrollbarLayout, ResizeEdge, VScrollbarLayout, MIN_PANE_COLS, MIN_TERM_COLS,
+    MIN_TERM_ROWS,
 };
 use super::state::{
     revert_scope, AppState, CompareRevertTarget, FocusPane, IconHit, LayoutHit, PendingConfirm,
@@ -271,6 +272,11 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
     state.layout.diff_hscrollbar_x = 0;
     state.layout.diff_hscrollbar_width = 0;
     state.layout.diff_col_max = 0;
+    state.layout.tree_vbar = VScrollbarLayout::default();
+    state.layout.files_vbar = VScrollbarLayout::default();
+    state.layout.explorer_tree_vbar = VScrollbarLayout::default();
+    state.layout.tree_hbar = HScrollbarLayout::default();
+    state.layout.files_hbar = HScrollbarLayout::default();
     state.layout.file_view_row_lines.clear();
     state.layout.explorer_tree = Rect::default();
     state.layout.explorer_preview = Rect::default();
@@ -647,16 +653,20 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) -> R
         } else {
             commit_detail_footer_height(state.commit_detail_footer_request(), tree_inner.height)
         };
+        // List rows only: not the horizontal bar row a panned list keeps.
         let list_h = tree_inner.height.saturating_sub(footer_h);
+        let list_h = list_h.saturating_sub(list_hbar_rows(list_h, state.left_col_offset));
         state.layout.files_list_y = tree_inner.y;
         state.layout.files_list_height = list_h;
         let painted_n = state.painted_commit_file_rows().len();
         let (start, _) = visible_window(painted_n, cursor, list_h as usize);
         state.layout.files_list_offset = start;
     } else if let super::drill::DrillView::Files { cursor, .. } = &state.drill {
+        let height = right_inner.height;
+        let list_h = height.saturating_sub(list_hbar_rows(height, state.right_col_offset));
         state.layout.files_list_y = right_inner.y;
-        state.layout.files_list_height = right_inner.height;
-        let list_h = right_inner.height as usize;
+        state.layout.files_list_height = list_h;
+        let list_h = list_h as usize;
         let painted_n = state.painted_commit_file_rows().len();
         let (start, _) = visible_window(painted_n, *cursor, list_h);
         state.layout.files_list_offset = start;
@@ -1438,7 +1448,10 @@ fn draw_explorer_tree(
         frame.render_widget(Paragraph::new(muted_copy(EMPTY_FOLDER, palette)), area);
         return;
     }
-    let height = area.height as usize;
+    // The tree never pans (offset 0), so it keeps no horizontal bar row.
+    let bars = ListBars::new(area, rows.len(), 0);
+    let rows_area = bars.rows_area();
+    let height = rows_area.height as usize;
     let (start, _) = visible_window(rows.len(), cursor.unwrap_or(0), height);
     if let Some(tab) = state.tabs.active_explorer_mut() {
         tab.tree_scroll = start;
@@ -1485,7 +1498,7 @@ fn draw_explorer_tree(
                 row.is_dir,
                 !row.expanded,
                 &explorer_row_segments(row, status, state.ascii, &loading),
-                area.width as usize,
+                rows_area.width as usize,
                 Some(index) == cursor,
                 focused,
                 None,
@@ -1497,7 +1510,10 @@ fn draw_explorer_tree(
             )
         })
         .collect();
-    frame.render_widget(Paragraph::new(lines), area);
+    frame.render_widget(Paragraph::new(lines), rows_area);
+    let flat = state.background == BackgroundMode::Paint;
+    let (vbar, _) = bars.paint(frame, start, (0, 0), flat);
+    state.layout.explorer_tree_vbar = vbar;
 }
 
 /// Name and right-hand mark of one Explorer row.
@@ -1608,8 +1624,10 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         frame.render_widget(Paragraph::new(muted_copy(NO_MATCHING_ROWS, palette)), area);
         return;
     }
-    let height = area.height as usize;
-    let width = area.width as usize;
+    let bars = ListBars::new(area, painted.len(), state.left_col_offset);
+    let rows_area = bars.rows_area();
+    let height = rows_area.height as usize;
+    let width = rows_area.width as usize;
     let focus_id = state.rows.get(state.cursor).map(|row| row.id.as_str());
     let painted_cursor = focus_id
         .and_then(|id| painted.iter().position(|row| row.id == id))
@@ -1696,7 +1714,17 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         }
     }
     state.layout.icon_hits.extend(hits);
-    frame.render_widget(Paragraph::new(lines), area);
+    frame.render_widget(Paragraph::new(lines), rows_area);
+    // Sized only while the bar row shows: the pan clamp walks every row.
+    let col_max = if bars.hscroll {
+        state.tree_max_col_in(area.width, bars.vscroll)
+    } else {
+        0
+    };
+    let flat = state.background == BackgroundMode::Paint;
+    let (vbar, hbar) = bars.paint(frame, start, (state.left_col_offset, col_max), flat);
+    state.layout.tree_vbar = vbar;
+    state.layout.tree_hbar = hbar;
 }
 
 /// Painted icon of a row: catalog kind, column offset from the row start,
@@ -2506,15 +2534,27 @@ fn graph_commit_links(
 
 /// Flat graph list, before [`bleed_flat_pad`]: the widget paints rows one
 /// column short of a shown vertical scrollbar, so each list row's
-/// scrollbar cell takes the bg of the cell left of it. Selection, flash,
-/// and search backgrounds then reach the pad. The scrollbar glyph stays.
+/// scrollbar cell takes the bg of the cell left of it
+/// ([`bleed_vscrollbar_column`]).
 fn bleed_graph_scrollbar_column(frame: &mut Frame<'_>, layout: &LayoutHit) {
-    let Some(x) = layout.graph_scrollbar_x.filter(|&x| x > 0) else {
+    let bar = VScrollbarLayout {
+        x: layout.graph_scrollbar_x,
+        y: layout.graph_scrollbar_y,
+        height: layout.graph_scrollbar_height,
+        ..VScrollbarLayout::default()
+    };
+    bleed_vscrollbar_column(frame.buffer_mut(), bar);
+}
+
+/// Flat pane, before [`bleed_flat_pad`]: each row's cell of the painted
+/// vertical scrollbar `bar` takes the bg of the cell left of it, so
+/// selection, flash, and search backgrounds reach the pad beside a list
+/// whose rows stop one column short of the bar. The scrollbar glyph stays.
+fn bleed_vscrollbar_column(buf: &mut Buffer, bar: VScrollbarLayout) {
+    let Some(x) = bar.x.filter(|&x| x > 0) else {
         return;
     };
-    let buf = frame.buffer_mut();
-    let top = layout.graph_scrollbar_y;
-    for y in top..top.saturating_add(layout.graph_scrollbar_height) {
+    for y in bar.y..bar.y.saturating_add(bar.height) {
         let bg = buf[(x - 1, y)].bg;
         buf[(x, y)].set_bg(bg);
     }
@@ -2937,8 +2977,11 @@ fn draw_commit_file_list(
         frame.render_widget(Paragraph::new(line), area);
         return;
     }
-    let height = area.height as usize;
-    let width = area.width as usize;
+    let pan = u16::try_from(col_offset).unwrap_or(u16::MAX);
+    let bars = ListBars::new(area, rows.len(), pan);
+    let rows_area = bars.rows_area();
+    let height = rows_area.height as usize;
+    let width = rows_area.width as usize;
     let focus_id = state
         .commit_file_rows()
         .get(cursor)
@@ -2989,7 +3032,17 @@ fn draw_commit_file_list(
         ));
     }
     state.layout.icon_hits.extend(hits);
-    frame.render_widget(Paragraph::new(lines), area);
+    frame.render_widget(Paragraph::new(lines), rows_area);
+    // Sized only while the bar row shows: the pan clamp walks every row.
+    let col_max = if bars.hscroll {
+        state.commit_file_max_col_in(area.width, bars.vscroll)
+    } else {
+        0
+    };
+    let flat = state.background == BackgroundMode::Paint;
+    let (vbar, hbar) = bars.paint(frame, start, (pan, col_max), flat);
+    state.layout.files_vbar = vbar;
+    state.layout.files_hbar = hbar;
 }
 
 /// Logical rows of a wrapped diff, counted back from `cursor` (included),
@@ -3254,26 +3307,17 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         0
     };
     if col_max > 0 && body.height > 0 && area.width > 0 {
-        state.layout.diff_hscrollbar_y = Some(body.y.saturating_add(body.height.saturating_sub(1)));
-        state.layout.diff_hscrollbar_x = area.x;
-        state.layout.diff_hscrollbar_width = area.width.saturating_sub(v_cols).max(1);
-        state.layout.diff_col_max = col_max.min(u16::MAX as usize) as u16;
-        let mut sb_state =
-            ScrollbarState::new(col_max).position((state.diff_col_offset as usize).min(col_max));
-        let sb_area = Rect {
+        let track = Rect {
             x: area.x,
             y: body.y.saturating_add(body.height.saturating_sub(1)),
             width: area.width.saturating_sub(v_cols).max(1),
             height: 1,
         };
-        StatefulWidget::render(
-            Scrollbar::new(ScrollbarOrientation::HorizontalBottom)
-                .begin_symbol(None)
-                .end_symbol(None),
-            sb_area,
-            buf,
-            &mut sb_state,
-        );
+        let hbar = paint_hscrollbar(buf, track, col_max, state.diff_col_offset);
+        state.layout.diff_hscrollbar_y = hbar.y;
+        state.layout.diff_hscrollbar_x = hbar.x;
+        state.layout.diff_hscrollbar_width = hbar.width;
+        state.layout.diff_col_max = hbar.col_max;
     }
 }
 
@@ -3308,6 +3352,122 @@ fn paint_vscrollbar(
         content_len,
         scroll: clamp(scroll),
         scroll_max: clamp(scroll_max),
+    }
+}
+
+/// Paint a 1-row horizontal scrollbar in `track` for a pan of `col_offset`
+/// out of `col_max` columns, and return its hit geometry for
+/// [`super::split::hit_hscrollbar`]. The bar is the ratatui `Scrollbar`
+/// with no end symbols, the same math as the graph widget's horizontal
+/// bar, so [`workspace_status_graph::graph_scrollbar_thumb`] of
+/// `col_max + 1` finds its thumb.
+fn paint_hscrollbar(
+    buf: &mut Buffer,
+    track: Rect,
+    col_max: usize,
+    col_offset: u16,
+) -> HScrollbarLayout {
+    let mut sb_state = ScrollbarState::new(col_max).position(usize::from(col_offset).min(col_max));
+    StatefulWidget::render(
+        Scrollbar::new(ScrollbarOrientation::HorizontalBottom)
+            .begin_symbol(None)
+            .end_symbol(None),
+        track,
+        buf,
+        &mut sb_state,
+    );
+    HScrollbarLayout {
+        y: Some(track.y),
+        x: track.x,
+        width: track.width,
+        col_max: col_max.min(usize::from(u16::MAX)) as u16,
+        col_offset,
+    }
+}
+
+/// Where a list that follows its cursor (the Workspace tree, a commit-file
+/// or compare list, the Explorer tree) paints its rows and its scrollbars
+/// in `area`, decided before the rows paint, as the graph list decides its
+/// bars: the vertical bar takes the last column whenever the rows
+/// overflow, and the horizontal bar takes the last row once the list pans
+/// off the left edge ([`list_hbar_rows`]). The rows never paint under a
+/// bar, and the pan clamp sizes rows to [`ListBars::rows_area`]'s width.
+struct ListBars {
+    /// The list's whole area.
+    area: Rect,
+    /// Rows the list paints (the area less the horizontal bar row).
+    rows: u16,
+    /// Painted rows the bar measures.
+    row_count: usize,
+    /// The vertical bar shows.
+    vscroll: bool,
+    /// The horizontal bar row is kept.
+    hscroll: bool,
+}
+
+impl ListBars {
+    /// Bars for `row_count` painted rows in `area`, panned `col_offset`.
+    fn new(area: Rect, row_count: usize, col_offset: u16) -> Self {
+        let h_rows = list_hbar_rows(area.height, col_offset);
+        let rows = area.height.saturating_sub(h_rows);
+        Self {
+            area,
+            rows,
+            row_count,
+            vscroll: row_count > usize::from(rows),
+            hscroll: h_rows > 0,
+        }
+    }
+
+    /// Where the rows paint: left of the vertical bar, above the
+    /// horizontal bar.
+    fn rows_area(&self) -> Rect {
+        Rect {
+            width: self.area.width.saturating_sub(u16::from(self.vscroll)),
+            height: self.rows,
+            ..self.area
+        }
+    }
+
+    /// Paint the bars over the painted rows: the vertical bar for the rows
+    /// from `start`, the horizontal bar for a pan of `col_offset` out of
+    /// `col_max` (none at 0). Flat panes give the vertical bar's cells the
+    /// row backgrounds beside them, as the graph list does. Returns the hit
+    /// geometry of each bar (`x` / `y` `None` when not painted).
+    fn paint(
+        &self,
+        frame: &mut Frame<'_>,
+        start: usize,
+        pan: (u16, usize),
+        flat: bool,
+    ) -> (VScrollbarLayout, HScrollbarLayout) {
+        let (col_offset, col_max) = pan;
+        let area = self.area;
+        let buf = frame.buffer_mut();
+        let mut vbar = VScrollbarLayout::default();
+        if self.vscroll && area.width > 0 && area.height > 0 {
+            let track = Rect {
+                x: area.right() - 1,
+                width: 1,
+                ..area
+            };
+            let max = self.row_count.saturating_sub(usize::from(self.rows));
+            vbar = paint_vscrollbar(buf, track, self.row_count, start, max);
+            if flat {
+                bleed_vscrollbar_column(buf, vbar);
+            }
+        }
+        let mut hbar = HScrollbarLayout::default();
+        if self.hscroll && col_max > 0 && area.width > 0 {
+            let track = Rect {
+                y: area.bottom() - 1,
+                width: self.rows_area().width.max(1),
+                height: 1,
+                ..area
+            };
+            hbar = paint_hscrollbar(buf, track, col_max, col_offset);
+        }
+        (vbar, hbar)
     }
 }
 
@@ -7360,7 +7520,7 @@ mod tests {
     use crate::tui::comments::{put_comment, CommentKey};
     use crate::tui::icons::{icon_linked_worktree, icon_repo};
     use crate::tui::pull_request::{PrLookup, PullRequest};
-    use crate::tui::split::{SplitDrag, VScrollbar};
+    use crate::tui::split::{HScrollbar, SplitDrag, VScrollbar};
     use crate::tui::state::{AppState, PrBadgeHit};
     use crate::tui::tree::{build_tree, flatten_with, visible_for_tree};
     use ratatui::backend::TestBackend;
@@ -7652,7 +7812,7 @@ mod tests {
     /// row picked, no text selection), a drag maps the thumb onto the
     /// viewport top as the graph bar does, the diff cursor moves with the
     /// viewport as the wheel moves it, the release ends the drag, and a
-    /// track click jumps toward the click.
+    /// track click jumps toward the click. Wrap off and on.
     #[test]
     fn diff_vertical_bar_drags_and_track_click_jumps_on_every_registry_surface() {
         let registry = crate::parity_registry::registry();
@@ -7675,7 +7835,7 @@ mod tests {
         let mut driven: Vec<(String, String)> = DIFF_BAR_SURFACES
             .iter()
             .flat_map(|s| {
-                FOOTER_LOOKS
+                PANE_LOOKS
                     .iter()
                     .map(|(look, _)| (s.id.to_string(), look.to_string()))
             })
@@ -7691,11 +7851,15 @@ mod tests {
             "docs/parity.md `scrollbars` / `vbar-drag` must mark every diff surface and look"
         );
         for surface in &DIFF_BAR_SURFACES {
-            for (look, background) in FOOTER_LOOKS {
-                let case = format!("{} {look}", surface.id);
+            // Wrap on paints these short rows one line each: the same math.
+            let looks = PANE_LOOKS
+                .into_iter()
+                .flat_map(|look| [(look, false), (look, true)]);
+            for ((look, background), wrap) in looks {
+                let case = format!("{} {look} wrap {wrap}", surface.id);
                 let mut state = (surface.open)();
                 state.background = background;
-                state.diff_wrap = false;
+                state.diff_wrap = wrap;
                 state.diff_cursor = 40;
                 let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
                 draw_state(&mut terminal, &mut state);
@@ -7808,6 +7972,526 @@ mod tests {
                 assert!(
                     buffer_text(&terminal).contains("bar line 00"),
                     "{case}: the first row shows"
+                );
+            }
+        }
+    }
+
+    /// Rows of every list in the list scrollbar tests: enough to overflow
+    /// each pane.
+    const BAR_LIST_ROWS: usize = 60;
+
+    /// Name of row `i` of the list scrollbar fixtures: wider than every
+    /// list pane, the same width on every row, with a unique tail.
+    fn bar_list_name(i: usize) -> String {
+        format!("bar-{i:02}-{}-T{i:02}.txt", "x".repeat(60))
+    }
+
+    /// [`BAR_LIST_ROWS`] modified files named by [`bar_list_name`].
+    fn bar_list_files() -> Vec<super::super::drill::CommitFile> {
+        (0..BAR_LIST_ROWS)
+            .map(|i| super::super::drill::CommitFile {
+                status: "M".into(),
+                path: bar_list_name(i),
+                old_path: None,
+                stat: None,
+            })
+            .collect()
+    }
+
+    /// One list surface the list scrollbar tests drive.
+    struct ListBarSurface {
+        /// Surface id in the `scrollbars` registry table.
+        id: &'static str,
+        /// A state that shows [`BAR_LIST_ROWS`] rows of [`bar_list_name`]
+        /// on this surface.
+        open: fn() -> AppState,
+        /// The pane that holds the list.
+        pane: FocusPane,
+        /// The list's vertical bar.
+        vbar: VScrollbar,
+        /// The list's horizontal bar; `None` for a list that never pans.
+        hbar: Option<HScrollbar>,
+        /// The list cursor.
+        cursor: fn(&AppState) -> usize,
+        /// Whether `effect` is what the wheel asks for when it moves this
+        /// list's cursor (the right pane, a diff, a preview, or nothing).
+        moved: fn(&Effect) -> bool,
+    }
+
+    /// Every list surface that paints through `draw_tree`,
+    /// `draw_commit_file_list`, or `draw_explorer_tree`.
+    const LIST_BAR_SURFACES: [ListBarSurface; 5] = [
+        ListBarSurface {
+            id: "tree",
+            open: || {
+                let mut app = repo("app", true);
+                app.changes = (0..BAR_LIST_ROWS)
+                    .map(|i| FileChange {
+                        path: bar_list_name(i),
+                        staged_status: None,
+                        unstaged_status: Some("M".into()),
+                        untracked: false,
+                        old_path: None,
+                    })
+                    .collect();
+                let snapshot = build_workspace_snapshot(&[app], &[], false, &[]);
+                AppState::new(PathBuf::from("/tmp"), snapshot, true)
+            },
+            pane: FocusPane::Left,
+            vbar: VScrollbar::Tree,
+            hbar: Some(HScrollbar::Tree),
+            cursor: |state| state.cursor,
+            moved: |effect| *effect == Effect::LoadRightPane,
+        },
+        ListBarSurface {
+            id: "files-d1",
+            open: || {
+                let mut state = two_pane_graph_state();
+                state.open_commit_files(
+                    "app".into(),
+                    super::super::drill::CommitFileSource::Commit {
+                        commit_id: FOOTER_COMMIT_A.into(),
+                    },
+                    bar_list_files(),
+                );
+                state
+            },
+            pane: FocusPane::Right,
+            vbar: VScrollbar::CommitFiles,
+            hbar: Some(HScrollbar::CommitFiles),
+            cursor: AppState::commit_files_cursor,
+            // A depth-1 file move loads nothing: the graph stays left.
+            moved: |effect| *effect == Effect::None,
+        },
+        ListBarSurface {
+            id: "files-d2",
+            open: || {
+                let mut state = two_pane_files_state();
+                state.open_commit_diff(
+                    "app".into(),
+                    super::super::drill::CommitFileSource::Commit {
+                        commit_id: FOOTER_COMMIT_A.into(),
+                    },
+                    bar_list_files(),
+                    0,
+                    bar_list_name(0),
+                    super::super::diff::DiffContent::from_lines(vec!["@@ -1,1 +1,1 @@".into()]),
+                );
+                state
+            },
+            pane: FocusPane::Left,
+            vbar: VScrollbar::CommitFiles,
+            hbar: Some(HScrollbar::CommitFiles),
+            cursor: AppState::commit_files_cursor,
+            moved: |effect| *effect == Effect::LoadRightPane,
+        },
+        ListBarSurface {
+            id: "compare-files",
+            open: || {
+                let mut state = two_pane_diff_state();
+                state
+                    .tabs
+                    .open_or_focus("app".into(), "main".into(), "HEAD".into());
+                let tab = state.tabs.active_compare_mut().unwrap();
+                tab.loading = false;
+                tab.files = bar_list_files();
+                tab.path = Some(bar_list_name(0));
+                tab.source = Some(super::super::drill::CommitFileSource::Compare {
+                    base_ref: "main".into(),
+                    head_ref: "HEAD".into(),
+                    base_tip: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                    merge_base: "cccccccccccccccccccccccccccccccccccccccc".into(),
+                    head: "dddddddddddddddddddddddddddddddddddddddd".into(),
+                });
+                state
+            },
+            pane: FocusPane::Left,
+            vbar: VScrollbar::CommitFiles,
+            hbar: Some(HScrollbar::CommitFiles),
+            cursor: AppState::commit_files_cursor,
+            moved: |effect| matches!(effect, Effect::LoadCompareDiff { .. }),
+        },
+        ListBarSurface {
+            id: "explorer-tree",
+            open: || {
+                let names: Vec<String> = (0..BAR_LIST_ROWS).map(bar_list_name).collect();
+                let entries: Vec<(&str, bool, bool)> = names
+                    .iter()
+                    .map(|name| (name.as_str(), false, false))
+                    .collect();
+                explorer_state_listing(&entries)
+            },
+            pane: FocusPane::Left,
+            vbar: VScrollbar::ExplorerTree,
+            hbar: None,
+            cursor: |state| {
+                state
+                    .explorer_rows()
+                    .and_then(|(_, cursor)| cursor)
+                    .expect("an Explorer cursor")
+            },
+            moved: |effect| matches!(effect, Effect::LoadExplorerPreview { .. }),
+        },
+    ];
+
+    /// The recorded vertical bar `bar` of a list.
+    fn list_vbar(state: &AppState, bar: VScrollbar) -> VScrollbarLayout {
+        match bar {
+            VScrollbar::Tree => state.layout.tree_vbar,
+            VScrollbar::CommitFiles => state.layout.files_vbar,
+            VScrollbar::ExplorerTree => state.layout.explorer_tree_vbar,
+            VScrollbar::Graph | VScrollbar::Diff => unreachable!("not a list bar"),
+        }
+    }
+
+    /// The recorded horizontal bar `bar` of a list.
+    fn list_hbar(state: &AppState, bar: HScrollbar) -> HScrollbarLayout {
+        match bar {
+            HScrollbar::Tree => state.layout.tree_hbar,
+            HScrollbar::CommitFiles => state.layout.files_hbar,
+            HScrollbar::Graph | HScrollbar::Diff => unreachable!("not a list bar"),
+        }
+    }
+
+    /// The pan offset of the list in `pane`.
+    fn list_pan(state: &AppState, pane: FocusPane) -> u16 {
+        if pane == FocusPane::Left {
+            state.left_col_offset
+        } else {
+            state.right_col_offset
+        }
+    }
+
+    /// [`LIST_BAR_SURFACES`] ids, after checking they are the `scrollbars`
+    /// list surfaces of `docs/parity.md` and that `features` mark every
+    /// `(surface, look)` that `driven` keeps `supported`.
+    fn checked_list_bar_ids(features: &[&str], driven: impl Fn(&ListBarSurface) -> bool) {
+        let registry = crate::parity_registry::registry();
+        let scrollbars = registry
+            .components
+            .iter()
+            .find(|c| c.id == "scrollbars")
+            .expect("scrollbars component");
+        let list_ids: Vec<&str> = scrollbars
+            .surfaces
+            .iter()
+            .filter(|s| {
+                s.anchors.iter().any(|a| {
+                    matches!(
+                        a.as_str(),
+                        "draw_tree" | "draw_commit_file_list" | "draw_explorer_tree"
+                    )
+                })
+            })
+            .map(|s| s.id.as_str())
+            .collect();
+        let surface_ids: Vec<&str> = LIST_BAR_SURFACES.iter().map(|s| s.id).collect();
+        assert_eq!(
+            list_ids, surface_ids,
+            "docs/parity.md `scrollbars` list surfaces must match this test's"
+        );
+        let mut want: Vec<(String, String)> = LIST_BAR_SURFACES
+            .iter()
+            .filter(|s| driven(s))
+            .flat_map(|s| {
+                PANE_LOOKS
+                    .iter()
+                    .map(|(look, _)| (s.id.to_string(), look.to_string()))
+            })
+            .collect();
+        want.sort();
+        for feature in features {
+            let supported: Vec<(String, String)> =
+                crate::parity_registry::supported_surface_looks("scrollbars", feature)
+                    .into_iter()
+                    .filter(|(id, _)| list_ids.contains(&id.as_str()))
+                    .collect();
+            assert_eq!(
+                supported, want,
+                "docs/parity.md `scrollbars` / `{feature}` must mark these list surfaces and looks"
+            );
+        }
+    }
+
+    /// A list's vertical bar scrolls the same way on every list surface,
+    /// in both looks: it paints in the list's last column whenever the rows
+    /// overflow (the rows stop left of it), a press on the painted thumb
+    /// grabs it (no row picked, focus on the list), a drag maps the thumb
+    /// onto the viewport top as the graph and diff bars do, the list
+    /// cursor moves with the viewport and asks for what the wheel asks for,
+    /// the release ends the drag, and a track click jumps to the end or
+    /// the top.
+    #[test]
+    fn list_vertical_bar_drags_and_track_click_jumps_on_every_registry_surface() {
+        checked_list_bar_ids(&["vbar", "vbar-drag"], |_| true);
+        for surface in &LIST_BAR_SURFACES {
+            for (look, background) in PANE_LOOKS {
+                let case = format!("{} {look}", surface.id);
+                let mut state = (surface.open)();
+                state.background = background;
+                state.focus = surface.pane;
+                state.dispatch(Action::Move(30));
+                let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let bar = list_vbar(&state, surface.vbar);
+                let x = bar
+                    .x
+                    .unwrap_or_else(|| panic!("{case}: the long list paints its bar"));
+                let (y, h) = (bar.y, bar.height);
+                // Pan 0: no horizontal bar row, so every track row is a row.
+                let max = bar.content_len - usize::from(h);
+                assert_eq!(usize::from(bar.scroll_max), max, "{case}");
+                let top = usize::from(bar.scroll);
+                assert!(top > 0 && top < max, "{case}: starts mid-list ({top})");
+                let buf = terminal.backend().buffer().clone();
+                for r in y..y + h {
+                    assert!(
+                        matches!(buf[(x, r)].symbol(), "█" | "║"),
+                        "{case}: row {r} leaves the bar column to the bar"
+                    );
+                }
+                let thumb: Vec<u16> = (y..y + h)
+                    .filter(|&r| buf[(x, r)].symbol() == "█")
+                    .collect();
+                let grab = *thumb
+                    .first()
+                    .unwrap_or_else(|| panic!("{case}: a painted thumb in column {x}"));
+
+                let cursor = (surface.cursor)(&state);
+                state.focus = if surface.pane == FocusPane::Left {
+                    FocusPane::Right
+                } else {
+                    FocusPane::Left
+                };
+                assert_eq!(
+                    state.dispatch(Action::Click { col: x, row: grab }),
+                    Effect::None,
+                    "{case}: thumb press"
+                );
+                assert_eq!((surface.cursor)(&state), cursor, "{case}: picks no row");
+                assert_eq!(state.focus, surface.pane, "{case}: the list takes focus");
+                assert!(state.text_selection.is_none(), "{case}: no text selection");
+                assert_eq!(
+                    state.drag,
+                    SplitDrag::VScrollbar {
+                        bar: surface.vbar,
+                        origin_row: grab,
+                        origin_scroll: top as u16,
+                    },
+                    "{case}: the press arms a drag"
+                );
+
+                let effect = state.dispatch(Action::Drag {
+                    col: x,
+                    row: grab + 3,
+                });
+                assert!(
+                    (surface.moved)(&effect),
+                    "{case}: a moved cursor asks for what the wheel asks for: {effect:?}"
+                );
+                let want = (top + 3 * max / usize::from(h - 1)).min(max);
+                draw_state(&mut terminal, &mut state);
+                let bar = list_vbar(&state, surface.vbar);
+                assert_eq!(usize::from(bar.scroll), want, "{case}: drag scrolls");
+                let painted_cursor = (surface.cursor)(&state);
+                assert!(
+                    (want..want + usize::from(h)).contains(&painted_cursor),
+                    "{case}: the cursor moves with the viewport ({painted_cursor})"
+                );
+                assert_ne!(painted_cursor, cursor, "{case}: the cursor moved");
+                assert_eq!(state.dispatch(Action::Release), Effect::None, "{case}");
+                assert_eq!(state.drag, SplitDrag::None, "{case}: release ends the drag");
+                state.dispatch(Action::Drag { col: x, row: y });
+                assert_eq!(
+                    usize::from(list_vbar(&state, surface.vbar).scroll),
+                    want,
+                    "{case}: no scroll after the release"
+                );
+                state.dispatch(Action::Release);
+
+                let bottom = y + h - 1;
+                let buf = terminal.backend().buffer().clone();
+                assert_ne!(buf[(x, bottom)].symbol(), "█", "{case}: bottom is track");
+                state.dispatch(Action::Click {
+                    col: x,
+                    row: bottom,
+                });
+                assert_eq!(
+                    state.drag,
+                    SplitDrag::VScrollbar {
+                        bar: surface.vbar,
+                        origin_row: bottom,
+                        origin_scroll: max as u16,
+                    },
+                    "{case}: a track press arms a drag from the jump"
+                );
+                state.dispatch(Action::Release);
+                draw_state(&mut terminal, &mut state);
+                let bar = list_vbar(&state, surface.vbar);
+                assert_eq!(
+                    usize::from(bar.scroll),
+                    max,
+                    "{case}: track jump to the end"
+                );
+                let last = bar_list_name(BAR_LIST_ROWS - 1);
+                assert!(
+                    buffer_text(&terminal).contains(&last[..8]),
+                    "{case}: the last row shows"
+                );
+                state.dispatch(Action::Click { col: x, row: y });
+                state.dispatch(Action::Release);
+                draw_state(&mut terminal, &mut state);
+                let bar = list_vbar(&state, surface.vbar);
+                assert_eq!(bar.scroll, 0, "{case}: track top jumps to the top");
+                assert!(
+                    buffer_text(&terminal).contains(&bar_list_name(0)[..8]),
+                    "{case}: the first rows show"
+                );
+            }
+        }
+    }
+
+    /// A list's horizontal bar pans the same way on every list surface
+    /// that pans, in both looks: none at the left edge; once panned, it
+    /// takes the list's last row (left of the vertical bar's corner) and
+    /// clamps to the same pan max as Shift-→, which still reaches the end
+    /// of the longest row beside the vertical bar; a press on the thumb
+    /// grabs it (no row picked, focus on the list), a drag pans by the
+    /// graph and diff bars' math, the release ends the drag, and a track
+    /// click jumps to the end or back to the left edge (the bar goes).
+    #[test]
+    fn list_horizontal_bar_drags_and_track_click_jumps_on_every_registry_surface() {
+        checked_list_bar_ids(&["hbar", "hbar-drag"], |s| s.hbar.is_some());
+        for surface in LIST_BAR_SURFACES.iter().filter(|s| s.hbar.is_some()) {
+            let hbar_id = surface.hbar.expect("a panning list");
+            for (look, background) in PANE_LOOKS {
+                let case = format!("{} {look}", surface.id);
+                let mut state = (surface.open)();
+                state.background = background;
+                state.focus = surface.pane;
+                state.dispatch(Action::Move(30));
+                let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                assert_eq!(list_hbar(&state, hbar_id).y, None, "{case}: none at pan 0");
+                let full = list_vbar(&state, surface.vbar);
+                assert_eq!(
+                    usize::from(full.scroll_max),
+                    full.content_len - usize::from(full.height),
+                    "{case}: at pan 0 every list row is a row"
+                );
+
+                // Shift-→ to the end: the pan clamp.
+                for _ in 0..200 {
+                    state.dispatch(Action::PanDiff(1));
+                }
+                let pan_max = list_pan(&state, surface.pane);
+                assert!(pan_max > 1, "{case}: the rows pan ({pan_max})");
+                state.dispatch(Action::PanDiff(1 - i32::from(pan_max)));
+                assert_eq!(list_pan(&state, surface.pane), 1, "{case}");
+                draw_state(&mut terminal, &mut state);
+                let vbar = list_vbar(&state, surface.vbar);
+                let vx = vbar.x.unwrap_or_else(|| panic!("{case}: vertical bar"));
+                let hbar = list_hbar(&state, hbar_id);
+                let hy = hbar
+                    .y
+                    .unwrap_or_else(|| panic!("{case}: panned, the bar paints"));
+                assert_eq!(hy, vbar.y + vbar.height - 1, "{case}: the list's last row");
+                assert_eq!(
+                    hbar.x + hbar.width,
+                    vx,
+                    "{case}: the corner is the vertical bar's"
+                );
+                assert_eq!(hbar.col_max, pan_max, "{case}: the bar clamps like Shift-→");
+                assert_eq!(
+                    usize::from(vbar.scroll_max),
+                    vbar.content_len - usize::from(vbar.height - 1),
+                    "{case}: the bar row is not a list row"
+                );
+                let buf = terminal.backend().buffer().clone();
+                let thumb: Vec<u16> = (hbar.x..hbar.x + hbar.width)
+                    .filter(|&c| buf[(c, hy)].symbol() == "█")
+                    .collect();
+                let grab = *thumb
+                    .first()
+                    .unwrap_or_else(|| panic!("{case}: a painted thumb on row {hy}"));
+                let row_text = |buf: &Buffer, y: u16| -> String {
+                    (hbar.x..vx).map(|c| buf[(c, y)].symbol()).collect()
+                };
+                assert!(
+                    !row_text(&buf, hy).contains("bar-"),
+                    "{case}: no row paints under the bar"
+                );
+
+                let cursor = (surface.cursor)(&state);
+                state.focus = if surface.pane == FocusPane::Left {
+                    FocusPane::Right
+                } else {
+                    FocusPane::Left
+                };
+                assert_eq!(
+                    state.dispatch(Action::Click { col: grab, row: hy }),
+                    Effect::None,
+                    "{case}: thumb press"
+                );
+                assert_eq!((surface.cursor)(&state), cursor, "{case}: picks no row");
+                assert_eq!(state.focus, surface.pane, "{case}: the list takes focus");
+                assert_eq!(list_pan(&state, surface.pane), 1, "{case}: grab, no jump");
+                assert_eq!(
+                    state.drag,
+                    SplitDrag::HScrollbar {
+                        bar: hbar_id,
+                        origin_col: grab,
+                        origin_offset: 1,
+                    },
+                    "{case}: the press arms a drag"
+                );
+                state.dispatch(Action::Drag {
+                    col: grab + 5,
+                    row: hy,
+                });
+                let max = usize::from(pan_max);
+                let want = (1 + 5 * max / usize::from(hbar.width - 1)).min(max);
+                assert_eq!(
+                    usize::from(list_pan(&state, surface.pane)),
+                    want,
+                    "{case}: drag pans"
+                );
+                assert_eq!((surface.cursor)(&state), cursor, "{case}: the cursor stays");
+                assert_eq!(state.dispatch(Action::Release), Effect::None, "{case}");
+                assert_eq!(state.drag, SplitDrag::None, "{case}: release ends the drag");
+
+                draw_state(&mut terminal, &mut state);
+                let end = hbar.x + hbar.width - 1;
+                let buf = terminal.backend().buffer().clone();
+                assert_ne!(buf[(end, hy)].symbol(), "█", "{case}: the end is track");
+                state.dispatch(Action::Click { col: end, row: hy });
+                state.dispatch(Action::Release);
+                assert_eq!(list_pan(&state, surface.pane), pan_max, "{case}: track end");
+                draw_state(&mut terminal, &mut state);
+                let buf = terminal.backend().buffer().clone();
+                let tails: Vec<String> = (vbar.y..hy)
+                    .map(|y| row_text(&buf, y))
+                    .filter(|text| text.contains("xxx"))
+                    .collect();
+                assert!(!tails.is_empty(), "{case}: file rows show");
+                for text in &tails {
+                    assert!(
+                        text.contains(".txt"),
+                        "{case}: at the pan max the row end shows beside the bar: {text:?}"
+                    );
+                }
+                state.dispatch(Action::Click {
+                    col: hbar.x,
+                    row: hy,
+                });
+                state.dispatch(Action::Release);
+                assert_eq!(list_pan(&state, surface.pane), 0, "{case}: track start");
+                draw_state(&mut terminal, &mut state);
+                assert_eq!(
+                    list_hbar(&state, hbar_id).y,
+                    None,
+                    "{case}: back at the left edge the bar goes"
                 );
             }
         }
@@ -7969,7 +8653,8 @@ mod tests {
             assert!(
                 matches!(
                     state.drag,
-                    SplitDrag::DiffHScrollbar {
+                    SplitDrag::HScrollbar {
+                        bar: HScrollbar::Diff,
                         origin_col,
                         origin_offset
                     } if origin_col == x && origin_offset == start
@@ -9967,7 +10652,7 @@ mod tests {
             "docs/parity.md `commit-footer` / `msg-scroll` surfaces and looks must match this test's"
         );
         for surface in &FOOTER_SURFACES {
-            for (look, background) in FOOTER_LOOKS {
+            for (look, background) in PANE_LOOKS {
                 let case = format!("{} {look}", surface.id);
                 let mut state = (surface.open)();
                 state.background = background;
@@ -10075,8 +10760,9 @@ mod tests {
         }
     }
 
-    /// Both pane looks the registry-driven footer tests run.
-    const FOOTER_LOOKS: [(&str, BackgroundMode); 2] = [
+    /// Both pane looks the registry-driven tests run (footer, scrollbars,
+    /// search): boxed (`"terminal"`) and flat (`"paint"`).
+    const PANE_LOOKS: [(&str, BackgroundMode); 2] = [
         ("boxed", BackgroundMode::Terminal),
         ("flat", BackgroundMode::Paint),
     ];
@@ -10087,7 +10773,7 @@ mod tests {
         let mut driven: Vec<(String, String)> = FOOTER_SURFACES
             .iter()
             .flat_map(|s| {
-                FOOTER_LOOKS
+                PANE_LOOKS
                     .iter()
                     .map(|(look, _)| (s.id.into(), (*look).into()))
             })
@@ -10118,7 +10804,7 @@ mod tests {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         for surface in &FOOTER_SURFACES {
-            for (look, background) in FOOTER_LOOKS {
+            for (look, background) in PANE_LOOKS {
                 let case = format!("{} {look}", surface.id);
                 let mut state = (surface.open)();
                 if let Some(model) = state.graph.as_mut() {
@@ -10255,7 +10941,7 @@ mod tests {
             "docs/parity.md `commit-footer` / `rule-drag` surfaces and looks must match this test's"
         );
         for surface in &FOOTER_SURFACES {
-            for (look, background) in FOOTER_LOOKS {
+            for (look, background) in PANE_LOOKS {
                 let case = format!("{} {look}", surface.id);
                 let mut state = (surface.open)();
                 state.background = background;
@@ -10367,7 +11053,7 @@ mod tests {
             );
         }
         for surface in &FOOTER_SURFACES {
-            for (look, background) in FOOTER_LOOKS {
+            for (look, background) in PANE_LOOKS {
                 let case = format!("{} {look}", surface.id);
                 let mut state = (surface.open)();
                 state.background = background;
@@ -10582,7 +11268,7 @@ mod tests {
         };
 
         for graph in ["none", "other repo", "own graph lacks it"] {
-            for (look, background) in FOOTER_LOOKS {
+            for (look, background) in PANE_LOOKS {
                 let case = format!("{graph} {look}");
                 let mut state = open(graph);
                 state.background = background;
@@ -10744,7 +11430,7 @@ mod tests {
     /// branch from the snapshot. Both looks.
     #[test]
     fn compare_commit_footer_paints_a_head_tab_commit_like_the_graph_row() {
-        for (look, background) in FOOTER_LOOKS {
+        for (look, background) in PANE_LOOKS {
             let mut state = two_pane_graph_state();
             state.background = background;
             state.tree_fraction = 0.5;
@@ -10798,7 +11484,7 @@ mod tests {
     /// head commit is in the loaded graph.
     #[test]
     fn compare_range_tab_paints_no_commit_footer() {
-        for (look, background) in FOOTER_LOOKS {
+        for (look, background) in PANE_LOOKS {
             for range in ["live", "worktree"] {
                 let case = format!("{range} {look}");
                 let mut state = with_two_long_commits(two_pane_graph_state());
@@ -15659,8 +16345,10 @@ mod tests {
             let bar_row = (first..=last)
                 .find(|&y| buf[(left.x, y)].symbol() == CURSOR_BAR)
                 .expect("cursor bar");
+            // The row text, not the scrollbar column and the pad after it:
+            // the thumb moves with the selection.
             let left_text = |y: u16| -> String {
-                (left.x + 1..left.x + left.width)
+                (left.x + 1..left.x + left.width - 2)
                     .map(|x| buf[(x, y)].symbol())
                     .collect()
             };
@@ -15669,7 +16357,7 @@ mod tests {
                 label
                     .chars()
                     .skip(usize::from(left.x) + 1)
-                    .take(usize::from(left.width) - 1)
+                    .take(usize::from(left.width) - 3)
                     .collect::<String>(),
                 "the clicked row is selected"
             );
@@ -19530,6 +20218,17 @@ mod tests {
     /// change inside), `target/` (ignored), `new.txt` (untracked),
     /// `README.md` (modified).
     fn explorer_state() -> AppState {
+        explorer_state_listing(&[
+            ("src", true, false),
+            ("target", true, true),
+            ("new.txt", false, false),
+            ("README.md", false, false),
+        ])
+    }
+
+    /// [`explorer_state`]'s checkout with its Explorer root listed as
+    /// `entries` (`(name, is_dir, ignored)`).
+    fn explorer_state_listing(entries: &[(&str, bool, bool)]) -> AppState {
         let mut app = repo("app", true);
         app.changes.push(FileChange {
             path: "new.txt".into(),
@@ -19556,17 +20255,16 @@ mod tests {
         else {
             panic!("a root listing");
         };
-        let entry = |name: &str, is_dir: bool, ignored: bool| crate::tui::explorer::ExplorerEntry {
-            name: name.into(),
-            is_dir,
-            ignored,
-        };
-        let listing = vec![
-            entry("src", true, false),
-            entry("target", true, true),
-            entry("new.txt", false, false),
-            entry("README.md", false, false),
-        ];
+        let listing = entries
+            .iter()
+            .map(
+                |&(name, is_dir, ignored)| crate::tui::explorer::ExplorerEntry {
+                    name: name.into(),
+                    is_dir,
+                    ignored,
+                },
+            )
+            .collect();
         state
             .apply_explorer_dir(tab_id, req, "", Ok(listing))
             .expect("fresh listing");
@@ -21842,6 +22540,8 @@ mod tests {
             .map(|i| branch_repo(&format!("r{i:02}"), "feature"))
             .collect();
         let mut state = pr_state(&repos, true);
+        // The list ends on the bottom row: selecting that row keeps it there.
+        state.cursor = state.rows.len() - 1;
         let mut terminal = pr_terminal();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let last = state

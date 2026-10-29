@@ -55,6 +55,55 @@ pub enum VScrollbar {
     /// The file-diff bar. Its viewport follows `diff_cursor`, so the cursor
     /// moves with the viewport, as the wheel moves it.
     Diff,
+    /// The Workspace tree bar. Its viewport follows the tree cursor, so the
+    /// cursor moves with the viewport and the right pane follows it, as the
+    /// wheel moves them.
+    Tree,
+    /// The commit-file or compare list bar (depth 1 right, depth 2 left, a
+    /// compare tab's left pane). Its viewport follows the file cursor, so
+    /// the cursor moves with the viewport and its diff loads, as the wheel
+    /// moves them.
+    CommitFiles,
+    /// The Explorer tree bar. Its viewport follows the Explorer cursor, so
+    /// the cursor moves with the viewport and its row previews, as the
+    /// wheel moves them.
+    ExplorerTree,
+}
+
+/// A painted horizontal scrollbar that the mouse drags
+/// ([`SplitHit::HThumb`], [`SplitDrag::HScrollbar`]). Each pans the same
+/// column offset that Shift-←/→ and the horizontal wheel pan on its pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HScrollbar {
+    /// The graph list bar (`left_col_offset` at depth 1, else
+    /// `right_col_offset`).
+    Graph,
+    /// The file-diff bar (`diff_col_offset`).
+    Diff,
+    /// The Workspace tree bar (`left_col_offset`).
+    Tree,
+    /// The commit-file or compare list bar (`left_col_offset` in the left
+    /// pane, `right_col_offset` at depth 1).
+    CommitFiles,
+}
+
+/// Geometry and pan state of one painted horizontal scrollbar, from the
+/// last paint. The thumb is [`workspace_status_graph::graph_scrollbar_thumb`]
+/// of `col_max + 1` columns at `col_offset` on a `width`-column track, the
+/// ratatui `Scrollbar` math every horizontal bar paints with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HScrollbarLayout {
+    /// 0-based bar row; `None` when the bar is not painted.
+    pub y: Option<u16>,
+    /// 0-based first column of the track.
+    pub x: u16,
+    /// Track width in columns.
+    pub width: u16,
+    /// Largest pan offset (the pane's pan clamp): a track click on the
+    /// last column lands here.
+    pub col_max: u16,
+    /// Current pan offset.
+    pub col_offset: u16,
 }
 
 /// Geometry and scroll state of one painted vertical scrollbar, from the
@@ -79,8 +128,9 @@ pub struct VScrollbarLayout {
 
 /// Which drag handle a mouse cell hits, if any.
 ///
-/// Graph and file-diff scrollbar hits reuse this enum so click / drag /
-/// release stay on one mouse stack with the pane and in-diff splitters.
+/// Scrollbar hits (graph, file diff, tree, and commit-file lists) reuse
+/// this enum so click / drag / release stay on one mouse stack with the
+/// pane and in-diff splitters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplitHit {
     Pane,
@@ -92,14 +142,10 @@ pub enum SplitHit {
     VThumb(VScrollbar),
     /// Track of a vertical scrollbar (not the thumb).
     VTrack(VScrollbar),
-    /// Painted graph horizontal scrollbar thumb.
-    GraphHThumb,
-    /// Graph horizontal scrollbar track (not the thumb).
-    GraphHTrack,
-    /// Painted file-diff horizontal scrollbar thumb.
-    DiffHThumb,
-    /// File-diff horizontal scrollbar track (not the thumb).
-    DiffHTrack,
+    /// Painted thumb of a horizontal scrollbar.
+    HThumb(HScrollbar),
+    /// Track of a horizontal scrollbar (not the thumb).
+    HTrack(HScrollbar),
     Other,
 }
 
@@ -143,15 +189,11 @@ pub enum SplitDrag {
         /// Viewport top at that origin.
         origin_scroll: u16,
     },
-    /// Graph horizontal scrollbar. Column delta maps onto `col_offset`.
-    GraphHScrollbar {
-        /// Mouse column at mouse-down (or after a track jump).
-        origin_col: u16,
-        /// Horizontal pan offset at that origin.
-        origin_offset: u16,
-    },
-    /// File-diff horizontal scrollbar. Column delta maps onto `diff_col_offset`.
-    DiffHScrollbar {
+    /// A horizontal scrollbar. Column delta maps onto the bar's pan offset
+    /// ([`hcol_from_delta`]).
+    HScrollbar {
+        /// The bar under the press.
+        bar: HScrollbar,
         /// Mouse column at mouse-down (or after a track jump).
         origin_col: u16,
         /// Horizontal pan offset at that origin.
@@ -167,13 +209,9 @@ impl SplitHit {
             Self::Pane => Some(ResizeEdge::Pane),
             Self::DiffSplit => Some(ResizeEdge::DiffSplit),
             Self::CommitMsg => Some(ResizeEdge::CommitMsg),
-            Self::VThumb(_)
-            | Self::VTrack(_)
-            | Self::GraphHThumb
-            | Self::GraphHTrack
-            | Self::DiffHThumb
-            | Self::DiffHTrack
-            | Self::Other => None,
+            Self::VThumb(_) | Self::VTrack(_) | Self::HThumb(_) | Self::HTrack(_) | Self::Other => {
+                None
+            }
         }
     }
 }
@@ -186,10 +224,7 @@ impl SplitDrag {
             Self::Pane => Some(ResizeEdge::Pane),
             Self::Diff => Some(ResizeEdge::DiffSplit),
             Self::CommitMsg { .. } => Some(ResizeEdge::CommitMsg),
-            Self::None
-            | Self::VScrollbar { .. }
-            | Self::GraphHScrollbar { .. }
-            | Self::DiffHScrollbar { .. } => None,
+            Self::None | Self::VScrollbar { .. } | Self::HScrollbar { .. } => None,
         }
     }
 }
@@ -210,7 +245,7 @@ pub struct SideBySideWidths {
 }
 
 /// Geometry used by splitter hit-test. Coordinates are 0-based (crossterm).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SplitLayout {
     pub term_cols: u16,
     pub term_rows: u16,
@@ -234,26 +269,23 @@ pub struct SplitLayout {
     /// File-diff vertical scrollbar: the diff body rows, the diff row
     /// count, and the viewport top (`diff_scroll`).
     pub diff_vbar: VScrollbarLayout,
-    /// 0-based graph horizontal scrollbar row when the bar is painted.
-    pub graph_hscrollbar_y: Option<u16>,
-    /// 0-based first column of the graph horizontal scrollbar track.
-    pub graph_hscrollbar_x: u16,
-    /// Graph horizontal scrollbar track width.
-    pub graph_hscrollbar_width: u16,
-    /// Max horizontal pan for the painted graph.
-    pub graph_col_max: u16,
-    /// Current graph horizontal pan (`col_offset`).
-    pub graph_col_offset: u16,
-    /// 0-based file-diff horizontal scrollbar row when the bar is painted.
-    pub diff_hscrollbar_y: Option<u16>,
-    /// 0-based first column of the file-diff horizontal scrollbar track.
-    pub diff_hscrollbar_x: u16,
-    /// File-diff horizontal scrollbar track width.
-    pub diff_hscrollbar_width: u16,
-    /// Max horizontal pan for the painted file diff.
-    pub diff_col_max: u16,
-    /// Current file-diff horizontal pan (`diff_col_offset`).
-    pub diff_col_offset: u16,
+    /// Workspace tree vertical scrollbar: the pane rows, the painted row
+    /// count, and the painted top.
+    pub tree_vbar: VScrollbarLayout,
+    /// Commit-file or compare list vertical scrollbar: the list rows (not
+    /// the commit footer), the painted row count, and the painted top.
+    pub files_vbar: VScrollbarLayout,
+    /// Explorer tree vertical scrollbar: the tree rows, the row count, and
+    /// the painted top.
+    pub explorer_tree_vbar: VScrollbarLayout,
+    /// Graph list horizontal scrollbar and its pan (`col_offset`).
+    pub graph_hbar: HScrollbarLayout,
+    /// File-diff horizontal scrollbar and its pan (`diff_col_offset`).
+    pub diff_hbar: HScrollbarLayout,
+    /// Workspace tree horizontal scrollbar and its pan (`left_col_offset`).
+    pub tree_hbar: HScrollbarLayout,
+    /// Commit-file or compare list horizontal scrollbar and its pan.
+    pub files_hbar: HScrollbarLayout,
     /// 0-based row of the expanded commit-message footer's top rule (graph
     /// or depth-2 commit files) when it is painted ([`SplitHit::CommitMsg`]).
     pub commit_msg_rule_y: Option<u16>,
@@ -483,8 +515,28 @@ impl SplitLayout {
         match bar {
             VScrollbar::Graph => self.graph_vbar,
             VScrollbar::Diff => self.diff_vbar,
+            VScrollbar::Tree => self.tree_vbar,
+            VScrollbar::CommitFiles => self.files_vbar,
+            VScrollbar::ExplorerTree => self.explorer_tree_vbar,
         }
     }
+
+    /// The recorded geometry and pan of horizontal scrollbar `bar`.
+    pub fn hbar(&self, bar: HScrollbar) -> HScrollbarLayout {
+        match bar {
+            HScrollbar::Graph => self.graph_hbar,
+            HScrollbar::Diff => self.diff_hbar,
+            HScrollbar::Tree => self.tree_hbar,
+            HScrollbar::CommitFiles => self.files_hbar,
+        }
+    }
+}
+
+/// Rows a list `height` rows tall keeps for its horizontal scrollbar: one
+/// once the list pans off the left edge (`col_offset > 0`, the graph bar's
+/// rule), so the bar never hides a row. A 1-row list keeps its row.
+pub fn list_hbar_rows(height: u16, col_offset: u16) -> u16 {
+    u16::from(height > 1 && workspace_status_graph::graph_hscroll_visible(col_offset))
 }
 
 /// Map a 0-based mouse row onto `bar`'s viewport top (track-fraction jump):
@@ -510,44 +562,25 @@ pub fn vscroll_from_delta(
     (i32::from(origin_scroll) + delta * max / denom).clamp(0, max) as u16
 }
 
-/// Map a 0-based mouse column onto `col_offset` (track-fraction jump).
-pub fn graph_col_from_col(layout: SplitLayout, col: u16) -> u16 {
-    graph_col_from_delta(layout, layout.graph_hscrollbar_x, 0, col)
+/// Map a 0-based mouse column onto `bar`'s pan offset (track-fraction
+/// jump): the track's first column is 0, its last column `col_max`.
+pub fn hcol_from_col(bar: HScrollbarLayout, col: u16) -> u16 {
+    hcol_from_delta(bar, bar.x, 0, col)
 }
 
-/// Map a drag (`origin_col` / `origin_offset` plus current `col`) onto pan.
-pub fn graph_col_from_delta(
-    layout: SplitLayout,
+/// Map a drag (`origin_col` / `origin_offset` plus current `col`) onto
+/// `bar`'s pan offset, clamped to `0..=col_max`.
+pub fn hcol_from_delta(
+    bar: HScrollbarLayout,
     origin_col: u16,
     origin_offset: u16,
     col: u16,
 ) -> u16 {
-    let max = i32::from(layout.graph_col_max);
+    let max = i32::from(bar.col_max);
     if max == 0 {
         return 0;
     }
-    let denom = i32::from(layout.graph_hscrollbar_width.saturating_sub(1).max(1));
-    let delta = i32::from(col).saturating_sub(i32::from(origin_col));
-    (i32::from(origin_offset) + delta * max / denom).clamp(0, max) as u16
-}
-
-/// Map a 0-based mouse column onto `diff_col_offset` (track-fraction jump).
-pub fn diff_col_from_col(layout: SplitLayout, col: u16) -> u16 {
-    diff_col_from_delta(layout, layout.diff_hscrollbar_x, 0, col)
-}
-
-/// Map a drag (`origin_col` / `origin_offset` plus current `col`) onto pan.
-pub fn diff_col_from_delta(
-    layout: SplitLayout,
-    origin_col: u16,
-    origin_offset: u16,
-    col: u16,
-) -> u16 {
-    let max = i32::from(layout.diff_col_max);
-    if max == 0 {
-        return 0;
-    }
-    let denom = i32::from(layout.diff_hscrollbar_width.saturating_sub(1).max(1));
+    let denom = i32::from(bar.width.saturating_sub(1).max(1));
     let delta = i32::from(col).saturating_sub(i32::from(origin_col));
     (i32::from(origin_offset) + delta * max / denom).clamp(0, max) as u16
 }
@@ -581,51 +614,32 @@ pub fn hit_vscrollbar(
     Some(SplitHit::VTrack(bar))
 }
 
-fn hit_graph_hscrollbar(layout: SplitLayout, col: u16, row: u16) -> Option<SplitHit> {
-    let y = layout.graph_hscrollbar_y?;
-    if row != y || layout.graph_hscrollbar_width == 0 {
+/// The part of horizontal scrollbar `bar` (recorded as `geometry`) under
+/// 0-based (`col`, `row`): its painted thumb, its track, or `None` off the
+/// bar, with no bar painted, or with nothing to pan (`col_max` 0).
+pub fn hit_hscrollbar(
+    bar: HScrollbar,
+    geometry: HScrollbarLayout,
+    col: u16,
+    row: u16,
+) -> Option<SplitHit> {
+    let y = geometry.y?;
+    if row != y || geometry.width == 0 || geometry.col_max == 0 || col < geometry.x {
         return None;
     }
-    if col < layout.graph_hscrollbar_x {
-        return None;
-    }
-    let rel = col.saturating_sub(layout.graph_hscrollbar_x);
-    if rel >= layout.graph_hscrollbar_width {
-        return None;
-    }
-    if let Some((thumb_off, thumb_len)) = workspace_status_graph::graph_scrollbar_thumb(
-        (layout.graph_col_max as usize).saturating_add(1),
-        layout.graph_col_offset,
-        layout.graph_hscrollbar_width,
-    ) {
-        if rel >= thumb_off && rel < thumb_off.saturating_add(thumb_len) {
-            return Some(SplitHit::GraphHThumb);
-        }
-    }
-    Some(SplitHit::GraphHTrack)
-}
-
-fn hit_diff_hscrollbar(layout: SplitLayout, col: u16, row: u16) -> Option<SplitHit> {
-    let y = layout.diff_hscrollbar_y?;
-    if row != y || layout.diff_hscrollbar_width == 0 || layout.diff_col_max == 0 {
-        return None;
-    }
-    if col < layout.diff_hscrollbar_x {
-        return None;
-    }
-    let rel = col.saturating_sub(layout.diff_hscrollbar_x);
-    if rel >= layout.diff_hscrollbar_width {
+    let rel = col.saturating_sub(geometry.x);
+    if rel >= geometry.width {
         return None;
     }
     let (thumb_off, thumb_len) = workspace_status_graph::graph_scrollbar_thumb(
-        (layout.diff_col_max as usize).saturating_add(1),
-        layout.diff_col_offset,
-        layout.diff_hscrollbar_width,
+        usize::from(geometry.col_max).saturating_add(1),
+        geometry.col_offset,
+        geometry.width,
     )?;
     if rel >= thumb_off && rel < thumb_off.saturating_add(thumb_len) {
-        return Some(SplitHit::DiffHThumb);
+        return Some(SplitHit::HThumb(bar));
     }
-    Some(SplitHit::DiffHTrack)
+    Some(SplitHit::HTrack(bar))
 }
 
 /// True when 0-based (`col`, `row`) is on the painted commit-message
@@ -640,11 +654,11 @@ fn is_commit_msg_rule(layout: SplitLayout, col: u16, row: u16) -> bool {
 
 /// Map a 0-based mouse cell onto a drag handle.
 ///
-/// Graph scrollbar (exact column, list track) wins over the pane divider
-/// band (3 columns boxed, 2 flat) so a left-pane graph thumb stays
-/// draggable. Horizontal graph track is next, then the file-diff vertical
-/// and horizontal bars, then pane, then the commit-message footer rule,
-/// then in-diff RULE.
+/// Scrollbars come first: each list's or diff's vertical bar (exact column,
+/// list track) wins over the pane divider band (3 columns boxed, 2 flat),
+/// so a left-pane thumb stays draggable, and over its own horizontal bar
+/// in the corner cell. Then pane, then the commit-message footer rule,
+/// then in-diff RULE. The Explorer tree's bar is hit in `explorer_click`.
 /// Boxed panes stop above the pane area's last row (the bottom border);
 /// flat panes include it.
 pub fn hit_split(layout: SplitLayout, col: u16, row: u16) -> SplitHit {
@@ -663,17 +677,19 @@ pub fn hit_split(layout: SplitLayout, col: u16, row: u16) -> SplitHit {
     if y > last_row {
         return SplitHit::Other;
     }
-    if let Some(hit) = hit_vscrollbar(VScrollbar::Graph, layout.graph_vbar, col, row) {
-        return hit;
-    }
-    if let Some(hit) = hit_graph_hscrollbar(layout, col, row) {
-        return hit;
-    }
-    if let Some(hit) = hit_vscrollbar(VScrollbar::Diff, layout.diff_vbar, col, row) {
-        return hit;
-    }
-    if let Some(hit) = hit_diff_hscrollbar(layout, col, row) {
-        return hit;
+    // Each pane's vertical bar, then its horizontal bar.
+    let bars = [
+        (VScrollbar::Graph, HScrollbar::Graph),
+        (VScrollbar::Diff, HScrollbar::Diff),
+        (VScrollbar::Tree, HScrollbar::Tree),
+        (VScrollbar::CommitFiles, HScrollbar::CommitFiles),
+    ];
+    for (vbar, hbar) in bars {
+        let hit = hit_vscrollbar(vbar, layout.vbar(vbar), col, row)
+            .or_else(|| hit_hscrollbar(hbar, layout.hbar(hbar), col, row));
+        if let Some(hit) = hit {
+            return hit;
+        }
     }
     if is_pane_divider(layout, x) {
         return SplitHit::Pane;
@@ -929,19 +945,10 @@ mod tests {
             diff_split_rule_x: rule,
             graph_vbar: VScrollbarLayout::default(),
             diff_vbar: VScrollbarLayout::default(),
-            graph_hscrollbar_y: None,
-            graph_hscrollbar_x: 0,
-            graph_hscrollbar_width: 0,
-            graph_col_max: 0,
-            graph_col_offset: 0,
-            diff_hscrollbar_y: None,
-            diff_hscrollbar_x: 0,
-            diff_hscrollbar_width: 0,
-            diff_col_max: 0,
-            diff_col_offset: 0,
             commit_msg_rule_y: None,
             commit_msg_rule_x: 0,
             commit_msg_rule_width: 0,
+            ..SplitLayout::default()
         }
     }
 
@@ -964,19 +971,10 @@ mod tests {
                 scroll_max: 30,
             },
             diff_vbar: VScrollbarLayout::default(),
-            graph_hscrollbar_y: None,
-            graph_hscrollbar_x: 0,
-            graph_hscrollbar_width: 0,
-            graph_col_max: 0,
-            graph_col_offset: 0,
-            diff_hscrollbar_y: None,
-            diff_hscrollbar_x: 0,
-            diff_hscrollbar_width: 0,
-            diff_col_max: 0,
-            diff_col_offset: 0,
             commit_msg_rule_y: None,
             commit_msg_rule_x: 0,
             commit_msg_rule_width: 0,
+            ..SplitLayout::default()
         }
     }
 
@@ -1020,19 +1018,10 @@ mod tests {
             diff_split_rule_x: Some(47),
             graph_vbar: VScrollbarLayout::default(),
             diff_vbar: VScrollbarLayout::default(),
-            graph_hscrollbar_y: None,
-            graph_hscrollbar_x: 0,
-            graph_hscrollbar_width: 0,
-            graph_col_max: 0,
-            graph_col_offset: 0,
-            diff_hscrollbar_y: None,
-            diff_hscrollbar_x: 0,
-            diff_hscrollbar_width: 0,
-            diff_col_max: 0,
-            diff_col_offset: 0,
             commit_msg_rule_y: None,
             commit_msg_rule_x: 0,
             commit_msg_rule_width: 0,
+            ..SplitLayout::default()
         };
         assert_eq!(hit_split(layout, 47, 4), SplitHit::Pane);
     }
@@ -1081,19 +1070,10 @@ mod tests {
                 scroll_max: 30,
             },
             diff_vbar: VScrollbarLayout::default(),
-            graph_hscrollbar_y: None,
-            graph_hscrollbar_x: 0,
-            graph_hscrollbar_width: 0,
-            graph_col_max: 0,
-            graph_col_offset: 0,
-            diff_hscrollbar_y: None,
-            diff_hscrollbar_x: 0,
-            diff_hscrollbar_width: 0,
-            diff_col_max: 0,
-            diff_col_offset: 0,
             commit_msg_rule_y: None,
             commit_msg_rule_x: 0,
             commit_msg_rule_width: 0,
+            ..SplitLayout::default()
         };
         assert!(
             matches!(
@@ -1124,6 +1104,87 @@ mod tests {
             3,
             "zero delta keeps origin scroll"
         );
+    }
+
+    /// A list's bars hit-test like the graph and diff bars, in both looks:
+    /// the tree's vertical bar on the left pane's last column wins over the
+    /// pane divider band (boxed, that column is in it), the vertical bar
+    /// takes the corner cell of the horizontal bar's row, the horizontal
+    /// bar's thumb and track split its row, and a list with nothing to pan
+    /// (`col_max` 0) has no horizontal bar to hit. The commit-file bars do
+    /// the same in the right pane.
+    #[test]
+    fn hit_test_list_scrollbars_win_over_the_pane_band_and_share_the_corner() {
+        for flat in [false, true] {
+            let base = if flat {
+                flat_wide_layout(None)
+            } else {
+                wide_layout(None)
+            };
+            let vbar = |x| VScrollbarLayout {
+                x: Some(x),
+                y: 2,
+                height: 10,
+                content_len: 40,
+                scroll: 0,
+                scroll_max: 31,
+            };
+            let hbar = |x, width| HScrollbarLayout {
+                y: Some(11),
+                x,
+                width,
+                col_max: 40,
+                col_offset: 0,
+            };
+            let layout = SplitLayout {
+                tree_vbar: vbar(46),
+                tree_hbar: hbar(1, 45),
+                files_vbar: vbar(158),
+                files_hbar: hbar(50, 108),
+                ..base
+            };
+            for (bar, hbar_id, x, x0) in [
+                (VScrollbar::Tree, HScrollbar::Tree, 46, 1),
+                (VScrollbar::CommitFiles, HScrollbar::CommitFiles, 158, 50),
+            ] {
+                let case = format!("{bar:?} flat {flat}");
+                assert_eq!(hit_split(layout, x, 2), SplitHit::VThumb(bar), "{case}");
+                assert_eq!(hit_split(layout, x, 10), SplitHit::VTrack(bar), "{case}");
+                assert_eq!(
+                    hit_split(layout, x, 11),
+                    SplitHit::VTrack(bar),
+                    "{case}: the corner is the vertical bar's"
+                );
+                assert_eq!(
+                    hit_split(layout, x0, 11),
+                    SplitHit::HThumb(hbar_id),
+                    "{case}"
+                );
+                assert_eq!(
+                    hit_split(layout, x - 1, 11),
+                    SplitHit::HTrack(hbar_id),
+                    "{case}"
+                );
+                assert_eq!(
+                    hcol_from_col(layout.hbar(hbar_id), x - 1),
+                    40,
+                    "{case}: the track end is the pan max"
+                );
+            }
+            assert_eq!(hit_split(layout, 10, 10), SplitHit::Other, "flat {flat}");
+            let still = SplitLayout {
+                tree_hbar: HScrollbarLayout {
+                    col_max: 0,
+                    ..layout.tree_hbar
+                },
+                ..layout
+            };
+            assert_eq!(
+                hit_split(still, 10, 11),
+                SplitHit::Other,
+                "flat {flat}: nothing to pan"
+            );
+        }
     }
 
     /// The file-diff vertical bar hit-tests like the graph bar: its painted
@@ -1184,11 +1245,11 @@ mod tests {
     fn graph_hsb_layout() -> SplitLayout {
         let mut layout = graph_sb_layout();
         layout.graph_vbar.x = None;
-        layout.graph_hscrollbar_y = Some(12);
-        layout.graph_hscrollbar_x = 50;
-        layout.graph_hscrollbar_width = 20;
-        layout.graph_col_max = 40;
-        layout.graph_col_offset = 0;
+        layout.graph_hbar.y = Some(12);
+        layout.graph_hbar.x = 50;
+        layout.graph_hbar.width = 20;
+        layout.graph_hbar.col_max = 40;
+        layout.graph_hbar.col_offset = 0;
         layout
     }
 
@@ -1196,17 +1257,24 @@ mod tests {
     fn hit_test_graph_horizontal_scrollbar_thumb_and_track() {
         let layout = graph_hsb_layout();
         let thumb = workspace_status_graph::graph_scrollbar_thumb(41, 0, 20).expect("thumb");
-        let thumb_col = layout.graph_hscrollbar_x + thumb.0;
-        assert_eq!(hit_split(layout, thumb_col, 12), SplitHit::GraphHThumb);
+        let thumb_col = layout.graph_hbar.x + thumb.0;
+        assert_eq!(
+            hit_split(layout, thumb_col, 12),
+            SplitHit::HThumb(HScrollbar::Graph)
+        );
         let track_col = layout
-            .graph_hscrollbar_x
-            .saturating_add(layout.graph_hscrollbar_width.saturating_sub(1));
+            .graph_hbar
+            .x
+            .saturating_add(layout.graph_hbar.width.saturating_sub(1));
         if track_col != thumb_col {
-            assert_eq!(hit_split(layout, track_col, 12), SplitHit::GraphHTrack);
+            assert_eq!(
+                hit_split(layout, track_col, 12),
+                SplitHit::HTrack(HScrollbar::Graph)
+            );
         }
         assert_eq!(hit_split(layout, thumb_col, 11), SplitHit::Other);
         assert_eq!(
-            hit_split(layout, layout.graph_hscrollbar_x.saturating_sub(1), 12),
+            hit_split(layout, layout.graph_hbar.x.saturating_sub(1), 12),
             SplitHit::Other
         );
     }
@@ -1215,9 +1283,9 @@ mod tests {
     fn vertical_graph_scrollbar_column_wins_over_horizontal_track() {
         let mut layout = graph_hsb_layout();
         layout.graph_vbar.x = Some(69);
-        layout.graph_hscrollbar_x = 50;
-        layout.graph_hscrollbar_width = 20;
-        layout.graph_hscrollbar_y = Some(4);
+        layout.graph_hbar.x = 50;
+        layout.graph_hbar.width = 20;
+        layout.graph_hbar.y = Some(4);
         layout.graph_vbar.y = 2;
         layout.graph_vbar.height = 10;
         assert!(
@@ -1230,28 +1298,29 @@ mod tests {
     }
 
     #[test]
-    fn graph_col_from_col_jumps_toward_track_and_drag_delta() {
+    fn graph_hbar_col_from_col_jumps_toward_track_and_drag_delta() {
         let layout = graph_hsb_layout();
-        let jumped = graph_col_from_col(
-            layout,
+        let jumped = hcol_from_col(
+            layout.graph_hbar,
             layout
-                .graph_hscrollbar_x
-                .saturating_add(layout.graph_hscrollbar_width.saturating_sub(1)),
+                .graph_hbar
+                .x
+                .saturating_add(layout.graph_hbar.width.saturating_sub(1)),
         );
         assert!(jumped > 0, "right of track should pan right: {jumped}");
-        assert_eq!(jumped, layout.graph_col_max);
-        let dragged = graph_col_from_delta(
-            layout,
-            layout.graph_hscrollbar_x,
+        assert_eq!(jumped, layout.graph_hbar.col_max);
+        let dragged = hcol_from_delta(
+            layout.graph_hbar,
+            layout.graph_hbar.x,
             0,
-            layout.graph_hscrollbar_x + 10,
+            layout.graph_hbar.x + 10,
         );
         assert!(
             dragged > 0 && dragged < jumped,
             "mid drag {dragged} jump {jumped}"
         );
         assert_eq!(
-            graph_col_from_delta(layout, 4, 3, 4),
+            hcol_from_delta(layout.graph_hbar, 4, 3, 4),
             3,
             "zero delta keeps origin offset"
         );
@@ -1259,11 +1328,11 @@ mod tests {
 
     fn diff_hsb_layout() -> SplitLayout {
         let mut layout = wide_layout(None);
-        layout.diff_hscrollbar_y = Some(12);
-        layout.diff_hscrollbar_x = 50;
-        layout.diff_hscrollbar_width = 20;
-        layout.diff_col_max = 40;
-        layout.diff_col_offset = 0;
+        layout.diff_hbar.y = Some(12);
+        layout.diff_hbar.x = 50;
+        layout.diff_hbar.width = 20;
+        layout.diff_hbar.col_max = 40;
+        layout.diff_hbar.col_offset = 0;
         layout
     }
 
@@ -1271,17 +1340,24 @@ mod tests {
     fn hit_test_diff_horizontal_scrollbar_thumb_and_track() {
         let layout = diff_hsb_layout();
         let thumb = workspace_status_graph::graph_scrollbar_thumb(41, 0, 20).expect("thumb");
-        let thumb_col = layout.diff_hscrollbar_x + thumb.0;
-        assert_eq!(hit_split(layout, thumb_col, 12), SplitHit::DiffHThumb);
+        let thumb_col = layout.diff_hbar.x + thumb.0;
+        assert_eq!(
+            hit_split(layout, thumb_col, 12),
+            SplitHit::HThumb(HScrollbar::Diff)
+        );
         let track_col = layout
-            .diff_hscrollbar_x
-            .saturating_add(layout.diff_hscrollbar_width.saturating_sub(1));
+            .diff_hbar
+            .x
+            .saturating_add(layout.diff_hbar.width.saturating_sub(1));
         if track_col != thumb_col {
-            assert_eq!(hit_split(layout, track_col, 12), SplitHit::DiffHTrack);
+            assert_eq!(
+                hit_split(layout, track_col, 12),
+                SplitHit::HTrack(HScrollbar::Diff)
+            );
         }
         assert_eq!(hit_split(layout, thumb_col, 11), SplitHit::Other);
         assert_eq!(
-            hit_split(layout, layout.diff_hscrollbar_x.saturating_sub(1), 12),
+            hit_split(layout, layout.diff_hbar.x.saturating_sub(1), 12),
             SplitHit::Other
         );
     }
@@ -1289,35 +1365,35 @@ mod tests {
     #[test]
     fn hit_test_diff_horizontal_scrollbar_absent_when_max_is_zero() {
         let mut layout = diff_hsb_layout();
-        layout.diff_col_max = 0;
-        layout.diff_col_offset = 8;
+        layout.diff_hbar.col_max = 0;
+        layout.diff_hbar.col_offset = 8;
         assert_eq!(
-            hit_split(layout, layout.diff_hscrollbar_x, 12),
+            hit_split(layout, layout.diff_hbar.x, 12),
             SplitHit::Other,
             "no max must not classify the row as a track jump to origin"
         );
-        layout.diff_col_max = 40;
-        layout.diff_hscrollbar_y = None;
-        assert_eq!(
-            hit_split(layout, layout.diff_hscrollbar_x, 12),
-            SplitHit::Other
-        );
+        layout.diff_hbar.col_max = 40;
+        layout.diff_hbar.y = None;
+        assert_eq!(hit_split(layout, layout.diff_hbar.x, 12), SplitHit::Other);
     }
 
     #[test]
     fn hit_test_diff_horizontal_thumb_at_nonzero_offset_is_not_left_track() {
         let mut layout = diff_hsb_layout();
-        layout.diff_col_offset = 12;
+        layout.diff_hbar.col_offset = 12;
         let thumb = workspace_status_graph::graph_scrollbar_thumb(41, 12, 20).expect("thumb");
         assert!(
             thumb.0 > 0,
             "origin-hidden offset must move the thumb off the left edge"
         );
-        let thumb_col = layout.diff_hscrollbar_x + thumb.0;
-        assert_eq!(hit_split(layout, thumb_col, 12), SplitHit::DiffHThumb);
+        let thumb_col = layout.diff_hbar.x + thumb.0;
         assert_eq!(
-            hit_split(layout, layout.diff_hscrollbar_x, 12),
-            SplitHit::DiffHTrack,
+            hit_split(layout, thumb_col, 12),
+            SplitHit::HThumb(HScrollbar::Diff)
+        );
+        assert_eq!(
+            hit_split(layout, layout.diff_hbar.x, 12),
+            SplitHit::HTrack(HScrollbar::Diff),
             "left-edge track must stay a jump when the thumb has left origin"
         );
     }
@@ -1325,16 +1401,16 @@ mod tests {
     #[test]
     fn graph_horizontal_track_wins_over_diff_horizontal_track() {
         let mut layout = diff_hsb_layout();
-        layout.graph_hscrollbar_y = Some(12);
-        layout.graph_hscrollbar_x = 50;
-        layout.graph_hscrollbar_width = 20;
-        layout.graph_col_max = 40;
-        layout.graph_col_offset = 0;
+        layout.graph_hbar.y = Some(12);
+        layout.graph_hbar.x = 50;
+        layout.graph_hbar.width = 20;
+        layout.graph_hbar.col_max = 40;
+        layout.graph_hbar.col_offset = 0;
         let thumb = workspace_status_graph::graph_scrollbar_thumb(41, 0, 20).expect("thumb");
         let thumb_col = 50 + thumb.0;
         assert_eq!(
             hit_split(layout, thumb_col, 12),
-            SplitHit::GraphHThumb,
+            SplitHit::HThumb(HScrollbar::Graph),
             "graph h-bar must win the overlapping cell"
         );
     }
@@ -1342,14 +1418,14 @@ mod tests {
     #[test]
     fn diff_horizontal_track_wins_over_pane_divider_band() {
         let mut layout = wide_layout(None);
-        layout.diff_hscrollbar_y = Some(5);
-        layout.diff_hscrollbar_x = 46;
-        layout.diff_hscrollbar_width = 4;
-        layout.diff_col_max = 10;
+        layout.diff_hbar.y = Some(5);
+        layout.diff_hbar.x = 46;
+        layout.diff_hbar.width = 4;
+        layout.diff_hbar.col_max = 10;
         assert!(
             matches!(
                 hit_split(layout, 47, 5),
-                SplitHit::DiffHThumb | SplitHit::DiffHTrack
+                SplitHit::HThumb(HScrollbar::Diff) | SplitHit::HTrack(HScrollbar::Diff)
             ),
             "file-diff h-bar must win over the pane divider band"
         );
@@ -1422,10 +1498,10 @@ mod tests {
             SplitHit::VThumb(VScrollbar::Diff),
             SplitHit::VTrack(VScrollbar::Graph),
             SplitHit::VTrack(VScrollbar::Diff),
-            SplitHit::GraphHThumb,
-            SplitHit::GraphHTrack,
-            SplitHit::DiffHThumb,
-            SplitHit::DiffHTrack,
+            SplitHit::HThumb(HScrollbar::Graph),
+            SplitHit::HTrack(HScrollbar::Graph),
+            SplitHit::HThumb(HScrollbar::Diff),
+            SplitHit::HTrack(HScrollbar::Diff),
             SplitHit::Other,
         ] {
             assert_eq!(hit.resize_edge(), None, "{hit:?}");
@@ -1447,11 +1523,13 @@ mod tests {
                 origin_row: 0,
                 origin_scroll: 0,
             },
-            SplitDrag::GraphHScrollbar {
+            SplitDrag::HScrollbar {
+                bar: HScrollbar::Graph,
                 origin_col: 0,
                 origin_offset: 0,
             },
-            SplitDrag::DiffHScrollbar {
+            SplitDrag::HScrollbar {
+                bar: HScrollbar::Diff,
                 origin_col: 0,
                 origin_offset: 0,
             },
@@ -1560,15 +1638,21 @@ mod tests {
         // one the bottom border when boxed and a content row when flat.
         let last = 22;
         let with_hbar = |mut layout: SplitLayout| {
-            layout.diff_hscrollbar_y = Some(last);
-            layout.diff_hscrollbar_x = 50;
-            layout.diff_hscrollbar_width = 20;
-            layout.diff_col_max = 40;
+            layout.diff_hbar.y = Some(last);
+            layout.diff_hbar.x = 50;
+            layout.diff_hbar.width = 20;
+            layout.diff_hbar.col_max = 40;
             layout
         };
         let flat = with_hbar(flat_wide_layout(None));
-        assert_eq!(hit_split(flat, 50, last), SplitHit::DiffHThumb);
-        assert_eq!(hit_split(flat, 69, last), SplitHit::DiffHTrack);
+        assert_eq!(
+            hit_split(flat, 50, last),
+            SplitHit::HThumb(HScrollbar::Diff)
+        );
+        assert_eq!(
+            hit_split(flat, 69, last),
+            SplitHit::HTrack(HScrollbar::Diff)
+        );
         assert_eq!(hit_split(flat, 47, last), SplitHit::Pane);
         assert_eq!(hit_split(flat, 50, last + 1), SplitHit::Other);
         let boxed = with_hbar(wide_layout(None));
@@ -1578,28 +1662,29 @@ mod tests {
     }
 
     #[test]
-    fn diff_col_from_col_jumps_toward_track_and_drag_delta() {
+    fn diff_hbar_col_from_col_jumps_toward_track_and_drag_delta() {
         let layout = diff_hsb_layout();
-        let jumped = diff_col_from_col(
-            layout,
+        let jumped = hcol_from_col(
+            layout.diff_hbar,
             layout
-                .diff_hscrollbar_x
-                .saturating_add(layout.diff_hscrollbar_width.saturating_sub(1)),
+                .diff_hbar
+                .x
+                .saturating_add(layout.diff_hbar.width.saturating_sub(1)),
         );
         assert!(jumped > 0, "right of track should pan right: {jumped}");
-        assert_eq!(jumped, layout.diff_col_max);
-        let dragged = diff_col_from_delta(
-            layout,
-            layout.diff_hscrollbar_x,
+        assert_eq!(jumped, layout.diff_hbar.col_max);
+        let dragged = hcol_from_delta(
+            layout.diff_hbar,
+            layout.diff_hbar.x,
             0,
-            layout.diff_hscrollbar_x + 10,
+            layout.diff_hbar.x + 10,
         );
         assert!(
             dragged > 0 && dragged < jumped,
             "mid drag {dragged} jump {jumped}"
         );
         assert_eq!(
-            diff_col_from_delta(layout, 4, 3, 4),
+            hcol_from_delta(layout.diff_hbar, 4, 3, 4),
             3,
             "zero delta keeps origin offset"
         );

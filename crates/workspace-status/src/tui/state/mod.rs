@@ -99,10 +99,10 @@ use super::search::{
 use super::search_files::{SearchFilesState, SearchZone};
 use super::selection::TextSelection;
 use super::split::{
-    clamp_tree_fraction, diff_col_from_col, diff_col_from_delta, diff_paint_width, diff_pane_mode,
-    diff_split_fraction_from_col, graph_col_from_col, graph_col_from_delta, graph_scroll_max,
-    hit_split, pane_widths, step_tree_fraction, tree_fraction_from_col, vscroll_from_delta,
-    vscroll_from_row, DiffMode, ResizeEdge, SplitDrag, SplitHit, SplitLayout, VScrollbar,
+    clamp_tree_fraction, diff_paint_width, diff_pane_mode, diff_split_fraction_from_col,
+    graph_scroll_max, hcol_from_col, hcol_from_delta, hit_split, list_hbar_rows, pane_widths,
+    step_tree_fraction, tree_fraction_from_col, vscroll_from_delta, vscroll_from_row, DiffMode,
+    HScrollbar, HScrollbarLayout, ResizeEdge, SplitDrag, SplitHit, SplitLayout, VScrollbar,
     VScrollbarLayout, DIFF_SPLIT_FRACTION, NARROW_SXS, TREE_WIDTH_FRACTION,
 };
 use super::stash::{
@@ -270,8 +270,8 @@ pub struct LayoutHit {
     pub right_y: u16,
     pub files_list_y: u16,
     /// Painted commit-file list height in rows. Screen rows from
-    /// `files_list_y + files_list_height` down (such as the commit-message
-    /// footer) are not file rows.
+    /// `files_list_y + files_list_height` down (a panned list's horizontal
+    /// scrollbar row, the commit-message footer) are not file rows.
     pub files_list_height: u16,
     pub files_list_offset: usize,
     /// 0-based graph scrollbar column when a graph list is painted.
@@ -334,6 +334,9 @@ pub struct LayoutHit {
     /// File-diff vertical scrollbar from the last paint: its column (`None`
     /// when no file diff paints one), the body rows it spans (not the path
     /// header), the diff row count, the painted top, and the largest top.
+    /// `AppState::split_layout` hit-tests with the live `diff_scroll` as
+    /// `scroll` instead, as a bar press or drag moves it before the next
+    /// paint.
     pub diff_vbar: VScrollbarLayout,
     /// 0-based diff horizontal scrollbar row when the bar is painted.
     pub diff_hscrollbar_y: Option<u16>,
@@ -343,6 +346,24 @@ pub struct LayoutHit {
     pub diff_hscrollbar_width: u16,
     /// Max horizontal pan for the painted file diff.
     pub diff_col_max: u16,
+    /// Workspace tree vertical scrollbar from the last paint: its column
+    /// (`None` while the rows fit), the pane rows it spans, the painted
+    /// row count, the painted top, and the largest top.
+    pub tree_vbar: VScrollbarLayout,
+    /// Commit-file or compare list vertical scrollbar from the last paint
+    /// (the list rows, not the commit footer under them).
+    pub files_vbar: VScrollbarLayout,
+    /// Explorer tree vertical scrollbar from the last paint.
+    pub explorer_tree_vbar: VScrollbarLayout,
+    /// Workspace tree horizontal scrollbar from the last paint: its row
+    /// (`None` until the tree pans off the left edge), track, pan clamp
+    /// (`AppState::tree_max_col`), and the painted pan (`split_layout`
+    /// hit-tests with the live pan, as a press or drag moves it first).
+    pub tree_hbar: HScrollbarLayout,
+    /// Commit-file or compare list horizontal scrollbar from the last
+    /// paint, with the list's pan clamp (`AppState::commit_file_max_col`);
+    /// `split_layout` hit-tests with the live pan.
+    pub files_hbar: HScrollbarLayout,
     /// Tab-strip row (always painted).
     pub tab_y: u16,
     /// Hit boxes `(x, width, tab_index)` for the painted strip.
@@ -477,6 +498,11 @@ impl Default for LayoutHit {
             diff_hscrollbar_x: 0,
             diff_hscrollbar_width: 0,
             diff_col_max: 0,
+            tree_vbar: VScrollbarLayout::default(),
+            files_vbar: VScrollbarLayout::default(),
+            explorer_tree_vbar: VScrollbarLayout::default(),
+            tree_hbar: HScrollbarLayout::default(),
+            files_hbar: HScrollbarLayout::default(),
             tab_y: 0,
             tab_hits: Vec::new(),
             tab_close_hits: Vec::new(),
@@ -2971,20 +2997,31 @@ impl AppState {
                 scroll: self.diff_scroll,
                 ..self.layout.diff_vbar
             },
-            graph_hscrollbar_y: self.layout.graph_hscrollbar_y,
-            graph_hscrollbar_x: self.layout.graph_hscrollbar_x,
-            graph_hscrollbar_width: self.layout.graph_hscrollbar_width,
-            graph_col_max: self.layout.graph_col_max,
-            graph_col_offset: if self.drill.is_files() {
-                self.left_col_offset
-            } else {
-                self.right_col_offset
+            tree_vbar: self.layout.tree_vbar,
+            files_vbar: self.layout.files_vbar,
+            explorer_tree_vbar: self.layout.explorer_tree_vbar,
+            graph_hbar: HScrollbarLayout {
+                y: self.layout.graph_hscrollbar_y,
+                x: self.layout.graph_hscrollbar_x,
+                width: self.layout.graph_hscrollbar_width,
+                col_max: self.layout.graph_col_max,
+                col_offset: self.hbar_offset(HScrollbar::Graph),
             },
-            diff_hscrollbar_y: self.layout.diff_hscrollbar_y,
-            diff_hscrollbar_x: self.layout.diff_hscrollbar_x,
-            diff_hscrollbar_width: self.layout.diff_hscrollbar_width,
-            diff_col_max: self.layout.diff_col_max,
-            diff_col_offset: self.diff_col_offset,
+            diff_hbar: HScrollbarLayout {
+                y: self.layout.diff_hscrollbar_y,
+                x: self.layout.diff_hscrollbar_x,
+                width: self.layout.diff_hscrollbar_width,
+                col_max: self.layout.diff_col_max,
+                col_offset: self.hbar_offset(HScrollbar::Diff),
+            },
+            tree_hbar: HScrollbarLayout {
+                col_offset: self.hbar_offset(HScrollbar::Tree),
+                ..self.layout.tree_hbar
+            },
+            files_hbar: HScrollbarLayout {
+                col_offset: self.hbar_offset(HScrollbar::CommitFiles),
+                ..self.layout.files_hbar
+            },
             commit_msg_rule_y: self.layout.commit_msg_rule_y,
             commit_msg_rule_x: self.layout.commit_msg_rule_x,
             commit_msg_rule_width: self.layout.commit_msg_rule_width,
@@ -3067,52 +3104,14 @@ impl AppState {
                 self.last_click = None;
                 return Effect::None;
             }
-            SplitHit::VThumb(bar) => {
-                self.press_vscrollbar(bar, true, row);
+            SplitHit::VThumb(bar) => return self.press_vscrollbar(bar, true, row),
+            SplitHit::VTrack(bar) => return self.press_vscrollbar(bar, false, row),
+            SplitHit::HThumb(bar) => {
+                self.press_hscrollbar(bar, true, col);
                 return Effect::None;
             }
-            SplitHit::VTrack(bar) => {
-                self.press_vscrollbar(bar, false, row);
-                return Effect::None;
-            }
-            SplitHit::GraphHThumb => {
-                self.focus_graph_pane();
-                self.drag = SplitDrag::GraphHScrollbar {
-                    origin_col: col,
-                    origin_offset: self.graph_col_offset(),
-                };
-                self.last_click = None;
-                return Effect::None;
-            }
-            SplitHit::GraphHTrack => {
-                self.focus_graph_pane();
-                let jumped = graph_col_from_col(self.split_layout(), col);
-                self.set_graph_col_offset(jumped);
-                self.drag = SplitDrag::GraphHScrollbar {
-                    origin_col: col,
-                    origin_offset: jumped,
-                };
-                self.last_click = None;
-                return Effect::None;
-            }
-            SplitHit::DiffHThumb => {
-                self.focus = FocusPane::Right;
-                self.drag = SplitDrag::DiffHScrollbar {
-                    origin_col: col,
-                    origin_offset: self.diff_col_offset,
-                };
-                self.last_click = None;
-                return Effect::None;
-            }
-            SplitHit::DiffHTrack => {
-                self.focus = FocusPane::Right;
-                let jumped = diff_col_from_col(self.split_layout(), col);
-                self.diff_col_offset = jumped;
-                self.drag = SplitDrag::DiffHScrollbar {
-                    origin_col: col,
-                    origin_offset: jumped,
-                };
-                self.last_click = None;
+            SplitHit::HTrack(bar) => {
+                self.press_hscrollbar(bar, false, col);
                 return Effect::None;
             }
             SplitHit::Other => self.arm_text_selection(col, row),
@@ -3163,7 +3162,9 @@ impl AppState {
         if self.drill.is_files() {
             return self.click_graph(row, is_double, false);
         }
-        if row < self.layout.tree_y {
+        // Below the painted rows: the horizontal bar row of a panned tree.
+        let rows_end = self.layout.tree_y.saturating_add(self.tree_list_rows());
+        if row < self.layout.tree_y || row >= rows_end {
             return Effect::None;
         }
         let idx = self.layout.list_offset + (row - self.layout.tree_y) as usize;
@@ -3363,22 +3364,16 @@ impl AppState {
             } => {
                 let geometry = self.split_layout().vbar(bar);
                 let top = vscroll_from_delta(geometry, origin_row, origin_scroll, row);
-                self.scroll_vbar_to(bar, top);
+                return self.scroll_vbar_to(bar, top);
             }
-            SplitDrag::GraphHScrollbar {
+            SplitDrag::HScrollbar {
+                bar,
                 origin_col,
                 origin_offset,
             } => {
-                let next =
-                    graph_col_from_delta(self.split_layout(), origin_col, origin_offset, col);
-                self.set_graph_col_offset(next);
-            }
-            SplitDrag::DiffHScrollbar {
-                origin_col,
-                origin_offset,
-            } => {
-                self.diff_col_offset =
-                    diff_col_from_delta(self.split_layout(), origin_col, origin_offset, col);
+                let geometry = self.split_layout().hbar(bar);
+                let offset = hcol_from_delta(geometry, origin_col, origin_offset, col);
+                self.scroll_hbar_to(bar, offset);
             }
             SplitDrag::None => {
                 if let Some(selection) = self.text_selection.as_mut() {
@@ -3497,8 +3492,10 @@ impl AppState {
     /// focus; a press on the thumb grabs it where it is painted, a track
     /// press jumps the viewport toward `row` ([`vscroll_from_row`]). Either
     /// arms [`SplitDrag::VScrollbar`] from that top, and neither picks a row
-    /// or counts toward a double-click.
-    fn press_vscrollbar(&mut self, bar: VScrollbar, on_thumb: bool, row: u16) {
+    /// or counts toward a double-click. Returns what the move asks for: a
+    /// list that follows its cursor loads the row the cursor moved to, as
+    /// a wheel step does ([`Self::scroll_vbar_to`]).
+    fn press_vscrollbar(&mut self, bar: VScrollbar, on_thumb: bool, row: u16) -> Effect {
         let geometry = self.split_layout().vbar(bar);
         // A thumb press keeps the painted top: it ends any glide without
         // jumping to the glide's target.
@@ -3510,21 +3507,42 @@ impl AppState {
         match bar {
             VScrollbar::Graph => self.focus_graph_pane(),
             VScrollbar::Diff => self.focus = FocusPane::Right,
+            VScrollbar::Tree | VScrollbar::ExplorerTree => self.focus = FocusPane::Left,
+            VScrollbar::CommitFiles => self.focus = self.commit_files_pane(),
         }
-        self.scroll_vbar_to(bar, top);
+        let effect = self.scroll_vbar_to(bar, top);
         self.drag = SplitDrag::VScrollbar {
             bar,
             origin_row: row,
             origin_scroll: top,
         };
         self.last_click = None;
+        effect
     }
 
-    /// Scroll the viewport of vertical scrollbar `bar` to `top`.
-    fn scroll_vbar_to(&mut self, bar: VScrollbar, top: u16) {
+    /// Scroll the viewport of vertical scrollbar `bar` to `top`, and return
+    /// what the move asks for.
+    ///
+    /// The graph bar moves `graph_scroll` only (the graph wheel moves the
+    /// cursor, but the graph viewport does not follow it). Every other
+    /// viewport follows its cursor, so the cursor moves to the row nearest
+    /// it whose viewport starts at `top` ([`cursor_for_viewport_top`]), and
+    /// a moved cursor asks for what the wheel asks for: the tree loads the
+    /// right pane, a commit-file row its diff, an Explorer row its preview.
+    fn scroll_vbar_to(&mut self, bar: VScrollbar, top: u16) -> Effect {
+        let top = usize::from(top);
         match bar {
-            VScrollbar::Graph => self.graph_scroll = top,
-            VScrollbar::Diff => self.scroll_diff_to(usize::from(top)),
+            VScrollbar::Graph => {
+                self.graph_scroll = top as u16;
+                Effect::None
+            }
+            VScrollbar::Diff => {
+                self.scroll_diff_to(top);
+                Effect::None
+            }
+            VScrollbar::Tree => self.scroll_tree_to(top),
+            VScrollbar::CommitFiles => self.scroll_commit_files_to(top),
+            VScrollbar::ExplorerTree => self.scroll_explorer_tree_to(top),
         }
     }
 
@@ -3552,6 +3570,130 @@ impl AppState {
             })
         };
         self.sync_diff_scroll_for(&rows);
+    }
+
+    /// Scroll the Workspace tree so its painted rows start at `top`: the
+    /// tree cursor moves with the viewport ([`cursor_for_viewport_top`] over
+    /// the painted rows, [`Self::tree_list_rows`] tall), and a moved cursor
+    /// loads the right pane, as the wheel does.
+    fn scroll_tree_to(&mut self, top: usize) -> Effect {
+        let painted = self.painted_tree_rows();
+        let focus = self.rows.get(self.cursor).map(|row| row.id.as_str());
+        let cursor = focus
+            .and_then(|id| painted.iter().position(|row| row.id == id))
+            .unwrap_or(0);
+        let height = usize::from(self.tree_list_rows());
+        let n = painted.len();
+        let target = cursor_for_viewport_top(n, cursor, top, |c| list_viewport_start(n, c, height));
+        let live = nearest_live_row(&painted, target, |row| {
+            self.rows.iter().position(|live| live.id == row.id)
+        });
+        match live {
+            Some(live) if live != self.cursor => {
+                self.cursor = live;
+                Effect::LoadRightPane
+            }
+            _ => Effect::None,
+        }
+    }
+
+    /// Scroll the commit-file or compare list so its painted rows start at
+    /// `top`: the file cursor moves with the viewport, and a moved cursor
+    /// loads its file's diff, as the wheel does.
+    fn scroll_commit_files_to(&mut self, top: usize) -> Effect {
+        let painted = self.painted_commit_file_rows();
+        let rows = self.commit_file_rows();
+        let current = self.commit_files_cursor();
+        let focus = rows.get(current).map(|row| row.id.as_str());
+        let cursor = focus
+            .and_then(|id| painted.iter().position(|row| row.id == id))
+            .unwrap_or(0);
+        let height = usize::from(self.layout.files_list_height.max(1));
+        let n = painted.len();
+        let target = cursor_for_viewport_top(n, cursor, top, |c| list_viewport_start(n, c, height));
+        let live = nearest_live_row(&painted, target, |row| {
+            rows.iter().position(|live| live.id == row.id)
+        });
+        match live {
+            Some(live) if live != current => {
+                self.set_commit_file_cursor(live);
+                self.maybe_load_focused_commit_diff()
+            }
+            _ => Effect::None,
+        }
+    }
+
+    /// Rows the Workspace tree paints: the pane rows less the horizontal
+    /// scrollbar row it keeps while panned ([`list_hbar_rows`]).
+    fn tree_list_rows(&self) -> u16 {
+        let height = self.layout.tree_height;
+        height.saturating_sub(list_hbar_rows(height, self.left_col_offset))
+    }
+
+    /// The pane that shows the commit-file or compare list: the left pane
+    /// beside a file diff (depth 2, a compare tab), else the right pane
+    /// (depth 1).
+    fn commit_files_pane(&self) -> FocusPane {
+        if self.is_compare_tab() || self.drill.is_diff() {
+            FocusPane::Left
+        } else {
+            FocusPane::Right
+        }
+    }
+
+    /// Press on horizontal scrollbar `bar` at `col`: the bar's pane takes
+    /// focus; a press on the thumb grabs it where it is painted, a track
+    /// press jumps the pan toward `col` ([`hcol_from_col`]). Either arms
+    /// [`SplitDrag::HScrollbar`] from that offset, and neither picks a row,
+    /// moves a cursor, or counts toward a double-click.
+    fn press_hscrollbar(&mut self, bar: HScrollbar, on_thumb: bool, col: u16) {
+        let geometry = self.split_layout().hbar(bar);
+        let offset = if on_thumb {
+            geometry.col_offset
+        } else {
+            hcol_from_col(geometry, col)
+        };
+        match bar {
+            HScrollbar::Graph => self.focus_graph_pane(),
+            HScrollbar::Diff => self.focus = FocusPane::Right,
+            HScrollbar::Tree => self.focus = FocusPane::Left,
+            HScrollbar::CommitFiles => self.focus = self.commit_files_pane(),
+        }
+        self.scroll_hbar_to(bar, offset);
+        self.drag = SplitDrag::HScrollbar {
+            bar,
+            origin_col: col,
+            origin_offset: offset,
+        };
+        self.last_click = None;
+    }
+
+    /// The pan offset horizontal scrollbar `bar` moves: the offset
+    /// Shift-←/→ and the horizontal wheel pan on its pane.
+    fn hbar_offset(&self, bar: HScrollbar) -> u16 {
+        match bar {
+            HScrollbar::Graph => self.graph_col_offset(),
+            HScrollbar::Diff => self.diff_col_offset,
+            HScrollbar::Tree => self.left_col_offset,
+            HScrollbar::CommitFiles if self.commit_files_pane() == FocusPane::Left => {
+                self.left_col_offset
+            }
+            HScrollbar::CommitFiles => self.right_col_offset,
+        }
+    }
+
+    /// Pan horizontal scrollbar `bar`'s pane to `offset` (already clamped
+    /// to the bar's `col_max`, the pane's pan clamp).
+    fn scroll_hbar_to(&mut self, bar: HScrollbar, offset: u16) {
+        match bar {
+            HScrollbar::Graph => self.set_graph_col_offset(offset),
+            HScrollbar::Diff => self.diff_col_offset = offset,
+            HScrollbar::Tree => self.left_col_offset = offset,
+            HScrollbar::CommitFiles if self.commit_files_pane() == FocusPane::Left => {
+                self.left_col_offset = offset;
+            }
+            HScrollbar::CommitFiles => self.right_col_offset = offset,
+        }
     }
 
     fn focus_graph_pane(&mut self) {
@@ -7466,6 +7608,26 @@ fn group_revert_targets(
     }
     groups.retain(|(_, tracked, untracked)| !tracked.is_empty() || !untracked.is_empty());
     groups
+}
+
+/// Live-row index of the painted row nearest `target` that is a live row
+/// (`live_index` gives `Some`), not a removal ghost the paint merged in.
+/// `None` when no painted row is live.
+fn nearest_live_row<T>(
+    painted: &[T],
+    target: usize,
+    live_index: impl Fn(&T) -> Option<usize>,
+) -> Option<usize> {
+    (0..painted.len()).find_map(|step| {
+        let below = painted
+            .get(target.saturating_add(step))
+            .and_then(&live_index);
+        let above = target
+            .checked_sub(step)
+            .and_then(|index| painted.get(index))
+            .and_then(&live_index);
+        below.or(above)
+    })
 }
 
 /// Snap a painted-list index onto a selectable line (prefer forward, then back).
@@ -15392,7 +15554,13 @@ mod tests {
             app.layout.diff_col_max = 40;
             app.dispatch(Action::Click { col: 60, row: 22 });
             assert_eq!(
-                matches!(app.drag, SplitDrag::DiffHScrollbar { .. }),
+                matches!(
+                    app.drag,
+                    SplitDrag::HScrollbar {
+                        bar: HScrollbar::Diff,
+                        ..
+                    }
+                ),
                 drags,
                 "{background:?}: {:?}",
                 app.drag
@@ -16221,7 +16389,8 @@ mod tests {
         );
         assert_eq!(
             app.drag,
-            SplitDrag::GraphHScrollbar {
+            SplitDrag::HScrollbar {
+                bar: HScrollbar::Graph,
                 origin_col: thumb_col,
                 origin_offset: start
             }
@@ -16283,7 +16452,8 @@ mod tests {
         );
         assert_eq!(
             app.drag,
-            SplitDrag::DiffHScrollbar {
+            SplitDrag::HScrollbar {
+                bar: HScrollbar::Diff,
                 origin_col: thumb_col,
                 origin_offset: start
             }
@@ -16337,7 +16507,8 @@ mod tests {
         );
         assert_eq!(
             app.drag,
-            SplitDrag::DiffHScrollbar {
+            SplitDrag::HScrollbar {
+                bar: HScrollbar::Diff,
                 origin_col: thumb_col,
                 origin_offset: start
             }
@@ -16385,7 +16556,8 @@ mod tests {
         );
         assert_eq!(
             app.drag,
-            SplitDrag::DiffHScrollbar {
+            SplitDrag::HScrollbar {
+                bar: HScrollbar::Diff,
                 origin_col: 50,
                 origin_offset: 0
             }
@@ -16420,7 +16592,8 @@ mod tests {
         );
         assert_eq!(
             app.drag,
-            SplitDrag::DiffHScrollbar {
+            SplitDrag::HScrollbar {
+                bar: HScrollbar::Diff,
                 origin_col: track_col,
                 origin_offset: app.diff_col_offset
             }

@@ -82,7 +82,7 @@ fn hbar_drag_panned(screen: &str) -> bool {
 /// Painted h-bar with the thumb off the left edge of the track.
 ///
 /// A left-edge `█` sits on the same cell as a track jump to origin
-/// (`diff_col_from_col` at the track start). Grab must use a thumb cell
+/// (`hcol_from_col` at the track start). Grab must use a thumb cell
 /// that a 1-cell miss cannot map to offset 0.
 fn hbar_thumb_off_left_edge(screen: &str) -> bool {
     hbar_painted_tail_clipped(screen)
@@ -136,7 +136,7 @@ fn sgr_release(tui: &mut PtySession, col: u16, row: u16) {
 ///
 /// Help VIEW: `m` = mouse on/off (graph commit: merge). File-diff paints
 /// `ScrollbarOrientation::HorizontalBottom` after pan leaves column 0.
-/// `hit_split` / `SplitDrag::DiffHScrollbar` must change `diff_col_offset`.
+/// `hit_split` / `SplitDrag::HScrollbar` must change `diff_col_offset`.
 ///
 /// Live PTY (80×24 so the NEW line clips): `/unique-diffline` loads the
 /// file. Wheel until `█` paints off the left track edge with the tail

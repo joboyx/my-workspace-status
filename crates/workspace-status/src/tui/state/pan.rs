@@ -86,8 +86,20 @@ impl AppState {
         }
     }
 
+    /// Pan max of the Workspace tree: its longest row against the pane
+    /// width, one column short while the vertical scrollbar shows (the
+    /// rows overflow [`Self::tree_list_rows`]), so the pan still reaches
+    /// the end of that row beside the bar.
     fn tree_max_col(&self) -> usize {
-        let width = self.layout.tree_width.max(1) as usize;
+        let vbar = self.painted_tree_rows().len() > usize::from(self.tree_list_rows());
+        self.tree_max_col_in(self.layout.tree_width, vbar)
+    }
+
+    /// [`Self::tree_max_col`] for a pane `pane_width` columns wide whose
+    /// vertical scrollbar shows (`vbar`) or not: what the paint clamps its
+    /// horizontal bar to.
+    pub(crate) fn tree_max_col_in(&self, pane_width: u16, vbar: bool) -> usize {
+        let width = pane_width.saturating_sub(u16::from(vbar)).max(1) as usize;
         self.rows
             .iter()
             .map(|row| {
@@ -104,9 +116,21 @@ impl AppState {
     /// Pan max of the shown commit-file or compare list: its rows sized by
     /// the segments [`Self::commit_file_row_paint_segments_in`] paints, in
     /// the list's own comment scope ([`Self::commit_file_comment_scope`]),
-    /// so a compare tab never reads the parked Workspace drill.
+    /// so a compare tab never reads the parked Workspace drill. One column
+    /// short while the vertical scrollbar shows (the rows overflow the
+    /// painted list height), so the pan still reaches the end of the
+    /// longest row beside the bar.
     fn commit_file_max_col(&self, pane_width: u16) -> usize {
-        let width = pane_width.max(1) as usize;
+        let vbar =
+            self.painted_commit_file_rows().len() > usize::from(self.layout.files_list_height);
+        self.commit_file_max_col_in(pane_width, vbar)
+    }
+
+    /// [`Self::commit_file_max_col`] for a list `pane_width` columns wide
+    /// whose vertical scrollbar shows (`vbar`) or not: what the paint
+    /// clamps its horizontal bar to.
+    pub(crate) fn commit_file_max_col_in(&self, pane_width: u16, vbar: bool) -> usize {
+        let width = pane_width.saturating_sub(u16::from(vbar)).max(1) as usize;
         let scope = self.commit_file_comment_scope();
         self.commit_file_rows()
             .iter()

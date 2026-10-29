@@ -46,7 +46,9 @@ use super::super::tabs::{
     EXPLORER_FILE_TABS_ONLY, EXPLORER_TAB_READ_ONLY, FILE_DELETED, FOCUS_A_TREE_ROW_TO_EXPLORE,
     NO_EXPLORER_FILE_TABS, ONLY_WORKSPACE_TAB_OPEN, SWITCH_TO_WORKSPACE_TAB, TAB_TO_THE_FILE_PANE,
 };
-use super::super::tree::{dir_path_from_id, NodeKind};
+use super::super::tree::{
+    cursor_for_viewport_top, dir_path_from_id, list_viewport_start, NodeKind,
+};
 use super::super::watch::{file_disk_token, GONE_DISK_TOKEN};
 use super::{
     single_or_batch, AppState, FocusPane, NO_HIGHLIGHT_TARGET, NO_SEARCH_ARMED, Z_FOLDS_TREE_ROWS,
@@ -638,6 +640,24 @@ impl AppState {
         self.explorer_sync_preview(tab_id)
     }
 
+    /// Scroll the Explorer tree so its rows start at `top`: the tree
+    /// cursor moves with the viewport ([`cursor_for_viewport_top`] over the
+    /// tree rows, the painted tree height tall), as [`Self::explorer_move`]
+    /// moves it for the wheel, and a moved cursor previews its row.
+    pub(super) fn scroll_explorer_tree_to(&mut self, top: usize) -> Effect {
+        let Some((rows, cursor)) = self.explorer_rows() else {
+            return Effect::None;
+        };
+        let n = rows.len();
+        let cursor = cursor.unwrap_or(0);
+        let height = usize::from(self.layout.explorer_tree.height.max(1));
+        let target = cursor_for_viewport_top(n, cursor, top, |c| list_viewport_start(n, c, height));
+        if n == 0 || target == cursor {
+            return Effect::None;
+        }
+        self.explorer_move(target as isize - cursor as isize)
+    }
+
     /// The file the active Explorer tab names (copy reference): with the
     /// right pane focused, the active inner file; with the tree focused,
     /// the tree's file row, else (a folder row, or a cursor row not listed
@@ -888,14 +908,18 @@ impl AppState {
     fn explorer_click(&mut self, col: u16, row: u16) -> Effect {
         self.drag = SplitDrag::None;
         self.pad_press = None;
-        // A changed file's diff bar scrolls like the Workspace diff bar: no
-        // row pick, no text selection.
-        let diff_bar = self.split_layout().diff_vbar;
-        if let Some(hit) = hit_vscrollbar(VScrollbar::Diff, diff_bar, col, row) {
-            self.text_selection = None;
-            let on_thumb = hit == SplitHit::VThumb(VScrollbar::Diff);
-            self.press_vscrollbar(VScrollbar::Diff, on_thumb, row);
-            return Effect::None;
+        // The tree's bar and a changed file's diff bar scroll like the
+        // Workspace bars: no row pick, no text selection.
+        let layout = self.split_layout();
+        let bars = [
+            (VScrollbar::ExplorerTree, layout.explorer_tree_vbar),
+            (VScrollbar::Diff, layout.diff_vbar),
+        ];
+        for (bar, geometry) in bars {
+            if let Some(hit) = hit_vscrollbar(bar, geometry, col, row) {
+                self.text_selection = None;
+                return self.press_vscrollbar(bar, hit == SplitHit::VThumb(bar), row);
+            }
         }
         let at = ratatui::layout::Position::new(col, row);
         let tree = self.layout.explorer_tree;
