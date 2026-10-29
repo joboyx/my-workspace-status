@@ -94,22 +94,21 @@ fn pty_pr_default_branch_checkout_is_never_looked_up() {
         WAIT,
     );
     tui.key('r');
+    // One wait holds the whole claim, so no assert reads a later frame.
+    let trunk_unbadged = |tui: &PtySession| {
+        tree_badge(tui, "trunk").is_some_and(|trunk| {
+            trunk.ref_text.is_none() && !Badge::ALL.iter().any(|b| b.ascii() == trunk.glyph)
+        })
+    };
     tui.wait_pred(
-        |_| badge_is(&tui, "appbox", Some("#7"), 'x'),
-        "r on appbox shows the failed PR",
+        |_| {
+            badge_is(&tui, "appbox", Some("#7"), 'x')
+                && trunk_unbadged(&tui)
+                && total_is(&tui, "# ws", "1 PR · 1 needs you")
+        },
+        "r on appbox shows the failed PR; the trunk row paints no badge; \
+         the total counts only #7",
         GIT_WAIT,
-    );
-
-    let trunk = tree_badge(&tui, "trunk").expect("trunk row");
-    assert!(
-        trunk.ref_text.is_none() && !Badge::ALL.iter().any(|b| b.ascii() == trunk.glyph),
-        "the trunk row paints no badge:\n{}",
-        tui.screen()
-    );
-    assert!(
-        total_is(&tui, "# ws", "1 PR · 1 needs you"),
-        "the total counts only #7:\n{}",
-        tui.screen()
     );
     assert_eq!(
         main_lookups(&forge),
