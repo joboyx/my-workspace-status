@@ -272,6 +272,25 @@ A row that a watch reload adds or changes flashes and fades.
 | `summary` | Workspace 2, Compare | - | right | boxed, flat | `draw_folder_summary` | gap: G21; `draw_folder_summary` passes no flash |
 | `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree` | gap: G17 |
 
+### `pr-status` — PR status marks
+
+The PR of a checkout's branch, in one of six states: the badge at the end of a workspace tree row (`<ref> <glyph>`), the badge flush right on a graph worktree row (glyph only), and the chip flush right on the graph sync header (`<glyph> <ref> <state label>  ▸ <next action>`). `tree::pr_badge_kind` and `tree::pr_badge_mark` give every surface the same glyph and colour role.
+
+| Feature | What | Tests |
+| --- | --- | --- |
+| `badge` | The state glyph paints bold in its state colour, one column, in both glyph modes. | `tree_pr_badge_ends_at_the_pane_edge_in_every_state_look_and_forge`, `graph_worktree_badges_paint_each_state_and_stale_muted`, `graph_header_chip_reads_state_ref_label_and_next_action` |
+| `ref` | The PR ref (`#318` GitHub, `!12` GitLab) paints beside the glyph. | `tree_pr_badge_ends_at_the_pane_edge_in_every_state_look_and_forge`, `tree_pr_glyphs_share_one_column_and_refs_drop_on_a_narrow_tree`, `graph_header_chip_reads_state_ref_label_and_next_action` |
+| `stale` | A PR whose last successful lookup is old paints muted, shape unchanged. | `stale_tree_pr_badge_paints_muted`, `graph_worktree_badges_paint_each_state_and_stale_muted`, `graph_header_chip_reads_state_ref_label_and_next_action` |
+| `link` | The painted PR mark is one icon hit (hover peek, click pin, Ctrl+click opens the PR) and one OSC 8 link to the PR. | `tree_pr_badge_ends_at_the_pane_edge_in_every_state_look_and_forge`, `ctrl_click_on_the_painted_tree_badge_opens_its_pr_only_there`, `graph_worktree_badge_paints_and_ctrl_click_opens_its_pr`, `graph_header_chip_paints_flush_right_and_links_its_ref_in_every_look` |
+| `chip` | The state label and the next action (merged: the age) follow the ref; a narrower pane drops the next action, then the label. | `graph_header_chip_reads_state_ref_label_and_next_action`, `graph_header_chip_paints_flush_right_and_links_its_ref_in_every_look`, `header_chip_paints_the_widest_candidate_that_fits_flush_right` |
+
+| Surface | Tab | Depth | Pane | Looks | Code anchors | `badge` | `ref` | `stale` | `link` | `chip` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `tree` | Workspace | 0 | left | boxed, flat | `draw_tree`, `tree_pr_badge`, `with_pr_badge`, `segmented_icon_spans`, `pr_badge_links` | supported | supported | supported | supported | n/a: I5, the graph header chip carries the label and the next action |
+| `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `draw_graph`, `graph_pr_badges`, `row_badges`, `pr_badge_links` | supported | n/a: I5, the worktree row is narrow and the header chip carries the ref | supported | supported | n/a: I5, the header chip carries the label and the next action |
+| `graph-d1` | Workspace | 1 | left | boxed, flat | `draw_graph`, `graph_pr_badges`, `row_badges`, `pr_badge_links` | supported | n/a: I5, the worktree row is narrow and the header chip carries the ref | supported | supported | n/a: I5, the header chip carries the label and the next action |
+| `graph-header` | Workspace | 0, 1 | right, left | boxed, flat | `draw_graph`, `graph_header_pr`, `graph_pr_chip`, `header_chip`, `pr_badge_links` | supported | supported | supported | supported | supported |
+
 ## Open gaps
 
 Each open gap is tracked by its id. Fixing one turns its cells into `supported` (or `n/a: <reason>`) and removes its row here.
@@ -310,3 +329,4 @@ Each open gap is tracked by its id. Fixing one turns its cells into `supported` 
 | I2 | Explorer file pane: `h` gives focus back to the tree, `l` does nothing | `docs/tui-model.md` (Explorer keys) |
 | I3 | Clean-file view: `j` / `k` scroll at the edge, not the middle | `docs/tui-rust.md` (viewport rule), `docs/tui-model.md` (sticky file view top) |
 | I4 | Explorer: `??` untracked, `●` dirty folder, no `t` toggle, `Ctrl-o` refused | `docs/tui-model.md` (Explorer tabs) |
+| I5 | PR status: the tree badge is `<ref> <glyph>`, a graph worktree row paints the glyph alone, and only the graph header chip paints the state label and the next action | `docs/tui-rust.md` (Pull request badge) |
