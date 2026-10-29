@@ -66,8 +66,8 @@ use super::icons::{
 use super::line_blame::{fit_annotation, relative_age, BlameSide, BLAME_MENU_ROWS};
 use super::ops::RevertScope;
 use super::popover::{
-    flat_lines, focused_line, graph_icon, graph_row_id, graph_sync_kind, popover_rect,
-    tree_icon_target, IconTarget, PopoverLine, POPOVER_FOOTER, POPOVER_MAX_WIDTH,
+    commit_meta_icon, flat_lines, focused_line, graph_icon, graph_row_id, graph_sync_kind,
+    popover_rect, tree_icon_target, IconTarget, PopoverLine, POPOVER_FOOTER, POPOVER_MAX_WIDTH,
 };
 use super::pr_status::PrState;
 use super::quick_open::{
@@ -2501,6 +2501,9 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         .header_chip(chip.as_ref().map_or(&[], |chip| chip.candidates.as_slice()))
         .render_with_icon_spans(area, frame.buffer_mut());
     let row_of = |span: &workspace_status_graph::IconSpan| rows.get(span.row_index?);
+    // Commit meta text opens a commit popover of the graph's checkout; no
+    // identity, no hit.
+    let graph_repo = state.graph_identity.as_ref().map(|(repo, _)| repo.as_str());
     let hits: Vec<IconHit> = spans
         .iter()
         .filter_map(|span| {
@@ -2530,6 +2533,11 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
                     IconKind::GraphMoreBelow,
                     IconTarget::GraphMoreLines(graph_row_id(row_of(span)?)),
                 ),
+                GraphIconKind::CommitHash
+                | GraphIconKind::CommitDate
+                | GraphIconKind::CommitAuthor => {
+                    commit_meta_icon(span.kind, span.part, row_of(span)?, graph_repo?)?
+                }
                 kind => graph_icon(kind, span.part, span.target.as_ref(), row_of(span)?)?,
             };
             Some(IconHit {
@@ -20127,6 +20135,142 @@ mod tests {
                 "{remote:?}: {:?}",
                 state.layout.links
             );
+        }
+    }
+
+    /// The graph rows and the selection footer at depth 0 (right pane) and
+    /// depth 1 (left pane), boxed and flat: the commit's short hash, date,
+    /// and author, and the footer's parent id, each record one commit
+    /// popover hit over the painted text. No graph identity, no hit.
+    #[test]
+    fn graph_commit_meta_records_commit_popover_hits_boxed_and_flat() {
+        const SHA: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const PARENT: &str = "ccc2222ddddddddddddddddddddddddddddddddd";
+        let commit_target = |sha: &str| IconTarget::Commit {
+            repo: "app".into(),
+            sha: sha.into(),
+        };
+        for surface in ["graph-d0", "graph-d1"] {
+            for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+                let what = format!("{surface} {background:?}");
+                let mut state = match surface {
+                    "graph-d0" => two_pane_graph_state(),
+                    _ => two_pane_files_state(),
+                };
+                state.background = background;
+                state.graph_identity = Some(("app".into(), SHA.into()));
+                if let Some(model) = state.graph.as_mut() {
+                    model.commits[0].author_name = "Ada Lovelace".into();
+                    model.commits[0].parents = vec![PARENT.into()];
+                    model.commits.push(Commit {
+                        id: PARENT.into(),
+                        subject: "parent".into(),
+                        author_name: "Bob Builder".into(),
+                        author_date_unix: 1_699_000_000,
+                        ..Commit::default()
+                    });
+                }
+                // Row 0 is the uncommitted row; select the commit so the
+                // footer paints its meta.
+                state.graph_cursor = 1;
+                let mut terminal = Terminal::new(TestBackend::new(240, 40)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let date = workspace_status_graph::format_relative_date(
+                    1_700_000_000,
+                    1_700_000_000 + 30 * 86_400,
+                );
+                let hits: Vec<IconHit> = state
+                    .layout
+                    .icon_hits
+                    .iter()
+                    .filter(|hit| matches!(hit.target, IconTarget::Commit { .. }))
+                    .cloned()
+                    .collect();
+                let text_of = |hit: &IconHit| {
+                    region_text(&terminal, hit.x, hit.y, hit.width, 1)
+                        .trim_end_matches('\n')
+                        .to_string()
+                };
+                let on = |kind: IconKind, sha: &str| -> Vec<(u16, String)> {
+                    hits.iter()
+                        .filter(|hit| hit.kind == kind && hit.target == commit_target(sha))
+                        .map(|hit| (hit.y, text_of(hit)))
+                        .collect()
+                };
+                let screen = buffer_text(&terminal);
+                let hashes = on(IconKind::CommitHash, SHA);
+                let dates = on(IconKind::CommitDate, SHA);
+                let authors = on(IconKind::CommitAuthor, SHA);
+                // One on the commit's spacer row, one on the footer row.
+                for (name, found, text) in [
+                    ("hash", &hashes, "aaa1111"),
+                    ("date", &dates, date.as_str()),
+                    ("author", &authors, "Ada Lovelace"),
+                ] {
+                    assert_eq!(found.len(), 2, "{what} {name}: {hits:?}\n{screen}");
+                    assert!(found[0].0 < found[1].0, "{what} {name}: {found:?}");
+                    for (_, painted) in found {
+                        assert_eq!(painted, text, "{what} {name}\n{screen}");
+                    }
+                }
+                let footer_y = hashes[1].0;
+                assert_eq!(
+                    on(IconKind::CommitHash, PARENT)
+                        .into_iter()
+                        .filter(|(y, _)| *y == footer_y)
+                        .collect::<Vec<_>>(),
+                    vec![(footer_y, "ccc2222".to_string())],
+                    "{what}: the footer parent id names parents[0]\n{screen}"
+                );
+                let in_pane = |hit: &IconHit| match surface {
+                    "graph-d0" => hit.x >= state.layout.right_x,
+                    _ => hit.x + hit.width <= state.layout.right_x,
+                };
+                assert!(hits.iter().all(in_pane), "{what}: {hits:?}");
+
+                // A click on the footer parent id pins that commit's hash
+                // card; a click on the spacer date pins the time popover.
+                let parent_hit = hits
+                    .iter()
+                    .find(|hit| hit.y == footer_y && hit.target == commit_target(PARENT))
+                    .expect("parent hit")
+                    .clone();
+                let date_hit = hits
+                    .iter()
+                    .find(|hit| hit.kind == IconKind::CommitDate && hit.y < footer_y)
+                    .expect("spacer date hit")
+                    .clone();
+                for (hit, kind, sha) in [
+                    (parent_hit, IconKind::CommitHash, PARENT),
+                    (date_hit, IconKind::CommitDate, SHA),
+                ] {
+                    state.close_popover();
+                    draw_state(&mut terminal, &mut state);
+                    state.dispatch(Action::Click {
+                        col: hit.x,
+                        row: hit.y,
+                    });
+                    assert!(state.popover_pinned(), "{what}: {kind:?} pins");
+                    let sections = state.open_popover_sections();
+                    assert_eq!(sections.len(), 1, "{what}");
+                    assert_eq!(
+                        (sections[0].icon, &sections[0].target),
+                        (kind, &commit_target(sha)),
+                        "{what}"
+                    );
+                }
+
+                state.graph_identity = None;
+                draw_state(&mut terminal, &mut state);
+                assert!(
+                    !state
+                        .layout
+                        .icon_hits
+                        .iter()
+                        .any(|hit| matches!(hit.target, IconTarget::Commit { .. })),
+                    "{what}: no identity, no hit"
+                );
+            }
         }
     }
 

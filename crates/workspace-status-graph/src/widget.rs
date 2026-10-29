@@ -101,6 +101,16 @@ pub enum GraphIconKind {
     HeaderChip,
     /// The selection footer's `more lines below` hint.
     MoreBelow,
+    /// Short commit id on a commit / stash spacer or in the selection
+    /// footer ([`crate::LabelKind::MetaHash`]). In the footer's parents
+    /// group, [`IconSpan::part`] names the parent.
+    CommitHash,
+    /// Commit date on a commit / stash spacer or in the selection footer
+    /// ([`crate::LabelKind::MetaDate`]).
+    CommitDate,
+    /// Commit author on a commit spacer or in the selection footer
+    /// ([`crate::LabelKind::MetaAuthor`]).
+    CommitAuthor,
 }
 
 /// Painted cells of one graph icon.
@@ -124,8 +134,10 @@ pub struct IconSpan {
     pub width: u16,
     /// Which part of the row the icon stands for, when a row can paint more
     /// than one of its kind: for [`GraphIconKind::Worktree`], the index into
-    /// the commit row's `worktrees` (`0` on a worktree row). `None` for the
-    /// other kinds.
+    /// the commit row's `worktrees` (`0` on a worktree row); for
+    /// [`GraphIconKind::CommitHash`], `Some(n)` is parent `n` of the commit
+    /// (git parent order) and `None` the row's own id. `None` for the other
+    /// kinds.
     pub part: Option<usize>,
     /// The chip a chip span stands for ([`LabelPart::target`]). `None` for
     /// the other kinds.
@@ -846,7 +858,8 @@ impl GraphWidget<'_> {
     /// paint through [`paint_footer_message`], the same viewport the app's
     /// commit-files footer uses.
     ///
-    /// Returns the chip spans of the painted lines and the hint span
+    /// Returns the chip and commit meta (hash, parent ids, author, date)
+    /// spans of the painted lines and the hint span
     /// ([`GraphIconKind::MoreBelow`]), on the selected row.
     fn paint_footer(
         &self,
@@ -871,7 +884,7 @@ impl GraphWidget<'_> {
                 fallback,
             );
             spans.extend(
-                chip_icons(line, area.x, area.width)
+                part_icons(line, area.x, area.width)
                     .into_iter()
                     .map(|icon| IconSpan {
                         kind: icon.kind,
@@ -879,7 +892,7 @@ impl GraphWidget<'_> {
                         x: icon.x,
                         y,
                         width: icon.width,
-                        part: None,
+                        part: icon.part,
                         target: icon.target,
                     }),
             );
@@ -1243,6 +1256,38 @@ fn label_icons(
     icons
 }
 
+/// Icon spans of a footer line's `parts` painted from column `x`, at most
+/// `width` columns: one per part with a kind icon
+/// ([`LabelKind::icon`]: commit hash, date, author), then the
+/// [`chip_icons`], sorted by column. A part cut by the pane edge keeps a
+/// span over its visible cells, like a chip.
+fn part_icons(parts: &[LabelPart], x: u16, width: u16) -> Vec<LineIcon> {
+    let mut icons = Vec::new();
+    let mut at: u16 = 0;
+    for part in parts {
+        let w = u16::try_from(Span::raw(part.text.as_str()).width()).unwrap_or(u16::MAX);
+        let start = at;
+        at = at.saturating_add(w);
+        let Some((kind, part_id)) = part.kind.icon() else {
+            continue;
+        };
+        let w = w.min(width.saturating_sub(start));
+        if w == 0 {
+            continue;
+        }
+        icons.push(LineIcon {
+            kind,
+            part: part_id,
+            x: x.saturating_add(start),
+            width: w,
+            target: None,
+        });
+    }
+    icons.extend(chip_icons(parts, x, width));
+    icons.sort_by_key(|icon| icon.x);
+    icons
+}
+
 /// Chip spans of `parts` painted from column `x`, at most `width` columns.
 ///
 /// One span per run of adjacent parts with the same target and icon kind,
@@ -1313,7 +1358,10 @@ fn label_spans(
 fn label_kind_color(kind: LabelKind, pal: GraphLabelPalette) -> Color {
     match kind {
         LabelKind::Subject => pal.subject,
-        LabelKind::Meta | LabelKind::MetaDate | LabelKind::MetaAuthor => pal.meta,
+        LabelKind::Meta
+        | LabelKind::MetaHash { .. }
+        | LabelKind::MetaDate
+        | LabelKind::MetaAuthor => pal.meta,
         LabelKind::ChipHead => pal.head_mark,
         LabelKind::ChipLocal => pal.branch_local,
         LabelKind::ChipDefault => pal.branch_default,
@@ -4417,12 +4465,16 @@ mod tests {
     }
 
     /// A node, row glyph, comment mark, or badge span: not a chip, the
-    /// sync header, or the footer hint.
+    /// sync header, the footer hint, or a commit meta text run.
     fn is_row_glyph(span: &IconSpan) -> bool {
         span.target.is_none()
             && !matches!(
                 span.kind,
-                GraphIconKind::SyncHeader | GraphIconKind::MoreBelow
+                GraphIconKind::SyncHeader
+                    | GraphIconKind::MoreBelow
+                    | GraphIconKind::CommitHash
+                    | GraphIconKind::CommitDate
+                    | GraphIconKind::CommitAuthor
             )
     }
 
@@ -4827,6 +4879,228 @@ mod tests {
             "{footer:?}"
         );
         assert!(buf_row(&buf, 11).starts_with("[+=main] [feat] [v…"));
+    }
+
+    /// A merge commit (two parents, an absolute date) with a stash parked
+    /// above it, and its two parents.
+    fn commit_meta_model() -> GraphModel {
+        let merge = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+        let left = "1111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let right = "2222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        GraphModel {
+            commits: vec![
+                Commit {
+                    id: merge.into(),
+                    subject: "merge topic".into(),
+                    parents: vec![left.into(), right.into()],
+                    author_name: "Ada Lovelace".into(),
+                    author_date_unix: NOW - 5 * 86_400,
+                    ..Commit::default()
+                },
+                Commit {
+                    author_name: "Bob Builder".into(),
+                    ..commit(left, "left", &[])
+                },
+                Commit {
+                    author_name: "Cy Coder".into(),
+                    ..commit(right, "right", &[])
+                },
+            ],
+            stashes: vec![Stash {
+                id: "5555555ccccccccccccccccccccccccccccccccc".into(),
+                stash_ref: "stash@{0}".into(),
+                subject: "WIP on main".into(),
+                author_name: "Ada Lovelace".into(),
+                author_date_unix: NOW - 120,
+                parent_id: Some(merge.into()),
+                ..Stash::default()
+            }],
+            head_id: Some(merge.into()),
+            window: 3,
+            ..GraphModel::default()
+        }
+    }
+
+    /// Commit meta spans (kind, part, painted text) on buffer row `y`, by
+    /// column.
+    fn meta_spans_on(
+        buf: &Buffer,
+        spans: &[IconSpan],
+        y: u16,
+    ) -> Vec<(GraphIconKind, Option<usize>, String)> {
+        let mut found: Vec<&IconSpan> = spans
+            .iter()
+            .filter(|span| {
+                span.y == y
+                    && matches!(
+                        span.kind,
+                        GraphIconKind::CommitHash
+                            | GraphIconKind::CommitDate
+                            | GraphIconKind::CommitAuthor
+                    )
+            })
+            .collect();
+        found.sort_by_key(|span| span.x);
+        found
+            .into_iter()
+            .map(|span| (span.kind, span.part, span_text(buf, span)))
+            .collect()
+    }
+
+    #[test]
+    fn icon_spans_cover_spacer_hash_date_author_and_footer_parents() {
+        use crate::format::{format_relative_date, short_id};
+        let model = commit_meta_model();
+        let rows = model.visible_rows();
+        let index_of = |id: &str| {
+            rows.iter()
+                .position(|row| match row {
+                    GraphRow::Commit { commit, .. } => commit.id == id,
+                    GraphRow::Stash(stash) => stash.id == id,
+                    _ => false,
+                })
+                .unwrap_or_else(|| panic!("row {id}: {rows:?}"))
+        };
+        let merge = &model.commits[0];
+        let stash = &model.stashes[0];
+        let merge_row = index_of(&merge.id);
+        let stash_row = index_of(&stash.id);
+        let render = |width: u16, col_offset: u16| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, width, 16));
+            let spans = GraphWidget::new(&model)
+                .ascii(true)
+                .now_unix(NOW)
+                .selected(Some(merge_row))
+                .col_offset(col_offset)
+                .render_with_icon_spans(buf.area, &mut buf);
+            (buf, spans)
+        };
+        let (buf, spans) = render(100, 0);
+        // The spacer line of a row: the row's meta spans below its node.
+        let spacer_y = |row: usize| {
+            spans
+                .iter()
+                .filter(|span| span.row_index == Some(row))
+                .filter(|span| span.kind == GraphIconKind::CommitHash && span.part.is_none())
+                .map(|span| span.y)
+                .min()
+                .unwrap_or_else(|| panic!("row {row} hash: {spans:?}"))
+        };
+        let date = |unix: i64| format_relative_date(unix, NOW);
+        let expect = |hash: &str, date: String, author: &str| {
+            vec![
+                (GraphIconKind::CommitHash, None, short_id(hash).to_string()),
+                (GraphIconKind::CommitDate, None, date),
+                (GraphIconKind::CommitAuthor, None, author.to_string()),
+            ]
+        };
+        let merge_y = spacer_y(merge_row);
+        assert_eq!(
+            meta_spans_on(&buf, &spans, merge_y),
+            expect(&merge.id, date(merge.author_date_unix), &merge.author_name),
+            "commit spacer: {}",
+            buf_row(&buf, merge_y)
+        );
+        let stash_y = spacer_y(stash_row);
+        assert_eq!(
+            meta_spans_on(&buf, &spans, stash_y),
+            expect(&stash.id, date(stash.author_date_unix), &stash.author_name),
+            "stash spacer: {}",
+            buf_row(&buf, stash_y)
+        );
+        // The stash's own date ("2m") is shorter than the date column: the
+        // span covers the value, not the pad.
+        assert!(date(stash.author_date_unix).len() < date(merge.author_date_unix).len());
+
+        // Footer of the selected merge: own hash, both parents in git
+        // order, author, date. All carry the selected row.
+        let footer_y = spans
+            .iter()
+            .find(|span| span.part == Some(1))
+            .map(|span| span.y)
+            .unwrap_or_else(|| panic!("footer parent span: {spans:?}"));
+        assert!(footer_y > merge_y);
+        assert_eq!(
+            meta_spans_on(&buf, &spans, footer_y),
+            vec![
+                (GraphIconKind::CommitHash, None, short_id(&merge.id).into()),
+                (GraphIconKind::CommitHash, Some(0), "1111111".into()),
+                (GraphIconKind::CommitHash, Some(1), "2222222".into()),
+                (GraphIconKind::CommitAuthor, None, merge.author_name.clone()),
+                (
+                    GraphIconKind::CommitDate,
+                    None,
+                    date(merge.author_date_unix)
+                ),
+            ],
+            "footer: {}",
+            buf_row(&buf, footer_y)
+        );
+        assert!(spans
+            .iter()
+            .filter(|span| span.y == footer_y)
+            .all(|span| span.row_index == Some(merge_row)));
+
+        // A pan that cuts the spacer hash drops its span; the date and the
+        // author keep theirs, moved left by the pan.
+        let hash_x = |spans: &[IconSpan]| {
+            spans
+                .iter()
+                .find(|span| {
+                    span.y == merge_y
+                        && span.kind == GraphIconKind::CommitHash
+                        && span.row_index == Some(merge_row)
+                })
+                .map(|span| span.x)
+        };
+        let date_x = |spans: &[IconSpan]| {
+            spans
+                .iter()
+                .find(|span| span.y == merge_y && span.kind == GraphIconKind::CommitDate)
+                .map(|span| span.x)
+        };
+        let plain_hash = hash_x(&spans).expect("hash span");
+        let plain_date = date_x(&spans).expect("date span");
+        let mut cut_at = None;
+        for offset in 1..100u16 {
+            let (_, panned) = render(100, offset);
+            match hash_x(&panned) {
+                Some(x) => assert_eq!(x, plain_hash - offset, "offset {offset}"),
+                None => {
+                    assert_eq!(date_x(&panned), Some(plain_date - offset));
+                    cut_at = Some(offset);
+                    break;
+                }
+            }
+        }
+        assert!(cut_at.is_some(), "a pan cuts the hash");
+
+        // A narrow footer cuts the date: its span covers the shown cells,
+        // and the `…` has none.
+        let full = selection_detail_lines(
+            &model,
+            GraphFooterSelection::Row(&rows[merge_row]),
+            &ASCII,
+            200,
+            NOW,
+        )[1]
+        .clone();
+        let width = u16::try_from(full.chars().count() - 5).unwrap();
+        let (buf, spans) = render(width, 0);
+        let footer_y = spans
+            .iter()
+            .find(|span| span.part == Some(1))
+            .map(|span| span.y)
+            .expect("footer parent span");
+        let cut = meta_spans_on(&buf, &spans, footer_y);
+        let shown: String = date(merge.author_date_unix).chars().take(10).collect();
+        assert_eq!(
+            cut.last(),
+            Some(&(GraphIconKind::CommitDate, None, shown)),
+            "{cut:?}: {}",
+            buf_row(&buf, footer_y)
+        );
+        assert!(buf_row(&buf, footer_y).trim_end().ends_with('…'));
     }
 
     #[test]

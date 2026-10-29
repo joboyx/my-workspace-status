@@ -2410,6 +2410,25 @@ mod tests {
         command_for(&action).expect("palette row").title
     }
 
+    /// `gh` lists the row's icons, not its commit hash / date / author
+    /// text: commit popovers open by mouse only.
+    #[test]
+    fn gh_on_a_graph_row_lists_no_commit_popover() {
+        let mut app = graph_app();
+        let rows = app.graph.as_ref().expect("graph").visible_rows().len();
+        assert!(rows > 3);
+        for index in 0..rows {
+            app.graph_cursor = index;
+            let icons = app.focused_row_icons();
+            assert!(
+                !icons
+                    .iter()
+                    .any(|(_, target)| matches!(target, IconTarget::Commit { .. })),
+                "row {index}: {icons:?}"
+            );
+        }
+    }
+
     #[test]
     fn every_graph_row_icon_has_its_fields_and_actions() {
         use IconKind as K;

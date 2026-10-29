@@ -136,8 +136,16 @@ impl PartTarget {
 pub enum LabelKind {
     /// Commit / stash subject (stronger than meta).
     Subject,
-    /// Hash, worktree marks, separators, padding.
+    /// Worktree marks, separators, padding.
     Meta,
+    /// Short commit id: the hash column of a commit / stash row or the
+    /// commit / stash hash of the selection footer (`parent: None`), or the
+    /// short id of parent `n` in the footer's parents group
+    /// (`parent: Some(n)`, git parent order). Meta colour, not italic.
+    MetaHash {
+        /// Index into the commit's `parents`, or `None` for the row's own id.
+        parent: Option<usize>,
+    },
     /// Relative date column of a commit / stash row, or the date run of
     /// the selection footer. Meta colour, painted italic.
     MetaDate,
@@ -177,13 +185,18 @@ pub enum LabelKind {
 
 impl LabelKind {
     /// The icon a part of this kind paints, and its part identity
-    /// ([`crate::IconSpan::part`]). `None` for text runs.
+    /// ([`crate::IconSpan::part`]). The commit meta runs (hash, date,
+    /// author) are text icons: hovering them opens a commit popover. `None`
+    /// for the other text runs.
     pub fn icon(self) -> Option<(crate::GraphIconKind, Option<usize>)> {
         match self {
             Self::UncommittedMark { .. } => Some((crate::GraphIconKind::Uncommitted, None)),
             Self::WorktreeMark { worktree } => {
                 Some((crate::GraphIconKind::Worktree, Some(worktree)))
             }
+            Self::MetaHash { parent } => Some((crate::GraphIconKind::CommitHash, parent)),
+            Self::MetaDate => Some((crate::GraphIconKind::CommitDate, None)),
+            Self::MetaAuthor => Some((crate::GraphIconKind::CommitAuthor, None)),
             _ => None,
         }
     }
@@ -476,21 +489,36 @@ pub fn meta_columns_text(hash: &str, date: &str, author: &str, cols: MetaCols) -
     parts_text(&meta_columns_parts(hash, date, author, cols))
 }
 
-/// Styled runs of [`meta_columns_text`]: ` hash` as [`LabelKind::Meta`],
-/// ` date` as [`LabelKind::MetaDate`], ` author` as
-/// [`LabelKind::MetaAuthor`]. Each run carries its leading space. Columns
-/// that `cols` drops (and an empty author) emit no run.
+/// Styled runs of [`meta_columns_text`]. Each column is a `" "`
+/// [`LabelKind::Meta`] run, then its value with the right pad trimmed
+/// (hash [`LabelKind::MetaHash`], date [`LabelKind::MetaDate`], author
+/// [`LabelKind::MetaAuthor`]), then the pad as a [`LabelKind::Meta`] run
+/// when there is one. The value run alone is the column's icon span.
+/// Columns that `cols` drops (and an empty author) emit no run.
 pub fn meta_columns_parts(hash: &str, date: &str, author: &str, cols: MetaCols) -> Vec<LabelPart> {
     let mut parts = Vec::new();
     let mut push = |text: &str, kind| {
-        parts.push(LabelPart {
-            text: format!(" {text}"),
-            kind,
+        let meta = |text: &str| LabelPart {
+            text: text.to_string(),
+            kind: LabelKind::Meta,
             target: None,
-        });
+        };
+        parts.push(meta(" "));
+        let value = text.trim_end_matches(' ');
+        if !value.is_empty() {
+            parts.push(LabelPart {
+                text: value.to_string(),
+                kind,
+                target: None,
+            });
+        }
+        let pad = &text[value.len()..];
+        if !pad.is_empty() {
+            parts.push(meta(pad));
+        }
     };
     if cols.hash {
-        push(hash, LabelKind::Meta);
+        push(hash, LabelKind::MetaHash { parent: None });
     }
     if cols.date {
         push(date, LabelKind::MetaDate);
@@ -1822,9 +1850,17 @@ mod tests {
                 .map(|p| p.kind)
                 .unwrap_or_else(|| panic!("{text}: {parts:?}"))
         };
-        assert_eq!(kind_of(" aaa1111"), LabelKind::Meta);
-        assert_eq!(kind_of(" 1h  "), LabelKind::MetaDate);
-        assert_eq!(kind_of(" Ada Lovelace"), LabelKind::MetaAuthor);
+        assert_eq!(kind_of("aaa1111"), LabelKind::MetaHash { parent: None });
+        assert_eq!(kind_of("1h"), LabelKind::MetaDate);
+        assert_eq!(kind_of("Ada Lovelace"), LabelKind::MetaAuthor);
+        // The pads and the leading blanks stay plain meta.
+        assert!(
+            parts
+                .iter()
+                .filter(|p| p.text.trim().is_empty())
+                .all(|p| p.kind == LabelKind::Meta),
+            "{parts:?}"
+        );
     }
 
     #[test]
@@ -2212,12 +2248,14 @@ mod tests {
             text.starts_with("L b other L c notes  [hidden] [feat]"),
             "{text}"
         );
-        let marks: Vec<_> = parts.iter().filter_map(|part| part.kind.icon()).collect();
+        let icons: Vec<_> = parts.iter().filter_map(|part| part.kind.icon()).collect();
         assert_eq!(
-            marks,
+            icons,
             vec![
                 (crate::GraphIconKind::Worktree, Some(1)),
                 (crate::GraphIconKind::Worktree, Some(2)),
+                // The hash column (no date or author column at width 0).
+                (crate::GraphIconKind::CommitHash, None),
             ]
         );
         for text in [" b other", " c notes", "  [hidden]"] {

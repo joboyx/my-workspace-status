@@ -34,9 +34,9 @@ clones only that row (the focused-row lookups use it).
 | `LaidOutCommit` | Lane assignment plus stem metadata for one commit |
 | `GraphWidget` | Ratatui `Widget` over a `GraphModel` |
 | `IconSpan` | Painted cells of one graph icon (`GraphIconKind`, row index or `None` for the sync header and its chip, x, y, width, `part`, chip `target`), from `render_with_icon_spans` |
-| `GraphIconKind` | Commit / HEAD / stash node, uncommitted glyph, worktree glyph, open / resolved comment mark, row badge, local / default / remote / tag chip, checkout-and-sync mark run, detached `[HEAD]`, `[+N]`, sync header, header chip, footer more-lines hint |
+| `GraphIconKind` | Commit / HEAD / stash node, uncommitted glyph, worktree glyph, open / resolved comment mark, row badge, local / default / remote / tag chip, checkout-and-sync mark run, detached `[HEAD]`, `[+N]`, sync header, header chip, footer more-lines hint, commit hash / date / author text (`CommitHash`, `CommitDate`, `CommitAuthor`) |
 | `LabelPart` | One styled run: text, `LabelKind`, and `target` (`PartTarget`: the chip the run belongs to, or `None`) |
-| `meta_columns_parts` | The right-meta runs of a spacer: ` hash` (`Meta`), ` date` (`MetaDate`), ` author` (`MetaAuthor`). `meta_columns_text` is their text |
+| `meta_columns_parts` | The right-meta runs of a spacer. Per column: a `" "` `Meta` run, the value with its right pad trimmed (hash `MetaHash { parent: None }`, date `MetaDate`, author `MetaAuthor`), then the pad as a `Meta` run. `meta_columns_text` is their text |
 | `PartTarget` | Chip identity: `Chip(refs)` (one ref, or a local branch and its same-name remote), `Marks { branch, checkout, remote }`, `DetachedHead`, `Overflow(hidden chips)` |
 | `GraphLabelPalette` | Label colours: subject, meta, chips, overflow, worktree glyph, dirty uncommitted glyph, open and resolved comment marks, sync header ahead and behind counts |
 | `graph_scrollbar_thumb` | Thumb offset/length matching a painted bar (TUI hit-test, vertical or horizontal) |
@@ -135,7 +135,7 @@ candidate). The TUI passes the PR chip of the graph's checkout (`<glyph> <ref>
 `IconSpan` per graph icon on screen, top to bottom: the sync header and its
 chip, then per list line in paint order (node, comment mark, label glyphs and chips
 left to right, then the badge at the right edge), then the selection
-footer's chips and hint.
+footer's commit meta and chips (by column) and hint.
 
 | `GraphIconKind` | Where |
 | --- | --- |
@@ -151,6 +151,9 @@ footer's chips and hint.
 | `SyncHeader` | The sync header text (branch and marks). `row_index` is `None` |
 | `HeaderChip` | The `header_chip` run, flush right on the sync header line. `row_index` is `None` |
 | `MoreBelow` | The footer's `<more_below><K>` hint, without its leading blank |
+| `CommitHash` | The short id of a commit / stash spacer and of the selection footer (`part` `None`), and each parent short id in the footer's parents group (`part` `Some(n)`: parent `n` in git order). The span covers the id only, not the column's blank or pad |
+| `CommitDate` | The date of a commit / stash spacer and of the selection footer, without the column pad |
+| `CommitAuthor` | The author of a commit spacer and of the selection footer, without the column pad |
 
 Rails, junctions, spacer gutter cells, and blanks are chrome: they have
 no span. A node cut by the gutter cap, a label glyph cut by `col_offset` or
@@ -163,7 +166,16 @@ branch chip with marks reads `[`, the marks, then `name]`. A chip cut by
 over the cells that show. Spacer chips carry their commit row; footer
 chips and the hint carry the selected row (the uncommitted row's footer
 paints HEAD's chips). `LabelPart::icon` maps a part to its kind: row
-glyphs through `LabelKind::icon`, chips through `PartTarget::icon`.
+glyphs and commit meta text through `LabelKind::icon`, chips through
+`PartTarget::icon`.
+
+Commit meta spans (`CommitHash`, `CommitDate`, `CommitAuthor`) follow the
+two rules above by surface. On a spacer line they are label icons: a
+hash, date, or author cut by `col_offset` or the pane edge has no span.
+In the selection footer they are like chips: a run cut by the footer's
+`…` truncation or the pane edge keeps a span over the cells that show.
+Spacer spans carry their commit / stash row; footer spans carry the
+selected row.
 
 `LabelPart::target` survives `fit_chip_groups`, chip-name truncation,
 `trunc_label_parts`, and `slice_label_parts`, so a pan, a narrow spacer,
@@ -181,8 +193,10 @@ its `GraphIconKind` and `part`.
 
 The right-meta date and author columns of a commit or stash spacer are
 `LabelKind::MetaDate` and `LabelKind::MetaAuthor` (`meta_columns_parts`).
-They paint in `meta` with `Modifier::ITALIC`; the hash stays plain `Meta`,
-so its cells (and the TUI's hash link) do not change. Italic is a
+They paint in `meta` with `Modifier::ITALIC`. The hash is
+`LabelKind::MetaHash { parent }`: `meta` colour, not italic, so its cells
+(and the TUI's hash link) do not change. `parent` is `None` for the row's
+own id and `Some(n)` for parent `n` in the footer's parents group. Italic is a
 modifier, not a colour or a glyph: it stays under `NO_COLOR` and in ASCII
 mode, and a terminal without italics shows plain text.
 
@@ -282,8 +296,12 @@ other strings):
 Footer paint reuses the commit-spacer chip runs (`LabelKind`: HEAD /
 default / local / remote / tag) and their `target`s. A worktree row's
 branch run is a local branch chip. `GraphWidget::label_palette` colours
-those the same as the row chips. Hash and parents stay `meta`; author and
-date are `MetaAuthor` / `MetaDate` (meta colour, italic), as on the spacer.
+those the same as the row chips. The commit / stash hash is
+`MetaHash { parent: None }`; the parents group is a `parent ` /
+`parents ` `Meta` run, then one `MetaHash { parent: Some(n) }` run per
+short id with a `Meta` blank between them (`root commit` stays one `Meta`
+run). Author and date are `MetaAuthor` / `MetaDate` (meta colour,
+italic), as on the spacer.
 Do not flatten the footer to one colour.
 
 The sync header is `branch` then the ahead / behind marks

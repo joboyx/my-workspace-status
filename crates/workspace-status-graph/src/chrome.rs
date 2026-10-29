@@ -195,8 +195,10 @@ pub fn selection_detail_lines(
 
 /// Styled selection-footer runs. Chip kinds match the commit spacer so
 /// [`crate::GraphWidget::label_palette`] can reuse row colours (HEAD /
-/// default / local / remote / tag). Hash and parents stay
-/// [`LabelKind::Meta`]; the author run is [`LabelKind::MetaAuthor`] and
+/// default / local / remote / tag). The commit / stash hash is
+/// [`LabelKind::MetaHash`] `{ parent: None }` and each parent short id
+/// `{ parent: Some(n) }` (the `parent` / `parents` label stays
+/// [`LabelKind::Meta`]); the author run is [`LabelKind::MetaAuthor`] and
 /// the date run [`LabelKind::MetaDate`] (italic, same colour as meta).
 /// Commit meta order: chips · hash · parents · author · date.
 pub fn selection_detail_parts(
@@ -231,7 +233,7 @@ pub fn selection_detail_parts(
         GraphFooterSelection::Row(GraphRow::Stash(stash)) => {
             let meta = join_meta_groups([
                 vec![meta_part(stash.stash_ref.clone())],
-                vec![meta_part(short_id(&stash.id).to_string())],
+                vec![hash_part(short_id(&stash.id).to_string(), None)],
                 vec![date_part(format_relative_date(
                     stash.author_date_unix,
                     now_unix,
@@ -283,8 +285,8 @@ pub fn selection_detail_parts(
             } else {
                 groups.push(chips);
             }
-            groups.push(vec![meta_part(short_id(&commit.id).to_string())]);
-            groups.push(vec![meta_part(parents_text(&commit.parents))]);
+            groups.push(vec![hash_part(short_id(&commit.id).to_string(), None)]);
+            groups.push(parents_parts(&commit.parents));
             if !commit.author_name.is_empty() {
                 groups.push(vec![author_part(commit.author_name.clone())]);
             }
@@ -395,14 +397,23 @@ fn meta_parts(text: &str, width: usize) -> Vec<LabelPart> {
 }
 
 /// Commit footer parents group: `parent <id>`, `parents <id> <id> …`
-/// (git parent order), or [`FOOTER_ROOT_COMMIT`].
-fn parents_text(parents: &[String]) -> String {
-    let ids = parents.iter().map(|id| short_id(id)).collect::<Vec<_>>();
-    match ids.as_slice() {
-        [] => FOOTER_ROOT_COMMIT.to_string(),
-        [one] => format!("parent {one}"),
-        _ => format!("parents {}", ids.join(" ")),
+/// (git parent order), or [`FOOTER_ROOT_COMMIT`]. The label and the blanks
+/// are meta runs; each short id is its own
+/// [`LabelKind::MetaHash`] run naming its parent index.
+fn parents_parts(parents: &[String]) -> Vec<LabelPart> {
+    let label = match parents.len() {
+        0 => return vec![meta_part(FOOTER_ROOT_COMMIT.to_string())],
+        1 => "parent ",
+        _ => "parents ",
+    };
+    let mut parts = vec![meta_part(label.to_string())];
+    for (i, id) in parents.iter().enumerate() {
+        if i > 0 {
+            parts.push(meta_part(" ".to_string()));
+        }
+        parts.push(hash_part(short_id(id).to_string(), Some(i)));
     }
+    parts
 }
 
 fn meta_part(text: String) -> LabelPart {
@@ -410,6 +421,14 @@ fn meta_part(text: String) -> LabelPart {
         text,
         kind: LabelKind::Meta,
         target: None,
+    }
+}
+
+/// A short commit id run: the row's own (`parent: None`) or parent `n`.
+fn hash_part(text: String, parent: Option<usize>) -> LabelPart {
+    LabelPart {
+        kind: LabelKind::MetaHash { parent },
+        ..meta_part(text)
     }
 }
 
@@ -851,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn footer_parents_group_is_meta_kind() {
+    fn footer_parents_group_tags_each_parent_id() {
         let commit = Commit {
             id: "abcdefghhhh".into(),
             subject: "merge".into(),
@@ -869,12 +888,23 @@ mod tests {
         };
         let [_, meta] =
             selection_detail_parts(&model, GraphFooterSelection::Row(&row), &UNICODE, 80, 0);
-        let group = meta
+        let at = meta
             .iter()
-            .find(|p| p.text.starts_with("parents "))
+            .position(|p| p.text == "parents ")
             .unwrap_or_else(|| panic!("parents group: {meta:?}"));
-        assert_eq!(group.text, "parents 2222222 1111111");
-        assert_eq!(group.kind, LabelKind::Meta);
+        let group: Vec<(&str, LabelKind)> = meta[at..at + 4]
+            .iter()
+            .map(|p| (p.text.as_str(), p.kind))
+            .collect();
+        assert_eq!(
+            group,
+            vec![
+                ("parents ", LabelKind::Meta),
+                ("2222222", LabelKind::MetaHash { parent: Some(0) }),
+                (" ", LabelKind::Meta),
+                ("1111111", LabelKind::MetaHash { parent: Some(1) }),
+            ]
+        );
     }
 
     #[test]
@@ -910,7 +940,7 @@ mod tests {
         };
         assert_eq!(kind_of("Ada"), LabelKind::MetaAuthor);
         assert_eq!(kind_of("2m"), LabelKind::MetaDate);
-        assert_eq!(kind_of("abcdefg"), LabelKind::Meta);
+        assert_eq!(kind_of("abcdefg"), LabelKind::MetaHash { parent: None });
 
         let stash = Stash {
             id: "1234567890".into(),
@@ -1006,8 +1036,11 @@ mod tests {
         );
         let hash_kinds = kinds_for("abcdefg");
         assert!(
-            !hash_kinds.is_empty() && hash_kinds.iter().all(|k| *k == LabelKind::Meta),
-            "hash stays meta: {meta:?}"
+            !hash_kinds.is_empty()
+                && hash_kinds
+                    .iter()
+                    .all(|k| *k == LabelKind::MetaHash { parent: None }),
+            "hash is the commit hash kind: {meta:?}"
         );
 
         let uncommitted = GraphRow::Uncommitted { has_changes: false };

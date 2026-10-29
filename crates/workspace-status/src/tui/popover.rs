@@ -314,8 +314,9 @@ pub fn graph_row_id(row: &GraphRow) -> String {
 /// is the [`workspace_status_graph::IconSpan::part`] and `chip` its
 /// [`workspace_status_graph::IconSpan::target`]. `None` for a PR badge or the
 /// header chip (their checkout comes from the badge list or the chip), the
-/// sync header and the footer hint (no row icon), and a worktree mark whose
-/// index is not on the row.
+/// sync header and the footer hint (no row icon), a worktree mark whose
+/// index is not on the row, and the commit hash / date / author text
+/// ([`commit_meta_icon`] maps those; they are not row icons for `gh`).
 ///
 /// A checkout / sync mark run is one icon: [`IconKind::ChipCheckout`] when
 /// HEAD is on its branch, else [`IconKind::ChipSynced`].
@@ -367,8 +368,53 @@ pub fn graph_icon(
         GraphIconKind::Badge
         | GraphIconKind::SyncHeader
         | GraphIconKind::HeaderChip
-        | GraphIconKind::MoreBelow => None,
+        | GraphIconKind::MoreBelow
+        | GraphIconKind::CommitHash
+        | GraphIconKind::CommitDate
+        | GraphIconKind::CommitAuthor => None,
     }
+}
+
+/// Catalog kind and [`IconTarget::Commit`] of a commit meta span (hash,
+/// date, or author text) painted for graph `row` of checkout `repo`.
+///
+/// The sha is the commit's id, or `parents[n]` for a
+/// [`GraphIconKind::CommitHash`] span whose `part` is `Some(n)` (a parent
+/// id in the selection footer); a stash row gives the stash id. `None` for
+/// another graph icon kind, a row with no commit (uncommitted, worktree),
+/// a parent index past the parents or on a stash, and an empty id.
+///
+/// [`graph_icon`] gives `None` for these kinds, so `gh` (which lists the
+/// row's icons) does not list them: commit popovers are mouse-only.
+pub fn commit_meta_icon(
+    kind: GraphIconKind,
+    part: Option<usize>,
+    row: &GraphRow,
+    repo: &str,
+) -> Option<(IconKind, IconTarget)> {
+    let kind = match kind {
+        GraphIconKind::CommitHash => IconKind::CommitHash,
+        GraphIconKind::CommitDate => IconKind::CommitDate,
+        GraphIconKind::CommitAuthor => IconKind::CommitAuthor,
+        _ => return None,
+    };
+    let part = part.filter(|_| kind == IconKind::CommitHash);
+    let sha = match (row, part) {
+        (GraphRow::Commit { commit, .. }, None) => &commit.id,
+        (GraphRow::Commit { commit, .. }, Some(n)) => commit.parents.get(n)?,
+        (GraphRow::Stash(stash), None) => &stash.id,
+        _ => return None,
+    };
+    if sha.is_empty() {
+        return None;
+    }
+    Some((
+        kind,
+        IconTarget::Commit {
+            repo: repo.to_string(),
+            sha: sha.clone(),
+        },
+    ))
 }
 
 /// The popover sections one painted icon opens: itself, and for a
@@ -3451,6 +3497,48 @@ mod tests {
             assert_eq!(who("", ""), None);
             assert_eq!(who("Ada Lovelace", "").as_deref(), Some("Ada Lovelace"));
             assert_eq!(super::super::when(0, Some(3600)), None);
+        }
+
+        #[test]
+        fn commit_meta_icon_names_the_row_commit_a_parent_or_the_stash() {
+            use workspace_status_graph::GraphIconKind as G;
+            let commit = GraphRow::Commit {
+                commit: merge(),
+                is_head: true,
+                worktrees: Vec::new(),
+            };
+            let stash_row = GraphRow::Stash(stash());
+            let icon = |kind, part, row: &GraphRow| commit_meta_icon(kind, part, row, "app");
+            assert_eq!(
+                icon(G::CommitHash, None, &commit),
+                Some((IconKind::CommitHash, target("app", &id('a'))))
+            );
+            assert_eq!(
+                icon(G::CommitHash, Some(1), &commit),
+                Some((IconKind::CommitHash, target("app", &id('c'))))
+            );
+            assert_eq!(icon(G::CommitHash, Some(2), &commit), None);
+            assert_eq!(
+                icon(G::CommitDate, None, &commit),
+                Some((IconKind::CommitDate, target("app", &id('a'))))
+            );
+            assert_eq!(
+                icon(G::CommitAuthor, None, &stash_row),
+                Some((IconKind::CommitAuthor, target("app", &id('d'))))
+            );
+            assert_eq!(icon(G::CommitHash, Some(0), &stash_row), None);
+            let no_id = GraphRow::Stash(Stash {
+                id: String::new(),
+                ..stash()
+            });
+            assert_eq!(icon(G::CommitHash, None, &no_id), None);
+            let uncommitted = GraphRow::Uncommitted { has_changes: true };
+            assert_eq!(icon(G::CommitHash, None, &uncommitted), None);
+            assert_eq!(icon(G::CommitNode, None, &commit), None);
+            // gh lists row icons through graph_icon: none for commit text.
+            for kind in [G::CommitHash, G::CommitDate, G::CommitAuthor] {
+                assert_eq!(graph_icon(kind, None, None, &commit), None);
+            }
         }
 
         #[test]
