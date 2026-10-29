@@ -60,8 +60,13 @@ fn pty_pr_poll_off_stops_polling_and_r_still_looks_up() {
         "both checkouts show a PR in review",
         GIT_WAIT,
     );
-    // Let any other launch lookup land, then count.
-    tui.wait_ms(300);
+    // Both badges show, so both launch list calls are logged. A third,
+    // late call would break `calls_stay_at` below.
+    tui.wait_pred(
+        |_| list_calls(&forge).len() >= 2,
+        "both launch list calls are in the log",
+        WAIT,
+    );
     let launch = list_calls(&forge);
     assert_eq!(
         (

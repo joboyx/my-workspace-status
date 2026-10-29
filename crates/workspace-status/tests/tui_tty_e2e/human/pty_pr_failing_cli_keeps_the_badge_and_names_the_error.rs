@@ -10,9 +10,8 @@ use crate::pr_support::{
 };
 use crate::support::{tree_cursor_on, GIT_WAIT, WAIT};
 
-/// Poll period of this test. A failing host doubles it (1 s, 2 s, 4 s), so
-/// after the second failed poll the next poll is 4 s away: long enough that
-/// the recovery steps below are the `r` key and not a poll.
+/// Poll period of the polling test. A failing host doubles it (1 s, 2 s,
+/// 4 s), and a badge is stale once its last success is 2 s old.
 const POLL: &str = "1000";
 
 /// How long a kept badge must stay on screen after an `r` against the
@@ -23,6 +22,27 @@ const KEPT: Duration = Duration::from_millis(600);
 /// count: a poll (or `r`) ran against the failing CLI.
 fn wait_lookups(tui: &PtySession, forge: &FakeForge, before: usize, more: usize, what: &str) {
     tui.wait_pred(|_| list_calls(forge).len() >= before + more, what, GIT_WAIT);
+}
+
+/// Make the fake `gh` and `glab` list calls of `github` and `gitlab` exit 1
+/// with a two-line stderr.
+fn fail_both(forge: &FakeForge, github: &PrCheckout, gitlab: &PrCheckout) {
+    forge.github_pr_list(
+        GITHUB_REPO,
+        &github.branch,
+        Reply::Fail {
+            code: 1,
+            stderr: "gh: HTTP 502\nsecond line of stderr\n",
+        },
+    );
+    forge.gitlab_mr_list(
+        GITLAB_PROJECT,
+        &gitlab.branch,
+        Reply::Fail {
+            code: 1,
+            stderr: "glab: HTTP 502\nsecond line of stderr\n",
+        },
+    );
 }
 
 /// The badge of `name` paints its ref muted and its bold glyph in the colour
@@ -48,15 +68,14 @@ fn badge_paints(tui: &PtySession, name: &str, stale: bool) -> bool {
 /// and `!5 P`, no alert shows, and the glyphs paint muted (stale: the last
 /// success is older than two poll periods) while staying bold. The pinned
 /// popover `checked` line reads `last lookup failed: <first stderr line>`
-/// in amber, without the second stderr line. `r` against the failing CLI
-/// keeps the badge: once its call is logged, the badge stays on screen for
-/// 600 ms. Once the answers come back, the glyphs are still stale (the
-/// failed host is backed off, so no poll comes for 4 s) until `r` looks each
-/// checkout up, and then each paints its state colour again. Reverting the
-/// keep-last-badge rule drops the badge on the first failed poll (the old
-/// behaviour: a failed lookup hides it); reverting the stale rule leaves the
-/// blue glyph; reverting the stderr line leaves the `checked` line without
-/// the reason.
+/// in amber, without the second stderr line. Once the answers come back,
+/// the glyphs are still stale until a lookup succeeds (`r` on each row
+/// asks at once; with polling on, the test does not count calls), and then
+/// each paints its state colour again. Reverting the keep-last-badge rule
+/// drops the badge on the first failed poll (the old behaviour: a failed
+/// lookup hides it); reverting the stale rule leaves the blue glyph;
+/// reverting the stderr line leaves the `checked` line without the reason.
+/// The `r` steps with exact call counts are the polling-off test below.
 #[test]
 fn pty_pr_failing_cli_keeps_the_badge_and_names_the_error() {
     let (root, workspace) = named_workspace("ws-tui-tty-pr-cli-fails", "ws");
@@ -85,22 +104,7 @@ fn pty_pr_failing_cli_keeps_the_badge_and_names_the_error() {
     );
 
     let before = list_calls(&forge).len();
-    forge.github_pr_list(
-        GITHUB_REPO,
-        &github.branch,
-        Reply::Fail {
-            code: 1,
-            stderr: "gh: HTTP 502\nsecond line of stderr\n",
-        },
-    );
-    forge.gitlab_mr_list(
-        GITLAB_PROJECT,
-        &gitlab.branch,
-        Reply::Fail {
-            code: 1,
-            stderr: "glab: HTTP 502\nsecond line of stderr\n",
-        },
-    );
+    fail_both(&forge, &github, &gitlab);
     wait_lookups(
         &tui,
         &forge,
@@ -119,24 +123,6 @@ fn pty_pr_failing_cli_keeps_the_badge_and_names_the_error() {
         GIT_WAIT,
     );
     assert!(!has_alert(&tui.screen()), "no alert:\n{}", tui.screen());
-
-    // `r` against the failing CLI keeps the badge: once the call is logged,
-    // the failure lands within milliseconds, and the badge must be there
-    // through the whole window, not only before the answer.
-    tui.wait_pred(
-        |screen| tree_cursor_on(screen, "apibox"),
-        "cursor on apibox",
-        WAIT,
-    );
-    let before = list_calls(&forge).len();
-    tui.key('r');
-    wait_lookups(&tui, &forge, before, 1, "r looks the checkout up");
-    assert_holds_for(
-        &tui,
-        |tui| badge_is(tui, "apibox", Some("!5"), 'P'),
-        KEPT,
-        "r against the failing CLI keeps the badge",
-    );
 
     // The popover names the reason: first stderr line only, in amber.
     click_badge(&mut tui, "appbox");
@@ -187,12 +173,9 @@ fn pty_pr_failing_cli_keeps_the_badge_and_names_the_error() {
         WAIT,
     );
 
-    // The forge answers again. The failed hosts are backed off (the next
-    // poll is seconds away), so the glyphs stay stale until `r` looks the
-    // checkout up: the colour comes back with the keys, not with a poll. The
-    // swap, the stale check and the three keys (`r` on apibox, `j`, `r` on
-    // appbox) follow each other without a wait, so no poll fits between
-    // them; the two lookups in the log are the two `r` keys.
+    // The forge answers again. The glyphs stay stale until a lookup
+    // succeeds; `r` on each row (`r` on apibox, `j`, `r` on appbox) asks at
+    // once instead of waiting for the backed-off poll.
     github.set(&forge, Badge::InReview);
     gitlab.set(&forge, Badge::InReview);
     assert!(
@@ -200,17 +183,104 @@ fn pty_pr_failing_cli_keeps_the_badge_and_names_the_error() {
         "stale until a lookup succeeds:\n{}",
         tui.screen()
     );
-    let before = list_calls(&forge).len();
     tui.keys("rjr");
     tui.wait_pred(
         |_| badge_paints(&tui, "apibox", false) && badge_paints(&tui, "appbox", false),
-        "the two r keys bring both state colours back",
+        "a successful lookup brings both state colours back",
         GIT_WAIT,
     );
-    assert_eq!(
-        list_calls(&forge).len(),
-        before + 2,
-        "the two r keys made the two lookups: {:?}",
-        forge.calls()
+}
+
+/// `r` against a failing `gh` or `glab` keeps the badge, and `r` after the
+/// forge answers again shows the new state, with polling off so every list
+/// call in the log is a key's (`docs/tui-rust.md`, **Pull request badge**).
+///
+/// Seed: `appbox` (GitHub `#7`) and `apibox` (GitLab `!5`), both in review,
+/// `WS_STATUS_PR_POLL_MS=0`. The test then makes both fake CLIs exit 1.
+///
+/// Proof: `r` on each row makes exactly one list call, and the badge stays
+/// on screen for 600 ms after the call is logged (the failure lands within
+/// milliseconds, so the window covers it). The forge then answers CI
+/// running; `r` on each row makes exactly one more list call and the row
+/// ends in `r`. Reverting the keep-last-badge rule drops the badge when the
+/// failed `r` lands; an `r` that looks up twice, or not at all, breaks the
+/// counts.
+#[test]
+fn pty_pr_failing_cli_on_r_keeps_the_badge_and_r_recovers() {
+    let (root, workspace) = named_workspace("ws-tui-tty-pr-cli-fails-r", "ws");
+    let forge = FakeForge::new(&root);
+    let github = PrCheckout::new("appbox", "feature/auth-refresh", Forge::GitHub, 7);
+    let gitlab = PrCheckout::new("apibox", "feature/rate-limit", Forge::GitLab, 5);
+    seed_checkouts(&workspace, &[github.clone(), gitlab.clone()]);
+    github.set(&forge, Badge::InReview);
+    gitlab.set(&forge, Badge::InReview);
+
+    let mut tui = PtySession::open_size_with_env(
+        &workspace,
+        140,
+        40,
+        &forge_env(&forge, &[("WS_STATUS_PR_POLL_MS", "0")]),
     );
+    tui.wait_pred(
+        |_| badge_is(&tui, "appbox", Some("#7"), 'P') && badge_is(&tui, "apibox", Some("!5"), 'P'),
+        "both checkouts show a PR in review",
+        GIT_WAIT,
+    );
+    tui.wait_pred(
+        |_| list_calls(&forge).len() >= 2,
+        "both launch list calls are in the log",
+        WAIT,
+    );
+    fail_both(&forge, &github, &gitlab);
+
+    // `r` against the failing CLI on each row: one call, and the badge
+    // holds through the failure.
+    for (name, ref_text, step) in [("apibox", "!5", ""), ("appbox", "#7", "j")] {
+        tui.keys(step);
+        tui.wait_pred(
+            |screen| tree_cursor_on(screen, name),
+            &format!("cursor on {name}"),
+            WAIT,
+        );
+        let before = list_calls(&forge).len();
+        tui.key('r');
+        wait_lookups(&tui, &forge, before, 1, &format!("r looks {name} up"));
+        assert_holds_for(
+            &tui,
+            |tui| badge_is(tui, name, Some(ref_text), 'P'),
+            KEPT,
+            &format!("r against the failing CLI keeps the {name} badge"),
+        );
+        assert_eq!(
+            list_calls(&forge).len(),
+            before + 1,
+            "one r, one list call: {:?}",
+            forge.calls()
+        );
+    }
+
+    // The forge answers again: `r` on each row shows the new state.
+    github.set(&forge, Badge::CiRunning);
+    gitlab.set(&forge, Badge::CiRunning);
+    for (name, ref_text, step) in [("appbox", "#7", ""), ("apibox", "!5", "k")] {
+        tui.keys(step);
+        tui.wait_pred(
+            |screen| tree_cursor_on(screen, name),
+            &format!("cursor on {name}"),
+            WAIT,
+        );
+        let before = list_calls(&forge).len();
+        tui.key('r');
+        tui.wait_pred(
+            |_| badge_is(&tui, name, Some(ref_text), 'r'),
+            &format!("r shows the {name} PR as CI running"),
+            GIT_WAIT,
+        );
+        assert_eq!(
+            list_calls(&forge).len(),
+            before + 1,
+            "one r, one list call: {:?}",
+            forge.calls()
+        );
+    }
 }
