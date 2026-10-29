@@ -63,7 +63,7 @@ use super::icons::{
     IconSpec, CURSOR_BAR, CURSOR_BAR_INACTIVE, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED,
     FOLD_EXPANDED_ASCII,
 };
-use super::line_blame::{fit_annotation, BlameSide, BLAME_MENU_ROWS};
+use super::line_blame::{fit_annotation, relative_age, BlameSide, BLAME_MENU_ROWS};
 use super::ops::RevertScope;
 use super::popover::{
     flat_lines, focused_line, graph_icon, graph_row_id, graph_sync_kind, popover_rect,
@@ -87,8 +87,8 @@ use super::split::{
     ResizeEdge, MIN_PANE_COLS, MIN_TERM_COLS, MIN_TERM_ROWS,
 };
 use super::state::{
-    revert_scope, AppState, CompareRevertTarget, FocusPane, IconHit, LayoutHit, PendingConfirm,
-    PopoverHit,
+    revert_scope, unix_now, AppState, CompareRevertTarget, FocusPane, IconHit, LayoutHit,
+    PendingConfirm, PopoverHit,
 };
 use super::syntax::{
     cached_highlight_diff_rows, highlight_file_window, readable_fg, slice_styled_cols,
@@ -102,8 +102,8 @@ use super::theme::{hex_color, mix_toward, BackgroundMode, Palette, Pill, ThemeId
 use super::toast::ToastTick;
 use super::tree::{
     file_change_from_name_status, file_change_segments, painted_row_segments, pr_badge_kind,
-    pr_badge_mark, visible_window, workspace_trailing_fit, NodeKind, NodeSegments, SegRole,
-    TextSeg, VisibleRow,
+    pr_badge_mark, visible_window, workspace_trailing_fit, NodeKind, NodeSegments, PrBadge,
+    PrTotals, SegRole, TextSeg, VisibleRow, PR_REF_MIN_TREE_COLS,
 };
 use super::undercurl::{cut_link_cells, drop_undercurls_under, underlined_runs, UndercurlHit};
 use super::watch::FlashKind;
@@ -1648,8 +1648,9 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                 .unwrap_or_else(|| checkout.clone())
         })
         .collect();
+    let pr_totals = state.pr_totals();
     for (y, row) in (area.y..).zip(painted.iter().skip(start).take(height)) {
-        let (viewed, commented, resolved, pr) = state.tree_row_marks(row);
+        let (viewed, commented, resolved, pr) = state.tree_row_marks(row, width, now);
         let spinner = tree_row_runs_remote(row, &state.remote_activity.running, &running_families)
             .then(|| spinner_glyph(state.anim_epoch, now, state.ascii));
         state.layout.animating |= spinner.is_some();
@@ -1666,6 +1667,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             commented,
             resolved,
             pr,
+            pr_totals,
             spinner,
             sparkline: bars,
             no_color: state.no_color,
@@ -1712,8 +1714,11 @@ struct TreeRowDecor {
     commented: bool,
     /// Every comment on the row is resolved.
     resolved: bool,
-    /// PR badge state of the row's branch.
-    pr: Option<PrState>,
+    /// PR badge of the row's branch: `<ref> <glyph>` at the end of the
+    /// trailing run.
+    pr: Option<PrBadge>,
+    /// Workspace PR total; only the workspace row paints it.
+    pr_totals: PrTotals,
     /// Spinner frame while a fetch / pull / push runs on the row's
     /// checkout. Paints ahead of the marks, after the sparkline.
     spinner: Option<&'static str>,
@@ -1772,7 +1777,7 @@ fn paint_tree_row(
         decor.viewed,
         decor.commented,
         decor.resolved,
-        decor.pr,
+        decor.pr.as_ref(),
     );
     // The spinner, then the bars left of it, lead the trailing run: each is
     // a bare token one space before the rest, as the run packs its marks.
@@ -1812,7 +1817,8 @@ fn paint_tree_row(
             .saturating_sub(name_width)
             .saturating_sub(marks_width);
         segs.trailing.truncate(marks);
-        let summary = workspace_trailing_fit(&row.chrome, room);
+        let narrow = width < PR_REF_MIN_TREE_COLS;
+        let summary = workspace_trailing_fit(&row.chrome, decor.pr_totals, narrow, room);
         if summary.is_empty() && segs.trailing.last().is_some_and(|seg| seg.text == " ") {
             // No summary fits: drop the space after the marks so the last
             // mark stays in the last column.
@@ -1845,7 +1851,9 @@ fn paint_tree_row(
 /// A span covers the glyph columns only: spaces at either end of the
 /// segment text stay out. Label icons pan and clip like the label; trailing
 /// icons stay flush right and clip from the left with the trailing run. An
-/// icon with no cell on screen has no span.
+/// icon with no cell on screen has no span. Two trailing segments of the
+/// same kind one blank column apart (the PR badge ref and glyph) are one
+/// span over both.
 fn segmented_icon_spans(
     depth: usize,
     segs: &NodeSegments,
@@ -1879,6 +1887,7 @@ fn segmented_icon_spans(
     // Trailing columns are counted on the full run; the first
     // `trailing_skip` of them are cut off at the left.
     let mut col = 0;
+    let label_spans = spans.len();
     for seg in &segs.trailing {
         let seg_width = visible_width(&seg.text);
         if let Some(kind) = seg.icon {
@@ -1892,8 +1901,15 @@ fn segmented_icon_spans(
             let shown = slice_cols(&core.text, cut, core_width);
             let shown = visible_width(shown.trim_start_matches(' '));
             if shown > 0 {
-                let start = core_start + core_width - shown - layout.trailing_skip;
-                spans.push((kind, layout.trailing_x + start, shown));
+                let x = layout.trailing_x + core_start + core_width - shown - layout.trailing_skip;
+                match spans[label_spans..].last_mut() {
+                    // The PR badge ref and glyph: one icon over both and
+                    // the space between.
+                    Some((last, last_x, last_w)) if *last == kind && *last_x + *last_w + 1 == x => {
+                        *last_w = x + shown - *last_x;
+                    }
+                    _ => spans.push((kind, x, shown)),
+                }
             }
         }
         col += seg_width;
@@ -2352,6 +2368,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         .iter()
         .map(|(index, _, _, glyph, color)| (*index, *glyph, *color))
         .collect();
+    let chip = graph_pr_chip(state, unix_now());
     let spans = GraphWidget::new(model)
         .ascii(state.ascii)
         .selected(Some(state.graph_cursor))
@@ -2392,11 +2409,23 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
             behind: pal.deleted,
         })
         .row_badges(&badges)
+        .header_chip(chip.as_ref().map_or(&[], |chip| chip.candidates.as_slice()))
         .render_with_icon_spans(area, frame.buffer_mut());
     let row_of = |span: &workspace_status_graph::IconSpan| rows.get(span.row_index?);
     let hits: Vec<IconHit> = spans
         .iter()
         .filter_map(|span| {
+            if span.kind == GraphIconKind::HeaderChip {
+                // The `<glyph> <ref>` head: the PR icon, linked like a badge.
+                let chip = chip.as_ref()?;
+                return Some(IconHit {
+                    y: span.y,
+                    x: span.x,
+                    width: span.width.min(chip.head_width),
+                    kind: pr_badge_kind(chip.state),
+                    target: IconTarget::PullRequest(chip.checkout.clone()),
+                });
+            }
             let (kind, target) = match span.kind {
                 GraphIconKind::Badge => badge_rows
                     .iter()
@@ -2516,17 +2545,100 @@ fn bleed_graph_scrollbar_column(frame: &mut Frame<'_>, layout: &LayoutHit) {
 /// state, glyph, and colour.
 type GraphPrBadge = (usize, PathBuf, PrState, &'static str, Color);
 
-/// [`AppState::graph_pr_badges`] with the glyph and colour to paint.
+/// [`AppState::graph_pr_badges`] with the glyph and colour to paint: the
+/// state colour, or muted when the badge is stale.
 fn graph_pr_badges(state: &AppState) -> Vec<GraphPrBadge> {
     let palette = state.theme.palette();
+    let now = Instant::now();
     state
         .graph_pr_badges()
         .into_iter()
         .map(|(index, path, pr)| {
             let (glyph, role) = pr_badge_mark(state.ascii, pr);
+            let role = if state.pr_is_stale(&path, now) {
+                SegRole::Muted
+            } else {
+                role
+            };
             (index, path, pr, glyph, seg_role_color(role, palette))
         })
         .collect()
+}
+
+/// The graph header chip: the checkout it describes, the columns of its
+/// `<glyph> <ref>` head (the PR icon hit and link), and the candidates for
+/// [`GraphWidget::header_chip`].
+struct GraphPrChip {
+    checkout: PathBuf,
+    state: PrState,
+    head_width: u16,
+    candidates: Vec<Line<'static>>,
+}
+
+/// The header chip of the graph checkout's PR ([`AppState::graph_header_pr`]),
+/// or `None` with no PR.
+///
+/// Candidates, widest first: `<glyph> <ref> <state label>  ▸ <next
+/// action>` (merged: `✔ !12 merged · 3h ago`), then without the next action
+/// (the age), then `<glyph> <ref>`. The glyph and the label paint in the
+/// state colour, the ref in the repo colour, `▸` dim, the next action bold.
+/// A stale PR paints every part muted. ASCII mode uses `>` for `▸`.
+fn graph_pr_chip(state: &AppState, now_unix: i64) -> Option<GraphPrChip> {
+    let (checkout, pr) = state.graph_header_pr()?;
+    let palette = state.theme.palette();
+    let stale = state.pr_is_stale(&checkout, Instant::now());
+    let (glyph, role) = pr_badge_mark(state.ascii, pr.state);
+    let muted = Style::default().fg(palette.muted);
+    let tone = |color: Color| {
+        if stale {
+            muted
+        } else {
+            Style::default().fg(color)
+        }
+    };
+    let state_style = tone(seg_role_color(role, palette));
+    let bold = state_style.add_modifier(Modifier::BOLD);
+    let ref_text = pr.ref_text();
+    let head = vec![
+        Span::styled(glyph.to_string(), bold),
+        Span::raw(" "),
+        Span::styled(ref_text.clone(), tone(palette.repo)),
+    ];
+    let labelled = [
+        head.clone(),
+        vec![Span::raw(" "), Span::styled(pr.state.label(), state_style)],
+    ]
+    .concat();
+    let tail = match pr.next_action(state.pr_stack_base(&checkout)) {
+        Some(next) => Some(vec![
+            Span::raw("  "),
+            Span::styled(
+                if state.ascii { ">" } else { "▸" },
+                muted.add_modifier(Modifier::DIM),
+            ),
+            Span::raw(" "),
+            Span::styled(next.text(), bold),
+        ]),
+        None => pr.updated_at.map(|unix| {
+            vec![
+                Span::styled(" · ", muted.add_modifier(Modifier::DIM)),
+                Span::styled(relative_age(now_unix, unix), muted),
+            ]
+        }),
+    };
+    let mut candidates = Vec::new();
+    if let Some(tail) = tail {
+        candidates.push(Line::from([labelled.clone(), tail].concat()));
+    }
+    candidates.push(Line::from(labelled));
+    candidates.push(Line::from(head));
+    Some(GraphPrChip {
+        checkout,
+        state: pr.state,
+        head_width: u16::try_from(2 + UnicodeWidthStr::width(ref_text.as_str()))
+            .unwrap_or(u16::MAX),
+        candidates,
+    })
 }
 
 fn graph_commented_row_indices(
@@ -3955,15 +4067,16 @@ fn overlay_block(accent: Color, panel: Color) -> Block<'static> {
 fn icon_legend_color(kind: IconKind, palette: Palette) -> Color {
     use IconKind as K;
     match kind {
-        K::Branch | K::PrOpen | K::ChipLocal => palette.branch_feature,
-        K::ChipDefault => palette.branch_default,
-        K::MergedIntoDefault | K::PrApproved | K::Ahead => palette.added,
+        K::Branch | K::PrMerged | K::ChipLocal => palette.branch_feature,
+        K::ChipDefault | K::PrInReview => palette.branch_default,
+        K::MergedIntoDefault | K::PrReady | K::Ahead => palette.added,
         K::StatusAdded | K::StatusStaged => palette.added,
         K::Behind | K::StatusFailed | K::StatusDeleted | K::StatusConflict => palette.deleted,
+        K::PrCiFailed | K::PrClosed => palette.deleted,
         K::Diverged | K::StatusModified | K::StatusStagedModified => palette.modified,
-        K::GraphUncommitted | K::ChipTag => palette.modified,
+        K::GraphUncommitted | K::ChipTag | K::PrCiRunning => palette.modified,
         K::StatusRenamed | K::StatusCopied => palette.renamed,
-        K::OpenVsDefault | K::PrMerged | K::NoUpstream | K::Clean | K::Synced => palette.muted,
+        K::OpenVsDefault | K::PrDraft | K::NoUpstream | K::Clean | K::Synced => palette.muted,
         K::Hidden | K::ChangeCount | K::WorktreeCount | K::CommentResolved => palette.muted,
         K::GraphMoreBelow | K::FoldExpanded | K::FoldCollapsed => palette.muted,
         K::CursorBarInactive => palette.muted,
@@ -12285,11 +12398,20 @@ mod tests {
         );
     }
 
+    /// A fresh tree badge in `state` with `ref_text`.
+    fn tree_badge(state: PrState, ref_text: Option<&str>) -> PrBadge {
+        PrBadge {
+            state,
+            ref_text: ref_text.map(str::to_string),
+            stale: false,
+        }
+    }
+
     /// Paint `row` with a PR badge; the line text and its icon spans.
     fn paint_row_icons(
         row: &VisibleRow,
         width: usize,
-        pr: Option<PrState>,
+        pr: Option<PrBadge>,
     ) -> (String, Vec<IconSpan>) {
         let palette = crate::tui::theme::ThemeId::TokyoNight.palette();
         let (line, icons) = paint_tree_row(
@@ -12350,9 +12472,9 @@ mod tests {
             ),
             (
                 &checkout,
-                Some(PrState::InReview),
-                "o P ^1 1",
-                vec![(IconKind::OpenVsDefault, 'o'), (IconKind::PrOpen, 'P')],
+                Some(tree_badge(PrState::InReview, None)),
+                "o ^1 1  P",
+                vec![(IconKind::OpenVsDefault, 'o'), (IconKind::PrInReview, 'P')],
                 "branch-name",
             ),
         ] {
@@ -18724,60 +18846,299 @@ mod tests {
     }
 
     #[test]
-    fn tree_pr_badge_paints_after_the_branch_glyph_and_records_its_cell() {
-        use crate::tui::icons::{icon_branch, icon_pr_approved, icon_pr_merged, icon_pr_open};
+    fn tree_pr_badge_ends_at_the_pane_edge_in_every_state_look_and_forge() {
         let palette = ThemeId::TokyoNight.palette();
         let cases = [
-            (
-                PrState::InReview,
-                icon_pr_open as fn(bool) -> &'static str,
-                palette.branch_feature,
-            ),
-            (PrState::Ready, icon_pr_approved, palette.added),
-            (PrState::Merged, icon_pr_merged, palette.muted),
+            (PrState::CiFailed, "✖", "x", palette.deleted),
+            (PrState::Ready, "◉", "A", palette.added),
+            (PrState::CiRunning, "◐", "r", palette.modified),
+            (PrState::Draft, "◌", "d", palette.muted),
+            (PrState::InReview, "○", "P", palette.branch_default),
+            (PrState::Merged, "✔", "m", palette.branch_feature),
         ];
-        for ascii in [true, false] {
-            for (pr, icon, color) in cases {
-                let what = format!("{pr:?} ascii={ascii}");
-                let mut state = pr_state(
-                    &[branch_repo("app", "feature"), branch_repo("lib", "main")],
-                    ascii,
-                );
-                assert_eq!(state.theme.palette(), palette);
-                set_pr(&mut state, "app", "feature", found_pr(pr));
-                let mut terminal = pr_terminal();
-                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-                let buf = terminal.backend().buffer();
-                let y = tree_row_y(&state, "repo:app");
-                let branch_x = find_cell_col(buf, y, "feature")
-                    .unwrap_or_else(|| panic!("{what}: branch on\n{}", buf_line(buf, y)));
-                // Trailing run `<branch glyph> <badge> <repo glyph> ...`,
-                // flush right; the branch text stays in the label.
-                let glyph_x = (branch_x + 7..state.layout.tree_width)
-                    .find(|&x| buf[(x, y)].symbol() == icon_branch(ascii))
-                    .unwrap_or_else(|| panic!("{what}: branch glyph on\n{}", buf_line(buf, y)));
-                let x = glyph_x + 2;
-                assert_eq!(
-                    state.layout.pr_badge_hits(),
-                    vec![PrBadgeHit {
-                        y,
-                        x,
-                        width: 1,
-                        repo: PathBuf::from("app"),
-                    }],
-                    "{what}"
-                );
-                assert_eq!(buf[(x - 1, y)].symbol(), " ", "{what}");
-                assert_eq!(buf[(x, y)].symbol(), icon(ascii), "{what}");
-                assert_eq!(buf[(x, y)].fg, color, "{what}");
-                for word in ["open", "approved", "merged"] {
-                    assert!(!buf_line(buf, y).contains(word), "{what}: {word}");
+        let forges = [
+            (PR_REMOTE, "https://github.com/octo/demo/pull/7", "#7"),
+            (
+                "git@gitlab.com:acme/services/api.git",
+                "https://gitlab.com/acme/services/api/-/merge_requests/12",
+                "!12",
+            ),
+        ];
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            for ascii in [true, false] {
+                for (pr, nerd, letter, color) in cases {
+                    for (remote, url, ref_text) in forges {
+                        let what = format!("{background:?} {pr:?} ascii={ascii} {ref_text}");
+                        let mut state = pr_state(
+                            &[branch_repo("app", "feature"), branch_repo("lib", "main")],
+                            ascii,
+                        );
+                        state.background = background;
+                        let number = if ref_text == "#7" { 7 } else { 12 };
+                        assert!(state.apply_pr_lookup(
+                            Path::new("app"),
+                            "feature",
+                            Some(remote.into()),
+                            PrLookup::Found(PullRequest::fixture(number, url, pr)),
+                        ));
+                        let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+                        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                        assert!(usize::from(state.layout.tree_width) >= PR_REF_MIN_TREE_COLS);
+                        let buf = terminal.backend().buffer();
+                        let y = tree_row_y(&state, "repo:app");
+                        // `<ref> <glyph>`: the glyph is the last tree column.
+                        let edge = state.layout.tree_x + state.layout.tree_width - 1;
+                        let ref_w = ref_text.chars().count() as u16;
+                        let x = edge - ref_w - 1;
+                        assert_eq!(
+                            state.layout.pr_badge_hits(),
+                            vec![PrBadgeHit {
+                                y,
+                                x,
+                                width: ref_w + 2,
+                                repo: PathBuf::from("app"),
+                            }],
+                            "{what}: one hit over ref and glyph"
+                        );
+                        let glyph = if ascii { letter } else { nerd };
+                        let cells: String = (x..=edge).map(|x| buf[(x, y)].symbol()).collect();
+                        assert_eq!(cells, format!("{ref_text} {glyph}"), "{what}");
+                        assert_eq!(buf[(x - 1, y)].symbol(), " ", "{what}");
+                        assert_eq!(buf[(x - 2, y)].symbol(), " ", "{what}: two-space gap");
+                        assert_eq!(buf[(edge, y)].fg, color, "{what}");
+                        assert!(buf[(edge, y)].modifier.contains(Modifier::BOLD), "{what}");
+                        assert_eq!(buf[(x, y)].fg, palette.muted, "{what}: ref");
+                        assert_eq!(
+                            state.layout.links,
+                            vec![crate::tui::hyperlink::LinkHit {
+                                y,
+                                x,
+                                width: ref_w + 2,
+                                url: url.into(),
+                            }],
+                            "{what}: one link over ref and glyph"
+                        );
+                    }
                 }
             }
         }
-        assert_eq!(icon_pr_open(true), "P");
-        assert_eq!(icon_pr_approved(true), "A");
-        assert_eq!(icon_pr_merged(true), "m");
+    }
+
+    /// Every badge glyph shares the last tree column, whatever the ref
+    /// width and the marks before it; under 50 columns no row paints a
+    /// ref. Boxed and flat looks.
+    #[test]
+    fn tree_pr_glyphs_share_one_column_and_refs_drop_on_a_narrow_tree() {
+        let mut ahead = branch_repo("lib", "feat");
+        ahead.sync_status = SyncStatus::Ahead;
+        ahead.sync_note = "ahead by 3".into();
+        let rows = [
+            branch_repo("app", "feature"),
+            ahead,
+            branch_repo("web", "fix"),
+        ];
+        let prs = [
+            ("app", "feature", 7, "https://github.com/octo/demo/pull/7"),
+            (
+                "lib",
+                "feat",
+                1234,
+                "https://github.com/octo/demo/pull/1234",
+            ),
+            (
+                "web",
+                "fix",
+                12,
+                "https://gitlab.com/acme/services/api/-/merge_requests/12",
+            ),
+        ];
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            for (cols, wide) in [(160, true), (96, false)] {
+                let what = format!("{background:?} {cols} cols");
+                let mut state = pr_state(&rows, true);
+                state.background = background;
+                for (repo, branch, number, url) in prs {
+                    assert!(state.apply_pr_lookup(
+                        Path::new(repo),
+                        branch,
+                        Some(PR_REMOTE.into()),
+                        PrLookup::Found(PullRequest::fixture(number, url, PrState::CiFailed)),
+                    ));
+                }
+                let mut terminal = Terminal::new(TestBackend::new(cols, 24)).unwrap();
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                let tree_width = usize::from(state.layout.tree_width);
+                assert_eq!(
+                    tree_width >= PR_REF_MIN_TREE_COLS,
+                    wide,
+                    "{what}: {tree_width}"
+                );
+                let buf = terminal.backend().buffer();
+                let edge = state.layout.tree_x + state.layout.tree_width - 1;
+                let mut hits = state.layout.pr_badge_hits();
+                hits.sort_by_key(|hit| hit.y);
+                assert_eq!(hits.len(), 3, "{what}: {hits:?}");
+                for (hit, (repo, _, number, url)) in hits.iter().zip(prs) {
+                    let row = buf_line(buf, hit.y);
+                    assert_eq!(buf[(edge, hit.y)].symbol(), "x", "{what}: {row}");
+                    assert_eq!(hit.x + hit.width - 1, edge, "{what}: {row}");
+                    let sigil = if url.contains("gitlab") { '!' } else { '#' };
+                    let ref_text = format!("{sigil}{number}");
+                    if wide {
+                        assert!(row.contains(&format!("{ref_text} x")), "{what}: {row}");
+                        assert_eq!(usize::from(hit.width), ref_text.len() + 2, "{what}");
+                    } else {
+                        assert!(!row.contains(&ref_text), "{what}: {row}");
+                        assert_eq!(hit.width, 1, "{what}: {row}");
+                    }
+                    assert_eq!(hit.repo, PathBuf::from(repo), "{what}");
+                }
+            }
+        }
+    }
+
+    /// The six state colours differ from each other in every theme, except
+    /// where a theme gives two of the roles one colour: Dracula's
+    /// `branch_default` is its `branch_feature` (in review and merged), and
+    /// Rosé Pine's `added` is its `branch_default` (ready and in review).
+    /// Their glyphs still differ.
+    #[test]
+    fn pr_state_colours_differ_in_every_theme_but_two_families() {
+        use crate::tui::theme::THEME_IDS;
+        let states = [
+            PrState::CiFailed,
+            PrState::Ready,
+            PrState::CiRunning,
+            PrState::Draft,
+            PrState::InReview,
+            PrState::Merged,
+        ];
+        let mut clashes = Vec::new();
+        for theme in THEME_IDS {
+            let palette = theme.palette();
+            let colours: Vec<Color> = states
+                .iter()
+                .map(|state| seg_role_color(pr_badge_mark(false, *state).1, palette))
+                .collect();
+            for (i, a) in colours.iter().enumerate() {
+                for (j, b) in colours.iter().enumerate().skip(i + 1) {
+                    if a == b {
+                        clashes.push((theme, states[i], states[j]));
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            clashes,
+            [
+                (ThemeId::Dracula, PrState::InReview, PrState::Merged),
+                (ThemeId::RosePine, PrState::Ready, PrState::InReview),
+                (ThemeId::DraculaLight, PrState::InReview, PrState::Merged),
+                (ThemeId::RosePineDawn, PrState::Ready, PrState::InReview),
+            ]
+        );
+    }
+
+    /// A stale badge paints its glyph and ref muted; its shape stays.
+    #[test]
+    fn stale_tree_pr_badge_paints_muted() {
+        let palette = ThemeId::TokyoNight.palette();
+        let mut state = pr_state(&[branch_repo("app", "feature")], true);
+        state.set_pr_poll_mode(crate::tui::pr_poll::PrPollMode::Every(50));
+        let landed = Instant::now() - std::time::Duration::from_secs(1);
+        assert!(state.apply_pr_lookup_at(
+            Path::new("app"),
+            "feature",
+            Some(PR_REMOTE.into()),
+            found_pr(PrState::Ready),
+            landed,
+        ));
+        assert!(
+            state.pr_is_stale(Path::new("app"), Instant::now()),
+            "over 2 × 50 ms"
+        );
+        let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let buf = terminal.backend().buffer();
+        let y = tree_row_y(&state, "repo:app");
+        let edge = state.layout.tree_x + state.layout.tree_width - 1;
+        assert_eq!(buf[(edge, y)].symbol(), "A");
+        assert_eq!(buf[(edge, y)].fg, palette.muted);
+        assert_eq!(buf[(edge - 2, y)].symbol(), "7");
+        assert_eq!(buf[(edge - 2, y)].fg, palette.muted);
+    }
+
+    /// The workspace row ends with the PR total: `N PRs · M need you` in its
+    /// colours, `N PRs` with none to act on, one part on a narrow tree.
+    #[test]
+    fn workspace_row_paints_the_pr_total_after_the_change_summary() {
+        let palette = ThemeId::TokyoNight.palette();
+        let prs = [
+            ("app", PrState::CiFailed, 1),
+            ("lib", PrState::Ready, 2),
+            ("web", PrState::InReview, 3),
+        ];
+        let rows: Vec<RepoSnapshot> = prs
+            .iter()
+            .map(|(name, _, _)| branch_repo(name, &format!("feat-{name}")))
+            .collect();
+        for (cols, want) in [(160, "3 PRs · 2 need you"), (100, "2 need you")] {
+            let mut state = pr_state(&rows, true);
+            state.tree_fraction = 0.5;
+            for (name, pr, number) in prs {
+                let url = format!("https://github.com/octo/demo/pull/{number}");
+                set_pr(
+                    &mut state,
+                    name,
+                    &format!("feat-{name}"),
+                    PrLookup::Found(PullRequest::fixture(number, &url, pr)),
+                );
+            }
+            assert_eq!(
+                state.pr_totals(),
+                PrTotals {
+                    prs: 3,
+                    need_you: 2
+                }
+            );
+            let mut terminal = Terminal::new(TestBackend::new(cols, 24)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let buf = terminal.backend().buffer();
+            let narrow = usize::from(state.layout.tree_width) < PR_REF_MIN_TREE_COLS;
+            assert_eq!(narrow, cols == 100, "{cols}: {}", state.layout.tree_width);
+            let y = tree_row_y(&state, "workspace");
+            let row = buf_line(buf, y);
+            let edge = state.layout.tree_x + state.layout.tree_width - 1;
+            let painted: String = (state.layout.tree_x..=edge)
+                .map(|x| buf[(x, y)].symbol())
+                .collect();
+            assert!(painted.trim_end().ends_with(want), "{cols}: {row}");
+            assert!(painted.ends_with(want), "{cols}: flush right: {row}");
+            let need_x = edge + 1 - "2 need you".len() as u16;
+            assert_eq!(buf[(need_x, y)].fg, palette.modified, "{cols}");
+            assert!(buf[(need_x, y)].modifier.contains(Modifier::BOLD), "{cols}");
+            if want.starts_with('3') {
+                let prs_x = edge + 1 - want.chars().count() as u16;
+                assert_eq!(buf[(prs_x, y)].fg, palette.muted);
+                assert!(
+                    buf[(prs_x + 6, y)].modifier.contains(Modifier::DIM),
+                    "the dot"
+                );
+            }
+        }
+        // Nothing needs you: `N PRs`. No PR: no total.
+        let mut state = pr_state(&rows[..1], true);
+        set_pr(&mut state, "app", "feat-app", found_pr(PrState::Draft));
+        let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let row = buf_line(terminal.backend().buffer(), tree_row_y(&state, "workspace"));
+        assert!(row.contains("  1 PR"), "{row}");
+        assert!(!row.contains("need you"), "{row}");
+        let mut state = pr_state(&rows[..1], true);
+        set_pr(&mut state, "app", "feat-app", PrLookup::NoPr);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let row = buf_line(terminal.backend().buffer(), tree_row_y(&state, "workspace"));
+        assert!(!row.contains("PR"), "{row}");
     }
 
     #[test]
@@ -18858,7 +19219,7 @@ mod tests {
     fn tree_pr_badge_hit_stays_put_under_hscroll() {
         let mut state = pr_state(&[branch_repo("app", "feature")], true);
         set_pr(&mut state, "app", "feature", found_pr(PrState::InReview));
-        let mut terminal = pr_terminal();
+        let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let x = state.layout.pr_badge_hits()[0].x;
 
@@ -18869,10 +19230,15 @@ mod tests {
             assert_eq!(state.layout.pr_badge_hits().len(), 1, "offset {offset}");
             let hit = state.layout.pr_badge_hits()[0].clone();
             assert_eq!(hit.x, x, "offset {offset}");
-            assert_eq!(terminal.backend().buffer()[(hit.x, hit.y)].symbol(), "P");
+            let buf = terminal.backend().buffer();
+            assert_eq!(buf[(hit.x, hit.y)].symbol(), "#");
+            assert_eq!(buf[(hit.x + hit.width - 1, hit.y)].symbol(), "P");
         }
     }
 
+    /// The badge ends the run, so a narrow row cuts the marks before it,
+    /// then the ref from the left; the glyph always paints in the last
+    /// column, and the one span covers what shows of `#7 P`.
     #[test]
     fn tree_pr_badge_span_matches_paint_at_every_width() {
         let state = pr_state(&[branch_repo("app", "feature")], true);
@@ -18883,8 +19249,8 @@ mod tests {
             .expect("repo row")
             .clone();
         let palette = ThemeId::TokyoNight.palette();
-        let (mut shown, mut cut) = (0, 0);
-        for width in 8..48 {
+        let (mut whole, mut cut) = (0, 0);
+        for width in 6..48 {
             for col_offset in [0, 2, 9] {
                 let (line, icons) = paint_tree_row(
                     &row,
@@ -18896,34 +19262,37 @@ mod tests {
                     search_bg_unused(),
                     true,
                     TreeRowDecor {
-                        pr: Some(PrState::InReview),
+                        pr: Some(tree_badge(PrState::InReview, Some("#7"))),
                         ..TreeRowDecor::default()
                     },
                     palette,
                     col_offset,
                 );
-                let span = icons
+                let spans: Vec<(usize, usize)> = icons
                     .iter()
-                    .find(|(kind, _, _)| *kind == IconKind::PrOpen)
-                    .map(|&(_, x, w)| (x, w));
+                    .filter(|(kind, _, _)| *kind == IconKind::PrInReview)
+                    .map(|&(_, x, w)| (x, w))
+                    .collect();
                 // ASCII row: one column per char.
                 let text: Vec<char> = line_text(&line).chars().collect();
                 let what = format!("width {width} offset {col_offset}: {text:?}");
-                match span {
-                    Some((x, w)) => {
-                        shown += 1;
-                        assert_eq!(w, 1, "{what}");
-                        assert!(x + w <= width, "{what}");
-                        assert_eq!(text[x], 'P', "{what}");
+                match spans[..] {
+                    [(x, w)] => {
+                        assert_eq!(x + w, width, "{what}: the glyph is the last column");
+                        let cells: String = text[x..x + w].iter().collect();
+                        assert!("#7 P".ends_with(&cells), "{what}");
+                        assert!(!cells.starts_with(' '), "{what}");
+                        if cells == "#7 P" {
+                            whole += 1;
+                        } else {
+                            cut += 1;
+                        }
                     }
-                    None => {
-                        cut += 1;
-                        assert!(!text.contains(&'P'), "{what}");
-                    }
+                    _ => panic!("one badge span: {spans:?} {what}"),
                 }
             }
         }
-        assert!(shown > 0 && cut > 0, "shown {shown} cut {cut}");
+        assert!(whole > 0 && cut > 0, "whole {whole} cut {cut}");
     }
 
     #[test]
@@ -18931,11 +19300,18 @@ mod tests {
         let mut state = pr_state(&[branch_repo("app", "feature"), repo("lib", true)], true);
         set_pr(&mut state, "app", "feature", found_pr(PrState::InReview));
         focus_tree_row(&mut state, "repo:lib");
-        let mut terminal = pr_terminal();
+        let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let hit = state.layout.pr_badge_hits()[0].clone();
         let want = Some((PathBuf::from("app"), "feature".to_string()));
 
+        // The ref, the space, and the glyph are one target.
+        assert!(hit.width > 1, "{hit:?}");
+        for col in hit.x + 1..hit.x + hit.width {
+            let mut fresh = state.clone();
+            let effect = fresh.dispatch(Action::CtrlClick { col, row: hit.y });
+            assert_eq!(pr_opened(&effect), want, "col {col}");
+        }
         let effect = state.dispatch(Action::CtrlClick {
             col: hit.x,
             row: hit.y,
@@ -19013,7 +19389,8 @@ mod tests {
                 url: url.into(),
             }]
         );
-        assert_eq!(terminal.backend().buffer()[(hit.x, hit.y)].symbol(), "P");
+        let glyph_x = hit.x + hit.width - 1;
+        assert_eq!(terminal.backend().buffer()[(glyph_x, hit.y)].symbol(), "P");
 
         // A frame that paints no badge links nothing.
         state
@@ -19378,7 +19755,8 @@ mod tests {
             "{row}"
         );
         assert_eq!(buf[(hit.x, hit.y)].symbol(), "P");
-        assert_eq!(buf[(hit.x, hit.y)].fg, state.theme.palette().branch_feature);
+        assert_eq!(buf[(hit.x, hit.y)].fg, state.theme.palette().branch_default);
+        assert!(buf[(hit.x, hit.y)].modifier.contains(Modifier::BOLD));
         // The graph badge glyph links to the full PR URL.
         assert!(
             state
@@ -19481,7 +19859,7 @@ mod tests {
             .expect("repo row")
             .clone();
         let palette = ThemeId::TokyoNight.palette();
-        let (mut both, mut sync_only) = (0, 0);
+        let (mut both, mut badge_only) = (0, 0);
         for width in 6..60 {
             for col_offset in [0, 3, 11, 40] {
                 let (line, icons) = paint_tree_row(
@@ -19494,7 +19872,7 @@ mod tests {
                     search_bg_unused(),
                     true,
                     TreeRowDecor {
-                        pr: Some(PrState::Merged),
+                        pr: Some(tree_badge(PrState::Merged, Some("!12"))),
                         ..TreeRowDecor::default()
                     },
                     palette,
@@ -19508,7 +19886,7 @@ mod tests {
                     match kind {
                         // A narrow pane cuts the trailing run from the left.
                         IconKind::Behind => assert!("v12".ends_with(&cells), "{what}"),
-                        IconKind::PrMerged => assert_eq!(cells, "m", "{what}"),
+                        IconKind::PrMerged => assert!("!12 m".ends_with(&cells), "{what}"),
                         IconKind::Branch => assert_eq!(cells, "&", "{what}"),
                         IconKind::Repo => assert_eq!(cells, "@", "{what}"),
                         other => panic!("{other:?}: {what}"),
@@ -19519,11 +19897,13 @@ mod tests {
                     .map(|icon| icon.0)
                     .filter(|kind| matches!(kind, IconKind::PrMerged | IconKind::Behind))
                     .collect();
-                if kinds == [IconKind::PrMerged, IconKind::Behind] {
+                if kinds == [IconKind::Behind, IconKind::PrMerged] {
                     both += 1;
-                } else if kinds == [IconKind::Behind] {
-                    sync_only += 1;
+                } else if kinds == [IconKind::PrMerged] {
+                    badge_only += 1;
                 }
+                // The badge ends the run: it is cut last.
+                assert!(kinds.contains(&IconKind::PrMerged), "{what}");
                 // The pane clips the line at `width`.
                 let shown: String = text.iter().take(width).collect();
                 if !kinds.contains(&IconKind::Behind) {
@@ -19532,8 +19912,8 @@ mod tests {
             }
         }
         assert!(
-            both > 0 && sync_only > 0,
-            "both {both} sync only {sync_only}"
+            both > 0 && badge_only > 0,
+            "both {both} badge only {badge_only}"
         );
     }
 
@@ -19810,8 +20190,8 @@ mod tests {
             "& branch",
             "Branch picker",
             "@ repo",
-            "P PR open",
-            "Pull request is open",
+            "P PR in review",
+            "Pull request is open and waits for review",
             // Labels pad to the widest label of their own section: the
             // PR section to `number`, the repo section to `changes`.
             "number #7",
@@ -19831,9 +20211,21 @@ mod tests {
             assert!(text.contains(want), "{want:?} in\n{text}");
         }
         let palette = state.theme.palette();
-        // From the branch picker past the branch actions (View remotely
-        // last) and the PR fields.
-        state.dispatch(Action::PopoverMove(7));
+        // From the branch picker down to Open PR, past the other sections
+        // and the PR fields: the PR section is last, as its badge is.
+        let sections = state.open_popover_sections();
+        let lines = flat_lines(&sections);
+        let focusable: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].focusable()).collect();
+        let landing = state.popover.as_ref().expect("popover").focus_line;
+        let from = focusable
+            .iter()
+            .position(|&i| i == landing)
+            .expect("landing");
+        let to = focusable
+            .iter()
+            .position(|&i| lines[i].copy_text() == "Open PR")
+            .expect("Open PR line");
+        state.dispatch(Action::PopoverMove(i32::try_from(to - from).unwrap()));
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let buf = &state.painted_frame;
         let open_y = (rect.y..rect.bottom())
@@ -20319,6 +20711,358 @@ mod tests {
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         assert_eq!(graph_badge_hits(&state).len(), 1);
         assert_eq!(graph_badge_hits(&state)[0].x, x);
+    }
+
+    /// Each graph worktree badge paints its state glyph bold in the state
+    /// colour; a stale one paints muted. Both glyph modes.
+    #[test]
+    fn graph_worktree_badges_paint_each_state_and_stale_muted() {
+        let palette = ThemeId::TokyoNight.palette();
+        let cases = [
+            (PrState::CiFailed, "✖", "x", palette.deleted),
+            (PrState::Ready, "◉", "A", palette.added),
+            (PrState::CiRunning, "◐", "r", palette.modified),
+            (PrState::Draft, "◌", "d", palette.muted),
+            (PrState::InReview, "○", "P", palette.branch_default),
+            (PrState::Merged, "✔", "m", palette.branch_feature),
+        ];
+        for ascii in [true, false] {
+            for (pr, nerd, letter, color) in cases {
+                for stale in [false, true] {
+                    let what = format!("{pr:?} ascii={ascii} stale={stale}");
+                    let mut state = pr_graph_state("app/.worktrees/wt", "feat", false);
+                    state.ascii = ascii;
+                    state.set_pr_poll_mode(crate::tui::pr_poll::PrPollMode::Every(50));
+                    let landed = if stale {
+                        Instant::now() - std::time::Duration::from_secs(1)
+                    } else {
+                        Instant::now()
+                    };
+                    assert!(state.apply_pr_lookup_at(
+                        Path::new("app/.worktrees/wt"),
+                        "feat",
+                        Some(PR_REMOTE.into()),
+                        found_pr(pr),
+                        landed,
+                    ));
+                    let mut terminal = pr_terminal();
+                    terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                    let hits = graph_badge_hits(&state);
+                    assert_eq!(hits.len(), 1, "{what}");
+                    let cell = &terminal.backend().buffer()[(hits[0].x, hits[0].y)];
+                    assert_eq!(cell.symbol(), if ascii { letter } else { nerd }, "{what}");
+                    // A merged PR is not polled, so it never goes stale.
+                    let want = if stale && pr != PrState::Merged {
+                        palette.muted
+                    } else {
+                        color
+                    };
+                    assert_eq!(cell.fg, want, "{what}");
+                    assert!(cell.modifier.contains(Modifier::BOLD), "{what}");
+                }
+            }
+        }
+    }
+
+    /// `app` on `feature` with PR `pr` from `remote`, the graph of `app`
+    /// loaded with its sync header, and the repo row focused.
+    fn chip_state(remote: &str, pr: PullRequest, ascii: bool) -> AppState {
+        const HEAD: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut state = pr_state(&[branch_repo("app", "feature")], ascii);
+        assert!(state.apply_pr_lookup(
+            Path::new("app"),
+            "feature",
+            Some(remote.into()),
+            PrLookup::Found(pr),
+        ));
+        focus_tree_row(&mut state, "repo:app");
+        state.graph = Some(GraphModel {
+            commits: vec![Commit {
+                id: HEAD.into(),
+                subject: "seed graph".into(),
+                refs: vec!["feature".into()],
+                author_name: "Ada".into(),
+                author_date_unix: 1_700_000_000,
+                ..Commit::default()
+            }],
+            head_id: Some(HEAD.into()),
+            sync: Some(workspace_status_graph::SyncState {
+                branch: "feature".into(),
+                status: workspace_status_graph::SyncStatus::Ahead,
+                ahead: 1,
+                behind: 0,
+            }),
+            ..GraphModel::default()
+        });
+        state.graph_identity = Some(("app".into(), HEAD.into()));
+        state
+    }
+
+    /// Text of `line`.
+    fn chip_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    /// The chip names the state, the ref of either forge, and the next
+    /// action; merged says how long ago; a stacked ready PR merges its base
+    /// first; stale paints every part muted. Shorter candidates drop the
+    /// next action, then the label.
+    #[test]
+    fn graph_header_chip_reads_state_ref_label_and_next_action() {
+        let palette = ThemeId::TokyoNight.palette();
+        let now = 1_800_000_000;
+        let cases = [
+            (
+                PrState::CiFailed,
+                "x",
+                "✖",
+                "CI failed  > fix CI",
+                palette.deleted,
+            ),
+            (
+                PrState::Ready,
+                "A",
+                "◉",
+                "ready to merge  > merge",
+                palette.added,
+            ),
+            (
+                PrState::CiRunning,
+                "r",
+                "◐",
+                "CI running  > wait for CI",
+                palette.modified,
+            ),
+            (PrState::Draft, "d", "◌", "draft  > undraft", palette.muted),
+            (
+                PrState::InReview,
+                "P",
+                "○",
+                "in review  > get review",
+                palette.branch_default,
+            ),
+            (
+                PrState::Merged,
+                "m",
+                "✔",
+                "merged · 3h ago",
+                palette.branch_feature,
+            ),
+        ];
+        let forges = [
+            (PR_REMOTE, "https://github.com/octo/demo/pull/7", "#7"),
+            (
+                "git@gitlab.com:acme/services/api.git",
+                "https://gitlab.com/acme/services/api/-/merge_requests/12",
+                "!12",
+            ),
+        ];
+        for (pr_state_kind, letter, nerd, tail, color) in cases {
+            for (remote, url, ref_text) in forges {
+                for ascii in [true, false] {
+                    let what = format!("{pr_state_kind:?} {ref_text} ascii={ascii}");
+                    let number = if ref_text == "#7" { 7 } else { 12 };
+                    let mut pr = PullRequest::fixture(number, url, pr_state_kind);
+                    pr.updated_at = Some(now - 3 * 3_600);
+                    let state = chip_state(remote, pr, ascii);
+                    let chip = graph_pr_chip(&state, now).expect(&what);
+                    assert_eq!(chip.checkout, PathBuf::from("app"), "{what}");
+                    assert_eq!(chip.head_width as usize, ref_text.len() + 2, "{what}");
+                    let glyph = if ascii { letter } else { nerd };
+                    let tail = if ascii {
+                        tail.to_string()
+                    } else {
+                        tail.replace('>', "▸")
+                    };
+                    let label = tail.split("  ").next().unwrap();
+                    let label = label.split(" · ").next().unwrap();
+                    let texts: Vec<String> = chip.candidates.iter().map(chip_text).collect();
+                    assert_eq!(
+                        texts,
+                        [
+                            format!("{glyph} {ref_text} {tail}"),
+                            format!("{glyph} {ref_text} {label}"),
+                            format!("{glyph} {ref_text}"),
+                        ],
+                        "{what}"
+                    );
+                    let spans = &chip.candidates[0].spans;
+                    assert_eq!(spans[0].style.fg, Some(color), "{what}: glyph");
+                    assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+                    assert_eq!(spans[2].style.fg, Some(palette.repo), "{what}: ref");
+                    assert_eq!(spans[4].style.fg, Some(color), "{what}: label");
+                    let last = spans.last().unwrap();
+                    if pr_state_kind == PrState::Merged {
+                        assert_eq!(last.style.fg, Some(palette.muted), "{what}: age");
+                    } else {
+                        assert_eq!(last.style.fg, Some(color), "{what}: next action");
+                        assert!(last.style.add_modifier.contains(Modifier::BOLD));
+                        let arrow = &spans[spans.len() - 3];
+                        assert!(arrow.style.add_modifier.contains(Modifier::DIM));
+                    }
+                }
+            }
+        }
+
+        // A ready PR whose base is the head of another open PR of the repo.
+        let mut base =
+            PullRequest::fixture(5, "https://github.com/octo/demo/pull/5", PrState::InReview);
+        base.head = "feature/a".into();
+        let mut top =
+            PullRequest::fixture(6, "https://github.com/octo/demo/pull/6", PrState::Ready);
+        top.head = "feature/b".into();
+        top.base = "feature/a".into();
+        let mut state = pr_state(
+            &[
+                branch_repo("app", "feature/b"),
+                branch_repo("lib", "feature/a"),
+            ],
+            true,
+        );
+        for (checkout, branch, pr) in [("app", "feature/b", top), ("lib", "feature/a", base)] {
+            assert!(state.apply_pr_lookup(
+                Path::new(checkout),
+                branch,
+                Some(PR_REMOTE.into()),
+                PrLookup::Found(pr),
+            ));
+        }
+        state.graph = chip_state(PR_REMOTE, found_pr_value(), true).graph;
+        if let Some(sync) = state.graph.as_mut().and_then(|model| model.sync.as_mut()) {
+            sync.branch = "feature/b".into();
+        }
+        state.graph_identity = Some(("app".into(), "HEAD".into()));
+        let chip = graph_pr_chip(&state, now).expect("stacked chip");
+        assert_eq!(
+            chip_text(&chip.candidates[0]),
+            "A #6 ready to merge  > merge #5 first"
+        );
+
+        // Stale: every part muted.
+        let mut state = chip_state(PR_REMOTE, found_pr_value(), true);
+        state.set_pr_poll_mode(crate::tui::pr_poll::PrPollMode::Every(50));
+        assert!(state.apply_pr_lookup_at(
+            Path::new("app"),
+            "feature",
+            Some(PR_REMOTE.into()),
+            PrLookup::Found(found_pr_value()),
+            Instant::now() - std::time::Duration::from_secs(1),
+        ));
+        let chip = graph_pr_chip(&state, now).expect("stale chip");
+        for span in chip.candidates[0]
+            .spans
+            .iter()
+            .filter(|span| span.content.trim() != "")
+        {
+            assert_eq!(span.style.fg, Some(palette.muted), "{:?}", span.content);
+        }
+
+        // A graph still on the old branch, or no PR: no chip.
+        let mut state = chip_state(PR_REMOTE, found_pr_value(), true);
+        if let Some(sync) = state.graph.as_mut().and_then(|model| model.sync.as_mut()) {
+            sync.branch = "old".into();
+        }
+        assert!(graph_pr_chip(&state, now).is_none());
+    }
+
+    /// The PR [`found_pr`] wraps.
+    fn found_pr_value() -> PullRequest {
+        PullRequest::fixture(7, "https://github.com/octo/demo/pull/7", PrState::CiFailed)
+    }
+
+    /// The chip paints flush right on the sync header line of the graph at
+    /// depth 0 (right pane) and depth 1 (left pane), boxed and flat; its
+    /// `<glyph> <ref>` is the PR icon hit and the PR link, and Ctrl+click
+    /// there opens the PR. A narrower pane drops the next action first.
+    #[test]
+    fn graph_header_chip_paints_flush_right_and_links_its_ref_in_every_look() {
+        let url = "https://github.com/octo/demo/pull/7";
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            for depth_1 in [false, true] {
+                // Wide graph pane, then one too narrow for the next action.
+                for (wide, want) in [
+                    (true, "x #7 CI failed  > fix CI"),
+                    (false, "x #7 CI failed"),
+                ] {
+                    let what = format!("{background:?} depth_1={depth_1} wide={wide}");
+                    let mut state = chip_state(PR_REMOTE, found_pr_value(), true);
+                    state.background = background;
+                    if depth_1 {
+                        state.open_commit_files(
+                            "app".into(),
+                            super::super::drill::CommitFileSource::Commit {
+                                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                            },
+                            Vec::new(),
+                        );
+                    }
+                    // The graph pane is the left pane at depth 1.
+                    state.tree_fraction = match (depth_1, wide) {
+                        (false, true) => 0.3,
+                        (false, false) => 0.78,
+                        (true, true) => 0.6,
+                        (true, false) => 0.22,
+                    };
+                    let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+                    terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                    let (x0, width) = if depth_1 {
+                        (state.layout.tree_x, state.layout.tree_width)
+                    } else {
+                        (state.layout.diff_content_x, state.layout.diff_pane_width)
+                    };
+                    // `feature ^1`, two blank columns, then the chip.
+                    let full = "feature ^1  x #7 CI failed  > fix CI".len() as u16;
+                    assert_eq!(width >= full, wide, "{what}: graph {width} columns");
+                    assert!(width >= full - 10, "{what}: graph {width} columns");
+                    let hit = state
+                        .layout
+                        .icon_hits
+                        .iter()
+                        // The tree badge of `app` is a PR hit too.
+                        .find(|hit| hit.kind == IconKind::PrCiFailed && hit.x >= x0)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            panic!("{what}: chip hit in\n{}", buffer_text(&terminal))
+                        });
+                    let buf = terminal.backend().buffer();
+                    let header: String =
+                        (x0..x0 + width).map(|x| buf[(x, hit.y)].symbol()).collect();
+                    assert!(header.starts_with("feature ^1"), "{what}: {header:?}");
+                    assert!(header.ends_with(want), "{what}: {header:?}");
+                    let chip_x = x0 + width - want.chars().count() as u16;
+                    assert_eq!(
+                        (hit.x, hit.width, &hit.target),
+                        (chip_x, 4, &IconTarget::PullRequest(PathBuf::from("app"))),
+                        "{what}: the hit covers `x #7`"
+                    );
+                    assert!(
+                        state
+                            .layout
+                            .links
+                            .contains(&crate::tui::hyperlink::LinkHit {
+                                y: hit.y,
+                                x: hit.x,
+                                width: 4,
+                                url: url.into(),
+                            }),
+                        "{what}: {:?}",
+                        state.layout.links
+                    );
+                    let effect = state.dispatch(Action::CtrlClick {
+                        col: hit.x + 2,
+                        row: hit.y,
+                    });
+                    assert_eq!(
+                        pr_opened(&effect),
+                        Some((PathBuf::from("app"), "feature".to_string())),
+                        "{what}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

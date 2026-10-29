@@ -24,12 +24,11 @@ use super::super::popover::{
     popover_sections, step_line, tree_icon_target, IconTarget, PopoverLine, PopoverOrigin,
     PopoverOwner, PopoverSection, PopoverState, PEEK_DWELL_MS, PEEK_GRACE_MS,
 };
-use super::super::pr_status::PrState;
 use super::super::selection::TextSelection;
 use super::super::status::StatusMessage;
 use super::super::tree::{
     painted_row_segments, pr_badge_kind, pr_badge_repo, segment_icons, with_comment_mark,
-    with_viewed_mark, NodeKind, NodeSegments, VisibleRow,
+    with_viewed_mark, NodeKind, NodeSegments, PrBadge, VisibleRow,
 };
 use super::{AppState, IconHit};
 use workspace_status_graph::{paint_model, GraphRow, ASCII, UNICODE};
@@ -47,8 +46,8 @@ pub(crate) struct PeekTimers {
     grace: Option<Instant>,
 }
 
-/// Viewed, commented, resolved, and PR badge state of one tree row.
-pub(crate) type TreeRowMarks = (bool, bool, bool, Option<PrState>);
+/// Viewed, commented, resolved, and PR badge of one tree row.
+pub(crate) type TreeRowMarks = (bool, bool, bool, Option<PrBadge>);
 
 /// Checkout, primary checkout, branch, and source of the shown commit-file
 /// list: the scope its line comments match in.
@@ -106,20 +105,28 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    /// Viewed, comment, and PR badge marks tree row `row` paints.
-    pub(crate) fn tree_row_marks(&self, row: &VisibleRow) -> TreeRowMarks {
+    /// Viewed, comment, and PR badge marks tree row `row` paints in a tree
+    /// `tree_width` columns wide at `now`.
+    pub(crate) fn tree_row_marks(
+        &self,
+        row: &VisibleRow,
+        tree_width: usize,
+        now: Instant,
+    ) -> TreeRowMarks {
         let viewed = row.kind == NodeKind::File && self.reviewed.contains(&row.id);
         let commented = tree_row_has_comment(&self.comment_store, &self.snapshot, row);
         let resolved =
             commented && tree_row_comments_resolved(&self.comment_store, &self.snapshot, row);
-        let pr = pr_badge_repo(row).and_then(|repo| self.pr_badge(Path::new(repo)));
+        let pr = pr_badge_repo(row)
+            .and_then(|repo| self.tree_pr_badge(Path::new(repo), tree_width, now));
         (viewed, commented, resolved, pr)
     }
 
     /// Every segment tree row `row` paints this frame.
     pub(crate) fn tree_row_paint_segments(&self, row: &VisibleRow) -> NodeSegments {
-        let (viewed, commented, resolved, pr) = self.tree_row_marks(row);
-        painted_row_segments(row, self.ascii, viewed, commented, resolved, pr)
+        let width = usize::from(self.layout.tree_width);
+        let (viewed, commented, resolved, pr) = self.tree_row_marks(row, width, Instant::now());
+        painted_row_segments(row, self.ascii, viewed, commented, resolved, pr.as_ref())
     }
 
     /// Scope the line comments of the shown commit-file list match in. A
@@ -889,6 +896,7 @@ mod tests {
     use super::super::super::command_palette::command_for;
     use super::super::super::event_pump::overlay_blocks_background_ticks;
     use super::super::super::keys::event_to_action;
+    use super::super::super::pr_status::PrState;
     use super::super::super::pull_request::{PrLookup, PullRequest};
     use super::super::super::remote_view::{RemoteTarget, NOTHING_TO_VIEW, UNCOMMITTED_LOCAL_ONLY};
     use super::super::super::render::draw;
@@ -1315,10 +1323,10 @@ mod tests {
             icons,
             vec![
                 IconKind::Branch,
-                IconKind::PrOpen,
                 IconKind::Repo,
                 IconKind::Behind,
                 IconKind::ChangeCount,
+                IconKind::PrInReview,
             ]
         );
         let titles = |lines: &[PopoverLine]| -> Vec<String> {
@@ -1326,9 +1334,9 @@ mod tests {
         };
         let lines = section_lines(&app);
         assert_eq!(
-            titles(&lines[1]),
+            titles(&lines[4]),
             vec![
-                IconKind::PrOpen.spec().meaning.to_string(),
+                IconKind::PrInReview.spec().meaning.to_string(),
                 "#7".into(),
                 "loading…".into(),
                 "https://github.com/octo/demo/pull/7".into(),
@@ -1336,7 +1344,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            titles(&lines[3]),
+            titles(&lines[2]),
             vec![
                 IconKind::Behind.spec().meaning.to_string(),
                 "2 commits to pull".into(),
@@ -2199,7 +2207,7 @@ mod tests {
         app.layout.icon_hits.insert(
             0,
             IconHit {
-                kind: IconKind::PrOpen,
+                kind: IconKind::PrInReview,
                 target: IconTarget::PullRequest(PathBuf::from("gone")),
                 ..hit.clone()
             },

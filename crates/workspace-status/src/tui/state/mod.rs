@@ -1069,7 +1069,8 @@ pub struct AppState {
     pub(crate) diff_row_builds: std::cell::Cell<usize>,
 }
 
-fn unix_now() -> i64 {
+/// Wall clock now, in Unix seconds (0 before the epoch).
+pub(crate) fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

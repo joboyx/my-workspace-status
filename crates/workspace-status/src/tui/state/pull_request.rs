@@ -48,7 +48,7 @@ use super::super::pull_request::{
     PullRequest, PullRequestDetail, NO_PR_FOR_ROW, OPEN_FAILED,
 };
 use super::super::status::StatusMessage;
-use super::super::tree::NodeKind;
+use super::super::tree::{NodeKind, PrBadge, PrTotals, PR_REF_MIN_TREE_COLS};
 use super::AppState;
 
 /// What the forge said about the PR of one (remote URL, branch).
@@ -762,7 +762,7 @@ impl AppState {
     }
 
     /// Set how PR polling runs, from [`crate::settings::Settings::pr_poll`].
-    pub(super) fn set_pr_poll_mode(&mut self, mode: PrPollMode) {
+    pub(crate) fn set_pr_poll_mode(&mut self, mode: PrPollMode) {
         self.pr_cache.poll = mode;
     }
 
@@ -1151,24 +1151,6 @@ impl AppState {
         let record = self.pr_cache.checkouts.get(checkout)?;
         (self.snapshot_branch(checkout) == Some(record.branch.as_str())).then_some(record)
     }
-}
-
-// Only tests read this until the PR badge, popover, alert, and PRs tab
-// surfaces do.
-#[cfg_attr(not(test), allow(dead_code))]
-impl AppState {
-    /// When the last successful PR lookup of checkout `checkout` landed, for
-    /// its current branch ("checked … ago"). `None` before one lands. `r`
-    /// and a full reload keep it until the new lookup succeeds.
-    pub(crate) fn pr_checked_at(&self, checkout: &Path) -> Option<Instant> {
-        self.current_pr_record(checkout)?.checked_at
-    }
-
-    /// The failure of the last PR lookup of checkout `checkout` for its
-    /// current branch; `None` when it succeeded or none landed yet.
-    pub(crate) fn pr_lookup_failure(&self, checkout: &Path) -> Option<&PrLookupFailure> {
-        self.current_pr_record(checkout)?.failure.as_ref()
-    }
 
     /// True when the badge of checkout `checkout` is stale at `now`: it
     /// shows a polled (open) PR, and the last successful lookup is older
@@ -1194,6 +1176,97 @@ impl AppState {
                     self.pr_poll_interval_ms(),
                 )
             })
+    }
+
+    /// The PR badge of checkout `checkout` in a tree `tree_width` columns
+    /// wide at `now`: the state of [`Self::pull_request_for`], its ref unless
+    /// the tree is narrower than [`PR_REF_MIN_TREE_COLS`], and whether it is
+    /// stale ([`Self::pr_is_stale`]). `None` when the checkout shows no PR.
+    pub(crate) fn tree_pr_badge(
+        &self,
+        checkout: &Path,
+        tree_width: usize,
+        now: Instant,
+    ) -> Option<PrBadge> {
+        let pr = self.pull_request_for(checkout)?;
+        Some(PrBadge {
+            state: pr.state,
+            ref_text: (tree_width >= PR_REF_MIN_TREE_COLS).then(|| pr.ref_text()),
+            stale: self.pr_is_stale(checkout, now),
+        })
+    }
+
+    /// The workspace PR total: the PRs whose badge shows on a visible
+    /// checkout (open and merged), each PR counted once, and how many of
+    /// them need the author ([`PullRequest::needs_you`]).
+    pub(crate) fn pr_totals(&self) -> PrTotals {
+        let mut seen = HashSet::new();
+        let mut totals = PrTotals::default();
+        for row in self.pr_rows() {
+            let Some(pr) = self.pull_request_for(Path::new(&row.repo)) else {
+                continue;
+            };
+            if seen.insert(pr.url.as_str()) {
+                totals.prs += 1;
+                totals.need_you += usize::from(pr.needs_you());
+            }
+        }
+        totals
+    }
+
+    /// The checkout and PR the graph header chip shows: the PR of the
+    /// graph's checkout, when the graph's sync header paints the branch the
+    /// checkout is on now (a graph loaded before a branch switch shows
+    /// none).
+    pub(crate) fn graph_header_pr(&self) -> Option<(PathBuf, &PullRequest)> {
+        let (checkout, _) = self.graph_identity.as_ref()?;
+        let checkout = Path::new(checkout);
+        let sync = self.graph.as_ref()?.sync.as_ref()?;
+        if self.snapshot_branch(checkout) != Some(sync.branch.as_str()) {
+            return None;
+        }
+        Some((checkout.to_path_buf(), self.pull_request_for(checkout)?))
+    }
+
+    /// The known PR that the PR of checkout `checkout` is stacked on
+    /// ([`PullRequest::stacked_on`]): among the PRs of every visible
+    /// checkout whose remote is the same forge repository, with the
+    /// checkout's configured default branch.
+    pub(crate) fn pr_stack_base(&self, checkout: &Path) -> Option<&PullRequest> {
+        let pr = self.pull_request_for(checkout)?;
+        let forge_repo = |path: &Path| parse_remote(self.pr_cache.remote_for(path)?);
+        let repo = forge_repo(checkout)?;
+        let known: Vec<&PullRequest> = self
+            .pr_rows()
+            .map(|row| Path::new(&row.repo))
+            .filter(|path| forge_repo(path).as_ref() == Some(&repo))
+            .filter_map(|path| self.pull_request_for(path))
+            .collect();
+        let default_branch = self
+            .snapshot
+            .repos
+            .iter()
+            .find(|row| Path::new(&row.repo) == checkout)
+            .and_then(|row| row.default_branch_override.as_deref());
+        pr.stacked_on(known, default_branch)
+    }
+}
+
+// Only tests read this until the PR popover, alert, and PRs tab surfaces
+// do.
+#[cfg_attr(not(test), allow(dead_code))]
+impl AppState {
+    /// When the last successful PR lookup of checkout `checkout` landed, for
+    /// its current branch ("checked … ago"). `None` before one lands. `r`
+    /// and a full reload keep it until the new lookup succeeds.
+    pub(crate) fn pr_checked_at(&self, checkout: &Path) -> Option<Instant> {
+        self.current_pr_record(checkout)?.checked_at
+    }
+
+    /// The failure of the last PR lookup of checkout `checkout` for its
+    /// current branch; `None` when it succeeded or none landed yet.
+    pub(crate) fn pr_lookup_failure(&self, checkout: &Path) -> Option<&PrLookupFailure> {
+        self.current_pr_record(checkout)?.failure.as_ref()
     }
 
     /// Take the queued [`PrTransition`]s, oldest first.
@@ -1589,7 +1662,7 @@ mod tests {
             y,
             x,
             width: 2,
-            kind: IconKind::PrOpen,
+            kind: IconKind::PrInReview,
             target: IconTarget::PullRequest(PathBuf::from(repo)),
         }];
     }

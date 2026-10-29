@@ -210,7 +210,7 @@ pub struct PopoverSection {
 /// row.
 pub fn tree_icon_target(kind: IconKind, row: &VisibleRow) -> IconTarget {
     match (kind, row.repo.as_deref()) {
-        (IconKind::PrOpen | IconKind::PrApproved | IconKind::PrMerged, Some(repo)) => {
+        (kind, Some(repo)) if kind.is_pull_request() => {
             IconTarget::PullRequest(PathBuf::from(repo))
         }
         _ => IconTarget::TreeRow(row.id.clone()),
@@ -232,9 +232,10 @@ pub fn graph_row_id(row: &GraphRow) -> String {
 
 /// Catalog kind and target of graph icon `kind` painted for `row`. `part`
 /// is the [`workspace_status_graph::IconSpan::part`] and `chip` its
-/// [`workspace_status_graph::IconSpan::target`]. `None` for a PR badge (its
-/// checkout comes from the badge list), the sync header and the footer
-/// hint (no row icon), and a worktree mark whose index is not on the row.
+/// [`workspace_status_graph::IconSpan::target`]. `None` for a PR badge or the
+/// header chip (their checkout comes from the badge list or the chip), the
+/// sync header and the footer hint (no row icon), and a worktree mark whose
+/// index is not on the row.
 ///
 /// A checkout / sync mark run is one icon: [`IconKind::ChipCheckout`] when
 /// HEAD is on its branch, else [`IconKind::ChipSynced`].
@@ -283,7 +284,10 @@ pub fn graph_icon(
             PartTarget::Marks { checkout: true, .. } => on_chip(IconKind::ChipCheckout),
             _ => on_chip(IconKind::ChipSynced),
         },
-        GraphIconKind::Badge | GraphIconKind::SyncHeader | GraphIconKind::MoreBelow => None,
+        GraphIconKind::Badge
+        | GraphIconKind::SyncHeader
+        | GraphIconKind::HeaderChip
+        | GraphIconKind::MoreBelow => None,
     }
 }
 

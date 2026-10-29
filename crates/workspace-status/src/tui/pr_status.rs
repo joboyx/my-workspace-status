@@ -29,8 +29,6 @@ pub enum PrState {
     InReview,
 }
 
-// Only tests read this until the PR badge, popover, and alert surfaces do.
-#[cfg_attr(not(test), allow(dead_code))]
 impl PrState {
     /// Lower-case state label: `merged`, `CI failed`, `draft`, `CI running`,
     /// `ready to merge`, or `in review`.
@@ -151,7 +149,7 @@ pub struct PrNotes {
     pub changes_requested: bool,
 }
 
-// Only tests read this until the PR badge, popover, and alert surfaces do.
+// Only tests read this until the PR popover and alert surfaces do.
 #[cfg_attr(not(test), allow(dead_code))]
 impl PrNotes {
     /// `has conflicts`, `unresolved threads`, `changes requested`: the notes
@@ -196,8 +194,6 @@ pub enum NextAction {
     GetReview,
 }
 
-// Only tests read this until the PR badge, popover, and alert surfaces do.
-#[cfg_attr(not(test), allow(dead_code))]
 impl NextAction {
     /// Exact text: `fix CI`, `fix conflicts`, `undraft`, `address review`,
     /// `merge <base ref> first`, `merge`, `wait for CI`, or `get review`.
@@ -232,8 +228,6 @@ impl NextAction {
 ///
 /// `open_base_ref` is the ref of the open PR whose head branch is this PR's
 /// base branch, if there is one: a ready PR then says `merge <ref> first`.
-// Only tests read this until the PR badge, popover, and alert surfaces do.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn next_action(
     state: PrState,
     notes: PrNotes,
@@ -268,7 +262,7 @@ pub enum CiLinkKind {
     Pipeline,
 }
 
-// Only tests read this until the PR badge, popover, and alert surfaces do.
+// Only tests read this until the PR popover and alert surfaces do.
 #[cfg_attr(not(test), allow(dead_code))]
 impl CiLinkKind {
     /// Action label: `Open failed check`, `Open running check`,

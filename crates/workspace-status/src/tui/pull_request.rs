@@ -117,8 +117,6 @@ pub struct PullRequest {
     pub merge_state_settled: bool,
 }
 
-// Only tests read this until the PR badge, popover, and alert surfaces do.
-#[cfg_attr(not(test), allow(dead_code))]
 impl PullRequest {
     /// `#318` on GitHub, `!12` on GitLab.
     pub fn ref_text(&self) -> String {
