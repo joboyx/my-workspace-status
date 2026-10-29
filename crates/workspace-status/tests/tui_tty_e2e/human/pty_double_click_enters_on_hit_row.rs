@@ -1,8 +1,8 @@
 use crate::harness::{tree_row_containing, PtySession};
 use crate::seed::daily_workspace;
 use crate::support::{
-    title_has_diff, title_has_files, title_has_graph, tree_has, GIT_WAIT, RIGHT_PANE_COL,
-    SETTLE_MS, TREE_DEPTH1_CHEVRON_COL, TREE_LABEL_COL, WAIT,
+    sgr_double_click, title_has_diff, title_has_files, title_has_graph, tree_has, GIT_WAIT,
+    RIGHT_PANE_COL, SETTLE_MS, TREE_DEPTH1_CHEVRON_COL, TREE_LABEL_COL, WAIT,
 };
 
 /// Live `last_click` window is 400ms. Wait past it so the next pair is a
@@ -15,15 +15,6 @@ fn screen_row_containing(screen: &str, needle: &str) -> Option<u16> {
         .lines()
         .enumerate()
         .find_map(|(i, line)| line.contains(needle).then_some(i as u16))
-}
-
-/// Two xterm SGR left press+release reports on the same cell.
-///
-/// The live loop does not decode a double-click button. It treats two
-/// left Downs at the same cell within 400ms as Enter (`nav_enter`).
-fn sgr_double_click(tui: &mut PtySession, col: u16, row: u16) {
-    tui.sgr_click(col, row);
-    tui.sgr_click(col, row);
 }
 
 /// Double-click is Enter on the hit row (help: `Enter dblclick`).

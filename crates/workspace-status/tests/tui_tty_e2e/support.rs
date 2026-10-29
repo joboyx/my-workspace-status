@@ -1198,6 +1198,55 @@ pub fn corrupt_index(index: &Path) {
 /// Gap between visual-highlight keys so held-nav does not coalesce them.
 pub const VISUAL_KEY_GAP_MS: u64 = 50;
 
+/// CSI-u press then release of an unshifted key (`CSI code ; 1 : 1 u`,
+/// `CSI code ; 1 : 3 u`), the bytes of one typed tap.
+pub fn csi_u_tap(key: char) -> String {
+    let code = u32::from(key.to_ascii_lowercase());
+    format!("\x1b[{code};1:1u\x1b[{code};1:3u")
+}
+
+/// Shift+letter press then release (`CSI code ; 2 : 1 u`, `: 3 u`).
+pub fn csi_u_shift_tap(letter: char) -> String {
+    let code = u32::from(letter.to_ascii_lowercase());
+    format!("\x1b[{code};2:1u\x1b[{code};2:3u")
+}
+
+/// One typeless CSI-u report of an unshifted key (`CSI code ; 1 u`).
+///
+/// VTE without event types sends this for a press, and sends the
+/// key-up as a second identical report in the same burst.
+pub fn csi_u_typeless(key: char) -> String {
+    let code = u32::from(key.to_ascii_lowercase());
+    format!("\x1b[{code};1u")
+}
+
+/// One typeless CSI-u report with Shift (`CSI code ; 2 u`).
+pub fn csi_u_typeless_shift(letter: char) -> String {
+    let code = u32::from(letter.to_ascii_lowercase());
+    format!("\x1b[{code};2u")
+}
+
+/// Send the keys of one gesture (`gg`, `gt`, a tap and its typeless
+/// release, a double-click) in one PTY write.
+///
+/// The TUI times a gesture by the stdin read its bytes arrived in. One
+/// write arrives in one read, so every key of the gesture shares one
+/// arrival instant: a `g` chord cannot expire and a typeless release stays
+/// inside the echo window however loaded the machine is. Keys sent in
+/// separate writes can arrive in separate reads with any gap between them.
+pub fn send_gesture(tui: &mut PtySession, parts: &[&str]) {
+    tui.send_bytes(parts.concat().as_bytes());
+}
+
+/// Two SGR left press + release reports on one cell, in one write
+/// (see [`send_gesture`]). The TUI reads two left presses on the same
+/// cell within 400 ms of arrival as a double-click.
+pub fn sgr_double_click(tui: &mut PtySession, col: u16, row: u16) {
+    let (x, y) = (col.saturating_add(1), row.saturating_add(1));
+    let click = format!("\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m");
+    send_gesture(tui, &[&click, &click]);
+}
+
 /// Launch paint of [`crate::seed::two_hunk_regions_workspace`]: cursor on
 /// `regions.txt`, both hunks in the UNSTAGED diff.
 pub fn regions_first_paint(screen: &str) -> bool {
