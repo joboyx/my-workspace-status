@@ -520,6 +520,19 @@ impl CompareTab {
         self.head_ref != COMPARE_HEAD_REF
     }
 
+    /// Full id of the one commit a Diff commit vs parent tab shows: the
+    /// pinned head when the base is its first parent (`<sha>^...<sha>`).
+    /// `None` for any other range (a live head, another base, or a
+    /// commit-vs-working-tree tab), which has no single commit message.
+    ///
+    /// Read from the tab key, so it holds before the range loads and needs
+    /// no git call.
+    pub fn commit_vs_parent(&self) -> Option<&str> {
+        let parent = self.base_ref.strip_suffix('^')?;
+        (self.worktree_file.is_none() && self.is_pinned() && parent == self.head_ref)
+            .then_some(self.head_ref.as_str())
+    }
+
     /// Diff pane header range (`<base-ref>...HEAD`,
     /// `abc1234^...abc1234` for a pinned head, or
     /// `abc1234 ↔ working tree` for a commit-vs-working-tree tab).
@@ -1466,6 +1479,28 @@ mod tests {
         assert!(!live.is_pinned());
         assert_eq!(live.label(), "app ↔ main");
         assert_eq!(live.range_header(), "main...HEAD");
+    }
+
+    /// Only the Diff commit vs parent tab (`<sha>^...<sha>`, head pinned)
+    /// is one commit against its parent; a live range, a pinned head
+    /// against another base, and a commit-vs-working-tree tab are not.
+    #[test]
+    fn commit_vs_parent_is_the_pinned_head_against_its_first_parent() {
+        let mut tabs = TabStrip::default();
+        tabs.open_or_focus("app".into(), format!("{SHA}^"), SHA.into());
+        assert_eq!(tabs.active_compare().unwrap().commit_vs_parent(), Some(SHA));
+        tabs.open_or_focus("app".into(), "main".into(), COMPARE_HEAD_REF.into());
+        assert_eq!(tabs.active_compare().unwrap().commit_vs_parent(), None);
+        tabs.open_or_focus("app".into(), "main".into(), SHA.into());
+        assert_eq!(tabs.active_compare().unwrap().commit_vs_parent(), None);
+        tabs.open_or_focus("app".into(), format!("{SHA}^"), COMPARE_HEAD_REF.into());
+        assert_eq!(tabs.active_compare().unwrap().commit_vs_parent(), None);
+        let file = WorktreeFile {
+            path: "a.rs".into(),
+            old_path: None,
+        };
+        tabs.open_or_focus_worktree("app".into(), SHA.into(), file);
+        assert_eq!(tabs.active_compare().unwrap().commit_vs_parent(), None);
     }
 
     #[test]

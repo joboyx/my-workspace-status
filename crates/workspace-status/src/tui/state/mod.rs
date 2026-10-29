@@ -19,6 +19,7 @@ mod scroll_glide;
 
 pub(crate) use pull_request::PrDetailState;
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -1835,21 +1836,15 @@ impl AppState {
         self.commit_msg_scroll = Some((id, next as usize));
     }
 
-    /// Graph row identity of the commit or stash the depth-2 commit-files
-    /// footer shows: the same key [`Self::graph_footer_msg_scroll`] uses
-    /// for that row. `None` for a compare tab and for sources with no
-    /// message (worktree, compare, commit vs worktree).
+    /// Graph row identity of the commit or stash the commit-files footer
+    /// shows (a depth-2 drill or a Diff commit vs parent tab,
+    /// [`Self::commit_footer_source`]): the same key
+    /// [`Self::graph_footer_msg_scroll`] uses for that row, so one commit
+    /// keeps one offset on every footer. `None` for a range compare tab and
+    /// for sources with no message (worktree, compare, commit vs worktree).
     pub(crate) fn commit_detail_msg_identity(&self) -> Option<String> {
-        if self.tabs.active_compare().is_some() {
-            return None;
-        }
-        let (repo, source) = match &self.drill {
-            DrillView::Files { repo, source, .. } | DrillView::Diff { repo, source, .. } => {
-                (repo, source)
-            }
-            DrillView::Graph => return None,
-        };
-        match source {
+        let (repo, source) = self.commit_footer_source()?;
+        match source.as_ref() {
             CommitFileSource::Commit { commit_id } => Some(format!("{repo}#commit:{commit_id}")),
             CommitFileSource::Stash { stash_ref } => Some(format!("{repo}#stash:{stash_ref}")),
             CommitFileSource::Worktree
@@ -2059,27 +2054,55 @@ impl AppState {
         })
     }
 
-    /// The drilled commit-files source of a Workspace drill. `None` for a
-    /// compare tab and for the graph view.
-    fn workspace_drill_source(&self) -> Option<&CommitFileSource> {
-        if self.tabs.active_compare().is_some() {
-            return None;
+    /// Checkout and source of the commit-files footer: the drilled source
+    /// of a Workspace drill, or the head commit of a Diff commit vs parent
+    /// tab ([`super::tabs::CompareTab::commit_vs_parent`], a commit source). `None`
+    /// for the graph view and for any other compare tab: a range has no
+    /// single commit message.
+    pub(crate) fn commit_footer_source(&self) -> Option<(&str, Cow<'_, CommitFileSource>)> {
+        if let Some(tab) = self.tabs.active_compare() {
+            let commit_id = tab.commit_vs_parent()?.to_string();
+            return Some((
+                tab.checkout_path.as_str(),
+                Cow::Owned(CommitFileSource::Commit { commit_id }),
+            ));
         }
         match &self.drill {
-            DrillView::Files { source, .. } | DrillView::Diff { source, .. } => Some(source),
+            DrillView::Files { repo, source, .. } | DrillView::Diff { repo, source, .. } => {
+                Some((repo.as_str(), Cow::Borrowed(source)))
+            }
             DrillView::Graph => None,
         }
     }
 
-    /// Graph row the depth-2 commit-files footer describes: the commit,
-    /// stash, or uncommitted row the drill opened, cloned from the loaded
-    /// graph (only that row). `None` for a compare tab, a source with no
-    /// graph row (compare, commit vs worktree), or a row no longer in the
-    /// graph ([`Self::commit_detail_fallback_name`] then names it).
+    /// Full id of the one commit the active compare tab shows against its
+    /// first parent (Diff commit vs parent), whose footer pins under the
+    /// tab's file list. `None` on another tab or a range compare tab.
+    pub(crate) fn active_compare_commit(&self) -> Option<&str> {
+        self.tabs.active_compare()?.commit_vs_parent()
+    }
+
+    /// Graph row the commit-files footer describes: the commit, stash, or
+    /// uncommitted row a depth-2 drill opened, or the commit of a Diff
+    /// commit vs parent tab ([`Self::commit_footer_source`]), cloned from
+    /// the loaded graph (only that row). A compare tab reads the graph only
+    /// while it is the tab checkout's graph. `None` for a range compare
+    /// tab, a source with no graph row (compare, commit vs worktree), or a
+    /// row not in the loaded graph ([`Self::commit_detail_fallback_name`]
+    /// then names it). No git call: the draw path reads only loaded data.
     pub(crate) fn commit_detail_graph_row(&self) -> Option<GraphRow> {
-        let source = self.workspace_drill_source()?;
+        let (repo, source) = self.commit_footer_source()?;
         let model = self.graph.as_ref()?;
-        match source {
+        if self.is_compare_tab()
+            && self
+                .graph_identity
+                .as_ref()
+                .map(|(graph_repo, _)| graph_repo.as_str())
+                != Some(repo)
+        {
+            return None;
+        }
+        match source.as_ref() {
             CommitFileSource::Commit { commit_id } => model.commit_row(commit_id),
             CommitFileSource::Stash { stash_ref } => model.stash_row(stash_ref),
             CommitFileSource::Worktree => model
@@ -2089,13 +2112,13 @@ impl AppState {
         }
     }
 
-    /// Name of the drilled source for the commit-files footer when
-    /// [`Self::commit_detail_graph_row`] finds no row: the short hash, the
-    /// `stash@{n}`, `uncommitted`, or the range label
-    /// ([`CommitFileSource::short_label`]). `None` for a compare tab.
+    /// Name of the footer's source when [`Self::commit_detail_graph_row`]
+    /// finds no row: the short hash, the `stash@{n}`, `uncommitted`, or
+    /// the range label ([`CommitFileSource::short_label`]). `None` for a
+    /// range compare tab.
     pub(crate) fn commit_detail_fallback_name(&self) -> Option<String> {
-        self.workspace_drill_source()
-            .map(CommitFileSource::short_label)
+        self.commit_footer_source()
+            .map(|(_, source)| source.short_label())
     }
 
     /// Body lines of a commit-message footer for graph row `row` at

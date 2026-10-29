@@ -575,7 +575,10 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) -> R
     if left_is_files {
         let cursor = state.commit_files_cursor();
         let col_offset = state.left_col_offset as usize;
-        if state.is_compare_tab() {
+        // A range compare has no single commit message: its list takes
+        // the whole pane. A Diff commit vs parent tab pins the commit's
+        // footer like a depth-2 drill.
+        if state.is_compare_tab() && state.active_compare_commit().is_none() {
             draw_commit_file_list(frame, tree_inner, state, cursor, col_offset);
         } else {
             draw_commit_detail(frame, tree_inner, state, cursor, col_offset);
@@ -633,17 +636,19 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) -> R
         None
     };
     state.layout.right_y = right_inner.y;
-    if state.is_compare_tab() {
-        let cursor = state.commit_files_cursor();
-        state.layout.files_list_y = tree_inner.y;
-        state.layout.files_list_height = tree_inner.height;
-        let list_h = tree_inner.height as usize;
-        let (start, _) = visible_window(state.painted_commit_file_rows().len(), cursor, list_h);
-        state.layout.files_list_offset = start;
-    } else if let super::drill::DrillView::Diff { file_cursor, .. } = &state.drill {
-        let cursor = *file_cursor;
-        let footer_h =
-            commit_detail_footer_height(state.commit_detail_footer_request(), tree_inner.height);
+    let left_files_cursor = match &state.drill {
+        _ if state.is_compare_tab() => Some(state.commit_files_cursor()),
+        super::drill::DrillView::Diff { file_cursor, .. } => Some(*file_cursor),
+        _ => None,
+    };
+    if let Some(cursor) = left_files_cursor {
+        // The commit footer under the list: a depth-2 drill or a Diff
+        // commit vs parent tab; a range compare tab has none.
+        let footer_h = if state.is_compare_tab() && state.active_compare_commit().is_none() {
+            0
+        } else {
+            commit_detail_footer_height(state.commit_detail_footer_request(), tree_inner.height)
+        };
         let list_h = tree_inner.height.saturating_sub(footer_h);
         state.layout.files_list_y = tree_inner.y;
         state.layout.files_list_height = list_h;
@@ -2686,10 +2691,10 @@ fn footer_rule_line(width: u16, ascii: bool, palette: Palette) -> Line<'static> 
     ))
 }
 
-/// Commit files beside the file diff (depth 2, left pane): the file list on
-/// top, the drilled commit's footer pinned to the bottom rows
-/// ([`draw_commit_footer`], the graph selection footer's rows for that
-/// commit).
+/// Commit files beside the file diff (depth 2, or a Diff commit vs parent
+/// compare tab; left pane): the file list on top, the commit's footer
+/// pinned to the bottom rows ([`draw_commit_footer`], the graph selection
+/// footer's rows for that commit, [`AppState::commit_footer_source`]).
 ///
 /// `col_offset` is the horizontal pan of the file list.
 fn draw_commit_detail(
@@ -2713,11 +2718,13 @@ fn draw_commit_detail(
     if footer_h == 0 {
         return;
     }
-    let (checkout, commit_id) = match state.commit_drill_source() {
-        Some((repo, super::drill::CommitFileSource::Commit { commit_id })) => {
-            (Some(repo.to_string()), Some(commit_id.clone()))
-        }
-        Some((repo, _)) => (Some(repo.to_string()), None),
+    let (checkout, commit_id) = match state.commit_footer_source() {
+        Some((repo, source)) => match source.as_ref() {
+            super::drill::CommitFileSource::Commit { commit_id } => {
+                (Some(repo.to_string()), Some(commit_id.clone()))
+            }
+            _ => (Some(repo.to_string()), None),
+        },
         None => (None, None),
     };
     let footer = CommitFooter {
@@ -9506,6 +9513,62 @@ mod tests {
         );
     }
 
+    /// Open (or focus) the Diff commit vs parent tab of commit `id`
+    /// (`<id>^...<id>`, head pinned) on checkout `app` and land its range
+    /// and diff loads on its one file, like the load workers do.
+    fn show_compare_commit(state: &mut AppState, id: &str) {
+        let base_ref = format!("{id}^");
+        state
+            .tabs
+            .open_or_focus("app".into(), base_ref.clone(), id.into());
+        let tab = state.tabs.active_compare().expect("compare tab");
+        if !tab.files.is_empty() {
+            return;
+        }
+        let (tab_id, gen) = (tab.id, tab.generation);
+        let source = super::super::drill::CommitFileSource::Compare {
+            base_ref,
+            head_ref: id.into(),
+            base_tip: "c".repeat(40),
+            merge_base: "c".repeat(40),
+            head: id.into(),
+        };
+        let load = super::super::app::CompareRangeLoad {
+            source: source.clone(),
+            files: vec![super::super::drill::CommitFile {
+                status: "M".into(),
+                path: "README.md".into(),
+                old_path: None,
+                stat: None,
+            }],
+            patch_keys: [("README.md".to_string(), "key:README.md".to_string())].into(),
+            head: Some(id.into()),
+            base_tip: "c".repeat(40),
+        };
+        let _ = state.apply_compare_range(tab_id, gen, Ok(load));
+        state.apply_compare_diff(
+            tab_id,
+            gen,
+            &source,
+            "README.md",
+            Ok(super::super::diff::DiffContent::from_compare_lines(vec![
+                "@@ -1,1 +1,1 @@".into(),
+                "-old line".into(),
+                "+new line".into(),
+            ])),
+        );
+        state.focus = FocusPane::Left;
+    }
+
+    /// The two-pane graph of checkout `app` with commits A and B (long
+    /// messages), and the Diff commit vs parent tab of commit A open.
+    fn compare_commit_footer_state() -> AppState {
+        let mut state = with_two_long_commits(two_pane_graph_state());
+        state.graph_identity = Some(("app".into(), FOOTER_COMMIT_A.into()));
+        show_compare_commit(&mut state, FOOTER_COMMIT_A);
+        state
+    }
+
     /// The wheel box a commit-message footer records, and its scroll max.
     struct FooterBox {
         y: u16,
@@ -9538,7 +9601,7 @@ mod tests {
     }
 
     /// Every commit-message footer surface this test can drive.
-    const FOOTER_SURFACES: [FooterSurface; 3] = [
+    const FOOTER_SURFACES: [FooterSurface; 4] = [
         FooterSurface {
             id: "graph-d0",
             open: || {
@@ -9571,6 +9634,16 @@ mod tests {
             id: "files-d2",
             open: || with_two_long_commits(two_pane_commit_diff_state()),
             show_commit: show_drill_commit,
+            footer_box: commit_detail_footer_box,
+            scroll: AppState::commit_detail_msg_scroll,
+            lines_below: AppState::commit_detail_footer_lines_below,
+            list_cursor: AppState::commit_files_cursor,
+            pane_height: |state| state.layout.tree_height,
+        },
+        FooterSurface {
+            id: "compare-commit",
+            open: compare_commit_footer_state,
+            show_commit: show_compare_commit,
             footer_box: commit_detail_footer_box,
             scroll: AppState::commit_detail_msg_scroll,
             lines_below: AppState::commit_detail_footer_lines_below,
@@ -9975,6 +10048,218 @@ mod tests {
                 );
                 state.dispatch(Action::Release);
                 let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+    }
+
+    /// The `commit-footer` shows, pins its more-lines popover, toggles with
+    /// `M`, and links its hash on every surface `docs/parity.md` marks
+    /// `supported` for `shown`, `hint-popover`, `expand`, and `hash-link`,
+    /// in both looks: the subject paints on the first body row; a click on
+    /// the more-below hint pins the more-lines section with the footer's
+    /// count; `M` leaves the subject and the meta row (no body) and a
+    /// second `M` brings the body back; the short hash on the meta row
+    /// links to the commit's forge page.
+    #[test]
+    fn commit_footer_shows_hint_expand_and_hash_link_on_every_registry_surface() {
+        let driven = footer_surface_looks();
+        for feature in ["shown", "hint-popover", "expand", "hash-link"] {
+            assert_eq!(
+                crate::parity_registry::supported_surface_looks("commit-footer", feature),
+                driven,
+                "docs/parity.md `commit-footer` / `{feature}` surfaces and looks must match this test's"
+            );
+        }
+        for surface in &FOOTER_SURFACES {
+            for (look, background) in FOOTER_LOOKS {
+                let case = format!("{} {look}", surface.id);
+                let mut state = (surface.open)();
+                state.background = background;
+                state.graph_identity = Some(("app".into(), FOOTER_COMMIT_A.into()));
+                resolve_app_remote(&mut state, "git@github.com:example/demo.git");
+                let mut terminal = Terminal::new(TestBackend::new(120, 28)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let FooterBox {
+                    y,
+                    x,
+                    width,
+                    height,
+                    ..
+                } = (surface.footer_box)(&state)
+                    .unwrap_or_else(|| panic!("{case}: an overflowing footer records its box"));
+                let meta_y = y + height - 1;
+                let footer_text =
+                    |terminal: &Terminal<TestBackend>| region_text(terminal, x, y, width, height);
+
+                // Shown: the subject on the first body row.
+                let subject = region_text(&terminal, x, y + FOOTER_RULE_ROWS, width, 1);
+                assert!(
+                    subject.starts_with("seed graph"),
+                    "{case}: the footer shows the commit:\n{}",
+                    footer_text(&terminal)
+                );
+
+                // Hash link: the meta row's short hash links to the commit page.
+                let url = format!("https://github.com/example/demo/commit/{FOOTER_COMMIT_A}");
+                let link = state
+                    .layout
+                    .links
+                    .iter()
+                    .find(|link| link.url == url && link.y == meta_y)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{case}: hash link on the meta row: {:?}",
+                            state.layout.links
+                        )
+                    });
+                assert!(
+                    (x..x + width).contains(&link.x),
+                    "{case}: in the footer: {link:?}"
+                );
+                assert_eq!(link_text(&terminal, &link), "aaa1111", "{case}");
+
+                // Hint popover: a click pins the more-lines section.
+                let below = (surface.lines_below)(&state);
+                assert!(below > 0, "{case}: lines below");
+                let hint = state
+                    .layout
+                    .icon_hits
+                    .iter()
+                    .find(|hit| hit.kind == IconKind::GraphMoreBelow)
+                    .cloned()
+                    .unwrap_or_else(|| panic!("{case}: hint hit"));
+                state.dispatch(Action::Click {
+                    col: hint.x,
+                    row: hint.y,
+                });
+                let section = state
+                    .open_popover_sections()
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| panic!("{case}: the hint pins a popover"));
+                assert_eq!(section.icon, IconKind::GraphMoreBelow, "{case}");
+                let lines: Vec<String> = section
+                    .lines
+                    .iter()
+                    .map(crate::tui::popover::PopoverLine::copy_text)
+                    .collect();
+                assert!(
+                    lines.contains(&format!("{below} more lines")),
+                    "{case}: the footer's count: {lines:?}"
+                );
+                state.dispatch(Action::PopoverClose);
+
+                // Expand: `M` collapses to subject + meta, `M` again expands.
+                state.dispatch(Action::ToggleCommitMsgExpand);
+                assert!(!state.commit_msg_expand, "{case}");
+                draw_state(&mut terminal, &mut state);
+                let collapsed = region_text(&terminal, x, y, width, height);
+                assert!(
+                    !collapsed.contains(FOOTER_BODY_TOKEN),
+                    "{case}: collapsed hides the body:\n{collapsed}"
+                );
+                assert!(
+                    collapsed.contains("seed graph"),
+                    "{case}: collapsed keeps the subject:\n{collapsed}"
+                );
+                assert!(
+                    region_text(&terminal, x, meta_y, width, 1).contains("aaa1111"),
+                    "{case}: the meta row stays on the bottom row:\n{collapsed}"
+                );
+                state.dispatch(Action::ToggleCommitMsgExpand);
+                draw_state(&mut terminal, &mut state);
+                assert!(
+                    footer_text(&terminal).contains(FOOTER_BODY_TOKEN),
+                    "{case}: expanded shows the body again:\n{}",
+                    footer_text(&terminal)
+                );
+            }
+        }
+    }
+
+    /// The same commit keeps one message scroll offset on the Diff commit
+    /// vs parent tab, the graph footer, and the depth-2 footer: the offset
+    /// is keyed by the commit's graph row identity.
+    #[test]
+    fn compare_commit_footer_shares_the_message_offset_with_graph_and_depth_2() {
+        let mut state = compare_commit_footer_state();
+        let mut terminal = Terminal::new(TestBackend::new(80, 28)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let footer = commit_detail_footer_box(&state).expect("compare footer box");
+        for _ in 0..3 {
+            state.dispatch(Action::ScrollWheel {
+                col: footer.x + 2,
+                row: footer.y + 2,
+                delta: 1,
+                horizontal: false,
+            });
+        }
+        assert_eq!(state.commit_detail_msg_scroll(), 3, "compare tab scrolled");
+        state.tabs.active = 0;
+        show_graph_commit(&mut state, FOOTER_COMMIT_A);
+        assert_eq!(state.graph_footer_msg_scroll(), 3, "graph footer");
+        show_drill_commit(&mut state, FOOTER_COMMIT_A);
+        assert_eq!(state.commit_detail_msg_scroll(), 3, "depth-2 footer");
+    }
+
+    /// A compare tab of a range (a branch or commit against HEAD, or a
+    /// commit against the working tree) has no single commit message: in
+    /// both looks the file list takes the whole left pane and no footer,
+    /// rule, wheel box, or rule edge is painted or recorded, even when the
+    /// head commit is in the loaded graph.
+    #[test]
+    fn compare_range_tab_paints_no_commit_footer() {
+        for (look, background) in FOOTER_LOOKS {
+            for range in ["live", "worktree"] {
+                let case = format!("{range} {look}");
+                let mut state = with_two_long_commits(two_pane_graph_state());
+                state.graph_identity = Some(("app".into(), FOOTER_COMMIT_A.into()));
+                state.background = background;
+                match range {
+                    "live" => {
+                        state
+                            .tabs
+                            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+                    }
+                    _ => {
+                        state.tabs.open_or_focus_worktree(
+                            "app".into(),
+                            FOOTER_COMMIT_A.into(),
+                            super::super::tabs::WorktreeFile {
+                                path: "README.md".into(),
+                                old_path: None,
+                            },
+                        );
+                    }
+                }
+                {
+                    let tab = state.tabs.active_compare_mut().expect("compare tab");
+                    tab.loading = false;
+                    tab.files = vec![super::super::drill::CommitFile {
+                        status: "M".into(),
+                        path: "README.md".into(),
+                        old_path: None,
+                        stat: None,
+                    }];
+                }
+                state.focus = FocusPane::Left;
+                let mut terminal = Terminal::new(TestBackend::new(80, 28)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let l = state.layout.clone();
+                assert_eq!(l.files_list_height, l.tree_height, "{case}: whole pane");
+                assert_eq!(l.commit_detail_footer_y, None, "{case}: no wheel box");
+                assert_eq!(l.commit_msg_rule_y, None, "{case}: no rule edge");
+                let left = left_inner_text(&terminal, &state);
+                assert!(left.contains("README.md"), "{case}: the list:\n{left}");
+                assert!(
+                    !left.contains("seed graph") && !left.contains(FOOTER_BODY_TOKEN),
+                    "{case}: no commit message:\n{left}"
+                );
+                assert!(
+                    !left.contains(&footer_rule_glyph(state.ascii).repeat(4)),
+                    "{case}: no footer rule:\n{left}"
+                );
             }
         }
     }

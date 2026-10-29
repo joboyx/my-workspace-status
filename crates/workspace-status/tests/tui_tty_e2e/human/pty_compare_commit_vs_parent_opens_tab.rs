@@ -14,8 +14,8 @@ fn tab_strip_has(screen: &str, label: &str) -> bool {
 }
 
 /// Palette Diff commit vs parent opens the focused graph commit's own diff
-/// in a new tab `app ↔ <short>^`. A later commit's file is not listed, and
-/// HEAD does not move.
+/// in a new tab `app ↔ <short>^`, with that commit's footer under the file
+/// list. A later commit's file is not listed, and HEAD does not move.
 #[test]
 fn pty_compare_commit_vs_parent_opens_tab() {
     let (_root, workspace) = compare_history_workspace();
@@ -54,8 +54,10 @@ fn pty_compare_commit_vs_parent_opens_tab() {
                 && !left.contains("third.txt")
                 && !left.contains("first.txt")
                 && !left.contains("README.md")
+                // The commit footer pins under the list.
+                && left.contains(middle)
         },
-        "new tab lists only the middle commit's own file next to Workspace",
+        "new tab lists only the middle commit's own file, with its footer, next to Workspace",
         GIT_WAIT,
     );
     assert_eq!(rev(&workspace, "HEAD"), before);
