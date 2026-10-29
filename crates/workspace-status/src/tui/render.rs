@@ -4706,6 +4706,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             (accent, lines)
         }
         PendingConfirm::ResetToUpstream {
+            repo,
             branch,
             upstream,
             dropped,
@@ -4713,8 +4714,17 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         } => {
             let accent = palette.modified;
             let noun = if *dropped == 1 { "commit" } else { "commits" };
+            // The repo leads the title: `p` on the workspace or family row
+            // can open this box for a repo the cursor is not on.
             let lines = vec![
                 Line::from(vec![
+                    Span::styled(
+                        repo.clone(),
+                        Style::default()
+                            .fg(palette.file)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(": ", Style::default().fg(palette.muted)),
                     Span::styled(
                         upstream.clone(),
                         Style::default()
@@ -11776,7 +11786,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_confirm_names_the_rewritten_upstream_and_the_dropped_count() {
+    fn reset_confirm_names_the_repo_the_rewritten_upstream_and_the_dropped_count() {
         let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
         let backend = TestBackend::new(100, 16);
@@ -11795,7 +11805,7 @@ mod tests {
 
         let text = paint(2);
         assert!(
-            text.contains("origin/main was rewritten. Move main to origin/main?"),
+            text.contains("app: origin/main was rewritten. Move main to origin/main?"),
             "{text}"
         );
         assert!(

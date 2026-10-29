@@ -37,7 +37,7 @@ fn idle_r0_row(screen: &str) -> bool {
 
 /// `p` opened the reset confirm. Nothing moved yet.
 fn reset_confirm_open(screen: &str) -> bool {
-    screen.contains("origin/main was rewritten. Move main to origin/main?")
+    screen.contains("rewrite: origin/main was rewritten. Move main to origin/main?")
         && screen.contains("Drops 2 commits that origin/main dropped; none are yours.")
         && screen.contains("reset    n")
         && !screen.contains("Moved ")
@@ -62,7 +62,7 @@ fn row_in_sync_after_reset(screen: &str) -> bool {
 /// Docs: `docs/git-operations.md`, `p` on a diverged row whose upstream was
 /// rewritten. Live PTY after first paint (cursor already on `rewrite`):
 /// the tree row shows `force-pushed · 2 dropped, 0 yours`. `p` opens the box
-/// `origin/main was rewritten. Move main to origin/main?` and writes nothing
+/// `rewrite: origin/main was rewritten. Move main to origin/main?` and writes nothing
 /// (tip unchanged on disk). `y` moves `main` to `origin/main` on disk, prints
 /// `Moved main to origin/main · undo: git reset --keep <old tip, 12 hex>`, and
 /// the row returns to in sync with a clean working tree. The undo text is an
@@ -91,7 +91,7 @@ fn pty_p_resets_branch_onto_force_pushed_upstream() {
     tui.key('p');
     tui.wait_pred(
         reset_confirm_open,
-        "p opens the reset confirm (origin/main was rewritten. Move main to origin/main?)",
+        "p opens the reset confirm (rewrite: origin/main was rewritten. Move main to origin/main?)",
         GIT_WAIT,
     );
     tui.wait_ms(SETTLE_MS);
