@@ -1240,7 +1240,7 @@ pub fn send_gesture(tui: &mut PtySession, parts: &[&str]) {
 /// Wait until `pred` holds and return that frame.
 ///
 /// Asserts that follow a wait read this frame, not a second
-/// [`PtySession::screen`] call, which can see a later or half-drawn frame.
+/// [`PtySession::screen`] call, which can see a later frame.
 pub fn wait_screen(
     tui: &PtySession,
     pred: impl Fn(&str) -> bool,
@@ -1505,12 +1505,8 @@ pub fn prove_keys_handled(tui: &mut PtySession) {
     tui.wait_pred(help_gone, "Esc closes help", WAIT);
 }
 
-/// No row of the help overlay is left on screen.
-///
-/// The frame that closes help repaints rows top to bottom, so a read in
-/// the middle of it still shows the help footer. Waiting for the footer
-/// (`Esc closes`, `Needs a Nerd Font`) to go as well as the header means
-/// the whole closing frame has arrived.
+/// No row of the help overlay is left on screen: neither the header nor
+/// the footer (`Esc closes`, `Needs a Nerd Font`).
 fn help_gone(screen: &str) -> bool {
     !help_open(screen) && !screen.contains("Esc closes") && !screen.contains("Needs a Nerd Font")
 }

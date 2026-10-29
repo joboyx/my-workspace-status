@@ -121,8 +121,8 @@ fn pty_pr_glyph_column_straight_and_narrow_tree_drops_refs() {
 
     for cols in [100, 120, 140] {
         tui.resize(cols, 36);
-        // One sample must satisfy all of it: a frame that is half drawn
-        // cannot, and neither can the frame of the width before the resize.
+        // One sample must satisfy all of it: the frame of the width before
+        // the resize cannot.
         tui.wait_pred(
             |_| {
                 frame_fits_terminal(&tui)

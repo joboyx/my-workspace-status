@@ -87,12 +87,97 @@ impl Default for SpawnOpts {
 /// OSC 11 background query the TUI writes at startup in `themeMode` `auto`.
 const OSC11_QUERY: &[u8] = b"\x1b]11;?";
 
+/// Start of a synchronized update (DEC private mode 2026). The TUI opens
+/// one before each frame (and before the clear of a resize).
+const SYNC_BEGIN: &[u8] = b"\x1b[?2026h";
+
+/// End of a synchronized update: the frame is complete.
+const SYNC_END: &[u8] = b"\x1b[?2026l";
+
+/// A vt100 parser that shows only whole frames, as a terminal with
+/// synchronized output does.
+///
+/// Every byte goes to the live parser when it is read. [`Self::screen`]
+/// is a copy of the live screen taken when no update is open: at each
+/// update end, before each update start, and at the end of each read
+/// outside an update (startup, mode changes, exit). A read therefore never
+/// sees a frame half drawn, however the PTY splits the frame's bytes.
+struct FrameParser {
+    live: vt100::Parser,
+    shown: vt100::Screen,
+    in_update: bool,
+    /// End of the last read when it may be the start of a split marker.
+    carry: Vec<u8>,
+}
+
+impl FrameParser {
+    fn new(rows: u16, cols: u16) -> Self {
+        let live = vt100::Parser::new(rows, cols, 0);
+        let shown = live.screen().clone();
+        Self {
+            live,
+            shown,
+            in_update: false,
+            carry: Vec::new(),
+        }
+    }
+
+    /// The screen at the last point no update was open.
+    fn screen(&self) -> &vt100::Screen {
+        &self.shown
+    }
+
+    /// Resize the live grid. The shown screen keeps its old size until
+    /// the TUI paints a frame for the new one.
+    fn set_size(&mut self, rows: u16, cols: u16) {
+        self.live.set_size(rows, cols);
+    }
+
+    /// Feed one read from the PTY.
+    fn process(&mut self, chunk: &[u8]) {
+        let mut data = std::mem::take(&mut self.carry);
+        data.extend_from_slice(chunk);
+        let mut fed = 0;
+        let mut at = 0;
+        while at < data.len() {
+            let rest = &data[at..];
+            if rest.starts_with(SYNC_BEGIN) {
+                at += SYNC_BEGIN.len();
+                self.live.process(&data[fed..at]);
+                fed = at;
+                if !self.in_update {
+                    self.shown = self.live.screen().clone();
+                }
+                self.in_update = true;
+            } else if rest.starts_with(SYNC_END) {
+                at += SYNC_END.len();
+                self.live.process(&data[fed..at]);
+                fed = at;
+                self.in_update = false;
+                self.shown = self.live.screen().clone();
+            } else if SYNC_BEGIN.starts_with(rest) || SYNC_END.starts_with(rest) {
+                // A marker split across two reads: finish it on the next one.
+                break;
+            } else {
+                at += 1;
+            }
+        }
+        self.live.process(&data[fed..at]);
+        self.carry = data[at..].to_vec();
+        if !self.in_update {
+            self.shown = self.live.screen().clone();
+        }
+    }
+}
+
 pub struct PtySession {
     child: Box<dyn portable_pty::Child + Send>,
     /// PTY master writer. The reader thread shares it to answer OSC 11.
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
-    parser: Arc<Mutex<vt100::Parser>>,
+    /// Terminal side of the PTY. Every screen and cell read below sees a
+    /// whole frame (see [`FrameParser`]).
+    parser: Arc<Mutex<FrameParser>>,
     /// Decoded OSC 52 clipboard texts (`ESC ] 52 ; c ; <base64> BEL` / ST).
     clipboard: Arc<Mutex<Vec<String>>>,
     /// Every byte the child wrote, in order (see [`Self::raw_output`]).
@@ -322,7 +407,7 @@ impl PtySession {
         let mut reader = pair.master.try_clone_reader().expect("clone pty reader");
         let writer: Arc<Mutex<Box<dyn Write + Send>>> =
             Arc::new(Mutex::new(pair.master.take_writer().expect("pty writer")));
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        let parser = Arc::new(Mutex::new(FrameParser::new(rows, cols)));
         let clipboard = Arc::new(Mutex::new(Vec::<String>::new()));
         let raw = Arc::new(Mutex::new(Vec::<u8>::new()));
         let parser_thread = Arc::clone(&parser);
@@ -555,6 +640,7 @@ impl PtySession {
         self.rows = rows;
     }
 
+    /// Text of the last whole frame (see [`FrameParser`]).
     pub fn screen(&self) -> String {
         self.parser.lock().unwrap().screen().contents()
     }
@@ -1403,4 +1489,30 @@ pub fn status_has_tree_hscroll_tail(screen: &str) -> bool {
         .lines()
         .last()
         .is_some_and(|line| line.contains(TREE_HSCROLL_TAIL))
+}
+
+/// A frame split over reads shows only once its update ends, also when
+/// the end marker itself is split; bytes outside an update show per read.
+#[test]
+fn frame_parser_shows_only_whole_frames() {
+    let mut parser = FrameParser::new(2, 10);
+    let text = |parser: &FrameParser| parser.screen().contents();
+    parser.process(b"old");
+    assert_eq!(text(&parser), "old", "outside an update: shown per read");
+
+    parser.process(b"\x1b[?2026h\x1b[2J\x1b[Hne");
+    assert_eq!(
+        text(&parser),
+        "old",
+        "update open: clear and half frame hidden"
+    );
+    parser.process(b"w\x1b[?20");
+    assert_eq!(text(&parser), "old", "end marker split: still hidden");
+    parser.process(b"26l");
+    assert_eq!(text(&parser), "new", "update end shows the whole frame");
+
+    parser.process(b"\x1b[?2026h\x1b[?2026h\x1b[2J");
+    assert_eq!(text(&parser), "new", "a resize update then a frame update");
+    parser.process(b"\x1b[Hnext\x1b[?2026l");
+    assert_eq!(text(&parser), "next", "one end closes both");
 }

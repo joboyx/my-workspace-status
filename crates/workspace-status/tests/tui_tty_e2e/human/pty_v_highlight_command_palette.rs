@@ -58,7 +58,7 @@ fn pty_v_colon_palette_revert_opens_range_confirm() {
     type_filter(&mut tui, "fetch");
     // One frame carries the whole claim. The full `>fetch` query anchors
     // it after the last typed key; a second screen read could see a later
-    // or half-drawn frame.
+    // frame.
     tui.wait_pred(
         |screen| {
             palette_open(screen)
