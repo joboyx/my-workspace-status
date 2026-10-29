@@ -1004,6 +1004,7 @@ pub(crate) mod fixtures {
             merged_into_default: None,
             default_branch_override: None,
             default_tip_ref: None,
+            default_branch: None,
             local_branches: Vec::new(),
         }
     }

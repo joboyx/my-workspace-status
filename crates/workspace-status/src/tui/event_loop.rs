@@ -270,6 +270,13 @@ pub async fn run(
     };
     ctx.interp
         .schedule(ctx.state, ctx.opts, lookups, &Action::None);
+    // Checkouts on their default branch get no PR lookup; their remote is
+    // resolved with git only, for commit links.
+    let remotes = Effect::ResolveCheckoutRemotes {
+        targets: ctx.state.due_remote_lookups(),
+    };
+    ctx.interp
+        .schedule(ctx.state, ctx.opts, remotes, &Action::None);
     // Sparkline counts run on low-priority workers after the first frame,
     // so they never hold up the first paint or user work.
     let activity = Effect::LoadActivity {

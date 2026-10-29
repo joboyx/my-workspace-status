@@ -51,6 +51,13 @@ pub fn no_pr_status(branch: &str) -> String {
 /// Status line when the focused row has no branch to look up.
 pub const NO_PR_FOR_ROW: &str = "no PR for this row";
 
+/// Status line when a PR action targets a checkout on its repository's
+/// default branch `branch`, which receives PRs and carries none: `main is
+/// the default branch: no PR`.
+pub fn default_branch_status(branch: &str) -> String {
+    format!("{branch} is the default branch: no PR")
+}
+
 /// Status line when the forge CLI could not answer for `branch`, with its
 /// `reason` when it gave one ([`run_cli`]): `could not look up PR for
 /// feature: gh not found`.
