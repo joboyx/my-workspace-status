@@ -1341,21 +1341,6 @@ fn pr_total_variants(totals: PrTotals, narrow: bool) -> Vec<Vec<TextSeg>> {
     }
 }
 
-/// Columns of the PR total at the end of `summary`, a
-/// [`workspace_trailing_fit`] result: the segments after the
-/// [`PR_BADGE_GAP`]. `0` when the summary has no PR total.
-pub(crate) fn pr_total_cols(summary: &[TextSeg]) -> usize {
-    summary
-        .iter()
-        .position(|seg| seg.text == PR_BADGE_GAP)
-        .map_or(0, |gap| {
-            summary[gap + 1..]
-                .iter()
-                .map(|seg| visible_width(&seg.text))
-                .sum()
-        })
-}
-
 /// Workspace root trailing summary that fits `room` columns (pad included)
 /// beside the name: `N changed · sync`, then two spaces and the PR total
 /// (`8 PRs · 2 need you`, see [`PrTotals`]). The name is the row's
@@ -1366,12 +1351,16 @@ pub(crate) fn pr_total_cols(summary: &[TextSeg]) -> usize {
 /// the author, the PR total goes and `N changed · sync` goes to
 /// `N changed`, then `N`, then nothing. A `narrow` tree (under
 /// [`PR_REF_MIN_TREE_COLS`]) starts at the one-part total.
+///
+/// Returns the segments and the columns of the PR total that ends them
+/// (`0` when the summary that fits shows no PR total), so the caller can
+/// record the total's click area without reading it back from the text.
 pub(crate) fn workspace_trailing_fit(
     chrome: &NodeChrome,
     totals: PrTotals,
     narrow: bool,
     room: usize,
-) -> Vec<TextSeg> {
+) -> (Vec<TextSeg>, usize) {
     let n = chrome.change_count;
     let summary = |text: String| vec![icon_text_seg(text, SegRole::Muted, IconKind::Workspace)];
     let summaries = [
@@ -1379,31 +1368,28 @@ pub(crate) fn workspace_trailing_fit(
         summary(format!("{n} changed")),
         summary(n.to_string()),
     ];
+    let width =
+        |segs: &[TextSeg]| -> usize { segs.iter().map(|seg| visible_width(&seg.text)).sum() };
     let beside = |summary: &[TextSeg], total: &[TextSeg]| {
         let mut segs = summary.to_vec();
         segs.push(text_seg(PR_BADGE_GAP, SegRole::Muted));
         segs.extend_from_slice(total);
-        segs
+        (segs, width(total))
     };
     let totals_variants = pr_total_variants(totals, narrow);
-    let mut candidates: Vec<Vec<TextSeg>> = totals_variants
+    let mut candidates: Vec<(Vec<TextSeg>, usize)> = totals_variants
         .iter()
         .map(|total| beside(&summaries[0], total))
         .collect();
     // With a PR that needs the author the last variant is `2 need you`.
     if let Some(need_you) = totals_variants.last().filter(|_| totals.need_you > 0) {
         candidates.extend(summaries[1..].iter().map(|short| beside(short, need_you)));
-        candidates.push(need_you.clone());
+        candidates.push((need_you.clone(), width(need_you)));
     }
     candidates
         .into_iter()
-        .chain(summaries)
-        .find(|segs| {
-            segs.iter()
-                .map(|seg| visible_width(&seg.text))
-                .sum::<usize>()
-                < room
-        })
+        .chain(summaries.map(|summary| (summary, 0)))
+        .find(|(segs, _)| width(segs) < room)
         .unwrap_or_default()
 }
 
@@ -1940,10 +1926,22 @@ mod tests {
             ..NodeChrome::default()
         };
         let text = |totals: PrTotals, narrow: bool, room: usize| -> String {
-            workspace_trailing_fit(&chrome, totals, narrow, room)
-                .iter()
-                .map(|seg| seg.text.as_str())
-                .collect()
+            let (segs, total_cols) = workspace_trailing_fit(&chrome, totals, narrow, room);
+            let text: String = segs.iter().map(|seg| seg.text.as_str()).collect();
+            // The total's columns are the text after the gap, or the whole
+            // text when the total stands alone.
+            let total = [
+                "8 PRs · 2 need you",
+                "1 PR · 1 needs you",
+                "8 PRs",
+                "2 need you",
+                "1 needs you",
+            ]
+            .into_iter()
+            .find(|total| text.ends_with(total))
+            .map_or(0, visible_width);
+            assert_eq!(total_cols, total, "{text:?}");
+            text
         };
         let both = PrTotals {
             prs: 8,
@@ -1992,7 +1990,7 @@ mod tests {
             "4 changed  2 need you",
             "a narrow tree shortens the summary beside need you too"
         );
-        let short =
+        let (short, _) =
             workspace_trailing_fit(&chrome, both, false, visible_width("4 changed  2 need you"));
         let short: Vec<(&str, SegRole, bool, Option<IconKind>)> = short
             .iter()
@@ -2017,7 +2015,7 @@ mod tests {
         assert_eq!(text(one, true, 80), "4 changed · 2 behind  1 needs you");
         assert_eq!(text(PrTotals::default(), false, 80), "4 changed · 2 behind");
 
-        let segs = workspace_trailing_fit(&chrome, both, false, 80);
+        let (segs, _) = workspace_trailing_fit(&chrome, both, false, 80);
         let styles: Vec<(&str, SegRole, bool, bool, Option<IconKind>)> = segs
             .iter()
             .map(|seg| (seg.text.as_str(), seg.role, seg.bold, seg.dim, seg.icon))

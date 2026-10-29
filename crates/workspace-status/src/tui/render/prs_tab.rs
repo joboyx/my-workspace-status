@@ -1098,37 +1098,55 @@ mod tests {
     /// wide and on a narrow tree, and a click on them opens the PRs tab.
     #[test]
     fn the_pr_total_hit_follows_the_part_that_fits() {
-        let mut need_you_only = [false; 2];
-        for cols in 40..=200 {
-            let mut state = workspace(false);
-            let (_, text) = paint(&mut state, cols, 30);
-            let Some(hit) = state.layout.pr_total_hit else {
-                continue;
-            };
-            let row: Vec<char> = text[usize::from(hit.y)].chars().collect();
-            let painted: String = row[usize::from(hit.x)..usize::from(hit.right())]
-                .iter()
-                .collect();
-            assert_eq!(row[usize::from(hit.x) - 1], ' ', "{cols}: {painted:?}");
-            assert_eq!(
-                hit.right(),
-                state.layout.tree_x + state.layout.tree_width,
-                "{cols}: flush right"
-            );
-            match painted.as_str() {
-                "5 PRs · 2 need you" => continue,
-                "2 need you" => {}
-                other => panic!("{cols}: the hit covers {other:?}"),
+        for background in LOOKS {
+            // `need you` alone beside a change summary on a wide and on a
+            // narrow tree, and with no change summary left beside it.
+            let mut need_you_only = [false; 2];
+            let mut bare = false;
+            for cols in 40..=200 {
+                let what = format!("{background:?} {cols} columns");
+                let mut state = workspace(false);
+                state.background = background;
+                let (_, text) = paint(&mut state, cols, 30);
+                let left = usize::from(state.layout.tree_x);
+                let right = left + usize::from(state.layout.tree_width);
+                let row: Vec<char> = text[usize::from(state.layout.tree_y)].chars().collect();
+                let tree_row: String = row[left..right].iter().collect();
+                let total_painted = tree_row.contains("need you") || tree_row.contains(" PRs");
+                let Some(hit) = state.layout.pr_total_hit else {
+                    assert!(
+                        !total_painted,
+                        "{what}: a painted total has no click area: {tree_row:?}"
+                    );
+                    continue;
+                };
+                assert_eq!(hit.y, state.layout.tree_y, "{what}: the workspace row");
+                let painted: String = row[usize::from(hit.x)..usize::from(hit.right())]
+                    .iter()
+                    .collect();
+                assert_eq!(row[usize::from(hit.x) - 1], ' ', "{what}: {painted:?}");
+                assert_eq!(usize::from(hit.right()), right, "{what}: flush right");
+                match painted.as_str() {
+                    "5 PRs · 2 need you" => continue,
+                    "2 need you" => {}
+                    other => panic!("{what}: the hit covers {other:?}"),
+                }
+                let before: String = row[left..usize::from(hit.x)].iter().collect();
+                if before.trim_end().ends_with("tmp") {
+                    bare = true;
+                } else {
+                    let narrow = usize::from(state.layout.tree_width) < PR_REF_MIN_TREE_COLS;
+                    need_you_only[usize::from(narrow)] = true;
+                }
+                state.dispatch(Action::Click {
+                    col: hit.x,
+                    row: hit.y,
+                });
+                assert!(state.is_prs_tab(), "{what}");
             }
-            let narrow = usize::from(state.layout.tree_width) < PR_REF_MIN_TREE_COLS;
-            need_you_only[usize::from(narrow)] = true;
-            state.dispatch(Action::Click {
-                col: hit.x,
-                row: hit.y,
-            });
-            assert!(state.is_prs_tab(), "{cols}");
+            assert_eq!(need_you_only, [true, true], "{background:?}: wide, narrow");
+            assert!(bare, "{background:?}: `need you` with no change summary");
         }
-        assert_eq!(need_you_only, [true, true], "wide, narrow");
     }
 
     #[test]

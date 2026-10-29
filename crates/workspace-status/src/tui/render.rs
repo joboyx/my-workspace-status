@@ -102,9 +102,8 @@ use super::theme::{hex_color, mix_toward, BackgroundMode, Palette, Pill, ThemeId
 use super::toast::{Toast, ToastMark, ToastTick};
 use super::tree::{
     file_change_from_name_status, file_change_segments, fit_upstream_rewrite_text,
-    painted_row_segments, pr_badge_kind, pr_badge_role, pr_total_cols, visible_window,
-    workspace_trailing_fit, NodeKind, NodeSegments, PrBadge, PrTotals, SegRole, TextSeg,
-    VisibleRow, PR_REF_MIN_TREE_COLS,
+    painted_row_segments, pr_badge_kind, pr_badge_role, visible_window, workspace_trailing_fit,
+    NodeKind, NodeSegments, PrBadge, PrTotals, SegRole, TextSeg, VisibleRow, PR_REF_MIN_TREE_COLS,
 };
 use super::undercurl::{cut_link_cells, drop_undercurls_under, underlined_runs, UndercurlHit};
 use super::watch::FlashKind;
@@ -1903,13 +1902,13 @@ fn paint_tree_row(
             .saturating_sub(marks_width);
         segs.trailing.truncate(marks);
         let narrow = width < PR_REF_MIN_TREE_COLS;
-        let summary = workspace_trailing_fit(&row.chrome, decor.pr_totals, narrow, room);
+        let (summary, cols) = workspace_trailing_fit(&row.chrome, decor.pr_totals, narrow, room);
         if summary.is_empty() && segs.trailing.last().is_some_and(|seg| seg.text == " ") {
             // No summary fits: drop the space after the marks so the last
             // mark stays in the last column.
             segs.trailing.pop();
         }
-        total_cols = pr_total_cols(&summary);
+        total_cols = cols;
         segs.trailing.extend(summary);
     }
     let icons = segmented_icon_spans(row.depth, &segs, width, col_offset);
