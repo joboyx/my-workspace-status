@@ -1093,6 +1093,44 @@ mod tests {
         }
     }
 
+    /// At every frame width the hit covers exactly the painted total, so a
+    /// row with room for one part keeps `2 need you` and its cells, on a
+    /// wide and on a narrow tree, and a click on them opens the PRs tab.
+    #[test]
+    fn the_pr_total_hit_follows_the_part_that_fits() {
+        let mut need_you_only = [false; 2];
+        for cols in 40..=200 {
+            let mut state = workspace(false);
+            let (_, text) = paint(&mut state, cols, 30);
+            let Some(hit) = state.layout.pr_total_hit else {
+                continue;
+            };
+            let row: Vec<char> = text[usize::from(hit.y)].chars().collect();
+            let painted: String = row[usize::from(hit.x)..usize::from(hit.right())]
+                .iter()
+                .collect();
+            assert_eq!(row[usize::from(hit.x) - 1], ' ', "{cols}: {painted:?}");
+            assert_eq!(
+                hit.right(),
+                state.layout.tree_x + state.layout.tree_width,
+                "{cols}: flush right"
+            );
+            match painted.as_str() {
+                "5 PRs · 2 need you" => continue,
+                "2 need you" => {}
+                other => panic!("{cols}: the hit covers {other:?}"),
+            }
+            let narrow = usize::from(state.layout.tree_width) < PR_REF_MIN_TREE_COLS;
+            need_you_only[usize::from(narrow)] = true;
+            state.dispatch(Action::Click {
+                col: hit.x,
+                row: hit.y,
+            });
+            assert!(state.is_prs_tab(), "{cols}");
+        }
+        assert_eq!(need_you_only, [true, true], "wide, narrow");
+    }
+
     #[test]
     fn a_pr_change_flashes_its_row_on_the_prs_tab() {
         let mut state = on_prs_tab(false, BackgroundMode::Terminal);
