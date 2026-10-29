@@ -241,7 +241,7 @@ Status text of `gw` and palette View remotely (set at once for a refusal, else w
 
 ## PRs tab
 
-`gp` (palette PRs tab, or a click on the workspace PR total) opens one PRs tab, labelled `PRs <n>` (`PR 1` for one): the PR of every checked-out branch, grouped by ticket key ([tui-model.md](./tui-model.md) → **PRs tab**). `render/prs_tab.rs` (`draw_prs_tab`) paints two panes through the shared pane chrome, boxed or flat like the Workspace panes: the list (`prs`, on `sidebar`) and, on its right, the detail (`PR`, on `surface`), a third of the width and at least 40 columns. Under 100 frame columns one pane shows, the list or the detail; `Tab` switches them and Esc goes back to the list.
+`gp` (palette PRs tab, or a click on the workspace PR total) opens one PRs tab, labelled `PRs <n>` (`PRs 1` for one too): the PR of every checked-out branch, grouped by ticket key ([tui-model.md](./tui-model.md) → **PRs tab**). `render/prs_tab.rs` (`draw_prs_tab`) paints two panes through the shared pane chrome, boxed or flat like the Workspace panes: the list (`prs`, on `sidebar`) and, on its right, the detail (`PR`, on `surface`), a third of the width and at least 40 columns. Under 100 frame columns one pane shows, the list or the detail; `Tab` switches them and Esc goes back to the list.
 
 ```text
  Workspace │ PRs 5 [✗]

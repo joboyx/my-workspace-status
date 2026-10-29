@@ -892,13 +892,11 @@ pub const PRS_TAB_HAS_NO_SEARCH: &str = "PRs tab has no search";
 /// `Z` off the PRs tab (status line and palette row).
 pub const PRS_TAB_ONLY: &str = "PRs tab only (gp)";
 
-/// Strip label of the PRs tab for `listed` PRs: `PRs 8`, and `PR 1` for one.
+/// Strip label of the PRs tab for `listed` PRs: `PRs 8`, and `PRs 1` for
+/// one. The tab's name stays `PRs` whatever the count, like the palette row
+/// PRs tab.
 pub fn prs_tab_label(listed: usize) -> String {
-    if listed == 1 {
-        "PR 1".into()
-    } else {
-        format!("PRs {listed}")
-    }
+    format!("PRs {listed}")
 }
 
 /// A group of the PRs tab by identity: how its key was found, and the key.

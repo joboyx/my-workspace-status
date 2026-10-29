@@ -129,7 +129,7 @@ Refusals (`AppState::explorer_tab_refusal`, checked first in `dispatch` and in `
 
 ## PRs tab
 
-The PRs tab is the fourth tab kind (`SessionTab::Prs`, `tabs::PrsTab`), one instance: `gp` (`Action::OpenPrsTab`), the palette row PRs tab, and a click on the workspace PR total open it, or focus it when it is open (`TabStrip::open_or_focus_prs`, `AppState::open_prs_tab`). `Ctrl-w` and its `[✗]` close it. The strip label is `PRs <n>`, `PR 1` for one (`tabs::prs_tab_label`, from `AppState::tab_labels`): `n` is the number of distinct PRs (`AppState::pr_totals`, by URL), so a PR that two checkouts show counts once.
+The PRs tab is the fourth tab kind (`SessionTab::Prs`, `tabs::PrsTab`), one instance: `gp` (`Action::OpenPrsTab`), the palette row PRs tab, and a click on the workspace PR total open it, or focus it when it is open (`TabStrip::open_or_focus_prs`, `AppState::open_prs_tab`). `Ctrl-w` and its `[✗]` close it. The strip label is `PRs <n>`, `PRs 1` for one too: the tab's name stays `PRs`, like the palette row (`tabs::prs_tab_label`, from `AppState::tab_labels`): `n` is the number of distinct PRs (`AppState::pr_totals`, by URL), so a PR that two checkouts show counts once.
 
 The PRs live in the PR cache (**Pull request badge and open**); the tab keeps only its view state. `AppState::prs_view` builds the list on each paint and key (`tui/state/prs_tab.rs`):
 

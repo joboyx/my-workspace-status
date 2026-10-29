@@ -1166,7 +1166,7 @@ mod tests {
     }
 
     #[test]
-    fn the_tab_label_counts_distinct_prs_with_the_singular_for_one() {
+    fn the_tab_label_counts_distinct_prs() {
         let retry = || {
             pr(
                 GH_APP,
@@ -1194,7 +1194,11 @@ mod tests {
             GH_APP,
             retry(),
         );
-        assert_eq!(app.tab_labels()[1], "PR 1", "two checkouts, one PR");
+        assert_eq!(
+            app.tab_labels()[1],
+            "PRs 1",
+            "two checkouts, one PR; the tab name stays PRs"
+        );
         assert_eq!(lines(&app), ["ABC-123", "  #318"], "one row");
         let view = app.prs_view().unwrap();
         let row = &view.groups[0].rows[0];
