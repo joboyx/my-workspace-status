@@ -1171,6 +1171,7 @@ mod tests {
             author_name: "Ada".into(),
             author_date_unix: 1_700_000_000 - 120,
             parent_id: None,
+            ..Stash::default()
         };
         let model = GraphModel {
             stashes: vec![stash.clone()],

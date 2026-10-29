@@ -253,8 +253,9 @@ Default window is 300 (`DEFAULT_GRAPH_WINDOW`). `--exclude=refs/stash` precedes 
 
 | Function | Command | Purpose |
 | --- | --- | --- |
-| `load_graph_model_window` | `log --exclude=refs/stash --all --topo-order --date-order --skip --max-count --pretty=%H%x00%P%x00%s%x00%an%x00%at` | One history page. Always sets the working-tree row (`Some(has_changes)`). Empty `focus_branches` uses `--all`; otherwise `log` the named tips (no `--all`) so unrelated history drops. |
+| `load_graph_model_window` | `log --exclude=refs/stash --all --topo-order --date-order --skip --max-count --pretty=%H%x00%P%x00%s%x00%an%x00%ae%x00%at%x00%aI%x00%cn%x00%ce%x00%ct%x00%cI%x00%b%x00` | One history page. The `%ae` / `%aI` / `%cn` / `%ce` / `%ct` / `%cI` fields feed `Commit.people` (emails, committer, UTC offsets from the ISO dates); `Co-authored-by` trailers are read from the full `%b` before the 8 KiB body cap. Always sets the working-tree row (`Some(has_changes)`). Empty `focus_branches` uses `--all`; otherwise `log` the named tips (no `--all`) so unrelated history drops. |
 | extra `stash^1` | `log --no-walk --ignore-missing --pretty=…` | Missing stash parents appended after the log prefix so autoload skip uses `window`, not `commits.len()`. Skipped while branch focus is on. |
+| stash list (`load_stashes`) | `stash list --format=%gd%x00%H%x00%P%x00%s%x00%at%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%ct%x00%cI%x00%b%x00` | Stash entries with the same people fields as a commit (`Stash.people`). |
 | refs (`load_refs`) | `for-each-ref --format=%(if)%(*objectname)%(then)%(*objectname)%(else)%(objectname)%(end)%00%(refname)%00%(refname:short) refs/heads refs/remotes refs/tags` | Ref chips keyed by commit id. An annotated tag uses its peeled commit (`%(*objectname)`), not the tag object id. Branches, remotes and lightweight tags use `%(objectname)`. `<remote>/HEAD` drops. |
 | `should_autoload` / `merge_autoload` | next page at `skip + window_count` | Cursor on last loaded row; skip stays at the original window start; `window` grows |
 

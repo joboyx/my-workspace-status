@@ -1446,6 +1446,7 @@ mod tests {
                 author_name: "Ada Lovelace".into(),
                 author_date_unix: NOW - 86400,
                 parent_id: Some(head.into()),
+                ..Stash::default()
             }],
             worktrees: vec![
                 worktree(".worktrees/feature/graph", head, false),
@@ -4362,6 +4363,7 @@ mod tests {
             author_name: "Ada Lovelace".into(),
             author_date_unix: NOW - 7200,
             parent_id: Some("eee5555".into()),
+            ..Stash::default()
         });
         model.worktrees.push(worktree("detached", "fff6666", false));
         model

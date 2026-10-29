@@ -691,6 +691,7 @@ mod tests {
                     refs: vec![GraphRef::local("main"), GraphRef::tag("v9.9.9")],
                     author_name: "Ada SearchAuthor".into(),
                     author_date_unix: recent_unix,
+                    ..Commit::default()
                 },
                 is_head: true,
                 worktrees: Vec::new(),

@@ -225,11 +225,31 @@ pub fn format_relative_date(unix: i64, now_unix: i64) -> String {
 /// localtime is unavailable.
 pub fn format_local_timestamp(unix: i64) -> String {
     match local_civil(unix) {
-        Some((year, month, day, hour, min)) => {
+        Some((year, month, day, hour, min, _)) => {
             format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}")
         }
         None => format_utc_timestamp(unix),
     }
+}
+
+/// Operator-local `YYYY-MM-DD HH:MM:SS`. Falls back to UTC when libc
+/// localtime is unavailable.
+pub fn format_local_exact(unix: i64) -> String {
+    match local_civil(unix) {
+        Some((year, month, day, hour, min, sec)) => {
+            format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}:{sec:02}")
+        }
+        None => format!("{}:{:02}", format_utc_timestamp(unix), unix.rem_euclid(60)),
+    }
+}
+
+/// A UTC offset as `UTC+02:00`, `UTC-05:30`, or `UTC+00:00`.
+///
+/// `offset_secs` is seconds east of UTC, as git records a commit date.
+pub fn format_utc_offset(offset_secs: i32) -> String {
+    let sign = if offset_secs < 0 { '-' } else { '+' };
+    let abs = offset_secs.unsigned_abs();
+    format!("UTC{sign}{:02}:{:02}", abs / 3600, (abs % 3600) / 60)
 }
 
 /// UTC `YYYY-MM-DD HH:MM` without extra crates. Stable search form.
@@ -248,8 +268,8 @@ fn format_timestamp_at_offset(unix: i64, offset_secs: i32) -> String {
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}")
 }
 
-/// Year, month, day, hour, minute in the operator timezone.
-fn local_civil(unix: i64) -> Option<(i32, u32, u32, u32, u32)> {
+/// Year, month, day, hour, minute, second in the operator timezone.
+fn local_civil(unix: i64) -> Option<(i32, u32, u32, u32, u32, u32)> {
     #[cfg(unix)]
     {
         unix_local_civil(unix)
@@ -266,7 +286,7 @@ fn local_civil(unix: i64) -> Option<(i32, u32, u32, u32, u32)> {
 }
 
 #[cfg(unix)]
-fn unix_local_civil(unix: i64) -> Option<(i32, u32, u32, u32, u32)> {
+fn unix_local_civil(unix: i64) -> Option<(i32, u32, u32, u32, u32, u32)> {
     let t = unix as libc::time_t;
     if t as i64 != unix {
         return None;
@@ -282,7 +302,7 @@ fn unix_local_civil(unix: i64) -> Option<(i32, u32, u32, u32, u32)> {
 }
 
 #[cfg(windows)]
-fn windows_local_civil(unix: i64) -> Option<(i32, u32, u32, u32, u32)> {
+fn windows_local_civil(unix: i64) -> Option<(i32, u32, u32, u32, u32, u32)> {
     let t = unix as libc::time_t;
     if t as i64 != unix {
         return None;
@@ -297,13 +317,14 @@ fn windows_local_civil(unix: i64) -> Option<(i32, u32, u32, u32, u32)> {
 }
 
 #[cfg(any(unix, windows))]
-fn civil_from_tm(tm: &libc::tm) -> (i32, u32, u32, u32, u32) {
+fn civil_from_tm(tm: &libc::tm) -> (i32, u32, u32, u32, u32, u32) {
     (
         tm.tm_year + 1900,
         (tm.tm_mon + 1) as u32,
         tm.tm_mday as u32,
         tm.tm_hour as u32,
         tm.tm_min as u32,
+        tm.tm_sec as u32,
     )
 }
 
@@ -1606,7 +1627,7 @@ mod tests {
     fn format_local_timestamp_matches_libc_civil() {
         let unix = 1_700_000_000;
         match local_civil(unix) {
-            Some((year, month, day, hour, min)) => {
+            Some((year, month, day, hour, min, _)) => {
                 assert_eq!(
                     format_local_timestamp(unix),
                     format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}")
@@ -1614,6 +1635,23 @@ mod tests {
             }
             None => assert_eq!(format_local_timestamp(unix), format_utc_timestamp(unix)),
         }
+    }
+
+    #[test]
+    fn format_utc_offset_signs_and_pads() {
+        assert_eq!(format_utc_offset(7200), "UTC+02:00");
+        assert_eq!(format_utc_offset(-19_800), "UTC-05:30");
+        assert_eq!(format_utc_offset(0), "UTC+00:00");
+    }
+
+    #[test]
+    fn format_local_exact_adds_seconds_to_the_local_minute() {
+        let unix = 1_700_000_042;
+        let exact = format_local_exact(unix);
+        assert_eq!(exact.len(), 19, "{exact}");
+        assert!(exact.starts_with(&format_local_timestamp(unix)), "{exact}");
+        // A whole-minute local offset keeps the seconds of the unix value.
+        assert!(exact.ends_with(&format!(":{:02}", unix % 60)), "{exact}");
     }
 
     #[test]

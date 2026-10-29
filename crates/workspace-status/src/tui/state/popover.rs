@@ -2315,6 +2315,7 @@ mod tests {
             author_name: "Ada".into(),
             author_date_unix: G_WHEN,
             parent_id: Some(G_HEAD.into()),
+            ..Stash::default()
         }
     }
 

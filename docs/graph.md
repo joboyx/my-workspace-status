@@ -20,8 +20,13 @@ clones only that row (the focused-row lookups use it).
 | Type | Role |
 | --- | --- |
 | `GraphModel` | Commits, stashes, worktrees, HEAD id, sync, `show_hidden`, `uncommitted`, `skip` / `limit` / `has_more` / `window` |
-| `Commit` | Id, subject, parents, refs, author name, author date |
-| `Stash` | Id, `stash@{n}`, subject, author name, author date, parent id (`stash^1`) |
+| `Commit` | Id, subject, parents, refs, author name, author date, `people` (`CommitPeople`). `author()` returns the author as a `Signature` |
+| `Stash` | Id, `stash@{n}`, subject, author name, author date, parent id (`stash^1`), `people` (`CommitPeople`). `author()` as on `Commit` |
+| `CommitPeople` | What rows do not paint: author email, author date offset, committer (`Signature`), `Co-authored-by` trailers (`Vec<Person>`). Filled by the graph load; `Default` when a caller builds a commit by hand |
+| `Signature` | Name, email, unix seconds, and `offset_secs` (seconds east of UTC as the commit recorded it, `None` when unknown) |
+| `Person` | Name and email. Email is empty when a trailer gave a name only |
+| `co_author_trailers` | `Co-authored-by` trailers of a message body. Reads the last paragraph only (after the last blank line); the key matches in any case. Run on the full body, before `cap_commit_body` |
+| `format_local_exact` / `format_utc_offset` | `YYYY-MM-DD HH:MM:SS` in the operator timezone (UTC fallback), and `UTC+02:00` / `UTC-05:30` for a recorded offset |
 | `Worktree` | Path, HEAD id, branch, `hidden`, `is_current`. Linked extras only (`git worktree list` / `.git` gitfile). The main checkout (`.git` directory) is not marked. |
 | `SyncState` | Branch, status, ahead, behind |
 | `GraphRow` | One visible row: uncommitted, stash, commit, or worktree |
