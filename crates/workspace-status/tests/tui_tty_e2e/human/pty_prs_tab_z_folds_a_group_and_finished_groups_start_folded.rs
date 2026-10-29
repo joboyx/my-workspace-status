@@ -103,7 +103,7 @@ fn pty_prs_tab_z_folds_a_group_and_finished_groups_start_folded() {
         GIT_WAIT,
     );
 
-    tui.keys("gp");
+    tui.send_bytes(b"gp");
     let start = headers([false, false, false, true, true, false]);
     tui.wait_pred(
         |_| shows(&tui, &start, &OPEN_ROWS),

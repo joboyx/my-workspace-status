@@ -79,7 +79,7 @@ fn pty_prs_tab_failing_cli_names_its_host_and_other_prs_still_list() {
         "every checkout is looked up once",
         GIT_WAIT,
     );
-    tui.keys("gp");
+    tui.send_bytes(b"gp");
     tui.wait_pred(
         |_| {
             notes(&tui) == ["! glab (gitlab.com): glab: 401 Unauthorized"]

@@ -5,7 +5,7 @@ use crate::pr_support::{
     badge_is, forge_env, list_calls, named_workspace, seed_checkouts, toast_count, toast_text,
     Forge, PrCheckout,
 };
-use crate::support::{open_command_palette, type_palette_filter, GIT_WAIT, WAIT};
+use crate::support::{open_command_palette, type_palette_filter, wait_screen, GIT_WAIT, WAIT};
 
 /// Four PRs that change in one batch raise two toasts and a summary
 /// (`docs/tui-rust.md`, **PR change toasts**: a batch of more than three
@@ -63,12 +63,13 @@ fn pty_pr_poll_many_changes_show_two_toasts_and_a_summary() {
     tui.wait_contains("Refresh PRs", WAIT);
     tui.enter();
 
-    tui.wait_pred(
+    // The asserts read the frame that showed the summary, not a later one.
+    let screen = wait_screen(
+        &tui,
         |screen| toast_count(screen, "more PR changes") == 1,
         "the summary toast shows",
         GIT_WAIT,
     );
-    let screen = tui.screen();
     let toasts = toast_text(&screen);
     assert_eq!(
         toast_count(&screen, "CI failed ·"),

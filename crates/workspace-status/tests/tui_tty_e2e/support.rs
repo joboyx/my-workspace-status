@@ -1238,6 +1238,31 @@ pub fn send_gesture(tui: &mut PtySession, parts: &[&str]) {
     tui.send_bytes(parts.concat().as_bytes());
 }
 
+/// Wait until `pred` holds and return that frame.
+///
+/// Asserts that follow a wait read this frame, not a second
+/// [`PtySession::screen`] call, which can see a later or half-drawn frame.
+pub fn wait_screen(
+    tui: &PtySession,
+    pred: impl Fn(&str) -> bool,
+    what: &str,
+    timeout: Duration,
+) -> String {
+    let matched = std::cell::RefCell::new(String::new());
+    tui.wait_pred(
+        |screen| {
+            let hit = pred(screen);
+            if hit {
+                *matched.borrow_mut() = screen.to_string();
+            }
+            hit
+        },
+        what,
+        timeout,
+    );
+    matched.into_inner()
+}
+
 /// Two SGR left press + release reports on one cell, in one write
 /// (see [`send_gesture`]). The TUI reads two left presses on the same
 /// cell within 400 ms of arrival as a double-click.

@@ -85,7 +85,7 @@ fn pty_icon_popover_peek_pin_esc() {
         GIT_WAIT,
     );
 
-    tui.keys("gh");
+    tui.send_bytes(b"gh");
     tui.wait_pred(pinned, "gh pins the focused row's popover", WAIT);
     tui.esc();
     tui.wait_pred(closed, "Esc closes the pinned popover", WAIT);
@@ -166,7 +166,7 @@ fn pty_icon_popover_gh_on_a_checkout_row_lists_branch_merge_and_sync() {
         "j focuses the primary checkout",
         WAIT,
     );
-    tui.keys("gh");
+    tui.send_bytes(b"gh");
     tui.wait_pred(
         checkout_sections,
         "gh lists the branch, merge mark, and sync sections",
@@ -262,7 +262,7 @@ fn pty_icon_popover_gh_on_a_file_row_lists_devicon_badge_and_viewed() {
     tui.sgr_mouse(SGR_POINTER_MOVE, 0, 0);
     tui.wait_pred(file_popover_closed, "leaving the eye closes the peek", WAIT);
 
-    tui.keys("gh");
+    tui.send_bytes(b"gh");
     tui.wait_pred(
         file_row_sections,
         "gh lists the devicon, viewed, and status letter sections",

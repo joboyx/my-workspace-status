@@ -10,7 +10,7 @@ use crate::support::{ack_rows, tree_cursor_on, GIT_WAIT, WAIT};
 /// more open and the acknowledgement `ack` shows.
 fn gc_opens(tui: &mut PtySession, forge: &FakeForge, ack: &str, want_url: &str) {
     let before = forge.opened().len();
-    tui.keys("gc");
+    tui.send_bytes(b"gc");
     tui.wait_pred(
         |screen| ack_rows(screen).contains(ack) && forge.opened().len() == before + 1,
         &format!("gc acknowledges `{ack}` and records one open"),
@@ -119,7 +119,7 @@ fn pty_pr_gc_opens_failed_check_and_pipeline() {
         GIT_WAIT,
     );
     let opened = forge.opened().len();
-    tui.keys("gc");
+    tui.send_bytes(b"gc");
     tui.wait_pred(
         |screen| ack_rows(screen).contains("no PR for feature/auth-refresh"),
         "gc says there is no PR for the branch",
