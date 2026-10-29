@@ -9635,4 +9635,81 @@ mod tests {
             [("#2 merged".to_string(), "feature".to_string())]
         );
     }
+
+    /// Poll cycles that overlap (the next cycle's lookup of `a` already
+    /// waits) and a lookup of `c` that never lands keep the badge queue
+    /// busy. A PR change still alerts at the first landing after it has
+    /// waited [`PR_ALERT_WAIT_MS`].
+    #[test]
+    fn pr_changes_alert_within_the_wait_bound_while_poll_cycles_overlap() {
+        use crate::tui::pr_status::PrState;
+        use crate::tui::pull_request::PullRequest;
+        use std::time::Duration;
+        let names = ["a", "b", "c"];
+        let remote = |name: &str| format!("git@github.com:acme/{name}.git");
+        let found = |number: u64, pr_state| {
+            let url = format!("https://github.com/acme/app/pull/{number}");
+            PrLookup::Found(PullRequest::fixture(number, &url, pr_state))
+        };
+        let target = |name: &str| (PathBuf::from(name), "main".to_string());
+        let busy = || {
+            let snapshot =
+                build_workspace_snapshot(&names.map(|name| repo(name, false)), &[], false, &[]);
+            let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+            let _ = state.due_pr_lookups();
+            for (number, name) in (1..).zip(names) {
+                let first = found(number, PrState::CiRunning);
+                assert!(state.apply_pr_lookup(Path::new(name), "main", Some(remote(name)), first));
+            }
+            let mut interp = Interpreter::with_cap(4);
+            interp.pr_badges.push_back(target("a"));
+            interp.pr_badge_jobs.extend([target("b"), target("c")]);
+            (state, interp)
+        };
+        let landed_ago = |state: &mut AppState, ms: u64| {
+            let at = Instant::now() - Duration::from_millis(ms);
+            let failed = found(1, PrState::CiFailed);
+            assert!(state.apply_pr_lookup_at(
+                Path::new("a"),
+                "main",
+                Some(remote("a")),
+                failed,
+                at
+            ));
+            at
+        };
+        let land_b = |interp: &mut Interpreter, state: &mut AppState| {
+            let outcome = JobOutcome::PullRequestBadge {
+                repo: PathBuf::from("b"),
+                branch: "main".into(),
+                remote: Some(remote("b")),
+                lookup: found(2, PrState::Ready),
+            };
+            apply(interp, state, outcome);
+        };
+
+        // The change of `a` landed 1 s ago: a busy landing keeps it waiting,
+        // and the newer change of `b` waits with it.
+        let (mut state, mut interp) = busy();
+        let at = landed_ago(&mut state, 1000);
+        land_b(&mut interp, &mut state);
+        assert!(state.toasts.is_empty(), "busy and under the bound");
+        assert_eq!(state.pr_transitions_waiting_since(), Some(at), "the oldest");
+
+        // It landed 2.5 s ago: the next landing alerts both, while the
+        // queue is still busy.
+        let (mut state, mut interp) = busy();
+        let _ = landed_ago(&mut state, PR_ALERT_WAIT_MS + 500);
+        land_b(&mut interp, &mut state);
+        assert!(!interp.pr_badges.is_empty() && !interp.pr_badge_jobs.is_empty());
+        assert_eq!(
+            toast_texts(&state),
+            [
+                ("#1 CI failed".to_string(), "feature".to_string()),
+                ("#2 ready to merge".to_string(), "feature".to_string()),
+            ]
+        );
+        assert_eq!(state.pr_transitions_waiting_since(), None, "drained");
+        assert!(interp.take_dirty());
+    }
 }

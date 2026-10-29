@@ -20154,6 +20154,60 @@ mod tests {
         }
     }
 
+    /// A PR change of a linked checkout flashes its graph worktree row on
+    /// the change's ramp, and the badge glyph keeps its state colour:
+    /// depth 0 and 1, boxed and flat.
+    #[test]
+    fn a_pr_change_flashes_the_graph_worktree_row_at_depth_0_and_1() {
+        const HEAD: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const FEAT: &str = "app/.worktrees/feat";
+        let palette = ThemeId::TokyoNight.palette();
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            for depth_1 in [false, true] {
+                for (pr, ramp, color, glyph) in [
+                    (
+                        PrState::CiFailed,
+                        palette.flash_remove_ramp,
+                        palette.deleted,
+                        "x",
+                    ),
+                    (
+                        PrState::Merged,
+                        palette.flash_ramp,
+                        palette.branch_feature,
+                        "m",
+                    ),
+                ] {
+                    let what = format!("{background:?} depth_1={depth_1} {pr:?}");
+                    let mut state = pr_graph_state(FEAT, "feat", true);
+                    state.graph_identity = Some(("app".into(), HEAD.into()));
+                    show_graph_at(&mut state, depth_1, background);
+                    set_pr(&mut state, FEAT, "feat", found_pr(pr));
+                    assert!(state.alert_pr_transitions(Instant::now()), "{what}");
+                    let mut terminal = pr_terminal();
+                    terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                    let hits = graph_pane_badge_hits(&state, depth_1);
+                    assert_eq!(hits.len(), 1, "{what}: {hits:?}");
+                    let hit = &hits[0];
+                    let buf = terminal.backend().buffer();
+                    let cell = &buf[(hit.x, hit.y)];
+                    assert_eq!((cell.symbol(), cell.fg), (glyph, color), "{what}");
+                    let label_x = find_cell_col(buf, hit.y, "app/.worktrees/feat feat ")
+                        .unwrap_or_else(|| panic!("{what}: {}", buf_line(buf, hit.y)));
+                    assert_eq!(buf[(label_x, hit.y)].bg, ramp[0], "{what}: the row");
+                    let commit_y = (0..24)
+                        .find(|y| buf_line(buf, *y).contains("seed graph"))
+                        .expect("commit row");
+                    let (x0, width) = graph_pane_cols(&state, depth_1);
+                    assert!(
+                        (x0..x0 + width).all(|x| buf[(x, commit_y)].bg != ramp[0]),
+                        "{what}: the commit row does not flash"
+                    );
+                }
+            }
+        }
+    }
+
     /// `app` on `main` plus linked checkout `linked` on `feat` (both with an
     /// open PR), and a graph whose worktree row for `linked` paints
     /// `graph_branch`.
