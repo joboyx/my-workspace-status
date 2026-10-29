@@ -57,15 +57,20 @@ fn search_open(screen: &str) -> bool {
     screen.contains(SEARCH_TITLE) && screen.contains("Enter open")
 }
 
-/// The search dialog is open and its query row shows [`QUERY`].
+/// The search dialog is open, its query row shows [`QUERY`], and the
+/// footer reads `Esc clear`.
 fn search_open_with_query(screen: &str) -> bool {
-    search_open(screen) && query_row_shows(screen, QUERY)
+    search_open(screen) && query_row_shows(screen, QUERY) && screen.contains("Esc clear")
 }
 
 /// The search dialog is open, its query row shows the empty-query
-/// placeholder, and [`QUERY`] shows nowhere on screen.
+/// placeholder, [`QUERY`] shows nowhere on screen, and the footer reads
+/// `Esc close`.
 fn search_open_empty(screen: &str) -> bool {
-    search_open(screen) && screen.contains(SEARCH_EMPTY_ROW) && !screen.contains(QUERY)
+    search_open(screen)
+        && screen.contains(SEARCH_EMPTY_ROW)
+        && !screen.contains(QUERY)
+        && screen.contains("Esc close")
 }
 
 /// No search dialog title on screen, and the tree cursor is back on
@@ -81,9 +86,13 @@ fn files_open(screen: &str) -> bool {
 }
 
 /// Quick Open files mode is open, its query row shows the empty-query
-/// placeholder, and [`QUERY`] shows nowhere on screen.
+/// placeholder, [`QUERY`] shows nowhere on screen, and the footer reads
+/// `Esc close`.
 fn files_open_empty(screen: &str) -> bool {
-    files_open(screen) && screen.contains(FILES_EMPTY_ROW) && !screen.contains(QUERY)
+    files_open(screen)
+        && screen.contains(FILES_EMPTY_ROW)
+        && !screen.contains(QUERY)
+        && screen.contains("Esc close")
 }
 
 /// Quick Open is painted in commands mode: the `Commands` title and the
@@ -93,11 +102,12 @@ fn commands_open(screen: &str) -> bool {
 }
 
 /// Quick Open commands mode is open, its query row shows only the `>`
-/// prefix and the caret, [`QUERY`] shows nowhere on screen, and the full
-/// list paints [`COMMAND_ROW`].
+/// prefix and the caret, [`QUERY`] shows nowhere on screen, the full
+/// list paints [`COMMAND_ROW`], and the footer reads `Esc close`.
 fn commands_open_prefix_only(screen: &str) -> bool {
     commands_open(screen)
         && screen.contains(COMMANDS_EMPTY_ROW)
+        && screen.contains("Esc close")
         && !screen.contains(QUERY)
         && screen.contains(COMMAND_ROW)
 }
@@ -170,8 +180,10 @@ fn pty_quick_open_files_esc_clears_query_then_closes() {
     );
     tui.keys(QUERY);
     tui.wait_pred(
-        |screen| files_open(screen) && query_row_shows(screen, QUERY),
-        "the Quick Open files query row shows the typed query",
+        |screen| {
+            files_open(screen) && query_row_shows(screen, QUERY) && screen.contains("Esc clear")
+        },
+        "the Quick Open files query row shows the typed query and the footer reads `Esc clear`",
         WAIT,
     );
 
@@ -215,8 +227,9 @@ fn pty_quick_open_commands_esc_keeps_prefix_then_closes() {
             commands_open(screen)
                 && query_row_shows(screen, &format!(">{QUERY}"))
                 && !screen.contains(COMMAND_ROW)
+                && screen.contains("Esc clear")
         },
-        "the commands query row shows `>` plus the typed text and the list is filtered",
+        "the commands query row shows `>` plus the typed text, the list is filtered, and the footer reads `Esc clear`",
         WAIT,
     );
 

@@ -1454,7 +1454,8 @@ mod tests {
         assert_eq!(dialog(&app).query, "foo", "the rest types into the dialog");
 
         // Text after `#` is the query, leading spaces trimmed.
-        app.dispatch(Action::SearchFilesEscape);
+        park(&mut app);
+        assert!(app.search_files.is_none());
         focus_row(&mut app, NodeKind::Repo, Some("lib"));
         app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Files));
         app.quick_open.as_mut().unwrap().query = "#  ba".into();

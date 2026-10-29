@@ -16758,7 +16758,10 @@ mod tests {
         }
         assert_eq!(palette_focus(&app).as_deref(), Some("Theme: One Dark"));
         assert_eq!(app.theme, ThemeId::OneDark);
+        // Esc clears the typed filter, then closes.
         app.dispatch(Action::QuickOpenEscape);
+        app.dispatch(Action::QuickOpenEscape);
+        assert!(app.quick_open.is_none());
         assert_eq!(app.theme, ThemeId::Kanagawa, "Esc after a files entry");
         assert!(!app.ui_store_path.exists(), "a close never saves");
         let _ = std::fs::remove_dir_all(&dir);
@@ -16777,7 +16780,10 @@ mod tests {
         // The applied theme is the new open-time theme.
         palette_type(&mut app, "dracula");
         assert_eq!(app.theme, ThemeId::Dracula);
+        // Esc clears the typed filter, then closes.
         app.dispatch(Action::QuickOpenEscape);
+        app.dispatch(Action::QuickOpenEscape);
+        assert!(app.quick_open.is_none());
         assert_eq!(app.theme, ThemeId::Nord);
         assert_eq!(load_ui_state(&app.ui_store_path).theme, Some(ThemeId::Nord));
         let _ = std::fs::remove_dir_all(&dir);
