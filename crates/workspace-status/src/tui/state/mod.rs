@@ -423,6 +423,12 @@ pub struct LayoutHit {
     /// Empty when no row shows an icon. [`Self::pr_badge_hits`] reads the
     /// PR badges from it.
     pub icon_hits: Vec<IconHit>,
+    /// Comment-mark targets of the right pane's line viewer cursor line, as
+    /// this frame's line viewer paint read them (the file diff's cursor
+    /// row from the rows it built, or the clean-file view's cursor line),
+    /// rebuilt every paint. A popover asks here whether its line-mark
+    /// section is on the cursor line, so its paint builds no diff rows.
+    pub cursor_line_marks: Vec<IconTarget>,
     /// Hyperlink spans of the frame, rebuilt every paint: the OSC 8 overlay
     /// prints exactly these.
     ///
@@ -605,6 +611,7 @@ impl Default for LayoutHit {
             wake_ms: None,
             search_option_y: 0,
             search_option_hits: Vec::new(),
+            cursor_line_marks: Vec::new(),
         }
     }
 }
@@ -923,6 +930,21 @@ struct DiffSearchMemo {
     hits: Vec<usize>,
 }
 
+/// Memo for [`AppState::cursor_comment_lines`]: content fingerprint,
+/// painted layout, diff cursor, and `V` anchor, then the line span.
+type CommentLinesMemo = Option<((u64, DiffMode, usize, Option<usize>), Option<(u32, u32)>)>;
+
+/// Source line span a comment on diff rows `rows` targets: the `V` range
+/// from `anchor` to `cursor` ([`viewport_line_range`]), else the first
+/// numbered row from `cursor` ([`viewport_line_number`]) as a one-line
+/// span.
+fn comment_line_span(rows: &[DiffRow], cursor: usize, anchor: Option<usize>) -> Option<(u32, u32)> {
+    match anchor {
+        Some(anchor) => viewport_line_range(rows, anchor, cursor),
+        None => viewport_line_number(rows, cursor as u16).map(|line| (line, line)),
+    }
+}
+
 /// Memo for [`AppState::file_search_hits`].
 #[derive(Clone, Debug)]
 struct FileSearchMemo {
@@ -1187,6 +1209,10 @@ pub struct AppState {
     /// Focused diff row's source line, so the blame hook does not rebuild
     /// the diff rows after every schedule and apply.
     line_blame_row_memo: RefCell<line_blame::RowLineMemo>,
+    /// Source line span a diff comment targets
+    /// ([`Self::cursor_comment_lines`]), so the Comment gate a line-comment
+    /// popover asks on every frame does not rebuild the diff rows.
+    comment_lines_memo: RefCell<CommentLinesMemo>,
     /// Pending blame "show commit in graph": selected once the graph
     /// holds the commit. Dropped when the graph repo changes.
     pub graph_reveal: Option<GraphReveal>,
@@ -1420,6 +1446,7 @@ impl AppState {
             explorer_status_memo: RefCell::new(None),
             line_blame: LineBlameState::default(),
             line_blame_row_memo: RefCell::new(None),
+            comment_lines_memo: RefCell::new(None),
             graph_reveal: None,
             blame_previous_gen: 0,
             #[cfg(test)]
@@ -5558,6 +5585,50 @@ impl AppState {
         }
     }
 
+    /// Source line span a comment on the file diff targets
+    /// ([`comment_line_span`] of the diff cursor and `V` anchor over
+    /// [`Self::current_diff_rows`]), memoised by content fingerprint,
+    /// layout, cursor, and anchor. The Comment gate runs on every frame a
+    /// line-comment popover paints; the diff pane primes the memo from the
+    /// rows it built ([`Self::prime_cursor_comment_lines`]), so that frame
+    /// builds the rows once. `None` under a folder summary, like the rows.
+    fn cursor_comment_lines(&self) -> Option<(u32, u32)> {
+        if self.folder_summary().is_some() {
+            return None;
+        }
+        let key = self.comment_lines_key();
+        if let Some((hit_key, hit)) = self.comment_lines_memo.borrow().as_ref() {
+            if *hit_key == key {
+                return *hit;
+            }
+        }
+        let hit = comment_line_span(&self.current_diff_rows(), key.2, key.3);
+        *self.comment_lines_memo.borrow_mut() = Some((key, hit));
+        hit
+    }
+
+    /// Fill the [`Self::cursor_comment_lines`] memo from `rows`, this
+    /// frame's [`Self::current_diff_rows`], so a gate asked later in the
+    /// frame reads it instead of building the rows again.
+    pub(crate) fn prime_cursor_comment_lines(&self, rows: &[DiffRow]) {
+        if self.folder_summary().is_some() {
+            return;
+        }
+        let key = self.comment_lines_key();
+        let hit = comment_line_span(rows, key.2, key.3);
+        *self.comment_lines_memo.borrow_mut() = Some((key, hit));
+    }
+
+    /// Key of the [`Self::cursor_comment_lines`] memo.
+    fn comment_lines_key(&self) -> (u64, DiffMode, usize, Option<usize>) {
+        (
+            self.current_diff_content().syntax_fingerprint(),
+            self.diff_layout(),
+            self.diff_cursor,
+            self.diff_visual_anchor,
+        )
+    }
+
     fn current_comment_target(&self) -> Option<CommentKey> {
         if self.tabs.active_explorer().is_some() {
             if let Some(key) = self.explorer_file_comment_target() {
@@ -5567,14 +5638,8 @@ impl AppState {
         match self.list_focus_target() {
             ListFocusTarget::None => {
                 let (repo, path, source) = self.open_diff_target()?;
-                let rows = self.current_diff_rows();
                 let visual = self.diff_visual_anchor.is_some();
-                let (line, end_line) = if let Some(anchor) = self.diff_visual_anchor {
-                    viewport_line_range(&rows, anchor, self.diff_cursor)?
-                } else {
-                    let line = viewport_line_number(&rows, self.diff_cursor as u16)?;
-                    (line, line)
-                };
+                let (line, end_line) = self.cursor_comment_lines()?;
                 let key = resolve_comment_target(
                     &self.snapshot,
                     None,

@@ -16,7 +16,7 @@ use super::super::comments::{
     CommentEntry,
 };
 use super::super::commit_files::CommitFileRow;
-use super::super::diff::diff_row_gutter_cells;
+use super::super::diff::{diff_row_gutter_cells, DiffRow};
 use super::super::drill::CommitFileSource;
 use super::super::gates::ListFocusTarget;
 use super::super::icons::IconKind;
@@ -339,27 +339,51 @@ impl AppState {
     /// (the PRs tab has none, though its list is no Workspace list), a
     /// folder summary stands in for the diff, or the line paints no mark.
     pub(crate) fn cursor_line_comment_icons(&self) -> Vec<(IconKind, IconTarget)> {
-        if self.is_prs_tab() || self.list_focus_target() != ListFocusTarget::None {
+        if !self.line_viewer_has_focus() {
             return Vec::new();
         }
-        if let Some(file) = self.tabs.active_file_view() {
-            if file.cursor >= file.lines().len() {
-                return Vec::new();
-            }
-            let line = u32::try_from(file.cursor + 1).unwrap_or(u32::MAX);
-            return self
-                .line_comment_mark(line, self.file_line_comment(line))
-                .into_iter()
-                .collect();
+        if self.tabs.active_file_view().is_some() {
+            return self.file_cursor_comment_marks();
         }
         if self.folder_summary().is_some() {
             return Vec::new();
         }
         let rows = self.current_diff_rows();
-        let Some(row) = rows.get(self.diff_cursor) else {
+        let split = self.diff_layout() == DiffMode::SideBySide;
+        rows.get(self.diff_cursor)
+            .map(|row| self.diff_row_comment_marks(row, split))
+            .unwrap_or_default()
+    }
+
+    /// True when the right pane's line viewer has focus: no list focus
+    /// target and not the PRs tab (its list is no Workspace list).
+    fn line_viewer_has_focus(&self) -> bool {
+        !self.is_prs_tab() && self.list_focus_target() == ListFocusTarget::None
+    }
+
+    /// Comment marks of the clean-file view's cursor line (at most one).
+    /// Empty with no clean-file view, a cursor past the last line, or a
+    /// line with no mark.
+    pub(crate) fn file_cursor_comment_marks(&self) -> Vec<(IconKind, IconTarget)> {
+        let Some(file) = self.tabs.active_file_view() else {
             return Vec::new();
         };
-        let split = self.diff_layout() == DiffMode::SideBySide;
+        if file.cursor >= file.lines().len() {
+            return Vec::new();
+        }
+        let line = u32::try_from(file.cursor + 1).unwrap_or(u32::MAX);
+        self.line_comment_mark(line, self.file_line_comment(line))
+            .into_iter()
+            .collect()
+    }
+
+    /// Comment marks of diff row `row` in paint order, one per marked line
+    /// (both gutter cells of a `split` side-by-side row), with no repeat.
+    pub(crate) fn diff_row_comment_marks(
+        &self,
+        row: &DiffRow,
+        split: bool,
+    ) -> Vec<(IconKind, IconTarget)> {
         let mut icons = Vec::new();
         for line in diff_row_gutter_cells(row, split)
             .into_iter()
@@ -452,7 +476,9 @@ impl AppState {
     }
 
     /// True when `target` is on the focused row, so its action lines act
-    /// on it and show their gate reasons. A pinned popover always is.
+    /// on it and show their gate reasons. A pinned popover always is. The
+    /// popover paint asks after the panes paint: a line comment mark
+    /// compares against the cursor line marks that frame recorded.
     pub(crate) fn popover_target_focused(&self, target: &IconTarget) -> bool {
         match target {
             IconTarget::ExplorerRow(rel) => {
@@ -486,10 +512,13 @@ impl AppState {
             IconTarget::CommitDetailMoreLines(id) => {
                 self.commit_detail_msg_identity().as_deref() == Some(id.as_str())
             }
-            IconTarget::LineComment { .. } => self
-                .cursor_line_comment_icons()
-                .iter()
-                .any(|(_, cursor)| cursor == target),
+            // The marks the last line viewer paint read for the cursor
+            // line ([`LayoutHit::cursor_line_marks`]): asking
+            // [`Self::cursor_line_comment_icons`] here would build every
+            // diff row again on each popover frame.
+            IconTarget::LineComment { .. } => {
+                self.line_viewer_has_focus() && self.layout.cursor_line_marks.contains(target)
+            }
             IconTarget::GraphWorktree(path) => {
                 self.list_focus_target() == ListFocusTarget::Graph
                     && self.focused_graph_row().is_some_and(|row| match row {

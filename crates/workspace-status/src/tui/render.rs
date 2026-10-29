@@ -214,6 +214,7 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
     // never opens a PR or a popover and a closed dialog's chip never
     // toggles an option.
     state.layout.icon_hits.clear();
+    state.layout.cursor_line_marks.clear();
     state.layout.search_option_hits.clear();
     state.layout.links.clear();
     state.layout.undercurls.clear();
@@ -859,6 +860,9 @@ fn file_lines_ending_at(cursor: usize, height: usize, rows_of: impl Fn(usize) ->
 /// horizontal bar). Each painted comment mark records an icon hit
 /// ([`IconTarget::LineComment`]).
 fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
+    // Like the file diff, the popover paint reads the cursor line's marks
+    // from here.
+    state.layout.cursor_line_marks = mark_targets(state.file_cursor_comment_marks());
     let palette = state.theme.palette();
     let inner = pane.inner;
     state.layout.file_view_rows = pane.rows;
@@ -3148,10 +3152,13 @@ fn draw_commit_footer(
 /// message rows a pane `pane_h` rows tall shows
 /// ([`commit_msg_lines_fit`], the graph footer's fit: both footers share
 /// one height budget), like [`record_commit_msg_rule`] for the graph
-/// footer. A collapsed footer, a footer with no body row under its rule,
-/// and a drill with no graph loaded record no rule.
+/// footer. A collapsed footer and a footer with no body row under its rule
+/// record no rule. Unlike the graph footer it needs no loaded graph: it
+/// paints from the drill's or compare tab's own commit, and a depth-0 file
+/// diff drops the graph before a blame action opens a Diff commit vs
+/// parent tab.
 fn record_commit_detail_msg_rule(state: &mut AppState, footer: Rect, pane_h: u16) {
-    if state.graph.is_none() || !state.commit_msg_expand || footer.width == 0 {
+    if !state.commit_msg_expand || footer.width == 0 {
         return;
     }
     if footer.height <= FOOTER_RULE_ROWS {
@@ -3324,6 +3331,13 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     if !rows.is_empty() {
         state.diff_cursor = state.diff_cursor.min(rows.len() - 1);
     }
+    // The popover paint reads the cursor row's marks and the Comment
+    // gate's line span from here, not from a second row build.
+    state.prime_cursor_comment_lines(&rows);
+    state.layout.cursor_line_marks = rows
+        .get(state.diff_cursor)
+        .map(|row| mark_targets(state.diff_row_comment_marks(row, split)))
+        .unwrap_or_default();
     let wrap = state.diff_wrap;
     let hscroll = state.diff_hscroll_shown();
     let h_rows = u16::from(hscroll);
@@ -3589,6 +3603,11 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         state.layout.diff_hscrollbar_width = hbar.width;
         state.layout.diff_col_max = hbar.col_max;
     }
+}
+
+/// The targets of comment `marks`, for [`LayoutHit::cursor_line_marks`].
+fn mark_targets(marks: Vec<(IconKind, IconTarget)>) -> Vec<IconTarget> {
+    marks.into_iter().map(|(_, target)| target).collect()
 }
 
 /// Icon hits of the comment marks diff row `row` paints on screen row `y`:
@@ -10340,6 +10359,92 @@ mod tests {
         }
     }
 
+    /// A frame under a line-comment popover builds the diff rows once (the
+    /// pane's own build), peeked or pinned, in both looks, on every gutter
+    /// surface: the popover asks whether its line is the cursor line from
+    /// the marks the pane painted for that line, and its Comment line's
+    /// gate reads the line span the pane primed, not a second row build.
+    /// The clean-file view builds none. The answer still follows the
+    /// cursor: on the marked line the target is focused, on another line
+    /// it is not.
+    #[test]
+    fn line_comment_popover_frames_build_the_diff_rows_once() {
+        for surface in &GUTTER_SURFACES {
+            let file = surface.id == "file-gutter";
+            let builds = usize::from(!file);
+            for (look, background) in PANE_LOOKS {
+                let case = format!("{} {look}", surface.name);
+                let mut state = (surface.open)();
+                state.background = background;
+                state.diff_wrap = false;
+                state.line_blame.set_enabled(false);
+                let mut terminal = Terminal::new(TestBackend::new(200, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                comment_gutter_line(&mut state, "ctx three", "note");
+                // Leave the Comment gate's line span on another line, so
+                // the popover frames read the span the pane paint primes.
+                put_gutter_cursor(&mut state, "ctx four");
+                state.dispatch(Action::CommentStart);
+                state.comment = None;
+                put_gutter_cursor(&mut state, "ctx three");
+                draw_state(&mut terminal, &mut state);
+                assert_eq!(
+                    state.focus,
+                    FocusPane::Right,
+                    "{case}: the viewer has focus"
+                );
+                let hit = state
+                    .layout
+                    .icon_hits
+                    .iter()
+                    .find(|hit| matches!(hit.target, IconTarget::LineComment { line: 3, .. }))
+                    .cloned()
+                    .unwrap_or_else(|| panic!("{case}: the mark's hit"));
+
+                // Peek: the pointer rests on the mark.
+                let at = std::time::Instant::now();
+                state.set_pointer_at(Some((hit.x, hit.y)), at);
+                assert!(state.expire_peek(at + std::time::Duration::from_secs(1)));
+                assert!(!state.popover_pinned(), "{case}: a peek");
+                state.diff_row_builds.set(0);
+                draw_state(&mut terminal, &mut state);
+                assert!(state.layout.popover.is_some(), "{case}: the peek paints");
+                assert_eq!(
+                    state.diff_row_builds.get(),
+                    builds,
+                    "{case}: a peeked frame"
+                );
+                assert!(
+                    state.popover_target_focused(&hit.target),
+                    "{case}: the cursor line's mark is focused"
+                );
+                put_gutter_cursor(&mut state, "ctx four");
+                draw_state(&mut terminal, &mut state);
+                assert!(
+                    !state.popover_target_focused(&hit.target),
+                    "{case}: another cursor line's mark is not"
+                );
+                put_gutter_cursor(&mut state, "ctx three");
+                state.set_pointer_at(None, at);
+                state.close_popover();
+
+                // Pinned with `gh`: the key press may build; the frame
+                // builds once.
+                draw_state(&mut terminal, &mut state);
+                state.dispatch(Action::PopoverOpenFocused);
+                assert!(state.popover_pinned(), "{case}: gh pins");
+                state.diff_row_builds.set(0);
+                draw_state(&mut terminal, &mut state);
+                assert!(state.layout.popover.is_some(), "{case}: the pin paints");
+                assert_eq!(
+                    state.diff_row_builds.get(),
+                    builds,
+                    "{case}: a pinned frame"
+                );
+            }
+        }
+    }
+
     /// A clean file one row tall, panned, keeps its line row: the
     /// horizontal bar does not paint over it, as a 1-row list keeps its
     /// row. Two rows give the bar its own row.
@@ -13550,6 +13655,54 @@ mod tests {
                 });
                 assert_eq!(state.commit_detail_msg_scroll(), 1, "{case}: wheel scrolls");
                 assert_eq!(state.commit_files_cursor(), cursor, "{case}: cursor stays");
+
+                // The footer's top rule hovers and drags with or without a
+                // graph: a press arms the drag, two rows up adds two
+                // message rows, the rule follows, the release saves.
+                let dir = crate::testutil::unique_dir("ws-blame-footer-rule");
+                state.ui_store_path = dir.join("ui-state.json");
+                assert_eq!(
+                    state.layout.commit_msg_rule_y,
+                    Some(y),
+                    "{case}: the rule on the footer's top row"
+                );
+                assert_eq!(
+                    (
+                        state.layout.commit_msg_rule_x,
+                        state.layout.commit_msg_rule_width
+                    ),
+                    (x, width),
+                    "{case}: over the footer width"
+                );
+                let col = x + 3;
+                state.pointer = Some((col, y));
+                assert_eq!(
+                    state.hovered_resize_edge(),
+                    Some(crate::tui::split::ResizeEdge::CommitMsg),
+                    "{case}: the rule is a resize edge"
+                );
+                let lines = state.commit_msg_lines;
+                state.dispatch(Action::Click { col, row: y });
+                assert!(
+                    matches!(state.drag, SplitDrag::CommitMsg { .. }),
+                    "{case}: the press arms the drag"
+                );
+                state.dispatch(Action::Drag { col, row: y - 2 });
+                assert_eq!(state.commit_msg_lines, lines + 2, "{case}: up adds rows");
+                draw_state(&mut terminal, &mut state);
+                assert_eq!(
+                    state.layout.commit_msg_rule_y,
+                    Some(y - 2),
+                    "{case}: the rule follows"
+                );
+                state.dispatch(Action::Release);
+                assert_eq!(
+                    crate::tui::ui_state_store::load_ui_state(&state.ui_store_path)
+                        .commit_msg_lines,
+                    Some(lines + 2),
+                    "{case}: the release saves the rows"
+                );
+                let _ = std::fs::remove_dir_all(&dir);
             }
         }
 
@@ -25362,9 +25515,11 @@ mod tests {
     }
 
     /// The depth-2 footer records no rule edge when no body row fits under
-    /// its rule or no graph is loaded, like the graph footer.
+    /// its rule. It needs no graph: with no graph loaded the footer still
+    /// paints (the tab's or drill's own commit, or the fallback), so its
+    /// rule records and drags.
     #[test]
-    fn commit_detail_rule_is_not_recorded_without_a_body_row_or_a_graph() {
+    fn commit_detail_rule_is_not_recorded_without_a_body_row() {
         let mut state = two_pane_commit_diff_state();
         let mut terminal = Terminal::new(TestBackend::new(30, 8)).unwrap();
         let mut draw_in = |state: &mut AppState, height: u16| {
@@ -25381,7 +25536,12 @@ mod tests {
         );
         assert_eq!(draw_in(&mut state, 2), None, "rule only: no body row");
         state.graph = None;
-        assert_eq!(draw_in(&mut state, 8), None, "no graph loaded");
+        assert_eq!(
+            draw_in(&mut state, 8),
+            Some(3),
+            "no graph loaded: the painted footer still records its rule"
+        );
+        assert_eq!(draw_in(&mut state, 2), None, "no graph, rule only");
     }
 
     /// Every `file://` link URL of the frame.
