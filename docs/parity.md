@@ -255,18 +255,18 @@ The reviewed eye and the comment mark (open or resolved) on a row or a line gutt
 
 ### `watch-flash` — Watch-reload flash
 
-A row that a watch reload adds or changes flashes and fades. A checkout row also flashes when its PR changes (`pr-change`).
+A row that a watch reload adds or changes flashes and fades. The rows that paint a checkout's PR badge also flash when its PR changes (`pr-change`).
 
 | Feature | What | Tests |
 | --- | --- | --- |
 | `flash` | A reloaded row flashes. | `flash_paints_node_and_spacer_cursor_wins` |
-| `pr-change` | A checkout whose PR turns CI failed, ready to merge, merged, or closed flashes: the remove ramp for CI failed and closed, the add ramp for ready to merge and merged. The PR badge glyph keeps its state colour. | `a_pr_change_flashes_the_checkout_tree_row_on_the_remove_or_add_ramp`, `a_pr_change_flash_keeps_the_badge_glyph_in_its_state_colour` |
+| `pr-change` | When a checkout's PR turns CI failed, ready to merge, merged, or closed, each row that paints its PR badge flashes (the checkout's tree row, never a family row; its graph worktree row): the remove ramp for CI failed and closed, the add ramp for ready to merge and merged. The PR badge glyph keeps its state colour. | `a_pr_change_flashes_the_checkout_tree_row_on_the_remove_or_add_ramp`, `a_pr_change_flash_keeps_the_badge_glyph_in_its_state_colour`, `a_pr_change_flashes_the_graph_worktree_row_at_depth_0_and_1` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `flash` | `pr-change` |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `tree` | Workspace | 0 | left | boxed, flat | `draw_tree`, `flash_color`, `alert_pr_transitions` | supported | supported |
-| `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `draw_graph`, `graph_flash_rows` | supported | gap: G24 |
-| `graph-d1` | Workspace | 1 | left | boxed, flat | `draw_graph`, `graph_flash_rows` | supported | gap: G24 |
+| `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `draw_graph`, `graph_flash_rows`, `alert_pr_transitions` | supported | supported |
+| `graph-d1` | Workspace | 1 | left | boxed, flat | `draw_graph`, `graph_flash_rows`, `alert_pr_transitions` | supported | supported |
 | `files-d1` | Workspace | 1 | right | boxed, flat | `draw_commit_file_list`, `commit_file_flash_color` | supported | n/a: commit-file rows carry no PR |
 | `files-d2` | Workspace | 2 | left | boxed, flat | `draw_commit_file_list`, `commit_file_flash_color` | supported | n/a: commit-file rows carry no PR |
 | `compare-files` | Compare | - | left | boxed, flat | `draw_commit_file_list`, `commit_file_flash_color` | supported | n/a: compare file rows carry no PR |
@@ -323,7 +323,6 @@ Each open gap is tracked by its id. Fixing one turns its cells into `supported` 
 | G21 | `row-marks` | Commit-file and compare list rows paint the reviewed eye, comment marks, and the watch-reload flash | Folder summary rows of the same files: `draw_folder_summary` paints `file_change_segments` with no mark and no flash |
 | G22 | `horizontal-pan` | Commit-file list rows pan with the keys and the horizontal wheel | Folder summary: its rows always paint at offset 0; a pan key or a horizontal wheel over it pans the hidden file diff (`pan_right_pane` → `pan_diff_content`) |
 | G23 | `scrollbars` | Graph list and file diff paint a horizontal scrollbar with drag and track click | Workspace tree and commit-file lists pan sideways with no horizontal bar |
-| G24 | `watch-flash` | A PR change flashes the checkout's tree row | Graph worktree rows paint the same PR badge (`graph_pr_badges`) and do not flash; at depth 1 the tree is hidden, so only the toast shows the change |
 
 ## Intentional differences
 

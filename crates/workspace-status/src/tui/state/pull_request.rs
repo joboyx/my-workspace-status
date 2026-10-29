@@ -270,8 +270,8 @@ impl PrTransition {
         }
     }
 
-    /// Flash ramp of the checkout's tree rows: remove for CI failed and
-    /// closed, add for ready to merge and merged.
+    /// Flash ramp of the rows that paint the checkout's PR badge: remove
+    /// for CI failed and closed, add for ready to merge and merged.
     fn flash_kind(&self) -> FlashKind {
         match self.to {
             PrTransitionTo::State(PrState::CiFailed) | PrTransitionTo::Closed => FlashKind::Remove,
