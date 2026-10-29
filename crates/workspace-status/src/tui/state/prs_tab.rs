@@ -476,7 +476,8 @@ impl AppState {
             | Action::CompareVsDefault
             | Action::CompareVsBranch
             | Action::CompareVsCommit
-            | Action::CompareCommitVsParent => SWITCH_TO_WORKSPACE_TAB,
+            | Action::CompareCommitVsParent
+            | Action::GoToLine(_) => SWITCH_TO_WORKSPACE_TAB,
             _ => return None,
         };
         Some(reason.into())
@@ -484,14 +485,15 @@ impl AppState {
 
     /// Palette row reason on the PRs tab after [`Self::prs_tab_refusal`]:
     /// the rows whose key the tab gives its own meaning (Copy comments
-    /// `y`, Graph focus branches `o`) are Workspace rows here, and the PR
-    /// rows need a listed PR.
+    /// `y`, Graph focus branches `o`, Refresh `r`) are Workspace rows here,
+    /// and the PR rows need a listed PR. The tab's `r` key and the Refresh
+    /// PRs row look the PRs up again.
     pub(crate) fn prs_tab_palette_reason(&self, action: &Action) -> Option<String> {
         if let Some(reason) = self.prs_tab_refusal(action) {
             return Some(reason);
         }
         match action {
-            Action::ExportComments | Action::GraphFocusBranches => {
+            Action::ExportComments | Action::GraphFocusBranches | Action::Refresh => {
                 Some(SWITCH_TO_WORKSPACE_TAB.into())
             }
             Action::OpenPullRequest
@@ -1090,7 +1092,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
-    use super::super::super::command_palette::command_for;
+    use super::super::super::command_palette::{command_for, go_to_line_command};
     use super::super::super::gates::ListFocusTarget;
     use super::super::super::pr_groups::GroupKind;
     use super::super::super::pull_request::{PrLookup, PrPage};
@@ -1536,6 +1538,29 @@ mod tests {
             reason(&app, Action::Stage).as_deref(),
             Some(PRS_TAB_READ_ONLY)
         );
+        // Go to line would move the parked Workspace diff cursor, and the
+        // Refresh row names a reload the tab does not run (its `r` key and
+        // the Refresh PRs row look the PRs up again).
+        assert_eq!(
+            app.palette_disabled_reason(&go_to_line_command(42))
+                .as_deref(),
+            Some(SWITCH_TO_WORKSPACE_TAB)
+        );
+        app.status.clear();
+        assert_eq!(app.dispatch(Action::GoToLine(42)), Effect::None);
+        assert_eq!(&*app.status, SWITCH_TO_WORKSPACE_TAB);
+        assert_eq!(
+            reason(&app, Action::Refresh).as_deref(),
+            Some(SWITCH_TO_WORKSPACE_TAB)
+        );
+        assert_eq!(reason(&app, Action::RefreshPullRequests), None);
+        app.status.clear();
+        assert_ne!(
+            app.dispatch(Action::Refresh),
+            Effect::None,
+            "`r` still runs"
+        );
+        assert_ne!(&*app.status, SWITCH_TO_WORKSPACE_TAB);
         let mut empty = app_with_no_pr();
         empty.dispatch(Action::OpenPrsTab);
         assert_eq!(

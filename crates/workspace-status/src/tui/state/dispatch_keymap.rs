@@ -528,7 +528,9 @@ impl AppState {
     pub(crate) fn palette_disabled_reason(&self, command: &PaletteCommand) -> Option<String> {
         let action = &command.action;
         if matches!(action, Action::GoToLine(_)) {
-            return self.go_to_line_refusal();
+            return self
+                .prs_tab_refusal(action)
+                .or_else(|| self.go_to_line_refusal());
         }
         if matches!(action, Action::PreviousFileTab | Action::NextFileTab) {
             return self.file_tab_cycle_reason();
