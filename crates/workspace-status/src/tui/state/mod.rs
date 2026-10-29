@@ -18,6 +18,7 @@ mod remote_view;
 mod scroll_glide;
 mod summary;
 
+pub(crate) use explorer_tab::explorer_row_segments;
 pub(crate) use pull_request::PrDetailState;
 
 use std::borrow::Cow;
@@ -369,6 +370,10 @@ pub struct LayoutHit {
     /// paint, with the list's pan clamp (`AppState::commit_file_max_col`);
     /// `split_layout` hit-tests with the live pan.
     pub files_hbar: HScrollbarLayout,
+    /// Explorer tree horizontal scrollbar from the last paint, with the
+    /// tree's pan clamp (`AppState::explorer_tree_max_col_in`);
+    /// `split_layout` hit-tests with the live pan.
+    pub explorer_tree_hbar: HScrollbarLayout,
     /// Explorer clean-file view vertical scrollbar from the last paint:
     /// its column (`None` while the lines fit), the body rows it spans,
     /// the line count, the painted top line, and the top that shows the
@@ -528,6 +533,7 @@ impl Default for LayoutHit {
             explorer_tree_vbar: VScrollbarLayout::default(),
             tree_hbar: HScrollbarLayout::default(),
             files_hbar: HScrollbarLayout::default(),
+            explorer_tree_hbar: HScrollbarLayout::default(),
             file_view_vbar: VScrollbarLayout::default(),
             file_view_hbar: HScrollbarLayout::default(),
             summary_vbar: VScrollbarLayout::default(),
@@ -3077,6 +3083,10 @@ impl AppState {
                 col_offset: self.hbar_offset(HScrollbar::CommitFiles),
                 ..self.layout.files_hbar
             },
+            explorer_tree_hbar: HScrollbarLayout {
+                col_offset: self.hbar_offset(HScrollbar::ExplorerTree),
+                ..self.layout.explorer_tree_hbar
+            },
             file_view_hbar: HScrollbarLayout {
                 col_offset: self.hbar_offset(HScrollbar::FileView),
                 ..self.layout.file_view_hbar
@@ -3148,10 +3158,12 @@ impl AppState {
     /// The drag handle under (`col`, `row`) ([`hit_split`]). The in-diff
     /// RULE's 3-column band covers the comment mark of the right cell next
     /// to it: the mark wins, so a press there picks its row and pins
-    /// instead of moving the RULE.
+    /// instead of moving the RULE. An Explorer tab has no commit-message
+    /// footer, so a recorded commit-message rule is never an edge there.
     fn split_hit_at(&self, col: u16, row: u16) -> SplitHit {
         match hit_split(self.split_layout(), col, row) {
             SplitHit::DiffSplit if self.on_line_comment_mark(col, row) => SplitHit::Other,
+            SplitHit::CommitMsg if self.is_explorer_tab() => SplitHit::Other,
             hit => hit,
         }
     }
@@ -3166,6 +3178,18 @@ impl AppState {
         if let Some(index) = self.hit_tab(col, row) {
             return self.activate_tab(index);
         }
+        if let Some(effect) = self.press_split_hit(col, row) {
+            return effect;
+        }
+        self.arm_text_selection(col, row);
+        self.click_row(col, row)
+    }
+
+    /// Press on the drag handle under (`col`, `row`) ([`Self::split_hit_at`]),
+    /// on every tab: the pane divider, the in-diff RULE, the commit-message
+    /// rule, or a scrollbar arms its drag. `None` off every handle, for the
+    /// caller's row click.
+    fn press_split_hit(&mut self, col: u16, row: u16) -> Option<Effect> {
         match self.split_hit_at(col, row) {
             SplitHit::Pane if self.background == BackgroundMode::Paint => {
                 // A flat divider press sits on a row's pad cell: resize only
@@ -3173,19 +3197,16 @@ impl AppState {
                 // (`last_click` stays for its double-click test).
                 self.drag = SplitDrag::Pane;
                 self.pad_press = Some((col, row));
-                return Effect::None;
             }
             SplitHit::Pane => {
                 self.drag = SplitDrag::Pane;
                 self.apply_tree_fraction_from_col(col);
                 self.last_click = None;
-                return Effect::None;
             }
             SplitHit::DiffSplit => {
                 self.drag = SplitDrag::Diff;
                 self.apply_diff_fraction_from_col(col);
                 self.last_click = None;
-                return Effect::None;
             }
             SplitHit::CommitMsg => {
                 // Rows change only once the pointer moves off this row.
@@ -3194,32 +3215,33 @@ impl AppState {
                     origin_lines: self.commit_msg_lines,
                 };
                 self.last_click = None;
-                return Effect::None;
             }
-            SplitHit::VThumb(bar) => return self.press_vscrollbar(bar, true, row),
-            SplitHit::VTrack(bar) => return self.press_vscrollbar(bar, false, row),
-            SplitHit::HThumb(bar) => {
-                self.press_hscrollbar(bar, true, col);
-                return Effect::None;
-            }
-            SplitHit::HTrack(bar) => {
-                self.press_hscrollbar(bar, false, col);
-                return Effect::None;
-            }
-            SplitHit::Other => self.arm_text_selection(col, row),
+            SplitHit::VThumb(bar) => return Some(self.press_vscrollbar(bar, true, row)),
+            SplitHit::VTrack(bar) => return Some(self.press_vscrollbar(bar, false, row)),
+            SplitHit::HThumb(bar) => self.press_hscrollbar(bar, true, col),
+            SplitHit::HTrack(bar) => self.press_hscrollbar(bar, false, col),
+            SplitHit::Other => return None,
         }
-        self.click_row(col, row)
+        Some(Effect::None)
     }
 
-    /// The row under (`col`, `row`) after [`Self::click_at`] found no tab,
-    /// divider, or scrollbar there: focus its pane and select the row; a
-    /// second press on the same cell within 400 ms is a double-click.
-    fn click_row(&mut self, col: u16, row: u16) -> Effect {
+    /// Note a row press at (`col`, `row`) and say whether it is a
+    /// double-click: a second press on the same cell within 400 ms.
+    fn note_row_press(&mut self, col: u16, row: u16) -> bool {
         let now = Instant::now();
         let is_double = self.last_click.as_ref().is_some_and(|(c, r, at)| {
             *c == col && *r == row && at.elapsed() <= Duration::from_millis(400)
         });
         self.last_click = Some((col, row, now));
+        is_double
+    }
+
+    /// The row under (`col`, `row`) after [`Self::click_at`] found no tab,
+    /// divider, or scrollbar there: focus its pane and select the row; a
+    /// second press on the same cell within 400 ms is a double-click
+    /// ([`Self::note_row_press`]).
+    fn click_row(&mut self, col: u16, row: u16) -> Effect {
+        let is_double = self.note_row_press(col, row);
         if col >= self.layout.right_x {
             self.focus = FocusPane::Right;
             if self.is_compare_tab() {
@@ -3543,7 +3565,11 @@ impl AppState {
         let Some((col, row)) = press else {
             return self.release_mouse();
         };
-        let clicked = self.click_row(col, row);
+        let clicked = if self.is_explorer_tab() {
+            self.explorer_click_row(col, row)
+        } else {
+            self.click_row(col, row)
+        };
         popover::then(clicked, self.release_mouse())
     }
 
@@ -3763,7 +3789,7 @@ impl AppState {
             HScrollbar::Diff | HScrollbar::FileView | HScrollbar::Summary => {
                 self.focus = FocusPane::Right;
             }
-            HScrollbar::Tree => self.focus = FocusPane::Left,
+            HScrollbar::Tree | HScrollbar::ExplorerTree => self.focus = FocusPane::Left,
             HScrollbar::CommitFiles => self.focus = self.commit_files_pane(),
         }
         self.scroll_hbar_to(bar, offset);
@@ -3786,6 +3812,7 @@ impl AppState {
                 self.left_col_offset
             }
             HScrollbar::CommitFiles => self.right_col_offset,
+            HScrollbar::ExplorerTree => self.explorer_tree_col_offset(),
             HScrollbar::FileView => self
                 .tabs
                 .active_file_view()
@@ -3806,6 +3833,7 @@ impl AppState {
                 self.left_col_offset = offset;
             }
             HScrollbar::CommitFiles => self.right_col_offset = offset,
+            HScrollbar::ExplorerTree => self.set_explorer_tree_col_offset(offset),
             HScrollbar::FileView => {
                 if let Some(file) = self.tabs.active_file_view_mut() {
                     file.col_offset = offset;
@@ -6848,8 +6876,7 @@ impl AppState {
     /// Resize edge to highlight: the edge an active drag moves, else the
     /// edge under [`Self::pane_pointer`] in the last paint.
     ///
-    /// `None` while mouse capture is off, on an Explorer tab (it has no
-    /// pane, RULE, or commit-message drag), below the minimum terminal
+    /// `None` while mouse capture is off, below the minimum terminal
     /// size, while an overlay takes the mouse (dialog, prompt, help,
     /// palette, pinned popover), with the pointer inside a hover popover,
     /// and on a painted tab label (a press there activates or closes the
@@ -6873,13 +6900,13 @@ impl AppState {
         self.split_hit_at(col, row).resize_edge()
     }
 
-    /// True when a left press can land on a resize edge: mouse on, a
-    /// Workspace or compare tab with both panes painted, and an input mode
-    /// whose clicks reach [`Self::click_at`].
+    /// True when a left press can land on a resize edge: mouse on, both
+    /// panes painted (any tab kind), and an input mode whose clicks reach
+    /// [`Self::press_split_hit`] (through [`Self::click_at`], or
+    /// `explorer_click` on an Explorer tab).
     fn resize_edges_take_mouse(&self) -> bool {
         self.mouse_enabled
             && !self.too_small
-            && !self.is_explorer_tab()
             && matches!(
                 self.input_mode(),
                 InputMode::Normal { .. }
@@ -15020,7 +15047,7 @@ mod tests {
     }
 
     #[test]
-    fn resize_edge_hover_clears_under_overlays_mouse_off_and_explorer() {
+    fn resize_edge_hover_clears_under_overlays_and_mouse_off_and_lights_on_explorer() {
         use crate::file_search::SearchOptions;
         use crate::tui::quick_open::QuickOpenScope;
         let mut app = state();
@@ -15057,9 +15084,11 @@ mod tests {
         app.layout = wide_split_layout();
         assert_eq!(
             app.hovered_resize_edge(),
-            None,
-            "Explorer has no pane or rule drag"
+            Some(ResizeEdge::Pane),
+            "the Explorer divider hovers as the Workspace one"
         );
+        app.help_open = true;
+        assert_eq!(app.hovered_resize_edge(), None, "help over the Explorer");
     }
 
     #[test]

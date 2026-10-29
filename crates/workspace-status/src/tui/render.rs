@@ -87,8 +87,8 @@ use super::split::{
     MIN_PANE_COLS, MIN_TERM_COLS, MIN_TERM_ROWS,
 };
 use super::state::{
-    revert_scope, AppState, CompareRevertTarget, FocusPane, IconHit, LayoutHit, PendingConfirm,
-    PopoverHit,
+    explorer_row_segments, revert_scope, AppState, CompareRevertTarget, FocusPane, IconHit,
+    LayoutHit, PendingConfirm, PopoverHit,
 };
 use super::syntax::{
     cached_highlight_diff_rows, highlight_file_window, readable_fg, slice_styled_cols,
@@ -278,10 +278,12 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
     state.layout.explorer_tree_vbar = VScrollbarLayout::default();
     state.layout.tree_hbar = HScrollbarLayout::default();
     state.layout.files_hbar = HScrollbarLayout::default();
+    state.layout.explorer_tree_hbar = HScrollbarLayout::default();
     state.layout.file_view_vbar = VScrollbarLayout::default();
     state.layout.file_view_hbar = HScrollbarLayout::default();
     state.layout.summary_vbar = VScrollbarLayout::default();
     state.layout.summary_hbar = HScrollbarLayout::default();
+    state.layout.summary_list_height = 0;
     state.layout.file_view_row_lines.clear();
     state.layout.explorer_tree = Rect::default();
     state.layout.explorer_preview = Rect::default();
@@ -290,8 +292,7 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
     state.layout.file_view_rows = Rect::default();
     state.layout.pane_height = chunks[1].height;
     let edge_area = if state.is_explorer_tab() {
-        draw_explorer_tab(frame, chunks[1], state);
-        None
+        draw_explorer_tab(frame, chunks[1], state)
     } else {
         Some(draw_panes(frame, chunks[1], state))
     };
@@ -687,8 +688,6 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) -> R
 const LOADING_FILE: &str = "loading…";
 /// Explorer tree copy for a checkout with no entries.
 const EMPTY_FOLDER: &str = "empty folder";
-/// Explorer badge of an untracked file (the Workspace tree says `A`).
-const UNTRACKED_BADGE: &str = "??";
 /// File view body for an empty file.
 const EMPTY_FILE: &str = "empty file";
 
@@ -1295,8 +1294,14 @@ fn fill_bg(frame: &mut Frame<'_>, area: Rect, bg: Color) {
 /// are. `explorer_tree` / `explorer_preview` record the content rects
 /// (the preview below the inner tab row), `explorer_tree_rows` /
 /// `explorer_preview_rows` the full-width rows (pad cells included when
-/// flat).
-fn draw_explorer_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
+/// flat). The pane divider and, on a side-by-side diff, the in-diff RULE
+/// are recorded as on the Workspace, and the returned geometry is what the
+/// resize-edge highlight paints over (`None` with no Explorer tab).
+fn draw_explorer_tab(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &mut AppState,
+) -> Option<ResizeEdgeArea> {
     let widths = pane_widths(area.width, state.tree_fraction);
     let panes = Layout::default()
         .direction(Direction::Horizontal)
@@ -1306,9 +1311,7 @@ fn draw_explorer_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         ])
         .split(area);
     let palette = state.theme.palette();
-    let Some(tab) = state.tabs.active_explorer() else {
-        return;
-    };
+    let tab = state.tabs.active_explorer()?;
     let preview_title = match tab.active_inner().map(|inner| &inner.view) {
         None => "preview".to_string(),
         Some(ExplorerPreview::Diff { .. }) => "diff".to_string(),
@@ -1365,22 +1368,33 @@ fn draw_explorer_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     state.layout.explorer_preview = right_inner;
     state.layout.explorer_preview_rows = body_pane.rows;
     state.layout.right_x = panes[1].x;
+    state.layout.outer_tree_width = panes[0].width;
     state.layout.right_y = right_inner.y;
     state.layout.diff_content_x = right_inner.x;
     state.layout.diff_pane_width = right_inner.width;
     state.layout.diff_pane_height = right_inner.height;
-    state.layout.diff_split_rule_x = None;
-    // The inner tab row keeps the pane fill in its pad cells; only the
-    // body rows bleed.
-    if right_inner.width == 0 || right_inner.height == 0 {
-        bleed_flat_pad(frame, body_pane);
-        return;
-    }
+    let edges = ResizeEdgeArea {
+        left: panes[0],
+        left_rows: tree_pane.rows,
+        right_inner,
+    };
     let view = state
         .tabs
         .active_explorer()
         .and_then(|tab| tab.active_inner())
         .map(|inner| matches!(inner.view, ExplorerPreview::File(_)));
+    // A changed file's diff paints side by side as on the Workspace, with
+    // the same RULE to drag.
+    state.layout.diff_split_rule_x = (view == Some(false)
+        && right_inner.width > 0
+        && state.diff_layout() == DiffMode::SideBySide)
+        .then(|| diff_split_rule_x(right_inner.x, right_inner.width, state.diff_split_fraction));
+    // The inner tab row keeps the pane fill in its pad cells; only the
+    // body rows bleed.
+    if right_inner.width == 0 || right_inner.height == 0 {
+        bleed_flat_pad(frame, body_pane);
+        return Some(edges);
+    }
     match view {
         Some(false) => draw_diff_pane(frame, right_inner, state),
         Some(true) => draw_file_body(frame, body_pane, state),
@@ -1391,6 +1405,7 @@ fn draw_explorer_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         None => {}
     }
     bleed_flat_pad(frame, body_pane);
+    Some(edges)
 }
 
 /// The active Explorer tab's inner file tab row in `area` (one row): each
@@ -1467,7 +1482,10 @@ fn draw_explorer_file_tabs(frame: &mut Frame<'_>, area: Rect, state: &AppState) 
 }
 
 /// Explorer tree `rows` (the cursor on `cursor`) inside `area`, keeping
-/// the cursor row in view. `status` gives each row its mark.
+/// the cursor row in view. `status` gives each row its mark. The rows pan
+/// by the tab's tree pan, clamped as Shift-→ clamps it
+/// ([`clamped_list_pan`] over [`AppState::explorer_tree_max_col_in`]), and
+/// keep their bars as the Workspace tree does ([`ListBars`]).
 fn draw_explorer_tree(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1484,8 +1502,19 @@ fn draw_explorer_tree(
         frame.render_widget(Paragraph::new(muted_copy(EMPTY_FOLDER, palette)), area);
         return;
     }
-    // The tree never pans (offset 0), so it keeps no horizontal bar row.
-    let bars = ListBars::new(area, rows.len(), 0);
+    let offset = state
+        .tabs
+        .active_explorer()
+        .map_or(0, |tab| tab.tree_col_offset);
+    let (pan, col_max) = clamped_list_pan(
+        state,
+        HScrollbar::ExplorerTree,
+        area,
+        rows.len(),
+        offset,
+        |state, vscroll| state.explorer_tree_max_col_in(area.width, vscroll),
+    );
+    let bars = ListBars::new(area, rows.len(), pan);
     let rows_area = bars.rows_area();
     let height = rows_area.height as usize;
     let (start, _) = visible_window(rows.len(), cursor.unwrap_or(0), height);
@@ -1529,11 +1558,19 @@ fn draw_explorer_tree(
         .skip(start)
         .take(height)
         .map(|(index, row)| {
+            let segs = if row.placeholder {
+                NodeSegments {
+                    segments: vec![loading.clone()],
+                    trailing: Vec::new(),
+                }
+            } else {
+                explorer_row_segments(row, status, state.ascii)
+            };
             paint_segmented_row(
                 row.depth,
                 row.is_dir,
                 !row.expanded,
-                &explorer_row_segments(row, status, state.ascii, &loading),
+                &segs,
                 rows_area.width as usize,
                 Some(index) == cursor,
                 focused,
@@ -1542,73 +1579,15 @@ fn draw_explorer_tree(
                 search,
                 state.ascii,
                 palette,
-                0,
+                usize::from(pan),
             )
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), rows_area);
     let flat = state.background == BackgroundMode::Paint;
-    let (vbar, _) = bars.paint(frame, start, (0, 0), flat);
+    let (vbar, hbar) = bars.paint(frame, start, (pan, col_max), flat);
     state.layout.explorer_tree_vbar = vbar;
-}
-
-/// Name and right-hand mark of one Explorer row.
-///
-/// A changed file paints in its status colour with its letter badge
-/// (`??` for an untracked file); a folder with changes under it gets a
-/// `●` in the modified colour. Ignored entries are muted and dim; a
-/// loading row paints `loading` (the spinner-prefixed copy and its role).
-fn explorer_row_segments(
-    row: &ExplorerRow,
-    status: &ExplorerStatus,
-    ascii: bool,
-    loading: &TextSeg,
-) -> NodeSegments {
-    let seg = |text: &str, role: SegRole, dim: bool| TextSeg {
-        text: text.to_string(),
-        role,
-        hex: None,
-        bold: false,
-        dim,
-        icon: None,
-    };
-    if row.placeholder {
-        return NodeSegments {
-            segments: vec![loading.clone()],
-            trailing: Vec::new(),
-        };
-    }
-    if row.ignored {
-        return NodeSegments {
-            segments: vec![seg(&row.name, SegRole::Muted, true)],
-            trailing: Vec::new(),
-        };
-    }
-    if row.is_dir {
-        let dirty = status.dir_dirty(&row.rel);
-        let dot = if ascii { "*" } else { "●" };
-        return NodeSegments {
-            segments: vec![seg(&row.name, SegRole::Dir, false)],
-            trailing: if dirty {
-                vec![seg(dot, SegRole::Modified, false)]
-            } else {
-                Vec::new()
-            },
-        };
-    }
-    let (role, badge) = if status.is_untracked(&row.rel) {
-        (SegRole::Added, Some(UNTRACKED_BADGE))
-    } else if let Some(letter) = status.letter(&row.rel) {
-        (SegRole::from(letter.color_role()), Some(letter.badge()))
-    } else {
-        (SegRole::File, None)
-    };
-    NodeSegments {
-        segments: vec![seg(&row.name, role, false)],
-        trailing: badge
-            .map(|badge| vec![seg(badge, role, false)])
-            .unwrap_or_default(),
-    }
+    state.layout.explorer_tree_hbar = hbar;
 }
 
 fn pane_border(focused: bool, palette: Palette) -> Style {
@@ -7872,31 +7851,34 @@ mod tests {
         body
     }
 
-    /// One file-diff surface the vertical-bar drag test drives.
+    /// One file-diff surface the diff bar, line-click, and resize-edge
+    /// tests drive.
     struct DiffBarSurface {
-        /// Surface id in the `scrollbars` registry table.
+        /// Surface id in the `scrollbars` and `line-viewers` registry
+        /// tables.
         id: &'static str,
-        /// A state that shows [`long_bar_diff`] on this surface.
-        open: fn() -> AppState,
+        /// A state that shows the unified diff it is given (one file, a
+        /// single hunk) on this surface.
+        open: fn(&str) -> AppState,
     }
 
     /// Every surface that paints a file diff through `draw_diff_pane`.
     const DIFF_BAR_SURFACES: [DiffBarSurface; 4] = [
         DiffBarSurface {
             id: "diff-d0",
-            open: || {
+            open: |diff| {
                 let mut state = two_pane_diff_state();
                 state.set_diff(
                     "app".into(),
                     "README.md".into(),
-                    super::super::diff::DiffContent::from_unified(long_bar_diff()),
+                    super::super::diff::DiffContent::from_unified(diff.to_string()),
                 );
                 state
             },
         },
         DiffBarSurface {
             id: "diff-d2",
-            open: || {
+            open: |diff| {
                 let mut state = two_pane_files_state();
                 state.open_commit_diff(
                     "app".into(),
@@ -7911,14 +7893,14 @@ mod tests {
                     }],
                     0,
                     "README.md".into(),
-                    super::super::diff::DiffContent::from_unified(long_bar_diff()),
+                    super::super::diff::DiffContent::from_unified(diff.to_string()),
                 );
                 state
             },
         },
         DiffBarSurface {
             id: "compare-diff",
-            open: || {
+            open: |diff| {
                 let mut state = two_pane_diff_state();
                 state
                     .tabs
@@ -7933,14 +7915,14 @@ mod tests {
                     stat: None,
                 }];
                 tab.content = super::super::diff::DiffContent::from_compare_lines(
-                    long_bar_diff().lines().map(String::from).collect(),
+                    diff.lines().map(String::from).collect(),
                 );
                 state
             },
         },
         DiffBarSurface {
             id: "explorer-diff",
-            open: || explorer_preview_state("README.md", Some(&long_bar_diff())),
+            open: |diff| explorer_preview_state("README.md", Some(diff)),
         },
     ];
 
@@ -7994,7 +7976,7 @@ mod tests {
                 .flat_map(|look| [(look, false), (look, true)]);
             for ((look, background), wrap) in looks {
                 let case = format!("{} {look} wrap {wrap}", surface.id);
-                let mut state = (surface.open)();
+                let mut state = (surface.open)(&long_bar_diff());
                 state.background = background;
                 state.diff_wrap = wrap;
                 state.diff_cursor = 40;
@@ -8308,7 +8290,7 @@ mod tests {
             },
             pane: FocusPane::Left,
             vbar: VScrollbar::ExplorerTree,
-            hbar: None,
+            hbar: Some(HScrollbar::ExplorerTree),
             cursor: |state| {
                 state
                     .explorer_rows()
@@ -8353,15 +8335,24 @@ mod tests {
         match bar {
             HScrollbar::Tree => state.layout.tree_hbar,
             HScrollbar::CommitFiles => state.layout.files_hbar,
+            HScrollbar::ExplorerTree => state.layout.explorer_tree_hbar,
             HScrollbar::FileView => state.layout.file_view_hbar,
             HScrollbar::Summary => state.layout.summary_hbar,
             HScrollbar::Graph | HScrollbar::Diff => unreachable!("not a list bar"),
         }
     }
 
-    /// The pan offset of `surface`'s list: the clean-file view's and the
-    /// folder summary's own pan, else the pan of the list's pane.
+    /// The pan offset of `surface`'s list: the clean-file view's, the
+    /// folder summary's, and the Explorer tree's own pan, else the pan of
+    /// the list's pane.
     fn list_pan(state: &AppState, surface: &ListBarSurface) -> u16 {
+        if surface.hbar == Some(HScrollbar::ExplorerTree) {
+            return state
+                .tabs
+                .active_explorer()
+                .expect("an Explorer tab")
+                .tree_col_offset;
+        }
         if surface.hbar == Some(HScrollbar::FileView) {
             return state
                 .tabs
@@ -8716,6 +8707,633 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Shift-←/→ on the focused list and the horizontal wheel over a list
+    /// pan it the same way on every list surface of `horizontal-pan` (the
+    /// `scrollbars` list surfaces, [`LIST_BAR_SURFACES`]), in both looks:
+    /// Shift-→ stops at the list's own pan max, the wheel pans the list
+    /// under the pointer while the other pane has focus, stops at that
+    /// same max, and moves no cursor.
+    #[test]
+    fn list_shift_keys_and_hwheel_pan_on_every_registry_list_surface() {
+        let registry = crate::parity_registry::registry();
+        let pan = registry
+            .components
+            .iter()
+            .find(|c| c.id == "horizontal-pan")
+            .expect("horizontal-pan component");
+        let list_ids: Vec<&str> = LIST_BAR_SURFACES.iter().map(|s| s.id).collect();
+        let pan_ids: Vec<&str> = pan
+            .surfaces
+            .iter()
+            .map(|s| s.id.as_str())
+            .filter(|id| list_ids.contains(id))
+            .collect();
+        assert_eq!(
+            pan_ids, list_ids,
+            "docs/parity.md `horizontal-pan` must list every list surface this test drives"
+        );
+        let mut want: Vec<(String, String)> = list_ids
+            .iter()
+            .flat_map(|id| {
+                PANE_LOOKS
+                    .iter()
+                    .map(|(look, _)| (id.to_string(), look.to_string()))
+            })
+            .collect();
+        want.sort();
+        for feature in ["shift-keys", "hwheel", "pan-limit"] {
+            let supported: Vec<(String, String)> =
+                crate::parity_registry::supported_surface_looks("horizontal-pan", feature)
+                    .into_iter()
+                    .filter(|(id, _)| list_ids.contains(&id.as_str()))
+                    .collect();
+            assert_eq!(
+                supported, want,
+                "docs/parity.md `horizontal-pan` / `{feature}` must mark every list surface and look"
+            );
+        }
+        for surface in &LIST_BAR_SURFACES {
+            for (look, background) in PANE_LOOKS {
+                let case = format!("{} {look}", surface.id);
+                let mut state = (surface.open)();
+                state.background = background;
+                state.focus = surface.pane;
+                state.dispatch(Action::Move(30));
+                let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                for _ in 0..300 {
+                    state.dispatch(Action::PanDiff(1));
+                }
+                let pan_max = list_pan(&state, surface);
+                assert!(pan_max > 3, "{case}: Shift-→ pans the list ({pan_max})");
+                state.dispatch(Action::PanDiff(1));
+                assert_eq!(list_pan(&state, surface), pan_max, "{case}: Shift-→ stops");
+                for _ in 0..300 {
+                    state.dispatch(Action::PanDiff(-1));
+                }
+                assert_eq!(list_pan(&state, surface), 0, "{case}: Shift-← back");
+                draw_state(&mut terminal, &mut state);
+
+                let vbar = list_vbar(&state, surface.vbar);
+                let (col, row) = (vbar.x.expect("a long list") - 1, vbar.y + 1);
+                let cursor = (surface.cursor)(&state);
+                state.focus = if surface.pane == FocusPane::Left {
+                    FocusPane::Right
+                } else {
+                    FocusPane::Left
+                };
+                let wheel = |delta| Action::ScrollWheel {
+                    col,
+                    row,
+                    delta,
+                    horizontal: true,
+                };
+                state.dispatch(wheel(3));
+                assert_eq!(list_pan(&state, surface), 3, "{case}: the wheel pans it");
+                assert_eq!((surface.cursor)(&state), cursor, "{case}: no cursor move");
+                state.dispatch(wheel(i32::from(pan_max) + 50));
+                assert_eq!(
+                    list_pan(&state, surface),
+                    pan_max,
+                    "{case}: the wheel stops where Shift-→ stops"
+                );
+                state.dispatch(wheel(-(i32::from(pan_max) + 50)));
+                assert_eq!(list_pan(&state, surface), 0, "{case}: and pans back");
+                assert_eq!((surface.cursor)(&state), cursor, "{case}: no cursor move");
+            }
+        }
+    }
+
+    /// Unified diff of 40 added lines (`+wide line 00 xxx…T00` …) wider
+    /// than every diff pane, so the diff pans.
+    fn wide_bar_diff() -> String {
+        let mut body = String::from("@@ -0,0 +1,40 @@\n");
+        for i in 0..40 {
+            body.push_str(&format!("+wide line {i:02} {}T{i:02}\n", "x".repeat(200)));
+        }
+        body
+    }
+
+    /// The file-diff horizontal bar pans the same way on every diff
+    /// surface, in both looks: none at the left edge; once panned it
+    /// clamps to the pan max Shift-→ stops at, a press on its thumb grabs
+    /// it (no row picked, no text selection, focus on the diff), a drag
+    /// pans by the graph bar's math, the release ends the drag, and a
+    /// track click jumps to the end or back to the left edge.
+    #[test]
+    fn diff_horizontal_bar_drags_and_track_click_jumps_on_every_registry_surface() {
+        let registry = crate::parity_registry::registry();
+        let scrollbars = registry
+            .components
+            .iter()
+            .find(|c| c.id == "scrollbars")
+            .expect("scrollbars component");
+        let diff_ids: Vec<&str> = scrollbars
+            .surfaces
+            .iter()
+            .filter(|s| s.anchors.iter().any(|a| a == "draw_diff_pane"))
+            .map(|s| s.id.as_str())
+            .collect();
+        let driven_ids: Vec<&str> = DIFF_BAR_SURFACES.iter().map(|s| s.id).collect();
+        assert_eq!(
+            diff_ids, driven_ids,
+            "docs/parity.md `scrollbars` diff surfaces must match this test's"
+        );
+        let mut driven: Vec<(String, String)> = DIFF_BAR_SURFACES
+            .iter()
+            .flat_map(|s| {
+                PANE_LOOKS
+                    .iter()
+                    .map(|(look, _)| (s.id.to_string(), look.to_string()))
+            })
+            .collect();
+        driven.sort();
+        for feature in ["hbar", "hbar-drag"] {
+            let supported: Vec<(String, String)> =
+                crate::parity_registry::supported_surface_looks("scrollbars", feature)
+                    .into_iter()
+                    .filter(|(id, _)| diff_ids.contains(&id.as_str()))
+                    .collect();
+            assert_eq!(
+                supported, driven,
+                "docs/parity.md `scrollbars` / `{feature}` must mark every diff surface and look"
+            );
+        }
+        for surface in &DIFF_BAR_SURFACES {
+            for (look, background) in PANE_LOOKS {
+                let case = format!("{} {look}", surface.id);
+                let mut state = (surface.open)(&wide_bar_diff());
+                state.background = background;
+                // Wrap off: the lines are wider than the pane, so they pan.
+                state.diff_wrap = false;
+                state.focus = FocusPane::Right;
+                state.diff_cursor = 5;
+                let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                assert_eq!(
+                    state.layout.diff_hscrollbar_y, None,
+                    "{case}: none at pan 0"
+                );
+                for _ in 0..300 {
+                    state.dispatch(Action::PanDiff(1));
+                }
+                let pan_max = state.diff_col_offset;
+                assert!(pan_max > 1, "{case}: the diff pans ({pan_max})");
+                state.dispatch(Action::PanDiff(1 - i32::from(pan_max)));
+                assert_eq!(state.diff_col_offset, 1, "{case}");
+                draw_state(&mut terminal, &mut state);
+                let hy = state
+                    .layout
+                    .diff_hscrollbar_y
+                    .unwrap_or_else(|| panic!("{case}: panned, the bar paints"));
+                let (hx, hw) = (
+                    state.layout.diff_hscrollbar_x,
+                    state.layout.diff_hscrollbar_width,
+                );
+                assert_eq!(
+                    state.layout.diff_col_max, pan_max,
+                    "{case}: the bar clamps like Shift-→"
+                );
+                let buf = terminal.backend().buffer().clone();
+                let grab = (hx..hx + hw)
+                    .find(|&c| buf[(c, hy)].symbol() == "█")
+                    .unwrap_or_else(|| panic!("{case}: a painted thumb on row {hy}"));
+
+                let cursor = state.diff_cursor;
+                state.focus = FocusPane::Left;
+                assert_eq!(
+                    state.dispatch(Action::Click { col: grab, row: hy }),
+                    Effect::None,
+                    "{case}: thumb press"
+                );
+                assert_eq!(state.diff_cursor, cursor, "{case}: picks no row");
+                assert_eq!(
+                    state.focus,
+                    FocusPane::Right,
+                    "{case}: the diff takes focus"
+                );
+                assert!(state.text_selection.is_none(), "{case}: no text selection");
+                assert_eq!(state.diff_col_offset, 1, "{case}: grab, no jump");
+                assert_eq!(
+                    state.drag,
+                    SplitDrag::HScrollbar {
+                        bar: HScrollbar::Diff,
+                        origin_col: grab,
+                        origin_offset: 1,
+                    },
+                    "{case}: the press arms a drag"
+                );
+                state.dispatch(Action::Drag {
+                    col: grab + 5,
+                    row: hy,
+                });
+                let max = usize::from(pan_max);
+                let want = (1 + 5 * max / usize::from(hw - 1)).min(max);
+                assert_eq!(
+                    usize::from(state.diff_col_offset),
+                    want,
+                    "{case}: drag pans"
+                );
+                assert_eq!(state.diff_cursor, cursor, "{case}: the cursor stays");
+                assert_eq!(state.dispatch(Action::Release), Effect::None, "{case}");
+                assert_eq!(state.drag, SplitDrag::None, "{case}: release ends the drag");
+
+                draw_state(&mut terminal, &mut state);
+                let end = hx + hw - 1;
+                let buf = terminal.backend().buffer().clone();
+                assert_ne!(buf[(end, hy)].symbol(), "█", "{case}: the end is track");
+                state.dispatch(Action::Click { col: end, row: hy });
+                state.dispatch(Action::Release);
+                assert_eq!(state.diff_col_offset, pan_max, "{case}: track end");
+                state.dispatch(Action::Click { col: hx, row: hy });
+                state.dispatch(Action::Release);
+                assert_eq!(state.diff_col_offset, 0, "{case}: track start");
+                draw_state(&mut terminal, &mut state);
+                assert_eq!(
+                    state.layout.diff_hscrollbar_y, None,
+                    "{case}: back at the left edge the bar goes"
+                );
+            }
+        }
+    }
+
+    /// One line viewer the line-click test drives.
+    struct LineClickSurface {
+        /// Surface id in the `line-viewers` registry table.
+        id: &'static str,
+        /// A state that shows 80 lines, `bar line 00` … `bar line 79`.
+        open: fn() -> AppState,
+        /// The text of the line under the line cursor.
+        cursor_line: fn(&AppState) -> String,
+    }
+
+    /// The text of the file diff's cursor row (both cells of a split row).
+    fn diff_cursor_text(state: &AppState) -> String {
+        match state.current_diff_rows().get(state.diff_cursor) {
+            Some(super::super::diff::DiffRow::Line { left, right }) => {
+                let right = right.as_ref().map_or("", |cell| cell.text.as_str());
+                format!("{}|{right}", left.text)
+            }
+            other => format!("{other:?}"),
+        }
+    }
+
+    /// Every line viewer: the file diff on each tab that paints one, and
+    /// the Explorer clean-file view.
+    const LINE_CLICK_SURFACES: [LineClickSurface; 5] = [
+        LineClickSurface {
+            id: "diff-d0",
+            open: || (DIFF_BAR_SURFACES[0].open)(&long_bar_diff()),
+            cursor_line: diff_cursor_text,
+        },
+        LineClickSurface {
+            id: "diff-d2",
+            open: || (DIFF_BAR_SURFACES[1].open)(&long_bar_diff()),
+            cursor_line: diff_cursor_text,
+        },
+        LineClickSurface {
+            id: "compare-diff",
+            open: || (DIFF_BAR_SURFACES[2].open)(&long_bar_diff()),
+            cursor_line: diff_cursor_text,
+        },
+        LineClickSurface {
+            id: "explorer-diff",
+            open: || (DIFF_BAR_SURFACES[3].open)(&long_bar_diff()),
+            cursor_line: diff_cursor_text,
+        },
+        LineClickSurface {
+            id: "explorer-file",
+            open: || {
+                let lines: Vec<String> = (0..80).map(|i| format!("bar line {i:02}")).collect();
+                let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+                file_view_state(&lines)
+            },
+            cursor_line: |state| {
+                let file = state.tabs.active_file_view().expect("a file view");
+                file.lines()[file.cursor].clone()
+            },
+        },
+    ];
+
+    /// A click on a line row moves the line cursor to the clicked line on
+    /// every line viewer, in both looks (the pane takes focus), and a
+    /// press-drag from a line selects text (copied on release) without
+    /// moving the cursor again, as on the Workspace diff.
+    #[test]
+    fn line_click_picks_the_row_and_a_drag_selects_on_every_registry_surface() {
+        let registry = crate::parity_registry::registry();
+        let viewers = registry
+            .components
+            .iter()
+            .find(|c| c.id == "line-viewers")
+            .expect("line-viewers component");
+        let ids: Vec<&str> = viewers.surfaces.iter().map(|s| s.id.as_str()).collect();
+        let driven_ids: Vec<&str> = LINE_CLICK_SURFACES.iter().map(|s| s.id).collect();
+        assert_eq!(
+            ids, driven_ids,
+            "docs/parity.md `line-viewers` surfaces must match this test's"
+        );
+        let mut driven: Vec<(String, String)> = driven_ids
+            .iter()
+            .flat_map(|id| {
+                PANE_LOOKS
+                    .iter()
+                    .map(|(look, _)| (id.to_string(), look.to_string()))
+            })
+            .collect();
+        driven.sort();
+        assert_eq!(
+            crate::parity_registry::supported_surface_looks("line-viewers", "click-row"),
+            driven,
+            "docs/parity.md `line-viewers` / `click-row` must mark every surface and look"
+        );
+        for surface in &LINE_CLICK_SURFACES {
+            for (look, background) in PANE_LOOKS {
+                let case = format!("{} {look}", surface.id);
+                let mut state = (surface.open)();
+                state.background = background;
+                state.focus = FocusPane::Left;
+                let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let buf = terminal.backend().buffer().clone();
+                let y = first_row_with(&buf, "bar line 12")
+                    .unwrap_or_else(|| panic!("{case}: line 12 paints"));
+                let x = find_cell_col(&buf, y, "bar line 12").expect("its column");
+                assert!(
+                    !(surface.cursor_line)(&state).contains("bar line 12"),
+                    "{case}: starts elsewhere"
+                );
+                state.dispatch(Action::Click { col: x, row: y });
+                assert!(
+                    (surface.cursor_line)(&state).contains("bar line 12"),
+                    "{case}: the click picks the line: {}",
+                    (surface.cursor_line)(&state)
+                );
+                assert_eq!(
+                    state.focus,
+                    FocusPane::Right,
+                    "{case}: the viewer takes focus"
+                );
+                assert_eq!(state.drag, SplitDrag::None, "{case}: no drag handle");
+
+                state.dispatch(Action::Drag {
+                    col: x + 6,
+                    row: y + 2,
+                });
+                assert!(
+                    state.text_selection.is_some_and(|sel| sel.is_active()),
+                    "{case}: the drag selects text"
+                );
+                assert!(
+                    (surface.cursor_line)(&state).contains("bar line 12"),
+                    "{case}: the drag keeps the clicked line"
+                );
+                let released = state.dispatch(Action::Release);
+                assert!(
+                    matches!(&released, Effect::CopyClipboard { text, .. } if text.contains("bar line 1")),
+                    "{case}: the release copies the selection: {released:?}"
+                );
+            }
+        }
+    }
+
+    /// One tab kind the resize-edge test drives: its `resize-edges` surface
+    /// id and the [`DIFF_BAR_SURFACES`] index of the fixture that opens it
+    /// with a file diff on the right.
+    const RESIZE_EDGE_SURFACES: [(&str, usize); 3] =
+        [("workspace", 0), ("compare", 2), ("explorer", 3)];
+
+    /// The pane divider and the side-by-side diff RULE hover and drag the
+    /// same way on every tab kind, in both looks: the edge under the
+    /// pointer lights in the focus accent, a press and drag on the divider
+    /// widens the left pane, a press and drag on the RULE moves it (and the
+    /// next paint draws it there), and the release ends each drag.
+    #[test]
+    fn resize_edges_drag_and_hover_on_every_registry_surface() {
+        use crate::tui::split::{DiffMode, ResizeEdge};
+        let registry = crate::parity_registry::registry();
+        let edges = registry
+            .components
+            .iter()
+            .find(|c| c.id == "resize-edges")
+            .expect("resize-edges component");
+        let ids: Vec<&str> = edges.surfaces.iter().map(|s| s.id.as_str()).collect();
+        let driven_ids: Vec<&str> = RESIZE_EDGE_SURFACES.iter().map(|(id, _)| *id).collect();
+        assert_eq!(
+            ids, driven_ids,
+            "docs/parity.md `resize-edges` surfaces must match this test's"
+        );
+        let mut driven: Vec<(String, String)> = driven_ids
+            .iter()
+            .flat_map(|id| {
+                PANE_LOOKS
+                    .iter()
+                    .map(|(look, _)| (id.to_string(), look.to_string()))
+            })
+            .collect();
+        driven.sort();
+        for feature in ["divider", "diff-rule", "hover"] {
+            assert_eq!(
+                crate::parity_registry::supported_surface_looks("resize-edges", feature),
+                driven,
+                "docs/parity.md `resize-edges` / `{feature}` must mark every surface and look"
+            );
+        }
+        for (id, fixture) in RESIZE_EDGE_SURFACES {
+            for (look, background) in PANE_LOOKS {
+                let case = format!("{id} {look}");
+                let mut state = (DIFF_BAR_SURFACES[fixture].open)(&long_bar_diff());
+                state.background = background;
+                state.diff_mode = DiffMode::SideBySide;
+                let accent = state.theme.palette().cursor;
+                let cols = 220;
+                let mut terminal = Terminal::new(TestBackend::new(cols, 24)).unwrap();
+                draw_state(&mut terminal, &mut state);
+
+                let x = state.layout.outer_tree_width - 1;
+                let y = state.layout.right_y + 2;
+                state.pointer = Some((x, y));
+                assert_eq!(
+                    state.hovered_resize_edge(),
+                    Some(ResizeEdge::Pane),
+                    "{case}: the divider hovers"
+                );
+                draw_state(&mut terminal, &mut state);
+                assert_eq!(
+                    terminal.backend().buffer()[(x, y)].fg,
+                    accent,
+                    "{case}: the hovered divider lights"
+                );
+                let before = pane_widths(cols, state.tree_fraction).tree_width;
+                state.dispatch(Action::Click { col: x, row: y });
+                assert_eq!(state.drag, SplitDrag::Pane, "{case}: a divider press");
+                state.dispatch(Action::Drag {
+                    col: x + 10,
+                    row: y,
+                });
+                let after = pane_widths(cols, state.tree_fraction).tree_width;
+                assert_eq!(after, before + 10, "{case}: the drag widens the left pane");
+                assert_eq!(state.dispatch(Action::Release), Effect::None, "{case}");
+                assert_eq!(state.drag, SplitDrag::None, "{case}: release ends the drag");
+                state.pointer = None;
+                draw_state(&mut terminal, &mut state);
+                assert_eq!(
+                    state.layout.outer_tree_width, after,
+                    "{case}: painted wider"
+                );
+
+                let rule = state
+                    .layout
+                    .diff_split_rule_x
+                    .unwrap_or_else(|| panic!("{case}: a side-by-side diff records its rule"));
+                let buf = terminal.backend().buffer().clone();
+                let rule_glyph = DIFF_RULE.to_string();
+                let ry = (state.layout.right_y..buf.area.height)
+                    .find(|&y| buf[(rule, y)].symbol() == rule_glyph)
+                    .unwrap_or_else(|| panic!("{case}: the rule paints in column {rule}"));
+                state.pointer = Some((rule, ry));
+                assert_eq!(
+                    state.hovered_resize_edge(),
+                    Some(ResizeEdge::DiffSplit),
+                    "{case}: the rule hovers"
+                );
+                draw_state(&mut terminal, &mut state);
+                assert_eq!(
+                    terminal.backend().buffer()[(rule, ry)].fg,
+                    accent,
+                    "{case}: the hovered rule lights"
+                );
+                let fraction = state.diff_split_fraction;
+                state.dispatch(Action::Click { col: rule, row: ry });
+                assert_eq!(state.drag, SplitDrag::Diff, "{case}: a rule press");
+                state.dispatch(Action::Drag {
+                    col: rule + 8,
+                    row: ry,
+                });
+                assert!(
+                    state.diff_split_fraction > fraction,
+                    "{case}: the drag moves the rule"
+                );
+                assert_eq!(state.dispatch(Action::Release), Effect::None, "{case}");
+                assert_eq!(state.drag, SplitDrag::None, "{case}: release ends the drag");
+                state.pointer = None;
+                draw_state(&mut terminal, &mut state);
+                assert_eq!(
+                    state.layout.diff_split_rule_x,
+                    Some(rule + 8),
+                    "{case}: the rule paints where it was dropped"
+                );
+            }
+        }
+    }
+
+    /// A double-click on an Explorer tree row is Enter on it, in both
+    /// looks: on a file the first press previews it (an unpinned inner
+    /// tab) and the second pins it as Enter does; on a folder the first
+    /// press already opened it as Enter would, and the second keeps it
+    /// open (as on a Workspace tree chevron).
+    #[test]
+    fn explorer_tree_double_click_is_enter_boxed_and_flat() {
+        let pinned = |state: &AppState| -> Vec<(String, bool)> {
+            let tab = state.tabs.active_explorer().expect("an Explorer tab");
+            tab.files
+                .iter()
+                .map(|file| (file.rel.clone(), file.pinned))
+                .collect()
+        };
+        for (look, background) in PANE_LOOKS {
+            let open = || {
+                let mut state = explorer_state();
+                state.background = background;
+                let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                (state, terminal)
+            };
+            let (mut state, terminal) = open();
+            let buf = terminal.backend().buffer().clone();
+            let tree = state.layout.explorer_tree;
+            let cell = |name: &str| {
+                (tree.y..tree.bottom())
+                    .find_map(|y| {
+                        find_cell_col(&buf, y, name)
+                            .filter(|x| *x < tree.right())
+                            .map(|x| (x, y))
+                    })
+                    .unwrap_or_else(|| panic!("{look}: no {name} row"))
+            };
+            let (x, y) = cell("README.md");
+            let first = state.dispatch(Action::Click { col: x, row: y });
+            assert!(
+                matches!(first, Effect::LoadExplorerPreview { ref path, .. } if path == "README.md"),
+                "{look}: the first press previews: {first:?}"
+            );
+            assert_eq!(
+                pinned(&state),
+                vec![("README.md".to_string(), false)],
+                "{look}: a preview tab"
+            );
+            state.dispatch(Action::Click { col: x, row: y });
+            let mut twin = open().0;
+            twin.dispatch(Action::Click { col: x, row: y });
+            twin.dispatch(Action::NavEnter);
+            assert_eq!(pinned(&state), pinned(&twin), "{look}: the same as Enter");
+            assert_eq!(
+                pinned(&state),
+                vec![("README.md".to_string(), true)],
+                "{look}: Enter pins it"
+            );
+            assert_eq!(state.focus, FocusPane::Left, "{look}: the tree keeps focus");
+
+            let expanded = |state: &AppState| {
+                let tab = state.tabs.active_explorer().expect("an Explorer tab");
+                tab.tree.is_expanded("src")
+            };
+            let (x, y) = cell("src");
+            assert!(!expanded(&state), "{look}: src starts closed");
+            state.dispatch(Action::Click { col: x, row: y });
+            assert!(expanded(&state), "{look}: the first press opens src");
+            state.dispatch(Action::Click { col: x, row: y });
+            assert!(expanded(&state), "{look}: the double-click keeps it open");
+            // Off the double-click, a third press toggles again.
+            state.dispatch(Action::Click { col: x + 1, row: y });
+            assert!(
+                !expanded(&state),
+                "{look}: a press on another cell closes it"
+            );
+        }
+    }
+
+    /// A flat Explorer divider press (the tree's right pad cell) released
+    /// where it was pressed clicks the tree row under it and resizes
+    /// nothing, as on the Workspace.
+    #[test]
+    fn explorer_flat_divider_pad_press_released_in_place_clicks_the_tree_row() {
+        let mut state = explorer_state();
+        state.background = BackgroundMode::Paint;
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let buf = terminal.backend().buffer().clone();
+        let tree = state.layout.explorer_tree;
+        let y = (tree.y..tree.bottom())
+            .find(|&y| find_cell_col(&buf, y, "README.md").is_some_and(|x| x < tree.right()))
+            .expect("a README.md row");
+        let x = state.layout.outer_tree_width - 1;
+        let fraction = state.tree_fraction;
+        assert_eq!(
+            state.dispatch(Action::Click { col: x, row: y }),
+            Effect::None
+        );
+        assert_eq!(state.drag, SplitDrag::Pane, "a divider press");
+        let released = state.dispatch(Action::Release);
+        assert!(
+            matches!(released, Effect::LoadExplorerPreview { ref path, .. } if path == "README.md"),
+            "the release clicks the row: {released:?}"
+        );
+        assert_eq!(state.drag, SplitDrag::None);
+        assert_eq!(state.tree_fraction, fraction, "a click never resizes");
+        assert_eq!(state.focus, FocusPane::Left);
     }
 
     /// Long line 2 so the view can pan; lines 1 to 4 are the same text in
@@ -17301,9 +17919,10 @@ mod tests {
         }
     }
 
-    /// Explorer flat pads: a press on either pad cell of a tree row
-    /// selects that row (no pane divider on this tab), the bar sits on the
-    /// pane edge, and a press on the preview's pad cell picks the file
+    /// Explorer flat pads: a click on either pad cell of a tree row
+    /// selects that row (the right pad is the pane divider band, so the
+    /// release picks the row, as on the Workspace), the bar sits on the
+    /// pane edge, and a click on the preview's pad cell picks the file
     /// line.
     #[test]
     fn paint_mode_explorer_pad_clicks_select_the_row() {
@@ -17323,6 +17942,7 @@ mod tests {
                 .find(|&y| buf_line(terminal.backend().buffer(), y).contains(name))
                 .expect(name);
             state.dispatch(Action::Click { col, row: y });
+            state.dispatch(Action::Release);
             draw_state(&mut terminal, &mut state);
             let buf = terminal.backend().buffer();
             assert_eq!(state.focus, FocusPane::Left, "col {col}");
@@ -17349,9 +17969,9 @@ mod tests {
             col: preview.x,
             row: preview.y + 3,
         });
+        state.dispatch(Action::Release);
         assert_eq!(state.focus, FocusPane::Right);
         assert_eq!(state.tabs.active_file_view().unwrap().cursor, 3);
-        state.dispatch(Action::Release);
         state.dispatch(Action::Click {
             col: preview.right() - 1,
             row: preview.y + 5,
@@ -17468,9 +18088,12 @@ mod tests {
                 .and_then(|tab| tab.painted_rel.clone())
         };
 
-        // The preview's title row and inner tab row are not the body.
+        // The preview's title row and inner tab row are not the body. Its
+        // first column is the pane divider band, so a click there lands on
+        // the release, as on the Workspace.
         for row in [right.y, right.y + 1] {
             state.dispatch(Action::Click { col: right.x, row });
+            state.dispatch(Action::Release);
             assert_eq!(state.focus, FocusPane::Left, "row {row}");
         }
         // Its first column, third body row, takes focus and that line.
@@ -17478,6 +18101,7 @@ mod tests {
             col: right.x,
             row: right.y + 4,
         });
+        state.dispatch(Action::Release);
         assert_eq!(state.focus, FocusPane::Right);
         assert_eq!(file_cursor(&state), 2);
         state.dispatch(Action::ScrollWheel {
@@ -21251,6 +21875,11 @@ mod tests {
 
             reload(&mut state, &"f".repeat(40), summary_files());
             draw_state(&mut terminal, &mut state);
+            assert_eq!(
+                state.folder_summary().map(|s| s.dir),
+                Some("src".into()),
+                "{look}: the summary still shows src"
+            );
             assert_eq!(state.summary_scroll(), 0, "{look}: clamped to 3 rows");
             assert_eq!(state.summary_col_offset(), 0, "{look}: short rows: no pan");
             assert_eq!(state.layout.summary_vbar.x, None, "{look}: rows fit");

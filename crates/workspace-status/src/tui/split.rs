@@ -93,6 +93,8 @@ pub enum HScrollbar {
     /// The commit-file or compare list bar (`left_col_offset` in the left
     /// pane, `right_col_offset` at depth 1).
     CommitFiles,
+    /// The Explorer tree bar (the Explorer tab's own tree pan).
+    ExplorerTree,
     /// The Explorer clean-file view bar (the file's own `col_offset`).
     FileView,
     /// The folder summary bar (the summary's own pan).
@@ -301,6 +303,8 @@ pub struct SplitLayout {
     pub tree_hbar: HScrollbarLayout,
     /// Commit-file or compare list horizontal scrollbar and its pan.
     pub files_hbar: HScrollbarLayout,
+    /// Explorer tree horizontal scrollbar and its pan.
+    pub explorer_tree_hbar: HScrollbarLayout,
     /// Explorer clean-file view horizontal scrollbar and its pan.
     pub file_view_hbar: HScrollbarLayout,
     /// Folder summary vertical scrollbar: the summary rows (not its
@@ -552,6 +556,7 @@ impl SplitLayout {
             HScrollbar::Diff => self.diff_hbar,
             HScrollbar::Tree => self.tree_hbar,
             HScrollbar::CommitFiles => self.files_hbar,
+            HScrollbar::ExplorerTree => self.explorer_tree_hbar,
             HScrollbar::FileView => self.file_view_hbar,
             HScrollbar::Summary => self.summary_hbar,
         }
@@ -684,8 +689,9 @@ fn is_commit_msg_rule(layout: SplitLayout, col: u16, row: u16) -> bool {
 /// list track) wins over the pane divider band (3 columns boxed, 2 flat),
 /// so a left-pane thumb stays draggable, and over its own horizontal bar
 /// in the corner cell. Then pane, then the commit-message footer rule,
-/// then in-diff RULE. The Explorer tree's and clean-file view's bars are hit in
-/// `explorer_click`.
+/// then in-diff RULE. The Explorer tab hit-tests through here too: its
+/// tree's and clean-file view's bars record no geometry on another tab,
+/// and the other tabs' bars none on an Explorer tab.
 /// Boxed panes stop above the pane area's last row (the bottom border);
 /// flat panes include it.
 pub fn hit_split(layout: SplitLayout, col: u16, row: u16) -> SplitHit {
@@ -711,6 +717,8 @@ pub fn hit_split(layout: SplitLayout, col: u16, row: u16) -> SplitHit {
         (VScrollbar::Tree, HScrollbar::Tree),
         (VScrollbar::CommitFiles, HScrollbar::CommitFiles),
         (VScrollbar::Summary, HScrollbar::Summary),
+        (VScrollbar::ExplorerTree, HScrollbar::ExplorerTree),
+        (VScrollbar::FileView, HScrollbar::FileView),
     ];
     for (vbar, hbar) in bars {
         let hit = hit_vscrollbar(vbar, layout.vbar(vbar), col, row)

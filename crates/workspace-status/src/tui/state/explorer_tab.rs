@@ -27,6 +27,7 @@ use std::time::Instant;
 use ratatui::layout::Rect;
 
 use crate::file_index::FileRead;
+use crate::helpers::visible_width;
 use crate::snapshot::FileChange;
 
 use super::super::action::{Action, Effect, ExternalDiffKind};
@@ -37,11 +38,11 @@ use super::super::effect::ExplorerPreviewBody;
 use super::super::event_pump::overlay_blocks_background_ticks;
 use super::super::explorer::{ExplorerEntry, ExplorerRow, ExplorerStatus};
 use super::super::gates::{ListFocusTarget, FOCUS_A_FILE_TO_MARK_REVIEWED};
-use super::super::search::{explorer_row_match_indices, step_from_anchor, SearchPane};
-use super::super::selection::TextSelection;
-use super::super::split::{
-    hit_hscrollbar, hit_vscrollbar, HScrollbar, SplitDrag, SplitHit, VScrollbar,
+use super::super::search::{
+    apply_pan, explorer_row_match_indices, list_row_pan_max, step_from_anchor, SearchPane,
 };
+use super::super::selection::TextSelection;
+use super::super::split::{list_hbar_rows, SplitDrag};
 use super::super::status::StatusMessage;
 use super::super::tabs::{
     ExplorerPreview, ExplorerTab, OpenFile, ParkedSearch, EXPLORER_DIFFS_SHOW_WHOLE_FILE,
@@ -49,7 +50,8 @@ use super::super::tabs::{
     NO_EXPLORER_FILE_TABS, ONLY_WORKSPACE_TAB_OPEN, SWITCH_TO_WORKSPACE_TAB, TAB_TO_THE_FILE_PANE,
 };
 use super::super::tree::{
-    cursor_for_viewport_top, dir_path_from_id, list_viewport_start, NodeKind,
+    cursor_for_viewport_top, dir_path_from_id, list_viewport_start, NodeKind, NodeSegments,
+    SegRole, TextSeg,
 };
 use super::super::watch::{file_disk_token, GONE_DISK_TOKEN};
 use super::{
@@ -449,6 +451,10 @@ impl AppState {
                 self.explorer_preview_pan(delta);
                 Effect::None
             }
+            Action::PanDiff(delta) => {
+                self.pan_explorer_tree(delta);
+                Effect::None
+            }
             Action::ScrollWheel {
                 col,
                 row,
@@ -509,8 +515,7 @@ impl AppState {
             Action::PreviousFileTab => self.explorer_cycle_inner(-1),
             Action::NextFileTab => self.explorer_cycle_inner(1),
             Action::CloseTab => return self.explorer_close_inner(),
-            Action::PanDiff(_)
-            | Action::NavEnter
+            Action::NavEnter
             | Action::NavEsc
             | Action::BackClick
             | Action::FoldOpen
@@ -885,9 +890,9 @@ impl AppState {
         }
     }
 
-    /// Wheel over the tree moves the tree cursor; over the preview it moves
-    /// the preview cursor (or pans, horizontally). Never the hidden
-    /// Workspace tree.
+    /// Wheel over the tree moves the tree cursor (or pans the tree,
+    /// horizontally); over the preview it moves the preview cursor (or
+    /// pans, horizontally). Never the hidden Workspace tree.
     fn explorer_wheel(&mut self, col: u16, row: u16, delta: i32, horizontal: bool) -> Effect {
         if !self.mouse_enabled {
             return Effect::None;
@@ -900,47 +905,56 @@ impl AppState {
             }
             return self.explorer_preview_move(i64::from(delta));
         }
-        if horizontal || !self.layout.explorer_tree_rows.contains(at) {
+        if !self.layout.explorer_tree_rows.contains(at) {
+            return Effect::None;
+        }
+        if horizontal {
+            self.pan_explorer_tree(delta);
             return Effect::None;
         }
         self.explorer_move(delta as isize)
     }
 
-    /// Press in a pane: a tree row takes the cursor (a folder also opens or
-    /// closes); the preview takes focus and, for a file body, the line. A
-    /// flat pad cell counts as its row; a text selection arms only in the
-    /// inner area. A press on a diff line's comment mark also picks that
-    /// row, as an icon click selects its row on the Workspace.
+    /// Plain left press on an Explorer tab, as [`Self::click_at`] on the
+    /// Workspace: the drag handles first ([`Self::press_split_hit`]: the
+    /// pane divider, the in-diff RULE of a side-by-side diff, and every
+    /// painted scrollbar — the tree's, a changed file's diff bars, a clean
+    /// file's bars), which pick no row and arm no text selection; then the
+    /// row under the press ([`Self::explorer_click_row`]).
     fn explorer_click(&mut self, col: u16, row: u16) -> Effect {
+        self.text_selection = None;
         self.drag = SplitDrag::None;
         self.pad_press = None;
-        // The tree's bar, a changed file's diff bar, and a clean file's
-        // bars scroll like the Workspace bars: no row pick, no text
-        // selection. A clean file's vertical bar wins its corner cell.
-        let layout = self.split_layout();
-        let bars = [
-            (VScrollbar::ExplorerTree, layout.explorer_tree_vbar),
-            (VScrollbar::Diff, layout.diff_vbar),
-            (VScrollbar::FileView, layout.file_view_vbar),
-        ];
-        for (bar, geometry) in bars {
-            if let Some(hit) = hit_vscrollbar(bar, geometry, col, row) {
-                self.text_selection = None;
-                return self.press_vscrollbar(bar, hit == SplitHit::VThumb(bar), row);
-            }
+        if let Some(effect) = self.press_split_hit(col, row) {
+            return effect;
         }
-        let bar = HScrollbar::FileView;
-        if let Some(hit) = hit_hscrollbar(bar, layout.file_view_hbar, col, row) {
-            self.text_selection = None;
-            self.press_hscrollbar(bar, hit == SplitHit::HThumb(bar), col);
-            return Effect::None;
-        }
+        self.explorer_click_row(col, row)
+    }
+
+    /// The row under (`col`, `row`) after [`Self::explorer_click`] found no
+    /// drag handle there (or a flat divider press released in place). A
+    /// tree row takes the cursor (a folder also opens or closes); a second
+    /// press on the same cell within 400 ms ([`Self::note_row_press`]) is
+    /// Enter on that row ([`Self::explorer_enter`]), except on a folder,
+    /// whose first press already toggled it (as on a Workspace tree
+    /// chevron). The preview takes focus and the clicked line: a clean
+    /// file's line ([`Self::click_file_tab`]) or a changed file's diff row
+    /// ([`Self::click_diff`], as on the Workspace diff). A flat pad cell
+    /// counts as its row; a text selection arms only in the inner area,
+    /// and a drag from the press selects text.
+    pub(super) fn explorer_click_row(&mut self, col: u16, row: u16) -> Effect {
+        let is_double = self.note_row_press(col, row);
         let at = ratatui::layout::Position::new(col, row);
         let tree = self.layout.explorer_tree;
         if self.layout.explorer_tree_rows.contains(at) {
             self.text_selection = TextSelection::arm(tree, col, row);
             self.clear_diff_visual();
             self.focus = FocusPane::Left;
+            // Below the painted rows: the horizontal bar row of a panned
+            // tree.
+            if row >= tree.y.saturating_add(self.explorer_tree_list_rows()) {
+                return Effect::None;
+            }
             let Some((rows, _)) = self.explorer_rows() else {
                 return Effect::None;
             };
@@ -952,6 +966,9 @@ impl AppState {
                 return Effect::None;
             };
             if hit.is_dir {
+                if is_double {
+                    return Effect::None;
+                }
                 return self.explorer_fold_dir(&hit.rel.clone(), FoldKind::Toggle);
             }
             let rel = hit.rel.clone();
@@ -960,21 +977,91 @@ impl AppState {
             };
             tab.tree.set_cursor_rel(&rel);
             let tab_id = tab.id;
-            return self.explorer_sync_preview(tab_id);
+            let preview = self.explorer_sync_preview(tab_id);
+            if is_double {
+                return super::popover::then(preview, self.explorer_enter());
+            }
+            return preview;
         }
         if self.layout.explorer_preview_rows.contains(at) {
             self.explorer_focus_preview();
-            if matches!(self.explorer_view(), Some(ExplorerPreview::File(_))) {
-                self.click_file_tab(col, row);
-            } else {
-                let pane: Rect = self.layout.explorer_preview;
-                self.text_selection = TextSelection::arm(pane, col, row);
-                if self.on_line_comment_mark(col, row) {
-                    self.click_diff(row);
+            match self.explorer_view() {
+                Some(ExplorerPreview::File(_)) => self.click_file_tab(col, row),
+                view => {
+                    let diff = view.is_some();
+                    let pane: Rect = self.layout.explorer_preview;
+                    self.text_selection = TextSelection::arm(pane, col, row);
+                    if diff {
+                        self.click_diff(row);
+                    }
                 }
             }
         }
         Effect::None
+    }
+
+    /// Rows the Explorer tree paints: the tree rows less the horizontal
+    /// scrollbar row it keeps while panned ([`list_hbar_rows`]), as
+    /// [`Self::tree_list_rows`] counts the Workspace tree.
+    fn explorer_tree_list_rows(&self) -> u16 {
+        let height = self.layout.explorer_tree.height;
+        height.saturating_sub(list_hbar_rows(height, self.explorer_tree_col_offset()))
+    }
+
+    /// Columns the active Explorer tab's tree is panned; 0 off an Explorer
+    /// tab.
+    pub(super) fn explorer_tree_col_offset(&self) -> u16 {
+        self.tabs
+            .active_explorer()
+            .map_or(0, |tab| tab.tree_col_offset)
+    }
+
+    /// Pan the active Explorer tab's tree to `offset` (already clamped to
+    /// its pan max).
+    pub(super) fn set_explorer_tree_col_offset(&mut self, offset: u16) {
+        if let Some(tab) = self.tabs.active_explorer_mut() {
+            tab.tree_col_offset = offset;
+        }
+    }
+
+    /// Pan max of the active Explorer tree in a pane `pane_width` columns
+    /// wide whose vertical scrollbar shows (`vbar`) or not: its longest
+    /// painted row ([`explorer_row_segments`]) against the width left of
+    /// the bar, as the Workspace tree clamps ([`Self::tree_max_col_in`]).
+    /// A loading placeholder row is left out: it paints a short spinner
+    /// copy only until its folder lists. 0 off an Explorer tab.
+    pub(crate) fn explorer_tree_max_col_in(&self, pane_width: u16, vbar: bool) -> usize {
+        let Some(tab) = self.tabs.active_explorer() else {
+            return 0;
+        };
+        let width = pane_width.saturating_sub(u16::from(vbar)).max(1) as usize;
+        let status = self.explorer_status(&tab.checkout);
+        tab.tree
+            .rows(&status)
+            .iter()
+            .filter(|row| !row.placeholder)
+            .map(|row| {
+                let segs = explorer_row_segments(row, &status, self.ascii);
+                let label: usize = segs.segments.iter().map(|s| visible_width(&s.text)).sum();
+                let trailing: usize = segs.trailing.iter().map(|s| visible_width(&s.text)).sum();
+                list_row_pan_max(label, row.depth, trailing, width)
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Shift-←/→ with the tree focused, or the horizontal wheel over it:
+    /// pan the Explorer tree `delta` columns, clamped to its longest row
+    /// beside its vertical bar when the rows overflow, as
+    /// [`Self::pan_left_pane`] pans the Workspace tree.
+    fn pan_explorer_tree(&mut self, delta: i32) {
+        let Some((rows, _)) = self.explorer_rows() else {
+            return;
+        };
+        let vbar = rows.len() > usize::from(self.explorer_tree_list_rows());
+        let max = self.explorer_tree_max_col_in(self.layout.explorer_tree.width, vbar);
+        let next = apply_pan(self.explorer_tree_col_offset(), delta, max);
+        self.set_explorer_tree_col_offset(next);
     }
 
     /// `r`: re-list the visible open folders and reload the active inner
@@ -1890,6 +1977,63 @@ enum FoldKind {
     Open,
     /// Expand or collapse (`z`, Enter, click).
     Toggle,
+}
+
+/// Explorer badge of an untracked file (the Workspace tree says `A`).
+const UNTRACKED_BADGE: &str = "??";
+
+/// Name and right-hand mark of one listed Explorer row (the paint draws a
+/// loading placeholder row itself).
+///
+/// A changed file paints in its status colour with its letter badge
+/// (`??` for an untracked file); a folder with changes under it gets a
+/// `●` in the modified colour. Ignored entries are muted and dim. The
+/// paint and the tree's pan clamp ([`AppState::explorer_tree_max_col_in`])
+/// both size rows from these segments.
+pub(crate) fn explorer_row_segments(
+    row: &ExplorerRow,
+    status: &ExplorerStatus,
+    ascii: bool,
+) -> NodeSegments {
+    let seg = |text: &str, role: SegRole, dim: bool| TextSeg {
+        text: text.to_string(),
+        role,
+        hex: None,
+        bold: false,
+        dim,
+        icon: None,
+    };
+    if row.ignored {
+        return NodeSegments {
+            segments: vec![seg(&row.name, SegRole::Muted, true)],
+            trailing: Vec::new(),
+        };
+    }
+    if row.is_dir {
+        let dirty = status.dir_dirty(&row.rel);
+        let dot = if ascii { "*" } else { "●" };
+        return NodeSegments {
+            segments: vec![seg(&row.name, SegRole::Dir, false)],
+            trailing: if dirty {
+                vec![seg(dot, SegRole::Modified, false)]
+            } else {
+                Vec::new()
+            },
+        };
+    }
+    let (role, badge) = if status.is_untracked(&row.rel) {
+        (SegRole::Added, Some(UNTRACKED_BADGE))
+    } else if let Some(letter) = status.letter(&row.rel) {
+        (SegRole::from(letter.color_role()), Some(letter.badge()))
+    } else {
+        (SegRole::File, None)
+    };
+    NodeSegments {
+        segments: vec![seg(&row.name, role, false)],
+        trailing: badge
+            .map(|badge| vec![seg(badge, role, false)])
+            .unwrap_or_default(),
+    }
 }
 
 /// Hash of every field of `changes` that [`ExplorerStatus::from_changes`]

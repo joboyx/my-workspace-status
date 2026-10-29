@@ -886,6 +886,9 @@ pub struct ExplorerTab {
     pub preview_gen: u64,
     /// First painted tree row.
     pub tree_scroll: usize,
+    /// Columns the tree is panned (Shift-←/→, the horizontal wheel, its
+    /// horizontal bar), as the Workspace tree's `left_col_offset`.
+    pub tree_col_offset: u16,
     /// Rel path of the cursor row in the last paint (the breadcrumb reads
     /// it, so a frame walks the tree once).
     pub painted_rel: Option<String>,
@@ -908,6 +911,7 @@ impl ExplorerTab {
             active_file: None,
             preview_gen: 0,
             tree_scroll: 0,
+            tree_col_offset: 0,
             painted_rel: None,
             focus_preview: false,
             search: ParkedSearch::default(),
