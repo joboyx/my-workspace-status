@@ -24,6 +24,13 @@ rust-version = "1.85"
 inherits = "release"
 lto = "thin"
 
+# Line tables keep file:line in panic backtraces but drop variable info,
+# which cuts link time and target/ size. Set on dev so `cargo build`,
+# `cargo run` and `cargo test` (the test profile inherits dev) keep sharing
+# dependency builds. For a debugger session, set CARGO_PROFILE_DEV_DEBUG=true.
+[profile.dev]
+debug = "line-tables-only"
+
 # syntect's fancy-regex backend is very slow unoptimized. Keep debug/test
 # highlighting usable without switching to Oniguruma.
 [profile.dev.package.fancy-regex]
