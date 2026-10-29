@@ -2125,8 +2125,11 @@ impl AppState {
     ///
     /// Fixed for the expand state and [`Self::commit_msg_lines`], never sized
     /// by the selected message: expanded is title + meta + N message rows,
-    /// collapsed is title + subtitle. [`Self::commit_detail_footer_lines`]
-    /// returns at least this many lines (more when a long message scrolls).
+    /// collapsed is title + subtitle. This is the painted height (before
+    /// the cap), not a line count: [`Self::commit_detail_footer_lines`]
+    /// returns the title and meta, then only the real message lines, so a
+    /// short message or a source with no message gives fewer lines (the
+    /// unused rows paint blank) and a long one gives more (they scroll).
     pub(crate) fn commit_detail_footer_request(&self) -> usize {
         if self.commit_msg_expand {
             2 + self.commit_msg_lines

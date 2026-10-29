@@ -39,7 +39,7 @@ The selected commit's message, pinned under a commit list: the graph selection f
 | Feature | What | Tests |
 | --- | --- | --- |
 | `shown` | The footer paints under the list for a commit-backed view. | `depth_2_left_files_pane_pins_commit_footer_under_the_list`, `depth_1_files_pane_has_no_commit_footer_beside_the_graph_footer` |
-| `msg-scroll` | A long message scrolls with the wheel over the footer (the list cursor stays), shows a 1-column scrollbar and a ` <more_below><K>` hint, and another commit starts at the top. | `commit_footer_message_scroll_matches_on_every_registry_surface` |
+| `msg-scroll` | A long message scrolls with the wheel over the footer (the list cursor stays), shows a 1-column scrollbar and a ` <more_below><K>` hint, another commit starts at the top, and the last-scrolled commit keeps its offset (the same offset on every surface that shows it). | `commit_footer_message_scroll_matches_on_every_registry_surface` |
 | `hint-popover` | The more-below hint hovers and pins the more-lines popover (Collapse, Taller). | `commit_detail_footer_hint_records_a_hit_and_pins_the_more_lines_section` |
 | `expand` | `M` toggles the full message and the subject-only footer. | `m_toggles_commit_msg_expand_on_graph_footer_and_commit_detail` |
 | `hash-link` | The short hash links to the forge commit page (OSC 8). | `commit_detail_footer_hash_links_to_forge_commit_page` |
