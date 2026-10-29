@@ -2082,34 +2082,94 @@ impl AppState {
         self.tabs.active_compare()?.commit_vs_parent()
     }
 
+    /// True on a compare tab of a range (not Diff commit vs parent): it has
+    /// no single commit message, so its file list takes the whole left
+    /// pane with no commit footer. Paint and layout both ask here.
+    pub(crate) fn is_range_compare_tab(&self) -> bool {
+        self.is_compare_tab() && self.active_compare_commit().is_none()
+    }
+
     /// Graph row the commit-files footer describes: the commit, stash, or
     /// uncommitted row a depth-2 drill opened, or the commit of a Diff
-    /// commit vs parent tab ([`Self::commit_footer_source`]), cloned from
-    /// the loaded graph (only that row). A compare tab reads the graph only
-    /// while it is the tab checkout's graph. `None` for a range compare
+    /// commit vs parent tab ([`Self::commit_footer_source`]).
+    ///
+    /// First choice is that row cloned from the loaded graph (only that
+    /// row, [`Self::commit_footer_graph`]), so chips match the graph
+    /// footer. A Diff commit vs parent tab whose commit has no graph row
+    /// (an old commit a blame action opened, another checkout's graph, or
+    /// none loaded) builds the row from the commit its range load read
+    /// ([`super::tabs::CompareTab::commit`]). `None` for a range compare
     /// tab, a source with no graph row (compare, commit vs worktree), or a
-    /// row not in the loaded graph ([`Self::commit_detail_fallback_name`]
-    /// then names it). No git call: the draw path reads only loaded data.
+    /// row found nowhere ([`Self::commit_detail_fallback_name`] then names
+    /// it). No git call: the draw path reads only loaded data.
     pub(crate) fn commit_detail_graph_row(&self) -> Option<GraphRow> {
         let (repo, source) = self.commit_footer_source()?;
+        let graph_row =
+            self.commit_footer_graph(repo)
+                .and_then(|model| match source.as_ref() {
+                    CommitFileSource::Commit { commit_id } => model.commit_row(commit_id),
+                    CommitFileSource::Stash { stash_ref } => model.stash_row(stash_ref),
+                    CommitFileSource::Worktree => model
+                        .uncommitted
+                        .map(|has_changes| GraphRow::Uncommitted { has_changes }),
+                    CommitFileSource::Compare { .. }
+                    | CommitFileSource::CommitVsWorktree { .. } => None,
+                });
+        if graph_row.is_some() {
+            return graph_row;
+        }
+        let tab = self.tabs.active_compare()?;
+        let commit = tab.commit.clone()?;
+        let is_head = self
+            .checkout_head_and_default(&tab.checkout_path)
+            .is_some_and(|(head, _)| head == commit.id);
+        Some(GraphRow::Commit {
+            commit,
+            is_head,
+            worktrees: Vec::new(),
+        })
+    }
+
+    /// The loaded graph when it serves the commit-files footer of checkout
+    /// `repo`: always on a Workspace drill (the drill opened from it), and
+    /// on a compare tab only while it is that checkout's graph
+    /// ([`Self::graph_identity`]).
+    fn commit_footer_graph(&self, repo: &str) -> Option<&GraphModel> {
         let model = self.graph.as_ref()?;
-        if self.is_compare_tab()
-            && self
+        let serves = !self.is_compare_tab()
+            || self
                 .graph_identity
                 .as_ref()
-                .map(|(graph_repo, _)| graph_repo.as_str())
-                != Some(repo)
-        {
-            return None;
+                .is_some_and(|(graph_repo, _)| graph_repo == repo);
+        serves.then_some(model)
+    }
+
+    /// Graph model the commit-files footer builds its lines against: chip
+    /// colours (default branch), the checkout mark (sync branch), and HEAD.
+    /// The loaded graph when it serves the footer's checkout
+    /// ([`Self::commit_footer_graph`]); otherwise a model with only that
+    /// checkout's HEAD, sync state, and default-branch override from the
+    /// snapshot, so a commit from the tab's own load colours its chips for
+    /// its own checkout.
+    pub(crate) fn commit_footer_model(&self) -> Cow<'_, GraphModel> {
+        let Some((repo, _)) = self.commit_footer_source() else {
+            return self
+                .graph
+                .as_ref()
+                .map_or_else(|| Cow::Owned(GraphModel::default()), Cow::Borrowed);
+        };
+        if let Some(model) = self.commit_footer_graph(repo) {
+            return Cow::Borrowed(model);
         }
-        match source.as_ref() {
-            CommitFileSource::Commit { commit_id } => model.commit_row(commit_id),
-            CommitFileSource::Stash { stash_ref } => model.stash_row(stash_ref),
-            CommitFileSource::Worktree => model
-                .uncommitted
-                .map(|has_changes| GraphRow::Uncommitted { has_changes }),
-            CommitFileSource::Compare { .. } | CommitFileSource::CommitVsWorktree { .. } => None,
-        }
+        let row = self.snapshot.repos.iter().find(|row| row.repo == repo);
+        Cow::Owned(GraphModel {
+            head_id: row
+                .map(|row| row.head.clone())
+                .filter(|head| !head.is_empty()),
+            sync: row.map(super::graph_load::sync_from_snapshot),
+            default_branch_override: row.and_then(|row| row.default_branch_override.clone()),
+            ..GraphModel::default()
+        })
     }
 
     /// Name of the footer's source when [`Self::commit_detail_graph_row`]
@@ -2152,11 +2212,10 @@ impl AppState {
             };
             return vec![meta(COMMIT_FOOTER_NOT_IN_GRAPH), meta(name)];
         }
-        let empty = GraphModel::default();
-        let model = self.graph.as_ref().unwrap_or(&empty);
+        let model = self.commit_footer_model();
         let glyphs = if self.ascii { &ASCII } else { &UNICODE };
         selection_footer_parts(
-            model,
+            &model,
             GraphFooterSelection::from(row),
             glyphs,
             width.max(1),
@@ -6955,6 +7014,7 @@ impl AppState {
             let load = match result {
                 Err(err) => {
                     tab.error = Some(err);
+                    tab.commit = None;
                     tab.files.clear();
                     tab.patch_keys.clear();
                     tab.source = None;
@@ -6967,6 +7027,7 @@ impl AppState {
             };
             tab.error = None;
             tab.source = Some(load.source.clone());
+            tab.commit = load.commit;
             tab.last_head = load.head;
             tab.last_base_tip = Some(load.base_tip);
             let previous_cursor = tab.file_cursor;
@@ -9434,6 +9495,7 @@ mod tests {
                 .collect(),
             head: Some("ccc".into()),
             base_tip: "bbb".into(),
+            commit: None,
         }
     }
 

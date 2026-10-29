@@ -1582,8 +1582,19 @@ fn graph_chip_section(
     row_id: &str,
     chip: &PartTarget,
 ) -> Option<PopoverSection> {
-    let model = state.graph.as_ref()?;
-    let row = rows.graph_row(row_id)?;
+    // A compare tab paints no graph: its chips are the commit footer's,
+    // whose row and model may come from the tab's own load.
+    let footer_model;
+    let footer_row;
+    let (model, row) = if state.is_compare_tab() {
+        footer_row = state
+            .commit_detail_graph_row()
+            .filter(|row| graph_row_id(row) == row_id)?;
+        footer_model = state.commit_footer_model();
+        (&*footer_model, &footer_row)
+    } else {
+        (state.graph.as_ref()?, rows.graph_row(row_id)?)
+    };
     let (refs, is_head, commit) = chip_refs(model, row)?;
     let on_commit_row = matches!(row, GraphRow::Commit { .. });
     let head_branch = model.sync.as_ref().map(|sync| sync.branch.as_str());

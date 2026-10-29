@@ -781,6 +781,10 @@ pub(crate) struct CompareRangeLoad {
     pub head: Option<String>,
     /// Base tip SHA at load time.
     pub base_tip: String,
+    /// The head commit of a Diff commit vs parent range
+    /// ([`super::tabs::commit_vs_parent_head`]), read for the commit
+    /// footer. `None` for any other range.
+    pub commit: Option<workspace_status_graph::Commit>,
 }
 
 /// Resolve `base_ref` and list the one file of a commit-vs-working-tree
@@ -808,6 +812,7 @@ pub(crate) fn compute_worktree_compare_range(
         patch_keys: HashMap::new(),
         head: None,
         base_tip: base,
+        commit: None,
     })
 }
 
@@ -835,6 +840,10 @@ pub(crate) fn compute_compare_range(
         .map(Into::into)
         .collect();
     let patch_keys = list_compare_patch_keys(dir, &base_tip, &head);
+    // One commit against its parent: read it for the footer here, off the
+    // event thread, so a commit outside the loaded graph still shows.
+    let commit = super::tabs::commit_vs_parent_head(base_ref, head_ref)
+        .and_then(|_| super::graph_load::load_commit(dir, &head));
     Ok(CompareRangeLoad {
         source: CommitFileSource::Compare {
             base_ref: base_ref.to_string(),
@@ -847,6 +856,7 @@ pub(crate) fn compute_compare_range(
         patch_keys,
         head: Some(head),
         base_tip,
+        commit,
     })
 }
 
@@ -2185,7 +2195,7 @@ mod tests {
         );
         let merge = exec_git(&["rev-parse", "HEAD"], &dir);
         // HEAD moves past both commits: a pinned head ignores it.
-        commit_file(&dir, "later.txt");
+        let later = commit_file(&dir, "later.txt");
 
         let load = compute_compare_range(&dir, &format!("{first}^"), &first).unwrap();
         assert_eq!(compare_paths(&load), vec![("A".into(), "a.txt".into())]);
@@ -2205,14 +2215,30 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+        // One commit against its parent: the load reads that commit for
+        // the footer, with its message, parent, and refs.
+        let commit = load.commit.as_ref().expect("the head commit");
+        assert_eq!(commit.id, first);
+        assert_eq!(commit.subject, "a.txt");
+        assert_eq!(commit.parents, vec![load.base_tip.clone()]);
 
         // A merge shows what it brought in versus its first parent.
         let load = compute_compare_range(&dir, &format!("{merge}^"), &merge).unwrap();
         assert_eq!(load.base_tip, main_tip);
+        let commit = load.commit.as_ref().expect("the merge commit");
+        assert_eq!(commit.subject, "merge topic");
+        assert_eq!(commit.parents.len(), 2);
         assert_eq!(compare_paths(&load), vec![("A".into(), "topic.txt".into())]);
 
         // A live tab still reads the checkout's HEAD.
         let live = compute_compare_range(&dir, &first, "HEAD").unwrap();
+        assert!(live.commit.is_none(), "a range has no single commit");
+        let tip = compute_compare_range(&dir, &format!("{later}^"), &later).unwrap();
+        let refs = tip.commit.map(|commit| commit.refs).unwrap_or_default();
+        assert!(
+            refs.iter().any(|r| r.name == "main"),
+            "branch tip refs: {refs:?}"
+        );
         let mut paths: Vec<_> = compare_paths(&live).into_iter().map(|(_, p)| p).collect();
         paths.sort();
         assert_eq!(paths, vec!["later.txt", "main.txt", "topic.txt"]);

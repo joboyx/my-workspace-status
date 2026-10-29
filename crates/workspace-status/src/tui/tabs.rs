@@ -11,6 +11,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
+use workspace_status_graph::Commit;
+
 use crate::file_index::FileRead;
 
 use super::diff::DiffContent;
@@ -350,6 +352,16 @@ pub fn compare_range_label(base_ref: &str, head_ref: &str) -> String {
     format!("{}...{}", short_rev(base_ref), short_rev(head_ref))
 }
 
+/// The pinned head of a `base_ref...head_ref` range of one commit against
+/// its first parent (`<sha>^...<sha>`, Diff commit vs parent): `head_ref`
+/// when `base_ref` is `head_ref` plus `^` and the head is not the live
+/// [`COMPARE_HEAD_REF`], else `None`. The tab ([`CompareTab::commit_vs_parent`])
+/// and the range load (which reads that commit for the footer) share it.
+pub fn commit_vs_parent_head<'a>(base_ref: &str, head_ref: &'a str) -> Option<&'a str> {
+    let parent = base_ref.strip_suffix('^')?;
+    (head_ref != COMPARE_HEAD_REF && parent == head_ref).then_some(head_ref)
+}
+
 /// Bidirectional separator between checkout leaf and base ref (VS Code-style).
 pub const COMPARE_TAB_SEP: &str = " ↔ ";
 
@@ -408,6 +420,12 @@ pub struct CompareTab {
     pub worktree_stamp: Option<String>,
     /// Immutable endpoints for the current load, when resolved.
     pub source: Option<CommitFileSource>,
+    /// Diff commit vs parent only: the head commit as the range load read
+    /// it (message, parents, refs, author, date). The commit footer paints
+    /// it when the loaded graph has no row for that commit (an old commit
+    /// a blame action opened, another checkout's graph, or none loaded).
+    /// `None` for a range tab, before the load, and after a load error.
+    pub commit: Option<Commit>,
     /// Load or probe error. Tab stays open.
     pub error: Option<String>,
     pub files: Vec<CommitFile>,
@@ -468,6 +486,7 @@ impl CompareTab {
             worktree_file,
             worktree_stamp: None,
             source: None,
+            commit: None,
             error: None,
             files: Vec::new(),
             file_cursor: 0,
@@ -528,9 +547,10 @@ impl CompareTab {
     /// Read from the tab key, so it holds before the range loads and needs
     /// no git call.
     pub fn commit_vs_parent(&self) -> Option<&str> {
-        let parent = self.base_ref.strip_suffix('^')?;
-        (self.worktree_file.is_none() && self.is_pinned() && parent == self.head_ref)
-            .then_some(self.head_ref.as_str())
+        if self.worktree_file.is_some() {
+            return None;
+        }
+        commit_vs_parent_head(&self.base_ref, &self.head_ref)
     }
 
     /// Diff pane header range (`<base-ref>...HEAD`,

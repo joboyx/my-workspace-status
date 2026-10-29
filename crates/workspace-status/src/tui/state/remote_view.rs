@@ -890,6 +890,7 @@ mod tests {
                 patch_keys: Default::default(),
                 head: Some("d".repeat(40)),
                 base_tip: "b".repeat(40),
+                commit: None,
             }),
         );
         focus_commit_file(&mut app, "src/lib.rs", false);

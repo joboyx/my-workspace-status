@@ -578,7 +578,7 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) -> R
         // A range compare has no single commit message: its list takes
         // the whole pane. A Diff commit vs parent tab pins the commit's
         // footer like a depth-2 drill.
-        if state.is_compare_tab() && state.active_compare_commit().is_none() {
+        if state.is_range_compare_tab() {
             draw_commit_file_list(frame, tree_inner, state, cursor, col_offset);
         } else {
             draw_commit_detail(frame, tree_inner, state, cursor, col_offset);
@@ -644,7 +644,7 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) -> R
     if let Some(cursor) = left_files_cursor {
         // The commit footer under the list: a depth-2 drill or a Diff
         // commit vs parent tab; a range compare tab has none.
-        let footer_h = if state.is_compare_tab() && state.active_compare_commit().is_none() {
+        let footer_h = if state.is_range_compare_tab() {
             0
         } else {
             commit_detail_footer_height(state.commit_detail_footer_request(), tree_inner.height)
@@ -9515,19 +9515,37 @@ mod tests {
 
     /// Open (or focus) the Diff commit vs parent tab of commit `id`
     /// (`<id>^...<id>`, head pinned) on checkout `app` and land its range
-    /// and diff loads on its one file, like the load workers do.
+    /// and diff loads on its one file, like the load workers do. The range
+    /// load carries the commit as the loaded graph holds it, as git would
+    /// read it.
     fn show_compare_commit(state: &mut AppState, id: &str) {
-        let base_ref = format!("{id}^");
         state
             .tabs
-            .open_or_focus("app".into(), base_ref.clone(), id.into());
-        let tab = state.tabs.active_compare().expect("compare tab");
-        if !tab.files.is_empty() {
+            .open_or_focus("app".into(), format!("{id}^"), id.into());
+        if !state
+            .tabs
+            .active_compare()
+            .expect("compare tab")
+            .files
+            .is_empty()
+        {
             return;
         }
+        let commit = state
+            .graph
+            .as_ref()
+            .and_then(|model| model.commits.iter().find(|commit| commit.id == id))
+            .cloned();
+        land_compare_commit_load(state, id, commit);
+    }
+
+    /// Land the range load (one file, and `commit` as the worker read it)
+    /// and the diff load of the active Diff commit vs parent tab of `id`.
+    fn land_compare_commit_load(state: &mut AppState, id: &str, commit: Option<Commit>) {
+        let tab = state.tabs.active_compare().expect("compare tab");
         let (tab_id, gen) = (tab.id, tab.generation);
         let source = super::super::drill::CommitFileSource::Compare {
-            base_ref,
+            base_ref: format!("{id}^"),
             head_ref: id.into(),
             base_tip: "c".repeat(40),
             merge_base: "c".repeat(40),
@@ -9544,6 +9562,7 @@ mod tests {
             patch_keys: [("README.md".to_string(), "key:README.md".to_string())].into(),
             head: Some(id.into()),
             base_tip: "c".repeat(40),
+            commit,
         };
         let _ = state.apply_compare_range(tab_id, gen, Ok(load));
         state.apply_compare_diff(
@@ -10201,6 +10220,196 @@ mod tests {
         assert_eq!(state.graph_footer_msg_scroll(), 3, "graph footer");
         show_drill_commit(&mut state, FOOTER_COMMIT_A);
         assert_eq!(state.commit_detail_msg_scroll(), 3, "depth-2 footer");
+    }
+
+    /// An older commit a blame action opened (`<prev>^...<prev>` from
+    /// Blame: open previous line change), absent from the loaded graph,
+    /// gets its full footer from the commit the range load read, in both
+    /// looks, whether no graph is loaded, the parked graph is another
+    /// checkout's (holding a commit with the same id: the repo gate keeps
+    /// it out), or the checkout's own graph lacks the commit: message rows
+    /// on top in the subject colour, the meta row with its ref chip (which
+    /// pins its popover) and `parent <id>` on the bottom row, the wheel scrolls the message, and the more-below hint
+    /// pins the more-lines section. When the checkout's graph holds the
+    /// commit, its row wins.
+    #[test]
+    fn blame_opened_compare_commit_footer_reads_the_tab_commit_off_the_graph() {
+        const OLD: &str = "ccc3333dddddddddddddddddddddddddddddddddd";
+        const PARENT: &str = "eee4444fffffffffffffffffffffffffffffffff";
+        let tab_commit = Commit {
+            id: OLD.into(),
+            subject: "blamed subject".into(),
+            body: footer_long_body(30),
+            parents: vec![PARENT.into()],
+            author_name: "Bo".into(),
+            refs: vec![workspace_status_graph::GraphRef::local("old-topic")],
+            ..Commit::default()
+        };
+        let open = |graph: &str| {
+            let mut state = with_two_long_commits(two_pane_graph_state());
+            match graph {
+                "none" => {
+                    state.graph = None;
+                    state.graph_identity = None;
+                }
+                "other repo" => {
+                    // Another checkout's graph that holds a commit with the
+                    // same id: the footer must not read it.
+                    state.graph.as_mut().unwrap().commits[0].id = OLD.into();
+                    state.graph_identity = Some(("lib".into(), OLD.into()));
+                }
+                "own graph has it" => {
+                    state.graph.as_mut().unwrap().commits[0].id = OLD.into();
+                    state.graph_identity = Some(("app".into(), OLD.into()));
+                }
+                _ => state.graph_identity = Some(("app".into(), FOOTER_COMMIT_A.into())),
+            }
+            let previous = crate::git::PreviousLineChange::Found(crate::git::LineBlame {
+                sha: OLD.into(),
+                author: "Bo".into(),
+                author_time: 0,
+                summary: "blamed subject".into(),
+                orig_line: 1,
+                filename: "README.md".into(),
+                previous: None,
+                boundary: false,
+                uncommitted: false,
+            });
+            let effect = state.apply_blame_previous(0, "app".into(), FOOTER_COMMIT_A, Ok(previous));
+            assert!(
+                matches!(effect, Some(Effect::LoadCompareRange { .. })),
+                "{graph}: the blame path opens the tab: {effect:?}"
+            );
+            assert_eq!(state.active_compare_commit(), Some(OLD), "{graph}");
+            land_compare_commit_load(&mut state, OLD, Some(tab_commit.clone()));
+            state
+        };
+
+        for graph in ["none", "other repo", "own graph lacks it"] {
+            for (look, background) in FOOTER_LOOKS {
+                let case = format!("{graph} {look}");
+                let mut state = open(graph);
+                state.background = background;
+                state.tree_fraction = 0.5;
+                let mut terminal = Terminal::new(TestBackend::new(120, 28)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let FooterBox {
+                    y,
+                    x,
+                    width,
+                    height,
+                    scroll_max,
+                } = commit_detail_footer_box(&state)
+                    .unwrap_or_else(|| panic!("{case}: an overflowing footer records its box"));
+                let row_text = |terminal: &Terminal<TestBackend>, row: u16| {
+                    region_text(terminal, x, row, width, 1)
+                        .trim_end()
+                        .to_string()
+                };
+                let footer = region_text(&terminal, x, y, width, height);
+                assert!(
+                    row_text(&terminal, y + FOOTER_RULE_ROWS).starts_with("blamed subject"),
+                    "{case}: the tab commit's subject first:\n{footer}"
+                );
+                assert!(
+                    !footer.contains("seed graph")
+                        && !footer.contains(super::super::state::COMMIT_FOOTER_NOT_IN_GRAPH),
+                    "{case}: neither a graph commit nor the fallback:\n{footer}"
+                );
+                let meta = row_text(&terminal, y + height - 1);
+                assert!(
+                    meta.contains("old-topic")
+                        && meta.contains("ccc3333")
+                        && meta.contains("parent eee4444"),
+                    "{case}: the meta row on the bottom row: {meta:?}"
+                );
+                let buf = terminal.backend().buffer().clone();
+                let palette = state.theme.palette();
+                assert_eq!(
+                    buf[(x, y + FOOTER_RULE_ROWS)].fg,
+                    palette.repo,
+                    "{case}: subject colour"
+                );
+
+                // Hint popover with the footer's count.
+                let below = state.commit_detail_footer_lines_below();
+                assert_eq!(below, scroll_max, "{case}: K at the top");
+                let hint = state
+                    .layout
+                    .icon_hits
+                    .iter()
+                    .find(|hit| hit.kind == IconKind::GraphMoreBelow)
+                    .cloned()
+                    .unwrap_or_else(|| panic!("{case}: hint hit"));
+                state.dispatch(Action::Click {
+                    col: hint.x,
+                    row: hint.y,
+                });
+                let lines: Vec<String> = state
+                    .open_popover_sections()
+                    .first()
+                    .map(|section| {
+                        section
+                            .lines
+                            .iter()
+                            .map(crate::tui::popover::PopoverLine::copy_text)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                assert!(
+                    lines.contains(&format!("{below} more lines")),
+                    "{case}: the more-lines section: {lines:?}"
+                );
+                state.dispatch(Action::PopoverClose);
+
+                // The ref chip of the tab commit pins its popover.
+                let chip = state
+                    .layout
+                    .icon_hits
+                    .iter()
+                    .find(|hit| {
+                        hit.y == y + height - 1
+                            && matches!(hit.target, IconTarget::GraphChip { .. })
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| panic!("{case}: chip hit: {:?}", state.layout.icon_hits));
+                state.dispatch(Action::Click {
+                    col: chip.x,
+                    row: chip.y,
+                });
+                assert_eq!(
+                    state
+                        .open_popover_sections()
+                        .first()
+                        .map(|section| section.icon),
+                    Some(chip.kind),
+                    "{case}: the chip pins its popover"
+                );
+                state.dispatch(Action::PopoverClose);
+
+                // The wheel scrolls the message; the list cursor stays.
+                let cursor = state.commit_files_cursor();
+                state.dispatch(Action::ScrollWheel {
+                    col: x + 2,
+                    row: y + 2,
+                    delta: 1,
+                    horizontal: false,
+                });
+                assert_eq!(state.commit_detail_msg_scroll(), 1, "{case}: wheel scrolls");
+                assert_eq!(state.commit_files_cursor(), cursor, "{case}: cursor stays");
+            }
+        }
+
+        // The checkout's own graph holds the commit: its row wins.
+        let mut state = open("own graph has it");
+        let mut terminal = Terminal::new(TestBackend::new(80, 28)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let footer = commit_detail_footer_box(&state).expect("footer box");
+        let subject = region_text(&terminal, footer.x, footer.y + 1, footer.width, 1);
+        assert!(
+            subject.starts_with("seed graph"),
+            "the graph row is the first choice: {subject:?}"
+        );
     }
 
     /// A compare tab of a range (a branch or commit against HEAD, or a
