@@ -61,6 +61,10 @@ pub enum UserTag {
     SearchFiles,
     /// Focused-line `git blame -L n,n` (latest-only slot).
     LineBlame,
+    /// One card lookup (`log --no-walk` plus `for-each-ref --points-at`)
+    /// for a commit popover whose commit is not in the loaded graph
+    /// (latest-only slot).
+    CommitCard,
     /// Doctor setup probe: PATH scan, read-only commands, config and store
     /// reads (latest-only slot).
     Doctor,

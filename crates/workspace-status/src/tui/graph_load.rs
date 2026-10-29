@@ -2,7 +2,7 @@
 //!
 //! History command: `log --exclude=refs/stash --all
 //! --topo-order --date-order --skip --max-count`. Pretty format is
-//! NUL-separated `%H %P %s %an %at %b` so a multiline body stays on the
+//! NUL-separated `%H %P %s %an %ae %at %aI %cn %ce %ct %cI %b` so a multiline body stays on the
 //! commit. Default window is 300.
 //! Graph `o` replaces `--all` with the selected local branch tips so the
 //! window is only their ancestors. Missing `stash^1` parents are fetched
@@ -14,8 +14,8 @@ use std::fs;
 use std::path::Path;
 
 use workspace_status_graph::{
-    cap_commit_body, Commit, GraphModel, GraphRef, Stash, SyncState, SyncStatus, Worktree,
-    DEFAULT_GRAPH_WINDOW,
+    cap_commit_body, co_author_trailers, Commit, CommitPeople, GraphModel, GraphRef, Signature,
+    Stash, SyncState, SyncStatus, Worktree, DEFAULT_GRAPH_WINDOW,
 };
 
 use crate::git::{exec_git, list_worktrees_porcelain};
@@ -299,6 +299,35 @@ fn load_missing_stash_parents(
         .collect()
 }
 
+/// Load one commit and the branches and tags that point at it, for a
+/// commit popover whose commit is not in the loaded graph window.
+///
+/// Runs `for-each-ref --points-at=<sha>` (same format and ref kinds as the
+/// graph load; an annotated tag counts for the commit it peels to), then
+/// `log --no-walk --ignore-missing` with the graph's pretty format.
+/// `Err("commit not found")` when git knows no such commit. Blocking: the
+/// TUI runs it on the blocking pool (`UserTag::CommitCard`), never on the
+/// draw or event thread.
+pub(crate) fn load_commit_card(repo_dir: &Path, sha: &str) -> Result<Commit, String> {
+    let points_at = format!("--points-at={sha}");
+    let raw = exec_git(
+        &[
+            "for-each-ref",
+            REF_FORMAT,
+            &points_at,
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ],
+        repo_dir,
+    );
+    let refs = parse_refs(&raw);
+    load_commits_by_ids(repo_dir, &[sha.to_string()], &refs)
+        .into_iter()
+        .next()
+        .ok_or_else(|| "commit not found".to_string())
+}
+
 /// Commit `id` in `repo_dir` as a graph row reads it: message, parents,
 /// author, date, and the branch and tag refs that point at it. Runs git;
 /// call it off the event thread. `None` when git cannot read the commit.
@@ -340,8 +369,12 @@ fn load_commits_by_ids(
 /// multiline body from gluing onto the next hash. Real `git log` still
 /// inserts a LF between commits when `%b` is present (`\0\n` before the
 /// next `%H`); [`parse_commit_fields`] trims that off the id.
-const COMMIT_PRETTY: &str = "--pretty=format:%H%x00%P%x00%s%x00%an%x00%at%x00%b%x00";
-const COMMIT_FIELDS: usize = 6;
+///
+/// Fields: id, parents, subject, author name, author email, author unix,
+/// author ISO date, committer name, committer email, committer unix,
+/// committer ISO date, body. The ISO dates carry the recorded UTC offset.
+const COMMIT_PRETTY: &str = "--pretty=format:%H%x00%P%x00%s%x00%an%x00%ae%x00%at%x00%aI%x00%cn%x00%ce%x00%ct%x00%cI%x00%b%x00";
+const COMMIT_FIELDS: usize = 12;
 
 fn parse_commit_stream(raw: &str, refs: &[(String, GraphRef)]) -> Vec<Commit> {
     nul_chunks(raw, COMMIT_FIELDS)
@@ -356,7 +389,7 @@ fn parse_commit_line(line: &str, refs: &[(String, GraphRef)]) -> Option<Commit> 
 }
 
 fn parse_commit_fields(chunk: &[&str], refs: &[(String, GraphRef)]) -> Option<Commit> {
-    if chunk.len() < 5 {
+    if chunk.len() < COMMIT_FIELDS - 1 {
         return None;
     }
     // `git log --pretty=format:…%b…` puts a LF between commits; the next
@@ -368,8 +401,21 @@ fn parse_commit_fields(chunk: &[&str], refs: &[(String, GraphRef)]) -> Option<Co
     let parents = chunk[1].split_whitespace().map(str::to_string).collect();
     let subject = chunk[2].to_string();
     let author_name = chunk[3].to_string();
-    let author_date_unix = chunk[4].trim().parse::<i64>().unwrap_or(0);
-    let body = cap_commit_body(chunk.get(5).copied().unwrap_or(""));
+    let author_date_unix = chunk[5].trim().parse::<i64>().unwrap_or(0);
+    // Trailers come from the full body: the cap below could drop them.
+    let raw_body = chunk.get(11).copied().unwrap_or("");
+    let people = CommitPeople {
+        author_email: chunk[4].to_string(),
+        author_offset_secs: iso_offset_secs(chunk[6]),
+        committer: Signature {
+            name: chunk[7].to_string(),
+            email: chunk[8].to_string(),
+            unix: chunk[9].trim().parse::<i64>().unwrap_or(0),
+            offset_secs: iso_offset_secs(chunk[10]),
+        },
+        co_authors: co_author_trailers(raw_body),
+    };
+    let body = cap_commit_body(raw_body);
     let commit_refs = refs
         .iter()
         .filter(|(sha, _)| sha == id)
@@ -383,7 +429,32 @@ fn parse_commit_fields(chunk: &[&str], refs: &[(String, GraphRef)]) -> Option<Co
         refs: commit_refs,
         author_name,
         author_date_unix,
+        people,
     })
+}
+
+/// UTC offset in seconds east of UTC from a strict ISO date (`%aI`, `%cI`).
+///
+/// The suffix `Z` is `0`; `±HH:MM` is the signed offset; anything else is
+/// `None`.
+fn iso_offset_secs(iso: &str) -> Option<i32> {
+    let iso = iso.trim();
+    if iso.ends_with('Z') {
+        return Some(0);
+    }
+    let tail = iso.get(iso.len().checked_sub(6)?..)?;
+    let bytes = tail.as_bytes();
+    let sign = match bytes[0] {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    if bytes[3] != b':' {
+        return None;
+    }
+    let hours = tail.get(1..3)?.parse::<i32>().ok()?;
+    let mins = tail.get(4..6)?.parse::<i32>().ok()?;
+    Some(sign * (hours * 3600 + mins * 60))
 }
 
 fn nul_chunks(raw: &str, fields: usize) -> Vec<Vec<&str>> {
@@ -419,19 +490,29 @@ fn classify_ref(refname: &str, short: &str) -> Option<GraphRef> {
     }
 }
 
+/// `for-each-ref` format: commit id, full ref name, short ref name.
+///
+/// An annotated tag's %(objectname) is the tag object; %(*objectname) is
+/// the peeled commit. Empty for branches and lightweight tags.
+const REF_FORMAT: &str = "--format=%(if)%(*objectname)%(then)%(*objectname)%(else)%(objectname)%(end)%00%(refname)%00%(refname:short)";
+
 fn load_refs(repo_dir: &Path) -> Vec<(String, GraphRef)> {
     let raw = exec_git(
         &[
             "for-each-ref",
-            // An annotated tag's %(objectname) is the tag object; %(*objectname)
-            // is the peeled commit. Empty for branches and lightweight tags.
-            "--format=%(if)%(*objectname)%(then)%(*objectname)%(else)%(objectname)%(end)%00%(refname)%00%(refname:short)",
+            REF_FORMAT,
             "refs/heads",
             "refs/remotes",
             "refs/tags",
         ],
         repo_dir,
     );
+    parse_refs(&raw)
+}
+
+/// Read [`REF_FORMAT`] lines into (commit id, ref) pairs. Symbolic
+/// `*/HEAD` refs and refs outside heads, remotes, and tags are dropped.
+fn parse_refs(raw: &str) -> Vec<(String, GraphRef)> {
     raw.lines()
         .filter_map(|line| {
             let mut parts = line.split('\0');
@@ -449,14 +530,17 @@ fn load_stashes(repo_dir: &Path) -> Vec<Stash> {
         &[
             "stash",
             "list",
-            "--format=%gd%x00%H%x00%P%x00%s%x00%at%x00%an%x00%b%x00",
+            "--format=%gd%x00%H%x00%P%x00%s%x00%at%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%ct%x00%cI%x00%b%x00",
         ],
         repo_dir,
     );
     parse_stash_stream(&raw)
 }
 
-const STASH_FIELDS: usize = 7;
+/// Stash fields: ref, id, parents, subject, author unix, author name, author
+/// email, author ISO date, committer name, committer email, committer unix,
+/// committer ISO date, body.
+const STASH_FIELDS: usize = 13;
 
 fn parse_stash_stream(raw: &str) -> Vec<Stash> {
     nul_chunks(raw, STASH_FIELDS)
@@ -471,7 +555,7 @@ fn parse_stash_line(line: &str) -> Option<Stash> {
 }
 
 fn parse_stash_fields(chunk: &[&str]) -> Option<Stash> {
-    if chunk.len() < 6 {
+    if chunk.len() < STASH_FIELDS - 1 {
         return None;
     }
     // Same inter-record LF as commit pretty (`\n` before the next `%gd`).
@@ -484,7 +568,19 @@ fn parse_stash_fields(chunk: &[&str]) -> Option<Stash> {
     let subject = chunk[3].to_string();
     let author_date_unix = chunk[4].trim().parse::<i64>().unwrap_or(0);
     let author_name = chunk[5].to_string();
-    let body = cap_commit_body(chunk.get(6).copied().unwrap_or(""));
+    let raw_body = chunk.get(12).copied().unwrap_or("");
+    let people = CommitPeople {
+        author_email: chunk[6].to_string(),
+        author_offset_secs: iso_offset_secs(chunk[7]),
+        committer: Signature {
+            name: chunk[8].to_string(),
+            email: chunk[9].to_string(),
+            unix: chunk[10].trim().parse::<i64>().unwrap_or(0),
+            offset_secs: iso_offset_secs(chunk[11]),
+        },
+        co_authors: co_author_trailers(raw_body),
+    };
+    let body = cap_commit_body(raw_body);
     Some(Stash {
         id: id.to_string(),
         stash_ref: stash_ref.to_string(),
@@ -493,6 +589,7 @@ fn parse_stash_fields(chunk: &[&str]) -> Option<Stash> {
         author_name,
         author_date_unix,
         parent_id: parent.filter(|s| !s.is_empty()),
+        people,
     })
 }
 
@@ -633,6 +730,7 @@ fn capture(note: &str, label: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use workspace_status_graph::{Person, COMMIT_BODY_MAX_BYTES};
 
     #[test]
     fn parse_diverged_counts() {
@@ -665,10 +763,19 @@ mod tests {
         );
     }
 
+    /// One commit record in `COMMIT_PRETTY` order, without trailing NUL.
+    fn commit_record(id: &str, parents: &str, subject: &str, body: &str) -> String {
+        format!(
+            "{id}\0{parents}\0{subject}\0Ada Lovelace\0ada@example.com\x001700000000\0\
+             2023-11-14T22:13:20+02:00\0Bob Builder\0bob@example.com\x001700000100\0\
+             2023-11-14T17:15:00-05:30\0{body}\0"
+        )
+    }
+
     #[test]
     fn parse_commit_line_loads_author_and_date() {
-        let line = "abc123\0parent1 parent2\0fix login\0Ada Lovelace\x001700000000";
-        let commit = parse_commit_line(line, &[]).expect("commit");
+        let line = commit_record("abc123", "parent1 parent2", "fix login", "");
+        let commit = parse_commit_line(&line, &[]).expect("commit");
         assert_eq!(commit.id, "abc123");
         assert_eq!(commit.parents, vec!["parent1", "parent2"]);
         assert_eq!(commit.subject, "fix login");
@@ -678,14 +785,66 @@ mod tests {
     }
 
     #[test]
+    fn commit_pretty_reads_emails_committer_and_offsets() {
+        let line = commit_record("abc123", "p1", "fix login", "");
+        let commit = parse_commit_line(&line, &[]).expect("commit");
+        assert_eq!(commit.people.author_email, "ada@example.com");
+        assert_eq!(commit.people.author_offset_secs, Some(7200));
+        let committer = &commit.people.committer;
+        assert_eq!(committer.name, "Bob Builder");
+        assert_eq!(committer.email, "bob@example.com");
+        assert_eq!(committer.unix, 1_700_000_100);
+        assert_eq!(committer.offset_secs, Some(-(5 * 3600 + 1800)));
+        assert!(commit.people.co_authors.is_empty());
+        let author = commit.author();
+        assert_eq!(author.name, "Ada Lovelace");
+        assert_eq!(author.email, "ada@example.com");
+        assert_eq!(author.unix, 1_700_000_000);
+        assert_eq!(author.offset_secs, Some(7200));
+        let utc = commit_record("def456", "p1", "utc", "").replace("+02:00", "Z");
+        let commit = parse_commit_line(&utc, &[]).expect("commit");
+        assert_eq!(commit.people.author_offset_secs, Some(0));
+    }
+
+    #[test]
+    fn iso_offset_secs_reads_z_signed_offsets_and_rejects_junk() {
+        assert_eq!(iso_offset_secs("2023-11-14T22:13:20Z"), Some(0));
+        assert_eq!(iso_offset_secs("2023-11-14T22:13:20+00:00"), Some(0));
+        assert_eq!(iso_offset_secs("2023-11-14T22:13:20+08:00"), Some(28_800));
+        assert_eq!(iso_offset_secs("2023-11-14T22:13:20-05:30"), Some(-19_800));
+        assert_eq!(iso_offset_secs(""), None);
+        assert_eq!(iso_offset_secs("1700000000"), None);
+        assert_eq!(iso_offset_secs("2023-11-14T22:13:20+0200"), None);
+    }
+
+    #[test]
+    fn co_authors_come_from_the_full_body_before_the_cap() {
+        let body = format!(
+            "{}\n\nCo-authored-by: Cy Coder <cy@example.com>",
+            "x".repeat(COMMIT_BODY_MAX_BYTES + 80)
+        );
+        let line = commit_record("abc123", "p1", "big", &body);
+        let commit = parse_commit_line(&line, &[]).expect("commit");
+        assert_eq!(
+            commit.people.co_authors,
+            vec![Person {
+                name: "Cy Coder".into(),
+                email: "cy@example.com".into(),
+            }]
+        );
+        assert!(commit.body.ends_with('…'), "{}", commit.body.len());
+        assert!(commit.body.len() <= COMMIT_BODY_MAX_BYTES);
+    }
+
+    #[test]
     fn parse_commit_stream_splits_subject_and_multiline_body() {
-        let raw = "abc123\0parent1\0fix login\0Ada\x001700000000\0line one\n\nline two\0";
-        let commits = parse_commit_stream(raw, &[]);
+        let raw = commit_record("abc123", "parent1", "fix login", "line one\n\nline two");
+        let commits = parse_commit_stream(&raw, &[]);
         assert_eq!(commits.len(), 1, "{commits:?}");
         assert_eq!(commits[0].subject, "fix login");
         assert_eq!(commits[0].body, "line one\n\nline two");
-        let empty_body = "def456\0p\0only subject\0Ada\x001\0\0";
-        let commits = parse_commit_stream(empty_body, &[]);
+        let empty_body = commit_record("def456", "p", "only subject", "");
+        let commits = parse_commit_stream(&empty_body, &[]);
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].subject, "only subject");
         assert_eq!(commits[0].body, "");
@@ -698,7 +857,9 @@ mod tests {
         let keep = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let main = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let raw = format!(
-            "{keep}\0\0keep-leaf-commit\0Ada\x001\0\0\n{main}\0{keep}\0main-leaf-commit\0Ada\x001\0\0"
+            "{}\n{}",
+            commit_record(keep, "", "keep-leaf-commit", ""),
+            commit_record(main, keep, "main-leaf-commit", "")
         );
         let refs = vec![
             (keep.to_string(), GraphRef::local("feature/keep")),
@@ -717,11 +878,19 @@ mod tests {
         assert_eq!(commits[1].subject, "main-leaf-commit");
     }
 
+    /// One stash record in the stash format order, without trailing NUL.
+    fn stash_record(stash_ref: &str, id: &str, body: &str) -> String {
+        format!(
+            "{stash_ref}\0{id}\0parentsha othersha\0WIP on main\x001700000000\0Ada Lovelace\0\
+             ada@example.com\x002023-11-14T22:13:20+02:00\0Bob Builder\0bob@example.com\0\
+             1700000100\x002023-11-14T17:15:00-05:30\0{body}\0"
+        )
+    }
+
     #[test]
     fn parse_stash_line_loads_id_date_and_author() {
-        let line =
-            "stash@{1}\0s1abcdef\0parentsha othersha\0WIP on main\x001700000000\0Ada Lovelace";
-        let stash = parse_stash_line(line).expect("stash");
+        let line = stash_record("stash@{1}", "s1abcdef", "");
+        let stash = parse_stash_line(&line).expect("stash");
         assert_eq!(stash.stash_ref, "stash@{1}");
         assert_eq!(stash.id, "s1abcdef");
         assert_eq!(stash.parent_id.as_deref(), Some("parentsha"));
@@ -732,8 +901,29 @@ mod tests {
     }
 
     #[test]
+    fn stash_pretty_reads_emails_committer_and_offsets() {
+        let body = "Notes\n\nCo-authored-by: Cy Coder <cy@example.com>";
+        let line = stash_record("stash@{0}", "s0abcdef", body);
+        let stash = parse_stash_line(&line).expect("stash");
+        assert_eq!(stash.people.author_email, "ada@example.com");
+        assert_eq!(stash.people.author_offset_secs, Some(7200));
+        let committer = &stash.people.committer;
+        assert_eq!(committer.name, "Bob Builder");
+        assert_eq!(committer.email, "bob@example.com");
+        assert_eq!(committer.unix, 1_700_000_100);
+        assert_eq!(committer.offset_secs, Some(-(5 * 3600 + 1800)));
+        assert_eq!(stash.people.co_authors.len(), 1);
+        assert_eq!(stash.people.co_authors[0].name, "Cy Coder");
+        let author = stash.author();
+        assert_eq!(author.email, "ada@example.com");
+        assert_eq!(author.unix, 1_700_000_000);
+        assert_eq!(author.offset_secs, Some(7200));
+    }
+
+    #[test]
     fn parse_stash_line_skips_missing_id() {
-        assert!(parse_stash_line("stash@{0}\0\0parent\0wip\x001\0Ada").is_none());
+        let line = stash_record("stash@{0}", "", "");
+        assert!(parse_stash_line(&line).is_none());
     }
 
     #[test]
@@ -1207,6 +1397,88 @@ mod live_git {
             "stash^1 outside the log window must be loaded so the tip can park"
         );
         assert!(model.commits.len() > 3);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn load_commit_card_reads_one_commit_and_its_refs() {
+        let (root, repo) = temp_workspace();
+        init_repo_empty(&repo);
+        commit_file(&repo, "a.txt", "1\n", "first");
+        let first = exec_git(&["rev-parse", "HEAD"], &repo);
+        let status = std::process::Command::new(crate::git::git_binary())
+            .args([
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "card subject",
+                "-m",
+                "Body line.\n\nCo-authored-by: Cy Coder <cy@example.com>",
+            ])
+            .current_dir(&repo)
+            .envs(crate::testutil::git_env())
+            .env("GIT_AUTHOR_NAME", "Ada Lovelace")
+            .env("GIT_AUTHOR_EMAIL", "ada@example.com")
+            .env("GIT_AUTHOR_DATE", "1700000000 +0200")
+            .env("GIT_COMMITTER_NAME", "Bob Builder")
+            .env("GIT_COMMITTER_EMAIL", "bob@example.com")
+            .env("GIT_COMMITTER_DATE", "1700003600 -0500")
+            .status()
+            .expect("git runs");
+        assert!(status.success());
+        git(&repo, &["branch", "feature"]);
+        git(&repo, &["tag", "v-light"]);
+        git(&repo, &["tag", "-a", "v-annotated", "-m", "release"]);
+        let sha = exec_git(&["rev-parse", "HEAD"], &repo);
+
+        let card = load_commit_card(&repo, &sha).expect("card");
+        assert_eq!(card.id, sha);
+        assert_eq!(card.subject, "card subject");
+        assert_eq!(card.parents, vec![first.clone()]);
+        assert_eq!(
+            card.refs,
+            vec![
+                GraphRef::local("feature"),
+                GraphRef::local("main"),
+                GraphRef::tag("v-annotated"),
+                GraphRef::tag("v-light"),
+            ]
+        );
+        assert_eq!(
+            card.author(),
+            Signature {
+                name: "Ada Lovelace".into(),
+                email: "ada@example.com".into(),
+                unix: 1_700_000_000,
+                offset_secs: Some(2 * 3600),
+            }
+        );
+        assert_eq!(
+            card.people.committer,
+            Signature {
+                name: "Bob Builder".into(),
+                email: "bob@example.com".into(),
+                unix: 1_700_003_600,
+                offset_secs: Some(-5 * 3600),
+            }
+        );
+        assert_eq!(
+            card.people.co_authors,
+            vec![workspace_status_graph::Person {
+                name: "Cy Coder".into(),
+                email: "cy@example.com".into(),
+            }]
+        );
+
+        let root_card = load_commit_card(&repo, &first).expect("root card");
+        assert!(root_card.parents.is_empty());
+        assert!(root_card.refs.is_empty(), "{:?}", root_card.refs);
+
+        assert_eq!(
+            load_commit_card(&repo, &"0".repeat(40)),
+            Err("commit not found".to_string())
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

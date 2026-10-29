@@ -63,8 +63,8 @@ use super::event_pump::action_triggers_graph_autoload;
 use super::explorer::{list_dir, ExplorerEntry};
 use super::fetch_claim::{try_claim_background_fetch, BackgroundFetchClaim};
 use super::graph_load::{
-    autoload_limit, autoload_skip, load_graph_model_window, merge_autoload, should_autoload,
-    GraphIdentity, ShouldAutoload,
+    autoload_limit, autoload_skip, load_commit_card, load_graph_model_window, merge_autoload,
+    should_autoload, GraphIdentity, ShouldAutoload,
 };
 use super::line_blame::BlameKey;
 use super::ops::{
@@ -250,6 +250,13 @@ pub(crate) enum JobOutcome {
     LineBlame {
         key: BlameKey,
         result: Result<Option<crate::git::LineBlame>, String>,
+    },
+    /// Card lookup for commit `sha` of checkout `repo` (a commit popover
+    /// off the loaded graph).
+    CommitCard {
+        repo: String,
+        sha: String,
+        result: Result<workspace_status_graph::Commit, String>,
     },
     /// Previous change to a blamed line, for request `gen` on blame
     /// commit `sha`.
@@ -907,6 +914,11 @@ pub(crate) struct Interpreter {
     line_blame_slot: Option<BlameKey>,
     /// A [`UserTag::LineBlame`] job is queued or running.
     line_blame_inflight: bool,
+    /// Latest commit popover card to look up (checkout, full id); a newer
+    /// one replaces it before spawn.
+    commit_card_slot: Option<(String, String)>,
+    /// A [`UserTag::CommitCard`] job is queued or running.
+    commit_card_inflight: bool,
     /// Latest Doctor probe request; a newer one replaces it before spawn.
     doctor_slot: Option<u64>,
     /// A [`UserTag::Doctor`] job is queued or running.
@@ -1016,6 +1028,8 @@ impl Interpreter {
             search_live: Arc::new(AtomicU64::new(0)),
             line_blame_slot: None,
             line_blame_inflight: false,
+            commit_card_slot: None,
+            commit_card_inflight: false,
             doctor_slot: None,
             doctor_inflight: false,
             blame_previous: None,
@@ -1862,9 +1876,9 @@ impl Interpreter {
     }
 
     /// Jobs the state asks for after any schedule or apply: the
-    /// search-in-files preview read, the focused line's blame, and an older
-    /// graph page for a pending blame reveal (dropped once the graph pane
-    /// loses focus).
+    /// search-in-files preview read, the focused line's blame, the card of
+    /// an open commit popover off the graph, and an older graph page for a
+    /// pending blame reveal (dropped once the graph pane loses focus).
     fn after_change(&mut self, state: &mut AppState) {
         self.search_live
             .store(state.search_files_live_gen(), Ordering::Relaxed);
@@ -1873,6 +1887,7 @@ impl Interpreter {
             self.sched.enqueue_user(UserTag::SearchFiles);
         }
         self.maybe_queue_line_blame(state);
+        self.maybe_queue_commit_card(state);
         state.drop_graph_reveal_off_graph();
         if Self::autoload_allowed(state) && state.graph_reveal_wants_older() {
             self.queue_autoload(state);
@@ -1922,6 +1937,25 @@ impl Interpreter {
         if !self.line_blame_inflight {
             self.line_blame_inflight = true;
             self.sched.enqueue_user(UserTag::LineBlame);
+        }
+    }
+
+    /// Queue a card lookup for the open commit popover when neither the
+    /// graph nor the cache has its commit ([`AppState::commit_card_want`]).
+    ///
+    /// Latest-only, like the line blame: the slot holds the newest commit,
+    /// and at most one job is queued or running. Its apply calls this
+    /// again, so a popover that moved on while git ran gets its own card
+    /// next.
+    fn maybe_queue_commit_card(&mut self, state: &AppState) {
+        let Some(want) = state.commit_card_want() else {
+            self.commit_card_slot = None;
+            return;
+        };
+        self.commit_card_slot = Some(want);
+        if !self.commit_card_inflight {
+            self.commit_card_inflight = true;
+            self.sched.enqueue_user(UserTag::CommitCard);
         }
     }
 
@@ -2583,6 +2617,12 @@ impl Interpreter {
             JobOutcome::LineBlame { key, result } => {
                 self.line_blame_inflight = false;
                 if state.apply_line_blame(key, result) {
+                    self.mark();
+                }
+            }
+            JobOutcome::CommitCard { repo, sha, result } => {
+                self.commit_card_inflight = false;
+                if state.apply_commit_card(repo, sha, result) {
                     self.mark();
                 }
             }
@@ -3689,6 +3729,23 @@ impl Interpreter {
                     Box::new(move || {
                         let result = blame_line(&dir, &key.rev, &key.path, key.line);
                         JobOutcome::LineBlame { key, result }
+                    }),
+                );
+            }
+            UserTag::CommitCard => {
+                let Some((repo, sha)) = self.commit_card_slot.take() else {
+                    // The popover closed or its commit got its data.
+                    self.commit_card_inflight = false;
+                    self.sched.note_job_finished(id);
+                    return;
+                };
+                let dir = opts.cwd.join(&repo);
+                spawn(
+                    id,
+                    Box::new(move || JobOutcome::CommitCard {
+                        result: load_commit_card(&dir, &sha),
+                        repo,
+                        sha,
                     }),
                 );
             }
@@ -8181,6 +8238,79 @@ mod tests {
         );
         state.focus = FocusPane::Right;
         (root, state)
+    }
+
+    /// Peek a commit popover section for commit `sha` of `app`.
+    fn peek_commit(state: &mut AppState, sha: &str) {
+        use crate::tui::icons::IconKind;
+        use crate::tui::popover::{IconTarget, PopoverOrigin, PopoverState};
+        state.popover = Some(PopoverState {
+            origin: PopoverOrigin::Peek,
+            targets: vec![(
+                IconKind::CommitHash,
+                IconTarget::Commit {
+                    repo: "app".into(),
+                    sha: sha.into(),
+                },
+            )],
+            anchor: None,
+            focus_line: 0,
+            owner: state.popover_owner(),
+        });
+    }
+
+    #[test]
+    fn a_commit_popover_off_the_graph_queues_one_card_lookup() {
+        let root = crate::testutil::unique_dir("ws-effect-commit-card");
+        let dir = root.join("app");
+        crate::testutil::init_repo(&dir);
+        let head = crate::git::exec_git(&["rev-parse", "HEAD"], &dir);
+        assert_eq!(head.len(), 40, "{head:?}");
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(root.clone(), snapshot, true);
+        let mut interp = Interpreter::with_cap(4);
+
+        peek_commit(&mut state, &head);
+        schedule_effect(&mut interp, &mut state, Effect::None, &Action::None);
+        let mut jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 1, "one card lookup");
+
+        // A newer commit while git runs: no second job, the slot keeps it.
+        let missing = "e".repeat(40);
+        peek_commit(&mut state, &missing);
+        schedule_effect(&mut interp, &mut state, Effect::None, &Action::None);
+        assert!(capture_jobs(&mut interp, &mut state).is_empty());
+
+        // The stale card fills the cache without a paint, then the newer
+        // commit runs.
+        let (id, work) = jobs.remove(0);
+        let _ = interp.take_dirty();
+        apply_id(&mut interp, &mut state, id, work());
+        assert!(
+            !interp.take_dirty(),
+            "a card no popover shows needs no paint"
+        );
+        let card = state.commit_cards.get("app", &head).expect("cached");
+        assert_eq!(
+            card.as_ref().map(|commit| commit.subject.as_str()),
+            Ok("seed")
+        );
+        let next = capture_jobs(&mut interp, &mut state);
+        assert_eq!(next.len(), 1, "the newer commit runs after the first apply");
+        for (id, work) in next {
+            apply_id(&mut interp, &mut state, id, work());
+        }
+        assert!(interp.take_dirty(), "the shown card paints");
+        assert_eq!(
+            state.commit_cards.get("app", &missing),
+            Some(&Err("commit not found".to_string()))
+        );
+
+        // Both answered: no more git.
+        peek_commit(&mut state, &head);
+        schedule_effect(&mut interp, &mut state, Effect::None, &Action::None);
+        assert!(capture_jobs(&mut interp, &mut state).is_empty());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn move_diff_cursor(interp: &mut Interpreter, state: &mut AppState, row: usize) {

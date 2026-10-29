@@ -91,6 +91,26 @@ impl AppState {
         }
     }
 
+    /// Checkout and committed blame behind the note
+    /// [`Self::painted_line_annotation`] paints now: the commit the note's
+    /// author, age, and short hash name, for their popovers.
+    ///
+    /// `None` when that note names no commit: loading, no blame, an
+    /// uncommitted or staged line (`You · …`), line blame off, or a drag
+    /// text selection active.
+    pub(crate) fn painted_line_blame(&self) -> Option<(String, LineBlame)> {
+        if self.text_selection.is_some() {
+            return None;
+        }
+        let FocusedBlame::Ask(key) = self.focused_blame()?.0 else {
+            return None;
+        };
+        match self.line_blame.cached(&key) {
+            Some(Some(blame)) if !blame.uncommitted => Some((key.repo, blame.clone())),
+            _ => None,
+        }
+    }
+
     /// Land a blame answer for `key`. Every answer fills the cache, so a
     /// line the cursor already left shows at once when it comes back. A
     /// failed run caches as no blame.

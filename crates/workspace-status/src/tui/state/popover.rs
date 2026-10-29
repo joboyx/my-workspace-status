@@ -15,6 +15,7 @@ use super::super::comments::{
     diff_line_comments, graph_row_comments, tree_row_comments_resolved, tree_row_has_comment,
     CommentEntry,
 };
+use super::super::commit_card::{commit_card_source, CommitCardSource};
 use super::super::commit_files::CommitFileRow;
 use super::super::diff::{diff_row_gutter_cells, DiffRow};
 use super::super::drill::CommitFileSource;
@@ -529,7 +530,28 @@ impl AppState {
                         GraphRow::Uncommitted { .. } | GraphRow::Stash(_) => false,
                     })
             }
+            // The commit sections have no action line to gate.
+            IconTarget::Commit { .. } => false,
         }
+    }
+
+    /// The commit popover card to look up next: the first
+    /// [`IconTarget::Commit`] of the open popover (peek or pinned) that is
+    /// neither in the loaded graph nor in [`AppState::commit_cards`].
+    /// `None` when every shown commit has its data.
+    pub(crate) fn commit_card_want(&self) -> Option<(String, String)> {
+        self.popover
+            .as_ref()?
+            .targets
+            .iter()
+            .find_map(|(_, target)| {
+                let IconTarget::Commit { repo, sha } = target else {
+                    return None;
+                };
+                (!sha.is_empty()
+                    && commit_card_source(self, repo, sha) == CommitCardSource::Loading)
+                    .then(|| (repo.clone(), sha.clone()))
+            })
     }
 
     /// Apply a popover [`Action`].
@@ -2512,6 +2534,7 @@ mod tests {
             author_name: "Ada".into(),
             author_date_unix: G_WHEN,
             parent_id: Some(G_HEAD.into()),
+            ..Stash::default()
         }
     }
 
@@ -2582,6 +2605,25 @@ mod tests {
 
     fn title(action: Action) -> &'static str {
         command_for(&action).expect("palette row").title
+    }
+
+    /// `gh` lists the row's icons, not its commit hash / date / author
+    /// text: commit popovers open by mouse only.
+    #[test]
+    fn gh_on_a_graph_row_lists_no_commit_popover() {
+        let mut app = graph_app();
+        let rows = app.graph.as_ref().expect("graph").visible_rows().len();
+        assert!(rows > 3);
+        for index in 0..rows {
+            app.graph_cursor = index;
+            let icons = app.focused_row_icons();
+            assert!(
+                !icons
+                    .iter()
+                    .any(|(_, target)| matches!(target, IconTarget::Commit { .. })),
+                "row {index}: {icons:?}"
+            );
+        }
     }
 
     #[test]
@@ -3862,5 +3904,171 @@ mod tests {
             )),
             "{sections:?}"
         );
+    }
+
+    fn commit_target(repo: &str, sha: &str) -> IconTarget {
+        IconTarget::Commit {
+            repo: repo.into(),
+            sha: sha.into(),
+        }
+    }
+
+    #[test]
+    fn commit_card_want_names_only_an_open_popover_target_missing_from_graph_and_cache() {
+        let mut app = graph_app();
+        assert_eq!(app.commit_card_want(), None, "no popover");
+        let missing = "e".repeat(40);
+        let peek = |app: &AppState, targets: Vec<(IconKind, IconTarget)>| PopoverState {
+            origin: PopoverOrigin::Peek,
+            targets,
+            anchor: None,
+            focus_line: 0,
+            owner: app.popover_owner(),
+        };
+        // Graph commit and stash of the same checkout: no lookup.
+        app.popover = Some(peek(
+            &app,
+            vec![
+                (IconKind::CommitHash, commit_target("app", G_HEAD)),
+                (IconKind::CommitDate, commit_target("app", G_STASH)),
+                (IconKind::CommitAuthor, commit_target("app", "")),
+            ],
+        ));
+        assert_eq!(app.commit_card_want(), None);
+        // A graph commit of another checkout, then one off the graph.
+        app.popover = Some(peek(
+            &app,
+            vec![
+                (IconKind::CommitHash, commit_target("app", G_HEAD)),
+                (IconKind::CommitHash, commit_target("lib", G_HEAD)),
+                (IconKind::CommitDate, commit_target("app", &missing)),
+            ],
+        ));
+        assert_eq!(
+            app.commit_card_want(),
+            Some(("lib".to_string(), G_HEAD.to_string()))
+        );
+        assert!(!app.apply_commit_card("lib".into(), "f".repeat(40), Err("not shown".into())));
+        assert!(app.apply_commit_card("lib".into(), G_HEAD.into(), Err("boom".into())));
+        assert_eq!(
+            app.commit_card_want(),
+            Some(("app".to_string(), missing.clone()))
+        );
+        assert!(app.apply_commit_card("app".into(), missing, Ok(Commit::default())));
+        assert_eq!(app.commit_card_want(), None, "every shown commit has data");
+        app.close_popover();
+        assert_eq!(app.commit_card_want(), None);
+    }
+
+    #[test]
+    fn a_pinned_commit_card_copies_the_full_sha() {
+        let mut app = graph_app();
+        let hit = IconHit {
+            y: 0,
+            x: 0,
+            width: 7,
+            kind: IconKind::CommitHash,
+            target: commit_target("app", G_HEAD),
+        };
+        app.pin_icon(&hit);
+        assert!(app.popover_pinned());
+        assert_eq!(app.commit_card_want(), None, "a graph commit needs no git");
+        assert_eq!(app.dispatch(Action::PopoverCopyLine), copy(G_HEAD));
+        app.dispatch(Action::PopoverMove(1));
+        assert_eq!(app.dispatch(Action::PopoverCopyLine), copy("add graph"));
+    }
+
+    /// An Explorer tab's clean file: a click on the blame note's short hash
+    /// pins the commit card through the Explorer click path; `y` copies the
+    /// full id, `j` then `y` the subject, and Esc closes it. A click inside
+    /// a peek over the age pins the time popover. The cursor line never
+    /// moves.
+    #[test]
+    fn explorer_click_on_a_blame_hash_pins_its_card_and_esc_closes() {
+        const SHA: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut app = app();
+        app.open_loaded_inner_file("app", "README.md", &["one", "two", "three"]);
+        assert_eq!(app.focus, FocusPane::Right, "the open focuses the file");
+        app.dispatch(Action::Move(1));
+        let blame_key = app.line_blame_want().expect("cursor line asks");
+        app.line_blame.insert(
+            blame_key,
+            Some(crate::git::LineBlame {
+                sha: SHA.into(),
+                author: "Ada Lovelace".into(),
+                author_time: super::super::unix_now() - 3 * 86_400,
+                summary: "fix the parser".into(),
+                orig_line: 2,
+                filename: "README.md".into(),
+                previous: None,
+                boundary: false,
+                uncommitted: false,
+            }),
+        );
+        app.commit_cards.insert(
+            "app".into(),
+            SHA.into(),
+            Ok(Commit {
+                id: SHA.into(),
+                subject: "fix the parser".into(),
+                parents: vec!["c".repeat(40)],
+                ..Commit::default()
+            }),
+        );
+        let cursor = |app: &AppState| app.tabs.active_file_view().expect("file view").cursor;
+        assert_eq!(cursor(&app), 1);
+        paint(&mut app);
+        let hit_of = |app: &AppState, kind: IconKind| {
+            app.layout
+                .icon_hits
+                .iter()
+                .find(|hit| hit.kind == kind)
+                .cloned()
+                .unwrap_or_else(|| panic!("no {kind:?} hit: {:?}", app.layout.icon_hits))
+        };
+        let hash = hit_of(&app, IconKind::CommitHash);
+        assert_eq!(hash.target, commit_target("app", SHA));
+        app.dispatch(Action::Click {
+            col: hash.x,
+            row: hash.y,
+        });
+        assert!(app.popover_pinned(), "the hash pins on an Explorer tab");
+        let sections = app.open_popover_sections();
+        assert_eq!(
+            (sections.len(), sections[0].icon, &sections[0].target),
+            (1, IconKind::CommitHash, &commit_target("app", SHA))
+        );
+        assert_eq!(app.input_mode(), InputMode::Popover);
+        paint(&mut app);
+        let press = |app: &mut AppState, code: KeyCode| {
+            let action = event_to_action(&key(code), app.input_mode(), false, false);
+            app.dispatch(action)
+        };
+        assert_eq!(press(&mut app, KeyCode::Char('y')), copy(SHA));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(press(&mut app, KeyCode::Char('y')), copy("fix the parser"));
+        assert_eq!(cursor(&app), 1, "j moves the popover focus, not the line");
+        press(&mut app, KeyCode::Esc);
+        assert!(app.popover.is_none(), "Esc closes it");
+        assert_eq!(cursor(&app), 1);
+        assert_eq!(app.focus, FocusPane::Right);
+
+        // A peek over the age; a click inside it pins it.
+        paint(&mut app);
+        let date = hit_of(&app, IconKind::CommitDate);
+        peek_at(&mut app, &date, Instant::now());
+        paint(&mut app);
+        let rect = app.layout.popover.as_ref().expect("peek").rect;
+        app.dispatch(Action::Click {
+            col: rect.x + 2,
+            row: rect.y + 1,
+        });
+        assert!(app.popover_pinned(), "a click inside the peek pins it");
+        let sections = app.open_popover_sections();
+        assert_eq!(
+            (sections[0].icon, &sections[0].target),
+            (IconKind::CommitDate, &commit_target("app", SHA))
+        );
+        assert_eq!(cursor(&app), 1);
     }
 }

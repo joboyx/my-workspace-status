@@ -606,6 +606,14 @@ mod tests {
             effect.contains("blame_line(") && effect.contains("UserTag::LineBlame"),
             "focused-line blame must run on spawn_blocking via Interpreter"
         );
+        assert!(
+            !app.contains("load_commit_card(") && !loop_src.contains("load_commit_card("),
+            "commit popover card lookup must not run on the TTY loop thread"
+        );
+        assert!(
+            effect.contains("load_commit_card(") && effect.contains("UserTag::CommitCard"),
+            "commit popover card lookup must run on spawn_blocking via Interpreter"
+        );
         for banned in ["commit_times_since(", "load_activity("] {
             assert!(
                 !app.contains(banned) && !loop_src.contains(banned) && !render.contains(banned),

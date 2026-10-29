@@ -11,6 +11,7 @@ mod branches;
 mod chrome;
 mod command_palette;
 pub(crate) mod comments;
+mod commit_card;
 mod commit_files;
 mod ctrl_c_exit;
 mod diff;

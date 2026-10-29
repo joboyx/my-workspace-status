@@ -122,6 +122,88 @@ pub fn cap_commit_body(body: &str) -> String {
     out
 }
 
+/// A name and email pair, for example a `Co-authored-by` trailer value.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Person {
+    /// Display name. Empty when the source gave none.
+    pub name: String,
+    /// Email address without the angle brackets. Empty when the source gave none.
+    pub email: String,
+}
+
+/// Who did something to a commit, and when, as git recorded it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Signature {
+    /// Display name. Empty when unknown.
+    pub name: String,
+    /// Email address without the angle brackets. Empty when unknown.
+    pub email: String,
+    /// Unix seconds. `0` when unknown.
+    pub unix: i64,
+    /// Seconds east of UTC, as the commit recorded it. `None` when unknown.
+    pub offset_secs: Option<i32>,
+}
+
+/// Identity data of a commit that the list rows do not paint.
+///
+/// Rows paint [`Commit::author_name`] and [`Commit::author_date_unix`]. The
+/// commit popovers read the rest from here.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommitPeople {
+    /// Author email (`%ae`). Empty when unknown.
+    pub author_email: String,
+    /// Author date offset (`%aI`) in seconds east of UTC. `None` when unknown.
+    pub author_offset_secs: Option<i32>,
+    /// Committer name, email, date, and offset (`%cn %ce %ct %cI`).
+    pub committer: Signature,
+    /// `Co-authored-by` trailers of the full message, in message order.
+    pub co_authors: Vec<Person>,
+}
+
+/// Read the `Co-authored-by` trailers of a commit message body.
+///
+/// Only the last paragraph counts (after the last blank line, trailing
+/// whitespace trimmed), as in git trailer rules. The key match ignores case.
+/// A value `Name <email>` gives both parts; a value without `<…>` gives the
+/// name only. Trailers elsewhere in the body are ignored.
+pub fn co_author_trailers(body: &str) -> Vec<Person> {
+    let body = body.trim_end();
+    let mut paragraph_start = 0;
+    let mut line_start = 0;
+    for line in body.split_inclusive('\n') {
+        if line.trim().is_empty() {
+            paragraph_start = line_start + line.len();
+        }
+        line_start += line.len();
+    }
+    body[paragraph_start..]
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            if !key.trim().eq_ignore_ascii_case("co-authored-by") {
+                return None;
+            }
+            Some(parse_person(value.trim()))
+        })
+        .collect()
+}
+
+/// Split `Name <email>` into a [`Person`]. A value without `<…>` is a name.
+fn parse_person(value: &str) -> Person {
+    if let (Some(open), Some(close)) = (value.rfind('<'), value.rfind('>')) {
+        if open < close {
+            return Person {
+                name: value[..open].trim().to_string(),
+                email: value[open + 1..close].trim().to_string(),
+            };
+        }
+    }
+    Person {
+        name: value.to_string(),
+        email: String::new(),
+    }
+}
+
 /// One commit in the loaded window.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Commit {
@@ -141,6 +223,21 @@ pub struct Commit {
     pub author_name: String,
     /// `git log` `%at` author date (unix seconds). `0` when unknown.
     pub author_date_unix: i64,
+    /// Emails, committer, date offsets, and co-authors. Not painted by rows.
+    pub people: CommitPeople,
+}
+
+impl Commit {
+    /// The author as a [`Signature`]: row name and date plus the emails and
+    /// offset in [`Commit::people`].
+    pub fn author(&self) -> Signature {
+        Signature {
+            name: self.author_name.clone(),
+            email: self.people.author_email.clone(),
+            unix: self.author_date_unix,
+            offset_secs: self.people.author_offset_secs,
+        }
+    }
 }
 
 /// One `git stash` entry.
@@ -162,6 +259,21 @@ pub struct Stash {
     pub author_date_unix: i64,
     /// First parent (`stash^1`). `None` when git did not report it.
     pub parent_id: Option<String>,
+    /// Emails, committer, date offsets, and co-authors. Not painted by rows.
+    pub people: CommitPeople,
+}
+
+impl Stash {
+    /// The author as a [`Signature`]: row name and date plus the emails and
+    /// offset in [`Stash::people`].
+    pub fn author(&self) -> Signature {
+        Signature {
+            name: self.author_name.clone(),
+            email: self.people.author_email.clone(),
+            unix: self.author_date_unix,
+            offset_secs: self.people.author_offset_secs,
+        }
+    }
 }
 
 /// One git worktree checkout.
@@ -355,8 +467,37 @@ enum RowRef<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cap_commit_body, Commit, GraphModel, GraphRow, Stash, Worktree, COMMIT_BODY_MAX_BYTES,
+        cap_commit_body, co_author_trailers, Commit, GraphModel, GraphRow, Person, Stash, Worktree,
+        COMMIT_BODY_MAX_BYTES,
     };
+
+    fn person(name: &str, email: &str) -> Person {
+        Person {
+            name: name.into(),
+            email: email.into(),
+        }
+    }
+
+    #[test]
+    fn co_author_trailers_read_the_last_paragraph_only() {
+        let body = "Co-authored-by: Early Bird <early@example.com>\n\nWhy this change.\n\n\
+                    Co-authored-by: Bob Builder <bob@example.com>\n\
+                    co-AUTHORED-by: Cy Coder <cy@example.com>\n\
+                    Co-authored-by: Plain Name\n\
+                    Signed-off-by: Ada Lovelace <ada@example.com>\n\n";
+        assert_eq!(
+            co_author_trailers(body),
+            vec![
+                person("Bob Builder", "bob@example.com"),
+                person("Cy Coder", "cy@example.com"),
+                person("Plain Name", ""),
+            ]
+        );
+        assert!(co_author_trailers("").is_empty());
+        assert!(
+            co_author_trailers("Co-authored-by: Early <e@example.com>\n\nTail text").is_empty()
+        );
+    }
 
     fn worktree(path: &str, head: Option<&str>, hidden: bool) -> Worktree {
         Worktree {

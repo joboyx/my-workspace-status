@@ -63,11 +63,11 @@ use super::icons::{
     IconSpec, CURSOR_BAR, CURSOR_BAR_INACTIVE, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED,
     FOLD_EXPANDED_ASCII,
 };
-use super::line_blame::{fit_annotation, relative_age, BlameSide, BLAME_MENU_ROWS};
+use super::line_blame::{fit_annotation, relative_age, short_sha, BlameSide, BLAME_MENU_ROWS};
 use super::ops::RevertScope;
 use super::popover::{
-    flat_lines, focused_line, graph_icon, graph_row_id, graph_sync_kind, popover_rect,
-    tree_icon_target, IconTarget, PopoverLine, POPOVER_FOOTER, POPOVER_MAX_WIDTH,
+    commit_meta_icon, flat_lines, focused_line, graph_icon, graph_row_id, graph_sync_kind,
+    popover_rect, tree_icon_target, IconTarget, PopoverLine, POPOVER_FOOTER, POPOVER_MAX_WIDTH,
 };
 use super::pr_status::PrState;
 use super::quick_open::{
@@ -96,8 +96,8 @@ use super::syntax::{
 };
 use super::tabs::{
     compare_picker_empty, file_gutter_width, file_too_large, file_view_gutter_width,
-    file_view_scroll, ComparePickerState, ExplorerPreview, FileTab, EXPLORER_FOLDER_HINT,
-    FILE_IS_BINARY,
+    file_view_scroll, short_rev, ComparePickerState, ExplorerPreview, FileTab,
+    EXPLORER_FOLDER_HINT, FILE_IS_BINARY,
 };
 use super::theme::{hex_color, mix_toward, BackgroundMode, Palette, Pill, ThemeId};
 use super::toast::{Toast, ToastMark, ToastTick};
@@ -110,6 +110,7 @@ use super::undercurl::{cut_link_cells, drop_undercurls_under, underlined_runs, U
 use super::watch::FlashKind;
 use crate::file_index::{FileIndex, FileRead};
 use crate::file_search::{SearchHit, SearchOptions};
+use crate::git::LineBlame;
 use crate::helpers::{is_detached_head_branch, visible_width};
 
 mod prs_tab;
@@ -592,8 +593,30 @@ fn painted_text_link(
     needle: &str,
     url: String,
 ) -> Option<LinkHit> {
+    let (x, width) = painted_text_span(buf, y, x0, x1, needle)?;
+    Some(LinkHit { y, x, width, url })
+}
+
+/// Column and width of the rightmost `needle` painted in buffer row `y`,
+/// columns `x0..x1`, or `None` when the row does not show it whole.
+///
+/// Matches painted cell symbols, so `x` and the width count cells, not
+/// bytes: a multi-byte or wide glyph maps back to the cells it painted.
+fn painted_text_span(buf: &Buffer, y: u16, x0: u16, x1: u16, needle: &str) -> Option<(u16, u16)> {
+    let (text, starts) = painted_row_text(buf, y, x0, x1)?;
+    if needle.is_empty() {
+        return None;
+    }
+    let at = text.rfind(needle)?;
+    painted_byte_span(&starts, at, at + needle.len())
+}
+
+/// Painted cell symbols of buffer row `y`, columns `x0..x1` (clipped to the
+/// buffer), and the byte offset in that text where each cell starts.
+/// `None` when the row is outside the buffer.
+fn painted_row_text(buf: &Buffer, y: u16, x0: u16, x1: u16) -> Option<(String, Vec<(usize, u16)>)> {
     let area = buf.area;
-    if needle.is_empty() || y < area.top() || y >= area.bottom() {
+    if y < area.top() || y >= area.bottom() {
         return None;
     }
     let (x0, x1) = (x0.max(area.left()), x1.min(area.right()));
@@ -603,16 +626,15 @@ fn painted_text_link(
         starts.push((text.len(), x));
         text.push_str(buf[(x, y)].symbol());
     }
-    let at = text.rfind(needle)?;
+    Some((text, starts))
+}
+
+/// Column and width of the cells that paint bytes `at..end` of a row text
+/// from [`painted_row_text`]; `None` when `at` is not a cell start.
+fn painted_byte_span(starts: &[(usize, u16)], at: usize, end: usize) -> Option<(u16, u16)> {
     let x = starts.iter().find(|(start, _)| *start == at)?.1;
-    let end = at + needle.len();
     let last = starts.iter().rev().find(|(start, _)| *start < end)?.1;
-    Some(LinkHit {
-        y,
-        x,
-        width: last - x + 1,
-        url,
-    })
+    Some((x, last - x + 1))
 }
 
 /// Pane geometry [`paint_resize_edge_hover`] lights, from [`draw_panes`].
@@ -979,6 +1001,8 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
     let visual = state.file_visual_range();
     let mut painted: Vec<Line> = Vec::with_capacity(height);
     let mut row_lines = Vec::with_capacity(height);
+    // Screen row the blame note painted on, for its commit popover hits.
+    let mut note_y: Option<u16> = None;
     let mut mark_hits = Vec::new();
     let rows_right = inner.x.saturating_add(diff_paint_width(inner.width));
     for (line, text) in lines.iter().enumerate().take(end).skip(scroll) {
@@ -1043,6 +1067,7 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
                 if selected && part + 1 == starts.len() {
                     if let Some((text, _)) = &blame {
                         put_line_annotation(&mut row, text, palette, false);
+                        note_y = Some(inner.y.saturating_add(painted.len() as u16));
                     }
                 }
             }
@@ -1059,6 +1084,20 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
     };
     frame.render_widget(Paragraph::new(painted), rows_area);
     state.layout.icon_hits.extend(mark_hits);
+    if let (Some(y), Some((note, _)), Some((repo, line_blame))) =
+        (note_y, &blame, state.painted_line_blame())
+    {
+        let hits = blame_note_hits(
+            frame.buffer_mut(),
+            &[y],
+            rows_area.left(),
+            rows_area.right(),
+            note,
+            &line_blame,
+            &repo,
+        );
+        state.layout.icon_hits.extend(hits);
+    }
     let curls = underlined_runs(frame.buffer_mut(), rows_area, palette.comment_underline());
     state.layout.undercurls.extend(curls);
     if state.background == BackgroundMode::Paint {
@@ -2566,6 +2605,9 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         .header_chip(chip.as_ref().map_or(&[], |chip| chip.candidates.as_slice()))
         .render_with_icon_spans(area, frame.buffer_mut());
     let row_of = |span: &workspace_status_graph::IconSpan| rows.get(span.row_index?);
+    // Commit meta text opens a commit popover of the graph's checkout; no
+    // identity, no hit.
+    let graph_repo = state.graph_identity.as_ref().map(|(repo, _)| repo.as_str());
     let hits: Vec<IconHit> = spans
         .iter()
         .filter_map(|span| {
@@ -2595,6 +2637,11 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
                     IconKind::GraphMoreBelow,
                     IconTarget::GraphMoreLines(graph_row_id(row_of(span)?)),
                 ),
+                GraphIconKind::CommitHash
+                | GraphIconKind::CommitDate
+                | GraphIconKind::CommitAuthor => {
+                    commit_meta_icon(span.kind, span.part, row_of(span)?, graph_repo?)?
+                }
                 kind => graph_icon(kind, span.part, span.target.as_ref(), row_of(span)?)?,
             };
             Some(IconHit {
@@ -3046,7 +3093,8 @@ struct CommitFooter {
     /// Checkout whose forge the short hash links to.
     checkout: Option<String>,
     /// Full id of the commit whose short hash on the meta row links to its
-    /// forge page. `None` for a stash, the working tree, or a range.
+    /// forge page, and in the fallback footer (no [`Self::row`]) opens its
+    /// hash card. `None` for a stash, the working tree, or a range.
     commit_id: Option<String>,
 }
 
@@ -3060,9 +3108,12 @@ struct CommitFooter {
 /// colour and the meta row (coloured ref chips, hash, `parent <id>`,
 /// author, date) is pinned on the bottom row. Records the wheel box of an
 /// overflowing message, the more-below hint, the ref chip hits (their
-/// popovers), the hash link, and the expanded footer's top rule
-/// ([`record_commit_detail_msg_rule`]), so a drag on it resizes the same
-/// [`AppState::commit_msg_lines`] the graph footer rule does.
+/// popovers), the commit popover hits of the hash, parent ids, author, and
+/// date ([`commit_meta_icon`]), the hash link (in the fallback footer of a
+/// commit with no graph row, also the hash's commit popover hit), and the
+/// expanded footer's top rule ([`record_commit_detail_msg_rule`]), so a
+/// drag on it resizes the same [`AppState::commit_msg_lines`] the graph
+/// footer rule does.
 fn draw_commit_footer(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -3109,14 +3160,19 @@ fn draw_commit_footer(
         state.layout.commit_detail_footer_scroll_max = scroll_max;
     }
     // The hint hovers and pins like the graph footer's; the chips open the
-    // graph chip popovers of the row.
+    // graph chip popovers of the row, and the meta row's hash, parent ids,
+    // author, and date open commit popovers on the footer's checkout.
     let hits = spans.iter().filter_map(|span| {
+        let row = footer.row.as_ref();
         let (kind, target) = match span.kind {
             GraphIconKind::MoreBelow => (
                 IconKind::GraphMoreBelow,
                 IconTarget::CommitDetailMoreLines(footer.msg_identity.clone()?),
             ),
-            kind => graph_icon(kind, span.part, span.target.as_ref(), footer.row.as_ref()?)?,
+            GraphIconKind::CommitHash | GraphIconKind::CommitDate | GraphIconKind::CommitAuthor => {
+                commit_meta_icon(span.kind, span.part, row?, footer.checkout.as_deref()?)?
+            }
+            kind => graph_icon(kind, span.part, span.target.as_ref(), row?)?,
         };
         Some(IconHit {
             y: span.y,
@@ -3129,22 +3185,38 @@ fn draw_commit_footer(
     state.layout.icon_hits.extend(hits);
     // The meta row (bottom row) holds the commit's short hash, also in the
     // fallback footer: link it to the commit page.
-    let link = match (&footer.commit_id, &footer.checkout) {
-        (Some(commit_id), Some(checkout)) => state
-            .commit_link(std::path::Path::new(checkout), commit_id)
-            .and_then(|url| {
-                painted_text_link(
-                    frame.buffer_mut(),
-                    body.bottom() - 1,
-                    body.x,
-                    body.right(),
-                    short_id(commit_id),
-                    url,
-                )
-            }),
-        _ => None,
+    let (Some(commit_id), Some(checkout)) = (&footer.commit_id, &footer.checkout) else {
+        return;
     };
-    state.layout.links.extend(link);
+    let y = body.bottom() - 1;
+    let Some((x, width)) = painted_text_span(
+        frame.buffer_mut(),
+        y,
+        body.x,
+        body.right(),
+        short_id(commit_id),
+    ) else {
+        return;
+    };
+    if let Some(url) = state.commit_link(std::path::Path::new(checkout), commit_id) {
+        state.layout.links.push(LinkHit { y, x, width, url });
+    }
+    // The fallback footer (no graph row: a reload dropped the commit, after
+    // an amend say) has no meta spans, so the loop above records no hash
+    // hit. The commit still exists as an object: its hash opens the hash
+    // card, which loads off the event thread.
+    if footer.row.is_none() {
+        state.layout.icon_hits.push(IconHit {
+            y,
+            x,
+            width,
+            kind: IconKind::CommitHash,
+            target: IconTarget::Commit {
+                repo: checkout.clone(),
+                sha: commit_id.clone(),
+            },
+        });
+    }
 }
 
 /// Record the expanded depth-2 commit-files footer's top rule (the first
@@ -3316,6 +3388,123 @@ fn wrap_rows_ending_at(heights: &[usize], cursor: usize, view_h: usize) -> usize
     count
 }
 
+/// True for a whole 40- or 64-hex object id.
+fn is_full_object_id(rev: &str) -> bool {
+    matches!(rev.len(), 40 | 64) && rev.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Commit popover hits ([`IconKind::CommitHash`]) on the commit tokens of
+/// the compare tab's range in the diff pane header rows `header`.
+///
+/// A commit-vs-working-tree tab (`abc1234 ↔ working tree`) records its
+/// base. A range tab (`abc1234^...abc1234`) records its base (a
+/// `<full id>^` base names the loaded [`CommitFileSource::Compare`]
+/// `base_tip`, so none before the source loads; a full-id base names
+/// itself) and a full-id head. Branch names and `HEAD` record nothing.
+/// The range is found in the painted rows; when the header wrapped it over
+/// two rows, a token cut by the break records nothing.
+///
+/// [`CommitFileSource::Compare`]: super::drill::CommitFileSource::Compare
+fn compare_header_hits(buf: &Buffer, header: Rect, state: &AppState) -> Vec<IconHit> {
+    let Some(tab) = state.tabs.active_compare() else {
+        return Vec::new();
+    };
+    let range = tab.range_header();
+    let base = short_rev(&tab.base_ref);
+    let base_sha = if is_full_object_id(&tab.base_ref) {
+        Some(tab.base_ref.clone())
+    } else if tab.worktree_file.is_none()
+        && tab
+            .base_ref
+            .strip_suffix('^')
+            .is_some_and(is_full_object_id)
+    {
+        match &tab.source {
+            Some(super::drill::CommitFileSource::Compare { base_tip, .. }) => {
+                Some(base_tip.clone())
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let head_sha = (tab.worktree_file.is_none() && is_full_object_id(&tab.head_ref))
+        .then(|| tab.head_ref.clone());
+    // Byte offset and length of each token in `range` (the token is ASCII,
+    // so its length is also its width), with the commit it names.
+    let mut tokens: Vec<(usize, usize, String)> = Vec::new();
+    if let Some(sha) = base_sha.filter(|sha| !sha.is_empty()) {
+        tokens.push((0, base.len(), sha));
+    }
+    if let Some(sha) = head_sha {
+        tokens.push((
+            base.len() + "...".len(),
+            short_rev(&tab.head_ref).len(),
+            sha,
+        ));
+    }
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+    let hit = |y: u16, x: u16, width: u16, sha: &str| IconHit {
+        y,
+        x,
+        width,
+        kind: IconKind::CommitHash,
+        target: IconTarget::Commit {
+            repo: tab.checkout_path.clone(),
+            sha: sha.to_string(),
+        },
+    };
+    let rows = header.top()..header.bottom();
+    for y in rows.clone() {
+        if let Some((x, _)) = painted_text_span(buf, y, header.left(), header.right(), &range) {
+            return tokens
+                .iter()
+                .map(|(at, len, sha)| {
+                    let col = range[..*at].width() as u16;
+                    hit(y, x + col, *len as u16, sha)
+                })
+                .collect();
+        }
+    }
+    // Wrapped: the range ends row `y` and goes on at the start of row
+    // `y + 1`; only the tokens wholly on one side record a hit.
+    let painted: Vec<_> = rows
+        .filter_map(|y| Some((y, painted_row_text(buf, y, header.left(), header.right())?)))
+        .collect();
+    for pair in painted.windows(2) {
+        let [(y0, (text0, starts0)), (y1, (text1, starts1))] = pair else {
+            continue;
+        };
+        let Some(cut) = (1..range.len()).find(|&cut| {
+            range.is_char_boundary(cut)
+                && text0.ends_with(&range[..cut])
+                && text1.starts_with(&range[cut..])
+        }) else {
+            continue;
+        };
+        let head0 = text0.len() - cut;
+        return tokens
+            .iter()
+            .filter_map(|(at, len, sha)| {
+                let (y, span) = if at + len <= cut {
+                    (
+                        *y0,
+                        painted_byte_span(starts0, head0 + at, head0 + at + len)?,
+                    )
+                } else if *at >= cut {
+                    (*y1, painted_byte_span(starts1, at - cut, at - cut + len)?)
+                } else {
+                    return None;
+                };
+                Some(hit(y, span.0, span.1, sha))
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
 fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -3420,6 +3609,10 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         height: header_h.min(area.height),
     };
     frame.render_widget(Paragraph::new(header_lines), header_area);
+    if state.is_compare_tab() {
+        let hits = compare_header_hits(frame.buffer_mut(), header_area, state);
+        state.layout.icon_hits.extend(hits);
+    }
     if area.height <= header_h {
         return;
     }
@@ -3521,6 +3714,8 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     ];
     let mut mark_hits = Vec::new();
     let mut painted: Vec<Line> = Vec::new();
+    // Screen rows of the focused cursor row: its blame note paints there.
+    let mut cursor_ys: Vec<u16> = Vec::new();
     let mut i = skip;
     while painted.len() < line_h && i < rows.len() {
         // A row's marks paint on its first visual line only.
@@ -3534,6 +3729,7 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             body.x.saturating_add(line_width),
         ));
         let search_match = search_hits.contains(&i);
+        let blamed_row = i == state.diff_cursor && state.focus == FocusPane::Right;
         let lines = paint_diff_row(
             &rows[i],
             content_w,
@@ -3553,6 +3749,9 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             if painted.len() >= line_h {
                 break;
             }
+            if blamed_row {
+                cursor_ys.push(body.y.saturating_add(painted.len() as u16));
+            }
             painted.push(line);
         }
         i = i.saturating_add(1);
@@ -3564,6 +3763,22 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         height: line_h as u16,
     };
     frame.render_widget(Paragraph::new(painted), lines_area);
+    if !cursor_ys.is_empty() {
+        if let (Some((note, _)), Some((repo, blame))) =
+            (state.painted_line_annotation(), state.painted_line_blame())
+        {
+            let hits = blame_note_hits(
+                frame.buffer_mut(),
+                &cursor_ys,
+                lines_area.left(),
+                lines_area.right(),
+                &note,
+                &blame,
+                &repo,
+            );
+            state.layout.icon_hits.extend(hits);
+        }
+    }
     state.layout.icon_hits.extend(mark_hits);
     // Only commented code is underlined in the diff rows: those runs get
     // the curly upgrade after the draw.
@@ -4051,6 +4266,81 @@ fn put_line_annotation(
     if rest > 0 {
         spans.push(Span::styled(" ".repeat(rest), style));
     }
+}
+
+/// Commit popover hits on the line-blame note `note` painted on one of the
+/// buffer rows `rows`, columns `x0..x1`: the author
+/// ([`IconKind::CommitAuthor`]), the age ([`IconKind::CommitDate`]), and the
+/// short hash ([`IconKind::CommitHash`]) of `blame` in checkout `repo`.
+///
+/// `note` is the `annotation_text` the row painted
+/// (`{author}, {age} · {sha7} · {summary}`). [`put_line_annotation`] cuts
+/// it from the end, so the row is searched for the longest painted prefix:
+/// all three fields, else author and age, else the author alone. A field
+/// cut short records no hit. Each hit covers its field's display cells from
+/// the match start. No commit id, or no row shows the note: no hit.
+fn blame_note_hits(
+    buf: &Buffer,
+    rows: &[u16],
+    x0: u16,
+    x1: u16,
+    note: &str,
+    blame: &LineBlame,
+    repo: &str,
+) -> Vec<IconHit> {
+    if blame.sha.is_empty() {
+        return Vec::new();
+    }
+    let author = blame.author.as_str();
+    let Some(rest) = note
+        .strip_prefix(author)
+        .and_then(|rest| rest.strip_prefix(", "))
+    else {
+        return Vec::new();
+    };
+    let Some((age, after_age)) = rest.split_once(" · ") else {
+        return Vec::new();
+    };
+    let sha7 = short_sha(&blame.sha);
+    if !after_age.starts_with(sha7.as_str()) {
+        return Vec::new();
+    }
+    let date_x = format!("{author}, ").width();
+    let hash_x = format!("{author}, {age} · ").width();
+    // Kind, start column inside the note, and width of each field.
+    let fields = [
+        (IconKind::CommitAuthor, 0, author.width()),
+        (IconKind::CommitDate, date_x, age.width()),
+        (IconKind::CommitHash, hash_x, sha7.width()),
+    ];
+    let prefixes = [
+        (format!("{author}, {age} · {sha7}"), 3),
+        (format!("{author}, {age}"), 2),
+        (format!("{author}, "), 1),
+    ];
+    // The note sits on the last painted row of its line.
+    for &y in rows.iter().rev() {
+        for (prefix, shown) in &prefixes {
+            let Some((x, _)) = painted_text_span(buf, y, x0, x1, prefix) else {
+                continue;
+            };
+            return fields[..*shown]
+                .iter()
+                .filter(|(_, _, width)| *width > 0)
+                .map(|(kind, at, width)| IconHit {
+                    y,
+                    x: x + *at as u16,
+                    width: *width as u16,
+                    kind: *kind,
+                    target: IconTarget::Commit {
+                        repo: repo.to_string(),
+                        sha: blame.sha.clone(),
+                    },
+                })
+                .collect();
+        }
+    }
+    Vec::new()
 }
 
 /// Flat diff rows, before [`bleed_flat_pad`]: the two cells a row leaves
@@ -4567,6 +4857,8 @@ fn icon_legend_color(kind: IconKind, palette: Palette) -> Color {
         K::Hidden | K::ChangeCount | K::WorktreeCount | K::CommentResolved => palette.muted,
         K::GraphMoreBelow | K::FoldExpanded | K::FoldCollapsed => palette.muted,
         K::CursorBarInactive => palette.muted,
+        // Not in the legend; muted like their popover heading.
+        K::CommitHash | K::CommitDate | K::CommitAuthor => palette.muted,
         K::CursorBar => palette.cursor,
         K::Folder | K::ChipRemote | K::ChipSynced => palette.dir,
         K::FileType => palette.file,
@@ -25493,6 +25785,142 @@ mod tests {
         }
     }
 
+    /// The graph rows and the selection footer at depth 0 (right pane) and
+    /// depth 1 (left pane), boxed and flat: the commit's short hash, date,
+    /// and author, and the footer's parent id, each record one commit
+    /// popover hit over the painted text. No graph identity, no hit.
+    #[test]
+    fn graph_commit_meta_records_commit_popover_hits_boxed_and_flat() {
+        const SHA: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const PARENT: &str = "ccc2222ddddddddddddddddddddddddddddddddd";
+        let commit_target = |sha: &str| IconTarget::Commit {
+            repo: "app".into(),
+            sha: sha.into(),
+        };
+        for surface in ["graph-d0", "graph-d1"] {
+            for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+                let what = format!("{surface} {background:?}");
+                let mut state = match surface {
+                    "graph-d0" => two_pane_graph_state(),
+                    _ => two_pane_files_state(),
+                };
+                state.background = background;
+                state.graph_identity = Some(("app".into(), SHA.into()));
+                if let Some(model) = state.graph.as_mut() {
+                    model.commits[0].author_name = "Ada Lovelace".into();
+                    model.commits[0].parents = vec![PARENT.into()];
+                    model.commits.push(Commit {
+                        id: PARENT.into(),
+                        subject: "parent".into(),
+                        author_name: "Bob Builder".into(),
+                        author_date_unix: 1_699_000_000,
+                        ..Commit::default()
+                    });
+                }
+                // Row 0 is the uncommitted row; select the commit so the
+                // footer paints its meta.
+                state.graph_cursor = 1;
+                let mut terminal = Terminal::new(TestBackend::new(240, 40)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let date = workspace_status_graph::format_relative_date(
+                    1_700_000_000,
+                    1_700_000_000 + 30 * 86_400,
+                );
+                let hits: Vec<IconHit> = state
+                    .layout
+                    .icon_hits
+                    .iter()
+                    .filter(|hit| matches!(hit.target, IconTarget::Commit { .. }))
+                    .cloned()
+                    .collect();
+                let text_of = |hit: &IconHit| {
+                    region_text(&terminal, hit.x, hit.y, hit.width, 1)
+                        .trim_end_matches('\n')
+                        .to_string()
+                };
+                let on = |kind: IconKind, sha: &str| -> Vec<(u16, String)> {
+                    hits.iter()
+                        .filter(|hit| hit.kind == kind && hit.target == commit_target(sha))
+                        .map(|hit| (hit.y, text_of(hit)))
+                        .collect()
+                };
+                let screen = buffer_text(&terminal);
+                let hashes = on(IconKind::CommitHash, SHA);
+                let dates = on(IconKind::CommitDate, SHA);
+                let authors = on(IconKind::CommitAuthor, SHA);
+                // One on the commit's spacer row, one on the footer row.
+                for (name, found, text) in [
+                    ("hash", &hashes, "aaa1111"),
+                    ("date", &dates, date.as_str()),
+                    ("author", &authors, "Ada Lovelace"),
+                ] {
+                    assert_eq!(found.len(), 2, "{what} {name}: {hits:?}\n{screen}");
+                    assert!(found[0].0 < found[1].0, "{what} {name}: {found:?}");
+                    for (_, painted) in found {
+                        assert_eq!(painted, text, "{what} {name}\n{screen}");
+                    }
+                }
+                let footer_y = hashes[1].0;
+                assert_eq!(
+                    on(IconKind::CommitHash, PARENT)
+                        .into_iter()
+                        .filter(|(y, _)| *y == footer_y)
+                        .collect::<Vec<_>>(),
+                    vec![(footer_y, "ccc2222".to_string())],
+                    "{what}: the footer parent id names parents[0]\n{screen}"
+                );
+                let in_pane = |hit: &IconHit| match surface {
+                    "graph-d0" => hit.x >= state.layout.right_x,
+                    _ => hit.x + hit.width <= state.layout.right_x,
+                };
+                assert!(hits.iter().all(in_pane), "{what}: {hits:?}");
+
+                // A click on the footer parent id pins that commit's hash
+                // card; a click on the spacer date pins the time popover.
+                let parent_hit = hits
+                    .iter()
+                    .find(|hit| hit.y == footer_y && hit.target == commit_target(PARENT))
+                    .expect("parent hit")
+                    .clone();
+                let date_hit = hits
+                    .iter()
+                    .find(|hit| hit.kind == IconKind::CommitDate && hit.y < footer_y)
+                    .expect("spacer date hit")
+                    .clone();
+                for (hit, kind, sha) in [
+                    (parent_hit, IconKind::CommitHash, PARENT),
+                    (date_hit, IconKind::CommitDate, SHA),
+                ] {
+                    state.close_popover();
+                    draw_state(&mut terminal, &mut state);
+                    state.dispatch(Action::Click {
+                        col: hit.x,
+                        row: hit.y,
+                    });
+                    assert!(state.popover_pinned(), "{what}: {kind:?} pins");
+                    let sections = state.open_popover_sections();
+                    assert_eq!(sections.len(), 1, "{what}");
+                    assert_eq!(
+                        (sections[0].icon, &sections[0].target),
+                        (kind, &commit_target(sha)),
+                        "{what}"
+                    );
+                }
+
+                state.graph_identity = None;
+                draw_state(&mut terminal, &mut state);
+                assert!(
+                    !state
+                        .layout
+                        .icon_hits
+                        .iter()
+                        .any(|hit| matches!(hit.target, IconTarget::Commit { .. })),
+                    "{what}: no identity, no hit"
+                );
+            }
+        }
+    }
+
     #[test]
     fn commit_detail_footer_hash_links_to_forge_commit_page() {
         let mut state = two_pane_commit_diff_state();
@@ -25508,6 +25936,992 @@ mod tests {
             link.y > l.files_list_y + l.files_list_height && link.x < l.right_x,
             "the footer under the left file list: {link:?}"
         );
+    }
+
+    /// Commit popover hits of the frame, each with the text painted under it.
+    fn commit_hits_with_text(
+        state: &AppState,
+        terminal: &Terminal<TestBackend>,
+    ) -> Vec<(IconHit, String)> {
+        state
+            .layout
+            .icon_hits
+            .iter()
+            .filter(|hit| matches!(hit.target, IconTarget::Commit { .. }))
+            .map(|hit| {
+                let text = region_text(terminal, hit.x, hit.y, hit.width, 1);
+                (hit.clone(), text.trim_end_matches('\n').to_string())
+            })
+            .collect()
+    }
+
+    /// Commit popover hits of the frame in the left pane (the commit-files
+    /// footer), each with the text painted under it.
+    fn left_commit_hits_with_text(
+        state: &AppState,
+        terminal: &Terminal<TestBackend>,
+    ) -> Vec<(IconHit, String)> {
+        commit_hits_with_text(state, terminal)
+            .into_iter()
+            .filter(|(hit, _)| hit.x < state.layout.right_x)
+            .collect()
+    }
+
+    /// The commit-files footer meta row (the graph footer's meta row) of a
+    /// depth-2 drill and of a Diff commit vs parent tab, collapsed and
+    /// expanded, boxed and flat: the short hash, author, and relative date
+    /// each record one commit popover hit over the painted text on the
+    /// footer's bottom row, and a click pins the popover of that kind. A
+    /// narrow pane never puts a hit past the left pane; a stash drill
+    /// records its stash id and date; the fallback footer of a commit a
+    /// reload dropped from the graph records its short hash, whose click
+    /// pins the hash card and asks for the card's load.
+    #[test]
+    fn commit_detail_footer_meta_records_hash_author_and_date_hits_boxed_and_flat() {
+        const SHA: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let target = IconTarget::Commit {
+            repo: "app".into(),
+            sha: SHA.into(),
+        };
+        let date = workspace_status_graph::format_relative_date(
+            1_700_000_000,
+            crate::tui::state::unix_now(),
+        );
+        let depth_2: fn() -> AppState = || with_graph_commit_card(two_pane_commit_diff_state());
+        let footers = [
+            ("files-d2", depth_2),
+            ("compare-commit", commit_vs_parent_tab_state),
+        ];
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            for (surface, open) in footers {
+                for expand in [false, true] {
+                    let what = format!("{surface} {background:?} expand={expand}");
+                    let mut state = open();
+                    state.background = background;
+                    state.commit_msg_expand = expand;
+                    let mut terminal = Terminal::new(TestBackend::new(240, 30)).unwrap();
+                    draw_state(&mut terminal, &mut state);
+                    let screen = buffer_text(&terminal);
+                    let meta = format!("aaa1111 · root commit · Ada Lovelace · {date}");
+                    assert!(screen.contains(&meta), "{what}: footer text\n{screen}");
+                    let hits = left_commit_hits_with_text(&state, &terminal);
+                    let found: Vec<(IconKind, &str)> = hits
+                        .iter()
+                        .map(|(hit, text)| (hit.kind, text.as_str()))
+                        .collect();
+                    assert_eq!(
+                        found,
+                        vec![
+                            (IconKind::CommitHash, "aaa1111"),
+                            (IconKind::CommitAuthor, "Ada Lovelace"),
+                            (IconKind::CommitDate, date.as_str()),
+                        ],
+                        "{what}\n{screen}"
+                    );
+                    let l = &state.layout;
+                    for (hit, _) in &hits {
+                        assert_eq!(hit.target, target, "{what}");
+                        assert_eq!(
+                            hit.y,
+                            l.tree_y + l.tree_height - 1,
+                            "{what}: the meta row is the footer's bottom row"
+                        );
+                        assert!(
+                            hit.y > l.files_list_y + l.files_list_height,
+                            "{what}: the footer under the left file list: {hit:?}"
+                        );
+                    }
+
+                    // A click on the author pins the author popover.
+                    let author = hits[1].0.clone();
+                    state.dispatch(Action::Click {
+                        col: author.x,
+                        row: author.y,
+                    });
+                    assert!(state.popover_pinned(), "{what}: the author pins");
+                    let sections = state.open_popover_sections();
+                    assert_eq!(sections.len(), 1, "{what}");
+                    assert_eq!(
+                        (sections[0].icon, &sections[0].target),
+                        (IconKind::CommitAuthor, &target),
+                        "{what}"
+                    );
+                }
+            }
+
+            // Narrow panes: every hit stays inside the left pane, over
+            // non-blank painted text.
+            let mut state = with_graph_commit_card(two_pane_commit_diff_state());
+            state.background = background;
+            for cols in (60..240).step_by(7) {
+                let mut terminal = Terminal::new(TestBackend::new(cols, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let right_x = state.layout.right_x;
+                for (hit, text) in left_commit_hits_with_text(&state, &terminal) {
+                    assert!(
+                        hit.x + hit.width <= right_x && !text.trim().is_empty(),
+                        "{background:?} {cols} cols: {hit:?} over {text:?}"
+                    );
+                }
+            }
+
+            // A stash drill paints the stash id and date (no author): each
+            // records a hit on the stash commit.
+            const STASH_SHA: &str = "eee5555fffffffffffffffffffffffffffffffff";
+            let mut state = two_pane_graph_state();
+            state.background = background;
+            state.graph_identity = Some(("app".into(), SHA.into()));
+            if let Some(model) = state.graph.as_mut() {
+                model.stashes.push(workspace_status_graph::Stash {
+                    id: STASH_SHA.into(),
+                    stash_ref: "stash@{0}".into(),
+                    subject: "WIP on main".into(),
+                    author_name: "Ada Lovelace".into(),
+                    author_date_unix: 1_700_000_000,
+                    parent_id: Some(SHA.into()),
+                    ..Default::default()
+                });
+            }
+            let source = super::super::drill::CommitFileSource::Stash {
+                stash_ref: "stash@{0}".into(),
+            };
+            let files = vec![super::super::drill::CommitFile {
+                status: "M".into(),
+                path: "README.md".into(),
+                old_path: None,
+                stat: None,
+            }];
+            state.open_commit_files("app".into(), source.clone(), files.clone());
+            state.open_commit_diff(
+                "app".into(),
+                source,
+                files,
+                0,
+                "README.md".into(),
+                super::super::diff::DiffContent::from_lines(vec![
+                    "@@ -1,1 +1,1 @@".into(),
+                    "-old line".into(),
+                    "+new line".into(),
+                ]),
+            );
+            let mut terminal = Terminal::new(TestBackend::new(240, 30)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let screen = buffer_text(&terminal);
+            assert!(
+                screen.contains(&format!("stash@{{0}} · eee5555 · {date}")),
+                "{background:?}\n{screen}"
+            );
+            let stash = IconTarget::Commit {
+                repo: "app".into(),
+                sha: STASH_SHA.into(),
+            };
+            let found: Vec<(IconKind, String, IconTarget)> =
+                left_commit_hits_with_text(&state, &terminal)
+                    .into_iter()
+                    .map(|(hit, text)| (hit.kind, text, hit.target))
+                    .collect();
+            assert_eq!(
+                found,
+                vec![
+                    (IconKind::CommitHash, "eee5555".to_string(), stash.clone()),
+                    (IconKind::CommitDate, date.clone(), stash),
+                ],
+                "{background:?}: a stash drill records its id and date\n{screen}"
+            );
+
+            // A reload dropped the commit from the loaded graph (an amend,
+            // say): the fallback footer paints only its short hash on the
+            // meta row, and that hash records the commit's hash hit; the
+            // card is a miss, so the click asks for its off-thread load.
+            for (surface, open) in footers {
+                for expand in [false, true] {
+                    let what = format!("{surface} fallback {background:?} expand={expand}");
+                    let mut state = open();
+                    state.background = background;
+                    state.commit_msg_expand = expand;
+                    if let Some(model) = state.graph.as_mut() {
+                        model.commits[0].id = "f".repeat(40);
+                    }
+                    assert_eq!(state.commit_detail_graph_row(), None, "{what}");
+                    let mut terminal = Terminal::new(TestBackend::new(240, 30)).unwrap();
+                    draw_state(&mut terminal, &mut state);
+                    let screen = buffer_text(&terminal);
+                    assert!(
+                        screen.contains(super::super::state::COMMIT_FOOTER_NOT_IN_GRAPH),
+                        "{what}: the fallback footer\n{screen}"
+                    );
+                    let hits = left_commit_hits_with_text(&state, &terminal);
+                    let found: Vec<(IconKind, &str, &IconTarget)> = hits
+                        .iter()
+                        .map(|(hit, text)| (hit.kind, text.as_str(), &hit.target))
+                        .collect();
+                    assert_eq!(
+                        found,
+                        vec![(IconKind::CommitHash, "aaa1111", &target)],
+                        "{what}\n{screen}"
+                    );
+                    let hash = hits[0].0.clone();
+                    let l = &state.layout;
+                    assert_eq!(
+                        hash.y,
+                        l.tree_y + l.tree_height - 1,
+                        "{what}: the meta row is the footer's bottom row"
+                    );
+                    state.dispatch(Action::Click {
+                        col: hash.x,
+                        row: hash.y,
+                    });
+                    assert!(state.popover_pinned(), "{what}: the hash pins");
+                    let sections = state.open_popover_sections();
+                    assert_eq!(sections.len(), 1, "{what}");
+                    assert_eq!(
+                        (sections[0].icon, &sections[0].target),
+                        (IconKind::CommitHash, &target),
+                        "{what}"
+                    );
+                    assert_eq!(
+                        state.commit_card_want(),
+                        Some(("app".to_string(), SHA.to_string())),
+                        "{what}: the card loads off the event thread"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Commit the blame notes of the line-viewer tests name: not the commit
+    /// of the depth-2 drill, whose footer records its own commit hits.
+    const BLAME_NOTE_SHA: &str = "ddd4444eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+    /// Cache a committed blame of [`BLAME_NOTE_SHA`] by `Ada Lovelace`,
+    /// three days old, as the answer of the line `state` focuses now.
+    /// Returns the age its note paints.
+    fn cache_focused_commit_blame(state: &mut AppState) -> String {
+        let key = state.line_blame_want().expect("focused line asks");
+        let now = crate::tui::state::unix_now();
+        let author_time = now - 3 * 86_400;
+        state.line_blame.insert(
+            key,
+            Some(crate::git::LineBlame {
+                sha: BLAME_NOTE_SHA.into(),
+                author: "Ada Lovelace".into(),
+                author_time,
+                summary: "fix the parser".into(),
+                orig_line: 1,
+                filename: "README.md".into(),
+                previous: None,
+                boundary: false,
+                uncommitted: false,
+            }),
+        );
+        relative_age(now, author_time)
+    }
+
+    /// Kind and painted text of each commit popover hit of the frame on
+    /// [`BLAME_NOTE_SHA`] of `app`, with the hits.
+    fn blame_note_found(
+        state: &AppState,
+        terminal: &Terminal<TestBackend>,
+    ) -> (Vec<(IconKind, String)>, Vec<IconHit>) {
+        let target = IconTarget::Commit {
+            repo: "app".into(),
+            sha: BLAME_NOTE_SHA.into(),
+        };
+        commit_hits_with_text(state, terminal)
+            .into_iter()
+            .filter(|(hit, _)| hit.target == target)
+            .map(|(hit, text)| ((hit.kind, text), hit))
+            .unzip()
+    }
+
+    /// The three fields a whole blame note of age `age` records.
+    fn blame_note_fields(age: &str) -> Vec<(IconKind, String)> {
+        vec![
+            (IconKind::CommitAuthor, "Ada Lovelace".into()),
+            (IconKind::CommitDate, age.into()),
+            (IconKind::CommitHash, "ddd4444".into()),
+        ]
+    }
+
+    /// The line-blame note on the focused diff row (Workspace depth 0 and
+    /// depth 2, inline and side by side) and on the Explorer file view's
+    /// cursor line, boxed and flat: the author, age, and short hash each
+    /// record one commit popover hit over the painted text, and a click on
+    /// the age pins the time popover. A pane that cuts the note after the
+    /// age keeps the author and age hits only; an uncommitted line and a
+    /// diff whose left pane has focus record none.
+    #[test]
+    fn blame_note_records_author_date_and_hash_hits_inline_split_and_file_view() {
+        const BODY: &str = "@@ -1,3 +1,3 @@\n keep one\n-old line\n+new line\n keep two\n";
+        let target = IconTarget::Commit {
+            repo: "app".into(),
+            sha: BLAME_NOTE_SHA.into(),
+        };
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            for surface in ["diff-d0", "diff-d2"] {
+                for mode in [DiffMode::Inline, DiffMode::SideBySide] {
+                    let what = format!("{surface} {background:?} {mode:?}");
+                    let (mut state, row) = match surface {
+                        "diff-d0" => {
+                            let mut state = two_pane_diff_state();
+                            state.set_diff(
+                                "app".into(),
+                                "README.md".into(),
+                                super::super::diff::DiffContent::from_unified(BODY),
+                            );
+                            (state, "keep one")
+                        }
+                        _ => (two_pane_commit_diff_state(), "new line"),
+                    };
+                    state.background = background;
+                    state.diff_mode = mode;
+                    state.focus = FocusPane::Right;
+                    let mut terminal = Terminal::new(TestBackend::new(220, 24)).unwrap();
+                    draw_state(&mut terminal, &mut state);
+                    state.diff_cursor = diff_row_index(&state, row);
+                    let age = cache_focused_commit_blame(&mut state);
+                    draw_state(&mut terminal, &mut state);
+                    let screen = buffer_text(&terminal);
+                    let (found, hits) = blame_note_found(&state, &terminal);
+                    assert_eq!(found, blame_note_fields(&age), "{what}\n{screen}");
+                    let y = first_row_with(terminal.backend().buffer(), row).expect("cursor row");
+                    for hit in &hits {
+                        assert_eq!(hit.y, y, "{what}: on the cursor row");
+                        assert!(hit.x >= state.layout.right_x, "{what}: {hit:?}");
+                    }
+                    if mode == DiffMode::SideBySide {
+                        let rule = state.layout.diff_split_rule_x.expect("split rule");
+                        assert!(hits[0].x > rule, "{what}: new side: {hits:?}");
+                    }
+
+                    // A click on the age pins the time popover.
+                    state.dispatch(Action::Click {
+                        col: hits[1].x,
+                        row: hits[1].y,
+                    });
+                    assert!(state.popover_pinned(), "{what}: the age pins");
+                    let sections = state.open_popover_sections();
+                    assert_eq!(
+                        (sections.len(), sections[0].icon, &sections[0].target),
+                        (1, IconKind::CommitDate, &target),
+                        "{what}"
+                    );
+                    state.close_popover();
+
+                    // Narrow the terminal until the note loses its hash. A
+                    // narrow split falls back to inline rows, so the cut
+                    // runs on inline only.
+                    if mode == DiffMode::Inline {
+                        let cut = (60..220).rev().find_map(|cols| {
+                            let mut terminal = Terminal::new(TestBackend::new(cols, 24)).unwrap();
+                            draw_state(&mut terminal, &mut state);
+                            let (found, _) = blame_note_found(&state, &terminal);
+                            (found.len() < 3).then(|| (found, buffer_text(&terminal)))
+                        });
+                        let (found, screen) = cut.expect("some width cuts the hash");
+                        assert_eq!(
+                            found,
+                            blame_note_fields(&age)[..2].to_vec(),
+                            "{what}: a cut hash records no hit\n{screen}"
+                        );
+                        assert!(!screen.contains("ddd4444"), "{what}: hash cut\n{screen}");
+                    }
+
+                    // The left pane focused: the row is not focused.
+                    state.focus = FocusPane::Left;
+                    draw_state(&mut terminal, &mut state);
+                    assert!(
+                        blame_note_found(&state, &terminal).0.is_empty(),
+                        "{what}: left pane focused"
+                    );
+                    if surface == "diff-d0" {
+                        // An unstaged added line paints `You · uncommitted`.
+                        state.focus = FocusPane::Right;
+                        state.diff_cursor = diff_row_index(&state, "new line");
+                        draw_state(&mut terminal, &mut state);
+                        let screen = buffer_text(&terminal);
+                        assert!(screen.contains("You · uncommitted"), "{what}\n{screen}");
+                        assert!(
+                            commit_hits_with_text(&state, &terminal).is_empty(),
+                            "{what}: an uncommitted line records none"
+                        );
+                    }
+                }
+            }
+
+            // The Explorer file view's cursor line.
+            let mut state = file_view_state(&["# app", "dirty"]);
+            state.background = background;
+            let mut terminal = Terminal::new(TestBackend::new(120, 16)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let age = cache_focused_commit_blame(&mut state);
+            draw_state(&mut terminal, &mut state);
+            let screen = buffer_text(&terminal);
+            let (found, hits) = blame_note_found(&state, &terminal);
+            assert_eq!(found, blame_note_fields(&age), "{background:?}\n{screen}");
+            for hit in &hits {
+                assert_eq!(hit.y, state.layout.file_view_y, "{background:?}");
+                assert!(hit.x >= state.layout.file_view_x, "{background:?}");
+            }
+            let cut = (40..120).rev().find_map(|cols| {
+                let mut terminal = Terminal::new(TestBackend::new(cols, 16)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let (found, _) = blame_note_found(&state, &terminal);
+                (found.len() < 3).then(|| (found, buffer_text(&terminal)))
+            });
+            let (found, screen) = cut.expect("some width cuts the hash");
+            assert_eq!(
+                found,
+                blame_note_fields(&age)[..2].to_vec(),
+                "{background:?}: file view cut\n{screen}"
+            );
+        }
+    }
+
+    /// The line-blame note on the focused row of a compare tab's diff and
+    /// of an Explorer tab's changed-file diff, boxed and flat: the author,
+    /// age, and short hash each record one commit popover hit over the
+    /// painted text, and a click on the hash pins the commit card.
+    #[test]
+    fn compare_diff_and_explorer_diff_blame_record_commit_hits() {
+        const BODY: &str = "@@ -1,3 +1,3 @@\n keep one\n-old line\n+new line\n keep two\n";
+        let target = IconTarget::Commit {
+            repo: "app".into(),
+            sha: BLAME_NOTE_SHA.into(),
+        };
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            for surface in ["compare-diff", "explorer-diff"] {
+                let what = format!("{surface} {background:?}");
+                let mut state = two_pane_diff_state();
+                if surface == "compare-diff" {
+                    state
+                        .tabs
+                        .open_or_focus("app".into(), "main".into(), "HEAD".into());
+                    let tab = state.tabs.active_compare_mut().unwrap();
+                    tab.loading = false;
+                    tab.source = Some(super::super::drill::CommitFileSource::Compare {
+                        base_ref: "main".into(),
+                        head_ref: "HEAD".into(),
+                        base_tip: "b".repeat(40),
+                        merge_base: "b".repeat(40),
+                        head: "c".repeat(40),
+                    });
+                    tab.files = vec![super::super::drill::CommitFile {
+                        status: "M".into(),
+                        path: "README.md".into(),
+                        old_path: None,
+                        stat: None,
+                    }];
+                    tab.path = Some("README.md".into());
+                    tab.content = super::super::diff::DiffContent::from_compare_lines(
+                        BODY.lines().map(String::from).collect(),
+                    );
+                    state.focus = FocusPane::Right;
+                } else {
+                    state.open_loaded_inner_diff(
+                        "app",
+                        "README.md",
+                        super::super::diff::DiffContent::from_unified(BODY),
+                    );
+                    state.dispatch(Action::FocusRight);
+                }
+                state.background = background;
+                let mut terminal = Terminal::new(TestBackend::new(200, 24)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                state.diff_cursor = diff_row_index(&state, "keep one");
+                let age = cache_focused_commit_blame(&mut state);
+                draw_state(&mut terminal, &mut state);
+                let screen = buffer_text(&terminal);
+                let (found, hits) = blame_note_found(&state, &terminal);
+                assert_eq!(found, blame_note_fields(&age), "{what}\n{screen}");
+                let y = first_row_with(terminal.backend().buffer(), "keep one").expect("row");
+                assert!(hits.iter().all(|hit| hit.y == y), "{what}: {hits:?}");
+
+                state.dispatch(Action::Click {
+                    col: hits[2].x,
+                    row: hits[2].y,
+                });
+                assert!(state.popover_pinned(), "{what}: the hash pins");
+                let sections = state.open_popover_sections();
+                assert_eq!(
+                    (sections.len(), sections[0].icon, &sections[0].target),
+                    (1, IconKind::CommitHash, &target),
+                    "{what}"
+                );
+            }
+        }
+    }
+
+    /// The compare tab's diff header, boxed and flat: a Diff commit vs
+    /// parent tab (`aaa1111^...aaa1111`) records the base on the loaded
+    /// `base_tip` and the head on itself, a commit-vs-working-tree tab
+    /// (`aaa1111 ↔ working tree`) its base, and a live `main...HEAD` tab
+    /// nothing. Each hit sits on the painted token and a click pins its
+    /// hash card. A header that wraps the range keeps only uncut tokens.
+    #[test]
+    fn compare_header_hashes_record_commit_hits_for_pinned_and_worktree_tabs() {
+        const SHA: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const PARENT: &str = "ccc2222ddddddddddddddddddddddddddddddddd";
+        let commit_target = |sha: &str| IconTarget::Commit {
+            repo: "app".into(),
+            sha: sha.into(),
+        };
+        // The diff header's commit hits only (right pane): the pinned tab's
+        // commit is not in this graph, so its left footer is the fallback
+        // one, whose short hash records its own hit.
+        let header_hits = |state: &AppState, terminal: &Terminal<TestBackend>| {
+            commit_hits_with_text(state, terminal)
+                .into_iter()
+                .filter(|(hit, _)| hit.x >= state.layout.right_x)
+                .collect::<Vec<_>>()
+        };
+        let pinned = |state: &mut AppState, path: Option<&str>| {
+            let base = format!("{SHA}^");
+            state
+                .tabs
+                .open_or_focus("app".into(), base.clone(), SHA.into());
+            let tab = state.tabs.active_compare_mut().unwrap();
+            tab.loading = false;
+            tab.path = path.map(str::to_string);
+            tab.source = Some(super::super::drill::CommitFileSource::Compare {
+                base_ref: base,
+                head_ref: SHA.into(),
+                base_tip: PARENT.into(),
+                merge_base: PARENT.into(),
+                head: SHA.into(),
+            });
+        };
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            let tabs: [(&str, Vec<(&str, &str)>); 3] = [
+                ("pinned", vec![("aaa1111^", PARENT), ("aaa1111", SHA)]),
+                ("worktree", vec![("aaa1111", SHA)]),
+                ("live", vec![]),
+            ];
+            for (name, want) in tabs {
+                let what = format!("{name} {background:?}");
+                let mut state = two_pane_graph_state();
+                state.background = background;
+                match name {
+                    "pinned" => pinned(&mut state, Some("README.md")),
+                    "worktree" => {
+                        state.tabs.open_or_focus_worktree(
+                            "app".into(),
+                            SHA.into(),
+                            super::super::tabs::WorktreeFile {
+                                path: "README.md".into(),
+                                old_path: None,
+                            },
+                        );
+                        state.tabs.active_compare_mut().unwrap().loading = false;
+                    }
+                    _ => {
+                        state
+                            .tabs
+                            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+                    }
+                }
+                let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let screen = buffer_text(&terminal);
+                let hits = header_hits(&state, &terminal);
+                let found: Vec<(&str, IconTarget)> = hits
+                    .iter()
+                    .map(|(hit, text)| (text.as_str(), hit.target.clone()))
+                    .collect();
+                let want: Vec<(&str, IconTarget)> = want
+                    .iter()
+                    .map(|(text, sha)| (*text, commit_target(sha)))
+                    .collect();
+                assert_eq!(found, want, "{what}\n{screen}");
+                for (hit, _) in &hits {
+                    assert_eq!(hit.kind, IconKind::CommitHash, "{what}");
+                }
+                // A click on each token pins that commit's hash card.
+                for (hit, _) in &hits {
+                    state.close_popover();
+                    draw_state(&mut terminal, &mut state);
+                    state.dispatch(Action::Click {
+                        col: hit.x,
+                        row: hit.y,
+                    });
+                    assert!(state.popover_pinned(), "{what}: {hit:?} pins");
+                    let sections = state.open_popover_sections();
+                    assert_eq!(sections.len(), 1, "{what}");
+                    assert_eq!(
+                        (sections[0].icon, &sections[0].target),
+                        (IconKind::CommitHash, &hit.target),
+                        "{what}"
+                    );
+                }
+            }
+
+            // Before the source loads, a `<full id>^` base names no commit.
+            let mut state = two_pane_graph_state();
+            state.background = background;
+            pinned(&mut state, None);
+            state.tabs.active_compare_mut().unwrap().source = None;
+            let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let texts: Vec<String> = header_hits(&state, &terminal)
+                .into_iter()
+                .map(|(_, text)| text)
+                .collect();
+            assert_eq!(texts, vec!["aaa1111".to_string()], "{background:?}");
+
+            // Grow the path so the header wraps the range at every point:
+            // a hit always sits on its whole token, and both one-row and
+            // two-row splits show up, as well as a cut token with no hit.
+            let (mut same_row, mut split, mut cut) = (0, 0, 0);
+            for n in 0..120 {
+                let mut state = two_pane_graph_state();
+                state.background = background;
+                pinned(&mut state, Some(&format!("d/{}", "x".repeat(n))));
+                let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let hits = header_hits(&state, &terminal);
+                for (hit, text) in &hits {
+                    let want = if hit.target == commit_target(PARENT) {
+                        "aaa1111^"
+                    } else {
+                        "aaa1111"
+                    };
+                    assert_eq!(text, want, "{background:?} n={n}: {hit:?}");
+                }
+                match hits.as_slice() {
+                    [(a, _), (b, _)] if a.y == b.y => same_row += 1,
+                    [(a, _), (b, _)] if a.y < b.y => split += 1,
+                    [_] => cut += 1,
+                    other => {
+                        let screen = buffer_text(&terminal);
+                        panic!("{background:?} n={n}: {other:?}\n{screen}")
+                    }
+                }
+            }
+            assert!(
+                same_row > 0 && split > 0 && cut > 0,
+                "{background:?}: same row {same_row}, split {split}, cut {cut}"
+            );
+        }
+    }
+
+    /// The author every commit popover surface case gives its commit card.
+    const COMMIT_POPOVER_AUTHOR: &str = "Ada Lovelace <ada@example.com>";
+
+    /// The three commit popover kinds: hash card, time, author.
+    const ALL_COMMIT_POPOVERS: &[IconKind] = &[
+        IconKind::CommitHash,
+        IconKind::CommitDate,
+        IconKind::CommitAuthor,
+    ];
+
+    /// One surface of the `commit-popovers` registry component
+    /// (`docs/parity.md`) and how to open it.
+    struct CommitPopoverSurface {
+        /// Surface id in the registry.
+        id: &'static str,
+        /// A state whose next frame paints commit `sha` of `app` on this
+        /// surface, with a loaded card whose author is
+        /// [`COMMIT_POPOVER_AUTHOR`].
+        open: fn() -> AppState,
+        /// Full id of the commit the surface's hits name.
+        sha: &'static str,
+        /// The commit popover kinds the surface paints.
+        features: &'static [IconKind],
+    }
+
+    /// Point the graph at `app` and give its seed commit (A) Ada's full
+    /// identity, so the graph holds the commit card.
+    fn with_graph_commit_card(mut state: AppState) -> AppState {
+        state.graph_identity = Some(("app".into(), FOOTER_COMMIT_A.into()));
+        if let Some(model) = state.graph.as_mut() {
+            model.commits[0].author_name = "Ada Lovelace".into();
+            model.commits[0].people.author_email = "ada@example.com".into();
+        }
+        state
+    }
+
+    /// Select commit A on the graph (row 0 is the uncommitted row).
+    fn with_graph_commit_selected(state: AppState) -> AppState {
+        let mut state = with_graph_commit_card(state);
+        state.graph_cursor = 1;
+        state
+    }
+
+    /// Focus the right pane's diff row with `needle`, cache a committed
+    /// blame of [`BLAME_NOTE_SHA`] for it, and put that commit's card into
+    /// `commit_cards` (the blame commit is off the graph).
+    fn with_diff_blame_card(mut state: AppState, needle: &str) -> AppState {
+        state.focus = FocusPane::Right;
+        state.diff_cursor = diff_row_index(&state, needle);
+        with_blame_card(state)
+    }
+
+    /// Cache a committed blame of [`BLAME_NOTE_SHA`] for the focused line
+    /// and put that commit's card into `commit_cards`.
+    fn with_blame_card(mut state: AppState) -> AppState {
+        cache_focused_commit_blame(&mut state);
+        let mut card = Commit {
+            id: BLAME_NOTE_SHA.into(),
+            subject: "fix the parser".into(),
+            author_name: "Ada Lovelace".into(),
+            author_date_unix: crate::tui::state::unix_now() - 3 * 86_400,
+            ..Commit::default()
+        };
+        card.people.author_email = "ada@example.com".into();
+        state
+            .commit_cards
+            .insert("app".into(), BLAME_NOTE_SHA.into(), Ok(card));
+        state
+    }
+
+    /// The diff of the line-blame cases: `keep one` is a context line.
+    const COMMIT_POPOVER_BODY: &str =
+        "@@ -1,3 +1,3 @@\n keep one\n-old line\n+new line\n keep two\n";
+
+    /// Every commit popover surface this test can drive.
+    const COMMIT_POPOVER_SURFACES: [CommitPopoverSurface; 10] = [
+        CommitPopoverSurface {
+            id: "graph-d0",
+            open: || with_graph_commit_selected(two_pane_graph_state()),
+            sha: FOOTER_COMMIT_A,
+            features: ALL_COMMIT_POPOVERS,
+        },
+        CommitPopoverSurface {
+            id: "graph-d1",
+            open: || with_graph_commit_selected(two_pane_files_state()),
+            sha: FOOTER_COMMIT_A,
+            features: ALL_COMMIT_POPOVERS,
+        },
+        CommitPopoverSurface {
+            id: "files-d2",
+            open: || with_graph_commit_card(two_pane_commit_diff_state()),
+            sha: FOOTER_COMMIT_A,
+            features: ALL_COMMIT_POPOVERS,
+        },
+        CommitPopoverSurface {
+            id: "diff-d0",
+            open: || {
+                let mut state = two_pane_diff_state();
+                state.set_diff(
+                    "app".into(),
+                    "README.md".into(),
+                    super::super::diff::DiffContent::from_unified(COMMIT_POPOVER_BODY),
+                );
+                with_diff_blame_card(state, "keep one")
+            },
+            sha: BLAME_NOTE_SHA,
+            features: ALL_COMMIT_POPOVERS,
+        },
+        CommitPopoverSurface {
+            id: "diff-d2",
+            open: || with_diff_blame_card(two_pane_commit_diff_state(), "new line"),
+            sha: BLAME_NOTE_SHA,
+            features: ALL_COMMIT_POPOVERS,
+        },
+        CommitPopoverSurface {
+            id: "compare-diff",
+            open: || {
+                let mut state = two_pane_diff_state();
+                state
+                    .tabs
+                    .open_or_focus("app".into(), "main".into(), "HEAD".into());
+                let tab = state.tabs.active_compare_mut().unwrap();
+                tab.loading = false;
+                tab.source = Some(super::super::drill::CommitFileSource::Compare {
+                    base_ref: "main".into(),
+                    head_ref: "HEAD".into(),
+                    base_tip: "b".repeat(40),
+                    merge_base: "b".repeat(40),
+                    head: "c".repeat(40),
+                });
+                tab.files = vec![super::super::drill::CommitFile {
+                    status: "M".into(),
+                    path: "README.md".into(),
+                    old_path: None,
+                    stat: None,
+                }];
+                tab.path = Some("README.md".into());
+                tab.content = super::super::diff::DiffContent::from_compare_lines(
+                    COMMIT_POPOVER_BODY.lines().map(String::from).collect(),
+                );
+                with_diff_blame_card(state, "keep one")
+            },
+            sha: BLAME_NOTE_SHA,
+            features: ALL_COMMIT_POPOVERS,
+        },
+        CommitPopoverSurface {
+            id: "explorer-diff",
+            open: || {
+                let mut state = two_pane_diff_state();
+                state.open_loaded_inner_diff(
+                    "app",
+                    "README.md",
+                    super::super::diff::DiffContent::from_unified(COMMIT_POPOVER_BODY),
+                );
+                state.dispatch(Action::FocusRight);
+                with_diff_blame_card(state, "keep one")
+            },
+            sha: BLAME_NOTE_SHA,
+            features: ALL_COMMIT_POPOVERS,
+        },
+        CommitPopoverSurface {
+            id: "explorer-file",
+            open: || with_blame_card(file_view_state(&["# app", "dirty"])),
+            sha: BLAME_NOTE_SHA,
+            features: ALL_COMMIT_POPOVERS,
+        },
+        CommitPopoverSurface {
+            id: "compare-header",
+            open: commit_vs_parent_tab_state,
+            sha: FOOTER_COMMIT_A,
+            features: &[IconKind::CommitHash],
+        },
+        CommitPopoverSurface {
+            id: "compare-commit",
+            open: commit_vs_parent_tab_state,
+            sha: FOOTER_COMMIT_A,
+            features: ALL_COMMIT_POPOVERS,
+        },
+    ];
+
+    /// A Diff commit vs parent tab of commit A (`aaa1111^...aaa1111`) over
+    /// the graph that holds A's card: its diff header and its commit-files
+    /// footer both paint A.
+    fn commit_vs_parent_tab_state() -> AppState {
+        let mut state = with_graph_commit_card(two_pane_graph_state());
+        let base = format!("{FOOTER_COMMIT_A}^");
+        state
+            .tabs
+            .open_or_focus("app".into(), base.clone(), FOOTER_COMMIT_A.into());
+        let tab = state.tabs.active_compare_mut().unwrap();
+        tab.loading = false;
+        tab.path = Some("README.md".into());
+        tab.source = Some(super::super::drill::CommitFileSource::Compare {
+            base_ref: base,
+            head_ref: FOOTER_COMMIT_A.into(),
+            base_tip: FOOTER_COMMIT_B.into(),
+            merge_base: FOOTER_COMMIT_B.into(),
+            head: FOOTER_COMMIT_A.into(),
+        });
+        state
+    }
+
+    /// The `commit-popovers` hash card, time, and author popovers behave
+    /// the same on every surface `docs/parity.md` marks `supported` for
+    /// them, in every look it names (boxed and flat panes): the painted
+    /// text records a commit hit, the pointer resting on it for the dwell
+    /// peeks that kind's loaded card, a click pins it, `y` copies the first
+    /// field (the full id on the hash card, `Name <email>` of the author on
+    /// the time and author popovers), and Esc closes it. Blame surfaces
+    /// read the card from `commit_cards` (the commit is off the graph);
+    /// the others from the graph. The registry's surface list and this
+    /// test's must match per feature, so a new surface gets a test case,
+    /// and a surface this test drives gets a registry row.
+    #[test]
+    fn commit_popovers_match_on_every_registry_surface() {
+        let looks = [
+            ("boxed", BackgroundMode::Terminal),
+            ("flat", BackgroundMode::Paint),
+        ];
+        for (feature, kind) in [
+            ("hash-card", IconKind::CommitHash),
+            ("time", IconKind::CommitDate),
+            ("author", IconKind::CommitAuthor),
+        ] {
+            let mut driven: Vec<(String, String)> = COMMIT_POPOVER_SURFACES
+                .iter()
+                .filter(|s| s.features.contains(&kind))
+                .flat_map(|s| looks.iter().map(|(look, _)| (s.id.into(), (*look).into())))
+                .collect();
+            driven.sort();
+            assert_eq!(
+                crate::parity_registry::supported_surface_looks("commit-popovers", feature),
+                driven,
+                "docs/parity.md `commit-popovers` / `{feature}` surfaces and looks must match this test's"
+            );
+        }
+        for surface in &COMMIT_POPOVER_SURFACES {
+            for (look, background) in looks {
+                for &kind in surface.features {
+                    let case = format!("{} {look} {kind:?}", surface.id);
+                    let target = IconTarget::Commit {
+                        repo: "app".into(),
+                        sha: surface.sha.into(),
+                    };
+                    let mut state = (surface.open)();
+                    state.background = background;
+                    // Wide enough that the depth-2 footer (left pane) paints
+                    // its date uncut.
+                    let mut terminal = Terminal::new(TestBackend::new(240, 36)).unwrap();
+                    draw_state(&mut terminal, &mut state);
+                    let hit = state
+                        .layout
+                        .icon_hits
+                        .iter()
+                        .find(|hit| hit.kind == kind && hit.target == target)
+                        .cloned()
+                        .unwrap_or_else(|| panic!("{case}: no hit\n{}", buffer_text(&terminal)));
+                    let open_section = |state: &AppState, what: &str| {
+                        let sections = state.open_popover_sections();
+                        assert_eq!(
+                            (sections.len(), sections[0].icon, &sections[0].target),
+                            (1, kind, &target),
+                            "{case}: {what}"
+                        );
+                        assert!(
+                            !sections[0]
+                                .lines
+                                .iter()
+                                .any(|line| matches!(line, PopoverLine::Note(_))),
+                            "{case}: {what} shows the loaded card: {:?}",
+                            sections[0].lines
+                        );
+                    };
+
+                    // Hover: the dwell opens a peek.
+                    let now = Instant::now();
+                    state.set_pointer_at(Some((hit.x, hit.y)), now);
+                    assert!(
+                        state.expire_peek(
+                            now + std::time::Duration::from_millis(
+                                super::super::popover::PEEK_DWELL_MS
+                            )
+                        ),
+                        "{case}: the dwell opens a peek"
+                    );
+                    assert!(!state.popover_pinned(), "{case}: a peek is not pinned");
+                    open_section(&state, "peek");
+                    draw_state(&mut terminal, &mut state);
+                    assert!(state.popover.is_some(), "{case}: the peek survives paint");
+
+                    // Click: pins it.
+                    state.dispatch(Action::Click {
+                        col: hit.x,
+                        row: hit.y,
+                    });
+                    assert!(state.popover_pinned(), "{case}: the click pins");
+                    open_section(&state, "pin");
+                    draw_state(&mut terminal, &mut state);
+
+                    // `y` copies the first field; Esc closes.
+                    let want = if kind == IconKind::CommitHash {
+                        surface.sha
+                    } else {
+                        COMMIT_POPOVER_AUTHOR
+                    };
+                    assert_eq!(
+                        state.dispatch(Action::PopoverCopyLine),
+                        Effect::CopyClipboard {
+                            text: want.into(),
+                            announce: true,
+                        },
+                        "{case}: y copies the first field"
+                    );
+                    state.dispatch(Action::PopoverClose);
+                    assert!(state.popover.is_none(), "{case}: Esc closes");
+                }
+            }
+        }
     }
 
     /// A depth-2 commit a watch reload dropped from the loaded graph (an
