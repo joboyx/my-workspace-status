@@ -67,10 +67,11 @@ fn tree_or_theme_fired(screen: &str) -> bool {
 /// (`theme:`) must fail. Start on the last compare (user POV), not after a
 /// raw-`g` jump that hid the VTE release-as-press hole.
 ///
-/// Each chord goes out in one write ([`send_gesture`]), so its keys share
-/// one arrival instant: the chord window and the typeless echo window
-/// cannot split it on a loaded machine. The window lengths themselves are
-/// pinned by the `tui::keys` and `tui::state` unit tests.
+/// Each chord goes out in one write ([`send_gesture`]): its bytes arrive
+/// back to back, in practice in one read, so the chord and typeless echo
+/// windows of arrival hold however late the loop takes the keys. The
+/// window lengths themselves are pinned by the `tui::keys` and
+/// `tui::state` unit tests.
 #[test]
 fn pty_compare_gt_chords_and_gg() {
     let (_root, workspace) = compare_ahead_workspace();

@@ -133,8 +133,8 @@ fn pty_gw_views_focused_entity_remotely() {
     );
     assert!(opened(&marker).is_empty(), "nothing opened at launch");
 
-    // Repo row: the repository home. Each chord goes out in one write so
-    // its keys share one arrival.
+    // Repo row: the repository home. Each chord goes out in one write (see
+    // `support::send_gesture`).
     tui.send_bytes(b"gw");
     tui.wait_pred(
         |screen| opened(&marker) == [REPO_PAGE] && screen.contains("opened"),

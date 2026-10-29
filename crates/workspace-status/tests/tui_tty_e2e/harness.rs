@@ -419,11 +419,14 @@ impl PtySession {
         );
     }
 
-    /// Press then release in one write, so both arrive in one stdin read.
+    /// Press then release in one write.
     ///
-    /// The TUI times key gestures by the read their bytes came in. Every
-    /// multi-report helper here sends its gesture as one write, so machine
-    /// load cannot put a gap inside it.
+    /// The TUI times key gestures by the stdin read their bytes came in.
+    /// The bytes of one small write arrive back to back and, in practice, a
+    /// PTY hands them to one read; the arrival-instant rule covers the rest
+    /// (a split read changes nothing unless the reader also stalls past the
+    /// window between the two reads). Every multi-report helper here sends
+    /// its gesture as one write.
     fn send_tap(&mut self, press: &str, release: &str) {
         self.send_bytes(format!("{press}{release}").as_bytes());
     }
@@ -443,8 +446,9 @@ impl PtySession {
 
     /// `gg` chord: two raw `g` bytes in one write.
     ///
-    /// One write is one stdin read, so both taps share one arrival and
-    /// stay inside the 400ms window however loaded the machine is. Do not
+    /// The bytes of one write arrive back to back (in practice in one read,
+    /// see [`Self::send_tap`]), so both taps stay inside the 400ms window of
+    /// arrival however late the loop handles them. Do not
     /// inject a CSI-u Release between the taps. A human `gg` is two
     /// Presses. The live reader must complete `MoveToStart` on that path.
     pub fn gg(&mut self) {

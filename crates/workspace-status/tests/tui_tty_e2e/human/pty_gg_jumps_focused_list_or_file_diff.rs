@@ -24,8 +24,8 @@ fn csi_u_letter(tui: &mut PtySession, letter: char) {
     tui.csi_u(codepoint, 1, 3);
 }
 
-/// CSI-u `gg` chord: two `g` press+release pairs in one write, so they
-/// share one arrival and stay inside the 400ms window.
+/// CSI-u `gg` chord: two `g` press+release pairs in one write (see
+/// `support::send_gesture`), so they arrive inside the 400ms window.
 fn csi_u_gg(tui: &mut PtySession) {
     send_gesture(tui, &[&csi_u_tap('g'), &csi_u_tap('g')]);
 }

@@ -16,8 +16,9 @@ const WATCH_MS: &str = "500";
 
 /// CSI-u `g` then `key`, each a press + release, in one write.
 ///
-/// One write is one stdin read, so the chord cannot expire between its
-/// halves however loaded the machine is ([`send_gesture`]).
+/// The bytes of one write arrive back to back (in practice in one read,
+/// see [`send_gesture`]), so the chord's halves stay inside the window of
+/// arrival however late the loop handles them.
 fn csi_u_g_chord(tui: &mut PtySession, key: char) {
     send_gesture(tui, &[&csi_u_tap('g'), &csi_u_tap(key)]);
 }

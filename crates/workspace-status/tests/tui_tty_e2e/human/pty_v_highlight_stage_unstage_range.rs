@@ -94,7 +94,7 @@ fn pty_v_s_stages_one_hunk_u_unstages_that_range() {
         "worktree diff must still show OMEGA unstaged:\ncached={cached}\nunstaged={unstaged}"
     );
 
-    // One write: both `g` share one arrival, so the 400 ms window holds.
+    // Both `g` in one write (see `support::send_gesture`).
     tui.send_bytes(b"gg");
     // Wait for the diff the stage reloads to its final rows: the cursor
     // follows the file to its Staged row, whose diff is the staged ALPHA

@@ -4,13 +4,13 @@
 //! that speaks typeless CSI-u (`CSI 103 ; 1 u`) still no-ops `gg` and
 //! fires bare `t` / `T`. These tests send the bytes that path emits.
 //!
-//! Every chord goes out in one write ([`send_gesture`]), so its keys share
-//! one arrival instant and a loaded machine cannot split it. Two rules
-//! are timing windows and stay in unit tests with explicit instants:
-//! a second one-report `g` 40 ms after the first is a new tap
-//! (`typeless_second_g_at_40ms_is_a_new_tap`), and so is a CSI-u
-//! press-only `g` past the echo window
-//! (`typeless_second_g_after_echo_window_is_a_new_tap`).
+//! Every chord goes out in one write ([`send_gesture`]): its bytes arrive
+//! back to back, in practice in one read, so its keys share one arrival
+//! instant. Two rules are timing windows and stay in unit tests with
+//! explicit instants: a second one-report `g` 40 ms after the first is a
+//! new tap (`typeless_second_g_at_40ms_is_a_new_tap`), and a CSI-u
+//! press-only `gg` runs through the loop's decode on arrival instants
+//! (`press_only_gg_runs_the_loop_decode_on_arrival_instants`).
 
 use std::time::Duration;
 

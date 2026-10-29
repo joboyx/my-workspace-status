@@ -4,8 +4,8 @@ use crate::harness::PtySession;
 use crate::seed::{compare_ahead_workspace, git};
 use crate::support::{csi_u_tap, send_gesture, tree_cursor_on, tree_has, GIT_WAIT, WAIT};
 
-/// CSI-u `gg` chord (press + release per tap) in one write, so both taps
-/// share one arrival and stay inside the 400ms window.
+/// CSI-u `gg` chord (press + release per tap) in one write (see
+/// `support::send_gesture`), so both taps arrive inside the 400ms window.
 fn csi_u_gg(tui: &mut PtySession) {
     send_gesture(tui, &[&csi_u_tap('g'), &csi_u_tap('g')]);
 }

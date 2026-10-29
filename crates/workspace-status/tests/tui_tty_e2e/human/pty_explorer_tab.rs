@@ -375,7 +375,7 @@ fn pty_explorer_reuses_tab_switches_and_refuses_stage() {
     let mut tui = launch(&workspace);
     open_explorer_on_edit(&mut tui);
 
-    // Each chord goes out in one write so its keys share one arrival.
+    // Each chord goes out in one write (see `support::send_gesture`).
     tui.send_bytes(b"gT");
     tui.wait_pred(
         |screen| {

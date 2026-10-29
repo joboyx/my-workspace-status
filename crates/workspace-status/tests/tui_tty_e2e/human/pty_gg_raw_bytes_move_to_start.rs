@@ -44,8 +44,8 @@ fn tree_or_theme_fired(screen: &str) -> bool {
         || screen.contains("theme: ")
 }
 
-/// Raw `g` then `second` in one write, so both bytes share one arrival
-/// and the 400 ms chord window holds on a loaded machine.
+/// Raw `g` then `second` in one write (see `support::send_gesture`), so
+/// the bytes arrive back to back inside the 400 ms chord window.
 fn raw_g_chord(tui: &mut PtySession, second: char) {
     tui.send_bytes(format!("g{second}").as_bytes());
 }
