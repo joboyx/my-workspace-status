@@ -13,6 +13,8 @@ A checkout row in the tree shows the pull request of its branch: a GitHub PR thr
 
 Every check in the feature files needs the PR status visuals (six states, the ref beside the glyph, `gc`, polling, toasts). A build from before them (a three-state badge `P` / `A` / `m`, no ref) cannot pass: report SKIP and name the missing piece.
 
+A checkout on its repository's default branch (the `defaultBranches` entry, else the branch `origin/HEAD` names) has no PR status: no lookup, no badge, and `gx` says `main is the default branch: no PR`. Every recipe here puts its PRs on feature branches, and neither the seeded workspace nor the live fixture sets `origin/HEAD`, so no recipe expects a badge on a default branch. To check the rule, set `origin/HEAD` on a checkout that sits on `main` (`git update-ref refs/remotes/origin/main HEAD && git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main`) before the launch; `$V calls "$RUN"` then shows no `--head main` call. The PTY test `pty_pr_default_branch_checkout_is_never_looked_up` proves the same.
+
 ## Setup
 
 Every recipe in these files uses the names of this block (the prelude). Save it as a file, for example `${TMPDIR:-/tmp}/ws-prelude.sh`, and source it at the top of a recipe. The shell must be in the repository root (or a worktree root).

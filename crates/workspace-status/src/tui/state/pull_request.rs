@@ -14,6 +14,11 @@
 //! screen while it runs. A failed poll backs its forge host off and keeps
 //! the last answer.
 //!
+//! A checkout on its repository's known default branch has no PR status:
+//! it is never looked up or polled, and a switch onto that branch drops its
+//! record like any other branch change. An unknown default branch changes
+//! nothing.
+//!
 //! Each successful lookup is compared with the last one of the same
 //! checkout in this session. A change of the same PR into CI failed, ready
 //! to merge, or merged, or the PR going away, queues a [`PrTransition`] for
@@ -46,9 +51,9 @@ use super::super::pr_poll::{
 };
 use super::super::pr_status::PrState;
 use super::super::pull_request::{
-    ci_opened_status, commit_url, is_web_url, lookup_failed_status, no_ci_status, no_pr_status,
-    parse_remote, Forge, PrDetailLookup, PrLookup, PrPage, PullRequest, PullRequestDetail,
-    CI_OPEN_FAILED, NO_PR_FOR_ROW, OPEN_FAILED, PR_LOOKUP_RUNNING,
+    ci_opened_status, commit_url, default_branch_status, is_web_url, lookup_failed_status,
+    no_ci_status, no_pr_status, parse_remote, Forge, PrDetailLookup, PrLookup, PrPage, PullRequest,
+    PullRequestDetail, CI_OPEN_FAILED, NO_PR_FOR_ROW, OPEN_FAILED, PR_LOOKUP_RUNNING,
 };
 use super::super::status::StatusMessage;
 use super::super::toast::{Toast, ToastMark, PR_TOAST_TTL_MS, TOAST_MAX};
@@ -61,6 +66,14 @@ use super::AppState;
 
 /// Error line reason when a failed PR lookup printed no reason.
 const PR_LOOKUP_FAILED: &str = "lookup failed";
+
+/// True when snapshot row `row` is on its repository's default branch, as
+/// far as it is known ([`WorkspaceRepoSnapshot::default_branch`]). Such a
+/// checkout receives PRs and carries none. An unknown default branch is
+/// never matched, so that checkout is looked up as any other.
+fn on_default_branch(row: &WorkspaceRepoSnapshot) -> bool {
+    row.default_branch.as_deref() == Some(row.branch.as_str())
+}
 
 /// What the forge said about the PR of one (remote URL, branch).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -461,6 +474,25 @@ pub(crate) struct PrCache {
     /// whenever a lookup lands or the records sync with the snapshot, so
     /// the poll period and the stale test cost nothing per frame.
     hot: bool,
+    /// Checkout path to the remote of a checkout on its known default
+    /// branch. Such a checkout has no PR record, so this keeps the remote
+    /// that commit links need ([`AppState::commit_link`]); no PR surface
+    /// reads it.
+    default_remotes: HashMap<PathBuf, CheckoutRemote>,
+}
+
+/// The remote of a checkout on its known default branch, resolved with git
+/// only (no forge CLI) for commit links.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CheckoutRemote {
+    /// The default branch the checkout was on when it was resolved.
+    branch: String,
+    /// The remote URL; `None` until the worker answers, and when the
+    /// checkout has no remote.
+    remote: Option<String>,
+    /// `r` or a full reload asked to resolve it again; the old remote
+    /// stays until the answer lands.
+    look_again: bool,
 }
 
 impl PrCache {
@@ -747,8 +779,14 @@ impl AppState {
             .collect()
     }
 
-    /// [`Self::run_pr_action`] on `branch` of checkout `repo`.
+    /// [`Self::run_pr_action`] on `branch` of checkout `repo`. A checkout on
+    /// its repository's known default branch has no PR: every action says
+    /// `<branch> is the default branch: no PR` and asks the forge nothing.
     fn run_pr_action_on(&mut self, action: PrAction, repo: PathBuf, branch: String) -> Effect {
+        if self.is_on_default_branch(&repo, &branch) {
+            self.status = StatusMessage::info(default_branch_status(&branch));
+            return Effect::None;
+        }
         match action {
             PrAction::Open => Effect::OpenPullRequest {
                 repo,
@@ -869,11 +907,9 @@ impl AppState {
                 // A second Ctrl+click on the badge opens again; it is not
                 // a double-click that drills into the row.
                 self.last_click = None;
-                Effect::OpenPullRequest {
-                    repo,
-                    branch,
-                    page: PrPage::Pr,
-                }
+                // The same guard as `gx`: a badge painted before the
+                // checkout's default branch became known opens nothing.
+                self.run_pr_action_on(PrAction::Open, repo, branch)
             }
             None => {
                 self.status = StatusMessage::warn(NO_PR_FOR_ROW);
@@ -922,7 +958,9 @@ impl AppState {
     /// Web page of commit `sha` (full id) in checkout `checkout`, or `None`.
     ///
     /// The forge comes from the remote URL the PR badge lookup already
-    /// resolved for the checkout ([`PrCache::remote_for`]); no git runs
+    /// resolved for the checkout ([`PrCache::remote_for`]), or, for a
+    /// checkout on its known default branch (never looked up), the remote
+    /// resolved for it alone ([`Self::due_remote_lookups`]); no git runs
     /// here. No resolved remote, or a remote that is not GitHub or GitLab,
     /// gives no link. An id that is not a full SHA-1 or SHA-256 hex id (an
     /// abbreviated one) gives no link either.
@@ -931,7 +969,13 @@ impl AppState {
         if !full {
             return None;
         }
-        let remote = self.pr_cache.remote_for(checkout)?;
+        let remote = self.pr_cache.remote_for(checkout).or_else(|| {
+            self.pr_cache
+                .default_remotes
+                .get(checkout)?
+                .remote
+                .as_deref()
+        })?;
         Some(commit_url(&parse_remote(remote)?, sha))
     }
 
@@ -992,13 +1036,93 @@ impl AppState {
     }
 
     /// Snapshot rows whose PR is looked up: visible (not hidden, unless
-    /// hidden repos show) and on a local branch.
+    /// hidden repos show), on a local branch, and not on the repository's
+    /// known default branch ([`on_default_branch`]). Every PR surface reads
+    /// these rows, so a default-branch checkout gets no lookup, poll,
+    /// badge, total, popover section, alert, or PRs tab row.
     pub(super) fn pr_rows(&self) -> impl Iterator<Item = &WorkspaceRepoSnapshot> {
+        self.branch_rows().filter(|row| !on_default_branch(row))
+    }
+
+    /// Snapshot rows that are visible (not hidden, unless hidden repos
+    /// show) and on a local branch.
+    fn branch_rows(&self) -> impl Iterator<Item = &WorkspaceRepoSnapshot> {
         self.snapshot
             .repos
             .iter()
             .filter(|row| self.show_hidden || !row.hidden)
             .filter(|row| is_counted_local_branch(&row.branch))
+    }
+
+    /// Checkouts on their known default branch whose remote needs a
+    /// git-only resolve for commit links: a new or changed checkout, or one
+    /// that `r` or a full reload asked to resolve again.
+    ///
+    /// Syncs the remote records with the snapshot like
+    /// [`Self::due_pr_lookups`]: a checkout that vanished, is hidden, or
+    /// left its default branch is dropped. No forge CLI runs for these.
+    pub(crate) fn due_remote_lookups(&mut self) -> Vec<(PathBuf, String)> {
+        let wanted: Vec<(PathBuf, String)> = self
+            .branch_rows()
+            .filter(|row| on_default_branch(row))
+            .map(|row| (PathBuf::from(&row.repo), row.branch.clone()))
+            .collect();
+        let remotes = &mut self.pr_cache.default_remotes;
+        remotes.retain(|path, record| {
+            wanted
+                .iter()
+                .any(|(want, branch)| want == path && *branch == record.branch)
+        });
+        let mut due = Vec::new();
+        for (path, branch) in wanted {
+            match remotes.get_mut(&path) {
+                Some(record) => {
+                    if !std::mem::take(&mut record.look_again) {
+                        continue;
+                    }
+                }
+                None => {
+                    remotes.insert(
+                        path.clone(),
+                        CheckoutRemote {
+                            branch: branch.clone(),
+                            remote: None,
+                            look_again: false,
+                        },
+                    );
+                }
+            }
+            due.push((path, branch));
+        }
+        due
+    }
+
+    /// Land the remote that a git-only resolve gave for checkout `repo` on
+    /// its default branch `branch`. False when the checkout left that
+    /// branch or vanished since the resolve was queued.
+    pub(crate) fn apply_checkout_remote(
+        &mut self,
+        repo: &Path,
+        branch: &str,
+        remote: Option<String>,
+    ) -> bool {
+        match self.pr_cache.default_remotes.get_mut(repo) {
+            Some(record) if record.branch == branch => {
+                record.remote = remote;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// True when checkout `repo` is a snapshot row on `branch`, and
+    /// `branch` is its repository's known default branch.
+    fn is_on_default_branch(&self, repo: &Path, branch: &str) -> bool {
+        self.snapshot
+            .repos
+            .iter()
+            .find(|row| Path::new(&row.repo) == repo)
+            .is_some_and(|row| row.branch == branch && on_default_branch(row))
     }
 
     /// Set how PR polling runs, from [`crate::settings::Settings::pr_poll`].
@@ -1068,9 +1192,15 @@ impl AppState {
     /// a forge that answered, or a branch change, clears it. The PR detail
     /// is dropped, so the popover fetches it again (at once when it is open
     /// and the lookup lands). The last answer seen stays too, so the new
-    /// lookup can still queue a transition.
+    /// lookup can still queue a transition. The remote of a checkout on its
+    /// default branch is resolved again too, and stays until that lands.
     pub(crate) fn forget_pr_lookups(&mut self, repo: Option<&Path>) {
         let cache = &mut self.pr_cache;
+        for (path, record) in &mut cache.default_remotes {
+            if repo.is_none_or(|repo| repo == path.as_path()) {
+                record.look_again = true;
+            }
+        }
         match repo {
             Some(repo) => {
                 let Some(record) = cache.checkouts.get_mut(repo) else {
@@ -1710,8 +1840,9 @@ mod tests {
 
     use super::super::super::app::apply_one_repo_snapshot;
     use super::super::super::icons::IconKind;
-    use super::super::super::popover::IconTarget;
+    use super::super::super::popover::{popover_sections, IconTarget};
     use super::super::super::status::StatusKind;
+    use super::super::super::tree::pr_badge_kind;
     use super::super::{FocusPane, IconHit};
     use super::*;
     use crate::helpers::DETACHED_HEAD_BRANCH;
@@ -1743,6 +1874,7 @@ mod tests {
             merged_into_default: None,
             default_branch_override: None,
             default_tip_ref: None,
+            default_branch: None,
             local_branches: Vec::new(),
         }
     }
@@ -2011,6 +2143,276 @@ mod tests {
         assert!(app.pr_cache.answers.is_empty(), "its answer too");
     }
 
+    /// `row` with `default` as its repository's known default branch.
+    fn with_default(mut row: RepoSnapshot, default: &str) -> RepoSnapshot {
+        row.default_branch = Some(default.into());
+        row
+    }
+
+    /// Sorted `(checkout, branch)` pairs of `targets`, for comparison.
+    fn names(targets: Vec<(PathBuf, String)>) -> Vec<(String, String)> {
+        let mut names: Vec<(String, String)> = targets
+            .into_iter()
+            .map(|(path, branch)| (path.display().to_string(), branch))
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter()
+            .map(|(name, branch)| (name.to_string(), branch.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_checkout_on_its_default_branch_is_never_looked_up_or_polled() {
+        let mut app = app_with(
+            &[
+                with_default(pushed_on("app", "main"), "main"),
+                with_default(pushed_on("dev", "develop"), "main"),
+                pushed_on("guess", "main"),
+                with_default(pushed("feat"), "main"),
+            ],
+            &[],
+        );
+        let lookups = pairs(&[("dev", "develop"), ("feat", "feature"), ("guess", "main")]);
+        assert_eq!(
+            names(app.due_pr_lookups()),
+            lookups,
+            "not the default branch; `develop` is not the default here, and an \
+             unknown default branch is looked up as before"
+        );
+        let t0 = Instant::now();
+        for (name, branch) in [
+            ("app", "main"),
+            ("dev", "develop"),
+            ("guess", "main"),
+            ("feat", "feature"),
+        ] {
+            // The default branch has no record, so its answer never lands.
+            let landed = app.apply_pr_lookup_at(
+                Path::new(name),
+                branch,
+                Some(gh(name)),
+                open_on(&gh(name), 1),
+                t0,
+            );
+            assert_eq!(landed, name != "app", "{name} lands");
+        }
+        let Effect::LookupPullRequests { targets } = app.refresh_pull_requests(None) else {
+            panic!("Refresh PRs looks up the other checkouts");
+        };
+        assert_eq!(names(targets), lookups, "Refresh PRs");
+        for (name, branch) in [("dev", "develop"), ("guess", "main"), ("feat", "feature")] {
+            let path = Path::new(name);
+            let lookup = open_on(&gh(name), 1);
+            assert!(app.apply_pr_lookup_at(path, branch, Some(gh(name)), lookup, t0));
+        }
+        assert_eq!(
+            names(app.due_pr_polls(t0 + secs(3600))),
+            lookups,
+            "a poll cycle"
+        );
+
+        app.forget_pr_lookups(None);
+        app.forget_pr_lookups(Some(Path::new("app")));
+        assert!(
+            !names(app.due_pr_lookups()).contains(&("app".to_string(), "main".to_string())),
+            "`r` and a full reload"
+        );
+    }
+
+    #[test]
+    fn a_default_branch_checkout_shows_no_badge_total_section_or_prs_tab_row() {
+        let mut app = app_with(
+            &[
+                with_default(pushed_on("app", "main"), "main"),
+                with_default(pushed("feat"), "main"),
+            ],
+            &[],
+        );
+        let _ = app.due_pr_lookups();
+        let t0 = Instant::now();
+        let main = Path::new("app");
+        let _ = app.apply_pr_lookup_at(main, "main", Some(gh("app")), open_on(&gh("app"), 1), t0);
+        land_pr(&mut app, "feat", &gh("feat"), open_on(&gh("feat"), 2), t0);
+
+        assert_eq!(app.pr_badge(main), None, "badge");
+        assert_eq!(app.tree_pr_badge(main, 120, t0), None, "tree badge");
+        assert_eq!(app.pull_request_for(main), None, "graph header chip");
+        assert_eq!(app.pr_totals().prs, 1, "the workspace total");
+        assert_eq!(
+            app.prs_listed_checkouts(),
+            vec![PathBuf::from("feat")],
+            "the PRs tab"
+        );
+        assert_eq!(app.pr_lookup_progress(), (1, 1), "the PRs tab loading line");
+        let target = (
+            pr_badge_kind(PrState::InReview),
+            IconTarget::PullRequest(main.to_path_buf()),
+        );
+        assert!(
+            popover_sections(&app, &[target], 0).is_empty(),
+            "the popover PR section"
+        );
+
+        let worktree = |path: &str, branch: &str| Worktree {
+            path: path.into(),
+            head_id: None,
+            branch: Some(branch.into()),
+            hidden: false,
+            is_current: false,
+        };
+        app.graph = Some(GraphModel {
+            commits: vec![Commit {
+                id: "aaa".into(),
+                subject: "seed".into(),
+                ..Commit::default()
+            }],
+            worktrees: vec![worktree("app", "main"), worktree("feat", "feature")],
+            window: 1,
+            ..GraphModel::default()
+        });
+        let graph: Vec<PathBuf> = app
+            .graph_pr_badges()
+            .into_iter()
+            .map(|(_, path, _)| path)
+            .collect();
+        assert_eq!(graph, vec![PathBuf::from("feat")], "graph worktree badges");
+    }
+
+    #[test]
+    fn gx_and_gc_on_the_default_branch_say_it_has_no_pr() {
+        let mut app = app_with(
+            &[
+                with_default(repo("app", "main"), "main"),
+                with_default(linked("app/.worktrees/feat", "app", "feat"), "main"),
+            ],
+            &[],
+        );
+        let refused = |app: &mut AppState, action: Action, what: &str| {
+            app.status = StatusMessage::default();
+            assert_eq!(app.dispatch(action), Effect::None, "{what}");
+            assert_eq!(app.status, "main is the default branch: no PR", "{what}");
+            assert_eq!(app.status.kind(), StatusKind::Info, "{what}");
+        };
+        focus(&mut app, "checkout:app");
+        refused(&mut app, Action::OpenPullRequest, "gx");
+        refused(&mut app, Action::OpenPullRequestCi, "gc");
+        refused(&mut app, Action::RefreshPullRequest, "Refresh this PR");
+        refused(&mut app, Action::CopyPullRequestUrl, "Copy PR URL");
+        focus(&mut app, "checkout:app/.worktrees/feat");
+        assert_eq!(gx(&mut app), open("app/.worktrees/feat", "feat"));
+
+        // A graph worktree row on the default branch too.
+        focus(&mut app, "checkout:app/.worktrees/feat");
+        app.graph = Some(GraphModel {
+            commits: vec![Commit {
+                id: "aaa".into(),
+                subject: "seed".into(),
+                ..Commit::default()
+            }],
+            worktrees: vec![Worktree {
+                path: "app".into(),
+                head_id: None,
+                branch: Some("main".into()),
+                hidden: false,
+                is_current: false,
+            }],
+            window: 1,
+            ..GraphModel::default()
+        });
+        app.focus = FocusPane::Right;
+        let rows = app.graph.as_ref().expect("graph").visible_rows();
+        app.graph_cursor = rows
+            .iter()
+            .position(|row| matches!(row, GraphRow::Worktree(_)))
+            .expect("worktree row");
+        refused(
+            &mut app,
+            Action::OpenPullRequest,
+            "gx on a graph worktree row",
+        );
+    }
+
+    #[test]
+    fn a_switch_onto_the_default_branch_drops_the_pr_and_a_switch_away_looks_up() {
+        let mut app = app_with(&[with_default(pushed("app"), "main")], &[]);
+        let path = Path::new("app");
+        let _ = app.due_pr_lookups();
+        land_pr(
+            &mut app,
+            "app",
+            &gh("app"),
+            open_on(&gh("app"), 7),
+            Instant::now(),
+        );
+        assert_eq!(app.pr_badge(path), Some(PrState::InReview));
+
+        let on_main = with_default(pushed_on("app", "main"), "main");
+        apply_one_repo_snapshot(&mut app, "app", Some(on_main));
+        assert!(app.due_pr_lookups().is_empty(), "no lookup for main");
+        assert_eq!(app.pr_badge(path), None, "the badge goes");
+        assert!(app.pr_cache.checkouts.is_empty(), "the record goes");
+        assert!(app.pr_cache.answers.is_empty(), "its answer too");
+        assert!(app.take_pr_transitions().is_empty(), "no alert");
+
+        apply_one_repo_snapshot(&mut app, "app", Some(with_default(pushed("app"), "main")));
+        assert_eq!(
+            app.due_pr_lookups(),
+            vec![(PathBuf::from("app"), "feature".to_string())],
+            "a switch away looks up"
+        );
+        land_pr(
+            &mut app,
+            "app",
+            &gh("app"),
+            open_on(&gh("app"), 7),
+            Instant::now(),
+        );
+        assert_eq!(app.pr_badge(path), Some(PrState::InReview));
+        assert!(app.take_pr_transitions().is_empty(), "no alert");
+    }
+
+    #[test]
+    fn a_default_branch_checkout_resolves_only_its_remote_for_commit_links() {
+        const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+        let mut app = app_with(&[with_default(repo("app", "main"), "main")], &[]);
+        let path = Path::new("app");
+        let main = vec![(PathBuf::from("app"), "main".to_string())];
+        assert!(app.due_pr_lookups().is_empty(), "no PR lookup");
+        assert_eq!(app.due_remote_lookups(), main, "a remote resolve");
+        assert!(app.due_remote_lookups().is_empty(), "once per branch");
+        assert_eq!(app.commit_link(path, SHA), None, "resolve in flight");
+        assert!(app.apply_checkout_remote(path, "main", Some(REMOTE.into())));
+        let link = Some(format!("https://github.com/octo/demo/commit/{SHA}"));
+        assert_eq!(app.commit_link(path, SHA), link);
+        assert_eq!(app.pr_badge(path), None, "still no PR status");
+        assert_eq!(app.pr_totals().prs, 0);
+
+        app.forget_pr_lookups(Some(path));
+        assert_eq!(app.due_remote_lookups(), main, "`r` resolves again");
+        assert_eq!(app.commit_link(path, SHA), link, "the old remote stays");
+
+        apply_one_repo_snapshot(
+            &mut app,
+            "app",
+            Some(with_default(repo("app", "x"), "main")),
+        );
+        assert!(app.due_remote_lookups().is_empty());
+        assert!(
+            !app.apply_checkout_remote(path, "main", Some(REMOTE.into())),
+            "a late resolve for the old branch is dropped"
+        );
+        assert_eq!(
+            app.due_pr_lookups(),
+            vec![(PathBuf::from("app"), "x".to_string())],
+            "off the default branch the PR lookup runs again"
+        );
+        assert_eq!(app.commit_link(path, SHA), None, "until it lands");
+    }
+
     #[test]
     fn open_result_sets_status_and_refreshes_the_cache() {
         let mut app = app_with(&[repo("app", "feature")], &[]);
@@ -2085,6 +2487,29 @@ mod tests {
             assert_eq!(focused_id(&app), "repo:app", "col {col}");
             assert_eq!(app.focus, FocusPane::Left);
         }
+    }
+
+    #[test]
+    fn ctrl_click_on_a_stale_badge_of_a_default_branch_checkout_opens_nothing() {
+        // The badge was painted before the default branch became known.
+        let mut app = app_with(
+            &[
+                with_default(repo("app", "main"), "main"),
+                repo("lib", "feature"),
+            ],
+            &[],
+        );
+        let y = tree_y(&app, "repo:app");
+        badge_at(&mut app, "app", 20, y);
+        focus(&mut app, "repo:lib");
+        app.last_click = None;
+        assert_eq!(
+            app.dispatch(Action::CtrlClick { col: 20, row: y }),
+            Effect::LoadRightPane,
+            "the row is selected, no PR opens"
+        );
+        assert_eq!(focused_id(&app), "repo:app");
+        assert_eq!(app.status, "main is the default branch: no PR");
     }
 
     #[test]
