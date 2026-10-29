@@ -51,11 +51,12 @@ $V stop "$RUN"
 | `build` | `cargo build -p workspace-status --bin workspace-status`; prints the binary path. |
 | `launch [--size COLSxROWS] [--env K=V]... [--fake-forge DIR] [--workspace DIR]` | Seeds `scripts/seed-demo-workspace.sh` into the run dir, starts the TUI in a private tmux server (default `160x45`), waits for the `? help` chrome, prints the run dir. `--env` overrides a default (repeatable). `--fake-forge DIR` turns on the fake forge (below). `--workspace DIR` drives a fixture you built, which must be inside the root. |
 | `keys [-l] <run> <key>...` | `tmux send-keys` with key names: `j`, `Enter`, `Escape`, `Tab`, `C-c`, `'?'`. `g x` sends the two keys of a chord. `-l` sends one argument as literal text (a search term), one character at a time. |
-| `wait [--gone] [--cursor\|--regex] <run> <text> [timeout]` | Waits until `<text>` is on the screen (default 10 s). `--cursor`: until a line with the focus bar `▌` holds it. `--regex`: `<text>` is an extended regex that matches inside one line. `--gone` inverts any of them: wait until it is not there. A timeout saves the screen to `evidence/NN-wait-timeout.txt` and exits 1. |
+| `wait [--gone] [--cursor\|--regex] <run> <text> [timeout]` | Waits until `<text>` is on the screen (default 10 s). `--cursor`: until a line with the focus bar `▌` holds it. `--regex`: `<text>` is an extended regex that matches inside one line. `--gone` inverts any of them: wait until it is not there. It fails at once, in both modes, when the tmux session is missing or the TUI has exited (a gone TUI must not satisfy `--gone`). A timeout or such a failure saves the screen to `evidence/NN-wait-timeout.txt` or `NN-wait-failed.txt` and exits 1. |
 | `capture <run> [name]` | Prints the screen and saves `evidence/NN-<name>.txt` plus `.ansi` (with colour). Works on a dead pane: it shows the panic text. |
-| `stop <run>` | Sends `q`, ends the tmux server of this run, copies the forge call log and `opened.log` into `evidence/`. The run dir stays. |
+| `stop <run>` | Sends `q`, ends the tmux server of this run, copies the calls of this run and `opened.log` into `evidence/`. The run dir stays. Safe to repeat. |
 | `cli <run> -- <args>` | Runs the same binary with the same isolation, headless, in the fixture. Needs `--plain`, `--json`, `--help` or `--version`; refuses `--update`. Saves `NN-cli-*.{cmd,out,err,rc}`. |
-| `scenario <forge-dir> <set>...` | Copies scenario sets into a fake forge directory. Each file goes in through a temporary name and a rename, so it is also the mid-run swap. |
+| `scenario [--reset] <forge-dir> <set>...` | Copies scenario sets into a fake forge directory. Without `--reset` the sets are **overlays** on what is there: a set replaces the files it ships and leaves the others. `--reset` first clears the scenario files (`gh/`, `glab/`; `calls.log` stays), so use it to start a run from a known state, before `launch`. Each file goes in through a temporary name and a rename, so an overlay is also the mid-run swap (a reset is not: a call in the gap finds no scenario). |
+| `calls <run>` | Prints the `gh` / `glab` calls this run made (fake forge only): the lines of `calls.log` after the ones that were there at launch. |
 
 `<run>` is the run dir that `launch` prints (or its id under the root). The root is `$WS_VERIFY_ROOT`, else `${TMPDIR:-/tmp}/ws-verify`. A system `TMPDIR` can be cleared on reboot: set `WS_VERIFY_ROOT` to a durable directory when you must keep the proof.
 
@@ -102,7 +103,7 @@ Scenario sets live in `.agents/skills/verify/scenarios/`. Apply sets with `scena
 
 `.agents/skills/verify/scenarios/<set>/` has the layout of a forge directory, so `scenario` is a copy that renames each file into place and removes a stale failure file. Add a set by adding a directory.
 
-`$FORGE/calls.log` lists every `gh` and `glab` call the app made (argv line, program first). Use it to prove the app asked, and to find a call the fake does not know (`fake forge: no scenario for ...`).
+`$FORGE/calls.log` lists every `gh` and `glab` call the app made (argv line, program first), across runs. `calls <run>` prints only the lines of one run. Use it to prove the app asked, and to find a call the fake does not know (`fake forge: no scenario for ...`). Use one run at a time per forge directory; give runs that overlap a forge directory each.
 
 ## Live mode
 
@@ -111,7 +112,7 @@ Run `launch` without `--fake-forge`, on a fixture whose `origin` is a public rep
 ## Rules for driving
 
 - **Wait for text, never sleep.** Panes load off the event thread, so a screen read right after a key can be one frame old. Follow each key with `wait` on the text the step should produce.
-- **One movement key per `keys` call, then wait.** A burst such as `j j j` can move the cursor fewer rows. For the same reason `keys -l` types text one character at a time: a burst of one letter (`ll`) lost a character in the app (seen live).
+- **Send one key per write, then wait.** Movement keys go one per `keys` call (a burst such as `j j j` can move the cursor fewer rows), and `keys -l` types text one character at a time. A chord is the one exception: two keys in one call.
 - **Select by row text.** Use `wait --cursor` on text unique to the row (`'& feature/auth-refresh'`), not a key count. After `Tab` the focus bar is in the graph; `wait --cursor` follows it.
 - **Chords are two keys in one call** (`g x`, `g c`, `g g`). Two separate presses of `z` or `g` more than 0.4 s apart are not a chord.
 - **Keys under tmux are legacy bytes.** There is no kitty keyboard protocol: Shift letters arrive as plain letters and `Escape` is a lone ESC byte. The PTY suite sends CSI-u (`docs/tui-tty-e2e.md`), a different input path.
@@ -119,6 +120,7 @@ Run `launch` without `--fake-forge`, on a fixture whose `origin` is a public rep
 - **Mutating keys** (`s` `u` `x` `S` `a` `p` `D` `P` `f` `d` `b` `m` `c` `W`, Space) write git state or a store in the fixture. Use them only against the run's own fixture, answer confirms with `n` unless the feature needs `y`, and start a new run after any write. `e` and `E` start an editor or diff tool in the pane, and `y` and `'` copy through OSC 52, which tmux can pass on to the host clipboard: press them only when the feature needs them.
 - **One TUI per run.** Never drive, signal or attach to an instance this run did not start.
 - A TTY run waits for keys forever. Never start the binary outside the driver without `--plain` or `--json`.
+- **A failed `wait` leaves the TUI running.** So does any step that stops early. Always `stop` the run (a `trap` in a script, `stop` by hand in a shell), and `stop` before you launch the next one: a run keeps its tmux server, and with `WS_STATUS_PR_POLL_MS` set it keeps polling, so it can answer into the next run. The feature files do this with `relaunch`.
 
 ## Proof
 
@@ -130,7 +132,7 @@ Run `launch` without `--fake-forge`, on a fixture whose `origin` is a public rep
     NN-<name>.txt .ansi                     capture
     NN-wait-timeout.txt                     the screen when a wait failed
     NN-cli-<args>.{cmd,out,err,rc}          cli
-    forge-calls.log opened.log              copied by stop
+    forge-calls.log opened.log              copied by stop (the calls of this run only)
   workspace/ config/ state/                 fixture and app state (disposable)
 ```
 

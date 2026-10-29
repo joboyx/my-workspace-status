@@ -2,13 +2,13 @@
 
 The left pane is the workspace tree: one row per checkout, with its PR badge in the trailing run. The right pane follows the cursor: a checkout or folder row shows that checkout's commit graph, a file row shows its diff. `Tab` moves the focus bar between the panes. The graph pane also carries the PR of the focused checkout.
 
-Setup, the `V`, `FORGE` and `to_*` helpers, and the PS ids: [pr-status.md](pr-status.md). **Needs phase A** has the same meaning here.
+Setup, the `V`, `FORGE`, `RUN`, `relaunch` and `to_*` helpers, the `trap` that stops the last run, and the PS ids: [pr-status.md](pr-status.md). **Needs phase A** has the same meaning here. Every recipe starts its own run with `relaunch`, which stops the previous one.
 
 ## TG1 Badges in the tree, and the pane follows the cursor
 
 ```bash
-$V scenario "$FORGE" context github-review gitlab-ready
-RUN=$($V launch --fake-forge "$FORGE")
+$V scenario --reset "$FORGE" context github-review gitlab-ready
+relaunch --fake-forge "$FORGE"
 $V wait --regex "$RUN" 'feature/rate-limit +& A'     # today; final: wait "$RUN" '!5 A'
 $V capture "$RUN" tree-wide
 to_app
@@ -39,9 +39,9 @@ Final (**needs phase A**): the badge moves to the end of each trailing run and g
 The glyph is the last cell of every badge, so all glyphs of a capture stand in one column. Under 50 tree columns the refs drop on every row and only glyphs stay. A tree pane of 50 columns needs about 125 terminal columns; `100x40` gives about 38.
 
 ```bash
-$V stop "$RUN"
-RUN=$($V launch --size 100x40 --fake-forge "$FORGE")
-$V wait --regex "$RUN" 'feature/auth-refresh.* P( |$)'      # the app badge (in review) on either layout
+$V scenario --reset "$FORGE" context github-review gitlab-ready
+relaunch --size 100x40 --fake-forge "$FORGE"                # stops the wide run first
+$V wait --regex "$RUN" 'feature/auth-refresh.* P($|[^[:alnum:]])'   # the app badge (in review) on either layout
 $V capture "$RUN" tree-narrow
 ```
 
@@ -52,12 +52,13 @@ $V capture "$RUN" tree-narrow
 With `github-failed gitlab-failed` and the cursor on the `app` row, the graph pane's branch header line shows, right aligned, `<glyph> <ref> <state label>  ▸ <next action>`. The workspace row shows `<n> PRs · <m> need you`.
 
 ```bash
-$V scenario "$FORGE" github-failed gitlab-failed
-to_top && $V keys "$RUN" r
+$V scenario --reset "$FORGE" context github-failed gitlab-failed
+relaunch --fake-forge "$FORGE"
 $V wait --regex "$RUN" 'PRs · 2 need you' 10          # the total on the workspace row
 to_app
 $V wait --regex "$RUN" 'x #7 CI failed.*fix CI' 10    # the chip, on the graph header line of app
 $V capture "$RUN" chip-and-total
+$V stop "$RUN"
 ```
 
-**PASS:** both lines are on the capture. On a `100x40` run the chip drops `▸ <next action>` first, then the state label.
+**PASS:** both lines are on the capture. On a `100x40` run (`relaunch --size 100x40 ...`) the chip drops `▸ <next action>` first, then the state label.
