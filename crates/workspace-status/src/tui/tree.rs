@@ -1302,10 +1302,11 @@ pub struct PrTotals {
 }
 
 /// The workspace total for `totals`, widest first: `8 PRs · 2 need you`,
-/// then `8 PRs`. `8 PRs` is muted, the `·` dim, and `2 need you` modified
-/// and bold. One reads `1 PR` and `1 needs you`. With no PR that needs you
-/// only `8 PRs`; with no PR nothing. A `narrow` tree shows one part:
-/// `2 need you`, else `8 PRs`.
+/// then `2 need you` alone. `8 PRs` is muted, the `·` dim, and `2 need you`
+/// modified and bold. One reads `1 PR` and `1 needs you`. With no PR that
+/// needs you only `8 PRs`; with no PR nothing. The count of PRs that need
+/// the author is the part worth keeping, so it outlasts the PR count. A
+/// `narrow` tree shows only that part: `2 need you`, else `8 PRs`.
 fn pr_total_variants(totals: PrTotals, narrow: bool) -> Vec<Vec<TextSeg>> {
     if totals.prs == 0 {
         return Vec::new();
@@ -1328,17 +1329,18 @@ fn pr_total_variants(totals: PrTotals, narrow: bool) -> Vec<Vec<TextSeg>> {
     match (totals.need_you > 0, narrow) {
         (false, _) => vec![vec![prs]],
         (true, true) => vec![vec![need_you]],
-        (true, false) => vec![vec![prs.clone(), dot, need_you], vec![prs]],
+        (true, false) => vec![vec![prs, dot, need_you.clone()], vec![need_you]],
     }
 }
 
 /// Workspace root trailing summary that fits `room` columns (pad included)
 /// beside the name: `N changed · sync`, then two spaces and the PR total
 /// (`8 PRs · 2 need you`, see [`PrTotals`]). The name is the row's
-/// identity, so the summary gives way first: the `need you` part, then the
-/// PR total, then `N changed · sync` goes to `N changed`, then `N`, then
-/// nothing. A `narrow` tree (under [`PR_REF_MIN_TREE_COLS`]) shows one part
-/// of the PR total.
+/// identity, so the summary gives way first: the `8 PRs` part (`2 need you`
+/// stays while any PR needs the author), then the whole PR total, then
+/// `N changed · sync` goes to `N changed`, then `N`, then nothing. A
+/// `narrow` tree (under [`PR_REF_MIN_TREE_COLS`]) starts at the one-part
+/// total.
 pub(crate) fn workspace_trailing_fit(
     chrome: &NodeChrome,
     totals: PrTotals,
@@ -1841,7 +1843,8 @@ mod tests {
     }
 
     /// The workspace total sits after the change summary and gives way
-    /// first: `need you`, then the PR count, then the summary's own steps.
+    /// first: the PR count (`need you` stays while any PR needs the author),
+    /// then the whole total, then the summary's own steps.
     #[test]
     fn workspace_pr_total_gives_way_before_the_change_summary() {
         let chrome = NodeChrome {
@@ -1863,9 +1866,9 @@ mod tests {
         let full = "4 changed · 2 behind  8 PRs · 2 need you";
         let steps = [
             (visible_width(full) + 1, full),
-            (visible_width(full), "4 changed · 2 behind  8 PRs"),
+            (visible_width(full), "4 changed · 2 behind  2 need you"),
             (
-                visible_width("4 changed · 2 behind  8 PRs"),
+                visible_width("4 changed · 2 behind  2 need you"),
                 "4 changed · 2 behind",
             ),
             (visible_width("4 changed · 2 behind"), "4 changed"),
@@ -1881,6 +1884,10 @@ mod tests {
         };
         assert_eq!(text(none_need, false, 80), "4 changed · 2 behind  8 PRs");
         assert_eq!(text(none_need, true, 80), "4 changed · 2 behind  8 PRs");
+        // With nobody to act, the PR count is the only part and it goes
+        // before the summary does.
+        let tight = visible_width("4 changed · 2 behind  8 PRs");
+        assert_eq!(text(none_need, false, tight), "4 changed · 2 behind");
         assert_eq!(text(both, true, 80), "4 changed · 2 behind  2 need you");
         let one = PrTotals {
             prs: 1,
