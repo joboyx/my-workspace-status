@@ -925,10 +925,15 @@ mod upstream_rewrite_tests {
         assert_eq!(snap.sync_status, SyncStatus::UpToDate);
         assert_eq!(snap.upstream_rewrite, None);
     }
+}
+
+#[cfg(test)]
+mod default_branch_tests {
+    use super::*;
+    use crate::testutil::{git, init_repo, unique_dir};
 
     #[test]
     fn the_default_branch_is_the_override_else_origin_head_else_unknown() {
-        use crate::testutil::{git, init_repo, unique_dir};
         let root = unique_dir("ws-default-branch");
         init_repo(&root.join("app"));
         let meta = RepoCheckoutMeta {

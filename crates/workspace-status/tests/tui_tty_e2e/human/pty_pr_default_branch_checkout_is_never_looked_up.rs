@@ -28,12 +28,14 @@ fn main_lookups(forge: &FakeForge) -> Vec<String> {
 /// review. Polling is off, so only the launch, `r`, and `gx` could ask.
 ///
 /// Proof: `appbox` shows `#7 P` and the workspace total reads `1 PR`; the
-/// `trunk` row paints no badge. `r` on `trunk` and then on `appbox` (whose
-/// answer turned CI failed) shows `#7 x`, so both reloads ran, and the
-/// total reads `1 PR · 1 needs you`. `gx` on `trunk` says `main is the
-/// default branch: no PR` and opens nothing. The call log never holds a
-/// `--head main` lookup. Without the rule the launch looks `main` up,
-/// `trunk` shows `#8 A`, and the total reads `2 PRs`.
+/// `trunk` row paints no badge. `gx` on `trunk` says `main is the default
+/// branch: no PR` and opens nothing. `r` on `appbox` (whose answer turned
+/// CI failed) shows `#7 x` and the total reads `1 PR · 1 needs you`. The
+/// call log never holds a `--head main` lookup: the launch and `gx` ask
+/// nothing for `main`. `r` on `trunk` runs too, but nothing waits for it
+/// (with no PR record it has nothing to forget), so it is not part of the
+/// proof. Without the rule the launch looks `main` up, `trunk` shows
+/// `#8 A`, and the total reads `2 PRs`.
 #[test]
 fn pty_pr_default_branch_checkout_is_never_looked_up() {
     let (root, workspace) = named_workspace("ws-tui-tty-pr-default-branch", "ws");
@@ -63,9 +65,9 @@ fn pty_pr_default_branch_checkout_is_never_looked_up() {
         GIT_WAIT,
     );
 
-    // `r` and `gx` on trunk, then `r` on appbox with a new answer:
-    // appbox's badge turns only after the later reload ran. The cursor
-    // starts on trunk's changed file, the first change in the tree.
+    // `r` and `gx` on trunk, then `r` on appbox with a new answer, whose
+    // badge turns once that reload and lookup ran. The cursor starts on
+    // trunk's changed file, the first change in the tree.
     tui.wait_pred(
         |screen| tree_cursor_on(screen, "README.md"),
         "cursor on trunk's README.md",
