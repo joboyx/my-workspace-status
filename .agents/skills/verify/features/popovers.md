@@ -2,13 +2,12 @@
 
 `gh` pins the icon popover of the focused row. For a checkout row with a PR it has a PR section: the PR fields, loaded with one more `gh pr view` / `glab api` call, and the actions of the PR. `j` / `k` move between lines, Enter runs the focused action, `y` copies the focused line, `Esc` closes it. A mouse hover peeks and a click pins; a tmux run sends no mouse, so the keys are the way in.
 
-Setup, the `V`, `FORGE`, `RUN`, `relaunch` and `to_*` helpers, the `trap` that stops the last run, and the **needs phase A** meaning: [pr-status.md](pr-status.md). Every recipe starts its own run with `relaunch`, which stops the previous one.
+Setup (the prelude with `V`, `FORGE`, `RUN`, `fresh`, `relaunch`, `stop_run` and the `to_*` helpers), the `trap` that stops the last run, how to run it when every command gets a fresh shell, and the **needs phase A** meaning: [pr-status.md](pr-status.md). Every recipe starts its own run with `fresh`, which stops the previous one before it resets the scenario files.
 
 ## PO1 The PR section, both forges (all builds)
 
 ```bash
-$V scenario --reset "$FORGE" context github-failed gitlab-failed
-relaunch --fake-forge "$FORGE"
+fresh context github-failed gitlab-failed -- --fake-forge "$FORGE"
 $V wait --regex "$RUN" 'feature/rate-limit +& P'
 to_app && $V keys "$RUN" g h
 $V wait "$RUN" 'Refresh auth tokens before expiry'      # the lines load after the popover opens
@@ -42,8 +41,7 @@ On `popover-gitlab` (today): `number  #5 Rate limit the public API`, `state   OP
 With `github-failed` and the cursor on the `app` row, `g h` shows the section header `x PR · CI failed` and these lines, each only when it has data: `number`, `state`, `next` (`▸ fix CI`), `author`, `branch`, `checks`, up to two lines naming checks (failed first, here `test (ubuntu-latest)`), `reviews`, `updated`, `checked`, `url`. Actions: `Open failed check  gc`, `Open PR  gx`, `Copy URL  y`, `Refresh this PR  r`. On `gitlab-failed`: `approvals 0 of 1`, `checks` as `pipeline failed`, a line for the failed job `test`, and the action `Open pipeline  gc`.
 
 ```bash
-$V scenario --reset "$FORGE" context github-failed gitlab-failed
-relaunch --fake-forge "$FORGE"
+fresh context github-failed gitlab-failed -- --fake-forge "$FORGE"
 $V wait "$RUN" '#7 x'
 to_app && $V keys "$RUN" g h
 $V wait "$RUN" 'Open failed check'

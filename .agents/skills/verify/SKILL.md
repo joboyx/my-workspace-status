@@ -112,7 +112,7 @@ Run `launch` without `--fake-forge`, on a fixture whose `origin` is a public rep
 ## Rules for driving
 
 - **Wait for text, never sleep.** Panes load off the event thread, so a screen read right after a key can be one frame old. Follow each key with `wait` on the text the step should produce.
-- **Send one key per write, then wait.** Movement keys go one per `keys` call (a burst such as `j j j` can move the cursor fewer rows), and `keys -l` types text one character at a time. A chord is the one exception: two keys in one call.
+- **Send one key per write; check the cursor after each move.** Give movement keys one per `keys` call and follow each with a `wait` (use `--cursor` on the row you expect). `keys -l` types text one character at a time. A chord is the one exception: two keys in one call.
 - **Select by row text.** Use `wait --cursor` on text unique to the row (`'& feature/auth-refresh'`), not a key count. After `Tab` the focus bar is in the graph; `wait --cursor` follows it.
 - **Chords are two keys in one call** (`g x`, `g c`, `g g`). Two separate presses of `z` or `g` more than 0.4 s apart are not a chord.
 - **Keys under tmux are legacy bytes.** There is no kitty keyboard protocol: Shift letters arrive as plain letters and `Escape` is a lone ESC byte. The PTY suite sends CSI-u (`docs/tui-tty-e2e.md`), a different input path.
@@ -120,7 +120,7 @@ Run `launch` without `--fake-forge`, on a fixture whose `origin` is a public rep
 - **Mutating keys** (`s` `u` `x` `S` `a` `p` `D` `P` `f` `d` `b` `m` `c` `W`, Space) write git state or a store in the fixture. Use them only against the run's own fixture, answer confirms with `n` unless the feature needs `y`, and start a new run after any write. `e` and `E` start an editor or diff tool in the pane, and `y` and `'` copy through OSC 52, which tmux can pass on to the host clipboard: press them only when the feature needs them.
 - **One TUI per run.** Never drive, signal or attach to an instance this run did not start.
 - A TTY run waits for keys forever. Never start the binary outside the driver without `--plain` or `--json`.
-- **A failed `wait` leaves the TUI running.** So does any step that stops early. Always `stop` the run (a `trap` in a script, `stop` by hand in a shell), and `stop` before you launch the next one: a run keeps its tmux server, and with `WS_STATUS_PR_POLL_MS` set it keeps polling, so it can answer into the next run. The feature files do this with `relaunch`.
+- **A failed `wait` leaves the TUI running.** So does any step that stops early. Always `stop` the run, and `stop` before you launch the next one: a run keeps its tmux server, and with `WS_STATUS_PR_POLL_MS` set it keeps polling, so it can answer into the next run. The feature files do this with `fresh` / `relaunch` and an exit `trap`. **If every command gets a fresh shell** (one tool call = one shell), that `trap` fires when the call that set it ends and stops the run that call started, and `V`, `RUN` and the helpers do not carry over: run Setup and a whole recipe in one call or one script file, or set `KEEP_RUN=1`, keep the printed run dir, and `stop <run dir>` by path in the last call. See **Setup**, **One shell or many** in [features/pr-status.md](features/pr-status.md).
 
 ## Proof
 

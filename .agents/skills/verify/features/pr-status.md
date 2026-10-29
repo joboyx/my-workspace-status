@@ -15,19 +15,28 @@ A checkout row in the tree shows the pull request of its branch: a GitHub PR thr
 
 ## Setup
 
-Repository root, or a worktree root. All steps use these names:
+Every recipe in these files uses the names of this block (the prelude). Save it as a file, for example `${TMPDIR:-/tmp}/ws-prelude.sh`, and source it at the top of a recipe. The shell must be in the repository root (or a worktree root).
 
 ```bash
-V=scripts/verify-tui.sh
-$V build
-FORGE=$(mktemp -d "${TMPDIR:-/tmp}/ws-forge.XXXXXX")
+V=$(pwd)/scripts/verify-tui.sh
+$V build >/dev/null                      # a no-op when the binary is up to date
+FORGE=${FORGE:-$(mktemp -d "${TMPDIR:-/tmp}/ws-forge.XXXXXX")}
+RUN=${RUN:-}
 
-# One run at a time per forge dir. A run that is not stopped keeps polling and keeps
-# its tmux server, and a failed wait leaves the TUI running. So: stop on exit, and
-# stop before every new launch.
-RUN=
-trap '[ -z "$RUN" ] || $V stop "$RUN" >/dev/null 2>&1' EXIT
-relaunch() { [ -z "$RUN" ] || $V stop "$RUN" >/dev/null 2>&1; RUN=$($V launch "$@"); }
+# One run at a time per forge dir. A run that is not stopped keeps its tmux server and,
+# with polling on, keeps polling; a failed wait leaves the TUI running too.
+stop_run() { [ -z "$RUN" ] || $V stop "$RUN" >/dev/null 2>&1; }
+[ -n "${KEEP_RUN:-}" ] || trap stop_run EXIT       # see "One shell or many" below
+relaunch() { stop_run; RUN=$($V launch "$@"); }
+# fresh <set>... -- <launch args>: stop the old run, THEN reset the scenario files to
+# these sets, THEN launch. The order matters: the old run may still poll the forge.
+fresh() {
+  stop_run
+  local sets=()
+  while [ $# -gt 0 ] && [ "$1" != -- ]; do sets+=("$1"); shift; done
+  shift
+  $V scenario --reset "$FORGE" "${sets[@]}" && RUN=$($V launch "$@")
+}
 
 # Move the cursor: to the workspace row, to the app checkout row, to any row by its text.
 to_top() { $V keys "$RUN" g g && $V wait --cursor "$RUN" '# workspace'; }
@@ -36,15 +45,48 @@ to_row() { $V keys "$RUN" / && $V keys -l "$RUN" "$1" && $V keys "$RUN" Enter &&
 to_api() { to_row 'rate-limit'; }
 ```
 
-In an interactive shell the `trap` runs only when that shell exits: call `$V stop "$RUN"` yourself when a recipe is done or has failed. `$V calls "$RUN"` lists the `gh` / `glab` calls of this run only, so an earlier run on the same forge dir does not count.
+`$V calls "$RUN"` lists the `gh` / `glab` calls of this run only, so an earlier run on the same forge dir does not count.
+
+### One shell or many
+
+The `trap` stops the last run when the shell that set it exits. What that means depends on how you run commands:
+
+- **One shell for the whole recipe** (an interactive terminal, a script file, or one tool call): the names stay, and the run is stopped when the shell exits. In an interactive terminal that is when you close it, so call `stop_run` yourself when a recipe is done or has failed.
+- **A fresh shell for every command** (one tool call = one shell): `V`, `RUN`, `fresh` and the `to_*` helpers do not carry over to the next call, and the `trap` fires when the call that set it ends, so it stops the run that call just started. Pick one of these:
+  - **(a) One call per recipe.** Put the prelude and the whole recipe in one call or one script file (example below). The trap stops the run at the end of the call. The evidence stays in the run dir, which `stop` keeps.
+  - **(b) A recipe split over calls.** Skip the trap with `export KEEP_RUN=1` before the prelude, print `FORGE` and `RUN` in the first call, pass them back in each later call, and `stop` the run **by path** in the last call, also when an earlier call failed:
+
+    ```bash
+    # call 1
+    cd <repo root> && export KEEP_RUN=1 && . "${TMPDIR:-/tmp}/ws-prelude.sh"
+    fresh context github-review gitlab-review -- --fake-forge "$FORGE"
+    echo "FORGE=$FORGE RUN=$RUN"                  # keep both lines
+    # call 2 (and more)
+    cd <repo root> && export KEEP_RUN=1 FORGE=<printed forge dir> RUN=<printed run dir> && . "${TMPDIR:-/tmp}/ws-prelude.sh"
+    to_app && $V keys "$RUN" g x && $V wait "$RUN" 'opened PR #7'
+    # last call
+    <repo root>/scripts/verify-tui.sh stop <printed run dir>
+    ```
+
+  - **(c) One call per recipe, the example (PS3 in short):**
+
+    ```bash
+    cd <repo root> && . "${TMPDIR:-/tmp}/ws-prelude.sh"
+    fresh context github-review gitlab-review -- --fake-forge "$FORGE"
+    $V wait --regex "$RUN" 'feature/auth-refresh +P'
+    to_app && $V keys "$RUN" g x
+    $V wait "$RUN" 'opened PR #7'
+    tail -n 1 "$RUN/opened.log"                   # https://github.com/acme/app/pull/7
+    $V capture "$RUN" after-gx
+    echo "run dir: $RUN"                          # the trap stops the run when this call ends
+    ```
 
 The fake forge points `app` at `acme/app` (GitHub, PR #7, branch `feature/auth-refresh`) and `services/api` at `acme/services/api` (GitLab, MR !5, branch `feature/rate-limit`). Set names and answers: `SKILL.md`, **Fake forge**.
 
 ## PS1 First paint, both forges
 
 ```bash
-$V scenario --reset "$FORGE" context github-review gitlab-review
-relaunch --fake-forge "$FORGE"
+fresh context github-review gitlab-review -- --fake-forge "$FORGE"
 $V wait --regex "$RUN" 'feature/auth-refresh +P'      # today; final: wait "$RUN" '#7 P'
 $V wait --regex "$RUN" 'feature/rate-limit +& P'      # today; final: wait "$RUN" '!5 P'
 $V capture "$RUN" first-paint
@@ -138,8 +180,7 @@ $V wait "$RUN" 'no PR for feature/auth-refresh'
 Polling needs a short interval: `WS_STATUS_PR_POLL_MS=1000`. The driver pins it to `0` (off) otherwise. An alert is a row flash plus a PR toast that lives 8 s; there is no alert on first load, on a branch change, or on the first lookup of a checkout.
 
 ```bash
-$V scenario --reset "$FORGE" context github-running gitlab-running
-relaunch --env WS_STATUS_PR_POLL_MS=1000 --fake-forge "$FORGE"
+fresh context github-running gitlab-running -- --env WS_STATUS_PR_POLL_MS=1000 --fake-forge "$FORGE"
 $V wait "$RUN" '#7 r' && $V wait "$RUN" '!5 r'
 $V capture "$RUN" t0-first-load                      # no toast here
 $V scenario "$FORGE" github-failed gitlab-failed     # no key: the poll finds it
@@ -157,8 +198,7 @@ Then: `github-review gitlab-review` (silent: badge `#7 P` / `!5 P`, no toast), `
 ## PS7 A failing CLI keeps the last badge (needs phase A)
 
 ```bash
-$V scenario --reset "$FORGE" context github-review gitlab-review
-relaunch --env WS_STATUS_PR_POLL_MS=1000 --fake-forge "$FORGE"
+fresh context github-review gitlab-review -- --env WS_STATUS_PR_POLL_MS=1000 --fake-forge "$FORGE"
 $V wait "$RUN" '#7 P' && $V wait "$RUN" '!5 P'
 $V scenario "$FORGE" github-cli-fails gitlab-cli-fails
 sleep 4                                              # a few polls; the one sleep in this file
@@ -171,7 +211,7 @@ $V wait "$RUN" 'last lookup failed: error connecting to api.github.com'
 
 ## PS8 Nerd glyph shapes (needs phase A)
 
-`relaunch --env WS_STATUS_GLYPHS=nerd --fake-forge "$FORGE"` (after `scenario --reset` with `context github-review gitlab-review`), then run the PS2 sweeps with `'#7 ✕' '!5 ✕'`, `'#7 ◉' '!5 ◉'`, `'#7 ◐' '!5 ◐'`, `'#7 ◌' '!5 ◌'`, `'#7 ○' '!5 ○'`, `'#7 ✓' '!5 ✓'` in the order of PS2.
+`fresh context github-review gitlab-review -- --env WS_STATUS_GLYPHS=nerd --fake-forge "$FORGE"`, then run the PS2 sweeps with `'#7 ✕' '!5 ✕'`, `'#7 ◉' '!5 ◉'`, `'#7 ◐' '!5 ◐'`, `'#7 ◌' '!5 ◌'`, `'#7 ○' '!5 ○'`, `'#7 ✓' '!5 ✓'` in the order of PS2.
 
 **PASS:** each shape is on both rows, and the glyph is the last cell of the badge on a captured tree row.
 
@@ -180,6 +220,7 @@ $V wait "$RUN" 'last lookup failed: error connecting to api.github.com'
 Real `gh` and `glab` against public repos, read-only. Needs `gh`, `glab`, `jq` and `git` on `PATH`, `gh auth status` and `glab auth status` passing, and network. Pick the branches at run time, so the recipe does not rot when a PR closes. The Setup helpers above are used here too.
 
 ```bash
+stop_run                                            # first: an old run may still be polling or use this fixture
 GH_OPEN=$(gh pr list -R cli/cli --state open --limit 100 --json headRefName,isCrossRepository --jq '[.[] | select(.isCrossRepository | not)][0].headRefName // empty')
 GH_MERGED=$(gh pr list -R cli/cli --state merged --limit 100 --json headRefName,isCrossRepository --jq '[.[] | select(.isCrossRepository | not)][0].headRefName // empty')
 GL_OPEN=$(glab api 'projects/gitlab-org%2Fcli/merge_requests?state=opened&per_page=100' | jq -r '[.[] | select(.source_project_id == .target_project_id)][0].source_branch // empty')
