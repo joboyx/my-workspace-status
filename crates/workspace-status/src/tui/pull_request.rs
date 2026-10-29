@@ -51,9 +51,14 @@ pub fn no_pr_status(branch: &str) -> String {
 /// Status line when the focused row has no branch to look up.
 pub const NO_PR_FOR_ROW: &str = "no PR for this row";
 
-/// Status line when the forge CLI could not answer for `branch`.
-pub fn lookup_failed_status(branch: &str) -> String {
-    format!("could not look up PR for {branch}")
+/// Status line when the forge CLI could not answer for `branch`, with its
+/// `reason` when it gave one ([`run_cli`]): `could not look up PR for
+/// feature: gh not found`.
+pub fn lookup_failed_status(branch: &str, reason: Option<&str>) -> String {
+    match reason {
+        Some(reason) => format!("could not look up PR for {branch}: {reason}"),
+        None => format!("could not look up PR for {branch}"),
+    }
 }
 
 /// Status line when the browser could not be started.
@@ -1372,8 +1377,8 @@ fn reap_in_background(mut child: Child) {
 /// reason when there is one: `<program> not found` (for example `gh not
 /// found`) when the program is missing, else the first non-blank stderr
 /// line of a non-zero exit, trimmed, without escape sequences, and at most
-/// 200 characters ([`first_stderr_line`]). A time limit, a cancel, or a
-/// silent failure has no reason.
+/// 200 characters ([`first_stderr_line`]), or `timed out after 20 s` when
+/// the time limit killed it. A cancel or a silent failure has no reason.
 ///
 /// Stdin is null and stderr is captured, so the CLI cannot read the TUI's
 /// terminal or print over it. `GH_PROMPT_DISABLED` and `NO_PROMPT` (read by
@@ -1437,6 +1442,16 @@ fn first_stderr_line(stderr: &[u8]) -> Option<String> {
     Some(cut)
 }
 
+/// Failure reason of a CLI killed by the time limit `limit`:
+/// `timed out after 20 s` (`timed out after 200 ms` below a whole second).
+fn timed_out_reason(limit: Duration) -> String {
+    if limit.subsec_millis() == 0 {
+        format!("timed out after {} s", limit.as_secs())
+    } else {
+        format!("timed out after {} ms", limit.as_millis())
+    }
+}
+
 fn run_cli_within(
     argv: &[String],
     limit: Duration,
@@ -1464,7 +1479,9 @@ fn run_cli_within(
     let Some(status) = wait_until(&mut child, deadline, cancel) else {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(None);
+        // The time limit names itself; a cancel (quit) says nothing.
+        let timed_out = !cancel.load(Ordering::Relaxed) && Instant::now() >= deadline;
+        return Err(timed_out.then(|| timed_out_reason(limit)));
     };
     // A grandchild that keeps a pipe open must not stall us either.
     let grace = deadline
@@ -3700,8 +3717,9 @@ mod tests {
     fn run_cli_kills_a_cli_that_runs_past_the_limit() {
         let started = Instant::now();
         let out = run_cli_within(&sh("exec sleep 5"), Duration::from_millis(200), &live());
-        assert_eq!(out, Err(None));
+        assert_eq!(out, Err(Some("timed out after 200 ms".to_string())));
         assert!(started.elapsed() < Duration::from_secs(3), "not bounded");
+        assert_eq!(timed_out_reason(CLI_TIME_LIMIT), "timed out after 20 s");
     }
 
     #[cfg(unix)]
@@ -4079,8 +4097,12 @@ mod tests {
         assert_eq!(no_pr_status("feature/login"), "no PR for feature/login");
         assert_eq!(NO_PR_FOR_ROW, "no PR for this row");
         assert_eq!(
-            lookup_failed_status("feature/login"),
+            lookup_failed_status("feature/login", None),
             "could not look up PR for feature/login"
+        );
+        assert_eq!(
+            lookup_failed_status("feature/login", Some("timed out after 20 s")),
+            "could not look up PR for feature/login: timed out after 20 s"
         );
         assert_eq!(OPEN_FAILED, "could not open PR");
     }

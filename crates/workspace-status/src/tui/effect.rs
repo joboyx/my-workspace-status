@@ -8905,6 +8905,10 @@ mod tests {
         ))
     }
 
+    /// Status of `gx` / `gc` when [`gh_fails`] answers: it names the reason.
+    const GH_FAILS_STATUS: &str =
+        "could not look up PR for feature: HTTP 401: Bad credentials (https://api.github.com/graphql)";
+
     fn cli_must_not_run(argv: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
         panic!("no forge CLI expected: {argv:?}")
     }
@@ -8977,13 +8981,7 @@ mod tests {
                 StatusKind::Warn,
                 0,
             ),
-            (
-                gh_fails,
-                opener_ok,
-                "could not look up PR for feature",
-                StatusKind::Error,
-                0,
-            ),
+            (gh_fails, opener_ok, GH_FAILS_STATUS, StatusKind::Error, 0),
             (
                 gh_approved_pr,
                 opener_fails,
@@ -9142,7 +9140,7 @@ mod tests {
                 "ws-effect-gc-cli-fails",
                 gh_fails,
                 opener_ok,
-                "could not look up PR for feature",
+                GH_FAILS_STATUS,
                 StatusKind::Error,
                 0,
             ),

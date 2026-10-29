@@ -1185,7 +1185,9 @@ impl AppState {
             }
             (PrLookup::Found(_), PrPage::Ci) => StatusMessage::error(CI_OPEN_FAILED),
             (PrLookup::NoPr, _) => StatusMessage::warn(no_pr_status(branch)),
-            (PrLookup::Failed(_), _) => StatusMessage::error(lookup_failed_status(branch)),
+            (PrLookup::Failed(reason), _) => {
+                StatusMessage::error(lookup_failed_status(branch, reason.as_deref()))
+            }
         };
         if self.snapshot_branch(repo) == Some(branch) {
             let focus = self.popover_focus_key();
@@ -2942,7 +2944,10 @@ mod tests {
             PrPage::Pr,
             false,
         );
-        assert_eq!(app.status, "could not look up PR for feature");
+        assert_eq!(
+            app.status, "could not look up PR for feature: HTTP 401: Bad credentials",
+            "gx names the reason"
+        );
         assert_eq!(app.pr_badge(path), Some(PrState::Ready), "gx keeps it too");
         assert_eq!(
             reason(&app, path),
@@ -4162,6 +4167,12 @@ mod tests {
                     PrLookup::Failed(None),
                     false,
                     "could not look up PR for feature".into(),
+                    StatusKind::Error,
+                ),
+                (
+                    PrLookup::Failed(Some("gh not found".into())),
+                    false,
+                    "could not look up PR for feature: gh not found".into(),
                     StatusKind::Error,
                 ),
             ] {
