@@ -19,9 +19,6 @@ use std::process::Stdio;
 use crate::git::{git_binary, git_output, git_process};
 use crate::snapshot::FileChange;
 
-#[cfg(test)]
-use super::icons::{status_letter_from_change, FileStatusLetter};
-
 /// One child of a listed folder.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExplorerEntry {
@@ -234,20 +231,6 @@ impl ExplorerStatus {
     /// Workspace tree's file-row segments.
     pub fn change(&self, rel: &str) -> Option<&FileChange> {
         self.changes.get(rel)
-    }
-
-    /// Status letter for the file at `rel`, or `None` when it is unchanged.
-    #[cfg(test)]
-    pub fn letter(&self, rel: &str) -> Option<FileStatusLetter> {
-        self.change(rel).map(status_letter_from_change)
-    }
-
-    /// True when the file at `rel` is untracked. [`ExplorerStatus::letter`]
-    /// says `A` for it (the Workspace tree's mapping); the Explorer paints
-    /// `??` instead.
-    #[cfg(test)]
-    pub fn is_untracked(&self, rel: &str) -> bool {
-        self.change(rel).is_some_and(|change| change.untracked)
     }
 
     /// Changed paths inside folder `rel_dir` at any depth: the `files`
@@ -703,6 +686,7 @@ impl ExplorerTree {
 mod tests {
     use super::*;
     use crate::testutil::{git, init_repo, unique_dir};
+    use crate::tui::icons::{status_letter_from_change, FileStatusLetter};
     use std::fs;
 
     fn entry(name: &str, is_dir: bool) -> ExplorerEntry {
@@ -1058,18 +1042,19 @@ mod tests {
             change("old.rs", None, Some("D")),
             untracked,
         ]);
-        assert_eq!(status.letter("src/tui/app.rs"), Some(FileStatusLetter::M));
-        assert_eq!(status.letter("src/added.rs"), Some(FileStatusLetter::A));
-        assert_eq!(status.letter("old.rs"), Some(FileStatusLetter::D));
+        let letter = |rel: &str| status.change(rel).map(status_letter_from_change);
+        let untracked = |rel: &str| status.change(rel).is_some_and(|change| change.untracked);
+        assert_eq!(letter("src/tui/app.rs"), Some(FileStatusLetter::M));
+        assert_eq!(letter("src/added.rs"), Some(FileStatusLetter::A));
+        assert_eq!(letter("old.rs"), Some(FileStatusLetter::D));
         // Untracked files use the Workspace tree's letter (A).
-        assert_eq!(
-            status.letter("docs/new/guide.md"),
-            Some(FileStatusLetter::A)
-        );
-        assert_eq!(status.letter("src/lib.rs"), None);
-        assert!(status.is_untracked("docs/new/guide.md"));
-        assert!(!status.is_untracked("src/added.rs"));
-        assert!(!status.is_untracked("docs/new"));
+        assert_eq!(letter("docs/new/guide.md"), Some(FileStatusLetter::A));
+        assert_eq!(letter("src/lib.rs"), None);
+        assert!(untracked("docs/new/guide.md"));
+        assert!(!untracked("src/added.rs"));
+        assert!(!untracked("docs/new"));
+        assert_eq!(status.changed_files_under("docs"), 1);
+        assert_eq!(status.changed_files_under(""), 4);
 
         assert!(status.dir_dirty("src"));
         assert!(status.dir_dirty("src/tui"));

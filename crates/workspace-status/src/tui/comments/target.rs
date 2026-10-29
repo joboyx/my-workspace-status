@@ -3,7 +3,7 @@
 //! Live refs come from the workspace snapshot (`local_branches`, checkout
 //! paths, repo identity). This module does not run git.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::helpers::{is_counted_local_branch, is_default_branch, is_detached_head_branch};
 use crate::snapshot::{CheckoutKind, WorkspaceSnapshot};
@@ -1033,16 +1033,22 @@ pub fn tree_row_comments<'a>(
 /// that file on that branch, or a line comment of that file at any commit.
 /// The workspace tree and the Explorer tree file rows share this match.
 fn file_key_on_checkout(identity: &str, branch: &str, path: &str, key: &CommentKey) -> bool {
-    let path = normalize_viewed_path(path);
+    file_key_path(identity, branch, key) == Some(normalize_viewed_path(path).as_str())
+}
+
+/// The file path whose row comment `key` marks in a checkout of repo
+/// `identity` on `branch` ([`file_key_on_checkout`]); `None` for a key that
+/// marks no file row there.
+fn file_key_path<'k>(identity: &str, branch: &str, key: &'k CommentKey) -> Option<&'k str> {
     match key {
         CommentKey::WorktreeLine {
             repo,
-            path: p,
+            path,
             branch: b,
             ..
-        } => repo == identity && p == &path && b == branch,
-        CommentKey::CommitLine { repo, path: p, .. } => repo == identity && p == &path,
-        _ => false,
+        } if repo == identity && b == branch => Some(path),
+        CommentKey::CommitLine { repo, path, .. } if repo == identity => Some(path),
+        _ => None,
     }
 }
 
@@ -1056,24 +1062,29 @@ fn checkout_file_scope(snapshot: &WorkspaceSnapshot, repo: &str) -> (String, Str
     )
 }
 
-/// Resolve state of the comments that mark the file row of `path` in
-/// checkout `repo` (an Explorer tree file row), with the workspace tree
-/// file row's match. `None` with no comment; `Some(true)` when every one
-/// is resolved.
-pub fn checkout_file_comment_state(
+/// Resolve state of the comment mark of every commented file row in
+/// checkout `repo` (the Explorer tree's file rows), with the workspace tree
+/// file row's match, from one pass over `store`: path → `true` when every
+/// comment on it is resolved. A path with no comment is absent. A tree
+/// paint builds it once and probes it per row.
+pub fn checkout_file_comment_states(
     store: &CommentStore,
     snapshot: &WorkspaceSnapshot,
     repo: &str,
-    path: &str,
-) -> Option<bool> {
+) -> HashMap<String, bool> {
     let (identity, branch) = checkout_file_scope(snapshot, repo);
-    comments_resolved_state(store, |key| {
-        file_key_on_checkout(&identity, &branch, path, key)
-    })
+    let mut states: HashMap<String, bool> = HashMap::new();
+    for (key, entry) in store {
+        if let Some(path) = file_key_path(&identity, &branch, key) {
+            let resolved = states.entry(path.to_string()).or_insert(true);
+            *resolved &= entry.resolved;
+        }
+    }
+    states
 }
 
-/// Comments behind the mark [`checkout_file_comment_state`] reads, in
-/// store order.
+/// Comments behind the mark [`checkout_file_comment_states`] reads for
+/// `path`, in store order.
 pub fn checkout_file_comments<'a>(
     store: &'a CommentStore,
     snapshot: &WorkspaceSnapshot,

@@ -18,7 +18,7 @@
 //! time. Git writes refuse with [`EXPLORER_TAB_READ_ONLY`].
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -34,7 +34,7 @@ use crate::snapshot::FileChange;
 use super::super::action::{Action, Effect, ExternalDiffKind};
 use super::super::command_palette::{CommandScope, PaletteCommand};
 use super::super::comments::{
-    checkout_file_comment_state, covering_line_comment, resolve_comment_target, CommentKey,
+    checkout_file_comment_states, covering_line_comment, resolve_comment_target, CommentKey,
 };
 use super::super::diff::{row_for_new_line, row_line_ref};
 use super::super::effect::ExplorerPreviewBody;
@@ -59,6 +59,7 @@ use super::super::tree::{
     file_row_id, file_type_seg, list_viewport_start, segment_icons, with_comment_mark,
     with_viewed_mark, NodeKind, NodeSegments, SegRole, TextSeg, UNSTAGED_ROW_SUFFIX,
 };
+use super::super::viewed::normalize_viewed_path;
 use super::super::watch::{file_disk_token, GONE_DISK_TOKEN};
 use super::{
     single_or_batch, AppState, FocusPane, NO_HIGHLIGHT_TARGET, NO_SEARCH_ARMED, Z_FOLDS_TREE_ROWS,
@@ -1065,30 +1066,46 @@ impl AppState {
         }
     }
 
-    /// Every segment Explorer tree row `row` of `checkout` paints: its
-    /// label and status mark ([`explorer_row_segments`]), then on a file
-    /// row the comment mark and the reviewed eye, in the order and with the
-    /// glyphs a Workspace tree file row adds them
+    /// What every row of the Explorer tree of `checkout` reads for its marks
+    /// and flash, built once per paint (or pan clamp, `gh`, or popover
+    /// section) instead of once per row: one pass over the comment store
+    /// and, while a flash decays, one walk of the Workspace tree.
+    pub(crate) fn explorer_row_marks(&self, checkout: &str) -> ExplorerRowMarks {
+        ExplorerRowMarks {
+            checkout: checkout.to_string(),
+            comments: checkout_file_comment_states(&self.comment_store, &self.snapshot, checkout),
+            folder_flashes: self.explorer_folder_flashes(checkout),
+        }
+    }
+
+    /// Every segment Explorer tree row `row` paints: its label and status
+    /// mark ([`explorer_row_segments`]), then on a file row the comment
+    /// mark and the reviewed eye, in the order and with the glyphs a
+    /// Workspace tree file row adds them
     /// ([`super::super::tree::painted_row_segments`]). The comment mark
-    /// uses the Workspace file row's match
-    /// ([`checkout_file_comment_state`]); the eye is the Workspace tree's
+    /// uses the Workspace file row's match (`marks`, from
+    /// [`checkout_file_comment_states`]); the eye is the Workspace tree's
     /// stored reviewed mark of the same file ([`file_row_id`] in
     /// [`AppState::reviewed`]), which Space toggles on either tab. Paint,
     /// the pan clamp, `gh`, and the popover sections read it.
     pub(crate) fn explorer_row_paint_segments(
         &self,
-        checkout: &str,
         row: &ExplorerRow,
         status: &ExplorerStatus,
+        marks: &ExplorerRowMarks,
     ) -> NodeSegments {
         let segs = explorer_row_segments(row, status, self.ascii);
         if row.is_dir || row.placeholder {
             return segs;
         }
-        let comment =
-            checkout_file_comment_state(&self.comment_store, &self.snapshot, checkout, &row.rel);
+        let comment = marks
+            .comments
+            .get(normalize_viewed_path(&row.rel).as_str())
+            .copied();
         let viewed = status.change(&row.rel).is_some()
-            && self.reviewed.contains(&file_row_id(checkout, &row.rel));
+            && self
+                .reviewed
+                .contains(&file_row_id(&marks.checkout, &row.rel));
         NodeSegments {
             segments: segs.segments,
             trailing: with_viewed_mark(
@@ -1104,27 +1121,93 @@ impl AppState {
         }
     }
 
-    /// Fade colour of Explorer tree row `row` of `checkout` while a watch
-    /// reload flash of its path decays: the flash of the Workspace tree row
-    /// of the same path ([`file_row_id`] for a file, `dir:<checkout>:<rel>`
-    /// for a folder, or the Changes-side twin of either), which
-    /// [`AppState::apply_watch_snapshot`] stamps when that status reload
-    /// adds, changes, or removes it. A map lookup: no git, no I/O.
+    /// Fade colour of Explorer tree row `row` while a watch reload flash of
+    /// its path decays: the flash of the Workspace tree row that shows the
+    /// same path, which [`AppState::apply_watch_snapshot`] stamps when that
+    /// status reload adds, changes, or removes it. A file reads its own row
+    /// ([`file_row_id`], or the Changes-side twin); a folder reads `marks`
+    /// ([`Self::explorer_folder_flashes`]). Map lookups: no git, no I/O.
     pub(crate) fn explorer_row_flash_color(
         &self,
-        checkout: &str,
         row: &ExplorerRow,
+        marks: &ExplorerRowMarks,
     ) -> Option<Color> {
         if row.placeholder {
             return None;
         }
-        let id = if row.is_dir {
-            format!("dir:{checkout}:{}", row.rel)
-        } else {
-            file_row_id(checkout, &row.rel)
-        };
+        if row.is_dir {
+            return marks.folder_flashes.get(&row.rel).copied();
+        }
+        let id = file_row_id(&marks.checkout, &row.rel);
         self.flash_color(&id)
             .or_else(|| self.flash_color(&format!("{id}{UNSTAGED_ROW_SUFFIX}")))
+    }
+
+    /// Flash colour of each Explorer folder of `checkout` that a decaying
+    /// Workspace tree flash covers, keyed by folder path. Empty with no
+    /// flash.
+    ///
+    /// The Workspace tree collapses a chain of single-child folders into
+    /// one row (`dir:<checkout>:a/b`), so a folder may have no row of its
+    /// own there: a folder row's flash covers its own path and each parent
+    /// folder up to the next folder row of the same section (Staged, or
+    /// Changes with the `#unstaged` suffix). The folder rows known are the
+    /// live tree's and the ones a reload just removed (each removal is
+    /// still a flash stamp while it decays), so a removed chain covers the
+    /// same folders it covered before the reload. A wholly untracked folder
+    /// is a file row with a trailing `/` (`file:<checkout>:<rel>/`) and
+    /// flashes its folder.
+    fn explorer_folder_flashes(&self, checkout: &str) -> HashMap<String, Color> {
+        let mut out = HashMap::new();
+        if self.flashes.is_empty() {
+            return out;
+        }
+        let dir_prefix = format!("dir:{checkout}:");
+        let file_prefix = file_row_id(checkout, "");
+        let mut known: HashSet<String> = HashSet::new();
+        let mut stack = vec![&self.tree];
+        while let Some(node) = stack.pop() {
+            if node.kind == NodeKind::Dir {
+                if let Some(rest) = node.id.strip_prefix(&dir_prefix) {
+                    known.insert(rest.to_string());
+                }
+            }
+            stack.extend(&node.children);
+        }
+        known.extend(
+            self.flashes
+                .keys()
+                .filter_map(|id| id.strip_prefix(&dir_prefix))
+                .map(str::to_string),
+        );
+        for id in self.flashes.keys() {
+            let Some(color) = self.flash_color(id) else {
+                continue;
+            };
+            if let Some(rest) = id.strip_prefix(&dir_prefix) {
+                let (path, suffix) = match rest.strip_suffix(UNSTAGED_ROW_SUFFIX) {
+                    Some(path) => (path, UNSTAGED_ROW_SUFFIX),
+                    None => (rest, ""),
+                };
+                let mut rel = path;
+                loop {
+                    out.entry(rel.to_string()).or_insert(color);
+                    let Some((parent, _)) = rel.rsplit_once('/') else {
+                        break;
+                    };
+                    if known.contains(&format!("{parent}{suffix}")) {
+                        break;
+                    }
+                    rel = parent;
+                }
+            } else if let Some(folder) = id
+                .strip_prefix(&file_prefix)
+                .and_then(|rest| rest.strip_suffix('/'))
+            {
+                out.entry(folder.to_string()).or_insert(color);
+            }
+        }
+        out
     }
 
     /// Checkout, row, and status of the active Explorer tab's listed tree
@@ -1152,7 +1235,8 @@ impl AppState {
             return Vec::new();
         };
         let status = self.explorer_status(&tab.checkout);
-        segment_icons(&self.explorer_row_paint_segments(&tab.checkout, &row, &status))
+        let marks = self.explorer_row_marks(&tab.checkout);
+        segment_icons(&self.explorer_row_paint_segments(&row, &status, &marks))
             .into_iter()
             .map(|kind| (kind, IconTarget::ExplorerRow(row.rel.clone())))
             .collect()
@@ -1177,12 +1261,13 @@ impl AppState {
         };
         let width = pane_width.saturating_sub(u16::from(vbar)).max(1) as usize;
         let status = self.explorer_status(&tab.checkout);
+        let marks = self.explorer_row_marks(&tab.checkout);
         tab.tree
             .rows(&status)
             .iter()
             .filter(|row| !row.placeholder)
             .map(|row| {
-                let segs = self.explorer_row_paint_segments(&tab.checkout, row, &status);
+                let segs = self.explorer_row_paint_segments(row, &status, &marks);
                 let label: usize = segs.segments.iter().map(|s| visible_width(&s.text)).sum();
                 let trailing: usize = segs.trailing.iter().map(|s| visible_width(&s.text)).sum();
                 list_row_pan_max(label, row.depth, trailing, width)
@@ -2111,6 +2196,20 @@ impl AppState {
     }
 }
 
+/// Per-paint lookups of the Explorer tree of one checkout
+/// ([`AppState::explorer_row_marks`]): every row probes them instead of
+/// scanning the comment store or the Workspace tree itself.
+pub(crate) struct ExplorerRowMarks {
+    /// The tab's checkout (snapshot `repo`).
+    checkout: String,
+    /// Commented file path → every comment on it resolved
+    /// ([`checkout_file_comment_states`]).
+    comments: HashMap<String, bool>,
+    /// Folder path → its flash colour
+    /// ([`AppState::explorer_folder_flashes`]).
+    folder_flashes: HashMap<String, Color>,
+}
+
 /// What `l` / `z` / Enter does to a folder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FoldKind {
@@ -2194,6 +2293,8 @@ fn changes_fingerprint(changes: &[FileChange]) -> u64 {
         change.staged_status.hash(&mut hasher);
         change.unstaged_status.hash(&mut hasher);
         change.untracked.hash(&mut hasher);
+        // The paint reads the rename source (`old → new`).
+        change.old_path.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -3609,7 +3710,10 @@ mod tests {
         let (rows, _) = app.explorer_rows().unwrap();
         assert!(rows.iter().any(|row| row.rel == "src/fresh.rs"));
         let status = app.explorer_status("app");
-        assert!(status.is_untracked("src/fresh.rs"), "paints ??");
+        assert!(
+            status.change("src/fresh.rs").is_some_and(|c| c.untracked),
+            "paints ??"
+        );
         assert_eq!(cursor_rel(&app), "src", "the cursor keeps its row");
 
         // A new untracked folder at the root re-lists the root; a deleted

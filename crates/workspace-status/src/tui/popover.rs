@@ -614,8 +614,9 @@ fn commit_file_section(
 /// the row is gone or no longer paints the icon.
 fn explorer_row_section(state: &AppState, kind: IconKind, rel: &str) -> Option<PopoverSection> {
     let (checkout, row, status) = state.explorer_row_at(rel)?;
+    let marks = state.explorer_row_marks(&checkout);
     let seg = painted_seg(
-        &state.explorer_row_paint_segments(&checkout, &row, &status),
+        &state.explorer_row_paint_segments(&row, &status, &marks),
         kind,
     )?;
     let kind = seg.icon?;

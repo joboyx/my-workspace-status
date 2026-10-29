@@ -1558,6 +1558,7 @@ fn draw_explorer_tree(
         .active_explorer()
         .map(|tab| tab.checkout.clone())
         .unwrap_or_default();
+    let marks = state.explorer_row_marks(&checkout);
     let width = rows_area.width as usize;
     let mut lines = Vec::new();
     let mut hits = Vec::new();
@@ -1574,7 +1575,7 @@ fn draw_explorer_tree(
                 trailing: Vec::new(),
             }
         } else {
-            state.explorer_row_paint_segments(&checkout, row, status)
+            state.explorer_row_paint_segments(row, status, &marks)
         };
         // Glyph-only hits, panned and clipped as the row paints them
         // (the vertical bar's column is outside `width`).
@@ -1597,7 +1598,7 @@ fn draw_explorer_tree(
             width,
             Some(index) == cursor,
             focused,
-            state.explorer_row_flash_color(&checkout, row),
+            state.explorer_row_flash_color(row, &marks),
             matches.contains(&index),
             search,
             state.ascii,
@@ -22851,6 +22852,214 @@ mod tests {
             assert!(flashed("README.md"), "{look}: the reloaded row flashes");
             assert!(!flashed("new.txt"), "{look}: an unchanged row does not");
         }
+    }
+
+    /// Text of the Explorer tree row painting `name`, and whether any of
+    /// its cells paints background `bg`.
+    fn explorer_row_paint(
+        terminal: &Terminal<TestBackend>,
+        state: &AppState,
+        name: &str,
+        bg: Color,
+    ) -> (String, bool) {
+        let buf = terminal.backend().buffer();
+        let tree = state.layout.explorer_tree;
+        let y = (tree.y..tree.bottom())
+            .find(|y| find_cell_col(buf, *y, name).is_some_and(|x| x < tree.right()))
+            .unwrap_or_else(|| panic!("no {name} row"));
+        let text = (tree.x..tree.right())
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect();
+        (text, (tree.x..tree.right()).any(|x| buf[(x, y)].bg == bg))
+    }
+
+    /// Hold every flash stamp at full strength so a paint is exact.
+    fn hold_flashes(state: &mut AppState) {
+        for stamp in state.flashes.values_mut() {
+            stamp.at = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        }
+    }
+
+    /// A changed rename source with the same status letters repaints the
+    /// Explorer row's `old → new` label (the status cache sees the source),
+    /// in both looks.
+    #[test]
+    fn explorer_rename_source_change_repaints_the_label() {
+        for (look, background) in PANE_LOOKS {
+            let mut state = explorer_state_listing(&[("new.rs", false, false)]);
+            state.background = background;
+            state.snapshot.repos[0].changes.push(FileChange {
+                path: "new.rs".into(),
+                staged_status: Some("R".into()),
+                unstaged_status: None,
+                untracked: false,
+                old_path: Some("a.rs".into()),
+            });
+            let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let none = Color::Rgb(1, 2, 3);
+            let (row, _) = explorer_row_paint(&terminal, &state, "new.rs", none);
+            assert!(row.contains("a.rs → new.rs"), "{look}: {row}");
+            state.snapshot.repos[0].changes.last_mut().unwrap().old_path = Some("b.rs".into());
+            draw_state(&mut terminal, &mut state);
+            let (row, _) = explorer_row_paint(&terminal, &state, "new.rs", none);
+            assert!(row.contains("b.rs → new.rs"), "{look}: {row}");
+        }
+    }
+
+    /// Explorer folders take the flash of the Workspace tree row that shows
+    /// them, in both looks: a folder the Workspace tree collapses into a
+    /// chain row (`deep/er`) flashes with that row on an add, a change,
+    /// and a removal; a folder with its own unflashed row does not; a
+    /// wholly untracked folder (`newdir/`, a Workspace file row) flashes.
+    #[test]
+    fn explorer_folders_take_the_flash_of_the_workspace_row_that_shows_them() {
+        for (look, background) in PANE_LOOKS {
+            let mut state = explorer_state_listing(&[
+                ("deep", true, false),
+                ("newdir", true, false),
+                ("src", true, false),
+            ]);
+            state.background = background;
+            // Open `deep` and list `er` in it.
+            state.dispatch(Action::Move(-10));
+            let Effect::LoadExplorerDir { tab_id, req, .. } = state.dispatch(Action::FoldOpen)
+            else {
+                panic!("{look}: deep lists");
+            };
+            let er = crate::tui::explorer::ExplorerEntry {
+                name: "er".into(),
+                is_dir: true,
+                ignored: false,
+            };
+            state
+                .apply_explorer_dir(tab_id, req, "deep", Ok(vec![er]))
+                .expect("fresh listing");
+            let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+            draw_state(&mut terminal, &mut state);
+
+            // Add: a new file under `deep/er` and an untracked `newdir/`.
+            let mut next = state.snapshot.clone();
+            next.repos[0].changes.push(FileChange {
+                path: "deep/er/x.rs".into(),
+                staged_status: None,
+                unstaged_status: Some("M".into()),
+                untracked: false,
+                old_path: None,
+            });
+            next.repos[0].changes.push(FileChange {
+                path: "newdir/".into(),
+                staged_status: None,
+                unstaged_status: None,
+                untracked: true,
+                old_path: None,
+            });
+            let added = state.apply_watch_snapshot(next.clone());
+            let chain = added
+                .iter()
+                .find(|id| id.starts_with("dir:app:deep/er"))
+                .cloned()
+                .unwrap_or_else(|| panic!("{look}: the Workspace chain row: {added:?}"));
+            for id in ["dir:app:deep", "dir:app:deep#unstaged"] {
+                assert!(
+                    crate::tui::tree::find_node(&state.tree, id).is_none(),
+                    "{look}: `deep` has no Workspace row of its own ({id})"
+                );
+            }
+            assert!(
+                crate::tui::tree::find_node(&state.tree, &chain).is_some(),
+                "{look}: {chain} is a live row"
+            );
+            hold_flashes(&mut state);
+            draw_state(&mut terminal, &mut state);
+            let palette = state.theme.palette();
+            let add = palette.flash_bg_for(FlashKind::Add, 1.0).unwrap();
+            for (name, want) in [
+                ("deep", true),
+                ("er", true),
+                ("newdir", true),
+                ("src", false),
+            ] {
+                let (row, flashed) = explorer_row_paint(&terminal, &state, name, add);
+                assert_eq!(flashed, want, "{look} add: {name}: {row}");
+            }
+
+            // Change: an update stamp on the chain row.
+            state.flashes.clear();
+            state.flashes.insert(
+                chain.clone(),
+                super::super::watch::FlashStamp {
+                    at: std::time::Instant::now(),
+                    kind: FlashKind::Update,
+                },
+            );
+            hold_flashes(&mut state);
+            draw_state(&mut terminal, &mut state);
+            let update = palette.flash_bg_for(FlashKind::Update, 1.0).unwrap();
+            for (name, want) in [("deep", true), ("er", true), ("src", false)] {
+                let (row, flashed) = explorer_row_paint(&terminal, &state, name, update);
+                assert_eq!(flashed, want, "{look} change: {name}: {row}");
+            }
+
+            // Remove: the file goes, so the chain row goes.
+            state.flashes.clear();
+            next.repos[0]
+                .changes
+                .retain(|change| change.path != "deep/er/x.rs");
+            state.apply_watch_snapshot(next);
+            hold_flashes(&mut state);
+            draw_state(&mut terminal, &mut state);
+            let remove = palette.flash_bg_for(FlashKind::Remove, 1.0).unwrap();
+            for (name, want) in [("deep", true), ("er", true), ("src", false)] {
+                let (row, flashed) = explorer_row_paint(&terminal, &state, name, remove);
+                assert_eq!(flashed, want, "{look} remove: {name}: {row}");
+            }
+        }
+    }
+
+    /// An Explorer folder's popover counts the distinct changed paths under
+    /// it (I6): `src/a.rs` staged and `src/b.rs` unstaged make `2 files`,
+    /// where the Workspace tree's Staged and Changes folder rows say
+    /// `1 file` each.
+    #[test]
+    fn explorer_folder_popover_counts_distinct_changed_paths() {
+        let mut state = explorer_state();
+        let mut next = state.snapshot.clone();
+        let a = next.repos[0]
+            .changes
+            .iter_mut()
+            .find(|change| change.path == "src/a.rs")
+            .expect("src/a.rs");
+        a.staged_status = Some("M".into());
+        a.unstaged_status = None;
+        next.repos[0].changes.push(FileChange {
+            path: "src/b.rs".into(),
+            staged_status: None,
+            unstaged_status: Some("M".into()),
+            untracked: false,
+            old_path: None,
+        });
+        state.apply_snapshot(next);
+        let files = |target: IconTarget| -> String {
+            let sections =
+                super::super::popover::popover_sections(&state, &[(IconKind::Folder, target)], 0);
+            sections
+                .iter()
+                .flat_map(|section| &section.lines)
+                .find_map(|line| match line {
+                    PopoverLine::Field { label, value, .. } if *label == "files" => {
+                        Some(value.clone())
+                    }
+                    _ => None,
+                })
+                .expect("a files field")
+        };
+        assert_eq!(files(IconTarget::ExplorerRow("src".into())), "2 files");
+        assert_eq!(files(IconTarget::TreeRow("dir:app:src".into())), "1 file");
+        assert_eq!(
+            files(IconTarget::TreeRow("dir:app:src#unstaged".into())),
+            "1 file"
+        );
     }
 
     /// Space on the Explorer marks the active inner file reviewed in the
