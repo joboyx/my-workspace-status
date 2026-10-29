@@ -16,10 +16,10 @@ use std::sync::Arc;
 use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
 use workspace_status_graph::{
-    commit_msg_lines_fit, footer_message_scroll_max, graph_col_max, graph_footer_request,
+    commit_msg_lines_fit, footer_message_scroll_max, graph_chrome_budget_for, graph_col_max,
     graph_hscroll_visible, graph_vscroll_visible, paint_selection_footer, painted_line_count,
     short_id, GraphIconKind, GraphLabelPalette, GraphRow, GraphWidget, ASCII, COMMIT_MSG_LINES_MAX,
-    COMMIT_MSG_LINES_MIN, FOOTER_RULE_ROWS, UNICODE,
+    FOOTER_RULE_ROWS, UNICODE,
 };
 
 use super::action::SearchFilesOption;
@@ -2655,17 +2655,21 @@ fn record_graph_scrollbar(
 /// ([`AppState::commit_detail_footer_request`], fixed whatever the message).
 ///
 /// The footer is the [`FOOTER_RULE_ROWS`] rule row, then the body, so it
-/// asks for `body_len + 1` rows. The file list keeps at least one row
-/// whenever the pane has two or more, so a short terminal never hides the
-/// list for the message; the body clips first, down to the rule only.
+/// asks for `body_len + 1` rows. From 3 rows up the graph selection
+/// footer's budget sizes it ([`graph_chrome_budget_for`]): the body takes at
+/// most half the pane (never under 2) and the list keeps at least one row,
+/// so one request gives the same footer height on both footers. A pane of
+/// 2 rows keeps one list row and the rule only; 1 row is the rule only.
 /// Draw and layout both size the footer here so the list rows and click
 /// mapping agree.
 fn commit_detail_footer_height(body_len: usize, pane_h: u16) -> u16 {
     let want = body_len
         .min(usize::from(u16::MAX - FOOTER_RULE_ROWS))
         .saturating_add(usize::from(FOOTER_RULE_ROWS)) as u16;
-    let max = if pane_h >= 2 { pane_h - 1 } else { pane_h };
-    want.min(max)
+    if pane_h >= 3 {
+        return graph_chrome_budget_for(pane_h, false, want).footer_height;
+    }
+    want.min(pane_h.min(1))
 }
 
 /// Rule glyph between a list and its footer: `▁` (`_` in ASCII mode).
@@ -2709,12 +2713,19 @@ fn draw_commit_detail(
     if footer_h == 0 {
         return;
     }
+    let (checkout, commit_id) = match state.commit_drill_source() {
+        Some((repo, super::drill::CommitFileSource::Commit { commit_id })) => {
+            (Some(repo.to_string()), Some(commit_id.clone()))
+        }
+        Some((repo, _)) => (Some(repo.to_string()), None),
+        None => (None, None),
+    };
     let footer = CommitFooter {
         row: state.commit_detail_graph_row(),
+        fallback: state.commit_detail_fallback_name(),
         msg_identity: state.commit_detail_msg_identity(),
-        checkout: state
-            .commit_drill_source()
-            .map(|(repo, _)| repo.to_string()),
+        checkout,
+        commit_id,
     };
     let footer_area = Rect {
         y: area.y.saturating_add(list_h),
@@ -2729,14 +2740,21 @@ fn draw_commit_detail(
 struct CommitFooter {
     /// Graph row whose message and meta the footer paints
     /// ([`AppState::commit_footer_parts`]); its ref chips' popovers resolve
-    /// against it. `None` paints the no-selection footer.
+    /// against it.
     row: Option<GraphRow>,
+    /// Name the footer shows when [`Self::row`] is `None` (the drilled
+    /// source a reload dropped from the graph); `None` too paints the
+    /// no-selection footer.
+    fallback: Option<String>,
     /// [`AppState::commit_msg_scroll`] key of the message, and the target
     /// of the more-below hint. `None` when the row has no message to
     /// scroll.
     msg_identity: Option<String>,
     /// Checkout whose forge the short hash links to.
     checkout: Option<String>,
+    /// Full id of the commit whose short hash on the meta row links to its
+    /// forge page. `None` for a stash, the working tree, or a range.
+    commit_id: Option<String>,
 }
 
 /// Paint a commit-message footer under a commit-files list into `area`
@@ -2774,7 +2792,11 @@ fn draw_commit_footer(
         height: body_h,
         ..area
     };
-    let lines = state.commit_footer_parts(footer.row.as_ref(), usize::from(area.width));
+    let lines = state.commit_footer_parts(
+        footer.row.as_ref(),
+        footer.fallback.as_deref(),
+        usize::from(area.width),
+    );
     let scroll_max = footer_message_scroll_max(lines.len(), body_h);
     let glyphs = if state.ascii { &ASCII } else { &UNICODE };
     let spans = paint_selection_footer(
@@ -2812,18 +2834,18 @@ fn draw_commit_footer(
         })
     });
     state.layout.icon_hits.extend(hits);
-    // The meta row (bottom row) holds the commit's short hash: link it to
-    // the commit page.
-    let link = match (&footer.row, &footer.checkout) {
-        (Some(GraphRow::Commit { commit, .. }), Some(checkout)) => state
-            .commit_link(std::path::Path::new(checkout), &commit.id)
+    // The meta row (bottom row) holds the commit's short hash, also in the
+    // fallback footer: link it to the commit page.
+    let link = match (&footer.commit_id, &footer.checkout) {
+        (Some(commit_id), Some(checkout)) => state
+            .commit_link(std::path::Path::new(checkout), commit_id)
             .and_then(|url| {
                 painted_text_link(
                     frame.buffer_mut(),
                     body.bottom() - 1,
                     body.x,
                     body.right(),
-                    short_id(&commit.id),
+                    short_id(commit_id),
                     url,
                 )
             }),
@@ -2835,29 +2857,21 @@ fn draw_commit_footer(
 /// Record the expanded depth-2 commit-files footer's top rule (the first
 /// row of `footer`), the [`ResizeEdge::CommitMsg`] edge, and the most
 /// message rows a pane `pane_h` rows tall shows
-/// ([`commit_detail_msg_lines_fit`]), like [`record_commit_msg_rule`] for
-/// the graph footer. A collapsed footer records no rule.
+/// ([`commit_msg_lines_fit`], the graph footer's fit: both footers share
+/// one height budget), like [`record_commit_msg_rule`] for the graph
+/// footer. A collapsed footer, a footer with no body row under its rule,
+/// and a drill with no graph loaded record no rule.
 fn record_commit_detail_msg_rule(state: &mut AppState, footer: Rect, pane_h: u16) {
-    if !state.commit_msg_expand || footer.width == 0 || footer.height == 0 {
+    if state.graph.is_none() || !state.commit_msg_expand || footer.width == 0 {
+        return;
+    }
+    if footer.height <= FOOTER_RULE_ROWS {
         return;
     }
     state.layout.commit_msg_rule_y = Some(footer.y);
     state.layout.commit_msg_rule_x = footer.x;
     state.layout.commit_msg_rule_width = footer.width;
-    state.layout.commit_msg_lines_fit = commit_detail_msg_lines_fit(pane_h);
-}
-
-/// Most expanded-footer message rows a commit-files pane `pane_h` rows
-/// tall shows, in [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`]:
-/// [`commit_detail_footer_height`] of the tallest request less the rule
-/// and the meta row. A rule drag clamps here so it never stores rows the
-/// pane cannot show.
-fn commit_detail_msg_lines_fit(pane_h: u16) -> usize {
-    let most = usize::from(graph_footer_request(true, COMMIT_MSG_LINES_MAX) - FOOTER_RULE_ROWS);
-    let rows = commit_detail_footer_height(most, pane_h)
-        .saturating_sub(FOOTER_RULE_ROWS)
-        .saturating_sub(1);
-    usize::from(rows).clamp(COMMIT_MSG_LINES_MIN, COMMIT_MSG_LINES_MAX)
+    state.layout.commit_msg_lines_fit = commit_msg_lines_fit(pane_h);
 }
 
 fn draw_commit_file_list(
@@ -9274,11 +9288,18 @@ mod tests {
             "footer is taller than the pane ({footer_len} >= {})",
             layout.tree_height
         );
-        assert_eq!(layout.files_list_height, 1, "list keeps one row");
+        // The graph footer's limit: the body takes at most half the pane.
+        let footer_h = (layout.tree_height / 2).max(2) + FOOTER_RULE_ROWS;
+        assert_eq!(
+            layout.files_list_height,
+            layout.tree_height - footer_h,
+            "the list keeps the rows above the capped footer"
+        );
+        assert!(layout.files_list_height >= 1, "list keeps a row");
         let left = left_inner_text(&terminal, &state);
         let first = left.lines().next().unwrap_or_default();
         assert!(first.contains("README.md"), "list row paints:\n{left}");
-        assert!(left.contains(FOOTER_BODY_TOKEN), "footer paints:\n{left}");
+        assert!(left.contains("seed graph"), "footer paints:\n{left}");
     }
 
     /// The depth-2 commit-files footer keeps one fixed height whatever the
@@ -9443,6 +9464,8 @@ mod tests {
         lines_below: fn(&AppState) -> usize,
         /// The list cursor the wheel over the footer must not move.
         list_cursor: fn(&AppState) -> usize,
+        /// Inner height of the pane the footer sits at the bottom of.
+        pane_height: fn(&AppState) -> u16,
     }
 
     /// Give `state`'s graph a second commit (B) and a 30-line body on both
@@ -9528,6 +9551,7 @@ mod tests {
             scroll: AppState::graph_footer_msg_scroll,
             lines_below: AppState::graph_footer_lines_below,
             list_cursor: |state| state.graph_cursor,
+            pane_height: |state| state.layout.diff_pane_height,
         },
         FooterSurface {
             id: "graph-d1",
@@ -9541,6 +9565,7 @@ mod tests {
             scroll: AppState::graph_footer_msg_scroll,
             lines_below: AppState::graph_footer_lines_below,
             list_cursor: |state| state.graph_cursor,
+            pane_height: |state| state.layout.tree_height,
         },
         FooterSurface {
             id: "files-d2",
@@ -9550,6 +9575,7 @@ mod tests {
             scroll: AppState::commit_detail_msg_scroll,
             lines_below: AppState::commit_detail_footer_lines_below,
             list_cursor: AppState::commit_files_cursor,
+            pane_height: |state| state.layout.tree_height,
         },
     ];
 
@@ -9818,11 +9844,19 @@ mod tests {
                     })
                     .cloned()
                     .unwrap_or_else(|| panic!("{case}: `main` chip hit: {:?}", state.layout.icon_hits));
-                assert_ne!(
-                    buf[(chip.x + chip.width - 1, meta_y)].fg,
-                    palette.muted,
-                    "{case}: the chip paints in a chip colour"
-                );
+                // `main` is the default branch: every cell of its name
+                // paints in the label palette's default-branch colour.
+                let text = cells(&chip);
+                let before = text.split("main").next().unwrap_or_default();
+                let name_x = chip.x + u16::try_from(before.chars().count()).unwrap_or(0);
+                let want = graph_label_palette(palette).branch_default;
+                for col in name_x..name_x + 4 {
+                    assert_eq!(
+                        buf[(col, meta_y)].fg,
+                        want,
+                        "{case}: `main` chip cell x={col} in the default-branch colour"
+                    );
+                }
                 state.dispatch(Action::Click {
                     col: chip.x,
                     row: chip.y,
@@ -9914,6 +9948,32 @@ mod tests {
                     Some(lines + 2),
                     "{case}: the release saves the rows"
                 );
+
+                // The tallest drag stops at the graph footer's limit: the
+                // body takes at most half the pane, on every surface.
+                let pane_h = (surface.pane_height)(&state);
+                let rule_y = state.layout.commit_msg_rule_y.expect("rule");
+                assert_eq!(
+                    rule_y + grown.height,
+                    footer.y + footer.height,
+                    "{case}: the footer ends on the pane's last row"
+                );
+                state.dispatch(Action::Click { col, row: rule_y });
+                state.dispatch(Action::Drag { col, row: 1 });
+                assert_eq!(
+                    state.commit_msg_lines,
+                    commit_msg_lines_fit(pane_h),
+                    "{case}: the graph footer's fit for a {pane_h}-row pane"
+                );
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                let tallest = (surface.footer_box)(&state)
+                    .unwrap_or_else(|| panic!("{case}: the tallest footer records its box"));
+                assert_eq!(
+                    tallest.height,
+                    (pane_h / 2).max(2) + FOOTER_RULE_ROWS,
+                    "{case}: half the {pane_h}-row pane plus the rule"
+                );
+                state.dispatch(Action::Release);
                 let _ = std::fs::remove_dir_all(&dir);
             }
         }
@@ -9952,7 +10012,7 @@ mod tests {
     }
 
     /// Paint `draw_commit_detail` alone into a 40x8 pane with the tallest N,
-    /// so `commit_detail_footer_height` caps the footer to 5 message rows
+    /// so `commit_detail_footer_height` caps the footer to 3 message rows
     /// over the meta row. Returns the message rows as `(y, text)`.
     fn draw_capped_commit_detail(state: &mut AppState) -> Vec<(u16, String)> {
         state.commit_msg_lines = workspace_status_graph::COMMIT_MSG_LINES_MAX;
@@ -10001,7 +10061,7 @@ mod tests {
             ("worktree source", worktree),
         ] {
             let rows = draw_capped_commit_detail(&mut state);
-            assert_eq!(rows.len(), 5, "{case}: 5 message rows");
+            assert_eq!(rows.len(), 3, "{case}: 3 message rows");
             assert_eq!(state.layout.commit_detail_footer_y, None, "{case}");
             assert_eq!(state.layout.commit_detail_footer_scroll_max, 0, "{case}");
             assert_eq!(state.commit_detail_footer_lines_below(), 0, "{case}");
@@ -10141,7 +10201,11 @@ mod tests {
         );
         assert_eq!(commit_detail_footer_height(4, 3), 2);
         assert_eq!(commit_detail_footer_height(4, 40), 5, "rule + 4 body rows");
-        assert_eq!(commit_detail_footer_height(usize::MAX, 40), 39);
+        assert_eq!(
+            commit_detail_footer_height(usize::MAX, 40),
+            21,
+            "half the pane plus the rule, like the graph footer"
+        );
 
         let mut state = two_pane_commit_diff_state();
         state.ascii = true;
@@ -19825,6 +19889,79 @@ mod tests {
             link.y > l.files_list_y + l.files_list_height && link.x < l.right_x,
             "the footer under the left file list: {link:?}"
         );
+    }
+
+    /// A depth-2 commit a watch reload dropped from the loaded graph (an
+    /// amend, say) keeps a footer that names it, in both looks: a muted
+    /// `not in the loaded graph` line and its short hash on the bottom
+    /// (meta) row, still linked to its forge page; never `no selection`.
+    #[test]
+    fn commit_detail_footer_names_a_commit_missing_from_the_graph() {
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            let case = format!("{background:?}");
+            let mut state = two_pane_commit_diff_state();
+            state.background = background;
+            state.graph_identity = Some(("app".into(), LINK_SHA.into()));
+            resolve_app_remote(&mut state, "https://gitlab.com/group/sub/demo.git");
+            if let Some(model) = state.graph.as_mut() {
+                model.commits[0].id = "f".repeat(40);
+            }
+            assert_eq!(state.commit_detail_graph_row(), None, "{case}");
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let l = state.layout.clone();
+            let rule_y = l.files_list_y + l.files_list_height;
+            let bottom = l.tree_y + l.tree_height;
+            let footer = region_text(&terminal, l.tree_x, rule_y, l.tree_width, bottom - rule_y);
+            assert!(
+                !footer.contains(workspace_status_graph::FOOTER_NO_SELECTION),
+                "{case}: not `no selection`:\n{footer}"
+            );
+            let first = region_text(&terminal, l.tree_x, rule_y + 1, l.tree_width, 1);
+            assert_eq!(
+                first.trim_end(),
+                super::super::state::COMMIT_FOOTER_NOT_IN_GRAPH,
+                "{case}"
+            );
+            let buf = terminal.backend().buffer().clone();
+            assert_eq!(
+                buf[(l.tree_x, rule_y + 1)].fg,
+                state.theme.palette().muted,
+                "{case}: muted note"
+            );
+            let meta = region_text(&terminal, l.tree_x, bottom - 1, l.tree_width, 1);
+            assert_eq!(
+                meta.trim_end(),
+                "aaa1111",
+                "{case}: the short hash on the meta row"
+            );
+            let url = format!("https://gitlab.com/group/sub/demo/-/commit/{LINK_SHA}");
+            let link = only_link_to(&state, &terminal, &url);
+            assert_eq!(link.y, bottom - 1, "{case}: the hash still links");
+        }
+    }
+
+    /// The depth-2 footer records no rule edge when no body row fits under
+    /// its rule or no graph is loaded, like the graph footer.
+    #[test]
+    fn commit_detail_rule_is_not_recorded_without_a_body_row_or_a_graph() {
+        let mut state = two_pane_commit_diff_state();
+        let mut terminal = Terminal::new(TestBackend::new(30, 8)).unwrap();
+        let mut draw_in = |state: &mut AppState, height: u16| {
+            state.layout.commit_msg_rule_y = None;
+            terminal
+                .draw(|frame| draw_commit_detail(frame, Rect::new(0, 0, 30, height), state, 0, 0))
+                .unwrap();
+            state.layout.commit_msg_rule_y
+        };
+        assert_eq!(
+            draw_in(&mut state, 8),
+            Some(3),
+            "8 rows: the rule over 4 body rows (half the pane)"
+        );
+        assert_eq!(draw_in(&mut state, 2), None, "rule only: no body row");
+        state.graph = None;
+        assert_eq!(draw_in(&mut state, 8), None, "no graph loaded");
     }
 
     /// Every `file://` link URL of the frame.

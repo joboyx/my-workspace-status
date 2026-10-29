@@ -14,6 +14,9 @@ list or a highlighted repo / worktree. The widget still paints
 whatever `visible_rows` the model holds.
 `GraphModel::visible_row_at` returns one row in the same order and
 clones only that row (the focused-row lookups use it).
+`GraphModel::commit_row(id)` and `GraphModel::stash_row(stash_ref)` return
+that commit or stash row the same way, cloning only it (the TUI depth-2
+commit-files footer finds its drilled row with them).
 
 ## Types
 

@@ -30,7 +30,7 @@ use ratatui::style::Color;
 use workspace_status_graph::{
     graph_chrome_budget_for, graph_footer_request, graph_vscroll_visible, paint_model,
     selection_footer_parts, GraphChromeBudget, GraphFooterSelection, GraphModel, GraphRow,
-    LabelPart, PaintedLine, ASCII, COMMIT_MSG_LINES_DEFAULT, COMMIT_MSG_LINES_MAX,
+    LabelKind, LabelPart, PaintedLine, ASCII, COMMIT_MSG_LINES_DEFAULT, COMMIT_MSG_LINES_MAX,
     COMMIT_MSG_LINES_MIN, FOOTER_RULE_ROWS, UNICODE,
 };
 
@@ -165,6 +165,11 @@ pub(crate) const SEARCH_WRAPPED_TO_BOTTOM: &str = "search wrapped to bottom";
 
 /// The `/` query matches nothing in the bound pane.
 pub(crate) const SEARCH_NO_MATCH: &str = "no match";
+
+/// Message line of the depth-2 commit-files footer when the drilled commit,
+/// stash, or working tree has no row in the loaded graph (a watch reload
+/// after an amend, say); the meta row under it names the source.
+pub(crate) const COMMIT_FOOTER_NOT_IN_GRAPH: &str = "not in the loaded graph";
 
 /// `z` where nothing folds (graph list, file diff).
 pub(crate) const Z_FOLDS_TREE_ROWS: &str = "z folds tree rows";
@@ -321,9 +326,8 @@ pub struct LayoutHit {
     /// Rule width (the pane width).
     pub commit_msg_rule_width: u16,
     /// Most message rows the painted pane shows in its expanded footer
-    /// ([`workspace_status_graph::commit_msg_lines_fit`] for a graph pane,
-    /// `commit_detail_msg_lines_fit` for a commit-files pane). A drag of the
-    /// rule clamps here.
+    /// ([`workspace_status_graph::commit_msg_lines_fit`], the same for a
+    /// graph pane and a commit-files pane). A drag of the rule clamps here.
     pub commit_msg_lines_fit: usize,
     /// 0-based diff scrollbar column when a file diff is painted.
     pub diff_scrollbar_x: Option<u16>,
@@ -2055,38 +2059,55 @@ impl AppState {
         })
     }
 
-    /// Graph row the depth-2 commit-files footer describes: the commit,
-    /// stash, or uncommitted row the drill opened, found in the loaded
-    /// graph. `None` for a compare tab, a source with no graph row
-    /// (compare, commit vs worktree), or a row no longer in the graph.
-    pub(crate) fn commit_detail_graph_row(&self) -> Option<GraphRow> {
+    /// The drilled commit-files source of a Workspace drill. `None` for a
+    /// compare tab and for the graph view.
+    fn workspace_drill_source(&self) -> Option<&CommitFileSource> {
         if self.tabs.active_compare().is_some() {
             return None;
         }
-        let source = match &self.drill {
-            DrillView::Files { source, .. } | DrillView::Diff { source, .. } => source,
-            DrillView::Graph => return None,
-        };
+        match &self.drill {
+            DrillView::Files { source, .. } | DrillView::Diff { source, .. } => Some(source),
+            DrillView::Graph => None,
+        }
+    }
+
+    /// Graph row the depth-2 commit-files footer describes: the commit,
+    /// stash, or uncommitted row the drill opened, cloned from the loaded
+    /// graph (only that row). `None` for a compare tab, a source with no
+    /// graph row (compare, commit vs worktree), or a row no longer in the
+    /// graph ([`Self::commit_detail_fallback_name`] then names it).
+    pub(crate) fn commit_detail_graph_row(&self) -> Option<GraphRow> {
+        let source = self.workspace_drill_source()?;
         let model = self.graph.as_ref()?;
-        model
-            .visible_rows()
-            .into_iter()
-            .find(|row| match (source, row) {
-                (CommitFileSource::Commit { commit_id }, GraphRow::Commit { commit, .. }) => {
-                    commit.id == *commit_id
-                }
-                (CommitFileSource::Stash { stash_ref }, GraphRow::Stash(stash)) => {
-                    stash.stash_ref == *stash_ref
-                }
-                (CommitFileSource::Worktree, GraphRow::Uncommitted { .. }) => true,
-                _ => false,
-            })
+        match source {
+            CommitFileSource::Commit { commit_id } => model.commit_row(commit_id),
+            CommitFileSource::Stash { stash_ref } => model.stash_row(stash_ref),
+            CommitFileSource::Worktree => model
+                .uncommitted
+                .map(|has_changes| GraphRow::Uncommitted { has_changes }),
+            CommitFileSource::Compare { .. } | CommitFileSource::CommitVsWorktree { .. } => None,
+        }
+    }
+
+    /// Name of the drilled source for the commit-files footer when
+    /// [`Self::commit_detail_graph_row`] finds no row: the short hash, the
+    /// `stash@{n}`, `uncommitted`, or the range label
+    /// ([`CommitFileSource::short_label`]). `None` for a compare tab.
+    pub(crate) fn commit_detail_fallback_name(&self) -> Option<String> {
+        self.workspace_drill_source()
+            .map(CommitFileSource::short_label)
     }
 
     /// Body lines of a commit-message footer for graph row `row` at
     /// `width`: [`selection_footer_parts`], the lines the graph selection
     /// footer paints for that row (message lines, then the meta line), in
-    /// the current expand state. `None` gives the no-selection footer.
+    /// the current expand state.
+    ///
+    /// With no row, a `fallback` name (the drilled source, for example a
+    /// commit a watch reload dropped from the graph) gives a muted
+    /// [`COMMIT_FOOTER_NOT_IN_GRAPH`] line and a meta line with that name,
+    /// so the footer still names what the file list shows. No row and no
+    /// name gives the graph's no-selection footer.
     ///
     /// Every commit-message footer builds its lines here, so the same
     /// commit gives the same rows on every surface. The row is input, not
@@ -2095,8 +2116,19 @@ impl AppState {
     pub(crate) fn commit_footer_parts(
         &self,
         row: Option<&GraphRow>,
+        fallback: Option<&str>,
         width: usize,
     ) -> Vec<Vec<LabelPart>> {
+        if let (None, Some(name)) = (row, fallback) {
+            let meta = |text: &str| {
+                vec![LabelPart {
+                    text: text.to_string(),
+                    kind: LabelKind::Meta,
+                    target: None,
+                }]
+            };
+            return vec![meta(COMMIT_FOOTER_NOT_IN_GRAPH), meta(name)];
+        }
         let empty = GraphModel::default();
         let model = self.graph.as_ref().unwrap_or(&empty);
         let glyphs = if self.ascii { &ASCII } else { &UNICODE };
@@ -2142,10 +2174,15 @@ impl AppState {
     /// message rows stay blank and a message taller than the rows scrolls
     /// ([`Self::commit_detail_msg_scroll`]).
     pub(crate) fn commit_detail_footer_lines(&self, width: usize) -> Vec<String> {
-        self.commit_footer_parts(self.commit_detail_graph_row().as_ref(), width)
-            .iter()
-            .map(|parts| parts.iter().map(|part| part.text.as_str()).collect())
-            .collect()
+        let fallback = self.commit_detail_fallback_name();
+        self.commit_footer_parts(
+            self.commit_detail_graph_row().as_ref(),
+            fallback.as_deref(),
+            width,
+        )
+        .iter()
+        .map(|parts| parts.iter().map(|part| part.text.as_str()).collect())
+        .collect()
     }
 
     /// Message lines of the depth-2 commit-files footer below the shown
