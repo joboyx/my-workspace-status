@@ -1093,13 +1093,22 @@ mod tests {
             assert!(state.popover_pinned(), "{what}");
             let (_, text) = paint(&mut state, 132, 30);
             line_with(&text, "PR · CI failed");
-            // Moving the cursor closes it: the popover belongs to its row.
-            state.dispatch(Action::PopoverClose);
-            state.dispatch(Action::PopoverOpenFocused);
-            assert!(state.popover_pinned(), "{what}");
-            state.dispatch(Action::PopoverClose);
-            state.dispatch(Action::Move(1));
-            assert!(!state.popover_pinned(), "{what}");
+            // The wheel stays live under a pinned popover: moving the
+            // cursor to another row closes it (its owner is the row).
+            let rows = state.layout.prs_list_rows;
+            state.dispatch(Action::ScrollWheel {
+                col: rows.x + 10,
+                row: rows.y + 1,
+                delta: 1,
+                horizontal: false,
+            });
+            assert!(!state.popover_pinned(), "{what}: the cursor moved on");
+            let (_, text) = paint(&mut state, 132, 30);
+            assert!(
+                !text.iter().any(|line| line.contains("PR · CI failed")),
+                "{what}: the paint drops it"
+            );
+            line_with(&text, "◉ #319 feat(ABC-123): Show the retry state");
         }
     }
 }

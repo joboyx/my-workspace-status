@@ -1963,10 +1963,17 @@ mod tests {
                 assert!(Instant::now() < started_by, "the script never started");
                 std::thread::sleep(Duration::from_millis(10));
             };
-            assert!(
-                crate::git::is_tracked(pid),
-                "a quit stops the running command's group"
-            );
+            // The parent registers the group right after spawn returns,
+            // which may be after the script wrote its pid: wait for it
+            // while the script still sleeps.
+            let tracked_by = Instant::now() + Duration::from_millis(900);
+            while !crate::git::is_tracked(pid) {
+                assert!(
+                    Instant::now() < tracked_by && !run.is_finished(),
+                    "a quit stops the running command's group"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
             assert_eq!(run.join().unwrap(), Some("Title".to_string()));
             assert!(!crate::git::is_tracked(pid), "reaped: its slot is free");
             let _ = fs::remove_dir_all(&dir);
