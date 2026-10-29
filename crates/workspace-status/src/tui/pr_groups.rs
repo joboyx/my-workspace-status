@@ -311,7 +311,8 @@ pub fn clean_title(title: &str, group_key: Option<&str>) -> String {
 /// line of stdout, with control characters as spaces and trimmed, when the
 /// command exits 0 within 2 seconds and that line is not empty. Anything
 /// else (a missing file, a non-zero exit, no output, a timeout; the command
-/// is then killed) gives `None`, with no error.
+/// is then killed) gives `None`, with no error. The command is one-shot:
+/// when it exits, whatever it left running in its process group is killed.
 ///
 /// This blocks for up to 2 seconds. The caller runs it off the event
 /// thread, and never for a group where [`PrGroup::wants_title`] is false;
@@ -729,12 +730,18 @@ fn run_title_command_within(cmd: &Path, key: &str, limit: Duration) -> Option<St
         kill_and_reap(child);
         return None;
     };
+    // The command is one-shot: once it exits, end anything it left in its
+    // group. A background child that keeps stdout open would otherwise keep
+    // the reader thread alive, one thread per run.
+    #[cfg(unix)]
+    crate::git::signal_group(i32::try_from(child.id()).unwrap_or(0), libc::SIGKILL);
     // Reaped: the group no longer needs a stop.
     drop(tracked);
     if !status.success() {
         return None;
     }
-    // A grandchild that keeps the pipe open must not stall us either.
+    // Data the command wrote before it exited stays in the pipe, so the
+    // first line still lands; the grace only covers a slow reader thread.
     let grace = deadline
         .saturating_duration_since(Instant::now())
         .max(Duration::from_millis(200));
@@ -1940,6 +1947,36 @@ mod tests {
                 return;
             }
             panic!("the script never started");
+        }
+
+        /// A command that exits 0 but leaves a background child holding its
+        /// stdout still gives its title, and the child is killed with the
+        /// rest of the group, so no reader thread waits on the pipe.
+        #[test]
+        fn a_finished_command_ends_what_it_left_in_its_group() {
+            let dir = crate::testutil::unique_dir("ws-pr-title-leftover");
+            fs::create_dir_all(&dir).unwrap();
+            let pid_file = dir.join("leftover.pid");
+            // The background `sleep` inherits stdout and outlives the shell.
+            let script = Script::new(&format!(
+                "sleep 30 &\necho $! > '{pid}.tmp'\nmv '{pid}.tmp' '{pid}'\necho Title",
+                pid = pid_file.display()
+            ));
+            let title = run_title_command_within(&script.path, "ABC-123", Duration::from_secs(10));
+            assert_eq!(title, Some("Title".to_string()));
+            let pid: libc::pid_t = fs::read_to_string(&pid_file)
+                .expect("the script wrote the pid before its title")
+                .trim()
+                .parse()
+                .unwrap();
+            // The kill was sent before the run returned; only the reap by
+            // init can lag, so this waits on a generous deadline.
+            let gone_by = Instant::now() + Duration::from_secs(10);
+            while process_runs(pid) {
+                assert!(Instant::now() < gone_by, "the leftover child still runs");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let _ = fs::remove_dir_all(&dir);
         }
 
         #[test]
