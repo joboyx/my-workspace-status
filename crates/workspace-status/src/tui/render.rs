@@ -1319,7 +1319,8 @@ fn draw_explorer_tab(
     };
     let has_files = !tab.files.is_empty();
     // One status index and one row walk per frame, shared by the tree,
-    // the folder hint, and the breadcrumb.
+    // the folder hint, and the breadcrumb. A panned tree walks its rows
+    // once more for its pan clamp (`explorer_tree_max_col_in`).
     let status = state.explorer_status(&tab.checkout);
     let rows = tab.tree.rows(&status);
     let cursor = tab.tree.cursor_index(&rows);
@@ -8803,6 +8804,166 @@ mod tests {
                 assert_eq!(list_pan(&state, surface), 0, "{case}: and pans back");
                 assert_eq!((surface.cursor)(&state), cursor, "{case}: no cursor move");
             }
+        }
+    }
+
+    /// The `horizontal-pan` tree surfaces and the [`LIST_BAR_SURFACES`]
+    /// index of the fixture that opens each.
+    const TREE_HWHEEL_SURFACES: [(&str, usize); 2] = [("tree", 0), ("explorer-tree", 5)];
+
+    /// Show a file view wider than its pane beside the tree of `state`: a
+    /// file diff on the Workspace, a clean file's body on an Explorer tab
+    /// (the next row's preview, landed).
+    fn show_wide_file_view(state: &mut AppState) {
+        use crate::tui::effect::ExplorerPreviewBody;
+        if !state.is_explorer_tab() {
+            state.set_diff(
+                "app".into(),
+                bar_list_name(30),
+                super::super::diff::DiffContent::from_unified(wide_bar_diff()),
+            );
+            return;
+        }
+        let Effect::LoadExplorerPreview { tab_id, gen, .. } = state.dispatch(Action::Move(1))
+        else {
+            panic!("a file row previews");
+        };
+        let lines: Vec<String> = (0..40)
+            .map(|i| format!("wide {i:02} {}", "x".repeat(300)))
+            .collect();
+        let body = ExplorerPreviewBody::File(FileRead::Text {
+            max_cols: lines.iter().map(|l| l.chars().count()).max().unwrap_or(0),
+            lines,
+        });
+        assert!(state.apply_explorer_preview(tab_id, gen, body));
+    }
+
+    /// The pan of the file view shown beside the tree of `state`.
+    fn shown_view_pan(state: &AppState) -> u16 {
+        if state.is_explorer_tab() {
+            state
+                .tabs
+                .active_file_view()
+                .expect("a file view")
+                .col_offset
+        } else {
+            state.diff_col_offset
+        }
+    }
+
+    /// The horizontal wheel over a tree follows one rule on the Workspace
+    /// tree and the Explorer tree, in both looks: a shown file view that
+    /// can pan takes the pan (the tree stays), and once that view cannot
+    /// pan (wrap on) the tree pans. Shift-→ with the tree focused always
+    /// pans the tree.
+    #[test]
+    fn tree_hwheel_pans_a_shown_file_view_that_can_pan_on_every_registry_tree_surface() {
+        let supported = crate::parity_registry::supported_surface_looks("horizontal-pan", "hwheel");
+        for (id, _) in TREE_HWHEEL_SURFACES {
+            for (look, _) in PANE_LOOKS {
+                assert!(
+                    supported.contains(&(id.to_string(), look.to_string())),
+                    "docs/parity.md `horizontal-pan` / `hwheel` must mark {id} {look}"
+                );
+            }
+        }
+        for (id, fixture) in TREE_HWHEEL_SURFACES {
+            let surface = &LIST_BAR_SURFACES[fixture];
+            assert_eq!(surface.id, id, "fixture of {id}");
+            for (look, background) in PANE_LOOKS {
+                let case = format!("{id} {look}");
+                let mut state = (surface.open)();
+                state.background = background;
+                state.diff_wrap = false;
+                state.focus = FocusPane::Left;
+                state.dispatch(Action::Move(30));
+                let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                show_wide_file_view(&mut state);
+                draw_state(&mut terminal, &mut state);
+                let vbar = list_vbar(&state, surface.vbar);
+                let (col, row) = (vbar.x.expect("a long tree") - 1, vbar.y + 1);
+                let wheel = |delta| Action::ScrollWheel {
+                    col,
+                    row,
+                    delta,
+                    horizontal: true,
+                };
+
+                state.focus = FocusPane::Right;
+                state.dispatch(wheel(3));
+                assert_eq!(shown_view_pan(&state), 3, "{case}: the view takes the pan");
+                assert_eq!(list_pan(&state, surface), 0, "{case}: the tree stays");
+
+                state.focus = FocusPane::Left;
+                state.dispatch(Action::PanDiff(2));
+                assert_eq!(
+                    list_pan(&state, surface),
+                    2,
+                    "{case}: Shift-→ pans the tree"
+                );
+                assert_eq!(shown_view_pan(&state), 3, "{case}: not the view");
+                state.dispatch(Action::PanDiff(-2));
+
+                state.diff_wrap = true;
+                draw_state(&mut terminal, &mut state);
+                state.dispatch(wheel(3));
+                assert_eq!(
+                    list_pan(&state, surface),
+                    3,
+                    "{case}: a view that cannot pan leaves the pan to the tree"
+                );
+                assert_eq!(shown_view_pan(&state), 3, "{case}: the view stays");
+            }
+        }
+    }
+
+    /// A stale Explorer tree pan (past the pan max, or the max shrank when
+    /// the pane widened) drops to the max at paint, in state too, in both
+    /// looks (`clamped_list_pan`), and the bar clamps with it.
+    #[test]
+    fn explorer_tree_stale_pan_clamps_at_paint_boxed_and_flat() {
+        let surface = &LIST_BAR_SURFACES[5];
+        assert_eq!(surface.id, "explorer-tree");
+        for (look, background) in PANE_LOOKS {
+            let mut state = (surface.open)();
+            state.background = background;
+            state.focus = FocusPane::Left;
+            state.dispatch(Action::Move(30));
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            for _ in 0..300 {
+                state.dispatch(Action::PanDiff(1));
+            }
+            let max = list_pan(&state, surface);
+            assert!(max > 0, "{look}: the tree pans");
+            state
+                .tabs
+                .active_explorer_mut()
+                .expect("an Explorer tab")
+                .tree_col_offset = max + 40;
+            draw_state(&mut terminal, &mut state);
+            assert_eq!(
+                list_pan(&state, surface),
+                max,
+                "{look}: past the max clamps"
+            );
+            assert_eq!(state.layout.explorer_tree_hbar.col_max, max, "{look}: bar");
+
+            let mut wide = Terminal::new(TestBackend::new(240, 30)).unwrap();
+            draw_state(&mut wide, &mut state);
+            let tree = state.layout.explorer_tree;
+            let vbar = state.layout.explorer_tree_vbar.x.is_some();
+            let wider_max = state.explorer_tree_max_col_in(tree.width, vbar);
+            assert!(
+                usize::from(max) > wider_max,
+                "{look}: widening lowers the max"
+            );
+            assert_eq!(
+                usize::from(list_pan(&state, surface)),
+                wider_max,
+                "{look}: a stale pan after a widen clamps"
+            );
         }
     }
 

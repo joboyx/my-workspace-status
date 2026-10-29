@@ -890,9 +890,10 @@ impl AppState {
         }
     }
 
-    /// Wheel over the tree moves the tree cursor (or pans the tree,
-    /// horizontally); over the preview it moves the preview cursor (or
-    /// pans, horizontally). Never the hidden Workspace tree.
+    /// Wheel over the tree moves the tree cursor; horizontally it pans the
+    /// shown file view when that view can pan, else the tree (the
+    /// Workspace tree's rule). Over the preview it moves the preview
+    /// cursor (or pans, horizontally). Never the hidden Workspace tree.
     fn explorer_wheel(&mut self, col: u16, row: u16, delta: i32, horizontal: bool) -> Effect {
         if !self.mouse_enabled {
             return Effect::None;
@@ -909,10 +910,30 @@ impl AppState {
             return Effect::None;
         }
         if horizontal {
-            self.pan_explorer_tree(delta);
+            // As over the Workspace tree (`mouse_pan`): a shown file view
+            // that can pan takes the pan, else the tree pans.
+            if self.explorer_preview_pan_max() > 0 {
+                self.explorer_preview_pan(delta);
+            } else {
+                self.pan_explorer_tree(delta);
+            }
             return Effect::None;
         }
         self.explorer_move(delta as isize)
+    }
+
+    /// Pan max of the active inner file the Explorer shows: a changed
+    /// file's diff ([`Self::diff_pan_max`]) or a clean file's body
+    /// (`FileTab::pan_max`); 0 with wrap on, no inner file, or a body that
+    /// fits.
+    fn explorer_preview_pan_max(&self) -> usize {
+        match self.explorer_view() {
+            Some(ExplorerPreview::Diff { .. }) => self.diff_pan_max(),
+            Some(ExplorerPreview::File(file)) if !self.diff_wrap => {
+                file.pan_max(self.layout.file_view_width, self.ascii)
+            }
+            _ => 0,
+        }
     }
 
     /// Plain left press on an Explorer tab, as [`Self::click_at`] on the
