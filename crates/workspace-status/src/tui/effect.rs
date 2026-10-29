@@ -9201,6 +9201,41 @@ mod tests {
     }
 
     #[test]
+    fn r_keeps_the_badge_when_the_cli_fails_and_clears_it_on_no_pr() {
+        let (root, mut state) =
+            pr_app("ws-effect-pr-r-keeps", Some("git@github.com:octo/demo.git"));
+        let path = Path::new("app");
+        let mut interp = Interpreter::with_cap(8);
+        let tui_opts = opts(&state);
+        interp.pr_cli = gh_approved_pr;
+        interp.queue_due_pr_lookups(&mut state, &tui_opts);
+        drain_jobs(&mut interp, &mut state, 10);
+        let ready = Some(crate::tui::pr_status::PrState::Ready);
+        assert_eq!(state.pr_badge(path), ready);
+
+        let refresh = |interp: &mut Interpreter, state: &mut AppState, cli: PrCliRunner| {
+            interp.pr_cli = cli;
+            let effect = state.dispatch(Action::Refresh);
+            assert_eq!(effect, Effect::ReloadRepo { repo: "app".into() });
+            schedule_effect(interp, state, effect, &Action::Refresh);
+            drain_jobs(interp, state, 10);
+        };
+        refresh(&mut interp, &mut state, gh_fails);
+        assert_eq!(state.pr_badge(path), ready, "a failed r keeps the badge");
+        assert_eq!(
+            state
+                .pr_lookup_failure(path)
+                .and_then(|failure| failure.reason.as_deref()),
+            Some("HTTP 401: Bad credentials (https://api.github.com/graphql)")
+        );
+        assert!(state.status.is_empty(), "a background failure stays silent");
+        refresh(&mut interp, &mut state, gh_no_pr);
+        assert_eq!(state.pr_badge(path), None, "no PR clears it");
+        assert_eq!(state.pr_lookup_failure(path), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn a_poll_tick_queues_pollable_checkouts_once() {
         let mut state = fixture_state();
         let mut interp = Interpreter::with_cap(4);

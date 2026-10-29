@@ -87,10 +87,14 @@ struct CheckoutPr {
     branch: String,
     /// Remote URL the last landed lookup resolved. `None` before the first
     /// lookup of the branch lands, and when the checkout has no remote (then
-    /// there is no PR either). A poll keeps it, so the badge stays.
+    /// there is no PR either). A poll, a refresh, `r`, and a full reload
+    /// keep it, so the badge stays.
     remote: Option<String>,
     /// A lookup of this branch is queued or running. A poll skips it.
     in_flight: bool,
+    /// `r` or a full reload asked for a new lookup: the next applied status
+    /// ([`AppState::due_pr_lookups`]) queues it.
+    look_again: bool,
     /// Start of the poll cycle that queued the lookup in flight; `None`
     /// when that lookup is not a poll. A failed poll backs off its forge
     /// host from this time.
@@ -108,6 +112,7 @@ impl CheckoutPr {
             branch: branch.to_string(),
             remote: None,
             in_flight,
+            look_again: false,
             poll_cycle: None,
             checked_at: None,
             failure: None,
@@ -603,9 +608,10 @@ impl AppState {
     /// Checkouts whose PR badge needs a lookup now, marked in flight.
     ///
     /// Syncs the cache with the snapshot. A checkout with a new or changed
-    /// branch is returned. A checkout already looked up for its current
-    /// branch is left alone. A checkout that vanished, has a detached HEAD,
-    /// or is a hidden repo is dropped.
+    /// branch is returned, and one that `r` or a full reload asked to look
+    /// up again (its answer stays, so the badge stays). A checkout already
+    /// looked up for its current branch is left alone. A checkout that
+    /// vanished, has a detached HEAD, or is a hidden repo is dropped.
     pub(crate) fn due_pr_lookups(&mut self) -> Vec<(PathBuf, String)> {
         let wanted: Vec<(PathBuf, String)> = self
             .pr_rows()
@@ -623,16 +629,22 @@ impl AppState {
             .retain(|path, seen| branch_of.get(path) == Some(&&seen.branch));
         let mut due = Vec::new();
         for (path, branch) in &wanted {
-            if cache
-                .checkouts
-                .get(path)
-                .is_some_and(|checkout| &checkout.branch == branch)
-            {
-                continue;
+            match cache.checkouts.get_mut(path) {
+                Some(record) if &record.branch == branch => {
+                    if !std::mem::take(&mut record.look_again) {
+                        continue;
+                    }
+                    // A lookup still in flight is not queued twice: the
+                    // interpreter drops the repeat.
+                    record.in_flight = true;
+                    record.poll_cycle = None;
+                }
+                _ => {
+                    cache
+                        .checkouts
+                        .insert(path.clone(), CheckoutPr::new(branch, true));
+                }
             }
-            cache
-                .checkouts
-                .insert(path.clone(), CheckoutPr::new(branch, true));
             due.push((path.clone(), branch.clone()));
         }
         cache.prune_answers();
@@ -731,34 +743,39 @@ impl AppState {
         due
     }
 
-    /// Forget PR answers so the next applied snapshot looks them up again.
+    /// Forget that the PRs were looked up, so the next applied snapshot
+    /// looks them up again.
     ///
     /// `r` on a checkout passes it; a full reload passes `None` (every
     /// checkout).
     ///
-    /// The PR detail of that checkout is dropped too, so the next peek or
-    /// pin fetches it again. The last answer seen stays, so the new lookup
-    /// can still queue a transition.
+    /// The last answer and its check time stay, so the badge stays while
+    /// the new lookup runs and when it fails, as for a poll; only no PR from
+    /// a forge that answered, or a branch change, clears it. The PR detail
+    /// is dropped, so the popover fetches it again (at once when it is open
+    /// and the lookup lands). The last answer seen stays too, so the new
+    /// lookup can still queue a transition.
     pub(crate) fn forget_pr_lookups(&mut self, repo: Option<&Path>) {
         let cache = &mut self.pr_cache;
         match repo {
             Some(repo) => {
-                if let Some(CheckoutPr {
-                    branch,
-                    remote: Some(remote),
-                    ..
-                }) = cache.checkouts.remove(repo)
-                {
-                    cache.drop_detail(&(remote, branch));
+                let Some(record) = cache.checkouts.get_mut(repo) else {
+                    return;
+                };
+                record.look_again = true;
+                if let Some(remote) = record.remote.clone() {
+                    let key = (remote, record.branch.clone());
+                    cache.drop_detail(&key);
                 }
             }
             None => {
-                cache.checkouts.clear();
+                for record in cache.checkouts.values_mut() {
+                    record.look_again = true;
+                }
                 cache.details.clear();
                 cache.detail_refresh.clear();
             }
         }
-        cache.prune_answers();
     }
 
     /// Land a badge lookup of `branch` in checkout `repo`, now.
@@ -1037,8 +1054,8 @@ impl AppState {
 #[cfg_attr(not(test), allow(dead_code))]
 impl AppState {
     /// When the last successful PR lookup of checkout `checkout` landed, for
-    /// its current branch ("checked … ago"). `None` before one lands, and
-    /// after `r` until the new one lands.
+    /// its current branch ("checked … ago"). `None` before one lands. `r`
+    /// and a full reload keep it until the new lookup succeeds.
     pub(crate) fn pr_checked_at(&self, checkout: &Path) -> Option<Instant> {
         self.current_pr_record(checkout)?.checked_at
     }
@@ -1077,10 +1094,11 @@ impl AppState {
     ///
     /// Takes each visible checkout on a local branch whose first lookup
     /// landed with a GitHub or GitLab remote and that has no lookup in
-    /// flight. Unlike `r`, the badge stays on screen until the new answer
-    /// lands, and the forge host backoff does not apply. The detail of each
-    /// is marked for a new fetch; a popover that shows it asks again when
-    /// the answer lands.
+    /// flight. Like `r`, the badge stays on screen until the new answer
+    /// lands, and when it fails; the forge host backoff does not apply.
+    /// Unlike `r`, it needs no status apply first, and it keeps the detail
+    /// on screen: the detail is marked for a new fetch, and a popover that
+    /// shows it asks again when the answer lands.
     pub(crate) fn refresh_pull_requests(&mut self, checkout: Option<&Path>) -> Effect {
         let targets: Vec<(PathBuf, String)> = self
             .pr_rows()
@@ -1346,7 +1364,7 @@ mod tests {
     }
 
     #[test]
-    fn a_lookup_for_an_old_branch_or_a_forgotten_checkout_is_dropped() {
+    fn a_lookup_for_an_old_branch_is_dropped_and_one_after_r_lands() {
         let mut app = app_with(&[repo("app", "feature")], &[]);
         let path = Path::new("app");
         let _ = app.due_pr_lookups();
@@ -1364,9 +1382,13 @@ mod tests {
             "the changed branch is looked up"
         );
 
+        // `r` keeps the record of the current branch: an answer for it
+        // lands, one for the old branch is still dropped.
         app.forget_pr_lookups(Some(path));
-        assert!(!app.apply_pr_lookup(path, "other", Some(REMOTE.into()), found(PrState::InReview)));
-        assert_eq!(app.pr_badge(path), None);
+        assert!(app.apply_pr_lookup(path, "other", Some(REMOTE.into()), found(PrState::InReview)));
+        assert_eq!(app.pr_badge(path), Some(PrState::InReview));
+        assert!(!app.apply_pr_lookup(path, "feature", Some(REMOTE.into()), found(PrState::Ready)));
+        assert_eq!(app.pr_badge(path), Some(PrState::InReview));
     }
 
     #[test]
@@ -2583,11 +2605,11 @@ mod tests {
             "a switch away and back"
         );
 
-        // `r` drops the answer (the badge hides until its lookup lands), but
-        // keeps the last one seen: the same state is quiet, a change alerts.
+        // `r` keeps the badge while it looks again, and the last answer
+        // seen: the same state is quiet, a change alerts.
         app.forget_pr_lookups(Some(path));
         assert!(app.take_pr_transitions().is_empty(), "a forget queues none");
-        assert_eq!(app.pr_badge(path), None);
+        assert_eq!(app.pr_badge(path), Some(PrState::Ready));
         let _ = app.due_pr_lookups();
         assert!(changes(&mut app, GH_REMOTE, Some(ready)).is_empty());
         app.forget_pr_lookups(None);
@@ -2818,5 +2840,71 @@ mod tests {
             ["lib", "local"],
             "every checkout with a forge remote, polled or not"
         );
+    }
+
+    /// `app` on `feature` with an open PR 7 at `remote` checked at `t0`,
+    /// then `r` (`Some`) or a full reload (`None`) and the status apply
+    /// that queues the new lookup.
+    fn reloaded(remote: &str, full: bool, t0: Instant) -> AppState {
+        let mut app = app_with(&[pushed("app")], &[]);
+        let path = Path::new("app");
+        let _ = app.due_pr_lookups();
+        land_pr(&mut app, "app", remote, open_on(remote, 7), t0);
+        app.forget_pr_lookups((!full).then_some(path));
+        assert_eq!(
+            app.pr_badge(path),
+            Some(PrState::InReview),
+            "the badge stays while it looks again"
+        );
+        assert_eq!(
+            app.due_pr_lookups(),
+            vec![(PathBuf::from("app"), "feature".to_string())],
+            "the next status apply looks it up again"
+        );
+        assert!(app.due_pr_lookups().is_empty(), "once");
+        app
+    }
+
+    #[test]
+    fn r_or_a_reload_with_a_failing_cli_keeps_the_badge_and_records_the_error() {
+        let path = Path::new("app");
+        for remote in [GH_REMOTE, GL_REMOTE] {
+            for full in [false, true] {
+                let what = format!("{remote}, full reload {full}");
+                let t0 = Instant::now();
+                let mut app = reloaded(remote, full, t0);
+                let failed = PrLookup::Failed(Some("HTTP 401: Bad credentials".into()));
+                land_pr(&mut app, "app", remote, failed, t0 + secs(30));
+                assert_eq!(app.pr_badge(path), Some(PrState::InReview), "{what}");
+                assert_eq!(
+                    app.pr_lookup_failure(path)
+                        .and_then(|failure| failure.reason.as_deref()),
+                    Some("HTTP 401: Bad credentials"),
+                    "{what}"
+                );
+                assert_eq!(app.pr_checked_at(path), Some(t0), "{what}: last success");
+                assert!(!app.pr_is_stale(path, t0 + secs(360)), "{what}");
+                assert!(
+                    app.pr_is_stale(path, t0 + secs(361)),
+                    "{what}: stale dims it like a failed poll"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn r_or_a_reload_with_no_pr_clears_the_badge() {
+        let path = Path::new("app");
+        for remote in [GH_REMOTE, GL_REMOTE] {
+            for full in [false, true] {
+                let what = format!("{remote}, full reload {full}");
+                let t0 = Instant::now();
+                let mut app = reloaded(remote, full, t0);
+                land_pr(&mut app, "app", remote, PrLookup::NoPr, t0 + secs(30));
+                assert_eq!(app.pr_badge(path), None, "{what}");
+                assert_eq!(app.pr_lookup_failure(path), None, "{what}");
+                assert_eq!(app.pr_checked_at(path), Some(t0 + secs(30)), "{what}");
+            }
+        }
     }
 }

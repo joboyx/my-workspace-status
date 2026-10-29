@@ -153,7 +153,7 @@ See [tui-model.md](./tui-model.md) for the tree model and action registry.
 
 ## Pull request badge
 
-A tree checkout row with a branch and a graph worktree row with a branch show a one-column badge when the branch has an open or a merged PR (GitHub PR or GitLab merge request; the UI says PR). In the tree the badge sits in the row's right-aligned trailing cluster; in the graph it sits flush right on the worktree row, and the label clips before it does. The badge is one space plus one glyph, never a word. Closed-unmerged PRs, branches with no PR, and a first lookup of the branch that is in flight or failed show nothing. A poll, a refresh, or a failed later lookup keeps the badge that shows. Other graph rows (commit, stash, uncommitted) get no badge.
+A tree checkout row with a branch and a graph worktree row with a branch show a one-column badge when the branch has an open or a merged PR (GitHub PR or GitLab merge request; the UI says PR). In the tree the badge sits in the row's right-aligned trailing cluster; in the graph it sits flush right on the worktree row, and the label clips before it does. The badge is one space plus one glyph, never a word. Closed-unmerged PRs, branches with no PR, and a first lookup of the branch that is in flight or failed show nothing. A poll, a refresh, `r`, a full reload, or a failed later lookup keeps the badge that shows. Other graph rows (commit, stash, uncommitted) get no badge.
 
 | State | Glyph (Nerd / ASCII) | Colour role |
 | --- | --- | --- |
