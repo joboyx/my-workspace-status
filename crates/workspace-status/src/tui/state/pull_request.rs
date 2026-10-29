@@ -474,6 +474,25 @@ pub(crate) struct PrCache {
     /// whenever a lookup lands or the records sync with the snapshot, so
     /// the poll period and the stale test cost nothing per frame.
     hot: bool,
+    /// Checkout path to the remote of a checkout on its known default
+    /// branch. Such a checkout has no PR record, so this keeps the remote
+    /// that commit links need ([`AppState::commit_link`]); no PR surface
+    /// reads it.
+    default_remotes: HashMap<PathBuf, CheckoutRemote>,
+}
+
+/// The remote of a checkout on its known default branch, resolved with git
+/// only (no forge CLI) for commit links.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CheckoutRemote {
+    /// The default branch the checkout was on when it was resolved.
+    branch: String,
+    /// The remote URL; `None` until the worker answers, and when the
+    /// checkout has no remote.
+    remote: Option<String>,
+    /// `r` or a full reload asked to resolve it again; the old remote
+    /// stays until the answer lands.
+    look_again: bool,
 }
 
 impl PrCache {
@@ -941,7 +960,9 @@ impl AppState {
     /// Web page of commit `sha` (full id) in checkout `checkout`, or `None`.
     ///
     /// The forge comes from the remote URL the PR badge lookup already
-    /// resolved for the checkout ([`PrCache::remote_for`]); no git runs
+    /// resolved for the checkout ([`PrCache::remote_for`]), or, for a
+    /// checkout on its known default branch (never looked up), the remote
+    /// resolved for it alone ([`Self::due_remote_lookups`]); no git runs
     /// here. No resolved remote, or a remote that is not GitHub or GitLab,
     /// gives no link. An id that is not a full SHA-1 or SHA-256 hex id (an
     /// abbreviated one) gives no link either.
@@ -950,7 +971,13 @@ impl AppState {
         if !full {
             return None;
         }
-        let remote = self.pr_cache.remote_for(checkout)?;
+        let remote = self.pr_cache.remote_for(checkout).or_else(|| {
+            self.pr_cache
+                .default_remotes
+                .get(checkout)?
+                .remote
+                .as_deref()
+        })?;
         Some(commit_url(&parse_remote(remote)?, sha))
     }
 
@@ -1016,12 +1043,78 @@ impl AppState {
     /// these rows, so a default-branch checkout gets no lookup, poll,
     /// badge, total, popover section, alert, or PRs tab row.
     pub(super) fn pr_rows(&self) -> impl Iterator<Item = &WorkspaceRepoSnapshot> {
+        self.branch_rows().filter(|row| !on_default_branch(row))
+    }
+
+    /// Snapshot rows that are visible (not hidden, unless hidden repos
+    /// show) and on a local branch.
+    fn branch_rows(&self) -> impl Iterator<Item = &WorkspaceRepoSnapshot> {
         self.snapshot
             .repos
             .iter()
             .filter(|row| self.show_hidden || !row.hidden)
             .filter(|row| is_counted_local_branch(&row.branch))
-            .filter(|row| !on_default_branch(row))
+    }
+
+    /// Checkouts on their known default branch whose remote needs a
+    /// git-only resolve for commit links: a new or changed checkout, or one
+    /// that `r` or a full reload asked to resolve again.
+    ///
+    /// Syncs the remote records with the snapshot like
+    /// [`Self::due_pr_lookups`]: a checkout that vanished, is hidden, or
+    /// left its default branch is dropped. No forge CLI runs for these.
+    pub(crate) fn due_remote_lookups(&mut self) -> Vec<(PathBuf, String)> {
+        let wanted: Vec<(PathBuf, String)> = self
+            .branch_rows()
+            .filter(|row| on_default_branch(row))
+            .map(|row| (PathBuf::from(&row.repo), row.branch.clone()))
+            .collect();
+        let remotes = &mut self.pr_cache.default_remotes;
+        remotes.retain(|path, record| {
+            wanted
+                .iter()
+                .any(|(want, branch)| want == path && *branch == record.branch)
+        });
+        let mut due = Vec::new();
+        for (path, branch) in wanted {
+            match remotes.get_mut(&path) {
+                Some(record) => {
+                    if !std::mem::take(&mut record.look_again) {
+                        continue;
+                    }
+                }
+                None => {
+                    remotes.insert(
+                        path.clone(),
+                        CheckoutRemote {
+                            branch: branch.clone(),
+                            remote: None,
+                            look_again: false,
+                        },
+                    );
+                }
+            }
+            due.push((path, branch));
+        }
+        due
+    }
+
+    /// Land the remote that a git-only resolve gave for checkout `repo` on
+    /// its default branch `branch`. False when the checkout left that
+    /// branch or vanished since the resolve was queued.
+    pub(crate) fn apply_checkout_remote(
+        &mut self,
+        repo: &Path,
+        branch: &str,
+        remote: Option<String>,
+    ) -> bool {
+        match self.pr_cache.default_remotes.get_mut(repo) {
+            Some(record) if record.branch == branch => {
+                record.remote = remote;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// True when checkout `repo` is a snapshot row on `branch`, and
@@ -1101,9 +1194,15 @@ impl AppState {
     /// a forge that answered, or a branch change, clears it. The PR detail
     /// is dropped, so the popover fetches it again (at once when it is open
     /// and the lookup lands). The last answer seen stays too, so the new
-    /// lookup can still queue a transition.
+    /// lookup can still queue a transition. The remote of a checkout on its
+    /// default branch is resolved again too, and stays until that lands.
     pub(crate) fn forget_pr_lookups(&mut self, repo: Option<&Path>) {
         let cache = &mut self.pr_cache;
+        for (path, record) in &mut cache.default_remotes {
+            if repo.is_none_or(|repo| repo == path.as_path()) {
+                record.look_again = true;
+            }
+        }
         match repo {
             Some(repo) => {
                 let Some(record) = cache.checkouts.get_mut(repo) else {
@@ -2276,6 +2375,44 @@ mod tests {
         );
         assert_eq!(app.pr_badge(path), Some(PrState::InReview));
         assert!(app.take_pr_transitions().is_empty(), "no alert");
+    }
+
+    #[test]
+    fn a_default_branch_checkout_resolves_only_its_remote_for_commit_links() {
+        const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+        let mut app = app_with(&[with_default(repo("app", "main"), "main")], &[]);
+        let path = Path::new("app");
+        let main = vec![(PathBuf::from("app"), "main".to_string())];
+        assert!(app.due_pr_lookups().is_empty(), "no PR lookup");
+        assert_eq!(app.due_remote_lookups(), main, "a remote resolve");
+        assert!(app.due_remote_lookups().is_empty(), "once per branch");
+        assert_eq!(app.commit_link(path, SHA), None, "resolve in flight");
+        assert!(app.apply_checkout_remote(path, "main", Some(REMOTE.into())));
+        let link = Some(format!("https://github.com/octo/demo/commit/{SHA}"));
+        assert_eq!(app.commit_link(path, SHA), link);
+        assert_eq!(app.pr_badge(path), None, "still no PR status");
+        assert_eq!(app.pr_totals().prs, 0);
+
+        app.forget_pr_lookups(Some(path));
+        assert_eq!(app.due_remote_lookups(), main, "`r` resolves again");
+        assert_eq!(app.commit_link(path, SHA), link, "the old remote stays");
+
+        apply_one_repo_snapshot(
+            &mut app,
+            "app",
+            Some(with_default(repo("app", "x"), "main")),
+        );
+        assert!(app.due_remote_lookups().is_empty());
+        assert!(
+            !app.apply_checkout_remote(path, "main", Some(REMOTE.into())),
+            "a late resolve for the old branch is dropped"
+        );
+        assert_eq!(
+            app.due_pr_lookups(),
+            vec![(PathBuf::from("app"), "x".to_string())],
+            "off the default branch the PR lookup runs again"
+        );
+        assert_eq!(app.commit_link(path, SHA), None, "until it lands");
     }
 
     #[test]
