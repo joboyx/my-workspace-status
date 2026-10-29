@@ -266,6 +266,13 @@ pub(crate) enum JobOutcome {
         sha: String,
         result: Result<crate::git::PreviousLineChange, String>,
     },
+    /// Git-only remote resolve of checkout `repo` on its default branch
+    /// `branch`, for commit links.
+    CheckoutRemote {
+        repo: PathBuf,
+        branch: String,
+        remote: Option<String>,
+    },
     /// Badge lookup of `branch` in checkout `repo`. `remote` is the URL the
     /// worker resolved.
     PullRequestBadge {
@@ -930,6 +937,11 @@ pub(crate) struct Interpreter {
     /// [`UserTag::PullRequest`] slot and runs after the queued `gx` and
     /// `gc` opens.
     remote_views: VecDeque<(PathBuf, RemoteTarget)>,
+    /// Queued git-only remote resolves of checkouts on their default
+    /// branch: checkout, branch. Each has its own
+    /// [`UserTag::PullRequest`] slot and runs after the "View remotely"
+    /// opens.
+    checkout_remotes: VecDeque<(PathBuf, String)>,
     /// Queued badge lookups: checkout, branch. A checkout and branch that
     /// is queued or running is not queued again.
     pr_badges: VecDeque<(PathBuf, String)>,
@@ -1024,6 +1036,7 @@ impl Interpreter {
             pr_opens: VecDeque::new(),
             pr_ci_opens: VecDeque::new(),
             remote_views: VecDeque::new(),
+            checkout_remotes: VecDeque::new(),
             pr_badges: VecDeque::new(),
             pr_badge_jobs: HashSet::new(),
             pr_details: VecDeque::new(),
@@ -1795,6 +1808,14 @@ impl Interpreter {
                 self.remote_views.push_back((checkout, target));
                 self.sched.enqueue_user(UserTag::PullRequest);
             }
+            Effect::ResolveCheckoutRemotes { targets } => {
+                for target in targets {
+                    if !self.checkout_remotes.contains(&target) {
+                        self.checkout_remotes.push_back(target);
+                        self.sched.enqueue_user(UserTag::PullRequest);
+                    }
+                }
+            }
             Effect::LookupPullRequests { targets } => {
                 for target in targets {
                     if !self.pr_badges.contains(&target) && !self.pr_badge_jobs.contains(&target) {
@@ -2078,6 +2099,7 @@ impl Interpreter {
                                         merged_into_default: row.merged_into_default,
                                         default_branch_override: row.default_branch_override,
                                         default_tip_ref: row.default_tip_ref,
+                                        default_branch: row.default_branch,
                                         local_branches: row.local_branches,
                                     })
                             };
@@ -2684,6 +2706,15 @@ impl Interpreter {
                 state.apply_remote_view(page, opened);
                 self.mark();
             }
+            JobOutcome::CheckoutRemote {
+                repo,
+                branch,
+                remote,
+            } => {
+                if state.apply_checkout_remote(&repo, &branch, remote) {
+                    self.mark();
+                }
+            }
             JobOutcome::ComparePicker { gen, repo, result } => {
                 self.sched.note_user_done(UserTag::Prepare);
                 let accepted = self.sched.accept_prepare_compare_result(gen);
@@ -2736,7 +2767,8 @@ impl Interpreter {
         self.dirty = true;
     }
 
-    /// Queue badge lookups for checkouts whose branch is new or changed.
+    /// Queue badge lookups for checkouts whose branch is new or changed,
+    /// and git-only remote resolves for checkouts on their default branch.
     fn queue_due_pr_lookups(&mut self, state: &mut AppState, opts: &TuiOpts) {
         let targets = state.due_pr_lookups();
         if !targets.is_empty() {
@@ -2744,6 +2776,15 @@ impl Interpreter {
                 state,
                 opts,
                 Effect::LookupPullRequests { targets },
+                &Action::None,
+            );
+        }
+        let targets = state.due_remote_lookups();
+        if !targets.is_empty() {
+            self.schedule(
+                state,
+                opts,
+                Effect::ResolveCheckoutRemotes { targets },
                 &Action::None,
             );
         }
@@ -2794,6 +2835,7 @@ impl Interpreter {
         let wanted = self.pr_opens.len()
             + self.pr_ci_opens.len()
             + self.remote_views.len()
+            + self.checkout_remotes.len()
             + waiting.min(free);
         for _ in self.sched.queued_user_tag(UserTag::PullRequest)..wanted {
             self.sched.enqueue_user(UserTag::PullRequest);
@@ -3846,6 +3888,25 @@ impl Interpreter {
                     );
                     return;
                 }
+                if let Some((repo, branch)) = self.checkout_remotes.pop_front() {
+                    spawn(
+                        id,
+                        Box::new(move || {
+                            // A job that starts after quit runs no git.
+                            let remote = if cancel.load(Ordering::Relaxed) {
+                                None
+                            } else {
+                                remote_url_for_branch(&cwd.join(&repo), &branch)
+                            };
+                            JobOutcome::CheckoutRemote {
+                                repo,
+                                branch,
+                                remote,
+                            }
+                        }),
+                    );
+                    return;
+                }
                 if self.pr_badges_running < PR_BADGE_LOOKUPS_MAX {
                     // A fetch the cache no longer waits on would land
                     // nothing: skip it.
@@ -3997,6 +4058,7 @@ mod tests {
             merged_into_default: None,
             default_branch_override: None,
             default_tip_ref: None,
+            default_branch: None,
             local_branches: Vec::new(),
         }
     }
@@ -4253,6 +4315,7 @@ mod tests {
             patch_keys: Default::default(),
             head: Some("ccc".into()),
             base_tip: "bbb".into(),
+            commit: None,
         }
     }
 
@@ -9963,6 +10026,36 @@ mod tests {
             "asked again after it landed"
         );
         assert_eq!(interp.pr_details.len(), 1);
+    }
+
+    #[test]
+    fn a_default_branch_checkout_links_commits_with_no_forge_call() {
+        const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+        let root = crate::testutil::unique_dir("ws-effect-default-branch-link");
+        let dir = root.join("app");
+        crate::testutil::init_repo(&dir);
+        crate::testutil::git(
+            &dir,
+            &["remote", "add", "origin", "git@github.com:octo/demo.git"],
+        );
+        let mut row = repo("app", false);
+        row.branch = "main".into();
+        row.default_branch = Some("main".into());
+        let snapshot = build_workspace_snapshot(&[row], &[], false, &[]);
+        let mut state = AppState::new(root.clone(), snapshot, true);
+        let mut interp = Interpreter::with_cap(8);
+        interp.pr_cli = cli_must_not_run;
+        let tui_opts = opts(&state);
+        interp.queue_due_pr_lookups(&mut state, &tui_opts);
+        drain_jobs(&mut interp, &mut state, 10);
+        let path = Path::new("app");
+        assert_eq!(state.pr_badge(path), None, "no PR status");
+        assert_eq!(
+            state.commit_link(path, SHA),
+            Some(format!("https://github.com/octo/demo/commit/{SHA}")),
+            "the graph and the commit-files footer link the commit"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

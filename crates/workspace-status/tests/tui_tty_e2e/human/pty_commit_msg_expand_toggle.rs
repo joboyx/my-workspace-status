@@ -5,9 +5,9 @@ use crate::seed::{
 use crate::support::{
     crumb_row, graph_cursor_on, no_wrong_overlays, panes_files_focused,
     panes_files_unfocused_diff_focused, panes_tree_focused_graph_unfocused,
-    panes_tree_unfocused_graph_focused, right_pane, status_row, title_has_diff, title_has_files,
-    title_has_graph, tree_cursor_on, tree_has, tree_inactive_selection_on, type_palette_filter,
-    SETTLE_MS, WAIT,
+    panes_tree_unfocused_graph_focused, prove_keys_handled, right_pane, status_row, title_has_diff,
+    title_has_files, title_has_graph, tree_cursor_on, tree_has, tree_inactive_selection_on,
+    type_palette_filter, WAIT,
 };
 
 const REPO: &str = "longmsg";
@@ -350,7 +350,7 @@ fn pty_commit_msg_expand_toggle() {
         "second M wraps the body onto the graph selection footer again",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         graph_msg_expanded,
         "graph expand holds (not a flicker or toast-only)",
@@ -370,7 +370,7 @@ fn pty_commit_msg_expand_toggle() {
         "depth 1 M hides the body on the graph footer",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         files_msg_collapsed,
         "collapse holds (not a no-op second M)",
@@ -397,7 +397,7 @@ fn pty_commit_msg_expand_toggle() {
         "depth 2 M hides the body on the left files footer",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(diff_msg_collapsed, "depth 2 collapse holds", WAIT);
 
     tui.key('M');

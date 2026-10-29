@@ -42,7 +42,7 @@ fn pty_prs_tab_enter_opens_the_pr_on_both_forges() {
         "every lookup lands: the workspace row counts nine PRs",
         GIT_WAIT,
     );
-    tui.keys("gp");
+    tui.send_bytes(b"gp");
     tui.wait_pred(|_| prs_list(&tui).is_some(), "gp opens the PRs tab", WAIT);
     assert!(forge.opened().is_empty(), "nothing opened yet");
 

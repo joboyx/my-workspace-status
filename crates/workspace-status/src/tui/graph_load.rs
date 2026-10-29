@@ -328,6 +328,16 @@ pub(crate) fn load_commit_card(repo_dir: &Path, sha: &str) -> Result<Commit, Str
         .ok_or_else(|| "commit not found".to_string())
 }
 
+/// Commit `id` in `repo_dir` as a graph row reads it: message, parents,
+/// author, date, and the branch and tag refs that point at it. Runs git;
+/// call it off the event thread. `None` when git cannot read the commit.
+pub(crate) fn load_commit(repo_dir: &Path, id: &str) -> Option<Commit> {
+    let refs = load_refs(repo_dir);
+    load_commits_by_ids(repo_dir, &[id.to_string()], &refs)
+        .into_iter()
+        .next()
+}
+
 fn load_commits_by_ids(
     repo_dir: &Path,
     ids: &[String],
@@ -671,7 +681,8 @@ fn same_checkout(a: &Path, b: &Path) -> bool {
     ca == cb
 }
 
-fn sync_from_snapshot(repo: &WorkspaceRepoSnapshot) -> SyncState {
+/// Graph sync header state (branch, ahead / behind) of snapshot row `repo`.
+pub(crate) fn sync_from_snapshot(repo: &WorkspaceRepoSnapshot) -> SyncState {
     let (ahead, behind) = parse_ahead_behind(&repo.sync_note);
     SyncState {
         branch: repo.branch.clone(),
@@ -1052,6 +1063,7 @@ mod live_git {
                 merged_into_default: None,
                 default_branch_override: None,
                 default_tip_ref: None,
+                default_branch: None,
                 local_branches: Vec::new(),
             }],
             &[],

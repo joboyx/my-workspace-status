@@ -10,7 +10,6 @@ use crate::support::{
 const LINE1: &str = "one";
 const HEADING: &str = "# heading";
 const LIST: &str = "- list";
-const KEY_GAP_MS: u64 = 50;
 
 fn comment_store(workspace: &Path) -> std::path::PathBuf {
     workspace.join(".e2e-state").join("comments.json")
@@ -103,10 +102,8 @@ fn pty_semicolon_comment_multiline_export() {
     );
     tui.keys(LINE1);
     shift_enter(&mut tui);
-    tui.wait_ms(KEY_GAP_MS);
     tui.keys(HEADING);
     shift_enter(&mut tui);
-    tui.wait_ms(KEY_GAP_MS);
     tui.keys(LIST);
     tui.wait_pred(
         |screen| {

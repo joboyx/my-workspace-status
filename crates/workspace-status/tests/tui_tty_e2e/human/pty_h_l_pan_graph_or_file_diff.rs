@@ -3,16 +3,15 @@ use crate::harness::{left_tree, PtySession};
 use crate::seed::{daily_workspace, seed_long_diff_file, unwrap_diffs_at_launch};
 use crate::support::{
     crumb_row, launch_breadcrumb_workspace_app, no_updates_group_folded, no_wrong_overlays,
-    panes_tree_focused_diff_unfocused, panes_tree_unfocused_diff_focused, right_pane,
-    right_vbar_at_top, status_row, title_has_files, tree_cursor_on, tree_dir_expanded, tree_has,
-    SETTLE_MS, WAIT,
+    panes_tree_focused_diff_unfocused, panes_tree_unfocused_diff_focused, prove_keys_handled,
+    right_pane, right_vbar_at_top, status_row, step_until_changed, title_has_files, tree_cursor_on,
+    tree_dir_expanded, tree_has, WAIT,
 };
 
 const FILE: &str = "unique-diffline.rs";
-/// Repeats after the first CSI-u press. One press is `· pan 1`.
+/// About how many Repeats pan the line to its tail; the loops stop on the
+/// paint, not on this count.
 const PAN_REPEATS: usize = 40;
-/// Gap so the input thread does not drain the held-nav backlog as one move.
-const REPEAT_GAP_MS: u64 = 50;
 
 fn status_has_diff_tail(screen: &str) -> bool {
     status_row(screen).contains(DIFF_HSCROLL_TAIL)
@@ -138,14 +137,28 @@ fn documented_hl_panned_file_diff(screen: &str) -> bool {
         && idle_chrome_right(screen)
 }
 
-/// CSI-u press, spaced Repeat, release. The input thread drains a held-nav
-/// burst after each move, so Repeats must not be written as one flush.
-fn csi_u_hold_letter(tui: &mut PtySession, letter: char, repeats: usize) {
-    tui.letter_press(letter);
-    tui.wait_ms(REPEAT_GAP_MS);
-    for _ in 0..repeats {
-        tui.letter_repeat(letter);
-        tui.wait_ms(REPEAT_GAP_MS);
+/// CSI-u press, Repeats until `done`, release. The input thread drops a
+/// queued copy of a held nav key after each move, so each key waits for
+/// the right pane to pan before the next one goes out.
+fn csi_u_hold_until(tui: &mut PtySession, letter: char, done: impl Fn(&str) -> bool) {
+    step_until_changed(
+        tui,
+        |tui| tui.letter_press(letter),
+        right_pane,
+        |_| true,
+        "the CSI-u press pans the focused diff",
+    );
+    for _ in 0..PAN_REPEATS * 4 {
+        if done(&tui.screen()) {
+            break;
+        }
+        step_until_changed(
+            tui,
+            |tui| tui.letter_repeat(letter),
+            right_pane,
+            |_| true,
+            "each CSI-u Repeat pans the focused diff one more column",
+        );
     }
     tui.csi_u(u32::from(letter.to_ascii_lowercase()), 1, 3);
 }
@@ -200,8 +213,17 @@ fn pty_h_l_pan_graph_or_file_diff() {
         WAIT,
     );
 
-    csi_u_hold_letter(&mut tui, 'l', 3);
-    tui.wait_ms(SETTLE_MS);
+    // A held l on the tree: press, three Repeats, release. It must not pan,
+    // so nothing moves to wait on; the probe proves every report ran.
+    let l = u32::from('l');
+    tui.send_bytes(
+        format!(
+            "\x1b[{l};1:1u{}\x1b[{l};1:3u",
+            format!("\x1b[{l};1:2u").repeat(3)
+        )
+        .as_bytes(),
+    );
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         long_diff_clipped_tree_focus,
         "CSI-u held l on the tree-focused file must not pan the overflowing diff (fold, not pan)",
@@ -221,16 +243,24 @@ fn pty_h_l_pan_graph_or_file_diff() {
         "one CSI-u l press pans one column (line 0 → ine 0, · pan 1, h-bar; tail still clipped)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_hl_panned_one_col,
         "one-column pan holds (not a delayed jump to the tail or a chrome-only flicker)",
         WAIT,
     );
 
-    for _ in 0..PAN_REPEATS {
-        tui.letter_repeat('l');
-        tui.wait_ms(REPEAT_GAP_MS);
+    for _ in 0..PAN_REPEATS * 4 {
+        if documented_hl_panned_file_diff(&tui.screen()) {
+            break;
+        }
+        step_until_changed(
+            &mut tui,
+            |tui| tui.letter_repeat('l'),
+            right_pane,
+            |_| true,
+            "each CSI-u l Repeat pans the focused diff one more column",
+        );
     }
     tui.csi_u(u32::from('l'), 1, 3);
     tui.wait_pred(
@@ -238,20 +268,20 @@ fn pty_h_l_pan_graph_or_file_diff() {
         "CSI-u l Repeat pans the overflowing file-diff to UNIQUE_DIFF_TAIL (tree stays)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_hl_panned_file_diff,
         "file-diff pan holds (not a flicker, tree fold, or chrome-only suffix)",
         WAIT,
     );
 
-    csi_u_hold_letter(&mut tui, 'h', PAN_REPEATS);
+    csi_u_hold_until(&mut tui, 'h', long_diff_clipped_diff_focus);
     tui.wait_pred(
         long_diff_clipped_diff_focus,
         "CSI-u held h pans the focused file-diff back to the left edge (tail and pan chrome gone)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         long_diff_clipped_diff_focus,
         "restored clip holds (not a no-op h, a fold, or a stale pan bar)",

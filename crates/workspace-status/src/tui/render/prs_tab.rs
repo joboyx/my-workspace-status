@@ -10,7 +10,9 @@
 //! hit, so hover, click, Ctrl+click, and the OSC 8 link work as on the
 //! tree badge. The detail pane paints the focused PR: its title line, the
 //! PR popover lines ([`pr_detail_lines`]), every checkout that shows it,
-//! the repository, and the PR actions with their keys.
+//! the repository, and the PR actions with their keys. Both panes paint
+//! the shared vertical scrollbar while their lines overflow; the detail
+//! keeps its own viewport per PR.
 
 use super::*;
 
@@ -381,7 +383,8 @@ pub(super) fn draw_prs_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppSta
 }
 
 /// The list pane: error and loading lines, then the empty copy or the
-/// scrolled lines with the cursor kept in view.
+/// scrolled lines with the cursor kept in view, and the shared vertical
+/// bar beside them while they overflow ([`ListBars`]).
 fn draw_prs_list(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, view: &PrsView) {
     let palette = state.theme.palette();
     let pane = draw_pane_chrome(frame, area, PRS_LIST_TITLE, true, palette.sidebar, state);
@@ -447,19 +450,23 @@ fn draw_prs_list(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, view: 
         bleed_flat_pad(frame, pane);
         return;
     }
-    let height = usize::from(lines_area.height);
+    // The vertical bar takes the last column while the lines overflow;
+    // the rows never pan, so there is no horizontal bar.
+    let bars = ListBars::new(lines_area, view.lines.len(), 0);
+    let rows_area = bars.rows_area();
+    let height = usize::from(rows_area.height);
     let (start, _) = visible_window(view.lines.len(), view.cursor.unwrap_or(0), height);
     if let Some(tab) = state.tabs.active_prs_mut() {
         tab.scroll = start;
     }
-    let width = usize::from(lines_area.width);
+    let width = usize::from(rows_area.width);
     let prefix = list_prefix_cols(0);
     let columns = RowColumns::of(state, view, width.saturating_sub(prefix));
     let search = state.theme.pills().filter;
     let now_unix = unix_now();
     let mut painted = Vec::new();
     for (index, line) in view.lines.iter().enumerate().skip(start).take(height) {
-        let y = lines_area.y + (index - start) as u16;
+        let y = rows_area.y + (index - start) as u16;
         let selected = Some(index) == view.cursor;
         let (segs, foldable, folded, flash) = match *line {
             PrsLine::Header { group, folded } => {
@@ -470,10 +477,10 @@ fn draw_prs_list(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, view: 
                 let row = &view.groups[group].rows[row];
                 let (segments, hit_w) =
                     row_segments(state, row, &columns, width.saturating_sub(prefix));
-                let x = lines_area.x + prefix as u16;
+                let x = rows_area.x + prefix as u16;
                 let hit_w = u16::try_from(hit_w)
                     .unwrap_or(0)
-                    .min(lines_area.right().saturating_sub(x));
+                    .min(rows_area.right().saturating_sub(x));
                 if hit_w > 0 {
                     state.layout.icon_hits.push(IconHit {
                         y,
@@ -507,12 +514,17 @@ fn draw_prs_list(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, view: 
             0,
         ));
     }
-    frame.render_widget(Paragraph::new(painted), lines_area);
+    frame.render_widget(Paragraph::new(painted), rows_area);
+    let flat = state.background == BackgroundMode::Paint;
+    let (vbar, _) = bars.paint(frame, start, (0, 0), flat);
+    state.layout.prs_list_vbar = vbar;
     bleed_flat_pad(frame, pane);
 }
 
 /// The detail pane: the focused PR's title line, its PR lines, its
 /// checkouts and repository, a rule, then the actions with their keys.
+/// Lines past its height scroll ([`AppState::keep_prs_detail_scroll`]),
+/// with the shared vertical bar in the last column while they overflow.
 fn draw_prs_detail(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -540,30 +552,9 @@ fn draw_prs_detail(
         bleed_flat_pad(frame, pane);
         return;
     }
-    let width = usize::from(inner.width);
     let ascii = state.ascii;
     let muted = Style::default().fg(palette.muted);
     let role = |role: SegRole| Style::default().fg(seg_role_color(role, palette));
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    // Line index, column, painted width, and full URL of the `url` field.
-    let mut link: Option<(usize, usize, usize, String)> = None;
-    // `<glyph> <ref> <title>`.
-    let mut title = vec![
-        Span::styled(
-            pr_badge_kind(row.pr.state).glyph(ascii).to_string(),
-            role(pr_badge_role(row.pr.state, false)).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            row.pr.ref_text(),
-            role(SegRole::Repo).add_modifier(Modifier::BOLD),
-        ),
-    ];
-    if !row.pr.title.is_empty() {
-        title.push(Span::raw(" "));
-        title.push(Span::styled(row.pr.title.clone(), role(SegRole::File)));
-    }
-    lines.push(Line::from(clamp_spans(title, width)));
     let mut fields = pr_detail_lines(state, &row.checkout, unix_now());
     for (nth, checkout) in view.checkouts_of(row).iter().enumerate() {
         let path = checkout.to_string_lossy().into_owned();
@@ -594,6 +585,45 @@ fn draw_prs_detail(
         bold: 0,
         mark: None,
     });
+    let actions = [
+        ("Enter", "Open PR"),
+        ("gc", row.pr.ci_link.kind.label()),
+        ("o", "Show in tree"),
+        ("y", "Copy URL"),
+    ];
+    // The title, one line per field, the rule, and the actions; the
+    // vertical bar takes the last column while they overflow, and the
+    // viewport is the PR's own (another PR starts at the top).
+    let shown_fields = fields
+        .iter()
+        .filter(|line| !matches!(line, PopoverLine::Rule | PopoverLine::Action { .. }))
+        .count();
+    let line_count = 1 + shown_fields + 1 + actions.len();
+    let bars = ListBars::new(inner, line_count, 0);
+    let body = bars.rows_area();
+    let height = usize::from(body.height);
+    let start = state.keep_prs_detail_scroll(&row.pr.url, line_count.saturating_sub(height));
+    let width = usize::from(body.width);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    // Line index, column, painted width, and full URL of the `url` field.
+    let mut link: Option<(usize, usize, usize, String)> = None;
+    // `<glyph> <ref> <title>`.
+    let mut title = vec![
+        Span::styled(
+            pr_badge_kind(row.pr.state).glyph(ascii).to_string(),
+            role(pr_badge_role(row.pr.state, false)).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            row.pr.ref_text(),
+            role(SegRole::Repo).add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if !row.pr.title.is_empty() {
+        title.push(Span::raw(" "));
+        title.push(Span::styled(row.pr.title.clone(), role(SegRole::File)));
+    }
+    lines.push(Line::from(clamp_spans(title, width)));
     let label_w = fields
         .iter()
         .filter_map(|line| match line {
@@ -651,12 +681,6 @@ fn draw_prs_detail(
         glyph(ascii, "─", "-").repeat(width),
         muted,
     )));
-    let actions = [
-        ("Enter", "Open PR"),
-        ("gc", row.pr.ci_link.kind.label()),
-        ("o", "Show in tree"),
-        ("y", "Copy URL"),
-    ];
     let key_w = actions
         .iter()
         .map(|(key, _)| visible_width(key) + 2)
@@ -674,21 +698,27 @@ fn draw_prs_detail(
             width,
         )));
     }
-    if let Some((y, x, shown_w, url)) = link {
-        if let (Ok(y), Ok(x), Ok(shown_w)) =
-            (u16::try_from(y), u16::try_from(x), u16::try_from(shown_w))
-        {
-            if y < inner.height {
-                state.layout.links.push(LinkHit {
-                    y: inner.y + y,
-                    x: inner.x + x,
-                    width: shown_w,
-                    url,
-                });
-            }
+    debug_assert_eq!(lines.len(), line_count, "the bar measures every line");
+    // The `url` line links only while it is in the viewport.
+    if let Some((y, x, shown_w, url)) = link.filter(|(y, ..)| (start..start + height).contains(y)) {
+        if let (Ok(y), Ok(x), Ok(shown_w)) = (
+            u16::try_from(y - start),
+            u16::try_from(x),
+            u16::try_from(shown_w),
+        ) {
+            state.layout.links.push(LinkHit {
+                y: body.y + y,
+                x: body.x + x,
+                width: shown_w,
+                url,
+            });
         }
     }
-    frame.render_widget(Paragraph::new(lines), inner);
+    let shown: Vec<Line<'static>> = lines.into_iter().skip(start).take(height).collect();
+    frame.render_widget(Paragraph::new(shown), body);
+    let flat = state.background == BackgroundMode::Paint;
+    let (vbar, _) = bars.paint(frame, start, (0, 0), flat);
+    state.layout.prs_detail_vbar = vbar;
     bleed_flat_pad(frame, pane);
 }
 
@@ -869,6 +899,145 @@ mod tests {
                     .iter()
                     .any(|link| link.y == url_y && link.url == url && link.x >= detail.x),
                 "{what}: the url field links the full URL"
+            );
+        }
+    }
+
+    /// The wheel over a long detail scrolls it (the list cursor stays) up
+    /// to its last page, the paint clamps a top the detail no longer
+    /// needs, and another PR starts at the top, in both looks.
+    #[test]
+    fn the_detail_scrolls_with_the_wheel_clamps_and_starts_another_pr_at_the_top() {
+        for background in LOOKS {
+            let what = format!("{background:?}");
+            let mut state = on_prs_tab(false, background);
+            state.dispatch(Action::Move(1));
+            let (_, text) = paint(&mut state, 132, 12);
+            let detail = state.layout.prs_detail;
+            let bar = state.layout.prs_detail_vbar;
+            let x = bar.x.expect("the long detail paints its bar");
+            assert_eq!(x, detail.right() - 1, "{what}: in the last column");
+            assert_eq!((bar.y, bar.height), (detail.y, detail.height), "{what}");
+            assert_eq!(bar.scroll, 0, "{what}");
+            let max = usize::from(bar.scroll_max);
+            assert_eq!(bar.content_len - usize::from(detail.height), max, "{what}");
+            line_with(&crop(&text, detail), "✕ #318 feat(ABC-123)");
+
+            let cursor = state.tabs.active_prs().unwrap().cursor_index;
+            let rows = state.layout.prs_detail_rows;
+            let wheel = |delta| Action::ScrollWheel {
+                col: rows.x + 2,
+                row: rows.y + 1,
+                delta,
+                horizontal: false,
+            };
+            state.dispatch(wheel(2));
+            assert_eq!(state.prs_detail_scroll(), 2, "{what}: the wheel scrolls");
+            assert_eq!(
+                state.tabs.active_prs().unwrap().cursor_index,
+                cursor,
+                "{what}: the list cursor stays"
+            );
+            let (_, text) = paint(&mut state, 132, 12);
+            assert_eq!(state.layout.prs_detail_vbar.scroll, 2, "{what}");
+            let right = crop(&text, detail);
+            assert!(
+                !right.iter().any(|line| line.contains("✕ #318 feat")),
+                "{what}: the title scrolled off"
+            );
+            state.dispatch(wheel(100));
+            assert_eq!(state.prs_detail_scroll(), max, "{what}: stops at the end");
+            let (_, text) = paint(&mut state, 132, 12);
+            line_with(&crop(&text, detail), " y      Copy URL");
+            state.dispatch(wheel(-100));
+            assert_eq!(state.prs_detail_scroll(), 0, "{what}: and back to the top");
+
+            // A taller frame needs a smaller top: the paint clamps it.
+            state.dispatch(wheel(100));
+            paint(&mut state, 132, 16);
+            let taller = usize::from(state.layout.prs_detail_vbar.scroll_max);
+            assert!(taller < max, "{what}: {taller} < {max}");
+            assert_eq!(state.prs_detail_scroll(), taller, "{what}: clamped");
+            assert_eq!(
+                usize::from(state.layout.prs_detail_vbar.scroll),
+                taller,
+                "{what}"
+            );
+
+            // The next PR starts at the top, and so does this one again.
+            state.dispatch(Action::Move(1));
+            let (_, text) = paint(&mut state, 132, 12);
+            assert_eq!(state.prs_detail_scroll(), 0, "{what}: another PR");
+            line_with(&crop(&text, state.layout.prs_detail), "◉ #319");
+            state.dispatch(wheel(2));
+            state.dispatch(Action::Move(-1));
+            let (_, text) = paint(&mut state, 132, 12);
+            assert_eq!(state.prs_detail_scroll(), 0, "{what}: back on #318");
+            line_with(&crop(&text, state.layout.prs_detail), "✕ #318 feat");
+        }
+    }
+
+    /// The narrow detail (after `Tab`) is the focused pane: `j` / `k`, the
+    /// page keys, and `gg` / `G` scroll it and leave the list cursor; back
+    /// on the list (Esc) they move the cursor again. In both looks.
+    #[test]
+    fn the_narrow_detail_scrolls_with_the_move_keys() {
+        use super::super::super::pr_status::PrState;
+        for background in LOOKS {
+            let what = format!("{background:?}");
+            // One PR that eight checkouts show: a detail of 19 lines.
+            let names: Vec<String> = (0..8).map(|i| format!("co{i}")).collect();
+            let repos: Vec<_> = names.iter().map(|name| checkout(name, "topic")).collect();
+            let mut state = app_over(&repos, false);
+            state.background = background;
+            let shared = pr(
+                GH_APP,
+                7,
+                PrState::InReview,
+                "Share one PR",
+                "topic",
+                "main",
+            );
+            for name in &names {
+                land(&mut state, name, "topic", GH_APP, shared.clone());
+            }
+            state.dispatch(Action::OpenPrsTab);
+            paint(&mut state, 90, 12);
+            state.dispatch(Action::FocusRight);
+            paint(&mut state, 90, 12);
+            assert_eq!(
+                state.layout.prs_list,
+                Rect::default(),
+                "{what}: detail only"
+            );
+            let max = usize::from(state.layout.prs_detail_vbar.scroll_max);
+            let page = usize::from(state.layout.prs_detail.height) - 1;
+            assert!(max > page, "{what}: a detail longer than a page ({max})");
+            let cursor = state.tabs.active_prs().unwrap().cursor_index;
+            state.dispatch(Action::Move(1));
+            assert_eq!(state.prs_detail_scroll(), 1, "{what}: j");
+            state.dispatch(Action::PageMove(1));
+            assert_eq!(state.prs_detail_scroll(), 1 + page, "{what}: PageDown");
+            state.dispatch(Action::Move(-1));
+            assert_eq!(state.prs_detail_scroll(), page, "{what}: k");
+            state.dispatch(Action::MoveToEnd);
+            assert_eq!(state.prs_detail_scroll(), max, "{what}: G");
+            state.dispatch(Action::PageMove(-1));
+            assert_eq!(state.prs_detail_scroll(), max - page, "{what}: PageUp");
+            state.dispatch(Action::MoveToStart);
+            assert_eq!(state.prs_detail_scroll(), 0, "{what}: gg");
+            assert_eq!(
+                state.tabs.active_prs().unwrap().cursor_index,
+                cursor,
+                "{what}: the list cursor stays"
+            );
+            state.dispatch(Action::NavEsc);
+            paint(&mut state, 90, 12);
+            state.dispatch(Action::Move(1));
+            assert_eq!(
+                state.tabs.active_prs().unwrap().cursor_index,
+                cursor + 1,
+                "{what}: on the list the keys move the cursor"
             );
         }
     }
@@ -1090,6 +1259,162 @@ mod tests {
             assert!(state.is_prs_tab(), "{background:?}");
             paint(&mut state, 132, 30);
             assert_eq!(state.layout.pr_total_hit, None, "only the tree paints it");
+        }
+    }
+
+    /// `app` with a failed PR (`#318`) and 11 checkouts without one, in
+    /// `background`: the 13 tree rows overflow the smallest frame
+    /// (`MIN_TERM_ROWS`) in both looks.
+    fn one_pr_among_thirteen_rows(background: BackgroundMode) -> AppState {
+        let mut repos = vec![checkout("app", "feature/ABC-123-retry")];
+        repos
+            .extend((1..=11).map(|n| checkout(&format!("repo-{n:02}"), &format!("feature/x-{n}"))));
+        let mut state = app_over(&repos, false);
+        let retry = pr(
+            GH_APP,
+            318,
+            PrState::CiFailed,
+            "feat(ABC-123): Retry failed uploads with backoff",
+            "feature/ABC-123-retry",
+            "main",
+        );
+        land(&mut state, "app", "feature/ABC-123-retry", GH_APP, retry);
+        state.background = background;
+        state
+    }
+
+    /// With the tree overflowing, its vertical bar takes the last column:
+    /// the total ends left of the bar, its first cell opens the PRs tab,
+    /// and a press on the bar's top cell grabs the bar instead.
+    #[test]
+    fn the_pr_total_hit_ends_left_of_the_tree_scrollbar() {
+        use super::super::super::split::{SplitDrag, VScrollbar};
+        for background in LOOKS {
+            let fresh = || {
+                let mut state = one_pr_among_thirteen_rows(background);
+                paint(&mut state, 200, MIN_TERM_ROWS);
+                state
+            };
+            let mut state = fresh();
+            let bar = state.layout.tree_vbar;
+            let bar_x = bar.x.expect("the tree overflows, so its bar paints");
+            let hit = state.layout.pr_total_hit.expect("the total painted");
+            assert_eq!(
+                hit.right(),
+                bar_x,
+                "{background:?}: the total ends at the bar"
+            );
+            assert_eq!(hit.y, bar.y, "{background:?}: the bar's top row");
+            state.dispatch(Action::Click {
+                col: bar_x,
+                row: bar.y,
+            });
+            assert!(
+                !state.is_prs_tab(),
+                "{background:?}: the bar takes the press"
+            );
+            assert!(
+                matches!(
+                    state.drag,
+                    SplitDrag::VScrollbar {
+                        bar: VScrollbar::Tree,
+                        ..
+                    }
+                ),
+                "{background:?}: the press grabs the tree bar: {:?}",
+                state.drag
+            );
+            let mut state = fresh();
+            state.dispatch(Action::Click {
+                col: hit.x,
+                row: hit.y,
+            });
+            assert!(
+                state.is_prs_tab(),
+                "{background:?}: the first cell opens it"
+            );
+        }
+    }
+
+    /// The PR ref drops on a tree narrower than `PR_REF_MIN_TREE_COLS`
+    /// painted columns. At a tree exactly that wide, the vertical bar's
+    /// column makes the rows one short: the paint drops the ref, and the
+    /// segments the pan clamp and `gh` read drop it too. With no bar the
+    /// ref paints and the segments keep it.
+    #[test]
+    fn tree_row_segments_drop_the_pr_ref_where_the_scrollbar_narrows_the_rows() {
+        for background in LOOKS {
+            for (rows, bar) in [(MIN_TERM_ROWS, true), (40, false)] {
+                let what = format!("{background:?} bar {bar}");
+                let cols = (40..=200)
+                    .find(|&cols| {
+                        let mut state = one_pr_among_thirteen_rows(background);
+                        paint(&mut state, cols, rows);
+                        usize::from(state.layout.tree_width) == PR_REF_MIN_TREE_COLS
+                    })
+                    .expect("a frame width gives the boundary tree width");
+                let mut state = one_pr_among_thirteen_rows(background);
+                let (_, text) = paint(&mut state, cols, rows);
+                assert_eq!(state.layout.tree_vbar.x.is_some(), bar, "{what}");
+                let row = state
+                    .rows
+                    .iter()
+                    .find(|row| crate::tui::tree::pr_badge_repo(row) == Some("app"))
+                    .expect("the app row")
+                    .clone();
+                let y = text
+                    .iter()
+                    .position(|line| line.contains("  app  "))
+                    .expect("the app row paints");
+                let left = usize::from(state.layout.tree_x);
+                let right = left + usize::from(state.layout.tree_width);
+                let painted: String = text[y].chars().skip(left).take(right - left).collect();
+                let segs = state.tree_row_paint_segments(&row);
+                let seg_text: String = segs
+                    .segments
+                    .iter()
+                    .chain(&segs.trailing)
+                    .map(|seg| seg.text.as_str())
+                    .collect();
+                assert_eq!(painted.contains("#318"), !bar, "{what}: {painted:?}");
+                assert_eq!(seg_text.contains("#318"), !bar, "{what}: {seg_text:?}");
+            }
+        }
+    }
+
+    /// The PRs tab has no resize edge (its `resize-edges` row is `n/a` on
+    /// every feature): no column hovers as an edge, and a press there arms
+    /// no divider drag, at the list / detail boundary or at the Workspace
+    /// divider's column of the frame before.
+    #[test]
+    fn the_prs_tab_has_no_resize_edge() {
+        use super::super::super::split::SplitDrag;
+        for background in LOOKS {
+            let mut state = workspace(false);
+            state.background = background;
+            paint(&mut state, 160, 30);
+            let workspace_divider = state.layout.outer_tree_width - 1;
+            state.dispatch(Action::OpenPrsTab);
+            paint(&mut state, 160, 30);
+            let list = state.layout.prs_list;
+            let detail = state.layout.prs_detail;
+            assert!(detail.width > 0, "{background:?}: the detail shows");
+            let y = list.y + 2;
+            for x in [
+                list.right().saturating_sub(1),
+                list.right(),
+                detail.x.saturating_sub(1),
+                detail.x,
+                workspace_divider,
+            ] {
+                let what = format!("{background:?} column {x}");
+                state.pointer = Some((x, y));
+                assert_eq!(state.hovered_resize_edge(), None, "{what}");
+                state.dispatch(Action::Click { col: x, row: y });
+                assert_eq!(state.drag, SplitDrag::None, "{what}: no drag");
+                state.dispatch(Action::Release);
+                assert!(state.is_prs_tab(), "{what}");
+            }
         }
     }
 

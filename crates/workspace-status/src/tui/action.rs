@@ -806,6 +806,13 @@ pub enum Effect {
         /// The entity whose page opens.
         target: RemoteTarget,
     },
+    /// Resolve the remote URL of each `(checkout, branch)` on its known
+    /// default branch, with git only (no forge CLI), so commit links work
+    /// where no PR is looked up.
+    ResolveCheckoutRemotes {
+        /// Checkout path (snapshot `repo`) and its default branch.
+        targets: Vec<(PathBuf, String)>,
+    },
     /// Look up the PR of each `(checkout, branch)` for its row badge.
     ///
     /// At most two lookups run at once. A failed lookup stays silent.

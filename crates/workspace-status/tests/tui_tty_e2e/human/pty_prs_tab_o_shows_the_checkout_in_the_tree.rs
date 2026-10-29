@@ -42,7 +42,7 @@ fn pty_prs_tab_o_shows_the_checkout_in_the_tree() {
         WAIT,
     );
 
-    tui.keys("gp");
+    tui.send_bytes(b"gp");
     tui.wait_pred(|_| prs_list(&tui).is_some(), "gp opens the PRs tab", WAIT);
     prs_move_to(&mut tui, "#45");
 
@@ -63,7 +63,7 @@ fn pty_prs_tab_o_shows_the_checkout_in_the_tree() {
         WAIT,
     );
 
-    tui.keys("gp");
+    tui.send_bytes(b"gp");
     tui.wait_pred(
         |_| prs_cursor_on(&tui, "#45"),
         "a second gp goes back to the PRs tab, cursor still on #45",

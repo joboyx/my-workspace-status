@@ -12,10 +12,12 @@ use super::super::chrome::open_dialog;
 use super::super::command_palette::PaletteCommand;
 use super::super::comments::{
     commit_file_row_comments, commit_file_row_comments_resolved, commit_file_row_has_comment,
-    graph_row_comments, tree_row_comments_resolved, tree_row_has_comment, CommentEntry,
+    diff_line_comments, graph_row_comments, tree_row_comments_resolved, tree_row_has_comment,
+    CommentEntry,
 };
 use super::super::commit_card::{commit_card_source, CommitCardSource};
 use super::super::commit_files::CommitFileRow;
+use super::super::diff::{diff_row_gutter_cells, DiffRow};
 use super::super::drill::CommitFileSource;
 use super::super::gates::ListFocusTarget;
 use super::super::icons::IconKind;
@@ -27,12 +29,13 @@ use super::super::popover::{
 };
 use super::super::search::list_prefix_cols;
 use super::super::selection::TextSelection;
+use super::super::split::DiffMode;
 use super::super::status::StatusMessage;
 use super::super::tree::{
     fit_upstream_rewrite_text, painted_row_segments, pr_badge_kind, pr_badge_repo, segment_icons,
     with_comment_mark, with_viewed_mark, NodeKind, NodeSegments, PrBadge, VisibleRow,
 };
-use super::{AppState, IconHit};
+use super::{AppState, IconHit, PlainClick};
 use workspace_status_graph::{paint_model, GraphRow, ASCII, UNICODE};
 
 /// `gh` on a row that paints no icon.
@@ -67,6 +70,12 @@ impl AppState {
         let row = match list {
             // The PRs tab list is no Workspace list: its cursor line.
             _ if self.is_prs_tab() => self.prs_popover_owner_row().unwrap_or_default(),
+            // The Explorer tree's cursor row, never the parked Workspace
+            // tree row.
+            ListFocusTarget::Tree if self.is_explorer_tab() => self
+                .explorer_cursor_rel()
+                .map(|rel| format!("explorer:{rel}"))
+                .unwrap_or_default(),
             ListFocusTarget::Tree => self
                 .rows
                 .get(self.cursor)
@@ -80,7 +89,12 @@ impl AppState {
                 .focused_commit_file_row()
                 .map(|row| row.id)
                 .unwrap_or_default(),
-            ListFocusTarget::None => String::new(),
+            // A focused line viewer: its cursor line, so a line-mark
+            // popover closes when the cursor leaves the line.
+            ListFocusTarget::None => match self.tabs.active_file_view() {
+                Some(file) => format!("file:{}", file.cursor),
+                None => format!("diff:{}", self.diff_cursor),
+            },
         };
         PopoverOwner {
             tab: self.tabs.active,
@@ -127,9 +141,22 @@ impl AppState {
     }
 
     /// Every segment tree row `row` paints this frame, before the spinner
-    /// and the sparkline join the trailing run.
+    /// and the sparkline join the trailing run: at the painted row width,
+    /// the tree's less the vertical bar's column while that bar shows.
     pub(crate) fn tree_row_paint_segments(&self, row: &VisibleRow) -> NodeSegments {
-        let width = usize::from(self.layout.tree_width);
+        let bar = u16::from(self.layout.tree_vbar.x.is_some());
+        let width = self.layout.tree_width.saturating_sub(bar);
+        self.tree_row_paint_segments_in(row, usize::from(width))
+    }
+
+    /// [`Self::tree_row_paint_segments`] for rows `width` columns wide, so
+    /// a PR ref or an upstream note the paint drops at that width drops
+    /// here too.
+    pub(crate) fn tree_row_paint_segments_in(
+        &self,
+        row: &VisibleRow,
+        width: usize,
+    ) -> NodeSegments {
         let (viewed, commented, resolved, pr) = self.tree_row_marks(row, width, Instant::now());
         let mut segs =
             painted_row_segments(row, self.ascii, viewed, commented, resolved, pr.as_ref());
@@ -214,9 +241,20 @@ impl AppState {
     }
 
     /// Icons of the focused row in paint order, clipped ones included.
+    ///
+    /// On a focused file diff or clean-file view, the comment marks of the
+    /// cursor line ([`Self::cursor_line_comment_icons`]); a cursor line
+    /// with no mark has no icon.
     fn focused_row_icons(&self) -> Vec<(IconKind, IconTarget)> {
+        let line_marks = self.cursor_line_comment_icons();
+        if !line_marks.is_empty() {
+            return line_marks;
+        }
         if self.is_explorer_tab() {
-            return Vec::new();
+            return match self.list_focus_target() {
+                ListFocusTarget::Tree => self.explorer_cursor_row_icons(),
+                _ => Vec::new(),
+            };
         }
         match self.list_focus_target() {
             ListFocusTarget::Tree => {
@@ -240,6 +278,124 @@ impl AppState {
             }
             ListFocusTarget::None => Vec::new(),
         }
+    }
+
+    /// Comments behind the gutter mark of 1-based `line` of `path` in
+    /// `checkout`, in store order: the same match as the mark
+    /// ([`Self::diff_line_comment`], [`Self::file_line_comment`]). Empty
+    /// when the right pane's line viewer ([`Self::line_viewer_target`])
+    /// shows another file.
+    pub(crate) fn line_comments(
+        &self,
+        checkout: &str,
+        path: &str,
+        line: u32,
+    ) -> Vec<&CommentEntry> {
+        let Some((repo, rel, source)) = self.line_viewer_target() else {
+            return Vec::new();
+        };
+        if repo != checkout || rel != path {
+            return Vec::new();
+        }
+        let snap = self.snapshot.repos.iter().find(|r| r.repo == repo);
+        diff_line_comments(
+            &self.comment_store,
+            repo,
+            snap.and_then(|r| r.primary_repo.as_deref()),
+            snap.map(|r| r.branch.as_str()),
+            rel,
+            source,
+            line,
+        )
+    }
+
+    /// Kind and target of the comment mark a line gutter paints beside
+    /// 1-based `line` of the right pane's line viewer, from the line's
+    /// comment state `comment` ([`Self::diff_line_comment`] or
+    /// [`Self::file_line_comment`]). `None` when the line paints no mark.
+    pub(crate) fn line_comment_mark(
+        &self,
+        line: u32,
+        comment: Option<bool>,
+    ) -> Option<(IconKind, IconTarget)> {
+        let resolved = comment?;
+        let (checkout, path, _) = self.line_viewer_target()?;
+        let kind = if resolved {
+            IconKind::CommentResolved
+        } else {
+            IconKind::Comment
+        };
+        let target = IconTarget::LineComment {
+            checkout: checkout.to_string(),
+            path: path.to_string(),
+            line,
+        };
+        Some((kind, target))
+    }
+
+    /// Comment marks on the cursor line of the focused line viewer, in
+    /// paint order: each gutter cell of the file diff's cursor row (both
+    /// cells of a side-by-side row; one section per line), or the
+    /// clean-file view's cursor line. Empty when no line viewer has focus
+    /// (the PRs tab has none, though its list is no Workspace list), a
+    /// folder summary stands in for the diff, or the line paints no mark.
+    pub(crate) fn cursor_line_comment_icons(&self) -> Vec<(IconKind, IconTarget)> {
+        if !self.line_viewer_has_focus() {
+            return Vec::new();
+        }
+        if self.tabs.active_file_view().is_some() {
+            return self.file_cursor_comment_marks();
+        }
+        if self.folder_summary().is_some() {
+            return Vec::new();
+        }
+        let rows = self.current_diff_rows();
+        let split = self.diff_layout() == DiffMode::SideBySide;
+        rows.get(self.diff_cursor)
+            .map(|row| self.diff_row_comment_marks(row, split))
+            .unwrap_or_default()
+    }
+
+    /// True when the right pane's line viewer has focus: no list focus
+    /// target and not the PRs tab (its list is no Workspace list).
+    fn line_viewer_has_focus(&self) -> bool {
+        !self.is_prs_tab() && self.list_focus_target() == ListFocusTarget::None
+    }
+
+    /// Comment marks of the clean-file view's cursor line (at most one).
+    /// Empty with no clean-file view, a cursor past the last line, or a
+    /// line with no mark.
+    pub(crate) fn file_cursor_comment_marks(&self) -> Vec<(IconKind, IconTarget)> {
+        let Some(file) = self.tabs.active_file_view() else {
+            return Vec::new();
+        };
+        if file.cursor >= file.lines().len() {
+            return Vec::new();
+        }
+        let line = u32::try_from(file.cursor + 1).unwrap_or(u32::MAX);
+        self.line_comment_mark(line, self.file_line_comment(line))
+            .into_iter()
+            .collect()
+    }
+
+    /// Comment marks of diff row `row` in paint order, one per marked line
+    /// (both gutter cells of a `split` side-by-side row), with no repeat.
+    pub(crate) fn diff_row_comment_marks(
+        &self,
+        row: &DiffRow,
+        split: bool,
+    ) -> Vec<(IconKind, IconTarget)> {
+        let mut icons = Vec::new();
+        for line in diff_row_gutter_cells(row, split)
+            .into_iter()
+            .filter_map(|cell| cell.line_no)
+        {
+            let mark = self.line_comment_mark(line, self.diff_line_comment(line));
+            if let Some(mark) = mark.filter(|mark| !icons.contains(mark)) {
+                icons.push(mark);
+            }
+        }
+        icons
     }
 
     /// Comments that paint their mark on graph row `row`, in store order.
@@ -321,9 +477,15 @@ impl AppState {
     }
 
     /// True when `target` is on the focused row, so its action lines act
-    /// on it and show their gate reasons. A pinned popover always is.
+    /// on it and show their gate reasons. A pinned popover always is. The
+    /// popover paint asks after the panes paint: a line comment mark
+    /// compares against the cursor line marks that frame recorded.
     pub(crate) fn popover_target_focused(&self, target: &IconTarget) -> bool {
         match target {
+            IconTarget::ExplorerRow(rel) => {
+                self.list_focus_target() == ListFocusTarget::Tree
+                    && self.explorer_cursor_rel().as_deref() == Some(rel.as_str())
+            }
             IconTarget::TreeRow(id) => {
                 self.list_focus_target() == ListFocusTarget::Tree
                     && self.focused_row().is_some_and(|row| &row.id == id)
@@ -350,6 +512,13 @@ impl AppState {
             // list row: it is focused while that source shows.
             IconTarget::CommitDetailMoreLines(id) => {
                 self.commit_detail_msg_identity().as_deref() == Some(id.as_str())
+            }
+            // The marks the last line viewer paint read for the cursor
+            // line ([`LayoutHit::cursor_line_marks`]): asking
+            // [`Self::cursor_line_comment_icons`] here would build every
+            // diff row again on each popover frame.
+            IconTarget::LineComment { .. } => {
+                self.line_viewer_has_focus() && self.layout.cursor_line_marks.contains(target)
             }
             IconTarget::GraphWorktree(path) => {
                 self.list_focus_target() == ListFocusTarget::Graph
@@ -834,9 +1003,14 @@ impl AppState {
     /// text selection on the popover body, and the release runs an action
     /// line unless the press became a drag. Outside it the press only
     /// closes the popover. Inside a peek the press selects the peek's row
-    /// (on an Explorer tab through `explorer_click`) and pins the peek.
-    /// Outside a peek the peek closes and the press goes on.
-    pub(super) fn popover_click(&mut self, col: u16, row: u16) -> Option<Effect> {
+    /// and pins the peek (`plain` at the peek's icon). Outside a peek the
+    /// peek closes and the press goes on.
+    pub(super) fn popover_click(
+        &mut self,
+        col: u16,
+        row: u16,
+        plain: PlainClick,
+    ) -> Option<Effect> {
         let popover = self.popover.as_ref()?;
         let painted = self.layout.popover.clone();
         let inside = painted
@@ -871,13 +1045,7 @@ impl AppState {
         }
         let targets = popover.targets.clone();
         let anchor = popover.anchor?;
-        // An Explorer tab selects through its own panes, not the parked
-        // Workspace layout.
-        let selected = if self.is_explorer_tab() {
-            self.explorer_click(anchor.x, anchor.y)
-        } else {
-            self.click_at(anchor.x, anchor.y)
-        };
+        let selected = plain(self, anchor.x, anchor.y);
         self.last_click = None;
         self.text_selection = None;
         let details = self.pin(targets, Some(anchor));
@@ -1018,6 +1186,7 @@ mod tests {
             merged_into_default: None,
             default_branch_override: None,
             default_tip_ref: None,
+            default_branch: None,
             local_branches: Vec::new(),
         }
     }
@@ -1181,6 +1350,28 @@ mod tests {
         assert!(!app.expire_peek(t2 + ms(PEEK_GRACE_MS - 1)));
         assert!(app.expire_peek(t2 + ms(PEEK_GRACE_MS)));
         assert!(app.popover.is_none(), "grace ended");
+    }
+
+    /// A pinned popover has no leave grace: the pointer leaving starts no
+    /// timer, and no time past the grace closes it.
+    #[test]
+    fn a_pinned_popover_has_no_leave_grace() {
+        let mut app = app();
+        paint(&mut app);
+        let hit = sync_hit(&app, "repo:app");
+        app.dispatch(Action::Click {
+            col: hit.x,
+            row: hit.y,
+        });
+        app.dispatch(Action::Release);
+        paint(&mut app);
+        assert_eq!(app.input_mode(), InputMode::Popover, "pinned");
+
+        let t0 = Instant::now();
+        app.set_pointer_at(Some((0, 0)), t0);
+        assert_eq!(app.peek_remaining_ms(t0), None, "no grace timer");
+        assert!(!app.expire_peek(t0 + ms(PEEK_GRACE_MS * 10)));
+        assert!(app.popover.is_some(), "the pinned popover stays");
     }
 
     #[test]

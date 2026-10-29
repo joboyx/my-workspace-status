@@ -6,8 +6,8 @@ use crate::seed::{daily_workspace, seed_tall_graph, unique_root};
 use crate::support::{
     crumb_row, documented_launch_first_paint, no_mouse_toggle_toast, no_wrong_overlays,
     panes_tree_focused_diff_unfocused, panes_tree_focused_graph_unfocused,
-    panes_tree_unfocused_graph_focused, status_row, title_has_graph, tree_cursor_on, tree_has,
-    GIT_WAIT, SETTLE_MS, TREE_LABEL_COL, WAIT,
+    panes_tree_unfocused_graph_focused, prove_keys_handled, status_row, title_has_graph,
+    tree_cursor_on, tree_has, GIT_WAIT, TREE_LABEL_COL, WAIT,
 };
 
 /// xterm SGR left-button drag (`Cb` 0 + motion bit 32).
@@ -194,7 +194,7 @@ fn pty_divider_scrollbar_drag() {
         "SGR divider drag widens the tree pane (a no-op keeps the launch join)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         |screen| divider_dragged_wider(screen, start_join),
         "wider split holds (not a flicker, row-select, or Mouse toast)",
@@ -239,13 +239,16 @@ fn pty_divider_scrollbar_drag() {
         track_bottom > thumb_row,
         "track end {track_bottom} must sit below mid-track █ {thumb_row} (grab-delta from the thumb cannot reach count 29):\n{after_g}"
     );
-    graph.sgr_mouse(0, thumb_col, track_bottom);
-    graph.wait_ms(SETTLE_MS);
+    // A press and release at the last track cell, then the probe: the grab
+    // must not jump. The drag below grabs there again.
+    graph.sgr_click(thumb_col, track_bottom);
+    prove_keys_handled(&mut graph);
     graph.wait_pred(
         history_graph_at_bottom,
         "grab at the last track cell must not jump (a click on the top would leave count 0)",
         WAIT,
     );
+    graph.sgr_mouse(0, thumb_col, track_bottom);
     graph.sgr_mouse(SGR_LEFT_DRAG, thumb_col, track_top);
     sgr_release(&mut graph, thumb_col, track_top);
     graph.wait_pred(
@@ -253,7 +256,7 @@ fn pty_divider_scrollbar_drag() {
         "track drag toward the top restores count 29 with █ at the track top (a no-op stays on count 0)",
         GIT_WAIT,
     );
-    graph.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut graph);
     graph.wait_pred(
         history_graph_at_top,
         "graph scroll after track drag holds (not a chrome flicker)",

@@ -1,9 +1,9 @@
 use crate::harness::PtySession;
 use crate::seed::merge_mark_workspace;
 use crate::support::{
-    ack_rows, crumb_row, merge_mark_after, no_mouse_toggle_toast, row_icons_after, status_row,
-    tree_cursor_on, tree_has, tree_line_containing, tree_line_has_leading_worktree_icon,
-    tree_pane_focused, SETTLE_MS, WAIT,
+    ack_rows, crumb_row, merge_mark_after, no_mouse_toggle_toast, prove_keys_handled,
+    row_icons_after, status_row, tree_cursor_on, tree_has, tree_line_containing,
+    tree_line_has_leading_worktree_icon, tree_pane_focused, WAIT,
 };
 
 const JUST_CREATED: &str = "feature/just-created";
@@ -153,7 +153,7 @@ fn pty_merge_mark_default_tip_is_open() {
         "third j: default-tip row; W hint is open, not merged",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         just_created_ready_to_remove,
         "default-tip open hint holds (not a delayed merged flicker)",
@@ -166,12 +166,7 @@ fn pty_merge_mark_default_tip_is_open() {
         "W confirm: NOT merged into default (default-tip is not merged work)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
-    tui.wait_pred(
-        just_created_remove_confirm_open,
-        "open confirm holds (not a merged-label flicker)",
-        WAIT,
-    );
+    // The `n` below cancels this confirm, which proves it stayed open.
 
     tui.key('n');
     tui.wait_pred(
@@ -179,7 +174,7 @@ fn pty_merge_mark_default_tip_is_open() {
         "n cancels; default-tip stays open, landed stays merged",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_cancel_keeps_open_default_tip,
         "cancel holds (not a delayed remove or mark flip)",

@@ -1,7 +1,8 @@
 use crate::harness::PtySession;
 use crate::seed::hidden_and_ignored_workspace;
 use crate::support::{
-    crumb_row, documented_launch_first_paint, tree_has, tree_line_containing, SETTLE_MS, WAIT,
+    crumb_row, documented_launch_first_paint, prove_keys_handled, tree_has, tree_line_containing,
+    WAIT,
 };
 
 /// Launch: `notes` (hiddenPaths) and `tmp/scratch` (ignoredPaths) both off.
@@ -42,7 +43,7 @@ fn pty_dot_skips_ignored_paths() {
         "`.` shows hidden notes; ignored tmp/scratch stays out",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         dot_shows_notes_not_scratch,
         "shown notes hold and tmp/scratch stays out after settle",

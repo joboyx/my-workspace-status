@@ -1,8 +1,8 @@
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    crumb_row, documented_launch_first_paint, no_updates_group_folded, status_row, tree_cursor_on,
-    tree_has, tree_line_containing, SETTLE_MS, WAIT,
+    crumb_row, documented_launch_first_paint, no_updates_group_folded, prove_keys_handled,
+    status_row, tree_cursor_on, tree_has, tree_line_containing, WAIT,
 };
 
 /// Painted SEARCH status line with this query, the typing cursor, and the
@@ -114,7 +114,7 @@ fn pty_search_does_not_reveal_hidden() {
         "Enter arms /notes; SEARCH closes; breadcrumb toasts no match; hidden notes still hidden",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         armed_notes_search_no_match,
         "armed /notes no-match holds (not a flicker or delayed notes reveal)",

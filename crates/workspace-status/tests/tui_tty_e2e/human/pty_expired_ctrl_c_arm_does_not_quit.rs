@@ -5,9 +5,6 @@ use crate::support::{screen_line_from_end, tree_has, GIT_WAIT, WAIT};
 /// Pinned chrome copy after the first Ctrl+C (`tui/ctrl_c_exit.rs`).
 const CTRL_C_EXIT_PROMPT: &str = "Press Ctrl-c again to exit";
 
-/// Confirm-exit window from `tui/ctrl_c_exit.rs` (`CTRL_C_EXIT_MS`).
-const CTRL_C_EXIT_MS: u64 = 2000;
-
 /// Idle daily seed: tree + status pills, breadcrumb on the penultimate row.
 ///
 /// No quit prompt yet. Status is last. A help overlay cannot pass.
@@ -95,7 +92,9 @@ fn pty_expired_ctrl_c_arm_does_not_quit() {
     );
     tui.assert_running("after first Ctrl+C (must not quit)");
 
-    tui.wait_ms(CTRL_C_EXIT_MS + 200);
+    // The prompt goes away when the 2 s window ends; wait for that paint.
+    // The late Ctrl-c below is written after it, so it arrives after the
+    // window and must re-arm.
     tui.wait_pred(
         idle_tree_before_ctrl_c,
         "after CTRL_C_EXIT_MS the pinned quit prompt is gone; idle chrome returns",

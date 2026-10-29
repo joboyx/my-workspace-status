@@ -3,7 +3,9 @@ use crate::harness::{
     SGR_WHEEL_DOWN, SGR_WHEEL_RIGHT,
 };
 use crate::seed::{daily_workspace, seed_long_path_file};
-use crate::support::{tree_cursor_on, tree_label_col, GIT_WAIT, SETTLE_MS, TREE_LABEL_COL, WAIT};
+use crate::support::{
+    prove_keys_handled, tree_cursor_on, tree_label_col, GIT_WAIT, TREE_LABEL_COL, WAIT,
+};
 
 /// Tree `m` toggles mouse reporting. Not graph merge.
 ///
@@ -77,7 +79,7 @@ fn pty_m_toggles_mouse_capture() {
     let readme_row = tree_row_containing(&tui.screen(), "README.md")
         .unwrap_or_else(|| panic!("README row while mouse off:\n{}", tui.screen()));
     tui.sgr_click(tree_label_col(&tui.screen(), "README.md"), readme_row);
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         |screen| {
             screen.contains("Mouse off")
@@ -94,7 +96,7 @@ fn pty_m_toggles_mouse_capture() {
     let merger_row = tree_row_containing(&tui.screen(), "merger")
         .unwrap_or_else(|| panic!("merger row while mouse off:\n{}", tui.screen()));
     tui.sgr_mouse(SGR_WHEEL_DOWN, TREE_LABEL_COL, merger_row);
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         |screen| {
             screen.contains("Mouse off")
@@ -110,7 +112,7 @@ fn pty_m_toggles_mouse_capture() {
     for _ in 0..40 {
         tui.sgr_mouse(SGR_WHEEL_RIGHT, 6, hscroll_row);
     }
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         |screen| {
             screen.contains("Mouse off")

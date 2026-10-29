@@ -42,12 +42,22 @@ pub fn glyph_colour(badge: Badge) -> (u8, u8, u8) {
     }
 }
 
-/// Tokyo Night remove flash ramp (CI failed, closed), peak first.
-pub const REMOVE_RAMP: [(u8, u8, u8); 3] =
-    [(0x77, 0x41, 0x52), (0x58, 0x34, 0x43), (0x3d, 0x2a, 0x37)];
+/// Tokyo Night remove flash ramp (CI failed, closed), peak first. The
+/// whole ramp: flash checks read every recorded frame
+/// ([`PtySession::wait_recorded_frame`]), so a late start still counts.
+pub const REMOVE_RAMP: [(u8, u8, u8); 4] = [
+    (0x77, 0x41, 0x52),
+    (0x58, 0x34, 0x43),
+    (0x3d, 0x2a, 0x37),
+    (0x2c, 0x22, 0x2e),
+];
 /// Tokyo Night add flash ramp (ready to merge, merged), peak first.
-pub const ADD_RAMP: [(u8, u8, u8); 3] =
-    [(0x51, 0x66, 0x43), (0x3f, 0x4d, 0x39), (0x2f, 0x38, 0x31)];
+pub const ADD_RAMP: [(u8, u8, u8); 4] = [
+    (0x51, 0x66, 0x43),
+    (0x3f, 0x4d, 0x39),
+    (0x2f, 0x38, 0x31),
+    (0x25, 0x29, 0x2b),
+];
 
 /// Forge a seeded checkout belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

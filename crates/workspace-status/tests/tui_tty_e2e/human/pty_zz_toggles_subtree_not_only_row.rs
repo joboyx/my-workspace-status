@@ -3,7 +3,8 @@ use std::fs;
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    tree_cursor_on, tree_dir_collapsed, tree_dir_expanded, tree_has, SETTLE_MS, WAIT,
+    step_cursor, tree_cursor_on, tree_dir_collapsed, tree_dir_expanded, tree_has,
+    PAST_CHORD_WINDOW, WAIT,
 };
 
 fn app_children_hidden(screen: &str) -> bool {
@@ -71,8 +72,7 @@ fn pty_zz_toggles_subtree_not_only_row() {
         WAIT,
     );
 
-    tui.key('k');
-    tui.wait_ms(SETTLE_MS);
+    step_cursor(&mut tui, |tui| tui.key('k'), |_| true);
     tui.key('k');
     tui.wait_pred(
         |screen| {
@@ -112,7 +112,6 @@ fn pty_zz_toggles_subtree_not_only_row() {
     tui.tab();
     tui.wait_contains("workspace › [app]", WAIT);
     tui.zz();
-    tui.wait_ms(SETTLE_MS);
     tui.tab();
     tui.wait_pred(
         |screen| {
@@ -138,7 +137,9 @@ fn pty_zz_toggles_subtree_not_only_row() {
         "late-z setup: first z folds the repo again",
         WAIT,
     );
-    tui.wait_ms(500);
+    // The first z painted above, so it arrived before now: a sleep past
+    // the window puts the second z's arrival outside it (a lower bound).
+    std::thread::sleep(PAST_CHORD_WINDOW);
     tui.key('z');
     tui.wait_pred(
         |screen| app_open_src_folded(screen) && tree_cursor_on(screen, "app"),

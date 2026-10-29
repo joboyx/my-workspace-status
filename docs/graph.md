@@ -14,6 +14,9 @@ list or a highlighted repo / worktree. The widget still paints
 whatever `visible_rows` the model holds.
 `GraphModel::visible_row_at` returns one row in the same order and
 clones only that row (the focused-row lookups use it).
+`GraphModel::commit_row(id)` and `GraphModel::stash_row(stash_ref)` return
+that commit or stash row the same way, cloning only it (the TUI depth-2
+commit-files footer finds its drilled row with them).
 
 ## Types
 
@@ -42,14 +45,15 @@ clones only that row (the focused-row lookups use it).
 | `graph_scrollbar_thumb` | Thumb offset/length matching a painted bar (TUI hit-test, vertical or horizontal) |
 | `graph_col_max` | Max `col_offset` that brings the end of the longest label into the pane; a `row_badges` row has the glyph and one space less room |
 | `graph_vscroll_visible` / `graph_hscroll_visible` | Show the vertical bar whenever the painted lines overflow the list (or it has left the top); the horizontal bar only after leaving the left edge |
-| `paint_footer_message` / `FooterMessagePaint` | Scrolling commit-message viewport (lines, 1-column scrollbar, more-below hint; returns `scroll_max` and the `more_below` hint cells) shared by the graph selection footer and the TUI commit-files footer; see **Paint** below |
+| `paint_selection_footer` | Selection-footer body painter: message rows from the top, the meta line with its ref chips pinned on the bottom row; returns the chip, commit meta, and hint `IconSpan`s. The graph selection footer and the TUI commit-files footer both paint here; see **Paint** below |
+| `paint_footer_message` / `FooterMessagePaint` | Scrolling commit-message viewport (lines, 1-column scrollbar, more-below hint) under `paint_selection_footer`; see **Paint** below |
 | `Action` | `ToggleShowHidden` and `SetShowHidden` |
 | `Effect` | `None` today. Dispatch stays pure. |
 
 `GraphModel::dispatch` applies an `Action` and returns an `Effect`.
 The widget does not bind keys or run an event loop. The TUI hit-tests the
 vertical and horizontal scrollbars through `tui/split.rs` (`hit_split` /
-`SplitDrag::GraphScrollbar` / `GraphHScrollbar`). The vertical bar is painted
+`SplitDrag::VScrollbar` / `SplitDrag::HScrollbar`). The vertical bar is painted
 whenever the painted lines overflow the list, at the top too; the horizontal
 bar only when `col_offset > 0`, because it paints over the last list row.
 `painted_line_count` gives the painted line count without a paint (a commit
@@ -266,11 +270,21 @@ moving between commits never changes the list height:
   and the hint (skipped when wider than the area less the bar column). It
   returns a `FooterMessagePaint`: `scroll_max` (the caller records it for
   the wheel clamp) and `more_below` (the hint cells, for an icon hit).
-  `footer_message_scroll_max` is that max for a body with the
-  pinned meta row. The TUI's depth-2 commit-files footer calls the same
-  function for its message rows (under its title and meta rows), with
-  `palette.muted` for the hint (the colour the TUI gives
-  `GraphLabelPalette::meta`), so both footers scroll the same way.
+  `footer_message_scroll_max` is that max for a body with the pinned meta
+  row.
+- `paint_selection_footer(buf, area, lines, scroll, arrow, palette,
+  row_index)` paints the whole body under the rule: the message lines
+  through `paint_footer_message`, then the last line (meta) on the bottom
+  row, each part in its `GraphLabelPalette` colour (the hint in `meta`).
+  It returns the chip and commit meta spans of the painted lines
+  (`part_icons`: `GraphIconKind::{CommitHash, CommitDate, CommitAuthor}`
+  over the hash, parent ids, date, and author) and the
+  `GraphIconKind::MoreBelow` hint span, each with `row_index`. The widget
+  calls it with `selection_footer_parts` for the selected row. The TUI's
+  depth-2 commit-files footer calls it with `selection_footer_parts` for
+  the drilled row and the same label palette, so for the same commit and
+  footer height both footers paint the same rows, chips, and hint, and
+  scroll the same way.
 
 List rows stay one line.
 The pane has no `loading older…` row: the status line shows it while the next

@@ -9,12 +9,11 @@ use std::rc::Rc;
 
 use ratatui::layout::Rect;
 
-use crate::file_index::FileRead;
-
 use super::super::search::{apply_pan, match_diff_line_indices, step_from_anchor};
 use super::super::selection::TextSelection;
 use super::super::split::SplitDrag;
-use super::super::tabs::file_view_gutter_width;
+use super::super::tabs::file_view_scroll;
+use super::super::tree::cursor_for_viewport_top;
 use super::{AppState, FileSearchMemo};
 
 impl AppState {
@@ -46,22 +45,52 @@ impl AppState {
         }
     }
 
-    /// Pan the active file body's code columns. A no-op while wrap is on.
+    /// Pan the active file body's code columns, clamped to
+    /// [`FileTab::pan_max`] (the horizontal scrollbar's clamp too). A
+    /// no-op while wrap is on.
+    ///
+    /// [`FileTab::pan_max`]: super::super::tabs::FileTab::pan_max
     pub(super) fn pan_file_tab(&mut self, delta: i32) {
         if self.diff_wrap {
             return;
         }
-        let view = usize::from(self.layout.file_view_width);
+        let (view, ascii) = (self.layout.file_view_width, self.ascii);
         let Some(tab) = self.tabs.active_file_view_mut() else {
             return;
         };
-        let max_cols = match tab.body.as_deref() {
-            Some(FileRead::Text { max_cols, .. }) => *max_cols,
-            _ => 0,
+        let max = tab.pan_max(view, ascii);
+        tab.col_offset = apply_pan(tab.col_offset, delta, max);
+    }
+
+    /// Scroll the active file body so its viewport starts at line `top`
+    /// (a scrollbar drag or track click).
+    ///
+    /// The view scrolls at the edge of its cursor (the sticky top of
+    /// [`file_view_scroll`]), so the cursor moves to the line nearest it
+    /// whose viewport starts at `top` ([`cursor_for_viewport_top`]): a drag
+    /// down leaves it on the bottom row and a drag up on the top row, as
+    /// the wheel leaves it. The next paint keeps that top.
+    pub(super) fn scroll_file_view_to(&mut self, top: usize) {
+        let (wrap, ascii) = (self.diff_wrap, self.ascii);
+        let width = self.layout.file_view_width;
+        let height = usize::from(self.layout.file_view_height).max(1);
+        let Some(tab) = self.tabs.active_file_view_mut() else {
+            return;
         };
-        let gutter = file_view_gutter_width(tab.lines().len(), self.ascii);
-        let code_w = view.saturating_sub(gutter);
-        tab.col_offset = apply_pan(tab.col_offset, delta, max_cols.saturating_sub(code_w));
+        let n = tab.lines().len();
+        if n == 0 {
+            return;
+        }
+        let cursor = {
+            let tab = &*tab;
+            let code_w = tab.code_width(width, ascii);
+            let rows_of = |line: usize| tab.line_rows(line, code_w, wrap, height + 1);
+            cursor_for_viewport_top(n, tab.cursor, top, |cursor| {
+                file_view_scroll(tab.scroll, cursor, height, rows_of)
+            })
+        };
+        tab.cursor = cursor;
+        tab.recenter = false;
     }
 
     /// Press in the file body: focus the clicked line and arm a text
@@ -144,6 +173,7 @@ mod tests {
     use super::super::super::search::SearchPane;
     use super::super::{FocusPane, SEARCH_WRAPPED_TO_BOTTOM, SEARCH_WRAPPED_TO_TOP};
     use super::*;
+    use crate::file_index::FileRead;
     use crate::snapshot::{build_workspace_snapshot, CheckoutKind, RepoSnapshot, SyncStatus};
 
     /// A clean `app` checkout.
@@ -164,6 +194,7 @@ mod tests {
             merged_into_default: None,
             default_branch_override: None,
             default_tip_ref: Some("main".into()),
+            default_branch: None,
             local_branches: Vec::new(),
         };
         let snapshot = build_workspace_snapshot(&[repo], &[], false, &[]);

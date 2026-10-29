@@ -4,8 +4,7 @@ use std::path::Path;
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    documented_launch_first_paint, pane_unstaged_readme, tree_cursor_on, tree_has, GIT_WAIT,
-    SETTLE_MS, WAIT,
+    documented_launch_first_paint, pane_unstaged_readme, tree_cursor_on, tree_has, GIT_WAIT, WAIT,
 };
 
 const BODY: &str = "wt-line-note-e2e";
@@ -124,7 +123,7 @@ fn pty_semicolon_line_comment_dirty_file() {
         "empty Enter deletes: overlay gone, toast comment deleted",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    // The store is written before the toast paints.
     let stored = store_text(&workspace);
     assert!(
         !stored.contains(BODY),

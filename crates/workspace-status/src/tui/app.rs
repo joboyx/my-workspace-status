@@ -15,11 +15,11 @@ use crossterm::cursor::Show;
 use crossterm::event::{
     KeyEvent, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
-use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, size as terminal_size, EnterAlternateScreen,
-    LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, size as terminal_size, BeginSynchronizedUpdate,
+    EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use crossterm::{execute, queue};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::{Terminal, TerminalOptions, Viewport};
@@ -50,7 +50,6 @@ use super::drill::{CommitFile, CommitFileSource, DrillView};
 use super::graph_load::{
     load_graph_model, load_graph_model_window, refresh_graph_limit, GraphIdentity,
 };
-use super::keys::KeyStrokeOrigin;
 use super::keys::{event_to_action_with, is_held_nav_backlog, InputMode};
 use super::pointer_shape::{TermPointer, POINTER_RESET, POINTER_SET};
 use super::state::AppState;
@@ -61,7 +60,9 @@ use super::tabs::{
 };
 use super::term_bg::{is_light_background, pick_theme, query_background, QUERY_TIMEOUT};
 use super::term_progress::{PROGRESS_CLEAR, PROGRESS_SHOWN};
-use super::tty::{disable_mouse, enable_mouse, poll_event, read_event, read_event_origin};
+use super::tty::{
+    disable_mouse, enable_mouse, poll_event, read_event, read_event_origin, TtyEvent,
+};
 #[cfg(test)]
 use super::watch::{checkout_watch_identities, watch_needs_pane_reload};
 
@@ -156,6 +157,9 @@ fn restore_terminal() {
 /// With no bar shown it writes no OSC 9;4: some terminals show any OSC 9
 /// as a desktop notification. With no resize shape shown it writes no
 /// OSC 22.
+///
+/// The alternate screen is left through [`leave_alternate_screen_to`],
+/// which closes any open synchronized update first.
 fn restore_terminal_to<W: Write>(out: &mut W, clear_progress: bool, reset_pointer: bool) {
     if clear_progress {
         let _ = out.write_all(PROGRESS_CLEAR.as_bytes());
@@ -165,7 +169,21 @@ fn restore_terminal_to<W: Write>(out: &mut W, clear_progress: bool, reset_pointe
     }
     let _ = disable_raw_mode();
     let _ = disable_mouse(out);
-    let _ = execute!(out, PopKeyboardEnhancementFlags, LeaveAlternateScreen, Show);
+    let _ = execute!(out, PopKeyboardEnhancementFlags);
+    let _ = leave_alternate_screen_to(out);
+    let _ = execute!(out, Show);
+}
+
+/// Close any open synchronized update (DEC private mode 2026), then leave
+/// the alternate screen.
+///
+/// A resize opens an update that the next frame closes. When the TUI
+/// quits, fails, or hands the terminal to an editor before that frame,
+/// this end marker closes it, so the terminal never holds back output.
+/// The end marker is written every time: with no update open, a terminal
+/// ignores it.
+fn leave_alternate_screen_to<W: Write>(out: &mut W) -> io::Result<()> {
+    execute!(out, EndSynchronizedUpdate, LeaveAlternateScreen)
 }
 
 /// Chain a panic hook that restores the terminal to `target()` before the
@@ -269,11 +287,18 @@ pub(crate) fn map_event(state: &AppState, event: &crossterm::event::Event) -> Ac
     }
 }
 
+/// Resize the viewport to `cols` × `rows`.
+///
+/// The resize clears the screen. A synchronized update (DEC private mode
+/// 2026) opens before the clear and the next frame closes it, so a
+/// terminal that knows the mode never shows the blank screen between the
+/// two.
 pub(crate) fn apply_terminal_resize(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     cols: u16,
     rows: u16,
 ) -> Result<(), u8> {
+    queue!(terminal.backend_mut(), BeginSynchronizedUpdate).map_err(|_| 1u8)?;
     terminal
         .resize(Rect::new(0, 0, cols.max(1), rows.max(1)))
         .map_err(|_| 1u8)
@@ -800,6 +825,10 @@ pub(crate) struct CompareRangeLoad {
     pub head: Option<String>,
     /// Base tip SHA at load time.
     pub base_tip: String,
+    /// The head commit of a Diff commit vs parent range
+    /// ([`super::tabs::commit_vs_parent_head`]), read for the commit
+    /// footer. `None` for any other range.
+    pub commit: Option<workspace_status_graph::Commit>,
 }
 
 /// Resolve `base_ref` and list the one file of a commit-vs-working-tree
@@ -827,6 +856,7 @@ pub(crate) fn compute_worktree_compare_range(
         patch_keys: HashMap::new(),
         head: None,
         base_tip: base,
+        commit: None,
     })
 }
 
@@ -854,6 +884,10 @@ pub(crate) fn compute_compare_range(
         .map(Into::into)
         .collect();
     let patch_keys = list_compare_patch_keys(dir, &base_tip, &head);
+    // One commit against its parent: read it for the footer here, off the
+    // event thread, so a commit outside the loaded graph still shows.
+    let commit = super::tabs::commit_vs_parent_head(base_ref, head_ref)
+        .and_then(|_| super::graph_load::load_commit(dir, &head));
     Ok(CompareRangeLoad {
         source: CommitFileSource::Compare {
             base_ref: base_ref.to_string(),
@@ -866,6 +900,7 @@ pub(crate) fn compute_compare_range(
         patch_keys,
         head: Some(head),
         base_tip,
+        commit,
     })
 }
 
@@ -912,10 +947,10 @@ pub(crate) fn compute_commit_diff(
     let dir = cwd.join(repo);
     match source {
         CommitFileSource::Commit { commit_id } => {
-            DiffContent::from_lines(diff_commit_file_ctx(&dir, commit_id, path, context))
+            DiffContent::from_commit_lines(diff_commit_file_ctx(&dir, commit_id, path, context))
         }
         CommitFileSource::Stash { stash_ref } => {
-            DiffContent::from_lines(diff_stash_file_ctx(&dir, stash_ref, path, context))
+            DiffContent::from_commit_lines(diff_stash_file_ctx(&dir, stash_ref, path, context))
         }
         CommitFileSource::Worktree => {
             if let Some((file_repo, change)) = focused_file {
@@ -997,6 +1032,8 @@ pub(crate) fn resume_tui(
     }
     push_keyboard_enhancement();
     let _ = terminal.hide_cursor();
+    // The next frame closes this update, so the clear never shows alone.
+    let _ = queue!(terminal.backend_mut(), BeginSynchronizedUpdate);
     let _ = terminal.resize(terminal_size_rect());
     let _ = terminal.clear();
     drain_pending_events();
@@ -1007,15 +1044,13 @@ pub(crate) fn resume_tui(
 ///
 /// Returns the first event that is not that backlog so it is not lost
 /// (the reader cannot unread).
-pub(crate) fn discard_held_nav_backlog(
-    held: KeyEvent,
-) -> Option<(crossterm::event::Event, KeyStrokeOrigin)> {
+pub(crate) fn discard_held_nav_backlog(held: KeyEvent) -> Option<TtyEvent> {
     while poll_event(Duration::from_millis(0)).unwrap_or(false) {
-        let Ok((event, origin)) = read_event_origin() else {
+        let Ok(next) = read_event_origin() else {
             return None;
         };
-        if !is_held_nav_backlog(held, &event) {
-            return Some((event, origin));
+        if !is_held_nav_backlog(held, &next.0) {
+            return Some(next);
         }
     }
     None
@@ -1037,7 +1072,7 @@ pub(crate) fn run_blocking_editor(
     let _ = disable_raw_mode();
     let mut out = stdout();
     let _ = disable_mouse(&mut out);
-    let _ = execute!(out, LeaveAlternateScreen);
+    let _ = leave_alternate_screen_to(&mut out);
     let _ = terminal.show_cursor();
     drain_pending_events();
     let spawn = Command::new(cmd)
@@ -1268,6 +1303,7 @@ mod tests {
             merged_into_default: None,
             default_branch_override: None,
             default_tip_ref: None,
+            default_branch: None,
             local_branches: Vec::new(),
         }
     }
@@ -1338,6 +1374,38 @@ mod tests {
             restore_bytes(&SHOWN, &NO_POINTER),
             idle,
             "a batch that already cleared its bar writes no second clear"
+        );
+    }
+
+    /// Every exit (quit, an error return, the panic hook) and the editor
+    /// suspend close a synchronized update before they leave the
+    /// alternate screen, whether or not one is open.
+    #[test]
+    fn restore_closes_a_synchronized_update_before_leaving_the_alt_screen() {
+        static NO_BAR: AtomicBool = AtomicBool::new(false);
+        static NO_POINTER: AtomicBool = AtomicBool::new(false);
+        const SYNC_END: &str = "\x1b[?2026l";
+        const LEAVE_ALT: &str = "\x1b[?1049l";
+        let closes_then_leaves = |out: &str| {
+            matches!(
+                (out.find(SYNC_END), out.find(LEAVE_ALT)),
+                (Some(end), Some(leave)) if end < leave
+            )
+        };
+
+        let restore = restore_bytes(&NO_BAR, &NO_POINTER);
+        assert!(
+            closes_then_leaves(&restore),
+            "restore ends the update, then leaves: {restore:?}"
+        );
+
+        let mut suspend = Vec::new();
+        leave_alternate_screen_to(&mut suspend).unwrap();
+        let suspend = String::from_utf8(suspend).unwrap();
+        assert_eq!(
+            suspend,
+            format!("{SYNC_END}{LEAVE_ALT}"),
+            "the editor suspend ends the update, then leaves"
         );
     }
 
@@ -1435,6 +1503,11 @@ mod tests {
             "hook resets the resize pointer next: {out:?}"
         );
         assert!(out.contains("\x1b[?1049l"), "hook leaves the alt screen");
+        assert!(
+            out.find("\x1b[?2026l")
+                .is_some_and(|end| out.find("\x1b[?1049l").is_some_and(|leave| end < leave)),
+            "hook ends any synchronized update before it leaves: {out:?}"
+        );
         assert!(out.contains("\x1b[?25h"), "hook shows the cursor");
         assert!(
             !TERMINAL_SET_UP.load(Ordering::SeqCst),
@@ -1442,6 +1515,65 @@ mod tests {
         );
         assert!(!SHOWN.load(Ordering::SeqCst), "the bar is gone");
         assert!(!POINTER.load(Ordering::SeqCst), "the pointer is reset");
+    }
+
+    /// Press-only CSI-u `gg` through the live loop's order: the TTY decode,
+    /// the stale-chord expiry, the echo filter, the key map, and dispatch,
+    /// each at the press's arrival instant.
+    ///
+    /// A second press 5 ms after the first is the echo of that tap. One
+    /// 120 ms later completes `gg`. One 401 ms later arms a new chord.
+    #[test]
+    fn press_only_gg_runs_the_loop_decode_on_arrival_instants() {
+        use crate::tui::event_loop::decode_input;
+        use crate::tui::tty::parse_tty_chunk;
+        use std::time::Instant;
+
+        let press = parse_tty_chunk(b"\x1b[103;1:1u");
+        let [(g, origin)] = press.as_slice() else {
+            panic!("one press-only g: {press:?}");
+        };
+        let fresh = || {
+            let snapshot =
+                build_workspace_snapshot(&[dummy_repo("app"), dummy_repo("lib")], &[], false, &[]);
+            let mut app = AppState::new(std::path::PathBuf::from("/tmp"), snapshot, true);
+            app.cursor = app.rows.len() - 1;
+            assert_ne!(app.cursor, 0, "the cursor starts off the workspace root");
+            app
+        };
+        let key_at = |app: &mut AppState, at: Instant| {
+            app.begin_input(at);
+            let action = decode_input(app, g, *origin, at);
+            if let Some(action) = action.clone() {
+                app.dispatch(action);
+            }
+            app.end_input();
+            action
+        };
+
+        let t0 = Instant::now() - Duration::from_secs(5);
+        let mut app = fresh();
+        assert_eq!(key_at(&mut app, t0), Some(Action::ArmGChord));
+        assert_eq!(
+            key_at(&mut app, t0 + Duration::from_millis(5)),
+            None,
+            "inside the echo window: the tap's own release"
+        );
+        assert_eq!(
+            key_at(&mut app, t0 + Duration::from_millis(120)),
+            Some(Action::MoveToStart)
+        );
+        assert_eq!(app.cursor, 0, "gg reached the workspace root");
+
+        let mut app = fresh();
+        let end = app.cursor;
+        key_at(&mut app, t0);
+        assert_eq!(
+            key_at(&mut app, t0 + Duration::from_millis(401)),
+            Some(Action::ArmGChord),
+            "past the 400 ms window: a new chord, not gg"
+        );
+        assert_eq!(app.cursor, end);
     }
 
     #[test]
@@ -2262,7 +2394,7 @@ mod tests {
         );
         let merge = exec_git(&["rev-parse", "HEAD"], &dir);
         // HEAD moves past both commits: a pinned head ignores it.
-        commit_file(&dir, "later.txt");
+        let later = commit_file(&dir, "later.txt");
 
         let load = compute_compare_range(&dir, &format!("{first}^"), &first).unwrap();
         assert_eq!(compare_paths(&load), vec![("A".into(), "a.txt".into())]);
@@ -2282,14 +2414,30 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+        // One commit against its parent: the load reads that commit for
+        // the footer, with its message, parent, and refs.
+        let commit = load.commit.as_ref().expect("the head commit");
+        assert_eq!(commit.id, first);
+        assert_eq!(commit.subject, "a.txt");
+        assert_eq!(commit.parents, vec![load.base_tip.clone()]);
 
         // A merge shows what it brought in versus its first parent.
         let load = compute_compare_range(&dir, &format!("{merge}^"), &merge).unwrap();
         assert_eq!(load.base_tip, main_tip);
+        let commit = load.commit.as_ref().expect("the merge commit");
+        assert_eq!(commit.subject, "merge topic");
+        assert_eq!(commit.parents.len(), 2);
         assert_eq!(compare_paths(&load), vec![("A".into(), "topic.txt".into())]);
 
         // A live tab still reads the checkout's HEAD.
         let live = compute_compare_range(&dir, &first, "HEAD").unwrap();
+        assert!(live.commit.is_none(), "a range has no single commit");
+        let tip = compute_compare_range(&dir, &format!("{later}^"), &later).unwrap();
+        let refs = tip.commit.map(|commit| commit.refs).unwrap_or_default();
+        assert!(
+            refs.iter().any(|r| r.name == "main"),
+            "branch tip refs: {refs:?}"
+        );
         let mut paths: Vec<_> = compare_paths(&live).into_iter().map(|(_, p)| p).collect();
         paths.sort();
         assert_eq!(paths, vec!["later.txt", "main.txt", "topic.txt"]);
@@ -2342,6 +2490,87 @@ mod tests {
             Some(base_ref_not_found(&"0".repeat(40)))
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A depth-2 commit or stash drill diff labels its one section
+    /// `COMMITTED`, as a compare diff does. `is_committed` stays false, so
+    /// `build_partial_patch` answers every kind and range exactly as for
+    /// the plain unstaged text of the same lines, and each row keeps the
+    /// same line reference (blame and go to line read it).
+    #[test]
+    fn commit_and_stash_diffs_label_committed_and_keep_partial_patch_kinds() {
+        use crate::tui::diff::{
+            build_diff_rows, build_partial_patch, row_line_ref, DiffRow, DiffSection,
+            PartialPatchKind,
+        };
+        use crate::tui::split::DiffMode;
+        let cwd = crate::testutil::unique_dir("ws-d2-committed-label");
+        let dir = cwd.join("app");
+        init_repo(&dir);
+        fs::write(dir.join("README.md"), "# seed\nold line\nkeep\n").unwrap();
+        git(&dir, &["commit", "-q", "-am", "base"]);
+        fs::write(dir.join("README.md"), "# seed\nnew line\nkeep\nadded\n").unwrap();
+        git(&dir, &["commit", "-q", "-am", "edit"]);
+        fs::write(dir.join("README.md"), "# seed\nnew line\nstashed\n").unwrap();
+        git(&dir, &["stash", "push", "-q"]);
+        let cases = [
+            (
+                CommitFileSource::Commit {
+                    commit_id: exec_git(&["rev-parse", "HEAD"], &dir),
+                },
+                diff_commit_file_ctx(&dir, "HEAD", "README.md", None),
+            ),
+            (
+                CommitFileSource::Stash {
+                    stash_ref: "stash@{0}".into(),
+                },
+                diff_stash_file_ctx(&dir, "stash@{0}", "README.md", None),
+            ),
+        ];
+        for (source, lines) in cases {
+            let content = compute_commit_diff(&cwd, "app", &source, "README.md", None, None);
+            let plain = DiffContent::from_lines(lines);
+            assert!(!content.is_committed, "{source:?}");
+            assert_eq!(content.unstaged, plain.unstaged, "{source:?}");
+            for mode in [DiffMode::Inline, DiffMode::SideBySide] {
+                let rows = build_diff_rows(&content, mode);
+                assert_eq!(
+                    rows.first(),
+                    Some(&DiffRow::Section(DiffSection::Committed)),
+                    "{source:?} {mode:?}"
+                );
+                assert!(
+                    !rows
+                        .iter()
+                        .any(|r| matches!(r, DiffRow::Section(DiffSection::Unstaged))),
+                    "{source:?} {mode:?}"
+                );
+                for row in 0..rows.len() {
+                    assert_eq!(
+                        row_line_ref(&content, mode, row),
+                        row_line_ref(&plain, mode, row),
+                        "{source:?} {mode:?} row {row}"
+                    );
+                }
+                for kind in [
+                    PartialPatchKind::Stage,
+                    PartialPatchKind::Unstage,
+                    PartialPatchKind::Revert,
+                    PartialPatchKind::RevertCommitted,
+                ] {
+                    for start in 0..rows.len() {
+                        for end in start..rows.len() {
+                            assert_eq!(
+                                build_partial_patch(&content, mode, start, end, kind, "README.md"),
+                                build_partial_patch(&plain, mode, start, end, kind, "README.md"),
+                                "{source:?} {mode:?} {kind:?} {start}..={end}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let _ = fs::remove_dir_all(&cwd);
     }
 
     #[test]

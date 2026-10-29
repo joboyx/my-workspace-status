@@ -1,7 +1,5 @@
 //! List keys, search, help, view toggles, and mouse hit-test.
 
-use std::time::Instant;
-
 use super::super::action::{Action, Effect, ExternalDiffKind};
 use super::super::branches::can_open_branch_picker;
 use super::super::command_palette::{CommandScope, PaletteCommand};
@@ -39,11 +37,11 @@ impl AppState {
                 if !fold_noop {
                     self.fold_op(FoldOp::Toggle);
                 }
-                self.z_pending_at = Some(Instant::now());
+                self.z_pending_at = Some(self.input_clock());
                 Effect::None
             }
             Action::Quit => Effect::Quit,
-            Action::CtrlC => self.ctrl_c(Instant::now()),
+            Action::CtrlC => self.ctrl_c(self.input_clock()),
             Action::ToggleHelp => {
                 self.cancel_mouse_drag();
                 self.help_open = !self.help_open;
@@ -67,7 +65,11 @@ impl AppState {
                 if self.graph_pane_focused() {
                     self.page_graph(pages)
                 } else if self.list_focus_target() == ListFocusTarget::None {
-                    let height = self.diff_body_height().saturating_sub(1).max(1) as i32;
+                    let height = if self.summary_shown() {
+                        self.summary_page_rows()
+                    } else {
+                        self.diff_body_height().saturating_sub(1).max(1)
+                    } as i32;
                     self.move_focused(pages * height)
                 } else {
                     let height = self.page_step();
@@ -84,7 +86,7 @@ impl AppState {
                     self.g_pending_at = None;
                     return self.move_focused_edge(false);
                 }
-                self.g_pending_at = Some(Instant::now());
+                self.g_pending_at = Some(self.input_clock());
                 Effect::None
             }
             Action::FoldClose => {

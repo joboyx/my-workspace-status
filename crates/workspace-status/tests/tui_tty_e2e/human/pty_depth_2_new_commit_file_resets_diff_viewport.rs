@@ -2,9 +2,9 @@ use crate::harness::PtySession;
 use crate::seed::{daily_workspace, seed_two_tall_commit_files, unwrap_diffs_at_launch};
 use crate::support::{
     graph_cursor_on, panes_files_focused, panes_files_focused_diff_unfocused,
-    panes_files_unfocused_diff_focused, panes_tree_unfocused_graph_focused, right_pane,
-    right_vbar_at_top, title_has_diff, title_has_files, title_has_graph, tree_cursor_on, tree_has,
-    GIT_WAIT, SETTLE_MS, WAIT,
+    panes_files_unfocused_diff_focused, panes_tree_unfocused_graph_focused, prove_keys_handled,
+    right_pane, right_vbar_at_top, step_until_changed, title_has_diff, title_has_files,
+    title_has_graph, tree_cursor_on, tree_has, GIT_WAIT, WAIT,
 };
 
 const ALPHA: &str = "alpha.rs";
@@ -17,10 +17,9 @@ const REPO: &str = "scrollbox";
 /// land in one read, which turns `scrollbox` into `scrolbox`.
 const REPO_QUERY: &str = "box";
 const COMMIT_QUERY: &str = "-pair-";
-/// Repeats after the first CSI-u press.
+/// Upper bound on Repeats while holding a pan key; the hold stops on the
+/// paint, not on this count.
 const PAN_REPEATS: usize = 40;
-/// Gap so the input thread does not drain the held-nav backlog as one move.
-const REPEAT_GAP_MS: u64 = 50;
 
 /// CSI-u Enter (`CSI 13 ; 1 : 1 u` press, `: 3` release).
 ///
@@ -30,14 +29,28 @@ fn csi_u_enter(tui: &mut PtySession) {
     tui.csi_u(13, 1, 3);
 }
 
-/// CSI-u press, spaced Repeat, release. The input thread drains a held-nav
-/// burst after each move, so Repeats must not be written as one flush.
-fn csi_u_hold_letter(tui: &mut PtySession, letter: char, repeats: usize) {
-    tui.letter_press(letter);
-    tui.wait_ms(REPEAT_GAP_MS);
-    for _ in 0..repeats {
-        tui.letter_repeat(letter);
-        tui.wait_ms(REPEAT_GAP_MS);
+/// CSI-u press, Repeats until `done`, release. The input thread drops a
+/// queued copy of a held nav key after each move, so each key waits for
+/// the right pane to pan before the next one goes out.
+fn csi_u_hold_until(tui: &mut PtySession, letter: char, done: impl Fn(&str) -> bool) {
+    step_until_changed(
+        tui,
+        |tui| tui.letter_press(letter),
+        right_pane,
+        |_| true,
+        "the CSI-u press pans the focused diff",
+    );
+    for _ in 0..PAN_REPEATS {
+        if done(&tui.screen()) {
+            break;
+        }
+        step_until_changed(
+            tui,
+            |tui| tui.letter_repeat(letter),
+            right_pane,
+            |_| true,
+            "each CSI-u Repeat pans the focused diff one more column",
+        );
     }
     tui.csi_u(u32::from(letter.to_ascii_lowercase()), 1, 3);
 }
@@ -138,12 +151,7 @@ fn unfocus_right(
     now_left: impl Fn(&str) -> bool,
     why: &str,
 ) {
-    tui.esc();
-    tui.wait_ms(120);
-    if still_right(&tui.screen()) {
-        tui.esc();
-    }
-    tui.wait_pred(now_left, why, WAIT);
+    crate::support::esc_to_left(tui, still_right, now_left, why);
 }
 
 /// Switching the focused commit file resets the diff viewport to the origin.
@@ -200,13 +208,13 @@ fn pty_depth_2_new_commit_file_resets_diff_viewport() {
         WAIT,
     );
 
-    csi_u_hold_letter(&mut tui, 'l', PAN_REPEATS);
+    csi_u_hold_until(&mut tui, 'l', alpha_panned);
     tui.wait_pred(
         alpha_panned,
         "CSI-u l pans the first commit diff (header shows pan N; a no-op l cannot pass)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         alpha_panned,
         "file-diff pan holds (not a flicker or chrome-only suffix)",

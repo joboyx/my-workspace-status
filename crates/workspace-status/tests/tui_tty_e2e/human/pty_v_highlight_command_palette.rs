@@ -2,7 +2,7 @@ use crate::harness::PtySession;
 use crate::seed::{regions_diff, two_hunk_regions_workspace, REGIONS_ALPHA, REGIONS_OMEGA};
 use crate::support::{
     ack_rows, esc_clears_palette_filter, open_regions_first_hunk_highlight,
-    regions_highlight_active, revert_range_confirm, GIT_WAIT, SETTLE_MS, VISUAL_KEY_GAP_MS, WAIT,
+    regions_highlight_active, revert_range_confirm, GIT_WAIT, WAIT,
 };
 
 fn palette_open(screen: &str) -> bool {
@@ -17,14 +17,9 @@ fn palette_highlight_rows(screen: &str) -> bool {
         && screen.contains("Exit highlight")
 }
 
-/// Type a palette filter with a gap after nav letters (held-nav backlog).
+/// Type a palette filter; after each nav letter wait for its paint.
 fn type_filter(tui: &mut PtySession, query: &str) {
-    for c in query.chars() {
-        tui.key(c);
-        if matches!(c, 'h' | 'H' | 'j' | 'J' | 'k' | 'K' | 'l' | 'L') {
-            tui.wait_ms(VISUAL_KEY_GAP_MS);
-        }
-    }
+    crate::support::type_palette_filter(tui, query);
 }
 
 /// The palette status line (not the footer, not a catalog row) shows `reason`.
@@ -61,23 +56,22 @@ fn pty_v_colon_palette_revert_opens_range_confirm() {
         WAIT,
     );
     type_filter(&mut tui, "fetch");
+    // One frame carries the whole claim. The full `>fetch` query anchors
+    // it after the last typed key; a second screen read could see a later
+    // frame.
     tui.wait_pred(
         |screen| {
             palette_open(screen)
+                && screen.contains(">fetch▏")
                 && screen.contains("Fetch remotes")
                 && screen.contains("exit highlight first")
+                && fetch_row_shows(screen, "exit highlight first (Esc)")
+                && !palette_status_shows(screen, "exit highlight first (Esc)")
         },
-        "a whole-file row shows the exit-highlight reason in the footer",
+        "before Enter a whole-file row shows the exit-highlight reason on the row and in the footer, not the status line",
         WAIT,
     );
-    let screen = tui.screen();
-    assert!(
-        fetch_row_shows(&screen, "exit highlight first (Esc)")
-            && !palette_status_shows(&screen, "exit highlight first (Esc)"),
-        "before Enter the reason is on the row and in the footer, not the status line"
-    );
     tui.enter();
-    tui.wait_ms(SETTLE_MS);
     tui.wait_pred(
         |screen| palette_open(screen) && palette_status_shows(screen, "exit highlight first (Esc)"),
         "Enter on a disabled row keeps the palette open and puts the reason on its status line",
@@ -145,7 +139,7 @@ fn pty_v_colon_palette_stages_highlighted_range() {
         "Enter stages the highlighted range (staged range toast)",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    // The toast paints after the stage job ends, so git is final here.
 
     let cached = regions_diff(&repo, true);
     let unstaged = regions_diff(&repo, false);

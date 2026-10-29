@@ -3,8 +3,8 @@ use std::path::Path;
 use crate::harness::PtySession;
 use crate::seed::{force_pushed_workspace, git_stdout};
 use crate::support::{
-    ack_rows, after_repo_name, crumb_row, repo_row_in_sync, status_row, tree_cursor_on, tree_has,
-    tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
+    ack_rows, after_repo_name, crumb_row, prove_keys_handled, repo_row_in_sync, status_row,
+    tree_cursor_on, tree_has, tree_line_containing, GIT_WAIT, WAIT,
 };
 
 fn rev(repo: &Path, name: &str) -> String {
@@ -94,12 +94,7 @@ fn pty_p_resets_branch_onto_force_pushed_upstream() {
         "p opens the reset confirm (rewrite: origin/main was rewritten. Move main to origin/main?)",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
-    tui.wait_pred(
-        reset_confirm_open,
-        "the confirm holds: nothing moves until y",
-        WAIT,
-    );
+    // The `y` below answers this confirm, which proves it stayed open.
     assert_eq!(
         rev(&repo, "main"),
         old_tip,
@@ -121,7 +116,7 @@ fn pty_p_resets_branch_onto_force_pushed_upstream() {
         "y resets: full undo text on the status line, row back in sync",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         row_in_sync_after_reset,
         "in-sync paint holds (not a flicker or toast-only tick)",
@@ -213,7 +208,7 @@ fn pty_p_on_force_pushed_with_own_commit_shows_rebase_command() {
         "p names the rebase command (under your 1 commit, rebase --onto origin/main <fork> main)",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     let screen = tui.screen();
     assert!(!screen.contains("was rewritten"), "no box:\n{screen}");
     assert!(!screen.contains("Moved "), "no reset:\n{screen}");

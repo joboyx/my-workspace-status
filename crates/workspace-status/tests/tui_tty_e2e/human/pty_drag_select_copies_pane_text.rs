@@ -1,6 +1,8 @@
 use crate::harness::{tree_row_containing, PtySession};
 use crate::seed::daily_workspace;
-use crate::support::{ack_rows, documented_launch_first_paint, RIGHT_PANE_COL, SETTLE_MS, WAIT};
+use crate::support::{
+    ack_rows, documented_launch_first_paint, prove_keys_handled, RIGHT_PANE_COL, WAIT,
+};
 
 /// xterm SGR left-button drag (`Cb` 0 + motion bit 32).
 const SGR_LEFT_DRAG: u8 = 32;
@@ -43,7 +45,7 @@ fn pty_drag_select_copies_pane_text() {
         .unwrap_or_else(|| panic!("README.md row:\n{}", tui.screen()));
 
     tui.sgr_click(TREE_INNER_COL, row);
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     assert!(
         tui.clipboard_payloads().is_empty(),
         "plain click must not copy:\n{}",

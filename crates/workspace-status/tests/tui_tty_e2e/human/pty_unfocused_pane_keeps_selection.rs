@@ -2,8 +2,8 @@ use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
     documented_launch_first_paint, panes_tree_focused_diff_unfocused,
-    panes_tree_unfocused_diff_focused, right_diff_has_focused_cursor,
-    right_diff_has_inactive_selection, tree_cursor_on, tree_inactive_selection_on, SETTLE_MS, WAIT,
+    panes_tree_unfocused_diff_focused, prove_keys_handled, right_diff_has_focused_cursor,
+    right_diff_has_inactive_selection, tree_cursor_on, tree_inactive_selection_on, WAIT,
 };
 
 /// CSI-u Enter (`CSI 13 ; 1 : 1 u` press, `: 3` release).
@@ -62,7 +62,7 @@ fn pty_unfocused_pane_keeps_selection() {
         "Enter: focused diff cursor, inactive marker stays on the unfocused README tree row",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         right_focused_readme_keeps_tree_inactive,
         "right-pane focus holds with the inactive tree marker (not a flicker or a blank tree row)",
@@ -70,7 +70,7 @@ fn pty_unfocused_pane_keeps_selection() {
     );
 
     tui.key('j');
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         right_focused_readme_keeps_tree_inactive,
         "j on the focused file-diff keeps the inactive README tree marker",

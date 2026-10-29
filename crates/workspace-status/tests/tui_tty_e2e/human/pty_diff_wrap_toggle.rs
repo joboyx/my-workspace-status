@@ -3,8 +3,8 @@ use crate::harness::{left_tree, PtySession};
 use crate::seed::{daily_workspace, seed_long_diff_file};
 use crate::support::{
     crumb_row, launch_breadcrumb_workspace_app, no_updates_group_folded, no_wrong_overlays,
-    panes_tree_focused_diff_unfocused, right_pane, right_vbar_at_top, status_row, title_has_files,
-    tree_cursor_on, tree_dir_expanded, tree_has, SETTLE_MS, WAIT,
+    panes_tree_focused_diff_unfocused, prove_keys_handled, right_pane, right_vbar_at_top,
+    status_row, title_has_files, tree_cursor_on, tree_dir_expanded, tree_has, WAIT,
 };
 
 const FILE: &str = "unique-diffline.rs";
@@ -169,7 +169,7 @@ fn pty_diff_wrap_toggle() {
         "\\ turns wrap off; UNIQUE_DIFF_TAIL is clipped again without pan",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         long_diff_unwrapped,
         "clip holds (not a flicker or a no-op \\)",
@@ -182,7 +182,7 @@ fn pty_diff_wrap_toggle() {
         "second \\ wraps the long NEW line again; UNIQUE_DIFF_TAIL is visible",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         long_diff_wrapped,
         "wrap holds (not a stale clip header or a pan that revealed the tail)",

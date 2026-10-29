@@ -29,6 +29,15 @@ const FRESH_BODY: &str = "pub fn fresh_body() {}";
 /// Ctrl-w as a C0 byte (what most terminals send without CSI-u).
 const CTRL_W: u8 = 0x17;
 
+/// True when the Explorer tree row of folder `name` paints open (`v`) or
+/// closed (`>`), then the Workspace tree's ASCII folder glyph `/`, then
+/// the name.
+fn folder_row(screen: &str, name: &str, open: bool) -> bool {
+    let chevron = if open { 'v' } else { '>' };
+    tree_line_containing(screen, name)
+        .is_some_and(|line| line.contains(&format!("{chevron} / {name}")))
+}
+
 /// Add to `app` of the daily seed: a committed `.gitignore` for
 /// `node_modules/`, a clean `src/kept.rs`, a modified `src/edit.rs`, an
 /// untracked `src/fresh.rs`, and an ignored `node_modules/dep/index.js`.
@@ -142,7 +151,7 @@ fn open_explorer_on_edit(tui: &mut PtySession) {
     tui.wait_pred(
         |screen| {
             explorer_cursor_on(screen, "edit.rs")
-                && tree_line_containing(screen, "src").is_some_and(|line| line.contains("v src"))
+                && folder_row(screen, "src", true)
                 && edit_diff_preview(screen)
         },
         "`-` opens Explorer · app on src/edit.rs (src open, diff preview)",
@@ -265,7 +274,7 @@ fn pty_explorer_minus_opens_and_walks_tree() {
     tui.wait_pred(
         |screen| {
             explorer_cursor_on(screen, "src")
-                && tree_line_containing(screen, "src").is_some_and(|line| line.contains("> src"))
+                && folder_row(screen, "src", false)
                 && !tree_has(screen, "edit.rs")
                 && !tree_has(screen, "kept.rs")
         },
@@ -277,7 +286,7 @@ fn pty_explorer_minus_opens_and_walks_tree() {
     tui.wait_pred(
         |screen| {
             explorer_cursor_on(screen, "src")
-                && tree_line_containing(screen, "src").is_some_and(|line| line.contains("v src"))
+                && folder_row(screen, "src", true)
                 && tree_has(screen, "kept.rs")
         },
         "`l` on the closed folder src opens it",
@@ -288,7 +297,7 @@ fn pty_explorer_minus_opens_and_walks_tree() {
     tui.wait_pred(
         |screen| {
             explorer_cursor_on(screen, "src")
-                && tree_line_containing(screen, "src").is_some_and(|line| line.contains("> src"))
+                && folder_row(screen, "src", false)
                 && !tree_has(screen, "kept.rs")
         },
         "Enter on the open folder src closes it",
@@ -298,7 +307,7 @@ fn pty_explorer_minus_opens_and_walks_tree() {
     tui.wait_pred(
         |screen| {
             explorer_cursor_on(screen, "src")
-                && tree_line_containing(screen, "src").is_some_and(|line| line.contains("v src"))
+                && folder_row(screen, "src", true)
                 && tree_has(screen, "kept.rs")
         },
         "Enter on the closed folder src opens it again",
@@ -308,9 +317,7 @@ fn pty_explorer_minus_opens_and_walks_tree() {
     tui.key('k');
     tui.wait_pred(
         |screen| {
-            explorer_cursor_on(screen, "node_modules")
-                && tree_line_containing(screen, "node_modules")
-                    .is_some_and(|line| line.contains("> node_modules"))
+            explorer_cursor_on(screen, "node_modules") && folder_row(screen, "node_modules", false)
         },
         "`k` moves to the ignored, closed node_modules folder",
         WAIT,
@@ -319,8 +326,7 @@ fn pty_explorer_minus_opens_and_walks_tree() {
     tui.wait_pred(
         |screen| {
             explorer_cursor_on(screen, "node_modules")
-                && tree_line_containing(screen, "node_modules")
-                    .is_some_and(|line| line.contains("v node_modules"))
+                && folder_row(screen, "node_modules", true)
                 && tree_has(screen, "dep")
         },
         "`l` opens the ignored node_modules folder and lists dep",
@@ -375,8 +381,8 @@ fn pty_explorer_reuses_tab_switches_and_refuses_stage() {
     let mut tui = launch(&workspace);
     open_explorer_on_edit(&mut tui);
 
-    tui.key('g');
-    tui.key('T');
+    // Each chord goes out in one write (see `support::send_gesture`).
+    tui.send_bytes(b"gT");
     tui.wait_pred(
         |screen| {
             on_workspace(screen)
@@ -412,15 +418,13 @@ fn pty_explorer_reuses_tab_switches_and_refuses_stage() {
         GIT_WAIT,
     );
 
-    tui.key('g');
-    tui.key('t');
+    tui.send_bytes(b"gt");
     tui.wait_pred(
         |screen| on_workspace(screen) && explorer_tab_count(screen) == 1,
         "gt from the last tab wraps to Workspace",
         WAIT,
     );
-    tui.key('g');
-    tui.key('t');
+    tui.send_bytes(b"gt");
     tui.wait_pred(
         |screen| explorer_cursor_on(screen, "README.md"),
         "gt from Workspace activates Explorer, cursor still on README.md",

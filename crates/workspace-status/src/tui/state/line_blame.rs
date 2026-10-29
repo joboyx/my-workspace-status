@@ -685,6 +685,7 @@ mod tests {
             merged_into_default: None,
             default_branch_override: None,
             default_tip_ref: Some("main".into()),
+            default_branch: None,
             local_branches: Vec::new(),
         }
     }
@@ -728,6 +729,7 @@ mod tests {
                 is_new,
                 is_committed: false,
                 vs_worktree: false,
+                committed_label: false,
                 error: None,
             },
         );

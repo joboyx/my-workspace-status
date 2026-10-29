@@ -2,8 +2,8 @@ use crate::harness::PtySession;
 use crate::seed::behind_workspace;
 use crate::support::{
     ack_rows, after_ack, crumb_row, graph_subject_line, graph_subject_meta_line, has_fetch_hint,
-    has_pull_hint, panes_tree_focused_graph_unfocused, status_row, syncbox_row_behind,
-    syncbox_row_current, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
+    has_pull_hint, panes_tree_focused_graph_unfocused, prove_keys_handled, status_row,
+    syncbox_row_behind, syncbox_row_current, tree_cursor_on, tree_has, GIT_WAIT, WAIT,
 };
 
 fn no_wrong_pull_overlays(screen: &str) -> bool {
@@ -133,7 +133,7 @@ fn pty_pull_behind_local_remote() {
         "p pulls: Pulled 1 repo, HEAD origin-tip-commit [+=main], no v1, pull hint gone",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_p_pulled,
         "pulled paint holds (not a flicker or toast-only tick)",

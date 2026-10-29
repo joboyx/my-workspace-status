@@ -2,8 +2,8 @@ use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
     documented_launch_first_paint, line_on_branch, no_updates_group_folded, no_wrong_overlays,
-    status_row, tree_cursor_on, tree_dir_collapsed, tree_dir_expanded, tree_has,
-    tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
+    prove_keys_handled, status_row, step_cursor, tree_cursor_on, tree_dir_collapsed,
+    tree_dir_expanded, tree_has, tree_line_containing, GIT_WAIT, WAIT,
 };
 
 fn help_lists_j_k_down_up(screen: &str) -> bool {
@@ -173,7 +173,7 @@ fn pty_key_repeat_j_reaches_no_updates() {
         "one CSI-u j press moves one row to app (G/End would hit No updates; a no-op stays on workspace)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         on_app_not_end,
         "one press holds on app (not a delayed jump to No updates)",
@@ -186,23 +186,28 @@ fn pty_key_repeat_j_reaches_no_updates() {
         "one CSI-u j Repeat moves one more row to README (ignored Repeat stays on app; G would hit No updates)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         on_readme_not_end,
         "one Repeat holds on README (not a delayed G/End jump)",
         WAIT,
     );
 
-    for _ in 0..9 {
-        tui.letter_repeat('j');
-        tui.wait_ms(50);
+    // One Repeat at a time, each after the cursor moved: the input thread
+    // drops a queued copy of a held nav key. Stop on No updates, so an
+    // extra Repeat cannot reach merger.
+    for _ in 0..20 {
+        if on_folded_no_updates(&tui.screen()) {
+            break;
+        }
+        step_cursor(&mut tui, |tui| tui.letter_repeat('j'), |_| true);
     }
     tui.wait_pred(
         on_folded_no_updates,
         "held CSI-u j Repeat walks to folded No updates (a no-op stays on README; one more j would hit merger)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         on_folded_no_updates,
         "Repeat j clamps on No updates (does not wrap, quit, or unfold)",
@@ -215,7 +220,7 @@ fn pty_key_repeat_j_reaches_no_updates() {
         "l on No updates opens the group (Repeat j actually selected that row)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         on_open_no_updates_with_lib,
         "opened No updates holds (not a flicker or Enter drill onto lib)",

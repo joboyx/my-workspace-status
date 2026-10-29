@@ -4,8 +4,11 @@
 //! ancestors so the row is visible. Hidden repos stay out of tree
 //! search unless shown (`.` / `-a`). Graph search matches subject, body, author,
 //! painted (relative or local) or UTC time, branch and tag names, and sha. Commit-file search
-//! matches paths. Diff search matches painted line text. Explorer tree search
-//! matches the names of the visible rows (a closed folder's rows are not
+//! matches file paths and the painted row labels, folder rows included;
+//! like tree search it includes rows under folded folders and a step
+//! unfolds to them, and the painted rows it highlights are the rows a step
+//! visits. Diff search matches painted line text. Explorer
+//! tree search matches the names of the visible rows (a closed folder's rows are not
 //! searched; folders also list lazily).
 //!
 //! Like vim `/`, a step lands on the first match after the pane cursor
@@ -17,7 +20,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use workspace_status_graph::{format_relative_date, format_utc_timestamp, short_id, GraphRow};
 
 use super::commit_files::CommitFileRow;
-use super::drill::CommitFile;
 use super::explorer::ExplorerRow;
 use super::tree::{flatten, TreeNode};
 use crate::helpers::visible_width;
@@ -313,27 +315,31 @@ pub fn focus_graph_search(
     )
 }
 
-/// Indices of commit-file paths that match `query`.
-pub fn collect_commit_file_match_indices(files: &[CommitFile], query: &str) -> Vec<usize> {
-    let labels: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
-    match_indices(&labels, query)
-}
-
-/// Positions in `rows` of the file rows whose path matches `query`.
+/// Positions in `rows` of the commit-file rows that match `query`: the
+/// rows the search highlights, `n` / `N` step to, and the pill counts.
 ///
 /// `rows` is the commit-file list flattened with no folds, so the hits
-/// follow the painted order (tree mode puts folders before files).
+/// follow the painted order (tree mode puts folders before files) and
+/// include rows under folded folders, as tree search does; a step to one
+/// unfolds its folders. A file row matches on its path or its painted
+/// label (name, status badge); a folder row on its painted label.
 pub fn commit_file_row_match_indices(rows: &[CommitFileRow], query: &str) -> Vec<usize> {
-    let file_rows: Vec<usize> = (0..rows.len()).filter(|&i| rows[i].is_file()).collect();
-    let paths: Vec<&str> = file_rows.iter().map(|&i| rows[i].path.as_str()).collect();
-    match_indices(&paths, query)
-        .into_iter()
-        .map(|k| file_rows[k])
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let contains = |text: &str| text.to_lowercase().contains(&q);
+    (0..rows.len())
+        .filter(|&i| {
+            let row = &rows[i];
+            contains(&row.label) || (row.is_file() && contains(&row.path))
+        })
         .collect()
 }
 
 /// Step to a commit-file match from row `current` of `rows` (the list
-/// flattened with no folds). A folder row is a valid anchor. See
+/// flattened with no folds). A folder row is a valid anchor and a valid
+/// landing. See [`commit_file_row_match_indices`] and
 /// [`step_from_anchor`].
 pub fn focus_commit_file_search(
     rows: &[CommitFileRow],
@@ -517,6 +523,7 @@ pub fn scroll_to_keep_anchor(lines: &[String], anchor: &str, view_h: u16) -> u16
 mod tests {
     use super::*;
     use crate::snapshot::{build_workspace_snapshot, FileChange, RepoSnapshot, SyncStatus};
+    use crate::tui::drill::CommitFile;
     use crate::tui::tree::{build_tree, default_folds, visible_for_tree, NodeKind};
 
     fn repo(name: &str, dirty_path: Option<&str>) -> RepoSnapshot {
@@ -546,6 +553,7 @@ mod tests {
             merged_into_default: None,
             default_branch_override: None,
             default_tip_ref: None,
+            default_branch: None,
             local_branches: Vec::new(),
         }
     }
@@ -795,9 +803,14 @@ mod tests {
                 "file:README.md",
             ]
         );
-        // Painted order, not `files` order; folder rows never match.
+        // Painted order, not `files` order. A folder row matches on its
+        // painted label (`src`), as the highlight paints it; `src/deep`
+        // paints `deep`, so it does not.
         assert_eq!(commit_file_row_match_indices(&rows, ".rs"), vec![2, 3, 4]);
-        assert_eq!(commit_file_row_match_indices(&rows, "src"), vec![2, 3, 4]);
+        assert_eq!(
+            commit_file_row_match_indices(&rows, "src"),
+            vec![0, 2, 3, 4]
+        );
         // From `src/a.rs`: next is `src/b.rs`, then wrap to `src/deep/c.rs`.
         assert_eq!(
             focus_commit_file_search(&rows, ".rs", Some(3), 1),
@@ -816,6 +829,47 @@ mod tests {
             focus_commit_file_search(&rows, ".rs", Some(1), -1),
             landed(4, true)
         );
+    }
+
+    /// A folder row matches on its painted label and is a step target in
+    /// both directions; the match list ignores folds (`rows` is unfolded),
+    /// so a folder under a folded parent counts, as on the tree.
+    #[test]
+    fn commit_file_search_steps_to_folder_rows() {
+        let files: Vec<CommitFile> = ["README.md", "src/a.rs", "src/deep/c.rs"]
+            .into_iter()
+            .map(|path| CommitFile {
+                status: "M".into(),
+                path: path.into(),
+                old_path: None,
+                stat: None,
+            })
+            .collect();
+        let rows =
+            crate::tui::commit_files::flatten_commit_files(&files, true, &HashSet::new(), false);
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "dir:src",
+                "dir:src/deep",
+                "file:src/deep/c.rs",
+                "file:src/a.rs",
+                "file:README.md",
+            ]
+        );
+        // `deep`: the folder row (label) and the file under it (path).
+        assert_eq!(commit_file_row_match_indices(&rows, "deep"), vec![1, 2]);
+        assert_eq!(
+            focus_commit_file_search(&rows, "deep", Some(0), 1),
+            landed(1, false)
+        );
+        assert_eq!(
+            focus_commit_file_search(&rows, "deep", Some(2), -1),
+            landed(1, false)
+        );
+        // The folder paints `deep`, not its path: `src/d` hits the file only.
+        assert_eq!(commit_file_row_match_indices(&rows, "src/d"), vec![2]);
     }
 
     #[test]

@@ -12,6 +12,8 @@ use std::sync::mpsc as std_mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crossterm::queue;
+use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::task::JoinSet;
@@ -32,13 +34,13 @@ use super::event_pump::{
 };
 use super::fetch_claim::unix_now_ms;
 use super::hyperlink::{link_cells, write_links};
-use super::keys::{drop_g_chord_echo, held_nav_key, is_half_page_chord, KeyStrokeOrigin};
+use super::keys::{drop_g_chord_echo_at, held_nav_key, is_half_page_chord, KeyStrokeOrigin};
 use super::pointer_shape::{shape_for, TermPointer};
 use super::render::draw;
 use super::state::{AppState, PendingConfirm};
 use super::status::StatusMessage;
 use super::term_progress::{progress_for, TermProgress};
-use super::tty::{poll_event, read_event_origin};
+use super::tty::{poll_event, read_event_origin, TtyEvent};
 use super::undercurl::{undercurl_cells, write_undercurls};
 use super::watch::watch_remain_ms;
 
@@ -58,7 +60,7 @@ enum InputCmd {
 }
 
 struct InputBridge {
-    rx: tokio::sync::mpsc::Receiver<(crossterm::event::Event, KeyStrokeOrigin)>,
+    rx: tokio::sync::mpsc::Receiver<TtyEvent>,
     cmd: std_mpsc::Sender<InputCmd>,
     ack: std_mpsc::Receiver<()>,
 }
@@ -92,7 +94,7 @@ impl InputBridge {
 }
 
 fn input_thread(
-    tx: tokio::sync::mpsc::Sender<(crossterm::event::Event, KeyStrokeOrigin)>,
+    tx: tokio::sync::mpsc::Sender<TtyEvent>,
     cmd_rx: std_mpsc::Receiver<InputCmd>,
     ack_tx: std_mpsc::Sender<()>,
 ) {
@@ -127,13 +129,13 @@ fn input_thread(
             Ok(false) => continue,
             Err(_) => break,
         }
-        let (event, origin) = match read_event_origin() {
+        let ready = match read_event_origin() {
             Ok(ready) => ready,
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
             Err(_) => break,
         };
-        let leftover = held_nav_key(&event).and_then(discard_held_nav_backlog);
-        if tx.blocking_send((event, origin)).is_err() {
+        let leftover = held_nav_key(&ready.0).and_then(discard_held_nav_backlog);
+        if tx.blocking_send(ready).is_err() {
             break;
         }
         if let Some(extra) = leftover {
@@ -270,6 +272,13 @@ pub async fn run(
     };
     ctx.interp
         .schedule(ctx.state, ctx.opts, lookups, &Action::None);
+    // Checkouts on their default branch get no PR lookup; their remote is
+    // resolved with git only, for commit links.
+    let remotes = Effect::ResolveCheckoutRemotes {
+        targets: ctx.state.due_remote_lookups(),
+    };
+    ctx.interp
+        .schedule(ctx.state, ctx.opts, remotes, &Action::None);
     // Sparkline counts run on low-priority workers after the first frame,
     // so they never hold up the first paint or user work.
     let activity = Effect::LoadActivity {
@@ -315,11 +324,11 @@ pub async fn run(
 
         tokio::select! {
             event = ctx.input.rx.recv() => {
-                let Some((event, origin)) = event else { break; };
-                handle_input(&mut ctx, event, origin);
+                let Some(event) = event else { break; };
+                handle_input(&mut ctx, event);
                 for _ in 1..INPUT_BATCH {
                     match ctx.input.rx.try_recv() {
-                        Ok((next, next_origin)) => handle_input(&mut ctx, next, next_origin),
+                        Ok(next) => handle_input(&mut ctx, next),
                         Err(_) => break,
                     }
                 }
@@ -426,12 +435,19 @@ pub async fn run(
 /// ends sets `batch` to `None`, so the next frame writes the clear state.
 /// The pointer shape follows `hovered_resize_edge` on the layout this
 /// frame recorded.
-fn draw_frame(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+///
+/// All of it is one synchronized update (DEC private mode 2026): a
+/// terminal that knows the mode shows the frame whole, never half drawn.
+/// A terminal resize opens the update before its clear (see
+/// [`super::app::apply_terminal_resize`]); this frame closes it. Terminals
+/// without the mode ignore both sequences.
+fn draw_frame<W: io::Write>(
+    terminal: &mut Terminal<CrosstermBackend<W>>,
     state: &mut AppState,
     progress: &mut TermProgress,
     pointer: &mut TermPointer,
 ) -> Result<(), u8> {
+    queue!(terminal.backend_mut(), BeginSynchronizedUpdate).map_err(|_| 1u8)?;
     let completed = terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
     let links = link_cells(completed.buffer, &state.layout.links);
     let curls = undercurl_cells(completed.buffer, &state.layout.undercurls);
@@ -448,7 +464,9 @@ fn draw_frame(
             terminal.backend_mut(),
             shape_for(state.hovered_resize_edge()),
         )
-        .map_err(|_| 1u8)
+        .map_err(|_| 1u8)?;
+    queue!(terminal.backend_mut(), EndSynchronizedUpdate).map_err(|_| 1u8)?;
+    io::Write::flush(terminal.backend_mut()).map_err(|_| 1u8)
 }
 
 async fn sleep_ms(ms: u64) {
@@ -459,20 +477,52 @@ async fn sleep_ms(ms: u64) {
     }
 }
 
-fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: KeyStrokeOrigin) {
-    // CSI-u with REPORT_EVENT_TYPES sends a Release after every Press.
-    // Do not dispatch it: `dispatch` would clear `GPending`. CSI-u
-    // without event types sends that release as another Press. Drop a
-    // protocol same-key Press only inside the echo window so `gt` / `gT`
-    // stay tab actions and a later typeless `g` still completes `gg`.
-    // A raw-byte second `g` is a new tap. Pending expiry clears a stale
-    // arming `g`.
-    ctx.state.expire_stale_g_chord();
-    let input_mode = ctx.state.input_mode();
-    if drop_g_chord_echo(&mut ctx.state.g_chord_echo, input_mode, &event, origin) {
-        return;
+/// Handle one input event on the clock of its arrival.
+///
+/// The `gg` / `zz` / `gt` chord windows, the typeless CSI-u echo window,
+/// and the double-click window measure from the instant the event's bytes
+/// were read. A busy loop that takes two keys late must not change what
+/// they mean.
+fn handle_input(ctx: &mut LoopCtx<'_>, (event, origin, read_at): TtyEvent) {
+    ctx.state.begin_input(read_at);
+    dispatch_input(ctx, event, origin, read_at);
+    ctx.state.end_input();
+}
+
+/// Decode one input event the way the live loop does, at its arrival.
+///
+/// Call it between [`AppState::begin_input`] and [`AppState::end_input`].
+/// `None` when the loop must not dispatch the event.
+///
+/// CSI-u with REPORT_EVENT_TYPES sends a Release after every Press. Do not
+/// dispatch it: `dispatch` would clear `GPending`. CSI-u without event
+/// types sends that release as another Press. Drop a protocol same-key
+/// Press only inside the echo window so `gt` / `gT` stay tab actions and a
+/// later typeless `g` still completes `gg`. A raw-byte second `g` is a new
+/// tap. Pending expiry clears a stale arming `g`.
+pub(crate) fn decode_input(
+    state: &mut AppState,
+    event: &crossterm::event::Event,
+    origin: KeyStrokeOrigin,
+    read_at: Instant,
+) -> Option<Action> {
+    state.expire_stale_g_chord();
+    let input_mode = state.input_mode();
+    if drop_g_chord_echo_at(&mut state.g_chord_echo, input_mode, event, origin, read_at) {
+        return None;
     }
-    let action = map_event(ctx.state, &event);
+    Some(map_event(state, event))
+}
+
+fn dispatch_input(
+    ctx: &mut LoopCtx<'_>,
+    event: crossterm::event::Event,
+    origin: KeyStrokeOrigin,
+    read_at: Instant,
+) {
+    let Some(action) = decode_input(ctx.state, &event, origin, read_at) else {
+        return;
+    };
     if let Some(pointer) = pointer_motion(&event, &action) {
         // Any-event motion (DECSET 1003) arrives on every cell the pointer
         // crosses. Store it without dispatch: no chord reset, no status,
@@ -510,7 +560,7 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
         match classify_busy_dispatch(&action, inner_action.as_ref()) {
             BusyAction::Quit => {
                 // `q` mid-write arms the same press-again window as Ctrl-C.
-                if matches!(ctx.state.quit_while_busy(Instant::now()), Effect::Quit) {
+                if matches!(ctx.state.quit_while_busy(read_at), Effect::Quit) {
                     ctx.quit = true;
                 }
                 ctx.presenter.mark();
@@ -754,6 +804,52 @@ mod tests {
         Presenter {
             dirty,
             last_draw: Instant::now(),
+        }
+    }
+
+    /// A frame is one synchronized update: the begin sequence is the first
+    /// byte written and the end sequence the last, so a terminal never
+    /// shows the frame half drawn.
+    #[test]
+    fn a_frame_is_one_synchronized_update() {
+        use ratatui::layout::Rect;
+        use ratatui::{TerminalOptions, Viewport};
+
+        /// Bytes the backend writes, readable after the draw.
+        #[derive(Clone, Default)]
+        struct Sink(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+        impl io::Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.borrow_mut().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        const BEGIN: &[u8] = b"\x1b[?2026h";
+        const END: &[u8] = b"\x1b[?2026l";
+        let snapshot = crate::snapshot::build_workspace_snapshot(&[], &[], false, &[]);
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"), snapshot, true);
+        let sink = Sink::default();
+        let mut terminal = Terminal::with_options(
+            CrosstermBackend::new(sink.clone()),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 80, 24)),
+            },
+        )
+        .unwrap();
+        let mut progress = TermProgress::new(true);
+        let mut pointer = TermPointer::default();
+        for _ in 0..2 {
+            sink.0.borrow_mut().clear();
+            draw_frame(&mut terminal, &mut state, &mut progress, &mut pointer).unwrap();
+            let out = sink.0.borrow();
+            let count = |seq: &[u8]| out.windows(seq.len()).filter(|w| *w == seq).count();
+            assert!(out.starts_with(BEGIN), "frame opens the update first");
+            assert!(out.ends_with(END), "frame closes the update last");
+            assert_eq!((count(BEGIN), count(END)), (1, 1), "one update per frame");
         }
     }
 

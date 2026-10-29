@@ -832,13 +832,20 @@ impl GraphWidget<'_> {
             );
             let body = chrome.footer_body_height();
             if body > 0 {
-                icon_spans.extend(self.paint_footer(
+                let body_area = Rect {
+                    x: area.x,
+                    y: footer_y.saturating_add(FOOTER_RULE_ROWS),
+                    width: area.width,
+                    height: body,
+                };
+                icon_spans.extend(paint_selection_footer(
                     buf,
-                    area,
-                    footer_y.saturating_add(FOOTER_RULE_ROWS),
-                    body,
+                    body_area,
                     footer_lines,
+                    self.commit_msg_scroll,
                     glyphs.more_below,
+                    self.label_palette,
+                    self.selected,
                 ));
             }
         }
@@ -846,87 +853,81 @@ impl GraphWidget<'_> {
     }
 }
 
-impl GraphWidget<'_> {
-    /// Paint the selection footer body (the rows under the rule) into `h`
-    /// rows from `top`.
-    ///
-    /// The last line (meta) is pinned on the bottom row. Message lines fill
-    /// the rows above it from the top; a short message leaves blank rows. A
-    /// taller message scrolls by [`Self::commit_msg_scroll`], gets a 1-column
-    /// scrollbar, and ends its last visible row with a muted `<arrow><K>`
-    /// hint (K hidden lines below) left of the scrollbar. The message rows
-    /// paint through [`paint_footer_message`], the same viewport the app's
-    /// commit-files footer uses.
-    ///
-    /// Returns the chip and commit meta (hash, parent ids, author, date)
-    /// spans of the painted lines and the hint span
-    /// ([`GraphIconKind::MoreBelow`]), on the selected row.
-    fn paint_footer(
-        &self,
-        buf: &mut Buffer,
-        area: Rect,
-        top: u16,
-        h: u16,
-        mut lines: Vec<Vec<LabelPart>>,
-        arrow: &str,
-    ) -> Vec<IconSpan> {
-        let fallback = Color::Reset;
-        let meta = lines.pop().unwrap_or_default();
-        let mut spans = Vec::new();
-        let mut put = |buf: &mut Buffer, y: u16, line: &[LabelPart]| {
-            put_parts_line(
-                buf,
-                area.x,
-                y,
-                area.width,
-                line,
-                self.label_palette,
-                fallback,
-            );
-            spans.extend(
-                part_icons(line, area.x, area.width)
-                    .into_iter()
-                    .map(|icon| IconSpan {
-                        kind: icon.kind,
-                        row_index: self.selected,
-                        x: icon.x,
-                        y,
-                        width: icon.width,
-                        part: icon.part,
-                        target: icon.target,
-                    }),
-            );
-        };
-        // Message rows: the body less the pinned meta row.
-        let message_area = Rect {
-            x: area.x,
-            y: top,
-            width: area.width,
-            height: h.saturating_sub(1),
-        };
-        let hint_fg = self.label_palette.map_or(fallback, |pal| pal.meta);
-        let painted = paint_footer_message(
-            buf,
-            message_area,
-            lines.len(),
-            self.commit_msg_scroll,
-            arrow,
-            hint_fg,
-            |buf, i, y| put(buf, y, &lines[i]),
-        );
-        put(buf, top.saturating_add(h.saturating_sub(1)), &meta);
-        // The span leaves out the hint's leading blank.
-        spans.extend(painted.more_below.map(|hint| IconSpan {
-            kind: GraphIconKind::MoreBelow,
-            row_index: self.selected,
-            x: hint.x,
-            y: hint.y,
-            width: hint.width,
-            part: None,
-            target: None,
-        }));
-        spans
+/// Paint a selection-footer body (the rows under the rule) into `area`.
+///
+/// `lines` is [`selection_footer_parts`]: message lines, then the meta
+/// line. The meta line is pinned on the bottom row. Message lines fill the
+/// rows above it from the top; a short message leaves blank rows. A taller
+/// message scrolls by `scroll`, gets a 1-column scrollbar, and ends its
+/// last visible row with a `<arrow><K>` hint (K hidden lines below) in the
+/// palette's meta colour, left of the scrollbar. The message rows paint
+/// through [`paint_footer_message`]. Each part paints in its
+/// [`GraphLabelPalette`] colour (`Color::Reset` with no palette).
+///
+/// The graph selection footer ([`GraphWidget`]) and the app's commit-files
+/// footer both paint here, so the same commit paints the same rows, chips,
+/// and hint on every surface. Returns the chip and commit meta (hash,
+/// parent ids, author, date) spans of the painted lines ([`part_icons`])
+/// and the hint span ([`GraphIconKind::MoreBelow`]), each with
+/// `row_index`.
+pub fn paint_selection_footer(
+    buf: &mut Buffer,
+    area: Rect,
+    mut lines: Vec<Vec<LabelPart>>,
+    scroll: usize,
+    arrow: &str,
+    palette: Option<GraphLabelPalette>,
+    row_index: Option<usize>,
+) -> Vec<IconSpan> {
+    let fallback = Color::Reset;
+    let meta = lines.pop().unwrap_or_default();
+    let mut spans = Vec::new();
+    if area.height == 0 {
+        return spans;
     }
+    let mut put = |buf: &mut Buffer, y: u16, line: &[LabelPart]| {
+        put_parts_line(buf, area.x, y, area.width, line, palette, fallback);
+        spans.extend(
+            part_icons(line, area.x, area.width)
+                .into_iter()
+                .map(|icon| IconSpan {
+                    kind: icon.kind,
+                    row_index,
+                    x: icon.x,
+                    y,
+                    width: icon.width,
+                    part: icon.part,
+                    target: icon.target,
+                }),
+        );
+    };
+    // Message rows: the body less the pinned meta row.
+    let message_area = Rect {
+        height: area.height - 1,
+        ..area
+    };
+    let hint_fg = palette.map_or(fallback, |pal| pal.meta);
+    let painted = paint_footer_message(
+        buf,
+        message_area,
+        lines.len(),
+        scroll,
+        arrow,
+        hint_fg,
+        |buf, i, y| put(buf, y, &lines[i]),
+    );
+    put(buf, area.bottom() - 1, &meta);
+    // The span leaves out the hint's leading blank.
+    spans.extend(painted.more_below.map(|hint| IconSpan {
+        kind: GraphIconKind::MoreBelow,
+        row_index,
+        x: hint.x,
+        y: hint.y,
+        width: hint.width,
+        part: None,
+        target: None,
+    }));
+    spans
 }
 
 fn now_unix_secs() -> i64 {

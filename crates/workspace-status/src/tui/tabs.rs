@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
+use workspace_status_graph::Commit;
+
 use crate::file_index::FileRead;
 
 use super::diff::DiffContent;
@@ -19,7 +21,8 @@ use super::drill::{CommitFile, CommitFileSource};
 use super::explorer::ExplorerTree;
 use super::icons::comment_mark_cols;
 use super::pr_groups::GroupKind;
-use super::search::SearchPane;
+use super::search::{wrap_col_starts_capped, SearchPane};
+use super::split::diff_paint_width;
 
 /// Palette / overlay copy when the focused row is not a compare target.
 pub const FOCUS_A_CHECKOUT: &str = "Focus a checkout to compare";
@@ -352,6 +355,16 @@ pub fn compare_range_label(base_ref: &str, head_ref: &str) -> String {
     format!("{}...{}", short_rev(base_ref), short_rev(head_ref))
 }
 
+/// The pinned head of a `base_ref...head_ref` range of one commit against
+/// its first parent (`<sha>^...<sha>`, Diff commit vs parent): `head_ref`
+/// when `base_ref` is `head_ref` plus `^` and the head is not the live
+/// [`COMPARE_HEAD_REF`], else `None`. The tab ([`CompareTab::commit_vs_parent`])
+/// and the range load (which reads that commit for the footer) share it.
+pub fn commit_vs_parent_head<'a>(base_ref: &str, head_ref: &'a str) -> Option<&'a str> {
+    let parent = base_ref.strip_suffix('^')?;
+    (head_ref != COMPARE_HEAD_REF && parent == head_ref).then_some(head_ref)
+}
+
 /// Bidirectional separator between checkout leaf and base ref (VS Code-style).
 pub const COMPARE_TAB_SEP: &str = " ↔ ";
 
@@ -410,6 +423,12 @@ pub struct CompareTab {
     pub worktree_stamp: Option<String>,
     /// Immutable endpoints for the current load, when resolved.
     pub source: Option<CommitFileSource>,
+    /// Diff commit vs parent only: the head commit as the range load read
+    /// it (message, parents, refs, author, date). The commit footer paints
+    /// it when the loaded graph has no row for that commit (an old commit
+    /// a blame action opened, another checkout's graph, or none loaded).
+    /// `None` for a range tab, before the load, and after a load error.
+    pub commit: Option<Commit>,
     /// Load or probe error. Tab stays open.
     pub error: Option<String>,
     pub files: Vec<CommitFile>,
@@ -470,6 +489,7 @@ impl CompareTab {
             worktree_file,
             worktree_stamp: None,
             source: None,
+            commit: None,
             error: None,
             files: Vec::new(),
             file_cursor: 0,
@@ -520,6 +540,20 @@ impl CompareTab {
     /// True when the head is a fixed commit, not the checkout's HEAD.
     pub fn is_pinned(&self) -> bool {
         self.head_ref != COMPARE_HEAD_REF
+    }
+
+    /// Full id of the one commit a Diff commit vs parent tab shows: the
+    /// pinned head when the base is its first parent (`<sha>^...<sha>`).
+    /// `None` for any other range (a live head, another base, or a
+    /// commit-vs-working-tree tab), which has no single commit message.
+    ///
+    /// Read from the tab key, so it holds before the range loads and needs
+    /// no git call.
+    pub fn commit_vs_parent(&self) -> Option<&str> {
+        if self.worktree_file.is_some() {
+            return None;
+        }
+        commit_vs_parent_head(&self.base_ref, &self.head_ref)
     }
 
     /// Diff pane header range (`<base-ref>...HEAD`,
@@ -671,6 +705,84 @@ impl FileTab {
             _ => &[],
         }
     }
+
+    /// Code columns the body paints in a `view_width`-column pane: the
+    /// pane less the vertical scrollbar column ([`diff_paint_width`], kept
+    /// whether or not the bar shows, as the file diff keeps it, so the
+    /// chrome stays put between a changed and a clean file) and the
+    /// gutter ([`file_view_gutter_width`]). At least 1.
+    pub fn code_width(&self, view_width: u16, ascii: bool) -> usize {
+        usize::from(diff_paint_width(view_width))
+            .saturating_sub(file_view_gutter_width(self.lines().len(), ascii))
+            .max(1)
+    }
+
+    /// Largest code-column pan in a `view_width`-column pane: the widest
+    /// line less [`Self::code_width`], so the end of the longest line
+    /// shows. 0 unless the body is text. Shift-←/→, the horizontal wheel,
+    /// and the horizontal scrollbar all clamp here.
+    pub fn pan_max(&self, view_width: u16, ascii: bool) -> usize {
+        let max_cols = match self.body.as_deref() {
+            Some(FileRead::Text { max_cols, .. }) => *max_cols,
+            _ => 0,
+        };
+        max_cols.saturating_sub(self.code_width(view_width, ascii))
+    }
+
+    /// Painted rows of `line` in `code_w` code columns: 1 with wrap off,
+    /// else its wrapped rows, counted to at most `row_cap` so a very long
+    /// line scans at most that many rows of its text.
+    pub(crate) fn line_rows(
+        &self,
+        line: usize,
+        code_w: usize,
+        wrap: bool,
+        row_cap: usize,
+    ) -> usize {
+        match self.lines().get(line) {
+            Some(text) if wrap => wrap_col_starts_capped(text, code_w, row_cap).len(),
+            _ => 1,
+        }
+    }
+}
+
+/// First line to paint so `cursor` shows in `height` rows: the clean-file
+/// view's sticky top, which scrolls only at the edge.
+///
+/// Keeps `scroll` when the cursor already shows. `rows_of(line)` is the
+/// painted row count of a line (more than 1 only while wrap is on); the
+/// walk reads at most one screen of lines, never the whole file.
+pub(crate) fn file_view_scroll(
+    scroll: usize,
+    cursor: usize,
+    height: usize,
+    rows_of: impl Fn(usize) -> usize,
+) -> usize {
+    let height = height.max(1);
+    if cursor < scroll {
+        return cursor;
+    }
+    let mut used = 0usize;
+    for line in scroll..=cursor {
+        used += rows_of(line);
+        if used > height {
+            break;
+        }
+    }
+    if used <= height {
+        return scroll;
+    }
+    let mut top = cursor;
+    let mut used = rows_of(cursor);
+    while top > 0 {
+        let above = rows_of(top - 1);
+        if used + above > height {
+            break;
+        }
+        used += above;
+        top -= 1;
+    }
+    top
 }
 
 /// What an Explorer inner file tab shows.
@@ -776,6 +888,9 @@ pub struct ExplorerTab {
     pub preview_gen: u64,
     /// First painted tree row.
     pub tree_scroll: usize,
+    /// Columns the tree is panned (Shift-←/→, the horizontal wheel, its
+    /// horizontal bar), as the Workspace tree's `left_col_offset`.
+    pub tree_col_offset: u16,
     /// Rel path of the cursor row in the last paint (the breadcrumb reads
     /// it, so a frame walks the tree once).
     pub painted_rel: Option<String>,
@@ -798,6 +913,7 @@ impl ExplorerTab {
             active_file: None,
             preview_gen: 0,
             tree_scroll: 0,
+            tree_col_offset: 0,
             painted_rel: None,
             focus_preview: false,
             search: ParkedSearch::default(),
@@ -930,6 +1046,11 @@ pub struct PrsTab {
     pub folds: HashMap<PrGroupId, bool>,
     /// Narrow layout: the detail pane shows instead of the list (`Tab`).
     pub show_detail: bool,
+    /// Detail pane viewport: the web URL of the PR it shows and its first
+    /// painted line. The paint starts another PR at the top and clamps
+    /// the line to the detail's lines, so a newly focused PR shows its
+    /// title and a detail that shrank shows its last page.
+    pub detail_scroll: Option<(String, usize)>,
 }
 
 /// One tab after Workspace: a compare, Explorer, or PRs tab.
@@ -1567,6 +1688,28 @@ mod tests {
         assert!(!live.is_pinned());
         assert_eq!(live.label(), "app ↔ main");
         assert_eq!(live.range_header(), "main...HEAD");
+    }
+
+    /// Only the Diff commit vs parent tab (`<sha>^...<sha>`, head pinned)
+    /// is one commit against its parent; a live range, a pinned head
+    /// against another base, and a commit-vs-working-tree tab are not.
+    #[test]
+    fn commit_vs_parent_is_the_pinned_head_against_its_first_parent() {
+        let mut tabs = TabStrip::default();
+        tabs.open_or_focus("app".into(), format!("{SHA}^"), SHA.into());
+        assert_eq!(tabs.active_compare().unwrap().commit_vs_parent(), Some(SHA));
+        tabs.open_or_focus("app".into(), "main".into(), COMPARE_HEAD_REF.into());
+        assert_eq!(tabs.active_compare().unwrap().commit_vs_parent(), None);
+        tabs.open_or_focus("app".into(), "main".into(), SHA.into());
+        assert_eq!(tabs.active_compare().unwrap().commit_vs_parent(), None);
+        tabs.open_or_focus("app".into(), format!("{SHA}^"), COMPARE_HEAD_REF.into());
+        assert_eq!(tabs.active_compare().unwrap().commit_vs_parent(), None);
+        let file = WorktreeFile {
+            path: "a.rs".into(),
+            old_path: None,
+        };
+        tabs.open_or_focus_worktree("app".into(), SHA.into(), file);
+        assert_eq!(tabs.active_compare().unwrap().commit_vs_parent(), None);
     }
 
     #[test]

@@ -7,7 +7,7 @@ use std::path::Path;
 use crate::config::{default_branch_override_for, WorkspaceStatusConfig};
 use crate::git::{
     classify_upstream_rewrite, exec_git, exec_git_checked, head_equals_ref, is_ancestor,
-    list_local_branches, list_worktrees_porcelain, resolve_default_branch_name,
+    known_default_branch_name, list_local_branches, list_worktrees_porcelain,
     resolve_default_branch_tip_ref, rev_parse_quiet,
 };
 use crate::helpers::{
@@ -225,6 +225,7 @@ fn failed_repo_snapshot(
         merged_into_default: None,
         default_branch_override: override_name.map(str::to_string),
         default_tip_ref: None,
+        default_branch: None,
         local_branches: Vec::new(),
     }
 }
@@ -523,28 +524,28 @@ fn override_for_path(
         .or_else(|| primary_repo.and_then(|p| default_branch_override_for(p, default_branches)))
 }
 
-/// Merge-into-default for one checkout.
+/// Merge-into-default for one checkout, against the default branch
+/// `default_name` and its tip `default_tip_ref` that [`process_repo`]
+/// resolved once for the checkout.
 ///
 /// Same-commit as the default tip is open (`Some(false)`), not merged.
 fn compute_merged_into_default(
     repo_dir: &Path,
     branch: &str,
     override_name: Option<&str>,
+    default_name: &str,
+    default_tip_ref: Option<&str>,
 ) -> Option<bool> {
-    if is_default_branch(branch, override_name) {
+    if is_default_branch(branch, override_name) || branch == default_name {
         return None;
     }
-    let default_branch = resolve_default_branch_name(repo_dir, override_name);
-    if branch == default_branch {
-        return None;
-    }
-    match resolve_default_branch_tip_ref(repo_dir, &default_branch) {
-        None => classify_merged_into_default(branch, &default_branch, None, false),
+    match default_tip_ref {
+        None => classify_merged_into_default(branch, default_name, None, false),
         Some(tip) => classify_merged_into_default(
             branch,
-            &default_branch,
-            is_ancestor(repo_dir, "HEAD", &tip),
-            head_equals_ref(repo_dir, &tip),
+            default_name,
+            is_ancestor(repo_dir, "HEAD", tip),
+            head_equals_ref(repo_dir, tip),
         ),
     }
 }
@@ -582,10 +583,20 @@ pub fn process_repo(
     let has_unstaged = !parsed.unstaged.is_empty();
     let has_staged = !parsed.staged.is_empty();
     let has_untracked = !parsed.untracked.is_empty();
-    let merged = compute_merged_into_default(&repo_dir, &branch_state.branch, override_name);
+    // Resolve the default branch and its tip once; merge-into-default and
+    // the snapshot row share them. An unknown default classifies against
+    // `main`.
+    let default_branch = known_default_branch_name(&repo_dir, override_name);
+    let default_name = default_branch.as_deref().unwrap_or("main");
+    let default_tip_ref = resolve_default_branch_tip_ref(&repo_dir, default_name);
+    let merged = compute_merged_into_default(
+        &repo_dir,
+        &branch_state.branch,
+        override_name,
+        default_name,
+        default_tip_ref.as_deref(),
+    );
     let head = rev_parse_quiet("HEAD", &repo_dir).unwrap_or_default();
-    let default_name = resolve_default_branch_name(&repo_dir, override_name);
-    let default_tip_ref = resolve_default_branch_tip_ref(&repo_dir, &default_name);
     let local_branches = list_local_branches(&repo_dir)
         .into_iter()
         .map(|b| b.name)
@@ -613,6 +624,7 @@ pub fn process_repo(
         merged_into_default: merged,
         default_branch_override: override_name.map(str::to_string),
         default_tip_ref,
+        default_branch,
         local_branches,
     })
 }
@@ -912,5 +924,46 @@ mod upstream_rewrite_tests {
         let snap = snapshot(&fixture);
         assert_eq!(snap.sync_status, SyncStatus::UpToDate);
         assert_eq!(snap.upstream_rewrite, None);
+    }
+}
+
+#[cfg(test)]
+mod default_branch_tests {
+    use super::*;
+    use crate::testutil::{git, init_repo, unique_dir};
+
+    #[test]
+    fn the_default_branch_is_the_override_else_origin_head_else_unknown() {
+        let root = unique_dir("ws-default-branch");
+        init_repo(&root.join("app"));
+        let meta = RepoCheckoutMeta {
+            checkout_kind: CheckoutKind::Primary,
+            primary_repo: None,
+        };
+        let default_of = |override_name: Option<&str>| {
+            process_repo("app", &root, false, override_name, &meta)
+                .expect("repo snapshot")
+                .default_branch
+        };
+        assert_eq!(default_of(None), None, "no origin/HEAD: no guess");
+        assert_eq!(default_of(Some("trunk")).as_deref(), Some("trunk"));
+
+        let app = root.join("app");
+        git(&app, &["update-ref", "refs/remotes/origin/develop", "HEAD"]);
+        git(
+            &app,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/develop",
+            ],
+        );
+        assert_eq!(default_of(None).as_deref(), Some("develop"), "origin/HEAD");
+        assert_eq!(
+            default_of(Some("main")).as_deref(),
+            Some("main"),
+            "the override wins"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 }

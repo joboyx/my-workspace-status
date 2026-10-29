@@ -17,12 +17,14 @@ mod prs_tab;
 mod pull_request;
 mod remote_view;
 mod scroll_glide;
+mod summary;
 
 #[cfg(test)]
 pub(crate) use prs_tab::fixtures as prs_fixtures;
 pub(crate) use prs_tab::{prs_row_flash_id, PrsLine, PrsView, PRS_DETAIL_MIN_COLS};
 pub(crate) use pull_request::PrDetailState;
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -31,13 +33,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
-use unicode_width::UnicodeWidthStr;
 use workspace_status_graph::{
-    format_commit_message, format_relative_date, graph_chrome_budget_for, graph_footer_request,
-    graph_vscroll_visible, paint_model, selection_footer_parts, wrap_commit_message, Commit,
-    GraphChromeBudget, GraphFooterSelection, GraphModel, GraphRow, PaintedLine, ASCII,
-    COMMIT_MSG_LINES_DEFAULT, COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN, FOOTER_RULE_ROWS,
-    UNICODE,
+    graph_chrome_budget_for, graph_footer_request, graph_vscroll_visible, paint_model,
+    selection_footer_parts, GraphChromeBudget, GraphFooterSelection, GraphModel, GraphRow,
+    LabelKind, LabelPart, PaintedLine, ASCII, COMMIT_MSG_LINES_DEFAULT, COMMIT_MSG_LINES_MAX,
+    COMMIT_MSG_LINES_MIN, FOOTER_RULE_ROWS, UNICODE,
 };
 
 use crate::config::ViewDefaults;
@@ -109,11 +109,11 @@ use super::search::{
 use super::search_files::{SearchFilesState, SearchZone};
 use super::selection::TextSelection;
 use super::split::{
-    clamp_tree_fraction, diff_col_from_col, diff_col_from_delta, diff_paint_width, diff_pane_mode,
-    diff_split_fraction_from_col, graph_col_from_col, graph_col_from_delta,
-    graph_scroll_from_delta, graph_scroll_from_row, hit_split, pane_widths, step_tree_fraction,
-    tree_fraction_from_col, DiffMode, ResizeEdge, SplitDrag, SplitHit, SplitLayout,
-    DIFF_SPLIT_FRACTION, NARROW_SXS, TREE_WIDTH_FRACTION,
+    clamp_tree_fraction, diff_paint_width, diff_pane_mode, diff_split_fraction_from_col,
+    graph_scroll_max, hcol_from_col, hcol_from_delta, hit_split, list_hbar_rows, pane_widths,
+    step_tree_fraction, tree_fraction_from_col, vscroll_from_delta, vscroll_from_row, DiffMode,
+    HScrollbar, HScrollbarLayout, ResizeEdge, SplitDrag, SplitHit, SplitLayout, VScrollbar,
+    VScrollbarLayout, DIFF_SPLIT_FRACTION, NARROW_SXS, TREE_WIDTH_FRACTION,
 };
 use super::stash::{
     checkout_path, resolve_stash_menu_key, row_is_hidden, stash_dirty_for_row,
@@ -121,17 +121,18 @@ use super::stash::{
 };
 use super::status::{StatusKind, StatusMessage};
 use super::tabs::{
-    compare_file_dirty, compare_range_label, CommitPickerState, ComparePickerKind,
-    ComparePickerState, OpenCompare, TabStrip, WorktreeFile, CANNOT_REVERT_COMMITTED_DIFF,
-    CANNOT_REVERT_WORKTREE_COMPARE, COMPARE_FOCUS_A_FILE, COMPARE_HEAD_MOVED, COMPARE_HEAD_REF,
-    COMPARE_STILL_LOADING, FOCUS_A_COMMIT_TO_DIFF, ROOT_COMMIT_HAS_NO_PARENT,
-    SWITCH_TO_WORKSPACE_TAB, WORKSPACE_TAB_CANNOT_CLOSE,
+    compare_file_dirty, CommitPickerState, ComparePickerKind, ComparePickerState, OpenCompare,
+    TabStrip, WorktreeFile, CANNOT_REVERT_COMMITTED_DIFF, CANNOT_REVERT_WORKTREE_COMPARE,
+    COMPARE_FOCUS_A_FILE, COMPARE_HEAD_MOVED, COMPARE_HEAD_REF, COMPARE_STILL_LOADING,
+    FOCUS_A_COMMIT_TO_DIFF, ROOT_COMMIT_HAS_NO_PARENT, SWITCH_TO_WORKSPACE_TAB,
+    WORKSPACE_TAB_CANNOT_CLOSE,
 };
 use super::theme::{BackgroundMode, ThemeId};
 use super::toast::ToastStack;
 use super::tree::{
-    build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, visible_for_tree,
-    visible_window, workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
+    build_tree, collect_foldable_subtree_ids, cursor_for_viewport_top, default_folds, flatten_with,
+    list_viewport_start, visible_for_tree, visible_window, workspace_label_from_cwd, NodeKind,
+    TreeNode, VisibleRow,
 };
 use super::ui_state_store::{save_activity_sparkline, save_commit_msg_lines, save_theme};
 use super::undercurl::UndercurlHit;
@@ -159,6 +160,7 @@ static EMPTY_DIFF: DiffContent = DiffContent {
     is_new: false,
     is_committed: false,
     vs_worktree: false,
+    committed_label: false,
     error: None,
 };
 
@@ -175,6 +177,11 @@ pub(crate) const SEARCH_WRAPPED_TO_BOTTOM: &str = "search wrapped to bottom";
 
 /// The `/` query matches nothing in the bound pane.
 pub(crate) const SEARCH_NO_MATCH: &str = "no match";
+
+/// Message line of the depth-2 commit-files footer when the drilled commit,
+/// stash, or working tree has no row in the loaded graph (a watch reload
+/// after an amend, say); the meta row under it names the source.
+pub(crate) const COMMIT_FOOTER_NOT_IN_GRAPH: &str = "not in the loaded graph";
 
 /// `z` where nothing folds (graph list, file diff).
 pub(crate) const Z_FOLDS_TREE_ROWS: &str = "z folds tree rows";
@@ -222,6 +229,10 @@ impl IconHit {
         Rect::new(self.x, self.y, self.width, 1)
     }
 }
+
+/// The plain left press of a tab kind (no popover, no icon): what a click
+/// on an icon runs to select its row before it pins.
+pub(super) type PlainClick = fn(&mut AppState, u16, u16) -> Effect;
 
 /// A painted PR badge: the PR view of an [`IconHit`].
 ///
@@ -273,8 +284,8 @@ pub struct LayoutHit {
     pub right_y: u16,
     pub files_list_y: u16,
     /// Painted commit-file list height in rows. Screen rows from
-    /// `files_list_y + files_list_height` down (such as the commit-message
-    /// footer) are not file rows.
+    /// `files_list_y + files_list_height` down (a panned list's horizontal
+    /// scrollbar row, the commit-message footer) are not file rows.
     pub files_list_height: u16,
     pub files_list_offset: usize,
     /// 0-based graph scrollbar column when a graph list is painted.
@@ -322,23 +333,25 @@ pub struct LayoutHit {
     pub commit_detail_footer_height: u16,
     /// Max message scroll for the painted commit-files footer.
     pub commit_detail_footer_scroll_max: usize,
-    /// 0-based row of the graph commit-message footer's top rule when the
-    /// footer is expanded and painted: the [`ResizeEdge::CommitMsg`] edge.
+    /// 0-based row of the commit-message footer's top rule (graph selection
+    /// footer or depth-2 commit-files footer) when the footer is expanded
+    /// and painted: the [`ResizeEdge::CommitMsg`] edge.
     pub commit_msg_rule_y: Option<u16>,
-    /// 0-based first column of that rule (the graph pane's first column).
+    /// 0-based first column of that rule (the pane's first column).
     pub commit_msg_rule_x: u16,
-    /// Rule width (the graph pane width).
+    /// Rule width (the pane width).
     pub commit_msg_rule_width: u16,
-    /// Most message rows the painted graph pane shows in its expanded
-    /// footer ([`workspace_status_graph::commit_msg_lines_fit`]). A drag of
-    /// the rule clamps here.
+    /// Most message rows the painted pane shows in its expanded footer
+    /// ([`workspace_status_graph::commit_msg_lines_fit`], the same for a
+    /// graph pane and a commit-files pane). A drag of the rule clamps here.
     pub commit_msg_lines_fit: usize,
-    /// 0-based diff scrollbar column when a file diff is painted.
-    pub diff_scrollbar_x: Option<u16>,
-    /// 0-based first row of the diff scrollbar track (body, not header).
-    pub diff_scrollbar_y: u16,
-    /// Diff body height (vertical scrollbar track).
-    pub diff_scrollbar_height: u16,
+    /// File-diff vertical scrollbar from the last paint: its column (`None`
+    /// when no file diff paints one), the body rows it spans (not the path
+    /// header), the diff row count, the painted top, and the largest top.
+    /// `AppState::split_layout` hit-tests with the live `diff_scroll` as
+    /// `scroll` instead, as a bar press or drag moves it before the next
+    /// paint.
+    pub diff_vbar: VScrollbarLayout,
     /// 0-based diff horizontal scrollbar row when the bar is painted.
     pub diff_hscrollbar_y: Option<u16>,
     /// 0-based first column of the diff horizontal scrollbar track.
@@ -347,6 +360,57 @@ pub struct LayoutHit {
     pub diff_hscrollbar_width: u16,
     /// Max horizontal pan for the painted file diff.
     pub diff_col_max: u16,
+    /// Workspace tree vertical scrollbar from the last paint: its column
+    /// (`None` while the rows fit), the pane rows it spans, the painted
+    /// row count, the painted top, and the largest top.
+    pub tree_vbar: VScrollbarLayout,
+    /// Commit-file or compare list vertical scrollbar from the last paint
+    /// (the list rows, not the commit footer under them).
+    pub files_vbar: VScrollbarLayout,
+    /// Explorer tree vertical scrollbar from the last paint.
+    pub explorer_tree_vbar: VScrollbarLayout,
+    /// Workspace tree horizontal scrollbar from the last paint: its row
+    /// (`None` until the tree pans off the left edge), track, pan clamp
+    /// (`AppState::tree_max_col`), and the painted pan (`split_layout`
+    /// hit-tests with the live pan, as a press or drag moves it first).
+    pub tree_hbar: HScrollbarLayout,
+    /// Commit-file or compare list horizontal scrollbar from the last
+    /// paint, with the list's pan clamp (`AppState::commit_file_max_col`);
+    /// `split_layout` hit-tests with the live pan.
+    pub files_hbar: HScrollbarLayout,
+    /// Explorer tree horizontal scrollbar from the last paint, with the
+    /// tree's pan clamp (`AppState::explorer_tree_max_col_in`);
+    /// `split_layout` hit-tests with the live pan.
+    pub explorer_tree_hbar: HScrollbarLayout,
+    /// Explorer clean-file view vertical scrollbar from the last paint:
+    /// its column (`None` while the lines fit), the body rows it spans,
+    /// the line count, the painted top line, and the top that shows the
+    /// last line on the bottom row.
+    pub file_view_vbar: VScrollbarLayout,
+    /// Explorer clean-file view horizontal scrollbar from the last paint,
+    /// with the file's pan clamp ([`super::tabs::FileTab::pan_max`]);
+    /// `split_layout` hit-tests with the live pan.
+    pub file_view_hbar: HScrollbarLayout,
+    /// Folder summary vertical scrollbar from the last paint: the rows
+    /// under its header, the file row count, and the painted top.
+    pub summary_vbar: VScrollbarLayout,
+    /// Folder summary horizontal scrollbar from the last paint, with the
+    /// summary's pan clamp (`AppState::summary_max_col_in`);
+    /// `split_layout` hit-tests with the live pan.
+    pub summary_hbar: HScrollbarLayout,
+    /// PRs tab list vertical scrollbar from the last paint: its column
+    /// (`None` while the lines fit), the scrolled lines it spans (not the
+    /// pinned error and loading lines), the line count, and the painted
+    /// top.
+    pub prs_list_vbar: VScrollbarLayout,
+    /// PRs tab detail vertical scrollbar from the last paint: its column
+    /// (`None` while the lines fit), the detail rows, the line count, the
+    /// painted top, and the largest top (0 while the lines fit), where the
+    /// detail's wheel and keys clamp.
+    pub prs_detail_vbar: VScrollbarLayout,
+    /// File rows the folder summary painted last (the rows under its
+    /// header, less a horizontal bar row): its page and scroll limit.
+    pub summary_list_height: u16,
     /// Tab-strip row (always painted).
     pub tab_y: u16,
     /// Hit boxes `(x, width, tab_index)` for the painted strip.
@@ -360,6 +424,12 @@ pub struct LayoutHit {
     /// Empty when no row shows an icon. [`Self::pr_badge_hits`] reads the
     /// PR badges from it.
     pub icon_hits: Vec<IconHit>,
+    /// Comment-mark targets of the right pane's line viewer cursor line, as
+    /// this frame's line viewer paint read them (the file diff's cursor
+    /// row from the rows it built, or the clean-file view's cursor line),
+    /// rebuilt every paint. A popover asks here whether its line-mark
+    /// section is on the cursor line, so its paint builds no diff rows.
+    pub cursor_line_marks: Vec<IconTarget>,
     /// Hyperlink spans of the frame, rebuilt every paint: the OSC 8 overlay
     /// prints exactly these.
     ///
@@ -385,9 +455,10 @@ pub struct LayoutHit {
     pub file_view_x: u16,
     /// 0-based first row of the painted file view body.
     pub file_view_y: u16,
-    /// File view body width, gutter included.
+    /// File view body width, gutter and vertical scrollbar column included.
     pub file_view_width: u16,
-    /// File view body height in rows.
+    /// File view line rows: the body height less the horizontal scrollbar
+    /// row a panned view keeps.
     pub file_view_height: u16,
     /// The file body's rows across the full pane width: the flat pad cells
     /// beside [`Self::file_view_x`]..[`Self::file_view_width`] included
@@ -493,13 +564,24 @@ impl Default for LayoutHit {
             commit_msg_rule_x: 0,
             commit_msg_rule_width: 0,
             commit_msg_lines_fit: COMMIT_MSG_LINES_MAX,
-            diff_scrollbar_x: None,
-            diff_scrollbar_y: 0,
-            diff_scrollbar_height: 0,
+            diff_vbar: VScrollbarLayout::default(),
             diff_hscrollbar_y: None,
             diff_hscrollbar_x: 0,
             diff_hscrollbar_width: 0,
             diff_col_max: 0,
+            tree_vbar: VScrollbarLayout::default(),
+            files_vbar: VScrollbarLayout::default(),
+            explorer_tree_vbar: VScrollbarLayout::default(),
+            tree_hbar: HScrollbarLayout::default(),
+            files_hbar: HScrollbarLayout::default(),
+            explorer_tree_hbar: HScrollbarLayout::default(),
+            file_view_vbar: VScrollbarLayout::default(),
+            file_view_hbar: HScrollbarLayout::default(),
+            summary_vbar: VScrollbarLayout::default(),
+            summary_hbar: HScrollbarLayout::default(),
+            prs_list_vbar: VScrollbarLayout::default(),
+            prs_detail_vbar: VScrollbarLayout::default(),
+            summary_list_height: 0,
             tab_y: 0,
             tab_hits: Vec::new(),
             tab_close_hits: Vec::new(),
@@ -530,6 +612,7 @@ impl Default for LayoutHit {
             wake_ms: None,
             search_option_y: 0,
             search_option_hits: Vec::new(),
+            cursor_line_marks: Vec::new(),
         }
     }
 }
@@ -548,13 +631,15 @@ impl LayoutHit {
                 }),
                 IconTarget::TreeRow(_)
                 | IconTarget::CommitFileRow(_)
+                | IconTarget::ExplorerRow(_)
                 | IconTarget::GraphRow(_)
                 | IconTarget::GraphWorktree(_)
                 | IconTarget::GraphChip { .. }
                 | IconTarget::GraphSync
                 | IconTarget::GraphMoreLines(_)
                 | IconTarget::CommitDetailMoreLines(_)
-                | IconTarget::Commit { .. } => None,
+                | IconTarget::Commit { .. }
+                | IconTarget::LineComment { .. } => None,
             })
             .collect()
     }
@@ -847,6 +932,21 @@ struct DiffSearchMemo {
     hits: Vec<usize>,
 }
 
+/// Memo for [`AppState::cursor_comment_lines`]: content fingerprint,
+/// painted layout, diff cursor, and `V` anchor, then the line span.
+type CommentLinesMemo = Option<((u64, DiffMode, usize, Option<usize>), Option<(u32, u32)>)>;
+
+/// Source line span a comment on diff rows `rows` targets: the `V` range
+/// from `anchor` to `cursor` ([`viewport_line_range`]), else the first
+/// numbered row from `cursor` ([`viewport_line_number`]) as a one-line
+/// span.
+fn comment_line_span(rows: &[DiffRow], cursor: usize, anchor: Option<usize>) -> Option<(u32, u32)> {
+    match anchor {
+        Some(anchor) => viewport_line_range(rows, anchor, cursor),
+        None => viewport_line_number(rows, cursor as u16).map(|line| (line, line)),
+    }
+}
+
 /// Memo for [`AppState::file_search_hits`].
 #[derive(Clone, Debug)]
 struct FileSearchMemo {
@@ -975,6 +1075,9 @@ pub struct AppState {
     pub left_col_offset: u16,
     /// Horizontal pan of the right list (graph or commit-files).
     pub right_col_offset: u16,
+    /// Viewport top and pan of the folder summary, for the folder they
+    /// were set on ([`summary::SummaryView`]).
+    summary_view: Option<summary::SummaryView>,
     /// File identities currently shown with unlimited `-U` context.
     pub full_context: HashSet<String>,
     /// Search text of the hunk/change row to keep in view after `-U` reload.
@@ -1088,7 +1191,14 @@ pub struct AppState {
     /// Typeless CSI-u release-as-press for `g`-chord keys.
     pub(crate) g_chord_echo: GChordEchoState,
     pub(crate) ctrl_c_armed_until: Option<Instant>,
+    /// Ctrl-C arm whose prompt the loop timer cleared. Kept so a press that
+    /// arrived before it ended, but was handled after, still quits.
+    ctrl_c_closed_until: Option<Instant>,
     last_click: Option<(u16, u16, Instant)>,
+    /// When the input event being handled arrived (its stdin read). Chord
+    /// and double-click windows measure from it. `None` outside input
+    /// handling, where they use the wall clock ([`Self::input_clock`]).
+    input_at: Option<Instant>,
     /// PR answers for branch-row badges, per checkout and (remote, branch).
     pr_cache: pull_request::PrCache,
     /// PRs tab group titles from the title command, and its fill state.
@@ -1111,6 +1221,10 @@ pub struct AppState {
     /// Focused diff row's source line, so the blame hook does not rebuild
     /// the diff rows after every schedule and apply.
     line_blame_row_memo: RefCell<line_blame::RowLineMemo>,
+    /// Source line span a diff comment targets
+    /// ([`Self::cursor_comment_lines`]), so the Comment gate a line-comment
+    /// popover asks on every frame does not rebuild the diff rows.
+    comment_lines_memo: RefCell<CommentLinesMemo>,
     /// Pending blame "show commit in graph": selected once the graph
     /// holds the commit. Dropped when the graph repo changes.
     pub graph_reveal: Option<GraphReveal>,
@@ -1129,62 +1243,6 @@ pub(crate) fn unix_now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
-}
-
-/// One commit popover field of a painted meta row: its kind, then its start
-/// column and width in display columns of that row.
-pub(crate) type MetaField = (IconKind, usize, usize);
-
-/// One commit meta row of the commit-files footer and where its commit
-/// popover fields sit in it.
-struct MetaLine {
-    /// `short · refs · [subject ·] author · date`, empty parts left out.
-    text: String,
-    /// The hash, author, and date fields in `text`.
-    fields: Vec<MetaField>,
-}
-
-/// The meta row of `commit`: short hash, refs, the subject when `subject`
-/// is set, author, and the date relative to `now`, joined by ` · `.
-fn commit_meta_line(commit: &Commit, subject: bool, now: i64) -> MetaLine {
-    let refs = commit
-        .refs
-        .iter()
-        .map(|r| r.name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let short: String = commit.id.chars().take(7).collect();
-    let mut bits: Vec<(Option<IconKind>, String)> = vec![(Some(IconKind::CommitHash), short)];
-    if !refs.is_empty() {
-        bits.push((None, refs));
-    }
-    if subject && !commit.subject.is_empty() {
-        bits.push((None, commit.subject.clone()));
-    }
-    if !commit.author_name.is_empty() {
-        bits.push((Some(IconKind::CommitAuthor), commit.author_name.clone()));
-    }
-    if commit.author_date_unix != 0 {
-        bits.push((
-            Some(IconKind::CommitDate),
-            format_relative_date(commit.author_date_unix, now),
-        ));
-    }
-    let mut line = MetaLine {
-        text: String::new(),
-        fields: Vec::new(),
-    };
-    for (i, (kind, bit)) in bits.into_iter().enumerate() {
-        if i > 0 {
-            line.text.push_str(" · ");
-        }
-        let start = line.text.width();
-        if let Some(kind) = kind {
-            line.fields.push((kind, start, bit.width()));
-        }
-        line.text.push_str(&bit);
-    }
-    line
 }
 
 impl AppState {
@@ -1338,6 +1396,7 @@ impl AppState {
             diff_col_offset: 0,
             left_col_offset: 0,
             right_col_offset: 0,
+            summary_view: None,
             full_context: HashSet::new(),
             pending_hunk_anchor: None,
             confirm: None,
@@ -1391,7 +1450,9 @@ impl AppState {
             g_pending_at: None,
             g_chord_echo: GChordEchoState::default(),
             ctrl_c_armed_until: None,
+            ctrl_c_closed_until: None,
             last_click: None,
+            input_at: None,
             pr_cache: pull_request::PrCache::default(),
             pr_titles: prs_tab::PrTitles::default(),
             diff_search_memo: RefCell::new(None),
@@ -1400,6 +1461,7 @@ impl AppState {
             line_blame: LineBlameState::default(),
             commit_cards: CommitCardCache::default(),
             line_blame_row_memo: RefCell::new(None),
+            comment_lines_memo: RefCell::new(None),
             graph_reveal: None,
             blame_previous_gen: 0,
             #[cfg(test)]
@@ -1524,7 +1586,29 @@ impl AppState {
     }
 
     fn chord_pending(&self, at: Option<Instant>) -> bool {
-        at.is_some_and(|t| t.elapsed() <= Duration::from_millis(DOUBLE_TAP_MS))
+        at.is_some_and(|t| {
+            self.input_clock().saturating_duration_since(t) <= Duration::from_millis(DOUBLE_TAP_MS)
+        })
+    }
+
+    /// Start handling an input event whose bytes arrived at `read_at`.
+    ///
+    /// Until [`Self::end_input`], chord and double-click windows measure
+    /// from `read_at`, so two keys from one burst keep their meaning when
+    /// the loop handles them late.
+    pub(crate) fn begin_input(&mut self, read_at: Instant) {
+        self.input_at = Some(read_at);
+    }
+
+    /// Stop measuring from the last input event. Paint and timers use the
+    /// wall clock again.
+    pub(crate) fn end_input(&mut self) {
+        self.input_at = None;
+    }
+
+    /// Arrival instant of the input event being handled, else now.
+    fn input_clock(&self) -> Instant {
+        self.input_at.unwrap_or_else(Instant::now)
     }
 
     /// Drop a stale arming-`g` echo after [`DOUBLE_TAP_MS`].
@@ -1532,7 +1616,8 @@ impl AppState {
     /// Call this before the `g`-chord echo filter so a late `g` is a new
     /// tap. An echo of `t` / `T` / `1`–`9` after a consumed chord stays.
     pub(crate) fn expire_stale_g_chord(&mut self) {
-        expire_stale_g_chord_echo(&mut self.g_chord_echo, &mut self.g_pending_at);
+        let now = self.input_clock();
+        expire_stale_g_chord_echo(&mut self.g_chord_echo, &mut self.g_pending_at, now);
     }
 
     pub fn focused_row(&self) -> Option<&VisibleRow> {
@@ -1721,6 +1806,18 @@ impl AppState {
             } => Some((repo.as_str(), path.as_str(), Some(source))),
             _ => Some((self.diff_repo.as_deref()?, self.diff_path.as_deref()?, None)),
         }
+    }
+
+    /// Checkout, file path, and source of the line viewer in the right
+    /// pane: the active Explorer clean-file view (the worktree, source
+    /// `None`), else [`Self::open_diff_target`]. The line comments its
+    /// gutter marks are keyed to this scope.
+    pub(crate) fn line_viewer_target(&self) -> Option<(&str, &str, Option<&CommitFileSource>)> {
+        if let (Some(tab), Some(file)) = (self.tabs.active_explorer(), self.tabs.active_file_view())
+        {
+            return Some((tab.checkout.as_str(), file.rel.as_str(), None));
+        }
+        self.open_diff_target()
     }
 
     /// Comment state of diff `line` in the right pane: `None` when no line
@@ -1954,21 +2051,15 @@ impl AppState {
         self.commit_msg_scroll = Some((id, next as usize));
     }
 
-    /// Graph row identity of the commit or stash the depth-2 commit-files
-    /// footer shows: the same key [`Self::graph_footer_msg_scroll`] uses
-    /// for that row. `None` for a compare tab and for sources with no
-    /// message (worktree, compare, commit vs worktree).
+    /// Graph row identity of the commit or stash the commit-files footer
+    /// shows (a depth-2 drill or a Diff commit vs parent tab,
+    /// [`Self::commit_footer_source`]): the same key
+    /// [`Self::graph_footer_msg_scroll`] uses for that row, so one commit
+    /// keeps one offset on every footer. `None` for a range compare tab and
+    /// for sources with no message (worktree, compare, commit vs worktree).
     pub(crate) fn commit_detail_msg_identity(&self) -> Option<String> {
-        if self.tabs.active_compare().is_some() {
-            return None;
-        }
-        let (repo, source) = match &self.drill {
-            DrillView::Files { repo, source, .. } | DrillView::Diff { repo, source, .. } => {
-                (repo, source)
-            }
-            DrillView::Graph => return None,
-        };
-        match source {
+        let (repo, source) = self.commit_footer_source()?;
+        match source.as_ref() {
             CommitFileSource::Commit { commit_id } => Some(format!("{repo}#commit:{commit_id}")),
             CommitFileSource::Stash { stash_ref } => Some(format!("{repo}#stash:{stash_ref}")),
             CommitFileSource::Worktree
@@ -1982,8 +2073,15 @@ impl AppState {
     /// Shares [`Self::commit_msg_scroll`] with the graph selection footer:
     /// another commit reads `0`.
     pub(crate) fn commit_detail_msg_scroll(&self) -> usize {
-        match (&self.commit_msg_scroll, self.commit_detail_msg_identity()) {
-            (Some((id, offset)), Some(current)) if *id == current => *offset,
+        self.commit_msg_scroll_of(self.commit_detail_msg_identity().as_deref())
+    }
+
+    /// Stored message scroll of the footer showing graph row identity
+    /// `identity` ([`Self::commit_msg_scroll`]); `0` for another identity
+    /// or none.
+    pub(crate) fn commit_msg_scroll_of(&self, identity: Option<&str>) -> usize {
+        match (&self.commit_msg_scroll, identity) {
+            (Some((id, offset)), Some(current)) if id == current => *offset,
             _ => 0,
         }
     }
@@ -2065,11 +2163,18 @@ impl AppState {
     /// moving back onto that file repaints it with no reload. Built from
     /// the full file list, so files under folded subfolders count.
     pub(crate) fn folder_summary(&self) -> Option<FolderSummary> {
+        let dir = self.folder_summary_dir()?;
+        Some(folder_summary(self.commit_drill_files()?, &dir))
+    }
+
+    /// Folder path of [`Self::folder_summary`], without building the
+    /// summary.
+    fn folder_summary_dir(&self) -> Option<String> {
         if self.is_explorer_tab() || (!self.is_compare_tab() && !self.drill.is_diff()) {
             return None;
         }
         let row = self.focused_commit_file_row().filter(|row| row.is_dir())?;
-        Some(folder_summary(self.commit_drill_files()?, &row.path))
+        Some(row.path)
     }
 
     /// True when `row` is a compare-tab file row marked reviewed.
@@ -2171,151 +2276,220 @@ impl AppState {
         })
     }
 
-    pub(crate) fn commit_detail_meta(&self) -> (String, Option<String>) {
+    /// Checkout and source of the commit-files footer: the drilled source
+    /// of a Workspace drill, or the head commit of a Diff commit vs parent
+    /// tab ([`super::tabs::CompareTab::commit_vs_parent`], a commit source). `None`
+    /// for the graph view and for any other compare tab: a range has no
+    /// single commit message.
+    pub(crate) fn commit_footer_source(&self) -> Option<(&str, Cow<'_, CommitFileSource>)> {
         if let Some(tab) = self.tabs.active_compare() {
-            return (
-                super::tabs::checkout_leaf(&tab.checkout_path),
-                Some(tab.range_header()),
-            );
+            let commit_id = tab.commit_vs_parent()?.to_string();
+            return Some((
+                tab.checkout_path.as_str(),
+                Cow::Owned(CommitFileSource::Commit { commit_id }),
+            ));
         }
-        let (repo, source) = match &self.drill {
+        match &self.drill {
             DrillView::Files { repo, source, .. } | DrillView::Diff { repo, source, .. } => {
-                (repo.as_str(), source)
+                Some((repo.as_str(), Cow::Borrowed(source)))
             }
-            DrillView::Graph => return (String::new(), None),
-        };
-        let title = repo.rsplit('/').next().unwrap_or(repo).to_string();
-        let subtitle = match source {
-            CommitFileSource::Worktree => Some("Uncommitted changes".into()),
-            CommitFileSource::Stash { stash_ref } => {
-                let subject = self.graph.as_ref().and_then(|model| {
-                    model
-                        .stashes
-                        .iter()
-                        .find(|stash| stash.stash_ref == *stash_ref)
-                        .map(|stash| stash.subject.clone())
+            DrillView::Graph => None,
+        }
+    }
+
+    /// Full id of the one commit the active compare tab shows against its
+    /// first parent (Diff commit vs parent), whose footer pins under the
+    /// tab's file list. `None` on another tab or a range compare tab.
+    pub(crate) fn active_compare_commit(&self) -> Option<&str> {
+        self.tabs.active_compare()?.commit_vs_parent()
+    }
+
+    /// True on a compare tab of a range (not Diff commit vs parent): it has
+    /// no single commit message, so its file list takes the whole left
+    /// pane with no commit footer. Paint and layout both ask here.
+    pub(crate) fn is_range_compare_tab(&self) -> bool {
+        self.is_compare_tab() && self.active_compare_commit().is_none()
+    }
+
+    /// Graph row the commit-files footer describes: the commit, stash, or
+    /// uncommitted row a depth-2 drill opened, or the commit of a Diff
+    /// commit vs parent tab ([`Self::commit_footer_source`]).
+    ///
+    /// First choice is that row cloned from the loaded graph (only that
+    /// row, [`Self::commit_footer_graph`]), so chips match the graph
+    /// footer. A Diff commit vs parent tab whose commit has no graph row
+    /// (an old commit a blame action opened, another checkout's graph, or
+    /// none loaded) builds the row from the commit its range load read
+    /// ([`super::tabs::CompareTab::commit`]). `None` for a range compare
+    /// tab, a source with no graph row (compare, commit vs worktree), or a
+    /// row found nowhere ([`Self::commit_detail_fallback_name`] then names
+    /// it). No git call: the draw path reads only loaded data.
+    pub(crate) fn commit_detail_graph_row(&self) -> Option<GraphRow> {
+        let (repo, source) = self.commit_footer_source()?;
+        let graph_row =
+            self.commit_footer_graph(repo)
+                .and_then(|model| match source.as_ref() {
+                    CommitFileSource::Commit { commit_id } => model.commit_row(commit_id),
+                    CommitFileSource::Stash { stash_ref } => model.stash_row(stash_ref),
+                    CommitFileSource::Worktree => model
+                        .uncommitted
+                        .map(|has_changes| GraphRow::Uncommitted { has_changes }),
+                    CommitFileSource::Compare { .. }
+                    | CommitFileSource::CommitVsWorktree { .. } => None,
                 });
-                Some(match subject {
-                    Some(subject) if !subject.is_empty() => format!("{stash_ref} · {subject}"),
-                    _ => stash_ref.clone(),
-                })
-            }
-            CommitFileSource::Compare {
-                base_ref, head_ref, ..
-            } => Some(compare_range_label(base_ref, head_ref)),
-            CommitFileSource::CommitVsWorktree { .. } => Some(source.short_label()),
-            CommitFileSource::Commit { commit_id } => {
-                let commit = self
-                    .graph
-                    .as_ref()
-                    .and_then(|model| model.commits.iter().find(|commit| commit.id == *commit_id));
-                Some(match commit {
-                    Some(commit) => commit_meta_line(commit, true, unix_now()).text,
-                    None => commit_id.chars().take(7).collect(),
-                })
-            }
-        };
-        (title, subtitle)
+        if graph_row.is_some() {
+            return graph_row;
+        }
+        let tab = self.tabs.active_compare()?;
+        // Only the commit the source names: a stale load never stands in.
+        let commit = tab.commit.clone().filter(|commit| {
+            matches!(source.as_ref(), CommitFileSource::Commit { commit_id } if *commit_id == commit.id)
+        })?;
+        let is_head = self
+            .checkout_head_and_default(&tab.checkout_path)
+            .is_some_and(|(head, _)| head == commit.id);
+        Some(GraphRow::Commit {
+            commit,
+            is_head,
+            worktrees: Vec::new(),
+        })
     }
 
-    /// Checkout, commit id, and commit popover fields of the meta row the
-    /// depth-2 commit-files footer paints now: the collapsed subtitle, or
-    /// the expanded meta line when the message shows.
-    ///
-    /// Each field is `(kind, start, width)` in display columns of that row:
-    /// the short hash ([`IconKind::CommitHash`]), the author
-    /// ([`IconKind::CommitAuthor`]), and the relative date
-    /// ([`IconKind::CommitDate`]); an empty author or a zero date has no
-    /// field. `None` on a compare tab, for a stash, worktree, or compare
-    /// source, and for a commit not in the loaded graph (the row paints
-    /// only the short hash then).
-    pub(crate) fn commit_detail_meta_fields(&self) -> Option<(String, String, Vec<MetaField>)> {
-        if self.tabs.active_compare().is_some() {
-            return None;
-        }
-        let (repo, commit_id) = match &self.drill {
-            DrillView::Files {
-                repo,
-                source: CommitFileSource::Commit { commit_id },
-                ..
-            }
-            | DrillView::Diff {
-                repo,
-                source: CommitFileSource::Commit { commit_id },
-                ..
-            } => (repo, commit_id),
-            _ => return None,
-        };
-        if commit_id.is_empty() {
-            return None;
-        }
-        let commit = self
-            .graph
-            .as_ref()?
-            .commits
-            .iter()
-            .find(|commit| commit.id == *commit_id)?;
-        // Expanded paints the meta line without the subject (the message
-        // below holds it); collapsed paints the subtitle with it.
-        let line = commit_meta_line(commit, !self.commit_msg_expand, unix_now());
-        Some((repo.clone(), commit_id.clone(), line.fields))
+    /// The loaded graph when it serves the commit-files footer of checkout
+    /// `repo`: always on a Workspace drill (the drill opened from it), and
+    /// on a compare tab only while it is that checkout's graph
+    /// ([`Self::graph_identity`]).
+    fn commit_footer_graph(&self, repo: &str) -> Option<&GraphModel> {
+        let model = self.graph.as_ref()?;
+        let serves = !self.is_compare_tab()
+            || self
+                .graph_identity
+                .as_ref()
+                .is_some_and(|(graph_repo, _)| graph_repo == repo);
+        serves.then_some(model)
     }
 
-    /// Rows the commit-files footer asks for, before the pane-size cap.
+    /// Graph model the commit-files footer builds its lines against: chip
+    /// colours (default branch), the checkout mark (sync branch), and HEAD.
+    /// The loaded graph when it serves the footer's checkout
+    /// ([`Self::commit_footer_graph`]); otherwise a model with only that
+    /// checkout's HEAD, sync state, and default-branch override from the
+    /// snapshot, so a commit from the tab's own load colours its chips for
+    /// its own checkout.
+    pub(crate) fn commit_footer_model(&self) -> Cow<'_, GraphModel> {
+        let Some((repo, _)) = self.commit_footer_source() else {
+            return self
+                .graph
+                .as_ref()
+                .map_or_else(|| Cow::Owned(GraphModel::default()), Cow::Borrowed);
+        };
+        if let Some(model) = self.commit_footer_graph(repo) {
+            return Cow::Borrowed(model);
+        }
+        let row = self.snapshot.repos.iter().find(|row| row.repo == repo);
+        Cow::Owned(GraphModel {
+            head_id: row
+                .map(|row| row.head.clone())
+                .filter(|head| !head.is_empty()),
+            sync: row.map(super::graph_load::sync_from_snapshot),
+            default_branch_override: row.and_then(|row| row.default_branch_override.clone()),
+            ..GraphModel::default()
+        })
+    }
+
+    /// Name of the footer's source when [`Self::commit_detail_graph_row`]
+    /// finds no row: the short hash, the `stash@{n}`, `uncommitted`, or
+    /// the range label ([`CommitFileSource::short_label`]). `None` for a
+    /// range compare tab.
+    pub(crate) fn commit_detail_fallback_name(&self) -> Option<String> {
+        self.commit_footer_source()
+            .map(|(_, source)| source.short_label())
+    }
+
+    /// Body lines of a commit-message footer for graph row `row` at
+    /// `width`: [`selection_footer_parts`], the lines the graph selection
+    /// footer paints for that row (message lines, then the meta line), in
+    /// the current expand state.
     ///
-    /// Fixed for the expand state and [`Self::commit_msg_lines`], never sized
-    /// by the selected message: expanded is title + meta + N message rows,
-    /// collapsed is title + subtitle. This is the painted height (before
-    /// the cap), not a line count: [`Self::commit_detail_footer_lines`]
-    /// returns the title and meta, then only the real message lines, so a
-    /// short message or a source with no message gives fewer lines (the
-    /// unused rows paint blank) and a long one gives more (they scroll).
+    /// With no row, a `fallback` name (the drilled source, for example a
+    /// commit a watch reload dropped from the graph) gives a muted
+    /// [`COMMIT_FOOTER_NOT_IN_GRAPH`] line and a meta line with that name,
+    /// so the footer still names what the file list shows. No row and no
+    /// name gives the graph's no-selection footer.
+    ///
+    /// Every commit-message footer builds its lines here, so the same
+    /// commit gives the same rows on every surface. The row is input, not
+    /// read from the drill, so a footer for a commit outside a Workspace
+    /// drill can call it too.
+    pub(crate) fn commit_footer_parts(
+        &self,
+        row: Option<&GraphRow>,
+        fallback: Option<&str>,
+        width: usize,
+    ) -> Vec<Vec<LabelPart>> {
+        if let (None, Some(name)) = (row, fallback) {
+            let meta = |text: &str| {
+                vec![LabelPart {
+                    text: text.to_string(),
+                    kind: LabelKind::Meta,
+                    target: None,
+                }]
+            };
+            return vec![meta(COMMIT_FOOTER_NOT_IN_GRAPH), meta(name)];
+        }
+        let model = self.commit_footer_model();
+        let glyphs = if self.ascii { &ASCII } else { &UNICODE };
+        selection_footer_parts(
+            &model,
+            GraphFooterSelection::from(row),
+            glyphs,
+            width.max(1),
+            unix_now(),
+            self.commit_msg_expand,
+        )
+    }
+
+    /// Rows the commit-files footer body asks for, before the pane-size cap.
+    ///
+    /// The graph selection footer's request ([`graph_footer_request`]) less
+    /// its rule row: expanded is [`Self::commit_msg_lines`] message rows
+    /// plus the meta row, collapsed is the subject and the meta row. Fixed
+    /// for the expand state and the rows, never sized by the selected
+    /// message: [`Self::commit_detail_footer_lines`] returns only the real
+    /// message lines, so a short message or a source with no message
+    /// leaves blank rows and a long one scrolls.
     pub(crate) fn commit_detail_footer_request(&self) -> usize {
-        if self.commit_msg_expand {
-            2 + self.commit_msg_lines
-        } else {
-            2
-        }
+        usize::from(
+            graph_footer_request(self.commit_msg_expand, self.commit_msg_lines)
+                .saturating_sub(FOOTER_RULE_ROWS),
+        )
     }
 
-    /// Title plus subtitle / wrapped message for the commit-files footer.
+    /// Text of the depth-2 commit-files footer lines at `width`.
     ///
     /// The footer sits at the bottom of the left commit-files pane beside a
     /// file diff, under the file list. The depth-1 files pane has no footer
-    /// (the graph pane beside it already shows one). Collapsed is the title
-    /// and the dense one-line subtitle from [`Self::commit_detail_meta`].
-    /// Expanded is the title, a meta line (sha / refs / author), then the
-    /// whole subject plus body, wrapped one column short of `width` (the
-    /// message scrollbar column) with no line cap, like
-    /// [`selection_footer_parts`]. Without a message (collapsed, a compare
-    /// tab, or a worktree / compare / commit-vs-worktree source) the
-    /// subtitle takes the meta row and nothing follows.
-    ///
-    /// Always the title and the meta / subtitle line, then only the real
-    /// message lines: no blank padding. The footer keeps its fixed
+    /// (the graph pane beside it already shows one). The lines are the
+    /// graph selection footer's for the drilled row
+    /// ([`Self::commit_detail_graph_row`], [`Self::commit_footer_parts`]):
+    /// collapsed, the subject and the meta line; expanded, the whole
+    /// subject plus body wrapped one column short of `width` (the message
+    /// scrollbar column) with no line cap, then the meta line. Paint pins
+    /// the meta line on the footer's bottom row under the message rows,
+    /// like the graph footer. No blank padding: the footer keeps its fixed
     /// [`Self::commit_detail_footer_request`] height in paint, where unused
     /// message rows stay blank and a message taller than the rows scrolls
     /// ([`Self::commit_detail_msg_scroll`]).
     pub(crate) fn commit_detail_footer_lines(&self, width: usize) -> Vec<String> {
-        let (title, subtitle) = self.commit_detail_meta();
-        let subtitle = subtitle.unwrap_or_default();
-        let mut footer = vec![title];
-        if !self.commit_msg_expand {
-            footer.push(subtitle);
-        } else {
-            match self.expanded_commit_message() {
-                Some((meta, message)) => {
-                    footer.push(meta);
-                    footer.extend(wrap_commit_message(
-                        &message,
-                        width.saturating_sub(1).max(1),
-                        usize::MAX,
-                    ));
-                }
-                None => footer.push(subtitle),
-            }
-        }
-        footer
+        let fallback = self.commit_detail_fallback_name();
+        self.commit_footer_parts(
+            self.commit_detail_graph_row().as_ref(),
+            fallback.as_deref(),
+            width,
+        )
+        .iter()
+        .map(|parts| parts.iter().map(|part| part.text.as_str()).collect())
+        .collect()
     }
 
     /// Message lines of the depth-2 commit-files footer below the shown
@@ -2326,14 +2500,14 @@ impl AppState {
         if layout.commit_detail_footer_y.is_none() {
             return 0;
         }
-        // Message rows: the footer less its rule, title, and meta rows.
+        // Message rows: the footer less its rule and the pinned meta row.
         let rows = usize::from(layout.commit_detail_footer_height)
             .saturating_sub(usize::from(FOOTER_RULE_ROWS))
-            .saturating_sub(2);
+            .saturating_sub(1);
         let messages = self
             .commit_detail_footer_lines(usize::from(layout.commit_detail_footer_width))
             .len()
-            .saturating_sub(2);
+            .saturating_sub(1);
         if rows == 0 || messages <= rows {
             return 0;
         }
@@ -2341,45 +2515,6 @@ impl AppState {
             .commit_detail_msg_scroll()
             .min(layout.commit_detail_footer_scroll_max);
         messages.saturating_sub(offset + rows)
-    }
-
-    fn expanded_commit_message(&self) -> Option<(String, String)> {
-        if self.tabs.active_compare().is_some() {
-            return None;
-        }
-        let source = match &self.drill {
-            DrillView::Files { source, .. } | DrillView::Diff { source, .. } => source,
-            DrillView::Graph => return None,
-        };
-        match source {
-            CommitFileSource::Commit { commit_id } => {
-                let commit = self
-                    .graph
-                    .as_ref()?
-                    .commits
-                    .iter()
-                    .find(|commit| commit.id == *commit_id)?;
-                Some((
-                    commit_meta_line(commit, false, unix_now()).text,
-                    format_commit_message(&commit.subject, &commit.body),
-                ))
-            }
-            CommitFileSource::Stash { stash_ref } => {
-                let stash = self
-                    .graph
-                    .as_ref()?
-                    .stashes
-                    .iter()
-                    .find(|stash| stash.stash_ref == *stash_ref)?;
-                Some((
-                    stash.stash_ref.clone(),
-                    format_commit_message(&stash.subject, &stash.body),
-                ))
-            }
-            CommitFileSource::Worktree
-            | CommitFileSource::Compare { .. }
-            | CommitFileSource::CommitVsWorktree { .. } => None,
-        }
     }
 
     fn restore_commit_file_cursor(&mut self, path: Option<&str>) {
@@ -2525,8 +2660,20 @@ impl AppState {
         kinds.into_iter().map(|(id, _)| id).collect()
     }
 
+    /// The Ctrl-C arm a press at `now` (its arrival) answers.
+    ///
+    /// The loop timer closes an arm on the wall clock, but a press that
+    /// arrived inside the window and was handled late still answers it:
+    /// [`handle_ctrl_c`] compares the press's arrival with the window end.
+    fn take_ctrl_c_arm(&mut self) -> Option<Instant> {
+        let armed = self.ctrl_c_armed_until.or(self.ctrl_c_closed_until);
+        self.ctrl_c_closed_until = None;
+        armed
+    }
+
     fn ctrl_c(&mut self, now: Instant) -> Effect {
-        let result = handle_ctrl_c(self.ctrl_c_armed_until, now);
+        let armed = self.take_ctrl_c_arm();
+        let result = handle_ctrl_c(armed, now);
         self.ctrl_c_armed_until = result.armed_until;
         if result.quit {
             return Effect::Quit;
@@ -2545,7 +2692,7 @@ impl AppState {
         if now < until {
             return false;
         }
-        self.ctrl_c_armed_until = None;
+        self.ctrl_c_closed_until = self.ctrl_c_armed_until.take();
         if is_ctrl_c_exit_prompt(&self.status) {
             self.status.clear();
             true
@@ -2565,7 +2712,8 @@ impl AppState {
     /// Same chord as Ctrl-C: the first press arms the window and shows
     /// [`QUIT_WHILE_BUSY_PROMPT`]; a second `q` or Ctrl-C inside it quits.
     pub fn quit_while_busy(&mut self, now: Instant) -> Effect {
-        let result = handle_ctrl_c(self.ctrl_c_armed_until, now);
+        let armed = self.take_ctrl_c_arm();
+        let result = handle_ctrl_c(armed, now);
         self.ctrl_c_armed_until = result.armed_until;
         if result.quit {
             return Effect::Quit;
@@ -3099,25 +3247,68 @@ impl AppState {
             diff_content_x: self.layout.diff_content_x,
             flat_panes: self.background == BackgroundMode::Paint,
             diff_split_rule_x: self.layout.diff_split_rule_x,
-            graph_scrollbar_x: self.layout.graph_scrollbar_x,
-            graph_scrollbar_y: self.layout.graph_scrollbar_y,
-            graph_scrollbar_height: self.layout.graph_scrollbar_height,
-            graph_content_len: self.layout.graph_content_len,
-            graph_scroll: self.graph_painted_top(),
-            graph_hscrollbar_y: self.layout.graph_hscrollbar_y,
-            graph_hscrollbar_x: self.layout.graph_hscrollbar_x,
-            graph_hscrollbar_width: self.layout.graph_hscrollbar_width,
-            graph_col_max: self.layout.graph_col_max,
-            graph_col_offset: if self.drill.is_files() {
-                self.left_col_offset
-            } else {
-                self.right_col_offset
+            graph_vbar: VScrollbarLayout {
+                x: self.layout.graph_scrollbar_x,
+                y: self.layout.graph_scrollbar_y,
+                height: self.layout.graph_scrollbar_height,
+                content_len: self.layout.graph_content_len,
+                scroll: self.graph_painted_top(),
+                scroll_max: graph_scroll_max(
+                    self.layout.graph_content_len,
+                    self.layout.graph_scrollbar_height,
+                )
+                .min(usize::from(u16::MAX)) as u16,
             },
-            diff_hscrollbar_y: self.layout.diff_hscrollbar_y,
-            diff_hscrollbar_x: self.layout.diff_hscrollbar_x,
-            diff_hscrollbar_width: self.layout.diff_hscrollbar_width,
-            diff_col_max: self.layout.diff_col_max,
-            diff_col_offset: self.diff_col_offset,
+            diff_vbar: VScrollbarLayout {
+                scroll: self.diff_scroll,
+                ..self.layout.diff_vbar
+            },
+            tree_vbar: self.layout.tree_vbar,
+            files_vbar: self.layout.files_vbar,
+            explorer_tree_vbar: self.layout.explorer_tree_vbar,
+            file_view_vbar: self.layout.file_view_vbar,
+            graph_hbar: HScrollbarLayout {
+                y: self.layout.graph_hscrollbar_y,
+                x: self.layout.graph_hscrollbar_x,
+                width: self.layout.graph_hscrollbar_width,
+                col_max: self.layout.graph_col_max,
+                col_offset: self.hbar_offset(HScrollbar::Graph),
+            },
+            diff_hbar: HScrollbarLayout {
+                y: self.layout.diff_hscrollbar_y,
+                x: self.layout.diff_hscrollbar_x,
+                width: self.layout.diff_hscrollbar_width,
+                col_max: self.layout.diff_col_max,
+                col_offset: self.hbar_offset(HScrollbar::Diff),
+            },
+            tree_hbar: HScrollbarLayout {
+                col_offset: self.hbar_offset(HScrollbar::Tree),
+                ..self.layout.tree_hbar
+            },
+            files_hbar: HScrollbarLayout {
+                col_offset: self.hbar_offset(HScrollbar::CommitFiles),
+                ..self.layout.files_hbar
+            },
+            explorer_tree_hbar: HScrollbarLayout {
+                col_offset: self.hbar_offset(HScrollbar::ExplorerTree),
+                ..self.layout.explorer_tree_hbar
+            },
+            file_view_hbar: HScrollbarLayout {
+                col_offset: self.hbar_offset(HScrollbar::FileView),
+                ..self.layout.file_view_hbar
+            },
+            // The summary viewport is its own state (no cursor): a press or
+            // drag moves it before the next paint, as on the file diff.
+            summary_vbar: VScrollbarLayout {
+                scroll: self.summary_scroll().min(usize::from(u16::MAX)) as u16,
+                ..self.layout.summary_vbar
+            },
+            summary_hbar: HScrollbarLayout {
+                col_offset: self.hbar_offset(HScrollbar::Summary),
+                ..self.layout.summary_hbar
+            },
+            prs_list_vbar: self.layout.prs_list_vbar,
+            prs_detail_vbar: self.layout.prs_detail_vbar,
             commit_msg_rule_y: self.layout.commit_msg_rule_y,
             commit_msg_rule_x: self.layout.commit_msg_rule_x,
             commit_msg_rule_width: self.layout.commit_msg_rule_width,
@@ -3144,20 +3335,45 @@ impl AppState {
     /// the icon's popover; it never counts toward a double-click. Anything
     /// else is [`Self::click_at`].
     fn click(&mut self, col: u16, row: u16) -> Effect {
-        if let Some(effect) = self.popover_click(col, row) {
+        self.click_with(col, row, Self::click_at)
+    }
+
+    /// [`Self::click`] with `plain` as the plain click: [`Self::click_at`]
+    /// on a Workspace or compare tab, `explorer_click` on an Explorer tab.
+    pub(super) fn click_with(&mut self, col: u16, row: u16, plain: PlainClick) -> Effect {
+        if let Some(effect) = self.popover_click(col, row, plain) {
             return effect;
         }
         let Some(hit) = self.icon_hit_at(col, row).cloned() else {
-            return self.click_at(col, row);
+            return plain(self, col, row);
         };
         // Cleared before the select too, so an earlier press on this cell
         // (a Ctrl+click that found no PR) never makes this click a drill.
         self.last_click = None;
-        let selected = self.click_at(col, row);
+        let selected = plain(self, col, row);
         self.last_click = None;
         self.text_selection = None;
         let details = self.pin_icon(&hit);
         popover::then(selected, details)
+    }
+
+    /// True when (`col`, `row`) is on a painted line-gutter comment mark.
+    pub(super) fn on_line_comment_mark(&self, col: u16, row: u16) -> bool {
+        self.icon_hit_at(col, row)
+            .is_some_and(|hit| matches!(hit.target, IconTarget::LineComment { .. }))
+    }
+
+    /// The drag handle under (`col`, `row`) ([`hit_split`]). The in-diff
+    /// RULE's 3-column band covers the comment mark of the right cell next
+    /// to it: the mark wins, so a press there picks its row and pins
+    /// instead of moving the RULE. An Explorer tab has no commit-message
+    /// footer, so a recorded commit-message rule is never an edge there.
+    fn split_hit_at(&self, col: u16, row: u16) -> SplitHit {
+        match hit_split(self.split_layout(), col, row) {
+            SplitHit::DiffSplit if self.on_line_comment_mark(col, row) => SplitHit::Other,
+            SplitHit::CommitMsg if self.is_explorer_tab() => SplitHit::Other,
+            hit => hit,
+        }
     }
 
     /// Plain left press: tabs, the PRs tab panes, the workspace PR total,
@@ -3171,7 +3387,8 @@ impl AppState {
         if let Some(index) = self.hit_tab(col, row) {
             return self.activate_tab(index);
         }
-        // The PRs tab has no divider or scrollbar: its panes take the press.
+        // The PRs tab has no divider: its panes and their scrollbars take
+        // the press.
         if self.is_prs_tab() {
             return self.prs_click(col, row);
         }
@@ -3183,26 +3400,35 @@ impl AppState {
             self.last_click = None;
             return self.open_prs_tab();
         }
-        match hit_split(self.split_layout(), col, row) {
+        if let Some(effect) = self.press_split_hit(col, row) {
+            return effect;
+        }
+        self.arm_text_selection(col, row);
+        self.click_row(col, row)
+    }
+
+    /// Press on the drag handle under (`col`, `row`) ([`Self::split_hit_at`]),
+    /// on every tab: the pane divider, the in-diff RULE, the commit-message
+    /// rule, or a scrollbar arms its drag. `None` off every handle, for the
+    /// caller's row click.
+    fn press_split_hit(&mut self, col: u16, row: u16) -> Option<Effect> {
+        match self.split_hit_at(col, row) {
             SplitHit::Pane if self.background == BackgroundMode::Paint => {
                 // A flat divider press sits on a row's pad cell: resize only
                 // once the pointer moves, else the release clicks the row
                 // (`last_click` stays for its double-click test).
                 self.drag = SplitDrag::Pane;
                 self.pad_press = Some((col, row));
-                return Effect::None;
             }
             SplitHit::Pane => {
                 self.drag = SplitDrag::Pane;
                 self.apply_tree_fraction_from_col(col);
                 self.last_click = None;
-                return Effect::None;
             }
             SplitHit::DiffSplit => {
                 self.drag = SplitDrag::Diff;
                 self.apply_diff_fraction_from_col(col);
                 self.last_click = None;
-                return Effect::None;
             }
             SplitHit::CommitMsg => {
                 // Rows change only once the pointer moves off this row.
@@ -3211,85 +3437,36 @@ impl AppState {
                     origin_lines: self.commit_msg_lines,
                 };
                 self.last_click = None;
-                return Effect::None;
             }
-            SplitHit::GraphThumb => {
-                self.focus_graph_pane();
-                // The press ended any glide: keep the rows on screen, so a
-                // grab mid-glide does not jump to the glide's target.
-                self.graph_scroll = self.graph_painted_top();
-                self.drag = SplitDrag::GraphScrollbar {
-                    origin_row: row,
-                    origin_scroll: self.graph_scroll,
-                };
-                self.last_click = None;
-                return Effect::None;
-            }
-            SplitHit::GraphTrack => {
-                self.focus_graph_pane();
-                let jumped = graph_scroll_from_row(self.split_layout(), row);
-                self.graph_scroll = jumped;
-                self.drag = SplitDrag::GraphScrollbar {
-                    origin_row: row,
-                    origin_scroll: jumped,
-                };
-                self.last_click = None;
-                return Effect::None;
-            }
-            SplitHit::GraphHThumb => {
-                self.focus_graph_pane();
-                self.drag = SplitDrag::GraphHScrollbar {
-                    origin_col: col,
-                    origin_offset: self.graph_col_offset(),
-                };
-                self.last_click = None;
-                return Effect::None;
-            }
-            SplitHit::GraphHTrack => {
-                self.focus_graph_pane();
-                let jumped = graph_col_from_col(self.split_layout(), col);
-                self.set_graph_col_offset(jumped);
-                self.drag = SplitDrag::GraphHScrollbar {
-                    origin_col: col,
-                    origin_offset: jumped,
-                };
-                self.last_click = None;
-                return Effect::None;
-            }
-            SplitHit::DiffHThumb => {
-                self.focus = FocusPane::Right;
-                self.drag = SplitDrag::DiffHScrollbar {
-                    origin_col: col,
-                    origin_offset: self.diff_col_offset,
-                };
-                self.last_click = None;
-                return Effect::None;
-            }
-            SplitHit::DiffHTrack => {
-                self.focus = FocusPane::Right;
-                let jumped = diff_col_from_col(self.split_layout(), col);
-                self.diff_col_offset = jumped;
-                self.drag = SplitDrag::DiffHScrollbar {
-                    origin_col: col,
-                    origin_offset: jumped,
-                };
-                self.last_click = None;
-                return Effect::None;
-            }
-            SplitHit::Other => self.arm_text_selection(col, row),
+            SplitHit::VThumb(bar) => return Some(self.press_vscrollbar(bar, true, row)),
+            SplitHit::VTrack(bar) => return Some(self.press_vscrollbar(bar, false, row)),
+            SplitHit::HThumb(bar) => self.press_hscrollbar(bar, true, col),
+            SplitHit::HTrack(bar) => self.press_hscrollbar(bar, false, col),
+            SplitHit::Other => return None,
         }
-        self.click_row(col, row)
+        Some(Effect::None)
+    }
+
+    /// Note a row press at (`col`, `row`) and say whether it is a
+    /// double-click: a second press on the same cell within 400 ms, timed
+    /// by when the presses arrived ([`Self::input_clock`]).
+    fn note_row_press(&mut self, col: u16, row: u16) -> bool {
+        let now = self.input_clock();
+        let is_double = self.last_click.as_ref().is_some_and(|(c, r, at)| {
+            *c == col
+                && *r == row
+                && now.saturating_duration_since(*at) <= Duration::from_millis(400)
+        });
+        self.last_click = Some((col, row, now));
+        is_double
     }
 
     /// The row under (`col`, `row`) after [`Self::click_at`] found no tab,
     /// divider, or scrollbar there: focus its pane and select the row; a
-    /// second press on the same cell within 400 ms is a double-click.
+    /// second press on the same cell within 400 ms is a double-click
+    /// ([`Self::note_row_press`]).
     fn click_row(&mut self, col: u16, row: u16) -> Effect {
-        let now = Instant::now();
-        let is_double = self.last_click.as_ref().is_some_and(|(c, r, at)| {
-            *c == col && *r == row && at.elapsed() <= Duration::from_millis(400)
-        });
-        self.last_click = Some((col, row, now));
+        let is_double = self.note_row_press(col, row);
         if col >= self.layout.right_x {
             self.focus = FocusPane::Right;
             if self.is_compare_tab() {
@@ -3324,7 +3501,9 @@ impl AppState {
         if self.drill.is_files() {
             return self.click_graph(row, is_double, false);
         }
-        if row < self.layout.tree_y {
+        // Below the painted rows: the horizontal bar row of a panned tree.
+        let rows_end = self.layout.tree_y.saturating_add(self.tree_list_rows());
+        if row < self.layout.tree_y || row >= rows_end {
             return Effect::None;
         }
         let idx = self.layout.list_offset + (row - self.layout.tree_y) as usize;
@@ -3517,27 +3696,23 @@ impl AppState {
                 origin_row,
                 origin_lines,
             } => self.drag_commit_msg(origin_row, origin_lines, row),
-            SplitDrag::GraphScrollbar {
+            SplitDrag::VScrollbar {
+                bar,
                 origin_row,
                 origin_scroll,
             } => {
-                self.graph_scroll =
-                    graph_scroll_from_delta(self.split_layout(), origin_row, origin_scroll, row);
+                let geometry = self.split_layout().vbar(bar);
+                let top = vscroll_from_delta(geometry, origin_row, origin_scroll, row);
+                return self.scroll_vbar_to(bar, top);
             }
-            SplitDrag::GraphHScrollbar {
+            SplitDrag::HScrollbar {
+                bar,
                 origin_col,
                 origin_offset,
             } => {
-                let next =
-                    graph_col_from_delta(self.split_layout(), origin_col, origin_offset, col);
-                self.set_graph_col_offset(next);
-            }
-            SplitDrag::DiffHScrollbar {
-                origin_col,
-                origin_offset,
-            } => {
-                self.diff_col_offset =
-                    diff_col_from_delta(self.split_layout(), origin_col, origin_offset, col);
+                let geometry = self.split_layout().hbar(bar);
+                let offset = hcol_from_delta(geometry, origin_col, origin_offset, col);
+                self.scroll_hbar_to(bar, offset);
             }
             SplitDrag::None => {
                 if let Some(selection) = self.text_selection.as_mut() {
@@ -3615,7 +3790,11 @@ impl AppState {
         let Some((col, row)) = press else {
             return self.release_mouse();
         };
-        let clicked = self.click_row(col, row);
+        let clicked = if self.is_explorer_tab() {
+            self.explorer_click_row(col, row)
+        } else {
+            self.click_row(col, row)
+        };
         popover::then(clicked, self.release_mouse())
     }
 
@@ -3649,6 +3828,256 @@ impl AppState {
         }
         if let Err(err) = save_commit_msg_lines(&self.ui_store_path, self.commit_msg_lines) {
             self.status = StatusMessage::error(persist_failed_status("commit message lines", err));
+        }
+    }
+
+    /// Press on vertical scrollbar `bar` at `row`: the bar's pane takes
+    /// focus; a press on the thumb grabs it where it is painted, a track
+    /// press jumps the viewport toward `row` ([`vscroll_from_row`]). Either
+    /// arms [`SplitDrag::VScrollbar`] from that top, and neither picks a row
+    /// or counts toward a double-click. Returns what the move asks for: a
+    /// list that follows its cursor loads the row the cursor moved to, as
+    /// a wheel step does ([`Self::scroll_vbar_to`]).
+    fn press_vscrollbar(&mut self, bar: VScrollbar, on_thumb: bool, row: u16) -> Effect {
+        let geometry = self.split_layout().vbar(bar);
+        // A thumb press keeps the painted top: it ends any glide without
+        // jumping to the glide's target.
+        let top = if on_thumb {
+            geometry.scroll
+        } else {
+            vscroll_from_row(geometry, row)
+        };
+        match bar {
+            VScrollbar::Graph => self.focus_graph_pane(),
+            VScrollbar::Diff | VScrollbar::FileView | VScrollbar::Summary => {
+                self.focus = FocusPane::Right;
+            }
+            VScrollbar::Tree | VScrollbar::ExplorerTree => self.focus = FocusPane::Left,
+            VScrollbar::CommitFiles => self.focus = self.commit_files_pane(),
+            // The PRs tab keeps the list focused ([`Self::apply_prs_session`]);
+            // its narrow toggle, not the focus, picks the pane it shows.
+            VScrollbar::PrsList | VScrollbar::PrsDetail => self.focus = FocusPane::Left,
+        }
+        let effect = self.scroll_vbar_to(bar, top);
+        self.drag = SplitDrag::VScrollbar {
+            bar,
+            origin_row: row,
+            origin_scroll: top,
+        };
+        self.last_click = None;
+        effect
+    }
+
+    /// Scroll the viewport of vertical scrollbar `bar` to `top`, and return
+    /// what the move asks for.
+    ///
+    /// The graph bar moves `graph_scroll` only (the graph wheel moves the
+    /// cursor, but the graph viewport does not follow it). Every other
+    /// viewport follows its cursor, so the cursor moves to the row nearest
+    /// it whose viewport starts at `top` ([`cursor_for_viewport_top`]), and
+    /// a moved cursor asks for what the wheel asks for: the tree loads the
+    /// right pane, a commit-file row its diff, an Explorer row its preview.
+    /// The clean-file view scrolls at the edge of its line cursor, so its
+    /// cursor moves to the nearest edge line of the new viewport. The
+    /// folder summary and the PRs detail have no cursor: their viewport
+    /// moves alone. The PRs list cursor moves and asks for nothing, as its
+    /// wheel.
+    fn scroll_vbar_to(&mut self, bar: VScrollbar, top: u16) -> Effect {
+        let top = usize::from(top);
+        match bar {
+            VScrollbar::Graph => {
+                self.graph_scroll = top as u16;
+                Effect::None
+            }
+            VScrollbar::Summary => {
+                self.scroll_summary_to(top);
+                Effect::None
+            }
+            VScrollbar::Diff => {
+                self.scroll_diff_to(top);
+                Effect::None
+            }
+            VScrollbar::Tree => self.scroll_tree_to(top),
+            VScrollbar::CommitFiles => self.scroll_commit_files_to(top),
+            VScrollbar::ExplorerTree => self.scroll_explorer_tree_to(top),
+            VScrollbar::FileView => {
+                self.scroll_file_view_to(top);
+                Effect::None
+            }
+            VScrollbar::PrsList => {
+                self.scroll_prs_list_to(top);
+                Effect::None
+            }
+            VScrollbar::PrsDetail => {
+                self.scroll_prs_detail_to(top);
+                Effect::None
+            }
+        }
+    }
+
+    /// Scroll the file diff so its viewport starts at row `top`.
+    ///
+    /// The diff viewport follows `diff_cursor` (middle-biased, as
+    /// [`Self::sync_diff_scroll`] places it), so the cursor moves to the row
+    /// nearest it whose viewport starts at `top` ([`cursor_for_viewport_top`]),
+    /// as a wheel step moves the cursor.
+    fn scroll_diff_to(&mut self, top: usize) {
+        let rows = self.current_diff_rows();
+        let n = rows.len();
+        if n == 0 {
+            return;
+        }
+        let height = self.diff_body_height();
+        self.diff_cursor = if self.diff_wrap {
+            let heights = self.diff_wrap_heights_for(&rows);
+            cursor_for_viewport_top(n, self.diff_cursor, top, |cursor| {
+                wrap_viewport_start(&heights, cursor, height)
+            })
+        } else {
+            cursor_for_viewport_top(n, self.diff_cursor, top, |cursor| {
+                list_viewport_start(n, cursor, height)
+            })
+        };
+        self.sync_diff_scroll_for(&rows);
+    }
+
+    /// Scroll the Workspace tree so its painted rows start at `top`: the
+    /// tree cursor moves with the viewport ([`cursor_for_viewport_top`] over
+    /// the painted rows, [`Self::tree_list_rows`] tall), and a moved cursor
+    /// loads the right pane, as the wheel does.
+    fn scroll_tree_to(&mut self, top: usize) -> Effect {
+        let painted = self.painted_tree_rows();
+        let focus = self.rows.get(self.cursor).map(|row| row.id.as_str());
+        let cursor = focus
+            .and_then(|id| painted.iter().position(|row| row.id == id))
+            .unwrap_or(0);
+        let height = usize::from(self.tree_list_rows());
+        let n = painted.len();
+        let target = cursor_for_viewport_top(n, cursor, top, |c| list_viewport_start(n, c, height));
+        let live = nearest_live_row(&painted, target, |row| {
+            self.rows.iter().position(|live| live.id == row.id)
+        });
+        match live {
+            Some(live) if live != self.cursor => {
+                self.cursor = live;
+                Effect::LoadRightPane
+            }
+            _ => Effect::None,
+        }
+    }
+
+    /// Scroll the commit-file or compare list so its painted rows start at
+    /// `top`: the file cursor moves with the viewport, and a moved cursor
+    /// loads its file's diff, as the wheel does.
+    fn scroll_commit_files_to(&mut self, top: usize) -> Effect {
+        let painted = self.painted_commit_file_rows();
+        let rows = self.commit_file_rows();
+        let current = self.commit_files_cursor();
+        let focus = rows.get(current).map(|row| row.id.as_str());
+        let cursor = focus
+            .and_then(|id| painted.iter().position(|row| row.id == id))
+            .unwrap_or(0);
+        let height = usize::from(self.layout.files_list_height.max(1));
+        let n = painted.len();
+        let target = cursor_for_viewport_top(n, cursor, top, |c| list_viewport_start(n, c, height));
+        let live = nearest_live_row(&painted, target, |row| {
+            rows.iter().position(|live| live.id == row.id)
+        });
+        match live {
+            Some(live) if live != current => {
+                self.set_commit_file_cursor(live);
+                self.maybe_load_focused_commit_diff()
+            }
+            _ => Effect::None,
+        }
+    }
+
+    /// Rows the Workspace tree paints: the pane rows less the horizontal
+    /// scrollbar row it keeps while panned ([`list_hbar_rows`]).
+    fn tree_list_rows(&self) -> u16 {
+        let height = self.layout.tree_height;
+        height.saturating_sub(list_hbar_rows(height, self.left_col_offset))
+    }
+
+    /// The pane that shows the commit-file or compare list: the left pane
+    /// beside a file diff (depth 2, a compare tab), else the right pane
+    /// (depth 1).
+    fn commit_files_pane(&self) -> FocusPane {
+        if self.is_compare_tab() || self.drill.is_diff() {
+            FocusPane::Left
+        } else {
+            FocusPane::Right
+        }
+    }
+
+    /// Press on horizontal scrollbar `bar` at `col`: the bar's pane takes
+    /// focus; a press on the thumb grabs it where it is painted, a track
+    /// press jumps the pan toward `col` ([`hcol_from_col`]). Either arms
+    /// [`SplitDrag::HScrollbar`] from that offset, and neither picks a row,
+    /// moves a cursor, or counts toward a double-click.
+    fn press_hscrollbar(&mut self, bar: HScrollbar, on_thumb: bool, col: u16) {
+        let geometry = self.split_layout().hbar(bar);
+        let offset = if on_thumb {
+            geometry.col_offset
+        } else {
+            hcol_from_col(geometry, col)
+        };
+        match bar {
+            HScrollbar::Graph => self.focus_graph_pane(),
+            HScrollbar::Diff | HScrollbar::FileView | HScrollbar::Summary => {
+                self.focus = FocusPane::Right;
+            }
+            HScrollbar::Tree | HScrollbar::ExplorerTree => self.focus = FocusPane::Left,
+            HScrollbar::CommitFiles => self.focus = self.commit_files_pane(),
+        }
+        self.scroll_hbar_to(bar, offset);
+        self.drag = SplitDrag::HScrollbar {
+            bar,
+            origin_col: col,
+            origin_offset: offset,
+        };
+        self.last_click = None;
+    }
+
+    /// The pan offset horizontal scrollbar `bar` moves: the offset
+    /// Shift-←/→ and the horizontal wheel pan on its pane.
+    fn hbar_offset(&self, bar: HScrollbar) -> u16 {
+        match bar {
+            HScrollbar::Graph => self.graph_col_offset(),
+            HScrollbar::Diff => self.diff_col_offset,
+            HScrollbar::Tree => self.left_col_offset,
+            HScrollbar::CommitFiles if self.commit_files_pane() == FocusPane::Left => {
+                self.left_col_offset
+            }
+            HScrollbar::CommitFiles => self.right_col_offset,
+            HScrollbar::ExplorerTree => self.explorer_tree_col_offset(),
+            HScrollbar::FileView => self
+                .tabs
+                .active_file_view()
+                .map_or(0, |file| file.col_offset),
+            HScrollbar::Summary => self.summary_col_offset(),
+        }
+    }
+
+    /// Pan horizontal scrollbar `bar`'s pane to `offset` (already clamped
+    /// to the bar's `col_max`, the pane's pan clamp). The paint also
+    /// drops a pan the clamp no longer allows here (the pane widened).
+    pub(crate) fn scroll_hbar_to(&mut self, bar: HScrollbar, offset: u16) {
+        match bar {
+            HScrollbar::Graph => self.set_graph_col_offset(offset),
+            HScrollbar::Diff => self.diff_col_offset = offset,
+            HScrollbar::Tree => self.left_col_offset = offset,
+            HScrollbar::CommitFiles if self.commit_files_pane() == FocusPane::Left => {
+                self.left_col_offset = offset;
+            }
+            HScrollbar::CommitFiles => self.right_col_offset = offset,
+            HScrollbar::ExplorerTree => self.set_explorer_tree_col_offset(offset),
+            HScrollbar::FileView => {
+                if let Some(file) = self.tabs.active_file_view_mut() {
+                    file.col_offset = offset;
+                }
+            }
+            HScrollbar::Summary => self.set_summary_col_offset(offset),
         }
     }
 
@@ -4223,9 +4652,8 @@ impl AppState {
                 )
             }
             SearchPane::CommitFiles => {
-                let rows = self.commit_file_search_rows()?;
-                let current = self.commit_file_search_anchor(&rows);
-                (current, commit_file_row_match_indices(&rows, query))
+                let (rows, hits) = self.commit_file_search_hits()?;
+                (self.commit_file_search_anchor(&rows), hits)
             }
             SearchPane::Diff => (self.search_hit, self.diff_search_hits(query)),
             SearchPane::File => {
@@ -4374,9 +4802,26 @@ impl AppState {
         landing.wrapped
     }
 
-    /// Commit-file list flattened with no folds: the search order.
-    fn commit_file_search_rows(&self) -> Option<Vec<CommitFileRow>> {
-        Some(self.unfolded_commit_file_rows(self.commit_drill_files()?))
+    /// Commit-file list flattened with no folds (the search order), and
+    /// the positions in it of the rows the search highlights, steps to,
+    /// and counts. `None` with no commit-file list.
+    fn commit_file_search_hits(&self) -> Option<(Vec<CommitFileRow>, Vec<usize>)> {
+        let rows = self.unfolded_commit_file_rows(self.commit_drill_files()?);
+        let hits = commit_file_row_match_indices(&rows, &self.search_query);
+        Some((rows, hits))
+    }
+
+    /// Ids of the commit-file rows the bound search highlights: the same
+    /// rows `n` / `N` step to and the pill counts. Empty unless `/` is
+    /// bound to the commit-file list with a query.
+    pub(crate) fn commit_file_search_match_ids(&self) -> HashSet<String> {
+        if self.search_target != SearchPane::CommitFiles || self.search_query.trim().is_empty() {
+            return HashSet::new();
+        }
+        let Some((rows, hits)) = self.commit_file_search_hits() else {
+            return HashSet::new();
+        };
+        hits.into_iter().map(|i| rows[i].id.clone()).collect()
     }
 
     /// Position of the focused commit-file row (file or folder) in `rows`.
@@ -4386,22 +4831,31 @@ impl AppState {
     }
 
     /// Commit-file search step from the focused row. Returns true when it
-    /// wrapped.
+    /// wrapped. A landing (file or folder) unfolds the folders above it and
+    /// puts the cursor on that row by id, so a folder and a file with the
+    /// same path stay apart; a landed folder keeps its own fold.
     fn apply_commit_file_search(&mut self, dir: i32) -> bool {
-        let Some(rows) = self.commit_file_search_rows() else {
+        let Some(files) = self.commit_drill_files() else {
             self.set_search_status(false);
             return false;
         };
+        let rows = self.unfolded_commit_file_rows(files);
         let anchor = self.commit_file_search_anchor(&rows);
         let Some(landing) = focus_commit_file_search(&rows, &self.search_query, anchor, dir) else {
             self.set_search_status(false);
             return false;
         };
-        let path = rows[landing.target].path.clone();
-        for id in ancestor_dir_ids(&path) {
+        let target = &rows[landing.target];
+        for id in ancestor_dir_ids(&target.path) {
             self.commit_file_folds.remove(&id);
         }
-        self.restore_commit_file_cursor(Some(&path));
+        if let Some(idx) = self
+            .commit_file_rows()
+            .iter()
+            .position(|row| row.id == target.id)
+        {
+            self.set_commit_file_cursor(idx);
+        }
         self.set_search_status(true);
         landing.wrapped
     }
@@ -4635,7 +5089,8 @@ impl AppState {
     ///
     /// Every `DrillView::Diff` returns `None` (commit, stash, and worktree
     /// drills). That is the only write stop for those views:
-    /// `DiffContent::from_unified` leaves `is_committed: false`. Workspace
+    /// their content leaves `is_committed: false` (`DiffContent::from_commit_lines`
+    /// only relabels the section `COMMITTED`). Workspace
     /// file diffs (`set_diff`) keep `DrillView::Graph` and still emit
     /// `Effect::ApplyCachedPatch`.
     fn visual_write_target(&self) -> Option<(String, String)> {
@@ -5184,6 +5639,50 @@ impl AppState {
         }
     }
 
+    /// Source line span a comment on the file diff targets
+    /// ([`comment_line_span`] of the diff cursor and `V` anchor over
+    /// [`Self::current_diff_rows`]), memoised by content fingerprint,
+    /// layout, cursor, and anchor. The Comment gate runs on every frame a
+    /// line-comment popover paints; the diff pane primes the memo from the
+    /// rows it built ([`Self::prime_cursor_comment_lines`]), so that frame
+    /// builds the rows once. `None` under a folder summary, like the rows.
+    fn cursor_comment_lines(&self) -> Option<(u32, u32)> {
+        if self.folder_summary().is_some() {
+            return None;
+        }
+        let key = self.comment_lines_key();
+        if let Some((hit_key, hit)) = self.comment_lines_memo.borrow().as_ref() {
+            if *hit_key == key {
+                return *hit;
+            }
+        }
+        let hit = comment_line_span(&self.current_diff_rows(), key.2, key.3);
+        *self.comment_lines_memo.borrow_mut() = Some((key, hit));
+        hit
+    }
+
+    /// Fill the [`Self::cursor_comment_lines`] memo from `rows`, this
+    /// frame's [`Self::current_diff_rows`], so a gate asked later in the
+    /// frame reads it instead of building the rows again.
+    pub(crate) fn prime_cursor_comment_lines(&self, rows: &[DiffRow]) {
+        if self.folder_summary().is_some() {
+            return;
+        }
+        let key = self.comment_lines_key();
+        let hit = comment_line_span(rows, key.2, key.3);
+        *self.comment_lines_memo.borrow_mut() = Some((key, hit));
+    }
+
+    /// Key of the [`Self::cursor_comment_lines`] memo.
+    fn comment_lines_key(&self) -> (u64, DiffMode, usize, Option<usize>) {
+        (
+            self.current_diff_content().syntax_fingerprint(),
+            self.diff_layout(),
+            self.diff_cursor,
+            self.diff_visual_anchor,
+        )
+    }
+
     fn current_comment_target(&self) -> Option<CommentKey> {
         if self.tabs.active_explorer().is_some() {
             if let Some(key) = self.explorer_file_comment_target() {
@@ -5193,14 +5692,8 @@ impl AppState {
         match self.list_focus_target() {
             ListFocusTarget::None => {
                 let (repo, path, source) = self.open_diff_target()?;
-                let rows = self.current_diff_rows();
                 let visual = self.diff_visual_anchor.is_some();
-                let (line, end_line) = if let Some(anchor) = self.diff_visual_anchor {
-                    viewport_line_range(&rows, anchor, self.diff_cursor)?
-                } else {
-                    let line = viewport_line_number(&rows, self.diff_cursor as u16)?;
-                    (line, line)
-                };
+                let (line, end_line) = self.cursor_comment_lines()?;
                 let key = resolve_comment_target(
                     &self.snapshot,
                     None,
@@ -6424,6 +6917,11 @@ impl AppState {
                 self.move_graph_cursor(delta);
                 self.follow_graph_files()
             }
+            // A folder summary has no cursor: the keys scroll it.
+            ListFocusTarget::None if self.summary_shown() => {
+                self.scroll_summary_by(delta);
+                Effect::None
+            }
             ListFocusTarget::None => {
                 self.move_diff_cursor(delta);
                 Effect::None
@@ -6457,6 +6955,10 @@ impl AppState {
                 self.graph_cursor = if end { n.saturating_sub(1) } else { 0 };
                 self.sync_graph_scroll();
                 self.follow_graph_files()
+            }
+            ListFocusTarget::None if self.summary_shown() => {
+                self.scroll_summary_to(if end { usize::MAX } else { 0 });
+                Effect::None
             }
             ListFocusTarget::None => {
                 let n = self.current_diff_rows().len();
@@ -6670,8 +7172,7 @@ impl AppState {
     /// Resize edge to highlight: the edge an active drag moves, else the
     /// edge under [`Self::pane_pointer`] in the last paint.
     ///
-    /// `None` while mouse capture is off, on an Explorer tab (it has no
-    /// pane, RULE, or commit-message drag), below the minimum terminal
+    /// `None` while mouse capture is off, below the minimum terminal
     /// size, while an overlay takes the mouse (dialog, prompt, help,
     /// palette, pinned popover), with the pointer inside a hover popover,
     /// and on a painted tab label (a press there activates or closes the
@@ -6692,16 +7193,16 @@ impl AppState {
         {
             return None;
         }
-        hit_split(self.split_layout(), col, row).resize_edge()
+        self.split_hit_at(col, row).resize_edge()
     }
 
-    /// True when a left press can land on a resize edge: mouse on, a
-    /// Workspace or compare tab with both panes painted, and an input mode
-    /// whose clicks reach [`Self::click_at`].
+    /// True when a left press can land on a resize edge: mouse on, both
+    /// panes painted (any tab kind), and an input mode whose clicks reach
+    /// [`Self::press_split_hit`] (through [`Self::click_at`], or
+    /// `explorer_click` on an Explorer tab).
     fn resize_edges_take_mouse(&self) -> bool {
         self.mouse_enabled
             && !self.too_small
-            && !self.is_explorer_tab()
             && !self.is_prs_tab()
             && matches!(
                 self.input_mode(),
@@ -7191,6 +7692,7 @@ impl AppState {
             let load = match result {
                 Err(err) => {
                     tab.error = Some(err);
+                    tab.commit = None;
                     tab.files.clear();
                     tab.patch_keys.clear();
                     tab.source = None;
@@ -7203,6 +7705,7 @@ impl AppState {
             };
             tab.error = None;
             tab.source = Some(load.source.clone());
+            tab.commit = load.commit;
             tab.last_head = load.head;
             tab.last_base_tip = Some(load.base_tip);
             let previous_cursor = tab.file_cursor;
@@ -7584,6 +8087,26 @@ fn group_revert_targets(
     groups
 }
 
+/// Live-row index of the painted row nearest `target` that is a live row
+/// (`live_index` gives `Some`), not a removal ghost the paint merged in.
+/// `None` when no painted row is live.
+fn nearest_live_row<T>(
+    painted: &[T],
+    target: usize,
+    live_index: impl Fn(&T) -> Option<usize>,
+) -> Option<usize> {
+    (0..painted.len()).find_map(|step| {
+        let below = painted
+            .get(target.saturating_add(step))
+            .and_then(&live_index);
+        let above = target
+            .checked_sub(step)
+            .and_then(|index| painted.get(index))
+            .and_then(&live_index);
+        below.or(above)
+    })
+}
+
 /// Snap a painted-list index onto a selectable line (prefer forward, then back).
 /// Nearest selectable graph index at or after `start`.
 fn nearest_selectable_painted_index(painted: &[PaintedLine], from: usize) -> usize {
@@ -7759,6 +8282,7 @@ mod tests {
             merged_into_default: None,
             default_branch_override: None,
             default_tip_ref: None,
+            default_branch: None,
             local_branches: Vec::new(),
         }
     }
@@ -8275,6 +8799,7 @@ mod tests {
                 merged_into_default: None,
                 default_branch_override: None,
                 default_tip_ref: None,
+                default_branch: None,
                 local_branches: Vec::new(),
             }],
             &[],
@@ -8322,6 +8847,7 @@ mod tests {
             merged_into_default: None,
             default_branch_override: None,
             default_tip_ref: None,
+            default_branch: None,
             local_branches: Vec::new(),
         }
     }
@@ -8482,6 +9008,7 @@ mod tests {
                     merged_into_default: None,
                     default_branch_override: None,
                     default_tip_ref: None,
+                    default_branch: None,
                     local_branches: Vec::new(),
                 },
             ],
@@ -9117,8 +9644,64 @@ mod tests {
         assert!(app.expire_ctrl_c_prompt(until));
         assert!(app.status.is_empty());
         assert!(app.ctrl_c_armed_until.is_none());
+        // The next press arrives once the window has ended.
+        app.begin_input(until);
         assert_eq!(app.dispatch(Action::CtrlC), Effect::None);
+        app.end_input();
         assert_eq!(app.status, CTRL_C_EXIT_PROMPT);
+    }
+
+    /// The press-again window is the gap between the two presses' arrival.
+    ///
+    /// The loop timer clears the prompt on the wall clock. A second Ctrl-C
+    /// that arrived inside the window, but that the loop handled after the
+    /// timer fired, still quits. One that arrived at the window end is a
+    /// fresh prompt.
+    #[test]
+    fn ctrl_c_window_reads_the_press_arrival_instant() {
+        let first = Instant::now() - Duration::from_secs(10);
+        let window = Duration::from_millis(crate::tui::ctrl_c_exit::CTRL_C_EXIT_MS);
+
+        let mut app = state();
+        app.begin_input(first);
+        assert_eq!(app.dispatch(Action::CtrlC), Effect::None);
+        app.end_input();
+        assert_eq!(app.ctrl_c_armed_until, Some(first + window));
+        assert!(
+            app.expire_ctrl_c_prompt(Instant::now()),
+            "timer clears the prompt"
+        );
+        assert!(app.status.is_empty());
+        app.begin_input(first + window - Duration::from_millis(1));
+        assert_eq!(
+            app.dispatch(Action::CtrlC),
+            Effect::Quit,
+            "arrived inside the window: quits though the loop took it late"
+        );
+        app.end_input();
+
+        let mut app = state();
+        app.begin_input(first);
+        app.dispatch(Action::CtrlC);
+        app.end_input();
+        assert!(app.expire_ctrl_c_prompt(Instant::now()));
+        app.begin_input(first + window);
+        assert_eq!(
+            app.dispatch(Action::CtrlC),
+            Effect::None,
+            "arrived at the end"
+        );
+        app.end_input();
+        assert_eq!(app.status, CTRL_C_EXIT_PROMPT, "a fresh prompt");
+
+        // `q` while busy reads the same arrival rule.
+        let mut app = state();
+        assert_eq!(app.quit_while_busy(first), Effect::None);
+        assert!(app.expire_ctrl_c_prompt(Instant::now()));
+        assert_eq!(
+            app.quit_while_busy(first + window - Duration::from_millis(1)),
+            Effect::Quit
+        );
     }
 
     #[test]
@@ -9822,6 +10405,7 @@ mod tests {
                 .collect(),
             head: Some("ccc".into()),
             base_tip: "bbb".into(),
+            commit: None,
         }
     }
 
@@ -12457,6 +13041,7 @@ mod tests {
                     merged_into_default: None,
                     default_branch_override: None,
                     default_tip_ref: None,
+                    default_branch: None,
                     local_branches: Vec::new(),
                 },
                 RepoSnapshot {
@@ -12475,6 +13060,7 @@ mod tests {
                     merged_into_default: None,
                     default_branch_override: None,
                     default_tip_ref: None,
+                    default_branch: None,
                     local_branches: Vec::new(),
                 },
             ],
@@ -13221,6 +13807,7 @@ mod tests {
                     merged_into_default: None,
                     default_branch_override: None,
                     default_tip_ref: None,
+                    default_branch: None,
                     local_branches: Vec::new(),
                 },
             ],
@@ -13442,6 +14029,7 @@ mod tests {
                     merged_into_default: Some(false),
                     default_branch_override: None,
                     default_tip_ref: None,
+                    default_branch: None,
                     local_branches: Vec::new(),
                 },
                 repo("notes", true),
@@ -13524,6 +14112,7 @@ mod tests {
                 merged_into_default: None,
                 default_branch_override: None,
                 default_tip_ref: None,
+                default_branch: None,
                 local_branches: Vec::new(),
             }],
             &["notes/.worktrees/feat".into()],
@@ -13842,6 +14431,7 @@ mod tests {
             merged_into_default: None,
             default_branch_override: None,
             default_tip_ref: None,
+            default_branch: None,
             local_branches: Vec::new(),
         }
     }
@@ -14577,10 +15167,6 @@ mod tests {
         assert!(tab.is_pinned());
         assert_eq!(tab.label(), "app ↔ ccc2222^");
         assert_eq!(tab.range_header(), "ccc2222^...ccc2222");
-        assert_eq!(
-            app.commit_detail_meta().1.as_deref(),
-            Some("ccc2222^...ccc2222")
-        );
         // Probes and reloads keep the pinned head.
         match app.compare_probe_effects().as_slice() {
             [] => {}
@@ -15007,7 +15593,7 @@ mod tests {
     }
 
     #[test]
-    fn resize_edge_hover_clears_under_overlays_mouse_off_and_explorer() {
+    fn resize_edge_hover_clears_under_overlays_and_mouse_off_and_lights_on_explorer() {
         use crate::file_search::SearchOptions;
         use crate::tui::quick_open::QuickOpenScope;
         let mut app = state();
@@ -15044,9 +15630,11 @@ mod tests {
         app.layout = wide_split_layout();
         assert_eq!(
             app.hovered_resize_edge(),
-            None,
-            "Explorer has no pane or rule drag"
+            Some(ResizeEdge::Pane),
+            "the Explorer divider hovers as the Workspace one"
         );
+        app.help_open = true;
+        assert_eq!(app.hovered_resize_edge(), None, "help over the Explorer");
     }
 
     #[test]
@@ -15669,7 +16257,13 @@ mod tests {
             app.layout.diff_col_max = 40;
             app.dispatch(Action::Click { col: 60, row: 22 });
             assert_eq!(
-                matches!(app.drag, SplitDrag::DiffHScrollbar { .. }),
+                matches!(
+                    app.drag,
+                    SplitDrag::HScrollbar {
+                        bar: HScrollbar::Diff,
+                        ..
+                    }
+                ),
                 drags,
                 "{background:?}: {:?}",
                 app.drag
@@ -16150,7 +16744,7 @@ mod tests {
             app.commit_msg_expand = false;
             app.commit_detail_footer_lines(32)
         };
-        assert_eq!(collapsed_files_footer.len(), 2, "title + subtitle");
+        assert_eq!(collapsed_files_footer.len(), 2, "subject + meta");
         let collapsed_join = collapsed_files_footer.join("\n");
         assert!(
             !collapsed_join.contains(body),
@@ -16160,8 +16754,8 @@ mod tests {
         let expanded_files_footer = app.commit_detail_footer_lines(32);
         assert_eq!(
             expanded_files_footer.len(),
-            2 + 2 + 1 + 1,
-            "title + meta + subject (2 rows) + blank + body, no padding"
+            2 + 1 + 1 + 1,
+            "subject (2 rows) + blank + body + meta, no padding"
         );
         let expanded_join = expanded_files_footer.join("");
         assert!(
@@ -16179,20 +16773,39 @@ mod tests {
         let long_footer = app.commit_detail_footer_lines(32);
         assert_eq!(
             long_footer.len(),
-            2 + 2 + 1 + 30,
-            "title + meta + subject (2 rows) + blank + 30 body lines: {long_footer:?}"
+            2 + 1 + 30 + 1,
+            "subject (2 rows) + blank + 30 body lines + meta: {long_footer:?}"
         );
+        let (meta, message) = long_footer.split_last().expect("meta line");
         assert!(
-            long_footer.iter().all(|line| !line.contains('…')),
+            message.iter().all(|line| !line.contains('…')),
             "no … clip: {long_footer:?}"
         );
         assert!(
-            long_footer[2..]
-                .iter()
-                .all(|line| line.chars().count() <= 31),
+            message.iter().all(|line| line.chars().count() <= 31),
             "message wraps at width - 1: {long_footer:?}"
         );
-        assert_eq!(long_footer.last().map(String::as_str), Some("body line 29"));
+        assert_eq!(message.last().map(String::as_str), Some("body line 29"));
+        assert!(meta.contains("aaa1111"), "the meta line is last: {meta}");
+        // The graph selection footer's lines for the same commit.
+        let model = app.graph.as_ref().expect("graph");
+        let row = model
+            .visible_rows()
+            .into_iter()
+            .find(|row| matches!(row, GraphRow::Commit { .. }))
+            .expect("commit row");
+        assert_eq!(
+            long_footer,
+            workspace_status_graph::selection_footer_lines(
+                model,
+                workspace_status_graph::GraphFooterSelection::Row(&row),
+                glyphs,
+                32,
+                unix_now(),
+                true,
+            ),
+            "the graph footer's lines"
+        );
         app.dispatch(Action::ToggleCommitMsgExpand);
         assert!(!app.commit_msg_expand);
         assert_eq!(app.status, "msg off");
@@ -16359,7 +16972,8 @@ mod tests {
         );
         assert_eq!(
             app.drag,
-            SplitDrag::GraphScrollbar {
+            SplitDrag::VScrollbar {
+                bar: VScrollbar::Graph,
                 origin_row: thumb_row,
                 origin_scroll: start
             }
@@ -16422,7 +17036,8 @@ mod tests {
         );
         assert_eq!(
             app.drag,
-            SplitDrag::GraphScrollbar {
+            SplitDrag::VScrollbar {
+                bar: VScrollbar::Graph,
                 origin_row: track_row,
                 origin_scroll: app.graph_scroll
             }
@@ -16477,7 +17092,8 @@ mod tests {
         );
         assert_eq!(
             app.drag,
-            SplitDrag::GraphHScrollbar {
+            SplitDrag::HScrollbar {
+                bar: HScrollbar::Graph,
                 origin_col: thumb_col,
                 origin_offset: start
             }
@@ -16539,7 +17155,8 @@ mod tests {
         );
         assert_eq!(
             app.drag,
-            SplitDrag::DiffHScrollbar {
+            SplitDrag::HScrollbar {
+                bar: HScrollbar::Diff,
                 origin_col: thumb_col,
                 origin_offset: start
             }
@@ -16593,7 +17210,8 @@ mod tests {
         );
         assert_eq!(
             app.drag,
-            SplitDrag::DiffHScrollbar {
+            SplitDrag::HScrollbar {
+                bar: HScrollbar::Diff,
                 origin_col: thumb_col,
                 origin_offset: start
             }
@@ -16641,7 +17259,8 @@ mod tests {
         );
         assert_eq!(
             app.drag,
-            SplitDrag::DiffHScrollbar {
+            SplitDrag::HScrollbar {
+                bar: HScrollbar::Diff,
                 origin_col: 50,
                 origin_offset: 0
             }
@@ -16676,7 +17295,8 @@ mod tests {
         );
         assert_eq!(
             app.drag,
-            SplitDrag::DiffHScrollbar {
+            SplitDrag::HScrollbar {
+                bar: HScrollbar::Diff,
                 origin_col: track_col,
                 origin_offset: app.diff_col_offset
             }
@@ -17250,6 +17870,7 @@ mod tests {
             merged_into_default: None,
             default_branch_override: None,
             default_tip_ref: None,
+            default_branch: None,
             local_branches: Vec::new(),
         }
     }
@@ -18241,6 +18862,135 @@ mod tests {
         );
     }
 
+    /// Pan max of the shown commit-file list, from the segments its rows
+    /// paint (label, badge, comment mark, viewed eye).
+    fn painted_commit_file_pan_max(app: &AppState) -> usize {
+        let width = app.layout.tree_width.max(1) as usize;
+        app.commit_file_rows()
+            .iter()
+            .map(|row| {
+                let segs = app.commit_file_row_paint_segments(row);
+                let label: usize = segs
+                    .segments
+                    .iter()
+                    .map(|s| crate::helpers::visible_width(&s.text))
+                    .sum();
+                let trailing: usize = segs
+                    .trailing
+                    .iter()
+                    .map(|s| crate::helpers::visible_width(&s.text))
+                    .sum();
+                crate::tui::search::list_row_pan_max(label, row.depth, trailing, width)
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The compare-tab file list pans to the end of its own longest row,
+    /// whatever the parked Workspace view holds: a tree with longer rows
+    /// (depth 0), or a depth-2 commit drill whose comment marks the same
+    /// path (the compare range has no comment there).
+    #[test]
+    fn compare_file_pan_clamps_to_the_compare_list_not_the_parked_drill() {
+        // Parked depth-0 tree whose file row is far longer than the list.
+        let mut snap = repo("app", true);
+        snap.changes = vec![FileChange {
+            path: format!("deep/nested/{}/tail.rs", "x".repeat(60)),
+            staged_status: None,
+            unstaged_status: Some("M".into()),
+            untracked: false,
+            old_path: None,
+        }];
+        let snapshot = build_workspace_snapshot(&[snap], &[], false, &[]);
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        focus_file(&mut app, "tail.rs");
+        app.layout.tree_width = 16;
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+        app.focus = FocusPane::Left;
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        let _ = app.apply_compare_range(
+            tab_id,
+            gen,
+            Ok(compare_range_load(&["src/compare_only_file.rs"])),
+        );
+        let want = painted_commit_file_pan_max(&app);
+        assert!(want > 0, "the compare row overflows the pane");
+        app.dispatch(Action::PanDiff(1_000));
+        assert_eq!(
+            usize::from(app.left_col_offset),
+            want,
+            "pan stops at the end of the longest compare row, not the parked tree's"
+        );
+        app.dispatch(Action::ScrollWheel {
+            col: 2,
+            row: 4,
+            delta: -1_000,
+            horizontal: true,
+        });
+        assert_eq!(app.left_col_offset, 0);
+        app.dispatch(Action::ScrollWheel {
+            col: 2,
+            row: 4,
+            delta: 1_000,
+            horizontal: true,
+        });
+        assert_eq!(
+            usize::from(app.left_col_offset),
+            want,
+            "hwheel clamps the same"
+        );
+
+        // Parked depth-2 commit drill with a line comment on README.md.
+        let mut app = state();
+        // The unit-test store file is shared; start from an empty store.
+        app.comment_store = CommentStore::new();
+        let commit_id = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        app.open_commit_diff(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: commit_id.into(),
+            },
+            vec![CommitFile {
+                status: "M".into(),
+                path: "README.md".into(),
+                old_path: None,
+                stat: None,
+            }],
+            0,
+            "README.md".into(),
+            DiffContent::from_unified("@@ -1 +1 @@\n-old\n+new\n"),
+        );
+        app.comment_store = put_comment(
+            &app.comment_store,
+            CommentKey::CommitLine {
+                repo: "app".into(),
+                sha: commit_id.into(),
+                path: "README.md".into(),
+                line: 1,
+                end_line: 1,
+            },
+            "drill-note",
+        );
+        app.layout.tree_width = 8;
+        let drill_max = painted_commit_file_pan_max(&app);
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+        app.focus = FocusPane::Left;
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        let _ = app.apply_compare_range(tab_id, gen, Ok(compare_range_load(&["README.md"])));
+        assert!(app.drill.is_diff(), "the Workspace drill stays parked");
+        let want = painted_commit_file_pan_max(&app);
+        assert!(
+            want > 0 && want < drill_max,
+            "the drill's comment mark widens only its own row: {want} vs {drill_max}"
+        );
+        app.dispatch(Action::PanDiff(1_000));
+        assert_eq!(usize::from(app.left_col_offset), want);
+    }
+
     #[test]
     fn tree_mouse_hscroll_pans_without_moving_cursor() {
         let mut snap = repo("app", true);
@@ -18471,16 +19221,18 @@ mod tests {
         );
         assert!(app.graph.is_some());
         assert!(app.in_commit_drill());
-        let (title, subtitle) = app.commit_detail_meta();
-        assert_eq!(title, "app");
-        let subtitle = subtitle.expect("subtitle");
-        assert!(subtitle.contains("aaa1111"), "{subtitle}");
-        assert!(subtitle.contains("main"), "{subtitle}");
-        assert!(subtitle.contains("head"), "{subtitle}");
-        assert!(subtitle.contains("Ada"), "{subtitle}");
+        // The footer shows the graph footer's lines: the subject first,
+        // the meta row last.
+        let lines = app.commit_detail_footer_lines(80);
+        let subject = &app.graph.as_ref().unwrap().commits[0].subject;
+        assert_eq!(lines.first(), Some(subject), "{lines:?}");
+        let meta = lines.last().expect("meta");
+        assert!(meta.contains("aaa1111"), "{meta}");
+        assert!(meta.contains("main"), "{meta}");
+        assert!(meta.contains("Ada"), "{meta}");
         assert!(
-            subtitle.contains("1h") || subtitle.contains("59m") || subtitle.contains("just now"),
-            "{subtitle}"
+            meta.contains("1h") || meta.contains("59m") || meta.contains("just now"),
+            "{meta}"
         );
         assert!(app
             .commit_file_rows()
@@ -18661,6 +19413,59 @@ mod tests {
         assert!(matches!(app.input_mode(), InputMode::GPending { .. }));
         app.dispatch(Action::ToggleTreeMode);
         assert!(app.g_pending_at.is_none());
+    }
+
+    /// The `g` chord window is the gap between the two keys' arrival.
+    ///
+    /// A live watch apply between the halves does not clear the chord, and
+    /// a loop that takes both keys late keeps `gt` a tab switch. The PTY
+    /// suite cannot hold a watch apply inside the 400 ms window on a loaded
+    /// machine, so this is where that rule is pinned.
+    #[test]
+    fn g_chord_window_reads_the_key_arrival_instant_across_a_watch_apply() {
+        let mut app = state();
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+        let g_at = Instant::now() - Duration::from_secs(5);
+        app.begin_input(g_at);
+        assert_eq!(
+            app.input_mode(),
+            InputMode::Normal {
+                search_active: false
+            }
+        );
+        app.dispatch(Action::ArmGChord);
+        app.end_input();
+        assert!(
+            !matches!(app.input_mode(), InputMode::GPending { .. }),
+            "on the wall clock the chord armed 5 s ago has expired"
+        );
+
+        let snapshot = app.snapshot.clone();
+        app.apply_watch_snapshot(snapshot);
+        app.dispatch(Action::WatchTick);
+        assert_eq!(
+            app.g_pending_at,
+            Some(g_at),
+            "a watch apply keeps the chord"
+        );
+
+        app.begin_input(g_at + Duration::from_millis(DOUBLE_TAP_MS));
+        assert!(
+            matches!(app.input_mode(), InputMode::GPending { .. }),
+            "t that arrived inside the window completes the chord"
+        );
+        app.end_input();
+
+        app.begin_input(g_at + Duration::from_millis(DOUBLE_TAP_MS + 1));
+        assert_eq!(
+            app.input_mode(),
+            InputMode::Normal {
+                search_active: false
+            },
+            "a key that arrived after the window is a bare key"
+        );
+        app.end_input();
     }
 
     #[test]
@@ -19129,6 +19934,53 @@ mod tests {
         let effect = app.dispatch(Action::Click { col, row });
         assert_eq!(app.focus, FocusPane::Right);
         assert_eq!(effect, Effect::None);
+    }
+
+    /// The 400 ms double-click window is the gap between the two presses'
+    /// arrival, not between the loop handling them.
+    #[test]
+    fn double_click_window_reads_the_press_arrival_instant() {
+        let setup = |app: &mut AppState| {
+            app.layout.tree_x = 0;
+            app.layout.tree_y = 1;
+            app.layout.list_offset = 0;
+            app.layout.right_x = 40;
+            let idx = app
+                .rows
+                .iter()
+                .position(|r| r.id == "repo:app")
+                .expect("repo");
+            (8, app.layout.tree_y + idx as u16)
+        };
+        // Both presses arrived long ago, 399 ms apart: the loop takes them
+        // late, and they are still a double-click.
+        let first = Instant::now() - Duration::from_secs(5);
+        let mut app = tree_app();
+        let (col, row) = setup(&mut app);
+        app.begin_input(first);
+        app.dispatch(Action::Click { col, row });
+        app.end_input();
+        assert_eq!(app.focus, FocusPane::Left);
+        app.begin_input(first + Duration::from_millis(399));
+        app.dispatch(Action::Click { col, row });
+        app.end_input();
+        assert_eq!(
+            app.focus,
+            FocusPane::Right,
+            "399 ms apart is a double-click"
+        );
+
+        // Two presses 401 ms apart, handled back to back, are two clicks.
+        let mut app = tree_app();
+        let (col, row) = setup(&mut app);
+        let first = Instant::now();
+        app.begin_input(first);
+        app.dispatch(Action::Click { col, row });
+        app.end_input();
+        app.begin_input(first + Duration::from_millis(401));
+        app.dispatch(Action::Click { col, row });
+        app.end_input();
+        assert_eq!(app.focus, FocusPane::Left, "401 ms apart is two clicks");
     }
 
     #[test]
@@ -19729,6 +20581,7 @@ diff --git a/README.md b/README.md
             is_new: false,
             is_committed: false,
             vs_worktree: false,
+            committed_label: false,
             error: None,
         }
     }
@@ -19774,6 +20627,7 @@ diff --git a/README.md b/README.md
                 is_new: false,
                 is_committed: false,
                 vs_worktree: false,
+                committed_label: false,
                 error: None,
             },
         );

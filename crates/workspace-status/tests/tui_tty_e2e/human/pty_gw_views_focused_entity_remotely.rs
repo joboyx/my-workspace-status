@@ -5,7 +5,7 @@ use std::path::Path;
 use crate::harness::PtySession;
 use crate::seed::{ahead_workspace, git, git_stdout};
 use crate::support::{
-    graph_cursor_on, graph_pane_focused, tree_cursor_on, GIT_WAIT, SETTLE_MS, WAIT,
+    graph_cursor_on, graph_pane_focused, step_until_changed, tree_cursor_on, GIT_WAIT, WAIT,
 };
 
 /// Forge URL `origin` points at after the seed push. No test reaches it:
@@ -13,28 +13,34 @@ use crate::support::{
 const ORIGIN_URL: &str = "https://github.com/octo/demo.git";
 const REPO_PAGE: &str = "https://github.com/octo/demo";
 
-/// Same gap as `pty_workspace_command_palette`: a same-letter nav burst
-/// is dropped after the first press.
-const PALETTE_NAV_LETTER_GAP_MS: u64 = 50;
-
 /// Footer of a pinned popover.
 const PINNED_FOOTER: &str = "y copy line · Enter run · Esc close";
 
-/// More than the field and action lines of the seed row popover, so `j`
-/// that many times lands on its last line.
+/// More than the field and action lines of the seed row popover; a bound
+/// on the `j` loop, which stops on the last line's paint.
 const POPOVER_LINES_MAX: usize = 30;
+
+/// Screen row of the pinned popover's focused line (`❯`).
+fn popover_focus_row(screen: &str) -> Option<usize> {
+    screen.lines().position(|line| line.contains('❯'))
+}
+
+/// Screen row of the last `View remotely` line (the chip section's).
+fn last_view_remotely_row(screen: &str) -> Option<usize> {
+    screen
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains("View remotely"))
+        .map(|(row, _)| row)
+        .last()
+}
 
 fn palette_open(screen: &str) -> bool {
     screen.contains("Enter run")
 }
 
 fn type_palette_filter(tui: &mut PtySession, query: &str) {
-    for c in query.chars() {
-        tui.key(c);
-        if matches!(c, 'h' | 'H' | 'j' | 'J' | 'k' | 'K' | 'l' | 'L') {
-            tui.wait_ms(PALETTE_NAV_LETTER_GAP_MS);
-        }
-    }
+    crate::support::type_palette_filter(tui, query);
 }
 
 fn open_commands_filter(tui: &mut PtySession, query: &str, title: &str) {
@@ -127,8 +133,9 @@ fn pty_gw_views_focused_entity_remotely() {
     );
     assert!(opened(&marker).is_empty(), "nothing opened at launch");
 
-    // Repo row: the repository home.
-    tui.keys("gw");
+    // Repo row: the repository home. Each chord goes out in one write (see
+    // `support::send_gesture`).
+    tui.send_bytes(b"gw");
     tui.wait_pred(
         |screen| opened(&marker) == [REPO_PAGE] && screen.contains("opened"),
         "gw on the repo row opens the repository home in $BROWSER",
@@ -144,13 +151,13 @@ fn pty_gw_views_focused_entity_remotely() {
         "graph cursor on the unpushed commit",
         WAIT,
     );
-    tui.keys("gw");
+    tui.send_bytes(b"gw");
     tui.wait_pred(
         |screen| screen.contains(&refused),
         "gw on an unpushed commit says it is not on origin",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    // The refusal paints in place of the open, so nothing opens after it.
     assert_eq!(
         opened(&marker),
         [REPO_PAGE],
@@ -179,15 +186,28 @@ fn pty_gw_views_focused_entity_remotely() {
     // branch page, not the commit. `gh` pins the commit node section, then
     // the chip section; the last line of the box is the chip's View
     // remotely, and `j` stops there.
-    tui.keys("gh");
+    tui.send_bytes(b"gh");
     tui.wait_pred(
         |screen| screen.contains(PINNED_FOOTER) && screen.contains("remote-tracking branch"),
         "gh pins the seed row's popover with its origin/main chip section",
         WAIT,
     );
+    // One `j` at a time, each after the focus moved (a queued copy of a
+    // held nav key is dropped), until the chip's View remotely line has it.
     for _ in 0..POPOVER_LINES_MAX {
-        tui.key('j');
-        tui.wait_ms(PALETTE_NAV_LETTER_GAP_MS);
+        let screen = tui.screen();
+        if popover_focus_row(&screen).is_some()
+            && popover_focus_row(&screen) == last_view_remotely_row(&screen)
+        {
+            break;
+        }
+        step_until_changed(
+            &mut tui,
+            |tui| tui.key('j'),
+            popover_focus_row,
+            |_| true,
+            "j moves the popover focus one line",
+        );
     }
     tui.enter();
     let branch_page = format!("{REPO_PAGE}/tree/main");

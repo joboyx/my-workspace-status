@@ -4,8 +4,8 @@ use crate::harness::{
 };
 use crate::seed::{daily_workspace, seed_long_subject_repo};
 use crate::support::{
-    no_wrong_overlays, panes_tree_focused_graph_unfocused, right_pane, status_row, title_has_files,
-    tree_cursor_on, tree_has, SETTLE_MS, WAIT,
+    no_wrong_overlays, panes_tree_focused_graph_unfocused, prove_keys_handled, right_pane,
+    status_row, title_has_files, tree_cursor_on, tree_has, WAIT,
 };
 
 const REPO: &str = "longsubj";
@@ -100,8 +100,6 @@ fn pty_right_pane_sgr_hscroll_pans_graph() {
         "CSI < 66 pans the graph back to the clipped start",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
-
     for _ in 0..80 {
         tui.sgr_mouse(SGR_WHEEL_RIGHT, NARROW_RIGHT_COL, GRAPH_BODY_ROW);
     }
@@ -110,7 +108,7 @@ fn pty_right_pane_sgr_hscroll_pans_graph() {
         "SGR 67 over the right pane pans the long graph subject (UNIQUE_GRAP; tree stays)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_right_pane_graph_sgr_hscroll_panned,
         "graph pan holds (not a flicker, tree pan, keep-middle jump, or focus steal)",

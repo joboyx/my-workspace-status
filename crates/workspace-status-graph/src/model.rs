@@ -386,6 +386,23 @@ impl GraphModel {
             .map(|row| self.owned_row(row))
     }
 
+    /// The [`Self::visible_rows`] row of commit `id`, cloning only that row.
+    /// `None` when the commit is not loaded.
+    pub fn commit_row(&self, id: &str) -> Option<GraphRow> {
+        let commit = self.commits.iter().find(|commit| commit.id == id)?;
+        Some(self.owned_row(RowRef::Commit(commit)))
+    }
+
+    /// The [`Self::visible_rows`] row of stash `stash_ref` (`stash@{n}`),
+    /// cloning only that row. `None` when the stash is not loaded.
+    pub fn stash_row(&self, stash_ref: &str) -> Option<GraphRow> {
+        let stash = self
+            .stashes
+            .iter()
+            .find(|stash| stash.stash_ref == stash_ref)?;
+        Some(self.owned_row(RowRef::Stash(stash)))
+    }
+
     /// The [`Self::visible_rows`] order, borrowed from the model.
     fn visible_row_refs(&self) -> impl Iterator<Item = RowRef<'_>> + '_ {
         let in_window = move |id: Option<&str>| {
@@ -500,6 +517,7 @@ mod tests {
         };
         let stash = |id: &str, parent: &str| Stash {
             id: id.into(),
+            stash_ref: format!("ref-{id}"),
             parent_id: Some(parent.into()),
             ..Stash::default()
         };
@@ -533,6 +551,11 @@ mod tests {
                 assert_eq!(model.visible_row_at(index).as_ref(), Some(row));
             }
             assert_eq!(model.visible_row_at(rows.len()), None);
+            // The finders return the same row as the visible list.
+            assert_eq!(model.commit_row("c1").as_ref(), Some(&rows[2]));
+            assert_eq!(model.commit_row("gone"), None);
+            assert_eq!(model.stash_row("ref-s1").as_ref(), Some(&rows[3]));
+            assert_eq!(model.stash_row("ref-none"), None);
         }
     }
 

@@ -6,13 +6,12 @@ use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
     documented_launch_first_paint, pane_unstaged_readme, panes_tree_unfocused_diff_focused,
-    tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
+    step_cursor, tree_cursor_on, tree_has, GIT_WAIT, WAIT,
 };
 
 const BODY: &str = "range-note-e2e";
 const WATCH_BODY: &str = "watch-span-e2e";
 const WATCH_EXTRA: &str = "watch-extra-line";
-const KEY_GAP_MS: u64 = 50;
 /// Kitty CSI-u Down. Crossterm 0.28 `event::read` yields Char U+E009.
 const KITTY_DOWN: u32 = 57353;
 
@@ -99,12 +98,10 @@ fn highlight_readme_range(tui: &mut PtySession) {
         "CSI-u Shift+V paints VISUAL highlight (not a no-op, not Comment)",
         WAIT,
     );
-    tui.wait_ms(KEY_GAP_MS);
-    csi_u_letter(tui, 'j');
-    tui.wait_ms(KEY_GAP_MS);
-    csi_u_kitty_down(tui);
-    tui.wait_ms(KEY_GAP_MS);
-    csi_u_letter(tui, 'j');
+    // Each nav key waits for the cursor to move before the next one.
+    step_cursor(tui, |tui| csi_u_letter(tui, 'j'), highlight_active);
+    step_cursor(tui, csi_u_kitty_down, highlight_active);
+    step_cursor(tui, |tui| csi_u_letter(tui, 'j'), highlight_active);
     tui.wait_pred(
         |screen| highlight_active(screen) && screen.contains("+dirty"),
         "CSI-u j and Kitty Down keep VISUAL and still show the dirty add",
@@ -293,7 +290,7 @@ fn pty_semicolon_opens_existing_range_on_covered_line() {
         "empty Enter deletes the covering range (not a no-op single-line key)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    // The store is written before the toast paints.
     let stored = store_text(&workspace);
     assert!(
         !stored.contains(BODY) && !stored.contains("\"endLine\": 2"),

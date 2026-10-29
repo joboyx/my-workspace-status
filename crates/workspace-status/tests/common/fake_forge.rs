@@ -180,6 +180,16 @@ pub fn set_origin(repo: &Path, url: &str) {
     git(repo, &["remote", verb, "origin", url]);
 }
 
+/// Make `branch` the default branch of `repo`, as a clone records it:
+/// `refs/remotes/origin/<branch>` points at `HEAD`, and `origin/HEAD`
+/// points at that ref. Only local refs change, so nothing touches the
+/// network.
+pub fn set_origin_head(repo: &Path, branch: &str) {
+    let remote = format!("refs/remotes/origin/{branch}");
+    git(repo, &["update-ref", &remote, "HEAD"]);
+    git(repo, &["symbolic-ref", "refs/remotes/origin/HEAD", &remote]);
+}
+
 /// File-name form of a branch or project path: `/` becomes `__`.
 fn slug(text: &str) -> String {
     text.replace('/', "__")

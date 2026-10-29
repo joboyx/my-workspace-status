@@ -579,6 +579,19 @@ mod tests {
             );
         }
         let render = include_str!("render.rs");
+        let state_src = include_str!("state/mod.rs");
+        let popover_src = include_str!("popover.rs");
+        assert!(
+            !render.contains("load_commit(")
+                && !state_src.contains("load_commit(")
+                && !popover_src.contains("load_commit(")
+                && !loop_src.contains("load_commit("),
+            "the commit-footer commit read must not run on paint, state, or the loop thread"
+        );
+        assert!(
+            app.contains("graph_load::load_commit(dir") && effect.contains("compute_compare_range("),
+            "the footer commit read runs in compute_compare_range, on spawn_blocking via Interpreter"
+        );
         let blame_state = include_str!("state/line_blame.rs");
         assert!(
             !render.contains("blame_line(") && !blame_state.contains("blame_line("),

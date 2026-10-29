@@ -4,13 +4,12 @@ use ratatui::style::Color;
 use workspace_status_graph::{graph_col_max, graph_hscroll_visible};
 
 use super::super::action::{Action, Effect};
-use super::super::comments::{commit_file_row_comments_resolved, commit_file_row_has_comment};
 use super::super::diff::{cell_code_width, diff_row_content_width, gutter_width, DiffRow};
 use super::super::gates::ListFocusTarget;
 use super::super::icons::comment_mark_cols;
 use super::super::search::{apply_pan, list_row_pan_max, max_col_offset};
 use super::super::split::diff_paint_width;
-use super::super::tree::{pr_badge_mark, with_comment_mark, with_viewed_mark};
+use super::super::tree::pr_badge_mark;
 use super::{AppState, FocusPane};
 use crate::helpers::visible_width;
 
@@ -24,7 +23,9 @@ impl AppState {
     }
 
     fn pan_left_pane(&mut self, delta: i32) {
-        if self.drill.is_diff() {
+        // A compare tab's left pane is its own file list; the Workspace
+        // `drill` is only parked there.
+        if self.is_compare_tab() || self.drill.is_diff() {
             let max = self.commit_file_max_col(self.layout.tree_width);
             self.left_col_offset = apply_pan(self.left_col_offset, delta, max);
         } else if self.drill.is_files() {
@@ -37,7 +38,10 @@ impl AppState {
     }
 
     fn pan_right_pane(&mut self, delta: i32) {
-        if self.right_is_diff() || self.drill.is_diff() {
+        // A folder summary pans its own rows, not the file diff it hides.
+        if self.summary_shown() {
+            self.pan_summary(delta);
+        } else if self.right_is_diff() || self.drill.is_diff() {
             self.pan_diff_content(delta);
         } else if self.drill.is_files() {
             let max = self.commit_file_max_col(self.layout.diff_pane_width);
@@ -85,13 +89,25 @@ impl AppState {
         }
     }
 
+    /// Pan max of the Workspace tree: its longest row against the pane
+    /// width, one column short while the vertical scrollbar shows (the
+    /// rows overflow [`Self::tree_list_rows`]), so the pan still reaches
+    /// the end of that row beside the bar.
     fn tree_max_col(&self) -> usize {
-        let width = self.layout.tree_width.max(1) as usize;
+        let vbar = self.painted_tree_rows().len() > usize::from(self.tree_list_rows());
+        self.tree_max_col_in(self.layout.tree_width, vbar)
+    }
+
+    /// [`Self::tree_max_col`] for a pane `pane_width` columns wide whose
+    /// vertical scrollbar shows (`vbar`) or not: what the paint clamps its
+    /// horizontal bar to.
+    pub(crate) fn tree_max_col_in(&self, pane_width: u16, vbar: bool) -> usize {
+        let width = pane_width.saturating_sub(u16::from(vbar)).max(1) as usize;
         self.rows
             .iter()
             .map(|row| {
                 // The painted marks and PR badge widen the trailing run.
-                let segs = self.tree_row_paint_segments(row);
+                let segs = self.tree_row_paint_segments_in(row, width);
                 let label: usize = segs.segments.iter().map(|s| visible_width(&s.text)).sum();
                 let trailing: usize = segs.trailing.iter().map(|s| visible_width(&s.text)).sum();
                 list_row_pan_max(label, row.depth, trailing, width)
@@ -100,47 +116,32 @@ impl AppState {
             .unwrap_or(0)
     }
 
+    /// Pan max of the shown commit-file or compare list: its rows sized by
+    /// the segments [`Self::commit_file_row_paint_segments_in`] paints, in
+    /// the list's own comment scope ([`Self::commit_file_comment_scope`]),
+    /// so a compare tab never reads the parked Workspace drill. One column
+    /// short while the vertical scrollbar shows (the rows overflow the
+    /// painted list height), so the pan still reaches the end of the
+    /// longest row beside the bar.
     fn commit_file_max_col(&self, pane_width: u16) -> usize {
-        let width = pane_width.max(1) as usize;
-        let scope = match &self.drill {
-            super::super::drill::DrillView::Files { repo, source, .. }
-            | super::super::drill::DrillView::Diff { repo, source, .. } => Some((repo, source)),
-            super::super::drill::DrillView::Graph => None,
-        };
-        let snap = scope.and_then(|(repo, _)| self.snapshot.repos.iter().find(|r| r.repo == *repo));
+        let vbar =
+            self.painted_commit_file_rows().len() > usize::from(self.layout.files_list_height);
+        self.commit_file_max_col_in(pane_width, vbar)
+    }
+
+    /// [`Self::commit_file_max_col`] for a list `pane_width` columns wide
+    /// whose vertical scrollbar shows (`vbar`) or not: what the paint
+    /// clamps its horizontal bar to.
+    pub(crate) fn commit_file_max_col_in(&self, pane_width: u16, vbar: bool) -> usize {
+        let width = pane_width.saturating_sub(u16::from(vbar)).max(1) as usize;
+        let scope = self.commit_file_comment_scope();
         self.commit_file_rows()
             .iter()
             .map(|row| {
-                let commented = scope.is_some_and(|(repo, source)| {
-                    row.is_file()
-                        && commit_file_row_has_comment(
-                            &self.comment_store,
-                            repo,
-                            snap.and_then(|r| r.primary_repo.as_deref()),
-                            source,
-                            &row.path,
-                            snap.map(|r| r.branch.as_str()),
-                        )
-                });
-                let resolved = commented
-                    && scope.is_some_and(|(repo, source)| {
-                        commit_file_row_comments_resolved(
-                            &self.comment_store,
-                            repo,
-                            snap.and_then(|r| r.primary_repo.as_deref()),
-                            source,
-                            &row.path,
-                            snap.map(|r| r.branch.as_str()),
-                        )
-                    });
-                let trailing = with_viewed_mark(
-                    with_comment_mark(row.trailing_segs.clone(), self.ascii, commented, resolved),
-                    self.ascii,
-                    self.compare_file_reviewed(row),
-                );
-                let label: usize = row.segments.iter().map(|s| visible_width(&s.text)).sum();
-                let trailing_w: usize = trailing.iter().map(|s| visible_width(&s.text)).sum();
-                list_row_pan_max(label, row.depth, trailing_w, width)
+                let segs = self.commit_file_row_paint_segments_in(row, scope);
+                let label: usize = segs.segments.iter().map(|s| visible_width(&s.text)).sum();
+                let trailing: usize = segs.trailing.iter().map(|s| visible_width(&s.text)).sum();
+                list_row_pan_max(label, row.depth, trailing, width)
             })
             .max()
             .unwrap_or(0)
@@ -251,6 +252,12 @@ impl AppState {
                         self.follow_graph_files()
                     }
                     ListFocusTarget::CommitFiles => self.move_file_cursor(delta),
+                    // Over a folder summary the wheel scrolls its viewport:
+                    // it has no cursor.
+                    ListFocusTarget::None if self.summary_shown() => {
+                        self.scroll_summary_by(delta);
+                        Effect::None
+                    }
                     ListFocusTarget::None => {
                         self.move_diff_cursor(delta);
                         Effect::None

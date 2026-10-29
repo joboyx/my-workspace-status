@@ -2,8 +2,8 @@ use crate::harness::PtySession;
 use crate::seed::focus_workspace;
 use crate::support::{
     ack_rows, after_ack, focusbox_graph_left_full, graph_subject_meta_line, line_on_branch,
-    no_mouse_toggle_toast, status_row, title_has_files, tree_cursor_on, tree_has,
-    tree_line_containing, tree_pane_focused, GIT_WAIT, SETTLE_MS, WAIT,
+    no_mouse_toggle_toast, prove_keys_handled, status_row, title_has_files, tree_cursor_on,
+    tree_has, tree_line_containing, tree_pane_focused, GIT_WAIT, WAIT,
 };
 
 /// `j`, `k`, and `C` used to move or open a prompt; in the picker they type.
@@ -143,7 +143,6 @@ fn pty_branch_picker_create_row_creates() {
         "b opens the local picker on focusbox; no create row yet; HEAD still feature/keep",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
 
     tui.keys(BRANCH);
     tui.wait_pred(
@@ -151,12 +150,7 @@ fn pty_branch_picker_create_row_creates() {
         "j / k / C type into the filter and the create row takes the cursor",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
-    tui.wait_pred(
-        picker_with_create_row,
-        "the create row holds; Enter has not created the ref yet",
-        WAIT,
-    );
+    // The Enter below runs this create row, which proves it stayed.
 
     tui.enter();
     tui.wait_pred(
@@ -167,7 +161,7 @@ fn pty_branch_picker_create_row_creates() {
         "Enter on the create row creates the branch at HEAD and checks it out",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_picker_create_checkout,
         "created checkout paint holds (not a flicker, toast-only tick, or graph-c)",

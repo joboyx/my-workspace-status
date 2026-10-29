@@ -88,6 +88,11 @@ pub struct RepoSnapshot {
     pub default_branch_override: Option<String>,
     /// Cached `origin/<default>` then `<default>` tip. Palette only; omitted from `--json`.
     pub default_tip_ref: Option<String>,
+    /// The repository's default branch when it is known: the configured
+    /// override, else the branch `origin/HEAD` points at. `None` when
+    /// neither names one. A checkout on it has no PR status. Omitted from
+    /// `--json`.
+    pub default_branch: Option<String>,
     /// Local `refs/heads` names. TUI comment GC, and the graph checkout
     /// picker's taken-name check (its create row never offers a name that
     /// exists). Omitted from `--json`.
@@ -120,6 +125,10 @@ pub struct WorkspaceRepoSnapshot {
     /// Cached `origin/<default>` then `<default>` tip. Palette only; omitted from `--json`.
     #[serde(skip)]
     pub default_tip_ref: Option<String>,
+    /// The known default branch. Same rules as
+    /// [`RepoSnapshot::default_branch`]. Omitted from `--json`.
+    #[serde(skip)]
+    pub default_branch: Option<String>,
     /// Local `refs/heads` names. TUI comment GC, and the graph checkout
     /// picker's taken-name check. Omitted from `--json`.
     #[serde(skip)]
@@ -219,6 +228,7 @@ fn to_workspace_repo(snapshot: &RepoSnapshot, hidden: &[String]) -> WorkspaceRep
         merged_into_default: snapshot.merged_into_default,
         default_branch_override: snapshot.default_branch_override.clone(),
         default_tip_ref: snapshot.default_tip_ref.clone(),
+        default_branch: snapshot.default_branch.clone(),
         local_branches: snapshot.local_branches.clone(),
         has_unstaged: snapshot.has_unstaged,
         has_staged: snapshot.has_staged,
@@ -396,6 +406,7 @@ pub fn repo_snapshots_from_workspace(snapshot: &WorkspaceSnapshot) -> Vec<RepoSn
             merged_into_default: repo.merged_into_default,
             default_branch_override: repo.default_branch_override.clone(),
             default_tip_ref: repo.default_tip_ref.clone(),
+            default_branch: repo.default_branch.clone(),
             local_branches: repo.local_branches.clone(),
         })
         .collect()
@@ -631,6 +642,7 @@ mod tests {
             merged_into_default: None,
             default_branch_override: None,
             default_tip_ref: None,
+            default_branch: None,
             local_branches: Vec::new(),
         }
     }

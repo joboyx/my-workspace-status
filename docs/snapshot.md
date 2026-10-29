@@ -63,7 +63,7 @@ A maintainer force-pushed the upstream and dropped commits the local branch stil
 
 The local branch tip the classification used is kept for the TUI and omitted from `--json`. The plain report is unchanged.
 
-These fields cover branch, sync, checkout kind, merge-into-default, and file changes. They are not a full commit graph. `HEAD` is collected for TUI live-watch identity and is omitted from `--json`. Local `refs/heads` names are collected on the snapshot worker for TUI comment GC and are omitted from `--json`. When status fails, the TUI keeps the last good branch list for GC only if every checkout of that identity has an empty counted list. A successful sibling's live names win.
+These fields cover branch, sync, checkout kind, merge-into-default, and file changes. They are not a full commit graph. `HEAD` is collected for TUI live-watch identity and is omitted from `--json`. Local `refs/heads` names are collected on the snapshot worker for TUI comment GC and are omitted from `--json`. The repository's known default branch (the `defaultBranches` entry, else the branch `origin/HEAD` names, else none) is collected for the TUI PR status and is omitted from `--json`. When status fails, the TUI keeps the last good branch list for GC only if every checkout of that identity has an empty counted list. A successful sibling's live names win.
 
 ## File change object
 

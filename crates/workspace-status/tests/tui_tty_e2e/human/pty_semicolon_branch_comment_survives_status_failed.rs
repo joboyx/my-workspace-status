@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::harness::PtySession;
 use crate::seed::{git, seed_repo, unique_root};
-use crate::support::{corrupt_index, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT};
+use crate::support::{corrupt_index, prove_keys_handled, tree_cursor_on, tree_has, GIT_WAIT, WAIT};
 
 const BODY: &str = "status-failed-keep-e2e";
 const BRANCH: &str = "topic/keep";
@@ -158,7 +158,7 @@ fn pty_semicolon_branch_comment_survives_status_failed() {
 
     make_status_fail(&app);
     tui.key('r');
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         |screen| {
             overlay_closed(screen)
