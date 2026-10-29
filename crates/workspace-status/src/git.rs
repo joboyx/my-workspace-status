@@ -918,7 +918,7 @@ pub fn classify_upstream_rewrite(
     branch: &str,
     upstream: &str,
 ) -> Option<UpstreamRewrite> {
-    let tip = rev_parse_quiet(branch, cwd)?;
+    let tip = rev_parse_quiet(&format!("refs/heads/{branch}"), cwd)?;
     let upstream_tip = rev_parse_quiet(upstream, cwd)?;
     let (ahead, behind) = ahead_behind(&tip, &upstream_tip, cwd)?;
     if ahead == 0 || behind == 0 {
@@ -956,6 +956,7 @@ fn other_worktree_on_branch(cwd: &Path, branch: &str) -> Option<String> {
     let wanted = format!("refs/heads/{branch}");
     list_worktrees_porcelain(cwd)
         .split("\n\n")
+        .filter(|block| !block.lines().any(|l| l.starts_with("prunable")))
         .filter_map(|block| {
             let path = block.lines().find_map(|l| l.strip_prefix("worktree "))?;
             let on = block.lines().find_map(|l| l.strip_prefix("branch "))?;
@@ -974,7 +975,9 @@ fn other_worktree_on_branch(cwd: &Path, branch: &str) -> Option<String> {
 /// `branch`; the branch tip equals `expected_tip` (the tip the confirm
 /// showed); no other worktree has `branch` checked out; no tracked changes;
 /// [`classify_upstream_rewrite`] still finds a rewrite with nothing of yours.
-/// `--keep` never discards local changes. The old tip stays reachable through
+/// The reset runs on the upstream sha resolved once before the checks, so a
+/// fetch in between cannot move the target. `--keep` never discards local
+/// changes. The old tip stays reachable through
 /// the branch reflog, which is the undo.
 ///
 /// Returns the old tip (full sha). `Err` carries a short human reason, or
@@ -1001,11 +1004,18 @@ pub fn reset_keep_to_upstream(
     if repo_has_local_changes(cwd) {
         return Err("working tree has changes".to_string());
     }
+    // Pin the target sha once: a fetch between the check and the write must
+    // not move it, so the reset runs on the sha the check saw.
+    let rewritten = || format!("{upstream} no longer looks rewritten");
+    let target = rev_parse_quiet(upstream, cwd).ok_or_else(rewritten)?;
     match classify_upstream_rewrite(cwd, branch, upstream) {
         Some(found) if found.yours == 0 && found.tip == tip => {}
-        _ => return Err(format!("{upstream} no longer looks rewritten")),
+        _ => return Err(rewritten()),
     }
-    exec_git_checked(&["reset", "--keep", upstream, "--"], cwd)?;
+    if rev_parse_quiet(upstream, cwd).as_deref() != Some(target.as_str()) {
+        return Err(rewritten());
+    }
+    exec_git_checked(&["reset", "--keep", &target, "--"], cwd)?;
     Ok(tip)
 }
 
@@ -2603,7 +2613,10 @@ fn hunk_range(token: &str) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{git, init_repo, init_repo_empty, unique_dir};
+    use crate::testutil::{
+        git, init_repo, init_repo_empty, unique_dir, upstream_rewrite_fixture, RewriteFixture,
+        RewriteKind,
+    };
     use std::fs;
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -4940,8 +4953,6 @@ filename new.txt
 
     // ---- upstream rewrite (force-push) classification and reset ----
 
-    use crate::testutil::{upstream_rewrite_fixture, RewriteFixture, RewriteKind};
-
     #[test]
     fn classify_upstream_rewrite_r0_nothing_of_yours() {
         let fx = upstream_rewrite_fixture(RewriteKind::Dropped);
@@ -5125,6 +5136,26 @@ filename new.txt
             "{err}"
         );
         assert_eq!(exec_git(&["rev-parse", "main"], &fx.checkout), tip);
+    }
+
+    #[test]
+    fn reset_keep_to_upstream_ignores_a_prunable_worktree() {
+        let (fx, tip) = rewrite_fixture_r0();
+        let gone = fx.root.join("gone");
+        git(
+            &fx.checkout,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--force",
+                gone.to_str().unwrap(),
+                "main",
+            ],
+        );
+        fs::remove_dir_all(&gone).unwrap();
+        let old = reset_keep_to_upstream(&fx.checkout, "main", "origin/main", &tip).unwrap();
+        assert_eq!(old, tip);
     }
 
     #[test]

@@ -154,7 +154,7 @@ fn head_sha(dir: &Path) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-/// Clone `remote` into `root/<name>` with a repo-local identity.
+/// Clone a non-empty `remote` into `root/<name>` with a repo-local identity.
 fn clone_with_identity(root: &Path, remote: &Path, name: &str) -> PathBuf {
     git(
         root,
@@ -195,7 +195,13 @@ pub fn upstream_rewrite_fixture(kind: RewriteKind) -> RewriteFixture {
             remote.to_str().unwrap(),
         ],
     );
-    let maint = clone_with_identity(&root, &remote, "maint");
+    // `git clone` of an empty remote warns; build the maintainer repo by init.
+    let maint = root.join("maint");
+    init_repo_empty(&maint);
+    git(
+        &maint,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
     let base = commit_file_at(&maint, "base.txt", "base");
     let bot1 = commit_file_at(&maint, "bot1.txt", "chore(deps): bot bump 1");
     commit_file_at(&maint, "bot2.txt", "chore(deps): bot bump 2");
