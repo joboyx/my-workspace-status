@@ -12,7 +12,7 @@ CI runs the checks in `crates/workspace-status/src/parity_registry.rs` (part of 
 | `parity_registry_gaps_and_intentional_differences_are_indexed` | A `gap:` id is not in **Open gaps**, an indexed gap is used nowhere, a gap is used in another component with no note, or an `I<n>` cited in an `n/a:` reason and the **Intentional differences** table do not match. |
 | `parity_registry_code_anchors_and_tests_exist` | A code anchor or a named test is no longer a `fn` anywhere under `crates/` (a mention in a `//` comment does not count). A rename or a moved code path forces an update here. |
 | `commit_footer_message_scroll_matches_on_every_registry_surface` (`tui/render.rs`) | The `commit-footer` surfaces marked `supported` for `msg-scroll`, in each look, differ from the surfaces that test drives; or the wheel, scrollbar, more-below hint, or per-commit reset fails on one of them. |
-| `commit_file_search_highlight_and_steps_agree_on_every_registry_surface` (`tui/render.rs`) | The `search` surfaces whose code anchors name `commit_file_search_match_ids` differ from the surfaces that test drives, or one of them is not `supported` for `agree` in each look; or on one of them the highlighted rows differ from the rows `n` visits and the pill counts. |
+| `commit_file_search_highlight_and_steps_agree_on_every_registry_surface` (`tui/render.rs`) | The `search` surfaces whose code anchors name `commit_file_search_match_ids` differ from the surfaces that test drives, or one of them is not `supported` for `agree` in each look; or on one of them the highlighted rows differ from the rows `n` / `N` visit and the pill counts, or a walk from a folded list changes the count. |
 
 The `commit-footer` check is the pattern for other components: one test body that runs the same assertions on every surface the registry marks `supported`, and that compares its own surface list to `parity_registry::supported_surface_looks(component, feature)`.
 
@@ -127,7 +127,7 @@ Vertical and horizontal scrollbars of lists and line viewers. The commit-message
 | --- | --- | --- |
 | `highlight` | Matching rows paint the search highlight. | none |
 | `step` | `n` / `N` step to the next / previous match and the pill counts them. | `commit_file_search_follows_painted_tree_order` |
-| `agree` | The highlighted rows are exactly the rows `n` / `N` step to and count. | `commit_file_search_highlight_and_steps_agree_on_every_registry_surface`, `commit_file_search_lands_on_painted_folders_only` |
+| `agree` | The highlighted rows are exactly the rows `n` / `N` step to and count. | `commit_file_search_highlight_and_steps_agree_on_every_registry_surface`, `commit_file_search_steps_to_folder_rows`, `commit_file_search_lands_on_the_folder_row_when_a_file_shares_its_path` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `highlight` | `step` | `agree` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |

@@ -4193,8 +4193,7 @@ impl AppState {
     /// and counts. `None` with no commit-file list.
     fn commit_file_search_hits(&self) -> Option<(Vec<CommitFileRow>, Vec<usize>)> {
         let rows = self.unfolded_commit_file_rows(self.commit_drill_files()?);
-        let hits =
-            commit_file_row_match_indices(&rows, &self.commit_file_rows(), &self.search_query);
+        let hits = commit_file_row_match_indices(&rows, &self.search_query);
         Some((rows, hits))
     }
 
@@ -4218,8 +4217,9 @@ impl AppState {
     }
 
     /// Commit-file search step from the focused row. Returns true when it
-    /// wrapped. A file landing unfolds its folders; a folder landing moves
-    /// the cursor onto the folder row and keeps its fold.
+    /// wrapped. A landing (file or folder) unfolds the folders above it and
+    /// puts the cursor on that row by id, so a folder and a file with the
+    /// same path stay apart; a landed folder keeps its own fold.
     fn apply_commit_file_search(&mut self, dir: i32) -> bool {
         let Some(files) = self.commit_drill_files() else {
             self.set_search_status(false);
@@ -4227,18 +4227,21 @@ impl AppState {
         };
         let rows = self.unfolded_commit_file_rows(files);
         let anchor = self.commit_file_search_anchor(&rows);
-        let painted = self.commit_file_rows();
-        let Some(landing) =
-            focus_commit_file_search(&rows, &painted, &self.search_query, anchor, dir)
-        else {
+        let Some(landing) = focus_commit_file_search(&rows, &self.search_query, anchor, dir) else {
             self.set_search_status(false);
             return false;
         };
-        let path = rows[landing.target].path.clone();
-        for id in ancestor_dir_ids(&path) {
+        let target = &rows[landing.target];
+        for id in ancestor_dir_ids(&target.path) {
             self.commit_file_folds.remove(&id);
         }
-        self.restore_commit_file_cursor(Some(&path));
+        if let Some(idx) = self
+            .commit_file_rows()
+            .iter()
+            .position(|row| row.id == target.id)
+        {
+            self.set_commit_file_cursor(idx);
+        }
         self.set_search_status(true);
         landing.wrapped
     }

@@ -12856,11 +12856,13 @@ mod tests {
 
     /// On every commit-file list surface `docs/parity.md` marks `supported`
     /// for `search` / `agree`, in both looks: the rows the search paints
-    /// highlighted are exactly the rows `n` visits, in painted order, and
-    /// the pill counts them. A folder row whose label matches is painted
-    /// and landed on (the cursor moves to it, its fold stays). A matching
-    /// folder under a folded parent is not painted, so it is neither
-    /// highlighted nor counted. The registry's commit-file surfaces (those
+    /// highlighted are exactly the rows `n` visits, in painted order (`N`
+    /// in reverse), and the pill counts them. A folder row whose label
+    /// matches is painted and landed on (the cursor moves to it, its fold
+    /// stays). Matches under a folded parent, folders too, count and are
+    /// stepped to, so the count stays the same over a walk; the step
+    /// unfolds their parents, and then they paint highlighted, as on the
+    /// Workspace tree. The registry's commit-file surfaces (those
     /// whose anchors name `commit_file_search_match_ids`) and this test's
     /// must match.
     #[test]
@@ -12964,10 +12966,28 @@ mod tests {
                     highlighted.first().cloned(),
                     "{case}: wraps to the first match"
                 );
+                // `N` from the first match: the same rows, bottom to top.
+                let mut back = Vec::new();
+                for step in (1..=highlighted.len()).rev() {
+                    state.dispatch(Action::SearchPrev);
+                    let row = state.focused_commit_file_row().expect("focused row");
+                    assert_eq!(
+                        state.search_match_position(),
+                        Some((Some(step), highlighted.len())),
+                        "{case}: `N` pill on {}",
+                        row.id
+                    );
+                    back.push(row.id);
+                }
+                let mut reversed = highlighted.clone();
+                reversed.reverse();
+                assert_eq!(back, reversed, "{case}: `N` visits the painted matches");
 
-                // Fold `src/`: `lib/` is not painted, so it is neither
-                // highlighted nor counted. The files under it still count,
-                // as folded tree matches do.
+                // Fold `src/`: `lib/` and the files under it do not paint,
+                // so only `lib.md` is highlighted, but all four count, as
+                // folded tree matches do. A step to a hidden match unfolds
+                // its folders; then it paints highlighted.
+                let all = highlighted;
                 state.commit_file_folds.insert("dir:src".into());
                 commit_file_move_to_id(&mut state, "dir:docs");
                 terminal.draw(|frame| draw(frame, &mut state)).unwrap();
@@ -12979,11 +12999,80 @@ mod tests {
                 assert_eq!(highlighted, vec!["file:docs/lib.md"], "{case}: folded");
                 assert_eq!(
                     state.search_match_position(),
-                    Some((None, 3)),
-                    "{case}: lib.md, core.rs, util.rs; not the hidden lib/"
+                    Some((None, all.len())),
+                    "{case}: the hidden matches count"
                 );
+                let mut visited = Vec::new();
+                for step in 1..=all.len() {
+                    state.dispatch(Action::SearchNext);
+                    let row = state.focused_commit_file_row().expect("focused row");
+                    assert_eq!(
+                        state.search_match_position(),
+                        Some((Some(step), all.len())),
+                        "{case}: folded walk pill on {} (the count stays)",
+                        row.id
+                    );
+                    visited.push(row.id);
+                }
+                assert_eq!(visited, all, "{case}: the folded walk visits every match");
+                assert!(
+                    !state.commit_file_folds.contains("dir:src"),
+                    "{case}: the step to `lib/` unfolds `src/`"
+                );
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                let highlighted = search_highlighted_commit_file_ids(
+                    &terminal,
+                    &state,
+                    (surface.list_cols)(&state),
+                );
+                // The cursor row (`util.rs`) paints the cursor, not the match.
+                assert_eq!(highlighted, all[..all.len() - 1], "{case}: unfolded");
             }
         }
+    }
+
+    /// A compare range can list a folder and a file with the same path
+    /// (`foo` deleted as a file, `foo/bar.rs` added). A search step that
+    /// lands on the folder puts the cursor on the folder row, not on the
+    /// file row that shares its path.
+    #[test]
+    fn commit_file_search_lands_on_the_folder_row_when_a_file_shares_its_path() {
+        let mut state = compare_json_over_stale_workspace_state();
+        {
+            let tab = state.tabs.active_compare_mut().unwrap();
+            tab.files = ["foo", "foo/bar.rs"]
+                .into_iter()
+                .map(|path| super::super::drill::CommitFile {
+                    status: "M".into(),
+                    path: path.into(),
+                    old_path: None,
+                    stat: None,
+                })
+                .collect();
+            tab.path = Some("foo".into());
+        }
+        state.focus = FocusPane::Left;
+        let ids: Vec<String> = state.commit_file_rows().into_iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec!["dir:foo", "file:foo/bar.rs", "file:foo"]);
+        state.dispatch(Action::SearchStart);
+        for c in "foo".chars() {
+            state.dispatch(Action::SearchChar(c));
+        }
+        state.dispatch(Action::SearchSubmit);
+        commit_file_move_to_id(&mut state, "file:foo");
+        // From the last match, `n` wraps to the folder.
+        state.dispatch(Action::SearchNext);
+        assert_eq!(
+            state.focused_commit_file_row().map(|r| r.id).as_deref(),
+            Some("dir:foo")
+        );
+        assert_eq!(state.search_match_position(), Some((Some(1), 3)));
+        // `N` from the folder wraps back to the file row.
+        state.dispatch(Action::SearchPrev);
+        assert_eq!(
+            state.focused_commit_file_row().map(|r| r.id).as_deref(),
+            Some("file:foo")
+        );
     }
 
     #[test]
