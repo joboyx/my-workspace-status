@@ -11,7 +11,7 @@ A checkout row in the tree shows the pull request of its branch: a GitHub PR thr
 | in review | `review` | `P` | `○` | `#7 P` / `!5 P` |
 | merged | `merged` | `m` | `✓` | `#7 m` / `!5 m` |
 
-Every check in this file needs the PR status visuals (six states, the ref beside the glyph, `gc`, polling, toasts). A build from before them (a three-state badge `P` / `A` / `m`, no ref) cannot pass: report SKIP and name the missing piece. The other feature files still mark such checks **needs phase A**.
+Every check in the feature files needs the PR status visuals (six states, the ref beside the glyph, `gc`, polling, toasts). A build from before them (a three-state badge `P` / `A` / `m`, no ref) cannot pass: report SKIP and name the missing piece.
 
 ## Setup
 
@@ -173,16 +173,16 @@ $V wait "$RUN" 'no PR for feature/auth-refresh'
 
 ## PS6 Scripted transition, toast and total
 
-Polling needs a short interval: `WS_STATUS_PR_POLL_MS=1000`. The driver pins it to `0` (off) otherwise. An alert is a row flash plus a PR toast that lives 8 s; there is no alert on first load, on a branch change, or on the first lookup of a checkout. The recipe launches at `200x45`: the `need you` part of the workspace total gives way first when the row is short of room (the seeded `5 changed · 1 ahead, 1 diverged` summary leaves none at the default width).
+Polling needs a short interval: `WS_STATUS_PR_POLL_MS=1000`. The driver pins it to `0` (off) otherwise. An alert is a row flash plus a PR toast that lives 8 s; there is no alert on first load, on a branch change, or on the first lookup of a checkout. The workspace total reads `<n> PRs · <m> need you` when its row has room for both parts. With the seeded `5 changed · 1 ahead, 1 diverged` summary the default width has room for `2 need you` only, so the recipe waits for that part (it is on the row in both cases).
 
 ```bash
-fresh context github-running gitlab-running -- --size 200x45 --env WS_STATUS_PR_POLL_MS=1000 --fake-forge "$FORGE"
+fresh context github-running gitlab-running -- --env WS_STATUS_PR_POLL_MS=1000 --fake-forge "$FORGE"
 $V wait --regex "$RUN" '#7 r($|[^[:alnum:]])' && $V wait --regex "$RUN" '!5 r($|[^[:alnum:]])'
 $V capture "$RUN" t0-first-load                      # no toast here
 $V scenario "$FORGE" github-failed gitlab-failed     # no key: the poll finds it
 $V wait "$RUN" 'x #7 CI failed · test (ubuntu-latest)' 10     # GitHub names the failed check
 $V wait "$RUN" 'x !5 CI failed · feature/rate-limit' 10      # GitLab names the branch (the badge path reads no job)
-$V wait --regex "$RUN" 'PRs · 2 need you' 10
+$V wait --regex "$RUN" '2 need you($|[^[:alnum:]])' 10
 $V capture "$RUN" t1-ci-failed
 $V wait --gone "$RUN" 'CI failed ·' 12              # the toasts are gone after 8 s
 $V scenario "$FORGE" github-review gitlab-review    # silent: no toast for review

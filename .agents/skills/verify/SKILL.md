@@ -21,7 +21,7 @@ Commands run from the repository root (or a worktree root).
 | Unit | A rule or a parser: state ladders, JSON to state, layout math, glyph widths | `cargo test -p workspace-status --lib`, `cargo test -p workspace-status-graph` |
 | PTY e2e | The real binary on a PTY with live `event::read`: keys, painted text, fake `gh` / `glab`. Unix only | `cargo test -p workspace-status --test tui_tty_e2e` (add a test name to filter) |
 | Desktop `#[ignore]` | Real terminal emulator under `DISPLAY`: xfce keys, xterm wheel | `./scripts/with-desktop-session.sh --auto -- cargo test --test tui_tty_e2e -- --ignored --nocapture --test-threads=1` |
-| Live forge `#[ignore]` | Real `gh` / `glab` against public PRs on github.com and gitlab.com. Lands with the PR status feature (phase A) | `cargo test -p workspace-status --lib pull_request -- --ignored --nocapture` |
+| Live forge `#[ignore]` | Real `gh` / `glab` against public PRs on github.com and gitlab.com (`cli/cli`, `gitlab-org/cli`), read-only | `cargo test -p workspace-status --lib pull_request -- --ignored --nocapture` |
 | Verify driver | What a user sees, in states a test does not cover yet; live forge in the TUI | `scripts/verify-tui.sh` (below) |
 | CI gate | Everything CI runs | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked` |
 
@@ -145,7 +145,7 @@ Verify: <what was checked>   build <short sha> <version>   run <run dir>   mode 
 | # | Check | Result | Proof |
 | V1 | github-ready shows the ready badge on app | PASS | evidence/04-ready.txt |
 | V2 | gc opens the failed check | FAIL | expected .../job/6002, got .../job/6001 (opened.log) |
-| V3 | toast on transition | SKIP | needs phase A (build has no toast) |
+| V3 | toast on transition | SKIP | needs polling and toasts (this build has neither) |
 Not verified: <what could not run and why>
 ```
 
@@ -159,4 +159,4 @@ PASS, FAIL (quote what you saw), or SKIP (name the missing precondition). Never 
 | [tree-and-graph](features/tree-and-graph.md) | Badges in the tree and the graph pane, glyph column at wide and narrow widths |
 | [popovers](features/popovers.md) | The PR popover: lines, actions, `gc` and `r` from it |
 
-Each feature file lists steps, the screen text to expect, and what counts as PASS. Items marked **needs phase A** need the PR status visuals (six states, ref beside the glyph, `gc`, polling, toasts); on an older build they are SKIP.
+Each feature file lists steps, the screen text to expect, and what counts as PASS. Every check needs the PR status visuals (six states, ref beside the glyph, `gc`, polling, toasts); on an older build they are SKIP.
