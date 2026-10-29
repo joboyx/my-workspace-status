@@ -323,14 +323,63 @@ fn verify_driver_isolates_forge_theme_and_git() {
              no git network from a fixture)"
         );
     }
+    // The binary comes from the checkout's `target/`. A bare name would let
+    // `PATH` pick an installed release that is older than the code under test.
     assert!(
-        VERIFY_SH.contains("debug/workspace-status")
-            && !VERIFY_SH.contains("command -v workspace-status"),
-        "scripts/verify-tui.sh must run the checkout's own target/debug/workspace-status, \
-         never the installed one on PATH"
+        VERIFY_SH.contains("${CARGO_TARGET_DIR:-$REPO_ROOT/target}")
+            && VERIFY_SH.contains("debug/workspace-status")
+            && VERIFY_SH.contains("printf 'exec %q\\n' \"$bin\""),
+        "scripts/verify-tui.sh must exec the checkout's own target/debug/workspace-status"
+    );
+    for bare in [
+        "command -v workspace-status",
+        "which workspace-status",
+        "type -p workspace-status",
+        "exec workspace-status",
+        "exec ws ",
+    ] {
+        assert!(
+            !VERIFY_SH.contains(bare),
+            "scripts/verify-tui.sh must not look up or exec the installed binary (`{bare}`)"
+        );
+    }
+    // Both modes get the BROWSER recorder, so a live run never opens a real
+    // browser: the export must come before the fake / live split.
+    let browser = VERIFY_SH.find("export BROWSER=");
+    let split = VERIFY_SH.find("if [[ -n \"$forge\" ]]");
+    assert!(
+        matches!((browser, split), (Some(b), Some(s)) if b < s)
+            && VERIFY_SH.contains("browser/open %s")
+            && VERIFY_SH.contains("opened.log")
+            && !unsets_var(VERIFY_SH, "BROWSER"),
+        "scripts/verify-tui.sh must export the BROWSER recorder for fake and live runs alike"
     );
     assert!(
         VERIFY_SH.contains("export WS_FAKE_FORGE_DIR=") && VERIFY_SH.contains("/fake-forge:$PATH"),
         "scripts/verify-tui.sh must put scripts/fake-forge first on PATH for --fake-forge"
+    );
+}
+
+#[test]
+fn verify_driver_wait_checks_the_pane_before_it_matches() {
+    // `wait --gone` passes when the text is missing. A dead TUI or a missing
+    // tmux server also shows no text, so `cmd_wait` must prove the pane is
+    // alive before it looks at the screen.
+    let body = VERIFY_SH
+        .split("cmd_wait() {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("scripts/verify-tui.sh defines cmd_wait");
+    let session = body
+        .find("has-session")
+        .expect("cmd_wait checks the session");
+    let dead = body.find("pane_dead").expect("cmd_wait checks pane_dead");
+    let matched = body
+        .find("screen_matches \"$kind\"")
+        .expect("cmd_wait matches the screen");
+    assert!(
+        session < matched && dead < matched,
+        "cmd_wait must check the tmux session and pane_dead before screen_matches, \
+         or `wait --gone` passes on a dead TUI"
     );
 }

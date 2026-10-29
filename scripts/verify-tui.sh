@@ -44,13 +44,18 @@ usage: scripts/verify-tui.sh <command> ...
                                  wait until <text> is on screen; --gone: until it is
                                  not; --cursor: a line with the focus bar holds it;
                                  --regex: <text> is an extended regex for one line;
-                                 default 10 s; a timeout saves the screen, exits 1
+                                 default 10 s; a timeout, a dead TUI or a missing
+                                 session saves the screen and exits 1
   capture <run> [name]           print the screen; save evidence/NN-<name>.txt/.ansi
   stop <run>                     quit the TUI, end the tmux server, keep the run dir
   cli <run> -- <args>            run the binary headless (--plain/--json/--help/
                                  --version) with the same isolation in the fixture
-  scenario <forge-dir> <set>...  copy scenario sets into a fake forge directory
-                                 (also the mid-run swap: each file is renamed in)
+  scenario [--reset] <forge-dir> <set>...
+                                 copy scenario sets into a fake forge directory;
+                                 --reset clears the old ones first (before launch)
+                                 (without --reset the sets overlay what is there, and
+                                 each file is renamed in, so it is the mid-run swap)
+  calls <run>                    print the gh / glab calls this run made (fake forge)
 
 <run> is the run dir that launch prints, or its id under the root.
 Root: $WS_VERIFY_ROOT, else ${TMPDIR:-/tmp}/ws-verify.
@@ -171,6 +176,8 @@ export TZ=Asia/Manila
 EOF
     printf 'export LANG=%s LC_ALL=%s\n' "$locale" "$locale"
     # The recorder gets every URL gx / gc opens, so a run never starts a browser.
+    # Keep this line before the fake / live split below: both modes need it, and
+    # release_watch.rs checks the order.
     printf 'export BROWSER=%q\n' "$RUN_DIR/browser/open %s"
     if [[ -n "$forge" ]]; then
       # Fake forge: the stand-ins come first on PATH, and no forge login of the
@@ -296,6 +303,10 @@ EOF
   record RUN_BIN "$bin"
   record RUN_FIXTURE "$fixture"
   record RUN_FORGE "$forge"
+  # Runs share one forge dir and its calls.log. Remember where this run starts.
+  local calls_from=0
+  if [[ -n "$forge" && -f "$forge/calls.log" ]]; then calls_from="$(wc -l <"$forge/calls.log" | tr -d ' ')"; fi
+  record RUN_CALLS_FROM "$calls_from"
   record RUN_SIZE "$size"
   record RUN_HEAD "$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
   record RUN_VERSION "$("$bin" --version </dev/null 2>&1 || echo unknown)"
@@ -347,8 +358,7 @@ cmd_keys() {
   require_live
   if ((literal)); then
     (($# == 1)) || die "keys -l: give one text argument"
-    # One character per call: a burst of the same letter ("ll") can lose one in
-    # the app (seen live).
+    # Send one key per write, so every key reaches the app as its own event.
     local text="$1" i
     for ((i = 0; i < ${#text}; i++)); do
       tm send-keys -t "$SESSION" -l -- "${text:i:1}"
@@ -393,13 +403,27 @@ cmd_wait() {
   end=$((SECONDS + timeout))
   while :; do
     scr="$(screen_text || true)"
+    # A dead pane or a missing server proves nothing, so this check comes before
+    # the match, in both modes: a gone TUI must never satisfy --gone.
+    if ! tm has-session -t "$SESSION" 2>/dev/null; then
+      f="$EVIDENCE/$(next_seq)-wait-failed.txt"
+      printf '%s\n' "$scr" >"$f"
+      log_action "wait $what '$text' FAILED: no tmux session -> $(basename "$f")"
+      die "wait $what '$text' failed: no tmux session for this run (stopped, or the server is gone); see $f"
+    fi
+    if [[ "$(pane_field pane_dead)" != 0 ]]; then
+      f="$EVIDENCE/$(next_seq)-wait-failed.txt"
+      printf '%s\n' "$scr" >"$f"
+      log_action "wait $what '$text' FAILED: the TUI exited -> $(basename "$f")"
+      die "wait $what '$text' failed: the TUI exited (status $(pane_field pane_dead_status)); its last screen is in $f"
+    fi
     found=0
     if screen_matches "$kind" "$text" "$scr"; then found=1; fi
     if ((found + negate == 1)); then
       log_action "wait $what '$text' ok"
       return 0
     fi
-    if ((SECONDS >= end)) || [[ "$(pane_field pane_dead)" != 0 ]]; then
+    if ((SECONDS >= end)); then
       f="$EVIDENCE/$(next_seq)-wait-timeout.txt"
       printf '%s\n' "$scr" >"$f"
       log_action "wait $what '$text' FAILED after ${timeout}s -> $(basename "$f")"
@@ -422,6 +446,18 @@ cmd_capture() {
   echo "saved: $base.txt, $base.ansi" >&2
 }
 
+# The fake forge calls of this run: the lines of calls.log after the ones that
+# were there at launch.
+run_calls() {
+  if [[ -f "$RUN_FORGE/calls.log" ]]; then tail -n "+$((${RUN_CALLS_FROM:-0} + 1))" "$RUN_FORGE/calls.log"; fi
+}
+
+cmd_calls() {
+  load_run "${1:-}"
+  [[ -n "$RUN_FORGE" ]] || die "calls: this run has no fake forge"
+  run_calls
+}
+
 cmd_stop() {
   load_run "${1:-}"
   local i
@@ -435,7 +471,7 @@ cmd_stop() {
     fi
   fi
   end_server
-  if [[ -n "$RUN_FORGE" && -f "$RUN_FORGE/calls.log" ]]; then cp "$RUN_FORGE/calls.log" "$EVIDENCE/forge-calls.log"; fi
+  if [[ -n "$RUN_FORGE" ]]; then run_calls >"$EVIDENCE/forge-calls.log"; fi
   if [[ -f "$RUN_DIR/opened.log" ]]; then cp "$RUN_DIR/opened.log" "$EVIDENCE/opened.log"; fi
   log_action "stop"
   echo "evidence: $EVIDENCE" >&2
@@ -493,15 +529,29 @@ put_file() {
   mv -f "$2.tmp.$$" "$2"
 }
 
+# scenario [--reset] <forge-dir> <set>...: without --reset the sets are overlays
+# on what is in the directory. --reset first clears the scenario files (gh/ and
+# glab/) and keeps calls.log. Use it before launch, never as a mid-run swap: a
+# call that lands in the gap would find no scenario.
 cmd_scenario() {
+  local reset=0
+  if [[ "${1:-}" == --reset ]]; then
+    reset=1
+    shift
+  fi
   local forge="${1:-}"
-  (($# >= 2)) || die "scenario: give a forge dir and at least one set (ls $SCENARIOS_DIR)"
+  if [[ -z "$forge" ]] || (($# < 2)); then
+    die "scenario: give [--reset] <forge-dir> and at least one set (ls $SCENARIOS_DIR)"
+  fi
   shift
-  mkdir -p "$forge"
   local set src f base s
   for set in "$@"; do
+    [[ -d "$SCENARIOS_DIR/$set" ]] || die "unknown scenario set '$set' (ls $SCENARIOS_DIR)"
+  done
+  mkdir -p "$forge"
+  if ((reset)); then rm -rf "${forge:?}/gh" "${forge:?}/glab"; fi
+  for set in "$@"; do
     src="$SCENARIOS_DIR/$set"
-    [[ -d "$src" ]] || die "unknown scenario set '$set' (ls $SCENARIOS_DIR)"
     while IFS= read -r f; do
       f="${f#./}"
       case "$f" in
@@ -537,6 +587,7 @@ case "$cmd" in
   stop) cmd_stop "$@" ;;
   cli) cmd_cli "$@" ;;
   scenario) cmd_scenario "$@" ;;
+  calls) cmd_calls "$@" ;;
   help | -h | --help) usage ;;
   *)
     usage >&2
