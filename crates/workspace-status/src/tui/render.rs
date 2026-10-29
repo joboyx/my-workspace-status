@@ -9305,22 +9305,6 @@ mod tests {
         assert_eq!(grown + 1, short_h, "one more message row");
     }
 
-    /// Message rows of the painted depth-2 commit-files footer: `(y, text)`
-    /// per row under the title and meta rows, plus the footer's last
-    /// column.
-    fn commit_detail_message_rows(
-        terminal: &Terminal<TestBackend>,
-        state: &AppState,
-    ) -> (Vec<(u16, String)>, u16) {
-        let l = &state.layout;
-        let rule_y = l.files_list_y + l.files_list_height;
-        let bottom = l.tree_y + l.tree_height;
-        let rows = (rule_y + 3..bottom)
-            .map(|y| (y, region_text(terminal, l.tree_x, y, l.tree_width, 1)))
-            .collect();
-        (rows, l.tree_x + l.tree_width - 1)
-    }
-
     /// The more-below arrow the footers paint for `state`'s glyph set.
     fn more_below_glyph(state: &AppState) -> &'static str {
         if state.ascii {
@@ -9343,11 +9327,11 @@ mod tests {
     /// The depth-2 footer's wheel box and hint hit cover exactly what was
     /// painted, in both looks (boxed panes and flat paint-mode panes) at
     /// the 80x28 size of the PTY test: every cell from the rule row to the
-    /// last message row, the scrollbar column included, scrolls the
-    /// message and leaves the file cursor; the row under the footer (box
-    /// border, or the breadcrumb with flat panes) and the list rows above
-    /// it are off the footer box.
-    /// The hint hit sits on the painted `<more_below><K>` cells.
+    /// last message row, the scrollbar column included, is on the wheel
+    /// box; the row under the footer (box border, or the breadcrumb with
+    /// flat panes) and the list rows above it are off it. The hint hit
+    /// sits on the painted `<more_below><K>` cells. The wheel itself is in
+    /// `commit_footer_message_scroll_matches_on_every_registry_surface`.
     #[test]
     fn depth_2_commit_footer_wheel_box_matches_paint_in_boxed_and_flat_panes() {
         for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
@@ -9399,16 +9383,6 @@ mod tests {
                 !state.scroll_commit_detail_msg(l.tree_x + 2, rule_y - 1, 0),
                 "{case}: the list row above the rule is not"
             );
-            // A real wheel on the first message row scrolls, keeps the file.
-            let effect = state.dispatch(Action::ScrollWheel {
-                col: l.tree_x + 2,
-                row: rule_y + 3,
-                delta: 1,
-                horizontal: false,
-            });
-            assert_eq!(effect, Effect::None, "{case}: no diff load");
-            assert_eq!(state.commit_files_cursor(), 0, "{case}: file cursor");
-            assert_eq!(state.commit_detail_msg_scroll(), 1, "{case}");
         }
     }
 
@@ -9548,8 +9522,9 @@ mod tests {
     /// `docs/parity.md` marks `supported` for `msg-scroll`, in every look
     /// it names (boxed and flat panes): the wheel over the footer scrolls
     /// the message and leaves the list cursor, a scrollbar sits on the
-    /// footer's last column, the ` <more_below><K>` hint sits left of it
-    /// and hits over its cells until the tail shows, and another commit
+    /// footer's last column, the muted ` <more_below><K>` hint sits left of
+    /// it and hits over its cells until the tail shows, the tail line is
+    /// painted and the first body line is gone at the end, and another commit
     /// starts at the top while the first keeps its offset. The registry's
     /// surface list and this test's must match, so a new footer surface
     /// gets a test case, and a surface this test drives gets a registry
@@ -9609,6 +9584,13 @@ mod tests {
                     .collect();
                 let glyph = more_below_glyph(&state);
                 assert_eq!(painted, format!("{glyph}{max}"), "{case}: hint text");
+                // Graph footer: `label_palette.meta` (= `muted`); depth 2:
+                // `palette.muted`.
+                assert_eq!(
+                    buf[(first.x, first.y)].fg,
+                    state.theme.palette().muted,
+                    "{case}: muted hint"
+                );
                 assert_eq!((surface.lines_below)(&state), max, "{case}: K at the top");
                 assert!(
                     is_scrollbar_cell(buf[(bar_x, first.y)].symbol()),
@@ -9646,6 +9628,16 @@ mod tests {
                     (y..bottom).any(|row| is_scrollbar_cell(buf[(bar_x, row)].symbol())),
                     "{case}: the bar stays at the end"
                 );
+                // The painted tail: the last body line shows, the first is gone.
+                let footer = region_text(&terminal, x, y, width, height);
+                assert!(
+                    footer.contains(&format!("{FOOTER_BODY_TOKEN}29")),
+                    "{case}: the tail shows:\n{footer}"
+                );
+                assert!(
+                    !footer.contains(&format!("{FOOTER_BODY_TOKEN}00")),
+                    "{case}: the first body line is gone:\n{footer}"
+                );
 
                 (surface.show_commit)(&mut state, FOOTER_COMMIT_B);
                 terminal.draw(|frame| draw(frame, &mut state)).unwrap();
@@ -9660,79 +9652,6 @@ mod tests {
                 assert_eq!((surface.scroll)(&state), max, "{case}: A keeps its offset");
             }
         }
-    }
-
-    /// A long message in the depth-2 commit-files footer scrolls like the
-    /// graph selection footer: a 1-column scrollbar over the message rows
-    /// and a muted ` <more_below><K>` hint on the last row, left of the
-    /// bar, until the tail shows. The wheel there scrolls the message and
-    /// leaves the file cursor.
-    #[test]
-    fn depth_2_commit_footer_scrolls_a_long_message_with_scrollbar_and_hint() {
-        let mut state = two_pane_commit_diff_state();
-        set_seed_commit_body(&mut state, &footer_long_body(30));
-        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-        let (rows, bar_x) = commit_detail_message_rows(&terminal, &state);
-        assert_eq!(rows.len(), state.commit_msg_lines, "N message rows");
-        let message_len = state
-            .commit_detail_footer_lines(state.layout.tree_width as usize)
-            .len()
-            - 2;
-        let max = message_len - rows.len();
-        assert_eq!(state.layout.commit_detail_footer_scroll_max, max);
-        let buf = terminal.backend().buffer().clone();
-        for (y, _) in &rows {
-            assert!(
-                is_scrollbar_cell(buf[(bar_x, *y)].symbol()),
-                "scrollbar at y={y}: {rows:?}"
-            );
-        }
-        let (last_y, last) = rows.last().expect("message rows");
-        let hint = format!(" {}{max}", more_below_glyph(&state));
-        let text = last.trim_end().trim_end_matches(SCROLLBAR_GLYPHS);
-        assert!(text.ends_with(&hint), "hint {hint:?} ends {last:?}");
-        let hint_x = bar_x - hint.chars().count() as u16 + 1;
-        assert_eq!(
-            buf[(hint_x, *last_y)].fg,
-            state.theme.palette().muted,
-            "muted hint"
-        );
-        let left = left_inner_text(&terminal, &state);
-        assert!(!left.contains('…'), "no … clip:\n{left}");
-
-        // Wheel to the end: the tail shows, the hint goes, the bar stays.
-        let top = state.layout.commit_detail_footer_y.expect("footer box");
-        let col = state.layout.commit_detail_footer_x + 2;
-        for _ in 0..max + 3 {
-            state.dispatch(Action::ScrollWheel {
-                col,
-                row: top,
-                delta: 1,
-                horizontal: false,
-            });
-        }
-        assert_eq!(state.commit_files_cursor(), 0, "file cursor stays");
-        assert_eq!(state.commit_detail_msg_scroll(), max);
-        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-        let (rows, bar_x) = commit_detail_message_rows(&terminal, &state);
-        let buf = terminal.backend().buffer().clone();
-        let joined: String = rows.iter().map(|(_, row)| row.as_str()).collect();
-        assert!(
-            joined.contains(&format!("{FOOTER_BODY_TOKEN}29")),
-            "{rows:?}"
-        );
-        assert!(
-            !joined.contains(&format!("{FOOTER_BODY_TOKEN}00")),
-            "{rows:?}"
-        );
-        assert!(
-            !joined.contains(&format!(" {}", more_below_glyph(&state))),
-            "no hint at the tail: {rows:?}"
-        );
-        assert!(rows
-            .iter()
-            .all(|(y, _)| is_scrollbar_cell(buf[(bar_x, *y)].symbol())));
     }
 
     /// A message that fits, and a collapsed footer, paint no scrollbar and
