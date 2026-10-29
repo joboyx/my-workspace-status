@@ -236,8 +236,6 @@ pub(crate) struct PrTransition {
     /// The new answer. For [`PrTransitionTo::Closed`], the last answer
     /// before the PR went away.
     pub(crate) pr: PullRequest,
-    /// State of the PR in the earlier lookup.
-    pub(crate) from: PrState,
     /// What the PR became.
     pub(crate) to: PrTransitionTo,
 }
@@ -332,7 +330,6 @@ impl SeenPr {
         Some(PrTransition {
             checkout: checkout.to_path_buf(),
             pr,
-            from: before.state,
             to,
         })
     }
@@ -632,14 +629,6 @@ impl PrCache {
         }
         self.set_answer((remote, branch.to_string()), BranchPr::Ready(pr));
     }
-}
-
-/// A checkout a poll cycle may look up.
-struct Pollable<'a> {
-    path: &'a Path,
-    record: &'a CheckoutPr,
-    /// Forge host of the resolved remote ([`CheckoutPr::host`]).
-    host: &'a str,
 }
 
 impl AppState {
@@ -1009,35 +998,6 @@ impl AppState {
         self.pr_cache.poll = mode;
     }
 
-    /// Checkouts a poll cycle may look up.
-    ///
-    /// A checkout is pollable when it is visible, on a local branch, its
-    /// first lookup for that branch landed with a GitHub or GitLab remote,
-    /// and either its answer is an open PR, or no PR is known yet and the
-    /// branch has an upstream (it was pushed), so a PR opened later shows.
-    /// A merged PR is not polled. Reads the facts each record keeps
-    /// ([`CheckoutPr::pollable`]); it parses no remote.
-    fn pollable_checkouts(&self) -> Vec<Pollable<'_>> {
-        self.pr_rows()
-            .filter_map(|row| {
-                let path = Path::new(&row.repo);
-                let record = self
-                    .pr_cache
-                    .checkouts
-                    .get(path)
-                    .filter(|record| record.branch == row.branch)?;
-                if !record.pollable(row.sync_status != SyncStatus::NoUpstream) {
-                    return None;
-                }
-                Some(Pollable {
-                    path,
-                    record,
-                    host: record.host.as_deref()?,
-                })
-            })
-            .collect()
-    }
-
     /// Planned PR poll period in ms: [`PrPollMode`] with "hot" while any
     /// pollable PR has CI running or is ready to merge. `0` with polling
     /// off. Reads a flag the cache keeps up to date, so it is cheap on
@@ -1049,6 +1009,14 @@ impl AppState {
     /// Pollable checkouts the poll cycle that starts at `now` looks up,
     /// marked in flight. Their badges stay on screen while the lookups run.
     ///
+    /// A checkout is pollable when it is visible, on a local branch, its
+    /// first lookup for that branch landed with a GitHub or GitLab remote,
+    /// and either its answer is an open PR, or no PR is known yet and the
+    /// branch has an upstream (it was pushed), so a PR opened later shows.
+    /// A merged PR is not polled. Reads the facts each record keeps
+    /// ([`CheckoutPr::pollable`], [`CheckoutPr::host`]); it parses no
+    /// remote.
+    ///
     /// Empty with polling off. Skips a checkout whose lookup is still in
     /// flight, and one whose forge host backs off after failed polls.
     pub(crate) fn due_pr_polls(&mut self, now: Instant) -> Vec<(PathBuf, String)> {
@@ -1057,11 +1025,20 @@ impl AppState {
             return Vec::new();
         }
         let due: Vec<(PathBuf, String)> = self
-            .pollable_checkouts()
-            .into_iter()
-            .filter(|pollable| !pollable.record.in_flight)
-            .filter(|pollable| self.pr_cache.host_ready(pollable.host, now, interval))
-            .map(|pollable| (pollable.path.to_path_buf(), pollable.record.branch.clone()))
+            .pr_rows()
+            .filter_map(|row| {
+                let path = Path::new(&row.repo);
+                let record = self
+                    .pr_cache
+                    .checkouts
+                    .get(path)
+                    .filter(|record| record.branch == row.branch)?;
+                let host = record.host.as_deref()?;
+                let due = record.pollable(row.sync_status != SyncStatus::NoUpstream)
+                    && !record.in_flight
+                    && self.pr_cache.host_ready(host, now, interval);
+                due.then(|| (path.to_path_buf(), record.branch.clone()))
+            })
             .collect();
         for (path, _) in &due {
             if let Some(record) = self.pr_cache.checkouts.get_mut(path) {
@@ -3023,11 +3000,10 @@ mod tests {
         app.take_pr_transitions()
     }
 
-    fn transition(pr: PullRequest, from: PrState, to: PrTransitionTo) -> PrTransition {
+    fn transition(pr: PullRequest, to: PrTransitionTo) -> PrTransition {
         PrTransition {
             checkout: PathBuf::from("app"),
             pr,
-            from,
             to,
         }
     }
@@ -3049,7 +3025,7 @@ mod tests {
                 let pr = pr_on(remote, 12, to);
                 assert_eq!(
                     changes(&mut app, remote, Some(pr.clone())),
-                    vec![transition(pr, from, PrTransitionTo::State(to))],
+                    vec![transition(pr, PrTransitionTo::State(to))],
                     "{remote}: {from:?} -> {to:?}"
                 );
                 assert!(app.take_pr_transitions().is_empty(), "drained");
@@ -3059,11 +3035,12 @@ mod tests {
             let mut app = seen_app(remote, PrLookup::Found(before.clone()));
             assert_eq!(
                 changes(&mut app, remote, None),
-                vec![transition(before, CiRunning, PrTransitionTo::Closed)],
+                vec![transition(before, PrTransitionTo::Closed)],
                 "{remote}: closed"
             );
 
-            // A failed lookup in between keeps the state before it.
+            // A failed lookup in between keeps the answer before it, so the
+            // change still alerts.
             let mut app = seen_app(remote, open_on(remote, 12));
             land_pr(
                 &mut app,
@@ -3075,11 +3052,7 @@ mod tests {
             let failed = pr_on(remote, 12, CiFailed);
             assert_eq!(
                 changes(&mut app, remote, Some(failed.clone())),
-                vec![transition(
-                    failed,
-                    InReview,
-                    PrTransitionTo::State(CiFailed)
-                )],
+                vec![transition(failed, PrTransitionTo::State(CiFailed))],
                 "{remote}: across a failed lookup"
             );
         }
@@ -3161,11 +3134,7 @@ mod tests {
         let merged = pr_on(GH_REMOTE, 7, PrState::Merged);
         assert_eq!(
             changes(&mut app, GH_REMOTE, Some(merged.clone())),
-            vec![transition(
-                merged,
-                PrState::Ready,
-                PrTransitionTo::State(PrState::Merged)
-            )],
+            vec![transition(merged, PrTransitionTo::State(PrState::Merged))],
             "a full reload compares with the last answer too"
         );
     }
@@ -3191,7 +3160,7 @@ mod tests {
             let ready = pr_on(remote, 5, Ready);
             assert_eq!(
                 changes(&mut app, remote, Some(ready.clone())),
-                vec![transition(ready, InReview, PrTransitionTo::State(Ready))],
+                vec![transition(ready, PrTransitionTo::State(Ready))],
                 "{remote}: the settled answer alerts once"
             );
             assert!(
@@ -3205,7 +3174,7 @@ mod tests {
             let failed = computing(remote, 5, CiFailed);
             assert_eq!(
                 changes(&mut app, remote, Some(failed.clone())),
-                vec![transition(failed, Ready, PrTransitionTo::State(CiFailed))],
+                vec![transition(failed, PrTransitionTo::State(CiFailed))],
                 "{remote}: CI failed still alerts"
             );
 
@@ -3269,7 +3238,7 @@ mod tests {
                     head: branch.into(),
                     ..pr_on(remote, 318, state)
                 };
-                let change = transition(pr, InReview, to);
+                let change = transition(pr, to);
                 for (look, glyph) in [(false, unicode), (true, ascii)] {
                     assert_eq!(
                         toast_parts(&change.toast(look, at)),
@@ -3294,12 +3263,12 @@ mod tests {
             failed_check: Some("test (ubuntu-latest)".into()),
             ..pr_on(GH_REMOTE, 318, state)
         };
-        let failed = transition(named(CiFailed), CiRunning, State(CiFailed));
+        let failed = transition(named(CiFailed), State(CiFailed));
         assert_eq!(
             (failed.toast(false, at).text, failed.toast(false, at).detail),
             ("#318 CI failed".into(), "test (ubuntu-latest)".into())
         );
-        let merged = transition(named(Merged), CiFailed, State(Merged));
+        let merged = transition(named(Merged), State(Merged));
         assert_eq!(merged.toast(false, at).detail, branch);
 
         // A GitLab badge answer names no job (`failed_check` is `None`), so
@@ -3309,7 +3278,7 @@ mod tests {
             ..pr_on(GL_REMOTE, 12, CiFailed)
         };
         assert_eq!(gitlab.failed_check, None);
-        let failed = transition(gitlab, CiRunning, State(CiFailed));
+        let failed = transition(gitlab, State(CiFailed));
         assert_eq!(
             (failed.toast(false, at).text, failed.toast(false, at).detail),
             ("!12 CI failed".into(), branch.into())
