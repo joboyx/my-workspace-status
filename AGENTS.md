@@ -82,8 +82,20 @@ Do **not** invent spur heuristics (`parent.lane + 1`, spine `◇─╯`, mid-rai
 | Output format of the plain report | `SAMPLE_OUTPUT.md` and `crates/workspace-status/tests/snapshot_contract.rs` |
 | Demo workspace seed or screenshot clips | `docs/demo.md` + `scripts/seed-demo-workspace.sh` + `scripts/capture-demo-stills.sh` |
 | Desktop Xvfb / Openbox session | `scripts/with-desktop-session.sh` + `scripts/openbox.xml` + `docs/tui-tty-e2e.md` |
+| Behaviour of a component on any surface listed in `docs/parity.md` | `docs/parity.md` (every surface of that component) + the test named in the row |
 
 A change is not complete while its documentation is stale.
+
+## Cross-surface parity
+
+A shared TUI component (commit-message footer, file lists, line viewers, scrollbars, search, icon popovers, resize edges, horizontal pan, double-click, row marks, watch-reload flash) must behave the same and have the same features on every surface where it appears. [`docs/parity.md`](./docs/parity.md) lists each component, its surfaces (tab, depth, pane, pane looks, code anchors), and one status per feature.
+
+- A behaviour change to a listed component checks every surface in its table and applies there by default. Each surface that does not take the change gets `n/a: <reason>` in the registry, and the pull request text says why.
+- A new surface or a new feature gets its registry row or column in the same change.
+- A gap found and not fixed gets a `gap: G<n>` cell and a row in **Open gaps**.
+- Boxed and flat panes (`viewDefaults.background` `"terminal"` / `"paint"`) paint and hit-test with different geometry: a behaviour test covers each look its row names.
+
+CI (`cargo test --workspace`, `crates/workspace-status/src/parity_registry.rs`) fails on a malformed cell, an unindexed gap, or a code anchor that is no longer a `fn` under `crates/`. `commit_footer_message_scroll_matches_on_every_registry_surface` runs one test body on every footer surface the registry marks supported, in both looks, and fails when the two surface lists differ. Follow that pattern for other components.
 
 ## Lint gate
 

@@ -2,6 +2,8 @@
 
 Pure data under `crates/workspace-status/src/tui/` (tree, fold, flatten, keymap, live refresh). The event loop is `Action` → `AppState::dispatch` → `Effect`. `tui/effect.rs` turns that `Effect` into Scheduler jobs and applies results. Autoload, commit-files, commit-diff, stash / branch / graph-focus picker, and compare-picker jobs carry a generation plus an immutable target. Compare picker uses `request_prepare_compare`, separate from `b` / `o` branch gens. Compare-file diffs keep a latest request id per tab (`CompareTab.diff_req`). Autoload captures `GraphIdentity` (repo + head) at enqueue; the others capture at spawn (`(repo, source)`, `(repo, source, path)`, or focused checkout / picker request). Apply drops a result when that gen is stale or the live drill / identity / focused checkout no longer matches, the same way a right-pane load drops a stale `req_id` or target. A right-pane Graph replace bumps the autoload generation and clears `graph_loading_older`, so a late older page cannot merge into the new window when repo+HEAD are unchanged (graph `o` / `O`). Esc Diff→Files bumps the commit-diff generation so a late result cannot reopen Diff. The live TTY loop (`tui/event_loop.rs`) spawns those jobs on a `JoinSet`.
 
+A component that paints on more than one surface (tab kind, drill depth, pane, boxed or flat look) keeps the same features on each. [parity.md](./parity.md) lists every surface per component, the features each has, the recorded `n/a` reasons, and the open gaps.
+
 ## Node kinds
 
 `NodeKind` in `tui/tree.rs` is a seven-member enum. Five of them are structural; `Group` and `Section` are chrome.
