@@ -185,6 +185,7 @@ impl AppState {
             }
             IconTarget::TreeRow(_)
             | IconTarget::CommitFileRow(_)
+            | IconTarget::ExplorerRow(_)
             | IconTarget::GraphRow(_)
             | IconTarget::GraphMoreLines(_)
             | IconTarget::CommitDetailMoreLines(_)

@@ -67,6 +67,12 @@ impl AppState {
     pub(crate) fn popover_owner(&self) -> PopoverOwner {
         let list = self.list_focus_target();
         let row = match list {
+            // The Explorer tree's cursor row, never the parked Workspace
+            // tree row.
+            ListFocusTarget::Tree if self.is_explorer_tab() => self
+                .explorer_cursor_rel()
+                .map(|rel| format!("explorer:{rel}"))
+                .unwrap_or_default(),
             ListFocusTarget::Tree => self
                 .rows
                 .get(self.cursor)
@@ -216,7 +222,10 @@ impl AppState {
             return line_marks;
         }
         if self.is_explorer_tab() {
-            return Vec::new();
+            return match self.list_focus_target() {
+                ListFocusTarget::Tree => self.explorer_cursor_row_icons(),
+                _ => Vec::new(),
+            };
         }
         match self.list_focus_target() {
             ListFocusTarget::Tree => {
@@ -418,6 +427,10 @@ impl AppState {
     /// on it and show their gate reasons. A pinned popover always is.
     pub(crate) fn popover_target_focused(&self, target: &IconTarget) -> bool {
         match target {
+            IconTarget::ExplorerRow(rel) => {
+                self.list_focus_target() == ListFocusTarget::Tree
+                    && self.explorer_cursor_rel().as_deref() == Some(rel.as_str())
+            }
             IconTarget::TreeRow(id) => {
                 self.list_focus_target() == ListFocusTarget::Tree
                     && self.focused_row().is_some_and(|row| &row.id == id)

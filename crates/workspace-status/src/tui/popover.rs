@@ -34,7 +34,7 @@ use crate::snapshot::{CheckoutKind, FileChange, WorkspaceRepoSnapshot};
 
 use super::action::Action;
 use super::command_palette::{command_for, PaletteCommand};
-use super::comments::{tree_row_comments, CommentEntry};
+use super::comments::{checkout_file_comments, tree_row_comments, CommentEntry};
 use super::commit_files::CommitFileRow;
 use super::gates::ListFocusTarget;
 use super::icons::{capture_count, file_type_name, spec, status_letter_from_change, IconKind};
@@ -71,6 +71,9 @@ pub enum IconTarget {
     /// An icon on the shown commit-file or compare file list row with this
     /// [`CommitFileRow::id`].
     CommitFileRow(String),
+    /// An icon on the active Explorer tab's tree row with this
+    /// checkout-relative path ([`super::explorer::ExplorerRow::rel`]).
+    ExplorerRow(String),
     /// An icon on the graph row with this [`graph_row_id`]: a node, the
     /// uncommitted glyph, or the comment mark.
     GraphRow(String),
@@ -415,6 +418,7 @@ fn section(
                 None => commit_file_section(state, kind, &summary()?),
             }
         }
+        IconTarget::ExplorerRow(rel) => explorer_row_section(state, kind, rel),
         IconTarget::GraphRow(id) => graph_row_section(state, rows, kind, id, now_unix),
         IconTarget::GraphWorktree(path) => graph_worktree_section(state, rows, path),
         IconTarget::GraphChip { row, chip } => graph_chip_section(state, rows, kind, row, chip),
@@ -599,6 +603,42 @@ fn commit_file_section(
         icon: kind,
         role: seg.role,
         target: IconTarget::CommitFileRow(row.id.clone()),
+        lines,
+    })
+}
+
+/// Section of icon `kind` on the active Explorer tree's row at `rel`. Same
+/// builders as a workspace tree file or folder row: the comment fields over
+/// the comments behind the row's mark, else the file-level fields with the
+/// checkout's own change as both the row change and its sides. `None` when
+/// the row is gone or no longer paints the icon.
+fn explorer_row_section(state: &AppState, kind: IconKind, rel: &str) -> Option<PopoverSection> {
+    let (checkout, row, status) = state.explorer_row_at(rel)?;
+    let seg = painted_seg(
+        &state.explorer_row_paint_segments(&checkout, &row, &status),
+        kind,
+    )?;
+    let kind = seg.icon?;
+    let mut lines = vec![PopoverLine::Text(spec(kind).meaning.to_string())];
+    let actions = if is_comment_kind(kind) {
+        let comments =
+            checkout_file_comments(&state.comment_store, &state.snapshot, &checkout, rel);
+        comment_fields(&comments, &mut lines)
+    } else {
+        let change = status.change(rel).cloned();
+        let facts = FileFacts {
+            path: rel.to_string(),
+            sides: change.clone(),
+            change,
+            files: status.changed_files_under(rel),
+        };
+        file_fields(kind, &facts, &mut lines)?
+    };
+    lines.extend(actions.iter().filter_map(PopoverLine::action));
+    Some(PopoverSection {
+        icon: kind,
+        role: seg.role,
+        target: IconTarget::ExplorerRow(rel.to_string()),
         lines,
     })
 }

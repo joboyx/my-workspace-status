@@ -22,6 +22,7 @@ CI runs the checks in `crates/workspace-status/src/parity_registry.rs` (part of 
 | `tree_hwheel_pans_a_shown_file_view_that_can_pan_on_every_registry_tree_surface` (`tui/render.rs`) | The `horizontal-pan` tree surfaces (`tree`, `explorer-tree`) are not `supported` for `hwheel` in each look; or on one of them the horizontal wheel over the tree does not pan a shown file view that can pan (leaving the tree still), does not pan the tree once the view cannot pan, or Shift-→ with the tree focused pans anything but the tree. |
 | `line_click_picks_the_row_and_a_drag_selects_on_every_registry_surface` (`tui/render.rs`) | The `line-viewers` surfaces differ from the surfaces that test drives, or one of them is not `supported` for `click-row` in each look; or on one of them a click on a line does not move the line cursor there and focus the viewer, or a press-drag from it does not select text (copied on release) or moves the cursor again. |
 | `resize_edges_drag_and_hover_on_every_registry_surface` (`tui/render.rs`) | The `resize-edges` surfaces differ from the surfaces that test drives, or one of them is not `supported` for `divider`, `diff-rule`, and `hover` in each look; or on one of them the divider or the side-by-side RULE under the pointer does not hover and light, a drag does not widen the left pane or move the RULE (painted where it was dropped), or the release does not end the drag. |
+| `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface` (`tui/render.rs`) | The `file-lists` (`row-icons`), `icon-popovers` (`icon-hits`, `focused-row`), `row-marks` (`reviewed`, `comment`), or `watch-flash` (`flash`) surfaces whose code anchors name `draw_tree` or `draw_explorer_tree` differ from the trees that test drives (`tree`, `explorer-tree`), or one of them is not `supported` in each look; or on one of them a file or folder row paints other icons, glyphs, or order than on the other tree, a hit is wider than its glyph (also panned), a reloaded row does not flash, a hover does not find the icon, a click on a glyph does not pin its section (or a folder glyph changes the fold), `gh` does not pin one section per icon, or a section differs from the other tree's. |
 | `line_gutter_comment_marks_peek_pin_and_gh_on_every_registry_surface` (`tui/render.rs`) | The `icon-popovers` surfaces whose code anchors name `draw_diff_pane` or `draw_file_body` differ from the surfaces that test drives, or one of them is not `supported` for `icon-hits` and `focused-row` in each look; or on one of them (each diff tab, inline and side by side, panned or not) a comment mark records no hit or a hit wider than its glyph, a hover does not peek the comments of that line only, a click does not select the line and pin with no text selection or RULE drag, or `gh` on the marked cursor line does not pin it. |
 
 The `commit-footer` check is the pattern for other components: one test body that runs the same assertions on every surface the registry marks `supported`, and that compares its own surface list to `parity_registry::supported_surface_looks(component, feature)`.
@@ -73,7 +74,7 @@ Lists of file rows: the workspace tree, the commit-file list (depth 1 right, dep
 
 | Feature | What | Tests |
 | --- | --- | --- |
-| `row-icons` | Rows paint devicons and status marks, and record icon hits for hover and pin popovers. | `commit_file_rows_record_icon_hits`, `file_row_badge_and_devicon_hits_cover_the_glyph_only`, `folder_summary_rows_paint_the_file_list_marks_flash_and_icon_hits` |
+| `row-icons` | Rows paint devicons and status marks, and record icon hits for hover and pin popovers. | `commit_file_rows_record_icon_hits`, `file_row_badge_and_devicon_hits_cover_the_glyph_only`, `folder_summary_rows_paint_the_file_list_marks_flash_and_icon_hits`, `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface` |
 | `scroll` | Rows past the pane height scroll into view. | `folder_summary_scrolls_with_the_keys_and_wheel_and_resets_on_another_folder`, `list_vertical_bar_drags_and_track_click_jumps_on_every_registry_surface` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `row-icons` | `scroll` |
@@ -83,7 +84,7 @@ Lists of file rows: the workspace tree, the commit-file list (depth 1 right, dep
 | `files-d2` | Workspace | 2 | left | boxed, flat | `draw_commit_detail`, `draw_commit_file_list`, `commit_file_row_paint_segments` | supported | supported |
 | `compare-files` | Compare | - | left | boxed, flat | `draw_panes`, `draw_commit_file_list`, `commit_file_row_paint_segments` | supported | supported |
 | `summary` | Workspace 2, Compare | - | right | boxed, flat | `draw_folder_summary`, `folder_summary`, `summary_rows`, `summary_row_paint_segments_in`, `scroll_summary_by` | supported | supported |
-| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree`, `explorer_row_segments` | gap: G15 | supported |
+| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree`, `explorer_row_segments`, `explorer_row_paint_segments` | supported | supported |
 
 ### `line-viewers` — Line viewers
 
@@ -162,8 +163,8 @@ Icons and marks on rows record an icon hit (`LayoutHit::icon_hits`): hover peeks
 
 | Feature | What | Tests |
 | --- | --- | --- |
-| `icon-hits` | The painted icons hover and pin their popover with the mouse. | `commit_file_rows_record_icon_hits`, `click_on_an_icon_selects_its_row_and_pins_without_a_double_click`, `line_gutter_comment_marks_peek_pin_and_gh_on_every_registry_surface`, `folder_summary_rows_paint_the_file_list_marks_flash_and_icon_hits` |
-| `focused-row` | `gh` pins the focused row's popover. | `gh_pins_the_icon_popover_and_bare_h_still_folds`, `line_gutter_comment_marks_peek_pin_and_gh_on_every_registry_surface`, `line_comment_popover_closes_when_the_cursor_leaves_its_line` |
+| `icon-hits` | The painted icons hover and pin their popover with the mouse. | `commit_file_rows_record_icon_hits`, `click_on_an_icon_selects_its_row_and_pins_without_a_double_click`, `line_gutter_comment_marks_peek_pin_and_gh_on_every_registry_surface`, `folder_summary_rows_paint_the_file_list_marks_flash_and_icon_hits`, `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface` |
+| `focused-row` | `gh` pins the focused row's popover. | `gh_pins_the_icon_popover_and_bare_h_still_folds`, `line_gutter_comment_marks_peek_pin_and_gh_on_every_registry_surface`, `line_comment_popover_closes_when_the_cursor_leaves_its_line`, `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `icon-hits` | `focused-row` |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -174,7 +175,7 @@ Icons and marks on rows record an icon hit (`LayoutHit::icon_hits`): hover peeks
 | `files-d2` | Workspace | 2 | left | boxed, flat | `draw_commit_file_list`, `commit_file_row_paint_segments`, `focused_row_icons` | supported | supported |
 | `compare-files` | Compare | - | left | boxed, flat | `draw_commit_file_list`, `commit_file_row_paint_segments`, `focused_row_icons` | supported | supported |
 | `summary` | Workspace 2, Compare | - | right | boxed, flat | `draw_folder_summary`, `summary_row_paint_segments_in`, `summary_rows` | supported | n/a: the summary is never the focused list, so it has no focused row |
-| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree`, `explorer_row_segments`, `focused_row_icons` | gap: G15; Explorer rows record no icon hit | gap: G15; `focused_row_icons` is empty on an Explorer tab |
+| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree`, `explorer_row_paint_segments`, `segmented_icon_spans`, `explorer_row_section`, `explorer_click_row`, `click_with`, `focused_row_icons`, `explorer_cursor_row_icons`, `popover_owner` | supported | supported |
 | `diff-gutter` | Workspace, Compare, Explorer | 0, 2, - | right | boxed, flat | `draw_diff_pane`, `comment_mark_cols`, `diff_row_mark_hits`, `diff_row_gutter_cells`, `line_comment_mark`, `cursor_line_comment_icons`, `line_comments`, `line_comment_section`, `focused_row_icons`, `click_with`, `split_hit_at` | supported | supported |
 | `file-gutter` | Explorer (clean file) | - | right | boxed, flat | `draw_file_body`, `format_line_gutter`, `line_mark_hit`, `line_comment_mark`, `cursor_line_comment_icons`, `line_comments`, `line_comment_section`, `focused_row_icons`, `click_with` | supported | supported |
 
@@ -250,8 +251,8 @@ The reviewed eye and the comment mark (open or resolved) on a row or a line gutt
 
 | Feature | What | Tests |
 | --- | --- | --- |
-| `reviewed` | A reviewed file paints the eye. | `folder_summary_rows_paint_the_file_list_marks_flash_and_icon_hits` |
-| `comment` | A row or line with comments paints the comment mark. | `commit_file_row_paints_comment_mark_when_file_has_comments`, `graph_commit_row_marks_object_and_file_comments`, `explorer_file_view_paints_a_comment_mark_on_its_line`, `folder_summary_rows_paint_the_file_list_marks_flash_and_icon_hits` |
+| `reviewed` | A reviewed file paints the eye. | `folder_summary_rows_paint_the_file_list_marks_flash_and_icon_hits`, `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface`, `explorer_space_paints_the_reviewed_eye_on_both_trees` |
+| `comment` | A row or line with comments paints the comment mark. | `commit_file_row_paints_comment_mark_when_file_has_comments`, `graph_commit_row_marks_object_and_file_comments`, `explorer_file_view_paints_a_comment_mark_on_its_line`, `folder_summary_rows_paint_the_file_list_marks_flash_and_icon_hits`, `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `reviewed` | `comment` |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -263,7 +264,7 @@ The reviewed eye and the comment mark (open or resolved) on a row or a line gutt
 | `compare-files` | Compare | - | left | boxed, flat | `commit_file_row_paint_segments`, `compare_file_reviewed` | supported | supported |
 | `summary-d2` | Workspace | 2 | right | boxed, flat | `draw_folder_summary`, `summary_row_paint_segments_in`, `commit_file_row_has_comment` | n/a: reviewed marks are for workspace-tree files and compare ranges, so the commit drill's file list has no eye to match | supported |
 | `summary-compare` | Compare | - | right | boxed, flat | `draw_folder_summary`, `summary_row_paint_segments_in`, `compare_file_reviewed` | supported | supported |
-| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree`, `explorer_toggle_reviewed` | gap: G16 | gap: G16 |
+| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree`, `explorer_row_paint_segments`, `checkout_file_comment_state`, `explorer_toggle_reviewed`, `toggle_viewed_for` | supported | supported |
 | `diff-gutter` | Workspace, Compare, Explorer | 0, 2, - | right | boxed, flat | `draw_diff_pane`, `comment_mark_cols` | n/a: reviewed is per file, and the file's list row carries the eye | supported |
 | `file-gutter` | Explorer (clean file) | - | right | boxed, flat | `draw_file_body`, `file_line_comment` | n/a: reviewed is per file, and the file's list row carries the eye | supported |
 
@@ -273,7 +274,7 @@ A row that a watch reload adds or changes flashes and fades.
 
 | Feature | What | Tests |
 | --- | --- | --- |
-| `flash` | A reloaded row flashes. | `flash_paints_node_and_spacer_cursor_wins`, `folder_summary_rows_paint_the_file_list_marks_flash_and_icon_hits` |
+| `flash` | A reloaded row flashes. | `flash_paints_node_and_spacer_cursor_wins`, `folder_summary_rows_paint_the_file_list_marks_flash_and_icon_hits`, `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface`, `explorer_rows_flash_on_a_watch_reload` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `flash` |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -284,17 +285,14 @@ A row that a watch reload adds or changes flashes and fades.
 | `files-d2` | Workspace | 2 | left | boxed, flat | `draw_commit_file_list`, `commit_file_flash_color` | supported |
 | `compare-files` | Compare | - | left | boxed, flat | `draw_commit_file_list`, `commit_file_flash_color` | supported |
 | `summary` | Workspace 2, Compare | - | right | boxed, flat | `draw_folder_summary`, `commit_file_flash_color` | supported |
-| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree` | gap: G17 |
+| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree`, `explorer_row_flash_color`, `flash_color`, `apply_watch_snapshot` | supported |
 
 ## Open gaps
 
-Each open gap is tracked by its id. Fixing one turns its cells into `supported` (or `n/a: <reason>`) and removes its row here.
+Each open gap is tracked by its id. Fixing one turns its cells into `supported` (or `n/a: <reason>`) and removes its row here. No gap is open now: the table has no rows.
 
 | Gap | Component | Has it | Missing on |
 | --- | --- | --- | --- |
-| G15 | `file-lists` | Workspace tree and commit-file lists: devicons, icon hits, popovers, `gh` | Explorer tree rows: `explorer_row_segments` sets `icon: None` and records no hit; `focused_row_icons` is empty on an Explorer tab |
-| G16 | `row-marks` | Workspace tree and compare list paint the reviewed eye and comment marks | Explorer tree paints no mark (code comment on `explorer_toggle_reviewed`); the docs do not say so |
-| G17 | `watch-flash` | Tree, graph, and commit-file rows flash on a watch reload | Explorer tree: the flash is passed as `None` in `draw_explorer_tree` |
 
 ## Intentional differences
 

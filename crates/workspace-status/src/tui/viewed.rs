@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use super::persist::{persist_with_lock, LEGACY_WORKSPACE_ID};
+use super::tree::{file_row_id, UNSTAGED_ROW_SUFFIX};
 use crate::snapshot::{FileChange, WorkspaceSnapshot};
 
 /// On-disk store version written by save. Load accepts `1` and `2`.
@@ -379,12 +380,13 @@ pub fn viewed_row_ids(
             let identity = viewed_identity(&repo.repo, &file.path);
             if let Some(fp) = current.get(&identity) {
                 if is_viewed(store, &identity, fp) {
-                    ids.insert(format!("file:{}:{}", repo.repo, file.path));
+                    let id = file_row_id(&repo.repo, &file.path);
                     if file.staged_status.is_some()
                         && (file.unstaged_status.is_some() || file.untracked)
                     {
-                        ids.insert(format!("file:{}:{}#unstaged", repo.repo, file.path));
+                        ids.insert(format!("{id}{UNSTAGED_ROW_SUFFIX}"));
                     }
+                    ids.insert(id);
                 }
             }
         }

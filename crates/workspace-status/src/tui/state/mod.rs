@@ -18,7 +18,6 @@ mod remote_view;
 mod scroll_glide;
 mod summary;
 
-pub(crate) use explorer_tab::explorer_row_segments;
 pub(crate) use pull_request::PrDetailState;
 
 use std::borrow::Cow;
@@ -582,6 +581,7 @@ impl LayoutHit {
                 }),
                 IconTarget::TreeRow(_)
                 | IconTarget::CommitFileRow(_)
+                | IconTarget::ExplorerRow(_)
                 | IconTarget::GraphRow(_)
                 | IconTarget::GraphWorktree(_)
                 | IconTarget::GraphChip { .. }

@@ -494,15 +494,29 @@ fn collapse_dir(name: String, mut node: MutableDir) -> (String, MutableDir) {
     (collapsed_name, node)
 }
 
+/// Id of the workspace tree row of changed file `path` in checkout
+/// `repo`: `file:<repo>:<path>`. A file with changes on both sides also
+/// has a Changes row, this id plus [`UNSTAGED_ROW_SUFFIX`]. Reviewed marks
+/// and watch flashes are keyed by these ids; the Explorer tree reads them
+/// for its row of the same file.
+pub fn file_row_id(repo: &str, path: &str) -> String {
+    format!("file:{repo}:{path}")
+}
+
+/// Suffix of the Changes-side row id of a file with changes on both sides
+/// ([`file_row_id`]).
+pub const UNSTAGED_ROW_SUFFIX: &str = "#unstaged";
+
 fn make_file_node(
     repo: &WorkspaceRepoSnapshot,
     change: &FileChange,
     unstaged_suffix: bool,
 ) -> TreeNode {
+    let id = file_row_id(&repo.repo, &change.path);
     let id = if unstaged_suffix {
-        format!("file:{}:{}#unstaged", repo.repo, change.path)
+        format!("{id}{UNSTAGED_ROW_SUFFIX}")
     } else {
-        format!("file:{}:{}", repo.repo, change.path)
+        id
     };
     TreeNode {
         id,
@@ -974,10 +988,24 @@ pub fn segments_search_label(segs: &NodeSegments) -> (String, String) {
     (label, right_raw)
 }
 
+/// Devicon segment of a file row at `path`: the [`file_icon`] glyph and
+/// one space, in the icon's own colour, tagged [`IconKind::FileType`]. The
+/// workspace tree, the commit-file lists, and the Explorer tree share it.
+pub fn file_type_seg(path: &str, ascii: bool) -> TextSeg {
+    let icon = file_icon(ascii, path);
+    TextSeg {
+        text: format!("{} ", icon.glyph),
+        role: SegRole::File,
+        hex: icon.color,
+        bold: false,
+        dim: false,
+        icon: Some(IconKind::FileType),
+    }
+}
+
 fn file_segments(change: &FileChange, tree_mode: bool, ascii: bool) -> NodeSegments {
     let status = status_letter_from_change(change);
     let color = SegRole::from(status.color_role());
-    let icon = file_icon(ascii, &change.path);
     let name = file_display_name(change);
     let dir = {
         let path = change.path.as_str();
@@ -987,14 +1015,7 @@ fn file_segments(change: &FileChange, tree_mode: bool, ascii: bool) -> NodeSegme
             .to_string()
     };
 
-    let mut segments = vec![TextSeg {
-        text: format!("{} ", icon.glyph),
-        role: SegRole::File,
-        hex: icon.color,
-        bold: false,
-        dim: false,
-        icon: Some(IconKind::FileType),
-    }];
+    let mut segments = vec![file_type_seg(&change.path, ascii)];
     if let Some(old) = change.old_path.as_deref() {
         let old_name = if tree_mode {
             old.rsplit('/')

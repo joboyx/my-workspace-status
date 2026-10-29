@@ -87,8 +87,8 @@ use super::split::{
     MIN_PANE_COLS, MIN_TERM_COLS, MIN_TERM_ROWS,
 };
 use super::state::{
-    explorer_row_segments, revert_scope, AppState, CompareRevertTarget, FocusPane, IconHit,
-    LayoutHit, PendingConfirm, PopoverHit,
+    revert_scope, AppState, CompareRevertTarget, FocusPane, IconHit, LayoutHit, PendingConfirm,
+    PopoverHit,
 };
 use super::syntax::{
     cached_highlight_diff_rows, highlight_file_window, readable_fg, slice_styled_cols,
@@ -1553,37 +1553,59 @@ fn draw_explorer_tree(
         dim: false,
         icon: None,
     };
-    let lines: Vec<Line> = rows
+    let checkout = state
+        .tabs
+        .active_explorer()
+        .map(|tab| tab.checkout.clone())
+        .unwrap_or_default();
+    let width = rows_area.width as usize;
+    let mut lines = Vec::new();
+    let mut hits = Vec::new();
+    for ((index, row), y) in rows
         .iter()
         .enumerate()
         .skip(start)
         .take(height)
-        .map(|(index, row)| {
-            let segs = if row.placeholder {
-                NodeSegments {
-                    segments: vec![loading.clone()],
-                    trailing: Vec::new(),
-                }
-            } else {
-                explorer_row_segments(row, status, state.ascii)
-            };
-            paint_segmented_row(
-                row.depth,
-                row.is_dir,
-                !row.expanded,
-                &segs,
-                rows_area.width as usize,
-                Some(index) == cursor,
-                focused,
-                None,
-                matches.contains(&index),
-                search,
-                state.ascii,
-                palette,
-                usize::from(pan),
-            )
-        })
-        .collect();
+        .zip(rows_area.y..)
+    {
+        let segs = if row.placeholder {
+            NodeSegments {
+                segments: vec![loading.clone()],
+                trailing: Vec::new(),
+            }
+        } else {
+            state.explorer_row_paint_segments(&checkout, row, status)
+        };
+        // Glyph-only hits, panned and clipped as the row paints them
+        // (the vertical bar's column is outside `width`).
+        for (kind, x, w) in segmented_icon_spans(row.depth, &segs, width, usize::from(pan)) {
+            hits.push(IconHit {
+                y,
+                x: rows_area
+                    .x
+                    .saturating_add(u16::try_from(x).unwrap_or(u16::MAX)),
+                width: u16::try_from(w).unwrap_or(u16::MAX),
+                kind,
+                target: IconTarget::ExplorerRow(row.rel.clone()),
+            });
+        }
+        lines.push(paint_segmented_row(
+            row.depth,
+            row.is_dir,
+            !row.expanded,
+            &segs,
+            width,
+            Some(index) == cursor,
+            focused,
+            state.explorer_row_flash_color(&checkout, row),
+            matches.contains(&index),
+            search,
+            state.ascii,
+            palette,
+            usize::from(pan),
+        ));
+    }
+    state.layout.icon_hits.extend(hits);
     frame.render_widget(Paragraph::new(lines), rows_area);
     let flat = state.background == BackgroundMode::Paint;
     let (vbar, hbar) = bars.paint(frame, start, (pan, col_max), flat);
@@ -22455,6 +22477,414 @@ mod tests {
         let crumb = buffer_text(&terminal);
         assert!(crumb.contains("app › src"), "{crumb}");
         assert!(crumb.contains("parent"), "{crumb}");
+    }
+
+    /// The components and features a tree file or folder row carries.
+    const TREE_ROW_FEATURES: [(&str, &str); 6] = [
+        ("file-lists", "row-icons"),
+        ("icon-popovers", "icon-hits"),
+        ("icon-popovers", "focused-row"),
+        ("row-marks", "reviewed"),
+        ("row-marks", "comment"),
+        ("watch-flash", "flash"),
+    ];
+
+    /// One tree a tree-row test drives, over [`explorer_state`]'s
+    /// checkout: the Workspace tree or the Explorer tree.
+    struct TreeRowSurface {
+        /// Registry surface id.
+        id: &'static str,
+        /// The fixture on this tree, tree focused.
+        open: fn() -> AppState,
+        /// Icon target of this tree's row of checkout path `rel`.
+        target: fn(&AppState, &str) -> IconTarget,
+        /// Put this tree's cursor on the row of `rel`.
+        focus: fn(&mut AppState, &str),
+    }
+
+    /// The Workspace tree row of checkout path `rel` (a file or folder).
+    fn workspace_tree_row_id(state: &AppState, rel: &str) -> String {
+        state
+            .rows
+            .iter()
+            .find(|row| {
+                row.chrome.path == rel && matches!(row.kind, NodeKind::File | NodeKind::Dir)
+            })
+            .map(|row| row.id.clone())
+            .unwrap_or_else(|| panic!("no Workspace tree row for {rel}"))
+    }
+
+    const TREE_ROW_SURFACES: [TreeRowSurface; 2] = [
+        TreeRowSurface {
+            id: "tree",
+            open: || {
+                let mut state = explorer_state();
+                state.dispatch(Action::JumpToTab(1));
+                assert!(!state.is_explorer_tab(), "the Workspace tab");
+                state.focus = FocusPane::Left;
+                state
+            },
+            target: |state, rel| IconTarget::TreeRow(workspace_tree_row_id(state, rel)),
+            focus: |state, rel| {
+                let id = workspace_tree_row_id(state, rel);
+                focus_tree_row(state, &id);
+            },
+        },
+        TreeRowSurface {
+            id: "explorer-tree",
+            open: explorer_state,
+            target: |_, rel| IconTarget::ExplorerRow(rel.into()),
+            focus: |state, rel| {
+                if let Some(tab) = state.tabs.active_explorer_mut() {
+                    tab.tree.set_cursor_rel(rel);
+                }
+            },
+        },
+    ];
+
+    /// `TREE_ROW_FEATURES` surfaces whose code anchors name a tree paint
+    /// are [`TREE_ROW_SURFACES`], each `supported` in both looks.
+    fn check_tree_row_registry() {
+        let registry = crate::parity_registry::registry();
+        let ids: Vec<&str> = TREE_ROW_SURFACES.iter().map(|s| s.id).collect();
+        let mut want: Vec<(String, String)> = ids
+            .iter()
+            .flat_map(|id| {
+                PANE_LOOKS
+                    .iter()
+                    .map(|(look, _)| (id.to_string(), look.to_string()))
+            })
+            .collect();
+        want.sort();
+        for (component, feature) in TREE_ROW_FEATURES {
+            let trees: Vec<&str> = registry
+                .components
+                .iter()
+                .find(|c| c.id == component)
+                .unwrap_or_else(|| panic!("no component {component}"))
+                .surfaces
+                .iter()
+                .filter(|s| {
+                    s.anchors
+                        .iter()
+                        .any(|a| a == "draw_tree" || a == "draw_explorer_tree")
+                })
+                .map(|s| s.id.as_str())
+                .collect();
+            assert_eq!(
+                trees, ids,
+                "docs/parity.md `{component}` tree surfaces must match this test's"
+            );
+            let supported: Vec<(String, String)> =
+                crate::parity_registry::supported_surface_looks(component, feature)
+                    .into_iter()
+                    .filter(|(surface, _)| ids.contains(&surface.as_str()))
+                    .collect();
+            assert_eq!(
+                supported, want,
+                "docs/parity.md `{component}` / `{feature}` must be supported on every tree"
+            );
+        }
+    }
+
+    /// The Workspace tree and the Explorer tree paint the same row for the
+    /// same file or folder, in both looks: the devicon or folder glyph, the
+    /// reviewed eye (the shared stored mark), the comment mark of a
+    /// working-tree line comment, and the status letter, in the same order
+    /// and glyphs, each with a glyph-only icon hit that stays glyph-only
+    /// when the tree pans. A watch-reload flash of a file paints its row.
+    /// A hover peeks, a click on a glyph selects the row and pins the same
+    /// popover section (a folder glyph leaves the fold as it is), and `gh`
+    /// on the focused row pins one section per icon, the same on both
+    /// trees.
+    #[test]
+    fn tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface() {
+        check_tree_row_registry();
+        // (surface, look) → painted README.md icons, src icons, and the
+        // folder click, devicon click, and `gh` sections (target left out).
+        type Seen = (
+            Vec<(IconKind, String)>,
+            Vec<(IconKind, String)>,
+            Vec<Vec<(IconKind, SegRole, Vec<PopoverLine>)>>,
+        );
+        let mut seen: Vec<(&str, &str, Seen)> = Vec::new();
+        let sections = |state: &AppState| -> Vec<(IconKind, SegRole, Vec<PopoverLine>)> {
+            state
+                .open_popover_sections()
+                .into_iter()
+                .map(|s| (s.icon, s.role, s.lines))
+                .collect()
+        };
+        for surface in &TREE_ROW_SURFACES {
+            for (look, background) in PANE_LOOKS {
+                let case = format!("{} {look}", surface.id);
+                let mut state = (surface.open)();
+                state.background = background;
+                state.comment_store = put_comment(
+                    &state.comment_store,
+                    CommentKey::WorktreeLine {
+                        repo: "app".into(),
+                        branch: "main".into(),
+                        path: "README.md".into(),
+                        line: 1,
+                        end_line: 1,
+                    },
+                    "note",
+                );
+                assert_eq!(
+                    state.toggle_viewed_for("app", "README.md"),
+                    Some(true),
+                    "{case}: README.md marked reviewed"
+                );
+                state.flashes.insert(
+                    "file:app:new.txt".into(),
+                    super::super::watch::FlashStamp {
+                        at: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                        kind: FlashKind::Update,
+                    },
+                );
+                let flash = state
+                    .theme
+                    .palette()
+                    .flash_bg_for(FlashKind::Update, 1.0)
+                    .expect("a flash colour");
+                let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let hits_of = |state: &AppState, terminal: &Terminal<TestBackend>, rel: &str| {
+                    hit_cells(state, terminal, &(surface.target)(state, rel))
+                        .into_iter()
+                        .map(|(kind, cells, width)| {
+                            assert_eq!(cells.trim(), cells, "{case} {rel} {kind:?}: glyph only");
+                            assert_eq!(visible_width(&cells), usize::from(width), "{case}");
+                            (kind, cells)
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let readme = hits_of(&state, &terminal, "README.md");
+                let kinds: Vec<IconKind> = readme.iter().map(|(k, _)| *k).collect();
+                assert_eq!(
+                    kinds,
+                    [
+                        IconKind::FileType,
+                        IconKind::Viewed,
+                        IconKind::Comment,
+                        IconKind::StatusModified
+                    ],
+                    "{case}: README.md icons in paint order"
+                );
+                let src = hits_of(&state, &terminal, "src");
+                assert_eq!(
+                    src.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+                    [IconKind::Folder],
+                    "{case}: src icons"
+                );
+
+                // The flash paints the flashed row, and only that row.
+                let target_hit = |state: &AppState, rel: &str, kind: IconKind| {
+                    let target = (surface.target)(state, rel);
+                    state
+                        .layout
+                        .icon_hits
+                        .iter()
+                        .find(|hit| hit.target == target && hit.kind == kind)
+                        .cloned()
+                        .unwrap_or_else(|| panic!("{case}: a {kind:?} hit on {rel}"))
+                };
+                let buf = terminal.backend().buffer().clone();
+                let flashed = |y: u16| (0..state.layout.right_x).any(|x| buf[(x, y)].bg == flash);
+                let new_y = target_hit(&state, "new.txt", IconKind::FileType).y;
+                let readme_y = target_hit(&state, "README.md", IconKind::FileType).y;
+                assert!(flashed(new_y), "{case}: the reloaded row flashes");
+                assert!(!flashed(readme_y), "{case}: another row does not");
+
+                // Hover, then a click on the folder glyph: selected and
+                // pinned, the fold as it was.
+                let devicon = target_hit(&state, "README.md", IconKind::FileType);
+                state.set_pointer(Some((devicon.x, devicon.y)));
+                assert_eq!(state.hovered_icon(), Some(&devicon), "{case}: hover");
+                let rows_before = state.explorer_rows().map(|(rows, _)| rows.len());
+                let tree_rows_before = state.rows.len();
+                let folder = target_hit(&state, "src", IconKind::Folder);
+                state.dispatch(Action::Click {
+                    col: folder.x,
+                    row: folder.y,
+                });
+                assert!(state.popover_pinned(), "{case}: the folder glyph pins");
+                let folder_sections = sections(&state);
+                assert_eq!(
+                    folder_sections.iter().map(|s| s.0).collect::<Vec<_>>(),
+                    [IconKind::Folder],
+                    "{case}: the folder section"
+                );
+                assert_eq!(
+                    state.explorer_rows().map(|(rows, _)| rows.len()),
+                    rows_before,
+                    "{case}: the Explorer fold stays"
+                );
+                assert_eq!(state.rows.len(), tree_rows_before, "{case}: the fold stays");
+                state.dispatch(Action::PopoverClose);
+                draw_state(&mut terminal, &mut state);
+
+                let devicon = target_hit(&state, "README.md", IconKind::FileType);
+                state.dispatch(Action::Click {
+                    col: devicon.x,
+                    row: devicon.y,
+                });
+                assert!(state.popover_pinned(), "{case}: the devicon pins");
+                let devicon_sections = sections(&state);
+                assert_eq!(
+                    devicon_sections.iter().map(|s| s.0).collect::<Vec<_>>(),
+                    [IconKind::FileType],
+                    "{case}: the file-type section"
+                );
+                state.dispatch(Action::PopoverClose);
+
+                (surface.focus)(&mut state, "README.md");
+                draw_state(&mut terminal, &mut state);
+                state.dispatch(Action::PopoverOpenFocused);
+                assert!(state.popover_pinned(), "{case}: gh pins");
+                let gh_sections = sections(&state);
+                assert_eq!(
+                    gh_sections.iter().map(|s| s.0).collect::<Vec<_>>(),
+                    kinds,
+                    "{case}: gh pins one section per icon"
+                );
+                // A cursor move closes the pinned popover.
+                (surface.focus)(&mut state, "new.txt");
+                assert!(!state.popover_pinned(), "{case}: another row closes it");
+                state.dispatch(Action::PopoverClose);
+
+                // Panned on a narrow terminal, each hit is still its glyph:
+                // the devicon pans out with the label's first column, and
+                // the right-aligned marks keep their cells.
+                let mut narrow = Terminal::new(TestBackend::new(48, 20)).unwrap();
+                (surface.focus)(&mut state, "README.md");
+                draw_state(&mut narrow, &mut state);
+                let badge = target_hit(&state, "README.md", IconKind::StatusModified);
+                state.dispatch(Action::PanDiff(1));
+                draw_state(&mut narrow, &mut state);
+                let pan = if surface.id == "tree" {
+                    state.left_col_offset
+                } else {
+                    state
+                        .tabs
+                        .active_explorer()
+                        .map_or(0, |t| t.tree_col_offset)
+                };
+                assert_eq!(pan, 1, "{case}: the narrow tree pans");
+                let panned = hits_of(&state, &narrow, "README.md");
+                assert_eq!(
+                    panned.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+                    kinds[1..],
+                    "{case}: the devicon glyph panned out, so its hit did"
+                );
+                assert_eq!(
+                    target_hit(&state, "README.md", IconKind::StatusModified),
+                    badge,
+                    "{case}: the badge keeps its cell"
+                );
+
+                seen.push((
+                    surface.id,
+                    look,
+                    (
+                        readme,
+                        src,
+                        vec![folder_sections, devicon_sections, gh_sections],
+                    ),
+                ));
+            }
+        }
+        for (look, _) in PANE_LOOKS {
+            let of = |id: &str| {
+                &seen
+                    .iter()
+                    .find(|(surface, l, _)| *surface == id && *l == look)
+                    .expect("a case")
+                    .2
+            };
+            assert_eq!(of("explorer-tree"), of("tree"), "{look}: the same rows");
+        }
+    }
+
+    /// A watch reload that changes a file's status flashes its Explorer
+    /// row (the Workspace tree row's flash of the same path), in both
+    /// looks; a row the reload left alone does not flash.
+    #[test]
+    fn explorer_rows_flash_on_a_watch_reload() {
+        for (look, background) in PANE_LOOKS {
+            let mut state = explorer_state();
+            state.background = background;
+            let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let mut next = state.snapshot.clone();
+            let readme = next.repos[0]
+                .changes
+                .iter_mut()
+                .find(|change| change.path == "README.md")
+                .expect("README.md change");
+            readme.staged_status = Some("M".into());
+            readme.unstaged_status = None;
+            let flashed = state.apply_watch_snapshot(next);
+            assert!(
+                flashed.iter().any(|id| id == "file:app:README.md"),
+                "{look}: {flashed:?}"
+            );
+            // Hold the stamps at full strength so the paint is exact.
+            for stamp in state.flashes.values_mut() {
+                stamp.at = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            }
+            draw_state(&mut terminal, &mut state);
+            let flash = state
+                .theme
+                .palette()
+                .flash_bg_for(FlashKind::Update, 1.0)
+                .expect("a flash colour");
+            let buf = terminal.backend().buffer();
+            let tree = state.layout.explorer_tree;
+            let flashed = |name: &str| {
+                let y = (tree.y..tree.bottom())
+                    .find(|y| find_cell_col(buf, *y, name).is_some_and(|x| x < tree.right()))
+                    .unwrap_or_else(|| panic!("{look}: no {name} row"));
+                (tree.x..tree.right()).any(|x| buf[(x, y)].bg == flash)
+            };
+            assert!(flashed("README.md"), "{look}: the reloaded row flashes");
+            assert!(!flashed("new.txt"), "{look}: an unchanged row does not");
+        }
+    }
+
+    /// Space on the Explorer marks the active inner file reviewed in the
+    /// store the Workspace tree reads: the eye paints on its Explorer row
+    /// and on its Workspace tree row, in both looks, and a second Space
+    /// clears both.
+    #[test]
+    fn explorer_space_paints_the_reviewed_eye_on_both_trees() {
+        for (look, background) in PANE_LOOKS {
+            let mut state = explorer_preview_state("README.md", Some(&gutter_diff()));
+            state.background = background;
+            let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+            let eyes = |state: &mut AppState, terminal: &mut Terminal<TestBackend>| {
+                draw_state(terminal, state);
+                let explorer = state.layout.icon_hits.iter().any(|hit| {
+                    hit.kind == IconKind::Viewed
+                        && hit.target == IconTarget::ExplorerRow("README.md".into())
+                });
+                state.dispatch(Action::JumpToTab(1));
+                draw_state(terminal, state);
+                let workspace = state.layout.icon_hits.iter().any(|hit| {
+                    hit.kind == IconKind::Viewed
+                        && hit.target == IconTarget::TreeRow("file:app:README.md".into())
+                });
+                state.dispatch(Action::JumpToTab(2));
+                (explorer, workspace)
+            };
+            assert_eq!(eyes(&mut state, &mut terminal), (false, false), "{look}");
+            state.dispatch(Action::ToggleReviewed);
+            assert_eq!(state.status.to_string(), "marked reviewed", "{look}");
+            assert_eq!(eyes(&mut state, &mut terminal), (true, true), "{look}");
+            state.dispatch(Action::ToggleReviewed);
+            assert_eq!(eyes(&mut state, &mut terminal), (false, false), "{look}");
+        }
     }
 
     /// A `/` search on the Explorer tree paints its matching rows in the

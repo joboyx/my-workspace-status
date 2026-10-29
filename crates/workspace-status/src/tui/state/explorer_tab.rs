@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 
 use crate::file_index::FileRead;
 use crate::helpers::visible_width;
@@ -32,12 +33,16 @@ use crate::snapshot::FileChange;
 
 use super::super::action::{Action, Effect, ExternalDiffKind};
 use super::super::command_palette::{CommandScope, PaletteCommand};
-use super::super::comments::{covering_line_comment, resolve_comment_target, CommentKey};
+use super::super::comments::{
+    checkout_file_comment_state, covering_line_comment, resolve_comment_target, CommentKey,
+};
 use super::super::diff::{row_for_new_line, row_line_ref};
 use super::super::effect::ExplorerPreviewBody;
 use super::super::event_pump::overlay_blocks_background_ticks;
 use super::super::explorer::{ExplorerEntry, ExplorerRow, ExplorerStatus};
 use super::super::gates::{ListFocusTarget, FOCUS_A_FILE_TO_MARK_REVIEWED};
+use super::super::icons::IconKind;
+use super::super::popover::IconTarget;
 use super::super::search::{
     apply_pan, explorer_row_match_indices, list_row_pan_max, step_from_anchor, SearchPane,
 };
@@ -50,8 +55,9 @@ use super::super::tabs::{
     NO_EXPLORER_FILE_TABS, ONLY_WORKSPACE_TAB_OPEN, SWITCH_TO_WORKSPACE_TAB, TAB_TO_THE_FILE_PANE,
 };
 use super::super::tree::{
-    cursor_for_viewport_top, dir_path_from_id, list_viewport_start, NodeKind, NodeSegments,
-    SegRole, TextSeg,
+    cursor_for_viewport_top, dir_name_segments, dir_path_from_id, file_change_segments,
+    file_row_id, file_type_seg, list_viewport_start, segment_icons, with_comment_mark,
+    with_viewed_mark, NodeKind, NodeSegments, SegRole, TextSeg, UNSTAGED_ROW_SUFFIX,
 };
 use super::super::watch::{file_disk_token, GONE_DISK_TOKEN};
 use super::{
@@ -536,8 +542,10 @@ impl AppState {
 
     /// `space`: toggle the reviewed mark of the active inner file (the
     /// Workspace tree's mark of the same file). A clean file, or no inner
-    /// tab, says [`FOCUS_A_FILE_TO_MARK_REVIEWED`]. The Explorer paints no
-    /// mark, so the status line says which way it went.
+    /// tab, says [`FOCUS_A_FILE_TO_MARK_REVIEWED`]. The file's tree row
+    /// paints the eye ([`Self::explorer_row_paint_segments`]); the inner
+    /// file can be another row than the cursor's, so the status line also
+    /// says which way it went.
     fn explorer_toggle_reviewed(&mut self) -> Effect {
         let Some((checkout, change)) = self.explorer_active_change() else {
             self.status = StatusMessage::warn(FOCUS_A_FILE_TO_MARK_REVIEWED);
@@ -954,7 +962,9 @@ impl AppState {
 
     /// The row under (`col`, `row`) after [`Self::explorer_click`] found no
     /// drag handle there (or a flat divider press released in place). A
-    /// tree row takes the cursor (a folder also opens or closes); a second
+    /// tree row takes the cursor (a folder also opens or closes, except on
+    /// a press on its folder glyph, which only selects it for the icon's
+    /// popover); a second
     /// press on the same cell within 400 ms ([`Self::note_row_press`]) is
     /// Enter on that row ([`Self::explorer_enter`]), except on a folder,
     /// whose first press already toggled it (as on a Workspace tree
@@ -987,6 +997,16 @@ impl AppState {
                 return Effect::None;
             };
             if hit.is_dir {
+                // A press on the folder glyph selects the row for its
+                // popover pin (`click_with`) and leaves the fold as is, as
+                // a Workspace tree row's glyph does.
+                if self.icon_hit_at(col, row).is_some() {
+                    let rel = hit.rel.clone();
+                    if let Some(tab) = self.tabs.active_explorer_mut() {
+                        tab.tree.set_cursor_rel(&rel);
+                    }
+                    return Effect::None;
+                }
                 if is_double {
                     return Effect::None;
                 }
@@ -1045,9 +1065,109 @@ impl AppState {
         }
     }
 
+    /// Every segment Explorer tree row `row` of `checkout` paints: its
+    /// label and status mark ([`explorer_row_segments`]), then on a file
+    /// row the comment mark and the reviewed eye, in the order and with the
+    /// glyphs a Workspace tree file row adds them
+    /// ([`super::super::tree::painted_row_segments`]). The comment mark
+    /// uses the Workspace file row's match
+    /// ([`checkout_file_comment_state`]); the eye is the Workspace tree's
+    /// stored reviewed mark of the same file ([`file_row_id`] in
+    /// [`AppState::reviewed`]), which Space toggles on either tab. Paint,
+    /// the pan clamp, `gh`, and the popover sections read it.
+    pub(crate) fn explorer_row_paint_segments(
+        &self,
+        checkout: &str,
+        row: &ExplorerRow,
+        status: &ExplorerStatus,
+    ) -> NodeSegments {
+        let segs = explorer_row_segments(row, status, self.ascii);
+        if row.is_dir || row.placeholder {
+            return segs;
+        }
+        let comment =
+            checkout_file_comment_state(&self.comment_store, &self.snapshot, checkout, &row.rel);
+        let viewed = status.change(&row.rel).is_some()
+            && self.reviewed.contains(&file_row_id(checkout, &row.rel));
+        NodeSegments {
+            segments: segs.segments,
+            trailing: with_viewed_mark(
+                with_comment_mark(
+                    segs.trailing,
+                    self.ascii,
+                    comment.is_some(),
+                    comment == Some(true),
+                ),
+                self.ascii,
+                viewed,
+            ),
+        }
+    }
+
+    /// Fade colour of Explorer tree row `row` of `checkout` while a watch
+    /// reload flash of its path decays: the flash of the Workspace tree row
+    /// of the same path ([`file_row_id`] for a file, `dir:<checkout>:<rel>`
+    /// for a folder, or the Changes-side twin of either), which
+    /// [`AppState::apply_watch_snapshot`] stamps when that status reload
+    /// adds, changes, or removes it. A map lookup: no git, no I/O.
+    pub(crate) fn explorer_row_flash_color(
+        &self,
+        checkout: &str,
+        row: &ExplorerRow,
+    ) -> Option<Color> {
+        if row.placeholder {
+            return None;
+        }
+        let id = if row.is_dir {
+            format!("dir:{checkout}:{}", row.rel)
+        } else {
+            file_row_id(checkout, &row.rel)
+        };
+        self.flash_color(&id)
+            .or_else(|| self.flash_color(&format!("{id}{UNSTAGED_ROW_SUFFIX}")))
+    }
+
+    /// Checkout, row, and status of the active Explorer tab's listed tree
+    /// row at `rel` (a popover section reads its icon from it). `None`
+    /// off an Explorer tab or once the row is gone.
+    pub(crate) fn explorer_row_at(
+        &self,
+        rel: &str,
+    ) -> Option<(String, ExplorerRow, Rc<ExplorerStatus>)> {
+        let tab = self.tabs.active_explorer()?;
+        let status = self.explorer_status(&tab.checkout);
+        let row = tab
+            .tree
+            .rows(&status)
+            .into_iter()
+            .find(|row| row.rel == rel && !row.placeholder)?;
+        Some((tab.checkout.clone(), row, status))
+    }
+
+    /// Icons of the Explorer tree's cursor row in paint order, clipped
+    /// ones included: what `gh` pins with the tree focused.
+    pub(crate) fn explorer_cursor_row_icons(&self) -> Vec<(IconKind, IconTarget)> {
+        let (Some(tab), Some(row)) = (self.tabs.active_explorer(), self.explorer_cursor_row())
+        else {
+            return Vec::new();
+        };
+        let status = self.explorer_status(&tab.checkout);
+        segment_icons(&self.explorer_row_paint_segments(&tab.checkout, &row, &status))
+            .into_iter()
+            .map(|kind| (kind, IconTarget::ExplorerRow(row.rel.clone())))
+            .collect()
+    }
+
+    /// Rel of the Explorer tree's cursor row; `None` off an Explorer tab
+    /// or with no row to focus. A popover owner and an Explorer row
+    /// target compare against it.
+    pub(crate) fn explorer_cursor_rel(&self) -> Option<String> {
+        self.explorer_cursor_row().map(|row| row.rel)
+    }
+
     /// Pan max of the active Explorer tree in a pane `pane_width` columns
     /// wide whose vertical scrollbar shows (`vbar`) or not: its longest
-    /// painted row ([`explorer_row_segments`]) against the width left of
+    /// painted row ([`Self::explorer_row_paint_segments`]) against the width left of
     /// the bar, as the Workspace tree clamps ([`Self::tree_max_col_in`]).
     /// A loading placeholder row is left out: it paints a short spinner
     /// copy only until its folder lists. 0 off an Explorer tab.
@@ -1062,7 +1182,7 @@ impl AppState {
             .iter()
             .filter(|row| !row.placeholder)
             .map(|row| {
-                let segs = explorer_row_segments(row, &status, self.ascii);
+                let segs = self.explorer_row_paint_segments(&tab.checkout, row, &status);
                 let label: usize = segs.segments.iter().map(|s| visible_width(&s.text)).sum();
                 let trailing: usize = segs.trailing.iter().map(|s| visible_width(&s.text)).sum();
                 list_row_pan_max(label, row.depth, trailing, width)
@@ -2003,57 +2123,64 @@ enum FoldKind {
 /// Explorer badge of an untracked file (the Workspace tree says `A`).
 const UNTRACKED_BADGE: &str = "??";
 
-/// Name and right-hand mark of one listed Explorer row (the paint draws a
-/// loading placeholder row itself).
+/// Label and status mark of one listed Explorer row, built from the
+/// Workspace tree's row pieces (the paint draws a loading placeholder row
+/// itself).
 ///
-/// A changed file paints in its status colour with its letter badge
-/// (`??` for an untracked file); a folder with changes under it gets a
-/// `●` in the modified colour. Ignored entries are muted and dim. The
-/// paint and the tree's pan clamp ([`AppState::explorer_tree_max_col_in`])
-/// both size rows from these segments.
-pub(crate) fn explorer_row_segments(
-    row: &ExplorerRow,
-    status: &ExplorerStatus,
-    ascii: bool,
-) -> NodeSegments {
-    let seg = |text: &str, role: SegRole, dim: bool| TextSeg {
+/// A folder is the Workspace folder row ([`dir_name_segments`]: folder
+/// glyph and name), with a `●` in the modified colour when it has changes
+/// under it. A changed file is the Workspace file row
+/// ([`file_change_segments`]: devicon, name in its status colour, and the
+/// bold status letter), except that an untracked file's letter is `??`. A
+/// clean file is the devicon and its name. Ignored entries keep their
+/// glyph and name, muted and dim, with no mark. The comment mark and the
+/// reviewed eye come on top ([`AppState::explorer_row_paint_segments`]).
+fn explorer_row_segments(row: &ExplorerRow, status: &ExplorerStatus, ascii: bool) -> NodeSegments {
+    let plain = |text: &str, role: SegRole| TextSeg {
         text: text.to_string(),
         role,
         hex: None,
         bold: false,
-        dim,
+        dim: false,
         icon: None,
     };
-    if row.ignored {
-        return NodeSegments {
-            segments: vec![seg(&row.name, SegRole::Muted, true)],
-            trailing: Vec::new(),
-        };
-    }
-    if row.is_dir {
-        let dirty = status.dir_dirty(&row.rel);
-        let dot = if ascii { "*" } else { "●" };
-        return NodeSegments {
-            segments: vec![seg(&row.name, SegRole::Dir, false)],
-            trailing: if dirty {
-                vec![seg(dot, SegRole::Modified, false)]
-            } else {
-                Vec::new()
-            },
-        };
-    }
-    let (role, badge) = if status.is_untracked(&row.rel) {
-        (SegRole::Added, Some(UNTRACKED_BADGE))
-    } else if let Some(letter) = status.letter(&row.rel) {
-        (SegRole::from(letter.color_role()), Some(letter.badge()))
+    let segs = if row.is_dir {
+        let mut segs = dir_name_segments(&row.name, ascii);
+        if status.dir_dirty(&row.rel) {
+            let dot = if ascii { "*" } else { "●" };
+            segs.trailing = vec![plain(dot, SegRole::Modified)];
+        }
+        segs
+    } else if let Some(change) = status.change(&row.rel) {
+        let mut segs = file_change_segments(change, true, ascii);
+        if change.untracked {
+            if let Some(badge) = segs.trailing.first_mut() {
+                badge.text = UNTRACKED_BADGE.to_string();
+            }
+        }
+        segs
     } else {
-        (SegRole::File, None)
+        NodeSegments {
+            segments: vec![
+                file_type_seg(&row.rel, ascii),
+                plain(&row.name, SegRole::File),
+            ],
+            trailing: Vec::new(),
+        }
+    };
+    if !row.ignored {
+        return segs;
+    }
+    let muted = |seg: TextSeg| TextSeg {
+        role: SegRole::Muted,
+        hex: None,
+        bold: false,
+        dim: true,
+        ..seg
     };
     NodeSegments {
-        segments: vec![seg(&row.name, role, false)],
-        trailing: badge
-            .map(|badge| vec![seg(badge, role, false)])
-            .unwrap_or_default(),
+        segments: segs.segments.into_iter().map(muted).collect(),
+        trailing: Vec::new(),
     }
 }
 
