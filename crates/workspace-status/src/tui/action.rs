@@ -258,6 +258,9 @@ pub enum Action {
     PopoverRun,
     /// Copy the focused line of the pinned popover (`y`).
     PopoverCopyLine,
+    /// End a pending `g` chord and do nothing else: a second key the
+    /// chord in a pinned popover does not bind (Esc, `j`, …).
+    GChordCancel,
     /// Close the pinned popover (Esc, right click).
     PopoverClose,
     NavEnter,

@@ -233,6 +233,8 @@ impl AppState {
             | Action::PopoverRun
             | Action::PopoverCopyLine
             | Action::PopoverClose) => self.dispatch_popover(action),
+            // `dispatch` already ended the chord above.
+            Action::GChordCancel => Effect::None,
             // Report-only, from every tab: no gate above refuses these.
             action @ (Action::OpenDoctor
             | Action::DoctorMove(_)

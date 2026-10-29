@@ -113,9 +113,14 @@ pub enum InputMode {
     },
     /// Pinned icon popover (click on an icon, or `gh`): `j` / `k` move,
     /// Enter runs, `y` copies the focused line, `r` refreshes the PR of a
-    /// PR section, Esc closes. The mouse stays live (click, drag-select,
-    /// wheel). A hover peek is not a mode.
+    /// PR section, `g` arms [`Self::PopoverGPending`], Esc closes. The
+    /// mouse stays live (click, drag-select, wheel). A hover peek is not a
+    /// mode.
     Popover,
+    /// `g` armed inside a pinned popover: `x` opens the PR of its PR
+    /// section and `c` its CI page, like `gx` / `gc` on the row. Any other
+    /// key (Esc, right click) only ends the chord; the popover stays.
+    PopoverGPending,
     /// Doctor setup checkup overlay: `j` / `k` / arrows / page keys / `g` /
     /// `G` move, `y` copies the focused fix line, `r` re-runs, Esc / `q`
     /// close. Every other key is swallowed.
@@ -127,11 +132,16 @@ fn same_g_chord_key(last: Option<(KeyCode, KeyModifiers)>, key: &KeyEvent) -> bo
 }
 
 fn records_g_chord_press(mode: InputMode, key: &KeyEvent) -> bool {
-    matches!(mode, InputMode::GPending { .. })
-        || (matches!(
-            mode,
-            InputMode::Normal { .. } | InputMode::ZPending { .. } | InputMode::DiffVisual
-        ) && matches!(key.code, KeyCode::Char('g')))
+    matches!(
+        mode,
+        InputMode::GPending { .. } | InputMode::PopoverGPending
+    ) || (matches!(
+        mode,
+        InputMode::Normal { .. }
+            | InputMode::ZPending { .. }
+            | InputMode::DiffVisual
+            | InputMode::Popover
+    ) && matches!(key.code, KeyCode::Char('g')))
 }
 
 #[cfg(test)]
@@ -354,7 +364,9 @@ pub fn event_to_action_with(
                 Action::PopoverClose
             } else if matches!(
                 mode,
-                InputMode::ZPending { .. } | InputMode::GPending { .. }
+                InputMode::ZPending { .. }
+                    | InputMode::GPending { .. }
+                    | InputMode::PopoverGPending
             ) && mouse.kind == MouseEventKind::Down(MouseButton::Right)
             {
                 // Right-click is Esc; in a pending chord, Esc only ends the chord.
@@ -589,6 +601,7 @@ fn repeat_maps_to_action(key: KeyEvent, mode: InputMode) -> bool {
         | InputMode::BlameMenu
         | InputMode::CommentExport
         | InputMode::Popover
+        | InputMode::PopoverGPending
         | InputMode::Doctor => false,
     }
 }
@@ -869,8 +882,17 @@ fn key_to_action(
             KeyCode::Char('y') => Action::PopoverCopyLine,
             // Refresh this PR; a popover with no PR section ignores it.
             KeyCode::Char('r') => Action::RefreshPullRequest,
+            // `gx` / `gc` on the popover's PR section.
+            KeyCode::Char('g') => Action::ArmGChord,
             KeyCode::Esc => Action::PopoverClose,
             _ => Action::None,
+        },
+        // Only `x` and `c` complete the chord; any other key ends it and
+        // does nothing else (it never reaches the popover keys).
+        InputMode::PopoverGPending => match key.code {
+            KeyCode::Char('x') if !has_command_modifier(key) => Action::OpenPullRequest,
+            KeyCode::Char('c') if !has_command_modifier(key) => Action::OpenPullRequestCi,
+            _ => Action::GChordCancel,
         },
         InputMode::Doctor => doctor_key_action(key),
         InputMode::QuickOpen => quick_open_key_action(key),
@@ -2988,14 +3010,16 @@ mod tests {
             (key(KeyCode::Enter), Action::PopoverRun),
             (key(KeyCode::Char('y')), Action::PopoverCopyLine),
             (key(KeyCode::Char('r')), Action::RefreshPullRequest),
-            (key(KeyCode::Char('g')), Action::None),
+            (key(KeyCode::Char('g')), Action::ArmGChord),
             (key(KeyCode::Char('c')), Action::None),
+            (key(KeyCode::Char('x')), Action::None),
             (key(KeyCode::Esc), Action::PopoverClose),
             (key(KeyCode::Char('p')), Action::None),
             (key(KeyCode::Char('q')), Action::None),
             (key(KeyCode::Char(':')), Action::None),
             (ctrl(KeyCode::Char('j')), Action::None),
             (ctrl(KeyCode::Char('p')), Action::None),
+            (ctrl(KeyCode::Char('g')), Action::None),
             (ctrl(KeyCode::Char('c')), Action::CtrlC),
         ] {
             assert_eq!(at(event.clone()), want, "{event:?}");

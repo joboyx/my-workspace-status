@@ -18,6 +18,7 @@ use super::super::tabs::{
     ComparePickerKind, NOT_ON_WORKTREE_COMPARE, ONLY_WORKSPACE_TAB_OPEN, WORKSPACE_TAB_CANNOT_CLOSE,
 };
 use super::super::tree::NodeKind;
+use super::pull_request::PrAction;
 use super::{AppState, FileWrite, FocusPane, FoldOp};
 
 impl AppState {
@@ -398,9 +399,10 @@ impl AppState {
             }
             Action::ExportComments => self.export_comments(),
             Action::CopyEntityReference => self.copy_entity_reference(),
-            Action::OpenPullRequest | Action::OpenPullRequestCi | Action::CopyPullRequestUrl => {
-                self.run_pr_action(&action)
-            }
+            // In a pinned popover `gx` / `gc` act on its PR section.
+            Action::OpenPullRequest => self.run_pr_key(PrAction::Open),
+            Action::OpenPullRequestCi => self.run_pr_key(PrAction::OpenCi),
+            Action::CopyPullRequestUrl => self.run_pr_action(PrAction::CopyUrl),
             Action::RefreshPullRequest => self.refresh_pull_request(),
             Action::RefreshPullRequests => self.refresh_pull_requests(None),
             Action::ViewRemotely => self.view_remotely(),

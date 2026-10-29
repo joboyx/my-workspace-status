@@ -7013,8 +7013,11 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
             PopoverRow::Line(index) => {
                 2 + match lines[index] {
                     PopoverLine::Text(text) | PopoverLine::Note(text) => visible_width(text),
-                    PopoverLine::Field { value, .. } => {
-                        label_width(index) + 1 + visible_width(value)
+                    PopoverLine::Field { value, mark, .. } => {
+                        label_width(index)
+                            + 1
+                            + mark.map_or(0, |(mark, _)| visible_width(mark) + 1)
+                            + visible_width(value)
                     }
                     // A rule fills the width the other rows set.
                     PopoverLine::Rule => 0,
@@ -7092,9 +7095,16 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
                         role,
                         link,
                         bold,
+                        mark,
                     } => {
                         let pad = label_width(index).saturating_sub(visible_width(label));
                         spans.push(Span::styled(format!("{label}{} ", " ".repeat(pad)), muted));
+                        if let Some((mark, mark_role)) = mark {
+                            spans.push(Span::styled(
+                                format!("{mark} "),
+                                Style::default().fg(seg_role_color(*mark_role, palette)),
+                            ));
+                        }
                         let style = Style::default().fg(seg_role_color(*role, palette));
                         // A cut value ends in `…`; a link keeps the full
                         // URL.

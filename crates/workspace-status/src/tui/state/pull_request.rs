@@ -47,7 +47,7 @@ use super::super::pr_status::PrState;
 use super::super::pull_request::{
     ci_opened_status, commit_url, is_web_url, lookup_failed_status, no_ci_status, no_pr_status,
     parse_remote, PrDetailLookup, PrLookup, PrPage, PullRequest, PullRequestDetail, CI_OPEN_FAILED,
-    NO_PR_FOR_ROW, OPEN_FAILED,
+    NO_PR_FOR_ROW, OPEN_FAILED, PR_LOOKUP_RUNNING,
 };
 use super::super::status::StatusMessage;
 use super::super::tree::{NodeKind, PrBadge, PrTotals, PR_REF_MIN_TREE_COLS};
@@ -157,16 +157,32 @@ impl CheckoutPr {
     }
 }
 
-/// True for the actions that act on one PR: Open PR, Open PR CI, Copy PR
-/// URL, and Refresh this PR.
-fn is_pr_action(action: &Action) -> bool {
-    matches!(
-        action,
-        Action::OpenPullRequest
-            | Action::OpenPullRequestCi
-            | Action::CopyPullRequestUrl
-            | Action::RefreshPullRequest
-    )
+/// An action on one PR. Only these run on a PR target
+/// ([`AppState::run_pr_action`]), so no other action can open a browser
+/// there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrAction {
+    /// Open the PR (`gx`, Open PR).
+    Open,
+    /// Open its CI page (`gc`, Open PR CI).
+    OpenCi,
+    /// Copy its URL (Copy PR URL, the popover's Copy URL).
+    CopyUrl,
+    /// Look it up again now (Refresh this PR).
+    Refresh,
+}
+
+impl PrAction {
+    /// The PR action `action` names, or `None` for any other action.
+    pub(crate) fn of(action: &Action) -> Option<Self> {
+        Some(match action {
+            Action::OpenPullRequest => Self::Open,
+            Action::OpenPullRequestCi => Self::OpenCi,
+            Action::CopyPullRequestUrl => Self::CopyUrl,
+            Action::RefreshPullRequest => Self::Refresh,
+            _ => return None,
+        })
+    }
 }
 
 /// Forge host of `remote`, or `None` when it is not on GitHub or GitLab.
@@ -609,13 +625,13 @@ impl AppState {
         is_counted_local_branch(branch).then(|| (repo.to_path_buf(), branch.to_string()))
     }
 
-    /// Run PR action `action` (Open PR, Open PR CI, Copy PR URL, Refresh
-    /// this PR) on the PR of the focused branch row, or say there is none.
+    /// Run PR action `action` on the PR of the focused branch row, or say
+    /// there is none.
     ///
     /// The focused row is a tree repo / checkout row or a graph worktree row
     /// with a branch ([`Self::pr_target_for_focus`]); any other row says
     /// `no PR for this row`.
-    pub(super) fn run_pr_action(&mut self, action: &Action) -> Effect {
+    pub(super) fn run_pr_action(&mut self, action: PrAction) -> Effect {
         match self.pr_target_for_focus() {
             Some((repo, branch)) => self.run_pr_action_on(action, repo, branch),
             None => {
@@ -625,28 +641,66 @@ impl AppState {
         }
     }
 
-    /// Run PR action `action` on the PR of checkout `repo`, from a line of
-    /// its PR popover section: the section's own PR, which is not the
-    /// focused row's when the section hangs from the graph header chip.
-    /// `None` when `action` is no PR action.
-    pub(super) fn run_pr_action_at(&mut self, action: &Action, repo: &Path) -> Option<Effect> {
-        if !is_pr_action(action) {
-            return None;
+    /// `gx` / `gc`: [`Self::run_pr_action`] on the focused row, or, inside
+    /// a pinned popover, on its PR section. The popover closes first, as
+    /// Enter on the line closes it. A pinned popover with no PR section
+    /// says `no PR for this row` and stays open.
+    pub(super) fn run_pr_key(&mut self, action: PrAction) -> Effect {
+        if !self.popover_pinned() {
+            return self.run_pr_action(action);
         }
-        Some(match self.pr_target_for_repo(repo) {
+        let Some(repo) = self.popover_pr_checkouts().into_iter().next() else {
+            self.status = StatusMessage::warn(NO_PR_FOR_ROW);
+            return Effect::None;
+        };
+        self.close_popover();
+        self.run_pr_action_on_checkout(action, &repo)
+    }
+
+    /// Run `action` on the PR of checkout `repo`, from a line of its PR
+    /// popover section: the section's own PR, which is not the focused
+    /// row's when the section hangs from the graph header chip. `None` when
+    /// `action` is no [`PrAction`].
+    pub(super) fn run_pr_action_at(&mut self, action: &Action, repo: &Path) -> Option<Effect> {
+        let action = PrAction::of(action)?;
+        Some(self.run_pr_action_on_checkout(action, repo))
+    }
+
+    /// Run `action` on the PR of the branch checkout `repo` is on now, or
+    /// say `no PR for this row` (detached or unknown HEAD).
+    fn run_pr_action_on_checkout(&mut self, action: PrAction, repo: &Path) -> Effect {
+        match self.pr_target_for_repo(repo) {
             Some((repo, branch)) => self.run_pr_action_on(action, repo, branch),
             None => {
                 self.status = StatusMessage::warn(NO_PR_FOR_ROW);
                 Effect::None
             }
-        })
+        }
+    }
+
+    /// Checkouts of the PR sections of the pinned popover, in section
+    /// order; empty with no popover.
+    fn popover_pr_checkouts(&self) -> Vec<PathBuf> {
+        self.popover
+            .iter()
+            .flat_map(|popover| &popover.targets)
+            .filter_map(|(_, target)| match target {
+                IconTarget::PullRequest(repo) => Some(repo.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     /// [`Self::run_pr_action`] on `branch` of checkout `repo`.
-    fn run_pr_action_on(&mut self, action: &Action, repo: PathBuf, branch: String) -> Effect {
+    fn run_pr_action_on(&mut self, action: PrAction, repo: PathBuf, branch: String) -> Effect {
         match action {
-            Action::OpenPullRequestCi => self.open_pull_request_ci(repo, branch),
-            Action::CopyPullRequestUrl => match self.pull_request_for(&repo) {
+            PrAction::Open => Effect::OpenPullRequest {
+                repo,
+                branch,
+                page: PrPage::Pr,
+            },
+            PrAction::OpenCi => self.open_pull_request_ci(repo, branch),
+            PrAction::CopyUrl => match self.pull_request_for(&repo) {
                 Some(pr) => Effect::CopyClipboard {
                     text: pr.url.clone(),
                     announce: true,
@@ -656,13 +710,7 @@ impl AppState {
                     Effect::None
                 }
             },
-            Action::RefreshPullRequest => self.refresh_pull_requests(Some(&repo)),
-            // `gx`, and any other action: open the PR.
-            _ => Effect::OpenPullRequest {
-                repo,
-                branch,
-                page: PrPage::Pr,
-            },
+            PrAction::Refresh => self.refresh_one_pull_request(&repo),
         }
     }
 
@@ -702,23 +750,16 @@ impl AppState {
     /// shows, and the popover stays open and shows the new answer and
     /// detail when they land; a popover with no PR section does nothing.
     /// Otherwise (the palette): the PR of the focused branch row, or `no PR
-    /// for this row`.
+    /// for this row`. Either way a PR that cannot be looked up says why
+    /// ([`Self::refresh_one_pull_request`]).
     pub(super) fn refresh_pull_request(&mut self) -> Effect {
         if !self.popover_pinned() {
-            return self.run_pr_action(&Action::RefreshPullRequest);
+            return self.run_pr_action(PrAction::Refresh);
         }
-        let repos: Vec<PathBuf> = self
-            .popover
+        let mut effects: Vec<Effect> = self
+            .popover_pr_checkouts()
             .iter()
-            .flat_map(|popover| &popover.targets)
-            .filter_map(|(_, target)| match target {
-                IconTarget::PullRequest(repo) => Some(repo.clone()),
-                _ => None,
-            })
-            .collect();
-        let mut effects: Vec<Effect> = repos
-            .iter()
-            .map(|repo| self.refresh_pull_requests(Some(repo)))
+            .map(|repo| self.refresh_one_pull_request(repo))
             .filter(|effect| *effect != Effect::None)
             .collect();
         match effects.len() {
@@ -726,6 +767,25 @@ impl AppState {
             1 => effects.remove(0),
             _ => Effect::Batch(effects),
         }
+    }
+
+    /// [`Self::refresh_pull_requests`] for checkout `repo`, or say why it
+    /// looks nothing up: `PR lookup already running` while a lookup of it
+    /// is queued or running, else `no PR for this row` (no GitHub or GitLab
+    /// remote, no branch, or a hidden checkout).
+    fn refresh_one_pull_request(&mut self, repo: &Path) -> Effect {
+        let effect = self.refresh_pull_requests(Some(repo));
+        if effect == Effect::None {
+            let running = self
+                .current_pr_record(repo)
+                .is_some_and(|record| record.in_flight);
+            self.status = StatusMessage::warn(if running {
+                PR_LOOKUP_RUNNING
+            } else {
+                NO_PR_FOR_ROW
+            });
+        }
+        effect
     }
 
     /// Ctrl+click: on a painted PR badge, select the row and open its PR.
@@ -1019,6 +1079,9 @@ impl AppState {
         if self.snapshot_branch(repo) != Some(branch) {
             return false;
         }
+        // The answer can add or drop popover lines above the focused one
+        // (notes, stack): keep the pinned focus on its line.
+        let focus = self.popover_focus_key();
         let Some(record) = self
             .pr_cache
             .checkouts
@@ -1031,6 +1094,7 @@ impl AppState {
         let poll_cycle = record.poll_cycle.take();
         self.pr_cache
             .land(repo, branch, remote, lookup, poll_cycle, now);
+        self.restore_popover_focus(focus);
         true
     }
 
@@ -1065,6 +1129,7 @@ impl AppState {
             (PrLookup::Failed(_), _) => StatusMessage::error(lookup_failed_status(branch)),
         };
         if self.snapshot_branch(repo) == Some(branch) {
+            let focus = self.popover_focus_key();
             let cache = &mut self.pr_cache;
             if cache
                 .checkouts
@@ -1076,6 +1141,7 @@ impl AppState {
                     .insert(repo.to_path_buf(), CheckoutPr::new(branch, false));
             }
             cache.land(repo, branch, remote, lookup, None, Instant::now());
+            self.restore_popover_focus(focus);
         } else if let Some(remote) = remote {
             self.pr_cache
                 .set_answer((remote, branch.to_string()), lookup.into());

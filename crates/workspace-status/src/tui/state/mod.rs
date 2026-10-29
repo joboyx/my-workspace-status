@@ -1384,7 +1384,11 @@ impl AppState {
         } else if self.doctor.is_some() {
             InputMode::Doctor
         } else if self.popover_pinned() {
-            InputMode::Popover
+            if self.chord_pending(self.g_pending_at) {
+                InputMode::PopoverGPending
+            } else {
+                InputMode::Popover
+            }
         } else if self.search_mode {
             InputMode::SearchPrompt
         } else if self.diff_visual_anchor.is_some()

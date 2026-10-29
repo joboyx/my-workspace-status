@@ -59,6 +59,10 @@ pub fn lookup_failed_status(branch: &str) -> String {
 /// Status line when the browser could not be started.
 pub const OPEN_FAILED: &str = "could not open PR";
 
+/// Status line when Refresh this PR finds a lookup of that PR already
+/// queued or running.
+pub const PR_LOOKUP_RUNNING: &str = "PR lookup already running";
+
 /// Status line when PR `pr_ref` (`#318`, `!12`) has no CI page to open.
 pub fn no_ci_status(pr_ref: &str) -> String {
     format!("no CI for {pr_ref}")

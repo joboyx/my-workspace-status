@@ -864,14 +864,26 @@ impl AppState {
     }
 }
 
-/// What identifies a focusable popover line inside its section: `true`
-/// and the title for an action, `false` and the label for a field.
-pub(crate) type PopoverLineKey = (bool, &'static str);
+/// What identifies a focusable popover line inside its section.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PopoverLineKey {
+    /// A field by its label.
+    Field(&'static str),
+    /// A field with a blank label (one of the lines that continue the
+    /// field above it, such as the PR check names) by its value.
+    Continued(String),
+    /// An action by its palette title, so a section's own title for it
+    /// (a CI label that changes) keeps the focus.
+    Action(&'static str),
+}
 
 fn line_key(line: &PopoverLine) -> Option<PopoverLineKey> {
     match line {
-        PopoverLine::Field { label, .. } => Some((false, label)),
-        PopoverLine::Action { command, .. } => Some((true, command.title)),
+        PopoverLine::Field {
+            label: "", value, ..
+        } => Some(PopoverLineKey::Continued(value.clone())),
+        PopoverLine::Field { label, .. } => Some(PopoverLineKey::Field(label)),
+        PopoverLine::Action { command, .. } => Some(PopoverLineKey::Action(command.title)),
         PopoverLine::Text(_) | PopoverLine::Note(_) | PopoverLine::Rule => None,
     }
 }
@@ -890,7 +902,9 @@ fn line_ref(sections: &[PopoverSection], index: usize) -> Option<PopoverLineRef>
 /// The [`flat_lines`] index of the line `key` names in `sections`.
 fn line_index(sections: &[PopoverSection], (target, key): &PopoverLineRef) -> Option<usize> {
     section_lines(sections)
-        .find(|(_, section, line)| section.target == *target && line_key(line) == Some(*key))
+        .find(|(_, section, line)| {
+            section.target == *target && line_key(line).as_ref() == Some(key)
+        })
         .map(|(index, _, _)| index)
 }
 

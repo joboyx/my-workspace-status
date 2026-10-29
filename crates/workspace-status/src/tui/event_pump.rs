@@ -119,6 +119,7 @@ pub fn overlay_blocks_background_ticks(mode: InputMode) -> bool {
             | InputMode::GPending { .. }
             | InputMode::DiffVisual
             | InputMode::Popover
+            | InputMode::PopoverGPending
     )
 }
 

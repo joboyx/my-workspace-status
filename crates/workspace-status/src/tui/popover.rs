@@ -171,6 +171,10 @@ pub enum PopoverLine {
         /// Length in bytes of the head of the value that paints bold: 0
         /// for none, the value's length for all of it.
         bold: usize,
+        /// A short mark painted before the value in its own colour (the
+        /// `✗` / `…` of a PR check name), while the value keeps
+        /// [`Self::Field::role`]. `y` copies the value alone.
+        mark: Option<(&'static str, SegRole)>,
     },
     /// A horizontal rule between the fields and the actions. Not
     /// focusable.
@@ -791,6 +795,7 @@ fn role_field(label: &'static str, value: impl Into<String>, role: SegRole) -> P
         role,
         link: false,
         bold: 0,
+        mark: None,
     }
 }
 
@@ -802,6 +807,7 @@ fn link_field(label: &'static str, url: impl Into<String>) -> PopoverLine {
         role: SegRole::File,
         link: true,
         bold: 0,
+        mark: None,
     }
 }
 
@@ -818,6 +824,7 @@ fn bold_field(
         role,
         link: false,
         bold,
+        mark: None,
     }
 }
 
@@ -1284,7 +1291,8 @@ fn pr_state_field(detail: &PullRequestDetail, badge: SegRole) -> Option<PopoverL
 }
 
 /// `checks`, then the named failed and running checks (blank label, at
-/// most [`super::pr_status::NAMED_CHECKS_MAX`]) and `+N more`.
+/// most [`super::pr_status::NAMED_CHECKS_MAX`]: a mark in the bucket colour,
+/// `✗` / `…`, then the plain name) and `+N more`.
 ///
 /// GitHub sums the checks ([`checks_text`]); GitLab names its head
 /// pipeline status (`pipeline failed`). The colour follows the worst
@@ -1312,7 +1320,7 @@ fn pr_check_fields(ascii: bool, detail: &PullRequestDetail, lines: &mut Vec<Popo
             more += 1;
             continue;
         }
-        let (mark, role) = match (check.bucket, ascii) {
+        let mark = match (check.bucket, ascii) {
             (CheckBucket::Fail, false) => ("✗", SegRole::Deleted),
             (CheckBucket::Fail, true) => ("fail", SegRole::Deleted),
             (CheckBucket::Pending, false) => ("…", SegRole::Modified),
@@ -1320,7 +1328,15 @@ fn pr_check_fields(ascii: bool, detail: &PullRequestDetail, lines: &mut Vec<Popo
             (CheckBucket::Pass, false) => ("✓", SegRole::Added),
             (CheckBucket::Pass, true) => ("pass", SegRole::Added),
         };
-        lines.push(role_field("", format!("{mark} {}", check.name), role));
+        // Only the mark takes the bucket colour; the name stays plain.
+        lines.push(PopoverLine::Field {
+            label: "",
+            value: check.name.clone(),
+            role: SegRole::File,
+            link: false,
+            bold: 0,
+            mark: Some(mark),
+        });
     }
     if more > 0 {
         lines.push(role_field("", format!("+{more} more"), SegRole::Muted));
@@ -2359,39 +2375,54 @@ mod tests {
                 .expect("PR section")
         }
 
-        /// Each line as text: `label: value`, `(note)`, `---` for the rule,
-        /// `[title] keys` for an action.
-        fn texts(section: &PopoverSection) -> Vec<String> {
-            section
-                .lines
-                .iter()
-                .map(|line| match line {
-                    PopoverLine::Field { label, value, .. } => format!("{label}: {value}"),
-                    PopoverLine::Text(text) | PopoverLine::Note(text) => format!("({text})"),
-                    PopoverLine::Rule => "---".into(),
-                    PopoverLine::Action { command, title } => {
-                        format!("[{title}] {}", command.keys)
-                    }
-                })
-                .collect()
+        /// A line as text: `label: value` (`label: mark value` with a
+        /// mark), `(note)`, `---` for the rule, `[title] keys` for an
+        /// action.
+        fn line_text(line: &PopoverLine) -> String {
+            match line {
+                PopoverLine::Field {
+                    label,
+                    value,
+                    mark: Some((mark, _)),
+                    ..
+                } => format!("{label}: {mark} {value}"),
+                PopoverLine::Field { label, value, .. } => format!("{label}: {value}"),
+                PopoverLine::Text(text) | PopoverLine::Note(text) => format!("({text})"),
+                PopoverLine::Rule => "---".into(),
+                PopoverLine::Action { command, title } => format!("[{title}] {}", command.keys),
+            }
         }
 
-        /// Colour and bold head of the field that starts with `text`.
-        fn style_of(section: &PopoverSection, text: &str) -> (SegRole, usize) {
+        fn texts(section: &PopoverSection) -> Vec<String> {
+            section.lines.iter().map(line_text).collect()
+        }
+
+        /// The field whose [`line_text`] starts with `text`.
+        fn field_of<'a>(section: &'a PopoverSection, text: &str) -> &'a PopoverLine {
             section
                 .lines
                 .iter()
-                .find_map(|line| match line {
-                    PopoverLine::Field {
-                        label,
-                        value,
-                        role,
-                        bold,
-                        ..
-                    } if format!("{label}: {value}").starts_with(text) => Some((*role, *bold)),
-                    _ => None,
+                .find(|line| {
+                    matches!(line, PopoverLine::Field { .. }) && line_text(line).starts_with(text)
                 })
                 .unwrap_or_else(|| panic!("no line {text:?} in {:?}", texts(section)))
+        }
+
+        /// Colour and bold head of the value of the field that starts with
+        /// `text`.
+        fn style_of(section: &PopoverSection, text: &str) -> (SegRole, usize) {
+            match field_of(section, text) {
+                PopoverLine::Field { role, bold, .. } => (*role, *bold),
+                _ => unreachable!("a field"),
+            }
+        }
+
+        /// Colour of the mark of the field that starts with `text`.
+        fn mark_role_of(section: &PopoverSection, text: &str) -> Option<SegRole> {
+            match field_of(section, text) {
+                PopoverLine::Field { mark, .. } => mark.map(|(_, role)| role),
+                _ => unreachable!("a field"),
+            }
         }
 
         fn actions(section: &PopoverSection) -> Vec<String> {
@@ -2510,8 +2541,12 @@ mod tests {
             );
             assert_eq!(style_of(&section, "branch"), (SegRole::BranchFeature, 0));
             assert_eq!(style_of(&section, "checks"), (SegRole::Deleted, 0));
-            assert_eq!(style_of(&section, ": fail"), (SegRole::Deleted, 0));
-            assert_eq!(style_of(&section, ": pending"), (SegRole::Modified, 0));
+            // The mark takes the bucket colour; the check name stays plain.
+            assert_eq!(style_of(&section, ": fail"), (SegRole::File, 0));
+            assert_eq!(mark_role_of(&section, ": fail"), Some(SegRole::Deleted));
+            assert_eq!(style_of(&section, ": pending"), (SegRole::File, 0));
+            assert_eq!(mark_role_of(&section, ": pending"), Some(SegRole::Modified));
+            assert_eq!(mark_role_of(&section, ": +1"), None);
             assert_eq!(style_of(&section, ": +1"), (SegRole::Muted, 0));
             assert_eq!(style_of(&section, "reviews"), (SegRole::Modified, 0));
             assert_eq!(style_of(&section, "checked"), (SegRole::Muted, 0));
@@ -2592,9 +2627,11 @@ mod tests {
                 style_of(&section, "checks: pipeline failed"),
                 (SegRole::Deleted, 0)
             );
+            // The mark takes the bucket colour; the job name stays plain.
+            assert_eq!(style_of(&section, ": fail rspec 1/2"), (SegRole::File, 0));
             assert_eq!(
-                style_of(&section, ": fail rspec 1/2"),
-                (SegRole::Deleted, 0)
+                mark_role_of(&section, ": fail rspec 1/2"),
+                Some(SegRole::Deleted)
             );
         }
 
