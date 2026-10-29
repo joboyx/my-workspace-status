@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use workspace_status_graph::LOADING_OLDER;
 
@@ -872,8 +873,11 @@ pub(crate) struct Interpreter {
     /// Queued "View remotely" opens: checkout, target. Each has its own
     /// [`UserTag::PullRequest`] slot and runs after the queued `gx` opens.
     remote_views: VecDeque<(PathBuf, RemoteTarget)>,
-    /// Queued badge lookups: checkout, branch.
+    /// Queued badge lookups: checkout, branch. A checkout and branch that
+    /// is queued or running is not queued again.
     pr_badges: VecDeque<(PathBuf, String)>,
+    /// Badge lookups on a worker: checkout, branch.
+    pr_badge_jobs: HashSet<(PathBuf, String)>,
     /// Queued popover detail fetches. They run before waiting badge
     /// lookups.
     pr_details: VecDeque<PrDetailJob>,
@@ -957,6 +961,7 @@ impl Interpreter {
             pr_opens: VecDeque::new(),
             remote_views: VecDeque::new(),
             pr_badges: VecDeque::new(),
+            pr_badge_jobs: HashSet::new(),
             pr_details: VecDeque::new(),
             pr_badges_running: 0,
             pr_cli: DEFAULT_PR_CLI,
@@ -1145,6 +1150,21 @@ impl Interpreter {
         self.schedule(state, opts, effect, &Action::FetchTick);
         if fetches && self.kind_live(RunningOp::Fetch) {
             self.fetch_claim = claim;
+        }
+    }
+
+    /// Run the PR poll cycle that starts at `now`: queue badge lookups for
+    /// the pollable checkouts that are due ([`AppState::due_pr_polls`]).
+    /// They share the badge lookup queue, its dedupe, and its cap.
+    pub(crate) fn pr_poll_tick(&mut self, state: &mut AppState, opts: &TuiOpts, now: Instant) {
+        let targets = state.due_pr_polls(now);
+        if !targets.is_empty() {
+            self.schedule(
+                state,
+                opts,
+                Effect::LookupPullRequests { targets },
+                &Action::None,
+            );
         }
     }
 
@@ -1679,7 +1699,11 @@ impl Interpreter {
                 self.sched.enqueue_user(UserTag::PullRequest);
             }
             Effect::LookupPullRequests { targets } => {
-                self.pr_badges.extend(targets);
+                for target in targets {
+                    if !self.pr_badges.contains(&target) && !self.pr_badge_jobs.contains(&target) {
+                        self.pr_badges.push_back(target);
+                    }
+                }
                 self.fill_pr_badge_slots();
             }
             Effect::LoadActivity { checkouts } => self.queue_activity(state, checkouts),
@@ -2468,7 +2492,14 @@ impl Interpreter {
                 lookup,
             } => {
                 self.pr_badges_running = self.pr_badges_running.saturating_sub(1);
+                self.pr_badge_jobs.remove(&(repo.clone(), branch.clone()));
                 if state.apply_pr_lookup(&repo, &branch, remote, lookup) {
+                    // A pinned or peeked popover asks again for a detail
+                    // whose answer changed.
+                    let details = state.request_popover_pr_details();
+                    if details != Effect::None {
+                        self.schedule(state, opts, details, &Action::None);
+                    }
                     self.mark();
                 }
                 self.fill_pr_badge_slots();
@@ -3567,6 +3598,7 @@ impl Interpreter {
                     }
                     if let Some((repo, branch)) = self.pr_badges.pop_front() {
                         self.pr_badges_running += 1;
+                        self.pr_badge_jobs.insert((repo.clone(), branch.clone()));
                         spawn(
                             id,
                             Box::new(move || {
@@ -9007,7 +9039,7 @@ mod tests {
     }
 
     #[test]
-    fn applied_status_looks_up_new_branches_only_and_refresh_looks_up_again() {
+    fn applied_status_looks_up_new_branches_only_and_polls_and_refresh_look_up_again() {
         let mut state = fixture_state();
         let mut interp = Interpreter::with_cap(4);
         let first = state.due_pr_lookups();
@@ -9022,6 +9054,33 @@ mod tests {
 
         apply_app_status(&mut interp, &mut state, 0, "main");
         assert!(interp.pr_badges.is_empty(), "same branch: no new lookup");
+
+        // The poll cycle looks a known PR up again and keeps its badge.
+        assert!(state.apply_pr_lookup(
+            Path::new("app"),
+            "main",
+            Some(DETAIL_REMOTE.into()),
+            PrLookup::Found(crate::tui::pull_request::PullRequest::fixture(
+                7,
+                PR_URL,
+                crate::tui::pr_status::PrState::InReview,
+            )),
+        ));
+        let tui_opts = opts(&state);
+        interp.pr_poll_tick(&mut state, &tui_opts, Instant::now());
+        assert_eq!(
+            interp.pr_badges,
+            VecDeque::from([(PathBuf::from("app"), "main".to_string())]),
+            "lib has no answer yet, so it is not polled"
+        );
+        assert_eq!(
+            state.pr_badge(Path::new("app")),
+            Some(crate::tui::pr_status::PrState::InReview),
+            "a poll keeps the badge"
+        );
+        apply_app_status(&mut interp, &mut state, 0, "main");
+        assert_eq!(interp.pr_badges.len(), 1, "a status apply adds nothing");
+        interp.pr_badges.clear();
 
         apply_app_status(&mut interp, &mut state, 0, "feature");
         assert_eq!(
@@ -9053,6 +9112,123 @@ mod tests {
             state.due_pr_lookups().len(),
             2,
             "a full reload forgets every checkout"
+        );
+    }
+
+    #[test]
+    fn a_checkout_queued_or_running_is_not_queued_again() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(8);
+        interp.pr_cli = cli_must_not_run;
+        let target = |i: usize| (PathBuf::from(format!("missing-{i}")), "feature".to_string());
+        let lookups = |targets: Vec<(PathBuf, String)>| Effect::LookupPullRequests { targets };
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            lookups(vec![target(0), target(1), target(2), target(2)]),
+            &Action::None,
+        );
+        assert_eq!(interp.pr_badges.len(), 3, "a repeat in one batch");
+        let running = capture_jobs(&mut interp, &mut state);
+        assert_eq!(running.len(), 2, "0 and 1 run");
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            lookups(vec![target(0), target(1), target(2), target(3)]),
+            &Action::None,
+        );
+        assert_eq!(
+            interp.pr_badges,
+            VecDeque::from([target(2), target(3)]),
+            "running 0 and 1 and queued 2 are not queued again"
+        );
+        for (id, work) in running {
+            apply_id(&mut interp, &mut state, id, work());
+        }
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            lookups(vec![target(0)]),
+            &Action::None,
+        );
+        assert_eq!(
+            interp.pr_badges,
+            VecDeque::from([target(2), target(3), target(0)]),
+            "a finished lookup can be queued again"
+        );
+    }
+
+    #[test]
+    fn a_landed_badge_lookup_asks_a_pinned_popover_detail_again_after_a_change() {
+        let (mut state, detail) = detail_state();
+        let mut interp = Interpreter::with_cap(4);
+        interp.pr_cli = gh_view_until_cancelled;
+        let tui_opts = opts(&state);
+        interp.interpret_sync(&mut state, &tui_opts, detail, &Action::None);
+        assert!(matches!(
+            state.pull_request_detail_for(Path::new("app")),
+            Some(crate::tui::state::PrDetailState::Ready(_))
+        ));
+        let badge = |pr_state| JobOutcome::PullRequestBadge {
+            repo: PathBuf::from("app"),
+            branch: "main".into(),
+            remote: Some(DETAIL_REMOTE.into()),
+            lookup: PrLookup::Found(crate::tui::pull_request::PullRequest::fixture(
+                7, PR_URL, pr_state,
+            )),
+        };
+        apply(
+            &mut interp,
+            &mut state,
+            badge(crate::tui::pr_status::PrState::InReview),
+        );
+        assert!(interp.pr_details.is_empty(), "the same answer asks nothing");
+
+        apply(
+            &mut interp,
+            &mut state,
+            badge(crate::tui::pr_status::PrState::Ready),
+        );
+        assert_eq!(interp.pr_details.len(), 1, "a changed answer asks again");
+        assert!(state.pr_detail_awaited(DETAIL_REMOTE, "main", 2));
+        assert!(
+            matches!(
+                state.pull_request_detail_for(Path::new("app")),
+                Some(crate::tui::state::PrDetailState::Ready(_))
+            ),
+            "the old detail stays on screen meanwhile"
+        );
+    }
+
+    #[test]
+    fn a_poll_tick_queues_pollable_checkouts_once() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        let _ = state.due_pr_lookups();
+        assert!(state.apply_pr_lookup(
+            Path::new("app"),
+            "main",
+            Some(DETAIL_REMOTE.into()),
+            PrLookup::Found(crate::tui::pull_request::PullRequest::fixture(
+                7,
+                PR_URL,
+                crate::tui::pr_status::PrState::CiRunning,
+            )),
+        ));
+        let tui_opts = opts(&state);
+        let t0 = Instant::now();
+        interp.pr_poll_tick(&mut state, &tui_opts, t0);
+        let app = (PathBuf::from("app"), "main".to_string());
+        assert_eq!(interp.pr_badges, VecDeque::from([app.clone()]));
+        interp.pr_poll_tick(
+            &mut state,
+            &tui_opts,
+            t0 + std::time::Duration::from_secs(60),
+        );
+        assert_eq!(
+            interp.pr_badges,
+            VecDeque::from([app]),
+            "still in flight: not queued again"
         );
     }
 }

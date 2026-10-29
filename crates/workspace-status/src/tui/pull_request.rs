@@ -108,6 +108,13 @@ pub struct PullRequest {
     pub ci_link: CiLink,
     /// Last update, in Unix seconds.
     pub updated_at: Option<i64>,
+    /// False while the forge still computes the merge facts (GitHub
+    /// `mergeStateStatus: UNKNOWN`; GitLab `detailed_merge_status`
+    /// `checking`, `unchecked`, `approvals_syncing`, or `preparing`, or on
+    /// an older server `merge_status` `unchecked`, `checking`, or
+    /// `cannot_be_merged_recheck`). Ready to merge versus in review is then
+    /// not final. Always true for a merged PR.
+    pub merge_state_settled: bool,
 }
 
 // Only tests read this until the PR badge, popover, and alert surfaces do.
@@ -190,6 +197,7 @@ impl PullRequest {
             failed_check: None,
             ci_link,
             updated_at: None,
+            merge_state_settled: true,
         }
     }
 }
@@ -588,6 +596,21 @@ impl GitLabMerge {
                 .or(older.blocking_discussions_resolved),
         }
     }
+
+    /// False while GitLab still computes the merge status (see
+    /// [`PullRequest::merge_state_settled`]).
+    fn settled(&self) -> bool {
+        match self.detailed() {
+            Some(status) => !matches!(
+                status,
+                "checking" | "unchecked" | "approvals_syncing" | "preparing"
+            ),
+            None => !matches!(
+                self.merge_status.as_deref(),
+                Some("unchecked" | "checking" | "cannot_be_merged_recheck")
+            ),
+        }
+    }
 }
 
 /// One GitLab `merge_requests` list entry.
@@ -798,6 +821,8 @@ fn github_pull_request(pr: GitHubPr, kind: Kind) -> PullRequest {
         failed_check: failed_check_name(&checks),
         ci_link: checks_ci_link(&checks, &pr.url),
         updated_at: pr.updated_at.as_deref().and_then(rfc3339_unix),
+        merge_state_settled: kind == Kind::Merged
+            || pr.status.merge_state_status.as_deref() != Some("UNKNOWN"),
         url: pr.url,
     }
 }
@@ -956,6 +981,7 @@ fn gitlab_lookup(
         failed_check: None,
         ci_link: pipeline_ci_link(pipeline.web_url.as_deref(), &mr.web_url),
         updated_at: mr.updated_at.as_deref().and_then(rfc3339_unix),
+        merge_state_settled: kind == Kind::Merged || merge.settled(),
         url: mr.web_url,
     }))
 }
@@ -1860,6 +1886,7 @@ mod tests {
                     kind: CiLinkKind::Checks,
                 },
                 updated_at: Some(1_767_312_000),
+                merge_state_settled: false,
             }
         );
     }
@@ -2512,6 +2539,7 @@ mod tests {
                     kind: CiLinkKind::Pipeline,
                 },
                 updated_at: Some(1_767_312_000),
+                merge_state_settled: true,
             }
         );
     }
@@ -2591,6 +2619,57 @@ mod tests {
         for (what, forge, want) in cases {
             assert_eq!(forge.found().state, want, "{what}");
         }
+    }
+
+    #[test]
+    fn merge_state_settled_is_false_while_the_forge_still_computes_it() {
+        let gh = |fields: &[(&str, &str)]| found_pr(gh_lookup(&[gh_open(fields)]));
+        assert!(!gh(&[]).merge_state_settled, "GitHub UNKNOWN");
+        for status in [r#""CLEAN""#, r#""BLOCKED""#, r#""BEHIND""#, "null"] {
+            assert!(
+                gh(&[("mergeStateStatus", status)]).merge_state_settled,
+                "GitHub {status}"
+            );
+        }
+        let merged = gh_pr(7, "MERGED", BRANCH, "APPROVED", "2026-01-02T00:00:00Z");
+        assert!(
+            found_pr(gh_lookup(&[merged])).merge_state_settled,
+            "a merged GitHub PR is settled even with UNKNOWN"
+        );
+
+        let gl = |fields: &[(&str, &str)]| GlForge::new(&[gl_open(fields)]).found();
+        for status in ["checking", "unchecked", "approvals_syncing", "preparing"] {
+            let pr = gl(&[("detailed_merge_status", &format!(r#""{status}""#))]);
+            assert!(!pr.merge_state_settled, "GitLab {status}");
+        }
+        for status in ["mergeable", "not_approved", "conflict", "ci_still_running"] {
+            let pr = gl(&[("detailed_merge_status", &format!(r#""{status}""#))]);
+            assert!(pr.merge_state_settled, "GitLab {status}");
+        }
+        for (merge_status, settled) in [
+            ("unchecked", false),
+            ("checking", false),
+            ("cannot_be_merged_recheck", false),
+            ("can_be_merged", true),
+            ("cannot_be_merged", true),
+        ] {
+            let pr = gl(&[
+                ("detailed_merge_status", "null"),
+                ("merge_status", &format!(r#""{merge_status}""#)),
+            ]);
+            assert_eq!(
+                pr.merge_state_settled, settled,
+                "older GitLab {merge_status}"
+            );
+        }
+        let merged = json_with(
+            &gl_mr(20, "merged", "2026-03-01T00:00:00.000Z"),
+            &[("detailed_merge_status", r#""checking""#)],
+        );
+        assert!(
+            GlForge::new(&[merged]).found().merge_state_settled,
+            "a merged GitLab MR is settled"
+        );
     }
 
     #[test]

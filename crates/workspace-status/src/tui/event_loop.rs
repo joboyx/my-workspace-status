@@ -208,6 +208,8 @@ struct LoopCtx<'a> {
     input: InputBridge,
     last_watch: Instant,
     last_fetch: Instant,
+    /// Start of the last PR poll cycle (launch: the first badge lookups).
+    last_pr_poll: Instant,
     watch_ms: u64,
     fetch_ms: u64,
     /// OSC 9;4 progress the terminal shows for the current batch.
@@ -251,6 +253,7 @@ pub async fn run(
         input,
         last_watch: Instant::now(),
         last_fetch: Instant::now(),
+        last_pr_poll: Instant::now(),
         watch_ms: opts.settings.watch_ms,
         fetch_ms: opts.settings.fetch_ms,
         progress,
@@ -260,7 +263,8 @@ pub async fn run(
     ctx.interp
         .schedule(ctx.state, ctx.opts, Effect::LoadRightPane, &Action::None);
     // Watch ticks look up only new or changed branches; the first snapshot
-    // is all new.
+    // is all new. This is the first PR poll cycle: the next one runs one
+    // poll period later.
     let lookups = Effect::LookupPullRequests {
         targets: ctx.state.due_pr_lookups(),
     };
@@ -293,6 +297,14 @@ pub async fn run(
             } else {
                 ctx.fetch_ms
                     .saturating_sub(ctx.last_fetch.elapsed().as_millis() as u64)
+            };
+        // Hot or calm: the period follows the PR states each loop pass.
+        let pr_poll_ms = ctx.state.pr_poll_interval_ms();
+        let pr_poll_remain =
+            if pr_poll_ms == 0 || overlay_blocks_background_ticks(ctx.state.input_mode()) {
+                u64::MAX
+            } else {
+                pr_poll_ms.saturating_sub(ctx.last_pr_poll.elapsed().as_millis() as u64)
             };
         let ctrl_remain = ctx.state.ctrl_c_remaining_ms(now).unwrap_or(u64::MAX);
         let status_remain = ctx.state.status_expiry_ms(now).unwrap_or(u64::MAX);
@@ -342,6 +354,15 @@ pub async fn run(
                 if !overlay_blocks_background_ticks(ctx.state.input_mode()) {
                     ctx.interp
                         .background_fetch_tick(ctx.state, ctx.opts, ctx.fetch_ms, unix_now_ms());
+                    if ctx.interp.take_dirty() {
+                        ctx.presenter.mark();
+                    }
+                }
+            }
+            _ = sleep_ms(pr_poll_remain) => {
+                ctx.last_pr_poll = Instant::now();
+                if !overlay_blocks_background_ticks(ctx.state.input_mode()) {
+                    ctx.interp.pr_poll_tick(ctx.state, ctx.opts, ctx.last_pr_poll);
                     if ctx.interp.take_dirty() {
                         ctx.presenter.mark();
                     }

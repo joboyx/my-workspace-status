@@ -6,27 +6,42 @@
 //! checkout remembers the branch it was looked up for and the remote URL the
 //! worker resolved, so a badge never shows an answer for another branch.
 //!
-//! A checkout is looked up again only when its branch is new or changed, and
-//! after `r` forgets it. A watch tick that re-applies the same branch does
-//! not ask the forge again.
+//! A checkout is looked up when its branch is new or changed, and after `r`
+//! forgets it. A watch tick that re-applies the same branch does not ask the
+//! forge again. The poll cycle ([`AppState::due_pr_polls`]) looks up the
+//! pollable checkouts again on its own timer, and keeps their badges on
+//! screen while it runs. A failed poll backs its forge host off and keeps
+//! the last answer.
+//!
+//! Each successful lookup is compared with the last one of the same
+//! checkout in this session. A change of the same PR into CI failed, ready
+//! to merge, or merged, or the PR going away, queues a [`PrTransition`] for
+//! the alert surfaces.
 //!
 //! The PR popover shows richer fields ([`PullRequestDetail`]). They are
 //! fetched once per (remote URL, branch), when a peek or pin first shows
 //! that PR ([`AppState::request_popover_pr_details`]), never on a tick. A
-//! branch switch, `r`, a vanished checkout, or a new answer for the branch
-//! drops the detail.
+//! branch switch, `r`, a vanished checkout, or an answer that names another
+//! PR drops the detail. A changed answer for the same PR keeps it and marks
+//! it for a new fetch, which the next peek, pin, or landed badge lookup
+//! with the popover open asks for.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use workspace_status_graph::{GraphRow, Worktree};
 
 use crate::helpers::is_counted_local_branch;
+use crate::snapshot::{SyncStatus, WorkspaceRepoSnapshot};
 
 use super::super::action::Effect;
 use super::super::gates::ListFocusTarget;
 use super::super::hyperlink::LinkHit;
 use super::super::popover::IconTarget;
+use super::super::pr_poll::{
+    pr_answer_is_stale, pr_poll_backoff_ms, pr_poll_interval_ms, PrPollMode,
+};
 use super::super::pr_status::PrState;
 use super::super::pull_request::{
     commit_url, lookup_failed_status, no_pr_status, parse_remote, PrDetailLookup, PrLookup,
@@ -55,13 +70,155 @@ impl From<PrLookup> for BranchPr {
     }
 }
 
-/// The branch one checkout was looked up for.
+impl BranchPr {
+    /// Number and URL of the PR this answer names; `None` for no PR or a
+    /// failed lookup.
+    fn identity(&self) -> Option<(u64, &str)> {
+        match self {
+            Self::Ready(Some(pr)) => Some((pr.number, pr.url.as_str())),
+            Self::Ready(None) | Self::Failed => None,
+        }
+    }
+}
+
+/// The branch one checkout was looked up for, and how its lookups went.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CheckoutPr {
     branch: String,
-    /// Remote URL the lookup resolved. `None` while the lookup is in flight,
-    /// and when the checkout has no remote (then there is no PR either).
+    /// Remote URL the last landed lookup resolved. `None` before the first
+    /// lookup of the branch lands, and when the checkout has no remote (then
+    /// there is no PR either). A poll keeps it, so the badge stays.
     remote: Option<String>,
+    /// A lookup of this branch is queued or running. A poll skips it.
+    in_flight: bool,
+    /// Start of the poll cycle that queued the lookup in flight; `None`
+    /// when that lookup is not a poll. A failed poll backs off its forge
+    /// host from this time.
+    poll_cycle: Option<Instant>,
+    /// When the last successful lookup of this branch landed.
+    checked_at: Option<Instant>,
+    /// The last lookup of this branch failed; `None` after a success.
+    failure: Option<PrLookupFailure>,
+}
+
+impl CheckoutPr {
+    /// A record for `branch` with nothing landed yet.
+    fn new(branch: &str, in_flight: bool) -> Self {
+        Self {
+            branch: branch.to_string(),
+            remote: None,
+            in_flight,
+            poll_cycle: None,
+            checked_at: None,
+            failure: None,
+        }
+    }
+}
+
+/// A PR lookup of a checkout that failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PrLookupFailure {
+    /// The CLI's first stderr line, when it printed one.
+    // Only tests read this until the PR popover does.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) reason: Option<String>,
+}
+
+/// What a PR became in a [`PrTransition`].
+// Only tests read this until the alert surfaces do.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrTransitionTo {
+    /// The same PR is in this state now: [`PrState::CiFailed`],
+    /// [`PrState::Ready`], or [`PrState::Merged`].
+    State(PrState),
+    /// The PR went away (closed without a merge, so no PR counts) while
+    /// the checkout stayed on the branch and the forge answered.
+    Closed,
+}
+
+/// A change of a PR that alerts: same checkout, same PR number, a state
+/// from an earlier successful lookup in this session, and now CI failed,
+/// ready to merge, merged, or closed. Other changes are not queued.
+///
+/// [`AppState::take_pr_transitions`] drains the queue.
+// Only tests read this until the alert surfaces do.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PrTransition {
+    /// Checkout path (snapshot `repo`) whose PR changed.
+    pub(crate) checkout: PathBuf,
+    /// The new answer. For [`PrTransitionTo::Closed`], the last answer
+    /// before the PR went away.
+    pub(crate) pr: PullRequest,
+    /// State of the PR in the earlier lookup.
+    pub(crate) from: PrState,
+    /// What the PR became.
+    pub(crate) to: PrTransitionTo,
+}
+
+/// The answer of the last successful lookup of one checkout in this
+/// session, the "before" of a [`PrTransition`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SeenPr {
+    remote: String,
+    branch: String,
+    pr: Option<PullRequest>,
+}
+
+impl SeenPr {
+    /// The transition from this answer to `pr`, the new answer of
+    /// `checkout` for `branch` at `remote`, when it is one that alerts.
+    fn transition_to(
+        &self,
+        checkout: &Path,
+        remote: &str,
+        branch: &str,
+        pr: Option<&PullRequest>,
+    ) -> Option<PrTransition> {
+        if self.remote != remote || self.branch != branch {
+            return None;
+        }
+        let before = self.pr.as_ref()?;
+        let (pr, to) = match pr {
+            Some(pr) if pr.number == before.number && pr.state != before.state => {
+                if !matches!(
+                    pr.state,
+                    PrState::CiFailed | PrState::Ready | PrState::Merged
+                ) {
+                    return None;
+                }
+                (pr.clone(), PrTransitionTo::State(pr.state))
+            }
+            None if before.state != PrState::Merged => (before.clone(), PrTransitionTo::Closed),
+            _ => return None,
+        };
+        Some(PrTransition {
+            checkout: checkout.to_path_buf(),
+            pr,
+            from: before.state,
+            to,
+        })
+    }
+}
+
+/// Failed polls of one forge host in a row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HostBackoff {
+    /// Poll cycles that failed in a row; each one doubles the period.
+    failures: u32,
+    /// Start of the last poll cycle that failed.
+    cycle: Instant,
+}
+
+/// A detail that waits for a new fetch: the answer of its PR changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DetailRefresh {
+    /// The next peek, pin, or landed badge lookup with the popover open
+    /// asks for it.
+    Due,
+    /// Request with this id is out. The old detail stays on screen.
+    Loading(u64),
 }
 
 /// Detail fetch of one PR for the PR popover.
@@ -94,8 +251,21 @@ pub(crate) struct PrCache {
     answers: HashMap<(String, String), BranchPr>,
     /// (remote URL, branch) to the detail of the PR its answer names.
     details: HashMap<(String, String), PrDetailState>,
+    /// (remote URL, branch) of details that wait for a new fetch.
+    detail_refresh: HashMap<(String, String), DetailRefresh>,
     /// Id of the last detail request.
     last_detail_request: u64,
+    /// Checkout path to its last successful answer in this session. `r`
+    /// and a full reload keep it, so their lookups can still alert; a
+    /// branch change, a detached HEAD, a hidden repo, or a vanished
+    /// checkout drops it.
+    seen: HashMap<PathBuf, SeenPr>,
+    /// Forge host (`github.com`) to its failed polls in a row.
+    hosts: HashMap<String, HostBackoff>,
+    /// Transitions not yet drained by [`AppState::take_pr_transitions`].
+    transitions: Vec<PrTransition>,
+    /// How polling runs ([`crate::settings::Settings::pr_poll`]).
+    poll: PrPollMode,
 }
 
 impl PrCache {
@@ -118,16 +288,167 @@ impl PrCache {
         };
         self.answers.retain(|key, _| keep(key));
         self.details.retain(|key, _| keep(key));
+        self.detail_refresh.retain(|key, _| keep(key));
     }
 
-    /// Store `answer` for `key`. A different answer drops the detail, which
-    /// described the old one.
+    /// Drop the detail of `key` and any refresh it waits for.
+    fn drop_detail(&mut self, key: &(String, String)) {
+        self.details.remove(key);
+        self.detail_refresh.remove(key);
+    }
+
+    /// Mark the detail of `key` for a new fetch, when one landed.
+    fn mark_detail_for_refresh(&mut self, key: &(String, String)) {
+        if matches!(
+            self.details.get(key),
+            Some(PrDetailState::Ready(_) | PrDetailState::Failed)
+        ) {
+            self.detail_refresh
+                .entry(key.clone())
+                .or_insert(DetailRefresh::Due);
+        }
+    }
+
+    /// Store `answer` for `key`.
+    ///
+    /// An answer that names another PR (number or URL), or no PR, drops the
+    /// detail, which described the old one. A changed answer for the same
+    /// PR keeps the detail on screen and marks it for a new fetch.
     fn set_answer(&mut self, key: (String, String), answer: BranchPr) {
-        if self.answers.get(&key) != Some(&answer) {
-            self.details.remove(&key);
+        let old = self.answers.get(&key);
+        if old != Some(&answer) {
+            if old.and_then(BranchPr::identity) != answer.identity() {
+                self.drop_detail(&key);
+            } else {
+                self.mark_detail_for_refresh(&key);
+            }
         }
         self.answers.insert(key, answer);
     }
+
+    /// True when a poll of a checkout on `host` may run at `now`, with poll
+    /// period `interval_ms`: the host has no failed poll in a row, or its
+    /// backed-off period has passed since the last failed cycle.
+    fn host_ready(&self, host: &str, now: Instant, interval_ms: u64) -> bool {
+        self.hosts.get(host).is_none_or(|backoff| {
+            let wait = Duration::from_millis(pr_poll_backoff_ms(interval_ms, backoff.failures));
+            now.saturating_duration_since(backoff.cycle) >= wait
+        })
+    }
+
+    /// Count a failed poll of `host` from the cycle that started at
+    /// `cycle`. Several failures in one cycle count once; a late failure
+    /// from an older cycle does not count.
+    fn back_off(&mut self, host: String, cycle: Instant) {
+        match self.hosts.get_mut(&host) {
+            Some(backoff) if cycle <= backoff.cycle => {}
+            Some(backoff) => {
+                backoff.failures = backoff.failures.saturating_add(1);
+                backoff.cycle = cycle;
+            }
+            None => {
+                self.hosts.insert(host, HostBackoff { failures: 1, cycle });
+            }
+        }
+    }
+
+    /// Record `pr`, the new answer of `checkout` for `branch` at `remote`,
+    /// as the last one seen, and queue the transition from the one before
+    /// when it alerts.
+    ///
+    /// While the forge still computes the merge facts, ready to merge versus
+    /// in review is not final: such an answer is not recorded, so the last
+    /// settled one stays the "before". CI failed and merged do not depend
+    /// on the merge facts, so they still alert.
+    fn note_seen(&mut self, checkout: &Path, remote: &str, branch: &str, pr: Option<&PullRequest>) {
+        let unsettled = pr.is_some_and(|pr| {
+            !pr.merge_state_settled && matches!(pr.state, PrState::Ready | PrState::InReview)
+        });
+        if unsettled {
+            return;
+        }
+        let now_seen = SeenPr {
+            remote: remote.to_string(),
+            branch: branch.to_string(),
+            pr: pr.cloned(),
+        };
+        let before = self.seen.insert(checkout.to_path_buf(), now_seen);
+        if let Some(transition) =
+            before.and_then(|before| before.transition_to(checkout, remote, branch, pr))
+        {
+            self.transitions.push(transition);
+        }
+    }
+
+    /// Land `lookup` of `branch` for `checkout`, whose record is for that
+    /// branch. `remote` is the URL the worker resolved; `poll_cycle` is the
+    /// start of the poll cycle that queued it (`None` for any other lookup).
+    ///
+    /// A success resets the backoff of its forge host, stamps the check
+    /// time, and may queue a transition. A failure records its reason and
+    /// keeps the last answer when there is one (the badge stays); a failed
+    /// poll also backs the host off.
+    fn land(
+        &mut self,
+        checkout: &Path,
+        branch: &str,
+        remote: Option<String>,
+        lookup: PrLookup,
+        poll_cycle: Option<Instant>,
+        now: Instant,
+    ) {
+        let host = remote
+            .as_deref()
+            .and_then(parse_remote)
+            .map(|repo| repo.host);
+        let Some(record) = self.checkouts.get_mut(checkout) else {
+            return;
+        };
+        let pr = match lookup {
+            PrLookup::Failed(reason) => {
+                record.failure = Some(PrLookupFailure { reason });
+                let known = record.remote.clone().is_some_and(|remote| {
+                    matches!(
+                        self.answers.get(&(remote, branch.to_string())),
+                        Some(BranchPr::Ready(_))
+                    )
+                });
+                if !known {
+                    record.remote.clone_from(&remote);
+                    if let Some(remote) = remote {
+                        self.set_answer((remote, branch.to_string()), BranchPr::Failed);
+                    }
+                }
+                if let (Some(host), Some(cycle)) = (host, poll_cycle) {
+                    self.back_off(host, cycle);
+                }
+                return;
+            }
+            PrLookup::Found(pr) => Some(pr),
+            PrLookup::NoPr => None,
+        };
+        record.remote.clone_from(&remote);
+        record.failure = None;
+        record.checked_at = Some(now);
+        if let Some(host) = host {
+            self.hosts.remove(&host);
+        }
+        let Some(remote) = remote else {
+            return;
+        };
+        self.note_seen(checkout, &remote, branch, pr.as_ref());
+        self.set_answer((remote, branch.to_string()), BranchPr::Ready(pr));
+    }
+}
+
+/// A checkout a poll cycle may look up, with the PR its badge shows.
+struct Pollable<'a> {
+    path: &'a Path,
+    record: &'a CheckoutPr,
+    /// Forge host of the resolved remote.
+    host: String,
+    /// The open PR the badge shows; `None` while no PR is known.
+    pr: Option<&'a PullRequest>,
 }
 
 impl AppState {
@@ -287,16 +608,19 @@ impl AppState {
     /// or is a hidden repo is dropped.
     pub(crate) fn due_pr_lookups(&mut self) -> Vec<(PathBuf, String)> {
         let wanted: Vec<(PathBuf, String)> = self
-            .snapshot
-            .repos
-            .iter()
-            .filter(|row| self.show_hidden || !row.hidden)
-            .filter(|row| is_counted_local_branch(&row.branch))
+            .pr_rows()
             .map(|row| (PathBuf::from(&row.repo), row.branch.clone()))
             .collect();
         let cache = &mut self.pr_cache;
-        let live: HashSet<&PathBuf> = wanted.iter().map(|(path, _)| path).collect();
-        cache.checkouts.retain(|path, _| live.contains(path));
+        let branch_of: HashMap<&PathBuf, &String> =
+            wanted.iter().map(|(path, branch)| (path, branch)).collect();
+        cache
+            .checkouts
+            .retain(|path, _| branch_of.contains_key(path));
+        // The last answer seen of another branch never makes a transition.
+        cache
+            .seen
+            .retain(|path, seen| branch_of.get(path) == Some(&&seen.branch));
         let mut due = Vec::new();
         for (path, branch) in &wanted {
             if cache
@@ -306,16 +630,104 @@ impl AppState {
             {
                 continue;
             }
-            cache.checkouts.insert(
-                path.clone(),
-                CheckoutPr {
-                    branch: branch.clone(),
-                    remote: None,
-                },
-            );
+            cache
+                .checkouts
+                .insert(path.clone(), CheckoutPr::new(branch, true));
             due.push((path.clone(), branch.clone()));
         }
         cache.prune_answers();
+        due
+    }
+
+    /// Snapshot rows whose PR is looked up: visible (not hidden, unless
+    /// hidden repos show) and on a local branch.
+    fn pr_rows(&self) -> impl Iterator<Item = &WorkspaceRepoSnapshot> {
+        self.snapshot
+            .repos
+            .iter()
+            .filter(|row| self.show_hidden || !row.hidden)
+            .filter(|row| is_counted_local_branch(&row.branch))
+    }
+
+    /// Set how PR polling runs, from [`crate::settings::Settings::pr_poll`].
+    pub(super) fn set_pr_poll_mode(&mut self, mode: PrPollMode) {
+        self.pr_cache.poll = mode;
+    }
+
+    /// Checkouts a poll cycle may look up.
+    ///
+    /// A checkout is pollable when it is visible, on a local branch, its
+    /// first lookup for that branch landed with a GitHub or GitLab remote,
+    /// and either its answer is an open PR, or no PR is known yet and the
+    /// branch has an upstream (it was pushed), so a PR opened later shows.
+    /// A merged PR is not polled.
+    fn pollable_checkouts(&self) -> Vec<Pollable<'_>> {
+        self.pr_rows()
+            .filter_map(|row| {
+                let path = Path::new(&row.repo);
+                let record = self
+                    .pr_cache
+                    .checkouts
+                    .get(path)
+                    .filter(|record| record.branch == row.branch)?;
+                let remote = record.remote.as_deref()?;
+                let host = parse_remote(remote)?.host;
+                let key = (remote.to_string(), row.branch.clone());
+                let pr = match self.pr_cache.answers.get(&key) {
+                    Some(BranchPr::Ready(Some(pr))) if pr.state == PrState::Merged => return None,
+                    Some(BranchPr::Ready(Some(pr))) => Some(pr),
+                    _ if row.sync_status == SyncStatus::NoUpstream => return None,
+                    _ => None,
+                };
+                Some(Pollable {
+                    path,
+                    record,
+                    host,
+                    pr,
+                })
+            })
+            .collect()
+    }
+
+    /// Planned PR poll period in ms: [`PrPollMode`] with "hot" while any
+    /// pollable PR has CI running or is ready to merge. `0` with polling
+    /// off.
+    pub(crate) fn pr_poll_interval_ms(&self) -> u64 {
+        let mode = self.pr_cache.poll;
+        if mode != PrPollMode::HotCalm {
+            return pr_poll_interval_ms(mode, false);
+        }
+        let hot = self.pollable_checkouts().iter().any(|pollable| {
+            pollable
+                .pr
+                .is_some_and(|pr| matches!(pr.state, PrState::CiRunning | PrState::Ready))
+        });
+        pr_poll_interval_ms(mode, hot)
+    }
+
+    /// Pollable checkouts the poll cycle that starts at `now` looks up,
+    /// marked in flight. Their badges stay on screen while the lookups run.
+    ///
+    /// Empty with polling off. Skips a checkout whose lookup is still in
+    /// flight, and one whose forge host backs off after failed polls.
+    pub(crate) fn due_pr_polls(&mut self, now: Instant) -> Vec<(PathBuf, String)> {
+        let interval = self.pr_poll_interval_ms();
+        if interval == 0 {
+            return Vec::new();
+        }
+        let due: Vec<(PathBuf, String)> = self
+            .pollable_checkouts()
+            .into_iter()
+            .filter(|pollable| !pollable.record.in_flight)
+            .filter(|pollable| self.pr_cache.host_ready(&pollable.host, now, interval))
+            .map(|pollable| (pollable.path.to_path_buf(), pollable.record.branch.clone()))
+            .collect();
+        for (path, _) in &due {
+            if let Some(record) = self.pr_cache.checkouts.get_mut(path) {
+                record.in_flight = true;
+                record.poll_cycle = Some(now);
+            }
+        }
         due
     }
 
@@ -325,7 +737,8 @@ impl AppState {
     /// checkout).
     ///
     /// The PR detail of that checkout is dropped too, so the next peek or
-    /// pin fetches it again.
+    /// pin fetches it again. The last answer seen stays, so the new lookup
+    /// can still queue a transition.
     pub(crate) fn forget_pr_lookups(&mut self, repo: Option<&Path>) {
         let cache = &mut self.pr_cache;
         match repo {
@@ -333,24 +746,24 @@ impl AppState {
                 if let Some(CheckoutPr {
                     branch,
                     remote: Some(remote),
+                    ..
                 }) = cache.checkouts.remove(repo)
                 {
-                    cache.details.remove(&(remote, branch));
+                    cache.drop_detail(&(remote, branch));
                 }
             }
             None => {
                 cache.checkouts.clear();
                 cache.details.clear();
+                cache.detail_refresh.clear();
             }
         }
         cache.prune_answers();
     }
 
-    /// Land a badge lookup of `branch` in checkout `repo`.
+    /// Land a badge lookup of `branch` in checkout `repo`, now.
     ///
-    /// Dropped when the checkout is on another branch now, or was forgotten
-    /// since the lookup was queued. A failed lookup shows no badge and no
-    /// status. Returns true when the cache changed.
+    /// See [`Self::apply_pr_lookup_at`].
     pub(crate) fn apply_pr_lookup(
         &mut self,
         repo: &Path,
@@ -358,28 +771,46 @@ impl AppState {
         remote: Option<String>,
         lookup: PrLookup,
     ) -> bool {
+        self.apply_pr_lookup_at(repo, branch, remote, lookup, Instant::now())
+    }
+
+    /// Land a badge lookup of `branch` in checkout `repo` at `now`.
+    ///
+    /// Dropped when the checkout is on another branch now, or was forgotten
+    /// since the lookup was queued. A failed lookup sets no status; it keeps
+    /// the last answer of the branch, so a known badge stays, and records
+    /// the failure. A failed poll backs its forge host off. A success may
+    /// queue a [`PrTransition`]. Returns true when the cache changed.
+    pub(crate) fn apply_pr_lookup_at(
+        &mut self,
+        repo: &Path,
+        branch: &str,
+        remote: Option<String>,
+        lookup: PrLookup,
+        now: Instant,
+    ) -> bool {
         if self.snapshot_branch(repo) != Some(branch) {
             return false;
         }
-        let Some(checkout) = self
+        let Some(record) = self
             .pr_cache
             .checkouts
             .get_mut(repo)
-            .filter(|checkout| checkout.branch == branch)
+            .filter(|record| record.branch == branch)
         else {
             return false;
         };
-        checkout.remote.clone_from(&remote);
-        if let Some(remote) = remote {
-            self.pr_cache
-                .set_answer((remote, branch.to_string()), lookup.into());
-        }
+        record.in_flight = false;
+        let poll_cycle = record.poll_cycle.take();
+        self.pr_cache
+            .land(repo, branch, remote, lookup, poll_cycle, now);
         true
     }
 
     /// Land a `gx` result: say what happened, and cache the fresh answer.
     ///
-    /// `opened` is true when the browser started for a found PR.
+    /// `opened` is true when the browser started for a found PR. The
+    /// answer lands like a badge lookup's (a failure keeps a known badge).
     pub(crate) fn apply_pr_open(
         &mut self,
         repo: &Path,
@@ -395,15 +826,18 @@ impl AppState {
             PrLookup::Failed(_) => StatusMessage::error(lookup_failed_status(branch)),
         };
         if self.snapshot_branch(repo) == Some(branch) {
-            self.pr_cache.checkouts.insert(
-                repo.to_path_buf(),
-                CheckoutPr {
-                    branch: branch.to_string(),
-                    remote: remote.clone(),
-                },
-            );
-        }
-        if let Some(remote) = remote {
+            let cache = &mut self.pr_cache;
+            if cache
+                .checkouts
+                .get(repo)
+                .is_none_or(|record| record.branch != branch)
+            {
+                cache
+                    .checkouts
+                    .insert(repo.to_path_buf(), CheckoutPr::new(branch, false));
+            }
+            cache.land(repo, branch, remote, lookup, None, Instant::now());
+        } else if let Some(remote) = remote {
             self.pr_cache
                 .set_answer((remote, branch.to_string()), lookup.into());
         }
@@ -424,7 +858,10 @@ impl AppState {
     ///
     /// A PR whose (remote URL, branch) already has a detail (loading, ready,
     /// or failed) is not asked again, so a later peek or pin reads the
-    /// cache. Called when a peek opens or a popover pins; never on a tick.
+    /// cache, unless the detail waits for a new fetch after its answer
+    /// changed: then it is asked again and the old detail stays on screen
+    /// until the answer lands. Called when a peek opens, a popover pins, and
+    /// a badge lookup lands; never on a watch or fetch tick.
     pub(crate) fn request_popover_pr_details(&mut self) -> Effect {
         let Some(popover) = self.popover.as_ref() else {
             return Effect::None;
@@ -445,19 +882,31 @@ impl AppState {
             let Some(CheckoutPr {
                 branch,
                 remote: Some(remote),
+                ..
             }) = self.pr_cache.checkouts.get(&repo).cloned()
             else {
                 continue;
             };
             let key = (remote.clone(), branch.clone());
-            if self.pr_cache.details.contains_key(&key) {
-                continue;
-            }
+            let refresh = match (
+                self.pr_cache.details.get(&key),
+                self.pr_cache.detail_refresh.get(&key),
+            ) {
+                (None, _) => false,
+                (Some(_), Some(DetailRefresh::Due)) => true,
+                (Some(_), _) => continue,
+            };
             self.pr_cache.last_detail_request += 1;
             let request = self.pr_cache.last_detail_request;
-            self.pr_cache
-                .details
-                .insert(key, PrDetailState::Loading(request));
+            if refresh {
+                self.pr_cache
+                    .detail_refresh
+                    .insert(key, DetailRefresh::Loading(request));
+            } else {
+                self.pr_cache
+                    .details
+                    .insert(key, PrDetailState::Loading(request));
+            }
             effects.push(Effect::LookupPullRequestDetail {
                 repo,
                 branch,
@@ -479,7 +928,8 @@ impl AppState {
     /// Dropped when the checkout is on another branch now, was forgotten,
     /// resolves another remote, its answer names another PR, or the
     /// detail no longer waits for this request (dropped since, or asked
-    /// again: a newer request wins over a late older one). Returns true
+    /// again: a newer request wins over a late older one). A failed new
+    /// fetch of a detail that had landed keeps the old detail. Returns true
     /// when the cache changed.
     pub(crate) fn apply_pr_detail(
         &mut self,
@@ -506,20 +956,28 @@ impl AppState {
         // The detail adds lines above Open PR: keep the pinned focus on
         // the line it was on.
         let focus = self.popover_focus_key();
-        self.pr_cache.details.insert(key, lookup.into());
+        let refreshed = self.pr_cache.detail_refresh.remove(&key).is_some();
+        let keep_old = refreshed
+            && matches!(lookup, PrDetailLookup::Failed(_))
+            && matches!(
+                self.pr_cache.details.get(&key),
+                Some(PrDetailState::Ready(_))
+            );
+        if !keep_old {
+            self.pr_cache.details.insert(key, lookup.into());
+        }
         self.restore_popover_focus(focus);
         true
     }
 
     /// True while the detail cache still waits on request `request` for
-    /// `branch` at `remote`. A refresh, a branch switch, or a changed
-    /// answer drops that `Loading` entry, and a queued fetch for it is
-    /// then skipped.
+    /// `branch` at `remote` (a first fetch or a new fetch of a changed
+    /// answer). `r`, a branch switch, or an answer that names another PR
+    /// drops the wait, and a queued fetch for it is then skipped.
     pub(crate) fn pr_detail_awaited(&self, remote: &str, branch: &str, request: u64) -> bool {
-        self.pr_cache
-            .details
-            .get(&(remote.to_string(), branch.to_string()))
-            == Some(&PrDetailState::Loading(request))
+        let key = (remote.to_string(), branch.to_string());
+        self.pr_cache.details.get(&key) == Some(&PrDetailState::Loading(request))
+            || self.pr_cache.detail_refresh.get(&key) == Some(&DetailRefresh::Loading(request))
     }
 
     /// Graph worktree rows that show a PR badge: visible-row index,
@@ -565,6 +1023,93 @@ impl AppState {
             .iter()
             .find(|row| Path::new(&row.repo) == repo)
             .map(|row| row.branch.as_str())
+    }
+
+    /// Lookup record of checkout `checkout` for the branch it is on now.
+    fn current_pr_record(&self, checkout: &Path) -> Option<&CheckoutPr> {
+        let record = self.pr_cache.checkouts.get(checkout)?;
+        (self.snapshot_branch(checkout) == Some(record.branch.as_str())).then_some(record)
+    }
+}
+
+// Only tests read this until the PR badge, popover, alert, and PRs tab
+// surfaces do.
+#[cfg_attr(not(test), allow(dead_code))]
+impl AppState {
+    /// When the last successful PR lookup of checkout `checkout` landed, for
+    /// its current branch ("checked … ago"). `None` before one lands, and
+    /// after `r` until the new one lands.
+    pub(crate) fn pr_checked_at(&self, checkout: &Path) -> Option<Instant> {
+        self.current_pr_record(checkout)?.checked_at
+    }
+
+    /// The failure of the last PR lookup of checkout `checkout` for its
+    /// current branch; `None` when it succeeded or none landed yet.
+    pub(crate) fn pr_lookup_failure(&self, checkout: &Path) -> Option<&PrLookupFailure> {
+        self.current_pr_record(checkout)?.failure.as_ref()
+    }
+
+    /// True when the badge of checkout `checkout` is stale at `now`: it
+    /// shows a polled (open) PR, and the last successful lookup is older
+    /// than twice the planned poll period ([`Self::pr_poll_interval_ms`]).
+    /// Never with polling off.
+    pub(crate) fn pr_is_stale(&self, checkout: &Path, now: Instant) -> bool {
+        let polled = self
+            .pollable_checkouts()
+            .iter()
+            .any(|pollable| pollable.path == checkout && pollable.pr.is_some());
+        polled
+            && self.pr_checked_at(checkout).is_some_and(|at| {
+                pr_answer_is_stale(
+                    now.saturating_duration_since(at),
+                    self.pr_poll_interval_ms(),
+                )
+            })
+    }
+
+    /// Take the queued [`PrTransition`]s, oldest first.
+    pub(crate) fn take_pr_transitions(&mut self) -> Vec<PrTransition> {
+        std::mem::take(&mut self.pr_cache.transitions)
+    }
+
+    /// Look up the PR of checkout `checkout` again now, or of every checkout
+    /// with `None` ("Refresh this PR", the PRs tab `r`).
+    ///
+    /// Takes each visible checkout on a local branch whose first lookup
+    /// landed with a GitHub or GitLab remote and that has no lookup in
+    /// flight. Unlike `r`, the badge stays on screen until the new answer
+    /// lands, and the forge host backoff does not apply. The detail of each
+    /// is marked for a new fetch; a popover that shows it asks again when
+    /// the answer lands.
+    pub(crate) fn refresh_pull_requests(&mut self, checkout: Option<&Path>) -> Effect {
+        let targets: Vec<(PathBuf, String)> = self
+            .pr_rows()
+            .filter(|row| checkout.is_none_or(|checkout| Path::new(&row.repo) == checkout))
+            .filter_map(|row| {
+                let path = Path::new(&row.repo);
+                let record = self
+                    .pr_cache
+                    .checkouts
+                    .get(path)
+                    .filter(|record| record.branch == row.branch && !record.in_flight)?;
+                parse_remote(record.remote.as_deref()?)?;
+                Some((path.to_path_buf(), row.branch.clone()))
+            })
+            .collect();
+        if targets.is_empty() {
+            return Effect::None;
+        }
+        let cache = &mut self.pr_cache;
+        for (path, branch) in &targets {
+            let Some(record) = cache.checkouts.get_mut(path) else {
+                continue;
+            };
+            record.in_flight = true;
+            if let Some(remote) = record.remote.clone() {
+                cache.mark_detail_for_refresh(&(remote, branch.clone()));
+            }
+        }
+        Effect::LookupPullRequests { targets }
     }
 }
 
@@ -775,7 +1320,7 @@ mod tests {
         assert!(app.apply_pr_lookup(path, "feature", Some(REMOTE.into()), PrLookup::NoPr));
         assert_eq!(app.pr_badge(path), None, "no PR");
         assert!(app.apply_pr_lookup(path, "feature", Some(REMOTE.into()), PrLookup::Failed(None)));
-        assert_eq!(app.pr_badge(path), None, "failed lookup");
+        assert_eq!(app.pr_badge(path), None, "failed lookup after no PR");
         assert!(app.status.is_empty(), "a background failure stays silent");
         assert!(app.apply_pr_lookup(path, "feature", None, PrLookup::NoPr));
         assert_eq!(app.pr_badge(path), None, "no remote");
@@ -1104,19 +1649,26 @@ mod tests {
         })
     }
 
-    /// Land the answer to the request the cache waits for (0 when it
-    /// waits for none).
+    /// Land the answer to the request the cache waits for, a first fetch or
+    /// a new fetch (0 when it waits for none).
     fn land(app: &mut AppState, branch: &str, number: u64, lookup: PrDetailLookup) -> bool {
-        let request = app
+        let first = app
             .pr_cache
             .details
             .values()
             .find_map(|detail| match detail {
                 PrDetailState::Loading(request) => Some(*request),
                 _ => None,
-            })
-            .unwrap_or(0);
-        land_request(app, branch, number, request, lookup)
+            });
+        let again = app
+            .pr_cache
+            .detail_refresh
+            .values()
+            .find_map(|refresh| match refresh {
+                DetailRefresh::Loading(request) => Some(*request),
+                DetailRefresh::Due => None,
+            });
+        land_request(app, branch, number, first.or(again).unwrap_or(0), lookup)
     }
 
     fn land_request(
@@ -1269,12 +1821,13 @@ mod tests {
     }
 
     #[test]
-    fn a_branch_switch_r_and_a_changed_answer_drop_the_detail() {
+    fn a_branch_switch_r_and_another_pr_drop_the_detail() {
         let mut app = app_with_pr(7);
         let _ = click_badge(&mut app);
         assert!(land(&mut app, "feature", 7, pr_detail(7)));
 
-        // `gx` with the same answer keeps the detail; a new one drops it.
+        // `gx` with the same PR keeps the detail, even when its answer
+        // changed; another PR drops it.
         app.apply_pr_open(
             Path::new("app"),
             "feature",
@@ -1283,6 +1836,7 @@ mod tests {
             true,
         );
         assert!(matches!(detail_of(&app), Some(PrDetailState::Ready(_))));
+        assert!(app.pr_cache.detail_refresh.is_empty(), "same answer");
         app.apply_pr_open(
             Path::new("app"),
             "feature",
@@ -1290,8 +1844,14 @@ mod tests {
             found(PrState::Ready),
             true,
         );
-        assert_eq!(detail_of(&app), None, "the answer changed under gx");
+        assert!(
+            matches!(detail_of(&app), Some(PrDetailState::Ready(_))),
+            "the same PR changed under gx: the detail stays"
+        );
+        set_answer(&mut app, 8, PrState::Ready);
+        assert_eq!(detail_of(&app), None, "another PR under gx");
         assert!(app.pr_cache.details.is_empty());
+        set_answer(&mut app, 7, PrState::Ready);
         assert_eq!(
             click_badge(&mut app),
             Effect::Batch(vec![Effect::LoadRightPane, fetch(7, 2)])
@@ -1431,8 +1991,8 @@ mod tests {
         focus(&mut app, "repo:app");
         let _ = click_badge(&mut app);
         assert!(app.popover_pinned());
-        // The detail is dropped while the popover stays pinned.
-        set_answer(&mut app, 7, PrState::Ready);
+        // Another PR drops the detail while the popover stays pinned.
+        set_answer(&mut app, 8, PrState::Ready);
         assert_eq!(detail_of(&app), None);
         for tick in [Action::WatchTick, Action::FetchTick] {
             let effect = app.dispatch(tick.clone());
@@ -1507,5 +2067,756 @@ mod tests {
         );
         assert_eq!(selected(&mut app, "pull request"), Some("Open PR"));
         assert_eq!(selected(&mut app, "merge request"), Some("Open PR"));
+    }
+
+    // ---- polling, backoff, stale state, transitions ----
+
+    use std::time::{Duration, Instant};
+
+    use super::super::super::pr_poll::PR_POLL_CALM_MS;
+
+    const GH_REMOTE: &str = "git@github.com:acme/app.git";
+    const GL_REMOTE: &str = "git@gitlab.com:acme/services/api.git";
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    /// Checkout `name` on `branch`, pushed (it has an upstream).
+    fn pushed_on(name: &str, branch: &str) -> RepoSnapshot {
+        let mut row = repo(name, branch);
+        row.sync_status = SyncStatus::UpToDate;
+        row
+    }
+
+    fn pushed(name: &str) -> RepoSnapshot {
+        pushed_on(name, "feature")
+    }
+
+    /// GitHub remote of repository `acme/<name>`. Answers are cached per
+    /// (remote URL, branch), so each checkout of a test needs its own.
+    fn gh(name: &str) -> String {
+        format!("git@github.com:acme/{name}.git")
+    }
+
+    /// GitLab remote of project `acme/services/<name>`.
+    fn gl(name: &str) -> String {
+        format!("git@gitlab.com:acme/services/{name}.git")
+    }
+
+    /// PR `number` in `state` on the forge of `remote`.
+    fn pr_on(remote: &str, number: u64, state: PrState) -> PullRequest {
+        let url = if remote.contains("gitlab") {
+            format!("https://gitlab.com/acme/services/api/-/merge_requests/{number}")
+        } else {
+            format!("https://github.com/acme/app/pull/{number}")
+        };
+        PullRequest::fixture(number, &url, state)
+    }
+
+    /// [`pr_on`] while the forge still computes its merge facts.
+    fn computing(remote: &str, number: u64, state: PrState) -> PullRequest {
+        PullRequest {
+            merge_state_settled: false,
+            ..pr_on(remote, number, state)
+        }
+    }
+
+    fn open_on(remote: &str, number: u64) -> PrLookup {
+        PrLookup::Found(pr_on(remote, number, PrState::InReview))
+    }
+
+    /// Land `lookup` of `feature` for checkout `name` at `remote` at `now`.
+    fn land_pr(app: &mut AppState, name: &str, remote: &str, lookup: PrLookup, now: Instant) {
+        assert!(
+            app.apply_pr_lookup_at(Path::new(name), "feature", Some(remote.into()), lookup, now),
+            "{name} lands"
+        );
+    }
+
+    /// Checkouts the poll cycle at `now` looks up, by name.
+    fn polled(app: &mut AppState, now: Instant) -> Vec<String> {
+        let mut names: Vec<String> = app
+            .due_pr_polls(now)
+            .into_iter()
+            .map(|(path, branch)| {
+                assert_eq!(branch, "feature");
+                path.display().to_string()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn pollable_checkouts_show_an_open_pr_or_a_pushed_branch_with_no_pr_yet() {
+        let mut app = app_with(
+            &[
+                repo("open", "feature"),
+                pushed("lab"),
+                pushed("merged"),
+                pushed("nopr"),
+                repo("local", "feature"),
+                pushed("failed"),
+                pushed("other"),
+                pushed("pending"),
+                repo("det", DETACHED_HEAD_BRANCH),
+                pushed("vendor"),
+            ],
+            &["vendor"],
+        );
+        app.show_hidden = true;
+        assert_eq!(app.due_pr_lookups().len(), 9, "every checkout on a branch");
+        let t0 = Instant::now();
+        assert!(polled(&mut app, t0).is_empty(), "no remote resolved yet");
+        let remote = |name: &str| match name {
+            "lab" | "failed" => gl(name),
+            "other" => "https://git.example.org/acme/other.git".to_string(),
+            _ => gh(name),
+        };
+        let answer = |name: &str| match name {
+            "open" | "vendor" => open_on(&remote(name), 1),
+            "lab" => PrLookup::Found(pr_on(&remote(name), 2, PrState::Draft)),
+            "merged" => PrLookup::Found(pr_on(&remote(name), 3, PrState::Merged)),
+            "failed" => PrLookup::Failed(None),
+            _ => PrLookup::NoPr,
+        };
+        for name in [
+            "open", "lab", "merged", "nopr", "local", "failed", "other", "vendor",
+        ] {
+            land_pr(&mut app, name, &remote(name), answer(name), t0);
+        }
+
+        let t1 = t0 + secs(180);
+        let due = polled(&mut app, t1);
+        assert_eq!(
+            due,
+            ["failed", "lab", "nopr", "open", "vendor"],
+            "open PRs (with or without an upstream), and pushed branches with no PR \
+             known; not a merged PR, an unpushed branch with no PR, another forge, \
+             a lookup in flight, or a detached HEAD"
+        );
+        for name in &due {
+            let lookup = match answer(name) {
+                PrLookup::Failed(_) => PrLookup::NoPr,
+                other => other,
+            };
+            land_pr(&mut app, name, &remote(name), lookup, t1);
+        }
+        app.show_hidden = false;
+        assert_eq!(
+            polled(&mut app, t1 + secs(180)),
+            ["failed", "lab", "nopr", "open"],
+            "a hidden repo polls only while hidden repos show"
+        );
+    }
+
+    #[test]
+    fn a_poll_keeps_the_badge_and_skips_a_checkout_still_in_flight() {
+        let mut app = app_with(&[pushed("app")], &[]);
+        let path = Path::new("app");
+        let _ = app.due_pr_lookups();
+        let t0 = Instant::now();
+        land_pr(&mut app, "app", GH_REMOTE, open_on(GH_REMOTE, 7), t0);
+        let t1 = t0 + secs(180);
+        assert_eq!(polled(&mut app, t1), ["app"]);
+        assert_eq!(
+            app.pr_badge(path),
+            Some(PrState::InReview),
+            "the badge stays"
+        );
+        assert!(
+            polled(&mut app, t1 + secs(180)).is_empty(),
+            "a lookup in flight is not polled again"
+        );
+        assert!(
+            app.due_pr_lookups().is_empty(),
+            "a status apply on the same branch asks nothing"
+        );
+        assert_eq!(app.pr_badge(path), Some(PrState::InReview));
+        let running = PrLookup::Found(pr_on(GH_REMOTE, 7, PrState::CiRunning));
+        land_pr(&mut app, "app", GH_REMOTE, running, t1 + secs(2));
+        assert_eq!(app.pr_badge(path), Some(PrState::CiRunning));
+        assert_eq!(polled(&mut app, t1 + secs(240)), ["app"]);
+    }
+
+    #[test]
+    fn the_poll_period_is_hot_while_a_pollable_pr_runs_ci_or_is_ready() {
+        let mut app = app_with(&[pushed("app"), pushed("vendor")], &["vendor"]);
+        app.show_hidden = true;
+        let _ = app.due_pr_lookups();
+        let t0 = Instant::now();
+        land_pr(
+            &mut app,
+            "vendor",
+            &gh("vendor"),
+            open_on(&gh("vendor"), 2),
+            t0,
+        );
+        for (state, want) in [
+            (PrState::InReview, 180_000),
+            (PrState::Draft, 180_000),
+            (PrState::CiFailed, 180_000),
+            (PrState::CiRunning, 60_000),
+            (PrState::Ready, 60_000),
+            (PrState::Merged, 180_000),
+        ] {
+            let lookup = PrLookup::Found(pr_on(GH_REMOTE, 1, state));
+            land_pr(&mut app, "app", GH_REMOTE, lookup, t0);
+            assert_eq!(app.pr_poll_interval_ms(), want, "{state:?}");
+        }
+        let running = PrLookup::Found(pr_on(&gh("vendor"), 2, PrState::CiRunning));
+        land_pr(&mut app, "vendor", &gh("vendor"), running, t0);
+        assert_eq!(app.pr_poll_interval_ms(), 60_000, "a shown hidden repo");
+        app.show_hidden = false;
+        assert_eq!(
+            app.pr_poll_interval_ms(),
+            180_000,
+            "a hidden repo is not pollable"
+        );
+
+        app.set_pr_poll_mode(PrPollMode::Every(300));
+        assert_eq!(app.pr_poll_interval_ms(), 300);
+        app.set_pr_poll_mode(PrPollMode::Off);
+        assert_eq!(app.pr_poll_interval_ms(), 0);
+        assert!(polled(&mut app, t0 + secs(3600)).is_empty(), "polling off");
+    }
+
+    /// Run the poll cycle at `at` over `app` (GitHub PR 1), `lib` (GitHub
+    /// PR 2), and `lab` (GitLab MR 3): land each polled checkout, the GitHub
+    /// ones failed when `github_fails`. Returns the polled names.
+    fn run_cycle(app: &mut AppState, at: Instant, github_fails: bool) -> Vec<String> {
+        let names = polled(app, at);
+        for name in &names {
+            let (remote, number) = match name.as_str() {
+                "app" => (gh("app"), 1),
+                "lib" => (gh("lib"), 2),
+                _ => (gl("lab"), 3),
+            };
+            let lookup = if github_fails && remote.contains("github") {
+                PrLookup::Failed(Some("HTTP 502: Bad Gateway".into()))
+            } else {
+                open_on(&remote, number)
+            };
+            land_pr(app, name, &remote, lookup, at + secs(1));
+        }
+        names
+    }
+
+    #[test]
+    fn a_failed_poll_doubles_its_host_period_up_to_fifteen_minutes() {
+        let mut app = app_with(&[pushed("app"), pushed("lab"), pushed("lib")], &[]);
+        let _ = app.due_pr_lookups();
+        let t0 = Instant::now();
+        land_pr(&mut app, "app", &gh("app"), open_on(&gh("app"), 1), t0);
+        land_pr(&mut app, "lib", &gh("lib"), open_on(&gh("lib"), 2), t0);
+        land_pr(&mut app, "lab", &gl("lab"), open_on(&gl("lab"), 3), t0);
+        assert_eq!(app.pr_poll_interval_ms(), PR_POLL_CALM_MS);
+        // Cycle k starts k × 180 s after t0. Both GitHub checkouts fail in
+        // one cycle, which counts once. github.com then waits 360 s, 720 s,
+        // 900 s (the cap), 900 s; GitLab keeps 180 s. A success resets it.
+        let github_polled = [1, 3, 7, 12, 17, 18];
+        let github_fails = [1, 3, 7, 12];
+        for k in 1..=18u64 {
+            let want: &[&str] = if github_polled.contains(&k) {
+                &["app", "lab", "lib"]
+            } else {
+                &["lab"]
+            };
+            let at = t0 + secs(180 * k);
+            assert_eq!(
+                run_cycle(&mut app, at, github_fails.contains(&k)),
+                want,
+                "cycle {k}"
+            );
+            assert_eq!(
+                app.pr_badge(Path::new("app")),
+                Some(PrState::InReview),
+                "cycle {k}: a failed poll keeps the badge"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_lookup_keeps_a_known_badge_and_records_why() {
+        let mut app = app_with(&[pushed("app"), pushed("lib")], &[]);
+        let (path, lib) = (Path::new("app"), Path::new("lib"));
+        let _ = app.due_pr_lookups();
+        let t0 = Instant::now();
+        let reason = |app: &AppState, path| {
+            app.pr_lookup_failure(path)
+                .map(|failure| failure.reason.clone())
+        };
+
+        land_pr(
+            &mut app,
+            "lib",
+            &gh("lib"),
+            PrLookup::Failed(Some("gh not found".into())),
+            t0,
+        );
+        assert_eq!(app.pr_badge(lib), None, "a failed first lookup shows none");
+        assert_eq!(reason(&app, lib), Some(Some("gh not found".into())));
+        assert_eq!(app.pr_checked_at(lib), None);
+
+        let ready = PrLookup::Found(pr_on(GH_REMOTE, 1, PrState::Ready));
+        land_pr(&mut app, "app", GH_REMOTE, ready, t0);
+        assert_eq!(app.pr_checked_at(path), Some(t0));
+        assert_eq!(reason(&app, path), None);
+        land_pr(
+            &mut app,
+            "app",
+            GH_REMOTE,
+            PrLookup::Failed(None),
+            t0 + secs(5),
+        );
+        assert_eq!(app.pr_badge(path), Some(PrState::Ready), "the badge stays");
+        assert_eq!(reason(&app, path), Some(None), "failed, with no reason");
+        assert_eq!(app.pr_checked_at(path), Some(t0), "the last success");
+
+        app.apply_pr_open(
+            path,
+            "feature",
+            Some(GH_REMOTE.into()),
+            PrLookup::Failed(Some("HTTP 401: Bad credentials".into())),
+            false,
+        );
+        assert_eq!(app.status, "could not look up PR for feature");
+        assert_eq!(app.pr_badge(path), Some(PrState::Ready), "gx keeps it too");
+        assert_eq!(
+            reason(&app, path),
+            Some(Some("HTTP 401: Bad credentials".into()))
+        );
+        assert!(
+            app.take_pr_transitions().is_empty(),
+            "a failure never alerts"
+        );
+
+        let t1 = t0 + secs(60);
+        land_pr(&mut app, "app", GH_REMOTE, PrLookup::NoPr, t1);
+        assert_eq!(reason(&app, path), None, "a success clears it");
+        assert_eq!(app.pr_checked_at(path), Some(t1));
+        assert_eq!(app.pr_badge(path), None);
+    }
+
+    #[test]
+    fn a_polled_badge_goes_stale_after_twice_the_planned_period() {
+        let mut app = app_with(&[pushed("app")], &[]);
+        let path = Path::new("app");
+        let _ = app.due_pr_lookups();
+        let t0 = Instant::now();
+        assert!(!app.pr_is_stale(path, t0 + secs(3600)), "no answer yet");
+        land_pr(&mut app, "app", GH_REMOTE, open_on(GH_REMOTE, 1), t0);
+        assert!(!app.pr_is_stale(path, t0 + secs(360)), "calm: 2 × 180 s");
+        assert!(app.pr_is_stale(path, t0 + secs(361)));
+
+        assert_eq!(polled(&mut app, t0 + secs(180)), ["app"]);
+        let failed = PrLookup::Failed(Some("HTTP 502: Bad Gateway".into()));
+        land_pr(&mut app, "app", GH_REMOTE, failed, t0 + secs(181));
+        assert!(
+            app.pr_is_stale(path, t0 + secs(400)),
+            "a failed poll keeps the old check time"
+        );
+        assert_eq!(app.pr_badge(path), Some(PrState::InReview));
+
+        let t1 = t0 + secs(500);
+        let running = PrLookup::Found(pr_on(GH_REMOTE, 1, PrState::CiRunning));
+        land_pr(&mut app, "app", GH_REMOTE, running, t1);
+        assert!(!app.pr_is_stale(path, t1 + secs(120)), "hot: 2 × 60 s");
+        assert!(app.pr_is_stale(path, t1 + secs(121)));
+
+        app.set_pr_poll_mode(PrPollMode::Every(300));
+        assert!(app.pr_is_stale(path, t1 + Duration::from_millis(601)));
+        app.set_pr_poll_mode(PrPollMode::Off);
+        assert!(!app.pr_is_stale(path, t1 + secs(9999)), "polling off");
+        app.set_pr_poll_mode(PrPollMode::HotCalm);
+        let merged = PrLookup::Found(pr_on(GH_REMOTE, 1, PrState::Merged));
+        land_pr(&mut app, "app", GH_REMOTE, merged, t1);
+        assert!(
+            !app.pr_is_stale(path, t1 + secs(9999)),
+            "a merged PR is not polled"
+        );
+    }
+
+    /// `app` on `feature` after a first lookup of `before` at `remote`.
+    fn seen_app(remote: &str, before: PrLookup) -> AppState {
+        let mut app = app_with(&[pushed("app")], &[]);
+        let _ = app.due_pr_lookups();
+        land_pr(&mut app, "app", remote, before, Instant::now());
+        assert!(
+            app.take_pr_transitions().is_empty(),
+            "never on the first lookup"
+        );
+        app
+    }
+
+    /// Land `pr` (or no PR) for `app` at `remote` and take the transitions.
+    fn changes(app: &mut AppState, remote: &str, pr: Option<PullRequest>) -> Vec<PrTransition> {
+        let lookup = pr.map_or(PrLookup::NoPr, PrLookup::Found);
+        land_pr(app, "app", remote, lookup, Instant::now());
+        app.take_pr_transitions()
+    }
+
+    fn transition(pr: PullRequest, from: PrState, to: PrTransitionTo) -> PrTransition {
+        PrTransition {
+            checkout: PathBuf::from("app"),
+            pr,
+            from,
+            to,
+        }
+    }
+
+    #[test]
+    fn a_change_into_ci_failed_ready_or_merged_or_a_closed_pr_queues_a_transition() {
+        use PrState::*;
+        for remote in [GH_REMOTE, GL_REMOTE] {
+            for (from, to) in [
+                (InReview, CiFailed),
+                (CiRunning, CiFailed),
+                (CiRunning, Ready),
+                (InReview, Ready),
+                (Draft, Ready),
+                (Ready, Merged),
+                (CiFailed, Merged),
+            ] {
+                let mut app = seen_app(remote, PrLookup::Found(pr_on(remote, 12, from)));
+                let pr = pr_on(remote, 12, to);
+                assert_eq!(
+                    changes(&mut app, remote, Some(pr.clone())),
+                    vec![transition(pr, from, PrTransitionTo::State(to))],
+                    "{remote}: {from:?} -> {to:?}"
+                );
+                assert!(app.take_pr_transitions().is_empty(), "drained");
+            }
+
+            let before = pr_on(remote, 12, CiRunning);
+            let mut app = seen_app(remote, PrLookup::Found(before.clone()));
+            assert_eq!(
+                changes(&mut app, remote, None),
+                vec![transition(before, CiRunning, PrTransitionTo::Closed)],
+                "{remote}: closed"
+            );
+
+            // A failed lookup in between keeps the state before it.
+            let mut app = seen_app(remote, open_on(remote, 12));
+            land_pr(
+                &mut app,
+                "app",
+                remote,
+                PrLookup::Failed(None),
+                Instant::now(),
+            );
+            let failed = pr_on(remote, 12, CiFailed);
+            assert_eq!(
+                changes(&mut app, remote, Some(failed.clone())),
+                vec![transition(
+                    failed,
+                    InReview,
+                    PrTransitionTo::State(CiFailed)
+                )],
+                "{remote}: across a failed lookup"
+            );
+        }
+    }
+
+    #[test]
+    fn other_pr_changes_update_silently() {
+        use PrState::*;
+        for remote in [GH_REMOTE, GL_REMOTE] {
+            for (from, to) in [
+                (InReview, CiRunning),
+                (CiFailed, CiRunning),
+                (Ready, InReview),
+                (InReview, Draft),
+                (CiFailed, CiFailed),
+                (Ready, Ready),
+            ] {
+                let mut app = seen_app(remote, PrLookup::Found(pr_on(remote, 12, from)));
+                assert!(
+                    changes(&mut app, remote, Some(pr_on(remote, 12, to))).is_empty(),
+                    "{remote}: {from:?} -> {to:?}"
+                );
+            }
+            let mut app = seen_app(remote, open_on(remote, 12));
+            assert!(
+                changes(&mut app, remote, Some(pr_on(remote, 13, CiFailed))).is_empty(),
+                "{remote}: another PR number"
+            );
+            let mut app = seen_app(remote, PrLookup::Found(pr_on(remote, 12, Merged)));
+            assert!(
+                changes(&mut app, remote, None).is_empty(),
+                "{remote}: a merged PR that goes away"
+            );
+            let mut app = seen_app(remote, PrLookup::NoPr);
+            assert!(
+                changes(&mut app, remote, Some(pr_on(remote, 12, CiFailed))).is_empty(),
+                "{remote}: a new PR"
+            );
+        }
+    }
+
+    #[test]
+    fn no_transition_after_a_branch_change_and_r_still_compares() {
+        let mut app = seen_app(GH_REMOTE, open_on(GH_REMOTE, 7));
+        let path = Path::new("app");
+        let failed = || Some(pr_on(GH_REMOTE, 7, PrState::CiFailed));
+
+        // feature → other → feature, each answer landed.
+        apply_one_repo_snapshot(&mut app, "app", Some(pushed_on("app", "other")));
+        let _ = app.due_pr_lookups();
+        assert!(app.apply_pr_lookup(path, "other", Some(GH_REMOTE.into()), PrLookup::NoPr));
+        apply_one_repo_snapshot(&mut app, "app", Some(pushed("app")));
+        let _ = app.due_pr_lookups();
+        assert!(
+            changes(&mut app, GH_REMOTE, failed()).is_empty(),
+            "the first lookup after a branch change"
+        );
+
+        // Away and back before any answer lands.
+        apply_one_repo_snapshot(&mut app, "app", Some(pushed_on("app", "other")));
+        let _ = app.due_pr_lookups();
+        apply_one_repo_snapshot(&mut app, "app", Some(pushed("app")));
+        let _ = app.due_pr_lookups();
+        let ready = pr_on(GH_REMOTE, 7, PrState::Ready);
+        assert!(
+            changes(&mut app, GH_REMOTE, Some(ready.clone())).is_empty(),
+            "a switch away and back"
+        );
+
+        // `r` drops the answer (the badge hides until its lookup lands), but
+        // keeps the last one seen: the same state is quiet, a change alerts.
+        app.forget_pr_lookups(Some(path));
+        assert!(app.take_pr_transitions().is_empty(), "a forget queues none");
+        assert_eq!(app.pr_badge(path), None);
+        let _ = app.due_pr_lookups();
+        assert!(changes(&mut app, GH_REMOTE, Some(ready)).is_empty());
+        app.forget_pr_lookups(None);
+        let _ = app.due_pr_lookups();
+        let merged = pr_on(GH_REMOTE, 7, PrState::Merged);
+        assert_eq!(
+            changes(&mut app, GH_REMOTE, Some(merged.clone())),
+            vec![transition(
+                merged,
+                PrState::Ready,
+                PrTransitionTo::State(PrState::Merged)
+            )],
+            "a full reload compares with the last answer too"
+        );
+    }
+
+    #[test]
+    fn ready_versus_in_review_alerts_only_on_settled_merge_facts() {
+        use PrState::*;
+        for remote in [GH_REMOTE, GL_REMOTE] {
+            let mut app = seen_app(remote, open_on(remote, 5));
+            assert!(
+                changes(&mut app, remote, Some(computing(remote, 5, Ready))).is_empty(),
+                "{remote}: ready while the forge computes"
+            );
+            assert_eq!(
+                app.pr_badge(Path::new("app")),
+                Some(Ready),
+                "the badge shows it"
+            );
+            assert!(
+                changes(&mut app, remote, Some(computing(remote, 5, InReview))).is_empty(),
+                "{remote}: back to in review while it computes"
+            );
+            let ready = pr_on(remote, 5, Ready);
+            assert_eq!(
+                changes(&mut app, remote, Some(ready.clone())),
+                vec![transition(ready, InReview, PrTransitionTo::State(Ready))],
+                "{remote}: the settled answer alerts once"
+            );
+            assert!(
+                changes(&mut app, remote, Some(computing(remote, 5, InReview))).is_empty(),
+                "{remote}: in review while it computes"
+            );
+            assert!(
+                changes(&mut app, remote, Some(pr_on(remote, 5, Ready))).is_empty(),
+                "{remote}: still ready as last settled: no flap"
+            );
+            let failed = computing(remote, 5, CiFailed);
+            assert_eq!(
+                changes(&mut app, remote, Some(failed.clone())),
+                vec![transition(failed, Ready, PrTransitionTo::State(CiFailed))],
+                "{remote}: CI failed still alerts"
+            );
+
+            let mut app = seen_app(remote, PrLookup::Found(computing(remote, 6, InReview)));
+            assert!(
+                changes(&mut app, remote, Some(pr_on(remote, 6, Ready))).is_empty(),
+                "{remote}: an answer that still computes is not the before"
+            );
+        }
+    }
+
+    #[test]
+    fn a_poll_with_the_same_pr_keeps_the_detail_and_another_pr_drops_it() {
+        let mut app = app_with_pr(7);
+        let _ = click_badge(&mut app);
+        assert!(land(&mut app, "feature", 7, pr_detail(7)));
+        let t0 = Instant::now();
+        assert_eq!(
+            app.due_pr_polls(t0),
+            vec![(PathBuf::from("app"), "feature".to_string())]
+        );
+        // Same PR, new update time: a changed answer.
+        let mut changed =
+            PullRequest::fixture(7, "https://github.com/octo/demo/pull/7", PrState::InReview);
+        changed.updated_at = Some(1_767_312_000);
+        assert!(app.apply_pr_lookup_at(
+            Path::new("app"),
+            "feature",
+            Some(REMOTE.into()),
+            PrLookup::Found(changed),
+            t0 + secs(1)
+        ));
+        assert!(
+            matches!(detail_of(&app), Some(PrDetailState::Ready(_))),
+            "the same PR keeps its detail"
+        );
+        assert_eq!(
+            app.pr_cache.detail_refresh.values().collect::<Vec<_>>(),
+            vec![&DetailRefresh::Due],
+            "marked for a new fetch"
+        );
+        set_answer(&mut app, 8, PrState::InReview);
+        assert_eq!(detail_of(&app), None, "another PR drops it");
+        assert!(app.pr_cache.details.is_empty());
+        assert!(app.pr_cache.detail_refresh.is_empty());
+    }
+
+    #[test]
+    fn a_pinned_popover_asks_again_after_its_pr_answer_changed() {
+        let title = |app: &AppState| match detail_of(app) {
+            Some(PrDetailState::Ready(detail)) => detail.title,
+            other => panic!("a ready detail expected: {other:?}"),
+        };
+        let mut app = app_with_pr(7);
+        let _ = click_badge(&mut app);
+        assert!(app.popover_pinned());
+        assert!(land(&mut app, "feature", 7, pr_detail(7)));
+        assert_eq!(app.request_popover_pr_details(), Effect::None, "no change");
+
+        set_answer(&mut app, 7, PrState::Ready);
+        assert_eq!(
+            app.request_popover_pr_details(),
+            fetch(7, 2),
+            "a changed answer asks again"
+        );
+        assert_eq!(title(&app), "Add login", "the old detail stays meanwhile");
+        assert_eq!(app.request_popover_pr_details(), Effect::None, "asked once");
+        let PrDetailLookup::Found(mut newer) = pr_detail(7) else {
+            unreachable!()
+        };
+        newer.title = "Add login and logout".into();
+        assert!(land_request(
+            &mut app,
+            "feature",
+            7,
+            2,
+            PrDetailLookup::Found(newer)
+        ));
+        assert_eq!(title(&app), "Add login and logout");
+        assert!(app.pr_cache.detail_refresh.is_empty());
+
+        // A failed new fetch keeps the detail that landed.
+        set_answer(&mut app, 7, PrState::CiRunning);
+        assert_eq!(app.request_popover_pr_details(), fetch(7, 3));
+        assert!(land_request(
+            &mut app,
+            "feature",
+            7,
+            3,
+            PrDetailLookup::Failed(None)
+        ));
+        assert_eq!(title(&app), "Add login and logout");
+
+        // "Refresh this PR" marks it too, with no change in the answer.
+        assert_eq!(
+            app.refresh_pull_requests(Some(Path::new("app"))),
+            Effect::LookupPullRequests {
+                targets: vec![(PathBuf::from("app"), "feature".to_string())]
+            }
+        );
+        assert_eq!(app.request_popover_pr_details(), fetch(7, 4));
+    }
+
+    #[test]
+    fn poll_cycles_never_request_a_detail_on_their_own() {
+        let mut app = app_with_pr(7);
+        focus(&mut app, "repo:app");
+        let _ = click_badge(&mut app);
+        assert!(land(&mut app, "feature", 7, pr_detail(7)));
+        assert_eq!(
+            app.due_pr_polls(Instant::now()),
+            vec![(PathBuf::from("app"), "feature".to_string())]
+        );
+        assert!(
+            matches!(detail_of(&app), Some(PrDetailState::Ready(_))),
+            "a poll keeps the detail"
+        );
+        for tick in [Action::WatchTick, Action::FetchTick] {
+            let effect = app.dispatch(tick.clone());
+            assert!(
+                !format!("{effect:?}").contains("LookupPullRequestDetail"),
+                "{tick:?}: {effect:?}"
+            );
+        }
+        set_answer(&mut app, 7, PrState::InReview);
+        assert_eq!(
+            app.request_popover_pr_details(),
+            Effect::None,
+            "the same answer asks nothing"
+        );
+        assert!(app.pr_cache.detail_refresh.is_empty());
+    }
+
+    #[test]
+    fn refresh_looks_up_now_keeps_the_badge_and_skips_the_backoff() {
+        let mut app = app_with(
+            &[pushed("app"), pushed("lib"), repo("local", "feature")],
+            &[],
+        );
+        let path = Path::new("app");
+        let _ = app.due_pr_lookups();
+        let t0 = Instant::now();
+        land_pr(&mut app, "app", GH_REMOTE, open_on(GH_REMOTE, 1), t0);
+        land_pr(&mut app, "lib", &gh("lib"), open_on(&gh("lib"), 2), t0);
+        land_pr(&mut app, "local", &gh("local"), PrLookup::NoPr, t0);
+        assert_eq!(run_cycle(&mut app, t0 + secs(180), true), ["app", "lib"]);
+        assert!(
+            polled(&mut app, t0 + secs(360)).is_empty(),
+            "github.com backs off"
+        );
+
+        let targets = |effect: Effect| match effect {
+            Effect::LookupPullRequests { targets } => {
+                let mut names: Vec<String> = targets
+                    .into_iter()
+                    .map(|(path, _)| path.display().to_string())
+                    .collect();
+                names.sort();
+                names
+            }
+            other => panic!("lookups expected: {other:?}"),
+        };
+        assert_eq!(targets(app.refresh_pull_requests(Some(path))), ["app"]);
+        assert_eq!(
+            app.pr_badge(path),
+            Some(PrState::InReview),
+            "the badge stays"
+        );
+        assert_eq!(
+            app.refresh_pull_requests(Some(path)),
+            Effect::None,
+            "already in flight"
+        );
+        assert_eq!(
+            targets(app.refresh_pull_requests(None)),
+            ["lib", "local"],
+            "every checkout with a forge remote, polled or not"
+        );
     }
 }

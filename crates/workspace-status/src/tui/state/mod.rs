@@ -1093,6 +1093,7 @@ impl AppState {
         state.no_color = settings.no_color;
         state.undercurl = settings.undercurl;
         state.smooth_scroll = settings.smooth_scroll;
+        state.set_pr_poll_mode(settings.pr_poll);
         state.activity_sparkline = settings.activity_sparkline;
         state.saved_commit_msg_lines = settings.commit_msg_lines;
         if let Some(lines) = settings.commit_msg_lines {
