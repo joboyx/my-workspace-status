@@ -35,12 +35,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use serde::de::IgnoredAny;
 use serde::Deserialize;
 
 use super::pr_status::{
-    badge_state, checks_ci_link, named_checks, next_action, pipeline_ci_link, Check, CheckBucket,
-    ChecksSummary, CiLink, NextAction, PrNotes, PrState, StatusFacts,
+    badge_state, can_stack_on, checks_ci_link, named_checks, named_failed_check, next_action,
+    pipeline_ci_link, Check, CheckBucket, ChecksSummary, CiLink, NextAction, PrNotes, PrState,
+    StatusFacts,
 };
 
 /// Status line when a branch has no PR that counts.
@@ -100,7 +100,8 @@ pub struct PullRequest {
     pub notes: PrNotes,
     /// Checks of the head commit (GitLab: the head pipeline).
     pub checks: ChecksSummary,
-    /// Name of the first failed GitHub check. GitLab names jobs only in the
+    /// Name of the failed GitHub check that [`Self::ci_link`] opens
+    /// ([`super::pr_status::named_failed_check`]). GitLab names jobs only in the
     /// detail, so a GitLab PR has none here.
     pub failed_check: Option<String>,
     /// CI page; [`CiLink::kind`] names its action.
@@ -144,11 +145,17 @@ impl PullRequest {
     /// branch. An open one wins over a merged one, then the highest number.
     /// The caller passes PRs of this repository only; this PR itself never
     /// counts.
+    ///
+    /// A base that is the repository's default branch `default_branch` (the
+    /// configured one, when set) or a long-lived branch such as `main` or
+    /// `develop` is never a stack ([`can_stack_on`]), even when some PR has
+    /// it as its head.
     pub fn stacked_on<'a>(
         &self,
         known: impl IntoIterator<Item = &'a PullRequest>,
+        default_branch: Option<&str>,
     ) -> Option<&'a PullRequest> {
-        if self.base.is_empty() {
+        if !can_stack_on(&self.base, default_branch) {
             return None;
         }
         known
@@ -234,10 +241,13 @@ pub enum ReviewCount {
     /// GitHub: distinct authors whose latest review is `APPROVED`. The
     /// GitHub CLI does not expose how many approvals are required.
     Approved(usize),
-    /// GitLab: approvals given (`approved_by`) and approvals the rules
-    /// require (`approvals_required`).
+    /// GitLab: approvals that count toward the rules
+    /// (`approvals_required − approvals_left`, at least 0) and approvals the
+    /// rules require (`approvals_required`). An approval from a user the
+    /// rules do not count is not given. Whether the rules are met is
+    /// [`PullRequestDetail::review`].
     Approvals {
-        /// Users who approved.
+        /// Approvals that count toward the rules.
         given: usize,
         /// Approvals the rules require.
         required: usize,
@@ -561,6 +571,23 @@ impl GitLabMerge {
             .as_deref()
             .filter(|status| !status.is_empty())
     }
+
+    /// These fields, each one taken from `older` when this answer leaves it
+    /// out (missing, `null`, or an empty status).
+    fn or(self, older: GitLabMerge) -> GitLabMerge {
+        let status = |text: Option<String>| text.filter(|text| !text.is_empty());
+        GitLabMerge {
+            draft: self.draft.or(older.draft),
+            work_in_progress: self.work_in_progress.or(older.work_in_progress),
+            detailed_merge_status: status(self.detailed_merge_status)
+                .or(status(older.detailed_merge_status)),
+            merge_status: status(self.merge_status).or(status(older.merge_status)),
+            has_conflicts: self.has_conflicts.or(older.has_conflicts),
+            blocking_discussions_resolved: self
+                .blocking_discussions_resolved
+                .or(older.blocking_discussions_resolved),
+        }
+    }
 }
 
 /// One GitLab `merge_requests` list entry.
@@ -595,8 +622,6 @@ struct GitLabApprovals {
     approvals_required: Option<u64>,
     #[serde(default)]
     approvals_left: Option<u64>,
-    #[serde(default)]
-    approved_by: Option<Vec<IgnoredAny>>,
 }
 
 /// One GitLab pipeline job.
@@ -711,15 +736,16 @@ fn github_notes(status: &GitHubStatus, open: bool) -> PrNotes {
 /// Badge state of a GitHub PR with `checks`.
 ///
 /// Ready to merge: `mergeStateStatus: CLEAN`, or `reviewDecision: APPROVED`
-/// with no failed or running check and a merge state that is not `DIRTY` or
-/// `BLOCKED` (`UNKNOWN`, still computing, is neither).
+/// with no failed or running check and a merge state that is not `DIRTY`,
+/// `BLOCKED`, or `BEHIND` (branch protection blocks the merge until the
+/// branch is updated). `UNKNOWN`, still computing, is none of them.
 fn github_state(status: &GitHubStatus, merged: bool, checks: ChecksSummary) -> PrState {
     let merge_state = status.merge_state_status.as_deref();
     let ready = merge_state == Some("CLEAN")
         || (status.review_decision.as_deref() == Some("APPROVED")
             && checks.fail == 0
             && checks.pending == 0
-            && !matches!(merge_state, Some("DIRTY" | "BLOCKED")));
+            && !matches!(merge_state, Some("DIRTY" | "BLOCKED" | "BEHIND")));
     badge_state(&StatusFacts {
         merged,
         draft: status.is_draft.unwrap_or(false),
@@ -728,12 +754,12 @@ fn github_state(status: &GitHubStatus, merged: bool, checks: ChecksSummary) -> P
     })
 }
 
-/// Name of the first failed check.
-fn first_failed(checks: &[Check]) -> Option<String> {
-    checks
-        .iter()
-        .find(|check| check.bucket == CheckBucket::Fail && !check.name.is_empty())
+/// Name of the failed check the PR names: [`named_failed_check`], the same
+/// check the CI link opens. `None` when no check failed or it has no name.
+fn failed_check_name(checks: &[Check]) -> Option<String> {
+    named_failed_check(checks)
         .map(|check| check.name.clone())
+        .filter(|name| !name.is_empty())
 }
 
 fn github_lookup(
@@ -769,7 +795,7 @@ fn github_pull_request(pr: GitHubPr, kind: Kind) -> PullRequest {
         state: github_state(&pr.status, kind == Kind::Merged, summary),
         notes: github_notes(&pr.status, kind == Kind::Open),
         checks: summary,
-        failed_check: first_failed(&checks),
+        failed_check: failed_check_name(&checks),
         ci_link: checks_ci_link(&checks, &pr.url),
         updated_at: pr.updated_at.as_deref().and_then(rfc3339_unix),
         url: pr.url,
@@ -805,7 +831,8 @@ fn gitlab_checks(pipeline_status: Option<&str>) -> ChecksSummary {
 /// Notes of a GitLab MR: conflicts on `has_conflicts` or
 /// `detailed_merge_status: conflict`; unresolved threads on
 /// `detailed_merge_status: discussions_not_resolved` or
-/// `blocking_discussions_resolved: false`. None unless `open`.
+/// `blocking_discussions_resolved: false`; changes requested on
+/// `detailed_merge_status: requested_changes`. None unless `open`.
 fn gitlab_notes(merge: &GitLabMerge, open: bool) -> PrNotes {
     if !open {
         return PrNotes::default();
@@ -815,7 +842,7 @@ fn gitlab_notes(merge: &GitLabMerge, open: bool) -> PrNotes {
         conflicts: merge.has_conflicts == Some(true) || detailed == Some("conflict"),
         unresolved_threads: detailed == Some("discussions_not_resolved")
             || merge.blocking_discussions_resolved == Some(false),
-        changes_requested: false,
+        changes_requested: detailed == Some("requested_changes"),
     }
 }
 
@@ -873,10 +900,14 @@ fn gitlab_jobs(repo: &ForgeRepo, pipeline: u64, run: Runner) -> Vec<Check> {
 }
 
 /// List, pick, then for an open MR the MR call (head pipeline) and, when
-/// the server sends no `detailed_merge_status`, the approvals call.
+/// neither answer has a `detailed_merge_status`, the approvals call.
 ///
-/// A failed MR call fails the lookup. A failed approvals call leaves the
-/// MR not ready.
+/// The merge fields (`detailed_merge_status`, `has_conflicts`,
+/// `blocking_discussions_resolved`, `draft`) of an open MR come from the MR
+/// call, which is fresher than the list (the list can still say
+/// `unchecked`); a field the MR call leaves out comes from the list. A
+/// failed MR call fails the lookup. A failed approvals call leaves the MR
+/// not ready.
 fn gitlab_lookup(
     repo: &ForgeRepo,
     branch: &str,
@@ -900,10 +931,14 @@ fn gitlab_lookup(
     };
     let mut pipeline = None;
     let mut approvals_left = None;
+    let mut merge = mr.merge;
     if kind == Kind::Open {
         let view: GitLabMrView = parse(&run(&gitlab_mr_argv(repo, mr.iid))?)?;
         pipeline = view.head_pipeline;
-        if mr.merge.detailed().is_none() {
+        // The single MR is fresher than the list, which can still say
+        // `unchecked`.
+        merge = view.merge.or(merge);
+        if merge.detailed().is_none() {
             approvals_left = gitlab_approvals(repo, mr.iid, run).and_then(|a| a.approvals_left);
         }
     }
@@ -915,8 +950,8 @@ fn gitlab_lookup(
         title: mr.title.unwrap_or_default(),
         head: mr.source_branch.unwrap_or_default(),
         base: mr.target_branch.unwrap_or_default(),
-        state: gitlab_state(&mr.merge, kind == Kind::Merged, checks, approvals_left),
-        notes: gitlab_notes(&mr.merge, kind == Kind::Open),
+        state: gitlab_state(&merge, kind == Kind::Merged, checks, approvals_left),
+        notes: gitlab_notes(&merge, kind == Kind::Open),
         checks,
         failed_check: None,
         ci_link: pipeline_ci_link(pipeline.web_url.as_deref(), &mr.web_url),
@@ -1139,9 +1174,10 @@ fn gitlab_detail(
             PrReview::NotApproved
         });
         reviews = approvals.and_then(|a| {
+            let required = a.approvals_required?;
             Some(ReviewCount::Approvals {
-                given: a.approved_by.map_or(0, |by| by.len()),
-                required: usize::try_from(a.approvals_required?).ok()?,
+                given: usize::try_from(required.saturating_sub(a.approvals_left?)).ok()?,
+                required: usize::try_from(required).ok()?,
             })
         });
         if checks.fail > 0 || checks.pending > 0 {
@@ -1285,8 +1321,9 @@ fn reap_in_background(mut child: Child) {
 /// the start or while it runs (it is then killed). The error holds the
 /// reason when there is one: `<program> not found` (for example `gh not
 /// found`) when the program is missing, else the first non-blank stderr
-/// line of a non-zero exit, trimmed, control characters as spaces. A time
-/// limit, a cancel, or a silent failure has no reason.
+/// line of a non-zero exit, trimmed, without escape sequences, and at most
+/// 200 characters ([`first_stderr_line`]). A time limit, a cancel, or a
+/// silent failure has no reason.
 ///
 /// Stdin is null and stderr is captured, so the CLI cannot read the TUI's
 /// terminal or print over it. `GH_PROMPT_DISABLED` and `NO_PROMPT` (read by
@@ -1311,14 +1348,43 @@ fn read_on_thread(mut pipe: impl Read + Send + 'static) -> mpsc::Receiver<Vec<u8
     rx
 }
 
-/// First non-blank line of `stderr`, trimmed, with each control character
-/// as a space, so the text cannot drive a terminal.
+/// Longest failure reason [`first_stderr_line`] keeps, in characters.
+const STDERR_LINE_MAX: usize = 200;
+
+/// `line` without CSI escape sequences (`ESC [`, parameter and
+/// intermediate bytes, one final byte in `@`..`~`), with every other
+/// control character as a space, so the text cannot drive a terminal.
+fn terminal_safe(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for byte in chars.by_ref() {
+                if ('@'..='~').contains(&byte) {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(if c.is_control() { ' ' } else { c });
+    }
+    out
+}
+
+/// First non-blank line of `stderr`: [`terminal_safe`], trimmed, and cut to
+/// [`STDERR_LINE_MAX`] characters with a trailing `…` when longer.
 fn first_stderr_line(stderr: &[u8]) -> Option<String> {
-    String::from_utf8_lossy(stderr)
+    let line = String::from_utf8_lossy(stderr)
         .lines()
-        .map(|line| line.replace(char::is_control, " "))
-        .map(|line| line.trim().to_string())
-        .find(|line| !line.is_empty())
+        .map(|line| terminal_safe(line).trim().to_string())
+        .find(|line| !line.is_empty())?;
+    if line.chars().count() <= STDERR_LINE_MAX {
+        return Some(line);
+    }
+    let mut cut: String = line.chars().take(STDERR_LINE_MAX - 1).collect();
+    cut.push('…');
+    Some(cut)
 }
 
 fn run_cli_within(
@@ -1488,7 +1554,7 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    use super::super::pr_status::CiLinkKind;
+    use super::super::pr_status::{CiLinkKind, LONG_LIVED_BRANCHES};
 
     fn repo(forge: Forge, host: &str, path: &str) -> ForgeRepo {
         ForgeRepo {
@@ -1895,7 +1961,7 @@ mod tests {
             gh_open(&[("mergeStateStatus", r#""CLEAN""#)]),
             PrState::Ready,
         );
-        for merge_state in ["UNKNOWN", "BEHIND", "UNSTABLE", "HAS_HOOKS"] {
+        for merge_state in ["UNKNOWN", "UNSTABLE", "HAS_HOOKS"] {
             row(
                 format!("approved, {merge_state}"),
                 gh_open(&[
@@ -1905,7 +1971,7 @@ mod tests {
                 PrState::Ready,
             );
         }
-        for merge_state in ["BLOCKED", "DIRTY"] {
+        for merge_state in ["BLOCKED", "DIRTY", "BEHIND"] {
             row(
                 format!("approved but {merge_state}"),
                 gh_open(&[
@@ -1915,6 +1981,15 @@ mod tests {
                 PrState::InReview,
             );
         }
+        row(
+            "approved, behind, a failed check: CI failed".into(),
+            gh_open(&[
+                ("reviewDecision", r#""APPROVED""#),
+                ("mergeStateStatus", r#""BEHIND""#),
+                ("statusCheckRollup", &failing("FAILURE")),
+            ]),
+            PrState::CiFailed,
+        );
         let passed = rollup(&[
             check_run("lint", "COMPLETED", "SUCCESS"),
             check_run("docs", "COMPLETED", "SKIPPED"),
@@ -1980,6 +2055,14 @@ mod tests {
                 gh_open(&[("mergeStateStatus", r#""CLEAN""#)]),
                 Some("merge"),
                 true,
+            ),
+            (
+                gh_open(&[
+                    ("reviewDecision", r#""APPROVED""#),
+                    ("mergeStateStatus", r#""BEHIND""#),
+                ]),
+                Some("get review"),
+                false,
             ),
             (
                 gh_open(&[("statusCheckRollup", &run)]),
@@ -2055,10 +2138,55 @@ mod tests {
             link(&[lint.clone(), build]),
             (None, details_url("build"), "Open running check")
         );
-        assert_eq!(link(&[lint]), (None, details_url("lint"), "Open checks"));
+        assert_eq!(
+            link(&[lint.clone()]),
+            (None, details_url("lint"), "Open checks")
+        );
         assert_eq!(
             link(&[]),
             (None, format!("{}/checks", gh_url(7)), "Open checks")
+        );
+
+        // The alert names the check the link opens.
+        let a_no_link = json_with(
+            &check_run("a", "COMPLETED", "FAILURE"),
+            &[("detailsUrl", "null")],
+        );
+        let b = check_run("b", "COMPLETED", "FAILURE");
+        assert_eq!(
+            link(&[a_no_link.clone(), b]),
+            (Some("b".into()), details_url("b"), "Open failed check")
+        );
+        let running = check_run("build", "IN_PROGRESS", "");
+        assert_eq!(
+            link(&[lint, a_no_link, running]),
+            (
+                Some("a".into()),
+                format!("{}/checks", gh_url(7)),
+                "Open checks"
+            ),
+            "no failed check has a link: the first one's name and the checks tab"
+        );
+    }
+
+    #[test]
+    fn github_merged_pr_with_a_failed_check_opens_that_check() {
+        let merged = json_with(
+            &gh_pr(7, "MERGED", BRANCH, "APPROVED", "2026-01-02T00:00:00Z"),
+            &[(
+                "statusCheckRollup",
+                &rollup(&[check_run("test", "COMPLETED", "FAILURE")]),
+            )],
+        );
+        let pr = found_pr(gh_lookup(&[merged]));
+        assert_eq!(pr.state, PrState::Merged);
+        assert_eq!(
+            (pr.ci_link.kind, pr.ci_link.url, pr.failed_check),
+            (
+                CiLinkKind::FailedCheck,
+                details_url("test"),
+                Some("test".into())
+            )
         );
     }
 
@@ -2196,23 +2324,35 @@ mod tests {
         json_with(&gl_mr(21, "opened", "2026-01-02T00:00:00.000Z"), fields)
     }
 
-    /// The single MR 21 as `glab api` prints it, with head pipeline 99 in
-    /// `pipeline` status (`""` for no pipeline).
-    fn gl_view(state: &str, pipeline: &str) -> String {
-        let head = if pipeline.is_empty() {
+    /// `head_pipeline` of the single MR: pipeline 99 in `status`, or `null`
+    /// for `""`.
+    fn gl_pipeline(status: &str) -> String {
+        if status.is_empty() {
             "null".to_string()
         } else {
             format!(
-                r#"{{"id":99,"iid":5,"status":"{pipeline}","web_url":"https://gitlab.com/group/sub/demo/-/pipelines/99"}}"#
+                r#"{{"id":99,"iid":5,"status":"{status}","web_url":"https://gitlab.com/group/sub/demo/-/pipelines/99"}}"#
             )
-        };
+        }
+    }
+
+    /// The single MR answer for list `entry`: the same fields (GitLab
+    /// sends both), plus the author and the head pipeline in `pipeline`
+    /// status.
+    fn gl_view_of(entry: &str, pipeline: &str) -> String {
         json_with(
-            &gl_mr(21, state, "2026-03-04T13:06:07.000+08:00"),
+            entry,
             &[
                 ("author", r#"{"username":"octo-user"}"#),
-                ("head_pipeline", &head),
+                ("head_pipeline", &gl_pipeline(pipeline)),
             ],
         )
+    }
+
+    /// The single MR 21 as `glab api` prints it, with head pipeline 99 in
+    /// `pipeline` status (`""` for no pipeline).
+    fn gl_view(state: &str, pipeline: &str) -> String {
+        gl_view_of(&gl_mr(21, state, "2026-03-04T13:06:07.000+08:00"), pipeline)
     }
 
     /// Which GitLab endpoint `argv` calls.
@@ -2234,29 +2374,57 @@ mod tests {
     /// A fake `glab api`: one answer per endpoint.
     struct GlForge {
         list: Answer,
-        mr: Answer,
+        /// The single MR object the MR call answers, unless `mr` is set.
+        view: String,
+        /// An MR call answer that replaces `view` (a failure, bad JSON).
+        mr: Option<Answer>,
         approvals: Answer,
         jobs: Answer,
     }
 
     impl GlForge {
-        /// List `mrs`; the MR call answers MR 21 with no pipeline; the
-        /// approvals and jobs calls fail.
+        /// List `mrs`. The MR call answers the first of them (else open MR
+        /// 21) with the same fields and no pipeline. The approvals and jobs
+        /// calls fail.
         fn new(mrs: &[String]) -> Self {
+            let first = mrs
+                .first()
+                .cloned()
+                .unwrap_or_else(|| gl_mr(21, "opened", "2026-03-04T13:06:07.000+08:00"));
             Self {
                 list: Ok(format!("[{}]", mrs.join(","))),
-                mr: Ok(gl_view("opened", "")),
+                view: gl_view_of(&first, ""),
+                mr: None,
                 approvals: Err(None),
                 jobs: Err(None),
             }
         }
 
         fn mr(self, mr: Answer) -> Self {
-            Self { mr, ..self }
+            Self {
+                mr: Some(mr),
+                ..self
+            }
+        }
+
+        /// The MR call answers `fields` on top of the list's.
+        fn mr_fields(self, fields: &[(&str, &str)]) -> Self {
+            Self {
+                view: json_with(&self.view, fields),
+                ..self
+            }
+        }
+
+        /// The MR call leaves `key` out.
+        fn mr_without(self, key: &str) -> Self {
+            Self {
+                view: json_without(&self.view, key),
+                ..self
+            }
         }
 
         fn pipeline(self, status: &str) -> Self {
-            self.mr(Ok(gl_view("opened", status)))
+            self.mr_fields(&[("head_pipeline", &gl_pipeline(status))])
         }
 
         fn approvals(self, json: &str) -> Self {
@@ -2274,7 +2442,7 @@ mod tests {
             calls.borrow_mut().push(argv.to_vec());
             match gl_endpoint(argv) {
                 "list" => self.list.clone(),
-                "mr" => self.mr.clone(),
+                "mr" => self.mr.clone().unwrap_or_else(|| Ok(self.view.clone())),
                 "approvals" => self.approvals.clone(),
                 _ => self.jobs.clone(),
             }
@@ -2516,6 +2684,14 @@ mod tests {
                 true,
             ),
             (
+                GlForge::new(&[gl_open(&[(
+                    "detailed_merge_status",
+                    r#""requested_changes""#,
+                )])]),
+                Some("address review"),
+                true,
+            ),
+            (
                 GlForge::new(&[gl_open(&[("detailed_merge_status", r#""mergeable""#)])]),
                 Some("merge"),
                 true,
@@ -2545,7 +2721,7 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_notes_conflicts_and_unresolved_threads_on_open_mrs_only() {
+    fn gitlab_notes_conflicts_threads_and_changes_requested_on_open_mrs_only() {
         let fields = [
             ("has_conflicts", "true"),
             ("blocking_discussions_resolved", "false"),
@@ -2555,8 +2731,59 @@ mod tests {
             open.notes.texts(),
             vec!["has conflicts", "unresolved threads"]
         );
+        let requested = GlForge::new(&[gl_open(&[(
+            "detailed_merge_status",
+            r#""requested_changes""#,
+        )])])
+        .found();
+        assert_eq!(requested.notes.texts(), vec!["changes requested"]);
+        assert_eq!(requested.state, PrState::InReview);
         let merged = json_with(&gl_mr(20, "merged", "2026-01-01T00:00:00.000Z"), &fields);
         assert_eq!(GlForge::new(&[merged]).found().notes, PrNotes::default());
+    }
+
+    #[test]
+    fn gitlab_open_mr_reads_merge_facts_from_the_mr_call_before_the_list() {
+        let stale = GlForge::new(&[gl_open(&[("detailed_merge_status", r#""unchecked""#)])])
+            .mr_fields(&[("detailed_merge_status", r#""mergeable""#)]);
+        let (result, calls) = stale.lookup();
+        assert_eq!(picked(result).2, PrState::Ready, "the MR call wins");
+        assert_eq!(calls, ["list", "mr"], "no approvals call");
+
+        let fresher = GlForge::new(&[gl_open(&[])]).mr_fields(&[
+            ("draft", "true"),
+            ("has_conflicts", "true"),
+            ("blocking_discussions_resolved", "false"),
+        ]);
+        let pr = fresher.found();
+        assert_eq!(pr.state, PrState::Draft);
+        assert_eq!(
+            pr.notes.texts(),
+            vec!["has conflicts", "unresolved threads"]
+        );
+
+        let missing = GlForge::new(&[gl_open(&[
+            ("detailed_merge_status", r#""mergeable""#),
+            ("has_conflicts", "true"),
+        ])])
+        .mr_without("detailed_merge_status")
+        .mr_without("has_conflicts");
+        let (result, calls) = missing.lookup();
+        let pr = found_pr(result);
+        assert_eq!(
+            (pr.state, pr.notes.conflicts),
+            (PrState::Ready, true),
+            "a field the MR call leaves out comes from the list"
+        );
+        assert_eq!(calls, ["list", "mr"]);
+
+        let empty = GlForge::new(&[gl_open(&[("detailed_merge_status", r#""mergeable""#)])])
+            .mr_fields(&[("detailed_merge_status", r#""""#)]);
+        assert_eq!(
+            empty.found().state,
+            PrState::Ready,
+            "an empty status is left out"
+        );
     }
 
     #[test]
@@ -2691,9 +2918,9 @@ mod tests {
             PrState::Ready,
         );
         let known = [base.clone(), top.clone()];
-        assert_eq!(top.stacked_on(&known), Some(&base));
-        assert_eq!(base.stacked_on(&known), None, "no PR has head main");
-        let action = top.next_action(top.stacked_on(&known)).expect("open");
+        assert_eq!(top.stacked_on(&known, None), Some(&base));
+        assert_eq!(base.stacked_on(&known, None), None, "no PR has head main");
+        let action = top.next_action(top.stacked_on(&known, None)).expect("open");
         assert_eq!(action.text(), "merge #318 first");
         assert!(top.needs_you());
 
@@ -2702,7 +2929,7 @@ mod tests {
         let known = [gl_base, gl_top.clone()];
         assert_eq!(
             gl_top
-                .next_action(gl_top.stacked_on(&known))
+                .next_action(gl_top.stacked_on(&known, None))
                 .map(|a| a.text()),
             Some("merge !12 first".into())
         );
@@ -2713,9 +2940,10 @@ mod tests {
         let merged = stacked(318, &gh_url(318), "feature/a", "main", PrState::Merged);
         let top = stacked(319, &gh_url(319), "feature/b", "feature/a", PrState::Ready);
         let known = [merged.clone(), top.clone()];
-        assert_eq!(top.stacked_on(&known), Some(&merged));
+        assert_eq!(top.stacked_on(&known, None), Some(&merged));
         assert_eq!(
-            top.next_action(top.stacked_on(&known)).map(|a| a.text()),
+            top.next_action(top.stacked_on(&known, None))
+                .map(|a| a.text()),
             Some("merge".into())
         );
     }
@@ -2732,16 +2960,48 @@ mod tests {
             newer_merged.clone(),
             top.clone(),
         ];
-        assert_eq!(top.stacked_on(&known), Some(&open));
+        assert_eq!(top.stacked_on(&known, None), Some(&open));
         assert_eq!(
-            top.stacked_on([&old_merged, &newer_merged]),
+            top.stacked_on([&old_merged, &newer_merged], None),
             Some(&newer_merged)
         );
         let loops = stacked(320, &gh_url(320), "feature/c", "feature/c", PrState::Ready);
-        assert_eq!(loops.stacked_on([&loops]), None);
+        assert_eq!(loops.stacked_on([&loops], None), None);
         let no_base = stacked(321, &gh_url(321), "feature/d", "", PrState::Ready);
         let empty_head = stacked(322, &gh_url(322), "", "main", PrState::InReview);
-        assert_eq!(no_base.stacked_on([&empty_head]), None);
+        assert_eq!(no_base.stacked_on([&empty_head], None), None);
+    }
+
+    #[test]
+    fn a_long_lived_or_default_base_is_never_a_stack() {
+        for state in [PrState::InReview, PrState::Merged] {
+            let release = stacked(400, &gh_url(400), "develop", "main", state);
+            let feature = stacked(401, &gh_url(401), "feature/a", "develop", PrState::Ready);
+            assert_eq!(
+                feature.stacked_on([&release, &feature], None),
+                None,
+                "a {state:?} develop → main PR does not stack a PR into develop"
+            );
+            assert_eq!(
+                feature
+                    .next_action(feature.stacked_on([&release], None))
+                    .map(|a| a.text()),
+                Some("merge".into())
+            );
+        }
+        for base in LONG_LIVED_BRANCHES {
+            let below = stacked(410, &gl_url(410), base, "other", PrState::InReview);
+            let top = stacked(411, &gl_url(411), "feature/b", base, PrState::Ready);
+            assert_eq!(top.stacked_on([&below], None), None, "{base}");
+        }
+        let release = stacked(420, &gh_url(420), "release", "main", PrState::InReview);
+        let top = stacked(421, &gh_url(421), "feature/c", "release", PrState::Ready);
+        assert_eq!(
+            top.stacked_on([&release], Some("release")),
+            None,
+            "the configured default branch"
+        );
+        assert_eq!(top.stacked_on([&release], Some("main")), Some(&release));
     }
 
     // ---- lookup_detail ----
@@ -3036,8 +3296,7 @@ mod tests {
 
     #[test]
     fn gitlab_detail_asks_jobs_only_while_the_pipeline_failed_or_runs() {
-        let approved =
-            r#"{"approved":true,"approvals_required":1,"approvals_left":0,"approved_by":[{},{}]}"#;
+        let approved = r#"{"approved":true,"approvals_required":1,"approvals_left":0}"#;
         let running = GlForge::new(&[])
             .pipeline("running")
             .approvals(approved)
@@ -3053,7 +3312,7 @@ mod tests {
         assert_eq!(
             running.reviews,
             Some(ReviewCount::Approvals {
-                given: 2,
+                given: 1,
                 required: 1
             })
         );
@@ -3084,6 +3343,46 @@ mod tests {
             "approvals call failed"
         );
         assert_eq!(failed_jobs_call.reviews, None);
+    }
+
+    #[test]
+    fn gitlab_approvals_given_is_required_minus_left() {
+        let reviews = |approvals: &str| {
+            let detail = detail(GlForge::new(&[]).approvals(approvals).detail().0);
+            (detail.review, detail.reviews)
+        };
+        let not_met = Some(PrReview::NotApproved);
+        let one_of = |given| Some(ReviewCount::Approvals { given, required: 1 });
+        assert_eq!(
+            reviews(
+                r#"{"approved":false,"approvals_required":1,"approvals_left":1,
+                    "approved_by":[{"user":{"username":"octo-user"}}]}"#
+            ),
+            (not_met, one_of(0)),
+            "an approval the rules do not count is not given"
+        );
+        assert_eq!(
+            reviews(r#"{"approved":false,"approvals_required":1,"approvals_left":3}"#),
+            (not_met, one_of(0)),
+            "clamped at 0"
+        );
+        assert_eq!(
+            reviews(r#"{"approved":true,"approvals_required":2,"approvals_left":0}"#),
+            (
+                Some(PrReview::Approved),
+                Some(ReviewCount::Approvals {
+                    given: 2,
+                    required: 2
+                })
+            )
+        );
+        for missing in [
+            r#"{"approved":false,"approvals_required":1}"#,
+            r#"{"approved":false,"approvals_left":1}"#,
+            r#"{"approved":false,"approvals_required":1,"approvals_left":null}"#,
+        ] {
+            assert_eq!(reviews(missing), (not_met, None), "{missing}");
+        }
     }
 
     #[test]
@@ -3228,12 +3527,42 @@ mod tests {
         );
         assert_eq!(
             run_cli(
-                &sh("printf 'HTTP 401:\\033[1m Bad\\tcredentials\\r\\n' >&2; exit 4"),
+                &sh("printf '\\033[31mHTTP 401:\\033[0m\\033[1;4m Bad\\tcredentials\\r\\n' >&2; exit 4"),
                 &live
             ),
-            Err(Some("HTTP 401: [1m Bad credentials".into())),
-            "control characters become spaces"
+            Err(Some("HTTP 401: Bad credentials".into())),
+            "escape sequences go, other control characters become spaces"
         );
+        assert_eq!(
+            run_cli(&sh("printf '%0300d\\n' 0 >&2; exit 1"), &live),
+            Err(Some(format!("{}…", "0".repeat(199)))),
+            "cut to 200 characters"
+        );
+    }
+
+    #[test]
+    fn first_stderr_line_strips_csi_and_caps_the_length() {
+        assert_eq!(
+            first_stderr_line("\u{1b}[38;5;196merror:\u{1b}[m bad\u{7}".as_bytes()),
+            Some("error: bad".into())
+        );
+        assert_eq!(
+            first_stderr_line("lone \u{1b} escape".as_bytes()),
+            Some("lone   escape".into()),
+            "an ESC that starts no CSI sequence is a space"
+        );
+        assert_eq!(
+            first_stderr_line("cut \u{1b}[1".as_bytes()),
+            Some("cut".into()),
+            "an unfinished sequence runs to the end"
+        );
+        let exact = "é".repeat(200);
+        assert_eq!(first_stderr_line(exact.as_bytes()), Some(exact.clone()));
+        let long = format!("{exact}x");
+        let cut = first_stderr_line(long.as_bytes()).expect("line");
+        assert_eq!(cut.chars().count(), 200);
+        assert!(cut.ends_with("é…"), "{cut}");
+        assert_eq!(first_stderr_line(b" \n\t\n"), None);
     }
 
     #[cfg(unix)]

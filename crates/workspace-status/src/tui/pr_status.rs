@@ -146,7 +146,8 @@ pub struct PrNotes {
     /// GitLab `detailed_merge_status: discussions_not_resolved`, or
     /// `blocking_discussions_resolved: false`.
     pub unresolved_threads: bool,
-    /// GitHub `reviewDecision: CHANGES_REQUESTED`.
+    /// GitHub `reviewDecision: CHANGES_REQUESTED`; GitLab
+    /// `detailed_merge_status: requested_changes`.
     pub changes_requested: bool,
 }
 
@@ -256,11 +257,12 @@ pub fn next_action(
 /// What a CI link opens, which names its action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CiLinkKind {
-    /// The first failed GitHub check.
+    /// The failed GitHub check [`named_failed_check`] picks.
     FailedCheck,
     /// The first running GitHub check.
     RunningCheck,
-    /// A GitHub check page, or the PR's checks tab.
+    /// A GitHub check page, or the PR's checks tab (also when no failed
+    /// check has a link).
     Checks,
     /// The GitLab head pipeline, or the MR's pipelines tab.
     Pipeline,
@@ -290,28 +292,83 @@ pub struct CiLink {
     pub kind: CiLinkKind,
 }
 
-/// GitHub CI link: the first failed check's link, else the first running
-/// check's link, else the first check with a link, else `<pr_url>/checks`.
+/// The failed check a PR names (in an alert) and links (`Open failed
+/// check`): the first failed check that has a link, else the first failed
+/// check. `None` when no check failed.
+///
+/// [`checks_ci_link`] opens this same check, so the name and the link never
+/// point at two different checks.
+pub fn named_failed_check(checks: &[Check]) -> Option<&Check> {
+    let failed = || {
+        checks
+            .iter()
+            .filter(|check| check.bucket == CheckBucket::Fail)
+    };
+    failed()
+        .find(|check| check.url.is_some())
+        .or_else(|| failed().next())
+}
+
+/// GitHub CI link.
+///
+/// With a failed check: the link of [`named_failed_check`]
+/// ([`CiLinkKind::FailedCheck`]), or `<pr_url>/checks` when no failed check
+/// has a link. With no failed check: the first running check's link, else
+/// the first check with a link, else `<pr_url>/checks`.
 pub fn checks_ci_link(checks: &[Check], pr_url: &str) -> CiLink {
+    let checks_tab = || CiLink {
+        url: format!("{}/checks", pr_url.trim_end_matches('/')),
+        kind: CiLinkKind::Checks,
+    };
+    if let Some(failed) = named_failed_check(checks) {
+        return match &failed.url {
+            Some(url) => CiLink {
+                url: url.clone(),
+                kind: CiLinkKind::FailedCheck,
+            },
+            None => checks_tab(),
+        };
+    }
     let first = |bucket: Option<CheckBucket>| {
         checks
             .iter()
             .filter(|check| bucket.is_none_or(|bucket| check.bucket == bucket))
             .find_map(|check| check.url.clone())
     };
-    let (url, kind) = if let Some(url) = first(Some(CheckBucket::Fail)) {
-        (url, CiLinkKind::FailedCheck)
-    } else if let Some(url) = first(Some(CheckBucket::Pending)) {
-        (url, CiLinkKind::RunningCheck)
+    if let Some(url) = first(Some(CheckBucket::Pending)) {
+        CiLink {
+            url,
+            kind: CiLinkKind::RunningCheck,
+        }
     } else if let Some(url) = first(None) {
-        (url, CiLinkKind::Checks)
+        CiLink {
+            url,
+            kind: CiLinkKind::Checks,
+        }
     } else {
-        (
-            format!("{}/checks", pr_url.trim_end_matches('/')),
-            CiLinkKind::Checks,
-        )
-    };
-    CiLink { url, kind }
+        checks_tab()
+    }
+}
+
+/// Branch names that never count as a stack base, whatever the repository's
+/// default branch is: long-lived branches that many PRs target. Holds every
+/// [`crate::helpers::DEFAULT_BRANCH_NAMES`] entry.
+pub const LONG_LIVED_BRANCHES: [&str; 7] = [
+    "main",
+    "master",
+    "develop",
+    "dev",
+    "trunk",
+    "staging",
+    "production",
+];
+
+/// True when a PR whose base branch is `base` can be stacked on another PR:
+/// `base` is not empty, not the repository's default branch
+/// `default_branch` (when one is configured), and not one of
+/// [`LONG_LIVED_BRANCHES`].
+pub fn can_stack_on(base: &str, default_branch: Option<&str>) -> bool {
+    !base.is_empty() && default_branch != Some(base) && !LONG_LIVED_BRANCHES.contains(&base)
 }
 
 /// GitLab CI link: the head pipeline's page, else `<mr_url>/pipelines`.
@@ -573,12 +630,17 @@ mod tests {
             ("https://ci/fail".into(), CiLinkKind::FailedCheck)
         );
         assert_eq!(
-            link(&[pass.clone(), fail_no_link.clone(), run]),
+            link(&[pass.clone(), run.clone()]),
             ("https://ci/run".into(), CiLinkKind::RunningCheck)
         );
         assert_eq!(
-            link(&[fail_no_link.clone(), pass]),
+            link(&[pass.clone()]),
             ("https://ci/pass".into(), CiLinkKind::Checks)
+        );
+        assert_eq!(
+            link(&[pass, fail_no_link.clone(), run]),
+            (format!("{PR}/checks"), CiLinkKind::Checks),
+            "a failed check with no link: the checks tab, not a running check"
         );
         assert_eq!(
             link(&[fail_no_link]),
@@ -589,6 +651,41 @@ mod tests {
             checks_ci_link(&[], &format!("{PR}/")).url,
             format!("{PR}/checks")
         );
+    }
+
+    #[test]
+    fn the_named_failed_check_is_the_one_the_link_opens() {
+        use CheckBucket::*;
+        let a = check(Fail, "a (no link)", None);
+        let b = check(Fail, "b", Some("https://ci/b"));
+        let c = check(Fail, "c", Some("https://ci/c"));
+        let run = check(Pending, "build", Some("https://ci/run"));
+        let all = [run.clone(), a.clone(), b.clone(), c];
+        assert_eq!(named_failed_check(&all), Some(&b));
+        assert_eq!(
+            checks_ci_link(&all, PR),
+            CiLink {
+                url: "https://ci/b".into(),
+                kind: CiLinkKind::FailedCheck
+            }
+        );
+        assert_eq!(named_failed_check(&[run.clone(), a.clone()]), Some(&a));
+        assert_eq!(named_failed_check(&[run]), None);
+    }
+
+    #[test]
+    fn long_lived_and_default_branches_never_count_as_a_stack_base() {
+        for base in LONG_LIVED_BRANCHES {
+            assert!(!can_stack_on(base, None), "{base}");
+        }
+        for name in crate::helpers::DEFAULT_BRANCH_NAMES {
+            assert!(LONG_LIVED_BRANCHES.contains(&name), "{name}");
+        }
+        assert!(!can_stack_on("", None));
+        assert!(!can_stack_on("release", Some("release")));
+        assert!(can_stack_on("release", Some("main")));
+        assert!(can_stack_on("feature/ABC-123-retry", None));
+        assert!(!can_stack_on("main", Some("release")), "long-lived wins");
     }
 
     #[test]
