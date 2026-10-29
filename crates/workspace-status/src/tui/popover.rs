@@ -2635,6 +2635,33 @@ mod tests {
             );
         }
 
+        /// A forge that sent no approval count (GitLab with a missing
+        /// approvals field; GitHub likewise) shows no review line.
+        #[test]
+        fn no_review_count_drops_the_review_line_on_both_forges() {
+            for (remote, pr) in forges(PrState::InReview) {
+                let mut detail = if remote == GL_REMOTE {
+                    gl_detail()
+                } else {
+                    gh_detail()
+                };
+                detail.reviews = None;
+                let mut app = app_with(remote, &[pr]);
+                let section = section_of(&mut app, "c0", Some(PrDetailLookup::Found(detail)));
+                let lines = texts(&section);
+                assert!(
+                    !lines
+                        .iter()
+                        .any(|line| line.starts_with("approvals") || line.starts_with("reviews")),
+                    "{remote}: {lines:?}"
+                );
+                assert!(
+                    lines.iter().any(|line| line.starts_with("checks")),
+                    "{lines:?}"
+                );
+            }
+        }
+
         #[test]
         fn github_reviews_leave_out_a_missing_decision_and_colour_by_approval() {
             let mut app = app_with(GH_REMOTE, &[gh_pr(PrState::Ready)]);

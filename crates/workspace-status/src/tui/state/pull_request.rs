@@ -3809,8 +3809,25 @@ mod tests {
     fn r_in_a_pinned_pr_popover_refreshes_that_pr_and_keeps_it_open() {
         for remote in [GH_REMOTE, GL_REMOTE] {
             let (pr, _, _) = pr_with_ci(remote, PrState::CiRunning);
-            let mut app = app_answered(remote, PrLookup::Found(pr));
-            let _ = pin_pr(&mut app);
+            let mut app = app_answered(remote, PrLookup::Found(pr.clone()));
+            let Effect::LookupPullRequestDetail {
+                repo,
+                branch,
+                remote: resolved,
+                number,
+                request,
+            } = pin_pr(&mut app)
+            else {
+                panic!("the pin asks for the detail");
+            };
+            assert!(app.apply_pr_detail(
+                &repo,
+                &branch,
+                &resolved,
+                number,
+                request,
+                pr_detail(number)
+            ));
             let refresh = Effect::LookupPullRequests {
                 targets: vec![(PathBuf::from("app"), "feature".into())],
             };
@@ -3825,10 +3842,31 @@ mod tests {
                 Some(PrState::CiRunning),
                 "the badge stays while it looks again"
             );
+            assert!(
+                matches!(detail_of(&app), Some(PrDetailState::Ready(_))),
+                "the detail stays on screen while it looks again"
+            );
             assert_eq!(
                 app.dispatch(Action::RefreshPullRequest),
                 Effect::None,
                 "already looking"
+            );
+            assert_eq!(app.status, PR_LOOKUP_RUNNING);
+            assert_eq!(app.status.kind(), StatusKind::Warn);
+
+            // The answer lands: the pinned popover asks for the detail
+            // again.
+            land_pr(&mut app, "app", remote, PrLookup::Found(pr), Instant::now());
+            assert_eq!(
+                app.request_popover_pr_details(),
+                Effect::LookupPullRequestDetail {
+                    repo: PathBuf::from("app"),
+                    branch: "feature".into(),
+                    remote: remote.into(),
+                    number,
+                    request: request + 1,
+                },
+                "{remote}: the detail is fetched again"
             );
 
             // The palette row (no popover) refreshes the focused row.
@@ -3848,6 +3886,221 @@ mod tests {
         assert_eq!(app.dispatch(Action::RefreshPullRequest), Effect::None);
         assert!(app.status.is_empty());
         assert!(app.popover_pinned());
+    }
+
+    /// Refresh this PR says why it looks nothing up: a lookup of that
+    /// checkout is already out, or the checkout has no forge remote or no
+    /// branch.
+    #[test]
+    fn refresh_this_pr_says_why_it_cannot_run() {
+        for remote in [GH_REMOTE, GL_REMOTE] {
+            let (pr, _, _) = pr_with_ci(remote, PrState::InReview);
+            let mut app = app_answered(remote, PrLookup::Found(pr));
+            assert!(matches!(
+                app.dispatch(Action::RefreshPullRequest),
+                Effect::LookupPullRequests { .. }
+            ));
+            assert!(app.status.is_empty());
+            assert_eq!(app.dispatch(Action::RefreshPullRequest), Effect::None);
+            assert_eq!(app.status, PR_LOOKUP_RUNNING, "{remote}");
+            assert_eq!(app.status.kind(), StatusKind::Warn);
+        }
+
+        // The first lookup is still out.
+        let mut app = app_with(&[repo("app", "feature")], &[]);
+        let _ = app.due_pr_lookups();
+        focus(&mut app, "repo:app");
+        assert_eq!(app.dispatch(Action::RefreshPullRequest), Effect::None);
+        assert_eq!(app.status, PR_LOOKUP_RUNNING);
+
+        // No GitHub or GitLab remote.
+        let mut app = app_with(&[repo("app", "feature")], &[]);
+        let _ = app.due_pr_lookups();
+        assert!(app.apply_pr_lookup(Path::new("app"), "feature", None, PrLookup::NoPr));
+        focus(&mut app, "repo:app");
+        assert_eq!(app.dispatch(Action::RefreshPullRequest), Effect::None);
+        assert_eq!(app.status, NO_PR_FOR_ROW);
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+
+        // No branch: a file row.
+        app.status = StatusMessage::default();
+        app.cursor = app
+            .rows
+            .iter()
+            .position(|row| row.kind == NodeKind::File)
+            .expect("file row");
+        assert_eq!(app.dispatch(Action::RefreshPullRequest), Effect::None);
+        assert_eq!(app.status, NO_PR_FOR_ROW);
+    }
+
+    /// Dispatch the action the key `code` maps to in the current mode.
+    fn press(app: &mut AppState, code: crossterm::event::KeyCode) -> Effect {
+        use crossterm::event::{Event, KeyEvent, KeyModifiers};
+        let event = Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        let action = crate::tui::keys::event_to_action(&event, app.input_mode(), false, false);
+        app.dispatch(action)
+    }
+
+    /// `gx` and `gc` inside a pinned PR popover act on its PR section, even
+    /// while the focused graph row (a commit) has no PR; the popover closes
+    /// as Enter on the line closes it.
+    #[test]
+    fn gx_and_gc_in_a_pinned_pr_popover_act_on_its_pr_on_both_forges() {
+        use crate::tui::keys::InputMode;
+        use crossterm::event::KeyCode;
+        for remote in [GH_REMOTE, GL_REMOTE] {
+            let (pr, pr_ref, url) = pr_with_ci(remote, PrState::CiFailed);
+            let mut app = app_answered(remote, PrLookup::Found(pr));
+            app.graph = Some(GraphModel {
+                commits: vec![Commit {
+                    id: "aaa".into(),
+                    subject: "seed".into(),
+                    ..Commit::default()
+                }],
+                window: 1,
+                ..GraphModel::default()
+            });
+            app.focus = FocusPane::Right;
+            let rows = app.graph.as_ref().expect("graph").visible_rows();
+            app.graph_cursor = rows
+                .iter()
+                .position(|row| matches!(row, GraphRow::Commit { .. }))
+                .expect("commit row");
+            for (second, want) in [
+                (KeyCode::Char('c'), ci_open(pr_ref, url)),
+                (
+                    KeyCode::Char('x'),
+                    Effect::OpenPullRequest {
+                        repo: PathBuf::from("app"),
+                        branch: "feature".into(),
+                        page: PrPage::Pr,
+                    },
+                ),
+            ] {
+                let _ = pin_pr(&mut app);
+                assert_eq!(app.input_mode(), InputMode::Popover);
+                assert_eq!(press(&mut app, KeyCode::Char('g')), Effect::None);
+                assert_eq!(app.input_mode(), InputMode::PopoverGPending);
+                assert_eq!(press(&mut app, second), want, "{remote} g{second:?}");
+                assert!(app.popover.is_none(), "the line's key closes it");
+            }
+        }
+    }
+
+    /// `gc` in a pinned popover with no PR section says so and keeps the
+    /// popover; `g` then Esc only ends the chord.
+    #[test]
+    fn g_chords_in_a_popover_without_a_pr_or_ended_by_esc() {
+        use crate::tui::keys::InputMode;
+        use crossterm::event::KeyCode;
+        let mut app = app_answered(GH_REMOTE, open_on(GH_REMOTE, 7));
+        app.cursor = app
+            .rows
+            .iter()
+            .position(|row| row.kind == NodeKind::File)
+            .expect("file row");
+        let _ = app.dispatch(Action::PopoverOpenFocused);
+        assert!(app.popover_pinned(), "a file row popover");
+        for second in [KeyCode::Char('c'), KeyCode::Char('x')] {
+            app.status = StatusMessage::default();
+            let _ = press(&mut app, KeyCode::Char('g'));
+            assert_eq!(press(&mut app, second), Effect::None);
+            assert_eq!(app.status, NO_PR_FOR_ROW);
+            assert!(app.popover_pinned(), "the popover stays");
+            assert_eq!(app.input_mode(), InputMode::Popover);
+        }
+
+        // `g` then Esc ends the chord and keeps the popover; a later `c`
+        // is a plain popover key again (it does nothing).
+        let mut app = app_answered(GH_REMOTE, open_on(GH_REMOTE, 7));
+        let _ = pin_pr(&mut app);
+        let _ = press(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.input_mode(), InputMode::PopoverGPending);
+        assert_eq!(press(&mut app, KeyCode::Esc), Effect::None);
+        assert_eq!(app.input_mode(), InputMode::Popover);
+        assert!(app.popover_pinned(), "Esc in the chord does not close");
+        assert_eq!(press(&mut app, KeyCode::Char('c')), Effect::None);
+        assert!(app.popover_pinned());
+        // `g` then `j` ends the chord without moving the focus.
+        let focus = app.popover.as_ref().expect("pinned").focus_line;
+        let _ = press(&mut app, KeyCode::Char('g'));
+        let _ = press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.input_mode(), InputMode::Popover);
+        assert_eq!(app.popover.as_ref().expect("pinned").focus_line, focus);
+    }
+
+    /// A poll that drops a line above the focused one (the notes) keeps
+    /// the pinned focus on the same action line.
+    #[test]
+    fn a_landed_badge_lookup_keeps_the_pinned_focus_on_its_line() {
+        for remote in [GH_REMOTE, GL_REMOTE] {
+            let (mut pr, _, _) = pr_with_ci(remote, PrState::InReview);
+            pr.notes.conflicts = true;
+            let mut app = app_answered(remote, PrLookup::Found(pr.clone()));
+            let _ = pin_pr(&mut app);
+            focus_line(&mut app, "Copy URL");
+            let notes = |app: &AppState| {
+                app.open_popover_sections()
+                    .iter()
+                    .flat_map(|section| section.lines.iter())
+                    .any(|line| line.copy_text() == "has conflicts")
+            };
+            assert!(notes(&app));
+            pr.notes.conflicts = false;
+            land_pr(&mut app, "app", remote, PrLookup::Found(pr), Instant::now());
+            assert!(!notes(&app), "the poll dropped the notes line");
+            assert_eq!(
+                app.popover_run_action(),
+                Some(Action::CopyPullRequestUrl),
+                "{remote}: the focus stays on Copy URL"
+            );
+        }
+    }
+
+    /// Two check names share the blank label: the focus on the second one
+    /// stays there when a new detail adds a line above it.
+    #[test]
+    fn the_focus_on_a_check_name_survives_a_detail_landing() {
+        use super::super::super::pr_status::{Check, CheckBucket};
+        use crate::tui::popover::flat_lines;
+        let with_checks = |author: Option<&str>| {
+            let PrDetailLookup::Found(mut detail) = pr_detail(7) else {
+                unreachable!("a found detail");
+            };
+            detail.author = author.map(str::to_string);
+            detail.check_names = ["test", "build"]
+                .iter()
+                .zip([CheckBucket::Fail, CheckBucket::Pending])
+                .map(|(name, bucket)| Check {
+                    bucket,
+                    name: name.to_string(),
+                    url: None,
+                })
+                .collect();
+            PrDetailLookup::Found(detail)
+        };
+        let focused_text = |app: &AppState| {
+            let sections = app.open_popover_sections();
+            let index = app.popover.as_ref().expect("pinned").focus_line;
+            flat_lines(&sections)[index].copy_text()
+        };
+        let mut app = app_with_pr(7);
+        let _ = click_badge(&mut app);
+        assert!(land(&mut app, "feature", 7, with_checks(None)));
+        let sections = app.open_popover_sections();
+        let build = flat_lines(&sections)
+            .iter()
+            .position(|line| line.copy_text() == "build")
+            .expect("build line");
+        app.popover.as_mut().expect("pinned").focus_line = build;
+        assert_eq!(focused_text(&app), "build");
+
+        // The answer changes, so the detail is fetched again; the new one
+        // adds `author` above the checks.
+        set_answer(&mut app, 7, PrState::CiRunning);
+        assert_eq!(app.request_popover_pr_details(), fetch(7, 2));
+        assert!(land(&mut app, "feature", 7, with_checks(Some("octo-user"))));
+        assert_eq!(focused_text(&app), "build", "not the first check line");
     }
 
     #[test]

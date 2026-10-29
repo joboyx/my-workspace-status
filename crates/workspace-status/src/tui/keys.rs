@@ -3026,6 +3026,44 @@ mod tests {
         }
     }
 
+    /// `g` in a pinned popover: `x` and `c` complete `gx` / `gc`; any
+    /// other key, Esc, and a right click only end the chord.
+    #[test]
+    fn popover_g_chord_keys() {
+        let mode = InputMode::PopoverGPending;
+        let at = |event: Event| event_to_action(&event, mode, false, false);
+        for (event, want) in [
+            (key(KeyCode::Char('x')), Action::OpenPullRequest),
+            (key(KeyCode::Char('c')), Action::OpenPullRequestCi),
+            (key(KeyCode::Esc), Action::GChordCancel),
+            (key(KeyCode::Char('j')), Action::GChordCancel),
+            (key(KeyCode::Enter), Action::GChordCancel),
+            (key(KeyCode::Char('y')), Action::GChordCancel),
+            (key(KeyCode::Char('g')), Action::GChordCancel),
+            (key(KeyCode::Char('w')), Action::GChordCancel),
+            (ctrl(KeyCode::Char('x')), Action::GChordCancel),
+            (ctrl(KeyCode::Char('c')), Action::CtrlC),
+            (
+                mouse(MouseEventKind::Down(MouseButton::Right), 4, 4),
+                Action::GChordCancel,
+            ),
+        ] {
+            assert_eq!(at(event.clone()), want, "{event:?}");
+        }
+        // The arming `g` and the second key both feed the echo guard.
+        let mut echo = GChordEchoState::default();
+        let g = key(KeyCode::Char('g'));
+        assert!(!drop_protocol_dup_g_chord_press(
+            &mut echo,
+            InputMode::Popover,
+            &g
+        ));
+        assert!(
+            drop_protocol_dup_g_chord_press(&mut echo, mode, &g),
+            "a typeless echo of the arming g is dropped"
+        );
+    }
+
     #[test]
     fn doctor_mode_keys_move_copy_rerun_close_and_swallow_the_rest() {
         let at = |event: Event| event_to_action(&event, InputMode::Doctor, false, false);
