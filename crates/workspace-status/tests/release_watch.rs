@@ -383,3 +383,26 @@ fn verify_driver_wait_checks_the_pane_before_it_matches() {
          or `wait --gone` passes on a dead TUI"
     );
 }
+
+#[test]
+fn verify_driver_reset_removes_only_directories() {
+    // `scenario --reset <dir>` clears `<dir>/gh` and `<dir>/glab`. In
+    // `scripts/fake-forge` those names are the fake executables, so the reset
+    // must refuse a regular file before it removes anything, and `rm` only a
+    // directory.
+    let body = VERIFY_SH
+        .split("cmd_scenario() {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("scripts/verify-tui.sh defines cmd_scenario");
+    let refuse = body
+        .find("! -d \"$forge/$d\"")
+        .expect("scenario --reset must refuse a gh / glab entry that is not a directory");
+    let remove = body
+        .find("rm -rf")
+        .expect("scenario --reset removes the old sets");
+    assert!(
+        refuse < remove && body.contains("if [[ -d \"$forge/$d\" ]]; then rm -rf"),
+        "scenario --reset must check for a file before it removes, and remove directories only"
+    );
+}

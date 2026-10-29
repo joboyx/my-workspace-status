@@ -548,8 +548,20 @@ cmd_scenario() {
   for set in "$@"; do
     [[ -d "$SCENARIOS_DIR/$set" ]] || die "unknown scenario set '$set' (ls $SCENARIOS_DIR)"
   done
+  if ((reset)); then
+    # Remove only scenario directories. In the directory of the fake gh and glab
+    # scripts (scripts/fake-forge) these names are the executables: refuse there.
+    local d
+    for d in gh glab; do
+      if [[ -e "$forge/$d" && ! -d "$forge/$d" ]]; then
+        die "scenario --reset: $forge/$d is a file, not a scenario directory (is $forge the fake gh / glab scripts directory?); nothing was removed"
+      fi
+    done
+    for d in gh glab; do
+      if [[ -d "$forge/$d" ]]; then rm -rf "${forge:?}/$d"; fi
+    done
+  fi
   mkdir -p "$forge"
-  if ((reset)); then rm -rf "${forge:?}/gh" "${forge:?}/glab"; fi
   for set in "$@"; do
     src="$SCENARIOS_DIR/$set"
     while IFS= read -r f; do
