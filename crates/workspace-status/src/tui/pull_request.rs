@@ -3416,6 +3416,214 @@ mod tests {
         );
     }
 
+    // ---- live forge (real gh / glab, public read-only PRs; `--ignored`) ----
+
+    /// The real runner with a cancel flag that is never set.
+    fn real_run(argv: &[String]) -> Result<String, Option<String>> {
+        run_cli(argv, &AtomicBool::new(false))
+    }
+
+    /// True when `program` is installed and logged in to `host`; else
+    /// prints why the live test skips.
+    fn live_cli_ready(program: &str, host: &str) -> bool {
+        match real_run(&strings(&[program, "auth", "status", "--hostname", host])) {
+            Ok(_) => true,
+            Err(why) => {
+                println!(
+                    "skip: {program} is missing or not logged in to {host} ({})",
+                    why.unwrap_or_default()
+                );
+                false
+            }
+        }
+    }
+
+    /// Head branches of the same-repository GitHub PRs of `cli/cli` in
+    /// `state`, newest first (at most 50 PRs).
+    fn live_github_branches(state: &str) -> Vec<String> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Entry {
+            head_ref_name: String,
+            is_cross_repository: bool,
+        }
+        let json = real_run(&strings(&[
+            "gh",
+            "pr",
+            "list",
+            "-R",
+            "github.com/cli/cli",
+            "--state",
+            state,
+            "--limit",
+            "50",
+            "--json",
+            "headRefName,isCrossRepository,number",
+        ]))
+        .expect("gh pr list");
+        let entries: Vec<Entry> = serde_json::from_str(&json).expect("gh pr list JSON");
+        entries
+            .into_iter()
+            .filter(|entry| !entry.is_cross_repository)
+            .map(|entry| entry.head_ref_name)
+            .collect()
+    }
+
+    /// Source branches of the same-project GitLab MRs of `gitlab-org/cli`
+    /// in `state`, newest first (at most 50 MRs).
+    fn live_gitlab_branches(state: &str) -> Vec<String> {
+        #[derive(Deserialize)]
+        struct Entry {
+            source_branch: String,
+            source_project_id: u64,
+            target_project_id: u64,
+        }
+        let json = real_run(&strings(&[
+            "glab",
+            "api",
+            "--hostname",
+            "gitlab.com",
+            &format!("projects/gitlab-org%2Fcli/merge_requests?state={state}&per_page=50"),
+        ]))
+        .expect("glab api merge_requests");
+        let entries: Vec<Entry> = serde_json::from_str(&json).expect("merge_requests JSON");
+        entries
+            .into_iter()
+            .filter(|entry| entry.source_project_id == entry.target_project_id)
+            .map(|entry| entry.source_branch)
+            .collect()
+    }
+
+    /// Look up `branch` at `remote` and fetch its detail with the real CLI;
+    /// check the PR class (merged or open), URL, next action, CI link, and
+    /// that the detail parses.
+    fn live_check(remote: &str, branch: &str, merged: bool, url_prefix: &str) {
+        let pr = match lookup(Some(remote), branch, &real_run) {
+            PrLookup::Found(pr) => pr,
+            other => panic!("{branch}: a PR expected, got {other:?}"),
+        };
+        println!(
+            "{branch}: {} {} · next: {} · {}: {} · checks {:?} · notes {:?}",
+            pr.ref_text(),
+            pr.state.label(),
+            pr.next_action(None)
+                .map_or("none".into(), |action| action.text()),
+            pr.ci_link.kind.label(),
+            pr.ci_link.url,
+            pr.checks,
+            pr.notes.texts(),
+        );
+        assert!(pr.url.starts_with(url_prefix), "{}", pr.url);
+        assert_eq!(pr.state == PrState::Merged, merged, "{:?}", pr.state);
+        assert_eq!(pr.next_action(None).is_some(), !merged);
+        assert!(pr.ci_link.url.starts_with("https://"), "{}", pr.ci_link.url);
+        let detail = match lookup_detail(remote, pr.number, &real_run) {
+            PrDetailLookup::Found(detail) => detail,
+            PrDetailLookup::Failed(why) => panic!("{branch}: detail failed: {why:?}"),
+        };
+        println!(
+            "  detail: {} · {} · reviews {:?} · checks {:?} · named {:?} +{} · pipeline {:?} · {}",
+            detail.state,
+            detail.title,
+            detail.reviews,
+            detail.checks,
+            detail
+                .check_names
+                .iter()
+                .map(|check| check.name.as_str())
+                .collect::<Vec<_>>(),
+            detail.more_checks,
+            detail.pipeline,
+            detail.ci_link.kind.label(),
+        );
+        assert_eq!(detail.number, pr.number);
+        assert_eq!(detail.state, if merged { "MERGED" } else { "OPEN" });
+    }
+
+    const LIVE_GITHUB: &str = "https://github.com/cli/cli.git";
+    const LIVE_GITLAB: &str = "https://gitlab.com/gitlab-org/cli.git";
+
+    #[test]
+    #[ignore = "runs the real gh against github.com/cli/cli"]
+    fn live_github_open_pr_parses() {
+        if !live_cli_ready("gh", "github.com") {
+            return;
+        }
+        let Some(branch) = live_github_branches("open").into_iter().next() else {
+            println!("skip: cli/cli has no open same-repository PR");
+            return;
+        };
+        live_check(
+            LIVE_GITHUB,
+            &branch,
+            false,
+            "https://github.com/cli/cli/pull/",
+        );
+    }
+
+    #[test]
+    #[ignore = "runs the real gh against github.com/cli/cli"]
+    fn live_github_merged_pr_parses() {
+        if !live_cli_ready("gh", "github.com") {
+            return;
+        }
+        // A branch that also has an open PR would pick the open one.
+        let open = live_github_branches("open");
+        let Some(branch) = live_github_branches("merged")
+            .into_iter()
+            .find(|branch| !open.contains(branch))
+        else {
+            println!("skip: cli/cli has no merged same-repository PR");
+            return;
+        };
+        live_check(
+            LIVE_GITHUB,
+            &branch,
+            true,
+            "https://github.com/cli/cli/pull/",
+        );
+    }
+
+    #[test]
+    #[ignore = "runs the real glab against gitlab.com/gitlab-org/cli"]
+    fn live_gitlab_open_mr_parses() {
+        if !live_cli_ready("glab", "gitlab.com") {
+            return;
+        }
+        let Some(branch) = live_gitlab_branches("opened").into_iter().next() else {
+            println!("skip: gitlab-org/cli has no open same-project MR");
+            return;
+        };
+        live_check(
+            LIVE_GITLAB,
+            &branch,
+            false,
+            "https://gitlab.com/gitlab-org/cli/-/merge_requests/",
+        );
+    }
+
+    #[test]
+    #[ignore = "runs the real glab against gitlab.com/gitlab-org/cli"]
+    fn live_gitlab_merged_mr_parses() {
+        if !live_cli_ready("glab", "gitlab.com") {
+            return;
+        }
+        let open = live_gitlab_branches("opened");
+        let Some(branch) = live_gitlab_branches("merged")
+            .into_iter()
+            .find(|branch| !open.contains(branch))
+        else {
+            println!("skip: gitlab-org/cli has no merged same-project MR");
+            return;
+        };
+        live_check(
+            LIVE_GITLAB,
+            &branch,
+            true,
+            "https://gitlab.com/gitlab-org/cli/-/merge_requests/",
+        );
+    }
+
     // ---- status strings ----
 
     #[test]
