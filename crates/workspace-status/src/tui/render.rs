@@ -7134,12 +7134,12 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
                     }
                     // A rule fills the width the other rows set.
                     PopoverLine::Rule => 0,
-                    PopoverLine::Action { command, title } => {
+                    PopoverLine::Action { title, keys, .. } => {
                         visible_width(title)
                             + reasons[index]
                                 .as_deref()
                                 .map_or(0, |why| 2 + visible_width(why))
-                            + chip_width(command.keys)
+                            + chip_width(keys)
                     }
                 }
             }
@@ -7249,14 +7249,14 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
                         let width = inner_width.saturating_sub(help_spans_width(&spans));
                         spans.push(Span::styled(rule.repeat(width), muted));
                     }
-                    PopoverLine::Action { command, title } => {
+                    PopoverLine::Action { title, keys, .. } => {
                         let reason = reasons[index].as_deref();
                         let mut title_style = Style::default().fg(palette.file);
                         if reason.is_some() {
                             title_style = title_style.fg(palette.muted).add_modifier(Modifier::DIM);
                         }
                         spans.push(Span::styled(*title, title_style));
-                        let chip_cols = chip_width(command.keys);
+                        let chip_cols = chip_width(keys);
                         if let Some(why) = reason {
                             let used = help_spans_width(&spans);
                             if used + 2 + visible_width(why) + chip_cols <= inner_width {
@@ -7266,13 +7266,13 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
                                 ));
                             }
                         }
-                        if !command.keys.is_empty() {
+                        if !keys.is_empty() {
                             let chip_bg = if reason.is_some() {
                                 palette.muted
                             } else {
                                 accent
                             };
-                            chip = Some(key_chip(command.keys, chip_bg, panel));
+                            chip = Some(key_chip(keys, chip_bg, panel));
                         }
                     }
                 }
@@ -17010,6 +17010,41 @@ mod tests {
                 !line.contains("  MOVE") && !line.contains("  GIT") && !line.contains("  VIEW"),
                 "{title} repeats its group: {line}"
             );
+        }
+    }
+
+    /// Copy PR URL and Refresh this PR run on `y` and `r` only inside a
+    /// pinned PR popover, so their palette rows paint no key chip. The
+    /// popover lines keep `y` and `r`
+    /// (`pr_popover_paints_its_heading_bold_ref_rule_and_clips_long_values`).
+    #[test]
+    fn palette_pr_rows_paint_no_popover_only_chip() {
+        use crate::tui::action::{Action, QuickOpenEntry};
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
+        for c in "pull request".chars() {
+            state.dispatch(Action::QuickOpenChar(c));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        let after = |title: &str| -> Vec<String> {
+            let line = text
+                .lines()
+                .find(|line| line.contains(title))
+                .unwrap_or_else(|| panic!("no {title} row:\n{text}"));
+            line.split(title)
+                .nth(1)
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(str::to_string)
+                .collect()
+        };
+        assert!(after("Open PR CI").contains(&"gc".to_string()), "{text}");
+        for (title, key) in [("Copy PR URL", "y"), ("Refresh this PR", "r")] {
+            let words = after(title);
+            assert!(!words.contains(&key.to_string()), "{title}: {words:?}");
         }
     }
 

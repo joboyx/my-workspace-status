@@ -412,10 +412,12 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         ],
         scope: CommandScope::NoHighlight,
     },
-    // `y` and `r` run these inside a pinned PR popover.
+    // `y` and `r` run these only inside a pinned PR popover; elsewhere
+    // those keys copy comments and refresh. So the rows show no chip, and
+    // the popover lines paint `y` and `r` themselves.
     PaletteCommand {
         title: "Copy PR URL",
-        keys: "y",
+        keys: "",
         group: CommandGroup::Git,
         action: Action::CopyPullRequestUrl,
         aliases: &["pull request", "merge request", "link", "yank"],
@@ -423,7 +425,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     },
     PaletteCommand {
         title: "Refresh this PR",
-        keys: "r",
+        keys: "",
         group: CommandGroup::Git,
         action: Action::RefreshPullRequest,
         aliases: &["pull request", "merge request", "reload"],
@@ -1377,14 +1379,14 @@ mod tests {
             ),
             (
                 "Copy PR URL",
-                "y",
+                "",
                 CommandGroup::Git,
                 Action::CopyPullRequestUrl,
                 CommandScope::NoHighlight,
             ),
             (
                 "Refresh this PR",
-                "r",
+                "",
                 CommandGroup::Git,
                 Action::RefreshPullRequest,
                 CommandScope::NoHighlight,

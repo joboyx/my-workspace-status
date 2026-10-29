@@ -182,14 +182,18 @@ pub enum PopoverLine {
     /// A horizontal rule between the fields and the actions. Not
     /// focusable.
     Rule,
-    /// An existing command: key chip from the palette catalog, and a title.
-    /// Enter or a click runs its [`Action`].
+    /// An existing command: a title and a key chip. Enter or a click runs
+    /// its [`Action`].
     Action {
-        /// The palette row: its action, key chip, and gate.
+        /// The palette row: its action and gate.
         command: &'static PaletteCommand,
         /// Painted title: the palette title, or a section's own name for
         /// it (the PR section names Open PR CI by its CI page).
         title: &'static str,
+        /// Key chip: the palette row's keys, or a key that runs the action
+        /// only inside this popover (the PR section's `y` and `r`, whose
+        /// palette rows show no chip). Empty paints no chip.
+        keys: &'static str,
     },
 }
 
@@ -199,13 +203,32 @@ impl PopoverLine {
         command_for(action).map(|command| Self::Action {
             command,
             title: command.title,
+            keys: command.keys,
         })
     }
 
     /// The palette row of `action` as a line painted with `title`. `None`
     /// when no row runs it.
     pub fn titled_action(action: &Action, title: &'static str) -> Option<Self> {
-        command_for(action).map(|command| Self::Action { command, title })
+        command_for(action).map(|command| Self::Action {
+            command,
+            title,
+            keys: command.keys,
+        })
+    }
+
+    /// This line with the key chip `keys`, for a key that runs the action
+    /// only inside the popover. A line that is not an action stays as it
+    /// is.
+    pub fn with_keys(self, keys: &'static str) -> Self {
+        match self {
+            Self::Action { command, title, .. } => Self::Action {
+                command,
+                title,
+                keys,
+            },
+            line => line,
+        }
     }
 
     /// True for a line `j` / `k` can focus: a field or an action.
@@ -1273,12 +1296,16 @@ fn pr_section(state: &AppState, repo: &Path, now_unix: i64) -> Option<PopoverSec
         &Action::OpenPullRequestCi,
         pr.ci_link.kind.label(),
     ));
-    lines.extend(PopoverLine::titled_action(
-        &Action::CopyPullRequestUrl,
-        PR_COPY_URL_TITLE,
-    ));
+    // `y` and `r` run these only inside the pinned popover (the palette
+    // rows show no chip), so the lines carry the chip themselves.
+    lines.extend(
+        PopoverLine::titled_action(&Action::CopyPullRequestUrl, PR_COPY_URL_TITLE)
+            .map(|line| line.with_keys("y")),
+    );
     if pr.state != PrState::Merged {
-        lines.extend(PopoverLine::action(&Action::RefreshPullRequest));
+        lines.extend(
+            PopoverLine::action(&Action::RefreshPullRequest).map(|line| line.with_keys("r")),
+        );
     }
     Some(PopoverSection {
         icon: pr_badge_kind(pr.state),
@@ -2164,6 +2191,7 @@ mod tests {
         PopoverLine::Action {
             command,
             title: command.title,
+            keys: command.keys,
         }
     }
 
@@ -2439,7 +2467,7 @@ mod tests {
                 PopoverLine::Field { label, value, .. } => format!("{label}: {value}"),
                 PopoverLine::Text(text) | PopoverLine::Note(text) => format!("({text})"),
                 PopoverLine::Rule => "---".into(),
-                PopoverLine::Action { command, title } => format!("[{title}] {}", command.keys),
+                PopoverLine::Action { title, keys, .. } => format!("[{title}] {keys}"),
             }
         }
 
