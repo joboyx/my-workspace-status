@@ -1,6 +1,6 @@
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
-use crate::support::{screen_line_from_end, tree_has, GIT_WAIT, WAIT};
+use crate::support::{screen_line_from_end, send_gesture, tree_has, GIT_WAIT, WAIT};
 
 /// Pinned chrome copy after the first Ctrl+C (`tui/ctrl_c_exit.rs`).
 const CTRL_C_EXIT_PROMPT: &str = "Press Ctrl-c again to exit";
@@ -25,43 +25,21 @@ fn idle_tree_before_ctrl_c(screen: &str) -> bool {
         && !screen.contains("MOVE")
 }
 
-/// First Ctrl+C pins the quit prompt between breadcrumb and status pills.
-///
-/// Fail if the copy is only a breadcrumb toast, if status pills vanish, or
-/// if the tree is gone. The process-alive check sits on the caller.
-fn first_ctrl_c_pinned_prompt(screen: &str) -> bool {
-    let status = screen_line_from_end(screen, 0);
-    let prompt = screen_line_from_end(screen, 1);
-    let crumb = screen_line_from_end(screen, 2);
-    prompt.trim() == CTRL_C_EXIT_PROMPT
-        && crumb.trim() == "workspace › app"
-        && !crumb.contains("Ctrl-c")
-        && status.contains(" tree")
-        && status.contains("? help")
-        && status.contains("focus right")
-        && !status.contains(CTRL_C_EXIT_PROMPT)
-        && tree_has(screen, "README.md")
-        && tree_has(screen, "app")
-        && screen.contains("UNSTAGED")
-        && !screen.contains("MOVE")
-}
-
 /// Second Ctrl+C within the window quits.
 ///
 /// Docs + VIEW: `Ctrl-c Ctrl-c` / `quit (press twice)`. The first-press
-/// test (`pty_ctrl_c_prompts_before_quit`) owns the first-press arm. Help
-/// overlay lists the row (`pty_help_overlay`). This claim is process
-/// exit after that prompt is armed.
+/// test (`pty_ctrl_c_prompts_before_quit`) owns the first-press arm: the
+/// prompt pins and the process keeps running. Help overlay lists the row
+/// (`pty_help_overlay`). This claim is process exit on the second press.
 ///
 /// Encoding: CSI-u Control+c (`CSI 99 ; 5 : 1 u` press, `: 3` release)
-/// for both presses. The live loop requested
+/// for both presses, sent in one write. The live loop requested
 /// `REPORT_ALL_KEYS_AS_ESCAPE_CODES` plus event types. C0 `\x03`
 /// (`PtySession::ctrl`) is a different path. `q` is help `quit`, not
 /// this chord.
 ///
-/// Documented result: first press pins `Press Ctrl-c again to exit` and
-/// keeps the process. Second press within ~2s exits with status 0.
-/// Fail if the first press already quits, if the second is a no-op, if
+/// Documented result: the second press within 2 s of the first (by
+/// arrival) exits with status 0. Fail if the second press is a no-op, if
 /// the prompt stays armed, or if nothing happens. Do not teardown with
 /// `q`.
 #[test]
@@ -77,14 +55,9 @@ fn pty_ctrl_c_second_quit() {
     );
     tui.assert_running("before first Ctrl+C");
 
-    tui.ctrl_letter('c');
-    tui.wait_pred(
-        first_ctrl_c_pinned_prompt,
-        "first CSI-u Ctrl-c pins Press Ctrl-c again to exit between breadcrumb and status",
-        WAIT,
-    );
-    tui.assert_running("after first Ctrl+C (must not quit)");
-
-    tui.ctrl_letter('c');
+    // Both presses in one write: they arrive together, well inside the
+    // 2 s window, however late the loop handles them.
+    let tap = "\x1b[99;5:1u\x1b[99;5:3u";
+    send_gesture(&mut tui, &[tap, tap]);
     tui.wait_exit(WAIT);
 }
