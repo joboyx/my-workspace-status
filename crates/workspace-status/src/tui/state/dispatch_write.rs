@@ -35,6 +35,7 @@ impl AppState {
                         PendingConfirm::MergeIntoHead { .. } => "merge cancelled".into(),
                         PendingConfirm::SwitchToDefault { .. } => "switch cancelled".into(),
                         PendingConfirm::Push { .. } => "push cancelled".into(),
+                        PendingConfirm::ResetToUpstream { .. } => "pull cancelled".into(),
                     };
                 }
                 Effect::None

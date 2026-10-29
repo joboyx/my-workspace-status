@@ -4705,6 +4705,39 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             ));
             (accent, lines)
         }
+        PendingConfirm::ResetToUpstream {
+            branch,
+            upstream,
+            dropped,
+            ..
+        } => {
+            let accent = palette.modified;
+            let noun = if *dropped == 1 { "commit" } else { "commits" };
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled(
+                        upstream.clone(),
+                        Style::default()
+                            .fg(palette.file)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        " was rewritten. Move ",
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(branch.clone(), Style::default().fg(palette.file)),
+                    Span::styled(" to ", Style::default().fg(palette.muted)),
+                    Span::styled(upstream.clone(), Style::default().fg(palette.file)),
+                    Span::styled("?", Style::default().fg(accent)),
+                ]),
+                Line::from(Span::styled(
+                    format!("  Drops {dropped} {noun} that {upstream} dropped; none are yours."),
+                    Style::default().fg(palette.muted),
+                )),
+                confirm_action_row("y", "reset", None, accent, palette.muted, panel),
+            ];
+            (accent, lines)
+        }
     };
     if area.width == 0 || area.height == 0 {
         return;
@@ -11740,6 +11773,43 @@ mod tests {
         assert!(text.contains("fast-forward"), "{text}");
         assert!(text.contains("merge commit"), "{text}");
         assert!(!text.contains("? y/n"), "{text}");
+    }
+
+    #[test]
+    fn reset_confirm_names_the_rewritten_upstream_and_the_dropped_count() {
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut paint = |dropped: usize| {
+            state.confirm = Some(PendingConfirm::ResetToUpstream {
+                repo: "app".into(),
+                branch: "main".into(),
+                upstream: "origin/main".into(),
+                tip: "a".repeat(40),
+                dropped,
+            });
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            buffer_text(&terminal)
+        };
+
+        let text = paint(2);
+        assert!(
+            text.contains("origin/main was rewritten. Move main to origin/main?"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Drops 2 commits that origin/main dropped; none are yours."),
+            "{text}"
+        );
+        assert!(text.contains(" y  reset"), "{text}");
+        assert!(text.contains(" n   Esc  cancel"), "{text}");
+
+        let text = paint(1);
+        assert!(
+            text.contains("Drops 1 commit that origin/main dropped; none are yours."),
+            "{text}"
+        );
     }
 
     #[test]
