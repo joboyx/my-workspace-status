@@ -21133,6 +21133,315 @@ mod tests {
         }
     }
 
+    /// The author every commit popover surface case gives its commit card.
+    const COMMIT_POPOVER_AUTHOR: &str = "Ada Lovelace <ada@example.com>";
+
+    /// The three commit popover kinds: hash card, time, author.
+    const ALL_COMMIT_POPOVERS: &[IconKind] = &[
+        IconKind::CommitHash,
+        IconKind::CommitDate,
+        IconKind::CommitAuthor,
+    ];
+
+    /// One surface of the `commit-popovers` registry component
+    /// (`docs/parity.md`) and how to open it.
+    struct CommitPopoverSurface {
+        /// Surface id in the registry.
+        id: &'static str,
+        /// A state whose next frame paints commit `sha` of `app` on this
+        /// surface, with a loaded card whose author is
+        /// [`COMMIT_POPOVER_AUTHOR`].
+        open: fn() -> AppState,
+        /// Full id of the commit the surface's hits name.
+        sha: &'static str,
+        /// The commit popover kinds the surface paints.
+        features: &'static [IconKind],
+    }
+
+    /// Point the graph at `app` and give its seed commit (A) Ada's full
+    /// identity, so the graph holds the commit card.
+    fn with_graph_commit_card(mut state: AppState) -> AppState {
+        state.graph_identity = Some(("app".into(), FOOTER_COMMIT_A.into()));
+        if let Some(model) = state.graph.as_mut() {
+            model.commits[0].author_name = "Ada Lovelace".into();
+            model.commits[0].people.author_email = "ada@example.com".into();
+        }
+        state
+    }
+
+    /// Select commit A on the graph (row 0 is the uncommitted row).
+    fn with_graph_commit_selected(state: AppState) -> AppState {
+        let mut state = with_graph_commit_card(state);
+        state.graph_cursor = 1;
+        state
+    }
+
+    /// Focus the right pane's diff row with `needle`, cache a committed
+    /// blame of [`BLAME_NOTE_SHA`] for it, and put that commit's card into
+    /// `commit_cards` (the blame commit is off the graph).
+    fn with_diff_blame_card(mut state: AppState, needle: &str) -> AppState {
+        state.focus = FocusPane::Right;
+        state.diff_cursor = diff_row_index(&state, needle);
+        with_blame_card(state)
+    }
+
+    /// Cache a committed blame of [`BLAME_NOTE_SHA`] for the focused line
+    /// and put that commit's card into `commit_cards`.
+    fn with_blame_card(mut state: AppState) -> AppState {
+        cache_focused_commit_blame(&mut state);
+        let mut card = Commit {
+            id: BLAME_NOTE_SHA.into(),
+            subject: "fix the parser".into(),
+            author_name: "Ada Lovelace".into(),
+            author_date_unix: crate::tui::state::unix_now() - 3 * 86_400,
+            ..Commit::default()
+        };
+        card.people.author_email = "ada@example.com".into();
+        state
+            .commit_cards
+            .insert("app".into(), BLAME_NOTE_SHA.into(), Ok(card));
+        state
+    }
+
+    /// The diff of the line-blame cases: `keep one` is a context line.
+    const COMMIT_POPOVER_BODY: &str =
+        "@@ -1,3 +1,3 @@\n keep one\n-old line\n+new line\n keep two\n";
+
+    /// Every commit popover surface this test can drive.
+    const COMMIT_POPOVER_SURFACES: [CommitPopoverSurface; 9] = [
+        CommitPopoverSurface {
+            id: "graph-d0",
+            open: || with_graph_commit_selected(two_pane_graph_state()),
+            sha: FOOTER_COMMIT_A,
+            features: ALL_COMMIT_POPOVERS,
+        },
+        CommitPopoverSurface {
+            id: "graph-d1",
+            open: || with_graph_commit_selected(two_pane_files_state()),
+            sha: FOOTER_COMMIT_A,
+            features: ALL_COMMIT_POPOVERS,
+        },
+        CommitPopoverSurface {
+            id: "files-d2",
+            open: || with_graph_commit_card(two_pane_commit_diff_state()),
+            sha: FOOTER_COMMIT_A,
+            features: ALL_COMMIT_POPOVERS,
+        },
+        CommitPopoverSurface {
+            id: "diff-d0",
+            open: || {
+                let mut state = two_pane_diff_state();
+                state.set_diff(
+                    "app".into(),
+                    "README.md".into(),
+                    super::super::diff::DiffContent::from_unified(COMMIT_POPOVER_BODY),
+                );
+                with_diff_blame_card(state, "keep one")
+            },
+            sha: BLAME_NOTE_SHA,
+            features: ALL_COMMIT_POPOVERS,
+        },
+        CommitPopoverSurface {
+            id: "diff-d2",
+            open: || with_diff_blame_card(two_pane_commit_diff_state(), "new line"),
+            sha: BLAME_NOTE_SHA,
+            features: ALL_COMMIT_POPOVERS,
+        },
+        CommitPopoverSurface {
+            id: "compare-diff",
+            open: || {
+                let mut state = two_pane_diff_state();
+                state
+                    .tabs
+                    .open_or_focus("app".into(), "main".into(), "HEAD".into());
+                let tab = state.tabs.active_compare_mut().unwrap();
+                tab.loading = false;
+                tab.source = Some(super::super::drill::CommitFileSource::Compare {
+                    base_ref: "main".into(),
+                    head_ref: "HEAD".into(),
+                    base_tip: "b".repeat(40),
+                    merge_base: "b".repeat(40),
+                    head: "c".repeat(40),
+                });
+                tab.files = vec![super::super::drill::CommitFile {
+                    status: "M".into(),
+                    path: "README.md".into(),
+                    old_path: None,
+                    stat: None,
+                }];
+                tab.path = Some("README.md".into());
+                tab.content = super::super::diff::DiffContent::from_compare_lines(
+                    COMMIT_POPOVER_BODY.lines().map(String::from).collect(),
+                );
+                with_diff_blame_card(state, "keep one")
+            },
+            sha: BLAME_NOTE_SHA,
+            features: ALL_COMMIT_POPOVERS,
+        },
+        CommitPopoverSurface {
+            id: "explorer-diff",
+            open: || {
+                let mut state = two_pane_diff_state();
+                state.open_loaded_inner_diff(
+                    "app",
+                    "README.md",
+                    super::super::diff::DiffContent::from_unified(COMMIT_POPOVER_BODY),
+                );
+                state.dispatch(Action::FocusRight);
+                with_diff_blame_card(state, "keep one")
+            },
+            sha: BLAME_NOTE_SHA,
+            features: ALL_COMMIT_POPOVERS,
+        },
+        CommitPopoverSurface {
+            id: "explorer-file",
+            open: || with_blame_card(file_view_state(&["# app", "dirty"])),
+            sha: BLAME_NOTE_SHA,
+            features: ALL_COMMIT_POPOVERS,
+        },
+        CommitPopoverSurface {
+            id: "compare-header",
+            open: || {
+                // A Diff commit vs parent tab: `aaa1111^...aaa1111`.
+                let mut state = with_graph_commit_card(two_pane_graph_state());
+                let base = format!("{FOOTER_COMMIT_A}^");
+                state
+                    .tabs
+                    .open_or_focus("app".into(), base.clone(), FOOTER_COMMIT_A.into());
+                let tab = state.tabs.active_compare_mut().unwrap();
+                tab.loading = false;
+                tab.path = Some("README.md".into());
+                tab.source = Some(super::super::drill::CommitFileSource::Compare {
+                    base_ref: base,
+                    head_ref: FOOTER_COMMIT_A.into(),
+                    base_tip: FOOTER_COMMIT_B.into(),
+                    merge_base: FOOTER_COMMIT_B.into(),
+                    head: FOOTER_COMMIT_A.into(),
+                });
+                state
+            },
+            sha: FOOTER_COMMIT_A,
+            features: &[IconKind::CommitHash],
+        },
+    ];
+
+    /// The `commit-popovers` hash card, time, and author popovers behave
+    /// the same on every surface `docs/parity.md` marks `supported` for
+    /// them, in every look it names (boxed and flat panes): the painted
+    /// text records a commit hit, the pointer resting on it for the dwell
+    /// peeks that kind's loaded card, a click pins it, `y` copies the first
+    /// field (the full id on the hash card, `Name <email>` of the author on
+    /// the time and author popovers), and Esc closes it. Blame surfaces
+    /// read the card from `commit_cards` (the commit is off the graph);
+    /// the others from the graph. The registry's surface list and this
+    /// test's must match per feature, so a new surface gets a test case,
+    /// and a surface this test drives gets a registry row.
+    #[test]
+    fn commit_popovers_match_on_every_registry_surface() {
+        let looks = [
+            ("boxed", BackgroundMode::Terminal),
+            ("flat", BackgroundMode::Paint),
+        ];
+        for (feature, kind) in [
+            ("hash-card", IconKind::CommitHash),
+            ("time", IconKind::CommitDate),
+            ("author", IconKind::CommitAuthor),
+        ] {
+            let mut driven: Vec<(String, String)> = COMMIT_POPOVER_SURFACES
+                .iter()
+                .filter(|s| s.features.contains(&kind))
+                .flat_map(|s| looks.iter().map(|(look, _)| (s.id.into(), (*look).into())))
+                .collect();
+            driven.sort();
+            assert_eq!(
+                crate::parity_registry::supported_surface_looks("commit-popovers", feature),
+                driven,
+                "docs/parity.md `commit-popovers` / `{feature}` surfaces and looks must match this test's"
+            );
+        }
+        for surface in &COMMIT_POPOVER_SURFACES {
+            for (look, background) in looks {
+                for &kind in surface.features {
+                    let case = format!("{} {look} {kind:?}", surface.id);
+                    let target = IconTarget::Commit {
+                        repo: "app".into(),
+                        sha: surface.sha.into(),
+                    };
+                    let mut state = (surface.open)();
+                    state.background = background;
+                    // Wide enough that the depth-2 footer (left pane) paints
+                    // its date uncut.
+                    let mut terminal = Terminal::new(TestBackend::new(240, 36)).unwrap();
+                    draw_state(&mut terminal, &mut state);
+                    let hit = state
+                        .layout
+                        .icon_hits
+                        .iter()
+                        .find(|hit| hit.kind == kind && hit.target == target)
+                        .cloned()
+                        .unwrap_or_else(|| panic!("{case}: no hit\n{}", buffer_text(&terminal)));
+                    let open_section = |state: &AppState, what: &str| {
+                        let sections = state.open_popover_sections();
+                        assert_eq!(
+                            (sections.len(), sections[0].icon, &sections[0].target),
+                            (1, kind, &target),
+                            "{case}: {what}"
+                        );
+                        assert!(
+                            !sections[0]
+                                .lines
+                                .iter()
+                                .any(|line| matches!(line, PopoverLine::Note(_))),
+                            "{case}: {what} shows the loaded card: {:?}",
+                            sections[0].lines
+                        );
+                    };
+
+                    // Hover: the dwell opens a peek.
+                    let now = Instant::now();
+                    state.set_pointer_at(Some((hit.x, hit.y)), now);
+                    assert!(
+                        state.expire_peek(
+                            now + std::time::Duration::from_millis(
+                                super::super::popover::PEEK_DWELL_MS
+                            )
+                        ),
+                        "{case}: the dwell opens a peek"
+                    );
+                    assert!(!state.popover_pinned(), "{case}: a peek is not pinned");
+                    open_section(&state, "peek");
+                    draw_state(&mut terminal, &mut state);
+
+                    // Click: pins it.
+                    state.dispatch(Action::Click {
+                        col: hit.x,
+                        row: hit.y,
+                    });
+                    assert!(state.popover_pinned(), "{case}: the click pins");
+                    open_section(&state, "pin");
+                    draw_state(&mut terminal, &mut state);
+
+                    // `y` copies the first field; Esc closes.
+                    let want = if kind == IconKind::CommitHash {
+                        surface.sha
+                    } else {
+                        COMMIT_POPOVER_AUTHOR
+                    };
+                    assert_eq!(
+                        state.dispatch(Action::PopoverCopyLine),
+                        Effect::CopyClipboard {
+                            text: want.into(),
+                            announce: true,
+                        },
+                        "{case}: y copies the first field"
+                    );
+                    state.dispatch(Action::PopoverClose);
+                    assert!(state.popover.is_none(), "{case}: Esc closes");
+                }
+            }
+        }
+    }
+
     /// Every `file://` link URL of the frame.
     fn file_link_urls(state: &AppState) -> Vec<String> {
         state

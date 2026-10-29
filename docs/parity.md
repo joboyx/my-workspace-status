@@ -12,6 +12,7 @@ CI runs the checks in `crates/workspace-status/src/parity_registry.rs` (part of 
 | `parity_registry_gaps_and_intentional_differences_are_indexed` | A `gap:` id is not in **Open gaps**, an indexed gap is used nowhere, a gap is used in another component with no note, or an `I<n>` cited in an `n/a:` reason and the **Intentional differences** table do not match. |
 | `parity_registry_code_anchors_and_tests_exist` | A code anchor or a named test is no longer a `fn` anywhere under `crates/` (a mention in a `//` comment does not count). A rename or a moved code path forces an update here. |
 | `commit_footer_message_scroll_matches_on_every_registry_surface` (`tui/render.rs`) | The `commit-footer` surfaces marked `supported` for `msg-scroll`, in each look, differ from the surfaces that test drives; or the wheel, scrollbar, more-below hint, or per-commit reset fails on one of them. |
+| `commit_popovers_match_on_every_registry_surface` (`tui/render.rs`) | The `commit-popovers` surfaces marked `supported` for `hash-card`, `time`, or `author`, in each look, differ from the surfaces that test drives; or the hit, hover peek, click pin, `y` copy, or Esc close fails on one of them. |
 
 The last check is the pattern for other components: one test body that runs the same assertions on every surface the registry marks `supported`, and that compares its own surface list to `parity_registry::supported_surface_looks(component, feature)`.
 
@@ -168,6 +169,33 @@ Icons and marks on rows record an icon hit (`LayoutHit::icon_hits`): hover peeks
 | `diff-gutter` | Workspace, Compare, Explorer | 0, 2, - | right | boxed, flat | `draw_diff_pane`, `comment_mark_cols` | gap: G7 | gap: G7 |
 | `file-gutter` | Explorer (clean file) | - | right | boxed, flat | `draw_file_body`, `format_line_gutter` | gap: G7 | gap: G7 |
 | `prs-tab` | PRs | - | left | boxed, flat | `draw_prs_list`, `prs_pin_focused` | supported | supported |
+
+### `commit-popovers` — Commit popovers
+
+Every painted commit short hash, commit time, and commit author is an icon hit (`IconTarget::Commit`): hover peeks, a click pins, `y` copies the focused field, and Esc closes. `gh` does not list them: they are mouse only. The depth-2 footer of a stash drill paints no hash, time, or author.
+
+| Feature | What | Tests |
+| --- | --- | --- |
+| `hash-card` | A painted short hash peeks / pins the commit card (full sha first, `y` copies it). | `commit_popovers_match_on_every_registry_surface`, `pty_commit_hash_popover_peeks_pins_and_copies_the_full_sha`, `pty_blame_hash_popover_shows_the_commit_card` |
+| `time` | A painted commit time peeks / pins author and committer with local time and the recorded offset. | `commit_popovers_match_on_every_registry_surface` |
+| `author` | A painted commit author peeks / pins author, committer, and co-authors. | `commit_popovers_match_on_every_registry_surface` |
+
+| Surface | Tab | Depth | Pane | Looks | Code anchors | `hash-card` | `time` | `author` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `draw_graph`, `commit_meta_icon`, `meta_columns_parts`, `label_icons`, `paint_footer`, `selection_detail_parts`, `commit_section` | supported | supported | supported |
+| `graph-d1` | Workspace | 1 | left | boxed, flat | `draw_graph`, `commit_meta_icon`, `meta_columns_parts`, `label_icons`, `paint_footer`, `selection_detail_parts`, `commit_section` | supported | supported | supported |
+| `files-d2` | Workspace | 2 | left | boxed, flat | `draw_commit_detail`, `commit_detail_meta`, `commit_detail_meta_fields`, `commit_section` | supported | supported | supported |
+| `diff-d0` | Workspace | 0 (file focused) | right | boxed, flat | `draw_diff_pane`, `put_line_annotation`, `blame_note_hits`, `painted_line_blame`, `commit_section` | supported | supported | supported |
+| `diff-d2` | Workspace | 2 | right | boxed, flat | `draw_diff_pane`, `put_line_annotation`, `blame_note_hits`, `painted_line_blame`, `commit_section` | supported | supported | supported |
+| `compare-diff` | Compare | - | right | boxed, flat | `draw_diff_pane`, `put_line_annotation`, `blame_note_hits`, `painted_line_blame`, `commit_section` | supported | supported | supported |
+| `explorer-diff` | Explorer (changed file) | - | right | boxed, flat | `draw_diff_pane`, `put_line_annotation`, `blame_note_hits`, `painted_line_blame`, `commit_section`, `dispatch_explorer_tab` | supported | supported | supported |
+| `explorer-file` | Explorer (clean file) | - | right | boxed, flat | `draw_file_body`, `put_line_annotation`, `blame_note_hits`, `dispatch_explorer_tab` | supported | supported | supported |
+| `compare-header` | Compare | - | right | boxed, flat | `draw_diff_pane`, `compare_header_hits`, `range_header` | supported | n/a: the range header paints no commit time | n/a: the range header paints no commit author |
+| `compare-tab-strip` | Compare | - | tab strip | boxed, flat | `draw_tab_strip`, `hit_tab` | n/a: a press on a tab label activates or closes the tab; the diff header of that tab paints the same commit with its popover | n/a: the tab label paints no commit time | n/a: the tab label paints no commit author |
+| `blame-menu` | any | - | overlay | boxed, flat | `draw_blame_menu` | n/a: the A menu is a modal dialog; the line behind it has the popovers | n/a: the A menu is a modal dialog; the line behind it has the popovers | n/a: the A menu is a modal dialog; the line behind it has the popovers |
+| `branch-picker` | any | - | overlay | boxed, flat | `draw_branch_picker` | n/a: a modal picker; the graph row behind it has the popovers | n/a: the picker paints no commit time | n/a: the picker paints no commit author |
+| `create-branch` | any | - | overlay | boxed, flat | `draw_create_branch` | n/a: a modal dialog; the graph row behind it has the popovers | n/a: the dialog paints no commit time | n/a: the dialog paints no commit author |
+| `comment-box` | any | - | overlay | boxed, flat | `draw_comment`, `comment_key_label` | n/a: a modal comment box; the commit's own rows have the popovers | n/a: the comment box paints no commit time | n/a: the comment box paints no commit author |
 
 ### `resize-edges` — Mouse on resize edges
 
