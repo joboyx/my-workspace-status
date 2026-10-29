@@ -40,6 +40,13 @@ usage: scripts/verify-tui.sh <command> ...
                                  server, wait for the chrome; print the run dir
   keys [-l] <run> <key>...       send tmux key names (j Enter Escape Tab C-c '?');
                                  with -l send one argument as literal text
+  mouse <run> move|click <col> <row>
+                                 send an SGR mouse report at a 1-based screen cell
+                                 (row 1 is the first capture line): move = pointer
+                                 motion, no button (hover); click = left press and
+                                 release
+  mouse <run> find <text>        print "<col> <row>" (1-based) of the first cell
+                                 where <text> starts on screen; exit 1 if absent
   wait [--gone] [--cursor|--regex] <run> <text> [timeout-s]
                                  wait until <text> is on screen; --gone: until it is
                                  not; --cursor: a line with the focus bar holds it;
@@ -370,6 +377,57 @@ cmd_keys() {
   if ((literal)); then log_action "keys -l $*"; else log_action "keys $*"; fi
 }
 
+# The TUI turns on xterm SGR (1006) mouse reports, so a report written to the
+# pane reaches it as a real pointer event. Cells are 1-based, as the reports
+# count them; with the status line off, capture line N is screen row N.
+cmd_mouse() {
+  load_run "${1:-}"
+  local action="${2:-}"
+  require_live
+  case "$action" in
+    move | click)
+      local col="${3:-}" row="${4:-}"
+      [[ "$col" =~ ^[1-9][0-9]*$ && "$row" =~ ^[1-9][0-9]*$ ]] ||
+        die "mouse $action: give <col> <row> as positive integers (1-based cells), got '$col' '$row'"
+      if [[ "$action" == move ]]; then
+        # Button 3 + 32: motion with no button held (any-event tracking).
+        tm send-keys -t "$SESSION" -l -- $'\e'"[<35;$col;${row}M"
+      else
+        tm send-keys -t "$SESSION" -l -- $'\e'"[<0;$col;${row}M"
+        tm send-keys -t "$SESSION" -l -- $'\e'"[<0;$col;${row}m"
+      fi
+      log_action "mouse $action $col $row"
+      ;;
+    find)
+      local text="${3:-}"
+      [[ -n "$text" ]] || die "mouse find: give the text to find"
+      local cell
+      cell="$(screen_cell "$text" "$(screen_text || true)")" ||
+        die "mouse find: '$text' is not on screen"
+      log_action "mouse find '$text' -> $cell"
+      echo "$cell"
+      ;;
+    *) die "mouse: give move|click <col> <row>, or find <text>" ;;
+  esac
+}
+
+# screen_cell TEXT SCREEN: "<col> <row>" (1-based) of the first cell where TEXT
+# starts. One cell per character, so wide glyphs (CJK, some emoji) put later
+# columns off by one each; the driver's default ASCII glyphs have none.
+screen_cell() {
+  local text="$1" line prefix row=0 LC_ALL=C.UTF-8
+  if [[ "$(uname)" == Darwin ]]; then LC_ALL=en_US.UTF-8; fi
+  while IFS= read -r line; do
+    row=$((row + 1))
+    if [[ "$line" == *"$text"* ]]; then
+      prefix="${line%%"$text"*}"
+      echo "$((${#prefix} + 1)) $row"
+      return 0
+    fi
+  done <<<"$2"
+  return 1
+}
+
 # screen_matches KIND TEXT SCREEN. KIND is text (a substring), regex (an
 # extended regular expression that matches inside one screen line), or cursor
 # (a screen line that holds both the focus bar and the substring TEXT).
@@ -594,6 +652,7 @@ case "$cmd" in
   build) cmd_build "$@" ;;
   launch) cmd_launch "$@" ;;
   keys) cmd_keys "$@" ;;
+  mouse) cmd_mouse "$@" ;;
   wait) cmd_wait "$@" ;;
   capture) cmd_capture "$@" ;;
   stop) cmd_stop "$@" ;;

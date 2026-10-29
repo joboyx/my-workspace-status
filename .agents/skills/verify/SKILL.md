@@ -8,7 +8,7 @@ description: Prove a workspace-status change works. Picks the test layer that pr
 `workspace-status` (`ws`) is a ratatui TUI over every git checkout under a workspace root. This skill does two things:
 
 1. It tells you which test layer proves which claim, with the exact commands.
-2. It gives a driver, `scripts/verify-tui.sh`, that runs the real binary **of this checkout** in a private tmux server on a seeded throwaway workspace. You send real key bytes, wait for text, and save the screen as proof.
+2. It gives a driver, `scripts/verify-tui.sh`, that runs the real binary **of this checkout** in a private tmux server on a seeded throwaway workspace. You send real key and mouse bytes, wait for text, and save the screen as proof.
 
 The driver is a **test harness**, like the PTY e2e suite. It is not a capture pipeline. README and demo clips come only from `scripts/capture-demo-stills.sh` (`AGENTS.md`, **Demo / screenshots**). Do not use the driver to make clips or stills, and do not use the demo script to check behaviour.
 
@@ -51,6 +51,7 @@ $V stop "$RUN"
 | `build` | `cargo build -p workspace-status --bin workspace-status`; prints the binary path. |
 | `launch [--size COLSxROWS] [--env K=V]... [--fake-forge DIR] [--workspace DIR]` | Seeds `scripts/seed-demo-workspace.sh` into the run dir, starts the TUI in a private tmux server (default `160x45`), waits for the `? help` chrome, prints the run dir. `--env` overrides a default (repeatable). `--fake-forge DIR` turns on the fake forge (below). `--workspace DIR` drives a fixture you built, which must be inside the root. |
 | `keys [-l] <run> <key>...` | `tmux send-keys` with key names: `j`, `Enter`, `Escape`, `Tab`, `C-c`, `'?'`. `g x` sends the two keys of a chord. `-l` sends one argument as literal text (a search term), one character at a time. |
+| `mouse <run> move\|click <col> <row>`, `mouse <run> find <text>` | Writes an xterm SGR (1006) mouse report to the pane, as a terminal does. `move` rests the pointer on a cell (motion, no button: hover); `click` is a left press and release. Cells are 1-based; capture line 1 is row 1. `find` prints `<col> <row>` of the first cell where `<text>` starts on screen (one cell per character), or exits 1, so a recipe hovers by text, not by a fixed cell. |
 | `wait [--gone] [--cursor\|--regex] <run> <text> [timeout]` | Waits until `<text>` is on the screen (default 10 s). `--cursor`: until a line with the focus bar `▌` holds it. `--regex`: `<text>` is an extended regex that matches inside one line. `--gone` inverts any of them: wait until it is not there. It fails at once, in both modes, when the tmux session is missing or the TUI has exited (a gone TUI must not satisfy `--gone`). A timeout or such a failure saves the screen to `evidence/NN-wait-timeout.txt` or `NN-wait-failed.txt` and exits 1. |
 | `capture <run> [name]` | Prints the screen and saves `evidence/NN-<name>.txt` plus `.ansi` (with colour). Works on a dead pane: it shows the panic text. |
 | `stop <run>` | Sends `q`, ends the tmux server of this run, copies the calls of this run and `opened.log` into `evidence/`. The run dir stays. Safe to repeat. |
@@ -115,6 +116,7 @@ Run `launch` without `--fake-forge`, on a fixture whose `origin` is a public rep
 
 - **Wait for text, never sleep.** Panes load off the event thread, so a screen read right after a key can be one frame old. Follow each key with `wait` on the text the step should produce.
 - **Send one key per write; check the cursor after each move.** Give movement keys one per `keys` call and follow each with a `wait` (use `--cursor` on the row you expect). `keys -l` types text one character at a time. A chord is the one exception: two keys in one call.
+- **Mouse by text, then wait.** Get the cell with `mouse find`, send `mouse move` or `mouse click`, then `wait` for the text the pointer should produce (a hover peek needs a 400 ms rest). A click is a real click: it selects the row under it, and two clicks on one cell close together are a double click.
 - **Select by row text.** Use `wait --cursor` on text unique to the row (`'& feature/auth-refresh'`), not a key count. After `Tab` the focus bar is in the graph; `wait --cursor` follows it.
 - **Chords are two keys in one call** (`g x`, `g c`, `g g`). Two separate presses of `z` or `g` more than 0.4 s apart are not a chord.
 - **Keys under tmux are legacy bytes.** There is no kitty keyboard protocol: Shift letters arrive as plain letters and `Escape` is a lone ESC byte. The PTY suite sends CSI-u (`docs/tui-tty-e2e.md`), a different input path.
@@ -159,7 +161,7 @@ PASS, FAIL (quote what you saw), or SKIP (name the missing precondition). Never 
 | --- | --- |
 | [pr-status](features/pr-status.md) | PR badge states on both forges, `gx` and `gc`, a scripted transition, a failing CLI, live recipe |
 | [tree-and-graph](features/tree-and-graph.md) | Badges in the tree and the graph pane, glyph column at wide and narrow widths |
-| [popovers](features/popovers.md) | The PR popover: lines, actions, `gc` and `r` from it |
+| [popovers](features/popovers.md) | The PR popover: lines, actions, `gc` and `r` from it; the commit popovers (hash card, time, author) by mouse hover and click |
 | [prs-tab](features/prs-tab.md) | The PRs tab (`gp`): group and row order, detail, `z` / `Z` folds, Enter / `gc` / `o` / `Ctrl-w`, narrow layout, a failing CLI, the empty state, the title command, Nerd glyphs |
 
-Each feature file lists steps, the screen text to expect, and what counts as PASS. Every check needs the PR status visuals (six states, ref beside the glyph, `gc`, polling, toasts), and the `prs-tab` checks need the PRs tab; on an older build they are SKIP.
+Each feature file lists steps, the screen text to expect, and what counts as PASS. Every check needs the PR status visuals (six states, ref beside the glyph, `gc`, polling, toasts), the `prs-tab` checks need the PRs tab, and PO3 needs the commit popovers; on an older build they are SKIP.

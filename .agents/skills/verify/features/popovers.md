@@ -1,6 +1,6 @@
-# PR popover
+# PR and commit popovers
 
-`gh` pins the icon popover of the focused row. For a checkout row with a PR it has a PR section, the last one: the PR fields, loaded with one more `gh pr view` / `glab api` call, and the actions of the PR. `j` / `k` move between lines, Enter runs the focused action, `y` copies the focused line, `Esc` closes it. A mouse hover peeks and a click pins; a tmux run sends no mouse, so the keys are the way in.
+`gh` pins the icon popover of the focused row. For a checkout row with a PR it has a PR section, the last one: the PR fields, loaded with one more `gh pr view` / `glab api` call, and the actions of the PR. `j` / `k` move between lines, Enter runs the focused action, `y` copies the focused line, `Esc` closes it. A mouse hover peeks and a click pins. The PR recipes use the keys; the commit popovers are mouse only, so PO3 drives them with the driver's `mouse` command.
 
 `gh` pins the popover of every mark on the row, and the PR section comes last, so these recipes launch at `160x70`: on a shorter screen the section is cut off.
 
@@ -64,3 +64,55 @@ for _ in $(seq 25); do [ "$(views)" -gt "$n" ] && break; sleep 0.2; done
 ```
 
 **PASS:** the four actions are on `popover-actions` in the order above; `gc` opens the failed check URL (`.../job/6002`); `r` makes the app call `gh pr view` again (the calls of this run grow, and `PASS refresh` prints).
+
+## PO3 Commit popovers (mouse)
+
+Every painted commit short hash, commit time and commit author opens a commit popover: the pointer resting on it for 400 ms peeks, a click pins. They are mouse only (`gh` does not list them), so this recipe uses `mouse`: `mouse <run> find <text>` prints the 1-based `<col> <row>` where the text starts on screen, `mouse <run> move <col> <row>` rests the pointer there, `mouse <run> click <col> <row>` presses and releases the left button. The reports are SGR (1006) bytes written to the pane, the same bytes a terminal sends.
+
+The cells are the `app` graph row of `HEAD`, read from the run's own fixture. The seed clock is fixed (`2026-08-17`), so the row shows the date as local `YYYY-MM-DD HH:MM`, and every commit is by `Demo User <demo@example.invalid>`.
+
+```bash
+fresh github-none gitlab-none context-none -- --fake-forge "$FORGE"
+to_app
+$V wait "$RUN" 'Tighten session expiry'                   # the graph of app is on the right
+SHA=$(git -C "$RUN/workspace/app" rev-parse HEAD)
+WHEN=$(TZ=Asia/Manila git -C "$RUN/workspace/app" log -1 --date=format-local:'%Y-%m-%d %H:%M' --format=%ad HEAD)
+CELL=$($V mouse "$RUN" find "${SHA:0:7}")                 # the short hash on the HEAD row
+$V mouse "$RUN" move $CELL
+$V wait "$RUN" "sha       $SHA" && $V wait "$RUN" 'authored'
+$V capture "$RUN" commit-hash-peek
+grep -q 'Esc close' "$RUN"/evidence/*-commit-hash-peek.txt || echo "PASS peek has no pinned footer"
+$V mouse "$RUN" click $CELL
+$V wait "$RUN" 'y copy line · Enter run · Esc close'
+$V capture "$RUN" commit-hash-pinned
+$V keys "$RUN" y                                          # copies the focused line, the full sha
+$V wait "$RUN" 'copied'
+$V keys "$RUN" Escape && $V wait --gone "$RUN" 'Commit: full id'
+read -r COL ROW <<<"$($V mouse "$RUN" find "$WHEN Demo User")"   # date, then author, on the HEAD row
+$V mouse "$RUN" move "$COL" "$ROW"
+$V wait "$RUN" 'Local times; orig is the UTC offset git recorded' && $V wait "$RUN" 'committer'
+$V capture "$RUN" commit-time-peek
+$V mouse "$RUN" move $((COL + ${#WHEN} + 1)) "$ROW"       # a peek follows the pointer: no Esc
+$V wait "$RUN" 'Author, committer, and Co-authored-by trailers' && $V wait --gone "$RUN" 'Local times;'
+$V capture "$RUN" commit-author-peek
+$V mouse "$RUN" move 1 1 && $V wait --gone "$RUN" 'Author, committer,'   # off every hit: the peek closes
+```
+
+Expect on `commit-hash-peek` a box titled `commit <short7>`, with no pinned footer, and these lines (`<when>` is `YYYY-MM-DD HH:MM:SS local · orig UTC+08:00`):
+
+```text
+Commit: full id, message, parents, refs, and dates
+sha       <full 40-char HEAD id>
+subject   Tighten session expiry
+parent    <full 40-char id of HEAD^>
+branches  feature/auth-refresh
+author    Demo User <demo@example.invalid>
+authored  <when>
+committed <when>
+```
+
+`commit-hash-pinned` shows the same card with the focus marker on `sha` and the footer `y copy line · Enter run · Esc close`. `commit-time-peek` is titled `commit time` with `author`, `authored`, `committer`, `committed`. `commit-author-peek` is titled `commit author` with the same four rows and no `co-author` row (the seed has no `Co-authored-by` trailer).
+
+A peek is not an input mode, so `Esc` does not close it (with the graph focused, `Esc` moves the focus back to the tree): moving the pointer to another hit swaps the peek, and moving it off every hit closes it. The click also moves the graph cursor to the clicked row.
+
+**PASS:** the four captures show those lines; the pinned capture has the footer and the peek does not; `y` sets the `copied` status; `Esc` closes the pinned card; the time peek gives way to the author peek, and the author peek closes when the pointer leaves. The copied text (OSC 52) is not on a tmux capture: `pty_commit_hash_popover_peeks_pins_and_copies_the_full_sha` checks it, and `pty_blame_hash_popover_shows_the_commit_card` covers the card of a commit off the graph.

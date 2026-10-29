@@ -404,6 +404,36 @@ fn verify_driver_wait_checks_the_pane_before_it_matches() {
 }
 
 #[test]
+fn verify_driver_mouse_checks_the_pane_and_the_cell_first() {
+    // `mouse` writes raw SGR reports into the pane. It must prove the TUI is
+    // alive before it writes (a dead pane would drop them silently), and refuse
+    // a cell that is not a positive integer pair, so a bad recipe fails loudly
+    // instead of sending `ESC[<35;;M`.
+    let body = VERIFY_SH
+        .split("cmd_mouse() {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("scripts/verify-tui.sh defines cmd_mouse");
+    let live = body
+        .find("require_live")
+        .expect("cmd_mouse checks the pane with require_live");
+    let checked = body
+        .find("^[1-9][0-9]*$")
+        .expect("cmd_mouse refuses a cell that is not a positive integer");
+    let sent = body
+        .find("send-keys")
+        .expect("cmd_mouse writes the report with send-keys");
+    assert!(
+        live < sent && checked < sent,
+        "cmd_mouse must run require_live and check the cell before it writes a report"
+    );
+    assert!(
+        VERIFY_SH.contains("mouse) cmd_mouse \"$@\" ;;"),
+        "scripts/verify-tui.sh must dispatch the mouse command"
+    );
+}
+
+#[test]
 fn verify_driver_reset_removes_only_directories() {
     // `scenario --reset <dir>` clears `<dir>/gh` and `<dir>/glab`. In
     // `scripts/fake-forge` those names are the fake executables, so the reset
