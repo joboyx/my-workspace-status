@@ -2,9 +2,11 @@
 //! (`PR`), or one of them in a narrow frame.
 //!
 //! The list pins the CLI error lines and the loading line at its top, then
-//! scrolls the group headers and PR rows ([`PrsLine`]). A row paints fixed
+//! scrolls the group headers and PR rows ([`PrsLine`]). A row paints
 //! columns: glyph, ref, repository, title (the flexible one), CI cell,
-//! reviews, state label, and stack mark. Its glyph and ref are one PR icon
+//! reviews, state label, and stack mark; a narrow pane drops reviews, the
+//! stack mark, then the `CI ` text, so the title keeps
+//! [`TITLE_MIN_COLS`] ([`RowColumns::of`]). Its glyph and ref are one PR icon
 //! hit, so hover, click, Ctrl+click, and the OSC 8 link work as on the
 //! tree badge. The detail pane paints the focused PR: its title line, the
 //! PR popover lines ([`pr_detail_lines`]), every checkout that shows it,
@@ -60,9 +62,9 @@ fn all_merged_text(ascii: bool, n: usize) -> String {
     }
 }
 
-/// CI cell of `row`: `CI ✕` failed, `CI …` running, `CI ✓` passed, `CI —`
-/// none (ASCII `CI x`, `CI ..`, `CI ok`, `CI -`), and its mark colour.
-fn ci_cell(ascii: bool, row: &PrRow) -> (String, SegRole) {
+/// CI mark of `row`, painted after `CI `: `✕` failed, `…` running, `✓`
+/// passed, `—` none (ASCII `x`, `..`, `ok`, `-`), and its colour.
+fn ci_mark(ascii: bool, row: &PrRow) -> (&'static str, SegRole) {
     let checks = row.pr.checks;
     let (unicode, plain, role) = if checks.fail > 0 {
         ("✕", "x", SegRole::Deleted)
@@ -73,7 +75,7 @@ fn ci_cell(ascii: bool, row: &PrRow) -> (String, SegRole) {
     } else {
         ("—", "-", SegRole::Muted)
     };
-    (format!("CI {}", glyph(ascii, unicode, plain)), role)
+    (glyph(ascii, unicode, plain), role)
 }
 
 /// Reviews cell of the PR of checkout `checkout` from its detail: GitLab
@@ -114,18 +116,38 @@ fn stack_text(ascii: bool, row: &PrRow) -> String {
     }
 }
 
-/// Widths of the fixed row columns of one list.
+/// The title keeps at least this many columns while optional columns can
+/// make room for it.
+const TITLE_MIN_COLS: usize = 16;
+
+/// `CI ` before the CI mark.
+const CI_LABEL: &str = "CI ";
+
+/// Widths of the row columns of one list, and the optional columns that
+/// fit.
 struct RowColumns {
     ref_w: usize,
-    ci_w: usize,
+    /// Widest CI mark.
+    mark_w: usize,
     reviews_w: usize,
     state_w: usize,
+    /// Widest stack mark; `0` when no row is stacked.
     stack_w: usize,
+    /// The reviews column paints.
+    reviews: bool,
+    /// The stack column paints.
+    stack: bool,
+    /// The CI cell paints `CI ` before its mark.
+    ci_label: bool,
 }
 
 impl RowColumns {
-    /// The widest cell of each fixed column over every row of `view`.
-    fn of(state: &AppState, view: &PrsView) -> Self {
+    /// The widest cell of each column over every row of `view`, for rows
+    /// `width` columns wide after the row prefix. While the title would get
+    /// fewer than [`TITLE_MIN_COLS`], the optional columns drop in this
+    /// order: reviews, the stack mark, then the `CI ` text (the CI mark
+    /// stays).
+    fn of(state: &AppState, view: &PrsView, width: usize) -> Self {
         let rows = || view.groups.iter().flat_map(|group| &group.rows);
         let widest = |cell: &dyn Fn(&PrRow) -> String| {
             rows()
@@ -133,34 +155,57 @@ impl RowColumns {
                 .max()
                 .unwrap_or(0)
         };
-        Self {
+        let stack_w = widest(&|row| stack_text(state.ascii, row));
+        let mut columns = Self {
             ref_w: widest(&|row| row.pr.ref_text()),
-            ci_w: widest(&|row| ci_cell(state.ascii, row).0),
+            mark_w: widest(&|row| ci_mark(state.ascii, row).0.to_string()),
             reviews_w: widest(&|row| reviews_cell(state, &row.checkout).0),
             state_w: widest(&|row| row_state_label(row.pr.state).to_string()),
-            stack_w: widest(&|row| stack_text(state.ascii, row)),
+            stack_w,
+            reviews: true,
+            stack: stack_w > 0,
+            ci_label: true,
+        };
+        let drops: [fn(&mut Self); 3] = [
+            |columns| columns.reviews = false,
+            |columns| columns.stack = false,
+            |columns| columns.ci_label = false,
+        ];
+        for drop in drops {
+            if columns.title_w(width) >= TITLE_MIN_COLS {
+                break;
+            }
+            drop(&mut columns);
         }
+        columns
     }
 
     /// Columns every cell but the title takes, gaps included.
     fn fixed(&self) -> usize {
         let gap = COLUMN_GAP.len();
-        let stack = if self.stack_w > 0 {
-            gap + self.stack_w
+        let ci_label = if self.ci_label { CI_LABEL.len() } else { 0 };
+        let reviews = if self.reviews {
+            gap + self.reviews_w
         } else {
             0
         };
+        let stack = if self.stack { gap + self.stack_w } else { 0 };
         2 + self.ref_w
             + gap
             + REPO_COLS
             + gap
             + gap
-            + self.ci_w
-            + gap
-            + self.reviews_w
+            + ci_label
+            + self.mark_w
+            + reviews
             + gap
             + self.state_w
             + stack
+    }
+
+    /// Columns the title gets in rows `width` columns wide.
+    fn title_w(&self, width: usize) -> usize {
+        width.saturating_sub(self.fixed())
     }
 }
 
@@ -203,9 +248,7 @@ fn row_segments(
     let stale = state.pr_is_stale(&row.checkout, Instant::now());
     let glyph_role = pr_badge_role(row.pr.state, stale);
     let ref_role = if stale { SegRole::Muted } else { SegRole::Repo };
-    let title_w = width.saturating_sub(columns.fixed());
-    let (ci, ci_role) = ci_cell(ascii, row);
-    let (reviews, reviews_role) = reviews_cell(state, &row.checkout);
+    let (mark, mark_role) = ci_mark(ascii, row);
     let label = row_state_label(row.pr.state).to_string();
     let gap = || seg(COLUMN_GAP, SegRole::Muted);
     let pr_ref = row.pr.ref_text();
@@ -216,22 +259,24 @@ fn row_segments(
         gap(),
         seg(cell(&row.repo, REPO_COLS), SegRole::Muted),
         gap(),
-        seg(cell(&row.title, title_w), SegRole::File),
+        seg(cell(&row.title, columns.title_w(width)), SegRole::File),
         gap(),
-        seg("CI ", SegRole::Muted),
-        seg(
-            cell(ci.trim_start_matches("CI "), columns.ci_w.saturating_sub(3)),
-            ci_role,
-        ),
-        gap(),
-        seg(cell(&reviews, columns.reviews_w), reviews_role),
-        gap(),
-        seg(
-            cell(&label, columns.state_w),
-            pr_badge_role(row.pr.state, false),
-        ),
     ];
-    if columns.stack_w > 0 {
+    if columns.ci_label {
+        segs.push(seg(CI_LABEL, SegRole::Muted));
+    }
+    segs.push(seg(cell(mark, columns.mark_w), mark_role));
+    if columns.reviews {
+        let (reviews, reviews_role) = reviews_cell(state, &row.checkout);
+        segs.push(gap());
+        segs.push(seg(cell(&reviews, columns.reviews_w), reviews_role));
+    }
+    segs.push(gap());
+    segs.push(seg(
+        cell(&label, columns.state_w),
+        pr_badge_role(row.pr.state, false),
+    ));
+    if columns.stack {
         segs.push(gap());
         segs.push(seg(
             cell(&stack_text(ascii, row), columns.stack_w),
@@ -409,7 +454,7 @@ fn draw_prs_list(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, view: 
     }
     let width = usize::from(lines_area.width);
     let prefix = list_prefix_cols(0);
-    let columns = RowColumns::of(state, view);
+    let columns = RowColumns::of(state, view, width.saturating_sub(prefix));
     let search = state.theme.pills().filter;
     let now_unix = unix_now();
     let mut painted = Vec::new();
@@ -1080,6 +1125,50 @@ mod tests {
             state.theme.palette().added,
             "the glyph keeps its state colour"
         );
+    }
+
+    #[test]
+    fn rows_keep_their_title_and_drop_optional_columns_as_the_pane_narrows() {
+        // Glyph and ref, a title fragment, and the state label of each row.
+        let rows = [
+            ("✕ #318", "Retry fail", "CI failed"),
+            ("◉ #319", "Show the r", "ready"),
+            ("◐ !12", "Rate limit", "CI running"),
+            ("✓ #40", "Cache the ", "merged"),
+            ("○ #320", "Update the", "in review"),
+        ];
+        // Frame width, then whether the reviews, the stack mark, and the
+        // `CI ` text paint.
+        let cases = [(80, true), (100, false), (120, true)];
+        for background in LOOKS {
+            for (cols, all) in cases {
+                let what = format!("{background:?} {cols} columns");
+                let mut state = on_prs_tab(false, background);
+                let (_, text) = paint(&mut state, cols, 30);
+                let list = crop(&text, state.layout.prs_list);
+                for (head, title, label) in rows {
+                    let (_, line) = line_with(&list, head);
+                    let at = |part: &str| {
+                        line.find(part)
+                            .unwrap_or_else(|| panic!("{what}: no {part:?} in {line:?}"))
+                    };
+                    // In order, each whole: nothing overlaps or is cut.
+                    assert!(at(head) < at(title), "{what}: {line}");
+                    assert!(at(title) < at(label), "{what}: {line}");
+                }
+                let (_, ready) = line_with(&list, "◉ #319");
+                let (_, failed) = line_with(&list, "✕ #318");
+                assert_eq!(ready.contains("⧗ after #318"), all, "{what}: {ready}");
+                if all {
+                    assert!(failed.contains("CI ✕  —  CI failed"), "{what}: {failed}");
+                } else {
+                    // Reviews, then the stack, then `CI ` gave way; the
+                    // mark stays.
+                    assert!(!failed.contains("CI ✕"), "{what}: {failed}");
+                    assert!(failed.contains("  ✕  CI failed"), "{what}: {failed}");
+                }
+            }
+        }
     }
 
     #[test]

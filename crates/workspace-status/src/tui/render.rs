@@ -112,9 +112,9 @@ use crate::file_index::{FileIndex, FileRead};
 use crate::file_search::{SearchHit, SearchOptions};
 use crate::helpers::{is_detached_head_branch, visible_width};
 
-/// Empty tree / empty commit-file list.
 mod prs_tab;
 
+/// Empty tree / empty commit-file list.
 const NO_MATCHING_ROWS: &str = "No matching rows";
 /// Right pane while the focused repo's graph loads.
 const LOADING_GRAPH: &str = "loading graph…";
