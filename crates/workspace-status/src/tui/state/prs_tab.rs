@@ -1165,6 +1165,56 @@ mod tests {
         assert_eq!(app.tabs.len(), 1);
     }
 
+    /// `gp` runs on every tab: from an Explorer tab and from a compare tab
+    /// it opens or focuses the PRs tab, and jumping back finds each tab's
+    /// parked session as it was, the Workspace one included.
+    #[test]
+    fn gp_from_an_explorer_or_compare_tab_keeps_their_parked_sessions() {
+        use super::super::explorer_tab::ExplorerTarget;
+        let mut app = workspace(false);
+        // Workspace session: the diff pane focused on its third row.
+        app.focus = FocusPane::Right;
+        app.diff_cursor = 2;
+
+        app.open_explorer_tab("app".into(), ExplorerTarget::Root);
+        assert!(app.is_explorer_tab());
+        app.dispatch(Action::OpenPrsTab);
+        assert!(app.is_prs_tab(), "gp from the Explorer tab");
+
+        app.dispatch(Action::JumpToTab(2));
+        assert_eq!(
+            app.tabs.active_explorer().map(|tab| tab.checkout.as_str()),
+            Some("app")
+        );
+        app.dispatch(Action::JumpToTab(1));
+        app.focus = FocusPane::Right;
+        app.diff_cursor = 2;
+        app.open_compare_tab("app".into(), "main".into(), "HEAD".into());
+        assert!(app.tabs.active_compare().is_some());
+        // Compare session: the diff pane focused on its fifth row.
+        app.focus = FocusPane::Right;
+        app.diff_cursor = 4;
+        assert_eq!(app.dispatch(Action::OpenPrsTab), Effect::None, "focused");
+        assert!(app.is_prs_tab(), "gp from the compare tab");
+        assert_eq!(app.tabs.len(), 4, "one PRs tab");
+
+        app.dispatch(Action::JumpToTab(4));
+        let tab = app.tabs.active_compare().expect("back on the compare tab");
+        assert_eq!(
+            (tab.base_ref.as_str(), app.focus, app.diff_cursor),
+            ("main", FocusPane::Right, 4),
+            "the compare session"
+        );
+        app.dispatch(Action::OpenPrsTab);
+        app.dispatch(Action::JumpToTab(1));
+        assert!(app.tabs.is_workspace());
+        assert_eq!(
+            (app.focus, app.diff_cursor),
+            (FocusPane::Right, 2),
+            "the Workspace session"
+        );
+    }
+
     #[test]
     fn the_tab_label_counts_distinct_prs() {
         let retry = || {
