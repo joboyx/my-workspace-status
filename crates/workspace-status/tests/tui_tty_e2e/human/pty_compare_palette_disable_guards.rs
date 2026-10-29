@@ -5,10 +5,6 @@ use crate::support::{esc_clears_palette_filter, tree_cursor_on, tree_has, SETTLE
 const PRIMARY_BRANCH: &str = "feature/primary-open";
 const LINKED_BRANCH: &str = "feature/linked-open";
 
-/// Same gap as `pty_workspace_command_palette`. A same-letter `h`/`j`/`k`/`l`
-/// burst is dropped by `discard_held_nav_backlog` after the first press.
-const PALETTE_NAV_LETTER_GAP_MS: u64 = 50;
-
 fn palette_open(screen: &str) -> bool {
     screen.contains("Enter run")
 }
@@ -37,12 +33,7 @@ fn family_row_focused(screen: &str) -> bool {
 /// `keys("vs default")` can drop the `l` in `default`. `close` has the same
 /// held-nav risk.
 fn type_palette_filter(tui: &mut PtySession, query: &str) {
-    for c in query.chars() {
-        tui.key(c);
-        if matches!(c, 'h' | 'H' | 'j' | 'J' | 'k' | 'K' | 'l' | 'L') {
-            tui.wait_ms(PALETTE_NAV_LETTER_GAP_MS);
-        }
-    }
+    crate::support::type_palette_filter(tui, query);
 }
 
 fn open_commands_filter(tui: &mut PtySession, query: &str, title: &str) {

@@ -4,10 +4,6 @@ use crate::support::{
     esc_clears_palette_filter, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
-/// Same gap as `pty_shift_left_right_tree_pan`. A same-letter `h`/`j`/`k`/`l`
-/// burst is dropped by `discard_held_nav_backlog` after the first press.
-const PALETTE_NAV_LETTER_GAP_MS: u64 = 50;
-
 fn palette_open(screen: &str) -> bool {
     screen.contains("Enter run")
 }
@@ -70,12 +66,7 @@ fn wait_readme_cursor(tui: &mut PtySession) {
 /// second `l` as held-nav backlog. `pull` can still match `Pull behind`
 /// after a dropped `l`; `full-file` cannot.
 fn type_palette_filter(tui: &mut PtySession, query: &str) {
-    for c in query.chars() {
-        tui.key(c);
-        if matches!(c, 'h' | 'H' | 'j' | 'J' | 'k' | 'K' | 'l' | 'L') {
-            tui.wait_ms(PALETTE_NAV_LETTER_GAP_MS);
-        }
-    }
+    crate::support::type_palette_filter(tui, query);
 }
 
 fn open_commands_filter(tui: &mut PtySession, query: &str, title: &str) {

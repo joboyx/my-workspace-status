@@ -5,8 +5,8 @@ use crate::harness::PtySession;
 use crate::seed::{compare_regions_workspace, git_stdout, COMPARE_ADDED_FILE, REGIONS_OMEGA};
 use crate::support::{
     ack_rows, compare_regions_diff_focused, crumb_row, esc_clears_palette_filter,
-    open_compare_regions_diff, tree_cursor_on, type_palette_filter, GIT_WAIT, SETTLE_MS,
-    VISUAL_KEY_GAP_MS, WAIT,
+    open_compare_regions_diff, press_j, tree_cursor_on, type_palette_filter, GIT_WAIT, SETTLE_MS,
+    WAIT,
 };
 
 const RANGE_CONFIRM: &str =
@@ -50,13 +50,6 @@ fn diff_cursor_on(screen: &str, needle: &str) -> bool {
         .any(|line| line.contains(needle) && line.contains('▌'))
 }
 
-fn press_j(tui: &mut PtySession, times: usize) {
-    for _ in 0..times {
-        tui.letter_press('j');
-        tui.wait_ms(VISUAL_KEY_GAP_MS);
-    }
-}
-
 fn confirm_open(screen: &str, title: &str) -> bool {
     screen.contains(title) && screen.contains("cancel") && !screen.contains("VISUAL")
 }
@@ -74,7 +67,6 @@ fn highlight_alpha(tui: &mut PtySession) {
         "Shift+V paints VISUAL on the compare diff",
         WAIT,
     );
-    tui.wait_ms(VISUAL_KEY_GAP_MS);
     press_j(tui, 1);
     tui.wait_pred(
         |screen| screen.contains("VISUAL") && diff_cursor_on(screen, "ALPHA-NEW"),

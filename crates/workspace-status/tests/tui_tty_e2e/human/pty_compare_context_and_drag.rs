@@ -2,7 +2,7 @@ use crate::harness::{tree_row_containing, PtySession};
 use crate::seed::{compare_regions_workspace, COMPARE_ADDED_FILE, REGIONS_ALPHA, REGIONS_OMEGA};
 use crate::support::{
     ack_rows, compare_regions_diff_focused, open_compare_regions_diff, right_of_split, right_pane,
-    GIT_WAIT, RIGHT_PANE_COL, WAIT,
+    step_cursor, GIT_WAIT, RIGHT_PANE_COL, WAIT,
 };
 
 /// Unchanged `regions.txt` line between the two hunks. Default `-U3`
@@ -22,23 +22,6 @@ fn diff_cursor_on(screen: &str, needle: &str) -> bool {
         .any(|line| line.contains(needle) && line.contains('▌'))
 }
 
-/// Where the diff cursor bar is: its right-pane row and the first word of
-/// that diff line (after the gutter `│`).
-///
-/// The inline blame that loads later on the cursor row does not change
-/// this key; a cursor move does.
-fn diff_cursor_key(screen: &str) -> Option<(usize, String)> {
-    right_pane(screen)
-        .lines()
-        .enumerate()
-        .find(|(_, line)| line.contains('▌'))
-        .map(|(row, line)| {
-            let text = line.split_once('│').map_or(line, |(_, text)| text);
-            let word = text.split_whitespace().next().unwrap_or("").to_string();
-            (row, word)
-        })
-}
-
 /// Press `j` until the diff cursor is on `needle`, one row at a time.
 ///
 /// Each `j` waits for the cursor to leave its row before the next one, so
@@ -51,13 +34,7 @@ fn step_diff_cursor_to(tui: &mut PtySession, needle: &str, on_view: impl Fn(&str
         if on_view(&screen) && diff_cursor_on(&screen, needle) {
             return;
         }
-        let before = diff_cursor_key(&screen);
-        tui.letter_press('j');
-        tui.wait_pred(
-            |screen| on_view(screen) && diff_cursor_key(screen).is_some_and(|k| Some(k) != before),
-            "j moves the diff cursor one row",
-            WAIT,
-        );
+        step_cursor(tui, |tui| tui.letter_press('j'), &on_view);
     }
     panic!("40 j presses did not reach `{needle}`:\n{}", tui.screen());
 }

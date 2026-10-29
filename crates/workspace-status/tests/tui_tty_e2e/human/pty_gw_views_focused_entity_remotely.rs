@@ -29,12 +29,7 @@ fn palette_open(screen: &str) -> bool {
 }
 
 fn type_palette_filter(tui: &mut PtySession, query: &str) {
-    for c in query.chars() {
-        tui.key(c);
-        if matches!(c, 'h' | 'H' | 'j' | 'J' | 'k' | 'K' | 'l' | 'L') {
-            tui.wait_ms(PALETTE_NAV_LETTER_GAP_MS);
-        }
-    }
+    crate::support::type_palette_filter(tui, query);
 }
 
 fn open_commands_filter(tui: &mut PtySession, query: &str, title: &str) {

@@ -5,7 +5,7 @@ use crate::harness::PtySession;
 use crate::seed::{compare_regions_workspace, git_stdout};
 use crate::support::{
     compare_regions_diff_focused, crumb_line, esc_clears_palette_filter, open_compare_regions_diff,
-    status_line, type_palette_filter, SETTLE_MS, VISUAL_KEY_GAP_MS, WAIT,
+    press_j, prove_keys_handled, status_line, type_palette_filter, wait_screen, WAIT,
 };
 
 /// Default theme `palette.cursor_bg`: the focused diff cursor row and every
@@ -54,18 +54,9 @@ fn wait_paint(tui: &PtySession, pred: impl Fn(&PtySession) -> bool, what: &str) 
     }
 }
 
-/// Plain `j` presses with the human gap the held-nav backlog needs.
-fn press_j(tui: &mut PtySession, times: usize) {
-    for _ in 0..times {
-        tui.letter_press('j');
-        tui.wait_ms(VISUAL_KEY_GAP_MS);
-    }
-}
-
 fn start_highlight(tui: &mut PtySession) {
     tui.shift_letter('V');
     tui.wait_pred(compare_highlight_active, "Shift+V paints VISUAL", WAIT);
-    tui.wait_ms(VISUAL_KEY_GAP_MS);
 }
 
 /// `git status --porcelain` in the compare checkout (index and worktree oracle).
@@ -243,7 +234,15 @@ fn pty_compare_highlight_palette_refuses_stage_and_unstage() {
         WAIT,
     );
     tui.enter();
-    tui.wait_ms(SETTLE_MS);
+    // A printable key after Enter types into the palette filter: its paint
+    // proves Enter was handled and left the palette open.
+    tui.key('z');
+    tui.wait_pred(
+        |screen| palette_open(screen) && screen.contains("stage highlightedz▏"),
+        "Enter on the disabled row keeps the palette (a key after it still types the filter)",
+        WAIT,
+    );
+    tui.send_bytes(b"\x7f");
     tui.wait_pred(
         |screen| palette_open(screen) && screen.contains(CANNOT_STAGE),
         "Enter on the disabled row keeps the palette and the reason",
@@ -279,14 +278,13 @@ fn pty_compare_highlight_palette_refuses_stage_and_unstage() {
         "s in the highlight shows the compare stage reason",
         WAIT,
     );
-    tui.wait_ms(VISUAL_KEY_GAP_MS);
     tui.letter_press('u');
     tui.wait_pred(
         |screen| compare_highlight_active(screen) && screen.contains(CANNOT_UNSTAGE),
         "u in the highlight shows the compare unstage reason",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    // A refused key schedules no git job: the reason paints in its place.
     assert_eq!(
         porcelain(&workspace),
         "",
@@ -344,26 +342,26 @@ fn pty_compare_fetch_and_stash_menu_stay_refused() {
     );
 
     tui.shift_letter('S');
-    tui.wait_pred(
+    // The reason and a stash menu would paint from the same key, so the
+    // frame with the reason shows whether the menu opened.
+    let screen = wait_screen(
+        &tui,
         |screen| compare_regions_diff_focused(screen) && status_line_or_crumb_has(screen, SWITCH),
         "S on a compare tab shows the switch reason",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
     assert!(
-        !tui.screen().contains('╭'),
-        "S must not open the stash menu:\n{}",
-        tui.screen()
+        !screen.contains('╭'),
+        "S must not open the stash menu:\n{screen}"
     );
 
     tui.letter_press('f');
-    tui.wait_ms(SETTLE_MS);
-    tui.wait_pred(
-        |screen| compare_regions_diff_focused(screen) && screen.contains(SWITCH),
-        "f on a compare tab keeps the switch reason",
-        WAIT,
+    prove_keys_handled(&mut tui);
+    let screen = tui.screen();
+    assert!(
+        compare_regions_diff_focused(&screen) && !screen.contains("Fetching"),
+        "f on a compare tab starts no fetch:\n{screen}"
     );
-    tui.wait_ms(SETTLE_MS);
     assert_eq!(
         git_stdout(&repo, &["rev-parse", "origin/main"]),
         tracking_before,

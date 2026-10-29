@@ -4,7 +4,7 @@ use crate::harness::PtySession;
 use crate::seed::{regions_diff, two_hunk_regions_workspace, REGIONS_ALPHA, REGIONS_OMEGA};
 use crate::support::{
     ack_rows, after_ack, panes_tree_unfocused_diff_focused, regions_diff_focused,
-    regions_first_paint, regions_highlight_active, GIT_WAIT, SETTLE_MS, VISUAL_KEY_GAP_MS, WAIT,
+    regions_first_paint, regions_highlight_active, step_cursor, GIT_WAIT, WAIT,
 };
 
 const ALPHA: &str = REGIONS_ALPHA;
@@ -41,10 +41,8 @@ fn highlight_first_hunk(tui: &mut PtySession) {
         "CSI-u Shift+V paints VISUAL highlight",
         WAIT,
     );
-    tui.wait_ms(VISUAL_KEY_GAP_MS);
     for _ in 0..6 {
-        csi_u_letter(tui, 'j');
-        tui.wait_ms(VISUAL_KEY_GAP_MS);
+        step_cursor(tui, |tui| csi_u_letter(tui, 'j'), regions_highlight_active);
     }
     tui.wait_pred(
         |screen| regions_highlight_active(screen) && screen.contains(ALPHA),
@@ -83,7 +81,7 @@ fn pty_v_s_stages_one_hunk_u_unstages_that_range() {
         "s stages the highlighted range (VISUAL off, staged range toast)",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    // The toast paints after the stage job ends, so git is final here.
 
     let cached = repo_cached(&workspace);
     let unstaged = repo_unstaged(&workspace);
@@ -115,10 +113,12 @@ fn pty_v_s_stages_one_hunk_u_unstages_that_range() {
         "V on the staged hunk paints VISUAL",
         WAIT,
     );
-    tui.wait_ms(VISUAL_KEY_GAP_MS);
     for _ in 0..6 {
-        csi_u_letter(&mut tui, 'j');
-        tui.wait_ms(VISUAL_KEY_GAP_MS);
+        step_cursor(
+            &mut tui,
+            |tui| csi_u_letter(tui, 'j'),
+            regions_highlight_active,
+        );
     }
     tui.key('u');
     tui.wait_pred(
@@ -126,7 +126,7 @@ fn pty_v_s_stages_one_hunk_u_unstages_that_range() {
         "u unstages the highlighted staged range",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    // The toast paints after the unstage job ends, so git is final here.
 
     let cached = repo_cached(&workspace);
     let unstaged = repo_unstaged(&workspace);

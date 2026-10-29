@@ -15,10 +15,6 @@ const DIFF_HUNK: &str = "@@ -1 +1,2 @@";
 /// the cursor row only.
 const CURSOR_BG: (u8, u8, u8) = (0x28, 0x34, 0x57);
 
-/// Same gap as `pty_workspace_command_palette`. A same-letter `h`/`j`/`k`/`l`
-/// burst is dropped by `discard_held_nav_backlog` after the first press.
-const QUERY_NAV_LETTER_GAP_MS: u64 = 50;
-
 fn files_open(screen: &str) -> bool {
     screen.contains("Go to file") && screen.contains("Enter open")
 }
@@ -46,14 +42,9 @@ fn wait_first_paint(tui: &PtySession) {
     );
 }
 
-/// Type a Quick Open query at human key gaps for nav letters.
+/// Type a Quick Open query; after each nav letter wait for its paint.
 fn type_query(tui: &mut PtySession, query: &str) {
-    for c in query.chars() {
-        tui.key(c);
-        if matches!(c, 'h' | 'H' | 'j' | 'J' | 'k' | 'K' | 'l' | 'L') {
-            tui.wait_ms(QUERY_NAV_LETTER_GAP_MS);
-        }
-    }
+    crate::support::type_palette_filter(tui, query);
 }
 
 /// Quick Open hit row: the `❯` cursor chip in front of `needle`. The tree

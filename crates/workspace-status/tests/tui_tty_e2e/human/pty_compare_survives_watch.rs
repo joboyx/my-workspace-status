@@ -14,10 +14,6 @@ use crate::support::{
 /// Live poll. `watch_interval_ms` clamps any positive value to 500ms.
 const WATCH_MS: &str = "500";
 
-/// Same gap as other compare palette humans. `keys("vs default")` can
-/// drop the `l` in `default`.
-const PALETTE_NAV_LETTER_GAP_MS: u64 = 50;
-
 /// CSI-u `g` then `key`, each a press + release, in one write.
 ///
 /// One write is one stdin read, so the chord cannot expire between its
@@ -164,12 +160,7 @@ fn palette_open(screen: &str) -> bool {
 }
 
 fn type_palette_filter(tui: &mut PtySession, query: &str) {
-    for c in query.chars() {
-        tui.key(c);
-        if matches!(c, 'h' | 'H' | 'j' | 'J' | 'k' | 'K' | 'l' | 'L') {
-            tui.wait_ms(PALETTE_NAV_LETTER_GAP_MS);
-        }
-    }
+    crate::support::type_palette_filter(tui, query);
 }
 
 fn open_vs_default(tui: &mut PtySession) {

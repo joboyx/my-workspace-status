@@ -69,12 +69,7 @@ fn unfocus_right(
     now_left: impl Fn(&str) -> bool,
     why: &str,
 ) {
-    tui.esc();
-    tui.wait_ms(120);
-    if still_right(&tui.screen()) {
-        tui.esc();
-    }
-    tui.wait_pred(now_left, why, WAIT);
+    crate::support::esc_to_left(tui, still_right, now_left, why);
 }
 
 fn leave_until(tui: &mut PtySession, still_at_top: impl Fn(&str) -> bool, why: &str) {

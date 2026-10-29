@@ -1,6 +1,6 @@
 use crate::harness::PtySession;
 use crate::seed::compare_ahead_workspace;
-use crate::support::{GIT_WAIT, WAIT};
+use crate::support::{prove_keys_handled, type_palette_filter, GIT_WAIT, WAIT};
 
 /// Esc on compare right focuses left. Esc on compare left keeps the tab.
 /// The palette `Close tab` row closes it.
@@ -23,7 +23,8 @@ fn pty_compare_esc_keeps_tab() {
     tui.esc();
     tui.wait_contains("app ↔ origin/main", WAIT);
     tui.esc();
-    tui.wait_ms(300);
+    // The probe proves both Esc presses were handled before the check.
+    prove_keys_handled(&mut tui);
     let screen = tui.screen();
     assert!(
         screen.contains("app ↔ origin/main"),
@@ -32,12 +33,7 @@ fn pty_compare_esc_keeps_tab() {
 
     tui.key(':');
     tui.wait_contains(">▏", WAIT);
-    for c in "close tab".chars() {
-        tui.key(c);
-        if c == 'l' {
-            tui.wait_ms(150);
-        }
-    }
+    type_palette_filter(&mut tui, "close tab");
     tui.wait_pred(
         |screen| screen.contains("Close tab") && screen.contains("close tab"),
         "palette filter `close tab` lists Close tab",
