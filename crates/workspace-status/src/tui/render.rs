@@ -5968,6 +5968,12 @@ fn draw_quick_open(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             caret,
         ])
     };
+    // Esc clears typed text first and closes only an empty query.
+    let esc = if quick.has_typed_query() {
+        "Esc clear"
+    } else {
+        "Esc close"
+    };
     let (rows, status, footer) = if files {
         let status = if files_row_shows_status(&state.status) {
             list_dialog_status(state, palette_theme)
@@ -5977,7 +5983,7 @@ fn draw_quick_open(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         (
             quick_open_file_rows(quick, palette_theme, max_rows, inner_width),
             status,
-            "↑↓ move · Enter open · > commands · # search · Esc close".to_string(),
+            format!("↑↓ move · Enter open · > commands · # search · {esc}"),
         )
     } else {
         let commands = &quick.commands;
@@ -5985,8 +5991,8 @@ fn draw_quick_open(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             .selected()
             .and_then(|command| state.palette_disabled_reason(&command));
         let footer = match reason {
-            Some(why) => format!("Enter run · Esc close · {why}"),
-            None => "Enter run · Esc close".into(),
+            Some(why) => format!("Enter run · {esc} · {why}"),
+            None => format!("Enter run · {esc}"),
         };
         (
             quick_open_command_rows(state, commands, max_rows, inner_width),
@@ -16920,7 +16926,7 @@ mod tests {
         assert!(first.ends_with(FOCUS_A_FILE_DIFF), "{first}");
         let footer = lines
             .iter()
-            .find(|line| line.contains("Enter run · Esc close"))
+            .find(|line| line.contains("Enter run · Esc clear"))
             .unwrap_or_else(|| panic!("no footer:\n{text}"));
         assert!(footer.contains(FOCUS_A_FILE_DIFF), "{footer}");
     }
@@ -17139,29 +17145,42 @@ mod tests {
         assert!(files.contains("Enter open"), "{files}");
         assert!(!files.contains("Enter run"), "{files}");
         assert!(
-            files.contains("↑↓ move · Enter open · > commands · # search · Esc close"),
-            "{files}"
+            files.contains("↑↓ move · Enter open · > commands · # search · Esc clear"),
+            "a typed query: Esc clears it first\n{files}"
         );
-        // A narrow box drops chips from the left; `Esc close` stays.
+        // A narrow box drops chips from the left; the Esc chip stays.
         let mut narrow = Terminal::new(TestBackend::new(50, 30)).unwrap();
         draw_state(&mut narrow, &mut state);
         let text = buffer_text(&narrow);
         let footer = text
             .lines()
-            .find(|line| line.contains("Esc close"))
-            .unwrap_or_else(|| panic!("footer keeps `Esc close`:\n{text}"));
+            .find(|line| line.contains("Esc clear"))
+            .unwrap_or_else(|| panic!("footer keeps `Esc clear`:\n{text}"));
         assert!(!footer.contains("↑↓ move"), "{text}");
         assert!(footer.contains("# search"), "{text}");
         state.dispatch(Action::QuickOpenBackspace);
         state.dispatch(Action::QuickOpenBackspace);
         state.dispatch(Action::QuickOpenBackspace);
         state.dispatch(Action::QuickOpenBackspace);
+        draw_state(&mut terminal, &mut state);
+        let empty = buffer_text(&terminal);
+        assert!(
+            empty.contains("↑↓ move · Enter open · > commands · # search · Esc close"),
+            "an empty query: Esc closes\n{empty}"
+        );
         state.dispatch(Action::QuickOpenChar('>'));
         draw_state(&mut terminal, &mut state);
         let commands = buffer_text(&terminal);
-        assert!(commands.contains("Enter run"), "{commands}");
+        assert!(commands.contains("Enter run · Esc close"), "{commands}");
         assert!(!commands.contains("Enter open"), "{commands}");
         assert!(commands.contains(">▏"), "the `>` stays in the query row");
+        state.dispatch(Action::QuickOpenChar('x'));
+        draw_state(&mut terminal, &mut state);
+        let typed = buffer_text(&terminal);
+        assert!(
+            typed.contains("Enter run · Esc clear"),
+            "text after `>`: Esc clears it first\n{typed}"
+        );
     }
 
     #[test]
@@ -17311,11 +17330,11 @@ mod tests {
         ];
         assert!(rows.windows(2).all(|w| w[0] < w[1]), "{rows:?}\n{text}");
         assert!(
-            text.contains("↑↓ move · Enter open · Tab all repos · Esc close"),
+            text.contains("↑↓ move · Enter open · Tab all repos · Esc clear"),
             "{text}"
         );
         assert_eq!(
-            row_of(&text, "Esc close"),
+            row_of(&text, "Esc clear"),
             row_of(&text, "Search · app") + 23,
             "footer on the last inner row of a 25-row box"
         );
@@ -17324,8 +17343,14 @@ mod tests {
         search_dialog(&mut state).zone = SearchZone::Results;
         let text = buffer_text(&draw_search(&mut state, 120, 30));
         assert!(
-            text.contains("j/k move · Enter open · e edit · Tab all repos · Esc close"),
+            text.contains("j/k move · Enter open · e edit · Tab all repos · Esc clear"),
             "{text}"
+        );
+        search_dialog(&mut state).query.clear();
+        let text = buffer_text(&draw_search(&mut state, 120, 30));
+        assert!(
+            text.contains("j/k move · Enter open · e edit · Tab all repos · Esc close"),
+            "an empty query: Esc closes\n{text}"
         );
 
         let mut state = search_files_state(true);
@@ -17533,7 +17558,7 @@ mod tests {
             text.contains("Whole word: on · click to turn off"),
             "{text}"
         );
-        assert!(!text.contains("Esc close"), "tooltip replaces the hints");
+        assert!(!text.contains("Esc clear"), "tooltip replaces the hints");
 
         assert!(state.set_pointer(Some((xs[0].1, y))));
         let terminal = draw_search(&mut state, 120, 30);
@@ -17550,7 +17575,7 @@ mod tests {
         assert!(state.set_pointer(Some((xs[0].1 + SEARCH_OPTION_CHIP_W, y))));
         let text = buffer_text(&draw_search(&mut state, 120, 30));
         assert!(
-            text.contains("↑↓ move · Enter open · Tab all repos · Esc close"),
+            text.contains("↑↓ move · Enter open · Tab all repos · Esc clear"),
             "{text}"
         );
         assert!(!text.contains("click to turn"), "{text}");
@@ -17565,7 +17590,7 @@ mod tests {
         state.mouse_enabled = false;
         let terminal = draw_search(&mut state, 120, 30);
         let text = buffer_text(&terminal);
-        let footer = row_of(&text, "Esc close");
+        let footer = row_of(&text, "Esc clear");
         assert!(
             text.lines().nth(footer).unwrap().contains(MOUSE_OFF_HINT),
             "{text}"

@@ -404,7 +404,7 @@ mod tests {
             Action::SearchFilesPage(1),
             Action::SearchFilesToggleScope,
             Action::SearchFilesToggleOption(SearchFilesOption::Regex),
-            Action::SearchFilesCancel,
+            Action::SearchFilesEscape,
             Action::SearchFilesSubmit,
         ] {
             assert_eq!(

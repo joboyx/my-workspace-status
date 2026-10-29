@@ -141,6 +141,23 @@ impl QuickOpenState {
         quick_open_mode(&self.query)
     }
 
+    /// Query that Esc clears to: empty in files mode, `">"` in commands
+    /// mode, so the mode stays.
+    ///
+    /// A query equal to it has no typed text, and Esc closes the overlay.
+    pub fn cleared_query(&self) -> &'static str {
+        match self.mode() {
+            QuickOpenMode::Files => "",
+            QuickOpenMode::Commands => ">",
+        }
+    }
+
+    /// True when the query has typed text that Esc clears first (see
+    /// [`Self::cleared_query`]).
+    pub fn has_typed_query(&self) -> bool {
+        self.query != self.cleared_query()
+    }
+
     /// Highlighted file hit, if any.
     pub fn selected_hit(&self) -> Option<&FileHit> {
         self.hits.get(self.file_cursor)

@@ -1,6 +1,6 @@
 use crate::harness::PtySession;
 use crate::seed::{topic_and_unborn_workspace, worktree_workspace};
-use crate::support::{tree_cursor_on, tree_has, SETTLE_MS, WAIT};
+use crate::support::{esc_clears_palette_filter, tree_cursor_on, tree_has, SETTLE_MS, WAIT};
 
 const PRIMARY_BRANCH: &str = "feature/primary-open";
 const LINKED_BRANCH: &str = "feature/linked-open";
@@ -74,6 +74,7 @@ fn enter_keeps_palette_open(tui: &mut PtySession, what: &str) {
 }
 
 fn esc_closes_palette(tui: &mut PtySession) {
+    esc_clears_palette_filter(tui);
     tui.esc();
     tui.wait_pred(
         palette_closed,

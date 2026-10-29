@@ -1,6 +1,8 @@
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
-use crate::support::{tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT};
+use crate::support::{
+    esc_clears_palette_filter, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
+};
 
 /// Same gap as `pty_shift_left_right_tree_pan`. A same-letter `h`/`j`/`k`/`l`
 /// burst is dropped by `discard_held_nav_backlog` after the first press.
@@ -105,6 +107,7 @@ fn enter_keeps_palette_open(tui: &mut PtySession, what: &str) {
 }
 
 fn esc_closes_palette(tui: &mut PtySession) {
+    esc_clears_palette_filter(tui);
     tui.esc();
     tui.wait_pred(
         palette_closed,
@@ -200,6 +203,7 @@ fn pty_workspace_palette_colon_esc_keeps_readme_cursor() {
         "`>pull` shows Pull behind before Esc",
         WAIT,
     );
+    esc_clears_palette_filter(&mut tui);
     tui.esc();
     tui.wait_pred(
         |screen| {
@@ -277,6 +281,7 @@ fn pty_workspace_ctrl_k_opens_nothing() {
         "Ctrl-k opens nothing: the next `:` opens commands with query `>pull`, not `>:pull`",
         WAIT,
     );
+    esc_clears_palette_filter(&mut tui);
     tui.esc();
     tui.wait_pred(
         |screen| {

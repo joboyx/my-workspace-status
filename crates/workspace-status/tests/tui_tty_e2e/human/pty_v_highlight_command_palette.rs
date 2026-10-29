@@ -1,8 +1,8 @@
 use crate::harness::PtySession;
 use crate::seed::{regions_diff, two_hunk_regions_workspace, REGIONS_ALPHA, REGIONS_OMEGA};
 use crate::support::{
-    ack_rows, open_regions_first_hunk_highlight, regions_highlight_active, revert_range_confirm,
-    GIT_WAIT, SETTLE_MS, VISUAL_KEY_GAP_MS, WAIT,
+    ack_rows, esc_clears_palette_filter, open_regions_first_hunk_highlight,
+    regions_highlight_active, revert_range_confirm, GIT_WAIT, SETTLE_MS, VISUAL_KEY_GAP_MS, WAIT,
 };
 
 fn palette_open(screen: &str) -> bool {
@@ -84,6 +84,7 @@ fn pty_v_colon_palette_revert_opens_range_confirm() {
         WAIT,
     );
 
+    esc_clears_palette_filter(&mut tui);
     tui.esc();
     tui.wait_pred(
         |screen| !palette_open(screen) && regions_highlight_active(screen),

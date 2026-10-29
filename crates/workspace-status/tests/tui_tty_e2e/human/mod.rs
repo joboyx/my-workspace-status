@@ -67,6 +67,7 @@ mod pty_drag_select_copies_pane_text;
 mod pty_e_opens_focused_file_in_editor;
 mod pty_emoji_diff_keeps_column_grid;
 mod pty_enter_from_tree_focuses_right;
+mod pty_esc_clears_query_then_closes;
 mod pty_expired_ctrl_c_arm_does_not_quit;
 mod pty_explorer_file_live_reload;
 mod pty_explorer_inner_file_tabs;

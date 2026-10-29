@@ -289,10 +289,28 @@ The PR of a checkout's branch, in one of six states: the badge at the end of a w
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `badge` | `ref` | `stale` | `link` | `chip` | `popover` | `open-ci` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `tree` | Workspace | 0 | left | boxed, flat | `draw_tree`, `tree_pr_badge`, `with_pr_badge`, `segmented_icon_spans`, `pr_badge_links`, `pr_section`, `run_pr_action` | supported | supported | supported | supported | n/a: I5, the graph header chip carries the label and the next action | supported | supported |
-| `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `draw_graph`, `graph_pr_badges`, `row_badges`, `pr_badge_links`, `pr_section`, `run_pr_action` | supported | n/a: I5, the worktree row is narrow and the header chip carries the ref | supported | supported | n/a: I5, the header chip carries the label and the next action | supported | supported |
-| `graph-d1` | Workspace | 1 | left | boxed, flat | `draw_graph`, `graph_pr_badges`, `row_badges`, `pr_badge_links`, `pr_section`, `run_pr_action` | supported | n/a: I5, the worktree row is narrow and the header chip carries the ref | supported | supported | n/a: I5, the header chip carries the label and the next action | supported | supported |
+| `tree` | Workspace | 0 | left | boxed, flat | `draw_tree`, `tree_pr_badge`, `with_pr_badge`, `segmented_icon_spans`, `pr_badge_links`, `pr_section`, `run_pr_action` | supported | supported | supported | supported | n/a: I6, the graph header chip carries the label and the next action | supported | supported |
+| `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `draw_graph`, `graph_pr_badges`, `row_badges`, `pr_badge_links`, `pr_section`, `run_pr_action` | supported | n/a: I6, the worktree row is narrow and the header chip carries the ref | supported | supported | n/a: I6, the header chip carries the label and the next action | supported | supported |
+| `graph-d1` | Workspace | 1 | left | boxed, flat | `draw_graph`, `graph_pr_badges`, `row_badges`, `pr_badge_links`, `pr_section`, `run_pr_action` | supported | n/a: I6, the worktree row is narrow and the header chip carries the ref | supported | supported | n/a: I6, the header chip carries the label and the next action | supported | supported |
 | `graph-header` | Workspace | 0, 1 | right, left | boxed, flat | `draw_graph`, `graph_header_pr`, `graph_pr_chip`, `header_chip`, `pr_badge_links`, `pr_section`, `run_pr_action` | supported | supported | supported | supported | supported | supported | supported |
+
+### `query-esc` — Esc clears the dialog query, then closes
+
+The query dialogs that paint over the panes: the search-in-files dialog (Ctrl-f, or `#` in Quick Open) and Quick Open in files and commands mode. Esc with typed text clears it through the same edit path as Backspace; Esc on an empty query (a bare `>` in commands mode) closes the dialog; a closed search dialog parks for the next Ctrl-f. The footer Esc chip reads `Esc clear` or `Esc close` to match. The filter pickers keep one-press Esc (I5).
+
+| Feature | What | Tests |
+| --- | --- | --- |
+| `two-step-esc` | Esc with a typed query clears it and keeps the dialog open; Esc on an empty query closes it. | `pty_search_in_files_esc_clears_query_then_closes`, `pty_quick_open_files_esc_clears_query_then_closes`, `pty_quick_open_commands_esc_keeps_prefix_then_closes`, `pty_quick_open_hash_search_esc_clears_query_then_closes`, `ctrl_f_toggles_and_esc_clears_then_parks`, `esc_from_the_results_zone_clears_the_query_and_its_hits`, `esc_clears_the_files_query_then_closes`, `esc_clears_commands_text_back_to_the_prefix_then_closes` |
+
+| Surface | Tab | Depth | Pane | Looks | Code anchors | `two-step-esc` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `search-files` | any | - | overlay | boxed, flat | `search_files_key_action`, `escape_search_files`, `search_files_edit`, `close_search_files`, `footer_hints` | supported |
+| `quick-open-files` | any | - | overlay | boxed, flat | `quick_open_key_action`, `escape_quick_open`, `quick_open_edit`, `close_quick_open`, `cleared_query`, `draw_quick_open` | supported |
+| `quick-open-commands` | any | - | overlay | boxed, flat | `quick_open_key_action`, `escape_quick_open`, `quick_open_edit`, `close_quick_open`, `cleared_query`, `sync_theme_preview`, `draw_quick_open` | supported |
+| `quick-open-search` | any | - | overlay | boxed, flat | `quick_open_edit`, `open_search_files_with`, `search_files_key_action`, `escape_search_files`, `search_files_edit` | supported |
+| `branch-picker` | any | - | overlay | boxed, flat | `key_to_action`, `dispatch_write`, `draw_branch_picker` | n/a: I5, one Esc closes a filter picker |
+| `compare-picker` | any | - | overlay | boxed, flat | `key_to_action`, `dispatch_keymap`, `draw_compare_picker` | n/a: I5, one Esc closes a filter picker |
+| `graph-focus-picker` | Workspace | - | overlay | boxed, flat | `key_to_action`, `dispatch_keymap`, `draw_graph_focus_picker` | n/a: I5, one Esc closes a filter picker |
 
 ## Open gaps
 
@@ -332,4 +350,5 @@ Each open gap is tracked by its id. Fixing one turns its cells into `supported` 
 | I2 | Explorer file pane: `h` gives focus back to the tree, `l` does nothing | `docs/tui-model.md` (Explorer keys) |
 | I3 | Clean-file view: `j` / `k` scroll at the edge, not the middle | `docs/tui-rust.md` (viewport rule), `docs/tui-model.md` (sticky file view top) |
 | I4 | Explorer: `??` untracked, `●` dirty folder, no `t` toggle, `Ctrl-o` refused | `docs/tui-model.md` (Explorer tabs) |
-| I5 | PR status: the tree badge is `<ref> <glyph>`, a graph worktree row paints the glyph alone, and only the graph header chip paints the state label and the next action | `docs/tui-rust.md` (Pull request badge) |
+| I5 | Filter pickers (branch, compare, graph focus): one Esc closes, typed filter or not. Quick Open and the search-in-files dialog take two presses with a typed query. | `docs/tui-rust.md` (picker key rule), `docs/tui-model.md` (Quick Open keys) |
+| I6 | PR status: the tree badge is `<ref> <glyph>`, a graph worktree row paints the glyph alone, and only the graph header chip paints the state label and the next action | `docs/tui-rust.md` (Pull request badge) |

@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 use crate::harness::PtySession;
 use crate::seed::{compare_regions_workspace, git_stdout};
 use crate::support::{
-    compare_regions_diff_focused, crumb_line, open_compare_regions_diff, status_line,
-    type_palette_filter, SETTLE_MS, VISUAL_KEY_GAP_MS, WAIT,
+    compare_regions_diff_focused, crumb_line, esc_clears_palette_filter, open_compare_regions_diff,
+    status_line, type_palette_filter, SETTLE_MS, VISUAL_KEY_GAP_MS, WAIT,
 };
 
 /// Default theme `palette.cursor_bg`: the focused diff cursor row and every
@@ -249,6 +249,7 @@ fn pty_compare_highlight_palette_refuses_stage_and_unstage() {
         "Enter on the disabled row keeps the palette and the reason",
         WAIT,
     );
+    esc_clears_palette_filter(&mut tui);
     tui.esc();
     tui.wait_pred(
         compare_highlight_active,
@@ -268,6 +269,7 @@ fn pty_compare_highlight_palette_refuses_stage_and_unstage() {
         "Unstage highlighted lines shows the compare reason",
         WAIT,
     );
+    esc_clears_palette_filter(&mut tui);
     tui.esc();
     tui.wait_pred(compare_highlight_active, "Esc closes the palette", WAIT);
 
@@ -333,6 +335,7 @@ fn pty_compare_fetch_and_stash_menu_stay_refused() {
         "Fetch remotes shows the switch reason in the palette",
         WAIT,
     );
+    esc_clears_palette_filter(&mut tui);
     tui.esc();
     tui.wait_pred(
         |screen| compare_regions_diff_focused(screen) && !screen.contains(SWITCH),

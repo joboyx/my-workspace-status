@@ -86,10 +86,7 @@ impl AppState {
                 }
                 self.request_search()
             }
-            Action::SearchFilesCancel => {
-                self.close_search_files();
-                Effect::None
-            }
+            Action::SearchFilesEscape => self.escape_search_files(),
             Action::SearchFilesSubmit => self.submit_search_files(),
             Action::SearchFilesEdit => self.edit_search_files_hit(),
             _ => Effect::None,
@@ -110,6 +107,21 @@ impl AppState {
             return Effect::None;
         }
         self.open_search_files(None)
+    }
+
+    /// Esc: clear a typed query the way Backspace edits it (hits, due
+    /// search, and error go too) and keep the dialog open on the query
+    /// zone. On an empty query, close and park it
+    /// ([`Self::close_search_files`]).
+    fn escape_search_files(&mut self) -> Effect {
+        let Some(dialog) = self.search_files.as_ref() else {
+            return Effect::None;
+        };
+        if dialog.query.is_empty() {
+            self.close_search_files();
+            return Effect::None;
+        }
+        self.search_files_edit(String::new())
     }
 
     /// Quick Open `#`: open the dialog the way Ctrl-f does, with `query` as
@@ -647,6 +659,13 @@ mod tests {
         last
     }
 
+    /// Close the open dialog with Ctrl-f, which parks it as it is, typed
+    /// query included (Esc would clear a typed query first).
+    fn park(app: &mut AppState) {
+        assert!(app.search_files.is_some(), "a dialog to park");
+        assert_eq!(app.dispatch(Action::ToggleSearchFiles), Effect::None);
+    }
+
     /// Fire the armed debounce as the live loop would once it is due.
     fn fire(app: &mut AppState) -> Effect {
         let due = dialog(app).due.expect("debounce armed");
@@ -704,7 +723,7 @@ mod tests {
             ],
             "primary checkouts only"
         );
-        app.dispatch(Action::SearchFilesCancel);
+        app.dispatch(Action::SearchFilesEscape);
 
         let opened = |app: &mut AppState| {
             let (_, roots) = open(app);
@@ -763,8 +782,10 @@ mod tests {
         );
     }
 
+    /// Ctrl-f closes at once and parks the typed query; Esc clears a typed
+    /// query first and closes (and parks) only an empty one.
     #[test]
-    fn ctrl_f_toggles_and_esc_parks() {
+    fn ctrl_f_toggles_and_esc_clears_then_parks() {
         let mut app = family_state();
         focus_row(&mut app, NodeKind::Checkout, Some("app"));
         open(&mut app);
@@ -773,13 +794,62 @@ mod tests {
             crate::tui::InputMode::SearchFiles { results: false }
         ));
         assert_eq!(dialog(&app).index, FileIndexState::Loading);
+        type_text(&mut app, "main");
         assert_eq!(app.dispatch(Action::ToggleSearchFiles), Effect::None);
         assert!(app.search_files.is_none(), "Ctrl-f again closes");
-        assert!(app.search_files_parked.is_some());
+        assert_eq!(
+            app.search_files_parked.as_ref().map(|d| d.query.as_str()),
+            Some("main"),
+            "Ctrl-f parks the typed query"
+        );
+
         open(&mut app);
-        assert_eq!(app.dispatch(Action::SearchFilesCancel), Effect::None);
-        assert!(app.search_files.is_none(), "Esc closes");
-        assert!(app.search_files_parked.is_some(), "Esc parks");
+        assert_eq!(dialog(&app).query, "main", "the parked query comes back");
+        assert_eq!(app.dispatch(Action::SearchFilesEscape), Effect::None);
+        let cleared = dialog(&app);
+        assert_eq!(cleared.query, "", "Esc clears the typed query");
+        assert_eq!(cleared.zone, SearchZone::Query);
+        assert_eq!(cleared.due, None, "no search left due");
+        assert!(app.search_files_parked.is_none(), "nothing parked yet");
+
+        assert_eq!(app.dispatch(Action::SearchFilesEscape), Effect::None);
+        assert!(app.search_files.is_none(), "Esc on an empty query closes");
+        assert_eq!(
+            app.search_files_parked.as_ref().map(|d| d.query.as_str()),
+            Some(""),
+            "Esc parks"
+        );
+    }
+
+    /// Esc from the results zone clears the query, its hits, and the
+    /// running search, and puts the keys back on the query zone.
+    #[test]
+    fn esc_from_the_results_zone_clears_the_query_and_its_hits() {
+        let mut app = family_state();
+        let gen = open_and_search(&mut app, "main");
+        assert!(app
+            .apply_search_chunk(gen, chunk(vec![hit(1, 1)], Some(1)))
+            .is_some());
+        app.dispatch(Action::SearchFilesMove(1));
+        assert_eq!(dialog(&app).zone, SearchZone::Results);
+        assert!(dialog(&app).searching, "the next chunk is still running");
+
+        assert_eq!(app.dispatch(Action::SearchFilesEscape), Effect::None);
+        let cleared = dialog(&app);
+        assert_eq!(cleared.query, "");
+        assert_eq!(cleared.zone, SearchZone::Query);
+        assert!(cleared.hits.is_empty(), "{:?}", cleared.hits);
+        assert!(!cleared.searching, "the running search stops");
+        assert_eq!(
+            app.apply_search_chunk(gen, chunk(vec![hit(0, 2)], None)),
+            None,
+            "a chunk of the cleared search is dropped"
+        );
+        assert!(dialog(&app).hits.is_empty());
+        assert!(app.search_files_parked.is_none(), "the dialog stays open");
+
+        app.dispatch(Action::SearchFilesEscape);
+        assert!(app.search_files.is_none(), "the second Esc closes");
     }
 
     #[test]
@@ -788,7 +858,7 @@ mod tests {
         app.status = StatusMessage::info("Fetched 2 repos");
         open(&mut app);
         assert!(app.status.is_empty(), "{}", app.status);
-        app.dispatch(Action::SearchFilesCancel);
+        app.dispatch(Action::SearchFilesEscape);
         app.status = StatusMessage::info("Press Ctrl-c again to exit");
         open(&mut app);
         assert_eq!(app.status, "Press Ctrl-c again to exit");
@@ -831,7 +901,7 @@ mod tests {
 
         // Park widened: the next Ctrl-f follows focus, not the widening.
         app.dispatch(Action::SearchFilesToggleScope);
-        app.dispatch(Action::SearchFilesCancel);
+        park(&mut app);
         let (_, roots) = open(&mut app);
         assert!(!dialog(&app).widened);
         assert_eq!(dialog(&app).scope(), QuickOpenScope::Checkout("app".into()));
@@ -858,7 +928,7 @@ mod tests {
         app.search_files.as_mut().unwrap().scroll = 1;
         let before = dialog(&app).clone();
         assert_eq!(before.zone, SearchZone::Results);
-        app.dispatch(Action::SearchFilesCancel);
+        park(&mut app);
 
         assert_eq!(app.dispatch(Action::ToggleSearchFiles), Effect::None);
         let restored = dialog(&app);
@@ -875,7 +945,7 @@ mod tests {
         let mut app = family_state();
         let gen = open_and_search(&mut app, "line");
         app.apply_search_chunk(gen, chunk(vec![hit(0, 1)], Some(1)));
-        app.dispatch(Action::SearchFilesCancel);
+        park(&mut app);
         assert_eq!(app.search_files_live_gen(), 0, "closing stops the search");
         assert_eq!(app.apply_search_chunk(gen, chunk(Vec::new(), None)), None);
 
@@ -887,7 +957,7 @@ mod tests {
 
         // A debounce still armed at close searches on restore.
         type_text(&mut app, "s");
-        app.dispatch(Action::SearchFilesCancel);
+        park(&mut app);
         let effect = app.dispatch(Action::ToggleSearchFiles);
         assert!(
             matches!(effect, Effect::SearchFilesChunk { ref query, .. } if query == "lines"),
@@ -896,7 +966,7 @@ mod tests {
         assert_eq!(dialog(&app).due, None);
 
         // An index still loading at close loads again.
-        app.dispatch(Action::SearchFilesCancel);
+        park(&mut app);
         app.search_files_parked.as_mut().unwrap().index = FileIndexState::Loading;
         let effect = app.dispatch(Action::ToggleSearchFiles);
         assert!(
@@ -915,7 +985,7 @@ mod tests {
         let gen2 = dialog(&app).search_gen;
         assert_ne!(gen, gen2);
         app.apply_search_chunk(gen2, chunk(vec![hit(0, 1)], None));
-        app.dispatch(Action::SearchFilesCancel);
+        park(&mut app);
 
         focus_row(&mut app, NodeKind::Repo, Some("lib"));
         let (gen, roots) = open(&mut app);
@@ -946,9 +1016,9 @@ mod tests {
         app.dispatch(Action::SearchFilesToggleScope);
         assert_eq!(app.apply_search_index(old, index_of(&["a.rs"])), None);
         assert_eq!(dialog(&app).index, FileIndexState::Loading);
-        app.dispatch(Action::SearchFilesCancel);
+        app.dispatch(Action::SearchFilesEscape);
         let (gen, _) = open(&mut app);
-        app.dispatch(Action::SearchFilesCancel);
+        app.dispatch(Action::SearchFilesEscape);
         assert_eq!(
             app.apply_search_index(gen, index_of(&["a.rs"])),
             None,
@@ -1384,7 +1454,8 @@ mod tests {
         assert_eq!(dialog(&app).query, "foo", "the rest types into the dialog");
 
         // Text after `#` is the query, leading spaces trimmed.
-        app.dispatch(Action::SearchFilesCancel);
+        park(&mut app);
+        assert!(app.search_files.is_none());
         focus_row(&mut app, NodeKind::Repo, Some("lib"));
         app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Files));
         app.quick_open.as_mut().unwrap().query = "#  ba".into();
@@ -1418,7 +1489,7 @@ mod tests {
         let mut app = family_state();
         let gen = open_and_search(&mut app, "line");
         app.apply_search_chunk(gen, chunk(vec![hit(0, 1)], None));
-        app.dispatch(Action::SearchFilesCancel);
+        park(&mut app);
 
         app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Files));
         app.quick_open.as_mut().unwrap().query = "#fo".into();
@@ -1435,7 +1506,7 @@ mod tests {
         );
 
         // `#` alone empties the query and its hits.
-        app.dispatch(Action::SearchFilesCancel);
+        park(&mut app);
         app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Files));
         assert_eq!(app.dispatch(Action::QuickOpenChar('#')), Effect::None);
         assert_eq!(dialog(&app).query, "");
@@ -1601,7 +1672,7 @@ mod tests {
         let gen = open_and_search(&mut app, "a");
         app.apply_search_chunk(gen, chunk(vec![hit(1, 2)], None));
         let (read, _, _) = app.search_preview_request().expect("a read");
-        app.dispatch(Action::SearchFilesCancel);
+        park(&mut app);
         assert!(!app.apply_search_preview(read, text(&MAIN_RS)), "closed");
         assert_eq!(app.dispatch(Action::ToggleSearchFiles), Effect::None);
         let (again, _, rel) = app.search_preview_request().expect("asked again");
@@ -1610,7 +1681,7 @@ mod tests {
         assert!(app.apply_search_preview(again, text(&MAIN_RS)));
 
         // A finished preview is parked with the dialog and kept.
-        app.dispatch(Action::SearchFilesCancel);
+        park(&mut app);
         app.dispatch(Action::ToggleSearchFiles);
         assert_eq!(app.search_preview_request(), None);
         assert!(dialog(&app).preview.as_ref().unwrap().body.is_some());
@@ -1621,7 +1692,7 @@ mod tests {
         let mut app = family_state();
         let gen = open_and_search(&mut app, "line");
         app.apply_search_chunk(gen, chunk(Vec::new(), None));
-        app.dispatch(Action::SearchFilesCancel);
+        park(&mut app);
 
         // A fresh open in another scope carries the query; nothing is due
         // or running until the index lands, but a search will run then.

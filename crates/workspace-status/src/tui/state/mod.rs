@@ -11777,7 +11777,7 @@ mod tests {
         assert_eq!(app.hovered_tab_close(), None);
         assert_eq!(app.pointer, Some((29, 0)), "the dialog keeps the pointer");
 
-        app.dispatch(Action::SearchFilesCancel);
+        app.dispatch(Action::SearchFilesEscape);
         assert_eq!(app.hovered_tab_close(), Some(1), "closed: the strip hovers");
         assert_eq!(
             app.search_option_at(80, 2),
@@ -16745,7 +16745,9 @@ mod tests {
             app.dispatch(Action::QuickOpenChar(c));
         }
         assert_eq!(app.theme, ThemeId::Nord);
-        app.dispatch(Action::QuickOpenCancel);
+        // Esc clears the typed filter, then closes.
+        app.dispatch(Action::QuickOpenEscape);
+        app.dispatch(Action::QuickOpenEscape);
         assert!(app.quick_open.is_none());
         assert_eq!(app.theme, ThemeId::Kanagawa, "Esc restores");
 
@@ -16762,7 +16764,10 @@ mod tests {
         }
         assert_eq!(palette_focus(&app).as_deref(), Some("Theme: One Dark"));
         assert_eq!(app.theme, ThemeId::OneDark);
-        app.dispatch(Action::QuickOpenCancel);
+        // Esc clears the typed filter, then closes.
+        app.dispatch(Action::QuickOpenEscape);
+        app.dispatch(Action::QuickOpenEscape);
+        assert!(app.quick_open.is_none());
         assert_eq!(app.theme, ThemeId::Kanagawa, "Esc after a files entry");
         assert!(!app.ui_store_path.exists(), "a close never saves");
         let _ = std::fs::remove_dir_all(&dir);
@@ -16781,7 +16786,10 @@ mod tests {
         // The applied theme is the new open-time theme.
         palette_type(&mut app, "dracula");
         assert_eq!(app.theme, ThemeId::Dracula);
-        app.dispatch(Action::QuickOpenCancel);
+        // Esc clears the typed filter, then closes.
+        app.dispatch(Action::QuickOpenEscape);
+        app.dispatch(Action::QuickOpenEscape);
+        assert!(app.quick_open.is_none());
         assert_eq!(app.theme, ThemeId::Nord);
         assert_eq!(load_ui_state(&app.ui_store_path).theme, Some(ThemeId::Nord));
         let _ = std::fs::remove_dir_all(&dir);
@@ -19575,7 +19583,7 @@ diff --git a/README.md b/README.md
             Some(">")
         );
         assert_eq!(app.diff_visual_anchor, anchor, "open keeps the anchor");
-        app.dispatch(Action::QuickOpenCancel);
+        app.dispatch(Action::QuickOpenEscape);
         assert!(app.quick_open.is_none());
         assert_eq!(app.diff_visual_anchor, anchor, "Esc keeps the anchor");
         assert_eq!(app.diff_cursor, cursor);
@@ -19921,7 +19929,9 @@ diff --git a/README.md b/README.md
         palette_select(&mut app, "Fetch remotes");
         assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
         assert_eq!(app.status, "exit highlight first (Esc)");
-        app.dispatch(Action::QuickOpenCancel);
+        // Esc clears the typed filter, then closes.
+        app.dispatch(Action::QuickOpenEscape);
+        app.dispatch(Action::QuickOpenEscape);
         assert_eq!(app.input_mode(), InputMode::DiffVisual);
         assert_eq!(app.status, "", "the reason does not linger in highlight");
 
@@ -19929,7 +19939,9 @@ diff --git a/README.md b/README.md
         // one, so this one lands while the palette is up.
         palette_select(&mut app, "Fetch remotes");
         app.status = "staged range README.md".into();
-        app.dispatch(Action::QuickOpenCancel);
+        // Esc clears the typed filter, then closes.
+        app.dispatch(Action::QuickOpenEscape);
+        app.dispatch(Action::QuickOpenEscape);
         assert_eq!(app.status, "staged range README.md");
     }
 
