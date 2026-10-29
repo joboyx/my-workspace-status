@@ -1303,18 +1303,23 @@ pub struct PrTotals {
 
 /// The workspace total for `totals`, widest first: `8 PRs · 2 need you`,
 /// then `8 PRs`. `8 PRs` is muted, the `·` dim, and `2 need you` modified
-/// and bold. With no PR that needs you only `8 PRs` (`1 PR` for one); with
-/// no PR nothing. A `narrow` tree shows one part: `2 need you`, else
-/// `8 PRs`.
+/// and bold. One reads `1 PR` and `1 needs you`. With no PR that needs you
+/// only `8 PRs`; with no PR nothing. A `narrow` tree shows one part:
+/// `2 need you`, else `8 PRs`.
 fn pr_total_variants(totals: PrTotals, narrow: bool) -> Vec<Vec<TextSeg>> {
     if totals.prs == 0 {
         return Vec::new();
     }
     let noun = if totals.prs == 1 { "PR" } else { "PRs" };
     let prs = text_seg(format!("{} {noun}", totals.prs), SegRole::Muted);
+    let verb = if totals.need_you == 1 {
+        "needs"
+    } else {
+        "need"
+    };
     let need_you = TextSeg {
         bold: true,
-        ..text_seg(format!("{} need you", totals.need_you), SegRole::Modified)
+        ..text_seg(format!("{} {verb} you", totals.need_you), SegRole::Modified)
     };
     let dot = TextSeg {
         dim: true,
@@ -1870,8 +1875,9 @@ mod tests {
         };
         assert_eq!(
             text(one, false, 80),
-            "4 changed · 2 behind  1 PR · 1 need you"
+            "4 changed · 2 behind  1 PR · 1 needs you"
         );
+        assert_eq!(text(one, true, 80), "4 changed · 2 behind  1 needs you");
         assert_eq!(text(PrTotals::default(), false, 80), "4 changed · 2 behind");
 
         let segs = workspace_trailing_fit(&chrome, both, false, 80);
