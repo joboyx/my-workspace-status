@@ -58,8 +58,8 @@ fn on_workspace(screen: &str) -> bool {
 }
 
 fn jump_workspace(tui: &mut PtySession) {
-    tui.key('g');
-    tui.key('1');
+    // One write: the chord's keys share one arrival.
+    tui.send_bytes(b"g1");
     tui.wait_pred(
         on_workspace,
         "g1 activates Workspace (compare chrome is not the focused surface)",

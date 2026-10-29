@@ -127,8 +127,9 @@ fn pty_gw_views_focused_entity_remotely() {
     );
     assert!(opened(&marker).is_empty(), "nothing opened at launch");
 
-    // Repo row: the repository home.
-    tui.keys("gw");
+    // Repo row: the repository home. Each chord goes out in one write so
+    // its keys share one arrival.
+    tui.send_bytes(b"gw");
     tui.wait_pred(
         |screen| opened(&marker) == [REPO_PAGE] && screen.contains("opened"),
         "gw on the repo row opens the repository home in $BROWSER",
@@ -144,7 +145,7 @@ fn pty_gw_views_focused_entity_remotely() {
         "graph cursor on the unpushed commit",
         WAIT,
     );
-    tui.keys("gw");
+    tui.send_bytes(b"gw");
     tui.wait_pred(
         |screen| screen.contains(&refused),
         "gw on an unpushed commit says it is not on origin",
@@ -179,7 +180,7 @@ fn pty_gw_views_focused_entity_remotely() {
     // branch page, not the commit. `gh` pins the commit node section, then
     // the chip section; the last line of the box is the chip's View
     // remotely, and `j` stops there.
-    tui.keys("gh");
+    tui.send_bytes(b"gh");
     tui.wait_pred(
         |screen| screen.contains(PINNED_FOOTER) && screen.contains("remote-tracking branch"),
         "gh pins the seed row's popover with its origin/main chip section",

@@ -104,8 +104,8 @@ fn pty_compare_help() {
     tui.esc();
     tui.wait_pred(help_closed, "Esc closes the compare help", WAIT);
 
-    tui.key('g');
-    tui.key('1');
+    // One write: the chord's keys share one arrival.
+    tui.send_bytes(b"g1");
     tui.wait_pred(
         |screen| screen.contains("# workspace") && !screen.contains("COMMITTED"),
         "g1 activates the Workspace tab",

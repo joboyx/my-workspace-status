@@ -96,9 +96,8 @@ fn pty_v_s_stages_one_hunk_u_unstages_that_range() {
         "worktree diff must still show OMEGA unstaged:\ncached={cached}\nunstaged={unstaged}"
     );
 
-    tui.key('g');
-    tui.wait_ms(VISUAL_KEY_GAP_MS);
-    tui.key('g');
+    // One write: both `g` share one arrival, so the 400 ms window holds.
+    tui.send_bytes(b"gg");
     tui.wait_pred(
         |screen| {
             panes_tree_unfocused_diff_focused(screen)

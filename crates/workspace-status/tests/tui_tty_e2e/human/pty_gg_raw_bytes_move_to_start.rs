@@ -44,9 +44,14 @@ fn tree_or_theme_fired(screen: &str) -> bool {
         || screen.contains("theme: ")
 }
 
+/// Raw `g` then `second` in one write, so both bytes share one arrival
+/// and the 400 ms chord window holds on a loaded machine.
+fn raw_g_chord(tui: &mut PtySession, second: char) {
+    tui.send_bytes(format!("g{second}").as_bytes());
+}
+
 fn raw_gg(tui: &mut PtySession) {
-    tui.key('g');
-    tui.key('g');
+    raw_g_chord(tui, 'g');
 }
 
 /// Two raw `g` bytes must `MoveToStart`. Raw `gt` / `gT` must switch tabs.
@@ -93,8 +98,7 @@ fn pty_raw_gg_jumps_and_gt_stays_tab_switch() {
         GIT_WAIT,
     );
 
-    tui.key('g');
-    tui.key('2');
+    raw_g_chord(&mut tui, '2');
     tui.wait_pred(
         |screen| on_compare_origin_main(screen) && !tree_or_theme_fired(screen),
         "g2 activates vs origin/main",
@@ -129,16 +133,14 @@ fn pty_raw_gg_jumps_and_gt_stays_tab_switch() {
         WAIT,
     );
 
-    tui.key('g');
-    tui.key('t');
+    raw_g_chord(&mut tui, 't');
     tui.wait_pred(
         |screen| on_compare_local_main(screen) && !tree_or_theme_fired(screen),
         "raw gt from vs origin/main is NextTab, not ToggleTreeMode",
         WAIT,
     );
 
-    tui.key('g');
-    tui.key('T');
+    raw_g_chord(&mut tui, 'T');
     tui.wait_pred(
         |screen| on_compare_origin_main(screen) && !tree_or_theme_fired(screen),
         "raw gT from vs main is PreviousTab and sets no theme",
