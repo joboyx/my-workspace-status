@@ -2044,6 +2044,7 @@ impl Interpreter {
                                         merged_into_default: row.merged_into_default,
                                         default_branch_override: row.default_branch_override,
                                         default_tip_ref: row.default_tip_ref,
+                                        default_branch: row.default_branch,
                                         local_branches: row.local_branches,
                                     })
                             };
@@ -3940,6 +3941,7 @@ mod tests {
             merged_into_default: None,
             default_branch_override: None,
             default_tip_ref: None,
+            default_branch: None,
             local_branches: Vec::new(),
         }
     }

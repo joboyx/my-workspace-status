@@ -1196,11 +1196,19 @@ pub fn resolve_default_branch_tip_ref(cwd: &Path, default_branch: &str) -> Optio
     None
 }
 
-/// Default branch name for merge-into-default classification.
+/// Default branch name for merge-into-default classification: the known
+/// default ([`known_default_branch_name`]), else `main`.
 pub fn resolve_default_branch_name(cwd: &Path, override_name: Option<&str>) -> String {
+    known_default_branch_name(cwd, override_name).unwrap_or_else(|| "main".to_string())
+}
+
+/// The repository's default branch when it is known: the non-empty
+/// configured override, else the branch `origin/HEAD` points at. `None`
+/// when neither names one; no branch name is guessed.
+pub fn known_default_branch_name(cwd: &Path, override_name: Option<&str>) -> Option<String> {
     if let Some(name) = override_name {
         if !name.is_empty() {
-            return name.to_string();
+            return Some(name.to_string());
         }
     }
     let remote_head = exec_git(
@@ -1212,13 +1220,14 @@ pub fn resolve_default_branch_name(cwd: &Path, override_name: Option<&str>) -> S
         ],
         cwd,
     );
-    if !remote_head.is_empty() {
-        if let Some(rest) = remote_head.strip_prefix("origin/") {
-            return rest.to_string();
-        }
-        return remote_head;
+    if remote_head.is_empty() {
+        return None;
     }
-    "main".to_string()
+    Some(
+        remote_head
+            .strip_prefix("origin/")
+            .map_or_else(|| remote_head.clone(), str::to_string),
+    )
 }
 
 /// Default branch used by `--default-branch` (origin/HEAD, then develop/main/master).

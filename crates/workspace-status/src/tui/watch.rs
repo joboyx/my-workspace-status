@@ -706,6 +706,7 @@ mod tests {
             merged_into_default: None,
             default_branch_override: None,
             default_tip_ref: None,
+            default_branch: None,
             local_branches: Vec::new(),
             has_unstaged: !dirty.is_empty(),
             has_staged: false,

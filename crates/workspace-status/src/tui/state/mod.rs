@@ -7683,6 +7683,7 @@ mod tests {
             merged_into_default: None,
             default_branch_override: None,
             default_tip_ref: None,
+            default_branch: None,
             local_branches: Vec::new(),
         }
     }
@@ -8199,6 +8200,7 @@ mod tests {
                 merged_into_default: None,
                 default_branch_override: None,
                 default_tip_ref: None,
+                default_branch: None,
                 local_branches: Vec::new(),
             }],
             &[],
@@ -8246,6 +8248,7 @@ mod tests {
             merged_into_default: None,
             default_branch_override: None,
             default_tip_ref: None,
+            default_branch: None,
             local_branches: Vec::new(),
         }
     }
@@ -8406,6 +8409,7 @@ mod tests {
                     merged_into_default: None,
                     default_branch_override: None,
                     default_tip_ref: None,
+                    default_branch: None,
                     local_branches: Vec::new(),
                 },
             ],
@@ -12381,6 +12385,7 @@ mod tests {
                     merged_into_default: None,
                     default_branch_override: None,
                     default_tip_ref: None,
+                    default_branch: None,
                     local_branches: Vec::new(),
                 },
                 RepoSnapshot {
@@ -12399,6 +12404,7 @@ mod tests {
                     merged_into_default: None,
                     default_branch_override: None,
                     default_tip_ref: None,
+                    default_branch: None,
                     local_branches: Vec::new(),
                 },
             ],
@@ -13145,6 +13151,7 @@ mod tests {
                     merged_into_default: None,
                     default_branch_override: None,
                     default_tip_ref: None,
+                    default_branch: None,
                     local_branches: Vec::new(),
                 },
             ],
@@ -13366,6 +13373,7 @@ mod tests {
                     merged_into_default: Some(false),
                     default_branch_override: None,
                     default_tip_ref: None,
+                    default_branch: None,
                     local_branches: Vec::new(),
                 },
                 repo("notes", true),
@@ -13448,6 +13456,7 @@ mod tests {
                 merged_into_default: None,
                 default_branch_override: None,
                 default_tip_ref: None,
+                default_branch: None,
                 local_branches: Vec::new(),
             }],
             &["notes/.worktrees/feat".into()],
@@ -13766,6 +13775,7 @@ mod tests {
             merged_into_default: None,
             default_branch_override: None,
             default_tip_ref: None,
+            default_branch: None,
             local_branches: Vec::new(),
         }
     }
@@ -17174,6 +17184,7 @@ mod tests {
             merged_into_default: None,
             default_branch_override: None,
             default_tip_ref: None,
+            default_branch: None,
             local_branches: Vec::new(),
         }
     }
