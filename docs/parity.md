@@ -15,6 +15,7 @@ CI runs the checks in `crates/workspace-status/src/parity_registry.rs` (part of 
 | `commit_footer_rows_match_on_every_registry_surface`, `commit_footer_rule_drag_matches_on_every_registry_surface` (`tui/render.rs`) | The `commit-footer` surfaces marked `supported` for `meta`, `msg-colour`, `row-order`, or `rule-drag`, in each look, differ from the surfaces those tests drive; or on one of them the message rows are not on top in `pal.repo`, the meta row is not the graph footer's meta on the bottom row with a ref chip hit that pins its popover, or the top rule does not drag the rows and save them once on release. |
 | `commit_footer_shows_hint_expand_and_hash_link_on_every_registry_surface` (`tui/render.rs`) | The `commit-footer` surfaces marked `supported` for `shown`, `hint-popover`, `expand`, or `hash-link`, in each look, differ from the surfaces that test drives; or on one of them the subject does not paint on the first body row, a click on the more-below hint does not pin the more-lines section with the footer's count, `M` does not hide and restore the body, or the meta row's short hash does not link to the commit page. |
 | `commit_file_search_highlight_and_steps_agree_on_every_registry_surface` (`tui/render.rs`) | The `search` surfaces whose code anchors name `commit_file_search_match_ids` differ from the surfaces that test drives, or one of them is not `supported` for `agree` in each look; or on one of them the highlighted rows differ from the rows `n` / `N` visit and the pill counts, or a walk from a folded list changes the count. |
+| `diff_vertical_bar_drags_and_track_click_jumps_on_every_registry_surface` (`tui/render.rs`) | The `scrollbars` surfaces whose code anchors name `draw_diff_pane` differ from the surfaces that test drives, or one of them is not `supported` for `vbar-drag` in each look; or on one of them a press on the vertical thumb picks a row, arms a text selection, or jumps, a drag does not move the viewport (and the diff cursor with it) by the graph bar's math, the release does not end the drag, or a track click does not jump to the end or the top. |
 
 The `commit-footer` check is the pattern for other components: one test body that runs the same assertions on every surface the registry marks `supported`, and that compares its own surface list to `parity_registry::supported_surface_looks(component, feature)`.
 
@@ -103,23 +104,23 @@ Vertical and horizontal scrollbars of lists and line viewers. The commit-message
 | Feature | What | Tests |
 | --- | --- | --- |
 | `vbar` | A vertical scrollbar paints when the rows overflow. | none |
-| `vbar-drag` | A drag on the vertical thumb scrolls; a track click jumps. | `graph_scrollbar_thumb_drag_updates_scroll_and_release_ends_drag`, `graph_scrollbar_track_click_jumps_and_arms_drag` |
+| `vbar-drag` | A drag on the vertical thumb scrolls; a track click jumps. A press on the bar picks no row. A viewport that follows its cursor (the file diff) moves the cursor with it, as the wheel does. | `graph_scrollbar_thumb_drag_updates_scroll_and_release_ends_drag`, `graph_scrollbar_track_click_jumps_and_arms_drag`, `diff_vertical_bar_drags_and_track_click_jumps_on_every_registry_surface`, `hit_test_diff_vertical_scrollbar_thumb_and_track_in_both_looks`, `cursor_for_viewport_top_on_wrapped_rows` |
 | `hbar` | A horizontal scrollbar paints when the columns overflow. | none |
 | `hbar-drag` | A drag on the horizontal thumb pans; a track click jumps. | `diff_hscrollbar_on_the_last_pane_row_drags_only_when_flat` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `vbar` | `vbar-drag` | `hbar` | `hbar-drag` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `draw_graph`, `record_graph_scrollbar`, `hit_graph_scrollbar` | supported | supported | supported | supported |
-| `graph-d1` | Workspace | 1 | left | boxed, flat | `draw_graph`, `record_graph_scrollbar`, `hit_graph_scrollbar` | supported | supported | supported | supported |
+| `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `draw_graph`, `record_graph_scrollbar`, `hit_vscrollbar`, `press_vscrollbar` | supported | supported | supported | supported |
+| `graph-d1` | Workspace | 1 | left | boxed, flat | `draw_graph`, `record_graph_scrollbar`, `hit_vscrollbar`, `press_vscrollbar` | supported | supported | supported | supported |
 | `tree` | Workspace | 0 | left | boxed, flat | `draw_tree` | gap: G5 | gap: G5 | gap: G23 | gap: G23 |
 | `files-d1` | Workspace | 1 | right | boxed, flat | `draw_commit_file_list` | gap: G5 | gap: G5 | gap: G23 | gap: G23 |
 | `files-d2` | Workspace | 2 | left | boxed, flat | `draw_commit_detail`, `draw_commit_file_list` | gap: G5 | gap: G5 | gap: G23 | gap: G23 |
 | `compare-files` | Compare | - | left | boxed, flat | `draw_commit_file_list` | gap: G5 | gap: G5 | gap: G23 | gap: G23 |
 | `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree` | gap: G5 | gap: G5 | gap: G13; the tree never pans, so it has no bar | gap: G13; the tree never pans, so it has no bar |
-| `diff-d0` | Workspace | 0 (file focused) | right | boxed, flat | `draw_diff_pane`, `hit_diff_hscrollbar` | supported | gap: G4 | supported | supported |
-| `diff-d2` | Workspace | 2 | right | boxed, flat | `draw_diff_pane`, `hit_diff_hscrollbar` | supported | gap: G4 | supported | supported |
-| `compare-diff` | Compare | - | right | boxed, flat | `draw_diff_pane`, `hit_diff_hscrollbar` | supported | gap: G4 | supported | supported |
-| `explorer-diff` | Explorer (changed file) | - | right | boxed, flat | `draw_diff_pane`, `explorer_click` | supported | gap: G4 | supported | gap: G11; `explorer_click` never calls `hit_split` |
+| `diff-d0` | Workspace | 0 (file focused) | right | boxed, flat | `draw_diff_pane`, `paint_vscrollbar`, `hit_vscrollbar`, `press_vscrollbar`, `scroll_diff_to`, `cursor_for_viewport_top`, `hit_diff_hscrollbar` | supported | supported | supported | supported |
+| `diff-d2` | Workspace | 2 | right | boxed, flat | `draw_diff_pane`, `paint_vscrollbar`, `hit_vscrollbar`, `press_vscrollbar`, `scroll_diff_to`, `cursor_for_viewport_top`, `hit_diff_hscrollbar` | supported | supported | supported | supported |
+| `compare-diff` | Compare | - | right | boxed, flat | `draw_diff_pane`, `paint_vscrollbar`, `hit_vscrollbar`, `press_vscrollbar`, `scroll_diff_to`, `cursor_for_viewport_top`, `hit_diff_hscrollbar` | supported | supported | supported | supported |
+| `explorer-diff` | Explorer (changed file) | - | right | boxed, flat | `draw_diff_pane`, `explorer_click`, `paint_vscrollbar`, `hit_vscrollbar`, `press_vscrollbar`, `scroll_diff_to`, `cursor_for_viewport_top` | supported | supported | supported | gap: G11; `explorer_click` never calls `hit_split` |
 | `explorer-file` | Explorer (clean file) | - | right | boxed, flat | `draw_file_body` | gap: G6 | gap: G6 | gap: G6 | gap: G6 |
 
 ### `search` — Pane search
@@ -282,7 +283,6 @@ Each open gap is tracked by its id. Fixing one turns its cells into `supported` 
 
 | Gap | Component | Has it | Missing on |
 | --- | --- | --- | --- |
-| G4 | `scrollbars` | Graph list scrollbar drag and track click (`SplitDrag::GraphScrollbar`) | File diff vertical bar: `SplitHit` / `SplitDrag` have no diff vertical variant; `diff_scrollbar_x` is read only in tests |
 | G5 | `scrollbars` | Graph list and file diff paint a vertical scrollbar | Workspace tree, commit-file lists, Explorer tree |
 | G6 | `scrollbars` | Explorer pane on a changed file (`draw_diff_pane`) | Explorer pane on a clean file: `draw_file_body` paints no bar |
 | G7 | `icon-popovers` | Comment marks on tree, graph, and commit-file rows open a popover | Diff gutter and clean-file gutter: `IconTarget` has no line variant |

@@ -100,10 +100,10 @@ use super::search_files::{SearchFilesState, SearchZone};
 use super::selection::TextSelection;
 use super::split::{
     clamp_tree_fraction, diff_col_from_col, diff_col_from_delta, diff_paint_width, diff_pane_mode,
-    diff_split_fraction_from_col, graph_col_from_col, graph_col_from_delta,
-    graph_scroll_from_delta, graph_scroll_from_row, hit_split, pane_widths, step_tree_fraction,
-    tree_fraction_from_col, DiffMode, ResizeEdge, SplitDrag, SplitHit, SplitLayout,
-    DIFF_SPLIT_FRACTION, NARROW_SXS, TREE_WIDTH_FRACTION,
+    diff_split_fraction_from_col, graph_col_from_col, graph_col_from_delta, graph_scroll_max,
+    hit_split, pane_widths, step_tree_fraction, tree_fraction_from_col, vscroll_from_delta,
+    vscroll_from_row, DiffMode, ResizeEdge, SplitDrag, SplitHit, SplitLayout, VScrollbar,
+    VScrollbarLayout, DIFF_SPLIT_FRACTION, NARROW_SXS, TREE_WIDTH_FRACTION,
 };
 use super::stash::{
     checkout_path, resolve_stash_menu_key, row_is_hidden, stash_dirty_for_row,
@@ -120,8 +120,9 @@ use super::tabs::{
 use super::theme::{BackgroundMode, ThemeId};
 use super::toast::ToastStack;
 use super::tree::{
-    build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, visible_for_tree,
-    visible_window, workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
+    build_tree, collect_foldable_subtree_ids, cursor_for_viewport_top, default_folds, flatten_with,
+    list_viewport_start, visible_for_tree, visible_window, workspace_label_from_cwd, NodeKind,
+    TreeNode, VisibleRow,
 };
 use super::ui_state_store::{save_activity_sparkline, save_commit_msg_lines, save_theme};
 use super::undercurl::UndercurlHit;
@@ -330,12 +331,10 @@ pub struct LayoutHit {
     /// ([`workspace_status_graph::commit_msg_lines_fit`], the same for a
     /// graph pane and a commit-files pane). A drag of the rule clamps here.
     pub commit_msg_lines_fit: usize,
-    /// 0-based diff scrollbar column when a file diff is painted.
-    pub diff_scrollbar_x: Option<u16>,
-    /// 0-based first row of the diff scrollbar track (body, not header).
-    pub diff_scrollbar_y: u16,
-    /// Diff body height (vertical scrollbar track).
-    pub diff_scrollbar_height: u16,
+    /// File-diff vertical scrollbar from the last paint: its column (`None`
+    /// when no file diff paints one), the body rows it spans (not the path
+    /// header), the diff row count, the painted top, and the largest top.
+    pub diff_vbar: VScrollbarLayout,
     /// 0-based diff horizontal scrollbar row when the bar is painted.
     pub diff_hscrollbar_y: Option<u16>,
     /// 0-based first column of the diff horizontal scrollbar track.
@@ -473,9 +472,7 @@ impl Default for LayoutHit {
             commit_msg_rule_x: 0,
             commit_msg_rule_width: 0,
             commit_msg_lines_fit: COMMIT_MSG_LINES_MAX,
-            diff_scrollbar_x: None,
-            diff_scrollbar_y: 0,
-            diff_scrollbar_height: 0,
+            diff_vbar: VScrollbarLayout::default(),
             diff_hscrollbar_y: None,
             diff_hscrollbar_x: 0,
             diff_hscrollbar_width: 0,
@@ -2958,11 +2955,22 @@ impl AppState {
             diff_content_x: self.layout.diff_content_x,
             flat_panes: self.background == BackgroundMode::Paint,
             diff_split_rule_x: self.layout.diff_split_rule_x,
-            graph_scrollbar_x: self.layout.graph_scrollbar_x,
-            graph_scrollbar_y: self.layout.graph_scrollbar_y,
-            graph_scrollbar_height: self.layout.graph_scrollbar_height,
-            graph_content_len: self.layout.graph_content_len,
-            graph_scroll: self.graph_painted_top(),
+            graph_vbar: VScrollbarLayout {
+                x: self.layout.graph_scrollbar_x,
+                y: self.layout.graph_scrollbar_y,
+                height: self.layout.graph_scrollbar_height,
+                content_len: self.layout.graph_content_len,
+                scroll: self.graph_painted_top(),
+                scroll_max: graph_scroll_max(
+                    self.layout.graph_content_len,
+                    self.layout.graph_scrollbar_height,
+                )
+                .min(usize::from(u16::MAX)) as u16,
+            },
+            diff_vbar: VScrollbarLayout {
+                scroll: self.diff_scroll,
+                ..self.layout.diff_vbar
+            },
             graph_hscrollbar_y: self.layout.graph_hscrollbar_y,
             graph_hscrollbar_x: self.layout.graph_hscrollbar_x,
             graph_hscrollbar_width: self.layout.graph_hscrollbar_width,
@@ -3059,27 +3067,12 @@ impl AppState {
                 self.last_click = None;
                 return Effect::None;
             }
-            SplitHit::GraphThumb => {
-                self.focus_graph_pane();
-                // The press ended any glide: keep the rows on screen, so a
-                // grab mid-glide does not jump to the glide's target.
-                self.graph_scroll = self.graph_painted_top();
-                self.drag = SplitDrag::GraphScrollbar {
-                    origin_row: row,
-                    origin_scroll: self.graph_scroll,
-                };
-                self.last_click = None;
+            SplitHit::VThumb(bar) => {
+                self.press_vscrollbar(bar, true, row);
                 return Effect::None;
             }
-            SplitHit::GraphTrack => {
-                self.focus_graph_pane();
-                let jumped = graph_scroll_from_row(self.split_layout(), row);
-                self.graph_scroll = jumped;
-                self.drag = SplitDrag::GraphScrollbar {
-                    origin_row: row,
-                    origin_scroll: jumped,
-                };
-                self.last_click = None;
+            SplitHit::VTrack(bar) => {
+                self.press_vscrollbar(bar, false, row);
                 return Effect::None;
             }
             SplitHit::GraphHThumb => {
@@ -3363,12 +3356,14 @@ impl AppState {
                 origin_row,
                 origin_lines,
             } => self.drag_commit_msg(origin_row, origin_lines, row),
-            SplitDrag::GraphScrollbar {
+            SplitDrag::VScrollbar {
+                bar,
                 origin_row,
                 origin_scroll,
             } => {
-                self.graph_scroll =
-                    graph_scroll_from_delta(self.split_layout(), origin_row, origin_scroll, row);
+                let geometry = self.split_layout().vbar(bar);
+                let top = vscroll_from_delta(geometry, origin_row, origin_scroll, row);
+                self.scroll_vbar_to(bar, top);
             }
             SplitDrag::GraphHScrollbar {
                 origin_col,
@@ -3496,6 +3491,67 @@ impl AppState {
         if let Err(err) = save_commit_msg_lines(&self.ui_store_path, self.commit_msg_lines) {
             self.status = StatusMessage::error(persist_failed_status("commit message lines", err));
         }
+    }
+
+    /// Press on vertical scrollbar `bar` at `row`: the bar's pane takes
+    /// focus; a press on the thumb grabs it where it is painted, a track
+    /// press jumps the viewport toward `row` ([`vscroll_from_row`]). Either
+    /// arms [`SplitDrag::VScrollbar`] from that top, and neither picks a row
+    /// or counts toward a double-click.
+    fn press_vscrollbar(&mut self, bar: VScrollbar, on_thumb: bool, row: u16) {
+        let geometry = self.split_layout().vbar(bar);
+        // A thumb press keeps the painted top: it ends any glide without
+        // jumping to the glide's target.
+        let top = if on_thumb {
+            geometry.scroll
+        } else {
+            vscroll_from_row(geometry, row)
+        };
+        match bar {
+            VScrollbar::Graph => self.focus_graph_pane(),
+            VScrollbar::Diff => self.focus = FocusPane::Right,
+        }
+        self.scroll_vbar_to(bar, top);
+        self.drag = SplitDrag::VScrollbar {
+            bar,
+            origin_row: row,
+            origin_scroll: top,
+        };
+        self.last_click = None;
+    }
+
+    /// Scroll the viewport of vertical scrollbar `bar` to `top`.
+    fn scroll_vbar_to(&mut self, bar: VScrollbar, top: u16) {
+        match bar {
+            VScrollbar::Graph => self.graph_scroll = top,
+            VScrollbar::Diff => self.scroll_diff_to(usize::from(top)),
+        }
+    }
+
+    /// Scroll the file diff so its viewport starts at row `top`.
+    ///
+    /// The diff viewport follows `diff_cursor` (middle-biased, as
+    /// [`Self::sync_diff_scroll`] places it), so the cursor moves to the row
+    /// nearest it whose viewport starts at `top` ([`cursor_for_viewport_top`]),
+    /// as a wheel step moves the cursor.
+    fn scroll_diff_to(&mut self, top: usize) {
+        let rows = self.current_diff_rows();
+        let n = rows.len();
+        if n == 0 {
+            return;
+        }
+        let height = self.diff_body_height();
+        self.diff_cursor = if self.diff_wrap {
+            let heights = self.diff_wrap_heights_for(&rows);
+            cursor_for_viewport_top(n, self.diff_cursor, top, |cursor| {
+                wrap_viewport_start(&heights, cursor, height)
+            })
+        } else {
+            cursor_for_viewport_top(n, self.diff_cursor, top, |cursor| {
+                list_viewport_start(n, cursor, height)
+            })
+        };
+        self.sync_diff_scroll_for(&rows);
     }
 
     fn focus_graph_pane(&mut self) {
@@ -16045,7 +16101,8 @@ mod tests {
         );
         assert_eq!(
             app.drag,
-            SplitDrag::GraphScrollbar {
+            SplitDrag::VScrollbar {
+                bar: VScrollbar::Graph,
                 origin_row: thumb_row,
                 origin_scroll: start
             }
@@ -16108,7 +16165,8 @@ mod tests {
         );
         assert_eq!(
             app.drag,
-            SplitDrag::GraphScrollbar {
+            SplitDrag::VScrollbar {
+                bar: VScrollbar::Graph,
                 origin_row: track_row,
                 origin_scroll: app.graph_scroll
             }

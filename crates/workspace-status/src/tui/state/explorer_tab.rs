@@ -39,7 +39,7 @@ use super::super::explorer::{ExplorerEntry, ExplorerRow, ExplorerStatus};
 use super::super::gates::{ListFocusTarget, FOCUS_A_FILE_TO_MARK_REVIEWED};
 use super::super::search::{explorer_row_match_indices, step_from_anchor, SearchPane};
 use super::super::selection::TextSelection;
-use super::super::split::SplitDrag;
+use super::super::split::{hit_vscrollbar, SplitDrag, SplitHit, VScrollbar};
 use super::super::status::StatusMessage;
 use super::super::tabs::{
     ExplorerPreview, ExplorerTab, OpenFile, ParkedSearch, EXPLORER_DIFFS_SHOW_WHOLE_FILE,
@@ -888,6 +888,15 @@ impl AppState {
     fn explorer_click(&mut self, col: u16, row: u16) -> Effect {
         self.drag = SplitDrag::None;
         self.pad_press = None;
+        // A changed file's diff bar scrolls like the Workspace diff bar: no
+        // row pick, no text selection.
+        let diff_bar = self.split_layout().diff_vbar;
+        if let Some(hit) = hit_vscrollbar(VScrollbar::Diff, diff_bar, col, row) {
+            self.text_selection = None;
+            let on_thumb = hit == SplitHit::VThumb(VScrollbar::Diff);
+            self.press_vscrollbar(VScrollbar::Diff, on_thumb, row);
+            return Effect::None;
+        }
         let at = ratatui::layout::Position::new(col, row);
         let tree = self.layout.explorer_tree;
         if self.layout.explorer_tree_rows.contains(at) {

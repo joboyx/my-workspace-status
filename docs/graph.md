@@ -48,7 +48,7 @@ commit-files footer finds its drilled row with them).
 `GraphModel::dispatch` applies an `Action` and returns an `Effect`.
 The widget does not bind keys or run an event loop. The TUI hit-tests the
 vertical and horizontal scrollbars through `tui/split.rs` (`hit_split` /
-`SplitDrag::GraphScrollbar` / `GraphHScrollbar`). The vertical bar is painted
+`SplitDrag::VScrollbar` / `GraphHScrollbar`). The vertical bar is painted
 whenever the painted lines overflow the list, at the top too; the horizontal
 bar only when `col_offset > 0`, because it paints over the last list row.
 `painted_line_count` gives the painted line count without a paint (a commit

@@ -46,6 +46,37 @@ pub enum DiffMode {
     Inline,
 }
 
+/// A painted vertical scrollbar that the mouse drags ([`SplitHit::VThumb`],
+/// [`SplitDrag::VScrollbar`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VScrollbar {
+    /// The graph list bar. It moves `graph_scroll`; the graph cursor stays.
+    Graph,
+    /// The file-diff bar. Its viewport follows `diff_cursor`, so the cursor
+    /// moves with the viewport, as the wheel moves it.
+    Diff,
+}
+
+/// Geometry and scroll state of one painted vertical scrollbar, from the
+/// last paint. The thumb is [`workspace_status_graph::graph_scrollbar_thumb`]
+/// of `content_len`, `scroll`, and `height`, the ratatui `Scrollbar` math
+/// both the graph and the file diff paint with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VScrollbarLayout {
+    /// 0-based bar column; `None` when the bar is not painted.
+    pub x: Option<u16>,
+    /// 0-based first row of the track.
+    pub y: u16,
+    /// Track height in rows.
+    pub height: u16,
+    /// Lines the bar measures (the painted list or diff rows).
+    pub content_len: usize,
+    /// Current viewport top, in those lines.
+    pub scroll: u16,
+    /// Largest viewport top: a track click on the last row lands here.
+    pub scroll_max: u16,
+}
+
 /// Which drag handle a mouse cell hits, if any.
 ///
 /// Graph and file-diff scrollbar hits reuse this enum so click / drag /
@@ -57,10 +88,10 @@ pub enum SplitHit {
     /// Top rule row of an expanded commit-message footer (graph or depth-2
     /// commit files).
     CommitMsg,
-    /// Painted graph scrollbar thumb (`█`).
-    GraphThumb,
-    /// Graph scrollbar track (not the thumb).
-    GraphTrack,
+    /// Painted thumb (`█`) of a vertical scrollbar.
+    VThumb(VScrollbar),
+    /// Track of a vertical scrollbar (not the thumb).
+    VTrack(VScrollbar),
     /// Painted graph horizontal scrollbar thumb.
     GraphHThumb,
     /// Graph horizontal scrollbar track (not the thumb).
@@ -102,11 +133,14 @@ pub enum SplitDrag {
         /// Commit-message rows at mouse-down.
         origin_lines: usize,
     },
-    /// Graph list scrollbar. Row delta maps onto `graph_scroll`.
-    GraphScrollbar {
+    /// A vertical scrollbar. Row delta maps onto the bar's viewport top
+    /// ([`vscroll_from_delta`]).
+    VScrollbar {
+        /// The bar under the press.
+        bar: VScrollbar,
         /// Mouse row at mouse-down (or after a track jump).
         origin_row: u16,
-        /// `graph_scroll` at that origin.
+        /// Viewport top at that origin.
         origin_scroll: u16,
     },
     /// Graph horizontal scrollbar. Column delta maps onto `col_offset`.
@@ -133,8 +167,8 @@ impl SplitHit {
             Self::Pane => Some(ResizeEdge::Pane),
             Self::DiffSplit => Some(ResizeEdge::DiffSplit),
             Self::CommitMsg => Some(ResizeEdge::CommitMsg),
-            Self::GraphThumb
-            | Self::GraphTrack
+            Self::VThumb(_)
+            | Self::VTrack(_)
             | Self::GraphHThumb
             | Self::GraphHTrack
             | Self::DiffHThumb
@@ -153,7 +187,7 @@ impl SplitDrag {
             Self::Diff => Some(ResizeEdge::DiffSplit),
             Self::CommitMsg { .. } => Some(ResizeEdge::CommitMsg),
             Self::None
-            | Self::GraphScrollbar { .. }
+            | Self::VScrollbar { .. }
             | Self::GraphHScrollbar { .. }
             | Self::DiffHScrollbar { .. } => None,
         }
@@ -194,16 +228,12 @@ pub struct SplitLayout {
     pub flat_panes: bool,
     /// 0-based RULE column when a split is painted.
     pub diff_split_rule_x: Option<u16>,
-    /// 0-based graph scrollbar column when a graph list is painted.
-    pub graph_scrollbar_x: Option<u16>,
-    /// 0-based first row of the graph scrollbar track (list, not header/footer).
-    pub graph_scrollbar_y: u16,
-    /// Graph list height (scrollbar track).
-    pub graph_scrollbar_height: u16,
-    /// Painted graph line count (`paint_model` length).
-    pub graph_content_len: usize,
-    /// Current graph list skip (`graph_scroll`).
-    pub graph_scroll: u16,
+    /// Graph list vertical scrollbar: the list rows (not header / footer),
+    /// the painted line count, and the painted top (`graph_scroll`).
+    pub graph_vbar: VScrollbarLayout,
+    /// File-diff vertical scrollbar: the diff body rows, the diff row
+    /// count, and the viewport top (`diff_scroll`).
+    pub diff_vbar: VScrollbarLayout,
     /// 0-based graph horizontal scrollbar row when the bar is painted.
     pub graph_hscrollbar_y: Option<u16>,
     /// 0-based first column of the graph horizontal scrollbar track.
@@ -447,23 +477,35 @@ pub fn graph_scroll_max(content_len: usize, list_height: u16) -> usize {
     content_len.saturating_sub(list_height.max(1) as usize)
 }
 
-/// Map a 0-based mouse row onto `graph_scroll` (track-fraction jump).
-pub fn graph_scroll_from_row(layout: SplitLayout, row: u16) -> u16 {
-    graph_scroll_from_delta(layout, layout.graph_scrollbar_y, 0, row)
+impl SplitLayout {
+    /// The recorded geometry of vertical scrollbar `bar`.
+    pub fn vbar(&self, bar: VScrollbar) -> VScrollbarLayout {
+        match bar {
+            VScrollbar::Graph => self.graph_vbar,
+            VScrollbar::Diff => self.diff_vbar,
+        }
+    }
 }
 
-/// Map a drag (`origin_row` / `origin_scroll` plus current `row`) onto `graph_scroll`.
-pub fn graph_scroll_from_delta(
-    layout: SplitLayout,
+/// Map a 0-based mouse row onto `bar`'s viewport top (track-fraction jump):
+/// the track's first row is the top, its last row `scroll_max`.
+pub fn vscroll_from_row(bar: VScrollbarLayout, row: u16) -> u16 {
+    vscroll_from_delta(bar, bar.y, 0, row)
+}
+
+/// Map a drag (`origin_row` / `origin_scroll` plus current `row`) onto
+/// `bar`'s viewport top, clamped to `0..=scroll_max`.
+pub fn vscroll_from_delta(
+    bar: VScrollbarLayout,
     origin_row: u16,
     origin_scroll: u16,
     row: u16,
 ) -> u16 {
-    let max = graph_scroll_max(layout.graph_content_len, layout.graph_scrollbar_height) as i32;
+    let max = i32::from(bar.scroll_max);
     if max == 0 {
         return 0;
     }
-    let denom = i32::from(layout.graph_scrollbar_height.saturating_sub(1).max(1));
+    let denom = i32::from(bar.height.saturating_sub(1).max(1));
     let delta = i32::from(row).saturating_sub(i32::from(origin_row));
     (i32::from(origin_scroll) + delta * max / denom).clamp(0, max) as u16
 }
@@ -510,28 +552,33 @@ pub fn diff_col_from_delta(
     (i32::from(origin_offset) + delta * max / denom).clamp(0, max) as u16
 }
 
-fn hit_graph_scrollbar(layout: SplitLayout, col: u16, row: u16) -> Option<SplitHit> {
-    let x = layout.graph_scrollbar_x?;
-    if col != x || layout.graph_scrollbar_height == 0 {
+/// The part of vertical scrollbar `bar` (recorded as `geometry`) under
+/// 0-based (`col`, `row`): its painted thumb, its track, or `None` off the
+/// bar or with no bar painted.
+pub fn hit_vscrollbar(
+    bar: VScrollbar,
+    geometry: VScrollbarLayout,
+    col: u16,
+    row: u16,
+) -> Option<SplitHit> {
+    let x = geometry.x?;
+    if col != x || geometry.height == 0 || row < geometry.y {
         return None;
     }
-    if row < layout.graph_scrollbar_y {
-        return None;
-    }
-    let rel = row.saturating_sub(layout.graph_scrollbar_y);
-    if rel >= layout.graph_scrollbar_height {
+    let rel = row.saturating_sub(geometry.y);
+    if rel >= geometry.height {
         return None;
     }
     if let Some((thumb_off, thumb_len)) = workspace_status_graph::graph_scrollbar_thumb(
-        layout.graph_content_len,
-        layout.graph_scroll,
-        layout.graph_scrollbar_height,
+        geometry.content_len,
+        geometry.scroll,
+        geometry.height,
     ) {
         if rel >= thumb_off && rel < thumb_off.saturating_add(thumb_len) {
-            return Some(SplitHit::GraphThumb);
+            return Some(SplitHit::VThumb(bar));
         }
     }
-    Some(SplitHit::GraphTrack)
+    Some(SplitHit::VTrack(bar))
 }
 
 fn hit_graph_hscrollbar(layout: SplitLayout, col: u16, row: u16) -> Option<SplitHit> {
@@ -595,8 +642,9 @@ fn is_commit_msg_rule(layout: SplitLayout, col: u16, row: u16) -> bool {
 ///
 /// Graph scrollbar (exact column, list track) wins over the pane divider
 /// band (3 columns boxed, 2 flat) so a left-pane graph thumb stays
-/// draggable. Horizontal graph track is next, then the file-diff horizontal
-/// bar, then pane, then the commit-message footer rule, then in-diff RULE.
+/// draggable. Horizontal graph track is next, then the file-diff vertical
+/// and horizontal bars, then pane, then the commit-message footer rule,
+/// then in-diff RULE.
 /// Boxed panes stop above the pane area's last row (the bottom border);
 /// flat panes include it.
 pub fn hit_split(layout: SplitLayout, col: u16, row: u16) -> SplitHit {
@@ -615,10 +663,13 @@ pub fn hit_split(layout: SplitLayout, col: u16, row: u16) -> SplitHit {
     if y > last_row {
         return SplitHit::Other;
     }
-    if let Some(hit) = hit_graph_scrollbar(layout, col, row) {
+    if let Some(hit) = hit_vscrollbar(VScrollbar::Graph, layout.graph_vbar, col, row) {
         return hit;
     }
     if let Some(hit) = hit_graph_hscrollbar(layout, col, row) {
+        return hit;
+    }
+    if let Some(hit) = hit_vscrollbar(VScrollbar::Diff, layout.diff_vbar, col, row) {
         return hit;
     }
     if let Some(hit) = hit_diff_hscrollbar(layout, col, row) {
@@ -876,11 +927,8 @@ mod tests {
             diff_content_x: 50,
             flat_panes: false,
             diff_split_rule_x: rule,
-            graph_scrollbar_x: None,
-            graph_scrollbar_y: 0,
-            graph_scrollbar_height: 0,
-            graph_content_len: 0,
-            graph_scroll: 0,
+            graph_vbar: VScrollbarLayout::default(),
+            diff_vbar: VScrollbarLayout::default(),
             graph_hscrollbar_y: None,
             graph_hscrollbar_x: 0,
             graph_hscrollbar_width: 0,
@@ -907,11 +955,15 @@ mod tests {
             diff_content_x: 50,
             flat_panes: false,
             diff_split_rule_x: None,
-            graph_scrollbar_x: Some(158),
-            graph_scrollbar_y: 2,
-            graph_scrollbar_height: 10,
-            graph_content_len: 40,
-            graph_scroll: 0,
+            graph_vbar: VScrollbarLayout {
+                x: Some(158),
+                y: 2,
+                height: 10,
+                content_len: 40,
+                scroll: 0,
+                scroll_max: 30,
+            },
+            diff_vbar: VScrollbarLayout::default(),
             graph_hscrollbar_y: None,
             graph_hscrollbar_x: 0,
             graph_hscrollbar_width: 0,
@@ -966,11 +1018,8 @@ mod tests {
             diff_content_x: 50,
             flat_panes: false,
             diff_split_rule_x: Some(47),
-            graph_scrollbar_x: None,
-            graph_scrollbar_y: 0,
-            graph_scrollbar_height: 0,
-            graph_content_len: 0,
-            graph_scroll: 0,
+            graph_vbar: VScrollbarLayout::default(),
+            diff_vbar: VScrollbarLayout::default(),
             graph_hscrollbar_y: None,
             graph_hscrollbar_x: 0,
             graph_hscrollbar_width: 0,
@@ -992,13 +1041,20 @@ mod tests {
     fn hit_test_graph_scrollbar_thumb_and_track() {
         let layout = graph_sb_layout();
         let thumb = workspace_status_graph::graph_scrollbar_thumb(40, 0, 10).expect("thumb");
-        let thumb_row = layout.graph_scrollbar_y + thumb.0;
-        assert_eq!(hit_split(layout, 158, thumb_row), SplitHit::GraphThumb);
+        let thumb_row = layout.graph_vbar.y + thumb.0;
+        assert_eq!(
+            hit_split(layout, 158, thumb_row),
+            SplitHit::VThumb(VScrollbar::Graph)
+        );
         let track_row = layout
-            .graph_scrollbar_y
-            .saturating_add(layout.graph_scrollbar_height.saturating_sub(1));
+            .graph_vbar
+            .y
+            .saturating_add(layout.graph_vbar.height.saturating_sub(1));
         if track_row != thumb_row {
-            assert_eq!(hit_split(layout, 158, track_row), SplitHit::GraphTrack);
+            assert_eq!(
+                hit_split(layout, 158, track_row),
+                SplitHit::VTrack(VScrollbar::Graph)
+            );
         }
         assert_eq!(hit_split(layout, 157, thumb_row), SplitHit::Other);
         assert_eq!(hit_split(layout, 158, 0), SplitHit::Other);
@@ -1016,11 +1072,15 @@ mod tests {
             flat_panes: false,
             diff_split_rule_x: None,
             // Left-pane graph: last inner column overlaps the ±1 pane band.
-            graph_scrollbar_x: Some(46),
-            graph_scrollbar_y: 1,
-            graph_scrollbar_height: 10,
-            graph_content_len: 40,
-            graph_scroll: 0,
+            graph_vbar: VScrollbarLayout {
+                x: Some(46),
+                y: 1,
+                height: 10,
+                content_len: 40,
+                scroll: 0,
+                scroll_max: 30,
+            },
+            diff_vbar: VScrollbarLayout::default(),
             graph_hscrollbar_y: None,
             graph_hscrollbar_x: 0,
             graph_hscrollbar_width: 0,
@@ -1038,7 +1098,7 @@ mod tests {
         assert!(
             matches!(
                 hit_split(layout, 46, 4),
-                SplitHit::GraphThumb | SplitHit::GraphTrack
+                SplitHit::VThumb(VScrollbar::Graph) | SplitHit::VTrack(VScrollbar::Graph)
             ),
             "exact scrollbar column must win over the pane divider band"
         );
@@ -1047,33 +1107,83 @@ mod tests {
 
     #[test]
     fn graph_scroll_from_row_jumps_toward_track_and_drag_delta() {
-        let layout = graph_sb_layout();
-        let jumped = graph_scroll_from_row(layout, layout.graph_scrollbar_y + 9);
+        let bar = graph_sb_layout().graph_vbar;
+        let jumped = vscroll_from_row(bar, bar.y + 9);
         assert!(jumped > 0, "bottom of track should scroll down: {jumped}");
         assert_eq!(
             jumped as usize,
-            graph_scroll_max(layout.graph_content_len, layout.graph_scrollbar_height)
+            graph_scroll_max(bar.content_len, bar.height)
         );
-        let dragged = graph_scroll_from_delta(
-            layout,
-            layout.graph_scrollbar_y,
-            0,
-            layout.graph_scrollbar_y + 5,
-        );
+        let dragged = vscroll_from_delta(bar, bar.y, 0, bar.y + 5);
         assert!(
             dragged > 0 && dragged < jumped,
             "mid drag {dragged} jump {jumped}"
         );
         assert_eq!(
-            graph_scroll_from_delta(layout, 4, 3, 4),
+            vscroll_from_delta(bar, 4, 3, 4),
             3,
             "zero delta keeps origin scroll"
         );
     }
 
+    /// The file-diff vertical bar hit-tests like the graph bar: its painted
+    /// thumb and its track, on its own column only; the pane's last row
+    /// takes it only when the panes paint flat (boxed, that row is the
+    /// border).
+    #[test]
+    fn hit_test_diff_vertical_scrollbar_thumb_and_track_in_both_looks() {
+        for flat in [false, true] {
+            let base = if flat {
+                flat_wide_layout(None)
+            } else {
+                wide_layout(None)
+            };
+            // Track from row 2 down to the pane area's last row (22).
+            let layout = SplitLayout {
+                diff_vbar: VScrollbarLayout {
+                    x: Some(158),
+                    y: 2,
+                    height: 21,
+                    content_len: 81,
+                    scroll: 0,
+                    scroll_max: 60,
+                },
+                ..base
+            };
+            let (off, len) =
+                workspace_status_graph::graph_scrollbar_thumb(81, 0, 21).expect("thumb");
+            assert_eq!(off, 0);
+            for row in 2..2 + len {
+                assert_eq!(
+                    hit_split(layout, 158, row),
+                    SplitHit::VThumb(VScrollbar::Diff),
+                    "{flat} row {row}"
+                );
+            }
+            assert_eq!(
+                hit_split(layout, 158, 2 + len),
+                SplitHit::VTrack(VScrollbar::Diff),
+                "{flat}"
+            );
+            assert_eq!(
+                hit_split(layout, 158, 22),
+                if flat {
+                    SplitHit::VTrack(VScrollbar::Diff)
+                } else {
+                    SplitHit::Other
+                },
+                "{flat}: the last pane row"
+            );
+            assert_eq!(hit_split(layout, 157, 2), SplitHit::Other, "{flat}");
+            assert_eq!(hit_split(layout, 158, 1), SplitHit::Other, "{flat}");
+            let jumped = vscroll_from_row(layout.diff_vbar, 22);
+            assert_eq!(jumped, 60, "{flat}: the track bottom is the last top");
+        }
+    }
+
     fn graph_hsb_layout() -> SplitLayout {
         let mut layout = graph_sb_layout();
-        layout.graph_scrollbar_x = None;
+        layout.graph_vbar.x = None;
         layout.graph_hscrollbar_y = Some(12);
         layout.graph_hscrollbar_x = 50;
         layout.graph_hscrollbar_width = 20;
@@ -1104,16 +1214,16 @@ mod tests {
     #[test]
     fn vertical_graph_scrollbar_column_wins_over_horizontal_track() {
         let mut layout = graph_hsb_layout();
-        layout.graph_scrollbar_x = Some(69);
+        layout.graph_vbar.x = Some(69);
         layout.graph_hscrollbar_x = 50;
         layout.graph_hscrollbar_width = 20;
         layout.graph_hscrollbar_y = Some(4);
-        layout.graph_scrollbar_y = 2;
-        layout.graph_scrollbar_height = 10;
+        layout.graph_vbar.y = 2;
+        layout.graph_vbar.height = 10;
         assert!(
             matches!(
                 hit_split(layout, 69, 4),
-                SplitHit::GraphThumb | SplitHit::GraphTrack
+                SplitHit::VThumb(VScrollbar::Graph) | SplitHit::VTrack(VScrollbar::Graph)
             ),
             "vertical column must win the corner cell"
         );
@@ -1308,8 +1418,10 @@ mod tests {
             Some(ResizeEdge::CommitMsg)
         );
         for hit in [
-            SplitHit::GraphThumb,
-            SplitHit::GraphTrack,
+            SplitHit::VThumb(VScrollbar::Graph),
+            SplitHit::VThumb(VScrollbar::Diff),
+            SplitHit::VTrack(VScrollbar::Graph),
+            SplitHit::VTrack(VScrollbar::Diff),
             SplitHit::GraphHThumb,
             SplitHit::GraphHTrack,
             SplitHit::DiffHThumb,
@@ -1330,7 +1442,8 @@ mod tests {
         );
         for drag in [
             SplitDrag::None,
-            SplitDrag::GraphScrollbar {
+            SplitDrag::VScrollbar {
+                bar: VScrollbar::Graph,
                 origin_row: 0,
                 origin_scroll: 0,
             },

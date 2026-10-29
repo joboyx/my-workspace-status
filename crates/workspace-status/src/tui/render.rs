@@ -82,7 +82,7 @@ use super::search_files::{
 };
 use super::split::{
     diff_paint_width, diff_split_rule_x, pane_widths, side_by_side_column_widths, DiffMode,
-    ResizeEdge, MIN_PANE_COLS, MIN_TERM_COLS, MIN_TERM_ROWS,
+    ResizeEdge, VScrollbarLayout, MIN_PANE_COLS, MIN_TERM_COLS, MIN_TERM_ROWS,
 };
 use super::state::{
     revert_scope, AppState, CompareRevertTarget, FocusPane, IconHit, LayoutHit, PendingConfirm,
@@ -266,9 +266,7 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
     state.layout.commit_msg_rule_x = 0;
     state.layout.commit_msg_rule_width = 0;
     state.layout.commit_msg_lines_fit = COMMIT_MSG_LINES_MAX;
-    state.layout.diff_scrollbar_x = None;
-    state.layout.diff_scrollbar_y = 0;
-    state.layout.diff_scrollbar_height = 0;
+    state.layout.diff_vbar = VScrollbarLayout::default();
     state.layout.diff_hscrollbar_y = None;
     state.layout.diff_hscrollbar_x = 0;
     state.layout.diff_hscrollbar_width = 0;
@@ -3239,25 +3237,16 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     }
     let buf = frame.buffer_mut();
     if vscroll && body.height > 0 && area.width > 0 {
-        state.layout.diff_scrollbar_x = Some(area.x.saturating_add(area.width.saturating_sub(1)));
-        state.layout.diff_scrollbar_y = body.y;
-        state.layout.diff_scrollbar_height = body.height;
-        let mut sb_state = ScrollbarState::new(content_len.saturating_sub(1))
-            .position(skip.min(content_len.saturating_sub(1)));
-        let sb_area = Rect {
+        let track = Rect {
             x: area.x.saturating_add(area.width.saturating_sub(1)),
             y: body.y,
             width: 1,
             height: body.height,
         };
-        StatefulWidget::render(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None),
-            sb_area,
-            buf,
-            &mut sb_state,
-        );
+        // The top the last row's cursor gives: a track click on the last
+        // row, or a drag to the end, shows the last row.
+        let scroll_max = wrap_viewport_start(&paint_heights, content_len - 1, line_h);
+        state.layout.diff_vbar = paint_vscrollbar(buf, track, content_len, skip, scroll_max);
     }
     let col_max = if hscroll {
         state.diff_pan_max_for(&rows)
@@ -3285,6 +3274,40 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             buf,
             &mut sb_state,
         );
+    }
+}
+
+/// Paint a 1-column vertical scrollbar in `track` for `content_len` lines
+/// with the viewport at line `scroll`, and return its hit geometry for
+/// [`super::split::hit_vscrollbar`]. The bar is the ratatui `Scrollbar`
+/// with no end symbols, the same math as the graph widget's bar, so
+/// [`workspace_status_graph::graph_scrollbar_thumb`] finds its thumb.
+/// `scroll_max` is the largest viewport top, where a drag to the end lands.
+fn paint_vscrollbar(
+    buf: &mut Buffer,
+    track: Rect,
+    content_len: usize,
+    scroll: usize,
+    scroll_max: usize,
+) -> VScrollbarLayout {
+    let last = content_len.saturating_sub(1);
+    let mut sb_state = ScrollbarState::new(last).position(scroll.min(last));
+    StatefulWidget::render(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None),
+        track,
+        buf,
+        &mut sb_state,
+    );
+    let clamp = |n: usize| n.min(usize::from(u16::MAX)) as u16;
+    VScrollbarLayout {
+        x: Some(track.x),
+        y: track.y,
+        height: track.height,
+        content_len,
+        scroll: clamp(scroll),
+        scroll_max: clamp(scroll_max),
     }
 }
 
@@ -7337,7 +7360,7 @@ mod tests {
     use crate::tui::comments::{put_comment, CommentKey};
     use crate::tui::icons::{icon_linked_worktree, icon_repo};
     use crate::tui::pull_request::{PrLookup, PullRequest};
-    use crate::tui::split::SplitDrag;
+    use crate::tui::split::{SplitDrag, VScrollbar};
     use crate::tui::state::{AppState, PrBadgeHit};
     use crate::tui::tree::{build_tree, flatten_with, visible_for_tree};
     use ratatui::backend::TestBackend;
@@ -7502,7 +7525,7 @@ mod tests {
         draw_state(&mut terminal, &mut state);
         assert_eq!((state.diff_scroll, state.diff_col_offset), (0, 0));
         assert!(
-            state.layout.diff_scrollbar_x.is_some(),
+            state.layout.diff_vbar.x.is_some(),
             "vertical bar at the top"
         );
         assert!(
@@ -7535,14 +7558,259 @@ mod tests {
             ]),
         );
         draw_state(&mut terminal, &mut state);
-        assert!(
-            state.layout.diff_scrollbar_x.is_none(),
-            "short diff: no bar"
-        );
+        assert!(state.layout.diff_vbar.x.is_none(), "short diff: no bar");
         assert!(
             state.layout.diff_hscrollbar_y.is_none(),
             "narrow diff: no bar"
         );
+    }
+
+    /// Unified diff of 80 short added lines (`+bar line 00` … `79`), with
+    /// the diff cursor parked on row 40 by each [`DIFF_BAR_SURFACES`] open.
+    fn long_bar_diff() -> String {
+        let mut body = String::from("@@ -0,0 +1,80 @@\n");
+        for i in 0..80 {
+            body.push_str(&format!("+bar line {i:02}\n"));
+        }
+        body
+    }
+
+    /// One file-diff surface the vertical-bar drag test drives.
+    struct DiffBarSurface {
+        /// Surface id in the `scrollbars` registry table.
+        id: &'static str,
+        /// A state that shows [`long_bar_diff`] on this surface.
+        open: fn() -> AppState,
+    }
+
+    /// Every surface that paints a file diff through `draw_diff_pane`.
+    const DIFF_BAR_SURFACES: [DiffBarSurface; 4] = [
+        DiffBarSurface {
+            id: "diff-d0",
+            open: || {
+                let mut state = two_pane_diff_state();
+                state.set_diff(
+                    "app".into(),
+                    "README.md".into(),
+                    super::super::diff::DiffContent::from_unified(long_bar_diff()),
+                );
+                state
+            },
+        },
+        DiffBarSurface {
+            id: "diff-d2",
+            open: || {
+                let mut state = two_pane_files_state();
+                state.open_commit_diff(
+                    "app".into(),
+                    super::super::drill::CommitFileSource::Commit {
+                        commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                    },
+                    vec![super::super::drill::CommitFile {
+                        status: "M".into(),
+                        path: "README.md".into(),
+                        old_path: None,
+                        stat: None,
+                    }],
+                    0,
+                    "README.md".into(),
+                    super::super::diff::DiffContent::from_unified(long_bar_diff()),
+                );
+                state
+            },
+        },
+        DiffBarSurface {
+            id: "compare-diff",
+            open: || {
+                let mut state = two_pane_diff_state();
+                state
+                    .tabs
+                    .open_or_focus("app".into(), "main".into(), "HEAD".into());
+                let tab = state.tabs.active_compare_mut().unwrap();
+                tab.loading = false;
+                tab.path = Some("bar.txt".into());
+                tab.files = vec![super::super::drill::CommitFile {
+                    status: "A".into(),
+                    path: "bar.txt".into(),
+                    old_path: None,
+                    stat: None,
+                }];
+                tab.content = super::super::diff::DiffContent::from_compare_lines(
+                    long_bar_diff().lines().map(String::from).collect(),
+                );
+                state
+            },
+        },
+        DiffBarSurface {
+            id: "explorer-diff",
+            open: || explorer_preview_state("README.md", Some(&long_bar_diff())),
+        },
+    ];
+
+    /// The file-diff vertical bar scrolls the same way on every diff
+    /// surface, in both looks: a press on the painted thumb grabs it (no
+    /// row picked, no text selection), a drag maps the thumb onto the
+    /// viewport top as the graph bar does, the diff cursor moves with the
+    /// viewport as the wheel moves it, the release ends the drag, and a
+    /// track click jumps toward the click.
+    #[test]
+    fn diff_vertical_bar_drags_and_track_click_jumps_on_every_registry_surface() {
+        let registry = crate::parity_registry::registry();
+        let scrollbars = registry
+            .components
+            .iter()
+            .find(|c| c.id == "scrollbars")
+            .expect("scrollbars component");
+        let diff_ids: Vec<&str> = scrollbars
+            .surfaces
+            .iter()
+            .filter(|s| s.anchors.iter().any(|a| a == "draw_diff_pane"))
+            .map(|s| s.id.as_str())
+            .collect();
+        let driven_ids: Vec<&str> = DIFF_BAR_SURFACES.iter().map(|s| s.id).collect();
+        assert_eq!(
+            diff_ids, driven_ids,
+            "docs/parity.md `scrollbars` diff surfaces must match this test's"
+        );
+        let mut driven: Vec<(String, String)> = DIFF_BAR_SURFACES
+            .iter()
+            .flat_map(|s| {
+                FOOTER_LOOKS
+                    .iter()
+                    .map(|(look, _)| (s.id.to_string(), look.to_string()))
+            })
+            .collect();
+        driven.sort();
+        let supported: Vec<(String, String)> =
+            crate::parity_registry::supported_surface_looks("scrollbars", "vbar-drag")
+                .into_iter()
+                .filter(|(id, _)| diff_ids.contains(&id.as_str()))
+                .collect();
+        assert_eq!(
+            supported, driven,
+            "docs/parity.md `scrollbars` / `vbar-drag` must mark every diff surface and look"
+        );
+        for surface in &DIFF_BAR_SURFACES {
+            for (look, background) in FOOTER_LOOKS {
+                let case = format!("{} {look}", surface.id);
+                let mut state = (surface.open)();
+                state.background = background;
+                state.diff_wrap = false;
+                state.diff_cursor = 40;
+                let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let x = state
+                    .layout
+                    .diff_vbar
+                    .x
+                    .unwrap_or_else(|| panic!("{case}: the long diff paints its bar"));
+                let (y, h) = (state.layout.diff_vbar.y, state.layout.diff_vbar.height);
+                let rows = state.current_diff_rows().len();
+                // Pan 0: no horizontal bar, so the body is the track.
+                let max = rows - usize::from(h);
+                let top = usize::from(state.diff_scroll);
+                assert!(top > 0 && top < max, "{case}: starts mid-diff ({top})");
+                let buf = terminal.backend().buffer().clone();
+                let thumb: Vec<u16> = (y..y + h)
+                    .filter(|&r| buf[(x, r)].symbol() == "█")
+                    .collect();
+                let grab = *thumb
+                    .first()
+                    .unwrap_or_else(|| panic!("{case}: a painted thumb in column {x}"));
+
+                let cursor = state.diff_cursor;
+                assert_eq!(
+                    state.dispatch(Action::Click { col: x, row: grab }),
+                    Effect::None,
+                    "{case}: thumb press"
+                );
+                assert_eq!(
+                    state.diff_cursor, cursor,
+                    "{case}: a thumb press picks no row"
+                );
+                assert_eq!(usize::from(state.diff_scroll), top, "{case}: grab, no jump");
+                assert!(state.text_selection.is_none(), "{case}: no text selection");
+                assert_eq!(
+                    state.focus,
+                    FocusPane::Right,
+                    "{case}: the diff takes focus"
+                );
+                assert_eq!(
+                    state.drag,
+                    SplitDrag::VScrollbar {
+                        bar: VScrollbar::Diff,
+                        origin_row: grab,
+                        origin_scroll: top as u16,
+                    },
+                    "{case}: the press arms a drag"
+                );
+
+                state.dispatch(Action::Drag {
+                    col: x,
+                    row: grab + 3,
+                });
+                let want = (top + 3 * max / usize::from(h - 1)).min(max);
+                assert_eq!(usize::from(state.diff_scroll), want, "{case}: drag scrolls");
+                assert!(state.text_selection.is_none(), "{case}: no text selection");
+                draw_state(&mut terminal, &mut state);
+                assert_eq!(
+                    usize::from(state.diff_scroll),
+                    want,
+                    "{case}: the moved cursor keeps the dragged top"
+                );
+                assert!(
+                    (want..want + usize::from(h)).contains(&state.diff_cursor),
+                    "{case}: the cursor moves with the viewport, as the wheel moves it"
+                );
+                assert_eq!(state.dispatch(Action::Release), Effect::None, "{case}");
+                assert_eq!(state.drag, SplitDrag::None, "{case}: release ends the drag");
+                state.dispatch(Action::Drag { col: x, row: y });
+                assert_eq!(
+                    usize::from(state.diff_scroll),
+                    want,
+                    "{case}: no scroll after the release"
+                );
+                state.dispatch(Action::Release);
+
+                let bottom = y + h - 1;
+                let buf = terminal.backend().buffer().clone();
+                assert_ne!(buf[(x, bottom)].symbol(), "█", "{case}: bottom is track");
+                state.dispatch(Action::Click {
+                    col: x,
+                    row: bottom,
+                });
+                assert_eq!(usize::from(state.diff_scroll), max, "{case}: track jump");
+                assert!(state.text_selection.is_none(), "{case}: no text selection");
+                assert_eq!(
+                    state.drag,
+                    SplitDrag::VScrollbar {
+                        bar: VScrollbar::Diff,
+                        origin_row: bottom,
+                        origin_scroll: max as u16,
+                    },
+                    "{case}: a track press arms a drag from the jump"
+                );
+                draw_state(&mut terminal, &mut state);
+                assert_eq!(
+                    usize::from(state.diff_scroll),
+                    max,
+                    "{case}: kept at the end"
+                );
+                assert!(
+                    buffer_text(&terminal).contains("bar line 79"),
+                    "{case}: the last row shows"
+                );
+                state.dispatch(Action::Release);
+                state.dispatch(Action::Click { col: x, row: y });
+                assert_eq!(state.diff_scroll, 0, "{case}: track top jumps to the top");
+                state.dispatch(Action::Release);
+                draw_state(&mut terminal, &mut state);
+                assert!(
+                    buffer_text(&terminal).contains("bar line 00"),
+                    "{case}: the first row shows"
+                );
+            }
+        }
     }
 
     /// Text of one right-pane row, `width` cells from `x`.
@@ -16512,7 +16780,8 @@ mod tests {
         });
         assert_eq!(
             state.drag,
-            SplitDrag::GraphScrollbar {
+            SplitDrag::VScrollbar {
+                bar: VScrollbar::Graph,
                 origin_row: list_top + rel,
                 origin_scroll: painted,
             },

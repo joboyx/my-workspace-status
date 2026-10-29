@@ -1556,6 +1556,45 @@ pub(crate) fn list_viewport_start(row_count: usize, cursor: usize, height: usize
     ideal.min(max_start)
 }
 
+/// Cursor for a viewport that follows its cursor (`start_of(cursor)` is the
+/// viewport top, never smaller for a later cursor, as
+/// [`list_viewport_start`]) to start at `top`: `cursor` itself when its
+/// viewport already starts there, else the nearest of `row_count` rows
+/// whose viewport does. When no row starts there (a wrapped row taller
+/// than the step), the first row whose viewport starts past `top`.
+///
+/// A scrollbar drag on such a viewport moves the cursor with it, as the
+/// wheel does.
+pub(crate) fn cursor_for_viewport_top(
+    row_count: usize,
+    cursor: usize,
+    top: usize,
+    start_of: impl Fn(usize) -> usize,
+) -> usize {
+    if row_count == 0 {
+        return 0;
+    }
+    // First row in `0..row_count` where `pred` holds (`pred` is false, then true).
+    let first = |pred: &dyn Fn(usize) -> bool| {
+        let (mut lo, mut hi) = (0, row_count);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if pred(mid) {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        lo
+    };
+    let lo = first(&|c| start_of(c) >= top);
+    let past = first(&|c| start_of(c) > top);
+    if lo >= past {
+        return lo.min(row_count - 1);
+    }
+    cursor.clamp(lo, past - 1)
+}
+
 /// Painted window: `(start, visible_count)`.
 pub(crate) fn visible_window(row_count: usize, cursor: usize, height: usize) -> (usize, usize) {
     let view_height = height.max(1);
@@ -1570,6 +1609,44 @@ mod tests {
     use crate::snapshot::{
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
     };
+
+    /// A middle-biased list: the cursor goes to the one row whose viewport
+    /// starts at the top, or stays when its own viewport already does (the
+    /// first and the last page).
+    #[test]
+    fn cursor_for_viewport_top_keeps_or_centres_the_cursor() {
+        let (n, h) = (81, 24);
+        let start = |c: usize| list_viewport_start(n, c, h);
+        assert_eq!(cursor_for_viewport_top(n, 40, 30, start), 42);
+        assert_eq!(cursor_for_viewport_top(n, 40, 0, start), 12, "first page");
+        assert_eq!(cursor_for_viewport_top(n, 5, 0, start), 5, "stays");
+        assert_eq!(cursor_for_viewport_top(n, 40, 57, start), 69, "last page");
+        assert_eq!(cursor_for_viewport_top(n, 75, 57, start), 75, "stays");
+        assert_eq!(cursor_for_viewport_top(0, 3, 4, start), 0, "no rows");
+    }
+
+    /// A wrapped diff: every top a cursor reaches lands exactly; a top
+    /// inside a tall row lands on the first cursor past it.
+    #[test]
+    fn cursor_for_viewport_top_on_wrapped_rows() {
+        use crate::tui::diff::wrap_viewport_start;
+        let heights = [1, 1, 8, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+        let start = |c: usize| wrap_viewport_start(&heights, c, 4);
+        let reached: Vec<usize> = (0..heights.len()).map(start).collect();
+        let last = *reached.last().unwrap();
+        for top in 0..=last {
+            let cursor = cursor_for_viewport_top(heights.len(), 0, top, start);
+            if reached.contains(&top) {
+                assert_eq!(start(cursor), top, "top {top}");
+            } else {
+                assert!(start(cursor) > top, "top {top} lands past it");
+                assert!(
+                    cursor == 0 || start(cursor - 1) < top,
+                    "top {top}: first past"
+                );
+            }
+        }
+    }
 
     #[test]
     fn sync_marks_and_pr_badges_carry_their_icon_kind() {
