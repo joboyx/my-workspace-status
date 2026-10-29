@@ -2400,12 +2400,9 @@ mod tests {
         assert!(app.quick_open.is_none(), "submit closes the palette");
     }
 
-    /// `pull` also finds Open PR by its `pull request` alias. On a file row
-    /// Pull behind is disabled and Open PR is enabled, but the cursor never
-    /// lands on a row only an alias finds: `pull` lands on Refresh pull
-    /// requests (its title names it), and `pull behind` stays on the
-    /// disabled Pull behind, so Enter keeps the palette open instead of
-    /// running `gx`.
+    /// `pull` also finds Open PR by its alias. On a file row Pull behind is
+    /// disabled and Open PR is enabled, but the cursor stays on Pull behind,
+    /// so Enter keeps the palette open instead of running `gx`.
     #[test]
     fn palette_pull_on_a_file_row_lands_on_disabled_pull_not_open_pr() {
         use super::super::super::action::QuickOpenEntry;
@@ -2425,17 +2422,13 @@ mod tests {
                 .and_then(|palette| palette.selected())
                 .map(|command| command.title)
         };
-        assert_eq!(selected(&mut app, "pull"), Some("Refresh pull requests"));
-        assert_eq!(selected(&mut app, "pull behind"), Some("Pull behind"));
+        assert_eq!(selected(&mut app, "pull"), Some("Pull behind"));
         assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
         assert!(
             app.command_palette().is_some(),
             "disabled row keeps it open"
         );
-        assert_eq!(
-            selected(&mut app, "pull request"),
-            Some("Refresh pull requests")
-        );
+        assert_eq!(selected(&mut app, "pull request"), Some("Open PR"));
         assert_eq!(selected(&mut app, "merge request"), Some("Open PR"));
     }
 

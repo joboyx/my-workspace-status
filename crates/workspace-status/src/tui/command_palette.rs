@@ -430,11 +430,11 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
-        title: "Refresh pull requests",
+        title: "Refresh PRs",
         keys: "",
         group: CommandGroup::Git,
         action: Action::RefreshPullRequests,
-        aliases: &["PRs", "merge requests", "reload"],
+        aliases: &["pull requests", "merge requests", "reload"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -1390,7 +1390,7 @@ mod tests {
                 CommandScope::NoHighlight,
             ),
             (
-                "Refresh pull requests",
+                "Refresh PRs",
                 "",
                 CommandGroup::Git,
                 Action::RefreshPullRequests,
@@ -1768,9 +1768,9 @@ mod tests {
             ("yank", "Copy PR URL"),
             ("pull request", "Refresh this PR"),
             ("reload", "Refresh this PR"),
-            ("reload", "Refresh pull requests"),
-            ("PRs", "Refresh pull requests"),
-            ("merge requests", "Refresh pull requests"),
+            ("reload", "Refresh PRs"),
+            ("pull requests", "Refresh PRs"),
+            ("merge requests", "Refresh PRs"),
         ] {
             assert!(titles(query).contains(&title), "{query} -> {title}");
         }
@@ -1836,19 +1836,18 @@ mod tests {
         let landing = |query: &str| landing_in(query, false);
         assert!(titles("pull").contains(&"Open PR"), "alias still finds it");
         assert!(!landing("pull").contains(&"Open PR"));
-        assert_eq!(landing("pull").first(), Some(&"Pull behind"));
-        // Refresh pull requests names it; the PR rows only alias it.
-        assert_eq!(landing("pull request"), vec!["Refresh pull requests"]);
-        assert_eq!(
-            landing("merge request"),
-            vec![
-                "Open PR",
-                "Open PR CI",
-                "Copy PR URL",
-                "Refresh this PR",
-                "Refresh pull requests"
-            ]
-        );
+        assert_eq!(landing("pull"), vec!["Pull behind"], "only Pull names it");
+        // Every PR row only aliases these, so all of them land.
+        let pr_rows = vec![
+            "Open PR",
+            "Open PR CI",
+            "Copy PR URL",
+            "Refresh this PR",
+            "Refresh PRs",
+        ];
+        assert_eq!(landing("pull request"), pr_rows);
+        assert_eq!(landing("merge request"), pr_rows);
+        assert_eq!(landing("refresh pr"), vec!["Refresh PRs"]);
         assert!(landing("PR").contains(&"Open PR"));
         assert_eq!(landing("gx"), vec!["Open PR"]);
         assert_eq!(landing("gc"), vec!["Open PR CI"]);

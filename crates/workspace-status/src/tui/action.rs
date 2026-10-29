@@ -228,8 +228,8 @@ pub enum Action {
     /// In a pinned popover it refreshes the PRs the popover shows and keeps
     /// the popover open; a pinned popover with no PR section ignores it.
     RefreshPullRequest,
-    /// Look the PR of every pollable checkout up again now (palette Refresh
-    /// pull requests).
+    /// Look the PR of every checkout with a GitHub or GitLab remote up
+    /// again now (palette Refresh PRs).
     RefreshPullRequests,
     /// Open the forge web page of the focused entity in the browser (`gw`).
     ///
