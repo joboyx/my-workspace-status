@@ -74,9 +74,8 @@ use super::quick_open::{
     files_row_shows_status, FileIndexState, QuickOpenMode, QuickOpenScope, QuickOpenState,
 };
 use super::search::{
-    collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids,
-    explorer_row_match_indices, list_prefix_cols, slice_cols, wrap_col_starts,
-    wrap_col_starts_capped, wrap_cols, SearchPane,
+    collect_graph_match_indices, collect_match_ids, explorer_row_match_indices, list_prefix_cols,
+    slice_cols, wrap_col_starts, wrap_col_starts_capped, wrap_cols, SearchPane,
 };
 use super::search_files::{
     option_is_on, option_tooltip, search_row_shows_status, SearchFilesState, SearchRow, SearchZone,
@@ -2886,9 +2885,8 @@ fn draw_commit_file_list(
     let (start, _) = visible_window(rows.len(), painted_cursor, height);
     state.layout.files_list_offset = start;
     let search = state.theme.pills().filter;
-    let searching_files =
-        state.search_target == SearchPane::CommitFiles && !state.search_query.trim().is_empty();
-    let match_paths = commit_file_search_match_paths(state);
+    // The rows `n` / `N` step to and count: highlight and steps agree.
+    let match_ids = state.commit_file_search_match_ids();
     let files_focused = if state.drill.is_diff() || state.is_compare_tab() {
         state.focus == FocusPane::Left
     } else {
@@ -2899,9 +2897,7 @@ fn draw_commit_file_list(
     let comment_scope = state.commit_file_comment_scope();
     for (y, row) in (area.y..).zip(rows.iter().skip(start).take(height)) {
         let segs = state.commit_file_row_paint_segments_in(row, comment_scope);
-        let search_match = searching_files
-            && (match_paths.contains(&row.path)
-                || commit_file_label_matches(&row.label, &state.search_query));
+        let search_match = match_ids.contains(&row.id);
         for (kind, x, w) in segmented_icon_spans(row.depth, &segs, width, col_offset) {
             hits.push(IconHit {
                 y,
@@ -2929,24 +2925,6 @@ fn draw_commit_file_list(
     }
     state.layout.icon_hits.extend(hits);
     frame.render_widget(Paragraph::new(lines), area);
-}
-
-fn commit_file_search_match_paths(state: &AppState) -> HashSet<String> {
-    if state.search_target != SearchPane::CommitFiles {
-        return HashSet::new();
-    }
-    let Some(files) = state.commit_drill_files() else {
-        return HashSet::new();
-    };
-    collect_commit_file_match_indices(files, &state.search_query)
-        .into_iter()
-        .filter_map(|i| files.get(i).map(|file| file.path.clone()))
-        .collect()
-}
-
-fn commit_file_label_matches(label: &str, query: &str) -> bool {
-    let q = query.trim().to_lowercase();
-    !q.is_empty() && label.to_lowercase().contains(&q)
 }
 
 /// Logical rows of a wrapped diff, counted back from `cursor` (included),
@@ -12753,6 +12731,259 @@ mod tests {
             "the other file match should use search bg: a={a_bg:?} b={b_bg:?} search={search_bg:?}"
         );
         assert_ne!(a_bg, b_bg, "cursor and search-match paint must differ");
+    }
+
+    /// Files for the commit-file search agreement test. With the query
+    /// `lib`, the tree mode list paints (match marked `*`):
+    /// `docs/`, `lib.md`*, `src/`, `lib/`*, `core.rs`*, `util.rs`*,
+    /// `app.rs`, `README.md`. The `lib/` folder matches by its label, the
+    /// two files under it by their path.
+    fn search_agree_files() -> Vec<super::super::drill::CommitFile> {
+        [
+            "README.md",
+            "docs/lib.md",
+            "src/app.rs",
+            "src/lib/core.rs",
+            "src/lib/util.rs",
+        ]
+        .into_iter()
+        .map(|path| super::super::drill::CommitFile {
+            status: "M".into(),
+            path: path.into(),
+            old_path: None,
+            stat: None,
+        })
+        .collect()
+    }
+
+    /// One commit-file list surface of the `search` registry row
+    /// (`docs/parity.md`) and how to open it on [`search_agree_files`].
+    struct CommitFileSearchSurface {
+        /// Surface id in the registry.
+        id: &'static str,
+        /// A state that shows the files, with the list focused.
+        open: fn() -> AppState,
+        /// Left column and width of the pane that paints the list.
+        list_cols: fn(&AppState) -> (u16, u16),
+    }
+
+    /// Every commit-file list surface the agreement test drives.
+    const COMMIT_FILE_SEARCH_SURFACES: [CommitFileSearchSurface; 3] = [
+        CommitFileSearchSurface {
+            id: "files-d1",
+            open: || {
+                let mut state = two_pane_graph_state();
+                state.open_commit_files(
+                    "app".into(),
+                    super::super::drill::CommitFileSource::Commit {
+                        commit_id: FOOTER_COMMIT_A.into(),
+                    },
+                    search_agree_files(),
+                );
+                state.focus = FocusPane::Right;
+                state
+            },
+            list_cols: |state| (state.layout.diff_content_x, state.layout.diff_pane_width),
+        },
+        CommitFileSearchSurface {
+            id: "files-d2",
+            open: || {
+                let mut state = two_pane_files_state();
+                state.open_commit_diff(
+                    "app".into(),
+                    super::super::drill::CommitFileSource::Commit {
+                        commit_id: FOOTER_COMMIT_A.into(),
+                    },
+                    search_agree_files(),
+                    0,
+                    "README.md".into(),
+                    super::super::diff::DiffContent::from_lines(vec!["@@ -1,1 +1,1 @@".into()]),
+                );
+                state.focus = FocusPane::Left;
+                state
+            },
+            list_cols: |state| (state.layout.tree_x, state.layout.tree_width),
+        },
+        CommitFileSearchSurface {
+            id: "compare-files",
+            open: || {
+                let mut state = compare_json_over_stale_workspace_state();
+                {
+                    let tab = state.tabs.active_compare_mut().unwrap();
+                    tab.files = search_agree_files();
+                    tab.path = Some("README.md".into());
+                }
+                state.focus = FocusPane::Left;
+                state
+            },
+            list_cols: |state| (state.layout.tree_x, state.layout.tree_width),
+        },
+    ];
+
+    /// Ids of the commit-file rows painted with the search background in
+    /// the last frame, top to bottom.
+    fn search_highlighted_commit_file_ids(
+        terminal: &Terminal<TestBackend>,
+        state: &AppState,
+        (x, w): (u16, u16),
+    ) -> Vec<String> {
+        let search_bg = state.theme.pills().filter.bg;
+        let rows = state.commit_file_rows();
+        let buf = terminal.backend().buffer();
+        let l = &state.layout;
+        (0..l.files_list_height)
+            .filter_map(|dy| {
+                let row = rows.get(l.files_list_offset + dy as usize)?;
+                let y = l.files_list_y + dy;
+                (x..x + w)
+                    .any(|col| buf[(col, y)].bg == search_bg)
+                    .then(|| row.id.clone())
+            })
+            .collect()
+    }
+
+    /// Move the focused commit-file list onto the row with id `id`.
+    fn commit_file_move_to_id(state: &mut AppState, id: &str) {
+        let row = state
+            .commit_file_rows()
+            .iter()
+            .position(|row| row.id == id)
+            .unwrap_or_else(|| panic!("row {id}"));
+        let delta = row as i32 - state.commit_files_cursor() as i32;
+        state.dispatch(Action::Move(delta));
+        assert_eq!(state.commit_files_cursor(), row, "cursor on {id}");
+    }
+
+    /// On every commit-file list surface `docs/parity.md` marks `supported`
+    /// for `search` / `agree`, in both looks: the rows the search paints
+    /// highlighted are exactly the rows `n` visits, in painted order, and
+    /// the pill counts them. A folder row whose label matches is painted
+    /// and landed on (the cursor moves to it, its fold stays). A matching
+    /// folder under a folded parent is not painted, so it is neither
+    /// highlighted nor counted. The registry's commit-file surfaces (those
+    /// whose anchors name `commit_file_search_match_ids`) and this test's
+    /// must match.
+    #[test]
+    fn commit_file_search_highlight_and_steps_agree_on_every_registry_surface() {
+        let looks = [
+            ("boxed", BackgroundMode::Terminal),
+            ("flat", BackgroundMode::Paint),
+        ];
+        let registry = crate::parity_registry::registry();
+        let search = registry
+            .components
+            .iter()
+            .find(|c| c.id == "search")
+            .expect("search component");
+        let commit_file_ids: Vec<&str> = search
+            .surfaces
+            .iter()
+            .filter(|s| {
+                s.anchors
+                    .iter()
+                    .any(|a| a == "commit_file_search_match_ids")
+            })
+            .map(|s| s.id.as_str())
+            .collect();
+        let driven_ids: Vec<&str> = COMMIT_FILE_SEARCH_SURFACES.iter().map(|s| s.id).collect();
+        assert_eq!(
+            commit_file_ids, driven_ids,
+            "docs/parity.md commit-file `search` surfaces must match this test's"
+        );
+        let mut driven: Vec<(String, String)> = COMMIT_FILE_SEARCH_SURFACES
+            .iter()
+            .flat_map(|s| looks.iter().map(|(look, _)| (s.id.into(), (*look).into())))
+            .collect();
+        driven.sort();
+        let supported: Vec<(String, String)> =
+            crate::parity_registry::supported_surface_looks("search", "agree")
+                .into_iter()
+                .filter(|(id, _)| commit_file_ids.contains(&id.as_str()))
+                .collect();
+        assert_eq!(
+            supported, driven,
+            "docs/parity.md `search` / `agree` must mark every commit-file surface and look"
+        );
+        let want = ["dir:src/lib", "file:docs/lib.md", "file:src/lib/core.rs"];
+        for surface in &COMMIT_FILE_SEARCH_SURFACES {
+            for (look, background) in looks {
+                let case = format!("{} {look}", surface.id);
+                let mut state = (surface.open)();
+                state.background = background;
+                state.ascii = false;
+                state.dispatch(Action::SearchStart);
+                for c in "lib".chars() {
+                    state.dispatch(Action::SearchChar(c));
+                }
+                state.dispatch(Action::SearchSubmit);
+                assert_eq!(state.search_target, SearchPane::CommitFiles, "{case}");
+                // Start on `docs/`, above every match and not one itself.
+                commit_file_move_to_id(&mut state, "dir:docs");
+                let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                let highlighted = search_highlighted_commit_file_ids(
+                    &terminal,
+                    &state,
+                    (surface.list_cols)(&state),
+                );
+                for id in want {
+                    assert!(
+                        highlighted.iter().any(|h| h == id),
+                        "{case}: {id} is highlighted: {highlighted:?}"
+                    );
+                }
+                assert_eq!(
+                    state.search_match_position(),
+                    Some((None, highlighted.len())),
+                    "{case}: the pill counts every highlighted row"
+                );
+                let mut visited = Vec::new();
+                for step in 1..=highlighted.len() {
+                    state.dispatch(Action::SearchNext);
+                    let row = state.focused_commit_file_row().expect("focused row");
+                    assert_eq!(
+                        state.search_match_position(),
+                        Some((Some(step), highlighted.len())),
+                        "{case}: pill on {}",
+                        row.id
+                    );
+                    visited.push(row.id);
+                }
+                assert_eq!(
+                    visited, highlighted,
+                    "{case}: `n` visits the painted matches"
+                );
+                // A landed folder keeps its fold state.
+                assert!(
+                    !state.commit_file_folds.contains("dir:src/lib"),
+                    "{case}: landing does not fold"
+                );
+                state.dispatch(Action::SearchNext);
+                assert_eq!(
+                    state.focused_commit_file_row().map(|r| r.id),
+                    highlighted.first().cloned(),
+                    "{case}: wraps to the first match"
+                );
+
+                // Fold `src/`: `lib/` is not painted, so it is neither
+                // highlighted nor counted. The files under it still count,
+                // as folded tree matches do.
+                state.commit_file_folds.insert("dir:src".into());
+                commit_file_move_to_id(&mut state, "dir:docs");
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                let highlighted = search_highlighted_commit_file_ids(
+                    &terminal,
+                    &state,
+                    (surface.list_cols)(&state),
+                );
+                assert_eq!(highlighted, vec!["file:docs/lib.md"], "{case}: folded");
+                assert_eq!(
+                    state.search_match_position(),
+                    Some((None, 3)),
+                    "{case}: lib.md, core.rs, util.rs; not the hidden lib/"
+                );
+            }
+        }
     }
 
     #[test]

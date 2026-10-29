@@ -12,8 +12,9 @@ CI runs the checks in `crates/workspace-status/src/parity_registry.rs` (part of 
 | `parity_registry_gaps_and_intentional_differences_are_indexed` | A `gap:` id is not in **Open gaps**, an indexed gap is used nowhere, a gap is used in another component with no note, or an `I<n>` cited in an `n/a:` reason and the **Intentional differences** table do not match. |
 | `parity_registry_code_anchors_and_tests_exist` | A code anchor or a named test is no longer a `fn` anywhere under `crates/` (a mention in a `//` comment does not count). A rename or a moved code path forces an update here. |
 | `commit_footer_message_scroll_matches_on_every_registry_surface` (`tui/render.rs`) | The `commit-footer` surfaces marked `supported` for `msg-scroll`, in each look, differ from the surfaces that test drives; or the wheel, scrollbar, more-below hint, or per-commit reset fails on one of them. |
+| `commit_file_search_highlight_and_steps_agree_on_every_registry_surface` (`tui/render.rs`) | The `search` surfaces whose code anchors name `commit_file_search_match_ids` differ from the surfaces that test drives, or one of them is not `supported` for `agree` in each look; or on one of them the highlighted rows differ from the rows `n` visits and the pill counts. |
 
-The last check is the pattern for other components: one test body that runs the same assertions on every surface the registry marks `supported`, and that compares its own surface list to `parity_registry::supported_surface_looks(component, feature)`.
+The `commit-footer` check is the pattern for other components: one test body that runs the same assertions on every surface the registry marks `supported`, and that compares its own surface list to `parity_registry::supported_surface_looks(component, feature)`.
 
 ## Format
 
@@ -126,16 +127,16 @@ Vertical and horizontal scrollbars of lists and line viewers. The commit-message
 | --- | --- | --- |
 | `highlight` | Matching rows paint the search highlight. | none |
 | `step` | `n` / `N` step to the next / previous match and the pill counts them. | `commit_file_search_follows_painted_tree_order` |
-| `agree` | The highlighted rows are exactly the rows `n` / `N` step to and count. | none |
+| `agree` | The highlighted rows are exactly the rows `n` / `N` step to and count. | `commit_file_search_highlight_and_steps_agree_on_every_registry_surface`, `commit_file_search_lands_on_painted_folders_only` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `highlight` | `step` | `agree` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `tree` | Workspace | 0 | left | boxed, flat | `draw_tree`, `collect_match_ids`, `apply_tree_search` | supported | supported | supported |
 | `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `graph_search_matches`, `collect_graph_match_indices`, `focus_graph_search` | supported | supported | supported |
 | `graph-d1` | Workspace | 1 | left | boxed, flat | `graph_search_matches`, `collect_graph_match_indices`, `focus_graph_search` | supported | supported | supported |
-| `files-d1` | Workspace | 1 | right | boxed, flat | `commit_file_search_match_paths`, `commit_file_label_matches`, `commit_file_row_match_indices` | supported | supported | gap: G8 |
-| `files-d2` | Workspace | 2 | left | boxed, flat | `commit_file_search_match_paths`, `commit_file_label_matches`, `commit_file_row_match_indices` | supported | supported | gap: G8 |
-| `compare-files` | Compare | - | left | boxed, flat | `commit_file_search_match_paths`, `commit_file_label_matches`, `commit_file_row_match_indices` | supported | supported | gap: G8 |
+| `files-d1` | Workspace | 1 | right | boxed, flat | `commit_file_search_match_ids`, `commit_file_search_hits`, `commit_file_row_match_indices` | supported | supported | supported |
+| `files-d2` | Workspace | 2 | left | boxed, flat | `commit_file_search_match_ids`, `commit_file_search_hits`, `commit_file_row_match_indices` | supported | supported | supported |
+| `compare-files` | Compare | - | left | boxed, flat | `commit_file_search_match_ids`, `commit_file_search_hits`, `commit_file_row_match_indices` | supported | supported | supported |
 | `diff-d0` | Workspace | 0 (file focused) | right | boxed, flat | `draw_diff_pane`, `diff_search_hits` | supported | supported | supported |
 | `diff-d2` | Workspace | 2 | right | boxed, flat | `draw_diff_pane`, `diff_search_hits` | supported | supported | supported |
 | `compare-diff` | Compare | - | right | boxed, flat | `draw_diff_pane`, `diff_search_hits` | supported | supported | supported |
@@ -284,7 +285,6 @@ Each open gap is tracked by its id. Fixing one turns its cells into `supported` 
 | G5 | `scrollbars` | Graph list and file diff paint a vertical scrollbar | Workspace tree, commit-file lists, Explorer tree |
 | G6 | `scrollbars` | Explorer pane on a changed file (`draw_diff_pane`) | Explorer pane on a clean file: `draw_file_body` paints no bar |
 | G7 | `icon-popovers` | Comment marks on tree, graph, and commit-file rows open a popover | Diff gutter and clean-file gutter: `IconTarget` has no line variant |
-| G8 | `search` | Workspace tree: highlight and `n` / `N` use the same matches | Commit-file lists: the paint also matches folder labels (`commit_file_label_matches`); stepping and the count use file rows only (`commit_file_row_match_indices`) |
 | G9 | `file-lists` | Commit-file and compare lists record icon hits and scroll | Folder summary: `draw_folder_summary` takes `&AppState`, records no icon hit, and folds overflow into `… N more` |
 | G10 | `commit-footer` | Workspace depth 2 shows the commit footer | Compare tab opened as Diff commit vs parent: no footer. Probably intentional but not documented: decide and document |
 | G11 | `resize-edges` | Workspace and compare tabs: divider drag, in-diff rule drag, diff horizontal thumb drag, edge hover | Explorer tab: `resize_edges_take_mouse` excludes it, `explorer_click` never calls `hit_split`, and `diff_split_rule_x` is forced to `None` |

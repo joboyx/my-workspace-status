@@ -4038,9 +4038,8 @@ impl AppState {
                 )
             }
             SearchPane::CommitFiles => {
-                let rows = self.commit_file_search_rows()?;
-                let current = self.commit_file_search_anchor(&rows);
-                (current, commit_file_row_match_indices(&rows, query))
+                let (rows, hits) = self.commit_file_search_hits()?;
+                (self.commit_file_search_anchor(&rows), hits)
             }
             SearchPane::Diff => (self.search_hit, self.diff_search_hits(query)),
             SearchPane::File => {
@@ -4189,9 +4188,27 @@ impl AppState {
         landing.wrapped
     }
 
-    /// Commit-file list flattened with no folds: the search order.
-    fn commit_file_search_rows(&self) -> Option<Vec<CommitFileRow>> {
-        Some(self.unfolded_commit_file_rows(self.commit_drill_files()?))
+    /// Commit-file list flattened with no folds (the search order), and
+    /// the positions in it of the rows the search highlights, steps to,
+    /// and counts. `None` with no commit-file list.
+    fn commit_file_search_hits(&self) -> Option<(Vec<CommitFileRow>, Vec<usize>)> {
+        let rows = self.unfolded_commit_file_rows(self.commit_drill_files()?);
+        let hits =
+            commit_file_row_match_indices(&rows, &self.commit_file_rows(), &self.search_query);
+        Some((rows, hits))
+    }
+
+    /// Ids of the commit-file rows the bound search highlights: the same
+    /// rows `n` / `N` step to and the pill counts. Empty unless `/` is
+    /// bound to the commit-file list with a query.
+    pub(crate) fn commit_file_search_match_ids(&self) -> HashSet<String> {
+        if self.search_target != SearchPane::CommitFiles || self.search_query.trim().is_empty() {
+            return HashSet::new();
+        }
+        let Some((rows, hits)) = self.commit_file_search_hits() else {
+            return HashSet::new();
+        };
+        hits.into_iter().map(|i| rows[i].id.clone()).collect()
     }
 
     /// Position of the focused commit-file row (file or folder) in `rows`.
@@ -4201,14 +4218,19 @@ impl AppState {
     }
 
     /// Commit-file search step from the focused row. Returns true when it
-    /// wrapped.
+    /// wrapped. A file landing unfolds its folders; a folder landing moves
+    /// the cursor onto the folder row and keeps its fold.
     fn apply_commit_file_search(&mut self, dir: i32) -> bool {
-        let Some(rows) = self.commit_file_search_rows() else {
+        let Some(files) = self.commit_drill_files() else {
             self.set_search_status(false);
             return false;
         };
+        let rows = self.unfolded_commit_file_rows(files);
         let anchor = self.commit_file_search_anchor(&rows);
-        let Some(landing) = focus_commit_file_search(&rows, &self.search_query, anchor, dir) else {
+        let painted = self.commit_file_rows();
+        let Some(landing) =
+            focus_commit_file_search(&rows, &painted, &self.search_query, anchor, dir)
+        else {
             self.set_search_status(false);
             return false;
         };
