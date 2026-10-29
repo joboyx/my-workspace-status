@@ -101,3 +101,129 @@ pub fn unique_dir(prefix: &str) -> PathBuf {
         pid = std::process::id()
     ))
 }
+
+/// What the checkout under test holds when the maintainer force-pushes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RewriteKind {
+    /// Nothing of yours: the checkout only holds the dropped bot commits.
+    Dropped,
+    /// One commit of yours sits on top of the dropped bot commits.
+    YourCommit,
+    /// Normal divergence: your commit, and `main` moved on without a rewrite.
+    NormalDivergence,
+}
+
+/// A bare remote, a maintainer clone, and a checkout after the maintainer
+/// force-pushed `main`. Built by [`upstream_rewrite_fixture`].
+pub struct RewriteFixture {
+    /// Directory that holds every repo of the fixture. Removed on drop.
+    pub root: PathBuf,
+    /// The checkout under test, on `main` tracking `origin/main`, fetched.
+    pub checkout: PathBuf,
+    /// Tip of the checkout's `main` before the fetch, with your commit when any.
+    pub local_tip: String,
+    /// The base commit both histories share.
+    pub base: String,
+    /// The first bot commit on top of `base` (the old remote history).
+    pub bot1: String,
+    /// The remote tip after the push (`origin/main`).
+    pub upstream_tip: String,
+}
+
+impl Drop for RewriteFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+/// Commit one file in `dir` and return the new `HEAD`.
+fn commit_file_at(dir: &Path, name: &str, msg: &str) -> String {
+    fs::write(dir.join(name), format!("{name}\n")).expect("write fixture file");
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "-q", "-m", msg]);
+    head_sha(dir)
+}
+
+/// Full `HEAD` sha of the repo at `dir`.
+fn head_sha(dir: &Path) -> String {
+    let out = Command::new(git_binary())
+        .args(["rev-parse", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .expect("git rev-parse runs");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Clone `remote` into `root/<name>` with a repo-local identity.
+fn clone_with_identity(root: &Path, remote: &Path, name: &str) -> PathBuf {
+    git(
+        root,
+        &["clone", "-q", remote.to_str().expect("utf8 path"), name],
+    );
+    let dir = root.join(name);
+    git(&dir, &["config", "user.name", "workspace-status test"]);
+    git(
+        &dir,
+        &[
+            "config",
+            "user.email",
+            "workspace-status-test@example.invalid",
+        ],
+    );
+    dir
+}
+
+/// Build the "a maintainer force-pushed `main` and dropped bot commits" story.
+///
+/// A bare remote gets a base commit and two bot commits from a maintainer
+/// clone. The checkout under test clones them. Then the maintainer drops the
+/// bot commits (`reset --hard HEAD~2`), commits a release commit, and runs
+/// `push --force`. The checkout fetches, so `origin/main` and its reflog show
+/// the rewrite. `kind` picks what the checkout holds, see [`RewriteKind`].
+pub fn upstream_rewrite_fixture(kind: RewriteKind) -> RewriteFixture {
+    let root = unique_dir("ws-rewrite");
+    fs::create_dir_all(&root).expect("create fixture root");
+    let remote = root.join("remote.git");
+    git(
+        &root,
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            remote.to_str().unwrap(),
+        ],
+    );
+    let maint = clone_with_identity(&root, &remote, "maint");
+    let base = commit_file_at(&maint, "base.txt", "base");
+    let bot1 = commit_file_at(&maint, "bot1.txt", "chore(deps): bot bump 1");
+    commit_file_at(&maint, "bot2.txt", "chore(deps): bot bump 2");
+    git(&maint, &["push", "-q", "-u", "origin", "main"]);
+    let checkout = clone_with_identity(&root, &remote, "checkout");
+
+    if kind != RewriteKind::Dropped {
+        commit_file_at(&checkout, "mine.txt", "feat: mine");
+    }
+    let local_tip = head_sha(&checkout);
+
+    if kind == RewriteKind::NormalDivergence {
+        commit_file_at(&maint, "up.txt", "feat: upstream");
+        git(&maint, &["push", "-q", "origin", "main"]);
+    } else {
+        git(&maint, &["reset", "-q", "--hard", "HEAD~2"]);
+        commit_file_at(&maint, "release.txt", "chore(release): 1.0.0");
+        git(&maint, &["push", "-q", "--force", "origin", "main"]);
+    }
+    let upstream_tip = head_sha(&maint);
+    git(&checkout, &["fetch", "-q"]);
+
+    RewriteFixture {
+        root,
+        checkout,
+        local_tip,
+        base,
+        bot1,
+        upstream_tip,
+    }
+}

@@ -870,6 +870,145 @@ pub fn ahead_behind(left: &str, right: &str, cwd: &Path) -> Option<(usize, usize
     }
 }
 
+/// A local branch whose upstream was rewritten (force-pushed) under it.
+///
+/// Only a diverged branch (ahead and behind) can be one. The upstream
+/// reflog tells which local commits the old upstream history held: those
+/// are the commits the rewrite dropped. See [`classify_upstream_rewrite`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpstreamRewrite {
+    /// Upstream ref as given, for example `origin/main`.
+    pub upstream: String,
+    /// Full sha of `git merge-base --fork-point <upstream> <branch>`: the
+    /// newest local commit that was once on the upstream.
+    pub fork_point: String,
+    /// Full sha of the local branch tip used for the classification.
+    pub tip: String,
+    /// Local commits above the fork point: work that is not on the old upstream.
+    pub yours: usize,
+    /// Local commits between the merge base and the fork point: commits the
+    /// upstream held and then dropped.
+    pub dropped: usize,
+}
+
+/// `rev-list --count <range>`. `None` when git fails.
+fn rev_list_count(cwd: &Path, range: &str) -> Option<usize> {
+    exec_git(&["rev-list", "--count", range, "--"], cwd)
+        .parse()
+        .ok()
+}
+
+/// Tell a force-pushed upstream apart from a normal divergence.
+///
+/// Returns `None` unless `branch` is ahead of and behind `upstream`.
+/// With `F` = `merge-base --fork-point`, `MB` = `merge-base` and `tip` = the
+/// branch tip:
+///
+/// - `F` == `tip`: the upstream dropped commits and none are yours
+///   (`yours: 0`, `dropped: count(MB..tip)`).
+/// - `F` found, not `tip`, not `MB`: the upstream dropped commits and you
+///   have commits on top (`yours: count(F..tip)`, `dropped: count(MB..F)`).
+/// - No `F` (reflog expired or missing), or `F` == `MB`: a normal
+///   divergence, `None`. Never guessed.
+///
+/// Any git failure or missing ref is `None`. Runs a few cheap git commands;
+/// call it once per diverged repo, off the event loop.
+pub fn classify_upstream_rewrite(
+    cwd: &Path,
+    branch: &str,
+    upstream: &str,
+) -> Option<UpstreamRewrite> {
+    let tip = rev_parse_quiet(branch, cwd)?;
+    let upstream_tip = rev_parse_quiet(upstream, cwd)?;
+    let (ahead, behind) = ahead_behind(&tip, &upstream_tip, cwd)?;
+    if ahead == 0 || behind == 0 {
+        return None;
+    }
+    let merge_base = merge_base(cwd, &tip, &upstream_tip).ok().flatten()?;
+    let fork_point = exec_git(&["merge-base", "--fork-point", upstream, &tip], cwd);
+    if fork_point.is_empty() || fork_point == merge_base {
+        return None;
+    }
+    let (yours, dropped) = if fork_point == tip {
+        (0, rev_list_count(cwd, &format!("{merge_base}..{tip}"))?)
+    } else {
+        (
+            rev_list_count(cwd, &format!("{fork_point}..{tip}"))?,
+            rev_list_count(cwd, &format!("{merge_base}..{fork_point}"))?,
+        )
+    };
+    Some(UpstreamRewrite {
+        upstream: upstream.to_string(),
+        fork_point,
+        tip,
+        yours,
+        dropped,
+    })
+}
+
+/// Path of another worktree that has `branch` checked out, when there is one.
+///
+/// Reads `git worktree list --porcelain` and skips the worktree at `cwd`
+/// (compared by canonical path).
+fn other_worktree_on_branch(cwd: &Path, branch: &str) -> Option<String> {
+    let own = PathBuf::from(exec_git(&["rev-parse", "--show-toplevel"], cwd));
+    let own = std::fs::canonicalize(&own).unwrap_or(own);
+    let wanted = format!("refs/heads/{branch}");
+    list_worktrees_porcelain(cwd)
+        .split("\n\n")
+        .filter_map(|block| {
+            let path = block.lines().find_map(|l| l.strip_prefix("worktree "))?;
+            let on = block.lines().find_map(|l| l.strip_prefix("branch "))?;
+            (on == wanted).then_some(path)
+        })
+        .find(|path| {
+            let path = Path::new(path);
+            std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()) != own
+        })
+        .map(str::to_string)
+}
+
+/// Move `branch` to `upstream` with `git reset --keep`, for a rewritten upstream.
+///
+/// Guards, re-checked right before the write and in this order: HEAD is on
+/// `branch`; the branch tip equals `expected_tip` (the tip the confirm
+/// showed); no other worktree has `branch` checked out; no tracked changes;
+/// [`classify_upstream_rewrite`] still finds a rewrite with nothing of yours.
+/// `--keep` never discards local changes. The old tip stays reachable through
+/// the branch reflog, which is the undo.
+///
+/// Returns the old tip (full sha). `Err` carries a short human reason, or
+/// git's own reason line when the reset fails. Blocking: call it off the
+/// event loop.
+pub fn reset_keep_to_upstream(
+    cwd: &Path,
+    branch: &str,
+    upstream: &str,
+    expected_tip: &str,
+) -> Result<String, String> {
+    let head = exec_git(&["symbolic-ref", "-q", "HEAD"], cwd);
+    if head != format!("refs/heads/{branch}") {
+        return Err(format!("HEAD is not on {branch}"));
+    }
+    let tip = rev_parse_quiet(&format!("refs/heads/{branch}"), cwd)
+        .filter(|tip| tip == expected_tip)
+        .ok_or_else(|| format!("{branch} moved since the last refresh"))?;
+    if let Some(path) = other_worktree_on_branch(cwd, branch) {
+        return Err(format!(
+            "{branch} is checked out in another worktree: {path}"
+        ));
+    }
+    if repo_has_local_changes(cwd) {
+        return Err("working tree has changes".to_string());
+    }
+    match classify_upstream_rewrite(cwd, branch, upstream) {
+        Some(found) if found.yours == 0 && found.tip == tip => {}
+        _ => return Err(format!("{upstream} no longer looks rewritten")),
+    }
+    exec_git_checked(&["reset", "--keep", upstream, "--"], cwd)?;
+    Ok(tip)
+}
+
 /// Outcome of merging a rev into the current HEAD.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MergeIntoHeadResult {
@@ -4797,5 +4936,253 @@ filename new.txt
         );
         assert!(commit_times_since(&dir.join("missing"), 14).is_empty());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ---- upstream rewrite (force-push) classification and reset ----
+
+    use crate::testutil::{upstream_rewrite_fixture, RewriteFixture, RewriteKind};
+
+    #[test]
+    fn classify_upstream_rewrite_r0_nothing_of_yours() {
+        let fx = upstream_rewrite_fixture(RewriteKind::Dropped);
+        let found = classify_upstream_rewrite(&fx.checkout, "main", "origin/main").unwrap();
+        assert_eq!(found.upstream, "origin/main");
+        assert_eq!(found.tip, fx.local_tip);
+        assert_eq!(found.fork_point, fx.local_tip);
+        assert_eq!(found.yours, 0);
+        assert_eq!(found.dropped, 2);
+    }
+
+    #[test]
+    fn classify_upstream_rewrite_r1_counts_yours_and_dropped() {
+        let fx = upstream_rewrite_fixture(RewriteKind::YourCommit);
+        let found = classify_upstream_rewrite(&fx.checkout, "main", "origin/main").unwrap();
+        assert_eq!(found.tip, fx.local_tip);
+        assert_ne!(found.fork_point, fx.local_tip);
+        assert_ne!(found.fork_point, fx.base);
+        assert_eq!(found.yours, 1);
+        assert_eq!(found.dropped, 2);
+        let fork_parent = exec_git(
+            &["rev-parse", &format!("{}^", found.fork_point)],
+            &fx.checkout,
+        );
+        assert_eq!(fork_parent, fx.bot1);
+    }
+
+    #[test]
+    fn classify_upstream_rewrite_is_none_for_normal_divergence() {
+        let fx = upstream_rewrite_fixture(RewriteKind::NormalDivergence);
+        assert_eq!(
+            ahead_behind("main", "origin/main", &fx.checkout),
+            Some((1, 1))
+        );
+        assert_eq!(
+            classify_upstream_rewrite(&fx.checkout, "main", "origin/main"),
+            None
+        );
+    }
+
+    #[test]
+    fn classify_upstream_rewrite_is_none_unless_diverged() {
+        let fx = upstream_rewrite_fixture(RewriteKind::Dropped);
+        // behind only
+        git(&fx.checkout, &["reset", "-q", "--hard", &fx.base]);
+        assert_eq!(
+            classify_upstream_rewrite(&fx.checkout, "main", "origin/main"),
+            None
+        );
+        // in sync
+        git(&fx.checkout, &["reset", "-q", "--hard", "origin/main"]);
+        assert_eq!(
+            classify_upstream_rewrite(&fx.checkout, "main", "origin/main"),
+            None
+        );
+        // ahead only
+        fs::write(fx.checkout.join("more.txt"), "more\n").unwrap();
+        git(&fx.checkout, &["add", "-A"]);
+        git(&fx.checkout, &["commit", "-q", "-m", "more"]);
+        assert_eq!(
+            classify_upstream_rewrite(&fx.checkout, "main", "origin/main"),
+            None
+        );
+    }
+
+    #[test]
+    fn classify_upstream_rewrite_is_none_for_missing_refs() {
+        let fx = upstream_rewrite_fixture(RewriteKind::Dropped);
+        assert_eq!(
+            classify_upstream_rewrite(&fx.checkout, "main", "origin/missing"),
+            None
+        );
+        assert_eq!(
+            classify_upstream_rewrite(&fx.checkout, "missing", "origin/main"),
+            None
+        );
+        assert_eq!(
+            classify_upstream_rewrite(&fx.root.join("nope"), "main", "origin/main"),
+            None
+        );
+    }
+
+    #[test]
+    fn classify_upstream_rewrite_is_none_without_remote_tracking_reflog() {
+        let fx = upstream_rewrite_fixture(RewriteKind::Dropped);
+        assert!(classify_upstream_rewrite(&fx.checkout, "main", "origin/main").is_some());
+        git(&fx.checkout, &["reflog", "expire", "--expire=now", "--all"]);
+        assert_eq!(
+            classify_upstream_rewrite(&fx.checkout, "main", "origin/main"),
+            None
+        );
+    }
+
+    #[test]
+    fn classify_upstream_rewrite_works_in_a_linked_worktree() {
+        let fx = upstream_rewrite_fixture(RewriteKind::Dropped);
+        let linked = fx.root.join("linked");
+        git(
+            &fx.checkout,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "side",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let found = classify_upstream_rewrite(&linked, "main", "origin/main").unwrap();
+        assert_eq!((found.yours, found.dropped), (0, 2));
+    }
+
+    fn rewrite_fixture_r0() -> (RewriteFixture, String) {
+        let fx = upstream_rewrite_fixture(RewriteKind::Dropped);
+        let tip = fx.local_tip.clone();
+        (fx, tip)
+    }
+
+    #[test]
+    fn reset_keep_to_upstream_moves_branch_and_returns_old_tip() {
+        let (fx, tip) = rewrite_fixture_r0();
+        fs::write(fx.checkout.join("scratch.txt"), "untracked\n").unwrap();
+        let old = reset_keep_to_upstream(&fx.checkout, "main", "origin/main", &tip).unwrap();
+        assert_eq!(old, tip);
+        assert_eq!(
+            exec_git(&["rev-parse", "main"], &fx.checkout),
+            fx.upstream_tip
+        );
+        assert_eq!(
+            ahead_behind("main", "origin/main", &fx.checkout),
+            Some((0, 0))
+        );
+        assert_eq!(
+            exec_git(&["branch", "--show-current"], &fx.checkout),
+            "main"
+        );
+        assert_eq!(
+            fs::read_to_string(fx.checkout.join("scratch.txt")).unwrap(),
+            "untracked\n"
+        );
+        // the old tip stays reachable through the branch reflog (the undo)
+        assert_eq!(exec_git(&["rev-parse", "main@{1}"], &fx.checkout), tip);
+    }
+
+    #[test]
+    fn reset_keep_to_upstream_refuses_tracked_changes() {
+        let (fx, tip) = rewrite_fixture_r0();
+        fs::write(fx.checkout.join("base.txt"), "edited\n").unwrap();
+        assert_eq!(
+            reset_keep_to_upstream(&fx.checkout, "main", "origin/main", &tip),
+            Err("working tree has changes".to_string())
+        );
+        assert_eq!(exec_git(&["rev-parse", "main"], &fx.checkout), tip);
+    }
+
+    #[test]
+    fn reset_keep_to_upstream_refuses_when_another_worktree_has_the_branch() {
+        let (fx, tip) = rewrite_fixture_r0();
+        let other = fx.root.join("other");
+        git(
+            &fx.checkout,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--force",
+                other.to_str().unwrap(),
+                "main",
+            ],
+        );
+        let err = reset_keep_to_upstream(&fx.checkout, "main", "origin/main", &tip).unwrap_err();
+        assert!(
+            err.starts_with("main is checked out in another worktree: ") && err.ends_with("other"),
+            "{err}"
+        );
+        // the same guard fires from the linked side, naming the primary checkout
+        let err = reset_keep_to_upstream(&other, "main", "origin/main", &tip).unwrap_err();
+        assert!(
+            err.starts_with("main is checked out in another worktree: ")
+                && err.ends_with("checkout"),
+            "{err}"
+        );
+        assert_eq!(exec_git(&["rev-parse", "main"], &fx.checkout), tip);
+    }
+
+    #[test]
+    fn reset_keep_to_upstream_works_from_a_linked_worktree() {
+        let (fx, tip) = rewrite_fixture_r0();
+        // free `main` in the primary checkout, then move it to a linked worktree
+        git(&fx.checkout, &["checkout", "-q", "--detach"]);
+        let linked = fx.root.join("linked");
+        git(
+            &fx.checkout,
+            &["worktree", "add", "-q", linked.to_str().unwrap(), "main"],
+        );
+        let old = reset_keep_to_upstream(&linked, "main", "origin/main", &tip).unwrap();
+        assert_eq!(old, tip);
+        assert_eq!(exec_git(&["rev-parse", "main"], &linked), fx.upstream_tip);
+    }
+
+    #[test]
+    fn reset_keep_to_upstream_refuses_a_stale_tip() {
+        let (fx, tip) = rewrite_fixture_r0();
+        assert_eq!(
+            reset_keep_to_upstream(&fx.checkout, "main", "origin/main", &fx.base),
+            Err("main moved since the last refresh".to_string())
+        );
+        assert_eq!(exec_git(&["rev-parse", "main"], &fx.checkout), tip);
+    }
+
+    #[test]
+    fn reset_keep_to_upstream_refuses_when_head_is_not_on_the_branch() {
+        let (fx, tip) = rewrite_fixture_r0();
+        git(&fx.checkout, &["checkout", "-q", "-b", "other"]);
+        assert_eq!(
+            reset_keep_to_upstream(&fx.checkout, "main", "origin/main", &tip),
+            Err("HEAD is not on main".to_string())
+        );
+        git(&fx.checkout, &["checkout", "-q", "--detach"]);
+        assert_eq!(
+            reset_keep_to_upstream(&fx.checkout, "main", "origin/main", &tip),
+            Err("HEAD is not on main".to_string())
+        );
+    }
+
+    #[test]
+    fn reset_keep_to_upstream_refuses_commits_of_yours() {
+        let fx = upstream_rewrite_fixture(RewriteKind::YourCommit);
+        assert_eq!(
+            reset_keep_to_upstream(&fx.checkout, "main", "origin/main", &fx.local_tip),
+            Err("origin/main no longer looks rewritten".to_string())
+        );
+        assert_eq!(exec_git(&["rev-parse", "main"], &fx.checkout), fx.local_tip);
+    }
+
+    #[test]
+    fn reset_keep_to_upstream_refuses_normal_divergence() {
+        let fx = upstream_rewrite_fixture(RewriteKind::NormalDivergence);
+        assert_eq!(
+            reset_keep_to_upstream(&fx.checkout, "main", "origin/main", &fx.local_tip),
+            Err("origin/main no longer looks rewritten".to_string())
+        );
     }
 }
