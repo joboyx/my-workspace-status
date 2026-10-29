@@ -1,5 +1,4 @@
 use std::cell::Cell;
-use std::time::Instant;
 
 use crate::common::fake_forge::FakeForge;
 use crate::common::pr_scenarios::{Badge, FAILED_CHECK};
@@ -80,34 +79,32 @@ fn pty_pr_poll_running_to_failed_alerts_on_both_forges() {
 
     let github_toast = format!("x #7 CI failed · {FAILED_CHECK}");
     let gitlab_toast = "x !5 CI failed · feature/rate-limit";
+    tui.record_frames();
     github.set(&forge, Badge::CiFailed);
     gitlab.set(&forge, Badge::CiFailed);
-    let flashed = (Cell::new(false), Cell::new(false));
-    let first_seen = Cell::new(None::<Instant>);
     tui.wait_pred(
         |screen| {
-            flashed
-                .0
-                .set(flashed.0.get() || badge_flashes(&tui, "appbox", &REMOVE_RAMP));
-            flashed
-                .1
-                .set(flashed.1.get() || badge_flashes(&tui, "apibox", &REMOVE_RAMP));
             let toasts = toast_text(screen);
-            let shown = toasts.contains(&github_toast) && toasts.contains(gitlab_toast);
-            if shown && first_seen.get().is_none() {
-                first_seen.set(Some(Instant::now()));
-            }
-            shown
+            toasts.contains(&github_toast) && toasts.contains(gitlab_toast)
         },
         "the next poll toasts both CI failures",
         GIT_WAIT,
     );
-    assert!(
-        flashed.0.get() && flashed.1.get(),
-        "both rows flash on the remove ramp with the toast: github={} gitlab={}\n{}",
-        flashed.0.get(),
-        flashed.1.get(),
-        tui.screen()
+    // Each row's flash shows in some recorded frame, not necessarily the
+    // same one.
+    let flashed = (Cell::new(false), Cell::new(false));
+    tui.wait_recorded_frame(
+        |tui| {
+            flashed
+                .0
+                .set(flashed.0.get() || badge_flashes(tui, "appbox", &REMOVE_RAMP));
+            flashed
+                .1
+                .set(flashed.1.get() || badge_flashes(tui, "apibox", &REMOVE_RAMP));
+            flashed.0.get() && flashed.1.get()
+        },
+        "both rows flash on the remove ramp",
+        WAIT,
     );
     tui.wait_pred(
         |_| {
@@ -138,7 +135,6 @@ fn pty_pr_poll_running_to_failed_alerts_on_both_forges() {
     // past the 2.5 s of an acknowledgement) is pinned by the unit test
     // `a_pr_toast_lives_8_s_with_the_ack_fade_beside_a_2_5_s_ack`
     // (`tui::toast`); a PTY check of a duration would race the clock.
-    assert!(first_seen.get().is_some(), "toast seen");
     tui.wait_pred(
         |screen| {
             let toasts = toast_text(screen);

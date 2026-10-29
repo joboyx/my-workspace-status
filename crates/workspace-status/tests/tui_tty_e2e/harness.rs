@@ -102,12 +102,35 @@ const SYNC_END: &[u8] = b"\x1b[?2026l";
 /// update end, before each update start, and at the end of each read
 /// outside an update (startup, mode changes, exit). A read therefore never
 /// sees a frame half drawn, however the PTY splits the frame's bytes.
+///
+/// While a record is on ([`PtySession::record_frames`]) it also keeps every
+/// whole frame it shows, so a test can check a paint that lasts only a
+/// short time without having to poll at the right moment.
 struct FrameParser {
     live: vt100::Parser,
     shown: vt100::Screen,
     in_update: bool,
     /// End of the last read when it may be the start of a split marker.
     carry: Vec<u8>,
+    /// Whole frames shown since [`PtySession::record_frames`].
+    record: Option<FrameRecord>,
+    /// A recorded frame that the screen and cell reads see instead of
+    /// `shown`, while [`PtySession::wait_recorded_frame`] checks it.
+    view: Option<vt100::Screen>,
+}
+
+/// Most frames one record keeps. A frame is stored as its formatted
+/// contents (glyphs and colours, a few KiB), so the cap bounds memory. A
+/// record that fills up fails the wait that reads it; it never drops a
+/// frame silently.
+const FRAME_RECORD_MAX: usize = 1024;
+
+/// Whole frames in the order they were shown: `(rows, cols, formatted
+/// contents)`. A frame equal to the one before it is not stored again.
+#[derive(Default)]
+struct FrameRecord {
+    frames: Vec<(u16, u16, Vec<u8>)>,
+    full: bool,
 }
 
 impl FrameParser {
@@ -119,18 +142,43 @@ impl FrameParser {
             shown,
             in_update: false,
             carry: Vec::new(),
+            record: None,
+            view: None,
         }
     }
 
-    /// The screen at the last point no update was open.
+    /// The screen at the last point no update was open, or the recorded
+    /// frame under check.
     fn screen(&self) -> &vt100::Screen {
-        &self.shown
+        self.view.as_ref().unwrap_or(&self.shown)
     }
 
     /// Resize the live grid. The shown screen keeps its old size until
     /// the TUI paints a frame for the new one.
     fn set_size(&mut self, rows: u16, cols: u16) {
         self.live.set_size(rows, cols);
+    }
+
+    /// Show the live screen, and record it while a record is on.
+    fn show_live(&mut self) {
+        self.shown = self.live.screen().clone();
+        let Some(record) = self.record.as_mut() else {
+            return;
+        };
+        let (rows, cols) = self.shown.size();
+        let contents = self.shown.contents_formatted();
+        let same = record
+            .frames
+            .last()
+            .is_some_and(|(r, c, last)| (*r, *c) == (rows, cols) && *last == contents);
+        if same {
+            return;
+        }
+        if record.frames.len() < FRAME_RECORD_MAX {
+            record.frames.push((rows, cols, contents));
+        } else {
+            record.full = true;
+        }
     }
 
     /// Feed one read from the PTY.
@@ -146,7 +194,7 @@ impl FrameParser {
                 self.live.process(&data[fed..at]);
                 fed = at;
                 if !self.in_update {
-                    self.shown = self.live.screen().clone();
+                    self.show_live();
                 }
                 self.in_update = true;
             } else if rest.starts_with(SYNC_END) {
@@ -154,7 +202,7 @@ impl FrameParser {
                 self.live.process(&data[fed..at]);
                 fed = at;
                 self.in_update = false;
-                self.shown = self.live.screen().clone();
+                self.show_live();
             } else if SYNC_BEGIN.starts_with(rest) || SYNC_END.starts_with(rest) {
                 // A marker split across two reads: finish it on the next one.
                 break;
@@ -165,7 +213,7 @@ impl FrameParser {
         self.live.process(&data[fed..at]);
         self.carry = data[at..].to_vec();
         if !self.in_update {
-            self.shown = self.live.screen().clone();
+            self.show_live();
         }
     }
 }
@@ -626,7 +674,13 @@ impl PtySession {
         self.send_tap(&format!("\x1b[<0;{x};{y}M"), &format!("\x1b[<0;{x};{y}m"));
     }
 
+    /// Resize the terminal side, then the PTY, as a terminal does.
+    ///
+    /// The parser lock is held across both, so the reader thread cannot
+    /// parse the TUI's redraw for the new size into the old-size grid.
     pub fn resize(&mut self, cols: u16, rows: u16) {
+        let mut parser = self.parser.lock().unwrap();
+        parser.set_size(rows, cols);
         self.master
             .resize(PtySize {
                 rows,
@@ -635,9 +689,70 @@ impl PtySession {
                 pixel_height: 0,
             })
             .expect("resize pty");
-        self.parser.lock().unwrap().set_size(rows, cols);
+        drop(parser);
         self.cols = cols;
         self.rows = rows;
+    }
+
+    /// Start a record of every whole frame shown from now on (a new
+    /// record replaces an earlier one). Call it before the action whose
+    /// paint lasts only a short time (a flash), then read the record with
+    /// [`Self::wait_recorded_frame`].
+    pub fn record_frames(&self) {
+        self.parser.lock().unwrap().record = Some(FrameRecord::default());
+    }
+
+    /// Wait until `pred` holds on a whole frame recorded since
+    /// [`Self::record_frames`], then end the record.
+    ///
+    /// Each recorded frame is checked once, in order. While `pred` runs,
+    /// every screen and cell read of `self` sees that frame. A paint that
+    /// lasts only a short time is therefore found however late this test
+    /// thread runs. Panics on timeout, or when the record filled up before
+    /// a frame matched.
+    pub fn wait_recorded_frame(
+        &self,
+        pred: impl Fn(&PtySession) -> bool,
+        what: &str,
+        timeout: Duration,
+    ) {
+        let start = Instant::now();
+        let mut checked = 0;
+        loop {
+            let (frames, full) = {
+                let parser = self.parser.lock().unwrap();
+                let record = parser
+                    .record
+                    .as_ref()
+                    .expect("wait_recorded_frame needs record_frames first");
+                (record.frames[checked..].to_vec(), record.full)
+            };
+            for (rows, cols, contents) in frames {
+                checked += 1;
+                let mut replay = vt100::Parser::new(rows, cols, 0);
+                replay.process(&contents);
+                self.parser.lock().unwrap().view = Some(replay.screen().clone());
+                let hit = pred(self);
+                self.parser.lock().unwrap().view = None;
+                if hit {
+                    self.parser.lock().unwrap().record = None;
+                    return;
+                }
+            }
+            if full {
+                panic!(
+                    "frame record full ({FRAME_RECORD_MAX} frames) before {what}:\n{}",
+                    self.screen()
+                );
+            }
+            if start.elapsed() >= timeout {
+                panic!(
+                    "timeout waiting for {what} in {checked} recorded frames; now:\n{}",
+                    self.screen()
+                );
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
     }
 
     /// Text of the last whole frame (see [`FrameParser`]).
@@ -1515,4 +1630,40 @@ fn frame_parser_shows_only_whole_frames() {
     assert_eq!(text(&parser), "new", "a resize update then a frame update");
     parser.process(b"\x1b[Hnext\x1b[?2026l");
     assert_eq!(text(&parser), "next", "one end closes both");
+}
+
+/// A record keeps every whole frame once, colours included, so a frame
+/// that a later one replaced can still be read back.
+#[test]
+fn frame_parser_records_each_whole_frame() {
+    let mut parser = FrameParser::new(2, 10);
+    parser.process(b"\x1b[?2026h\x1b[Hbefore\x1b[?2026l");
+    parser.record = Some(FrameRecord::default());
+    parser.process(b"\x1b[?2026h\x1b[H\x1b[2K\x1b[48;2;81;102;67mflash\x1b[?2026l");
+    parser.process(b"\x1b[?2026h\x1b[H\x1b[0m\x1b[2Kafter\x1b[?2026l");
+    parser.process(b"\x1b[?2026h\x1b[?2026l");
+    let record = parser.record.as_ref().unwrap();
+    let replay = |at: usize| {
+        let (rows, cols, contents) = &record.frames[at];
+        let mut replay = vt100::Parser::new(*rows, *cols, 0);
+        replay.process(contents);
+        replay.screen().clone()
+    };
+    // The frame on screen when the first update opened, then the two new
+    // frames; the empty update repeats the last one and is not kept.
+    assert_eq!(record.frames.len(), 3, "before, flash, after");
+    assert_eq!(replay(0).contents(), "before");
+    let flash = replay(1);
+    assert_eq!(flash.contents(), "flash");
+    assert_eq!(
+        flash.cell(0, 0).unwrap().bgcolor(),
+        vt100::Color::Rgb(81, 102, 67),
+        "the replayed frame keeps its colours"
+    );
+    assert_eq!(replay(2).contents(), "after");
+    assert_eq!(
+        parser.screen().contents(),
+        "after",
+        "the shown frame moved on"
+    );
 }
