@@ -35,6 +35,8 @@ CI fails if a TTY spawn path drops that assignment: `crates/workspace-status/tes
 
 PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` also unset `WS_STATUS_WORKSPACE` so a parent pin cannot retarget the fixture. CI: `tty_spawn_paths_isolate_workspace_env`.
 
+PTY and desktop e2e also drop a parent `WS_STATUS_PR_POLL_MS` (the verify driver pins it to `0`), so a test that leaves it unset never polls the fake forge. CI: `tty_spawn_paths_drop_parent_pr_poll_period`.
+
 They also point `XDG_CONFIG_HOME` at a temp dir (PTY and desktop e2e write a fixed baseline config file there, see [docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md)), so the operator user config file (`$XDG_CONFIG_HOME/my-workspace-status/config.json`, else `~/.config/...`) cannot change the fixture's settings. CLI integration tests that run the binary do the same. CI: `tty_spawn_paths_isolate_user_config`.
 
 They also point `WS_STATUS_UI_STORE` at a temp file with no last-used theme and the activity sparkline off, so the operator UI-state file (`$XDG_STATE_HOME/my-workspace-status/ui-state.json`) cannot beat the fixture theme, switch the sparkline on, or set the commit-message rows, and a palette theme pick, sparkline toggle, or commit-message rule drag does not write it. The PTY harness uses a new `.e2e-state/ui-state-<n>.json` for each spawn unless the test passes `WS_STATUS_UI_STORE`; the desktop harness and the demo script remove their file before each launch. They also drop a parent `WS_STATUS_THEME`. CI: `tty_spawn_paths_isolate_ui_store`, `tty_spawn_paths_drop_old_theme_store_name`.

@@ -297,6 +297,25 @@ fn tty_spawn_paths_pin_theme_mode() {
 }
 
 #[test]
+fn tty_spawn_paths_drop_parent_pr_poll_period() {
+    // A test that leaves WS_STATUS_PR_POLL_MS unset must not poll, so a
+    // parent value (left from a manual try) is dropped; a test that wants
+    // polling passes its own.
+    assert!(
+        PTY_HARNESS.contains("env_remove(\"WS_STATUS_PR_POLL_MS\")"),
+        "tui_tty_e2e/harness.rs must drop a parent WS_STATUS_PR_POLL_MS"
+    );
+    assert!(
+        DESKTOP_HARNESS.contains(r#"script.push_str("unset WS_STATUS_PR_POLL_MS\n");"#),
+        "tui_tty_e2e/desktop.rs must unset a parent WS_STATUS_PR_POLL_MS"
+    );
+    assert!(
+        VERIFY_SH.contains("export WS_STATUS_PR_POLL_MS=0"),
+        "scripts/verify-tui.sh must pin WS_STATUS_PR_POLL_MS (off unless a recipe sets it)"
+    );
+}
+
+#[test]
 fn verify_driver_isolates_forge_theme_and_git() {
     // The verify driver (`scripts/verify-tui.sh`) shares the TTY spawn rules
     // above through the loops; these are the pins only it adds.
