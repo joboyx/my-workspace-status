@@ -643,8 +643,12 @@ pub const HELP_PRS_GROUP: HelpGroup = HelpGroup {
             desc: "Workspace tab only",
         },
         HelpEntry {
-            keys: "t . M / -",
+            keys: "t . M -",
             desc: "Workspace tab only",
+        },
+        HelpEntry {
+            keys: "/ n N",
+            desc: "no search here",
         },
     ],
 };
@@ -1777,6 +1781,34 @@ mod tests {
         assert!(
             help_entries().any(|e| e.keys == "-"),
             "MOVE lists - on Workspace"
+        );
+    }
+
+    /// On the PRs tab `/ n N` say `PRs tab has no search`, not "switch to
+    /// the Workspace tab", so help lists them on their own row and no
+    /// `Workspace tab only` row names them.
+    #[test]
+    fn prs_help_lists_search_keys_apart_from_the_workspace_only_rows() {
+        let entries: Vec<&HelpEntry> = help_groups(HelpTab::Prs)
+            .iter()
+            .flat_map(|g| g.entries.iter())
+            .collect();
+        for entry in &entries {
+            let keys: Vec<&str> = entry.keys.split(' ').collect();
+            if entry.desc == "Workspace tab only" {
+                for key in ["/", "n", "N"] {
+                    assert!(!keys.contains(&key), "{entry:?}");
+                }
+            }
+        }
+        let search: Vec<&&HelpEntry> = entries.iter().filter(|e| e.keys == "/ n N").collect();
+        assert_eq!(search.len(), 1, "{entries:?}");
+        assert_eq!(search[0].desc, "no search here");
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.keys == "t . M -" && e.desc == "Workspace tab only"),
+            "{entries:?}"
         );
     }
 
