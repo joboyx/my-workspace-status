@@ -31,9 +31,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
+use unicode_width::UnicodeWidthStr;
 use workspace_status_graph::{
     format_commit_message, format_relative_date, graph_chrome_budget_for, graph_footer_request,
-    graph_vscroll_visible, paint_model, selection_footer_parts, wrap_commit_message,
+    graph_vscroll_visible, paint_model, selection_footer_parts, wrap_commit_message, Commit,
     GraphChromeBudget, GraphFooterSelection, GraphModel, GraphRow, PaintedLine, ASCII,
     COMMIT_MSG_LINES_DEFAULT, COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN, FOOTER_RULE_ROWS,
     UNICODE,
@@ -1130,6 +1131,62 @@ pub(crate) fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
+/// One commit popover field of a painted meta row: its kind, then its start
+/// column and width in display columns of that row.
+pub(crate) type MetaField = (IconKind, usize, usize);
+
+/// One commit meta row of the commit-files footer and where its commit
+/// popover fields sit in it.
+struct MetaLine {
+    /// `short · refs · [subject ·] author · date`, empty parts left out.
+    text: String,
+    /// The hash, author, and date fields in `text`.
+    fields: Vec<MetaField>,
+}
+
+/// The meta row of `commit`: short hash, refs, the subject when `subject`
+/// is set, author, and the date relative to `now`, joined by ` · `.
+fn commit_meta_line(commit: &Commit, subject: bool, now: i64) -> MetaLine {
+    let refs = commit
+        .refs
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let short: String = commit.id.chars().take(7).collect();
+    let mut bits: Vec<(Option<IconKind>, String)> = vec![(Some(IconKind::CommitHash), short)];
+    if !refs.is_empty() {
+        bits.push((None, refs));
+    }
+    if subject && !commit.subject.is_empty() {
+        bits.push((None, commit.subject.clone()));
+    }
+    if !commit.author_name.is_empty() {
+        bits.push((Some(IconKind::CommitAuthor), commit.author_name.clone()));
+    }
+    if commit.author_date_unix != 0 {
+        bits.push((
+            Some(IconKind::CommitDate),
+            format_relative_date(commit.author_date_unix, now),
+        ));
+    }
+    let mut line = MetaLine {
+        text: String::new(),
+        fields: Vec::new(),
+    };
+    for (i, (kind, bit)) in bits.into_iter().enumerate() {
+        if i > 0 {
+            line.text.push_str(" · ");
+        }
+        let start = line.text.width();
+        if let Some(kind) = kind {
+            line.fields.push((kind, start, bit.width()));
+        }
+        line.text.push_str(&bit);
+    }
+    line
+}
+
 impl AppState {
     /// TUI launch state: glyphs, theme, `NO_COLOR`, and the viewed /
     /// comment / UI-state / background-fetch store paths and the activity
@@ -2148,45 +2205,60 @@ impl AppState {
             } => Some(compare_range_label(base_ref, head_ref)),
             CommitFileSource::CommitVsWorktree { .. } => Some(source.short_label()),
             CommitFileSource::Commit { commit_id } => {
-                let short = if commit_id.len() >= 7 {
-                    &commit_id[..7]
-                } else {
-                    commit_id.as_str()
-                };
                 let commit = self
                     .graph
                     .as_ref()
                     .and_then(|model| model.commits.iter().find(|commit| commit.id == *commit_id));
-                let refs = commit
-                    .map(|commit| {
-                        commit
-                            .refs
-                            .iter()
-                            .map(|r| r.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .unwrap_or_default();
-                let subject = commit.map(|c| c.subject.as_str()).unwrap_or("");
-                let mut bits = vec![short.to_string()];
-                if !refs.is_empty() {
-                    bits.push(refs);
-                }
-                if !subject.is_empty() {
-                    bits.push(subject.to_string());
-                }
-                if let Some(commit) = commit {
-                    if !commit.author_name.is_empty() {
-                        bits.push(commit.author_name.clone());
-                    }
-                    if commit.author_date_unix != 0 {
-                        bits.push(format_relative_date(commit.author_date_unix, unix_now()));
-                    }
-                }
-                Some(bits.join(" · "))
+                Some(match commit {
+                    Some(commit) => commit_meta_line(commit, true, unix_now()).text,
+                    None => commit_id.chars().take(7).collect(),
+                })
             }
         };
         (title, subtitle)
+    }
+
+    /// Checkout, commit id, and commit popover fields of the meta row the
+    /// depth-2 commit-files footer paints now: the collapsed subtitle, or
+    /// the expanded meta line when the message shows.
+    ///
+    /// Each field is `(kind, start, width)` in display columns of that row:
+    /// the short hash ([`IconKind::CommitHash`]), the author
+    /// ([`IconKind::CommitAuthor`]), and the relative date
+    /// ([`IconKind::CommitDate`]); an empty author or a zero date has no
+    /// field. `None` on a compare tab, for a stash, worktree, or compare
+    /// source, and for a commit not in the loaded graph (the row paints
+    /// only the short hash then).
+    pub(crate) fn commit_detail_meta_fields(&self) -> Option<(String, String, Vec<MetaField>)> {
+        if self.tabs.active_compare().is_some() {
+            return None;
+        }
+        let (repo, commit_id) = match &self.drill {
+            DrillView::Files {
+                repo,
+                source: CommitFileSource::Commit { commit_id },
+                ..
+            }
+            | DrillView::Diff {
+                repo,
+                source: CommitFileSource::Commit { commit_id },
+                ..
+            } => (repo, commit_id),
+            _ => return None,
+        };
+        if commit_id.is_empty() {
+            return None;
+        }
+        let commit = self
+            .graph
+            .as_ref()?
+            .commits
+            .iter()
+            .find(|commit| commit.id == *commit_id)?;
+        // Expanded paints the meta line without the subject (the message
+        // below holds it); collapsed paints the subtitle with it.
+        let line = commit_meta_line(commit, !self.commit_msg_expand, unix_now());
+        Some((repo.clone(), commit_id.clone(), line.fields))
     }
 
     /// Rows the commit-files footer asks for, before the pane-size cap.
@@ -2287,29 +2359,8 @@ impl AppState {
                     .commits
                     .iter()
                     .find(|commit| commit.id == *commit_id)?;
-                let short = if commit_id.len() >= 7 {
-                    &commit_id[..7]
-                } else {
-                    commit_id.as_str()
-                };
-                let refs = commit
-                    .refs
-                    .iter()
-                    .map(|r| r.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let mut bits = vec![short.to_string()];
-                if !refs.is_empty() {
-                    bits.push(refs);
-                }
-                if !commit.author_name.is_empty() {
-                    bits.push(commit.author_name.clone());
-                }
-                if commit.author_date_unix != 0 {
-                    bits.push(format_relative_date(commit.author_date_unix, unix_now()));
-                }
                 Some((
-                    bits.join(" · "),
+                    commit_meta_line(commit, false, unix_now()).text,
                     format_commit_message(&commit.subject, &commit.body),
                 ))
             }

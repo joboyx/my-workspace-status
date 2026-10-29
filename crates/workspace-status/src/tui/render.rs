@@ -95,7 +95,7 @@ use super::syntax::{
     CachedDiffSyntax, CodeSpan, DiffBackgrounds, DiffSyntaxKey,
 };
 use super::tabs::{
-    compare_picker_empty, file_gutter_width, file_too_large, file_view_gutter_width,
+    compare_picker_empty, file_gutter_width, file_too_large, file_view_gutter_width, short_rev,
     ComparePickerState, ExplorerPreview, FileTab, EXPLORER_FOLDER_HINT, FILE_IS_BINARY,
 };
 use super::theme::{hex_color, mix_toward, BackgroundMode, Palette, Pill, ThemeId};
@@ -580,8 +580,30 @@ fn painted_text_link(
     needle: &str,
     url: String,
 ) -> Option<LinkHit> {
+    let (x, width) = painted_text_span(buf, y, x0, x1, needle)?;
+    Some(LinkHit { y, x, width, url })
+}
+
+/// Column and width of the rightmost `needle` painted in buffer row `y`,
+/// columns `x0..x1`, or `None` when the row does not show it whole.
+///
+/// Matches painted cell symbols, so `x` and the width count cells, not
+/// bytes: a multi-byte or wide glyph maps back to the cells it painted.
+fn painted_text_span(buf: &Buffer, y: u16, x0: u16, x1: u16, needle: &str) -> Option<(u16, u16)> {
+    let (text, starts) = painted_row_text(buf, y, x0, x1)?;
+    if needle.is_empty() {
+        return None;
+    }
+    let at = text.rfind(needle)?;
+    painted_byte_span(&starts, at, at + needle.len())
+}
+
+/// Painted cell symbols of buffer row `y`, columns `x0..x1` (clipped to the
+/// buffer), and the byte offset in that text where each cell starts.
+/// `None` when the row is outside the buffer.
+fn painted_row_text(buf: &Buffer, y: u16, x0: u16, x1: u16) -> Option<(String, Vec<(usize, u16)>)> {
     let area = buf.area;
-    if needle.is_empty() || y < area.top() || y >= area.bottom() {
+    if y < area.top() || y >= area.bottom() {
         return None;
     }
     let (x0, x1) = (x0.max(area.left()), x1.min(area.right()));
@@ -591,16 +613,15 @@ fn painted_text_link(
         starts.push((text.len(), x));
         text.push_str(buf[(x, y)].symbol());
     }
-    let at = text.rfind(needle)?;
+    Some((text, starts))
+}
+
+/// Column and width of the cells that paint bytes `at..end` of a row text
+/// from [`painted_row_text`]; `None` when `at` is not a cell start.
+fn painted_byte_span(starts: &[(usize, u16)], at: usize, end: usize) -> Option<(u16, u16)> {
     let x = starts.iter().find(|(start, _)| *start == at)?.1;
-    let end = at + needle.len();
     let last = starts.iter().rev().find(|(start, _)| *start < end)?.1;
-    Some(LinkHit {
-        y,
-        x,
-        width: last - x + 1,
-        url,
-    })
+    Some((x, last - x + 1))
 }
 
 /// Pane geometry [`paint_resize_edge_hover`] lights, from [`draw_panes`].
@@ -3000,6 +3021,27 @@ fn draw_commit_detail(
             target: IconTarget::CommitDetailMoreLines(id),
         });
     state.layout.icon_hits.extend(hint);
+    // The meta row's hash, author, and date open commit popovers; a field
+    // the pane edge cuts records nothing.
+    if body_h >= 2 {
+        if let Some((repo, sha, fields)) = state.commit_detail_meta_fields() {
+            let y = footer_area.y + 1;
+            let hits = fields
+                .into_iter()
+                .filter(|(_, start, width)| start + width <= usize::from(area.width))
+                .map(|(kind, start, width)| IconHit {
+                    y,
+                    x: footer_area.x + start as u16,
+                    width: width as u16,
+                    kind,
+                    target: IconTarget::Commit {
+                        repo: repo.clone(),
+                        sha: sha.clone(),
+                    },
+                });
+            state.layout.icon_hits.extend(hits);
+        }
+    }
     // The meta row (second body row) starts with the commit's short hash:
     // link it to the commit page.
     let link = match state.commit_drill_source() {
@@ -3172,6 +3214,123 @@ fn wrap_rows_ending_at(heights: &[usize], cursor: usize, view_h: usize) -> usize
     count
 }
 
+/// True for a whole 40- or 64-hex object id.
+fn is_full_object_id(rev: &str) -> bool {
+    matches!(rev.len(), 40 | 64) && rev.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Commit popover hits ([`IconKind::CommitHash`]) on the commit tokens of
+/// the compare tab's range in the diff pane header rows `header`.
+///
+/// A commit-vs-working-tree tab (`abc1234 ↔ working tree`) records its
+/// base. A range tab (`abc1234^...abc1234`) records its base (a
+/// `<full id>^` base names the loaded [`CommitFileSource::Compare`]
+/// `base_tip`, so none before the source loads; a full-id base names
+/// itself) and a full-id head. Branch names and `HEAD` record nothing.
+/// The range is found in the painted rows; when the header wrapped it over
+/// two rows, a token cut by the break records nothing.
+///
+/// [`CommitFileSource::Compare`]: super::drill::CommitFileSource::Compare
+fn compare_header_hits(buf: &Buffer, header: Rect, state: &AppState) -> Vec<IconHit> {
+    let Some(tab) = state.tabs.active_compare() else {
+        return Vec::new();
+    };
+    let range = tab.range_header();
+    let base = short_rev(&tab.base_ref);
+    let base_sha = if is_full_object_id(&tab.base_ref) {
+        Some(tab.base_ref.clone())
+    } else if tab.worktree_file.is_none()
+        && tab
+            .base_ref
+            .strip_suffix('^')
+            .is_some_and(is_full_object_id)
+    {
+        match &tab.source {
+            Some(super::drill::CommitFileSource::Compare { base_tip, .. }) => {
+                Some(base_tip.clone())
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let head_sha = (tab.worktree_file.is_none() && is_full_object_id(&tab.head_ref))
+        .then(|| tab.head_ref.clone());
+    // Byte offset and length of each token in `range` (the token is ASCII,
+    // so its length is also its width), with the commit it names.
+    let mut tokens: Vec<(usize, usize, String)> = Vec::new();
+    if let Some(sha) = base_sha.filter(|sha| !sha.is_empty()) {
+        tokens.push((0, base.len(), sha));
+    }
+    if let Some(sha) = head_sha {
+        tokens.push((
+            base.len() + "...".len(),
+            short_rev(&tab.head_ref).len(),
+            sha,
+        ));
+    }
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+    let hit = |y: u16, x: u16, width: u16, sha: &str| IconHit {
+        y,
+        x,
+        width,
+        kind: IconKind::CommitHash,
+        target: IconTarget::Commit {
+            repo: tab.checkout_path.clone(),
+            sha: sha.to_string(),
+        },
+    };
+    let rows = header.top()..header.bottom();
+    for y in rows.clone() {
+        if let Some((x, _)) = painted_text_span(buf, y, header.left(), header.right(), &range) {
+            return tokens
+                .iter()
+                .map(|(at, len, sha)| {
+                    let col = range[..*at].width() as u16;
+                    hit(y, x + col, *len as u16, sha)
+                })
+                .collect();
+        }
+    }
+    // Wrapped: the range ends row `y` and goes on at the start of row
+    // `y + 1`; only the tokens wholly on one side record a hit.
+    let painted: Vec<_> = rows
+        .filter_map(|y| Some((y, painted_row_text(buf, y, header.left(), header.right())?)))
+        .collect();
+    for pair in painted.windows(2) {
+        let [(y0, (text0, starts0)), (y1, (text1, starts1))] = pair else {
+            continue;
+        };
+        let Some(cut) = (1..range.len()).find(|&cut| {
+            range.is_char_boundary(cut)
+                && text0.ends_with(&range[..cut])
+                && text1.starts_with(&range[cut..])
+        }) else {
+            continue;
+        };
+        let head0 = text0.len() - cut;
+        return tokens
+            .iter()
+            .filter_map(|(at, len, sha)| {
+                let (y, span) = if at + len <= cut {
+                    (
+                        *y0,
+                        painted_byte_span(starts0, head0 + at, head0 + at + len)?,
+                    )
+                } else if *at >= cut {
+                    (*y1, painted_byte_span(starts1, at - cut, at - cut + len)?)
+                } else {
+                    return None;
+                };
+                Some(hit(y, span.0, span.1, sha))
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
 fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -3269,6 +3428,10 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         height: header_h.min(area.height),
     };
     frame.render_widget(Paragraph::new(header_lines), header_area);
+    if state.is_compare_tab() {
+        let hits = compare_header_hits(frame.buffer_mut(), header_area, state);
+        state.layout.icon_hits.extend(hits);
+    }
     if area.height <= header_h {
         return;
     }
@@ -20289,6 +20452,307 @@ mod tests {
             link.y > l.files_list_y + l.files_list_height && link.x < l.right_x,
             "the footer under the left file list: {link:?}"
         );
+    }
+
+    /// Commit popover hits of the frame, each with the text painted under it.
+    fn commit_hits_with_text(
+        state: &AppState,
+        terminal: &Terminal<TestBackend>,
+    ) -> Vec<(IconHit, String)> {
+        state
+            .layout
+            .icon_hits
+            .iter()
+            .filter(|hit| matches!(hit.target, IconTarget::Commit { .. }))
+            .map(|hit| {
+                let text = region_text(terminal, hit.x, hit.y, hit.width, 1);
+                (hit.clone(), text.trim_end_matches('\n').to_string())
+            })
+            .collect()
+    }
+
+    /// The depth-2 commit-files footer meta row, collapsed and expanded,
+    /// boxed and flat: the short hash, author, and relative date each record
+    /// one commit popover hit over the painted text, and a click pins the
+    /// popover of that kind. The footer text does not change. A pane that
+    /// cuts the date records no date hit; a stash drill records none.
+    #[test]
+    fn commit_detail_footer_meta_records_hash_author_and_date_hits_boxed_and_flat() {
+        const SHA: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let target = IconTarget::Commit {
+            repo: "app".into(),
+            sha: SHA.into(),
+        };
+        let date = workspace_status_graph::format_relative_date(
+            1_700_000_000,
+            crate::tui::state::unix_now(),
+        );
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            for expand in [false, true] {
+                let what = format!("{background:?} expand={expand}");
+                let mut state = two_pane_commit_diff_state();
+                state.background = background;
+                state.commit_msg_expand = expand;
+                state.graph_identity = Some(("app".into(), SHA.into()));
+                if let Some(model) = state.graph.as_mut() {
+                    model.commits[0].author_name = "Ada Lovelace".into();
+                }
+                let mut terminal = Terminal::new(TestBackend::new(240, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let screen = buffer_text(&terminal);
+                let meta = if expand {
+                    format!("aaa1111 · main · Ada Lovelace · {date}")
+                } else {
+                    format!("aaa1111 · main · seed graph · Ada Lovelace · {date}")
+                };
+                assert!(screen.contains(&meta), "{what}: footer text\n{screen}");
+                let hits = commit_hits_with_text(&state, &terminal);
+                let found: Vec<(IconKind, &str)> = hits
+                    .iter()
+                    .map(|(hit, text)| (hit.kind, text.as_str()))
+                    .collect();
+                assert_eq!(
+                    found,
+                    vec![
+                        (IconKind::CommitHash, "aaa1111"),
+                        (IconKind::CommitAuthor, "Ada Lovelace"),
+                        (IconKind::CommitDate, date.as_str()),
+                    ],
+                    "{what}\n{screen}"
+                );
+                let l = &state.layout;
+                for (hit, _) in &hits {
+                    assert_eq!(hit.target, target, "{what}");
+                    assert_eq!(hit.y, hits[0].0.y, "{what}: one meta row");
+                    assert!(
+                        hit.y > l.files_list_y + l.files_list_height
+                            && hit.x + hit.width <= l.right_x,
+                        "{what}: the footer under the left file list: {hit:?}"
+                    );
+                }
+
+                // A click on the author pins the author popover.
+                let author = hits[1].0.clone();
+                state.dispatch(Action::Click {
+                    col: author.x,
+                    row: author.y,
+                });
+                assert!(state.popover_pinned(), "{what}: the author pins");
+                let sections = state.open_popover_sections();
+                assert_eq!(sections.len(), 1, "{what}");
+                assert_eq!(
+                    (sections[0].icon, &sections[0].target),
+                    (IconKind::CommitAuthor, &target),
+                    "{what}"
+                );
+            }
+
+            // Narrow the terminal until the left pane cuts the date: the
+            // date hit goes, the hash and author stay.
+            let mut state = two_pane_commit_diff_state();
+            state.background = background;
+            state.commit_msg_expand = false;
+            state.graph_identity = Some(("app".into(), SHA.into()));
+            let cut = (60..240).rev().find_map(|cols| {
+                let mut terminal = Terminal::new(TestBackend::new(cols, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let kinds: Vec<IconKind> = commit_hits_with_text(&state, &terminal)
+                    .into_iter()
+                    .map(|(hit, _)| hit.kind)
+                    .collect();
+                (!kinds.contains(&IconKind::CommitDate)).then(|| (kinds, buffer_text(&terminal)))
+            });
+            let (kinds, screen) = cut.expect("some width cuts the date");
+            assert_eq!(
+                kinds,
+                vec![IconKind::CommitHash, IconKind::CommitAuthor],
+                "{background:?}: a cut date records no hit\n{screen}"
+            );
+            assert!(
+                screen.contains("Ada · "),
+                "{background:?}: the date is cut\n{screen}"
+            );
+
+            // A stash drill paints no hash, author, or date: no hit.
+            let mut state = two_pane_graph_state();
+            state.background = background;
+            state.graph_identity = Some(("app".into(), SHA.into()));
+            let source = super::super::drill::CommitFileSource::Stash {
+                stash_ref: "stash@{0}".into(),
+            };
+            let files = vec![super::super::drill::CommitFile {
+                status: "M".into(),
+                path: "README.md".into(),
+                old_path: None,
+                stat: None,
+            }];
+            state.open_commit_files("app".into(), source.clone(), files.clone());
+            state.open_commit_diff(
+                "app".into(),
+                source,
+                files,
+                0,
+                "README.md".into(),
+                super::super::diff::DiffContent::from_lines(vec![
+                    "@@ -1,1 +1,1 @@".into(),
+                    "-old line".into(),
+                    "+new line".into(),
+                ]),
+            );
+            let mut terminal = Terminal::new(TestBackend::new(240, 30)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let screen = buffer_text(&terminal);
+            assert!(screen.contains("stash@{0}"), "{background:?}\n{screen}");
+            let hits = commit_hits_with_text(&state, &terminal);
+            assert!(
+                hits.is_empty(),
+                "{background:?}: a stash drill records no hit: {hits:?}"
+            );
+        }
+    }
+
+    /// The compare tab's diff header, boxed and flat: a Diff commit vs
+    /// parent tab (`aaa1111^...aaa1111`) records the base on the loaded
+    /// `base_tip` and the head on itself, a commit-vs-working-tree tab
+    /// (`aaa1111 ↔ working tree`) its base, and a live `main...HEAD` tab
+    /// nothing. Each hit sits on the painted token and a click pins its
+    /// hash card. A header that wraps the range keeps only uncut tokens.
+    #[test]
+    fn compare_header_hashes_record_commit_hits_for_pinned_and_worktree_tabs() {
+        const SHA: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const PARENT: &str = "ccc2222ddddddddddddddddddddddddddddddddd";
+        let commit_target = |sha: &str| IconTarget::Commit {
+            repo: "app".into(),
+            sha: sha.into(),
+        };
+        let pinned = |state: &mut AppState, path: Option<&str>| {
+            let base = format!("{SHA}^");
+            state
+                .tabs
+                .open_or_focus("app".into(), base.clone(), SHA.into());
+            let tab = state.tabs.active_compare_mut().unwrap();
+            tab.loading = false;
+            tab.path = path.map(str::to_string);
+            tab.source = Some(super::super::drill::CommitFileSource::Compare {
+                base_ref: base,
+                head_ref: SHA.into(),
+                base_tip: PARENT.into(),
+                merge_base: PARENT.into(),
+                head: SHA.into(),
+            });
+        };
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            let tabs: [(&str, Vec<(&str, &str)>); 3] = [
+                ("pinned", vec![("aaa1111^", PARENT), ("aaa1111", SHA)]),
+                ("worktree", vec![("aaa1111", SHA)]),
+                ("live", vec![]),
+            ];
+            for (name, want) in tabs {
+                let what = format!("{name} {background:?}");
+                let mut state = two_pane_graph_state();
+                state.background = background;
+                match name {
+                    "pinned" => pinned(&mut state, Some("README.md")),
+                    "worktree" => {
+                        state.tabs.open_or_focus_worktree(
+                            "app".into(),
+                            SHA.into(),
+                            super::super::tabs::WorktreeFile {
+                                path: "README.md".into(),
+                                old_path: None,
+                            },
+                        );
+                        state.tabs.active_compare_mut().unwrap().loading = false;
+                    }
+                    _ => {
+                        state
+                            .tabs
+                            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+                    }
+                }
+                let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let screen = buffer_text(&terminal);
+                let hits = commit_hits_with_text(&state, &terminal);
+                let found: Vec<(&str, IconTarget)> = hits
+                    .iter()
+                    .map(|(hit, text)| (text.as_str(), hit.target.clone()))
+                    .collect();
+                let want: Vec<(&str, IconTarget)> = want
+                    .iter()
+                    .map(|(text, sha)| (*text, commit_target(sha)))
+                    .collect();
+                assert_eq!(found, want, "{what}\n{screen}");
+                for (hit, _) in &hits {
+                    assert_eq!(hit.kind, IconKind::CommitHash, "{what}");
+                    assert!(hit.x >= state.layout.right_x, "{what}: right pane {hit:?}");
+                }
+                // A click on each token pins that commit's hash card.
+                for (hit, _) in &hits {
+                    state.close_popover();
+                    draw_state(&mut terminal, &mut state);
+                    state.dispatch(Action::Click {
+                        col: hit.x,
+                        row: hit.y,
+                    });
+                    assert!(state.popover_pinned(), "{what}: {hit:?} pins");
+                    let sections = state.open_popover_sections();
+                    assert_eq!(sections.len(), 1, "{what}");
+                    assert_eq!(
+                        (sections[0].icon, &sections[0].target),
+                        (IconKind::CommitHash, &hit.target),
+                        "{what}"
+                    );
+                }
+            }
+
+            // Before the source loads, a `<full id>^` base names no commit.
+            let mut state = two_pane_graph_state();
+            state.background = background;
+            pinned(&mut state, None);
+            state.tabs.active_compare_mut().unwrap().source = None;
+            let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let texts: Vec<String> = commit_hits_with_text(&state, &terminal)
+                .into_iter()
+                .map(|(_, text)| text)
+                .collect();
+            assert_eq!(texts, vec!["aaa1111".to_string()], "{background:?}");
+
+            // Grow the path so the header wraps the range at every point:
+            // a hit always sits on its whole token, and both one-row and
+            // two-row splits show up, as well as a cut token with no hit.
+            let (mut same_row, mut split, mut cut) = (0, 0, 0);
+            for n in 0..120 {
+                let mut state = two_pane_graph_state();
+                state.background = background;
+                pinned(&mut state, Some(&format!("d/{}", "x".repeat(n))));
+                let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let hits = commit_hits_with_text(&state, &terminal);
+                for (hit, text) in &hits {
+                    let want = if hit.target == commit_target(PARENT) {
+                        "aaa1111^"
+                    } else {
+                        "aaa1111"
+                    };
+                    assert_eq!(text, want, "{background:?} n={n}: {hit:?}");
+                }
+                match hits.as_slice() {
+                    [(a, _), (b, _)] if a.y == b.y => same_row += 1,
+                    [(a, _), (b, _)] if a.y < b.y => split += 1,
+                    [_] => cut += 1,
+                    other => {
+                        let screen = buffer_text(&terminal);
+                        panic!("{background:?} n={n}: {other:?}\n{screen}")
+                    }
+                }
+            }
+            assert!(
+                same_row > 0 && split > 0 && cut > 0,
+                "{background:?}: same row {same_row}, split {split}, cut {cut}"
+            );
+        }
     }
 
     /// Every `file://` link URL of the frame.
