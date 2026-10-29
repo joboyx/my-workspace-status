@@ -471,31 +471,40 @@ fn handle_input(ctx: &mut LoopCtx<'_>, (event, origin, read_at): TtyEvent) {
     ctx.state.end_input();
 }
 
+/// Decode one input event the way the live loop does, at its arrival.
+///
+/// Call it between [`AppState::begin_input`] and [`AppState::end_input`].
+/// `None` when the loop must not dispatch the event.
+///
+/// CSI-u with REPORT_EVENT_TYPES sends a Release after every Press. Do not
+/// dispatch it: `dispatch` would clear `GPending`. CSI-u without event
+/// types sends that release as another Press. Drop a protocol same-key
+/// Press only inside the echo window so `gt` / `gT` stay tab actions and a
+/// later typeless `g` still completes `gg`. A raw-byte second `g` is a new
+/// tap. Pending expiry clears a stale arming `g`.
+pub(crate) fn decode_input(
+    state: &mut AppState,
+    event: &crossterm::event::Event,
+    origin: KeyStrokeOrigin,
+    read_at: Instant,
+) -> Option<Action> {
+    state.expire_stale_g_chord();
+    let input_mode = state.input_mode();
+    if drop_g_chord_echo_at(&mut state.g_chord_echo, input_mode, event, origin, read_at) {
+        return None;
+    }
+    Some(map_event(state, event))
+}
+
 fn dispatch_input(
     ctx: &mut LoopCtx<'_>,
     event: crossterm::event::Event,
     origin: KeyStrokeOrigin,
     read_at: Instant,
 ) {
-    // CSI-u with REPORT_EVENT_TYPES sends a Release after every Press.
-    // Do not dispatch it: `dispatch` would clear `GPending`. CSI-u
-    // without event types sends that release as another Press. Drop a
-    // protocol same-key Press only inside the echo window so `gt` / `gT`
-    // stay tab actions and a later typeless `g` still completes `gg`.
-    // A raw-byte second `g` is a new tap. Pending expiry clears a stale
-    // arming `g`.
-    ctx.state.expire_stale_g_chord();
-    let input_mode = ctx.state.input_mode();
-    if drop_g_chord_echo_at(
-        &mut ctx.state.g_chord_echo,
-        input_mode,
-        &event,
-        origin,
-        read_at,
-    ) {
+    let Some(action) = decode_input(ctx.state, &event, origin, read_at) else {
         return;
-    }
-    let action = map_event(ctx.state, &event);
+    };
     if let Some(pointer) = pointer_motion(&event, &action) {
         // Any-event motion (DECSET 1003) arrives on every cell the pointer
         // crosses. Store it without dispatch: no chord reset, no status,

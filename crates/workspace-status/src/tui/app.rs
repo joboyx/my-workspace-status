@@ -1443,6 +1443,65 @@ mod tests {
         assert!(!POINTER.load(Ordering::SeqCst), "the pointer is reset");
     }
 
+    /// Press-only CSI-u `gg` through the live loop's order: the TTY decode,
+    /// the stale-chord expiry, the echo filter, the key map, and dispatch,
+    /// each at the press's arrival instant.
+    ///
+    /// A second press 5 ms after the first is the echo of that tap. One
+    /// 120 ms later completes `gg`. One 401 ms later arms a new chord.
+    #[test]
+    fn press_only_gg_runs_the_loop_decode_on_arrival_instants() {
+        use crate::tui::event_loop::decode_input;
+        use crate::tui::tty::parse_tty_chunk;
+        use std::time::Instant;
+
+        let press = parse_tty_chunk(b"\x1b[103;1:1u");
+        let [(g, origin)] = press.as_slice() else {
+            panic!("one press-only g: {press:?}");
+        };
+        let fresh = || {
+            let snapshot =
+                build_workspace_snapshot(&[dummy_repo("app"), dummy_repo("lib")], &[], false, &[]);
+            let mut app = AppState::new(std::path::PathBuf::from("/tmp"), snapshot, true);
+            app.cursor = app.rows.len() - 1;
+            assert_ne!(app.cursor, 0, "the cursor starts off the workspace root");
+            app
+        };
+        let key_at = |app: &mut AppState, at: Instant| {
+            app.begin_input(at);
+            let action = decode_input(app, g, *origin, at);
+            if let Some(action) = action.clone() {
+                app.dispatch(action);
+            }
+            app.end_input();
+            action
+        };
+
+        let t0 = Instant::now() - Duration::from_secs(5);
+        let mut app = fresh();
+        assert_eq!(key_at(&mut app, t0), Some(Action::ArmGChord));
+        assert_eq!(
+            key_at(&mut app, t0 + Duration::from_millis(5)),
+            None,
+            "inside the echo window: the tap's own release"
+        );
+        assert_eq!(
+            key_at(&mut app, t0 + Duration::from_millis(120)),
+            Some(Action::MoveToStart)
+        );
+        assert_eq!(app.cursor, 0, "gg reached the workspace root");
+
+        let mut app = fresh();
+        let end = app.cursor;
+        key_at(&mut app, t0);
+        assert_eq!(
+            key_at(&mut app, t0 + Duration::from_millis(401)),
+            Some(Action::ArmGChord),
+            "past the 400 ms window: a new chord, not gg"
+        );
+        assert_eq!(app.cursor, end);
+    }
+
     #[test]
     fn drop_undiscovered_checkouts_removes_vanished_paths() {
         let snapshot =

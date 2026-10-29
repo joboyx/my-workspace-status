@@ -22,7 +22,6 @@ use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
 
 use ratatui::layout::Rect;
 
@@ -667,7 +666,7 @@ impl AppState {
             return Effect::None;
         };
         if kind == FoldKind::Toggle {
-            self.z_pending_at = Some(Instant::now());
+            self.z_pending_at = Some(self.input_clock());
         }
         self.explorer_fold_dir(&row.rel, kind)
     }
@@ -2843,6 +2842,35 @@ mod tests {
         app.dispatch(Action::Move(2));
         assert_eq!(cursor_rel(&app), "new.txt");
         assert!(!app.search_active, "the file search cleared");
+    }
+
+    /// The Explorer `zz` window is the gap between the two `z` presses'
+    /// arrival, as on the Workspace tree.
+    #[test]
+    fn zz_window_reads_the_key_arrival_instant() {
+        use crate::tui::keys::InputMode;
+        use std::time::{Duration, Instant};
+        let mut app = state();
+        open_root(&mut app);
+        assert_eq!(cursor_rel(&app), "src");
+        let first = Instant::now() - Duration::from_secs(5);
+        app.begin_input(first);
+        let _ = app.dispatch(Action::FoldToggle);
+        app.end_input();
+        assert_eq!(app.z_pending_at, Some(first), "z arms at its arrival");
+
+        app.begin_input(first + Duration::from_millis(400));
+        assert!(
+            matches!(app.input_mode(), InputMode::ZPending { .. }),
+            "a z that arrived 400 ms later is the second z of zz"
+        );
+        app.end_input();
+        app.begin_input(first + Duration::from_millis(401));
+        assert!(
+            !matches!(app.input_mode(), InputMode::ZPending { .. }),
+            "a z that arrived 401 ms later is a new single toggle"
+        );
+        app.end_input();
     }
 
     #[test]
