@@ -108,8 +108,9 @@ pub fn graph_footer_request(expand: bool, msg_lines: usize) -> u16 {
 /// [`GraphChromeBudget::footer_body_height`]).
 ///
 /// The last line (meta) stays pinned under the message viewport, so this is
-/// [`crate::footer_message_rows_scroll_max`] of the other lines in the rows
-/// above it. `0` when every line fits.
+/// the scroll max of the other lines in the rows above it, the same value
+/// [`crate::paint_footer_message`] reports for that viewport. `0` when every
+/// line fits.
 pub fn footer_message_scroll_max(line_count: usize, body_height: u16) -> usize {
     crate::footer::footer_message_rows_scroll_max(
         line_count.saturating_sub(1),
