@@ -19737,119 +19737,160 @@ mod tests {
             .contains(ratatui::layout::Position::new(inside[0].x, inside[0].y)));
     }
 
+    /// Paint the graph in `background`'s look: in the right pane (depth 0),
+    /// or with `depth_1` in the left pane beside the commit files of `app`.
+    fn show_graph_at(state: &mut AppState, depth_1: bool, background: BackgroundMode) {
+        state.background = background;
+        if depth_1 {
+            state.open_commit_files(
+                "app".into(),
+                super::super::drill::CommitFileSource::Commit {
+                    commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                },
+                Vec::new(),
+            );
+        }
+    }
+
+    /// Columns `(x, width)` of the pane the graph painted in.
+    fn graph_pane_cols(state: &AppState, depth_1: bool) -> (u16, u16) {
+        if depth_1 {
+            (state.layout.tree_x, state.layout.tree_width)
+        } else {
+            (state.layout.diff_content_x, state.layout.diff_pane_width)
+        }
+    }
+
+    /// PR badge hits inside the graph pane.
+    fn graph_pane_badge_hits(state: &AppState, depth_1: bool) -> Vec<PrBadgeHit> {
+        let (x0, width) = graph_pane_cols(state, depth_1);
+        state
+            .layout
+            .pr_badge_hits()
+            .into_iter()
+            .filter(|hit| (x0..x0 + width).contains(&hit.x))
+            .collect()
+    }
+
+    /// A graph worktree badge paints flush right, records one hit and one
+    /// link, and Ctrl+click on it opens its PR: depth 0 and 1, boxed and
+    /// flat.
     #[test]
     fn graph_worktree_badge_paints_and_ctrl_click_opens_its_pr() {
         use workspace_status_graph::Worktree;
         const HEAD: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let mut state = pr_state(
-            &[
-                branch_repo("app", "main"),
-                linked_repo("app/.worktrees/feat", "app", "feat"),
-            ],
-            true,
-        );
-        set_pr(&mut state, "app", "main", found_pr(PrState::Ready));
-        set_pr(
-            &mut state,
-            "app/.worktrees/feat",
-            "feat",
-            found_pr(PrState::InReview),
-        );
-        focus_tree_row(&mut state, "checkout:app");
-        state.graph = Some(GraphModel {
-            commits: vec![Commit {
-                id: HEAD.into(),
-                subject: "seed graph".into(),
-                refs: vec!["main".into()],
-                author_name: "Ada".into(),
-                author_date_unix: 1_700_000_000,
-                ..Commit::default()
-            }],
-            head_id: Some(HEAD.into()),
-            // The commit row lists `app`; only the worktree row is badged.
-            worktrees: vec![
-                Worktree {
-                    path: "app".into(),
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            for depth_1 in [false, true] {
+                let what = format!("{background:?} depth_1={depth_1}");
+                let mut state = pr_state(
+                    &[
+                        branch_repo("app", "main"),
+                        linked_repo("app/.worktrees/feat", "app", "feat"),
+                    ],
+                    true,
+                );
+                set_pr(&mut state, "app", "main", found_pr(PrState::Ready));
+                set_pr(
+                    &mut state,
+                    "app/.worktrees/feat",
+                    "feat",
+                    found_pr(PrState::InReview),
+                );
+                focus_tree_row(&mut state, "checkout:app");
+                state.graph = Some(GraphModel {
+                    commits: vec![Commit {
+                        id: HEAD.into(),
+                        subject: "seed graph".into(),
+                        refs: vec!["main".into()],
+                        author_name: "Ada".into(),
+                        author_date_unix: 1_700_000_000,
+                        ..Commit::default()
+                    }],
                     head_id: Some(HEAD.into()),
-                    branch: Some("main".into()),
-                    hidden: false,
-                    is_current: true,
-                },
-                Worktree {
-                    path: "app/.worktrees/feat".into(),
-                    head_id: None,
-                    branch: Some("feat".into()),
-                    hidden: false,
-                    is_current: false,
-                },
-            ],
-            ..GraphModel::default()
-        });
-        let mut terminal = pr_terminal();
-        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-        let right_x = state.layout.right_x;
-        let graph_hits: Vec<PrBadgeHit> = state
-            .layout
-            .pr_badge_hits()
-            .iter()
-            .filter(|hit| hit.x >= right_x)
-            .cloned()
-            .collect();
-        assert_eq!(graph_hits.len(), 1, "{graph_hits:?}");
-        let hit = graph_hits[0].clone();
-        assert_eq!(
-            (hit.width, hit.repo.as_path()),
-            (1, Path::new("app/.worktrees/feat"))
-        );
-        let buf = terminal.backend().buffer();
-        let row = buf_line(buf, hit.y);
-        let label_x = find_cell_col(buf, hit.y, "app/.worktrees/feat feat ")
-            .unwrap_or_else(|| panic!("worktree label:\n{row}"));
-        // Flush right in the graph pane, left of its border; blank between.
-        assert_eq!(hit.x, graph_badge_edge_x(buf), "{row}");
-        assert!(
-            (label_x + 24..hit.x).all(|x| buf[(x, hit.y)].symbol() == " "),
-            "{row}"
-        );
-        assert_eq!(buf[(hit.x, hit.y)].symbol(), "P");
-        assert_eq!(buf[(hit.x, hit.y)].fg, state.theme.palette().branch_default);
-        assert!(buf[(hit.x, hit.y)].modifier.contains(Modifier::BOLD));
-        // The graph badge glyph links to the full PR URL.
-        assert!(
-            state
-                .layout
-                .links
-                .contains(&crate::tui::hyperlink::LinkHit {
-                    y: hit.y,
-                    x: hit.x,
-                    width: 1,
-                    url: "https://github.com/octo/demo/pull/7".into(),
-                }),
-            "{:?}",
-            state.layout.links
-        );
-        let commit_y = (0..24)
-            .find(|y| buf_line(buf, *y).contains("seed graph"))
-            .expect("commit row");
-        let commit_row: String = buf_line(buf, commit_y)
-            .chars()
-            .skip(right_x as usize)
-            .collect();
-        assert!(!commit_row.contains(" A"), "{commit_row}");
+                    // The commit row lists `app`; only the worktree row is
+                    // badged.
+                    worktrees: vec![
+                        Worktree {
+                            path: "app".into(),
+                            head_id: Some(HEAD.into()),
+                            branch: Some("main".into()),
+                            hidden: false,
+                            is_current: true,
+                        },
+                        Worktree {
+                            path: "app/.worktrees/feat".into(),
+                            head_id: None,
+                            branch: Some("feat".into()),
+                            hidden: false,
+                            is_current: false,
+                        },
+                    ],
+                    ..GraphModel::default()
+                });
+                show_graph_at(&mut state, depth_1, background);
+                let mut terminal = pr_terminal();
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                let (x0, width) = graph_pane_cols(&state, depth_1);
+                let graph_hits = graph_pane_badge_hits(&state, depth_1);
+                assert_eq!(graph_hits.len(), 1, "{what}: {graph_hits:?}");
+                let hit = graph_hits[0].clone();
+                assert_eq!(
+                    (hit.width, hit.repo.as_path()),
+                    (1, Path::new("app/.worktrees/feat")),
+                    "{what}"
+                );
+                let buf = terminal.backend().buffer();
+                let row = buf_line(buf, hit.y);
+                let label_x = find_cell_col(buf, hit.y, "app/.worktrees/feat feat ")
+                    .unwrap_or_else(|| panic!("{what}: worktree label:\n{row}"));
+                // Flush right in the graph pane; blank between.
+                assert_eq!(hit.x, x0 + width - 1, "{what}: {row}");
+                assert!(
+                    (label_x + 24..hit.x).all(|x| buf[(x, hit.y)].symbol() == " "),
+                    "{what}: {row}"
+                );
+                assert_eq!(buf[(hit.x, hit.y)].symbol(), "P", "{what}");
+                let cell = &buf[(hit.x, hit.y)];
+                assert_eq!(cell.fg, state.theme.palette().branch_default, "{what}");
+                assert!(cell.modifier.contains(Modifier::BOLD), "{what}");
+                // The graph badge glyph links to the full PR URL.
+                assert!(
+                    state
+                        .layout
+                        .links
+                        .contains(&crate::tui::hyperlink::LinkHit {
+                            y: hit.y,
+                            x: hit.x,
+                            width: 1,
+                            url: "https://github.com/octo/demo/pull/7".into(),
+                        }),
+                    "{what}: {:?}",
+                    state.layout.links
+                );
+                let commit_y = (0..24)
+                    .find(|y| buf_line(buf, *y).contains("seed graph"))
+                    .expect("commit row");
+                let commit_row: String = (x0..x0 + width)
+                    .map(|x| buf[(x, commit_y)].symbol())
+                    .collect();
+                assert!(!commit_row.contains(" A"), "{what}: {commit_row}");
 
-        let effect = state.dispatch(Action::CtrlClick {
-            col: hit.x,
-            row: hit.y,
-        });
-        assert_eq!(
-            pr_opened(&effect),
-            Some((PathBuf::from("app/.worktrees/feat"), "feat".to_string()))
-        );
-        let effect = state.dispatch(Action::CtrlClick {
-            col: hit.x - 1,
-            row: hit.y,
-        });
-        assert_eq!(pr_opened(&effect), None);
+                let effect = state.dispatch(Action::CtrlClick {
+                    col: hit.x,
+                    row: hit.y,
+                });
+                assert_eq!(
+                    pr_opened(&effect),
+                    Some((PathBuf::from("app/.worktrees/feat"), "feat".to_string())),
+                    "{what}"
+                );
+                let effect = state.dispatch(Action::CtrlClick {
+                    col: hit.x - 1,
+                    row: hit.y,
+                });
+                assert_eq!(pr_opened(&effect), None, "{what}");
+            }
+        }
     }
 
     /// `app` on `main` plus linked checkout `linked` on `feat` (both with an
@@ -20771,7 +20812,8 @@ mod tests {
     }
 
     /// Each graph worktree badge paints its state glyph bold in the state
-    /// colour; a stale one paints muted. Both glyph modes.
+    /// colour; a stale one paints muted. Both glyph modes, depth 0 and 1,
+    /// boxed and flat.
     #[test]
     fn graph_worktree_badges_paint_each_state_and_stale_muted() {
         let palette = ThemeId::TokyoNight.palette();
@@ -20783,39 +20825,48 @@ mod tests {
             (PrState::InReview, "○", "P", palette.branch_default),
             (PrState::Merged, "✓", "m", palette.branch_feature),
         ];
-        for ascii in [true, false] {
-            for (pr, nerd, letter, color) in cases {
-                for stale in [false, true] {
-                    let what = format!("{pr:?} ascii={ascii} stale={stale}");
-                    let mut state = pr_graph_state("app/.worktrees/wt", "feat", false);
-                    state.ascii = ascii;
-                    state.set_pr_poll_mode(crate::tui::pr_poll::PrPollMode::Every(50));
-                    let landed = if stale {
-                        Instant::now() - std::time::Duration::from_secs(1)
-                    } else {
-                        Instant::now()
-                    };
-                    assert!(state.apply_pr_lookup_at(
-                        Path::new("app/.worktrees/wt"),
-                        "feat",
-                        Some(PR_REMOTE.into()),
-                        found_pr(pr),
-                        landed,
-                    ));
-                    let mut terminal = pr_terminal();
-                    terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-                    let hits = graph_badge_hits(&state);
-                    assert_eq!(hits.len(), 1, "{what}");
-                    let cell = &terminal.backend().buffer()[(hits[0].x, hits[0].y)];
-                    assert_eq!(cell.symbol(), if ascii { letter } else { nerd }, "{what}");
-                    // A merged PR is not polled, so it never goes stale.
-                    let want = if stale && pr != PrState::Merged {
-                        palette.muted
-                    } else {
-                        color
-                    };
-                    assert_eq!(cell.fg, want, "{what}");
-                    assert!(cell.modifier.contains(Modifier::BOLD), "{what}");
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            for depth_1 in [false, true] {
+                for ascii in [true, false] {
+                    for (pr, nerd, letter, color) in cases {
+                        for stale in [false, true] {
+                            let what = format!(
+                                "{background:?} depth_1={depth_1} {pr:?} ascii={ascii} stale={stale}"
+                            );
+                            let mut state = pr_graph_state("app/.worktrees/wt", "feat", false);
+                            state.ascii = ascii;
+                            state.set_pr_poll_mode(crate::tui::pr_poll::PrPollMode::Every(50));
+                            let landed = if stale {
+                                Instant::now() - std::time::Duration::from_secs(1)
+                            } else {
+                                Instant::now()
+                            };
+                            assert!(state.apply_pr_lookup_at(
+                                Path::new("app/.worktrees/wt"),
+                                "feat",
+                                Some(PR_REMOTE.into()),
+                                found_pr(pr),
+                                landed,
+                            ));
+                            show_graph_at(&mut state, depth_1, background);
+                            let mut terminal = pr_terminal();
+                            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                            let hits = graph_pane_badge_hits(&state, depth_1);
+                            assert_eq!(hits.len(), 1, "{what}");
+                            let (x0, width) = graph_pane_cols(&state, depth_1);
+                            assert_eq!(hits[0].x, x0 + width - 1, "{what}: flush right");
+                            let cell = &terminal.backend().buffer()[(hits[0].x, hits[0].y)];
+                            assert_eq!(cell.symbol(), if ascii { letter } else { nerd }, "{what}");
+                            // A merged PR is not polled, so it never goes stale.
+                            let want = if stale && pr != PrState::Merged {
+                                palette.muted
+                            } else {
+                                color
+                            };
+                            assert_eq!(cell.fg, want, "{what}");
+                            assert!(cell.modifier.contains(Modifier::BOLD), "{what}");
+                        }
+                    }
                 }
             }
         }
