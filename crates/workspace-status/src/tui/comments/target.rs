@@ -1439,6 +1439,7 @@ mod tests {
             branch: branch.into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream_rewrite: None,
             head: String::new(),
             has_unstaged: false,
             has_staged: false,

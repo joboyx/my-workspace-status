@@ -875,7 +875,8 @@ pub fn ahead_behind(left: &str, right: &str, cwd: &Path) -> Option<(usize, usize
 /// Only a diverged branch (ahead and behind) can be one. The upstream
 /// reflog tells which local commits the old upstream history held: those
 /// are the commits the rewrite dropped. See [`classify_upstream_rewrite`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpstreamRewrite {
     /// Upstream ref as given, for example `origin/main`.
     pub upstream: String,
@@ -883,6 +884,8 @@ pub struct UpstreamRewrite {
     /// newest local commit that was once on the upstream.
     pub fork_point: String,
     /// Full sha of the local branch tip used for the classification.
+    /// Omitted from `--json`; the `p` confirm checks it against the branch.
+    #[serde(skip)]
     pub tip: String,
     /// Local commits above the fork point: work that is not on the old upstream.
     pub yours: usize,

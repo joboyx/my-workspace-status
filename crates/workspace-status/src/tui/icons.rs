@@ -9,6 +9,7 @@
 //! `?` help legend paints it. Graph glyphs come from
 //! `workspace_status_graph::{UNICODE, ASCII}`.
 
+use crate::git::UpstreamRewrite;
 use crate::helpers::visible_width;
 use crate::snapshot::{FileChange, SyncStatus};
 
@@ -1122,6 +1123,16 @@ pub fn tui_sync_mark(ascii: bool, status: SyncStatus, note: &str) -> String {
         SyncStatus::Diverged => icon_diverged(ascii).to_string(),
         SyncStatus::UpToDate => icon_synced(ascii).to_string(),
     }
+}
+
+/// Text for a diverged branch whose upstream was force-pushed:
+/// `origin/main was force-pushed \u{b7} 2 dropped, 0 yours`. The tree row
+/// and the sync popover show it.
+pub fn upstream_rewrite_text(rewrite: &UpstreamRewrite) -> String {
+    format!(
+        "{} was force-pushed \u{b7} {} dropped, {} yours",
+        rewrite.upstream, rewrite.dropped, rewrite.yours
+    )
 }
 
 /// The digits right after `prefix` in a sync note (`ahead by 3 commits`

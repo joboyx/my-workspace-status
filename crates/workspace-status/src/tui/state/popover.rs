@@ -913,6 +913,7 @@ mod tests {
             branch: "feature".into(),
             sync_status: status,
             sync_note: note.into(),
+            upstream_rewrite: None,
             head: "abc".into(),
             has_unstaged: true,
             has_staged: false,

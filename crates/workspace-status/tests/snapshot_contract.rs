@@ -288,6 +288,74 @@ fn default_without_flags_is_plain() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Commit one file in `repo`.
+fn commit_file(repo: &Path, name: &str) {
+    fs::write(repo.join(name), format!("{name}\n")).unwrap();
+    git(repo, &["add", name]);
+    git(repo, &["commit", "-q", "-m", name]);
+}
+
+#[test]
+fn json_names_a_force_pushed_upstream_and_omits_it_elsewhere() {
+    let root = std::env::temp_dir().join(format!(
+        "workspace-status-rewrite-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    // A maintainer pushes base + 2 bot commits, the checkout clones them,
+    // then the maintainer drops the bot commits and force-pushes a release.
+    let remote = root.join("remote.git");
+    git(&root, &["init", "-q", "--bare", "-b", "main", "remote.git"]);
+    let maint = root.join("maint");
+    fs::create_dir_all(&maint).unwrap();
+    git(&maint, &["init", "-q", "-b", "main"]);
+    git(
+        &maint,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    for name in ["base.txt", "bot1.txt", "bot2.txt"] {
+        commit_file(&maint, name);
+    }
+    git(&maint, &["push", "-q", "-u", "origin", "main"]);
+    git(
+        &workspace,
+        &["clone", "-q", remote.to_str().unwrap(), "rewritten"],
+    );
+    git(&maint, &["reset", "-q", "--hard", "HEAD~2"]);
+    commit_file(&maint, "release.txt");
+    git(&maint, &["push", "-q", "--force", "origin", "main"]);
+    git(&workspace.join("rewritten"), &["fetch", "-q"]);
+    seed_repo(&workspace, "plain", "main", false);
+
+    let snapshot = run_json(&workspace, &["--json"]);
+    let repos = snapshot["repos"].as_array().unwrap();
+    let rewritten = repos.iter().find(|r| r["repo"] == "rewritten").unwrap();
+    assert_eq!(rewritten["syncStatus"], "diverged");
+    assert_eq!(rewritten["syncNote"], "diverged (ahead 2, behind 1)");
+    let rewrite = rewritten["upstreamRewrite"].as_object().expect("object");
+    assert_eq!(rewrite["upstream"], "origin/main");
+    assert_eq!(rewrite["dropped"], 2);
+    assert_eq!(rewrite["yours"], 0);
+    assert_eq!(rewrite["forkPoint"].as_str().unwrap().len(), 40);
+    let mut keys: Vec<&str> = rewrite.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["dropped", "forkPoint", "upstream", "yours"]);
+
+    let plain_repo = repos.iter().find(|r| r["repo"] == "plain").unwrap();
+    assert!(plain_repo.get("upstreamRewrite").is_none(), "{plain_repo}");
+
+    let plain = run_plain(&workspace, &["--plain"]);
+    assert!(
+        !plain.contains("force-pushed"),
+        "the plain report is unchanged:\n{plain}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn merged_into_default_skips_same_commit_as_default_tip() {
     let root = std::env::temp_dir().join(format!(
