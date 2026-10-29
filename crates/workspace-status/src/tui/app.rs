@@ -17,7 +17,7 @@ use crossterm::event::{
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, size as terminal_size, BeginSynchronizedUpdate,
-    EnterAlternateScreen, LeaveAlternateScreen,
+    EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::{execute, queue};
 use ratatui::backend::CrosstermBackend;
@@ -157,6 +157,9 @@ fn restore_terminal() {
 /// With no bar shown it writes no OSC 9;4: some terminals show any OSC 9
 /// as a desktop notification. With no resize shape shown it writes no
 /// OSC 22.
+///
+/// The alternate screen is left through [`leave_alternate_screen_to`],
+/// which closes any open synchronized update first.
 fn restore_terminal_to<W: Write>(out: &mut W, clear_progress: bool, reset_pointer: bool) {
     if clear_progress {
         let _ = out.write_all(PROGRESS_CLEAR.as_bytes());
@@ -166,7 +169,21 @@ fn restore_terminal_to<W: Write>(out: &mut W, clear_progress: bool, reset_pointe
     }
     let _ = disable_raw_mode();
     let _ = disable_mouse(out);
-    let _ = execute!(out, PopKeyboardEnhancementFlags, LeaveAlternateScreen, Show);
+    let _ = execute!(out, PopKeyboardEnhancementFlags);
+    let _ = leave_alternate_screen_to(out);
+    let _ = execute!(out, Show);
+}
+
+/// Close any open synchronized update (DEC private mode 2026), then leave
+/// the alternate screen.
+///
+/// A resize opens an update that the next frame closes. When the TUI
+/// quits, fails, or hands the terminal to an editor before that frame,
+/// this end marker closes it, so the terminal never holds back output.
+/// The end marker is written every time: with no update open, a terminal
+/// ignores it.
+fn leave_alternate_screen_to<W: Write>(out: &mut W) -> io::Result<()> {
+    execute!(out, EndSynchronizedUpdate, LeaveAlternateScreen)
 }
 
 /// Chain a panic hook that restores the terminal to `target()` before the
@@ -1045,7 +1062,7 @@ pub(crate) fn run_blocking_editor(
     let _ = disable_raw_mode();
     let mut out = stdout();
     let _ = disable_mouse(&mut out);
-    let _ = execute!(out, LeaveAlternateScreen);
+    let _ = leave_alternate_screen_to(&mut out);
     let _ = terminal.show_cursor();
     drain_pending_events();
     let spawn = Command::new(cmd)
@@ -1350,6 +1367,38 @@ mod tests {
         );
     }
 
+    /// Every exit (quit, an error return, the panic hook) and the editor
+    /// suspend close a synchronized update before they leave the
+    /// alternate screen, whether or not one is open.
+    #[test]
+    fn restore_closes_a_synchronized_update_before_leaving_the_alt_screen() {
+        static NO_BAR: AtomicBool = AtomicBool::new(false);
+        static NO_POINTER: AtomicBool = AtomicBool::new(false);
+        const SYNC_END: &str = "\x1b[?2026l";
+        const LEAVE_ALT: &str = "\x1b[?1049l";
+        let closes_then_leaves = |out: &str| {
+            matches!(
+                (out.find(SYNC_END), out.find(LEAVE_ALT)),
+                (Some(end), Some(leave)) if end < leave
+            )
+        };
+
+        let restore = restore_bytes(&NO_BAR, &NO_POINTER);
+        assert!(
+            closes_then_leaves(&restore),
+            "restore ends the update, then leaves: {restore:?}"
+        );
+
+        let mut suspend = Vec::new();
+        leave_alternate_screen_to(&mut suspend).unwrap();
+        let suspend = String::from_utf8(suspend).unwrap();
+        assert_eq!(
+            suspend,
+            format!("{SYNC_END}{LEAVE_ALT}"),
+            "the editor suspend ends the update, then leaves"
+        );
+    }
+
     #[test]
     fn restore_resets_the_pointer_only_after_a_resize_shape() {
         static NO_BAR: AtomicBool = AtomicBool::new(false);
@@ -1444,6 +1493,11 @@ mod tests {
             "hook resets the resize pointer next: {out:?}"
         );
         assert!(out.contains("\x1b[?1049l"), "hook leaves the alt screen");
+        assert!(
+            out.find("\x1b[?2026l")
+                .is_some_and(|end| out.find("\x1b[?1049l").is_some_and(|leave| end < leave)),
+            "hook ends any synchronized update before it leaves: {out:?}"
+        );
         assert!(out.contains("\x1b[?25h"), "hook shows the cursor");
         assert!(
             !TERMINAL_SET_UP.load(Ordering::SeqCst),
