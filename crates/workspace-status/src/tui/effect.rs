@@ -2514,6 +2514,12 @@ impl Interpreter {
                     request,
                 } = job;
                 if state.apply_pr_detail(&repo, &branch, &remote, number, request, lookup) {
+                    // The answer changed while this fetch was out: ask
+                    // again for the open popover.
+                    let details = state.request_popover_pr_details();
+                    if details != Effect::None {
+                        self.schedule(state, opts, details, &Action::None);
+                    }
                     self.mark();
                 }
                 self.fill_pr_badge_slots();
@@ -9198,6 +9204,25 @@ mod tests {
             ),
             "the old detail stays on screen meanwhile"
         );
+
+        // A second change while that fetch is out: the detail is asked
+        // again once it lands, so it never stays older than the badge.
+        apply(
+            &mut interp,
+            &mut state,
+            badge(crate::tui::pr_status::PrState::CiRunning),
+        );
+        assert_eq!(interp.pr_details.len(), 1, "one fetch at a time");
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 1, "the queued detail fetch runs");
+        for (id, work) in jobs {
+            apply_id(&mut interp, &mut state, id, work());
+        }
+        assert!(
+            state.pr_detail_awaited(DETAIL_REMOTE, "main", 3),
+            "asked again after it landed"
+        );
+        assert_eq!(interp.pr_details.len(), 1);
     }
 
     #[test]
