@@ -1,7 +1,5 @@
 //! List keys, search, help, view toggles, and mouse hit-test.
 
-use std::time::Instant;
-
 use super::super::action::{Action, Effect, ExternalDiffKind};
 use super::super::branches::can_open_branch_picker;
 use super::super::command_palette::{CommandScope, PaletteCommand};
@@ -43,7 +41,7 @@ impl AppState {
                 Effect::None
             }
             Action::Quit => Effect::Quit,
-            Action::CtrlC => self.ctrl_c(Instant::now()),
+            Action::CtrlC => self.ctrl_c(self.input_clock()),
             Action::ToggleHelp => {
                 self.cancel_mouse_drag();
                 self.help_open = !self.help_open;

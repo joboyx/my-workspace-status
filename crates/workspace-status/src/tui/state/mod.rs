@@ -1085,6 +1085,9 @@ pub struct AppState {
     /// Typeless CSI-u release-as-press for `g`-chord keys.
     pub(crate) g_chord_echo: GChordEchoState,
     pub(crate) ctrl_c_armed_until: Option<Instant>,
+    /// Ctrl-C arm whose prompt the loop timer cleared. Kept so a press that
+    /// arrived before it ended, but was handled after, still quits.
+    ctrl_c_closed_until: Option<Instant>,
     last_click: Option<(u16, u16, Instant)>,
     /// When the input event being handled arrived (its stdin read). Chord
     /// and double-click windows measure from it. `None` outside input
@@ -1333,6 +1336,7 @@ impl AppState {
             g_pending_at: None,
             g_chord_echo: GChordEchoState::default(),
             ctrl_c_armed_until: None,
+            ctrl_c_closed_until: None,
             last_click: None,
             input_at: None,
             pr_cache: pull_request::PrCache::default(),
@@ -2496,8 +2500,20 @@ impl AppState {
         kinds.into_iter().map(|(id, _)| id).collect()
     }
 
+    /// The Ctrl-C arm a press at `now` (its arrival) answers.
+    ///
+    /// The loop timer closes an arm on the wall clock, but a press that
+    /// arrived inside the window and was handled late still answers it:
+    /// [`handle_ctrl_c`] compares the press's arrival with the window end.
+    fn take_ctrl_c_arm(&mut self) -> Option<Instant> {
+        let armed = self.ctrl_c_armed_until.or(self.ctrl_c_closed_until);
+        self.ctrl_c_closed_until = None;
+        armed
+    }
+
     fn ctrl_c(&mut self, now: Instant) -> Effect {
-        let result = handle_ctrl_c(self.ctrl_c_armed_until, now);
+        let armed = self.take_ctrl_c_arm();
+        let result = handle_ctrl_c(armed, now);
         self.ctrl_c_armed_until = result.armed_until;
         if result.quit {
             return Effect::Quit;
@@ -2516,7 +2532,7 @@ impl AppState {
         if now < until {
             return false;
         }
-        self.ctrl_c_armed_until = None;
+        self.ctrl_c_closed_until = self.ctrl_c_armed_until.take();
         if is_ctrl_c_exit_prompt(&self.status) {
             self.status.clear();
             true
@@ -2536,7 +2552,8 @@ impl AppState {
     /// Same chord as Ctrl-C: the first press arms the window and shows
     /// [`QUIT_WHILE_BUSY_PROMPT`]; a second `q` or Ctrl-C inside it quits.
     pub fn quit_while_busy(&mut self, now: Instant) -> Effect {
-        let result = handle_ctrl_c(self.ctrl_c_armed_until, now);
+        let armed = self.take_ctrl_c_arm();
+        let result = handle_ctrl_c(armed, now);
         self.ctrl_c_armed_until = result.armed_until;
         if result.quit {
             return Effect::Quit;
@@ -9071,8 +9088,64 @@ mod tests {
         assert!(app.expire_ctrl_c_prompt(until));
         assert!(app.status.is_empty());
         assert!(app.ctrl_c_armed_until.is_none());
+        // The next press arrives once the window has ended.
+        app.begin_input(until);
         assert_eq!(app.dispatch(Action::CtrlC), Effect::None);
+        app.end_input();
         assert_eq!(app.status, CTRL_C_EXIT_PROMPT);
+    }
+
+    /// The press-again window is the gap between the two presses' arrival.
+    ///
+    /// The loop timer clears the prompt on the wall clock. A second Ctrl-C
+    /// that arrived inside the window, but that the loop handled after the
+    /// timer fired, still quits. One that arrived at the window end is a
+    /// fresh prompt.
+    #[test]
+    fn ctrl_c_window_reads_the_press_arrival_instant() {
+        let first = Instant::now() - Duration::from_secs(10);
+        let window = Duration::from_millis(crate::tui::ctrl_c_exit::CTRL_C_EXIT_MS);
+
+        let mut app = state();
+        app.begin_input(first);
+        assert_eq!(app.dispatch(Action::CtrlC), Effect::None);
+        app.end_input();
+        assert_eq!(app.ctrl_c_armed_until, Some(first + window));
+        assert!(
+            app.expire_ctrl_c_prompt(Instant::now()),
+            "timer clears the prompt"
+        );
+        assert!(app.status.is_empty());
+        app.begin_input(first + window - Duration::from_millis(1));
+        assert_eq!(
+            app.dispatch(Action::CtrlC),
+            Effect::Quit,
+            "arrived inside the window: quits though the loop took it late"
+        );
+        app.end_input();
+
+        let mut app = state();
+        app.begin_input(first);
+        app.dispatch(Action::CtrlC);
+        app.end_input();
+        assert!(app.expire_ctrl_c_prompt(Instant::now()));
+        app.begin_input(first + window);
+        assert_eq!(
+            app.dispatch(Action::CtrlC),
+            Effect::None,
+            "arrived at the end"
+        );
+        app.end_input();
+        assert_eq!(app.status, CTRL_C_EXIT_PROMPT, "a fresh prompt");
+
+        // `q` while busy reads the same arrival rule.
+        let mut app = state();
+        assert_eq!(app.quit_while_busy(first), Effect::None);
+        assert!(app.expire_ctrl_c_prompt(Instant::now()));
+        assert_eq!(
+            app.quit_while_busy(first + window - Duration::from_millis(1)),
+            Effect::Quit
+        );
     }
 
     #[test]

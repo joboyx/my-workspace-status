@@ -533,7 +533,7 @@ fn dispatch_input(
         match classify_busy_dispatch(&action, inner_action.as_ref()) {
             BusyAction::Quit => {
                 // `q` mid-write arms the same press-again window as Ctrl-C.
-                if matches!(ctx.state.quit_while_busy(Instant::now()), Effect::Quit) {
+                if matches!(ctx.state.quit_while_busy(read_at), Effect::Quit) {
                     ctx.quit = true;
                 }
                 ctx.presenter.mark();
