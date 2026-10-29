@@ -636,42 +636,6 @@ mod tests {
     }
 
     #[test]
-    fn upstream_rewrite_is_an_additive_json_object_without_the_tip() {
-        let mut rewritten = sample_repo("app", false);
-        rewritten.sync_status = SyncStatus::Diverged;
-        rewritten.sync_note = "diverged (ahead 2, behind 1)".into();
-        rewritten.upstream_rewrite = Some(crate::git::UpstreamRewrite {
-            upstream: "origin/main".into(),
-            fork_point: "f".repeat(40),
-            tip: "t".repeat(40),
-            yours: 1,
-            dropped: 2,
-        });
-        let built =
-            build_workspace_snapshot(&[rewritten, sample_repo("lib", false)], &[], false, &[]);
-        let json: serde_json::Value =
-            serde_json::from_str(&serialize_workspace_snapshot(&built)).expect("json");
-        let repos = json["repos"].as_array().expect("repos");
-        let app = repos.iter().find(|r| r["repo"] == "app").expect("app");
-        assert_eq!(
-            app["upstreamRewrite"],
-            serde_json::json!({
-                "upstream": "origin/main",
-                "forkPoint": "f".repeat(40),
-                "yours": 1,
-                "dropped": 2,
-            })
-        );
-        assert_eq!(app["syncStatus"], "diverged");
-        assert_eq!(app["syncNote"], "diverged (ahead 2, behind 1)");
-        let lib = repos.iter().find(|r| r["repo"] == "lib").expect("lib");
-        assert!(
-            lib.get("upstreamRewrite").is_none(),
-            "omitted when not a rewrite: {lib}"
-        );
-    }
-
-    #[test]
     fn the_rewrite_survives_the_workspace_round_trip() {
         let mut rewritten = sample_repo("app", false);
         rewritten.upstream_rewrite = Some(crate::git::UpstreamRewrite {

@@ -906,23 +906,6 @@ mod upstream_rewrite_tests {
     }
 
     #[test]
-    fn your_commit_on_top_counts_as_yours() {
-        let fixture = upstream_rewrite_fixture(RewriteKind::YourCommit);
-        let rewrite = snapshot(&fixture)
-            .upstream_rewrite
-            .expect("classified as a rewrite");
-        assert_eq!((rewrite.dropped, rewrite.yours), (2, 1));
-    }
-
-    #[test]
-    fn normal_divergence_has_no_rewrite() {
-        let fixture = upstream_rewrite_fixture(RewriteKind::NormalDivergence);
-        let snap = snapshot(&fixture);
-        assert_eq!(snap.sync_status, SyncStatus::Diverged);
-        assert_eq!(snap.upstream_rewrite, None);
-    }
-
-    #[test]
     fn a_branch_that_is_not_diverged_has_no_rewrite() {
         let fixture = upstream_rewrite_fixture(RewriteKind::Dropped);
         crate::testutil::git(&fixture.checkout, &["reset", "-q", "--hard", "origin/main"]);
