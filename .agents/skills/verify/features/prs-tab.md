@@ -48,7 +48,7 @@ $V capture "$RUN" groups | in_order 'v ABC-123 · > fix CI #7' 'x #7   acme/app'
 $V wait --cursor "$RUN" 'v ABC-123'
 ```
 
-Expect: the tab strip ` Workspace │ PRs 4 [✗]`; the list pane `prs` beside the detail pane `PR`. The headers read `ABC-123 · > fix CI #7`, `ABC-125 · > wait for CI !5`, `ABC-120 · m merged`; only the first header ends in `checked just now`. Rows show the title without its key and commit type (`Refresh auth tokens before expiry`, `Add the login page`, `Rate limit the public API`, `Reconcile billing runs`), a CI cell (`CI x`, `CI ok`, `CI ..`, `CI -`), and the state label; the `#8` row ends in `in review   after #7`. The detail starts `x #7 fix(ABC-123): Refresh auth tokens before expir…`: a header shows the PR its next action names.
+Expect: the tab strip ` Workspace │ PRs 4 [✗]`; the list pane `prs` beside the detail pane `PR`. The headers read `ABC-123 · > fix CI #7`, `ABC-125 · > wait for CI !5`, `ABC-120 · m merged`; only the first header ends in `checked just now`. Rows show the title without its key and commit type (`Refresh auth tokens before expiry`, `Add the login page`, `Rate limit the public API`, `Reconcile billing runs`), a CI cell (`CI x`, `CI ok`, `CI ..`, `CI -`), and the state label; the `#8` row ends in `in review   after #7`. The detail starts `x #7 fix(ABC-123): Refresh auth tokens` (the full title, cut at the pane edge): a header shows the PR its next action names.
 
 **PASS:** `in_order` prints PASS, the capture shows `PRs 4`, `after #7` on the `#8` row, and `checked ` on the first header only, and the cursor starts on the `ABC-123` header. The group order follows what the author must do (CI failed, then waiting, then finished), not the key: key order would put `ABC-120` first.
 
@@ -202,6 +202,6 @@ Stop the last run when you are done (`stop_run`, or `$V stop <run dir>`).
 
 - The tab opens with the cursor on its first line at that moment, and the cursor then follows that line. Wait for every badge before `gp` (as above), or the first line can be a group that later moves down.
 - The tree row and the detail pane share screen lines with the list. `x #7 ` alone also matches the detail title on the first line; use the row text with its repository (`x #7   acme/app`) or `wait --cursor`.
-- `Z` and `C-w` reach the app as legacy key bytes under tmux; the PTY suite sends them as CSI-u. Both paths work, and only the PTY suite proves the CSI-u one.
+- `Z` and `C-w` reach the app as legacy key bytes under tmux; the PTY suite sends Shift and Ctrl keys as CSI-u. Both paths work, and only the PTY suite proves the CSI-u one.
 - The title command runs once per key per fill. A fill starts when the tab opens, when the listed keys change, and after `r` on the tab; with polling off (the driver default) nothing else starts one.
 - Mouse clicks, OSC 8 links on the refs, and the row flash are not proved here: the PTY tests and the render tests cover them.
