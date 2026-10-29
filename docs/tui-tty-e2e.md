@@ -53,6 +53,13 @@ PR badge tests need `gh` and `glab` answers with no network and no login. `scrip
 
 `pty_fake_forge_shows_pr_badges` proves the harness against the shipped badge. The `fake_forge::tests` unit tests in the helper run the scripts directly.
 
+The PR status suite (`pty_pr_*`) adds two shared helpers:
+
+- `tests/common/pr_scenarios.rs` holds the answers of the six badge states (`Badge`) for a GitHub PR and a GitLab merge request, and of a closed one. `put_github` and `put_gitlab` move a branch to a state, also while the app runs: a transition test swaps the answers, presses no key, and waits for the next poll.
+- `tests/tui_tty_e2e/pr_support.rs` seeds the checkouts and reads the result off the cell grid: the badge column (the last content cell of the tree, in the boxed and the flat look), the ref left of it, its colours, the toast rows, the row flash, and the call log. `watch_quiet` proves an alert did not show by sampling the screen over a window.
+
+Tests that need polling pass `WS_STATUS_PR_POLL_MS` (300 ms, or 800 ms where a test needs a quiet gap between two poll cycles); the poll-off test passes `0`; the others leave it unset, so the default period (60 s or 180 s) never fires inside a test. The Tokyo Night colours of the baseline config are the oracle for glyph and flash colours.
+
 ## Verify driver
 
 To watch the real binary run, against the same fake forge or against a live one, the verify skill drives it in a private tmux server: `.agents/skills/verify/SKILL.md` and `scripts/verify-tui.sh`. It is a test harness with the isolation rules of **Harness notes** (guarded by `crates/workspace-status/tests/release_watch.rs`), not the screenshot pipeline, and it does not replace a `pty_*` test.

@@ -5,4 +5,5 @@
 
 pub mod fake_forge;
 pub mod hscroll;
+pub mod pr_scenarios;
 pub mod seed;
