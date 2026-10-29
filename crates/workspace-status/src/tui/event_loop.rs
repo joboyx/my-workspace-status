@@ -32,13 +32,13 @@ use super::event_pump::{
 };
 use super::fetch_claim::unix_now_ms;
 use super::hyperlink::{link_cells, write_links};
-use super::keys::{drop_g_chord_echo, held_nav_key, is_half_page_chord, KeyStrokeOrigin};
+use super::keys::{drop_g_chord_echo_at, held_nav_key, is_half_page_chord, KeyStrokeOrigin};
 use super::pointer_shape::{shape_for, TermPointer};
 use super::render::draw;
 use super::state::{AppState, PendingConfirm};
 use super::status::StatusMessage;
 use super::term_progress::{progress_for, TermProgress};
-use super::tty::{poll_event, read_event_origin};
+use super::tty::{poll_event, read_event_origin, TtyEvent};
 use super::undercurl::{undercurl_cells, write_undercurls};
 use super::watch::watch_remain_ms;
 
@@ -58,7 +58,7 @@ enum InputCmd {
 }
 
 struct InputBridge {
-    rx: tokio::sync::mpsc::Receiver<(crossterm::event::Event, KeyStrokeOrigin)>,
+    rx: tokio::sync::mpsc::Receiver<TtyEvent>,
     cmd: std_mpsc::Sender<InputCmd>,
     ack: std_mpsc::Receiver<()>,
 }
@@ -92,7 +92,7 @@ impl InputBridge {
 }
 
 fn input_thread(
-    tx: tokio::sync::mpsc::Sender<(crossterm::event::Event, KeyStrokeOrigin)>,
+    tx: tokio::sync::mpsc::Sender<TtyEvent>,
     cmd_rx: std_mpsc::Receiver<InputCmd>,
     ack_tx: std_mpsc::Sender<()>,
 ) {
@@ -127,13 +127,13 @@ fn input_thread(
             Ok(false) => continue,
             Err(_) => break,
         }
-        let (event, origin) = match read_event_origin() {
+        let ready = match read_event_origin() {
             Ok(ready) => ready,
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
             Err(_) => break,
         };
-        let leftover = held_nav_key(&event).and_then(discard_held_nav_backlog);
-        if tx.blocking_send((event, origin)).is_err() {
+        let leftover = held_nav_key(&ready.0).and_then(discard_held_nav_backlog);
+        if tx.blocking_send(ready).is_err() {
             break;
         }
         if let Some(extra) = leftover {
@@ -315,11 +315,11 @@ pub async fn run(
 
         tokio::select! {
             event = ctx.input.rx.recv() => {
-                let Some((event, origin)) = event else { break; };
-                handle_input(&mut ctx, event, origin);
+                let Some(event) = event else { break; };
+                handle_input(&mut ctx, event);
                 for _ in 1..INPUT_BATCH {
                     match ctx.input.rx.try_recv() {
-                        Ok((next, next_origin)) => handle_input(&mut ctx, next, next_origin),
+                        Ok(next) => handle_input(&mut ctx, next),
                         Err(_) => break,
                     }
                 }
@@ -459,7 +459,24 @@ async fn sleep_ms(ms: u64) {
     }
 }
 
-fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: KeyStrokeOrigin) {
+/// Handle one input event on the clock of its arrival.
+///
+/// The `gg` / `zz` / `gt` chord windows, the typeless CSI-u echo window,
+/// and the double-click window measure from the instant the event's bytes
+/// were read. A busy loop that takes two keys late must not change what
+/// they mean.
+fn handle_input(ctx: &mut LoopCtx<'_>, (event, origin, read_at): TtyEvent) {
+    ctx.state.begin_input(read_at);
+    dispatch_input(ctx, event, origin, read_at);
+    ctx.state.end_input();
+}
+
+fn dispatch_input(
+    ctx: &mut LoopCtx<'_>,
+    event: crossterm::event::Event,
+    origin: KeyStrokeOrigin,
+    read_at: Instant,
+) {
     // CSI-u with REPORT_EVENT_TYPES sends a Release after every Press.
     // Do not dispatch it: `dispatch` would clear `GPending`. CSI-u
     // without event types sends that release as another Press. Drop a
@@ -469,7 +486,13 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
     // arming `g`.
     ctx.state.expire_stale_g_chord();
     let input_mode = ctx.state.input_mode();
-    if drop_g_chord_echo(&mut ctx.state.g_chord_echo, input_mode, &event, origin) {
+    if drop_g_chord_echo_at(
+        &mut ctx.state.g_chord_echo,
+        input_mode,
+        &event,
+        origin,
+        read_at,
+    ) {
         return;
     }
     let action = map_event(ctx.state, &event);

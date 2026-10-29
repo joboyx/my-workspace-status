@@ -1086,6 +1086,10 @@ pub struct AppState {
     pub(crate) g_chord_echo: GChordEchoState,
     pub(crate) ctrl_c_armed_until: Option<Instant>,
     last_click: Option<(u16, u16, Instant)>,
+    /// When the input event being handled arrived (its stdin read). Chord
+    /// and double-click windows measure from it. `None` outside input
+    /// handling, where they use the wall clock ([`Self::input_clock`]).
+    input_at: Option<Instant>,
     /// PR answers for branch-row badges, per checkout and (remote, branch).
     pr_cache: pull_request::PrCache,
     /// PRs tab group titles from the title command, and its fill state.
@@ -1330,6 +1334,7 @@ impl AppState {
             g_chord_echo: GChordEchoState::default(),
             ctrl_c_armed_until: None,
             last_click: None,
+            input_at: None,
             pr_cache: pull_request::PrCache::default(),
             pr_titles: prs_tab::PrTitles::default(),
             diff_search_memo: RefCell::new(None),
@@ -1461,7 +1466,29 @@ impl AppState {
     }
 
     fn chord_pending(&self, at: Option<Instant>) -> bool {
-        at.is_some_and(|t| t.elapsed() <= Duration::from_millis(DOUBLE_TAP_MS))
+        at.is_some_and(|t| {
+            self.input_clock().saturating_duration_since(t) <= Duration::from_millis(DOUBLE_TAP_MS)
+        })
+    }
+
+    /// Start handling an input event whose bytes arrived at `read_at`.
+    ///
+    /// Until [`Self::end_input`], chord and double-click windows measure
+    /// from `read_at`, so two keys from one burst keep their meaning when
+    /// the loop handles them late.
+    pub(crate) fn begin_input(&mut self, read_at: Instant) {
+        self.input_at = Some(read_at);
+    }
+
+    /// Stop measuring from the last input event. Paint and timers use the
+    /// wall clock again.
+    pub(crate) fn end_input(&mut self) {
+        self.input_at = None;
+    }
+
+    /// Arrival instant of the input event being handled, else now.
+    fn input_clock(&self) -> Instant {
+        self.input_at.unwrap_or_else(Instant::now)
     }
 
     /// Drop a stale arming-`g` echo after [`DOUBLE_TAP_MS`].
@@ -1469,7 +1496,8 @@ impl AppState {
     /// Call this before the `g`-chord echo filter so a late `g` is a new
     /// tap. An echo of `t` / `T` / `1`–`9` after a consumed chord stays.
     pub(crate) fn expire_stale_g_chord(&mut self) {
-        expire_stale_g_chord_echo(&mut self.g_chord_echo, &mut self.g_pending_at);
+        let now = self.input_clock();
+        expire_stale_g_chord_echo(&mut self.g_chord_echo, &mut self.g_pending_at, now);
     }
 
     pub fn focused_row(&self) -> Option<&VisibleRow> {
@@ -3228,9 +3256,11 @@ impl AppState {
     /// divider, or scrollbar there: focus its pane and select the row; a
     /// second press on the same cell within 400 ms is a double-click.
     fn click_row(&mut self, col: u16, row: u16) -> Effect {
-        let now = Instant::now();
+        let now = self.input_clock();
         let is_double = self.last_click.as_ref().is_some_and(|(c, r, at)| {
-            *c == col && *r == row && at.elapsed() <= Duration::from_millis(400)
+            *c == col
+                && *r == row
+                && now.saturating_duration_since(*at) <= Duration::from_millis(400)
         });
         self.last_click = Some((col, row, now));
         if col >= self.layout.right_x {
@@ -18587,6 +18617,59 @@ mod tests {
         assert!(app.g_pending_at.is_none());
     }
 
+    /// The `g` chord window is the gap between the two keys' arrival.
+    ///
+    /// A live watch apply between the halves does not clear the chord, and
+    /// a loop that takes both keys late keeps `gt` a tab switch. The PTY
+    /// suite cannot hold a watch apply inside the 400 ms window on a loaded
+    /// machine, so this is where that rule is pinned.
+    #[test]
+    fn g_chord_window_reads_the_key_arrival_instant_across_a_watch_apply() {
+        let mut app = state();
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+        let g_at = Instant::now() - Duration::from_secs(5);
+        app.begin_input(g_at);
+        assert_eq!(
+            app.input_mode(),
+            InputMode::Normal {
+                search_active: false
+            }
+        );
+        app.dispatch(Action::ArmGChord);
+        app.end_input();
+        assert!(
+            !matches!(app.input_mode(), InputMode::GPending { .. }),
+            "on the wall clock the chord armed 5 s ago has expired"
+        );
+
+        let snapshot = app.snapshot.clone();
+        app.apply_watch_snapshot(snapshot);
+        app.dispatch(Action::WatchTick);
+        assert_eq!(
+            app.g_pending_at,
+            Some(g_at),
+            "a watch apply keeps the chord"
+        );
+
+        app.begin_input(g_at + Duration::from_millis(DOUBLE_TAP_MS));
+        assert!(
+            matches!(app.input_mode(), InputMode::GPending { .. }),
+            "t that arrived inside the window completes the chord"
+        );
+        app.end_input();
+
+        app.begin_input(g_at + Duration::from_millis(DOUBLE_TAP_MS + 1));
+        assert_eq!(
+            app.input_mode(),
+            InputMode::Normal {
+                search_active: false
+            },
+            "a key that arrived after the window is a bare key"
+        );
+        app.end_input();
+    }
+
     #[test]
     fn gg_g_on_focused_diff_scroll_to_edges() {
         let mut app = state();
@@ -19053,6 +19136,53 @@ mod tests {
         let effect = app.dispatch(Action::Click { col, row });
         assert_eq!(app.focus, FocusPane::Right);
         assert_eq!(effect, Effect::None);
+    }
+
+    /// The 400 ms double-click window is the gap between the two presses'
+    /// arrival, not between the loop handling them.
+    #[test]
+    fn double_click_window_reads_the_press_arrival_instant() {
+        let setup = |app: &mut AppState| {
+            app.layout.tree_x = 0;
+            app.layout.tree_y = 1;
+            app.layout.list_offset = 0;
+            app.layout.right_x = 40;
+            let idx = app
+                .rows
+                .iter()
+                .position(|r| r.id == "repo:app")
+                .expect("repo");
+            (8, app.layout.tree_y + idx as u16)
+        };
+        // Both presses arrived long ago, 399 ms apart: the loop takes them
+        // late, and they are still a double-click.
+        let first = Instant::now() - Duration::from_secs(5);
+        let mut app = tree_app();
+        let (col, row) = setup(&mut app);
+        app.begin_input(first);
+        app.dispatch(Action::Click { col, row });
+        app.end_input();
+        assert_eq!(app.focus, FocusPane::Left);
+        app.begin_input(first + Duration::from_millis(399));
+        app.dispatch(Action::Click { col, row });
+        app.end_input();
+        assert_eq!(
+            app.focus,
+            FocusPane::Right,
+            "399 ms apart is a double-click"
+        );
+
+        // Two presses 401 ms apart, handled back to back, are two clicks.
+        let mut app = tree_app();
+        let (col, row) = setup(&mut app);
+        let first = Instant::now();
+        app.begin_input(first);
+        app.dispatch(Action::Click { col, row });
+        app.end_input();
+        app.begin_input(first + Duration::from_millis(401));
+        app.dispatch(Action::Click { col, row });
+        app.end_input();
+        assert_eq!(app.focus, FocusPane::Left, "401 ms apart is two clicks");
     }
 
     #[test]

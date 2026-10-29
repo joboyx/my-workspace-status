@@ -50,7 +50,6 @@ use super::drill::{CommitFile, CommitFileSource, DrillView};
 use super::graph_load::{
     load_graph_model, load_graph_model_window, refresh_graph_limit, GraphIdentity,
 };
-use super::keys::KeyStrokeOrigin;
 use super::keys::{event_to_action_with, is_held_nav_backlog, InputMode};
 use super::pointer_shape::{TermPointer, POINTER_RESET, POINTER_SET};
 use super::state::AppState;
@@ -61,7 +60,9 @@ use super::tabs::{
 };
 use super::term_bg::{is_light_background, pick_theme, query_background, QUERY_TIMEOUT};
 use super::term_progress::{PROGRESS_CLEAR, PROGRESS_SHOWN};
-use super::tty::{disable_mouse, enable_mouse, poll_event, read_event, read_event_origin};
+use super::tty::{
+    disable_mouse, enable_mouse, poll_event, read_event, read_event_origin, TtyEvent,
+};
 #[cfg(test)]
 use super::watch::{checkout_watch_identities, watch_needs_pane_reload};
 
@@ -1007,15 +1008,13 @@ pub(crate) fn resume_tui(
 ///
 /// Returns the first event that is not that backlog so it is not lost
 /// (the reader cannot unread).
-pub(crate) fn discard_held_nav_backlog(
-    held: KeyEvent,
-) -> Option<(crossterm::event::Event, KeyStrokeOrigin)> {
+pub(crate) fn discard_held_nav_backlog(held: KeyEvent) -> Option<TtyEvent> {
     while poll_event(Duration::from_millis(0)).unwrap_or(false) {
-        let Ok((event, origin)) = read_event_origin() else {
+        let Ok(next) = read_event_origin() else {
             return None;
         };
-        if !is_held_nav_backlog(held, &event) {
-            return Some((event, origin));
+        if !is_held_nav_backlog(held, &next.0) {
+            return Some(next);
         }
     }
     None

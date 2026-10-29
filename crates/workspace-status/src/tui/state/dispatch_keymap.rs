@@ -39,7 +39,7 @@ impl AppState {
                 if !fold_noop {
                     self.fold_op(FoldOp::Toggle);
                 }
-                self.z_pending_at = Some(Instant::now());
+                self.z_pending_at = Some(self.input_clock());
                 Effect::None
             }
             Action::Quit => Effect::Quit,
@@ -84,7 +84,7 @@ impl AppState {
                     self.g_pending_at = None;
                     return self.move_focused_edge(false);
                 }
-                self.g_pending_at = Some(Instant::now());
+                self.g_pending_at = Some(self.input_clock());
                 Effect::None
             }
             Action::FoldClose => {

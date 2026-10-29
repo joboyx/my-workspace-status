@@ -172,6 +172,7 @@ pub fn drop_protocol_dup_g_chord_press(
 /// typed `g`.
 ///
 /// Returns true when the caller must not dispatch (echo or Release).
+#[cfg(test)]
 pub fn drop_g_chord_echo(
     state: &mut GChordEchoState,
     mode: InputMode,
@@ -181,7 +182,12 @@ pub fn drop_g_chord_echo(
     drop_g_chord_echo_at(state, mode, event, origin, Instant::now())
 }
 
-fn drop_g_chord_echo_at(
+/// [`drop_g_chord_echo`] at `now`, the instant the event's bytes arrived.
+///
+/// The live loop passes the stdin read instant, so a press and its
+/// typeless release from one burst stay inside
+/// [`G_CHORD_PROTOCOL_ECHO_MS`] however late the loop handles them.
+pub(crate) fn drop_g_chord_echo_at(
     state: &mut GChordEchoState,
     mode: InputMode,
     event: &Event,
@@ -225,16 +231,20 @@ fn drop_g_chord_echo_at(
     false
 }
 
-/// Clear a stale arming-`g` echo after [`DOUBLE_TAP_MS`].
+/// Clear a stale arming-`g` echo after [`DOUBLE_TAP_MS`] at `now`.
 ///
 /// After `gt` / `gT` / `g1`–`g9` the pending is already gone and `last`
 /// is that second key. Keep that echo so a typeless release in Normal
 /// does not fire bare `t` / `T`.
-pub fn expire_stale_g_chord_echo(echo: &mut GChordEchoState, g_pending_at: &mut Option<Instant>) {
+pub fn expire_stale_g_chord_echo(
+    echo: &mut GChordEchoState,
+    g_pending_at: &mut Option<Instant>,
+    now: Instant,
+) {
     let Some(at) = *g_pending_at else {
         return;
     };
-    if at.elapsed() <= Duration::from_millis(DOUBLE_TAP_MS) {
+    if now.saturating_duration_since(at) <= Duration::from_millis(DOUBLE_TAP_MS) {
         return;
     }
     *g_pending_at = None;
@@ -2882,10 +2892,10 @@ mod tests {
         let mut pending = Some(Instant::now());
         let g = key(KeyCode::Char('g'));
         assert!(!drop_protocol_dup_g_chord_press(&mut echo, normal(), &g));
-        expire_stale_g_chord_echo(&mut echo, &mut pending);
+        expire_stale_g_chord_echo(&mut echo, &mut pending, Instant::now());
         assert!(pending.is_some(), "fresh pending must stay");
         pending = Some(Instant::now() - Duration::from_millis(DOUBLE_TAP_MS + 1));
-        expire_stale_g_chord_echo(&mut echo, &mut pending);
+        expire_stale_g_chord_echo(&mut echo, &mut pending, Instant::now());
         assert!(pending.is_none());
         assert!(
             !drop_protocol_dup_g_chord_press(&mut echo, normal(), &g),
@@ -2902,7 +2912,7 @@ mod tests {
         let t = key(KeyCode::Char('t'));
         assert!(!drop_protocol_dup_g_chord_press(&mut echo, normal(), &g));
         assert!(!drop_protocol_dup_g_chord_press(&mut echo, pending_g(), &t));
-        expire_stale_g_chord_echo(&mut echo, &mut pending);
+        expire_stale_g_chord_echo(&mut echo, &mut pending, Instant::now());
         assert!(
             drop_protocol_dup_g_chord_press(&mut echo, normal(), &t),
             "typeless t release after NextTab must still drop"
