@@ -4,7 +4,7 @@ This is the human TUI e2e. Demo GIF clips stay in `scripts/capture-demo-stills.s
 
 It drives the real `workspace-status` binary the way a person does: a PTY (and, on Linux, a real terminal emulator). Assertions read the painted screen. It does not construct crossterm `Event` values in memory.
 
-Git seeds live in `crates/workspace-status/tests/common/seed.rs`. `seed_two_tall_commit_files` adds a pair of long committed files so a file switch in a commit diff can prove the new view starts at the origin. The tree hscroll oracle (clipped `very-long` vs `TAIL99`), file-diff tail (`UNIQUE_DIFF_TAIL`), and graph subject prefix (`UNIQUE_GRAP`) live in `tests/common/hscroll.rs`. The PTY harness extracts the left pane itself.
+Git seeds live in `crates/workspace-status/tests/common/seed.rs`. `seed_two_tall_commit_files` adds a pair of long committed files so a file switch in a commit diff can prove the new view starts at the origin. `seed_two_file_long_message_repo` adds two commits with the same long message (`pair base` with one file, `pair tip` with two) so a depth-2 commit-files footer can scroll a message on one commit and prove another commit starts at the top. The tree hscroll oracle (clipped `very-long` vs `TAIL99`), file-diff tail (`UNIQUE_DIFF_TAIL`), and graph subject prefix (`UNIQUE_GRAP`) live in `tests/common/hscroll.rs`. The PTY harness extracts the left pane itself.
 
 ## What runs where
 
