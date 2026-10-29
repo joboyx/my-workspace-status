@@ -1753,7 +1753,28 @@ mod tests {
         ] {
             assert!(help_legend_specs().any(|s| s.kind == kind), "{kind:?}");
         }
-        for kind in [IconKind::Synced, IconKind::HelpMove, IconKind::FolderOpen] {
+        // The six PR states, in ladder order, under Tree; closed only alerts.
+        let pr_rows: Vec<(&str, &str, &str)> = help_legend_specs()
+            .filter(|s| s.kind.is_pull_request())
+            .map(|s| (s.nerd, s.ascii, s.name))
+            .collect();
+        assert_eq!(
+            pr_rows,
+            [
+                ("✖", "x", "PR CI failed"),
+                ("◉", "A", "PR ready"),
+                ("◐", "r", "PR CI running"),
+                ("◌", "d", "PR draft"),
+                ("○", "P", "PR in review"),
+                ("✔", "m", "PR merged"),
+            ]
+        );
+        for kind in [
+            IconKind::Synced,
+            IconKind::HelpMove,
+            IconKind::FolderOpen,
+            IconKind::PrClosed,
+        ] {
             assert!(!help_legend_specs().any(|s| s.kind == kind), "{kind:?}");
         }
         for inner in [42usize, 76, 96, 136, 296] {

@@ -11525,6 +11525,22 @@ mod tests {
             ] {
                 assert_eq!(glyph_cell(kind).fg, color, "{id:?} {kind:?}");
             }
+            // PR state rows paint in the colour the badges use.
+            for state in [
+                PrState::CiFailed,
+                PrState::Ready,
+                PrState::CiRunning,
+                PrState::Draft,
+                PrState::InReview,
+                PrState::Merged,
+            ] {
+                let color = seg_role_color(pr_badge_mark(true, state).1, pal);
+                assert_eq!(
+                    glyph_cell(pr_badge_kind(state)).fg,
+                    color,
+                    "{id:?} {state:?}"
+                );
+            }
             // Some themes share a hex between chip roles (the graph pane
             // shares it too); the tag chip always stands apart.
             let colours: HashSet<_> = chips.iter().map(|(_, color)| *color).collect();

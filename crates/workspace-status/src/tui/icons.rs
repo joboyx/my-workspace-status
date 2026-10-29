@@ -340,7 +340,7 @@ pub const ICON_CATALOG: &[IconSpec] = {
             "\u{2716}", // ✖
             "x",
             "PR CI failed",
-            "Pull request: a check or the pipeline failed",
+            "Pull request: a CI check failed",
             TREE,
         ),
         row(
@@ -356,7 +356,7 @@ pub const ICON_CATALOG: &[IconSpec] = {
             "\u{25d0}", // ◐
             "r",
             "PR CI running",
-            "Pull request: checks or the pipeline still run",
+            "Pull request: CI still runs",
             TREE,
         ),
         row(
