@@ -20155,50 +20155,67 @@ mod tests {
     }
 
     /// A PR change of a linked checkout flashes its graph worktree row on
-    /// the change's ramp, and the badge glyph keeps its state colour:
-    /// depth 0 and 1, boxed and flat.
+    /// the change's ramp, and the badge glyph keeps its state colour. A
+    /// closed PR has no badge left, and its row still flashes: depth 0 and
+    /// 1, boxed and flat.
     #[test]
     fn a_pr_change_flashes_the_graph_worktree_row_at_depth_0_and_1() {
         const HEAD: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         const FEAT: &str = "app/.worktrees/feat";
+        const LABEL: &str = "app/.worktrees/feat feat ";
         let palette = ThemeId::TokyoNight.palette();
         for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
             for depth_1 in [false, true] {
-                for (pr, ramp, color, glyph) in [
+                for (change, lookup, ramp, badge) in [
                     (
-                        PrState::CiFailed,
+                        "CI failed",
+                        found_pr(PrState::CiFailed),
                         palette.flash_remove_ramp,
-                        palette.deleted,
-                        "x",
+                        Some(("x", palette.deleted)),
                     ),
                     (
-                        PrState::Merged,
+                        "merged",
+                        found_pr(PrState::Merged),
                         palette.flash_ramp,
-                        palette.branch_feature,
-                        "m",
+                        Some(("m", palette.branch_feature)),
                     ),
+                    ("closed", PrLookup::NoPr, palette.flash_remove_ramp, None),
                 ] {
-                    let what = format!("{background:?} depth_1={depth_1} {pr:?}");
+                    let what = format!("{background:?} depth_1={depth_1} {change}");
                     let mut state = pr_graph_state(FEAT, "feat", true);
                     state.graph_identity = Some(("app".into(), HEAD.into()));
                     show_graph_at(&mut state, depth_1, background);
-                    set_pr(&mut state, FEAT, "feat", found_pr(pr));
+                    set_pr(&mut state, FEAT, "feat", lookup);
                     assert!(state.alert_pr_transitions(Instant::now()), "{what}");
                     let mut terminal = pr_terminal();
                     terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-                    let hits = graph_pane_badge_hits(&state, depth_1);
-                    assert_eq!(hits.len(), 1, "{what}: {hits:?}");
-                    let hit = &hits[0];
                     let buf = terminal.backend().buffer();
-                    let cell = &buf[(hit.x, hit.y)];
-                    assert_eq!((cell.symbol(), cell.fg), (glyph, color), "{what}");
-                    let label_x = find_cell_col(buf, hit.y, "app/.worktrees/feat feat ")
-                        .unwrap_or_else(|| panic!("{what}: {}", buf_line(buf, hit.y)));
-                    assert_eq!(buf[(label_x, hit.y)].bg, ramp[0], "{what}: the row");
+                    let (x0, width) = graph_pane_cols(&state, depth_1);
+                    // The worktree label inside the graph pane.
+                    let in_pane = |y: u16, x: u16| {
+                        LABEL
+                            .chars()
+                            .enumerate()
+                            .all(|(i, ch)| buf[(x + i as u16, y)].symbol() == ch.to_string())
+                    };
+                    let last_x = x0 + width - LABEL.len() as u16;
+                    let (label_x, y) = (0..24u16)
+                        .find_map(|y| (x0..=last_x).find(|x| in_pane(y, *x)).map(|x| (x, y)))
+                        .unwrap_or_else(|| panic!("{what}: no worktree row in the graph"));
+                    assert_eq!(buf[(label_x, y)].bg, ramp[0], "{what}: the row");
+                    let hits = graph_pane_badge_hits(&state, depth_1);
+                    match badge {
+                        Some((glyph, color)) => {
+                            assert_eq!(hits.len(), 1, "{what}: {hits:?}");
+                            assert_eq!(hits[0].y, y, "{what}");
+                            let cell = &buf[(hits[0].x, y)];
+                            assert_eq!((cell.symbol(), cell.fg), (glyph, color), "{what}");
+                        }
+                        None => assert!(hits.is_empty(), "{what}: the badge is gone"),
+                    }
                     let commit_y = (0..24)
                         .find(|y| buf_line(buf, *y).contains("seed graph"))
                         .expect("commit row");
-                    let (x0, width) = graph_pane_cols(&state, depth_1);
                     assert!(
                         (x0..x0 + width).all(|x| buf[(x, commit_y)].bg != ramp[0]),
                         "{what}: the commit row does not flash"
