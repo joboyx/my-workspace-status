@@ -1413,6 +1413,33 @@ mod tests {
     }
 
     #[test]
+    fn all_merged_counts_distinct_prs_not_checkouts() {
+        // #1 is listed for two checkouts: one PR.
+        let mut worktree = app(1, "feature/ABC-123-x", "t", PrState::Merged);
+        worktree.checkout = PathBuf::from("/ws/app-wt");
+        let groups = group_prs(vec![
+            app(1, "feature/ABC-123-x", "t", PrState::Merged),
+            worktree,
+            app(2, "feature/ABC-123-y", "t", PrState::Merged),
+        ]);
+        assert_eq!(groups[0].rows.len(), 3, "every checkout is a row");
+        assert_eq!(groups[0].headline, GroupHeadline::AllMerged(2));
+        // The same number in another repository is another PR.
+        let groups = group_prs(vec![
+            app(1, "feature/ABC-123-x", "t", PrState::Merged),
+            entry(
+                "acme/merger",
+                MERGER,
+                1,
+                "feature/ABC-123-x",
+                "t",
+                PrState::Merged,
+            ),
+        ]);
+        assert_eq!(groups[0].headline, GroupHeadline::AllMerged(2));
+    }
+
+    #[test]
     fn the_other_group_has_no_header_text_and_is_never_finished() {
         let groups = group_prs(vec![app(1, "solo", "t", PrState::Merged)]);
         assert_eq!(groups[0].kind, GroupKind::Other);
@@ -1461,6 +1488,63 @@ mod tests {
             entry("acme/merger", MERGER, 4, "shared", "t", PrState::Ready),
         ]);
         assert_eq!(keys(&groups), vec!["ABC-123", "ABC-125", "shared"]);
+    }
+
+    #[test]
+    fn group_keys_sort_in_natural_order_not_text_order() {
+        // Not zero-padded, so a text sort would put ABC-1000 and ABC-100
+        // before ABC-9.
+        let groups = group_prs(vec![
+            app(1, "feature/ABC-1000-a", "t", PrState::InReview),
+            app(2, "feature/ABC-999-a", "t", PrState::InReview),
+            app(3, "feature/ABC-10-a", "t", PrState::InReview),
+            app(4, "feature/ABC-9-a", "t", PrState::InReview),
+            app(5, "feature/ABC-100-a", "t", PrState::InReview),
+            app(6, "feature/AB-5-a", "t", PrState::InReview),
+            app(7, "feature/ABD-1-a", "t", PrState::InReview),
+        ]);
+        assert_eq!(
+            keys(&groups),
+            vec!["AB-5", "ABC-9", "ABC-10", "ABC-100", "ABC-999", "ABC-1000", "ABD-1"]
+        );
+        // The same inside one rank: a CI failed group still leads.
+        let groups = group_prs(vec![
+            app(1, "feature/ABC-1000-a", "t", PrState::CiFailed),
+            app(2, "feature/ABC-999-a", "t", PrState::CiFailed),
+            app(3, "feature/ABC-20-a", "t", PrState::Ready),
+        ]);
+        assert_eq!(keys(&groups), vec!["ABC-999", "ABC-1000", "ABC-20"]);
+    }
+
+    #[test]
+    fn natural_key_order_compares_letters_then_number_then_rest() {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        for (a, b, order) in [
+            ("ABC-999", "ABC-1000", Less),
+            ("ABC-9", "ABC-10", Less),
+            ("ABC-10", "ABC-9", Greater),
+            ("AB-100", "ABC-1", Less),
+            ("ABC-007", "ABC-8", Less),
+            ("ABC-7", "ABC-7", Equal),
+            // The same number: the whole key decides, so the order is total.
+            ("ABC-007", "ABC-7", Less),
+            // A rest after the number is compared as text.
+            ("topic-2-a", "topic-2-b", Less),
+            ("topic-2-b", "topic-10-a", Less),
+            // No number: the key is text, before the same text with one.
+            ("shared", "shared-1", Less),
+            ("my-topic", "my-topic-3", Less),
+            ("my-topic-3", "my-topic-12", Less),
+            // A digit run longer than any integer type still compares.
+            (
+                "x-99999999999999999999999",
+                "x-100000000000000000000000",
+                Less,
+            ),
+        ] {
+            assert_eq!(natural_key_cmp(a, b), order, "{a} vs {b}");
+            assert_eq!(natural_key_cmp(b, a), order.reverse(), "{b} vs {a}");
+        }
     }
 
     #[test]
@@ -1579,6 +1663,62 @@ mod tests {
         assert_eq!(row.stacked_on.as_ref().unwrap().state, PrState::Merged);
         assert_eq!(row.next_action, Some(NextAction::Merge));
         assert_eq!(numbers(&groups[0]), vec![318, 319]);
+    }
+
+    #[test]
+    fn the_configured_default_branch_is_never_a_stack_base() {
+        // `release` is open as a PR into `main`; `#11` targets `release`.
+        let release = app(10, "release", "ABC-123: release", PrState::InReview);
+        let mut child = app(11, "feature/ABC-123-a", "t", PrState::Ready);
+        child.pr.base = "release".into();
+        let child_row = |default_branch: Option<&str>| {
+            let mut child = child.clone();
+            child.default_branch = default_branch.map(str::to_string);
+            let groups = group_prs(vec![release.clone(), child]);
+            assert_eq!(numbers(&groups[0]), vec![10, 11]);
+            let row = groups[0].rows[1].clone();
+            (header(&groups[0]), row)
+        };
+
+        // Not configured and not a long-lived name: `release` is a base.
+        let (header, row) = child_row(None);
+        assert_eq!(header, "merge #10 first");
+        assert_eq!(row.stacked_on.map(|base| base.pr_ref), Some("#10".into()));
+        assert_eq!(
+            row.next_action,
+            Some(NextAction::MergeBaseFirst("#10".into()))
+        );
+
+        // Configured as the default branch: no stack; rows and header say so.
+        let (header, row) = child_row(Some("release"));
+        assert_eq!(header, "merge #11");
+        assert_eq!(row.stacked_on, None);
+        assert_eq!(row.next_action, Some(NextAction::Merge));
+
+        // Another default branch changes nothing for this base.
+        let (_, row) = child_row(Some("main"));
+        assert!(row.stacked_on.is_some());
+    }
+
+    #[test]
+    fn a_pr_into_a_long_lived_branch_is_not_stacked_on_a_pr_from_it() {
+        // `develop → main` is open; `#11` targets `develop`.
+        let develop = app(10, "develop", "ABC-123: promote", PrState::InReview);
+        let mut child = app(11, "feature/ABC-123-a", "t", PrState::Ready);
+        child.pr.base = "develop".into();
+        for default_branch in [None, Some("develop".to_string()), Some("main".to_string())] {
+            let mut child = child.clone();
+            child.default_branch = default_branch.clone();
+            let groups = group_prs(vec![develop.clone(), child]);
+            let row = groups[0]
+                .rows
+                .iter()
+                .find(|row| row.pr.number == 11)
+                .unwrap();
+            assert_eq!(row.stacked_on, None, "default {default_branch:?}");
+            assert_eq!(row.next_action, Some(NextAction::Merge));
+            assert_eq!(header(&groups[0]), "merge #11");
+        }
     }
 
     #[test]
@@ -1731,6 +1871,58 @@ mod tests {
                 "stopped at the limit, took {:?}",
                 started.elapsed()
             );
+        }
+
+        /// True while `pid` exists and is not a zombie: a killed orphan stays
+        /// a zombie until init reaps it, and init may never reap in a
+        /// container.
+        fn process_runs(pid: libc::pid_t) -> bool {
+            // SAFETY: signal 0 only checks that the process exists.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                return false;
+            }
+            // Linux: the state letter follows the `(comm)` field.
+            match fs::read_to_string(format!("/proc/{pid}/stat")) {
+                Ok(stat) => stat
+                    .rsplit_once(')')
+                    .is_none_or(|(_, rest)| !rest.trim_start().starts_with('Z')),
+                Err(_) => true,
+            }
+        }
+
+        #[test]
+        fn a_timeout_ends_the_whole_process_group() {
+            let dir = crate::testutil::unique_dir("ws-pr-title-group");
+            fs::create_dir_all(&dir).unwrap();
+            let pid_file = dir.join("grandchild.pid");
+            // No `exec`: the shell stays the child, and `sleep` runs below
+            // it. Killing only the shell would leave both sleeps behind.
+            let script = Script::new(&format!(
+                "sleep 30 &\necho $! > '{pid}.tmp'\nmv '{pid}.tmp' '{pid}'\nsleep 5\necho late",
+                pid = pid_file.display()
+            ));
+            // A busy host may not start the script within the short limit;
+            // retry with a longer one so the group check always runs.
+            for limit in [500, 3000].map(Duration::from_millis) {
+                let started = Instant::now();
+                let title = run_title_command_within(&script.path, "ABC-123", limit);
+                assert_eq!(title, None, "the title came after the limit");
+                assert!(started.elapsed() < limit + Duration::from_secs(3));
+                let Some(pid) = fs::read_to_string(&pid_file)
+                    .ok()
+                    .and_then(|text| text.trim().parse::<libc::pid_t>().ok())
+                else {
+                    continue;
+                };
+                let gone_by = Instant::now() + Duration::from_secs(3);
+                while process_runs(pid) {
+                    assert!(Instant::now() < gone_by, "the grandchild still runs");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let _ = fs::remove_dir_all(&dir);
+                return;
+            }
+            panic!("the script never started");
         }
 
         #[test]
