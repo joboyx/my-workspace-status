@@ -27,12 +27,12 @@ use ratatui::{Terminal, TerminalOptions, Viewport};
 use crate::config::{ThemeMode, WorkspaceStatusConfig};
 use crate::discovery::{collect_snapshots, process_repo, RepoCheckoutMeta};
 use crate::git::{
-    ahead_behind, checkout_branch, diff_commit_file_ctx, diff_compare_file_ctx,
-    diff_stash_file_ctx, diff_worktree_vs_commit_file_ctx, fast_forward_to_remote_ref,
-    git_diff_args, list_commit_name_status, list_compare_name_status, list_compare_patch_keys,
-    list_stash_name_status, list_worktree_name_status, list_worktree_vs_commit_name_status,
-    merge_base, merge_into_head, repo_has_local_changes, rev_parse_commit, rev_parse_quiet,
-    MergeIntoHeadResult, NameStatus,
+    ahead_behind, checkout_branch, classify_upstream_rewrite, diff_commit_file_ctx,
+    diff_compare_file_ctx, diff_stash_file_ctx, diff_worktree_vs_commit_file_ctx,
+    fast_forward_to_remote_ref, git_diff_args, list_commit_name_status, list_compare_name_status,
+    list_compare_patch_keys, list_stash_name_status, list_worktree_name_status,
+    list_worktree_vs_commit_name_status, merge_base, merge_into_head, repo_has_local_changes,
+    rev_parse_commit, rev_parse_quiet, MergeIntoHeadResult, NameStatus,
 };
 use crate::settings::Settings;
 use crate::snapshot::{
@@ -590,6 +590,25 @@ pub(crate) fn compute_checkout(
             StatusMessage::ok(format!(
                 "Checked out {selected_name} and fast-forwarded to {remote_ref}"
             ))
+        } else if let Some(rewrite) = classify_upstream_rewrite(dir, selected_name, remote_ref) {
+            // The remote was rewritten: `p` resets (nothing of yours) or names
+            // the rebase (your commits on top). The checkout never resets.
+            StatusMessage::warn(if rewrite.yours == 0 {
+                format!(
+                    "Checked out {selected_name}; {remote_ref} was force-pushed ({} dropped, none yours) — press p to move {selected_name} to {remote_ref}",
+                    rewrite.dropped
+                )
+            } else {
+                let noun = if rewrite.yours == 1 {
+                    "commit"
+                } else {
+                    "commits"
+                };
+                format!(
+                    "Checked out {selected_name}; {remote_ref} was force-pushed under your {} {noun} — press p for the rebase command",
+                    rewrite.yours
+                )
+            })
         } else {
             let reason = match ahead_behind("HEAD", remote_ref, dir) {
                 Some((ahead, _)) if ahead > 0 => format!(": local has commits {remote_ref} lacks"),
@@ -1238,6 +1257,7 @@ mod tests {
             branch: "main".into(),
             sync_status: crate::snapshot::SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream_rewrite: None,
             head: String::new(),
             has_unstaged: false,
             has_staged: false,
@@ -1262,6 +1282,22 @@ mod tests {
             pointer_set.swap(false, Ordering::SeqCst),
         );
         String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn single_repo_reload_keeps_the_upstream_rewrite() {
+        let fixture =
+            crate::testutil::upstream_rewrite_fixture(crate::testutil::RewriteKind::Dropped);
+        let empty = build_workspace_snapshot(&[], &[], false, &[]);
+        let next = compute_reload_repo(&fixture.root, &empty, "checkout", false);
+        let row = next
+            .repos
+            .iter()
+            .find(|row| row.repo == "checkout")
+            .expect("reloaded row");
+        let rewrite = row.upstream_rewrite.as_ref().expect("rewrite survives");
+        assert_eq!((rewrite.dropped, rewrite.yours), (2, 0));
+        assert_eq!(row.sync_note, "diverged (ahead 2, behind 1)");
     }
 
     #[test]
@@ -1641,6 +1677,47 @@ mod tests {
         assert_eq!(app.status.kind(), StatusKind::Warn);
         assert_eq!(exec_git(&["rev-parse", "HEAD"], &repo_dir), local_ahead);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Status of the confirm-Yes checkout (`fast_forward_ref: origin/main`)
+    /// on the fixture checkout, and its tip after it.
+    fn checkout_after_rewrite(kind: crate::testutil::RewriteKind) -> (StatusMessage, bool) {
+        let fixture = crate::testutil::upstream_rewrite_fixture(kind);
+        let status = match compute_checkout(&fixture.checkout, "main", Some("origin/main")) {
+            CheckoutCompute::Done { status } => status,
+            _ => panic!("checkout must finish"),
+        };
+        let tip = exec_git(&["rev-parse", "HEAD"], &fixture.checkout);
+        (status, tip == fixture.local_tip)
+    }
+
+    #[test]
+    fn checkout_ff_failure_on_a_rewritten_upstream_points_to_p() {
+        use crate::testutil::RewriteKind;
+
+        let (status, kept) = checkout_after_rewrite(RewriteKind::Dropped);
+        assert_eq!(
+            status,
+            "Checked out main; origin/main was force-pushed (2 dropped, none yours) — press p to move main to origin/main"
+        );
+        assert_eq!(status.kind(), StatusKind::Warn);
+        assert!(kept, "the checkout never resets");
+
+        let (status, kept) = checkout_after_rewrite(RewriteKind::YourCommit);
+        assert_eq!(
+            status,
+            "Checked out main; origin/main was force-pushed under your 1 commit — press p for the rebase command"
+        );
+        assert_eq!(status.kind(), StatusKind::Warn);
+        assert!(kept);
+
+        // A normal divergence keeps the plain reason.
+        let (status, kept) = checkout_after_rewrite(RewriteKind::NormalDivergence);
+        assert_eq!(
+            status,
+            "Checked out main; could not fast-forward to origin/main: local has commits origin/main lacks"
+        );
+        assert!(kept);
     }
 
     #[test]

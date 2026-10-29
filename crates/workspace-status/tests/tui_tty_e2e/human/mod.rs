@@ -119,6 +119,7 @@ mod pty_pgup_pgdn_pages_workspace_tree;
 mod pty_primary_merged_branch_shows_check;
 mod pty_primary_omits_open_vs_default_mark;
 mod pty_pull_behind_local_remote;
+mod pty_pull_force_pushed_upstream;
 mod pty_q_quits_immediately;
 mod pty_q_quits_while_fetch_is_running;
 mod pty_quick_open_files_opens_in_explorer;

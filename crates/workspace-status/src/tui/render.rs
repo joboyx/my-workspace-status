@@ -4705,6 +4705,49 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             ));
             (accent, lines)
         }
+        PendingConfirm::ResetToUpstream {
+            repo,
+            branch,
+            upstream,
+            dropped,
+            ..
+        } => {
+            let accent = palette.modified;
+            let noun = if *dropped == 1 { "commit" } else { "commits" };
+            // The repo leads the title: `p` on the workspace or family row
+            // can open this box for a repo the cursor is not on.
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled(
+                        repo.clone(),
+                        Style::default()
+                            .fg(palette.file)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(": ", Style::default().fg(palette.muted)),
+                    Span::styled(
+                        upstream.clone(),
+                        Style::default()
+                            .fg(palette.file)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        " was rewritten. Move ",
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(branch.clone(), Style::default().fg(palette.file)),
+                    Span::styled(" to ", Style::default().fg(palette.muted)),
+                    Span::styled(upstream.clone(), Style::default().fg(palette.file)),
+                    Span::styled("?", Style::default().fg(accent)),
+                ]),
+                Line::from(Span::styled(
+                    format!("  Drops {dropped} {noun} that {upstream} dropped; none are yours."),
+                    Style::default().fg(palette.muted),
+                )),
+                confirm_action_row("y", "reset", None, accent, palette.muted, panel),
+            ];
+            (accent, lines)
+        }
     };
     if area.width == 0 || area.height == 0 {
         return;
@@ -7313,6 +7356,7 @@ mod tests {
             branch: "main".into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream_rewrite: None,
             head: String::new(),
             has_unstaged: dirty,
             has_staged: false,
@@ -11742,6 +11786,43 @@ mod tests {
     }
 
     #[test]
+    fn reset_confirm_names_the_repo_the_rewritten_upstream_and_the_dropped_count() {
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut paint = |dropped: usize| {
+            state.confirm = Some(PendingConfirm::ResetToUpstream {
+                repo: "app".into(),
+                branch: "main".into(),
+                upstream: "origin/main".into(),
+                tip: "a".repeat(40),
+                dropped,
+            });
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            buffer_text(&terminal)
+        };
+
+        let text = paint(2);
+        assert!(
+            text.contains("app: origin/main was rewritten. Move main to origin/main?"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Drops 2 commits that origin/main dropped; none are yours."),
+            "{text}"
+        );
+        assert!(text.contains(" y  reset"), "{text}");
+        assert!(text.contains(" n   Esc  cancel"), "{text}");
+
+        let text = paint(1);
+        assert!(
+            text.contains("Drops 1 commit that origin/main dropped; none are yours."),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn push_confirm_names_branch_remote_count_and_risk() {
         let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
@@ -12128,6 +12209,35 @@ mod tests {
             )
             .0,
         )
+    }
+
+    /// The short force-push text leaves room for the repo name on a narrow pane.
+    #[test]
+    fn narrow_force_pushed_row_keeps_the_repo_name_beside_the_short_text() {
+        let mut ops = repo("ops", false);
+        ops.sync_status = SyncStatus::Diverged;
+        ops.sync_note = "diverged (ahead 2, behind 1)".into();
+        ops.upstream_rewrite = Some(crate::git::UpstreamRewrite {
+            upstream: "origin/main".into(),
+            fork_point: "f".repeat(40),
+            tip: "t".repeat(40),
+            yours: 0,
+            dropped: 2,
+        });
+        let built = build_workspace_snapshot(&[ops], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let row = rows.iter().find(|r| r.id == "repo:ops").expect("ops row");
+        let text = paint_row(row, 60, 0);
+        assert!(text.contains("ops"), "repo name stays visible:\n{text}");
+        assert!(
+            text.contains("Y force-pushed \u{b7} 2 dropped, 0 yours"),
+            "mark and short text paint together:\n{text}"
+        );
+        assert!(
+            !text.contains("origin/main"),
+            "the tree row does not name the upstream:\n{text}"
+        );
     }
 
     /// A narrowed tree keeps the workspace name: the root summary drops its

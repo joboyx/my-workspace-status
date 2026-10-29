@@ -38,7 +38,8 @@ use workspace_status_graph::{
 use crate::config::ViewDefaults;
 use crate::settings::Settings;
 use crate::snapshot::{
-    carry_status_failed_local_branches, CheckoutKind, FileChange, SyncStatus, WorkspaceSnapshot,
+    carry_status_failed_local_branches, CheckoutKind, FileChange, SyncStatus,
+    WorkspaceRepoSnapshot, WorkspaceSnapshot,
 };
 
 #[cfg(test)]
@@ -50,7 +51,10 @@ use super::branches::{
     branch_name_error, can_open_branch_picker, checkoutable_branch_names, merge_rev_for_commit,
     BranchPickerState, CreateBranchState, DIRTY_WORKTREE_STATUS,
 };
-use super::chrome::{diverged_pull_status, status_uses_status_text, STATUS_NO_COMMENTS};
+use super::chrome::{
+    diverged_pull_status, rebase_pull_status, rewritten_pull_status, status_uses_status_text,
+    STATUS_NO_COMMENTS,
+};
 use super::comments::{
     collect_live_set, comment_key_label, comments_in_focus_scope, covering_line_comment,
     diff_focus_side, diff_line_comment_state, export_markdown, format_entity_reference,
@@ -668,6 +672,22 @@ pub enum PendingConfirm {
         /// Commits ahead of, then behind, the upstream from the snapshot
         /// sync note; `None` with no upstream or no parsable count.
         ahead_behind: Option<(u32, u32)>,
+    },
+    /// `p` on a diverged checkout whose upstream was force-pushed and holds
+    /// nothing of yours: `y` moves the branch to the upstream with a guarded
+    /// `git reset --keep` ([`crate::git::reset_keep_to_upstream`]).
+    ResetToUpstream {
+        /// Checkout path (snapshot `repo`).
+        repo: String,
+        /// Local branch the reset moves.
+        branch: String,
+        /// Upstream ref the branch moves to, for example `origin/main`.
+        upstream: String,
+        /// Branch tip the snapshot classified. The reset refuses when the
+        /// branch has moved since.
+        tip: String,
+        /// Commits the upstream dropped that the reset leaves behind.
+        dropped: usize,
     },
     /// Compare-tab highlight `x`: put the merge-base lines back for the
     /// highlighted rows of the committed compare diff (worktree only).
@@ -2713,8 +2733,7 @@ impl AppState {
                 let behind = with_sync(crate::snapshot::SyncStatus::Behind);
                 let diverged = with_sync(crate::snapshot::SyncStatus::Diverged);
                 if behind.is_empty() {
-                    self.status = StatusMessage::warn(diverged_pull_status(&diverged));
-                    Effect::None
+                    self.pull_nothing_behind(&diverged)
                 } else {
                     self.status = StatusMessage::progress(format_running_op(
                         RunningOp::Pull,
@@ -2755,6 +2774,61 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// `p` with nothing behind among the targets; `diverged` are the
+    /// diverged targets in row order.
+    ///
+    /// Exactly one target whose upstream was force-pushed with nothing of
+    /// yours opens the reset confirm. Several of them warn to focus one.
+    /// Otherwise the first one with your commits on top names the rebase.
+    /// Otherwise the plain [`diverged_pull_status`]. Only the confirm's `y`
+    /// writes.
+    fn pull_nothing_behind(&mut self, diverged: &[String]) -> Effect {
+        let rewrites: Vec<&WorkspaceRepoSnapshot> = diverged
+            .iter()
+            .filter_map(|repo| {
+                self.snapshot
+                    .repos
+                    .iter()
+                    .find(|r| r.repo == *repo && r.upstream_rewrite.is_some())
+            })
+            .collect();
+        let (nothing_yours, yours): (Vec<&WorkspaceRepoSnapshot>, Vec<&WorkspaceRepoSnapshot>) =
+            rewrites
+                .into_iter()
+                .partition(|r| r.upstream_rewrite.as_ref().is_some_and(|rw| rw.yours == 0));
+        match (nothing_yours.as_slice(), yours.first()) {
+            ([one], _) => {
+                let Some(rewrite) = one.upstream_rewrite.as_ref() else {
+                    return Effect::None;
+                };
+                let pending = PendingConfirm::ResetToUpstream {
+                    repo: one.repo.clone(),
+                    branch: one.branch.clone(),
+                    upstream: rewrite.upstream.clone(),
+                    tip: rewrite.tip.clone(),
+                    dropped: rewrite.dropped,
+                };
+                self.help_open = false;
+                self.cancel_mouse_drag();
+                self.confirm = Some(pending);
+            }
+            ([first, rest @ ..], _) => {
+                self.status = StatusMessage::warn(rewritten_pull_status(&first.repo, rest.len()));
+            }
+            ([], Some(first)) => {
+                if let Some(rewrite) = first.upstream_rewrite.as_ref() {
+                    self.status = StatusMessage::warn(rebase_pull_status(
+                        &first.repo,
+                        &first.branch,
+                        rewrite,
+                    ));
+                }
+            }
+            ([], None) => self.status = StatusMessage::warn(diverged_pull_status(diverged)),
+        }
+        Effect::None
     }
 
     fn refresh_effect(&self) -> Effect {
@@ -4840,6 +4914,26 @@ impl AppState {
             Some(PendingConfirm::Push { repo, .. }) => {
                 self.status = StatusMessage::progress(format_running_op(RunningOp::Push, 0, 1));
                 Effect::Push { repos: vec![repo] }
+            }
+            // The reset confirm offers only y / n: `Y` keeps it open.
+            Some(pending @ PendingConfirm::ResetToUpstream { .. }) if clean => {
+                self.confirm = Some(pending);
+                Effect::None
+            }
+            Some(PendingConfirm::ResetToUpstream {
+                repo,
+                branch,
+                upstream,
+                tip,
+                ..
+            }) => {
+                self.status = StatusMessage::progress(format!("moving {branch} to {upstream}…"));
+                Effect::ResetToUpstream {
+                    repo,
+                    branch,
+                    upstream,
+                    tip,
+                }
             }
             // Compare confirms offer only y / n: `Y` keeps them open.
             Some(pending) if pending.is_compare_owned() && clean => {
@@ -7506,6 +7600,7 @@ mod tests {
             branch: "main".into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream_rewrite: None,
             head: String::new(),
             has_unstaged: dirty,
             has_staged: false,
@@ -8031,6 +8126,7 @@ mod tests {
                 branch: "feature/x".into(),
                 sync_status: SyncStatus::NoUpstream,
                 sync_note: String::new(),
+                upstream_rewrite: None,
                 head: String::new(),
                 has_unstaged: false,
                 has_staged: false,
@@ -8062,6 +8158,7 @@ mod tests {
             branch: "main".into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream_rewrite: None,
             head: String::new(),
             has_unstaged: true,
             has_staged: false,
@@ -8236,6 +8333,7 @@ mod tests {
                     branch: "feature/x".into(),
                     sync_status: SyncStatus::NoUpstream,
                     sync_note: String::new(),
+                    upstream_rewrite: None,
                     head: String::new(),
                     has_unstaged: false,
                     has_staged: false,
@@ -8497,6 +8595,154 @@ mod tests {
         assert_eq!(app.dispatch(Action::Pull), Effect::None);
         assert_eq!(app.status, "app has diverged — pull it from a terminal");
         assert_eq!(app.status.kind(), StatusKind::Warn);
+        assert!(app.confirm.is_none());
+    }
+
+    const REWRITE_TIP: &str = "aaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const REWRITE_FORK_POINT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// A diverged checkout `name` on `main` whose `origin/main` was
+    /// force-pushed: `yours` commits of yours, `dropped` commits dropped.
+    fn rewritten_repo(name: &str, yours: usize, dropped: usize) -> RepoSnapshot {
+        let mut snap = repo(name, false);
+        snap.sync_status = SyncStatus::Diverged;
+        snap.sync_note = format!("diverged (ahead {}, behind 1)", yours + dropped);
+        snap.upstream_rewrite = Some(crate::git::UpstreamRewrite {
+            upstream: "origin/main".into(),
+            fork_point: REWRITE_FORK_POINT.into(),
+            tip: REWRITE_TIP.into(),
+            yours,
+            dropped,
+        });
+        snap
+    }
+
+    fn app_with(repos: &[RepoSnapshot]) -> AppState {
+        let snapshot = build_workspace_snapshot(repos, &[], false, &[]);
+        AppState::new(PathBuf::from("/tmp"), snapshot, true)
+    }
+
+    #[test]
+    fn pull_on_a_rewritten_upstream_with_nothing_of_yours_opens_the_reset_confirm() {
+        let mut app = app_with(&[rewritten_repo("app", 0, 2)]);
+        focus_repo(&mut app, "app");
+        app.help_open = true;
+        assert_eq!(app.dispatch(Action::Pull), Effect::None);
+        assert!(!app.help_open, "the confirm closes help");
+        assert_eq!(
+            app.confirm,
+            Some(PendingConfirm::ResetToUpstream {
+                repo: "app".into(),
+                branch: "main".into(),
+                upstream: "origin/main".into(),
+                tip: REWRITE_TIP.into(),
+                dropped: 2,
+            })
+        );
+        assert_eq!(app.confirm.as_ref().map(|c| c.accept_key()), Some('y'));
+        assert!(!app.confirm.as_ref().unwrap().is_compare_owned());
+
+        // Enter does not accept: it names the key.
+        assert_eq!(app.dispatch(Action::ConfirmEnter), Effect::None);
+        assert!(app.confirm.is_some());
+        assert_eq!(app.status, "press y to confirm · n or Esc to cancel");
+        // `Y` is not offered: the box stays open.
+        assert_eq!(app.dispatch(Action::ConfirmYesClean), Effect::None);
+        assert!(app.confirm.is_some());
+        // `y` asks for the guarded reset with the tip the box showed.
+        assert_eq!(
+            app.dispatch(Action::ConfirmYes),
+            Effect::ResetToUpstream {
+                repo: "app".into(),
+                branch: "main".into(),
+                upstream: "origin/main".into(),
+                tip: REWRITE_TIP.into(),
+            }
+        );
+        assert!(app.confirm.is_none());
+        assert_eq!(app.status, "moving main to origin/main…");
+        assert_eq!(app.status.kind(), StatusKind::Progress);
+    }
+
+    #[test]
+    fn reset_confirm_n_cancels_the_pull() {
+        let mut app = app_with(&[rewritten_repo("app", 0, 2)]);
+        focus_repo(&mut app, "app");
+        assert_eq!(app.dispatch(Action::Pull), Effect::None);
+        assert!(app.confirm.is_some());
+        assert_eq!(app.dispatch(Action::ConfirmNo), Effect::None);
+        assert!(app.confirm.is_none());
+        assert_eq!(app.status, "pull cancelled");
+    }
+
+    #[test]
+    fn pull_on_several_rewritten_upstreams_asks_to_focus_one() {
+        let mut app = app_with(&[
+            rewritten_repo("app", 0, 2),
+            rewritten_repo("lib", 0, 1),
+            rewritten_repo("web", 0, 3),
+        ]);
+        app.cursor = 0;
+        assert_eq!(app.focused_row().map(|r| r.kind), Some(NodeKind::Workspace));
+        assert_eq!(app.dispatch(Action::Pull), Effect::None);
+        assert!(app.confirm.is_none());
+        assert_eq!(
+            app.status,
+            "app (+2 more) upstream rewritten — focus one repo and press p"
+        );
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+    }
+
+    #[test]
+    fn pull_on_a_rewritten_upstream_under_your_commits_names_the_rebase() {
+        let mut app = app_with(&[rewritten_repo("app", 1, 2)]);
+        focus_repo(&mut app, "app");
+        assert_eq!(app.dispatch(Action::Pull), Effect::None);
+        assert!(app.confirm.is_none(), "no write for your commits");
+        assert_eq!(
+            app.status,
+            "app: origin/main was force-pushed under your 1 commit — run git rebase --onto origin/main 0123456789ab main"
+        );
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+
+        let mut app = app_with(&[rewritten_repo("app", 3, 2)]);
+        focus_repo(&mut app, "app");
+        assert_eq!(app.dispatch(Action::Pull), Effect::None);
+        assert_eq!(
+            app.status,
+            "app: origin/main was force-pushed under your 3 commits — run git rebase --onto origin/main 0123456789ab main"
+        );
+    }
+
+    #[test]
+    fn one_rewritten_upstream_with_nothing_of_yours_wins_over_your_commits() {
+        let mut app = app_with(&[rewritten_repo("app", 1, 2), rewritten_repo("lib", 0, 2)]);
+        app.cursor = 0;
+        assert_eq!(app.dispatch(Action::Pull), Effect::None);
+        assert!(
+            matches!(
+                &app.confirm,
+                Some(PendingConfirm::ResetToUpstream { repo, .. }) if repo == "lib"
+            ),
+            "{:?}",
+            app.confirm
+        );
+    }
+
+    #[test]
+    fn pull_with_a_behind_repo_still_pulls_and_skips_the_rewritten_one() {
+        let mut behind = repo("lib", false);
+        behind.sync_status = SyncStatus::Behind;
+        behind.sync_note = "behind by 1 commits".into();
+        let mut app = app_with(&[rewritten_repo("app", 0, 2), behind]);
+        app.cursor = 0;
+        assert_eq!(
+            app.dispatch(Action::Pull),
+            Effect::Pull {
+                repos: vec!["lib".into()]
+            }
+        );
+        assert!(app.confirm.is_none());
     }
 
     #[test]
@@ -12062,6 +12308,7 @@ mod tests {
                     branch: "feature/x".into(),
                     sync_status: SyncStatus::Ahead,
                     sync_note: "ahead 1".into(),
+                    upstream_rewrite: None,
                     head: String::new(),
                     has_unstaged: false,
                     has_staged: false,
@@ -12079,6 +12326,7 @@ mod tests {
                     branch: "main".into(),
                     sync_status: SyncStatus::Ahead,
                     sync_note: "ahead 1".into(),
+                    upstream_rewrite: None,
                     head: String::new(),
                     has_unstaged: false,
                     has_staged: false,
@@ -12824,6 +13072,7 @@ mod tests {
                     branch: "feature/x".into(),
                     sync_status: SyncStatus::NoUpstream,
                     sync_note: String::new(),
+                    upstream_rewrite: None,
                     head: String::new(),
                     has_unstaged: false,
                     has_staged: false,
@@ -13044,6 +13293,7 @@ mod tests {
                     branch: "feature/x".into(),
                     sync_status: SyncStatus::NoUpstream,
                     sync_note: String::new(),
+                    upstream_rewrite: None,
                     head: String::new(),
                     has_unstaged: false,
                     has_staged: false,
@@ -13125,6 +13375,7 @@ mod tests {
                 branch: "feature/x".into(),
                 sync_status: SyncStatus::NoUpstream,
                 sync_note: String::new(),
+                upstream_rewrite: None,
                 head: String::new(),
                 has_unstaged: false,
                 has_staged: false,
@@ -13436,6 +13687,7 @@ mod tests {
             branch: "main".into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream_rewrite: None,
             head: String::new(),
             has_unstaged: true,
             has_staged: true,
@@ -16834,6 +17086,7 @@ mod tests {
             branch: "main".into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream_rewrite: None,
             head: String::new(),
             has_unstaged: true,
             has_staged: false,

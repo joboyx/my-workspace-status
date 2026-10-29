@@ -6,9 +6,9 @@ use std::path::Path;
 
 use crate::config::{default_branch_override_for, WorkspaceStatusConfig};
 use crate::git::{
-    exec_git, exec_git_checked, head_equals_ref, is_ancestor, list_local_branches,
-    list_worktrees_porcelain, resolve_default_branch_name, resolve_default_branch_tip_ref,
-    rev_parse_quiet,
+    classify_upstream_rewrite, exec_git, exec_git_checked, head_equals_ref, is_ancestor,
+    list_local_branches, list_worktrees_porcelain, resolve_default_branch_name,
+    resolve_default_branch_tip_ref, rev_parse_quiet,
 };
 use crate::helpers::{
     is_default_branch, path_is_under_any, DETACHED_HEAD_BRANCH, STATUS_FAILED_NOTE,
@@ -104,6 +104,8 @@ pub struct BranchState {
     pub branch: String,
     pub sync_status: SyncStatus,
     pub sync_note: String,
+    /// Upstream ref from the header (`origin/main`), when the branch has one.
+    pub upstream: Option<String>,
 }
 
 /// Parse the `##` porcelain branch header.
@@ -118,6 +120,7 @@ pub fn parse_branch_line(line: &str) -> Option<BranchState> {
             branch: branch.to_string(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: "no commits yet".to_string(),
+            upstream: None,
         });
     }
     if value == "HEAD (no branch)" {
@@ -125,6 +128,7 @@ pub fn parse_branch_line(line: &str) -> Option<BranchState> {
             branch: DETACHED_HEAD_BRANCH.to_string(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream: None,
         });
     }
 
@@ -148,8 +152,10 @@ pub fn parse_branch_line(line: &str) -> Option<BranchState> {
             branch: branch.to_string(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream: None,
         });
     }
+    let upstream = upstream.map(str::to_string);
     let ahead = capture_count(tracking, "ahead ");
     let behind = capture_count(tracking, "behind ");
     if ahead > 0 && behind > 0 {
@@ -157,6 +163,7 @@ pub fn parse_branch_line(line: &str) -> Option<BranchState> {
             branch: branch.to_string(),
             sync_status: SyncStatus::Diverged,
             sync_note: format!("diverged (ahead {ahead}, behind {behind})"),
+            upstream,
         });
     }
     if behind > 0 {
@@ -164,6 +171,7 @@ pub fn parse_branch_line(line: &str) -> Option<BranchState> {
             branch: branch.to_string(),
             sync_status: SyncStatus::Behind,
             sync_note: format!("behind by {behind} commits"),
+            upstream,
         });
     }
     if ahead > 0 {
@@ -171,12 +179,14 @@ pub fn parse_branch_line(line: &str) -> Option<BranchState> {
             branch: branch.to_string(),
             sync_status: SyncStatus::Ahead,
             sync_note: format!("ahead by {ahead} commits"),
+            upstream,
         });
     }
     Some(BranchState {
         branch: branch.to_string(),
         sync_status: SyncStatus::UpToDate,
         sync_note: String::new(),
+        upstream,
     })
 }
 
@@ -204,6 +214,7 @@ fn failed_repo_snapshot(
         branch: UNKNOWN_HEAD_BRANCH.to_string(),
         sync_status: SyncStatus::NoUpstream,
         sync_note: STATUS_FAILED_NOTE.to_string(),
+        upstream_rewrite: None,
         head: String::new(),
         has_unstaged: false,
         has_staged: false,
@@ -579,11 +590,19 @@ pub fn process_repo(
         .into_iter()
         .map(|b| b.name)
         .collect();
+    // Only a diverged branch can have its upstream rewritten under it.
+    let upstream_rewrite = match (&branch_state.sync_status, &branch_state.upstream) {
+        (SyncStatus::Diverged, Some(upstream)) => {
+            classify_upstream_rewrite(&repo_dir, &branch_state.branch, upstream)
+        }
+        _ => None,
+    };
     Some(RepoSnapshot {
         repo: repo_path.to_string(),
         branch: branch_state.branch,
         sync_status: branch_state.sync_status,
         sync_note: branch_state.sync_note,
+        upstream_rewrite,
         head,
         has_unstaged,
         has_staged,
@@ -691,6 +710,20 @@ mod tests {
         let s = parse_branch_line("## feature/x...origin/feature/x [ahead 2, behind 1]").unwrap();
         assert_eq!(s.sync_status, SyncStatus::Diverged);
         assert_eq!(s.sync_note, "diverged (ahead 2, behind 1)");
+        assert_eq!(s.upstream.as_deref(), Some("origin/feature/x"));
+    }
+
+    #[test]
+    fn parse_branch_keeps_the_upstream_name_only_with_an_upstream() {
+        let up = parse_branch_line("## main...origin/main").unwrap();
+        assert_eq!(up.upstream.as_deref(), Some("origin/main"));
+        assert_eq!(parse_branch_line("## main").unwrap().upstream, None);
+        assert_eq!(
+            parse_branch_line("## No commits yet on main")
+                .unwrap()
+                .upstream,
+            None
+        );
     }
 
     #[test]
@@ -843,5 +876,41 @@ mod path_list_tests {
         };
         assert_eq!(found(&root, &show_hidden, None), vec!["tmp/b"]);
         let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod upstream_rewrite_tests {
+    use super::*;
+    use crate::testutil::{upstream_rewrite_fixture, RewriteFixture, RewriteKind};
+
+    fn snapshot(fixture: &RewriteFixture) -> RepoSnapshot {
+        let meta = RepoCheckoutMeta {
+            checkout_kind: CheckoutKind::Primary,
+            primary_repo: None,
+        };
+        process_repo("checkout", &fixture.root, false, None, &meta).expect("repo snapshot")
+    }
+
+    #[test]
+    fn dropped_commits_set_the_rewrite_and_keep_the_sync_note() {
+        let fixture = upstream_rewrite_fixture(RewriteKind::Dropped);
+        let snap = snapshot(&fixture);
+        assert_eq!(snap.sync_status, SyncStatus::Diverged);
+        assert_eq!(snap.sync_note, "diverged (ahead 2, behind 1)");
+        let rewrite = snap.upstream_rewrite.expect("classified as a rewrite");
+        assert_eq!(rewrite.upstream, "origin/main");
+        assert_eq!(rewrite.dropped, 2);
+        assert_eq!(rewrite.yours, 0);
+        assert_eq!(rewrite.tip, fixture.local_tip);
+    }
+
+    #[test]
+    fn a_branch_that_is_not_diverged_has_no_rewrite() {
+        let fixture = upstream_rewrite_fixture(RewriteKind::Dropped);
+        crate::testutil::git(&fixture.checkout, &["reset", "-q", "--hard", "origin/main"]);
+        let snap = snapshot(&fixture);
+        assert_eq!(snap.sync_status, SyncStatus::UpToDate);
+        assert_eq!(snap.upstream_rewrite, None);
     }
 }

@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use crate::git::UpstreamRewrite;
 use crate::helpers::{
     is_attention_sync_note, is_default_branch, is_detached_head_branch, visible_width,
     STATUS_FAILED_NOTE,
@@ -16,8 +17,8 @@ use super::icons::{
     file_icon, icon_branch, icon_changes, icon_clean, icon_comment, icon_comment_resolved,
     icon_folder, icon_hidden, icon_linked_worktree, icon_pr_approved, icon_pr_merged, icon_pr_open,
     icon_repo, icon_staged, icon_status_failed, icon_viewed, icon_workspace,
-    status_letter_from_change, tui_file_badge, tui_merge_mark, tui_sync_mark, IconKind,
-    StatusColorRole,
+    status_letter_from_change, tui_file_badge, tui_merge_mark, tui_sync_mark,
+    upstream_rewrite_short_text, IconKind, StatusColorRole,
 };
 use super::pull_request::PrState;
 
@@ -44,6 +45,8 @@ pub struct NodeChrome {
     pub merged_into_default: Option<bool>,
     pub sync_status: Option<SyncStatus>,
     pub sync_note: String,
+    /// Set when this diverged branch's upstream was force-pushed under it.
+    pub upstream_rewrite: Option<UpstreamRewrite>,
     /// `HEAD` sha. Watch identity only; not painted.
     pub head: String,
     pub change_count: usize,
@@ -346,11 +349,11 @@ fn family_container(
     let change_count = children.iter().map(|c| c.chrome.change_count).sum();
     let statuses: Vec<SyncStatus> = members.iter().map(|m| m.sync_status).collect();
     let worst = worst_sync_status(&statuses);
-    let note_for_worst = members
-        .iter()
-        .find(|m| m.sync_status == worst)
+    let worst_member = members.iter().find(|m| m.sync_status == worst);
+    let note_for_worst = worst_member
         .map(|m| m.sync_note.clone())
         .unwrap_or_default();
+    let rewrite_for_worst = worst_member.and_then(|m| m.upstream_rewrite.clone());
     let primary_head = members
         .iter()
         .find(|m| m.checkout_kind == CheckoutKind::Primary)
@@ -370,6 +373,7 @@ fn family_container(
             path: primary.to_string(),
             sync_status: Some(worst),
             sync_note: note_for_worst,
+            upstream_rewrite: rewrite_for_worst,
             head: primary_head,
             change_count,
             is_family: true,
@@ -421,6 +425,7 @@ fn repo_or_checkout(repo: &WorkspaceRepoSnapshot, kind: NodeKind, tree_mode: boo
             merged_into_default: repo.merged_into_default,
             sync_status: Some(repo.sync_status),
             sync_note: repo.sync_note.clone(),
+            upstream_rewrite: repo.upstream_rewrite.clone(),
             head: repo.head.clone(),
             change_count: repo.changes.len(),
             default_branch_override: repo.default_branch_override.clone(),
@@ -919,11 +924,14 @@ fn sync_trailing(chrome: &NodeChrome, in_no_updates: bool, ascii: bool) -> Vec<T
         }
         return vec![icon_text_seg(icon_clean(ascii), role, kind)];
     }
-    vec![icon_text_seg(
-        tui_sync_mark(ascii, status, &chrome.sync_note),
-        role,
-        kind,
-    )]
+    let mark = icon_text_seg(tui_sync_mark(ascii, status, &chrome.sync_note), role, kind);
+    match &chrome.upstream_rewrite {
+        Some(rewrite) if status == SyncStatus::Diverged => vec![
+            mark,
+            text_seg(format!(" {}", upstream_rewrite_short_text(rewrite)), role),
+        ],
+        _ => vec![mark],
+    }
 }
 
 /// Single-sided name-status → FileChange.
@@ -1567,6 +1575,7 @@ pub(crate) fn visible_window(row_count: usize, cursor: usize, height: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::UpstreamRewrite;
     use crate::snapshot::{
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
     };
@@ -1663,12 +1672,73 @@ mod tests {
         assert!(no_branch.trailing.is_empty());
     }
 
+    fn force_pushed() -> UpstreamRewrite {
+        UpstreamRewrite {
+            upstream: "origin/main".into(),
+            fork_point: "f".repeat(40),
+            tip: "t".repeat(40),
+            yours: 0,
+            dropped: 2,
+        }
+    }
+
+    #[test]
+    fn diverged_mark_is_followed_by_the_force_push_text() {
+        let chrome = NodeChrome {
+            sync_status: Some(SyncStatus::Diverged),
+            sync_note: "diverged (ahead 2, behind 1)".into(),
+            upstream_rewrite: Some(force_pushed()),
+            ..NodeChrome::default()
+        };
+        let segs = sync_trailing(&chrome, false, true);
+        assert_eq!(segs.len(), 2, "{segs:?}");
+        assert_eq!(segs[0].text, "Y");
+        assert_eq!(segs[0].icon, Some(IconKind::Diverged));
+        assert_eq!(
+            segs[1].text, " force-pushed \u{b7} 2 dropped, 0 yours",
+            "short form: the popover names the upstream"
+        );
+        assert_eq!(segs[1].icon, None, "the text is not a second icon");
+        assert_eq!(segs[1].role, segs[0].role);
+
+        let plain = NodeChrome {
+            upstream_rewrite: None,
+            ..chrome
+        };
+        assert_eq!(sync_trailing(&plain, false, true).len(), 1);
+    }
+
+    #[test]
+    fn repo_row_carries_the_force_push_text_from_the_snapshot() {
+        let mut diverged = repo("ops", false, false);
+        diverged.sync_status = SyncStatus::Diverged;
+        diverged.sync_note = "diverged (ahead 2, behind 1)".into();
+        diverged.upstream_rewrite = Some(force_pushed());
+        let built = build_workspace_snapshot(&[diverged], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let row = rows.iter().find(|r| r.id == "repo:ops").expect("ops");
+        assert_eq!(row.chrome.upstream_rewrite, Some(force_pushed()));
+        assert!(
+            row.trailing
+                .contains("force-pushed \u{b7} 2 dropped, 0 yours")
+                && !row.trailing.contains("origin/main"),
+            "{}",
+            row.trailing
+        );
+        assert_eq!(
+            row.chrome.sync_note, "diverged (ahead 2, behind 1)",
+            "the sync note stays for the parsers"
+        );
+    }
+
     fn repo(name: &str, with_change: bool, linked: bool) -> RepoSnapshot {
         RepoSnapshot {
             repo: name.into(),
             branch: "main".into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream_rewrite: None,
             head: String::new(),
             has_unstaged: with_change,
             has_staged: false,

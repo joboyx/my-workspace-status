@@ -47,8 +47,34 @@ pub fn diverged_pull_status(diverged: &[String]) -> String {
     }
 }
 
-/// True when `status` is what `p` sets when it found nothing to pull:
-/// [`STATUS_NOTHING_TO_PULL`] or a [`diverged_pull_status`] line.
+/// Status text `p` sets when nothing is behind and more than one target has a
+/// force-pushed upstream that holds nothing of yours. The reset confirm moves
+/// one branch at a time, so it names the first repo and the count of others.
+pub fn rewritten_pull_status(first: &str, more: usize) -> String {
+    format!("{first} (+{more} more) upstream rewritten — focus one repo and press p")
+}
+
+/// Status text `p` sets when nothing is behind and the first rewritten target
+/// has commits of yours on top of the dropped ones. `p` writes nothing; the
+/// line names the rebase that keeps your commits:
+/// `<repo>: <u> was force-pushed under your K commits — run git rebase --onto <u> <fork-point-12> <b>`.
+pub fn rebase_pull_status(repo: &str, branch: &str, rewrite: &UpstreamRewrite) -> String {
+    let noun = if rewrite.yours == 1 {
+        "commit"
+    } else {
+        "commits"
+    };
+    let fork_point = rewrite.fork_point.get(..12).unwrap_or(&rewrite.fork_point);
+    format!(
+        "{repo}: {u} was force-pushed under your {k} {noun} — run git rebase --onto {u} {fork_point} {branch}",
+        u = rewrite.upstream,
+        k = rewrite.yours,
+    )
+}
+
+/// True when `status` is what `p` sets when it found nothing to pull and
+/// wrote nothing: [`STATUS_NOTHING_TO_PULL`], a [`diverged_pull_status`]
+/// line, a [`rewritten_pull_status`] line, or a [`rebase_pull_status`] line.
 ///
 /// `effect.rs` then queues a pull behind an inflight fetch, so this check
 /// and that copy must agree.
@@ -56,6 +82,9 @@ pub fn is_idle_pull_status(status: &str) -> bool {
     status == STATUS_NOTHING_TO_PULL
         || status.ends_with(" has diverged — pull it from a terminal")
         || status.ends_with(" diverged — pull from a terminal")
+        || status.ends_with(" upstream rewritten — focus one repo and press p")
+        || (status.contains(" was force-pushed under your ")
+            && status.contains(" — run git rebase --onto "))
 }
 
 use ratatui::layout::Rect;
@@ -63,6 +92,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use workspace_status_graph::GraphRow;
 
+use crate::git::UpstreamRewrite;
 use crate::helpers::{is_default_branch, visible_width};
 use crate::snapshot::{CheckoutKind, SyncStatus};
 
@@ -589,6 +619,7 @@ pub fn dialog_height(state: &AppState, kind: DialogKind, width: u16) -> u16 {
                 | super::state::PendingConfirm::MergeIntoHead { .. }
                 // Title, up to two detail lines, chips; one spare for a wrap.
                 | super::state::PendingConfirm::Push { .. }
+                | super::state::PendingConfirm::ResetToUpstream { .. }
                 | super::state::PendingConfirm::CompareRevertRange { .. }
                 | super::state::PendingConfirm::CompareRevertFile { .. },
             ) => 7,
@@ -1558,6 +1589,7 @@ mod tests {
             branch: "main".into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream_rewrite: None,
             head: String::new(),
             has_unstaged: dirty,
             has_staged: false,
@@ -2245,6 +2277,14 @@ mod tests {
             remote: "origin".into(),
             publish: true,
             ahead_behind: Some((2, 1)),
+        });
+        assert_eq!(dialog_height(&app, DialogKind::Confirm, 96), 7);
+        app.confirm = Some(super::super::state::PendingConfirm::ResetToUpstream {
+            repo: "app".into(),
+            branch: "main".into(),
+            upstream: "origin/main".into(),
+            tip: "a".repeat(40),
+            dropped: 2,
         });
         assert_eq!(dialog_height(&app, DialogKind::Confirm, 96), 7);
     }

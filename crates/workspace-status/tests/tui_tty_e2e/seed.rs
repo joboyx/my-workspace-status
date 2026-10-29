@@ -394,3 +394,41 @@ pub fn compare_history_workspace() -> (PathBuf, PathBuf) {
     }
     (root, workspace)
 }
+
+/// One tracking checkout `rewrite` whose upstream a maintainer force-pushed.
+///
+/// The maintainer pushes `base` plus two `chore(deps)` bot commits. The
+/// checkout clones that, then the maintainer drops the bot commits, pushes a
+/// `chore(release)` commit with `--force`, and the checkout fetches. The
+/// fetch comes after the clone, so the remote-tracking reflog still holds the
+/// fork point. `mine` adds one local commit (`feat: mine`) before the rewrite:
+/// the rewrite then sits under a commit of yours instead of nothing.
+pub fn force_pushed_workspace(mine: bool) -> (PathBuf, PathBuf) {
+    let root = unique_root("ws-tui-tty-force-push");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let remote = seed_bare_remote(&root);
+    let maint = root.join("maintainer");
+    let remote_arg = git_path_arg(&remote);
+    git(&root, &["clone", "-q", &remote_arg, &git_path_arg(&maint)]);
+    configure_identity(&maint);
+    git(&maint, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    write_commit(&maint, "base.txt", "base\n", "base");
+    git(&maint, &["push", "-q", "origin", "main"]);
+    write_commit(&maint, "bot1.txt", "bot1\n", "chore(deps): bot bump 1");
+    write_commit(&maint, "bot2.txt", "bot2\n", "chore(deps): bot bump 2");
+    git(&maint, &["push", "-q", "origin", "main"]);
+
+    let repo = workspace.join("rewrite");
+    git(&root, &["clone", "-q", &remote_arg, &git_path_arg(&repo)]);
+    configure_identity(&repo);
+    if mine {
+        write_commit(&repo, "mine.txt", "mine\n", "feat: mine");
+    }
+
+    git(&maint, &["reset", "-q", "--hard", "HEAD~2"]);
+    write_commit(&maint, "release.txt", "rel\n", "chore(release): 1.0.0");
+    git(&maint, &["push", "-q", "--force", "origin", "main"]);
+    git(&repo, &["fetch", "-q"]);
+    (root, workspace)
+}

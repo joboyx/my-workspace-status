@@ -610,6 +610,18 @@ pub enum Effect {
         /// Overlay / status label for `rev`.
         label: String,
     },
+    /// Reset confirm `y`: move `branch` to `upstream` with a guarded
+    /// `git reset --keep`, as an exclusive write on the checkout's gitdir.
+    ResetToUpstream {
+        /// Checkout path (snapshot `repo`).
+        repo: String,
+        /// Local branch the reset moves.
+        branch: String,
+        /// Upstream ref the branch moves to, for example `origin/main`.
+        upstream: String,
+        /// Tip the confirm showed; the worker refuses when the branch moved.
+        tip: String,
+    },
     RemoveWorktree {
         primary: String,
         path: String,

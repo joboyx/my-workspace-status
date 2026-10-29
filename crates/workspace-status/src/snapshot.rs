@@ -4,6 +4,7 @@ use std::collections::{BTreeSet, HashSet};
 
 use serde::Serialize;
 
+use crate::git::UpstreamRewrite;
 use crate::helpers::{
     compare_repo_paths_for_display, get_branch_emoji, get_branch_kind, get_branch_priority,
     get_sync_priority, is_attention_sync_note, is_counted_local_branch, is_default_branch,
@@ -67,6 +68,9 @@ pub struct RepoSnapshot {
     pub branch: String,
     pub sync_status: SyncStatus,
     pub sync_note: String,
+    /// Set when a diverged branch's upstream was force-pushed under it.
+    /// `sync_status` and `sync_note` stay plain `diverged`.
+    pub upstream_rewrite: Option<UpstreamRewrite>,
     /// `HEAD` sha. Live-watch identity only; not part of `--json`.
     pub head: String,
     pub has_unstaged: bool,
@@ -98,6 +102,10 @@ pub struct WorkspaceRepoSnapshot {
     pub branch: String,
     pub sync_status: SyncStatus,
     pub sync_note: String,
+    /// Additive `--json` object: the upstream was force-pushed under this
+    /// diverged branch. Omitted when the branch is not such a case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_rewrite: Option<UpstreamRewrite>,
     /// `HEAD` sha. Live-watch identity only; omitted from `--json`.
     #[serde(skip)]
     pub head: String,
@@ -204,6 +212,7 @@ fn to_workspace_repo(snapshot: &RepoSnapshot, hidden: &[String]) -> WorkspaceRep
         branch: snapshot.branch.clone(),
         sync_status: snapshot.sync_status,
         sync_note: snapshot.sync_note.clone(),
+        upstream_rewrite: snapshot.upstream_rewrite.clone(),
         head: snapshot.head.clone(),
         checkout_kind: snapshot.checkout_kind,
         primary_repo: snapshot.primary_repo.clone(),
@@ -376,6 +385,7 @@ pub fn repo_snapshots_from_workspace(snapshot: &WorkspaceSnapshot) -> Vec<RepoSn
             branch: repo.branch.clone(),
             sync_status: repo.sync_status,
             sync_note: repo.sync_note.clone(),
+            upstream_rewrite: repo.upstream_rewrite.clone(),
             head: repo.head.clone(),
             has_unstaged: repo.has_unstaged,
             has_staged: repo.has_staged,
@@ -600,6 +610,7 @@ mod tests {
             branch: "main".to_string(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream_rewrite: None,
             head: String::new(),
             has_unstaged: with_change,
             has_staged: false,
@@ -622,6 +633,21 @@ mod tests {
             default_tip_ref: None,
             local_branches: Vec::new(),
         }
+    }
+
+    #[test]
+    fn the_rewrite_survives_the_workspace_round_trip() {
+        let mut rewritten = sample_repo("app", false);
+        rewritten.upstream_rewrite = Some(crate::git::UpstreamRewrite {
+            upstream: "origin/main".into(),
+            fork_point: "f".repeat(40),
+            tip: "t".repeat(40),
+            yours: 0,
+            dropped: 3,
+        });
+        let built = build_workspace_snapshot(&[rewritten.clone()], &[], false, &[]);
+        let back = repo_snapshots_from_workspace(&built);
+        assert_eq!(back[0].upstream_rewrite, rewritten.upstream_rewrite);
     }
 
     #[test]
