@@ -164,6 +164,7 @@ mod tests {
             merged_into_default: None,
             default_branch_override: None,
             default_tip_ref: Some("main".into()),
+            default_branch: None,
             local_branches: Vec::new(),
         };
         let snapshot = build_workspace_snapshot(&[repo], &[], false, &[]);

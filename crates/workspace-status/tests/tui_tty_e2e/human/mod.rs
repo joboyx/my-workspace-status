@@ -119,6 +119,7 @@ mod pty_palette_theme_rows;
 mod pty_pgup_pgdn_pages_workspace_tree;
 mod pty_pr_badge_nerd_glyphs_on_both_forges;
 mod pty_pr_badge_shows_every_state_on_both_forges;
+mod pty_pr_default_branch_checkout_is_never_looked_up;
 mod pty_pr_failing_cli_keeps_the_badge_and_names_the_error;
 mod pty_pr_first_load_and_branch_change_raise_no_alert;
 mod pty_pr_gc_opens_failed_check_and_pipeline;
