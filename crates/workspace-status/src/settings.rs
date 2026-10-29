@@ -91,12 +91,6 @@ pub struct Settings {
     /// PR polling (`WS_STATUS_PR_POLL_MS` / `prPolling`), default hot / calm
     /// ([`crate::tui::pr_poll::pr_poll_mode`]).
     pub(crate) pr_poll: PrPollMode,
-    /// Program that names a ticket key for the PRs tab group titles
-    /// (`WS_STATUS_PR_TITLE_CMD` / `prTitleCommand`, user file only). A
-    /// non-blank env value wins. `None` runs nothing.
-    // Only tests read this until the PRs tab does.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) pr_title_command: Option<PathBuf>,
 }
 
 impl Settings {
@@ -150,20 +144,12 @@ impl Settings {
                 .or(keys.smooth_scroll)
                 .unwrap_or(true),
             pr_poll: pr_poll_mode(get(PR_POLL_ENV).as_deref(), keys.pr_polling),
-            pr_title_command: get(PR_TITLE_CMD_ENV)
-                .map(|raw| raw.trim().to_string())
-                .filter(|raw| !raw.is_empty())
-                .map(PathBuf::from)
-                .or_else(|| keys.pr_title_command.clone()),
         }
     }
 }
 
 /// Env var that overrides the PR poll period (`0` turns polling off).
 const PR_POLL_ENV: &str = "WS_STATUS_PR_POLL_MS";
-
-/// Env var for the `prTitleCommand` key.
-const PR_TITLE_CMD_ENV: &str = "WS_STATUS_PR_TITLE_CMD";
 
 /// Boolean env value: `0`, `false`, or `off` is false; `1`, `true`, or `on`
 /// is true (trimmed, any case). Unset or any other value is `None`, so the
@@ -261,7 +247,6 @@ mod tests {
             term_progress: Some(false),
             smooth_scroll: Some(false),
             pr_polling: Some(false),
-            pr_title_command: Some(PathBuf::from("/cfg/pr-title")),
         }
     }
 
@@ -302,7 +287,6 @@ mod tests {
         assert!(got.term_progress, "terminal progress is on by default");
         assert!(got.smooth_scroll, "smooth scroll is on by default");
         assert_eq!(got.pr_poll, PrPollMode::HotCalm, "PR polling is on");
-        assert_eq!(got.pr_title_command, None, "no title command");
         assert!(
             !got.activity_sparkline,
             "activity sparkline is off by default"
@@ -337,7 +321,6 @@ mod tests {
                 term_progress: false,
                 smooth_scroll: false,
                 pr_poll: PrPollMode::Off,
-                pr_title_command: Some(PathBuf::from("/cfg/pr-title")),
             }
         );
     }
@@ -360,7 +343,6 @@ mod tests {
             ("WS_STATUS_TERM_PROGRESS", "on"),
             ("WS_STATUS_SMOOTH_SCROLL", "1"),
             ("WS_STATUS_PR_POLL_MS", "300"),
-            ("WS_STATUS_PR_TITLE_CMD", " /env/pr-title "),
         ];
         let got = Settings::resolve(&all_keys(), env_of(&env));
         assert_eq!(
@@ -388,7 +370,6 @@ mod tests {
                 term_progress: true,
                 smooth_scroll: true,
                 pr_poll: PrPollMode::Every(300),
-                pr_title_command: Some(PathBuf::from("/env/pr-title")),
             }
         );
     }
@@ -411,7 +392,6 @@ mod tests {
             ("WS_STATUS_TERM_PROGRESS", "maybe"),
             ("WS_STATUS_SMOOTH_SCROLL", "maybe"),
             ("WS_STATUS_PR_POLL_MS", "soon"),
-            ("WS_STATUS_PR_TITLE_CMD", "  "),
         ];
         let got = Settings::resolve(&all_keys(), env_of(&env));
         assert_eq!(got, Settings::resolve(&all_keys(), env_of(&[])));
@@ -654,59 +634,37 @@ mod tests {
     }
 
     #[test]
-    fn pr_poll_env_beats_config_and_title_command_env_beats_config() {
-        let resolve = |polling: Option<bool>, title: Option<&str>, env: &[(&str, &str)]| {
+    fn pr_poll_env_beats_config() {
+        let resolve = |polling: Option<bool>, env: &[(&str, &str)]| {
             let keys = RuntimeKeys {
                 pr_polling: polling,
-                pr_title_command: title.map(PathBuf::from),
                 ..RuntimeKeys::default()
             };
-            let got = Settings::resolve(&keys, env_of(env));
-            (got.pr_poll, got.pr_title_command)
+            Settings::resolve(&keys, env_of(env)).pr_poll
         };
-        assert_eq!(resolve(None, None, &[]), (PrPollMode::HotCalm, None));
+        assert_eq!(resolve(None, &[]), PrPollMode::HotCalm);
         assert_eq!(
-            resolve(Some(false), None, &[]).0,
+            resolve(Some(false), &[]),
             PrPollMode::Off,
             "config prPolling false"
         );
         assert_eq!(
-            resolve(Some(false), None, &[("WS_STATUS_PR_POLL_MS", "300")]).0,
+            resolve(Some(false), &[("WS_STATUS_PR_POLL_MS", "300")]),
             PrPollMode::Every(300),
             "a valid env period wins over config off"
         );
         assert_eq!(
-            resolve(Some(true), None, &[("WS_STATUS_PR_POLL_MS", "0")]).0,
+            resolve(Some(true), &[("WS_STATUS_PR_POLL_MS", "0")]),
             PrPollMode::Off,
             "env 0 wins over config on"
         );
         for bad in ["", "-1", "abc"] {
             assert_eq!(
-                resolve(Some(false), None, &[("WS_STATUS_PR_POLL_MS", bad)]).0,
+                resolve(Some(false), &[("WS_STATUS_PR_POLL_MS", bad)]),
                 PrPollMode::Off,
                 "env {bad:?} falls through to config"
             );
         }
-        assert_eq!(
-            resolve(None, Some("/cfg/pr-title"), &[]).1,
-            Some(PathBuf::from("/cfg/pr-title")),
-            "config applies"
-        );
-        assert_eq!(
-            resolve(
-                None,
-                Some("/cfg/pr-title"),
-                &[("WS_STATUS_PR_TITLE_CMD", "pr-title")]
-            )
-            .1,
-            Some(PathBuf::from("pr-title")),
-            "env wins"
-        );
-        assert_eq!(
-            resolve(None, None, &[("WS_STATUS_PR_TITLE_CMD", " ")]).1,
-            None,
-            "blank env is unset"
-        );
     }
 
     #[test]

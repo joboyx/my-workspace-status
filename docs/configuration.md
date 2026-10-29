@@ -73,8 +73,7 @@ User file only (a workspace file that sets these keys fails to load):
   "commentStore": "~/.local/state/my-workspace-status/comments.json",
   "viewedStore": "~/.local/state/my-workspace-status/viewed-files.json",
   "uiStore": "~/.local/state/my-workspace-status/ui-state.json",
-  "git": "/usr/bin/git",
-  "prTitleCommand": "~/bin/pr-title"
+  "git": "/usr/bin/git"
 }
 ```
 
@@ -88,7 +87,7 @@ User file only (a workspace file that sets these keys fails to load):
 | `diffTool`        | no                                 | unset (`vimdiff` at resolve) | Command string for TUI `E`. No `$EDITOR` / `$VISUAL` / `$GIT_EXTERNAL_DIFF` fallback.          |
 | `viewDefaults`    | no                                 | `{}` (in-app defaults)       | TUI launch view modes. See [`viewDefaults`](#viewdefaults)                                     |
 | `theme`, `themeMode`, `glyphs`, `watchMs`, `fetchMs`, `fetchConcurrency`, `updateCheck`, `termProgress`, `smoothScroll`, `prPolling` | no | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
-| `updateCheckStore`, `commentStore`, `viewedStore`, `uiStore`, `git`, `prTitleCommand` | no; user file or env only | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
+| `updateCheckStore`, `commentStore`, `viewedStore`, `uiStore`, `git` | no; user file or env only | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
 
 ### `hiddenPaths` and `ignoredPaths`
 
@@ -228,13 +227,12 @@ These top-level keys set the same settings as the env vars in [Environment varia
 | `viewedStore` | `WS_STATUS_VIEWED_STORE` | path. User file or env only |
 | `uiStore` | `WS_STATUS_UI_STORE` | path. User file or env only |
 | `git` | `WORKSPACE_STATUS_GIT` | path, or a command name without `/` (looked up on `PATH`). User file or env only |
-| `prTitleCommand` | `WS_STATUS_PR_TITLE_CMD` | path, or a command name without `/` (looked up on `PATH`). User file or env only |
 
-`updateCheckStore`, `commentStore`, `viewedStore`, `uiStore`, `git`, and `prTitleCommand` are allowed only in the user file (or the env var), because a workspace file can be committed to a repo and must not pick a program to run or a file to write. A workspace file that sets one fails to load: `.workspace-status-config.json git is only allowed in the user config file (<user file path>) or WORKSPACE_STATUS_GIT`. `null` counts as omitted and is allowed.
+`updateCheckStore`, `commentStore`, `viewedStore`, `uiStore`, and `git` are allowed only in the user file (or the env var), because a workspace file can be committed to a repo and must not pick a program to run or a file to write. A workspace file that sets one fails to load: `.workspace-status-config.json git is only allowed in the user config file (<user file path>) or WORKSPACE_STATUS_GIT`. `null` counts as omitted and is allowed.
 
 - Values are strict, like `viewDefaults`. A wrong type, an unknown value, a blank string, or a fraction is an error that names the file, the key, and the allowed values. Example: `.workspace-status-config.json glyphs must be "nerd" or "ascii"`. String values are trimmed, then matched case-sensitively.
 - A path must be absolute or start with `~/`. `~/` expands with `$HOME`. A relative path is an error: `<file> commentStore must be an absolute path or a path that starts with ~/`. When `$HOME` is unset, a `~/` path is an error.
-- `git` and `prTitleCommand` also accept a bare command name (`"git"`). A relative path with `/` (`"bin/git"`) is an error.
+- `git` also accepts a bare command name (`"git"`). A relative path with `/` (`"bin/git"`) is an error.
 - `null` counts as omitted, so the user file value or the default applies.
 - Env-only settings have no key: see the **Config key** column in [Environment variables](#environment-variables).
 
@@ -303,14 +301,13 @@ Optional object. It sets the TUI view modes at launch. Each key is optional. An 
 | `WS_STATUS_TERM_PROGRESS` | `termProgress` | unset (progress on) | Terminal progress (OSC 9;4, `ESC ] 9 ; 4 ; <state> ; <percent> BEL`) while a key-started fetch, pull, or push runs over two or more repos (for example `f` or `p` on the workspace row). Terminals that support it show the bar in the tab or taskbar; others ignore it. The bar is normal (`1`) with the percent of repos done, and error (`2`) once a repo in the batch fails. A single-repo fetch and the background fetch tick write nothing. The TUI clears a bar it shows (`ESC ] 9 ; 4 ; 0 ; 0 BEL`) when the batch ends, and on quit, Ctrl-C, an error return, or a panic on the TUI thread. A launch with no batch writes no OSC 9;4 at all, so a quit never sends a clear for a bar that never showed. SIGTERM and SIGHUP are not covered (the TUI has no signal handler): a bar that shows then stays until the terminal resets it. `0`, `false`, or `off` turns it off: the TUI writes no OSC 9;4 at all. `1`, `true`, or `on` turns it on. Any other value falls through to config `termProgress`, then on. Some older terminals show any OSC 9 as a desktop notification; turn it off there. |
 | `WS_STATUS_SMOOTH_SCROLL` | `smoothScroll` | unset (glide on) | Ctrl-d / Ctrl-u glide the viewport to its new top over about 3 frames (48 ms, ease-out cubic) instead of jumping, in the workspace tree, the graph list, the file diff, and the Explorer file view. Visual only: the cursor moves 5 rows at once, and no extra pane load runs. While the glide runs the loop redraws at the 16 ms draw floor; then there is no timer again. Any other key, a click, or the wheel ends a glide at once. The commit-file list and the Explorer tree jump. Not a colour or glyph feature, so `NO_COLOR` and ASCII glyphs keep it. `0`, `false`, or `off` turns it off: Ctrl-d / Ctrl-u jump. `1`, `true`, or `on` turns it on. Any other value falls through to config `smoothScroll`, then on. |
 | `WS_STATUS_PR_POLL_MS` | `prPolling` (on or off only) | unset (60 s hot, 180 s calm) | PR poll period in ms. It replaces both the hot period (60 s, while a pollable PR has CI running or is ready to merge) and the calm period (180 s). `0` turns polling off. There is no floor, so tests can poll every few hundred ms. A valid value wins over config `prPolling`. Empty, negative, or non-numeric falls through to `prPolling`, then on. With polling off, a branch change, `r`, and a full reload still look up. See [Pull request badges](#pull-request-badges). |
-| `WS_STATUS_PR_TITLE_CMD` | `prTitleCommand` (user file only) | unset | Program that gives a title for a ticket key, for the group titles of a PRs tab: an absolute path, a path that starts with `~/` (config only), or a command name on `PATH`. A non-blank value wins over the config key; a blank one falls through. This build reads the setting but runs nothing yet. |
 | `WORKSPACE_STATUS_GITHUB_TOKEN` | — (secret; a workspace file may be committed) | unset | Optional Bearer token for GitHub Releases API (`curl`). Used by the TUI startup check and by `ws --update` when fetching notes. Unset is fine for the public repo rate limit. |
 | `WS_STATUS_DEV_BUILD` | — (build time) | unset                                                   | **Build time** (`option_env!`, `DEV_BUILD` in `lib.rs`). `scripts/install-dev.sh` sets it to the short git sha, plus `-dirty` for a dirty tree. A dev build shows `-dev (sha)` in `--version` and the help footer, skips the TUI-startup release prompt, and makes `--update` exec `workspace-status-update-dev` with no release notes. Has no effect at run time. |
 | `WS_DEV_BIN_DIR` | — (`scripts/install-dev.sh` only) | `$HOME/.local/bin`                                      | `scripts/install-dev.sh` only: where `ws-dev`, `workspace-status-dev`, and `workspace-status-update-dev` go (and what `--uninstall` cleans). The generated `workspace-status-update-dev` keeps the directory it was installed with. |
 | `WS_DEV_TARGET_DIR` | — (`scripts/install-dev.sh` only) | `<repo>/target/dev-install`                             | `scripts/install-dev.sh` only: `CARGO_TARGET_DIR` for the dev build. Kept apart from `target/release` so the dev marker never reaches a release or demo build. The generated `workspace-status-update-dev` keeps the target dir it was installed with. |
 
 
-A **Config key** sets the same setting from a config file; a valid env var wins over it (see [Env-backed keys](#env-backed-keys)). For the store paths, `WORKSPACE_STATUS_GIT`, and `WS_STATUS_PR_TITLE_CMD`, a blank (store, title command) or empty (git) env value falls through to the config key. Env-only, with no config key: `WS_STATUS_WORKSPACE` (it picks the workspace file), `WORKSPACE_STATUS_GITHUB_TOKEN` (a secret, and a workspace file may be committed), the test-harness vars `WS_STATUS_E2E_*` and `WS_E2E_REAL_GIT`, `WS_STATUS_DEV_BUILD` (build time), `WS_DEV_BIN_DIR` / `WS_DEV_TARGET_DIR` (`scripts/install-dev.sh` only), and the system vars `EDITOR`, `VISUAL`, `BROWSER`, `DISPLAY`, `PATH`, `XDG_*`, and `HOME`.
+A **Config key** sets the same setting from a config file; a valid env var wins over it (see [Env-backed keys](#env-backed-keys)). For the store paths and `WORKSPACE_STATUS_GIT`, a blank (store) or empty (git) env value falls through to the config key. Env-only, with no config key: `WS_STATUS_WORKSPACE` (it picks the workspace file), `WORKSPACE_STATUS_GITHUB_TOKEN` (a secret, and a workspace file may be committed), the test-harness vars `WS_STATUS_E2E_*` and `WS_E2E_REAL_GIT`, `WS_STATUS_DEV_BUILD` (build time), `WS_DEV_BIN_DIR` / `WS_DEV_TARGET_DIR` (`scripts/install-dev.sh` only), and the system vars `EDITOR`, `VISUAL`, `BROWSER`, `DISPLAY`, `PATH`, `XDG_*`, and `HOME`.
 
 ### Theme flash tokens
 
