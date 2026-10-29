@@ -628,7 +628,7 @@ While the `?` help overlay is open, `/` is scoped to that overlay: it starts a h
 
 ### Pull request badges
 
-A checkout row with a branch (tree) and a worktree row with a branch (graph) show a one-column badge (in the tree, in the right-aligned trailing icons; in the graph, flush right on the worktree row) when the branch has an open or a merged PR (GitHub PR or GitLab merge request): open, approved (open and the forge reports it approved), or merged. A closed PR that was not merged, no PR, and a lookup that failed or is still running show no badge. Glyphs and colours are in [tui-rust.md](./tui-rust.md).
+A checkout row with a branch (tree) and a worktree row with a branch (graph) show a one-column badge (in the tree, in the right-aligned trailing icons; in the graph, flush right on the worktree row) when the branch has an open or a merged PR (GitHub PR or GitLab merge request): open (CI failed, draft, CI running, or in review), approved (ready to merge: mergeable now, with no failed or running check), or merged. A closed PR that was not merged, no PR, and a lookup that failed or is still running show no badge. Glyphs and colours are in [tui-rust.md](./tui-rust.md).
 
 - Lookups use `gh` for GitHub hosts and `glab` for GitLab hosts. Install and log in to the CLI yourself (`gh auth login`, `glab auth login`). The TUI never asks for a login, and never passes a token. Without a working CLI there is no badge, and `gx` says `could not look up PR for <branch>`.
 - A remote whose host contains neither `github` nor `gitlab` gets no badge, and `gx` says `no PR for <branch>`.

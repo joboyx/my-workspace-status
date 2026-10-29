@@ -157,8 +157,8 @@ A tree checkout row with a branch and a graph worktree row with a branch show a 
 
 | State | Glyph (Nerd / ASCII) | Colour role |
 | --- | --- | --- |
-| Open | nf-oct-git_pull_request `U+F407` / `P` | `branch_feature` |
-| Approved (open, forge reports approved) | nf-oct-check `U+F42E` / `A` | `added` |
+| Open (CI failed, draft, CI running, or in review) | nf-oct-git_pull_request `U+F407` / `P` | `branch_feature` |
+| Approved (ready to merge: mergeable now, no failed or running check) | nf-oct-check `U+F42E` / `A` | `added` |
 | Merged | nf-oct-git_merge `U+F419` / `m` | `muted` |
 
 | Theme | Open | Approved | Merged |
