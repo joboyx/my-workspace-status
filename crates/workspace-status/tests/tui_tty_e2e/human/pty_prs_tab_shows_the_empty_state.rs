@@ -20,8 +20,8 @@ const EMPTY: [&str; 3] = [
 /// Proof: once both lookups ran (one `gh pr list` and one GitLab merge
 /// request list call), `gp` shows a tab labelled `PRs 0` whose list pane
 /// holds exactly the three empty lines, with no group header, PR row, or
-/// loading line. Painting the empty copy before the lookups finish, or a
-/// header with no rows, fails the exact list.
+/// loading line. A header with no rows, or a loading or error line left
+/// over, fails the exact list.
 #[test]
 fn pty_prs_tab_shows_the_empty_state() {
     let specs: Vec<_> = PRS_BOARD

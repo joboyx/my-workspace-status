@@ -525,7 +525,7 @@ pub const fn spec(
 /// | `ABC-110` | `#30` and `!20` merged | finished |
 /// | `other` | `#50` in review, no key | last |
 ///
-/// Key order would be the reverse for the first four groups, and number
+/// Key order would list `ABC-110` first and `ABC-130` last, and number
 /// order would put `!31` before `#40` and `#44` before `#45`.
 pub const PRS_BOARD: [PrSpec; 9] = [
     spec(

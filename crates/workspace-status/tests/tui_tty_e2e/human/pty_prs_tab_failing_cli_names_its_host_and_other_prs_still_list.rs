@@ -53,8 +53,8 @@ fn first_header_row(tui: &PtySession) -> String {
 /// checkout up again: the `glab` line goes, `! gh (github.com): gh: HTTP
 /// 502` shows, `!31` lists (CI failed, so `ABC-130` moves first), and the
 /// GitHub PRs stay listed from their last answer. Dropping the error line
-/// leaves no `!` line; dropping the PRs of a failing host empties the list
-/// in the second step.
+/// leaves no `!` line; dropping the PRs of a failing host drops `#40` and
+/// `#43` in the second step.
 #[test]
 fn pty_prs_tab_failing_cli_names_its_host_and_other_prs_still_list() {
     let specs = specs();
