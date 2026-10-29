@@ -12,6 +12,8 @@ use std::sync::mpsc as std_mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crossterm::queue;
+use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::task::JoinSet;
@@ -426,12 +428,19 @@ pub async fn run(
 /// ends sets `batch` to `None`, so the next frame writes the clear state.
 /// The pointer shape follows `hovered_resize_edge` on the layout this
 /// frame recorded.
-fn draw_frame(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+///
+/// All of it is one synchronized update (DEC private mode 2026): a
+/// terminal that knows the mode shows the frame whole, never half drawn.
+/// A terminal resize opens the update before its clear (see
+/// [`super::app::apply_terminal_resize`]); this frame closes it. Terminals
+/// without the mode ignore both sequences.
+fn draw_frame<W: io::Write>(
+    terminal: &mut Terminal<CrosstermBackend<W>>,
     state: &mut AppState,
     progress: &mut TermProgress,
     pointer: &mut TermPointer,
 ) -> Result<(), u8> {
+    queue!(terminal.backend_mut(), BeginSynchronizedUpdate).map_err(|_| 1u8)?;
     let completed = terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
     let links = link_cells(completed.buffer, &state.layout.links);
     let curls = undercurl_cells(completed.buffer, &state.layout.undercurls);
@@ -448,7 +457,9 @@ fn draw_frame(
             terminal.backend_mut(),
             shape_for(state.hovered_resize_edge()),
         )
-        .map_err(|_| 1u8)
+        .map_err(|_| 1u8)?;
+    queue!(terminal.backend_mut(), EndSynchronizedUpdate).map_err(|_| 1u8)?;
+    io::Write::flush(terminal.backend_mut()).map_err(|_| 1u8)
 }
 
 async fn sleep_ms(ms: u64) {
@@ -786,6 +797,52 @@ mod tests {
         Presenter {
             dirty,
             last_draw: Instant::now(),
+        }
+    }
+
+    /// A frame is one synchronized update: the begin sequence is the first
+    /// byte written and the end sequence the last, so a terminal never
+    /// shows the frame half drawn.
+    #[test]
+    fn a_frame_is_one_synchronized_update() {
+        use ratatui::layout::Rect;
+        use ratatui::{TerminalOptions, Viewport};
+
+        /// Bytes the backend writes, readable after the draw.
+        #[derive(Clone, Default)]
+        struct Sink(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+        impl io::Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.borrow_mut().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        const BEGIN: &[u8] = b"\x1b[?2026h";
+        const END: &[u8] = b"\x1b[?2026l";
+        let snapshot = crate::snapshot::build_workspace_snapshot(&[], &[], false, &[]);
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"), snapshot, true);
+        let sink = Sink::default();
+        let mut terminal = Terminal::with_options(
+            CrosstermBackend::new(sink.clone()),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 80, 24)),
+            },
+        )
+        .unwrap();
+        let mut progress = TermProgress::new(true);
+        let mut pointer = TermPointer::default();
+        for _ in 0..2 {
+            sink.0.borrow_mut().clear();
+            draw_frame(&mut terminal, &mut state, &mut progress, &mut pointer).unwrap();
+            let out = sink.0.borrow();
+            let count = |seq: &[u8]| out.windows(seq.len()).filter(|w| *w == seq).count();
+            assert!(out.starts_with(BEGIN), "frame opens the update first");
+            assert!(out.ends_with(END), "frame closes the update last");
+            assert_eq!((count(BEGIN), count(END)), (1, 1), "one update per frame");
         }
     }
 

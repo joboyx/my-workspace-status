@@ -15,11 +15,11 @@ use crossterm::cursor::Show;
 use crossterm::event::{
     KeyEvent, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
-use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, size as terminal_size, EnterAlternateScreen,
-    LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, size as terminal_size, BeginSynchronizedUpdate,
+    EnterAlternateScreen, LeaveAlternateScreen,
 };
+use crossterm::{execute, queue};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::{Terminal, TerminalOptions, Viewport};
@@ -270,11 +270,18 @@ pub(crate) fn map_event(state: &AppState, event: &crossterm::event::Event) -> Ac
     }
 }
 
+/// Resize the viewport to `cols` × `rows`.
+///
+/// The resize clears the screen. A synchronized update (DEC private mode
+/// 2026) opens before the clear and the next frame closes it, so a
+/// terminal that knows the mode never shows the blank screen between the
+/// two.
 pub(crate) fn apply_terminal_resize(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     cols: u16,
     rows: u16,
 ) -> Result<(), u8> {
+    queue!(terminal.backend_mut(), BeginSynchronizedUpdate).map_err(|_| 1u8)?;
     terminal
         .resize(Rect::new(0, 0, cols.max(1), rows.max(1)))
         .map_err(|_| 1u8)
@@ -998,6 +1005,8 @@ pub(crate) fn resume_tui(
     }
     push_keyboard_enhancement();
     let _ = terminal.hide_cursor();
+    // The next frame closes this update, so the clear never shows alone.
+    let _ = queue!(terminal.backend_mut(), BeginSynchronizedUpdate);
     let _ = terminal.resize(terminal_size_rect());
     let _ = terminal.clear();
     drain_pending_events();
