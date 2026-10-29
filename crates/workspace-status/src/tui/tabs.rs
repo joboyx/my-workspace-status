@@ -1046,6 +1046,11 @@ pub struct PrsTab {
     pub folds: HashMap<PrGroupId, bool>,
     /// Narrow layout: the detail pane shows instead of the list (`Tab`).
     pub show_detail: bool,
+    /// Detail pane viewport: the web URL of the PR it shows and its first
+    /// painted line. The paint starts another PR at the top and clamps
+    /// the line to the detail's lines, so a newly focused PR shows its
+    /// title and a detail that shrank shows its last page.
+    pub detail_scroll: Option<(String, usize)>,
 }
 
 /// One tab after Workspace: a compare, Explorer, or PRs tab.

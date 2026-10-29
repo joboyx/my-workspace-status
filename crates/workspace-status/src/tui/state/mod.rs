@@ -397,6 +397,16 @@ pub struct LayoutHit {
     /// summary's pan clamp (`AppState::summary_max_col_in`);
     /// `split_layout` hit-tests with the live pan.
     pub summary_hbar: HScrollbarLayout,
+    /// PRs tab list vertical scrollbar from the last paint: its column
+    /// (`None` while the lines fit), the scrolled lines it spans (not the
+    /// pinned error and loading lines), the line count, and the painted
+    /// top.
+    pub prs_list_vbar: VScrollbarLayout,
+    /// PRs tab detail vertical scrollbar from the last paint: its column
+    /// (`None` while the lines fit), the detail rows, the line count, the
+    /// painted top, and the largest top (0 while the lines fit), where the
+    /// detail's wheel and keys clamp.
+    pub prs_detail_vbar: VScrollbarLayout,
     /// File rows the folder summary painted last (the rows under its
     /// header, less a horizontal bar row): its page and scroll limit.
     pub summary_list_height: u16,
@@ -562,6 +572,8 @@ impl Default for LayoutHit {
             file_view_hbar: HScrollbarLayout::default(),
             summary_vbar: VScrollbarLayout::default(),
             summary_hbar: HScrollbarLayout::default(),
+            prs_list_vbar: VScrollbarLayout::default(),
+            prs_detail_vbar: VScrollbarLayout::default(),
             summary_list_height: 0,
             tab_y: 0,
             tab_hits: Vec::new(),
@@ -3217,6 +3229,8 @@ impl AppState {
                 col_offset: self.hbar_offset(HScrollbar::Summary),
                 ..self.layout.summary_hbar
             },
+            prs_list_vbar: self.layout.prs_list_vbar,
+            prs_detail_vbar: self.layout.prs_detail_vbar,
             commit_msg_rule_y: self.layout.commit_msg_rule_y,
             commit_msg_rule_x: self.layout.commit_msg_rule_x,
             commit_msg_rule_width: self.layout.commit_msg_rule_width,
@@ -3295,7 +3309,8 @@ impl AppState {
         if let Some(index) = self.hit_tab(col, row) {
             return self.activate_tab(index);
         }
-        // The PRs tab has no divider or scrollbar: its panes take the press.
+        // The PRs tab has no divider: its panes and their scrollbars take
+        // the press.
         if self.is_prs_tab() {
             return self.prs_click(col, row);
         }
@@ -3758,6 +3773,9 @@ impl AppState {
             }
             VScrollbar::Tree | VScrollbar::ExplorerTree => self.focus = FocusPane::Left,
             VScrollbar::CommitFiles => self.focus = self.commit_files_pane(),
+            // The PRs tab keeps the list focused ([`Self::apply_prs_session`]);
+            // its narrow toggle, not the focus, picks the pane it shows.
+            VScrollbar::PrsList | VScrollbar::PrsDetail => self.focus = FocusPane::Left,
         }
         let effect = self.scroll_vbar_to(bar, top);
         self.drag = SplitDrag::VScrollbar {
@@ -3780,7 +3798,9 @@ impl AppState {
     /// right pane, a commit-file row its diff, an Explorer row its preview.
     /// The clean-file view scrolls at the edge of its line cursor, so its
     /// cursor moves to the nearest edge line of the new viewport. The
-    /// folder summary has no cursor: its viewport moves alone.
+    /// folder summary and the PRs detail have no cursor: their viewport
+    /// moves alone. The PRs list cursor moves and asks for nothing, as its
+    /// wheel.
     fn scroll_vbar_to(&mut self, bar: VScrollbar, top: u16) -> Effect {
         let top = usize::from(top);
         match bar {
@@ -3801,6 +3821,14 @@ impl AppState {
             VScrollbar::ExplorerTree => self.scroll_explorer_tree_to(top),
             VScrollbar::FileView => {
                 self.scroll_file_view_to(top);
+                Effect::None
+            }
+            VScrollbar::PrsList => {
+                self.scroll_prs_list_to(top);
+                Effect::None
+            }
+            VScrollbar::PrsDetail => {
+                self.scroll_prs_detail_to(top);
                 Effect::None
             }
         }

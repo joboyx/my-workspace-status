@@ -286,6 +286,8 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
     state.layout.file_view_hbar = HScrollbarLayout::default();
     state.layout.summary_vbar = VScrollbarLayout::default();
     state.layout.summary_hbar = HScrollbarLayout::default();
+    state.layout.prs_list_vbar = VScrollbarLayout::default();
+    state.layout.prs_detail_vbar = VScrollbarLayout::default();
     state.layout.summary_list_height = 0;
     state.layout.file_view_row_lines.clear();
     state.layout.explorer_tree = Rect::default();
@@ -3696,13 +3698,14 @@ fn paint_hscrollbar(
     }
 }
 
-/// Where a list that follows its cursor (the Workspace tree, a commit-file
-/// or compare list, the Explorer tree) paints its rows and its scrollbars
-/// in `area`, decided before the rows paint, as the graph list decides its
-/// bars: the vertical bar takes the last column whenever the rows
-/// overflow, and the horizontal bar takes the last row once the list pans
-/// off the left edge ([`list_hbar_rows`]). The rows never paint under a
-/// bar, and the pan clamp sizes rows to [`ListBars::rows_area`]'s width.
+/// Where a list (the Workspace tree, a commit-file or compare list, the
+/// folder summary, the Explorer tree, the PRs tab list and detail) paints
+/// its rows and its scrollbars in `area`, decided before the rows paint,
+/// as the graph list decides its bars: the vertical bar takes the last
+/// column whenever the rows overflow, and the horizontal bar takes the
+/// last row once the list pans off the left edge ([`list_hbar_rows`]).
+/// The rows never paint under a bar, and the pan clamp sizes rows to
+/// [`ListBars::rows_area`]'s width.
 struct ListBars {
     /// The list's whole area.
     area: Rect,
@@ -8490,11 +8493,74 @@ mod tests {
         state
     }
 
+    /// A PRs tab of [`BAR_LIST_ROWS`] PRs in one group, titled by
+    /// [`bar_list_name`], one checkout each.
+    fn bar_list_prs_state() -> AppState {
+        use super::super::pr_status::PrState;
+        use super::super::state::prs_fixtures::{app_over, checkout, land, pr, GH_APP};
+        let checkouts: Vec<(String, String)> = (0..BAR_LIST_ROWS)
+            .map(|i| (format!("r{i:02}"), format!("topic-{i:02}")))
+            .collect();
+        let repos: Vec<_> = checkouts
+            .iter()
+            .map(|(name, branch)| checkout(name, branch))
+            .collect();
+        let mut state = app_over(&repos, false);
+        for (i, (name, branch)) in checkouts.iter().enumerate() {
+            let title = bar_list_name(i);
+            let number = 100 + i as u64;
+            let found = pr(GH_APP, number, PrState::InReview, &title, branch, "main");
+            land(&mut state, name, branch, GH_APP, found);
+        }
+        state.dispatch(Action::OpenPrsTab);
+        state
+    }
+
+    /// A PRs tab of one PR that [`BAR_LIST_ROWS`] checkouts named by
+    /// [`bar_list_name`] show: its detail has one `checkout` line each.
+    /// The detail starts mid-way (scrolled by the wheel on a 120 × 30
+    /// frame), as the move keys move the list cursor in a wide frame.
+    fn bar_list_pr_detail_state() -> AppState {
+        use super::super::pr_status::PrState;
+        use super::super::state::prs_fixtures::{app_over, checkout, land, pr, GH_APP};
+        let names: Vec<String> = (0..BAR_LIST_ROWS).map(bar_list_name).collect();
+        let repos: Vec<_> = names.iter().map(|name| checkout(name, "topic")).collect();
+        let mut state = app_over(&repos, false);
+        let shared = pr(
+            GH_APP,
+            7,
+            PrState::InReview,
+            "Share one PR",
+            "topic",
+            "main",
+        );
+        for name in &names {
+            land(&mut state, name, "topic", GH_APP, shared.clone());
+        }
+        state.dispatch(Action::OpenPrsTab);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let rows = state.layout.prs_detail_rows;
+        state.dispatch(Action::ScrollWheel {
+            col: rows.x + 1,
+            row: rows.y + 1,
+            delta: 30,
+            horizontal: false,
+        });
+        assert_eq!(
+            state.prs_detail_scroll(),
+            30,
+            "the wheel scrolls the detail"
+        );
+        state
+    }
+
     /// Every list surface that paints through `draw_tree`,
-    /// `draw_commit_file_list`, `draw_folder_summary`, or
-    /// `draw_explorer_tree`, and the Explorer clean-file view
-    /// (`draw_file_body`), whose lines scroll and pan the same way.
-    const LIST_BAR_SURFACES: [ListBarSurface; 7] = [
+    /// `draw_commit_file_list`, `draw_folder_summary`,
+    /// `draw_explorer_tree`, `draw_prs_list`, or `draw_prs_detail`, and
+    /// the Explorer clean-file view (`draw_file_body`), whose lines scroll
+    /// (and, but for the PRs tab panes, pan) the same way.
+    const LIST_BAR_SURFACES: [ListBarSurface; 9] = [
         ListBarSurface {
             id: "tree",
             open: || {
@@ -8633,6 +8699,27 @@ mod tests {
             // A clean-file wheel step moves the line cursor and loads nothing.
             moved: |effect| *effect == Effect::None,
         },
+        ListBarSurface {
+            id: "prs-list",
+            open: bar_list_prs_state,
+            pane: FocusPane::Left,
+            vbar: VScrollbar::PrsList,
+            hbar: None,
+            cursor: |state| state.tabs.active_prs().expect("a PRs tab").cursor_index,
+            // A PRs list wheel step moves the cursor and loads nothing.
+            moved: |effect| *effect == Effect::None,
+        },
+        ListBarSurface {
+            id: "prs-detail",
+            open: bar_list_pr_detail_state,
+            // The PRs tab keeps its focus on the list.
+            pane: FocusPane::Left,
+            vbar: VScrollbar::PrsDetail,
+            hbar: None,
+            // No cursor, so nothing loads: the viewport moves alone.
+            cursor: AppState::prs_detail_scroll,
+            moved: |effect| *effect == Effect::None,
+        },
     ];
 
     /// The recorded vertical bar `bar` of a list.
@@ -8643,6 +8730,8 @@ mod tests {
             VScrollbar::ExplorerTree => state.layout.explorer_tree_vbar,
             VScrollbar::FileView => state.layout.file_view_vbar,
             VScrollbar::Summary => state.layout.summary_vbar,
+            VScrollbar::PrsList => state.layout.prs_list_vbar,
+            VScrollbar::PrsDetail => state.layout.prs_detail_vbar,
             VScrollbar::Graph | VScrollbar::Diff => unreachable!("not a list bar"),
         }
     }
@@ -8710,6 +8799,8 @@ mod tests {
                             | "draw_folder_summary"
                             | "draw_explorer_tree"
                             | "draw_file_body"
+                            | "draw_prs_list"
+                            | "draw_prs_detail"
                     )
                 })
             })
@@ -9028,10 +9119,10 @@ mod tests {
 
     /// Shift-←/→ on the focused list and the horizontal wheel over a list
     /// pan it the same way on every list surface of `horizontal-pan` (the
-    /// `scrollbars` list surfaces, [`LIST_BAR_SURFACES`]), in both looks:
-    /// Shift-→ stops at the list's own pan max, the wheel pans the list
-    /// under the pointer while the other pane has focus, stops at that
-    /// same max, and moves no cursor.
+    /// `scrollbars` list surfaces with a horizontal bar,
+    /// [`LIST_BAR_SURFACES`]), in both looks: Shift-→ stops at the list's
+    /// own pan max, the wheel pans the list under the pointer while the
+    /// other pane has focus, stops at that same max, and moves no cursor.
     #[test]
     fn list_shift_keys_and_hwheel_pan_on_every_registry_list_surface() {
         let registry = crate::parity_registry::registry();
@@ -9040,7 +9131,8 @@ mod tests {
             .iter()
             .find(|c| c.id == "horizontal-pan")
             .expect("horizontal-pan component");
-        let list_ids: Vec<&str> = LIST_BAR_SURFACES.iter().map(|s| s.id).collect();
+        let panning = || LIST_BAR_SURFACES.iter().filter(|s| s.hbar.is_some());
+        let list_ids: Vec<&str> = panning().map(|s| s.id).collect();
         let pan_ids: Vec<&str> = pan
             .surfaces
             .iter()
@@ -9071,7 +9163,7 @@ mod tests {
                 "docs/parity.md `horizontal-pan` / `{feature}` must mark every list surface and look"
             );
         }
-        for surface in &LIST_BAR_SURFACES {
+        for surface in panning() {
             for (look, background) in PANE_LOOKS {
                 let case = format!("{} {look}", surface.id);
                 let mut state = (surface.open)();

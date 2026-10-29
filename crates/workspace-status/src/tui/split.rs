@@ -76,6 +76,13 @@ pub enum VScrollbar {
     /// commit-file folder). The summary has no cursor: the bar moves its
     /// viewport only, as the wheel does.
     Summary,
+    /// The PRs tab list bar. Its viewport follows the list cursor, so the
+    /// cursor moves with the viewport and the detail shows its PR, as the
+    /// wheel moves them.
+    PrsList,
+    /// The PRs tab detail bar. The detail has no cursor: the bar moves
+    /// its viewport only, as the wheel does.
+    PrsDetail,
 }
 
 /// A painted horizontal scrollbar that the mouse drags
@@ -312,6 +319,12 @@ pub struct SplitLayout {
     pub summary_vbar: VScrollbarLayout,
     /// Folder summary horizontal scrollbar and its pan.
     pub summary_hbar: HScrollbarLayout,
+    /// PRs tab list vertical scrollbar: the scrolled lines (not the pinned
+    /// error and loading lines), the line count, and the painted top.
+    pub prs_list_vbar: VScrollbarLayout,
+    /// PRs tab detail vertical scrollbar: the detail lines, their count,
+    /// and the painted top.
+    pub prs_detail_vbar: VScrollbarLayout,
     /// 0-based row of the expanded commit-message footer's top rule (graph
     /// or depth-2 commit files) when it is painted ([`SplitHit::CommitMsg`]).
     pub commit_msg_rule_y: Option<u16>,
@@ -546,6 +559,8 @@ impl SplitLayout {
             VScrollbar::ExplorerTree => self.explorer_tree_vbar,
             VScrollbar::FileView => self.file_view_vbar,
             VScrollbar::Summary => self.summary_vbar,
+            VScrollbar::PrsList => self.prs_list_vbar,
+            VScrollbar::PrsDetail => self.prs_detail_vbar,
         }
     }
 
@@ -691,7 +706,9 @@ fn is_commit_msg_rule(layout: SplitLayout, col: u16, row: u16) -> bool {
 /// in the corner cell. Then pane, then the commit-message footer rule,
 /// then in-diff RULE. The Explorer tab hit-tests through here too: its
 /// tree's and clean-file view's bars record no geometry on another tab,
-/// and the other tabs' bars none on an Explorer tab.
+/// and the other tabs' bars none on an Explorer tab. The PRs tab takes
+/// only its two bars' hits from here (`prs_click`): its list and detail
+/// record no other geometry.
 /// Boxed panes stop above the pane area's last row (the bottom border);
 /// flat panes include it.
 pub fn hit_split(layout: SplitLayout, col: u16, row: u16) -> SplitHit {
@@ -710,19 +727,22 @@ pub fn hit_split(layout: SplitLayout, col: u16, row: u16) -> SplitHit {
     if y > last_row {
         return SplitHit::Other;
     }
-    // Each pane's vertical bar, then its horizontal bar.
+    // Each pane's vertical bar, then its horizontal bar (the PRs tab panes
+    // never pan, so they have none).
     let bars = [
-        (VScrollbar::Graph, HScrollbar::Graph),
-        (VScrollbar::Diff, HScrollbar::Diff),
-        (VScrollbar::Tree, HScrollbar::Tree),
-        (VScrollbar::CommitFiles, HScrollbar::CommitFiles),
-        (VScrollbar::Summary, HScrollbar::Summary),
-        (VScrollbar::ExplorerTree, HScrollbar::ExplorerTree),
-        (VScrollbar::FileView, HScrollbar::FileView),
+        (VScrollbar::Graph, Some(HScrollbar::Graph)),
+        (VScrollbar::Diff, Some(HScrollbar::Diff)),
+        (VScrollbar::Tree, Some(HScrollbar::Tree)),
+        (VScrollbar::CommitFiles, Some(HScrollbar::CommitFiles)),
+        (VScrollbar::Summary, Some(HScrollbar::Summary)),
+        (VScrollbar::ExplorerTree, Some(HScrollbar::ExplorerTree)),
+        (VScrollbar::FileView, Some(HScrollbar::FileView)),
+        (VScrollbar::PrsList, None),
+        (VScrollbar::PrsDetail, None),
     ];
     for (vbar, hbar) in bars {
         let hit = hit_vscrollbar(vbar, layout.vbar(vbar), col, row)
-            .or_else(|| hit_hscrollbar(hbar, layout.hbar(hbar), col, row));
+            .or_else(|| hbar.and_then(|hbar| hit_hscrollbar(hbar, layout.hbar(hbar), col, row)));
         if let Some(hit) = hit {
             return hit;
         }
