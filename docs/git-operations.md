@@ -88,8 +88,8 @@ If git exits but a process it started keeps stdout or stderr open, the runner ki
 | `list_worktrees_porcelain(cwd)` | `worktree list --porcelain` | stdout (or `""`) | Enumerate checkouts for linked-worktree discovery |
 | `is_ancestor(cwd, maybe_ancestor, tip)` | `merge-base --is-ancestor` | `Some(true/false)` / `None` | Merge-into-default probe |
 | `head_equals_ref(cwd, git_ref)` | `rev-parse` of `HEAD` and `git_ref` | boolean | Same-commit as default tip is open, not merged |
-| `resolve_default_branch_tip_ref` / `resolve_default_branch_name` / `get_default_branch` | `rev-parse` / `symbolic-ref` / `show-ref` | branch / tip | Default branch name and tip for classification and `-d` |
-| `known_default_branch_name` | `symbolic-ref --quiet --short refs/remotes/origin/HEAD` | `Option<branch>` | The configured override, else the branch `origin/HEAD` names; `None` with neither (no guess). `resolve_default_branch_name` falls back to `main` on `None`. The snapshot worker calls it once per checkout, in place of `resolve_default_branch_name`, and keeps the answer as the snapshot row's `default_branch`: a checkout on it has no PR status |
+| `resolve_default_branch_tip_ref` / `get_default_branch` | `rev-parse` / `symbolic-ref` / `show-ref` | branch / tip | Default branch tip for classification, and the `-d` target |
+| `known_default_branch_name` | `symbolic-ref --quiet --short refs/remotes/origin/HEAD` | `Option<branch>` | The configured override, else the branch `origin/HEAD` names; `None` with neither (no guess). The snapshot worker calls it once per checkout. Merge-into-default classification uses its answer, or `main` on `None`, and the snapshot row keeps the answer as `default_branch`: a checkout on it has no PR status |
 | `create_branch_at(cwd, name, commit_id)` | `branch -- <name> <commitId>` | `Result` | Create a local ref **without** checking it out (graph `c`, and the create row of the graph `b` picker, which hides for any existing local branch from the snapshot) |
 | `create_branch_checkout(cwd, name)` | `checkout -b <name> --quiet` | `Result` | The `+ create branch <name>` row of the tree `b` picker. Both create paths check the name first with `branches::branch_name_error` (git `check-ref-format` rules); a bad name shows the reason and git does not run |
 | `stash_push` / `stash_apply` / `stash_pop` / `stash_drop` | `stash push -u` / `apply` / `pop` / `drop` | `Result` | Stash menu and graph stash rows. Unchanged stash list after push is failure |
@@ -116,7 +116,7 @@ Every wrapper that takes a path puts `--` before it, so a file named `-f` or `HE
 | `expand_repos_with_linked_worktrees` | `worktree list --porcelain` per main checkout |
 | `process_repo` (when `do_fetch`) | `fetch --quiet` — failure (a timeout too) is caught and ignored; stale refs are better than no output |
 | `process_repo` | `status --porcelain=v1 --branch --ahead-behind --untracked-files=all` |
-| `process_repo` (merge probe) | `resolve_default_branch_name` + `resolve_default_branch_tip_ref` + `merge-base --is-ancestor HEAD <tip>` + same-commit SHA compare. Same-commit as the default tip is open, not merged. |
+| `process_repo` (merge probe) | `known_default_branch_name` (else `main`) + `resolve_default_branch_tip_ref`, resolved once per checkout and shared with the snapshot row, + `merge-base --is-ancestor HEAD <tip>` + same-commit SHA compare. Same-commit as the default tip is open, not merged. |
 
 After `find_repos_with_config` (primaries; still skips dot-dirs), discovery lists linked worktrees under the workspace cwd, applies the same hiddenPaths / ignoredPaths / named-filter rules (filter on a primary includes its linked children, except those at or under an `ignoredPaths` entry; filter on a linked path includes only that path), dedupes by path (linked metadata wins), and runs `process_repo` with `checkout_kind` / `primary_repo`. Independent checkouts run with a cap of `FETCH_CONCURRENCY` (10; `WS_STATUS_FETCH_CONCURRENCY`) so a live watch tick is not one-repo-at-a-time. There is no inotify.
 
@@ -139,7 +139,7 @@ CLI `-p` / `-d` (progress strings go to the caller; `--json` sends them to stder
 
 ## Compare reads (`tui/app.rs` `compute_compare_range` / `compute_compare_diff`)
 
-Default tip is `resolve_default_branch_name` then `resolve_default_branch_tip_ref` (`origin/<default>` before local). Then:
+Default tip is `known_default_branch_name` (else `main`) then `resolve_default_branch_tip_ref` (`origin/<default>` before local). Then:
 
 ```
 git rev-parse --verify --quiet <head-ref>^{commit}

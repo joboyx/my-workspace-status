@@ -8,7 +8,7 @@ use crate::config::{default_branch_override_for, WorkspaceStatusConfig};
 use crate::git::{
     classify_upstream_rewrite, exec_git, exec_git_checked, head_equals_ref, is_ancestor,
     known_default_branch_name, list_local_branches, list_worktrees_porcelain,
-    resolve_default_branch_name, resolve_default_branch_tip_ref, rev_parse_quiet,
+    resolve_default_branch_tip_ref, rev_parse_quiet,
 };
 use crate::helpers::{
     is_default_branch, path_is_under_any, DETACHED_HEAD_BRANCH, STATUS_FAILED_NOTE,
@@ -524,28 +524,28 @@ fn override_for_path(
         .or_else(|| primary_repo.and_then(|p| default_branch_override_for(p, default_branches)))
 }
 
-/// Merge-into-default for one checkout.
+/// Merge-into-default for one checkout, against the default branch
+/// `default_name` and its tip `default_tip_ref` that [`process_repo`]
+/// resolved once for the checkout.
 ///
 /// Same-commit as the default tip is open (`Some(false)`), not merged.
 fn compute_merged_into_default(
     repo_dir: &Path,
     branch: &str,
     override_name: Option<&str>,
+    default_name: &str,
+    default_tip_ref: Option<&str>,
 ) -> Option<bool> {
-    if is_default_branch(branch, override_name) {
+    if is_default_branch(branch, override_name) || branch == default_name {
         return None;
     }
-    let default_branch = resolve_default_branch_name(repo_dir, override_name);
-    if branch == default_branch {
-        return None;
-    }
-    match resolve_default_branch_tip_ref(repo_dir, &default_branch) {
-        None => classify_merged_into_default(branch, &default_branch, None, false),
+    match default_tip_ref {
+        None => classify_merged_into_default(branch, default_name, None, false),
         Some(tip) => classify_merged_into_default(
             branch,
-            &default_branch,
-            is_ancestor(repo_dir, "HEAD", &tip),
-            head_equals_ref(repo_dir, &tip),
+            default_name,
+            is_ancestor(repo_dir, "HEAD", tip),
+            head_equals_ref(repo_dir, tip),
         ),
     }
 }
@@ -583,11 +583,20 @@ pub fn process_repo(
     let has_unstaged = !parsed.unstaged.is_empty();
     let has_staged = !parsed.staged.is_empty();
     let has_untracked = !parsed.untracked.is_empty();
-    let merged = compute_merged_into_default(&repo_dir, &branch_state.branch, override_name);
-    let head = rev_parse_quiet("HEAD", &repo_dir).unwrap_or_default();
+    // Resolve the default branch and its tip once; merge-into-default and
+    // the snapshot row share them. An unknown default classifies against
+    // `main`.
     let default_branch = known_default_branch_name(&repo_dir, override_name);
     let default_name = default_branch.as_deref().unwrap_or("main");
     let default_tip_ref = resolve_default_branch_tip_ref(&repo_dir, default_name);
+    let merged = compute_merged_into_default(
+        &repo_dir,
+        &branch_state.branch,
+        override_name,
+        default_name,
+        default_tip_ref.as_deref(),
+    );
+    let head = rev_parse_quiet("HEAD", &repo_dir).unwrap_or_default();
     let local_branches = list_local_branches(&repo_dir)
         .into_iter()
         .map(|b| b.name)
