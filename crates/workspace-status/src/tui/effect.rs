@@ -10155,10 +10155,14 @@ mod tests {
         // screen stay.
         let later = Instant::now() + std::time::Duration::from_secs(3600);
         let effect = state.new_pr_title_cycle(later);
-        assert!(
-            matches!(effect, Effect::FillPrTitles { .. }),
-            "a poll period on"
-        );
+        let Effect::FillPrTitles { groups, .. } = &effect else {
+            panic!("a poll period on: {effect:?}");
+        };
+        // What the fill would have shown had it not been cut short.
+        let renamed = crate::tui::state::prs_fixtures::script_with("echo \"Renamed $1\"");
+        let mut cut_short = crate::tui::pr_groups::TitleCache::default();
+        cut_short.fill(&renamed, groups);
+        assert_eq!(cut_short.get("ABC-123"), Some("Renamed ABC-123"));
         schedule_effect(&mut interp, &mut state, effect, &Action::None);
         interp.pr_cancel.store(true, Ordering::Relaxed);
         drain_jobs(&mut interp, &mut state, 10);
@@ -10167,6 +10171,18 @@ mod tests {
             Some("Title ABC-123"),
             "a cancelled fill changes nothing on screen"
         );
+        // A cancelled fill that did get titles still shows none of them.
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::PrTitles {
+                titles: cut_short,
+                cancelled: true,
+            },
+        );
+        assert_eq!(state.pr_group_title("ABC-123"), Some("Title ABC-123"));
+        assert_eq!(state.pr_group_title("ABC-125"), Some("Title ABC-125"));
         let _ = std::fs::remove_dir_all(cmd.parent().unwrap());
+        let _ = std::fs::remove_dir_all(renamed.parent().unwrap());
     }
 }

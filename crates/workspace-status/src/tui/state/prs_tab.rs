@@ -1818,11 +1818,23 @@ mod tests {
         );
         assert_eq!(app.pr_group_title("ABC-125"), Some("Title ABC-125"));
 
-        // A fill the quit cut short changes nothing.
-        let next = app.new_pr_title_cycle(later + Duration::from_secs(3600));
+        // A fill the quit cut short changes nothing, even when it got
+        // titles before the quit: the titles and their age stay.
+        let last = later + Duration::from_secs(3600);
+        let next = app.new_pr_title_cycle(last);
         assert!(matches!(next, Effect::FillPrTitles { .. }));
-        app.apply_pr_titles(TitleCache::default(), true, later);
+        let renamed = script_with("echo \"Renamed $1\"");
+        let Effect::FillPrTitles { groups, .. } = &next else {
+            unreachable!()
+        };
+        let mut cut_short = TitleCache::default();
+        cut_short.fill(&renamed, groups);
+        assert_eq!(cut_short.get("ABC-120"), Some("Renamed ABC-120"));
+        app.apply_pr_titles(cut_short, true, last);
         assert_eq!(app.pr_group_title("ABC-120"), Some("Title ABC-120"));
+        assert_eq!(app.pr_group_title("ABC-123"), Some("Title ABC-123"));
+        assert_eq!(app.pr_titles.filled_at, Some(later), "the age stays");
         let _ = std::fs::remove_dir_all(cmd.parent().unwrap());
+        let _ = std::fs::remove_dir_all(renamed.parent().unwrap());
     }
 }
