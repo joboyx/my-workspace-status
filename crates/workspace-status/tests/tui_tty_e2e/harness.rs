@@ -412,10 +412,20 @@ impl PtySession {
     /// a press then a release. A raw `'O'` byte is a different path and does
     /// not catch that remap.
     pub fn shift_letter(&mut self, letter: char) {
-        let lower = letter.to_ascii_lowercase();
-        let codepoint = u32::from(lower);
-        self.csi_u(codepoint, 2, 1);
-        self.csi_u(codepoint, 2, 3);
+        let codepoint = u32::from(letter.to_ascii_lowercase());
+        self.send_tap(
+            &format!("\x1b[{codepoint};2:1u"),
+            &format!("\x1b[{codepoint};2:3u"),
+        );
+    }
+
+    /// Press then release in one write, so both arrive in one stdin read.
+    ///
+    /// The TUI times key gestures by the read their bytes came in. Every
+    /// multi-report helper here sends its gesture as one write, so machine
+    /// load cannot put a gap inside it.
+    fn send_tap(&mut self, press: &str, release: &str) {
+        self.send_bytes(format!("{press}{release}").as_bytes());
     }
 
     /// Unshifted letter press via CSI-u (kind 1). Traditional bytes stay
@@ -431,39 +441,36 @@ impl PtySession {
         self.csi_u(codepoint, 1, 2);
     }
 
-    /// `gg` chord: two raw `g` bytes inside the 400ms window.
+    /// `gg` chord: two raw `g` bytes in one write.
     ///
-    /// Do not inject a CSI-u Release between the taps. A human `gg` is
-    /// two Presses. The live reader must complete `MoveToStart` on that
-    /// path.
+    /// One write is one stdin read, so both taps share one arrival and
+    /// stay inside the 400ms window however loaded the machine is. Do not
+    /// inject a CSI-u Release between the taps. A human `gg` is two
+    /// Presses. The live reader must complete `MoveToStart` on that path.
     pub fn gg(&mut self) {
-        self.key('g');
-        self.key('g');
+        self.send_bytes(b"gg");
     }
 
-    /// `zz` chord: two `z` bytes inside the 400ms window.
+    /// `zz` chord: two `z` bytes in one write (see [`Self::gg`]).
     ///
     /// First `z` toggles the focused row. The second is `toggleSubtree`.
     pub fn zz(&mut self) {
-        self.key('z');
-        self.key('z');
+        self.send_bytes(b"zz");
     }
 
-    /// Home as CSI `1 ; 1 : 1 ~` (press) then `: 3` (release).
+    /// Home as CSI `1 ; 1 : 1 ~` (press) then `: 3` (release), one write.
     ///
     /// The live loop requested event types. `event::read` maps CSI `1~` to
     /// `KeyCode::Home`. `CSI 1 u` is not Home.
     pub fn home(&mut self) {
-        self.send_bytes(b"\x1b[1;1:1~");
-        self.send_bytes(b"\x1b[1;1:3~");
+        self.send_tap("\x1b[1;1:1~", "\x1b[1;1:3~");
     }
 
-    /// End as CSI `4 ; 1 : 1 ~` (press) then `: 3` (release).
+    /// End as CSI `4 ; 1 : 1 ~` (press) then `: 3` (release), one write.
     ///
     /// Same event-type encoding as [`Self::home`]. `CSI 4 u` is not End.
     pub fn end(&mut self) {
-        self.send_bytes(b"\x1b[4;1:1~");
-        self.send_bytes(b"\x1b[4;1:3~");
+        self.send_tap("\x1b[4;1:1~", "\x1b[4;1:3~");
     }
 
     pub fn enter(&mut self) {
@@ -497,8 +504,10 @@ impl PtySession {
     /// (`\x15` / `\x04`) is a different path. Ctrl-d as `\x04` is also EOT.
     pub fn ctrl_letter(&mut self, letter: char) {
         let codepoint = u32::from(letter.to_ascii_lowercase());
-        self.csi_u(codepoint, 5, 1);
-        self.csi_u(codepoint, 5, 3);
+        self.send_tap(
+            &format!("\x1b[{codepoint};5:1u"),
+            &format!("\x1b[{codepoint};5:3u"),
+        );
     }
 
     pub fn search(&mut self, query: &str) {
@@ -520,16 +529,12 @@ impl PtySession {
         self.send_bytes(seq.as_bytes());
     }
 
-    /// Left press + release. Setup only (focus a short tree row before
-    /// hscroll). Not a click-coverage claim: a no-op click still continues.
+    /// Left press + release in one write. Setup only (focus a short tree
+    /// row before hscroll). Not a click-coverage claim: a no-op click still
+    /// continues.
     pub fn sgr_click(&mut self, col: u16, row: u16) {
-        self.sgr_mouse(0, col, row);
-        let seq = format!(
-            "\x1b[<0;{};{}m",
-            col.saturating_add(1),
-            row.saturating_add(1)
-        );
-        self.send_bytes(seq.as_bytes());
+        let (x, y) = (col.saturating_add(1), row.saturating_add(1));
+        self.send_tap(&format!("\x1b[<0;{x};{y}M"), &format!("\x1b[<0;{x};{y}m"));
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
