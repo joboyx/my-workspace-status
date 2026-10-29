@@ -585,23 +585,30 @@ pub(crate) fn declared_fns(root: &Path) -> HashSet<String> {
 }
 
 /// Names after each `fn ` keyword in `text`.
+///
+/// Comments do not count: a line's text from `//` on (`//`, `///`, `//!`,
+/// and a trailing comment) is skipped, so a stale doc mention of a renamed
+/// fn cannot keep its anchor alive.
 fn fn_names_in(text: &str) -> Vec<String> {
     let mut names = Vec::new();
-    let bytes = text.as_bytes();
-    let mut from = 0;
-    while let Some(at) = text[from..].find("fn ") {
-        let start = from + at;
-        from = start + 3;
-        let keyword = start == 0 || !is_ident_byte(bytes[start - 1]);
-        if !keyword {
-            continue;
-        }
-        let name: String = text[from..]
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect();
-        if !name.is_empty() {
-            names.push(name);
+    for line in text.lines() {
+        let code = line.split_once("//").map_or(line, |(code, _)| code);
+        let bytes = code.as_bytes();
+        let mut from = 0;
+        while let Some(at) = code[from..].find("fn ") {
+            let start = from + at;
+            from = start + 3;
+            let keyword = start == 0 || !is_ident_byte(bytes[start - 1]);
+            if !keyword {
+                continue;
+            }
+            let name: String = code[from..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                names.push(name);
+            }
         }
     }
     names
@@ -787,5 +794,21 @@ mod tests {
             "pub(crate) fn alpha(x: u8) {}\nfn beta<T>() {}\nlet info = 1; // defn gamma\n",
         );
         assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    /// A renamed fn that a comment still mentions is not declared: `//`,
+    /// `///`, `//!`, and trailing comments do not count.
+    #[test]
+    fn fn_names_in_skips_comments() {
+        let text = "/// Was fn old_doc before the rename.\n\
+                    //! Crate note: fn old_module.\n\
+                    // fn old_line()\n\
+                    fn kept() {} // was fn old_trailing\n";
+        assert_eq!(fn_names_in(text), vec!["kept".to_string()]);
+        let declared: HashSet<String> = fn_names_in(text).into_iter().collect();
+        let registry =
+            parse(&sample("gap: G1", "").replace("`sample`", "`old_doc`")).expect("valid sample");
+        let missing = missing_fns(&registry, &declared).join("\n");
+        assert!(missing.contains("anchor `fn old_doc`"), "{missing}");
     }
 }
