@@ -299,6 +299,35 @@ fn load_missing_stash_parents(
         .collect()
 }
 
+/// Load one commit and the branches and tags that point at it, for a
+/// commit popover whose commit is not in the loaded graph window.
+///
+/// Runs `for-each-ref --points-at=<sha>` (same format and ref kinds as the
+/// graph load; an annotated tag counts for the commit it peels to), then
+/// `log --no-walk --ignore-missing` with the graph's pretty format.
+/// `Err("commit not found")` when git knows no such commit. Blocking: the
+/// TUI runs it on the blocking pool (`UserTag::CommitCard`), never on the
+/// draw or event thread.
+pub(crate) fn load_commit_card(repo_dir: &Path, sha: &str) -> Result<Commit, String> {
+    let points_at = format!("--points-at={sha}");
+    let raw = exec_git(
+        &[
+            "for-each-ref",
+            REF_FORMAT,
+            &points_at,
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ],
+        repo_dir,
+    );
+    let refs = parse_refs(&raw);
+    load_commits_by_ids(repo_dir, &[sha.to_string()], &refs)
+        .into_iter()
+        .next()
+        .ok_or_else(|| "commit not found".to_string())
+}
+
 fn load_commits_by_ids(
     repo_dir: &Path,
     ids: &[String],
@@ -451,19 +480,29 @@ fn classify_ref(refname: &str, short: &str) -> Option<GraphRef> {
     }
 }
 
+/// `for-each-ref` format: commit id, full ref name, short ref name.
+///
+/// An annotated tag's %(objectname) is the tag object; %(*objectname) is
+/// the peeled commit. Empty for branches and lightweight tags.
+const REF_FORMAT: &str = "--format=%(if)%(*objectname)%(then)%(*objectname)%(else)%(objectname)%(end)%00%(refname)%00%(refname:short)";
+
 fn load_refs(repo_dir: &Path) -> Vec<(String, GraphRef)> {
     let raw = exec_git(
         &[
             "for-each-ref",
-            // An annotated tag's %(objectname) is the tag object; %(*objectname)
-            // is the peeled commit. Empty for branches and lightweight tags.
-            "--format=%(if)%(*objectname)%(then)%(*objectname)%(else)%(objectname)%(end)%00%(refname)%00%(refname:short)",
+            REF_FORMAT,
             "refs/heads",
             "refs/remotes",
             "refs/tags",
         ],
         repo_dir,
     );
+    parse_refs(&raw)
+}
+
+/// Read [`REF_FORMAT`] lines into (commit id, ref) pairs. Symbolic
+/// `*/HEAD` refs and refs outside heads, remotes, and tags are dropped.
+fn parse_refs(raw: &str) -> Vec<(String, GraphRef)> {
     raw.lines()
         .filter_map(|line| {
             let mut parts = line.split('\0');
@@ -1346,6 +1385,88 @@ mod live_git {
             "stash^1 outside the log window must be loaded so the tip can park"
         );
         assert!(model.commits.len() > 3);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn load_commit_card_reads_one_commit_and_its_refs() {
+        let (root, repo) = temp_workspace();
+        init_repo_empty(&repo);
+        commit_file(&repo, "a.txt", "1\n", "first");
+        let first = exec_git(&["rev-parse", "HEAD"], &repo);
+        let status = std::process::Command::new(crate::git::git_binary())
+            .args([
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "card subject",
+                "-m",
+                "Body line.\n\nCo-authored-by: Cy Coder <cy@example.com>",
+            ])
+            .current_dir(&repo)
+            .envs(crate::testutil::git_env())
+            .env("GIT_AUTHOR_NAME", "Ada Lovelace")
+            .env("GIT_AUTHOR_EMAIL", "ada@example.com")
+            .env("GIT_AUTHOR_DATE", "1700000000 +0200")
+            .env("GIT_COMMITTER_NAME", "Bob Builder")
+            .env("GIT_COMMITTER_EMAIL", "bob@example.com")
+            .env("GIT_COMMITTER_DATE", "1700003600 -0500")
+            .status()
+            .expect("git runs");
+        assert!(status.success());
+        git(&repo, &["branch", "feature"]);
+        git(&repo, &["tag", "v-light"]);
+        git(&repo, &["tag", "-a", "v-annotated", "-m", "release"]);
+        let sha = exec_git(&["rev-parse", "HEAD"], &repo);
+
+        let card = load_commit_card(&repo, &sha).expect("card");
+        assert_eq!(card.id, sha);
+        assert_eq!(card.subject, "card subject");
+        assert_eq!(card.parents, vec![first.clone()]);
+        assert_eq!(
+            card.refs,
+            vec![
+                GraphRef::local("feature"),
+                GraphRef::local("main"),
+                GraphRef::tag("v-annotated"),
+                GraphRef::tag("v-light"),
+            ]
+        );
+        assert_eq!(
+            card.author(),
+            Signature {
+                name: "Ada Lovelace".into(),
+                email: "ada@example.com".into(),
+                unix: 1_700_000_000,
+                offset_secs: Some(2 * 3600),
+            }
+        );
+        assert_eq!(
+            card.people.committer,
+            Signature {
+                name: "Bob Builder".into(),
+                email: "bob@example.com".into(),
+                unix: 1_700_003_600,
+                offset_secs: Some(-5 * 3600),
+            }
+        );
+        assert_eq!(
+            card.people.co_authors,
+            vec![workspace_status_graph::Person {
+                name: "Cy Coder".into(),
+                email: "cy@example.com".into(),
+            }]
+        );
+
+        let root_card = load_commit_card(&repo, &first).expect("root card");
+        assert!(root_card.parents.is_empty());
+        assert!(root_card.refs.is_empty(), "{:?}", root_card.refs);
+
+        assert_eq!(
+            load_commit_card(&repo, &"0".repeat(40)),
+            Err("commit not found".to_string())
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

@@ -66,6 +66,7 @@ use super::comments::{
     resolve_entity_reference, save_comment_store, viewport_line_number, viewport_line_range,
     CommentExport, CommentExportList, CommentKey, CommentPrompt, CommentStore, DiffSide, EntityRef,
 };
+use super::commit_card::CommitCardCache;
 use super::commit_files::{
     ancestor_dir_ids, collect_foldable_subtree_ids as collect_commit_subtree_ids,
     commit_file_cursor_index, flatten_commit_files, folder_summary, CommitFileRow, FolderSummary,
@@ -551,7 +552,8 @@ impl LayoutHit {
                 | IconTarget::GraphChip { .. }
                 | IconTarget::GraphSync
                 | IconTarget::GraphMoreLines(_)
-                | IconTarget::CommitDetailMoreLines(_) => None,
+                | IconTarget::CommitDetailMoreLines(_)
+                | IconTarget::Commit { .. } => None,
             })
             .collect()
     }
@@ -1102,6 +1104,9 @@ pub struct AppState {
     explorer_status_memo: RefCell<Option<(String, u64, std::rc::Rc<ExplorerStatus>)>>,
     /// Current-line blame toggle and answer cache.
     pub line_blame: LineBlameState,
+    /// Commit popover cards looked up off the graph, per (checkout, full
+    /// commit id). Graph commits never land here.
+    pub commit_cards: CommitCardCache,
     /// Focused diff row's source line, so the blame hook does not rebuild
     /// the diff rows after every schedule and apply.
     line_blame_row_memo: RefCell<line_blame::RowLineMemo>,
@@ -1336,6 +1341,7 @@ impl AppState {
             file_search_memo: RefCell::new(None),
             explorer_status_memo: RefCell::new(None),
             line_blame: LineBlameState::default(),
+            commit_cards: CommitCardCache::default(),
             line_blame_row_memo: RefCell::new(None),
             graph_reveal: None,
             blame_previous_gen: 0,
@@ -7091,6 +7097,25 @@ impl AppState {
             .nth(tab.file_cursor)
             .filter(|row| row.is_dir())
             .map(|row| row.path)
+    }
+
+    /// Store a commit card lookup for commit `sha` of checkout `repo`.
+    ///
+    /// Returns true when the open popover (peek or pinned) shows that
+    /// commit, so the loop paints the card.
+    pub(crate) fn apply_commit_card(
+        &mut self,
+        repo: String,
+        sha: String,
+        result: Result<workspace_status_graph::Commit, String>,
+    ) -> bool {
+        let shown = self.popover.as_ref().is_some_and(|popover| {
+            popover.targets.iter().any(|(_, target)| {
+                matches!(target, IconTarget::Commit { repo: r, sha: s } if *r == repo && *s == sha)
+            })
+        });
+        self.commit_cards.insert(repo, sha, result);
+        shown
     }
 
     /// Apply a compare range load. Cursor is a flattened row, not a `files` index.

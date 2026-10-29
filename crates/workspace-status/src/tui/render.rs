@@ -4175,6 +4175,8 @@ fn icon_legend_color(kind: IconKind, palette: Palette) -> Color {
         K::Hidden | K::ChangeCount | K::WorktreeCount | K::CommentResolved => palette.muted,
         K::GraphMoreBelow | K::FoldExpanded | K::FoldCollapsed => palette.muted,
         K::CursorBarInactive => palette.muted,
+        // Not in the legend; muted like their popover heading.
+        K::CommitHash | K::CommitDate | K::CommitAuthor => palette.muted,
         K::CursorBar => palette.cursor,
         K::Folder | K::ChipRemote | K::ChipSynced => palette.dir,
         K::FileType => palette.file,

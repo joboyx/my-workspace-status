@@ -14,6 +14,7 @@ use super::super::comments::{
     commit_file_row_comments, commit_file_row_comments_resolved, commit_file_row_has_comment,
     graph_row_comments, tree_row_comments_resolved, tree_row_has_comment, CommentEntry,
 };
+use super::super::commit_card::{commit_card_source, CommitCardSource};
 use super::super::commit_files::CommitFileRow;
 use super::super::drill::CommitFileSource;
 use super::super::gates::ListFocusTarget;
@@ -360,7 +361,28 @@ impl AppState {
                         GraphRow::Uncommitted { .. } | GraphRow::Stash(_) => false,
                     })
             }
+            // The commit sections have no action line to gate.
+            IconTarget::Commit { .. } => false,
         }
+    }
+
+    /// The commit popover card to look up next: the first
+    /// [`IconTarget::Commit`] of the open popover (peek or pinned) that is
+    /// neither in the loaded graph nor in [`AppState::commit_cards`].
+    /// `None` when every shown commit has its data.
+    pub(crate) fn commit_card_want(&self) -> Option<(String, String)> {
+        self.popover
+            .as_ref()?
+            .targets
+            .iter()
+            .find_map(|(_, target)| {
+                let IconTarget::Commit { repo, sha } = target else {
+                    return None;
+                };
+                (!sha.is_empty()
+                    && commit_card_source(self, repo, sha) == CommitCardSource::Loading)
+                    .then(|| (repo.clone(), sha.clone()))
+            })
     }
 
     /// Apply a popover [`Action`].
@@ -3666,5 +3688,77 @@ mod tests {
             )),
             "{sections:?}"
         );
+    }
+
+    fn commit_target(repo: &str, sha: &str) -> IconTarget {
+        IconTarget::Commit {
+            repo: repo.into(),
+            sha: sha.into(),
+        }
+    }
+
+    #[test]
+    fn commit_card_want_names_only_an_open_popover_target_missing_from_graph_and_cache() {
+        let mut app = graph_app();
+        assert_eq!(app.commit_card_want(), None, "no popover");
+        let missing = "e".repeat(40);
+        let peek = |app: &AppState, targets: Vec<(IconKind, IconTarget)>| PopoverState {
+            origin: PopoverOrigin::Peek,
+            targets,
+            anchor: None,
+            focus_line: 0,
+            owner: app.popover_owner(),
+        };
+        // Graph commit and stash of the same checkout: no lookup.
+        app.popover = Some(peek(
+            &app,
+            vec![
+                (IconKind::CommitHash, commit_target("app", G_HEAD)),
+                (IconKind::CommitDate, commit_target("app", G_STASH)),
+                (IconKind::CommitAuthor, commit_target("app", "")),
+            ],
+        ));
+        assert_eq!(app.commit_card_want(), None);
+        // A graph commit of another checkout, then one off the graph.
+        app.popover = Some(peek(
+            &app,
+            vec![
+                (IconKind::CommitHash, commit_target("app", G_HEAD)),
+                (IconKind::CommitHash, commit_target("lib", G_HEAD)),
+                (IconKind::CommitDate, commit_target("app", &missing)),
+            ],
+        ));
+        assert_eq!(
+            app.commit_card_want(),
+            Some(("lib".to_string(), G_HEAD.to_string()))
+        );
+        assert!(!app.apply_commit_card("lib".into(), "f".repeat(40), Err("not shown".into())));
+        assert!(app.apply_commit_card("lib".into(), G_HEAD.into(), Err("boom".into())));
+        assert_eq!(
+            app.commit_card_want(),
+            Some(("app".to_string(), missing.clone()))
+        );
+        assert!(app.apply_commit_card("app".into(), missing, Ok(Commit::default())));
+        assert_eq!(app.commit_card_want(), None, "every shown commit has data");
+        app.close_popover();
+        assert_eq!(app.commit_card_want(), None);
+    }
+
+    #[test]
+    fn a_pinned_commit_card_copies_the_full_sha() {
+        let mut app = graph_app();
+        let hit = IconHit {
+            y: 0,
+            x: 0,
+            width: 7,
+            kind: IconKind::CommitHash,
+            target: commit_target("app", G_HEAD),
+        };
+        app.pin_icon(&hit);
+        assert!(app.popover_pinned());
+        assert_eq!(app.commit_card_want(), None, "a graph commit needs no git");
+        assert_eq!(app.dispatch(Action::PopoverCopyLine), copy(G_HEAD));
+        app.dispatch(Action::PopoverMove(1));
+        assert_eq!(app.dispatch(Action::PopoverCopyLine), copy("add graph"));
     }
 }

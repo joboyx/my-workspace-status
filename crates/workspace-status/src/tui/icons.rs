@@ -154,6 +154,14 @@ pub enum IconKind {
     ChipOverflow,
     /// Graph selection footer: more message lines below.
     GraphMoreBelow,
+    /// Painted commit short hash: hover or click opens the commit card.
+    CommitHash,
+    /// Painted commit time: hover or click opens the author and committer
+    /// times.
+    CommitDate,
+    /// Painted commit author: hover or click opens the author, committer,
+    /// and co-authors.
+    CommitAuthor,
     /// Fold chevron, expanded.
     FoldExpanded,
     /// Fold chevron, collapsed.
@@ -655,6 +663,30 @@ pub const ICON_CATALOG: &[IconSpec] = {
             "more lines",
             "More commit message lines below (count)",
             GRAPH,
+        ),
+        row(
+            K::CommitHash,
+            "\u{f417}",
+            "#",
+            "commit",
+            "Commit: full id, message, parents, refs, and dates",
+            None,
+        ),
+        row(
+            K::CommitDate,
+            "\u{f43a}",
+            "~",
+            "commit time",
+            "Local times; orig is the UTC offset git recorded",
+            None,
+        ),
+        row(
+            K::CommitAuthor,
+            "\u{f415}",
+            "@",
+            "commit author",
+            "Author, committer, and Co-authored-by trailers",
+            None,
         ),
         row(
             K::FoldExpanded,

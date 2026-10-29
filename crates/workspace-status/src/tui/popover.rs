@@ -27,8 +27,9 @@ use std::time::Instant;
 
 use ratatui::layout::Rect;
 use workspace_status_graph::{
-    format_local_timestamp, format_relative_date, short_id, Commit, GraphIconKind, GraphRef,
-    GraphRow, PartTarget, RefKind, Stash, SyncStatus, Worktree, ASCII, UNICODE,
+    format_local_exact, format_local_timestamp, format_relative_date, format_utc_offset, short_id,
+    Commit, CommitPeople, GraphIconKind, GraphRef, GraphRow, PartTarget, RefKind, Signature, Stash,
+    SyncStatus, Worktree, ASCII, UNICODE,
 };
 
 use crate::git::UpstreamRewrite;
@@ -38,6 +39,7 @@ use crate::snapshot::{CheckoutKind, FileChange, WorkspaceRepoSnapshot};
 use super::action::Action;
 use super::command_palette::{command_for, PaletteCommand};
 use super::comments::{tree_row_comments, CommentEntry};
+use super::commit_card::{commit_card_source, CommitCardSource};
 use super::commit_files::CommitFileRow;
 use super::gates::ListFocusTarget;
 use super::icons::{
@@ -102,6 +104,17 @@ pub enum IconTarget {
     /// commit or stash with this identity
     /// ([`AppState::commit_detail_msg_identity`]).
     CommitDetailMoreLines(String),
+    /// A painted commit short hash, time, or author. The [`IconKind`] of
+    /// the hit picks the section: [`IconKind::CommitHash`] the commit card,
+    /// [`IconKind::CommitDate`] the times, [`IconKind::CommitAuthor`] the
+    /// people.
+    Commit {
+        /// Snapshot checkout path of the commit's repository, as in
+        /// [`AppState::graph_identity`].
+        repo: String,
+        /// Full commit id. A hit is recorded only when it is not empty.
+        sha: String,
+    },
 }
 
 /// How a popover opened.
@@ -471,6 +484,7 @@ fn section(
         IconTarget::GraphSync => graph_sync_section(state),
         IconTarget::GraphMoreLines(row) => graph_more_lines_section(state, rows, row),
         IconTarget::CommitDetailMoreLines(id) => commit_detail_more_lines_section(state, id),
+        IconTarget::Commit { repo, sha } => commit_section(state, kind, repo, sha),
     }
 }
 
@@ -2121,6 +2135,215 @@ fn more_lines_section(below: usize, target: IconTarget) -> Option<PopoverSection
     })
 }
 
+/// The parts of a commit or a stash that the commit popovers show.
+struct CommitCard<'a> {
+    /// Full commit id.
+    id: &'a str,
+    /// `stash@{n}` for a stash.
+    stash_ref: Option<&'a str>,
+    subject: &'a str,
+    /// Every parent of a commit; `stash^1` alone for a stash.
+    parents: &'a [String],
+    refs: &'a [GraphRef],
+    author: Signature,
+    people: &'a CommitPeople,
+}
+
+impl<'a> CommitCard<'a> {
+    fn of_commit(commit: &'a Commit) -> Self {
+        Self {
+            id: &commit.id,
+            stash_ref: None,
+            subject: &commit.subject,
+            parents: &commit.parents,
+            refs: &commit.refs,
+            author: commit.author(),
+            people: &commit.people,
+        }
+    }
+
+    fn of_stash(stash: &'a Stash) -> Self {
+        Self {
+            id: &stash.id,
+            stash_ref: Some(&stash.stash_ref),
+            subject: &stash.subject,
+            parents: stash.parent_id.as_slice(),
+            refs: &[],
+            author: stash.author(),
+            people: &stash.people,
+        }
+    }
+}
+
+/// Section of commit popover `kind` (hash card, time, or author) for
+/// commit `sha` of checkout `repo`. `None` for an empty `sha` or another
+/// kind.
+///
+/// A commit off the loaded graph whose card is not looked up yet shows
+/// `loading…`; a failed lookup says why. The hash card keeps its `sha`
+/// row in both cases.
+fn commit_section(
+    state: &AppState,
+    kind: IconKind,
+    repo: &str,
+    sha: &str,
+) -> Option<PopoverSection> {
+    if sha.is_empty() {
+        return None;
+    }
+    let title = match kind {
+        IconKind::CommitHash => Some(format!("commit {}", short_id(sha))),
+        IconKind::CommitDate | IconKind::CommitAuthor => None,
+        _ => return None,
+    };
+    let mut lines = vec![PopoverLine::Text(spec(kind).meaning.to_string())];
+    let card = match commit_card_source(state, repo, sha) {
+        CommitCardSource::Commit(commit) => Ok(CommitCard::of_commit(commit)),
+        CommitCardSource::Stash(stash) => Ok(CommitCard::of_stash(stash)),
+        CommitCardSource::Loading => Err(PR_DETAIL_LOADING.to_string()),
+        CommitCardSource::Failed(reason) => Err(format!("no commit details: {reason}")),
+    };
+    match card {
+        Ok(card) => match kind {
+            IconKind::CommitHash => hash_card_lines(&card, &mut lines),
+            IconKind::CommitDate => time_lines(&card, &mut lines),
+            _ => author_lines(&card, &mut lines),
+        },
+        Err(note) => {
+            if kind == IconKind::CommitHash {
+                lines.push(sha_field(sha));
+            }
+            lines.push(PopoverLine::Note(note));
+        }
+    }
+    Some(PopoverSection {
+        icon: kind,
+        role: SegRole::Muted,
+        target: IconTarget::Commit {
+            repo: repo.to_string(),
+            sha: sha.to_string(),
+        },
+        title,
+        lines,
+    })
+}
+
+/// The hash card's `sha` row: the full id, all of it bold.
+fn sha_field(sha: &str) -> PopoverLine {
+    bold_field("sha", sha, SegRole::File, sha.len())
+}
+
+/// Hash card rows: sha, stash ref, subject, parents, branches, tags,
+/// author, and both dates.
+fn hash_card_lines(card: &CommitCard<'_>, lines: &mut Vec<PopoverLine>) {
+    lines.push(sha_field(card.id));
+    if let Some(stash_ref) = card.stash_ref {
+        lines.push(field("ref", stash_ref));
+    }
+    lines.push(field("subject", card.subject));
+    if card.parents.is_empty() && card.stash_ref.is_none() {
+        lines.push(field("parent", "none (root commit)"));
+    }
+    for (index, parent) in card.parents.iter().enumerate() {
+        lines.push(field(
+            if index == 0 { "parent" } else { "" },
+            parent.as_str(),
+        ));
+    }
+    let ref_names = |wanted: fn(RefKind) -> bool| -> String {
+        let names: Vec<&str> = card
+            .refs
+            .iter()
+            .filter(|graph_ref| wanted(graph_ref.kind))
+            .map(|graph_ref| graph_ref.name.as_str())
+            .collect();
+        names.join(", ")
+    };
+    let branches = ref_names(|kind| matches!(kind, RefKind::Local | RefKind::Remote));
+    if !branches.is_empty() {
+        lines.push(field("branches", branches));
+    }
+    let tags = ref_names(|kind| kind == RefKind::Tag);
+    if !tags.is_empty() {
+        lines.push(field("tags", tags));
+    }
+    let committer = &card.people.committer;
+    push_some(lines, "author", who(&card.author.name, &card.author.email));
+    push_some(
+        lines,
+        "authored",
+        when(card.author.unix, card.author.offset_secs),
+    );
+    push_some(
+        lines,
+        "committed",
+        when(committer.unix, committer.offset_secs),
+    );
+}
+
+/// Time popover rows: author, authored, committer, committed.
+fn time_lines(card: &CommitCard<'_>, lines: &mut Vec<PopoverLine>) {
+    let committer = &card.people.committer;
+    push_some(lines, "author", who(&card.author.name, &card.author.email));
+    push_some(
+        lines,
+        "authored",
+        when(card.author.unix, card.author.offset_secs),
+    );
+    push_some(lines, "committer", who(&committer.name, &committer.email));
+    push_some(
+        lines,
+        "committed",
+        when(committer.unix, committer.offset_secs),
+    );
+}
+
+/// Author popover rows: the time rows, then one `co-author` row per
+/// `Co-authored-by` trailer in message order.
+fn author_lines(card: &CommitCard<'_>, lines: &mut Vec<PopoverLine>) {
+    time_lines(card, lines);
+    let co_authors = card
+        .people
+        .co_authors
+        .iter()
+        .filter_map(|person| who(&person.name, &person.email));
+    for (index, value) in co_authors.enumerate() {
+        lines.push(field(if index == 0 { "co-author" } else { "" }, value));
+    }
+}
+
+/// A `label` field for `value`; nothing when `value` is `None`.
+fn push_some(lines: &mut Vec<PopoverLine>, label: &'static str, value: Option<String>) {
+    if let Some(value) = value {
+        lines.push(field(label, value));
+    }
+}
+
+/// An identity as `Name <email>`, `Name` with no email, `<email>` with no
+/// name. `None` when both are empty.
+fn who(name: &str, email: &str) -> Option<String> {
+    match (name.is_empty(), email.is_empty()) {
+        (true, true) => None,
+        (false, true) => Some(name.to_string()),
+        (true, false) => Some(format!("<{email}>")),
+        (false, false) => Some(format!("{name} <{email}>")),
+    }
+}
+
+/// A commit date as `YYYY-MM-DD HH:MM:SS local · orig UTC±HH:MM`: the
+/// operator's local clock, then the offset the commit recorded. No offset
+/// leaves out the `orig` part. `None` for unix `0` (unknown).
+fn when(unix: i64, offset: Option<i32>) -> Option<String> {
+    if unix == 0 {
+        return None;
+    }
+    let local = format_local_exact(unix);
+    Some(match offset {
+        Some(offset) => format!("{local} local · orig {}", format_utc_offset(offset)),
+        None => format!("{local} local"),
+    })
+}
+
 /// Every line of `sections`, in order. [`PopoverState::focus_line`]
 /// indexes this list.
 pub fn flat_lines(sections: &[PopoverSection]) -> Vec<&PopoverLine> {
@@ -2984,5 +3207,330 @@ mod tests {
         assert_eq!(commits(Some(1), "to pull"), "1 commit to pull");
         assert_eq!(commits(Some(4), "not pushed"), "4 commits not pushed");
         assert_eq!(commits(None, "to pull"), "commits to pull");
+    }
+
+    mod commit_popovers {
+        use std::path::PathBuf;
+
+        use super::super::*;
+        use crate::snapshot::build_workspace_snapshot;
+        use workspace_status_graph::{GraphModel, Person};
+
+        const AUTHORED: i64 = 1_700_000_000;
+        const COMMITTED: i64 = 1_700_003_600;
+
+        fn id(c: char) -> String {
+            c.to_string().repeat(40)
+        }
+
+        fn ada() -> CommitPeople {
+            CommitPeople {
+                author_email: "ada@example.com".into(),
+                author_offset_secs: Some(2 * 3600),
+                committer: Signature {
+                    name: "Bob Builder".into(),
+                    email: "bob@example.com".into(),
+                    unix: COMMITTED,
+                    offset_secs: Some(-5 * 3600),
+                },
+                co_authors: vec![
+                    Person {
+                        name: "Cy Coder".into(),
+                        email: "cy@example.com".into(),
+                    },
+                    Person {
+                        name: "Bob Builder".into(),
+                        email: String::new(),
+                    },
+                ],
+            }
+        }
+
+        /// A merge `a` of `b` and `c` with a branch, a remote, and a tag,
+        /// authored by Ada, committed by Bob, with two co-authors.
+        fn merge() -> Commit {
+            Commit {
+                id: id('a'),
+                subject: "Merge feature".into(),
+                parents: vec![id('b'), id('c')],
+                refs: vec![
+                    GraphRef::local("main"),
+                    GraphRef::tag("v1.0"),
+                    GraphRef::remote("origin/main"),
+                ],
+                author_name: "Ada Lovelace".into(),
+                author_date_unix: AUTHORED,
+                people: ada(),
+                ..Commit::default()
+            }
+        }
+
+        /// Root commit `c`: no trailer, no author offset, committer
+        /// unknown.
+        fn root() -> Commit {
+            Commit {
+                id: id('c'),
+                subject: "root".into(),
+                author_name: "Ada Lovelace".into(),
+                author_date_unix: AUTHORED,
+                people: CommitPeople {
+                    author_email: "ada@example.com".into(),
+                    ..CommitPeople::default()
+                },
+                ..Commit::default()
+            }
+        }
+
+        fn stash() -> Stash {
+            Stash {
+                id: id('d'),
+                stash_ref: "stash@{0}".into(),
+                subject: "WIP on main".into(),
+                author_name: "Ada Lovelace".into(),
+                author_date_unix: AUTHORED,
+                parent_id: Some(id('a')),
+                people: ada(),
+                ..Stash::default()
+            }
+        }
+
+        /// No repos; the graph of `app` holds [`merge`], [`root`], and
+        /// [`stash`].
+        fn graph_state() -> AppState {
+            let snapshot = build_workspace_snapshot(&[], &[], false, &[]);
+            let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+            state.graph = Some(GraphModel {
+                commits: vec![merge(), root()],
+                stashes: vec![stash()],
+                ..GraphModel::default()
+            });
+            state.graph_identity = Some(("app".into(), id('a')));
+            state
+        }
+
+        fn target(repo: &str, sha: &str) -> IconTarget {
+            IconTarget::Commit {
+                repo: repo.into(),
+                sha: sha.into(),
+            }
+        }
+
+        fn section(state: &AppState, kind: IconKind, sha: &str) -> Option<PopoverSection> {
+            popover_sections(state, &[(kind, target("app", sha))], 0)
+                .into_iter()
+                .next()
+        }
+
+        /// Each line as `label|value`, `text|…`, or `note|…`.
+        fn rows(section: &PopoverSection) -> Vec<String> {
+            section
+                .lines
+                .iter()
+                .map(|line| match line {
+                    PopoverLine::Text(text) => format!("text|{text}"),
+                    PopoverLine::Note(text) => format!("note|{text}"),
+                    PopoverLine::Field { label, value, .. } => format!("{label}|{value}"),
+                    other => panic!("no actions in a commit popover: {other:?}"),
+                })
+                .collect()
+        }
+
+        fn meaning(kind: IconKind) -> String {
+            format!("text|{}", spec(kind).meaning)
+        }
+
+        fn when(unix: i64, offset: &str) -> String {
+            format!("{} local · orig {offset}", format_local_exact(unix))
+        }
+
+        #[test]
+        fn commit_hash_card_lists_full_sha_subject_parents_refs_and_dates() {
+            let state = graph_state();
+            let card = section(&state, IconKind::CommitHash, &id('a')).expect("card");
+            assert_eq!(card.heading(), "commit aaaaaaa");
+            assert_eq!(card.icon, IconKind::CommitHash);
+            assert_eq!(card.role, SegRole::Muted);
+            assert_eq!(card.target, target("app", &id('a')));
+            assert_eq!(
+                rows(&card),
+                vec![
+                    meaning(IconKind::CommitHash),
+                    format!("sha|{}", id('a')),
+                    "subject|Merge feature".into(),
+                    format!("parent|{}", id('b')),
+                    format!("|{}", id('c')),
+                    "branches|main, origin/main".into(),
+                    "tags|v1.0".into(),
+                    "author|Ada Lovelace <ada@example.com>".into(),
+                    format!("authored|{}", when(AUTHORED, "UTC+02:00")),
+                    format!("committed|{}", when(COMMITTED, "UTC-05:00")),
+                ]
+            );
+            assert!(
+                matches!(&card.lines[1], PopoverLine::Field { bold, value, .. } if *bold == value.len()),
+                "the whole sha is bold: {:?}",
+                card.lines[1]
+            );
+            let lines: Vec<&PopoverLine> = card.lines.iter().collect();
+            assert_eq!(landing_line(&lines), 1, "lands on the sha");
+
+            let root = section(&state, IconKind::CommitHash, &id('c')).expect("root");
+            assert_eq!(
+                rows(&root),
+                vec![
+                    meaning(IconKind::CommitHash),
+                    format!("sha|{}", id('c')),
+                    "subject|root".into(),
+                    "parent|none (root commit)".into(),
+                    "author|Ada Lovelace <ada@example.com>".into(),
+                    format!("authored|{} local", format_local_exact(AUTHORED)),
+                ]
+            );
+
+            let stash = section(&state, IconKind::CommitHash, &id('d')).expect("stash");
+            assert_eq!(stash.heading(), "commit ddddddd");
+            assert_eq!(
+                rows(&stash),
+                vec![
+                    meaning(IconKind::CommitHash),
+                    format!("sha|{}", id('d')),
+                    "ref|stash@{0}".into(),
+                    "subject|WIP on main".into(),
+                    format!("parent|{}", id('a')),
+                    "author|Ada Lovelace <ada@example.com>".into(),
+                    format!("authored|{}", when(AUTHORED, "UTC+02:00")),
+                    format!("committed|{}", when(COMMITTED, "UTC-05:00")),
+                ]
+            );
+        }
+
+        #[test]
+        fn commit_time_and_author_sections_show_both_people_and_co_authors() {
+            let state = graph_state();
+            let times = vec![
+                "author|Ada Lovelace <ada@example.com>".to_string(),
+                format!("authored|{}", when(AUTHORED, "UTC+02:00")),
+                "committer|Bob Builder <bob@example.com>".into(),
+                format!("committed|{}", when(COMMITTED, "UTC-05:00")),
+            ];
+            let time = section(&state, IconKind::CommitDate, &id('a')).expect("time");
+            assert_eq!(time.heading(), "commit time");
+            assert_eq!(time.role, SegRole::Muted);
+            assert_eq!(
+                rows(&time),
+                [vec![meaning(IconKind::CommitDate)], times.clone()].concat()
+            );
+
+            let author = section(&state, IconKind::CommitAuthor, &id('a')).expect("author");
+            assert_eq!(author.heading(), "commit author");
+            assert_eq!(
+                rows(&author),
+                [
+                    vec![meaning(IconKind::CommitAuthor)],
+                    times,
+                    vec![
+                        "co-author|Cy Coder <cy@example.com>".into(),
+                        "|Bob Builder".into(),
+                    ],
+                ]
+                .concat()
+            );
+
+            // No trailer: no co-author row. No offset: local only. Unix 0
+            // and no committer: those rows are left out.
+            let root = section(&state, IconKind::CommitAuthor, &id('c')).expect("root");
+            assert_eq!(
+                rows(&root),
+                vec![
+                    meaning(IconKind::CommitAuthor),
+                    "author|Ada Lovelace <ada@example.com>".into(),
+                    format!("authored|{} local", format_local_exact(AUTHORED)),
+                ]
+            );
+
+            assert_eq!(who("", ""), None);
+            assert_eq!(who("Ada Lovelace", "").as_deref(), Some("Ada Lovelace"));
+            assert_eq!(super::super::when(0, Some(3600)), None);
+        }
+
+        #[test]
+        fn commit_card_off_the_graph_shows_loading_then_the_cached_card_or_the_failure() {
+            let mut state = graph_state();
+            let missing = id('e');
+            let hash = section(&state, IconKind::CommitHash, &missing).expect("loading");
+            assert_eq!(hash.heading(), "commit eeeeeee");
+            assert_eq!(
+                rows(&hash),
+                vec![
+                    meaning(IconKind::CommitHash),
+                    format!("sha|{missing}"),
+                    "note|loading…".into(),
+                ]
+            );
+            for kind in [IconKind::CommitDate, IconKind::CommitAuthor] {
+                let loading = section(&state, kind, &missing).expect("loading");
+                assert_eq!(rows(&loading), vec![meaning(kind), "note|loading…".into()]);
+            }
+            // The graph of `app` does not answer for another checkout.
+            let other = popover_sections(
+                &state,
+                &[(IconKind::CommitHash, target("lib", &id('a')))],
+                0,
+            );
+            assert_eq!(
+                rows(&other[0]).last().map(String::as_str),
+                Some("note|loading…")
+            );
+
+            state.commit_cards.insert(
+                "app".into(),
+                missing.clone(),
+                Ok(Commit {
+                    id: missing.clone(),
+                    ..merge()
+                }),
+            );
+            let card = section(&state, IconKind::CommitHash, &missing).expect("card");
+            assert_eq!(
+                rows(&card)[1..4],
+                [
+                    format!("sha|{missing}"),
+                    "subject|Merge feature".to_string(),
+                    format!("parent|{}", id('b')),
+                ]
+            );
+            assert_eq!(rows(&card).len(), 10, "the full card");
+
+            let failed = id('f');
+            state
+                .commit_cards
+                .insert("app".into(), failed.clone(), Err("boom".into()));
+            let hash = section(&state, IconKind::CommitHash, &failed).expect("failed");
+            assert_eq!(
+                rows(&hash),
+                vec![
+                    meaning(IconKind::CommitHash),
+                    format!("sha|{failed}"),
+                    "note|no commit details: boom".into(),
+                ]
+            );
+            let author = section(&state, IconKind::CommitAuthor, &failed).expect("failed");
+            assert_eq!(
+                rows(&author),
+                vec![
+                    meaning(IconKind::CommitAuthor),
+                    "note|no commit details: boom".into(),
+                ]
+            );
+
+            assert!(
+                section(&state, IconKind::CommitHash, "").is_none(),
+                "empty sha"
+            );
+            assert!(
+                section(&state, IconKind::GraphCommit, &id('a')).is_none(),
+                "another kind"
+            );
+        }
     }
 }
