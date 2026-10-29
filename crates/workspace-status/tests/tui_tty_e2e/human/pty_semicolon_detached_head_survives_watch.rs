@@ -86,10 +86,13 @@ fn pty_semicolon_detached_head_survives_watch() {
         "detached HEAD must persist as a worktree key, not Branch HEAD (detached):\n{stored}"
     );
 
-    tui.wait_ms(2500);
+    // Prove a watch apply ran after the save: a new untracked file makes the
+    // workspace row count a changed repo only through a watch poll. The GC
+    // runs on that same apply.
+    fs::write(app.join("watch-after-save.txt"), "after save\n").unwrap();
     tui.wait_pred(
-        |screen| overlay_closed(screen) && tree_has(screen, "app"),
-        "watch ticks keep the TUI mounted after the save",
+        |screen| overlay_closed(screen) && tree_has(screen, "app") && screen.contains("1 changed"),
+        "a watch apply after the save counts the new dirty file; the TUI stays mounted",
         GIT_WAIT,
     );
     let stored = store_text(&workspace);

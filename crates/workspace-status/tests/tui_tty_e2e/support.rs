@@ -1502,7 +1502,17 @@ pub fn prove_keys_handled(tui: &mut PtySession) {
         WAIT,
     );
     tui.esc();
-    tui.wait_pred(|screen| !help_open(screen), "Esc closes help", WAIT);
+    tui.wait_pred(help_gone, "Esc closes help", WAIT);
+}
+
+/// No row of the help overlay is left on screen.
+///
+/// The frame that closes help repaints rows top to bottom, so a read in
+/// the middle of it still shows the help footer. Waiting for the footer
+/// (`Esc closes`, `Needs a Nerd Font`) to go as well as the header means
+/// the whole closing frame has arrived.
+fn help_gone(screen: &str) -> bool {
+    !help_open(screen) && !screen.contains("Esc closes") && !screen.contains("Needs a Nerd Font")
 }
 
 /// [`prove_keys_handled`] for an open Quick Open palette: a typed `z`

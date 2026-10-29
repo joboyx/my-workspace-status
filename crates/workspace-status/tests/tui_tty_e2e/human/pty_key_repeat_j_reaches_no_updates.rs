@@ -2,8 +2,8 @@ use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
     documented_launch_first_paint, line_on_branch, no_updates_group_folded, no_wrong_overlays,
-    prove_keys_handled, status_row, tree_cursor_on, tree_dir_collapsed, tree_dir_expanded,
-    tree_has, tree_line_containing, GIT_WAIT, WAIT,
+    prove_keys_handled, status_row, step_cursor, tree_cursor_on, tree_dir_collapsed,
+    tree_dir_expanded, tree_has, tree_line_containing, GIT_WAIT, WAIT,
 };
 
 fn help_lists_j_k_down_up(screen: &str) -> bool {
@@ -193,9 +193,14 @@ fn pty_key_repeat_j_reaches_no_updates() {
         WAIT,
     );
 
-    for _ in 0..9 {
-        tui.letter_repeat('j');
-        tui.wait_ms(50);
+    // One Repeat at a time, each after the cursor moved: the input thread
+    // drops a queued copy of a held nav key. Stop on No updates, so an
+    // extra Repeat cannot reach merger.
+    for _ in 0..20 {
+        if on_folded_no_updates(&tui.screen()) {
+            break;
+        }
+        step_cursor(&mut tui, |tui| tui.letter_repeat('j'), |_| true);
     }
     tui.wait_pred(
         on_folded_no_updates,

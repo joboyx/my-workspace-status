@@ -1,6 +1,5 @@
 use std::cell::Cell;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::common::fake_forge::FakeForge;
 use crate::common::pr_scenarios::{Badge, FAILED_CHECK};
@@ -135,23 +134,18 @@ fn pty_pr_poll_running_to_failed_alerts_on_both_forges() {
         WAIT,
     );
 
-    // A toast outlives the 2.5 s of an acknowledgement and is gone within
-    // the wait budget. The exact 8 s is a unit test (see above).
-    let seen = first_seen.get().expect("toast seen");
-    thread::sleep((seen + Duration::from_secs(3)).saturating_duration_since(Instant::now()));
-    assert!(
-        toast_text(&tui.screen()).contains(&github_toast),
-        "the toast is still up 3 s after it appeared:\n{}",
-        tui.screen()
-    );
-    let budget = (seen + WAIT).saturating_duration_since(Instant::now());
+    // The toasts go away on their own timer. How long a PR toast lives (8 s,
+    // past the 2.5 s of an acknowledgement) is pinned by the unit test
+    // `a_pr_toast_lives_8_s_with_the_ack_fade_beside_a_2_5_s_ack`
+    // (`tui::toast`); a PTY check of a duration would race the clock.
+    assert!(first_seen.get().is_some(), "toast seen");
     tui.wait_pred(
         |screen| {
             let toasts = toast_text(screen);
             !toasts.contains(&github_toast) && !toasts.contains(gitlab_toast)
         },
-        "the toasts are gone within the wait budget of their first sighting",
-        budget.max(Duration::from_secs(1)),
+        "the toasts go away after their lifetime",
+        WAIT,
     );
 
     // The popover reads the new state.

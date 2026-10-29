@@ -998,10 +998,6 @@ impl PtySession {
         }
     }
 
-    pub fn wait_ms(&self, ms: u64) {
-        thread::sleep(Duration::from_millis(ms));
-    }
-
     /// Fail if the child has already exited.
     pub fn assert_running(&mut self, what: &str) {
         match self.child.try_wait() {

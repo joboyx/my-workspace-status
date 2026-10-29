@@ -1,14 +1,9 @@
-use std::time::{Duration, Instant};
-
 use crate::harness::PtySession;
 use crate::seed::behind_workspace;
 use crate::support::{
     ack_rows, after_ack, has_pull_hint, syncbox_row_behind, syncbox_row_current, tree_cursor_on,
     tree_has, GIT_WAIT, WAIT,
 };
-
-/// Long enough for a pull against the local bare origin to start and paint.
-const NO_PULL_WINDOW: Duration = Duration::from_millis(1500);
 
 /// Cursor on the behind checkout; nothing pulled yet.
 fn idle_behind_syncbox(screen: &str) -> bool {
@@ -37,9 +32,9 @@ fn no_failed_ack(screen: &str) -> bool {
 /// Ctrl-p is not `p`: it opens Quick Open on files and never pulls.
 ///
 /// Same behind checkout as the plain `p` pull test. CSI-u Ctrl+p must not
-/// start a pull: for a settle window every frame keeps `1 behind` and no
-/// `Pulling` / `Pulled`, and the file picker (`Go to file`) paints. Esc
-/// closes it, then plain `p` pulls, so the fixture really was pullable.
+/// start a pull: the file picker (`Go to file`) paints with `1 behind` and
+/// no `Pulling` / `Pulled`, and after Esc the row is still behind with no
+/// pull shown. Plain `p` then pulls, so the fixture really was pullable.
 #[test]
 fn pty_ctrl_p_does_not_pull() {
     let (_root, workspace) = behind_workspace();
@@ -52,16 +47,11 @@ fn pty_ctrl_p_does_not_pull() {
         WAIT,
     );
 
+    // A pull from Ctrl-p would show in every later frame: `Pulling`, then
+    // `Pulled`, then a current row with no `1 behind`. The Quick Open paint
+    // proves Ctrl-p was handled, and the idle check after Esc reads a frame
+    // where any pull it started would show.
     tui.ctrl_letter('p');
-    let start = Instant::now();
-    while start.elapsed() < NO_PULL_WINDOW {
-        let screen = tui.screen();
-        assert!(
-            no_pull_started(&screen),
-            "Ctrl-p must not pull; screen:\n{screen}"
-        );
-        tui.wait_ms(50);
-    }
     tui.assert_running("after Ctrl-p");
     tui.wait_pred(
         |screen| screen.contains("Go to file") && no_pull_started(screen),

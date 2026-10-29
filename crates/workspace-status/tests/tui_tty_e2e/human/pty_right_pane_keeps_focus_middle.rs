@@ -7,8 +7,8 @@ use crate::seed::{seed_many_commit_files, seed_repo, seed_tall_graph, unique_roo
 use crate::support::{
     graph_cursor_on, graph_pane_focused, panes_files_focused, panes_graph_focused_files_unfocused,
     panes_tree_focused_diff_unfocused, panes_tree_focused_graph_unfocused,
-    panes_tree_unfocused_diff_focused, right_pane, title_has_files, tree_cursor_on, tree_has,
-    GIT_WAIT, RIGHT_PANE_COL, WAIT,
+    panes_tree_unfocused_diff_focused, prove_keys_handled, right_pane, title_has_files,
+    tree_cursor_on, tree_has, GIT_WAIT, RIGHT_PANE_COL, WAIT,
 };
 
 /// Wheel up (`ScrollUp`, `Cb` 64). Wheel down is [`SGR_WHEEL_DOWN`] (65).
@@ -23,14 +23,8 @@ const SGR_WHEEL_UP_MOTION: u8 = 64 | 32;
 const KITTY_UP: u32 = 57352;
 const KITTY_DOWN: u32 = 57353;
 
-/// Gap so the input thread does not drain a burst of nav as one move.
-const KEY_GAP_MS: u64 = 50;
-
-/// Upper bound for one nav step to repaint on a loaded host.
-const STEP_WAIT: Duration = Duration::from_secs(2);
-
-/// Poll interval while a nav step repaints.
-const STEP_POLL_MS: u64 = 25;
+/// Upper bound for one nav step to repaint; a bound, not a gap.
+const STEP_WAIT: Duration = Duration::from_secs(12);
 
 #[derive(Clone, Copy)]
 enum RightList {
@@ -261,24 +255,26 @@ fn send_wheel_up(tui: &mut PtySession) {
     tui.sgr_mouse(SGR_WHEEL_UP, RIGHT_PANE_COL, 8);
 }
 
-/// Screen after one nav step: the focused marker differs from `before` and
-/// two polls in a row read the same frame (not a half-written one).
+/// Screen after one nav step: wait until the focused marker differs from
+/// `before`, then the probe proves the step was handled before the frame
+/// is read (no second step in flight, no half-written frame of it).
 ///
-/// Waits at least [`KEY_GAP_MS`] and at most [`STEP_WAIT`]. At the bound it
-/// returns the last screen so the caller's assert fails with that frame.
-fn screen_after_step(tui: &PtySession, kind: RightList, before: &str) -> String {
-    tui.wait_ms(KEY_GAP_MS);
+/// At [`STEP_WAIT`] with no move it returns that screen so the caller's
+/// assert fails with that frame.
+fn screen_after_step(tui: &mut PtySession, kind: RightList, before: &str) -> String {
     let start = Instant::now();
-    let mut last = tui.screen();
     loop {
-        tui.wait_ms(STEP_POLL_MS);
         let screen = tui.screen();
-        let moved = focus_geom(&screen, kind).is_some_and(|g| g.marker != before);
-        if (moved && screen == last) || start.elapsed() >= STEP_WAIT {
+        if focus_geom(&screen, kind).is_some_and(|g| g.marker != before) {
+            break;
+        }
+        if start.elapsed() >= STEP_WAIT {
             return screen;
         }
-        last = screen;
+        std::thread::sleep(Duration::from_millis(25));
     }
+    prove_keys_handled(tui);
+    tui.screen()
 }
 
 /// One nav step must change the focused marker. After the row is past the

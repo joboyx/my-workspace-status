@@ -1127,6 +1127,26 @@ mod tests {
         assert!(flash_active(Duration::from_millis(0)));
     }
 
+    /// A removed row's ghost stays for the whole flash and drops when it
+    /// ends: the duration rule the PTY watch-flash test leaves to this one.
+    #[test]
+    fn a_ghost_lives_for_the_flash_then_drops() {
+        let t0 = Instant::now();
+        let ghost = |at| GhostRow {
+            id: "file:app:gone.txt".to_string(),
+            row: (),
+            flashed_at: at,
+            index: 0,
+        };
+        let mut ghosts = vec![ghost(t0)];
+        prune_ghosts(&mut ghosts, t0 + Duration::from_millis(200));
+        assert_eq!(ghosts.len(), 1, "still painted 200 ms in");
+        prune_ghosts(&mut ghosts, t0 + Duration::from_millis(FLASH_MS - 1));
+        assert_eq!(ghosts.len(), 1, "still painted just before the end");
+        prune_ghosts(&mut ghosts, t0 + Duration::from_millis(FLASH_MS));
+        assert!(ghosts.is_empty(), "dropped when the flash ends");
+    }
+
     #[test]
     fn merge_ghosts_reinserts_at_index() {
         let live = vec!["a".to_string(), "c".to_string()];

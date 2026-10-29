@@ -15,8 +15,14 @@ use crate::support::{open_command_palette, type_palette_filter, wait_screen, GIT
 /// Seed: two GitHub checkouts (`#7`, `#8`) and two GitLab checkouts (`!5`,
 /// `!6`), all CI running, polling off. Once the four badges show, the test
 /// swaps all four answers to CI failed and runs palette **Refresh PRs**
-/// once: the four lookups queue together, so their changes alert as one
-/// batch. No poll timing is involved.
+/// once. Polling is off, so no poll interval is involved, but the batch
+/// still depends on one timer: at most two lookups run at a time
+/// (`PR_BADGE_LOOKUPS_MAX`), so the four land in two waves, and a wave
+/// that lands more than the 2 s batch window (`PR_ALERT_WAIT_MS`) after the
+/// first alerts on its own. The fake `gh` / `glab` answer at once, so the
+/// two waves land well inside 2 s even on a loaded machine; that margin is
+/// accepted here, and the batch layout itself is pinned by the unit test
+/// `a_batch_of_more_than_three_pr_changes_toasts_the_first_two_and_a_summary`.
 ///
 /// Proof: the toast stack holds two `CI failed ·` toasts and the summary
 /// `+2 more PR changes`, and the summary names `gp`, the key of the PRs tab

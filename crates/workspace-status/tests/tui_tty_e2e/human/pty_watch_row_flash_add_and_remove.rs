@@ -9,11 +9,6 @@ use crate::support::{
     tree_line_containing, GIT_WAIT, WAIT,
 };
 
-/// Matches `watch::FLASH_MS`. Remove ghosts drop when this window ends.
-const FLASH_MS: u64 = 800;
-/// Extra wait after `FLASH_MS` before the ghost must be gone.
-const FLASH_GONE_SLACK_MS: u64 = 200;
-
 /// Tokyo Night add ramp[0] `#516643`.
 const ADD_PEAK: (u8, u8, u8) = (0x51, 0x66, 0x43);
 /// Tokyo Night add ramp[1] `#3f4d39`. Peak is only the first ~200ms.
@@ -100,7 +95,9 @@ fn wait_cursor_flash(tui: &PtySession, ramp: &[(u8, u8, u8)], what: &str, timeou
 /// only the default / surface / cursor background must fail. Add and remove
 /// run on unfocused `app/` files after `j` to merger. Update runs first on
 /// the focused README so flash wins over `cursor_bg`. Remove keeps a ghost
-/// for `FLASH_MS`, then drops.
+/// with the remove flash, then drops it. How long each lasts is a timer,
+/// pinned by `flash_strength_ramps_to_zero` and
+/// `a_ghost_lives_for_the_flash_then_drops` (`tui::watch` unit tests).
 #[test]
 fn pty_watch_row_flash_add_and_remove() {
     let (_root, workspace) = daily_workspace();
@@ -191,7 +188,8 @@ fn pty_watch_row_flash_add_and_remove() {
         tui.screen()
     );
 
-    tui.wait_ms(FLASH_MS + FLASH_GONE_SLACK_MS);
+    // The flash ends on its own timer; wait for that paint. Its length is
+    // pinned by the `tui::watch` unit tests.
     tui.wait_pred(
         |screen| tree_shows_untracked(screen, &marker) && !needle_on_ramp(&tui, &marker, &ADD_RAMP),
         "add flash expired; untracked path stays on the tree",
@@ -206,33 +204,12 @@ fn pty_watch_row_flash_add_and_remove() {
         "removed path stays as a ghost with remove flash bg (instant vanish is red)",
         GIT_WAIT,
     );
-    let remove_seen = Instant::now();
-    assert!(
-        tree_has(&tui.screen(), &marker),
-        "ghost must remain during FLASH_MS; screen:\n{}",
-        tui.screen()
-    );
-    assert!(
-        needle_on_ramp(&tui, &marker, &REMOVE_RAMP),
-        "remove flash bg on `{marker}`; bgs={:?}; screen:\n{}",
-        tui.first_needle_bgs(&marker),
-        tui.screen()
-    );
-
-    tui.wait_ms(200);
-    assert!(
-        tree_has(&tui.screen(), &marker) && needle_on_ramp(&tui, &marker, &REMOVE_RAMP),
-        "ghost + remove flash still painted 200ms in; bgs={:?}; screen:\n{}",
-        tui.first_needle_bgs(&marker),
-        tui.screen()
-    );
-
-    let elapsed_ms = remove_seen.elapsed().as_millis() as u64;
-    let remain = (FLASH_MS + FLASH_GONE_SLACK_MS).saturating_sub(elapsed_ms);
-    tui.wait_ms(remain);
+    // The ghost with the remove flash painted above; how long it stays is
+    // a timer, pinned by the `tui::watch` unit tests. Here: it shows, then
+    // the row goes away on its own.
     tui.wait_pred(
         |screen| !tree_has(screen, &marker),
-        "ghost dropped after FLASH_MS + slack",
+        "ghost dropped after the flash",
         WAIT,
     );
 }
