@@ -270,8 +270,8 @@ impl PrTransition {
         }
     }
 
-    /// Flash ramp of the rows that paint the checkout's PR badge: remove
-    /// for CI failed and closed, add for ready to merge and merged.
+    /// Flash ramp of the rows that show the checkout's PR: remove for CI
+    /// failed and closed, add for ready to merge and merged.
     fn flash_kind(&self) -> FlashKind {
         match self.to {
             PrTransitionTo::State(PrState::CiFailed) | PrTransitionTo::Closed => FlashKind::Remove,
@@ -1536,9 +1536,9 @@ impl AppState {
 
     /// Alert the queued PR changes as one batch pushed at `now`: a toast
     /// per change, oldest first ([`PrTransition::toast`]), and a flash,
-    /// stamped at `now`, of each row that paints the checkout's PR badge
-    /// ([`Self::pr_badge_row_ids`]) on the remove ramp (CI failed, closed)
-    /// or the add ramp (ready to merge, merged).
+    /// stamped at `now`, of each row that shows the checkout's PR
+    /// ([`Self::pr_row_ids`], closed included) on the remove ramp (CI
+    /// failed, closed) or the add ramp (ready to merge, merged).
     ///
     /// A batch of more than [`TOAST_MAX`] changes pushes the toasts of the
     /// first `TOAST_MAX - 1` and then `+<n> more PR changes`, so the stack
@@ -1562,7 +1562,7 @@ impl AppState {
             .iter()
             .flat_map(|transition| {
                 let kind = transition.flash_kind();
-                self.pr_badge_row_ids(&transition.checkout)
+                self.pr_row_ids(&transition.checkout)
                     .into_iter()
                     .map(move |id| (id, kind))
             })
@@ -1572,27 +1572,27 @@ impl AppState {
         !transitions.is_empty()
     }
 
-    /// Flash ids of the rows that paint the PR badge of checkout
-    /// `checkout`: its tree row ([`pr_badge_repo`]: a checkout row, or a
-    /// repo row with one checkout, never a family row), and its graph
-    /// worktree row when the graph paints a badge there
-    /// ([`Self::graph_pr_badges`]). A row folded out of view has no id here.
-    fn pr_badge_row_ids(&self, checkout: &Path) -> Vec<String> {
+    /// Flash ids of the rows that show the PR of checkout `checkout`, with
+    /// its badge or, after the PR closed, without one: its tree row
+    /// ([`pr_badge_repo`]: a checkout row, or a repo row with one checkout,
+    /// never a family row), and the graph's worktree row of that checkout
+    /// when the graph shows its repository. A row folded out of view has no
+    /// id here.
+    fn pr_row_ids(&self, checkout: &Path) -> Vec<String> {
         let tree = self
             .rows
             .iter()
             .filter(|row| pr_badge_repo(row).is_some_and(|repo| Path::new(repo) == checkout))
             .map(|row| row.id.clone());
         let graph = match (self.graph_identity.as_ref(), self.graph.as_ref()) {
-            (Some((repo, _)), Some(model)) => {
-                let rows = model.visible_rows();
-                self.graph_pr_badges()
-                    .into_iter()
-                    .filter(|(_, path, _)| path == checkout)
-                    .filter_map(|(index, _, _)| rows.get(index))
-                    .map(|row| graph_row_identity(repo, row))
-                    .collect()
-            }
+            (Some((repo, _)), Some(model)) => model
+                .visible_rows()
+                .iter()
+                .filter(|row| {
+                    matches!(row, GraphRow::Worktree(worktree) if Path::new(&worktree.path) == checkout)
+                })
+                .map(|row| graph_row_identity(repo, row))
+                .collect(),
             _ => Vec::new(),
         };
         tree.chain(graph).collect()
