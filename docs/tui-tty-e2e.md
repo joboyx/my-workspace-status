@@ -53,6 +53,10 @@ PR badge tests need `gh` and `glab` answers with no network and no login. `scrip
 
 `pty_fake_forge_shows_pr_badges` proves the harness against the shipped badge. The `fake_forge::tests` unit tests in the helper run the scripts directly.
 
+## Verify driver
+
+To watch the real binary run, against the same fake forge or against a live one, the verify skill drives it in a private tmux server: `.agents/skills/verify/SKILL.md` and `scripts/verify-tui.sh`. It is a test harness with the isolation rules of **Harness notes** (guarded by `crates/workspace-status/tests/release_watch.rs`), not the screenshot pipeline, and it does not replace a `pty_*` test.
+
 ## Harness notes
 
 - ASCII glyphs (`WS_STATUS_GLYPHS=ascii`) so CI does not depend on a Nerd Font. This is a test setting, not a product default. The spawn drops parent `NO_COLOR` / `FORCE_COLOR` so colour claims can paint.

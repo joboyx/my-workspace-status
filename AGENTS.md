@@ -41,6 +41,8 @@ They also point `WS_STATUS_UI_STORE` at a temp file with no last-used theme and 
 
 They also pin `themeMode` to `dark` and drop a parent `WS_STATUS_THEME_MODE`, so the terminal background cannot swap the fixture theme for its light twin (the desktop xterm is white). PTY and desktop e2e pin it in the baseline config file; the demo script exports `WS_STATUS_THEME_MODE` (`WS_STATUS_STILLS_THEME_MODE`, default `dark`). CI: `tty_spawn_paths_pin_theme_mode`.
 
+The verify skill driver (`scripts/verify-tui.sh`, see **Verify skill**) is a TTY spawn path too. It follows every rule above, with the same guards in `release_watch.rs`.
+
 Env table: [docs/configuration.md](./docs/configuration.md).
 
 ## `dist generate`
@@ -81,6 +83,7 @@ Do **not** invent spur heuristics (`parent.lane + 1`, spine `◇─╯`, mid-rai
 | cargo-dist `dist generate` / Release git-cliff host steps | `docs/architecture.md` (**Distribution**) and `crates/workspace-status/tests/release_watch.rs` |
 | Output format of the plain report | `SAMPLE_OUTPUT.md` and `crates/workspace-status/tests/snapshot_contract.rs` |
 | Demo workspace seed or screenshot clips | `docs/demo.md` + `scripts/seed-demo-workspace.sh` + `scripts/capture-demo-stills.sh` |
+| Verify skill, its driver, or its scenario sets | `.agents/skills/verify/` + `scripts/verify-tui.sh` + `crates/workspace-status/tests/release_watch.rs` (+ `docs/tui-tty-e2e.md` for the fake forge) |
 | Desktop Xvfb / Openbox session | `scripts/with-desktop-session.sh` + `scripts/openbox.xml` + `docs/tui-tty-e2e.md` |
 | Behaviour of a component on any surface listed in `docs/parity.md` | `docs/parity.md` (every surface of that component) + the test named in the row |
 
@@ -121,6 +124,20 @@ per-module copy.
 - TTY event loop: do not run git or other blocking I/O on the draw/event thread. The live path is `tui/event_loop.rs` (current-thread Tokio, dedicated input thread, `spawn_blocking` on a `JoinSet`) through `tui/effect.rs`. Fetch / pull / push enqueue on a per-gitdir remote queue (`RemoteQueue`) under the resolved `fetchConcurrency` cap (`WS_STATUS_FETCH_CONCURRENCY` > config > 10). Exclusive writes stay serial. While an exclusive write or default-branch job is in flight, nav / pane switch / cancel / remotes stay live (`BusyAction::Handle`); keys that would start another exclusive write are drained (`Ignore`). An exclusive write on a gitdir that already has a remote dispatches, then `schedule` refuses with breadcrumb `busy`. `E` blob/temp prepare is `UserTag::DiffPrepare` on that pool; `blob_bytes` must not run on the loop thread. Guard: `tty_event_loop_must_not_call_sync_pane_git` in `tui/event_pump.rs`.
 - After `dist generate`, restore `workflow_dispatch` and host git-cliff on `release.yml`. TTY demo clips and e2e must set `WS_STATUS_UPDATE_CHECK_STORE`, `WS_STATUS_UI_STORE`, and `XDG_CONFIG_HOME`, and pin `themeMode` to `dark`. Guards: `tty_spawn_paths_isolate_update_check_store`, `tty_spawn_paths_isolate_ui_store`, `tty_spawn_paths_isolate_user_config`, and `tty_spawn_paths_pin_theme_mode` in `tests/release_watch.rs`.
 - This repository is public. Do not commit private workspace paths, personal hostnames, unpublished ticket keys, customer/project names from private work, chat transcripts, screenshots of private work, tokens, or credentials. Use `scripts/seed-demo-workspace.sh` for examples and demo clips.
+
+## Verify skill
+
+`.agents/skills/verify/` is the in-repo skill for proving that a change works. It maps each claim to a test layer (unit, PTY e2e, desktop `#[ignore]`, live forge `#[ignore]`) with the exact commands, and it holds the recipes of the driver `scripts/verify-tui.sh`. The driver runs the `target/debug/workspace-status` of this checkout in a private tmux server on a seeded throwaway workspace. It runs offline against the fake `gh` / `glab` scenarios, or live against public repos, and saves screen captures as proof.
+
+The driver is a **test harness** with the isolation rules of **TUI test layers**. It is not a capture pipeline and it makes no demo clips or stills: those stay in `scripts/capture-demo-stills.sh` (**Demo / screenshots**). "Do not drive the TUI by hand" below is about demo clips. For verification, drive the TUI only through the driver, never by starting the binary in a bare terminal.
+
+Run the skill:
+
+- After a change to the PR badge, the PR popover, the fake forge, or any TUI behaviour a user sees, before you report it done.
+- To reproduce a TUI bug with evidence.
+- After a rebase onto work that touches those.
+
+Driver proof does not replace a test: behaviour that must stay gets a `pty_*` test. Keep the skill in step with the code: a new `gh` / `glab` call needs a fake forge answer and scenario sets, a changed badge needs `features/pr-status.md`. `crates/workspace-status/tests/release_watch.rs` guards the driver's isolation.
 
 ## Demo / screenshots
 
