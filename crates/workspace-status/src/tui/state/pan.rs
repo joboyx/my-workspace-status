@@ -229,7 +229,11 @@ impl AppState {
                     self.mouse_pan(col, delta);
                     return Effect::None;
                 }
-                if self.scroll_graph_footer_msg(col, row, delta) {
+                // Over a commit-message footer the wheel scrolls the
+                // message: the list cursor, focus, and right pane stay.
+                if self.scroll_graph_footer_msg(col, row, delta)
+                    || self.scroll_commit_detail_msg(col, row, delta)
+                {
                     return Effect::None;
                 }
                 if col >= self.layout.right_x {

@@ -107,16 +107,14 @@ pub fn graph_footer_request(expand: bool, msg_lines: usize) -> u16 {
 /// in `body_height` rows (the footer under its rule,
 /// [`GraphChromeBudget::footer_body_height`]).
 ///
-/// The last line (meta) stays pinned under the message viewport. `0` when
-/// every line fits.
+/// The last line (meta) stays pinned under the message viewport, so this is
+/// [`crate::footer_message_rows_scroll_max`] of the other lines in the rows
+/// above it. `0` when every line fits.
 pub fn footer_message_scroll_max(line_count: usize, body_height: u16) -> usize {
-    let rows = body_height as usize;
-    if line_count <= rows {
-        return 0;
-    }
-    line_count
-        .saturating_sub(1)
-        .saturating_sub(rows.saturating_sub(1))
+    crate::footer::footer_message_rows_scroll_max(
+        line_count.saturating_sub(1),
+        body_height.saturating_sub(1),
+    )
 }
 
 /// Footer first, then header. Collapsed footer: the rule, subject, and

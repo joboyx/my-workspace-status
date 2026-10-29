@@ -12,8 +12,9 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 use workspace_status_graph::{
     commit_msg_lines_fit, footer_message_scroll_max, graph_col_max, graph_hscroll_visible,
-    graph_vscroll_visible, painted_line_count, short_id, GraphIconKind, GraphLabelPalette,
-    GraphRow, GraphWidget, COMMIT_MSG_LINES_MAX, FOOTER_RULE_ROWS,
+    graph_vscroll_visible, paint_footer_message, painted_line_count, short_id, GraphIconKind,
+    GraphLabelPalette, GraphRow, GraphWidget, ASCII, COMMIT_MSG_LINES_MAX, FOOTER_RULE_ROWS,
+    UNICODE,
 };
 
 use std::cell::RefCell;
@@ -261,6 +262,8 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
     state.layout.graph_col_max = 0;
     state.layout.graph_footer_y = None;
     state.layout.graph_footer_scroll_max = 0;
+    state.layout.commit_detail_footer_y = None;
+    state.layout.commit_detail_footer_scroll_max = 0;
     state.layout.commit_msg_rule_y = None;
     state.layout.commit_msg_rule_x = 0;
     state.layout.commit_msg_rule_width = 0;
@@ -2717,10 +2720,11 @@ fn draw_commit_detail(
     if body_h == 0 {
         return;
     }
-    // Clip keeps the first lines: title, meta, then message lines.
-    let footer_lines: Vec<Line> = footer
+    // Title and meta rows first; a short body clips the message first.
+    let head_h = body_h.min(2);
+    let head_lines: Vec<Line> = footer
         .iter()
-        .take(body_h as usize)
+        .take(usize::from(head_h))
         .enumerate()
         .map(|(i, line)| {
             let style = if i == 0 {
@@ -2737,7 +2741,47 @@ fn draw_commit_detail(
         width: area.width,
         height: body_h,
     };
-    frame.render_widget(Paragraph::new(footer_lines), footer_area);
+    frame.render_widget(
+        Paragraph::new(head_lines),
+        Rect {
+            height: head_h,
+            ..footer_area
+        },
+    );
+    // The message rows scroll like the graph selection footer: same
+    // viewport, scrollbar, and more-below hint.
+    let message = footer.get(2..).unwrap_or_default();
+    let message_area = Rect {
+        y: footer_area.y.saturating_add(head_h),
+        height: body_h - head_h,
+        ..footer_area
+    };
+    let glyphs = if state.ascii { &ASCII } else { &UNICODE };
+    let style = Style::default().fg(palette.muted);
+    let painted = paint_footer_message(
+        frame.buffer_mut(),
+        message_area,
+        message.len(),
+        state.commit_detail_msg_scroll(),
+        glyphs.more_below,
+        palette.muted,
+        |buf, i, y| {
+            buf.set_stringn(
+                message_area.x,
+                y,
+                &message[i],
+                usize::from(message_area.width),
+                style,
+            );
+        },
+    );
+    if painted.scroll_max > 0 {
+        state.layout.commit_detail_footer_y = Some(rule_y);
+        state.layout.commit_detail_footer_x = area.x;
+        state.layout.commit_detail_footer_width = area.width;
+        state.layout.commit_detail_footer_height = footer_h;
+        state.layout.commit_detail_footer_scroll_max = painted.scroll_max;
+    }
     // The meta row (second body row) starts with the commit's short hash:
     // link it to the commit page.
     let link = match state.commit_drill_source() {
@@ -9197,8 +9241,9 @@ mod tests {
     }
 
     /// The depth-2 commit-files footer keeps one fixed height whatever the
-    /// message: a one-line subject pads, a long body clips with `…`, in
-    /// both expand states, and one more message line grows it by one row.
+    /// message: a one-line subject pads, a long body scrolls (more-below
+    /// hint, never a `…` clip), in both expand states, and one more message
+    /// line grows it by one row.
     #[test]
     fn depth_2_left_footer_height_is_fixed_for_short_and_long_messages() {
         let long = (0..30)
@@ -9213,34 +9258,185 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
             terminal.draw(|frame| draw(frame, &mut state)).unwrap();
             let footer = state.commit_detail_footer_lines(state.layout.tree_width as usize);
-            assert_eq!(footer.len(), state.commit_detail_footer_request());
+            assert!(footer.len() >= state.commit_detail_footer_request());
             let left = left_inner_text(&terminal, &state);
             (
                 state.layout.tree_height,
                 state.layout.files_list_height,
                 left,
+                more_below_glyph(&state),
             )
         };
         let n = workspace_status_graph::COMMIT_MSG_LINES_DEFAULT;
-        let (pane, short_h, _) = list_height("", true, n);
-        let (_, long_h, left) = list_height(&long, true, n);
+        let (pane, short_h, _, _) = list_height("", true, n);
+        let (_, long_h, left, more_below) = list_height(&long, true, n);
         assert_eq!(short_h, long_h, "expanded: same list height");
         assert_eq!(
             short_h as usize,
             pane as usize - (1 + 2 + n),
             "rule + title + meta + N"
         );
-        assert!(left.contains('…'), "a long body clips with …:\n{left}");
+        assert!(!left.contains('…'), "a long body is not clipped:\n{left}");
+        assert!(
+            left.contains(&format!("{more_below}28")),
+            "a long body shows the more-below hint:\n{left}"
+        );
         assert!(
             !left.contains(&format!("{FOOTER_BODY_TOKEN}{n:02}")),
             "rows past N stay hidden:\n{left}"
         );
-        let (_, short_c, _) = list_height("", false, n);
-        let (_, long_c, _) = list_height(&long, false, n);
+        let (_, short_c, _, _) = list_height("", false, n);
+        let (_, long_c, _, _) = list_height(&long, false, n);
         assert_eq!(short_c, long_c, "collapsed: same list height");
         assert_eq!(short_c, pane - 3, "collapsed: rule + title + subtitle");
-        let (_, grown, _) = list_height("", true, n + 1);
+        let (_, grown, _, _) = list_height("", true, n + 1);
         assert_eq!(grown + 1, short_h, "one more message row");
+    }
+
+    /// Message rows of the painted depth-2 commit-files footer: `(y, text)`
+    /// per row under the title and meta rows, plus the footer's last
+    /// column.
+    fn commit_detail_message_rows(
+        terminal: &Terminal<TestBackend>,
+        state: &AppState,
+    ) -> (Vec<(u16, String)>, u16) {
+        let l = &state.layout;
+        let rule_y = l.files_list_y + l.files_list_height;
+        let bottom = l.tree_y + l.tree_height;
+        let rows = (rule_y + 3..bottom)
+            .map(|y| (y, region_text(terminal, l.tree_x, y, l.tree_width, 1)))
+            .collect();
+        (rows, l.tree_x + l.tree_width - 1)
+    }
+
+    /// The more-below arrow the footers paint for `state`'s glyph set.
+    fn more_below_glyph(state: &AppState) -> &'static str {
+        if state.ascii {
+            workspace_status_graph::ASCII.more_below
+        } else {
+            workspace_status_graph::UNICODE.more_below
+        }
+    }
+
+    fn is_scrollbar_cell(symbol: &str) -> bool {
+        matches!(symbol, "█" | "║")
+    }
+
+    /// A long message in the depth-2 commit-files footer scrolls like the
+    /// graph selection footer: a 1-column scrollbar over the message rows
+    /// and a muted ` <more_below><K>` hint on the last row, left of the
+    /// bar, until the tail shows. The wheel there scrolls the message and
+    /// leaves the file cursor.
+    #[test]
+    fn depth_2_commit_footer_scrolls_a_long_message_with_scrollbar_and_hint() {
+        let mut state = two_pane_commit_diff_state();
+        let body = (0..30)
+            .map(|i| format!("{FOOTER_BODY_TOKEN}{i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        set_seed_commit_body(&mut state, &body);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let (rows, bar_x) = commit_detail_message_rows(&terminal, &state);
+        assert_eq!(rows.len(), state.commit_msg_lines, "N message rows");
+        let message_len = state
+            .commit_detail_footer_lines(state.layout.tree_width as usize)
+            .len()
+            - 2;
+        let max = message_len - rows.len();
+        assert_eq!(state.layout.commit_detail_footer_scroll_max, max);
+        let buf = terminal.backend().buffer().clone();
+        for (y, _) in &rows {
+            assert!(
+                is_scrollbar_cell(buf[(bar_x, *y)].symbol()),
+                "scrollbar at y={y}: {rows:?}"
+            );
+        }
+        let (last_y, last) = rows.last().expect("message rows");
+        let hint = format!(" {}{max}", more_below_glyph(&state));
+        let text = last.trim_end().trim_end_matches(is_scrollbar_cell_char);
+        assert!(text.ends_with(&hint), "hint {hint:?} ends {last:?}");
+        let hint_x = bar_x - hint.chars().count() as u16 + 1;
+        assert_eq!(
+            buf[(hint_x, *last_y)].fg,
+            state.theme.palette().muted,
+            "muted hint"
+        );
+        let left = left_inner_text(&terminal, &state);
+        assert!(!left.contains('…'), "no … clip:\n{left}");
+
+        // Wheel to the end: the tail shows, the hint goes, the bar stays.
+        let top = state.layout.commit_detail_footer_y.expect("footer box");
+        let col = state.layout.commit_detail_footer_x + 2;
+        for _ in 0..max + 3 {
+            state.dispatch(Action::ScrollWheel {
+                col,
+                row: top,
+                delta: 1,
+                horizontal: false,
+            });
+        }
+        assert_eq!(state.commit_files_cursor(), 0, "file cursor stays");
+        assert_eq!(state.commit_detail_msg_scroll(), max);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let (rows, bar_x) = commit_detail_message_rows(&terminal, &state);
+        let buf = terminal.backend().buffer().clone();
+        let joined: String = rows.iter().map(|(_, row)| row.as_str()).collect();
+        assert!(
+            joined.contains(&format!("{FOOTER_BODY_TOKEN}29")),
+            "{rows:?}"
+        );
+        assert!(
+            !joined.contains(&format!("{FOOTER_BODY_TOKEN}00")),
+            "{rows:?}"
+        );
+        assert!(
+            !joined.contains(&format!(" {}", more_below_glyph(&state))),
+            "no hint at the tail: {rows:?}"
+        );
+        assert!(rows
+            .iter()
+            .all(|(y, _)| is_scrollbar_cell(buf[(bar_x, *y)].symbol())));
+    }
+
+    fn is_scrollbar_cell_char(c: char) -> bool {
+        matches!(c, '█' | '║')
+    }
+
+    /// A message that fits, and a collapsed footer, paint no scrollbar and
+    /// no hint, and record no wheel box (the wheel moves the file list).
+    #[test]
+    fn depth_2_commit_footer_without_overflow_has_no_scrollbar_or_hint() {
+        let long = (0..30)
+            .map(|i| format!("{FOOTER_BODY_TOKEN}{i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for (case, body, expand) in [
+            ("short", FOOTER_BODY_TOKEN.to_string(), true),
+            ("collapsed", long, false),
+        ] {
+            let mut state = two_pane_commit_diff_state();
+            set_seed_commit_body(&mut state, &body);
+            state.commit_msg_expand = expand;
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            assert_eq!(state.layout.commit_detail_footer_y, None, "{case}");
+            let l = state.layout.clone();
+            let rule_y = l.files_list_y + l.files_list_height;
+            let bar_x = l.tree_x + l.tree_width - 1;
+            let buf = terminal.backend().buffer().clone();
+            for y in rule_y + 1..l.tree_y + l.tree_height {
+                assert!(
+                    !is_scrollbar_cell(buf[(bar_x, y)].symbol()),
+                    "{case}: no scrollbar at y={y}"
+                );
+            }
+            let left = left_inner_text(&terminal, &state);
+            assert!(
+                !left.contains(&format!(" {}", more_below_glyph(&state))),
+                "{case}: no hint:\n{left}"
+            );
+        }
     }
 
     /// Commit files beside a file diff, with `n` files so the list

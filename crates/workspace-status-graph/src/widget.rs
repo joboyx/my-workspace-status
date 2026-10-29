@@ -7,9 +7,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget};
 
 use crate::chrome::{
-    footer_message_scroll_max, graph_chrome_budget_for, graph_footer_request,
-    selection_footer_parts, GraphFooterSelection, FOOTER_RULE_ROWS,
+    graph_chrome_budget_for, graph_footer_request, selection_footer_parts, GraphFooterSelection,
+    FOOTER_RULE_ROWS,
 };
+use crate::footer::paint_footer_message;
 use crate::format::{
     format_label, format_sync_parts, parts_text, slice_label_parts, LabelKind, LabelPart,
     PartTarget, COMMIT_MSG_LINES_DEFAULT, COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN,
@@ -391,7 +392,7 @@ impl<'a> GraphWidget<'a> {
     ///
     /// `offset` is the first painted message line. The meta line stays
     /// pinned and a scrollbar marks the position. Clamped to
-    /// [`footer_message_scroll_max`]. Default is `0`.
+    /// [`crate::footer_message_scroll_max`]. Default is `0`.
     pub fn commit_msg_scroll(mut self, offset: usize) -> Self {
         self.commit_msg_scroll = offset;
         self
@@ -797,7 +798,9 @@ impl GraphWidget<'_> {
     /// the rows above it from the top; a short message leaves blank rows. A
     /// taller message scrolls by [`Self::commit_msg_scroll`], gets a 1-column
     /// scrollbar, and ends its last visible row with a muted `<arrow><K>`
-    /// hint (K hidden lines below) left of the scrollbar.
+    /// hint (K hidden lines below) left of the scrollbar. The message rows
+    /// paint through [`paint_footer_message`], the same viewport the app's
+    /// commit-files footer uses.
     ///
     /// Returns the chip spans of the painted lines and the hint span
     /// ([`GraphIconKind::MoreBelow`]), on the selected row.
@@ -811,13 +814,9 @@ impl GraphWidget<'_> {
         arrow: &str,
     ) -> Vec<IconSpan> {
         let fallback = Color::Reset;
-        let rows = h.saturating_sub(1) as usize;
-        let scroll_max = footer_message_scroll_max(lines.len(), h);
         let meta = lines.pop().unwrap_or_default();
-        let message_count = lines.len();
-        let offset = self.commit_msg_scroll.min(scroll_max);
         let mut spans = Vec::new();
-        let mut put = |y: u16, line: &[LabelPart]| {
+        let mut put = |buf: &mut Buffer, y: u16, line: &[LabelPart]| {
             put_parts_line(
                 buf,
                 area.x,
@@ -841,55 +840,34 @@ impl GraphWidget<'_> {
                     }),
             );
         };
-        for (i, line) in lines.iter().skip(offset).take(rows).enumerate() {
-            put(top.saturating_add(i as u16), line);
-        }
-        put(top.saturating_add(h.saturating_sub(1)), &meta);
-        if message_count <= rows || rows == 0 {
-            return spans;
-        }
-        let bar_x = area.x.saturating_add(area.width.saturating_sub(1));
-        let mut sb_state = ScrollbarState::new(scroll_max + 1)
-            .position(offset)
-            .viewport_content_length(rows);
-        StatefulWidget::render(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None),
-            Rect {
-                x: bar_x,
-                y: top,
-                width: 1,
-                height: rows as u16,
-            },
+        // Message rows: the body less the pinned meta row.
+        let message_area = Rect {
+            x: area.x,
+            y: top,
+            width: area.width,
+            height: h.saturating_sub(1),
+        };
+        let hint_fg = self.label_palette.map_or(fallback, |pal| pal.meta);
+        let painted = paint_footer_message(
             buf,
-            &mut sb_state,
+            message_area,
+            lines.len(),
+            self.commit_msg_scroll,
+            arrow,
+            hint_fg,
+            |buf, i, y| put(buf, y, &lines[i]),
         );
-        let hidden = message_count.saturating_sub(offset + rows);
-        if hidden == 0 {
-            return spans;
-        }
-        // One leading blank keeps the hint apart from the message text.
-        let hint = format!(" {arrow}{hidden}");
-        let hint_w = hint.chars().count() as u16;
-        let room = area.width.saturating_sub(1);
-        if hint_w > room {
-            return spans;
-        }
-        let color = self.label_palette.map_or(fallback, |pal| pal.meta);
-        let hint_x = bar_x.saturating_sub(hint_w);
-        let hint_y = top.saturating_add(rows as u16 - 1);
-        put_text_line(buf, hint_x, hint_y, hint_w, &hint, false, color);
-        // The span leaves out the leading blank.
-        spans.push(IconSpan {
+        put(buf, top.saturating_add(h.saturating_sub(1)), &meta);
+        // The span leaves out the hint's leading blank.
+        spans.extend(painted.more_below.map(|hint| IconSpan {
             kind: GraphIconKind::MoreBelow,
             row_index: self.selected,
-            x: hint_x.saturating_add(1),
-            y: hint_y,
-            width: hint_w.saturating_sub(1),
+            x: hint.x,
+            y: hint.y,
+            width: hint.width,
             part: None,
             target: None,
-        });
+        }));
         spans
     }
 }
