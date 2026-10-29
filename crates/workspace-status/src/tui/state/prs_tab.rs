@@ -138,10 +138,7 @@ impl PrsView {
     pub(crate) fn header_row(&self, group: usize) -> &PrRow {
         let group = &self.groups[group];
         let target = match &group.headline {
-            GroupHeadline::Next(step) => group
-                .rows
-                .iter()
-                .find(|row| row.pr.ref_text() == step.pr_ref && row.pr.state == step.state),
+            GroupHeadline::Next(step) => group.rows.iter().find(|row| row.pr.url == step.url),
             GroupHeadline::AllMerged(_) | GroupHeadline::Bare => None,
         };
         target.unwrap_or(&group.rows[0])
@@ -1427,6 +1424,58 @@ mod tests {
                 .and_then(|row| row.repo.clone())
                 .as_deref(),
             Some("api")
+        );
+    }
+
+    /// Two repositories in one group can both have a `#12` in the same
+    /// state. The header acts on the PR its next action names (here the one
+    /// with changes requested), not on the first row with the same ref.
+    #[test]
+    fn a_header_acts_on_its_own_pr_when_two_repos_share_the_number() {
+        const GH_MERGER: &str = "git@github.com:acme/merger.git";
+        let mut app = app_over(
+            &[
+                checkout("app", "feature/ABC-140-a"),
+                checkout("merger", "feature/ABC-140-b"),
+            ],
+            false,
+        );
+        let waiting = pr(
+            GH_APP,
+            12,
+            PrState::InReview,
+            "Tidy the app",
+            "feature/ABC-140-a",
+            "main",
+        );
+        let mut asked = pr(
+            GH_MERGER,
+            12,
+            PrState::InReview,
+            "Tidy the merger",
+            "feature/ABC-140-b",
+            "main",
+        );
+        asked.notes.changes_requested = true;
+        land(&mut app, "app", "feature/ABC-140-a", GH_APP, waiting);
+        land(&mut app, "merger", "feature/ABC-140-b", GH_MERGER, asked);
+        app.dispatch(Action::OpenPrsTab);
+        assert_eq!(lines(&app), ["ABC-140", "  #12", "  #12"]);
+        cursor_to(&mut app, "ABC-140");
+        assert_eq!(
+            app.dispatch(Action::NavEnter),
+            Effect::OpenPullRequest {
+                repo: PathBuf::from("merger"),
+                branch: "feature/ABC-140-b".into(),
+                page: PrPage::Pr,
+            }
+        );
+        assert_eq!(
+            app.dispatch(Action::ExportComments),
+            Effect::CopyClipboard {
+                text: "https://github.com/acme/merger/pull/12".into(),
+                announce: true,
+            }
         );
     }
 

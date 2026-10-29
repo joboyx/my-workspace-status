@@ -111,6 +111,9 @@ pub struct NextStep {
     pub action: NextAction,
     /// Ref of the PR the action targets (`#318`, `!12`).
     pub pr_ref: String,
+    /// URL of that PR: its identity, since two repositories can both have
+    /// a `#12`.
+    pub url: String,
     /// State of that PR; it picks the colour of the header text.
     pub state: PrState,
 }
@@ -658,6 +661,7 @@ fn headline(kind: GroupKind, rows: &[PrRow]) -> GroupHeadline {
         Some((row, action)) => GroupHeadline::Next(NextStep {
             action: (*action).clone(),
             pr_ref: row.pr.ref_text(),
+            url: row.pr.url.clone(),
             state: row.pr.state,
         }),
         None => GroupHeadline::AllMerged(distinct_prs(rows)),
