@@ -1,0 +1,108 @@
+#!/bin/sh
+# Fake `gh` for e2e tests. Answers `gh pr list` and `gh pr view` from scenario
+# files under $WS_FAKE_FORGE_DIR. It reads flags, not exact argv strings, so a
+# change to the `--json` field list does not matter. Format: README.md.
+
+dir=${WS_FAKE_FORGE_DIR:-}
+if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+  echo "fake forge: WS_FAKE_FORGE_DIR is not a directory" >&2
+  exit 1
+fi
+argv="gh $*"
+printf '%s\n' "$argv" >> "$dir/calls.log"
+
+# Print $1 with every / replaced by __ (a branch or repo path as a file name).
+slug() {
+  rest=$1
+  out=
+  while :; do
+    case $rest in
+      */*)
+        out=$out${rest%%/*}__
+        rest=${rest#*/}
+        ;;
+      *)
+        out=$out$rest
+        break
+        ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# Answer from scenario file $1, or fail when it has no scenario. A scenario is
+# the .json file, or only its .exit file (a failing call with no output).
+serve() {
+  if [ ! -f "$1" ] && [ ! -f "$1.exit" ]; then
+    printf 'fake forge: no scenario for %s\n' "$argv" >&2
+    exit 1
+  fi
+  if [ -f "$1.stderr" ]; then
+    cat "$1.stderr" >&2
+  fi
+  if [ -f "$1" ]; then
+    cat "$1"
+  fi
+  code=0
+  if [ -f "$1.exit" ]; then
+    IFS= read -r code < "$1.exit"
+  fi
+  case $code in
+    '' | *[!0-9]*) code=1 ;;
+  esac
+  exit "$code"
+}
+
+group=${1:-}
+verb=${2:-}
+if [ $# -ge 2 ]; then
+  shift 2
+else
+  shift $#
+fi
+
+repo=
+head=
+number=
+while [ $# -gt 0 ]; do
+  case $1 in
+    -R | --repo)
+      repo=${2:-}
+      [ $# -ge 2 ] && shift
+      ;;
+    --repo=*) repo=${1#--repo=} ;;
+    -H | --head)
+      head=${2:-}
+      [ $# -ge 2 ] && shift
+      ;;
+    --head=*) head=${1#--head=} ;;
+    # Flags with a value this fake ignores: skip the value too.
+    --json | --state | --limit | --search | --author | --base | --label | --jq | --template | \
+      -s | -L | -S | -A | -B | -l | -q | -t)
+      [ $# -ge 2 ] && shift
+      ;;
+    -*) ;;
+    *)
+      [ -z "$number" ] && number=$1
+      ;;
+  esac
+  shift
+done
+
+# `-R host/owner/repo` and `-R owner/repo` both name the repository by their
+# last two segments.
+name=${repo##*/}
+owner=${repo%/*}
+owner=${owner##*/}
+if [ -z "$repo" ] || [ "$owner" = "$repo" ]; then
+  printf 'fake forge: no scenario for %s\n' "$argv" >&2
+  exit 1
+fi
+base=$dir/gh/${owner}__${name}
+
+case "$group $verb" in
+  'pr list') serve "$base/pr-list/$(slug "$head").json" ;;
+  'pr view') serve "$base/pr-view/$number.json" ;;
+esac
+printf 'fake forge: no scenario for %s\n' "$argv" >&2
+exit 1
