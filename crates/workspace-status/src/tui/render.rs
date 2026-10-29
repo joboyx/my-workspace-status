@@ -19635,6 +19635,44 @@ mod tests {
         assert!(!row.contains("PR"), "{row}");
     }
 
+    /// A 45-column tree beside the workspace name `workspace` has no room
+    /// for the full change summary and `2 need you`: the change summary
+    /// shortens and `2 need you` stays at the edge.
+    #[test]
+    fn narrow_tree_keeps_need_you_beside_a_long_workspace_name() {
+        let rows = [
+            branch_repo("app", "feat-app"),
+            branch_repo("lib", "feat-lib"),
+        ];
+        let snapshot = build_workspace_snapshot(&rows, &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp/workspace"), snapshot, true);
+        assert_eq!(state.due_pr_lookups().len(), rows.len());
+        for (name, pr, number) in [("app", PrState::CiFailed, 1), ("lib", PrState::Ready, 2)] {
+            let url = format!("https://github.com/octo/demo/pull/{number}");
+            set_pr(
+                &mut state,
+                name,
+                &format!("feat-{name}"),
+                PrLookup::Found(PullRequest::fixture(number, &url, pr)),
+            );
+        }
+        state.tree_fraction = 0.47;
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert_eq!(state.layout.tree_width, 45);
+        let buf = terminal.backend().buffer();
+        let y = tree_row_y(&state, "workspace");
+        let edge = state.layout.tree_x + state.layout.tree_width - 1;
+        let painted: String = (state.layout.tree_x..=edge)
+            .map(|x| buf[(x, y)].symbol())
+            .collect();
+        assert!(painted.contains("workspace"), "{painted}");
+        assert!(painted.ends_with("  2 need you"), "{painted}");
+        assert!(!painted.contains(" · "), "the summary shortened: {painted}");
+        let need_x = edge + 1 - "2 need you".len() as u16;
+        assert!(buf[(need_x, y)].modifier.contains(Modifier::BOLD));
+    }
+
     #[test]
     fn tree_pr_badge_needs_a_ready_pr() {
         for (lookup, what) in [

@@ -1344,11 +1344,13 @@ fn pr_total_variants(totals: PrTotals, narrow: bool) -> Vec<Vec<TextSeg>> {
 /// Workspace root trailing summary that fits `room` columns (pad included)
 /// beside the name: `N changed · sync`, then two spaces and the PR total
 /// (`8 PRs · 2 need you`, see [`PrTotals`]). The name is the row's
-/// identity, so the summary gives way first: the `8 PRs` part (`2 need you`
-/// stays while any PR needs the author), then the whole PR total, then
-/// `N changed · sync` goes to `N changed`, then `N`, then nothing. A
-/// `narrow` tree (under [`PR_REF_MIN_TREE_COLS`]) starts at the one-part
-/// total.
+/// identity, so the summary gives way first. While any PR needs the author,
+/// `2 need you` is the part worth keeping: the `8 PRs` part goes first,
+/// then the change summary shortens beside `2 need you` (`N changed`, then
+/// `N`), then `2 need you` stands alone. After that, and when no PR needs
+/// the author, the PR total goes and `N changed · sync` goes to
+/// `N changed`, then `N`, then nothing. A `narrow` tree (under
+/// [`PR_REF_MIN_TREE_COLS`]) starts at the one-part total.
 pub(crate) fn workspace_trailing_fit(
     chrome: &NodeChrome,
     totals: PrTotals,
@@ -1357,19 +1359,29 @@ pub(crate) fn workspace_trailing_fit(
 ) -> Vec<TextSeg> {
     let n = chrome.change_count;
     let summary = |text: String| vec![icon_text_seg(text, SegRole::Muted, IconKind::Workspace)];
-    let full = summary(format!("{n} changed · {}", chrome.sync_summary));
-    let with_total = pr_total_variants(totals, narrow).into_iter().map(|total| {
-        let mut segs = full.clone();
-        segs.push(text_seg(PR_BADGE_GAP, SegRole::Muted));
-        segs.extend(total);
-        segs
-    });
     let summaries = [
-        full.clone(),
+        summary(format!("{n} changed · {}", chrome.sync_summary)),
         summary(format!("{n} changed")),
         summary(n.to_string()),
     ];
-    with_total
+    let beside = |summary: &[TextSeg], total: &[TextSeg]| {
+        let mut segs = summary.to_vec();
+        segs.push(text_seg(PR_BADGE_GAP, SegRole::Muted));
+        segs.extend_from_slice(total);
+        segs
+    };
+    let totals_variants = pr_total_variants(totals, narrow);
+    let mut candidates: Vec<Vec<TextSeg>> = totals_variants
+        .iter()
+        .map(|total| beside(&summaries[0], total))
+        .collect();
+    // With a PR that needs the author the last variant is `2 need you`.
+    if let Some(need_you) = totals_variants.last().filter(|_| totals.need_you > 0) {
+        candidates.extend(summaries[1..].iter().map(|short| beside(short, need_you)));
+        candidates.push(need_you.clone());
+    }
+    candidates
+        .into_iter()
         .chain(summaries)
         .find(|segs| {
             segs.iter()
@@ -1900,11 +1912,13 @@ mod tests {
         }
     }
 
-    /// The workspace total sits after the change summary and gives way
-    /// first: the PR count (`need you` stays while any PR needs the author),
-    /// then the whole total, then the summary's own steps.
+    /// The workspace total sits after the change summary. While a PR needs
+    /// the author, `need you` outlasts the PR count and the change summary:
+    /// the PR count goes, then the summary shortens beside `need you`, then
+    /// `need you` stands alone, then the summary's own steps. With none to
+    /// act on, the PR count goes before the summary does.
     #[test]
-    fn workspace_pr_total_gives_way_before_the_change_summary() {
+    fn workspace_need_you_outlasts_the_pr_count_and_the_change_summary() {
         let chrome = NodeChrome {
             change_count: 4,
             sync_summary: "2 behind".into(),
@@ -1927,9 +1941,11 @@ mod tests {
             (visible_width(full), "4 changed · 2 behind  2 need you"),
             (
                 visible_width("4 changed · 2 behind  2 need you"),
-                "4 changed · 2 behind",
+                "4 changed  2 need you",
             ),
-            (visible_width("4 changed · 2 behind"), "4 changed"),
+            (visible_width("4 changed  2 need you"), "4  2 need you"),
+            (visible_width("4  2 need you"), "2 need you"),
+            (visible_width("2 need you"), "4 changed"),
             (visible_width("4 changed"), "4"),
             (1, ""),
         ];
@@ -1946,7 +1962,35 @@ mod tests {
         // before the summary does.
         let tight = visible_width("4 changed · 2 behind  8 PRs");
         assert_eq!(text(none_need, false, tight), "4 changed · 2 behind");
+        assert_eq!(
+            text(none_need, false, visible_width("4 changed · 2 behind")),
+            "4 changed",
+            "with none to act on, no short summary keeps the PR count"
+        );
         assert_eq!(text(both, true, 80), "4 changed · 2 behind  2 need you");
+        assert_eq!(
+            text(
+                both,
+                true,
+                visible_width("4 changed · 2 behind  2 need you")
+            ),
+            "4 changed  2 need you",
+            "a narrow tree shortens the summary beside need you too"
+        );
+        let short =
+            workspace_trailing_fit(&chrome, both, false, visible_width("4 changed  2 need you"));
+        let short: Vec<(&str, SegRole, bool, Option<IconKind>)> = short
+            .iter()
+            .map(|seg| (seg.text.as_str(), seg.role, seg.bold, seg.icon))
+            .collect();
+        assert_eq!(
+            short,
+            [
+                ("4", SegRole::Muted, false, Some(IconKind::Workspace)),
+                ("  ", SegRole::Muted, false, None),
+                ("2 need you", SegRole::Modified, true, None),
+            ]
+        );
         let one = PrTotals {
             prs: 1,
             need_you: 1,
