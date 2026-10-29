@@ -272,6 +272,47 @@ pub fn seed_multiline_message_repo(workspace: &Path, name: &str) {
     git(&repo, &["commit", "-q", "-m", &subject, "-m", &body]);
 }
 
+/// Only added line of `first.txt` in [`seed_two_file_long_message_repo`].
+pub const PAIR_FIRST_FILE_LINE: &str = "PAIR_FIRST_FILE_LINE";
+/// Only added line of `second.txt` in [`seed_two_file_long_message_repo`].
+pub const PAIR_SECOND_FILE_LINE: &str = "PAIR_SECOND_FILE_LINE";
+/// Only added line of `base.txt` in [`seed_two_file_long_message_repo`].
+pub const PAIR_BASE_FILE_LINE: &str = "PAIR_BASE_FILE_LINE";
+
+/// `root` (one-line message), then two commits with the same tall body as
+/// [`seed_multiline_message_repo`] ([`COMMIT_MSG_BODY`], filler lines, then
+/// [`COMMIT_MSG_BODY_TAIL`]): `pair base` adds `base.txt`
+/// ([`PAIR_BASE_FILE_LINE`]), and the tip `pair tip` adds `first.txt` and
+/// `second.txt` (distinct diffs: [`PAIR_FIRST_FILE_LINE`],
+/// [`PAIR_SECOND_FILE_LINE`]).
+///
+/// Each body is taller than the default 4 message rows, so the depth-2
+/// commit-files footer overflows on both long-message commits.
+pub fn seed_two_file_long_message_repo(workspace: &Path, name: &str) {
+    let repo = workspace.join(name);
+    init_repo(&repo, "main");
+    fs::write(repo.join("README.md"), "# pair\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "root"]);
+    git(&repo, &["checkout", "-q", "-b", "feature/msg-pair"]);
+    let filler = (1..=20)
+        .map(|i| format!("filler {i:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = format!("{COMMIT_MSG_BODY}\n{filler}\n{COMMIT_MSG_BODY_TAIL}");
+    fs::write(repo.join("base.txt"), format!("{PAIR_BASE_FILE_LINE}\n")).unwrap();
+    git(&repo, &["add", "base.txt"]);
+    git(&repo, &["commit", "-q", "-m", "pair base", "-m", &body]);
+    fs::write(repo.join("first.txt"), format!("{PAIR_FIRST_FILE_LINE}\n")).unwrap();
+    fs::write(
+        repo.join("second.txt"),
+        format!("{PAIR_SECOND_FILE_LINE}\n"),
+    )
+    .unwrap();
+    git(&repo, &["add", "first.txt", "second.txt"]);
+    git(&repo, &["commit", "-q", "-m", "pair tip", "-m", &body]);
+}
+
 /// Long line plus many rows so a focused file-diff can pan and scroll.
 ///
 /// `tail` is usually `hscroll::DIFF_HSCROLL_TAIL`.
