@@ -101,9 +101,9 @@ use super::tabs::{
 use super::theme::{hex_color, mix_toward, BackgroundMode, Palette, Pill, ThemeId};
 use super::toast::{Toast, ToastMark, ToastTick};
 use super::tree::{
-    file_change_from_name_status, file_change_segments, painted_row_segments, pr_badge_kind,
-    pr_badge_role, visible_window, workspace_trailing_fit, NodeKind, NodeSegments, PrBadge,
-    PrTotals, SegRole, TextSeg, VisibleRow, PR_REF_MIN_TREE_COLS,
+    file_change_from_name_status, file_change_segments, fit_upstream_rewrite_text,
+    painted_row_segments, pr_badge_kind, pr_badge_role, visible_window, workspace_trailing_fit,
+    NodeKind, NodeSegments, PrBadge, PrTotals, SegRole, TextSeg, VisibleRow, PR_REF_MIN_TREE_COLS,
 };
 use super::undercurl::{cut_link_cells, drop_undercurls_under, underlined_runs, UndercurlHit};
 use super::watch::FlashKind;
@@ -1835,6 +1835,13 @@ fn paint_tree_row(
         decor.commented,
         decor.resolved,
         decor.pr.as_ref(),
+    );
+    // The force-push text gives way before the label clips (as in
+    // `tree_row_paint_segments`, so the pan limit matches).
+    fit_upstream_rewrite_text(
+        &mut segs,
+        &row.chrome,
+        width.saturating_sub(list_prefix_cols(row.depth)),
     );
     // The spinner, then the bars left of it, lead the trailing run: each is
     // a bare token one space before the rest, as the run packs its marks.
@@ -4885,6 +4892,49 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             ));
             (accent, lines)
         }
+        PendingConfirm::ResetToUpstream {
+            repo,
+            branch,
+            upstream,
+            dropped,
+            ..
+        } => {
+            let accent = palette.modified;
+            let noun = if *dropped == 1 { "commit" } else { "commits" };
+            // The repo leads the title: `p` on the workspace or family row
+            // can open this box for a repo the cursor is not on.
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled(
+                        repo.clone(),
+                        Style::default()
+                            .fg(palette.file)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(": ", Style::default().fg(palette.muted)),
+                    Span::styled(
+                        upstream.clone(),
+                        Style::default()
+                            .fg(palette.file)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        " was rewritten. Move ",
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(branch.clone(), Style::default().fg(palette.file)),
+                    Span::styled(" to ", Style::default().fg(palette.muted)),
+                    Span::styled(upstream.clone(), Style::default().fg(palette.file)),
+                    Span::styled("?", Style::default().fg(accent)),
+                ]),
+                Line::from(Span::styled(
+                    format!("  Drops {dropped} {noun} that {upstream} dropped; none are yours."),
+                    Style::default().fg(palette.muted),
+                )),
+                confirm_action_row("y", "reset", None, accent, palette.muted, panel),
+            ];
+            (accent, lines)
+        }
     };
     if area.width == 0 || area.height == 0 {
         return;
@@ -7527,6 +7577,7 @@ mod tests {
             branch: "main".into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream_rewrite: None,
             head: String::new(),
             has_unstaged: dirty,
             has_staged: false,
@@ -11972,6 +12023,43 @@ mod tests {
     }
 
     #[test]
+    fn reset_confirm_names_the_repo_the_rewritten_upstream_and_the_dropped_count() {
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut paint = |dropped: usize| {
+            state.confirm = Some(PendingConfirm::ResetToUpstream {
+                repo: "app".into(),
+                branch: "main".into(),
+                upstream: "origin/main".into(),
+                tip: "a".repeat(40),
+                dropped,
+            });
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            buffer_text(&terminal)
+        };
+
+        let text = paint(2);
+        assert!(
+            text.contains("app: origin/main was rewritten. Move main to origin/main?"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Drops 2 commits that origin/main dropped; none are yours."),
+            "{text}"
+        );
+        assert!(text.contains(" y  reset"), "{text}");
+        assert!(text.contains(" n   Esc  cancel"), "{text}");
+
+        let text = paint(1);
+        assert!(
+            text.contains("Drops 1 commit that origin/main dropped; none are yours."),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn push_confirm_names_branch_remote_count_and_risk() {
         let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
@@ -12358,6 +12446,35 @@ mod tests {
             )
             .0,
         )
+    }
+
+    /// The short force-push text leaves room for the repo name on a narrow pane.
+    #[test]
+    fn narrow_force_pushed_row_keeps_the_repo_name_beside_the_short_text() {
+        let mut ops = repo("ops", false);
+        ops.sync_status = SyncStatus::Diverged;
+        ops.sync_note = "diverged (ahead 2, behind 1)".into();
+        ops.upstream_rewrite = Some(crate::git::UpstreamRewrite {
+            upstream: "origin/main".into(),
+            fork_point: "f".repeat(40),
+            tip: "t".repeat(40),
+            yours: 0,
+            dropped: 2,
+        });
+        let built = build_workspace_snapshot(&[ops], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let row = rows.iter().find(|r| r.id == "repo:ops").expect("ops row");
+        let text = paint_row(row, 60, 0);
+        assert!(text.contains("ops"), "repo name stays visible:\n{text}");
+        assert!(
+            text.contains("Y force-pushed \u{b7} 2 dropped, 0 yours"),
+            "mark and short text paint together:\n{text}"
+        );
+        assert!(
+            !text.contains("origin/main"),
+            "the tree row does not name the upstream:\n{text}"
+        );
     }
 
     /// A narrowed tree keeps the workspace name: the root summary drops its
@@ -19278,6 +19395,70 @@ mod tests {
                     }
                     assert_eq!(hit.repo, PathBuf::from(repo), "{what}");
                 }
+            }
+        }
+    }
+
+    /// A row with a force-pushed upstream and a PR: the PR glyph stays in
+    /// the last tree column, the branch clips first, and then the force-push
+    /// text gives way (whole, then ` force-pushed`, then gone) so the repo
+    /// name and the diverged mark keep their columns. The pan limit counts
+    /// the same run: a label that fits does not pan. Boxed and flat looks.
+    #[test]
+    fn force_pushed_row_with_a_pr_keeps_the_glyph_flush_right_and_the_text_gives_way() {
+        let mut app = branch_repo("app", "feature/rate-limit");
+        app.sync_status = SyncStatus::Diverged;
+        app.sync_note = "diverged (ahead 2, behind 1)".into();
+        app.upstream_rewrite = Some(crate::git::UpstreamRewrite {
+            upstream: "origin/feature/rate-limit".into(),
+            fork_point: "f".repeat(40),
+            tip: "t".repeat(40),
+            yours: 0,
+            dropped: 2,
+        });
+        let label = "app  feature/rate-limit";
+        let cases = [
+            (200, true, "Y force-pushed \u{b7} 2 dropped, 0 yours  #7 x"),
+            (160, false, "Y force-pushed \u{b7} 2 dropped, 0 yours  #7 x"),
+            (120, false, "Y force-pushed  x"),
+            (60, false, "Y  x"),
+        ];
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            for (cols, whole_label, tail) in cases {
+                let what = format!("{background:?} {cols} cols");
+                let mut state = pr_state(&[app.clone(), branch_repo("lib", "main")], true);
+                state.background = background;
+                set_pr(
+                    &mut state,
+                    "app",
+                    "feature/rate-limit",
+                    found_pr(PrState::CiFailed),
+                );
+                let mut terminal = Terminal::new(TestBackend::new(cols, 24)).unwrap();
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                let buf = terminal.backend().buffer();
+                let y = tree_row_y(&state, "repo:app");
+                let (x0, edge) = (
+                    state.layout.tree_x,
+                    state.layout.tree_x + state.layout.tree_width - 1,
+                );
+                let row: String = (x0..=edge).map(|x| buf[(x, y)].symbol()).collect();
+                // The tail starts at the diverged mark: the run is never
+                // cut at its left, and the text is whole, short, or gone.
+                assert!(row.ends_with(tail), "{what}: {row}");
+                assert_eq!(row.contains(label), whole_label, "{what}: {row}");
+                assert!(row.contains("app"), "{what}: the name stays: {row}");
+                let hits = state.layout.pr_badge_hits();
+                assert_eq!(hits.len(), 1, "{what}: {hits:?}");
+                assert_eq!(hits[0].x + hits[0].width - 1, edge, "{what}");
+
+                state.focus = FocusPane::Left;
+                state.pan_focused(5);
+                assert_eq!(
+                    state.left_col_offset == 0,
+                    whole_label,
+                    "{what}: a label that fits does not pan"
+                );
             }
         }
     }

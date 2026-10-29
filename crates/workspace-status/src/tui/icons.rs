@@ -10,6 +10,7 @@
 //! `?` help legend paints it. Graph glyphs come from
 //! `workspace_status_graph::{UNICODE, ASCII}`.
 
+use crate::git::UpstreamRewrite;
 use crate::helpers::visible_width;
 use crate::snapshot::{FileChange, SyncStatus};
 
@@ -1166,6 +1167,27 @@ pub fn tui_sync_mark(ascii: bool, status: SyncStatus, note: &str) -> String {
         SyncStatus::Diverged => icon_diverged(ascii).to_string(),
         SyncStatus::UpToDate => icon_synced(ascii).to_string(),
     }
+}
+
+/// Full text for a diverged branch whose upstream was force-pushed:
+/// `origin/main was force-pushed · 2 dropped, 0 yours`. The sync popover and
+/// the watch identity use it.
+pub fn upstream_rewrite_text(rewrite: &UpstreamRewrite) -> String {
+    format!(
+        "{} was {}",
+        rewrite.upstream,
+        upstream_rewrite_short_text(rewrite)
+    )
+}
+
+/// Short form for the tree row, without the upstream name:
+/// `force-pushed · 2 dropped, 0 yours`. A narrow tree pane keeps the repo
+/// name beside it; the popover names the upstream.
+pub fn upstream_rewrite_short_text(rewrite: &UpstreamRewrite) -> String {
+    format!(
+        "force-pushed \u{b7} {} dropped, {} yours",
+        rewrite.dropped, rewrite.yours
+    )
 }
 
 /// The digits right after `prefix` in a sync note (`ahead by 3 commits`

@@ -1916,6 +1916,7 @@ mod tests {
             branch: "main".into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream_rewrite: None,
             head: "abc".into(),
             has_unstaged: !changes.is_empty(),
             has_staged: false,

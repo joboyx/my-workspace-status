@@ -31,6 +31,7 @@ use workspace_status_graph::{
     GraphRow, PartTarget, RefKind, Stash, SyncStatus, Worktree, ASCII, UNICODE,
 };
 
+use crate::git::UpstreamRewrite;
 use crate::helpers::{is_default_branch, is_detached_head_branch, DEFAULT_BRANCH_NAMES};
 use crate::snapshot::{CheckoutKind, FileChange, WorkspaceRepoSnapshot};
 
@@ -39,7 +40,9 @@ use super::command_palette::{command_for, PaletteCommand};
 use super::comments::{tree_row_comments, CommentEntry};
 use super::commit_files::CommitFileRow;
 use super::gates::ListFocusTarget;
-use super::icons::{capture_count, file_type_name, spec, status_letter_from_change, IconKind};
+use super::icons::{
+    capture_count, file_type_name, spec, status_letter_from_change, upstream_rewrite_text, IconKind,
+};
 use super::line_blame::relative_age;
 use super::pr_status::{CheckBucket, ChecksSummary, PrState};
 use super::pull_request::{PrReview, PullRequestDetail, ReviewCount};
@@ -539,7 +542,12 @@ fn tree_section(state: &AppState, kind: IconKind, row: &VisibleRow) -> Option<Po
             group_fields(state, row, &mut lines);
             vec![Action::FoldToggle, Action::FoldToggleSubtree]
         }
-        kind if is_sync_kind(kind) => sync_fields(kind, &row.chrome.sync_note, &mut lines),
+        kind if is_sync_kind(kind) => sync_fields(
+            kind,
+            &row.chrome.sync_note,
+            row.chrome.upstream_rewrite.as_ref(),
+            &mut lines,
+        ),
         IconKind::StatusFailed => vec![Action::Refresh],
         IconKind::Hidden => vec![Action::ToggleShowHidden],
         IconKind::ChangeCount => {
@@ -1092,8 +1100,14 @@ fn is_sync_kind(kind: IconKind) -> bool {
 }
 
 /// Sync mark fields from `sync_note` and its actions: Pull / Push /
-/// Fetch as the state calls for.
-fn sync_fields(kind: IconKind, note: &str, lines: &mut Vec<PopoverLine>) -> Vec<Action> {
+/// Fetch as the state calls for. A diverged branch whose upstream was
+/// force-pushed shows that text in place of the ahead / behind counts.
+fn sync_fields(
+    kind: IconKind,
+    note: &str,
+    rewrite: Option<&UpstreamRewrite>,
+    lines: &mut Vec<PopoverLine>,
+) -> Vec<Action> {
     match kind {
         IconKind::Ahead => {
             lines.push(role_field(
@@ -1116,7 +1130,8 @@ fn sync_fields(kind: IconKind, note: &str, lines: &mut Vec<PopoverLine>) -> Vec<
                 .strip_prefix("diverged (")
                 .and_then(|rest| rest.strip_suffix(')'))
                 .unwrap_or(note);
-            lines.push(role_field("sync", counts, SegRole::Modified));
+            let value = rewrite.map_or_else(|| counts.to_string(), upstream_rewrite_text);
+            lines.push(role_field("sync", value, SegRole::Modified));
             vec![Action::Fetch, Action::Pull, Action::Push]
         }
         IconKind::NoUpstream => {
@@ -2156,6 +2171,40 @@ mod tests {
         super::field("x", value)
     }
 
+    fn sync_value(lines: &[PopoverLine]) -> Option<&str> {
+        lines.iter().find_map(|line| match line {
+            PopoverLine::Field {
+                label: "sync",
+                value,
+                ..
+            } => Some(value.as_str()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn diverged_popover_shows_the_force_push_text_when_classified() {
+        let rewrite = crate::git::UpstreamRewrite {
+            upstream: "origin/main".into(),
+            fork_point: "f".repeat(40),
+            tip: "t".repeat(40),
+            yours: 1,
+            dropped: 2,
+        };
+        let note = "diverged (ahead 3, behind 1)";
+        let mut lines = Vec::new();
+        let actions = sync_fields(IconKind::Diverged, note, Some(&rewrite), &mut lines);
+        assert_eq!(
+            sync_value(&lines),
+            Some("origin/main was force-pushed \u{b7} 2 dropped, 1 yours")
+        );
+        assert_eq!(actions, vec![Action::Fetch, Action::Pull, Action::Push]);
+
+        let mut plain = Vec::new();
+        sync_fields(IconKind::Diverged, note, None, &mut plain);
+        assert_eq!(sync_value(&plain), Some("ahead 3, behind 1"));
+    }
+
     #[test]
     fn worktree_branch_honours_the_configured_default() {
         let role = |branch, default_override| {
@@ -2296,6 +2345,7 @@ mod tests {
                 branch: branch.into(),
                 sync_status: SyncStatus::UpToDate,
                 sync_note: String::new(),
+                upstream_rewrite: None,
                 head: "abc".into(),
                 has_unstaged: false,
                 has_staged: false,

@@ -33,8 +33,9 @@ use crate::git::{
     create_branch_checkout, exec_git_checked, latest_stash_ref, list_compare_picker_branches,
     list_compare_picker_commits, list_local_branches, previous_line_change, pull_quiet_detailed,
     push_plan, push_quiet, remote_url_for_branch, remove_untracked_file, remove_worktree,
-    revert_compare_file, revert_compare_patch, revert_tracked_file, stage_file, stash_apply,
-    stash_drop, stash_pop, stash_push, unstage_file, PushPlan, COMPARE_REVERT_ABORTED,
+    reset_keep_to_upstream, revert_compare_file, revert_compare_patch, revert_tracked_file,
+    stage_file, stash_apply, stash_drop, stash_pop, stash_push, unstage_file, PushPlan,
+    COMPARE_REVERT_ABORTED,
 };
 use crate::settings::Settings;
 use crate::snapshot::RepoSnapshot;
@@ -78,7 +79,7 @@ use super::scheduler::{ApplyDecision, Scheduler, SpawnKind, UserTag};
 use super::search_files::SEARCH_CHUNK_BUDGET;
 use super::stash::{resolve_stash_menu_key, StashMenuKeyResult, StashOpId};
 use super::state::{revert_scope, AppState, PendingConfirm};
-use super::status::StatusMessage;
+use super::status::{StatusKind, StatusMessage};
 use super::tabs::{ComparePickerKind, ComparePickerRows, WorktreeFile};
 use super::viewed::workspace_store_id;
 
@@ -540,16 +541,25 @@ fn completed_op_status(kind: RunningOp, tally: &OpTally) -> StatusMessage {
     }
 }
 
-/// Final status of an exclusive write named `op`.
+/// Final status of an exclusive write named `op`. Success has `ok_kind`:
+/// [`StatusKind::Ok`] for a one-shot ack (a toast), [`StatusKind::Info`] for
+/// a note that must stay readable on the status line.
 ///
 /// A compare-tab refusal ([`COMPARE_REVERT_ABORTED`]) keeps its own copy as
 /// a warn: git did not fail, the write never ran.
-fn write_status(op: &str, result: Result<String, String>) -> StatusMessage {
+fn write_status(op: &str, ok_kind: StatusKind, result: Result<String, String>) -> StatusMessage {
     match result {
-        Ok(text) => StatusMessage::ok(text),
+        Ok(text) => StatusMessage::new(ok_kind, text),
         Err(err) if err.starts_with(COMPARE_REVERT_ABORTED) => StatusMessage::warn(err),
         Err(err) => StatusMessage::error(format!("{op} failed: {err}")),
     }
+}
+
+/// Ok status after the reset confirm moved `branch` to `upstream`. The undo
+/// puts the branch back on `old_tip` (first 12 hex chars).
+fn reset_done_status(branch: &str, upstream: &str, old_tip: &str) -> String {
+    let short = old_tip.get(..12).unwrap_or(old_tip);
+    format!("Moved {branch} to {upstream} · undo: git reset --keep {short}")
 }
 
 /// Bulk pull result for one repo.
@@ -585,6 +595,8 @@ struct WriteJob {
     /// Short name for `busy: <op> running`.
     op: &'static str,
     gitdirs: Vec<String>,
+    /// Status kind of the success text (see [`write_status`]).
+    ok_kind: StatusKind,
     work: Box<dyn FnOnce() -> Result<String, String> + Send>,
 }
 
@@ -760,6 +772,14 @@ fn overlay_write_checkouts(state: &AppState, action: &Action) -> Vec<String> {
             Some(PendingConfirm::SwitchToDefault { repos }) => repos.clone(),
             // Push goes on the per-gitdir remote queue; it is not an exclusive write.
             Some(PendingConfirm::Push { .. }) => Vec::new(),
+            // The reset is an exclusive write; `Y` only keeps its box open.
+            Some(PendingConfirm::ResetToUpstream { repo, .. }) => {
+                if matches!(action, Action::ConfirmYesClean) {
+                    Vec::new()
+                } else {
+                    vec![repo.clone()]
+                }
+            }
             // `Y` keeps a compare confirm open, so it writes nothing.
             Some(
                 PendingConfirm::CompareRevertRange { target, .. }
@@ -1200,7 +1220,13 @@ impl Interpreter {
         match effect {
             Effect::Quit => {}
             Effect::None => {
-                if matches!(action, Action::Pull) && is_idle_pull_status(&state.status) {
+                // The reset box `p` just opened sets no status, so it counts
+                // as idle too (a modal box cannot be open before `p` runs).
+                let reset_box =
+                    matches!(state.confirm, Some(PendingConfirm::ResetToUpstream { .. }));
+                if matches!(action, Action::Pull)
+                    && (reset_box || is_idle_pull_status(&state.status))
+                {
                     self.enqueue_pull_after_inflight_fetch(state);
                 }
             }
@@ -1512,6 +1538,28 @@ impl Interpreter {
                 self.occupy_exclusive(std::slice::from_ref(&gitdir));
                 self.merge = Some((repo, rev, label, gitdir));
                 self.sched.enqueue_user(UserTag::Write);
+            }
+            Effect::ResetToUpstream {
+                repo,
+                branch,
+                upstream,
+                tip,
+            } => {
+                // Exclusive write on the gitdir: serial with other writes and
+                // with the gitdir's remote queue. The guards run on the worker.
+                // Success is an info note, not an ok toast: a toast clips the
+                // undo sha at the pane edge.
+                let dir = opts.cwd.join(&repo);
+                self.enqueue_write_as(
+                    state,
+                    "reset",
+                    StatusKind::Info,
+                    &[&repo],
+                    Box::new(move || {
+                        reset_keep_to_upstream(&dir, &branch, &upstream, &tip)
+                            .map(|old_tip| reset_done_status(&branch, &upstream, &old_tip))
+                    }),
+                );
             }
             Effect::RemoveWorktree {
                 primary,
@@ -1966,6 +2014,7 @@ impl Interpreter {
                                         branch: row.branch,
                                         sync_status: row.sync_status,
                                         sync_note: row.sync_note,
+                                        upstream_rewrite: row.upstream_rewrite,
                                         head: row.head,
                                         has_unstaged: row.has_unstaged,
                                         has_staged: row.has_staged,
@@ -2676,12 +2725,29 @@ impl Interpreter {
         checkouts: &[&str],
         work: Box<dyn FnOnce() -> Result<String, String> + Send>,
     ) {
+        self.enqueue_write_as(state, op, StatusKind::Ok, checkouts, work);
+    }
+
+    /// [`Self::enqueue_write`] with the success status kind `ok_kind`.
+    fn enqueue_write_as(
+        &mut self,
+        state: &AppState,
+        op: &'static str,
+        ok_kind: StatusKind,
+        checkouts: &[&str],
+        work: Box<dyn FnOnce() -> Result<String, String> + Send>,
+    ) {
         let gitdirs: Vec<String> = checkouts
             .iter()
             .map(|checkout| gitdir_key(state, checkout))
             .collect();
         self.occupy_exclusive(&gitdirs);
-        self.writes.push_back(WriteJob { op, gitdirs, work });
+        self.writes.push_back(WriteJob {
+            op,
+            gitdirs,
+            ok_kind,
+            work,
+        });
         self.sched.enqueue_user(UserTag::Write);
     }
 
@@ -2772,7 +2838,8 @@ impl Interpreter {
             | Effect::CheckoutBranch { repo, .. }
             | Effect::CreateBranch { repo, .. }
             | Effect::CreateBranchAt { repo, .. }
-            | Effect::MergeIntoHead { repo, .. } => self.remote_gitdir_busy(state, repo),
+            | Effect::MergeIntoHead { repo, .. }
+            | Effect::ResetToUpstream { repo, .. } => self.remote_gitdir_busy(state, repo),
             Effect::RemoveWorktree { primary, path, .. } => {
                 self.remote_gitdir_busy(state, primary) || self.remote_gitdir_busy(state, path)
             }
@@ -2802,7 +2869,8 @@ impl Interpreter {
     /// Queue pull when `p` lands during an inflight/pending fetch on that gitdir.
     ///
     /// Dispatch keeps idle in-sync `p` as [`Effect::None`] and status
-    /// `nothing behind to pull` (or a diverged line). An unfetched tracking
+    /// `nothing behind to pull` (or a diverged or upstream-rewrite line, or
+    /// it opened the reset box). An unfetched tracking
     /// checkout still looks in-sync, so that path would drop `p` while fetch
     /// occupies the gitdir. Other None Pull paths (right pane, compare tab,
     /// drill) must not follow. Diverged targets stay out: `p` never pulls
@@ -3140,10 +3208,11 @@ impl Interpreter {
                     self.exclusive_inflight.insert(id, job.gitdirs);
                     self.running_write = Some(job.op);
                     let op = job.op;
+                    let ok_kind = job.ok_kind;
                     spawn(
                         id,
                         Box::new(move || JobOutcome::Write {
-                            status: write_status(op, (job.work)()),
+                            status: write_status(op, ok_kind, (job.work)()),
                         }),
                     );
                     return;
@@ -3784,6 +3853,7 @@ mod tests {
             branch: "main".into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream_rewrite: None,
             head: String::new(),
             has_unstaged: dirty,
             has_staged: false,
@@ -5971,10 +6041,18 @@ mod tests {
 
     #[test]
     fn compare_refusal_is_a_warn_without_the_failed_prefix() {
-        let refused = write_status("revert", Err("revert aborted: HEAD moved".into()));
+        let refused = write_status(
+            "revert",
+            StatusKind::Ok,
+            Err("revert aborted: HEAD moved".into()),
+        );
         assert_eq!(refused, "revert aborted: HEAD moved");
         assert_eq!(refused.kind(), StatusKind::Warn);
-        let failed = write_status("revert", Err("patch failed: a.txt:1".into()));
+        let failed = write_status(
+            "revert",
+            StatusKind::Ok,
+            Err("patch failed: a.txt:1".into()),
+        );
         assert_eq!(failed, "revert failed: patch failed: a.txt:1");
         assert_eq!(failed.kind(), StatusKind::Error);
     }
@@ -5988,6 +6066,103 @@ mod tests {
             "lib".into()
         ])));
         assert!(!is_idle_pull_status("Fetching 0/1…"));
+        // The no-write upstream-rewrite warns are idle pull lines too.
+        assert!(is_idle_pull_status(
+            "app (+1 more) upstream rewritten — focus one repo and press p"
+        ));
+        assert!(is_idle_pull_status(
+            "app: origin/main was force-pushed under your 1 commit — run git rebase --onto origin/main 0123456789ab main"
+        ));
+        assert!(!is_idle_pull_status("moving main to origin/main…"));
+    }
+
+    #[test]
+    fn workspace_pull_during_fetch_that_opens_the_reset_box_still_pulls_the_rest() {
+        let mut app = repo("app", false);
+        app.sync_status = SyncStatus::Diverged;
+        app.sync_note = "diverged (ahead 2, behind 1)".into();
+        app.upstream_rewrite = Some(crate::git::UpstreamRewrite {
+            upstream: "origin/main".into(),
+            fork_point: "a".repeat(40),
+            tip: "a".repeat(40),
+            yours: 0,
+            dropped: 2,
+        });
+        let mut lib = repo("lib", false);
+        lib.sync_status = SyncStatus::UpToDate;
+        // The leftover status must not change the outcome: a live
+        // `Fetching…` line and an idle line from an earlier `p` both queue.
+        for before in ["Fetching 0/2…", STATUS_NOTHING_TO_PULL] {
+            let snapshot = build_workspace_snapshot(&[app.clone(), lib.clone()], &[], false, &[]);
+            let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+            state.cursor = 0;
+            let mut interp = Interpreter::with_cap(4);
+            schedule_effect(
+                &mut interp,
+                &mut state,
+                Effect::Fetch {
+                    repos: vec!["app".into(), "lib".into()],
+                },
+                &Action::Fetch,
+            );
+            assert_eq!(capture_jobs(&mut interp, &mut state).len(), 2);
+            state.status = before.into();
+            let effect = state.dispatch(Action::Pull);
+            assert_eq!(effect, Effect::None);
+            assert!(
+                matches!(state.confirm, Some(PendingConfirm::ResetToUpstream { .. })),
+                "{before}: {:?}",
+                state.confirm
+            );
+            schedule_effect(&mut interp, &mut state, effect, &Action::Pull);
+            assert_eq!(
+                interp.pending_remotes(),
+                vec![(RunningOp::Pull, "lib".into())],
+                "{before}"
+            );
+            assert!(state.confirm.is_some(), "the box stays up");
+        }
+    }
+
+    #[test]
+    fn workspace_pull_during_fetch_with_your_commits_on_a_rewrite_still_pulls_the_rest() {
+        let mut app = repo("app", false);
+        app.sync_status = SyncStatus::Diverged;
+        app.sync_note = "diverged (ahead 3, behind 1)".into();
+        app.upstream_rewrite = Some(crate::git::UpstreamRewrite {
+            upstream: "origin/main".into(),
+            fork_point: "0123456789abcdef0123456789abcdef01234567".into(),
+            tip: "a".repeat(40),
+            yours: 1,
+            dropped: 2,
+        });
+        let mut lib = repo("lib", false);
+        lib.sync_status = SyncStatus::UpToDate;
+        let snapshot = build_workspace_snapshot(&[app, lib], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.cursor = 0;
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into(), "lib".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 2);
+        let effect = state.dispatch(Action::Pull);
+        assert_eq!(effect, Effect::None);
+        assert!(
+            state.status.contains("run git rebase --onto"),
+            "{}",
+            state.status
+        );
+        schedule_effect(&mut interp, &mut state, effect, &Action::Pull);
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Pull, "lib".into())]
+        );
     }
 
     #[test]
@@ -6260,6 +6435,155 @@ mod tests {
         assert!(state.confirm.is_some());
         assert_eq!(state.status, "confirm revert notes?");
         assert_eq!(interp.write_jobs_queued(), 0);
+    }
+
+    #[test]
+    fn reset_confirm_on_occupied_gitdir_keeps_overlay() {
+        use crate::tui::state::PendingConfirm;
+
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+        state.confirm = Some(PendingConfirm::ResetToUpstream {
+            repo: "app".into(),
+            branch: "main".into(),
+            upstream: "origin/main".into(),
+            tip: "a".repeat(40),
+            dropped: 2,
+        });
+        state.status = "move main?".into();
+        assert!(interp.keep_overlay_if_gitdir_busy(&mut state, &Action::ConfirmYes));
+        assert!(state.confirm.is_some(), "the reset box stays up");
+        assert_eq!(state.status, "busy");
+        // `Y` only keeps the box open, so it is never busy.
+        state.status = "move main?".into();
+        assert!(!interp.keep_overlay_if_gitdir_busy(&mut state, &Action::ConfirmYesClean));
+        assert_eq!(state.status, "move main?");
+
+        // A reset that reaches `schedule` on the occupied gitdir is refused.
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::ResetToUpstream {
+                repo: "app".into(),
+                branch: "main".into(),
+                upstream: "origin/main".into(),
+                tip: "a".repeat(40),
+            },
+            &Action::ConfirmYes,
+        );
+        assert_eq!(state.status, "busy");
+        assert_eq!(interp.write_jobs_queued(), 0);
+    }
+
+    /// Workspace at the fixture root with the checkout under test `checkout`,
+    /// its snapshot built from a real `process_repo`, and the row focused.
+    fn rewrite_state(fixture: &crate::testutil::RewriteFixture) -> AppState {
+        let meta = RepoCheckoutMeta {
+            checkout_kind: crate::snapshot::CheckoutKind::Primary,
+            primary_repo: None,
+        };
+        let snap = crate::discovery::process_repo("checkout", &fixture.root, false, None, &meta)
+            .expect("repo snapshot");
+        assert!(snap.upstream_rewrite.is_some(), "{snap:?}");
+        let snapshot = build_workspace_snapshot(&[snap], &[], false, &[]);
+        let mut state = AppState::new(fixture.root.clone(), snapshot, true);
+        focus_repo(&mut state, "checkout");
+        state
+    }
+
+    /// `p` then `y` on the focused rewritten checkout; schedules the reset.
+    fn press_p_then_y(interp: &mut Interpreter, state: &mut AppState) {
+        let effect = state.dispatch(Action::Pull);
+        schedule_effect(interp, state, effect, &Action::Pull);
+        assert!(
+            matches!(state.confirm, Some(PendingConfirm::ResetToUpstream { .. })),
+            "{:?}",
+            state.confirm
+        );
+        assert!(!interp.keep_overlay_if_gitdir_busy(state, &Action::ConfirmYes));
+        let effect = state.dispatch(Action::ConfirmYes);
+        assert!(
+            matches!(effect, Effect::ResetToUpstream { .. }),
+            "{effect:?}"
+        );
+        schedule_effect(interp, state, effect, &Action::ConfirmYes);
+        assert_eq!(state.status, "moving main to origin/main…");
+        assert_eq!(interp.write_jobs_queued(), 1, "one exclusive write");
+        assert!(interp.busy_for_writes());
+    }
+
+    #[test]
+    fn reset_confirm_y_moves_the_branch_off_the_loop_thread_and_names_the_undo() {
+        use crate::testutil::{upstream_rewrite_fixture, RewriteKind};
+
+        let fixture = upstream_rewrite_fixture(RewriteKind::Dropped);
+        let mut state = rewrite_state(&fixture);
+        let mut interp = Interpreter::with_cap(4);
+        press_p_then_y(&mut interp, &mut state);
+        let head = || crate::git::exec_git(&["rev-parse", "HEAD"], &fixture.checkout);
+        assert_eq!(head(), fixture.local_tip, "no git on the loop thread");
+
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 1);
+        for (id, work) in jobs {
+            let outcome = work();
+            assert!(matches!(outcome, JobOutcome::Write { .. }));
+            apply_id(&mut interp, &mut state, id, outcome);
+        }
+        assert_eq!(
+            state.status,
+            format!(
+                "Moved main to origin/main · undo: git reset --keep {}",
+                &fixture.local_tip[..12]
+            )
+        );
+        // A note, not an ok ack: it stays on the status line instead of
+        // moving to a toast that clips the undo sha.
+        assert_eq!(state.status.kind(), StatusKind::Info);
+        let undo = state.status.to_string();
+        state.route_ack_to_toast(std::time::Instant::now());
+        assert_eq!(state.status, undo, "the undo hint stays on the status line");
+        assert_eq!(head(), fixture.upstream_tip);
+        assert!(!interp.busy_for_writes(), "the write released the gitdir");
+
+        // The follow-up reload shows the checkout in sync.
+        let tui_opts = opts(&state);
+        interp.pump_sync(&mut state, &tui_opts);
+        let snap = state
+            .snapshot
+            .repos
+            .iter()
+            .find(|r| r.repo == "checkout")
+            .expect("checkout row after reload");
+        assert_eq!(snap.sync_status, SyncStatus::UpToDate);
+        assert_eq!(snap.upstream_rewrite, None);
+    }
+
+    #[test]
+    fn reset_confirm_y_on_a_dirty_checkout_refuses_and_keeps_the_tip() {
+        use crate::testutil::{upstream_rewrite_fixture, RewriteKind};
+
+        let fixture = upstream_rewrite_fixture(RewriteKind::Dropped);
+        let mut state = rewrite_state(&fixture);
+        std::fs::write(fixture.checkout.join("base.txt"), "edited\n").unwrap();
+        let mut interp = Interpreter::with_cap(4);
+        press_p_then_y(&mut interp, &mut state);
+        run_jobs(&mut interp, &mut state);
+        assert_eq!(state.status, "reset failed: working tree has changes");
+        assert_eq!(state.status.kind(), StatusKind::Error);
+        assert_eq!(
+            crate::git::exec_git(&["rev-parse", "HEAD"], &fixture.checkout),
+            fixture.local_tip
+        );
     }
 
     #[test]

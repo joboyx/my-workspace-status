@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use crate::git::UpstreamRewrite;
 use crate::helpers::{
     is_attention_sync_note, is_default_branch, is_detached_head_branch, visible_width,
     STATUS_FAILED_NOTE,
@@ -16,7 +17,7 @@ use super::icons::{
     file_icon, icon_branch, icon_changes, icon_clean, icon_comment, icon_comment_resolved,
     icon_folder, icon_hidden, icon_linked_worktree, icon_repo, icon_staged, icon_status_failed,
     icon_viewed, icon_workspace, status_letter_from_change, tui_file_badge, tui_merge_mark,
-    tui_sync_mark, IconKind, StatusColorRole,
+    tui_sync_mark, upstream_rewrite_short_text, IconKind, StatusColorRole,
 };
 use super::pr_status::PrState;
 
@@ -43,6 +44,8 @@ pub struct NodeChrome {
     pub merged_into_default: Option<bool>,
     pub sync_status: Option<SyncStatus>,
     pub sync_note: String,
+    /// Set when this diverged branch's upstream was force-pushed under it.
+    pub upstream_rewrite: Option<UpstreamRewrite>,
     /// `HEAD` sha. Watch identity only; not painted.
     pub head: String,
     pub change_count: usize,
@@ -345,11 +348,11 @@ fn family_container(
     let change_count = children.iter().map(|c| c.chrome.change_count).sum();
     let statuses: Vec<SyncStatus> = members.iter().map(|m| m.sync_status).collect();
     let worst = worst_sync_status(&statuses);
-    let note_for_worst = members
-        .iter()
-        .find(|m| m.sync_status == worst)
+    let worst_member = members.iter().find(|m| m.sync_status == worst);
+    let note_for_worst = worst_member
         .map(|m| m.sync_note.clone())
         .unwrap_or_default();
+    let rewrite_for_worst = worst_member.and_then(|m| m.upstream_rewrite.clone());
     let primary_head = members
         .iter()
         .find(|m| m.checkout_kind == CheckoutKind::Primary)
@@ -369,6 +372,7 @@ fn family_container(
             path: primary.to_string(),
             sync_status: Some(worst),
             sync_note: note_for_worst,
+            upstream_rewrite: rewrite_for_worst,
             head: primary_head,
             change_count,
             is_family: true,
@@ -420,6 +424,7 @@ fn repo_or_checkout(repo: &WorkspaceRepoSnapshot, kind: NodeKind, tree_mode: boo
             merged_into_default: repo.merged_into_default,
             sync_status: Some(repo.sync_status),
             sync_note: repo.sync_note.clone(),
+            upstream_rewrite: repo.upstream_rewrite.clone(),
             head: repo.head.clone(),
             change_count: repo.changes.len(),
             default_branch_override: repo.default_branch_override.clone(),
@@ -918,11 +923,14 @@ fn sync_trailing(chrome: &NodeChrome, in_no_updates: bool, ascii: bool) -> Vec<T
         }
         return vec![icon_text_seg(icon_clean(ascii), role, kind)];
     }
-    vec![icon_text_seg(
-        tui_sync_mark(ascii, status, &chrome.sync_note),
-        role,
-        kind,
-    )]
+    let mark = icon_text_seg(tui_sync_mark(ascii, status, &chrome.sync_note), role, kind);
+    match &chrome.upstream_rewrite {
+        Some(rewrite) if status == SyncStatus::Diverged => vec![
+            mark,
+            text_seg(format!(" {}", upstream_rewrite_short_text(rewrite)), role),
+        ],
+        _ => vec![mark],
+    }
 }
 
 /// Single-sided name-status → FileChange.
@@ -1590,6 +1598,55 @@ pub fn with_pr_badge(
     Some(trailing.len() - 1)
 }
 
+/// Force-push text of a row too narrow for the whole short text
+/// ([`upstream_rewrite_short_text`]).
+const UPSTREAM_REWRITE_TINY_TEXT: &str = " force-pushed";
+
+/// Let the force-push text after a diverged mark give way before the
+/// row's name.
+///
+/// The name is the label up to its first segment with no icon: the repo
+/// name, or the branch of a checkout row. While the name and the trailing
+/// run fit in `room` columns (the row less its edge, indent, and chevron),
+/// the text stays whole and the rest of the label (the branch of a repo
+/// row) clips as usual. Past that the text drops to ` force-pushed`, then
+/// goes. So the run never has to cut the diverged mark off its left end to
+/// keep the PR glyph in the last column. The mark stays the click target,
+/// and its popover names the whole rewrite.
+///
+/// Paint and the tree pan limit call this on the same segments, before
+/// the spinner and the sparkline join the run, so a fetch that starts does
+/// not change the text.
+pub fn fit_upstream_rewrite_text(segs: &mut NodeSegments, chrome: &NodeChrome, room: usize) {
+    let Some(rewrite) = &chrome.upstream_rewrite else {
+        return;
+    };
+    let full = format!(" {}", upstream_rewrite_short_text(rewrite));
+    let Some(at) = segs
+        .trailing
+        .iter()
+        .position(|seg| seg.icon.is_none() && seg.text == full)
+    else {
+        return;
+    };
+    let cols = |segs: &[TextSeg]| -> usize { segs.iter().map(|s| visible_width(&s.text)).sum() };
+    let name_end = segs
+        .segments
+        .iter()
+        .position(|seg| seg.icon.is_none())
+        .map_or(segs.segments.len(), |at| at + 1);
+    // The name, the run less the text, and the one-column pad before it.
+    let rest = cols(&segs.segments[..name_end]) + cols(&segs.trailing) - visible_width(&full) + 1;
+    if rest + visible_width(&full) <= room {
+        return;
+    }
+    if rest + visible_width(UPSTREAM_REWRITE_TINY_TEXT) <= room {
+        segs.trailing[at].text = UPSTREAM_REWRITE_TINY_TEXT.to_string();
+    } else {
+        segs.trailing.remove(at);
+    }
+}
+
 /// Every segment one tree row paints: the row's segments plus the PR
 /// badge, the comment mark, and the viewed eye.
 ///
@@ -1672,6 +1729,7 @@ pub(crate) fn visible_window(row_count: usize, cursor: usize, height: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::UpstreamRewrite;
     use crate::snapshot::{
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
     };
@@ -1923,12 +1981,135 @@ mod tests {
         );
     }
 
+    fn force_pushed() -> UpstreamRewrite {
+        UpstreamRewrite {
+            upstream: "origin/main".into(),
+            fork_point: "f".repeat(40),
+            tip: "t".repeat(40),
+            yours: 0,
+            dropped: 2,
+        }
+    }
+
+    #[test]
+    fn diverged_mark_is_followed_by_the_force_push_text() {
+        let chrome = NodeChrome {
+            sync_status: Some(SyncStatus::Diverged),
+            sync_note: "diverged (ahead 2, behind 1)".into(),
+            upstream_rewrite: Some(force_pushed()),
+            ..NodeChrome::default()
+        };
+        let segs = sync_trailing(&chrome, false, true);
+        assert_eq!(segs.len(), 2, "{segs:?}");
+        assert_eq!(segs[0].text, "Y");
+        assert_eq!(segs[0].icon, Some(IconKind::Diverged));
+        assert_eq!(
+            segs[1].text, " force-pushed \u{b7} 2 dropped, 0 yours",
+            "short form: the popover names the upstream"
+        );
+        assert_eq!(segs[1].icon, None, "the text is not a second icon");
+        assert_eq!(segs[1].role, segs[0].role);
+
+        let plain = NodeChrome {
+            upstream_rewrite: None,
+            ..chrome
+        };
+        assert_eq!(sync_trailing(&plain, false, true).len(), 1);
+    }
+
+    #[test]
+    fn repo_row_carries_the_force_push_text_from_the_snapshot() {
+        let mut diverged = repo("ops", false, false);
+        diverged.sync_status = SyncStatus::Diverged;
+        diverged.sync_note = "diverged (ahead 2, behind 1)".into();
+        diverged.upstream_rewrite = Some(force_pushed());
+        let built = build_workspace_snapshot(&[diverged], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let row = rows.iter().find(|r| r.id == "repo:ops").expect("ops");
+        assert_eq!(row.chrome.upstream_rewrite, Some(force_pushed()));
+        assert!(
+            row.trailing
+                .contains("force-pushed \u{b7} 2 dropped, 0 yours")
+                && !row.trailing.contains("origin/main"),
+            "{}",
+            row.trailing
+        );
+        assert_eq!(
+            row.chrome.sync_note, "diverged (ahead 2, behind 1)",
+            "the sync note stays for the parsers"
+        );
+    }
+
+    /// The force-push text gives way before the row's name: whole while the
+    /// name and the run fit (the branch after the name clips first), then
+    /// ` force-pushed`, then gone. The PR glyph still ends the run, the
+    /// label is not touched, and a row with no rewrite is left alone.
+    #[test]
+    fn force_push_text_gives_way_before_the_name_and_the_pr_badge() {
+        let chrome = NodeChrome {
+            sync_status: Some(SyncStatus::Diverged),
+            sync_note: "diverged (ahead 2, behind 1)".into(),
+            upstream_rewrite: Some(force_pushed()),
+            ..NodeChrome::default()
+        };
+        let row = |chrome: &NodeChrome| {
+            let mut segs = NodeSegments {
+                segments: vec![
+                    text_seg("app", SegRole::Repo),
+                    text_seg("  feature", SegRole::BranchFeature),
+                ],
+                trailing: sync_trailing(chrome, false, true),
+            };
+            with_pr_badge(&mut segs, true, Some(&badge(PrState::CiFailed, Some("#7"))))
+                .expect("badge");
+            segs
+        };
+        let text = |segs: &NodeSegments| -> String {
+            segs.trailing.iter().map(|seg| seg.text.as_str()).collect()
+        };
+        let whole = text(&row(&chrome));
+        assert_eq!(whole, "Y force-pushed \u{b7} 2 dropped, 0 yours  #7 x");
+        // The name `app`, the run, and the one-column pad before the run.
+        // `  feature` is not counted: it clips before the text gives way.
+        let full = visible_width("app") + visible_width(&whole) + 1;
+        let tiny = full - visible_width(" \u{b7} 2 dropped, 0 yours");
+        for (room, want) in [
+            (full + 10, whole.as_str()),
+            (full, whole.as_str()),
+            (full - 1, "Y force-pushed  #7 x"),
+            (tiny, "Y force-pushed  #7 x"),
+            (tiny - 1, "Y  #7 x"),
+            (0, "Y  #7 x"),
+        ] {
+            let mut segs = row(&chrome);
+            fit_upstream_rewrite_text(&mut segs, &chrome, room);
+            assert_eq!(text(&segs), want, "room {room}");
+            assert_eq!(
+                segs.trailing.last().and_then(|seg| seg.icon),
+                Some(IconKind::PrCiFailed),
+                "room {room}: the glyph ends the run"
+            );
+            assert_eq!(segs.segments, row(&chrome).segments, "room {room}");
+        }
+
+        let plain = NodeChrome {
+            upstream_rewrite: None,
+            ..chrome.clone()
+        };
+        let mut segs = row(&plain);
+        let before = segs.clone();
+        fit_upstream_rewrite_text(&mut segs, &plain, 0);
+        assert_eq!(segs, before, "no rewrite: nothing to fit");
+    }
+
     fn repo(name: &str, with_change: bool, linked: bool) -> RepoSnapshot {
         RepoSnapshot {
             repo: name.into(),
             branch: "main".into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            upstream_rewrite: None,
             head: String::new(),
             has_unstaged: with_change,
             has_staged: false,

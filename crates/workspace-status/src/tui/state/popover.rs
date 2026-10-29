@@ -24,11 +24,12 @@ use super::super::popover::{
     popover_sections, step_line, tree_icon_target, IconTarget, PopoverLine, PopoverOrigin,
     PopoverOwner, PopoverSection, PopoverState, PEEK_DWELL_MS, PEEK_GRACE_MS,
 };
+use super::super::search::list_prefix_cols;
 use super::super::selection::TextSelection;
 use super::super::status::StatusMessage;
 use super::super::tree::{
-    painted_row_segments, pr_badge_kind, pr_badge_repo, segment_icons, with_comment_mark,
-    with_viewed_mark, NodeKind, NodeSegments, PrBadge, VisibleRow,
+    fit_upstream_rewrite_text, painted_row_segments, pr_badge_kind, pr_badge_repo, segment_icons,
+    with_comment_mark, with_viewed_mark, NodeKind, NodeSegments, PrBadge, VisibleRow,
 };
 use super::{AppState, IconHit};
 use workspace_status_graph::{paint_model, GraphRow, ASCII, UNICODE};
@@ -122,11 +123,16 @@ impl AppState {
         (viewed, commented, resolved, pr)
     }
 
-    /// Every segment tree row `row` paints this frame.
+    /// Every segment tree row `row` paints this frame, before the spinner
+    /// and the sparkline join the trailing run.
     pub(crate) fn tree_row_paint_segments(&self, row: &VisibleRow) -> NodeSegments {
         let width = usize::from(self.layout.tree_width);
         let (viewed, commented, resolved, pr) = self.tree_row_marks(row, width, Instant::now());
-        painted_row_segments(row, self.ascii, viewed, commented, resolved, pr.as_ref())
+        let mut segs =
+            painted_row_segments(row, self.ascii, viewed, commented, resolved, pr.as_ref());
+        let room = width.saturating_sub(list_prefix_cols(row.depth));
+        fit_upstream_rewrite_text(&mut segs, &row.chrome, room);
+        segs
     }
 
     /// Scope the line comments of the shown commit-file list match in. A
@@ -965,6 +971,7 @@ mod tests {
             branch: "feature".into(),
             sync_status: status,
             sync_note: note.into(),
+            upstream_rewrite: None,
             head: "abc".into(),
             has_unstaged: true,
             has_staged: false,
