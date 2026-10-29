@@ -402,8 +402,18 @@ fn section(
         }
         IconTarget::PullRequest(repo) => pr_section(state, repo, now_unix),
         IconTarget::CommitFileRow(id) => {
-            let row = rows.commit_files().iter().find(|row| &row.id == id)?;
-            commit_file_section(state, kind, row)
+            // The folder summary paints files the list may fold away.
+            let summary = || {
+                let summary = state.folder_summary()?;
+                state
+                    .summary_rows(&summary)
+                    .into_iter()
+                    .find(|row| &row.id == id)
+            };
+            match rows.commit_files().iter().find(|row| &row.id == id) {
+                Some(row) => commit_file_section(state, kind, row),
+                None => commit_file_section(state, kind, &summary()?),
+            }
         }
         IconTarget::GraphRow(id) => graph_row_section(state, rows, kind, id, now_unix),
         IconTarget::GraphWorktree(path) => graph_worktree_section(state, rows, path),

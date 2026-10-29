@@ -83,6 +83,8 @@ impl AppState {
         match self.list_focus_target() {
             ListFocusTarget::Tree => Some((GlidePane::Tree, self.layout.list_offset)),
             ListFocusTarget::Graph => Some((GlidePane::Graph, usize::from(self.graph_scroll))),
+            // A folder summary scrolls without a glide, over the hidden diff.
+            ListFocusTarget::None if self.summary_shown() => None,
             ListFocusTarget::None => Some((GlidePane::Diff, usize::from(self.diff_scroll))),
             ListFocusTarget::CommitFiles => None,
         }

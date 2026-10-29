@@ -72,6 +72,10 @@ pub enum VScrollbar {
     /// of the line cursor, so the cursor moves with the viewport, as the
     /// wheel moves it.
     FileView,
+    /// The folder summary bar (the right pane beside a focused
+    /// commit-file folder). The summary has no cursor: the bar moves its
+    /// viewport only, as the wheel does.
+    Summary,
 }
 
 /// A painted horizontal scrollbar that the mouse drags
@@ -91,6 +95,8 @@ pub enum HScrollbar {
     CommitFiles,
     /// The Explorer clean-file view bar (the file's own `col_offset`).
     FileView,
+    /// The folder summary bar (the summary's own pan).
+    Summary,
 }
 
 /// Geometry and pan state of one painted horizontal scrollbar, from the
@@ -297,6 +303,11 @@ pub struct SplitLayout {
     pub files_hbar: HScrollbarLayout,
     /// Explorer clean-file view horizontal scrollbar and its pan.
     pub file_view_hbar: HScrollbarLayout,
+    /// Folder summary vertical scrollbar: the summary rows (not its
+    /// header), the row count, and the viewport top.
+    pub summary_vbar: VScrollbarLayout,
+    /// Folder summary horizontal scrollbar and its pan.
+    pub summary_hbar: HScrollbarLayout,
     /// 0-based row of the expanded commit-message footer's top rule (graph
     /// or depth-2 commit files) when it is painted ([`SplitHit::CommitMsg`]).
     pub commit_msg_rule_y: Option<u16>,
@@ -530,6 +541,7 @@ impl SplitLayout {
             VScrollbar::CommitFiles => self.files_vbar,
             VScrollbar::ExplorerTree => self.explorer_tree_vbar,
             VScrollbar::FileView => self.file_view_vbar,
+            VScrollbar::Summary => self.summary_vbar,
         }
     }
 
@@ -541,6 +553,7 @@ impl SplitLayout {
             HScrollbar::Tree => self.tree_hbar,
             HScrollbar::CommitFiles => self.files_hbar,
             HScrollbar::FileView => self.file_view_hbar,
+            HScrollbar::Summary => self.summary_hbar,
         }
     }
 }
@@ -697,6 +710,7 @@ pub fn hit_split(layout: SplitLayout, col: u16, row: u16) -> SplitHit {
         (VScrollbar::Diff, HScrollbar::Diff),
         (VScrollbar::Tree, HScrollbar::Tree),
         (VScrollbar::CommitFiles, HScrollbar::CommitFiles),
+        (VScrollbar::Summary, HScrollbar::Summary),
     ];
     for (vbar, hbar) in bars {
         let hit = hit_vscrollbar(vbar, layout.vbar(vbar), col, row)

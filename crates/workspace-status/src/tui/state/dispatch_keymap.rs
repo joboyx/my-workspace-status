@@ -65,7 +65,11 @@ impl AppState {
                 if self.graph_pane_focused() {
                     self.page_graph(pages)
                 } else if self.list_focus_target() == ListFocusTarget::None {
-                    let height = self.diff_body_height().saturating_sub(1).max(1) as i32;
+                    let height = if self.summary_shown() {
+                        self.summary_page_rows()
+                    } else {
+                        self.diff_body_height().saturating_sub(1).max(1)
+                    } as i32;
                     self.move_focused(pages * height)
                 } else {
                     let height = self.page_step();

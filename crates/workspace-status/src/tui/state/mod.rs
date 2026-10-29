@@ -16,6 +16,7 @@ mod popover;
 mod pull_request;
 mod remote_view;
 mod scroll_glide;
+mod summary;
 
 pub(crate) use pull_request::PrDetailState;
 
@@ -377,6 +378,16 @@ pub struct LayoutHit {
     /// with the file's pan clamp ([`super::tabs::FileTab::pan_max`]);
     /// `split_layout` hit-tests with the live pan.
     pub file_view_hbar: HScrollbarLayout,
+    /// Folder summary vertical scrollbar from the last paint: the rows
+    /// under its header, the file row count, and the painted top.
+    pub summary_vbar: VScrollbarLayout,
+    /// Folder summary horizontal scrollbar from the last paint, with the
+    /// summary's pan clamp (`AppState::summary_max_col_in`);
+    /// `split_layout` hit-tests with the live pan.
+    pub summary_hbar: HScrollbarLayout,
+    /// File rows the folder summary painted last (the rows under its
+    /// header, less a horizontal bar row): its page and scroll limit.
+    pub summary_list_height: u16,
     /// Tab-strip row (always painted).
     pub tab_y: u16,
     /// Hit boxes `(x, width, tab_index)` for the painted strip.
@@ -519,6 +530,9 @@ impl Default for LayoutHit {
             files_hbar: HScrollbarLayout::default(),
             file_view_vbar: VScrollbarLayout::default(),
             file_view_hbar: HScrollbarLayout::default(),
+            summary_vbar: VScrollbarLayout::default(),
+            summary_hbar: HScrollbarLayout::default(),
+            summary_list_height: 0,
             tab_y: 0,
             tab_hits: Vec::new(),
             tab_close_hits: Vec::new(),
@@ -973,6 +987,9 @@ pub struct AppState {
     pub left_col_offset: u16,
     /// Horizontal pan of the right list (graph or commit-files).
     pub right_col_offset: u16,
+    /// Viewport top and pan of the folder summary, for the folder they
+    /// were set on ([`summary::SummaryView`]).
+    summary_view: Option<summary::SummaryView>,
     /// File identities currently shown with unlimited `-U` context.
     pub full_context: HashSet<String>,
     /// Search text of the hunk/change row to keep in view after `-U` reload.
@@ -1272,6 +1289,7 @@ impl AppState {
             diff_col_offset: 0,
             left_col_offset: 0,
             right_col_offset: 0,
+            summary_view: None,
             full_context: HashSet::new(),
             pending_hunk_anchor: None,
             confirm: None,
@@ -2000,11 +2018,18 @@ impl AppState {
     /// moving back onto that file repaints it with no reload. Built from
     /// the full file list, so files under folded subfolders count.
     pub(crate) fn folder_summary(&self) -> Option<FolderSummary> {
+        let dir = self.folder_summary_dir()?;
+        Some(folder_summary(self.commit_drill_files()?, &dir))
+    }
+
+    /// Folder path of [`Self::folder_summary`], without building the
+    /// summary.
+    fn folder_summary_dir(&self) -> Option<String> {
         if self.is_explorer_tab() || (!self.is_compare_tab() && !self.drill.is_diff()) {
             return None;
         }
         let row = self.focused_commit_file_row().filter(|row| row.is_dir())?;
-        Some(folder_summary(self.commit_drill_files()?, &row.path))
+        Some(row.path)
     }
 
     /// True when `row` is a compare-tab file row marked reviewed.
@@ -3056,6 +3081,16 @@ impl AppState {
                 col_offset: self.hbar_offset(HScrollbar::FileView),
                 ..self.layout.file_view_hbar
             },
+            // The summary viewport is its own state (no cursor): a press or
+            // drag moves it before the next paint, as on the file diff.
+            summary_vbar: VScrollbarLayout {
+                scroll: self.summary_scroll().min(usize::from(u16::MAX)) as u16,
+                ..self.layout.summary_vbar
+            },
+            summary_hbar: HScrollbarLayout {
+                col_offset: self.hbar_offset(HScrollbar::Summary),
+                ..self.layout.summary_hbar
+            },
             commit_msg_rule_y: self.layout.commit_msg_rule_y,
             commit_msg_rule_x: self.layout.commit_msg_rule_x,
             commit_msg_rule_width: self.layout.commit_msg_rule_width,
@@ -3563,7 +3598,9 @@ impl AppState {
         };
         match bar {
             VScrollbar::Graph => self.focus_graph_pane(),
-            VScrollbar::Diff | VScrollbar::FileView => self.focus = FocusPane::Right,
+            VScrollbar::Diff | VScrollbar::FileView | VScrollbar::Summary => {
+                self.focus = FocusPane::Right;
+            }
             VScrollbar::Tree | VScrollbar::ExplorerTree => self.focus = FocusPane::Left,
             VScrollbar::CommitFiles => self.focus = self.commit_files_pane(),
         }
@@ -3587,12 +3624,17 @@ impl AppState {
     /// a moved cursor asks for what the wheel asks for: the tree loads the
     /// right pane, a commit-file row its diff, an Explorer row its preview.
     /// The clean-file view scrolls at the edge of its line cursor, so its
-    /// cursor moves to the nearest edge line of the new viewport.
+    /// cursor moves to the nearest edge line of the new viewport. The
+    /// folder summary has no cursor: its viewport moves alone.
     fn scroll_vbar_to(&mut self, bar: VScrollbar, top: u16) -> Effect {
         let top = usize::from(top);
         match bar {
             VScrollbar::Graph => {
                 self.graph_scroll = top as u16;
+                Effect::None
+            }
+            VScrollbar::Summary => {
+                self.scroll_summary_to(top);
                 Effect::None
             }
             VScrollbar::Diff => {
@@ -3718,7 +3760,9 @@ impl AppState {
         };
         match bar {
             HScrollbar::Graph => self.focus_graph_pane(),
-            HScrollbar::Diff | HScrollbar::FileView => self.focus = FocusPane::Right,
+            HScrollbar::Diff | HScrollbar::FileView | HScrollbar::Summary => {
+                self.focus = FocusPane::Right;
+            }
             HScrollbar::Tree => self.focus = FocusPane::Left,
             HScrollbar::CommitFiles => self.focus = self.commit_files_pane(),
         }
@@ -3746,6 +3790,7 @@ impl AppState {
                 .tabs
                 .active_file_view()
                 .map_or(0, |file| file.col_offset),
+            HScrollbar::Summary => self.summary_col_offset(),
         }
     }
 
@@ -3766,6 +3811,7 @@ impl AppState {
                     file.col_offset = offset;
                 }
             }
+            HScrollbar::Summary => self.set_summary_col_offset(offset),
         }
     }
 
@@ -6547,6 +6593,11 @@ impl AppState {
                 self.move_graph_cursor(delta);
                 self.follow_graph_files()
             }
+            // A folder summary has no cursor: the keys scroll it.
+            ListFocusTarget::None if self.summary_shown() => {
+                self.scroll_summary_by(delta);
+                Effect::None
+            }
             ListFocusTarget::None => {
                 self.move_diff_cursor(delta);
                 Effect::None
@@ -6580,6 +6631,10 @@ impl AppState {
                 self.graph_cursor = if end { n.saturating_sub(1) } else { 0 };
                 self.sync_graph_scroll();
                 self.follow_graph_files()
+            }
+            ListFocusTarget::None if self.summary_shown() => {
+                self.scroll_summary_to(if end { usize::MAX } else { 0 });
+                Effect::None
             }
             ListFocusTarget::None => {
                 let n = self.current_diff_rows().len();

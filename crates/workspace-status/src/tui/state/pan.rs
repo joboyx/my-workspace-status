@@ -38,7 +38,10 @@ impl AppState {
     }
 
     fn pan_right_pane(&mut self, delta: i32) {
-        if self.right_is_diff() || self.drill.is_diff() {
+        // A folder summary pans its own rows, not the file diff it hides.
+        if self.summary_shown() {
+            self.pan_summary(delta);
+        } else if self.right_is_diff() || self.drill.is_diff() {
             self.pan_diff_content(delta);
         } else if self.drill.is_files() {
             let max = self.commit_file_max_col(self.layout.diff_pane_width);
@@ -249,6 +252,12 @@ impl AppState {
                         self.follow_graph_files()
                     }
                     ListFocusTarget::CommitFiles => self.move_file_cursor(delta),
+                    // Over a folder summary the wheel scrolls its viewport:
+                    // it has no cursor.
+                    ListFocusTarget::None if self.summary_shown() => {
+                        self.scroll_summary_by(delta);
+                        Effect::None
+                    }
                     ListFocusTarget::None => {
                         self.move_diff_cursor(delta);
                         Effect::None

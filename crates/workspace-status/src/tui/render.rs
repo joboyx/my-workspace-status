@@ -102,9 +102,8 @@ use super::tabs::{
 use super::theme::{hex_color, mix_toward, BackgroundMode, Palette, Pill, ThemeId};
 use super::toast::ToastTick;
 use super::tree::{
-    file_change_from_name_status, file_change_segments, painted_row_segments, pr_badge_kind,
-    pr_badge_mark, visible_window, workspace_trailing_fit, NodeKind, NodeSegments, SegRole,
-    TextSeg, VisibleRow,
+    painted_row_segments, pr_badge_kind, pr_badge_mark, visible_window, workspace_trailing_fit,
+    NodeKind, NodeSegments, SegRole, TextSeg, VisibleRow,
 };
 use super::undercurl::{cut_link_cells, drop_undercurls_under, underlined_runs, UndercurlHit};
 use super::watch::FlashKind;
@@ -281,6 +280,8 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
     state.layout.files_hbar = HScrollbarLayout::default();
     state.layout.file_view_vbar = VScrollbarLayout::default();
     state.layout.file_view_hbar = HScrollbarLayout::default();
+    state.layout.summary_vbar = VScrollbarLayout::default();
+    state.layout.summary_hbar = HScrollbarLayout::default();
     state.layout.file_view_row_lines.clear();
     state.layout.explorer_tree = Rect::default();
     state.layout.explorer_preview = Rect::default();
@@ -2267,11 +2268,13 @@ fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
 }
 
 /// Folder summary in the diff pane: `dir/` and its totals, then one row per
-/// changed file under it. Rows past the pane height fold into `… N more`.
+/// changed file under it. Rows past the pane height scroll (the wheel, the
+/// right-pane move keys, and the vertical bar) and long rows pan, on the
+/// summary's own viewport and pan ([`AppState::summary_scroll`]).
 fn draw_folder_summary(
     frame: &mut Frame<'_>,
     area: Rect,
-    state: &AppState,
+    state: &mut AppState,
     summary: &FolderSummary,
 ) {
     let palette = state.theme.palette();
@@ -2311,68 +2314,67 @@ fn draw_folder_summary(
         height: area.height - header_h,
         ..area
     };
-    let list_h = body.height as usize;
-    let shown = if n > list_h {
-        list_h.saturating_sub(1)
-    } else {
-        n
-    };
-    let width = body.width as usize;
+    // The file rows are the list's flat rows, painted and hit like them
+    // (marks, eye, flash, icon hits), as a list with its own viewport and
+    // pan: no cursor, so the wheel, keys, and bar move the viewport only.
+    let rows = state.summary_rows(summary);
+    let (pan, col_max) = clamped_list_pan(
+        state,
+        HScrollbar::Summary,
+        body,
+        rows.len(),
+        state.summary_col_offset(),
+        |state, vscroll| state.summary_max_col_in(body.width, vscroll),
+    );
+    let bars = ListBars::new(body, rows.len(), pan);
+    let rows_area = bars.rows_area();
+    let height = usize::from(rows_area.height);
+    let width = usize::from(rows_area.width);
+    let start = state
+        .summary_scroll()
+        .min(rows.len().saturating_sub(height));
+    state.keep_summary_view(start, pan);
+    state.layout.summary_list_height = rows_area.height;
+    let col_offset = usize::from(pan);
     let search = state.theme.pills().filter;
-    let paint = |segs: &NodeSegments| {
-        paint_segmented_row(
-            0, false, false, segs, width, false, false, None, false, search, ascii, palette, 0,
-        )
-    };
-    let mut lines: Vec<Line> = summary.files[..shown]
-        .iter()
-        .map(|file| {
-            let change = file_change_from_name_status(
-                &file.status,
-                file.path.clone(),
-                file.old_path.clone(),
-            );
-            let mut segs = file_change_segments(&change, false, ascii);
-            if let Some(stat) = file.stat {
-                // Counts sit before the badge so badges line up as in the list.
-                let badge = std::mem::take(&mut segs.trailing);
-                segs.trailing = vec![
-                    TextSeg {
-                        text: format!("+{}", stat.added),
-                        role: SegRole::Added,
-                        hex: None,
-                        bold: false,
-                        dim: false,
-                        icon: None,
-                    },
-                    TextSeg {
-                        text: format!(" {minus}{}  ", stat.deleted),
-                        role: SegRole::Deleted,
-                        hex: None,
-                        bold: false,
-                        dim: false,
-                        icon: None,
-                    },
-                ];
-                segs.trailing.extend(badge);
-            }
-            paint(&segs)
-        })
-        .collect();
-    if shown < n {
-        lines.push(paint(&NodeSegments {
-            segments: vec![TextSeg {
-                text: format!("… {} more", n - shown),
-                role: SegRole::Muted,
-                hex: None,
-                bold: false,
-                dim: false,
-                icon: None,
-            }],
-            trailing: Vec::new(),
-        }));
+    let comment_scope = state.commit_file_comment_scope();
+    let mut lines = Vec::new();
+    let mut hits = Vec::new();
+    for (y, row) in (rows_area.y..).zip(rows.iter().skip(start).take(height)) {
+        let segs = state.summary_row_paint_segments_in(row, comment_scope);
+        for (kind, x, w) in segmented_icon_spans(row.depth, &segs, width, col_offset) {
+            hits.push(IconHit {
+                y,
+                x: rows_area
+                    .x
+                    .saturating_add(u16::try_from(x).unwrap_or(u16::MAX)),
+                width: u16::try_from(w).unwrap_or(u16::MAX),
+                kind,
+                target: IconTarget::CommitFileRow(row.id.clone()),
+            });
+        }
+        lines.push(paint_segmented_row(
+            row.depth,
+            false,
+            false,
+            &segs,
+            width,
+            false,
+            false,
+            state.commit_file_flash_color(&row.id),
+            false,
+            search,
+            ascii,
+            palette,
+            col_offset,
+        ));
     }
-    frame.render_widget(Paragraph::new(lines), body);
+    state.layout.icon_hits.extend(hits);
+    frame.render_widget(Paragraph::new(lines), rows_area);
+    let flat = state.background == BackgroundMode::Paint;
+    let (vbar, hbar) = bars.paint(frame, start, (pan, col_max), flat);
+    state.layout.summary_vbar = vbar;
+    state.layout.summary_hbar = hbar;
 }
 
 /// Graph list top to paint in a pane `area_height` rows tall:
@@ -8147,18 +8149,53 @@ mod tests {
         vbar: VScrollbar,
         /// The list's horizontal bar; `None` for a list that never pans.
         hbar: Option<HScrollbar>,
-        /// The list cursor.
+        /// The list cursor. The folder summary has no cursor: its viewport
+        /// top stands in, which moves only with the viewport.
         cursor: fn(&AppState) -> usize,
         /// Whether `effect` is what the wheel asks for when it moves this
         /// list's cursor (the right pane, a diff, a preview, or nothing).
         moved: fn(&Effect) -> bool,
     }
 
+    /// A depth-2 drill on [`bar_list_files`] under folder `d`, with the
+    /// file list's cursor on the `d` folder row: the right pane shows the
+    /// folder summary of [`BAR_LIST_ROWS`] files.
+    fn bar_list_summary_state() -> AppState {
+        let files: Vec<_> = bar_list_files()
+            .into_iter()
+            .map(|file| super::super::drill::CommitFile {
+                path: format!("d/{}", file.path),
+                ..file
+            })
+            .collect();
+        let mut state = two_pane_files_state();
+        state.open_commit_diff(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: FOOTER_COMMIT_A.into(),
+            },
+            files,
+            0,
+            format!("d/{}", bar_list_name(0)),
+            super::super::diff::DiffContent::from_lines(vec!["@@ -1,1 +1,1 @@".into()]),
+        );
+        state.focus = FocusPane::Left;
+        let up = -(state.commit_files_cursor() as i32);
+        state.dispatch(Action::Move(up));
+        assert_eq!(
+            state.focused_commit_file_row().map(|row| row.id),
+            Some("dir:d".to_string()),
+            "the folder row has the cursor"
+        );
+        assert!(state.summary_shown(), "the right pane shows the summary");
+        state
+    }
+
     /// Every list surface that paints through `draw_tree`,
-    /// `draw_commit_file_list`, or `draw_explorer_tree`, and the Explorer
-    /// clean-file view (`draw_file_body`), whose lines scroll and pan the
-    /// same way.
-    const LIST_BAR_SURFACES: [ListBarSurface; 6] = [
+    /// `draw_commit_file_list`, `draw_folder_summary`, or
+    /// `draw_explorer_tree`, and the Explorer clean-file view
+    /// (`draw_file_body`), whose lines scroll and pan the same way.
+    const LIST_BAR_SURFACES: [ListBarSurface; 7] = [
         ListBarSurface {
             id: "tree",
             open: || {
@@ -8250,6 +8287,16 @@ mod tests {
             moved: |effect| matches!(effect, Effect::LoadCompareDiff { .. }),
         },
         ListBarSurface {
+            id: "summary",
+            open: bar_list_summary_state,
+            pane: FocusPane::Right,
+            vbar: VScrollbar::Summary,
+            hbar: Some(HScrollbar::Summary),
+            cursor: AppState::summary_scroll,
+            // No cursor, so nothing loads: the viewport moves alone.
+            moved: |effect| *effect == Effect::None,
+        },
+        ListBarSurface {
             id: "explorer-tree",
             open: || {
                 let names: Vec<String> = (0..BAR_LIST_ROWS).map(bar_list_name).collect();
@@ -8296,6 +8343,7 @@ mod tests {
             VScrollbar::CommitFiles => state.layout.files_vbar,
             VScrollbar::ExplorerTree => state.layout.explorer_tree_vbar,
             VScrollbar::FileView => state.layout.file_view_vbar,
+            VScrollbar::Summary => state.layout.summary_vbar,
             VScrollbar::Graph | VScrollbar::Diff => unreachable!("not a list bar"),
         }
     }
@@ -8306,12 +8354,13 @@ mod tests {
             HScrollbar::Tree => state.layout.tree_hbar,
             HScrollbar::CommitFiles => state.layout.files_hbar,
             HScrollbar::FileView => state.layout.file_view_hbar,
+            HScrollbar::Summary => state.layout.summary_hbar,
             HScrollbar::Graph | HScrollbar::Diff => unreachable!("not a list bar"),
         }
     }
 
-    /// The pan offset of `surface`'s list: the clean-file view's own pan,
-    /// else the pan of the list's pane.
+    /// The pan offset of `surface`'s list: the clean-file view's and the
+    /// folder summary's own pan, else the pan of the list's pane.
     fn list_pan(state: &AppState, surface: &ListBarSurface) -> u16 {
         if surface.hbar == Some(HScrollbar::FileView) {
             return state
@@ -8319,6 +8368,9 @@ mod tests {
                 .active_file_view()
                 .expect("a file view")
                 .col_offset;
+        }
+        if surface.hbar == Some(HScrollbar::Summary) {
+            return state.summary_col_offset();
         }
         if surface.pane == FocusPane::Left {
             state.left_col_offset
@@ -8347,6 +8399,7 @@ mod tests {
                         a.as_str(),
                         "draw_tree"
                             | "draw_commit_file_list"
+                            | "draw_folder_summary"
                             | "draw_explorer_tree"
                             | "draw_file_body"
                     )
@@ -21010,9 +21063,9 @@ mod tests {
         }
     }
 
-    /// More files than rows: the last row folds the rest into `… N more`.
-    #[test]
-    fn folder_summary_overflow_ends_with_more_row() {
+    /// [`summary_files`] plus `src/many/f00.rs` to `f39.rs` (+1 each): 43
+    /// files under `src`, more than a summary pane shows at once.
+    fn summary_many_files() -> Vec<super::super::drill::CommitFile> {
         let mut files = summary_files();
         files.extend((0..40).map(|i| super::super::drill::CommitFile {
             status: "A".into(),
@@ -21023,27 +21076,399 @@ mod tests {
                 deleted: 0,
             }),
         }));
-        for (name, mut state) in [
-            ("drill", summary_drill_state(files.clone())),
-            ("compare", summary_compare_state(files.clone())),
-        ] {
-            let _ = summary_move_to(&mut state, "src");
-            let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        files
+    }
+
+    /// An added file under `src` whose path is wider than any summary pane
+    /// (no line counts), ending in `-tail.rs`.
+    fn summary_long_file() -> super::super::drill::CommitFile {
+        super::super::drill::CommitFile {
+            status: "A".into(),
+            path: format!("src/{}-tail.rs", "n".repeat(150)),
+            old_path: None,
+            stat: None,
+        }
+    }
+
+    /// The compare source the folder-summary tests give a compare tab,
+    /// with head commit `head`.
+    fn summary_compare_source(head: &str) -> super::super::drill::CommitFileSource {
+        super::super::drill::CommitFileSource::Compare {
+            base_ref: "main".into(),
+            head_ref: "HEAD".into(),
+            base_tip: "b".repeat(40),
+            merge_base: "c".repeat(40),
+            head: head.into(),
+        }
+    }
+
+    /// [`summary_compare_state`] with its range loaded from
+    /// [`summary_compare_source`] (head `ddd…`) and a patch key per file,
+    /// so its rows can carry comment marks and the reviewed eye.
+    fn summary_compare_state_with_source(files: Vec<super::super::drill::CommitFile>) -> AppState {
+        let mut state = summary_compare_state(files);
+        let tab = state.tabs.active_compare_mut().unwrap();
+        tab.source = Some(summary_compare_source(&"d".repeat(40)));
+        tab.patch_keys = tab
+            .files
+            .iter()
+            .map(|file| (file.path.clone(), format!("key:{}", file.path)))
+            .collect();
+        state
+    }
+
+    /// Focus the file list and move its cursor onto the row for `path`.
+    fn summary_focus_row(state: &mut AppState, path: &str) {
+        state.focus = FocusPane::Left;
+        let _ = summary_move_to(state, path);
+    }
+
+    /// The text of screen row `y` from column `x0` for `width` cells.
+    fn summary_row_text(terminal: &Terminal<TestBackend>, y: u16, x0: u16, width: u16) -> String {
+        let buf = terminal.backend().buffer();
+        (x0..x0 + width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    /// More files than rows, in both looks, on a depth-2 drill and a
+    /// compare tab: the summary paints a vertical bar and no `… N more`
+    /// row. With the right pane focused, `j`, PageDown, End, and Home
+    /// scroll it; the vertical wheel over it scrolls it from either focus.
+    /// Neither moves the file-list cursor or the hidden diff. Another
+    /// folder starts at the top, and so does this one after it.
+    #[test]
+    fn folder_summary_scrolls_with_the_keys_and_wheel_and_resets_on_another_folder() {
+        for (look, background) in PANE_LOOKS {
+            for (name, mut state) in [
+                ("drill", summary_drill_state(summary_many_files())),
+                (
+                    "compare",
+                    summary_compare_state_with_source(summary_many_files()),
+                ),
+            ] {
+                let case = format!("{name} {look}");
+                state.background = background;
+                summary_focus_row(&mut state, "src");
+                let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let pane = summary_pane_text(&terminal, &state);
+                assert!(
+                    pane.lines()
+                        .next()
+                        .unwrap()
+                        .starts_with("src/  43 files · +45 −1"),
+                    "{case}:\n{pane}"
+                );
+                assert!(!pane.contains(" more"), "{case}: no collapse row:\n{pane}");
+                let bar = state.layout.summary_vbar;
+                assert!(bar.x.is_some(), "{case}: the vertical bar paints");
+                let height = usize::from(state.layout.summary_list_height);
+                assert_eq!(usize::from(bar.height), height, "{case}");
+                let max = 43 - height;
+                assert_eq!(usize::from(bar.scroll_max), max, "{case}");
+                let list_cursor = state.commit_files_cursor();
+                let diff_cursor = state.diff_cursor;
+
+                state.focus = FocusPane::Right;
+                assert_eq!(state.dispatch(Action::Move(1)), Effect::None, "{case}");
+                assert_eq!(state.summary_scroll(), 1, "{case}: j scrolls");
+                state.dispatch(Action::PageMove(1));
+                assert_eq!(state.summary_scroll(), height, "{case}: PageDown pages");
+                state.dispatch(Action::MoveToEnd);
+                assert_eq!(state.summary_scroll(), max, "{case}: End");
+                draw_state(&mut terminal, &mut state);
+                let pane = summary_pane_text(&terminal, &state);
+                assert!(pane.contains("f39.rs"), "{case}: the last row:\n{pane}");
+                assert!(!pane.contains("a.rs"), "{case}: scrolled off:\n{pane}");
+                assert!(pane.starts_with("src/"), "{case}: the header stays");
+                state.dispatch(Action::MoveToStart);
+                assert_eq!(state.summary_scroll(), 0, "{case}: Home");
+
+                state.focus = FocusPane::Left;
+                let x = bar.x.unwrap() - 4;
+                let wheel = Action::ScrollWheel {
+                    col: x,
+                    row: bar.y + 2,
+                    delta: 3,
+                    horizontal: false,
+                };
+                assert_eq!(state.dispatch(wheel), Effect::None, "{case}");
+                assert_eq!(state.summary_scroll(), 3, "{case}: the wheel scrolls");
+                draw_state(&mut terminal, &mut state);
+                let first = summary_row_text(&terminal, bar.y, state.layout.diff_content_x, 60);
+                assert!(first.contains("f00.rs"), "{case}: 4th file on top: {first}");
+                assert_eq!(state.commit_files_cursor(), list_cursor, "{case}: list");
+                assert_eq!(state.diff_cursor, diff_cursor, "{case}: hidden diff");
+                assert!(state.summary_shown(), "{case}: the summary stays");
+
+                summary_focus_row(&mut state, "src/many");
+                draw_state(&mut terminal, &mut state);
+                assert_eq!(state.summary_scroll(), 0, "{case}: another folder");
+                summary_focus_row(&mut state, "src");
+                draw_state(&mut terminal, &mut state);
+                assert_eq!(state.summary_scroll(), 0, "{case}: back starts at the top");
+            }
+        }
+    }
+
+    /// A compare range reload of the same folder (a watch reload, here one
+    /// that moved the head) keeps the summary's place and pan, in both
+    /// looks; a reload with fewer rows clamps them to the new rows.
+    #[test]
+    fn compare_folder_summary_keeps_its_place_over_a_range_reload_and_clamps() {
+        let mut files = summary_many_files();
+        files.push(summary_long_file());
+        for (look, background) in PANE_LOOKS {
+            let mut state = summary_compare_state_with_source(files.clone());
+            state.background = background;
+            summary_focus_row(&mut state, "src");
+            let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
             draw_state(&mut terminal, &mut state);
-            let pane = summary_pane_text(&terminal, &state);
-            let lines: Vec<&str> = pane.lines().collect();
-            assert!(
-                lines[0].starts_with("src/  43 files · +45 −1"),
-                "{name}:\n{pane}"
-            );
-            // One header row; the last body row is the overflow row.
-            let shown = lines.len() - 2;
-            let more = format!("… {} more", 43 - shown);
-            assert!(
-                lines.last().unwrap().contains(&more),
-                "{name} expected {more}:\n{pane}"
-            );
-            assert!(lines[1].contains("a.rs"), "{name} sorted by path:\n{pane}");
+            state.focus = FocusPane::Right;
+            state.dispatch(Action::Move(10));
+            state.dispatch(Action::PanDiff(4));
+            draw_state(&mut terminal, &mut state);
+            assert_eq!(state.summary_scroll(), 10, "{look}");
+            assert_eq!(state.summary_col_offset(), 4, "{look}");
+
+            let reload = |state: &mut AppState, head: &str, files: Vec<_>| {
+                let tab = state.tabs.active_compare().expect("compare tab");
+                let (tab_id, gen) = (tab.id, tab.generation);
+                let load = super::super::app::CompareRangeLoad {
+                    source: summary_compare_source(head),
+                    patch_keys: Default::default(),
+                    files,
+                    head: Some(head.into()),
+                    base_tip: "b".repeat(40),
+                    commit: None,
+                };
+                let _ = state.apply_compare_range(tab_id, gen, Ok(load));
+            };
+            reload(&mut state, &"e".repeat(40), files.clone());
+            draw_state(&mut terminal, &mut state);
+            assert_eq!(state.folder_summary().map(|s| s.dir), Some("src".into()));
+            assert_eq!(state.summary_scroll(), 10, "{look}: the place stays");
+            assert_eq!(state.summary_col_offset(), 4, "{look}: the pan stays");
+
+            reload(&mut state, &"f".repeat(40), summary_files());
+            draw_state(&mut terminal, &mut state);
+            assert_eq!(state.summary_scroll(), 0, "{look}: clamped to 3 rows");
+            assert_eq!(state.summary_col_offset(), 0, "{look}: short rows: no pan");
+            assert_eq!(state.layout.summary_vbar.x, None, "{look}: rows fit");
+        }
+    }
+
+    /// The pan keys (Shift-←/→, `h` / `l`, all [`Action::PanDiff`]) with the
+    /// right pane focused and the horizontal wheel over the summary pan
+    /// the summary's own rows, in both looks, on a depth-2 drill and a
+    /// compare tab: never the file diff it hides. The pan stops where the
+    /// longest row ends, and another folder starts unpanned.
+    #[test]
+    fn folder_summary_pans_its_own_rows_not_the_hidden_diff() {
+        let mut files = summary_files();
+        files.push(summary_long_file());
+        for (look, background) in PANE_LOOKS {
+            for (name, mut state) in [
+                ("drill", summary_drill_state(files.clone())),
+                ("compare", summary_compare_state_with_source(files.clone())),
+            ] {
+                let case = format!("{name} {look}");
+                state.background = background;
+                summary_focus_row(&mut state, "src");
+                let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                assert_eq!(state.layout.summary_hbar.y, None, "{case}: unpanned");
+                state.focus = FocusPane::Right;
+                for _ in 0..400 {
+                    state.dispatch(Action::PanDiff(1));
+                }
+                let pan_max = state.summary_col_offset();
+                assert!(pan_max > 60, "{case}: the long row pans ({pan_max})");
+                assert_eq!(state.diff_col_offset, 0, "{case}: the hidden diff stays");
+                draw_state(&mut terminal, &mut state);
+                let hbar = state.layout.summary_hbar;
+                let y = hbar.y.unwrap_or_else(|| panic!("{case}: the bar paints"));
+                assert_eq!(
+                    hbar.col_max, pan_max,
+                    "{case}: the bar clamps like the keys"
+                );
+                let rows: Vec<String> = (state.layout.right_y..y)
+                    .map(|y| summary_row_text(&terminal, y, hbar.x, hbar.width))
+                    .collect();
+                let row = rows
+                    .iter()
+                    .find(|text| text.contains("nnn"))
+                    .unwrap_or_else(|| panic!("{case}: the long row: {rows:?}"));
+                assert!(row.contains("-tail.rs"), "{case}: its end shows: {row}");
+
+                let wheel = Action::ScrollWheel {
+                    col: hbar.x + 2,
+                    row: y - 1,
+                    delta: -3,
+                    horizontal: true,
+                };
+                state.dispatch(wheel);
+                assert_eq!(state.summary_col_offset(), pan_max - 3, "{case}: hwheel");
+                state.dispatch(Action::PanDiff(-1));
+                assert_eq!(state.summary_col_offset(), pan_max - 4, "{case}: h");
+                assert_eq!(state.diff_col_offset, 0, "{case}: the hidden diff stays");
+
+                summary_focus_row(&mut state, "src/deep");
+                draw_state(&mut terminal, &mut state);
+                assert_eq!(state.summary_col_offset(), 0, "{case}: another folder");
+                assert_eq!(state.layout.summary_hbar.y, None, "{case}: no bar");
+            }
+        }
+    }
+
+    /// The summary paints its rows with the file list's segments, marks,
+    /// flash, and icon hits for the same files, in both looks, on a
+    /// depth-2 drill and a compare tab: the comment mark, the reviewed eye
+    /// on the compare tab only (a commit drill has none, as on its list),
+    /// the watch-reload flash, and glyph-only icon hits that hover and pin
+    /// the file's popover, also for a file its folded list hides.
+    #[test]
+    fn folder_summary_rows_paint_the_file_list_marks_flash_and_icon_hits() {
+        let drill_sha = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        for (look, background) in PANE_LOOKS {
+            for (name, mut state) in [
+                ("drill", summary_drill_state(summary_files())),
+                (
+                    "compare",
+                    summary_compare_state_with_source(summary_files()),
+                ),
+            ] {
+                let case = format!("{name} {look}");
+                let compare = name == "compare";
+                state.background = background;
+                let sha = if compare {
+                    "d".repeat(40)
+                } else {
+                    drill_sha.into()
+                };
+                state.comment_store = put_comment(
+                    &state.comment_store,
+                    CommentKey::CommitLine {
+                        repo: "app".into(),
+                        sha,
+                        path: "src/a.rs".into(),
+                        line: 1,
+                        end_line: 1,
+                    },
+                    "note",
+                );
+                if let Some(tab) = state.tabs.active_compare_mut() {
+                    tab.toggle_reviewed("src/b.rs");
+                }
+                // The flash identity the file list reads (a compare tab's
+                // list reads it off the parked drill too).
+                let source = super::super::drill::CommitFileSource::Commit {
+                    commit_id: drill_sha.into(),
+                };
+                state.flashes.insert(
+                    super::super::watch::commit_file_identity("app", &source, "file:src/b.rs"),
+                    super::super::watch::FlashStamp {
+                        at: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                        kind: FlashKind::Update,
+                    },
+                );
+                let flash = state.theme.palette().flash_bg_for(FlashKind::Update, 1.0);
+                summary_focus_row(&mut state, "src");
+                let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let right_x = state.layout.right_x;
+                let buf = terminal.backend().buffer().clone();
+                // (kind, cells, width) of the icon hits of `id` left of or
+                // right of the pane split, and the row they sit on.
+                let hits = |state: &AppState, id: &str, right: bool| {
+                    let target = IconTarget::CommitFileRow(id.into());
+                    let mut y = None;
+                    let cells: Vec<(IconKind, String, u16)> = state
+                        .layout
+                        .icon_hits
+                        .iter()
+                        .filter(|hit| hit.target == target && (hit.x >= right_x) == right)
+                        .map(|hit| {
+                            y = Some(hit.y);
+                            let cells = (hit.x..hit.x + hit.width)
+                                .map(|x| buf[(x, hit.y)].symbol().to_string())
+                                .collect();
+                            (hit.kind, cells, hit.width)
+                        })
+                        .collect();
+                    (cells, y)
+                };
+                let flashed =
+                    |y: u16, x0: u16, x1: u16| (x0..x1).any(|x| buf[(x, y)].bg == flash.unwrap());
+                for (path, mark) in [
+                    ("src/a.rs", Some(IconKind::Comment)),
+                    ("src/b.rs", compare.then_some(IconKind::Viewed)),
+                    ("src/deep/c.rs", None),
+                ] {
+                    let id = format!("file:{path}");
+                    let (list, list_y) = hits(&state, &id, false);
+                    let (summary, summary_y) = hits(&state, &id, true);
+                    assert_eq!(summary, list, "{case} {path}: the list's icons");
+                    for (kind, cells, _) in &summary {
+                        assert_eq!(cells.trim(), cells, "{case} {path} {kind:?}: glyph only");
+                    }
+                    let kinds: Vec<IconKind> = summary.iter().map(|(k, _, _)| *k).collect();
+                    assert!(
+                        kinds.contains(&IconKind::FileType),
+                        "{case} {path}: {kinds:?}"
+                    );
+                    for marked in [IconKind::Comment, IconKind::Viewed] {
+                        assert_eq!(
+                            kinds.contains(&marked),
+                            mark == Some(marked),
+                            "{case} {path}: {kinds:?}"
+                        );
+                    }
+                    let (list_y, summary_y) = (list_y.unwrap(), summary_y.unwrap());
+                    let want = path == "src/b.rs";
+                    assert_eq!(
+                        flashed(list_y, 0, right_x),
+                        want,
+                        "{case} {path}: list flash"
+                    );
+                    assert_eq!(
+                        flashed(summary_y, right_x, buf.area.width),
+                        want,
+                        "{case} {path}: summary flash"
+                    );
+                }
+
+                // Fold `src` away in the list: the summary's rows still
+                // hover and pin their popover.
+                assert_eq!(state.dispatch(Action::FoldClose), Effect::None, "{case}");
+                draw_state(&mut terminal, &mut state);
+                let devicon = state
+                    .layout
+                    .icon_hits
+                    .iter()
+                    .find(|hit| {
+                        hit.target == IconTarget::CommitFileRow("file:src/a.rs".into())
+                            && hit.kind == IconKind::FileType
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| panic!("{case}: a summary devicon hit"));
+                assert!(devicon.x >= right_x, "{case}: only the summary paints it");
+                state.set_pointer(Some((devicon.x, devicon.y)));
+                assert_eq!(state.hovered_icon(), Some(&devicon), "{case}: hover");
+                state.dispatch(Action::Click {
+                    col: devicon.x,
+                    row: devicon.y,
+                });
+                assert!(state.popover_pinned(), "{case}: pinned");
+                let sections = state.open_popover_sections();
+                assert_eq!(
+                    sections.first().map(|s| (s.icon, s.target.clone())),
+                    Some((
+                        IconKind::FileType,
+                        IconTarget::CommitFileRow("file:src/a.rs".into())
+                    )),
+                    "{case}: the file's popover"
+                );
+            }
         }
     }
 
