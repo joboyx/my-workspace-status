@@ -144,26 +144,52 @@ fn github_facts(badge: Badge) -> (bool, &'static str, &'static str, &'static str
     }
 }
 
-/// `gh pr list --head <branch>` answer: one PR in `badge`.
-pub fn github_list_json(number: u64, branch: &str, badge: Badge) -> String {
+/// Title and base branch of a fixture PR. The text goes into the JSON as it
+/// is, so it must hold no `"` and no `\`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PrText<'a> {
+    /// Title of the PR.
+    pub title: &'a str,
+    /// Branch the PR merges into. The head branch of another PR stacks this
+    /// PR on that one.
+    pub base: &'a str,
+}
+
+/// Title and base of the GitHub PR of the badge tests.
+pub const GITHUB_TEXT: PrText<'static> = PrText {
+    title: "Refresh auth tokens",
+    base: "main",
+};
+
+/// Title and base of the GitLab merge request of the badge tests.
+pub const GITLAB_TEXT: PrText<'static> = PrText {
+    title: "Rate limit the public API",
+    base: "main",
+};
+
+/// `gh pr list --head <branch>` answer: one PR in `badge` with `text`.
+pub fn github_list_json(number: u64, branch: &str, badge: Badge, text: PrText<'_>) -> String {
     let (draft, state, review, merge) = github_facts(badge);
+    let PrText { title, base } = text;
     format!(
-        r#"[{{"number":{number},"state":"{state}","url":"{}","title":"Refresh auth tokens","headRefName":"{branch}","baseRefName":"main","isCrossRepository":false,"isDraft":{draft},"reviewDecision":"{review}","mergeStateStatus":"{merge}","statusCheckRollup":{},"updatedAt":"2026-10-29T01:00:00Z"}}]"#,
+        r#"[{{"number":{number},"state":"{state}","url":"{}","title":"{title}","headRefName":"{branch}","baseRefName":"{base}","isCrossRepository":false,"isDraft":{draft},"reviewDecision":"{review}","mergeStateStatus":"{merge}","statusCheckRollup":{},"updatedAt":"2026-10-29T01:00:00Z"}}]"#,
         github_pr_url(number),
         github_checks(number, badge)
     )
 }
 
-/// `gh pr view <number>` answer: the PR in `badge`, with its reviews.
-pub fn github_view_json(number: u64, branch: &str, badge: Badge) -> String {
+/// `gh pr view <number>` answer: the PR in `badge` with `text`, and its
+/// reviews.
+pub fn github_view_json(number: u64, branch: &str, badge: Badge, text: PrText<'_>) -> String {
     let (draft, state, review, merge) = github_facts(badge);
+    let PrText { title, base } = text;
     let reviews = if review == "APPROVED" {
         r#"[{"author":{"login":"octo-reviewer"},"state":"APPROVED","submittedAt":"2026-10-29T00:40:00Z"}]"#
     } else {
         "[]"
     };
     format!(
-        r#"{{"number":{number},"title":"Refresh auth tokens","state":"{state}","isDraft":{draft},"author":{{"login":"octo-user"}},"headRefName":"{branch}","baseRefName":"main","reviewDecision":"{review}","mergeStateStatus":"{merge}","statusCheckRollup":{},"latestReviews":{reviews},"updatedAt":"2026-10-29T01:00:00Z"}}"#,
+        r#"{{"number":{number},"title":"{title}","state":"{state}","isDraft":{draft},"author":{{"login":"octo-user"}},"headRefName":"{branch}","baseRefName":"{base}","reviewDecision":"{review}","mergeStateStatus":"{merge}","statusCheckRollup":{},"latestReviews":{reviews},"updatedAt":"2026-10-29T01:00:00Z"}}"#,
         github_checks(number, badge)
     )
 }
@@ -171,15 +197,27 @@ pub fn github_view_json(number: u64, branch: &str, badge: Badge) -> String {
 /// Make every `gh` answer for PR `number` on `branch` in `repo` the PR in
 /// `badge`.
 pub fn put_github(forge: &FakeForge, repo: &str, number: u64, branch: &str, badge: Badge) {
+    put_github_with(forge, repo, number, branch, badge, GITHUB_TEXT);
+}
+
+/// [`put_github`] with the title and base branch of `text`.
+pub fn put_github_with(
+    forge: &FakeForge,
+    repo: &str,
+    number: u64,
+    branch: &str,
+    badge: Badge,
+    text: PrText<'_>,
+) {
     forge.github_pr_list(
         repo,
         branch,
-        Reply::Json(&github_list_json(number, branch, badge)),
+        Reply::Json(&github_list_json(number, branch, badge, text)),
     );
     forge.github_pr_view(
         repo,
         number,
-        Reply::Json(&github_view_json(number, branch, badge)),
+        Reply::Json(&github_view_json(number, branch, badge, text)),
     );
 }
 
@@ -196,9 +234,17 @@ fn gitlab_facts(badge: Badge) -> (bool, &'static str, &'static str, &'static str
     }
 }
 
-/// The merge request object, with the head pipeline when `pipeline`.
-fn gitlab_mr_json(iid: u64, branch: &str, badge: Badge, pipeline: bool) -> String {
+/// The merge request object with `text`, and the head pipeline when
+/// `pipeline`.
+fn gitlab_mr_json(
+    iid: u64,
+    branch: &str,
+    badge: Badge,
+    text: PrText<'_>,
+    pipeline: bool,
+) -> String {
     let (draft, state, merge, ci) = gitlab_facts(badge);
+    let PrText { title, base } = text;
     let head = if pipeline {
         format!(
             r#","head_pipeline":{{"id":{},"status":"{ci}","web_url":"{}"}}"#,
@@ -209,7 +255,7 @@ fn gitlab_mr_json(iid: u64, branch: &str, badge: Badge, pipeline: bool) -> Strin
         String::new()
     };
     format!(
-        r#"{{"iid":{iid},"state":"{state}","title":"Rate limit the public API","draft":{draft},"source_branch":"{branch}","target_branch":"main","web_url":"{}","source_project_id":1,"target_project_id":1,"has_conflicts":false,"blocking_discussions_resolved":true,"detailed_merge_status":"{merge}","merge_status":"can_be_merged","author":{{"username":"octo-user"}},"updated_at":"2026-10-29T01:00:00Z"{head}}}"#,
+        r#"{{"iid":{iid},"state":"{state}","title":"{title}","draft":{draft},"source_branch":"{branch}","target_branch":"{base}","web_url":"{}","source_project_id":1,"target_project_id":1,"has_conflicts":false,"blocking_discussions_resolved":true,"detailed_merge_status":"{merge}","merge_status":"can_be_merged","author":{{"username":"octo-user"}},"updated_at":"2026-10-29T01:00:00Z"{head}}}"#,
         gitlab_mr_url(iid)
     )
 }
@@ -221,16 +267,31 @@ fn gitlab_mr_json(iid: u64, branch: &str, badge: Badge, pipeline: bool) -> Strin
 /// reads the pipeline and the merge facts from the single-merge-request
 /// answer.
 pub fn put_gitlab(forge: &FakeForge, project: &str, iid: u64, branch: &str, badge: Badge) {
+    put_gitlab_with(forge, project, iid, branch, badge, GITLAB_TEXT);
+}
+
+/// [`put_gitlab`] with the title and target branch of `text`.
+pub fn put_gitlab_with(
+    forge: &FakeForge,
+    project: &str,
+    iid: u64,
+    branch: &str,
+    badge: Badge,
+    text: PrText<'_>,
+) {
     let (_, _, _, ci) = gitlab_facts(badge);
     forge.gitlab_mr_list(
         project,
         branch,
-        Reply::Json(&format!("[{}]", gitlab_mr_json(iid, branch, badge, false))),
+        Reply::Json(&format!(
+            "[{}]",
+            gitlab_mr_json(iid, branch, badge, text, false)
+        )),
     );
     forge.gitlab_mr(
         project,
         iid,
-        Reply::Json(&gitlab_mr_json(iid, branch, badge, true)),
+        Reply::Json(&gitlab_mr_json(iid, branch, badge, text, true)),
     );
     let approved = matches!(badge, Badge::Ready | Badge::CiRunning | Badge::Merged);
     forge.gitlab_approvals(
@@ -257,10 +318,10 @@ pub fn put_gitlab(forge: &FakeForge, project: &str, iid: u64, branch: &str, badg
 /// Make every `gh` answer for PR `number` on `branch` in `repo` a closed,
 /// unmerged PR. The badge treats it as no PR.
 pub fn put_github_closed(forge: &FakeForge, repo: &str, number: u64, branch: &str) {
-    let list = github_list_json(number, branch, Badge::InReview)
+    let list = github_list_json(number, branch, Badge::InReview, GITHUB_TEXT)
         .replace(r#""state":"OPEN""#, r#""state":"CLOSED""#);
     forge.github_pr_list(repo, branch, Reply::Json(&list));
-    let view = github_view_json(number, branch, Badge::InReview)
+    let view = github_view_json(number, branch, Badge::InReview, GITHUB_TEXT)
         .replace(r#""state":"OPEN""#, r#""state":"CLOSED""#);
     forge.github_pr_view(repo, number, Reply::Json(&view));
 }
@@ -268,9 +329,9 @@ pub fn put_github_closed(forge: &FakeForge, repo: &str, number: u64, branch: &st
 /// Make every `glab api` answer for merge request `iid` on `branch` in
 /// `project` a closed, unmerged merge request. The badge treats it as no PR.
 pub fn put_gitlab_closed(forge: &FakeForge, project: &str, iid: u64, branch: &str) {
-    let mr = gitlab_mr_json(iid, branch, Badge::InReview, true)
+    let mr = gitlab_mr_json(iid, branch, Badge::InReview, GITLAB_TEXT, true)
         .replace(r#""state":"opened""#, r#""state":"closed""#);
-    let list = gitlab_mr_json(iid, branch, Badge::InReview, false)
+    let list = gitlab_mr_json(iid, branch, Badge::InReview, GITLAB_TEXT, false)
         .replace(r#""state":"opened""#, r#""state":"closed""#);
     forge.gitlab_mr_list(project, branch, Reply::Json(&format!("[{list}]")));
     forge.gitlab_mr(project, iid, Reply::Json(&mr));

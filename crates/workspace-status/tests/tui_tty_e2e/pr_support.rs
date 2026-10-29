@@ -12,13 +12,13 @@ use std::time::{Duration, Instant};
 
 use crate::common::fake_forge::{set_origin, FakeForge, GITHUB_ORIGIN, GITLAB_ORIGIN};
 use crate::common::pr_scenarios::{
-    github_check_url, gitlab_pipeline_url, put_github, put_github_closed, put_gitlab,
-    put_gitlab_closed, Badge, GITHUB_REPO, GITLAB_PROJECT,
+    github_check_url, gitlab_pipeline_url, put_github, put_github_closed, put_github_with,
+    put_gitlab, put_gitlab_closed, put_gitlab_with, Badge, PrText, GITHUB_REPO, GITLAB_PROJECT,
 };
 use crate::common::seed::{seed_repo, unique_root};
 use crate::harness::PtySession;
 use crate::support::{
-    flat_join_col, flat_pane_last_row, FLAT_BODY_ROW, FLAT_PAD_COLS, SLATE_SIDEBAR,
+    flat_join_col, flat_pane_last_row, FLAT_BODY_ROW, FLAT_PAD_COLS, SLATE_SIDEBAR, WAIT,
 };
 
 /// Poll period the polling tests pass as `WS_STATUS_PR_POLL_MS`.
@@ -122,6 +122,23 @@ impl PrCheckout {
         match self.forge {
             Forge::GitHub => put_github(forge, GITHUB_REPO, self.number, &self.branch, badge),
             Forge::GitLab => put_gitlab(forge, GITLAB_PROJECT, self.number, &self.branch, badge),
+        }
+    }
+
+    /// [`Self::set`] with the title and base branch of `text`.
+    pub fn set_with(&self, forge: &FakeForge, badge: Badge, text: PrText<'_>) {
+        match self.forge {
+            Forge::GitHub => {
+                put_github_with(forge, GITHUB_REPO, self.number, &self.branch, badge, text)
+            }
+            Forge::GitLab => put_gitlab_with(
+                forge,
+                GITLAB_PROJECT,
+                self.number,
+                &self.branch,
+                badge,
+                text,
+            ),
         }
     }
 
@@ -449,4 +466,344 @@ pub fn watch_quiet(
         );
         thread::sleep(Duration::from_millis(25));
     }
+}
+
+/// One PR of a PRs tab fixture: the checkout that shows it and what the
+/// fake forge answers for it.
+#[derive(Clone, Copy, Debug)]
+pub struct PrSpec {
+    /// Checkout directory, which is also the tree row text.
+    pub dir: &'static str,
+    /// Checked-out branch, which is the PR head.
+    pub branch: &'static str,
+    /// Forge of the `origin` remote.
+    pub forge: Forge,
+    /// PR number (GitHub) or merge request iid (GitLab).
+    pub number: u64,
+    /// State the fake forge answers with.
+    pub badge: Badge,
+    /// Title and base branch.
+    pub text: PrText<'static>,
+}
+
+impl PrSpec {
+    /// The checkout of this PR.
+    pub fn checkout(&self) -> PrCheckout {
+        PrCheckout::new(self.dir, self.branch, self.forge, self.number)
+    }
+}
+
+/// Shorthand for a [`PrSpec`] row of a fixture table.
+pub const fn spec(
+    dir: &'static str,
+    branch: &'static str,
+    forge: Forge,
+    number: u64,
+    badge: Badge,
+    title: &'static str,
+    base: &'static str,
+) -> PrSpec {
+    PrSpec {
+        dir,
+        branch,
+        forge,
+        number,
+        badge,
+        text: PrText { title, base },
+    }
+}
+
+/// Nine PRs on both forges that make every kind of PRs tab group. The
+/// group keys come from the branch (`feature/ABC-130-limit`) or the commit
+/// scope of the title (`feat(ABC-130): …`).
+///
+/// | Group | PRs | Rank |
+/// | --- | --- | --- |
+/// | `ABC-130` | `#40` in review (`acme/app`), `!31` CI failed (`acme/services/api`) | CI failed |
+/// | `ABC-120` | `#43` ready, `#44` draft, `#45` in review stacked on `#43` | needs you (`merge #43`) |
+/// | `ABC-125` | `!32` CI running | waiting |
+/// | `ABC-110` | `#30` and `!20` merged | finished |
+/// | `other` | `#50` in review, no key | last |
+///
+/// Key order would be the reverse for the first four groups, and number
+/// order would put `!31` before `#40` and `#44` before `#45`.
+pub const PRS_BOARD: [PrSpec; 9] = [
+    spec(
+        "api-limit",
+        "feature/ABC-130-limit",
+        Forge::GitLab,
+        31,
+        Badge::CiFailed,
+        "Limit the upload rate",
+        "main",
+    ),
+    spec(
+        "app-retry",
+        "fix/retry-uploads",
+        Forge::GitHub,
+        40,
+        Badge::InReview,
+        "feat(ABC-130): Retry failed uploads",
+        "main",
+    ),
+    spec(
+        "app-export",
+        "feature/ABC-120-export",
+        Forge::GitHub,
+        43,
+        Badge::Ready,
+        "Export the totals",
+        "main",
+    ),
+    spec(
+        "app-export-docs",
+        "feature/ABC-120-docs",
+        Forge::GitHub,
+        44,
+        Badge::Draft,
+        "Document the export",
+        "main",
+    ),
+    spec(
+        "app-export-ui",
+        "feature/ABC-120-export-ui",
+        Forge::GitHub,
+        45,
+        Badge::InReview,
+        "Show the export button",
+        "feature/ABC-120-export",
+    ),
+    spec(
+        "api-queue",
+        "feature/ABC-125-queue",
+        Forge::GitLab,
+        32,
+        Badge::CiRunning,
+        "Queue the uploads",
+        "main",
+    ),
+    spec(
+        "app-cache",
+        "feature/ABC-110-cache",
+        Forge::GitHub,
+        30,
+        Badge::Merged,
+        "Cache the totals",
+        "main",
+    ),
+    spec(
+        "api-cache",
+        "feature/ABC-110-cache",
+        Forge::GitLab,
+        20,
+        Badge::Merged,
+        "Cache the rate limits",
+        "main",
+    ),
+    spec(
+        "app-readme",
+        "update-readme",
+        Forge::GitHub,
+        50,
+        Badge::InReview,
+        "Update the README",
+        "main",
+    ),
+];
+
+/// Seed `specs` in a workspace named `ws` under a new temp root, with the
+/// fake forge answering each PR. Returns the root, the workspace, and the
+/// forge.
+pub fn seed_prs(prefix: &str, specs: &[PrSpec]) -> (PathBuf, PathBuf, FakeForge) {
+    let (root, workspace) = named_workspace(prefix, "ws");
+    let forge = FakeForge::new(&root);
+    let checkouts: Vec<PrCheckout> = specs.iter().map(PrSpec::checkout).collect();
+    seed_checkouts(&workspace, &checkouts);
+    for spec in specs {
+        spec.checkout().set_with(&forge, spec.badge, spec.text);
+    }
+    (root, workspace, forge)
+}
+
+/// Body rows of the boxed pane whose top border starts `┌<title>─`, from
+/// the first cell inside the side borders to the last, with trailing blanks
+/// cut. `None` when that pane is not on screen.
+fn pane_rows(tui: &PtySession, title: &str) -> Option<Vec<String>> {
+    let (cols, rows) = tui.grid_size();
+    let top = tui.grid_row_text(1, 0..cols);
+    let corner = format!("┌{title}─");
+    let left = top.find(&corner).map(|byte| top[..byte].chars().count())? as u16;
+    let right = top
+        .chars()
+        .skip(usize::from(left))
+        .position(|c| c == '┐')
+        .map(|at| left + at as u16)?;
+    let body = (2..rows)
+        .take_while(|row| tui.grid_cell_char(*row, left) != Some('└'))
+        .map(|row| {
+            tui.grid_row_text(row, left + 1..right)
+                .trim_end()
+                .to_string()
+        })
+        .collect();
+    Some(body)
+}
+
+/// One line of the PRs tab list, as painted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrsLine {
+    /// A group header: `folded` when its chevron is `>`, and the text after
+    /// the chevron (`ABC-130 · > fix CI !31`), with the poll age of the
+    /// first header cut off.
+    Header {
+        /// The group's rows are hidden.
+        folded: bool,
+        /// Key, title, and next action or `m all 2 merged`.
+        text: String,
+    },
+    /// A PR row.
+    Row {
+        /// State glyph (ASCII in the PTY suite).
+        glyph: char,
+        /// `#40` or `!31`.
+        pr_ref: String,
+        /// The rest of the row: repository, title, CI, reviews, state, and
+        /// stack mark, single-spaced.
+        rest: String,
+    },
+    /// A line above the groups: a CLI error or the loading line.
+    Note(String),
+}
+
+/// The list pane lines of the PRs tab and the index of the one under the
+/// cursor (`▌` in its first cell). `None` when the `prs` pane is not on
+/// screen.
+pub fn prs_list(tui: &PtySession) -> Option<(Vec<PrsLine>, Option<usize>)> {
+    let rows = pane_rows(tui, "prs")?;
+    let mut lines = Vec::new();
+    let mut cursor = None;
+    for row in rows.iter().filter(|row| !row.is_empty()) {
+        // Headers and rows start with the cursor bar column; the error,
+        // loading, and empty lines start in that column with their text.
+        let body = if let Some(body) = row.strip_prefix('▌') {
+            cursor = Some(lines.len());
+            body
+        } else if let Some(body) = row.strip_prefix(' ') {
+            body
+        } else {
+            lines.push(PrsLine::Note(row.trim().to_string()));
+            continue;
+        };
+        let words: Vec<&str> = body.split_whitespace().collect();
+        let line = match words.as_slice() {
+            [chevron @ ("v" | ">"), ..] if body.starts_with(&format!("{chevron} ")) => {
+                let text = body[2..].split("  ").next().unwrap_or("").trim();
+                PrsLine::Header {
+                    folded: *chevron == ">",
+                    text: text.to_string(),
+                }
+            }
+            [glyph, pr_ref, rest @ ..]
+                if glyph.chars().count() == 1
+                    && pr_ref.len() > 1
+                    && pr_ref.starts_with(['#', '!'])
+                    && pr_ref[1..].chars().all(|c| c.is_ascii_digit()) =>
+            {
+                PrsLine::Row {
+                    glyph: glyph.chars().next().unwrap_or(' '),
+                    pr_ref: pr_ref.to_string(),
+                    rest: rest.join(" "),
+                }
+            }
+            _ => PrsLine::Note(body.trim().to_string()),
+        };
+        lines.push(line);
+    }
+    Some((lines, cursor))
+}
+
+/// Header texts of the PRs tab list, top to bottom.
+pub fn prs_headers(tui: &PtySession) -> Vec<(bool, String)> {
+    prs_list(tui)
+        .map(|(lines, _)| {
+            lines
+                .into_iter()
+                .filter_map(|line| match line {
+                    PrsLine::Header { folded, text } => Some((folded, text)),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Refs of the PR rows of the PRs tab list, top to bottom.
+pub fn prs_refs(tui: &PtySession) -> Vec<String> {
+    prs_list(tui)
+        .map(|(lines, _)| {
+            lines
+                .into_iter()
+                .filter_map(|line| match line {
+                    PrsLine::Row { pr_ref, .. } => Some(pr_ref),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The PRs tab list line under the cursor.
+pub fn prs_cursor_line(tui: &PtySession) -> Option<PrsLine> {
+    let (lines, cursor) = prs_list(tui)?;
+    lines.into_iter().nth(cursor?)
+}
+
+/// True when the PRs tab cursor is on the row of `pr_ref`.
+pub fn prs_cursor_on(tui: &PtySession, pr_ref: &str) -> bool {
+    matches!(prs_cursor_line(tui), Some(PrsLine::Row { pr_ref: at, .. }) if at == pr_ref)
+}
+
+/// Move the PRs tab cursor down with `j`, one key at a time, until the
+/// line under it passes `at`. After each key it waits for the cursor line
+/// to change, so a slow frame is never read as a missed key.
+pub fn prs_move_until(tui: &mut PtySession, what: &str, at: impl Fn(&PrsLine) -> bool) {
+    for _ in 0..40 {
+        if prs_cursor_line(tui).is_some_and(|line| at(&line)) {
+            return;
+        }
+        let before = prs_list(tui).and_then(|(_, cursor)| cursor);
+        tui.key('j');
+        tui.wait_pred(
+            |_| prs_list(tui).and_then(|(_, cursor)| cursor) != before,
+            &format!("j moves the PRs tab cursor toward {what}"),
+            WAIT,
+        );
+    }
+    panic!("the PRs tab cursor never reached {what}:\n{}", tui.screen());
+}
+
+/// [`prs_move_until`] the row of `pr_ref`.
+pub fn prs_move_to(tui: &mut PtySession, pr_ref: &str) {
+    prs_move_until(
+        tui,
+        pr_ref,
+        |line| matches!(line, PrsLine::Row { pr_ref: at, .. } if at == pr_ref),
+    );
+}
+
+/// Body rows of the PRs tab list pane (`prs`) as painted, trailing blanks
+/// cut: the first cell is the cursor bar column.
+pub fn prs_list_rows(tui: &PtySession) -> Option<Vec<String>> {
+    pane_rows(tui, "prs")
+}
+
+/// Body rows of the PRs tab detail pane (`PR`), trailing blanks cut.
+pub fn prs_detail(tui: &PtySession) -> Option<Vec<String>> {
+    pane_rows(tui, "PR")
+}
+
+/// The tab strip (top screen row).
+pub fn tab_strip(tui: &PtySession) -> String {
+    let (cols, _) = tui.grid_size();
+    tui.grid_row_text(0, 0..cols).trim_end().to_string()
 }
