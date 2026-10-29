@@ -3,8 +3,7 @@
 //! A patched Nerd Font is a hard requirement. `WS_STATUS_GLYPHS=ascii` falls
 //! back to plain markers. Every glyph occupies one terminal column: Nerd icons
 //! live in the private-use area, and the PR state marks are plain Unicode
-//! shapes in their text form (never with the emoji selector). Do not add
-//! emoji or CJK codepoints.
+//! shapes with no emoji form. Do not add emoji or CJK codepoints.
 //!
 //! [`ICON_CATALOG`] owns every tree and graph icon: both glyphs, a short
 //! name, and a one-line meaning. The `icon_*` functions read it, and the
@@ -337,7 +336,7 @@ pub const ICON_CATALOG: &[IconSpec] = {
         // fill series reads as progress; `●` stays the graph commit node.
         row(
             K::PrCiFailed,
-            "\u{2716}", // ✖
+            "\u{2715}", // ✕
             "x",
             "PR CI failed",
             "Pull request: a CI check failed",
@@ -377,7 +376,7 @@ pub const ICON_CATALOG: &[IconSpec] = {
         ),
         row(
             K::PrMerged,
-            "\u{2714}", // ✔
+            "\u{2713}", // ✓
             "m",
             "PR merged",
             "Pull request is merged",
@@ -1699,7 +1698,7 @@ mod tests {
         let kinds = [&PR_BADGES[..], &[IconKind::PrClosed]].concat();
         let glyphs =
             |ascii: bool| -> Vec<&str> { kinds.iter().map(|kind| kind.glyph(ascii)).collect() };
-        assert_eq!(glyphs(false), ["✖", "◉", "◐", "◌", "○", "✔", "⊘"]);
+        assert_eq!(glyphs(false), ["✕", "◉", "◐", "◌", "○", "✓", "⊘"]);
         assert_eq!(glyphs(true), ["x", "A", "r", "d", "P", "m", "c"]);
         for ascii in [true, false] {
             let marks = glyphs(ascii);
@@ -1736,24 +1735,29 @@ mod tests {
         assert_eq!(IconKind::PrClosed.spec().group, None);
     }
 
-    /// Every PR glyph is one column as the terminal paints it (ratatui
-    /// counts with `unicode-width`) and as the layout counts it
-    /// ([`visible_width`]), and is the text form, never an emoji: one
-    /// codepoint, no variation selector, outside the pictograph planes.
+    /// Every PR glyph is one column as ratatui paints it (`Span::width`,
+    /// `unicode-width`) and as the layout counts it ([`visible_width`]),
+    /// and has no emoji form: one codepoint outside the pictograph planes,
+    /// still one column with the emoji selector U+FE0F after it (an
+    /// emoji-capable mark such as `✔` turns two columns wide).
     #[test]
-    fn pr_state_glyphs_are_one_column_in_text_form() {
+    fn pr_state_glyphs_are_one_column_and_have_no_emoji_form() {
+        use ratatui::text::Span;
         use unicode_width::UnicodeWidthStr;
+        assert_eq!(UnicodeWidthStr::width("✔\u{fe0f}"), 2, "the check bites");
         for kind in [&PR_BADGES[..], &[IconKind::PrClosed]].concat() {
             for ascii in [false, true] {
                 let glyph = kind.glyph(ascii);
                 let what = format!("{kind:?} ascii={ascii} {glyph:?}");
                 assert_eq!(UnicodeWidthStr::width(glyph), 1, "{what}");
+                assert_eq!(Span::raw(glyph).width(), 1, "{what}");
                 assert_eq!(visible_width(glyph), 1, "{what}");
                 assert_eq!(glyph.chars().count(), 1, "{what}");
                 let ch = glyph.chars().next().expect("glyph");
-                assert!(!matches!(ch, '\u{fe0e}' | '\u{fe0f}'), "{what}");
                 assert!(u32::from(ch) < 0x1f000, "{what}");
                 assert!(!has_wide_emoji(glyph), "{what}");
+                let selected = format!("{glyph}\u{fe0f}");
+                assert_eq!(UnicodeWidthStr::width(selected.as_str()), 1, "{what}");
             }
         }
     }

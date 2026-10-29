@@ -1761,12 +1761,12 @@ mod tests {
         assert_eq!(
             pr_rows,
             [
-                ("✖", "x", "PR CI failed"),
+                ("✕", "x", "PR CI failed"),
                 ("◉", "A", "PR ready"),
                 ("◐", "r", "PR CI running"),
                 ("◌", "d", "PR draft"),
                 ("○", "P", "PR in review"),
-                ("✔", "m", "PR merged"),
+                ("✓", "m", "PR merged"),
             ]
         );
         for kind in [

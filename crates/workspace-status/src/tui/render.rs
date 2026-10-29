@@ -2579,7 +2579,7 @@ struct GraphPrChip {
 /// or `None` with no PR.
 ///
 /// Candidates, widest first: `<glyph> <ref> <state label>  ▸ <next
-/// action>` (merged: `✔ !12 merged · 3h ago`), then without the next action
+/// action>` (merged: `✓ !12 merged · 3h ago`), then without the next action
 /// (the age), then `<glyph> <ref>`. The glyph and the label paint in the
 /// state colour, the ref in the repo colour, `▸` dim, the next action bold.
 /// A stale PR paints every part muted. ASCII mode uses `>` for `▸`.
@@ -18865,12 +18865,12 @@ mod tests {
     fn tree_pr_badge_ends_at_the_pane_edge_in_every_state_look_and_forge() {
         let palette = ThemeId::TokyoNight.palette();
         let cases = [
-            (PrState::CiFailed, "✖", "x", palette.deleted),
+            (PrState::CiFailed, "✕", "x", palette.deleted),
             (PrState::Ready, "◉", "A", palette.added),
             (PrState::CiRunning, "◐", "r", palette.modified),
             (PrState::Draft, "◌", "d", palette.muted),
             (PrState::InReview, "○", "P", palette.branch_default),
-            (PrState::Merged, "✔", "m", palette.branch_feature),
+            (PrState::Merged, "✓", "m", palette.branch_feature),
         ];
         let forges = [
             (PR_REMOTE, "https://github.com/octo/demo/pull/7", "#7"),
@@ -20735,12 +20735,12 @@ mod tests {
     fn graph_worktree_badges_paint_each_state_and_stale_muted() {
         let palette = ThemeId::TokyoNight.palette();
         let cases = [
-            (PrState::CiFailed, "✖", "x", palette.deleted),
+            (PrState::CiFailed, "✕", "x", palette.deleted),
             (PrState::Ready, "◉", "A", palette.added),
             (PrState::CiRunning, "◐", "r", palette.modified),
             (PrState::Draft, "◌", "d", palette.muted),
             (PrState::InReview, "○", "P", palette.branch_default),
-            (PrState::Merged, "✔", "m", palette.branch_feature),
+            (PrState::Merged, "✓", "m", palette.branch_feature),
         ];
         for ascii in [true, false] {
             for (pr, nerd, letter, color) in cases {
@@ -20834,7 +20834,7 @@ mod tests {
             (
                 PrState::CiFailed,
                 "x",
-                "✖",
+                "✕",
                 "CI failed  > fix CI",
                 palette.deleted,
             ),
@@ -20863,7 +20863,7 @@ mod tests {
             (
                 PrState::Merged,
                 "m",
-                "✔",
+                "✓",
                 "merged · 3h ago",
                 palette.branch_feature,
             ),

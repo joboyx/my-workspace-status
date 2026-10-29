@@ -210,9 +210,10 @@ pub fn compare_repo_paths_for_display(a: &RepoSnapshot, b: &RepoSnapshot) -> std
 
 /// Terminal display width.
 ///
-/// The PR state marks `✔` (U+2714) and `✖` (U+2716) are one column: the TUI
-/// paints them in their text form, and ratatui counts them as one. The rest
-/// of that dingbat block counts as two.
+/// The PR state marks `✓` (U+2713) and `✕` (U+2715) are one column: they
+/// have no emoji form, so every terminal draws them narrow, as
+/// `unicode-width` and ratatui count them. The rest of that dingbat block
+/// counts as two, including `✔` and `✖`, which have emoji forms.
 pub fn visible_width(value: &str) -> usize {
     let mut width = 0;
     for ch in value.chars() {
@@ -220,7 +221,7 @@ pub fn visible_width(value: &str) -> usize {
         if code == 0xfe0f || code == 0x200d {
             continue;
         }
-        let text_mark = matches!(code, 0x2714 | 0x2716);
+        let text_mark = matches!(code, 0x2713 | 0x2715);
         let wide = !text_mark
             && ((0x1100..=0x115f).contains(&code)
                 || code == 0x2329
@@ -256,10 +257,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pr_state_dingbats_are_one_column_and_the_block_stays_wide() {
-        assert_eq!(visible_width("✔"), 1);
-        assert_eq!(visible_width("✖ #318"), 6);
-        assert_eq!(visible_width("☔"), 2);
+    fn pr_state_marks_are_one_column_and_emoji_capable_dingbats_stay_wide() {
+        assert_eq!(visible_width("✓"), 1);
+        assert_eq!(visible_width("✕ #318"), 6);
+        // Emoji forms keep their two columns, with or without U+FE0F.
+        for wide in ["✔", "✖", "✔\u{fe0f}", "✖\u{fe0f}", "☔"] {
+            assert_eq!(visible_width(wide), 2, "{wide:?}");
+        }
     }
 
     #[test]

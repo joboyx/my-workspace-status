@@ -1777,12 +1777,12 @@ mod tests {
     #[test]
     fn pr_badge_paints_its_ref_muted_and_its_glyph_bold_in_the_state_colour() {
         let roles = [
-            (PrState::CiFailed, SegRole::Deleted, "✖", "x"),
+            (PrState::CiFailed, SegRole::Deleted, "✕", "x"),
             (PrState::Ready, SegRole::Added, "◉", "A"),
             (PrState::CiRunning, SegRole::Modified, "◐", "r"),
             (PrState::Draft, SegRole::Muted, "◌", "d"),
             (PrState::InReview, SegRole::BranchDefault, "○", "P"),
-            (PrState::Merged, SegRole::BranchFeature, "✔", "m"),
+            (PrState::Merged, SegRole::BranchFeature, "✓", "m"),
         ];
         for (state, role, nerd, letter) in roles {
             for ascii in [false, true] {
