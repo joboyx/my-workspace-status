@@ -39,6 +39,20 @@ cargo test --test tui_tty_e2e -- --ignored --nocapture --test-threads=1
 
 Packages (Debian/Ubuntu): `xvfb xfce4-terminal xterm xdotool dbus-x11 openbox`. `script` is util-linux. `scripts/with-desktop-session.sh` starts Xvfb when `DISPLAY` is unset, then dbus and Openbox (`scripts/openbox.xml`) so xdotool can focus the terminal. `scripts/capture-demo-stills.sh` sources the same helper. Do not invent a second screenshot pipeline. The Actions `tui-tty-desktop` job removes the image Chrome apt files (`google-chrome.list` and `google-chrome.sources`) before `apt-get update`. A hash mismatch on that index must not skip xfce or xterm.
 
+## Fake forge
+
+PR badge tests need `gh` and `glab` answers with no network and no login. `scripts/fake-forge/` holds POSIX `sh` stand-ins for both. They answer by flags and by the `glab api` endpoint, not by exact argv, so a longer `--json` field list or query string needs no change. Scenario file layout, failure files (`.exit`, `.stderr`), and the call log: `scripts/fake-forge/README.md`.
+
+`FakeForge` in `crates/workspace-status/tests/common/fake_forge.rs` wires them into a spawn:
+
+- `FakeForge::new(root)` makes a scenario directory and a `$BROWSER` recorder under `root`.
+- The setters (`github_pr_list`, `github_pr_view`, `gitlab_mr_list`, `gitlab_mr`, `gitlab_approvals`, `gitlab_pipeline_jobs`) write what the CLI prints (`Reply::Json`) or how it fails (`Reply::Fail`: exit code and stderr). Each write goes to a temporary name and is renamed, so a setter called while the app runs swaps the answer for the next call only.
+- `forge.env()` goes to `PtySession::open_with_env`: `PATH` with the scripts first, `WS_FAKE_FORGE_DIR`, and `BROWSER`. The update-check store, UI store, `XDG_CONFIG_HOME`, and theme mode isolation stay as in **Harness notes**.
+- `forge.calls()` gives the argv line of each CLI call. `forge.opened()` gives each URL the `$BROWSER` recorder got.
+- `set_origin(repo, url)` points a seeded repo's `origin` at a forge URL (`GITHUB_ORIGIN`, `GITLAB_ORIGIN`). Only `git remote` runs.
+
+`pty_fake_forge_shows_pr_badges` proves the harness against the shipped badge. The `fake_forge::tests` unit tests in the helper run the scripts directly.
+
 ## Harness notes
 
 - ASCII glyphs (`WS_STATUS_GLYPHS=ascii`) so CI does not depend on a Nerd Font. This is a test setting, not a product default. The spawn drops parent `NO_COLOR` / `FORCE_COLOR` so colour claims can paint.
