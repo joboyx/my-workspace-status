@@ -60,7 +60,8 @@ The keys below apply to both files. A missing file means nothing is hidden or ig
   "fetchConcurrency": 10,
   "updateCheck": true,
   "termProgress": true,
-  "smoothScroll": true
+  "smoothScroll": true,
+  "prPolling": true
 }
 ```
 
@@ -72,7 +73,8 @@ User file only (a workspace file that sets these keys fails to load):
   "commentStore": "~/.local/state/my-workspace-status/comments.json",
   "viewedStore": "~/.local/state/my-workspace-status/viewed-files.json",
   "uiStore": "~/.local/state/my-workspace-status/ui-state.json",
-  "git": "/usr/bin/git"
+  "git": "/usr/bin/git",
+  "prTitleCommand": "~/bin/pr-title"
 }
 ```
 
@@ -85,8 +87,8 @@ User file only (a workspace file that sets these keys fails to load):
 | `editor`          | no                                 | unset (`vim` at resolve)     | Command string for TUI `e` (same shape as `$EDITOR`). Overrides `$VISUAL` / `$EDITOR`.         |
 | `diffTool`        | no                                 | unset (`vimdiff` at resolve) | Command string for TUI `E`. No `$EDITOR` / `$VISUAL` / `$GIT_EXTERNAL_DIFF` fallback.          |
 | `viewDefaults`    | no                                 | `{}` (in-app defaults)       | TUI launch view modes. See [`viewDefaults`](#viewdefaults)                                     |
-| `theme`, `themeMode`, `glyphs`, `watchMs`, `fetchMs`, `fetchConcurrency`, `updateCheck`, `termProgress`, `smoothScroll` | no | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
-| `updateCheckStore`, `commentStore`, `viewedStore`, `uiStore`, `git` | no; user file or env only | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
+| `theme`, `themeMode`, `glyphs`, `watchMs`, `fetchMs`, `fetchConcurrency`, `updateCheck`, `termProgress`, `smoothScroll`, `prPolling` | no | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
+| `updateCheckStore`, `commentStore`, `viewedStore`, `uiStore`, `git`, `prTitleCommand` | no; user file or env only | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
 
 ### `hiddenPaths` and `ignoredPaths`
 
@@ -220,17 +222,19 @@ These top-level keys set the same settings as the env vars in [Environment varia
 | `updateCheck` | `WS_STATUS_UPDATE_CHECK` | `true` \| `false`. `false` turns the TUI-startup release check off |
 | `termProgress` | `WS_STATUS_TERM_PROGRESS` | `true` \| `false`. `false` turns the OSC 9;4 terminal progress off |
 | `smoothScroll` | `WS_STATUS_SMOOTH_SCROLL` | `true` \| `false`. `false` makes Ctrl-d / Ctrl-u jump instead of glide |
+| `prPolling` | `WS_STATUS_PR_POLL_MS` | `true` \| `false`. `false` turns PR polling off. The env var sets a period instead (`0` is off); a valid env value wins over this key |
 | `updateCheckStore` | `WS_STATUS_UPDATE_CHECK_STORE` | path. User file or env only |
 | `commentStore` | `WS_STATUS_COMMENT_STORE` | path. User file or env only |
 | `viewedStore` | `WS_STATUS_VIEWED_STORE` | path. User file or env only |
 | `uiStore` | `WS_STATUS_UI_STORE` | path. User file or env only |
 | `git` | `WORKSPACE_STATUS_GIT` | path, or a command name without `/` (looked up on `PATH`). User file or env only |
+| `prTitleCommand` | `WS_STATUS_PR_TITLE_CMD` | path, or a command name without `/` (looked up on `PATH`). User file or env only |
 
-`updateCheckStore`, `commentStore`, `viewedStore`, `uiStore`, and `git` are allowed only in the user file (or the env var), because a workspace file can be committed to a repo and must not pick a program to run or a file to write. A workspace file that sets one fails to load: `.workspace-status-config.json git is only allowed in the user config file (<user file path>) or WORKSPACE_STATUS_GIT`. `null` counts as omitted and is allowed.
+`updateCheckStore`, `commentStore`, `viewedStore`, `uiStore`, `git`, and `prTitleCommand` are allowed only in the user file (or the env var), because a workspace file can be committed to a repo and must not pick a program to run or a file to write. A workspace file that sets one fails to load: `.workspace-status-config.json git is only allowed in the user config file (<user file path>) or WORKSPACE_STATUS_GIT`. `null` counts as omitted and is allowed.
 
 - Values are strict, like `viewDefaults`. A wrong type, an unknown value, a blank string, or a fraction is an error that names the file, the key, and the allowed values. Example: `.workspace-status-config.json glyphs must be "nerd" or "ascii"`. String values are trimmed, then matched case-sensitively.
 - A path must be absolute or start with `~/`. `~/` expands with `$HOME`. A relative path is an error: `<file> commentStore must be an absolute path or a path that starts with ~/`. When `$HOME` is unset, a `~/` path is an error.
-- `git` also accepts a bare command name (`"git"`). A relative path with `/` (`"bin/git"`) is an error.
+- `git` and `prTitleCommand` also accept a bare command name (`"git"`). A relative path with `/` (`"bin/git"`) is an error.
 - `null` counts as omitted, so the user file value or the default applies.
 - Env-only settings have no key: see the **Config key** column in [Environment variables](#environment-variables).
 
@@ -298,13 +302,15 @@ Optional object. It sets the TUI view modes at launch. Each key is optional. An 
 | `WS_STATUS_UPDATE_CHECK` | `updateCheck` | unset (check on) | `0`, `false`, or `off` turns off the TUI-startup GitHub Release check: no fetch, no prompt, no store write. `1`, `true`, or `on` turns it on. Any other value is ignored and falls through to config `updateCheck`, then on. |
 | `WS_STATUS_TERM_PROGRESS` | `termProgress` | unset (progress on) | Terminal progress (OSC 9;4, `ESC ] 9 ; 4 ; <state> ; <percent> BEL`) while a key-started fetch, pull, or push runs over two or more repos (for example `f` or `p` on the workspace row). Terminals that support it show the bar in the tab or taskbar; others ignore it. The bar is normal (`1`) with the percent of repos done, and error (`2`) once a repo in the batch fails. A single-repo fetch and the background fetch tick write nothing. The TUI clears a bar it shows (`ESC ] 9 ; 4 ; 0 ; 0 BEL`) when the batch ends, and on quit, Ctrl-C, an error return, or a panic on the TUI thread. A launch with no batch writes no OSC 9;4 at all, so a quit never sends a clear for a bar that never showed. SIGTERM and SIGHUP are not covered (the TUI has no signal handler): a bar that shows then stays until the terminal resets it. `0`, `false`, or `off` turns it off: the TUI writes no OSC 9;4 at all. `1`, `true`, or `on` turns it on. Any other value falls through to config `termProgress`, then on. Some older terminals show any OSC 9 as a desktop notification; turn it off there. |
 | `WS_STATUS_SMOOTH_SCROLL` | `smoothScroll` | unset (glide on) | Ctrl-d / Ctrl-u glide the viewport to its new top over about 3 frames (48 ms, ease-out cubic) instead of jumping, in the workspace tree, the graph list, the file diff, and the Explorer file view. Visual only: the cursor moves 5 rows at once, and no extra pane load runs. While the glide runs the loop redraws at the 16 ms draw floor; then there is no timer again. Any other key, a click, or the wheel ends a glide at once. The commit-file list and the Explorer tree jump. Not a colour or glyph feature, so `NO_COLOR` and ASCII glyphs keep it. `0`, `false`, or `off` turns it off: Ctrl-d / Ctrl-u jump. `1`, `true`, or `on` turns it on. Any other value falls through to config `smoothScroll`, then on. |
+| `WS_STATUS_PR_POLL_MS` | `prPolling` (on or off only) | unset (60 s hot, 180 s calm) | PR poll period in ms. It replaces both the hot period (60 s, while a pollable PR has CI running or is ready to merge) and the calm period (180 s). `0` turns polling off. There is no floor, so tests can poll every few hundred ms. A valid value wins over config `prPolling`. Empty, negative, or non-numeric falls through to `prPolling`, then on. With polling off, a branch change, `r`, and a full reload still look up. See [Pull request badges](#pull-request-badges). |
+| `WS_STATUS_PR_TITLE_CMD` | `prTitleCommand` (user file only) | unset | Program that gives a title for a ticket key, for the group titles of a PRs tab: an absolute path, a path that starts with `~/` (config only), or a command name on `PATH`. A non-blank value wins over the config key; a blank one falls through. This build reads the setting but runs nothing yet. |
 | `WORKSPACE_STATUS_GITHUB_TOKEN` | — (secret; a workspace file may be committed) | unset | Optional Bearer token for GitHub Releases API (`curl`). Used by the TUI startup check and by `ws --update` when fetching notes. Unset is fine for the public repo rate limit. |
 | `WS_STATUS_DEV_BUILD` | — (build time) | unset                                                   | **Build time** (`option_env!`, `DEV_BUILD` in `lib.rs`). `scripts/install-dev.sh` sets it to the short git sha, plus `-dirty` for a dirty tree. A dev build shows `-dev (sha)` in `--version` and the help footer, skips the TUI-startup release prompt, and makes `--update` exec `workspace-status-update-dev` with no release notes. Has no effect at run time. |
 | `WS_DEV_BIN_DIR` | — (`scripts/install-dev.sh` only) | `$HOME/.local/bin`                                      | `scripts/install-dev.sh` only: where `ws-dev`, `workspace-status-dev`, and `workspace-status-update-dev` go (and what `--uninstall` cleans). The generated `workspace-status-update-dev` keeps the directory it was installed with. |
 | `WS_DEV_TARGET_DIR` | — (`scripts/install-dev.sh` only) | `<repo>/target/dev-install`                             | `scripts/install-dev.sh` only: `CARGO_TARGET_DIR` for the dev build. Kept apart from `target/release` so the dev marker never reaches a release or demo build. The generated `workspace-status-update-dev` keeps the target dir it was installed with. |
 
 
-A **Config key** sets the same setting from a config file; a valid env var wins over it (see [Env-backed keys](#env-backed-keys)). For the store paths and `WORKSPACE_STATUS_GIT`, a blank (store) or empty (git) env value falls through to the config key. Env-only, with no config key: `WS_STATUS_WORKSPACE` (it picks the workspace file), `WORKSPACE_STATUS_GITHUB_TOKEN` (a secret, and a workspace file may be committed), the test-harness vars `WS_STATUS_E2E_*` and `WS_E2E_REAL_GIT`, `WS_STATUS_DEV_BUILD` (build time), `WS_DEV_BIN_DIR` / `WS_DEV_TARGET_DIR` (`scripts/install-dev.sh` only), and the system vars `EDITOR`, `VISUAL`, `BROWSER`, `DISPLAY`, `PATH`, `XDG_*`, and `HOME`.
+A **Config key** sets the same setting from a config file; a valid env var wins over it (see [Env-backed keys](#env-backed-keys)). For the store paths, `WORKSPACE_STATUS_GIT`, and `WS_STATUS_PR_TITLE_CMD`, a blank (store, title command) or empty (git) env value falls through to the config key. Env-only, with no config key: `WS_STATUS_WORKSPACE` (it picks the workspace file), `WORKSPACE_STATUS_GITHUB_TOKEN` (a secret, and a workspace file may be committed), the test-harness vars `WS_STATUS_E2E_*` and `WS_E2E_REAL_GIT`, `WS_STATUS_DEV_BUILD` (build time), `WS_DEV_BIN_DIR` / `WS_DEV_TARGET_DIR` (`scripts/install-dev.sh` only), and the system vars `EDITOR`, `VISUAL`, `BROWSER`, `DISPLAY`, `PATH`, `XDG_*`, and `HOME`.
 
 ### Theme flash tokens
 
@@ -628,10 +634,13 @@ While the `?` help overlay is open, `/` is scoped to that overlay: it starts a h
 
 ### Pull request badges
 
-A checkout row with a branch (tree) and a worktree row with a branch (graph) show a one-column badge (in the tree, in the right-aligned trailing icons; in the graph, flush right on the worktree row) when the branch has an open or a merged PR (GitHub PR or GitLab merge request): open (CI failed, draft, CI running, or in review), approved (ready to merge: mergeable now, with no failed or running check), or merged. A closed PR that was not merged, no PR, and a lookup that failed or is still running show no badge. Glyphs and colours are in [tui-rust.md](./tui-rust.md).
+A checkout row with a branch (tree) and a worktree row with a branch (graph) show a one-column badge (in the tree, in the right-aligned trailing icons; in the graph, flush right on the worktree row) when the branch has an open or a merged PR (GitHub PR or GitLab merge request): open (CI failed, draft, CI running, or in review), approved (ready to merge: mergeable now, with no failed or running check), or merged. A closed PR that was not merged, no PR, and a first lookup of the branch that failed or is still running show no badge. A known badge stays while a later lookup of it runs, and when that lookup fails. Glyphs and colours are in [tui-rust.md](./tui-rust.md).
 
 - Lookups use `gh` for GitHub hosts and `glab` for GitLab hosts. Install and log in to the CLI yourself (`gh auth login`, `glab auth login`). The TUI never asks for a login, and never passes a token. Without a working CLI there is no badge, and `gx` says `could not look up PR for <branch>`.
 - A remote whose host contains neither `github` nor `gitlab` gets no badge, and `gx` says `no PR for <branch>`.
-- A badge lookup runs when a branch first appears or changes, on `r`, and on a full reload. A watch tick on the same branch does not look again, so a PR that is opened or merged later shows after `r`. `gx` and Ctrl+click always look up fresh.
-- The PR popover (hover or click a badge, or `gh`) fetches the PR's title, state, review, author, branches, checks, and update time once per branch, with the same CLI (`gh pr view`, or `glab api` on the MR). It shows `loading…` until the answer lands and `could not load details` when the CLI fails. `r` drops the detail so the next popover fetches it again.
+- A badge lookup runs when a branch first appears or changes, on `r`, on a full reload, and on each PR poll. A watch tick on the same branch does not look again. `gx` and Ctrl+click always look up fresh. `r` hides the badge until its lookup lands; a poll does not.
+- **PR polling.** One cycle for the whole TUI looks up each pollable checkout again. A checkout is pollable when it is visible (not hidden, unless hidden repos show), on a local branch, its remote is on GitHub or GitLab, and either its answer is an open PR, or its branch has an upstream and no PR is known yet (so a PR opened later shows without `r`). A merged PR is not polled. The cycle runs every 60 s while a pollable PR has CI running or is ready to merge, else every 180 s. `WS_STATUS_PR_POLL_MS` sets one period for both; `0`, or config `prPolling: false`, turns polling off. The lookup at launch is the first cycle. A checkout whose lookup is still queued or running is not queued again. While an overlay (help, a picker, the palette, a confirm) is open, the cycle waits.
+- **Failures.** A failed poll doubles the period of its forge host (for example `github.com`): 60 s, then 120 s, 240 s, and so on, at most 15 min. Several failures in one cycle count once. The next successful lookup on that host resets it. A failed lookup keeps the last answer and records the CLI's first stderr line. The answer is stale when its last successful lookup is older than twice the planned period (hot or calm, without the backoff).
+- **Changes.** Each successful lookup is compared with the last one of the same checkout in this session. When the same PR (same number) moves into CI failed, ready to merge, or merged, or the PR goes away (closed) while the branch stays, the TUI records a change for an alert. The first lookup of a checkout and the first lookup after a branch change record none. While the forge still computes the merge state (GitHub `mergeStateStatus: UNKNOWN`; GitLab `detailed_merge_status` `checking`, `unchecked`, `approvals_syncing`, or `preparing`), ready to merge versus in review is not final: such an answer records no change and is not compared with later, so a PR that flips between the two does not alert.
+- The PR popover (hover or click a badge, or `gh`) fetches the PR's title, state, review, author, branches, checks, and update time once per branch, with the same CLI (`gh pr view`, or `glab api` on the MR). It shows `loading…` until the answer lands and `could not load details` when the CLI fails. `r` drops the detail so the next popover fetches it again. A new answer for another PR drops it too. A changed answer for the same PR keeps the detail on screen and fetches it again: at once when a popover shows it (when the badge answer lands), else at the next peek or pin. A failed new fetch keeps the old detail.
 - Git details: [git-operations.md](./git-operations.md) → **Pull request lookup**.
