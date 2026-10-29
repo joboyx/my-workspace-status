@@ -916,4 +916,40 @@ mod upstream_rewrite_tests {
         assert_eq!(snap.sync_status, SyncStatus::UpToDate);
         assert_eq!(snap.upstream_rewrite, None);
     }
+
+    #[test]
+    fn the_default_branch_is_the_override_else_origin_head_else_unknown() {
+        use crate::testutil::{git, init_repo, unique_dir};
+        let root = unique_dir("ws-default-branch");
+        init_repo(&root.join("app"));
+        let meta = RepoCheckoutMeta {
+            checkout_kind: CheckoutKind::Primary,
+            primary_repo: None,
+        };
+        let default_of = |override_name: Option<&str>| {
+            process_repo("app", &root, false, override_name, &meta)
+                .expect("repo snapshot")
+                .default_branch
+        };
+        assert_eq!(default_of(None), None, "no origin/HEAD: no guess");
+        assert_eq!(default_of(Some("trunk")).as_deref(), Some("trunk"));
+
+        let app = root.join("app");
+        git(&app, &["update-ref", "refs/remotes/origin/develop", "HEAD"]);
+        git(
+            &app,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/develop",
+            ],
+        );
+        assert_eq!(default_of(None).as_deref(), Some("develop"), "origin/HEAD");
+        assert_eq!(
+            default_of(Some("main")).as_deref(),
+            Some("main"),
+            "the override wins"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
 }
