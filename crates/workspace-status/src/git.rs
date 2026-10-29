@@ -354,12 +354,13 @@ fn is_tracked(pgid: i32) -> bool {
         .any(|slot| slot.load(Ordering::SeqCst) == pgid)
 }
 
-/// Send `signal` to process group `pgid`.
+/// Send `signal` to process group `pgid`: a group `process_group(0)` made for
+/// a git run, or for a PR title command (`tui/pr_groups.rs`).
 #[cfg(unix)]
-fn signal_group(pgid: i32, signal: libc::c_int) {
+pub(crate) fn signal_group(pgid: i32, signal: libc::c_int) {
     if pgid > 0 {
         // SAFETY: a plain syscall with no pointers. `pgid` is a group
-        // `process_group(0)` made for a git child. While the child is not
+        // `process_group(0)` made for a child. While the child is not
         // reaped (timeout, stop) the id is still ours. Where git is already
         // reaped (post-exit pipe holder, a slot not yet cleared) the id is
         // not guaranteed ours, but Linux keeps a pid allocated while it is

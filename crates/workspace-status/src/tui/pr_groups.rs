@@ -10,6 +10,7 @@
 // Only tests read this until the PRs tab does.
 #![cfg_attr(not(test), allow(dead_code))]
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read};
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use super::pr_status::{NextAction, PrState};
+use super::pr_status::{NextAction, PrState, LONG_LIVED_BRANCHES};
 use super::pull_request::PullRequest;
 
 /// Header of the group that holds every PR without a key and without a
@@ -31,17 +32,6 @@ pub const FOLD_FINISHED_ABOVE: usize = 12;
 /// (`CVE-2024-1234`, `UTF-8`, `SHA-256`).
 const NOT_KEYS: [&str; 9] = [
     "CVE", "UTF", "SHA", "ISO", "HTTP", "RFC", "TLS", "MD", "GHSA",
-];
-
-/// Head branches that never make a shared-branch group.
-const COMMON_BRANCHES: [&str; 7] = [
-    "main",
-    "master",
-    "develop",
-    "dev",
-    "trunk",
-    "staging",
-    "production",
 ];
 
 /// Commit types that a title may start with (`feat(api): …`).
@@ -68,6 +58,9 @@ pub struct PrEntry {
     pub repo: String,
     /// The PR of the checkout's current branch.
     pub pr: PullRequest,
+    /// The default branch configured for the checkout, if any. A PR whose
+    /// base is this branch is never stacked on another PR.
+    pub default_branch: Option<String>,
 }
 
 /// How a group got its key.
@@ -185,12 +178,13 @@ impl PrGroup {
 ///
 /// Group order: a group with a CI failed row first, then the groups that
 /// need the author, then the groups that wait, then the finished groups,
-/// then [`OTHER_KEY`]; ties by key ascending. Row order: repository name,
-/// then number, with a stacked PR right after its base when both are in the
-/// group.
+/// then [`OTHER_KEY`]; ties by key in natural order ([`natural_key_cmp`]).
+/// Row order: repository name, then number, with a stacked PR right after its
+/// base when both are in the group.
 ///
 /// A PR is stacked on a known PR of the same repository, whatever group that
-/// PR is in. The repository is read from the PR URL.
+/// PR is in; the base branch must pass [`PullRequest::stacked_on`] with the
+/// entry's `default_branch`. The repository is read from the PR URL.
 pub fn group_prs(entries: Vec<PrEntry>) -> Vec<PrGroup> {
     let derived = stack_and_actions(&entries);
     let ticket_keys: Vec<Option<String>> = entries
@@ -224,8 +218,51 @@ pub fn group_prs(entries: Vec<PrEntry>) -> Vec<PrGroup> {
         .into_iter()
         .map(|((kind, key), rows)| build_group(kind, key, rows))
         .collect();
-    groups.sort_by(|a, b| group_rank(a).cmp(&group_rank(b)).then(a.key.cmp(&b.key)));
+    groups.sort_by(|a, b| {
+        group_rank(a)
+            .cmp(&group_rank(b))
+            .then_with(|| natural_key_cmp(&a.key, &b.key))
+    });
     groups
+}
+
+/// Orders group keys: the text before the first `-<digits>`, then those
+/// digits as a number, then the rest as text, so `ABC-999` comes before
+/// `ABC-1000` and `ABC-007` ties with `ABC-7`. A key without `-<digits>` is
+/// all text. Equal parts fall back to the whole key, so the order is total.
+fn natural_key_cmp(a: &str, b: &str) -> Ordering {
+    let (letters_a, number_a, rest_a) = natural_parts(a);
+    let (letters_b, number_b, rest_b) = natural_parts(b);
+    letters_a
+        .cmp(letters_b)
+        .then(number_a.len().cmp(&number_b.len()))
+        .then(number_a.cmp(number_b))
+        .then(rest_a.cmp(rest_b))
+        .then(a.cmp(b))
+}
+
+/// Splits `key` at its first `-<digits>`: the text before it, the digits
+/// without leading zeros (compare them by length, then as text), and the
+/// text after them. `(key, "", "")` when there is none.
+fn natural_parts(key: &str) -> (&str, &str, &str) {
+    let mut from = 0;
+    while let Some(at) = key[from..].find('-') {
+        let dash = from + at;
+        let digits = key[dash + 1..]
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .count();
+        if digits > 0 {
+            let end = dash + 1 + digits;
+            return (
+                &key[..dash],
+                key[dash + 1..end].trim_start_matches('0'),
+                &key[end..],
+            );
+        }
+        from = dash + 1;
+    }
+    (key, "", "")
 }
 
 /// Number of PRs listed in `groups`: the `n` of the tab label `PRs <n>`.
@@ -487,7 +524,9 @@ fn stack_and_actions(entries: &[PrEntry]) -> Vec<(Option<StackedOn>, Option<Next
         .iter()
         .map(|entry| {
             let known = &by_repo[repo_of_url(&entry.pr.url)];
-            let base = entry.pr.stacked_on(known.iter().copied());
+            let base = entry
+                .pr
+                .stacked_on(known.iter().copied(), entry.default_branch.as_deref());
             let stacked_on = base.map(|base| StackedOn {
                 pr_ref: base.ref_text(),
                 number: base.number,
@@ -498,7 +537,8 @@ fn stack_and_actions(entries: &[PrEntry]) -> Vec<(Option<StackedOn>, Option<Next
         .collect()
 }
 
-/// Head branches that make a shared-branch group: not a common branch, and
+/// Head branches that make a shared-branch group: not one of
+/// [`LONG_LIVED_BRANCHES`], and
 /// the head of two or more listed PRs that have no ticket key
 /// (`ticket_keys[i]` is the key of `entries[i]`). The same PR listed for two
 /// checkouts counts once.
@@ -506,7 +546,7 @@ fn shared_branches(entries: &[PrEntry], ticket_keys: &[Option<String>]) -> HashS
     let mut prs_by_head: HashMap<&str, HashSet<(&str, u64)>> = HashMap::new();
     for (entry, ticket_key) in entries.iter().zip(ticket_keys) {
         let head = entry.pr.head.as_str();
-        if ticket_key.is_none() && !head.is_empty() && !COMMON_BRANCHES.contains(&head) {
+        if ticket_key.is_none() && !head.is_empty() && !LONG_LIVED_BRANCHES.contains(&head) {
             prs_by_head
                 .entry(head)
                 .or_default()
@@ -585,8 +625,10 @@ fn place_with_children(
 /// The header text of a group made of `rows`, which are already ordered.
 ///
 /// The next action is `fix CI` from any row, else `fix conflicts`, `address
-/// review`, `merge <base> first`, `merge` from any row, in that priority and
-/// then in row order; else the action of the first open row.
+/// review`, then `merge <base> first` or `merge` (one slot, so the first
+/// such row in row order) from any row, in that priority; else the action of
+/// the first open row. `AllMerged` counts distinct PRs: one PR seen from two
+/// checkouts is one.
 fn headline(kind: GroupKind, rows: &[PrRow]) -> GroupHeadline {
     if kind == GroupKind::Other {
         return GroupHeadline::Bare;
@@ -605,20 +647,29 @@ fn headline(kind: GroupKind, rows: &[PrRow]) -> GroupHeadline {
             pr_ref: row.pr.ref_text(),
             state: row.pr.state,
         }),
-        None => GroupHeadline::AllMerged(rows.len()),
+        None => GroupHeadline::AllMerged(distinct_prs(rows)),
     }
 }
 
+/// Number of different PRs in `rows`: a PR listed for two checkouts counts
+/// once.
+fn distinct_prs(rows: &[PrRow]) -> usize {
+    rows.iter()
+        .map(|row| (repo_of_url(&row.pr.url), row.pr.number))
+        .collect::<HashSet<_>>()
+        .len()
+}
+
 /// Rank of an action the author must take; the lowest rank leads the
-/// header.
+/// header. `merge <base> first` and `merge` share a rank, so the row order
+/// decides between them.
 fn needs_you_priority(action: &NextAction) -> u8 {
     match action {
         NextAction::FixCi => 0,
         NextAction::FixConflicts => 1,
         NextAction::AddressReview => 2,
-        NextAction::MergeBaseFirst(_) => 3,
-        NextAction::Merge => 4,
-        NextAction::Undraft | NextAction::WaitForCi | NextAction::GetReview => 5,
+        NextAction::MergeBaseFirst(_) | NextAction::Merge => 3,
+        NextAction::Undraft | NextAction::WaitForCi | NextAction::GetReview => 4,
     }
 }
 
@@ -658,16 +709,25 @@ fn run_title_command_within(cmd: &Path, key: &str, limit: Duration) -> Option<St
 
 fn spawn_title_command(cmd: &Path, key: &str, deadline: Instant) -> Option<Child> {
     loop {
-        let spawned = Command::new(cmd)
+        let mut command = Command::new(cmd);
+        command
             .arg(key)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn();
-        match spawned {
+            .stderr(Stdio::null());
+        // Its own process group, so a timeout can end the command and
+        // everything it started.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        match command.spawn() {
             Ok(child) => return Some(child),
-            // The script is still open for writing, for example while an
-            // editor saves it. Try again until the deadline.
+            // In a multi-threaded process, a fork on another thread can hold
+            // the script's write descriptor open until its own exec, so this
+            // exec fails with ETXTBSY for a moment. Try again until the
+            // deadline.
             Err(error)
                 if error.kind() == ErrorKind::ExecutableFileBusy && Instant::now() < deadline =>
             {
@@ -678,7 +738,12 @@ fn spawn_title_command(cmd: &Path, key: &str, deadline: Instant) -> Option<Child
     }
 }
 
+/// Ends `child` and everything in its process group, then reaps it. The
+/// group exists because [`spawn_title_command`] started the child with
+/// `process_group(0)`. Elsewhere only the child is killed.
 fn kill_and_reap(mut child: Child) {
+    #[cfg(unix)]
+    crate::git::signal_group(i32::try_from(child.id()).unwrap_or(0), libc::SIGKILL);
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -752,6 +817,7 @@ mod tests {
             checkout: PathBuf::from(format!("/ws/{repo}")),
             repo: repo.into(),
             pr,
+            default_branch: None,
         }
     }
 
@@ -1039,7 +1105,7 @@ mod tests {
 
     #[test]
     fn a_shared_branch_needs_two_listed_prs_and_a_branch_that_is_not_common() {
-        for branch in COMMON_BRANCHES {
+        for branch in LONG_LIVED_BRANCHES {
             let groups = group_prs(vec![
                 app(1, branch, "one", PrState::InReview),
                 entry("acme/merger", MERGER, 2, branch, "two", PrState::InReview),
@@ -1294,11 +1360,22 @@ mod tests {
     }
 
     #[test]
-    fn header_merge_base_first_beats_merge_from_any_row() {
+    fn header_merge_and_merge_base_first_share_one_slot_in_row_order() {
+        // The base sorts first, so the header targets the base: `merge #318`,
+        // not the child's `merge #318 first`.
         let base = app(318, "feature/ABC-123-a", "t", PrState::Ready);
         let mut child = app(319, "feature/ABC-123-b", "t", PrState::Ready);
         child.pr.base = "feature/ABC-123-a".into();
-        let groups = group_prs(vec![base, child]);
+        let groups = group_prs(vec![child.clone(), base]);
+        assert_eq!(numbers(&groups[0]), vec![318, 319]);
+        assert_eq!(header(&groups[0]), "merge #318");
+        let GroupHeadline::Next(step) = &groups[0].headline else {
+            panic!("open group");
+        };
+        assert_eq!(step.pr_ref, "#318", "it targets the base");
+        // With a base that is not ready, the child's action is the one.
+        let base = app(318, "feature/ABC-123-a", "t", PrState::InReview);
+        let groups = group_prs(vec![child, base]);
         assert_eq!(header(&groups[0]), "merge #318 first");
     }
 
