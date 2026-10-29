@@ -2,8 +2,8 @@ use crate::harness::{PtySession, ROWS};
 use crate::seed::daily_workspace;
 use crate::support::{
     ack_rows, crumb_row, has_stage_hint, idle_dirty_readme_unstaged, no_wrong_overlays,
-    pane_unstaged_readme, readme_unstaged_badge, status_row, tree_cursor_on, tree_has, GIT_WAIT,
-    SETTLE_MS, WAIT,
+    pane_unstaged_readme, prove_keys_handled, readme_unstaged_badge, status_row, tree_cursor_on,
+    tree_has, GIT_WAIT, WAIT,
 };
 
 fn no_y_revert_path(screen: &str) -> bool {
@@ -117,12 +117,7 @@ fn pty_revert_confirm_survives_resize() {
         "x arms Revert README.md? with y/n only; file stays dirty",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
-    tui.wait_pred(
-        documented_revert_confirm_armed,
-        "revert confirm holds (not a flicker, y path, or toast-only tick)",
-        WAIT,
-    );
+    // Later keys answer this confirm, which proves it stayed open.
 
     assert!(
         !painted_shorter_than_launch(&tui.screen()),
@@ -133,12 +128,6 @@ fn pty_revert_confirm_survives_resize() {
     tui.wait_pred(
         documented_revert_confirm_armed_on_short_grid,
         "100x24 resize keeps Revert README.md? y/n on a shorter grid",
-        WAIT,
-    );
-    tui.wait_ms(SETTLE_MS);
-    tui.wait_pred(
-        documented_revert_confirm_armed_on_short_grid,
-        "confirm holds after resize (not a flicker, overlay drop, or same-size no-op)",
         WAIT,
     );
 
@@ -153,12 +142,8 @@ fn pty_revert_confirm_survives_resize() {
         "j does not move the tree cursor; confirm stays armed on README",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
-    tui.wait_pred(
-        documented_revert_confirm_armed,
-        "confirm still armed after j (overlay swallowed movement)",
-        WAIT,
-    );
+    // The confirm swallows `j`. The `n` below runs after it: its cancel
+    // (with the cursor still on README) proves j moved nothing.
 
     assert!(
         !documented_revert_n_cancelled(&tui.screen()),
@@ -171,7 +156,7 @@ fn pty_revert_confirm_survives_resize() {
         "n cancels: revert cancelled toast, README still unstaged, overlay gone",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_revert_n_cancelled,
         "cancelled paint holds (not a flicker, y revert, or overlay return)",

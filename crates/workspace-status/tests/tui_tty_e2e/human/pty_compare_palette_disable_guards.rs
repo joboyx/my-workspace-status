@@ -1,6 +1,8 @@
 use crate::harness::PtySession;
 use crate::seed::{topic_and_unborn_workspace, worktree_workspace};
-use crate::support::{esc_clears_palette_filter, tree_cursor_on, tree_has, SETTLE_MS, WAIT};
+use crate::support::{
+    esc_clears_palette_filter, prove_palette_keys_handled, tree_cursor_on, tree_has, WAIT,
+};
 
 const PRIMARY_BRANCH: &str = "feature/primary-open";
 const LINKED_BRANCH: &str = "feature/linked-open";
@@ -56,7 +58,7 @@ fn open_commands_filter(tui: &mut PtySession, query: &str, title: &str) {
 fn enter_keeps_palette_open(tui: &mut PtySession, what: &str) {
     tui.enter();
     tui.wait_pred(palette_open, what, WAIT);
-    tui.wait_ms(SETTLE_MS);
+    prove_palette_keys_handled(tui);
     tui.wait_pred(
         palette_open,
         &format!("{what} (holds; a delayed close would drop Enter run)"),

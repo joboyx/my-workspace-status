@@ -2,9 +2,9 @@ use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
     crumb_row, documented_launch_first_paint, no_mouse_toggle_toast, no_updates_group_folded,
-    no_wrong_overlays, panes_tree_unfocused_diff_focused, right_diff_has_focused_cursor,
-    status_row, title_has_files, tree_cursor_on, tree_dir_expanded, tree_has,
-    tree_inactive_selection_on, RIGHT_PANE_COL, SETTLE_MS, TREE_DEPTH1_CHEVRON_COL, TREE_LABEL_COL,
+    no_wrong_overlays, panes_tree_unfocused_diff_focused, prove_keys_handled,
+    right_diff_has_focused_cursor, status_row, title_has_files, tree_cursor_on, tree_dir_expanded,
+    tree_has, tree_inactive_selection_on, RIGHT_PANE_COL, TREE_DEPTH1_CHEVRON_COL, TREE_LABEL_COL,
     WAIT,
 };
 
@@ -93,7 +93,7 @@ fn pty_click_right_pane_focuses() {
         "SGR press+release on the UNSTAGED diff focuses the right pane",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         click_focuses_readme_diff,
         "right-pane focus holds (not a flicker, toast-only, or tree-row select)",
@@ -101,7 +101,7 @@ fn pty_click_right_pane_focuses() {
     );
 
     tui.key('j');
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         click_focuses_readme_diff,
         "j on the focused file-diff does not move the tree cursor (a no-op click would land on merger)",

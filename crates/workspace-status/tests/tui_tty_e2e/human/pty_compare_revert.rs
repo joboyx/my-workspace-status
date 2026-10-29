@@ -5,8 +5,8 @@ use crate::harness::PtySession;
 use crate::seed::{compare_regions_workspace, git_stdout, COMPARE_ADDED_FILE, REGIONS_OMEGA};
 use crate::support::{
     ack_rows, compare_regions_diff_focused, crumb_row, esc_clears_palette_filter,
-    open_compare_regions_diff, press_j, tree_cursor_on, type_palette_filter, GIT_WAIT, SETTLE_MS,
-    WAIT,
+    open_compare_regions_diff, press_j, prove_palette_keys_handled, tree_cursor_on,
+    type_palette_filter, GIT_WAIT, WAIT,
 };
 
 const RANGE_CONFIRM: &str =
@@ -109,7 +109,7 @@ fn pty_compare_v_x_y_reverts_range_to_merge_base() {
         "x opens the range confirm that names the merge base",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    // An open confirm means no write job was scheduled.
     assert_eq!(
         worktree_file(&workspace, "regions.txt"),
         committed,
@@ -166,7 +166,7 @@ fn pty_compare_x_restores_modified_file_to_merge_base() {
             "n / Esc cancels the confirm",
             WAIT,
         );
-        tui.wait_ms(SETTLE_MS);
+        // The cancel toast paints in place of a write.
         assert_eq!(
             worktree_file(&workspace, "regions.txt"),
             committed,
@@ -226,7 +226,7 @@ fn pty_compare_x_deletes_file_added_on_head() {
         "x on the added file says it will be deleted",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    // An open confirm means no write job was scheduled.
     assert!(
         app(&workspace).join(COMPARE_ADDED_FILE).exists(),
         "the confirm alone must not delete"
@@ -284,7 +284,7 @@ fn pty_compare_x_refuses_dirty_file() {
         WAIT,
     );
     tui.enter();
-    tui.wait_ms(SETTLE_MS);
+    prove_palette_keys_handled(&mut tui);
     tui.wait_pred(
         |screen| screen.contains("Enter run") && screen.contains(DIRTY_REASON),
         "Enter on the disabled row keeps the palette",
@@ -314,7 +314,7 @@ fn pty_compare_x_refuses_dirty_file() {
         "highlighted x shows the reason and keeps the highlight",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    // The reason paints in place of a confirm, so no write was scheduled.
     assert_eq!(fs::read_to_string(&path).unwrap(), dirty, "nothing written");
     assert_eq!(git_state(&workspace), before, "git state unchanged");
 }
@@ -348,7 +348,7 @@ fn pty_compare_y_aborts_when_file_changes_after_confirm() {
         "y aborts on the worker because regions.txt changed",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    // The abort toast paints when the worker has given up.
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
         dirty,

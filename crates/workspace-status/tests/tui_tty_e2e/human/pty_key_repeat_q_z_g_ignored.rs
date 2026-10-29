@@ -2,8 +2,8 @@ use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
     crumb_row, documented_launch_first_paint, no_updates_group_folded, no_wrong_overlays,
-    status_row, tree_cursor_on, tree_dir_collapsed, tree_dir_expanded, tree_has, GIT_WAIT,
-    SETTLE_MS, WAIT,
+    prove_keys_handled, status_row, tree_cursor_on, tree_dir_collapsed, tree_dir_expanded,
+    tree_has, GIT_WAIT, WAIT,
 };
 
 fn left_tree_not_drilled(screen: &str) -> bool {
@@ -90,7 +90,7 @@ fn pty_key_repeat_q_z_g_ignored() {
         "one CSI-u j press moves one row to expanded app with graph loaded (G/End would hit No updates; a no-op stays on workspace)",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         on_app_expanded,
         "one press holds on expanded app (not a delayed jump to No updates)",
@@ -104,7 +104,7 @@ fn pty_key_repeat_q_z_g_ignored() {
         "CSI-u Repeat q stays on expanded app (no Ctrl+C prompt; a press q would quit)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(on_app_expanded, "Repeat q hold (not a delayed quit)", WAIT);
     tui.assert_running("CSI-u Repeat q must not quit after settle");
 
@@ -114,7 +114,7 @@ fn pty_key_repeat_q_z_g_ignored() {
         "CSI-u Repeat z does not fold app or arm z… (a press z on app would hide README and paint z…)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         on_app_expanded,
         "Repeat z hold (not a delayed fold or z… chord)",
@@ -127,7 +127,7 @@ fn pty_key_repeat_q_z_g_ignored() {
         "CSI-u Repeat g does not jump (gg would hit workspace; G would hit No updates)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         on_app_expanded,
         "Repeat g hold (not a delayed gg or G)",

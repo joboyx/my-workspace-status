@@ -4,7 +4,7 @@ use crate::support::{
     after_ack, app_focused_stash_visible, app_graph_stash_row_focused,
     app_graph_working_tree_focused, documented_stash_applied, documented_stash_created,
     documented_stash_dropped, idle_dirty_readme_unstaged, no_updates_unfolded_after_stash,
-    stash_create_overlay_open, stash_drop_confirm_open, GIT_WAIT, SETTLE_MS, WAIT,
+    prove_keys_handled, stash_create_overlay_open, stash_drop_confirm_open, GIT_WAIT, WAIT,
 };
 
 /// CSI-u Shift+S creates a stash, graph `a` applies it, CSI-u Shift+D
@@ -49,7 +49,7 @@ fn pty_stash_create_apply_and_drop() {
         "overlay s stashes README: Stashed 1 file, file leaves tree, overlay closes",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_stash_created,
         "stashed paint holds (not a flicker or toast-only tick)",
@@ -88,7 +88,7 @@ fn pty_stash_create_apply_and_drop() {
         "graph a applies: README returns dirty, stash@{0} stays, applied toast",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_stash_applied,
         "applied paint holds (not pop, not a flicker)",
@@ -107,7 +107,7 @@ fn pty_stash_create_apply_and_drop() {
         "y drops stash@{0}; README stays dirty; graph stash row is gone",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_stash_dropped,
         "dropped paint holds (not pop, not a flicker)",

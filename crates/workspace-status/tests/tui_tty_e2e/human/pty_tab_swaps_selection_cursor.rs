@@ -2,8 +2,8 @@ use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
     documented_launch_first_paint, panes_tree_focused_diff_unfocused,
-    panes_tree_unfocused_diff_focused, right_diff_has_focused_cursor,
-    right_diff_has_inactive_selection, tree_cursor_on, tree_inactive_selection_on, SETTLE_MS, WAIT,
+    panes_tree_unfocused_diff_focused, prove_keys_handled, right_diff_has_focused_cursor,
+    right_diff_has_inactive_selection, tree_cursor_on, tree_inactive_selection_on, WAIT,
 };
 
 fn tree_focused_readme_keeps_right_inactive(screen: &str) -> bool {
@@ -55,7 +55,7 @@ fn pty_tab_swaps_focused_and_inactive_list_markers() {
         "Tab: focused diff cursor, inactive marker on the unfocused README tree row (a no-op still paints the focused cursor on README)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         right_focused_readme_keeps_tree_inactive,
         "right-pane focus holds with the inactive tree marker (not a flicker, swapped markers, or a Tab no-op)",

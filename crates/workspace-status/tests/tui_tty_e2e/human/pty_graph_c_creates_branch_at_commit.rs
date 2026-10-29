@@ -2,8 +2,8 @@ use crate::harness::PtySession;
 use crate::seed::focus_workspace;
 use crate::support::{
     ack_rows, crumb_row, focusbox_graph_left_full, graph_cursor_on, graph_pane_focused,
-    graph_subject_meta_line, no_mouse_toggle_toast, status_row, title_has_files, tree_has,
-    tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
+    graph_subject_meta_line, no_mouse_toggle_toast, prove_keys_handled, status_row,
+    title_has_files, tree_has, tree_line_containing, GIT_WAIT, WAIT,
 };
 
 const BRANCH: &str = "e2e-at-commit";
@@ -176,7 +176,6 @@ fn pty_graph_c_creates_branch_at_commit() {
         "graph cursor on main-leaf-commit; c create branch hint; overlay closed",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
 
     tui.key('c');
     tui.wait_pred(
@@ -184,12 +183,8 @@ fn pty_graph_c_creates_branch_at_commit() {
         "graph c opens Create branch at <short> (not the branch picker, not a write)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
-    tui.wait_pred(
-        empty_create_branch_at_overlay,
-        "create-branch overlay holds (not a flicker or toast-only tick)",
-        WAIT,
-    );
+    // The name typed next lands in this overlay, which proves it stayed
+    // open.
     let overlay_hash = overlay_at_hash(&tui.screen()).expect("Create branch at <short>");
 
     tui.keys(BRANCH);
@@ -205,7 +200,7 @@ fn pty_graph_c_creates_branch_at_commit() {
         "Enter creates e2e-at-commit at the focused commit; HEAD stays feature/keep",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         |screen| documented_graph_create_branch_at(screen, &overlay_hash),
         "created paint holds (not a flicker, toast-only tick, or checkout)",

@@ -1,7 +1,8 @@
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    esc_clears_palette_filter, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
+    esc_clears_palette_filter, prove_keys_handled, prove_palette_keys_handled, tree_cursor_on,
+    tree_has, GIT_WAIT, WAIT,
 };
 
 fn palette_open(screen: &str) -> bool {
@@ -89,7 +90,7 @@ fn open_commands_filter(tui: &mut PtySession, query: &str, title: &str) {
 fn enter_keeps_palette_open(tui: &mut PtySession, what: &str) {
     tui.enter();
     tui.wait_pred(palette_open, what, WAIT);
-    tui.wait_ms(SETTLE_MS);
+    prove_palette_keys_handled(tui);
     tui.wait_pred(
         palette_open,
         &format!("{what} (holds; a delayed close would drop Enter run)"),
@@ -309,7 +310,7 @@ fn pty_workspace_palette_disabled_pull_on_file_keeps_open() {
         "Enter on dimmed Pull behind keeps the palette; no pull toast; cursor stays on README",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_palette_keys_handled(&mut tui);
     tui.wait_pred(
         |screen| {
             palette_open(screen) && no_pull_toast(screen) && tree_cursor_on(screen, "README.md")
@@ -350,7 +351,7 @@ fn pty_workspace_palette_disabled_push_on_file_keeps_open() {
         "Enter on dimmed Push keeps the palette and reason; no nothing to push toast",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_palette_keys_handled(&mut tui);
     tui.wait_pred(
         |screen| {
             palette_open(screen)
@@ -437,14 +438,16 @@ fn pty_workspace_palette_revert_opens_boxed_confirm() {
         "Enter on Revert closes the palette and paints Revert README.md? (do not confirm y)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    // `n` cancels the confirm: `revert cancelled` paints only on a confirm
+    // that is still open, so it proves the confirm held and nothing reverted.
+    tui.key('n');
     tui.wait_pred(
         |screen| {
             palette_closed(screen)
-                && screen.contains("Revert README.md?")
+                && screen.contains("revert cancelled")
                 && !screen.contains("reverted")
         },
-        "revert confirm holds (not a flicker, y path, or palette return)",
+        "revert confirm holds until n cancels it (not a flicker, y path, or palette return)",
         WAIT,
     );
 }
@@ -487,9 +490,9 @@ fn pty_workspace_palette_does_not_steal_daily_keys() {
     );
 
     tui.key('p');
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(palette_closed, "bare p does not open Quick Open", WAIT);
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         palette_closed,
         "bare p still does not open Quick Open",
@@ -497,13 +500,13 @@ fn pty_workspace_palette_does_not_steal_daily_keys() {
     );
 
     tui.shift_letter('p');
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         palette_closed,
         "CSI-u Shift+P does not open Quick Open",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         palette_closed,
         "CSI-u Shift+P still does not open Quick Open",

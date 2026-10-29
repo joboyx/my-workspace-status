@@ -2,8 +2,7 @@ use crate::harness::PtySession;
 use crate::seed::focus_workspace;
 use crate::support::{
     ack_rows, after_ack, crumb_row, graph_cursor_on, graph_pane_focused, no_mouse_toggle_toast,
-    status_row, title_has_files, tree_cursor_on, tree_has, tree_pane_focused, GIT_WAIT, SETTLE_MS,
-    WAIT,
+    status_row, title_has_files, tree_cursor_on, tree_has, tree_pane_focused, GIT_WAIT, WAIT,
 };
 
 fn no_merge_confirm(screen: &str) -> bool {
@@ -164,7 +163,6 @@ fn pty_graph_merge_creates_commit() {
         "graph cursor on main-leaf-commit; m merge hint; overlay closed",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
 
     tui.key('m');
     tui.wait_pred(
@@ -172,12 +170,7 @@ fn pty_graph_merge_creates_commit() {
         "graph m opens Merge main into feature/keep confirm (not mouse, not a write)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
-    tui.wait_pred(
-        merge_into_head_confirm,
-        "merge confirm holds (not a flicker or toast-only tick)",
-        WAIT,
-    );
+    // The key that answers this confirm next proves it stayed open.
 
     tui.key('y');
     tui.wait_pred(

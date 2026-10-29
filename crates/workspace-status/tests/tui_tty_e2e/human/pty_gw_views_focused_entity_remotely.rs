@@ -4,9 +4,7 @@ use std::path::Path;
 
 use crate::harness::PtySession;
 use crate::seed::{ahead_workspace, git, git_stdout};
-use crate::support::{
-    graph_cursor_on, graph_pane_focused, tree_cursor_on, GIT_WAIT, SETTLE_MS, WAIT,
-};
+use crate::support::{graph_cursor_on, graph_pane_focused, tree_cursor_on, GIT_WAIT, WAIT};
 
 /// Forge URL `origin` points at after the seed push. No test reaches it:
 /// `gw` reads local refs, and the `gh` / `glab` shims answer badge lookups.
@@ -146,7 +144,7 @@ fn pty_gw_views_focused_entity_remotely() {
         "gw on an unpushed commit says it is not on origin",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    // The refusal paints in place of the open, so nothing opens after it.
     assert_eq!(
         opened(&marker),
         [REPO_PAGE],

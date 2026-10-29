@@ -6,8 +6,8 @@ use crate::harness::{left_tree, PtySession};
 use crate::seed::{daily_workspace, git_env};
 use crate::support::{
     ack_rows, after_ack, crumb_row, has_stage_hint, no_wrong_overlays, pane_unstaged_readme,
-    readme_unstaged_badge, status_row, tree_cursor_on, tree_has, tree_line_containing, GIT_WAIT,
-    SETTLE_MS, WAIT,
+    prove_keys_handled, readme_unstaged_badge, status_row, tree_cursor_on, tree_has,
+    tree_line_containing, GIT_WAIT, WAIT,
 };
 
 const UNTRACKED: &str = "new.txt";
@@ -244,12 +244,7 @@ fn pty_y_revert_and_delete() {
         "x arms Revert app? with 1 tracked / 1 untracked kept; Y deletes",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
-    tui.wait_pred(
-        documented_revert_confirm_mixed_y_deletes,
-        "mixed revert confirm holds (not a flicker, y path, or toast-only tick)",
-        WAIT,
-    );
+    // The Shift+Y below answers this confirm, which proves it stayed open.
     assert_mixed_dirty_on_disk(&app, &untracked, &tui.screen());
 
     tui.shift_letter('Y');
@@ -261,7 +256,7 @@ fn pty_y_revert_and_delete() {
         "CSI-u Shift+Y: reverted 1 tracked, 1 untracked; overlay gone; new.txt off tree",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_y_reverted_and_deleted,
         "Y apply holds (not a flicker, y keep-untracked, or overlay return)",

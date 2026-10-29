@@ -1470,9 +1470,12 @@ pub fn esc_to_left(
     tui.wait_pred(now_left, why, WAIT);
 }
 
-/// The `?` help overlay is open.
+/// The `?` help overlay is open: its header row names the MOVE and VIEW
+/// columns (at any width; the footer text wraps on a narrow grid).
 pub fn help_open(screen: &str) -> bool {
-    screen.contains("MOVE") && screen.contains("/ search help")
+    screen
+        .lines()
+        .any(|line| line.contains("MOVE") && line.contains("VIEW"))
 }
 
 /// Prove that every key sent before this call has been handled.
@@ -1492,6 +1495,24 @@ pub fn prove_keys_handled(tui: &mut PtySession) {
     );
     tui.esc();
     tui.wait_pred(|screen| !help_open(screen), "Esc closes help", WAIT);
+}
+
+/// [`prove_keys_handled`] for an open Quick Open palette: a typed `z`
+/// shows at the end of the filter (`…z▏`) only after the earlier keys ran
+/// and only while the palette is still open; Backspace then removes it.
+pub fn prove_palette_keys_handled(tui: &mut PtySession) {
+    tui.key('z');
+    tui.wait_pred(
+        |screen| screen.contains("z▏"),
+        "a z typed after the earlier keys shows in the open palette filter",
+        WAIT,
+    );
+    tui.send_bytes(b"\x7f");
+    tui.wait_pred(
+        |screen| !screen.contains("z▏"),
+        "Backspace removes the probe z from the filter",
+        WAIT,
+    );
 }
 
 /// `times` plain CSI-u `j` presses, each waiting for the cursor to move

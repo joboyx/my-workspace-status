@@ -96,11 +96,19 @@ fn pty_v_s_stages_one_hunk_u_unstages_that_range() {
 
     // One write: both `g` share one arrival, so the 400 ms window holds.
     tui.send_bytes(b"gg");
+    // Wait for the diff the stage reloads to its final rows: the cursor
+    // follows the file to its Staged row, whose diff is the staged ALPHA
+    // hunk only. A `V` on an earlier load is dropped when the rows change
+    // under it.
     tui.wait_pred(
         |screen| {
             panes_tree_unfocused_diff_focused(screen)
-                && screen.contains("STAGED")
+                && screen
+                    .lines()
+                    .any(|line| line.contains("STAGED") && !line.contains("UNSTAGED"))
+                && !screen.contains("UNSTAGED")
                 && screen.contains(ALPHA)
+                && !screen.contains(OMEGA)
                 && !screen.contains("VISUAL")
         },
         "gg on the focused diff keeps STAGED ALPHA in view",
