@@ -274,7 +274,7 @@ A row that a watch reload adds or changes flashes and fades.
 
 ### `pr-status` — PR status marks
 
-The PR of a checkout's branch, in one of six states: the badge at the end of a workspace tree row (`<ref> <glyph>`), the badge flush right on a graph worktree row (glyph only), and the chip flush right on the graph sync header (`<glyph> <ref> <state label>  ▸ <next action>`). `tree::pr_badge_kind` and `tree::pr_badge_mark` give every surface the same glyph and colour role.
+The PR of a checkout's branch, in one of six states: the badge at the end of a workspace tree row (`<ref> <glyph>`), the badge flush right on a graph worktree row (glyph only), and the chip flush right on the graph sync header (`<glyph> <ref> <state label>  ▸ <next action>`). `tree::pr_badge_kind` and `tree::pr_badge_mark` give every surface the same glyph and colour role. Every mark opens the same PR popover (`popover::pr_section`), whose PR lines act on its own PR (`run_pr_action_at`).
 
 | Feature | What | Tests |
 | --- | --- | --- |
@@ -283,13 +283,15 @@ The PR of a checkout's branch, in one of six states: the badge at the end of a w
 | `stale` | A PR whose last successful lookup is old paints muted, shape unchanged. | `stale_tree_pr_badge_paints_muted`, `graph_worktree_badges_paint_each_state_and_stale_muted`, `graph_header_chip_reads_state_ref_label_and_next_action` |
 | `link` | The painted PR mark is one icon hit (hover peek, click pin, Ctrl+click opens the PR) and one OSC 8 link to the PR. | `tree_pr_badge_ends_at_the_pane_edge_in_every_state_look_and_forge`, `ctrl_click_on_the_painted_tree_badge_opens_its_pr_only_there`, `graph_worktree_badge_paints_and_ctrl_click_opens_its_pr`, `graph_header_chip_paints_flush_right_and_links_its_ref_in_every_look` |
 | `chip` | The state label and the next action (merged: the age) follow the ref; a narrower pane drops the next action, then the label. | `graph_header_chip_reads_state_ref_label_and_next_action`, `graph_header_chip_paints_flush_right_and_links_its_ref_in_every_look`, `header_chip_paints_the_widest_candidate_that_fits_flush_right` |
+| `popover` | The PR popover (peek or pin on the mark) shows `<glyph> PR · <state label>`, the PR lines, a rule, and Open PR, the CI page, Copy URL, and Refresh this PR (not on a merged PR); its PR lines act on that PR, whatever row has the focus. | `each_state_names_its_next_step_and_actions_on_both_forges`, `a_failed_github_pr_lists_every_line_in_order`, `a_ready_gitlab_mr_shows_its_pipeline_and_approvals`, `pr_popover_paints_its_heading_bold_ref_rule_and_clips_long_values`, `pr_popover_lines_act_on_their_own_pr_not_the_focused_graph_row` |
+| `open-ci` | `gc` on the row, and the popover CI line, open the PR's CI page (GitHub the failed, running, or first check, else the checks tab; GitLab the head pipeline, else the pipelines tab). | `gc_on_a_tree_row_opens_the_known_ci_link_on_both_forges`, `gc_in_the_graph_opens_a_worktree_rows_ci_on_both_forges`, `the_popover_open_ci_line_runs_gc_on_both_forges`, `gc_looks_the_pr_up_then_opens_its_ci_page_on_both_forges`, `pr_popover_lines_act_on_their_own_pr_not_the_focused_graph_row` |
 
-| Surface | Tab | Depth | Pane | Looks | Code anchors | `badge` | `ref` | `stale` | `link` | `chip` |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `tree` | Workspace | 0 | left | boxed, flat | `draw_tree`, `tree_pr_badge`, `with_pr_badge`, `segmented_icon_spans`, `pr_badge_links` | supported | supported | supported | supported | n/a: I5, the graph header chip carries the label and the next action |
-| `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `draw_graph`, `graph_pr_badges`, `row_badges`, `pr_badge_links` | supported | n/a: I5, the worktree row is narrow and the header chip carries the ref | supported | supported | n/a: I5, the header chip carries the label and the next action |
-| `graph-d1` | Workspace | 1 | left | boxed, flat | `draw_graph`, `graph_pr_badges`, `row_badges`, `pr_badge_links` | supported | n/a: I5, the worktree row is narrow and the header chip carries the ref | supported | supported | n/a: I5, the header chip carries the label and the next action |
-| `graph-header` | Workspace | 0, 1 | right, left | boxed, flat | `draw_graph`, `graph_header_pr`, `graph_pr_chip`, `header_chip`, `pr_badge_links` | supported | supported | supported | supported | supported |
+| Surface | Tab | Depth | Pane | Looks | Code anchors | `badge` | `ref` | `stale` | `link` | `chip` | `popover` | `open-ci` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `tree` | Workspace | 0 | left | boxed, flat | `draw_tree`, `tree_pr_badge`, `with_pr_badge`, `segmented_icon_spans`, `pr_badge_links`, `pr_section`, `run_pr_action` | supported | supported | supported | supported | n/a: I5, the graph header chip carries the label and the next action | supported | supported |
+| `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `draw_graph`, `graph_pr_badges`, `row_badges`, `pr_badge_links`, `pr_section`, `run_pr_action` | supported | n/a: I5, the worktree row is narrow and the header chip carries the ref | supported | supported | n/a: I5, the header chip carries the label and the next action | supported | supported |
+| `graph-d1` | Workspace | 1 | left | boxed, flat | `draw_graph`, `graph_pr_badges`, `row_badges`, `pr_badge_links`, `pr_section`, `run_pr_action` | supported | n/a: I5, the worktree row is narrow and the header chip carries the ref | supported | supported | n/a: I5, the header chip carries the label and the next action | supported | supported |
+| `graph-header` | Workspace | 0, 1 | right, left | boxed, flat | `draw_graph`, `graph_header_pr`, `graph_pr_chip`, `header_chip`, `pr_badge_links`, `pr_section`, `run_pr_action` | supported | supported | supported | supported | supported | supported | supported |
 
 ## Open gaps
 
