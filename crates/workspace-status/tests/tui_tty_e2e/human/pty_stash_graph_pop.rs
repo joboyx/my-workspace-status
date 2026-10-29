@@ -2,8 +2,8 @@ use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
     ack_rows, after_ack, documented_launch_first_paint, graph_cursor_on, graph_pane_focused,
-    merger_graph_drilled_right, merger_graph_left_unfocused, no_mouse_toggle_toast, right_pane,
-    status_row, tree_has, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
+    merger_graph_drilled_right, merger_graph_left_unfocused, no_mouse_toggle_toast,
+    prove_keys_handled, right_pane, status_row, tree_has, tree_line_containing, GIT_WAIT, WAIT,
 };
 
 fn no_wrong_stash_pop_overlays(screen: &str) -> bool {
@@ -137,7 +137,7 @@ fn pty_stash_graph_pop() {
         "j selects stash@{0}: graph cursor on WIP on graph; p pop stash hint",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         stash_row_ready_to_pop,
         "stash row holds (not a flicker); overlay closed; not pull",
@@ -150,7 +150,7 @@ fn pty_stash_graph_pop() {
         "graph p pops stash@{0}: wip.txt A on merger, stash gone, popped toast",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_graph_stash_pop,
         "popped paint holds (not a flicker, toast-only tick, or apply-only)",

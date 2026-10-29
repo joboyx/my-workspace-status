@@ -2,9 +2,9 @@ use crate::harness::{tree_row_containing, PtySession};
 use crate::seed::daily_workspace;
 use crate::support::{
     crumb_row, documented_launch_first_paint, merger_graph_left_unfocused, no_mouse_toggle_toast,
-    no_updates_group_folded, no_wrong_overlays, status_row, title_has_files, tree_cursor_on,
-    tree_dir_expanded, tree_has, tree_pane_focused, GIT_WAIT, SETTLE_MS, TREE_DEPTH1_CHEVRON_COL,
-    TREE_LABEL_COL, WAIT,
+    no_updates_group_folded, no_wrong_overlays, prove_keys_handled, status_row, title_has_files,
+    tree_cursor_on, tree_dir_expanded, tree_has, tree_pane_focused, GIT_WAIT,
+    TREE_DEPTH1_CHEVRON_COL, TREE_LABEL_COL, WAIT,
 };
 
 /// Clicked merger label: cursor + graph pane, stay left, no fold, no Enter.
@@ -75,7 +75,7 @@ fn pty_click_selects_tree_row() {
         "SGR press+release on merger label selects that row and loads its graph",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         click_selects_merger_row,
         "selected merger graph holds (not a flicker, cursor-only, or toast-only)",

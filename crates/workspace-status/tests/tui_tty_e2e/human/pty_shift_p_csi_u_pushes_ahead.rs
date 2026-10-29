@@ -3,8 +3,8 @@ use crate::seed::ahead_workspace;
 use crate::support::{
     ack_rows, after_ack, after_syncbox_name, crumb_row, graph_subject_line,
     graph_subject_meta_line, has_fetch_hint, has_pull_hint, line_on_branch,
-    panes_tree_focused_graph_unfocused, status_row, syncbox_row_current, tree_cursor_on, tree_has,
-    GIT_WAIT, SETTLE_MS, WAIT,
+    panes_tree_focused_graph_unfocused, prove_keys_handled, status_row, syncbox_row_current,
+    tree_cursor_on, tree_has, GIT_WAIT, WAIT,
 };
 
 /// Trailing ASCII ahead-by-1 (`^1`) on the syncbox tree row.
@@ -165,12 +165,7 @@ fn pty_shift_p_csi_u_pushes_ahead() {
         "Shift+P opens the push confirm (Push main → origin (1 commit)?) and pushes nothing",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
-    tui.wait_pred(
-        push_confirm_open_nothing_pushed,
-        "the confirm holds: no push until y",
-        WAIT,
-    );
+    // The `y` below answers this confirm, which proves it stayed open.
 
     tui.key('y');
     tui.wait_pred(
@@ -178,7 +173,7 @@ fn pty_shift_p_csi_u_pushes_ahead() {
         "Shift+P pushes: Pushed 1 repo, HEAD ahead-tip-commit [+=main], no ^1, push hint gone",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_shift_p_pushed,
         "pushed paint holds (not a flicker or toast-only tick)",

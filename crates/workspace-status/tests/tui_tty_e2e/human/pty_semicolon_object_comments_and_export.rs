@@ -6,7 +6,7 @@ use crate::harness::PtySession;
 use crate::seed::{daily_workspace, git, git_env, seed_repo, unique_root, worktree_workspace};
 use crate::support::{
     documented_launch_first_paint, graph_cursor_on, merger_graph_drilled_right,
-    merger_graph_left_unfocused, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
+    merger_graph_left_unfocused, prove_keys_handled, tree_cursor_on, tree_has, GIT_WAIT, WAIT,
 };
 
 const BRANCH_BODY: &str = "branch-obj-note-e2e";
@@ -268,7 +268,7 @@ fn pty_semicolon_object_comments_and_export() {
 
     git(&app, &["branch", "-D", "doomed"]);
     tui.key('r');
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         |screen| overlay_closed(screen) && tree_has(screen, "app"),
         "r refresh after deleting doomed",

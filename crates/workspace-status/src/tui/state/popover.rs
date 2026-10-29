@@ -1156,6 +1156,28 @@ mod tests {
         assert!(app.popover.is_none(), "grace ended");
     }
 
+    /// A pinned popover has no leave grace: the pointer leaving starts no
+    /// timer, and no time past the grace closes it.
+    #[test]
+    fn a_pinned_popover_has_no_leave_grace() {
+        let mut app = app();
+        paint(&mut app);
+        let hit = sync_hit(&app, "repo:app");
+        app.dispatch(Action::Click {
+            col: hit.x,
+            row: hit.y,
+        });
+        app.dispatch(Action::Release);
+        paint(&mut app);
+        assert_eq!(app.input_mode(), InputMode::Popover, "pinned");
+
+        let t0 = Instant::now();
+        app.set_pointer_at(Some((0, 0)), t0);
+        assert_eq!(app.peek_remaining_ms(t0), None, "no grace timer");
+        assert!(!app.expire_peek(t0 + ms(PEEK_GRACE_MS * 10)));
+        assert!(app.popover.is_some(), "the pinned popover stays");
+    }
+
     #[test]
     fn icons_under_the_search_dialog_do_not_hover_or_arm_a_peek() {
         let mut app = app();

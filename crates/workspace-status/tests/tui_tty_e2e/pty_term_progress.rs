@@ -55,17 +55,30 @@ fn fetch_all(tui: &mut PtySession, slow: &SlowFetchPullGit) {
     wait_slow_git_started(slow, || tui.screen(), WAIT);
 }
 
-/// Wait until the reader thread has every byte the exited child wrote.
+/// Leave-alternate-screen: the terminal restore writes it after any OSC
+/// 9;4 clear (`restore_terminal_to`), so it is the last byte that matters.
+const LEAVE_ALT_SCREEN: &[u8] = b"\x1b[?1049l";
+
+/// Wait until the reader thread has the exited child's terminal restore.
+///
+/// Bytes arrive in order, so once the leave-alternate-screen sequence is
+/// read, every OSC 9;4 sequence written before it has been read too.
 fn settle_raw(tui: &PtySession) -> Vec<u8> {
     let start = Instant::now();
-    let mut raw = tui.raw_output();
     loop {
-        thread::sleep(Duration::from_millis(100));
-        let next = tui.raw_output();
-        if next.len() == raw.len() || start.elapsed() >= WAIT {
-            return next;
+        let raw = tui.raw_output();
+        if raw
+            .windows(LEAVE_ALT_SCREEN.len())
+            .any(|w| w == LEAVE_ALT_SCREEN)
+        {
+            return raw;
         }
-        raw = next;
+        assert!(
+            start.elapsed() < WAIT,
+            "timeout waiting for the terminal restore; states: {:?}",
+            progress_states(&raw)
+        );
+        thread::sleep(Duration::from_millis(25));
     }
 }
 

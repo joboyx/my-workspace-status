@@ -4,8 +4,8 @@ use std::process::Command;
 use crate::harness::{PtySession, ROWS};
 use crate::seed::{git, unique_root};
 use crate::support::{
-    graph_cursor_on, graph_pane_focused, right_pane, title_has_files, title_has_graph,
-    tree_cursor_on, GIT_WAIT, SETTLE_MS, WAIT,
+    graph_cursor_on, graph_pane_focused, prove_keys_handled, right_pane, title_has_files,
+    title_has_graph, tree_cursor_on, GIT_WAIT, WAIT,
 };
 
 const FULL_REF: &str = "feature/reconciliation";
@@ -194,13 +194,13 @@ fn land_demo_merger_graph() -> PtySession {
 /// Real-input PTY layer; runs under `cargo test --workspace`.
 #[test]
 fn pty_demo_merged_head_chip_matches_footer_on_painted_row() {
-    let tui = land_demo_merger_graph();
+    let mut tui = land_demo_merger_graph();
     tui.wait_pred(
         painted_merged_head_on_left_graph,
         "merged HEAD chip matches the footer on the painted spacer",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         painted_merged_head_on_left_graph,
         "merged HEAD chip holds (not a flicker or launch file-diff)",
@@ -243,7 +243,7 @@ fn pty_demo_narrow_graph_truncates_chip_name_footer_keeps_full_ref() {
         "64x28 resize keeps the full ref in the footer; spacer keeps a full or truncated chip",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         narrow_graph_footer_on_short_grid,
         "narrow footer holds (not a flicker, same-size no-op, or [+N] collapse)",

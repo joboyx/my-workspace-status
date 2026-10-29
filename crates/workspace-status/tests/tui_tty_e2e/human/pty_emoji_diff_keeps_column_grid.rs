@@ -4,8 +4,8 @@ use std::path::Path;
 use crate::harness::PtySession;
 use crate::seed::{daily_workspace, git};
 use crate::support::{
-    no_wrong_overlays, panes_tree_focused_diff_unfocused, right_pane, status_row, title_has_diff,
-    tree_cursor_on, tree_has, SETTLE_MS, WAIT,
+    no_wrong_overlays, panes_tree_focused_diff_unfocused, prove_keys_handled, right_pane,
+    status_row, title_has_diff, tree_cursor_on, tree_has, WAIT,
 };
 
 /// Wide enough that split paints (`NARROW_SXS` is 100). Default 140 falls
@@ -166,7 +166,7 @@ fn pty_emoji_diff_keeps_column_grid() {
         "search loads the UNSTAGED split: emoji stay emoji, RULE matches ASCII rows",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_emoji_split_grid,
         "emoji split grid holds (not a flicker, RULE walk, wrap, or placeholder)",

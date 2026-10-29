@@ -4,10 +4,6 @@ use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::WAIT;
 
-/// Gap after a nav letter typed into the palette filter. A same-letter burst
-/// is dropped by `discard_held_nav_backlog` (see `pty_workspace_command_palette`).
-const PALETTE_NAV_LETTER_GAP_MS: u64 = 50;
-
 fn wait_tracking(tui: &PtySession, mode: MouseProtocolMode, what: &str) {
     tui.wait_pred(
         |_| {
@@ -78,12 +74,7 @@ fn pty_m_toggles_terminal_mouse_tracking() {
             "`:` opens Quick Open commands",
             WAIT,
         );
-        for c in "toggle mouse".chars() {
-            tui.key(c);
-            if matches!(c, 'l' | 'k' | 'j' | 'h') {
-                tui.wait_ms(PALETTE_NAV_LETTER_GAP_MS);
-            }
-        }
+        crate::support::type_palette_filter(&mut tui, "toggle mouse");
         tui.wait_pred(
             |screen| screen.contains("Enter run") && screen.contains("Toggle mouse"),
             "palette filter shows `Toggle mouse`",

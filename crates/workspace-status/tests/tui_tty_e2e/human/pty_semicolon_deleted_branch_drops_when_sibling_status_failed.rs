@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::harness::PtySession;
 use crate::seed::{git, seed_primary_and_linked_family, unique_root};
-use crate::support::{corrupt_index, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT};
+use crate::support::{corrupt_index, tree_cursor_on, tree_has, GIT_WAIT, WAIT};
 
 const BODY: &str = "sibling-failed-drop-e2e";
 const BRANCH: &str = "doomed";
@@ -120,14 +120,19 @@ fn pty_semicolon_deleted_branch_drops_when_sibling_status_failed() {
         WAIT,
     );
     tui.key('r');
-    tui.wait_ms(SETTLE_MS);
+    // Wait for both halves of the refresh: the linked checkout failed, and
+    // the healthy primary moved off the deleted branch. The comment store
+    // drops the doomed comment when that primary snapshot applies, so `y`
+    // before it would open the export with the old comment.
     tui.wait_pred(
         |screen| {
             overlay_closed(screen)
                 && tree_has(screen, "app")
                 && (screen.contains("(unknown)") || screen.contains("status failed"))
+                && tree_has(screen, PRIMARY)
+                && !tree_has(screen, BRANCH)
         },
-        "workspace r shows the failed linked checkout",
+        "workspace r shows the failed linked checkout and the primary off the deleted branch",
         GIT_WAIT,
     );
     tui.key('y');

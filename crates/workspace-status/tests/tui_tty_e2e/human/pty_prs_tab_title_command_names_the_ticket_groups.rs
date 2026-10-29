@@ -64,7 +64,7 @@ fn pty_prs_tab_title_command_names_the_ticket_groups() {
         "every lookup lands: the workspace row counts nine PRs",
         GIT_WAIT,
     );
-    tui.keys("gp");
+    tui.send_bytes(b"gp");
     let want: Vec<(bool, String)> = WITH_TITLES
         .iter()
         .map(|text| (false, text.to_string()))

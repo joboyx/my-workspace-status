@@ -3,13 +3,12 @@ use crate::harness::{left_tree, PtySession};
 use crate::seed::{daily_workspace, seed_long_subject_repo};
 use crate::support::{
     crumb_row, graph_cursor_on, no_wrong_overlays, panes_tree_focused_graph_unfocused,
-    panes_tree_unfocused_graph_focused, right_of_split, right_pane, status_row, title_has_files,
-    tree_cursor_on, tree_has, tree_inactive_selection_on, SETTLE_MS, WAIT,
+    panes_tree_unfocused_graph_focused, prove_keys_handled, right_of_split, right_pane, status_row,
+    step_until_changed, title_has_files, tree_cursor_on, tree_has, tree_inactive_selection_on,
+    WAIT,
 };
 
 const REPO: &str = "longsubj";
-/// Gap so the input thread does not drain the held-nav backlog as one move.
-const REPEAT_GAP_MS: u64 = 50;
 
 fn status_has_graph_tail(screen: &str) -> bool {
     status_row(screen).contains(GRAPH_HSCROLL_VISIBLE)
@@ -100,19 +99,33 @@ fn graph_cursor_on_panned_root(screen: &str) -> bool {
     })
 }
 
-/// CSI-u press, spaced Repeat, release. The input thread drains a held-nav
-/// burst after each move, so Repeats must not be written as one flush.
+/// CSI-u press, Repeats, release. The input thread drops queued copies of
+/// a held nav key after each move, so each Repeat waits for the right pane
+/// to pan before the next one; Repeats go on until `UNIQUE_GRAP` shows.
 fn csi_u_hold_letter(tui: &mut PtySession, letter: char) {
-    tui.letter_press(letter);
-    tui.wait_ms(REPEAT_GAP_MS);
-    tui.wait_pred_while(
+    step_until_changed(
+        tui,
+        |tui| tui.letter_press(letter),
+        right_pane,
+        |_| true,
+        "the CSI-u press pans the focused graph",
+    );
+    for _ in 0..80 {
+        if documented_hl_panned_graph(&tui.screen()) {
+            break;
+        }
+        step_until_changed(
+            tui,
+            |tui| tui.letter_repeat(letter),
+            right_pane,
+            |_| true,
+            "each CSI-u Repeat pans the focused graph further",
+        );
+    }
+    tui.wait_pred(
         documented_hl_panned_graph,
         "CSI-u held l pans UNIQUE_GRAP onto the focused graph (right pane, not tree/chip)",
         WAIT,
-        |tui| {
-            tui.letter_repeat(letter);
-            tui.wait_ms(REPEAT_GAP_MS);
-        },
     );
     tui.csi_u(u32::from(letter.to_ascii_lowercase()), 1, 3);
 }
@@ -171,7 +184,8 @@ fn pty_graph_h_l_pans_long_subject() {
         "CSI-u held l pans UNIQUE_GRAP onto the right pane (tree and status chip stay clean)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    // After the release key is handled, the pan holds.
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_hl_panned_graph,
         "graph pan holds (not a flicker, tree fold, file-diff, or chrome-only suffix)",

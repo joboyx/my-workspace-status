@@ -375,8 +375,8 @@ fn pty_explorer_reuses_tab_switches_and_refuses_stage() {
     let mut tui = launch(&workspace);
     open_explorer_on_edit(&mut tui);
 
-    tui.key('g');
-    tui.key('T');
+    // Each chord goes out in one write (see `support::send_gesture`).
+    tui.send_bytes(b"gT");
     tui.wait_pred(
         |screen| {
             on_workspace(screen)
@@ -412,15 +412,13 @@ fn pty_explorer_reuses_tab_switches_and_refuses_stage() {
         GIT_WAIT,
     );
 
-    tui.key('g');
-    tui.key('t');
+    tui.send_bytes(b"gt");
     tui.wait_pred(
         |screen| on_workspace(screen) && explorer_tab_count(screen) == 1,
         "gt from the last tab wraps to Workspace",
         WAIT,
     );
-    tui.key('g');
-    tui.key('t');
+    tui.send_bytes(b"gt");
     tui.wait_pred(
         |screen| explorer_cursor_on(screen, "README.md"),
         "gt from Workspace activates Explorer, cursor still on README.md",

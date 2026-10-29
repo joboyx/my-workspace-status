@@ -1,34 +1,20 @@
 use crate::harness::PtySession;
 use crate::seed::compare_ahead_workspace;
-use crate::support::{crumb_row, status_row, tree_cursor_on, GIT_WAIT, WAIT};
+use crate::support::{
+    crumb_row, csi_u_shift_tap, csi_u_tap, csi_u_typeless, send_gesture, status_row,
+    tree_cursor_on, GIT_WAIT, WAIT,
+};
 
-/// CSI-u press+release (`CSI code ; 1 : 1 u` / `: 3 u`).
-fn csi_u_letter(tui: &mut PtySession, letter: char) {
-    let codepoint = u32::from(letter.to_ascii_lowercase());
-    tui.csi_u(codepoint, 1, 1);
-    tui.csi_u(codepoint, 1, 3);
-}
-
-/// CSI-u letter with no event type (`CSI code ; 1 u`).
+/// Typeless CSI-u tap of `key`: the press report and the key-up report
+/// that VTE sends as a second identical report in the same burst.
 ///
 /// Terminals that honor `REPORT_ALL_KEYS_AS_ESCAPE_CODES` but omit
-/// `REPORT_EVENT_TYPES` send this for both press and release. The second
-/// sequence is another Press, not Release. That is the live xfce/VTE hole:
-/// `g` then typeless `g` completes `gg`, so `t` / `T` stay bare.
-fn csi_u_typeless(tui: &mut PtySession, letter: char) {
-    let codepoint = u32::from(letter.to_ascii_lowercase());
-    tui.send_bytes(format!("\x1b[{codepoint};1u").as_bytes());
-}
-
-fn csi_u_typeless_press_and_release(tui: &mut PtySession, letter: char) {
-    csi_u_typeless(tui, letter);
-    csi_u_typeless(tui, letter);
-}
-
-fn csi_u_gg(tui: &mut PtySession) {
-    csi_u_letter(tui, 'g');
-    tui.wait_ms(50);
-    csi_u_letter(tui, 'g');
+/// `REPORT_EVENT_TYPES` send `CSI code ; 1 u` for both press and release.
+/// The second report is another Press, not Release. That is the live
+/// xfce/VTE hole: `g` then typeless `g` completes `gg`, so `t` / `T` stay
+/// bare.
+fn typeless_tap(key: char) -> String {
+    csi_u_typeless(key).repeat(2)
 }
 
 fn open_default_and_main(tui: &mut PtySession) {
@@ -80,6 +66,12 @@ fn tree_or_theme_fired(screen: &str) -> bool {
 /// `ToggleTreeMode` (`Flat paths` / ` flat`) or a theme toast
 /// (`theme:`) must fail. Start on the last compare (user POV), not after a
 /// raw-`g` jump that hid the VTE release-as-press hole.
+///
+/// Each chord goes out in one write ([`send_gesture`]): its bytes arrive
+/// back to back, in practice in one read, so the chord and typeless echo
+/// windows of arrival hold however late the loop takes the keys. The
+/// window lengths themselves are pinned by the `tui::keys` and
+/// `tui::state` unit tests.
 #[test]
 fn pty_compare_gt_chords_and_gg() {
     let (_root, workspace) = compare_ahead_workspace();
@@ -92,56 +84,49 @@ fn pty_compare_gt_chords_and_gg() {
         GIT_WAIT,
     );
 
-    csi_u_typeless_press_and_release(&mut tui, 'g');
-    csi_u_typeless_press_and_release(&mut tui, 't');
+    send_gesture(&mut tui, &[&typeless_tap('g'), &typeless_tap('t')]);
     tui.wait_pred(
         |screen| on_workspace(screen) && !tree_or_theme_fired(screen),
         "typeless CSI-u gt from the last compare is NextTab (wrap to Workspace), not ToggleTreeMode",
         WAIT,
     );
 
-    csi_u_typeless_press_and_release(&mut tui, 'g');
-    tui.shift_letter('T');
+    send_gesture(&mut tui, &[&typeless_tap('g'), &csi_u_shift_tap('T')]);
     tui.wait_pred(
         |screen| on_compare_local_main(screen) && !tree_or_theme_fired(screen),
         "gT from Workspace is PreviousTab back to vs main and sets no theme",
         WAIT,
     );
 
-    csi_u_letter(&mut tui, 'g');
-    csi_u_letter(&mut tui, '1');
+    send_gesture(&mut tui, &[&csi_u_tap('g'), &csi_u_tap('1')]);
     tui.wait_pred(
         |screen| on_workspace(screen) && !tree_or_theme_fired(screen),
         "g1 activates Workspace",
         WAIT,
     );
 
-    csi_u_letter(&mut tui, 'g');
-    csi_u_letter(&mut tui, '2');
+    send_gesture(&mut tui, &[&csi_u_tap('g'), &csi_u_tap('2')]);
     tui.wait_pred(
         |screen| on_compare_origin_main(screen) && !tree_or_theme_fired(screen),
         "g2 activates vs origin/main",
         WAIT,
     );
 
-    csi_u_letter(&mut tui, 'g');
-    csi_u_letter(&mut tui, '3');
+    send_gesture(&mut tui, &[&csi_u_tap('g'), &csi_u_tap('3')]);
     tui.wait_pred(
         |screen| on_compare_local_main(screen) && !tree_or_theme_fired(screen),
         "g3 activates vs main",
         WAIT,
     );
 
-    csi_u_letter(&mut tui, 'g');
-    csi_u_letter(&mut tui, '9');
+    send_gesture(&mut tui, &[&csi_u_tap('g'), &csi_u_tap('9')]);
     tui.wait_pred(
         |screen| on_compare_local_main(screen) && !tree_or_theme_fired(screen),
         "g9 missing index is a no-op (stay on vs main)",
         WAIT,
     );
 
-    tui.key('g');
-    tui.key('t');
+    send_gesture(&mut tui, &["g", "t"]);
     tui.wait_pred(
         |screen| on_workspace(screen) && !tree_or_theme_fired(screen),
         "raw-byte gt from vs main is NextTab",
@@ -149,7 +134,12 @@ fn pty_compare_gt_chords_and_gg() {
     );
 
     tui.search("app");
-    csi_u_gg(&mut tui);
+    tui.wait_pred(
+        |screen| tree_cursor_on(screen, "app") && !tree_cursor_on(screen, "workspace"),
+        "search lands on app, off the workspace root, so a no-op gg cannot pass",
+        WAIT,
+    );
+    send_gesture(&mut tui, &[&csi_u_tap('g'), &csi_u_tap('g')]);
     tui.wait_pred(
         |screen| tree_cursor_on(screen, "workspace") && !tree_cursor_on(screen, "app"),
         "gg still jumps the workspace tree",

@@ -6,10 +6,11 @@ use crate::seed::{
     PAIR_BASE_FILE_LINE, PAIR_FIRST_FILE_LINE, PAIR_SECOND_FILE_LINE,
 };
 use crate::support::{
-    graph_cursor_on, no_wrong_overlays, panes_files_focused, panes_files_focused_diff_unfocused,
-    panes_files_unfocused_diff_focused, panes_graph_focused_files_unfocused,
-    panes_tree_focused_graph_unfocused, panes_tree_unfocused_graph_focused, right_cursor_on,
-    right_pane, title_has_diff, title_has_files, WAIT,
+    esc_to_left, graph_cursor_on, no_wrong_overlays, panes_files_focused,
+    panes_files_focused_diff_unfocused, panes_files_unfocused_diff_focused,
+    panes_graph_focused_files_unfocused, panes_tree_focused_graph_unfocused,
+    panes_tree_unfocused_graph_focused, right_cursor_on, right_pane, title_has_diff,
+    title_has_files, WAIT,
 };
 
 const REPO: &str = "msgpair";
@@ -249,15 +250,10 @@ fn wheel(tui: &mut PtySession, look: Look, button: u8, needle: &str) {
 /// Esc out of the depth-2 diff to the depth-2 file list. The first Esc
 /// may only clear the armed search chip.
 fn esc_unfocus_diff(tui: &mut PtySession, look: Look) {
-    tui.esc();
-    tui.wait_ms(120);
-    if panes_files_unfocused_diff_focused(&look.view(&tui.screen())) {
-        tui.esc();
-    }
-    wait(
+    esc_to_left(
         tui,
-        look,
-        panes_files_focused_diff_unfocused,
+        |screen| panes_files_unfocused_diff_focused(&look.view(screen)),
+        |screen| panes_files_focused_diff_unfocused(&look.view(screen)),
         "Esc unfocuses the depth 2 diff",
     );
 }

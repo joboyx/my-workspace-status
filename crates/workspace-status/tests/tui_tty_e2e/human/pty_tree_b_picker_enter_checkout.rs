@@ -5,8 +5,8 @@ use crate::harness::PtySession;
 use crate::seed::{focus_workspace, git_env};
 use crate::support::{
     ack_rows, after_ack, focusbox_graph_left_full, has_fetch_hint, line_on_branch,
-    no_mouse_toggle_toast, status_row, title_has_files, tree_cursor_on, tree_has, tree_has_branch,
-    tree_line_containing, tree_pane_focused, GIT_WAIT, SETTLE_MS, WAIT,
+    no_mouse_toggle_toast, prove_keys_handled, status_row, title_has_files, tree_cursor_on,
+    tree_has, tree_has_branch, tree_line_containing, tree_pane_focused, GIT_WAIT, WAIT,
 };
 
 fn git_stdout(repo: &Path, args: &[&str]) -> String {
@@ -235,12 +235,8 @@ fn pty_tree_b_picker_enter_checkout() {
         "tree b opens the local picker on focusbox; Enter checkout; HEAD still feature/keep",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
-    tui.wait_pred(
-        tree_picker_open_on_keep,
-        "picker holds (not a flicker, graph b, or no-op)",
-        WAIT,
-    );
+    // The filter typed next lands in this picker, which proves it stayed
+    // open.
     assert_head(&repo, "feature/keep", "keep-leaf-commit", &tui.screen());
     assert_eq!(
         porcelain(&repo),
@@ -255,12 +251,8 @@ fn pty_tree_b_picker_enter_checkout() {
         "filter main isolates existing main; Enter has not checked out yet",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
-    tui.wait_pred(
-        tree_picker_filtered_to_main,
-        "filtered picker holds (not create, not a write)",
-        WAIT,
-    );
+    // The Enter below checks out from this filtered picker, which proves
+    // it stayed.
     assert_head(&repo, "feature/keep", "keep-leaf-commit", &tui.screen());
 
     tui.enter();
@@ -269,7 +261,7 @@ fn pty_tree_b_picker_enter_checkout() {
         "Enter checks out main: Checked out main, tree on main, [+main], picker closed",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_tree_picker_enter_checkout,
         "checkout paint holds (not a flicker, toast-only tick, create, or still feature/keep)",

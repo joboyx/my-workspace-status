@@ -14,7 +14,7 @@ use crate::seed::{daily_workspace, seed_multiline_message_repo};
 use crate::support::{
     crumb_row, documented_launch_first_paint, graph_cursor_on, no_mouse_toggle_toast,
     no_wrong_overlays, panes_tree_unfocused_graph_focused, right_of_split, tree_cursor_on,
-    RIGHT_PANE_COL, SETTLE_MS, WAIT,
+    RIGHT_PANE_COL, WAIT,
 };
 
 /// xterm SGR left-button drag (`Cb` 0 + motion bit 32).
@@ -211,14 +211,10 @@ fn pty_pane_divider_hover_lights_edge_sets_pointer_and_drags() {
         "the right pane's left border keeps its colour"
     );
 
-    // Same band, next column: no new shape.
+    // Same band, next column: no new shape. The drag below runs after this
+    // motion, so the shapes read once the drag has painted include any
+    // shape the motion wrote.
     tui.sgr_mouse(SGR_MOTION, join + 1, row);
-    tui.wait_ms(SETTLE_MS);
-    assert_eq!(
-        pointer_shapes(&tui.raw_output()),
-        vec!["ew-resize".to_string()],
-        "motion inside the band writes no second shape"
-    );
 
     let dest = join + 10;
     tui.sgr_mouse(0, join, row);
@@ -228,6 +224,11 @@ fn pty_pane_divider_hover_lights_edge_sets_pointer_and_drags() {
         |screen| pane_join_col(screen) == Some(dest) && lit(&tui, dest, row),
         "the divider drag moves the join under the pointer and it stays lit",
         WAIT,
+    );
+    assert_eq!(
+        pointer_shapes(&tui.raw_output()),
+        vec!["ew-resize".to_string()],
+        "motion inside the band (and the drag on it) writes no second shape"
     );
 
     tui.sgr_mouse(SGR_MOTION, 2, row);

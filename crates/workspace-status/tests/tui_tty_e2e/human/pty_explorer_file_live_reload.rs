@@ -7,11 +7,6 @@ use crate::support::{
     right_pane, tree_cursor_on, tree_has, tree_inactive_selection_on, GIT_WAIT, WAIT,
 };
 
-/// Same gap as `pty_quick_open_files_opens_in_explorer`. A same-letter
-/// `h`/`j`/`k`/`l` burst is dropped by `discard_held_nav_backlog` after the
-/// first press.
-const QUERY_NAV_LETTER_GAP_MS: u64 = 50;
-
 /// Clean, committed file under `app` that the test opens, edits and deletes.
 const LIVE_FILE: &str = "live-reload.txt";
 /// Path the file view title and the diff header both name.
@@ -49,14 +44,9 @@ fn first_paint(screen: &str) -> bool {
         && !screen.contains("Go to file")
 }
 
-/// Type a Quick Open query at human key gaps for nav letters.
+/// Type a Quick Open query; after each nav letter wait for its paint.
 fn type_query(tui: &mut PtySession, query: &str) {
-    for c in query.chars() {
-        tui.key(c);
-        if matches!(c, 'h' | 'H' | 'j' | 'J' | 'k' | 'K' | 'l' | 'L') {
-            tui.wait_ms(QUERY_NAV_LETTER_GAP_MS);
-        }
-    }
+    crate::support::type_palette_filter(tui, query);
 }
 
 /// Quick Open hit row: the `❯` cursor chip in front of `needle`.

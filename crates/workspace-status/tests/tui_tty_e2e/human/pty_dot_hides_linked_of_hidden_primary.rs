@@ -1,8 +1,9 @@
 use crate::harness::{left_tree, PtySession};
 use crate::seed::hidden_primary_family_workspace;
 use crate::support::{
-    crumb_row, no_wrong_overlays, panes_tree_focused_diff_unfocused, status_row, tree_dir_expanded,
-    tree_has, tree_line_containing, tree_line_has_leading_worktree_icon, SETTLE_MS, WAIT,
+    crumb_row, no_wrong_overlays, panes_tree_focused_diff_unfocused, prove_keys_handled,
+    status_row, tree_dir_expanded, tree_has, tree_line_containing,
+    tree_line_has_leading_worktree_icon, WAIT,
 };
 
 const LINKED_BRANCH: &str = "feature/linked-open";
@@ -107,7 +108,7 @@ fn pty_dot_hides_linked_of_hidden_primary() {
         "`.` shows hidden app family nested; linked is not a workspace-root L orphan",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_dot_shows_hidden_family,
         "shown hidden family holds (not a flicker, toast-only, or orphan)",
@@ -120,7 +121,7 @@ fn pty_dot_hides_linked_of_hidden_primary() {
         "second `.` hides app and linked child; toast hiding",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_dot_hides_hidden_family,
         "hidden family holds (not a flicker or still-orphan after hide)",

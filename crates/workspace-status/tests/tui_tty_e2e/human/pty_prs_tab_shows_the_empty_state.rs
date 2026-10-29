@@ -44,7 +44,7 @@ fn pty_prs_tab_shows_the_empty_state() {
         "both checkouts are looked up",
         GIT_WAIT,
     );
-    tui.keys("gp");
+    tui.send_bytes(b"gp");
     tui.wait_pred(
         |_| {
             prs_list(&tui).is_some_and(|(lines, _)| {

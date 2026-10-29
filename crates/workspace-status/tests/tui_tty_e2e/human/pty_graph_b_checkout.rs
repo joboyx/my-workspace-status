@@ -5,8 +5,8 @@ use crate::harness::PtySession;
 use crate::seed::{focus_workspace, git_env};
 use crate::support::{
     ack_rows, after_ack, crumb_row, focusbox_graph_left_full, graph_cursor_on, graph_pane_focused,
-    graph_subject_meta_line, line_on_branch, no_mouse_toggle_toast, status_row, title_has_files,
-    tree_has, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
+    graph_subject_meta_line, line_on_branch, no_mouse_toggle_toast, prove_keys_handled, status_row,
+    title_has_files, tree_has, tree_line_containing, GIT_WAIT, WAIT,
 };
 
 const BRANCH: &str = "topic/noise";
@@ -252,7 +252,7 @@ fn pty_graph_b_checkout() {
         "graph cursor on noise-leaf-commit; b checkout hint; overlay closed",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         noise_leaf_ready_to_checkout,
         "noise-leaf ready holds (not a flicker, picker, or files drill)",
@@ -275,7 +275,7 @@ fn pty_graph_b_checkout() {
         "graph b checks out topic/noise at noise-leaf-commit (not picker, not d, not no-op)",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_graph_b_checkout,
         "checked-out paint holds (not a flicker, toast-only tick, tree picker, or wrong ref)",

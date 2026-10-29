@@ -1,7 +1,7 @@
 use crate::harness::{tree_row_containing, PtySession, SGR_WHEEL_DOWN};
 use crate::seed::daily_workspace;
 use crate::support::{
-    seed_tree_page_files, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, TREE_LABEL_COL, WAIT,
+    seed_tree_page_files, tree_cursor_on, tree_has, GIT_WAIT, TREE_LABEL_COL, WAIT,
 };
 
 /// Wheel down + any-event (1003) motion bit (`65 | 32`). Scrolls like `65`.
@@ -85,8 +85,6 @@ fn pty_sgr_vertical_wheel_scrolls() {
         "fifteen motion-bit CSI < 97 reports move the tree cursor fifteen rows",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
-
     for _ in 0..15 {
         tui.sgr_mouse(SGR_WHEEL_DOWN, TREE_LABEL_COL, readme_row);
     }

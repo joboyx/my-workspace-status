@@ -5,7 +5,7 @@ use crate::harness::{
     SGR_WHEEL_LEFT, SGR_WHEEL_RIGHT, SGR_WHEEL_RIGHT_MOTION,
 };
 use crate::seed::{daily_workspace, seed_long_path_file};
-use crate::support::{tree_cursor_on, tree_label_col, GIT_WAIT, SETTLE_MS, WAIT};
+use crate::support::{tree_cursor_on, tree_label_col, GIT_WAIT, WAIT};
 
 /// Default mouse-on: clipped tree row, README short diff, cursor stays.
 fn tree_sgr_hscroll_clipped_readme_focus(screen: &str, readme_row: u16) -> bool {
@@ -101,8 +101,6 @@ fn pty_tree_sgr_hscroll_pans_clipped_path() {
         "CSI < 66 pans the tree back to the clipped prefix",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
-
     for _ in 0..40 {
         tui.sgr_mouse(SGR_WHEEL_RIGHT, 6, row);
     }

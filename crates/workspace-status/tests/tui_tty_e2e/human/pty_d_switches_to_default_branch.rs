@@ -6,9 +6,9 @@ use crate::harness::PtySession;
 use crate::seed::{daily_workspace, focus_workspace, git_env};
 use crate::support::{
     ack_rows, after_ack, crumb_row, documented_launch_first_paint, focusbox_graph_left_full,
-    has_fetch_hint, launch_status_chrome, line_on_branch, not_files_search_or_stash, status_row,
-    title_has_files, tree_cursor_on, tree_has, tree_has_branch, tree_line_containing, GIT_WAIT,
-    SETTLE_MS, WAIT,
+    has_fetch_hint, launch_status_chrome, line_on_branch, not_files_search_or_stash,
+    prove_keys_handled, status_row, title_has_files, tree_cursor_on, tree_has, tree_has_branch,
+    tree_line_containing, GIT_WAIT, WAIT,
 };
 
 fn git_stdout(repo: &Path, args: &[&str]) -> String {
@@ -258,7 +258,7 @@ fn pty_d_switches_to_default_branch() {
         "d checks out main: Switched 1 repo, tree on main, [+main]",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_d_switched_to_main,
         "switched paint holds (not a flicker, toast-only tick, or still feature/keep)",
@@ -273,7 +273,7 @@ fn pty_d_switches_to_default_branch() {
         "second d on main: no non-default branches to switch; HEAD stays main",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_d_already_on_default,
         "already-default refuse holds (not a second checkout or toast-only tick)",
@@ -303,14 +303,13 @@ fn pty_d_switches_to_default_branch() {
         "keep-leaf-commit",
         &dirty_tui.screen(),
     );
-    dirty_tui.wait_ms(SETTLE_MS);
     dirty_tui.key('d');
     dirty_tui.wait_pred(
         documented_d_skips_dirty_keep,
         "d on dirty keep: Switched 1 repo (1 skipped: dirty); HEAD stays feature/keep",
         GIT_WAIT,
     );
-    dirty_tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut dirty_tui);
     dirty_tui.wait_pred(
         documented_d_skips_dirty_keep,
         "dirty skip holds (not a checkout of main or a silent no-op)",
@@ -347,7 +346,7 @@ fn pty_d_switches_to_default_branch() {
         "file-row d says focus a repo or checkout; merger still feature/graph",
         WAIT,
     );
-    file_tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut file_tui);
     file_tui.wait_pred(
         documented_d_file_row_says_why,
         "file-row refusal holds (not a workspace switch of merger)",

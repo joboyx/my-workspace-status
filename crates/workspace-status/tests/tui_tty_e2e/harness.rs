@@ -87,12 +87,145 @@ impl Default for SpawnOpts {
 /// OSC 11 background query the TUI writes at startup in `themeMode` `auto`.
 const OSC11_QUERY: &[u8] = b"\x1b]11;?";
 
+/// Start of a synchronized update (DEC private mode 2026). The TUI opens
+/// one before each frame (and before the clear of a resize).
+const SYNC_BEGIN: &[u8] = b"\x1b[?2026h";
+
+/// End of a synchronized update: the frame is complete.
+const SYNC_END: &[u8] = b"\x1b[?2026l";
+
+/// A vt100 parser that shows only whole frames, as a terminal with
+/// synchronized output does.
+///
+/// Every byte goes to the live parser when it is read. [`Self::screen`]
+/// is a copy of the live screen taken when no update is open: at each
+/// update end, before each update start, and at the end of each read
+/// outside an update (startup, mode changes, exit). A read therefore never
+/// sees a frame half drawn, however the PTY splits the frame's bytes.
+///
+/// While a record is on ([`PtySession::record_frames`]) it also keeps every
+/// whole frame it shows, so a test can check a paint that lasts only a
+/// short time without having to poll at the right moment.
+struct FrameParser {
+    live: vt100::Parser,
+    shown: vt100::Screen,
+    in_update: bool,
+    /// End of the last read when it may be the start of a split marker.
+    carry: Vec<u8>,
+    /// Whole frames shown since [`PtySession::record_frames`].
+    record: Option<FrameRecord>,
+    /// A recorded frame that the screen and cell reads see instead of
+    /// `shown`, while [`PtySession::wait_recorded_frame`] checks it.
+    view: Option<vt100::Screen>,
+}
+
+/// Most frames one record keeps. A frame is stored as its formatted
+/// contents (glyphs and colours, a few KiB), so the cap bounds memory. A
+/// record that fills up fails the wait that reads it; it never drops a
+/// frame silently.
+const FRAME_RECORD_MAX: usize = 1024;
+
+/// Whole frames in the order they were shown: `(rows, cols, formatted
+/// contents)`. A frame equal to the one before it is not stored again.
+#[derive(Default)]
+struct FrameRecord {
+    frames: Vec<(u16, u16, Vec<u8>)>,
+    full: bool,
+}
+
+impl FrameParser {
+    fn new(rows: u16, cols: u16) -> Self {
+        let live = vt100::Parser::new(rows, cols, 0);
+        let shown = live.screen().clone();
+        Self {
+            live,
+            shown,
+            in_update: false,
+            carry: Vec::new(),
+            record: None,
+            view: None,
+        }
+    }
+
+    /// The screen at the last point no update was open, or the recorded
+    /// frame under check.
+    fn screen(&self) -> &vt100::Screen {
+        self.view.as_ref().unwrap_or(&self.shown)
+    }
+
+    /// Resize the live grid. The shown screen keeps its old size until
+    /// the TUI paints a frame for the new one.
+    fn set_size(&mut self, rows: u16, cols: u16) {
+        self.live.set_size(rows, cols);
+    }
+
+    /// Show the live screen, and record it while a record is on.
+    fn show_live(&mut self) {
+        self.shown = self.live.screen().clone();
+        let Some(record) = self.record.as_mut() else {
+            return;
+        };
+        let (rows, cols) = self.shown.size();
+        let contents = self.shown.contents_formatted();
+        let same = record
+            .frames
+            .last()
+            .is_some_and(|(r, c, last)| (*r, *c) == (rows, cols) && *last == contents);
+        if same {
+            return;
+        }
+        if record.frames.len() < FRAME_RECORD_MAX {
+            record.frames.push((rows, cols, contents));
+        } else {
+            record.full = true;
+        }
+    }
+
+    /// Feed one read from the PTY.
+    fn process(&mut self, chunk: &[u8]) {
+        let mut data = std::mem::take(&mut self.carry);
+        data.extend_from_slice(chunk);
+        let mut fed = 0;
+        let mut at = 0;
+        while at < data.len() {
+            let rest = &data[at..];
+            if rest.starts_with(SYNC_BEGIN) {
+                at += SYNC_BEGIN.len();
+                self.live.process(&data[fed..at]);
+                fed = at;
+                if !self.in_update {
+                    self.show_live();
+                }
+                self.in_update = true;
+            } else if rest.starts_with(SYNC_END) {
+                at += SYNC_END.len();
+                self.live.process(&data[fed..at]);
+                fed = at;
+                self.in_update = false;
+                self.show_live();
+            } else if SYNC_BEGIN.starts_with(rest) || SYNC_END.starts_with(rest) {
+                // A marker split across two reads: finish it on the next one.
+                break;
+            } else {
+                at += 1;
+            }
+        }
+        self.live.process(&data[fed..at]);
+        self.carry = data[at..].to_vec();
+        if !self.in_update {
+            self.show_live();
+        }
+    }
+}
+
 pub struct PtySession {
     child: Box<dyn portable_pty::Child + Send>,
     /// PTY master writer. The reader thread shares it to answer OSC 11.
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
-    parser: Arc<Mutex<vt100::Parser>>,
+    /// Terminal side of the PTY. Every screen and cell read below sees a
+    /// whole frame (see [`FrameParser`]).
+    parser: Arc<Mutex<FrameParser>>,
     /// Decoded OSC 52 clipboard texts (`ESC ] 52 ; c ; <base64> BEL` / ST).
     clipboard: Arc<Mutex<Vec<String>>>,
     /// Every byte the child wrote, in order (see [`Self::raw_output`]).
@@ -322,7 +455,7 @@ impl PtySession {
         let mut reader = pair.master.try_clone_reader().expect("clone pty reader");
         let writer: Arc<Mutex<Box<dyn Write + Send>>> =
             Arc::new(Mutex::new(pair.master.take_writer().expect("pty writer")));
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        let parser = Arc::new(Mutex::new(FrameParser::new(rows, cols)));
         let clipboard = Arc::new(Mutex::new(Vec::<String>::new()));
         let raw = Arc::new(Mutex::new(Vec::<u8>::new()));
         let parser_thread = Arc::clone(&parser);
@@ -412,10 +545,23 @@ impl PtySession {
     /// a press then a release. A raw `'O'` byte is a different path and does
     /// not catch that remap.
     pub fn shift_letter(&mut self, letter: char) {
-        let lower = letter.to_ascii_lowercase();
-        let codepoint = u32::from(lower);
-        self.csi_u(codepoint, 2, 1);
-        self.csi_u(codepoint, 2, 3);
+        let codepoint = u32::from(letter.to_ascii_lowercase());
+        self.send_tap(
+            &format!("\x1b[{codepoint};2:1u"),
+            &format!("\x1b[{codepoint};2:3u"),
+        );
+    }
+
+    /// Press then release in one write.
+    ///
+    /// The TUI times key gestures by the stdin read their bytes came in.
+    /// The bytes of one small write arrive back to back and, in practice, a
+    /// PTY hands them to one read; the arrival-instant rule covers the rest
+    /// (a split read changes nothing unless the reader also stalls past the
+    /// window between the two reads). Every multi-report helper here sends
+    /// its gesture as one write.
+    fn send_tap(&mut self, press: &str, release: &str) {
+        self.send_bytes(format!("{press}{release}").as_bytes());
     }
 
     /// Unshifted letter press via CSI-u (kind 1). Traditional bytes stay
@@ -425,75 +571,43 @@ impl PtySession {
         self.csi_u(codepoint, 1, 1);
     }
 
-    /// Typeless CSI-u (`CSI code ; 1 u`). No event type.
-    ///
-    /// Terminals that honor `REPORT_ALL_KEYS_AS_ESCAPE_CODES` and omit
-    /// `REPORT_EVENT_TYPES` send this for a tap. One report per key is
-    /// the live xfce/VTE path. Do not send a second report for key-up
-    /// when the test claims that path.
-    pub fn csi_u_typeless(&mut self, letter: char) {
-        let codepoint = u32::from(letter.to_ascii_lowercase());
-        self.send_bytes(format!("\x1b[{codepoint};1u").as_bytes());
-    }
-
-    /// Typeless CSI-u with Shift (`CSI code ; 2 u`).
-    pub fn csi_u_typeless_shift(&mut self, letter: char) {
-        let codepoint = u32::from(letter.to_ascii_lowercase());
-        self.send_bytes(format!("\x1b[{codepoint};2u").as_bytes());
-    }
-
-    /// Human `gg` as two typeless CSI-u `g` reports.
-    ///
-    /// The gap is 40ms: inside `DOUBLE_TAP_MS` (400) and under the old
-    /// 80ms echo, but past the few-ms VTE burst. After the completing
-    /// `g`, wait that burst out so the next `g` of `gt` is not dropped.
-    /// Does not inject Release or a typeless key-up.
-    pub fn typeless_gg(&mut self) {
-        self.csi_u_typeless('g');
-        self.wait_ms(40);
-        self.csi_u_typeless('g');
-        self.wait_ms(16);
-    }
-
     /// Held-key Repeat (`CSI code ; 1 : 2 u`). Must fail if Repeat is ignored.
     pub fn letter_repeat(&mut self, letter: char) {
         let codepoint = u32::from(letter.to_ascii_lowercase());
         self.csi_u(codepoint, 1, 2);
     }
 
-    /// `gg` chord: two raw `g` bytes inside the 400ms window.
+    /// `gg` chord: two raw `g` bytes in one write.
     ///
-    /// Do not inject a CSI-u Release between the taps. A human `gg` is
-    /// two Presses. The live reader must complete `MoveToStart` on that
-    /// path.
+    /// The bytes of one write arrive back to back (in practice in one read,
+    /// see [`Self::send_tap`]), so both taps stay inside the 400ms window of
+    /// arrival however late the loop handles them. Do not
+    /// inject a CSI-u Release between the taps. A human `gg` is two
+    /// Presses. The live reader must complete `MoveToStart` on that path.
     pub fn gg(&mut self) {
-        self.key('g');
-        self.key('g');
+        self.send_bytes(b"gg");
     }
 
-    /// `zz` chord: two `z` bytes inside the 400ms window.
+    /// `zz` chord: two `z` bytes in one write (see [`Self::gg`]).
     ///
     /// First `z` toggles the focused row. The second is `toggleSubtree`.
     pub fn zz(&mut self) {
-        self.key('z');
-        self.key('z');
+        self.send_bytes(b"zz");
     }
 
-    /// Home as CSI `1 ; 1 : 1 ~` (press) then `: 3` (release).
+    /// Home as CSI `1 ; 1 : 1 ~` (press) then `: 3` (release), one write.
     ///
     /// The live loop requested event types. `event::read` maps CSI `1~` to
     /// `KeyCode::Home`. `CSI 1 u` is not Home.
     pub fn home(&mut self) {
-        self.send_bytes(b"\x1b[1;1:1~");
-        self.send_bytes(b"\x1b[1;1:3~");
+        self.send_tap("\x1b[1;1:1~", "\x1b[1;1:3~");
     }
 
-    /// End as CSI `4 ; 1 : 1 ~` (press) then `: 3` (release).
+    /// End as CSI `4 ; 1 : 1 ~` (press) then `: 3` (release), one write.
     ///
     /// Same event-type encoding as [`Self::home`]. `CSI 4 u` is not End.
     pub fn end(&mut self) {
-        self.send_bytes(b"\x1b[4;1:1~");
-        self.send_bytes(b"\x1b[4;1:3~");
+        self.send_tap("\x1b[4;1:1~", "\x1b[4;1:3~");
     }
 
     pub fn enter(&mut self) {
@@ -527,8 +641,10 @@ impl PtySession {
     /// (`\x15` / `\x04`) is a different path. Ctrl-d as `\x04` is also EOT.
     pub fn ctrl_letter(&mut self, letter: char) {
         let codepoint = u32::from(letter.to_ascii_lowercase());
-        self.csi_u(codepoint, 5, 1);
-        self.csi_u(codepoint, 5, 3);
+        self.send_tap(
+            &format!("\x1b[{codepoint};5:1u"),
+            &format!("\x1b[{codepoint};5:3u"),
+        );
     }
 
     pub fn search(&mut self, query: &str) {
@@ -550,19 +666,21 @@ impl PtySession {
         self.send_bytes(seq.as_bytes());
     }
 
-    /// Left press + release. Setup only (focus a short tree row before
-    /// hscroll). Not a click-coverage claim: a no-op click still continues.
+    /// Left press + release in one write. Setup only (focus a short tree
+    /// row before hscroll). Not a click-coverage claim: a no-op click still
+    /// continues.
     pub fn sgr_click(&mut self, col: u16, row: u16) {
-        self.sgr_mouse(0, col, row);
-        let seq = format!(
-            "\x1b[<0;{};{}m",
-            col.saturating_add(1),
-            row.saturating_add(1)
-        );
-        self.send_bytes(seq.as_bytes());
+        let (x, y) = (col.saturating_add(1), row.saturating_add(1));
+        self.send_tap(&format!("\x1b[<0;{x};{y}M"), &format!("\x1b[<0;{x};{y}m"));
     }
 
+    /// Resize the terminal side, then the PTY, as a terminal does.
+    ///
+    /// The parser lock is held across both, so the reader thread cannot
+    /// parse the TUI's redraw for the new size into the old-size grid.
     pub fn resize(&mut self, cols: u16, rows: u16) {
+        let mut parser = self.parser.lock().unwrap();
+        parser.set_size(rows, cols);
         self.master
             .resize(PtySize {
                 rows,
@@ -571,11 +689,73 @@ impl PtySession {
                 pixel_height: 0,
             })
             .expect("resize pty");
-        self.parser.lock().unwrap().set_size(rows, cols);
+        drop(parser);
         self.cols = cols;
         self.rows = rows;
     }
 
+    /// Start a record of every whole frame shown from now on (a new
+    /// record replaces an earlier one). Call it before the action whose
+    /// paint lasts only a short time (a flash), then read the record with
+    /// [`Self::wait_recorded_frame`].
+    pub fn record_frames(&self) {
+        self.parser.lock().unwrap().record = Some(FrameRecord::default());
+    }
+
+    /// Wait until `pred` holds on a whole frame recorded since
+    /// [`Self::record_frames`], then end the record.
+    ///
+    /// Each recorded frame is checked once, in order. While `pred` runs,
+    /// every screen and cell read of `self` sees that frame. A paint that
+    /// lasts only a short time is therefore found however late this test
+    /// thread runs. Panics on timeout, or when the record filled up before
+    /// a frame matched.
+    pub fn wait_recorded_frame(
+        &self,
+        pred: impl Fn(&PtySession) -> bool,
+        what: &str,
+        timeout: Duration,
+    ) {
+        let start = Instant::now();
+        let mut checked = 0;
+        loop {
+            let (frames, full) = {
+                let parser = self.parser.lock().unwrap();
+                let record = parser
+                    .record
+                    .as_ref()
+                    .expect("wait_recorded_frame needs record_frames first");
+                (record.frames[checked..].to_vec(), record.full)
+            };
+            for (rows, cols, contents) in frames {
+                checked += 1;
+                let mut replay = vt100::Parser::new(rows, cols, 0);
+                replay.process(&contents);
+                self.parser.lock().unwrap().view = Some(replay.screen().clone());
+                let hit = pred(self);
+                self.parser.lock().unwrap().view = None;
+                if hit {
+                    self.parser.lock().unwrap().record = None;
+                    return;
+                }
+            }
+            if full {
+                panic!(
+                    "frame record full ({FRAME_RECORD_MAX} frames) before {what}:\n{}",
+                    self.screen()
+                );
+            }
+            if start.elapsed() >= timeout {
+                panic!(
+                    "timeout waiting for {what} in {checked} recorded frames; now:\n{}",
+                    self.screen()
+                );
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    /// Text of the last whole frame (see [`FrameParser`]).
     pub fn screen(&self) -> String {
         self.parser.lock().unwrap().screen().contents()
     }
@@ -1023,10 +1203,6 @@ impl PtySession {
         }
     }
 
-    pub fn wait_ms(&self, ms: u64) {
-        thread::sleep(Duration::from_millis(ms));
-    }
-
     /// Fail if the child has already exited.
     pub fn assert_running(&mut self, what: &str) {
         match self.child.try_wait() {
@@ -1428,4 +1604,66 @@ pub fn status_has_tree_hscroll_tail(screen: &str) -> bool {
         .lines()
         .last()
         .is_some_and(|line| line.contains(TREE_HSCROLL_TAIL))
+}
+
+/// A frame split over reads shows only once its update ends, also when
+/// the end marker itself is split; bytes outside an update show per read.
+#[test]
+fn frame_parser_shows_only_whole_frames() {
+    let mut parser = FrameParser::new(2, 10);
+    let text = |parser: &FrameParser| parser.screen().contents();
+    parser.process(b"old");
+    assert_eq!(text(&parser), "old", "outside an update: shown per read");
+
+    parser.process(b"\x1b[?2026h\x1b[2J\x1b[Hne");
+    assert_eq!(
+        text(&parser),
+        "old",
+        "update open: clear and half frame hidden"
+    );
+    parser.process(b"w\x1b[?20");
+    assert_eq!(text(&parser), "old", "end marker split: still hidden");
+    parser.process(b"26l");
+    assert_eq!(text(&parser), "new", "update end shows the whole frame");
+
+    parser.process(b"\x1b[?2026h\x1b[?2026h\x1b[2J");
+    assert_eq!(text(&parser), "new", "a resize update then a frame update");
+    parser.process(b"\x1b[Hnext\x1b[?2026l");
+    assert_eq!(text(&parser), "next", "one end closes both");
+}
+
+/// A record keeps every whole frame once, colours included, so a frame
+/// that a later one replaced can still be read back.
+#[test]
+fn frame_parser_records_each_whole_frame() {
+    let mut parser = FrameParser::new(2, 10);
+    parser.process(b"\x1b[?2026h\x1b[Hbefore\x1b[?2026l");
+    parser.record = Some(FrameRecord::default());
+    parser.process(b"\x1b[?2026h\x1b[H\x1b[2K\x1b[48;2;81;102;67mflash\x1b[?2026l");
+    parser.process(b"\x1b[?2026h\x1b[H\x1b[0m\x1b[2Kafter\x1b[?2026l");
+    parser.process(b"\x1b[?2026h\x1b[?2026l");
+    let record = parser.record.as_ref().unwrap();
+    let replay = |at: usize| {
+        let (rows, cols, contents) = &record.frames[at];
+        let mut replay = vt100::Parser::new(*rows, *cols, 0);
+        replay.process(contents);
+        replay.screen().clone()
+    };
+    // The frame on screen when the first update opened, then the two new
+    // frames; the empty update repeats the last one and is not kept.
+    assert_eq!(record.frames.len(), 3, "before, flash, after");
+    assert_eq!(replay(0).contents(), "before");
+    let flash = replay(1);
+    assert_eq!(flash.contents(), "flash");
+    assert_eq!(
+        flash.cell(0, 0).unwrap().bgcolor(),
+        vt100::Color::Rgb(81, 102, 67),
+        "the replayed frame keeps its colours"
+    );
+    assert_eq!(replay(2).contents(), "after");
+    assert_eq!(
+        parser.screen().contents(),
+        "after",
+        "the shown frame moved on"
+    );
 }

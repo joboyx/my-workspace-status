@@ -3,8 +3,8 @@ use std::fs;
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    ack_rows, after_ack, no_wrong_overlays, readme_unstaged_badge, tree_cursor_on, tree_has,
-    GIT_WAIT, SETTLE_MS, WAIT,
+    ack_rows, after_ack, crumb_row, no_wrong_overlays, readme_unstaged_badge, tree_cursor_on,
+    tree_has, GIT_WAIT, WAIT,
 };
 
 const UNTRACKED: &str = "new.txt";
@@ -84,17 +84,26 @@ fn pty_revert_confirm_single_untracked_y_deletes() {
         WAIT,
     );
 
+    // `n` after Shift+Y is the probe: only a confirm that is still open
+    // paints `revert cancelled`, so the toast proves Shift+Y was handled and
+    // left the confirm open.
     tui.shift_letter('Y');
-    tui.wait_ms(SETTLE_MS * 3);
+    tui.key('n');
     tui.wait_pred(
-        single_untracked_confirm_armed,
-        "Shift+Y keeps the single-untracked confirm open",
+        |screen| crumb_row(screen).contains("revert cancelled"),
+        "Shift+Y keeps the single-untracked confirm open: the n after it cancels it",
         WAIT,
     );
     assert!(
         untracked.is_file(),
         "Shift+Y must not delete {UNTRACKED}:\n{}",
         tui.screen()
+    );
+    tui.key('x');
+    tui.wait_pred(
+        single_untracked_confirm_armed,
+        "x arms Revert new.txt? again",
+        WAIT,
     );
 
     tui.letter_press('y');

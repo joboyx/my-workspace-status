@@ -1,12 +1,12 @@
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::common::hscroll::DIFF_HSCROLL_TAIL;
 use crate::harness::{PtySession, UserConfig, COLS, ROWS, SGR_WHEEL_RIGHT};
 use crate::seed::{daily_workspace, seed_long_diff_file, unwrap_diffs_at_launch};
 use crate::support::{
     ack_rows, crumb_row, flat_join_col, flat_left_body, flat_left_cursor_on,
-    flat_left_row_containing, flat_pane_last_row, flat_right_body, status_row, FLAT_PAD_COLS,
-    SETTLE_MS, SLATE_SIDEBAR, WAIT,
+    flat_left_row_containing, flat_pane_last_row, flat_right_body, prove_keys_handled, status_row,
+    FLAT_PAD_COLS, SLATE_SIDEBAR, WAIT,
 };
 
 /// xterm SGR left-button drag (`Cb` 0 + motion bit 32).
@@ -97,7 +97,7 @@ fn pty_paint_flat_click_first_column_selects_row() {
         "column-0 click selects merger and loads its graph",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     assert!(
         merger_selected(&tui) && tui.clipboard_payloads().is_empty(),
         "selection holds and a click copies nothing:\n{}",
@@ -136,7 +136,7 @@ fn pty_paint_flat_divider_drag_resizes_panes() {
         "drag from the left pane's last column widens the tree pane",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     let wide = flat_join_col(&tui, SLATE_SIDEBAR).unwrap();
     assert!(
         wide + DIVIDER_SLACK >= start + DIVIDER_DRAG_DELTA && flat_launch(&tui),
@@ -191,32 +191,21 @@ fn diff_hbar_off_left_edge(tui: &PtySession) -> Option<(u16, u16, u16)> {
 
 /// Wheel right one notch at a time until the file-diff h-bar paints.
 ///
-/// Each notch waits for its own frame and the frame must hold for
-/// `SETTLE_MS`, so no wheel is in flight when the caller reads the thumb.
+/// After each notch the probe proves that notch was handled, so no wheel
+/// is in flight when the caller reads the thumb.
 fn wheel_until_hbar(tui: &mut PtySession, col: u16, row: u16) -> (u16, u16, u16) {
-    const NOTCH_WAIT: Duration = Duration::from_secs(3);
     let start = Instant::now();
     loop {
-        let sent_on = tui.screen();
         tui.sgr_mouse(SGR_WHEEL_RIGHT, col, row);
-        let notch = Instant::now();
-        while tui.screen() == sent_on && notch.elapsed() < NOTCH_WAIT {
-            tui.wait_ms(25);
-        }
-        let mut screen = tui.screen();
-        loop {
-            tui.wait_ms(SETTLE_MS);
-            let next = tui.screen();
-            if next == screen || start.elapsed() >= WAIT {
-                break;
-            }
-            screen = next;
-        }
+        prove_keys_handled(tui);
         if let Some(span) = diff_hbar_off_left_edge(tui) {
             return span;
         }
         if start.elapsed() >= WAIT {
-            panic!("timeout waiting for the file-diff h-bar on the pane's last row:\n{screen}");
+            panic!(
+                "timeout waiting for the file-diff h-bar on the pane's last row:\n{}",
+                tui.screen()
+            );
         }
     }
 }
@@ -245,13 +234,16 @@ fn pty_paint_flat_diff_hbar_drags_on_last_row() {
     let row = flat_left_row_containing(&tui, join, LONG_DIFF_FILE).unwrap();
 
     let (bar_row, thumb, end) = wheel_until_hbar(&mut tui, join + 18, row);
-    tui.sgr_mouse(0, thumb, bar_row);
-    tui.wait_ms(SETTLE_MS);
+    // A press and release on the thumb, then the probe: a grab must not
+    // jump (a track click moves the pan). The drag below grabs again.
+    tui.sgr_click(thumb, bar_row);
+    prove_keys_handled(&mut tui);
     assert!(
-        diff_hbar_off_left_edge(&tui).is_some(),
+        diff_hbar_off_left_edge(&tui) == Some((bar_row, thumb, end)),
         "thumb grab must not jump (a track click moves the pan):\n{}",
         tui.screen()
     );
+    tui.sgr_mouse(0, thumb, bar_row);
     tui.sgr_mouse(SGR_LEFT_DRAG, end, bar_row);
     sgr_release(&mut tui, end, bar_row);
     let panned = |tui: &PtySession| {
@@ -263,7 +255,7 @@ fn pty_paint_flat_diff_hbar_drags_on_last_row() {
         "h-bar drag on the last pane row pans UNIQUE_DIFF_TAIL onto the diff",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     assert!(
         panned(&tui),
         "diff pan holds after the drag:\n{}",
@@ -286,7 +278,7 @@ fn pty_paint_flat_drag_select_copies_pane_text() {
         .unwrap_or_else(|| panic!("README row:\n{}", tui.screen()));
 
     tui.sgr_click(0, row);
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     assert!(
         tui.clipboard_payloads().is_empty(),
         "plain click must not copy:\n{}",

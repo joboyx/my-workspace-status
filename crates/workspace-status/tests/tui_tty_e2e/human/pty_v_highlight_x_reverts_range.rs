@@ -1,6 +1,6 @@
 use crate::seed::{regions_diff, two_hunk_regions_workspace, REGIONS_ALPHA, REGIONS_OMEGA};
 use crate::support::{
-    ack_rows, open_regions_first_hunk_highlight, revert_range_confirm, GIT_WAIT, SETTLE_MS, WAIT,
+    ack_rows, open_regions_first_hunk_highlight, revert_range_confirm, GIT_WAIT, WAIT,
 };
 
 fn reverted_range_toast(screen: &str) -> bool {
@@ -27,7 +27,7 @@ fn pty_v_x_y_reverts_one_hunk() {
         "x opens the range revert confirm and clears VISUAL",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    // An open confirm means no write job was scheduled.
     assert!(
         regions_diff(&repo, false).contains(REGIONS_ALPHA),
         "the confirm alone must not touch the worktree"
@@ -39,7 +39,7 @@ fn pty_v_x_y_reverts_one_hunk() {
         "y reverts the highlighted range (reverted range toast)",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    // The toast paints after the revert job ends, so git is final here.
 
     let unstaged = regions_diff(&repo, false);
     let cached = regions_diff(&repo, true);

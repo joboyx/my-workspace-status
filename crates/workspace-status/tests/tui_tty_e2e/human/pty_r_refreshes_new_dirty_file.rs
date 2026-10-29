@@ -4,8 +4,9 @@ use crate::harness::{left_tree, PtySession};
 use crate::seed::daily_workspace;
 use crate::support::{
     documented_launch_first_paint, launch_breadcrumb_workspace_app,
-    launch_panes_left_tree_right_diff, launch_status_chrome, no_wrong_overlays, title_has_files,
-    tree_cursor_on, tree_has, tree_has_branch, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
+    launch_panes_left_tree_right_diff, launch_status_chrome, no_wrong_overlays, prove_keys_handled,
+    title_has_files, tree_cursor_on, tree_has, tree_has_branch, tree_line_containing, GIT_WAIT,
+    WAIT,
 };
 
 const MARKER: &str = "r-live.txt";
@@ -94,7 +95,7 @@ fn pty_r_refreshes_new_dirty_file() {
         "watch is off: new dirty path stays off the tree until r",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         idle_watch_off_before_r,
         "still first paint after the write (not a delayed watch apply)",
@@ -107,7 +108,7 @@ fn pty_r_refreshes_new_dirty_file() {
         "r reloads app: r-live.txt on the tree with A, 2 changed, README file-diff",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_r_refreshed_app_dirty_file,
         "r refresh holds (not a flicker, toast-only, watch-only, or wrong pane)",

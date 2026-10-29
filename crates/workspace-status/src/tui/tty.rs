@@ -10,11 +10,16 @@
 //! 0-byte read is a read error. [`decode_sgr_mouse`] matches crossterm's
 //! `parse_cb` / `parse_csi_sgr_mouse` with one change: a wheel report with
 //! the any-event motion bit decodes as the plain wheel.
+//!
+//! Each event also carries the instant its bytes were read from stdin.
+//! Events from one read share that instant, so key gestures (`gg`, `gt`,
+//! the typeless CSI-u echo, double-click) are timed by when the keys
+//! arrived, not by when a busy event loop got to them.
 
 use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(not(unix))]
 use crossterm::event;
@@ -77,29 +82,37 @@ pub fn poll_event(timeout: Duration) -> io::Result<bool> {
 
 /// Read one TTY event. Live loop only.
 pub fn read_event() -> io::Result<Event> {
-    read_event_origin().map(|(event, _)| event)
+    read_event_origin().map(|(event, _, _)| event)
 }
 
-/// Read one TTY event and the origin of its bytes.
+/// One TTY event, the origin of its bytes, and the instant those bytes
+/// were read from stdin.
+pub type TtyEvent = (Event, KeyStrokeOrigin, Instant);
+
+/// Read one TTY event, the origin of its bytes, and when they arrived.
 ///
 /// Unix tags raw printable / control bytes as
 /// [`KeyStrokeOrigin::LegacyByte`]. CSI-u and other escape sequences
-/// are [`KeyStrokeOrigin::Protocol`]. Windows keeps `event::read` and
-/// tags every event as Protocol.
-pub fn read_event_origin() -> io::Result<(Event, KeyStrokeOrigin)> {
+/// are [`KeyStrokeOrigin::Protocol`]. The instant is the stdin read that
+/// completed the event, so events from one read share it. Windows keeps
+/// `event::read`, tags every event as Protocol, and stamps the read time.
+pub fn read_event_origin() -> io::Result<TtyEvent> {
     #[cfg(unix)]
     {
         unix_read()
     }
     #[cfg(not(unix))]
     {
-        event::read().map(|event| (event, KeyStrokeOrigin::Protocol))
+        event::read().map(|event| (event, KeyStrokeOrigin::Protocol, Instant::now()))
     }
 }
 
 struct TtyBuf {
     raw: Vec<u8>,
-    events: VecDeque<(Event, KeyStrokeOrigin)>,
+    events: VecDeque<TtyEvent>,
+    /// When the last stdin bytes were appended to `raw`. Events parsed
+    /// from `raw` carry this instant.
+    read_at: Instant,
     last_winsize: Option<(u16, u16)>,
     /// Set after [`unix_poll`] waited one timeout with a lone ESC and no
     /// further stdin. [`unix_read`] emits Escape only when this is set.
@@ -110,6 +123,7 @@ fn empty_tty_buf() -> TtyBuf {
     TtyBuf {
         raw: Vec::new(),
         events: VecDeque::new(),
+        read_at: Instant::now(),
         last_winsize: None,
         lone_esc_ready: false,
     }
@@ -138,6 +152,7 @@ pub(crate) fn push_pending_input(bytes: &[u8]) {
     }
     let mut buf = lock_tty_buf();
     buf.raw.extend_from_slice(bytes);
+    buf.read_at = Instant::now();
     buf.lone_esc_ready = false;
 }
 
@@ -177,12 +192,13 @@ fn unix_poll(timeout: Duration) -> io::Result<bool> {
 }
 
 #[cfg(unix)]
-fn unix_read() -> io::Result<(Event, KeyStrokeOrigin)> {
+fn unix_read() -> io::Result<TtyEvent> {
     let pending = stdin_pending()?;
     let mut buf = lock_tty_buf();
     if pending > 0 {
         let bytes = read_stdin(pending)?;
         buf.raw.extend_from_slice(&bytes);
+        buf.read_at = Instant::now();
         buf.lone_esc_ready = false;
     }
     if let Some(event) = take_ready_event(&mut buf, stdin_pending()? > 0) {
@@ -279,8 +295,11 @@ fn enqueue_resize_if_changed(buf: &mut TtyBuf) -> bool {
         match buf.last_winsize {
             Some(prev) if prev != size => {
                 buf.last_winsize = Some(size);
-                buf.events
-                    .push_back((Event::Resize(size.0, size.1), KeyStrokeOrigin::Protocol));
+                buf.events.push_back((
+                    Event::Resize(size.0, size.1),
+                    KeyStrokeOrigin::Protocol,
+                    Instant::now(),
+                ));
                 true
             }
             None => {
@@ -315,7 +334,7 @@ fn read_stdin(n: usize) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn take_ready_event(buf: &mut TtyBuf, more_stdin: bool) -> Option<(Event, KeyStrokeOrigin)> {
+fn take_ready_event(buf: &mut TtyBuf, more_stdin: bool) -> Option<TtyEvent> {
     drain_parsed(buf, more_stdin);
     if let Some(event) = buf.events.pop_front() {
         buf.lone_esc_ready = false;
@@ -327,6 +346,7 @@ fn take_ready_event(buf: &mut TtyBuf, more_stdin: bool) -> Option<(Event, KeyStr
         return Some((
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             KeyStrokeOrigin::Protocol,
+            buf.read_at,
         ));
     }
     None
@@ -361,7 +381,8 @@ fn drain_parsed(buf: &mut TtyBuf, more: bool) {
             Take::Ready(n, event, origin) => {
                 let n = n.min(buf.raw.len()).max(1);
                 buf.raw.drain(..n);
-                buf.events.push_back((event, origin));
+                let read_at = buf.read_at;
+                buf.events.push_back((event, origin, read_at));
             }
         }
     }
@@ -798,7 +819,10 @@ pub(crate) fn parse_tty_chunk(bytes: &[u8]) -> Vec<(Event, KeyStrokeOrigin)> {
     let mut buf = empty_tty_buf();
     buf.raw.extend_from_slice(bytes);
     drain_parsed(&mut buf, false);
-    buf.events.into_iter().collect()
+    buf.events
+        .into_iter()
+        .map(|(event, origin, _)| (event, origin))
+        .collect()
 }
 
 #[cfg(test)]
@@ -1226,7 +1250,7 @@ mod tests {
         assert_eq!(buf.raw, [0x1b]);
 
         buf.lone_esc_ready = true;
-        let (event, origin) = take_ready_event(&mut buf, false).expect("idle timeout");
+        let (event, origin, _) = take_ready_event(&mut buf, false).expect("idle timeout");
         assert_eq!(key_code(&event), KeyCode::Esc);
         assert_eq!(origin, KeyStrokeOrigin::Protocol);
         assert!(buf.raw.is_empty());
@@ -1253,7 +1277,7 @@ mod tests {
         assert!(take_ready_event(&mut arrow, false).is_none());
         arrow.raw.extend_from_slice(b"[A");
         arrow.lone_esc_ready = false;
-        let (event, origin) = take_ready_event(&mut arrow, false).expect("Up");
+        let (event, origin, _) = take_ready_event(&mut arrow, false).expect("Up");
         assert_eq!(key_code(&event), KeyCode::Up);
         assert_eq!(origin, KeyStrokeOrigin::Protocol);
         assert!(take_ready_event(&mut arrow, false).is_none());
@@ -1262,7 +1286,7 @@ mod tests {
         csi_u.raw.extend_from_slice(&[0x1b]);
         assert!(take_ready_event(&mut csi_u, false).is_none());
         csi_u.raw.extend_from_slice(b"[103;1u");
-        let (event, origin) = take_ready_event(&mut csi_u, false).expect("g");
+        let (event, origin, _) = take_ready_event(&mut csi_u, false).expect("g");
         assert_eq!(key_code(&event), KeyCode::Char('g'));
         assert_eq!(origin, KeyStrokeOrigin::Protocol);
         assert!(take_ready_event(&mut csi_u, false).is_none());
@@ -1274,7 +1298,7 @@ mod tests {
         push_pending_input(b"jq\x1b[A");
         let mut buf = lock_tty_buf();
         let mut keys = Vec::new();
-        while let Some((event, origin)) = take_ready_event(&mut buf, false) {
+        while let Some((event, origin, _)) = take_ready_event(&mut buf, false) {
             keys.push((key_code(&event), origin));
         }
         assert_eq!(
@@ -1287,6 +1311,22 @@ mod tests {
             "bytes a startup query read back reach the live reader in order"
         );
         assert!(buf.raw.is_empty());
+    }
+
+    #[test]
+    fn events_from_one_read_share_its_instant() {
+        let mut buf = empty_tty_buf();
+        let first = buf.read_at;
+        buf.raw.extend_from_slice(b"g\x1b[116;1u");
+        let later = first + Duration::from_millis(500);
+        buf.read_at = later;
+        let (_, _, g_at) = take_ready_event(&mut buf, false).expect("g");
+        let (_, _, t_at) = take_ready_event(&mut buf, false).expect("t");
+        assert_eq!(g_at, later, "an event carries the read that brought it");
+        assert_eq!(
+            g_at, t_at,
+            "keys from one read share one instant, however late the loop takes them"
+        );
     }
 
     #[test]

@@ -5,8 +5,8 @@ use crate::harness::PtySession;
 use crate::seed::{compare_regions_workspace, git_stdout};
 use crate::support::{
     compare_regions_diff_focused, open_compare_regions_diff, open_compare_regions_in,
-    panes_tree_focused_diff_unfocused, panes_tree_unfocused_diff_focused, GIT_WAIT, SETTLE_MS,
-    VISUAL_KEY_GAP_MS, WAIT,
+    panes_tree_focused_diff_unfocused, panes_tree_unfocused_diff_focused, press_j, wait_screen,
+    GIT_WAIT, WAIT,
 };
 
 const LINE_BODY: &str = "compare-line-note";
@@ -63,14 +63,6 @@ fn diff_cursor_on(screen: &str, needle: &str) -> bool {
     diff_row(screen, needle).is_some_and(|line| line.contains('▌'))
 }
 
-/// Plain `j` presses with the human gap the held-nav backlog needs.
-fn press_j(tui: &mut PtySession, times: usize) {
-    for _ in 0..times {
-        tui.letter_press('j');
-        tui.wait_ms(VISUAL_KEY_GAP_MS);
-    }
-}
-
 /// `j` until the diff cursor sits on `needle`.
 fn move_diff_cursor_to(tui: &mut PtySession, needle: &str) {
     for _ in 0..12 {
@@ -78,7 +70,6 @@ fn move_diff_cursor_to(tui: &mut PtySession, needle: &str) {
             return;
         }
         press_j(tui, 1);
-        tui.wait_ms(SETTLE_MS);
     }
     tui.wait_pred(
         |screen| diff_cursor_on(screen, needle),
@@ -87,14 +78,9 @@ fn move_diff_cursor_to(tui: &mut PtySession, needle: &str) {
     );
 }
 
-/// Type a comment body; `j`/`k`/`h`/`l` need the held-nav gap.
+/// Type a comment body; after each nav letter wait for its paint.
 fn type_body(tui: &mut PtySession, body: &str) {
-    for c in body.chars() {
-        tui.key(c);
-        if matches!(c, 'h' | 'j' | 'k' | 'l') {
-            tui.wait_ms(VISUAL_KEY_GAP_MS);
-        }
-    }
+    crate::support::type_palette_filter(tui, body);
     tui.wait_pred(
         |screen| comment_overlay(screen) && screen.contains(body),
         "the typed body shows in the Comment overlay",
@@ -232,7 +218,6 @@ fn pty_compare_highlight_semicolon_comments_range() {
         "Shift+V starts the highlight",
         WAIT,
     );
-    tui.wait_ms(VISUAL_KEY_GAP_MS);
     press_j(&mut tui, 2);
     tui.wait_pred(
         |screen| screen.contains("VISUAL") && diff_cursor_on(screen, "keep-c"),
@@ -351,11 +336,13 @@ fn pty_compare_hides_workspace_line_comment() {
         WAIT,
     );
     open_compare_regions_in(&mut tui);
-    tui.wait_ms(SETTLE_MS);
-    let screen = tui.screen();
-    assert!(
-        diff_row(&screen, "keep-b").is_some(),
-        "compare diff shows keep-b:\n{screen}"
+    // Comment marks paint with the diff rows, so the frame that first shows
+    // keep-b already carries any mark it would have.
+    let screen = wait_screen(
+        &tui,
+        |screen| diff_row(screen, "keep-b").is_some(),
+        "compare diff shows keep-b",
+        WAIT,
     );
     assert!(
         !diff_row_has(&screen, "keep-b", '"') && !screen.contains(DIRTY_B),

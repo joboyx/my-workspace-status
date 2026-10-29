@@ -2,7 +2,7 @@ use crate::harness::{tree_row_containing, PtySession};
 use crate::seed::{compare_regions_workspace, COMPARE_ADDED_FILE, REGIONS_ALPHA, REGIONS_OMEGA};
 use crate::support::{
     ack_rows, compare_regions_diff_focused, open_compare_regions_diff, right_of_split, right_pane,
-    GIT_WAIT, RIGHT_PANE_COL, VISUAL_KEY_GAP_MS, WAIT,
+    step_cursor, GIT_WAIT, RIGHT_PANE_COL, WAIT,
 };
 
 /// Unchanged `regions.txt` line between the two hunks. Default `-U3`
@@ -20,6 +20,23 @@ fn diff_cursor_on(screen: &str, needle: &str) -> bool {
     screen
         .lines()
         .any(|line| line.contains(needle) && line.contains('▌'))
+}
+
+/// Press `j` until the diff cursor is on `needle`, one row at a time.
+///
+/// Each `j` waits for the cursor to leave its row before the next one, so
+/// no `j` is still in flight when the cursor reaches `needle`. A loop that
+/// sends on a timer can read a frame that lags its keys, stop late, and
+/// leave the cursor past `needle`.
+fn step_diff_cursor_to(tui: &mut PtySession, needle: &str, on_view: impl Fn(&str) -> bool) {
+    for _ in 0..40 {
+        let screen = tui.screen();
+        if on_view(&screen) && diff_cursor_on(&screen, needle) {
+            return;
+        }
+        step_cursor(tui, |tui| tui.letter_press('j'), &on_view);
+    }
+    panic!("40 j presses did not reach `{needle}`:\n{}", tui.screen());
 }
 
 fn diff_header_full(screen: &str) -> bool {
@@ -101,13 +118,7 @@ fn pty_compare_ctrl_o_full_file_context_keeps_hunk() {
         WAIT,
     );
 
-    for _ in 0..40 {
-        if diff_cursor_on(&tui.screen(), REGIONS_OMEGA) {
-            break;
-        }
-        tui.letter_press('j');
-        tui.wait_ms(VISUAL_KEY_GAP_MS);
-    }
+    step_diff_cursor_to(&mut tui, REGIONS_OMEGA, compare_hunk_only);
     tui.wait_pred(
         |screen| compare_hunk_only(screen) && diff_cursor_on(screen, REGIONS_OMEGA),
         "plain j moves the compare diff cursor to the second hunk (OMEGA-NEW)",

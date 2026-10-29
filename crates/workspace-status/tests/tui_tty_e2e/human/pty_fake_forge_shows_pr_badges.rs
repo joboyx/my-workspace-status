@@ -84,7 +84,7 @@ fn pty_fake_forge_shows_pr_badges() {
         "j moves the tree cursor to appbox",
         WAIT,
     );
-    tui.keys("gx");
+    tui.send_bytes(b"gx");
     tui.wait_pred(
         |_| forge.opened() == [PR_URL],
         "gx opens the PR URL in the browser recorder",

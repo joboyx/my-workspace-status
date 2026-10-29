@@ -3,7 +3,7 @@ use std::process::{Command, Stdio};
 
 use crate::harness::PtySession;
 use crate::seed::{daily_workspace, git_env};
-use crate::support::{documented_launch_first_paint, status_row, SETTLE_MS, WAIT};
+use crate::support::{documented_launch_first_paint, prove_keys_handled, status_row, WAIT};
 
 fn local_branch_names(repo: &Path) -> String {
     let mut cmd = Command::new("git");
@@ -87,7 +87,7 @@ fn pty_c_on_tree_file_is_not_commit() {
         "tree-file `c` stays on the README file-diff; not create-branch, the branch picker, or commit",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         tree_file_c_left_file_diff,
         "file-diff after tree-file `c` holds (not a flicker or overlay tick)",

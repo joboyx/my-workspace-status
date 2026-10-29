@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::harness::PtySession;
 use crate::seed::{daily_workspace, git};
-use crate::support::{right_pane, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT};
+use crate::support::{right_pane, tree_cursor_on, tree_has, GIT_WAIT, WAIT};
 
 const FILE: &str = "wide-hunk.rs";
 const HEAD: &str = "WIDE-FILE-HEAD-00";
@@ -182,13 +182,22 @@ fn pty_ctrl_o_full_file_context() {
         "merger graph row is not a file-diff",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
-    let before = tui.screen();
+    // Ctrl-o on a graph row paints nothing of its own. Keys run in order,
+    // so `?` painting help after it proves this Ctrl-o was handled; the
+    // graph frame after Esc then proves nothing expanded. A timed sleep
+    // then a whole-screen compare could pass before the key landed, or fail
+    // on an unrelated repaint.
     tui.ctrl_letter('o');
-    tui.wait_ms(SETTLE_MS);
+    tui.key('?');
     tui.wait_pred(
-        |screen| merger_graph_no_full_file(screen) && screen == before,
-        "CSI-u Ctrl-o on a graph row refuses: no full-file marker, no layout change",
+        |screen| help_lists_ctrl_o_keep_hunk(screen) && screen.contains("MOVE"),
+        "? after Ctrl-o opens help, so the Ctrl-o before it was handled",
+        WAIT,
+    );
+    tui.esc();
+    tui.wait_pred(
+        |screen| merger_graph_no_full_file(screen) && !screen.contains("keep hunk in view"),
+        "CSI-u Ctrl-o on a graph row refuses: still the merger graph, no full-file marker",
         WAIT,
     );
 }

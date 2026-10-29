@@ -2,7 +2,7 @@ use std::fs;
 
 use crate::harness::{user_config_file, PtySession, BASELINE_USER_CONFIG};
 use crate::seed::daily_workspace;
-use crate::support::{SETTLE_MS, WAIT};
+use crate::support::{prove_keys_handled, WAIT};
 
 /// Tokyo Night (the launch theme) surface, mode pill, and heading.
 const TOKYO_NIGHT: [(u8, u8, u8); 3] = [(0x1a, 0x1b, 0x26), (0x3d, 0x59, 0xa1), (0x7d, 0xcf, 0xff)];
@@ -70,7 +70,7 @@ fn pty_shift_t_does_not_cycle_theme() {
 
     tui.shift_letter('T');
     tui.key('T');
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     let screen = tui.screen();
     assert!(
         still_tokyo_tree(&tui, &screen),

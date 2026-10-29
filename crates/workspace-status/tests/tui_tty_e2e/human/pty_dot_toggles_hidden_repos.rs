@@ -3,8 +3,8 @@ use crate::seed::daily_workspace;
 use crate::support::{
     crumb_row, documented_launch_first_paint, line_on_branch, no_updates_group_folded,
     no_wrong_overlays, pane_unstaged_readme, panes_tree_focused_diff_unfocused,
-    panes_tree_unfocused_diff_focused, status_row, tree_cursor_on, tree_dir_collapsed,
-    tree_dir_expanded, tree_has, tree_line_containing, SETTLE_MS, WAIT,
+    panes_tree_unfocused_diff_focused, prove_keys_handled, status_row, tree_cursor_on,
+    tree_dir_collapsed, tree_dir_expanded, tree_has, tree_line_containing, WAIT,
 };
 
 fn tree_readme_rows(screen: &str) -> usize {
@@ -163,7 +163,7 @@ fn pty_dot_toggles_hidden_repos() {
         "`.` shows hidden notes as `~` repo row; not No-updates; toast showing",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_dot_shows_hidden_notes,
         "shown hidden notes hold (not a flicker, toast-only, or group unfold)",
@@ -176,7 +176,7 @@ fn pty_dot_toggles_hidden_repos() {
         "second `.` hides notes; heading back to 1 changed; toast hiding",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_dot_hides_hidden_notes,
         "hidden notes hold (not a flicker or hide-only first press)",
@@ -195,7 +195,7 @@ fn pty_dot_toggles_hidden_repos() {
         "right-focused `.` still shows hidden notes (not a left-list no-op)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_dot_shows_hidden_notes_right,
         "right-focused shown notes hold",

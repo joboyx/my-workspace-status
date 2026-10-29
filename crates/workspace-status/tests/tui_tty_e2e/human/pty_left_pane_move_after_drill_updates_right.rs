@@ -41,12 +41,7 @@ fn unfocus_right(
     now_left: impl Fn(&str) -> bool,
     why: &str,
 ) {
-    tui.esc();
-    tui.wait_ms(120);
-    if still_right(&tui.screen()) {
-        tui.esc();
-    }
-    tui.wait_pred(now_left, why, WAIT);
+    crate::support::esc_to_left(tui, still_right, now_left, why);
 }
 
 /// `j` on the focused graph after a files drill reloads the right pane.

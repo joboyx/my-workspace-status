@@ -2,14 +2,10 @@ use crate::harness::{tree_row_containing, PtySession};
 use crate::seed::daily_workspace;
 use crate::support::{
     crumb_row, documented_launch_first_paint, line_on_branch, no_mouse_toggle_toast,
-    no_updates_group_folded, no_wrong_overlays, status_row, title_has_files, tree_cursor_on,
-    tree_dir_collapsed, tree_dir_expanded, tree_has, tree_line_containing, tree_pane_focused,
-    GIT_WAIT, SETTLE_MS, TREE_DEPTH1_CHEVRON_COL, TREE_LABEL_COL, WAIT,
+    no_updates_group_folded, no_wrong_overlays, prove_keys_handled, status_row, title_has_files,
+    tree_cursor_on, tree_dir_collapsed, tree_dir_expanded, tree_has, tree_line_containing,
+    tree_pane_focused, GIT_WAIT, PAST_CHORD_WINDOW, TREE_DEPTH1_CHEVRON_COL, TREE_LABEL_COL, WAIT,
 };
-
-/// Two Downs on the same cell within 400ms are a double-click. Wait past
-/// that window so the next chevron click is a fresh toggle, not a skip.
-const DOUBLE_CLICK_EXPIRE_MS: u64 = 500;
 
 /// Open No-updates group: expanded chevron, `lib` on the tree.
 fn no_updates_group_open(screen: &str) -> bool {
@@ -150,14 +146,18 @@ fn pty_click_chevron_toggles_fold() {
         "SGR click on No updates chevron opens that group (v, lib, cursor stays, not Enter)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         chevron_opens_no_updates,
         "opened No updates holds (not a flicker, click-to-select, or toast-only)",
         WAIT,
     );
 
-    tui.wait_ms(DOUBLE_CLICK_EXPIRE_MS);
+    // Two presses on one cell within 400 ms of arrival are a double-click,
+    // which toggles once. The click above painted, so it arrived before
+    // now; this sleep puts the next click outside the window (a lower
+    // bound after an observed paint, not a timeout).
+    std::thread::sleep(PAST_CHORD_WINDOW);
     let nu_row = tree_row_containing(&tui.screen(), "No updates")
         .unwrap_or_else(|| panic!("No updates row after open:\n{}", tui.screen()));
     tui.sgr_click(TREE_DEPTH1_CHEVRON_COL, nu_row);
@@ -166,14 +166,18 @@ fn pty_click_chevron_toggles_fold() {
         "second chevron click folds No updates (>, lib hidden; app and README stay)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         chevron_folds_no_updates,
         "folded No updates holds (not a delayed second toggle or Enter)",
         WAIT,
     );
 
-    tui.wait_ms(DOUBLE_CLICK_EXPIRE_MS);
+    // Two presses on one cell within 400 ms of arrival are a double-click,
+    // which toggles once. The click above painted, so it arrived before
+    // now; this sleep puts the next click outside the window (a lower
+    // bound after an observed paint, not a timeout).
+    std::thread::sleep(PAST_CHORD_WINDOW);
     let app_row = tree_row_containing(&tui.screen(), "app")
         .unwrap_or_else(|| panic!("app row:\n{}", tui.screen()));
     tui.sgr_click(TREE_DEPTH1_CHEVRON_COL, app_row);
@@ -182,7 +186,7 @@ fn pty_click_chevron_toggles_fold() {
         "app chevron folds that repo (README gone, graph loaded, stay left)",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         chevron_folds_app_repo,
         "folded app holds (not zz subtree, Enter, or a delayed unfold)",

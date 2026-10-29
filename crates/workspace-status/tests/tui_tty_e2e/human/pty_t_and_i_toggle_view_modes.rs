@@ -4,8 +4,8 @@ use crate::harness::{left_tree, PtySession};
 use crate::seed::daily_workspace;
 use crate::support::{
     crumb_row, no_updates_group_folded, no_wrong_overlays, panes_tree_focused_diff_unfocused,
-    right_pane, status_row, tree_cursor_on, tree_dir_expanded, tree_has, tree_line_containing,
-    SETTLE_MS, WAIT,
+    prove_keys_handled, right_pane, status_row, tree_cursor_on, tree_dir_expanded, tree_has,
+    tree_line_containing, WAIT,
 };
 
 /// Wide enough that split actually paints (`NARROW_SXS` is 100). Default 140
@@ -234,9 +234,13 @@ fn pty_t_and_i_toggle_view_modes() {
         "CSI-u t flattens src into view.rs  src; pill flat; toast Flat paths",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    // The hold is read after a probe key, so it is not a frame from before
+    // the toggle settled. The toast is left out: it expires on a timer.
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
-        documented_flat_split_file,
+        |screen| {
+            on_view_rs_file(screen) && tree_presents_flat(screen) && file_diff_is_split(screen)
+        },
         "flat paths hold (not a flicker, pill-only, or tree that never dropped src)",
         WAIT,
     );
@@ -247,9 +251,11 @@ fn pty_t_and_i_toggle_view_modes() {
         "second CSI-u t restores the src dir row; toast Directory tree",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
-        documented_tree_after_restore,
+        |screen| {
+            on_view_rs_file(screen) && tree_presents_directory(screen) && file_diff_is_split(screen)
+        },
         "directory tree holds (not a no-op second t or a stale flat file row)",
         WAIT,
     );
@@ -260,9 +266,13 @@ fn pty_t_and_i_toggle_view_modes() {
         "CSI-u i on the file diff paints unified inline; pill inline; toast Diff: inline",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
-        documented_inline_file,
+        |screen| {
+            on_view_rs_file(screen)
+                && tree_presents_directory(screen)
+                && file_diff_is_inline(screen)
+        },
         "inline layout holds (not a flicker, header-only, or split that never collapsed)",
         WAIT,
     );
@@ -273,9 +283,11 @@ fn pty_t_and_i_toggle_view_modes() {
         "second CSI-u i restores two-column split; toast Diff: split",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
-        documented_split_after_restore,
+        |screen| {
+            on_view_rs_file(screen) && tree_presents_directory(screen) && file_diff_is_split(screen)
+        },
         "split layout holds (not a no-op second i or a stale inline add row)",
         WAIT,
     );

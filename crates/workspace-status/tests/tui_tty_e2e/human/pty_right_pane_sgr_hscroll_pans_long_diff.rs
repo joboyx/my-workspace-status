@@ -5,8 +5,8 @@ use crate::harness::{
 };
 use crate::seed::{daily_workspace, seed_long_diff_file, unwrap_diffs_at_launch};
 use crate::support::{
-    no_wrong_overlays, panes_tree_focused_diff_unfocused, right_pane, right_vbar_at_top,
-    status_row, title_has_files, tree_cursor_on, tree_has, SETTLE_MS, WAIT,
+    no_wrong_overlays, panes_tree_focused_diff_unfocused, prove_keys_handled, right_pane,
+    right_vbar_at_top, status_row, title_has_files, tree_cursor_on, tree_has, WAIT,
 };
 
 const FILE: &str = "unique-diffline.rs";
@@ -125,8 +125,6 @@ fn pty_right_pane_sgr_hscroll_pans_long_diff() {
         "CSI < 66 pans the long file-diff back to the clipped start",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
-
     for _ in 0..80 {
         tui.sgr_mouse(SGR_WHEEL_RIGHT, NARROW_RIGHT_COL, row);
     }
@@ -137,7 +135,7 @@ fn pty_right_pane_sgr_hscroll_pans_long_diff() {
         "SGR 67 over the right pane pans the long file-diff (tail + pan chrome; tree stays)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         |screen| {
             documented_right_pane_sgr_hscroll_panned(screen) && tree_cursor_bar_on_row(screen, row)

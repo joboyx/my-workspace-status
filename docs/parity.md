@@ -216,7 +216,7 @@ Long labels and lines pan sideways: Shift-←/→ and `h` / `l` on the focused p
 
 ### `double-click` — Double-click
 
-A second press on the same cell within 400 ms is Enter on that row.
+A second press on the same cell within 400 ms is Enter on that row. The 400 ms is the gap between the presses' arrival (their stdin reads), not between the loop handling them.
 
 | Feature | What | Tests |
 | --- | --- | --- |

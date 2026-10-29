@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
-use crate::support::{open_command_palette, type_palette_filter, VISUAL_KEY_GAP_MS, WAIT};
+use crate::support::{open_command_palette, type_palette_filter, WAIT};
 
 /// Dialog title the overlay paints on its first line.
 const TITLE: &str = "Doctor · setup checkup";
@@ -57,6 +57,16 @@ fn cursor_on(screen: &str, name: &str) -> bool {
         CHIPS
             .iter()
             .any(|chip| line.contains(&format!("> {chip} {name}")))
+    })
+}
+
+/// Text after the cursor mark (`> <chip> <name>`), or `None` with no cursor.
+fn cursor_row(screen: &str) -> Option<String> {
+    screen.lines().find_map(|line| {
+        CHIPS.iter().find_map(|chip| {
+            let mark = format!("> {chip} ");
+            line.find(&mark).map(|at| line[at..].to_string())
+        })
     })
 }
 
@@ -134,9 +144,17 @@ fn pty_doctor_opens_from_palette_fills_rows_and_writes_no_ui_state() {
         WAIT,
     );
     // git is the first TOOLS row, after the seven TERMINAL rows on Unix.
+    // Each j waits for the cursor to move before the next: the input
+    // thread drops a queued copy of a held nav key, so two j presses that
+    // arrive in one read move once.
     for _ in 0..7 {
+        let before = cursor_row(&tui.screen());
         tui.key('j');
-        tui.wait_ms(VISUAL_KEY_GAP_MS);
+        tui.wait_pred(
+            |screen| cursor_row(screen).is_some_and(|row| Some(row) != before),
+            "j moves the Doctor cursor one row",
+            WAIT,
+        );
     }
     tui.wait_pred(
         |screen| doctor_filled_with(screen, "git") && cursor_on(screen, "git"),
