@@ -9340,6 +9340,78 @@ mod tests {
             .is_some_and(|c| SCROLLBAR_GLYPHS.contains(&c) && chars.next().is_none())
     }
 
+    /// The depth-2 footer's wheel box and hint hit cover exactly what was
+    /// painted, in both looks (boxed panes and flat paint-mode panes) at
+    /// the 80x28 size of the PTY test: every cell from the rule row to the
+    /// last message row, the scrollbar column included, scrolls the
+    /// message and leaves the file cursor; the row under the footer (box
+    /// border, or the breadcrumb with flat panes) and the list rows above
+    /// it are off the footer box.
+    /// The hint hit sits on the painted `<more_below><K>` cells.
+    #[test]
+    fn depth_2_commit_footer_wheel_box_matches_paint_in_boxed_and_flat_panes() {
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            let case = format!("{background:?}");
+            let mut state = two_pane_commit_diff_state();
+            state.background = background;
+            set_seed_commit_body(&mut state, &footer_long_body(30));
+            let mut terminal = Terminal::new(TestBackend::new(80, 28)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let l = state.layout.clone();
+            let rule_y = l.files_list_y + l.files_list_height;
+            let bottom = l.tree_y + l.tree_height;
+            let bar_x = l.tree_x + l.tree_width - 1;
+            assert_eq!(l.commit_detail_footer_y, Some(rule_y), "{case}");
+            assert_eq!(l.commit_detail_footer_x, l.tree_x, "{case}");
+            assert_eq!(l.commit_detail_footer_width, l.tree_width, "{case}");
+            assert_eq!(rule_y + l.commit_detail_footer_height, bottom, "{case}");
+            let buf = terminal.backend().buffer().clone();
+            assert!(
+                is_scrollbar_cell(buf[(bar_x, bottom - 1)].symbol()),
+                "{case}: bar on the recorded box's last column"
+            );
+            let hint = l
+                .icon_hits
+                .iter()
+                .find(|hit| hit.kind == IconKind::GraphMoreBelow)
+                .cloned()
+                .unwrap_or_else(|| panic!("{case}: hint hit"));
+            assert_eq!(hint.y, bottom - 1, "{case}: hint on the last message row");
+            let painted: String = (hint.x..hint.x + hint.width)
+                .map(|x| buf[(x, hint.y)].symbol().to_string())
+                .collect();
+            let glyph = more_below_glyph(&state);
+            let k = state.commit_detail_footer_lines_below();
+            assert_eq!(painted, format!("{glyph}{k}"), "{case}: hit on the hint");
+            for y in rule_y..bottom {
+                for x in l.tree_x..=bar_x {
+                    assert!(
+                        state.scroll_commit_detail_msg(x, y, 0),
+                        "{case}: ({x}, {y}) is on the footer"
+                    );
+                }
+            }
+            assert!(
+                !state.scroll_commit_detail_msg(l.tree_x + 2, bottom, 0),
+                "{case}: the row under the footer is not"
+            );
+            assert!(
+                !state.scroll_commit_detail_msg(l.tree_x + 2, rule_y - 1, 0),
+                "{case}: the list row above the rule is not"
+            );
+            // A real wheel on the first message row scrolls, keeps the file.
+            let effect = state.dispatch(Action::ScrollWheel {
+                col: l.tree_x + 2,
+                row: rule_y + 3,
+                delta: 1,
+                horizontal: false,
+            });
+            assert_eq!(effect, Effect::None, "{case}: no diff load");
+            assert_eq!(state.commit_files_cursor(), 0, "{case}: file cursor");
+            assert_eq!(state.commit_detail_msg_scroll(), 1, "{case}");
+        }
+    }
+
     /// A long message in the depth-2 commit-files footer scrolls like the
     /// graph selection footer: a 1-column scrollbar over the message rows
     /// and a muted ` <more_below><K>` hint on the last row, left of the
