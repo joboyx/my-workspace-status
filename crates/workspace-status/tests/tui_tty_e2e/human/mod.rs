@@ -52,6 +52,7 @@ mod pty_ctrl_r_resolves_comment_and_copy_tags;
 mod pty_ctrl_u_d_jumps_workspace_tree;
 mod pty_d_switches_to_default_branch;
 mod pty_demo_head_chip_and_narrow_footer;
+mod pty_depth_2_commit_footer_wheel_scrolls_message;
 mod pty_depth_2_new_commit_file_resets_diff_viewport;
 mod pty_diff_hscrollbar_thumb_drag;
 mod pty_diff_path_header_wraps_long_path;

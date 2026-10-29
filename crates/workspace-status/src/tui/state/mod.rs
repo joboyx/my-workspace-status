@@ -300,6 +300,18 @@ pub struct LayoutHit {
     pub graph_footer_height: u16,
     /// Max message scroll for the painted footer.
     pub graph_footer_scroll_max: usize,
+    /// 0-based first row of the depth-2 commit-files footer (its rule row)
+    /// when its expanded message is taller than its message rows (wheel
+    /// there scrolls the message, not the file list).
+    pub commit_detail_footer_y: Option<u16>,
+    /// 0-based first column of that footer.
+    pub commit_detail_footer_x: u16,
+    /// Footer width.
+    pub commit_detail_footer_width: u16,
+    /// Footer height, the rule row on top included.
+    pub commit_detail_footer_height: u16,
+    /// Max message scroll for the painted commit-files footer.
+    pub commit_detail_footer_scroll_max: usize,
     /// 0-based row of the graph commit-message footer's top rule when the
     /// footer is expanded and painted: the [`ResizeEdge::CommitMsg`] edge.
     pub commit_msg_rule_y: Option<u16>,
@@ -445,6 +457,11 @@ impl Default for LayoutHit {
             graph_footer_width: 0,
             graph_footer_height: 0,
             graph_footer_scroll_max: 0,
+            commit_detail_footer_y: None,
+            commit_detail_footer_x: 0,
+            commit_detail_footer_width: 0,
+            commit_detail_footer_height: 0,
+            commit_detail_footer_scroll_max: 0,
             commit_msg_rule_y: None,
             commit_msg_rule_x: 0,
             commit_msg_rule_width: 0,
@@ -503,7 +520,8 @@ impl LayoutHit {
                 | IconTarget::GraphWorktree(_)
                 | IconTarget::GraphChip { .. }
                 | IconTarget::GraphSync
-                | IconTarget::GraphMoreLines(_) => None,
+                | IconTarget::GraphMoreLines(_)
+                | IconTarget::CommitDetailMoreLines(_) => None,
             })
             .collect()
     }
@@ -530,6 +548,23 @@ fn hit_row_box<T: Copy>(hits: &[(u16, u16, T)], y: u16, col: u16, row: u16) -> O
     hits.iter()
         .find(|(x, width, _)| col >= *x && col < x.saturating_add(*width))
         .map(|(_, _, value)| *value)
+}
+
+/// Whether cell `(col, row)` is on a recorded footer box: `top` is its
+/// first row (`None` when no scrolling footer painted this frame), then
+/// `x`, `width`, and `height`. The wheel hit test of every
+/// commit-message footer.
+fn on_footer_box(
+    (col, row): (u16, u16),
+    top: Option<u16>,
+    x: u16,
+    width: u16,
+    height: u16,
+) -> bool {
+    top.is_some_and(|top| {
+        (top..top.saturating_add(height)).contains(&row)
+            && (x..x.saturating_add(width)).contains(&col)
+    })
 }
 
 /// Cursor, scroll, and folds saved when `/` opens. Every query change and
@@ -963,8 +998,11 @@ pub struct AppState {
     /// none or a bad value). They beat `viewDefaults.commitMessageLines` in
     /// [`Self::apply_view_defaults`].
     saved_commit_msg_lines: Option<usize>,
-    /// Scroll of an expanded message taller than the graph footer, keyed by
-    /// the graph row identity it belongs to. Any other selection reads `0`.
+    /// Scroll of an expanded message taller than its footer, keyed by the
+    /// graph row identity of the commit or stash it belongs to. The graph
+    /// selection footer and the depth-2 commit-files footer share it, so
+    /// the same commit reads the same offset on both; any other commit
+    /// reads `0`.
     commit_msg_scroll: Option<(String, usize)>,
     pub drag: SplitDrag,
     /// Flat panes: a press on a pad cell at the pane join (the divider grab
@@ -1765,25 +1803,88 @@ impl AppState {
     /// moves the list as usual.
     pub(crate) fn scroll_graph_footer_msg(&mut self, col: u16, row: u16, delta: i32) -> bool {
         let layout = &self.layout;
-        let Some(top) = layout.graph_footer_y else {
-            return false;
-        };
-        let on_footer = (top..top.saturating_add(layout.graph_footer_height)).contains(&row)
-            && (layout.graph_footer_x
-                ..layout
-                    .graph_footer_x
-                    .saturating_add(layout.graph_footer_width))
-                .contains(&col);
+        let on_footer = on_footer_box(
+            (col, row),
+            layout.graph_footer_y,
+            layout.graph_footer_x,
+            layout.graph_footer_width,
+            layout.graph_footer_height,
+        );
         if !on_footer {
             return false;
         }
         let Some(id) = self.graph_selected_row_identity() else {
             return false;
         };
-        let max = layout.graph_footer_scroll_max;
-        let current = self.graph_footer_msg_scroll().min(max) as i64;
+        let max = self.layout.graph_footer_scroll_max;
+        self.step_commit_msg_scroll(id, self.graph_footer_msg_scroll(), max, delta);
+        true
+    }
+
+    /// Store `current + delta`, clamped to `0..=max`, as the message scroll
+    /// of identity `id`.
+    fn step_commit_msg_scroll(&mut self, id: String, current: usize, max: usize, delta: i32) {
+        let current = current.min(max) as i64;
         let next = (current + i64::from(delta)).clamp(0, max as i64);
         self.commit_msg_scroll = Some((id, next as usize));
+    }
+
+    /// Graph row identity of the commit or stash the depth-2 commit-files
+    /// footer shows: the same key [`Self::graph_footer_msg_scroll`] uses
+    /// for that row. `None` for a compare tab and for sources with no
+    /// message (worktree, compare, commit vs worktree).
+    pub(crate) fn commit_detail_msg_identity(&self) -> Option<String> {
+        if self.tabs.active_compare().is_some() {
+            return None;
+        }
+        let (repo, source) = match &self.drill {
+            DrillView::Files { repo, source, .. } | DrillView::Diff { repo, source, .. } => {
+                (repo, source)
+            }
+            DrillView::Graph => return None,
+        };
+        match source {
+            CommitFileSource::Commit { commit_id } => Some(format!("{repo}#commit:{commit_id}")),
+            CommitFileSource::Stash { stash_ref } => Some(format!("{repo}#stash:{stash_ref}")),
+            CommitFileSource::Worktree
+            | CommitFileSource::Compare { .. }
+            | CommitFileSource::CommitVsWorktree { .. } => None,
+        }
+    }
+
+    /// First painted message line of the depth-2 commit-files footer.
+    ///
+    /// Shares [`Self::commit_msg_scroll`] with the graph selection footer:
+    /// another commit reads `0`.
+    pub(crate) fn commit_detail_msg_scroll(&self) -> usize {
+        match (&self.commit_msg_scroll, self.commit_detail_msg_identity()) {
+            (Some((id, offset)), Some(current)) if *id == current => *offset,
+            _ => 0,
+        }
+    }
+
+    /// Wheel over an overflowing depth-2 commit-files footer scrolls its
+    /// message.
+    ///
+    /// Returns false when `(col, row)` is not on that footer, so the wheel
+    /// moves the file list as usual. The file cursor, focus, and diff stay.
+    pub(crate) fn scroll_commit_detail_msg(&mut self, col: u16, row: u16, delta: i32) -> bool {
+        let layout = &self.layout;
+        let on_footer = on_footer_box(
+            (col, row),
+            layout.commit_detail_footer_y,
+            layout.commit_detail_footer_x,
+            layout.commit_detail_footer_width,
+            layout.commit_detail_footer_height,
+        );
+        if !on_footer {
+            return false;
+        }
+        let Some(id) = self.commit_detail_msg_identity() else {
+            return false;
+        };
+        let max = self.layout.commit_detail_footer_scroll_max;
+        self.step_commit_msg_scroll(id, self.commit_detail_msg_scroll(), max, delta);
         true
     }
 
@@ -2024,8 +2125,11 @@ impl AppState {
     ///
     /// Fixed for the expand state and [`Self::commit_msg_lines`], never sized
     /// by the selected message: expanded is title + meta + N message rows,
-    /// collapsed is title + subtitle. [`Self::commit_detail_footer_lines`]
-    /// returns exactly this many lines.
+    /// collapsed is title + subtitle. This is the painted height (before
+    /// the cap), not a line count: [`Self::commit_detail_footer_lines`]
+    /// returns the title and meta, then only the real message lines, so a
+    /// short message or a source with no message gives fewer lines (the
+    /// unused rows paint blank) and a long one gives more (they scroll).
     pub(crate) fn commit_detail_footer_request(&self) -> usize {
         if self.commit_msg_expand {
             2 + self.commit_msg_lines
@@ -2041,10 +2145,17 @@ impl AppState {
     /// (the graph pane beside it already shows one). Collapsed is the title
     /// and the dense one-line subtitle from [`Self::commit_detail_meta`].
     /// Expanded is the title, a meta line (sha / refs / author), then the
-    /// subject plus body wrapped into [`Self::commit_msg_lines`] rows: blank
-    /// rows pad a short message and `…` ends a clipped long one. Without a
-    /// message the subtitle takes the meta row. Always
-    /// [`Self::commit_detail_footer_request`] lines.
+    /// whole subject plus body, wrapped one column short of `width` (the
+    /// message scrollbar column) with no line cap, like
+    /// [`selection_footer_parts`]. Without a message (collapsed, a compare
+    /// tab, or a worktree / compare / commit-vs-worktree source) the
+    /// subtitle takes the meta row and nothing follows.
+    ///
+    /// Always the title and the meta / subtitle line, then only the real
+    /// message lines: no blank padding. The footer keeps its fixed
+    /// [`Self::commit_detail_footer_request`] height in paint, where unused
+    /// message rows stay blank and a message taller than the rows scrolls
+    /// ([`Self::commit_detail_msg_scroll`]).
     pub(crate) fn commit_detail_footer_lines(&self, width: usize) -> Vec<String> {
         let (title, subtitle) = self.commit_detail_meta();
         let subtitle = subtitle.unwrap_or_default();
@@ -2057,15 +2168,39 @@ impl AppState {
                     footer.push(meta);
                     footer.extend(wrap_commit_message(
                         &message,
-                        width.max(1),
-                        self.commit_msg_lines,
+                        width.saturating_sub(1).max(1),
+                        usize::MAX,
                     ));
                 }
                 None => footer.push(subtitle),
             }
         }
-        footer.resize(self.commit_detail_footer_request(), String::new());
         footer
+    }
+
+    /// Message lines of the depth-2 commit-files footer below the shown
+    /// ones: the count its more-below hint paints. `0` when the footer did
+    /// not record an overflowing message this frame or every line shows.
+    pub(crate) fn commit_detail_footer_lines_below(&self) -> usize {
+        let layout = &self.layout;
+        if layout.commit_detail_footer_y.is_none() {
+            return 0;
+        }
+        // Message rows: the footer less its rule, title, and meta rows.
+        let rows = usize::from(layout.commit_detail_footer_height)
+            .saturating_sub(usize::from(FOOTER_RULE_ROWS))
+            .saturating_sub(2);
+        let messages = self
+            .commit_detail_footer_lines(usize::from(layout.commit_detail_footer_width))
+            .len()
+            .saturating_sub(2);
+        if rows == 0 || messages <= rows {
+            return 0;
+        }
+        let offset = self
+            .commit_detail_msg_scroll()
+            .min(layout.commit_detail_footer_scroll_max);
+        messages.saturating_sub(offset + rows)
     }
 
     fn expanded_commit_message(&self) -> Option<(String, String)> {
@@ -15635,8 +15770,8 @@ mod tests {
         let expanded_files_footer = app.commit_detail_footer_lines(32);
         assert_eq!(
             expanded_files_footer.len(),
-            2 + app.commit_msg_lines,
-            "title + meta + N message rows"
+            2 + 2 + 1 + 1,
+            "title + meta + subject (2 rows) + blank + body, no padding"
         );
         let expanded_join = expanded_files_footer.join("");
         assert!(
@@ -15647,9 +15782,155 @@ mod tests {
             expanded_join.contains(tail),
             "expanded files footer shows subject tail: {expanded_files_footer:?}"
         );
+        // A long body is never clipped: every line comes back, wrapped one
+        // column short of the width (the scrollbar column), for the footer
+        // to scroll.
+        app.graph.as_mut().expect("graph").commits[0].body = long_commit_body(30);
+        let long_footer = app.commit_detail_footer_lines(32);
+        assert_eq!(
+            long_footer.len(),
+            2 + 2 + 1 + 30,
+            "title + meta + subject (2 rows) + blank + 30 body lines: {long_footer:?}"
+        );
+        assert!(
+            long_footer.iter().all(|line| !line.contains('…')),
+            "no … clip: {long_footer:?}"
+        );
+        assert!(
+            long_footer[2..]
+                .iter()
+                .all(|line| line.chars().count() <= 31),
+            "message wraps at width - 1: {long_footer:?}"
+        );
+        assert_eq!(long_footer.last().map(String::as_str), Some("body line 29"));
         app.dispatch(Action::ToggleCommitMsgExpand);
         assert!(!app.commit_msg_expand);
         assert_eq!(app.status, "msg off");
+    }
+
+    /// A commit body of `n` lines `body line 00`, `body line 01`, ….
+    fn long_commit_body(n: usize) -> String {
+        (0..n)
+            .map(|i| format!("body line {i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Depth 2 on the seed commit with a 30-line body: `one.rs` selected and
+    /// its diff on the right, drawn once so the footer records its box.
+    fn depth_2_long_message_state() -> AppState {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        install_graph(&mut app, Vec::new());
+        app.graph.as_mut().expect("graph").commits[0].body = long_commit_body(30);
+        app.open_commit_diff(
+            "app".into(),
+            sample_commit_source(),
+            two_commit_files(),
+            0,
+            "one.rs".into(),
+            tall_panning_diff(),
+        );
+        draw_once(&mut app);
+        app
+    }
+
+    fn wheel(col: u16, row: u16, delta: i32) -> Action {
+        Action::ScrollWheel {
+            col,
+            row,
+            delta,
+            horizontal: false,
+        }
+    }
+
+    #[test]
+    fn wheel_over_depth_2_commit_footer_scrolls_the_message_not_the_file_list() {
+        let mut app = depth_2_long_message_state();
+        let top = app
+            .layout
+            .commit_detail_footer_y
+            .expect("overflowing footer records its hit box");
+        let max = app.layout.commit_detail_footer_scroll_max;
+        assert!(max > 0);
+        let col = app.layout.commit_detail_footer_x + 2;
+        let last_row = top + app.layout.commit_detail_footer_height - 1;
+        let focus = app.focus;
+        assert_eq!(app.commit_files_cursor(), 0);
+        for _ in 0..max + 5 {
+            let effect = app.dispatch(wheel(col, last_row, 1));
+            assert!(matches!(effect, Effect::None), "no diff load: {effect:?}");
+        }
+        assert_eq!(app.commit_files_cursor(), 0, "file cursor stays");
+        assert_eq!(app.focus, focus, "focus stays");
+        assert_eq!(app.commit_detail_msg_scroll(), max, "clamped at the end");
+        // The rule row is part of the footer box, like the graph footer.
+        app.dispatch(wheel(col, top, -1));
+        assert_eq!(app.commit_detail_msg_scroll(), max - 1, "wheel up");
+        for _ in 0..max + 5 {
+            app.dispatch(wheel(col, last_row, -1));
+        }
+        assert_eq!(app.commit_detail_msg_scroll(), 0, "clamped at the top");
+
+        // Outside the footer the wheel still moves the file cursor.
+        let list_row = app.layout.files_list_y;
+        assert!(list_row < top);
+        let effect = app.dispatch(wheel(col, list_row, 1));
+        assert_eq!(app.commit_files_cursor(), 1, "list wheel moves the cursor");
+        assert!(!matches!(effect, Effect::None), "and loads the diff");
+        assert_eq!(app.commit_detail_msg_scroll(), 0);
+    }
+
+    #[test]
+    fn depth_2_commit_footer_scroll_is_keyed_by_the_commit_graph_identity() {
+        let mut app = depth_2_long_message_state();
+        let top = app.layout.commit_detail_footer_y.expect("footer box");
+        let col = app.layout.commit_detail_footer_x + 2;
+        for _ in 0..3 {
+            app.dispatch(wheel(col, top, 1));
+        }
+        assert_eq!(app.commit_detail_msg_scroll(), 3);
+        // Same key as the graph footer of that commit row.
+        let row = app
+            .graph
+            .as_ref()
+            .expect("graph")
+            .visible_rows()
+            .into_iter()
+            .find(|row| matches!(row, GraphRow::Commit { .. }))
+            .expect("commit row");
+        assert_eq!(
+            app.commit_detail_msg_identity(),
+            Some(graph_row_identity("app", &row))
+        );
+        // Another commit starts at the top and records nothing until a wheel.
+        app.open_commit_diff(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "bbb2222cccccccccccccccccccccccccccccccc".into(),
+            },
+            two_commit_files(),
+            0,
+            "one.rs".into(),
+            tall_panning_diff(),
+        );
+        assert_eq!(app.commit_detail_msg_scroll(), 0, "another commit");
+        // A stash keys like its graph row too.
+        app.open_commit_diff(
+            "app".into(),
+            CommitFileSource::Stash {
+                stash_ref: "stash@{0}".into(),
+            },
+            two_commit_files(),
+            0,
+            "one.rs".into(),
+            tall_panning_diff(),
+        );
+        assert_eq!(
+            app.commit_detail_msg_identity().as_deref(),
+            Some("app#stash:stash@{0}")
+        );
+        assert_eq!(app.commit_detail_msg_scroll(), 0, "a stash");
     }
 
     fn arm_graph_scrollbar(app: &mut AppState, content_len: usize) {

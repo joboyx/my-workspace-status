@@ -10,6 +10,7 @@
 
 mod action;
 mod chrome;
+mod footer;
 mod format;
 mod glyphs;
 mod gutter;
@@ -29,6 +30,7 @@ pub use chrome::{
     FOOTER_CONNECTOR_NOT_SELECTABLE, FOOTER_NO_REFS, FOOTER_NO_SELECTION, FOOTER_ROOT_COMMIT,
     FOOTER_RULE_ROWS, FOOTER_SPACER_SUBJECT, FOOTER_WORKTREE_NOT_A_COMMIT, LOADING_OLDER,
 };
+pub use footer::{paint_footer_message, FooterMessagePaint};
 pub use format::{
     assemble_commit_spacer, assemble_stash_spacer, format_commit_message, format_commit_ref_chips,
     format_commit_ref_chips_with, format_commit_spacer, format_commit_subject, format_label,

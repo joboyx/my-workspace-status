@@ -40,6 +40,8 @@ pub mod file_search;
 pub mod git;
 pub mod helpers;
 pub(crate) mod parallel;
+#[cfg(test)]
+pub(crate) mod parity_registry;
 pub mod render;
 pub mod settings;
 pub mod snapshot;

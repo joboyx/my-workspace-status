@@ -91,6 +91,10 @@ pub enum IconTarget {
     /// The selection footer's `more lines below` hint of the graph row with
     /// this [`graph_row_id`].
     GraphMoreLines(String),
+    /// The depth-2 commit-files footer's `more lines below` hint of the
+    /// commit or stash with this identity
+    /// ([`AppState::commit_detail_msg_identity`]).
+    CommitDetailMoreLines(String),
 }
 
 /// How a popover opened.
@@ -394,6 +398,7 @@ fn section(
         IconTarget::GraphChip { row, chip } => graph_chip_section(state, rows, kind, row, chip),
         IconTarget::GraphSync => graph_sync_section(state),
         IconTarget::GraphMoreLines(row) => graph_more_lines_section(state, rows, row),
+        IconTarget::CommitDetailMoreLines(id) => commit_detail_more_lines_section(state, id),
     }
 }
 
@@ -1808,7 +1813,30 @@ fn graph_more_lines_section(
     if graph_row_id(rows.graph().get(state.graph_cursor)?) != row_id {
         return None;
     }
-    let below = state.graph_footer_lines_below();
+    more_lines_section(
+        state.graph_footer_lines_below(),
+        IconTarget::GraphMoreLines(row_id.to_string()),
+    )
+}
+
+/// The depth-2 commit-files footer hint of the commit or stash with
+/// identity `id`: the same section as [`graph_more_lines_section`], with
+/// the count of that footer. `None` once another source shows or every
+/// line shows.
+fn commit_detail_more_lines_section(state: &AppState, id: &str) -> Option<PopoverSection> {
+    if state.commit_detail_msg_identity().as_deref() != Some(id) {
+        return None;
+    }
+    more_lines_section(
+        state.commit_detail_footer_lines_below(),
+        IconTarget::CommitDetailMoreLines(id.to_string()),
+    )
+}
+
+/// A commit-message footer's `more lines below` section: the meaning,
+/// `below` hidden lines, then Collapse / expand and Taller message.
+/// `None` when `below` is 0. Every footer hint uses it.
+fn more_lines_section(below: usize, target: IconTarget) -> Option<PopoverSection> {
     if below == 0 {
         return None;
     }
@@ -1824,7 +1852,7 @@ fn graph_more_lines_section(
     Some(PopoverSection {
         icon: IconKind::GraphMoreBelow,
         role: SegRole::Muted,
-        target: IconTarget::GraphMoreLines(row_id.to_string()),
+        target,
         lines,
     })
 }

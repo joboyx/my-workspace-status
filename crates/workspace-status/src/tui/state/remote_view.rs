@@ -186,6 +186,7 @@ impl AppState {
             | IconTarget::CommitFileRow(_)
             | IconTarget::GraphRow(_)
             | IconTarget::GraphMoreLines(_)
+            | IconTarget::CommitDetailMoreLines(_)
             | IconTarget::PullRequest(_) => self.remote_focus(line),
         }
     }
