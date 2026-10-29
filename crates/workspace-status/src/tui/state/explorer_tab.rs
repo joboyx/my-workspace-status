@@ -455,7 +455,7 @@ impl AppState {
                 if row != self.layout.tab_y =>
             {
                 if self.mouse_enabled {
-                    self.explorer_click(col, row)
+                    self.explorer_press(col, row)
                 } else {
                     Effect::None
                 }
@@ -881,11 +881,32 @@ impl AppState {
         self.explorer_move(delta as isize)
     }
 
+    /// Left press below the tab strip, in the order the Workspace's
+    /// `click` uses: an open popover takes the press first
+    /// ([`Self::popover_click`]); a press on a painted icon (a blame note's
+    /// author, age, or hash) runs [`Self::explorer_click`] and then pins
+    /// the icon's popover, never counting toward a double-click; anything
+    /// else is [`Self::explorer_click`].
+    fn explorer_press(&mut self, col: u16, row: u16) -> Effect {
+        if let Some(effect) = self.popover_click(col, row) {
+            return effect;
+        }
+        let Some(hit) = self.icon_hit_at(col, row).cloned() else {
+            return self.explorer_click(col, row);
+        };
+        self.last_click = None;
+        let selected = self.explorer_click(col, row);
+        self.last_click = None;
+        self.text_selection = None;
+        let details = self.pin_icon(&hit);
+        super::popover::then(selected, details)
+    }
+
     /// Press in a pane: a tree row takes the cursor (a folder also opens or
     /// closes); the preview takes focus and, for a file body, the line. A
     /// flat pad cell counts as its row; a text selection arms only in the
     /// inner area.
-    fn explorer_click(&mut self, col: u16, row: u16) -> Effect {
+    pub(super) fn explorer_click(&mut self, col: u16, row: u16) -> Effect {
         self.drag = SplitDrag::None;
         self.pad_press = None;
         let at = ratatui::layout::Position::new(col, row);

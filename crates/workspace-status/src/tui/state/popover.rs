@@ -834,8 +834,8 @@ impl AppState {
     /// text selection on the popover body, and the release runs an action
     /// line unless the press became a drag. Outside it the press only
     /// closes the popover. Inside a peek the press selects the peek's row
-    /// and pins the peek. Outside a peek the peek closes and the press goes
-    /// on.
+    /// (on an Explorer tab through `explorer_click`) and pins the peek.
+    /// Outside a peek the peek closes and the press goes on.
     pub(super) fn popover_click(&mut self, col: u16, row: u16) -> Option<Effect> {
         let popover = self.popover.as_ref()?;
         let painted = self.layout.popover.clone();
@@ -871,7 +871,13 @@ impl AppState {
         }
         let targets = popover.targets.clone();
         let anchor = popover.anchor?;
-        let selected = self.click_at(anchor.x, anchor.y);
+        // An Explorer tab selects through its own panes, not the parked
+        // Workspace layout.
+        let selected = if self.is_explorer_tab() {
+            self.explorer_click(anchor.x, anchor.y)
+        } else {
+            self.click_at(anchor.x, anchor.y)
+        };
         self.last_click = None;
         self.text_selection = None;
         let details = self.pin(targets, Some(anchor));
@@ -3779,5 +3785,99 @@ mod tests {
         assert_eq!(app.dispatch(Action::PopoverCopyLine), copy(G_HEAD));
         app.dispatch(Action::PopoverMove(1));
         assert_eq!(app.dispatch(Action::PopoverCopyLine), copy("add graph"));
+    }
+
+    /// An Explorer tab's clean file: a click on the blame note's short hash
+    /// pins the commit card through the Explorer click path; `y` copies the
+    /// full id, `j` then `y` the subject, and Esc closes it. A click inside
+    /// a peek over the age pins the time popover. The cursor line never
+    /// moves.
+    #[test]
+    fn explorer_click_on_a_blame_hash_pins_its_card_and_esc_closes() {
+        const SHA: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut app = app();
+        app.open_loaded_inner_file("app", "README.md", &["one", "two", "three"]);
+        assert_eq!(app.focus, FocusPane::Right, "the open focuses the file");
+        app.dispatch(Action::Move(1));
+        let blame_key = app.line_blame_want().expect("cursor line asks");
+        app.line_blame.insert(
+            blame_key,
+            Some(crate::git::LineBlame {
+                sha: SHA.into(),
+                author: "Ada Lovelace".into(),
+                author_time: super::super::unix_now() - 3 * 86_400,
+                summary: "fix the parser".into(),
+                orig_line: 2,
+                filename: "README.md".into(),
+                previous: None,
+                boundary: false,
+                uncommitted: false,
+            }),
+        );
+        app.commit_cards.insert(
+            "app".into(),
+            SHA.into(),
+            Ok(Commit {
+                id: SHA.into(),
+                subject: "fix the parser".into(),
+                parents: vec!["c".repeat(40)],
+                ..Commit::default()
+            }),
+        );
+        let cursor = |app: &AppState| app.tabs.active_file_view().expect("file view").cursor;
+        assert_eq!(cursor(&app), 1);
+        paint(&mut app);
+        let hit_of = |app: &AppState, kind: IconKind| {
+            app.layout
+                .icon_hits
+                .iter()
+                .find(|hit| hit.kind == kind)
+                .cloned()
+                .unwrap_or_else(|| panic!("no {kind:?} hit: {:?}", app.layout.icon_hits))
+        };
+        let hash = hit_of(&app, IconKind::CommitHash);
+        assert_eq!(hash.target, commit_target("app", SHA));
+        app.dispatch(Action::Click {
+            col: hash.x,
+            row: hash.y,
+        });
+        assert!(app.popover_pinned(), "the hash pins on an Explorer tab");
+        let sections = app.open_popover_sections();
+        assert_eq!(
+            (sections.len(), sections[0].icon, &sections[0].target),
+            (1, IconKind::CommitHash, &commit_target("app", SHA))
+        );
+        assert_eq!(app.input_mode(), InputMode::Popover);
+        paint(&mut app);
+        let press = |app: &mut AppState, code: KeyCode| {
+            let action = event_to_action(&key(code), app.input_mode(), false, false);
+            app.dispatch(action)
+        };
+        assert_eq!(press(&mut app, KeyCode::Char('y')), copy(SHA));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(press(&mut app, KeyCode::Char('y')), copy("fix the parser"));
+        assert_eq!(cursor(&app), 1, "j moves the popover focus, not the line");
+        press(&mut app, KeyCode::Esc);
+        assert!(app.popover.is_none(), "Esc closes it");
+        assert_eq!(cursor(&app), 1);
+        assert_eq!(app.focus, FocusPane::Right);
+
+        // A peek over the age; a click inside it pins it.
+        paint(&mut app);
+        let date = hit_of(&app, IconKind::CommitDate);
+        peek_at(&mut app, &date, Instant::now());
+        paint(&mut app);
+        let rect = app.layout.popover.as_ref().expect("peek").rect;
+        app.dispatch(Action::Click {
+            col: rect.x + 2,
+            row: rect.y + 1,
+        });
+        assert!(app.popover_pinned(), "a click inside the peek pins it");
+        let sections = app.open_popover_sections();
+        assert_eq!(
+            (sections[0].icon, &sections[0].target),
+            (IconKind::CommitDate, &commit_target("app", SHA))
+        );
+        assert_eq!(cursor(&app), 1);
     }
 }

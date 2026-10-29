@@ -63,7 +63,7 @@ use super::icons::{
     IconSpec, CURSOR_BAR, CURSOR_BAR_INACTIVE, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED,
     FOLD_EXPANDED_ASCII,
 };
-use super::line_blame::{fit_annotation, relative_age, BlameSide, BLAME_MENU_ROWS};
+use super::line_blame::{fit_annotation, relative_age, short_sha, BlameSide, BLAME_MENU_ROWS};
 use super::ops::RevertScope;
 use super::popover::{
     commit_meta_icon, flat_lines, focused_line, graph_icon, graph_row_id, graph_sync_kind,
@@ -109,6 +109,7 @@ use super::undercurl::{cut_link_cells, drop_undercurls_under, underlined_runs, U
 use super::watch::FlashKind;
 use crate::file_index::{FileIndex, FileRead};
 use crate::file_search::{SearchHit, SearchOptions};
+use crate::git::LineBlame;
 use crate::helpers::{is_detached_head_branch, visible_width};
 
 mod prs_tab;
@@ -991,6 +992,8 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
     let visual = state.file_visual_range();
     let mut painted: Vec<Line> = Vec::with_capacity(height);
     let mut row_lines = Vec::with_capacity(height);
+    // Screen row the blame note painted on, for its commit popover hits.
+    let mut note_y: Option<u16> = None;
     for (line, text) in lines.iter().enumerate().take(end).skip(scroll) {
         let selected = line == tab.cursor;
         let hit = hits.binary_search(&line).is_ok();
@@ -1045,6 +1048,7 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
                 if selected && part + 1 == starts.len() {
                     if let Some((text, _)) = &blame {
                         put_line_annotation(&mut row, text, palette, false);
+                        note_y = Some(inner.y.saturating_add(painted.len() as u16));
                     }
                 }
             }
@@ -1053,6 +1057,20 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
         }
     }
     frame.render_widget(Paragraph::new(painted), inner);
+    if let (Some(y), Some((note, _)), Some((repo, line_blame))) =
+        (note_y, &blame, state.painted_line_blame())
+    {
+        let hits = blame_note_hits(
+            frame.buffer_mut(),
+            &[y],
+            inner.left(),
+            inner.right(),
+            note,
+            &line_blame,
+            &repo,
+        );
+        state.layout.icon_hits.extend(hits);
+    }
     let curls = underlined_runs(frame.buffer_mut(), inner, palette.comment_underline());
     state.layout.undercurls.extend(curls);
     state.layout.file_view_row_lines = row_lines;
@@ -3520,9 +3538,12 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     };
     let search = state.theme.pills().filter;
     let mut painted: Vec<Line> = Vec::new();
+    // Screen rows of the focused cursor row: its blame note paints there.
+    let mut cursor_ys: Vec<u16> = Vec::new();
     let mut i = skip;
     while painted.len() < line_h && i < rows.len() {
         let search_match = search_hits.contains(&i);
+        let blamed_row = i == state.diff_cursor && state.focus == FocusPane::Right;
         let lines = paint_diff_row(
             &rows[i],
             content_w,
@@ -3542,6 +3563,9 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             if painted.len() >= line_h {
                 break;
             }
+            if blamed_row {
+                cursor_ys.push(body.y.saturating_add(painted.len() as u16));
+            }
             painted.push(line);
         }
         i = i.saturating_add(1);
@@ -3553,6 +3577,22 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         height: line_h as u16,
     };
     frame.render_widget(Paragraph::new(painted), lines_area);
+    if !cursor_ys.is_empty() {
+        if let (Some((note, _)), Some((repo, blame))) =
+            (state.painted_line_annotation(), state.painted_line_blame())
+        {
+            let hits = blame_note_hits(
+                frame.buffer_mut(),
+                &cursor_ys,
+                lines_area.left(),
+                lines_area.right(),
+                &note,
+                &blame,
+                &repo,
+            );
+            state.layout.icon_hits.extend(hits);
+        }
+    }
     // Only commented code is underlined in the diff rows: those runs get
     // the curly upgrade after the draw.
     let curls = underlined_runs(frame.buffer_mut(), lines_area, palette.comment_underline());
@@ -3830,6 +3870,81 @@ fn put_line_annotation(
     if rest > 0 {
         spans.push(Span::styled(" ".repeat(rest), style));
     }
+}
+
+/// Commit popover hits on the line-blame note `note` painted on one of the
+/// buffer rows `rows`, columns `x0..x1`: the author
+/// ([`IconKind::CommitAuthor`]), the age ([`IconKind::CommitDate`]), and the
+/// short hash ([`IconKind::CommitHash`]) of `blame` in checkout `repo`.
+///
+/// `note` is the `annotation_text` the row painted
+/// (`{author}, {age} · {sha7} · {summary}`). [`put_line_annotation`] cuts
+/// it from the end, so the row is searched for the longest painted prefix:
+/// all three fields, else author and age, else the author alone. A field
+/// cut short records no hit. Each hit covers its field's display cells from
+/// the match start. No commit id, or no row shows the note: no hit.
+fn blame_note_hits(
+    buf: &Buffer,
+    rows: &[u16],
+    x0: u16,
+    x1: u16,
+    note: &str,
+    blame: &LineBlame,
+    repo: &str,
+) -> Vec<IconHit> {
+    if blame.sha.is_empty() {
+        return Vec::new();
+    }
+    let author = blame.author.as_str();
+    let Some(rest) = note
+        .strip_prefix(author)
+        .and_then(|rest| rest.strip_prefix(", "))
+    else {
+        return Vec::new();
+    };
+    let Some((age, after_age)) = rest.split_once(" · ") else {
+        return Vec::new();
+    };
+    let sha7 = short_sha(&blame.sha);
+    if !after_age.starts_with(sha7.as_str()) {
+        return Vec::new();
+    }
+    let date_x = format!("{author}, ").width();
+    let hash_x = format!("{author}, {age} · ").width();
+    // Kind, start column inside the note, and width of each field.
+    let fields = [
+        (IconKind::CommitAuthor, 0, author.width()),
+        (IconKind::CommitDate, date_x, age.width()),
+        (IconKind::CommitHash, hash_x, sha7.width()),
+    ];
+    let prefixes = [
+        (format!("{author}, {age} · {sha7}"), 3),
+        (format!("{author}, {age}"), 2),
+        (format!("{author}, "), 1),
+    ];
+    // The note sits on the last painted row of its line.
+    for &y in rows.iter().rev() {
+        for (prefix, shown) in &prefixes {
+            let Some((x, _)) = painted_text_span(buf, y, x0, x1, prefix) else {
+                continue;
+            };
+            return fields[..*shown]
+                .iter()
+                .filter(|(_, _, width)| *width > 0)
+                .map(|(kind, at, width)| IconHit {
+                    y,
+                    x: x + *at as u16,
+                    width: *width as u16,
+                    kind: *kind,
+                    target: IconTarget::Commit {
+                        repo: repo.to_string(),
+                        sha: blame.sha.clone(),
+                    },
+                })
+                .collect();
+        }
+    }
+    Vec::new()
 }
 
 /// Flat diff rows, before [`bleed_flat_pad`]: the two cells a row leaves
@@ -20608,6 +20723,269 @@ mod tests {
                 hits.is_empty(),
                 "{background:?}: a stash drill records no hit: {hits:?}"
             );
+        }
+    }
+
+    /// Commit the blame notes of the line-viewer tests name: not the commit
+    /// of the depth-2 drill, whose footer records its own commit hits.
+    const BLAME_NOTE_SHA: &str = "ddd4444eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+    /// Cache a committed blame of [`BLAME_NOTE_SHA`] by `Ada Lovelace`,
+    /// three days old, as the answer of the line `state` focuses now.
+    /// Returns the age its note paints.
+    fn cache_focused_commit_blame(state: &mut AppState) -> String {
+        let key = state.line_blame_want().expect("focused line asks");
+        let now = crate::tui::state::unix_now();
+        let author_time = now - 3 * 86_400;
+        state.line_blame.insert(
+            key,
+            Some(crate::git::LineBlame {
+                sha: BLAME_NOTE_SHA.into(),
+                author: "Ada Lovelace".into(),
+                author_time,
+                summary: "fix the parser".into(),
+                orig_line: 1,
+                filename: "README.md".into(),
+                previous: None,
+                boundary: false,
+                uncommitted: false,
+            }),
+        );
+        relative_age(now, author_time)
+    }
+
+    /// Kind and painted text of each commit popover hit of the frame on
+    /// [`BLAME_NOTE_SHA`] of `app`, with the hits.
+    fn blame_note_found(
+        state: &AppState,
+        terminal: &Terminal<TestBackend>,
+    ) -> (Vec<(IconKind, String)>, Vec<IconHit>) {
+        let target = IconTarget::Commit {
+            repo: "app".into(),
+            sha: BLAME_NOTE_SHA.into(),
+        };
+        commit_hits_with_text(state, terminal)
+            .into_iter()
+            .filter(|(hit, _)| hit.target == target)
+            .map(|(hit, text)| ((hit.kind, text), hit))
+            .unzip()
+    }
+
+    /// The three fields a whole blame note of age `age` records.
+    fn blame_note_fields(age: &str) -> Vec<(IconKind, String)> {
+        vec![
+            (IconKind::CommitAuthor, "Ada Lovelace".into()),
+            (IconKind::CommitDate, age.into()),
+            (IconKind::CommitHash, "ddd4444".into()),
+        ]
+    }
+
+    /// The line-blame note on the focused diff row (Workspace depth 0 and
+    /// depth 2, inline and side by side) and on the Explorer file view's
+    /// cursor line, boxed and flat: the author, age, and short hash each
+    /// record one commit popover hit over the painted text, and a click on
+    /// the age pins the time popover. A pane that cuts the note after the
+    /// age keeps the author and age hits only; an uncommitted line and a
+    /// diff whose left pane has focus record none.
+    #[test]
+    fn blame_note_records_author_date_and_hash_hits_inline_split_and_file_view() {
+        const BODY: &str = "@@ -1,3 +1,3 @@\n keep one\n-old line\n+new line\n keep two\n";
+        let target = IconTarget::Commit {
+            repo: "app".into(),
+            sha: BLAME_NOTE_SHA.into(),
+        };
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            for surface in ["diff-d0", "diff-d2"] {
+                for mode in [DiffMode::Inline, DiffMode::SideBySide] {
+                    let what = format!("{surface} {background:?} {mode:?}");
+                    let (mut state, row) = match surface {
+                        "diff-d0" => {
+                            let mut state = two_pane_diff_state();
+                            state.set_diff(
+                                "app".into(),
+                                "README.md".into(),
+                                super::super::diff::DiffContent::from_unified(BODY),
+                            );
+                            (state, "keep one")
+                        }
+                        _ => (two_pane_commit_diff_state(), "new line"),
+                    };
+                    state.background = background;
+                    state.diff_mode = mode;
+                    state.focus = FocusPane::Right;
+                    let mut terminal = Terminal::new(TestBackend::new(220, 24)).unwrap();
+                    draw_state(&mut terminal, &mut state);
+                    state.diff_cursor = diff_row_index(&state, row);
+                    let age = cache_focused_commit_blame(&mut state);
+                    draw_state(&mut terminal, &mut state);
+                    let screen = buffer_text(&terminal);
+                    let (found, hits) = blame_note_found(&state, &terminal);
+                    assert_eq!(found, blame_note_fields(&age), "{what}\n{screen}");
+                    let y = first_row_with(terminal.backend().buffer(), row).expect("cursor row");
+                    for hit in &hits {
+                        assert_eq!(hit.y, y, "{what}: on the cursor row");
+                        assert!(hit.x >= state.layout.right_x, "{what}: {hit:?}");
+                    }
+                    if mode == DiffMode::SideBySide {
+                        let rule = state.layout.diff_split_rule_x.expect("split rule");
+                        assert!(hits[0].x > rule, "{what}: new side: {hits:?}");
+                    }
+
+                    // A click on the age pins the time popover.
+                    state.dispatch(Action::Click {
+                        col: hits[1].x,
+                        row: hits[1].y,
+                    });
+                    assert!(state.popover_pinned(), "{what}: the age pins");
+                    let sections = state.open_popover_sections();
+                    assert_eq!(
+                        (sections.len(), sections[0].icon, &sections[0].target),
+                        (1, IconKind::CommitDate, &target),
+                        "{what}"
+                    );
+                    state.close_popover();
+
+                    // Narrow the terminal until the note loses its hash. A
+                    // narrow split falls back to inline rows, so the cut
+                    // runs on inline only.
+                    if mode == DiffMode::Inline {
+                        let cut = (60..220).rev().find_map(|cols| {
+                            let mut terminal = Terminal::new(TestBackend::new(cols, 24)).unwrap();
+                            draw_state(&mut terminal, &mut state);
+                            let (found, _) = blame_note_found(&state, &terminal);
+                            (found.len() < 3).then(|| (found, buffer_text(&terminal)))
+                        });
+                        let (found, screen) = cut.expect("some width cuts the hash");
+                        assert_eq!(
+                            found,
+                            blame_note_fields(&age)[..2].to_vec(),
+                            "{what}: a cut hash records no hit\n{screen}"
+                        );
+                        assert!(!screen.contains("ddd4444"), "{what}: hash cut\n{screen}");
+                    }
+
+                    // The left pane focused: the row is not focused.
+                    state.focus = FocusPane::Left;
+                    draw_state(&mut terminal, &mut state);
+                    assert!(
+                        blame_note_found(&state, &terminal).0.is_empty(),
+                        "{what}: left pane focused"
+                    );
+                    if surface == "diff-d0" {
+                        // An unstaged added line paints `You · uncommitted`.
+                        state.focus = FocusPane::Right;
+                        state.diff_cursor = diff_row_index(&state, "new line");
+                        draw_state(&mut terminal, &mut state);
+                        let screen = buffer_text(&terminal);
+                        assert!(screen.contains("You · uncommitted"), "{what}\n{screen}");
+                        assert!(
+                            commit_hits_with_text(&state, &terminal).is_empty(),
+                            "{what}: an uncommitted line records none"
+                        );
+                    }
+                }
+            }
+
+            // The Explorer file view's cursor line.
+            let mut state = file_view_state(&["# app", "dirty"]);
+            state.background = background;
+            let mut terminal = Terminal::new(TestBackend::new(120, 16)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let age = cache_focused_commit_blame(&mut state);
+            draw_state(&mut terminal, &mut state);
+            let screen = buffer_text(&terminal);
+            let (found, hits) = blame_note_found(&state, &terminal);
+            assert_eq!(found, blame_note_fields(&age), "{background:?}\n{screen}");
+            for hit in &hits {
+                assert_eq!(hit.y, state.layout.file_view_y, "{background:?}");
+                assert!(hit.x >= state.layout.file_view_x, "{background:?}");
+            }
+            let cut = (40..120).rev().find_map(|cols| {
+                let mut terminal = Terminal::new(TestBackend::new(cols, 16)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let (found, _) = blame_note_found(&state, &terminal);
+                (found.len() < 3).then(|| (found, buffer_text(&terminal)))
+            });
+            let (found, screen) = cut.expect("some width cuts the hash");
+            assert_eq!(
+                found,
+                blame_note_fields(&age)[..2].to_vec(),
+                "{background:?}: file view cut\n{screen}"
+            );
+        }
+    }
+
+    /// The line-blame note on the focused row of a compare tab's diff and
+    /// of an Explorer tab's changed-file diff, boxed and flat: the author,
+    /// age, and short hash each record one commit popover hit over the
+    /// painted text, and a click on the hash pins the commit card.
+    #[test]
+    fn compare_diff_and_explorer_diff_blame_record_commit_hits() {
+        const BODY: &str = "@@ -1,3 +1,3 @@\n keep one\n-old line\n+new line\n keep two\n";
+        let target = IconTarget::Commit {
+            repo: "app".into(),
+            sha: BLAME_NOTE_SHA.into(),
+        };
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            for surface in ["compare-diff", "explorer-diff"] {
+                let what = format!("{surface} {background:?}");
+                let mut state = two_pane_diff_state();
+                if surface == "compare-diff" {
+                    state
+                        .tabs
+                        .open_or_focus("app".into(), "main".into(), "HEAD".into());
+                    let tab = state.tabs.active_compare_mut().unwrap();
+                    tab.loading = false;
+                    tab.source = Some(super::super::drill::CommitFileSource::Compare {
+                        base_ref: "main".into(),
+                        head_ref: "HEAD".into(),
+                        base_tip: "b".repeat(40),
+                        merge_base: "b".repeat(40),
+                        head: "c".repeat(40),
+                    });
+                    tab.files = vec![super::super::drill::CommitFile {
+                        status: "M".into(),
+                        path: "README.md".into(),
+                        old_path: None,
+                        stat: None,
+                    }];
+                    tab.path = Some("README.md".into());
+                    tab.content = super::super::diff::DiffContent::from_compare_lines(
+                        BODY.lines().map(String::from).collect(),
+                    );
+                    state.focus = FocusPane::Right;
+                } else {
+                    state.open_loaded_inner_diff(
+                        "app",
+                        "README.md",
+                        super::super::diff::DiffContent::from_unified(BODY),
+                    );
+                    state.dispatch(Action::FocusRight);
+                }
+                state.background = background;
+                let mut terminal = Terminal::new(TestBackend::new(200, 24)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                state.diff_cursor = diff_row_index(&state, "keep one");
+                let age = cache_focused_commit_blame(&mut state);
+                draw_state(&mut terminal, &mut state);
+                let screen = buffer_text(&terminal);
+                let (found, hits) = blame_note_found(&state, &terminal);
+                assert_eq!(found, blame_note_fields(&age), "{what}\n{screen}");
+                let y = first_row_with(terminal.backend().buffer(), "keep one").expect("row");
+                assert!(hits.iter().all(|hit| hit.y == y), "{what}: {hits:?}");
+
+                state.dispatch(Action::Click {
+                    col: hits[2].x,
+                    row: hits[2].y,
+                });
+                assert!(state.popover_pinned(), "{what}: the hash pins");
+                let sections = state.open_popover_sections();
+                assert_eq!(
+                    (sections.len(), sections[0].icon, &sections[0].target),
+                    (1, IconKind::CommitHash, &target),
+                    "{what}"
+                );
+            }
         }
     }
 
