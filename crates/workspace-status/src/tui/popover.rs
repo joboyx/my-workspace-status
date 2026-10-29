@@ -2298,7 +2298,7 @@ mod tests {
         assert_eq!(PopoverLine::action(&Action::PopoverClose), None);
     }
 
-    // ---- PR section: lines P1–P13 and the actions ----
+    // ---- PR section: field lines (number … url) and the actions ----
 
     mod pr {
         use std::path::{Path, PathBuf};
@@ -2760,7 +2760,10 @@ mod tests {
                     assert_eq!(section.icon, pr_badge_kind(state), "{what}");
                     let lines = texts(&section);
                     assert!(lines.contains(&next.to_string()), "{what}: {lines:?}");
-                    assert_eq!(lines[1], "(loading…)", "{what}: the note under P1");
+                    assert_eq!(
+                        lines[1], "(loading…)",
+                        "{what}: the note under the number line"
+                    );
                     let mut want = vec!["[Open PR] gx", ci, "[Copy URL] y"];
                     if state != PrState::Merged {
                         want.push("[Refresh this PR] r");

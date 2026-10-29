@@ -1614,7 +1614,7 @@ impl AppState {
     }
 
     /// Look up the PR of checkout `checkout` again now, or of every checkout
-    /// with `None` ("Refresh this PR", the PRs tab `r`).
+    /// with `None` ("Refresh this PR", palette Refresh PRs).
     ///
     /// Takes each visible checkout on a local branch whose first lookup
     /// landed with a GitHub or GitLab remote and that has no lookup in
