@@ -14,12 +14,13 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use super::pr_status::{NextAction, PrState, LONG_LIVED_BRANCHES};
-use super::pull_request::PullRequest;
+use super::pull_request::{wait_until, PullRequest};
 
 /// Header of the group that holds every PR without a key and without a
 /// shared branch. It is always the last group.
@@ -322,7 +323,7 @@ pub fn run_title_command(cmd: &Path, key: &str) -> Option<String> {
 /// The titles of one poll cycle, by group key. The caller owns it and starts
 /// a new one for each cycle, so the command runs at most once per key per
 /// cycle.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TitleCache {
     titles: HashMap<String, Option<String>>,
 }
@@ -685,18 +686,35 @@ fn group_rank(group: &PrGroup) -> u8 {
     }
 }
 
+/// [`run_title_command`] with the time limit `limit`.
+///
+/// The command's process group sits in the exit-kill registry of git runs
+/// ([`crate::git::TrackedGroup`]) while it runs, so quitting `ws` ends a
+/// command that hangs. Once `ws` is exiting no command starts.
 fn run_title_command_within(cmd: &Path, key: &str, limit: Duration) -> Option<String> {
+    if crate::git::exiting() {
+        return None;
+    }
     let deadline = Instant::now() + limit;
     let mut child = spawn_title_command(cmd, key, deadline)?;
+    let tracked = crate::git::TrackedGroup::register(child.id());
+    // A stop that ran between the check above and the registration did
+    // not see this group: end it here.
+    if crate::git::exiting() {
+        kill_and_reap(child);
+        return None;
+    }
     let Some(pipe) = child.stdout.take() else {
         kill_and_reap(child);
         return None;
     };
     let first_line = read_first_line(pipe);
-    let Some(status) = wait_until(&mut child, deadline) else {
+    let Some(status) = wait_until(&mut child, deadline, &AtomicBool::new(false)) else {
         kill_and_reap(child);
         return None;
     };
+    // Reaped: the group no longer needs a stop.
+    drop(tracked);
     if !status.success() {
         return None;
     }
@@ -746,23 +764,6 @@ fn kill_and_reap(mut child: Child) {
     crate::git::signal_group(i32::try_from(child.id()).unwrap_or(0), libc::SIGKILL);
     let _ = child.kill();
     let _ = child.wait();
-}
-
-/// Poll `child` until it exits (`Some`), or until `deadline` passes or its
-/// state cannot be read (`None`).
-fn wait_until(child: &mut Child, deadline: Instant) -> Option<ExitStatus> {
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
-            Ok(None) => {}
-            Err(_) => return None,
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            return None;
-        }
-        std::thread::sleep((deadline - now).min(Duration::from_millis(10)));
-    }
 }
 
 /// Reads the first line of `pipe` (at most [`TITLE_LINE_MAX`] bytes) on its
@@ -1923,6 +1924,40 @@ mod tests {
                 return;
             }
             panic!("the script never started");
+        }
+
+        #[test]
+        fn a_running_title_command_sits_in_the_exit_kill_registry() {
+            let dir = crate::testutil::unique_dir("ws-pr-title-registry");
+            fs::create_dir_all(&dir).unwrap();
+            let pid_file = dir.join("command.pid");
+            // `$$` is the shell: the child and its process group leader.
+            let script = Script::new(&format!(
+                "echo $$ > '{pid}.tmp'\nmv '{pid}.tmp' '{pid}'\nsleep 1\necho Title",
+                pid = pid_file.display()
+            ));
+            let path = script.path.clone();
+            let run = std::thread::spawn(move || {
+                run_title_command_within(&path, "ABC-123", Duration::from_secs(10))
+            });
+            let started_by = Instant::now() + Duration::from_secs(5);
+            let pid = loop {
+                if let Some(pid) = fs::read_to_string(&pid_file)
+                    .ok()
+                    .and_then(|text| text.trim().parse::<i32>().ok())
+                {
+                    break pid;
+                }
+                assert!(Instant::now() < started_by, "the script never started");
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            assert!(
+                crate::git::is_tracked(pid),
+                "a quit stops the running command's group"
+            );
+            assert_eq!(run.join().unwrap(), Some("Title".to_string()));
+            assert!(!crate::git::is_tracked(pid), "reaped: its slot is free");
+            let _ = fs::remove_dir_all(&dir);
         }
 
         #[test]

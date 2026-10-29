@@ -1346,8 +1346,13 @@ const CLI_TIME_LIMIT: Duration = Duration::from_secs(20);
 const OPENER_EXIT_WINDOW: Duration = Duration::from_secs(3);
 
 /// Poll `child` until it exits, `deadline` passes, or `cancel` is set.
-/// `None` on timeout, on cancel, or when its state cannot be read.
-fn wait_until(child: &mut Child, deadline: Instant, cancel: &AtomicBool) -> Option<ExitStatus> {
+/// `None` on timeout, on cancel, or when its state cannot be read. The
+/// forge CLI runs and the PR title command (`tui/pr_groups.rs`) wait here.
+pub(crate) fn wait_until(
+    child: &mut Child,
+    deadline: Instant,
+    cancel: &AtomicBool,
+) -> Option<ExitStatus> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Some(status),

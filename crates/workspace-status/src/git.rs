@@ -320,11 +320,15 @@ const GIT_TERM_GRACE: Duration = Duration::from_secs(2);
 
 /// A slot in [`RUNNING_GIT_GROUPS`] that holds one run's process group. It
 /// frees the slot on drop.
-struct TrackedGroup(Option<&'static AtomicI32>);
+///
+/// Git runs and the PR title command (`tui/pr_groups.rs`) register here,
+/// so the exit paths ([`stop_running_git`], the exit-signal handler) end
+/// them too.
+pub(crate) struct TrackedGroup(Option<&'static AtomicI32>);
 
 impl TrackedGroup {
     /// Register `pgid` in the first free slot (none when all are taken).
-    fn register(pgid: u32) -> Self {
+    pub(crate) fn register(pgid: u32) -> Self {
         let slot = i32::try_from(pgid)
             .ok()
             .filter(|pgid| *pgid > 0)
@@ -346,9 +350,15 @@ impl Drop for TrackedGroup {
     }
 }
 
+/// True once `ws` is exiting ([`stop_running_git`]): a child process that
+/// registers in [`RUNNING_GIT_GROUPS`] must not start.
+pub(crate) fn exiting() -> bool {
+    GIT_SHUTDOWN.load(Ordering::SeqCst)
+}
+
 /// True while `pgid` holds a slot in [`RUNNING_GIT_GROUPS`].
 #[cfg(test)]
-fn is_tracked(pgid: i32) -> bool {
+pub(crate) fn is_tracked(pgid: i32) -> bool {
     RUNNING_GIT_GROUPS
         .iter()
         .any(|slot| slot.load(Ordering::SeqCst) == pgid)
