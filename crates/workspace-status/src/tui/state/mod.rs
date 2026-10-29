@@ -3683,8 +3683,9 @@ impl AppState {
     }
 
     /// Pan horizontal scrollbar `bar`'s pane to `offset` (already clamped
-    /// to the bar's `col_max`, the pane's pan clamp).
-    fn scroll_hbar_to(&mut self, bar: HScrollbar, offset: u16) {
+    /// to the bar's `col_max`, the pane's pan clamp). The paint also
+    /// drops a pan the clamp no longer allows here (the pane widened).
+    pub(crate) fn scroll_hbar_to(&mut self, bar: HScrollbar, offset: u16) {
         match bar {
             HScrollbar::Graph => self.set_graph_col_offset(offset),
             HScrollbar::Diff => self.diff_col_offset = offset,

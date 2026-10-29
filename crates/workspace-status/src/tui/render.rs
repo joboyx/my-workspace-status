@@ -82,8 +82,8 @@ use super::search_files::{
 };
 use super::split::{
     diff_paint_width, diff_split_rule_x, list_hbar_rows, pane_widths, side_by_side_column_widths,
-    DiffMode, HScrollbarLayout, ResizeEdge, VScrollbarLayout, MIN_PANE_COLS, MIN_TERM_COLS,
-    MIN_TERM_ROWS,
+    DiffMode, HScrollbar, HScrollbarLayout, ResizeEdge, VScrollbarLayout, MIN_PANE_COLS,
+    MIN_TERM_COLS, MIN_TERM_ROWS,
 };
 use super::state::{
     revert_scope, AppState, CompareRevertTarget, FocusPane, IconHit, LayoutHit, PendingConfirm,
@@ -1624,7 +1624,15 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         frame.render_widget(Paragraph::new(muted_copy(NO_MATCHING_ROWS, palette)), area);
         return;
     }
-    let bars = ListBars::new(area, painted.len(), state.left_col_offset);
+    let (pan, col_max) = clamped_list_pan(
+        state,
+        HScrollbar::Tree,
+        area,
+        painted.len(),
+        state.left_col_offset,
+        |state, vscroll| state.tree_max_col_in(area.width, vscroll),
+    );
+    let bars = ListBars::new(area, painted.len(), pan);
     let rows_area = bars.rows_area();
     let height = rows_area.height as usize;
     let width = rows_area.width as usize;
@@ -1674,8 +1682,9 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         state.layout.animating |= spinner.is_some();
         // Commit-activity bars: repo rows only, while the sparkline is on,
         // once the worker has counted, and only when the pane leaves the
-        // label room. Off, the label keeps the bar columns.
-        let bars = (state.activity_sparkline && width >= SPARK_MIN_TREE_COLS)
+        // label room (the pane width, scrollbar column included). Off, the
+        // label keeps the bar columns.
+        let bars = (state.activity_sparkline && usize::from(area.width) >= SPARK_MIN_TREE_COLS)
             .then(|| row_activity_key(row))
             .flatten()
             .and_then(|key| state.activity.get(key))
@@ -1715,14 +1724,8 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     }
     state.layout.icon_hits.extend(hits);
     frame.render_widget(Paragraph::new(lines), rows_area);
-    // Sized only while the bar row shows: the pan clamp walks every row.
-    let col_max = if bars.hscroll {
-        state.tree_max_col_in(area.width, bars.vscroll)
-    } else {
-        0
-    };
     let flat = state.background == BackgroundMode::Paint;
-    let (vbar, hbar) = bars.paint(frame, start, (state.left_col_offset, col_max), flat);
+    let (vbar, hbar) = bars.paint(frame, start, (pan, col_max), flat);
     state.layout.tree_vbar = vbar;
     state.layout.tree_hbar = hbar;
 }
@@ -2977,7 +2980,15 @@ fn draw_commit_file_list(
         frame.render_widget(Paragraph::new(line), area);
         return;
     }
-    let pan = u16::try_from(col_offset).unwrap_or(u16::MAX);
+    let (pan, col_max) = clamped_list_pan(
+        state,
+        HScrollbar::CommitFiles,
+        area,
+        rows.len(),
+        u16::try_from(col_offset).unwrap_or(u16::MAX),
+        |state, vscroll| state.commit_file_max_col_in(area.width, vscroll),
+    );
+    let col_offset = usize::from(pan);
     let bars = ListBars::new(area, rows.len(), pan);
     let rows_area = bars.rows_area();
     let height = rows_area.height as usize;
@@ -3033,12 +3044,6 @@ fn draw_commit_file_list(
     }
     state.layout.icon_hits.extend(hits);
     frame.render_widget(Paragraph::new(lines), rows_area);
-    // Sized only while the bar row shows: the pan clamp walks every row.
-    let col_max = if bars.hscroll {
-        state.commit_file_max_col_in(area.width, bars.vscroll)
-    } else {
-        0
-    };
     let flat = state.background == BackgroundMode::Paint;
     let (vbar, hbar) = bars.paint(frame, start, (pan, col_max), flat);
     state.layout.files_vbar = vbar;
@@ -3469,6 +3474,33 @@ impl ListBars {
         }
         (vbar, hbar)
     }
+}
+
+/// The pan a list panned `col_offset` paints with, and its pan clamp.
+/// A pan the clamp no longer allows (the pane widened since the pan) drops
+/// to the clamp, in state too ([`AppState::scroll_hbar_to`] on `bar`), as
+/// the next Shift-←/→ would clamp it; at 0 the list keeps no bar row.
+/// `max_col(state, vscroll)` is the list's pan clamp beside a shown (or
+/// hidden) vertical bar; it runs only while panned, as it walks every row.
+fn clamped_list_pan(
+    state: &mut AppState,
+    bar: HScrollbar,
+    area: Rect,
+    row_count: usize,
+    col_offset: u16,
+    max_col: impl Fn(&AppState, bool) -> usize,
+) -> (u16, usize) {
+    if col_offset == 0 {
+        return (0, 0);
+    }
+    let vscroll = ListBars::new(area, row_count, col_offset).vscroll;
+    let col_max = max_col(state, vscroll);
+    if usize::from(col_offset) <= col_max {
+        return (col_offset, col_max);
+    }
+    let clamped = col_max.min(usize::from(u16::MAX)) as u16;
+    state.scroll_hbar_to(bar, clamped);
+    (clamped, col_max)
 }
 
 fn paint_diff_row(
@@ -8163,10 +8195,11 @@ mod tests {
         }
     }
 
-    /// [`LIST_BAR_SURFACES`] ids, after checking they are the `scrollbars`
-    /// list surfaces of `docs/parity.md` and that `features` mark every
-    /// `(surface, look)` that `driven` keeps `supported`.
-    fn checked_list_bar_ids(features: &[&str], driven: impl Fn(&ListBarSurface) -> bool) {
+    /// Check that [`LIST_BAR_SURFACES`] are the `scrollbars` list surfaces
+    /// of `docs/parity.md` (by their paint anchors), and that each of
+    /// `features` marks `supported` exactly the `(surface, look)` pairs of
+    /// the surfaces `driven` keeps.
+    fn check_list_bar_registry(features: &[&str], driven: impl Fn(&ListBarSurface) -> bool) {
         let registry = crate::parity_registry::registry();
         let scrollbars = registry
             .components
@@ -8224,7 +8257,7 @@ mod tests {
     /// the top.
     #[test]
     fn list_vertical_bar_drags_and_track_click_jumps_on_every_registry_surface() {
-        checked_list_bar_ids(&["vbar", "vbar-drag"], |_| true);
+        check_list_bar_registry(&["vbar", "vbar-drag"], |_| true);
         for surface in &LIST_BAR_SURFACES {
             for (look, background) in PANE_LOOKS {
                 let case = format!("{} {look}", surface.id);
@@ -8362,7 +8395,7 @@ mod tests {
     /// click jumps to the end or back to the left edge (the bar goes).
     #[test]
     fn list_horizontal_bar_drags_and_track_click_jumps_on_every_registry_surface() {
-        checked_list_bar_ids(&["hbar", "hbar-drag"], |s| s.hbar.is_some());
+        check_list_bar_registry(&["hbar", "hbar-drag"], |s| s.hbar.is_some());
         for surface in LIST_BAR_SURFACES.iter().filter(|s| s.hbar.is_some()) {
             let hbar_id = surface.hbar.expect("a panning list");
             for (look, background) in PANE_LOOKS {
@@ -8494,6 +8527,111 @@ mod tests {
                     "{case}: back at the left edge the bar goes"
                 );
             }
+        }
+    }
+
+    /// A list panned to its end that a wider pane no longer lets pan drops
+    /// its pan to the new clamp on the next paint, in both looks: here
+    /// everything fits, so the pan goes to 0, the list keeps no blank bar
+    /// row, and no horizontal bar paints.
+    #[test]
+    fn list_pan_left_stale_by_a_wider_pane_drops_to_the_clamp_and_keeps_no_bar_row() {
+        for surface in LIST_BAR_SURFACES.iter().filter(|s| s.hbar.is_some()) {
+            let hbar_id = surface.hbar.expect("a panning list");
+            for (look, background) in PANE_LOOKS {
+                let case = format!("{} {look}", surface.id);
+                let mut state = (surface.open)();
+                state.background = background;
+                state.focus = surface.pane;
+                let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                for _ in 0..200 {
+                    state.dispatch(Action::PanDiff(1));
+                }
+                draw_state(&mut terminal, &mut state);
+                assert!(list_pan(&state, surface.pane) > 0, "{case}: panned");
+                assert!(list_hbar(&state, hbar_id).y.is_some(), "{case}: bar shows");
+
+                let mut wide = Terminal::new(TestBackend::new(400, 30)).unwrap();
+                draw_state(&mut wide, &mut state);
+                assert_eq!(list_pan(&state, surface.pane), 0, "{case}: clamped to 0");
+                assert_eq!(list_hbar(&state, hbar_id).y, None, "{case}: no bar");
+                let vbar = list_vbar(&state, surface.vbar);
+                assert_eq!(
+                    usize::from(vbar.scroll_max),
+                    vbar.content_len - usize::from(vbar.height),
+                    "{case}: no blank bar row is kept"
+                );
+            }
+        }
+    }
+
+    /// Beside an overflowing tree, in both looks: the pane divider band
+    /// still lights on hover and a press there still drags the divider,
+    /// while the tree's scrollbar column (boxed, inside the band) is the
+    /// bar's: no edge lights there and a press drags the bar.
+    #[test]
+    fn pane_divider_hovers_and_drags_beside_a_painted_tree_scrollbar() {
+        for (look, background) in PANE_LOOKS {
+            let mut state = (LIST_BAR_SURFACES[0].open)();
+            state.background = background;
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let bar_x = state
+                .layout
+                .tree_vbar
+                .x
+                .unwrap_or_else(|| panic!("{look}: the tree paints its bar"));
+            let (top, height) = (state.layout.tree_y, state.layout.tree_height);
+            state.pointer = Some((5, top + 1));
+            draw_state(&mut terminal, &mut state);
+            assert_eq!(state.hovered_resize_edge(), None, "{look}");
+            let idle = terminal.backend().buffer().clone();
+
+            let x = state.layout.outer_tree_width - 1;
+            assert_eq!(bar_x + 1, x, "{look}: the bar sits next to the edge");
+            state.pointer = Some((x, top + 2));
+            assert_eq!(
+                state.hovered_resize_edge(),
+                Some(crate::tui::split::ResizeEdge::Pane),
+                "{look}: the divider lights beside the bar"
+            );
+            draw_state(&mut terminal, &mut state);
+            let lit = terminal.backend().buffer().clone();
+            let want: Vec<(u16, u16)> = (top..top + height).map(|y| (x, y)).collect();
+            assert_eq!(changed_cells(&idle, &lit), want, "{look}: the edge column");
+            let accent = state.theme.palette().cursor;
+            assert!(want.iter().all(|&cell| lit[cell].fg == accent), "{look}");
+            state.pointer = Some((bar_x, top + 2));
+            assert_eq!(
+                state.hovered_resize_edge(),
+                None,
+                "{look}: the bar column lights no edge"
+            );
+
+            state.dispatch(Action::Click {
+                col: x,
+                row: top + 2,
+            });
+            assert_eq!(state.drag, SplitDrag::Pane, "{look}: the divider drags");
+            state.dispatch(Action::Release);
+            draw_state(&mut terminal, &mut state);
+            state.dispatch(Action::Click {
+                col: bar_x,
+                row: top + 2,
+            });
+            assert!(
+                matches!(
+                    state.drag,
+                    SplitDrag::VScrollbar {
+                        bar: VScrollbar::Tree,
+                        ..
+                    }
+                ),
+                "{look}: the bar column drags the bar: {:?}",
+                state.drag
+            );
+            state.dispatch(Action::Release);
         }
     }
 
