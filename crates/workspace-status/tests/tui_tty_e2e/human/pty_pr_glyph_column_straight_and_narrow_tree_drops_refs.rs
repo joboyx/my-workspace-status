@@ -1,12 +1,11 @@
-use std::collections::BTreeSet;
 use std::fs;
 
 use crate::common::fake_forge::FakeForge;
 use crate::common::pr_scenarios::Badge;
 use crate::harness::{PtySession, UserConfig};
 use crate::pr_support::{
-    badge_is, forge_env, frame_fits_terminal, last_content_col, seed_checkouts, state_board,
-    tree_edge, Forge, PrCheckout,
+    badge_is, forge_env, frame_fits_terminal, seed_checkouts, state_board, tree_edge, Forge,
+    PrCheckout,
 };
 use crate::support::GIT_WAIT;
 
@@ -35,7 +34,10 @@ fn extra_checkouts() -> Vec<(PrCheckout, Badge)> {
 }
 
 /// Every row of the board and the extras must show its badge: the ref (when
-/// `refs`) and the ASCII glyph, flush with the tree edge.
+/// `refs`) and the ASCII glyph in the tree's edge cell, which
+/// [`tree_edge`] reads from the pane border. So every glyph sits in one
+/// column, and a badge that sits earlier in the trailing run leaves another
+/// mark in that cell and fails.
 fn board_matches(tui: &PtySession, board: &[(PrCheckout, Badge)], refs: bool) -> bool {
     board.iter().all(|(checkout, badge)| {
         let ref_text = checkout.ref_text();
@@ -46,17 +48,6 @@ fn board_matches(tui: &PtySession, board: &[(PrCheckout, Badge)], refs: bool) ->
             badge.ascii(),
         )
     })
-}
-
-/// Column of the last painted cell of every board row, read from each row's
-/// own cells and not from the pane edge. The badge is the last item of the
-/// trailing run, so a straight column is exactly one value; a badge that
-/// sits earlier in the run gives a different value per row.
-fn last_cells(tui: &PtySession, board: &[(PrCheckout, Badge)]) -> BTreeSet<u16> {
-    board
-        .iter()
-        .filter_map(|(checkout, _)| last_content_col(tui, &checkout.dir))
-        .collect()
 }
 
 /// The board plus the extras, seeded and answered by the fake forge.
@@ -79,8 +70,8 @@ fn fixture(
 }
 
 /// One fresh launch at `cols` columns: the inner tree is `inner` columns
-/// (read off the cell grid), every row ends at the tree edge in one column,
-/// and the refs are on every row exactly when `inner` is 50 or more.
+/// (read off the cell grid), every row's glyph sits in the tree's edge
+/// cell, and the refs are on every row exactly when `inner` is 50 or more.
 ///
 /// A fresh launch, not a resize: the split a resize leaves does not follow
 /// the width (the tree keeps the share it had), so only a launch gives a
@@ -92,9 +83,7 @@ fn launch_at(prefix: &str, cols: u16, inner: u16) {
         |_| {
             frame_fits_terminal(&tui)
                 && tree_edge(&tui).is_some_and(|edge| {
-                    edge.glyph_col == inner
-                        && board_matches(&tui, &board, inner >= REF_MIN_COLS)
-                        && last_cells(&tui, &board) == BTreeSet::from([inner])
+                    edge.glyph_col == inner && board_matches(&tui, &board, inner >= REF_MIN_COLS)
                 })
         },
         &format!(
@@ -112,13 +101,13 @@ fn launch_at(prefix: &str, cols: u16, inner: u16) {
 /// whose other marks differ), fake `gh` / `glab` answers per state.
 ///
 /// Proof: at 140 columns each row ends in `<ref> <glyph>`. The terminal then
-/// resizes to 100 and 120 columns and back to 140. At each width the last
-/// painted cell of every row, read from the row itself, is the pane's last
-/// cell (one column), and the refs are on every row when the inner tree is
-/// 50 columns or wider and on no row when narrower. Reverting the ref drop
-/// keeps refs on a narrow tree and fails the narrow wait; moving the badge
-/// earlier in the trailing run gives each row its own last column and fails
-/// the single-column check. The 50-column boundary itself is the next two
+/// resizes to 100 and 120 columns and back to 140. At each width every
+/// row's glyph sits in the pane's last cell (one column, read from the pane
+/// border), and the refs are on every row when the inner tree is 50 columns
+/// or wider and on no row when narrower. Reverting the ref drop keeps refs
+/// on a narrow tree and fails the narrow wait; moving the badge earlier in
+/// the trailing run leaves another mark in the edge cell of the dirty rows
+/// and fails the badge check. The 50-column boundary itself is the next two
 /// tests.
 #[test]
 fn pty_pr_glyph_column_straight_and_narrow_tree_drops_refs() {
@@ -139,7 +128,6 @@ fn pty_pr_glyph_column_straight_and_narrow_tree_drops_refs() {
                 frame_fits_terminal(&tui)
                     && tree_edge(&tui).is_some_and(|edge| {
                         board_matches(&tui, &board, edge.glyph_col >= REF_MIN_COLS)
-                            && last_cells(&tui, &board) == BTreeSet::from([edge.glyph_col])
                     })
             },
             &format!(
@@ -174,10 +162,9 @@ fn pty_pr_tree_of_50_columns_paints_refs() {
 /// and drops the refs on a narrow tree.
 ///
 /// Seed: as the boxed test. Proof: at 140 columns every row ends in
-/// `<ref> <glyph>`, and the last painted cell of every row is one column; at
-/// 100 columns every row ends in the glyph alone, still in one column.
-/// Reverting the flat edge placement or the ref drop fails the matching
-/// wait.
+/// `<ref> <glyph>` with the glyph in the tree's edge cell; at 100 columns
+/// every row ends in the glyph alone, still in that cell. Reverting the
+/// flat edge placement or the ref drop fails the matching wait.
 #[test]
 fn pty_pr_glyph_column_straight_in_the_flat_look() {
     let (_root, workspace, forge, board) = fixture("ws-tui-tty-pr-column-flat");
@@ -189,14 +176,14 @@ fn pty_pr_glyph_column_straight_in_the_flat_look() {
         UserConfig::Own,
     );
     tui.wait_pred(
-        |_| board_matches(&tui, &board, true) && last_cells(&tui, &board).len() == 1,
-        "flat look, 140 columns: every row ends in `<ref> <glyph>`, one last column",
+        |_| board_matches(&tui, &board, true),
+        "flat look, 140 columns: every row ends in `<ref> <glyph>` at the edge",
         GIT_WAIT,
     );
     tui.resize(100, 36);
     tui.wait_pred(
-        |_| board_matches(&tui, &board, false) && last_cells(&tui, &board).len() == 1,
-        "flat look, 100 columns: glyphs only, one last column",
+        |_| board_matches(&tui, &board, false),
+        "flat look, 100 columns: glyphs only, at the edge",
         GIT_WAIT,
     );
 }

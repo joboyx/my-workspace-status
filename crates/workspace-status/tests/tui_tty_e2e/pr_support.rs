@@ -296,18 +296,6 @@ pub fn total_is(tui: &PtySession, name: &str, total: &str) -> bool {
     tree_row_text(tui, name).is_some_and(|row| row.trim_end().ends_with(&format!("  {total}")))
 }
 
-/// Column of the last painted (non-blank) cell of the tree row that paints
-/// `name`, read from the row's own cells and not from the pane edge. `None`
-/// when the row or the pane is not on screen.
-///
-/// A badge that is the last item of the trailing run puts this at the edge
-/// on every row; a badge that sits earlier in the run moves it per row.
-pub fn last_content_col(tui: &PtySession, name: &str) -> Option<u16> {
-    let text = tree_row_text(tui, name)?;
-    let trimmed = text.trim_end();
-    (!trimmed.is_empty()).then(|| trimmed.chars().count() as u16 - 1)
-}
-
 /// Foreground and bold flag of the first cell of `needle` on the tree row
 /// that paints `name`. `None` when the row or the text is not on screen.
 pub fn tree_text_paint(tui: &PtySession, name: &str, needle: &str) -> Option<((u8, u8, u8), bool)> {

@@ -34,7 +34,9 @@ pub enum Badge {
 }
 
 impl Badge {
-    /// Every state, in the order of the spec table.
+    /// Every state, in the order of the state table in `docs/tui-rust.md`
+    /// (**Pull request badge**): CI failed, ready, CI running, draft, in
+    /// review, merged.
     pub const ALL: [Badge; 6] = [
         Self::CiFailed,
         Self::Ready,
