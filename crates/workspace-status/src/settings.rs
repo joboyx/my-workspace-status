@@ -94,8 +94,6 @@ pub struct Settings {
     /// Program that names a ticket key for the PRs tab group titles
     /// (`WS_STATUS_PR_TITLE_CMD` / `prTitleCommand`, user file only). A
     /// non-blank env value wins. `None` runs nothing.
-    // Only tests read this until the PRs tab does.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) pr_title_command: Option<PathBuf>,
 }
 

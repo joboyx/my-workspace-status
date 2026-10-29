@@ -21,7 +21,7 @@
 //!
 //! The PR popover shows richer fields ([`PullRequestDetail`]). They are
 //! fetched once per (remote URL, branch), when a peek or pin first shows
-//! that PR ([`AppState::request_popover_pr_details`]), never on a tick. A
+//! that PR ([`AppState::request_pr_details`]), never on a tick. A
 //! branch switch, `r`, a vanished checkout, or an answer that names another
 //! PR drops the detail. A changed answer for the same PR keeps it and marks
 //! it for a new fetch, which the next peek, pin, or landed badge lookup
@@ -47,8 +47,8 @@ use super::super::pr_poll::{
 use super::super::pr_status::PrState;
 use super::super::pull_request::{
     ci_opened_status, commit_url, is_web_url, lookup_failed_status, no_ci_status, no_pr_status,
-    parse_remote, PrDetailLookup, PrLookup, PrPage, PullRequest, PullRequestDetail, CI_OPEN_FAILED,
-    NO_PR_FOR_ROW, OPEN_FAILED, PR_LOOKUP_RUNNING,
+    parse_remote, Forge, PrDetailLookup, PrLookup, PrPage, PullRequest, PullRequestDetail,
+    CI_OPEN_FAILED, NO_PR_FOR_ROW, OPEN_FAILED, PR_LOOKUP_RUNNING,
 };
 use super::super::status::StatusMessage;
 use super::super::toast::{Toast, ToastMark, PR_TOAST_TTL_MS, TOAST_MAX};
@@ -56,7 +56,11 @@ use super::super::tree::{
     pr_badge_mark, pr_badge_repo, NodeKind, PrBadge, PrTotals, SegRole, PR_REF_MIN_TREE_COLS,
 };
 use super::super::watch::{graph_row_identity, FlashKind};
+use super::prs_tab::prs_row_flash_id;
 use super::AppState;
+
+/// Error line reason when a failed PR lookup printed no reason.
+const PR_LOOKUP_FAILED: &str = "lookup failed";
 
 /// What the forge said about the PR of one (remote URL, branch).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -278,13 +282,17 @@ impl PrTransition {
     }
 }
 
+/// The key that opens the PRs tab, named after the summary toast.
+const PRS_TAB_KEY: &str = "gp";
+
 /// The muted toast for the `more` PR changes of one alert batch past its
-/// first ones, pushed at `at`: `+<more> more PR changes`.
+/// first ones, pushed at `at`: `+<more> more PR changes · gp`, the key of
+/// the PRs tab that lists them all.
 fn more_pr_changes_toast(more: usize, at: Instant) -> Toast {
     Toast {
         mark: ToastMark::None,
         text: format!("+{more} more PR changes"),
-        detail: String::new(),
+        detail: PRS_TAB_KEY.to_string(),
         role: SegRole::Muted,
         ttl_ms: PR_TOAST_TTL_MS,
         at,
@@ -716,7 +724,7 @@ impl AppState {
 
     /// Run `action` on the PR of the branch checkout `repo` is on now, or
     /// say `no PR for this row` (detached or unknown HEAD).
-    fn run_pr_action_on_checkout(&mut self, action: PrAction, repo: &Path) -> Effect {
+    pub(super) fn run_pr_action_on_checkout(&mut self, action: PrAction, repo: &Path) -> Effect {
         match self.pr_target_for_repo(repo) {
             Some((repo, branch)) => self.run_pr_action_on(action, repo, branch),
             None => {
@@ -985,7 +993,7 @@ impl AppState {
 
     /// Snapshot rows whose PR is looked up: visible (not hidden, unless
     /// hidden repos show) and on a local branch.
-    fn pr_rows(&self) -> impl Iterator<Item = &WorkspaceRepoSnapshot> {
+    pub(super) fn pr_rows(&self) -> impl Iterator<Item = &WorkspaceRepoSnapshot> {
         self.snapshot
             .repos
             .iter()
@@ -1206,28 +1214,35 @@ impl AppState {
         self.pr_cache.details.get(&key)
     }
 
-    /// Detail fetches for the PRs the open popover shows, each marked
-    /// loading.
+    /// Detail fetches for the PRs on screen, each marked loading: the PRs
+    /// the open popover shows, and while the PRs tab is active every PR it
+    /// lists (its review column and detail pane read the detail).
     ///
     /// A PR whose (remote URL, branch) already has a detail (loading, ready,
     /// or failed) is not asked again, so a later peek or pin reads the
     /// cache, unless the detail waits for a new fetch after its answer
     /// changed: then it is asked again and the old detail stays on screen
     /// until the answer lands. A change during the first fetch waits for
-    /// that fetch to land. Called when a peek opens, a popover pins, and a
-    /// badge or detail lookup lands; never on a watch or fetch tick.
-    pub(crate) fn request_popover_pr_details(&mut self) -> Effect {
-        let Some(popover) = self.popover.as_ref() else {
-            return Effect::None;
-        };
-        let repos: Vec<PathBuf> = popover
-            .targets
+    /// that fetch to land. Called when a peek opens, a popover pins, the
+    /// PRs tab opens or becomes active, and a badge or detail lookup lands;
+    /// never on a watch or fetch tick.
+    pub(crate) fn request_pr_details(&mut self) -> Effect {
+        let mut repos: Vec<PathBuf> = self
+            .popover
             .iter()
+            .flat_map(|popover| &popover.targets)
             .filter_map(|(_, target)| match target {
                 IconTarget::PullRequest(repo) => Some(repo.clone()),
                 _ => None,
             })
             .collect();
+        if self.is_prs_tab() {
+            for repo in self.prs_listed_checkouts() {
+                if !repos.contains(&repo) {
+                    repos.push(repo);
+                }
+            }
+        }
         let mut effects = Vec::new();
         for repo in repos {
             let Some(number) = self.pull_request_for(&repo).map(|pr| pr.number) else {
@@ -1520,8 +1535,8 @@ impl AppState {
     /// failed, closed) or the add ramp (ready to merge, merged).
     ///
     /// A batch of more than [`TOAST_MAX`] changes pushes the toasts of the
-    /// first `TOAST_MAX - 1` and then `+<n> more PR changes`, so the stack
-    /// never drops one of its own toasts; every change still flashes.
+    /// first `TOAST_MAX - 1` and then `+<n> more PR changes · gp`, so the
+    /// stack never drops one of its own toasts; every change still flashes.
     /// Returns true when the batch was not empty.
     pub(crate) fn alert_pr_transitions(&mut self, now: Instant) -> bool {
         let transitions = self.take_pr_transitions();
@@ -1541,7 +1556,7 @@ impl AppState {
             .iter()
             .flat_map(|transition| {
                 let kind = transition.flash_kind();
-                self.pr_row_ids(&transition.checkout)
+                self.pr_row_ids(transition)
                     .into_iter()
                     .map(move |id| (id, kind))
             })
@@ -1551,13 +1566,19 @@ impl AppState {
         !transitions.is_empty()
     }
 
-    /// Flash ids of the rows that show the PR of checkout `checkout`, with
-    /// its badge or, after the PR closed, without one: its tree row
+    /// Flash ids of the rows that show the PR of `transition`, with its
+    /// badge or, after the PR closed, without one: the checkout's tree row
     /// ([`pr_badge_repo`]: a checkout row, or a repo row with one checkout,
-    /// never a family row), and the graph's worktree row of that checkout
-    /// when the graph shows its repository. A row folded out of view has no
-    /// id here.
-    fn pr_row_ids(&self, checkout: &Path) -> Vec<String> {
+    /// never a family row), the graph's worktree row of that checkout when
+    /// the graph shows its repository, and the PR's row of the PRs tab
+    /// while that tab is open ([`prs_row_flash_id`]). A tree or graph row
+    /// folded out of view has no id here.
+    fn pr_row_ids(&self, transition: &PrTransition) -> Vec<String> {
+        let checkout = transition.checkout.as_path();
+        let prs_tab = self
+            .tabs
+            .find_prs()
+            .map(|_| prs_row_flash_id(&transition.pr.url));
         let tree = self
             .rows
             .iter()
@@ -1574,7 +1595,7 @@ impl AppState {
                 .collect(),
             _ => Vec::new(),
         };
-        tree.chain(graph).collect()
+        tree.chain(graph).chain(prs_tab).collect()
     }
 }
 
@@ -1590,6 +1611,53 @@ impl AppState {
     /// current branch; `None` when it succeeded or none landed yet.
     pub(crate) fn pr_lookup_failure(&self, checkout: &Path) -> Option<&PrLookupFailure> {
         self.current_pr_record(checkout)?.failure.as_ref()
+    }
+
+    /// How far the PR lookups are, for the PRs tab loading line: the
+    /// visible checkouts on a local branch whose lookup for that branch
+    /// landed (an answer or a failure), and how many such checkouts there
+    /// are.
+    pub(crate) fn pr_lookup_progress(&self) -> (usize, usize) {
+        self.pr_rows().fold((0, 0), |(done, total), row| {
+            let landed = self
+                .pr_cache
+                .checkouts
+                .get(Path::new(&row.repo))
+                .filter(|record| record.branch == row.branch)
+                .is_some_and(|record| record.checked_at.is_some() || record.failure.is_some());
+            (done + usize::from(landed), total + 1)
+        })
+    }
+
+    /// One line per forge CLI and host whose last PR lookup of a visible
+    /// checkout failed, in snapshot order, with the first reason seen:
+    /// `! glab (gitlab.com): 401 Unauthorized`, or `lookup failed` when the
+    /// CLI printed none. A checkout whose remote is not on GitHub or GitLab
+    /// has no line.
+    pub(crate) fn pr_lookup_error_lines(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut lines = Vec::new();
+        for row in self.pr_rows() {
+            let Some(record) = self.current_pr_record(Path::new(&row.repo)) else {
+                continue;
+            };
+            let Some(failure) = record.failure.as_ref() else {
+                continue;
+            };
+            let Some(repo) = record.remote.as_deref().and_then(parse_remote) else {
+                continue;
+            };
+            let cli = match repo.forge {
+                Forge::GitHub => "gh",
+                Forge::GitLab => "glab",
+            };
+            if !seen.insert((cli, repo.host.clone())) {
+                continue;
+            }
+            let reason = failure.reason.as_deref().unwrap_or(PR_LOOKUP_FAILED);
+            lines.push(format!("! {cli} ({}): {reason}", repo.host));
+        }
+        lines
     }
 
     /// Look up the PR of checkout `checkout` again now, or of every checkout
@@ -2245,7 +2313,7 @@ mod tests {
         assert!(app.popover.is_some(), "peek open");
         assert_eq!(detail_of(&app), Some(PrDetailState::Loading(1)));
         assert_eq!(
-            app.request_popover_pr_details(),
+            app.request_pr_details(),
             Effect::None,
             "a later peek reads the cache"
         );
@@ -3313,7 +3381,7 @@ mod tests {
             [
                 ("#1 CI failed".into(), "feature".into()),
                 ("#2 ready to merge".into(), "feature".into()),
-                ("+3 more PR changes".into(), String::new()),
+                ("+3 more PR changes".into(), "gp".into()),
             ]
         );
         let summary = app.toasts.visible(t0).last().unwrap().0.clone();
@@ -3322,7 +3390,7 @@ mod tests {
             (
                 ToastMark::None,
                 "+3 more PR changes".into(),
-                String::new(),
+                "gp".into(),
                 SegRole::Muted,
                 PR_TOAST_TTL_MS,
             ),
@@ -3511,16 +3579,16 @@ mod tests {
         let _ = click_badge(&mut app);
         assert!(app.popover_pinned());
         assert!(land(&mut app, "feature", 7, pr_detail(7)));
-        assert_eq!(app.request_popover_pr_details(), Effect::None, "no change");
+        assert_eq!(app.request_pr_details(), Effect::None, "no change");
 
         set_answer(&mut app, 7, PrState::Ready);
         assert_eq!(
-            app.request_popover_pr_details(),
+            app.request_pr_details(),
             fetch(7, 2),
             "a changed answer asks again"
         );
         assert_eq!(title(&app), "Add login", "the old detail stays meanwhile");
-        assert_eq!(app.request_popover_pr_details(), Effect::None, "asked once");
+        assert_eq!(app.request_pr_details(), Effect::None, "asked once");
         let PrDetailLookup::Found(mut newer) = pr_detail(7) else {
             unreachable!()
         };
@@ -3537,7 +3605,7 @@ mod tests {
 
         // A failed new fetch keeps the detail that landed.
         set_answer(&mut app, 7, PrState::CiRunning);
-        assert_eq!(app.request_popover_pr_details(), fetch(7, 3));
+        assert_eq!(app.request_pr_details(), fetch(7, 3));
         assert!(land_request(
             &mut app,
             "feature",
@@ -3554,7 +3622,7 @@ mod tests {
                 targets: vec![(PathBuf::from("app"), "feature".to_string())]
             }
         );
-        assert_eq!(app.request_popover_pr_details(), fetch(7, 4));
+        assert_eq!(app.request_pr_details(), fetch(7, 4));
     }
 
     #[test]
@@ -3580,7 +3648,7 @@ mod tests {
         }
         set_answer(&mut app, 7, PrState::InReview);
         assert_eq!(
-            app.request_popover_pr_details(),
+            app.request_pr_details(),
             Effect::None,
             "the same answer asks nothing"
         );
@@ -3802,21 +3870,21 @@ mod tests {
         let _ = click_badge(&mut app);
         assert!(land(&mut app, "feature", 7, pr_detail(7)));
         set_answer(&mut app, 7, PrState::Ready);
-        assert_eq!(app.request_popover_pr_details(), fetch(7, 2));
+        assert_eq!(app.request_pr_details(), fetch(7, 2));
         set_answer(&mut app, 7, PrState::CiRunning);
         assert_eq!(
-            app.request_popover_pr_details(),
+            app.request_pr_details(),
             Effect::None,
             "one fetch at a time"
         );
         assert!(land_request(&mut app, "feature", 7, 2, pr_detail(7)));
         assert_eq!(
-            app.request_popover_pr_details(),
+            app.request_pr_details(),
             fetch(7, 3),
             "that detail is older than the badge: ask again"
         );
         assert!(land_request(&mut app, "feature", 7, 3, pr_detail(7)));
-        assert_eq!(app.request_popover_pr_details(), Effect::None, "up to date");
+        assert_eq!(app.request_pr_details(), Effect::None, "up to date");
     }
 
     #[test]
@@ -3828,14 +3896,14 @@ mod tests {
         );
         set_answer(&mut app, 7, PrState::Ready);
         assert_eq!(
-            app.request_popover_pr_details(),
+            app.request_pr_details(),
             Effect::None,
             "waits for the first fetch"
         );
         assert!(land_request(&mut app, "feature", 7, 1, pr_detail(7)));
-        assert_eq!(app.request_popover_pr_details(), fetch(7, 2));
+        assert_eq!(app.request_pr_details(), fetch(7, 2));
         assert!(land_request(&mut app, "feature", 7, 2, pr_detail(7)));
-        assert_eq!(app.request_popover_pr_details(), Effect::None);
+        assert_eq!(app.request_pr_details(), Effect::None);
     }
 
     // ---- gc (Open CI), Copy URL, Refresh this PR ----
@@ -4246,7 +4314,7 @@ mod tests {
             // again.
             land_pr(&mut app, "app", remote, PrLookup::Found(pr), Instant::now());
             assert_eq!(
-                app.request_popover_pr_details(),
+                app.request_pr_details(),
                 Effect::LookupPullRequestDetail {
                     repo: PathBuf::from("app"),
                     branch: "feature".into(),
@@ -4536,7 +4604,7 @@ mod tests {
         // The answer changes, so the detail is fetched again; the new one
         // adds `author` above the checks.
         set_answer(&mut app, 7, PrState::CiRunning);
-        assert_eq!(app.request_popover_pr_details(), fetch(7, 2));
+        assert_eq!(app.request_pr_details(), fetch(7, 2));
         assert!(land(&mut app, "feature", 7, with_checks(Some("octo-user"))));
         assert_eq!(focused_text(&app), "build", "not the first check line");
     }

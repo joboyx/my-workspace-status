@@ -1,0 +1,1105 @@
+//! Paint of the PRs tab: the list pane (`prs`) beside the detail pane
+//! (`PR`), or one of them in a narrow frame.
+//!
+//! The list pins the CLI error lines and the loading line at its top, then
+//! scrolls the group headers and PR rows ([`PrsLine`]). A row paints fixed
+//! columns: glyph, ref, repository, title (the flexible one), CI cell,
+//! reviews, state label, and stack mark. Its glyph and ref are one PR icon
+//! hit, so hover, click, Ctrl+click, and the OSC 8 link work as on the
+//! tree badge. The detail pane paints the focused PR: its title line, the
+//! PR popover lines ([`pr_detail_lines`]), every checkout that shows it,
+//! the repository, and the PR actions with their keys.
+
+use super::*;
+
+use super::super::popover::pr_detail_lines;
+use super::super::pr_groups::{GroupHeadline, PrGroup, PrRow};
+use super::super::pull_request::{PrReview, ReviewCount};
+use super::super::state::{prs_row_flash_id, PrDetailState, PrsLine, PrsView, PRS_DETAIL_MIN_COLS};
+use crate::snapshot::CheckoutKind;
+
+/// List pane title.
+const PRS_LIST_TITLE: &str = "prs";
+/// Detail pane title.
+const PRS_DETAIL_TITLE: &str = "PR";
+/// The empty list: no checkout's branch has a PR.
+const PRS_EMPTY: [&str; 3] = [
+    "No PR for any checked-out branch.",
+    "Open and merged PRs of each checkout's branch show here.",
+    "Push a branch and open a PR, then press r.",
+];
+/// Repository column width; a longer path is cut with `…`.
+const REPO_COLS: usize = 12;
+/// Blank columns between two row columns.
+const COLUMN_GAP: &str = "  ";
+
+/// `looking up PRs · 3 of 8 checkouts` (one: `1 of 1 checkout`).
+fn prs_loading_text(done: usize, total: usize) -> String {
+    let noun = if total == 1 { "checkout" } else { "checkouts" };
+    format!("looking up PRs · {done} of {total} {noun}")
+}
+
+/// The first header's poll age: `checked 40s ago`, or with a failing
+/// lookup or a stale PR `checked 12m ago · lookups failing`.
+fn prs_checked_text(age: &str, failing: bool) -> String {
+    if failing {
+        format!("checked {age} · lookups failing")
+    } else {
+        format!("checked {age}")
+    }
+}
+
+/// The header text of a finished group of `n` PRs: `✓ all 2 merged`
+/// (`m all 2 merged` in ASCII), and for one PR `✓ merged`.
+fn all_merged_text(ascii: bool, n: usize) -> String {
+    let mark = glyph(ascii, "✓", "m");
+    if n == 1 {
+        format!("{mark} merged")
+    } else {
+        format!("{mark} all {n} merged")
+    }
+}
+
+/// CI cell of `row`: `CI ✕` failed, `CI …` running, `CI ✓` passed, `CI —`
+/// none (ASCII `CI x`, `CI ..`, `CI ok`, `CI -`), and its mark colour.
+fn ci_cell(ascii: bool, row: &PrRow) -> (String, SegRole) {
+    let checks = row.pr.checks;
+    let (unicode, plain, role) = if checks.fail > 0 {
+        ("✕", "x", SegRole::Deleted)
+    } else if checks.pending > 0 {
+        ("…", "..", SegRole::Modified)
+    } else if checks.pass > 0 {
+        ("✓", "ok", SegRole::Added)
+    } else {
+        ("—", "-", SegRole::Muted)
+    };
+    (format!("CI {}", glyph(ascii, unicode, plain)), role)
+}
+
+/// Reviews cell of the PR of checkout `checkout` from its detail: GitLab
+/// `1/2` (given of required), GitHub `1` (approved count), else `—` (`-`
+/// in ASCII). Added colour when the review rule is met.
+fn reviews_cell(state: &AppState, checkout: &std::path::Path) -> (String, SegRole) {
+    let detail = match state.pull_request_detail_for(checkout) {
+        Some(PrDetailState::Ready(detail)) => detail,
+        _ => return (glyph(state.ascii, "—", "-").to_string(), SegRole::Muted),
+    };
+    let role = if detail.review == Some(PrReview::Approved) {
+        SegRole::Added
+    } else {
+        SegRole::Muted
+    };
+    match detail.reviews {
+        Some(ReviewCount::Approvals { given, required }) => (format!("{given}/{required}"), role),
+        Some(ReviewCount::Approved(n)) => (n.to_string(), role),
+        None => (glyph(state.ascii, "—", "-").to_string(), SegRole::Muted),
+    }
+}
+
+/// State label of a row: `CI failed`, `ready`, `CI running`, `draft`, `in
+/// review`, or `merged` (the badge label, with ready to merge short).
+fn row_state_label(state: PrState) -> &'static str {
+    match state {
+        PrState::Ready => "ready",
+        state => state.label(),
+    }
+}
+
+/// Stack mark of `row`: `⧗ after #318` (ASCII `after #318`), or empty.
+fn stack_text(ascii: bool, row: &PrRow) -> String {
+    match &row.stacked_on {
+        Some(base) if ascii => format!("after {}", base.pr_ref),
+        Some(base) => format!("⧗ after {}", base.pr_ref),
+        None => String::new(),
+    }
+}
+
+/// Widths of the fixed row columns of one list.
+struct RowColumns {
+    ref_w: usize,
+    ci_w: usize,
+    reviews_w: usize,
+    state_w: usize,
+    stack_w: usize,
+}
+
+impl RowColumns {
+    /// The widest cell of each fixed column over every row of `view`.
+    fn of(state: &AppState, view: &PrsView) -> Self {
+        let rows = || view.groups.iter().flat_map(|group| &group.rows);
+        let widest = |cell: &dyn Fn(&PrRow) -> String| {
+            rows()
+                .map(|row| visible_width(&cell(row)))
+                .max()
+                .unwrap_or(0)
+        };
+        Self {
+            ref_w: widest(&|row| row.pr.ref_text()),
+            ci_w: widest(&|row| ci_cell(state.ascii, row).0),
+            reviews_w: widest(&|row| reviews_cell(state, &row.checkout).0),
+            state_w: widest(&|row| row_state_label(row.pr.state).to_string()),
+            stack_w: widest(&|row| stack_text(state.ascii, row)),
+        }
+    }
+
+    /// Columns every cell but the title takes, gaps included.
+    fn fixed(&self) -> usize {
+        let gap = COLUMN_GAP.len();
+        let stack = if self.stack_w > 0 {
+            gap + self.stack_w
+        } else {
+            0
+        };
+        2 + self.ref_w
+            + gap
+            + REPO_COLS
+            + gap
+            + gap
+            + self.ci_w
+            + gap
+            + self.reviews_w
+            + gap
+            + self.state_w
+            + stack
+    }
+}
+
+/// `text` cut to `width` columns with `…`, then padded to `width`.
+fn cell(text: &str, width: usize) -> String {
+    let shown = fit_with_ellipsis(text, width);
+    let pad = width.saturating_sub(visible_width(&shown));
+    format!("{shown}{}", " ".repeat(pad))
+}
+
+/// A plain segment.
+fn seg(text: impl Into<String>, role: SegRole) -> TextSeg {
+    TextSeg {
+        text: text.into(),
+        role,
+        hex: None,
+        bold: false,
+        dim: false,
+        icon: None,
+    }
+}
+
+/// A bold segment.
+fn bold_seg(text: impl Into<String>, role: SegRole) -> TextSeg {
+    TextSeg {
+        bold: true,
+        ..seg(text, role)
+    }
+}
+
+/// Segments of one PR row `width` columns wide after the row prefix, and
+/// the width of its glyph and ref, its first cells (the PR icon hit).
+fn row_segments(
+    state: &AppState,
+    row: &PrRow,
+    columns: &RowColumns,
+    width: usize,
+) -> (Vec<TextSeg>, usize) {
+    let ascii = state.ascii;
+    let stale = state.pr_is_stale(&row.checkout, Instant::now());
+    let glyph_role = pr_badge_role(row.pr.state, stale);
+    let ref_role = if stale { SegRole::Muted } else { SegRole::Repo };
+    let title_w = width.saturating_sub(columns.fixed());
+    let (ci, ci_role) = ci_cell(ascii, row);
+    let (reviews, reviews_role) = reviews_cell(state, &row.checkout);
+    let label = row_state_label(row.pr.state).to_string();
+    let gap = || seg(COLUMN_GAP, SegRole::Muted);
+    let pr_ref = row.pr.ref_text();
+    let mut segs = vec![
+        bold_seg(pr_badge_kind(row.pr.state).glyph(ascii), glyph_role),
+        seg(" ", SegRole::Muted),
+        bold_seg(cell(&pr_ref, columns.ref_w), ref_role),
+        gap(),
+        seg(cell(&row.repo, REPO_COLS), SegRole::Muted),
+        gap(),
+        seg(cell(&row.title, title_w), SegRole::File),
+        gap(),
+        seg("CI ", SegRole::Muted),
+        seg(
+            cell(ci.trim_start_matches("CI "), columns.ci_w.saturating_sub(3)),
+            ci_role,
+        ),
+        gap(),
+        seg(cell(&reviews, columns.reviews_w), reviews_role),
+        gap(),
+        seg(
+            cell(&label, columns.state_w),
+            pr_badge_role(row.pr.state, false),
+        ),
+    ];
+    if columns.stack_w > 0 {
+        segs.push(gap());
+        segs.push(seg(
+            cell(&stack_text(ascii, row), columns.stack_w),
+            SegRole::Modified,
+        ));
+    }
+    (segs, 2 + visible_width(&pr_ref))
+}
+
+/// Segments of the header of `group`: the key, the title from the title
+/// command, and the next action (`▸ fix CI #318`) or `✓ all 2 merged`;
+/// and, as the trailing run of the first header, the poll age.
+fn header_segments(
+    state: &AppState,
+    view: &PrsView,
+    group: &PrGroup,
+    first: bool,
+    now_unix: i64,
+) -> NodeSegments {
+    let ascii = state.ascii;
+    let dot = || TextSeg {
+        dim: true,
+        ..seg(" · ", SegRole::Muted)
+    };
+    let mut segments = vec![bold_seg(group.key.clone(), SegRole::Heading)];
+    if let Some(title) = state.pr_group_title(&group.key) {
+        segments.push(dot());
+        segments.push(seg(title, SegRole::Repo));
+    }
+    match &group.headline {
+        GroupHeadline::Next(step) => {
+            segments.push(dot());
+            segments.push(bold_seg(
+                format!("{} {}", glyph(ascii, "▸", ">"), step.text()),
+                pr_badge_role(step.state, false),
+            ));
+        }
+        GroupHeadline::AllMerged(n) => {
+            segments.push(dot());
+            segments.push(seg(
+                all_merged_text(ascii, *n),
+                pr_badge_role(PrState::Merged, false),
+            ));
+        }
+        GroupHeadline::Bare => {}
+    }
+    let trailing = match view.checked.filter(|_| first) {
+        Some(checked) => {
+            let secs = Instant::now()
+                .saturating_duration_since(checked.at)
+                .as_secs();
+            let age = relative_age(now_unix, now_unix.saturating_sub_unsigned(secs));
+            let role = if checked.failing {
+                SegRole::Modified
+            } else {
+                SegRole::Muted
+            };
+            vec![seg(prs_checked_text(&age, checked.failing), role)]
+        }
+        None => Vec::new(),
+    };
+    NodeSegments { segments, trailing }
+}
+
+/// The active PRs tab in `area`: the list and the detail side by side
+/// (the detail a third of the width, at least [`PRS_DETAIL_MIN_COLS`]), or
+/// in a frame narrower than `PRS_DETAIL_MIN_TERM_COLS` the one `Tab` picked.
+/// The list pane is on `sidebar` and the detail on `surface` in paint
+/// mode, both through [`draw_pane_chrome`]. Records the pane rects, the PR
+/// icon hits, and the detail URL link.
+pub(super) fn draw_prs_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
+    let Some(view) = state.sync_prs_view() else {
+        return;
+    };
+    let show_detail = state.tabs.active_prs().is_some_and(|tab| tab.show_detail);
+    let (list, detail) = if state.prs_narrow() {
+        if show_detail {
+            (None, Some(area))
+        } else {
+            (Some(area), None)
+        }
+    } else {
+        let detail_w = (area.width / 3).max(PRS_DETAIL_MIN_COLS).min(area.width);
+        let list = Rect {
+            width: area.width - detail_w,
+            ..area
+        };
+        let detail = Rect {
+            x: area.x + list.width,
+            width: detail_w,
+            ..area
+        };
+        (Some(list), Some(detail))
+    };
+    let detail_focused = list.is_none();
+    if let Some(list) = list {
+        draw_prs_list(frame, list, state, &view);
+    }
+    if let Some(detail) = detail {
+        draw_prs_detail(frame, detail, state, &view, detail_focused);
+    }
+}
+
+/// The list pane: error and loading lines, then the empty copy or the
+/// scrolled lines with the cursor kept in view.
+fn draw_prs_list(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, view: &PrsView) {
+    let palette = state.theme.palette();
+    let pane = draw_pane_chrome(frame, area, PRS_LIST_TITLE, true, palette.sidebar, state);
+    let inner = pane.inner;
+    state.layout.prs_list = inner;
+    let mut pinned: Vec<Line<'static>> = view
+        .errors
+        .iter()
+        .map(|line| {
+            Line::from(Span::styled(
+                line.clone(),
+                Style::default().fg(palette.modified),
+            ))
+        })
+        .collect();
+    let (done, total) = view.lookups;
+    if done < total {
+        pinned.push(Line::from(Span::styled(
+            prs_loading_text(done, total),
+            Style::default().fg(palette.muted),
+        )));
+    }
+    let pinned_h = u16::try_from(pinned.len())
+        .unwrap_or(u16::MAX)
+        .min(inner.height);
+    frame.render_widget(
+        Paragraph::new(pinned),
+        Rect {
+            height: pinned_h,
+            ..inner
+        },
+    );
+    let lines_area = Rect {
+        y: inner.y + pinned_h,
+        height: inner.height - pinned_h,
+        ..inner
+    };
+    state.layout.prs_list_rows = Rect {
+        y: lines_area.y,
+        height: lines_area.height,
+        ..pane.rows
+    };
+    if lines_area.width == 0 || lines_area.height == 0 {
+        bleed_flat_pad(frame, pane);
+        return;
+    }
+    if view.groups.is_empty() {
+        if done >= total {
+            let empty: Vec<Line<'static>> = PRS_EMPTY
+                .iter()
+                .enumerate()
+                .map(|(index, text)| {
+                    let fg = if index == 0 {
+                        palette.file
+                    } else {
+                        palette.muted
+                    };
+                    Line::from(Span::styled(*text, Style::default().fg(fg)))
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(empty), lines_area);
+        }
+        bleed_flat_pad(frame, pane);
+        return;
+    }
+    let height = usize::from(lines_area.height);
+    let (start, _) = visible_window(view.lines.len(), view.cursor.unwrap_or(0), height);
+    if let Some(tab) = state.tabs.active_prs_mut() {
+        tab.scroll = start;
+    }
+    let width = usize::from(lines_area.width);
+    let prefix = list_prefix_cols(0);
+    let columns = RowColumns::of(state, view);
+    let search = state.theme.pills().filter;
+    let now_unix = unix_now();
+    let mut painted = Vec::new();
+    for (index, line) in view.lines.iter().enumerate().skip(start).take(height) {
+        let y = lines_area.y + (index - start) as u16;
+        let selected = Some(index) == view.cursor;
+        let (segs, foldable, folded, flash) = match *line {
+            PrsLine::Header { group, folded } => {
+                let segs = header_segments(state, view, &view.groups[group], group == 0, now_unix);
+                (segs, true, folded, None)
+            }
+            PrsLine::Row { group, row } => {
+                let row = &view.groups[group].rows[row];
+                let (segments, hit_w) =
+                    row_segments(state, row, &columns, width.saturating_sub(prefix));
+                let x = lines_area.x + prefix as u16;
+                let hit_w = u16::try_from(hit_w)
+                    .unwrap_or(0)
+                    .min(lines_area.right().saturating_sub(x));
+                if hit_w > 0 {
+                    state.layout.icon_hits.push(IconHit {
+                        y,
+                        x,
+                        width: hit_w,
+                        kind: pr_badge_kind(row.pr.state),
+                        target: IconTarget::PullRequest(row.checkout.clone()),
+                    });
+                }
+                let flash = state.flash_color(&prs_row_flash_id(&row.pr.url));
+                let segs = NodeSegments {
+                    segments,
+                    trailing: Vec::new(),
+                };
+                (segs, false, false, flash)
+            }
+        };
+        painted.push(paint_segmented_row(
+            0,
+            foldable,
+            folded,
+            &segs,
+            width,
+            selected,
+            true,
+            flash,
+            false,
+            search,
+            state.ascii,
+            palette,
+            0,
+        ));
+    }
+    frame.render_widget(Paragraph::new(painted), lines_area);
+    bleed_flat_pad(frame, pane);
+}
+
+/// The detail pane: the focused PR's title line, its PR lines, its
+/// checkouts and repository, a rule, then the actions with their keys.
+fn draw_prs_detail(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &mut AppState,
+    view: &PrsView,
+    focused: bool,
+) {
+    let palette = state.theme.palette();
+    let pane = draw_pane_chrome(
+        frame,
+        area,
+        PRS_DETAIL_TITLE,
+        focused,
+        palette.surface,
+        state,
+    );
+    let inner = pane.inner;
+    state.layout.prs_detail = inner;
+    state.layout.prs_detail_rows = pane.rows;
+    let Some(row) = view.focused() else {
+        bleed_flat_pad(frame, pane);
+        return;
+    };
+    if inner.width == 0 || inner.height == 0 {
+        bleed_flat_pad(frame, pane);
+        return;
+    }
+    let width = usize::from(inner.width);
+    let ascii = state.ascii;
+    let muted = Style::default().fg(palette.muted);
+    let role = |role: SegRole| Style::default().fg(seg_role_color(role, palette));
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    // Line index, column, painted width, and full URL of the `url` field.
+    let mut link: Option<(usize, usize, usize, String)> = None;
+    // `<glyph> <ref> <title>`.
+    let mut title = vec![
+        Span::styled(
+            pr_badge_kind(row.pr.state).glyph(ascii).to_string(),
+            role(pr_badge_role(row.pr.state, false)).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            row.pr.ref_text(),
+            role(SegRole::Repo).add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if !row.pr.title.is_empty() {
+        title.push(Span::raw(" "));
+        title.push(Span::styled(row.pr.title.clone(), role(SegRole::File)));
+    }
+    lines.push(Line::from(clamp_spans(title, width)));
+    let mut fields = pr_detail_lines(state, &row.checkout, unix_now());
+    for (nth, checkout) in view.checkouts_of(row).iter().enumerate() {
+        let path = checkout.to_string_lossy().into_owned();
+        let kind = state
+            .snapshot
+            .repos
+            .iter()
+            .find(|repo| repo.repo == path)
+            .map(|repo| repo.checkout_kind);
+        let kind = match kind {
+            Some(CheckoutKind::Linked) => "worktree",
+            _ => "primary",
+        };
+        fields.push(PopoverLine::Field {
+            label: if nth == 0 { "checkout" } else { "" },
+            value: format!("{path} · {kind}"),
+            role: SegRole::Dir,
+            link: false,
+            bold: 0,
+            mark: None,
+        });
+    }
+    fields.push(PopoverLine::Field {
+        label: "repo",
+        value: row.repo.clone(),
+        role: SegRole::Repo,
+        link: false,
+        bold: 0,
+        mark: None,
+    });
+    let label_w = fields
+        .iter()
+        .filter_map(|line| match line {
+            PopoverLine::Field { label, .. } => Some(visible_width(label)),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    for line in &fields {
+        let mut spans = Vec::new();
+        match line {
+            PopoverLine::Text(text) => {
+                spans.push(Span::styled(text.clone(), role(SegRole::File)));
+            }
+            PopoverLine::Note(text) => spans.push(Span::styled(text.clone(), muted)),
+            PopoverLine::Field {
+                label,
+                value,
+                role: value_role,
+                link: is_link,
+                bold,
+                mark,
+            } => {
+                let pad = label_w.saturating_sub(visible_width(label));
+                spans.push(Span::styled(format!("{label}{} ", " ".repeat(pad)), muted));
+                if let Some((mark, mark_role)) = mark {
+                    spans.push(Span::styled(format!("{mark} "), role(*mark_role)));
+                }
+                let x = help_spans_width(&spans);
+                let shown = fit_with_ellipsis(value, width.saturating_sub(x));
+                // A cut URL keeps the full one in its link.
+                if *is_link && !shown.is_empty() {
+                    link = Some((lines.len(), x, visible_width(&shown), value.clone()));
+                }
+                let mut head = (*bold).min(shown.len());
+                while !shown.is_char_boundary(head) {
+                    head -= 1;
+                }
+                let (bold_text, rest) = shown.split_at(head);
+                if !bold_text.is_empty() {
+                    spans.push(Span::styled(
+                        bold_text.to_string(),
+                        role(*value_role).add_modifier(Modifier::BOLD),
+                    ));
+                }
+                if !rest.is_empty() {
+                    spans.push(Span::styled(rest.to_string(), role(*value_role)));
+                }
+            }
+            PopoverLine::Rule | PopoverLine::Action { .. } => continue,
+        }
+        lines.push(Line::from(clamp_spans(spans, width)));
+    }
+    lines.push(Line::from(Span::styled(
+        glyph(ascii, "─", "-").repeat(width),
+        muted,
+    )));
+    let actions = [
+        ("Enter", "Open PR"),
+        ("gc", row.pr.ci_link.kind.label()),
+        ("o", "Show in tree"),
+        ("y", "Copy URL"),
+    ];
+    let key_w = actions
+        .iter()
+        .map(|(key, _)| visible_width(key) + 2)
+        .max()
+        .unwrap_or(0);
+    for (key, title) in actions {
+        let chip = key_chip(key, palette.cursor, palette.panel);
+        let pad = key_w.saturating_sub(chip.width());
+        lines.push(Line::from(clamp_spans(
+            vec![
+                chip,
+                Span::raw(" ".repeat(pad + 1)),
+                Span::styled(title, role(SegRole::File)),
+            ],
+            width,
+        )));
+    }
+    if let Some((y, x, shown_w, url)) = link {
+        if let (Ok(y), Ok(x), Ok(shown_w)) =
+            (u16::try_from(y), u16::try_from(x), u16::try_from(shown_w))
+        {
+            if y < inner.height {
+                state.layout.links.push(LinkHit {
+                    y: inner.y + y,
+                    x: inner.x + x,
+                    width: shown_w,
+                    url,
+                });
+            }
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+    bleed_flat_pad(frame, pane);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    use super::super::super::action::{Action, Effect};
+    use super::super::super::pull_request::{PrLookup, PrPage};
+    use super::super::super::state::prs_fixtures::{
+        app_over, checkout, land, pr, workspace, GH_APP, GL_API,
+    };
+    use super::*;
+
+    const LOOKS: [BackgroundMode; 2] = [BackgroundMode::Terminal, BackgroundMode::Paint];
+
+    /// Paint `state` on a `cols` × `rows` frame; the terminal and its text,
+    /// one line per row.
+    fn paint(state: &mut AppState, cols: u16, rows: u16) -> (Terminal<TestBackend>, Vec<String>) {
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap();
+        terminal.draw(|frame| draw(frame, state)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text = (0..rows)
+            .map(|y| (0..cols).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+        (terminal, text)
+    }
+
+    /// Row and text of the first painted line that contains `needle`.
+    fn line_with<'a>(text: &'a [String], needle: &str) -> (u16, &'a str) {
+        let y = text
+            .iter()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("no line with {needle:?}:\n{}", text.join("\n")));
+        (y as u16, text[y].as_str())
+    }
+
+    /// The columns of `rect` of each row of `text` (empty outside its rows).
+    fn crop(text: &[String], rect: Rect) -> Vec<String> {
+        text.iter()
+            .enumerate()
+            .map(|(y, line)| {
+                if (rect.y..rect.bottom()).contains(&(y as u16)) {
+                    line.chars()
+                        .skip(usize::from(rect.x))
+                        .take(usize::from(rect.width))
+                        .collect()
+                } else {
+                    String::new()
+                }
+            })
+            .collect()
+    }
+
+    /// The made-up workspace on its PRs tab.
+    fn on_prs_tab(ascii: bool, background: BackgroundMode) -> AppState {
+        let mut state = workspace(ascii);
+        state.background = background;
+        state.dispatch(Action::OpenPrsTab);
+        state
+    }
+
+    /// Column of the first cell of `needle` in row `y` of `text`.
+    fn col_of(text: &[String], y: u16, needle: &str) -> u16 {
+        let line = &text[usize::from(y)];
+        let byte = line.find(needle).expect("needle in the row");
+        visible_width(&line[..byte]) as u16
+    }
+
+    #[test]
+    fn the_prs_tab_paints_groups_rows_and_the_detail_in_both_looks() {
+        for background in LOOKS {
+            let what = format!("{background:?}");
+            let mut state = on_prs_tab(false, background);
+            state.dispatch(Action::Move(1));
+            let (terminal, text) = paint(&mut state, 132, 30);
+            let buf = terminal.backend().buffer();
+            let palette = state.theme.palette();
+            assert_eq!(text[0].trim_end(), " Workspace │ PRs 5 [✗]", "{what}");
+            let (y, _) = line_with(&text, "prs");
+            assert_eq!(y, 1, "{what}: the list pane title");
+            assert!(text[1].contains("PR"), "{what}: the detail pane title");
+            let list = state.layout.prs_list;
+            let detail = state.layout.prs_detail;
+            assert!(detail.width >= PRS_DETAIL_MIN_COLS, "{what}");
+            assert!(
+                detail.x > list.x + list.width,
+                "{what}: detail on the right"
+            );
+            let left = crop(&text, list);
+            let right = crop(&text, detail);
+
+            // Group headers: key, next action, and the poll age.
+            let (_, first) = line_with(&left, "ABC-123");
+            assert!(first.contains("ABC-123 · ▸ fix CI #318"), "{what}: {first}");
+            assert!(first.trim_end().ends_with("checked just now"), "{what}");
+            let (_, waiting) = line_with(&left, "ABC-125");
+            assert!(waiting.contains("ABC-125 · ▸ wait for CI !12"), "{what}");
+            assert!(
+                !waiting.contains("checked"),
+                "{what}: only the first header"
+            );
+            assert!(line_with(&left, "ABC-120").1.contains("ABC-120 · ✓ merged"));
+            assert_eq!(line_with(&left, "other").1.trim(), "▾ other", "{what}");
+
+            // Rows: glyph, ref, repo, title, CI, reviews, state, stack.
+            let (y318, failed) = line_with(&left, "✕ #318");
+            for cell in [
+                "✕ #318  acme/app      Retry failed uploads with…",
+                "CI ✕",
+                "CI failed",
+            ] {
+                assert!(failed.contains(cell), "{what}: {cell:?} in {failed}");
+            }
+            let (_, ready) = line_with(&left, "◉ #319");
+            for cell in [
+                "◉ #319  acme/app      Show the retry state",
+                "CI ✓",
+                "ready",
+                "⧗ after #318",
+            ] {
+                assert!(ready.contains(cell), "{what}: {cell:?} in {ready}");
+            }
+            let (_, running) = line_with(&left, "◐ !12");
+            for cell in [
+                "◐ !12   acme/servic…  Rate limit the upload API",
+                "CI …",
+                "CI running",
+            ] {
+                assert!(running.contains(cell), "{what}: {cell:?} in {running}");
+            }
+            assert!(line_with(&left, "✓ #40").1.contains("✓ #40   acme/lib"));
+            assert!(line_with(&left, "○ #320").1.contains("○ #320"));
+
+            // The glyph is bold in its state colour; glyph and ref are one
+            // PR icon hit and one OSC 8 link.
+            let x = col_of(&text, y318, "✕ #318");
+            assert_eq!(buf[(x, y318)].fg, palette.deleted, "{what}");
+            assert!(buf[(x, y318)].modifier.contains(Modifier::BOLD), "{what}");
+            let hit = state
+                .layout
+                .icon_hits
+                .iter()
+                .find(|hit| hit.y == y318)
+                .expect("a PR icon hit")
+                .clone();
+            assert_eq!((hit.x, hit.width), (x, 6), "{what}");
+            assert_eq!(hit.target, IconTarget::PullRequest(PathBuf::from("app")));
+            let url = "https://github.com/acme/app/pull/318";
+            assert!(
+                state
+                    .layout
+                    .links
+                    .iter()
+                    .any(|link| link.y == y318 && link.x == x && link.url == url),
+                "{what}: {:?}",
+                state.layout.links
+            );
+
+            // The detail pane: the focused PR, its checkouts, the actions.
+            let (_, head) = line_with(&right, "✕ #318 feat(ABC-123)");
+            assert!(head.contains("✕ #318 feat(ABC-123): Retry"), "{what}");
+            line_with(&right, "checkout app · primary");
+            line_with(&right, "app-copy · primary");
+            line_with(&right, "repo     acme/app");
+            line_with(&right, " Enter  Open PR");
+            line_with(&right, " gc     Open checks");
+            line_with(&right, " o      Show in tree");
+            line_with(&right, " y      Copy URL");
+            let (url_y, _) = line_with(&right, "url      https://");
+            assert!(
+                state
+                    .layout
+                    .links
+                    .iter()
+                    .any(|link| link.y == url_y && link.url == url && link.x >= detail.x),
+                "{what}: the url field links the full URL"
+            );
+        }
+    }
+
+    #[test]
+    fn a_narrow_frame_shows_the_list_or_the_detail() {
+        for background in LOOKS {
+            let what = format!("{background:?}");
+            let mut state = on_prs_tab(false, background);
+            let (_, text) = paint(&mut state, 90, 30);
+            assert!(text[1].contains("prs"), "{what}");
+            assert!(!text[1].contains("PR "), "{what}: no detail pane");
+            assert_eq!(state.layout.prs_detail, Rect::default(), "{what}");
+            line_with(&text, "Tab");
+            state.dispatch(Action::FocusRight);
+            let (_, text) = paint(&mut state, 90, 30);
+            assert!(!text[1].contains("prs"), "{what}: no list pane");
+            assert_eq!(state.layout.prs_list, Rect::default(), "{what}");
+            assert!(
+                state.layout.prs_detail.width > 80,
+                "{what}: the whole width"
+            );
+            line_with(&text, "▸ fix CI");
+            state.dispatch(Action::NavEsc);
+            let (_, text) = paint(&mut state, 90, 30);
+            assert!(text[1].contains("prs"), "{what}: Esc goes back");
+        }
+    }
+
+    #[test]
+    fn empty_loading_error_and_stale_states_use_their_copy() {
+        for background in LOOKS {
+            let what = format!("{background:?}");
+            let repos = [
+                checkout("api", "feature/ABC-125-limits"),
+                checkout("app", "feature/ABC-123-retry"),
+            ];
+            let mut state = app_over(&repos, false);
+            state.background = background;
+            state.dispatch(Action::OpenPrsTab);
+            let (_, text) = paint(&mut state, 132, 30);
+            line_with(&text, "looking up PRs · 0 of 2 checkouts");
+
+            for (name, branch, remote) in [
+                ("api", "feature/ABC-125-limits", GL_API),
+                ("app", "feature/ABC-123-retry", GH_APP),
+            ] {
+                assert!(state.apply_pr_lookup(
+                    Path::new(name),
+                    branch,
+                    Some(remote.into()),
+                    PrLookup::NoPr
+                ));
+            }
+            let (terminal, text) = paint(&mut state, 132, 30);
+            for copy in PRS_EMPTY {
+                line_with(&text, copy);
+            }
+            assert!(
+                !text.iter().any(|line| line.contains("looking up")),
+                "{what}"
+            );
+
+            // A failing glab names its host; the GitHub PR still lists,
+            // and an old answer makes the header say lookups fail.
+            assert!(state.apply_pr_lookup(
+                Path::new("api"),
+                "feature/ABC-125-limits",
+                Some(GL_API.into()),
+                PrLookup::Failed(Some("401 Unauthorized".into())),
+            ));
+            let hour_ago = Instant::now() - std::time::Duration::from_secs(3600);
+            assert!(state.apply_pr_lookup_at(
+                Path::new("app"),
+                "feature/ABC-123-retry",
+                Some(GH_APP.into()),
+                PrLookup::Found(pr(
+                    GH_APP,
+                    318,
+                    PrState::InReview,
+                    "Retry",
+                    "feature/ABC-123-retry",
+                    "main"
+                )),
+                hour_ago,
+            ));
+            drop(terminal);
+            let (terminal, text) = paint(&mut state, 132, 30);
+            let buf = terminal.backend().buffer();
+            let palette = state.theme.palette();
+            let (y, error) = line_with(&text, "! glab (gitlab.com): 401 Unauthorized");
+            let x = col_of(&text, y, "! glab");
+            assert_eq!(buf[(x, y)].fg, palette.modified, "{what}: {error}");
+            let (y, header) = line_with(&text, "ABC-123");
+            assert!(
+                header.contains("checked 1h ago · lookups failing"),
+                "{what}: {header}"
+            );
+            let x = col_of(&text, y, "checked");
+            assert_eq!(buf[(x, y)].fg, palette.modified, "{what}");
+            // The stale row paints its glyph and ref muted, shape unchanged.
+            let (y, _) = line_with(&crop(&text, state.layout.prs_list), "○ #318");
+            let x = col_of(&text, y, "○ #318");
+            assert_eq!(buf[(x, y)].fg, palette.muted, "{what}: stale glyph");
+            assert_eq!(buf[(x + 2, y)].fg, palette.muted, "{what}: stale ref");
+        }
+    }
+
+    #[test]
+    fn ascii_mode_paints_letters() {
+        let mut state = on_prs_tab(true, BackgroundMode::Terminal);
+        state.dispatch(Action::Move(1));
+        let (_, text) = paint(&mut state, 132, 30);
+        for cell in [
+            "x #318",
+            "CI x",
+            "A #319",
+            "CI ok",
+            "after #318",
+            "r !12",
+            "CI ..",
+            "m #40",
+            "P #320",
+            "CI -",
+            "ABC-123 · > fix CI #318",
+            "ABC-120 · m merged",
+        ] {
+            line_with(&text, cell);
+        }
+        assert!(!text.iter().any(|line| line.contains('⧗')));
+    }
+
+    #[test]
+    fn the_mouse_selects_rows_folds_headers_and_opens_the_pr() {
+        for background in LOOKS {
+            let what = format!("{background:?}");
+            let mut state = on_prs_tab(false, background);
+            let (_, text) = paint(&mut state, 132, 30);
+            let (y319, _) = line_with(&text, "◉ #319  ");
+            let x = state.layout.prs_list.x + 30;
+            assert_eq!(
+                state.dispatch(Action::Click { col: x, row: y319 }),
+                Effect::None
+            );
+            let (_, text) = paint(&mut state, 132, 30);
+            line_with(&text, "◉ #319 feat(ABC-123): Show the retry state");
+            // A header press folds its group; a second press on the same
+            // cell (a double-click) does not undo it.
+            let (y, _) = line_with(&text, "ABC-125");
+            state.dispatch(Action::Click { col: x, row: y });
+            state.dispatch(Action::Click { col: x, row: y });
+            let (_, text) = paint(&mut state, 132, 30);
+            let left = crop(&text, state.layout.prs_list);
+            assert!(!left.iter().any(|line| line.contains("◐ !12")), "{what}");
+            // Another cell is a new press: it unfolds.
+            state.dispatch(Action::Click { col: x + 1, row: y });
+            let (_, text) = paint(&mut state, 132, 30);
+            line_with(&text, "◐ !12   ");
+            // The wheel moves the cursor.
+            state.dispatch(Action::ScrollWheel {
+                col: x,
+                row: y,
+                delta: 1,
+                horizontal: false,
+            });
+            let (_, text) = paint(&mut state, 132, 30);
+            line_with(&text, "◐ !12 ABC-125: Rate limit the upload API");
+            // Ctrl+click on a ref opens its PR.
+            let (y318, _) = line_with(&text, "✕ #318  ");
+            let hit = state
+                .layout
+                .icon_hits
+                .iter()
+                .find(|hit| hit.y == y318)
+                .unwrap()
+                .clone();
+            assert_eq!(
+                state.dispatch(Action::CtrlClick {
+                    col: hit.x + 3,
+                    row: y318
+                }),
+                Effect::OpenPullRequest {
+                    repo: PathBuf::from("app"),
+                    branch: "feature/ABC-123-retry".into(),
+                    page: PrPage::Pr,
+                },
+                "{what}"
+            );
+            assert!(state.is_prs_tab(), "{what}");
+            // A plain click on a ref selects its row and pins its popover.
+            paint(&mut state, 132, 30);
+            state.dispatch(Action::Click {
+                col: hit.x + 3,
+                row: y318,
+            });
+            assert!(state.popover_pinned(), "{what}");
+            let (_, text) = paint(&mut state, 132, 30);
+            line_with(&text, "PR · CI failed");
+        }
+    }
+
+    #[test]
+    fn a_click_on_the_workspace_pr_total_opens_the_prs_tab() {
+        for background in LOOKS {
+            let mut state = workspace(false);
+            state.background = background;
+            let (_, text) = paint(&mut state, 200, 30);
+            let hit = state.layout.pr_total_hit.expect("the total painted");
+            let painted: String = text[usize::from(hit.y)]
+                .chars()
+                .skip(usize::from(hit.x))
+                .take(usize::from(hit.width))
+                .collect();
+            assert_eq!(painted, "5 PRs · 2 need you", "{background:?}");
+            state.dispatch(Action::Click {
+                col: hit.x + 1,
+                row: hit.y,
+            });
+            assert!(state.is_prs_tab(), "{background:?}");
+            paint(&mut state, 132, 30);
+            assert_eq!(state.layout.pr_total_hit, None, "only the tree paints it");
+        }
+    }
+
+    #[test]
+    fn a_pr_change_flashes_its_row_on_the_prs_tab() {
+        let mut state = on_prs_tab(false, BackgroundMode::Terminal);
+        let now = Instant::now();
+        land(
+            &mut state,
+            "app-docs",
+            "docs/readme",
+            GH_APP,
+            pr(
+                GH_APP,
+                320,
+                PrState::Ready,
+                "Update the README",
+                "docs/readme",
+                "main",
+            ),
+        );
+        assert!(state.alert_pr_transitions(now));
+        let (terminal, text) = paint(&mut state, 132, 30);
+        let (y, _) = line_with(&text, "◉ #320  ");
+        let x = col_of(&text, y, "Update");
+        let flash = state
+            .flash_color(&prs_row_flash_id("https://github.com/acme/app/pull/320"))
+            .expect("flashing");
+        assert_eq!(terminal.backend().buffer()[(x, y)].bg, flash);
+        let x = col_of(&text, y, "◉");
+        assert_eq!(
+            terminal.backend().buffer()[(x, y)].fg,
+            state.theme.palette().added,
+            "the glyph keeps its state colour"
+        );
+    }
+
+    #[test]
+    fn gh_pins_the_popover_of_the_focused_pr_row() {
+        for background in LOOKS {
+            let what = format!("{background:?}");
+            let mut state = on_prs_tab(false, background);
+            state.dispatch(Action::Move(1));
+            paint(&mut state, 132, 30);
+            state.dispatch(Action::PopoverOpenFocused);
+            assert!(state.popover_pinned(), "{what}");
+            let (_, text) = paint(&mut state, 132, 30);
+            line_with(&text, "PR · CI failed");
+            // Moving the cursor closes it: the popover belongs to its row.
+            state.dispatch(Action::PopoverClose);
+            state.dispatch(Action::PopoverOpenFocused);
+            assert!(state.popover_pinned(), "{what}");
+            state.dispatch(Action::PopoverClose);
+            state.dispatch(Action::Move(1));
+            assert!(!state.popover_pinned(), "{what}");
+        }
+    }
+}

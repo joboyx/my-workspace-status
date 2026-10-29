@@ -750,6 +750,8 @@ fn key_to_action(
             KeyCode::Char('T') if !has_command_modifier(key) => Action::PreviousTab,
             KeyCode::Char('x') if !has_command_modifier(key) => Action::OpenPullRequest,
             KeyCode::Char('c') if !has_command_modifier(key) => Action::OpenPullRequestCi,
+            // Bound so a `p` after `g` never falls through to Pull.
+            KeyCode::Char('p') if !has_command_modifier(key) => Action::OpenPrsTab,
             KeyCode::Char('w') if !has_command_modifier(key) => Action::ViewRemotely,
             KeyCode::Char('h') if !has_command_modifier(key) => Action::PopoverOpenFocused,
             KeyCode::Char(c @ '1'..='9') if !has_command_modifier(key) => {
@@ -1137,6 +1139,7 @@ fn normal_key(
         KeyCode::Char('r') => Action::Refresh,
         KeyCode::Char(' ') => Action::ToggleReviewed,
         KeyCode::Char('z') => Action::FoldToggle,
+        KeyCode::Char('Z') => Action::ToggleFinishedPrGroups,
         KeyCode::Char('/') => Action::SearchStart,
         KeyCode::Char('s') => Action::Stage,
         KeyCode::Char('u') => Action::Unstage,
@@ -4139,6 +4142,7 @@ mod tests {
             (n, 0, Char('r'), Action::Refresh),
             (n, 0, Char(' '), Action::ToggleReviewed),
             (n, 0, Char('z'), Action::FoldToggle),
+            (n, 0, Char('Z'), Action::ToggleFinishedPrGroups),
             (n, 0, Char('/'), Action::SearchStart),
             (n, 0, Char('s'), Action::Stage),
             (n, 0, Char('u'), Action::Unstage),
@@ -4273,7 +4277,7 @@ mod tests {
             (pending_g(), 0, Char('w'), Action::ViewRemotely),
             (pending_g(), 0, Char('1'), Action::JumpToTab(1)),
             (pending_g(), 0, Char('9'), Action::JumpToTab(9)),
-            (pending_g(), 0, Char('p'), Action::Pull),
+            (pending_g(), 0, Char('p'), Action::OpenPrsTab),
             (
                 pending_z,
                 0,

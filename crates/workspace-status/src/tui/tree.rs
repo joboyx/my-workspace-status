@@ -1341,6 +1341,21 @@ fn pr_total_variants(totals: PrTotals, narrow: bool) -> Vec<Vec<TextSeg>> {
     }
 }
 
+/// Columns of the PR total at the end of `summary`, a
+/// [`workspace_trailing_fit`] result: the segments after the
+/// [`PR_BADGE_GAP`]. `0` when the summary has no PR total.
+pub(crate) fn pr_total_cols(summary: &[TextSeg]) -> usize {
+    summary
+        .iter()
+        .position(|seg| seg.text == PR_BADGE_GAP)
+        .map_or(0, |gap| {
+            summary[gap + 1..]
+                .iter()
+                .map(|seg| visible_width(&seg.text))
+                .sum()
+        })
+}
+
 /// Workspace root trailing summary that fits `room` columns (pad included)
 /// beside the name: `N changed · sync`, then two spaces and the PR total
 /// (`8 PRs · 2 need you`, see [`PrTotals`]). The name is the row's

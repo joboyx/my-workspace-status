@@ -170,6 +170,17 @@ impl AppState {
         ) {
             self.g_pending_at = None;
         }
+        // The PRs tab answers its own keys and refuses writes and the
+        // Workspace pane keys, before any gate reads the parked tree.
+        if self.is_prs_tab() {
+            if let Some(reason) = self.prs_tab_refusal(&action) {
+                self.status = StatusMessage::warn(reason);
+                return Effect::None;
+            }
+            if let Some(effect) = self.dispatch_prs_tab(&action) {
+                return effect;
+            }
+        }
         // `-` picks its meaning from the tab and the focused row.
         if matches!(action, Action::ExplorerReveal) {
             return self.explorer_reveal();
@@ -345,6 +356,8 @@ impl AppState {
             | Action::CopyPullRequestUrl
             | Action::RefreshPullRequest
             | Action::RefreshPullRequests
+            | Action::OpenPrsTab
+            | Action::ToggleFinishedPrGroups
             | Action::ViewRemotely
             | Action::ToggleQuickOpen(_)
             | Action::QuickOpenMove(_)

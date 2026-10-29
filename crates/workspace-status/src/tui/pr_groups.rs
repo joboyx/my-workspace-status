@@ -7,9 +7,6 @@
 //! listed checkout and gets back the ordered [`PrGroup`]s; it never decides
 //! a group, an order, or a header text itself.
 
-// Only tests read this until the PRs tab does.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read};

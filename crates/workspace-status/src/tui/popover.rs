@@ -1216,6 +1216,53 @@ pub const PR_COPY_URL_TITLE: &str = "Copy URL";
 /// [`CiLinkKind::label`]: super::pr_status::CiLinkKind::label
 fn pr_section(state: &AppState, repo: &Path, now_unix: i64) -> Option<PopoverSection> {
     let pr = state.pull_request_for(repo)?;
+    let (_, role) = pr_badge_mark(state.ascii, pr.state);
+    let detail = match state.pull_request_detail_for(repo) {
+        Some(PrDetailState::Ready(detail)) => Some(detail),
+        _ => None,
+    };
+    let pr_ref = pr.ref_text();
+    let number = match detail.filter(|detail| !detail.title.is_empty()) {
+        Some(detail) => format!("{pr_ref} {}", detail.title),
+        None => pr_ref.clone(),
+    };
+    let mut lines = vec![bold_field("number", number, SegRole::Repo, pr_ref.len())];
+    lines.extend(pr_detail_lines(state, repo, now_unix));
+    lines.push(PopoverLine::Rule);
+    lines.extend(PopoverLine::action(&Action::OpenPullRequest));
+    lines.extend(PopoverLine::titled_action(
+        &Action::OpenPullRequestCi,
+        pr.ci_link.kind.label(),
+    ));
+    // `y` and `r` run these only inside the pinned popover (the palette
+    // rows show no chip), so the lines carry the chip themselves.
+    lines.extend(
+        PopoverLine::titled_action(&Action::CopyPullRequestUrl, PR_COPY_URL_TITLE)
+            .map(|line| line.with_keys("y")),
+    );
+    if pr.state != PrState::Merged {
+        lines.extend(
+            PopoverLine::action(&Action::RefreshPullRequest).map(|line| line.with_keys("r")),
+        );
+    }
+    Some(PopoverSection {
+        icon: pr_badge_kind(pr.state),
+        role,
+        target: IconTarget::PullRequest(repo.to_path_buf()),
+        title: Some(format!("PR · {}", pr.state.label())),
+        lines,
+    })
+}
+
+/// The lines of the PR of checkout `repo` under its `number` line, as the
+/// PR popover and the PRs tab detail pane show them: the `loading…` or
+/// `could not load details` note, then `state` to `url` (see
+/// [`pr_section`]), each only when it has data. Empty when the checkout
+/// shows no PR.
+pub(crate) fn pr_detail_lines(state: &AppState, repo: &Path, now_unix: i64) -> Vec<PopoverLine> {
+    let Some(pr) = state.pull_request_for(repo) else {
+        return Vec::new();
+    };
     let ascii = state.ascii;
     let (_, role) = pr_badge_mark(ascii, pr.state);
     let detail_state = state.pull_request_detail_for(repo);
@@ -1225,12 +1272,6 @@ fn pr_section(state: &AppState, repo: &Path, now_unix: i64) -> Option<PopoverSec
     };
     let stack_base = state.pr_stack_base(repo);
     let mut lines = Vec::new();
-    let pr_ref = pr.ref_text();
-    let number = match detail.filter(|detail| !detail.title.is_empty()) {
-        Some(detail) => format!("{pr_ref} {}", detail.title),
-        None => pr_ref.clone(),
-    };
-    lines.push(bold_field("number", number, SegRole::Repo, pr_ref.len()));
     match detail_state {
         Some(PrDetailState::Loading(_)) => lines.push(PopoverLine::Note(PR_DETAIL_LOADING.into())),
         Some(PrDetailState::Failed) => lines.push(PopoverLine::Note(PR_DETAIL_FAILED.into())),
@@ -1290,30 +1331,7 @@ fn pr_section(state: &AppState, repo: &Path, now_unix: i64) -> Option<PopoverSec
     }
     lines.extend(pr_checked_field(state, repo, now_unix));
     lines.push(link_field("url", pr.url.clone()));
-    lines.push(PopoverLine::Rule);
-    lines.extend(PopoverLine::action(&Action::OpenPullRequest));
-    lines.extend(PopoverLine::titled_action(
-        &Action::OpenPullRequestCi,
-        pr.ci_link.kind.label(),
-    ));
-    // `y` and `r` run these only inside the pinned popover (the palette
-    // rows show no chip), so the lines carry the chip themselves.
-    lines.extend(
-        PopoverLine::titled_action(&Action::CopyPullRequestUrl, PR_COPY_URL_TITLE)
-            .map(|line| line.with_keys("y")),
-    );
-    if pr.state != PrState::Merged {
-        lines.extend(
-            PopoverLine::action(&Action::RefreshPullRequest).map(|line| line.with_keys("r")),
-        );
-    }
-    Some(PopoverSection {
-        icon: pr_badge_kind(pr.state),
-        role,
-        target: IconTarget::PullRequest(repo.to_path_buf()),
-        title: Some(format!("PR · {}", pr.state.label())),
-        lines,
-    })
+    lines
 }
 
 /// `state`: the forge state words, `DRAFT`, and the review decision, in
@@ -2434,7 +2452,7 @@ mod tests {
             detail: Option<PrDetailLookup>,
         ) -> PopoverSection {
             let target = pin(app, name);
-            let fetch = app.request_popover_pr_details();
+            let fetch = app.request_pr_details();
             if let Some(detail) = detail {
                 let Effect::LookupPullRequestDetail {
                     repo,

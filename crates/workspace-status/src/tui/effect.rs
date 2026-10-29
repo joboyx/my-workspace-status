@@ -71,6 +71,7 @@ use super::ops::{
     format_completed_op, format_mixed_running_op, format_running_op, op_targets, Op, OpTally,
     RepoOpResult, RunningOp,
 };
+use super::pr_groups::{PrGroup, TitleCache};
 use super::pull_request::{is_web_url, lookup, lookup_detail, PrDetailLookup, PrLookup, PrPage};
 #[cfg(not(test))]
 use super::pull_request::{open_in_browser, run_cli};
@@ -282,6 +283,10 @@ pub(crate) enum JobOutcome {
         lookup: PrLookup,
         page: PrPage,
         opened: bool,
+    },
+    /// Titles of one PR title command fill, by group key.
+    PrTitles {
+        titles: TitleCache,
     },
     /// `gc` browser open of the CI page of the known PR `pr_ref`. `opened`
     /// is true when the browser started.
@@ -927,8 +932,12 @@ pub(crate) struct Interpreter {
     /// Browser opener ([`DEFAULT_PR_OPENER`]; tests swap in a fake).
     pr_opener: PrUrlOpener,
     /// Set on quit. PR jobs on workers stop their CLI or opener wait at
-    /// once, so the runtime shutdown does not wait for them.
+    /// once, so the runtime shutdown does not wait for them; a title fill
+    /// runs no further key.
     pr_cancel: Arc<AtomicBool>,
+    /// Latest PR title fill: the title command and the PRs tab groups. A
+    /// newer one replaces it before spawn.
+    pr_title_job: Option<(PathBuf, Vec<PrGroup>)>,
     /// Activity keys waiting for a sparkline count, one queued
     /// [`UserTag::Activity`] slot each; a slot takes the front key.
     activity_pending: VecDeque<String>,
@@ -1006,6 +1015,7 @@ impl Interpreter {
             pr_cli: DEFAULT_PR_CLI,
             pr_opener: DEFAULT_PR_OPENER,
             pr_cancel: Arc::new(AtomicBool::new(false)),
+            pr_title_job: None,
             activity_pending: VecDeque::new(),
             activity_cancel: Arc::new(AtomicBool::new(false)),
             activity_after_reload: false,
@@ -1798,6 +1808,13 @@ impl Interpreter {
                 self.doctor_slot = Some(gen);
                 self.queue_doctor();
             }
+            Effect::FillPrTitles { cmd, groups } => {
+                // The state runs one fill at a time; a queued slot only
+                // takes the newer groups.
+                if self.pr_title_job.replace((cmd, groups)).is_none() {
+                    self.sched.enqueue_user(UserTag::PrTitles);
+                }
+            }
             Effect::CopyClipboard { text, announce } => {
                 let ok = comments::copy_to_clipboard(&text);
                 // `y` opens the export overlay right before this copy; its
@@ -2566,16 +2583,24 @@ impl Interpreter {
                 self.pr_badges_running = self.pr_badges_running.saturating_sub(1);
                 self.pr_badge_jobs.remove(&(repo.clone(), branch.clone()));
                 if state.apply_pr_lookup(&repo, &branch, remote, lookup) {
-                    // A pinned or peeked popover asks again for a detail
-                    // whose answer changed.
-                    let details = state.request_popover_pr_details();
+                    // A pinned or peeked popover, and the active PRs tab,
+                    // ask again for a detail whose answer changed.
+                    let details = state.request_pr_details();
                     if details != Effect::None {
                         self.schedule(state, opts, details, &Action::None);
                     }
                     self.mark();
                 }
                 self.alert_pr_changes(state);
+                self.start_pr_title_cycle(state, opts);
                 self.fill_pr_badge_slots();
+            }
+            JobOutcome::PrTitles { titles } => {
+                let next = state.apply_pr_titles(titles);
+                if next != Effect::None {
+                    self.schedule(state, opts, next, &Action::None);
+                }
+                self.mark();
             }
             JobOutcome::PullRequestDetail { job, lookup } => {
                 self.pr_badges_running = self.pr_badges_running.saturating_sub(1);
@@ -2588,8 +2613,8 @@ impl Interpreter {
                 } = job;
                 if state.apply_pr_detail(&repo, &branch, &remote, number, request, lookup) {
                     // The answer changed while this fetch was out: ask
-                    // again for the open popover.
-                    let details = state.request_popover_pr_details();
+                    // again for the open popover and the active PRs tab.
+                    let details = state.request_pr_details();
                     if details != Effect::None {
                         self.schedule(state, opts, details, &Action::None);
                     }
@@ -2700,6 +2725,19 @@ impl Interpreter {
         });
         if (idle || waited) && state.alert_pr_transitions(now) {
             self.mark();
+        }
+    }
+
+    /// Start a PR title cycle once no badge lookup waits or runs: a poll
+    /// cycle, an `r`, or the launch lookups ended
+    /// ([`AppState::new_pr_title_cycle`]).
+    fn start_pr_title_cycle(&mut self, state: &mut AppState, opts: &TuiOpts) {
+        if !self.pr_badges.is_empty() || !self.pr_badge_jobs.is_empty() {
+            return;
+        }
+        let fill = state.new_pr_title_cycle();
+        if fill != Effect::None {
+            self.schedule(state, opts, fill, &Action::None);
         }
     }
 
@@ -3628,6 +3666,28 @@ impl Interpreter {
                     Box::new(move || JobOutcome::Doctor {
                         gen,
                         checks: inputs.run(),
+                    }),
+                );
+            }
+            UserTag::PrTitles => {
+                let Some((cmd, groups)) = self.pr_title_job.take() else {
+                    self.sched.note_job_finished(id);
+                    return;
+                };
+                let cancel = Arc::clone(&self.pr_cancel);
+                spawn(
+                    id,
+                    Box::new(move || {
+                        // One group at a time, so a quit stops between keys;
+                        // the registry ends a command that runs then.
+                        let mut titles = TitleCache::default();
+                        for group in &groups {
+                            if cancel.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            titles.fill(&cmd, std::slice::from_ref(group));
+                        }
+                        JobOutcome::PrTitles { titles }
                     }),
                 );
             }
@@ -9934,7 +9994,7 @@ mod tests {
             [
                 ("#1 CI failed".into(), "feature".into()),
                 ("#2 ready to merge".into(), "feature".into()),
-                ("+2 more PR changes".into(), String::new()),
+                ("+2 more PR changes".into(), "gp".into()),
             ]
         );
         assert!(interp.take_dirty(), "the alert asks for a frame");
@@ -10034,5 +10094,52 @@ mod tests {
         );
         assert_eq!(state.pr_transitions_waiting_since(), None, "drained");
         assert!(interp.take_dirty());
+    }
+
+    // ---- PR title command ----
+
+    #[test]
+    fn a_title_fill_runs_on_a_worker_and_lands_in_the_group_headers() {
+        use crate::tui::state::prs_fixtures::{set_title_command, title_script, workspace};
+        let mut state = workspace(false);
+        let cmd = title_script();
+        set_title_command(&mut state, &cmd);
+        let mut interp = Interpreter::with_cap(4);
+        let effect = state.dispatch(Action::OpenPrsTab);
+        schedule_effect(&mut interp, &mut state, effect, &Action::OpenPrsTab);
+        assert_eq!(interp.sched.queued_user_tag(UserTag::PrTitles), 1);
+        assert_eq!(state.pr_group_title("ABC-123"), None, "not yet");
+        drain_jobs(&mut interp, &mut state, 10);
+        assert_eq!(state.pr_group_title("ABC-123"), Some("Title ABC-123"));
+        assert_eq!(state.pr_group_title("ABC-125"), Some("Title ABC-125"));
+        assert_eq!(state.pr_group_title("other"), None, "never for other");
+        assert!(interp.take_dirty(), "the headers repaint");
+
+        // A badge lookup that lands with none left out ends a cycle: a new
+        // fill runs, and the titles on screen stay until it lands.
+        let outcome = JobOutcome::PullRequestBadge {
+            repo: PathBuf::from("lib"),
+            branch: "feature/ABC-120-cache".into(),
+            remote: Some(crate::tui::state::prs_fixtures::GH_LIB.into()),
+            lookup: PrLookup::NoPr,
+        };
+        apply(&mut interp, &mut state, outcome);
+        assert_eq!(interp.sched.queued_user_tag(UserTag::PrTitles), 1);
+        assert_eq!(state.pr_group_title("ABC-120"), Some("Title ABC-120"));
+        drain_jobs(&mut interp, &mut state, 10);
+        assert_eq!(
+            state.pr_group_title("ABC-120"),
+            None,
+            "the merged ticket left the list with its PR"
+        );
+        assert_eq!(state.pr_group_title("ABC-123"), Some("Title ABC-123"));
+
+        // A quit stops a fill before its next key.
+        let effect = state.new_pr_title_cycle();
+        schedule_effect(&mut interp, &mut state, effect, &Action::None);
+        interp.pr_cancel.store(true, Ordering::Relaxed);
+        drain_jobs(&mut interp, &mut state, 10);
+        assert_eq!(state.pr_group_title("ABC-123"), None, "no key ran");
+        let _ = std::fs::remove_dir_all(cmd.parent().unwrap());
     }
 }
