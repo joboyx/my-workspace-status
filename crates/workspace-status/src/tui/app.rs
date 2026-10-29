@@ -1266,6 +1266,22 @@ mod tests {
     }
 
     #[test]
+    fn single_repo_reload_keeps_the_upstream_rewrite() {
+        let fixture =
+            crate::testutil::upstream_rewrite_fixture(crate::testutil::RewriteKind::Dropped);
+        let empty = build_workspace_snapshot(&[], &[], false, &[]);
+        let next = compute_reload_repo(&fixture.root, &empty, "checkout", false);
+        let row = next
+            .repos
+            .iter()
+            .find(|row| row.repo == "checkout")
+            .expect("reloaded row");
+        let rewrite = row.upstream_rewrite.as_ref().expect("rewrite survives");
+        assert_eq!((rewrite.dropped, rewrite.yours), (2, 0));
+        assert_eq!(row.sync_note, "diverged (ahead 2, behind 1)");
+    }
+
+    #[test]
     fn restore_sequence_clears_progress_first() {
         static SHOWN: AtomicBool = AtomicBool::new(false);
         static NO_POINTER: AtomicBool = AtomicBool::new(false);

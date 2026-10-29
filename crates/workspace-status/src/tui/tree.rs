@@ -18,7 +18,7 @@ use super::icons::{
     icon_folder, icon_hidden, icon_linked_worktree, icon_pr_approved, icon_pr_merged, icon_pr_open,
     icon_repo, icon_staged, icon_status_failed, icon_viewed, icon_workspace,
     status_letter_from_change, tui_file_badge, tui_merge_mark, tui_sync_mark,
-    upstream_rewrite_text, IconKind, StatusColorRole,
+    upstream_rewrite_short_text, IconKind, StatusColorRole,
 };
 use super::pull_request::PrState;
 
@@ -928,7 +928,7 @@ fn sync_trailing(chrome: &NodeChrome, in_no_updates: bool, ascii: bool) -> Vec<T
     match &chrome.upstream_rewrite {
         Some(rewrite) if status == SyncStatus::Diverged => vec![
             mark,
-            text_seg(format!(" {}", upstream_rewrite_text(rewrite)), role),
+            text_seg(format!(" {}", upstream_rewrite_short_text(rewrite)), role),
         ],
         _ => vec![mark],
     }
@@ -1695,8 +1695,8 @@ mod tests {
         assert_eq!(segs[0].text, "Y");
         assert_eq!(segs[0].icon, Some(IconKind::Diverged));
         assert_eq!(
-            segs[1].text,
-            " origin/main was force-pushed \u{b7} 2 dropped, 0 yours"
+            segs[1].text, " force-pushed \u{b7} 2 dropped, 0 yours",
+            "short form: the popover names the upstream"
         );
         assert_eq!(segs[1].icon, None, "the text is not a second icon");
         assert_eq!(segs[1].role, segs[0].role);
@@ -1720,7 +1720,9 @@ mod tests {
         let row = rows.iter().find(|r| r.id == "repo:ops").expect("ops");
         assert_eq!(row.chrome.upstream_rewrite, Some(force_pushed()));
         assert!(
-            row.trailing.contains("origin/main was force-pushed"),
+            row.trailing
+                .contains("force-pushed \u{b7} 2 dropped, 0 yours")
+                && !row.trailing.contains("origin/main"),
             "{}",
             row.trailing
         );

@@ -12131,6 +12131,35 @@ mod tests {
         )
     }
 
+    /// The short force-push text leaves room for the repo name on a narrow pane.
+    #[test]
+    fn narrow_force_pushed_row_keeps_the_repo_name_beside_the_short_text() {
+        let mut ops = repo("ops", false);
+        ops.sync_status = SyncStatus::Diverged;
+        ops.sync_note = "diverged (ahead 2, behind 1)".into();
+        ops.upstream_rewrite = Some(crate::git::UpstreamRewrite {
+            upstream: "origin/main".into(),
+            fork_point: "f".repeat(40),
+            tip: "t".repeat(40),
+            yours: 0,
+            dropped: 2,
+        });
+        let built = build_workspace_snapshot(&[ops], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let row = rows.iter().find(|r| r.id == "repo:ops").expect("ops row");
+        let text = paint_row(row, 60, 0);
+        assert!(text.contains("ops"), "repo name stays visible:\n{text}");
+        assert!(
+            text.contains("Y force-pushed \u{b7} 2 dropped, 0 yours"),
+            "mark and short text paint together:\n{text}"
+        );
+        assert!(
+            !text.contains("origin/main"),
+            "the tree row does not name the upstream:\n{text}"
+        );
+    }
+
     /// A narrowed tree keeps the workspace name: the root summary drops its
     /// sync part, then shortens `N changed` to `N`, then goes, before the
     /// name clips.
