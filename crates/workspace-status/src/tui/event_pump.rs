@@ -107,10 +107,12 @@ pub fn classify_busy_dispatch(action: &Action, inner_action: Option<&Action>) ->
     }
 }
 
-/// True when fetch/watch timers must not start (confirm, help, pickers, …).
+/// True when the fetch, watch, and PR poll timers must not start (confirm,
+/// help, pickers, …).
 ///
-/// A pinned icon popover does not block them: it is read-only, rebuilds
-/// its content every frame, and may stay open a long time.
+/// A pinned icon popover (also while its `g` chord waits) does not block
+/// them: it is read-only, rebuilds its content every frame, and may stay
+/// open a long time, for example to watch a PR's CI.
 pub fn overlay_blocks_background_ticks(mode: InputMode) -> bool {
     !matches!(
         mode,

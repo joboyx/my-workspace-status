@@ -4465,6 +4465,56 @@ mod tests {
         }
     }
 
+    /// A pinned PR popover does not pause polling: the event loop runs the
+    /// poll tick in `Popover` and `PopoverGPending` (both pass
+    /// `overlay_blocks_background_ticks`), the cycle takes the popover's
+    /// checkout, and the landed answer shows in the PR section while the
+    /// popover stays pinned.
+    #[test]
+    fn a_pinned_pr_popover_keeps_polling_and_shows_the_new_state() {
+        use super::super::super::event_pump::overlay_blocks_background_ticks;
+        use super::super::super::keys::InputMode;
+        assert!(!overlay_blocks_background_ticks(InputMode::PopoverGPending));
+        for remote in [GH_REMOTE, GL_REMOTE] {
+            let (pr, _, _) = pr_with_ci(remote, PrState::CiRunning);
+            let mut app = app_answered(remote, PrLookup::Found(pr.clone()));
+            let _ = pin_pr(&mut app);
+            assert!(app.popover_pinned(), "{remote}");
+            assert_eq!(app.input_mode(), InputMode::Popover, "{remote}");
+            assert!(!overlay_blocks_background_ticks(app.input_mode()));
+            let heading = |app: &AppState| {
+                app.open_popover_sections()
+                    .iter()
+                    .find(|section| section.target == IconTarget::PullRequest(PathBuf::from("app")))
+                    .map(|section| section.heading().to_string())
+            };
+            assert_eq!(heading(&app).as_deref(), Some("PR · CI running"));
+
+            let due = app.due_pr_polls(Instant::now());
+            assert!(
+                due.contains(&(PathBuf::from("app"), "feature".to_string())),
+                "{remote}: the poll takes the pinned checkout: {due:?}"
+            );
+            let ready = PullRequest {
+                state: PrState::Ready,
+                ..pr
+            };
+            land_pr(
+                &mut app,
+                "app",
+                remote,
+                PrLookup::Found(ready),
+                Instant::now(),
+            );
+            assert!(app.popover_pinned(), "{remote}: still pinned");
+            assert_eq!(
+                heading(&app).as_deref(),
+                Some("PR · ready to merge"),
+                "{remote}"
+            );
+        }
+    }
+
     /// Two check names share the blank label: the focus on the second one
     /// stays there when a new detail adds a line above it.
     #[test]
