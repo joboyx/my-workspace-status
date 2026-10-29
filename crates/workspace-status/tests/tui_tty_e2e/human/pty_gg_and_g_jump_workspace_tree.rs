@@ -1,7 +1,8 @@
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    page_file_body_visible, seed_tree_page_files, tree_cursor_on, tree_has, GIT_WAIT, WAIT,
+    page_file_body_visible, prove_keys_handled, seed_tree_page_files, tree_cursor_on, tree_has,
+    GIT_WAIT, WAIT,
 };
 
 fn help_lists_gg_g_top_bottom(screen: &str) -> bool {
@@ -66,8 +67,11 @@ fn pty_gg_and_g_jump_workspace_tree() {
         WAIT,
     );
 
+    // A lone `g` moves nothing. The probe's `?` also ends the pending chord,
+    // so no later key can complete it. Expiry of the 400 ms window is a
+    // timing rule, pinned by the `tui::keys` and `tui::state` unit tests.
     tui.key('g');
-    tui.wait_ms(500);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         |screen| {
             tree_cursor_on(screen, "README.md")
@@ -77,7 +81,7 @@ fn pty_gg_and_g_jump_workspace_tree() {
                 && tree_has(screen, "workspace")
                 && !tree_has(screen, "No updates")
         },
-        "lone g expires with no move (gg would land on workspace; G would land on No updates)",
+        "lone g moves nothing (gg would land on workspace; G would land on No updates)",
         WAIT,
     );
 

@@ -2,8 +2,8 @@ use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
     ack_rows, crumb_row, has_stage_hint, idle_dirty_readme_unstaged, no_wrong_overlays,
-    pane_unstaged_readme, readme_unstaged_badge, status_row, tree_cursor_on, tree_has, GIT_WAIT,
-    SETTLE_MS, WAIT,
+    pane_unstaged_readme, prove_keys_handled, readme_unstaged_badge, status_row, tree_cursor_on,
+    tree_has, GIT_WAIT, WAIT,
 };
 
 fn no_y_revert_path(screen: &str) -> bool {
@@ -100,12 +100,7 @@ fn pty_revert_confirm_n_cancels() {
         "x arms Revert README.md? with y/n only; file stays dirty",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
-    tui.wait_pred(
-        documented_revert_confirm_armed,
-        "revert confirm holds (not a flicker, y path, or toast-only tick)",
-        WAIT,
-    );
+    // The `n` below cancels this confirm, which proves it stayed open.
 
     tui.key('n');
     tui.wait_pred(
@@ -113,7 +108,7 @@ fn pty_revert_confirm_n_cancels() {
         "n cancels: revert cancelled toast, README still unstaged, overlay gone",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_revert_n_cancelled,
         "cancelled paint holds (not a flicker, y revert, or overlay return)",

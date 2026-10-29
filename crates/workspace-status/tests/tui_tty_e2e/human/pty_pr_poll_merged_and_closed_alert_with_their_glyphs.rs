@@ -7,7 +7,7 @@ use crate::pr_support::{
     badge_flashes, badge_is, forge_env, named_workspace, row_flashes, seed_checkouts, toast_text,
     tree_badge, Forge, PrCheckout, ADD_RAMP, POLL_MS, REMOVE_RAMP,
 };
-use crate::support::GIT_WAIT;
+use crate::support::{GIT_WAIT, WAIT};
 
 /// Run one merged and one closed transition, one per forge, with the glyph
 /// set `glyphs` (`ascii` or `nerd`).
@@ -53,6 +53,7 @@ fn merged_and_closed(prefix: &str, glyphs: &str, merged_on: Forge, merged: char,
         GIT_WAIT,
     );
 
+    tui.record_frames();
     merging.set(&forge, Badge::Merged);
     closing.set_closed(&forge);
     let merged_toast = format!(
@@ -65,27 +66,29 @@ fn merged_and_closed(prefix: &str, glyphs: &str, merged_on: Forge, merged: char,
         closing.ref_text(),
         closing.branch
     );
-    let flashed = (Cell::new(false), Cell::new(false));
     tui.wait_pred(
         |screen| {
-            flashed
-                .0
-                .set(flashed.0.get() || badge_flashes(&tui, &merging.dir, &ADD_RAMP));
-            flashed
-                .1
-                .set(flashed.1.get() || row_flashes(&tui, &closing.dir, &REMOVE_RAMP));
             let toasts = toast_text(screen);
             toasts.contains(&merged_toast) && toasts.contains(&closed_toast)
         },
         "the next poll toasts the merge and the close",
         GIT_WAIT,
     );
-    assert!(
-        flashed.0.get() && flashed.1.get(),
-        "the merged row flashes on the add ramp ({}) and the closed row on the remove ramp ({}):\n{}",
-        flashed.0.get(),
-        flashed.1.get(),
-        tui.screen()
+    // Each row's flash shows in some recorded frame, not necessarily the
+    // same one.
+    let flashed = (Cell::new(false), Cell::new(false));
+    tui.wait_recorded_frame(
+        |tui| {
+            flashed
+                .0
+                .set(flashed.0.get() || badge_flashes(tui, &merging.dir, &ADD_RAMP));
+            flashed
+                .1
+                .set(flashed.1.get() || row_flashes(tui, &closing.dir, &REMOVE_RAMP));
+            flashed.0.get() && flashed.1.get()
+        },
+        "the merged row flashes on the add ramp and the closed row on the remove ramp",
+        WAIT,
     );
     let merged_glyph = if glyphs == "nerd" {
         Badge::Merged.nerd()

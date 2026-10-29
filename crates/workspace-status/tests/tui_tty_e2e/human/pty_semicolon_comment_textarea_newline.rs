@@ -5,7 +5,7 @@ use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
     documented_launch_first_paint, pane_unstaged_readme, status_row, tree_cursor_on, tree_has,
-    GIT_WAIT, SETTLE_MS, WAIT,
+    GIT_WAIT, WAIT,
 };
 
 const LINE1: &str = "one";
@@ -14,7 +14,6 @@ const LINE2: &str = "two three";
 const KITTY_LEFT: u32 = 57350;
 /// Kitty CSI-u Right. Pair of [`KITTY_LEFT`].
 const KITTY_RIGHT: u32 = 57351;
-const KEY_GAP_MS: u64 = 50;
 
 fn comment_store(workspace: &Path) -> std::path::PathBuf {
     workspace.join(".e2e-state").join("comments.json")
@@ -126,7 +125,6 @@ fn pty_semicolon_comment_textarea_newline() {
     );
 
     shift_enter(&mut tui);
-    tui.wait_ms(KEY_GAP_MS);
     tui.wait_pred(
         |screen| {
             idle_status_occluded(screen)
@@ -154,7 +152,6 @@ fn pty_semicolon_comment_textarea_newline() {
     );
 
     ctrl_left(&mut tui);
-    tui.wait_ms(KEY_GAP_MS);
     tui.wait_pred(
         |screen| {
             let overlay = overlay_region(screen);
@@ -168,7 +165,6 @@ fn pty_semicolon_comment_textarea_newline() {
     );
 
     tui.ctrl_letter('a');
-    tui.wait_ms(KEY_GAP_MS);
     tui.wait_pred(
         |screen| {
             let overlay = overlay_region(screen);
@@ -183,7 +179,6 @@ fn pty_semicolon_comment_textarea_newline() {
     );
 
     ctrl_right(&mut tui);
-    tui.wait_ms(KEY_GAP_MS);
     tui.wait_pred(
         |screen| {
             let overlay = overlay_region(screen);
@@ -197,7 +192,6 @@ fn pty_semicolon_comment_textarea_newline() {
     );
 
     tui.ctrl_letter('e');
-    tui.wait_ms(KEY_GAP_MS);
     tui.wait_pred(
         |screen| {
             let overlay = overlay_region(screen);
@@ -223,7 +217,7 @@ fn pty_semicolon_comment_textarea_newline() {
         "Enter saves: overlay gone, toast comment saved",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    // The store is written before the toast paints.
     let stored = store_text(&workspace);
     assert!(
         stored.contains("one\\ntwo three")

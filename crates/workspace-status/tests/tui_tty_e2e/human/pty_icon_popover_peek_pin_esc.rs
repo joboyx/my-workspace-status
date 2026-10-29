@@ -2,7 +2,7 @@ use crate::harness::{tree_row_containing, PtySession};
 use crate::seed::{behind_workspace, daily_workspace, primary_merged_workspace};
 use crate::support::{
     ack_rows, documented_space_reviewed, idle_dirty_readme_unreviewed, merge_mark_after,
-    syncbox_row_behind, tree_cursor_on, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
+    syncbox_row_behind, tree_cursor_on, tree_line_containing, GIT_WAIT, WAIT,
 };
 
 /// SGR pointer motion with no button held (`3 | 32`, any-event tracking).
@@ -67,10 +67,11 @@ fn pty_icon_popover_peek_pin_esc() {
 
     tui.sgr_click(col, row);
     tui.wait_pred(pinned, "a click on v1 pins the popover", WAIT);
-    // Move the pointer off: a pinned popover has no leave grace.
+    // Move the pointer off: a pinned popover has no leave grace. The grace
+    // is a timer, so `a_pinned_popover_has_no_leave_grace` (state unit
+    // test) pins that rule; here the `j` below, which runs after the
+    // motion, proves the popover is still pinned and live.
     tui.sgr_mouse(SGR_POINTER_MOVE, 2, row);
-    tui.wait_ms(SETTLE_MS * 3);
-    assert!(pinned(&tui.screen()), "pinned stays:\n{}", tui.screen());
 
     tui.key('j');
     tui.wait_pred(
@@ -85,7 +86,7 @@ fn pty_icon_popover_peek_pin_esc() {
         GIT_WAIT,
     );
 
-    tui.keys("gh");
+    tui.send_bytes(b"gh");
     tui.wait_pred(pinned, "gh pins the focused row's popover", WAIT);
     tui.esc();
     tui.wait_pred(closed, "Esc closes the pinned popover", WAIT);
@@ -166,7 +167,7 @@ fn pty_icon_popover_gh_on_a_checkout_row_lists_branch_merge_and_sync() {
         "j focuses the primary checkout",
         WAIT,
     );
-    tui.keys("gh");
+    tui.send_bytes(b"gh");
     tui.wait_pred(
         checkout_sections,
         "gh lists the branch, merge mark, and sync sections",
@@ -262,7 +263,7 @@ fn pty_icon_popover_gh_on_a_file_row_lists_devicon_badge_and_viewed() {
     tui.sgr_mouse(SGR_POINTER_MOVE, 0, 0);
     tui.wait_pred(file_popover_closed, "leaving the eye closes the peek", WAIT);
 
-    tui.keys("gh");
+    tui.send_bytes(b"gh");
     tui.wait_pred(
         file_row_sections,
         "gh lists the devicon, viewed, and status letter sections",

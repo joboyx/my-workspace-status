@@ -9907,6 +9907,52 @@ mod tests {
         }
     }
 
+    /// The Explorer tree's double-click window is the gap between the two
+    /// presses' arrival (the shared row rule, `note_row_press`), as on the
+    /// Workspace tree and the PRs tab: presses that arrived 399 ms apart
+    /// pin the file even when handled late, presses 401 ms apart handled
+    /// back to back only preview it.
+    #[test]
+    fn explorer_tree_double_click_reads_the_press_arrival_instant() {
+        use std::time::Duration;
+        for (look, background) in PANE_LOOKS {
+            let open = || {
+                let mut state = explorer_state();
+                state.background = background;
+                let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                let buf = terminal.backend().buffer().clone();
+                let tree = state.layout.explorer_tree;
+                let cell = (tree.y..tree.bottom())
+                    .find_map(|y| {
+                        find_cell_col(&buf, y, "README.md")
+                            .filter(|x| *x < tree.right())
+                            .map(|x| (x, y))
+                    })
+                    .unwrap_or_else(|| panic!("{look}: no README.md row"));
+                (state, cell)
+            };
+            let pinned = |state: &AppState| {
+                let tab = state.tabs.active_explorer().expect("an Explorer tab");
+                tab.files.iter().any(|file| file.pinned)
+            };
+            let press = |state: &mut AppState, at: Instant, (col, row): (u16, u16)| {
+                state.begin_input(at);
+                state.dispatch(Action::Click { col, row });
+                state.end_input();
+            };
+            for (first, gap, double) in [
+                (Instant::now() - Duration::from_secs(5), 399, true),
+                (Instant::now(), 401, false),
+            ] {
+                let (mut state, cell) = open();
+                press(&mut state, first, cell);
+                press(&mut state, first + Duration::from_millis(gap), cell);
+                assert_eq!(pinned(&state), double, "{look}: {gap} ms apart");
+            }
+        }
+    }
+
     /// A flat Explorer divider press (the tree's right pad cell) released
     /// where it was pressed clicks the tree row under it and resizes
     /// nothing, as on the Workspace.

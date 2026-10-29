@@ -5,8 +5,9 @@ use crate::harness::{
 };
 use crate::seed::{daily_workspace, seed_long_path_file};
 use crate::support::{
-    launch_panes_left_tree_right_diff, no_updates_group_folded, no_wrong_overlays, status_row,
-    tree_cursor_on, tree_dir_expanded, tree_has, tree_label_col, GIT_WAIT, SETTLE_MS, WAIT,
+    launch_panes_left_tree_right_diff, no_updates_group_folded, no_wrong_overlays,
+    prove_keys_handled, status_row, step_until_changed, tree_cursor_on, tree_dir_expanded,
+    tree_has, tree_label_col, GIT_WAIT, WAIT,
 };
 
 /// Kitty CSI-u Left. Crossterm 0.28 `event::read` yields Char U+E006.
@@ -14,18 +15,27 @@ const KITTY_LEFT: u32 = 57350;
 /// Kitty CSI-u Right. Crossterm 0.28 `event::read` yields Char U+E007.
 const KITTY_RIGHT: u32 = 57351;
 
-/// Same gap as `pty_key_repeat_j_reaches_no_updates`. A burst of the same
-/// nav key is dropped by `discard_held_nav_backlog` after the first press.
-const NAV_KEY_GAP_MS: u64 = 50;
-
 fn csi_u_arrow(tui: &mut PtySession, codepoint: u32, modifier: u8) {
     tui.csi_u(codepoint, modifier, 1);
     tui.csi_u(codepoint, modifier, 3);
 }
 
-fn csi_u_shift_arrow_pan(tui: &mut PtySession, codepoint: u32) {
-    csi_u_arrow(tui, codepoint, 2);
-    tui.wait_ms(NAV_KEY_GAP_MS);
+/// Shift+arrow until `done`, one press at a time: each waits for the tree
+/// to pan before the next, since a queued copy of a held nav key is
+/// dropped.
+fn csi_u_shift_arrow_pan_until(tui: &mut PtySession, codepoint: u32, done: impl Fn(&str) -> bool) {
+    for _ in 0..120 {
+        if done(&tui.screen()) {
+            return;
+        }
+        step_until_changed(
+            tui,
+            |tui| csi_u_arrow(tui, codepoint, 2),
+            left_tree,
+            |_| true,
+            "each CSI-u Shift+arrow pans the tree one more column",
+        );
+    }
 }
 
 fn help_lists_shift_arrows_tree_pan(screen: &str) -> bool {
@@ -160,16 +170,16 @@ fn pty_shift_left_right_tree_pan() {
         csi_u_arrow(&mut tui, KITTY_RIGHT, 1);
         csi_u_arrow(&mut tui, KITTY_LEFT, 1);
     }
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     assert!(
         tree_clipped_readme_focus(&tui.screen(), readme_row),
         "unshifted CSI-u Left/Right must not pan (file fold is a no-op):\n{}",
         tui.screen()
     );
 
-    for _ in 0..40 {
-        csi_u_shift_arrow_pan(&mut tui, KITTY_RIGHT);
-    }
+    csi_u_shift_arrow_pan_until(&mut tui, KITTY_RIGHT, |screen| {
+        documented_shift_arrows_panned(screen, readme_row)
+    });
     tui.wait_pred(
         |screen| documented_shift_arrows_panned(screen, readme_row),
         "CSI-u Shift+Right shows TAIL99, drops very-long, keeps README cursor and short diff",
@@ -177,9 +187,9 @@ fn pty_shift_left_right_tree_pan() {
     );
     crate::common::hscroll::assert_panned_to_tail(&left_tree(&tui.screen()));
 
-    for _ in 0..40 {
-        csi_u_shift_arrow_pan(&mut tui, KITTY_LEFT);
-    }
+    csi_u_shift_arrow_pan_until(&mut tui, KITTY_LEFT, |screen| {
+        tree_clipped_readme_focus(screen, readme_row)
+    });
     tui.wait_pred(
         |screen| tree_clipped_readme_focus(screen, readme_row),
         "CSI-u Shift+Left restores the clipped prefix without folding or stealing focus",

@@ -2,8 +2,8 @@ use crate::harness::PtySession;
 use crate::seed::unfetched_behind_workspace;
 use crate::support::{
     ack_rows, after_ack, crumb_row, has_fetch_hint, has_pull_hint,
-    panes_tree_focused_graph_unfocused, status_row, syncbox_row_behind, tree_cursor_on, tree_has,
-    tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
+    panes_tree_focused_graph_unfocused, prove_keys_handled, status_row, syncbox_row_behind,
+    tree_cursor_on, tree_has, tree_line_containing, GIT_WAIT, WAIT,
 };
 
 fn no_wrong_fetch_overlays(screen: &str) -> bool {
@@ -120,7 +120,7 @@ fn pty_fetch_local_remote_marks_behind() {
         "f fetches remotes: Fetched 1 repo, syncbox v1, 1 behind, pull hint, not pulled",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_workspace_fetch_behind,
         "fetched behind paint holds (not a flicker or toast-only tick)",

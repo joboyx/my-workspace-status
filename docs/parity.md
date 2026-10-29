@@ -231,15 +231,15 @@ Long labels and lines pan sideways: Shift-←/→ and `h` / `l` on the focused p
 
 ### `double-click` — Double-click
 
-A second press on the same cell within 400 ms is Enter on that row.
+A second press on the same cell within 400 ms is Enter on that row. The 400 ms is the gap between the presses' arrival (their stdin reads), not between the loop handling them. Every surface, the PRs tab included, takes the rule from one function, `note_row_press`.
 
 | Feature | What | Tests |
 | --- | --- | --- |
-| `enter` | A double-click does what Enter does on the row. | `double_click_dispatches_enter`, `explorer_tree_double_click_is_enter_boxed_and_flat` |
+| `enter` | A double-click does what Enter does on the row. | `double_click_dispatches_enter`, `explorer_tree_double_click_is_enter_boxed_and_flat`, `double_click_window_reads_the_press_arrival_instant`, `explorer_tree_double_click_reads_the_press_arrival_instant` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `enter` |
 | --- | --- | --- | --- | --- | --- | --- |
-| `tree` | Workspace | 0 | left | boxed, flat | `click_row`, `nav_enter` | supported |
+| `tree` | Workspace | 0 | left | boxed, flat | `click_row`, `note_row_press`, `nav_enter` | supported |
 | `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `click_row`, `click_graph` | supported |
 | `graph-d1` | Workspace | 1 | left | boxed, flat | `click_row`, `click_graph` | supported |
 | `files-d1` | Workspace | 1 | right | boxed, flat | `click_row`, `click_commit_files` | supported |
@@ -251,7 +251,7 @@ A second press on the same cell within 400 ms is Enter on that row.
 | `explorer-tree` | Explorer | - | left | boxed, flat | `explorer_click`, `explorer_click_row`, `note_row_press`, `explorer_enter` | supported |
 | `explorer-diff` | Explorer (changed file) | - | right | boxed, flat | `explorer_click`, `dispatch_explorer_tab` | n/a: Enter does nothing in the Explorer file pane |
 | `explorer-file` | Explorer (clean file) | - | right | boxed, flat | `explorer_click`, `dispatch_explorer_tab` | n/a: Enter does nothing in the Explorer file pane |
-| `prs-tab` | PRs | - | left | boxed, flat | `prs_click`, `dispatch_prs_tab` | n/a: Enter opens the PR in the browser, so a double-click only selects the row; on a group header the second press does not undo the fold |
+| `prs-tab` | PRs | - | left | boxed, flat | `prs_click`, `note_row_press`, `dispatch_prs_tab` | n/a: Enter opens the PR in the browser, so a double-click only selects the row; on a group header the second press does not undo the fold |
 
 ### `row-marks` — Row marks
 

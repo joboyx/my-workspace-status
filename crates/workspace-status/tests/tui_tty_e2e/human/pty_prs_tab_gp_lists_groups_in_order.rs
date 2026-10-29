@@ -40,7 +40,7 @@ fn pty_prs_tab_gp_lists_groups_in_order() {
         GIT_WAIT,
     );
 
-    tui.keys("gp");
+    tui.send_bytes(b"gp");
     tui.wait_pred(
         |_| {
             prs_refs(&tui) == ROW_ORDER

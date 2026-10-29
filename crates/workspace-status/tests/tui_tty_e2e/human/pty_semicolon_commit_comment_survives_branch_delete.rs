@@ -5,7 +5,8 @@ use std::process::{Command, Stdio};
 use crate::harness::PtySession;
 use crate::seed::{git, git_env, seed_repo, unique_root};
 use crate::support::{
-    graph_cursor_on, graph_pane_focused, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
+    graph_cursor_on, graph_pane_focused, prove_keys_handled, tree_cursor_on, tree_has, GIT_WAIT,
+    WAIT,
 };
 
 const BODY: &str = "commit-survives-branch-e2e";
@@ -103,8 +104,6 @@ fn pty_semicolon_commit_comment_survives_branch_delete() {
         "search selects the doomed leaf commit",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
-
     tui.key(';');
     tui.wait_pred(
         comment_overlay,
@@ -126,7 +125,7 @@ fn pty_semicolon_commit_comment_survives_branch_delete() {
 
     git(&app, &["branch", "-D", "doomed"]);
     tui.key('r');
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         |screen| overlay_closed(screen) && tree_has(screen, "app"),
         "r refresh after deleting doomed",

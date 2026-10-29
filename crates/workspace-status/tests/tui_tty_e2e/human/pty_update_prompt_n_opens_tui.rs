@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
-use crate::support::{documented_launch_first_paint, SETTLE_MS, WAIT};
+use crate::support::{documented_launch_first_paint, prove_keys_handled, WAIT};
 
 use workspace_status::update_check::UPDATE_PROMPT_SUFFIX;
 
@@ -114,12 +114,7 @@ fn pty_update_prompt_n_opens_tui() {
         WAIT,
     );
     tui.assert_running("blocked on update prompt (must not skip or auto-mount)");
-    tui.wait_ms(SETTLE_MS);
-    tui.wait_pred(
-        startup_update_prompt_blocking,
-        "update prompt holds (not a skip, auto-mount, or y path)",
-        WAIT,
-    );
+    // The `n` below answers this prompt, which proves it stayed up.
     assert!(
         !sidecar_marker.exists(),
         "sidecar must not run while the prompt is up"
@@ -133,7 +128,7 @@ fn pty_update_prompt_n_opens_tui() {
         WAIT,
     );
     tui.assert_running("after n (must open TUI, not exec the sidecar)");
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         declined_update_opened_tui,
         "declined TUI holds (not a flicker, prompt return, or y path)",

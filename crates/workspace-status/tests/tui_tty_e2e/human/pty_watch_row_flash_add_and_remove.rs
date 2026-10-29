@@ -1,6 +1,4 @@
 use std::fs;
-use std::thread;
-use std::time::{Duration, Instant};
 
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
@@ -9,28 +7,29 @@ use crate::support::{
     tree_line_containing, GIT_WAIT, WAIT,
 };
 
-/// Matches `watch::FLASH_MS`. Remove ghosts drop when this window ends.
-const FLASH_MS: u64 = 800;
-/// Extra wait after `FLASH_MS` before the ghost must be gone.
-const FLASH_GONE_SLACK_MS: u64 = 200;
-
-/// Tokyo Night add ramp[0] `#516643`.
-const ADD_PEAK: (u8, u8, u8) = (0x51, 0x66, 0x43);
-/// Tokyo Night add ramp[1] `#3f4d39`. Peak is only the first ~200ms.
-const ADD_STEP1: (u8, u8, u8) = (0x3f, 0x4d, 0x39);
-/// Tokyo Night update ramp[0] `#6d5942`.
-const UPDATE_PEAK: (u8, u8, u8) = (0x6d, 0x59, 0x42);
-/// Tokyo Night update ramp[1] `#514438`.
-const UPDATE_STEP1: (u8, u8, u8) = (0x51, 0x44, 0x38);
-/// Tokyo Night remove ramp[0] `#774152`.
-const REMOVE_PEAK: (u8, u8, u8) = (0x77, 0x41, 0x52);
-/// Tokyo Night remove ramp[1] `#583443`.
-const REMOVE_STEP1: (u8, u8, u8) = (0x58, 0x34, 0x43);
-
-/// Peak plus next step. Watch is 500ms; ramp[0] lasts ~200ms (`strength > 0.75`).
-const ADD_RAMP: [(u8, u8, u8); 2] = [ADD_PEAK, ADD_STEP1];
-const UPDATE_RAMP: [(u8, u8, u8); 2] = [UPDATE_PEAK, UPDATE_STEP1];
-const REMOVE_RAMP: [(u8, u8, u8); 2] = [REMOVE_PEAK, REMOVE_STEP1];
+/// Tokyo Night add flash ramp, peak first (`flash_ramp`). The whole ramp
+/// counts: every recorded frame is checked, so a flash that starts late
+/// (at a lower step) is still found.
+const ADD_RAMP: [(u8, u8, u8); 4] = [
+    (0x51, 0x66, 0x43),
+    (0x3f, 0x4d, 0x39),
+    (0x2f, 0x38, 0x31),
+    (0x25, 0x29, 0x2b),
+];
+/// Tokyo Night update flash ramp, peak first (`flash_update_ramp`).
+const UPDATE_RAMP: [(u8, u8, u8); 4] = [
+    (0x6d, 0x59, 0x42),
+    (0x51, 0x44, 0x38),
+    (0x3a, 0x33, 0x31),
+    (0x2a, 0x27, 0x2b),
+];
+/// Tokyo Night remove flash ramp, peak first (`flash_remove_ramp`).
+const REMOVE_RAMP: [(u8, u8, u8); 4] = [
+    (0x77, 0x41, 0x52),
+    (0x58, 0x34, 0x43),
+    (0x3d, 0x2a, 0x37),
+    (0x2c, 0x22, 0x2e),
+];
 
 /// ASCII file glyph plus name. Unique to the tree README row (`app/README.md`
 /// in the diff header and the diff-pane `▌` are other first-match hits).
@@ -48,59 +47,19 @@ fn tree_shows_untracked(screen: &str, name: &str) -> bool {
     tree_line_containing(screen, name).is_some_and(|line| line.contains("A "))
 }
 
-fn wait_needle_flash(
-    tui: &PtySession,
-    needle: &str,
-    ramp: &[(u8, u8, u8)],
-    what: &str,
-    timeout: Duration,
-) {
-    let start = Instant::now();
-    loop {
-        let screen = tui.screen();
-        if tree_has(&screen, needle) && needle_on_ramp(tui, needle, ramp) {
-            return;
-        }
-        if start.elapsed() >= timeout {
-            panic!(
-                "timeout waiting for {what}; on_tree={} bgs={:?}; screen:\n{screen}",
-                tree_has(&screen, needle),
-                tui.first_needle_bgs(needle)
-            );
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-}
-
-fn wait_cursor_flash(tui: &PtySession, ramp: &[(u8, u8, u8)], what: &str, timeout: Duration) {
-    let start = Instant::now();
-    let mut bgs_when_diff_applied: Option<Vec<Option<(u8, u8, u8)>>> = None;
-    loop {
-        let screen = tui.screen();
-        if screen.contains("flash-update") && bgs_when_diff_applied.is_none() {
-            bgs_when_diff_applied = tui.first_needle_bgs(TREE_README);
-        }
-        if tree_cursor_on(&screen, "README.md") && needle_on_ramp(tui, TREE_README, ramp) {
-            return;
-        }
-        if start.elapsed() >= timeout {
-            panic!(
-                "timeout waiting for {what}; cursor_on_readme={} apply_bgs={bgs_when_diff_applied:?} now_bgs={:?}; screen:\n{screen}",
-                tree_cursor_on(&screen, "README.md"),
-                tui.first_needle_bgs(TREE_README)
-            );
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-}
-
 /// Live watch paints add / update / remove 24-bit flash backgrounds.
 ///
 /// Glyphs on the tree are not enough: a row that appears or vanishes with
 /// only the default / surface / cursor background must fail. Add and remove
 /// run on unfocused `app/` files after `j` to merger. Update runs first on
 /// the focused README so flash wins over `cursor_bg`. Remove keeps a ghost
-/// for `FLASH_MS`, then drops.
+/// with the remove flash, then drops it. How long each lasts is a timer,
+/// pinned by `flash_strength_ramps_to_zero` and
+/// `a_ghost_lives_for_the_flash_then_drops` (`tui::watch` unit tests).
+///
+/// Each flash claim reads the frame record started before the disk write
+/// ([`PtySession::wait_recorded_frame`]), so a flash that is over by the
+/// time this test thread runs again is still found.
 #[test]
 fn pty_watch_row_flash_add_and_remove() {
     let (_root, workspace) = daily_workspace();
@@ -133,29 +92,18 @@ fn pty_watch_row_flash_add_and_remove() {
     let readme = app.join("README.md");
     let mut body = fs::read_to_string(&readme).unwrap();
     body.push_str("flash-update\n");
+    tui.record_frames();
     fs::write(&readme, body).unwrap();
-    wait_cursor_flash(
-        &tui,
-        &UPDATE_RAMP,
+    // Flash over the cursor: README stays focused, its row is on the
+    // update ramp, and cursor_bg does not hide it.
+    tui.wait_recorded_frame(
+        |tui| {
+            tree_cursor_on(&tui.screen(), "README.md")
+                && needle_on_ramp(tui, TREE_README, &UPDATE_RAMP)
+                && !tui.needle_has_bg(TREE_README, CURSOR_BG.0, CURSOR_BG.1, CURSOR_BG.2)
+        },
         "focused README tree row uses update flash bg (not cursor_bg)",
         GIT_WAIT,
-    );
-    assert!(
-        tree_cursor_on(&tui.screen(), "README.md"),
-        "update flash is paint-over-cursor; README must stay focused; screen:\n{}",
-        tui.screen()
-    );
-    assert!(
-        needle_on_ramp(&tui, TREE_README, &UPDATE_RAMP),
-        "update flash must paint over the cursor; bgs={:?}; screen:\n{}",
-        tui.first_needle_bgs(TREE_README),
-        tui.screen()
-    );
-    assert!(
-        !tui.needle_has_bg(TREE_README, CURSOR_BG.0, CURSOR_BG.1, CURSOR_BG.2),
-        "cursor_bg #283457 must not hide the update flash; bgs={:?}; screen:\n{}",
-        tui.first_needle_bgs(TREE_README),
-        tui.screen()
     );
 
     tui.key('j');
@@ -165,74 +113,39 @@ fn pty_watch_row_flash_add_and_remove() {
         GIT_WAIT,
     );
 
+    tui.record_frames();
     fs::write(app.join(&marker), "live-add-flash\n").unwrap();
-    wait_needle_flash(
-        &tui,
-        &marker,
-        &ADD_RAMP,
-        "watch paints the new dirty path with add flash bg (glyphs-only is red)",
+    tui.wait_recorded_frame(
+        |tui| {
+            tree_shows_untracked(&tui.screen(), &marker)
+                && needle_on_ramp(tui, &marker, &ADD_RAMP)
+                && !needle_on_ramp(tui, &marker, &REMOVE_RAMP)
+        },
+        "watch paints the new untracked path (A) with add flash bg, not remove (glyphs-only is red)",
         GIT_WAIT,
     );
-    assert!(
-        tree_shows_untracked(&tui.screen(), &marker),
-        "added path must keep the untracked A badge; screen:\n{}",
-        tui.screen()
-    );
-    assert!(
-        needle_on_ramp(&tui, &marker, &ADD_RAMP),
-        "add flash bg on `{marker}`; bgs={:?}; screen:\n{}",
-        tui.first_needle_bgs(&marker),
-        tui.screen()
-    );
-    assert!(
-        !needle_on_ramp(&tui, &marker, &REMOVE_RAMP),
-        "add must not use the remove ramp; bgs={:?}; screen:\n{}",
-        tui.first_needle_bgs(&marker),
-        tui.screen()
-    );
 
-    tui.wait_ms(FLASH_MS + FLASH_GONE_SLACK_MS);
+    // The flash ends on its own timer; wait for that paint. Its length is
+    // pinned by the `tui::watch` unit tests.
     tui.wait_pred(
         |screen| tree_shows_untracked(screen, &marker) && !needle_on_ramp(&tui, &marker, &ADD_RAMP),
         "add flash expired; untracked path stays on the tree",
         WAIT,
     );
 
+    tui.record_frames();
     fs::remove_file(app.join(&marker)).unwrap();
-    wait_needle_flash(
-        &tui,
-        &marker,
-        &REMOVE_RAMP,
+    tui.wait_recorded_frame(
+        |tui| tree_has(&tui.screen(), &marker) && needle_on_ramp(tui, &marker, &REMOVE_RAMP),
         "removed path stays as a ghost with remove flash bg (instant vanish is red)",
         GIT_WAIT,
     );
-    let remove_seen = Instant::now();
-    assert!(
-        tree_has(&tui.screen(), &marker),
-        "ghost must remain during FLASH_MS; screen:\n{}",
-        tui.screen()
-    );
-    assert!(
-        needle_on_ramp(&tui, &marker, &REMOVE_RAMP),
-        "remove flash bg on `{marker}`; bgs={:?}; screen:\n{}",
-        tui.first_needle_bgs(&marker),
-        tui.screen()
-    );
-
-    tui.wait_ms(200);
-    assert!(
-        tree_has(&tui.screen(), &marker) && needle_on_ramp(&tui, &marker, &REMOVE_RAMP),
-        "ghost + remove flash still painted 200ms in; bgs={:?}; screen:\n{}",
-        tui.first_needle_bgs(&marker),
-        tui.screen()
-    );
-
-    let elapsed_ms = remove_seen.elapsed().as_millis() as u64;
-    let remain = (FLASH_MS + FLASH_GONE_SLACK_MS).saturating_sub(elapsed_ms);
-    tui.wait_ms(remain);
+    // The ghost with the remove flash painted above; how long it stays is
+    // a timer, pinned by the `tui::watch` unit tests. Here: it shows, then
+    // the row goes away on its own.
     tui.wait_pred(
         |screen| !tree_has(screen, &marker),
-        "ghost dropped after FLASH_MS + slack",
+        "ghost dropped after the flash",
         WAIT,
     );
 }

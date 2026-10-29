@@ -1,10 +1,10 @@
 use crate::harness::{left_tree, pane_body_start, PtySession};
 use crate::seed::{daily_workspace, seed_multiline_message_repo, COMMIT_MSG_BODY};
 use crate::support::{
-    crumb_row, no_wrong_overlays, panes_files_focused, panes_files_focused_diff_unfocused,
-    panes_files_unfocused_diff_focused, panes_graph_focused_files_unfocused,
-    panes_tree_unfocused_graph_focused, right_pane, title_has_diff, title_has_files, SETTLE_MS,
-    WAIT,
+    crumb_row, esc_to_left, no_wrong_overlays, panes_files_focused,
+    panes_files_focused_diff_unfocused, panes_files_unfocused_diff_focused,
+    panes_graph_focused_files_unfocused, panes_tree_unfocused_graph_focused, prove_keys_handled,
+    right_pane, title_has_diff, title_has_files, WAIT,
 };
 
 const REPO: &str = "longmsg";
@@ -277,7 +277,7 @@ fn pty_commit_msg_bottom_every_depth() {
         "depth 2: wip.txt row above the subject, body, and bottom meta line on the left",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         diff_expanded_at_left_bottom,
         "depth 2 holds (no late message paint on the diff)",
@@ -325,17 +325,13 @@ fn pty_commit_msg_bottom_every_depth() {
     );
 
     // First Esc may only clear the armed search chip; the next unfocuses.
-    tui.esc();
-    tui.wait_ms(120);
-    if panes_files_unfocused_diff_focused(&tui.screen()) {
-        tui.esc();
-    }
-    tui.wait_pred(
+    esc_to_left(
+        &mut tui,
+        panes_files_unfocused_diff_focused,
         |screen| {
             panes_files_focused_diff_unfocused(screen) && files_msg_at_left_bottom(screen, true)
         },
         "Esc unfocuses the depth 2 diff: message still below wip.txt",
-        WAIT,
     );
 
     tui.esc();

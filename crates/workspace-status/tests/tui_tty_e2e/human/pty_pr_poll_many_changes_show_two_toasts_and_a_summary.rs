@@ -5,7 +5,7 @@ use crate::pr_support::{
     badge_is, forge_env, list_calls, named_workspace, seed_checkouts, toast_count, toast_text,
     Forge, PrCheckout,
 };
-use crate::support::{open_command_palette, type_palette_filter, GIT_WAIT, WAIT};
+use crate::support::{open_command_palette, type_palette_filter, wait_screen, GIT_WAIT, WAIT};
 
 /// Four PRs that change in one batch raise two toasts and a summary
 /// (`docs/tui-rust.md`, **PR change toasts**: a batch of more than three
@@ -15,8 +15,14 @@ use crate::support::{open_command_palette, type_palette_filter, GIT_WAIT, WAIT};
 /// Seed: two GitHub checkouts (`#7`, `#8`) and two GitLab checkouts (`!5`,
 /// `!6`), all CI running, polling off. Once the four badges show, the test
 /// swaps all four answers to CI failed and runs palette **Refresh PRs**
-/// once: the four lookups queue together, so their changes alert as one
-/// batch. No poll timing is involved.
+/// once. Polling is off, so no poll interval is involved, but the batch
+/// still depends on one timer: at most two lookups run at a time
+/// (`PR_BADGE_LOOKUPS_MAX`), so the four land in two waves, and a wave
+/// that lands more than the 2 s batch window (`PR_ALERT_WAIT_MS`) after the
+/// first alerts on its own. The fake `gh` / `glab` answer at once, so the
+/// two waves land well inside 2 s even on a loaded machine; that margin is
+/// accepted here, and the batch layout itself is pinned by the unit test
+/// `a_batch_of_more_than_three_pr_changes_toasts_the_first_two_and_a_summary`.
 ///
 /// Proof: the toast stack holds two `CI failed ·` toasts and the summary
 /// `+2 more PR changes`, and the summary names `gp`, the key of the PRs tab
@@ -63,12 +69,13 @@ fn pty_pr_poll_many_changes_show_two_toasts_and_a_summary() {
     tui.wait_contains("Refresh PRs", WAIT);
     tui.enter();
 
-    tui.wait_pred(
+    // The asserts read the frame that showed the summary, not a later one.
+    let screen = wait_screen(
+        &tui,
         |screen| toast_count(screen, "more PR changes") == 1,
         "the summary toast shows",
         GIT_WAIT,
     );
-    let screen = tui.screen();
     let toasts = toast_text(&screen);
     assert_eq!(
         toast_count(&screen, "CI failed ·"),

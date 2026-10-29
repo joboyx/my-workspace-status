@@ -1,12 +1,12 @@
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::common::hscroll::GRAPH_HSCROLL_VISIBLE;
 use crate::harness::{left_tree, PtySession, SGR_WHEEL_RIGHT};
 use crate::seed::{daily_workspace, seed_long_subject_repo};
 use crate::support::{
     no_mouse_toggle_toast, no_wrong_overlays, panes_tree_focused_graph_unfocused,
-    panes_tree_unfocused_graph_focused, right_pane, status_row, title_has_files, tree_cursor_on,
-    tree_has, tree_inactive_selection_on, SETTLE_MS, WAIT,
+    panes_tree_unfocused_graph_focused, prove_keys_handled, right_pane, status_row,
+    title_has_files, tree_cursor_on, tree_has, tree_inactive_selection_on, WAIT,
 };
 
 const REPO: &str = "longsubj";
@@ -99,31 +99,16 @@ fn hbar_span(screen: &str) -> Option<(u16, u16, u16)> {
 
 /// Wheel right one notch at a time until `hbar_painted_tail_clipped`.
 ///
-/// Returns the settled screen. A second wheel must not be in flight when
+/// Returns the screen it read. A second wheel must not be in flight when
 /// the caller reads the thumb: it moves the thumb after `hbar_span` reads
-/// it, and the press on the old thumb cell becomes a track click. So each
-/// notch waits for its own frame, and the screen must hold for
-/// `SETTLE_MS` before it counts. A notch that paints nothing within
-/// `NOTCH_WAIT` is treated as dropped and sent again.
+/// it, and the press on the old thumb cell becomes a track click. So after
+/// each notch the probe proves that notch was handled before the read.
 fn wheel_until_hbar(tui: &mut PtySession) -> String {
-    const NOTCH_WAIT: Duration = Duration::from_secs(3);
     let start = Instant::now();
     loop {
-        let sent_on = tui.screen();
         tui.sgr_mouse(SGR_WHEEL_RIGHT, NARROW_RIGHT_COL, GRAPH_BODY_ROW);
-        let notch = Instant::now();
-        while tui.screen() == sent_on && notch.elapsed() < NOTCH_WAIT {
-            tui.wait_ms(25);
-        }
-        let mut screen = tui.screen();
-        loop {
-            tui.wait_ms(SETTLE_MS);
-            let next = tui.screen();
-            if next == screen || start.elapsed() >= WAIT {
-                break;
-            }
-            screen = next;
-        }
+        prove_keys_handled(tui);
+        let screen = tui.screen();
         if hbar_painted_tail_clipped(&screen) {
             return screen;
         }
@@ -175,14 +160,20 @@ fn pty_graph_hscrollbar_thumb_drag() {
         "h-bar track {thumb_col}..{track_end} is too short to drag:\n{before}"
     );
 
-    tui.sgr_mouse(0, thumb_col, bar_row);
-    tui.wait_ms(SETTLE_MS);
+    // A press and release on the thumb, then the probe: a grab must not
+    // jump. The drag below grabs again.
+    tui.sgr_click(thumb_col, bar_row);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
-        hbar_painted_tail_clipped,
+        |screen| {
+            hbar_painted_tail_clipped(screen)
+                && hbar_span(screen) == Some((bar_row, thumb_col, track_end))
+        },
         "thumb grab must not jump (a track click would reveal UNIQUE_GRAP)",
         WAIT,
     );
 
+    tui.sgr_mouse(0, thumb_col, bar_row);
     tui.sgr_mouse(SGR_LEFT_DRAG, track_end, bar_row);
     sgr_release(&mut tui, track_end, bar_row);
     tui.wait_pred(
@@ -190,7 +181,7 @@ fn pty_graph_hscrollbar_thumb_drag() {
         "h-thumb drag pans UNIQUE_GRAP onto the graph (a no-op stays clipped)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         hbar_drag_panned,
         "graph pan after h-thumb drag holds (not a flicker, tree pan, or Mouse toast)",

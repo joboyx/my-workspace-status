@@ -7,8 +7,8 @@ use crate::harness::{
 use crate::seed::{daily_workspace, seed_long_diff_file, unwrap_diffs_at_launch};
 use crate::support::{
     no_mouse_toggle_toast, no_wrong_overlays, panes_tree_focused_diff_unfocused,
-    panes_tree_unfocused_diff_focused, right_pane, right_vbar_at_top, status_row, title_has_files,
-    tree_cursor_on, tree_has, tree_inactive_selection_on, SETTLE_MS, WAIT,
+    panes_tree_unfocused_diff_focused, prove_keys_handled, right_pane, right_vbar_at_top,
+    status_row, title_has_files, tree_cursor_on, tree_has, tree_inactive_selection_on, WAIT,
 };
 
 const FILE: &str = "unique-diffline.rs";
@@ -164,22 +164,19 @@ fn pty_diff_hscrollbar_thumb_drag() {
         tui.screen()
     );
 
-    tui.wait_pred_while(
-        hbar_thumb_off_left_edge,
-        "SGR 67 pan paints the file-diff h-bar with █ right of ═/─ (tail still clipped)",
-        WAIT,
-        |tui| tui.sgr_mouse(SGR_WHEEL_RIGHT, NARROW_RIGHT_COL, row),
-    );
+    // One wheel notch at a time; the probe after each proves that notch
+    // was handled, so no wheel is in flight when the thumb is read.
     let start = Instant::now();
     let (bar_row, thumb_col, track_end) = loop {
-        tui.wait_ms(SETTLE_MS);
+        tui.sgr_mouse(SGR_WHEEL_RIGHT, NARROW_RIGHT_COL, row);
+        prove_keys_handled(&mut tui);
         let screen = tui.screen();
         if let Some((bar_row, thumb_col, track_end)) = tui.grid_hbar_span() {
             let left = tui.grid_cell_char(bar_row, thumb_col.saturating_sub(1));
             if tui.grid_cell_char(bar_row, thumb_col) == Some(THUMB)
                 && matches!(left, Some('═' | '─'))
                 && track_end > thumb_col
-                && hbar_painted_tail_clipped(&screen)
+                && hbar_thumb_off_left_edge(&screen)
             {
                 break (bar_row, thumb_col, track_end);
             }
@@ -190,7 +187,6 @@ fn pty_diff_hscrollbar_thumb_drag() {
                 screen = tui.screen()
             );
         }
-        tui.sgr_mouse(SGR_WHEEL_RIGHT, NARROW_RIGHT_COL, row);
     };
     assert!(
         track_end > thumb_col,
@@ -198,14 +194,20 @@ fn pty_diff_hscrollbar_thumb_drag() {
         tui.screen()
     );
 
-    tui.sgr_mouse(0, thumb_col, bar_row);
-    tui.wait_ms(SETTLE_MS);
+    // A press and release on the thumb, then the probe: a grab must not
+    // jump. The drag below grabs again.
+    tui.sgr_click(thumb_col, bar_row);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
-        hbar_painted_tail_clipped,
+        |screen| {
+            hbar_painted_tail_clipped(screen)
+                && tui.grid_hbar_span() == Some((bar_row, thumb_col, track_end))
+        },
         "thumb grab must not jump (a left-edge track click hides the bar at origin)",
         WAIT,
     );
 
+    tui.sgr_mouse(0, thumb_col, bar_row);
     tui.sgr_mouse(SGR_LEFT_DRAG, track_end, bar_row);
     sgr_release(&mut tui, track_end, bar_row);
     tui.wait_pred(
@@ -213,7 +215,7 @@ fn pty_diff_hscrollbar_thumb_drag() {
         "h-thumb drag pans UNIQUE_DIFF_TAIL onto the file-diff (a no-op stays clipped)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         hbar_drag_panned,
         "file-diff pan after h-thumb drag holds (not a flicker, tree pan, or Mouse toast)",

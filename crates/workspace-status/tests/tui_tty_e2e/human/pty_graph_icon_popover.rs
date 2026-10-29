@@ -103,7 +103,8 @@ fn pty_graph_icon_popover_peeks_pins_and_gh_on_nodes() {
         "Esc closes the HEAD popover",
         WAIT,
     );
-    tui.keys("gh");
+    // The chord in one write (see `support::send_gesture`).
+    tui.send_bytes(b"gh");
     tui.wait_pred(head_pinned, "gh pins the focused HEAD row", WAIT);
     tui.esc();
     tui.wait_pred(

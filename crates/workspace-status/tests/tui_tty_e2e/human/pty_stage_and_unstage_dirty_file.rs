@@ -2,8 +2,8 @@ use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
     ack_rows, after_ack, after_readme_name, has_stage_hint, has_unstage_hint,
-    idle_dirty_readme_unstaged, no_wrong_overlays, pane_unstaged_readme, readme_unstaged_badge,
-    status_row, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
+    idle_dirty_readme_unstaged, no_wrong_overlays, pane_unstaged_readme, prove_keys_handled,
+    readme_unstaged_badge, status_row, tree_cursor_on, tree_has, GIT_WAIT, WAIT,
 };
 
 /// Trailing staged `S `, not `M ` / `MS`, not reviewed `*`.
@@ -85,7 +85,7 @@ fn pty_stage_and_unstage_dirty_file() {
         "s stages focused README: tree S, pane STAGED, unstage hint, staged toast",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_s_staged,
         "staged paint holds (not a flicker or toast-only tick)",

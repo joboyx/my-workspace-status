@@ -4,8 +4,8 @@ use std::path::Path;
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    after_ack, idle_dirty_readme_unstaged, no_wrong_overlays, pane_unstaged_readme,
-    readme_unstaged_badge, tree_cursor_on, GIT_WAIT, SETTLE_MS, WAIT,
+    after_ack, crumb_row, idle_dirty_readme_unstaged, no_wrong_overlays, pane_unstaged_readme,
+    readme_unstaged_badge, tree_cursor_on, GIT_WAIT, WAIT,
 };
 
 const HEAD_README: &str = "# app\n";
@@ -82,11 +82,14 @@ fn pty_revert_confirm_tracked_only_ignores_shift_y() {
         WAIT,
     );
 
+    // `n` after Shift+Y is the probe: only a confirm that is still open
+    // paints `revert cancelled`, so the toast proves Shift+Y was handled and
+    // left the confirm open.
     tui.shift_letter('Y');
-    tui.wait_ms(SETTLE_MS * 3);
+    tui.key('n');
     tui.wait_pred(
-        tracked_only_confirm_armed,
-        "Shift+Y keeps the tracked-only confirm open and reverts nothing",
+        |screen| crumb_row(screen).contains("revert cancelled"),
+        "Shift+Y keeps the tracked-only confirm open: the n after it cancels it",
         WAIT,
     );
     assert_eq!(
@@ -94,6 +97,12 @@ fn pty_revert_confirm_tracked_only_ignores_shift_y() {
         DIRTY_README,
         "Shift+Y must not revert README:\n{}",
         tui.screen()
+    );
+    tui.key('x');
+    tui.wait_pred(
+        tracked_only_confirm_armed,
+        "x arms Revert README.md? again",
+        WAIT,
     );
 
     tui.letter_press('y');

@@ -1,9 +1,9 @@
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    crumb_row, documented_launch_first_paint, pane_unstaged_readme, readme_unstaged_badge,
-    status_row, tree_cursor_on, tree_dir_collapsed, tree_dir_expanded, tree_has, GIT_WAIT,
-    SETTLE_MS, WAIT,
+    crumb_row, documented_launch_first_paint, pane_unstaged_readme, prove_keys_handled,
+    readme_unstaged_badge, status_row, tree_cursor_on, tree_dir_collapsed, tree_dir_expanded,
+    tree_has, GIT_WAIT, PAST_CHORD_WINDOW, WAIT,
 };
 
 /// Daily seed: dirty README stays, `app` stays expanded, No updates stays folded.
@@ -129,7 +129,7 @@ fn pty_z_folds_focused_repo() {
         "z on the dirty file is a no-op: README stays, app stays expanded",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         z_file_row_leaves_tree_open,
         "file-row z hold (not a delayed parent fold)",
@@ -149,7 +149,7 @@ fn pty_z_folds_focused_repo() {
         "z folds focused app: chevron >, README gone, cursor stays, graph stays",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_z_folds_focused_repo,
         "folded paint holds (not a flicker or workspace-root fold)",
@@ -168,7 +168,7 @@ fn pty_z_folds_focused_repo() {
         "graph-focused z is a no-op (does not unfold the hidden tree)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         graph_z_leaves_repo_folded,
         "graph z hold (not a delayed unfold)",
@@ -181,7 +181,9 @@ fn pty_z_folds_focused_repo() {
         "Tab returns to the folded app row",
         WAIT,
     );
-    tui.wait_ms(500);
+    // Every earlier z painted above, so it arrived before now: a sleep past
+    // the window puts this z's arrival outside it (a lower bound).
+    std::thread::sleep(PAST_CHORD_WINDOW);
     tui.key('z');
     tui.wait_pred(
         app_repo_expanded_before_z,

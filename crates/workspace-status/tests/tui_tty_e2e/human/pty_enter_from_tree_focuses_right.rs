@@ -2,9 +2,9 @@ use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
     crumb_row, documented_launch_first_paint, no_mouse_toggle_toast, no_updates_group_folded,
-    no_wrong_overlays, panes_tree_unfocused_diff_focused, right_diff_has_focused_cursor,
-    status_row, title_has_files, tree_cursor_on, tree_dir_expanded, tree_has,
-    tree_inactive_selection_on, SETTLE_MS, WAIT,
+    no_wrong_overlays, panes_tree_unfocused_diff_focused, prove_keys_handled,
+    right_diff_has_focused_cursor, status_row, title_has_files, tree_cursor_on, tree_dir_expanded,
+    tree_has, tree_inactive_selection_on, WAIT,
 };
 
 /// CSI-u Enter (`CSI 13 ; 1 : 1 u` press, `: 3` release).
@@ -81,7 +81,7 @@ fn pty_enter_from_tree_focuses_right() {
         "CSI-u Enter on the README tree row focuses the file-diff",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         enter_focuses_readme_diff,
         "right-pane focus holds (not a flicker, toast-only, or crumb-only paint)",
@@ -89,7 +89,7 @@ fn pty_enter_from_tree_focuses_right() {
     );
 
     tui.key('j');
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         enter_focuses_readme_diff,
         "j on the focused file-diff does not move the tree cursor (a no-op Enter would land on merger)",

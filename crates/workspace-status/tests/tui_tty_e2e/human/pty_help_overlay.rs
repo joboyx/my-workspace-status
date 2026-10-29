@@ -1,6 +1,6 @@
 use crate::harness::{PtySession, COLS};
 use crate::seed::daily_workspace;
-use crate::support::{SETTLE_MS, WAIT};
+use crate::support::{step_until_changed, WAIT};
 
 /// Compact painted help text so wrapped description fragments rejoin.
 fn help_compact(text: &str) -> String {
@@ -276,13 +276,19 @@ fn pty_help_overlay() {
     // One PgDn at a time until the bottom shows. PgDn is a held
     // navigation key: the event loop drops queued copies of it
     // (`discard_held_nav_backlog` in `tui/app.rs`), so a burst of presses
-    // can count as one. PgDn past the end clamps.
+    // can count as one, so each PgDn waits for the help body to scroll
+    // before the next. The loop stops on the bottom rows.
     for _ in 0..10 {
         if help_legend_bottom(&tui.screen()) {
             break;
         }
-        tui.page_down();
-        tui.wait_ms(SETTLE_MS);
+        step_until_changed(
+            &mut tui,
+            PtySession::page_down,
+            str::to_string,
+            |_| true,
+            "PgDn scrolls the help body one page",
+        );
     }
     tui.wait_pred(
         help_legend_bottom,

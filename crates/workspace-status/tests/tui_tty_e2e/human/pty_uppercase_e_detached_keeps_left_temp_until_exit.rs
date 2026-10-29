@@ -168,10 +168,16 @@ fn pty_uppercase_e_detached_keeps_left_temp_until_exit() {
         "LEFT HEAD temp must survive while the detached child holds:\n{}",
         left_temp.display()
     );
-    std::thread::sleep(Duration::from_secs(2));
+    // The launch has returned once its toast paints: a cleanup on launch
+    // return would have removed the temp by then, while the child holds.
+    tui.wait_pred(
+        |screen| screen.contains("opened diff edit-target.txt"),
+        "the detached launch returned (opened diff toast) while the child holds",
+        GIT_WAIT,
+    );
     assert!(
         left_temp.exists(),
-        "LEFT HEAD temp must still exist after 2s (cleanup-on-CLI-return fails):\n{}",
+        "LEFT HEAD temp must still exist after the launch returned (cleanup-on-CLI-return fails):\n{}",
         left_temp.display()
     );
     fs::remove_file(&hold).unwrap();

@@ -60,29 +60,32 @@ fn pty_pr_poll_review_to_ready_alerts_on_both_forges() {
 
     let github_toast = "A #7 ready to merge · feature/auth-refresh";
     let gitlab_toast = "A !5 ready to merge · feature/rate-limit";
+    tui.record_frames();
     github.set(&forge, Badge::Ready);
     gitlab.set(&forge, Badge::Ready);
-    let flashed = (Cell::new(false), Cell::new(false));
     tui.wait_pred(
         |screen| {
-            flashed
-                .0
-                .set(flashed.0.get() || badge_flashes(&tui, "appbox", &ADD_RAMP));
-            flashed
-                .1
-                .set(flashed.1.get() || badge_flashes(&tui, "apibox", &ADD_RAMP));
             let toasts = toast_text(screen);
             toasts.contains(github_toast) && toasts.contains(gitlab_toast)
         },
         "the next poll toasts both ready PRs",
         GIT_WAIT,
     );
-    assert!(
-        flashed.0.get() && flashed.1.get(),
-        "both rows flash on the add ramp with the toast: github={} gitlab={}\n{}",
-        flashed.0.get(),
-        flashed.1.get(),
-        tui.screen()
+    // Each row's flash shows in some recorded frame, not necessarily the
+    // same one.
+    let flashed = (Cell::new(false), Cell::new(false));
+    tui.wait_recorded_frame(
+        |tui| {
+            flashed
+                .0
+                .set(flashed.0.get() || badge_flashes(tui, "appbox", &ADD_RAMP));
+            flashed
+                .1
+                .set(flashed.1.get() || badge_flashes(tui, "apibox", &ADD_RAMP));
+            flashed.0.get() && flashed.1.get()
+        },
+        "both rows flash on the add ramp",
+        WAIT,
     );
     tui.wait_pred(
         |_| {

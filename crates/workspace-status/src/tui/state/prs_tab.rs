@@ -49,9 +49,6 @@ pub(crate) const PRS_DETAIL_MIN_TERM_COLS: u16 = 100;
 /// the width, and never less than this.
 pub(crate) const PRS_DETAIL_MIN_COLS: u16 = 40;
 
-/// Two presses on one cell within this time are a double-click.
-const DOUBLE_CLICK: Duration = Duration::from_millis(400);
-
 /// Flash id of the PRs tab row of the PR with web URL `url`.
 pub(crate) fn prs_row_flash_id(url: &str) -> String {
     format!("prs:{url}")
@@ -863,11 +860,8 @@ impl AppState {
             return Effect::None;
         }
         self.text_selection = TextSelection::arm(self.layout.prs_list, col, row);
-        let now = Instant::now();
-        let double = self.last_click.as_ref().is_some_and(|(c, r, when)| {
-            *c == col && *r == row && now.saturating_duration_since(*when) <= DOUBLE_CLICK
-        });
-        self.last_click = Some((col, row, now));
+        // The shared row double-click rule, timed by the presses' arrival.
+        let double = self.note_row_press(col, row);
         let Some(view) = self.sync_prs_view() else {
             return Effect::None;
         };
@@ -1409,6 +1403,42 @@ mod tests {
             view.groups[0].rows[1].stacked_on, None,
             "the row's configured default branch reaches the stack rule"
         );
+    }
+
+    /// The header double-click window is the gap between the two presses'
+    /// arrival, not between the loop handling them.
+    #[test]
+    fn header_double_click_reads_the_press_arrival_instant() {
+        let press = |app: &mut AppState, at: Instant, row: u16| {
+            app.begin_input(at);
+            app.dispatch(Action::Click { col: 4, row });
+            app.end_input();
+        };
+        let setup = || {
+            let mut app = opened(false);
+            app.layout.prs_list_rows = ratatui::layout::Rect::new(0, 2, 60, 30);
+            let header = lines(&app)
+                .iter()
+                .position(|line| line == "ABC-123")
+                .expect("header line");
+            (app, 2 + header as u16)
+        };
+        let folded = |app: &AppState| !lines(app).contains(&"  #318".to_string());
+
+        // Two presses that arrived 399 ms apart, long ago: one toggle.
+        let (mut app, row) = setup();
+        let first = Instant::now() - Duration::from_secs(5);
+        press(&mut app, first, row);
+        assert!(folded(&app), "the first press folds the header");
+        press(&mut app, first + Duration::from_millis(399), row);
+        assert!(folded(&app), "a double-click does not undo the fold");
+
+        // Two presses 401 ms apart, handled back to back: two toggles.
+        let (mut app, row) = setup();
+        let first = Instant::now();
+        press(&mut app, first, row);
+        press(&mut app, first + Duration::from_millis(401), row);
+        assert!(!folded(&app), "the second single click unfolds again");
     }
 
     #[test]

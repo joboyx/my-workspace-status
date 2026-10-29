@@ -4,9 +4,9 @@ use std::process::{Command, Stdio};
 use crate::harness::PtySession;
 use crate::seed::{git_env, worktree_workspace};
 use crate::support::{
-    ack_rows, after_ack, crumb_row, merge_mark_after, no_mouse_toggle_toast, status_row,
-    title_has_files, tree_cursor_on, tree_has, tree_line_containing,
-    tree_line_has_leading_worktree_icon, tree_pane_focused, GIT_WAIT, SETTLE_MS, WAIT,
+    ack_rows, after_ack, crumb_row, merge_mark_after, no_mouse_toggle_toast, prove_keys_handled,
+    status_row, title_has_files, tree_cursor_on, tree_has, tree_line_containing,
+    tree_line_has_leading_worktree_icon, tree_pane_focused, GIT_WAIT, WAIT,
 };
 
 const LINKED_PATH: &str = "app/.worktrees/feat";
@@ -189,7 +189,7 @@ fn pty_worktree_w_remove_confirm() {
         "family W refuses with Focus a linked worktree to remove; overlay closed",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         family_w_refuses_without_confirm,
         "family refuse holds (not a delayed confirm or immediate remove)",
@@ -213,10 +213,9 @@ fn pty_worktree_w_remove_confirm() {
         "second j: cursor on linked checkout; W remove hint; overlay closed",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
 
     tui.key('w');
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         linked_ready_to_remove,
         "lowercase w does not open remove confirm",
@@ -234,12 +233,7 @@ fn pty_worktree_w_remove_confirm() {
         "linked W opens Remove worktree confirm (not a write, not family refuse)",
         WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
-    tui.wait_pred(
-        remove_worktree_confirm,
-        "remove confirm holds (not a flicker, immediate remove, or toast-only)",
-        WAIT,
-    );
+    // The `y` below answers this confirm, which proves it stayed open.
     assert!(
         linked_worktree_registered(&app),
         "confirm must not remove until y:\n{}",
@@ -260,7 +254,7 @@ fn pty_worktree_w_remove_confirm() {
         "y removes the linked worktree: toast, row gone, primary stays",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         documented_worktree_removed,
         "removed worktree holds (not a ghost row or overlay-only tick)",

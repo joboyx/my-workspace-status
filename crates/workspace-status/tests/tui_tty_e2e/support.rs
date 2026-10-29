@@ -1195,8 +1195,81 @@ pub fn corrupt_index(index: &Path) {
         .unwrap_or_else(|err| panic!("corrupt {}: {err}", index.display()));
 }
 
-/// Gap between visual-highlight keys so held-nav does not coalesce them.
-pub const VISUAL_KEY_GAP_MS: u64 = 50;
+/// CSI-u press then release of an unshifted key (`CSI code ; 1 : 1 u`,
+/// `CSI code ; 1 : 3 u`), the bytes of one typed tap.
+pub fn csi_u_tap(key: char) -> String {
+    let code = u32::from(key.to_ascii_lowercase());
+    format!("\x1b[{code};1:1u\x1b[{code};1:3u")
+}
+
+/// Shift+letter press then release (`CSI code ; 2 : 1 u`, `: 3 u`).
+pub fn csi_u_shift_tap(letter: char) -> String {
+    let code = u32::from(letter.to_ascii_lowercase());
+    format!("\x1b[{code};2:1u\x1b[{code};2:3u")
+}
+
+/// One typeless CSI-u report of an unshifted key (`CSI code ; 1 u`).
+///
+/// VTE without event types sends this for a press, and sends the
+/// key-up as a second identical report in the same burst.
+pub fn csi_u_typeless(key: char) -> String {
+    let code = u32::from(key.to_ascii_lowercase());
+    format!("\x1b[{code};1u")
+}
+
+/// One typeless CSI-u report with Shift (`CSI code ; 2 u`).
+pub fn csi_u_typeless_shift(letter: char) -> String {
+    let code = u32::from(letter.to_ascii_lowercase());
+    format!("\x1b[{code};2u")
+}
+
+/// Send the keys of one gesture (`gg`, `gt`, a tap and its typeless
+/// release, a double-click) in one PTY write.
+///
+/// The TUI times a gesture by the stdin read its bytes arrived in. The
+/// bytes of one small write arrive back to back; in practice a PTY hands
+/// them to one read, so every key of the gesture shares one arrival
+/// instant. The line discipline does not promise that, but a split read
+/// changes the outcome only if the reader also stalls longer than the
+/// window between the two reads. Keys sent in separate writes can arrive
+/// any time apart.
+pub fn send_gesture(tui: &mut PtySession, parts: &[&str]) {
+    tui.send_bytes(parts.concat().as_bytes());
+}
+
+/// Wait until `pred` holds and return that frame.
+///
+/// Asserts that follow a wait read this frame, not a second
+/// [`PtySession::screen`] call, which can see a later frame.
+pub fn wait_screen(
+    tui: &PtySession,
+    pred: impl Fn(&str) -> bool,
+    what: &str,
+    timeout: Duration,
+) -> String {
+    let matched = std::cell::RefCell::new(String::new());
+    tui.wait_pred(
+        |screen| {
+            let hit = pred(screen);
+            if hit {
+                *matched.borrow_mut() = screen.to_string();
+            }
+            hit
+        },
+        what,
+        timeout,
+    );
+    matched.into_inner()
+}
+
+/// Two SGR left press + release reports on one cell, in one write
+/// (see [`send_gesture`]). The TUI reads two left presses on the same
+/// cell within 400 ms of arrival as a double-click.
+pub fn sgr_double_click(tui: &mut PtySession, col: u16, row: u16) {
+    let (x, y) = (col.saturating_add(1), row.saturating_add(1));
+    let click = format!("\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m");
+    send_gesture(tui, &[&click, &click]);
+}
 
 /// Launch paint of [`crate::seed::two_hunk_regions_workspace`]: cursor on
 /// `regions.txt`, both hunks in the UNSTAGED diff.
@@ -1258,10 +1331,12 @@ pub fn open_regions_first_hunk_highlight(workspace: &Path) -> PtySession {
     );
     tui.shift_letter('V');
     tui.wait_pred(regions_highlight_active, "Shift+V paints VISUAL", WAIT);
-    tui.wait_ms(VISUAL_KEY_GAP_MS);
     for _ in 0..6 {
-        tui.letter_press('j');
-        tui.wait_ms(VISUAL_KEY_GAP_MS);
+        step_cursor(
+            &mut tui,
+            |tui| tui.letter_press('j'),
+            regions_highlight_active,
+        );
     }
     tui.wait_pred(
         |screen| regions_highlight_active(screen) && screen.contains(REGIONS_ALPHA),
@@ -1271,16 +1346,194 @@ pub fn open_regions_first_hunk_highlight(workspace: &Path) -> PtySession {
     tui
 }
 
-/// Type a command-palette filter with a gap after nav letters.
+/// True for a key the input thread treats as held navigation.
 ///
-/// A same-letter `h`/`j`/`k`/`l` burst is dropped by the held-nav backlog,
-/// so `keys("vs default")` can lose the `l`.
-pub fn type_palette_filter(tui: &mut PtySession, query: &str) {
-    for c in query.chars() {
+/// After such a press it drops queued copies of the same key, so a second
+/// copy that arrives in the same read is lost even in a text field.
+fn is_nav_letter(c: char) -> bool {
+    matches!(c, 'h' | 'H' | 'j' | 'J' | 'k' | 'K' | 'l' | 'L')
+}
+
+/// Type `text` into the focused text field (palette filter, search
+/// prompt, comment body), one key per write.
+///
+/// After a nav letter (`h` / `j` / `k` / `l`) it waits until the field
+/// shows the text typed so far with its caret (`…typed▏`) before the next
+/// key, so a doubled letter (`full`) is never queued behind its twin. The
+/// wait is on the paint, not on time.
+pub fn type_palette_filter(tui: &mut PtySession, text: &str) {
+    let mut typed = String::new();
+    for c in text.chars() {
         tui.key(c);
-        if matches!(c, 'h' | 'H' | 'j' | 'J' | 'k' | 'K' | 'l' | 'L') {
-            tui.wait_ms(VISUAL_KEY_GAP_MS);
+        typed.push(c);
+        if is_nav_letter(c) {
+            let tail: String = {
+                let chars: Vec<char> = typed.chars().collect();
+                chars[chars.len().saturating_sub(16)..].iter().collect()
+            };
+            let shown = format!("{tail}▏");
+            tui.wait_pred(
+                |screen| screen.contains(&shown),
+                &format!("the field shows `{shown}`"),
+                WAIT,
+            );
         }
+    }
+}
+
+/// Where the focused cursor bar (`▌`) is: its screen row and the 14 cells
+/// after the bar (a diff line's gutter number and the start of its text,
+/// or a list row's label).
+///
+/// A move changes it, also when a diff scrolls under a fixed cursor row.
+/// An inline blame that loads later at the end of the cursor row does not.
+/// An unfocused pane draws its cursor as `▏`, so only the focused one
+/// counts.
+pub fn cursor_key(screen: &str) -> Option<(usize, String)> {
+    screen.lines().enumerate().find_map(|(row, line)| {
+        let at = line.find('▌')?;
+        let after: String = line[at + '▌'.len_utf8()..].chars().take(14).collect();
+        Some((row, after))
+    })
+}
+
+/// Send one nav key with `send` and wait until the focused cursor moved
+/// ([`cursor_key`]) on a frame where `on_view` holds.
+///
+/// One key at a time: the input thread drops a queued copy of a held nav
+/// key, so two presses in one read would move once.
+pub fn step_cursor(
+    tui: &mut PtySession,
+    send: impl FnOnce(&mut PtySession),
+    on_view: impl Fn(&str) -> bool,
+) {
+    let before = cursor_key(&tui.screen());
+    send(tui);
+    tui.wait_pred(
+        |screen| on_view(screen) && cursor_key(screen).is_some_and(|k| Some(k) != before),
+        "the nav key moves the focused cursor one row",
+        WAIT,
+    );
+}
+
+/// Send one key with `send` and wait until `key_of` reads a different value
+/// on a frame where `on_view` holds. `key_of` names the thing the key moves
+/// (a cursor row, a pan offset, a scroll position), so an unrelated repaint
+/// does not count.
+pub fn step_until_changed<K: PartialEq>(
+    tui: &mut PtySession,
+    send: impl FnOnce(&mut PtySession),
+    key_of: impl Fn(&str) -> K,
+    on_view: impl Fn(&str) -> bool,
+    what: &str,
+) {
+    let before = key_of(&tui.screen());
+    send(tui);
+    tui.wait_pred(
+        |screen| on_view(screen) && key_of(screen) != before,
+        what,
+        WAIT,
+    );
+}
+
+/// Longer than the 400 ms `gg` / `zz` and double-click windows.
+///
+/// Sleep this long only after a paint has shown the first key (or click)
+/// was handled: it arrived before the paint, so the next one arrives at
+/// least this long after it and cannot pair with it, however loaded the
+/// machine is. This is a lower bound, not a timeout.
+pub const PAST_CHORD_WINDOW: Duration = Duration::from_millis(450);
+
+/// The status row shows an armed search chip (`/query`).
+pub fn search_chip_armed(screen: &str) -> bool {
+    status_row(screen)
+        .split_whitespace()
+        .any(|word| word.starts_with('/') && word.chars().count() > 1)
+}
+
+/// Esc until the right pane gives keyboard focus back, one Esc at a time.
+///
+/// With a search chip armed, the first Esc only clears the chip. That Esc
+/// waits for its own paint (the chip gone, or focus already left) before
+/// a second Esc goes out, and only while `still_right` holds, so a drill
+/// never pops on an extra Esc.
+pub fn esc_to_left(
+    tui: &mut PtySession,
+    still_right: impl Fn(&str) -> bool,
+    now_left: impl Fn(&str) -> bool,
+    why: &str,
+) {
+    let armed = search_chip_armed(&tui.screen());
+    tui.esc();
+    if armed {
+        tui.wait_pred(
+            |screen| now_left(screen) || !search_chip_armed(screen),
+            "the first Esc clears the armed search chip",
+            WAIT,
+        );
+        if still_right(&tui.screen()) {
+            tui.esc();
+        }
+    }
+    tui.wait_pred(now_left, why, WAIT);
+}
+
+/// The `?` help overlay is open: its header row names the MOVE and VIEW
+/// columns (at any width; the footer text wraps on a narrow grid).
+pub fn help_open(screen: &str) -> bool {
+    screen
+        .lines()
+        .any(|line| line.contains("MOVE") && line.contains("VIEW"))
+}
+
+/// Prove that every key sent before this call has been handled.
+///
+/// Keys run in the order they arrive. `?` painting the help overlay
+/// therefore means the keys before it ran; Esc closes help again. An
+/// absence claim ("that key changed nothing") reads the screen after this,
+/// not after a timed sleep. Use it only where `?` opens help: Normal mode
+/// with no overlay, no text field, and no `V` highlight (opening help ends
+/// a highlight).
+pub fn prove_keys_handled(tui: &mut PtySession) {
+    tui.key('?');
+    tui.wait_pred(
+        help_open,
+        "? opens help, so every key sent before it was handled",
+        WAIT,
+    );
+    tui.esc();
+    tui.wait_pred(help_gone, "Esc closes help", WAIT);
+}
+
+/// No row of the help overlay is left on screen: neither the header nor
+/// the footer (`Esc closes`, `Needs a Nerd Font`).
+fn help_gone(screen: &str) -> bool {
+    !help_open(screen) && !screen.contains("Esc closes") && !screen.contains("Needs a Nerd Font")
+}
+
+/// [`prove_keys_handled`] for an open Quick Open palette: a typed `z`
+/// shows at the end of the filter (`…z▏`) only after the earlier keys ran
+/// and only while the palette is still open; Backspace then removes it.
+pub fn prove_palette_keys_handled(tui: &mut PtySession) {
+    tui.key('z');
+    tui.wait_pred(
+        |screen| screen.contains("z▏"),
+        "a z typed after the earlier keys shows in the open palette filter",
+        WAIT,
+    );
+    tui.send_bytes(b"\x7f");
+    tui.wait_pred(
+        |screen| !screen.contains("z▏"),
+        "Backspace removes the probe z from the filter",
+        WAIT,
+    );
+}
+
+/// `times` plain CSI-u `j` presses, each waiting for the cursor to move
+/// ([`step_cursor`]).
+pub fn press_j(tui: &mut PtySession, times: usize) {
+    for _ in 0..times {
+        step_cursor(tui, |tui| tui.letter_press('j'), |_| true);
     }
 }
 
