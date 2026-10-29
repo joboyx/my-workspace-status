@@ -28,11 +28,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 use workspace_status_graph::{
-    format_commit_message, format_relative_date, graph_chrome_budget_for, graph_footer_request,
-    graph_vscroll_visible, paint_model, selection_footer_parts, wrap_commit_message,
-    GraphChromeBudget, GraphFooterSelection, GraphModel, GraphRow, PaintedLine, ASCII,
-    COMMIT_MSG_LINES_DEFAULT, COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN, FOOTER_RULE_ROWS,
-    UNICODE,
+    graph_chrome_budget_for, graph_footer_request, graph_vscroll_visible, paint_model,
+    selection_footer_parts, GraphChromeBudget, GraphFooterSelection, GraphModel, GraphRow,
+    LabelPart, PaintedLine, ASCII, COMMIT_MSG_LINES_DEFAULT, COMMIT_MSG_LINES_MAX,
+    COMMIT_MSG_LINES_MIN, FOOTER_RULE_ROWS, UNICODE,
 };
 
 use crate::config::ViewDefaults;
@@ -111,11 +110,11 @@ use super::stash::{
 };
 use super::status::{StatusKind, StatusMessage};
 use super::tabs::{
-    compare_file_dirty, compare_range_label, CommitPickerState, ComparePickerKind,
-    ComparePickerState, OpenCompare, TabStrip, WorktreeFile, CANNOT_REVERT_COMMITTED_DIFF,
-    CANNOT_REVERT_WORKTREE_COMPARE, COMPARE_FOCUS_A_FILE, COMPARE_HEAD_MOVED, COMPARE_HEAD_REF,
-    COMPARE_STILL_LOADING, FOCUS_A_COMMIT_TO_DIFF, ROOT_COMMIT_HAS_NO_PARENT,
-    SWITCH_TO_WORKSPACE_TAB, WORKSPACE_TAB_CANNOT_CLOSE,
+    compare_file_dirty, CommitPickerState, ComparePickerKind, ComparePickerState, OpenCompare,
+    TabStrip, WorktreeFile, CANNOT_REVERT_COMMITTED_DIFF, CANNOT_REVERT_WORKTREE_COMPARE,
+    COMPARE_FOCUS_A_FILE, COMPARE_HEAD_MOVED, COMPARE_HEAD_REF, COMPARE_STILL_LOADING,
+    FOCUS_A_COMMIT_TO_DIFF, ROOT_COMMIT_HAS_NO_PARENT, SWITCH_TO_WORKSPACE_TAB,
+    WORKSPACE_TAB_CANNOT_CLOSE,
 };
 use super::theme::{BackgroundMode, ThemeId};
 use super::toast::ToastStack;
@@ -313,16 +312,18 @@ pub struct LayoutHit {
     pub commit_detail_footer_height: u16,
     /// Max message scroll for the painted commit-files footer.
     pub commit_detail_footer_scroll_max: usize,
-    /// 0-based row of the graph commit-message footer's top rule when the
-    /// footer is expanded and painted: the [`ResizeEdge::CommitMsg`] edge.
+    /// 0-based row of the commit-message footer's top rule (graph selection
+    /// footer or depth-2 commit-files footer) when the footer is expanded
+    /// and painted: the [`ResizeEdge::CommitMsg`] edge.
     pub commit_msg_rule_y: Option<u16>,
-    /// 0-based first column of that rule (the graph pane's first column).
+    /// 0-based first column of that rule (the pane's first column).
     pub commit_msg_rule_x: u16,
-    /// Rule width (the graph pane width).
+    /// Rule width (the pane width).
     pub commit_msg_rule_width: u16,
-    /// Most message rows the painted graph pane shows in its expanded
-    /// footer ([`workspace_status_graph::commit_msg_lines_fit`]). A drag of
-    /// the rule clamps here.
+    /// Most message rows the painted pane shows in its expanded footer
+    /// ([`workspace_status_graph::commit_msg_lines_fit`] for a graph pane,
+    /// `commit_detail_msg_lines_fit` for a commit-files pane). A drag of the
+    /// rule clamps here.
     pub commit_msg_lines_fit: usize,
     /// 0-based diff scrollbar column when a file diff is painted.
     pub diff_scrollbar_x: Option<u16>,
@@ -1858,8 +1859,15 @@ impl AppState {
     /// Shares [`Self::commit_msg_scroll`] with the graph selection footer:
     /// another commit reads `0`.
     pub(crate) fn commit_detail_msg_scroll(&self) -> usize {
-        match (&self.commit_msg_scroll, self.commit_detail_msg_identity()) {
-            (Some((id, offset)), Some(current)) if *id == current => *offset,
+        self.commit_msg_scroll_of(self.commit_detail_msg_identity().as_deref())
+    }
+
+    /// Stored message scroll of the footer showing graph row identity
+    /// `identity` ([`Self::commit_msg_scroll`]); `0` for another identity
+    /// or none.
+    pub(crate) fn commit_msg_scroll_of(&self, identity: Option<&str>) -> usize {
+        match (&self.commit_msg_scroll, identity) {
+            (Some((id, offset)), Some(current)) if id == current => *offset,
             _ => 0,
         }
     }
@@ -2047,136 +2055,97 @@ impl AppState {
         })
     }
 
-    pub(crate) fn commit_detail_meta(&self) -> (String, Option<String>) {
-        if let Some(tab) = self.tabs.active_compare() {
-            return (
-                super::tabs::checkout_leaf(&tab.checkout_path),
-                Some(tab.range_header()),
-            );
+    /// Graph row the depth-2 commit-files footer describes: the commit,
+    /// stash, or uncommitted row the drill opened, found in the loaded
+    /// graph. `None` for a compare tab, a source with no graph row
+    /// (compare, commit vs worktree), or a row no longer in the graph.
+    pub(crate) fn commit_detail_graph_row(&self) -> Option<GraphRow> {
+        if self.tabs.active_compare().is_some() {
+            return None;
         }
-        let (repo, source) = match &self.drill {
-            DrillView::Files { repo, source, .. } | DrillView::Diff { repo, source, .. } => {
-                (repo.as_str(), source)
-            }
-            DrillView::Graph => return (String::new(), None),
+        let source = match &self.drill {
+            DrillView::Files { source, .. } | DrillView::Diff { source, .. } => source,
+            DrillView::Graph => return None,
         };
-        let title = repo.rsplit('/').next().unwrap_or(repo).to_string();
-        let subtitle = match source {
-            CommitFileSource::Worktree => Some("Uncommitted changes".into()),
-            CommitFileSource::Stash { stash_ref } => {
-                let subject = self.graph.as_ref().and_then(|model| {
-                    model
-                        .stashes
-                        .iter()
-                        .find(|stash| stash.stash_ref == *stash_ref)
-                        .map(|stash| stash.subject.clone())
-                });
-                Some(match subject {
-                    Some(subject) if !subject.is_empty() => format!("{stash_ref} · {subject}"),
-                    _ => stash_ref.clone(),
-                })
-            }
-            CommitFileSource::Compare {
-                base_ref, head_ref, ..
-            } => Some(compare_range_label(base_ref, head_ref)),
-            CommitFileSource::CommitVsWorktree { .. } => Some(source.short_label()),
-            CommitFileSource::Commit { commit_id } => {
-                let short = if commit_id.len() >= 7 {
-                    &commit_id[..7]
-                } else {
-                    commit_id.as_str()
-                };
-                let commit = self
-                    .graph
-                    .as_ref()
-                    .and_then(|model| model.commits.iter().find(|commit| commit.id == *commit_id));
-                let refs = commit
-                    .map(|commit| {
-                        commit
-                            .refs
-                            .iter()
-                            .map(|r| r.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .unwrap_or_default();
-                let subject = commit.map(|c| c.subject.as_str()).unwrap_or("");
-                let mut bits = vec![short.to_string()];
-                if !refs.is_empty() {
-                    bits.push(refs);
+        let model = self.graph.as_ref()?;
+        model
+            .visible_rows()
+            .into_iter()
+            .find(|row| match (source, row) {
+                (CommitFileSource::Commit { commit_id }, GraphRow::Commit { commit, .. }) => {
+                    commit.id == *commit_id
                 }
-                if !subject.is_empty() {
-                    bits.push(subject.to_string());
+                (CommitFileSource::Stash { stash_ref }, GraphRow::Stash(stash)) => {
+                    stash.stash_ref == *stash_ref
                 }
-                if let Some(commit) = commit {
-                    if !commit.author_name.is_empty() {
-                        bits.push(commit.author_name.clone());
-                    }
-                    if commit.author_date_unix != 0 {
-                        bits.push(format_relative_date(commit.author_date_unix, unix_now()));
-                    }
-                }
-                Some(bits.join(" · "))
-            }
-        };
-        (title, subtitle)
+                (CommitFileSource::Worktree, GraphRow::Uncommitted { .. }) => true,
+                _ => false,
+            })
     }
 
-    /// Rows the commit-files footer asks for, before the pane-size cap.
+    /// Body lines of a commit-message footer for graph row `row` at
+    /// `width`: [`selection_footer_parts`], the lines the graph selection
+    /// footer paints for that row (message lines, then the meta line), in
+    /// the current expand state. `None` gives the no-selection footer.
     ///
-    /// Fixed for the expand state and [`Self::commit_msg_lines`], never sized
-    /// by the selected message: expanded is title + meta + N message rows,
-    /// collapsed is title + subtitle. This is the painted height (before
-    /// the cap), not a line count: [`Self::commit_detail_footer_lines`]
-    /// returns the title and meta, then only the real message lines, so a
-    /// short message or a source with no message gives fewer lines (the
-    /// unused rows paint blank) and a long one gives more (they scroll).
-    pub(crate) fn commit_detail_footer_request(&self) -> usize {
-        if self.commit_msg_expand {
-            2 + self.commit_msg_lines
-        } else {
-            2
-        }
+    /// Every commit-message footer builds its lines here, so the same
+    /// commit gives the same rows on every surface. The row is input, not
+    /// read from the drill, so a footer for a commit outside a Workspace
+    /// drill can call it too.
+    pub(crate) fn commit_footer_parts(
+        &self,
+        row: Option<&GraphRow>,
+        width: usize,
+    ) -> Vec<Vec<LabelPart>> {
+        let empty = GraphModel::default();
+        let model = self.graph.as_ref().unwrap_or(&empty);
+        let glyphs = if self.ascii { &ASCII } else { &UNICODE };
+        selection_footer_parts(
+            model,
+            GraphFooterSelection::from(row),
+            glyphs,
+            width.max(1),
+            unix_now(),
+            self.commit_msg_expand,
+        )
     }
 
-    /// Title plus subtitle / wrapped message for the commit-files footer.
+    /// Rows the commit-files footer body asks for, before the pane-size cap.
+    ///
+    /// The graph selection footer's request ([`graph_footer_request`]) less
+    /// its rule row: expanded is [`Self::commit_msg_lines`] message rows
+    /// plus the meta row, collapsed is the subject and the meta row. Fixed
+    /// for the expand state and the rows, never sized by the selected
+    /// message: [`Self::commit_detail_footer_lines`] returns only the real
+    /// message lines, so a short message or a source with no message
+    /// leaves blank rows and a long one scrolls.
+    pub(crate) fn commit_detail_footer_request(&self) -> usize {
+        usize::from(
+            graph_footer_request(self.commit_msg_expand, self.commit_msg_lines)
+                .saturating_sub(FOOTER_RULE_ROWS),
+        )
+    }
+
+    /// Text of the depth-2 commit-files footer lines at `width`.
     ///
     /// The footer sits at the bottom of the left commit-files pane beside a
     /// file diff, under the file list. The depth-1 files pane has no footer
-    /// (the graph pane beside it already shows one). Collapsed is the title
-    /// and the dense one-line subtitle from [`Self::commit_detail_meta`].
-    /// Expanded is the title, a meta line (sha / refs / author), then the
-    /// whole subject plus body, wrapped one column short of `width` (the
-    /// message scrollbar column) with no line cap, like
-    /// [`selection_footer_parts`]. Without a message (collapsed, a compare
-    /// tab, or a worktree / compare / commit-vs-worktree source) the
-    /// subtitle takes the meta row and nothing follows.
-    ///
-    /// Always the title and the meta / subtitle line, then only the real
-    /// message lines: no blank padding. The footer keeps its fixed
+    /// (the graph pane beside it already shows one). The lines are the
+    /// graph selection footer's for the drilled row
+    /// ([`Self::commit_detail_graph_row`], [`Self::commit_footer_parts`]):
+    /// collapsed, the subject and the meta line; expanded, the whole
+    /// subject plus body wrapped one column short of `width` (the message
+    /// scrollbar column) with no line cap, then the meta line. Paint pins
+    /// the meta line on the footer's bottom row under the message rows,
+    /// like the graph footer. No blank padding: the footer keeps its fixed
     /// [`Self::commit_detail_footer_request`] height in paint, where unused
     /// message rows stay blank and a message taller than the rows scrolls
     /// ([`Self::commit_detail_msg_scroll`]).
     pub(crate) fn commit_detail_footer_lines(&self, width: usize) -> Vec<String> {
-        let (title, subtitle) = self.commit_detail_meta();
-        let subtitle = subtitle.unwrap_or_default();
-        let mut footer = vec![title];
-        if !self.commit_msg_expand {
-            footer.push(subtitle);
-        } else {
-            match self.expanded_commit_message() {
-                Some((meta, message)) => {
-                    footer.push(meta);
-                    footer.extend(wrap_commit_message(
-                        &message,
-                        width.saturating_sub(1).max(1),
-                        usize::MAX,
-                    ));
-                }
-                None => footer.push(subtitle),
-            }
-        }
-        footer
+        self.commit_footer_parts(self.commit_detail_graph_row().as_ref(), width)
+            .iter()
+            .map(|parts| parts.iter().map(|part| part.text.as_str()).collect())
+            .collect()
     }
 
     /// Message lines of the depth-2 commit-files footer below the shown
@@ -2187,14 +2156,14 @@ impl AppState {
         if layout.commit_detail_footer_y.is_none() {
             return 0;
         }
-        // Message rows: the footer less its rule, title, and meta rows.
+        // Message rows: the footer less its rule and the pinned meta row.
         let rows = usize::from(layout.commit_detail_footer_height)
             .saturating_sub(usize::from(FOOTER_RULE_ROWS))
-            .saturating_sub(2);
+            .saturating_sub(1);
         let messages = self
             .commit_detail_footer_lines(usize::from(layout.commit_detail_footer_width))
             .len()
-            .saturating_sub(2);
+            .saturating_sub(1);
         if rows == 0 || messages <= rows {
             return 0;
         }
@@ -2202,66 +2171,6 @@ impl AppState {
             .commit_detail_msg_scroll()
             .min(layout.commit_detail_footer_scroll_max);
         messages.saturating_sub(offset + rows)
-    }
-
-    fn expanded_commit_message(&self) -> Option<(String, String)> {
-        if self.tabs.active_compare().is_some() {
-            return None;
-        }
-        let source = match &self.drill {
-            DrillView::Files { source, .. } | DrillView::Diff { source, .. } => source,
-            DrillView::Graph => return None,
-        };
-        match source {
-            CommitFileSource::Commit { commit_id } => {
-                let commit = self
-                    .graph
-                    .as_ref()?
-                    .commits
-                    .iter()
-                    .find(|commit| commit.id == *commit_id)?;
-                let short = if commit_id.len() >= 7 {
-                    &commit_id[..7]
-                } else {
-                    commit_id.as_str()
-                };
-                let refs = commit
-                    .refs
-                    .iter()
-                    .map(|r| r.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let mut bits = vec![short.to_string()];
-                if !refs.is_empty() {
-                    bits.push(refs);
-                }
-                if !commit.author_name.is_empty() {
-                    bits.push(commit.author_name.clone());
-                }
-                if commit.author_date_unix != 0 {
-                    bits.push(format_relative_date(commit.author_date_unix, unix_now()));
-                }
-                Some((
-                    bits.join(" · "),
-                    format_commit_message(&commit.subject, &commit.body),
-                ))
-            }
-            CommitFileSource::Stash { stash_ref } => {
-                let stash = self
-                    .graph
-                    .as_ref()?
-                    .stashes
-                    .iter()
-                    .find(|stash| stash.stash_ref == *stash_ref)?;
-                Some((
-                    stash.stash_ref.clone(),
-                    format_commit_message(&stash.subject, &stash.body),
-                ))
-            }
-            CommitFileSource::Worktree
-            | CommitFileSource::Compare { .. }
-            | CommitFileSource::CommitVsWorktree { .. } => None,
-        }
     }
 
     fn restore_commit_file_cursor(&mut self, path: Option<&str>) {
@@ -14214,10 +14123,6 @@ mod tests {
         assert!(tab.is_pinned());
         assert_eq!(tab.label(), "app ↔ ccc2222^");
         assert_eq!(tab.range_header(), "ccc2222^...ccc2222");
-        assert_eq!(
-            app.commit_detail_meta().1.as_deref(),
-            Some("ccc2222^...ccc2222")
-        );
         // Probes and reloads keep the pinned head.
         match app.compare_probe_effects().as_slice() {
             [] => {}
@@ -15787,7 +15692,7 @@ mod tests {
             app.commit_msg_expand = false;
             app.commit_detail_footer_lines(32)
         };
-        assert_eq!(collapsed_files_footer.len(), 2, "title + subtitle");
+        assert_eq!(collapsed_files_footer.len(), 2, "subject + meta");
         let collapsed_join = collapsed_files_footer.join("\n");
         assert!(
             !collapsed_join.contains(body),
@@ -15797,8 +15702,8 @@ mod tests {
         let expanded_files_footer = app.commit_detail_footer_lines(32);
         assert_eq!(
             expanded_files_footer.len(),
-            2 + 2 + 1 + 1,
-            "title + meta + subject (2 rows) + blank + body, no padding"
+            2 + 1 + 1 + 1,
+            "subject (2 rows) + blank + body + meta, no padding"
         );
         let expanded_join = expanded_files_footer.join("");
         assert!(
@@ -15816,20 +15721,39 @@ mod tests {
         let long_footer = app.commit_detail_footer_lines(32);
         assert_eq!(
             long_footer.len(),
-            2 + 2 + 1 + 30,
-            "title + meta + subject (2 rows) + blank + 30 body lines: {long_footer:?}"
+            2 + 1 + 30 + 1,
+            "subject (2 rows) + blank + 30 body lines + meta: {long_footer:?}"
         );
+        let (meta, message) = long_footer.split_last().expect("meta line");
         assert!(
-            long_footer.iter().all(|line| !line.contains('…')),
+            message.iter().all(|line| !line.contains('…')),
             "no … clip: {long_footer:?}"
         );
         assert!(
-            long_footer[2..]
-                .iter()
-                .all(|line| line.chars().count() <= 31),
+            message.iter().all(|line| line.chars().count() <= 31),
             "message wraps at width - 1: {long_footer:?}"
         );
-        assert_eq!(long_footer.last().map(String::as_str), Some("body line 29"));
+        assert_eq!(message.last().map(String::as_str), Some("body line 29"));
+        assert!(meta.contains("aaa1111"), "the meta line is last: {meta}");
+        // The graph selection footer's lines for the same commit.
+        let model = app.graph.as_ref().expect("graph");
+        let row = model
+            .visible_rows()
+            .into_iter()
+            .find(|row| matches!(row, GraphRow::Commit { .. }))
+            .expect("commit row");
+        assert_eq!(
+            long_footer,
+            workspace_status_graph::selection_footer_lines(
+                model,
+                workspace_status_graph::GraphFooterSelection::Row(&row),
+                glyphs,
+                32,
+                unix_now(),
+                true,
+            ),
+            "the graph footer's lines"
+        );
         app.dispatch(Action::ToggleCommitMsgExpand);
         assert!(!app.commit_msg_expand);
         assert_eq!(app.status, "msg off");
@@ -18228,16 +18152,18 @@ mod tests {
         );
         assert!(app.graph.is_some());
         assert!(app.in_commit_drill());
-        let (title, subtitle) = app.commit_detail_meta();
-        assert_eq!(title, "app");
-        let subtitle = subtitle.expect("subtitle");
-        assert!(subtitle.contains("aaa1111"), "{subtitle}");
-        assert!(subtitle.contains("main"), "{subtitle}");
-        assert!(subtitle.contains("head"), "{subtitle}");
-        assert!(subtitle.contains("Ada"), "{subtitle}");
+        // The footer shows the graph footer's lines: the subject first,
+        // the meta row last.
+        let lines = app.commit_detail_footer_lines(80);
+        let subject = &app.graph.as_ref().unwrap().commits[0].subject;
+        assert_eq!(lines.first(), Some(subject), "{lines:?}");
+        let meta = lines.last().expect("meta");
+        assert!(meta.contains("aaa1111"), "{meta}");
+        assert!(meta.contains("main"), "{meta}");
+        assert!(meta.contains("Ada"), "{meta}");
         assert!(
-            subtitle.contains("1h") || subtitle.contains("59m") || subtitle.contains("just now"),
-            "{subtitle}"
+            meta.contains("1h") || meta.contains("59m") || meta.contains("just now"),
+            "{meta}"
         );
         assert!(app
             .commit_file_rows()

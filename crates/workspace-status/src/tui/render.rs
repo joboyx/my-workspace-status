@@ -9,19 +9,18 @@ use ratatui::widgets::{
     ScrollbarState, StatefulWidget, Wrap,
 };
 use ratatui::Frame;
-use unicode_width::UnicodeWidthStr;
-use workspace_status_graph::{
-    commit_msg_lines_fit, footer_message_scroll_max, graph_col_max, graph_hscroll_visible,
-    graph_vscroll_visible, paint_footer_message, painted_line_count, short_id, GraphIconKind,
-    GraphLabelPalette, GraphRow, GraphWidget, ASCII, COMMIT_MSG_LINES_MAX, FOOTER_RULE_ROWS,
-    UNICODE,
-};
-
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+use unicode_width::UnicodeWidthStr;
+use workspace_status_graph::{
+    commit_msg_lines_fit, footer_message_scroll_max, graph_col_max, graph_footer_request,
+    graph_hscroll_visible, graph_vscroll_visible, paint_selection_footer, painted_line_count,
+    short_id, GraphIconKind, GraphLabelPalette, GraphRow, GraphWidget, ASCII, COMMIT_MSG_LINES_MAX,
+    COMMIT_MSG_LINES_MIN, FOOTER_RULE_ROWS, UNICODE,
+};
 
 use super::action::SearchFilesOption;
 use super::activity::{row_activity_key, sparkline, SPARK_MIN_TREE_COLS};
@@ -2374,22 +2373,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         .commit_msg_scroll(state.graph_footer_msg_scroll())
         .footer_rule(footer_rule_glyph(state.ascii), pal.border_dim)
         .lane_colors(&lane_colors)
-        .label_palette(GraphLabelPalette {
-            subject: pal.repo,
-            meta: pal.muted,
-            branch_local: pal.branch_feature,
-            branch_default: pal.branch_default,
-            remote: pal.dir,
-            tag: pal.modified,
-            head_mark: pal.head_mark,
-            overflow: pal.heading,
-            worktree: pal.heading,
-            dirty: pal.modified,
-            comment: pal.heading,
-            comment_resolved: pal.muted,
-            ahead: pal.added,
-            behind: pal.deleted,
-        })
+        .label_palette(graph_label_palette(pal))
         .row_badges(&badges)
         .render_with_icon_spans(area, frame.buffer_mut());
     let row_of = |span: &workspace_status_graph::IconSpan| rows.get(span.row_index?);
@@ -2429,6 +2413,28 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
     record_commit_msg_rule(state, area);
     if state.background == BackgroundMode::Paint {
         bleed_graph_scrollbar_column(frame, &state.layout);
+    }
+}
+
+/// Graph label colours from the theme `pal`: the graph rows and every
+/// commit-message footer (graph selection footer, commit-files footer)
+/// paint their subject, meta, and ref chips with these.
+fn graph_label_palette(pal: Palette) -> GraphLabelPalette {
+    GraphLabelPalette {
+        subject: pal.repo,
+        meta: pal.muted,
+        branch_local: pal.branch_feature,
+        branch_default: pal.branch_default,
+        remote: pal.dir,
+        tag: pal.modified,
+        head_mark: pal.head_mark,
+        overflow: pal.heading,
+        worktree: pal.heading,
+        dirty: pal.modified,
+        comment: pal.heading,
+        comment_resolved: pal.muted,
+        ahead: pal.added,
+        behind: pal.deleted,
     }
 }
 
@@ -2677,9 +2683,9 @@ fn footer_rule_line(width: u16, ascii: bool, palette: Palette) -> Line<'static> 
 }
 
 /// Commit files beside the file diff (depth 2, left pane): the file list on
-/// top, the selected commit's title, meta, and message pinned to the bottom
-/// rows as a footer (like the graph selection footer on the graph pane).
-/// The footer's first row is a rule ([`footer_rule_line`]) under the list.
+/// top, the drilled commit's footer pinned to the bottom rows
+/// ([`draw_commit_footer`], the graph selection footer's rows for that
+/// commit).
 ///
 /// `col_offset` is the horizontal pan of the file list.
 fn draw_commit_detail(
@@ -2689,7 +2695,6 @@ fn draw_commit_detail(
     cursor: usize,
     col_offset: usize,
 ) {
-    let footer = state.commit_detail_footer_lines(area.width as usize);
     let footer_h = commit_detail_footer_height(state.commit_detail_footer_request(), area.height);
     let list_h = area.height.saturating_sub(footer_h);
     if list_h > 0 {
@@ -2704,114 +2709,155 @@ fn draw_commit_detail(
     if footer_h == 0 {
         return;
     }
+    let footer = CommitFooter {
+        row: state.commit_detail_graph_row(),
+        msg_identity: state.commit_detail_msg_identity(),
+        checkout: state
+            .commit_drill_source()
+            .map(|(repo, _)| repo.to_string()),
+    };
+    let footer_area = Rect {
+        y: area.y.saturating_add(list_h),
+        height: footer_h,
+        ..area
+    };
+    draw_commit_footer(frame, footer_area, area.height, state, &footer);
+}
+
+/// The commit a commit-files footer describes: the input of
+/// [`draw_commit_footer`].
+struct CommitFooter {
+    /// Graph row whose message and meta the footer paints
+    /// ([`AppState::commit_footer_parts`]); its ref chips' popovers resolve
+    /// against it. `None` paints the no-selection footer.
+    row: Option<GraphRow>,
+    /// [`AppState::commit_msg_scroll`] key of the message, and the target
+    /// of the more-below hint. `None` when the row has no message to
+    /// scroll.
+    msg_identity: Option<String>,
+    /// Checkout whose forge the short hash links to.
+    checkout: Option<String>,
+}
+
+/// Paint a commit-message footer under a commit-files list into `area`
+/// (its rule row, then the body) of a pane `pane_h` rows tall, and record
+/// its hits.
+///
+/// The body is the graph selection footer's: the same lines
+/// ([`AppState::commit_footer_parts`]) through the same painter
+/// ([`paint_selection_footer`]), so message rows come first in the subject
+/// colour and the meta row (coloured ref chips, hash, `parent <id>`,
+/// author, date) is pinned on the bottom row. Records the wheel box of an
+/// overflowing message, the more-below hint, the ref chip hits (their
+/// popovers), the hash link, and the expanded footer's top rule
+/// ([`record_commit_detail_msg_rule`]), so a drag on it resizes the same
+/// [`AppState::commit_msg_lines`] the graph footer rule does.
+fn draw_commit_footer(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    pane_h: u16,
+    state: &mut AppState,
+    footer: &CommitFooter,
+) {
     let palette = state.theme.palette();
-    let rule_y = area.y.saturating_add(list_h);
     frame.render_widget(
         Paragraph::new(footer_rule_line(area.width, state.ascii, palette)),
-        Rect {
-            x: area.x,
-            y: rule_y,
-            width: area.width,
-            height: 1,
-        },
+        Rect { height: 1, ..area },
     );
-    let body_h = footer_h.saturating_sub(FOOTER_RULE_ROWS);
+    record_commit_detail_msg_rule(state, area, pane_h);
+    let body_h = area.height.saturating_sub(FOOTER_RULE_ROWS);
     if body_h == 0 {
         return;
     }
-    // Title and meta rows first; a short body clips the message first.
-    let head_h = body_h.min(2);
-    let head_lines: Vec<Line> = footer
-        .iter()
-        .take(usize::from(head_h))
-        .enumerate()
-        .map(|(i, line)| {
-            let style = if i == 0 {
-                Style::default().fg(palette.repo)
-            } else {
-                Style::default().fg(palette.muted)
-            };
-            Line::from(Span::styled(line.clone(), style))
-        })
-        .collect();
-    let footer_area = Rect {
-        x: area.x,
-        y: rule_y.saturating_add(FOOTER_RULE_ROWS),
-        width: area.width,
+    let body = Rect {
+        y: area.y.saturating_add(FOOTER_RULE_ROWS),
         height: body_h,
+        ..area
     };
-    frame.render_widget(
-        Paragraph::new(head_lines),
-        Rect {
-            height: head_h,
-            ..footer_area
-        },
-    );
-    // The message rows scroll like the graph selection footer: same
-    // viewport, scrollbar, and more-below hint. Only real message lines
-    // (never padding), like the graph footer; unused rows stay blank.
-    let message = footer.get(2..).unwrap_or_default();
-    let message_area = Rect {
-        y: footer_area.y.saturating_add(head_h),
-        height: body_h - head_h,
-        ..footer_area
-    };
+    let lines = state.commit_footer_parts(footer.row.as_ref(), usize::from(area.width));
+    let scroll_max = footer_message_scroll_max(lines.len(), body_h);
     let glyphs = if state.ascii { &ASCII } else { &UNICODE };
-    let style = Style::default().fg(palette.muted);
-    let painted = paint_footer_message(
+    let spans = paint_selection_footer(
         frame.buffer_mut(),
-        message_area,
-        message.len(),
-        state.commit_detail_msg_scroll(),
+        body,
+        lines,
+        state.commit_msg_scroll_of(footer.msg_identity.as_deref()),
         glyphs.more_below,
-        palette.muted,
-        |buf, i, y| {
-            buf.set_stringn(
-                message_area.x,
-                y,
-                &message[i],
-                usize::from(message_area.width),
-                style,
-            );
-        },
+        Some(graph_label_palette(palette)),
+        None,
     );
-    if painted.scroll_max > 0 {
-        state.layout.commit_detail_footer_y = Some(rule_y);
+    if scroll_max > 0 {
+        state.layout.commit_detail_footer_y = Some(area.y);
         state.layout.commit_detail_footer_x = area.x;
         state.layout.commit_detail_footer_width = area.width;
-        state.layout.commit_detail_footer_height = footer_h;
-        state.layout.commit_detail_footer_scroll_max = painted.scroll_max;
+        state.layout.commit_detail_footer_height = area.height;
+        state.layout.commit_detail_footer_scroll_max = scroll_max;
     }
-    // The hint hovers and pins like the graph footer's.
-    let hint = painted
-        .more_below
-        .zip(state.commit_detail_msg_identity())
-        .map(|(cells, id)| IconHit {
-            y: cells.y,
-            x: cells.x,
-            width: cells.width,
-            kind: IconKind::GraphMoreBelow,
-            target: IconTarget::CommitDetailMoreLines(id),
-        });
-    state.layout.icon_hits.extend(hint);
-    // The meta row (second body row) starts with the commit's short hash:
-    // link it to the commit page.
-    let link = match state.commit_drill_source() {
-        Some((repo, super::drill::CommitFileSource::Commit { commit_id })) if body_h >= 2 => state
-            .commit_link(std::path::Path::new(repo), commit_id)
+    // The hint hovers and pins like the graph footer's; the chips open the
+    // graph chip popovers of the row.
+    let hits = spans.iter().filter_map(|span| {
+        let (kind, target) = match span.kind {
+            GraphIconKind::MoreBelow => (
+                IconKind::GraphMoreBelow,
+                IconTarget::CommitDetailMoreLines(footer.msg_identity.clone()?),
+            ),
+            kind => graph_icon(kind, span.part, span.target.as_ref(), footer.row.as_ref()?)?,
+        };
+        Some(IconHit {
+            y: span.y,
+            x: span.x,
+            width: span.width,
+            kind,
+            target,
+        })
+    });
+    state.layout.icon_hits.extend(hits);
+    // The meta row (bottom row) holds the commit's short hash: link it to
+    // the commit page.
+    let link = match (&footer.row, &footer.checkout) {
+        (Some(GraphRow::Commit { commit, .. }), Some(checkout)) => state
+            .commit_link(std::path::Path::new(checkout), &commit.id)
             .and_then(|url| {
                 painted_text_link(
                     frame.buffer_mut(),
-                    footer_area.y + 1,
-                    footer_area.x,
-                    footer_area.right(),
-                    short_id(commit_id),
+                    body.bottom() - 1,
+                    body.x,
+                    body.right(),
+                    short_id(&commit.id),
                     url,
                 )
             }),
         _ => None,
     };
     state.layout.links.extend(link);
+}
+
+/// Record the expanded depth-2 commit-files footer's top rule (the first
+/// row of `footer`), the [`ResizeEdge::CommitMsg`] edge, and the most
+/// message rows a pane `pane_h` rows tall shows
+/// ([`commit_detail_msg_lines_fit`]), like [`record_commit_msg_rule`] for
+/// the graph footer. A collapsed footer records no rule.
+fn record_commit_detail_msg_rule(state: &mut AppState, footer: Rect, pane_h: u16) {
+    if !state.commit_msg_expand || footer.width == 0 || footer.height == 0 {
+        return;
+    }
+    state.layout.commit_msg_rule_y = Some(footer.y);
+    state.layout.commit_msg_rule_x = footer.x;
+    state.layout.commit_msg_rule_width = footer.width;
+    state.layout.commit_msg_lines_fit = commit_detail_msg_lines_fit(pane_h);
+}
+
+/// Most expanded-footer message rows a commit-files pane `pane_h` rows
+/// tall shows, in [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`]:
+/// [`commit_detail_footer_height`] of the tallest request less the rule
+/// and the meta row. A rule drag clamps here so it never stores rows the
+/// pane cannot show.
+fn commit_detail_msg_lines_fit(pane_h: u16) -> usize {
+    let most = usize::from(graph_footer_request(true, COMMIT_MSG_LINES_MAX) - FOOTER_RULE_ROWS);
+    let rows = commit_detail_footer_height(most, pane_h)
+        .saturating_sub(FOOTER_RULE_ROWS)
+        .saturating_sub(1);
+    usize::from(rows).clamp(COMMIT_MSG_LINES_MIN, COMMIT_MSG_LINES_MAX)
 }
 
 fn draw_commit_file_list(
@@ -9198,8 +9244,8 @@ mod tests {
             commit_detail_footer_height(state.commit_detail_footer_request(), layout.tree_height);
         assert_eq!(
             footer_h as usize,
-            1 + 2 + workspace_status_graph::COMMIT_MSG_LINES_DEFAULT,
-            "rule + title + meta + N message rows for a one-line body"
+            1 + 1 + workspace_status_graph::COMMIT_MSG_LINES_DEFAULT,
+            "rule + N message rows + meta for a one-line body"
         );
         assert_eq!(layout.files_list_y, layout.tree_y);
         assert_eq!(
@@ -9263,10 +9309,17 @@ mod tests {
         assert_eq!(short_h, long_h, "expanded: same list height");
         assert_eq!(
             short_h as usize,
-            pane as usize - (1 + 2 + n),
-            "rule + title + meta + N"
+            pane as usize - (1 + n + 1),
+            "rule + N + meta"
         );
-        assert!(!left.contains('…'), "a long body is not clipped:\n{left}");
+        // The meta row (the last row) truncates like the graph footer's;
+        // the message rows above it never do.
+        let above_meta: Vec<&str> = left.lines().collect();
+        let above_meta = above_meta[..above_meta.len() - 1].join("\n");
+        assert!(
+            !above_meta.contains('…'),
+            "a long body is not clipped:\n{left}"
+        );
         assert!(
             left.contains(&format!("{more_below}28")),
             "a long body shows the more-below hint:\n{left}"
@@ -9278,7 +9331,7 @@ mod tests {
         let (_, short_c, _, _) = list_height("", false, n);
         let (_, long_c, _, _) = list_height(&long, false, n);
         assert_eq!(short_c, long_c, "collapsed: same list height");
-        assert_eq!(short_c, pane - 3, "collapsed: rule + title + subtitle");
+        assert_eq!(short_c, pane - 3, "collapsed: rule + subject + meta");
         let (_, grown, _, _) = list_height("", true, n + 1);
         assert_eq!(grown + 1, short_h, "one more message row");
     }
@@ -9329,8 +9382,8 @@ mod tests {
             assert_eq!(rule_y + l.commit_detail_footer_height, bottom, "{case}");
             let buf = terminal.backend().buffer().clone();
             assert!(
-                is_scrollbar_cell(buf[(bar_x, bottom - 1)].symbol()),
-                "{case}: bar on the recorded box's last column"
+                is_scrollbar_cell(buf[(bar_x, bottom - 2)].symbol()),
+                "{case}: bar on the recorded box's last column, last message row"
             );
             let hint = l
                 .icon_hits
@@ -9338,7 +9391,11 @@ mod tests {
                 .find(|hit| hit.kind == IconKind::GraphMoreBelow)
                 .cloned()
                 .unwrap_or_else(|| panic!("{case}: hint hit"));
-            assert_eq!(hint.y, bottom - 1, "{case}: hint on the last message row");
+            assert_eq!(
+                hint.y,
+                bottom - 2,
+                "{case}: hint on the last message row, over the meta row"
+            );
             let painted: String = (hint.x..hint.x + hint.width)
                 .map(|x| buf[(x, hint.y)].symbol().to_string())
                 .collect();
@@ -9509,22 +9566,13 @@ mod tests {
     /// row.
     #[test]
     fn commit_footer_message_scroll_matches_on_every_registry_surface() {
-        let looks = [
-            ("boxed", BackgroundMode::Terminal),
-            ("flat", BackgroundMode::Paint),
-        ];
-        let mut driven: Vec<(String, String)> = FOOTER_SURFACES
-            .iter()
-            .flat_map(|s| looks.iter().map(|(look, _)| (s.id.into(), (*look).into())))
-            .collect();
-        driven.sort();
         assert_eq!(
             crate::parity_registry::supported_surface_looks("commit-footer", "msg-scroll"),
-            driven,
+            footer_surface_looks(),
             "docs/parity.md `commit-footer` / `msg-scroll` surfaces and looks must match this test's"
         );
         for surface in &FOOTER_SURFACES {
-            for (look, background) in looks {
+            for (look, background) in FOOTER_LOOKS {
                 let case = format!("{} {look}", surface.id);
                 let mut state = (surface.open)();
                 state.background = background;
@@ -9562,8 +9610,8 @@ mod tests {
                     .collect();
                 let glyph = more_below_glyph(&state);
                 assert_eq!(painted, format!("{glyph}{max}"), "{case}: hint text");
-                // Graph footer: `label_palette.meta` (= `muted`); depth 2:
-                // `palette.muted`.
+                // Both paint the hint in `GraphLabelPalette::meta` (=
+                // `muted`).
                 assert_eq!(
                     buf[(first.x, first.y)].fg,
                     state.theme.palette().muted,
@@ -9632,6 +9680,245 @@ mod tests {
         }
     }
 
+    /// Both pane looks the registry-driven footer tests run.
+    const FOOTER_LOOKS: [(&str, BackgroundMode); 2] = [
+        ("boxed", BackgroundMode::Terminal),
+        ("flat", BackgroundMode::Paint),
+    ];
+
+    /// Every `(surface, look)` [`FOOTER_SURFACES`] drives, sorted like
+    /// `parity_registry::supported_surface_looks`.
+    fn footer_surface_looks() -> Vec<(String, String)> {
+        let mut driven: Vec<(String, String)> = FOOTER_SURFACES
+            .iter()
+            .flat_map(|s| {
+                FOOTER_LOOKS
+                    .iter()
+                    .map(|(look, _)| (s.id.into(), (*look).into()))
+            })
+            .collect();
+        driven.sort();
+        driven
+    }
+
+    /// The `commit-footer` rows are the same on every surface
+    /// `docs/parity.md` marks `supported` for `meta`, `msg-colour`, and
+    /// `row-order`, in both looks: the message rows come first, in the
+    /// subject colour (`pal.repo`); the meta row is pinned on the footer's
+    /// bottom row with the graph footer's meta text (ref chips, hash,
+    /// `parent <id>`, author, date); its ref chip paints in a chip colour,
+    /// records a hit on its cells, and a click pins the chip's popover.
+    #[test]
+    fn commit_footer_rows_match_on_every_registry_surface() {
+        let driven = footer_surface_looks();
+        for feature in ["meta", "msg-colour", "row-order"] {
+            assert_eq!(
+                crate::parity_registry::supported_surface_looks("commit-footer", feature),
+                driven,
+                "docs/parity.md `commit-footer` / `{feature}` surfaces and looks must match this test's"
+            );
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        for surface in &FOOTER_SURFACES {
+            for (look, background) in FOOTER_LOOKS {
+                let case = format!("{} {look}", surface.id);
+                let mut state = (surface.open)();
+                if let Some(model) = state.graph.as_mut() {
+                    model.commits[0].parents = vec![FOOTER_COMMIT_B.into()];
+                    // No date, so the whole meta fits the narrower pane.
+                    model.commits[0].author_date_unix = 0;
+                }
+                state.background = background;
+                let mut terminal = Terminal::new(TestBackend::new(120, 28)).unwrap();
+                state.tree_fraction = 0.5;
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                let FooterBox {
+                    y,
+                    x,
+                    width,
+                    height,
+                    ..
+                } = (surface.footer_box)(&state)
+                    .unwrap_or_else(|| panic!("{case}: an overflowing footer records its box"));
+                let bottom = y + height;
+                let meta_y = bottom - 1;
+                let row_text = |row: u16| {
+                    region_text(&terminal, x, row, width, 1)
+                        .trim_end()
+                        .to_string()
+                };
+
+                // Row order: the subject on the first body row, the meta row
+                // on the bottom row, and no meta among the message rows.
+                assert!(
+                    row_text(y + FOOTER_RULE_ROWS).starts_with("seed graph"),
+                    "{case}: the message comes first:\n{}",
+                    region_text(&terminal, x, y, width, height)
+                );
+                let model = state.graph.as_ref().expect("graph");
+                let rows = model.visible_rows();
+                let row = rows
+                    .iter()
+                    .find(|row| {
+                        matches!(row, GraphRow::Commit { commit, .. } if commit.id == FOOTER_COMMIT_A)
+                    })
+                    .expect("commit A row");
+                let glyphs = if state.ascii { &ASCII } else { &UNICODE };
+                let [_, meta] = workspace_status_graph::selection_detail_lines(
+                    model,
+                    workspace_status_graph::GraphFooterSelection::Row(row),
+                    glyphs,
+                    usize::from(width),
+                    now,
+                );
+                assert!(meta.contains("parent bbb2222"), "{case}: {meta}");
+                assert_eq!(
+                    row_text(meta_y),
+                    meta.trim_end(),
+                    "{case}: the graph footer's meta, pinned on the bottom row"
+                );
+                for row in y + FOOTER_RULE_ROWS..meta_y {
+                    assert!(
+                        !row_text(row).contains("parent "),
+                        "{case}: no meta on message row {row}"
+                    );
+                }
+
+                // Message colour: subject and body in `pal.repo`.
+                let palette = state.theme.palette();
+                let buf = terminal.backend().buffer().clone();
+                assert_eq!(
+                    buf[(x, y + FOOTER_RULE_ROWS)].fg,
+                    palette.repo,
+                    "{case}: subject colour"
+                );
+                let body_y = (y + FOOTER_RULE_ROWS..meta_y)
+                    .find(|&row| row_text(row).starts_with(FOOTER_BODY_TOKEN))
+                    .unwrap_or_else(|| panic!("{case}: a body row shows"));
+                assert_eq!(buf[(x, body_y)].fg, palette.repo, "{case}: body colour");
+
+                // Meta: a coloured ref chip with a hit that pins its popover.
+                let row_id = format!("commit:{FOOTER_COMMIT_A}");
+                let cells = |hit: &IconHit| -> String {
+                    (hit.x..hit.x + hit.width)
+                        .map(|col| buf[(col, hit.y)].symbol().to_string())
+                        .collect()
+                };
+                let chip = state
+                    .layout
+                    .icon_hits
+                    .iter()
+                    .find(|hit| {
+                        hit.y == meta_y
+                            && matches!(&hit.target, IconTarget::GraphChip { row, .. } if *row == row_id)
+                            && cells(hit).contains("main")
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| panic!("{case}: `main` chip hit: {:?}", state.layout.icon_hits));
+                assert_ne!(
+                    buf[(chip.x + chip.width - 1, meta_y)].fg,
+                    palette.muted,
+                    "{case}: the chip paints in a chip colour"
+                );
+                state.dispatch(Action::Click {
+                    col: chip.x,
+                    row: chip.y,
+                });
+                let sections = state.open_popover_sections();
+                assert_eq!(
+                    sections.first().map(|section| section.icon),
+                    Some(chip.kind),
+                    "{case}: the chip pins its popover"
+                );
+            }
+        }
+    }
+
+    /// The `commit-footer` top rule drags on every surface `docs/parity.md`
+    /// marks `supported` for `rule-drag`, in both looks: the rule is
+    /// recorded on the footer's top row over the footer width where it
+    /// paints; a press arms the drag, two rows up adds two message rows
+    /// (the one `commit_msg_lines` setting), the next frame moves the rule
+    /// and grows the footer, nothing is saved mid-drag, and the release
+    /// saves the rows once.
+    #[test]
+    fn commit_footer_rule_drag_matches_on_every_registry_surface() {
+        assert_eq!(
+            crate::parity_registry::supported_surface_looks("commit-footer", "rule-drag"),
+            footer_surface_looks(),
+            "docs/parity.md `commit-footer` / `rule-drag` surfaces and looks must match this test's"
+        );
+        for surface in &FOOTER_SURFACES {
+            for (look, background) in FOOTER_LOOKS {
+                let case = format!("{} {look}", surface.id);
+                let mut state = (surface.open)();
+                state.background = background;
+                let dir = crate::testutil::unique_dir("ws-footer-rule-drag");
+                state.ui_store_path = dir.join("ui-state.json");
+                let mut terminal = Terminal::new(TestBackend::new(80, 28)).unwrap();
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                let footer = (surface.footer_box)(&state)
+                    .unwrap_or_else(|| panic!("{case}: an overflowing footer records its box"));
+                let rule_y = state
+                    .layout
+                    .commit_msg_rule_y
+                    .unwrap_or_else(|| panic!("{case}: the rule is recorded"));
+                assert_eq!(rule_y, footer.y, "{case}: on the footer's top row");
+                assert_eq!(
+                    (
+                        state.layout.commit_msg_rule_x,
+                        state.layout.commit_msg_rule_width
+                    ),
+                    (footer.x, footer.width),
+                    "{case}: over the footer width"
+                );
+                let buf = terminal.backend().buffer().clone();
+                let rule = footer_rule_glyph(state.ascii);
+                for col in footer.x..footer.x + footer.width {
+                    assert_eq!(buf[(col, rule_y)].symbol(), rule, "{case}: rule at x={col}");
+                }
+
+                let lines = state.commit_msg_lines;
+                let col = footer.x + 3;
+                state.dispatch(Action::Click { col, row: rule_y });
+                assert!(
+                    matches!(state.drag, SplitDrag::CommitMsg { .. }),
+                    "{case}: the press arms the drag"
+                );
+                state.dispatch(Action::Drag {
+                    col,
+                    row: rule_y - 2,
+                });
+                assert_eq!(state.commit_msg_lines, lines + 2, "{case}: up adds rows");
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                assert_eq!(
+                    state.layout.commit_msg_rule_y,
+                    Some(rule_y - 2),
+                    "{case}: the rule follows"
+                );
+                let grown = (surface.footer_box)(&state)
+                    .unwrap_or_else(|| panic!("{case}: the grown footer records its box"));
+                assert_eq!(grown.height, footer.height + 2, "{case}: footer grows");
+                assert!(
+                    !state.ui_store_path.exists(),
+                    "{case}: nothing saved mid-drag"
+                );
+                state.dispatch(Action::Release);
+                assert_eq!(state.drag, SplitDrag::None, "{case}");
+                assert_eq!(
+                    crate::tui::ui_state_store::load_ui_state(&state.ui_store_path)
+                        .commit_msg_lines,
+                    Some(lines + 2),
+                    "{case}: the release saves the rows"
+                );
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+    }
+
     /// A message that fits, and a collapsed footer, paint no scrollbar and
     /// no hint, and record no wheel box (the wheel moves the file list).
     #[test]
@@ -9665,8 +9952,8 @@ mod tests {
     }
 
     /// Paint `draw_commit_detail` alone into a 40x8 pane with the tallest N,
-    /// so `commit_detail_footer_height` caps the footer to 4 message rows.
-    /// Returns the message rows as `(y, text)`.
+    /// so `commit_detail_footer_height` caps the footer to 5 message rows
+    /// over the meta row. Returns the message rows as `(y, text)`.
     fn draw_capped_commit_detail(state: &mut AppState) -> Vec<(u16, String)> {
         state.commit_msg_lines = workspace_status_graph::COMMIT_MSG_LINES_MAX;
         let (w, h) = (40, 8);
@@ -9679,9 +9966,9 @@ mod tests {
             usize::from(footer_h) < 1 + state.commit_detail_footer_request(),
             "the pane caps the footer"
         );
-        // Under the rule, the title, and the meta row.
-        let first = h - footer_h + FOOTER_RULE_ROWS + 2;
-        (first..h)
+        // Under the rule, down to the pinned meta row.
+        let first = h - footer_h + FOOTER_RULE_ROWS;
+        (first..h - 1)
             .map(|y| (y, region_text(&terminal, 0, y, w, 1)))
             .collect()
     }
@@ -9714,7 +10001,7 @@ mod tests {
             ("worktree source", worktree),
         ] {
             let rows = draw_capped_commit_detail(&mut state);
-            assert_eq!(rows.len(), 4, "{case}: 4 message rows");
+            assert_eq!(rows.len(), 5, "{case}: 5 message rows");
             assert_eq!(state.layout.commit_detail_footer_y, None, "{case}");
             assert_eq!(state.layout.commit_detail_footer_scroll_max, 0, "{case}");
             assert_eq!(state.commit_detail_footer_lines_below(), 0, "{case}");
@@ -9738,7 +10025,7 @@ mod tests {
         // Subject, blank, and 8 body lines.
         set_seed_commit_body(&mut state, &footer_long_body(8));
         let rows = draw_capped_commit_detail(&mut state);
-        let real = state.commit_detail_footer_lines(40).len() - 2;
+        let real = state.commit_detail_footer_lines(40).len() - 1;
         assert_eq!(real, 10);
         assert!(rows.len() < real && real < state.commit_msg_lines);
         let k = real - rows.len();
@@ -9823,7 +10110,14 @@ mod tests {
                         l.tree_width,
                         body_len as u16,
                     );
-                    for (i, (row, line)) in painted.lines().zip(&footer).enumerate() {
+                    // Message rows from the top, the meta line on the
+                    // bottom row, blank rows between.
+                    let rows: Vec<&str> = painted.lines().collect();
+                    let (meta, message) = footer.split_last().expect("meta line");
+                    let mut want = message.to_vec();
+                    want.resize(rows.len() - 1, String::new());
+                    want.push(meta.clone());
+                    for (i, (row, line)) in rows.iter().zip(&want).enumerate() {
                         // The pane clips a long line at its width.
                         let clipped: String = line.chars().take(l.tree_width as usize).collect();
                         assert_eq!(row.trim_end(), clipped.trim_end(), "{case}: body row {i}");

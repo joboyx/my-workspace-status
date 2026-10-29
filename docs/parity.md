@@ -12,6 +12,7 @@ CI runs the checks in `crates/workspace-status/src/parity_registry.rs` (part of 
 | `parity_registry_gaps_and_intentional_differences_are_indexed` | A `gap:` id is not in **Open gaps**, an indexed gap is used nowhere, a gap is used in another component with no note, or an `I<n>` cited in an `n/a:` reason and the **Intentional differences** table do not match. |
 | `parity_registry_code_anchors_and_tests_exist` | A code anchor or a named test is no longer a `fn` anywhere under `crates/` (a mention in a `//` comment does not count). A rename or a moved code path forces an update here. |
 | `commit_footer_message_scroll_matches_on_every_registry_surface` (`tui/render.rs`) | The `commit-footer` surfaces marked `supported` for `msg-scroll`, in each look, differ from the surfaces that test drives; or the wheel, scrollbar, more-below hint, or per-commit reset fails on one of them. |
+| `commit_footer_rows_match_on_every_registry_surface`, `commit_footer_rule_drag_matches_on_every_registry_surface` (`tui/render.rs`) | The `commit-footer` surfaces marked `supported` for `meta`, `msg-colour`, `row-order`, or `rule-drag`, in each look, differ from the surfaces those tests drive; or on one of them the message rows are not on top in `pal.repo`, the meta row is not the graph footer's meta on the bottom row with a ref chip hit that pins its popover, or the top rule does not drag the rows and save them once on release. |
 | `commit_file_search_highlight_and_steps_agree_on_every_registry_surface` (`tui/render.rs`) | The `search` surfaces whose code anchors name `commit_file_search_match_ids` differ from the surfaces that test drives, or one of them is not `supported` for `agree` in each look; or on one of them the highlighted rows differ from the rows `n` / `N` visit and the pill counts, or a walk from a folded list changes the count. |
 
 The `commit-footer` check is the pattern for other components: one test body that runs the same assertions on every surface the registry marks `supported`, and that compares its own surface list to `parity_registry::supported_surface_looks(component, feature)`.
@@ -35,7 +36,7 @@ The checks parse this file. Keep to these rules:
 
 ### `commit-footer` — Commit message footer
 
-The selected commit's message, pinned under a commit list: the graph selection footer (graph crate `GraphWidget::paint_footer`) and the depth-2 commit-files footer (`render::draw_commit_detail`). Both paint the message rows through the shared `paint_footer_message` and keep one scroll offset, `commit_msg_scroll`, keyed by the commit's graph row identity.
+The selected commit's message, pinned under a commit list: the graph selection footer (graph crate `GraphWidget`) and the depth-2 commit-files footer (`render::draw_commit_detail` → `draw_commit_footer`). Both build their lines with `selection_footer_parts` (depth 2 for the drilled graph row, `commit_footer_parts`) and paint them with the shared `paint_selection_footer` (message rows through `paint_footer_message`, the meta row with its ref chips pinned at the bottom), so the same commit paints the same rows on both. They keep one scroll offset, `commit_msg_scroll`, keyed by the commit's graph row identity, and their rule drags change the one `commit_msg_lines` setting.
 
 | Feature | What | Tests |
 | --- | --- | --- |
@@ -44,16 +45,16 @@ The selected commit's message, pinned under a commit list: the graph selection f
 | `hint-popover` | The more-below hint hovers and pins the more-lines popover (Collapse, Taller). | `commit_detail_footer_hint_records_a_hit_and_pins_the_more_lines_section` |
 | `expand` | `M` toggles the full message and the subject-only footer. | `m_toggles_commit_msg_expand_on_graph_footer_and_commit_detail` |
 | `hash-link` | The short hash links to the forge commit page (OSC 8). | `commit_detail_footer_hash_links_to_forge_commit_page` |
-| `rule-drag` | A drag on the footer's top rule adds or removes message rows. | `commit_msg_rule_drag_resizes_the_footer_and_release_saves_once` |
-| `meta` | The meta row has coloured ref chips with popovers and `parent <id>`. | none |
-| `msg-colour` | The message text paints in the subject colour (`pal.repo`). | none |
-| `row-order` | The message rows come first and the meta row is pinned at the bottom. | none |
+| `rule-drag` | A drag on the footer's top rule adds or removes message rows. | `commit_msg_rule_drag_resizes_the_footer_and_release_saves_once`, `commit_footer_rule_drag_matches_on_every_registry_surface` |
+| `meta` | The meta row has coloured ref chips with popovers and `parent <id>`. | `commit_footer_rows_match_on_every_registry_surface` |
+| `msg-colour` | The message text paints in the subject colour (`pal.repo`). | `commit_footer_rows_match_on_every_registry_surface` |
+| `row-order` | The message rows come first and the meta row is pinned at the bottom. | `commit_footer_rows_match_on_every_registry_surface` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `shown` | `msg-scroll` | `hint-popover` | `expand` | `hash-link` | `rule-drag` | `meta` | `msg-colour` | `row-order` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `draw_graph`, `selection_footer_parts`, `commit_msg_scroll`, `paint_footer`, `paint_footer_message`, `scroll_graph_footer_msg`, `on_footer_box`, `step_commit_msg_scroll`, `graph_more_lines_section`, `more_lines_section`, `record_commit_msg_rule` | supported | supported | supported | supported | supported | supported | supported | supported | supported |
-| `graph-d1` | Workspace | 1 | left | boxed, flat | `draw_graph`, `selection_footer_parts`, `commit_msg_scroll`, `paint_footer`, `paint_footer_message`, `scroll_graph_footer_msg`, `on_footer_box`, `step_commit_msg_scroll`, `graph_more_lines_section`, `more_lines_section`, `record_commit_msg_rule` | supported | supported | supported | supported | supported | supported | supported | supported | supported |
-| `files-d2` | Workspace | 2 | left | boxed, flat | `draw_commit_detail`, `commit_detail_footer_lines`, `commit_detail_meta`, `paint_footer_message`, `scroll_commit_detail_msg`, `on_footer_box`, `step_commit_msg_scroll`, `commit_detail_msg_identity`, `commit_detail_more_lines_section`, `more_lines_section` | supported | supported | supported | supported | supported | gap: G2 | gap: G1 | gap: G19 | gap: G20 |
+| `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `draw_graph`, `selection_footer_parts`, `commit_msg_scroll`, `paint_selection_footer`, `paint_footer_message`, `scroll_graph_footer_msg`, `on_footer_box`, `step_commit_msg_scroll`, `graph_more_lines_section`, `more_lines_section`, `record_commit_msg_rule` | supported | supported | supported | supported | supported | supported | supported | supported | supported |
+| `graph-d1` | Workspace | 1 | left | boxed, flat | `draw_graph`, `selection_footer_parts`, `commit_msg_scroll`, `paint_selection_footer`, `paint_footer_message`, `scroll_graph_footer_msg`, `on_footer_box`, `step_commit_msg_scroll`, `graph_more_lines_section`, `more_lines_section`, `record_commit_msg_rule` | supported | supported | supported | supported | supported | supported | supported | supported | supported |
+| `files-d2` | Workspace | 2 | left | boxed, flat | `draw_commit_detail`, `draw_commit_footer`, `commit_detail_graph_row`, `commit_footer_parts`, `commit_detail_footer_lines`, `paint_selection_footer`, `paint_footer_message`, `scroll_commit_detail_msg`, `on_footer_box`, `step_commit_msg_scroll`, `commit_detail_msg_identity`, `commit_detail_more_lines_section`, `more_lines_section`, `record_commit_detail_msg_rule` | supported | supported | supported | supported | supported | supported | supported | supported | supported |
 | `compare-commit` | Compare (Diff commit vs parent) | - | left | boxed, flat | `draw_panes`, `draw_commit_file_list`, `open_compare_tab_for` | gap: G10 | gap: G10 | gap: G10 | gap: G10 | gap: G10 | gap: G10 | gap: G10 | gap: G10 | gap: G10 |
 
 ### `file-lists` — File lists
@@ -279,8 +280,6 @@ Each open gap is tracked by its id. Fixing one turns its cells into `supported` 
 
 | Gap | Component | Has it | Missing on |
 | --- | --- | --- | --- |
-| G1 | `commit-footer` | Graph footer meta: coloured ref chips, popovers on chips, `parent <id>` | Depth-2 commit-files footer: the meta is plain text (`commit_detail_meta`) |
-| G2 | `commit-footer` | Graph footer top rule drags (`record_commit_msg_rule`) | Depth-2 commit-files footer: its rule paints but records no hit |
 | G4 | `scrollbars` | Graph list scrollbar drag and track click (`SplitDrag::GraphScrollbar`) | File diff vertical bar: `SplitHit` / `SplitDrag` have no diff vertical variant; `diff_scrollbar_x` is read only in tests |
 | G5 | `scrollbars` | Graph list and file diff paint a vertical scrollbar | Workspace tree, commit-file lists, Explorer tree |
 | G6 | `scrollbars` | Explorer pane on a changed file (`draw_diff_pane`) | Explorer pane on a clean file: `draw_file_body` paints no bar |
@@ -294,8 +293,6 @@ Each open gap is tracked by its id. Fixing one turns its cells into `supported` 
 | G15 | `file-lists` | Workspace tree and commit-file lists: devicons, icon hits, popovers, `gh` | Explorer tree rows: `explorer_row_segments` sets `icon: None` and records no hit; `focused_row_icons` is empty on an Explorer tab |
 | G16 | `row-marks` | Workspace tree and compare list paint the reviewed eye and comment marks | Explorer tree paints no mark (code comment on `explorer_toggle_reviewed`); the docs do not say so |
 | G17 | `watch-flash` | Tree, graph, and commit-file rows flash on a watch reload | Explorer tree: the flash is passed as `None` in `draw_explorer_tree` |
-| G19 | `commit-footer` | Graph footer message text paints in the subject colour (`pal.repo`) | Depth-2 commit-files footer paints its message in `muted` |
-| G20 | `commit-footer` | Graph footer pins the meta row at the bottom, under the message | Depth-2 commit-files footer puts title and meta on top, message under them; no recorded reason |
 | G21 | `row-marks` | Commit-file and compare list rows paint the reviewed eye, comment marks, and the watch-reload flash | Folder summary rows of the same files: `draw_folder_summary` paints `file_change_segments` with no mark and no flash |
 | G22 | `horizontal-pan` | Commit-file list rows pan with the keys and the horizontal wheel | Folder summary: its rows always paint at offset 0; a pan key or a horizontal wheel over it pans the hidden file diff (`pan_right_pane` → `pan_diff_content`) |
 | G23 | `scrollbars` | Graph list and file diff paint a horizontal scrollbar with drag and track click | Workspace tree and commit-file lists pan sideways with no horizontal bar |

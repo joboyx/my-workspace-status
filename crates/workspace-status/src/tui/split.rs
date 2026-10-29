@@ -54,7 +54,8 @@ pub enum DiffMode {
 pub enum SplitHit {
     Pane,
     DiffSplit,
-    /// Top rule row of the expanded graph commit-message footer.
+    /// Top rule row of an expanded commit-message footer (graph or depth-2
+    /// commit files).
     CommitMsg,
     /// Painted graph scrollbar thumb (`█`).
     GraphThumb,
@@ -80,7 +81,7 @@ pub enum ResizeEdge {
     Pane,
     /// The side-by-side diff RULE ([`SplitHit::DiffSplit`], [`SplitDrag::Diff`]).
     DiffSplit,
-    /// The top rule of the expanded graph commit-message footer
+    /// The top rule of an expanded commit-message footer (graph or depth-2)
     /// ([`SplitHit::CommitMsg`], [`SplitDrag::CommitMsg`]). It moves up and
     /// down, where the other edges move left and right.
     CommitMsg,
@@ -93,7 +94,7 @@ pub enum SplitDrag {
     None,
     Pane,
     Diff,
-    /// Graph commit-message footer top rule. Row delta maps onto the footer
+    /// Commit-message footer top rule. Row delta maps onto the footer
     /// message rows: up adds rows, down removes them.
     CommitMsg {
         /// Mouse row at mouse-down.
@@ -223,12 +224,12 @@ pub struct SplitLayout {
     pub diff_col_max: u16,
     /// Current file-diff horizontal pan (`diff_col_offset`).
     pub diff_col_offset: u16,
-    /// 0-based row of the expanded graph commit-message footer's top rule
-    /// when it is painted ([`SplitHit::CommitMsg`]).
+    /// 0-based row of the expanded commit-message footer's top rule (graph
+    /// or depth-2 commit files) when it is painted ([`SplitHit::CommitMsg`]).
     pub commit_msg_rule_y: Option<u16>,
     /// 0-based first column of that rule.
     pub commit_msg_rule_x: u16,
-    /// Rule width (the graph pane width).
+    /// Rule width (the pane width).
     pub commit_msg_rule_width: u16,
 }
 
