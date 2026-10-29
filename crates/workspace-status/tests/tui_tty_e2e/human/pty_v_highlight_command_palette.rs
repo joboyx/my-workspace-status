@@ -61,20 +61,20 @@ fn pty_v_colon_palette_revert_opens_range_confirm() {
         WAIT,
     );
     type_filter(&mut tui, "fetch");
+    // One frame carries the whole claim. The full `>fetch` query anchors
+    // it after the last typed key; a second screen read could see a later
+    // or half-drawn frame.
     tui.wait_pred(
         |screen| {
             palette_open(screen)
+                && screen.contains(">fetch▏")
                 && screen.contains("Fetch remotes")
                 && screen.contains("exit highlight first")
+                && fetch_row_shows(screen, "exit highlight first (Esc)")
+                && !palette_status_shows(screen, "exit highlight first (Esc)")
         },
-        "a whole-file row shows the exit-highlight reason in the footer",
+        "before Enter a whole-file row shows the exit-highlight reason on the row and in the footer, not the status line",
         WAIT,
-    );
-    let screen = tui.screen();
-    assert!(
-        fetch_row_shows(&screen, "exit highlight first (Esc)")
-            && !palette_status_shows(&screen, "exit highlight first (Esc)"),
-        "before Enter the reason is on the row and in the footer, not the status line"
     );
     tui.enter();
     tui.wait_ms(SETTLE_MS);
