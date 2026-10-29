@@ -136,7 +136,7 @@ fn pty_workspace_palette_filter_pull_enter_closes_palette() {
         WAIT,
     );
 
-    open_commands_filter(&mut tui, "pull", "Pull behind");
+    open_commands_filter(&mut tui, "pull behind", "Pull behind");
     tui.enter();
     tui.wait_pred(
         |screen| {
@@ -291,6 +291,9 @@ fn pty_workspace_ctrl_k_opens_nothing() {
 
 /// Pull behind on a file row stays dimmed: Enter keeps the palette open.
 ///
+/// The filter names Pull behind in full: `pull` alone lands on the enabled
+/// Refresh pull requests row, whose title also names it.
+///
 /// No pull toast. Cursor stays on README. A dispatch that closes the
 /// overlay or toasts `nothing behind to pull` / `Pulling` is red.
 #[test]
@@ -300,7 +303,7 @@ fn pty_workspace_palette_disabled_pull_on_file_keeps_open() {
     wait_first_paint(&tui);
     wait_readme_cursor(&mut tui);
 
-    open_commands_filter(&mut tui, "pull", "Pull behind");
+    open_commands_filter(&mut tui, "pull behind", "Pull behind");
     tui.enter();
     tui.wait_pred(
         |screen| {

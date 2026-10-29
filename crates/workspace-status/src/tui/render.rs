@@ -6910,10 +6910,12 @@ enum PopoverRow {
 /// Icon popover (peek or pinned) over the panes, hung from its icon.
 ///
 /// Same rounded surface as Quick Open. Each section paints a heading (the
-/// glyph in the row's colour and the catalog name), the meaning, fields
-/// (muted label padded to the section's widest label, value in its role
-/// colour), and action lines (palette title, key chip at the right edge;
-/// a disabled one dims and names its gate reason when it fits). A pinned
+/// glyph in the row's colour and
+/// [`super::popover::PopoverSection::heading`]), the meaning, fields (muted
+/// label padded to the section's widest label, value in its role colour,
+/// its bold head bold, cut with `…`), a muted rule where the section has
+/// one, and action lines (title, key chip at the right edge; a disabled
+/// one dims and names its gate reason when it fits). A pinned
 /// popover marks its focused line with the cursor background and ends
 /// with [`POPOVER_FOOTER`]. A box the frame cuts names the rows below the
 /// shown ones on its bottom border. Records [`PopoverHit`] for clicks and
@@ -6968,7 +6970,7 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
         .iter()
         .zip(&line_section)
         .map(|(line, &section)| match line {
-            PopoverLine::Action(command) if gated[section] => state.popover_line_refusal(
+            PopoverLine::Action { command, .. } if gated[section] => state.popover_line_refusal(
                 command,
                 sections[section].icon,
                 &sections[section].target,
@@ -7003,8 +7005,10 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
         .iter()
         .map(|row| match *row {
             PopoverRow::Heading(index) => {
-                let kind = sections[index].icon;
-                visible_width(kind.glyph(state.ascii)) + 1 + visible_width(kind.spec().name)
+                let section = &sections[index];
+                visible_width(section.icon.glyph(state.ascii))
+                    + 1
+                    + visible_width(section.heading())
             }
             PopoverRow::Line(index) => {
                 2 + match lines[index] {
@@ -7012,8 +7016,10 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
                     PopoverLine::Field { value, .. } => {
                         label_width(index) + 1 + visible_width(value)
                     }
-                    PopoverLine::Action(command) => {
-                        visible_width(command.title)
+                    // A rule fills the width the other rows set.
+                    PopoverLine::Rule => 0,
+                    PopoverLine::Action { command, title } => {
+                        visible_width(title)
                             + reasons[index]
                                 .as_deref()
                                 .map_or(0, |why| 2 + visible_width(why))
@@ -7054,7 +7060,7 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
                         ),
                         Span::raw(" "),
                         Span::styled(
-                            section.icon.spec().name,
+                            section.heading().to_string(),
                             Style::default().fg(palette.heading).add_modifier(bold),
                         ),
                     ],
@@ -7085,31 +7091,48 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
                         value,
                         role,
                         link,
+                        bold,
                     } => {
                         let pad = label_width(index).saturating_sub(visible_width(label));
                         spans.push(Span::styled(format!("{label}{} ", " ".repeat(pad)), muted));
                         let style = Style::default().fg(seg_role_color(*role, palette));
-                        if *link {
-                            // A cut URL ends in `…`; the link keeps the
-                            // full URL.
-                            let x = help_spans_width(&spans);
-                            let room = inner_width.saturating_sub(x);
-                            if room > 0 {
-                                let shown = fit_with_ellipsis(value, room);
+                        // A cut value ends in `…`; a link keeps the full
+                        // URL.
+                        let x = help_spans_width(&spans);
+                        let room = inner_width.saturating_sub(x);
+                        if room > 0 {
+                            let shown = fit_with_ellipsis(value, room);
+                            if *link {
                                 line_links[index] = Some((x, visible_width(&shown), value.clone()));
-                                spans.push(Span::styled(shown, style));
                             }
-                        } else {
-                            spans.push(Span::styled(value.clone(), style));
+                            let mut head = (*bold).min(shown.len());
+                            while !shown.is_char_boundary(head) {
+                                head -= 1;
+                            }
+                            let (bold_text, rest) = shown.split_at(head);
+                            if !bold_text.is_empty() {
+                                spans.push(Span::styled(
+                                    bold_text.to_string(),
+                                    style.add_modifier(Modifier::BOLD),
+                                ));
+                            }
+                            if !rest.is_empty() {
+                                spans.push(Span::styled(rest.to_string(), style));
+                            }
                         }
                     }
-                    PopoverLine::Action(command) => {
+                    PopoverLine::Rule => {
+                        let rule = if state.ascii { "-" } else { "─" };
+                        let width = inner_width.saturating_sub(help_spans_width(&spans));
+                        spans.push(Span::styled(rule.repeat(width), muted));
+                    }
+                    PopoverLine::Action { command, title } => {
                         let reason = reasons[index].as_deref();
-                        let mut title = Style::default().fg(palette.file);
+                        let mut title_style = Style::default().fg(palette.file);
                         if reason.is_some() {
-                            title = title.fg(palette.muted).add_modifier(Modifier::DIM);
+                            title_style = title_style.fg(palette.muted).add_modifier(Modifier::DIM);
                         }
-                        spans.push(Span::styled(command.title, title));
+                        spans.push(Span::styled(*title, title_style));
                         let chip_cols = chip_width(command.keys);
                         if let Some(why) = reason {
                             let used = help_spans_width(&spans);
@@ -18866,7 +18889,7 @@ mod tests {
     /// The PR this effect opens, if any.
     fn pr_opened(effect: &Effect) -> Option<(PathBuf, String)> {
         match effect {
-            Effect::OpenPullRequest { repo, branch } => Some((repo.clone(), branch.clone())),
+            Effect::OpenPullRequest { repo, branch, .. } => Some((repo.clone(), branch.clone())),
             Effect::Batch(effects) => effects.iter().find_map(pr_opened),
             _ => None,
         }
@@ -20288,12 +20311,11 @@ mod tests {
             "& branch",
             "Branch picker",
             "@ repo",
-            "P PR in review",
-            "Pull request is open and waits for review",
+            "P PR · in review",
             // Labels pad to the widest label of their own section: the
-            // PR section to `number`, the repo section to `changes`.
-            "number #7",
-            "url    https://github.com/octo/demo/pull/7",
+            // PR section to `checked`, the repo section to `changes`.
+            "number  #7",
+            "url     https://github.com/octo/demo/pull/7",
             "path    app",
             "changes 0 staged · 0 unstaged · 0 untracked",
             "Open PR",
@@ -20374,9 +20396,9 @@ mod tests {
             ));
             let text = popover_text(&mut state, &mut terminal);
             for want in [
-                "number #7",
+                "number  #7",
                 "loading…",
-                "url    https://github.com/octo/demo/pull/7",
+                "url     https://github.com/octo/demo/pull/7",
                 "Open PR",
             ] {
                 assert!(text.contains(want), "{want:?} in\n{text}");
@@ -20465,14 +20487,97 @@ mod tests {
         ));
         let text = popover_text(&mut state, &mut terminal);
         for want in [
-            "number #7",
+            "number  #7",
             "could not load details",
-            "url    https://github.com/octo/demo/pull/7",
+            "url     https://github.com/octo/demo/pull/7",
             "Open PR",
         ] {
             assert!(text.contains(want), "{want:?} in\n{text}");
         }
         assert!(!text.contains("loading…"), "{text}");
+    }
+
+    /// The PR section paints `<glyph> PR · <state label>`, the ref bold,
+    /// a rule above the actions with their key chips, and a long failure
+    /// reason cut with `…` inside the widest popover, on both forges.
+    #[test]
+    fn pr_popover_paints_its_heading_bold_ref_rule_and_clips_long_values() {
+        for (remote, url, pr_ref, ci) in [
+            (
+                PR_REMOTE,
+                "https://github.com/octo/demo/pull/7",
+                "#7",
+                "Open checks",
+            ),
+            (
+                "git@gitlab.com:octo/demo.git",
+                "https://gitlab.com/octo/demo/-/merge_requests/7",
+                "!7",
+                "Open pipeline",
+            ),
+        ] {
+            let mut state = pr_state(&[branch_repo("app", "feature")], false);
+            let path = Path::new("app");
+            let lookup = PrLookup::Found(PullRequest::fixture(7, url, PrState::CiFailed));
+            assert!(state.apply_pr_lookup(path, "feature", Some(remote.into()), lookup));
+            let reason = format!("HTTP 502: {}", "upstream ".repeat(20));
+            let failed = PrLookup::Failed(Some(reason));
+            assert!(state.apply_pr_lookup(path, "feature", Some(remote.into()), failed));
+            focus_tree_row(&mut state, "repo:app");
+            let mut terminal = Terminal::new(TestBackend::new(120, 60)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let _ = state.dispatch(Action::PopoverOpenFocused);
+            let text = popover_text(&mut state, &mut terminal);
+            let heading = format!("{} PR · CI failed", IconKind::PrCiFailed.glyph(false));
+            for want in [
+                heading.as_str(),
+                "next    ▸ fix CI",
+                "checked just now · last lookup failed: HTTP 502: upstream",
+                ci,
+                "Copy URL",
+                "Refresh this PR",
+                " gc ",
+                " y ",
+                " r ",
+            ] {
+                assert!(text.contains(want), "{remote}: {want:?} in\n{text}");
+            }
+            let rect = state.layout.popover.as_ref().expect("popover").rect;
+            assert!(rect.width <= POPOVER_MAX_WIDTH);
+            let lines = rect_lines(&state.painted_frame, rect);
+            let checked = lines
+                .iter()
+                .find(|line| line.contains("checked"))
+                .expect("checked row");
+            assert!(checked.ends_with("… │"), "cut with …: {checked:?}");
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.starts_with(&format!("│   {}", "─".repeat(20)))),
+                "a rule above the actions:\n{text}"
+            );
+            let rule = lines
+                .iter()
+                .position(|line| line.starts_with(&format!("│   {}", "─".repeat(20))))
+                .unwrap();
+            let open = lines
+                .iter()
+                .position(|line| line.contains("Open PR"))
+                .unwrap();
+            assert_eq!(open, rule + 1, "the actions start under the rule");
+
+            // The ref paints bold; the title after it does not.
+            let buf = &state.painted_frame;
+            let y = (rect.y..rect.bottom())
+                .find(|y| buf_line(buf, *y).contains(&format!("number  {pr_ref}")))
+                .expect("number row");
+            let x = (rect.x..rect.right())
+                .find(|x| buf[(*x, y)].symbol() == &pr_ref[..1])
+                .expect("ref");
+            assert!(buf[(x, y)].modifier.contains(Modifier::BOLD));
+            assert!(buf[(x + 1, y)].modifier.contains(Modifier::BOLD));
+            assert!(!buf[(x - 1, y)].modifier.contains(Modifier::BOLD));
+        }
     }
 
     /// The painted text under the popover's URL link and the link itself,

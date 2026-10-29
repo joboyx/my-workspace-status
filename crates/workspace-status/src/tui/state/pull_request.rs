@@ -1,4 +1,5 @@
-//! PR of a branch row: the `gx` target and the badge cache.
+//! PR of a branch row: the `gx` / `gc` target, the PR actions, and the
+//! badge cache.
 //!
 //! The forge CLI runs on a worker ([`Effect::OpenPullRequest`],
 //! [`Effect::LookupPullRequests`]). This module decides what to look up and
@@ -35,7 +36,7 @@ use workspace_status_graph::{GraphRow, Worktree};
 use crate::helpers::is_counted_local_branch;
 use crate::snapshot::{SyncStatus, WorkspaceRepoSnapshot};
 
-use super::super::action::Effect;
+use super::super::action::{Action, Effect};
 use super::super::gates::ListFocusTarget;
 use super::super::hyperlink::LinkHit;
 use super::super::popover::IconTarget;
@@ -44,8 +45,9 @@ use super::super::pr_poll::{
 };
 use super::super::pr_status::PrState;
 use super::super::pull_request::{
-    commit_url, lookup_failed_status, no_pr_status, parse_remote, PrDetailLookup, PrLookup,
-    PullRequest, PullRequestDetail, NO_PR_FOR_ROW, OPEN_FAILED,
+    ci_opened_status, commit_url, is_web_url, lookup_failed_status, no_ci_status, no_pr_status,
+    parse_remote, PrDetailLookup, PrLookup, PrPage, PullRequest, PullRequestDetail, CI_OPEN_FAILED,
+    NO_PR_FOR_ROW, OPEN_FAILED,
 };
 use super::super::status::StatusMessage;
 use super::super::tree::{NodeKind, PrBadge, PrTotals, PR_REF_MIN_TREE_COLS};
@@ -155,6 +157,18 @@ impl CheckoutPr {
     }
 }
 
+/// True for the actions that act on one PR: Open PR, Open PR CI, Copy PR
+/// URL, and Refresh this PR.
+fn is_pr_action(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::OpenPullRequest
+            | Action::OpenPullRequestCi
+            | Action::CopyPullRequestUrl
+            | Action::RefreshPullRequest
+    )
+}
+
 /// Forge host of `remote`, or `None` when it is not on GitHub or GitLab.
 /// The only place this module parses a remote for polling; test builds
 /// count the calls.
@@ -174,8 +188,6 @@ thread_local! {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PrLookupFailure {
     /// The CLI's first stderr line, when it printed one.
-    // Only tests read this until the PR popover does.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) reason: Option<String>,
 }
 
@@ -597,14 +609,122 @@ impl AppState {
         is_counted_local_branch(branch).then(|| (repo.to_path_buf(), branch.to_string()))
     }
 
-    /// `gx`: open the PR of the focused branch row, or say there is none.
-    pub(super) fn open_pull_request(&mut self) -> Effect {
+    /// Run PR action `action` (Open PR, Open PR CI, Copy PR URL, Refresh
+    /// this PR) on the PR of the focused branch row, or say there is none.
+    ///
+    /// The focused row is a tree repo / checkout row or a graph worktree row
+    /// with a branch ([`Self::pr_target_for_focus`]); any other row says
+    /// `no PR for this row`.
+    pub(super) fn run_pr_action(&mut self, action: &Action) -> Effect {
         match self.pr_target_for_focus() {
-            Some((repo, branch)) => Effect::OpenPullRequest { repo, branch },
+            Some((repo, branch)) => self.run_pr_action_on(action, repo, branch),
             None => {
                 self.status = StatusMessage::warn(NO_PR_FOR_ROW);
                 Effect::None
             }
+        }
+    }
+
+    /// Run PR action `action` on the PR of checkout `repo`, from a line of
+    /// its PR popover section: the section's own PR, which is not the
+    /// focused row's when the section hangs from the graph header chip.
+    /// `None` when `action` is no PR action.
+    pub(super) fn run_pr_action_at(&mut self, action: &Action, repo: &Path) -> Option<Effect> {
+        if !is_pr_action(action) {
+            return None;
+        }
+        Some(match self.pr_target_for_repo(repo) {
+            Some((repo, branch)) => self.run_pr_action_on(action, repo, branch),
+            None => {
+                self.status = StatusMessage::warn(NO_PR_FOR_ROW);
+                Effect::None
+            }
+        })
+    }
+
+    /// [`Self::run_pr_action`] on `branch` of checkout `repo`.
+    fn run_pr_action_on(&mut self, action: &Action, repo: PathBuf, branch: String) -> Effect {
+        match action {
+            Action::OpenPullRequestCi => self.open_pull_request_ci(repo, branch),
+            Action::CopyPullRequestUrl => match self.pull_request_for(&repo) {
+                Some(pr) => Effect::CopyClipboard {
+                    text: pr.url.clone(),
+                    announce: true,
+                },
+                None => {
+                    self.status = StatusMessage::warn(no_pr_status(&branch));
+                    Effect::None
+                }
+            },
+            Action::RefreshPullRequest => self.refresh_pull_requests(Some(&repo)),
+            // `gx`, and any other action: open the PR.
+            _ => Effect::OpenPullRequest {
+                repo,
+                branch,
+                page: PrPage::Pr,
+            },
+        }
+    }
+
+    /// `gc`: open the CI page of the PR of `branch` in checkout `repo`
+    /// ([`PullRequest::ci_link`]), or say why not.
+    ///
+    /// A PR the badge already shows opens its CI link at once (no lookup,
+    /// no detail needed). A branch whose lookup answered with no PR says
+    /// `no PR for <branch>`. With no answer yet (in flight or failed), a
+    /// fresh lookup finds the PR first, like `gx`.
+    fn open_pull_request_ci(&mut self, repo: PathBuf, branch: String) -> Effect {
+        if let Some(pr) = self.pull_request_for(&repo) {
+            let pr_ref = pr.ref_text();
+            if !is_web_url(&pr.ci_link.url) {
+                self.status = StatusMessage::warn(no_ci_status(&pr_ref));
+                return Effect::None;
+            }
+            return Effect::OpenPullRequestCi {
+                pr_ref,
+                url: pr.ci_link.url.clone(),
+            };
+        }
+        if self.pr_checked_at(&repo).is_some() {
+            self.status = StatusMessage::warn(no_pr_status(&branch));
+            return Effect::None;
+        }
+        Effect::OpenPullRequest {
+            repo,
+            branch,
+            page: PrPage::Ci,
+        }
+    }
+
+    /// Refresh this PR.
+    ///
+    /// Inside a pinned popover (`r`): looks up again every PR the popover
+    /// shows, and the popover stays open and shows the new answer and
+    /// detail when they land; a popover with no PR section does nothing.
+    /// Otherwise (the palette): the PR of the focused branch row, or `no PR
+    /// for this row`.
+    pub(super) fn refresh_pull_request(&mut self) -> Effect {
+        if !self.popover_pinned() {
+            return self.run_pr_action(&Action::RefreshPullRequest);
+        }
+        let repos: Vec<PathBuf> = self
+            .popover
+            .iter()
+            .flat_map(|popover| &popover.targets)
+            .filter_map(|(_, target)| match target {
+                IconTarget::PullRequest(repo) => Some(repo.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut effects: Vec<Effect> = repos
+            .iter()
+            .map(|repo| self.refresh_pull_requests(Some(repo)))
+            .filter(|effect| *effect != Effect::None)
+            .collect();
+        match effects.len() {
+            0 => Effect::None,
+            1 => effects.remove(0),
+            _ => Effect::Batch(effects),
         }
     }
 
@@ -633,7 +753,11 @@ impl AppState {
                 // A second Ctrl+click on the badge opens again; it is not
                 // a double-click that drills into the row.
                 self.last_click = None;
-                Effect::OpenPullRequest { repo, branch }
+                Effect::OpenPullRequest {
+                    repo,
+                    branch,
+                    page: PrPage::Pr,
+                }
             }
             None => {
                 self.status = StatusMessage::warn(NO_PR_FOR_ROW);
@@ -910,9 +1034,11 @@ impl AppState {
         true
     }
 
-    /// Land a `gx` result: say what happened, and cache the fresh answer.
+    /// Land a `gx` result (or a `gc` result that looked the PR up first):
+    /// say what happened, and cache the fresh answer.
     ///
-    /// `opened` is true when the browser started for a found PR. The
+    /// `opened` is true when the browser started for `page` of a found PR.
+    /// A `gc` whose PR has no CI web page says `no CI for <ref>`. The
     /// answer lands like a badge lookup's (a failure keeps a known badge).
     pub(crate) fn apply_pr_open(
         &mut self,
@@ -920,13 +1046,23 @@ impl AppState {
         branch: &str,
         remote: Option<String>,
         lookup: PrLookup,
+        page: PrPage,
         opened: bool,
     ) {
-        self.status = match &lookup {
-            PrLookup::Found(pr) if opened => StatusMessage::ok(format!("opened PR #{}", pr.number)),
-            PrLookup::Found(_) => StatusMessage::error(OPEN_FAILED),
-            PrLookup::NoPr => StatusMessage::warn(no_pr_status(branch)),
-            PrLookup::Failed(_) => StatusMessage::error(lookup_failed_status(branch)),
+        self.status = match (&lookup, page) {
+            (PrLookup::Found(pr), PrPage::Pr) if opened => {
+                StatusMessage::ok(format!("opened PR #{}", pr.number))
+            }
+            (PrLookup::Found(_), PrPage::Pr) => StatusMessage::error(OPEN_FAILED),
+            (PrLookup::Found(pr), PrPage::Ci) if !is_web_url(&pr.ci_link.url) => {
+                StatusMessage::warn(no_ci_status(&pr.ref_text()))
+            }
+            (PrLookup::Found(pr), PrPage::Ci) if opened => {
+                StatusMessage::ok(ci_opened_status(&pr.ref_text()))
+            }
+            (PrLookup::Found(_), PrPage::Ci) => StatusMessage::error(CI_OPEN_FAILED),
+            (PrLookup::NoPr, _) => StatusMessage::warn(no_pr_status(branch)),
+            (PrLookup::Failed(_), _) => StatusMessage::error(lookup_failed_status(branch)),
         };
         if self.snapshot_branch(repo) == Some(branch) {
             let cache = &mut self.pr_cache;
@@ -944,6 +1080,16 @@ impl AppState {
             self.pr_cache
                 .set_answer((remote, branch.to_string()), lookup.into());
         }
+    }
+
+    /// Land a `gc` open of the CI page of the known PR `pr_ref`: say
+    /// whether the browser started.
+    pub(crate) fn apply_pr_ci_open(&mut self, pr_ref: &str, opened: bool) {
+        self.status = if opened {
+            StatusMessage::ok(ci_opened_status(pr_ref))
+        } else {
+            StatusMessage::error(CI_OPEN_FAILED)
+        };
     }
 
     /// Detail state of the PR the badge of checkout `repo` shows, under the
@@ -1252,9 +1398,6 @@ impl AppState {
     }
 }
 
-// Only tests read this until the PR popover, alert, and PRs tab surfaces
-// do.
-#[cfg_attr(not(test), allow(dead_code))]
 impl AppState {
     /// When the last successful PR lookup of checkout `checkout` landed, for
     /// its current branch ("checked … ago"). `None` before one lands. `r`
@@ -1270,6 +1413,8 @@ impl AppState {
     }
 
     /// Take the queued [`PrTransition`]s, oldest first.
+    // Only tests read this until the alert surfaces do.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn take_pr_transitions(&mut self) -> Vec<PrTransition> {
         std::mem::take(&mut self.pr_cache.transitions)
     }
@@ -1390,6 +1535,7 @@ mod tests {
         Effect::OpenPullRequest {
             repo: PathBuf::from(repo),
             branch: branch.into(),
+            page: PrPage::Pr,
         }
     }
 
@@ -1632,6 +1778,7 @@ mod tests {
             "feature",
             Some(REMOTE.into()),
             found(PrState::Merged),
+            PrPage::Pr,
             true,
         );
         assert_eq!(app.status, "opened PR #7");
@@ -1642,7 +1789,14 @@ mod tests {
             "the open answered this branch"
         );
 
-        app.apply_pr_open(path, "feature", Some(REMOTE.into()), PrLookup::NoPr, false);
+        app.apply_pr_open(
+            path,
+            "feature",
+            Some(REMOTE.into()),
+            PrLookup::NoPr,
+            PrPage::Pr,
+            false,
+        );
         assert_eq!(app.status, "no PR for feature");
         assert_eq!(app.pr_badge(path), None, "fresh answer replaces the badge");
     }
@@ -2040,6 +2194,7 @@ mod tests {
             "feature",
             Some(REMOTE.into()),
             found(PrState::InReview),
+            PrPage::Pr,
             true,
         );
         assert!(matches!(detail_of(&app), Some(PrDetailState::Ready(_))));
@@ -2049,6 +2204,7 @@ mod tests {
             "feature",
             Some(REMOTE.into()),
             found(PrState::Ready),
+            PrPage::Pr,
             true,
         );
         assert!(
@@ -2162,7 +2318,7 @@ mod tests {
             .lines
             .iter()
             .find(|(_, index)| {
-                matches!(lines[*index], PopoverLine::Action(command)
+                matches!(lines[*index], PopoverLine::Action { command, .. }
                     if command.action == Action::OpenPullRequest)
             })
             .expect("Open PR line");
@@ -2176,7 +2332,7 @@ mod tests {
         assert!(land(&mut app, "feature", 7, pr_detail(7)));
         let sections = app.open_popover_sections();
         assert!(
-            !matches!(flat_lines(&sections)[index], PopoverLine::Action(command)
+            !matches!(flat_lines(&sections)[index], PopoverLine::Action { command, .. }
                 if command.action == Action::OpenPullRequest),
             "the pressed index now holds another line"
         );
@@ -2244,9 +2400,12 @@ mod tests {
         assert!(app.quick_open.is_none(), "submit closes the palette");
     }
 
-    /// `pull` also finds Open PR by its alias. On a file row Pull behind is
-    /// disabled and Open PR is enabled, but the cursor stays on Pull behind,
-    /// so Enter keeps the palette open instead of running `gx`.
+    /// `pull` also finds Open PR by its `pull request` alias. On a file row
+    /// Pull behind is disabled and Open PR is enabled, but the cursor never
+    /// lands on a row only an alias finds: `pull` lands on Refresh pull
+    /// requests (its title names it), and `pull behind` stays on the
+    /// disabled Pull behind, so Enter keeps the palette open instead of
+    /// running `gx`.
     #[test]
     fn palette_pull_on_a_file_row_lands_on_disabled_pull_not_open_pr() {
         use super::super::super::action::QuickOpenEntry;
@@ -2266,13 +2425,17 @@ mod tests {
                 .and_then(|palette| palette.selected())
                 .map(|command| command.title)
         };
-        assert_eq!(selected(&mut app, "pull"), Some("Pull behind"));
+        assert_eq!(selected(&mut app, "pull"), Some("Refresh pull requests"));
+        assert_eq!(selected(&mut app, "pull behind"), Some("Pull behind"));
         assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
         assert!(
             app.command_palette().is_some(),
             "disabled row keeps it open"
         );
-        assert_eq!(selected(&mut app, "pull request"), Some("Open PR"));
+        assert_eq!(
+            selected(&mut app, "pull request"),
+            Some("Refresh pull requests")
+        );
         assert_eq!(selected(&mut app, "merge request"), Some("Open PR"));
     }
 
@@ -2588,6 +2751,7 @@ mod tests {
             "feature",
             Some(GH_REMOTE.into()),
             PrLookup::Failed(Some("HTTP 401: Bad credentials".into())),
+            PrPage::Pr,
             false,
         );
         assert_eq!(app.status, "could not look up PR for feature");
@@ -3231,5 +3395,420 @@ mod tests {
         assert_eq!(app.request_popover_pr_details(), fetch(7, 2));
         assert!(land_request(&mut app, "feature", 7, 2, pr_detail(7)));
         assert_eq!(app.request_popover_pr_details(), Effect::None);
+    }
+
+    // ---- gc (Open CI), Copy URL, Refresh this PR ----
+
+    use super::super::super::pr_status::{pipeline_ci_link, CiLink, CiLinkKind};
+
+    const FAILED_JOB: &str = "https://github.com/acme/app/actions/runs/1/job/2";
+    const PIPELINE: &str = "https://gitlab.com/acme/services/api/-/pipelines/99";
+
+    /// A PR on the forge of `remote` whose CI link is a failed check
+    /// (GitHub) or the head pipeline (GitLab), with that ref and URL.
+    fn pr_with_ci(remote: &str, state: PrState) -> (PullRequest, &'static str, &'static str) {
+        if remote.contains("gitlab") {
+            let mut pr = pr_on(remote, 12, state);
+            pr.ci_link = pipeline_ci_link(Some(PIPELINE), &pr.url);
+            (pr, "!12", PIPELINE)
+        } else {
+            let mut pr = pr_on(remote, 318, state);
+            pr.ci_link = CiLink {
+                url: FAILED_JOB.into(),
+                kind: CiLinkKind::FailedCheck,
+            };
+            (pr, "#318", FAILED_JOB)
+        }
+    }
+
+    /// `app` on `feature` with `lookup` landed at `remote`, focused.
+    fn app_answered(remote: &str, lookup: PrLookup) -> AppState {
+        let mut app = app_with(&[repo("app", "feature"), repo("lib", "main")], &[]);
+        let _ = app.due_pr_lookups();
+        land_pr(&mut app, "app", remote, lookup, Instant::now());
+        focus(&mut app, "repo:app");
+        app
+    }
+
+    fn gc(app: &mut AppState) -> Effect {
+        app.status = StatusMessage::default();
+        app.dispatch(Action::OpenPullRequestCi)
+    }
+
+    fn ci_open(pr_ref: &str, url: &str) -> Effect {
+        Effect::OpenPullRequestCi {
+            pr_ref: pr_ref.into(),
+            url: url.into(),
+        }
+    }
+
+    /// Pin the PR popover of `app` (its badge on the focused row).
+    fn pin_pr(app: &mut AppState) -> Effect {
+        let kind = super::super::super::tree::pr_badge_kind(
+            app.pr_badge(Path::new("app")).expect("badge"),
+        );
+        app.pin_icon(&IconHit {
+            y: 1,
+            x: 20,
+            width: 2,
+            kind,
+            target: IconTarget::PullRequest(PathBuf::from("app")),
+        })
+    }
+
+    /// Move the pinned popover focus to the action line titled `title`.
+    fn focus_line(app: &mut AppState, title: &str) {
+        use crate::tui::popover::{flat_lines, PopoverLine};
+        let sections = app.open_popover_sections();
+        let index = flat_lines(&sections)
+            .iter()
+            .position(|line| matches!(line, PopoverLine::Action { title: t, .. } if *t == title))
+            .unwrap_or_else(|| panic!("no {title} line"));
+        app.popover.as_mut().expect("pinned").focus_line = index;
+    }
+
+    #[test]
+    fn gc_on_a_tree_row_opens_the_known_ci_link_on_both_forges() {
+        for remote in [GH_REMOTE, GL_REMOTE] {
+            for state in [PrState::CiFailed, PrState::Ready, PrState::Merged] {
+                let (pr, pr_ref, url) = pr_with_ci(remote, state);
+                let mut app = app_answered(remote, PrLookup::Found(pr));
+                assert_eq!(gc(&mut app), ci_open(pr_ref, url), "{remote} {state:?}");
+                assert!(app.status.is_empty(), "the worker says how it went");
+            }
+        }
+    }
+
+    #[test]
+    fn gc_says_no_pr_no_ci_or_looks_the_pr_up_first() {
+        // No branch to look up.
+        let mut app = app_answered(GH_REMOTE, PrLookup::NoPr);
+        focus(&mut app, "repo:lib");
+        app.cursor = app
+            .rows
+            .iter()
+            .position(|row| row.kind == NodeKind::File)
+            .expect("file row");
+        assert_eq!(gc(&mut app), Effect::None);
+        assert_eq!(app.status, NO_PR_FOR_ROW);
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+
+        for remote in [GH_REMOTE, GL_REMOTE] {
+            // The forge answered: no PR.
+            let mut app = app_answered(remote, PrLookup::NoPr);
+            assert_eq!(gc(&mut app), Effect::None);
+            assert_eq!(app.status, "no PR for feature");
+            assert_eq!(app.status.kind(), StatusKind::Warn);
+
+            // A PR with no CI web page.
+            let (mut pr, pr_ref, _) = pr_with_ci(remote, PrState::InReview);
+            pr.ci_link.url = String::new();
+            let mut app = app_answered(remote, PrLookup::Found(pr));
+            assert_eq!(gc(&mut app), Effect::None);
+            assert_eq!(app.status, format!("no CI for {pr_ref}"));
+            assert_eq!(app.status.kind(), StatusKind::Warn);
+
+            // A failed first lookup knows nothing: look the PR up first.
+            let mut app = app_answered(remote, PrLookup::Failed(None));
+            assert_eq!(
+                gc(&mut app),
+                Effect::OpenPullRequest {
+                    repo: PathBuf::from("app"),
+                    branch: "feature".into(),
+                    page: PrPage::Ci,
+                }
+            );
+        }
+
+        // The first lookup is still out.
+        let mut app = app_with(&[repo("app", "feature")], &[]);
+        let _ = app.due_pr_lookups();
+        focus(&mut app, "repo:app");
+        assert!(matches!(
+            gc(&mut app),
+            Effect::OpenPullRequest {
+                page: PrPage::Ci,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn gc_in_the_graph_opens_a_worktree_rows_ci_on_both_forges() {
+        for remote in [GH_REMOTE, GL_REMOTE] {
+            let wt = "app/.worktrees/feat";
+            let mut app = app_with(&[repo("app", "main"), linked(wt, "app", "feature")], &[]);
+            let _ = app.due_pr_lookups();
+            let (pr, pr_ref, url) = pr_with_ci(remote, PrState::CiRunning);
+            land_pr(&mut app, wt, remote, PrLookup::Found(pr), Instant::now());
+            focus(&mut app, "repo:app");
+            app.graph = Some(GraphModel {
+                commits: vec![Commit {
+                    id: "aaa".into(),
+                    subject: "seed".into(),
+                    ..Commit::default()
+                }],
+                worktrees: vec![Worktree {
+                    path: wt.into(),
+                    head_id: None,
+                    branch: Some("feature".into()),
+                    hidden: false,
+                    is_current: false,
+                }],
+                window: 1,
+                ..GraphModel::default()
+            });
+            app.focus = FocusPane::Right;
+            assert!(app.graph_pane_focused());
+            let rows = app.graph.as_ref().expect("graph").visible_rows();
+            app.graph_cursor = rows
+                .iter()
+                .position(|row| matches!(row, GraphRow::Worktree(_)))
+                .expect("worktree row");
+            assert_eq!(gc(&mut app), ci_open(pr_ref, url), "{remote}");
+
+            app.graph_cursor = rows
+                .iter()
+                .position(|row| matches!(row, GraphRow::Commit { .. }))
+                .expect("commit row");
+            assert_eq!(gc(&mut app), Effect::None, "gc is no longer graph c");
+            assert_eq!(app.status, NO_PR_FOR_ROW);
+        }
+    }
+
+    #[test]
+    fn the_popover_open_ci_line_runs_gc_on_both_forges() {
+        for remote in [GH_REMOTE, GL_REMOTE] {
+            let (pr, pr_ref, url) = pr_with_ci(remote, PrState::CiFailed);
+            let title = pr.ci_link.kind.label();
+            let mut app = app_answered(remote, PrLookup::Found(pr));
+            let _ = pin_pr(&mut app);
+            focus_line(&mut app, title);
+            assert_eq!(app.popover_run_action(), Some(Action::OpenPullRequestCi));
+            assert_eq!(app.dispatch(Action::PopoverRun), ci_open(pr_ref, url));
+            assert!(app.popover.is_none(), "Enter closes, then opens CI");
+        }
+    }
+
+    /// The graph header chip pins the PR popover of the graph's checkout
+    /// while a commit row has the focus: its PR lines act on that PR, not
+    /// on the focused row (which has none).
+    #[test]
+    fn pr_popover_lines_act_on_their_own_pr_not_the_focused_graph_row() {
+        for remote in [GH_REMOTE, GL_REMOTE] {
+            let (pr, pr_ref, url) = pr_with_ci(remote, PrState::CiFailed);
+            let (ci_title, pr_url) = (pr.ci_link.kind.label(), pr.url.clone());
+            let mut app = app_answered(remote, PrLookup::Found(pr));
+            app.graph = Some(GraphModel {
+                commits: vec![Commit {
+                    id: "aaa".into(),
+                    subject: "seed".into(),
+                    ..Commit::default()
+                }],
+                window: 1,
+                ..GraphModel::default()
+            });
+            app.focus = FocusPane::Right;
+            let rows = app.graph.as_ref().expect("graph").visible_rows();
+            app.graph_cursor = rows
+                .iter()
+                .position(|row| matches!(row, GraphRow::Commit { .. }))
+                .expect("commit row");
+            assert_eq!(gc(&mut app), Effect::None, "the commit row has no PR");
+            for (title, want) in [
+                (ci_title, ci_open(pr_ref, url)),
+                (
+                    "Open PR",
+                    Effect::OpenPullRequest {
+                        repo: PathBuf::from("app"),
+                        branch: "feature".into(),
+                        page: PrPage::Pr,
+                    },
+                ),
+                (
+                    "Copy URL",
+                    Effect::CopyClipboard {
+                        text: pr_url.clone(),
+                        announce: true,
+                    },
+                ),
+                (
+                    "Refresh this PR",
+                    Effect::LookupPullRequests {
+                        targets: vec![(PathBuf::from("app"), "feature".into())],
+                    },
+                ),
+            ] {
+                let _ = pin_pr(&mut app);
+                focus_line(&mut app, title);
+                assert_eq!(app.dispatch(Action::PopoverRun), want, "{remote} {title}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_ci_open_reports_each_outcome_on_the_status_line() {
+        let mut app = app_with(&[repo("app", "feature")], &[]);
+        let _ = app.due_pr_lookups();
+        for (pr_ref, opened, text, kind) in [
+            ("#318", true, "opened CI for #318", StatusKind::Ok),
+            ("!12", true, "opened CI for !12", StatusKind::Ok),
+            ("#318", false, "could not open CI", StatusKind::Error),
+        ] {
+            app.apply_pr_ci_open(pr_ref, opened);
+            assert_eq!(app.status, text);
+            assert_eq!(app.status.kind(), kind, "{text}");
+        }
+
+        // `gc` that looked the PR up first.
+        let path = Path::new("app");
+        for remote in [GH_REMOTE, GL_REMOTE] {
+            let (pr, pr_ref, _) = pr_with_ci(remote, PrState::CiFailed);
+            let mut no_ci = pr.clone();
+            no_ci.ci_link.url = String::new();
+            for (lookup, opened, text, kind) in [
+                (
+                    PrLookup::Found(pr.clone()),
+                    true,
+                    format!("opened CI for {pr_ref}"),
+                    StatusKind::Ok,
+                ),
+                (
+                    PrLookup::Found(pr.clone()),
+                    false,
+                    "could not open CI".into(),
+                    StatusKind::Error,
+                ),
+                (
+                    PrLookup::Found(no_ci),
+                    false,
+                    format!("no CI for {pr_ref}"),
+                    StatusKind::Warn,
+                ),
+                (
+                    PrLookup::NoPr,
+                    false,
+                    "no PR for feature".into(),
+                    StatusKind::Warn,
+                ),
+                (
+                    PrLookup::Failed(None),
+                    false,
+                    "could not look up PR for feature".into(),
+                    StatusKind::Error,
+                ),
+            ] {
+                app.apply_pr_open(
+                    path,
+                    "feature",
+                    Some(remote.into()),
+                    lookup,
+                    PrPage::Ci,
+                    opened,
+                );
+                assert_eq!(app.status, text.as_str(), "{remote}");
+                assert_eq!(app.status.kind(), kind, "{remote}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn copy_url_copies_the_pr_url_from_the_palette_and_the_popover_line() {
+        for remote in [GH_REMOTE, GL_REMOTE] {
+            let (pr, _, _) = pr_with_ci(remote, PrState::InReview);
+            let copy = Effect::CopyClipboard {
+                text: pr.url.clone(),
+                announce: true,
+            };
+            let mut app = app_answered(remote, PrLookup::Found(pr));
+            assert_eq!(app.dispatch(Action::CopyPullRequestUrl), copy, "{remote}");
+
+            // `y` on the Copy URL line copies the URL, not the title, and
+            // the popover stays open.
+            let _ = pin_pr(&mut app);
+            focus_line(&mut app, "Copy URL");
+            assert_eq!(app.dispatch(Action::PopoverCopyLine), copy, "{remote}");
+            assert!(app.popover_pinned());
+            // Enter runs it like the palette row.
+            assert_eq!(app.dispatch(Action::PopoverRun), copy, "{remote}");
+            assert!(app.popover.is_none());
+        }
+        let mut app = app_answered(GH_REMOTE, PrLookup::NoPr);
+        assert_eq!(app.dispatch(Action::CopyPullRequestUrl), Effect::None);
+        assert_eq!(app.status, "no PR for feature");
+        focus(&mut app, "repo:lib");
+        app.cursor = app
+            .rows
+            .iter()
+            .position(|row| row.kind == NodeKind::File)
+            .expect("file row");
+        assert_eq!(app.dispatch(Action::CopyPullRequestUrl), Effect::None);
+        assert_eq!(app.status, NO_PR_FOR_ROW);
+    }
+
+    #[test]
+    fn r_in_a_pinned_pr_popover_refreshes_that_pr_and_keeps_it_open() {
+        for remote in [GH_REMOTE, GL_REMOTE] {
+            let (pr, _, _) = pr_with_ci(remote, PrState::CiRunning);
+            let mut app = app_answered(remote, PrLookup::Found(pr));
+            let _ = pin_pr(&mut app);
+            let refresh = Effect::LookupPullRequests {
+                targets: vec![(PathBuf::from("app"), "feature".into())],
+            };
+            assert_eq!(
+                app.dispatch(Action::RefreshPullRequest),
+                refresh,
+                "{remote}"
+            );
+            assert!(app.popover_pinned(), "r keeps the popover");
+            assert_eq!(
+                app.pr_badge(Path::new("app")),
+                Some(PrState::CiRunning),
+                "the badge stays while it looks again"
+            );
+            assert_eq!(
+                app.dispatch(Action::RefreshPullRequest),
+                Effect::None,
+                "already looking"
+            );
+
+            // The palette row (no popover) refreshes the focused row.
+            let (pr, _, _) = pr_with_ci(remote, PrState::Ready);
+            let mut app = app_answered(remote, PrLookup::Found(pr));
+            assert_eq!(
+                app.dispatch(Action::RefreshPullRequest),
+                refresh,
+                "{remote}"
+            );
+        }
+
+        // A pinned popover with no PR section ignores `r`.
+        let mut app = app_answered(GH_REMOTE, PrLookup::NoPr);
+        let _ = app.dispatch(Action::PopoverOpenFocused);
+        assert!(app.popover_pinned());
+        assert_eq!(app.dispatch(Action::RefreshPullRequest), Effect::None);
+        assert!(app.status.is_empty());
+        assert!(app.popover_pinned());
+    }
+
+    #[test]
+    fn palette_refresh_pull_requests_looks_every_pr_up_again() {
+        let mut app = app_with(&[pushed("app"), pushed("lib")], &[]);
+        let _ = app.due_pr_lookups();
+        let now = Instant::now();
+        land_pr(&mut app, "app", &gh("app"), open_on(GH_REMOTE, 1), now);
+        land_pr(&mut app, "lib", &gl("lib"), open_on(GL_REMOTE, 2), now);
+        let Effect::LookupPullRequests { mut targets } = app.dispatch(Action::RefreshPullRequests)
+        else {
+            panic!("a lookup of every PR");
+        };
+        targets.sort();
+        assert_eq!(
+            targets,
+            vec![
+                (PathBuf::from("app"), "feature".to_string()),
+                (PathBuf::from("lib"), "feature".to_string()),
+            ]
+        );
     }
 }

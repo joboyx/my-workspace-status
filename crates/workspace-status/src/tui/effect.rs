@@ -70,7 +70,7 @@ use super::ops::{
     format_completed_op, format_mixed_running_op, format_running_op, op_targets, Op, OpTally,
     RepoOpResult, RunningOp,
 };
-use super::pull_request::{lookup, lookup_detail, PrDetailLookup, PrLookup};
+use super::pull_request::{is_web_url, lookup, lookup_detail, PrDetailLookup, PrLookup, PrPage};
 #[cfg(not(test))]
 use super::pull_request::{open_in_browser, run_cli};
 use super::remote_view::{self, RemoteTarget};
@@ -271,13 +271,21 @@ pub(crate) enum JobOutcome {
         job: PrDetailJob,
         lookup: PrDetailLookup,
     },
-    /// `gx` lookup of `branch` in checkout `repo`, then the browser open.
-    /// `opened` is true when the browser started for a found PR.
+    /// `gx` (or `gc`) lookup of `branch` in checkout `repo`, then the
+    /// browser open of `page`. `opened` is true when the browser started
+    /// for a found PR.
     PullRequestOpen {
         repo: PathBuf,
         branch: String,
         remote: Option<String>,
         lookup: PrLookup,
+        page: PrPage,
+        opened: bool,
+    },
+    /// `gc` browser open of the CI page of the known PR `pr_ref`. `opened`
+    /// is true when the browser started.
+    PullRequestCiOpen {
+        pr_ref: String,
         opened: bool,
     },
     /// "View remotely" check, then the browser open. `page` is the page URL,
@@ -868,10 +876,16 @@ pub(crate) struct Interpreter {
     /// Latest blame previous-change request; a newer one replaces it
     /// before spawn.
     blame_previous: Option<(u64, String, Box<crate::git::LineBlame>)>,
-    /// Queued `gx` opens: checkout, branch. Each has its own slot.
-    pr_opens: VecDeque<(PathBuf, String)>,
+    /// Queued `gx` opens, and `gc` opens that look the PR up first:
+    /// checkout, branch, page. Each has its own slot.
+    pr_opens: VecDeque<(PathBuf, String, PrPage)>,
+    /// Queued `gc` opens of a known PR: its ref and CI URL. Each has its
+    /// own [`UserTag::PullRequest`] slot and runs after the queued `gx`
+    /// opens.
+    pr_ci_opens: VecDeque<(String, String)>,
     /// Queued "View remotely" opens: checkout, target. Each has its own
-    /// [`UserTag::PullRequest`] slot and runs after the queued `gx` opens.
+    /// [`UserTag::PullRequest`] slot and runs after the queued `gx` and
+    /// `gc` opens.
     remote_views: VecDeque<(PathBuf, RemoteTarget)>,
     /// Queued badge lookups: checkout, branch. A checkout and branch that
     /// is queued or running is not queued again.
@@ -959,6 +973,7 @@ impl Interpreter {
             doctor_inflight: false,
             blame_previous: None,
             pr_opens: VecDeque::new(),
+            pr_ci_opens: VecDeque::new(),
             remote_views: VecDeque::new(),
             pr_badges: VecDeque::new(),
             pr_badge_jobs: HashSet::new(),
@@ -1690,8 +1705,12 @@ impl Interpreter {
                     self.sched.enqueue_user(UserTag::QuickOpen);
                 }
             }
-            Effect::OpenPullRequest { repo, branch } => {
-                self.pr_opens.push_back((repo, branch));
+            Effect::OpenPullRequest { repo, branch, page } => {
+                self.pr_opens.push_back((repo, branch, page));
+                self.sched.enqueue_user(UserTag::PullRequest);
+            }
+            Effect::OpenPullRequestCi { pr_ref, url } => {
+                self.pr_ci_opens.push_back((pr_ref, url));
                 self.sched.enqueue_user(UserTag::PullRequest);
             }
             Effect::ViewRemotely { checkout, target } => {
@@ -2529,9 +2548,14 @@ impl Interpreter {
                 branch,
                 remote,
                 lookup,
+                page,
                 opened,
             } => {
-                state.apply_pr_open(&repo, &branch, remote, lookup, opened);
+                state.apply_pr_open(&repo, &branch, remote, lookup, page, opened);
+                self.mark();
+            }
+            JobOutcome::PullRequestCiOpen { pr_ref, opened } => {
+                state.apply_pr_ci_open(&pr_ref, opened);
                 self.mark();
             }
             JobOutcome::RemoteView { page, opened } => {
@@ -2609,7 +2633,10 @@ impl Interpreter {
     fn fill_pr_badge_slots(&mut self) {
         let free = PR_BADGE_LOOKUPS_MAX.saturating_sub(self.pr_badges_running);
         let waiting = self.pr_badges.len() + self.pr_details.len();
-        let wanted = self.pr_opens.len() + self.remote_views.len() + waiting.min(free);
+        let wanted = self.pr_opens.len()
+            + self.pr_ci_opens.len()
+            + self.remote_views.len()
+            + waiting.min(free);
         for _ in self.sched.queued_user_tag(UserTag::PullRequest)..wanted {
             self.sched.enqueue_user(UserTag::PullRequest);
         }
@@ -3536,7 +3563,7 @@ impl Interpreter {
                 let cwd = opts.cwd.clone();
                 let cli = self.pr_cli;
                 let cancel = Arc::clone(&self.pr_cancel);
-                if let Some((repo, branch)) = self.pr_opens.pop_front() {
+                if let Some((repo, branch, page)) = self.pr_opens.pop_front() {
                     let open = self.pr_opener;
                     spawn(
                         id,
@@ -3544,17 +3571,33 @@ impl Interpreter {
                             let run = |argv: &[String]| cli(argv, &cancel);
                             let remote = remote_url_for_branch(&cwd.join(&repo), &branch);
                             let lookup = lookup(remote.as_deref(), &branch, &run);
-                            let opened = match &lookup {
-                                PrLookup::Found(pr) => open(&pr.url, &cancel).is_ok(),
-                                PrLookup::NoPr | PrLookup::Failed(_) => false,
+                            let opened = match (&lookup, page) {
+                                (PrLookup::Found(pr), PrPage::Pr) => open(&pr.url, &cancel).is_ok(),
+                                (PrLookup::Found(pr), PrPage::Ci) => {
+                                    is_web_url(&pr.ci_link.url)
+                                        && open(&pr.ci_link.url, &cancel).is_ok()
+                                }
+                                (PrLookup::NoPr | PrLookup::Failed(_), _) => false,
                             };
                             JobOutcome::PullRequestOpen {
                                 repo,
                                 branch,
                                 remote,
                                 lookup,
+                                page,
                                 opened,
                             }
+                        }),
+                    );
+                    return;
+                }
+                if let Some((pr_ref, url)) = self.pr_ci_opens.pop_front() {
+                    let open = self.pr_opener;
+                    spawn(
+                        id,
+                        Box::new(move || JobOutcome::PullRequestCiOpen {
+                            pr_ref,
+                            opened: open(&url, &cancel).is_ok(),
                         }),
                     );
                     return;
@@ -8546,6 +8589,7 @@ mod tests {
             Effect::OpenPullRequest {
                 repo: PathBuf::from("app"),
                 branch: "feature".into(),
+                page: PrPage::Pr,
             }
         );
         let opts = opts(state);
@@ -8618,6 +8662,154 @@ mod tests {
             let status = run_gx(&mut state, cli_must_not_run, opener_ok);
             assert_eq!(status, "no PR for feature", "{remote:?}");
             assert!(opened_urls().is_empty());
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    const FAILED_JOB_URL: &str = "https://github.com/octo/demo/actions/runs/1/job/2";
+    const GL_MR_URL: &str = "https://gitlab.com/acme/services/api/-/merge_requests/12";
+    const GL_PIPELINE_URL: &str = "https://gitlab.com/acme/services/api/-/pipelines/99";
+
+    /// `gh pr list`: PR #7 with a failed check that links its job.
+    fn gh_failed_pr(argv: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
+        assert_eq!(argv.first().map(String::as_str), Some("gh"), "{argv:?}");
+        Ok(format!(
+            r#"[{{"number":7,"state":"OPEN","url":"{PR_URL}","headRefName":"feature","isCrossRepository":false,"statusCheckRollup":[{{"name":"test","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"{FAILED_JOB_URL}"}}]}}]"#
+        ))
+    }
+
+    /// `glab api`: MR !12 on the list call, its failed head pipeline on the
+    /// MR call.
+    fn glab_failed_mr(argv: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
+        assert_eq!(argv.first().map(String::as_str), Some("glab"), "{argv:?}");
+        let endpoint = argv.last().expect("endpoint");
+        if endpoint.contains("merge_requests?") {
+            Ok(format!(
+                r#"[{{"iid":12,"state":"opened","web_url":"{GL_MR_URL}","source_branch":"feature","source_project_id":1,"target_project_id":1}}]"#
+            ))
+        } else {
+            Ok(format!(
+                r#"{{"iid":12,"head_pipeline":{{"id":99,"status":"failed","web_url":"{GL_PIPELINE_URL}"}}}}"#
+            ))
+        }
+    }
+
+    /// `gc` on the focused row with fake CLI and opener; returns the effect
+    /// it dispatched and the status.
+    fn run_gc(
+        state: &mut AppState,
+        cli: PrCliRunner,
+        opener: PrUrlOpener,
+    ) -> (Effect, StatusMessage) {
+        let mut interp = Interpreter::with_cap(4);
+        interp.pr_cli = cli;
+        interp.pr_opener = opener;
+        state.status = StatusMessage::default();
+        let effect = state.dispatch(Action::OpenPullRequestCi);
+        let opts = opts(state);
+        interp.interpret_sync(state, &opts, effect.clone(), &Action::OpenPullRequestCi);
+        (effect, state.status.clone())
+    }
+
+    /// `gc` with no PR answer yet looks the PR up first, then opens the CI
+    /// page: the failed check (GitHub), the head pipeline (GitLab).
+    #[test]
+    fn gc_looks_the_pr_up_then_opens_its_ci_page_on_both_forges() {
+        let cases: [(&str, &str, PrCliRunner, &str, &str); 2] = [
+            (
+                "ws-effect-gc-github",
+                "git@github.com:octo/demo.git",
+                gh_failed_pr,
+                FAILED_JOB_URL,
+                "#7",
+            ),
+            (
+                "ws-effect-gc-gitlab",
+                "git@gitlab.com:acme/services/api.git",
+                glab_failed_mr,
+                GL_PIPELINE_URL,
+                "!12",
+            ),
+        ];
+        for (tag, remote, cli, url, pr_ref) in cases {
+            let (root, mut state) = pr_app(tag, Some(remote));
+            let _ = opened_urls();
+            let (effect, status) = run_gc(&mut state, cli, opener_ok);
+            assert!(
+                matches!(
+                    effect,
+                    Effect::OpenPullRequest {
+                        page: PrPage::Ci,
+                        ..
+                    }
+                ),
+                "{effect:?}"
+            );
+            assert_eq!(status, format!("opened CI for {pr_ref}"));
+            assert_eq!(status.kind(), StatusKind::Ok);
+            assert_eq!(opened_urls(), vec![url.to_string()]);
+            assert_eq!(
+                state.pr_badge(Path::new("app")),
+                Some(crate::tui::pr_status::PrState::CiFailed),
+                "the lookup feeds the badge"
+            );
+
+            // Now the answer is known: the next `gc` opens at once, with no
+            // forge call.
+            let (effect, status) = run_gc(&mut state, cli_must_not_run, opener_ok);
+            assert_eq!(
+                effect,
+                Effect::OpenPullRequestCi {
+                    pr_ref: pr_ref.into(),
+                    url: url.into(),
+                }
+            );
+            assert_eq!(status, format!("opened CI for {pr_ref}"));
+            assert_eq!(opened_urls(), vec![url.to_string()]);
+
+            let (_, status) = run_gc(&mut state, cli_must_not_run, opener_fails);
+            assert_eq!(status, "could not open CI");
+            assert_eq!(status.kind(), StatusKind::Error);
+            assert_eq!(opened_urls(), vec![url.to_string()]);
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn gc_reports_no_pr_a_failed_lookup_and_a_failed_open() {
+        let cases: [(&str, PrCliRunner, PrUrlOpener, &str, StatusKind, usize); 3] = [
+            (
+                "ws-effect-gc-no-pr",
+                gh_no_pr,
+                opener_ok,
+                "no PR for feature",
+                StatusKind::Warn,
+                0,
+            ),
+            (
+                "ws-effect-gc-cli-fails",
+                gh_fails,
+                opener_ok,
+                "could not look up PR for feature",
+                StatusKind::Error,
+                0,
+            ),
+            (
+                "ws-effect-gc-open-fails",
+                gh_failed_pr,
+                opener_fails,
+                "could not open CI",
+                StatusKind::Error,
+                1,
+            ),
+        ];
+        for (tag, cli, opener, text, kind, opens) in cases {
+            let (root, mut state) = pr_app(tag, Some("git@github.com:octo/demo.git"));
+            let _ = opened_urls();
+            let (_, status) = run_gc(&mut state, cli, opener);
+            assert_eq!(status, text);
+            assert_eq!(status.kind(), kind, "{text}");
+            assert_eq!(opened_urls().len(), opens, "{text}");
             let _ = std::fs::remove_dir_all(root);
         }
     }
@@ -8794,6 +8986,7 @@ mod tests {
             Effect::OpenPullRequest {
                 repo: PathBuf::from("missing-open"),
                 branch: "feature".into(),
+                page: PrPage::Pr,
             },
         ] {
             schedule_effect(&mut interp, &mut state, effect, &Action::None);
@@ -8863,6 +9056,7 @@ mod tests {
             Effect::OpenPullRequest {
                 repo: PathBuf::from("missing-open"),
                 branch: "feature".into(),
+                page: PrPage::Pr,
             },
             &Action::OpenPullRequest,
         );

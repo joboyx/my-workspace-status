@@ -327,6 +327,19 @@ mod tests {
             classify_busy_action(&Action::OpenPullRequest),
             BusyAction::Handle
         );
+        // `gc`, Copy URL, and the PR refreshes write no git state either.
+        for action in [
+            Action::OpenPullRequestCi,
+            Action::CopyPullRequestUrl,
+            Action::RefreshPullRequest,
+            Action::RefreshPullRequests,
+        ] {
+            assert_eq!(
+                classify_busy_action(&action),
+                BusyAction::Handle,
+                "{action:?}"
+            );
+        }
         // `gw` too: its remote check and browser open run on the pool.
         assert_eq!(
             classify_busy_action(&Action::ViewRemotely),

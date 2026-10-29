@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use super::drill::CommitFileSource;
+use super::pull_request::PrPage;
 use super::remote_view::RemoteTarget;
 use super::theme::ThemeId;
 
@@ -211,6 +212,25 @@ pub enum Action {
     /// The target is a tree checkout row or a graph worktree row with a
     /// branch. Any other row sets the status `no PR for this row`.
     OpenPullRequest,
+    /// Open the CI page of the PR of the focused branch row in the browser
+    /// (`gc`, palette Open PR CI).
+    ///
+    /// Same target rule as [`Self::OpenPullRequest`]. A PR the badge already
+    /// knows opens its [`super::pr_status::CiLink`] at once; with no answer
+    /// yet, a fresh lookup finds the PR first.
+    OpenPullRequestCi,
+    /// Copy the URL of the PR of the focused branch row (palette Copy PR
+    /// URL, the PR popover Copy URL line).
+    CopyPullRequestUrl,
+    /// Look the PR of the focused branch row up again now ("Refresh this
+    /// PR"; `r` inside a pinned PR popover).
+    ///
+    /// In a pinned popover it refreshes the PRs the popover shows and keeps
+    /// the popover open; a pinned popover with no PR section ignores it.
+    RefreshPullRequest,
+    /// Look the PR of every pollable checkout up again now (palette Refresh
+    /// pull requests).
+    RefreshPullRequests,
     /// Open the forge web page of the focused entity in the browser (`gw`).
     ///
     /// A repository row opens the repository home, a checkout or graph
@@ -726,7 +746,8 @@ pub enum Effect {
         /// Snapshot change of a changed file; `None` reads the file.
         change: Option<crate::snapshot::FileChange>,
     },
-    /// Look up the PR of `branch` on a worker, then open it in the browser.
+    /// Look up the PR of `branch` on a worker, then open its `page` in the
+    /// browser.
     ///
     /// The lookup is always fresh and also updates the PR cache. The status
     /// line reports the result.
@@ -735,6 +756,18 @@ pub enum Effect {
         repo: PathBuf,
         /// Branch checked out there.
         branch: String,
+        /// The PR page (`gx`) or its CI page (`gc`).
+        page: PrPage,
+    },
+    /// Open the CI page `url` of the known PR `pr_ref` in the browser on a
+    /// worker (`gc` on a row whose PR answer is known). No lookup runs.
+    ///
+    /// The status line reports the result.
+    OpenPullRequestCi {
+        /// `#318` (GitHub) or `!12` (GitLab), for the status line.
+        pr_ref: String,
+        /// The PR's [`super::pr_status::CiLink::url`].
+        url: String,
     },
     /// Check on a worker that `target` is on the remote of `checkout`, then
     /// open its forge page in the browser.

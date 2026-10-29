@@ -59,6 +59,28 @@ pub fn lookup_failed_status(branch: &str) -> String {
 /// Status line when the browser could not be started.
 pub const OPEN_FAILED: &str = "could not open PR";
 
+/// Status line when PR `pr_ref` (`#318`, `!12`) has no CI page to open.
+pub fn no_ci_status(pr_ref: &str) -> String {
+    format!("no CI for {pr_ref}")
+}
+
+/// Status line when the browser could not be started for a CI page.
+pub const CI_OPEN_FAILED: &str = "could not open CI";
+
+/// Status line after the browser started for the CI page of PR `pr_ref`.
+pub fn ci_opened_status(pr_ref: &str) -> String {
+    format!("opened CI for {pr_ref}")
+}
+
+/// The page of a PR that a `gx` / `gc` open shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrPage {
+    /// The PR itself (`gx`).
+    Pr,
+    /// Its CI page, [`PullRequest::ci_link`] (`gc`).
+    Ci,
+}
+
 /// Code-hosting service a remote points at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Forge {
@@ -1513,7 +1535,7 @@ const CMD_SPECIAL: &[char] = &['&', '|', '^', '%', '<', '>', '"'];
 /// True for an `http://` or `https://` URL with no whitespace, control
 /// characters, or [`CMD_SPECIAL`] characters: the only kind handed to a
 /// browser command.
-fn is_web_url(url: &str) -> bool {
+pub(crate) fn is_web_url(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
     (lower.starts_with("https://") || lower.starts_with("http://"))
         && !url

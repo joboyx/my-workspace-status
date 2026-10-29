@@ -478,8 +478,11 @@ impl AppState {
     /// gating classifies Enter as this action.
     pub(crate) fn popover_run_action(&self) -> Option<Action> {
         match self.focused_popover_line()? {
-            PopoverLine::Action(command) => Some(command.action.clone()),
-            PopoverLine::Text(_) | PopoverLine::Note(_) | PopoverLine::Field { .. } => None,
+            PopoverLine::Action { command, .. } => Some(command.action.clone()),
+            PopoverLine::Text(_)
+            | PopoverLine::Note(_)
+            | PopoverLine::Rule
+            | PopoverLine::Field { .. } => None,
         }
     }
 
@@ -493,8 +496,11 @@ impl AppState {
         }
         let sections = self.open_popover_sections();
         match flat_lines(&sections).get(line_index(&sections, press)?)? {
-            PopoverLine::Action(command) => Some(command.action.clone()),
-            PopoverLine::Text(_) | PopoverLine::Note(_) | PopoverLine::Field { .. } => None,
+            PopoverLine::Action { command, .. } => Some(command.action.clone()),
+            PopoverLine::Text(_)
+            | PopoverLine::Note(_)
+            | PopoverLine::Rule
+            | PopoverLine::Field { .. } => None,
         }
     }
 
@@ -524,8 +530,11 @@ impl AppState {
     /// disabled one keeps the popover and shows the gate reason, like the
     /// palette ([`Self::popover_line_refusal`]). View remotely opens the
     /// entity of the line's own section ([`Self::view_remotely_at`]), not
-    /// the focused row: a tag chip on a commit row opens the tag. Any other
-    /// line does nothing.
+    /// the focused row: a tag chip on a commit row opens the tag. The PR
+    /// lines of a PR section (Open PR, the CI page, Copy URL, Refresh this
+    /// PR) act on that section's PR ([`Self::run_pr_action_at`]), so the
+    /// graph header chip's popover acts on its checkout, not the focused
+    /// graph row. Any other line does nothing.
     fn run_popover_line(&mut self, line: Option<usize>) -> Effect {
         if !self.popover_pinned() {
             self.close_popover();
@@ -537,7 +546,7 @@ impl AppState {
             (None, Some(popover)) => focused_line(&flat_lines(&sections), popover.focus_line),
             (None, None) => None,
         };
-        let Some((_, section, PopoverLine::Action(command))) =
+        let Some((_, section, PopoverLine::Action { command, .. })) =
             index.and_then(|index| section_lines(&sections).nth(index))
         else {
             return Effect::None;
@@ -548,24 +557,45 @@ impl AppState {
             return Effect::None;
         }
         self.close_popover();
-        match &command.action {
-            Action::ViewRemotely => self.view_remotely_at(kind, &target),
-            action => self.dispatch_palette_action(action.clone()),
+        match (&command.action, &target) {
+            (Action::ViewRemotely, _) => self.view_remotely_at(kind, &target),
+            (action, IconTarget::PullRequest(repo)) => self
+                .run_pr_action_at(action, repo)
+                .unwrap_or_else(|| self.dispatch_palette_action(action.clone())),
+            (action, _) => self.dispatch_palette_action(action.clone()),
         }
     }
 
     /// `y`: copy the focused line of the pinned popover. It stays open.
+    ///
+    /// On the PR section's Copy URL line it copies the PR URL, as the
+    /// line's `y` chip says, not the line's title.
     fn copy_popover_line(&mut self) -> Effect {
         if !self.popover_pinned() {
             self.close_popover();
             return Effect::None;
         }
-        match self.focused_popover_line() {
-            Some(line) => Effect::CopyClipboard {
-                text: line.copy_text(),
-                announce: true,
-            },
-            None => Effect::None,
+        let sections = self.open_popover_sections();
+        let focus = self
+            .popover
+            .as_ref()
+            .and_then(|popover| focused_line(&flat_lines(&sections), popover.focus_line));
+        let Some((_, section, line)) = focus.and_then(|index| section_lines(&sections).nth(index))
+        else {
+            return Effect::None;
+        };
+        if let (PopoverLine::Action { command, .. }, IconTarget::PullRequest(repo)) =
+            (line, &section.target)
+        {
+            if command.action == Action::CopyPullRequestUrl {
+                if let Some(effect) = self.run_pr_action_at(&command.action, repo) {
+                    return effect;
+                }
+            }
+        }
+        Effect::CopyClipboard {
+            text: line.copy_text(),
+            announce: true,
         }
     }
 
@@ -841,8 +871,8 @@ pub(crate) type PopoverLineKey = (bool, &'static str);
 fn line_key(line: &PopoverLine) -> Option<PopoverLineKey> {
     match line {
         PopoverLine::Field { label, .. } => Some((false, label)),
-        PopoverLine::Action(command) => Some((true, command.title)),
-        PopoverLine::Text(_) | PopoverLine::Note(_) => None,
+        PopoverLine::Action { command, .. } => Some((true, command.title)),
+        PopoverLine::Text(_) | PopoverLine::Note(_) | PopoverLine::Rule => None,
     }
 }
 
@@ -1336,13 +1366,19 @@ mod tests {
         assert_eq!(
             titles(&lines[4]),
             vec![
-                IconKind::PrInReview.spec().meaning.to_string(),
-                "#7".into(),
+                "#7".to_string(),
                 "loading…".into(),
+                "> get review".into(),
+                "just now".into(),
                 "https://github.com/octo/demo/pull/7".into(),
+                String::new(),
                 "Open PR".into(),
+                "Open checks".into(),
+                "Copy URL".into(),
+                "Refresh this PR".into(),
             ]
         );
+        assert_eq!(sections[4].heading(), "PR · in review");
         assert_eq!(
             titles(&lines[2]),
             vec![

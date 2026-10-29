@@ -325,8 +325,8 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "refresh now",
             },
             HelpEntry {
-                keys: "gx",
-                desc: "open branch PR in browser",
+                keys: "gx gc",
+                desc: "open branch PR · its CI",
             },
             HelpEntry {
                 keys: "gw",
@@ -1266,9 +1266,9 @@ mod tests {
             HELP_GROUPS[1]
                 .entries
                 .iter()
-                .find(|e| e.keys == "gx")
+                .find(|e| e.keys == "gx gc")
                 .map(|e| e.desc),
-            Some("open branch PR in browser")
+            Some("open branch PR · its CI")
         );
         assert_eq!(
             HELP_GROUPS[1]

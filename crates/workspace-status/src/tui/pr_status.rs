@@ -159,8 +159,6 @@ pub struct PrNotes {
     pub changes_requested: bool,
 }
 
-// Only tests read this until the PR popover and alert surfaces do.
-#[cfg_attr(not(test), allow(dead_code))]
 impl PrNotes {
     /// `has conflicts`, `unresolved threads`, `changes requested`: the notes
     /// that hold, in that order.
@@ -272,8 +270,6 @@ pub enum CiLinkKind {
     Pipeline,
 }
 
-// Only tests read this until the PR popover and alert surfaces do.
-#[cfg_attr(not(test), allow(dead_code))]
 impl CiLinkKind {
     /// Action label: `Open failed check`, `Open running check`,
     /// `Open checks`, or `Open pipeline`.
