@@ -903,7 +903,11 @@ fn rev_list_count(cwd: &Path, range: &str) -> Option<usize> {
 
 /// Tell a force-pushed upstream apart from a normal divergence.
 ///
-/// Returns `None` unless `branch` is ahead of and behind `upstream`.
+/// Returns `None` unless `upstream` resolves to a remote-tracking ref
+/// (`refs/remotes/...`) and `branch` is ahead of and behind it. Only a
+/// remote-tracking ref moves on fetch or push alone, so only its reflog
+/// tells "was on the upstream" apart from "is yours". The reflog of a local
+/// upstream branch (`branch.<b>.remote = .`) records your own local moves.
 /// With `F` = `merge-base --fork-point`, `MB` = `merge-base` and `tip` = the
 /// branch tip:
 ///
@@ -921,14 +925,18 @@ pub fn classify_upstream_rewrite(
     branch: &str,
     upstream: &str,
 ) -> Option<UpstreamRewrite> {
+    let upstream_ref = exec_git(&["rev-parse", "--symbolic-full-name", upstream], cwd);
+    if !upstream_ref.starts_with("refs/remotes/") {
+        return None;
+    }
     let tip = rev_parse_quiet(&format!("refs/heads/{branch}"), cwd)?;
-    let upstream_tip = rev_parse_quiet(upstream, cwd)?;
+    let upstream_tip = rev_parse_quiet(&upstream_ref, cwd)?;
     let (ahead, behind) = ahead_behind(&tip, &upstream_tip, cwd)?;
     if ahead == 0 || behind == 0 {
         return None;
     }
     let merge_base = merge_base(cwd, &tip, &upstream_tip).ok().flatten()?;
-    let fork_point = exec_git(&["merge-base", "--fork-point", upstream, &tip], cwd);
+    let fork_point = exec_git(&["merge-base", "--fork-point", &upstream_ref, &tip], cwd);
     if fork_point.is_empty() || fork_point == merge_base {
         return None;
     }
@@ -977,7 +985,8 @@ fn other_worktree_on_branch(cwd: &Path, branch: &str) -> Option<String> {
 /// Guards, re-checked right before the write and in this order: HEAD is on
 /// `branch`; the branch tip equals `expected_tip` (the tip the confirm
 /// showed); no other worktree has `branch` checked out; no tracked changes;
-/// [`classify_upstream_rewrite`] still finds a rewrite with nothing of yours.
+/// [`classify_upstream_rewrite`] still finds a rewrite with nothing of yours
+/// (so `upstream` must be a remote-tracking ref).
 /// The reset runs on the upstream sha resolved once before the checks, so a
 /// fetch in between cannot move the target. `--keep` never discards local
 /// changes. The old tip stays reachable through
@@ -5066,6 +5075,46 @@ filename new.txt
         );
         let found = classify_upstream_rewrite(&linked, "main", "origin/main").unwrap();
         assert_eq!((found.yours, found.dropped), (0, 2));
+    }
+
+    #[test]
+    fn classify_upstream_rewrite_is_none_for_a_local_branch_upstream() {
+        // `feature` tracks the local `main` (`branch.feature.remote = .`). The
+        // `main` reflog records your own local moves, so `--fork-point` would
+        // call your unpushed commits "dropped, none yours".
+        let dir = unique_dir("ws-rewrite-local-upstream");
+        init_repo(&dir);
+        git(
+            &dir,
+            &["checkout", "-q", "-b", "feature", "--track", "main"],
+        );
+        for name in ["f1.txt", "f2.txt"] {
+            fs::write(dir.join(name), "work\n").unwrap();
+            git(&dir, &["add", "-A"]);
+            git(&dir, &["commit", "-q", "-m", name]);
+        }
+        let tip = exec_git(&["rev-parse", "feature"], &dir);
+        git(&dir, &["checkout", "-q", "main"]);
+        git(&dir, &["merge", "-q", "--ff-only", "feature"]);
+        git(&dir, &["reset", "-q", "--hard", "ORIG_HEAD"]);
+        fs::write(dir.join("m1.txt"), "main\n").unwrap();
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "m1"]);
+        git(&dir, &["checkout", "-q", "feature"]);
+        // the hazard is real: the local reflog puts the fork point at the tip
+        assert_eq!(ahead_behind("feature", "main", &dir), Some((2, 1)));
+        assert_eq!(
+            exec_git(&["merge-base", "--fork-point", "main", "feature"], &dir),
+            tip
+        );
+
+        assert_eq!(classify_upstream_rewrite(&dir, "feature", "main"), None);
+        assert_eq!(
+            reset_keep_to_upstream(&dir, "feature", "main", &tip),
+            Err("main no longer looks rewritten".to_string())
+        );
+        assert_eq!(exec_git(&["rev-parse", "feature"], &dir), tip);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn rewrite_fixture_r0() -> (RewriteFixture, String) {

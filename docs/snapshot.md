@@ -52,7 +52,7 @@ Omitted optional keys: `primaryRepo`, `defaultBranchOverride`, `upstreamRewrite`
 
 ### `upstreamRewrite` object
 
-A maintainer force-pushed the upstream and dropped commits the local branch still holds. The snapshot worker classifies it only for a `diverged` branch, with `git merge-base --fork-point` over the upstream reflog. A branch with no reflog entry for the old upstream (a clone made after the rewrite, an expired reflog) is a normal divergence and has no object.
+A maintainer force-pushed the upstream and dropped commits the local branch still holds. The snapshot worker classifies it only for a `diverged` branch whose upstream is a remote-tracking ref (a branch that tracks a local branch never gets the object), with `git merge-base --fork-point` over the upstream reflog. A branch with no reflog entry for the old upstream (a clone made after the rewrite, an expired reflog) is a normal divergence and has no object.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
