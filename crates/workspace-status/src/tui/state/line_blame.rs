@@ -706,6 +706,7 @@ mod tests {
                 is_new,
                 is_committed: false,
                 vs_worktree: false,
+                committed_label: false,
                 error: None,
             },
         );

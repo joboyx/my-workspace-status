@@ -81,13 +81,13 @@ The file diff (`draw_diff_pane`) and the clean-file view (`draw_file_body`, an E
 | --- | --- | --- |
 | `click-row` | A click on a line row moves the line cursor there. | none |
 | `cursor-middle` | `j` / `k` keep the cursor near the vertical middle. | none |
-| `section-label` | The section label names the diff's side (`STAGED`, `UNSTAGED`, `COMMITTED`, …). | none |
+| `section-label` | The section label names the diff's side (`STAGED`, `UNSTAGED`, `COMMITTED`, …). | `depth_2_commit_and_stash_diffs_paint_committed_in_boxed_and_flat_panes`, `commit_and_stash_diffs_label_committed_and_keep_partial_patch_kinds` |
 | `full-context` | `Ctrl-o` toggles the whole-file context. | none |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `click-row` | `cursor-middle` | `section-label` | `full-context` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `diff-d0` | Workspace | 0 (file focused) | right | boxed, flat | `draw_right`, `draw_diff_pane`, `click_diff` | supported | supported | supported | supported |
-| `diff-d2` | Workspace | 2 | right | boxed, flat | `draw_right`, `draw_diff_pane`, `click_diff`, `compute_commit_diff` | supported | supported | gap: G18 | supported |
+| `diff-d2` | Workspace | 2 | right | boxed, flat | `draw_right`, `draw_diff_pane`, `click_diff`, `compute_commit_diff`, `from_commit_lines` | supported | supported | supported | supported |
 | `compare-diff` | Compare | - | right | boxed, flat | `draw_right`, `draw_diff_pane`, `click_diff` | supported | supported | supported | supported |
 | `explorer-diff` | Explorer (changed file) | - | right | boxed, flat | `draw_explorer_tab`, `draw_diff_pane`, `explorer_click` | gap: G12 | supported | supported | n/a: I4, Explorer diffs always show the whole file and `Ctrl-o` refuses |
 | `explorer-file` | Explorer (clean file) | - | right | boxed, flat | `draw_explorer_tab`, `draw_file_body`, `click_file_tab` | supported | n/a: I3, the clean-file view scrolls at the edge | n/a: a clean file has no diff sections | n/a: I4, the Explorer refuses `Ctrl-o` and a clean file shows the whole file |
@@ -190,7 +190,7 @@ Long labels and lines pan sideways: Shift-←/→ and `h` / `l` on the focused p
 | `shift-keys` | Shift-←/→ pan the focused pane. | `list_pan_shifts_tree_and_graph_without_stealing_fold` |
 | `h-l` | `h` / `l` pan the focused row or line. | `h_l_fold_commit_file_dirs_and_pan_on_files`, `focused_diff_l_increases_pan_h_decreases_tree_still_folds` |
 | `hwheel` | The horizontal wheel pans the pane under the pointer. | `mouse_hscroll_and_shift_wheel_map_to_horizontal_pan` |
-| `pan-limit` | The pan stops where the pane's own longest row ends. | `commit_file_and_diff_search_and_pan_clamp` |
+| `pan-limit` | The pan stops where the pane's own longest row ends. | `commit_file_and_diff_search_and_pan_clamp`, `compare_file_pan_clamps_to_the_compare_list_not_the_parked_drill` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `shift-keys` | `h-l` | `hwheel` | `pan-limit` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -199,7 +199,7 @@ Long labels and lines pan sideways: Shift-←/→ and `h` / `l` on the focused p
 | `graph-d1` | Workspace | 1 | left | boxed, flat | `pan_left_pane`, `graph_max_col`, `mouse_pan` | supported | supported | supported | supported |
 | `files-d1` | Workspace | 1 | right | boxed, flat | `pan_right_pane`, `commit_file_max_col`, `mouse_pan` | supported | supported | supported | supported |
 | `files-d2` | Workspace | 2 | left | boxed, flat | `pan_left_pane`, `commit_file_max_col`, `mouse_pan` | supported | supported | supported | supported |
-| `compare-files` | Compare | - | left | boxed, flat | `pan_left_pane`, `commit_file_max_col`, `mouse_pan` | supported | supported | supported | gap: G3 |
+| `compare-files` | Compare | - | left | boxed, flat | `pan_left_pane`, `commit_file_max_col`, `commit_file_comment_scope`, `mouse_pan` | supported | supported | supported | supported |
 | `summary` | Workspace 2, Compare | - | right | boxed, flat | `draw_folder_summary`, `pan_right_pane` | gap: G22 | gap: G22 | gap: G22 | gap: G22 |
 | `explorer-tree` | Explorer | - | left | boxed, flat | `dispatch_explorer_tab`, `explorer_wheel`, `draw_explorer_tree` | gap: G13 | n/a: as on the Workspace tree (I1), `h` / `l` move through folders | gap: G13 | gap: G13 |
 | `diff-d0` | Workspace | 0 (file focused) | right | boxed, flat | `pan_diff_content`, `diff_pan_max` | supported | supported | supported | supported |
@@ -280,7 +280,6 @@ Each open gap is tracked by its id. Fixing one turns its cells into `supported` 
 | --- | --- | --- | --- |
 | G1 | `commit-footer` | Graph footer meta: coloured ref chips, popovers on chips, `parent <id>` | Depth-2 commit-files footer: the meta is plain text (`commit_detail_meta`) |
 | G2 | `commit-footer` | Graph footer top rule drags (`record_commit_msg_rule`) | Depth-2 commit-files footer: its rule paints but records no hit |
-| G3 | `horizontal-pan` | Depth-2 commit-file list: the pan limit comes from its rows | Compare-tab file list: `pan_left_pane` picks the limit from the parked Workspace `drill`, and `commit_file_max_col` reads the comment scope from it |
 | G4 | `scrollbars` | Graph list scrollbar drag and track click (`SplitDrag::GraphScrollbar`) | File diff vertical bar: `SplitHit` / `SplitDrag` have no diff vertical variant; `diff_scrollbar_x` is read only in tests |
 | G5 | `scrollbars` | Graph list and file diff paint a vertical scrollbar | Workspace tree, commit-file lists, Explorer tree |
 | G6 | `scrollbars` | Explorer pane on a changed file (`draw_diff_pane`) | Explorer pane on a clean file: `draw_file_body` paints no bar |
@@ -295,7 +294,6 @@ Each open gap is tracked by its id. Fixing one turns its cells into `supported` 
 | G15 | `file-lists` | Workspace tree and commit-file lists: devicons, icon hits, popovers, `gh` | Explorer tree rows: `explorer_row_segments` sets `icon: None` and records no hit; `focused_row_icons` is empty on an Explorer tab |
 | G16 | `row-marks` | Workspace tree and compare list paint the reviewed eye and comment marks | Explorer tree paints no mark (code comment on `explorer_toggle_reviewed`); the docs do not say so |
 | G17 | `watch-flash` | Tree, graph, and commit-file rows flash on a watch reload | Explorer tree: the flash is passed as `None` in `draw_explorer_tree` |
-| G18 | `line-viewers` | Compare-tab diff labels its section `COMMITTED` (`DiffContent::from_compare_lines`) | Workspace depth-2 commit / stash diff labels it `UNSTAGED`: `compute_commit_diff` builds it with `DiffContent::from_lines`, which sets `is_committed: false` |
 | G19 | `commit-footer` | Graph footer message text paints in the subject colour (`pal.repo`) | Depth-2 commit-files footer paints its message in `muted` |
 | G20 | `commit-footer` | Graph footer pins the meta row at the bottom, under the message | Depth-2 commit-files footer puts title and meta on top, message under them; no recorded reason |
 | G21 | `row-marks` | Commit-file and compare list rows paint the reviewed eye, comment marks, and the watch-reload flash | Folder summary rows of the same files: `draw_folder_summary` paints `file_change_segments` with no mark and no flash |

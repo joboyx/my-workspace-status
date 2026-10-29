@@ -12824,6 +12824,65 @@ mod tests {
         );
     }
 
+    /// A Workspace depth-2 commit diff and stash diff, built by the drill's
+    /// own loader (`compute_commit_diff`), paint the section label
+    /// `COMMITTED` as the compare diff does, in boxed and flat panes.
+    #[test]
+    fn depth_2_commit_and_stash_diffs_paint_committed_in_boxed_and_flat_panes() {
+        use crate::testutil::{git, init_repo};
+        let cwd = crate::testutil::unique_dir("ws-d2-committed-paint");
+        let dir = cwd.join("app");
+        init_repo(&dir);
+        std::fs::write(dir.join("README.md"), "# seed\ncommitted line\n").unwrap();
+        git(&dir, &["commit", "-q", "-am", "edit"]);
+        std::fs::write(dir.join("README.md"), "# seed\nstashed line\n").unwrap();
+        git(&dir, &["stash", "push", "-q"]);
+        let sources = [
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: "HEAD".into(),
+            },
+            super::super::drill::CommitFileSource::Stash {
+                stash_ref: "stash@{0}".into(),
+            },
+        ];
+        for source in sources {
+            let content = super::super::app::compute_commit_diff(
+                &cwd,
+                "app",
+                &source,
+                "README.md",
+                None,
+                None,
+            );
+            assert!(!content.unstaged.is_empty(), "{source:?}: diff loaded");
+            for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+                let case = format!("{source:?} {background:?}");
+                let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+                let mut state = AppState::new(cwd.clone(), snapshot, true);
+                state.background = background;
+                state.open_commit_diff(
+                    "app".into(),
+                    source.clone(),
+                    vec![super::super::drill::CommitFile {
+                        status: "M".into(),
+                        path: "README.md".into(),
+                        old_path: None,
+                        stat: None,
+                    }],
+                    0,
+                    "README.md".into(),
+                    content.clone(),
+                );
+                let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                let text = buffer_text(&terminal);
+                assert!(text.contains("COMMITTED"), "{case}:\n{text}");
+                assert!(!text.contains("UNSTAGED"), "{case}:\n{text}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
     #[test]
     fn search_match_paints_filter_bg_on_compare_commit_file_rows() {
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);

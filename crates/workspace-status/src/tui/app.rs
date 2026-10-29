@@ -893,10 +893,10 @@ pub(crate) fn compute_commit_diff(
     let dir = cwd.join(repo);
     match source {
         CommitFileSource::Commit { commit_id } => {
-            DiffContent::from_lines(diff_commit_file_ctx(&dir, commit_id, path, context))
+            DiffContent::from_commit_lines(diff_commit_file_ctx(&dir, commit_id, path, context))
         }
         CommitFileSource::Stash { stash_ref } => {
-            DiffContent::from_lines(diff_stash_file_ctx(&dir, stash_ref, path, context))
+            DiffContent::from_commit_lines(diff_stash_file_ctx(&dir, stash_ref, path, context))
         }
         CommitFileSource::Worktree => {
             if let Some((file_repo, change)) = focused_file {
@@ -2265,6 +2265,87 @@ mod tests {
             Some(base_ref_not_found(&"0".repeat(40)))
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A depth-2 commit or stash drill diff labels its one section
+    /// `COMMITTED`, as a compare diff does. `is_committed` stays false, so
+    /// `build_partial_patch` answers every kind and range exactly as for
+    /// the plain unstaged text of the same lines, and each row keeps the
+    /// same line reference (blame and go to line read it).
+    #[test]
+    fn commit_and_stash_diffs_label_committed_and_keep_partial_patch_kinds() {
+        use crate::tui::diff::{
+            build_diff_rows, build_partial_patch, row_line_ref, DiffRow, DiffSection,
+            PartialPatchKind,
+        };
+        use crate::tui::split::DiffMode;
+        let cwd = crate::testutil::unique_dir("ws-d2-committed-label");
+        let dir = cwd.join("app");
+        init_repo(&dir);
+        fs::write(dir.join("README.md"), "# seed\nold line\nkeep\n").unwrap();
+        git(&dir, &["commit", "-q", "-am", "base"]);
+        fs::write(dir.join("README.md"), "# seed\nnew line\nkeep\nadded\n").unwrap();
+        git(&dir, &["commit", "-q", "-am", "edit"]);
+        fs::write(dir.join("README.md"), "# seed\nnew line\nstashed\n").unwrap();
+        git(&dir, &["stash", "push", "-q"]);
+        let cases = [
+            (
+                CommitFileSource::Commit {
+                    commit_id: exec_git(&["rev-parse", "HEAD"], &dir),
+                },
+                diff_commit_file_ctx(&dir, "HEAD", "README.md", None),
+            ),
+            (
+                CommitFileSource::Stash {
+                    stash_ref: "stash@{0}".into(),
+                },
+                diff_stash_file_ctx(&dir, "stash@{0}", "README.md", None),
+            ),
+        ];
+        for (source, lines) in cases {
+            let content = compute_commit_diff(&cwd, "app", &source, "README.md", None, None);
+            let plain = DiffContent::from_lines(lines);
+            assert!(!content.is_committed, "{source:?}");
+            assert_eq!(content.unstaged, plain.unstaged, "{source:?}");
+            for mode in [DiffMode::Inline, DiffMode::SideBySide] {
+                let rows = build_diff_rows(&content, mode);
+                assert_eq!(
+                    rows.first(),
+                    Some(&DiffRow::Section(DiffSection::Committed)),
+                    "{source:?} {mode:?}"
+                );
+                assert!(
+                    !rows
+                        .iter()
+                        .any(|r| matches!(r, DiffRow::Section(DiffSection::Unstaged))),
+                    "{source:?} {mode:?}"
+                );
+                for row in 0..rows.len() {
+                    assert_eq!(
+                        row_line_ref(&content, mode, row),
+                        row_line_ref(&plain, mode, row),
+                        "{source:?} {mode:?} row {row}"
+                    );
+                }
+                for kind in [
+                    PartialPatchKind::Stage,
+                    PartialPatchKind::Unstage,
+                    PartialPatchKind::Revert,
+                    PartialPatchKind::RevertCommitted,
+                ] {
+                    for start in 0..rows.len() {
+                        for end in start..rows.len() {
+                            assert_eq!(
+                                build_partial_patch(&content, mode, start, end, kind, "README.md"),
+                                build_partial_patch(&plain, mode, start, end, kind, "README.md"),
+                                "{source:?} {mode:?} {kind:?} {start}..={end}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let _ = fs::remove_dir_all(&cwd);
     }
 
     #[test]

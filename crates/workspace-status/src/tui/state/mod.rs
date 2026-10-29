@@ -149,6 +149,7 @@ static EMPTY_DIFF: DiffContent = DiffContent {
     is_new: false,
     is_committed: false,
     vs_worktree: false,
+    committed_label: false,
     error: None,
 };
 
@@ -4449,7 +4450,8 @@ impl AppState {
     ///
     /// Every `DrillView::Diff` returns `None` (commit, stash, and worktree
     /// drills). That is the only write stop for those views:
-    /// `DiffContent::from_unified` leaves `is_committed: false`. Workspace
+    /// their content leaves `is_committed: false` (`DiffContent::from_commit_lines`
+    /// only relabels the section `COMMITTED`). Workspace
     /// file diffs (`set_diff`) keep `DrillView::Graph` and still emit
     /// `Effect::ApplyCachedPatch`.
     fn visual_write_target(&self) -> Option<(String, String)> {
@@ -17842,6 +17844,135 @@ mod tests {
         );
     }
 
+    /// Pan max of the shown commit-file list, from the segments its rows
+    /// paint (label, badge, comment mark, viewed eye).
+    fn painted_commit_file_pan_max(app: &AppState) -> usize {
+        let width = app.layout.tree_width.max(1) as usize;
+        app.commit_file_rows()
+            .iter()
+            .map(|row| {
+                let segs = app.commit_file_row_paint_segments(row);
+                let label: usize = segs
+                    .segments
+                    .iter()
+                    .map(|s| crate::helpers::visible_width(&s.text))
+                    .sum();
+                let trailing: usize = segs
+                    .trailing
+                    .iter()
+                    .map(|s| crate::helpers::visible_width(&s.text))
+                    .sum();
+                crate::tui::search::list_row_pan_max(label, row.depth, trailing, width)
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The compare-tab file list pans to the end of its own longest row,
+    /// whatever the parked Workspace view holds: a tree with longer rows
+    /// (depth 0), or a depth-2 commit drill whose comment marks the same
+    /// path (the compare range has no comment there).
+    #[test]
+    fn compare_file_pan_clamps_to_the_compare_list_not_the_parked_drill() {
+        // Parked depth-0 tree whose file row is far longer than the list.
+        let mut snap = repo("app", true);
+        snap.changes = vec![FileChange {
+            path: format!("deep/nested/{}/tail.rs", "x".repeat(60)),
+            staged_status: None,
+            unstaged_status: Some("M".into()),
+            untracked: false,
+            old_path: None,
+        }];
+        let snapshot = build_workspace_snapshot(&[snap], &[], false, &[]);
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        focus_file(&mut app, "tail.rs");
+        app.layout.tree_width = 16;
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+        app.focus = FocusPane::Left;
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        let _ = app.apply_compare_range(
+            tab_id,
+            gen,
+            Ok(compare_range_load(&["src/compare_only_file.rs"])),
+        );
+        let want = painted_commit_file_pan_max(&app);
+        assert!(want > 0, "the compare row overflows the pane");
+        app.dispatch(Action::PanDiff(1_000));
+        assert_eq!(
+            usize::from(app.left_col_offset),
+            want,
+            "pan stops at the end of the longest compare row, not the parked tree's"
+        );
+        app.dispatch(Action::ScrollWheel {
+            col: 2,
+            row: 4,
+            delta: -1_000,
+            horizontal: true,
+        });
+        assert_eq!(app.left_col_offset, 0);
+        app.dispatch(Action::ScrollWheel {
+            col: 2,
+            row: 4,
+            delta: 1_000,
+            horizontal: true,
+        });
+        assert_eq!(
+            usize::from(app.left_col_offset),
+            want,
+            "hwheel clamps the same"
+        );
+
+        // Parked depth-2 commit drill with a line comment on README.md.
+        let mut app = state();
+        // The unit-test store file is shared; start from an empty store.
+        app.comment_store = CommentStore::new();
+        let commit_id = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        app.open_commit_diff(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: commit_id.into(),
+            },
+            vec![CommitFile {
+                status: "M".into(),
+                path: "README.md".into(),
+                old_path: None,
+                stat: None,
+            }],
+            0,
+            "README.md".into(),
+            DiffContent::from_unified("@@ -1 +1 @@\n-old\n+new\n"),
+        );
+        app.comment_store = put_comment(
+            &app.comment_store,
+            CommentKey::CommitLine {
+                repo: "app".into(),
+                sha: commit_id.into(),
+                path: "README.md".into(),
+                line: 1,
+                end_line: 1,
+            },
+            "drill-note",
+        );
+        app.layout.tree_width = 8;
+        let drill_max = painted_commit_file_pan_max(&app);
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+        app.focus = FocusPane::Left;
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        let _ = app.apply_compare_range(tab_id, gen, Ok(compare_range_load(&["README.md"])));
+        assert!(app.drill.is_diff(), "the Workspace drill stays parked");
+        let want = painted_commit_file_pan_max(&app);
+        assert!(
+            want > 0 && want < drill_max,
+            "the drill's comment mark widens only its own row: {want} vs {drill_max}"
+        );
+        app.dispatch(Action::PanDiff(1_000));
+        assert_eq!(usize::from(app.left_col_offset), want);
+    }
+
     #[test]
     fn tree_mouse_hscroll_pans_without_moving_cursor() {
         let mut snap = repo("app", true);
@@ -19330,6 +19461,7 @@ diff --git a/README.md b/README.md
             is_new: false,
             is_committed: false,
             vs_worktree: false,
+            committed_label: false,
             error: None,
         }
     }
@@ -19375,6 +19507,7 @@ diff --git a/README.md b/README.md
                 is_new: false,
                 is_committed: false,
                 vs_worktree: false,
+                committed_label: false,
                 error: None,
             },
         );
