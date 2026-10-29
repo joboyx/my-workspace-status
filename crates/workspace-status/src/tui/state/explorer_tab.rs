@@ -4094,7 +4094,7 @@ mod tests {
         quick_open_with(&mut app, "app", &["notes.txt"], &[0]);
         assert_eq!(app.explorer_live_reload("app"), None);
         assert_eq!(tab(&app).active_inner().unwrap().stamp, stamp);
-        app.dispatch(Action::QuickOpenCancel);
+        app.dispatch(Action::QuickOpenEscape);
 
         // A status change that makes the file changed swaps in a diff.
         let mut changes = app.snapshot.repos[0].changes.clone();
@@ -4541,7 +4541,9 @@ mod tests {
         };
         type_nord(&mut app);
         assert_eq!(app.theme, ThemeId::Nord, "focus previews the row");
-        app.dispatch(Action::QuickOpenCancel);
+        // Esc clears the typed filter, then closes.
+        app.dispatch(Action::QuickOpenEscape);
+        app.dispatch(Action::QuickOpenEscape);
         assert_eq!(app.theme, before, "Esc restores the open-time theme");
 
         type_nord(&mut app);

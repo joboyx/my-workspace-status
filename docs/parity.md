@@ -272,6 +272,24 @@ A row that a watch reload adds or changes flashes and fades.
 | `summary` | Workspace 2, Compare | - | right | boxed, flat | `draw_folder_summary` | gap: G21; `draw_folder_summary` passes no flash |
 | `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree` | gap: G17 |
 
+### `query-esc` — Esc clears the dialog query, then closes
+
+The query dialogs that paint over the panes: the search-in-files dialog (Ctrl-f, or `#` in Quick Open) and Quick Open in files and commands mode. Esc with typed text clears it through the same edit path as Backspace; Esc on an empty query (a bare `>` in commands mode) closes the dialog; a closed search dialog parks for the next Ctrl-f. The footer Esc chip reads `Esc clear` or `Esc close` to match. The filter pickers keep one-press Esc (I5).
+
+| Feature | What | Tests |
+| --- | --- | --- |
+| `two-step-esc` | Esc with a typed query clears it and keeps the dialog open; Esc on an empty query closes it. | `pty_search_in_files_esc_clears_query_then_closes`, `pty_quick_open_files_esc_clears_query_then_closes`, `pty_quick_open_commands_esc_keeps_prefix_then_closes`, `pty_quick_open_hash_search_esc_clears_query_then_closes`, `ctrl_f_toggles_and_esc_clears_then_parks`, `esc_from_the_results_zone_clears_the_query_and_its_hits`, `esc_clears_the_files_query_then_closes`, `esc_clears_commands_text_back_to_the_prefix_then_closes` |
+
+| Surface | Tab | Depth | Pane | Looks | Code anchors | `two-step-esc` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `search-files` | any | - | overlay | boxed, flat | `search_files_key_action`, `escape_search_files`, `search_files_edit`, `close_search_files`, `footer_hints` | supported |
+| `quick-open-files` | any | - | overlay | boxed, flat | `quick_open_key_action`, `escape_quick_open`, `quick_open_edit`, `close_quick_open`, `cleared_query`, `draw_quick_open` | supported |
+| `quick-open-commands` | any | - | overlay | boxed, flat | `quick_open_key_action`, `escape_quick_open`, `quick_open_edit`, `close_quick_open`, `cleared_query`, `sync_theme_preview`, `draw_quick_open` | supported |
+| `quick-open-search` | any | - | overlay | boxed, flat | `quick_open_edit`, `open_search_files_with`, `search_files_key_action`, `escape_search_files`, `search_files_edit` | supported |
+| `branch-picker` | any | - | overlay | boxed, flat | `key_to_action`, `dispatch_write`, `draw_branch_picker` | n/a: I5, one Esc closes a filter picker |
+| `compare-picker` | any | - | overlay | boxed, flat | `key_to_action`, `dispatch_keymap`, `draw_compare_picker` | n/a: I5, one Esc closes a filter picker |
+| `graph-focus-picker` | Workspace | - | overlay | boxed, flat | `key_to_action`, `dispatch_keymap`, `draw_graph_focus_picker` | n/a: I5, one Esc closes a filter picker |
+
 ## Open gaps
 
 Each open gap is tracked by its id. Fixing one turns its cells into `supported` (or `n/a: <reason>`) and removes its row here.
@@ -310,3 +328,4 @@ Each open gap is tracked by its id. Fixing one turns its cells into `supported` 
 | I2 | Explorer file pane: `h` gives focus back to the tree, `l` does nothing | `docs/tui-model.md` (Explorer keys) |
 | I3 | Clean-file view: `j` / `k` scroll at the edge, not the middle | `docs/tui-rust.md` (viewport rule), `docs/tui-model.md` (sticky file view top) |
 | I4 | Explorer: `??` untracked, `●` dirty folder, no `t` toggle, `Ctrl-o` refused | `docs/tui-model.md` (Explorer tabs) |
+| I5 | Filter pickers (branch, compare, graph focus): one Esc closes, typed filter or not. Quick Open and the search-in-files dialog take two presses with a typed query. | `docs/tui-rust.md` (picker key rule), `docs/tui-model.md` (Quick Open keys) |

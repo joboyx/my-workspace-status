@@ -415,7 +415,7 @@ impl AppState {
             | Action::QuickOpenChar(_)
             | Action::QuickOpenBackspace
             | Action::QuickOpenSubmit
-            | Action::QuickOpenCancel => self.dispatch_quick_open(action),
+            | Action::QuickOpenEscape => self.dispatch_quick_open(action),
             Action::ToggleSearchFiles
             | Action::SearchFilesChar(_)
             | Action::SearchFilesBackspace
@@ -423,7 +423,7 @@ impl AppState {
             | Action::SearchFilesPage(_)
             | Action::SearchFilesToggleScope
             | Action::SearchFilesToggleOption(_)
-            | Action::SearchFilesCancel
+            | Action::SearchFilesEscape
             | Action::SearchFilesSubmit
             | Action::SearchFilesEdit => self.dispatch_search_files(action),
             Action::CompareVsDefault => self.compare_vs_default(),

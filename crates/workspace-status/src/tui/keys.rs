@@ -960,7 +960,7 @@ fn quick_open_key_action(key: KeyEvent) -> Action {
         return Action::QuickOpenMove(delta);
     }
     match key.code {
-        KeyCode::Esc => Action::QuickOpenCancel,
+        KeyCode::Esc => Action::QuickOpenEscape,
         KeyCode::Enter => Action::QuickOpenSubmit,
         KeyCode::Backspace => Action::QuickOpenBackspace,
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -974,18 +974,18 @@ fn quick_open_key_action(key: KeyEvent) -> Action {
 ///
 /// Both zones: list moves and PgUp / PgDn move the highlight (and enter
 /// the results zone), Enter opens the highlighted hit, Tab widens to all
-/// repos, Esc closes. The query zone types every other printable key
-/// without a command modifier. The results zone also moves on `j` / `k`
-/// and edits on `e`; any other printable key or Backspace goes back to the
-/// query and applies there. No key flips a match option: a click on an
-/// option chip does (see [`event_to_action_with`]), so an Alt chord stays
-/// [`Action::None`] here.
+/// repos, Esc clears the query (and closes on an empty query). The query
+/// zone types every other printable key without a command modifier. The
+/// results zone also moves on `j` / `k` and edits on `e`; any other
+/// printable key or Backspace goes back to the query and applies there. No
+/// key flips a match option: a click on an option chip does (see
+/// [`event_to_action_with`]), so an Alt chord stays [`Action::None`] here.
 fn search_files_key_action(key: KeyEvent, results: bool) -> Action {
     if let Some(delta) = list_overlay_move(key) {
         return Action::SearchFilesMove(delta);
     }
     match key.code {
-        KeyCode::Esc => Action::SearchFilesCancel,
+        KeyCode::Esc => Action::SearchFilesEscape,
         KeyCode::Enter => Action::SearchFilesSubmit,
         KeyCode::Tab => Action::SearchFilesToggleScope,
         KeyCode::PageDown => Action::SearchFilesPage(1),
@@ -3535,7 +3535,7 @@ mod tests {
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Esc), quick_open(), false, false),
-            Action::QuickOpenCancel
+            Action::QuickOpenEscape
         );
         assert_eq!(
             event_to_action(&ctrl(KeyCode::Char('c')), quick_open(), false, false),
@@ -3739,7 +3739,7 @@ mod tests {
         assert_eq!(at(key(KeyCode::PageUp)), Action::SearchFilesPage(-1));
         assert_eq!(at(key(KeyCode::Backspace)), Action::SearchFilesBackspace);
         assert_eq!(at(key(KeyCode::Tab)), Action::SearchFilesToggleScope);
-        assert_eq!(at(key(KeyCode::Esc)), Action::SearchFilesCancel);
+        assert_eq!(at(key(KeyCode::Esc)), Action::SearchFilesEscape);
         assert_eq!(at(ctrl(KeyCode::Char('f'))), Action::ToggleSearchFiles);
         assert_eq!(at(ctrl(KeyCode::Char('c'))), Action::CtrlC);
         assert_eq!(at(key(KeyCode::Enter)), Action::SearchFilesSubmit);
@@ -3779,7 +3779,7 @@ mod tests {
         assert_eq!(at(key(KeyCode::Enter)), Action::SearchFilesSubmit);
         assert_eq!(at(key(KeyCode::Backspace)), Action::SearchFilesBackspace);
         assert_eq!(at(key(KeyCode::Tab)), Action::SearchFilesToggleScope);
-        assert_eq!(at(key(KeyCode::Esc)), Action::SearchFilesCancel);
+        assert_eq!(at(key(KeyCode::Esc)), Action::SearchFilesEscape);
     }
 
     #[test]

@@ -1108,7 +1108,7 @@ mod tests {
         assert!(app.hovered_icon().is_none());
         assert_eq!(app.peek_remaining_ms(t0), None, "no dwell armed");
 
-        app.dispatch(Action::SearchFilesCancel);
+        app.dispatch(Action::SearchFilesEscape);
         assert!(app.hovered_icon().is_some(), "closed: the icon hovers");
     }
 

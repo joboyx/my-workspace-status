@@ -4,7 +4,8 @@ use std::path::Path;
 use crate::harness::{user_config_file, PtySession, BASELINE_USER_CONFIG, COLS, ROWS};
 use crate::seed::daily_workspace;
 use crate::support::{
-    apply_palette_theme, open_command_palette, type_palette_filter, GIT_WAIT, WAIT,
+    apply_palette_theme, esc_clears_palette_filter, open_command_palette, type_palette_filter,
+    GIT_WAIT, WAIT,
 };
 
 /// Painted chrome for one built-in theme. Surfaces / pills / headings are
@@ -509,9 +510,11 @@ fn pty_palette_theme_rows_apply_every_theme() {
 ///
 /// 1. `:` `dracula` paints Dracula with the palette open, no toast.
 /// 2. `x` leaves no row focused: Tokyo Night again. Backspace: Dracula.
-/// 3. Esc closes the palette on Tokyo Night, with no theme toast.
+/// 3. Esc clears the filter and a second Esc closes the palette on Tokyo
+///    Night, with no theme toast.
 /// 4. `:` `theme` lands on `Theme: Tokyo Night`; Ctrl-n moves to
-///    `Theme: Monokai` and paints it; Esc puts Tokyo Night back.
+///    `Theme: Monokai` and paints it; Esc, Esc closes and puts Tokyo Night
+///    back.
 /// 5. The store file still does not exist. Then `:` `nord` Enter applies
 ///    Nord, toasts `theme: Nord`, and the store names `nord`.
 ///
@@ -567,6 +570,7 @@ fn pty_palette_theme_row_previews_and_esc_restores() {
         "Backspace focuses Theme: Dracula again",
     );
 
+    esc_clears_palette_filter(&mut tui);
     tui.esc();
     tui.wait_pred(
         |screen| !screen.contains("Theme: Dracula"),
@@ -589,6 +593,7 @@ fn pty_palette_theme_row_previews_and_esc_restores() {
     );
     tui.ctrl_letter('n');
     wait_preview(&tui, monokai, tokyo, "Ctrl-n onto Theme: Monokai previews");
+    esc_clears_palette_filter(&mut tui);
     tui.esc();
     tui.wait_pred(
         |screen| !screen.contains("Theme: Monokai"),
