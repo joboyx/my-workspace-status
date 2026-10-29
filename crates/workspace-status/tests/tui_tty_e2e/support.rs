@@ -1436,6 +1436,14 @@ pub fn step_until_changed<K: PartialEq>(
     );
 }
 
+/// Longer than the 400 ms `gg` / `zz` and double-click windows.
+///
+/// Sleep this long only after a paint has shown the first key (or click)
+/// was handled: it arrived before the paint, so the next one arrives at
+/// least this long after it and cannot pair with it, however loaded the
+/// machine is. This is a lower bound, not a timeout.
+pub const PAST_CHORD_WINDOW: Duration = Duration::from_millis(450);
+
 /// The status row shows an armed search chip (`/query`).
 pub fn search_chip_armed(screen: &str) -> bool {
     status_row(screen)

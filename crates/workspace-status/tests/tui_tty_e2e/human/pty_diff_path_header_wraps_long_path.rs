@@ -1,7 +1,7 @@
 use crate::common::hscroll::{TREE_HSCROLL_DIR, TREE_HSCROLL_FILE, TREE_HSCROLL_TAIL};
 use crate::harness::PtySession;
 use crate::seed::{daily_workspace, seed_long_path_file};
-use crate::support::{right_pane, tree_cursor_on, GIT_WAIT, SETTLE_MS, WAIT};
+use crate::support::{right_pane, tree_cursor_on, wait_screen, GIT_WAIT, WAIT};
 
 /// Body line of the seeded untracked file.
 const BODY: &str = "export const pan";
@@ -78,14 +78,13 @@ fn pty_diff_path_header_wraps_long_path() {
     tui.wait_contains("README.md", WAIT);
 
     tui.search("very-long");
-    tui.wait_pred(
+    // The asserts read the frame that showed the loaded diff.
+    let screen = wait_screen(
+        &tui,
         long_path_diff_loaded,
         "search loads the long-path file diff; header starts with the path prefix",
         GIT_WAIT,
     );
-    tui.wait_ms(SETTLE_MS);
-
-    let screen = tui.screen();
     let path = full_path();
     let header = header_text(&screen).unwrap_or_default();
     assert!(

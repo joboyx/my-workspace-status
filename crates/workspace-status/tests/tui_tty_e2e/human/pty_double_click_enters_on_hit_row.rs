@@ -1,13 +1,17 @@
 use crate::harness::{tree_row_containing, PtySession};
 use crate::seed::daily_workspace;
 use crate::support::{
-    sgr_double_click, title_has_diff, title_has_files, title_has_graph, tree_has, GIT_WAIT,
-    RIGHT_PANE_COL, SETTLE_MS, TREE_DEPTH1_CHEVRON_COL, TREE_LABEL_COL, WAIT,
+    prove_keys_handled, sgr_double_click, title_has_diff, title_has_files, title_has_graph,
+    tree_has, GIT_WAIT, RIGHT_PANE_COL, TREE_DEPTH1_CHEVRON_COL, TREE_LABEL_COL, WAIT,
 };
 
-/// Live `last_click` window is 400ms. Wait past it so the next pair is a
-/// fresh double-click, not a continuation of a setup click.
-const DOUBLE_CLICK_EXPIRE_MS: u64 = 500;
+/// Column shift for a setup single click: the same row, one cell right of
+/// where the double-click pair lands.
+///
+/// A double-click needs both presses on the same cell, so a click on the
+/// next cell can never pair with the pair's first press, however close in
+/// time they arrive. No sleep has to outlast the 400 ms window.
+const SETUP_COL_SHIFT: u16 = 1;
 
 /// 0-based screen row whose full line contains `needle` (right pane included).
 fn screen_row_containing(screen: &str, needle: &str) -> Option<u16> {
@@ -48,12 +52,11 @@ fn pty_double_click_enters_on_hit_row() {
         WAIT,
     );
 
-    tui.wait_ms(DOUBLE_CLICK_EXPIRE_MS);
     let merger_row = tree_row_containing(&tui.screen(), "merger")
         .unwrap_or_else(|| panic!("merger row:\n{}", tui.screen()));
-    tui.sgr_click(TREE_LABEL_COL, merger_row);
+    tui.sgr_click(TREE_LABEL_COL + SETUP_COL_SHIFT, merger_row);
     tui.wait_contains("WIP on graph", GIT_WAIT);
-    tui.wait_ms(DOUBLE_CLICK_EXPIRE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         |screen| {
             title_has_graph(screen)
@@ -88,7 +91,6 @@ fn pty_double_click_enters_on_hit_row() {
     tui.tab();
     tui.wait_contains("Working tree", WAIT);
     tui.key('j');
-    tui.wait_ms(SETTLE_MS);
     tui.enter();
     tui.wait_pred(
         |screen| {
@@ -109,11 +111,10 @@ fn pty_double_click_enters_on_hit_row() {
         WAIT,
     );
 
-    tui.wait_ms(DOUBLE_CLICK_EXPIRE_MS);
     let graph_row = screen_row_containing(&tui.screen(), "WIP on graph")
         .unwrap_or_else(|| panic!("graph WIP row:\n{}", tui.screen()));
-    tui.sgr_click(RIGHT_PANE_COL, graph_row);
-    tui.wait_ms(DOUBLE_CLICK_EXPIRE_MS);
+    tui.sgr_click(RIGHT_PANE_COL + SETUP_COL_SHIFT, graph_row);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         |screen| {
             screen.contains("WIP on graph")
@@ -138,11 +139,10 @@ fn pty_double_click_enters_on_hit_row() {
         GIT_WAIT,
     );
 
-    tui.wait_ms(DOUBLE_CLICK_EXPIRE_MS);
     let file_row = screen_row_containing(&tui.screen(), "wip.txt")
         .unwrap_or_else(|| panic!("wip.txt row:\n{}", tui.screen()));
-    tui.sgr_click(RIGHT_PANE_COL, file_row);
-    tui.wait_ms(DOUBLE_CLICK_EXPIRE_MS);
+    tui.sgr_click(RIGHT_PANE_COL + SETUP_COL_SHIFT, file_row);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         |screen| {
             title_has_files(screen)
@@ -167,9 +167,11 @@ fn pty_double_click_enters_on_hit_row() {
         GIT_WAIT,
     );
 
-    tui.wait_ms(DOUBLE_CLICK_EXPIRE_MS);
+    // A click on the next cell first, so the leaf pair below cannot pair
+    // with the last press of the pair above.
+    tui.sgr_click(RIGHT_PANE_COL + SETUP_COL_SHIFT, file_row);
     sgr_double_click(&mut tui, RIGHT_PANE_COL, file_row);
-    tui.wait_ms(SETTLE_MS);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         |screen| {
             title_has_diff(screen)

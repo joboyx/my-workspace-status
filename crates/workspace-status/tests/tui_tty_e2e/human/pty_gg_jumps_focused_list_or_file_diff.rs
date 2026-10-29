@@ -3,16 +3,15 @@ use std::fs;
 use crate::harness::PtySession;
 use crate::seed::{daily_workspace, seed_many_commit_files, seed_tall_graph};
 use crate::support::{
-    graph_cursor_on, graph_pane_focused, page_file_body_visible, panes_files_focused,
-    panes_tree_focused_diff_unfocused, panes_tree_unfocused_diff_focused, right_pane,
-    seed_tree_page_files, title_has_files, tree_cursor_on, tree_has, tree_pane_focused, GIT_WAIT,
-    WAIT,
+    csi_u_tap, graph_cursor_on, graph_pane_focused, page_file_body_visible, panes_files_focused,
+    panes_tree_focused_diff_unfocused, panes_tree_unfocused_diff_focused, prove_keys_handled,
+    right_pane, seed_tree_page_files, send_gesture, step_cursor, title_has_files, tree_cursor_on,
+    tree_has, tree_pane_focused, GIT_WAIT, WAIT,
 };
 
 const DIFF_FILE: &str = "keepmid-diff.rs";
 const DIFF_TOP: &str = "keepmid-line-0";
 const FILES_TOP: &str = "keepmid-00.txt";
-const KEY_GAP_MS: u64 = 50;
 const LEAVE_TOP_TRIES: usize = 48;
 
 /// CSI-u unmodified letter (`CSI code ; 1 : 1 u` press, `: 3` release).
@@ -25,11 +24,10 @@ fn csi_u_letter(tui: &mut PtySession, letter: char) {
     tui.csi_u(codepoint, 1, 3);
 }
 
-/// CSI-u `gg` chord: two `g` press+release pairs inside the 400ms window.
+/// CSI-u `gg` chord: two `g` press+release pairs in one write, so they
+/// share one arrival and stay inside the 400ms window.
 fn csi_u_gg(tui: &mut PtySession) {
-    csi_u_letter(tui, 'g');
-    tui.wait_ms(KEY_GAP_MS);
-    csi_u_letter(tui, 'g');
+    send_gesture(tui, &[&csi_u_tap('g'), &csi_u_tap('g')]);
 }
 
 /// CSI-u Enter (`CSI 13 ; 1 : 1 u` press, `: 3` release).
@@ -56,9 +54,9 @@ fn right_cursor_on(screen: &str, needle: &str) -> bool {
         .any(|line| line.contains('\u{258C}') && line.contains(needle))
 }
 
+/// One `j`, then wait for the focused cursor to move before the next key.
 fn send_j(tui: &mut PtySession) {
-    tui.key('j');
-    tui.wait_ms(KEY_GAP_MS);
+    step_cursor(tui, |tui| tui.key('j'), |_| true);
 }
 
 /// First Esc may clear an armed pane search. A second Esc runs only while
@@ -190,11 +188,13 @@ fn pty_gg_jumps_focused_list_or_file_diff() {
         WAIT,
     );
 
+    // A lone `g` moves nothing; the probe's `?` also ends the pending
+    // chord. Expiry of the window is pinned by the unit tests.
     csi_u_letter(&mut tui, 'g');
-    tui.wait_ms(500);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         tree_on_readme_not_root,
-        "lone CSI-u g expires with no move (gg would land on workspace)",
+        "lone CSI-u g moves nothing (gg would land on workspace)",
         WAIT,
     );
 

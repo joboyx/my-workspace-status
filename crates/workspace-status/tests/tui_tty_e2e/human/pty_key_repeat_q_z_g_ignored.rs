@@ -140,7 +140,7 @@ fn pty_key_repeat_q_z_g_ignored() {
         "CSI-u g press after Repeat g stays on app (Repeat g did not arm the g chord as a press)",
         WAIT,
     );
-    tui.wait_ms(500);
+    prove_keys_handled(&mut tui);
     tui.wait_pred(
         on_app_expanded,
         "lone g press expires; still on app (not delayed gg)",

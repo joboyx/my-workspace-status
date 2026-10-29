@@ -2,22 +2,12 @@ use std::fs;
 
 use crate::harness::PtySession;
 use crate::seed::{compare_ahead_workspace, git};
-use crate::support::{tree_cursor_on, tree_has, GIT_WAIT, WAIT};
+use crate::support::{csi_u_tap, send_gesture, tree_cursor_on, tree_has, GIT_WAIT, WAIT};
 
-const KEY_GAP_MS: u64 = 50;
-
-/// CSI-u unmodified letter (`CSI code ; 1 : 1 u` press, `: 3` release).
-fn csi_u_letter(tui: &mut PtySession, letter: char) {
-    let codepoint = u32::from(letter.to_ascii_lowercase());
-    tui.csi_u(codepoint, 1, 1);
-    tui.csi_u(codepoint, 1, 3);
-}
-
-/// CSI-u `gg` chord used by other compare human tests.
+/// CSI-u `gg` chord (press + release per tap) in one write, so both taps
+/// share one arrival and stay inside the 400ms window.
 fn csi_u_gg(tui: &mut PtySession) {
-    csi_u_letter(tui, 'g');
-    tui.wait_ms(KEY_GAP_MS);
-    csi_u_letter(tui, 'g');
+    send_gesture(tui, &[&csi_u_tap('g'), &csi_u_tap('g')]);
 }
 
 /// Ahead of `origin/main` with only nested files under `src/`.

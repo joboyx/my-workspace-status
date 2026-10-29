@@ -3,7 +3,7 @@ use crate::seed::daily_workspace;
 use crate::support::{
     crumb_row, documented_launch_first_paint, pane_unstaged_readme, prove_keys_handled,
     readme_unstaged_badge, status_row, tree_cursor_on, tree_dir_collapsed, tree_dir_expanded,
-    tree_has, GIT_WAIT, WAIT,
+    tree_has, GIT_WAIT, PAST_CHORD_WINDOW, WAIT,
 };
 
 /// Daily seed: dirty README stays, `app` stays expanded, No updates stays folded.
@@ -181,7 +181,9 @@ fn pty_z_folds_focused_repo() {
         "Tab returns to the folded app row",
         WAIT,
     );
-    tui.wait_ms(500);
+    // Every earlier z painted above, so it arrived before now: a sleep past
+    // the window puts this z's arrival outside it (a lower bound).
+    std::thread::sleep(PAST_CHORD_WINDOW);
     tui.key('z');
     tui.wait_pred(
         app_repo_expanded_before_z,
