@@ -187,7 +187,7 @@ Icons and marks on rows record an icon hit (`LayoutHit::icon_hits`): hover peeks
 
 ### `commit-popovers` — Commit popovers
 
-Every painted commit short hash, commit time, and commit author is an icon hit (`IconTarget::Commit`): hover peeks, a click pins, `y` copies the focused field, and Esc closes. `gh` does not list them: they are mouse only. The commit-files footer (depth 2, and a Diff commit vs parent compare tab) paints the graph footer's meta row (`commit-footer`), so its hash, parent ids, author, and date take the same hits as the graph footer; a stash drill's footer paints its stash id and date, no author.
+Every painted commit short hash, commit time, and commit author is an icon hit (`IconTarget::Commit`): hover peeks, a click pins, `y` copies the focused field, and Esc closes. `gh` does not list them: they are mouse only. The commit-files footer (depth 2, and a Diff commit vs parent compare tab) paints the graph footer's meta row (`commit-footer`), so its hash, parent ids, author, and date take the same hits as the graph footer; a stash drill's footer paints its stash id and date, no author. The fallback footer of a commit a watch reload dropped from the loaded graph (`not in the loaded graph`) paints only the short hash, with no time or author: that hash opens the hash card, which loads off the event thread.
 
 | Feature | What | Tests |
 | --- | --- | --- |

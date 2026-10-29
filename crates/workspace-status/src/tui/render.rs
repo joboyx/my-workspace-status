@@ -3093,7 +3093,8 @@ struct CommitFooter {
     /// Checkout whose forge the short hash links to.
     checkout: Option<String>,
     /// Full id of the commit whose short hash on the meta row links to its
-    /// forge page. `None` for a stash, the working tree, or a range.
+    /// forge page, and in the fallback footer (no [`Self::row`]) opens its
+    /// hash card. `None` for a stash, the working tree, or a range.
     commit_id: Option<String>,
 }
 
@@ -3108,9 +3109,11 @@ struct CommitFooter {
 /// author, date) is pinned on the bottom row. Records the wheel box of an
 /// overflowing message, the more-below hint, the ref chip hits (their
 /// popovers), the commit popover hits of the hash, parent ids, author, and
-/// date ([`commit_meta_icon`]), the hash link, and the expanded footer's
-/// top rule ([`record_commit_detail_msg_rule`]), so a drag on it resizes the same
-/// [`AppState::commit_msg_lines`] the graph footer rule does.
+/// date ([`commit_meta_icon`]), the hash link (in the fallback footer of a
+/// commit with no graph row, also the hash's commit popover hit), and the
+/// expanded footer's top rule ([`record_commit_detail_msg_rule`]), so a
+/// drag on it resizes the same [`AppState::commit_msg_lines`] the graph
+/// footer rule does.
 fn draw_commit_footer(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -3182,22 +3185,38 @@ fn draw_commit_footer(
     state.layout.icon_hits.extend(hits);
     // The meta row (bottom row) holds the commit's short hash, also in the
     // fallback footer: link it to the commit page.
-    let link = match (&footer.commit_id, &footer.checkout) {
-        (Some(commit_id), Some(checkout)) => state
-            .commit_link(std::path::Path::new(checkout), commit_id)
-            .and_then(|url| {
-                painted_text_link(
-                    frame.buffer_mut(),
-                    body.bottom() - 1,
-                    body.x,
-                    body.right(),
-                    short_id(commit_id),
-                    url,
-                )
-            }),
-        _ => None,
+    let (Some(commit_id), Some(checkout)) = (&footer.commit_id, &footer.checkout) else {
+        return;
     };
-    state.layout.links.extend(link);
+    let y = body.bottom() - 1;
+    let Some((x, width)) = painted_text_span(
+        frame.buffer_mut(),
+        y,
+        body.x,
+        body.right(),
+        short_id(commit_id),
+    ) else {
+        return;
+    };
+    if let Some(url) = state.commit_link(std::path::Path::new(checkout), commit_id) {
+        state.layout.links.push(LinkHit { y, x, width, url });
+    }
+    // The fallback footer (no graph row: a reload dropped the commit, after
+    // an amend say) has no meta spans, so the loop above records no hash
+    // hit. The commit still exists as an object: its hash opens the hash
+    // card, which loads off the event thread.
+    if footer.row.is_none() {
+        state.layout.icon_hits.push(IconHit {
+            y,
+            x,
+            width,
+            kind: IconKind::CommitHash,
+            target: IconTarget::Commit {
+                repo: checkout.clone(),
+                sha: commit_id.clone(),
+            },
+        });
+    }
 }
 
 /// Record the expanded depth-2 commit-files footer's top rule (the first
@@ -25954,7 +25973,9 @@ mod tests {
     /// each record one commit popover hit over the painted text on the
     /// footer's bottom row, and a click pins the popover of that kind. A
     /// narrow pane never puts a hit past the left pane; a stash drill
-    /// records its stash id and date.
+    /// records its stash id and date; the fallback footer of a commit a
+    /// reload dropped from the graph records its short hash, whose click
+    /// pins the hash card and asks for the card's load.
     #[test]
     fn commit_detail_footer_meta_records_hash_author_and_date_hits_boxed_and_flat() {
         const SHA: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -26107,6 +26128,64 @@ mod tests {
                 ],
                 "{background:?}: a stash drill records its id and date\n{screen}"
             );
+
+            // A reload dropped the commit from the loaded graph (an amend,
+            // say): the fallback footer paints only its short hash on the
+            // meta row, and that hash records the commit's hash hit; the
+            // card is a miss, so the click asks for its off-thread load.
+            for (surface, open) in footers {
+                for expand in [false, true] {
+                    let what = format!("{surface} fallback {background:?} expand={expand}");
+                    let mut state = open();
+                    state.background = background;
+                    state.commit_msg_expand = expand;
+                    if let Some(model) = state.graph.as_mut() {
+                        model.commits[0].id = "f".repeat(40);
+                    }
+                    assert_eq!(state.commit_detail_graph_row(), None, "{what}");
+                    let mut terminal = Terminal::new(TestBackend::new(240, 30)).unwrap();
+                    draw_state(&mut terminal, &mut state);
+                    let screen = buffer_text(&terminal);
+                    assert!(
+                        screen.contains(super::super::state::COMMIT_FOOTER_NOT_IN_GRAPH),
+                        "{what}: the fallback footer\n{screen}"
+                    );
+                    let hits = left_commit_hits_with_text(&state, &terminal);
+                    let found: Vec<(IconKind, &str, &IconTarget)> = hits
+                        .iter()
+                        .map(|(hit, text)| (hit.kind, text.as_str(), &hit.target))
+                        .collect();
+                    assert_eq!(
+                        found,
+                        vec![(IconKind::CommitHash, "aaa1111", &target)],
+                        "{what}\n{screen}"
+                    );
+                    let hash = hits[0].0.clone();
+                    let l = &state.layout;
+                    assert_eq!(
+                        hash.y,
+                        l.tree_y + l.tree_height - 1,
+                        "{what}: the meta row is the footer's bottom row"
+                    );
+                    state.dispatch(Action::Click {
+                        col: hash.x,
+                        row: hash.y,
+                    });
+                    assert!(state.popover_pinned(), "{what}: the hash pins");
+                    let sections = state.open_popover_sections();
+                    assert_eq!(sections.len(), 1, "{what}");
+                    assert_eq!(
+                        (sections[0].icon, &sections[0].target),
+                        (IconKind::CommitHash, &target),
+                        "{what}"
+                    );
+                    assert_eq!(
+                        state.commit_card_want(),
+                        Some(("app".to_string(), SHA.to_string())),
+                        "{what}: the card loads off the event thread"
+                    );
+                }
+            }
         }
     }
 
@@ -26387,6 +26466,15 @@ mod tests {
             repo: "app".into(),
             sha: sha.into(),
         };
+        // The diff header's commit hits only (right pane): the pinned tab's
+        // commit is not in this graph, so its left footer is the fallback
+        // one, whose short hash records its own hit.
+        let header_hits = |state: &AppState, terminal: &Terminal<TestBackend>| {
+            commit_hits_with_text(state, terminal)
+                .into_iter()
+                .filter(|(hit, _)| hit.x >= state.layout.right_x)
+                .collect::<Vec<_>>()
+        };
         let pinned = |state: &mut AppState, path: Option<&str>| {
             let base = format!("{SHA}^");
             state
@@ -26435,7 +26523,7 @@ mod tests {
                 let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
                 draw_state(&mut terminal, &mut state);
                 let screen = buffer_text(&terminal);
-                let hits = commit_hits_with_text(&state, &terminal);
+                let hits = header_hits(&state, &terminal);
                 let found: Vec<(&str, IconTarget)> = hits
                     .iter()
                     .map(|(hit, text)| (text.as_str(), hit.target.clone()))
@@ -26447,7 +26535,6 @@ mod tests {
                 assert_eq!(found, want, "{what}\n{screen}");
                 for (hit, _) in &hits {
                     assert_eq!(hit.kind, IconKind::CommitHash, "{what}");
-                    assert!(hit.x >= state.layout.right_x, "{what}: right pane {hit:?}");
                 }
                 // A click on each token pins that commit's hash card.
                 for (hit, _) in &hits {
@@ -26475,7 +26562,7 @@ mod tests {
             state.tabs.active_compare_mut().unwrap().source = None;
             let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
             draw_state(&mut terminal, &mut state);
-            let texts: Vec<String> = commit_hits_with_text(&state, &terminal)
+            let texts: Vec<String> = header_hits(&state, &terminal)
                 .into_iter()
                 .map(|(_, text)| text)
                 .collect();
@@ -26491,7 +26578,7 @@ mod tests {
                 pinned(&mut state, Some(&format!("d/{}", "x".repeat(n))));
                 let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
                 draw_state(&mut terminal, &mut state);
-                let hits = commit_hits_with_text(&state, &terminal);
+                let hits = header_hits(&state, &terminal);
                 for (hit, text) in &hits {
                     let want = if hit.target == commit_target(PARENT) {
                         "aaa1111^"
