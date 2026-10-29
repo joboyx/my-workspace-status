@@ -57,8 +57,12 @@ fn pty_blame_palette_opens_commit_changes() {
                 && left.contains("second.txt")
                 && !left.contains("third.txt")
                 && !screen.contains(newest)
+                // The commit footer, read by the range load (no graph row
+                // needed): the subject and the meta row with its parent.
+                && left.contains(middle)
+                && left.contains("parent ")
         },
-        "a new tab shows only the middle commit's own file",
+        "a new tab shows only the middle commit's own file, with its footer",
         GIT_WAIT,
     );
     assert_eq!(git_stdout(&app, &["rev-parse", "HEAD"]), head);

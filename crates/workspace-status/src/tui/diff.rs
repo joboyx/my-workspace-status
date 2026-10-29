@@ -105,18 +105,26 @@ pub struct DiffContent {
     pub unstaged: String,
     /// Label the unstaged section `NEW` (untracked synthesised as all-add).
     pub is_new: bool,
-    /// Label the unstaged section `COMMITTED` (compare tabs).
+    /// Compare-tab diff: label the unstaged section `COMMITTED`, and let
+    /// [`build_partial_patch`] build only
+    /// [`PartialPatchKind::RevertCommitted`] from it.
     pub is_committed: bool,
     /// Label the unstaged section `WORKING TREE` (commit-vs-working-tree
     /// compare tabs). Line writes refuse it.
     pub vs_worktree: bool,
+    /// Paint the unstaged section's label as `COMMITTED` and change
+    /// nothing else (Workspace depth-2 commit and stash drill diffs). Row
+    /// bindings and [`RowLineRef::section`] stay UNSTAGED, so
+    /// [`build_partial_patch`], blame, and go to line read the diff as an
+    /// unstaged one; [`Self::is_committed`] stays false.
+    pub committed_label: bool,
     /// Git's reason when `git diff` failed, so the pane does not read as
     /// an empty diff.
     pub error: Option<String>,
 }
 
 impl DiffContent {
-    /// Unstaged-only unified text (commit / stash diffs and tests).
+    /// Unstaged-only unified text (worktree drill diffs and tests).
     pub fn from_unified(text: impl Into<String>) -> Self {
         Self {
             staged: String::new(),
@@ -124,6 +132,7 @@ impl DiffContent {
             is_new: false,
             is_committed: false,
             vs_worktree: false,
+            committed_label: false,
             error: None,
         }
     }
@@ -136,6 +145,7 @@ impl DiffContent {
             is_new: false,
             is_committed: true,
             vs_worktree: false,
+            committed_label: false,
             error: None,
         }
     }
@@ -152,6 +162,15 @@ impl DiffContent {
     /// Join raw git lines into unstaged-only content.
     pub fn from_lines(lines: Vec<String>) -> Self {
         Self::from_unified(lines.join("\n"))
+    }
+
+    /// Depth-2 commit or stash drill text ([`Self::from_lines`]). The
+    /// section label is `COMMITTED` ([`Self::committed_label`]).
+    pub fn from_commit_lines(lines: Vec<String>) -> Self {
+        Self {
+            committed_label: true,
+            ..Self::from_lines(lines)
+        }
     }
 
     /// True when both slots are empty or whitespace.
@@ -207,6 +226,7 @@ pub fn load_file_diff(
         is_new: false,
         is_committed: false,
         vs_worktree: false,
+        committed_label: false,
         error,
     }
 }
@@ -226,6 +246,7 @@ fn untracked_content(repo_dir: &Path, path: &str) -> DiffContent {
         is_new,
         is_committed: false,
         vs_worktree: false,
+        committed_label: false,
         error: None,
     }
 }
@@ -619,7 +640,13 @@ fn annotated_diff_rows(content: &DiffContent, mode: DiffMode) -> Vec<(DiffRow, R
         } else {
             DiffSection::Unstaged
         };
-        out.push((DiffRow::Section(section), RowBind::Section(section)));
+        // Only the painted label changes; the binding keeps `section`.
+        let label = if content.committed_label {
+            DiffSection::Committed
+        } else {
+            section
+        };
+        out.push((DiffRow::Section(label), RowBind::Section(section)));
         for (idx, hunk) in unstaged.iter().enumerate() {
             push_hunk_rows(&mut out, section, idx, hunk, mode);
         }
@@ -1304,6 +1331,20 @@ pub fn section_header(section: DiffSection) -> &'static str {
     }
 }
 
+/// Cells diff row `row` paints with a line gutter, in paint order: the
+/// left cell, then the right cell when the row paints side by side
+/// (`split`). Section, hunk, and error rows have none.
+pub fn diff_row_gutter_cells(row: &DiffRow, split: bool) -> Vec<&DiffCell> {
+    match row {
+        DiffRow::Line {
+            left,
+            right: Some(right),
+        } if split => vec![left, right],
+        DiffRow::Line { left, .. } => vec![left],
+        DiffRow::Section(_) | DiffRow::Hunk { .. } | DiffRow::Error { .. } => Vec::new(),
+    }
+}
+
 /// Sign glyph for a cell kind.
 pub fn cell_sign(kind: DiffCellKind) -> char {
     match kind {
@@ -1691,6 +1732,7 @@ index 1111111..2222222 100644
             is_new: false,
             is_committed: false,
             vs_worktree: false,
+            committed_label: false,
             error: None,
         };
         let at = |row| row_line_ref(&content, DiffMode::Inline, row);
@@ -1719,6 +1761,7 @@ index 1111111..2222222 100644
             is_new: false,
             is_committed: false,
             vs_worktree: false,
+            committed_label: false,
             error: None,
         };
         // STAGED 0, hunk 1, a 2, -b 3, +B 4; UNSTAGED 5, hunk 6, a 7, +x 8,
@@ -1796,6 +1839,7 @@ index 1111111..2222222 100644
             is_new: false,
             is_committed: false,
             vs_worktree: false,
+            committed_label: false,
             error: Some("fatal: bad object".into()),
         };
         let rows = build_diff_rows(&content, DiffMode::Inline);
@@ -1836,6 +1880,7 @@ index 1111111..2222222 100644
                 is_new: false,
                 is_committed: false,
                 vs_worktree: false,
+                committed_label: false,
                 error: None,
             },
             DiffMode::Inline,
@@ -1852,6 +1897,7 @@ index 1111111..2222222 100644
                 is_new: false,
                 is_committed: false,
                 vs_worktree: false,
+                committed_label: false,
                 error: None,
             },
             DiffMode::Inline,
@@ -1924,6 +1970,7 @@ index 1111111..2222222 100644
                 is_new: true,
                 is_committed: false,
                 vs_worktree: false,
+                committed_label: false,
                 error: None,
             },
             DiffMode::Inline,
@@ -1940,6 +1987,7 @@ index 1111111..2222222 100644
                 is_new: false,
                 is_committed: false,
                 vs_worktree: false,
+                committed_label: false,
                 error: None,
             },
             DiffMode::Inline,
@@ -1963,6 +2011,7 @@ index 1111111..2222222 100644
                 is_new: false,
                 is_committed: false,
                 vs_worktree: false,
+                committed_label: false,
                 error: None,
             },
             DiffMode::SideBySide,
@@ -2035,6 +2084,7 @@ index 1111111..2222222 100644
                 is_new: false,
                 is_committed: false,
                 vs_worktree: false,
+                committed_label: false,
                 error: None,
             },
             DiffMode::Inline,
@@ -2242,6 +2292,7 @@ index 1111111..2222222 100644
             is_new: false,
             is_committed: false,
             vs_worktree: false,
+            committed_label: false,
             error: None,
         }
     }
@@ -2335,6 +2386,7 @@ index 1111111..2222222 100644
             is_new: false,
             is_committed: true,
             vs_worktree: false,
+            committed_label: false,
             error: None,
         };
         let err = build_partial_patch(
@@ -2357,6 +2409,7 @@ index 1111111..2222222 100644
             is_new: false,
             is_committed: false,
             vs_worktree: false,
+            committed_label: false,
             error: None,
         };
         let rows = build_diff_rows(&content, DiffMode::Inline);
@@ -2420,6 +2473,7 @@ index 1111111..2222222 100644
             is_new: false,
             is_committed: false,
             vs_worktree: false,
+            committed_label: false,
             error: None,
         };
         let end = build_diff_rows(&staged, DiffMode::Inline)
@@ -2445,6 +2499,7 @@ index 1111111..2222222 100644
             is_new: false,
             is_committed: false,
             vs_worktree: false,
+            committed_label: false,
             error: None,
         };
         let end = build_diff_rows(&content, DiffMode::Inline).len() - 1;
@@ -2538,6 +2593,7 @@ index 1111111..2222222 100644
         let committed = DiffContent {
             is_committed: true,
             vs_worktree: false,
+            committed_label: false,
             error: None,
             ..two_hunk_content()
         };
@@ -2555,6 +2611,7 @@ index 1111111..2222222 100644
             is_new: true,
             is_committed: false,
             vs_worktree: false,
+            committed_label: false,
             error: None,
         };
         let end = build_diff_rows(&new_file, DiffMode::Inline).len() - 1;
@@ -2577,6 +2634,7 @@ index 1111111..2222222 100644
             is_new: false,
             is_committed: false,
             vs_worktree: false,
+            committed_label: false,
             error: None,
         };
         let end = build_diff_rows(&staged_only, DiffMode::Inline).len() - 1;
@@ -2589,6 +2647,7 @@ index 1111111..2222222 100644
             is_new: false,
             is_committed: false,
             vs_worktree: false,
+            committed_label: false,
             error: None,
         };
         let end = build_diff_rows(&mixed, DiffMode::Inline).len() - 1;
@@ -2660,6 +2719,7 @@ keep-z
                 is_new: false,
                 is_committed: false,
                 vs_worktree: false,
+                committed_label: false,
                 error: None,
             }
         }
@@ -3005,6 +3065,7 @@ keep-z
                 is_new: false,
                 is_committed: false,
                 vs_worktree: false,
+                committed_label: false,
                 error: None,
             };
             let hunks = parse_unified_diff(if kind == PartialPatchKind::Unstage {
@@ -3114,6 +3175,7 @@ keep-z
                 is_new: false,
                 is_committed: false,
                 vs_worktree: false,
+                committed_label: false,
                 error: None,
             };
             let row = line_row(&content, row);

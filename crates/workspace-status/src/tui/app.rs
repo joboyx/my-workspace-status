@@ -825,6 +825,10 @@ pub(crate) struct CompareRangeLoad {
     pub head: Option<String>,
     /// Base tip SHA at load time.
     pub base_tip: String,
+    /// The head commit of a Diff commit vs parent range
+    /// ([`super::tabs::commit_vs_parent_head`]), read for the commit
+    /// footer. `None` for any other range.
+    pub commit: Option<workspace_status_graph::Commit>,
 }
 
 /// Resolve `base_ref` and list the one file of a commit-vs-working-tree
@@ -852,6 +856,7 @@ pub(crate) fn compute_worktree_compare_range(
         patch_keys: HashMap::new(),
         head: None,
         base_tip: base,
+        commit: None,
     })
 }
 
@@ -879,6 +884,10 @@ pub(crate) fn compute_compare_range(
         .map(Into::into)
         .collect();
     let patch_keys = list_compare_patch_keys(dir, &base_tip, &head);
+    // One commit against its parent: read it for the footer here, off the
+    // event thread, so a commit outside the loaded graph still shows.
+    let commit = super::tabs::commit_vs_parent_head(base_ref, head_ref)
+        .and_then(|_| super::graph_load::load_commit(dir, &head));
     Ok(CompareRangeLoad {
         source: CommitFileSource::Compare {
             base_ref: base_ref.to_string(),
@@ -891,6 +900,7 @@ pub(crate) fn compute_compare_range(
         patch_keys,
         head: Some(head),
         base_tip,
+        commit,
     })
 }
 
@@ -937,10 +947,10 @@ pub(crate) fn compute_commit_diff(
     let dir = cwd.join(repo);
     match source {
         CommitFileSource::Commit { commit_id } => {
-            DiffContent::from_lines(diff_commit_file_ctx(&dir, commit_id, path, context))
+            DiffContent::from_commit_lines(diff_commit_file_ctx(&dir, commit_id, path, context))
         }
         CommitFileSource::Stash { stash_ref } => {
-            DiffContent::from_lines(diff_stash_file_ctx(&dir, stash_ref, path, context))
+            DiffContent::from_commit_lines(diff_stash_file_ctx(&dir, stash_ref, path, context))
         }
         CommitFileSource::Worktree => {
             if let Some((file_repo, change)) = focused_file {
@@ -2384,7 +2394,7 @@ mod tests {
         );
         let merge = exec_git(&["rev-parse", "HEAD"], &dir);
         // HEAD moves past both commits: a pinned head ignores it.
-        commit_file(&dir, "later.txt");
+        let later = commit_file(&dir, "later.txt");
 
         let load = compute_compare_range(&dir, &format!("{first}^"), &first).unwrap();
         assert_eq!(compare_paths(&load), vec![("A".into(), "a.txt".into())]);
@@ -2404,14 +2414,30 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+        // One commit against its parent: the load reads that commit for
+        // the footer, with its message, parent, and refs.
+        let commit = load.commit.as_ref().expect("the head commit");
+        assert_eq!(commit.id, first);
+        assert_eq!(commit.subject, "a.txt");
+        assert_eq!(commit.parents, vec![load.base_tip.clone()]);
 
         // A merge shows what it brought in versus its first parent.
         let load = compute_compare_range(&dir, &format!("{merge}^"), &merge).unwrap();
         assert_eq!(load.base_tip, main_tip);
+        let commit = load.commit.as_ref().expect("the merge commit");
+        assert_eq!(commit.subject, "merge topic");
+        assert_eq!(commit.parents.len(), 2);
         assert_eq!(compare_paths(&load), vec![("A".into(), "topic.txt".into())]);
 
         // A live tab still reads the checkout's HEAD.
         let live = compute_compare_range(&dir, &first, "HEAD").unwrap();
+        assert!(live.commit.is_none(), "a range has no single commit");
+        let tip = compute_compare_range(&dir, &format!("{later}^"), &later).unwrap();
+        let refs = tip.commit.map(|commit| commit.refs).unwrap_or_default();
+        assert!(
+            refs.iter().any(|r| r.name == "main"),
+            "branch tip refs: {refs:?}"
+        );
         let mut paths: Vec<_> = compare_paths(&live).into_iter().map(|(_, p)| p).collect();
         paths.sort();
         assert_eq!(paths, vec!["later.txt", "main.txt", "topic.txt"]);
@@ -2464,6 +2490,87 @@ mod tests {
             Some(base_ref_not_found(&"0".repeat(40)))
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A depth-2 commit or stash drill diff labels its one section
+    /// `COMMITTED`, as a compare diff does. `is_committed` stays false, so
+    /// `build_partial_patch` answers every kind and range exactly as for
+    /// the plain unstaged text of the same lines, and each row keeps the
+    /// same line reference (blame and go to line read it).
+    #[test]
+    fn commit_and_stash_diffs_label_committed_and_keep_partial_patch_kinds() {
+        use crate::tui::diff::{
+            build_diff_rows, build_partial_patch, row_line_ref, DiffRow, DiffSection,
+            PartialPatchKind,
+        };
+        use crate::tui::split::DiffMode;
+        let cwd = crate::testutil::unique_dir("ws-d2-committed-label");
+        let dir = cwd.join("app");
+        init_repo(&dir);
+        fs::write(dir.join("README.md"), "# seed\nold line\nkeep\n").unwrap();
+        git(&dir, &["commit", "-q", "-am", "base"]);
+        fs::write(dir.join("README.md"), "# seed\nnew line\nkeep\nadded\n").unwrap();
+        git(&dir, &["commit", "-q", "-am", "edit"]);
+        fs::write(dir.join("README.md"), "# seed\nnew line\nstashed\n").unwrap();
+        git(&dir, &["stash", "push", "-q"]);
+        let cases = [
+            (
+                CommitFileSource::Commit {
+                    commit_id: exec_git(&["rev-parse", "HEAD"], &dir),
+                },
+                diff_commit_file_ctx(&dir, "HEAD", "README.md", None),
+            ),
+            (
+                CommitFileSource::Stash {
+                    stash_ref: "stash@{0}".into(),
+                },
+                diff_stash_file_ctx(&dir, "stash@{0}", "README.md", None),
+            ),
+        ];
+        for (source, lines) in cases {
+            let content = compute_commit_diff(&cwd, "app", &source, "README.md", None, None);
+            let plain = DiffContent::from_lines(lines);
+            assert!(!content.is_committed, "{source:?}");
+            assert_eq!(content.unstaged, plain.unstaged, "{source:?}");
+            for mode in [DiffMode::Inline, DiffMode::SideBySide] {
+                let rows = build_diff_rows(&content, mode);
+                assert_eq!(
+                    rows.first(),
+                    Some(&DiffRow::Section(DiffSection::Committed)),
+                    "{source:?} {mode:?}"
+                );
+                assert!(
+                    !rows
+                        .iter()
+                        .any(|r| matches!(r, DiffRow::Section(DiffSection::Unstaged))),
+                    "{source:?} {mode:?}"
+                );
+                for row in 0..rows.len() {
+                    assert_eq!(
+                        row_line_ref(&content, mode, row),
+                        row_line_ref(&plain, mode, row),
+                        "{source:?} {mode:?} row {row}"
+                    );
+                }
+                for kind in [
+                    PartialPatchKind::Stage,
+                    PartialPatchKind::Unstage,
+                    PartialPatchKind::Revert,
+                    PartialPatchKind::RevertCommitted,
+                ] {
+                    for start in 0..rows.len() {
+                        for end in start..rows.len() {
+                            assert_eq!(
+                                build_partial_patch(&content, mode, start, end, kind, "README.md"),
+                                build_partial_patch(&plain, mode, start, end, kind, "README.md"),
+                                "{source:?} {mode:?} {kind:?} {start}..={end}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let _ = fs::remove_dir_all(&cwd);
     }
 
     #[test]

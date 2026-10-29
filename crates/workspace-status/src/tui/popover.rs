@@ -37,7 +37,7 @@ use crate::snapshot::{CheckoutKind, FileChange, WorkspaceRepoSnapshot};
 
 use super::action::Action;
 use super::command_palette::{command_for, PaletteCommand};
-use super::comments::{tree_row_comments, CommentEntry};
+use super::comments::{checkout_file_comments, tree_row_comments, CommentEntry};
 use super::commit_files::CommitFileRow;
 use super::gates::ListFocusTarget;
 use super::icons::{
@@ -78,6 +78,9 @@ pub enum IconTarget {
     /// An icon on the shown commit-file or compare file list row with this
     /// [`CommitFileRow::id`].
     CommitFileRow(String),
+    /// An icon on the active Explorer tab's tree row with this
+    /// checkout-relative path ([`super::explorer::ExplorerRow::rel`]).
+    ExplorerRow(String),
     /// An icon on the graph row with this [`graph_row_id`]: a node, the
     /// uncommitted glyph, or the comment mark.
     GraphRow(String),
@@ -102,6 +105,17 @@ pub enum IconTarget {
     /// commit or stash with this identity
     /// ([`AppState::commit_detail_msg_identity`]).
     CommitDetailMoreLines(String),
+    /// The comment mark on a line gutter of the right pane's line viewer:
+    /// a file diff (Workspace, compare, or Explorer changed file) or the
+    /// Explorer clean-file view ([`AppState::line_viewer_target`]).
+    LineComment {
+        /// Checkout of the viewer's file.
+        checkout: String,
+        /// Repo-relative path of the viewer's file.
+        path: String,
+        /// 1-based line number the gutter paints the mark beside.
+        line: u32,
+    },
 }
 
 /// How a popover opened.
@@ -121,8 +135,9 @@ pub struct PopoverOwner {
     pub tab: usize,
     /// Focused list.
     pub list: ListFocusTarget,
-    /// Focused tree row id, commit-file row id, [`graph_row_id`], or
-    /// empty.
+    /// Focused tree row id, commit-file row id, [`graph_row_id`], or, on
+    /// a focused line viewer, its cursor (`diff:<row>` on a file diff,
+    /// `file:<line>` on the clean-file view, both 0-based).
     pub row: String,
 }
 
@@ -462,16 +477,57 @@ fn section(
         }
         IconTarget::PullRequest(repo) => pr_section(state, repo, now_unix),
         IconTarget::CommitFileRow(id) => {
-            let row = rows.commit_files().iter().find(|row| &row.id == id)?;
-            commit_file_section(state, kind, row)
+            // The folder summary paints files the list may fold away.
+            let summary = || {
+                let summary = state.folder_summary()?;
+                state
+                    .summary_rows(&summary)
+                    .into_iter()
+                    .find(|row| &row.id == id)
+            };
+            match rows.commit_files().iter().find(|row| &row.id == id) {
+                Some(row) => commit_file_section(state, kind, row),
+                None => commit_file_section(state, kind, &summary()?),
+            }
         }
+        IconTarget::ExplorerRow(rel) => explorer_row_section(state, kind, rel),
         IconTarget::GraphRow(id) => graph_row_section(state, rows, kind, id, now_unix),
         IconTarget::GraphWorktree(path) => graph_worktree_section(state, rows, path),
         IconTarget::GraphChip { row, chip } => graph_chip_section(state, rows, kind, row, chip),
         IconTarget::GraphSync => graph_sync_section(state),
         IconTarget::GraphMoreLines(row) => graph_more_lines_section(state, rows, row),
         IconTarget::CommitDetailMoreLines(id) => commit_detail_more_lines_section(state, id),
+        IconTarget::LineComment {
+            checkout,
+            path,
+            line,
+        } => line_comment_section(target, &state.line_comments(checkout, path, *line)),
     }
+}
+
+/// Section of the comment mark on a line gutter: the comment fields over
+/// `comments`, the comments behind that line's mark, as a row comment
+/// mark lists its file's. `None` once the line has no comment (its mark
+/// went away). Open and resolved are one slot, as on a graph row.
+fn line_comment_section(target: &IconTarget, comments: &[&CommentEntry]) -> Option<PopoverSection> {
+    if comments.is_empty() {
+        return None;
+    }
+    let (kind, role) = if comments.iter().all(|entry| entry.resolved) {
+        (IconKind::CommentResolved, SegRole::Muted)
+    } else {
+        (IconKind::Comment, SegRole::Heading)
+    };
+    let mut lines = vec![PopoverLine::Text(spec(kind).meaning.to_string())];
+    let actions = comment_fields(comments, &mut lines);
+    lines.extend(actions.iter().filter_map(PopoverLine::action));
+    Some(PopoverSection {
+        icon: kind,
+        role,
+        target: target.clone(),
+        title: None,
+        lines,
+    })
 }
 
 /// The segment of `segs` (every segment a row paints) that paints `kind`
@@ -626,6 +682,44 @@ fn commit_file_section(
         icon: kind,
         role: seg.role,
         target: IconTarget::CommitFileRow(row.id.clone()),
+        title: None,
+        lines,
+    })
+}
+
+/// Section of icon `kind` on the active Explorer tree's row at `rel`. Same
+/// builders as a workspace tree file or folder row: the comment fields over
+/// the comments behind the row's mark, else the file-level fields with the
+/// checkout's own change as both the row change and its sides. `None` when
+/// the row is gone or no longer paints the icon.
+fn explorer_row_section(state: &AppState, kind: IconKind, rel: &str) -> Option<PopoverSection> {
+    let (checkout, row, status) = state.explorer_row_at(rel)?;
+    let marks = state.explorer_row_marks(&checkout);
+    let seg = painted_seg(
+        &state.explorer_row_paint_segments(&row, &status, &marks),
+        kind,
+    )?;
+    let kind = seg.icon?;
+    let mut lines = vec![PopoverLine::Text(spec(kind).meaning.to_string())];
+    let actions = if is_comment_kind(kind) {
+        let comments =
+            checkout_file_comments(&state.comment_store, &state.snapshot, &checkout, rel);
+        comment_fields(&comments, &mut lines)
+    } else {
+        let change = status.change(rel).cloned();
+        let facts = FileFacts {
+            path: rel.to_string(),
+            sides: change.clone(),
+            change,
+            files: status.changed_files_under(rel),
+        };
+        file_fields(kind, &facts, &mut lines)?
+    };
+    lines.extend(actions.iter().filter_map(PopoverLine::action));
+    Some(PopoverSection {
+        icon: kind,
+        role: seg.role,
+        target: IconTarget::ExplorerRow(rel.to_string()),
         title: None,
         lines,
     })
@@ -1843,8 +1937,19 @@ fn graph_chip_section(
     row_id: &str,
     chip: &PartTarget,
 ) -> Option<PopoverSection> {
-    let model = state.graph.as_ref()?;
-    let row = rows.graph_row(row_id)?;
+    // A compare tab paints no graph: its chips are the commit footer's,
+    // whose row and model may come from the tab's own load.
+    let footer_model;
+    let footer_row;
+    let (model, row) = if state.is_compare_tab() {
+        footer_row = state
+            .commit_detail_graph_row()
+            .filter(|row| graph_row_id(row) == row_id)?;
+        footer_model = state.commit_footer_model();
+        (&*footer_model, &footer_row)
+    } else {
+        (state.graph.as_ref()?, rows.graph_row(row_id)?)
+    };
     let (refs, is_head, commit) = chip_refs(model, row)?;
     let on_commit_row = matches!(row, GraphRow::Commit { .. });
     let head_branch = model.sync.as_ref().map(|sync| sync.branch.as_str());

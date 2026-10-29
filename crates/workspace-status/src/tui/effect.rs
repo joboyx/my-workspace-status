@@ -4258,6 +4258,7 @@ mod tests {
             patch_keys: Default::default(),
             head: Some("ccc".into()),
             base_tip: "bbb".into(),
+            commit: None,
         }
     }
 

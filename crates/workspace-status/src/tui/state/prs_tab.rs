@@ -30,12 +30,13 @@ use super::super::pr_groups::{
 use super::super::pr_status::PrState;
 use super::super::pull_request::{parse_remote, NO_PR_FOR_ROW, PR_LOOKUP_RUNNING};
 use super::super::selection::TextSelection;
-use super::super::split::SplitDrag;
+use super::super::split::{SplitDrag, SplitHit};
 use super::super::status::StatusMessage;
 use super::super::tabs::{
     PrGroupId, PrsLineId, PrsTab, PRS_TAB_HAS_NO_SEARCH, PRS_TAB_ONLY, PRS_TAB_READ_ONLY,
     SWITCH_TO_WORKSPACE_TAB,
 };
+use super::super::tree::{cursor_for_viewport_top, list_viewport_start};
 use super::popover::then;
 use super::pull_request::PrAction;
 use super::{single_or_batch, AppState, FocusPane};
@@ -47,9 +48,6 @@ pub(crate) const PRS_DETAIL_MIN_TERM_COLS: u16 = 100;
 /// Narrowest detail pane (columns) beside the list. It takes a third of
 /// the width, and never less than this.
 pub(crate) const PRS_DETAIL_MIN_COLS: u16 = 40;
-
-/// Two presses on one cell within this time are a double-click.
-const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 /// Flash id of the PRs tab row of the PR with web URL `url`.
 pub(crate) fn prs_row_flash_id(url: &str) -> String {
@@ -511,7 +509,7 @@ impl AppState {
     ///
     /// | Key | Action |
     /// | --- | --- |
-    /// | `j` `k` arrows, `gg` `G`, page keys, wheel | move |
+    /// | `j` `k` arrows, `gg` `G`, page keys, wheel | move (the narrow detail: scroll it) |
     /// | Enter, `gx` | open the PR |
     /// | `gc` | open its CI page |
     /// | `y` | copy its URL |
@@ -526,6 +524,22 @@ impl AppState {
     /// on the Workspace tab.
     pub(super) fn dispatch_prs_tab(&mut self, action: &Action) -> Option<Effect> {
         let pinned = self.popover_pinned();
+        if self.prs_detail_focused() {
+            let delta = match *action {
+                Action::Move(delta) => Some(delta as isize),
+                Action::MoveToStart => Some(isize::MIN / 2),
+                Action::MoveToEnd => Some(isize::MAX / 2),
+                Action::PageMove(pages) => {
+                    let page = self.layout.prs_detail.height.saturating_sub(1).max(1);
+                    Some(pages as isize * page as isize)
+                }
+                _ => None,
+            };
+            if let Some(delta) = delta {
+                self.scroll_prs_detail_by(delta);
+                return Some(Effect::None);
+            }
+        }
         let effect = match *action {
             Action::Move(delta) => self.prs_move(delta as isize),
             Action::MoveToStart => self.prs_move(isize::MIN / 2),
@@ -593,6 +607,75 @@ impl AppState {
             tab.cursor = Some(id);
             tab.cursor_index = index;
         }
+    }
+
+    /// Scroll the list so its painted lines start at `top`: the list
+    /// follows its cursor (middle-biased, [`list_viewport_start`]), so the
+    /// cursor moves to the line nearest it whose viewport starts there
+    /// ([`cursor_for_viewport_top`]), as the wheel moves the cursor.
+    pub(super) fn scroll_prs_list_to(&mut self, top: usize) {
+        let Some(view) = self.sync_prs_view() else {
+            return;
+        };
+        let n = view.lines.len();
+        if n == 0 {
+            return;
+        }
+        let height = usize::from(self.layout.prs_list_rows.height.max(1));
+        let cursor = view.cursor.unwrap_or(0);
+        let next = cursor_for_viewport_top(n, cursor, top, |c| list_viewport_start(n, c, height));
+        self.prs_set_cursor(&view, next);
+    }
+
+    /// True when the detail pane is the one pane shown (the narrow
+    /// layout after `Tab`): the move keys then scroll it. The wide layout
+    /// keeps the keys on the list.
+    fn prs_detail_focused(&self) -> bool {
+        self.prs_narrow() && self.tabs.active_prs().is_some_and(|tab| tab.show_detail)
+    }
+
+    /// First detail line, as the last paint or scroll left it (the paint
+    /// starts another PR at the top).
+    pub(crate) fn prs_detail_scroll(&self) -> usize {
+        self.tabs
+            .active_prs()
+            .and_then(|tab| tab.detail_scroll.as_ref())
+            .map_or(0, |(_, top)| *top)
+    }
+
+    /// Scroll the detail so its painted lines start at `top`, clamped to
+    /// its last page (`prs_detail_vbar.scroll_max` of the last paint).
+    pub(super) fn scroll_prs_detail_to(&mut self, top: usize) {
+        let top = top.min(usize::from(self.layout.prs_detail_vbar.scroll_max));
+        if let Some((_, scroll)) = self
+            .tabs
+            .active_prs_mut()
+            .and_then(|tab| tab.detail_scroll.as_mut())
+        {
+            *scroll = top;
+        }
+    }
+
+    /// First detail line the paint shows for the PR at `url`, whose
+    /// largest top is `scroll_max`: the kept line clamped to it (the
+    /// detail lines shrank, say a detail lookup landed), or 0 for another
+    /// PR than the one kept. Kept for `url`.
+    pub(crate) fn keep_prs_detail_scroll(&mut self, url: &str, scroll_max: usize) -> usize {
+        let Some(tab) = self.tabs.active_prs_mut() else {
+            return 0;
+        };
+        let top = match &tab.detail_scroll {
+            Some((kept, top)) if kept == url => (*top).min(scroll_max),
+            _ => 0,
+        };
+        tab.detail_scroll = Some((url.to_string(), top));
+        top
+    }
+
+    /// Scroll the detail `delta` lines (a wheel step or a move key).
+    fn scroll_prs_detail_by(&mut self, delta: isize) {
+        let top = self.prs_detail_scroll().saturating_add_signed(delta);
+        self.scroll_prs_detail_to(top);
     }
 
     /// Run `action` on the focused PR, or say `no PR for this row`.
@@ -735,24 +818,38 @@ impl AppState {
         }
     }
 
-    /// Wheel over the list moves the cursor; elsewhere it does nothing.
+    /// Wheel over the list moves the cursor; over the detail it scrolls
+    /// the detail (the list cursor stays); elsewhere it does nothing.
     fn prs_wheel(&mut self, col: u16, row: u16, delta: i32, horizontal: bool) -> Effect {
         if !self.mouse_enabled || horizontal {
             return Effect::None;
         }
-        if !self.layout.prs_list_rows.contains(Position::new(col, row)) {
+        let at = Position::new(col, row);
+        if self.layout.prs_detail_rows.contains(at) {
+            self.scroll_prs_detail_by(delta as isize);
+            return Effect::None;
+        }
+        if !self.layout.prs_list_rows.contains(at) {
             return Effect::None;
         }
         self.prs_move(delta as isize)
     }
 
     /// Left press on the PRs tab ([`Self::click_at`] after the tab strip):
-    /// a row takes the cursor; a group header takes it and folds or
-    /// unfolds (a double-click does not undo the first toggle). A press in
-    /// either pane arms a text selection.
+    /// a press on the list's or the detail's vertical scrollbar grabs it
+    /// or jumps ([`Self::press_vscrollbar`], no row picked); a row takes
+    /// the cursor; a group header takes it and folds or unfolds (a
+    /// double-click does not undo the first toggle). A press in either
+    /// pane off a bar arms a text selection.
     pub(super) fn prs_click(&mut self, col: u16, row: u16) -> Effect {
         self.drag = SplitDrag::None;
         self.pad_press = None;
+        // The tab has no divider: only its own bars are drag handles.
+        match self.split_hit_at(col, row) {
+            SplitHit::VThumb(bar) => return self.press_vscrollbar(bar, true, row),
+            SplitHit::VTrack(bar) => return self.press_vscrollbar(bar, false, row),
+            _ => {}
+        }
         let at = Position::new(col, row);
         if self.layout.prs_detail_rows.contains(at) {
             self.text_selection = TextSelection::arm(self.layout.prs_detail, col, row);
@@ -763,12 +860,8 @@ impl AppState {
             return Effect::None;
         }
         self.text_selection = TextSelection::arm(self.layout.prs_list, col, row);
-        // The window is the gap between the presses' arrival.
-        let now = self.input_clock();
-        let double = self.last_click.as_ref().is_some_and(|(c, r, when)| {
-            *c == col && *r == row && now.saturating_duration_since(*when) <= DOUBLE_CLICK
-        });
-        self.last_click = Some((col, row, now));
+        // The shared row double-click rule, timed by the presses' arrival.
+        let double = self.note_row_press(col, row);
         let Some(view) = self.sync_prs_view() else {
             return Effect::None;
         };

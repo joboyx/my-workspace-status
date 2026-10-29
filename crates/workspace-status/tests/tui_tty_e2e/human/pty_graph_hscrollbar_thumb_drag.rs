@@ -131,8 +131,8 @@ fn sgr_release(tui: &mut PtySession, col: u16, row: u16) {
 
 /// Drag the painted graph horizontal scrollbar. Not wheel, not keys.
 ///
-/// Graph h-bar thumb drag already works via `SplitHit::GraphHThumb` /
-/// `SplitDrag::GraphHScrollbar`. This is the live PTY counterpart of
+/// Graph h-bar thumb drag already works via `SplitHit::HThumb(HScrollbar::Graph)` /
+/// `SplitDrag::HScrollbar`. This is the live PTY counterpart of
 /// `graph_horizontal_scrollbar_thumb_drag_updates_offset`.
 ///
 /// Live PTY (80×28 so `UNIQUE_GRAP` clips): `/longsubj` loads the graph.

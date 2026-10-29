@@ -12,7 +12,7 @@ const REPO: &str = "longmsg";
 const FILE: &str = "wip.txt";
 /// Prefix of the long `nnnn…` subject (graph list row and both footers).
 const SUBJECT: &str = "nnnnnnnnnn";
-/// Branch on the commit meta line (`<sha> · feature/long-msg · <author>`).
+/// Branch chip on the commit meta line (`[feature/long-msg] · <sha> · …`).
 const META_BRANCH: &str = "long-msg";
 /// Added line of the file diff at depth 2.
 const DIFF_HUNK: &str = "@@ -0,0 +1 @@";
@@ -115,11 +115,12 @@ fn depth_1_msg_on_graph_only(screen: &str, need_body: bool) -> bool {
 }
 
 /// The last painted left-pane body row is the pane's last inner row (just
-/// above the bottom border `└`), and it belongs to the message: at or below
-/// the meta line, never the file row.
+/// above the bottom border `└`), and it is the meta line: the footer pins
+/// its meta row on the bottom row, like the graph footer.
 ///
-/// A blank row inside the message is fine; blank rows under it are not.
-fn msg_pinned_to_left_bottom(screen: &str, file: usize, meta: usize) -> bool {
+/// A blank row inside the message is fine; blank rows under the meta line
+/// are not.
+fn meta_pinned_to_left_bottom(screen: &str, meta: usize) -> bool {
     let start = pane_body_start(screen.lines().count());
     let cells = pane_cells(screen, Pane::Left);
     let Some(border) = cells
@@ -134,16 +135,17 @@ fn msg_pinned_to_left_bottom(screen: &str, file: usize, meta: usize) -> bool {
             .trim_matches(|c: char| c == '\u{2502}' || c.is_whitespace())
             .is_empty()
     });
-    painted.is_some_and(|row| row + 1 == border && row >= meta && row > file)
+    painted.is_some_and(|row| row + 1 == border && row == meta)
 }
 
-/// Depth 2: the left file list comes first, then the footer rule, title,
-/// meta, subject, and body, with the message block pinned to the left pane
-/// bottom. The right diff pane carries no commit message.
+/// Depth 2: the left file list comes first, then the footer rule, the
+/// message rows (subject, then body), and the meta line pinned on the left
+/// pane's last inner row, the graph footer's row order. The right diff pane
+/// carries no commit message.
 ///
-/// `need_body` is false when the pane is too short for the body to fit
-/// under the list; the meta line must still sit under the file row, and the
-/// last painted row must still be the pane's last inner row.
+/// `need_body` is false when the footer is collapsed or the pane is short;
+/// the rule and the meta line must still sit under the file row, and the
+/// meta line must still be the pane's last inner row.
 fn files_msg_at_left_bottom(screen: &str, need_body: bool) -> bool {
     let Some(file) = pane_row_of(screen, Pane::Left, FILE) else {
         return false;
@@ -151,20 +153,23 @@ fn files_msg_at_left_bottom(screen: &str, need_body: bool) -> bool {
     let Some(meta) = meta_row(screen, Pane::Left) else {
         return false;
     };
+    let Some(rule) = rule_row(screen, Pane::Left) else {
+        return false;
+    };
     let body = pane_row_of(screen, Pane::Left, COMMIT_MSG_BODY);
     let subject = pane_row(screen, Pane::Left, |cells| {
         cells.contains(SUBJECT) && !cells.contains(FILE)
     });
-    // The footer's first row is the rule, then the title row, then meta.
-    let rule_on_top =
-        rule_row(screen, Pane::Left).is_some_and(|rule| rule > file && rule + 2 == meta);
+    // The footer's first row is the rule, then the subject; the message
+    // rows sit between the rule and the meta line.
+    let in_message = |row: usize| row > rule && row < meta;
     title_has_diff(screen)
-        && meta > file
-        && rule_on_top
-        && msg_pinned_to_left_bottom(screen, file, meta)
-        && subject.is_none_or(|row| row > file)
-        && body.is_none_or(|row| row > file)
-        && (!need_body || body.is_some())
+        && rule > file
+        && meta > rule
+        && meta_pinned_to_left_bottom(screen, meta)
+        && subject.is_none_or(|row| row == rule + 1)
+        && body.is_none_or(in_message)
+        && (!need_body || (subject.is_some() && body.is_some()))
         && diff_without_msg(screen)
         && no_wrong_overlays(screen)
 }
@@ -199,8 +204,8 @@ fn diff_collapsed_at_left_bottom(screen: &str) -> bool {
 /// 1 (Enter, commit files): the left graph keeps the body under its
 /// selected row; the right files pane is the `wip.txt` list with no
 /// subject, meta line, or body. Depth 2 (Enter, file diff): the left pane
-/// lists `wip.txt` first, then subject, meta line, and body, pinned to the
-/// pane bottom (its last painted row is the pane's last inner row), both
+/// lists `wip.txt` first, then the rule, the subject and body, and the meta
+/// line pinned on the pane's last inner row (the graph footer's order), both
 /// expanded and collapsed (`M`), and on short 80×16 and 80×14 terminals
 /// where the file row must stay visible. The right diff carries no commit
 /// message. Esc walks back to depth 1 and depth 0 with the message on the
@@ -208,8 +213,8 @@ fn diff_collapsed_at_left_bottom(screen: &str) -> bool {
 ///
 /// Live PTY 80×28. A message on the depth 1 files pane or the depth 2 diff,
 /// a footer with no rule above it,
-/// a header painted above the depth 2 file list, a message painted directly
-/// under the list with blank rows below it, or a short terminal that drops
+/// a header painted above the depth 2 file list, a meta line above the
+/// message or with blank rows below it, or a short terminal that drops
 /// the file row for the message cannot pass.
 #[test]
 fn pty_commit_msg_bottom_every_depth() {
@@ -269,7 +274,7 @@ fn pty_commit_msg_bottom_every_depth() {
     tui.enter();
     tui.wait_pred(
         diff_expanded_at_left_bottom,
-        "depth 2: wip.txt row above the subject, meta line, and body on the left",
+        "depth 2: wip.txt row above the subject, body, and bottom meta line on the left",
         WAIT,
     );
     prove_keys_handled(&mut tui);

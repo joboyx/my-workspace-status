@@ -3,7 +3,7 @@
 //! Live refs come from the workspace snapshot (`local_branches`, checkout
 //! paths, repo identity). This module does not run git.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::helpers::{is_counted_local_branch, is_default_branch, is_detached_head_branch};
 use crate::snapshot::{CheckoutKind, WorkspaceSnapshot};
@@ -1028,6 +1028,77 @@ pub fn tree_row_comments<'a>(
         .collect()
 }
 
+/// True when comment `key` paints its mark on the file row of `path` in a
+/// checkout of repo `identity` on `branch`: a working-tree line comment of
+/// that file on that branch, or a line comment of that file at any commit.
+/// The workspace tree and the Explorer tree file rows share this match.
+fn file_key_on_checkout(identity: &str, branch: &str, path: &str, key: &CommentKey) -> bool {
+    file_key_path(identity, branch, key) == Some(normalize_viewed_path(path).as_str())
+}
+
+/// The file path whose row comment `key` marks in a checkout of repo
+/// `identity` on `branch` ([`file_key_on_checkout`]); `None` for a key that
+/// marks no file row there.
+fn file_key_path<'k>(identity: &str, branch: &str, key: &'k CommentKey) -> Option<&'k str> {
+    match key {
+        CommentKey::WorktreeLine {
+            repo,
+            path,
+            branch: b,
+            ..
+        } if repo == identity && b == branch => Some(path),
+        CommentKey::CommitLine { repo, path, .. } if repo == identity => Some(path),
+        _ => None,
+    }
+}
+
+/// Repo identity and branch of checkout `repo` in `snapshot`, the scope a
+/// file row's comments match in ([`file_key_on_checkout`]).
+fn checkout_file_scope(snapshot: &WorkspaceSnapshot, repo: &str) -> (String, String) {
+    let snap = snapshot.repos.iter().find(|r| r.repo == repo);
+    (
+        repo_identity(repo, snap.and_then(|r| r.primary_repo.as_deref())),
+        snap.map(|r| r.branch.clone()).unwrap_or_default(),
+    )
+}
+
+/// Resolve state of the comment mark of every commented file row in
+/// checkout `repo` (the Explorer tree's file rows), with the workspace tree
+/// file row's match, from one pass over `store`: path → `true` when every
+/// comment on it is resolved. A path with no comment is absent. A tree
+/// paint builds it once and probes it per row.
+pub fn checkout_file_comment_states(
+    store: &CommentStore,
+    snapshot: &WorkspaceSnapshot,
+    repo: &str,
+) -> HashMap<String, bool> {
+    let (identity, branch) = checkout_file_scope(snapshot, repo);
+    let mut states: HashMap<String, bool> = HashMap::new();
+    for (key, entry) in store {
+        if let Some(path) = file_key_path(&identity, &branch, key) {
+            let resolved = states.entry(path.to_string()).or_insert(true);
+            *resolved &= entry.resolved;
+        }
+    }
+    states
+}
+
+/// Comments behind the mark [`checkout_file_comment_states`] reads for
+/// `path`, in store order.
+pub fn checkout_file_comments<'a>(
+    store: &'a CommentStore,
+    snapshot: &WorkspaceSnapshot,
+    repo: &str,
+    path: &str,
+) -> Vec<&'a CommentEntry> {
+    let (identity, branch) = checkout_file_scope(snapshot, repo);
+    store
+        .iter()
+        .filter(|(key, _)| file_key_on_checkout(&identity, &branch, path, key))
+        .map(|(_, entry)| entry)
+        .collect()
+}
+
 fn tree_key_on_row(snapshot: &WorkspaceSnapshot, row: &VisibleRow, key: &CommentKey) -> bool {
     let Some(repo_path) = row.repo.as_deref() else {
         return false;
@@ -1041,20 +1112,16 @@ fn tree_key_on_row(snapshot: &WorkspaceSnapshot, row: &VisibleRow, key: &Comment
     );
     match row.kind {
         NodeKind::File => {
-            let Some(file) = row.file.as_ref() else {
-                return false;
+            // A file row carries no branch chrome: its checkout's branch is
+            // the snapshot's, as the Explorer tree file row reads it.
+            let branch = if row.chrome.branch.is_empty() {
+                snap.map_or("", |r| r.branch.as_str())
+            } else {
+                row.chrome.branch.as_str()
             };
-            let path = normalize_viewed_path(&file.path);
-            match key {
-                CommentKey::WorktreeLine {
-                    repo,
-                    path: p,
-                    branch,
-                    ..
-                } => repo == &identity && p == &path && branch == &row.chrome.branch,
-                CommentKey::CommitLine { repo, path: p, .. } => repo == &identity && p == &path,
-                _ => false,
-            }
+            row.file
+                .as_ref()
+                .is_some_and(|file| file_key_on_checkout(&identity, branch, &file.path, key))
         }
         NodeKind::Repo | NodeKind::Checkout => {
             if row.chrome.is_family {
@@ -1291,6 +1358,24 @@ pub fn diff_line_comment_state(
     comments_resolved_state(store, |key| {
         diff_line_key_covers(repo, primary, branch, path, source, line, key)
     })
+}
+
+/// Line comments that cover painted diff `line`, in store order: the
+/// comments behind the mark [`diff_line_comment_state`] reads.
+pub fn diff_line_comments<'a>(
+    store: &'a CommentStore,
+    repo: &str,
+    primary: Option<&str>,
+    branch: Option<&str>,
+    path: &str,
+    source: Option<&CommitFileSource>,
+    line: u32,
+) -> Vec<&'a CommentEntry> {
+    store
+        .iter()
+        .filter(|(key, _)| diff_line_key_covers(repo, primary, branch, path, source, line, key))
+        .map(|(_, entry)| entry)
+        .collect()
 }
 
 fn diff_line_key_covers(

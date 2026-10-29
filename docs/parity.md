@@ -12,8 +12,20 @@ CI runs the checks in `crates/workspace-status/src/parity_registry.rs` (part of 
 | `parity_registry_gaps_and_intentional_differences_are_indexed` | A `gap:` id is not in **Open gaps**, an indexed gap is used nowhere, a gap is used in another component with no note, or an `I<n>` cited in an `n/a:` reason and the **Intentional differences** table do not match. |
 | `parity_registry_code_anchors_and_tests_exist` | A code anchor or a named test is no longer a `fn` anywhere under `crates/` (a mention in a `//` comment does not count). A rename or a moved code path forces an update here. |
 | `commit_footer_message_scroll_matches_on_every_registry_surface` (`tui/render.rs`) | The `commit-footer` surfaces marked `supported` for `msg-scroll`, in each look, differ from the surfaces that test drives; or the wheel, scrollbar, more-below hint, or per-commit reset fails on one of them. |
+| `commit_footer_rows_match_on_every_registry_surface`, `commit_footer_rule_drag_matches_on_every_registry_surface` (`tui/render.rs`) | The `commit-footer` surfaces marked `supported` for `meta`, `msg-colour`, `row-order`, or `rule-drag`, in each look, differ from the surfaces those tests drive; or on one of them the message rows are not on top in `pal.repo`, the meta row is not the graph footer's meta on the bottom row with a ref chip hit that pins its popover, or the top rule does not drag the rows and save them once on release. |
+| `commit_footer_shows_hint_expand_and_hash_link_on_every_registry_surface` (`tui/render.rs`) | The `commit-footer` surfaces marked `supported` for `shown`, `hint-popover`, `expand`, or `hash-link`, in each look, differ from the surfaces that test drives; or on one of them the subject does not paint on the first body row, a click on the more-below hint does not pin the more-lines section with the footer's count, `M` does not hide and restore the body, or the meta row's short hash does not link to the commit page. |
+| `commit_file_search_highlight_and_steps_agree_on_every_registry_surface` (`tui/render.rs`) | The `search` surfaces whose code anchors name `commit_file_search_match_ids` differ from the surfaces that test drives, or one of them is not `supported` for `agree` in each look; or on one of them the highlighted rows differ from the rows `n` / `N` visit and the pill counts, or a walk from a folded list changes the count. |
+| `diff_vertical_bar_drags_and_track_click_jumps_on_every_registry_surface` (`tui/render.rs`) | The `scrollbars` surfaces whose code anchors name `draw_diff_pane` differ from the surfaces that test drives, or one of them is not `supported` for `vbar-drag` in each look; or on one of them a press on the vertical thumb picks a row, arms a text selection, or jumps, a drag does not move the viewport (and the diff cursor with it) by the graph bar's math, the release does not end the drag, or a track click does not jump to the end or the top. |
+| `list_vertical_bar_drags_and_track_click_jumps_on_every_registry_surface`, `list_horizontal_bar_drags_and_track_click_jumps_on_every_registry_surface` (`tui/render.rs`) | The `scrollbars` surfaces whose code anchors name `draw_tree`, `draw_commit_file_list`, `draw_folder_summary`, `draw_explorer_tree`, `draw_prs_list`, `draw_prs_detail`, or `draw_file_body` (the clean-file view) differ from the surfaces those tests drive, or one of them (for the horizontal bar, one that pans) is not `supported` for `vbar` and `vbar-drag` (`hbar` and `hbar-drag`) in each look; or on one of them a bar does not paint where its rows leave room for it, a press on a thumb picks a row, a drag does not move the viewport (and the list cursor with it, asking for what the wheel asks for; the folder summary and the PRs detail have no cursor) or the pan by the graph bar's math, the horizontal bar clamps to another pan max than Shift-→ or hides the end of the longest row, the release does not end the drag, or a track click does not jump to the end or the start. |
+| `diff_horizontal_bar_drags_and_track_click_jumps_on_every_registry_surface` (`tui/render.rs`) | The `scrollbars` surfaces whose code anchors name `draw_diff_pane` differ from the surfaces that test drives, or one of them is not `supported` for `hbar` and `hbar-drag` in each look; or on one of them the bar paints at the left edge, clamps to another pan max than Shift-→, a thumb press picks a row or arms a text selection, a drag does not pan by the graph bar's math, the release does not end the drag, or a track click does not jump to the end or the start. |
+| `list_shift_keys_and_hwheel_pan_on_every_registry_list_surface` (`tui/render.rs`) | A `scrollbars` list surface that pans (the list scrollbar tests' surfaces with a horizontal bar) is not a `horizontal-pan` surface, or one of them is not `supported` for `shift-keys`, `hwheel`, and `pan-limit` in each look; or on one of them Shift-→ does not pan the focused list or does not stop at its pan max, or the horizontal wheel over the list (the other pane focused) does not pan it, stops elsewhere than Shift-→, or moves its cursor. |
+| `tree_hwheel_pans_a_shown_file_view_that_can_pan_on_every_registry_tree_surface` (`tui/render.rs`) | The `horizontal-pan` tree surfaces (`tree`, `explorer-tree`) are not `supported` for `hwheel` in each look; or on one of them the horizontal wheel over the tree does not pan a shown file view that can pan (leaving the tree still), does not pan the tree once the view cannot pan, or Shift-→ with the tree focused pans anything but the tree. |
+| `line_click_picks_the_row_and_a_drag_selects_on_every_registry_surface` (`tui/render.rs`) | The `line-viewers` surfaces differ from the surfaces that test drives, or one of them is not `supported` for `click-row` in each look; or on one of them a click on a line does not move the line cursor there and focus the viewer, or a press-drag from it does not select text (copied on release) or moves the cursor again. |
+| `resize_edges_drag_and_hover_on_every_registry_surface` (`tui/render.rs`) | The `resize-edges` surfaces (except one that is `n/a` on every feature, with no edge to drive) differ from the surfaces that test drives, or one of them is not `supported` for `divider`, `diff-rule`, and `hover` in each look; or on one of them the divider or the side-by-side RULE under the pointer does not hover and light, a drag does not widen the left pane or move the RULE (painted where it was dropped), or the release does not end the drag. |
+| `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface` (`tui/render.rs`) | The `file-lists` (`row-icons`), `icon-popovers` (`icon-hits`, `focused-row`), `row-marks` (`reviewed`, `comment`), or `watch-flash` (`flash`) surfaces whose code anchors name `draw_tree` or `draw_explorer_tree` differ from the trees that test drives (`tree`, `explorer-tree`), or one of them is not `supported` in each look; or on one of them a file or folder row paints other icons, glyphs, or order than on the other tree, a hit is wider than its glyph (also panned), a reloaded row does not flash, a hover does not find the icon, a click on a glyph does not pin its section (or a folder glyph changes the fold), `gh` does not pin one section per icon, or a section differs from the other tree's. |
+| `line_gutter_comment_marks_peek_pin_and_gh_on_every_registry_surface` (`tui/render.rs`) | The `icon-popovers` surfaces whose code anchors name `draw_diff_pane` or `draw_file_body` differ from the surfaces that test drives, or one of them is not `supported` for `icon-hits` and `focused-row` in each look; or on one of them (each diff tab, inline and side by side, panned or not) a comment mark records no hit or a hit wider than its glyph, a hover does not peek the comments of that line only, a click does not select the line and pin with no text selection or RULE drag, or `gh` on the marked cursor line does not pin it. |
 
-The last check is the pattern for other components: one test body that runs the same assertions on every surface the registry marks `supported`, and that compares its own surface list to `parity_registry::supported_surface_looks(component, feature)`.
+The `commit-footer` check is the pattern for other components: one test body that runs the same assertions on every surface the registry marks `supported`, and that compares its own surface list to `parity_registry::supported_surface_looks(component, feature)`.
 
 ## Format
 
@@ -26,7 +38,7 @@ The checks parse this file. Keep to these rules:
 3. Each feature cell is exactly one of:
    - `supported`: the surface has the feature.
    - `n/a: <reason>`: the feature does not apply. The reason has two words or more. An intentional difference cites its id (`I3`) in the reason.
-   - `gap: G<n>`: an open gap (`n` from 1, no leading zero). A gap belongs to the component that **Open gaps** names; a cell in another component adds a note after `;` (`gap: G13; the tree never pans, so it has no bar`).
+   - `gap: G<n>`: an open gap (`n` from 1, no leading zero). A gap belongs to the component that **Open gaps** names; a cell in another component adds a note after `;` (for example `gap: G99; <why it is missing here>`).
 4. **Open gaps** has one row per gap: `| Gap | Component | Has it | Missing on |`. **Intentional differences** has one row per `I<n>`: `| Id | Difference | Stated in |`.
 5. No `|` inside a cell.
 
@@ -34,26 +46,27 @@ The checks parse this file. Keep to these rules:
 
 ### `commit-footer` — Commit message footer
 
-The selected commit's message, pinned under a commit list: the graph selection footer (graph crate `GraphWidget::paint_footer`) and the depth-2 commit-files footer (`render::draw_commit_detail`). Both paint the message rows through the shared `paint_footer_message` and keep one scroll offset, `commit_msg_scroll`, keyed by the commit's graph row identity.
+The selected commit's message, pinned under a commit list: the graph selection footer (graph crate `GraphWidget`) and the commit-files footer of a depth-2 drill or a Diff commit vs parent compare tab (`render::draw_commit_detail` → `draw_commit_footer`; `commit_footer_source` gives the drilled source or the tab's head commit). Both build their lines with `selection_footer_parts` (for the commit-files footer, the graph row of that source, `commit_footer_parts`) and paint them with the shared `paint_selection_footer` (message rows through `paint_footer_message`, the meta row with its ref chips pinned at the bottom), so the same commit paints the same rows on every surface. A range compare tab (`compare-range`) has no single commit message and paints no footer. They keep one scroll offset, `commit_msg_scroll`, keyed by the commit's graph row identity, and their rule drags change the one `commit_msg_lines` setting.
 
 | Feature | What | Tests |
 | --- | --- | --- |
-| `shown` | The footer paints under the list for a commit-backed view. | `depth_2_left_files_pane_pins_commit_footer_under_the_list`, `depth_1_files_pane_has_no_commit_footer_beside_the_graph_footer` |
-| `msg-scroll` | A long message scrolls with the wheel over the footer (the list cursor stays), shows a 1-column scrollbar and a ` <more_below><K>` hint, another commit starts at the top, and the last-scrolled commit keeps its offset (the same offset on every surface that shows it). | `commit_footer_message_scroll_matches_on_every_registry_surface` |
-| `hint-popover` | The more-below hint hovers and pins the more-lines popover (Collapse, Taller). | `commit_detail_footer_hint_records_a_hit_and_pins_the_more_lines_section` |
-| `expand` | `M` toggles the full message and the subject-only footer. | `m_toggles_commit_msg_expand_on_graph_footer_and_commit_detail` |
-| `hash-link` | The short hash links to the forge commit page (OSC 8). | `commit_detail_footer_hash_links_to_forge_commit_page` |
-| `rule-drag` | A drag on the footer's top rule adds or removes message rows. | `commit_msg_rule_drag_resizes_the_footer_and_release_saves_once` |
-| `meta` | The meta row has coloured ref chips with popovers and `parent <id>`. | none |
-| `msg-colour` | The message text paints in the subject colour (`pal.repo`). | none |
-| `row-order` | The message rows come first and the meta row is pinned at the bottom. | none |
+| `shown` | The footer paints under the list for a commit-backed view. | `depth_2_left_files_pane_pins_commit_footer_under_the_list`, `depth_1_files_pane_has_no_commit_footer_beside_the_graph_footer`, `commit_footer_shows_hint_expand_and_hash_link_on_every_registry_surface`, `compare_range_tab_paints_no_commit_footer` |
+| `msg-scroll` | A long message scrolls with the wheel over the footer (the list cursor stays), shows a 1-column scrollbar and a ` <more_below><K>` hint, another commit starts at the top, and the last-scrolled commit keeps its offset (the same offset on every surface that shows it). | `commit_footer_message_scroll_matches_on_every_registry_surface`, `compare_commit_footer_shares_the_message_offset_with_graph_and_depth_2`, `blame_opened_compare_commit_footer_reads_the_tab_commit_off_the_graph` |
+| `hint-popover` | The more-below hint hovers and pins the more-lines popover (Collapse, Taller). | `commit_detail_footer_hint_records_a_hit_and_pins_the_more_lines_section`, `commit_footer_shows_hint_expand_and_hash_link_on_every_registry_surface`, `blame_opened_compare_commit_footer_reads_the_tab_commit_off_the_graph` |
+| `expand` | `M` toggles the full message and the subject-only footer. | `m_toggles_commit_msg_expand_on_graph_footer_and_commit_detail`, `commit_footer_shows_hint_expand_and_hash_link_on_every_registry_surface` |
+| `hash-link` | The short hash links to the forge commit page (OSC 8). | `commit_detail_footer_hash_links_to_forge_commit_page`, `commit_footer_shows_hint_expand_and_hash_link_on_every_registry_surface` |
+| `rule-drag` | A drag on the footer's top rule adds or removes message rows. | `commit_msg_rule_drag_resizes_the_footer_and_release_saves_once`, `commit_footer_rule_drag_matches_on_every_registry_surface`, `blame_opened_compare_commit_footer_reads_the_tab_commit_off_the_graph` |
+| `meta` | The meta row has coloured ref chips with popovers and `parent <id>`. | `commit_footer_rows_match_on_every_registry_surface`, `blame_opened_compare_commit_footer_reads_the_tab_commit_off_the_graph`, `compare_commit_footer_paints_a_head_tab_commit_like_the_graph_row` |
+| `msg-colour` | The message text paints in the subject colour (`pal.repo`). | `commit_footer_rows_match_on_every_registry_surface`, `blame_opened_compare_commit_footer_reads_the_tab_commit_off_the_graph` |
+| `row-order` | The message rows come first and the meta row is pinned at the bottom. | `commit_footer_rows_match_on_every_registry_surface`, `blame_opened_compare_commit_footer_reads_the_tab_commit_off_the_graph` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `shown` | `msg-scroll` | `hint-popover` | `expand` | `hash-link` | `rule-drag` | `meta` | `msg-colour` | `row-order` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `draw_graph`, `selection_footer_parts`, `commit_msg_scroll`, `paint_footer`, `paint_footer_message`, `scroll_graph_footer_msg`, `on_footer_box`, `step_commit_msg_scroll`, `graph_more_lines_section`, `more_lines_section`, `record_commit_msg_rule` | supported | supported | supported | supported | supported | supported | supported | supported | supported |
-| `graph-d1` | Workspace | 1 | left | boxed, flat | `draw_graph`, `selection_footer_parts`, `commit_msg_scroll`, `paint_footer`, `paint_footer_message`, `scroll_graph_footer_msg`, `on_footer_box`, `step_commit_msg_scroll`, `graph_more_lines_section`, `more_lines_section`, `record_commit_msg_rule` | supported | supported | supported | supported | supported | supported | supported | supported | supported |
-| `files-d2` | Workspace | 2 | left | boxed, flat | `draw_commit_detail`, `commit_detail_footer_lines`, `commit_detail_meta`, `paint_footer_message`, `scroll_commit_detail_msg`, `on_footer_box`, `step_commit_msg_scroll`, `commit_detail_msg_identity`, `commit_detail_more_lines_section`, `more_lines_section` | supported | supported | supported | supported | supported | gap: G2 | gap: G1 | gap: G19 | gap: G20 |
-| `compare-commit` | Compare (Diff commit vs parent) | - | left | boxed, flat | `draw_panes`, `draw_commit_file_list`, `open_compare_tab_for` | gap: G10 | gap: G10 | gap: G10 | gap: G10 | gap: G10 | gap: G10 | gap: G10 | gap: G10 | gap: G10 |
+| `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `draw_graph`, `selection_footer_parts`, `commit_msg_scroll`, `paint_selection_footer`, `paint_footer_message`, `scroll_graph_footer_msg`, `on_footer_box`, `step_commit_msg_scroll`, `graph_more_lines_section`, `more_lines_section`, `record_commit_msg_rule` | supported | supported | supported | supported | supported | supported | supported | supported | supported |
+| `graph-d1` | Workspace | 1 | left | boxed, flat | `draw_graph`, `selection_footer_parts`, `commit_msg_scroll`, `paint_selection_footer`, `paint_footer_message`, `scroll_graph_footer_msg`, `on_footer_box`, `step_commit_msg_scroll`, `graph_more_lines_section`, `more_lines_section`, `record_commit_msg_rule` | supported | supported | supported | supported | supported | supported | supported | supported | supported |
+| `files-d2` | Workspace | 2 | left | boxed, flat | `draw_commit_detail`, `draw_commit_footer`, `commit_detail_graph_row`, `commit_detail_fallback_name`, `commit_footer_parts`, `commit_detail_footer_lines`, `paint_selection_footer`, `paint_footer_message`, `scroll_commit_detail_msg`, `on_footer_box`, `step_commit_msg_scroll`, `commit_detail_msg_identity`, `commit_detail_more_lines_section`, `more_lines_section`, `record_commit_detail_msg_rule` | supported | supported | supported | supported | supported | supported | supported | supported | supported |
+| `compare-commit` | Compare (Diff commit vs parent, Blame: open commit changes, Blame: open previous line change) | - | left | boxed, flat | `draw_panes`, `compare_commit_vs_parent`, `blame_commit_vs_parent`, `apply_blame_previous`, `commit_vs_parent`, `commit_vs_parent_head`, `compute_compare_range`, `load_commit`, `apply_compare_range`, `is_range_compare_tab`, `commit_footer_model`, `remote_target_for_chip`, `footer_chip_row`, `draw_commit_detail`, `draw_commit_footer`, `commit_footer_source`, `commit_detail_graph_row`, `commit_detail_fallback_name`, `commit_footer_parts`, `paint_selection_footer`, `paint_footer_message`, `scroll_commit_detail_msg`, `on_footer_box`, `step_commit_msg_scroll`, `commit_detail_msg_identity`, `commit_detail_more_lines_section`, `more_lines_section`, `record_commit_detail_msg_rule` | supported | supported | supported | supported | supported | supported | supported | supported | supported |
+| `compare-range` | Compare (Diff vs default, branch, or commit; commit vs working tree) | - | left | boxed, flat | `draw_panes`, `draw_commit_file_list`, `is_range_compare_tab` | n/a: a range compare has no single commit message | n/a: a range compare has no single commit message | n/a: a range compare has no single commit message | n/a: a range compare has no single commit message | n/a: a range compare has no single commit message | n/a: a range compare has no single commit message | n/a: a range compare has no single commit message | n/a: a range compare has no single commit message | n/a: a range compare has no single commit message |
 
 ### `file-lists` — File lists
 
@@ -61,8 +74,8 @@ Lists of file rows: the workspace tree, the commit-file list (depth 1 right, dep
 
 | Feature | What | Tests |
 | --- | --- | --- |
-| `row-icons` | Rows paint devicons and status marks, and record icon hits for hover and pin popovers. | `commit_file_rows_record_icon_hits`, `file_row_badge_and_devicon_hits_cover_the_glyph_only` |
-| `scroll` | Rows past the pane height scroll into view. | none |
+| `row-icons` | Rows paint devicons and status marks, and record icon hits for hover and pin popovers. | `commit_file_rows_record_icon_hits`, `file_row_badge_and_devicon_hits_cover_the_glyph_only`, `folder_summary_rows_paint_the_file_list_marks_flash_and_icon_hits`, `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface` |
+| `scroll` | Rows past the pane height scroll into view. | `folder_summary_scrolls_with_the_keys_and_wheel_and_resets_on_another_folder`, `list_vertical_bar_drags_and_track_click_jumps_on_every_registry_surface` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `row-icons` | `scroll` |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -70,8 +83,8 @@ Lists of file rows: the workspace tree, the commit-file list (depth 1 right, dep
 | `files-d1` | Workspace | 1 | right | boxed, flat | `draw_right`, `draw_commit_file_list`, `commit_file_row_paint_segments` | supported | supported |
 | `files-d2` | Workspace | 2 | left | boxed, flat | `draw_commit_detail`, `draw_commit_file_list`, `commit_file_row_paint_segments` | supported | supported |
 | `compare-files` | Compare | - | left | boxed, flat | `draw_panes`, `draw_commit_file_list`, `commit_file_row_paint_segments` | supported | supported |
-| `summary` | Workspace 2, Compare | - | right | boxed, flat | `draw_folder_summary`, `folder_summary` | gap: G9 | gap: G9 |
-| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree`, `explorer_row_segments` | gap: G15 | supported |
+| `summary` | Workspace 2, Compare | - | right | boxed, flat | `draw_folder_summary`, `folder_summary`, `summary_rows`, `summary_row_paint_segments_in`, `scroll_summary_by` | supported | supported |
+| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree`, `explorer_row_segments`, `explorer_row_paint_segments` | supported | supported |
 
 ### `line-viewers` — Line viewers
 
@@ -79,17 +92,17 @@ The file diff (`draw_diff_pane`) and the clean-file view (`draw_file_body`, an E
 
 | Feature | What | Tests |
 | --- | --- | --- |
-| `click-row` | A click on a line row moves the line cursor there. | none |
+| `click-row` | A click on a line row moves the line cursor there; a press-drag from it selects text. | `line_click_picks_the_row_and_a_drag_selects_on_every_registry_surface` |
 | `cursor-middle` | `j` / `k` keep the cursor near the vertical middle. | none |
-| `section-label` | The section label names the diff's side (`STAGED`, `UNSTAGED`, `COMMITTED`, …). | none |
+| `section-label` | The section label names the diff's side (`STAGED`, `UNSTAGED`, `COMMITTED`, …). | `depth_2_commit_and_stash_diffs_paint_committed_in_boxed_and_flat_panes`, `commit_and_stash_diffs_label_committed_and_keep_partial_patch_kinds` |
 | `full-context` | `Ctrl-o` toggles the whole-file context. | none |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `click-row` | `cursor-middle` | `section-label` | `full-context` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `diff-d0` | Workspace | 0 (file focused) | right | boxed, flat | `draw_right`, `draw_diff_pane`, `click_diff` | supported | supported | supported | supported |
-| `diff-d2` | Workspace | 2 | right | boxed, flat | `draw_right`, `draw_diff_pane`, `click_diff`, `compute_commit_diff` | supported | supported | gap: G18 | supported |
+| `diff-d2` | Workspace | 2 | right | boxed, flat | `draw_right`, `draw_diff_pane`, `click_diff`, `compute_commit_diff`, `from_commit_lines` | supported | supported | supported | supported |
 | `compare-diff` | Compare | - | right | boxed, flat | `draw_right`, `draw_diff_pane`, `click_diff` | supported | supported | supported | supported |
-| `explorer-diff` | Explorer (changed file) | - | right | boxed, flat | `draw_explorer_tab`, `draw_diff_pane`, `explorer_click` | gap: G12 | supported | supported | n/a: I4, Explorer diffs always show the whole file and `Ctrl-o` refuses |
+| `explorer-diff` | Explorer (changed file) | - | right | boxed, flat | `draw_explorer_tab`, `draw_diff_pane`, `explorer_click`, `explorer_click_row`, `click_diff` | supported | supported | supported | n/a: I4, Explorer diffs always show the whole file and `Ctrl-o` refuses |
 | `explorer-file` | Explorer (clean file) | - | right | boxed, flat | `draw_explorer_tab`, `draw_file_body`, `click_file_tab` | supported | n/a: I3, the clean-file view scrolls at the edge | n/a: a clean file has no diff sections | n/a: I4, the Explorer refuses `Ctrl-o` and a clean file shows the whole file |
 
 ### `scrollbars` — Scrollbars
@@ -98,27 +111,28 @@ Vertical and horizontal scrollbars of lists and line viewers. The commit-message
 
 | Feature | What | Tests |
 | --- | --- | --- |
-| `vbar` | A vertical scrollbar paints when the rows overflow. | none |
-| `vbar-drag` | A drag on the vertical thumb scrolls; a track click jumps. | `graph_scrollbar_thumb_drag_updates_scroll_and_release_ends_drag`, `graph_scrollbar_track_click_jumps_and_arms_drag` |
-| `hbar` | A horizontal scrollbar paints when the columns overflow. | none |
-| `hbar-drag` | A drag on the horizontal thumb pans; a track click jumps. | `diff_hscrollbar_on_the_last_pane_row_drags_only_when_flat` |
+| `vbar` | A vertical scrollbar paints in the last column whenever the rows overflow, at the top too. A list's rows stop left of it, and its pan clamp counts that column. A file diff and the clean-file view keep that column whether or not the bar shows. | `list_vertical_bar_drags_and_track_click_jumps_on_every_registry_surface`, `explorer_clean_file_bars_sit_where_the_changed_file_diff_bars_sit`, `the_detail_scrolls_with_the_wheel_clamps_and_starts_another_pr_at_the_top` |
+| `vbar-drag` | A drag on the vertical thumb scrolls; a track click jumps. A press on the bar picks no row. A viewport that follows its cursor (the file diff, the Workspace tree, a commit-file list, the Explorer tree, the PRs list) moves the cursor with it and asks for what the wheel asks for (the right pane, a diff, a preview; nothing for the PRs list, whose detail follows its cursor). The clean-file view scrolls at the edge, so its line cursor moves to the nearest edge row of the new viewport, as the wheel leaves it. The folder summary and the PRs detail have no cursor, so only their viewport moves. | `graph_scrollbar_thumb_drag_updates_scroll_and_release_ends_drag`, `graph_scrollbar_track_click_jumps_and_arms_drag`, `diff_vertical_bar_drags_and_track_click_jumps_on_every_registry_surface`, `hit_test_diff_vertical_scrollbar_thumb_and_track_in_both_looks`, `cursor_for_viewport_top_on_wrapped_rows`, `list_vertical_bar_drags_and_track_click_jumps_on_every_registry_surface`, `hit_test_list_scrollbars_win_over_the_pane_band_and_share_the_corner`, `clean_file_vertical_bar_drags_wrapped_lines_in_both_looks` |
+| `hbar` | A horizontal scrollbar paints once the pane pans off the left edge. A list keeps its last row for it, left of the vertical bar's corner cell. | `list_horizontal_bar_drags_and_track_click_jumps_on_every_registry_surface`, `explorer_clean_file_bars_sit_where_the_changed_file_diff_bars_sit` |
+| `hbar-drag` | A drag on the horizontal thumb pans the offset Shift-←/→ pans, up to the same pan clamp; a track click jumps. A press on the bar picks no row. | `diff_hscrollbar_on_the_last_pane_row_drags_only_when_flat`, `diff_horizontal_bar_drags_and_track_click_jumps_on_every_registry_surface`, `list_horizontal_bar_drags_and_track_click_jumps_on_every_registry_surface`, `hit_test_list_scrollbars_win_over_the_pane_band_and_share_the_corner` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `vbar` | `vbar-drag` | `hbar` | `hbar-drag` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `draw_graph`, `record_graph_scrollbar`, `hit_graph_scrollbar` | supported | supported | supported | supported |
-| `graph-d1` | Workspace | 1 | left | boxed, flat | `draw_graph`, `record_graph_scrollbar`, `hit_graph_scrollbar` | supported | supported | supported | supported |
-| `tree` | Workspace | 0 | left | boxed, flat | `draw_tree` | gap: G5 | gap: G5 | gap: G23 | gap: G23 |
-| `files-d1` | Workspace | 1 | right | boxed, flat | `draw_commit_file_list` | gap: G5 | gap: G5 | gap: G23 | gap: G23 |
-| `files-d2` | Workspace | 2 | left | boxed, flat | `draw_commit_detail`, `draw_commit_file_list` | gap: G5 | gap: G5 | gap: G23 | gap: G23 |
-| `compare-files` | Compare | - | left | boxed, flat | `draw_commit_file_list` | gap: G5 | gap: G5 | gap: G23 | gap: G23 |
-| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree` | gap: G5 | gap: G5 | gap: G13; the tree never pans, so it has no bar | gap: G13; the tree never pans, so it has no bar |
-| `diff-d0` | Workspace | 0 (file focused) | right | boxed, flat | `draw_diff_pane`, `hit_diff_hscrollbar` | supported | gap: G4 | supported | supported |
-| `diff-d2` | Workspace | 2 | right | boxed, flat | `draw_diff_pane`, `hit_diff_hscrollbar` | supported | gap: G4 | supported | supported |
-| `compare-diff` | Compare | - | right | boxed, flat | `draw_diff_pane`, `hit_diff_hscrollbar` | supported | gap: G4 | supported | supported |
-| `explorer-diff` | Explorer (changed file) | - | right | boxed, flat | `draw_diff_pane`, `explorer_click` | supported | gap: G4 | supported | gap: G11; `explorer_click` never calls `hit_split` |
-| `explorer-file` | Explorer (clean file) | - | right | boxed, flat | `draw_file_body` | gap: G6 | gap: G6 | gap: G6 | gap: G6 |
-| `prs-list` | PRs | - | left | boxed, flat | `draw_prs_list` | gap: G5 | gap: G5 | n/a: PRs tab rows cut the title to fit and never pan | n/a: PRs tab rows cut the title to fit and never pan |
-| `prs-detail` | PRs | - | right | boxed, flat | `draw_prs_detail` | gap: G5 | gap: G5 | n/a: long values end in an ellipsis and never pan | n/a: long values end in an ellipsis and never pan |
+| `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `draw_graph`, `record_graph_scrollbar`, `hit_vscrollbar`, `press_vscrollbar`, `hit_hscrollbar`, `press_hscrollbar` | supported | supported | supported | supported |
+| `graph-d1` | Workspace | 1 | left | boxed, flat | `draw_graph`, `record_graph_scrollbar`, `hit_vscrollbar`, `press_vscrollbar`, `hit_hscrollbar`, `press_hscrollbar` | supported | supported | supported | supported |
+| `tree` | Workspace | 0 | left | boxed, flat | `draw_tree`, `paint_vscrollbar`, `paint_hscrollbar`, `hit_vscrollbar`, `press_vscrollbar`, `scroll_tree_to`, `cursor_for_viewport_top`, `hit_hscrollbar`, `press_hscrollbar`, `tree_max_col_in` | supported | supported | supported | supported |
+| `files-d1` | Workspace | 1 | right | boxed, flat | `draw_commit_file_list`, `paint_vscrollbar`, `paint_hscrollbar`, `hit_vscrollbar`, `press_vscrollbar`, `scroll_commit_files_to`, `cursor_for_viewport_top`, `hit_hscrollbar`, `press_hscrollbar`, `commit_file_max_col_in` | supported | supported | supported | supported |
+| `files-d2` | Workspace | 2 | left | boxed, flat | `draw_commit_detail`, `draw_commit_file_list`, `paint_vscrollbar`, `paint_hscrollbar`, `hit_vscrollbar`, `press_vscrollbar`, `scroll_commit_files_to`, `cursor_for_viewport_top`, `hit_hscrollbar`, `press_hscrollbar`, `commit_file_max_col_in` | supported | supported | supported | supported |
+| `compare-files` | Compare | - | left | boxed, flat | `draw_commit_file_list`, `paint_vscrollbar`, `paint_hscrollbar`, `hit_vscrollbar`, `press_vscrollbar`, `scroll_commit_files_to`, `cursor_for_viewport_top`, `hit_hscrollbar`, `press_hscrollbar`, `commit_file_max_col_in` | supported | supported | supported | supported |
+| `summary` | Workspace 2, Compare | - | right | boxed, flat | `draw_folder_summary`, `paint_vscrollbar`, `paint_hscrollbar`, `hit_vscrollbar`, `press_vscrollbar`, `scroll_summary_to`, `hit_hscrollbar`, `press_hscrollbar`, `summary_max_col_in` | supported | supported | supported | supported |
+| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree`, `paint_vscrollbar`, `paint_hscrollbar`, `explorer_click`, `press_split_hit`, `hit_vscrollbar`, `press_vscrollbar`, `scroll_explorer_tree_to`, `cursor_for_viewport_top`, `hit_hscrollbar`, `press_hscrollbar`, `explorer_tree_max_col_in` | supported | supported | supported | supported |
+| `diff-d0` | Workspace | 0 (file focused) | right | boxed, flat | `draw_diff_pane`, `paint_vscrollbar`, `hit_vscrollbar`, `press_vscrollbar`, `scroll_diff_to`, `cursor_for_viewport_top`, `paint_hscrollbar`, `hit_hscrollbar`, `press_hscrollbar` | supported | supported | supported | supported |
+| `diff-d2` | Workspace | 2 | right | boxed, flat | `draw_diff_pane`, `paint_vscrollbar`, `hit_vscrollbar`, `press_vscrollbar`, `scroll_diff_to`, `cursor_for_viewport_top`, `paint_hscrollbar`, `hit_hscrollbar`, `press_hscrollbar` | supported | supported | supported | supported |
+| `compare-diff` | Compare | - | right | boxed, flat | `draw_diff_pane`, `paint_vscrollbar`, `hit_vscrollbar`, `press_vscrollbar`, `scroll_diff_to`, `cursor_for_viewport_top`, `paint_hscrollbar`, `hit_hscrollbar`, `press_hscrollbar` | supported | supported | supported | supported |
+| `explorer-diff` | Explorer (changed file) | - | right | boxed, flat | `draw_diff_pane`, `explorer_click`, `press_split_hit`, `paint_vscrollbar`, `hit_vscrollbar`, `press_vscrollbar`, `scroll_diff_to`, `cursor_for_viewport_top`, `paint_hscrollbar`, `hit_hscrollbar`, `press_hscrollbar` | supported | supported | supported | supported |
+| `explorer-file` | Explorer (clean file) | - | right | boxed, flat | `draw_file_body`, `explorer_click`, `paint_vscrollbar`, `paint_hscrollbar`, `hit_vscrollbar`, `press_vscrollbar`, `scroll_file_view_to`, `cursor_for_viewport_top`, `file_view_scroll`, `hit_hscrollbar`, `press_hscrollbar`, `pan_max`, `pan_file_tab` | supported | supported | supported | supported |
+| `prs-list` | PRs | - | left | boxed, flat | `draw_prs_list`, `paint_vscrollbar`, `prs_click`, `hit_vscrollbar`, `press_vscrollbar`, `scroll_prs_list_to`, `cursor_for_viewport_top`, `prs_wheel` | supported | supported | n/a: PRs tab rows cut the title to fit and never pan | n/a: PRs tab rows cut the title to fit and never pan |
+| `prs-detail` | PRs | - | right | boxed, flat | `draw_prs_detail`, `keep_prs_detail_scroll`, `paint_vscrollbar`, `prs_click`, `hit_vscrollbar`, `press_vscrollbar`, `scroll_prs_detail_to`, `prs_wheel`, `dispatch_prs_tab` | supported | supported | n/a: long values end in an ellipsis and never pan | n/a: long values end in an ellipsis and never pan |
 
 ### `search` — Pane search
 
@@ -128,16 +142,16 @@ Vertical and horizontal scrollbars of lists and line viewers. The commit-message
 | --- | --- | --- |
 | `highlight` | Matching rows paint the search highlight. | none |
 | `step` | `n` / `N` step to the next / previous match and the pill counts them. | `commit_file_search_follows_painted_tree_order` |
-| `agree` | The highlighted rows are exactly the rows `n` / `N` step to and count. | none |
+| `agree` | The highlighted rows are exactly the rows `n` / `N` step to and count. | `commit_file_search_highlight_and_steps_agree_on_every_registry_surface`, `commit_file_search_steps_to_folder_rows`, `commit_file_search_lands_on_the_folder_row_when_a_file_shares_its_path` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `highlight` | `step` | `agree` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `tree` | Workspace | 0 | left | boxed, flat | `draw_tree`, `collect_match_ids`, `apply_tree_search` | supported | supported | supported |
 | `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `graph_search_matches`, `collect_graph_match_indices`, `focus_graph_search` | supported | supported | supported |
 | `graph-d1` | Workspace | 1 | left | boxed, flat | `graph_search_matches`, `collect_graph_match_indices`, `focus_graph_search` | supported | supported | supported |
-| `files-d1` | Workspace | 1 | right | boxed, flat | `commit_file_search_match_paths`, `commit_file_label_matches`, `commit_file_row_match_indices` | supported | supported | gap: G8 |
-| `files-d2` | Workspace | 2 | left | boxed, flat | `commit_file_search_match_paths`, `commit_file_label_matches`, `commit_file_row_match_indices` | supported | supported | gap: G8 |
-| `compare-files` | Compare | - | left | boxed, flat | `commit_file_search_match_paths`, `commit_file_label_matches`, `commit_file_row_match_indices` | supported | supported | gap: G8 |
+| `files-d1` | Workspace | 1 | right | boxed, flat | `commit_file_search_match_ids`, `commit_file_search_hits`, `commit_file_row_match_indices` | supported | supported | supported |
+| `files-d2` | Workspace | 2 | left | boxed, flat | `commit_file_search_match_ids`, `commit_file_search_hits`, `commit_file_row_match_indices` | supported | supported | supported |
+| `compare-files` | Compare | - | left | boxed, flat | `commit_file_search_match_ids`, `commit_file_search_hits`, `commit_file_row_match_indices` | supported | supported | supported |
 | `diff-d0` | Workspace | 0 (file focused) | right | boxed, flat | `draw_diff_pane`, `diff_search_hits` | supported | supported | supported |
 | `diff-d2` | Workspace | 2 | right | boxed, flat | `draw_diff_pane`, `diff_search_hits` | supported | supported | supported |
 | `compare-diff` | Compare | - | right | boxed, flat | `draw_diff_pane`, `diff_search_hits` | supported | supported | supported |
@@ -148,26 +162,27 @@ Vertical and horizontal scrollbars of lists and line viewers. The commit-message
 
 ### `icon-popovers` — Icon popovers
 
-Icons and marks on rows record an icon hit (`LayoutHit::icon_hits`): hover peeks and a click pins the icon's popover. `gh` pins the focused row's popover.
+Icons and marks on rows record an icon hit (`LayoutHit::icon_hits`): hover peeks and a click pins the icon's popover. `gh` pins the focused row's popover. The comment mark on a line gutter (a file diff, the Explorer clean-file view) is an icon too (`IconTarget::LineComment`): its popover lists the comments of that line, and on a focused line viewer the cursor line is the focused row.
 
 | Feature | What | Tests |
 | --- | --- | --- |
-| `icon-hits` | The painted icons hover and pin their popover with the mouse. | `commit_file_rows_record_icon_hits`, `click_on_an_icon_selects_its_row_and_pins_without_a_double_click`, `the_mouse_selects_rows_folds_headers_and_opens_the_pr` |
-| `focused-row` | `gh` pins the focused row's popover. | `gh_pins_the_icon_popover_and_bare_h_still_folds`, `gh_pins_the_popover_of_the_focused_pr_row` |
+| `icon-hits` | The painted icons hover and pin their popover with the mouse. | `commit_file_rows_record_icon_hits`, `click_on_an_icon_selects_its_row_and_pins_without_a_double_click`, `line_gutter_comment_marks_peek_pin_and_gh_on_every_registry_surface`, `folder_summary_rows_paint_the_file_list_marks_flash_and_icon_hits`, `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface`, `the_mouse_selects_rows_folds_headers_and_opens_the_pr` |
+| `focused-row` | `gh` pins the focused row's popover. | `gh_pins_the_icon_popover_and_bare_h_still_folds`, `line_gutter_comment_marks_peek_pin_and_gh_on_every_registry_surface`, `line_comment_popover_closes_when_the_cursor_leaves_its_line`, `line_comment_popover_frames_build_the_diff_rows_once`, `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface`, `gh_pins_the_popover_of_the_focused_pr_row` |
+| `folder-count` | A folder glyph's section counts the changed files under the folder in its list. | `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface`, `explorer_folder_popover_counts_distinct_changed_paths` |
 
-| Surface | Tab | Depth | Pane | Looks | Code anchors | `icon-hits` | `focused-row` |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `tree` | Workspace | 0 | left | boxed, flat | `draw_tree`, `tree_row_paint_segments`, `focused_row_icons` | supported | supported |
-| `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `draw_graph`, `graph_row_icons`, `focused_row_icons` | supported | supported |
-| `graph-d1` | Workspace | 1 | left | boxed, flat | `draw_graph`, `graph_row_icons`, `focused_row_icons` | supported | supported |
-| `files-d1` | Workspace | 1 | right | boxed, flat | `draw_commit_file_list`, `commit_file_row_paint_segments`, `focused_row_icons` | supported | supported |
-| `files-d2` | Workspace | 2 | left | boxed, flat | `draw_commit_file_list`, `commit_file_row_paint_segments`, `focused_row_icons` | supported | supported |
-| `compare-files` | Compare | - | left | boxed, flat | `draw_commit_file_list`, `commit_file_row_paint_segments`, `focused_row_icons` | supported | supported |
-| `summary` | Workspace 2, Compare | - | right | boxed, flat | `draw_folder_summary` | gap: G9; `draw_folder_summary` records no icon hit | n/a: the summary is never the focused list, so it has no focused row |
-| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree`, `explorer_row_segments`, `focused_row_icons` | gap: G15; Explorer rows record no icon hit | gap: G15; `focused_row_icons` is empty on an Explorer tab |
-| `diff-gutter` | Workspace, Compare, Explorer | 0, 2, - | right | boxed, flat | `draw_diff_pane`, `comment_mark_cols` | gap: G7 | gap: G7 |
-| `file-gutter` | Explorer (clean file) | - | right | boxed, flat | `draw_file_body`, `format_line_gutter` | gap: G7 | gap: G7 |
-| `prs-tab` | PRs | - | left | boxed, flat | `draw_prs_list`, `prs_pin_focused` | supported | supported |
+| Surface | Tab | Depth | Pane | Looks | Code anchors | `icon-hits` | `focused-row` | `folder-count` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `tree` | Workspace | 0 | left | boxed, flat | `draw_tree`, `tree_row_paint_segments`, `focused_row_icons`, `tree_file_facts` | supported | supported | supported |
+| `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `draw_graph`, `graph_row_icons`, `focused_row_icons` | supported | supported | n/a: a graph row is a commit, with no folder glyph |
+| `graph-d1` | Workspace | 1 | left | boxed, flat | `draw_graph`, `graph_row_icons`, `focused_row_icons` | supported | supported | n/a: a graph row is a commit, with no folder glyph |
+| `files-d1` | Workspace | 1 | right | boxed, flat | `draw_commit_file_list`, `commit_file_row_paint_segments`, `focused_row_icons`, `commit_file_facts` | supported | supported | supported |
+| `files-d2` | Workspace | 2 | left | boxed, flat | `draw_commit_file_list`, `commit_file_row_paint_segments`, `focused_row_icons`, `commit_file_facts` | supported | supported | supported |
+| `compare-files` | Compare | - | left | boxed, flat | `draw_commit_file_list`, `commit_file_row_paint_segments`, `focused_row_icons`, `commit_file_facts` | supported | supported | supported |
+| `summary` | Workspace 2, Compare | - | right | boxed, flat | `draw_folder_summary`, `summary_row_paint_segments_in`, `summary_rows` | supported | n/a: the summary is never the focused list, so it has no focused row | n/a: the summary lists file rows only, with no folder glyph |
+| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree`, `explorer_row_paint_segments`, `explorer_row_marks`, `segmented_icon_spans`, `explorer_row_section`, `explorer_click_row`, `click_with`, `focused_row_icons`, `explorer_cursor_row_icons`, `popover_owner`, `changed_files_under` | supported | supported | n/a: I7, the Explorer has no Staged or Changes sections, so a folder counts its distinct changed paths |
+| `diff-gutter` | Workspace, Compare, Explorer | 0, 2, - | right | boxed, flat | `draw_diff_pane`, `comment_mark_cols`, `diff_row_mark_hits`, `diff_row_gutter_cells`, `line_comment_mark`, `cursor_line_comment_icons`, `diff_row_comment_marks`, `prime_cursor_comment_lines`, `line_comments`, `line_comment_section`, `focused_row_icons`, `click_with`, `split_hit_at` | supported | supported | n/a: a line gutter has no folder glyph |
+| `file-gutter` | Explorer (clean file) | - | right | boxed, flat | `draw_file_body`, `format_line_gutter`, `line_mark_hit`, `line_comment_mark`, `cursor_line_comment_icons`, `file_cursor_comment_marks`, `line_comments`, `line_comment_section`, `focused_row_icons`, `click_with` | supported | supported | n/a: a line gutter has no folder glyph |
+| `prs-tab` | PRs | - | left | boxed, flat | `draw_prs_list`, `prs_pin_focused` | supported | supported | n/a: a PRs tab row is one PR, with no folder glyph |
 
 ### `resize-edges` — Mouse on resize edges
 
@@ -175,15 +190,15 @@ A press on a resize edge drags it: the tree / right pane divider and the in-diff
 
 | Feature | What | Tests |
 | --- | --- | --- |
-| `divider` | A drag on the pane divider resizes the panes. | `flat_divider_pad_press_and_drag_resizes` |
-| `diff-rule` | A drag on the split-mode diff rule moves it. | `diff_split_rule_round_trips_through_the_fraction_boxed_and_flat` |
-| `hover` | The edge under the pointer lights. | `hovered_pane_divider_lights_the_left_pane_edge_boxed_and_flat` |
+| `divider` | A drag on the pane divider resizes the panes. | `flat_divider_pad_press_and_drag_resizes`, `resize_edges_drag_and_hover_on_every_registry_surface`, `explorer_flat_divider_pad_press_released_in_place_clicks_the_tree_row` |
+| `diff-rule` | A drag on the split-mode diff rule moves it. | `diff_split_rule_round_trips_through_the_fraction_boxed_and_flat`, `resize_edges_drag_and_hover_on_every_registry_surface` |
+| `hover` | The edge under the pointer lights. | `hovered_pane_divider_lights_the_left_pane_edge_boxed_and_flat`, `resize_edges_drag_and_hover_on_every_registry_surface` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `divider` | `diff-rule` | `hover` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `workspace` | Workspace | any | both | boxed, flat | `click_at`, `hit_split`, `resize_edges_take_mouse`, `hovered_resize_edge` | supported | supported | supported |
-| `compare` | Compare | - | both | boxed, flat | `click_at`, `hit_split`, `resize_edges_take_mouse`, `hovered_resize_edge` | supported | supported | supported |
-| `explorer` | Explorer | - | both | boxed, flat | `explorer_click`, `resize_edges_take_mouse`, `draw_explorer_tab` | gap: G11 | gap: G11 | gap: G11 |
+| `workspace` | Workspace | any | both | boxed, flat | `click_at`, `press_split_hit`, `hit_split`, `resize_edges_take_mouse`, `hovered_resize_edge` | supported | supported | supported |
+| `compare` | Compare | - | both | boxed, flat | `click_at`, `press_split_hit`, `hit_split`, `resize_edges_take_mouse`, `hovered_resize_edge` | supported | supported | supported |
+| `explorer` | Explorer | - | both | boxed, flat | `explorer_click`, `press_split_hit`, `hit_split`, `resize_edges_take_mouse`, `hovered_resize_edge`, `draw_explorer_tab` | supported | supported | supported |
 | `prs-tab` | PRs | - | both | boxed, flat | `click_at`, `resize_edges_take_mouse`, `draw_prs_tab` | n/a: the detail pane takes a fixed third of the width | n/a: the PRs tab paints no diff | n/a: the PRs tab has no edge to drag |
 
 ### `horizontal-pan` — Horizontal pan
@@ -192,10 +207,10 @@ Long labels and lines pan sideways: Shift-←/→ and `h` / `l` on the focused p
 
 | Feature | What | Tests |
 | --- | --- | --- |
-| `shift-keys` | Shift-←/→ pan the focused pane. | `list_pan_shifts_tree_and_graph_without_stealing_fold` |
-| `h-l` | `h` / `l` pan the focused row or line. | `h_l_fold_commit_file_dirs_and_pan_on_files`, `focused_diff_l_increases_pan_h_decreases_tree_still_folds` |
-| `hwheel` | The horizontal wheel pans the pane under the pointer. | `mouse_hscroll_and_shift_wheel_map_to_horizontal_pan` |
-| `pan-limit` | The pan stops where the pane's own longest row ends. | `commit_file_and_diff_search_and_pan_clamp` |
+| `shift-keys` | Shift-←/→ pan the focused pane. | `list_pan_shifts_tree_and_graph_without_stealing_fold`, `folder_summary_pans_its_own_rows_not_the_hidden_diff`, `list_shift_keys_and_hwheel_pan_on_every_registry_list_surface` |
+| `h-l` | `h` / `l` pan the focused row or line. | `h_l_fold_commit_file_dirs_and_pan_on_files`, `focused_diff_l_increases_pan_h_decreases_tree_still_folds`, `folder_summary_pans_its_own_rows_not_the_hidden_diff` |
+| `hwheel` | The horizontal wheel pans the pane under the pointer; over a tree (the Workspace tree, the Explorer tree), a shown file view that can pan takes the pan, and the tree pans only when it cannot. | `mouse_hscroll_and_shift_wheel_map_to_horizontal_pan`, `folder_summary_pans_its_own_rows_not_the_hidden_diff`, `list_shift_keys_and_hwheel_pan_on_every_registry_list_surface`, `tree_hwheel_pans_a_shown_file_view_that_can_pan_on_every_registry_tree_surface` |
+| `pan-limit` | The pan stops where the pane's own longest row ends. | `commit_file_and_diff_search_and_pan_clamp`, `compare_file_pan_clamps_to_the_compare_list_not_the_parked_drill`, `folder_summary_pans_its_own_rows_not_the_hidden_diff`, `list_horizontal_bar_drags_and_track_click_jumps_on_every_registry_surface`, `list_shift_keys_and_hwheel_pan_on_every_registry_list_surface` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `shift-keys` | `h-l` | `hwheel` | `pan-limit` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -204,9 +219,9 @@ Long labels and lines pan sideways: Shift-←/→ and `h` / `l` on the focused p
 | `graph-d1` | Workspace | 1 | left | boxed, flat | `pan_left_pane`, `graph_max_col`, `mouse_pan` | supported | supported | supported | supported |
 | `files-d1` | Workspace | 1 | right | boxed, flat | `pan_right_pane`, `commit_file_max_col`, `mouse_pan` | supported | supported | supported | supported |
 | `files-d2` | Workspace | 2 | left | boxed, flat | `pan_left_pane`, `commit_file_max_col`, `mouse_pan` | supported | supported | supported | supported |
-| `compare-files` | Compare | - | left | boxed, flat | `pan_left_pane`, `commit_file_max_col`, `mouse_pan` | supported | supported | supported | gap: G3 |
-| `summary` | Workspace 2, Compare | - | right | boxed, flat | `draw_folder_summary`, `pan_right_pane` | gap: G22 | gap: G22 | gap: G22 | gap: G22 |
-| `explorer-tree` | Explorer | - | left | boxed, flat | `dispatch_explorer_tab`, `explorer_wheel`, `draw_explorer_tree` | gap: G13 | n/a: as on the Workspace tree (I1), `h` / `l` move through folders | gap: G13 | gap: G13 |
+| `compare-files` | Compare | - | left | boxed, flat | `pan_left_pane`, `commit_file_max_col`, `commit_file_comment_scope`, `mouse_pan` | supported | supported | supported | supported |
+| `summary` | Workspace 2, Compare | - | right | boxed, flat | `draw_folder_summary`, `pan_right_pane`, `pan_summary`, `summary_max_col_in`, `mouse_pan` | supported | supported | supported | supported |
+| `explorer-tree` | Explorer | - | left | boxed, flat | `dispatch_explorer_tab`, `pan_explorer_tree`, `explorer_tree_max_col_in`, `explorer_wheel`, `explorer_preview_pan_max`, `draw_explorer_tree` | supported | n/a: as on the Workspace tree (I1), `h` / `l` move through folders | supported | supported |
 | `diff-d0` | Workspace | 0 (file focused) | right | boxed, flat | `pan_diff_content`, `diff_pan_max` | supported | supported | supported | supported |
 | `diff-d2` | Workspace | 2 | right | boxed, flat | `pan_diff_content`, `diff_pan_max` | supported | supported | supported | supported |
 | `compare-diff` | Compare | - | right | boxed, flat | `pan_diff_content`, `diff_pan_max` | supported | supported | supported | supported |
@@ -216,15 +231,15 @@ Long labels and lines pan sideways: Shift-←/→ and `h` / `l` on the focused p
 
 ### `double-click` — Double-click
 
-A second press on the same cell within 400 ms is Enter on that row. The 400 ms is the gap between the presses' arrival (their stdin reads), not between the loop handling them.
+A second press on the same cell within 400 ms is Enter on that row. The 400 ms is the gap between the presses' arrival (their stdin reads), not between the loop handling them. Every surface, the PRs tab included, takes the rule from one function, `note_row_press`.
 
 | Feature | What | Tests |
 | --- | --- | --- |
-| `enter` | A double-click does what Enter does on the row. | `double_click_dispatches_enter` |
+| `enter` | A double-click does what Enter does on the row. | `double_click_dispatches_enter`, `explorer_tree_double_click_is_enter_boxed_and_flat`, `double_click_window_reads_the_press_arrival_instant`, `explorer_tree_double_click_reads_the_press_arrival_instant` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `enter` |
 | --- | --- | --- | --- | --- | --- | --- |
-| `tree` | Workspace | 0 | left | boxed, flat | `click_row`, `nav_enter` | supported |
+| `tree` | Workspace | 0 | left | boxed, flat | `click_row`, `note_row_press`, `nav_enter` | supported |
 | `graph-d0` | Workspace | 0 (repo focused) | right | boxed, flat | `click_row`, `click_graph` | supported |
 | `graph-d1` | Workspace | 1 | left | boxed, flat | `click_row`, `click_graph` | supported |
 | `files-d1` | Workspace | 1 | right | boxed, flat | `click_row`, `click_commit_files` | supported |
@@ -233,10 +248,10 @@ A second press on the same cell within 400 ms is Enter on that row. The 400 ms i
 | `diff-d0` | Workspace | 0 (file focused) | right | boxed, flat | `click_row`, `click_diff`, `nav_enter` | n/a: Enter has no action on a focused file diff (`nav_enter` warns `focus a repo commit to drill` at depth 0 and returns `Effect::None` at depth 2 and on a compare tab), so a double-click there has nothing to repeat |
 | `diff-d2` | Workspace | 2 | right | boxed, flat | `click_row`, `click_diff`, `nav_enter` | n/a: Enter has no action on a focused file diff (`nav_enter` warns `focus a repo commit to drill` at depth 0 and returns `Effect::None` at depth 2 and on a compare tab), so a double-click there has nothing to repeat |
 | `compare-diff` | Compare | - | right | boxed, flat | `click_row`, `click_diff`, `nav_enter` | n/a: Enter has no action on a focused file diff (`nav_enter` warns `focus a repo commit to drill` at depth 0 and returns `Effect::None` at depth 2 and on a compare tab), so a double-click there has nothing to repeat |
-| `explorer-tree` | Explorer | - | left | boxed, flat | `explorer_click`, `explorer_enter` | gap: G14 |
+| `explorer-tree` | Explorer | - | left | boxed, flat | `explorer_click`, `explorer_click_row`, `note_row_press`, `explorer_enter` | supported |
 | `explorer-diff` | Explorer (changed file) | - | right | boxed, flat | `explorer_click`, `dispatch_explorer_tab` | n/a: Enter does nothing in the Explorer file pane |
 | `explorer-file` | Explorer (clean file) | - | right | boxed, flat | `explorer_click`, `dispatch_explorer_tab` | n/a: Enter does nothing in the Explorer file pane |
-| `prs-tab` | PRs | - | left | boxed, flat | `prs_click`, `dispatch_prs_tab` | n/a: Enter opens the PR in the browser, so a double-click only selects the row; on a group header the second press does not undo the fold |
+| `prs-tab` | PRs | - | left | boxed, flat | `prs_click`, `note_row_press`, `dispatch_prs_tab` | n/a: Enter opens the PR in the browser, so a double-click only selects the row; on a group header the second press does not undo the fold |
 
 ### `row-marks` — Row marks
 
@@ -244,8 +259,8 @@ The reviewed eye and the comment mark (open or resolved) on a row or a line gutt
 
 | Feature | What | Tests |
 | --- | --- | --- |
-| `reviewed` | A reviewed file paints the eye. | none |
-| `comment` | A row or line with comments paints the comment mark. | `commit_file_row_paints_comment_mark_when_file_has_comments`, `graph_commit_row_marks_object_and_file_comments`, `explorer_file_view_paints_a_comment_mark_on_its_line` |
+| `reviewed` | A reviewed file paints the eye. | `folder_summary_rows_paint_the_file_list_marks_flash_and_icon_hits`, `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface`, `explorer_space_paints_the_reviewed_eye_on_both_trees` |
+| `comment` | A row or line with comments paints the comment mark. | `commit_file_row_paints_comment_mark_when_file_has_comments`, `graph_commit_row_marks_object_and_file_comments`, `explorer_file_view_paints_a_comment_mark_on_its_line`, `folder_summary_rows_paint_the_file_list_marks_flash_and_icon_hits`, `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `reviewed` | `comment` |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -255,8 +270,9 @@ The reviewed eye and the comment mark (open or resolved) on a row or a line gutt
 | `files-d1` | Workspace | 1 | right | boxed, flat | `commit_file_row_paint_segments`, `commit_file_row_has_comment` | n/a: reviewed marks are for workspace-tree files and compare ranges; Space in a commit drill says so | supported |
 | `files-d2` | Workspace | 2 | left | boxed, flat | `commit_file_row_paint_segments`, `commit_file_row_has_comment` | n/a: reviewed marks are for workspace-tree files and compare ranges; Space in a commit drill says so | supported |
 | `compare-files` | Compare | - | left | boxed, flat | `commit_file_row_paint_segments`, `compare_file_reviewed` | supported | supported |
-| `summary` | Workspace 2, Compare | - | right | boxed, flat | `draw_folder_summary` | gap: G21 | gap: G21 |
-| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree`, `explorer_toggle_reviewed` | gap: G16 | gap: G16 |
+| `summary-d2` | Workspace | 2 | right | boxed, flat | `draw_folder_summary`, `summary_row_paint_segments_in`, `commit_file_row_has_comment` | n/a: reviewed marks are for workspace-tree files and compare ranges, so the commit drill's file list has no eye to match | supported |
+| `summary-compare` | Compare | - | right | boxed, flat | `draw_folder_summary`, `summary_row_paint_segments_in`, `compare_file_reviewed` | supported | supported |
+| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree`, `explorer_row_paint_segments`, `explorer_row_marks`, `checkout_file_comment_states`, `explorer_toggle_reviewed`, `toggle_viewed_for` | supported | supported |
 | `diff-gutter` | Workspace, Compare, Explorer | 0, 2, - | right | boxed, flat | `draw_diff_pane`, `comment_mark_cols` | n/a: reviewed is per file, and the file's list row carries the eye | supported |
 | `file-gutter` | Explorer (clean file) | - | right | boxed, flat | `draw_file_body`, `file_line_comment` | n/a: reviewed is per file, and the file's list row carries the eye | supported |
 
@@ -266,7 +282,7 @@ A row that a watch reload adds or changes flashes and fades. The rows that show 
 
 | Feature | What | Tests |
 | --- | --- | --- |
-| `flash` | A reloaded row flashes. | `flash_paints_node_and_spacer_cursor_wins` |
+| `flash` | A reloaded row flashes. | `flash_paints_node_and_spacer_cursor_wins`, `folder_summary_rows_paint_the_file_list_marks_flash_and_icon_hits`, `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface`, `explorer_rows_flash_on_a_watch_reload`, `explorer_folders_take_the_flash_of_the_workspace_row_that_shows_them` |
 | `pr-change` | When a checkout's PR turns CI failed, ready to merge, merged, or closed, each row that shows its PR flashes (the checkout's tree row, never a family row; its graph worktree row; its PRs tab row while that tab is open), closed included though its badge is gone: the remove ramp for CI failed and closed, the add ramp for ready to merge and merged. The PR badge glyph keeps its state colour. | `a_pr_change_flashes_the_checkout_tree_row_on_the_remove_or_add_ramp`, `a_pr_change_flash_keeps_the_badge_glyph_in_its_state_colour`, `a_pr_change_flashes_the_graph_worktree_row_at_depth_0_and_1`, `a_pr_change_flashes_its_row_on_the_prs_tab`, `a_pr_change_flashes_its_prs_tab_row` |
 
 | Surface | Tab | Depth | Pane | Looks | Code anchors | `flash` | `pr-change` |
@@ -277,8 +293,8 @@ A row that a watch reload adds or changes flashes and fades. The rows that show 
 | `files-d1` | Workspace | 1 | right | boxed, flat | `draw_commit_file_list`, `commit_file_flash_color` | supported | n/a: commit-file rows carry no PR |
 | `files-d2` | Workspace | 2 | left | boxed, flat | `draw_commit_file_list`, `commit_file_flash_color` | supported | n/a: commit-file rows carry no PR |
 | `compare-files` | Compare | - | left | boxed, flat | `draw_commit_file_list`, `commit_file_flash_color` | supported | n/a: compare file rows carry no PR |
-| `summary` | Workspace 2, Compare | - | right | boxed, flat | `draw_folder_summary` | gap: G21; `draw_folder_summary` passes no flash | n/a: folder summary rows carry no PR |
-| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree` | gap: G17 | n/a: Explorer rows carry no PR |
+| `summary` | Workspace 2, Compare | - | right | boxed, flat | `draw_folder_summary`, `commit_file_flash_color` | supported | n/a: folder summary rows carry no PR |
+| `explorer-tree` | Explorer | - | left | boxed, flat | `draw_explorer_tree`, `explorer_row_marks`, `explorer_row_flash_color`, `explorer_folder_flashes`, `flash_color`, `apply_watch_snapshot` | supported | n/a: Explorer rows carry no PR |
 | `prs-tab` | PRs | - | left | boxed, flat | `draw_prs_list`, `alert_pr_transitions`, `pr_row_ids` | n/a: PRs tab rows come from the PR cache, which no watch reload changes | supported |
 
 ### `pr-status` — PR status marks
@@ -327,29 +343,6 @@ Each open gap is tracked by its id. Fixing one turns its cells into `supported` 
 
 | Gap | Component | Has it | Missing on |
 | --- | --- | --- | --- |
-| G1 | `commit-footer` | Graph footer meta: coloured ref chips, popovers on chips, `parent <id>` | Depth-2 commit-files footer: the meta is plain text (`commit_detail_meta`) |
-| G2 | `commit-footer` | Graph footer top rule drags (`record_commit_msg_rule`) | Depth-2 commit-files footer: its rule paints but records no hit |
-| G3 | `horizontal-pan` | Depth-2 commit-file list: the pan limit comes from its rows | Compare-tab file list: `pan_left_pane` picks the limit from the parked Workspace `drill`, and `commit_file_max_col` reads the comment scope from it |
-| G4 | `scrollbars` | Graph list scrollbar drag and track click (`SplitDrag::GraphScrollbar`) | File diff vertical bar: `SplitHit` / `SplitDrag` have no diff vertical variant; `diff_scrollbar_x` is read only in tests |
-| G5 | `scrollbars` | Graph list and file diff paint a vertical scrollbar | Workspace tree, commit-file lists, Explorer tree; PRs tab list and detail (the detail does not scroll at all: lines past its height are cut) |
-| G6 | `scrollbars` | Explorer pane on a changed file (`draw_diff_pane`) | Explorer pane on a clean file: `draw_file_body` paints no bar |
-| G7 | `icon-popovers` | Comment marks on tree, graph, and commit-file rows open a popover | Diff gutter and clean-file gutter: `IconTarget` has no line variant |
-| G8 | `search` | Workspace tree: highlight and `n` / `N` use the same matches | Commit-file lists: the paint also matches folder labels (`commit_file_label_matches`); stepping and the count use file rows only (`commit_file_row_match_indices`) |
-| G9 | `file-lists` | Commit-file and compare lists record icon hits and scroll | Folder summary: `draw_folder_summary` takes `&AppState`, records no icon hit, and folds overflow into `… N more` |
-| G10 | `commit-footer` | Workspace depth 2 shows the commit footer | Compare tab opened as Diff commit vs parent: no footer. Probably intentional but not documented: decide and document |
-| G11 | `resize-edges` | Workspace and compare tabs: divider drag, in-diff rule drag, diff horizontal thumb drag, edge hover | Explorer tab: `resize_edges_take_mouse` excludes it, `explorer_click` never calls `hit_split`, and `diff_split_rule_x` is forced to `None` |
-| G12 | `line-viewers` | Workspace and compare diffs: a click picks the row (`click_diff`) | Explorer pane on a changed file: `explorer_click` only arms a text selection |
-| G13 | `horizontal-pan` | Workspace tree pans | Explorer tree: `PanDiff` with the tree focused does nothing, the horizontal wheel does nothing, and the paint uses offset 0 |
-| G14 | `double-click` | Workspace lists (`click_row`, `last_click`) | Explorer tree: no double-click handling in `explorer_click` |
-| G15 | `file-lists` | Workspace tree and commit-file lists: devicons, icon hits, popovers, `gh` | Explorer tree rows: `explorer_row_segments` sets `icon: None` and records no hit; `focused_row_icons` is empty on an Explorer tab |
-| G16 | `row-marks` | Workspace tree and compare list paint the reviewed eye and comment marks | Explorer tree paints no mark (code comment on `explorer_toggle_reviewed`); the docs do not say so |
-| G17 | `watch-flash` | Tree, graph, and commit-file rows flash on a watch reload | Explorer tree: the flash is passed as `None` in `draw_explorer_tree` |
-| G18 | `line-viewers` | Compare-tab diff labels its section `COMMITTED` (`DiffContent::from_compare_lines`) | Workspace depth-2 commit / stash diff labels it `UNSTAGED`: `compute_commit_diff` builds it with `DiffContent::from_lines`, which sets `is_committed: false` |
-| G19 | `commit-footer` | Graph footer message text paints in the subject colour (`pal.repo`) | Depth-2 commit-files footer paints its message in `muted` |
-| G20 | `commit-footer` | Graph footer pins the meta row at the bottom, under the message | Depth-2 commit-files footer puts title and meta on top, message under them; no recorded reason |
-| G21 | `row-marks` | Commit-file and compare list rows paint the reviewed eye, comment marks, and the watch-reload flash | Folder summary rows of the same files: `draw_folder_summary` paints `file_change_segments` with no mark and no flash |
-| G22 | `horizontal-pan` | Commit-file list rows pan with the keys and the horizontal wheel | Folder summary: its rows always paint at offset 0; a pan key or a horizontal wheel over it pans the hidden file diff (`pan_right_pane` → `pan_diff_content`) |
-| G23 | `scrollbars` | Graph list and file diff paint a horizontal scrollbar with drag and track click | Workspace tree and commit-file lists pan sideways with no horizontal bar |
 | G24 | `search` | Workspace tree, graph, file lists, diffs, and the Explorer: `/` binds the focused pane, and `n` / `N` step | PRs tab list: `/`, `n`, and `N` say `PRs tab has no search` (`prs_tab_refusal`) |
 
 ## Intentional differences
@@ -362,3 +355,4 @@ Each open gap is tracked by its id. Fixing one turns its cells into `supported` 
 | I4 | Explorer: `??` untracked, `●` dirty folder, no `t` toggle, `Ctrl-o` refused | `docs/tui-model.md` (Explorer tabs) |
 | I5 | Filter pickers (branch, compare, graph focus): one Esc closes, typed filter or not. Quick Open and the search-in-files dialog take two presses with a typed query. | `docs/tui-rust.md` (picker key rule), `docs/tui-model.md` (Quick Open keys) |
 | I6 | PR status: the tree badge is `<ref> <glyph>`, a graph worktree row paints the glyph alone, and of the badges only the graph header chip paints the state label and the next action; the PRs tab paints the state label in a row column and the next action in the group header | `docs/tui-rust.md` (Pull request badge, PRs tab) |
+| I7 | Explorer folder popover counts distinct changed paths; the Workspace counts per Staged / Changes section, since the Explorer has no sections | `docs/tui-model.md` (Explorer tabs) |

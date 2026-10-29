@@ -122,7 +122,8 @@ impl AppState {
     /// A ref chip opens its tag (`Tag`), its remote-tracking branch
     /// (`RemoteBranch`), or its local branch (`Branch`); a checkout or sync
     /// mark run its branch; `[HEAD]` the commit of its row. Graph chips use
-    /// the graph's checkout ([`AppState::focused_graph_repo`]). A worktree
+    /// the graph's checkout ([`AppState::focused_graph_repo`]); commit-files
+    /// footer chips use the footer's checkout and row. A worktree
     /// glyph opens that worktree's branch (or its HEAD commit when
     /// detached), and the sync header HEAD's branch (HEAD's commit when
     /// detached). The Branch and Linked worktree sections of a
@@ -184,9 +185,11 @@ impl AppState {
             }
             IconTarget::TreeRow(_)
             | IconTarget::CommitFileRow(_)
+            | IconTarget::ExplorerRow(_)
             | IconTarget::GraphRow(_)
             | IconTarget::GraphMoreLines(_)
             | IconTarget::CommitDetailMoreLines(_)
+            | IconTarget::LineComment { .. }
             | IconTarget::PullRequest(_) => self.remote_focus(line),
         }
     }
@@ -195,8 +198,16 @@ impl AppState {
     /// row with [`graph_row_id`] `row`. `[+N]` falls back to the focused
     /// row.
     ///
+    /// The checkout and the `[HEAD]` commit come from the chip's own list:
+    /// a commit-files footer chip ([`Self::footer_chip_row`], a depth-2
+    /// drill or a Diff commit vs parent tab) uses the footer's checkout and
+    /// row, so a tab whose commit came from its own load opens on that
+    /// tab's checkout; a graph chip uses the graph's checkout
+    /// ([`AppState::focused_graph_repo`]) and the graph row.
+    ///
     /// [`graph_row_id`]: super::super::popover::graph_row_id
     fn remote_target_for_chip(&self, row: &str, chip: &PartTarget, line: bool) -> RemoteFocus {
+        let footer = self.footer_chip_row(row);
         let target = match chip {
             PartTarget::Chip(refs) => match refs.first() {
                 Some(chip_ref) => match chip_ref.kind {
@@ -207,16 +218,40 @@ impl AppState {
                 None => return RemoteFocus::nothing(),
             },
             PartTarget::Marks { branch, .. } => RemoteTarget::Branch(branch.clone()),
-            PartTarget::DetachedHead => match self.graph_row_commit(row) {
-                Some(sha) => RemoteTarget::Commit(sha.to_string()),
-                None => return RemoteFocus::nothing(),
-            },
+            PartTarget::DetachedHead => {
+                let sha = match &footer {
+                    Some((_, GraphRow::Commit { commit, .. })) => Some(commit.id.as_str()),
+                    _ => self.graph_row_commit(row),
+                };
+                match sha {
+                    Some(sha) => RemoteTarget::Commit(sha.to_string()),
+                    None => return RemoteFocus::nothing(),
+                }
+            }
             PartTarget::Overflow(_) => return self.remote_focus(line),
         };
-        self.focused_graph_repo()
-            .map_or_else(RemoteFocus::nothing, |checkout| {
-                RemoteFocus::view(checkout, target)
-            })
+        let checkout = match footer {
+            Some((checkout, _)) => Some(checkout.to_string()),
+            None => self.focused_graph_repo(),
+        };
+        checkout.map_or_else(RemoteFocus::nothing, |checkout| {
+            RemoteFocus::view(checkout, target)
+        })
+    }
+
+    /// Checkout and row of the commit-files footer when graph row id `row`
+    /// is that footer's: on a Diff commit vs parent tab or a depth-2 drill
+    /// (no graph paints there, so every chip is the footer's). `None` on
+    /// the graph surfaces.
+    fn footer_chip_row(&self, row: &str) -> Option<(&str, GraphRow)> {
+        if !self.is_compare_tab() && !self.drill.is_diff() {
+            return None;
+        }
+        let (checkout, _) = self.commit_footer_source()?;
+        let footer_row = self
+            .commit_detail_graph_row()
+            .filter(|footer_row| super::super::popover::graph_row_id(footer_row) == row)?;
+        Some((checkout, footer_row))
     }
 
     /// Commit of the graph row with [`graph_row_id`] `row`: its own, or
@@ -892,6 +927,7 @@ mod tests {
                 patch_keys: Default::default(),
                 head: Some("d".repeat(40)),
                 base_tip: "b".repeat(40),
+                commit: None,
             }),
         );
         focus_commit_file(&mut app, "src/lib.rs", false);
