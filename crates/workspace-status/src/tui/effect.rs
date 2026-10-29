@@ -78,7 +78,7 @@ use super::scheduler::{ApplyDecision, Scheduler, SpawnKind, UserTag};
 use super::search_files::SEARCH_CHUNK_BUDGET;
 use super::stash::{resolve_stash_menu_key, StashMenuKeyResult, StashOpId};
 use super::state::{revert_scope, AppState, PendingConfirm};
-use super::status::StatusMessage;
+use super::status::{StatusKind, StatusMessage};
 use super::tabs::{ComparePickerKind, ComparePickerRows, WorktreeFile};
 use super::viewed::workspace_store_id;
 
@@ -527,13 +527,15 @@ fn completed_op_status(kind: RunningOp, tally: &OpTally) -> StatusMessage {
     }
 }
 
-/// Final status of an exclusive write named `op`.
+/// Final status of an exclusive write named `op`. Success has `ok_kind`:
+/// [`StatusKind::Ok`] for a one-shot ack (a toast), [`StatusKind::Info`] for
+/// a note that must stay readable on the status line.
 ///
 /// A compare-tab refusal ([`COMPARE_REVERT_ABORTED`]) keeps its own copy as
 /// a warn: git did not fail, the write never ran.
-fn write_status(op: &str, result: Result<String, String>) -> StatusMessage {
+fn write_status(op: &str, ok_kind: StatusKind, result: Result<String, String>) -> StatusMessage {
     match result {
-        Ok(text) => StatusMessage::ok(text),
+        Ok(text) => StatusMessage::new(ok_kind, text),
         Err(err) if err.starts_with(COMPARE_REVERT_ABORTED) => StatusMessage::warn(err),
         Err(err) => StatusMessage::error(format!("{op} failed: {err}")),
     }
@@ -579,6 +581,8 @@ struct WriteJob {
     /// Short name for `busy: <op> running`.
     op: &'static str,
     gitdirs: Vec<String>,
+    /// Status kind of the success text (see [`write_status`]).
+    ok_kind: StatusKind,
     work: Box<dyn FnOnce() -> Result<String, String> + Send>,
 }
 
@@ -1503,10 +1507,13 @@ impl Interpreter {
             } => {
                 // Exclusive write on the gitdir: serial with other writes and
                 // with the gitdir's remote queue. The guards run on the worker.
+                // Success is an info note, not an ok toast: a toast clips the
+                // undo sha at the pane edge.
                 let dir = opts.cwd.join(&repo);
-                self.enqueue_write(
+                self.enqueue_write_as(
                     state,
                     "reset",
+                    StatusKind::Info,
                     &[&repo],
                     Box::new(move || {
                         reset_keep_to_upstream(&dir, &branch, &upstream, &tip)
@@ -2626,12 +2633,29 @@ impl Interpreter {
         checkouts: &[&str],
         work: Box<dyn FnOnce() -> Result<String, String> + Send>,
     ) {
+        self.enqueue_write_as(state, op, StatusKind::Ok, checkouts, work);
+    }
+
+    /// [`Self::enqueue_write`] with the success status kind `ok_kind`.
+    fn enqueue_write_as(
+        &mut self,
+        state: &AppState,
+        op: &'static str,
+        ok_kind: StatusKind,
+        checkouts: &[&str],
+        work: Box<dyn FnOnce() -> Result<String, String> + Send>,
+    ) {
         let gitdirs: Vec<String> = checkouts
             .iter()
             .map(|checkout| gitdir_key(state, checkout))
             .collect();
         self.occupy_exclusive(&gitdirs);
-        self.writes.push_back(WriteJob { op, gitdirs, work });
+        self.writes.push_back(WriteJob {
+            op,
+            gitdirs,
+            ok_kind,
+            work,
+        });
         self.sched.enqueue_user(UserTag::Write);
     }
 
@@ -3092,10 +3116,11 @@ impl Interpreter {
                     self.exclusive_inflight.insert(id, job.gitdirs);
                     self.running_write = Some(job.op);
                     let op = job.op;
+                    let ok_kind = job.ok_kind;
                     spawn(
                         id,
                         Box::new(move || JobOutcome::Write {
-                            status: write_status(op, (job.work)()),
+                            status: write_status(op, ok_kind, (job.work)()),
                         }),
                     );
                     return;
@@ -5907,10 +5932,18 @@ mod tests {
 
     #[test]
     fn compare_refusal_is_a_warn_without_the_failed_prefix() {
-        let refused = write_status("revert", Err("revert aborted: HEAD moved".into()));
+        let refused = write_status(
+            "revert",
+            StatusKind::Ok,
+            Err("revert aborted: HEAD moved".into()),
+        );
         assert_eq!(refused, "revert aborted: HEAD moved");
         assert_eq!(refused.kind(), StatusKind::Warn);
-        let failed = write_status("revert", Err("patch failed: a.txt:1".into()));
+        let failed = write_status(
+            "revert",
+            StatusKind::Ok,
+            Err("patch failed: a.txt:1".into()),
+        );
         assert_eq!(failed, "revert failed: patch failed: a.txt:1");
         assert_eq!(failed.kind(), StatusKind::Error);
     }
@@ -6404,7 +6437,12 @@ mod tests {
                 &fixture.local_tip[..12]
             )
         );
-        assert_eq!(state.status.kind(), StatusKind::Ok);
+        // A note, not an ok ack: it stays on the status line instead of
+        // moving to a toast that clips the undo sha.
+        assert_eq!(state.status.kind(), StatusKind::Info);
+        let undo = state.status.to_string();
+        state.route_ack_to_toast(std::time::Instant::now());
+        assert_eq!(state.status, undo, "the undo hint stays on the status line");
         assert_eq!(head(), fixture.upstream_tip);
         assert!(!interp.busy_for_writes(), "the write released the gitdir");
 

@@ -3,7 +3,7 @@ use std::path::Path;
 use crate::harness::PtySession;
 use crate::seed::{force_pushed_workspace, git_stdout};
 use crate::support::{
-    ack_rows, after_repo_name, repo_row_in_sync, status_row, tree_cursor_on, tree_has,
+    ack_rows, after_repo_name, crumb_row, repo_row_in_sync, status_row, tree_cursor_on, tree_has,
     tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
@@ -65,8 +65,8 @@ fn row_in_sync_after_reset(screen: &str) -> bool {
 /// `origin/main was rewritten. Move main to origin/main?` and writes nothing
 /// (tip unchanged on disk). `y` moves `main` to `origin/main` on disk, prints
 /// `Moved main to origin/main · undo: git reset --keep <old tip, 12 hex>`, and
-/// the row returns to in sync with a clean working tree. The toast clips at
-/// the pane edge: the screen proves its prefix, the reflog proves the old tip.
+/// the row returns to in sync with a clean working tree. The undo text is an
+/// info note on the status line (not a toast), so the full 12-hex old tip shows.
 #[test]
 fn pty_p_resets_branch_onto_force_pushed_upstream() {
     let (_root, workspace) = force_pushed_workspace(false);
@@ -74,9 +74,11 @@ fn pty_p_resets_branch_onto_force_pushed_upstream() {
     let old_tip = rev(&repo, "main");
     let upstream_tip = rev(&repo, "origin/main");
     assert_ne!(old_tip, upstream_tip, "seed must be diverged");
-    // The toast truncates at the pane edge (`undo: git rese…`), so the screen
-    // proves the prefix. The reflog check below proves the 12-hex tip.
-    let undo = "Moved main to origin/main · undo: git rese";
+    // The full undo text with the 12-hex old tip, in the breadcrumb status slot.
+    let undo = format!(
+        "Moved main to origin/main · undo: git reset --keep {}",
+        &old_tip[..12]
+    );
 
     let mut tui = PtySession::open(&workspace);
     tui.wait_contains("rewrite", WAIT);
@@ -106,17 +108,17 @@ fn pty_p_resets_branch_onto_force_pushed_upstream() {
     );
 
     tui.key('y');
-    // The ok message is a toast (2.5 s) and can be gone before the reload
-    // lands under load, so remember it once seen on any polled screen.
+    // The info note expires after a few seconds and can be gone before the
+    // reload lands under load, so remember it once seen on any polled screen.
     let seen = std::cell::Cell::new(false);
     tui.wait_pred(
         |screen| {
-            if screen.contains(undo) {
+            if crumb_row(screen).contains(&undo) {
                 seen.set(true);
             }
             seen.get() && row_in_sync_after_reset(screen)
         },
-        "y resets: undo text shown, row back in sync",
+        "y resets: full undo text on the status line, row back in sync",
         GIT_WAIT,
     );
     tui.wait_ms(SETTLE_MS);
