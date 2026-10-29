@@ -520,7 +520,8 @@ impl LayoutHit {
                 | IconTarget::GraphWorktree(_)
                 | IconTarget::GraphChip { .. }
                 | IconTarget::GraphSync
-                | IconTarget::GraphMoreLines(_) => None,
+                | IconTarget::GraphMoreLines(_)
+                | IconTarget::CommitDetailMoreLines(_) => None,
             })
             .collect()
     }
@@ -1832,7 +1833,7 @@ impl AppState {
     /// footer shows: the same key [`Self::graph_footer_msg_scroll`] uses
     /// for that row. `None` for a compare tab and for sources with no
     /// message (worktree, compare, commit vs worktree).
-    fn commit_detail_msg_identity(&self) -> Option<String> {
+    pub(crate) fn commit_detail_msg_identity(&self) -> Option<String> {
         if self.tabs.active_compare().is_some() {
             return None;
         }
@@ -2143,12 +2144,15 @@ impl AppState {
     /// Expanded is the title, a meta line (sha / refs / author), then the
     /// whole subject plus body, wrapped one column short of `width` (the
     /// message scrollbar column) with no line cap, like
-    /// [`selection_footer_parts`]. Blank rows pad a short message to
-    /// [`Self::commit_msg_lines`] rows; a longer one scrolls in the footer
-    /// ([`Self::commit_detail_msg_scroll`]). Without a message the subtitle
-    /// takes the meta row. At least
-    /// [`Self::commit_detail_footer_request`] lines; lines from index 2 on
-    /// are the message.
+    /// [`selection_footer_parts`]. Without a message (collapsed, a compare
+    /// tab, or a worktree / compare / commit-vs-worktree source) the
+    /// subtitle takes the meta row and nothing follows.
+    ///
+    /// Always the title and the meta / subtitle line, then only the real
+    /// message lines: no blank padding. The footer keeps its fixed
+    /// [`Self::commit_detail_footer_request`] height in paint, where unused
+    /// message rows stay blank and a message taller than the rows scrolls
+    /// ([`Self::commit_detail_msg_scroll`]).
     pub(crate) fn commit_detail_footer_lines(&self, width: usize) -> Vec<String> {
         let (title, subtitle) = self.commit_detail_meta();
         let subtitle = subtitle.unwrap_or_default();
@@ -2168,11 +2172,32 @@ impl AppState {
                 None => footer.push(subtitle),
             }
         }
-        let request = self.commit_detail_footer_request();
-        if footer.len() < request {
-            footer.resize(request, String::new());
-        }
         footer
+    }
+
+    /// Message lines of the depth-2 commit-files footer below the shown
+    /// ones: the count its more-below hint paints. `0` when the footer did
+    /// not record an overflowing message this frame or every line shows.
+    pub(crate) fn commit_detail_footer_lines_below(&self) -> usize {
+        let layout = &self.layout;
+        if layout.commit_detail_footer_y.is_none() {
+            return 0;
+        }
+        // Message rows: the footer less its rule, title, and meta rows.
+        let rows = usize::from(layout.commit_detail_footer_height)
+            .saturating_sub(usize::from(FOOTER_RULE_ROWS))
+            .saturating_sub(2);
+        let messages = self
+            .commit_detail_footer_lines(usize::from(layout.commit_detail_footer_width))
+            .len()
+            .saturating_sub(2);
+        if rows == 0 || messages <= rows {
+            return 0;
+        }
+        let offset = self
+            .commit_detail_msg_scroll()
+            .min(layout.commit_detail_footer_scroll_max);
+        messages.saturating_sub(offset + rows)
     }
 
     fn expanded_commit_message(&self) -> Option<(String, String)> {
@@ -15742,8 +15767,8 @@ mod tests {
         let expanded_files_footer = app.commit_detail_footer_lines(32);
         assert_eq!(
             expanded_files_footer.len(),
-            2 + app.commit_msg_lines,
-            "title + meta + N message rows"
+            2 + 2 + 1 + 1,
+            "title + meta + subject (2 rows) + blank + body, no padding"
         );
         let expanded_join = expanded_files_footer.join("");
         assert!(
@@ -15757,11 +15782,7 @@ mod tests {
         // A long body is never clipped: every line comes back, wrapped one
         // column short of the width (the scrollbar column), for the footer
         // to scroll.
-        let long_body = (0..30)
-            .map(|i| format!("body line {i:02}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        app.graph.as_mut().expect("graph").commits[0].body = long_body;
+        app.graph.as_mut().expect("graph").commits[0].body = long_commit_body(30);
         let long_footer = app.commit_detail_footer_lines(32);
         assert_eq!(
             long_footer.len(),
@@ -15784,16 +15805,21 @@ mod tests {
         assert_eq!(app.status, "msg off");
     }
 
+    /// A commit body of `n` lines `body line 00`, `body line 01`, ….
+    fn long_commit_body(n: usize) -> String {
+        (0..n)
+            .map(|i| format!("body line {i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// Depth 2 on the seed commit with a 30-line body: `one.rs` selected and
     /// its diff on the right, drawn once so the footer records its box.
     fn depth_2_long_message_state() -> AppState {
         let mut app = state();
         focus_repo(&mut app, "app");
         install_graph(&mut app, Vec::new());
-        app.graph.as_mut().expect("graph").commits[0].body = (0..30)
-            .map(|i| format!("body line {i:02}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        app.graph.as_mut().expect("graph").commits[0].body = long_commit_body(30);
         app.open_commit_diff(
             "app".into(),
             sample_commit_source(),

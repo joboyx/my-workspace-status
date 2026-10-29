@@ -330,6 +330,11 @@ impl AppState {
                         .is_some_and(|row| graph_row_id(&row) == *id)
             }
             IconTarget::GraphSync => self.list_focus_target() == ListFocusTarget::Graph,
+            // The footer belongs to the shown commit-file source, not to a
+            // list row: it is focused while that source shows.
+            IconTarget::CommitDetailMoreLines(id) => {
+                self.commit_detail_msg_identity().as_deref() == Some(id.as_str())
+            }
             IconTarget::GraphWorktree(path) => {
                 self.list_focus_target() == ListFocusTarget::Graph
                     && self.focused_graph_row().is_some_and(|row| match row {
@@ -3279,6 +3284,68 @@ mod tests {
         assert!(!app.commit_msg_expand);
         assert!(app.popover.is_none());
         assert_eq!(app.graph_footer_lines_below(), 0);
+    }
+
+    /// The depth-2 commit-files footer hint hits and pins like the graph
+    /// footer hint: same icon, meaning, count, and actions, with the count
+    /// of that footer.
+    #[test]
+    fn commit_detail_footer_hint_records_a_hit_and_pins_the_more_lines_section() {
+        use IconKind as K;
+        let mut app = graph_app();
+        app.graph.as_mut().unwrap().commits[0].body = (0..30)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.commit_msg_expand = true;
+        app.open_commit_diff(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: G_HEAD.into(),
+            },
+            vec![commit_file("M", "src/main.rs")],
+            0,
+            "src/main.rs".into(),
+            crate::tui::diff::DiffContent::from_lines(vec!["@@ -1,1 +1,1 @@".into()]),
+        );
+        paint(&mut app);
+        let id = app.commit_detail_msg_identity().expect("commit identity");
+        let hint = app
+            .layout
+            .icon_hits
+            .iter()
+            .find(|hit| hit.kind == K::GraphMoreBelow)
+            .cloned()
+            .unwrap_or_else(|| panic!("hint hit: {:?}", app.layout.icon_hits));
+        assert_eq!(hint.target, IconTarget::CommitDetailMoreLines(id));
+        // K as the footer paints it: `v<K>` under the hint hit.
+        let painted: String = (hint.x..hint.x + hint.width)
+            .map(|x| app.painted_frame[(x, hint.y)].symbol().to_string())
+            .collect();
+        let below: usize = painted
+            .strip_prefix('v')
+            .and_then(|count| count.parse().ok())
+            .unwrap_or_else(|| panic!("footer hint {painted:?}"));
+        assert!(below > 0);
+        assert_eq!(app.commit_detail_footer_lines_below(), below);
+        app.pin_icon(&hint);
+        assert_eq!(
+            section_texts(&app),
+            vec![(
+                K::GraphMoreBelow,
+                texts(&[
+                    meaning(K::GraphMoreBelow),
+                    &format!("{below} more lines"),
+                    title(Action::ToggleCommitMsgExpand),
+                    title(Action::ResizeCommitMsg(1)),
+                ])
+            )]
+        );
+        // Collapsing the message (M) clears the hint and its section.
+        app.dispatch(Action::PopoverRun);
+        assert!(!app.commit_msg_expand);
+        assert!(app.popover.is_none());
+        assert_eq!(app.commit_detail_footer_lines_below(), 0);
     }
 
     /// Enter or a click on an action line that a diff highlight disables
