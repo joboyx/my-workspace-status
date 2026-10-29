@@ -39,6 +39,7 @@ use crate::snapshot::{SyncStatus, WorkspaceRepoSnapshot};
 use super::super::action::{Action, Effect};
 use super::super::gates::ListFocusTarget;
 use super::super::hyperlink::LinkHit;
+use super::super::icons::IconKind;
 use super::super::popover::IconTarget;
 use super::super::pr_poll::{
     pr_answer_is_stale, pr_poll_backoff_ms, pr_poll_interval_ms, PrPollMode,
@@ -50,7 +51,11 @@ use super::super::pull_request::{
     NO_PR_FOR_ROW, OPEN_FAILED, PR_LOOKUP_RUNNING,
 };
 use super::super::status::StatusMessage;
-use super::super::tree::{NodeKind, PrBadge, PrTotals, PR_REF_MIN_TREE_COLS};
+use super::super::toast::{Toast, ToastMark, PR_TOAST_TTL_MS, TOAST_MAX};
+use super::super::tree::{
+    pr_badge_mark, NodeKind, PrBadge, PrTotals, SegRole, PR_REF_MIN_TREE_COLS,
+};
+use super::super::watch::FlashKind;
 use super::AppState;
 
 /// What the forge said about the PR of one (remote URL, branch).
@@ -208,8 +213,6 @@ pub(crate) struct PrLookupFailure {
 }
 
 /// What a PR became in a [`PrTransition`].
-// Only tests read this until the alert surfaces do.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PrTransitionTo {
     /// The same PR is in this state now: [`PrState::CiFailed`],
@@ -224,9 +227,8 @@ pub(crate) enum PrTransitionTo {
 /// from an earlier successful lookup in this session, and now CI failed,
 /// ready to merge, merged, or closed. Other changes are not queued.
 ///
-/// [`AppState::take_pr_transitions`] drains the queue.
-// Only tests read this until the alert surfaces do.
-#[cfg_attr(not(test), allow(dead_code))]
+/// [`AppState::take_pr_transitions`] drains the queue;
+/// [`AppState::alert_pr_transitions`] turns it into toasts and row flashes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PrTransition {
     /// Checkout path (snapshot `repo`) whose PR changed.
@@ -238,6 +240,57 @@ pub(crate) struct PrTransition {
     pub(crate) from: PrState,
     /// What the PR became.
     pub(crate) to: PrTransitionTo,
+}
+
+impl PrTransition {
+    /// Toast of this change, pushed at `at`, for [`PR_TOAST_TTL_MS`]:
+    /// the state glyph in the state colour ([`pr_badge_mark`]; closed is
+    /// [`IconKind::PrClosed`] in the deleted colour), `<ref> <state>`
+    /// (`#318 CI failed`, `!12 merged`, `#45 closed`), then the first failed
+    /// check's name for CI failed, else the PR's branch.
+    fn toast(&self, ascii: bool, at: Instant) -> Toast {
+        let (glyph, role, label) = match self.to {
+            PrTransitionTo::State(state) => {
+                let (glyph, role) = pr_badge_mark(ascii, state);
+                (glyph, role, state.label())
+            }
+            PrTransitionTo::Closed => (IconKind::PrClosed.glyph(ascii), SegRole::Deleted, "closed"),
+        };
+        let failed_check = match self.to {
+            PrTransitionTo::State(PrState::CiFailed) => self.pr.failed_check.as_deref(),
+            _ => None,
+        };
+        Toast {
+            mark: ToastMark::Glyph(glyph, role),
+            text: format!("{} {label}", self.pr.ref_text()),
+            detail: failed_check.unwrap_or(&self.pr.head).to_string(),
+            role: SegRole::Repo,
+            ttl_ms: PR_TOAST_TTL_MS,
+            at,
+        }
+    }
+
+    /// Flash ramp of the checkout's tree rows: remove for CI failed and
+    /// closed, add for ready to merge and merged.
+    fn flash_kind(&self) -> FlashKind {
+        match self.to {
+            PrTransitionTo::State(PrState::CiFailed) | PrTransitionTo::Closed => FlashKind::Remove,
+            PrTransitionTo::State(_) => FlashKind::Add,
+        }
+    }
+}
+
+/// The muted toast for the `more` PR changes of one alert batch past its
+/// first ones, pushed at `at`: `+<more> more PR changes · gp`.
+fn more_pr_changes_toast(more: usize, at: Instant) -> Toast {
+    Toast {
+        mark: ToastMark::None,
+        text: format!("+{more} more PR changes"),
+        detail: "gp".into(),
+        role: SegRole::Muted,
+        ttl_ms: PR_TOAST_TTL_MS,
+        at,
+    }
 }
 
 /// The answer of the last successful lookup of one checkout in this
@@ -1462,6 +1515,41 @@ impl AppState {
             .and_then(|row| row.default_branch_override.as_deref());
         pr.stacked_on(known, default_branch)
     }
+
+    /// Take the queued [`PrTransition`]s, oldest first.
+    pub(crate) fn take_pr_transitions(&mut self) -> Vec<PrTransition> {
+        std::mem::take(&mut self.pr_cache.transitions)
+    }
+
+    /// Alert the queued PR changes as one batch pushed at `now`: a toast
+    /// per change, oldest first ([`PrTransition::toast`]), and a flash of
+    /// each checkout's tree rows on the remove ramp (CI failed, closed) or
+    /// the add ramp (ready to merge, merged).
+    ///
+    /// A batch of more than [`TOAST_MAX`] changes pushes the toasts of the
+    /// first `TOAST_MAX - 1` and then `+<n> more PR changes · gp`, so the
+    /// stack never drops one of its own toasts; every change still flashes.
+    /// Returns true when the batch was not empty.
+    pub(crate) fn alert_pr_transitions(&mut self, now: Instant) -> bool {
+        let transitions = self.take_pr_transitions();
+        let shown = if transitions.len() > TOAST_MAX {
+            TOAST_MAX - 1
+        } else {
+            transitions.len()
+        };
+        for transition in &transitions[..shown] {
+            self.toasts.push_with(transition.toast(self.ascii, now));
+        }
+        if transitions.len() > shown {
+            self.toasts
+                .push_with(more_pr_changes_toast(transitions.len() - shown, now));
+        }
+        for transition in &transitions {
+            let checkout = transition.checkout.to_string_lossy().into_owned();
+            self.stamp_checkout_flashes_as(&[checkout], transition.flash_kind());
+        }
+        !transitions.is_empty()
+    }
 }
 
 impl AppState {
@@ -1476,13 +1564,6 @@ impl AppState {
     /// current branch; `None` when it succeeded or none landed yet.
     pub(crate) fn pr_lookup_failure(&self, checkout: &Path) -> Option<&PrLookupFailure> {
         self.current_pr_record(checkout)?.failure.as_ref()
-    }
-
-    /// Take the queued [`PrTransition`]s, oldest first.
-    // Only tests read this until the alert surfaces do.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn take_pr_transitions(&mut self) -> Vec<PrTransition> {
-        std::mem::take(&mut self.pr_cache.transitions)
     }
 
     /// Look up the PR of checkout `checkout` again now, or of every checkout
@@ -3079,6 +3160,260 @@ mod tests {
             assert!(
                 changes(&mut app, remote, Some(pr_on(remote, 6, Ready))).is_empty(),
                 "{remote}: an answer that still computes is not the before"
+            );
+        }
+    }
+
+    // ---- change alerts: toasts and row flashes ----
+
+    use super::super::super::toast::Toast;
+
+    /// Mark, text, detail, text role, and TTL of `toast`.
+    fn toast_parts(toast: &Toast) -> (ToastMark, String, String, SegRole, u64) {
+        (
+            toast.mark,
+            toast.text.clone(),
+            toast.detail.clone(),
+            toast.role,
+            toast.ttl_ms,
+        )
+    }
+
+    /// Text and detail of every toast on the stack at `now`, oldest first.
+    fn toast_texts(app: &AppState, now: Instant) -> Vec<(String, String)> {
+        app.toasts
+            .visible(now)
+            .map(|(toast, _)| (toast.text.clone(), toast.detail.clone()))
+            .collect()
+    }
+
+    /// Flash ramp of each painted tree row that flashes, by row id.
+    fn flashed_rows(app: &AppState) -> Vec<(String, FlashKind)> {
+        app.rows
+            .iter()
+            .filter_map(|row| Some((row.id.clone(), app.flashes.get(&row.id)?.kind)))
+            .collect()
+    }
+
+    #[test]
+    fn pr_change_toasts_read_glyph_ref_state_and_check_or_branch_on_both_forges() {
+        use PrState::*;
+        use PrTransitionTo::{Closed, State};
+        let at = Instant::now();
+        let branch = "feature/ABC-123-retry-ui";
+        for (remote, sign) in [(GH_REMOTE, "#"), (GL_REMOTE, "!")] {
+            for (to, unicode, ascii, role, label) in [
+                (State(CiFailed), "✕", "x", SegRole::Deleted, "CI failed"),
+                (State(Ready), "◉", "A", SegRole::Added, "ready to merge"),
+                (State(Merged), "✓", "m", SegRole::BranchFeature, "merged"),
+                (Closed, "⊘", "c", SegRole::Deleted, "closed"),
+            ] {
+                let state = match to {
+                    State(state) => state,
+                    Closed => InReview,
+                };
+                let pr = PullRequest {
+                    head: branch.into(),
+                    ..pr_on(remote, 318, state)
+                };
+                let change = transition(pr, InReview, to);
+                for (look, glyph) in [(false, unicode), (true, ascii)] {
+                    assert_eq!(
+                        toast_parts(&change.toast(look, at)),
+                        (
+                            ToastMark::Glyph(glyph, role),
+                            format!("{sign}318 {label}"),
+                            branch.to_string(),
+                            SegRole::Repo,
+                            PR_TOAST_TTL_MS,
+                        ),
+                        "{remote}: {to:?}, ascii {look}"
+                    );
+                }
+                assert_eq!(change.toast(false, at).at, at);
+            }
+
+            // CI failed names the first failed check; any other change, and
+            // a CI failed PR with no named check, keeps the branch.
+            let named = |state| PullRequest {
+                head: branch.into(),
+                failed_check: Some("test (ubuntu-latest)".into()),
+                ..pr_on(remote, 318, state)
+            };
+            let failed = transition(named(CiFailed), CiRunning, State(CiFailed));
+            assert_eq!(
+                (failed.toast(false, at).text, failed.toast(false, at).detail),
+                (
+                    format!("{sign}318 CI failed"),
+                    "test (ubuntu-latest)".into()
+                ),
+                "{remote}"
+            );
+            let merged = transition(named(Merged), CiFailed, State(Merged));
+            assert_eq!(merged.toast(false, at).detail, branch, "{remote}");
+        }
+        assert_eq!(PR_TOAST_TTL_MS, 8000);
+    }
+
+    #[test]
+    fn a_batch_of_more_than_three_pr_changes_toasts_the_first_two_and_a_summary() {
+        use PrState::*;
+        let names = ["a", "b", "c", "d", "e"];
+        let mut app = app_with(&names.map(pushed), &[]);
+        app.ascii = false;
+        let _ = app.due_pr_lookups();
+        let t0 = Instant::now();
+        for (number, name) in (1..).zip(names) {
+            land_pr(&mut app, name, &gh(name), open_on(&gh(name), number), t0);
+        }
+        assert!(!app.alert_pr_transitions(t0), "the first lookups: none");
+        assert!(app.toasts.is_empty());
+
+        // Five changes in one batch: two toasts and a summary of three.
+        let into = [CiFailed, Ready, Merged, CiFailed];
+        for ((number, name), state) in (1..).zip(names).zip(into) {
+            let found = PrLookup::Found(pr_on(&gh(name), number, state));
+            land_pr(&mut app, name, &gh(name), found, t0);
+        }
+        land_pr(&mut app, "e", &gh("e"), PrLookup::NoPr, t0);
+        assert!(app.alert_pr_transitions(t0));
+        assert_eq!(
+            toast_texts(&app, t0),
+            [
+                ("#1 CI failed".into(), "feature".into()),
+                ("#2 ready to merge".into(), "feature".into()),
+                ("+3 more PR changes".into(), "gp".into()),
+            ]
+        );
+        let summary = app.toasts.visible(t0).last().unwrap().0.clone();
+        assert_eq!(
+            toast_parts(&summary),
+            (
+                ToastMark::None,
+                "+3 more PR changes".into(),
+                "gp".into(),
+                SegRole::Muted,
+                PR_TOAST_TTL_MS,
+            ),
+            "muted, no mark, 8 s"
+        );
+        assert_eq!(
+            flashed_rows(&app),
+            [
+                ("repo:a".into(), FlashKind::Remove),
+                ("repo:b".into(), FlashKind::Add),
+                ("repo:c".into(), FlashKind::Add),
+                ("repo:d".into(), FlashKind::Remove),
+                ("repo:e".into(), FlashKind::Remove),
+            ],
+            "every change flashes, toasted or summed up"
+        );
+        assert!(!app.alert_pr_transitions(t0), "drained");
+
+        // Exactly three: three toasts, no summary.
+        let mut app = app_with(&names.map(pushed), &[]);
+        let _ = app.due_pr_lookups();
+        for (number, name) in (1..).zip(&names[..3]) {
+            land_pr(&mut app, name, &gh(name), open_on(&gh(name), number), t0);
+        }
+        for (number, name) in (1..).zip(&names[..3]) {
+            let ready = PrLookup::Found(pr_on(&gh(name), number, Ready));
+            land_pr(&mut app, name, &gh(name), ready, t0);
+        }
+        assert!(app.alert_pr_transitions(t0));
+        let texts: Vec<String> = toast_texts(&app, t0).into_iter().map(|t| t.0).collect();
+        assert_eq!(
+            texts,
+            [
+                "#1 ready to merge",
+                "#2 ready to merge",
+                "#3 ready to merge"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_pr_change_flashes_the_checkout_tree_row_on_the_remove_or_add_ramp() {
+        use PrState::*;
+        // `app` is a repo row of its own; `api-wt` is a linked checkout row
+        // under the `api` family row.
+        let linked_wt = RepoSnapshot {
+            sync_status: SyncStatus::UpToDate,
+            ..linked("api-wt", "api", "feature")
+        };
+        let repos = [pushed("app"), pushed("api"), linked_wt];
+        for (to, kind) in [
+            (Some(CiFailed), FlashKind::Remove),
+            (Some(Ready), FlashKind::Add),
+            (Some(Merged), FlashKind::Add),
+            (None, FlashKind::Remove),
+        ] {
+            for (checkout, row) in [("app", "repo:app"), ("api-wt", "checkout:api-wt")] {
+                let mut app = app_with(&repos, &[]);
+                let _ = app.due_pr_lookups();
+                let remote = gh(checkout);
+                land_pr(
+                    &mut app,
+                    checkout,
+                    &remote,
+                    open_on(&remote, 9),
+                    Instant::now(),
+                );
+                let lookup = to.map_or(PrLookup::NoPr, |state| {
+                    PrLookup::Found(pr_on(&remote, 9, state))
+                });
+                land_pr(&mut app, checkout, &remote, lookup, Instant::now());
+                assert!(app.flashes.is_empty());
+                assert!(app.alert_pr_transitions(Instant::now()));
+                assert_eq!(
+                    flashed_rows(&app),
+                    [(row.to_string(), kind)],
+                    "{checkout}: {to:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_pr_alert_on_first_load_or_a_branch_change_and_one_after_a_poll_changes_the_state() {
+        for remote in [GH_REMOTE, GL_REMOTE] {
+            let mut app = app_with(&[pushed("app")], &[]);
+            let path = Path::new("app");
+            let t0 = Instant::now();
+            let _ = app.due_pr_lookups();
+            land_pr(&mut app, "app", remote, open_on(remote, 7), t0);
+            assert!(!app.alert_pr_transitions(t0), "{remote}: first load");
+            assert!(app.toasts.is_empty() && app.flashes.is_empty());
+
+            // A branch change, then back: each first lookup is quiet.
+            apply_one_repo_snapshot(&mut app, "app", Some(pushed_on("app", "other")));
+            let _ = app.due_pr_lookups();
+            let failed = PrLookup::Found(pr_on(remote, 8, PrState::CiFailed));
+            assert!(app.apply_pr_lookup(path, "other", Some(remote.into()), failed));
+            assert!(!app.alert_pr_transitions(t0), "{remote}: branch change");
+            apply_one_repo_snapshot(&mut app, "app", Some(pushed("app")));
+            let _ = app.due_pr_lookups();
+            land_pr(&mut app, "app", remote, open_on(remote, 7), t0);
+            assert!(!app.alert_pr_transitions(t0), "{remote}: back again");
+
+            // A poll that lands the same state is quiet; a new state alerts.
+            let t1 = t0 + secs(180);
+            assert_eq!(polled(&mut app, t1), ["app"]);
+            land_pr(&mut app, "app", remote, open_on(remote, 7), t1);
+            assert!(!app.alert_pr_transitions(t1), "{remote}: same state");
+            let t2 = t1 + secs(180);
+            assert_eq!(polled(&mut app, t2), ["app"]);
+            let merged = PrLookup::Found(pr_on(remote, 7, PrState::Merged));
+            land_pr(&mut app, "app", remote, merged, t2);
+            assert!(app.alert_pr_transitions(t2), "{remote}: merged");
+            let sign = if remote == GH_REMOTE { "#" } else { "!" };
+            assert_eq!(
+                toast_texts(&app, t2),
+                [(format!("{sign}7 merged"), "feature".to_string())]
+            );
+            assert_eq!(
+                flashed_rows(&app),
+                [("repo:app".to_string(), FlashKind::Add)]
             );
         }
     }

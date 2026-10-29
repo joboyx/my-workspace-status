@@ -99,7 +99,7 @@ use super::tabs::{
     ComparePickerState, ExplorerPreview, FileTab, EXPLORER_FOLDER_HINT, FILE_IS_BINARY,
 };
 use super::theme::{hex_color, mix_toward, BackgroundMode, Palette, Pill, ThemeId};
-use super::toast::ToastTick;
+use super::toast::{Toast, ToastMark, ToastTick};
 use super::tree::{
     file_change_from_name_status, file_change_segments, painted_row_segments, pr_badge_kind,
     pr_badge_role, visible_window, workspace_trailing_fit, NodeKind, NodeSegments, PrBadge,
@@ -377,9 +377,11 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
 const TOAST_MAX_COLS: u16 = 48;
 
 /// Toast stack in the bottom-right of `pane_area`, newest on the bottom
-/// row, one row each: ` ✓ text ` (ASCII ` ok text `).
+/// row, one row each: ` <mark> <text> · <detail> ` ([`toast_spans`]).
 ///
-/// Fg is `repo` on the add-flash ramp step for the toast's fade strength.
+/// An ack sits on the add-flash ramp step for its fade strength. A PR
+/// change sits on `panel`, where its state glyph and muted detail stay
+/// readable, and fades by mixing its colours toward `surface`.
 /// Under `NO_COLOR` the row is reversed terminal colours with no fade.
 /// While a toast fades the frame is marked animating, so the loop ticks.
 /// While every toast holds full strength it asks for one wake at the first
@@ -390,38 +392,41 @@ fn draw_toasts(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
         return;
     }
     let palette = state.theme.palette();
-    let mark = if state.ascii { " ok " } else { " ✓ " };
     let cap = TOAST_MAX_COLS.min(pane_area.width - 2);
     // Inside the pane border: one column in from the right, one row up.
     let bottom = pane_area.bottom() - 2;
     let rows = usize::from(pane_area.height - 2);
-    let toasts: Vec<(String, f32)> = state
+    let toasts: Vec<(Toast, f32)> = state
         .toasts
         .visible(now)
-        .map(|(toast, strength)| (toast.text.clone(), strength))
+        .map(|(toast, strength)| (toast.clone(), strength))
         .collect();
-    // Cell widths as ratatui paints them: `visible_width` counts `✓` as
-    // two columns, which would leave a blank cell at the right edge.
-    let body_max = usize::from(cap).saturating_sub(UnicodeWidthStr::width(mark) + 1);
-    for (offset, (text, strength)) in toasts.iter().rev().take(rows).enumerate() {
-        let label = format!("{mark}{} ", fit_with_ellipsis(text, body_max));
-        let width = (UnicodeWidthStr::width(label.as_str()) as u16).min(cap);
+    for (offset, (toast, strength)) in toasts.iter().rev().take(rows).enumerate() {
+        let colors = if state.no_color {
+            None
+        } else if toast.mark == ToastMark::Ack {
+            let Some(bg) = palette.flash_bg_for(FlashKind::Add, *strength) else {
+                continue;
+            };
+            Some((palette, bg, 0))
+        } else {
+            let fade = ((1.0 - strength) * 100.0).round() as i32;
+            let bg = mix_toward(palette.panel, palette.surface, fade);
+            Some((palette, bg, fade))
+        };
+        let spans = toast_spans(toast, state.ascii, usize::from(cap), colors);
+        // Cell widths as ratatui paints them, so the row ends one column in
+        // from the pane edge with no blank cell.
+        let width = spans.iter().map(Span::width).sum::<usize>();
+        let width = u16::try_from(width).unwrap_or(cap).min(cap);
         let rect = Rect::new(
             pane_area.right() - 1 - width,
             bottom - offset as u16,
             width,
             1,
         );
-        let style = if state.no_color {
-            Style::default().add_modifier(Modifier::REVERSED)
-        } else {
-            let Some(bg) = palette.flash_bg_for(FlashKind::Add, *strength) else {
-                continue;
-            };
-            Style::default().fg(palette.repo).bg(bg)
-        };
         frame.render_widget(Clear, rect);
-        frame.render_widget(Paragraph::new(Span::styled(label, style)), rect);
+        frame.render_widget(Paragraph::new(Line::from(spans)), rect);
         drop_hits_under(&mut state.layout, rect);
     }
     match state.toasts.next_tick(now, state.no_color) {
@@ -431,6 +436,58 @@ fn draw_toasts(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
         }
         ToastTick::Idle => {}
     }
+}
+
+/// Spans of one toast row, at most `cap` columns: the mark, the text, and
+/// ` · <detail>`, cut from the end with `…`, then one space.
+///
+/// `colors` is the palette, the row background, and how far (percent)
+/// each foreground mixes toward that background as the toast fades;
+/// `None` (`NO_COLOR`) paints reversed terminal colours. The ack mark
+/// (` ✓ `, ASCII ` ok `) takes the text colour; a glyph mark paints bold
+/// in its own role (a PR state colour). The text paints in the toast's
+/// role, the ` · <detail>` tail muted.
+fn toast_spans(
+    toast: &Toast,
+    ascii: bool,
+    cap: usize,
+    colors: Option<(Palette, Color, i32)>,
+) -> Vec<Span<'static>> {
+    let style = |role: SegRole| match colors {
+        Some((palette, bg, fade)) => Style::default()
+            .fg(mix_toward(seg_role_color(role, palette), bg, fade))
+            .bg(bg),
+        None => Style::default().add_modifier(Modifier::REVERSED),
+    };
+    let (mark, mark_style) = match toast.mark {
+        ToastMark::Ack => {
+            let mark = if ascii { " ok " } else { " ✓ " };
+            (mark.to_string(), style(toast.role))
+        }
+        ToastMark::Glyph(glyph, role) => (
+            format!(" {glyph} "),
+            style(role).add_modifier(Modifier::BOLD),
+        ),
+        ToastMark::None => (" ".to_string(), style(toast.role)),
+    };
+    let body = if toast.detail.is_empty() {
+        toast.text.clone()
+    } else {
+        format!("{} · {}", toast.text, toast.detail)
+    };
+    let body_max = cap.saturating_sub(UnicodeWidthStr::width(mark.as_str()) + 1);
+    let body = fit_with_ellipsis(&body, body_max);
+    // A cut takes the detail first; a cut into the text keeps its colour.
+    let (text, tail) = match body.strip_prefix(toast.text.as_str()) {
+        Some(tail) => (toast.text.clone(), tail.to_string()),
+        None => (body, String::new()),
+    };
+    vec![
+        Span::styled(mark, mark_style),
+        Span::styled(text, style(toast.role)),
+        Span::styled(tail, style(SegRole::Muted)),
+        Span::styled(" ", style(toast.role)),
+    ]
 }
 
 /// How far (percent) each cell behind a centered dialog blends toward the
@@ -15746,6 +15803,149 @@ mod tests {
         assert!(!copy_text.contains("copied"), "no toast in painted_frame");
     }
 
+    /// A PR change toast, pushed now.
+    fn pr_toast(mark: ToastMark, role: SegRole, text: &str, detail: &str) -> Toast {
+        Toast {
+            mark,
+            text: text.into(),
+            detail: detail.into(),
+            role,
+            ttl_ms: super::super::toast::PR_TOAST_TTL_MS,
+            at: Instant::now(),
+        }
+    }
+
+    /// The `width` cells that end one column in from the right pane edge
+    /// on row `y`: where a toast row paints.
+    fn toast_cells(terminal: &Terminal<TestBackend>, y: u16, width: u16) -> String {
+        let buf = terminal.backend().buffer();
+        (TOAST_W - 1 - width..TOAST_W - 1)
+            .map(|x| buf[(x, y)].symbol())
+            .collect()
+    }
+
+    #[test]
+    fn pr_change_toasts_paint_the_glyph_in_its_state_colour_and_the_detail_muted() {
+        let mut state = toast_state(StatusMessage::default(), false);
+        state.toasts.push_with(pr_toast(
+            ToastMark::Glyph("✕", SegRole::Deleted),
+            SegRole::Repo,
+            "#318 CI failed",
+            "test (ubuntu-latest)",
+        ));
+        state.toasts.push_with(pr_toast(
+            ToastMark::Glyph("✓", SegRole::BranchFeature),
+            SegRole::Repo,
+            "!12 merged",
+            "feature/ABC-123-retry-api",
+        ));
+        state.toasts.push_with(pr_toast(
+            ToastMark::None,
+            SegRole::Muted,
+            "+3 more PR changes",
+            "gp",
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(TOAST_W, TOAST_H)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let palette = state.theme.palette();
+        let buf = terminal.backend().buffer().clone();
+        // Newest on the bottom row, each flush right inside the border.
+        let rows = [
+            (TOAST_H - 6, " ✕ #318 CI failed · test (ubuntu-latest) "),
+            (TOAST_H - 5, " ✓ !12 merged · feature/ABC-123-retry-api "),
+            (TOAST_H - 4, " +3 more PR changes · gp "),
+        ];
+        for (y, text) in rows {
+            let width = text.chars().count() as u16;
+            assert_eq!(toast_cells(&terminal, y, width), text);
+            let x0 = TOAST_W - 1 - width;
+            assert_ne!(buf[(x0 - 1, y)].bg, palette.panel, "{text}");
+            assert!(
+                (x0..TOAST_W - 1).all(|x| buf[(x, y)].bg == palette.panel),
+                "{text}: the popup background while it holds"
+            );
+        }
+        let (y, x0) = (TOAST_H - 6, TOAST_W - 1 - 41);
+        let glyph = &buf[(x0 + 1, y)];
+        assert_eq!(glyph.symbol(), "✕");
+        assert_eq!(glyph.fg, palette.deleted, "state colour");
+        assert!(glyph.modifier.contains(Modifier::BOLD));
+        assert_eq!(buf[(x0 + 3, y)].symbol(), "#");
+        assert_eq!(buf[(x0 + 3, y)].fg, palette.repo, "ref and state");
+        assert_eq!(buf[(x0 + 18, y)].symbol(), "·");
+        assert_eq!(buf[(x0 + 18, y)].fg, palette.muted, "` · detail`");
+        assert_eq!(buf[(x0 + 20, y)].fg, palette.muted);
+        let (y, x0) = (TOAST_H - 5, TOAST_W - 1 - 42);
+        assert_eq!(buf[(x0 + 1, y)].fg, palette.branch_feature);
+        let (y, x0) = (TOAST_H - 4, TOAST_W - 1 - 25);
+        assert_eq!(buf[(x0 + 1, y)].symbol(), "+");
+        assert_eq!(buf[(x0 + 1, y)].fg, palette.muted, "the summary is muted");
+        assert!(!state.layout.animating, "holding: no frame ticks");
+
+        // Half way through its fade the row mixes toward the pane surface,
+        // the glyph toward the row.
+        use super::super::toast::{PR_TOAST_TTL_MS, TOAST_FADE_MS};
+        state.toasts = Default::default();
+        state.toasts.push_with(Toast {
+            at: toast_pushed_ago(PR_TOAST_TTL_MS - TOAST_FADE_MS / 2),
+            ..pr_toast(
+                ToastMark::Glyph("✕", SegRole::Deleted),
+                SegRole::Repo,
+                "#318 CI failed",
+                "test (ubuntu-latest)",
+            )
+        });
+        draw_state(&mut terminal, &mut state);
+        let buf = terminal.backend().buffer();
+        let (y, x0) = (TOAST_H - 4, TOAST_W - 1 - 41);
+        let glyph = &buf[(x0 + 1, y)];
+        assert_eq!(glyph.symbol(), "✕");
+        assert!(
+            (49..=52).any(|fade| {
+                let bg = mix_toward(palette.panel, palette.surface, fade);
+                (glyph.bg, glyph.fg) == (bg, mix_toward(palette.deleted, bg, fade))
+            }),
+            "half faded: {glyph:?}"
+        );
+        assert!(state.layout.animating, "a fading PR toast ticks the loop");
+    }
+
+    #[test]
+    fn a_long_pr_toast_cuts_its_detail_first_in_ascii_and_no_color() {
+        let mut state = toast_state(StatusMessage::default(), true);
+        state.toasts.push_with(pr_toast(
+            ToastMark::Glyph("x", SegRole::Deleted),
+            SegRole::Repo,
+            "#318 CI failed",
+            "integration tests (ubuntu-latest, stable, all features)",
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(TOAST_W, TOAST_H)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let y = TOAST_H - 4;
+        assert_eq!(
+            toast_cells(&terminal, y, 48),
+            " x #318 CI failed · integration tests (ubuntu-… ",
+            "at most 48 columns"
+        );
+        let buf = terminal.backend().buffer();
+        assert_ne!(buf[(TOAST_W - 50, y)].bg, state.theme.palette().panel);
+        let x0 = TOAST_W - 49;
+        assert_eq!(buf[(x0, y)].bg, state.theme.palette().panel);
+        assert_eq!(buf[(x0 + 1, y)].fg, state.theme.palette().deleted);
+        assert_eq!(buf[(x0 + 46, y)].symbol(), "…");
+        assert_eq!(buf[(x0 + 46, y)].fg, state.theme.palette().muted);
+
+        state.no_color = true;
+        draw_state(&mut terminal, &mut state);
+        let buf = terminal.backend().buffer();
+        for x in [x0 + 1, x0 + 3, x0 + 18] {
+            let cell = &buf[(x, y)];
+            assert_eq!((cell.fg, cell.bg), (Color::Reset, Color::Reset), "{x}");
+            assert!(cell.modifier.contains(Modifier::REVERSED));
+        }
+        assert!(buf[(x0 + 1, y)].modifier.contains(Modifier::BOLD), "glyph");
+    }
+
     /// A primary `app` with a linked `wt` checkout: one family repo row
     /// over two checkout rows.
     fn family_state() -> AppState {
@@ -19126,6 +19326,34 @@ mod tests {
         assert_eq!(buf[(edge, y)].fg, palette.muted);
         assert_eq!(buf[(edge - 2, y)].symbol(), "7");
         assert_eq!(buf[(edge - 2, y)].fg, palette.muted);
+    }
+
+    /// A PR change flashes the checkout row on its ramp (remove for CI
+    /// failed, add for merged); the badge glyph keeps its state colour.
+    #[test]
+    fn a_pr_change_flash_keeps_the_badge_glyph_in_its_state_colour() {
+        let palette = ThemeId::TokyoNight.palette();
+        for (pr, ramp, color) in [
+            (
+                PrState::CiFailed,
+                palette.flash_remove_ramp,
+                palette.deleted,
+            ),
+            (PrState::Merged, palette.flash_ramp, palette.branch_feature),
+        ] {
+            let mut state = pr_state(&[branch_repo("app", "feature")], false);
+            set_pr(&mut state, "app", "feature", found_pr(PrState::InReview));
+            set_pr(&mut state, "app", "feature", found_pr(pr));
+            assert!(state.alert_pr_transitions(Instant::now()));
+            let mut terminal = pr_terminal();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let buf = terminal.backend().buffer();
+            let y = tree_row_y(&state, "repo:app");
+            let edge = state.layout.tree_x + state.layout.tree_width - 1;
+            let glyph = &buf[(edge, y)];
+            assert_eq!((glyph.fg, glyph.bg), (color, ramp[0]), "{pr:?}");
+            assert_eq!(buf[(edge - 2, y)].bg, ramp[0], "{pr:?}: the ref too");
+        }
     }
 
     /// The workspace row ends with the PR total: `N PRs · M need you` in its

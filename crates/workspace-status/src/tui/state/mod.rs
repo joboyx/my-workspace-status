@@ -2565,13 +2565,17 @@ impl AppState {
 
     /// Flash checkout chrome after fetch / pull / push / default-branch.
     pub fn stamp_checkout_flashes(&mut self, repos: &[String]) {
+        self.stamp_checkout_flashes_as(repos, FlashKind::Update);
+    }
+
+    /// Flash the tree rows of each checkout in `repos` (its `repo:` and
+    /// `checkout:` ids, [`checkout_flash_ids`]) on the `kind` ramp.
+    pub fn stamp_checkout_flashes_as(&mut self, repos: &[String], kind: FlashKind) {
         let now = Instant::now();
         self.prune_flash_state(now);
         for repo in repos {
             self.stamp_flashes(
-                checkout_flash_ids(repo)
-                    .into_iter()
-                    .map(|id| (id, FlashKind::Update)),
+                checkout_flash_ids(repo).into_iter().map(|id| (id, kind)),
                 now,
             );
         }

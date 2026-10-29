@@ -2521,6 +2521,7 @@ impl Interpreter {
                     }
                     self.mark();
                 }
+                self.alert_pr_changes(state);
                 self.fill_pr_badge_slots();
             }
             JobOutcome::PullRequestDetail { job, lookup } => {
@@ -2553,6 +2554,7 @@ impl Interpreter {
             } => {
                 state.apply_pr_open(&repo, &branch, remote, lookup, page, opened);
                 self.mark();
+                self.alert_pr_changes(state);
             }
             JobOutcome::PullRequestCiOpen { pr_ref, opened } => {
                 state.apply_pr_ci_open(&pr_ref, opened);
@@ -2624,6 +2626,18 @@ impl Interpreter {
                 Effect::LookupPullRequests { targets },
                 &Action::None,
             );
+        }
+    }
+
+    /// Alert the PR changes that landed lookups queued
+    /// ([`AppState::alert_pr_transitions`]), once no badge lookup waits or
+    /// runs. The lookups of one poll cycle, one `r`, or the launch land one
+    /// by one under the cap, so they alert as one batch when the last one
+    /// lands; a `gx` lookup that lands with none out alerts at once.
+    fn alert_pr_changes(&mut self, state: &mut AppState) {
+        let idle = self.pr_badges.is_empty() && self.pr_badge_jobs.is_empty();
+        if idle && state.alert_pr_transitions(Instant::now()) {
+            self.mark();
         }
     }
 
@@ -9483,6 +9497,129 @@ mod tests {
             interp.pr_badges,
             VecDeque::from([app]),
             "still in flight: not queued again"
+        );
+    }
+
+    // ---- PR change alerts ----
+
+    fn gh_merged_pr(argv: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
+        assert_eq!(argv.first().map(String::as_str), Some("gh"), "{argv:?}");
+        Ok(format!(
+            r#"[{{"number":7,"state":"MERGED","url":"{PR_URL}","headRefName":"feature","isCrossRepository":false,"updatedAt":"2026-01-03T00:00:00Z"}}]"#
+        ))
+    }
+
+    /// Text and detail of every toast on the stack now, oldest first.
+    fn toast_texts(state: &AppState) -> Vec<(String, String)> {
+        state
+            .toasts
+            .visible(Instant::now())
+            .map(|(toast, _)| (toast.text.clone(), toast.detail.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn the_launch_lookup_never_alerts_and_a_poll_that_changes_the_pr_does() {
+        let (root, mut state) = pr_app("ws-effect-pr-alert", Some("git@github.com:octo/demo.git"));
+        let path = Path::new("app");
+        let mut interp = Interpreter::with_cap(8);
+        let tui_opts = opts(&state);
+        interp.pr_cli = gh_approved_pr;
+        interp.queue_due_pr_lookups(&mut state, &tui_opts);
+        drain_jobs(&mut interp, &mut state, 10);
+        let ready = Some(crate::tui::pr_status::PrState::Ready);
+        assert_eq!(state.pr_badge(path), ready);
+        assert!(state.toasts.is_empty(), "no alert on the first load");
+        assert!(!state.flashes.contains_key("repo:app"));
+
+        // A poll with the same answer stays quiet.
+        let later = |secs| Instant::now() + std::time::Duration::from_secs(secs);
+        interp.pr_poll_tick(&mut state, &tui_opts, later(60));
+        drain_jobs(&mut interp, &mut state, 10);
+        assert!(state.toasts.is_empty(), "same state: no alert");
+
+        interp.pr_cli = gh_merged_pr;
+        interp.pr_poll_tick(&mut state, &tui_opts, later(120));
+        drain_jobs(&mut interp, &mut state, 10);
+        assert_eq!(
+            toast_texts(&state),
+            [("#7 merged".to_string(), "feature".to_string())]
+        );
+        assert_eq!(
+            state.flashes.get("repo:app").map(|stamp| stamp.kind),
+            Some(crate::tui::watch::FlashKind::Add)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_pr_changes_of_one_poll_cycle_alert_once_its_last_lookup_lands() {
+        use crate::tui::pr_status::PrState;
+        use crate::tui::pull_request::PullRequest;
+        let names = ["a", "b", "c", "d"];
+        let snapshot =
+            build_workspace_snapshot(&names.map(|name| repo(name, false)), &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let remote = |name: &str| format!("git@github.com:acme/{name}.git");
+        let found = |number: u64, pr_state| {
+            let url = format!("https://github.com/acme/app/pull/{number}");
+            PrLookup::Found(PullRequest::fixture(number, &url, pr_state))
+        };
+        let _ = state.due_pr_lookups();
+        for (number, name) in (1..).zip(names) {
+            let first = found(number, PrState::CiRunning);
+            assert!(state.apply_pr_lookup(Path::new(name), "main", Some(remote(name)), first));
+        }
+
+        // The poll cycle's four lookups run under the cap and land one by
+        // one.
+        let mut interp = Interpreter::with_cap(4);
+        let targets = state.due_pr_polls(Instant::now());
+        assert_eq!(targets.len(), 4);
+        interp.pr_badge_jobs.extend(targets);
+        let into = [
+            PrState::CiFailed,
+            PrState::Ready,
+            PrState::CiFailed,
+            PrState::Ready,
+        ];
+        for ((number, name), pr_state) in (1..).zip(names).zip(into) {
+            assert!(state.toasts.is_empty(), "{name}: waits for the last lookup");
+            let outcome = JobOutcome::PullRequestBadge {
+                repo: PathBuf::from(name),
+                branch: "main".into(),
+                remote: Some(remote(name)),
+                lookup: found(number, pr_state),
+            };
+            apply(&mut interp, &mut state, outcome);
+        }
+        assert_eq!(
+            toast_texts(&state),
+            [
+                ("#1 CI failed".into(), "feature".into()),
+                ("#2 ready to merge".into(), "feature".into()),
+                ("+2 more PR changes".into(), "gp".into()),
+            ]
+        );
+        assert!(interp.take_dirty(), "the alert asks for a frame");
+
+        // A `gx` lookup that lands with no badge lookup out alerts at once.
+        state.toasts = Default::default();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::PullRequestOpen {
+                repo: PathBuf::from("b"),
+                branch: "main".into(),
+                remote: Some(remote("b")),
+                lookup: found(2, PrState::Merged),
+                page: PrPage::Pr,
+                opened: true,
+            },
+        );
+        assert_eq!(
+            toast_texts(&state),
+            [("#2 merged".to_string(), "feature".to_string())]
         );
     }
 }
