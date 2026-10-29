@@ -30,6 +30,16 @@ pub enum PrState {
 }
 
 impl PrState {
+    /// Every state, in ladder order.
+    pub const ALL: [PrState; 6] = [
+        Self::Merged,
+        Self::CiFailed,
+        Self::Draft,
+        Self::CiRunning,
+        Self::Ready,
+        Self::InReview,
+    ];
+
     /// Lower-case state label: `merged`, `CI failed`, `draft`, `CI running`,
     /// `ready to merge`, or `in review`.
     pub fn label(self) -> &'static str {

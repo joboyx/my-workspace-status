@@ -102,7 +102,7 @@ use super::theme::{hex_color, mix_toward, BackgroundMode, Palette, Pill, ThemeId
 use super::toast::ToastTick;
 use super::tree::{
     file_change_from_name_status, file_change_segments, painted_row_segments, pr_badge_kind,
-    pr_badge_mark, visible_window, workspace_trailing_fit, NodeKind, NodeSegments, PrBadge,
+    pr_badge_role, visible_window, workspace_trailing_fit, NodeKind, NodeSegments, PrBadge,
     PrTotals, SegRole, TextSeg, VisibleRow, PR_REF_MIN_TREE_COLS,
 };
 use super::undercurl::{cut_link_cells, drop_undercurls_under, underlined_runs, UndercurlHit};
@@ -1851,8 +1851,8 @@ fn paint_tree_row(
 /// A span covers the glyph columns only: spaces at either end of the
 /// segment text stay out. Label icons pan and clip like the label; trailing
 /// icons stay flush right and clip from the left with the trailing run. An
-/// icon with no cell on screen has no span. Two trailing segments of the
-/// same kind one blank column apart (the PR badge ref and glyph) are one
+/// icon with no cell on screen has no span. The PR badge ref and glyph,
+/// two trailing segments of one PR kind one blank column apart, are one
 /// span over both.
 fn segmented_icon_spans(
     depth: usize,
@@ -1905,7 +1905,11 @@ fn segmented_icon_spans(
                 match spans[label_spans..].last_mut() {
                     // The PR badge ref and glyph: one icon over both and
                     // the space between.
-                    Some((last, last_x, last_w)) if *last == kind && *last_x + *last_w + 1 == x => {
+                    Some((last, last_x, last_w))
+                        if kind.is_pull_request()
+                            && *last == kind
+                            && *last_x + *last_w + 1 == x =>
+                    {
                         *last_w = x + shown - *last_x;
                     }
                     _ => spans.push((kind, x, shown)),
@@ -2554,12 +2558,8 @@ fn graph_pr_badges(state: &AppState) -> Vec<GraphPrBadge> {
         .graph_pr_badges()
         .into_iter()
         .map(|(index, path, pr)| {
-            let (glyph, role) = pr_badge_mark(state.ascii, pr);
-            let role = if state.pr_is_stale(&path, now) {
-                SegRole::Muted
-            } else {
-                role
-            };
+            let glyph = pr_badge_kind(pr).glyph(state.ascii);
+            let role = pr_badge_role(pr, state.pr_is_stale(&path, now));
             (index, path, pr, glyph, seg_role_color(role, palette))
         })
         .collect()
@@ -2587,22 +2587,22 @@ fn graph_pr_chip(state: &AppState, now_unix: i64) -> Option<GraphPrChip> {
     let (checkout, pr) = state.graph_header_pr()?;
     let palette = state.theme.palette();
     let stale = state.pr_is_stale(&checkout, Instant::now());
-    let (glyph, role) = pr_badge_mark(state.ascii, pr.state);
+    let glyph = pr_badge_kind(pr.state).glyph(state.ascii);
     let muted = Style::default().fg(palette.muted);
-    let tone = |color: Color| {
-        if stale {
-            muted
-        } else {
-            Style::default().fg(color)
-        }
-    };
-    let state_style = tone(seg_role_color(role, palette));
+    let state_role = pr_badge_role(pr.state, stale);
+    let state_style = Style::default().fg(seg_role_color(state_role, palette));
     let bold = state_style.add_modifier(Modifier::BOLD);
+    // The ref takes the repo colour; a stale chip steps it back with the
+    // state colour.
+    let ref_role = if stale { state_role } else { SegRole::Repo };
     let ref_text = pr.ref_text();
     let head = vec![
         Span::styled(glyph.to_string(), bold),
         Span::raw(" "),
-        Span::styled(ref_text.clone(), tone(palette.repo)),
+        Span::styled(
+            ref_text.clone(),
+            Style::default().fg(seg_role_color(ref_role, palette)),
+        ),
     ];
     let labelled = [
         head.clone(),
@@ -4067,16 +4067,26 @@ fn overlay_block(accent: Color, panel: Color) -> Block<'static> {
 fn icon_legend_color(kind: IconKind, palette: Palette) -> Color {
     use IconKind as K;
     match kind {
-        K::Branch | K::PrMerged | K::ChipLocal => palette.branch_feature,
-        K::ChipDefault | K::PrInReview => palette.branch_default,
-        K::MergedIntoDefault | K::PrReady | K::Ahead => palette.added,
+        K::Branch | K::ChipLocal => palette.branch_feature,
+        K::ChipDefault => palette.branch_default,
+        K::MergedIntoDefault | K::Ahead => palette.added,
         K::StatusAdded | K::StatusStaged => palette.added,
         K::Behind | K::StatusFailed | K::StatusDeleted | K::StatusConflict => palette.deleted,
-        K::PrCiFailed | K::PrClosed => palette.deleted,
+        // Closed only alerts, on the remove ramp.
+        K::PrClosed => palette.deleted,
+        // A PR state row paints in its badge colour.
+        K::PrCiFailed | K::PrReady | K::PrCiRunning | K::PrDraft | K::PrInReview | K::PrMerged => {
+            PrState::ALL
+                .into_iter()
+                .find(|state| pr_badge_kind(*state) == kind)
+                .map_or(palette.heading, |state| {
+                    seg_role_color(pr_badge_role(state, false), palette)
+                })
+        }
         K::Diverged | K::StatusModified | K::StatusStagedModified => palette.modified,
-        K::GraphUncommitted | K::ChipTag | K::PrCiRunning => palette.modified,
+        K::GraphUncommitted | K::ChipTag => palette.modified,
         K::StatusRenamed | K::StatusCopied => palette.renamed,
-        K::OpenVsDefault | K::PrDraft | K::NoUpstream | K::Clean | K::Synced => palette.muted,
+        K::OpenVsDefault | K::NoUpstream | K::Clean | K::Synced => palette.muted,
         K::Hidden | K::ChangeCount | K::WorktreeCount | K::CommentResolved => palette.muted,
         K::GraphMoreBelow | K::FoldExpanded | K::FoldCollapsed => palette.muted,
         K::CursorBarInactive => palette.muted,
@@ -7407,6 +7417,7 @@ mod tests {
     use crate::tui::pull_request::{PrLookup, PullRequest};
     use crate::tui::split::SplitDrag;
     use crate::tui::state::{AppState, PrBadgeHit};
+    use crate::tui::tree::pr_badge_mark;
     use crate::tui::tree::{build_tree, flatten_with, visible_for_tree};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -19250,6 +19261,36 @@ mod tests {
             assert_eq!(buf[(hit.x, hit.y)].symbol(), "#");
             assert_eq!(buf[(hit.x + hit.width - 1, hit.y)].symbol(), "P");
         }
+    }
+
+    /// Only a PR kind joins two trailing spans one column apart: two other
+    /// marks of one kind with a blank between stay two icons.
+    #[test]
+    fn trailing_spans_join_for_pr_marks_only() {
+        let seg = |text: &str, icon: Option<IconKind>| TextSeg {
+            text: text.into(),
+            role: SegRole::Muted,
+            hex: None,
+            bold: false,
+            dim: false,
+            icon,
+        };
+        let spans = |kind: IconKind| {
+            let segs = NodeSegments {
+                segments: vec![seg("app", None)],
+                trailing: vec![seg("12", Some(kind)), seg(" ", None), seg("x", Some(kind))],
+            };
+            segmented_icon_spans(0, &segs, 30, 0)
+        };
+        // The run `12 x` ends in the last column: 26..30.
+        assert_eq!(spans(IconKind::PrCiFailed), [(IconKind::PrCiFailed, 26, 4)]);
+        assert_eq!(
+            spans(IconKind::ChangeCount),
+            [
+                (IconKind::ChangeCount, 26, 2),
+                (IconKind::ChangeCount, 29, 1)
+            ]
+        );
     }
 
     /// The badge ends the run, so a narrow row cuts the marks before it,

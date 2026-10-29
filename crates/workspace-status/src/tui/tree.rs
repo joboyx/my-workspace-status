@@ -1469,21 +1469,33 @@ pub fn with_viewed_mark(trailing: Vec<TextSeg>, ascii: bool, viewed: bool) -> Ve
 }
 
 /// Glyph and colour role of the PR badge for `state`: the glyph of
-/// [`pr_badge_kind`], and the state colour. CI failed is
-/// [`SegRole::Deleted`], ready to merge [`SegRole::Added`], CI running
-/// [`SegRole::Modified`], draft [`SegRole::Muted`], in review
-/// [`SegRole::BranchDefault`], and merged [`SegRole::BranchFeature`]. The
-/// tree, the graph, the header chip, and the popover share this mapping.
+/// [`pr_badge_kind`], and the state colour ([`pr_badge_role`] of a fresh
+/// badge). The tree, the graph, the header chip, and the popover share this
+/// mapping.
 pub fn pr_badge_mark(ascii: bool, state: PrState) -> (&'static str, SegRole) {
-    let role = match state {
+    (
+        pr_badge_kind(state).glyph(ascii),
+        pr_badge_role(state, false),
+    )
+}
+
+/// Colour role a PR mark in `state` paints in: [`SegRole::Muted`] when
+/// `stale`, else the state colour. CI failed is [`SegRole::Deleted`], ready
+/// to merge [`SegRole::Added`], CI running [`SegRole::Modified`], draft
+/// [`SegRole::Muted`], in review [`SegRole::BranchDefault`], and merged
+/// [`SegRole::BranchFeature`].
+pub fn pr_badge_role(state: PrState, stale: bool) -> SegRole {
+    if stale {
+        return SegRole::Muted;
+    }
+    match state {
         PrState::CiFailed => SegRole::Deleted,
         PrState::Ready => SegRole::Added,
         PrState::CiRunning => SegRole::Modified,
         PrState::Draft => SegRole::Muted,
         PrState::InReview => SegRole::BranchDefault,
         PrState::Merged => SegRole::BranchFeature,
-    };
-    (pr_badge_kind(state).glyph(ascii), role)
+    }
 }
 
 /// Catalog kind of the PR badge for `state`: one kind per state.
@@ -1537,7 +1549,7 @@ pub fn pr_badge_repo(row: &VisibleRow) -> Option<&str> {
 /// badge glyph shares one column.
 ///
 /// The ref paints muted and the glyph bold in its state colour
-/// ([`pr_badge_mark`]); a stale badge paints both muted. Both segments
+/// ([`pr_badge_role`]); a stale badge paints both muted. Both segments
 /// carry the badge's [`IconKind`], so hover, pin, Ctrl+click, and the link
 /// cover ref and glyph.
 ///
@@ -1559,8 +1571,8 @@ pub fn with_pr_badge(
         return None;
     }
     let kind = pr_badge_kind(badge.state);
-    let (glyph, role) = pr_badge_mark(ascii, badge.state);
-    let role = if badge.stale { SegRole::Muted } else { role };
+    let glyph = kind.glyph(ascii);
+    let role = pr_badge_role(badge.state, badge.stale);
     let trailing = &mut segs.trailing;
     if !trailing.is_empty() {
         trailing.push(text_seg(PR_BADGE_GAP, SegRole::Muted));
@@ -1821,6 +1833,7 @@ mod tests {
                             assert_eq!(segs.trailing[at - 1].icon, None, "{what}: the gap");
                         }
                         assert_eq!(pr_badge_mark(ascii, state), (glyph, role), "{what}");
+                        assert_eq!(pr_badge_role(state, stale), want, "{what}");
                     }
                 }
             }
