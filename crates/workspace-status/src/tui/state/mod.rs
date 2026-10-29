@@ -2119,7 +2119,10 @@ impl AppState {
             return graph_row;
         }
         let tab = self.tabs.active_compare()?;
-        let commit = tab.commit.clone()?;
+        // Only the commit the source names: a stale load never stands in.
+        let commit = tab.commit.clone().filter(|commit| {
+            matches!(source.as_ref(), CommitFileSource::Commit { commit_id } if *commit_id == commit.id)
+        })?;
         let is_head = self
             .checkout_head_and_default(&tab.checkout_path)
             .is_some_and(|(head, _)| head == commit.id);

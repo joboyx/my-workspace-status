@@ -8916,12 +8916,21 @@ mod tests {
     }
 
     fn two_pane_graph_state() -> AppState {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        two_pane_graph_state_of(&[repo("app", true)], "app")
+    }
+
+    /// [`two_pane_graph_state`] over the checkouts `repos`, with the tree
+    /// cursor on checkout `focus` (the graph is the seed graph).
+    fn two_pane_graph_state_of(repos: &[RepoSnapshot], focus: &str) -> AppState {
+        let snapshot = build_workspace_snapshot(repos, &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
         let repo_row = state
             .rows
             .iter()
-            .position(|r| r.kind == NodeKind::Repo)
+            .position(|r| {
+                matches!(r.kind, NodeKind::Repo | NodeKind::Checkout)
+                    && r.repo.as_deref() == Some(focus)
+            })
             .expect("repo row");
         state.cursor = repo_row;
         state.graph = Some(GraphModel {
@@ -10246,7 +10255,14 @@ mod tests {
             ..Commit::default()
         };
         let open = |graph: &str| {
-            let mut state = with_two_long_commits(two_pane_graph_state());
+            // With another checkout's graph parked, the tree cursor is on
+            // that checkout, as when its graph was focused.
+            let mut state = with_two_long_commits(match graph {
+                "other repo" => {
+                    two_pane_graph_state_of(&[repo("app", true), repo("lib", true)], "lib")
+                }
+                _ => two_pane_graph_state(),
+            });
             match graph {
                 "none" => {
                     state.graph = None;
@@ -10281,6 +10297,18 @@ mod tests {
                 "{graph}: the blame path opens the tab: {effect:?}"
             );
             assert_eq!(state.active_compare_commit(), Some(OLD), "{graph}");
+            // The checkout sits detached on the commit, so its footer paints
+            // `[HEAD]`.
+            if graph != "own graph has it" {
+                let row = state
+                    .snapshot
+                    .repos
+                    .iter_mut()
+                    .find(|row| row.repo == "app")
+                    .unwrap();
+                row.head = OLD.into();
+                row.branch = "HEAD".into();
+            }
             land_compare_commit_load(&mut state, OLD, Some(tab_commit.clone()));
             state
         };
@@ -10318,7 +10346,8 @@ mod tests {
                 );
                 let meta = row_text(&terminal, y + height - 1);
                 assert!(
-                    meta.contains("old-topic")
+                    meta.contains("[HEAD]")
+                        && meta.contains("old-topic")
                         && meta.contains("ccc3333")
                         && meta.contains("parent eee4444"),
                     "{case}: the meta row on the bottom row: {meta:?}"
@@ -10362,30 +10391,58 @@ mod tests {
                 );
                 state.dispatch(Action::PopoverClose);
 
-                // The ref chip of the tab commit pins its popover.
-                let chip = state
-                    .layout
-                    .icon_hits
-                    .iter()
-                    .find(|hit| {
-                        hit.y == y + height - 1
-                            && matches!(hit.target, IconTarget::GraphChip { .. })
-                    })
-                    .cloned()
-                    .unwrap_or_else(|| panic!("{case}: chip hit: {:?}", state.layout.icon_hits));
-                state.dispatch(Action::Click {
-                    col: chip.x,
-                    row: chip.y,
-                });
-                assert_eq!(
-                    state
-                        .open_popover_sections()
-                        .first()
-                        .map(|section| section.icon),
-                    Some(chip.kind),
-                    "{case}: the chip pins its popover"
-                );
-                state.dispatch(Action::PopoverClose);
+                // The tab commit's chips pin their popovers, and View
+                // remotely on them opens on the tab's checkout (`app`), not
+                // the parked graph's: the ref chip its branch, `[HEAD]` the
+                // commit.
+                for (text, want) in [
+                    (
+                        "old-topic",
+                        crate::tui::remote_view::RemoteTarget::Branch("old-topic".into()),
+                    ),
+                    (
+                        "[HEAD]",
+                        crate::tui::remote_view::RemoteTarget::Commit(OLD.into()),
+                    ),
+                ] {
+                    let chip = state
+                        .layout
+                        .icon_hits
+                        .iter()
+                        .find(|hit| {
+                            hit.y == y + height - 1
+                                && matches!(hit.target, IconTarget::GraphChip { .. })
+                                && region_text(&terminal, hit.x, hit.y, hit.width, 1).contains(text)
+                        })
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            panic!("{case}: {text} chip hit: {:?}", state.layout.icon_hits)
+                        });
+                    state.dispatch(Action::Click {
+                        col: chip.x,
+                        row: chip.y,
+                    });
+                    let sections = state.open_popover_sections();
+                    assert_eq!(
+                        sections.first().map(|section| section.icon),
+                        Some(chip.kind),
+                        "{case}: the {text} chip pins its popover"
+                    );
+                    let line = crate::tui::popover::flat_lines(&sections)
+                        .iter()
+                        .position(|line| line.copy_text() == "View remotely")
+                        .unwrap_or_else(|| panic!("{case}: {text} View remotely line"));
+                    state.popover.as_mut().expect("pinned").focus_line = line;
+                    assert_eq!(
+                        state.dispatch(Action::PopoverRun),
+                        Effect::ViewRemotely {
+                            checkout: PathBuf::from("app"),
+                            target: want,
+                        },
+                        "{case}: View remotely on {text}"
+                    );
+                    state.dispatch(Action::PopoverClose);
+                }
 
                 // The wheel scrolls the message; the list cursor stays.
                 let cursor = state.commit_files_cursor();
@@ -10410,6 +10467,60 @@ mod tests {
             subject.starts_with("seed graph"),
             "the graph row is the first choice: {subject:?}"
         );
+    }
+
+    /// A Diff commit vs parent tab whose commit is the checkout's HEAD
+    /// paints the same meta row, chip text and colours (the checkout mark
+    /// on `main` included), from the commit its load read as from the
+    /// graph row: the footer model carries the checkout's HEAD and sync
+    /// branch from the snapshot. Both looks.
+    #[test]
+    fn compare_commit_footer_paints_a_head_tab_commit_like_the_graph_row() {
+        for (look, background) in FOOTER_LOOKS {
+            let mut state = two_pane_graph_state();
+            state.background = background;
+            state.tree_fraction = 0.5;
+            let row = state
+                .snapshot
+                .repos
+                .iter_mut()
+                .find(|row| row.repo == "app")
+                .expect("app row");
+            row.head = FOOTER_COMMIT_A.into();
+            let sync = super::super::graph_load::sync_from_snapshot(row);
+            // A real graph load: HEAD and the sync branch from the snapshot.
+            let model = state.graph.as_mut().expect("graph");
+            model.head_id = Some(FOOTER_COMMIT_A.into());
+            model.sync = Some(sync);
+            state.graph_identity = Some(("app".into(), FOOTER_COMMIT_A.into()));
+            show_compare_commit(&mut state, FOOTER_COMMIT_A);
+            let mut terminal = Terminal::new(TestBackend::new(120, 28)).unwrap();
+            let meta_cells = |terminal: &mut Terminal<TestBackend>, state: &mut AppState| {
+                draw_state(terminal, state);
+                let l = &state.layout;
+                let y = l.tree_y + l.tree_height - 1;
+                let buf = terminal.backend().buffer();
+                (l.tree_x..l.tree_x + l.tree_width)
+                    .map(|x| (buf[(x, y)].symbol().to_string(), buf[(x, y)].fg))
+                    .collect::<Vec<_>>()
+            };
+            let from_graph = meta_cells(&mut terminal, &mut state);
+            let text: String = from_graph
+                .iter()
+                .map(|(symbol, _)| symbol.as_str())
+                .collect();
+            assert!(
+                text.contains("main") && text.contains("aaa1111"),
+                "{look}: the HEAD commit's meta: {text:?}"
+            );
+            state.graph = None;
+            state.graph_identity = None;
+            let from_tab = meta_cells(&mut terminal, &mut state);
+            assert_eq!(
+                from_tab, from_graph,
+                "{look}: the tab commit's meta row paints like the graph row's"
+            );
+        }
     }
 
     /// A compare tab of a range (a branch or commit against HEAD, or a
