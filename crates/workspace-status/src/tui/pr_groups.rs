@@ -342,6 +342,21 @@ impl TitleCache {
     pub fn get(&self, key: &str) -> Option<&str> {
         self.titles.get(key)?.as_deref()
     }
+
+    /// The titles to show after `newer` lands over these: for each key of
+    /// `keys` (the ticket keys listed now), the title of `newer`, else the
+    /// title these had, so a run that fails, times out, or did not run
+    /// keeps the title on screen. A key not in `keys` drops.
+    pub fn merged<'a>(&self, newer: &TitleCache, keys: impl IntoIterator<Item = &'a str>) -> Self {
+        let titles = keys
+            .into_iter()
+            .filter_map(|key| {
+                let title = newer.get(key).or_else(|| self.get(key))?;
+                Some((key.to_string(), Some(title.to_string())))
+            })
+            .collect();
+        Self { titles }
+    }
 }
 
 /// Group key of a PR, first match wins: a key at the start of a branch path

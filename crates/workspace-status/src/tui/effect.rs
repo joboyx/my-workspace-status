@@ -287,6 +287,8 @@ pub(crate) enum JobOutcome {
     /// Titles of one PR title command fill, by group key.
     PrTitles {
         titles: TitleCache,
+        /// The quit flag stopped the fill before its last key.
+        cancelled: bool,
     },
     /// `gc` browser open of the CI page of the known PR `pr_ref`. `opened`
     /// is true when the browser started.
@@ -2595,8 +2597,8 @@ impl Interpreter {
                 self.start_pr_title_cycle(state, opts);
                 self.fill_pr_badge_slots();
             }
-            JobOutcome::PrTitles { titles } => {
-                let next = state.apply_pr_titles(titles);
+            JobOutcome::PrTitles { titles, cancelled } => {
+                let next = state.apply_pr_titles(titles, cancelled, Instant::now());
                 if next != Effect::None {
                     self.schedule(state, opts, next, &Action::None);
                 }
@@ -2730,12 +2732,14 @@ impl Interpreter {
 
     /// Start a PR title cycle once no badge lookup waits or runs: a poll
     /// cycle, an `r`, or the launch lookups ended
-    /// ([`AppState::new_pr_title_cycle`]).
+    /// ([`AppState::new_pr_title_cycle`], which runs the command only when
+    /// the listed keys changed, the last fill is a poll period old, or `r`
+    /// asked).
     fn start_pr_title_cycle(&mut self, state: &mut AppState, opts: &TuiOpts) {
         if !self.pr_badges.is_empty() || !self.pr_badge_jobs.is_empty() {
             return;
         }
-        let fill = state.new_pr_title_cycle();
+        let fill = state.new_pr_title_cycle(Instant::now());
         if fill != Effect::None {
             self.schedule(state, opts, fill, &Action::None);
         }
@@ -3681,13 +3685,15 @@ impl Interpreter {
                         // One group at a time, so a quit stops between keys;
                         // the registry ends a command that runs then.
                         let mut titles = TitleCache::default();
+                        let mut cancelled = false;
                         for group in &groups {
                             if cancel.load(Ordering::Relaxed) {
+                                cancelled = true;
                                 break;
                             }
                             titles.fill(&cmd, std::slice::from_ref(group));
                         }
-                        JobOutcome::PrTitles { titles }
+                        JobOutcome::PrTitles { titles, cancelled }
                     }),
                 );
             }
@@ -10098,6 +10104,7 @@ mod tests {
 
     // ---- PR title command ----
 
+    #[cfg(unix)]
     #[test]
     fn a_title_fill_runs_on_a_worker_and_lands_in_the_group_headers() {
         use crate::tui::state::prs_fixtures::{set_title_command, title_script, workspace};
@@ -10134,12 +10141,32 @@ mod tests {
         );
         assert_eq!(state.pr_group_title("ABC-123"), Some("Title ABC-123"));
 
-        // A quit stops a fill before its next key.
-        let effect = state.new_pr_title_cycle();
+        // Another landing with the same keys and a fresh fill runs nothing.
+        let outcome = JobOutcome::PullRequestBadge {
+            repo: PathBuf::from("lib"),
+            branch: "feature/ABC-120-cache".into(),
+            remote: Some(crate::tui::state::prs_fixtures::GH_LIB.into()),
+            lookup: PrLookup::NoPr,
+        };
+        apply(&mut interp, &mut state, outcome);
+        assert_eq!(interp.sched.queued_user_tag(UserTag::PrTitles), 0);
+
+        // A quit stops a fill before its next key, and the titles on
+        // screen stay.
+        let later = Instant::now() + std::time::Duration::from_secs(3600);
+        let effect = state.new_pr_title_cycle(later);
+        assert!(
+            matches!(effect, Effect::FillPrTitles { .. }),
+            "a poll period on"
+        );
         schedule_effect(&mut interp, &mut state, effect, &Action::None);
         interp.pr_cancel.store(true, Ordering::Relaxed);
         drain_jobs(&mut interp, &mut state, 10);
-        assert_eq!(state.pr_group_title("ABC-123"), None, "no key ran");
+        assert_eq!(
+            state.pr_group_title("ABC-123"),
+            Some("Title ABC-123"),
+            "a cancelled fill changes nothing on screen"
+        );
         let _ = std::fs::remove_dir_all(cmd.parent().unwrap());
     }
 }

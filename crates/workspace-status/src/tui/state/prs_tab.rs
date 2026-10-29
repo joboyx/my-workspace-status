@@ -38,7 +38,7 @@ use super::super::tabs::{
 };
 use super::popover::then;
 use super::pull_request::PrAction;
-use super::{AppState, FocusPane};
+use super::{single_or_batch, AppState, FocusPane};
 
 /// Narrowest frame (columns) that paints the detail pane beside the list.
 /// A narrower frame shows one pane, and `Tab` switches list and detail.
@@ -206,12 +206,20 @@ pub(crate) struct PrTitles {
     /// The program that names a ticket key (`prTitleCommand`); `None`
     /// runs nothing and the headers show the key only.
     pub(crate) command: Option<PathBuf>,
-    /// The titles on screen: the last fill that ended.
+    /// The titles on screen: each fill that landed, merged over the ones
+    /// before ([`TitleCache::merged`]).
     shown: TitleCache,
     /// A new cycle wants a fill.
     due: bool,
     /// A fill is queued or running.
     running: bool,
+    /// The ticket keys of the last fill that started, sorted.
+    filled_keys: Vec<String>,
+    /// When the last fill landed; `None` before the first one.
+    filled_at: Option<Instant>,
+    /// The next cycle fills even when the keys and the age would not ask
+    /// for it (`r` on the PRs tab).
+    forced: bool,
 }
 
 impl AppState {
@@ -385,7 +393,7 @@ impl AppState {
         let created = self.tabs.open_or_focus_prs();
         self.apply_active_session();
         let titles = if created {
-            self.new_pr_title_cycle()
+            self.new_pr_title_cycle(Instant::now())
         } else {
             Effect::None
         };
@@ -600,8 +608,11 @@ impl AppState {
     }
 
     /// `r`: look every PR up again now ([`Self::refresh_pull_requests`]),
-    /// or say that the lookups already run.
+    /// or say that the lookups already run. The next title cycle runs the
+    /// title command again for every key.
     fn prs_refresh(&mut self) -> Effect {
+        // The titles are looked up again once these lookups go idle.
+        self.force_pr_titles();
         let effect = self.refresh_pull_requests(None);
         if effect == Effect::None {
             self.status = StatusMessage::warn(PR_LOOKUP_RUNNING);
@@ -630,11 +641,7 @@ impl AppState {
             effects.push(Effect::LoadRightPane);
         }
         effects.retain(|effect| *effect != Effect::None);
-        match effects.len() {
-            0 => Effect::None,
-            1 => effects.remove(0),
-            _ => Effect::Batch(effects),
-        }
+        single_or_batch(effects)
     }
 
     /// `z`: fold the group under the cursor (the cursor moves to its
@@ -782,17 +789,23 @@ impl AppState {
         self.pr_titles.shown.get(key)
     }
 
-    /// Start a title cycle: the PRs tab opened, or the PR lookups went
-    /// idle. Returns the fill when one may start ([`Self::pr_title_fill`]).
-    pub(crate) fn new_pr_title_cycle(&mut self) -> Effect {
+    /// Start a title cycle at `now`: the PRs tab opened, or the PR lookups
+    /// went idle. Returns the fill when one may start
+    /// ([`Self::pr_title_fill`]).
+    pub(crate) fn new_pr_title_cycle(&mut self, now: Instant) -> Effect {
         self.pr_titles.due = true;
-        self.pr_title_fill()
+        self.pr_title_fill(now)
     }
 
-    /// The title fill a waiting cycle asks for: only with a title command,
-    /// the PRs tab open, and no fill queued or running, so one fill runs
-    /// at a time. A cycle with no ticket group clears the titles.
-    fn pr_title_fill(&mut self) -> Effect {
+    /// The title fill a waiting cycle asks for at `now`: only with a title
+    /// command, the PRs tab open, and no fill queued or running, so one
+    /// fill runs at a time. It runs only when the listed ticket keys
+    /// changed since the last fill, the last fill landed more than one PR
+    /// poll period ago ([`Self::pr_poll_interval_ms`]; never with polling
+    /// off), or `r` forced it; any other cycle passes, so lookups that land
+    /// one by one do not run the command for every key each time. A cycle
+    /// with no ticket group clears the titles.
+    fn pr_title_fill(&mut self, now: Instant) -> Effect {
         let Some(cmd) = self.pr_titles.command.clone() else {
             return Effect::None;
         };
@@ -806,18 +819,54 @@ impl AppState {
             .collect();
         if groups.is_empty() {
             self.pr_titles.shown = TitleCache::default();
+            self.pr_titles.filled_keys.clear();
             return Effect::None;
         }
+        let mut keys: Vec<String> = groups.iter().map(|group| group.key.clone()).collect();
+        keys.sort();
+        let period = Duration::from_millis(self.pr_poll_interval_ms());
+        let old = self
+            .pr_titles
+            .filled_at
+            .is_none_or(|at| !period.is_zero() && now.saturating_duration_since(at) > period);
+        if !self.pr_titles.forced && keys == self.pr_titles.filled_keys && !old {
+            return Effect::None;
+        }
+        self.pr_titles.forced = false;
+        self.pr_titles.filled_keys = keys;
         self.pr_titles.running = true;
         Effect::FillPrTitles { cmd, groups }
     }
 
-    /// Land a title fill: its titles replace the ones on screen, and a
-    /// cycle that started while it ran asks for the next fill.
-    pub(crate) fn apply_pr_titles(&mut self, titles: TitleCache) -> Effect {
+    /// Land a title fill at `now`. A fill the quit cut short (`cancelled`)
+    /// changes nothing on screen. Otherwise its titles merge over the ones
+    /// on screen ([`TitleCache::merged`] over the ticket keys listed now):
+    /// a key whose run gave no title keeps its title, and a key no longer
+    /// listed drops. A cycle that started while it ran may ask for the
+    /// next fill.
+    pub(crate) fn apply_pr_titles(
+        &mut self,
+        titles: TitleCache,
+        cancelled: bool,
+        now: Instant,
+    ) -> Effect {
         self.pr_titles.running = false;
-        self.pr_titles.shown = titles;
-        self.pr_title_fill()
+        if cancelled {
+            return Effect::None;
+        }
+        let groups = group_prs(self.pr_entries().0);
+        let keys = groups
+            .iter()
+            .filter(|group| group.wants_title())
+            .map(|group| group.key.as_str());
+        self.pr_titles.shown = self.pr_titles.shown.merged(&titles, keys);
+        self.pr_titles.filled_at = Some(now);
+        self.pr_title_fill(now)
+    }
+
+    /// Make the next title cycle run the command for every key (`r`).
+    fn force_pr_titles(&mut self) {
+        self.pr_titles.forced = true;
     }
 }
 
@@ -947,12 +996,20 @@ pub(crate) mod fixtures {
 
     /// An executable script in a new temp dir that prints `Title <KEY>`;
     /// the caller removes its dir.
+    #[cfg(unix)]
     pub(crate) fn title_script() -> PathBuf {
+        script_with("echo \"Title $1\"")
+    }
+
+    /// An executable `/bin/sh` script with `body` in a new temp dir; the
+    /// caller removes its dir.
+    #[cfg(unix)]
+    pub(crate) fn script_with(body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let dir = crate::testutil::unique_dir("ws-prs-title");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("title");
-        std::fs::write(&path, "#!/bin/sh\necho \"Title $1\"\n").unwrap();
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
     }
@@ -1565,41 +1622,133 @@ mod tests {
         assert_eq!(lines(&app), ["ABC-123", "  #318"], "other hosts still list");
     }
 
+    /// The keys of a title fill, or `None` when `effect` holds none.
+    fn fill_keys(effect: &Effect) -> Option<Vec<String>> {
+        match effect {
+            Effect::FillPrTitles { groups, .. } => {
+                Some(groups.iter().map(|group| group.key.clone()).collect())
+            }
+            Effect::Batch(effects) => effects.iter().find_map(fill_keys),
+            _ => None,
+        }
+    }
+
     #[test]
-    fn a_title_fill_runs_one_at_a_time_and_old_titles_stay_until_it_lands() {
+    fn a_title_cycle_fills_only_for_new_keys_an_old_fill_or_r() {
         let mut app = workspace(false);
-        assert_eq!(app.new_pr_title_cycle(), Effect::None, "no command");
-        let cmd = title_script();
+        let t0 = Instant::now();
+        let hour = Duration::from_secs(3600);
+        assert_eq!(app.new_pr_title_cycle(t0), Effect::None, "no command");
+        set_title_command(&mut app, Path::new("/opt/acme/bin/pr-title"));
+        assert_eq!(app.new_pr_title_cycle(t0), Effect::None, "no PRs tab");
+        let opened = app.dispatch(Action::OpenPrsTab);
+        assert_eq!(
+            fill_keys(&opened).as_deref(),
+            Some(&["ABC-123", "ABC-125", "ABC-120"].map(String::from)[..]),
+            "the first fill, ticket groups only"
+        );
+        assert_eq!(app.new_pr_title_cycle(t0), Effect::None, "one at a time");
+        assert_eq!(
+            app.apply_pr_titles(TitleCache::default(), false, t0),
+            Effect::None,
+            "the cycle that came while it ran has the same keys"
+        );
+        // Lookups that land one by one start no new fill within a poll
+        // period (60 s here: a PR has CI running).
+        assert_eq!(app.pr_poll_interval_ms(), 60_000);
+        assert_eq!(app.new_pr_title_cycle(t0), Effect::None);
+        assert_eq!(
+            app.new_pr_title_cycle(t0 + Duration::from_secs(30)),
+            Effect::None
+        );
+        // A fill older than a poll period runs again, once.
+        let fill = app.new_pr_title_cycle(t0 + hour);
+        assert!(fill_keys(&fill).is_some(), "old: {fill:?}");
+        assert_eq!(
+            app.apply_pr_titles(TitleCache::default(), false, t0 + hour),
+            Effect::None
+        );
+        assert_eq!(app.new_pr_title_cycle(t0 + hour), Effect::None);
+        // A new ticket key fills at once.
+        land(
+            &mut app,
+            "app-docs",
+            "docs/readme",
+            GH_APP,
+            pr(
+                GH_APP,
+                320,
+                PrState::InReview,
+                "ABC-130: Update the README",
+                "docs/readme",
+                "main",
+            ),
+        );
+        let fill = app.new_pr_title_cycle(t0 + hour);
+        assert_eq!(
+            fill_keys(&fill).as_deref(),
+            Some(&["ABC-123", "ABC-125", "ABC-130", "ABC-120"].map(String::from)[..])
+        );
+        app.apply_pr_titles(TitleCache::default(), false, t0 + hour);
+        // `r` on the tab makes the next cycle fill.
+        assert!(matches!(
+            app.dispatch(Action::Refresh),
+            Effect::LookupPullRequests { .. }
+        ));
+        assert!(fill_keys(&app.new_pr_title_cycle(t0 + hour)).is_some(), "r");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_title_that_fails_later_stays_on_screen() {
+        // Each key gets a title the first time and fails every time after.
+        let cmd = script_with(
+            "seen=\"$(dirname \"$0\")/seen-$1\"\n\
+             [ -e \"$seen\" ] && exit 1\n\
+             touch \"$seen\"\n\
+             echo \"Title $1\"",
+        );
+        let mut app = workspace(false);
         set_title_command(&mut app, &cmd);
-        assert_eq!(app.new_pr_title_cycle(), Effect::None, "no PRs tab");
-        let Effect::Batch(effects) = app.dispatch(Action::OpenPrsTab) else {
-            panic!("details and a title fill");
+        let t0 = Instant::now();
+        let run = |effect: &Effect| -> TitleCache {
+            let Some(Effect::FillPrTitles { cmd, groups }) = (match effect {
+                Effect::Batch(effects) => effects.last().cloned(),
+                other => Some(other.clone()),
+            }) else {
+                panic!("a title fill: {effect:?}");
+            };
+            let mut titles = TitleCache::default();
+            titles.fill(&cmd, &groups);
+            titles
         };
-        let Some(Effect::FillPrTitles { cmd: run, groups }) = effects.last().cloned() else {
-            panic!("a title fill: {effects:?}");
-        };
-        assert_eq!(run, cmd);
-        let keys: Vec<&str> = groups.iter().map(|group| group.key.as_str()).collect();
-        assert_eq!(
-            keys,
-            ["ABC-123", "ABC-125", "ABC-120"],
-            "ticket groups only"
-        );
-        assert_eq!(app.new_pr_title_cycle(), Effect::None, "one fill at a time");
-        let mut titles = TitleCache::default();
-        titles.fill(&cmd, &groups);
-        let next = app.apply_pr_titles(titles);
+        let opened = app.dispatch(Action::OpenPrsTab);
+        let first = run(&opened);
+        app.apply_pr_titles(first, false, t0);
         assert_eq!(app.pr_group_title("ABC-123"), Some("Title ABC-123"));
-        assert_eq!(app.pr_group_title("other"), None);
-        assert!(
-            matches!(next, Effect::FillPrTitles { .. }),
-            "the cycle that started while it ran fills next"
-        );
+
+        let later = t0 + Duration::from_secs(3600);
+        let again = app.new_pr_title_cycle(later);
+        let failed = run(&again);
+        assert_eq!(failed.get("ABC-123"), None, "the second run fails");
         assert_eq!(
-            app.pr_group_title("ABC-125"),
-            Some("Title ABC-125"),
-            "the titles stay while the next fill runs"
+            app.pr_group_title("ABC-123"),
+            Some("Title ABC-123"),
+            "the titles stay while a fill runs"
         );
+        app.apply_pr_titles(failed, false, later);
+        assert_eq!(
+            app.pr_group_title("ABC-123"),
+            Some("Title ABC-123"),
+            "a failed run keeps the title"
+        );
+        assert_eq!(app.pr_group_title("ABC-125"), Some("Title ABC-125"));
+
+        // A fill the quit cut short changes nothing.
+        let next = app.new_pr_title_cycle(later + Duration::from_secs(3600));
+        assert!(matches!(next, Effect::FillPrTitles { .. }));
+        app.apply_pr_titles(TitleCache::default(), true, later);
+        assert_eq!(app.pr_group_title("ABC-120"), Some("Title ABC-120"));
         let _ = std::fs::remove_dir_all(cmd.parent().unwrap());
     }
 }
