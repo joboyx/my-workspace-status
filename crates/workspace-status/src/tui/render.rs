@@ -27206,11 +27206,19 @@ mod tests {
             set_pr(&mut state, name, "feature", found_pr(PrState::InReview));
         }
         focus_tree_row(&mut state, "repo:app");
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        // Wide enough for the tree to paint PR refs, so badges get a link.
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let before = state.layout.links.clone();
         let _ = state.dispatch(Action::PopoverOpenFocused);
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let hit = state.layout.popover.clone().expect("pinned");
+        // Without the popover, badge links lie where it now paints.
+        assert!(
+            !links_in(&before, hit.rect).is_empty(),
+            "the popover {:?} must cover a badge link: {before:?}",
+            hit.rect
+        );
         let covered = state
             .layout
             .pr_badge_hits()
