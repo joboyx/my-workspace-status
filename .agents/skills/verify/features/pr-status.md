@@ -296,4 +296,4 @@ $V stop "$RUN"
 - `r` on a checkout row reloads that checkout; on the workspace row it reloads every checkout.
 - `wait --regex` matches inside one screen line, and the tree row also carries the right pane text. Anchor on the ref (`#7 P`) and end a one-letter glyph pattern with `($|[^[:alnum:]])`: a toast that lingers for 8 s can start with the same letters (`#7 ready`, `!5 merged`).
 - `fake forge: no scenario for ...` in `$V calls "$RUN"` means the app made a call no set answers (a new `gh` / `glab` call). Teach the fake in `scripts/fake-forge/` and add the file to the sets.
-- OSC 8 links on the badge are not in a tmux capture. The PTY e2e suite covers them.
+- OSC 8 links on the badge are not in a tmux capture. The PTY e2e suite covers them. The link covers only the PR ref (`#7`, `!5`), not the glyph; a glyph-only badge has no link. PTY proof: `pty_pr_badge_links_only_its_ref_on_both_forges`.

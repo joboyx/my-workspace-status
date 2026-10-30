@@ -119,6 +119,7 @@ mod pty_paint_palette_theme_repaints_pane_fills;
 mod pty_paint_terminal_background_keeps_boxed_slate;
 mod pty_palette_theme_rows;
 mod pty_pgup_pgdn_pages_workspace_tree;
+mod pty_pr_badge_links_only_its_ref_on_both_forges;
 mod pty_pr_badge_nerd_glyphs_on_both_forges;
 mod pty_pr_badge_shows_every_state_on_both_forges;
 mod pty_pr_default_branch_checkout_is_never_looked_up;

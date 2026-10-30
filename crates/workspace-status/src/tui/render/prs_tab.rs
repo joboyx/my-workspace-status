@@ -857,7 +857,7 @@ mod tests {
             assert!(line_with(&left, "○ #320").1.contains("○ #320"));
 
             // The glyph is bold in its state colour; glyph and ref are one
-            // PR icon hit and one OSC 8 link.
+            // PR icon hit, and the OSC 8 link covers the ref `#318` only.
             let x = col_of(&text, y318, "✕ #318");
             assert_eq!(buf[(x, y318)].fg, palette.deleted, "{what}");
             assert!(buf[(x, y318)].modifier.contains(Modifier::BOLD), "{what}");
@@ -871,15 +871,14 @@ mod tests {
             assert_eq!((hit.x, hit.width), (x, 6), "{what}");
             assert_eq!(hit.target, IconTarget::PullRequest(PathBuf::from("app")));
             let url = "https://github.com/acme/app/pull/318";
-            assert!(
-                state
-                    .layout
-                    .links
-                    .iter()
-                    .any(|link| link.y == y318 && link.x == x && link.url == url),
-                "{what}: {:?}",
-                state.layout.links
-            );
+            let row_links: Vec<_> = state
+                .layout
+                .links
+                .iter()
+                .filter(|link| link.y == y318 && link.x < detail.x)
+                .map(|link| (link.x, link.width, link.url.as_str()))
+                .collect();
+            assert_eq!(row_links, vec![(x + 2, 4, url)], "{what}: the ref only");
 
             // The detail pane: the focused PR, its checkouts, the actions.
             let (_, head) = line_with(&right, "✕ #318 feat(ABC-123)");

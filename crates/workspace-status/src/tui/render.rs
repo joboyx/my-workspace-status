@@ -327,9 +327,9 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
         chunks[4],
     );
 
-    // Each painted PR badge glyph links to its full PR URL. A box painted
-    // over the panes below drops the links it covers.
-    let badge_links = state.pr_badge_links();
+    // The painted ref of each PR badge links to its full PR URL. A box
+    // painted over the panes below drops the links it covers.
+    let badge_links = pr_badge_links(state, frame.buffer_mut());
     state.layout.links.extend(badge_links);
 
     // Dialogs paint last: a fixed-height box centered over the panes.
@@ -578,6 +578,33 @@ fn drop_hits_under(layout: &mut LayoutHit, rect: Rect) {
         .links
         .retain(|link| !rect.intersects(Rect::new(link.x, link.y, link.width, 1)));
     drop_undercurls_under(&mut layout.undercurls, rect);
+}
+
+/// One link per PR badge painted so far this frame in `buf`, to the full
+/// URL of its PR, for [`LayoutHit::links`].
+///
+/// The link covers only the PR ref (`#318`, `!12`) painted inside the
+/// badge's icon hit, not the state glyph. The icon hit stays the whole
+/// mark, so hover, a click, and Ctrl+click still work on the glyph. A badge
+/// that paints no whole ref (the glyph alone, or a ref cut for room) and a
+/// badge whose PR is no longer cached get no link.
+fn pr_badge_links(state: &AppState, buf: &Buffer) -> Vec<LinkHit> {
+    state
+        .layout
+        .pr_badge_hits()
+        .into_iter()
+        .filter_map(|hit| {
+            let pr = state.pull_request_for(&hit.repo)?;
+            painted_text_link(
+                buf,
+                hit.y,
+                hit.x,
+                hit.x.saturating_add(hit.width),
+                &pr.ref_text(),
+                pr.url.clone(),
+            )
+        })
+        .collect()
 }
 
 /// Link over the rightmost `needle` painted in buffer row `y`, columns
@@ -24933,6 +24960,12 @@ mod tests {
         Terminal::new(TestBackend::new(120, 24)).unwrap()
     }
 
+    /// A frame wide enough for the tree to paint PR refs
+    /// ([`PR_REF_MIN_TREE_COLS`]), so badges get a link.
+    fn pr_ref_terminal() -> Terminal<TestBackend> {
+        Terminal::new(TestBackend::new(160, 24)).unwrap()
+    }
+
     /// Screen row of tree row `id`.
     fn tree_row_y(state: &AppState, id: &str) -> u16 {
         let index = state
@@ -25028,10 +25061,14 @@ mod tests {
                             vec![crate::tui::hyperlink::LinkHit {
                                 y,
                                 x,
-                                width: ref_w + 2,
+                                width: ref_w,
                                 url: url.into(),
                             }],
-                            "{what}: one link over ref and glyph"
+                            "{what}: one link over the ref only"
+                        );
+                        assert!(
+                            !link_covers(&state.layout.links, edge, y),
+                            "{what}: the glyph is in no link"
                         );
                     }
                 }
@@ -25041,7 +25078,8 @@ mod tests {
 
     /// Every badge glyph shares the last tree column, whatever the ref
     /// width and the marks before it; under 50 columns no row paints a
-    /// ref. Boxed and flat looks.
+    /// ref. Only a painted ref links, so a glyph-only badge links nothing.
+    /// Boxed and flat looks.
     #[test]
     fn tree_pr_glyphs_share_one_column_and_refs_drop_on_a_narrow_tree() {
         let mut ahead = branch_repo("lib", "feat");
@@ -25090,6 +25128,7 @@ mod tests {
                 );
                 let buf = terminal.backend().buffer();
                 let edge = state.layout.tree_x + state.layout.tree_width - 1;
+                let tree_row = |y| Rect::new(state.layout.tree_x, y, state.layout.tree_width, 1);
                 let mut hits = state.layout.pr_badge_hits();
                 hits.sort_by_key(|hit| hit.y);
                 assert_eq!(hits.len(), 3, "{what}: {hits:?}");
@@ -25099,14 +25138,37 @@ mod tests {
                     assert_eq!(hit.x + hit.width - 1, edge, "{what}: {row}");
                     let sigil = if url.contains("gitlab") { '!' } else { '#' };
                     let ref_text = format!("{sigil}{number}");
+                    // The link covers the painted ref only; a glyph alone
+                    // links nothing.
+                    assert!(
+                        !link_covers(&state.layout.links, edge, hit.y),
+                        "{what}: {row}"
+                    );
                     if wide {
                         assert!(row.contains(&format!("{ref_text} x")), "{what}: {row}");
                         assert_eq!(usize::from(hit.width), ref_text.len() + 2, "{what}");
+                        let links = links_in(&state.layout.links, tree_row(hit.y));
+                        assert_eq!(links.len(), 1, "{what}: {links:?}");
+                        assert_eq!((links[0].x, links[0].width), (hit.x, hit.width - 2));
+                        assert_eq!(links[0].url, url, "{what}");
                     } else {
                         assert!(!row.contains(&ref_text), "{what}: {row}");
                         assert_eq!(hit.width, 1, "{what}: {row}");
                     }
                     assert_eq!(hit.repo, PathBuf::from(repo), "{what}");
+                }
+                if !wide {
+                    let tree = Rect::new(
+                        state.layout.tree_x,
+                        0,
+                        state.layout.tree_width,
+                        buf.area.height,
+                    );
+                    let links = links_in(&state.layout.links, tree);
+                    assert!(
+                        links.is_empty(),
+                        "{what}: a glyph-only badge links nothing: {links:?}"
+                    );
                 }
             }
         }
@@ -25652,20 +25714,26 @@ mod tests {
             "feature",
             PrLookup::Found(PullRequest::fixture(12345, url, PrState::InReview)),
         );
-        let mut terminal = pr_terminal();
+        let mut terminal = pr_ref_terminal();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let hit = state.layout.pr_badge_hits()[0].clone();
+        // The link wraps the ref `#12345` only; the glyph stays plain.
         assert_eq!(
             state.layout.links,
             vec![LinkHit {
                 y: hit.y,
                 x: hit.x,
-                width: hit.width,
+                width: hit.width - 2,
                 url: url.into(),
             }]
         );
+        assert_eq!(
+            link_text(&terminal, &state.layout.links[0]).trim_end(),
+            "#12345"
+        );
         let glyph_x = hit.x + hit.width - 1;
         assert_eq!(terminal.backend().buffer()[(glyph_x, hit.y)].symbol(), "P");
+        assert!(!link_covers(&state.layout.links, glyph_x, hit.y));
 
         // A frame that paints no badge links nothing.
         state
@@ -27082,6 +27150,11 @@ mod tests {
         }
     }
 
+    /// Whether a span in `links` covers cell (`x`, `y`).
+    fn link_covers(links: &[crate::tui::hyperlink::LinkHit], x: u16, y: u16) -> bool {
+        !links_in(links, Rect::new(x, y, 1, 1)).is_empty()
+    }
+
     /// Link spans in `links` that overlap `rect`.
     fn links_in(
         links: &[crate::tui::hyperlink::LinkHit],
@@ -27098,7 +27171,7 @@ mod tests {
     fn dialog_drops_the_badge_links_it_covers() {
         let mut state = pr_state(&[branch_repo("app", "feature")], true);
         set_pr(&mut state, "app", "feature", found_pr(PrState::InReview));
-        let mut terminal = pr_terminal();
+        let mut terminal = pr_ref_terminal();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let before = state.layout.links.clone();
         assert_eq!(before.len(), 1, "{before:?}");
@@ -27273,17 +27346,10 @@ mod tests {
                 let cell = &buf[(hit.x, hit.y)];
                 assert_eq!(cell.fg, state.theme.palette().branch_default, "{what}");
                 assert!(cell.modifier.contains(Modifier::BOLD), "{what}");
-                // The graph badge glyph links to the full PR URL.
+                // The graph badge paints the glyph alone: no ref, so no
+                // terminal link. Ctrl+click below still opens the PR.
                 assert!(
-                    state
-                        .layout
-                        .links
-                        .contains(&crate::tui::hyperlink::LinkHit {
-                            y: hit.y,
-                            x: hit.x,
-                            width: 1,
-                            url: "https://github.com/octo/demo/pull/7".into(),
-                        }),
+                    !link_covers(&state.layout.links, hit.x, hit.y),
                     "{what}: {:?}",
                     state.layout.links
                 );
@@ -28658,8 +28724,9 @@ mod tests {
 
     /// The chip paints flush right on the sync header line of the graph at
     /// depth 0 (right pane) and depth 1 (left pane), boxed and flat; its
-    /// `<glyph> <ref>` is the PR icon hit and the PR link, and Ctrl+click
-    /// there opens the PR. A narrower pane drops the next action first.
+    /// `<glyph> <ref>` is the PR icon hit, its `<ref>` alone is the PR
+    /// link, and Ctrl+click there opens the PR. A narrower pane drops the
+    /// next action first.
     #[test]
     fn graph_header_chip_paints_flush_right_and_links_its_ref_in_every_look() {
         let url = "https://github.com/octo/demo/pull/7";
@@ -28721,17 +28788,23 @@ mod tests {
                         (chip_x, 4, &IconTarget::PullRequest(PathBuf::from("app"))),
                         "{what}: the hit covers `x #7`"
                     );
+                    // The link wraps the ref `#7` only, not the glyph.
                     assert!(
                         state
                             .layout
                             .links
                             .contains(&crate::tui::hyperlink::LinkHit {
                                 y: hit.y,
-                                x: hit.x,
-                                width: 4,
+                                x: hit.x + 2,
+                                width: 2,
                                 url: url.into(),
                             }),
                         "{what}: {:?}",
+                        state.layout.links
+                    );
+                    assert!(
+                        !link_covers(&state.layout.links, hit.x, hit.y),
+                        "{what}: the glyph is in no link: {:?}",
                         state.layout.links
                     );
                     let effect = state.dispatch(Action::CtrlClick {
@@ -29051,7 +29124,7 @@ mod tests {
         let mut state = pr_state(&[branch_repo("app", "feature")], true);
         set_pr(&mut state, "app", "feature", found_pr(PrState::InReview));
         let palette = state.theme.palette();
-        let mut terminal = pr_terminal();
+        let mut terminal = pr_ref_terminal();
         draw_state(&mut terminal, &mut state);
         let link = state.layout.links[0].clone();
         let was = terminal.backend().buffer()[(link.x, link.y)].clone();
@@ -29061,7 +29134,7 @@ mod tests {
             stash_ref: "stash@{0}".into(),
         });
         draw_state(&mut terminal, &mut state);
-        let keep = open_dialog_box(&state, 120);
+        let keep = open_dialog_box(&state, 160);
         assert!(!keep.contains(Position::new(link.x, link.y)));
         assert_eq!(state.layout.links, vec![link.clone()]);
         let cells = link_cells(terminal.backend().buffer(), &state.layout.links);
