@@ -1708,3 +1708,41 @@ pub fn flat_left_cursor_on(tui: &PtySession, join: u16, needle: &str) -> bool {
     flat_left_row_containing(tui, join, needle)
         .is_some_and(|row| tui.grid_row_text(row, 0..join).contains('\u{258C}'))
 }
+
+/// Every OSC 8 link in `raw`: its URL and the visible text it wraps, with
+/// CSI sequences (cursor moves, colours) removed. `vt100` drops OSC 8 from
+/// the screen model, so links are read from the raw PTY bytes.
+fn osc8_links(raw: &str) -> Vec<(String, String)> {
+    raw.split("\x1b]8;;")
+        .skip(1)
+        .filter_map(|tail| tail.split_once("\x1b\\"))
+        .filter(|(url, _)| !url.is_empty())
+        .map(|(url, body)| (url.to_string(), strip_csi(body)))
+        .collect()
+}
+
+/// `s` without its `ESC [ … final` sequences.
+fn strip_csi(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// OSC 8 links (URL, wrapped text) in the raw PTY output from byte `from` on.
+pub fn links_since(tui: &PtySession, from: usize) -> Vec<(String, String)> {
+    let raw = tui.raw_output();
+    osc8_links(&String::from_utf8_lossy(&raw[from.min(raw.len())..]))
+}

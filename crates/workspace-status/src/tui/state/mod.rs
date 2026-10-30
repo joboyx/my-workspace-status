@@ -433,7 +433,7 @@ pub struct LayoutHit {
     /// Hyperlink spans of the frame, rebuilt every paint: the OSC 8 overlay
     /// prints exactly these.
     ///
-    /// Each painted PR badge glyph (from [`AppState::pr_badge_links`]), then
+    /// Each painted PR badge ref (from `pr_badge_links` in `render.rs`), then
     /// the popover URL line. A dialog or the popover drops the links under
     /// its box before it records its own.
     pub links: Vec<LinkHit>,

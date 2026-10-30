@@ -6,7 +6,7 @@ use std::fs;
 use crate::harness::PtySession;
 use crate::seed::{daily_workspace, git, git_stdout};
 use crate::support::{
-    crumb_line, graph_cursor_on, panes_tree_unfocused_graph_focused, title_has_diff,
+    crumb_line, graph_cursor_on, links_since, panes_tree_unfocused_graph_focused, title_has_diff,
     title_has_files, tree_cursor_on, GIT_WAIT, WAIT,
 };
 
@@ -15,43 +15,6 @@ use crate::support::{
 const APP_REMOTE: &str = "https://github.invalid/octo/demo.git";
 /// Subject of the `app` commit that adds `my notes.txt`.
 const NOTES_COMMIT: &str = "notes-link";
-
-/// Every OSC 8 link in `raw`: its URL and the visible text it wraps, with
-/// CSI sequences (cursor moves, colours) removed.
-fn osc8_links(raw: &str) -> Vec<(String, String)> {
-    raw.split("\x1b]8;;")
-        .skip(1)
-        .filter_map(|tail| tail.split_once("\x1b\\"))
-        .filter(|(url, _)| !url.is_empty())
-        .map(|(url, body)| (url.to_string(), strip_csi(body)))
-        .collect()
-}
-
-/// `s` without its `ESC [ … final` sequences.
-fn strip_csi(s: &str) -> String {
-    let mut out = String::new();
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            if chars.next() == Some('[') {
-                for c in chars.by_ref() {
-                    if ('\x40'..='\x7e').contains(&c) {
-                        break;
-                    }
-                }
-            }
-            continue;
-        }
-        out.push(c);
-    }
-    out
-}
-
-/// OSC 8 links in the raw output from byte `from` on.
-fn links_since(tui: &PtySession, from: usize) -> Vec<(String, String)> {
-    let raw = tui.raw_output();
-    osc8_links(&String::from_utf8_lossy(&raw[from.min(raw.len())..]))
-}
 
 /// A diff pane title paints `app/my notes.txt`, or `app/"my notes.txt"`
 /// when git C-quotes the path.
