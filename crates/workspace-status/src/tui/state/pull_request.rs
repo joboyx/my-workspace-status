@@ -12,7 +12,8 @@
 //! forge again. The poll cycle ([`AppState::due_pr_polls`]) looks up the
 //! pollable checkouts again on its own timer, and keeps their badges on
 //! screen while it runs. A failed poll backs its forge host off and keeps
-//! the last answer.
+//! the last answer. A checkout whose last lookup failed is polled until a
+//! lookup succeeds.
 //!
 //! A checkout on its repository's known default branch has no PR status:
 //! it is never looked up or polled, and a switch onto that branch drops its
@@ -172,15 +173,19 @@ impl CheckoutPr {
     }
 
     /// True when a poll cycle may look this record up, given the snapshot
-    /// row's upstream: a GitHub or GitLab remote, and an open PR, or no PR
-    /// known yet on a branch that was pushed. A merged PR is not polled.
+    /// row's upstream: a GitHub or GitLab remote, and a last lookup that
+    /// failed, an open PR, or no PR known yet on a branch that was pushed.
+    /// A merged PR is not polled once its lookup works. A failed lookup is
+    /// polled until it succeeds, whatever the upstream or the PR state, so
+    /// the outage of its forge host can end ([`AppState::settle_pr_outages`]).
     fn pollable(&self, has_upstream: bool) -> bool {
         self.host.is_some()
-            && match self.pr_state {
-                Some(PrState::Merged) => false,
-                Some(_) => true,
-                None => has_upstream,
-            }
+            && (self.failure.is_some()
+                || match self.pr_state {
+                    Some(PrState::Merged) => false,
+                    Some(_) => true,
+                    None => has_upstream,
+                })
     }
 
     /// True when this record shows an open PR with CI running or ready to
@@ -254,8 +259,14 @@ enum LandedLookup {
     /// with no other failing record recovers.
     Answered,
     /// The lookup failed: the outage of `source` starts or goes on, with
-    /// toast text `text` (`glab (gitlab.com): invalid_token`).
-    Failed { source: OutageSource, text: String },
+    /// toast text `text` (`glab (gitlab.com): invalid_token`). `moved`
+    /// is true when the record's last failure was on another source (its
+    /// remote moved to another host), which may end that outage.
+    Failed {
+        source: OutageSource,
+        text: String,
+        moved: bool,
+    },
 }
 
 #[cfg(test)]
@@ -689,10 +700,14 @@ impl PrCache {
                     reason.as_deref().unwrap_or(PR_LOOKUP_FAILED)
                 );
                 let source = OutageSource::PrLookup { tool, host: name };
-                record.failure = Some(PrLookupFailure {
+                let failure = PrLookupFailure {
                     reason,
                     source: source.clone(),
-                });
+                };
+                let moved = record
+                    .failure
+                    .replace(failure)
+                    .is_some_and(|before| before.source != source);
                 let known = record.remote.clone().is_some_and(|remote| {
                     matches!(
                         self.answers.get(&(remote, branch.to_string())),
@@ -710,7 +725,11 @@ impl PrCache {
                     self.hosts.entry(host).or_default().fail(cycle);
                 }
                 self.rehot();
-                return LandedLookup::Failed { source, text };
+                return LandedLookup::Failed {
+                    source,
+                    text,
+                    moved,
+                };
             }
             PrLookup::Found(pr) => Some(pr),
             PrLookup::NoPr => None,
@@ -1113,8 +1132,9 @@ impl AppState {
     }
 
     /// End every PR lookup outage that no record fails on any more. Runs
-    /// only after a lookup succeeded ([`Self::note_pr_landing`]) or records
-    /// were dropped ([`Self::due_pr_lookups`], [`Self::apply_pr_open`]):
+    /// only after a lookup succeeded or a failure moved its record to
+    /// another source ([`Self::note_pr_landing`]), or records were dropped
+    /// ([`Self::due_pr_lookups`], [`Self::apply_pr_open`]):
     /// `r`, a full reload, and a lookup in flight keep each record's last
     /// failure, so they never end an outage.
     fn settle_pr_outages(&mut self) {
@@ -1133,12 +1153,22 @@ impl AppState {
     /// Feed a landed lookup to the PR lookup outages at `now`: a failure
     /// starts or updates the outage of its forge CLI and host (one toast
     /// per outage), and an answer ends each outage no record fails on any
-    /// more.
+    /// more. A failure that moved its record to another source does too,
+    /// since the old source may have no failing record left.
     fn note_pr_landing(&mut self, landed: LandedLookup, now: Instant) {
         match landed {
             LandedLookup::Dropped => {}
             LandedLookup::Answered => self.settle_pr_outages(),
-            LandedLookup::Failed { source, text } => self.note_outage(source, text, now),
+            LandedLookup::Failed {
+                source,
+                text,
+                moved,
+            } => {
+                self.note_outage(source, text, now);
+                if moved {
+                    self.settle_pr_outages();
+                }
+            }
         }
     }
 
@@ -1252,7 +1282,9 @@ impl AppState {
     /// first lookup for that branch landed with a GitHub or GitLab remote,
     /// and either its answer is an open PR, or no PR is known yet and the
     /// branch has an upstream (it was pushed), so a PR opened later shows.
-    /// A merged PR is not polled. Reads the facts each record keeps
+    /// A merged PR is not polled. A checkout whose last lookup failed is
+    /// polled until a lookup succeeds, also with no upstream or a merged
+    /// PR, so a working forge ends its outage. Reads the facts each record keeps
     /// ([`CheckoutPr::pollable`], [`CheckoutPr::host`]); it parses no
     /// remote.
     ///
@@ -5328,23 +5360,162 @@ mod tests {
     }
 
     #[test]
-    fn a_branch_switch_or_a_vanished_checkout_of_the_failing_ones_ends_the_outage() {
+    fn a_branch_switch_of_the_only_failing_checkout_ends_the_outage() {
         let mut app = app_with(&[pushed("app"), pushed("lib")], &[]);
         let _ = app.due_pr_lookups();
         let t0 = Instant::now();
+        // `app` is the only checkout that fails on gitlab.com; `lib` works.
         land_pr(&mut app, "app", &gl("app"), invalid_token(), t0);
-        land_pr(&mut app, "lib", &gl("lib"), invalid_token(), t0);
+        land_pr(&mut app, "lib", &gl("lib"), open_on(&gl("lib"), 2), t0);
+        assert!(app.outages.get(&gitlab_outage()).is_some());
 
-        // `app` switches branch: `lib` still fails on gitlab.com.
+        // `app` switches branch. No checkout vanished, so only the replaced
+        // record ends the outage.
         apply_one_repo_snapshot(&mut app, "app", Some(pushed_on("app", "other")));
+        assert!(
+            app.outages.get(&gitlab_outage()).is_some(),
+            "the outage waits for the lookup sync"
+        );
         let _ = app.due_pr_lookups();
         assert_eq!(app.pr_mark(Path::new("app")), None, "a new branch");
+        assert!(app.outages.is_empty(), "the header part goes");
+        assert!(outage_toasts(&app).is_empty(), "the toast goes");
+    }
+
+    #[test]
+    fn a_vanished_checkout_that_was_the_only_failing_one_ends_the_outage() {
+        let mut app = app_with(&[pushed("app"), pushed("lib")], &[]);
+        let _ = app.due_pr_lookups();
+        let t0 = Instant::now();
+        land_pr(&mut app, "app", &gl("app"), open_on(&gl("app"), 1), t0);
+        land_pr(&mut app, "lib", &gl("lib"), invalid_token(), t0);
         assert!(app.outages.get(&gitlab_outage()).is_some());
-        // `lib` vanishes: no checkout fails on the host any more.
+
+        // `lib` vanishes; `app` keeps its branch, so no record is replaced.
         apply_one_repo_snapshot(&mut app, "lib", None);
         let _ = app.due_pr_lookups();
-        assert!(app.outages.is_empty());
-        assert!(outage_toasts(&app).is_empty());
+        assert!(app.outages.is_empty(), "the header part goes");
+        assert!(outage_toasts(&app).is_empty(), "the toast goes");
+    }
+
+    #[test]
+    fn a_failed_lookup_is_polled_until_it_works_also_with_no_upstream() {
+        // `app` was pushed; `wip` has no upstream, so with no PR known it
+        // is not polled for a PR.
+        let mut app = app_with(&[pushed("app"), repo("wip", "feature")], &[]);
+        let _ = app.due_pr_lookups();
+        let t0 = Instant::now();
+        // The token expired at launch: both fail on gitlab.com.
+        land_pr(&mut app, "app", &gl("app"), invalid_token(), t0);
+        land_pr(&mut app, "wip", &gl("wip"), invalid_token(), t0);
+        assert_eq!(outage_toasts(&app).len(), 1);
+
+        // The poll cycle retries both, under the host backoff.
+        let t1 = t0 + secs(180);
+        assert_eq!(polled(&mut app, t1), ["app", "wip"]);
+        land_pr(&mut app, "app", &gl("app"), invalid_token(), t1);
+        land_pr(&mut app, "wip", &gl("wip"), invalid_token(), t1);
+        assert!(
+            polled(&mut app, t1 + secs(180)).is_empty(),
+            "the failing host backs off"
+        );
+        // The token works again: the next cycle retries both.
+        let t2 = t1 + secs(360);
+        assert_eq!(polled(&mut app, t2), ["app", "wip"]);
+        land_pr(&mut app, "app", &gl("app"), PrLookup::NoPr, t2);
+        assert!(
+            app.outages.get(&gitlab_outage()).is_some(),
+            "`wip` still fails"
+        );
+        land_pr(&mut app, "wip", &gl("wip"), PrLookup::NoPr, t2);
+        assert!(app.outages.is_empty(), "the header part goes");
+        assert!(outage_toasts(&app).is_empty(), "the toast goes");
+        assert_eq!(app.pr_mark(Path::new("wip")), None);
+
+        // Working again, the branch with no upstream is not polled.
+        assert_eq!(polled(&mut app, t2 + secs(180)), ["app"]);
+    }
+
+    #[test]
+    fn a_merged_pr_whose_later_lookup_failed_is_polled_until_it_works() {
+        let mut app = app_with(&[pushed("app")], &[]);
+        let path = Path::new("app");
+        let _ = app.due_pr_lookups();
+        let t0 = Instant::now();
+        let merged = || PrLookup::Found(pr_on(&gl("app"), 1, PrState::Merged));
+        land_pr(&mut app, "app", &gl("app"), merged(), t0);
+        assert!(
+            polled(&mut app, t0 + secs(180)).is_empty(),
+            "a merged PR is not polled"
+        );
+
+        // `r` looks it up again, and that lookup fails.
+        app.forget_pr_lookups(Some(path));
+        assert_eq!(app.due_pr_lookups().len(), 1);
+        land_pr(&mut app, "app", &gl("app"), invalid_token(), t0 + secs(200));
+        assert!(app.outages.get(&gitlab_outage()).is_some());
+        assert_eq!(
+            app.pr_mark(path),
+            Some(PrMark::State(PrState::Merged)),
+            "the badge stays"
+        );
+
+        let t1 = t0 + secs(400);
+        assert_eq!(
+            polled(&mut app, t1),
+            ["app"],
+            "the failed lookup is retried"
+        );
+        land_pr(&mut app, "app", &gl("app"), merged(), t1);
+        assert!(app.outages.is_empty(), "the header part goes");
+        assert!(outage_toasts(&app).is_empty(), "the toast goes");
+        assert!(
+            polled(&mut app, t1 + secs(400)).is_empty(),
+            "merged and working: not polled"
+        );
+    }
+
+    #[test]
+    fn gx_on_a_new_branch_ends_the_outage_of_the_old_branchs_failure() {
+        let mut app = app_with(&[pushed("app")], &[]);
+        let path = Path::new("app");
+        let _ = app.due_pr_lookups();
+        land_pr(&mut app, "app", &gl("app"), invalid_token(), Instant::now());
+        assert!(app.outages.get(&gitlab_outage()).is_some());
+
+        // `app` switches branch, and `gx` lands before the lookup sync: its
+        // record of `feature` is replaced. The `gx` lookup fails on another
+        // host, so only the replaced record can end the GitLab outage.
+        apply_one_repo_snapshot(&mut app, "app", Some(pushed_on("app", "other")));
+        assert!(app.outages.get(&gitlab_outage()).is_some());
+        app.apply_pr_open(
+            path,
+            "other",
+            Some(gh("app")),
+            PrLookup::Failed(Some("HTTP 401".into())),
+            PrPage::Pr,
+            false,
+        );
+        assert!(app.outages.get(&gitlab_outage()).is_none());
+        assert!(app.outages.get(&github_outage()).is_some());
+        assert_eq!(outage_toasts(&app), ["gh (github.com): HTTP 401"]);
+    }
+
+    #[test]
+    fn a_failure_on_a_moved_remote_ends_the_outage_of_the_old_host() {
+        let mut app = app_with(&[pushed("app")], &[]);
+        let _ = app.due_pr_lookups();
+        let t0 = Instant::now();
+        land_pr(&mut app, "app", &gl("app"), invalid_token(), t0);
+        assert!(app.outages.get(&gitlab_outage()).is_some());
+
+        // The remote moved to GitHub, which fails too: the record now fails
+        // on github.com only, so the GitLab outage ends.
+        land_pr(&mut app, "app", &gh("app"), PrLookup::Failed(None), t0);
+        assert!(app.outages.get(&gitlab_outage()).is_none());
+        assert!(app.outages.get(&github_outage()).is_some());
+        assert_eq!(outage_toasts(&app), ["gh (github.com): lookup failed"]);
+        assert_eq!(app.pr_mark(Path::new("app")), Some(PrMark::LookupFailed));
     }
 
     #[test]

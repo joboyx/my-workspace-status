@@ -3,8 +3,8 @@ use crate::common::pr_scenarios::{Badge, GITLAB_PROJECT};
 use crate::common::seed::git;
 use crate::harness::PtySession;
 use crate::pr_support::{
-    badge_glyph_paint, badge_is, forge_env, glyph_colour, list_calls, named_workspace,
-    seed_checkouts, tab_strip, Forge, PrCheckout,
+    badge_glyph_paint, badge_is, forge_env, list_calls, named_workspace, seed_checkouts, tab_strip,
+    Forge, PrCheckout, DELETED,
 };
 use crate::support::{GIT_WAIT, WAIT};
 
@@ -110,8 +110,8 @@ fn pty_pr_failing_host_toasts_once_per_outage_and_marks_the_badge() {
     );
     assert_eq!(
         badge_glyph_paint(&tui, "apibox"),
-        Some((glyph_colour(Badge::CiFailed), true)),
-        "the failure mark paints bold red"
+        Some((DELETED, true)),
+        "the failure mark paints bold in the theme's deleted colour"
     );
     assert_eq!(
         tui.screen().matches(TOAST).count(),
