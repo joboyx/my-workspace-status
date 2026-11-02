@@ -104,7 +104,7 @@ use super::theme::{hex_color, mix_toward, BackgroundMode, Palette, Pill, ThemeId
 use super::toast::{Toast, ToastMark, ToastTick};
 use super::tree::{
     fit_upstream_rewrite_text, painted_row_segments, pr_badge_kind, pr_badge_role, visible_window,
-    workspace_trailing_fit, NodeKind, NodeSegments, PrBadge, PrTotals, SegRole, TextSeg,
+    workspace_trailing_fit, NodeKind, NodeSegments, PrBadge, PrMark, PrTotals, SegRole, TextSeg,
     VisibleRow, PR_REF_MIN_TREE_COLS,
 };
 use super::undercurl::{cut_link_cells, drop_undercurls_under, underlined_runs, UndercurlHit};
@@ -2669,7 +2669,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
                     y: span.y,
                     x: span.x,
                     width: span.width.min(chip.head_width),
-                    kind: pr_badge_kind(chip.state),
+                    kind: chip.mark.kind(),
                     target: IconTarget::PullRequest(chip.checkout.clone()),
                 });
             }
@@ -2677,8 +2677,8 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
                 GraphIconKind::Badge => badge_rows
                     .iter()
                     .find(|row| Some(row.0) == span.row_index)
-                    .map(|(_, repo, pr, _, _)| {
-                        (pr_badge_kind(*pr), IconTarget::PullRequest(repo.clone()))
+                    .map(|(_, repo, mark, _, _)| {
+                        (mark.kind(), IconTarget::PullRequest(repo.clone()))
                     })?,
                 GraphIconKind::SyncHeader => (
                     graph_sync_kind(model.sync.as_ref()?.status),
@@ -2828,34 +2828,38 @@ fn bleed_vscrollbar_column(buf: &mut Buffer, bar: VScrollbarLayout) {
 }
 
 /// One graph worktree row's PR badge: visible row index, checkout,
-/// state, glyph, and colour.
-type GraphPrBadge = (usize, PathBuf, PrState, &'static str, Color);
+/// mark, glyph, and colour.
+type GraphPrBadge = (usize, PathBuf, PrMark, &'static str, Color);
 
 /// [`AppState::graph_pr_badges`] with the glyph and colour to paint: the
-/// state colour, or muted when the badge is stale.
+/// state colour, or muted when the badge is stale; the failure mark `!` in
+/// the deleted colour.
 fn graph_pr_badges(state: &AppState) -> Vec<GraphPrBadge> {
     let palette = state.theme.palette();
     let now = Instant::now();
     state
         .graph_pr_badges()
         .into_iter()
-        .map(|(index, path, pr)| {
-            let glyph = pr_badge_kind(pr).glyph(state.ascii);
-            let role = pr_badge_role(pr, state.pr_is_stale(&path, now));
-            (index, path, pr, glyph, seg_role_color(role, palette))
+        .map(|(index, path, mark)| {
+            let glyph = mark.kind().glyph(state.ascii);
+            let role = mark.role(state.pr_is_stale(&path, now));
+            (index, path, mark, glyph, seg_role_color(role, palette))
         })
         .collect()
 }
 
-/// The graph header chip: the checkout it describes, the columns of its
-/// `<glyph> <ref>` head (the PR icon hit and link), and the candidates for
-/// [`GraphWidget::header_chip`].
+/// The graph header chip: the checkout it describes, its mark, the columns
+/// of its `<glyph> <ref>` head (the PR icon hit and link), and the
+/// candidates for [`GraphWidget::header_chip`].
 struct GraphPrChip {
     checkout: PathBuf,
-    state: PrState,
+    mark: PrMark,
     head_width: u16,
     candidates: Vec<Line<'static>>,
 }
+
+/// Label of the header chip of a failed lookup with no earlier answer.
+const GRAPH_CHIP_LOOKUP_FAILED: &str = "lookup failed";
 
 /// The header chip of the graph checkout's PR ([`AppState::graph_header_pr`]),
 /// or `None` with no PR.
@@ -2865,8 +2869,14 @@ struct GraphPrChip {
 /// (the age), then `<glyph> <ref>`. The glyph and the label paint in the
 /// state colour, the ref in the repo colour, `▸` dim, the next action bold.
 /// A stale PR paints every part muted. ASCII mode uses `>` for `▸`.
+///
+/// A failed lookup with no earlier answer
+/// ([`AppState::graph_header_lookup_failed`]) paints the failure mark:
+/// `! lookup failed`, then `!` alone, bold in the deleted colour, no ref.
 fn graph_pr_chip(state: &AppState, now_unix: i64) -> Option<GraphPrChip> {
-    let (checkout, pr) = state.graph_header_pr()?;
+    let Some((checkout, pr)) = state.graph_header_pr() else {
+        return graph_lookup_failed_chip(state);
+    };
     let palette = state.theme.palette();
     let stale = state.pr_is_stale(&checkout, Instant::now());
     let glyph = pr_badge_kind(pr.state).glyph(state.ascii);
@@ -2916,10 +2926,36 @@ fn graph_pr_chip(state: &AppState, now_unix: i64) -> Option<GraphPrChip> {
     candidates.push(Line::from(head));
     Some(GraphPrChip {
         checkout,
-        state: pr.state,
+        mark: PrMark::State(pr.state),
         head_width: u16::try_from(2 + UnicodeWidthStr::width(ref_text.as_str()))
             .unwrap_or(u16::MAX),
         candidates,
+    })
+}
+
+/// The header chip of a failed lookup with no earlier answer: `! lookup
+/// failed`, then `!`; the mark bold and the label in the deleted colour.
+/// Its head (the icon hit) is the mark alone: there is no ref to link.
+fn graph_lookup_failed_chip(state: &AppState) -> Option<GraphPrChip> {
+    let checkout = state.graph_header_lookup_failed()?;
+    let mark = PrMark::LookupFailed;
+    let style = Style::default().fg(seg_role_color(mark.role(false), state.theme.palette()));
+    let head = Span::styled(
+        mark.kind().glyph(state.ascii),
+        style.add_modifier(Modifier::BOLD),
+    );
+    Some(GraphPrChip {
+        checkout,
+        mark,
+        head_width: 1,
+        candidates: vec![
+            Line::from(vec![
+                head.clone(),
+                Span::raw(" "),
+                Span::styled(GRAPH_CHIP_LOOKUP_FAILED, style),
+            ]),
+            Line::from(head),
+        ],
     })
 }
 
@@ -4890,8 +4926,9 @@ fn icon_legend_color(kind: IconKind, palette: Palette) -> Color {
         K::MergedIntoDefault | K::Ahead => palette.added,
         K::StatusAdded | K::StatusStaged => palette.added,
         K::Behind | K::StatusFailed | K::StatusDeleted | K::StatusConflict => palette.deleted,
-        // Closed only alerts, on the remove ramp.
-        K::PrClosed => palette.deleted,
+        // Closed only alerts, on the remove ramp; the lookup failure mark
+        // paints in the deleted colour.
+        K::PrClosed | K::PrLookupFailed => palette.deleted,
         // A PR state row paints in its badge colour.
         K::PrCiFailed | K::PrReady | K::PrCiRunning | K::PrDraft | K::PrInReview | K::PrMerged => {
             PrState::ALL
@@ -16162,6 +16199,11 @@ mod tests {
                     "{id:?} {state:?}"
                 );
             }
+            assert_eq!(
+                glyph_cell(IconKind::PrLookupFailed).fg,
+                seg_role_color(PrMark::LookupFailed.role(false), pal),
+                "{id:?} lookup failed"
+            );
             // Some themes share a hex between chip roles (the graph pane
             // shares it too); the tag chip always stands apart.
             let colours: HashSet<_> = chips.iter().map(|(_, color)| *color).collect();
@@ -17104,7 +17146,7 @@ mod tests {
     /// A fresh tree badge in `state` with `ref_text`.
     fn tree_badge(state: PrState, ref_text: Option<&str>) -> PrBadge {
         PrBadge {
-            state,
+            mark: PrMark::State(state),
             ref_text: ref_text.map(str::to_string),
             stale: false,
         }
@@ -25357,6 +25399,65 @@ mod tests {
         }
     }
 
+    /// A failed first lookup paints `!` in the last tree column, bold in
+    /// the deleted colour, in both glyph modes and both looks: one icon hit
+    /// one column wide, no ref, no link. A later good answer paints the PR
+    /// badge again; a failure after a good answer keeps that badge.
+    #[test]
+    fn tree_pr_lookup_failed_paints_a_bold_red_bang_at_the_pane_edge() {
+        let palette = ThemeId::TokyoNight.palette();
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            for ascii in [true, false] {
+                let what = format!("{background:?} ascii={ascii}");
+                let mut state = pr_state(
+                    &[branch_repo("app", "feature"), branch_repo("lib", "main")],
+                    ascii,
+                );
+                state.background = background;
+                set_pr(
+                    &mut state,
+                    "app",
+                    "feature",
+                    PrLookup::Failed(Some("HTTP 401".into())),
+                );
+                let mut terminal = pr_ref_terminal();
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                let buf = terminal.backend().buffer();
+                let y = tree_row_y(&state, "repo:app");
+                let edge = state.layout.tree_x + state.layout.tree_width - 1;
+                assert_eq!(buf[(edge, y)].symbol(), "!", "{what}");
+                assert_eq!(buf[(edge, y)].fg, palette.deleted, "{what}");
+                assert!(buf[(edge, y)].modifier.contains(Modifier::BOLD), "{what}");
+                assert_eq!(buf[(edge - 1, y)].symbol(), " ", "{what}: no ref");
+                assert_eq!(
+                    state.layout.pr_badge_hits(),
+                    vec![PrBadgeHit {
+                        y,
+                        x: edge,
+                        width: 1,
+                        repo: PathBuf::from("app"),
+                    }],
+                    "{what}: one hit over the mark"
+                );
+                assert!(state.layout.links.is_empty(), "{what}: no link");
+
+                set_pr(&mut state, "app", "feature", found_pr(PrState::Ready));
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                let ready = if ascii { "A" } else { "◉" };
+                let buf = terminal.backend().buffer();
+                assert_eq!(buf[(edge, y)].symbol(), ready, "{what}: back to the PR");
+                set_pr(&mut state, "app", "feature", PrLookup::Failed(None));
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                let buf = terminal.backend().buffer();
+                assert_eq!(
+                    buf[(edge, y)].symbol(),
+                    ready,
+                    "{what}: a known badge stays"
+                );
+            }
+        }
+    }
+
     /// Every badge glyph shares the last tree column, whatever the ref
     /// width and the marks before it; under 50 columns no row paints a
     /// ref. Only a painted ref links, so a glyph-only badge links nothing.
@@ -25729,13 +25830,12 @@ mod tests {
         assert!(buf[(need_x, y)].modifier.contains(Modifier::BOLD));
     }
 
+    /// No PR badge while the first lookup is in flight or the forge says
+    /// no PR. A failed first lookup paints the failure mark instead
+    /// ([`tree_pr_lookup_failed_paints_a_bold_red_bang_at_the_pane_edge`]).
     #[test]
     fn tree_pr_badge_needs_a_ready_pr() {
-        for (lookup, what) in [
-            (None, "in flight"),
-            (Some(PrLookup::Failed(None)), "failed"),
-            (Some(PrLookup::NoPr), "no PR"),
-        ] {
+        for (lookup, what) in [(None, "in flight"), (Some(PrLookup::NoPr), "no PR")] {
             let mut state = pr_state(&[branch_repo("app", "feature")], true);
             if let Some(lookup) = lookup {
                 set_pr(&mut state, "app", "feature", lookup);
@@ -28802,17 +28902,82 @@ mod tests {
         }
     }
 
+    /// A graph worktree row whose first lookup failed paints `!` flush
+    /// right, bold in the deleted colour: one icon hit, no link. Both glyph
+    /// modes, depth 0 and 1, boxed and flat.
+    #[test]
+    fn graph_worktree_row_paints_the_lookup_failure_mark() {
+        let palette = ThemeId::TokyoNight.palette();
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            for depth_1 in [false, true] {
+                for ascii in [true, false] {
+                    let what = format!("{background:?} depth_1={depth_1} ascii={ascii}");
+                    let mut state = pr_graph_state("app/.worktrees/wt", "feat", false);
+                    state.ascii = ascii;
+                    set_pr(
+                        &mut state,
+                        "app/.worktrees/wt",
+                        "feat",
+                        PrLookup::Failed(Some("HTTP 401".into())),
+                    );
+                    show_graph_at(&mut state, depth_1, background);
+                    let mut terminal = pr_terminal();
+                    terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                    let hits = graph_pane_badge_hits(&state, depth_1);
+                    assert_eq!(hits.len(), 1, "{what}");
+                    let (x0, width) = graph_pane_cols(&state, depth_1);
+                    assert_eq!(hits[0].x, x0 + width - 1, "{what}: flush right");
+                    assert_eq!(hits[0].width, 1, "{what}");
+                    let cell = &terminal.backend().buffer()[(hits[0].x, hits[0].y)];
+                    assert_eq!(cell.symbol(), "!", "{what}");
+                    assert_eq!(cell.fg, palette.deleted, "{what}");
+                    assert!(cell.modifier.contains(Modifier::BOLD), "{what}");
+                    assert!(
+                        !link_covers(&state.layout.links, hits[0].x, hits[0].y),
+                        "{what}: no link"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The header chip of a failed first lookup: `! lookup failed`, then
+    /// `!`, bold red mark and red label, a one-column head, no ref; a good
+    /// answer brings the PR chip back.
+    #[test]
+    fn graph_header_chip_paints_the_lookup_failure_mark() {
+        let palette = ThemeId::TokyoNight.palette();
+        for ascii in [true, false] {
+            let mut state =
+                chip_state_with(PR_REMOTE, PrLookup::Failed(Some("HTTP 401".into())), ascii);
+            let chip = graph_pr_chip(&state, 1_800_000_000).expect("failure chip");
+            assert_eq!(chip.checkout, PathBuf::from("app"));
+            assert_eq!(chip.mark, PrMark::LookupFailed);
+            assert_eq!(chip.head_width, 1);
+            let texts: Vec<String> = chip.candidates.iter().map(chip_text).collect();
+            assert_eq!(texts, ["! lookup failed", "!"], "ascii={ascii}");
+            let spans = &chip.candidates[0].spans;
+            assert_eq!(spans[0].style.fg, Some(palette.deleted));
+            assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+            assert_eq!(spans[2].style.fg, Some(palette.deleted));
+
+            set_pr(&mut state, "app", "feature", found_pr(PrState::Ready));
+            let chip = graph_pr_chip(&state, 1_800_000_000).expect("PR chip");
+            assert_eq!(chip.mark, PrMark::State(PrState::Ready));
+        }
+    }
+
     /// `app` on `feature` with PR `pr` from `remote`, the graph of `app`
     /// loaded with its sync header, and the repo row focused.
     fn chip_state(remote: &str, pr: PullRequest, ascii: bool) -> AppState {
+        chip_state_with(remote, PrLookup::Found(pr), ascii)
+    }
+
+    /// [`chip_state`] with `lookup` landed for `app`.
+    fn chip_state_with(remote: &str, lookup: PrLookup, ascii: bool) -> AppState {
         const HEAD: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let mut state = pr_state(&[branch_repo("app", "feature")], ascii);
-        assert!(state.apply_pr_lookup(
-            Path::new("app"),
-            "feature",
-            Some(remote.into()),
-            PrLookup::Found(pr),
-        ));
+        assert!(state.apply_pr_lookup(Path::new("app"), "feature", Some(remote.into()), lookup,));
         focus_tree_row(&mut state, "repo:app");
         state.graph = Some(GraphModel {
             commits: vec![Commit {

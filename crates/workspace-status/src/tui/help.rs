@@ -1934,7 +1934,8 @@ mod tests {
         ] {
             assert!(help_legend_specs().any(|s| s.kind == kind), "{kind:?}");
         }
-        // The six PR states, in ladder order, under Tree; closed only alerts.
+        // The six PR states, in ladder order, then the lookup failure
+        // mark, under Tree; closed only alerts.
         let pr_rows: Vec<(&str, &str, &str)> = help_legend_specs()
             .filter(|s| s.kind.is_pull_request())
             .map(|s| (s.nerd, s.ascii, s.name))
@@ -1948,6 +1949,7 @@ mod tests {
                 ("◌", "d", "PR draft"),
                 ("○", "P", "PR in review"),
                 ("✓", "m", "PR merged"),
+                ("!", "!", "lookup failed"),
             ]
         );
         for kind in [

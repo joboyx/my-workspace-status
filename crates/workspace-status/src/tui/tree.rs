@@ -1554,6 +1554,39 @@ pub fn pr_badge_kind(state: PrState) -> IconKind {
     }
 }
 
+/// What one PR mark shows: the state of the PR the branch has, or the
+/// failure mark of a lookup that failed with no earlier answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrMark {
+    /// The forge named a PR in this state.
+    State(PrState),
+    /// The last lookup failed and no earlier answer is known
+    /// ([`IconKind::PrLookupFailed`]).
+    LookupFailed,
+}
+
+impl PrMark {
+    /// Catalog kind of this mark: [`pr_badge_kind`] of a state, else
+    /// [`IconKind::PrLookupFailed`] (`!` in both glyph modes). Every PR
+    /// badge surface (tree, graph worktree row, graph header chip) paints
+    /// through this.
+    pub fn kind(self) -> IconKind {
+        match self {
+            Self::State(state) => pr_badge_kind(state),
+            Self::LookupFailed => IconKind::PrLookupFailed,
+        }
+    }
+
+    /// Colour role of this mark: [`pr_badge_role`] of a state, else
+    /// [`SegRole::Deleted`]. A failure mark is never stale.
+    pub fn role(self, stale: bool) -> SegRole {
+        match self {
+            Self::State(state) => pr_badge_role(state, stale),
+            Self::LookupFailed => SegRole::Deleted,
+        }
+    }
+}
+
 /// Narrowest tree (columns) that paints PR refs. A narrower tree paints the
 /// badge glyph alone on every row, so the glyph column stays straight, and
 /// one part of the workspace PR total.
@@ -1566,10 +1599,11 @@ const PR_BADGE_GAP: &str = "  ";
 /// What the PR badge of one tree row paints: `<ref> <glyph>`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrBadge {
-    /// Badge state: picks the glyph and its colour ([`pr_badge_mark`]).
-    pub state: PrState,
+    /// Badge mark: picks the glyph and its colour ([`PrMark::kind`],
+    /// [`PrMark::role`]).
+    pub mark: PrMark,
     /// `#318` (GitHub) or `!12` (GitLab). `None` paints the glyph alone (a
-    /// tree narrower than [`PR_REF_MIN_TREE_COLS`]).
+    /// tree narrower than [`PR_REF_MIN_TREE_COLS`], or the failure mark).
     pub ref_text: Option<String>,
     /// The last successful lookup is old: the glyph paints muted too.
     pub stale: bool,
@@ -1593,7 +1627,9 @@ pub fn pr_badge_repo(row: &VisibleRow) -> Option<&str> {
 /// badge glyph shares one column.
 ///
 /// The ref paints muted and the glyph bold in its state colour
-/// ([`pr_badge_role`]); a stale badge paints both muted. Both segments
+/// ([`PrMark::role`]); a stale badge paints both muted. A failed lookup
+/// with no earlier answer paints the failure mark `!` alone, bold in the
+/// deleted colour. Both segments
 /// carry the badge's [`IconKind`], so hover, pin, Ctrl+click, and the link
 /// cover ref and glyph.
 ///
@@ -1614,9 +1650,9 @@ pub fn with_pr_badge(
     if !paints_branch {
         return None;
     }
-    let kind = pr_badge_kind(badge.state);
+    let kind = badge.mark.kind();
     let glyph = kind.glyph(ascii);
-    let role = pr_badge_role(badge.state, badge.stale);
+    let role = badge.mark.role(badge.stale);
     let trailing = &mut segs.trailing;
     if !trailing.is_empty() {
         trailing.push(text_seg(PR_BADGE_GAP, SegRole::Muted));
@@ -1948,7 +1984,7 @@ mod tests {
     /// A fresh badge in `state` with `ref_text`.
     fn badge(state: PrState, ref_text: Option<&str>) -> PrBadge {
         PrBadge {
-            state,
+            mark: PrMark::State(state),
             ref_text: ref_text.map(str::to_string),
             stale: false,
         }
@@ -2005,8 +2041,38 @@ mod tests {
                         }
                         assert_eq!(pr_badge_mark(ascii, state), (glyph, role), "{what}");
                         assert_eq!(pr_badge_role(state, stale), want, "{what}");
+                        assert_eq!(PrMark::State(state).kind(), kind, "{what}");
+                        assert_eq!(PrMark::State(state).role(stale), want, "{what}");
                     }
                 }
+            }
+        }
+    }
+
+    /// A failed lookup with no earlier answer ends the run with `!` alone,
+    /// bold in the deleted colour, tagged as the failure mark, in both
+    /// glyph modes; it is never muted.
+    #[test]
+    fn pr_lookup_failed_badge_paints_a_bold_red_bang_alone() {
+        for ascii in [false, true] {
+            for stale in [false, true] {
+                let what = format!("ascii={ascii} stale={stale}");
+                let mut segs = NodeSegments {
+                    segments: vec![text_seg("feature", SegRole::BranchFeature)],
+                    trailing: vec![change_count_seg(3)],
+                };
+                let pr = PrBadge {
+                    mark: PrMark::LookupFailed,
+                    ref_text: None,
+                    stale,
+                };
+                let at = with_pr_badge(&mut segs, ascii, Some(&pr)).expect("badge");
+                let texts: Vec<&str> = segs.trailing.iter().map(|seg| seg.text.as_str()).collect();
+                assert_eq!(texts, ["3", "  ", "!"], "{what}");
+                let mark = &segs.trailing[at];
+                assert_eq!(at, segs.trailing.len() - 1, "{what}");
+                assert_eq!(mark.icon, Some(IconKind::PrLookupFailed), "{what}");
+                assert_eq!((mark.role, mark.bold), (SegRole::Deleted, true), "{what}");
             }
         }
     }

@@ -17,9 +17,6 @@ impl AppState {
     /// updates its stored reason (and the text of its toast while that
     /// still shows): no new toast, and a dismissed toast stays dismissed.
     /// Pure state, no I/O.
-    // Allowed until the background jobs report outages: today only tests
-    // call it.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn note_outage(&mut self, source: OutageSource, toast_text: String, now: Instant) {
         match self.outages.fail(source.clone(), toast_text.clone()) {
             OutageNote::Started => self
@@ -33,9 +30,6 @@ impl AppState {
     /// Note that `source` works again: end its outage, drop its toast if
     /// it still shows, and clear its part of the header mark. A source
     /// that was not failing changes nothing.
-    // Allowed until the background jobs report outages: today only tests
-    // call it.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn note_recovered(&mut self, source: &OutageSource) {
         if self.outages.recover(source) {
             self.toasts.drop_outage(source);

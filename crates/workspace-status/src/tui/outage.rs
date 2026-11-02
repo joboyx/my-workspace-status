@@ -59,8 +59,8 @@ impl OutageKind {
 /// One background job source that can fail. The key of an outage: a
 /// source fails or works as a whole.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-// Allowed until the background jobs report outages: today only tests
-// build a source.
+// Allowed until the fetch and watch jobs report outages: today only tests
+// build those two sources.
 #[cfg_attr(not(test), allow(dead_code))]
 pub enum OutageSource {
     /// PR lookups on one forge host through one tool.
@@ -154,6 +154,11 @@ impl Outages {
             outage.dismissed = true;
         }
         any
+    }
+
+    /// The sources that fail now, in [`OutageSource`] order.
+    pub fn sources(&self) -> impl Iterator<Item = &OutageSource> {
+        self.entries.keys()
     }
 
     /// True when no source fails.

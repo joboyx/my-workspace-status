@@ -10093,6 +10093,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A badge lookup job whose CLI fails at launch starts the outage of
+    /// its forge host: one sticky toast naming tool, host, and reason, and
+    /// the failure mark. A failing `r` adds no toast; a good answer ends it.
+    #[test]
+    fn a_failing_pr_lookup_job_toasts_its_host_outage_once_until_it_works() {
+        let (root, mut state) = pr_app("ws-effect-pr-outage", Some("git@github.com:octo/demo.git"));
+        let path = Path::new("app");
+        let mut interp = Interpreter::with_cap(8);
+        let tui_opts = opts(&state);
+        let outage_texts = |state: &AppState| -> Vec<String> {
+            state
+                .toasts
+                .visible(Instant::now())
+                .filter(|(toast, _)| toast.is_outage())
+                .map(|(toast, _)| toast.text.clone())
+                .collect()
+        };
+        interp.pr_cli = gh_fails;
+        interp.queue_due_pr_lookups(&mut state, &tui_opts);
+        drain_jobs(&mut interp, &mut state, 10);
+        assert_eq!(
+            outage_texts(&state),
+            ["gh (github.com): HTTP 401: Bad credentials (https://api.github.com/graphql)"]
+        );
+        assert_eq!(
+            state.pr_mark(path),
+            Some(crate::tui::tree::PrMark::LookupFailed)
+        );
+        assert!(state.status.is_empty(), "the toast, not the status slot");
+
+        let refresh = |interp: &mut Interpreter, state: &mut AppState, cli: PrCliRunner| {
+            interp.pr_cli = cli;
+            let effect = state.dispatch(Action::Refresh);
+            schedule_effect(interp, state, effect, &Action::Refresh);
+            drain_jobs(interp, state, 10);
+        };
+        refresh(&mut interp, &mut state, gh_fails);
+        assert_eq!(outage_texts(&state).len(), 1, "no second toast");
+        refresh(&mut interp, &mut state, gh_approved_pr);
+        assert!(outage_texts(&state).is_empty(), "recovered");
+        assert!(state.outages.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn a_poll_tick_queues_pollable_checkouts_once() {
         let mut state = fixture_state();
