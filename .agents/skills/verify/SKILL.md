@@ -162,6 +162,6 @@ PASS, FAIL (quote what you saw), or SKIP (name the missing precondition). Never 
 | [pr-status](features/pr-status.md) | PR badge states on both forges, `gx` and `gc`, a scripted transition, a failing CLI, the per-host lookup outage and failure mark, live recipe |
 | [tree-and-graph](features/tree-and-graph.md) | Badges in the tree and the graph pane, glyph column at wide and narrow widths |
 | [popovers](features/popovers.md) | The PR popover: lines, actions, `gc` and `r` from it; the commit popovers (hash card, time, author) by mouse hover and click |
-| [prs-tab](features/prs-tab.md) | The PRs tab (`gp`): group and row order, detail, `z` / `Z` folds, Enter / `gc` / `o` / `Ctrl-w`, narrow layout, a failing CLI, the empty state, the title command, Nerd glyphs |
+| [prs-tab](features/prs-tab.md) | The PRs tab (`gp`): group and row order, detail, `z` / `Z` folds, Enter / `gc` / `o` / `Ctrl-w`, narrow layout, a failing CLI and its outage toast, the empty state, the title command, Nerd glyphs |
 
-Each feature file lists steps, the screen text to expect, and what counts as PASS. Every check needs the PR status visuals (six states, ref beside the glyph, `gc`, polling, toasts), the `prs-tab` checks need the PRs tab, and PO3 needs the commit popovers; on an older build they are SKIP.
+Each feature file lists steps, the screen text to expect, and what counts as PASS. Every check needs the PR status visuals (six states, ref beside the glyph, `gc`, polling, toasts), the `prs-tab` checks need the PRs tab, PO3 needs the commit popovers, and PS7, PS9 and PT7 need the outage toast and the header failure mark; on an older build they are SKIP.

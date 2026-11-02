@@ -29,7 +29,7 @@ Expect on `tree-wide` (5 rows with a badge, each ending in `<ref> <glyph>` after
 | `merger` worktree | `L feature/reconciliation` ... `#12 m` |
 | `services/api` | `feature/rate-limit` ... `!5 A` |
 
-The `lib` row (local remote, no forge) has no badge.
+The `lib` row (local remote, no forge) has no badge. A checkout whose first lookup failed shows the failure mark `!` alone in the badge column instead: [pr-status.md](pr-status.md), PS9.
 
 **PASS:** the badges are on the rows above in the captured screen; the graph shows commits of `app` (`Add token refresh window`) when the cursor is on the `app` row; `Tab` moves the focus bar into the graph and the second `Tab` back.
 

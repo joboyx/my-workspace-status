@@ -137,15 +137,18 @@ $V keys "$RUN" Escape && $V wait "$RUN" 'v ABC-120 · m merged' && $V wait --gon
 fresh prs-tab gitlab-cli-fails -- --fake-forge "$FORGE"
 $V wait --regex "$RUN" '#12 m($|[^[:alnum:]])'
 $V keys "$RUN" g p
+$V wait "$RUN" 'glab (gitlab.com): glab: HTTP 502 · Esc dismiss' && $V wait "$RUN" 'PR lookup failed'   # the outage toast and header mark
+$V keys "$RUN" Escape && $V wait --gone "$RUN" 'Esc dismiss'   # the toast paints over the bottom-right rows
 $V wait "$RUN" '! glab (gitlab.com): glab: HTTP 502' && $V wait "$RUN" 'lookups failing' && $V wait "$RUN" 'PRs 3'
 $V capture "$RUN" glab-fails | grep -c '!5   acme'       # 0
 $V scenario "$FORGE" prs-tab                              # glab answers again (overlay)
 $V keys "$RUN" r
 $V wait "$RUN" '!5   acme' && $V wait --gone "$RUN" '! glab (gitlab.com)' && $V wait --gone "$RUN" 'lookups failing'
+$V wait --gone "$RUN" 'PR lookup failed'
 $V capture "$RUN" glab-back
 ```
 
-**PASS:** the `glab-fails` capture shows the line `! glab (gitlab.com): glab: HTTP 502` above the groups, the label `PRs 3`, the rows `#7`, `#8` and `#12`, no `!5` row (the count prints `0`), and the first header ends in `checked just now · lookups failing`. After the swap, `r` on the tab brings `!5` back and the error line and `lookups failing` go.
+**PASS:** the `glab` outage toast and the header mark `PR lookup failed` show, and Esc dismisses the toast and does nothing else (the tab and its cursor stay). The `glab-fails` capture shows the line `! glab (gitlab.com): glab: HTTP 502` above the groups, the header mark, the label `PRs 3`, the rows `#7`, `#8` and `#12`, no `!5` row (the count prints `0`), and the first header ends in `checked just now · lookups failing`. After the swap, `r` on the tab brings `!5` back, and the error line, `lookups failing`, and the header mark go.
 
 ## PT8 Empty state
 
