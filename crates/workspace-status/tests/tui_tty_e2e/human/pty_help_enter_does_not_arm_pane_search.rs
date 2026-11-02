@@ -25,7 +25,7 @@ fn pane_search_prompt(screen: &str) -> bool {
 }
 
 /// First painted row of the Esc help entry (`back / unfocus · right-click ·
-/// never quit`), which matches `/quit`. The VIEW column wraps `quit` onto
+/// never quit · dismiss failure`), which matches `/quit`. The VIEW column wraps `quit` onto
 /// its own row at the default size, so the needle is the part that stays
 /// on the first row; the search highlights the whole entry.
 const ESC_QUIT_ROW: &str = "right-click · never";

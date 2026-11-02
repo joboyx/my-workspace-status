@@ -28,12 +28,15 @@ pub const POLL_MS: &str = "300";
 pub const MUTED: (u8, u8, u8) = (0x9a, 0xa5, 0xce);
 /// Tokyo Night `modified`: the `need you` part of the workspace total.
 pub const MODIFIED: (u8, u8, u8) = (0xe0, 0xaf, 0x68);
+/// Tokyo Night `deleted` (red): the PR lookup failure mark `!`, and the
+/// CI failed glyph, which paints in the same role.
+pub const DELETED: (u8, u8, u8) = (0xf7, 0x76, 0x8e);
 
 /// Tokyo Night colour of the badge glyph in `badge`: red failed, green
 /// ready, amber running, muted draft, blue in review, purple merged.
 pub fn glyph_colour(badge: Badge) -> (u8, u8, u8) {
     match badge {
-        Badge::CiFailed => (0xf7, 0x76, 0x8e),
+        Badge::CiFailed => DELETED,
         Badge::Ready => (0x9e, 0xce, 0x6a),
         Badge::CiRunning => (0xe0, 0xaf, 0x68),
         Badge::Draft => MUTED,

@@ -9,7 +9,6 @@ use super::super::gates::ListFocusTarget;
 use super::super::icons::comment_mark_cols;
 use super::super::search::{apply_pan, list_row_pan_max, max_col_offset};
 use super::super::split::diff_paint_width;
-use super::super::tree::pr_badge_mark;
 use super::{AppState, FocusPane};
 use crate::helpers::visible_width;
 
@@ -155,7 +154,7 @@ impl AppState {
         let badges: Vec<(usize, &str, Color)> = self
             .graph_pr_badges()
             .into_iter()
-            .map(|(index, _, pr)| (index, pr_badge_mark(self.ascii, pr).0, Color::Reset))
+            .map(|(index, _, mark)| (index, mark.kind().glyph(self.ascii), Color::Reset))
             .collect();
         graph_col_max(
             model,

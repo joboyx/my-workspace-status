@@ -1,4 +1,8 @@
 //! Live snapshot poll. `WS_STATUS_WATCH_MS=0` disables.
+//!
+//! A checkout whose `git status` failed shows as the live-refresh outage
+//! ([`super::outage::OutageSource::LiveRefresh`]), with the toast text from
+//! [`live_refresh_failure_text`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -7,6 +11,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use workspace_status_graph::{GraphModel, GraphRow};
 
+use crate::helpers::STATUS_FAILED_NOTE;
 use crate::snapshot::WorkspaceRepoSnapshot;
 #[cfg(test)]
 use crate::snapshot::WorkspaceSnapshot;
@@ -90,6 +95,24 @@ pub fn checkout_watch_identity(repo: &WorkspaceRepoSnapshot) -> String {
         repo.head,
         dirty.join(";"),
     )
+}
+
+/// Outage toast text of the live-refresh poll for the checkout rows the
+/// tree shows (`repos`, in snapshot order): `git status (<repo>): status
+/// failed` for the first row whose `git status` failed
+/// ([`STATUS_FAILED_NOTE`]), then ` +<n> more` when more rows failed.
+/// `None` when no row failed.
+pub fn live_refresh_failure_text(repos: &[WorkspaceRepoSnapshot]) -> Option<String> {
+    let mut failed = repos
+        .iter()
+        .filter(|repo| repo.sync_note == STATUS_FAILED_NOTE);
+    let first = failed.next()?;
+    let more = failed.count();
+    let mut text = format!("git status ({}): {STATUS_FAILED_NOTE}", first.repo);
+    if more > 0 {
+        text.push_str(&format!(" +{more} more"));
+    }
+    Some(text)
 }
 
 #[cfg(test)]
@@ -567,9 +590,57 @@ mod tests {
     use super::super::tree::NodeChrome;
     use super::*;
     use crate::git::UpstreamRewrite;
-    use crate::snapshot::{CheckoutKind, FileChange, SyncStatus, WorkspaceRepoSnapshot};
+    use crate::snapshot::{
+        build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
+        WorkspaceRepoSnapshot,
+    };
     use std::path::PathBuf;
     use workspace_status_graph::{Commit, GraphRef, Stash, Worktree};
+
+    /// A checkout row with `note` as its sync note.
+    fn status_row(name: &str, note: &str) -> RepoSnapshot {
+        RepoSnapshot {
+            repo: name.into(),
+            branch: "main".into(),
+            sync_status: SyncStatus::NoUpstream,
+            sync_note: note.into(),
+            upstream_rewrite: None,
+            head: String::new(),
+            has_unstaged: false,
+            has_staged: false,
+            has_untracked: false,
+            changes: Vec::new(),
+            checkout_kind: CheckoutKind::Primary,
+            primary_repo: None,
+            merged_into_default: None,
+            default_branch_override: None,
+            default_tip_ref: None,
+            default_branch: None,
+            local_branches: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn live_refresh_failure_text_names_the_first_failed_row_and_counts_the_rest() {
+        let text = |rows: &[RepoSnapshot]| {
+            live_refresh_failure_text(&build_workspace_snapshot(rows, &[], false, &[]).repos)
+        };
+        assert_eq!(text(&[status_row("app", "no commits yet")]), None);
+        assert_eq!(
+            text(&[status_row("lib", STATUS_FAILED_NOTE), status_row("app", "")]).as_deref(),
+            Some("git status (lib): status failed")
+        );
+        assert_eq!(
+            text(&[
+                status_row("web", STATUS_FAILED_NOTE),
+                status_row("app", STATUS_FAILED_NOTE),
+                status_row("lib", STATUS_FAILED_NOTE),
+            ])
+            .as_deref(),
+            Some("git status (app): status failed +2 more"),
+            "snapshot order, the tree order"
+        );
+    }
 
     fn modified_file_row(repo: &str, path: &str) -> VisibleRow {
         VisibleRow {

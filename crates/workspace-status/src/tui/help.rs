@@ -152,7 +152,7 @@ macro_rules! view_group {
                 },
                 HelpEntry {
                     keys: "Esc",
-                    desc: "back / unfocus · right-click · never quit",
+                    desc: "back / unfocus · right-click · never quit · dismiss failure",
                 },
                 HelpEntry {
                     keys: "Enter dblclick",
@@ -244,7 +244,7 @@ pub const HELP_EXPLORER_VIEW_GROUP: HelpGroup = HelpGroup {
         },
         HelpEntry {
             keys: "Esc",
-            desc: "clear search · back to tree · never quit",
+            desc: "clear search · back to tree · never quit · dismiss failure",
         },
         HelpEntry {
             keys: ": Ctrl-p F",
@@ -663,7 +663,7 @@ pub const HELP_PRS_VIEW_GROUP: HelpGroup = HelpGroup {
         },
         HelpEntry {
             keys: "Esc",
-            desc: "detail back to list · never quit",
+            desc: "detail back to list · never quit · dismiss failure",
         },
         HelpEntry {
             keys: ": Ctrl-p F",
@@ -1934,7 +1934,8 @@ mod tests {
         ] {
             assert!(help_legend_specs().any(|s| s.kind == kind), "{kind:?}");
         }
-        // The six PR states, in ladder order, under Tree; closed only alerts.
+        // The six PR states, in ladder order, then the lookup failure
+        // mark, under Tree; closed only alerts.
         let pr_rows: Vec<(&str, &str, &str)> = help_legend_specs()
             .filter(|s| s.kind.is_pull_request())
             .map(|s| (s.nerd, s.ascii, s.name))
@@ -1948,6 +1949,7 @@ mod tests {
                 ("◌", "d", "PR draft"),
                 ("○", "P", "PR in review"),
                 ("✓", "m", "PR merged"),
+                ("!", "!", "lookup failed"),
             ]
         );
         for kind in [

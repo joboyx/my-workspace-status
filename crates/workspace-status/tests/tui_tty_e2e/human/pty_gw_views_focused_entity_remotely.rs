@@ -90,7 +90,8 @@ fn opened(marker: &Path) -> Vec<String> {
 /// more commit (`ahead-tip-commit`, not pushed). `origin` is then pointed
 /// at a GitHub URL, so `refs/remotes/origin/main` stays on the seed and no
 /// test touches the network. `$BROWSER` is a shim that appends its URL to
-/// a marker file; `gh` / `glab` shims fail, so badge lookups find nothing.
+/// a marker file; `gh` / `glab` shims answer an empty list, so badge
+/// lookups find no PR.
 #[test]
 fn pty_gw_views_focused_entity_remotely() {
     let (root, workspace) = ahead_workspace();
@@ -108,8 +109,10 @@ fn pty_gw_views_focused_entity_remotely() {
         "rec",
         &format!("printf '%s\\n' \"$1\" >> '{}'\n", marker.display()),
     );
-    shim(&shim_dir, "gh", "exit 1\n");
-    shim(&shim_dir, "glab", "exit 1\n");
+    // An empty list: no PR. A failing CLI would raise the PR lookup
+    // outage toast over the pinned popover.
+    shim(&shim_dir, "gh", "printf '[]\\n'\n");
+    shim(&shim_dir, "glab", "printf '[]\\n'\n");
     let browser = format!("{} %s", shim_dir.join("rec").display());
     let path = format!(
         "{}:{}",

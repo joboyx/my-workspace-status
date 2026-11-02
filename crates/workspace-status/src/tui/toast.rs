@@ -1,16 +1,21 @@
-//! Toast stack: one-shot acks (`copied`, `Fetched 3 repos`) and PR change
-//! alerts (`✕ #318 CI failed · test (ubuntu-latest)`) shown in the
-//! bottom-right corner of the panes, fading out through the add-flash ramp.
+//! Toast stack: one-shot acks (`copied`, `Fetched 3 repos`), PR change
+//! alerts (`✕ #318 CI failed · test (ubuntu-latest)`), and background job
+//! outages (`✕ glab (gitlab.com): invalid_token · Esc dismiss`) shown in
+//! the bottom-right corner of the panes.
 //!
 //! [`super::state::AppState::route_ack_to_toast`] moves a
 //! [`super::status::StatusKind::Ok`] status here at the top of each draw.
 //! [`super::state::AppState::alert_pr_transitions`] pushes the PR change
-//! toasts. Errors, warnings, progress, and info notes stay in the status
-//! slot.
+//! toasts. Acks and PR changes fade out after their time. A background job
+//! that starts to fail pushes one sticky outage toast ([`Toast::outage`],
+//! `AppState::note_outage`): it never fades, and it stays until Esc
+//! dismisses it or the job works again. Foreground errors, warnings,
+//! progress, and info notes stay in the status slot.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use super::outage::{outage_glyph, OutageSource};
 use super::tree::SegRole;
 use super::watch::FLASH_MS;
 
@@ -24,8 +29,13 @@ pub const PR_TOAST_TTL_MS: u64 = 8000;
 /// drops from 1.0 to 0.0 over this window, whatever the toast's TTL.
 pub const TOAST_FADE_MS: u64 = FLASH_MS;
 
-/// Most toasts on screen at once. A push past it drops the oldest.
+/// Most acks and PR change toasts on screen at once. A push past it drops
+/// the oldest of them. Outage toasts do not count against it and are never
+/// dropped for room: there is at most one per outage.
 pub const TOAST_MAX: usize = 3;
+
+/// The muted detail of an outage toast: the key that dismisses it.
+pub const OUTAGE_DISMISS_HINT: &str = "Esc dismiss";
 
 /// The mark a toast paints before its text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,10 +62,15 @@ pub struct Toast {
     /// Colour role of the text: [`SegRole::Repo`], or [`SegRole::Muted`]
     /// for a summary.
     pub role: SegRole,
-    /// How long the toast shows, fade included (ms).
+    /// How long the toast shows, fade included (ms). An outage toast has
+    /// no time: it ignores this.
     pub ttl_ms: u64,
     /// When the toast was pushed. Its TTL counts from here.
     pub at: Instant,
+    /// The outage this toast reports, for an outage toast: it never fades
+    /// or expires, and it goes only through
+    /// [`ToastStack::dismiss_outages`] or [`ToastStack::drop_outage`].
+    pub outage: Option<OutageSource>,
 }
 
 impl Toast {
@@ -69,17 +84,43 @@ impl Toast {
             role: SegRole::Repo,
             ttl_ms: TOAST_TTL_MS,
             at,
+            outage: None,
         }
     }
 
+    /// The sticky toast of `source`'s outage, pushed at `at`: the failure
+    /// mark (`✕`, ASCII `x`) and `text` in the deleted colour, then the
+    /// muted [`OUTAGE_DISMISS_HINT`].
+    pub fn outage(source: OutageSource, text: impl Into<String>, ascii: bool, at: Instant) -> Self {
+        Self {
+            mark: ToastMark::Glyph(outage_glyph(ascii), SegRole::Deleted),
+            text: text.into(),
+            detail: OUTAGE_DISMISS_HINT.to_string(),
+            role: SegRole::Deleted,
+            ttl_ms: 0,
+            at,
+            outage: Some(source),
+        }
+    }
+
+    /// True for an outage toast ([`Self::outage`]).
+    pub fn is_outage(&self) -> bool {
+        self.outage.is_some()
+    }
+
     /// Fade strength at `now`: 1.0 until the last [`TOAST_FADE_MS`] of its
-    /// TTL, then linear down to 0.0 at the TTL.
+    /// TTL, then linear down to 0.0 at the TTL. An outage toast is always
+    /// 1.0.
     pub fn strength(&self, now: Instant) -> f32 {
+        if self.is_outage() {
+            return 1.0;
+        }
         toast_strength(now.saturating_duration_since(self.at), self.ttl_ms)
     }
 }
 
-/// Live toasts, oldest first. At most [`TOAST_MAX`].
+/// Live toasts, oldest first: at most [`TOAST_MAX`] acks and PR change
+/// toasts, plus one toast per outage.
 #[derive(Clone, Debug, Default)]
 pub struct ToastStack {
     items: VecDeque<Toast>,
@@ -87,21 +128,27 @@ pub struct ToastStack {
 
 impl ToastStack {
     /// Add an acknowledgement pushed at `now` ([`Toast::ack`]). Drops the
-    /// oldest past [`TOAST_MAX`].
+    /// oldest ack or PR change toast past [`TOAST_MAX`].
     pub fn push(&mut self, text: impl Into<String>, now: Instant) {
         self.push_with(Toast::ack(text, now));
     }
 
-    /// Add `toast`, pushed at its `at`. Drops the oldest past
-    /// [`TOAST_MAX`], whatever its kind.
+    /// Add `toast`, pushed at its `at`. When more than [`TOAST_MAX`] acks
+    /// and PR change toasts are held, it drops the oldest of them. Outage
+    /// toasts do not count and stay, so they never take the room of a new
+    /// ack.
     pub fn push_with(&mut self, toast: Toast) {
         self.items.push_back(toast);
-        while self.items.len() > TOAST_MAX {
-            self.items.pop_front();
+        while self.items.iter().filter(|held| !held.is_outage()).count() > TOAST_MAX {
+            let Some(index) = self.items.iter().position(|held| !held.is_outage()) else {
+                break;
+            };
+            self.items.remove(index);
         }
     }
 
-    /// Drop every toast whose own TTL has run out at `now`.
+    /// Drop every toast whose own TTL has run out at `now`. Outage toasts
+    /// stay.
     pub fn prune(&mut self, now: Instant) {
         self.items.retain(|toast| toast.strength(now) > 0.0);
     }
@@ -109,6 +156,34 @@ impl ToastStack {
     /// True when no toast is held.
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    /// True when an outage toast is held.
+    pub fn has_outage(&self) -> bool {
+        self.items.iter().any(Toast::is_outage)
+    }
+
+    /// Drop every outage toast (Esc). True when one was held.
+    pub fn dismiss_outages(&mut self) -> bool {
+        let held = self.items.len();
+        self.items.retain(|toast| !toast.is_outage());
+        self.items.len() != held
+    }
+
+    /// Drop the toast of `source`'s outage, if it is held.
+    pub fn drop_outage(&mut self, source: &OutageSource) {
+        self.items
+            .retain(|toast| toast.outage.as_ref() != Some(source));
+    }
+
+    /// Show `text` in the held toast of `source`'s outage, in place: no
+    /// new toast, and no toast comes back once dismissed.
+    pub fn set_outage_text(&mut self, source: &OutageSource, text: &str) {
+        for toast in &mut self.items {
+            if toast.outage.as_ref() == Some(source) {
+                toast.text = text.to_string();
+            }
+        }
     }
 
     /// Toasts still showing at `now`, oldest first, each with its fade
@@ -138,10 +213,11 @@ pub enum ToastTick {
 impl ToastStack {
     /// What the loop must do after a frame painted at `now`, from each
     /// toast's own TTL. `no_color` toasts have no fade, so they only wake
-    /// at their expiry.
+    /// at their expiry. An outage toast never changes on its own: it asks
+    /// for no redraw.
     pub fn next_tick(&self, now: Instant, no_color: bool) -> ToastTick {
         let mut wake: Option<u64> = None;
-        for toast in &self.items {
+        for toast in self.items.iter().filter(|toast| !toast.is_outage()) {
             let age = now.saturating_duration_since(toast.at).as_millis() as u64;
             if age >= toast.ttl_ms {
                 continue;
@@ -190,7 +266,154 @@ mod tests {
             role: SegRole::Repo,
             ttl_ms: PR_TOAST_TTL_MS,
             at,
+            outage: None,
         }
+    }
+
+    /// The outage toast of the `gitlab.com` PR lookups, pushed at `at`.
+    fn outage_toast(host: &str, at: Instant) -> Toast {
+        Toast::outage(
+            OutageSource::PrLookup {
+                tool: "glab",
+                host: host.into(),
+            },
+            format!("glab ({host}): invalid_token"),
+            false,
+            at,
+        )
+    }
+
+    fn texts(stack: &ToastStack, now: Instant) -> Vec<String> {
+        stack
+            .visible(now)
+            .map(|(toast, _)| toast.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn an_outage_toast_never_fades_never_prunes_and_asks_for_no_wake() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut stack = ToastStack::default();
+        stack.push_with(outage_toast("gitlab.com", t0));
+        let toast = stack.visible(t0).next().unwrap().0.clone();
+        assert_eq!(toast.mark, ToastMark::Glyph("✕", SegRole::Deleted));
+        assert_eq!(toast.role, SegRole::Deleted);
+        assert_eq!(toast.detail, OUTAGE_DISMISS_HINT);
+        assert_eq!(
+            Toast::outage(OutageSource::ScheduledFetch, "f", true, t0).mark,
+            ToastMark::Glyph("x", SegRole::Deleted),
+            "ASCII glyph mode"
+        );
+        let late = at(PR_TOAST_TTL_MS * 100);
+        assert_eq!(
+            stack.visible(late).map(|(_, s)| s).collect::<Vec<_>>(),
+            [1.0],
+            "full strength long after any TTL"
+        );
+        stack.prune(late);
+        assert!(stack.has_outage(), "not pruned");
+        for no_color in [false, true] {
+            assert_eq!(stack.next_tick(t0, no_color), ToastTick::Idle);
+            assert_eq!(stack.next_tick(late, no_color), ToastTick::Idle);
+        }
+        // Beside an ack, the stack wakes for the ack only.
+        stack.push("copied", t0);
+        assert_eq!(
+            stack.next_tick(t0, false),
+            ToastTick::WakeIn(TOAST_TTL_MS - TOAST_FADE_MS)
+        );
+        stack.prune(at(TOAST_TTL_MS));
+        assert_eq!(
+            texts(&stack, at(TOAST_TTL_MS)),
+            ["glab (gitlab.com): invalid_token"]
+        );
+        assert_eq!(stack.next_tick(at(TOAST_TTL_MS), false), ToastTick::Idle);
+    }
+
+    #[test]
+    fn outage_toasts_take_no_ack_room_and_are_never_evicted() {
+        let t0 = Instant::now();
+        let mut stack = ToastStack::default();
+        stack.push_with(outage_toast("a.example", t0));
+        stack.push("copied", t0);
+        stack.push_with(pr_toast("#1 CI failed", t0));
+        stack.push("staged README.md", t0);
+        assert_eq!(
+            texts(&stack, t0),
+            [
+                "glab (a.example): invalid_token",
+                "copied",
+                "#1 CI failed",
+                "staged README.md"
+            ],
+            "the outage toast takes none of the 3 ack and PR slots"
+        );
+        stack.push("Fetched 2 repos", t0);
+        assert_eq!(
+            texts(&stack, t0),
+            [
+                "glab (a.example): invalid_token",
+                "#1 CI failed",
+                "staged README.md",
+                "Fetched 2 repos"
+            ],
+            "the oldest ack or PR toast goes, the outage toast stays"
+        );
+        stack.push_with(outage_toast("b.example", t0));
+        stack.push_with(outage_toast("c.example", t0));
+        assert_eq!(texts(&stack, t0).len(), 6, "no toast goes for an outage");
+        stack.push("copied", t0);
+        assert_eq!(
+            texts(&stack, t0),
+            [
+                "glab (a.example): invalid_token",
+                "staged README.md",
+                "Fetched 2 repos",
+                "glab (b.example): invalid_token",
+                "glab (c.example): invalid_token",
+                "copied"
+            ],
+            "three outage toasts: a new ack is still held"
+        );
+    }
+
+    #[test]
+    fn outage_toasts_dismiss_drop_and_update_in_place() {
+        let t0 = Instant::now();
+        let source = |host: &str| OutageSource::PrLookup {
+            tool: "glab",
+            host: host.into(),
+        };
+        let mut stack = ToastStack::default();
+        assert!(!stack.dismiss_outages(), "nothing to dismiss");
+        stack.push_with(outage_toast("a.example", t0));
+        stack.push_with(outage_toast("b.example", t0));
+        stack.push("copied", t0);
+        stack.set_outage_text(&source("a.example"), "glab (a.example): HTTP 401");
+        assert_eq!(
+            texts(&stack, t0),
+            [
+                "glab (a.example): HTTP 401",
+                "glab (b.example): invalid_token",
+                "copied"
+            ]
+        );
+        stack.drop_outage(&source("a.example"));
+        assert_eq!(
+            texts(&stack, t0),
+            ["glab (b.example): invalid_token", "copied"]
+        );
+        assert!(stack.has_outage());
+        assert!(stack.dismiss_outages());
+        assert!(!stack.has_outage());
+        assert_eq!(texts(&stack, t0), ["copied"], "other toasts stay");
+        stack.set_outage_text(&source("b.example"), "glab (b.example): HTTP 401");
+        assert_eq!(
+            texts(&stack, t0),
+            ["copied"],
+            "a dismissed toast stays gone"
+        );
     }
 
     #[test]

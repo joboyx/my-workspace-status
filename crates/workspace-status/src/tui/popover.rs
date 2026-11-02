@@ -51,7 +51,7 @@ use super::pull_request::{PrReview, PullRequestDetail, ReviewCount};
 use super::state::{AppState, PrDetailState};
 use super::tree::{
     file_change_from_name_status, find_node, is_merge_mark_kind, path_under_dir, pr_badge_kind,
-    pr_badge_mark, NodeKind, NodeSegments, SegRole, TextSeg, TreeNode, VisibleRow,
+    pr_badge_mark, NodeKind, NodeSegments, PrMark, SegRole, TextSeg, TreeNode, VisibleRow,
 };
 
 /// Pointer rest on an icon before its peek opens, in milliseconds.
@@ -1369,7 +1369,9 @@ pub const PR_COPY_URL_TITLE: &str = "Copy URL";
 ///
 /// [`CiLinkKind::label`]: super::pr_status::CiLinkKind::label
 fn pr_section(state: &AppState, repo: &Path, now_unix: i64) -> Option<PopoverSection> {
-    let pr = state.pull_request_for(repo)?;
+    let Some(pr) = state.pull_request_for(repo) else {
+        return pr_lookup_failed_section(state, repo, now_unix);
+    };
     let (_, role) = pr_badge_mark(state.ascii, pr.state);
     let detail = match state.pull_request_detail_for(repo) {
         Some(PrDetailState::Ready(detail)) => Some(detail),
@@ -1404,6 +1406,32 @@ fn pr_section(state: &AppState, repo: &Path, now_unix: i64) -> Option<PopoverSec
         role,
         target: IconTarget::PullRequest(repo.to_path_buf()),
         title: Some(format!("PR · {}", pr.state.label())),
+        lines,
+    })
+}
+
+/// Section of the failure mark of checkout `repo`: its last PR lookup
+/// failed and no earlier answer is known ([`PrMark::LookupFailed`]).
+/// `! PR · lookup failed`, the `checked` line with the CLI's reason, a
+/// rule, and Refresh this PR. `None` for any other checkout.
+fn pr_lookup_failed_section(
+    state: &AppState,
+    repo: &Path,
+    now_unix: i64,
+) -> Option<PopoverSection> {
+    if state.pr_mark(repo)? != PrMark::LookupFailed {
+        return None;
+    }
+    let mut lines: Vec<PopoverLine> = pr_checked_field(state, repo, now_unix)
+        .into_iter()
+        .collect();
+    lines.push(PopoverLine::Rule);
+    lines.extend(PopoverLine::action(&Action::RefreshPullRequest).map(|line| line.with_keys("r")));
+    Some(PopoverSection {
+        icon: PrMark::LookupFailed.kind(),
+        role: PrMark::LookupFailed.role(false),
+        target: IconTarget::PullRequest(repo.to_path_buf()),
+        title: Some("PR · lookup failed".into()),
         lines,
     })
 }
@@ -3334,6 +3362,57 @@ mod tests {
                     assert!(lines.contains(&want.to_string()), "{remote}: {lines:?}");
                     assert_eq!(style_of(&section, want), (SegRole::Modified, 0));
                 }
+            }
+        }
+
+        #[test]
+        fn a_failed_first_lookup_pins_the_failure_section_with_its_reason() {
+            for (remote, pr) in forges(PrState::InReview) {
+                let snapshot =
+                    build_workspace_snapshot(&[checkout("c0", &pr.head)], &[], false, &[]);
+                let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+                let _ = app.due_pr_lookups();
+                let target = (
+                    IconKind::PrLookupFailed,
+                    IconTarget::PullRequest(PathBuf::from("c0")),
+                );
+                assert!(
+                    popover_sections(&app, std::slice::from_ref(&target), unix_now()).is_empty(),
+                    "{remote}: no section while the first lookup runs"
+                );
+                assert!(app.apply_pr_lookup(
+                    Path::new("c0"),
+                    &pr.head,
+                    Some(remote.into()),
+                    PrLookup::Failed(Some("HTTP 401: Bad credentials".into())),
+                ));
+                let section = popover_sections(&app, std::slice::from_ref(&target), unix_now())
+                    .pop()
+                    .expect("the failure mark has a section");
+                assert_eq!(section.icon, IconKind::PrLookupFailed, "{remote}");
+                assert_eq!(section.role, SegRole::Deleted, "{remote}");
+                assert_eq!(section.title.as_deref(), Some("PR · lookup failed"));
+                assert_eq!(
+                    texts(&section),
+                    [
+                        "checked: last lookup failed: HTTP 401: Bad credentials",
+                        "---",
+                        "[Refresh this PR] r",
+                    ],
+                    "{remote}"
+                );
+
+                // A good answer replaces the failure section with the PR's.
+                assert!(app.apply_pr_lookup(
+                    Path::new("c0"),
+                    &pr.head,
+                    Some(remote.into()),
+                    PrLookup::Found(pr.clone()),
+                ));
+                let section = popover_sections(&app, &[target], unix_now())
+                    .pop()
+                    .expect("the PR section");
+                assert_eq!(section.title.as_deref(), Some("PR · in review"));
             }
         }
 

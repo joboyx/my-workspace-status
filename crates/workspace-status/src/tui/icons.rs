@@ -75,6 +75,9 @@ pub enum IconKind {
     PrInReview,
     /// Pull request merged.
     PrMerged,
+    /// The PR lookup of the branch failed and no earlier answer is known:
+    /// the failure mark in the PR badge column.
+    PrLookupFailed,
     /// Pull request closed without a merge. Only change alerts paint it:
     /// a closed PR shows no badge.
     PrClosed,
@@ -237,7 +240,8 @@ impl IconKind {
         self.spec().glyph(ascii)
     }
 
-    /// True for the PR state kinds: the six badge states and closed.
+    /// True for the PR marks: the six badge states, the lookup failure
+    /// mark, and closed.
     pub fn is_pull_request(self) -> bool {
         matches!(
             self,
@@ -247,6 +251,7 @@ impl IconKind {
                 | Self::PrDraft
                 | Self::PrInReview
                 | Self::PrMerged
+                | Self::PrLookupFailed
                 | Self::PrClosed
         )
     }
@@ -389,6 +394,17 @@ pub const ICON_CATALOG: &[IconSpec] = {
             "m",
             "PR merged",
             "Pull request is merged",
+            TREE,
+        ),
+        // `!` in both glyph modes. ASCII status failed is `!` too; the two
+        // never share a row: a checkout whose `git status` failed has no
+        // known branch, so it has no PR lookup.
+        row(
+            K::PrLookupFailed,
+            "!",
+            "!",
+            "lookup failed",
+            "PR lookup failed; no earlier answer",
             TREE,
         ),
         // Change alerts only: a closed PR shows no badge.
@@ -1586,12 +1602,27 @@ mod tests {
         IconKind::PrMerged,
     ];
 
+    /// The six badge states and the lookup failure mark: every mark the PR
+    /// badge column paints.
+    const PR_MARKS: [IconKind; 7] = [
+        IconKind::PrCiFailed,
+        IconKind::PrReady,
+        IconKind::PrCiRunning,
+        IconKind::PrDraft,
+        IconKind::PrInReview,
+        IconKind::PrMerged,
+        IconKind::PrLookupFailed,
+    ];
+
     /// Glyphs that paint in the same place differ in both modes. A pair
     /// that shares a glyph (ASCII `#` workspace and Staged, `~` hidden and
     /// Changes, `o` open-vs-default and graph uncommitted, `○` PR in review
     /// and graph uncommitted) sits in different contexts, where position
     /// tells them apart: the PR mark sits flush right on a worktree row or
-    /// in the sync header chip, the uncommitted glyph in the gutter.
+    /// in the sync header chip, the uncommitted glyph in the gutter. The PR
+    /// lookup failure mark and ASCII status failed share `!` but never one
+    /// row: a checkout whose `git status` failed has no known branch, so no
+    /// PR lookup.
     #[test]
     fn glyphs_are_unique_within_one_paint_context() {
         use IconKind as K;
@@ -1617,14 +1648,26 @@ mod tests {
             &PR_BADGES,
         ]
         .concat();
-        let sync_header = [&[K::Ahead, K::Behind][..], &PR_BADGES].concat();
+        // A failed PR lookup needs a known branch, so status failed is not
+        // on that row.
+        let lookup_failed_row: Vec<IconKind> = checkout_row
+            .iter()
+            .copied()
+            .filter(|kind| *kind != K::StatusFailed)
+            .chain([K::PrLookupFailed])
+            .collect();
+        let sync_header = [&[K::Ahead, K::Behind][..], &PR_MARKS].concat();
         let toast = [&PR_BADGES[..], &[K::PrClosed]].concat();
-        let contexts: [(&str, &[IconKind]); 10] = [
+        let contexts: [(&str, &[IconKind]); 11] = [
             (
                 "tree workspace / group row",
                 &[K::Workspace, K::Clean, K::Comment, K::CommentResolved],
             ),
             ("tree repo / checkout row", &checkout_row),
+            (
+                "tree repo / checkout row with a failed PR lookup",
+                &lookup_failed_row,
+            ),
             ("tree section row", &[K::Staged, K::Changes]),
             (
                 "tree file / dir row",
@@ -1660,7 +1703,7 @@ mod tests {
                     K::CommentResolved,
                 ],
             ),
-            ("graph worktree row badge", &PR_BADGES),
+            ("graph worktree row badge", &PR_MARKS),
             ("graph sync header", &sync_header),
             (
                 "graph selection footer",
@@ -1711,6 +1754,7 @@ mod tests {
         // The shared pairs named above, and the latent Clean / Synced clash.
         assert_eq!(K::Workspace.glyph(true), K::Staged.glyph(true));
         assert_eq!(K::Hidden.glyph(true), K::Changes.glyph(true));
+        assert_eq!(K::PrLookupFailed.glyph(true), K::StatusFailed.glyph(true));
         assert_eq!(
             K::OpenVsDefault.glyph(true),
             K::GraphUncommitted.glyph(true)
@@ -1745,15 +1789,15 @@ mod tests {
         }
     }
 
-    /// The six badge states and closed: one glyph each, never a word, never
-    /// a mark another surface owns.
+    /// The six badge states, the lookup failure mark, and closed: one
+    /// glyph each, never a word, never a mark another surface owns.
     #[test]
     fn pr_state_glyphs_are_pinned_distinct_and_never_words() {
-        let kinds = [&PR_BADGES[..], &[IconKind::PrClosed]].concat();
+        let kinds = [&PR_MARKS[..], &[IconKind::PrClosed]].concat();
         let glyphs =
             |ascii: bool| -> Vec<&str> { kinds.iter().map(|kind| kind.glyph(ascii)).collect() };
-        assert_eq!(glyphs(false), ["✕", "◉", "◐", "◌", "○", "✓", "⊘"]);
-        assert_eq!(glyphs(true), ["x", "A", "r", "d", "P", "m", "c"]);
+        assert_eq!(glyphs(false), ["✕", "◉", "◐", "◌", "○", "✓", "!", "⊘"]);
+        assert_eq!(glyphs(true), ["x", "A", "r", "d", "P", "m", "!", "c"]);
         for ascii in [true, false] {
             let marks = glyphs(ascii);
             for mark in &marks {
@@ -1782,8 +1826,9 @@ mod tests {
                 .count(),
             kinds.len()
         );
-        // The legend lists the six badge states; closed only alerts.
-        for kind in PR_BADGES {
+        // The legend lists the six badge states and the failure mark;
+        // closed only alerts.
+        for kind in PR_MARKS {
             assert_eq!(kind.spec().group, Some(IconGroup::Tree), "{kind:?}");
         }
         assert_eq!(IconKind::PrClosed.spec().group, None);
@@ -1799,7 +1844,7 @@ mod tests {
         use ratatui::text::Span;
         use unicode_width::UnicodeWidthStr;
         assert_eq!(UnicodeWidthStr::width("✔\u{fe0f}"), 2, "the check bites");
-        for kind in [&PR_BADGES[..], &[IconKind::PrClosed]].concat() {
+        for kind in [&PR_MARKS[..], &[IconKind::PrClosed]].concat() {
             for ascii in [false, true] {
                 let glyph = kind.glyph(ascii);
                 let what = format!("{kind:?} ascii={ascii} {glyph:?}");

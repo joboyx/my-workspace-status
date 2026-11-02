@@ -32,7 +32,7 @@ use super::super::selection::TextSelection;
 use super::super::split::DiffMode;
 use super::super::status::StatusMessage;
 use super::super::tree::{
-    fit_upstream_rewrite_text, painted_row_segments, pr_badge_kind, pr_badge_repo, segment_icons,
+    fit_upstream_rewrite_text, painted_row_segments, pr_badge_repo, segment_icons,
     with_comment_mark, with_viewed_mark, NodeKind, NodeSegments, PrBadge, VisibleRow,
 };
 use super::{AppState, IconHit, PlainClick};
@@ -469,7 +469,7 @@ impl AppState {
                     self.graph_pr_badges()
                         .into_iter()
                         .filter(|(badged, _, _)| *badged == index)
-                        .map(|(_, repo, pr)| (pr_badge_kind(pr), IconTarget::PullRequest(repo))),
+                        .map(|(_, repo, mark)| (mark.kind(), IconTarget::PullRequest(repo))),
                 );
             }
         }

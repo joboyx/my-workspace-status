@@ -206,13 +206,20 @@ $V capture "$RUN" t4-merged
 
 The fake CLIs exit 1 with a one-line stderr (`gh: HTTP 502`, `glab: HTTP 502`). The popover is 64 columns wide and ends a longer value in `…`, so the sets keep the line short. `gh` pins the popover of every mark on the row, and the PR section is the last: the recipe launches at `160x70` so the `services/api` row (branch, repo, diverged and change count sections before it) shows the whole PR section.
 
+The first failing poll of each forge host starts its outage: one sticky toast `<tool> (<host>): <reason> · Esc dismiss` per host (the reason's leading `<tool>: ` is cut, so the toast reads `gh (github.com): HTTP 502`), and `PR lookup failed` at the right end of the tab strip. More failures on that host show no new toast. Esc dismisses the toasts before the popover pins, and the header mark stays.
+
 ```bash
 fresh context github-review gitlab-review -- --size 160x70 --env WS_STATUS_PR_POLL_MS=1000 --fake-forge "$FORGE"
 $V wait "$RUN" '#7 P' && $V wait "$RUN" '!5 P'
 $V capture "$RUN" before-fail
 $V scenario "$FORGE" github-cli-fails gitlab-cli-fails
+$V wait "$RUN" 'gh (github.com): HTTP 502 · Esc dismiss'           # the first failing poll
+$V wait "$RUN" 'glab (gitlab.com): HTTP 502 · Esc dismiss'
+$V wait "$RUN" 'PR lookup failed'                                   # the header mark
 sleep 4                                              # a few polls; the one sleep in this file
-$V capture "$RUN" cli-fails
+$V capture "$RUN" cli-fails | grep -c 'Esc dismiss'  # 2: one toast per host, no more
+$V keys "$RUN" Escape && $V wait --gone "$RUN" 'Esc dismiss'
+$V wait "$RUN" 'PR lookup failed'                    # the dismiss keeps the header mark
 to_app && $V keys "$RUN" g h                         # pin the popover
 $V wait "$RUN" 'last lookup failed: gh: HTTP 502'
 $V capture "$RUN" popover-github
@@ -222,7 +229,7 @@ $V wait "$RUN" 'last lookup failed: glab: HTTP 502'
 $V capture "$RUN" popover-gitlab
 ```
 
-**PASS:** after the failing polls `#7 P` and `!5 P` are still on the screen, no toast appears, the glyphs are dimmed (the `.ansi` captures `before-fail` and `cli-fails` differ in the colour of the glyph: the data is stale after twice the poll period), and each popover `checked` line carries the first stderr line of its fake CLI.
+**PASS:** after the failing polls `#7 P` and `!5 P` are still on the screen (a badge with an earlier answer never turns into the failure mark), each host showed its outage toast on its first failing poll and `cli-fails` holds exactly two (no PR change toast, no repeat), the header mark stays after Esc, the glyphs are dimmed (the `.ansi` captures `before-fail` and `cli-fails` differ in the colour of the glyph: the data is stale after twice the poll period), and each popover `checked` line carries the first stderr line of its fake CLI.
 
 ## PS8 Nerd glyph shapes
 
@@ -238,6 +245,36 @@ sweep review  '#7 ○' '!5 ○'
 ```
 
 **PASS:** each sweep prints PASS, each shape is on both rows, and the glyph is the last cell of the badge on a captured tree row (`#7 ◉` then the end of the tree column).
+
+## PS9 Outage lifecycle
+
+One outage per forge host. It starts on the first failed lookup, shows its toast once, survives `r`, and ends only when no checkout on that host fails any more. A checkout with no earlier answer shows the failure mark `!` (ASCII and Nerd alike, bold red, no ref) instead of a badge. GitHub keeps answering here, so it has no outage.
+
+```bash
+TOAST='glab (gitlab.com): HTTP 502 · Esc dismiss'
+glab_calls() { $V calls "$RUN" | grep -c '^glab '; }
+# 1. A host that fails from launch: the toast, the header mark, and the failure mark.
+fresh context github-review gitlab-cli-fails -- --env WS_STATUS_PR_POLL_MS=1000 --fake-forge "$FORGE"
+$V wait "$RUN" "$TOAST" && $V wait "$RUN" 'PR lookup failed' && $V wait "$RUN" '#7 P'
+$V wait --regex "$RUN" 'services/api  feature/rate-limit .* !($|[^[:alnum:]])'   # the failure mark, no ref
+$V capture "$RUN" outage-start | grep -c 'gh (github.com)'           # 0: GitHub has no outage
+# 2. Esc hides the toast; r looks the checkout up again and still fails: no new toast.
+$V keys "$RUN" Escape && $V wait --gone "$RUN" "$TOAST"
+N=$(glab_calls); to_api && $V keys "$RUN" r
+for _ in $(seq 50); do [ "$(glab_calls)" -gt "$N" ] && break; sleep 0.2; done
+$V wait "$RUN" "$TOAST" 3 && echo "FAIL the toast came back" || echo "PASS no second toast"   # the wait timeout line is expected
+$V wait "$RUN" 'PR lookup failed'                                    # the outage goes on
+# 3. glab answers: the badge replaces the mark, and the header mark goes.
+$V scenario "$FORGE" gitlab-review && $V keys "$RUN" r
+$V wait "$RUN" '!5 P' && $V wait --gone "$RUN" 'PR lookup failed'
+$V capture "$RUN" outage-end
+# 4. A new failure is a new outage: the toast shows again, and the badge stays.
+$V scenario "$FORGE" gitlab-cli-fails && $V keys "$RUN" r
+$V wait "$RUN" "$TOAST" && $V wait "$RUN" 'PR lookup failed' && $V wait "$RUN" '!5 P'
+$V capture "$RUN" outage-again
+```
+
+**PASS:** step 1 shows the `glab` toast, the header mark, `#7 P`, and a lone `!` on the `services/api` row (the `.ansi` capture paints it bold red), with no `gh` toast; step 2 prints `PASS no second toast` and keeps the header mark; step 3 shows `!5 P` with no header mark; step 4 shows the toast and the header mark again while `!5 P` stays. A full reload (`r` on the workspace row) behaves like step 2: it never ends an outage. PTY proof: `pty_pr_failing_host_toasts_once_per_outage_and_marks_the_badge`.
 
 ## Live
 
@@ -295,5 +332,6 @@ $V stop "$RUN"
 - The first lookup runs at launch. Apply scenario sets **before** `launch` if the first paint matters; a later `scenario` needs `r` (or a poll) to show.
 - `r` on a checkout row reloads that checkout; on the workspace row it reloads every checkout.
 - `wait --regex` matches inside one screen line, and the tree row also carries the right pane text. Anchor on the ref (`#7 P`) and end a one-letter glyph pattern with `($|[^[:alnum:]])`: a toast that lingers for 8 s can start with the same letters (`#7 ready`, `!5 merged`).
+- A failing CLI shows a sticky outage toast (`… · Esc dismiss`) in the bottom-right of the panes. It never fades: it stays until Esc or until the host works again, and it can cover the bottom rows of the tree or a list. Press Escape before you read those rows; the header mark `PR lookup failed` stays.
 - `fake forge: no scenario for ...` in `$V calls "$RUN"` means the app made a call no set answers (a new `gh` / `glab` call). Teach the fake in `scripts/fake-forge/` and add the file to the sets.
 - OSC 8 links on the badge are not in a tmux capture. The PTY e2e suite covers them. The link covers only the PR ref (`#7`, `!5`), not the glyph; a glyph-only badge has no link. PTY proof: `pty_pr_badge_links_only_its_ref_on_both_forges`.

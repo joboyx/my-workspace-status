@@ -65,6 +65,7 @@ use super::icons::{
 };
 use super::line_blame::{fit_annotation, relative_age, short_sha, BlameSide, BLAME_MENU_ROWS};
 use super::ops::RevertScope;
+use super::outage::outage_header_text;
 use super::popover::{
     commit_meta_icon, flat_lines, focused_line, graph_icon, graph_row_id, graph_sync_kind,
     popover_rect, tree_icon_target, IconTarget, PopoverLine, POPOVER_FOOTER, POPOVER_MAX_WIDTH,
@@ -103,7 +104,7 @@ use super::theme::{hex_color, mix_toward, BackgroundMode, Palette, Pill, ThemeId
 use super::toast::{Toast, ToastMark, ToastTick};
 use super::tree::{
     fit_upstream_rewrite_text, painted_row_segments, pr_badge_kind, pr_badge_role, visible_window,
-    workspace_trailing_fit, NodeKind, NodeSegments, PrBadge, PrTotals, SegRole, TextSeg,
+    workspace_trailing_fit, NodeKind, NodeSegments, PrBadge, PrMark, PrTotals, SegRole, TextSeg,
     VisibleRow, PR_REF_MIN_TREE_COLS,
 };
 use super::undercurl::{cut_link_cells, drop_undercurls_under, underlined_runs, UndercurlHit};
@@ -399,12 +400,19 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
 /// Widest a toast row may be (columns).
 const TOAST_MAX_COLS: u16 = 48;
 
+/// Widest an outage toast row may be (columns): it names a tool, a host,
+/// and a reason, and keeps its dismiss hint.
+const OUTAGE_TOAST_MAX_COLS: u16 = 72;
+
 /// Toast stack in the bottom-right of `pane_area`, newest on the bottom
 /// row, one row each: ` <mark> <text> · <detail> ` ([`toast_spans`]).
 ///
 /// An ack sits on the add-flash ramp step for its fade strength. A PR
-/// change sits on `panel`, where its state glyph and muted detail stay
-/// readable, and fades by mixing its colours toward `surface`.
+/// change and an outage sit on `panel`, where the state glyph and the
+/// muted detail stay readable; a PR change fades by mixing its colours
+/// toward `surface`, an outage never fades. An outage row may be up to
+/// [`OUTAGE_TOAST_MAX_COLS`] wide, the others [`TOAST_MAX_COLS`], and none
+/// wider than the pane less 2.
 /// Under `NO_COLOR` the row is reversed terminal colours with no fade.
 /// While a toast fades the frame is marked animating, so the loop ticks.
 /// While every toast holds full strength it asks for one wake at the first
@@ -415,7 +423,6 @@ fn draw_toasts(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
         return;
     }
     let palette = state.theme.palette();
-    let cap = TOAST_MAX_COLS.min(pane_area.width - 2);
     // Inside the pane border: one column in from the right, one row up.
     let bottom = pane_area.bottom() - 2;
     let rows = usize::from(pane_area.height - 2);
@@ -437,6 +444,12 @@ fn draw_toasts(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
             let bg = mix_toward(palette.panel, palette.surface, fade);
             Some((palette, bg, fade))
         };
+        let max_cols = if toast.is_outage() {
+            OUTAGE_TOAST_MAX_COLS
+        } else {
+            TOAST_MAX_COLS
+        };
+        let cap = max_cols.min(pane_area.width - 2);
         let spans = toast_spans(toast, state.ascii, usize::from(cap), colors);
         // Cell widths as ratatui paints them, so the row ends one column in
         // from the pane edge with no blank cell.
@@ -469,7 +482,8 @@ fn draw_toasts(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
 /// `None` (`NO_COLOR`) paints reversed terminal colours. The ack mark
 /// (` ✓ `, ASCII ` ok `) takes the text colour; a glyph mark paints bold
 /// in its own role (a PR state colour). The text paints in the toast's
-/// role, the ` · <detail>` tail muted.
+/// role, the ` · <detail>` tail muted. An outage toast keeps its whole
+/// detail (the dismiss hint) and cuts its text instead.
 fn toast_spans(
     toast: &Toast,
     ascii: bool,
@@ -493,12 +507,22 @@ fn toast_spans(
         ),
         ToastMark::None => (" ".to_string(), style(toast.role)),
     };
+    let body_max = cap.saturating_sub(UnicodeWidthStr::width(mark.as_str()) + 1);
+    if toast.is_outage() && !toast.detail.is_empty() {
+        let tail = format!(" · {}", toast.detail);
+        let text_max = body_max.saturating_sub(UnicodeWidthStr::width(tail.as_str()));
+        return vec![
+            Span::styled(mark, mark_style),
+            Span::styled(fit_with_ellipsis(&toast.text, text_max), style(toast.role)),
+            Span::styled(tail, style(SegRole::Muted)),
+            Span::styled(" ", style(toast.role)),
+        ];
+    }
     let body = if toast.detail.is_empty() {
         toast.text.clone()
     } else {
         format!("{} · {}", toast.text, toast.detail)
     };
-    let body_max = cap.saturating_sub(UnicodeWidthStr::width(mark.as_str()) + 1);
     let body = fit_with_ellipsis(&body, body_max);
     // A cut takes the detail first; a cut into the text keeps its colour.
     let (text, tail) = match body.strip_prefix(toast.text.as_str()) {
@@ -2645,7 +2669,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
                     y: span.y,
                     x: span.x,
                     width: span.width.min(chip.head_width),
-                    kind: pr_badge_kind(chip.state),
+                    kind: chip.mark.kind(),
                     target: IconTarget::PullRequest(chip.checkout.clone()),
                 });
             }
@@ -2653,8 +2677,8 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
                 GraphIconKind::Badge => badge_rows
                     .iter()
                     .find(|row| Some(row.0) == span.row_index)
-                    .map(|(_, repo, pr, _, _)| {
-                        (pr_badge_kind(*pr), IconTarget::PullRequest(repo.clone()))
+                    .map(|(_, repo, mark, _, _)| {
+                        (mark.kind(), IconTarget::PullRequest(repo.clone()))
                     })?,
                 GraphIconKind::SyncHeader => (
                     graph_sync_kind(model.sync.as_ref()?.status),
@@ -2804,34 +2828,38 @@ fn bleed_vscrollbar_column(buf: &mut Buffer, bar: VScrollbarLayout) {
 }
 
 /// One graph worktree row's PR badge: visible row index, checkout,
-/// state, glyph, and colour.
-type GraphPrBadge = (usize, PathBuf, PrState, &'static str, Color);
+/// mark, glyph, and colour.
+type GraphPrBadge = (usize, PathBuf, PrMark, &'static str, Color);
 
 /// [`AppState::graph_pr_badges`] with the glyph and colour to paint: the
-/// state colour, or muted when the badge is stale.
+/// state colour, or muted when the badge is stale; the failure mark `!` in
+/// the deleted colour.
 fn graph_pr_badges(state: &AppState) -> Vec<GraphPrBadge> {
     let palette = state.theme.palette();
     let now = Instant::now();
     state
         .graph_pr_badges()
         .into_iter()
-        .map(|(index, path, pr)| {
-            let glyph = pr_badge_kind(pr).glyph(state.ascii);
-            let role = pr_badge_role(pr, state.pr_is_stale(&path, now));
-            (index, path, pr, glyph, seg_role_color(role, palette))
+        .map(|(index, path, mark)| {
+            let glyph = mark.kind().glyph(state.ascii);
+            let role = mark.role(state.pr_is_stale(&path, now));
+            (index, path, mark, glyph, seg_role_color(role, palette))
         })
         .collect()
 }
 
-/// The graph header chip: the checkout it describes, the columns of its
-/// `<glyph> <ref>` head (the PR icon hit and link), and the candidates for
-/// [`GraphWidget::header_chip`].
+/// The graph header chip: the checkout it describes, its mark, the columns
+/// of its `<glyph> <ref>` head (the PR icon hit and link), and the
+/// candidates for [`GraphWidget::header_chip`].
 struct GraphPrChip {
     checkout: PathBuf,
-    state: PrState,
+    mark: PrMark,
     head_width: u16,
     candidates: Vec<Line<'static>>,
 }
+
+/// Label of the header chip of a failed lookup with no earlier answer.
+const GRAPH_CHIP_LOOKUP_FAILED: &str = "lookup failed";
 
 /// The header chip of the graph checkout's PR ([`AppState::graph_header_pr`]),
 /// or `None` with no PR.
@@ -2841,8 +2869,14 @@ struct GraphPrChip {
 /// (the age), then `<glyph> <ref>`. The glyph and the label paint in the
 /// state colour, the ref in the repo colour, `▸` dim, the next action bold.
 /// A stale PR paints every part muted. ASCII mode uses `>` for `▸`.
+///
+/// A failed lookup with no earlier answer
+/// ([`AppState::graph_header_lookup_failed`]) paints the failure mark:
+/// `! lookup failed`, then `!` alone, bold in the deleted colour, no ref.
 fn graph_pr_chip(state: &AppState, now_unix: i64) -> Option<GraphPrChip> {
-    let (checkout, pr) = state.graph_header_pr()?;
+    let Some((checkout, pr)) = state.graph_header_pr() else {
+        return graph_lookup_failed_chip(state);
+    };
     let palette = state.theme.palette();
     let stale = state.pr_is_stale(&checkout, Instant::now());
     let glyph = pr_badge_kind(pr.state).glyph(state.ascii);
@@ -2892,10 +2926,36 @@ fn graph_pr_chip(state: &AppState, now_unix: i64) -> Option<GraphPrChip> {
     candidates.push(Line::from(head));
     Some(GraphPrChip {
         checkout,
-        state: pr.state,
+        mark: PrMark::State(pr.state),
         head_width: u16::try_from(2 + UnicodeWidthStr::width(ref_text.as_str()))
             .unwrap_or(u16::MAX),
         candidates,
+    })
+}
+
+/// The header chip of a failed lookup with no earlier answer: `! lookup
+/// failed`, then `!`; the mark bold and the label in the deleted colour.
+/// Its head (the icon hit) is the mark alone: there is no ref to link.
+fn graph_lookup_failed_chip(state: &AppState) -> Option<GraphPrChip> {
+    let checkout = state.graph_header_lookup_failed()?;
+    let mark = PrMark::LookupFailed;
+    let style = Style::default().fg(seg_role_color(mark.role(false), state.theme.palette()));
+    let head = Span::styled(
+        mark.kind().glyph(state.ascii),
+        style.add_modifier(Modifier::BOLD),
+    );
+    Some(GraphPrChip {
+        checkout,
+        mark,
+        head_width: 1,
+        candidates: vec![
+            Line::from(vec![
+                head.clone(),
+                Span::raw(" "),
+                Span::styled(GRAPH_CHIP_LOOKUP_FAILED, style),
+            ]),
+            Line::from(head),
+        ],
     })
 }
 
@@ -4866,8 +4926,9 @@ fn icon_legend_color(kind: IconKind, palette: Palette) -> Color {
         K::MergedIntoDefault | K::Ahead => palette.added,
         K::StatusAdded | K::StatusStaged => palette.added,
         K::Behind | K::StatusFailed | K::StatusDeleted | K::StatusConflict => palette.deleted,
-        // Closed only alerts, on the remove ramp.
-        K::PrClosed => palette.deleted,
+        // Closed only alerts, on the remove ramp; the lookup failure mark
+        // paints in the deleted colour.
+        K::PrClosed | K::PrLookupFailed => palette.deleted,
         // A PR state row paints in its badge colour.
         K::PrCiFailed | K::PrReady | K::PrCiRunning | K::PrDraft | K::PrInReview | K::PrMerged => {
             PrState::ALL
@@ -6226,6 +6287,46 @@ fn draw_tab_strip(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         Paragraph::new(Line::from(spans)),
         Rect {
             width: limit.saturating_sub(area.x),
+            ..area
+        },
+    );
+    draw_outage_header(frame, area, state, x, limit);
+}
+
+/// The failure mark of the failing background jobs ([`outage_header_text`]),
+/// bold in `palette.deleted`, flush right in the free cells of the tab strip
+/// row `area`: right of the last tab (which ends at `tabs_end`) and one
+/// blank cell, left of `limit` (the right overflow marker, if any). The
+/// tabs keep priority: with too little room the mark gets shorter, then
+/// does not paint.
+fn draw_outage_header(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    tabs_end: u16,
+    limit: u16,
+) {
+    if state.outages.is_empty() {
+        return;
+    }
+    let room = limit.saturating_sub(tabs_end).saturating_sub(1);
+    let Some(text) = outage_header_text(&state.outages.kinds(), state.ascii, usize::from(room))
+    else {
+        return;
+    };
+    let width = painted_width(&text);
+    let style = if state.no_color {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(state.theme.palette().deleted)
+            .add_modifier(Modifier::BOLD)
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(text, style)),
+        Rect {
+            x: limit - width,
+            width,
             ..area
         },
     );
@@ -15048,6 +15149,121 @@ mod tests {
         state
     }
 
+    #[test]
+    fn outage_header_mark_names_each_failing_kind_flush_right() {
+        use super::super::outage::OutageSource;
+        let host = |tool: &'static str, host: &str| OutageSource::PrLookup {
+            tool,
+            host: host.into(),
+        };
+        let now = Instant::now();
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, false);
+        let mut terminal = Terminal::new(TestBackend::new(80, 1)).unwrap();
+        let clean = paint_tab_row(&mut terminal, &mut state).concat();
+        assert!(!clean.contains('✕'), "no outage, no mark: {clean}");
+
+        state.note_outage(
+            host("glab", "gitlab.com"),
+            "glab (gitlab.com): invalid_token".into(),
+            now,
+        );
+        state.note_outage(
+            host("gh", "github.com"),
+            "gh (github.com): HTTP 401".into(),
+            now,
+        );
+        let row = paint_tab_row(&mut terminal, &mut state).concat();
+        assert!(row.ends_with(" ✕ PR lookup failed"), "{row}");
+        assert_eq!(row.matches("failed").count(), 1, "two hosts, one label");
+        let palette = state.theme.palette();
+        let buf = terminal.backend().buffer();
+        for x in [80 - 18, 80 - 16, 79] {
+            assert_eq!(buf[(x, 0)].fg, palette.deleted, "cell {x}");
+            assert!(buf[(x, 0)].modifier.contains(Modifier::BOLD), "cell {x}");
+        }
+
+        state.dismiss_outage_toasts();
+        let row = paint_tab_row(&mut terminal, &mut state).concat();
+        assert!(row.ends_with(" ✕ PR lookup failed"), "the dismiss keeps it");
+
+        state.note_outage(
+            OutageSource::ScheduledFetch,
+            "git fetch (app): could not read from remote".into(),
+            now,
+        );
+        let row = paint_tab_row(&mut terminal, &mut state).concat();
+        assert!(row.ends_with(" ✕ PR lookup failed · fetch failed"), "{row}");
+
+        state.ascii = true;
+        let row = paint_tab_row(&mut terminal, &mut state).concat();
+        assert!(row.ends_with(" x PR lookup failed · fetch failed"), "{row}");
+        state.ascii = false;
+
+        state.note_recovered(&host("gh", "github.com"));
+        state.note_recovered(&OutageSource::ScheduledFetch);
+        let row = paint_tab_row(&mut terminal, &mut state).concat();
+        assert!(row.ends_with(" ✕ PR lookup failed"), "one host still fails");
+        state.note_recovered(&host("glab", "gitlab.com"));
+        assert_eq!(paint_tab_row(&mut terminal, &mut state).concat(), clean);
+    }
+
+    #[test]
+    fn outage_header_mark_steps_down_and_never_paints_over_a_tab() {
+        use super::super::outage::{outage_header_text, OutageSource};
+        let now = Instant::now();
+        let mut seen: Vec<String> = Vec::new();
+        for width in 8..=160u16 {
+            let mut state = five_compare_tabs();
+            let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+            let before = paint_tab_row(&mut terminal, &mut state);
+            state.note_outage(
+                OutageSource::LiveRefresh,
+                "git status (app): status failed".into(),
+                now,
+            );
+            state.note_outage(
+                OutageSource::ScheduledFetch,
+                "git fetch (app): could not read from remote".into(),
+                now,
+            );
+            let after = paint_tab_row(&mut terminal, &mut state);
+            // The right overflow marker, if any, bounds the free cells.
+            let mut limit = width;
+            let mut tabs_end = 0;
+            for &(x, w, _) in &state.layout.tab_hits {
+                let text = before[usize::from(x)..usize::from(x + w)].concat();
+                if text.ends_with('\u{203a}') {
+                    limit = x;
+                } else {
+                    tabs_end = tabs_end.max(x + w);
+                }
+            }
+            let room = usize::from(limit.saturating_sub(tabs_end).saturating_sub(1));
+            let mut want = before.clone();
+            if let Some(text) = outage_header_text(&state.outages.kinds(), true, room) {
+                let start = usize::from(limit - painted_width(&text));
+                for (offset, ch) in text.chars().enumerate() {
+                    want[start + offset] = ch.to_string();
+                }
+                seen.push(text);
+            }
+            assert_eq!(
+                after.concat(),
+                want.concat(),
+                "width {width}: only free cells right of the tabs change"
+            );
+            for (x, cell) in before.iter().enumerate() {
+                if cell != " " {
+                    assert_eq!(&after[x], cell, "width {width}: cell {x} is a tab's");
+                }
+            }
+        }
+        for text in ["x fetch failed · refresh failed", "x 2 jobs failed", "x"] {
+            assert!(seen.iter().any(|seen| seen == text), "{text} at some width");
+        }
+    }
+
     /// Paint and return the tab row, one string per cell.
     /// Paint only the tab strip (row 0), so narrow widths below the
     /// terminal-too-small guard still exercise the strip's windowing.
@@ -15983,6 +16199,11 @@ mod tests {
                     "{id:?} {state:?}"
                 );
             }
+            assert_eq!(
+                glyph_cell(IconKind::PrLookupFailed).fg,
+                seg_role_color(PrMark::LookupFailed.role(false), pal),
+                "{id:?} lookup failed"
+            );
             // Some themes share a hex between chip roles (the graph pane
             // shares it too); the tag chip always stands apart.
             let colours: HashSet<_> = chips.iter().map(|(_, color)| *color).collect();
@@ -16925,7 +17146,7 @@ mod tests {
     /// A fresh tree badge in `state` with `ref_text`.
     fn tree_badge(state: PrState, ref_text: Option<&str>) -> PrBadge {
         PrBadge {
-            state,
+            mark: PrMark::State(state),
             ref_text: ref_text.map(str::to_string),
             stale: false,
         }
@@ -20629,6 +20850,7 @@ mod tests {
             role,
             ttl_ms: super::super::toast::PR_TOAST_TTL_MS,
             at: Instant::now(),
+            outage: None,
         }
     }
 
@@ -20761,6 +20983,143 @@ mod tests {
             assert!(cell.modifier.contains(Modifier::REVERSED));
         }
         assert!(buf[(x0 + 1, y)].modifier.contains(Modifier::BOLD), "glyph");
+    }
+
+    /// The `gitlab.com` PR lookup outage source.
+    fn gitlab_outage() -> super::super::outage::OutageSource {
+        super::super::outage::OutageSource::PrLookup {
+            tool: "glab",
+            host: "gitlab.com".into(),
+        }
+    }
+
+    #[test]
+    fn an_outage_toast_paints_red_with_its_dismiss_hint_and_holds() {
+        let mut state = toast_state(StatusMessage::default(), false);
+        state.note_outage(
+            gitlab_outage(),
+            "glab (gitlab.com): invalid_token".into(),
+            Instant::now(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(TOAST_W, TOAST_H)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = " ✕ glab (gitlab.com): invalid_token · Esc dismiss ";
+        let width = text.chars().count() as u16;
+        let y = TOAST_H - 4;
+        assert_eq!(toast_cells(&terminal, y, width), text);
+        let palette = state.theme.palette();
+        let buf = terminal.backend().buffer();
+        let x0 = TOAST_W - 1 - width;
+        assert_ne!(buf[(x0 - 1, y)].bg, palette.panel);
+        assert!((x0..TOAST_W - 1).all(|x| buf[(x, y)].bg == palette.panel));
+        let glyph = &buf[(x0 + 1, y)];
+        assert_eq!(glyph.symbol(), "✕");
+        assert_eq!(glyph.fg, palette.deleted);
+        assert!(glyph.modifier.contains(Modifier::BOLD));
+        assert_eq!(buf[(x0 + 3, y)].fg, palette.deleted, "the text is red");
+        assert_eq!(buf[(x0 + 34, y)].fg, palette.deleted);
+        assert_eq!(buf[(x0 + 36, y)].symbol(), "·");
+        assert_eq!(buf[(x0 + 36, y)].fg, palette.muted, "the hint is muted");
+        assert_eq!(buf[(x0 + 38, y)].symbol(), "E");
+        assert_eq!(buf[(x0 + 38, y)].fg, palette.muted);
+        assert!(!state.layout.animating, "an outage toast never ticks");
+        assert_eq!(state.layout.wake_ms, None, "and asks for no wake");
+
+        // ASCII glyphs and NO_COLOR: `x`, reversed terminal colours.
+        let mut state = toast_state(StatusMessage::default(), true);
+        state.no_color = true;
+        state.note_outage(
+            gitlab_outage(),
+            "glab (gitlab.com): invalid_token".into(),
+            Instant::now(),
+        );
+        draw_state(&mut terminal, &mut state);
+        let text = " x glab (gitlab.com): invalid_token · Esc dismiss ";
+        assert_eq!(toast_cells(&terminal, y, width), text);
+        let buf = terminal.backend().buffer();
+        for x in [x0 + 1, x0 + 3, x0 + 38] {
+            let cell = &buf[(x, y)];
+            assert_eq!((cell.fg, cell.bg), (Color::Reset, Color::Reset), "{x}");
+            assert!(cell.modifier.contains(Modifier::REVERSED), "{x}");
+        }
+    }
+
+    #[test]
+    fn an_ack_paints_below_three_outage_toasts() {
+        use super::super::outage::OutageSource;
+        let mut state = toast_state(StatusMessage::default(), false);
+        let now = Instant::now();
+        let github = OutageSource::PrLookup {
+            tool: "gh",
+            host: "github.com".into(),
+        };
+        state.note_outage(github, "gh (github.com): HTTP 401".into(), now);
+        state.note_outage(
+            gitlab_outage(),
+            "glab (gitlab.com): invalid_token".into(),
+            now,
+        );
+        state.note_outage(
+            OutageSource::ScheduledFetch,
+            "git fetch (app): could not read from remote repository".into(),
+            now,
+        );
+        state.status = StatusMessage::ok("Fetched 2 repos");
+        let mut terminal = Terminal::new(TestBackend::new(TOAST_W, TOAST_H)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let bottom = TOAST_H - 4;
+        for (text, y) in [
+            ("gh (github.com): HTTP 401", bottom - 3),
+            ("glab (gitlab.com): invalid_token", bottom - 2),
+            ("git fetch (app): could not", bottom - 1),
+            ("Fetched 2 repos", bottom),
+        ] {
+            let rows = rows_with(&terminal, text);
+            assert_eq!(rows.len(), 1, "{text}: {rows:?}");
+            assert_eq!(rows[0].0, y, "{text}: newest at the bottom");
+        }
+    }
+
+    #[test]
+    fn a_long_outage_toast_cuts_its_text_and_keeps_the_hint_up_to_72_columns() {
+        let reason = format!("glab (gitlab.com): {}", "invalid_token ".repeat(8));
+        let mut state = toast_state(StatusMessage::default(), false);
+        state.note_outage(gitlab_outage(), reason.clone(), Instant::now());
+        let mut terminal = Terminal::new(TestBackend::new(TOAST_W, TOAST_H)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let y = TOAST_H - 4;
+        let row = toast_cells(&terminal, y, 72);
+        assert!(
+            row.starts_with(" ✕ glab (gitlab.com): invalid_token"),
+            "{row}"
+        );
+        assert!(
+            row.ends_with("… · Esc dismiss "),
+            "cut text, whole hint: {row}"
+        );
+        let buf = terminal.backend().buffer();
+        assert_ne!(
+            buf[(TOAST_W - 74, y)].bg,
+            state.theme.palette().panel,
+            "at most 72 columns"
+        );
+        assert_eq!(buf[(TOAST_W - 73, y)].bg, state.theme.palette().panel);
+
+        // A narrow pane caps the row at the pane less 2; the hint stays.
+        let mut terminal = Terminal::new(TestBackend::new(50, TOAST_H)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let buf = terminal.backend().buffer();
+        let row: String = (1..49).map(|x| buf[(x, y)].symbol()).collect();
+        assert!(row.starts_with(" ✕ glab (gitlab.com)"), "{row}");
+        assert!(row.ends_with("… · Esc dismiss "), "{row}");
+
+        // An ack beside it keeps the 48-column cap.
+        state.toasts.push("a".repeat(60), Instant::now());
+        let mut terminal = Terminal::new(TestBackend::new(TOAST_W, TOAST_H)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let ack = toast_cells(&terminal, y, 48);
+        assert!(ack.starts_with(" ✓ aaa") && ack.ends_with("a… "), "{ack}");
+        assert!(toast_cells(&terminal, y - 1, 72).ends_with("… · Esc dismiss "));
     }
 
     /// A primary `app` with a linked `wt` checkout: one family repo row
@@ -25076,6 +25435,65 @@ mod tests {
         }
     }
 
+    /// A failed first lookup paints `!` in the last tree column, bold in
+    /// the deleted colour, in both glyph modes and both looks: one icon hit
+    /// one column wide, no ref, no link. A later good answer paints the PR
+    /// badge again; a failure after a good answer keeps that badge.
+    #[test]
+    fn tree_pr_lookup_failed_paints_a_bold_red_bang_at_the_pane_edge() {
+        let palette = ThemeId::TokyoNight.palette();
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            for ascii in [true, false] {
+                let what = format!("{background:?} ascii={ascii}");
+                let mut state = pr_state(
+                    &[branch_repo("app", "feature"), branch_repo("lib", "main")],
+                    ascii,
+                );
+                state.background = background;
+                set_pr(
+                    &mut state,
+                    "app",
+                    "feature",
+                    PrLookup::Failed(Some("HTTP 401".into())),
+                );
+                let mut terminal = pr_ref_terminal();
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                let buf = terminal.backend().buffer();
+                let y = tree_row_y(&state, "repo:app");
+                let edge = state.layout.tree_x + state.layout.tree_width - 1;
+                assert_eq!(buf[(edge, y)].symbol(), "!", "{what}");
+                assert_eq!(buf[(edge, y)].fg, palette.deleted, "{what}");
+                assert!(buf[(edge, y)].modifier.contains(Modifier::BOLD), "{what}");
+                assert_eq!(buf[(edge - 1, y)].symbol(), " ", "{what}: no ref");
+                assert_eq!(
+                    state.layout.pr_badge_hits(),
+                    vec![PrBadgeHit {
+                        y,
+                        x: edge,
+                        width: 1,
+                        repo: PathBuf::from("app"),
+                    }],
+                    "{what}: one hit over the mark"
+                );
+                assert!(state.layout.links.is_empty(), "{what}: no link");
+
+                set_pr(&mut state, "app", "feature", found_pr(PrState::Ready));
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                let ready = if ascii { "A" } else { "◉" };
+                let buf = terminal.backend().buffer();
+                assert_eq!(buf[(edge, y)].symbol(), ready, "{what}: back to the PR");
+                set_pr(&mut state, "app", "feature", PrLookup::Failed(None));
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                let buf = terminal.backend().buffer();
+                assert_eq!(
+                    buf[(edge, y)].symbol(),
+                    ready,
+                    "{what}: a known badge stays"
+                );
+            }
+        }
+    }
+
     /// Every badge glyph shares the last tree column, whatever the ref
     /// width and the marks before it; under 50 columns no row paints a
     /// ref. Only a painted ref links, so a glyph-only badge links nothing.
@@ -25448,13 +25866,12 @@ mod tests {
         assert!(buf[(need_x, y)].modifier.contains(Modifier::BOLD));
     }
 
+    /// No PR badge while the first lookup is in flight or the forge says
+    /// no PR. A failed first lookup paints the failure mark instead
+    /// ([`tree_pr_lookup_failed_paints_a_bold_red_bang_at_the_pane_edge`]).
     #[test]
     fn tree_pr_badge_needs_a_ready_pr() {
-        for (lookup, what) in [
-            (None, "in flight"),
-            (Some(PrLookup::Failed(None)), "failed"),
-            (Some(PrLookup::NoPr), "no PR"),
-        ] {
+        for (lookup, what) in [(None, "in flight"), (Some(PrLookup::NoPr), "no PR")] {
             let mut state = pr_state(&[branch_repo("app", "feature")], true);
             if let Some(lookup) = lookup {
                 set_pr(&mut state, "app", "feature", lookup);
@@ -28521,17 +28938,82 @@ mod tests {
         }
     }
 
+    /// A graph worktree row whose first lookup failed paints `!` flush
+    /// right, bold in the deleted colour: one icon hit, no link. Both glyph
+    /// modes, depth 0 and 1, boxed and flat.
+    #[test]
+    fn graph_worktree_row_paints_the_lookup_failure_mark() {
+        let palette = ThemeId::TokyoNight.palette();
+        for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+            for depth_1 in [false, true] {
+                for ascii in [true, false] {
+                    let what = format!("{background:?} depth_1={depth_1} ascii={ascii}");
+                    let mut state = pr_graph_state("app/.worktrees/wt", "feat", false);
+                    state.ascii = ascii;
+                    set_pr(
+                        &mut state,
+                        "app/.worktrees/wt",
+                        "feat",
+                        PrLookup::Failed(Some("HTTP 401".into())),
+                    );
+                    show_graph_at(&mut state, depth_1, background);
+                    let mut terminal = pr_terminal();
+                    terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                    let hits = graph_pane_badge_hits(&state, depth_1);
+                    assert_eq!(hits.len(), 1, "{what}");
+                    let (x0, width) = graph_pane_cols(&state, depth_1);
+                    assert_eq!(hits[0].x, x0 + width - 1, "{what}: flush right");
+                    assert_eq!(hits[0].width, 1, "{what}");
+                    let cell = &terminal.backend().buffer()[(hits[0].x, hits[0].y)];
+                    assert_eq!(cell.symbol(), "!", "{what}");
+                    assert_eq!(cell.fg, palette.deleted, "{what}");
+                    assert!(cell.modifier.contains(Modifier::BOLD), "{what}");
+                    assert!(
+                        !link_covers(&state.layout.links, hits[0].x, hits[0].y),
+                        "{what}: no link"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The header chip of a failed first lookup: `! lookup failed`, then
+    /// `!`, bold red mark and red label, a one-column head, no ref; a good
+    /// answer brings the PR chip back.
+    #[test]
+    fn graph_header_chip_paints_the_lookup_failure_mark() {
+        let palette = ThemeId::TokyoNight.palette();
+        for ascii in [true, false] {
+            let mut state =
+                chip_state_with(PR_REMOTE, PrLookup::Failed(Some("HTTP 401".into())), ascii);
+            let chip = graph_pr_chip(&state, 1_800_000_000).expect("failure chip");
+            assert_eq!(chip.checkout, PathBuf::from("app"));
+            assert_eq!(chip.mark, PrMark::LookupFailed);
+            assert_eq!(chip.head_width, 1);
+            let texts: Vec<String> = chip.candidates.iter().map(chip_text).collect();
+            assert_eq!(texts, ["! lookup failed", "!"], "ascii={ascii}");
+            let spans = &chip.candidates[0].spans;
+            assert_eq!(spans[0].style.fg, Some(palette.deleted));
+            assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+            assert_eq!(spans[2].style.fg, Some(palette.deleted));
+
+            set_pr(&mut state, "app", "feature", found_pr(PrState::Ready));
+            let chip = graph_pr_chip(&state, 1_800_000_000).expect("PR chip");
+            assert_eq!(chip.mark, PrMark::State(PrState::Ready));
+        }
+    }
+
     /// `app` on `feature` with PR `pr` from `remote`, the graph of `app`
     /// loaded with its sync header, and the repo row focused.
     fn chip_state(remote: &str, pr: PullRequest, ascii: bool) -> AppState {
+        chip_state_with(remote, PrLookup::Found(pr), ascii)
+    }
+
+    /// [`chip_state`] with `lookup` landed for `app`.
+    fn chip_state_with(remote: &str, lookup: PrLookup, ascii: bool) -> AppState {
         const HEAD: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let mut state = pr_state(&[branch_repo("app", "feature")], ascii);
-        assert!(state.apply_pr_lookup(
-            Path::new("app"),
-            "feature",
-            Some(remote.into()),
-            PrLookup::Found(pr),
-        ));
+        assert!(state.apply_pr_lookup(Path::new("app"), "feature", Some(remote.into()), lookup,));
         focus_tree_row(&mut state, "repo:app");
         state.graph = Some(GraphModel {
             commits: vec![Commit {

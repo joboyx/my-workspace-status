@@ -99,6 +99,7 @@ use crate::git::UpstreamRewrite;
 use crate::helpers::{is_default_branch, visible_width};
 use crate::snapshot::{CheckoutKind, SyncStatus};
 
+use super::action::Action;
 use super::branches::{can_open_branch_picker, checkoutable_branch_names};
 use super::comments::{COMMENT_OVERLAY_CHROME_ROWS, COMMENT_OVERLAY_MAX_BODY_LINES};
 use super::commit_files::CommitFileRowKind;
@@ -756,8 +757,9 @@ pub fn fit_hint_segments(
 ///
 /// `Enter drill` shows only when Enter opens the next depth
 /// ([`AppState::nav_enter_drills`]). Esc reads `clear` while a
-/// search is armed, `← <pane>` when it moves focus left, `↑ <depth>` when
-/// it pops a depth, and is absent when it does nothing.
+/// search is armed, `dismiss` while it dismisses an outage toast,
+/// `← <pane>` when it moves focus left, `↑ <depth>` when it pops a depth,
+/// and is absent when it does nothing.
 pub fn nav_chrome_hint_segments(state: &AppState) -> Vec<HintSegment> {
     let mut out = Vec::new();
     let compare = state.is_compare_tab();
@@ -778,6 +780,9 @@ pub fn nav_chrome_hint_segments(state: &AppState) -> Vec<HintSegment> {
 fn esc_hint_label(state: &AppState) -> Option<String> {
     if state.search_active {
         return Some("clear".into());
+    }
+    if state.esc_dismisses_outage_toasts(&Action::NavEsc) {
+        return Some("dismiss".into());
     }
     if state.focus == FocusPane::Right {
         return Some(format!("← {}", state.left_pane_title()));
@@ -1767,6 +1772,32 @@ mod tests {
         app.search_active = true;
         app.search_query = "READ".into();
         assert_eq!(nav_keys(&app), vec![pair("Esc", "clear")]);
+    }
+
+    #[test]
+    fn esc_hint_reads_dismiss_while_an_outage_toast_shows() {
+        use crate::tui::outage::OutageSource;
+        let mut app = state();
+        app.focus = FocusPane::Right;
+        assert_eq!(nav_keys(&app), vec![pair("Esc", "← tree")]);
+        app.note_outage(
+            OutageSource::ScheduledFetch,
+            "git fetch (app): could not read from remote".into(),
+            std::time::Instant::now(),
+        );
+        assert_eq!(nav_keys(&app), vec![pair("Esc", "dismiss")]);
+        // At depth 0 on the left Esc does nothing, but it dismisses now.
+        app.focus = FocusPane::Left;
+        assert!(nav_keys(&app).contains(&pair("Esc", "dismiss")));
+        // An armed search still takes Esc first.
+        app.search_active = true;
+        assert!(nav_keys(&app).contains(&pair("Esc", "clear")));
+        app.search_active = false;
+        app.dismiss_outage_toasts();
+        assert!(
+            !nav_keys(&app).iter().any(|(key, _)| key == "Esc"),
+            "dismissed: Esc does nothing here again"
+        );
     }
 
     #[test]

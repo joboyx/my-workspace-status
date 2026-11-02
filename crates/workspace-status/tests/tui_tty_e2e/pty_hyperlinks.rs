@@ -3,6 +3,7 @@
 
 use std::fs;
 
+use crate::common::fake_forge::{FakeForge, Reply};
 use crate::harness::PtySession;
 use crate::seed::{daily_workspace, git, git_stdout};
 use crate::support::{
@@ -10,9 +11,12 @@ use crate::support::{
     title_has_files, tree_cursor_on, GIT_WAIT, WAIT,
 };
 
-/// GitHub-form origin of `app`. The `.invalid` host keeps the PR lookup
-/// off the network; the lookup still caches the remote for commit links.
+/// GitHub-form origin of `app`. The fake `gh` answers its PR lookup with no
+/// PR, so no real CLI runs and no lookup failure toast takes the Esc presses;
+/// the lookup still caches the remote for commit links.
 const APP_REMOTE: &str = "https://github.invalid/octo/demo.git";
+/// `owner/repo` of [`APP_REMOTE`], as the fake forge names it.
+const APP_REPO: &str = "octo/demo";
 /// Subject of the `app` commit that adds `my notes.txt`.
 const NOTES_COMMIT: &str = "notes-link";
 
@@ -33,9 +37,11 @@ fn notes_diff_title(screen: &str) -> bool {
 /// those frames were flushed.
 #[test]
 fn pty_emits_no_osc8_file_link() {
-    let (_root, workspace) = daily_workspace();
+    let (root, workspace) = daily_workspace();
     let app = workspace.join("app");
     git(&app, &["remote", "add", "origin", APP_REMOTE]);
+    let forge = FakeForge::new(&root);
+    forge.github_pr_list(APP_REPO, "main", Reply::Json("[]"));
     fs::write(app.join("my notes.txt"), "note\n").unwrap();
     git(&app, &["add", "my notes.txt"]);
     git(&app, &["commit", "-q", "-m", NOTES_COMMIT]);
@@ -44,7 +50,7 @@ fn pty_emits_no_osc8_file_link() {
     // Dirty again so the tree lists the file too.
     fs::write(app.join("my notes.txt"), "note\nmore\n").unwrap();
 
-    let mut tui = PtySession::open(&workspace);
+    let mut tui = PtySession::open_with_env(&workspace, &forge.env());
     tui.wait_contains("my notes.txt", WAIT);
 
     // Tree row and working-tree diff title.
