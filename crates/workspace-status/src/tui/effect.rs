@@ -3039,16 +3039,21 @@ impl Interpreter {
         if repos.is_empty() {
             return;
         }
-        if let Some(wave) = self.remote.wave_mut(kind) {
-            if foreground {
-                wave.foreground = true;
-            } else {
-                wave.scheduled = true;
-            }
-        }
         let mut flushed = false;
         for checkout in repos {
             flushed |= self.enqueue_remote_job(state, kind, checkout);
+        }
+        // Mark the wave only when a job of this kind is live: when every
+        // target was dropped (a pull already holds it), no wave runs, and a
+        // flag set here would leak into the next wave a key starts.
+        if self.kind_live(kind) {
+            if let Some(wave) = self.remote.wave_mut(kind) {
+                if foreground {
+                    wave.foreground = true;
+                } else {
+                    wave.scheduled = true;
+                }
+            }
         }
         if !flushed {
             self.paint_remote_running(state);
@@ -3171,6 +3176,10 @@ impl Interpreter {
             return false;
         };
         if wave.done() == 0 && wave.repos.is_empty() {
+            // No wave ran: clear its origin flags so they cannot reach the
+            // next wave.
+            wave.foreground = false;
+            wave.scheduled = false;
             return false;
         }
         let repos = std::mem::take(&mut wave.repos);
@@ -7372,6 +7381,59 @@ mod tests {
             "a good `f` does not end the scheduled-fetch outage"
         );
         assert_eq!(fetch_outage_toasts(&state).len(), 1);
+    }
+
+    #[test]
+    fn a_tick_that_queues_nothing_does_not_mark_the_next_key_fetch_as_scheduled() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Pull {
+                repos: vec!["app".into(), "lib".into()],
+            },
+            &Action::Pull,
+        );
+        let pulls = capture_jobs(&mut interp, &mut state);
+        assert_eq!(pulls.len(), 2, "app and lib pull");
+
+        // A pull holds every tick target: the tick queues no fetch.
+        background_tick(&mut interp, &mut state, unix_now_ms());
+        assert!(!interp.kind_live(RunningOp::Fetch), "no fetch wave starts");
+        assert!(interp.fetch_claim.is_none(), "the claim is released");
+        for ((id, _), repo) in pulls.into_iter().zip(["app", "lib"]) {
+            apply_id(
+                &mut interp,
+                &mut state,
+                id,
+                JobOutcome::BulkRemote {
+                    kind: RunningOp::Pull,
+                    result: RepoOpResult::Ok,
+                    repo: repo.into(),
+                },
+            );
+        }
+        let _ = capture_jobs(&mut interp, &mut state);
+
+        // A failing `f` writes the status slot only: no outage starts.
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 1, "the `f` fetch");
+        finish_fetches(&mut interp, &mut state, jobs, Some("app"));
+        assert_eq!(
+            state.status,
+            "Fetched 1 repo (1 failed: app — could not read from remote repository)"
+        );
+        assert!(!fetch_outage(&state), "a key fetch starts no outage");
+        assert!(fetch_outage_toasts(&state).is_empty());
     }
 
     #[test]

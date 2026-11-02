@@ -12,8 +12,9 @@ use crate::support::{GIT_WAIT, WAIT};
 /// it.
 const POLL: &str = "1000";
 
-/// The outage toast text of the failing GitLab host.
-const TOAST: &str = "glab (gitlab.com): glab: 401 invalid_token";
+/// The outage toast text of the failing GitLab host: the reason's leading
+/// `glab: ` is cut.
+const TOAST: &str = "glab (gitlab.com): 401 invalid_token";
 
 /// The header mark at the right end of the tab strip.
 const HEADER: &str = "PR lookup failed";
@@ -72,8 +73,8 @@ fn track_origin(checkout: &std::path::Path, branch: &str) {
 /// with `glab: 401 invalid_token`, and `appbox` (GitHub `#7`, in review),
 /// polled every second.
 ///
-/// Proof: at launch the toast reads `glab (gitlab.com): glab: 401
-/// invalid_token · Esc dismiss`, the tab strip ends in `PR lookup failed`,
+/// Proof: at launch the toast reads `glab (gitlab.com): 401 invalid_token
+/// · Esc dismiss`, the tab strip ends in `PR lookup failed`,
 /// and `apibox` ends in a bold red `!` while `appbox` keeps `#7 P`. Esc
 /// hides the toast and keeps the header. Two more failed polls bring no
 /// toast back. Once `glab` answers, a poll lands `!5 P` and the header

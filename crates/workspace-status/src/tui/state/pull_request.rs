@@ -250,6 +250,21 @@ const UNKNOWN_PR_TOOL: &str = "PR";
 /// GitLab host ([`UNKNOWN_PR_TOOL`]).
 const UNKNOWN_PR_HOST: &str = "unknown";
 
+/// The outage toast text of a failed lookup through `tool` on `host`:
+/// `<tool> (<host>): <reason>`, [`PR_LOOKUP_FAILED`] when the CLI printed
+/// no reason. A reason is the CLI's first stderr line, which usually starts
+/// with the tool name again (`glab: 401 Unauthorized`); that one leading
+/// `<tool>: ` is cut so the toast spends its width on the reason.
+fn pr_outage_toast_text(tool: &str, host: &str, reason: Option<&str>) -> String {
+    let reason = reason.unwrap_or(PR_LOOKUP_FAILED);
+    let reason = reason
+        .strip_prefix(tool)
+        .and_then(|rest| rest.strip_prefix(": "))
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(reason);
+    format!("{tool} ({host}): {reason}")
+}
+
 /// What a landed lookup tells the PR lookup outages ([`PrCache::land`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum LandedLookup {
@@ -695,10 +710,7 @@ impl PrCache {
                 let (tool, name) = forge
                     .clone()
                     .unwrap_or_else(|| (UNKNOWN_PR_TOOL, UNKNOWN_PR_HOST.to_string()));
-                let text = format!(
-                    "{tool} ({name}): {}",
-                    reason.as_deref().unwrap_or(PR_LOOKUP_FAILED)
-                );
+                let text = pr_outage_toast_text(tool, &name, reason.as_deref());
                 let source = OutageSource::PrLookup { tool, host: name };
                 let failure = PrLookupFailure {
                     reason,
@@ -5254,6 +5266,51 @@ mod tests {
 
     fn invalid_token() -> PrLookup {
         PrLookup::Failed(Some("invalid_token".into()))
+    }
+
+    #[test]
+    fn a_pr_outage_toast_cuts_one_leading_tool_name_from_the_reason() {
+        assert_eq!(
+            pr_outage_toast_text("glab", "gitlab.com", Some("glab: 401 Unauthorized")),
+            "glab (gitlab.com): 401 Unauthorized"
+        );
+        assert_eq!(
+            pr_outage_toast_text("glab", "gitlab.com", Some("invalid_token")),
+            "glab (gitlab.com): invalid_token",
+            "a reason without the prefix is unchanged"
+        );
+        assert_eq!(
+            pr_outage_toast_text("gh", "github.com", Some("gh: gh: HTTP 401")),
+            "gh (github.com): gh: HTTP 401",
+            "only one prefix goes"
+        );
+        assert_eq!(
+            pr_outage_toast_text("gh", "github.com", Some("ghost: HTTP 401")),
+            "gh (github.com): ghost: HTTP 401",
+            "only the exact tool name"
+        );
+        assert_eq!(
+            pr_outage_toast_text("gh", "github.com", Some("glab: HTTP 401")),
+            "gh (github.com): glab: HTTP 401",
+            "another tool's name stays"
+        );
+        assert_eq!(
+            pr_outage_toast_text("gh", "github.com", None),
+            "gh (github.com): lookup failed"
+        );
+    }
+
+    #[test]
+    fn a_failed_lookup_whose_reason_repeats_the_tool_toasts_it_once() {
+        let mut app = app_with(&[pushed("app")], &[]);
+        let _ = app.due_pr_lookups();
+        let reason = PrLookup::Failed(Some("glab: 401 Unauthorized".into()));
+        land_pr(&mut app, "app", &gl("app"), reason, Instant::now());
+        assert_eq!(outage_toasts(&app), ["glab (gitlab.com): 401 Unauthorized"]);
+        assert_eq!(
+            app.outages.get(&gitlab_outage()).unwrap().reason,
+            "glab (gitlab.com): 401 Unauthorized"
+        );
     }
 
     #[test]

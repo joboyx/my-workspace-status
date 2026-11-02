@@ -91,9 +91,6 @@ pub struct Outage {
     /// The latest failure text, as its toast shows it
     /// (`glab (gitlab.com): invalid_token`).
     pub reason: String,
-    /// True once Esc hid this outage's toast. A dismissed toast does not
-    /// come back while the outage lasts.
-    pub dismissed: bool,
 }
 
 /// What a failure report changed ([`Outages::fail`]).
@@ -116,7 +113,7 @@ pub struct Outages {
 
 impl Outages {
     /// Note that `source` failed with `reason`: start its outage, or update
-    /// the reason of the outage that goes on (its dismiss stays).
+    /// the reason of the outage that goes on.
     pub fn fail(&mut self, source: OutageSource, reason: String) -> OutageNote {
         match self.entries.get_mut(&source) {
             Some(outage) if outage.reason == reason => OutageNote::Unchanged,
@@ -125,13 +122,7 @@ impl Outages {
                 OutageNote::ReasonChanged
             }
             None => {
-                self.entries.insert(
-                    source,
-                    Outage {
-                        reason,
-                        dismissed: false,
-                    },
-                );
+                self.entries.insert(source, Outage { reason });
                 OutageNote::Started
             }
         }
@@ -140,17 +131,6 @@ impl Outages {
     /// End the outage of `source`. True when it was failing.
     pub fn recover(&mut self, source: &OutageSource) -> bool {
         self.entries.remove(source).is_some()
-    }
-
-    /// Mark every outage's toast dismissed. True when one was not
-    /// dismissed before.
-    pub fn dismiss_all(&mut self) -> bool {
-        let mut any = false;
-        for outage in self.entries.values_mut() {
-            any |= !outage.dismissed;
-            outage.dismissed = true;
-        }
-        any
     }
 
     /// The sources that fail now, in [`OutageSource`] order.
@@ -219,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn fail_starts_once_then_updates_the_reason_and_keeps_the_dismiss() {
+    fn fail_starts_once_then_updates_the_reason() {
         let mut outages = Outages::default();
         assert!(outages.is_empty());
         assert_eq!(
@@ -230,8 +210,6 @@ mod tests {
             outages.fail(gitlab(), "glab (gitlab.com): HTTP 401".into()),
             OutageNote::Unchanged
         );
-        assert!(outages.dismiss_all(), "a shown toast is dismissed");
-        assert!(!outages.dismiss_all(), "nothing left to dismiss");
         assert_eq!(
             outages.fail(gitlab(), "glab (gitlab.com): invalid_token".into()),
             OutageNote::ReasonChanged
@@ -240,9 +218,8 @@ mod tests {
             outages.get(&gitlab()),
             Some(&Outage {
                 reason: "glab (gitlab.com): invalid_token".into(),
-                dismissed: true,
             }),
-            "the new reason, still dismissed"
+            "the new reason"
         );
         assert!(outages.recover(&gitlab()));
         assert!(!outages.recover(&gitlab()), "already working");
@@ -252,7 +229,6 @@ mod tests {
             OutageNote::Started,
             "a fail after a recover starts a new outage"
         );
-        assert!(!outages.get(&gitlab()).unwrap().dismissed);
     }
 
     #[test]

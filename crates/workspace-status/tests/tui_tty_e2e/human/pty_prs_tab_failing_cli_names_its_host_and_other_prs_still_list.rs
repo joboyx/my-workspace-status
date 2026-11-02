@@ -64,8 +64,9 @@ fn dismiss_outage_toast(tui: &mut PtySession, reason: &str) {
 /// Seed: GitHub `#40` and `#43` and GitLab `!31`. The GitLab list call
 /// exits 1 with a two-line stderr from the start.
 ///
-/// Each failing host also shows its outage toast; Esc dismisses it before
-/// the list is read.
+/// Each failing host also shows its outage toast, with the leading tool
+/// name of the reason cut (`glab (gitlab.com): 401 Unauthorized`); Esc
+/// dismisses it before the list is read.
 ///
 /// Proof: the tab reads `PRs 2`; the list shows `! glab (gitlab.com): glab:
 /// 401 Unauthorized` (first stderr line only), then `ABC-120` with `#43` and
@@ -101,7 +102,7 @@ fn pty_prs_tab_failing_cli_names_its_host_and_other_prs_still_list() {
         GIT_WAIT,
     );
     tui.send_bytes(b"gp");
-    dismiss_outage_toast(&mut tui, "glab (gitlab.com): glab: 401 Unauthorized");
+    dismiss_outage_toast(&mut tui, "glab (gitlab.com): 401 Unauthorized");
     tui.wait_pred(
         |_| {
             notes(&tui) == ["! glab (gitlab.com): glab: 401 Unauthorized"]
@@ -146,7 +147,7 @@ fn pty_prs_tab_failing_cli_names_its_host_and_other_prs_still_list() {
         "r looks every checkout up again",
         WAIT,
     );
-    dismiss_outage_toast(&mut tui, "gh (github.com): gh: HTTP 502");
+    dismiss_outage_toast(&mut tui, "gh (github.com): HTTP 502");
     tui.wait_pred(
         |_| {
             notes(&tui) == ["! gh (github.com): gh: HTTP 502"]

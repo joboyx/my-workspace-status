@@ -206,15 +206,15 @@ $V capture "$RUN" t4-merged
 
 The fake CLIs exit 1 with a one-line stderr (`gh: HTTP 502`, `glab: HTTP 502`). The popover is 64 columns wide and ends a longer value in `…`, so the sets keep the line short. `gh` pins the popover of every mark on the row, and the PR section is the last: the recipe launches at `160x70` so the `services/api` row (branch, repo, diverged and change count sections before it) shows the whole PR section.
 
-The first failing poll of each forge host starts its outage: one sticky toast `<tool> (<host>): <reason> · Esc dismiss` per host, and `PR lookup failed` at the right end of the tab strip. More failures on that host show no new toast. Esc dismisses the toasts before the popover pins, and the header mark stays.
+The first failing poll of each forge host starts its outage: one sticky toast `<tool> (<host>): <reason> · Esc dismiss` per host (the reason's leading `<tool>: ` is cut, so the toast reads `gh (github.com): HTTP 502`), and `PR lookup failed` at the right end of the tab strip. More failures on that host show no new toast. Esc dismisses the toasts before the popover pins, and the header mark stays.
 
 ```bash
 fresh context github-review gitlab-review -- --size 160x70 --env WS_STATUS_PR_POLL_MS=1000 --fake-forge "$FORGE"
 $V wait "$RUN" '#7 P' && $V wait "$RUN" '!5 P'
 $V capture "$RUN" before-fail
 $V scenario "$FORGE" github-cli-fails gitlab-cli-fails
-$V wait "$RUN" 'gh (github.com): gh: HTTP 502 · Esc dismiss'       # the first failing poll
-$V wait "$RUN" 'glab (gitlab.com): glab: HTTP 502 · Esc dismiss'
+$V wait "$RUN" 'gh (github.com): HTTP 502 · Esc dismiss'           # the first failing poll
+$V wait "$RUN" 'glab (gitlab.com): HTTP 502 · Esc dismiss'
 $V wait "$RUN" 'PR lookup failed'                                   # the header mark
 sleep 4                                              # a few polls; the one sleep in this file
 $V capture "$RUN" cli-fails | grep -c 'Esc dismiss'  # 2: one toast per host, no more
@@ -251,7 +251,7 @@ sweep review  '#7 ○' '!5 ○'
 One outage per forge host. It starts on the first failed lookup, shows its toast once, survives `r`, and ends only when no checkout on that host fails any more. A checkout with no earlier answer shows the failure mark `!` (ASCII and Nerd alike, bold red, no ref) instead of a badge. GitHub keeps answering here, so it has no outage.
 
 ```bash
-TOAST='glab (gitlab.com): glab: HTTP 502 · Esc dismiss'
+TOAST='glab (gitlab.com): HTTP 502 · Esc dismiss'
 glab_calls() { $V calls "$RUN" | grep -c '^glab '; }
 # 1. A host that fails from launch: the toast, the header mark, and the failure mark.
 fresh context github-review gitlab-cli-fails -- --env WS_STATUS_PR_POLL_MS=1000 --fake-forge "$FORGE"

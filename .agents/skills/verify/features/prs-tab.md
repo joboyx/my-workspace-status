@@ -137,7 +137,7 @@ $V keys "$RUN" Escape && $V wait "$RUN" 'v ABC-120 · m merged' && $V wait --gon
 fresh prs-tab gitlab-cli-fails -- --fake-forge "$FORGE"
 $V wait --regex "$RUN" '#12 m($|[^[:alnum:]])'
 $V keys "$RUN" g p
-$V wait "$RUN" 'glab (gitlab.com): glab: HTTP 502 · Esc dismiss' && $V wait "$RUN" 'PR lookup failed'   # the outage toast and header mark
+$V wait "$RUN" 'glab (gitlab.com): HTTP 502 · Esc dismiss' && $V wait "$RUN" 'PR lookup failed'   # the outage toast and header mark
 $V keys "$RUN" Escape && $V wait --gone "$RUN" 'Esc dismiss'   # the toast paints over the bottom-right rows
 $V wait "$RUN" '! glab (gitlab.com): glab: HTTP 502' && $V wait "$RUN" 'lookups failing' && $V wait "$RUN" 'PRs 3'
 $V capture "$RUN" glab-fails | grep -c '!5   acme'       # 0

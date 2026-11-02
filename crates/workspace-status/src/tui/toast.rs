@@ -29,9 +29,9 @@ pub const PR_TOAST_TTL_MS: u64 = 8000;
 /// drops from 1.0 to 0.0 over this window, whatever the toast's TTL.
 pub const TOAST_FADE_MS: u64 = FLASH_MS;
 
-/// Most toasts on screen at once. A push past it drops the oldest toast
-/// that is not an outage toast (the oldest outage toast only when every
-/// held toast is one).
+/// Most acks and PR change toasts on screen at once. A push past it drops
+/// the oldest of them. Outage toasts do not count against it and are never
+/// dropped for room: there is at most one per outage.
 pub const TOAST_MAX: usize = 3;
 
 /// The muted detail of an outage toast: the key that dismisses it.
@@ -119,7 +119,8 @@ impl Toast {
     }
 }
 
-/// Live toasts, oldest first. At most [`TOAST_MAX`].
+/// Live toasts, oldest first: at most [`TOAST_MAX`] acks and PR change
+/// toasts, plus one toast per outage.
 #[derive(Clone, Debug, Default)]
 pub struct ToastStack {
     items: VecDeque<Toast>,
@@ -127,25 +128,22 @@ pub struct ToastStack {
 
 impl ToastStack {
     /// Add an acknowledgement pushed at `now` ([`Toast::ack`]). Drops the
-    /// oldest past [`TOAST_MAX`].
+    /// oldest ack or PR change toast past [`TOAST_MAX`].
     pub fn push(&mut self, text: impl Into<String>, now: Instant) {
         self.push_with(Toast::ack(text, now));
     }
 
-    /// Add `toast`, pushed at its `at`. Past [`TOAST_MAX`] it drops the
-    /// oldest toast that is not an outage toast, of either other kind; an
-    /// outage toast goes only when every held toast is one.
+    /// Add `toast`, pushed at its `at`. When more than [`TOAST_MAX`] acks
+    /// and PR change toasts are held, it drops the oldest of them. Outage
+    /// toasts do not count and stay, so they never take the room of a new
+    /// ack.
     pub fn push_with(&mut self, toast: Toast) {
         self.items.push_back(toast);
-        while self.items.len() > TOAST_MAX {
-            match self.items.iter().position(|held| !held.is_outage()) {
-                Some(index) => {
-                    self.items.remove(index);
-                }
-                None => {
-                    self.items.pop_front();
-                }
-            }
+        while self.items.iter().filter(|held| !held.is_outage()).count() > TOAST_MAX {
+            let Some(index) = self.items.iter().position(|held| !held.is_outage()) else {
+                break;
+            };
+            self.items.remove(index);
         }
     }
 
@@ -334,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn eviction_keeps_outage_toasts_until_every_held_toast_is_one() {
+    fn outage_toasts_take_no_ack_room_and_are_never_evicted() {
         let t0 = Instant::now();
         let mut stack = ToastStack::default();
         stack.push_with(outage_toast("a.example", t0));
@@ -345,36 +343,38 @@ mod tests {
             texts(&stack, t0),
             [
                 "glab (a.example): invalid_token",
+                "copied",
                 "#1 CI failed",
                 "staged README.md"
             ],
-            "the oldest non-outage toast goes"
+            "the outage toast takes none of the 3 ack and PR slots"
         );
-        stack.push_with(outage_toast("b.example", t0));
-        stack.push_with(outage_toast("c.example", t0));
+        stack.push("Fetched 2 repos", t0);
         assert_eq!(
             texts(&stack, t0),
             [
                 "glab (a.example): invalid_token",
-                "glab (b.example): invalid_token",
-                "glab (c.example): invalid_token"
-            ]
+                "#1 CI failed",
+                "staged README.md",
+                "Fetched 2 repos"
+            ],
+            "the oldest ack or PR toast goes, the outage toast stays"
         );
+        stack.push_with(outage_toast("b.example", t0));
+        stack.push_with(outage_toast("c.example", t0));
+        assert_eq!(texts(&stack, t0).len(), 6, "no toast goes for an outage");
         stack.push("copied", t0);
-        assert_eq!(texts(&stack, t0).len(), 3);
-        assert!(
-            !texts(&stack, t0).contains(&"copied".to_string()),
-            "a new ack is the only non-outage toast, so it goes"
-        );
-        stack.push_with(outage_toast("d.example", t0));
         assert_eq!(
             texts(&stack, t0),
             [
+                "glab (a.example): invalid_token",
+                "staged README.md",
+                "Fetched 2 repos",
                 "glab (b.example): invalid_token",
                 "glab (c.example): invalid_token",
-                "glab (d.example): invalid_token"
+                "copied"
             ],
-            "all outage toasts: the oldest goes"
+            "three outage toasts: a new ack is still held"
         );
     }
 

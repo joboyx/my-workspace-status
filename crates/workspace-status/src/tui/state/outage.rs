@@ -16,7 +16,7 @@ impl AppState {
     /// A source that was not failing starts an outage and pushes one
     /// sticky outage toast at `now`. A source that already fails only
     /// updates its stored reason (and the text of its toast while that
-    /// still shows): no new toast, and a dismissed toast stays dismissed.
+    /// still shows): no new toast, so a dismissed toast stays gone.
     /// Pure state, no I/O.
     pub(crate) fn note_outage(&mut self, source: OutageSource, toast_text: String, now: Instant) {
         match self.outages.fail(source.clone(), toast_text.clone()) {
@@ -53,10 +53,10 @@ impl AppState {
     }
 
     /// Hide every shown outage toast. The outages stay, so the header
-    /// mark stays, and their toasts do not come back while they last.
-    /// True when a toast was shown.
+    /// mark stays, and their toasts do not come back while they last:
+    /// only a new outage ([`Self::note_outage`] on a source that was not
+    /// failing) pushes a toast. True when a toast was shown.
     pub(crate) fn dismiss_outage_toasts(&mut self) -> bool {
-        self.outages.dismiss_all();
         self.toasts.dismiss_outages()
     }
 
@@ -162,7 +162,11 @@ mod tests {
         // A fail while dismissed shows no toast.
         app.note_outage(gitlab(), "glab (gitlab.com): HTTP 401".into(), now);
         assert!(toast_texts(&app).is_empty());
-        assert!(app.outages.get(&gitlab()).unwrap().dismissed);
+        assert_eq!(
+            app.outages.get(&gitlab()).unwrap().reason,
+            "glab (gitlab.com): HTTP 401",
+            "the outage goes on with the new reason"
+        );
 
         // Recover: the outage and its header part go.
         app.note_recovered(&gitlab());

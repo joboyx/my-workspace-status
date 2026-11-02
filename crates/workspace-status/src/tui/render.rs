@@ -21045,6 +21045,42 @@ mod tests {
     }
 
     #[test]
+    fn an_ack_paints_below_three_outage_toasts() {
+        use super::super::outage::OutageSource;
+        let mut state = toast_state(StatusMessage::default(), false);
+        let now = Instant::now();
+        let github = OutageSource::PrLookup {
+            tool: "gh",
+            host: "github.com".into(),
+        };
+        state.note_outage(github, "gh (github.com): HTTP 401".into(), now);
+        state.note_outage(
+            gitlab_outage(),
+            "glab (gitlab.com): invalid_token".into(),
+            now,
+        );
+        state.note_outage(
+            OutageSource::ScheduledFetch,
+            "git fetch (app): could not read from remote repository".into(),
+            now,
+        );
+        state.status = StatusMessage::ok("Fetched 2 repos");
+        let mut terminal = Terminal::new(TestBackend::new(TOAST_W, TOAST_H)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let bottom = TOAST_H - 4;
+        for (text, y) in [
+            ("gh (github.com): HTTP 401", bottom - 3),
+            ("glab (gitlab.com): invalid_token", bottom - 2),
+            ("git fetch (app): could not", bottom - 1),
+            ("Fetched 2 repos", bottom),
+        ] {
+            let rows = rows_with(&terminal, text);
+            assert_eq!(rows.len(), 1, "{text}: {rows:?}");
+            assert_eq!(rows[0].0, y, "{text}: newest at the bottom");
+        }
+    }
+
+    #[test]
     fn a_long_outage_toast_cuts_its_text_and_keeps_the_hint_up_to_72_columns() {
         let reason = format!("glab (gitlab.com): {}", "invalid_token ".repeat(8));
         let mut state = toast_state(StatusMessage::default(), false);
