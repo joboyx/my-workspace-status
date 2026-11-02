@@ -1271,6 +1271,9 @@ impl AppState {
             state.commit_msg_lines = lines;
         }
         state.open_background_fetch_store(settings.fetch_store.clone());
+        // A checkout whose `git status` failed in the launch snapshot
+        // starts the live-refresh outage at once.
+        state.sync_live_refresh_outage(Instant::now());
         state
     }
 
@@ -2623,6 +2626,7 @@ impl AppState {
         self.signatures = tree_signatures(&self.tree, &self.cwd);
         self.reconcile_viewed_store();
         self.reconcile_comment_store();
+        self.sync_live_refresh_outage(Instant::now());
     }
 
     /// Apply a watch poll. Keeps fold / focus / scroll. Flashes only rows

@@ -1,5 +1,7 @@
 //! List keys, search, help, view toggles, and mouse hit-test.
 
+use std::time::Instant;
+
 use super::super::action::{Action, Effect, ExternalDiffKind};
 use super::super::branches::can_open_branch_picker;
 use super::super::command_palette::{CommandScope, PaletteCommand};
@@ -101,6 +103,8 @@ impl AppState {
                 self.show_hidden = !self.show_hidden;
                 self.snapshot.show_hidden = self.show_hidden;
                 self.rebuild_rows();
+                // A hidden checkout whose status failed counts only while shown.
+                self.sync_live_refresh_outage(Instant::now());
                 self.status = if self.show_hidden {
                     "showing hidden repos".into()
                 } else {

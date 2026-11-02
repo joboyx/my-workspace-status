@@ -6,7 +6,8 @@ use std::time::Instant;
 use super::super::action::Action;
 use super::super::outage::{OutageNote, OutageSource};
 use super::super::toast::Toast;
-use super::AppState;
+use super::super::watch::live_refresh_failure_text;
+use super::{visible_snapshot, AppState};
 
 impl AppState {
     /// Note that `source` failed, with `toast_text` naming the tool, the
@@ -33,6 +34,21 @@ impl AppState {
     pub(crate) fn note_recovered(&mut self, source: &OutageSource) {
         if self.outages.recover(source) {
             self.toasts.drop_outage(source);
+        }
+    }
+
+    /// Start, update, or end the live-refresh outage from the checkout rows
+    /// the tree shows now: it fails while any of them carries the `status
+    /// failed` note ([`live_refresh_failure_text`]) and works when none
+    /// does. A hidden row that the tree does not show does not count.
+    ///
+    /// Called each time a snapshot lands (launch, watch tick, reload) and
+    /// when `.` shows or hides the hidden repos. Pure state, no I/O.
+    pub(crate) fn sync_live_refresh_outage(&mut self, now: Instant) {
+        let visible = visible_snapshot(&self.snapshot, self.show_hidden);
+        match live_refresh_failure_text(&visible.repos) {
+            Some(text) => self.note_outage(OutageSource::LiveRefresh, text, now),
+            None => self.note_recovered(&OutageSource::LiveRefresh),
         }
     }
 
@@ -330,5 +346,132 @@ mod tests {
         app.dispatch(Action::BackClick);
         assert!(toast_texts(&app).is_empty(), "a right click is Esc");
         assert!(shown(&app));
+    }
+
+    /// A checkout row whose `git status` failed, as discovery builds it.
+    fn status_failed(name: &str) -> RepoSnapshot {
+        let mut row = checkout(name);
+        row.sync_note = crate::helpers::STATUS_FAILED_NOTE.into();
+        row
+    }
+
+    /// The header mark the tab strip paints for the outages now.
+    fn header(app: &AppState) -> Option<String> {
+        super::super::super::outage::outage_header_text(&app.outages.kinds(), false, 80)
+    }
+
+    #[test]
+    fn a_status_failed_row_toasts_once_per_outage_and_a_good_snapshot_ends_it() {
+        let mut app = app();
+        let good = || build_workspace_snapshot(&[checkout("app")], &[], false, &[]);
+        let bad = || build_workspace_snapshot(&[status_failed("app")], &[], false, &[]);
+        assert!(
+            app.outages.is_empty(),
+            "a good launch snapshot fails nothing"
+        );
+
+        // A watch tick lands a failed row: one toast and the header mark.
+        app.apply_watch_snapshot(bad());
+        assert_eq!(toast_texts(&app), ["git status (app): status failed"]);
+        assert_eq!(header(&app).as_deref(), Some("\u{2715} refresh failed"));
+        let toast = app.toasts.visible(Instant::now()).next().unwrap().0.clone();
+        assert_eq!(toast.outage, Some(OutageSource::LiveRefresh));
+
+        // The same failure on the next tick: no new toast.
+        app.apply_watch_snapshot(bad());
+        assert_eq!(toast_texts(&app).len(), 1);
+
+        // Esc dismisses the toast; the header stays and more ticks bring
+        // no toast back.
+        app.focus = FocusPane::Right;
+        app.dispatch(Action::NavEsc);
+        assert!(toast_texts(&app).is_empty());
+        assert_eq!(
+            app.focus,
+            FocusPane::Right,
+            "the dismiss press only dismisses"
+        );
+        app.apply_watch_snapshot(bad());
+        assert!(toast_texts(&app).is_empty(), "no repeat after a dismiss");
+        assert_eq!(header(&app).as_deref(), Some("\u{2715} refresh failed"));
+
+        // A good snapshot ends the outage.
+        app.apply_watch_snapshot(good());
+        assert!(app.outages.is_empty());
+        assert_eq!(header(&app), None);
+
+        // A failure after the recover toasts again; a recover while the
+        // toast shows drops it.
+        app.apply_watch_snapshot(bad());
+        assert_eq!(toast_texts(&app), ["git status (app): status failed"]);
+        app.apply_watch_snapshot(good());
+        assert!(toast_texts(&app).is_empty());
+        assert!(app.outages.is_empty());
+    }
+
+    #[test]
+    fn several_status_failed_rows_share_one_toast_that_counts_the_rest() {
+        let mut app = app();
+        let rows = |rows: &[RepoSnapshot]| build_workspace_snapshot(rows, &[], false, &[]);
+        app.apply_watch_snapshot(rows(&[status_failed("app"), status_failed("lib")]));
+        assert_eq!(
+            toast_texts(&app),
+            ["git status (app): status failed +1 more"]
+        );
+
+        // One row works again: the same toast names the one left.
+        app.apply_watch_snapshot(rows(&[checkout("app"), status_failed("lib")]));
+        assert_eq!(toast_texts(&app), ["git status (lib): status failed"]);
+        assert_eq!(
+            app.outages.get(&OutageSource::LiveRefresh).unwrap().reason,
+            "git status (lib): status failed"
+        );
+
+        // A checkout that vanishes from the snapshot no longer counts.
+        app.apply_watch_snapshot(rows(&[checkout("app")]));
+        assert!(app.outages.is_empty());
+        assert!(toast_texts(&app).is_empty());
+    }
+
+    #[test]
+    fn a_hidden_status_failed_row_counts_only_while_the_tree_shows_it() {
+        let mut app = app();
+        let snapshot = build_workspace_snapshot(
+            &[checkout("app"), status_failed("notes")],
+            &["notes".into()],
+            false,
+            &[],
+        );
+        app.apply_watch_snapshot(snapshot);
+        assert!(app.outages.is_empty(), "the tree hides `notes`");
+
+        app.dispatch(Action::ToggleShowHidden);
+        assert_eq!(toast_texts(&app), ["git status (notes): status failed"]);
+        app.dispatch(Action::ToggleShowHidden);
+        assert!(app.outages.is_empty(), "hidden again: the outage ends");
+        assert!(toast_texts(&app).is_empty());
+    }
+
+    #[test]
+    fn a_status_failed_row_in_the_launch_snapshot_toasts_at_launch() {
+        use crate::settings::Settings;
+        let dir = crate::testutil::unique_dir("ws-launch-live-refresh-outage");
+        std::fs::create_dir_all(&dir).unwrap();
+        let stores = [
+            ("WS_STATUS_VIEWED_STORE", dir.join("viewed.json")),
+            ("WS_STATUS_COMMENT_STORE", dir.join("comments.json")),
+            ("WS_STATUS_UI_STORE", dir.join("ui-state.json")),
+        ];
+        let settings = Settings::resolve(&Default::default(), |key| {
+            stores
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, path)| path.display().to_string())
+        });
+        let snapshot = build_workspace_snapshot(&[status_failed("app")], &[], false, &[]);
+        let app = AppState::launch(PathBuf::from("/tmp"), snapshot, &settings);
+        assert_eq!(toast_texts(&app), ["git status (app): status failed"]);
+        assert_eq!(header(&app).as_deref(), Some("\u{2715} refresh failed"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

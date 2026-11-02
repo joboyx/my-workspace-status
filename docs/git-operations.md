@@ -122,7 +122,7 @@ After `find_repos_with_config` (primaries; still skips dot-dirs), discovery list
 
 One status call per repo produces branch, upstream, ahead/behind counts, and all three file buckets. `--untracked-files=all` lists files inside untracked directories rather than collapsing to `dir/`, which the tree view needs.
 
-Unborn repos (`## No commits yet on <branch>`) become a normal snapshot with `sync_note: no commits yet`. When status stdout is empty or the branch header cannot be parsed, `process_repo` returns a failure snapshot (`sync_note: status failed`, `merged_into_default: None`) instead of dropping the repo — so the plain report cannot claim all-clean by omission.
+Unborn repos (`## No commits yet on <branch>`) become a normal snapshot with `sync_note: no commits yet`. When status stdout is empty or the branch header cannot be parsed, `process_repo` returns a failure snapshot (`sync_note: status failed`, `merged_into_default: None`) instead of dropping the repo — so the plain report cannot claim all-clean by omission. In the TUI a shown row with that note starts the live-refresh outage ([tui-rust.md](./tui-rust.md) → **Background job failures**).
 
 ## `crates/workspace-status/src/parallel.rs`
 

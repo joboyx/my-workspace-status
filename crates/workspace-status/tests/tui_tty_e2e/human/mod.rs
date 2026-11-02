@@ -204,6 +204,7 @@ mod pty_watch_applies_while_keys_arrive;
 mod pty_watch_keeps_graph_focus;
 mod pty_watch_reloads_silent_head_move;
 mod pty_watch_row_flash_add_and_remove;
+mod pty_watch_status_failed_toasts_once_per_outage;
 mod pty_watch_updates_ahead_count;
 mod pty_workspace_command_palette;
 mod pty_worktree_w_remove_confirm;
