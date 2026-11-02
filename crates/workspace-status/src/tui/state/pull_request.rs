@@ -281,6 +281,7 @@ impl PrTransition {
             role: SegRole::Repo,
             ttl_ms: PR_TOAST_TTL_MS,
             at,
+            outage: None,
         }
     }
 
@@ -308,6 +309,7 @@ fn more_pr_changes_toast(more: usize, at: Instant) -> Toast {
         role: SegRole::Muted,
         ttl_ms: PR_TOAST_TTL_MS,
         at,
+        outage: None,
     }
 }
 

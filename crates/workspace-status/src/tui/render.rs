@@ -65,6 +65,7 @@ use super::icons::{
 };
 use super::line_blame::{fit_annotation, relative_age, short_sha, BlameSide, BLAME_MENU_ROWS};
 use super::ops::RevertScope;
+use super::outage::outage_header_text;
 use super::popover::{
     commit_meta_icon, flat_lines, focused_line, graph_icon, graph_row_id, graph_sync_kind,
     popover_rect, tree_icon_target, IconTarget, PopoverLine, POPOVER_FOOTER, POPOVER_MAX_WIDTH,
@@ -399,12 +400,19 @@ pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant)
 /// Widest a toast row may be (columns).
 const TOAST_MAX_COLS: u16 = 48;
 
+/// Widest an outage toast row may be (columns): it names a tool, a host,
+/// and a reason, and keeps its dismiss hint.
+const OUTAGE_TOAST_MAX_COLS: u16 = 72;
+
 /// Toast stack in the bottom-right of `pane_area`, newest on the bottom
 /// row, one row each: ` <mark> <text> · <detail> ` ([`toast_spans`]).
 ///
 /// An ack sits on the add-flash ramp step for its fade strength. A PR
-/// change sits on `panel`, where its state glyph and muted detail stay
-/// readable, and fades by mixing its colours toward `surface`.
+/// change and an outage sit on `panel`, where the state glyph and the
+/// muted detail stay readable; a PR change fades by mixing its colours
+/// toward `surface`, an outage never fades. An outage row may be up to
+/// [`OUTAGE_TOAST_MAX_COLS`] wide, the others [`TOAST_MAX_COLS`], and none
+/// wider than the pane less 2.
 /// Under `NO_COLOR` the row is reversed terminal colours with no fade.
 /// While a toast fades the frame is marked animating, so the loop ticks.
 /// While every toast holds full strength it asks for one wake at the first
@@ -415,7 +423,6 @@ fn draw_toasts(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
         return;
     }
     let palette = state.theme.palette();
-    let cap = TOAST_MAX_COLS.min(pane_area.width - 2);
     // Inside the pane border: one column in from the right, one row up.
     let bottom = pane_area.bottom() - 2;
     let rows = usize::from(pane_area.height - 2);
@@ -437,6 +444,12 @@ fn draw_toasts(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
             let bg = mix_toward(palette.panel, palette.surface, fade);
             Some((palette, bg, fade))
         };
+        let max_cols = if toast.is_outage() {
+            OUTAGE_TOAST_MAX_COLS
+        } else {
+            TOAST_MAX_COLS
+        };
+        let cap = max_cols.min(pane_area.width - 2);
         let spans = toast_spans(toast, state.ascii, usize::from(cap), colors);
         // Cell widths as ratatui paints them, so the row ends one column in
         // from the pane edge with no blank cell.
@@ -469,7 +482,8 @@ fn draw_toasts(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
 /// `None` (`NO_COLOR`) paints reversed terminal colours. The ack mark
 /// (` ✓ `, ASCII ` ok `) takes the text colour; a glyph mark paints bold
 /// in its own role (a PR state colour). The text paints in the toast's
-/// role, the ` · <detail>` tail muted.
+/// role, the ` · <detail>` tail muted. An outage toast keeps its whole
+/// detail (the dismiss hint) and cuts its text instead.
 fn toast_spans(
     toast: &Toast,
     ascii: bool,
@@ -493,12 +507,22 @@ fn toast_spans(
         ),
         ToastMark::None => (" ".to_string(), style(toast.role)),
     };
+    let body_max = cap.saturating_sub(UnicodeWidthStr::width(mark.as_str()) + 1);
+    if toast.is_outage() && !toast.detail.is_empty() {
+        let tail = format!(" · {}", toast.detail);
+        let text_max = body_max.saturating_sub(UnicodeWidthStr::width(tail.as_str()));
+        return vec![
+            Span::styled(mark, mark_style),
+            Span::styled(fit_with_ellipsis(&toast.text, text_max), style(toast.role)),
+            Span::styled(tail, style(SegRole::Muted)),
+            Span::styled(" ", style(toast.role)),
+        ];
+    }
     let body = if toast.detail.is_empty() {
         toast.text.clone()
     } else {
         format!("{} · {}", toast.text, toast.detail)
     };
-    let body_max = cap.saturating_sub(UnicodeWidthStr::width(mark.as_str()) + 1);
     let body = fit_with_ellipsis(&body, body_max);
     // A cut takes the detail first; a cut into the text keeps its colour.
     let (text, tail) = match body.strip_prefix(toast.text.as_str()) {
@@ -6226,6 +6250,46 @@ fn draw_tab_strip(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         Paragraph::new(Line::from(spans)),
         Rect {
             width: limit.saturating_sub(area.x),
+            ..area
+        },
+    );
+    draw_outage_header(frame, area, state, x, limit);
+}
+
+/// The failure mark of the failing background jobs ([`outage_header_text`]),
+/// bold in `palette.deleted`, flush right in the free cells of the tab strip
+/// row `area`: right of the last tab (which ends at `tabs_end`) and one
+/// blank cell, left of `limit` (the right overflow marker, if any). The
+/// tabs keep priority: with too little room the mark gets shorter, then
+/// does not paint.
+fn draw_outage_header(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    tabs_end: u16,
+    limit: u16,
+) {
+    if state.outages.is_empty() {
+        return;
+    }
+    let room = limit.saturating_sub(tabs_end).saturating_sub(1);
+    let Some(text) = outage_header_text(&state.outages.kinds(), state.ascii, usize::from(room))
+    else {
+        return;
+    };
+    let width = painted_width(&text);
+    let style = if state.no_color {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(state.theme.palette().deleted)
+            .add_modifier(Modifier::BOLD)
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(text, style)),
+        Rect {
+            x: limit - width,
+            width,
             ..area
         },
     );
@@ -15048,6 +15112,121 @@ mod tests {
         state
     }
 
+    #[test]
+    fn outage_header_mark_names_each_failing_kind_flush_right() {
+        use super::super::outage::OutageSource;
+        let host = |tool: &'static str, host: &str| OutageSource::PrLookup {
+            tool,
+            host: host.into(),
+        };
+        let now = Instant::now();
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, false);
+        let mut terminal = Terminal::new(TestBackend::new(80, 1)).unwrap();
+        let clean = paint_tab_row(&mut terminal, &mut state).concat();
+        assert!(!clean.contains('✕'), "no outage, no mark: {clean}");
+
+        state.note_outage(
+            host("glab", "gitlab.com"),
+            "glab (gitlab.com): invalid_token".into(),
+            now,
+        );
+        state.note_outage(
+            host("gh", "github.com"),
+            "gh (github.com): HTTP 401".into(),
+            now,
+        );
+        let row = paint_tab_row(&mut terminal, &mut state).concat();
+        assert!(row.ends_with(" ✕ PR lookup failed"), "{row}");
+        assert_eq!(row.matches("failed").count(), 1, "two hosts, one label");
+        let palette = state.theme.palette();
+        let buf = terminal.backend().buffer();
+        for x in [80 - 18, 80 - 16, 79] {
+            assert_eq!(buf[(x, 0)].fg, palette.deleted, "cell {x}");
+            assert!(buf[(x, 0)].modifier.contains(Modifier::BOLD), "cell {x}");
+        }
+
+        state.dismiss_outage_toasts();
+        let row = paint_tab_row(&mut terminal, &mut state).concat();
+        assert!(row.ends_with(" ✕ PR lookup failed"), "the dismiss keeps it");
+
+        state.note_outage(
+            OutageSource::ScheduledFetch,
+            "git fetch (app): could not read from remote".into(),
+            now,
+        );
+        let row = paint_tab_row(&mut terminal, &mut state).concat();
+        assert!(row.ends_with(" ✕ PR lookup failed · fetch failed"), "{row}");
+
+        state.ascii = true;
+        let row = paint_tab_row(&mut terminal, &mut state).concat();
+        assert!(row.ends_with(" x PR lookup failed · fetch failed"), "{row}");
+        state.ascii = false;
+
+        state.note_recovered(&host("gh", "github.com"));
+        state.note_recovered(&OutageSource::ScheduledFetch);
+        let row = paint_tab_row(&mut terminal, &mut state).concat();
+        assert!(row.ends_with(" ✕ PR lookup failed"), "one host still fails");
+        state.note_recovered(&host("glab", "gitlab.com"));
+        assert_eq!(paint_tab_row(&mut terminal, &mut state).concat(), clean);
+    }
+
+    #[test]
+    fn outage_header_mark_steps_down_and_never_paints_over_a_tab() {
+        use super::super::outage::{outage_header_text, OutageSource};
+        let now = Instant::now();
+        let mut seen: Vec<String> = Vec::new();
+        for width in 8..=160u16 {
+            let mut state = five_compare_tabs();
+            let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+            let before = paint_tab_row(&mut terminal, &mut state);
+            state.note_outage(
+                OutageSource::LiveRefresh,
+                "git status (app): status failed".into(),
+                now,
+            );
+            state.note_outage(
+                OutageSource::ScheduledFetch,
+                "git fetch (app): could not read from remote".into(),
+                now,
+            );
+            let after = paint_tab_row(&mut terminal, &mut state);
+            // The right overflow marker, if any, bounds the free cells.
+            let mut limit = width;
+            let mut tabs_end = 0;
+            for &(x, w, _) in &state.layout.tab_hits {
+                let text = before[usize::from(x)..usize::from(x + w)].concat();
+                if text.ends_with('\u{203a}') {
+                    limit = x;
+                } else {
+                    tabs_end = tabs_end.max(x + w);
+                }
+            }
+            let room = usize::from(limit.saturating_sub(tabs_end).saturating_sub(1));
+            let mut want = before.clone();
+            if let Some(text) = outage_header_text(&state.outages.kinds(), true, room) {
+                let start = usize::from(limit - painted_width(&text));
+                for (offset, ch) in text.chars().enumerate() {
+                    want[start + offset] = ch.to_string();
+                }
+                seen.push(text);
+            }
+            assert_eq!(
+                after.concat(),
+                want.concat(),
+                "width {width}: only free cells right of the tabs change"
+            );
+            for (x, cell) in before.iter().enumerate() {
+                if cell != " " {
+                    assert_eq!(&after[x], cell, "width {width}: cell {x} is a tab's");
+                }
+            }
+        }
+        for text in ["x fetch failed · refresh failed", "x 2 jobs failed", "x"] {
+            assert!(seen.iter().any(|seen| seen == text), "{text} at some width");
+        }
+    }
+
     /// Paint and return the tab row, one string per cell.
     /// Paint only the tab strip (row 0), so narrow widths below the
     /// terminal-too-small guard still exercise the strip's windowing.
@@ -20629,6 +20808,7 @@ mod tests {
             role,
             ttl_ms: super::super::toast::PR_TOAST_TTL_MS,
             at: Instant::now(),
+            outage: None,
         }
     }
 
@@ -20761,6 +20941,107 @@ mod tests {
             assert!(cell.modifier.contains(Modifier::REVERSED));
         }
         assert!(buf[(x0 + 1, y)].modifier.contains(Modifier::BOLD), "glyph");
+    }
+
+    /// The `gitlab.com` PR lookup outage source.
+    fn gitlab_outage() -> super::super::outage::OutageSource {
+        super::super::outage::OutageSource::PrLookup {
+            tool: "glab",
+            host: "gitlab.com".into(),
+        }
+    }
+
+    #[test]
+    fn an_outage_toast_paints_red_with_its_dismiss_hint_and_holds() {
+        let mut state = toast_state(StatusMessage::default(), false);
+        state.note_outage(
+            gitlab_outage(),
+            "glab (gitlab.com): invalid_token".into(),
+            Instant::now(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(TOAST_W, TOAST_H)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = " ✕ glab (gitlab.com): invalid_token · Esc dismiss ";
+        let width = text.chars().count() as u16;
+        let y = TOAST_H - 4;
+        assert_eq!(toast_cells(&terminal, y, width), text);
+        let palette = state.theme.palette();
+        let buf = terminal.backend().buffer();
+        let x0 = TOAST_W - 1 - width;
+        assert_ne!(buf[(x0 - 1, y)].bg, palette.panel);
+        assert!((x0..TOAST_W - 1).all(|x| buf[(x, y)].bg == palette.panel));
+        let glyph = &buf[(x0 + 1, y)];
+        assert_eq!(glyph.symbol(), "✕");
+        assert_eq!(glyph.fg, palette.deleted);
+        assert!(glyph.modifier.contains(Modifier::BOLD));
+        assert_eq!(buf[(x0 + 3, y)].fg, palette.deleted, "the text is red");
+        assert_eq!(buf[(x0 + 34, y)].fg, palette.deleted);
+        assert_eq!(buf[(x0 + 36, y)].symbol(), "·");
+        assert_eq!(buf[(x0 + 36, y)].fg, palette.muted, "the hint is muted");
+        assert_eq!(buf[(x0 + 38, y)].symbol(), "E");
+        assert_eq!(buf[(x0 + 38, y)].fg, palette.muted);
+        assert!(!state.layout.animating, "an outage toast never ticks");
+        assert_eq!(state.layout.wake_ms, None, "and asks for no wake");
+
+        // ASCII glyphs and NO_COLOR: `x`, reversed terminal colours.
+        let mut state = toast_state(StatusMessage::default(), true);
+        state.no_color = true;
+        state.note_outage(
+            gitlab_outage(),
+            "glab (gitlab.com): invalid_token".into(),
+            Instant::now(),
+        );
+        draw_state(&mut terminal, &mut state);
+        let text = " x glab (gitlab.com): invalid_token · Esc dismiss ";
+        assert_eq!(toast_cells(&terminal, y, width), text);
+        let buf = terminal.backend().buffer();
+        for x in [x0 + 1, x0 + 3, x0 + 38] {
+            let cell = &buf[(x, y)];
+            assert_eq!((cell.fg, cell.bg), (Color::Reset, Color::Reset), "{x}");
+            assert!(cell.modifier.contains(Modifier::REVERSED), "{x}");
+        }
+    }
+
+    #[test]
+    fn a_long_outage_toast_cuts_its_text_and_keeps_the_hint_up_to_72_columns() {
+        let reason = format!("glab (gitlab.com): {}", "invalid_token ".repeat(8));
+        let mut state = toast_state(StatusMessage::default(), false);
+        state.note_outage(gitlab_outage(), reason.clone(), Instant::now());
+        let mut terminal = Terminal::new(TestBackend::new(TOAST_W, TOAST_H)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let y = TOAST_H - 4;
+        let row = toast_cells(&terminal, y, 72);
+        assert!(
+            row.starts_with(" ✕ glab (gitlab.com): invalid_token"),
+            "{row}"
+        );
+        assert!(
+            row.ends_with("… · Esc dismiss "),
+            "cut text, whole hint: {row}"
+        );
+        let buf = terminal.backend().buffer();
+        assert_ne!(
+            buf[(TOAST_W - 74, y)].bg,
+            state.theme.palette().panel,
+            "at most 72 columns"
+        );
+        assert_eq!(buf[(TOAST_W - 73, y)].bg, state.theme.palette().panel);
+
+        // A narrow pane caps the row at the pane less 2; the hint stays.
+        let mut terminal = Terminal::new(TestBackend::new(50, TOAST_H)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let buf = terminal.backend().buffer();
+        let row: String = (1..49).map(|x| buf[(x, y)].symbol()).collect();
+        assert!(row.starts_with(" ✕ glab (gitlab.com)"), "{row}");
+        assert!(row.ends_with("… · Esc dismiss "), "{row}");
+
+        // An ack beside it keeps the 48-column cap.
+        state.toasts.push("a".repeat(60), Instant::now());
+        let mut terminal = Terminal::new(TestBackend::new(TOAST_W, TOAST_H)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let ack = toast_cells(&terminal, y, 48);
+        assert!(ack.starts_with(" ✓ aaa") && ack.ends_with("a… "), "{ack}");
+        assert!(toast_cells(&terminal, y - 1, 72).ends_with("… · Esc dismiss "));
     }
 
     /// A primary `app` with a linked `wt` checkout: one family repo row

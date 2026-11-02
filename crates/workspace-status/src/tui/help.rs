@@ -152,7 +152,7 @@ macro_rules! view_group {
                 },
                 HelpEntry {
                     keys: "Esc",
-                    desc: "back / unfocus · right-click · never quit",
+                    desc: "back / unfocus · right-click · never quit · dismiss failure",
                 },
                 HelpEntry {
                     keys: "Enter dblclick",
@@ -244,7 +244,7 @@ pub const HELP_EXPLORER_VIEW_GROUP: HelpGroup = HelpGroup {
         },
         HelpEntry {
             keys: "Esc",
-            desc: "clear search · back to tree · never quit",
+            desc: "clear search · back to tree · never quit · dismiss failure",
         },
         HelpEntry {
             keys: ": Ctrl-p F",
@@ -663,7 +663,7 @@ pub const HELP_PRS_VIEW_GROUP: HelpGroup = HelpGroup {
         },
         HelpEntry {
             keys: "Esc",
-            desc: "detail back to list · never quit",
+            desc: "detail back to list · never quit · dismiss failure",
         },
         HelpEntry {
             keys: ": Ctrl-p F",

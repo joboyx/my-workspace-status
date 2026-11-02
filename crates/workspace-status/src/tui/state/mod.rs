@@ -11,6 +11,7 @@ mod explorer_tab;
 mod file_view;
 mod go_to_line;
 mod line_blame;
+mod outage;
 mod pan;
 mod popover;
 mod prs_tab;
@@ -99,6 +100,7 @@ use super::ops::{
     collect_write_files, format_running_op, op_is_kind_noop, op_kind_noop_reason, op_targets,
     push_targets, refresh_target, snapshot_pushable, Op, RevertScope, RunningOp, ScopedFile,
 };
+use super::outage::Outages;
 use super::popover::{IconTarget, PopoverState};
 use super::quick_open::QuickOpenState;
 use super::search::{
@@ -984,6 +986,9 @@ pub struct AppState {
     /// One-shot acks painted bottom-right. Filled from an ok `status` by
     /// [`Self::route_ack_to_toast`] at the top of each draw.
     pub toasts: ToastStack,
+    /// Background job sources that fail now ([`Self::note_outage`]). The
+    /// tab strip paints a failure mark while one lasts.
+    pub outages: Outages,
     pub graph: Option<GraphModel>,
     pub graph_identity: Option<(String, String)>,
     pub graph_scroll: u16,
@@ -1350,6 +1355,7 @@ impl AppState {
             focus: FocusPane::Left,
             status: StatusMessage::default(),
             toasts: ToastStack::default(),
+            outages: Outages::default(),
             graph: None,
             graph_identity: None,
             graph_scroll: 0,

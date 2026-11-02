@@ -170,6 +170,15 @@ impl AppState {
         ) {
             self.g_pending_at = None;
         }
+        // Esc with an outage toast showing only dismisses it, on every tab,
+        // before any tab handler or gate can step back.
+        if self.esc_dismisses_outage_toasts(&action) {
+            if matches!(action, Action::BackClick) {
+                self.cancel_mouse_drag();
+            }
+            self.dismiss_outage_toasts();
+            return Effect::None;
+        }
         // The PRs tab answers its own keys and refuses writes and the
         // Workspace pane keys, before any gate reads the parked tree.
         if self.is_prs_tab() {

@@ -58,7 +58,10 @@ const HELP_VIEW_ROWS: &[(&str, &str)] = &[
     ("V", "highlight diff lines for ; / s / u / x / :"),
     ("y", "copy comments as markdown"),
     ("'", "copy entity reference"),
-    ("Esc", "back / unfocus · right-click · never quit"),
+    (
+        "Esc",
+        "back / unfocus · right-click · never quit · dismiss failure",
+    ),
     ("Enter dblclick", "focus right / drill"),
     (
         ": Ctrl-p F",
