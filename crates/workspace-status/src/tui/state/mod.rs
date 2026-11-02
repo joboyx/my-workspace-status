@@ -85,7 +85,7 @@ use super::drill::{
     source_from_graph_row, stash_ref_from_graph_row, CommitFile, CommitFileSource, DrillView,
 };
 use super::explorer::ExplorerStatus;
-use super::fetch::background_fetch_targets;
+use super::fetch::{background_fetch_targets, OTHER_INSTANCE_FETCH_FAILED};
 use super::fetch_claim::load_background_fetch_record;
 use super::gates::{
     ListFocusTarget, FOCUS_A_FILE_DIFF, FOCUS_A_FILE_TO_MARK_REVIEWED,
@@ -100,7 +100,7 @@ use super::ops::{
     collect_write_files, format_running_op, op_is_kind_noop, op_kind_noop_reason, op_targets,
     push_targets, refresh_target, snapshot_pushable, Op, RevertScope, RunningOp, ScopedFile,
 };
-use super::outage::Outages;
+use super::outage::{OutageSource, Outages};
 use super::popover::{IconTarget, PopoverState};
 use super::quick_open::QuickOpenState;
 use super::search::{
@@ -1023,10 +1023,6 @@ pub struct AppState {
     /// Newest background-fetch generation this instance has applied or
     /// written. A record with this generation is not applied again.
     fetch_applied_generation: u64,
-    /// The status this instance showed for the latest background fetch
-    /// failure. A later success clears the status only while it still
-    /// equals this stamp (text and kind).
-    fetch_failure_stamp: Option<StatusMessage>,
     pub comment: Option<CommentPrompt>,
     pub comment_export: Option<CommentExport>,
     /// Visual-line anchor on a focused file diff (`V`). Cursor is the other end.
@@ -1377,7 +1373,6 @@ impl AppState {
             ui_store_path,
             fetch_store_path: PathBuf::new(),
             fetch_applied_generation: 0,
-            fetch_failure_stamp: None,
             comment: None,
             comment_export: None,
             diff_visual_anchor: None,
@@ -6128,7 +6123,8 @@ impl AppState {
         if targets.is_empty() {
             return Effect::None;
         }
-        // The background tick paints nothing unless a repo fails.
+        // The background tick never writes the status slot: a failure
+        // shows as the scheduled-fetch outage.
         Effect::Fetch { repos: targets }
     }
 
@@ -6139,19 +6135,20 @@ impl AppState {
         self.fetch_applied_generation =
             load_background_fetch_record(&path, &workspace_store_id(&self.cwd))
                 .map_or(0, |record| record.generation);
-        self.fetch_failure_stamp = None;
         self.fetch_store_path = path;
     }
 
-    /// Apply a background-fetch outcome that another instance recorded
-    /// since this one last applied or wrote one. Returns true when it did.
+    /// Apply, at `now`, a background-fetch outcome that another instance
+    /// recorded since this one last applied or wrote one. Returns true
+    /// when it did.
     ///
-    /// A failure shows the error `fetch failed`. A success clears the
-    /// status only while it still shows this instance's last failure stamp.
-    /// No progress or summary line. The generation already applied changes
-    /// nothing, so a newer local status is never stamped over. Any other
-    /// generation applies, a lower one too: the store was deleted or reset.
-    pub(crate) fn apply_background_fetch_record(&mut self) -> bool {
+    /// The record has no repo or reason, so a failure starts (or updates)
+    /// the scheduled-fetch outage with [`OTHER_INSTANCE_FETCH_FAILED`], and
+    /// a success ends it ([`Self::note_background_fetch_outcome`]). The
+    /// status slot is left alone. The generation already applied changes
+    /// nothing. Any other generation applies, a lower one too: the store
+    /// was deleted or reset.
+    pub(crate) fn apply_background_fetch_record(&mut self, now: Instant) -> bool {
         let Some(record) =
             load_background_fetch_record(&self.fetch_store_path, &workspace_store_id(&self.cwd))
         else {
@@ -6160,28 +6157,32 @@ impl AppState {
         if record.generation == self.fetch_applied_generation {
             return false;
         }
-        if record.failed {
-            self.status = StatusMessage::error("fetch failed");
-        }
-        self.note_background_fetch_outcome(record.generation, record.failed);
+        let failure = record
+            .failed
+            .then(|| OTHER_INSTANCE_FETCH_FAILED.to_string());
+        self.note_background_fetch_outcome(Some(record.generation), failure, now);
         true
     }
 
-    /// Mark background-fetch `generation` as applied here.
+    /// Note, at `now`, how a scheduled background fetch ended.
     ///
-    /// `failed`: the current status (the one just painted for that fetch)
-    /// becomes the failure stamp. Ok: the status clears if it still equals
-    /// the stamp (text and kind), and the stamp is forgotten.
-    pub(crate) fn note_background_fetch_outcome(&mut self, generation: u64, failed: bool) {
-        self.fetch_applied_generation = generation;
-        if failed {
-            self.fetch_failure_stamp = Some(self.status.clone());
-        } else if self
-            .fetch_failure_stamp
-            .take()
-            .is_some_and(|stamp| stamp == self.status)
-        {
-            self.status.clear();
+    /// `generation`: the shared record this instance wrote or applied for
+    /// it, now marked applied here (`None` when no record was written).
+    /// `failure`: the outage toast text when a repo failed. It starts the
+    /// [`OutageSource::ScheduledFetch`] outage, or updates its text while
+    /// it goes on; `None` ends the outage. The status slot is left alone.
+    pub(crate) fn note_background_fetch_outcome(
+        &mut self,
+        generation: Option<u64>,
+        failure: Option<String>,
+        now: Instant,
+    ) {
+        if let Some(generation) = generation {
+            self.fetch_applied_generation = generation;
+        }
+        match failure {
+            Some(text) => self.note_outage(OutageSource::ScheduledFetch, text, now),
+            None => self.note_recovered(&OutageSource::ScheduledFetch),
         }
     }
 
@@ -14158,79 +14159,103 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn background_fetch_record_paints_fetch_failed_once_per_generation() {
-        let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
-        assert!(!app.apply_background_fetch_record(), "no record yet");
-        assert_eq!(record_other_instance_fetch(&app, true, 10), 1);
-        assert!(app.apply_background_fetch_record());
-        assert_eq!(app.status, "fetch failed");
-        assert_eq!(app.status.kind(), StatusKind::Error);
+    /// Texts of the scheduled-fetch outage toasts shown now.
+    fn fetch_outage_toasts(app: &AppState) -> Vec<String> {
+        app.toasts
+            .visible(Instant::now())
+            .filter(|(toast, _)| toast.outage == Some(OutageSource::ScheduledFetch))
+            .map(|(toast, _)| toast.text.clone())
+            .collect()
+    }
 
-        app.status = StatusMessage::error("push failed");
-        assert!(
-            !app.apply_background_fetch_record(),
-            "the same generation is not applied again"
-        );
-        assert_eq!(app.status, "push failed", "a newer local status stays");
+    /// True while the scheduled fetch is an outage (its header mark shows).
+    fn fetch_outage(app: &AppState) -> bool {
+        app.outages.get(&OutageSource::ScheduledFetch).is_some()
     }
 
     #[test]
-    fn background_fetch_record_success_clears_only_its_own_stamp() {
+    fn background_fetch_record_starts_the_outage_once_per_generation() {
         let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
-        record_other_instance_fetch(&app, true, 10);
-        assert!(app.apply_background_fetch_record());
-        assert_eq!(app.status, "fetch failed");
-        record_other_instance_fetch(&app, false, 20);
-        assert!(app.apply_background_fetch_record());
-        assert_eq!(app.status, "", "a later success clears the shared failure");
-
-        record_other_instance_fetch(&app, true, 30);
-        assert!(app.apply_background_fetch_record());
-        app.status = StatusMessage::error("push failed");
-        record_other_instance_fetch(&app, false, 40);
-        assert!(app.apply_background_fetch_record());
-        assert_eq!(app.status, "push failed", "an unrelated status stays");
-
-        record_other_instance_fetch(&app, true, 50);
-        assert!(app.apply_background_fetch_record());
-        app.status = StatusMessage::warn("fetch failed");
-        record_other_instance_fetch(&app, false, 60);
-        assert!(app.apply_background_fetch_record());
+        let now = Instant::now();
+        assert!(!app.apply_background_fetch_record(now), "no record yet");
+        assert_eq!(record_other_instance_fetch(&app, true, 10), 1);
+        assert!(app.apply_background_fetch_record(now));
+        assert_eq!(app.status, "", "no status-slot error");
         assert_eq!(
-            app.status.kind(),
-            StatusKind::Warn,
-            "same text, other kind: not the stamp"
+            fetch_outage_toasts(&app),
+            ["git fetch: failed in another ws"]
+        );
+        assert!(fetch_outage(&app), "the header mark shows");
+
+        app.status = StatusMessage::error("push failed");
+        assert!(app.dismiss_outage_toasts());
+        assert!(
+            !app.apply_background_fetch_record(now),
+            "the same generation is not applied again"
+        );
+        assert_eq!(app.status, "push failed", "a newer local status stays");
+        assert!(fetch_outage_toasts(&app).is_empty(), "the dismiss stays");
+        assert!(fetch_outage(&app));
+    }
+
+    #[test]
+    fn background_fetch_record_success_ends_the_outage_and_keeps_the_status() {
+        let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
+        let now = Instant::now();
+        record_other_instance_fetch(&app, true, 10);
+        assert!(app.apply_background_fetch_record(now));
+        assert!(fetch_outage(&app));
+        // Another failed record while it lasts: no second toast.
+        record_other_instance_fetch(&app, true, 20);
+        assert!(app.apply_background_fetch_record(now));
+        assert_eq!(fetch_outage_toasts(&app).len(), 1, "one toast per outage");
+
+        app.status = StatusMessage::error("push failed");
+        record_other_instance_fetch(&app, false, 30);
+        assert!(app.apply_background_fetch_record(now));
+        assert!(!fetch_outage(&app), "a later success ends the outage");
+        assert!(fetch_outage_toasts(&app).is_empty(), "and drops its toast");
+        assert_eq!(app.status, "push failed", "the status slot is left alone");
+
+        record_other_instance_fetch(&app, true, 40);
+        assert!(app.apply_background_fetch_record(now));
+        assert_eq!(
+            fetch_outage_toasts(&app),
+            ["git fetch: failed in another ws"],
+            "a failure after the recovery toasts again"
         );
     }
 
     #[test]
     fn background_fetch_record_after_a_store_reset_applies() {
         let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
-        app.note_background_fetch_outcome(5, false);
+        let now = Instant::now();
+        app.note_background_fetch_outcome(Some(5), None, now);
         assert_eq!(record_other_instance_fetch(&app, true, 10), 1, "new store");
-        assert!(app.apply_background_fetch_record());
-        assert_eq!(app.status, "fetch failed");
-        assert_eq!(app.status.kind(), StatusKind::Error);
-        app.status = StatusMessage::error("push failed");
+        assert!(app.apply_background_fetch_record(now));
+        assert!(fetch_outage(&app));
+        assert_eq!(fetch_outage_toasts(&app).len(), 1);
+        app.dismiss_outage_toasts();
         assert!(
-            !app.apply_background_fetch_record(),
+            !app.apply_background_fetch_record(now),
             "the same generation is still not applied again"
         );
-        assert_eq!(app.status, "push failed");
+        assert!(fetch_outage_toasts(&app).is_empty());
     }
 
     #[test]
     fn background_fetch_record_from_before_launch_paints_nothing() {
         let first = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
+        let now = Instant::now();
         record_other_instance_fetch(&first, true, 10);
         let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
         app.open_background_fetch_store(first.fetch_store_path.clone());
-        assert!(!app.apply_background_fetch_record(), "seeded at launch");
+        assert!(!app.apply_background_fetch_record(now), "seeded at launch");
         assert_eq!(app.status, "");
+        assert!(!fetch_outage(&app));
         record_other_instance_fetch(&first, true, 20);
-        assert!(app.apply_background_fetch_record());
-        assert_eq!(app.status, "fetch failed", "a later generation applies");
+        assert!(app.apply_background_fetch_record(now));
+        assert!(fetch_outage(&app), "a later generation applies");
     }
 
     #[test]

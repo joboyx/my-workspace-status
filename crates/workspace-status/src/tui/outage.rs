@@ -59,8 +59,8 @@ impl OutageKind {
 /// One background job source that can fail. The key of an outage: a
 /// source fails or works as a whole.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-// Allowed until the fetch and watch jobs report outages: today only tests
-// build those two sources.
+// Allowed until the watch job reports outages: today only tests build
+// `LiveRefresh`.
 #[cfg_attr(not(test), allow(dead_code))]
 pub enum OutageSource {
     /// PR lookups on one forge host through one tool.

@@ -340,6 +340,19 @@ impl OpTally {
             .any(|(_, r)| matches!(r, RepoOpResult::Failed(_) | RepoOpResult::StashConflict))
     }
 
+    /// The first repo that failed, in finish order, with git's reason
+    /// ([`STASH_CONFLICT_COPY`] for a conflicted auto-stash), and how many
+    /// repos failed. `None` when no repo failed.
+    pub fn first_failure(&self) -> Option<(&str, &str, usize)> {
+        let mut failed = self.results.iter().filter_map(|(repo, r)| match r {
+            RepoOpResult::Failed(reason) => Some((repo.as_str(), reason.as_str())),
+            RepoOpResult::StashConflict => Some((repo.as_str(), STASH_CONFLICT_COPY)),
+            _ => None,
+        });
+        let (repo, reason) = failed.next()?;
+        Some((repo, reason, 1 + failed.count()))
+    }
+
     /// True when a repo was skipped on purpose.
     pub fn has_skip(&self) -> bool {
         self.results

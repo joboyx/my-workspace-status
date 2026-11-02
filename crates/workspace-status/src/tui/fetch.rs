@@ -5,8 +5,30 @@
 //! (cap: `WS_STATUS_FETCH_CONCURRENCY`, else the config key
 //! `fetchConcurrency`, else `FETCH_CONCURRENCY` = 10) so independent gitdirs
 //! overlap.
+//!
+//! A failed scheduled fetch shows as the scheduled-fetch outage
+//! ([`super::outage::OutageSource::ScheduledFetch`]), with the toast text
+//! from [`scheduled_fetch_failure_text`] or [`OTHER_INSTANCE_FETCH_FAILED`].
 
 use crate::snapshot::{checkout_is_hidden, WorkspaceSnapshot};
+
+use super::ops::OpTally;
+
+/// Outage toast text when the scheduled fetch of another `ws` instance in
+/// this workspace failed. Its shared record names no repo or reason.
+pub const OTHER_INSTANCE_FETCH_FAILED: &str = "git fetch: failed in another ws";
+
+/// Outage toast text of a scheduled fetch wave that ended with `tally`:
+/// `git fetch (<repo>): <reason>` for the first failed repo, then
+/// ` +<n> more` when more repos failed. `None` when no repo failed.
+pub fn scheduled_fetch_failure_text(tally: &OpTally) -> Option<String> {
+    let (repo, reason, failed) = tally.first_failure()?;
+    let mut text = format!("git fetch ({repo}): {reason}");
+    if failed > 1 {
+        text.push_str(&format!(" +{} more", failed - 1));
+    }
+    Some(text)
+}
 
 /// Default background-fetch period (5 minutes).
 pub const DEFAULT_FETCH_MS: u64 = 300_000;
@@ -113,6 +135,25 @@ mod tests {
                 "env {bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn scheduled_fetch_failure_text_names_the_first_failed_repo_and_counts_the_rest() {
+        use crate::tui::ops::RepoOpResult;
+        let mut tally = OpTally::default();
+        tally.note("notes", RepoOpResult::Ok);
+        assert_eq!(scheduled_fetch_failure_text(&tally), None, "no failure");
+        tally.note("app", RepoOpResult::Failed("HTTP 401".into()));
+        assert_eq!(
+            scheduled_fetch_failure_text(&tally).as_deref(),
+            Some("git fetch (app): HTTP 401")
+        );
+        tally.note("lib", RepoOpResult::Failed("timed out".into()));
+        tally.note("web", RepoOpResult::Failed("timed out".into()));
+        assert_eq!(
+            scheduled_fetch_failure_text(&tally).as_deref(),
+            Some("git fetch (app): HTTP 401 +2 more")
+        );
     }
 
     #[test]

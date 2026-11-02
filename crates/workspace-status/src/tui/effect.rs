@@ -61,6 +61,7 @@ use super::drill::{CommitFileSource, DrillView};
 #[cfg(test)]
 use super::event_pump::action_triggers_graph_autoload;
 use super::explorer::{list_dir, ExplorerEntry};
+use super::fetch::scheduled_fetch_failure_text;
 use super::fetch_claim::{try_claim_background_fetch, BackgroundFetchClaim};
 use super::graph_load::{
     autoload_limit, autoload_skip, load_commit_card, load_graph_model_window, merge_autoload,
@@ -482,9 +483,12 @@ enum OccupyReason {
 struct KindWave {
     tally: OpTally,
     repos: Vec<String>,
-    /// A key (not only the background fetch tick) started this wave.
-    /// Background-only waves leave the status slot alone unless a repo fails.
+    /// A key (not only the background fetch tick) started this wave. Only
+    /// such a wave writes its result to the status slot.
     foreground: bool,
+    /// The background fetch tick started or joined this wave. Its end
+    /// starts or ends the scheduled-fetch outage.
+    scheduled: bool,
 }
 
 impl KindWave {
@@ -493,6 +497,7 @@ impl KindWave {
             tally: OpTally::default(),
             repos: Vec::new(),
             foreground: false,
+            scheduled: false,
         }
     }
 
@@ -3022,7 +3027,8 @@ impl Interpreter {
     }
 
     /// Queue `repos` for `kind`. `foreground` is false only for the
-    /// background fetch tick, which paints nothing unless a repo fails.
+    /// background fetch tick, which never writes the status slot: its wave
+    /// end feeds the scheduled-fetch outage.
     fn start_bulk(
         &mut self,
         state: &mut AppState,
@@ -3033,9 +3039,11 @@ impl Interpreter {
         if repos.is_empty() {
             return;
         }
-        if foreground {
-            if let Some(wave) = self.remote.wave_mut(kind) {
+        if let Some(wave) = self.remote.wave_mut(kind) {
+            if foreground {
                 wave.foreground = true;
+            } else {
+                wave.scheduled = true;
             }
         }
         let mut flushed = false;
@@ -3167,7 +3175,9 @@ impl Interpreter {
         }
         let repos = std::mem::take(&mut wave.repos);
         let tally = std::mem::take(&mut wave.tally);
-        let quiet = !wave.foreground && !tally.has_failure();
+        let foreground = wave.foreground;
+        // A claim is only held for a wave the tick joined.
+        let scheduled = wave.scheduled || claim.is_some();
         *wave = KindWave::empty();
         state.stamp_checkout_flashes(&repos);
         // A pull can bring commits onto local branches: recount the repos
@@ -3175,15 +3185,20 @@ impl Interpreter {
         if kind == RunningOp::Pull {
             self.queue_activity(state, activity_targets(&state.snapshot, Some(&repos)));
         }
-        if !quiet {
+        // The background tick never writes the status slot: its failure is
+        // the scheduled-fetch outage below. A key that joined its wave
+        // still gets the result line.
+        if foreground {
             state.status = completed_op_status(kind, &tally);
         }
-        if let Some(claim) = claim {
-            let failed = tally.has_failure();
-            // A failed record write has no recovery; the claim is released.
-            if let Ok(generation) = claim.finish(failed) {
-                state.note_background_fetch_outcome(generation, failed);
-            }
+        // A failed record write has no recovery; the claim is released.
+        let generation = claim.and_then(|claim| claim.finish(tally.has_failure()).ok());
+        if scheduled {
+            state.note_background_fetch_outcome(
+                generation,
+                scheduled_fetch_failure_text(&tally),
+                Instant::now(),
+            );
         }
         self.sched.on_reload_snapshot(state.focused_checkout_path());
         if state.tabs.is_workspace() {
@@ -4025,6 +4040,7 @@ mod tests {
     };
     use crate::tui::graph_load::GraphIdentity;
     use crate::tui::line_blame::BlameSide;
+    use crate::tui::outage::OutageSource;
     use crate::tui::state::{AppState, FocusPane};
 
     use super::*;
@@ -7035,8 +7051,23 @@ mod tests {
         assert_eq!(state.status.kind(), StatusKind::Error);
     }
 
+    /// Texts of the scheduled-fetch outage toasts shown now.
+    fn fetch_outage_toasts(state: &AppState) -> Vec<String> {
+        state
+            .toasts
+            .visible(Instant::now())
+            .filter(|(toast, _)| toast.outage == Some(OutageSource::ScheduledFetch))
+            .map(|(toast, _)| toast.text.clone())
+            .collect()
+    }
+
+    /// True while the scheduled fetch is an outage (its header mark shows).
+    fn fetch_outage(state: &AppState) -> bool {
+        state.outages.get(&OutageSource::ScheduledFetch).is_some()
+    }
+
     #[test]
-    fn background_fetch_failure_writes_an_error() {
+    fn background_fetch_failure_starts_the_outage_not_a_status_error() {
         let mut state = fixture_state();
         let mut interp = Interpreter::with_cap(4);
         schedule_effect(
@@ -7058,11 +7089,12 @@ mod tests {
                 repo: "app".into(),
             },
         );
+        assert_eq!(state.status, "", "no status-slot error");
         assert_eq!(
-            state.status,
-            "Fetched 1 repo (1 failed: app — could not read from remote repository)"
+            fetch_outage_toasts(&state),
+            ["git fetch (app): could not read from remote repository"]
         );
-        assert_eq!(state.status.kind(), StatusKind::Error);
+        assert!(fetch_outage(&state), "the header mark shows");
     }
 
     const FETCH_MS: u64 = 300_000;
@@ -7146,9 +7178,12 @@ mod tests {
             capture_jobs(&mut interp, &mut state).is_empty(),
             "a background fetch inside this instance's interval is not run again"
         );
-        assert!(state.apply_background_fetch_record());
-        assert_eq!(state.status, "fetch failed");
-        assert_eq!(state.status.kind(), StatusKind::Error);
+        assert!(state.apply_background_fetch_record(Instant::now()));
+        assert_eq!(state.status, "", "no status-slot error");
+        assert_eq!(
+            fetch_outage_toasts(&state),
+            ["git fetch: failed in another ws"]
+        );
         assert!(capture_jobs(&mut interp, &mut state).is_empty());
     }
 
@@ -7183,19 +7218,17 @@ mod tests {
             "the claim time, not the wave end"
         );
         assert!(interp.fetch_claim.is_none());
-        let detailed = state.status.clone();
+        assert_eq!(state.status, "", "no status-slot error");
+        let detailed = vec!["git fetch (app): could not read from remote repository"];
+        assert_eq!(fetch_outage_toasts(&state), detailed);
         assert!(
-            detailed.starts_with("Fetched 2 repos (1 failed: app"),
-            "{detailed}"
-        );
-        assert_eq!(detailed.kind(), StatusKind::Error);
-        assert!(
-            !state.apply_background_fetch_record(),
-            "the runner's own watch tick does not repaint"
+            !state.apply_background_fetch_record(Instant::now()),
+            "the runner's own watch tick does not apply its record"
         );
         assert_eq!(
-            state.status, detailed,
-            "the runner keeps the detailed status"
+            fetch_outage_toasts(&state),
+            detailed,
+            "the runner keeps the detailed toast"
         );
 
         // The wave end queued follow-up loads (snapshot reload); leave
@@ -7212,11 +7245,10 @@ mod tests {
         let record = fetch_record(&state).unwrap();
         assert_eq!(record.generation, 2);
         assert!(!record.failed);
-        assert_eq!(
-            state.status, "",
-            "the success clears the runner's own stamp"
-        );
-        assert!(!state.apply_background_fetch_record());
+        assert!(!fetch_outage(&state), "the success ends the outage");
+        assert!(fetch_outage_toasts(&state).is_empty());
+        assert_eq!(state.status, "");
+        assert!(!state.apply_background_fetch_record(Instant::now()));
         assert!(other_instance_claim(&state, later + FETCH_MS).is_some());
     }
 
@@ -7237,6 +7269,7 @@ mod tests {
         assert!(state.status.starts_with("Fetched 1 repo (1 failed"));
         assert_eq!(fetch_record(&state), None);
         assert!(!state.fetch_store_path.exists());
+        assert!(!fetch_outage(&state), "a key fetch starts no outage");
     }
 
     #[test]
@@ -7284,9 +7317,168 @@ mod tests {
         let jobs = capture_jobs(&mut interp, &mut state);
         assert_eq!(jobs.len(), 2, "fetches as before, without dedupe");
         assert!(interp.fetch_claim.is_none());
+        finish_fetches(&mut interp, &mut state, jobs, Some("app"));
+        assert_eq!(state.status, "", "no status-slot error");
+        assert!(
+            fetch_outage(&state),
+            "a failure with no claim and no record still starts the outage"
+        );
+        let _ = capture_jobs(&mut interp, &mut state);
+
+        background_tick(&mut interp, &mut state, unix_now_ms());
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 2, "no dedupe: the next tick fetches again");
         finish_fetches(&mut interp, &mut state, jobs, None);
         assert_eq!(state.status, "", "a quiet background success");
+        assert!(!fetch_outage(&state), "and it ends the outage");
         let _ = fs::remove_dir_all(blocker);
+    }
+
+    #[test]
+    fn foreground_fetch_neither_starts_nor_ends_the_scheduled_fetch_outage() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        let fetch = |interp: &mut Interpreter, state: &mut AppState, failed: Option<&str>| {
+            schedule_effect(
+                interp,
+                state,
+                Effect::Fetch {
+                    repos: vec!["app".into()],
+                },
+                &Action::Fetch,
+            );
+            let jobs = capture_jobs(interp, state);
+            finish_fetches(interp, state, jobs, failed);
+            let _ = capture_jobs(interp, state);
+        };
+        fetch(&mut interp, &mut state, Some("app"));
+        assert_eq!(
+            state.status,
+            "Fetched 1 repo (1 failed: app — could not read from remote repository)"
+        );
+        assert_eq!(state.status.kind(), StatusKind::Error, "the status slot");
+        assert!(!fetch_outage(&state), "no outage for a key press");
+        assert!(fetch_outage_toasts(&state).is_empty());
+
+        background_tick(&mut interp, &mut state, unix_now_ms());
+        let jobs = capture_jobs(&mut interp, &mut state);
+        finish_fetches(&mut interp, &mut state, jobs, Some("app"));
+        let _ = capture_jobs(&mut interp, &mut state);
+        assert!(fetch_outage(&state));
+        fetch(&mut interp, &mut state, None);
+        assert_eq!(state.status, "Fetched 1 repo");
+        assert!(
+            fetch_outage(&state),
+            "a good `f` does not end the scheduled-fetch outage"
+        );
+        assert_eq!(fetch_outage_toasts(&state).len(), 1);
+    }
+
+    #[test]
+    fn a_key_fetch_that_joins_the_scheduled_wave_shows_its_line_and_feeds_the_outage() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(8);
+        background_tick(&mut interp, &mut state, unix_now_ms());
+        assert!(interp.fetch_claim.is_some(), "the tick claims the wave");
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 2, "app and lib, app once");
+        finish_fetches(&mut interp, &mut state, jobs, Some("app"));
+        assert!(
+            state.status.starts_with("Fetched 2 repos (1 failed: app"),
+            "the key gets its result line: {}",
+            state.status
+        );
+        assert_eq!(state.status.kind(), StatusKind::Error);
+        assert_eq!(
+            fetch_outage_toasts(&state),
+            ["git fetch (app): could not read from remote repository"],
+            "the claim outcome still feeds the outage"
+        );
+        assert!(fetch_record(&state).expect("the claim writes").failed);
+        assert!(!state.apply_background_fetch_record(Instant::now()));
+    }
+
+    /// One scheduled fetch tick at `now` on real checkouts: run its git
+    /// fetch jobs, apply them, and leave the wave-end follow-up loads unrun.
+    fn run_scheduled_fetch(interp: &mut Interpreter, state: &mut AppState, now: u64) {
+        background_tick(interp, state, now);
+        let jobs = capture_jobs(interp, state);
+        assert!(!jobs.is_empty(), "the tick fetches");
+        for (id, work) in jobs {
+            let outcome = work();
+            apply_id(interp, state, id, outcome);
+        }
+        assert!(interp.fetch_claim.is_none(), "the wave ended");
+        let _ = capture_jobs(interp, state);
+    }
+
+    #[test]
+    fn scheduled_fetch_outage_toasts_once_per_outage_on_a_real_remote() {
+        let (root, mut state) = git_app_state("ws-effect-fetch-outage", "main", false);
+        let app = root.join("app");
+        let missing = root.join("missing.git");
+        let bare = root.join("remote.git");
+        let set_origin = |url: &Path| {
+            crate::testutil::git(
+                &app,
+                &["remote", "set-url", "origin", url.to_str().unwrap()],
+            );
+        };
+        crate::testutil::git(
+            &app,
+            &["remote", "add", "origin", missing.to_str().unwrap()],
+        );
+        crate::testutil::git(
+            &root,
+            &["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()],
+        );
+        let mut interp = Interpreter::with_cap(4);
+        let start = unix_now_ms();
+        let tick = |n: u64| start + n * FETCH_MS;
+
+        // An origin with no repo behind it: the wave fails.
+        run_scheduled_fetch(&mut interp, &mut state, tick(0));
+        assert!(fetch_record(&state).unwrap().failed);
+        assert_eq!(state.status, "", "no status-slot error");
+        let toasts = fetch_outage_toasts(&state);
+        assert_eq!(toasts.len(), 1, "{toasts:?}");
+        assert!(toasts[0].starts_with("git fetch (app): "), "{toasts:?}");
+        assert!(fetch_outage(&state), "the header mark shows");
+
+        // The next failed wave: no new toast.
+        run_scheduled_fetch(&mut interp, &mut state, tick(1));
+        assert_eq!(fetch_outage_toasts(&state), toasts, "no second toast");
+
+        // Esc: the toast goes, the outage (header mark) stays, and a
+        // failure while it lasts brings no toast back.
+        assert!(state.dismiss_outage_toasts());
+        assert!(fetch_outage_toasts(&state).is_empty());
+        run_scheduled_fetch(&mut interp, &mut state, tick(2));
+        assert!(fetch_outage_toasts(&state).is_empty());
+        assert!(fetch_outage(&state));
+
+        // A real remote: the good wave ends the outage.
+        set_origin(&bare);
+        run_scheduled_fetch(&mut interp, &mut state, tick(3));
+        assert!(!fetch_record(&state).unwrap().failed);
+        assert!(!fetch_outage(&state), "recovered");
+        assert!(fetch_outage_toasts(&state).is_empty());
+        assert_eq!(state.status, "", "a quiet background success");
+
+        // It fails again: a new outage, a new toast.
+        set_origin(&missing);
+        run_scheduled_fetch(&mut interp, &mut state, tick(4));
+        assert_eq!(fetch_outage_toasts(&state), toasts, "toasts again");
+        assert!(fetch_outage(&state));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
