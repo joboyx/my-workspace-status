@@ -159,7 +159,7 @@ PASS, FAIL (quote what you saw), or SKIP (name the missing precondition). Never 
 
 | Feature file | Proves |
 | --- | --- |
-| [pr-status](features/pr-status.md) | PR badge states on both forges, `gx` and `gc`, a scripted transition, a failing CLI, live recipe |
+| [pr-status](features/pr-status.md) | PR badge states on both forges, `gx` and `gc`, a scripted transition, a failing CLI, the per-host lookup outage and failure mark, live recipe |
 | [tree-and-graph](features/tree-and-graph.md) | Badges in the tree and the graph pane, glyph column at wide and narrow widths |
 | [popovers](features/popovers.md) | The PR popover: lines, actions, `gc` and `r` from it; the commit popovers (hash card, time, author) by mouse hover and click |
 | [prs-tab](features/prs-tab.md) | The PRs tab (`gp`): group and row order, detail, `z` / `Z` folds, Enter / `gc` / `o` / `Ctrl-w`, narrow layout, a failing CLI, the empty state, the title command, Nerd glyphs |
