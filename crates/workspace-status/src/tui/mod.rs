@@ -69,6 +69,9 @@ mod word_diff;
 
 pub use app::{collect_full_snapshot, run_tui, TuiOpts};
 pub use keys::InputMode;
+/// Test-only path for `crate::testutil` app-state fixtures; `state` is private.
+#[cfg(test)]
+pub(crate) use state::AppState;
 pub use viewed::workspace_store_id;
 
 /// CLI flags that decide TUI vs headless. Testable without a real TTY.

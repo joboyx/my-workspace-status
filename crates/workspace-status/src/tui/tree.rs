@@ -1842,6 +1842,7 @@ mod tests {
     use crate::snapshot::{
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
     };
+    use crate::testutil::unstaged_change;
 
     /// A middle-biased list: the cursor goes to the one row whose viewport
     /// starts at the top, or stays when its own viewport already does (the
@@ -2325,38 +2326,14 @@ mod tests {
     }
 
     fn repo(name: &str, with_change: bool, linked: bool) -> RepoSnapshot {
+        let snap = crate::testutil::repo(name, with_change);
+        if !linked {
+            return snap;
+        }
         RepoSnapshot {
-            repo: name.into(),
-            branch: "main".into(),
-            sync_status: SyncStatus::NoUpstream,
-            sync_note: String::new(),
-            upstream_rewrite: None,
-            head: String::new(),
-            has_unstaged: with_change,
-            has_staged: false,
-            has_untracked: false,
-            changes: if with_change {
-                vec![FileChange {
-                    path: "README.md".into(),
-                    staged_status: None,
-                    unstaged_status: Some("M".into()),
-                    untracked: false,
-                    old_path: None,
-                }]
-            } else {
-                vec![]
-            },
-            checkout_kind: if linked {
-                CheckoutKind::Linked
-            } else {
-                CheckoutKind::Primary
-            },
-            primary_repo: if linked { Some("app".into()) } else { None },
-            merged_into_default: None,
-            default_branch_override: None,
-            default_tip_ref: None,
-            default_branch: None,
-            local_branches: Vec::new(),
+            checkout_kind: CheckoutKind::Linked,
+            primary_repo: Some("app".into()),
+            ..snap
         }
     }
 
@@ -2516,16 +2493,7 @@ mod tests {
         snap.has_untracked = paths
             .iter()
             .any(|p| *p != "README.md" && *p != "src/lib.rs");
-        snap.changes = paths
-            .iter()
-            .map(|path| FileChange {
-                path: (*path).into(),
-                staged_status: None,
-                unstaged_status: Some("M".into()),
-                untracked: false,
-                old_path: None,
-            })
-            .collect();
+        snap.changes = paths.iter().map(|path| unstaged_change(path)).collect();
         snap
     }
 

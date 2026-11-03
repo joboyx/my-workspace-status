@@ -1511,32 +1511,18 @@ mod tests {
     use super::super::store::{put_comment, CommentEntry, CommentKey, CommentStore};
     use super::*;
     use crate::helpers::DETACHED_HEAD_BRANCH;
-    use crate::snapshot::{
-        build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
-    };
+    use crate::snapshot::{build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot};
+    use crate::testutil::{repo_snapshot, unstaged_change};
     use crate::tui::diff::{DiffCell, DiffCellKind, DiffContent, DiffRow};
     use crate::tui::tree::NodeChrome;
     use workspace_status_graph::Commit;
 
     fn snap(repo: &str, branch: &str, kind: CheckoutKind, primary: Option<&str>) -> RepoSnapshot {
         RepoSnapshot {
-            repo: repo.into(),
             branch: branch.into(),
-            sync_status: SyncStatus::NoUpstream,
-            sync_note: String::new(),
-            upstream_rewrite: None,
-            head: String::new(),
-            has_unstaged: false,
-            has_staged: false,
-            has_untracked: false,
-            changes: Vec::new(),
             checkout_kind: kind,
             primary_repo: primary.map(str::to_string),
-            merged_into_default: None,
-            default_branch_override: None,
-            default_tip_ref: None,
-            default_branch: None,
-            local_branches: Vec::new(),
+            ..repo_snapshot(repo)
         }
     }
 
@@ -1843,13 +1829,7 @@ mod tests {
     }
 
     fn dirty_file(path: &str) -> FileChange {
-        FileChange {
-            path: path.into(),
-            staged_status: None,
-            unstaged_status: Some("M".into()),
-            untracked: false,
-            old_path: None,
-        }
+        unstaged_change(path)
     }
 
     fn workspace_tree() -> TreeNode {

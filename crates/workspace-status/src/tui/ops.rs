@@ -569,44 +569,21 @@ pub fn push_targets(
 mod tests {
     use super::*;
     use crate::snapshot::{build_workspace_snapshot, FileChange, RepoSnapshot, SyncStatus};
+    use crate::testutil::repo_snapshot;
     use crate::tui::tree::VisibleRow;
 
     fn snap(name: &str, _hidden: bool, linked: bool, behind: bool) -> RepoSnapshot {
-        RepoSnapshot {
-            repo: name.into(),
-            branch: if behind {
-                "feature/x".into()
-            } else {
-                "main".into()
-            },
-            sync_status: if behind {
-                SyncStatus::Behind
-            } else {
-                SyncStatus::NoUpstream
-            },
-            sync_note: if behind {
-                "behind by 1 commits".into()
-            } else {
-                String::new()
-            },
-            upstream_rewrite: None,
-            head: String::new(),
-            has_unstaged: false,
-            has_staged: false,
-            has_untracked: false,
-            changes: Vec::new(),
-            checkout_kind: if linked {
-                CheckoutKind::Linked
-            } else {
-                CheckoutKind::Primary
-            },
-            primary_repo: if linked { Some("app".into()) } else { None },
-            merged_into_default: None,
-            default_branch_override: None,
-            default_tip_ref: None,
-            default_branch: None,
-            local_branches: Vec::new(),
+        let mut row = repo_snapshot(name);
+        if behind {
+            row.branch = "feature/x".into();
+            row.sync_status = SyncStatus::Behind;
+            row.sync_note = "behind by 1 commits".into();
         }
+        if linked {
+            row.checkout_kind = CheckoutKind::Linked;
+            row.primary_repo = Some("app".into());
+        }
+        row
     }
 
     fn file_row(repo: &str) -> VisibleRow {

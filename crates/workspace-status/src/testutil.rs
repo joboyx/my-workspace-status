@@ -1,10 +1,16 @@
-//! Shared git fixtures for this crate's inline unit tests.
+//! Shared fixtures for this crate's inline unit tests: git fixtures, and
+//! snapshot / app-state fixtures.
 //!
 //! Integration tests under `tests/` use `tests/common/seed.rs`. Inline
 //! `#[cfg(test)]` modules cannot reach that file, so each one used to carry
 //! its own `git_env` / `git` / `init_repo` copy — five `git_env` variants
 //! and fifteen copies of the same init block. This module is the one place
 //! those live for `src/`.
+//!
+//! The snapshot fixtures ([`repo_snapshot`], [`repo`], [`app_state`]) are
+//! where a test builds a [`RepoSnapshot`] from scratch: tests set only the
+//! fields they care about, so a new field means one edit here, not one per
+//! test module.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,6 +19,81 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::git::git_binary;
+use crate::snapshot::{
+    build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus, WorkspaceSnapshot,
+};
+use crate::tui::AppState;
+
+// ---------------------------------------------------------------------------
+// Snapshot and app-state fixtures
+// ---------------------------------------------------------------------------
+
+/// A clean primary checkout named `name` on `main` with no upstream.
+///
+/// This is the only place that lists every [`RepoSnapshot`] field. Tests set
+/// what they care about with struct update syntax:
+/// `RepoSnapshot { branch: "feat".into(), ..repo_snapshot("app") }`.
+pub fn repo_snapshot(name: &str) -> RepoSnapshot {
+    RepoSnapshot {
+        repo: name.to_string(),
+        branch: "main".to_string(),
+        sync_status: SyncStatus::NoUpstream,
+        sync_note: String::new(),
+        upstream_rewrite: None,
+        head: String::new(),
+        has_unstaged: false,
+        has_staged: false,
+        has_untracked: false,
+        changes: Vec::new(),
+        checkout_kind: CheckoutKind::Primary,
+        primary_repo: None,
+        merged_into_default: None,
+        default_branch_override: None,
+        default_tip_ref: None,
+        default_branch: None,
+        local_branches: Vec::new(),
+    }
+}
+
+/// One unstaged `M` edit of `path` (not staged, not untracked, no rename).
+pub fn unstaged_change(path: &str) -> FileChange {
+    FileChange {
+        path: path.to_string(),
+        staged_status: None,
+        unstaged_status: Some("M".to_string()),
+        untracked: false,
+        old_path: None,
+    }
+}
+
+/// [`repo_snapshot`] for `name`; when `dirty`, it also has an unstaged
+/// `README.md` edit ([`unstaged_change`]) and `has_unstaged` set.
+pub fn repo(name: &str, dirty: bool) -> RepoSnapshot {
+    if !dirty {
+        return repo_snapshot(name);
+    }
+    RepoSnapshot {
+        has_unstaged: true,
+        changes: vec![unstaged_change("README.md")],
+        ..repo_snapshot(name)
+    }
+}
+
+/// Test [`AppState`] over `repos`: cwd `/tmp`, ASCII glyphs, and the
+/// workspace snapshot with no hidden paths, hidden repos off, no filter.
+pub fn app_state(repos: &[RepoSnapshot]) -> AppState {
+    app_state_of(build_workspace_snapshot(repos, &[], false, &[]))
+}
+
+/// Test [`AppState`] over a custom `snapshot` (hidden paths, show-hidden,
+/// filters): cwd `/tmp`, ASCII glyphs.
+pub fn app_state_of(snapshot: WorkspaceSnapshot) -> AppState {
+    AppState::new(PathBuf::from("/tmp"), snapshot, true)
+}
+
+// ---------------------------------------------------------------------------
+// Git fixtures
+// ---------------------------------------------------------------------------
 
 /// Deterministic author / committer plus config isolation.
 ///
@@ -231,5 +312,59 @@ pub fn upstream_rewrite_fixture(kind: RewriteKind) -> RewriteFixture {
         base,
         bot1,
         upstream_tip,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repo_snapshot_is_a_clean_primary_checkout_on_main_with_no_upstream() {
+        let snap = repo_snapshot("app");
+        assert_eq!(snap.repo, "app");
+        assert_eq!(snap.branch, "main");
+        assert_eq!(snap.sync_status, SyncStatus::NoUpstream);
+        assert_eq!(snap.sync_note, "");
+        assert!(snap.upstream_rewrite.is_none());
+        assert_eq!(snap.head, "");
+        assert!(!snap.has_unstaged);
+        assert!(!snap.has_staged);
+        assert!(!snap.has_untracked);
+        assert!(snap.changes.is_empty());
+        assert_eq!(snap.checkout_kind, CheckoutKind::Primary);
+        assert_eq!(snap.primary_repo, None);
+        assert_eq!(snap.merged_into_default, None);
+        assert_eq!(snap.default_branch_override, None);
+        assert_eq!(snap.default_tip_ref, None);
+        assert_eq!(snap.default_branch, None);
+        assert!(snap.local_branches.is_empty());
+    }
+
+    #[test]
+    fn dirty_repo_has_one_unstaged_readme_edit() {
+        let snap = repo("app", true);
+        assert_eq!(snap.repo, "app");
+        assert_eq!(snap.branch, "main");
+        assert!(snap.has_unstaged);
+        assert!(!snap.has_staged);
+        assert!(!snap.has_untracked);
+        assert_eq!(
+            snap.changes,
+            vec![FileChange {
+                path: "README.md".to_string(),
+                staged_status: None,
+                unstaged_status: Some("M".to_string()),
+                untracked: false,
+                old_path: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn clean_repo_has_no_changes() {
+        let snap = repo("app", false);
+        assert!(!snap.has_unstaged);
+        assert!(snap.changes.is_empty());
     }
 }

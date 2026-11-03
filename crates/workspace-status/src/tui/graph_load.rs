@@ -1016,14 +1016,14 @@ mod tests {
 #[cfg(test)]
 mod live_git {
     use super::*;
-    use crate::testutil::{git, init_repo_empty};
+    use crate::testutil::{git, init_repo_empty, repo_snapshot};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use workspace_status_graph::{format_commit_ref_chips, GraphRow, RefKind, ASCII};
 
-    use crate::snapshot::{build_workspace_snapshot, CheckoutKind, RepoSnapshot, SyncStatus};
+    use crate::snapshot::{build_workspace_snapshot, CheckoutKind};
 
     fn temp_workspace() -> (PathBuf, PathBuf) {
         let root = std::env::temp_dir().join(format!(
@@ -1046,30 +1046,7 @@ mod live_git {
     }
 
     fn snapshot_app() -> crate::snapshot::WorkspaceSnapshot {
-        build_workspace_snapshot(
-            &[RepoSnapshot {
-                repo: "app".into(),
-                branch: "main".into(),
-                sync_status: SyncStatus::NoUpstream,
-                sync_note: String::new(),
-                upstream_rewrite: None,
-                head: String::new(),
-                has_unstaged: false,
-                has_staged: false,
-                has_untracked: false,
-                changes: Vec::new(),
-                checkout_kind: CheckoutKind::Primary,
-                primary_repo: None,
-                merged_into_default: None,
-                default_branch_override: None,
-                default_tip_ref: None,
-                default_branch: None,
-                local_branches: Vec::new(),
-            }],
-            &[],
-            false,
-            &[],
-        )
+        build_workspace_snapshot(&[repo_snapshot("app")], &[], false, &[])
     }
 
     #[test]

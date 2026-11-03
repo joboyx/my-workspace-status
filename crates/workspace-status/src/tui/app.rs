@@ -1273,7 +1273,7 @@ mod tests {
     use crate::config::WorkspaceStatusConfig;
     use crate::git::{exec_git, git_binary, list_local_branches, stage_file};
     use crate::parallel::FETCH_CONCURRENCY;
-    use crate::testutil::{git, init_repo};
+    use crate::testutil::{app_state, git, init_repo, repo_snapshot};
     use crate::tui::action::{Action, Effect};
     use crate::tui::branches::DIRTY_WORKTREE_STATUS;
     use crate::tui::pointer_shape::PointerShape;
@@ -1287,25 +1287,7 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn dummy_repo(name: &str) -> crate::snapshot::RepoSnapshot {
-        crate::snapshot::RepoSnapshot {
-            repo: name.into(),
-            branch: "main".into(),
-            sync_status: crate::snapshot::SyncStatus::NoUpstream,
-            sync_note: String::new(),
-            upstream_rewrite: None,
-            head: String::new(),
-            has_unstaged: false,
-            has_staged: false,
-            has_untracked: false,
-            changes: vec![],
-            checkout_kind: CheckoutKind::Primary,
-            primary_repo: None,
-            merged_into_default: None,
-            default_branch_override: None,
-            default_tip_ref: None,
-            default_branch: None,
-            local_branches: Vec::new(),
-        }
+        repo_snapshot(name)
     }
 
     /// Restore bytes as `restore_terminal` writes them, with `shown` as
@@ -1534,9 +1516,7 @@ mod tests {
             panic!("one press-only g: {press:?}");
         };
         let fresh = || {
-            let snapshot =
-                build_workspace_snapshot(&[dummy_repo("app"), dummy_repo("lib")], &[], false, &[]);
-            let mut app = AppState::new(std::path::PathBuf::from("/tmp"), snapshot, true);
+            let mut app = app_state(&[dummy_repo("app"), dummy_repo("lib")]);
             app.cursor = app.rows.len() - 1;
             assert_ne!(app.cursor, 0, "the cursor starts off the workspace root");
             app
@@ -1578,9 +1558,7 @@ mod tests {
 
     #[test]
     fn drop_undiscovered_checkouts_removes_vanished_paths() {
-        let snapshot =
-            build_workspace_snapshot(&[dummy_repo("app"), dummy_repo("linked")], &[], false, &[]);
-        let mut app = AppState::new(std::path::PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state(&[dummy_repo("app"), dummy_repo("linked")]);
         assert_eq!(app.snapshot.repos.len(), 2);
         drop_undiscovered_checkouts(&mut app, &["app".into()]);
         let names: Vec<&str> = app
