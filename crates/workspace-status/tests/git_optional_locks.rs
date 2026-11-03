@@ -6,8 +6,9 @@
 //! `Command::new(crate::git::git_binary())` directly would skip it and can
 //! collide with a concurrent write on `.git/index.lock`. This scans
 //! production source only — `#[cfg(test)]` fixtures (inline `mod tests`
-//! blocks and the whole-file `testutil.rs` fixture module) are exempt,
-//! since none of that code ships.
+//! blocks, out-of-line `<module>/tests.rs` files that their parent declares
+//! as `#[cfg(test)] mod tests;`, and the whole-file `testutil.rs` fixture
+//! module) are exempt, since none of that code ships.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,6 +25,24 @@ fn production_source(src: &str) -> &str {
         Some(idx) => &src[..idx],
         None => src,
     }
+}
+
+/// True when `path` is a `tests.rs` whose parent module (`<dir>/mod.rs`,
+/// else `<dir>.rs`) declares it as `#[cfg(test)] mod tests;`.
+fn is_cfg_test_module_file(path: &Path) -> bool {
+    if path.file_name().and_then(|n| n.to_str()) != Some("tests.rs") {
+        return false;
+    }
+    let Some(dir) = path.parent() else {
+        return false;
+    };
+    let mod_rs = dir.join("mod.rs");
+    let parent = if mod_rs.is_file() {
+        mod_rs
+    } else {
+        dir.with_extension("rs")
+    };
+    fs::read_to_string(parent).is_ok_and(|src| src.contains("#[cfg(test)]\nmod tests;"))
 }
 
 fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -63,6 +82,9 @@ fn git_spawns_go_through_git_process() {
         if path.file_name().and_then(|n| n.to_str()) == Some("testutil.rs") {
             // Whole file is `#[cfg(test)]`-gated at its `mod` declaration
             // in lib.rs; it never ships.
+            continue;
+        }
+        if is_cfg_test_module_file(path) {
             continue;
         }
         let src =
