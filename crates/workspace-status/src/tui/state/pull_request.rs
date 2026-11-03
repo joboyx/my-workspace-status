@@ -1428,6 +1428,21 @@ impl AppState {
         true
     }
 
+    /// End the badge lookup of `branch` in checkout `repo` with no answer
+    /// (its worker panicked): the badge, the last failure, and the host
+    /// back-off stay, and the next poll cycle may look it up again.
+    pub(crate) fn abandon_pr_lookup(&mut self, repo: &Path, branch: &str) {
+        if let Some(record) = self
+            .pr_cache
+            .checkouts
+            .get_mut(repo)
+            .filter(|record| record.branch == branch)
+        {
+            record.in_flight = false;
+            record.poll_cycle = None;
+        }
+    }
+
     /// Land a `gx` result (or a `gc` result that looked the PR up first):
     /// say what happened, and cache the fresh answer.
     ///

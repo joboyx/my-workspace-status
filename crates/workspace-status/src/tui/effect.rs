@@ -86,6 +86,11 @@ use super::status::{StatusKind, StatusMessage};
 use super::tabs::{ComparePickerKind, ComparePickerRows, WorktreeFile};
 use super::viewed::workspace_store_id;
 
+mod job_release;
+
+use job_release::JobRelease;
+pub(crate) use job_release::{run_job, JobResult};
+
 /// Blocking work that produces one [`JobOutcome`].
 pub(crate) type JobWork = Box<dyn FnOnce() -> JobOutcome + Send>;
 
@@ -980,6 +985,9 @@ pub(crate) struct Interpreter {
     /// runs. Held while that fetch wave is live; the wave end records its
     /// outcome and releases it.
     fetch_claim: Option<BackgroundFetchClaim>,
+    /// What each job on a worker holds, by job id, so a job that panics
+    /// still releases it ([`Self::apply_panic`]).
+    job_releases: HashMap<u64, JobRelease>,
     dirty: bool,
 }
 
@@ -1050,6 +1058,7 @@ impl Interpreter {
             exclusive_inflight: HashMap::new(),
             running_write: None,
             fetch_claim: None,
+            job_releases: HashMap::new(),
             dirty: false,
         }
     }
@@ -2007,12 +2016,20 @@ impl Interpreter {
     }
 
     /// Spawn every job the Scheduler will issue under the cap.
+    ///
+    /// Each spawn records what its job holds ([`JobRelease`]), so a job
+    /// that panics still releases it.
     pub(crate) fn spawn_ready(
         &mut self,
         state: &mut AppState,
         opts: &TuiOpts,
         spawn: &mut dyn FnMut(u64, JobWork),
     ) {
+        let mut started = Vec::new();
+        let mut start = |id: u64, release: JobRelease, work: JobWork| {
+            started.push((id, release));
+            spawn(id, work);
+        };
         while let Some(req) = self.sched.spawn_next() {
             let id = req.id;
             match req.kind {
@@ -2020,8 +2037,9 @@ impl Interpreter {
                     let cwd = opts.cwd.clone();
                     let config = discover_config(&opts.config);
                     let filter = state.snapshot.filter_repos.clone();
-                    spawn(
+                    start(
                         id,
+                        JobRelease::Discover { gen },
                         Box::new(move || {
                             let only = filter_repo_set(&filter);
                             let entries = discover_checkouts(&cwd, &config, only.as_ref());
@@ -2044,8 +2062,12 @@ impl Interpreter {
                             )
                         })
                     });
-                    spawn(
+                    start(
                         id,
+                        JobRelease::RepoStatus {
+                            gen,
+                            path: path.clone(),
+                        },
                         Box::new(move || {
                             let snap = if let Some((meta, override_name)) = meta {
                                 process_repo(&path, &cwd, false, override_name.as_deref(), &meta)
@@ -2084,8 +2106,9 @@ impl Interpreter {
                         .clone()
                         .unwrap_or_else(|| RightPaneRequest::from_state(state));
                     let target = request.target();
-                    spawn(
+                    start(
                         id,
+                        JobRelease::RightPane { req_id },
                         Box::new(move || {
                             let load = request.compute();
                             JobOutcome::RightPane {
@@ -2096,9 +2119,10 @@ impl Interpreter {
                         }),
                     );
                 }
-                SpawnKind::UserWork { tag } => self.spawn_user(state, opts, id, tag, spawn),
+                SpawnKind::UserWork { tag } => self.spawn_user(state, opts, id, tag, &mut start),
             }
         }
+        self.job_releases.extend(started);
         self.publish_remote_activity(state);
     }
 
@@ -2172,7 +2196,7 @@ impl Interpreter {
         id: u64,
         outcome: JobOutcome,
     ) {
-        self.sched.note_job_finished(id);
+        let _ = self.finish_job(id);
         match outcome {
             JobOutcome::Discovered { gen, entries } => {
                 if self
@@ -2209,13 +2233,7 @@ impl Interpreter {
                     self.schedule(state, opts, relist, &Action::None);
                 }
                 self.queue_due_pr_lookups(state, opts);
-                let decision = self.sched.note_repo_done(gen, &path);
-                // The `r` reload has landed: count every repo it found.
-                if decision == ApplyDecision::CollectionIdle
-                    && std::mem::take(&mut self.activity_after_reload)
-                {
-                    self.queue_activity(state, activity_targets(&state.snapshot, None));
-                }
+                let decision = self.note_repo_status_done(state, gen, &path);
                 if focused.as_deref() == Some(path.as_str())
                     && focused_repo_needs_pane(&before_sigs, &before_snap, state, &path)
                     && state.tabs.is_workspace()
@@ -2256,8 +2274,7 @@ impl Interpreter {
                 }
             }
             JobOutcome::Write { status } => {
-                self.sched.note_user_done(UserTag::Write);
-                self.release_exclusive(state, id);
+                self.release_write(state, id);
                 state.status = status;
                 self.sched.on_reload_snapshot(state.focused_checkout_path());
                 if state.tabs.is_workspace() {
@@ -2267,55 +2284,10 @@ impl Interpreter {
                 self.mark();
             }
             JobOutcome::BulkRemote { kind, result, repo } => {
-                let gitdir = self
-                    .remote
-                    .occupy
-                    .iter()
-                    .find(|(_, occ)| match occ {
-                        OccupyReason::Remote(inf) => inf.checkout == repo,
-                        _ => false,
-                    })
-                    .map(|(key, _)| key.clone())
-                    .unwrap_or_else(|| gitdir_key(state, &repo));
-                self.remote.occupy.remove(&gitdir);
-                if let Some(wave) = self.remote.wave_mut(kind) {
-                    wave.tally.note(&repo, result);
-                    wave.note_repo(&repo);
-                }
-                self.mark();
-                if self.kind_live(kind) {
-                    self.paint_remote_running(state);
-                } else {
-                    self.finish_kind_if_idle(state, kind);
-                }
-                self.pump_remote_slots(state);
+                self.land_remote(state, kind, &repo, result);
             }
             JobOutcome::DefaultBranch { repo, result } => {
-                self.sched.note_user_done(UserTag::DefaultBranch);
-                self.default_tally.note(&repo, result);
-                let done = self.default_tally.done();
-                state.status = StatusMessage::progress(format_running_op(
-                    RunningOp::DefaultBranch,
-                    done,
-                    self.default_total,
-                ));
-                if !self.default_queue.is_empty() {
-                    self.sched.enqueue_user(UserTag::DefaultBranch);
-                } else {
-                    state.stamp_checkout_flashes(&self.default_repos);
-                    state.status = completed_op_status(
-                        RunningOp::DefaultBranch,
-                        &std::mem::take(&mut self.default_tally),
-                    );
-                    self.default_repos.clear();
-                    self.release_default_branch(state);
-                    self.sched.on_reload_snapshot(state.focused_checkout_path());
-                    if state.tabs.is_workspace() {
-                        self.pane_req = Some(RightPaneRequest::from_state(state));
-                        self.sched.request_pane();
-                    }
-                }
-                self.mark();
+                self.land_default_branch(state, &repo, result);
             }
             JobOutcome::PrepareStash { gen, repo, latest } => {
                 self.sched.note_user_done(UserTag::Prepare);
@@ -2368,8 +2340,7 @@ impl Interpreter {
                 }
             }
             JobOutcome::Checkout { repo, result } => {
-                self.sched.note_user_done(UserTag::Write);
-                self.release_exclusive(state, id);
+                self.release_write(state, id);
                 if apply_checkout_compute(state, repo, result) {
                     self.sched.on_reload_snapshot(state.focused_checkout_path());
                 }
@@ -2380,8 +2351,7 @@ impl Interpreter {
                 self.mark();
             }
             JobOutcome::Merge { label, result } => {
-                self.sched.note_user_done(UserTag::Write);
-                self.release_exclusive(state, id);
+                self.release_write(state, id);
                 if apply_merge_compute(state, &label, result) {
                     self.sched.on_reload_snapshot(state.focused_checkout_path());
                 }
@@ -2396,7 +2366,6 @@ impl Interpreter {
                 page,
                 identity,
             } => {
-                self.sched.note_user_done(UserTag::Autoload);
                 let accepted = self.sched.accept_autoload_result(gen);
                 let target_ok = state
                     .graph_identity
@@ -2408,15 +2377,7 @@ impl Interpreter {
                         state.set_graph(merged, identity.repo, identity.head);
                     }
                 }
-                if accepted {
-                    state.graph_loading_older = false;
-                    self.restore_older_prev(state);
-                    self.mark();
-                } else if !state.graph_loading_older {
-                    // Stale, and no newer autoload is running.
-                    self.restore_older_prev(state);
-                    self.mark();
-                }
+                self.finish_autoload(state, accepted);
             }
             JobOutcome::CommitFiles {
                 gen,
@@ -2587,18 +2548,13 @@ impl Interpreter {
                 }
             }
             JobOutcome::LineBlame { key, result } => {
-                // The waiting question may be cached or off target by now:
-                // `after_change` offers the current one again.
-                self.line_blame_job.clear();
-                self.line_blame_job.finish(&mut self.sched);
+                self.release_line_blame();
                 if state.apply_line_blame(key, result) {
                     self.mark();
                 }
             }
             JobOutcome::CommitCard { repo, sha, result } => {
-                // `after_change` offers the current popover commit again.
-                self.commit_card_job.clear();
-                self.commit_card_job.finish(&mut self.sched);
+                self.release_commit_card();
                 if state.apply_commit_card(repo, sha, result) {
                     self.mark();
                 }
@@ -2621,8 +2577,7 @@ impl Interpreter {
                 remote,
                 lookup,
             } => {
-                self.pr_badges_running = self.pr_badges_running.saturating_sub(1);
-                self.pr_badge_jobs.remove(&(repo.clone(), branch.clone()));
+                self.release_pr_badge(&repo, &branch);
                 if state.apply_pr_lookup(&repo, &branch, remote, lookup) {
                     // A pinned or peeked popover, and the active PRs tab,
                     // ask again for a detail whose answer changed.
@@ -2632,9 +2587,7 @@ impl Interpreter {
                     }
                     self.mark();
                 }
-                self.alert_pr_changes(state);
-                self.start_pr_title_cycle(state, opts);
-                self.fill_pr_badge_slots();
+                self.after_pr_badge(state, opts);
             }
             JobOutcome::PrTitles { titles, cancelled } => {
                 let next = state.apply_pr_titles(titles, cancelled, Instant::now());
@@ -2644,24 +2597,7 @@ impl Interpreter {
                 self.mark();
             }
             JobOutcome::PullRequestDetail { job, lookup } => {
-                self.pr_badges_running = self.pr_badges_running.saturating_sub(1);
-                let PrDetailJob {
-                    repo,
-                    branch,
-                    remote,
-                    number,
-                    request,
-                } = job;
-                if state.apply_pr_detail(&repo, &branch, &remote, number, request, lookup) {
-                    // The answer changed while this fetch was out: ask
-                    // again for the open popover and the active PRs tab.
-                    let details = state.request_pr_details();
-                    if details != Effect::None {
-                        self.schedule(state, opts, details, &Action::None);
-                    }
-                    self.mark();
-                }
-                self.fill_pr_badge_slots();
+                self.land_pr_detail(state, opts, job, lookup);
             }
             JobOutcome::PullRequestOpen {
                 repo,
@@ -2728,6 +2664,164 @@ impl Interpreter {
                 }
             }
         }
+    }
+
+    // Releases shared by the outcome handlers above and the panic path
+    // (`job_release.rs`): each job kind frees what it holds in one place.
+
+    /// Checkout `path` of collect `gen` is done: the collect may finish.
+    /// The `r` reload that lands here counts every repo it found.
+    fn note_repo_status_done(&mut self, state: &AppState, gen: u64, path: &str) -> ApplyDecision {
+        let decision = self.sched.note_repo_done(gen, path);
+        if decision == ApplyDecision::CollectionIdle
+            && std::mem::take(&mut self.activity_after_reload)
+        {
+            self.queue_activity(state, activity_targets(&state.snapshot, None));
+        }
+        decision
+    }
+
+    /// Free the exclusive write slot of job `id` and the gitdirs it holds.
+    fn release_write(&mut self, state: &mut AppState, id: u64) {
+        self.sched.note_user_done(UserTag::Write);
+        self.release_exclusive(state, id);
+    }
+
+    /// Land the fetch / pull / push `result` of checkout `repo`: free its
+    /// gitdir, count it in its wave, and end the wave when it was the last.
+    fn land_remote(
+        &mut self,
+        state: &mut AppState,
+        kind: RunningOp,
+        repo: &str,
+        result: RepoOpResult,
+    ) {
+        let gitdir = self
+            .remote
+            .occupy
+            .iter()
+            .find(|(_, occ)| match occ {
+                OccupyReason::Remote(inf) => inf.checkout == repo,
+                _ => false,
+            })
+            .map(|(key, _)| key.clone())
+            .unwrap_or_else(|| gitdir_key(state, repo));
+        self.remote.occupy.remove(&gitdir);
+        if let Some(wave) = self.remote.wave_mut(kind) {
+            wave.tally.note(repo, result);
+            wave.note_repo(repo);
+        }
+        self.mark();
+        if self.kind_live(kind) {
+            self.paint_remote_running(state);
+        } else {
+            self.finish_kind_if_idle(state, kind);
+        }
+        self.pump_remote_slots(state);
+    }
+
+    /// Land the default-branch switch `result` of checkout `repo`: start
+    /// the next queued switch, or end the batch and free its gitdirs.
+    fn land_default_branch(&mut self, state: &mut AppState, repo: &str, result: RepoOpResult) {
+        self.sched.note_user_done(UserTag::DefaultBranch);
+        self.default_tally.note(repo, result);
+        let done = self.default_tally.done();
+        state.status = StatusMessage::progress(format_running_op(
+            RunningOp::DefaultBranch,
+            done,
+            self.default_total,
+        ));
+        if !self.default_queue.is_empty() {
+            self.sched.enqueue_user(UserTag::DefaultBranch);
+        } else {
+            state.stamp_checkout_flashes(&self.default_repos);
+            state.status = completed_op_status(
+                RunningOp::DefaultBranch,
+                &std::mem::take(&mut self.default_tally),
+            );
+            self.default_repos.clear();
+            self.release_default_branch(state);
+            self.sched.on_reload_snapshot(state.focused_checkout_path());
+            if state.tabs.is_workspace() {
+                self.pane_req = Some(RightPaneRequest::from_state(state));
+                self.sched.request_pane();
+            }
+        }
+        self.mark();
+    }
+
+    /// An older graph page job ended. `accepted`: it was the latest
+    /// autoload, so `loading older…` ends and older pages may load again.
+    fn finish_autoload(&mut self, state: &mut AppState, accepted: bool) {
+        self.sched.note_user_done(UserTag::Autoload);
+        if accepted {
+            state.graph_loading_older = false;
+            self.restore_older_prev(state);
+            self.mark();
+        } else if !state.graph_loading_older {
+            // Stale, and no newer autoload is running.
+            self.restore_older_prev(state);
+            self.mark();
+        }
+    }
+
+    /// Free the focused-line blame slot. The waiting question may be
+    /// cached or off target by now: `after_change` offers the current one
+    /// again.
+    fn release_line_blame(&mut self) {
+        self.line_blame_job.clear();
+        self.line_blame_job.finish(&mut self.sched);
+    }
+
+    /// Free the commit card slot. `after_change` offers the current
+    /// popover commit again.
+    fn release_commit_card(&mut self) {
+        self.commit_card_job.clear();
+        self.commit_card_job.finish(&mut self.sched);
+    }
+
+    /// Free the badge slot of the lookup of `branch` in checkout `repo`.
+    fn release_pr_badge(&mut self, repo: &Path, branch: &str) {
+        self.pr_badges_running = self.pr_badges_running.saturating_sub(1);
+        self.pr_badge_jobs
+            .remove(&(repo.to_path_buf(), branch.to_string()));
+    }
+
+    /// After a badge lookup ended: alert the PR changes, start a title
+    /// cycle once the lookups are idle, and give the freed slot to a
+    /// waiting lookup.
+    fn after_pr_badge(&mut self, state: &mut AppState, opts: &TuiOpts) {
+        self.alert_pr_changes(state);
+        self.start_pr_title_cycle(state, opts);
+        self.fill_pr_badge_slots();
+    }
+
+    /// Land the detail `lookup` of `job` and free its badge slot.
+    fn land_pr_detail(
+        &mut self,
+        state: &mut AppState,
+        opts: &TuiOpts,
+        job: PrDetailJob,
+        lookup: PrDetailLookup,
+    ) {
+        self.pr_badges_running = self.pr_badges_running.saturating_sub(1);
+        let PrDetailJob {
+            repo,
+            branch,
+            remote,
+            number,
+            request,
+        } = job;
+        if state.apply_pr_detail(&repo, &branch, &remote, number, request, lookup) {
+            // The answer changed while this fetch was out: ask
+            // again for the open popover and the active PRs tab.
+            let details = state.request_pr_details();
+            if details != Effect::None {
+                self.schedule(state, opts, details, &Action::None);
+            }
+            self.mark();
+        }
+        self.fill_pr_badge_slots();
     }
 
     /// Reload a checkout after a TTY editor returns.
@@ -3294,7 +3388,7 @@ impl Interpreter {
         opts: &TuiOpts,
         id: u64,
         tag: UserTag,
-        spawn: &mut dyn FnMut(u64, JobWork),
+        spawn: &mut dyn FnMut(u64, JobRelease, JobWork),
     ) {
         match tag {
             UserTag::Write => {
@@ -3304,6 +3398,7 @@ impl Interpreter {
                     let dir = opts.cwd.join(&repo);
                     spawn(
                         id,
+                        JobRelease::Write { op: "checkout" },
                         Box::new(move || {
                             let result = compute_checkout(&dir, &name, ff.as_deref());
                             JobOutcome::Checkout { repo, result }
@@ -3317,6 +3412,7 @@ impl Interpreter {
                     let dir = opts.cwd.join(&repo);
                     spawn(
                         id,
+                        JobRelease::Write { op: "merge" },
                         Box::new(move || {
                             let result = compute_merge(&dir, &rev);
                             JobOutcome::Merge { label, result }
@@ -3331,6 +3427,7 @@ impl Interpreter {
                     let ok_kind = job.ok_kind;
                     spawn(
                         id,
+                        JobRelease::Write { op },
                         Box::new(move || JobOutcome::Write {
                             status: write_status(op, ok_kind, (job.work)()),
                         }),
@@ -3366,6 +3463,10 @@ impl Interpreter {
                 self.mark();
                 spawn(
                     id,
+                    JobRelease::Remote {
+                        kind,
+                        repo: repo.clone(),
+                    },
                     Box::new(move || {
                         let result = match kind {
                             RunningOp::Fetch => {
@@ -3397,6 +3498,7 @@ impl Interpreter {
                 let cwd = opts.cwd.clone();
                 spawn(
                     id,
+                    JobRelease::DefaultBranch { repo: repo.clone() },
                     Box::new(move || {
                         let result = match task {
                             Some((branch, override_name)) => switch_result(
@@ -3419,6 +3521,7 @@ impl Interpreter {
                     let dir = opts.cwd.join(&repo);
                     spawn(
                         id,
+                        JobRelease::Prepare { what: "stash menu" },
                         Box::new(move || {
                             let latest = latest_stash_ref(&dir);
                             JobOutcome::PrepareStash { gen, repo, latest }
@@ -3430,6 +3533,7 @@ impl Interpreter {
                     let dir = opts.cwd.join(&repo);
                     spawn(
                         id,
+                        JobRelease::Prepare { what: "push plan" },
                         Box::new(move || {
                             let plan = push_plan(&dir);
                             JobOutcome::PreparePush { gen, repo, plan }
@@ -3441,6 +3545,9 @@ impl Interpreter {
                     let dir = opts.cwd.join(&repo);
                     spawn(
                         id,
+                        JobRelease::Prepare {
+                            what: "compare picker",
+                        },
                         Box::new(move || {
                             let result = match kind {
                                 ComparePickerKind::Branch => list_compare_picker_branches(&dir)
@@ -3457,6 +3564,9 @@ impl Interpreter {
                     let dir = opts.cwd.join(&repo);
                     spawn(
                         id,
+                        JobRelease::Prepare {
+                            what: "blame previous change",
+                        },
                         Box::new(move || {
                             let result = previous_line_change(&dir, &blame);
                             JobOutcome::BlamePrevious {
@@ -3473,6 +3583,9 @@ impl Interpreter {
                     let dir = opts.cwd.join(&repo);
                     spawn(
                         id,
+                        JobRelease::Prepare {
+                            what: "branch picker",
+                        },
                         Box::new(move || {
                             let branches = list_local_branches(&dir);
                             JobOutcome::PrepareBranches {
@@ -3492,6 +3605,7 @@ impl Interpreter {
                 if let Some(job) = self.diff_prepare.take() {
                     spawn(
                         id,
+                        JobRelease::DiffPrepare,
                         Box::new(move || {
                             let prepared = match &job.kind {
                                 ExternalDiffKind::Worktree => {
@@ -3529,6 +3643,9 @@ impl Interpreter {
                     let dir = opts.cwd.join(&job.repo);
                     spawn(
                         id,
+                        JobRelease::Read {
+                            what: "compare range",
+                        },
                         Box::new(move || JobOutcome::CompareRange {
                             tab_id: job.tab_id,
                             gen: job.gen,
@@ -3547,6 +3664,9 @@ impl Interpreter {
                     let context = state.commit_diff_context(&job.repo, &job.path);
                     spawn(
                         id,
+                        JobRelease::Read {
+                            what: "compare diff",
+                        },
                         Box::new(move || {
                             let content = compute_compare_diff(
                                 &dir,
@@ -3571,6 +3691,9 @@ impl Interpreter {
                     let dir = opts.cwd.join(&job.repo);
                     spawn(
                         id,
+                        JobRelease::Read {
+                            what: "compare probe",
+                        },
                         Box::new(move || {
                             let result = probe_compare_range(
                                 &dir,
@@ -3593,6 +3716,9 @@ impl Interpreter {
                     let source_work = source.clone();
                     spawn(
                         id,
+                        JobRelease::Read {
+                            what: "commit files",
+                        },
                         Box::new(move || {
                             let files = compute_commit_files(&dir, &source_work);
                             JobOutcome::CommitFiles {
@@ -3615,6 +3741,9 @@ impl Interpreter {
                     let path_w = path.clone();
                     spawn(
                         id,
+                        JobRelease::Read {
+                            what: "commit diff",
+                        },
                         Box::new(move || {
                             let content = compute_commit_diff(
                                 &cwd,
@@ -3649,13 +3778,22 @@ impl Interpreter {
                 });
                 if let Some(job) = job {
                     let cwd = opts.cwd.clone();
-                    spawn(id, Box::new(move || run_explorer_job(&cwd, job)));
+                    spawn(
+                        id,
+                        JobRelease::Read {
+                            what: "Explorer load",
+                        },
+                        Box::new(move || run_explorer_job(&cwd, job)),
+                    );
                     return;
                 }
                 if let Some((gen, roots)) = self.file_index_job.take() {
                     let cwd = opts.cwd.clone();
                     spawn(
                         id,
+                        JobRelease::Read {
+                            what: "Quick Open index",
+                        },
                         Box::new(move || JobOutcome::FileIndex {
                             gen,
                             index: build_file_index(&cwd, roots, MAX_INDEX_ENTRIES),
@@ -3666,6 +3804,9 @@ impl Interpreter {
                 if let Some((gen, index, query)) = self.file_score_job.take() {
                     spawn(
                         id,
+                        JobRelease::Read {
+                            what: "Quick Open score",
+                        },
                         Box::new(move || JobOutcome::FileScore {
                             gen,
                             hits: score_files(&index, &query, MAX_RESULTS),
@@ -3682,6 +3823,9 @@ impl Interpreter {
                     let file = opts.cwd.join(checkout).join(rel);
                     spawn(
                         id,
+                        JobRelease::Read {
+                            what: "search preview",
+                        },
                         Box::new(move || JobOutcome::SearchPreview {
                             gen,
                             body: read_text_file(&file, MAX_FILE_BYTES),
@@ -3693,6 +3837,9 @@ impl Interpreter {
                     let cwd = opts.cwd.clone();
                     spawn(
                         id,
+                        JobRelease::Read {
+                            what: "search index",
+                        },
                         Box::new(move || JobOutcome::SearchIndex {
                             gen,
                             index: build_file_index(&cwd, roots, MAX_INDEX_ENTRIES),
@@ -3707,7 +3854,13 @@ impl Interpreter {
                     .take_if(|job| job.gen == live.load(Ordering::Relaxed))
                 {
                     let cwd = opts.cwd.clone();
-                    spawn(id, Box::new(move || job.run(&cwd, &live)));
+                    spawn(
+                        id,
+                        JobRelease::Read {
+                            what: "search chunk",
+                        },
+                        Box::new(move || job.run(&cwd, &live)),
+                    );
                     return;
                 }
                 self.sched.note_job_finished(id);
@@ -3721,6 +3874,7 @@ impl Interpreter {
                 let dir = opts.cwd.join(&key.repo);
                 spawn(
                     id,
+                    JobRelease::LineBlame,
                     Box::new(move || {
                         let result = blame_line(&dir, &key.rev, &key.path, key.line);
                         JobOutcome::LineBlame { key, result }
@@ -3736,6 +3890,7 @@ impl Interpreter {
                 let dir = opts.cwd.join(&repo);
                 spawn(
                     id,
+                    JobRelease::CommitCard,
                     Box::new(move || JobOutcome::CommitCard {
                         result: load_commit_card(&dir, &sha),
                         repo,
@@ -3755,6 +3910,7 @@ impl Interpreter {
                 let inputs = DoctorJob::new(state, opts);
                 spawn(
                     id,
+                    JobRelease::Doctor,
                     Box::new(move || JobOutcome::Doctor {
                         gen,
                         checks: inputs.run(),
@@ -3769,6 +3925,7 @@ impl Interpreter {
                 let cancel = Arc::clone(&self.pr_cancel);
                 spawn(
                     id,
+                    JobRelease::PrTitles,
                     Box::new(move || {
                         // One group at a time, so a quit stops between keys;
                         // the registry ends a command that runs then.
@@ -3800,6 +3957,9 @@ impl Interpreter {
                 let cwd = opts.cwd.clone();
                 spawn(
                     id,
+                    JobRelease::Read {
+                        what: "activity count",
+                    },
                     Box::new(move || {
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
@@ -3817,6 +3977,7 @@ impl Interpreter {
                     let open = self.pr_opener;
                     spawn(
                         id,
+                        JobRelease::Read { what: "PR open" },
                         Box::new(move || {
                             let run = |argv: &[String]| cli(argv, &cancel);
                             let remote = remote_url_for_branch(&cwd.join(&repo), &branch);
@@ -3845,6 +4006,7 @@ impl Interpreter {
                     let open = self.pr_opener;
                     spawn(
                         id,
+                        JobRelease::Read { what: "PR CI open" },
                         Box::new(move || JobOutcome::PullRequestCiOpen {
                             pr_ref,
                             opened: open(&url, &cancel).is_ok(),
@@ -3856,6 +4018,9 @@ impl Interpreter {
                     let open = self.pr_opener;
                     spawn(
                         id,
+                        JobRelease::Read {
+                            what: "remote view",
+                        },
                         Box::new(move || {
                             // A job that starts after quit runs no git.
                             if cancel.load(Ordering::Relaxed) {
@@ -3880,6 +4045,9 @@ impl Interpreter {
                 if let Some((repo, branch)) = self.checkout_remotes.pop_front() {
                     spawn(
                         id,
+                        JobRelease::Read {
+                            what: "checkout remote",
+                        },
                         Box::new(move || {
                             // A job that starts after quit runs no git.
                             let remote = if cancel.load(Ordering::Relaxed) {
@@ -3906,6 +4074,7 @@ impl Interpreter {
                         self.pr_badges_running += 1;
                         spawn(
                             id,
+                            JobRelease::PrDetail { job: job.clone() },
                             Box::new(move || {
                                 let run = |argv: &[String]| cli(argv, &cancel);
                                 let lookup = lookup_detail(&job.remote, job.number, &run);
@@ -3919,6 +4088,10 @@ impl Interpreter {
                         self.pr_badge_jobs.insert((repo.clone(), branch.clone()));
                         spawn(
                             id,
+                            JobRelease::PrBadge {
+                                repo: repo.clone(),
+                                branch: branch.clone(),
+                            },
                             Box::new(move || {
                                 let run = |argv: &[String]| cli(argv, &cancel);
                                 let remote = remote_url_for_branch(&cwd.join(&repo), &branch);
@@ -3958,6 +4131,7 @@ impl Interpreter {
                 let repo = identity.repo.clone();
                 spawn(
                     id,
+                    JobRelease::Autoload { gen },
                     Box::new(move || {
                         let (page, _loaded) = load_graph_model_window(
                             &cwd,
@@ -4022,7 +4196,7 @@ mod tests {
     use crate::tui::chrome::{diverged_pull_status, STATUS_NOTHING_TO_PULL};
     use crate::tui::status::StatusKind;
 
-    fn fixture_state() -> AppState {
+    pub(super) fn fixture_state() -> AppState {
         app_state_of(build_workspace_snapshot(
             &[repo("app", true), repo("notes", true), repo("lib", true)],
             &["notes".into()],
@@ -4031,7 +4205,7 @@ mod tests {
         ))
     }
 
-    fn opts(state: &AppState) -> TuiOpts {
+    pub(super) fn opts(state: &AppState) -> TuiOpts {
         TuiOpts {
             cwd: state.cwd.clone(),
             snapshot: state.snapshot.clone(),
@@ -5861,7 +6035,10 @@ mod tests {
         );
     }
 
-    fn capture_jobs(interp: &mut Interpreter, state: &mut AppState) -> Vec<(u64, JobWork)> {
+    pub(super) fn capture_jobs(
+        interp: &mut Interpreter,
+        state: &mut AppState,
+    ) -> Vec<(u64, JobWork)> {
         let tui_opts = opts(state);
         let mut jobs = Vec::new();
         interp.spawn_ready(state, &tui_opts, &mut |id, work| {
@@ -5870,7 +6047,7 @@ mod tests {
         jobs
     }
 
-    fn schedule_effect(
+    pub(super) fn schedule_effect(
         interp: &mut Interpreter,
         state: &mut AppState,
         effect: Effect,
@@ -8918,7 +9095,7 @@ mod tests {
     }
 
     /// Run spawned jobs until none is left (at most `rounds` passes).
-    fn drain_jobs(interp: &mut Interpreter, state: &mut AppState, rounds: usize) {
+    pub(super) fn drain_jobs(interp: &mut Interpreter, state: &mut AppState, rounds: usize) {
         for _ in 0..rounds {
             let jobs = capture_jobs(interp, state);
             if jobs.is_empty() {
@@ -9526,14 +9703,17 @@ mod tests {
         OPENED.with(|urls| urls.borrow_mut().drain(..).collect())
     }
 
-    fn gh_approved_pr(argv: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
+    pub(super) fn gh_approved_pr(
+        argv: &[String],
+        _: &AtomicBool,
+    ) -> Result<String, Option<String>> {
         assert_eq!(argv.first().map(String::as_str), Some("gh"), "{argv:?}");
         Ok(format!(
             r#"[{{"number":7,"state":"OPEN","url":"{PR_URL}","headRefName":"feature","isCrossRepository":false,"reviewDecision":"APPROVED","updatedAt":"2026-01-02T00:00:00Z"}}]"#
         ))
     }
 
-    fn gh_no_pr(_: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
+    pub(super) fn gh_no_pr(_: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
         Ok("[]".into())
     }
 
@@ -9563,7 +9743,7 @@ mod tests {
 
     /// Real checkout `app` on `feature`, with `origin` at `remote` when set,
     /// focused in the tree.
-    fn pr_app(tag: &str, remote: Option<&str>) -> (PathBuf, AppState) {
+    pub(super) fn pr_app(tag: &str, remote: Option<&str>) -> (PathBuf, AppState) {
         let (root, mut state) = git_app_state(tag, "feature", false);
         if let Some(remote) = remote {
             crate::testutil::git(&root.join("app"), &["remote", "add", "origin", remote]);
@@ -10550,7 +10730,7 @@ mod tests {
 
     // ---- PR change alerts ----
 
-    fn gh_merged_pr(argv: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
+    pub(super) fn gh_merged_pr(argv: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
         assert_eq!(argv.first().map(String::as_str), Some("gh"), "{argv:?}");
         Ok(format!(
             r#"[{{"number":7,"state":"MERGED","url":"{PR_URL}","headRefName":"feature","isCrossRepository":false,"updatedAt":"2026-01-03T00:00:00Z"}}]"#

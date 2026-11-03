@@ -390,26 +390,46 @@ impl Scheduler {
             .as_ref()
             .is_some_and(|c| c.discovered && c.pending.is_empty());
         if finished {
-            let (kind, focused) = self
-                .collection
-                .as_ref()
-                .map(|c| (c.kind, c.focused.clone()))
-                .unwrap_or((CollectionKind::Watch, None));
-            self.collection = None;
-            if self.latched_watch {
-                self.latched_watch = false;
-                self.start_collection(kind, focused);
-                return ApplyDecision::StartDiscover {
-                    gen: self.collection.as_ref().map(|c| c.gen).unwrap_or(0),
-                    kind,
-                };
-            }
-            return ApplyDecision::CollectionIdle;
+            return self.finish_collection();
         }
         ApplyDecision::ApplyRepo {
             path: path.to_string(),
             load_pane_if_focused: focused,
         }
+    }
+
+    /// End collect `gen` whose workspace walk never landed (its worker
+    /// panicked), so a watch tick or reload can start the next collect.
+    /// A collect that already landed its walk, or a newer one, is kept.
+    pub fn abandon_collection(&mut self, gen: u64) -> ApplyDecision {
+        if self
+            .collection
+            .as_ref()
+            .is_none_or(|c| c.gen != gen || c.discovered)
+        {
+            return ApplyDecision::Ignore;
+        }
+        self.finish_collection()
+    }
+
+    /// Close the current collect. A watch tick that latched meanwhile
+    /// starts the next one.
+    fn finish_collection(&mut self) -> ApplyDecision {
+        let (kind, focused) = self
+            .collection
+            .as_ref()
+            .map(|c| (c.kind, c.focused.clone()))
+            .unwrap_or((CollectionKind::Watch, None));
+        self.collection = None;
+        if self.latched_watch {
+            self.latched_watch = false;
+            self.start_collection(kind, focused);
+            return ApplyDecision::StartDiscover {
+                gen: self.collection.as_ref().map(|c| c.gen).unwrap_or(0),
+                kind,
+            };
+        }
+        ApplyDecision::CollectionIdle
     }
 
     pub fn request_pane(&mut self) -> u64 {
