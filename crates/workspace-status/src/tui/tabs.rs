@@ -828,12 +828,9 @@ pub struct InnerFile {
     /// search-in-files hit). On a diff view it maps to the row whose new
     /// line number is `line + 1`.
     pub pending_line: Option<usize>,
-    /// Parked diff cursor of a diff view while another inner tab is active.
-    pub diff_cursor: usize,
-    /// Parked diff scroll of a diff view.
-    pub diff_scroll: u16,
-    /// Parked diff pan of a diff view.
-    pub diff_col_offset: u16,
+    /// Parked diff viewport of a diff view while another inner tab is
+    /// active.
+    pub diff: ParkedDiff,
 }
 
 impl InnerFile {
@@ -843,7 +840,18 @@ impl InnerFile {
     }
 }
 
-/// `/` search of an Explorer tab, parked while another tab is active.
+/// The viewport of one diff view, parked while another view is active.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ParkedDiff {
+    /// Diff cursor row.
+    pub cursor: usize,
+    /// First painted diff row.
+    pub scroll: u16,
+    /// Columns the diff is panned.
+    pub col_offset: u16,
+}
+
+/// `/` search of a tab, parked while another tab is active.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ParkedSearch {
     /// The `/` prompt was open.
@@ -973,9 +981,7 @@ impl ExplorerTab {
             gen,
             stamp: None,
             pending_line: None,
-            diff_cursor: 0,
-            diff_scroll: 0,
-            diff_col_offset: 0,
+            diff: ParkedDiff::default(),
         }
     }
 
@@ -1159,11 +1165,13 @@ impl TabStrip {
         self.active == 0
     }
 
-    fn active_tab(&self) -> Option<&SessionTab> {
+    /// The active session tab; `None` while Workspace is active.
+    pub fn active_tab(&self) -> Option<&SessionTab> {
         self.active.checked_sub(1).and_then(|i| self.tabs.get(i))
     }
 
-    fn active_tab_mut(&mut self) -> Option<&mut SessionTab> {
+    /// Mutable [`Self::active_tab`].
+    pub fn active_tab_mut(&mut self) -> Option<&mut SessionTab> {
         self.active
             .checked_sub(1)
             .and_then(|i| self.tabs.get_mut(i))
