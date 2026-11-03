@@ -1511,7 +1511,7 @@ mod tests {
     use super::super::store::{put_comment, CommentEntry, CommentKey, CommentStore};
     use super::*;
     use crate::helpers::DETACHED_HEAD_BRANCH;
-    use crate::snapshot::{build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot};
+    use crate::snapshot::{build_workspace_snapshot, CheckoutKind, RepoSnapshot};
     use crate::testutil::{repo_snapshot, unstaged_change};
     use crate::tui::diff::{DiffCell, DiffCellKind, DiffContent, DiffRow};
     use crate::tui::tree::NodeChrome;
@@ -1828,10 +1828,6 @@ mod tests {
         );
     }
 
-    fn dirty_file(path: &str) -> FileChange {
-        unstaged_change(path)
-    }
-
     fn workspace_tree() -> TreeNode {
         TreeNode {
             id: "workspace".into(),
@@ -1903,7 +1899,7 @@ mod tests {
         VisibleRow {
             kind: NodeKind::File,
             repo: Some("app".into()),
-            file: Some(dirty_file(path)),
+            file: Some(unstaged_change(path)),
             chrome: NodeChrome {
                 path: path.into(),
                 ..Default::default()

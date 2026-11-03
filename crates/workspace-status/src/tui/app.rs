@@ -1286,10 +1286,6 @@ mod tests {
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    fn dummy_repo(name: &str) -> crate::snapshot::RepoSnapshot {
-        repo_snapshot(name)
-    }
-
     /// Restore bytes as `restore_terminal` writes them, with `shown` as
     /// the shown-bar flag and `pointer_set` as the resize-pointer flag.
     fn restore_bytes(shown: &AtomicBool, pointer_set: &AtomicBool) -> String {
@@ -1516,7 +1512,7 @@ mod tests {
             panic!("one press-only g: {press:?}");
         };
         let fresh = || {
-            let mut app = app_state(&[dummy_repo("app"), dummy_repo("lib")]);
+            let mut app = app_state(&[repo_snapshot("app"), repo_snapshot("lib")]);
             app.cursor = app.rows.len() - 1;
             assert_ne!(app.cursor, 0, "the cursor starts off the workspace root");
             app
@@ -1558,7 +1554,7 @@ mod tests {
 
     #[test]
     fn drop_undiscovered_checkouts_removes_vanished_paths() {
-        let mut app = app_state(&[dummy_repo("app"), dummy_repo("linked")]);
+        let mut app = app_state(&[repo_snapshot("app"), repo_snapshot("linked")]);
         assert_eq!(app.snapshot.repos.len(), 2);
         drop_undiscovered_checkouts(&mut app, &["app".into()]);
         let names: Vec<&str> = app

@@ -115,9 +115,8 @@ delete the entry once its sites are done, and do not add new ones.
 
 Dead code is a build error under `-D warnings`. Test-only helpers belong
 behind `#[cfg(test)]` so they leave the shipped binary but keep their
-coverage; in-crate git fixtures and snapshot / app-state fixtures
-(`repo_snapshot`, `repo`, `app_state`) live in `src/testutil.rs`, not in a
-per-module copy.
+coverage; in-crate git fixtures and snapshot / app-state fixtures live in
+`src/testutil.rs`, not in a per-module copy.
 
 ## Conventions
 

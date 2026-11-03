@@ -2753,13 +2753,14 @@ mod tests {
         use std::time::{Duration, Instant};
 
         use super::super::*;
-        use crate::snapshot::{RepoSnapshot, SyncStatus};
-        use crate::testutil::{app_state, repo_snapshot};
+        use crate::snapshot::RepoSnapshot;
+        use crate::testutil::app_state;
         use crate::tui::action::Effect;
         use crate::tui::pr_status::{
             checks_ci_link, pipeline_ci_link, Check, CiLink, CiLinkKind, PrNotes,
         };
         use crate::tui::pull_request::{Forge, PrDetailLookup, PrLookup, PullRequest};
+        use crate::tui::state::prs_fixtures::checkout;
         use crate::tui::state::unix_now;
 
         const GH_REMOTE: &str = "git@github.com:acme/app.git";
@@ -2786,15 +2787,6 @@ mod tests {
             pr.title = "Add the retry API".into();
             pr.head = "feature/ABC-123-retry".into();
             pr
-        }
-
-        fn checkout(name: &str, branch: &str) -> RepoSnapshot {
-            RepoSnapshot {
-                branch: branch.into(),
-                sync_status: SyncStatus::UpToDate,
-                head: "abc".into(),
-                ..repo_snapshot(name)
-            }
         }
 
         /// One checkout per PR (named `c<i>`, on the PR's head branch),

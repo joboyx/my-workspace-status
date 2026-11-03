@@ -101,8 +101,7 @@ mod tests {
     use crate::snapshot::build_workspace_snapshot;
 
     fn app() -> AppState {
-        let snapshot = build_workspace_snapshot(&[], &[], false, &[]);
-        AppState::new(PathBuf::from("/tmp"), snapshot, false)
+        crate::testutil::app_state_ascii(&[], false)
     }
 
     fn at(start: Instant, ms: u64) -> Instant {

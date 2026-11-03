@@ -7,10 +7,11 @@
 //! and fifteen copies of the same init block. This module is the one place
 //! those live for `src/`.
 //!
-//! The snapshot fixtures ([`repo_snapshot`], [`repo`], [`app_state`]) are
-//! where a test builds a [`RepoSnapshot`] from scratch: tests set only the
-//! fields they care about, so a new field means one edit here, not one per
-//! test module.
+//! The snapshot fixtures ([`repo_snapshot`], [`repo`]) are where a test
+//! builds a [`RepoSnapshot`] row from scratch: tests set only the fields they
+//! care about, so a new field means one edit here, not one per test module.
+//! The app-state fixtures ([`app_state`], [`app_state_ascii`],
+//! [`app_state_of`]) build an [`AppState`] over those rows.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,8 +31,8 @@ use crate::tui::AppState;
 
 /// A clean primary checkout named `name` on `main` with no upstream.
 ///
-/// This is the only place that lists every [`RepoSnapshot`] field. Tests set
-/// what they care about with struct update syntax:
+/// This is the only test code that lists every [`RepoSnapshot`] field. Tests
+/// set what they care about with struct update syntax:
 /// `RepoSnapshot { branch: "feat".into(), ..repo_snapshot("app") }`.
 pub fn repo_snapshot(name: &str) -> RepoSnapshot {
     RepoSnapshot {
@@ -82,7 +83,17 @@ pub fn repo(name: &str, dirty: bool) -> RepoSnapshot {
 /// Test [`AppState`] over `repos`: cwd `/tmp`, ASCII glyphs, and the
 /// workspace snapshot with no hidden paths, hidden repos off, no filter.
 pub fn app_state(repos: &[RepoSnapshot]) -> AppState {
-    app_state_of(build_workspace_snapshot(repos, &[], false, &[]))
+    app_state_ascii(repos, true)
+}
+
+/// Same as [`app_state`], but the caller picks the glyph set: `ascii` is
+/// the third argument of [`AppState::new`] (`true` for ASCII glyphs).
+pub fn app_state_ascii(repos: &[RepoSnapshot], ascii: bool) -> AppState {
+    AppState::new(
+        PathBuf::from("/tmp"),
+        build_workspace_snapshot(repos, &[], false, &[]),
+        ascii,
+    )
 }
 
 /// Test [`AppState`] over a custom `snapshot` (hidden paths, show-hidden,
@@ -359,12 +370,5 @@ mod tests {
                 old_path: None,
             }]
         );
-    }
-
-    #[test]
-    fn clean_repo_has_no_changes() {
-        let snap = repo("app", false);
-        assert!(!snap.has_unstaged);
-        assert!(snap.changes.is_empty());
     }
 }

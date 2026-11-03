@@ -8390,7 +8390,7 @@ mod tests {
     use crate::snapshot::{
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
     };
-    use crate::testutil::{app_state, repo, repo_snapshot, unstaged_change};
+    use crate::testutil::{app_state, app_state_ascii, repo, repo_snapshot, unstaged_change};
     use crate::tui::action::{Action, Effect};
     use crate::tui::comments::{put_comment, CommentKey};
     use crate::tui::icons::{icon_linked_worktree, icon_repo};
@@ -15111,8 +15111,7 @@ mod tests {
             host: host.into(),
         };
         let now = Instant::now();
-        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, false);
+        let mut state = app_state_ascii(&[repo("app", false)], false);
         let mut terminal = Terminal::new(TestBackend::new(80, 1)).unwrap();
         let clean = paint_tab_row(&mut terminal, &mut state).concat();
         assert!(!clean.contains('✕'), "no outage, no mark: {clean}");
@@ -15965,8 +15964,7 @@ mod tests {
     fn help_legend_paints_under_the_columns() {
         use super::super::icons::IconKind;
         for ascii in [true, false] {
-            let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-            let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, ascii);
+            let mut state = app_state_ascii(&[repo("app", true)], ascii);
             state.help_open = true;
             let mut terminal = Terminal::new(TestBackend::new(200, 120)).unwrap();
             terminal.draw(|frame| draw(frame, &mut state)).unwrap();
@@ -20052,8 +20050,7 @@ mod tests {
 
     /// One dirty `app` checkout with a fetch in flight.
     fn fetching_app_state(ascii: bool) -> AppState {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, ascii);
+        let mut state = app_state_ascii(&[repo("app", true)], ascii);
         state.remote_activity.running.insert("app".into());
         state
     }
@@ -20535,8 +20532,7 @@ mod tests {
 
     #[test]
     fn pane_loading_spinner_has_no_fg_under_no_color() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, false);
+        let mut state = app_state_ascii(&[repo("app", true)], false);
         let muted = state.theme.palette().muted;
         state.begin_commit_files(
             "app".into(),
@@ -20574,8 +20570,7 @@ mod tests {
 
     /// A one-repo `app` state with `status` set.
     fn toast_state(status: StatusMessage, ascii: bool) -> AppState {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, ascii);
+        let mut state = app_state_ascii(&[repo("app", true)], ascii);
         state.status = status;
         state
     }
@@ -23808,8 +23803,7 @@ mod tests {
             old_path: None,
         });
         app.changes.push(unstaged_change("src/a.rs"));
-        let snapshot = build_workspace_snapshot(&[app], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, false);
+        let mut state = app_state_ascii(&[app], false);
         state.cursor = state
             .rows
             .iter()
@@ -25161,8 +25155,7 @@ mod tests {
 
     /// State with every checkout's PR lookup in flight.
     fn pr_state(repos: &[RepoSnapshot], ascii: bool) -> AppState {
-        let snapshot = build_workspace_snapshot(repos, &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, ascii);
+        let mut state = app_state_ascii(repos, ascii);
         assert_eq!(state.due_pr_lookups().len(), repos.len());
         state
     }
@@ -28028,8 +28021,7 @@ mod tests {
     #[test]
     fn file_row_badge_and_devicon_hits_cover_the_glyph_only() {
         for ascii in [true, false] {
-            let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-            let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, ascii);
+            let mut state = app_state_ascii(&[repo("app", true)], ascii);
             focus_tree_row(&mut state, "file:app:README.md");
             let mut terminal = pr_terminal();
             terminal.draw(|frame| draw(frame, &mut state)).unwrap();
@@ -29595,8 +29587,7 @@ mod tests {
     /// While the probe runs the dialog says `checking…` and paints no row.
     #[test]
     fn doctor_paints_checking_until_the_probe_answers() {
-        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, false);
+        let mut state = app_state_ascii(&[repo("app", false)], false);
         state.dispatch(Action::OpenDoctor);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         draw_state(&mut terminal, &mut state);

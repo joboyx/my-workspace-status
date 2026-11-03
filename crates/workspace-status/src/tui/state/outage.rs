@@ -91,20 +91,12 @@ mod tests {
     use super::super::super::toast::OUTAGE_DISMISS_HINT;
     use super::super::{AppState, FocusPane};
     use super::*;
-    use crate::snapshot::{build_workspace_snapshot, RepoSnapshot, SyncStatus};
-    use crate::testutil::repo_snapshot;
-
-    fn checkout(name: &str) -> RepoSnapshot {
-        RepoSnapshot {
-            sync_status: SyncStatus::UpToDate,
-            head: "abc".into(),
-            ..repo_snapshot(name)
-        }
-    }
+    use crate::snapshot::{build_workspace_snapshot, RepoSnapshot};
+    use crate::testutil::app_state_ascii;
+    use crate::tui::state::prs_fixtures::checkout;
 
     fn app() -> AppState {
-        let snapshot = build_workspace_snapshot(&[checkout("app")], &[], false, &[]);
-        AppState::new(PathBuf::from("/tmp"), snapshot, false)
+        app_state_ascii(&[checkout("app", "main")], false)
     }
 
     fn gitlab() -> OutageSource {
@@ -341,7 +333,7 @@ mod tests {
 
     /// A checkout row whose `git status` failed, as discovery builds it.
     fn status_failed(name: &str) -> RepoSnapshot {
-        let mut row = checkout(name);
+        let mut row = checkout(name, "main");
         row.sync_note = crate::helpers::STATUS_FAILED_NOTE.into();
         row
     }
@@ -354,7 +346,7 @@ mod tests {
     #[test]
     fn a_status_failed_row_toasts_once_per_outage_and_a_good_snapshot_ends_it() {
         let mut app = app();
-        let good = || build_workspace_snapshot(&[checkout("app")], &[], false, &[]);
+        let good = || build_workspace_snapshot(&[checkout("app", "main")], &[], false, &[]);
         let bad = || build_workspace_snapshot(&[status_failed("app")], &[], false, &[]);
         assert!(
             app.outages.is_empty(),
@@ -411,7 +403,7 @@ mod tests {
         );
 
         // One row works again: the same toast names the one left.
-        app.apply_watch_snapshot(rows(&[checkout("app"), status_failed("lib")]));
+        app.apply_watch_snapshot(rows(&[checkout("app", "main"), status_failed("lib")]));
         assert_eq!(toast_texts(&app), ["git status (lib): status failed"]);
         assert_eq!(
             app.outages.get(&OutageSource::LiveRefresh).unwrap().reason,
@@ -419,7 +411,7 @@ mod tests {
         );
 
         // A checkout that vanishes from the snapshot no longer counts.
-        app.apply_watch_snapshot(rows(&[checkout("app")]));
+        app.apply_watch_snapshot(rows(&[checkout("app", "main")]));
         assert!(app.outages.is_empty());
         assert!(toast_texts(&app).is_empty());
     }
@@ -428,7 +420,7 @@ mod tests {
     fn a_hidden_status_failed_row_counts_only_while_the_tree_shows_it() {
         let mut app = app();
         let snapshot = build_workspace_snapshot(
-            &[checkout("app"), status_failed("notes")],
+            &[checkout("app", "main"), status_failed("notes")],
             &["notes".into()],
             false,
             &[],

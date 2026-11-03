@@ -831,8 +831,7 @@ mod tests {
 
         const BEGIN: &[u8] = b"\x1b[?2026h";
         const END: &[u8] = b"\x1b[?2026l";
-        let snapshot = crate::snapshot::build_workspace_snapshot(&[], &[], false, &[]);
-        let mut state = AppState::new(std::path::PathBuf::from("/tmp"), snapshot, true);
+        let mut state = crate::testutil::app_state(&[]);
         let sink = Sink::default();
         let mut terminal = Terminal::with_options(
             CrosstermBackend::new(sink.clone()),
