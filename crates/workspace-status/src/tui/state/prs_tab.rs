@@ -395,22 +395,6 @@ impl AppState {
         then(self.request_pr_details(), titles)
     }
 
-    /// Restore the PRs tab session: the list has the focus and no pane
-    /// search runs (the Workspace search stays parked). Returns false off
-    /// the PRs tab.
-    pub(super) fn apply_prs_session(&mut self) -> bool {
-        if !self.is_prs_tab() {
-            return false;
-        }
-        self.focus = FocusPane::Left;
-        self.search_mode = false;
-        self.search_active = false;
-        self.search_query.clear();
-        self.search_hit = None;
-        self.search_origin = None;
-        true
-    }
-
     /// Why `action` refuses on the PRs tab, or `None` (off the tab too).
     ///
     /// Git writes say [`PRS_TAB_READ_ONLY`]; view keys and actions of the

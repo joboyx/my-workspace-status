@@ -49,7 +49,7 @@ use super::super::selection::TextSelection;
 use super::super::split::{list_hbar_rows, SplitDrag};
 use super::super::status::StatusMessage;
 use super::super::tabs::{
-    ExplorerPreview, ExplorerTab, OpenFile, ParkedSearch, EXPLORER_DIFFS_SHOW_WHOLE_FILE,
+    ExplorerPreview, ExplorerTab, OpenFile, ParkedDiff, EXPLORER_DIFFS_SHOW_WHOLE_FILE,
     EXPLORER_FILE_TABS_ONLY, EXPLORER_TAB_READ_ONLY, FILE_DELETED, FOCUS_A_TREE_ROW_TO_EXPLORE,
     NO_EXPLORER_FILE_TABS, ONLY_WORKSPACE_TAB_OPEN, SWITCH_TO_WORKSPACE_TAB, TAB_TO_THE_FILE_PANE,
 };
@@ -1411,13 +1411,9 @@ impl AppState {
         }
         inner.view = view;
         inner.gen = gen;
-        inner.diff_cursor = 0;
-        inner.diff_scroll = 0;
-        inner.diff_col_offset = 0;
+        inner.diff = ParkedDiff::default();
         if active {
-            self.diff_cursor = 0;
-            self.diff_scroll = 0;
-            self.diff_col_offset = 0;
+            self.set_live_diff(ParkedDiff::default());
         }
         Effect::LoadExplorerPreview {
             tab_id,
@@ -1623,11 +1619,11 @@ impl AppState {
     /// Explorer tab, park the live diff view in it. Returns its load
     /// generation (for [`Self::explorer_load_inner`]).
     fn explorer_park_inner(&mut self, tab_id: u64) -> Option<u64> {
-        let live = (self.diff_cursor, self.diff_scroll, self.diff_col_offset);
+        let live = self.live_diff();
         let active = self.active_explorer_id() == Some(tab_id);
         let inner = self.tabs.get_explorer_id_mut(tab_id)?.active_inner_mut()?;
         if active {
-            (inner.diff_cursor, inner.diff_scroll, inner.diff_col_offset) = live;
+            inner.diff = live;
         }
         Some(inner.gen)
     }
@@ -1643,10 +1639,8 @@ impl AppState {
         };
         let inner = tab.active_inner();
         let after = inner.map(|inner| inner.gen);
-        (self.diff_cursor, self.diff_scroll, self.diff_col_offset) = inner
-            .map_or((0, 0, 0), |inner| {
-                (inner.diff_cursor, inner.diff_scroll, inner.diff_col_offset)
-            });
+        let diff = inner.map_or_else(ParkedDiff::default, |inner| inner.diff);
+        self.set_live_diff(diff);
         if after.is_none() {
             self.focus = FocusPane::Left;
         }
@@ -1941,8 +1935,8 @@ impl AppState {
                 let new_line = u32::try_from(line.saturating_add(1)).unwrap_or(u32::MAX);
                 let row = row_for_new_line(content, mode, new_line);
                 if !active {
-                    inner.diff_cursor = row.unwrap_or(0);
-                    inner.diff_scroll = u16::try_from(inner.diff_cursor).unwrap_or(u16::MAX);
+                    inner.diff.cursor = row.unwrap_or(0);
+                    inner.diff.scroll = u16::try_from(inner.diff.cursor).unwrap_or(u16::MAX);
                 }
                 (SearchPane::Diff, row)
             }
@@ -2028,8 +2022,8 @@ impl AppState {
         match flipped {
             Some(view) => {
                 inner.view = view;
-                (inner.diff_cursor, inner.diff_scroll, inner.diff_col_offset) = (0, 0, 0);
-                (self.diff_cursor, self.diff_scroll, self.diff_col_offset) = (0, 0, 0);
+                inner.diff = ParkedDiff::default();
+                self.set_live_diff(ParkedDiff::default());
                 self.clear_diff_visual();
                 self.clear_explorer_search();
             }
@@ -2075,55 +2069,6 @@ impl AppState {
             }
             ExplorerPreview::File(_) => None,
         }
-    }
-
-    /// Park the active Explorer tab's pane focus and `/` search, and its
-    /// diff view in the active inner tab. Returns false off an Explorer
-    /// tab.
-    pub(super) fn park_explorer_session(&mut self) -> bool {
-        let Some(tab_id) = self.active_explorer_id() else {
-            return false;
-        };
-        let focus_preview = self.focus == FocusPane::Right;
-        let search = ParkedSearch {
-            mode: self.search_mode,
-            active: self.search_active,
-            query: self.search_query.clone(),
-            target: self.search_target,
-            hit: self.search_hit,
-        };
-        self.explorer_park_inner(tab_id);
-        if let Some(tab) = self.tabs.active_explorer_mut() {
-            tab.focus_preview = focus_preview;
-            tab.search = search;
-        }
-        true
-    }
-
-    /// Restore the active Explorer tab's pane focus, its `/` search, and
-    /// its active inner tab's diff view. Returns false off an Explorer tab.
-    pub(super) fn apply_explorer_session(&mut self) -> bool {
-        let Some(tab) = self.tabs.active_explorer() else {
-            return false;
-        };
-        let inner = tab.active_inner();
-        self.focus = if tab.focus_preview && inner.is_some() {
-            FocusPane::Right
-        } else {
-            FocusPane::Left
-        };
-        (self.diff_cursor, self.diff_scroll, self.diff_col_offset) = inner
-            .map_or((0, 0, 0), |inner| {
-                (inner.diff_cursor, inner.diff_scroll, inner.diff_col_offset)
-            });
-        let search = tab.search.clone();
-        self.search_mode = search.mode;
-        self.search_active = search.active;
-        self.search_query = search.query;
-        self.search_target = search.target;
-        self.search_hit = search.hit;
-        self.search_origin = None;
-        true
     }
 }
 

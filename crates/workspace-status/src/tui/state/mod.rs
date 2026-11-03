@@ -19,11 +19,13 @@ mod pull_request;
 mod remote_view;
 mod scroll_glide;
 mod summary;
+mod tab_park;
 
 #[cfg(test)]
 pub(crate) use prs_tab::fixtures as prs_fixtures;
 pub(crate) use prs_tab::{prs_row_flash_id, PrsLine, PrsView, PRS_DETAIL_MIN_COLS};
 pub(crate) use pull_request::PrDetailState;
+use tab_park::TabView;
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -707,24 +709,6 @@ struct SearchOrigin {
     explorer_cursor: Option<String>,
 }
 
-/// Workspace chrome parked while a compare or Explorer tab is active.
-#[derive(Clone, Debug)]
-struct WorkspacePark {
-    focus: FocusPane,
-    search_mode: bool,
-    search_active: bool,
-    search_query: String,
-    search_target: SearchPane,
-    search_hit: Option<usize>,
-    left_col_offset: u16,
-    right_col_offset: u16,
-    diff_col_offset: u16,
-    diff_cursor: usize,
-    diff_scroll: u16,
-    commit_file_folds: HashSet<String>,
-    commit_tree_mode: bool,
-}
-
 /// Confirm overlay before a destructive file write.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PendingConfirm {
@@ -1118,7 +1102,8 @@ pub struct AppState {
     pub compare_picker: Option<ComparePickerState>,
     /// Checkout waiting for [`Effect::PrepareComparePicker`]. Cleared on open or abandon.
     pub(crate) compare_picker_pending: Option<String>,
-    workspace_park: Option<WorkspacePark>,
+    /// Workspace view parked while a session tab is active.
+    workspace_park: Option<TabView>,
     pub flashes: HashMap<String, FlashStamp>,
     pub signatures: BTreeMap<String, String>,
     pub graph_signatures: BTreeMap<String, String>,
@@ -3859,7 +3844,7 @@ impl AppState {
             }
             VScrollbar::Tree | VScrollbar::ExplorerTree => self.focus = FocusPane::Left,
             VScrollbar::CommitFiles => self.focus = self.commit_files_pane(),
-            // The PRs tab keeps the list focused ([`Self::apply_prs_session`]);
+            // The PRs tab keeps the list focused ([`PrsTab::parked_view`]);
             // its narrow toggle, not the focus, picks the pane it shows.
             VScrollbar::PrsList | VScrollbar::PrsDetail => self.focus = FocusPane::Left,
         }
@@ -7269,95 +7254,6 @@ impl AppState {
             || icon != icon_before
             || self.hovered_search_option() != chip_before
             || self.hovered_resize_edge() != edge_before
-    }
-
-    fn park_active_session(&mut self) {
-        // An Explorer tab owns its pane focus and diff view.
-        if self.park_explorer_session() {
-            return;
-        }
-        // The PRs tab keeps its view state in its own tab; the Workspace
-        // park stays as it was.
-        if self.is_prs_tab() {
-            return;
-        }
-        if let Some(tab) = self.tabs.active_compare_mut() {
-            tab.focus_right = self.focus == FocusPane::Right;
-            tab.search_mode = self.search_mode;
-            tab.search_active = self.search_active;
-            tab.search_query = self.search_query.clone();
-            tab.search_hit = self.search_hit;
-            tab.left_col_offset = self.left_col_offset;
-            tab.diff_col_offset = self.diff_col_offset;
-            tab.diff_cursor = self.diff_cursor;
-            tab.diff_scroll = self.diff_scroll;
-            tab.folds = self.commit_file_folds.clone();
-            tab.tree_mode = self.commit_tree_mode;
-            return;
-        }
-        self.workspace_park = Some(WorkspacePark {
-            focus: self.focus,
-            search_mode: self.search_mode,
-            search_active: self.search_active,
-            search_query: self.search_query.clone(),
-            search_target: self.search_target,
-            search_hit: self.search_hit,
-            left_col_offset: self.left_col_offset,
-            right_col_offset: self.right_col_offset,
-            diff_col_offset: self.diff_col_offset,
-            diff_cursor: self.diff_cursor,
-            diff_scroll: self.diff_scroll,
-            commit_file_folds: self.commit_file_folds.clone(),
-            commit_tree_mode: self.commit_tree_mode,
-        });
-    }
-
-    fn apply_active_session(&mut self) {
-        if self.apply_explorer_session() || self.apply_prs_session() {
-            return;
-        }
-        if let Some(tab) = self.tabs.active_compare() {
-            self.focus = if tab.focus_right {
-                FocusPane::Right
-            } else {
-                FocusPane::Left
-            };
-            self.search_mode = tab.search_mode;
-            self.search_active = tab.search_active;
-            self.search_query = tab.search_query.clone();
-            self.search_target = if tab.search_active || tab.search_mode {
-                if tab.focus_right {
-                    SearchPane::Diff
-                } else {
-                    SearchPane::CommitFiles
-                }
-            } else {
-                SearchPane::CommitFiles
-            };
-            self.search_hit = tab.search_hit;
-            self.left_col_offset = tab.left_col_offset;
-            self.diff_col_offset = tab.diff_col_offset;
-            self.diff_cursor = tab.diff_cursor;
-            self.diff_scroll = tab.diff_scroll;
-            self.commit_file_folds = tab.folds.clone();
-            self.commit_tree_mode = tab.tree_mode;
-            return;
-        }
-        if let Some(park) = self.workspace_park.take() {
-            self.focus = park.focus;
-            self.search_mode = park.search_mode;
-            self.search_active = park.search_active;
-            self.search_query = park.search_query;
-            self.search_target = park.search_target;
-            self.search_hit = park.search_hit;
-            self.left_col_offset = park.left_col_offset;
-            self.right_col_offset = park.right_col_offset;
-            self.diff_col_offset = park.diff_col_offset;
-            self.diff_cursor = park.diff_cursor;
-            self.diff_scroll = park.diff_scroll;
-            self.commit_file_folds = park.commit_file_folds;
-            self.commit_tree_mode = park.commit_tree_mode;
-        }
     }
 
     fn activate_tab(&mut self, index: usize) -> Effect {
