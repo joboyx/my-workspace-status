@@ -7,9 +7,9 @@ use crate::support::{
     GIT_WAIT, WAIT,
 };
 
-/// Words with a doubled nav letter (`ll`). The input thread treats `l` as
-/// held navigation in Normal mode, so these catch a text field that loses
-/// the second `l` when the whole word arrives in one read.
+/// Words with a doubled nav letter (`ll`). `l` is a held nav key, and in
+/// Normal mode the event loop drops its queued copy, so these catch a text
+/// field that loses the second `l` when the whole word arrives in one read.
 const WORDS: [&str; 2] = ["full", "skill"];
 
 /// The search-in-files dialog title for the `app` checkout (tree cursor on
