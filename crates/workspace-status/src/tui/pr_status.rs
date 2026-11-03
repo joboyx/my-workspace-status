@@ -157,11 +157,25 @@ pub struct PrNotes {
     /// GitHub `reviewDecision: CHANGES_REQUESTED`; GitLab
     /// `detailed_merge_status: requested_changes`.
     pub changes_requested: bool,
+    /// The PR is approved, and the forge says the branch must be updated
+    /// from its base before merge: GitHub `mergeStateStatus: BEHIND` with
+    /// `reviewDecision: APPROVED`; GitLab `detailed_merge_status:
+    /// need_rebase` with no approvals left. It has no note text: the next
+    /// action [`NextAction::UpdateBranch`] carries it.
+    ///
+    /// Known gap on GitLab: `detailed_merge_status` names only the first
+    /// failed merge check, and `need_rebase` comes before
+    /// `requested_changes` and the later checks (MR dependencies, external
+    /// status checks). So a `need_rebase` MR can say `update branch` while
+    /// a reviewer's change request or such a check still blocks it.
+    /// Unresolved threads and CI do not have this gap: they come from
+    /// their own fields.
+    pub behind: bool,
 }
 
 impl PrNotes {
     /// `has conflicts`, `unresolved threads`, `changes requested`: the notes
-    /// that hold, in that order.
+    /// that hold, in that order. [`PrNotes::behind`] has no text.
     pub fn texts(self) -> Vec<&'static str> {
         [
             (self.conflicts, "has conflicts"),
@@ -191,6 +205,9 @@ pub enum NextAction {
     Undraft,
     /// Changes requested or unresolved threads.
     AddressReview,
+    /// [`PrNotes::behind`]: approved, and the only merge blocker left is a
+    /// branch behind its base. A label only: no update or rebase runs.
+    UpdateBranch,
     /// Ready, but the base branch is the head of another open PR; holds the
     /// ref of that PR (`#318`, `!12`).
     MergeBaseFirst(String),
@@ -204,13 +221,15 @@ pub enum NextAction {
 
 impl NextAction {
     /// Exact text: `fix CI`, `fix conflicts`, `undraft`, `address review`,
-    /// `merge <base ref> first`, `merge`, `wait for CI`, or `get review`.
+    /// `update branch`, `merge <base ref> first`, `merge`, `wait for CI`,
+    /// or `get review`.
     pub fn text(&self) -> String {
         match self {
             Self::FixCi => "fix CI".into(),
             Self::FixConflicts => "fix conflicts".into(),
             Self::Undraft => "undraft".into(),
             Self::AddressReview => "address review".into(),
+            Self::UpdateBranch => "update branch".into(),
             Self::MergeBaseFirst(base) => format!("merge {base} first"),
             Self::Merge => "merge".into(),
             Self::WaitForCi => "wait for CI".into(),
@@ -219,13 +238,14 @@ impl NextAction {
     }
 
     /// True when the move is the author's: fix CI, fix conflicts, address
-    /// review, merge the base first, or merge.
+    /// review, update the branch, merge the base first, or merge.
     pub fn needs_you(&self) -> bool {
         matches!(
             self,
             Self::FixCi
                 | Self::FixConflicts
                 | Self::AddressReview
+                | Self::UpdateBranch
                 | Self::MergeBaseFirst(_)
                 | Self::Merge
         )
@@ -247,6 +267,7 @@ pub fn next_action(
         _ if notes.conflicts => NextAction::FixConflicts,
         PrState::Draft => NextAction::Undraft,
         _ if notes.review_asks() => NextAction::AddressReview,
+        PrState::InReview if notes.behind => NextAction::UpdateBranch,
         PrState::Ready => match open_base_ref {
             Some(base) => NextAction::MergeBaseFirst(base.to_string()),
             None => NextAction::Merge,
@@ -466,21 +487,31 @@ mod tests {
         conflicts: true,
         unresolved_threads: false,
         changes_requested: false,
+        behind: false,
     };
     const THREADS: PrNotes = PrNotes {
         conflicts: false,
         unresolved_threads: true,
         changes_requested: false,
+        behind: false,
     };
     const CHANGES: PrNotes = PrNotes {
         conflicts: false,
         unresolved_threads: false,
         changes_requested: true,
+        behind: false,
+    };
+    const BEHIND: PrNotes = PrNotes {
+        conflicts: false,
+        unresolved_threads: false,
+        changes_requested: false,
+        behind: true,
     };
     const NONE: PrNotes = PrNotes {
         conflicts: false,
         unresolved_threads: false,
         changes_requested: false,
+        behind: false,
     };
 
     /// State, notes, open base ref → action, its text, needs you.
@@ -494,9 +525,13 @@ mod tests {
     );
 
     #[test]
-    fn next_action_rows_n1_to_n8_with_texts_and_needs_you() {
+    fn next_action_rows_with_texts_and_needs_you() {
         use NextAction::*;
-        let cases: [ActionRow; 13] = [
+        let behind_and = |notes: PrNotes| PrNotes {
+            behind: true,
+            ..notes
+        };
+        let cases: [ActionRow; 19] = [
             (PrState::CiFailed, CONFLICTS, None, FixCi, "fix CI", true),
             (
                 PrState::InReview,
@@ -573,6 +608,40 @@ mod tests {
                 true,
             ),
             (PrState::CiFailed, NONE, None, FixCi, "fix CI", true),
+            (
+                PrState::InReview,
+                BEHIND,
+                Some("#318"),
+                UpdateBranch,
+                "update branch",
+                true,
+            ),
+            (
+                PrState::CiRunning,
+                BEHIND,
+                None,
+                WaitForCi,
+                "wait for CI",
+                false,
+            ),
+            (PrState::Draft, BEHIND, None, Undraft, "undraft", false),
+            (
+                PrState::InReview,
+                behind_and(CHANGES),
+                None,
+                AddressReview,
+                "address review",
+                true,
+            ),
+            (
+                PrState::InReview,
+                behind_and(CONFLICTS),
+                None,
+                FixConflicts,
+                "fix conflicts",
+                true,
+            ),
+            (PrState::CiFailed, BEHIND, None, FixCi, "fix CI", true),
         ];
         for (state, notes, base, want, text, needs_you) in cases {
             let got = next_action(state, notes, base).expect("open PR");
@@ -584,7 +653,7 @@ mod tests {
 
     #[test]
     fn merged_has_no_next_action() {
-        for notes in [NONE, CONFLICTS, THREADS, CHANGES] {
+        for notes in [NONE, CONFLICTS, THREADS, CHANGES, BEHIND] {
             assert_eq!(next_action(PrState::Merged, notes, Some("#1")), None);
         }
     }
@@ -596,12 +665,14 @@ mod tests {
             conflicts: true,
             unresolved_threads: true,
             changes_requested: true,
+            behind: true,
         };
         assert_eq!(
             all.texts(),
             vec!["has conflicts", "unresolved threads", "changes requested"]
         );
         assert_eq!(THREADS.texts(), vec!["unresolved threads"]);
+        assert!(BEHIND.texts().is_empty(), "behind has no note text");
     }
 
     fn check(bucket: CheckBucket, name: &str, url: Option<&str>) -> Check {

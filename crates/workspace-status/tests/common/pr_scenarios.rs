@@ -3,7 +3,9 @@
 //! The JSON follows what `gh pr list` / `gh pr view` and the GitLab merge
 //! request API print for each state. [`put_github`] and [`put_gitlab`] write
 //! every answer the app asks for into a [`FakeForge`], so one call moves a
-//! checkout to a state, also in the middle of a run.
+//! checkout to a state, also in the middle of a run. [`put_github_behind`]
+//! and [`put_gitlab_behind`] write an approved PR whose branch is behind its
+//! base: a next action (`update branch`), not a seventh badge state.
 
 use super::fake_forge::{FakeForge, Reply};
 
@@ -209,15 +211,50 @@ pub fn put_github_with(
     badge: Badge,
     text: PrText<'_>,
 ) {
+    put_github_edited(forge, repo, number, branch, badge, text, &|json| json);
+}
+
+/// [`put_github_with`], with `edit` applied to the list and the view answer
+/// before they are written.
+fn put_github_edited(
+    forge: &FakeForge,
+    repo: &str,
+    number: u64,
+    branch: &str,
+    badge: Badge,
+    text: PrText<'_>,
+    edit: &dyn Fn(String) -> String,
+) {
     forge.github_pr_list(
         repo,
         branch,
-        Reply::Json(&github_list_json(number, branch, badge, text)),
+        Reply::Json(&edit(github_list_json(number, branch, badge, text))),
     );
     forge.github_pr_view(
         repo,
         number,
-        Reply::Json(&github_view_json(number, branch, badge, text)),
+        Reply::Json(&edit(github_view_json(number, branch, badge, text))),
+    );
+}
+
+/// Make every `gh` answer for PR `number` on `branch` in `repo` an approved
+/// PR with green checks whose branch is behind its base: the
+/// [`Badge::Ready`] answers with `mergeStateStatus: BEHIND`. The badge
+/// reads in review and the next action is `update branch`.
+pub fn put_github_behind(forge: &FakeForge, repo: &str, number: u64, branch: &str) {
+    put_github_edited(
+        forge,
+        repo,
+        number,
+        branch,
+        Badge::Ready,
+        GITHUB_TEXT,
+        &|json| {
+            json.replace(
+                r#""mergeStateStatus":"CLEAN""#,
+                r#""mergeStateStatus":"BEHIND""#,
+            )
+        },
     );
 }
 
@@ -279,19 +316,55 @@ pub fn put_gitlab_with(
     badge: Badge,
     text: PrText<'_>,
 ) {
+    put_gitlab_edited(forge, project, iid, branch, badge, text, &|json| json);
+}
+
+/// Make every `glab api` answer for merge request `iid` on `branch` in
+/// `project` an approved merge request with a green pipeline whose branch
+/// is behind its target: the [`Badge::Ready`] answers (approvals left 0)
+/// with `detailed_merge_status: need_rebase`. The badge reads in review and
+/// the next action is `update branch`.
+pub fn put_gitlab_behind(forge: &FakeForge, project: &str, iid: u64, branch: &str) {
+    put_gitlab_edited(
+        forge,
+        project,
+        iid,
+        branch,
+        Badge::Ready,
+        GITLAB_TEXT,
+        &|json| {
+            json.replace(
+                r#""detailed_merge_status":"mergeable""#,
+                r#""detailed_merge_status":"need_rebase""#,
+            )
+        },
+    );
+}
+
+/// [`put_gitlab_with`], with `edit` applied to the merge request object of
+/// the list and the single-merge-request answer before they are written.
+fn put_gitlab_edited(
+    forge: &FakeForge,
+    project: &str,
+    iid: u64,
+    branch: &str,
+    badge: Badge,
+    text: PrText<'_>,
+    edit: &dyn Fn(String) -> String,
+) {
     let (_, _, _, ci) = gitlab_facts(badge);
     forge.gitlab_mr_list(
         project,
         branch,
         Reply::Json(&format!(
             "[{}]",
-            gitlab_mr_json(iid, branch, badge, text, false)
+            edit(gitlab_mr_json(iid, branch, badge, text, false))
         )),
     );
     forge.gitlab_mr(
         project,
         iid,
-        Reply::Json(&gitlab_mr_json(iid, branch, badge, text, true)),
+        Reply::Json(&edit(gitlab_mr_json(iid, branch, badge, text, true))),
     );
     let approved = matches!(badge, Badge::Ready | Badge::CiRunning | Badge::Merged);
     forge.gitlab_approvals(

@@ -199,6 +199,22 @@ $V capture "$RUN" nerd
 
 **PASS:** the capture shows the headers `▾ ABC-123 · ▸ fix CI #7` and `▾ ABC-120 · ✓ merged`, the rows `✕ #7`, `○ #8`, `◐ !5`, `✓ #12`, the CI cells `CI ✕`, `CI ✓`, `CI …`, `CI —`, and the stack mark `⧗ after #7`.
 
+## PT11 Update branch in the detail
+
+An approved PR with green CI whose branch is behind its base gets the next action `update branch` (`SKILL.md`, **Fake forge**: `github-behind`, `gitlab-behind`).
+
+```bash
+fresh context github-behind gitlab-behind -- --fake-forge "$FORGE"
+$V wait --regex "$RUN" '#7 P($|[^[:alnum:]])' && $V wait --regex "$RUN" '!5 P($|[^[:alnum:]])' && $V wait --regex "$RUN" '#12 m($|[^[:alnum:]])'
+$V keys "$RUN" g p
+$V wait "$RUN" 'PRs 4' && $V wait "$RUN" 'next     > update branch'
+$V capture "$RUN" prs-behind
+```
+
+Expect: these sets carry no ticket key, so the four PRs land in one group, and its header reads `v other` with no next action. The cursor starts on that header, and the detail shows `#7`: the title `P #7 Refresh auth tokens before expiry`, then `state    OPEN · APPROVED` and `next     > update branch`. The rows read `P #7   acme/app`, `P #8   acme/app`, `m #12  acme/merger` and `P !5   acme/servic…`, each `in review` except `#12`.
+
+**PASS:** the capture shows `PRs 4`, the `v other` header, and the detail lines `state    OPEN · APPROVED` and `next     > update branch`. A group header with a ticket key names the action (`ABC-140 · > update branch #7`): the PTY test `pty_pr_update_branch_next_action_on_both_forges` checks that on both forges.
+
 Stop the last run when you are done (`stop_run`, or `$V stop <run dir>`).
 
 ## Gotchas

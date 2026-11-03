@@ -116,3 +116,37 @@ committed <when>
 A peek is not an input mode, so `Esc` does not close it (with the graph focused, `Esc` moves the focus back to the tree): moving the pointer to another hit swaps the peek, and moving it off every hit closes it. The click also moves the graph cursor to the clicked row.
 
 **PASS:** the four captures show those lines; the pinned capture has the footer and the peek does not; `y` sets the `copied` status; `Esc` closes the pinned card; the time peek gives way to the author peek, and the author peek closes when the pointer leaves. The copied text (OSC 52) is not on a tmux capture: `pty_commit_hash_popover_peeks_pins_and_copies_the_full_sha` checks it, and `pty_blame_hash_popover_shows_the_commit_card` covers the card of a commit off the graph.
+
+## PO4 Update branch, both forges
+
+An approved PR with green CI whose branch is behind its base gets the next action `update branch`, and it needs you. The badge stays in review (`P`). The sets: `SKILL.md`, **Fake forge** (`github-behind`, `gitlab-behind`).
+
+```bash
+fresh context github-behind gitlab-behind -- --size 160x70 --fake-forge "$FORGE"
+$V wait --regex "$RUN" '#7 P($|[^[:alnum:]])' && $V wait --regex "$RUN" '!5 P($|[^[:alnum:]])'
+to_app && $V keys "$RUN" g h
+$V wait "$RUN" 'Refresh this PR' && $V wait "$RUN" 'OPEN · APPROVED'   # the list answer paints the section first, with `loading…`
+$V capture "$RUN" popover-github-behind
+$V keys "$RUN" Escape && $V wait --gone "$RUN" '╭'
+to_api && $V keys "$RUN" g h
+$V wait "$RUN" 'Open pipeline'
+$V capture "$RUN" popover-gitlab-behind
+$V keys "$RUN" Escape && $V wait --gone "$RUN" '╭'
+$V calls "$RUN" | grep 'merge_requests/5/approvals'      # the approvals call ran for need_rebase
+```
+
+Expect on `popover-github-behind` a section titled `P PR · in review` with these first lines:
+
+```text
+number  #7 Refresh auth tokens before expiry
+state   OPEN · APPROVED
+next    > update branch
+author  octo-user
+branch  feature/auth-refresh -> main
+checks  2 pass · 0 fail · 0 pending
+reviews 1 approved · APPROVED
+```
+
+On `popover-gitlab-behind`: the title `P PR · in review` and the lines `number    !5 Rate limit the public API`, `state     OPEN · APPROVED`, `next      > update branch`, `checks    pipeline success`, `approvals 1 of 1`. Both captures also show the graph header chip `P #7 in review  > update branch` (`P !5 …` on the second) and the workspace row `2 need you` (`#8` in review and `#12` merged of `context` do not need you).
+
+**PASS:** both captures show `P PR · in review`, `state   OPEN · APPROVED` and `next    > update branch`, the GitLab capture shows `approvals 1 of 1`, and `$V calls "$RUN"` holds a `.../merge_requests/5/approvals` call. Without the approvals call for `need_rebase` the MR reads unapproved and its next action is `get review`. The PTY test `pty_pr_update_branch_next_action_on_both_forges` guards the popover lines, the workspace total and the PRs tab headers.

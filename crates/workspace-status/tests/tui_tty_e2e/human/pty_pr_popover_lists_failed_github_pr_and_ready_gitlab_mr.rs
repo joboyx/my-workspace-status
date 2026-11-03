@@ -2,48 +2,10 @@ use crate::common::fake_forge::FakeForge;
 use crate::common::pr_scenarios::Badge;
 use crate::harness::PtySession;
 use crate::pr_support::{
-    badge_is, click_badge, forge_env, named_workspace, seed_checkouts, Forge, PrCheckout,
+    badge_is, click_badge, forge_env, line_with, named_workspace, popover_reads, seed_checkouts,
+    Forge, PrCheckout,
 };
 use crate::support::{GIT_WAIT, WAIT};
-
-/// A screen line with runs of blanks folded to one space, so a label column
-/// of any width compares the same.
-fn folded(line: &str) -> String {
-    line.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Index of the first screen line that, folded, contains `needle`.
-fn line_with(screen: &str, needle: &str) -> Option<usize> {
-    screen
-        .lines()
-        .position(|line| folded(line).contains(needle))
-}
-
-/// The popover prints `fields` on consecutive lines starting at the line
-/// with `header`, then the `actions` in order below them.
-fn popover_reads(screen: &str, header: &str, fields: &[&str], actions: &[&str]) -> bool {
-    let Some(top) = line_with(screen, header) else {
-        return false;
-    };
-    let lines: Vec<&str> = screen.lines().collect();
-    let fields_ok = fields.iter().enumerate().all(|(i, field)| {
-        lines
-            .get(top + 1 + i)
-            .is_some_and(|line| folded(line).contains(field))
-    });
-    let mut below = top + 1 + fields.len();
-    let actions_ok = actions.iter().all(|action| {
-        let found = lines
-            .iter()
-            .enumerate()
-            .skip(below)
-            .find(|(_, line)| folded(line).contains(action))
-            .map(|(i, _)| i);
-        below = found.map_or(below, |i| i + 1);
-        found.is_some()
-    });
-    fields_ok && actions_ok
-}
 
 /// A pinned PR popover lists its lines in order, for a failed GitHub PR and
 /// for a ready GitLab merge request (`docs/tui-rust.md`, **Pull request

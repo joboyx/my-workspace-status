@@ -3280,6 +3280,7 @@ mod tests {
                     conflicts: true,
                     unresolved_threads: true,
                     changes_requested: false,
+                    behind: false,
                 };
                 let mut app = app_with(remote, &[pr]);
                 let section = section_of(&mut app, "c0", None);
