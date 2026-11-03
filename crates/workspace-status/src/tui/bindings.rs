@@ -487,7 +487,7 @@ mod tests {
 
     use crossterm::event::{Event, KeyCode};
 
-    use super::super::command_palette::{CommandPaletteState, PALETTE_COMMANDS};
+    use super::super::command_palette::{CommandPaletteState, CommandScope, PALETTE_COMMANDS};
     use super::super::keys::{event_to_action_ex, InputMode};
     use super::*;
     use crate::testutil::{ctrl, key};
@@ -536,9 +536,9 @@ mod tests {
         event_to_action_ex(event, mode, false, false, stash, commit)
     }
 
-    /// Chip text and action of the palette row titled `title`, reached by
-    /// filtering on the title and moving the cursor onto that row.
-    fn palette_row(title: &str) -> (&'static str, Option<Action>) {
+    /// Chip text, scope and action of the palette row titled `title`,
+    /// reached by filtering on the title and moving the cursor onto that row.
+    fn palette_row(title: &str) -> (&'static str, CommandScope, Option<Action>) {
         let mut palette = CommandPaletteState::new();
         palette.set_filter(title);
         let index = palette
@@ -549,443 +549,557 @@ mod tests {
         palette.move_cursor(index as i32);
         let selected = palette.selected().expect(title);
         assert_eq!(selected.title, title);
-        (selected.keys, palette.selected_action())
+        (selected.keys, selected.scope, palette.selected_action())
     }
 
     /// Every non-theme palette row runs its action from the palette, shows
-    /// its chip, and that key runs the same action in its context.
+    /// its chip, has its highlight scope, and that key runs the same action
+    /// in its context.
     #[test]
     fn palette_rows_and_their_keys_run_the_same_action() {
+        use CommandScope as Scope;
         use Ctx::*;
         use KeyCode::{Char, Esc, Tab};
         let cases = [
             (
                 "Stage highlighted lines",
                 "s",
+                Scope::Highlight,
                 Some((Highlight, key(Char('s')))),
                 Action::Stage,
             ),
             (
                 "Unstage highlighted lines",
                 "u",
+                Scope::Highlight,
                 Some((Highlight, key(Char('u')))),
                 Action::Unstage,
             ),
             (
                 "Revert highlighted lines",
                 "x",
+                Scope::Highlight,
                 Some((Highlight, key(Char('x')))),
                 Action::Revert,
             ),
             (
                 "Exit highlight",
                 "Esc",
+                Scope::Highlight,
                 Some((Highlight, key(Esc))),
                 Action::DiffVisualCancel,
             ),
             (
                 "Search focused pane",
                 "/",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('/')))),
                 Action::SearchStart,
             ),
             (
                 "Next match",
                 "n",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('n')))),
                 Action::SearchNext,
             ),
             (
                 "Previous match",
                 "N",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('N')))),
                 Action::SearchPrev,
             ),
             (
                 "Search in files",
                 "Ctrl-f",
+                Scope::Any,
                 Some((Normal, ctrl(Char('f')))),
                 Action::ToggleSearchFiles,
             ),
             (
                 "Fold row",
                 "z",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('z')))),
                 Action::FoldToggle,
             ),
             (
                 "Fold subtree",
                 "zz",
+                Scope::NoHighlight,
                 Some((ZChord, key(Char('z')))),
                 Action::FoldToggleSubtree,
             ),
             (
                 "Other pane",
                 "Tab",
+                Scope::NoHighlight,
                 Some((Normal, key(Tab))),
                 Action::FocusRight,
             ),
             (
                 "Next tab",
                 "gt",
+                Scope::NoHighlight,
                 Some((GChord, key(Char('t')))),
                 Action::NextTab,
             ),
             (
                 "Previous tab",
                 "gT",
+                Scope::NoHighlight,
                 Some((GChord, key(Char('T')))),
                 Action::PreviousTab,
             ),
             (
                 "Previous file tab",
                 "[",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('[')))),
                 Action::PreviousFileTab,
             ),
             (
                 "Next file tab",
                 "]",
+                Scope::NoHighlight,
                 Some((Normal, key(Char(']')))),
                 Action::NextFileTab,
             ),
             (
                 "Open in Explorer",
                 "-",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('-')))),
                 Action::ExplorerReveal,
             ),
             (
                 "Fold finished PR groups",
                 "Z",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('Z')))),
                 Action::ToggleFinishedPrGroups,
             ),
-            ("Stage", "s", Some((Normal, key(Char('s')))), Action::Stage),
+            (
+                "Stage",
+                "s",
+                Scope::NoHighlight,
+                Some((Normal, key(Char('s')))),
+                Action::Stage,
+            ),
             (
                 "Unstage",
                 "u",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('u')))),
                 Action::Unstage,
             ),
             (
                 "Revert",
                 "x",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('x')))),
                 Action::Revert,
             ),
             (
                 "Stash menu",
                 "S",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('S')))),
                 Action::StashMenu,
             ),
             (
                 "Fetch remotes",
                 "f",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('f')))),
                 Action::Fetch,
             ),
             (
                 "Pull behind",
                 "p",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('p')))),
                 Action::Pull,
             ),
-            ("Push", "P", Some((Normal, key(Char('P')))), Action::Push),
+            (
+                "Push",
+                "P",
+                Scope::NoHighlight,
+                Some((Normal, key(Char('P')))),
+                Action::Push,
+            ),
             (
                 "Default branch",
                 "d",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('d')))),
                 Action::DefaultBranch,
             ),
             (
                 "Branch picker",
                 "b",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('b')))),
                 Action::Branch,
             ),
             (
                 "Checkout commit refs",
                 "b",
+                Scope::NoHighlight,
                 Some((GraphCommit, key(Char('b')))),
                 Action::GraphCheckout,
             ),
             (
                 "Create branch at commit",
                 "c",
+                Scope::NoHighlight,
                 Some((GraphCommit, key(Char('c')))),
                 Action::GraphCreateBranch,
             ),
             (
                 "Merge into HEAD",
                 "m",
+                Scope::NoHighlight,
                 Some((GraphCommit, key(Char('m')))),
                 Action::GraphMerge,
             ),
             (
                 "Remove worktree",
                 "W",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('W')))),
                 Action::RemoveWorktree,
             ),
             (
                 "Apply stash",
                 "a",
+                Scope::NoHighlight,
                 Some((GraphStash, key(Char('a')))),
                 Action::GraphStashApply,
             ),
             (
                 "Pop stash",
                 "p",
+                Scope::NoHighlight,
                 Some((GraphStash, key(Char('p')))),
                 Action::GraphStashPop,
             ),
             (
                 "Drop stash",
                 "D",
+                Scope::NoHighlight,
                 Some((GraphStash, key(Char('D')))),
                 Action::GraphStashDrop,
             ),
             (
                 "Open in editor",
                 "e",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('e')))),
                 Action::Edit,
             ),
             (
                 "Open in diff tool",
                 "E",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('E')))),
                 Action::ExternalDiff,
             ),
             (
                 "Refresh",
                 "r",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('r')))),
                 Action::Refresh,
             ),
             (
                 "Open PR",
                 "gx",
+                Scope::NoHighlight,
                 Some((GChord, key(Char('x')))),
                 Action::OpenPullRequest,
             ),
             (
                 "Open PR CI",
                 "gc",
+                Scope::NoHighlight,
                 Some((GChord, key(Char('c')))),
                 Action::OpenPullRequestCi,
             ),
-            ("Copy PR URL", "", None, Action::CopyPullRequestUrl),
-            ("Refresh this PR", "", None, Action::RefreshPullRequest),
-            ("Refresh PRs", "", None, Action::RefreshPullRequests),
+            (
+                "Copy PR URL",
+                "",
+                Scope::NoHighlight,
+                None,
+                Action::CopyPullRequestUrl,
+            ),
+            (
+                "Refresh this PR",
+                "",
+                Scope::NoHighlight,
+                None,
+                Action::RefreshPullRequest,
+            ),
+            (
+                "Refresh PRs",
+                "",
+                Scope::NoHighlight,
+                None,
+                Action::RefreshPullRequests,
+            ),
             (
                 "View remotely",
                 "gw",
+                Scope::NoHighlight,
                 Some((GChord, key(Char('w')))),
                 Action::ViewRemotely,
             ),
             (
                 "Blame: open commit changes",
                 "",
+                Scope::NoHighlight,
                 None,
                 Action::BlameCommitVsParent,
             ),
             (
                 "Blame: open previous line change",
                 "",
+                Scope::NoHighlight,
                 None,
                 Action::BlamePreviousChange,
             ),
             (
                 "Blame: diff commit to working tree",
                 "",
+                Scope::NoHighlight,
                 None,
                 Action::BlameCommitVsWorktree,
             ),
             (
                 "Blame: show commit in graph",
                 "",
+                Scope::NoHighlight,
                 None,
                 Action::BlameRevealGraph,
             ),
             (
                 "Diff vs default in new tab",
                 "",
+                Scope::NoHighlight,
                 None,
                 Action::CompareVsDefault,
             ),
             (
                 "Diff vs branch in new tab…",
                 "",
+                Scope::NoHighlight,
                 None,
                 Action::CompareVsBranch,
             ),
             (
                 "Diff vs commit in new tab…",
                 "",
+                Scope::NoHighlight,
                 None,
                 Action::CompareVsCommit,
             ),
             (
                 "Diff commit vs parent in new tab",
                 "",
+                Scope::NoHighlight,
                 None,
                 Action::CompareCommitVsParent,
             ),
             (
                 "Close tab",
                 "Ctrl-w",
+                Scope::NoHighlight,
                 Some((Normal, ctrl(Char('w')))),
                 Action::CloseTab,
             ),
             (
                 "PRs tab",
                 "gp",
+                Scope::Any,
                 Some((GChord, key(Char('p')))),
                 Action::OpenPrsTab,
             ),
             (
                 "Mark reviewed",
                 "space",
+                Scope::NoHighlight,
                 Some((Normal, key(Char(' ')))),
                 Action::ToggleReviewed,
             ),
             (
                 "Go to file",
                 "Ctrl-p F",
+                Scope::Any,
                 Some((Normal, ctrl(Char('p')))),
                 Action::ToggleQuickOpen(QuickOpenEntry::Files),
             ),
             (
                 "Keymap help",
                 "?",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('?')))),
                 Action::ToggleHelp,
             ),
             (
                 "Icon popover",
                 "gh",
+                Scope::NoHighlight,
                 Some((GChord, key(Char('h')))),
                 Action::PopoverOpenFocused,
             ),
             (
                 "Flat / tree",
                 "t",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('t')))),
                 Action::ToggleTreeMode,
             ),
             (
                 "Show hidden",
                 ".",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('.')))),
                 Action::ToggleShowHidden,
             ),
             (
                 "Inline / split",
                 "i",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('i')))),
                 Action::ToggleDiffMode,
             ),
             (
                 "Narrow tree",
                 "<",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('<')))),
                 Action::ResizeTree(-1),
             ),
             (
                 "Widen tree",
                 ">",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('>')))),
                 Action::ResizeTree(1),
             ),
             (
                 "Wrap / unwrap",
                 "\\",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('\\')))),
                 Action::ToggleDiffWrap,
             ),
             (
                 "Collapse / expand commit message",
                 "M",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('M')))),
                 Action::ToggleCommitMsgExpand,
             ),
             (
                 "Shorter commit message",
                 "",
+                Scope::NoHighlight,
                 None,
                 Action::ResizeCommitMsg(-1),
             ),
             (
                 "Taller commit message",
                 "",
+                Scope::NoHighlight,
                 None,
                 Action::ResizeCommitMsg(1),
             ),
             (
                 "Toggle line blame",
                 "B",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('B')))),
                 Action::ToggleLineBlame,
             ),
             (
                 "Toggle mouse",
                 "m",
+                Scope::Any,
                 Some((Normal, key(Char('m')))),
                 Action::ToggleMouse,
             ),
             (
                 "Toggle activity sparkline",
                 "",
+                Scope::Any,
                 None,
                 Action::ToggleActivitySparkline,
             ),
             (
                 "Full-file context",
                 "Ctrl-o",
+                Scope::NoHighlight,
                 Some((Normal, ctrl(Char('o')))),
                 Action::ToggleFullContext,
             ),
             (
                 "Graph focus branches",
                 "o",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('o')))),
                 Action::GraphFocusBranches,
             ),
             (
                 "Clear graph focus",
                 "O",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('O')))),
                 Action::GraphFocusClear,
             ),
             (
                 "Comment",
                 ";",
+                Scope::Any,
                 Some((Normal, key(Char(';')))),
                 Action::CommentStart,
             ),
             (
                 "Highlight diff lines",
                 "V",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('V')))),
                 Action::DiffVisualStart,
             ),
             (
                 "Copy comments",
                 "y",
+                Scope::NoHighlight,
                 Some((Normal, key(Char('y')))),
                 Action::ExportComments,
             ),
             (
                 "Copy entity reference",
                 "'",
+                Scope::Any,
                 Some((Normal, key(Char('\'')))),
                 Action::CopyEntityReference,
             ),
-            ("Doctor: setup checkup", "", None, Action::OpenDoctor),
-            ("Quit", "q", Some((Normal, key(Char('q')))), Action::Quit),
+            (
+                "Doctor: setup checkup",
+                "",
+                Scope::Any,
+                None,
+                Action::OpenDoctor,
+            ),
+            (
+                "Quit",
+                "q",
+                Scope::Any,
+                Some((Normal, key(Char('q')))),
+                Action::Quit,
+            ),
         ];
 
         // The `Theme: …` rows have their own test in `command_palette`.
@@ -1000,10 +1114,34 @@ mod tests {
             "one case per non-theme row, in catalog order"
         );
 
-        for (title, chip, key_press, expected) in &cases {
-            let (keys, action) = palette_row(title);
+        // With no filter every row matches by name, so the cursor may land
+        // on a row exactly when its scope fits the highlight mode. A title
+        // filter would not show that: when no listed row fits, every listed
+        // row may take the cursor.
+        let unfiltered = CommandPaletteState::new();
+        let all_rows = unfiltered.rows();
+        let landing_off = unfiltered.landing_rows(false);
+        let landing_on = unfiltered.landing_rows(true);
+
+        for (title, chip, scope, key_press, expected) in &cases {
+            let (keys, row_scope, action) = palette_row(title);
             assert_eq!(action.as_ref(), Some(expected), "{title}: palette action");
             assert_eq!(keys, *chip, "{title}: palette chip");
+            assert_eq!(row_scope, *scope, "{title}: palette scope");
+            let index = all_rows
+                .iter()
+                .position(|row| row.title == *title)
+                .unwrap_or_else(|| panic!("{title}: not in the unfiltered palette"));
+            assert_eq!(
+                landing_off.contains(&index),
+                scope.fits(false),
+                "{title}: lands with no highlighted range"
+            );
+            assert_eq!(
+                landing_on.contains(&index),
+                scope.fits(true),
+                "{title}: lands while a diff range is highlighted"
+            );
             if let Some((ctx, event)) = key_press {
                 assert_eq!(&press(*ctx, event), expected, "{title}: {chip} in {ctx:?}");
             }
