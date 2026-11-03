@@ -679,14 +679,14 @@ fn distinct_prs(rows: &[PrRow]) -> usize {
 }
 
 /// Rank of an action the author must take; the lowest rank leads the
-/// header. `merge <base> first` and `merge` share a rank, so the row order
-/// decides between them.
+/// header. `update branch`, `merge <base> first`, and `merge` share a rank,
+/// so the row order decides between them.
 fn needs_you_priority(action: &NextAction) -> u8 {
     match action {
         NextAction::FixCi => 0,
         NextAction::FixConflicts => 1,
         NextAction::AddressReview => 2,
-        NextAction::MergeBaseFirst(_) | NextAction::Merge => 3,
+        NextAction::MergeBaseFirst(_) | NextAction::Merge | NextAction::UpdateBranch => 3,
         NextAction::Undraft | NextAction::WaitForCi | NextAction::GetReview => 4,
     }
 }
@@ -1300,6 +1300,15 @@ mod tests {
             },
         )]);
         assert_eq!(header(&groups[0]), "address review #8");
+        let groups = group_prs(vec![with_notes(
+            app(9, "feature/ABC-123-x", "t", PrState::InReview),
+            PrNotes {
+                behind: true,
+                ..Default::default()
+            },
+        )]);
+        assert_eq!(header(&groups[0]), "update branch #9");
+        assert_eq!(group_rank(&groups[0]), 1, "update branch needs you");
     }
 
     #[test]

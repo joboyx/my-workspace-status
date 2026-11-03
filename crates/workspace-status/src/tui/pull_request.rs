@@ -176,8 +176,8 @@ impl PullRequest {
     }
 
     /// True when the next action is the author's: fix CI, fix conflicts,
-    /// address review, or merge (the base first, or this PR). The stack
-    /// does not change it.
+    /// address review, update the branch, or merge (the base first, or this
+    /// PR). The stack does not change it.
     pub fn needs_you(&self) -> bool {
         self.next_action(None)
             .is_some_and(|action| action.needs_you())
@@ -780,15 +780,20 @@ fn github_checks(status: &GitHubStatus) -> Vec<Check> {
 }
 
 /// Notes of a GitHub PR: conflicts on `mergeStateStatus: DIRTY`, changes
-/// requested on `reviewDecision: CHANGES_REQUESTED`. None unless `open`.
+/// requested on `reviewDecision: CHANGES_REQUESTED`, behind on
+/// `mergeStateStatus: BEHIND` with `reviewDecision: APPROVED`. None unless
+/// `open`.
 fn github_notes(status: &GitHubStatus, open: bool) -> PrNotes {
     if !open {
         return PrNotes::default();
     }
+    let merge_state = status.merge_state_status.as_deref();
+    let decision = status.review_decision.as_deref();
     PrNotes {
-        conflicts: status.merge_state_status.as_deref() == Some("DIRTY"),
+        conflicts: merge_state == Some("DIRTY"),
         unresolved_threads: false,
-        changes_requested: status.review_decision.as_deref() == Some("CHANGES_REQUESTED"),
+        changes_requested: decision == Some("CHANGES_REQUESTED"),
+        behind: merge_state == Some("BEHIND") && decision == Some("APPROVED"),
     }
 }
 
@@ -893,8 +898,11 @@ fn gitlab_checks(pipeline_status: Option<&str>) -> ChecksSummary {
 /// `detailed_merge_status: conflict`; unresolved threads on
 /// `detailed_merge_status: discussions_not_resolved` or
 /// `blocking_discussions_resolved: false`; changes requested on
-/// `detailed_merge_status: requested_changes`. None unless `open`.
-fn gitlab_notes(merge: &GitLabMerge, open: bool) -> PrNotes {
+/// `detailed_merge_status: requested_changes`; behind on
+/// `detailed_merge_status: need_rebase` with `approvals_left == Some(0)`
+/// (GitLab reports `need_rebase` before `not_approved`, so the status alone
+/// does not prove approval). None unless `open`.
+fn gitlab_notes(merge: &GitLabMerge, open: bool, approvals_left: Option<u64>) -> PrNotes {
     if !open {
         return PrNotes::default();
     }
@@ -904,6 +912,7 @@ fn gitlab_notes(merge: &GitLabMerge, open: bool) -> PrNotes {
         unresolved_threads: detailed == Some("discussions_not_resolved")
             || merge.blocking_discussions_resolved == Some(false),
         changes_requested: detailed == Some("requested_changes"),
+        behind: detailed == Some("need_rebase") && approvals_left == Some(0),
     }
 }
 
@@ -961,14 +970,15 @@ fn gitlab_jobs(repo: &ForgeRepo, pipeline: u64, run: Runner) -> Vec<Check> {
 }
 
 /// List, pick, then for an open MR the MR call (head pipeline) and, when
-/// neither answer has a `detailed_merge_status`, the approvals call.
+/// neither answer has a `detailed_merge_status` or the status is
+/// `need_rebase`, the approvals call.
 ///
 /// The merge fields (`detailed_merge_status`, `has_conflicts`,
 /// `blocking_discussions_resolved`, `draft`) of an open MR come from the MR
 /// call, which is fresher than the list (the list can still say
 /// `unchecked`); a field the MR call leaves out comes from the list. A
 /// failed MR call fails the lookup. A failed approvals call leaves the MR
-/// not ready.
+/// not ready, and a `need_rebase` MR not behind ([`PrNotes::behind`]).
 fn gitlab_lookup(
     repo: &ForgeRepo,
     branch: &str,
@@ -999,7 +1009,9 @@ fn gitlab_lookup(
         // The single MR is fresher than the list, which can still say
         // `unchecked`.
         merge = view.merge.or(merge);
-        if merge.detailed().is_none() {
+        // `need_rebase` comes before `not_approved` in GitLab's checks, so
+        // only the approvals call says whether the MR is approved.
+        if matches!(merge.detailed(), None | Some("need_rebase")) {
             approvals_left = gitlab_approvals(repo, mr.iid, run).and_then(|a| a.approvals_left);
         }
     }
@@ -1012,7 +1024,7 @@ fn gitlab_lookup(
         head: mr.source_branch.unwrap_or_default(),
         base: mr.target_branch.unwrap_or_default(),
         state: gitlab_state(&merge, kind == Kind::Merged, checks, approvals_left),
-        notes: gitlab_notes(&merge, kind == Kind::Open),
+        notes: gitlab_notes(&merge, kind == Kind::Open, approvals_left),
         checks,
         failed_check: None,
         ci_link: pipeline_ci_link(pipeline.web_url.as_deref(), &mr.web_url),
@@ -1029,7 +1041,7 @@ fn gitlab_lookup(
 /// [`run_cli`] in production and a fake in tests. GitHub is one `gh pr
 /// list`. GitLab is the MR list, then for an open MR the MR call (head
 /// pipeline), plus the approvals call when the server sends no
-/// `detailed_merge_status`.
+/// `detailed_merge_status` or sends `need_rebase`.
 pub fn lookup(remote_url: Option<&str>, branch: &str, run: Runner) -> PrLookup {
     let Some(repo) = remote_url.and_then(parse_remote) else {
         return PrLookup::NoPr;
@@ -1227,8 +1239,10 @@ fn gitlab_detail(
     let status = pipeline.status.filter(|status| !status.is_empty());
     let checks = gitlab_checks(status.as_deref());
     let (mut review, mut reviews, mut jobs) = (None, None, Vec::new());
+    let mut approvals_left = None;
     if open {
         let approvals = gitlab_approvals(repo, mr.iid, run);
+        approvals_left = approvals.as_ref().and_then(|a| a.approvals_left);
         let approved = approvals.as_ref().and_then(|a| a.approved) == Some(true);
         review = Some(if approved {
             PrReview::Approved
@@ -1270,7 +1284,7 @@ fn gitlab_detail(
         checks,
         check_names,
         more_checks,
-        notes: gitlab_notes(&mr.merge, open),
+        notes: gitlab_notes(&mr.merge, open, approvals_left),
         ci_link: pipeline_ci_link(pipeline.web_url.as_deref(), &url),
         pipeline: status,
         updated_at: mr.updated_at.as_deref().and_then(rfc3339_unix),
@@ -2141,7 +2155,39 @@ mod tests {
                     ("reviewDecision", r#""APPROVED""#),
                     ("mergeStateStatus", r#""BEHIND""#),
                 ]),
+                Some("update branch"),
+                true,
+            ),
+            (
+                gh_open(&[("mergeStateStatus", r#""BEHIND""#)]),
                 Some("get review"),
+                false,
+            ),
+            (
+                gh_open(&[
+                    ("reviewDecision", r#""APPROVED""#),
+                    ("mergeStateStatus", r#""BEHIND""#),
+                    ("statusCheckRollup", &run),
+                ]),
+                Some("wait for CI"),
+                false,
+            ),
+            (
+                gh_open(&[
+                    ("reviewDecision", r#""APPROVED""#),
+                    ("mergeStateStatus", r#""BEHIND""#),
+                    ("statusCheckRollup", &fail),
+                ]),
+                Some("fix CI"),
+                true,
+            ),
+            (
+                gh_open(&[
+                    ("reviewDecision", r#""APPROVED""#),
+                    ("mergeStateStatus", r#""BEHIND""#),
+                    ("isDraft", "true"),
+                ]),
+                Some("undraft"),
                 false,
             ),
             (
@@ -2184,6 +2230,27 @@ mod tests {
             &both,
         );
         assert_eq!(found_pr(gh_lookup(&[merged])).notes, PrNotes::default());
+    }
+
+    #[test]
+    fn github_behind_needs_an_approved_open_pr() {
+        let behind = |entry: String| found_pr(gh_lookup(&[entry])).notes.behind;
+        let approved = found_pr(gh_lookup(&[gh_open(&[
+            ("reviewDecision", r#""APPROVED""#),
+            ("mergeStateStatus", r#""BEHIND""#),
+        ])]));
+        assert!(approved.notes.behind);
+        assert!(approved.notes.texts().is_empty(), "no note text");
+        assert!(!behind(gh_open(&[("mergeStateStatus", r#""BEHIND""#)])));
+        assert!(!behind(gh_open(&[
+            ("reviewDecision", r#""APPROVED""#),
+            ("mergeStateStatus", r#""BLOCKED""#),
+        ])));
+        let merged = json_with(
+            &gh_pr(7, "MERGED", BRANCH, "APPROVED", "2026-01-02T00:00:00Z"),
+            &[("mergeStateStatus", r#""BEHIND""#)],
+        );
+        assert!(!behind(merged), "a merged PR is never behind");
     }
 
     #[test]
@@ -2741,6 +2808,15 @@ mod tests {
         );
     }
 
+    /// The approvals answer of an MR that needs 1 approval and has `left`
+    /// left.
+    fn gl_approvals(left: u64) -> String {
+        format!(
+            r#"{{"approved":{},"approvals_required":1,"approvals_left":{left},"approved_by":[]}}"#,
+            left == 0
+        )
+    }
+
     #[test]
     fn gitlab_missing_detailed_merge_status_falls_back_to_merge_status_and_approvals() {
         let old = |merge_status: &str| {
@@ -2749,12 +2825,7 @@ mod tests {
                 "detailed_merge_status",
             )
         };
-        let approvals = |left: u64| {
-            format!(
-                r#"{{"approved":{},"approvals_required":1,"approvals_left":{left},"approved_by":[]}}"#,
-                left == 0
-            )
-        };
+        let approvals = gl_approvals;
         let ready = GlForge::new(&[old("can_be_merged")]).approvals(&approvals(0));
         let (result, calls) = ready.lookup();
         assert_eq!(picked(result).2, PrState::Ready);
@@ -2796,8 +2867,66 @@ mod tests {
     }
 
     #[test]
+    fn gitlab_need_rebase_runs_the_approvals_call_and_is_behind_only_when_approved() {
+        let need_rebase =
+            || GlForge::new(&[gl_open(&[("detailed_merge_status", r#""need_rebase""#)])]);
+        let (result, calls) = need_rebase().approvals(&gl_approvals(0)).lookup();
+        assert_eq!(calls, ["list", "mr", "approvals"]);
+        let pr = found_pr(result);
+        assert!(pr.notes.behind);
+        assert!(pr.notes.texts().is_empty(), "no note text");
+        assert_eq!(pr.state, PrState::InReview, "need_rebase is not ready");
+        assert!(
+            !need_rebase()
+                .approvals(&gl_approvals(1))
+                .found()
+                .notes
+                .behind
+        );
+        assert!(!need_rebase().found().notes.behind, "approvals call failed");
+        let merged = json_with(
+            &gl_mr(20, "merged", "2026-01-01T00:00:00.000Z"),
+            &[("detailed_merge_status", r#""need_rebase""#)],
+        );
+        let (result, calls) = GlForge::new(&[merged]).approvals(&gl_approvals(0)).lookup();
+        assert!(
+            !found_pr(result).notes.behind,
+            "a merged MR is never behind"
+        );
+        assert_eq!(calls, ["list"]);
+    }
+
+    #[test]
     fn gitlab_next_action_rows() {
+        let need_rebase = |fields: &[(&str, &str)]| {
+            let mut fields = fields.to_vec();
+            fields.push(("detailed_merge_status", r#""need_rebase""#));
+            GlForge::new(&[gl_open(&fields)])
+        };
         let cases = [
+            (
+                need_rebase(&[]).approvals(&gl_approvals(0)),
+                Some("update branch"),
+                true,
+            ),
+            (
+                need_rebase(&[]).approvals(&gl_approvals(1)),
+                Some("get review"),
+                false,
+            ),
+            (need_rebase(&[]), Some("get review"), false),
+            (
+                need_rebase(&[])
+                    .approvals(&gl_approvals(0))
+                    .pipeline("running"),
+                Some("wait for CI"),
+                false,
+            ),
+            (
+                need_rebase(&[("draft", "true")]).approvals(&gl_approvals(0)),
+                Some("undraft"),
+                false,
+            ),
             (
                 GlForge::new(&[gl_open(&[("has_conflicts", "true")])]).pipeline("failed"),
                 Some("fix CI"),
@@ -3249,6 +3378,7 @@ mod tests {
                     conflicts: true,
                     unresolved_threads: false,
                     changes_requested: true,
+                    behind: false,
                 },
                 ci_link: CiLink {
                     url: details_url("test (ubuntu-latest)"),
@@ -3432,6 +3562,7 @@ mod tests {
                     conflicts: true,
                     unresolved_threads: false,
                     changes_requested: false,
+                    behind: false,
                 },
                 ci_link: CiLink {
                     url: "https://gitlab.com/group/sub/demo/-/pipelines/99".into(),
