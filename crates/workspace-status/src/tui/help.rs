@@ -16,10 +16,45 @@
 //! have a legend group (Tree / Graph / Chrome): glyph, muted name, meaning.
 //! It flows into up to [`HELP_LEGEND_MAX_COLUMNS`] even columns inside the
 //! same scroll body, so the three key columns stay three.
+//!
+//! Each key chip comes from its binding in [`super::bindings`], joined with
+//! `chips!` when a row shows several. Only chips that name no binding stay
+//! literal: `g1-g9`, `dblclick`, `?? ●`, and the tab-close glyph.
 
 use std::sync::LazyLock;
 
+use super::bindings::{
+    chips, BLAME_MENU, BRANCH_PICKER, CLEAR_GRAPH_FOCUS, CLOSE_TAB, COMMENT, COPY_COMMENTS,
+    COPY_ENTITY_REFERENCE, CTRL_C_EXIT, DEFAULT_BRANCH, EXPAND_COMMIT_MESSAGE, FETCH, FLAT_OR_TREE,
+    FOLD_FINISHED_PR_GROUPS, FOLD_ROW, FOLD_SUBTREE, FULL_FILE_CONTEXT, GO_TO_BOTTOM, GO_TO_FILE,
+    GO_TO_FILE_F, GO_TO_TOP, GRAPH_CREATE_BRANCH, GRAPH_FOCUS_BRANCHES, GRAPH_MERGE,
+    GRAPH_STASH_APPLY, GRAPH_STASH_DROP, GRAPH_STASH_POP, HALF_PAGE_DOWN, HALF_PAGE_UP,
+    HIGHLIGHT_LINES, ICON_POPOVER, INLINE_OR_SPLIT, KEYMAP_HELP, LINE_BLAME, MARK_REVIEWED,
+    MOVE_DOWN, MOVE_TO_END, MOVE_TO_START, MOVE_UP, NARROW_TREE, NAV_BACK, NAV_ENTER,
+    NEXT_FILE_TAB, NEXT_MATCH, NEXT_TAB, OPEN_IN_DIFF_TOOL, OPEN_IN_EDITOR, OPEN_IN_EXPLORER,
+    OPEN_PR, OPEN_PR_CI, OTHER_PANE, PAGE_DOWN, PAGE_UP, PAN_LEFT, PAN_RIGHT, PREVIOUS_FILE_TAB,
+    PREVIOUS_MATCH, PREVIOUS_TAB, PRS_TAB, PULL, PUSH, QUICK_OPEN_COMMANDS, QUIT, REFRESH,
+    REMOVE_WORKTREE, REVERT, SEARCH_IN_FILES, SEARCH_PANE, SHOW_HIDDEN, STAGE, STASH_MENU,
+    TOGGLE_MOUSE, UNSTAGE, VIEW_REMOTELY, WIDEN_TREE, WRAP_DIFF,
+};
 use super::icons::{IconGroup, IconSpec, ICON_CATALOG};
+
+// Chip sets that three or more help rows show.
+
+/// `j k`: one row down / up.
+const MOVE_CHIPS: &str = chips!(MOVE_DOWN.chip, MOVE_UP.chip);
+/// `PgUp PgDn`: page the focused pane.
+const PAGE_CHIPS: &str = chips!(PAGE_UP.chip, PAGE_DOWN.chip);
+/// `Ctrl-u Ctrl-d`: five rows up / down.
+const HALF_PAGE_CHIPS: &str = chips!(HALF_PAGE_UP.chip, HALF_PAGE_DOWN.chip);
+/// `: Ctrl-p F`: Quick Open commands and files.
+const QUICK_OPEN_CHIPS: &str = chips!(QUICK_OPEN_COMMANDS.chip, GO_TO_FILE.chip, GO_TO_FILE_F.chip);
+/// `Ctrl-c Ctrl-c`: the double Ctrl-c quit.
+const CTRL_C_QUIT_CHIPS: &str = chips!(CTRL_C_EXIT.chip, CTRL_C_EXIT.chip);
+/// `e E`: open in the editor / the diff tool.
+const OPEN_CHIPS: &str = chips!(OPEN_IN_EDITOR.chip, OPEN_IN_DIFF_TOOL.chip);
+/// `f p P d`: the remote and default-branch keys.
+const REMOTE_CHIPS: &str = chips!(FETCH.chip, PULL.chip, PUSH.chip, DEFAULT_BRANCH.chip);
 
 /// One help row: key chips plus a short description.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,43 +81,43 @@ macro_rules! move_group {
             title: "MOVE",
             entries: &[
                 HelpEntry {
-                    keys: "j k",
+                    keys: MOVE_CHIPS,
                     desc: "down / up",
                 },
                 HelpEntry {
-                    keys: "h l",
+                    keys: chips!(PAN_LEFT.chip, PAN_RIGHT.chip),
                     desc: "fold · pan lists/diff · Shift-←→ tree",
                 },
                 HelpEntry {
-                    keys: "z",
+                    keys: FOLD_ROW.chip,
                     desc: "toggle fold (instant; no-op on graph/diff)",
                 },
                 HelpEntry {
-                    keys: "zz",
+                    keys: FOLD_SUBTREE.chip,
                     desc: "toggle subtree (no-op on graph/diff)",
                 },
                 HelpEntry {
-                    keys: "gg G",
+                    keys: chips!(GO_TO_TOP.chip, GO_TO_BOTTOM.chip),
                     desc: "top / bottom of focused pane",
                 },
                 HelpEntry {
-                    keys: "Home End",
+                    keys: chips!(MOVE_TO_START.chip, MOVE_TO_END.chip),
                     desc: "top / bottom",
                 },
                 HelpEntry {
-                    keys: "/",
+                    keys: SEARCH_PANE.chip,
                     desc: "search focused pane (Enter arms)",
                 },
                 HelpEntry {
-                    keys: "n N",
+                    keys: chips!(NEXT_MATCH.chip, PREVIOUS_MATCH.chip),
                     desc: "next / prev match (after Enter)",
                 },
                 HelpEntry {
-                    keys: "Ctrl-f",
+                    keys: SEARCH_IN_FILES.chip,
                     desc: "search in files",
                 },
                 HelpEntry {
-                    keys: "gt gT",
+                    keys: chips!(NEXT_TAB.chip, PREVIOUS_TAB.chip),
                     desc: "next / prev tab",
                 },
                 HelpEntry {
@@ -105,81 +140,86 @@ macro_rules! view_group {
             title: "VIEW",
             entries: &[
                 HelpEntry {
-                    keys: "i \\ M B",
+                    keys: chips!(
+                        INLINE_OR_SPLIT.chip,
+                        WRAP_DIFF.chip,
+                        EXPAND_COMMIT_MESSAGE.chip,
+                        LINE_BLAME.chip
+                    ),
                     desc: "inline / split · wrap · msg · blame",
                 },
                 $($sizes,)*
                 HelpEntry {
-                    keys: "t",
+                    keys: FLAT_OR_TREE.chip,
                     desc: "flat / tree · Staged split",
                 },
                 $($ignored,)*
                 HelpEntry {
-                    keys: "Ctrl-o",
+                    keys: FULL_FILE_CONTEXT.chip,
                     desc: "full-file · keep hunk in view",
                 },
                 HelpEntry {
-                    keys: "o O",
+                    keys: chips!(GRAPH_FOCUS_BRANCHES.chip, CLEAR_GRAPH_FOCUS.chip),
                     desc: "focus branches / clear (graph · repo)",
                 },
                 HelpEntry {
-                    keys: "PgUp PgDn",
+                    keys: PAGE_CHIPS,
                     desc: "page focused pane",
                 },
                 HelpEntry {
-                    keys: "Ctrl-u Ctrl-d",
+                    keys: HALF_PAGE_CHIPS,
                     desc: "page focused ±5",
                 },
                 HelpEntry {
-                    keys: "m",
+                    keys: TOGGLE_MOUSE.chip,
                     desc: "mouse on/off (graph commit: merge)",
                 },
                 HelpEntry {
-                    keys: ";",
+                    keys: COMMENT.chip,
                     desc: "comment row/line · Ctrl-r resolves in box",
                 },
                 HelpEntry {
-                    keys: "V",
+                    keys: HIGHLIGHT_LINES.chip,
                     desc: "highlight diff lines for ; / s / u / x / :",
                 },
                 HelpEntry {
-                    keys: "y",
+                    keys: COPY_COMMENTS.chip,
                     desc: "copy comments as markdown",
                 },
                 HelpEntry {
-                    keys: "'",
+                    keys: COPY_ENTITY_REFERENCE.chip,
                     desc: "copy entity reference",
                 },
                 HelpEntry {
-                    keys: "Esc",
+                    keys: NAV_BACK.chip,
                     desc: "back / unfocus · right-click · never quit · dismiss failure",
                 },
                 HelpEntry {
-                    keys: "Enter dblclick",
+                    keys: chips!(NAV_ENTER.chip, "dblclick"),
                     desc: "focus right / drill",
                 },
                 HelpEntry {
-                    keys: ": Ctrl-p F",
+                    keys: QUICK_OPEN_CHIPS,
                     desc: "commands · :<n> go to line · go to file (> first switches)",
                 },
                 HelpEntry {
-                    keys: "?",
+                    keys: KEYMAP_HELP.chip,
                     desc: "help",
                 },
                 HelpEntry {
-                    keys: "gh",
+                    keys: ICON_POPOVER.chip,
                     desc: "icon popover",
                 },
                 HelpEntry {
-                    keys: "Tab",
+                    keys: OTHER_PANE.chip,
                     desc: "other pane",
                 },
                 HelpEntry {
-                    keys: "q",
+                    keys: QUIT.chip,
                     desc: "quit",
                 },
                 HelpEntry {
-                    keys: "Ctrl-c Ctrl-c",
+                    keys: CTRL_C_QUIT_CHIPS,
                     desc: "quit (press twice)",
                 },
             ],
@@ -189,26 +229,26 @@ macro_rules! view_group {
 
 /// `gp` on every tab (MOVE).
 const HELP_PRS_TAB: HelpEntry = HelpEntry {
-    keys: "gp",
+    keys: PRS_TAB.chip,
     desc: "PRs tab",
 };
 
 /// `-` on the Workspace tab (MOVE).
 const HELP_DASH_EXPLORER: HelpEntry = HelpEntry {
-    keys: "-",
+    keys: OPEN_IN_EXPLORER.chip,
     desc: "Explorer tab",
 };
 
 /// `< >` on the Workspace and compare tabs (VIEW). The commit message
 /// height has no key: the palette rows set it.
 const HELP_PANE_SIZES: HelpEntry = HelpEntry {
-    keys: "< >",
+    keys: chips!(NARROW_TREE.chip, WIDEN_TREE.chip),
     desc: "tree width",
 };
 
 /// `.` everywhere but the Explorer tab (VIEW).
 const HELP_HIDDEN_REPOS: HelpEntry = HelpEntry {
-    keys: ".",
+    keys: SHOW_HIDDEN.chip,
     desc: "show / hide hidden repos",
 };
 
@@ -227,39 +267,39 @@ pub const HELP_EXPLORER_VIEW_GROUP: HelpGroup = HelpGroup {
     title: "VIEW",
     entries: &[
         HelpEntry {
-            keys: "i \\",
+            keys: chips!(INLINE_OR_SPLIT.chip, WRAP_DIFF.chip),
             desc: "inline / split · wrap (file pane)",
         },
         HelpEntry {
-            keys: "PgUp PgDn",
+            keys: PAGE_CHIPS,
             desc: "page focused pane",
         },
         HelpEntry {
-            keys: "Ctrl-u Ctrl-d",
+            keys: HALF_PAGE_CHIPS,
             desc: "page focused ±5",
         },
         HelpEntry {
-            keys: "m",
+            keys: TOGGLE_MOUSE.chip,
             desc: "mouse on/off",
         },
         HelpEntry {
-            keys: "Esc",
+            keys: NAV_BACK.chip,
             desc: "clear search · back to tree · never quit · dismiss failure",
         },
         HelpEntry {
-            keys: ": Ctrl-p F",
+            keys: QUICK_OPEN_CHIPS,
             desc: "commands · :<n> go to line · go to file (> first switches)",
         },
         HelpEntry {
-            keys: "?",
+            keys: KEYMAP_HELP.chip,
             desc: "help",
         },
         HelpEntry {
-            keys: "q",
+            keys: QUIT.chip,
             desc: "quit",
         },
         HelpEntry {
-            keys: "Ctrl-c Ctrl-c",
+            keys: CTRL_C_QUIT_CHIPS,
             desc: "quit (press twice)",
         },
     ],
@@ -272,79 +312,83 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
         title: "GIT",
         entries: &[
             HelpEntry {
-                keys: "s",
+                keys: STAGE.chip,
                 desc: "stage scope",
             },
             HelpEntry {
-                keys: "S",
+                keys: STASH_MENU.chip,
                 desc: "stash menu",
             },
             HelpEntry {
-                keys: "u",
+                keys: UNSTAGE.chip,
                 desc: "unstage scope",
             },
             HelpEntry {
-                keys: "x",
+                keys: REVERT.chip,
                 desc: "revert (y/Y)",
             },
             HelpEntry {
-                keys: "e E",
+                keys: OPEN_CHIPS,
                 desc: "open in editor · open in diff tool",
             },
             HelpEntry {
-                keys: "space",
+                keys: MARK_REVIEWED.chip,
                 desc: "mark file reviewed (eye)",
             },
             HelpEntry {
-                keys: "f",
+                keys: FETCH.chip,
                 desc: "fetch remotes",
             },
             HelpEntry {
-                keys: "p",
+                keys: PULL.chip,
                 desc: "pull behind",
             },
             HelpEntry {
-                keys: "P",
+                keys: PUSH.chip,
                 desc: "push ahead/diverged/new",
             },
             HelpEntry {
-                keys: "d",
+                keys: DEFAULT_BRANCH.chip,
                 desc: "default branch",
             },
             HelpEntry {
-                keys: "b",
+                keys: BRANCH_PICKER.chip,
                 desc: "depth 0 picker · graph local/origin/*",
             },
             HelpEntry {
-                keys: "m",
+                keys: GRAPH_MERGE.chip,
                 desc: "graph merge into HEAD",
             },
             HelpEntry {
-                keys: "c",
+                keys: GRAPH_CREATE_BRANCH.chip,
                 desc: "create branch at graph commit (no checkout)",
             },
             HelpEntry {
-                keys: "W",
+                keys: REMOVE_WORKTREE.chip,
                 desc: "remove linked worktree",
             },
             HelpEntry {
-                keys: "r",
+                keys: REFRESH.chip,
                 desc: "refresh now",
             },
             HelpEntry {
-                keys: "gx gc",
+                keys: chips!(OPEN_PR.chip, OPEN_PR_CI.chip),
                 desc: "open branch PR · its CI",
             },
             HelpEntry {
-                keys: "gw",
+                keys: VIEW_REMOTELY.chip,
                 desc: "view on GitHub/GitLab",
             },
             HelpEntry {
-                keys: "a p D",
+                keys: chips!(
+                    GRAPH_STASH_APPLY.chip,
+                    GRAPH_STASH_POP.chip,
+                    GRAPH_STASH_DROP.chip
+                ),
                 desc: "focused stash apply/pop/drop",
             },
             HelpEntry {
-                keys: "A",
+                keys: BLAME_MENU.chip,
                 desc: "blame menu",
             },
         ],
@@ -361,43 +405,43 @@ pub const HELP_COMPARE_GROUP: HelpGroup = HelpGroup {
     title: "COMPARE",
     entries: &[
         HelpEntry {
-            keys: "V",
+            keys: HIGHLIGHT_LINES.chip,
             desc: "highlight for ; x ' :",
         },
         HelpEntry {
-            keys: ";",
+            keys: COMMENT.chip,
             desc: "comment (Ctrl-r resolves inside the box)",
         },
         HelpEntry {
-            keys: "y",
+            keys: COPY_COMMENTS.chip,
             desc: "copy comments",
         },
         HelpEntry {
-            keys: "'",
+            keys: COPY_ENTITY_REFERENCE.chip,
             desc: "copy reference",
         },
         HelpEntry {
-            keys: "x",
+            keys: REVERT.chip,
             desc: "revert to merge base (only if head checked out, file clean)",
         },
         HelpEntry {
-            keys: "Ctrl-o",
+            keys: FULL_FILE_CONTEXT.chip,
             desc: "full-file",
         },
         HelpEntry {
-            keys: "space",
+            keys: MARK_REVIEWED.chip,
             desc: "mark reviewed",
         },
         HelpEntry {
-            keys: "e E",
+            keys: OPEN_CHIPS,
             desc: "editor · diff tool",
         },
         HelpEntry {
-            keys: "gw",
+            keys: VIEW_REMOTELY.chip,
             desc: "view on GitHub/GitLab",
         },
         HelpEntry {
-            keys: "A",
+            keys: BLAME_MENU.chip,
             desc: "blame menu",
         },
         HelpEntry {
@@ -405,27 +449,36 @@ pub const HELP_COMPARE_GROUP: HelpGroup = HelpGroup {
             desc: "close tab (Ctrl-w or :)",
         },
         HelpEntry {
-            keys: "s u",
+            keys: chips!(STAGE.chip, UNSTAGE.chip),
             desc: "Workspace tab only",
         },
         HelpEntry {
-            keys: "f p P d",
+            keys: REMOTE_CHIPS,
             desc: "Workspace tab only",
         },
         HelpEntry {
-            keys: "b c W",
+            keys: chips!(
+                BRANCH_PICKER.chip,
+                GRAPH_CREATE_BRANCH.chip,
+                REMOVE_WORKTREE.chip
+            ),
             desc: "Workspace tab only",
         },
         HelpEntry {
-            keys: "S a p D",
+            keys: chips!(
+                STASH_MENU.chip,
+                GRAPH_STASH_APPLY.chip,
+                GRAPH_STASH_POP.chip,
+                GRAPH_STASH_DROP.chip
+            ),
             desc: "Workspace tab only",
         },
         HelpEntry {
-            keys: "o O",
+            keys: chips!(GRAPH_FOCUS_BRANCHES.chip, CLEAR_GRAPH_FOCUS.chip),
             desc: "Workspace tab only",
         },
         HelpEntry {
-            keys: "r",
+            keys: REFRESH.chip,
             desc: "refresh now",
         },
     ],
@@ -445,71 +498,71 @@ pub const HELP_EXPLORER_GROUP: HelpGroup = HelpGroup {
     title: "EXPLORER",
     entries: &[
         HelpEntry {
-            keys: "j k",
+            keys: MOVE_CHIPS,
             desc: "preview file (dim italic tab)",
         },
         HelpEntry {
-            keys: "Enter",
+            keys: NAV_ENTER.chip,
             desc: "folder open / close · file: pin tab",
         },
         HelpEntry {
-            keys: "[ ]",
+            keys: chips!(PREVIOUS_FILE_TAB.chip, NEXT_FILE_TAB.chip),
             desc: "prev / next file tab (selects it in tree)",
         },
         HelpEntry {
-            keys: "Ctrl-w",
+            keys: CLOSE_TAB.chip,
             desc: "close file tab · none left: Explorer tab",
         },
         HelpEntry {
-            keys: "l h",
+            keys: chips!(PAN_RIGHT.chip, PAN_LEFT.chip),
             desc: "open / close folder · h on a file: parent",
         },
         HelpEntry {
-            keys: "-",
+            keys: OPEN_IN_EXPLORER.chip,
             desc: "parent folder",
         },
         HelpEntry {
-            keys: "Tab",
+            keys: OTHER_PANE.chip,
             desc: "tree / file pane",
         },
         HelpEntry {
-            keys: "Esc h",
+            keys: chips!(NAV_BACK.chip, PAN_LEFT.chip),
             desc: "file pane back to tree",
         },
         HelpEntry {
-            keys: "/ n N",
+            keys: chips!(SEARCH_PANE.chip, NEXT_MATCH.chip, PREVIOUS_MATCH.chip),
             desc: "search tree rows (file pane: its lines)",
         },
         HelpEntry {
-            keys: "zz",
+            keys: FOLD_SUBTREE.chip,
             desc: "toggle folder subtree",
         },
         HelpEntry {
-            keys: "< >",
+            keys: chips!(NARROW_TREE.chip, WIDEN_TREE.chip),
             desc: "tree width",
         },
         HelpEntry {
-            keys: "B A",
+            keys: chips!(LINE_BLAME.chip, BLAME_MENU.chip),
             desc: "line blame · blame menu (file pane)",
         },
         HelpEntry {
-            keys: "; V y",
+            keys: chips!(COMMENT.chip, HIGHLIGHT_LINES.chip, COPY_COMMENTS.chip),
             desc: "comment · highlight (file pane) · copy comments",
         },
         HelpEntry {
-            keys: "space",
+            keys: MARK_REVIEWED.chip,
             desc: "mark changed file reviewed",
         },
         HelpEntry {
-            keys: "e E",
+            keys: OPEN_CHIPS,
             desc: "editor (at line) · diff tool",
         },
         HelpEntry {
-            keys: "'",
+            keys: COPY_ENTITY_REFERENCE.chip,
             desc: "copy reference",
         },
         HelpEntry {
-            keys: "r",
+            keys: REFRESH.chip,
             desc: "re-list folders · reload file",
         },
         HelpEntry {
@@ -521,19 +574,23 @@ pub const HELP_EXPLORER_GROUP: HelpGroup = HelpGroup {
             desc: "close Explorer tab",
         },
         HelpEntry {
-            keys: "Ctrl-o",
+            keys: FULL_FILE_CONTEXT.chip,
             desc: "diffs always show the whole file",
         },
         HelpEntry {
-            keys: "s u x S",
+            keys: chips!(STAGE.chip, UNSTAGE.chip, REVERT.chip, STASH_MENU.chip),
             desc: "Workspace tab only",
         },
         HelpEntry {
-            keys: "f p P d",
+            keys: REMOTE_CHIPS,
             desc: "Workspace tab only",
         },
         HelpEntry {
-            keys: "t . M",
+            keys: chips!(
+                FLAT_OR_TREE.chip,
+                SHOW_HIDDEN.chip,
+                EXPAND_COMMIT_MESSAGE.chip
+            ),
             desc: "Workspace tab only",
         },
     ],
@@ -552,31 +609,31 @@ pub const HELP_PRS_MOVE_GROUP: HelpGroup = HelpGroup {
     title: "MOVE",
     entries: &[
         HelpEntry {
-            keys: "j k",
+            keys: MOVE_CHIPS,
             desc: "down / up",
         },
         HelpEntry {
-            keys: "gg G",
+            keys: chips!(GO_TO_TOP.chip, GO_TO_BOTTOM.chip),
             desc: "top / bottom",
         },
         HelpEntry {
-            keys: "Home End",
+            keys: chips!(MOVE_TO_START.chip, MOVE_TO_END.chip),
             desc: "top / bottom",
         },
         HelpEntry {
-            keys: "PgUp PgDn",
+            keys: PAGE_CHIPS,
             desc: "page the list",
         },
         HelpEntry {
-            keys: "Ctrl-u Ctrl-d",
+            keys: HALF_PAGE_CHIPS,
             desc: "move ±5",
         },
         HelpEntry {
-            keys: "Ctrl-f",
+            keys: SEARCH_IN_FILES.chip,
             desc: "search in files",
         },
         HelpEntry {
-            keys: "gt gT",
+            keys: chips!(NEXT_TAB.chip, PREVIOUS_TAB.chip),
             desc: "next / prev tab",
         },
         HelpEntry {
@@ -595,39 +652,39 @@ pub const HELP_PRS_GROUP: HelpGroup = HelpGroup {
     title: "PRS",
     entries: &[
         HelpEntry {
-            keys: "Enter gx",
+            keys: chips!(NAV_ENTER.chip, OPEN_PR.chip),
             desc: "open PR",
         },
         HelpEntry {
-            keys: "gc",
+            keys: OPEN_PR_CI.chip,
             desc: "open its CI page",
         },
         HelpEntry {
-            keys: "y",
+            keys: COPY_COMMENTS.chip,
             desc: "copy PR URL",
         },
         HelpEntry {
-            keys: "o",
+            keys: GRAPH_FOCUS_BRANCHES.chip,
             desc: "show its checkout in the Workspace tree",
         },
         HelpEntry {
-            keys: "z",
+            keys: FOLD_ROW.chip,
             desc: "fold / unfold the group (click a header too)",
         },
         HelpEntry {
-            keys: "Z",
+            keys: FOLD_FINISHED_PR_GROUPS.chip,
             desc: "fold / unfold every finished group",
         },
         HelpEntry {
-            keys: "r",
+            keys: REFRESH.chip,
             desc: "look every PR up again",
         },
         HelpEntry {
-            keys: "Tab",
+            keys: OTHER_PANE.chip,
             desc: "list / detail (under 100 columns)",
         },
         HelpEntry {
-            keys: "gh",
+            keys: ICON_POPOVER.chip,
             desc: "PR popover",
         },
         HelpEntry {
@@ -635,19 +692,24 @@ pub const HELP_PRS_GROUP: HelpGroup = HelpGroup {
             desc: "close PRs tab (Ctrl-w)",
         },
         HelpEntry {
-            keys: "s u x S",
+            keys: chips!(STAGE.chip, UNSTAGE.chip, REVERT.chip, STASH_MENU.chip),
             desc: "Workspace tab only",
         },
         HelpEntry {
-            keys: "f p P d",
+            keys: REMOTE_CHIPS,
             desc: "Workspace tab only",
         },
         HelpEntry {
-            keys: "t . M -",
+            keys: chips!(
+                FLAT_OR_TREE.chip,
+                SHOW_HIDDEN.chip,
+                EXPAND_COMMIT_MESSAGE.chip,
+                OPEN_IN_EXPLORER.chip
+            ),
             desc: "Workspace tab only",
         },
         HelpEntry {
-            keys: "/ n N",
+            keys: chips!(SEARCH_PANE.chip, NEXT_MATCH.chip, PREVIOUS_MATCH.chip),
             desc: "no search here",
         },
     ],
@@ -658,27 +720,27 @@ pub const HELP_PRS_VIEW_GROUP: HelpGroup = HelpGroup {
     title: "VIEW",
     entries: &[
         HelpEntry {
-            keys: "m",
+            keys: TOGGLE_MOUSE.chip,
             desc: "mouse on/off",
         },
         HelpEntry {
-            keys: "Esc",
+            keys: NAV_BACK.chip,
             desc: "detail back to list · never quit · dismiss failure",
         },
         HelpEntry {
-            keys: ": Ctrl-p F",
+            keys: QUICK_OPEN_CHIPS,
             desc: "commands · go to file",
         },
         HelpEntry {
-            keys: "?",
+            keys: KEYMAP_HELP.chip,
             desc: "help",
         },
         HelpEntry {
-            keys: "q",
+            keys: QUIT.chip,
             desc: "quit",
         },
         HelpEntry {
-            keys: "Ctrl-c Ctrl-c",
+            keys: CTRL_C_QUIT_CHIPS,
             desc: "quit (press twice)",
         },
     ],
