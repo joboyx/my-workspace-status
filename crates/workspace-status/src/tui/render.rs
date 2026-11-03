@@ -10212,6 +10212,70 @@ mod tests {
         }
     }
 
+    /// A terminal resized one column at a time paints the tree width of a
+    /// fresh launch at the end size on every divider surface, in both
+    /// looks, and a tree the narrowest terminal squeezed comes back when
+    /// the terminal grows again. Each step is a `Resize` then a paint, as
+    /// in the live loop.
+    #[test]
+    fn stepwise_terminal_resize_paints_the_fresh_launch_tree_width_on_every_surface() {
+        const ROWS: u16 = 30;
+        let resize_and_draw = |terminal: &mut Terminal<TestBackend>, state: &mut AppState, cols| {
+            state.dispatch(Action::Resize { cols, rows: ROWS });
+            terminal.backend_mut().resize(cols, ROWS);
+            draw_state(terminal, state);
+            state.layout.outer_tree_width
+        };
+        for (id, fixture) in RESIZE_EDGE_SURFACES {
+            for (look, background) in PANE_LOOKS {
+                let case = format!("{id} {look}");
+                let open = || {
+                    let mut state = (DIFF_BAR_SURFACES[fixture].open)(&long_bar_diff());
+                    state.background = background;
+                    state
+                };
+                let mut fresh = open();
+                let mut terminal = Terminal::new(TestBackend::new(134, ROWS)).unwrap();
+                draw_state(&mut terminal, &mut fresh);
+                assert_eq!(fresh.layout.outer_tree_width, 53, "{case}: fresh 134 cols");
+
+                let mut state = open();
+                let mut terminal = Terminal::new(TestBackend::new(124, ROWS)).unwrap();
+                draw_state(&mut terminal, &mut state);
+                for cols in 125..=134 {
+                    resize_and_draw(&mut terminal, &mut state, cols);
+                }
+                assert_eq!(
+                    state.layout.outer_tree_width, 53,
+                    "{case}: resize steps 124 -> 134"
+                );
+                assert_eq!(
+                    resize_and_draw(&mut terminal, &mut state, MIN_TERM_COLS),
+                    MIN_PANE_COLS,
+                    "{case}: the narrowest terminal"
+                );
+                // A divider press released in place and a `<` the clamp
+                // refuses do not change the painted width, so they keep the
+                // split.
+                let (x, y) = (state.layout.outer_tree_width - 1, state.layout.right_y + 2);
+                state.dispatch(Action::Click { col: x, row: y });
+                assert_eq!(state.drag, SplitDrag::Pane, "{case}: a divider press");
+                state.dispatch(Action::Release);
+                state.dispatch(Action::ResizeTree(-1));
+                draw_state(&mut terminal, &mut state);
+                assert_eq!(
+                    state.layout.outer_tree_width, MIN_PANE_COLS,
+                    "{case}: still the narrowest tree"
+                );
+                assert_eq!(
+                    resize_and_draw(&mut terminal, &mut state, 134),
+                    53,
+                    "{case}: back to 134 cols"
+                );
+            }
+        }
+    }
+
     /// A double-click on an Explorer tree row is Enter on it, in both
     /// looks: on a file the first press previews it (an unpinned inner
     /// tab) and the second pins it as Enter does; on a folder the first
