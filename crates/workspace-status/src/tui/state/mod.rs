@@ -3305,9 +3305,18 @@ impl AppState {
         }
     }
 
+    /// Store the split of a divider press or drag at `col`. A column that
+    /// paints the tree at its current width (a press on the divider, or a
+    /// drag the clamp holds at a narrow terminal) keeps the stored fraction,
+    /// so it can come back when the terminal grows.
     fn apply_tree_fraction_from_col(&mut self, col: u16) {
         let cols = self.layout.term_cols.max(1);
-        self.tree_fraction = clamp_tree_fraction(cols, tree_fraction_from_col(cols, col));
+        let fraction = clamp_tree_fraction(cols, tree_fraction_from_col(cols, col));
+        if pane_widths(cols, fraction).tree_width
+            != pane_widths(cols, self.tree_fraction).tree_width
+        {
+            self.tree_fraction = fraction;
+        }
     }
 
     fn apply_diff_fraction_from_col(&mut self, col: u16) {
@@ -4103,13 +4112,16 @@ impl AppState {
     }
 
     /// Move the tree / right split by `steps` of 5% (`<` / `>`). Session-only, like a drag.
+    /// A step the clamp refuses keeps the stored fraction.
     fn step_tree_width(&mut self, steps: i32) -> Effect {
         let cols = self.layout.term_cols.max(1);
         let before = pane_widths(cols, self.tree_fraction).tree_width;
-        self.tree_fraction = step_tree_fraction(cols, self.tree_fraction, steps);
-        if pane_widths(cols, self.tree_fraction).tree_width == before {
+        let stepped = step_tree_fraction(cols, self.tree_fraction, steps);
+        if pane_widths(cols, stepped).tree_width == before {
             let edge = if steps < 0 { "narrowest" } else { "widest" };
             self.status = StatusMessage::warn(format!("tree pane is at its {edge}"));
+        } else {
+            self.tree_fraction = stepped;
         }
         Effect::None
     }
@@ -16144,11 +16156,25 @@ mod tests {
         assert_eq!(width(&app, 134).tree_width, 53);
         assert_eq!(width(&app, 134).tree_inner_width, 50);
 
-        // The narrowest terminal holds the tree at its minimum width.
+        // The narrowest terminal holds the tree at its minimum width. A `<`
+        // the clamp refuses there keeps the stored split.
         resize(&mut app, MIN_TERM_COLS);
         assert_eq!(width(&app, MIN_TERM_COLS).tree_width, MIN_PANE_COLS);
+        app.dispatch(Action::ResizeTree(-1));
+        assert_eq!(app.status, "tree pane is at its narrowest");
+        assert_eq!(app.tree_fraction, TREE_WIDTH_FRACTION);
         resize(&mut app, 134);
         assert_eq!(width(&app, 134).tree_width, 53);
+
+        // A `>` the clamp refuses keeps a split wider than the clamp too.
+        app.tree_fraction = 0.6;
+        assert_eq!(width(&app, 134).tree_width, 80);
+        resize(&mut app, MIN_TERM_COLS);
+        app.dispatch(Action::ResizeTree(1));
+        assert_eq!(app.status, "tree pane is at its widest");
+        assert_eq!(app.tree_fraction, 0.6);
+        resize(&mut app, 134);
+        assert_eq!(width(&app, 134).tree_width, 80);
 
         // A dragged split keeps its own fraction the same way.
         app.layout = wide_split_layout();

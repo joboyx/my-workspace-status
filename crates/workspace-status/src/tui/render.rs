@@ -10254,6 +10254,19 @@ mod tests {
                     MIN_PANE_COLS,
                     "{case}: the narrowest terminal"
                 );
+                // A divider press released in place and a `<` the clamp
+                // refuses do not change the painted width, so they keep the
+                // split.
+                let (x, y) = (state.layout.outer_tree_width - 1, state.layout.right_y + 2);
+                state.dispatch(Action::Click { col: x, row: y });
+                assert_eq!(state.drag, SplitDrag::Pane, "{case}: a divider press");
+                state.dispatch(Action::Release);
+                state.dispatch(Action::ResizeTree(-1));
+                draw_state(&mut terminal, &mut state);
+                assert_eq!(
+                    state.layout.outer_tree_width, MIN_PANE_COLS,
+                    "{case}: still the narrowest tree"
+                );
                 assert_eq!(
                     resize_and_draw(&mut terminal, &mut state, 134),
                     53,
