@@ -562,6 +562,10 @@ fn intentional_ids(reason: &str) -> Vec<u32> {
 }
 
 /// Every `fn` name declared in the `.rs` files under `root`.
+///
+/// A crate's cargo build output (`target/` next to its `Cargo.toml`) is
+/// skipped. A module directory that is only named `target` (such as
+/// `tui/comments/target/`) is read like any other.
 pub(crate) fn declared_fns(root: &Path) -> HashSet<String> {
     let mut names = HashSet::new();
     let mut dirs: Vec<PathBuf> = vec![root.to_path_buf()];
@@ -571,7 +575,9 @@ pub(crate) fn declared_fns(root: &Path) -> HashSet<String> {
         for entry in entries {
             let path = entry.expect("dir entry").path();
             if path.is_dir() {
-                if path.file_name().is_some_and(|n| n != "target") {
+                let build_output = path.file_name().is_some_and(|n| n == "target")
+                    && dir.join("Cargo.toml").is_file();
+                if !build_output {
                     dirs.push(path);
                 }
             } else if path.extension().is_some_and(|e| e == "rs") {
@@ -810,5 +816,25 @@ mod tests {
             parse(&sample("gap: G1", "").replace("`sample`", "`old_doc`")).expect("valid sample");
         let missing = missing_fns(&registry, &declared).join("\n");
         assert!(missing.contains("anchor `fn old_doc`"), "{missing}");
+    }
+
+    /// A module directory named `target` is read; the cargo build output
+    /// `target/` next to a crate's `Cargo.toml` is not.
+    #[test]
+    fn declared_fns_reads_a_target_module_dir_and_skips_build_output() {
+        let root = crate::testutil::unique_dir("parity-declared-fns");
+        let module_dir = root.join("app/src/comments/target");
+        let build_dir = root.join("app/target/debug");
+        std::fs::create_dir_all(&module_dir).unwrap();
+        std::fs::create_dir_all(&build_dir).unwrap();
+        std::fs::write(root.join("app/Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(module_dir.join("tests.rs"), "fn in_target_module() {}\n").unwrap();
+        std::fs::write(build_dir.join("gen.rs"), "fn in_build_output() {}\n").unwrap();
+
+        let declared = declared_fns(&root);
+        std::fs::remove_dir_all(&root).unwrap();
+
+        assert!(declared.contains("in_target_module"), "{declared:?}");
+        assert!(!declared.contains("in_build_output"), "{declared:?}");
     }
 }
