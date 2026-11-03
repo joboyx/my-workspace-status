@@ -7,6 +7,11 @@ use crossterm::event::{
 };
 
 use super::action::{Action, QuickOpenEntry};
+use super::bindings::{
+    self, has_command_modifier, is_ctrl_chord, COMMAND_MODIFIERS, FOLD_SUBTREE, GRAPH_COMMIT_KEYS,
+    GRAPH_STASH_KEYS, G_CHORD_KEYS, HIGHLIGHT_CTRL_KEYS, HIGHLIGHT_KEYS, NORMAL_CTRL_KEYS,
+    NORMAL_KEYS, OTHER_PANE, PAN_LEFT, PAN_RIGHT,
+};
 
 /// Rows PgUp / PgDn scroll the `?` help body.
 ///
@@ -454,35 +459,12 @@ fn fold_kitty_csi_u_arrows(mut key: KeyEvent) -> KeyEvent {
     key
 }
 
-/// Modifiers that turn a key into a command chord.
-///
-/// SHIFT is not one of them: it selects the shifted binding (`P`, `O`, …).
-const COMMAND_MODIFIERS: KeyModifiers = KeyModifiers::CONTROL
-    .union(KeyModifiers::ALT)
-    .union(KeyModifiers::SUPER)
-    .union(KeyModifiers::HYPER)
-    .union(KeyModifiers::META);
-
-/// True when `key` carries Ctrl, Alt, Super, Hyper, or Meta.
-fn has_command_modifier(key: KeyEvent) -> bool {
-    key.modifiers.intersects(COMMAND_MODIFIERS)
-}
-
 /// True when `key` is a modifier chord with no explicit binding in a
 /// plain-key mode, so it must not run the plain-key action.
 ///
 /// Esc is exempt: Esc with a modifier still cancels or closes.
 fn is_unbound_chord(key: KeyEvent) -> bool {
     key.code != KeyCode::Esc && has_command_modifier(key)
-}
-
-/// True for Ctrl+`c` with no Alt, Super, Hyper, or Meta (Shift is ignored).
-fn is_ctrl_chord(key: KeyEvent, c: char) -> bool {
-    key.code == KeyCode::Char(c)
-        && key.modifiers.contains(KeyModifiers::CONTROL)
-        && !key
-            .modifiers
-            .intersects(COMMAND_MODIFIERS.difference(KeyModifiers::CONTROL))
 }
 
 /// True for a Ctrl-u or Ctrl-d press (or key repeat), the half-page keys
@@ -664,9 +646,11 @@ fn key_to_action(
     graph_commit_focused: bool,
     hl_folds: bool,
 ) -> Action {
+    // Chip: `bindings::CTRL_C_EXIT` (any Ctrl+c, other modifiers allowed).
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Action::CtrlC;
     }
+    // Chip: `bindings::SEARCH_IN_FILES`.
     if is_search_files_key(key) {
         match mode {
             InputMode::Normal { .. }
@@ -688,6 +672,7 @@ fn key_to_action(
             _ => return Action::None,
         }
     }
+    // Chips: `bindings::QUICK_OPEN_COMMANDS`, `GO_TO_FILE`, `GO_TO_FILE_F`.
     if let Some(entry) = quick_open_key(key) {
         match mode {
             InputMode::Normal { .. }
@@ -741,7 +726,9 @@ fn key_to_action(
         },
         // A modifier chord falls through to `normal_key` (see GPending).
         InputMode::ZPending { .. } => match key.code {
-            KeyCode::Char('z') if !has_command_modifier(key) => Action::FoldToggleSubtree,
+            _ if !has_command_modifier(key) && FOLD_SUBTREE.matches(key) => {
+                FOLD_SUBTREE.action.clone()
+            }
             KeyCode::Esc => Action::None,
             _ => normal_key(
                 key,
@@ -754,29 +741,27 @@ fn key_to_action(
         },
         // A modifier chord falls through to `normal_key`, which keeps
         // Ctrl-o / Ctrl-u / Ctrl-d / Ctrl-w and maps the rest to None.
-        InputMode::GPending { .. } => match key.code {
-            KeyCode::Char('g') if !has_command_modifier(key) => Action::MoveToStart,
-            KeyCode::Char('t') if !has_command_modifier(key) => Action::NextTab,
-            KeyCode::Char('T') if !has_command_modifier(key) => Action::PreviousTab,
-            KeyCode::Char('x') if !has_command_modifier(key) => Action::OpenPullRequest,
-            KeyCode::Char('c') if !has_command_modifier(key) => Action::OpenPullRequestCi,
-            // Bound so a `p` after `g` never falls through to Pull.
-            KeyCode::Char('p') if !has_command_modifier(key) => Action::OpenPrsTab,
-            KeyCode::Char('w') if !has_command_modifier(key) => Action::ViewRemotely,
-            KeyCode::Char('h') if !has_command_modifier(key) => Action::PopoverOpenFocused,
-            KeyCode::Char(c @ '1'..='9') if !has_command_modifier(key) => {
-                Action::JumpToTab(c as u8 - b'0')
+        InputMode::GPending { .. } => {
+            if !has_command_modifier(key) {
+                if let Some(action) = bound_action(G_CHORD_KEYS, key) {
+                    return action;
+                }
             }
-            KeyCode::Esc => Action::None,
-            _ => normal_key(
-                key,
-                right_is_diff,
-                focus_right,
-                graph_stash_focused,
-                graph_commit_focused,
-                hl_folds,
-            ),
-        },
+            match key.code {
+                KeyCode::Char(c @ '1'..='9') if !has_command_modifier(key) => {
+                    Action::JumpToTab(c as u8 - b'0')
+                }
+                KeyCode::Esc => Action::None,
+                _ => normal_key(
+                    key,
+                    right_is_diff,
+                    focus_right,
+                    graph_stash_focused,
+                    graph_commit_focused,
+                    hl_folds,
+                ),
+            }
+        }
         InputMode::Confirm => match key.code {
             // Ctrl-y / Alt-y never confirm a write.
             _ if is_unbound_chord(key) => Action::None,
@@ -1050,11 +1035,8 @@ fn search_files_key_action(key: KeyEvent, results: bool) -> Action {
 /// [`Action::None`]. `:` (commands) and Ctrl-p / `F` (files) open Quick
 /// Open before this map runs; the highlight stays.
 fn diff_visual_key(key: KeyEvent) -> Action {
-    if is_ctrl_chord(key, 'u') {
-        return Action::Move(-5);
-    }
-    if is_ctrl_chord(key, 'd') {
-        return Action::Move(5);
+    if let Some(action) = bound_action(HIGHLIGHT_CTRL_KEYS, key) {
+        return action;
     }
     if is_unbound_chord(key) {
         return match key.code {
@@ -1062,25 +1044,10 @@ fn diff_visual_key(key: KeyEvent) -> Action {
             _ => Action::None,
         };
     }
+    if let Some(action) = bound_action(HIGHLIGHT_KEYS, key) {
+        return action;
+    }
     match key.code {
-        KeyCode::Char('?') => Action::ToggleHelp,
-        KeyCode::Char('q') => Action::Quit,
-        KeyCode::Char('m') => Action::ToggleMouse,
-        KeyCode::Char('g') => Action::ArmGChord,
-        KeyCode::Char('G') | KeyCode::End => Action::MoveToEnd,
-        KeyCode::Home => Action::MoveToStart,
-        KeyCode::PageUp => Action::PageMove(-1),
-        KeyCode::PageDown => Action::PageMove(1),
-        KeyCode::Esc | KeyCode::Char('V') => Action::DiffVisualCancel,
-        KeyCode::Char(';') => Action::CommentStart,
-        KeyCode::Char('\'') => Action::CopyEntityReference,
-        KeyCode::Char('s') => Action::Stage,
-        KeyCode::Char('u') => Action::Unstage,
-        KeyCode::Char('x') => Action::Revert,
-        KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => Action::Move(1),
-        KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::Move(-1),
-        KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Left => Action::PanDiff(-1),
-        KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Right => Action::PanDiff(1),
         KeyCode::Char(_)
         | KeyCode::Enter
         | KeyCode::Tab
@@ -1107,100 +1074,46 @@ fn normal_key(
     graph_commit_focused: bool,
     hl_folds: bool,
 ) -> Action {
-    if is_ctrl_chord(key, 'o') {
-        return Action::ToggleFullContext;
-    }
-    if is_ctrl_chord(key, 'u') {
-        return Action::Move(-5);
-    }
-    if is_ctrl_chord(key, 'd') {
-        return Action::Move(5);
-    }
-    if is_ctrl_chord(key, 'w') || is_ctrl_chord(key, 'W') {
-        return Action::CloseTab;
+    if let Some(action) = bound_action(NORMAL_CTRL_KEYS, key) {
+        return action;
     }
     if is_unbound_chord(key) {
         return Action::None;
     }
     if graph_stash_focused {
-        match key.code {
-            KeyCode::Char('a') => return Action::GraphStashApply,
-            KeyCode::Char('p') => return Action::GraphStashPop,
-            KeyCode::Char('D') => return Action::GraphStashDrop,
-            _ => {}
+        if let Some(action) = bound_action(GRAPH_STASH_KEYS, key) {
+            return action;
         }
     }
     if graph_commit_focused {
-        match key.code {
-            KeyCode::Char('b') => return Action::GraphCheckout,
-            KeyCode::Char('c') => return Action::GraphCreateBranch,
-            KeyCode::Char('m') => return Action::GraphMerge,
-            _ => {}
+        if let Some(action) = bound_action(GRAPH_COMMIT_KEYS, key) {
+            return action;
         }
     }
-    match key.code {
-        KeyCode::Char('t') => Action::ToggleTreeMode,
-        KeyCode::Char('q') => Action::Quit,
-        KeyCode::Char('?') => Action::ToggleHelp,
-        KeyCode::Char('.') => Action::ToggleShowHidden,
-        KeyCode::Char('f') => Action::Fetch,
-        KeyCode::Char('p') => Action::Pull,
-        KeyCode::Char('d') => Action::DefaultBranch,
-        KeyCode::Char('r') => Action::Refresh,
-        KeyCode::Char(' ') => Action::ToggleReviewed,
-        KeyCode::Char('z') => Action::FoldToggle,
-        KeyCode::Char('Z') => Action::ToggleFinishedPrGroups,
-        KeyCode::Char('/') => Action::SearchStart,
-        KeyCode::Char('s') => Action::Stage,
-        KeyCode::Char('u') => Action::Unstage,
-        KeyCode::Char('x') => Action::Revert,
-        KeyCode::Char('e') => Action::Edit,
-        KeyCode::Char('E') => Action::ExternalDiff,
-        KeyCode::Char('P') => Action::Push,
-        KeyCode::Char('S') => Action::StashMenu,
-        KeyCode::Char('b') => Action::Branch,
-        KeyCode::Char('o') => Action::GraphFocusBranches,
-        KeyCode::Char('O') => Action::GraphFocusClear,
-        KeyCode::Char('W') => Action::RemoveWorktree,
-        KeyCode::Char('i') => Action::ToggleDiffMode,
-        KeyCode::Char('<') => Action::ResizeTree(-1),
-        KeyCode::Char('>') => Action::ResizeTree(1),
-        KeyCode::Char('\\') => Action::ToggleDiffWrap,
-        KeyCode::Char('M') => Action::ToggleCommitMsgExpand,
-        KeyCode::Char('-') => Action::ExplorerReveal,
-        KeyCode::Char('B') => Action::ToggleLineBlame,
-        KeyCode::Char('A') => Action::BlameMenu,
-        KeyCode::Char('m') => Action::ToggleMouse,
-        KeyCode::Char(';') => Action::CommentStart,
-        KeyCode::Char('V') => Action::DiffVisualStart,
-        KeyCode::Char('y') => Action::ExportComments,
-        KeyCode::Char('\'') => Action::CopyEntityReference,
-        KeyCode::Char('[') => Action::PreviousFileTab,
-        KeyCode::Char(']') => Action::NextFileTab,
-        // With no armed search these still dispatch so the status can say why.
-        KeyCode::Char('n') => Action::SearchNext,
-        KeyCode::Char('N') => Action::SearchPrev,
-        KeyCode::Tab => {
-            if focus_right {
-                Action::FocusLeft
-            } else {
-                Action::FocusRight
-            }
-        }
-        KeyCode::Char('G') => Action::MoveToEnd,
-        KeyCode::Char('g') => Action::ArmGChord,
-        KeyCode::Home => Action::MoveToStart,
-        KeyCode::End => Action::MoveToEnd,
-        KeyCode::PageUp => Action::PageMove(-1),
-        KeyCode::PageDown => Action::PageMove(1),
-        KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => Action::Move(1),
-        KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::Move(-1),
-        KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Left => hl_or_pan(key, -1, hl_folds),
-        KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Right => hl_or_pan(key, 1, hl_folds),
-        KeyCode::Enter => Action::NavEnter,
-        KeyCode::Esc => Action::NavEsc,
-        _ => Action::None,
+    if let Some(action) = bound_action(NORMAL_KEYS, key) {
+        return action;
     }
+    // Chip: `bindings::OTHER_PANE`; the action follows the focused pane.
+    if OTHER_PANE.matches(key) {
+        return if focus_right {
+            Action::FocusLeft
+        } else {
+            Action::FocusRight
+        };
+    }
+    // `bindings::PAN_LEFT` / `PAN_RIGHT` keys fold or pan here.
+    if PAN_LEFT.matches(key) {
+        return hl_or_pan(key, -1, hl_folds);
+    }
+    if PAN_RIGHT.matches(key) {
+        return hl_or_pan(key, 1, hl_folds);
+    }
+    Action::None
+}
+
+/// Action of the first `table` binding that matches `key`, if any.
+fn bound_action(table: &'static [bindings::KeyBinding], key: KeyEvent) -> Option<Action> {
+    bindings::find(table, key).map(|binding| binding.action.clone())
 }
 
 /// `h` / `l` / arrows: fold the focused tree or commit-file folder row,
@@ -1273,10 +1186,7 @@ fn wheel_action(mouse: MouseEvent, delta: i32, horizontal: bool) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
-    }
+    use crate::testutil::{ctrl, key};
 
     fn key_kind(code: KeyCode, kind: KeyEventKind) -> Event {
         Event::Key(KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind))
@@ -2346,10 +2256,6 @@ mod tests {
             InputMode::DiffVisual,
             &g
         ));
-    }
-
-    fn ctrl(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL))
     }
 
     fn shift(code: KeyCode) -> Event {

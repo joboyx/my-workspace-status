@@ -19,6 +19,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
 use crate::git::git_binary;
 use crate::snapshot::{
     build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus, WorkspaceSnapshot,
@@ -100,6 +102,20 @@ pub fn app_state_ascii(repos: &[RepoSnapshot], ascii: bool) -> AppState {
 /// filters): cwd `/tmp`, ASCII glyphs.
 pub fn app_state_of(snapshot: WorkspaceSnapshot) -> AppState {
     AppState::new(PathBuf::from("/tmp"), snapshot, true)
+}
+
+// ---------------------------------------------------------------------------
+// Key event fixtures
+// ---------------------------------------------------------------------------
+
+/// A press of `code` with no modifiers.
+pub fn key(code: KeyCode) -> Event {
+    Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+}
+
+/// A press of `code` with Ctrl.
+pub fn ctrl(code: KeyCode) -> Event {
+    Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL))
 }
 
 // ---------------------------------------------------------------------------

@@ -1137,7 +1137,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::KeyCode;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -1154,7 +1154,7 @@ mod tests {
     use crate::snapshot::{
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
     };
-    use crate::testutil::{app_state, repo_snapshot, unstaged_change};
+    use crate::testutil::{app_state, key, repo_snapshot, unstaged_change};
     use crate::tui::comments::{put_comment, CommentKey};
     use crate::tui::tree::SegRole;
     use workspace_status_graph::{
@@ -1215,10 +1215,6 @@ mod tests {
 
     fn focused_id(app: &AppState) -> String {
         app.focused_row().expect("focused row").id.clone()
-    }
-
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     fn ms(n: u64) -> Duration {
