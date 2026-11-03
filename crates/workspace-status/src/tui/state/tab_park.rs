@@ -106,11 +106,7 @@ impl AppState {
             return;
         };
         let view = tab.parked_view(self.tab_view());
-        // An Explorer or PRs tab restores a `/` search of its own panes
-        // (or none), so the origin saved for another tab's panes must not
-        // let Esc restore those. Workspace and compare tabs never dropped
-        // it; that stays as it was.
-        let drop_search_origin = matches!(tab, SessionTab::Explorer(_) | SessionTab::Prs(_));
+        let drop_search_origin = tab.drops_search_origin();
         self.set_tab_view(view);
         if drop_search_origin {
             self.search_origin = None;
@@ -135,6 +131,18 @@ impl SessionTab {
             Self::Compare(tab) => tab.parked_view(live),
             Self::Explorer(tab) => tab.parked_view(live),
             Self::Prs(tab) => tab.parked_view(live),
+        }
+    }
+
+    /// Whether restoring this tab drops the saved `/` search origin.
+    ///
+    /// An Explorer or PRs tab restores a `/` search of its own panes (or
+    /// none), so the origin saved for another tab's panes must not let Esc
+    /// restore those. A compare tab keeps it.
+    pub(crate) fn drops_search_origin(&self) -> bool {
+        match self {
+            Self::Compare(_) => false,
+            Self::Explorer(_) | Self::Prs(_) => true,
         }
     }
 }
