@@ -6,6 +6,11 @@
 //! [`Interpreter::apply_panic`] frees what that record names through the
 //! same release function the job's outcome handler calls, and the status
 //! line names the job and the panic message.
+//!
+//! A lookup whose answer a view waits on (a cache entry, a loading pane, a
+//! request id) gets a failed answer through its outcome handler. Without
+//! one, the follow-ups after the panic would see no answer and queue the
+//! same lookup again at once.
 
 use std::any::Any;
 use std::panic::AssertUnwindSafe;
@@ -14,8 +19,12 @@ use std::time::Instant;
 
 use tokio::task::JoinError;
 
-use super::{Interpreter, JobOutcome, JobWork, PrDetailJob};
+use super::{ExplorerJob, ExplorerPreviewBody, Interpreter, JobOutcome, JobWork, PrDetailJob};
+use crate::file_index::FileRead;
 use crate::tui::app::TuiOpts;
+use crate::tui::diff::DiffContent;
+use crate::tui::drill::CommitFileSource;
+use crate::tui::line_blame::BlameKey;
 use crate::tui::ops::{RepoOpResult, RunningOp};
 use crate::tui::pr_groups::TitleCache;
 use crate::tui::pull_request::PrDetailLookup;
@@ -64,16 +73,44 @@ pub(super) enum JobRelease {
     /// Default-branch switch of checkout `repo`, one of a batch.
     DefaultBranch { repo: String },
     /// Prepare `what` on the [`UserTag::Prepare`] slot (stash menu, push
-    /// plan, pickers, blame previous change).
+    /// plan, branch pickers, blame previous change).
     Prepare { what: &'static str },
+    /// Compare picker rows of request `gen` for checkout `repo`, on the
+    /// [`UserTag::Prepare`] slot.
+    ComparePicker { gen: u64, repo: String },
     /// `E` blob and temp-file prepare.
     DiffPrepare,
     /// Older graph page of autoload `gen`.
     Autoload { gen: u64 },
-    /// Focused-line blame (serial latest-only slot).
-    LineBlame,
-    /// Commit popover card (serial latest-only slot).
-    CommitCard,
+    /// Compare endpoints and file list of compare tab `tab_id`, load `gen`.
+    CompareRange { tab_id: u64, gen: u64 },
+    /// Compare diff of `path` from `source` for request `req_id` of tab
+    /// `tab_id`, load `gen`.
+    CompareDiff {
+        tab_id: u64,
+        req_id: u64,
+        gen: u64,
+        source: CommitFileSource,
+        path: String,
+    },
+    /// Watch probe of compare tab `tab_id`.
+    CompareProbe { tab_id: u64 },
+    /// Folder listing `rel_dir` of request `req` in Explorer tab `tab_id`.
+    ExplorerDir {
+        tab_id: u64,
+        req: u64,
+        rel_dir: String,
+    },
+    /// Explorer preview `gen` of tab `tab_id`: a worktree diff when `diff`,
+    /// else a file body.
+    ExplorerPreview { tab_id: u64, gen: u64, diff: bool },
+    /// Search-in-files preview body of preview `gen`.
+    SearchPreview { gen: u64 },
+    /// Blame of the focused line `key` (serial latest-only slot).
+    LineBlame { key: BlameKey },
+    /// Commit popover card of `sha` in checkout `repo` (serial latest-only
+    /// slot).
+    CommitCard { repo: String, sha: String },
     /// Doctor probe (serial latest-only slot).
     Doctor,
     /// PRs tab title fill (one fill at a time).
@@ -103,14 +140,49 @@ impl JobRelease {
             },
             Self::DefaultBranch { .. } => "default-branch switch",
             Self::Prepare { what } | Self::Read { what } => what,
+            Self::ComparePicker { .. } => "compare picker",
             Self::DiffPrepare => "external diff prepare",
             Self::Autoload { .. } => "older graph page",
-            Self::LineBlame => "line blame",
-            Self::CommitCard => "commit card",
+            Self::CompareRange { .. } => "compare range",
+            Self::CompareDiff { .. } => "compare diff",
+            Self::CompareProbe { .. } => "compare probe",
+            Self::ExplorerDir { .. } => "Explorer folder load",
+            Self::ExplorerPreview { .. } => "Explorer preview",
+            Self::SearchPreview { .. } => "search preview",
+            Self::LineBlame { .. } => "line blame",
+            Self::CommitCard { .. } => "commit card",
             Self::Doctor => "Doctor probe",
             Self::PrTitles => "PR title fill",
             Self::PrDetail { .. } => "PR detail",
             Self::PrBadge { .. } => "PR badge lookup",
+        }
+    }
+}
+
+impl ExplorerJob {
+    /// The record of this job: the request its outcome answers.
+    pub(super) fn release(&self) -> JobRelease {
+        match self {
+            Self::Dir {
+                tab_id,
+                req,
+                rel_dir,
+                ..
+            } => JobRelease::ExplorerDir {
+                tab_id: *tab_id,
+                req: *req,
+                rel_dir: rel_dir.clone(),
+            },
+            Self::Preview {
+                tab_id,
+                gen,
+                change,
+                ..
+            } => JobRelease::ExplorerPreview {
+                tab_id: *tab_id,
+                gen: *gen,
+                diff: change.is_some(),
+            },
         }
     }
 }
@@ -159,7 +231,11 @@ impl Interpreter {
 
     /// Free what panicked job `id` held, by the release its outcome
     /// handler uses. A job with a result to count (remote, default-branch
-    /// switch, PR detail) lands a failure that names the panic.
+    /// switch, PR detail) or a view that waits on its answer lands a
+    /// failure that names the panic, through that outcome handler.
+    ///
+    /// Jobs whose failure is only a status line (push plan, blame previous
+    /// change, `E` prepare, writes) keep the panic status instead.
     fn release_panicked(
         &mut self,
         state: &mut AppState,
@@ -169,48 +245,134 @@ impl Interpreter {
         message: &str,
     ) {
         let failed = || format!("panicked: {message}");
-        match release {
+        let answer = match release {
             JobRelease::Discover { gen } => {
                 let _ = self.sched.abandon_collection(gen);
+                None
             }
             JobRelease::RepoStatus { gen, path } => {
                 if self.sched.accept_repo_result(gen, &path) {
                     let _ = self.note_repo_status_done(state, gen, &path);
                 }
+                None
             }
             JobRelease::RightPane { req_id } => {
                 let _ = self.sched.accept_pane_result(req_id);
+                None
             }
-            JobRelease::Write { .. } => self.release_write(state, id),
+            JobRelease::Write { .. } => {
+                self.release_write(state, id);
+                None
+            }
             JobRelease::Remote { kind, repo } => {
                 self.land_remote(state, kind, &repo, RepoOpResult::Failed(failed()));
+                None
             }
             JobRelease::DefaultBranch { repo } => {
                 self.land_default_branch(state, &repo, RepoOpResult::Failed(failed()));
+                None
             }
-            JobRelease::Prepare { .. } => self.sched.note_user_done(UserTag::Prepare),
-            JobRelease::DiffPrepare => self.sched.note_user_done(UserTag::DiffPrepare),
+            JobRelease::Prepare { .. } => {
+                self.sched.note_user_done(UserTag::Prepare);
+                None
+            }
+            JobRelease::ComparePicker { gen, repo } => Some(JobOutcome::ComparePicker {
+                gen,
+                repo,
+                result: Err(failed()),
+            }),
+            JobRelease::DiffPrepare => {
+                self.sched.note_user_done(UserTag::DiffPrepare);
+                None
+            }
             JobRelease::Autoload { gen } => {
                 let accepted = self.sched.accept_autoload_result(gen);
                 self.finish_autoload(state, accepted);
+                None
             }
-            JobRelease::LineBlame => self.release_line_blame(),
-            JobRelease::CommitCard => self.release_commit_card(),
-            JobRelease::Doctor => self.doctor_job.finish(&mut self.sched),
+            JobRelease::CompareRange { tab_id, gen } => Some(JobOutcome::CompareRange {
+                tab_id,
+                gen,
+                result: Err(failed()),
+            }),
+            JobRelease::CompareDiff {
+                tab_id,
+                req_id,
+                gen,
+                source,
+                path,
+            } => Some(JobOutcome::CompareDiff {
+                tab_id,
+                req_id,
+                gen,
+                source,
+                path,
+                content: Err(failed()),
+            }),
+            JobRelease::CompareProbe { tab_id } => Some(JobOutcome::CompareProbe {
+                tab_id,
+                result: Err(failed()),
+            }),
+            JobRelease::ExplorerDir {
+                tab_id,
+                req,
+                rel_dir,
+            } => Some(JobOutcome::ExplorerDir {
+                tab_id,
+                req,
+                rel_dir,
+                entries: Err(failed()),
+            }),
+            JobRelease::ExplorerPreview { tab_id, gen, diff } => {
+                let body = if diff {
+                    ExplorerPreviewBody::Diff(DiffContent {
+                        error: Some(failed()),
+                        ..DiffContent::default()
+                    })
+                } else {
+                    ExplorerPreviewBody::File(FileRead::Failed(failed()))
+                };
+                Some(JobOutcome::ExplorerPreview { tab_id, gen, body })
+            }
+            JobRelease::SearchPreview { gen } => Some(JobOutcome::SearchPreview {
+                gen,
+                body: FileRead::Failed(failed()),
+            }),
+            JobRelease::LineBlame { key } => Some(JobOutcome::LineBlame {
+                key,
+                result: Err(failed()),
+            }),
+            JobRelease::CommitCard { repo, sha } => Some(JobOutcome::CommitCard {
+                repo,
+                sha,
+                result: Err(failed()),
+            }),
+            JobRelease::Doctor => {
+                self.doctor_job.finish(&mut self.sched);
+                None
+            }
             JobRelease::PrTitles => {
                 // A cut-short fill changes nothing on screen and asks for
                 // no next fill; the next title cycle may start one.
                 let _ = state.apply_pr_titles(TitleCache::default(), true, Instant::now());
+                None
             }
             JobRelease::PrDetail { job } => {
                 self.land_pr_detail(state, opts, job, PrDetailLookup::Failed(Some(failed())));
+                None
             }
             JobRelease::PrBadge { repo, branch } => {
                 self.release_pr_badge(&repo, &branch);
                 state.abandon_pr_lookup(&repo, &branch);
                 self.after_pr_badge(state, opts);
+                None
             }
-            JobRelease::Read { .. } => {}
+            JobRelease::Read { .. } => None,
+        };
+        // The outcome handler frees the slot and lands the failed answer.
+        // It ends the job again; that is a no-op by now.
+        if let Some(answer) = answer {
+            self.apply_outcome(state, opts, id, answer);
         }
     }
 }
@@ -223,10 +385,12 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::super::tests::{
-        capture_jobs, drain_jobs, fixture_state, gh_approved_pr, gh_merged_pr, gh_no_pr, opts,
-        pr_app, schedule_effect,
+        blame_fixture, capture_jobs, compare_source, drain_jobs, explorer_inner, explorer_load,
+        fixture_state, gh_approved_pr, gh_merged_pr, gh_no_pr, move_diff_cursor, open_compare_tab,
+        opts, peek_commit, pr_app, schedule_effect, search_preview_of, searched_needles,
     };
     use super::super::Interpreter;
+    use crate::file_index::FileRead;
     use crate::tui::action::{Action, Effect};
     use crate::tui::anim::RemoteActivity;
     use crate::tui::event_loop::{apply_joined, spawn_job, JobJoinSet};
@@ -234,13 +398,15 @@ mod tests {
     use crate::tui::pull_request::PrPage;
     use crate::tui::state::AppState;
     use crate::tui::status::StatusKind;
+    use crate::tui::tabs::{ComparePickerKind, ExplorerPreview};
 
     const FORGE_REMOTE: &str = "git@github.com:octo/demo.git";
 
-    const GH_PANIC: &str = "forge CLI runner exploded";
+    /// Panic message of every panicked job in these tests.
+    const JOB_PANIC: &str = "worker job exploded";
 
     fn gh_panics(_: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
-        panic!("{GH_PANIC}")
+        panic!("{JOB_PANIC}")
     }
 
     /// The runtime the live loop runs on (`run_tui`).
@@ -316,6 +482,12 @@ mod tests {
                 0,
                 "the Scheduler holds no entry for the panicked job"
             );
+            assert!(interp.job_releases.is_empty(), "the job record is gone");
+            assert_eq!(
+                spawn_live(&mut interp, &mut state, &mut join),
+                0,
+                "no lookup again before the next poll"
+            );
 
             interp.pr_cli = gh_merged_pr;
             interp.pr_poll_tick(&mut state, &tui_opts, later(120));
@@ -332,6 +504,7 @@ mod tests {
             "its answer lands"
         );
         assert_eq!(interp.pr_badges_running, 0);
+        assert!(interp.job_releases.is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -352,6 +525,7 @@ mod tests {
                 "the lane is full"
             );
             join_live(&mut interp, &mut state, &mut join).await;
+            assert!(interp.job_releases.is_empty(), "no job record is left");
 
             interp.pr_cli = gh_no_pr;
             schedule_effect(&mut interp, &mut state, open_pr(), &Action::OpenPullRequest);
@@ -363,6 +537,7 @@ mod tests {
             join_live(&mut interp, &mut state, &mut join).await;
         });
         assert_eq!(state.status, "no PR for feature", "its outcome applies");
+        assert!(interp.job_releases.is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -377,7 +552,7 @@ mod tests {
             assert_eq!(spawn_live(&mut interp, &mut state, &mut join), 1);
             join_live(&mut interp, &mut state, &mut join).await;
         });
-        assert_eq!(state.status, format!("PR open job panicked: {GH_PANIC}"));
+        assert_eq!(state.status, format!("PR open job panicked: {JOB_PANIC}"));
         assert_eq!(state.status.kind(), StatusKind::Error);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -391,10 +566,186 @@ mod tests {
     }
 
     /// Hand job `id` to the live panic path, as [`apply_joined`] does for
-    /// a job whose worker panicked with [`GH_PANIC`].
+    /// a job whose worker panicked with [`JOB_PANIC`].
     fn land_panic(interp: &mut Interpreter, state: &mut AppState, id: u64) {
         let tui_opts = opts(state);
-        interp.apply_panic(state, &tui_opts, id, GH_PANIC);
+        interp.apply_panic(state, &tui_opts, id, JOB_PANIC);
+    }
+
+    /// Spawn the one ready job, `label`, and land it as a panic. The
+    /// status names it, its record is gone, and the follow-ups start no
+    /// new job: the live loop spawns the ready jobs again at once.
+    fn panic_the_one_job(interp: &mut Interpreter, state: &mut AppState, label: &str) {
+        let jobs = spawned_ids(interp, state);
+        assert_eq!(jobs.len(), 1, "one {label} job");
+        land_panic(interp, state, jobs[0]);
+        assert_eq!(state.status, format!("{label} job panicked: {JOB_PANIC}"));
+        assert!(interp.job_releases.is_empty());
+        assert!(
+            spawned_ids(interp, state).is_empty(),
+            "the {label} does not start again"
+        );
+    }
+
+    /// The failed answer a panicked job lands.
+    fn panicked() -> String {
+        format!("panicked: {JOB_PANIC}")
+    }
+
+    #[test]
+    fn a_panicked_line_blame_caches_no_blame_so_it_does_not_run_again() {
+        let (root, mut state) = blame_fixture("ws-job-release-blame");
+        let mut interp = Interpreter::with_cap(4);
+        move_diff_cursor(&mut interp, &mut state, 2);
+        let key = state.line_blame_want().expect("context line asks");
+        panic_the_one_job(&mut interp, &mut state, "line blame");
+        assert_eq!(
+            state.line_blame.cached(&key),
+            Some(None),
+            "the line is answered with no blame"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_panicked_commit_card_caches_the_failure_so_it_does_not_run_again() {
+        let (root, mut state) = blame_fixture("ws-job-release-card");
+        let mut interp = Interpreter::with_cap(4);
+        let sha = "d".repeat(40);
+        peek_commit(&mut state, &sha);
+        schedule_effect(&mut interp, &mut state, Effect::None, &Action::None);
+        panic_the_one_job(&mut interp, &mut state, "commit card");
+        assert_eq!(state.commit_cards.get("app", &sha), Some(&Err(panicked())));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_panicked_compare_load_shows_the_failure_on_its_tab() {
+        let tab_error = |state: &AppState| {
+            let tab = state.tabs.active_compare().expect("compare tab");
+            (tab.error.clone(), tab.loading)
+        };
+        let range = |tab_id| Effect::LoadCompareRange {
+            tab_id,
+            repo: "app".into(),
+            base_ref: "main".into(),
+            head_ref: "HEAD".into(),
+            force: true,
+        };
+        let diff = |tab_id| Effect::LoadCompareDiff {
+            tab_id,
+            repo: "app".into(),
+            source: compare_source(),
+            path: "a.txt".into(),
+            old_path: None,
+        };
+        let probe = |tab_id| Effect::ProbeCompareTab {
+            tab_id,
+            repo: "app".into(),
+            base_ref: "main".into(),
+            head_ref: "HEAD".into(),
+            last_head: None,
+            last_base_tip: None,
+        };
+        /// The load of compare tab `tab_id` that one case panics.
+        type TabLoad = fn(u64) -> Effect;
+        let cases: [(&str, TabLoad); 3] = [
+            ("compare range", range),
+            ("compare diff", diff),
+            ("compare probe", probe),
+        ];
+        for (label, load) in cases {
+            let mut state = fixture_state();
+            let (tab_id, _) = open_compare_tab(&mut state);
+            state.tabs.active_compare_mut().unwrap().source = Some(compare_source());
+            let mut interp = Interpreter::with_cap(4);
+            schedule_effect(&mut interp, &mut state, load(tab_id), &Action::None);
+            panic_the_one_job(&mut interp, &mut state, label);
+            let (error, loading) = tab_error(&state);
+            assert_eq!(error, Some(panicked()), "{label}");
+            if label == "compare range" {
+                assert!(!loading, "the range load no longer shows loading");
+            }
+        }
+    }
+
+    #[test]
+    fn a_panicked_compare_picker_ends_the_wait_for_its_rows() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        state.compare_picker_pending = Some("app".into());
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::PrepareComparePicker {
+                repo: "app".into(),
+                kind: ComparePickerKind::Branch,
+            },
+            &Action::None,
+        );
+        panic_the_one_job(&mut interp, &mut state, "compare picker");
+        assert_eq!(
+            state.compare_picker_pending, None,
+            "the picker no longer waits"
+        );
+    }
+
+    #[test]
+    fn a_panicked_explorer_load_answers_the_folder_and_the_preview() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        let (tab_id, gen) = explorer_inner(&mut state, "app", "a.txt", false, false);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            explorer_load(tab_id, gen, "a.txt"),
+            &Action::None,
+        );
+        panic_the_one_job(&mut interp, &mut state, "Explorer preview");
+        let tab = state.tabs.active_explorer().expect("explorer tab");
+        match &tab.active_inner().expect("inner tab").view {
+            ExplorerPreview::File(file) => {
+                assert_eq!(file.body.as_deref(), Some(&FileRead::Failed(panicked())));
+            }
+            view => panic!("expected a file view, got {view:?}"),
+        }
+
+        let req = 7;
+        let tab = state.tabs.active_explorer_mut().expect("explorer tab");
+        tab.dir_reqs.insert(String::new(), req);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::LoadExplorerDir {
+                tab_id,
+                req,
+                repo: "app".into(),
+                rel_dir: String::new(),
+                parent_ignored: false,
+            },
+            &Action::None,
+        );
+        panic_the_one_job(&mut interp, &mut state, "Explorer folder load");
+        let tab = state.tabs.active_explorer().expect("explorer tab");
+        assert!(tab.dir_reqs.is_empty(), "the folder no longer waits");
+    }
+
+    #[test]
+    fn a_panicked_search_preview_shows_the_failure_and_does_not_read_again() {
+        let (root, mut state, mut interp) = searched_needles("ws-job-release-search-preview");
+        let moved = Action::SearchFilesMove(1);
+        let effect = state.dispatch(moved.clone());
+        schedule_effect(&mut interp, &mut state, effect, &moved);
+        let (_, rel) = search_preview_of(&state).expect("preview waits");
+        assert_eq!(rel, "b.txt");
+        panic_the_one_job(&mut interp, &mut state, "search preview");
+        let preview = state
+            .search_files
+            .as_ref()
+            .and_then(|dialog| dialog.preview.as_ref())
+            .expect("preview");
+        assert_eq!(preview.body, Some(FileRead::Failed(panicked())));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -413,7 +764,7 @@ mod tests {
         assert!(!interp.sched.collection_active(), "the collect ended");
         assert_eq!(
             state.status,
-            format!("workspace scan job panicked: {GH_PANIC}")
+            format!("workspace scan job panicked: {JOB_PANIC}")
         );
 
         schedule_effect(

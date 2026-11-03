@@ -3545,8 +3545,9 @@ impl Interpreter {
                     let dir = opts.cwd.join(&repo);
                     spawn(
                         id,
-                        JobRelease::Prepare {
-                            what: "compare picker",
+                        JobRelease::ComparePicker {
+                            gen,
+                            repo: repo.clone(),
                         },
                         Box::new(move || {
                             let result = match kind {
@@ -3643,8 +3644,9 @@ impl Interpreter {
                     let dir = opts.cwd.join(&job.repo);
                     spawn(
                         id,
-                        JobRelease::Read {
-                            what: "compare range",
+                        JobRelease::CompareRange {
+                            tab_id: job.tab_id,
+                            gen: job.gen,
                         },
                         Box::new(move || JobOutcome::CompareRange {
                             tab_id: job.tab_id,
@@ -3664,8 +3666,12 @@ impl Interpreter {
                     let context = state.commit_diff_context(&job.repo, &job.path);
                     spawn(
                         id,
-                        JobRelease::Read {
-                            what: "compare diff",
+                        JobRelease::CompareDiff {
+                            tab_id: job.tab_id,
+                            req_id: job.req_id,
+                            gen: job.gen,
+                            source: job.source.clone(),
+                            path: job.path.clone(),
                         },
                         Box::new(move || {
                             let content = compute_compare_diff(
@@ -3691,9 +3697,7 @@ impl Interpreter {
                     let dir = opts.cwd.join(&job.repo);
                     spawn(
                         id,
-                        JobRelease::Read {
-                            what: "compare probe",
-                        },
+                        JobRelease::CompareProbe { tab_id: job.tab_id },
                         Box::new(move || {
                             let result = probe_compare_range(
                                 &dir,
@@ -3780,9 +3784,7 @@ impl Interpreter {
                     let cwd = opts.cwd.clone();
                     spawn(
                         id,
-                        JobRelease::Read {
-                            what: "Explorer load",
-                        },
+                        job.release(),
                         Box::new(move || run_explorer_job(&cwd, job)),
                     );
                     return;
@@ -3823,9 +3825,7 @@ impl Interpreter {
                     let file = opts.cwd.join(checkout).join(rel);
                     spawn(
                         id,
-                        JobRelease::Read {
-                            what: "search preview",
-                        },
+                        JobRelease::SearchPreview { gen },
                         Box::new(move || JobOutcome::SearchPreview {
                             gen,
                             body: read_text_file(&file, MAX_FILE_BYTES),
@@ -3874,7 +3874,7 @@ impl Interpreter {
                 let dir = opts.cwd.join(&key.repo);
                 spawn(
                     id,
-                    JobRelease::LineBlame,
+                    JobRelease::LineBlame { key: key.clone() },
                     Box::new(move || {
                         let result = blame_line(&dir, &key.rev, &key.path, key.line);
                         JobOutcome::LineBlame { key, result }
@@ -3890,7 +3890,10 @@ impl Interpreter {
                 let dir = opts.cwd.join(&repo);
                 spawn(
                     id,
-                    JobRelease::CommitCard,
+                    JobRelease::CommitCard {
+                        repo: repo.clone(),
+                        sha: sha.clone(),
+                    },
                     Box::new(move || JobOutcome::CommitCard {
                         result: load_commit_card(&dir, &sha),
                         repo,
@@ -4430,7 +4433,7 @@ mod tests {
         assert!(interp.take_pending_diff().is_none());
     }
 
-    fn compare_source() -> CommitFileSource {
+    pub(super) fn compare_source() -> CommitFileSource {
         CommitFileSource::Compare {
             base_ref: "main".into(),
             head_ref: "HEAD".into(),
@@ -4451,7 +4454,7 @@ mod tests {
         }
     }
 
-    fn open_compare_tab(state: &mut AppState) -> (u64, u64) {
+    pub(super) fn open_compare_tab(state: &mut AppState) -> (u64, u64) {
         state
             .tabs
             .open_or_focus("app".into(), "main".into(), "HEAD".into());
@@ -8207,11 +8210,11 @@ mod tests {
         assert_eq!(kinds, ["explorer", "index", "score"]);
     }
 
-    /// Two highlight moves before the preview read spawns: one slot, and
-    /// the one read is the newer file.
-    #[test]
-    fn a_newer_search_preview_replaces_the_waiting_read() {
-        let (root, mut state) = git_app_state("ws-effect-search-preview", "main", false);
+    /// Real repo `app` with `needle` in `a.txt` and `b.txt`, searched in
+    /// the search-in-files dialog. The highlight is on `a.txt` and its
+    /// preview is read.
+    pub(super) fn searched_needles(tag: &str) -> (PathBuf, AppState, Interpreter) {
+        let (root, mut state) = git_app_state(tag, "main", false);
         std::fs::write(root.join("app/a.txt"), "needle a\n").unwrap();
         std::fs::write(root.join("app/b.txt"), "needle b\n").unwrap();
         let opts = opts(&state);
@@ -8230,12 +8233,23 @@ mod tests {
             .expect("armed");
         let effect = state.fire_search_files_due(due).expect("due");
         interp.interpret_sync(&mut state, &opts, effect, &Action::None);
-        let preview_of = |state: &AppState| {
-            let preview = state.search_files.as_ref()?.preview.as_ref()?;
-            Some((preview.gen, preview.rel.clone()))
-        };
-        let (_, first) = preview_of(&state).expect("first hit read");
+        let (_, first) = search_preview_of(&state).expect("first hit read");
         assert_eq!(first, "a.txt");
+        (root, state, interp)
+    }
+
+    /// Generation and file of the search-in-files preview.
+    pub(super) fn search_preview_of(state: &AppState) -> Option<(u64, String)> {
+        let preview = state.search_files.as_ref()?.preview.as_ref()?;
+        Some((preview.gen, preview.rel.clone()))
+    }
+
+    /// Two highlight moves before the preview read spawns: one slot, and
+    /// the one read is the newer file.
+    #[test]
+    fn a_newer_search_preview_replaces_the_waiting_read() {
+        let (root, mut state, mut interp) = searched_needles("ws-effect-search-preview");
+        let preview_of = search_preview_of;
 
         // Down to b.txt, then back up to a.txt, with no spawn between.
         for delta in [1, -1] {
@@ -8271,7 +8285,7 @@ mod tests {
     /// Open (or focus) the Explorer tab of `checkout` and make `rel` its
     /// active inner tab: pinned, or the preview tab (replaced in place, as
     /// a tree move does). Returns the tab id and the load generation.
-    fn explorer_inner(
+    pub(super) fn explorer_inner(
         state: &mut AppState,
         checkout: &str,
         rel: &str,
@@ -8296,7 +8310,7 @@ mod tests {
         (tab.id, gen)
     }
 
-    fn explorer_load(tab_id: u64, gen: u64, path: &str) -> Effect {
+    pub(super) fn explorer_load(tab_id: u64, gen: u64, path: &str) -> Effect {
         Effect::LoadExplorerPreview {
             tab_id,
             gen,
@@ -8744,7 +8758,7 @@ mod tests {
 
     /// Real repo `app` whose README.md has committed lines `a b c` and a
     /// worktree edit of line 2, with that diff focused (inline).
-    fn blame_fixture(tag: &str) -> (PathBuf, AppState) {
+    pub(super) fn blame_fixture(tag: &str) -> (PathBuf, AppState) {
         let root = crate::testutil::unique_dir(tag);
         let dir = root.join("app");
         crate::testutil::init_repo(&dir);
@@ -8770,7 +8784,7 @@ mod tests {
     }
 
     /// Peek a commit popover section for commit `sha` of `app`.
-    fn peek_commit(state: &mut AppState, sha: &str) {
+    pub(super) fn peek_commit(state: &mut AppState, sha: &str) {
         use crate::tui::icons::IconKind;
         use crate::tui::popover::{IconTarget, PopoverOrigin, PopoverState};
         state.popover = Some(PopoverState {
@@ -8856,7 +8870,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    fn move_diff_cursor(interp: &mut Interpreter, state: &mut AppState, row: usize) {
+    pub(super) fn move_diff_cursor(interp: &mut Interpreter, state: &mut AppState, row: usize) {
         state.diff_cursor = row;
         schedule_effect(interp, state, Effect::None, &Action::Move(1));
     }
