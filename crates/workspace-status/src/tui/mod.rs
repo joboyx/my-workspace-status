@@ -7,6 +7,7 @@ mod action;
 mod activity;
 pub mod anim;
 mod app;
+mod bindings;
 mod branches;
 mod chrome;
 mod command_palette;
