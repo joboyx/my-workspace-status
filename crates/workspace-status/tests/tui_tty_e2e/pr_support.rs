@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 
 use crate::common::fake_forge::{set_origin, FakeForge, GITHUB_ORIGIN, GITLAB_ORIGIN};
 use crate::common::pr_scenarios::{
-    github_check_url, gitlab_pipeline_url, put_github, put_github_closed, put_github_with,
-    put_gitlab, put_gitlab_closed, put_gitlab_with, Badge, PrText, GITHUB_REPO, GITLAB_PROJECT,
+    github_check_url, gitlab_pipeline_url, put_github, put_github_behind, put_github_closed,
+    put_github_with, put_gitlab, put_gitlab_behind, put_gitlab_closed, put_gitlab_with, Badge,
+    PrText, GITHUB_REPO, GITLAB_PROJECT,
 };
 use crate::common::seed::{seed_repo, unique_root};
 use crate::harness::PtySession;
@@ -152,6 +153,15 @@ impl PrCheckout {
                 badge,
                 text,
             ),
+        }
+    }
+
+    /// Make the fake forge answer with an approved PR, green CI, whose
+    /// branch is behind its base (next action `update branch`).
+    pub fn set_behind(&self, forge: &FakeForge) {
+        match self.forge {
+            Forge::GitHub => put_github_behind(forge, GITHUB_REPO, self.number, &self.branch),
+            Forge::GitLab => put_gitlab_behind(forge, GITLAB_PROJECT, self.number, &self.branch),
         }
     }
 
@@ -396,6 +406,45 @@ pub fn toast_text(screen: &str) -> String {
     let lines: Vec<&str> = screen.lines().collect();
     let end = lines.len().saturating_sub(3);
     lines[end.saturating_sub(3)..end].join("\n")
+}
+
+/// A screen line with runs of blanks folded to one space, so a label column
+/// of any width compares the same.
+pub fn folded(line: &str) -> String {
+    line.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Index of the first screen line that, folded, contains `needle`.
+pub fn line_with(screen: &str, needle: &str) -> Option<usize> {
+    screen
+        .lines()
+        .position(|line| folded(line).contains(needle))
+}
+
+/// True when the PR popover prints `fields` on consecutive lines starting at
+/// the line with `header`, then the `actions` in order below them.
+pub fn popover_reads(screen: &str, header: &str, fields: &[&str], actions: &[&str]) -> bool {
+    let Some(top) = line_with(screen, header) else {
+        return false;
+    };
+    let lines: Vec<&str> = screen.lines().collect();
+    let fields_ok = fields.iter().enumerate().all(|(i, field)| {
+        lines
+            .get(top + 1 + i)
+            .is_some_and(|line| folded(line).contains(field))
+    });
+    let mut below = top + 1 + fields.len();
+    let actions_ok = actions.iter().all(|action| {
+        let found = lines
+            .iter()
+            .enumerate()
+            .skip(below)
+            .find(|(_, line)| folded(line).contains(action))
+            .map(|(i, _)| i);
+        below = found.map_or(below, |i| i + 1);
+        found.is_some()
+    });
+    fields_ok && actions_ok
 }
 
 /// Count of `needle` hits in the toast rows of `screen`.

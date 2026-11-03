@@ -99,6 +99,7 @@ Scenario sets live in `.agents/skills/verify/scenarios/`. Apply sets with `scena
 | `context` | `app` worktree `feature/login-page`: open PR #8, in review. `merger` `feature/reconciliation`: merged PR #12. Fixed rows for a second and third badge. |
 | `github-failed`, `-ready`, `-running`, `-draft`, `-review`, `-merged` | PR #7 of `acme/app` in that state (list answer and `gh pr view` answer). Two checks: `lint` (listed first) and `test (ubuntu-latest)`. |
 | `gitlab-failed`, `-ready`, `-running`, `-draft`, `-review`, `-merged` | MR !5 of `acme/services/api` in that state (list, MR, approvals, and for failed or running the pipeline jobs). |
+| `github-behind`, `gitlab-behind` | PR #7 / MR !5 approved, green CI, branch behind its base: GitHub `mergeStateStatus: BEHIND`, GitLab `detailed_merge_status: need_rebase` (approvals left 0). The badge stays in review (`P`); the next action is `update branch`. |
 | `github-none`, `gitlab-none` | The forge answers with an empty list: no PR. |
 | `context-none` | The `context` branches (`feature/login-page`, `feature/reconciliation`) answer an empty list. With `github-none` and `gitlab-none`, no seeded branch has a PR. |
 | `github-cli-fails`, `gitlab-cli-fails` | The CLI exits 1 with one stderr line. |
@@ -161,7 +162,7 @@ PASS, FAIL (quote what you saw), or SKIP (name the missing precondition). Never 
 | --- | --- |
 | [pr-status](features/pr-status.md) | PR badge states on both forges, `gx` and `gc`, a scripted transition, a failing CLI, the per-host lookup outage and failure mark, live recipe |
 | [tree-and-graph](features/tree-and-graph.md) | Badges in the tree and the graph pane, glyph column at wide and narrow widths |
-| [popovers](features/popovers.md) | The PR popover: lines, actions, `gc` and `r` from it; the commit popovers (hash card, time, author) by mouse hover and click |
+| [popovers](features/popovers.md) | The PR popover: lines, actions, `gc` and `r` from it, the `update branch` next action of an approved PR behind its base; the commit popovers (hash card, time, author) by mouse hover and click |
 | [prs-tab](features/prs-tab.md) | The PRs tab (`gp`): group and row order, detail, `z` / `Z` folds, Enter / `gc` / `o` / `Ctrl-w`, narrow layout, a failing CLI and its outage toast, the empty state, the title command, Nerd glyphs |
 
 Each feature file lists steps, the screen text to expect, and what counts as PASS. Every check needs the PR status visuals (six states, ref beside the glyph, `gc`, polling, toasts), the `prs-tab` checks need the PRs tab, PO3 needs the commit popovers, and PS7, PS9 and PT7 need the outage toast and the header failure mark; on an older build they are SKIP.
