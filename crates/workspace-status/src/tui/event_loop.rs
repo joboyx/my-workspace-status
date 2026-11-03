@@ -16,7 +16,7 @@ use crossterm::queue;
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use tokio::task::JoinSet;
+use tokio::task::{JoinError, JoinSet};
 use tokio::time::{sleep, Duration as TokioDuration};
 
 use super::action::{Action, Effect, ExternalDiffKind};
@@ -27,7 +27,7 @@ use super::app::{
 };
 use super::diff_tool::{cleanup_prepared, diff_tool_command, wait_and_cleanup};
 use super::editor::{editor_command, is_detached_editor, resolve_editor};
-use super::effect::{DiffLaunch, Interpreter, JobOutcome};
+use super::effect::{run_job, DiffLaunch, Interpreter, JobResult, JobWork};
 use super::event_pump::{
     action_triggers_graph_autoload, classify_busy_dispatch, overlay_blocks_background_ticks,
     BusyAction,
@@ -205,7 +205,7 @@ struct LoopCtx<'a> {
     state: &'a mut AppState,
     opts: &'a TuiOpts,
     interp: Interpreter,
-    join: JoinSet<(u64, JobOutcome)>,
+    join: JobJoinSet,
     presenter: Presenter,
     input: InputBridge,
     last_watch: Instant,
@@ -334,14 +334,12 @@ pub async fn run(
                 }
             }
             Some(joined) = ctx.join.join_next(), if !join_empty => {
-                if let Ok((id, outcome)) = joined {
-                    ctx.interp.apply(ctx.state, ctx.opts, id, outcome);
-                    if let Some(launch) = ctx.interp.take_pending_diff_launch() {
-                        launch_diff(&mut ctx, launch);
-                    }
-                    if ctx.interp.take_dirty() {
-                        ctx.presenter.mark();
-                    }
+                apply_joined(&mut ctx.interp, ctx.state, ctx.opts, joined);
+                if let Some(launch) = ctx.interp.take_pending_diff_launch() {
+                    launch_diff(&mut ctx, launch);
+                }
+                if ctx.interp.take_dirty() {
+                    ctx.presenter.mark();
                 }
             }
             _ = sleep_ms(watch_remain) => {
@@ -648,12 +646,35 @@ fn spawn_joinset(ctx: &mut LoopCtx<'_>) {
         join,
         ..
     } = ctx;
-    interp.spawn_ready(state, opts, &mut |id, work| {
-        join.spawn_blocking(move || (id, work()));
-    });
+    interp.spawn_ready(state, opts, &mut |id, work| spawn_job(join, id, work));
     // A started remote shows its row spinner and progress at once.
     if ctx.interp.take_dirty() {
         ctx.presenter.mark();
+    }
+}
+
+/// The live loop's workers: each result carries its job id, also when the
+/// job panicked.
+pub(super) type JobJoinSet = JoinSet<(u64, JobResult)>;
+
+/// Put job `id` on the live `JoinSet`: `work` runs on a blocking worker,
+/// and a panic in it comes back as that job's result ([`run_job`]).
+pub(super) fn spawn_job(join: &mut JobJoinSet, id: u64, work: JobWork) {
+    join.spawn_blocking(move || (id, run_job(work)));
+}
+
+/// Apply one `JoinSet` result to `interp`: an outcome, a panicked job
+/// (its slots are released), or a worker that ended with no job id.
+pub(super) fn apply_joined(
+    interp: &mut Interpreter,
+    state: &mut AppState,
+    opts: &TuiOpts,
+    joined: Result<(u64, JobResult), JoinError>,
+) {
+    match joined {
+        Ok((id, Ok(outcome))) => interp.apply(state, opts, id, outcome),
+        Ok((id, Err(message))) => interp.apply_panic(state, opts, id, &message),
+        Err(err) => interp.apply_lost_job(state, &err),
     }
 }
 

@@ -191,8 +191,8 @@ fn leave_alternate_screen_to<W: Write>(out: &mut W) -> io::Result<()> {
 /// screen with raw mode off.
 ///
 /// It acts only for a panic on the thread that installed it (the TUI
-/// thread) while [`TERMINAL_SET_UP`] is set. A worker panic that Tokio
-/// catches leaves the running TUI alone. It clears the OSC 9;4 bar only
+/// thread) while [`TERMINAL_SET_UP`] is set. A worker panic, which
+/// `run_job` catches, leaves the running TUI alone. It clears the OSC 9;4 bar only
 /// while `shown` is set ([`PROGRESS_SHOWN`] outside tests), and resets the
 /// OSC 22 pointer only while `pointer_set` is set ([`POINTER_SET`] outside
 /// tests).
