@@ -11,9 +11,7 @@ const SEARCH_FILE: &str = "search-me.txt";
 const SEARCH_TITLE: &str = "┐┌app/search-me.txt";
 /// Strip label of the `app` checkout's Explorer tab.
 const EXPLORER_APP: &str = "Explorer · app";
-/// Search term. It is in no other seeded file. It has no `h`/`j`/`k`/`l`,
-/// so it types in one burst (`discard_held_nav_backlog` drops a held
-/// same-letter nav burst).
+/// Search term. It is in no other seeded file.
 const QUERY: &str = "zorbatron";
 /// Line 2 of [`SEARCH_FILE`]: the first hit.
 const FIRST_HIT: &str = "alpha zorbatron";

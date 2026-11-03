@@ -600,7 +600,9 @@ fn repeat_maps_to_action(key: KeyEvent, mode: InputMode) -> bool {
 
 /// Queued press / repeat / release of the same held nav key.
 ///
-/// Dropped after one move so a hold cannot flush as a burst after release.
+/// The input thread forwards these marked; the loop thread drops one
+/// unless it types into a text field, so a hold cannot flush as a burst
+/// after release ([`super::event_pump::keep_held_nav_backlog`]).
 pub(crate) fn is_held_nav_backlog(held: KeyEvent, event: &Event) -> bool {
     let Event::Key(next) = event else {
         return false;

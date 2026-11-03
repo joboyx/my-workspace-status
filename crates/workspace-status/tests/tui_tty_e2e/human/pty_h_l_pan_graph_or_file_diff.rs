@@ -137,7 +137,7 @@ fn documented_hl_panned_file_diff(screen: &str) -> bool {
         && idle_chrome_right(screen)
 }
 
-/// CSI-u press, Repeats until `done`, release. The input thread drops a
+/// CSI-u press, Repeats until `done`, release. The event loop drops a
 /// queued copy of a held nav key after each move, so each key waits for
 /// the right pane to pan before the next one goes out.
 fn csi_u_hold_until(tui: &mut PtySession, letter: char, done: impl Fn(&str) -> bool) {
@@ -177,7 +177,7 @@ fn csi_u_hold_until(tui: &mut PtySession, letter: char, done: impl Fn(&str) -> b
 /// One CSI-u `l` press (`CSI 108 ; 1 : 1 u`) pans one column (`· pan 1`,
 /// `line 0` → `ine 0`, h-bar). Spaced Repeat (`: 2`) reveals
 /// `UNIQUE_DIFF_TAIL`. CSI-u held `h` restores the clip. A raw `'l'`
-/// byte is a different path. The input thread drops a held-nav burst,
+/// byte is a different path. The event loop drops a held-nav burst,
 /// so Repeats are spaced like `pty_key_repeat_j`. A no-op, a tree fold,
 /// a chrome-only pan suffix, or a tree pan cannot pass.
 #[test]

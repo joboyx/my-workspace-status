@@ -22,15 +22,15 @@ use tokio::time::{sleep, Duration as TokioDuration};
 use super::action::{Action, Effect, ExternalDiffKind};
 use super::activity::activity_targets;
 use super::app::{
-    apply_terminal_resize, discard_held_nav_backlog, map_event, run_blocking_editor,
-    sync_mouse_capture, TuiOpts,
+    apply_terminal_resize, map_event, run_blocking_editor, sync_mouse_capture,
+    take_held_nav_backlog, TuiOpts,
 };
 use super::diff_tool::{cleanup_prepared, diff_tool_command, wait_and_cleanup};
 use super::editor::{editor_command, is_detached_editor, resolve_editor};
 use super::effect::{run_job, DiffLaunch, Interpreter, JobResult, JobWork};
 use super::event_pump::{
-    action_triggers_graph_autoload, classify_busy_dispatch, overlay_blocks_background_ticks,
-    BusyAction,
+    action_triggers_graph_autoload, classify_busy_dispatch, keep_held_nav_backlog,
+    overlay_blocks_background_ticks, BusyAction,
 };
 use super::fetch_claim::unix_now_ms;
 use super::hyperlink::{link_cells, write_links};
@@ -59,8 +59,36 @@ enum InputCmd {
     Shutdown,
 }
 
+/// One terminal event the input thread forwards to the loop thread.
+struct InputEvent {
+    /// The event as read, with its key origin and read instant.
+    event: TtyEvent,
+    /// A queued copy of the held nav key read just before it
+    /// ([`take_held_nav_backlog`]). The loop thread drops it unless it
+    /// types text in the current state ([`keep_held_nav_backlog`]).
+    held_backlog: bool,
+}
+
+impl InputEvent {
+    /// An event that dispatches as read.
+    fn read(event: TtyEvent) -> Self {
+        Self {
+            event,
+            held_backlog: false,
+        }
+    }
+
+    /// A queued copy of a held nav key.
+    fn held_backlog(event: TtyEvent) -> Self {
+        Self {
+            event,
+            held_backlog: true,
+        }
+    }
+}
+
 struct InputBridge {
-    rx: tokio::sync::mpsc::Receiver<TtyEvent>,
+    rx: tokio::sync::mpsc::Receiver<InputEvent>,
     cmd: std_mpsc::Sender<InputCmd>,
     ack: std_mpsc::Receiver<()>,
 }
@@ -93,8 +121,14 @@ impl InputBridge {
     }
 }
 
+/// Read terminal events and forward them in read order.
+///
+/// After a held nav key it also reads the queued copies of that key and
+/// the first event after them ([`take_held_nav_backlog`]), and marks the
+/// copies. It drops nothing: the loop thread knows the input mode and
+/// decides ([`handle_input`]).
 fn input_thread(
-    tx: tokio::sync::mpsc::Sender<TtyEvent>,
+    tx: tokio::sync::mpsc::Sender<InputEvent>,
     cmd_rx: std_mpsc::Receiver<InputCmd>,
     ack_tx: std_mpsc::Sender<()>,
 ) {
@@ -134,13 +168,16 @@ fn input_thread(
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
             Err(_) => break,
         };
-        let leftover = held_nav_key(&ready.0).and_then(discard_held_nav_backlog);
-        if tx.blocking_send(ready).is_err() {
-            break;
-        }
-        if let Some(extra) = leftover {
-            if tx.blocking_send(extra).is_err() {
-                break;
+        let (backlog, next) = match held_nav_key(&ready.0) {
+            Some(held) => take_held_nav_backlog(held),
+            None => (Vec::new(), None),
+        };
+        let forwarded = std::iter::once(InputEvent::read(ready))
+            .chain(backlog.into_iter().map(InputEvent::held_backlog))
+            .chain(next.map(InputEvent::read));
+        for input in forwarded {
+            if tx.blocking_send(input).is_err() {
+                return;
             }
         }
     }
@@ -482,7 +519,19 @@ async fn sleep_ms(ms: u64) {
 /// and the double-click window measure from the instant the event's bytes
 /// were read. A busy loop that takes two keys late must not change what
 /// they mean.
-fn handle_input(ctx: &mut LoopCtx<'_>, (event, origin, read_at): TtyEvent) {
+///
+/// A queued copy of a held nav key is dropped first unless it types text
+/// in the current state ([`keep_held_nav_backlog`]): the key read before
+/// it is already dispatched, so a `/` that opened the search prompt
+/// counts.
+fn handle_input(ctx: &mut LoopCtx<'_>, input: InputEvent) {
+    let InputEvent {
+        event: (event, origin, read_at),
+        held_backlog,
+    } = input;
+    if held_backlog && !keep_held_nav_backlog(ctx.state, &event) {
+        return;
+    }
     ctx.state.begin_input(read_at);
     dispatch_input(ctx, event, origin, read_at);
     ctx.state.end_input();

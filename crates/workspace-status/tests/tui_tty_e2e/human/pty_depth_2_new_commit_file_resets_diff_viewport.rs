@@ -12,9 +12,7 @@ const BETA: &str = "beta.rs";
 const ALPHA_TOP: &str = "alpha-line-0";
 const COMMIT: &str = "tall-pair-scroll-reset";
 const REPO: &str = "scrollbox";
-/// `/` queries for [`REPO`] and [`COMMIT`] with no doubled `l`. The input
-/// thread drops a queued second `l` (held-nav backlog) when both bytes
-/// land in one read, which turns `scrollbox` into `scrolbox`.
+/// `/` queries for [`REPO`] and [`COMMIT`].
 const REPO_QUERY: &str = "box";
 const COMMIT_QUERY: &str = "-pair-";
 /// Upper bound on Repeats while holding a pan key; the hold stops on the
@@ -29,7 +27,7 @@ fn csi_u_enter(tui: &mut PtySession) {
     tui.csi_u(13, 1, 3);
 }
 
-/// CSI-u press, Repeats until `done`, release. The input thread drops a
+/// CSI-u press, Repeats until `done`, release. The event loop drops a
 /// queued copy of a held nav key after each move, so each key waits for
 /// the right pane to pan before the next one goes out.
 fn csi_u_hold_until(tui: &mut PtySession, letter: char, done: impl Fn(&str) -> bool) {

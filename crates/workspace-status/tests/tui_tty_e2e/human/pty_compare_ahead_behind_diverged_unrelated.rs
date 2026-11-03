@@ -13,7 +13,7 @@ fn palette_open(screen: &str) -> bool {
     screen.contains("Enter run")
 }
 
-/// Type a palette filter; after each nav letter wait for its paint.
+/// Type a palette filter in one write.
 fn type_palette_filter(tui: &mut PtySession, query: &str) {
     crate::support::type_palette_filter(tui, query);
 }

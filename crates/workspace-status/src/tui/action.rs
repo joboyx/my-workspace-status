@@ -447,6 +447,38 @@ pub enum Action {
     None,
 }
 
+impl Action {
+    /// True when this action types one character into a focused text
+    /// field.
+    ///
+    /// The text fields are the search prompt and the help search
+    /// ([`Self::SearchChar`]), the Quick Open query, the search-in-files
+    /// query, the branch, compare, and graph-focus picker filters, the
+    /// new-branch name, and the comment body ([`Self::CommentInput`] of a
+    /// character with no Ctrl or Alt; those chords edit or move in the
+    /// textarea). Menu hotkeys ([`Self::StashMenuChar`],
+    /// [`Self::BlameMenuChar`]), moves, and edits are not typing.
+    pub(crate) fn types_text(&self) -> bool {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        match self {
+            Self::SearchChar(_)
+            | Self::QuickOpenChar(_)
+            | Self::SearchFilesChar(_)
+            | Self::BranchChar(_)
+            | Self::ComparePickerChar(_)
+            | Self::GraphFocusChar(_)
+            | Self::CreateBranchChar(_) => true,
+            Self::CommentInput(key) => {
+                matches!(key.code, KeyCode::Char(_))
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Mode the Quick Open overlay starts in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QuickOpenEntry {
@@ -870,4 +902,43 @@ pub enum Effect {
         /// left to the caller (`y` overlay chrome).
         announce: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn types_text_is_true_only_for_a_character_typed_into_a_text_field() {
+        let comment = |code, modifiers| Action::CommentInput(KeyEvent::new(code, modifiers));
+        let cases = [
+            (Action::SearchChar('l'), true),
+            (Action::QuickOpenChar('l'), true),
+            (Action::SearchFilesChar('l'), true),
+            (Action::BranchChar('l'), true),
+            (Action::ComparePickerChar('l'), true),
+            (Action::GraphFocusChar('l'), true),
+            (Action::CreateBranchChar('l'), true),
+            (comment(KeyCode::Char('l'), KeyModifiers::NONE), true),
+            (comment(KeyCode::Char('L'), KeyModifiers::SHIFT), true),
+            (comment(KeyCode::Char('a'), KeyModifiers::CONTROL), false),
+            (comment(KeyCode::Char('f'), KeyModifiers::ALT), false),
+            (comment(KeyCode::Right, KeyModifiers::NONE), false),
+            (comment(KeyCode::Enter, KeyModifiers::SHIFT), false),
+            (Action::Move(1), false),
+            (Action::PanDiff(1), false),
+            (Action::HelpScroll(1), false),
+            (Action::SearchFilesMove(1), false),
+            (Action::QuickOpenMove(1), false),
+            (Action::BranchMove(1), false),
+            (Action::StashMenuChar('p'), false),
+            (Action::BlameMenuChar('c'), false),
+            (Action::SearchBackspace, false),
+            (Action::None, false),
+        ];
+        for (action, want) in cases {
+            assert_eq!(action.types_text(), want, "{action:?}");
+        }
+    }
 }

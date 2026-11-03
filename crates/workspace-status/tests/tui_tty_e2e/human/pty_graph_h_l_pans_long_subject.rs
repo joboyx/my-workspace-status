@@ -99,7 +99,7 @@ fn graph_cursor_on_panned_root(screen: &str) -> bool {
     })
 }
 
-/// CSI-u press, Repeats, release. The input thread drops queued copies of
+/// CSI-u press, Repeats, release. The event loop drops queued copies of
 /// a held nav key after each move, so each Repeat waits for the right pane
 /// to pan before the next one; Repeats go on until `UNIQUE_GRAP` shows.
 fn csi_u_hold_letter(tui: &mut PtySession, letter: char) {

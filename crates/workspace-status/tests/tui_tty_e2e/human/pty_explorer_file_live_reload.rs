@@ -44,7 +44,7 @@ fn first_paint(screen: &str) -> bool {
         && !screen.contains("Go to file")
 }
 
-/// Type a Quick Open query; after each nav letter wait for its paint.
+/// Type a Quick Open query in one write.
 fn type_query(tui: &mut PtySession, query: &str) {
     crate::support::type_palette_filter(tui, query);
 }

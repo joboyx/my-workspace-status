@@ -3,9 +3,7 @@ use crate::seed::daily_workspace;
 use crate::support::{tree_cursor_on, tree_has, GIT_WAIT, WAIT};
 
 /// Typed query. It is in no seeded file, path, or command title, so it
-/// shows on screen only in the dialog's query row. It has no `h`/`j`/`k`/`l`,
-/// so it types in one burst (`discard_held_nav_backlog` drops a held
-/// same-letter nav burst).
+/// shows on screen only in the dialog's query row.
 const QUERY: &str = "zorbatron";
 /// Search dialog title for the `app` checkout (tree cursor on README.md).
 const SEARCH_TITLE: &str = "Search · app";

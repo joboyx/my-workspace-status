@@ -15,8 +15,7 @@ const REPO: &str = "longmsg";
 const SGR_WHEEL_UP: u8 = 64;
 
 /// `:` opens Quick Open commands; once the empty filter (`>▏`) paints,
-/// type `query` (with a gap after nav letters, which a burst can drop),
-/// wait for row `title`, then Enter runs it.
+/// type `query` in one write, wait for row `title`, then Enter runs it.
 fn run_palette_row(tui: &mut PtySession, query: &str, title: &str) {
     tui.key(':');
     tui.wait_pred(
