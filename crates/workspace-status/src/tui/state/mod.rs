@@ -8247,7 +8247,9 @@ mod tests {
     use crate::snapshot::{
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
     };
-    use crate::testutil::init_repo;
+    use crate::testutil::{
+        app_state, app_state_of, init_repo, repo, repo_snapshot, unstaged_change,
+    };
     use crate::tui::split::{
         diff_split_fraction_from_left_width, diff_split_row_width, diff_split_rule_x, pane_widths,
         side_by_side_column_widths, DIFF_SPLIT_FRACTION, MIN_PANE_COLS,
@@ -8266,46 +8268,13 @@ mod tests {
         app.palette_disabled_reason(command)
     }
 
-    fn repo(name: &str, dirty: bool) -> RepoSnapshot {
-        RepoSnapshot {
-            repo: name.into(),
-            branch: "main".into(),
-            sync_status: SyncStatus::NoUpstream,
-            sync_note: String::new(),
-            upstream_rewrite: None,
-            head: String::new(),
-            has_unstaged: dirty,
-            has_staged: false,
-            has_untracked: false,
-            changes: if dirty {
-                vec![FileChange {
-                    path: "README.md".into(),
-                    staged_status: None,
-                    unstaged_status: Some("M".into()),
-                    untracked: false,
-                    old_path: None,
-                }]
-            } else {
-                vec![]
-            },
-            checkout_kind: crate::snapshot::CheckoutKind::Primary,
-            primary_repo: None,
-            merged_into_default: None,
-            default_branch_override: None,
-            default_tip_ref: None,
-            default_branch: None,
-            local_branches: Vec::new(),
-        }
-    }
-
     fn state() -> AppState {
-        let snapshot = build_workspace_snapshot(
+        app_state_of(build_workspace_snapshot(
             &[repo("app", true), repo("notes", true), repo("lib", false)],
             &["notes".into()],
             false,
             &[],
-        );
-        AppState::new(PathBuf::from("/tmp"), snapshot, true)
+        ))
     }
 
     #[test]
@@ -8358,7 +8327,7 @@ mod tests {
                 .any(|r| r.repo == "app/.worktrees/feat" && !r.hidden),
             "linked child must not be retagged hidden"
         );
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state_of(snapshot);
         assert!(
             app.rows.iter().any(|r| r.id == "repo:lib"),
             "visible lib must still paint"
@@ -8418,8 +8387,7 @@ mod tests {
         let mut lib_snap = repo("lib", false);
         lib_snap.sync_status = SyncStatus::Behind;
         lib_snap.branch = "feature/y".into();
-        let snapshot = build_workspace_snapshot(&[app_snap, lib_snap], &[], false, &[]);
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state(&[app_snap, lib_snap]);
         app.cursor = 0;
         match app.dispatch(Action::Pull) {
             Effect::Pull { repos } => assert_eq!(repos, vec!["app", "lib"]),
@@ -8448,8 +8416,7 @@ mod tests {
         app_snap.branch = "feature/x".into();
         let mut lib_snap = repo("lib", false);
         lib_snap.branch = "feature/y".into();
-        let snapshot = build_workspace_snapshot(&[app_snap, lib_snap], &[], false, &[]);
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state(&[app_snap, lib_snap]);
         app.cursor = 0;
         assert_eq!(app.dispatch(Action::DefaultBranch), Effect::None);
         assert!(matches!(
@@ -8649,8 +8616,7 @@ mod tests {
         let mut snap = tree_repo();
         snap.branch = "feature/x".into();
         snap.sync_status = SyncStatus::Behind;
-        let snapshot = build_workspace_snapshot(&[snap], &[], false, &[]);
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state(&[snap]);
         focus_id(&mut app, "file:app:README.md");
         assert_eq!(app.dispatch(Action::Pull), Effect::None);
         assert_eq!(app.status, "focus a repo or checkout to pull");
@@ -8744,7 +8710,7 @@ mod tests {
 
     #[test]
     fn remove_worktree_refuses_with_status_when_not_linked() {
-        let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
+        let mut app = app_state_of(linked_snapshot());
         app.cursor = 0;
         assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
         assert_eq!(app.status, "Focus a linked worktree to remove");
@@ -8793,31 +8759,10 @@ mod tests {
         focus_repo(&mut app, "app");
         assert_eq!(app.dispatch(Action::DefaultBranch), Effect::None);
         assert!(app.status.contains("no non-default"));
-        let snapshot = build_workspace_snapshot(
-            &[RepoSnapshot {
-                repo: "app".into(),
-                branch: "feature/x".into(),
-                sync_status: SyncStatus::NoUpstream,
-                sync_note: String::new(),
-                upstream_rewrite: None,
-                head: String::new(),
-                has_unstaged: false,
-                has_staged: false,
-                has_untracked: false,
-                changes: Vec::new(),
-                checkout_kind: CheckoutKind::Primary,
-                primary_repo: None,
-                merged_into_default: None,
-                default_branch_override: None,
-                default_tip_ref: None,
-                default_branch: None,
-                local_branches: Vec::new(),
-            }],
-            &[],
-            false,
-            &[],
-        );
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state(&[RepoSnapshot {
+            branch: "feature/x".into(),
+            ..repo_snapshot("app")
+        }]);
         focus_repo(&mut app, "app");
         match app.dispatch(Action::DefaultBranch) {
             Effect::DefaultBranch { repos } => assert_eq!(repos, vec!["app"]),
@@ -8828,23 +8773,10 @@ mod tests {
 
     fn two_file_repo() -> RepoSnapshot {
         RepoSnapshot {
-            repo: "app".into(),
-            branch: "main".into(),
-            sync_status: SyncStatus::NoUpstream,
-            sync_note: String::new(),
-            upstream_rewrite: None,
-            head: String::new(),
             has_unstaged: true,
-            has_staged: false,
             has_untracked: true,
             changes: vec![
-                FileChange {
-                    path: "README.md".into(),
-                    staged_status: None,
-                    unstaged_status: Some("M".into()),
-                    untracked: false,
-                    old_path: None,
-                },
+                unstaged_change("README.md"),
                 FileChange {
                     path: "new.txt".into(),
                     staged_status: None,
@@ -8853,13 +8785,7 @@ mod tests {
                     old_path: None,
                 },
             ],
-            checkout_kind: CheckoutKind::Primary,
-            primary_repo: None,
-            merged_into_default: None,
-            default_branch_override: None,
-            default_tip_ref: None,
-            default_branch: None,
-            local_branches: Vec::new(),
+            ..repo_snapshot("app")
         }
     }
 
@@ -8871,7 +8797,7 @@ mod tests {
             false,
             &[],
         );
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state_of(snapshot);
         app.cursor = 0;
         assert_eq!(app.dispatch(Action::Stage), Effect::None);
         focus_repo(&mut app, "app");
@@ -8897,15 +8823,8 @@ mod tests {
         linked.checkout_kind = CheckoutKind::Linked;
         linked.primary_repo = Some("app".into());
         linked.has_untracked = false;
-        linked.changes = vec![FileChange {
-            path: "wt.md".into(),
-            staged_status: None,
-            unstaged_status: Some("M".into()),
-            untracked: false,
-            old_path: None,
-        }];
-        let snapshot = build_workspace_snapshot(&[two_file_repo(), linked], &[], false, &[]);
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        linked.changes = vec![unstaged_change("wt.md")];
+        let mut app = app_state(&[two_file_repo(), linked]);
         focus_repo(&mut app, "app");
         assert_eq!(app.dispatch(Action::Stage), Effect::None);
         let idx = app
@@ -8947,9 +8866,7 @@ mod tests {
 
     #[test]
     fn workspace_stage_unstage_revert_are_noop() {
-        let snapshot =
-            build_workspace_snapshot(&[mixed_dirty("app"), mixed_dirty("api")], &[], false, &[]);
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state(&[mixed_dirty("app"), mixed_dirty("api")]);
         app.cursor = 0;
         assert_eq!(
             app.focused_row().map(|row| row.kind),
@@ -9000,34 +8917,15 @@ mod tests {
 
     #[test]
     fn refresh_on_linked_checkout_names_that_path() {
-        let snapshot = build_workspace_snapshot(
-            &[
-                repo("app", true),
-                RepoSnapshot {
-                    repo: ".worktrees/app/feat".into(),
-                    branch: "feature/x".into(),
-                    sync_status: SyncStatus::NoUpstream,
-                    sync_note: String::new(),
-                    upstream_rewrite: None,
-                    head: String::new(),
-                    has_unstaged: false,
-                    has_staged: false,
-                    has_untracked: false,
-                    changes: Vec::new(),
-                    checkout_kind: CheckoutKind::Linked,
-                    primary_repo: Some("app".into()),
-                    merged_into_default: None,
-                    default_branch_override: None,
-                    default_tip_ref: None,
-                    default_branch: None,
-                    local_branches: Vec::new(),
-                },
-            ],
-            &[],
-            false,
-            &[],
-        );
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state(&[
+            repo("app", true),
+            RepoSnapshot {
+                branch: "feature/x".into(),
+                checkout_kind: CheckoutKind::Linked,
+                primary_repo: Some("app".into()),
+                ..repo_snapshot(".worktrees/app/feat")
+            },
+        ]);
         let idx = app
             .rows
             .iter()
@@ -9044,8 +8942,7 @@ mod tests {
 
     #[test]
     fn revert_y_keeps_untracked_on_mixed_scope_y_clean_deletes() {
-        let snapshot = build_workspace_snapshot(&[two_file_repo()], &[], false, &[]);
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state(&[two_file_repo()]);
         focus_repo(&mut app, "app");
         assert_eq!(app.dispatch(Action::Revert), Effect::None);
         match app.dispatch(Action::ConfirmYes) {
@@ -9265,8 +9162,7 @@ mod tests {
         let mut diverged = repo("app", false);
         diverged.sync_status = SyncStatus::Diverged;
         diverged.sync_note = "ahead 1, behind 1".into();
-        let snapshot = build_workspace_snapshot(&[diverged], &[], false, &[]);
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state(&[diverged]);
         focus_repo(&mut app, "app");
         assert_eq!(app.dispatch(Action::Pull), Effect::None);
         assert_eq!(app.status, "app has diverged — pull it from a terminal");
@@ -9293,14 +9189,9 @@ mod tests {
         snap
     }
 
-    fn app_with(repos: &[RepoSnapshot]) -> AppState {
-        let snapshot = build_workspace_snapshot(repos, &[], false, &[]);
-        AppState::new(PathBuf::from("/tmp"), snapshot, true)
-    }
-
     #[test]
     fn pull_on_a_rewritten_upstream_with_nothing_of_yours_opens_the_reset_confirm() {
-        let mut app = app_with(&[rewritten_repo("app", 0, 2)]);
+        let mut app = app_state(&[rewritten_repo("app", 0, 2)]);
         focus_repo(&mut app, "app");
         app.help_open = true;
         assert_eq!(app.dispatch(Action::Pull), Effect::None);
@@ -9342,7 +9233,7 @@ mod tests {
 
     #[test]
     fn reset_confirm_n_cancels_the_pull() {
-        let mut app = app_with(&[rewritten_repo("app", 0, 2)]);
+        let mut app = app_state(&[rewritten_repo("app", 0, 2)]);
         focus_repo(&mut app, "app");
         assert_eq!(app.dispatch(Action::Pull), Effect::None);
         assert!(app.confirm.is_some());
@@ -9353,7 +9244,7 @@ mod tests {
 
     #[test]
     fn pull_on_several_rewritten_upstreams_asks_to_focus_one() {
-        let mut app = app_with(&[
+        let mut app = app_state(&[
             rewritten_repo("app", 0, 2),
             rewritten_repo("lib", 0, 1),
             rewritten_repo("web", 0, 3),
@@ -9371,7 +9262,7 @@ mod tests {
 
     #[test]
     fn pull_on_a_rewritten_upstream_under_your_commits_names_the_rebase() {
-        let mut app = app_with(&[rewritten_repo("app", 1, 2)]);
+        let mut app = app_state(&[rewritten_repo("app", 1, 2)]);
         focus_repo(&mut app, "app");
         assert_eq!(app.dispatch(Action::Pull), Effect::None);
         assert!(app.confirm.is_none(), "no write for your commits");
@@ -9381,7 +9272,7 @@ mod tests {
         );
         assert_eq!(app.status.kind(), StatusKind::Warn);
 
-        let mut app = app_with(&[rewritten_repo("app", 3, 2)]);
+        let mut app = app_state(&[rewritten_repo("app", 3, 2)]);
         focus_repo(&mut app, "app");
         assert_eq!(app.dispatch(Action::Pull), Effect::None);
         assert_eq!(
@@ -9392,7 +9283,7 @@ mod tests {
 
     #[test]
     fn one_rewritten_upstream_with_nothing_of_yours_wins_over_your_commits() {
-        let mut app = app_with(&[rewritten_repo("app", 1, 2), rewritten_repo("lib", 0, 2)]);
+        let mut app = app_state(&[rewritten_repo("app", 1, 2), rewritten_repo("lib", 0, 2)]);
         app.cursor = 0;
         assert_eq!(app.dispatch(Action::Pull), Effect::None);
         assert!(
@@ -9410,7 +9301,7 @@ mod tests {
         let mut behind = repo("lib", false);
         behind.sync_status = SyncStatus::Behind;
         behind.sync_note = "behind by 1 commits".into();
-        let mut app = app_with(&[rewritten_repo("app", 0, 2), behind]);
+        let mut app = app_state(&[rewritten_repo("app", 0, 2), behind]);
         app.cursor = 0;
         assert_eq!(
             app.dispatch(Action::Pull),
@@ -9426,8 +9317,7 @@ mod tests {
         let mut ahead = repo("app", false);
         ahead.sync_status = SyncStatus::Ahead;
         ahead.sync_note = "ahead 1".into();
-        let snapshot = build_workspace_snapshot(&[ahead], &[], false, &[]);
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state(&[ahead]);
         app.cursor = 0;
         assert_eq!(app.focused_row().map(|r| r.kind), Some(NodeKind::Workspace));
         assert_eq!(app.dispatch(Action::Push), Effect::None);
@@ -9442,8 +9332,7 @@ mod tests {
         let mut ahead = repo("lib", false);
         ahead.sync_status = SyncStatus::Ahead;
         ahead.sync_note = "ahead 1".into();
-        let snapshot = build_workspace_snapshot(&[in_sync, ahead], &[], false, &[]);
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state(&[in_sync, ahead]);
         app.folds.remove("group:no-updates");
         app.rebuild_rows();
         focus_repo(&mut app, "app");
@@ -9489,8 +9378,7 @@ mod tests {
         let mut ahead = repo("app", false);
         ahead.sync_status = sync;
         ahead.sync_note = note.into();
-        let snapshot = build_workspace_snapshot(&[ahead], &[], false, &[]);
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state(&[ahead]);
         focus_repo(&mut app, "app");
         app
     }
@@ -9562,8 +9450,7 @@ mod tests {
 
         let mut in_sync = repo("app", false);
         in_sync.sync_status = SyncStatus::UpToDate;
-        let snapshot = build_workspace_snapshot(&[in_sync], &[], false, &[]);
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state(&[in_sync]);
         app.folds.remove("group:no-updates");
         app.rebuild_rows();
         focus_repo(&mut app, "app");
@@ -10099,13 +9986,7 @@ mod tests {
         let mut app = state();
         focus_file(&mut app, "README.md");
         let mut snapshot = app.snapshot.clone();
-        snapshot.repos[0].changes = vec![FileChange {
-            path: "src/lib.rs".into(),
-            staged_status: None,
-            unstaged_status: Some("M".into()),
-            untracked: false,
-            old_path: None,
-        }];
+        snapshot.repos[0].changes = vec![unstaged_change("src/lib.rs")];
         snapshot.repos[0].has_unstaged = true;
         snapshot.repos[0].has_untracked = false;
         let _ = app.apply_watch_snapshot(snapshot);
@@ -13037,49 +12918,24 @@ mod tests {
             &[
                 repo("app", true),
                 RepoSnapshot {
-                    repo: ".worktrees/app/feat".into(),
                     branch: "feature/x".into(),
                     sync_status: SyncStatus::Ahead,
                     sync_note: "ahead 1".into(),
-                    upstream_rewrite: None,
-                    head: String::new(),
-                    has_unstaged: false,
-                    has_staged: false,
-                    has_untracked: false,
-                    changes: Vec::new(),
                     checkout_kind: CheckoutKind::Linked,
                     primary_repo: Some("app".into()),
-                    merged_into_default: None,
-                    default_branch_override: None,
-                    default_tip_ref: None,
-                    default_branch: None,
-                    local_branches: Vec::new(),
+                    ..repo_snapshot(".worktrees/app/feat")
                 },
                 RepoSnapshot {
-                    repo: "notes".into(),
-                    branch: "main".into(),
                     sync_status: SyncStatus::Ahead,
                     sync_note: "ahead 1".into(),
-                    upstream_rewrite: None,
-                    head: String::new(),
-                    has_unstaged: false,
-                    has_staged: false,
-                    has_untracked: false,
-                    changes: Vec::new(),
-                    checkout_kind: CheckoutKind::Primary,
-                    primary_repo: None,
-                    merged_into_default: None,
-                    default_branch_override: None,
-                    default_tip_ref: None,
-                    default_branch: None,
-                    local_branches: Vec::new(),
+                    ..repo_snapshot("notes")
                 },
             ],
             &["notes".into()],
             false,
             &[],
         );
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state_of(snapshot);
         app.cursor = 0;
         assert_eq!(app.dispatch(Action::Push), Effect::None);
         focus_repo(&mut app, "app");
@@ -13388,13 +13244,12 @@ mod tests {
         if !dirty {
             app_repo.branch = "feature/x".into();
         }
-        let snapshot = build_workspace_snapshot(
+        app_state_of(build_workspace_snapshot(
             &[app_repo, repo("notes", true)],
             &["notes".into()],
             false,
             &[],
-        );
-        AppState::new(PathBuf::from("/tmp"), snapshot, true)
+        ))
     }
 
     fn install_graph_commit(app: &mut AppState, refs: &[&str]) {
@@ -13668,7 +13523,7 @@ mod tests {
 
     #[test]
     fn graph_merge_worktree_only_when_that_row_is_focused() {
-        let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
+        let mut app = app_state_of(linked_snapshot());
         focus_repo(&mut app, "app");
         install_graph_commit(&mut app, &["topic"]);
         assert_eq!(app.dispatch(Action::GraphMerge), Effect::None);
@@ -13799,34 +13654,15 @@ mod tests {
             "graph O hint must follow active focus, not identity: {keys:?}"
         );
 
-        let snapshot = build_workspace_snapshot(
-            &[
-                repo("app", false),
-                RepoSnapshot {
-                    repo: "app/.worktrees/feat".into(),
-                    branch: "feature/x".into(),
-                    sync_status: SyncStatus::NoUpstream,
-                    sync_note: String::new(),
-                    upstream_rewrite: None,
-                    head: String::new(),
-                    has_unstaged: false,
-                    has_staged: false,
-                    has_untracked: false,
-                    changes: Vec::new(),
-                    checkout_kind: CheckoutKind::Linked,
-                    primary_repo: Some("app".into()),
-                    merged_into_default: None,
-                    default_branch_override: None,
-                    default_tip_ref: None,
-                    default_branch: None,
-                    local_branches: Vec::new(),
-                },
-            ],
-            &[],
-            false,
-            &[],
-        );
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state(&[
+            repo("app", false),
+            RepoSnapshot {
+                branch: "feature/x".into(),
+                checkout_kind: CheckoutKind::Linked,
+                primary_repo: Some("app".into()),
+                ..repo_snapshot("app/.worktrees/feat")
+            },
+        ]);
         let idx = app
             .rows
             .iter()
@@ -14025,23 +13861,11 @@ mod tests {
             &[
                 repo("app", true),
                 RepoSnapshot {
-                    repo: "app/.worktrees/feat".into(),
                     branch: "feature/x".into(),
-                    sync_status: SyncStatus::NoUpstream,
-                    sync_note: String::new(),
-                    upstream_rewrite: None,
-                    head: String::new(),
-                    has_unstaged: false,
-                    has_staged: false,
-                    has_untracked: false,
-                    changes: Vec::new(),
                     checkout_kind: CheckoutKind::Linked,
                     primary_repo: Some("app".into()),
                     merged_into_default: Some(false),
-                    default_branch_override: None,
-                    default_tip_ref: None,
-                    default_branch: None,
-                    local_branches: Vec::new(),
+                    ..repo_snapshot("app/.worktrees/feat")
                 },
                 repo("notes", true),
             ],
@@ -14062,7 +13886,7 @@ mod tests {
 
     #[test]
     fn remove_worktree_linked_only_confirm_cancel_and_apply() {
-        let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
+        let mut app = app_state_of(linked_snapshot());
         app.cursor = 0;
         assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
         assert_eq!(app.status, "Focus a linked worktree to remove");
@@ -14108,29 +13932,16 @@ mod tests {
     fn remove_worktree_hidden_is_noop() {
         let snapshot = build_workspace_snapshot(
             &[RepoSnapshot {
-                repo: "notes/.worktrees/feat".into(),
                 branch: "feature/x".into(),
-                sync_status: SyncStatus::NoUpstream,
-                sync_note: String::new(),
-                upstream_rewrite: None,
-                head: String::new(),
-                has_unstaged: false,
-                has_staged: false,
-                has_untracked: false,
-                changes: Vec::new(),
                 checkout_kind: CheckoutKind::Linked,
                 primary_repo: Some("notes".into()),
-                merged_into_default: None,
-                default_branch_override: None,
-                default_tip_ref: None,
-                default_branch: None,
-                local_branches: Vec::new(),
+                ..repo_snapshot("notes/.worktrees/feat")
             }],
             &["notes/.worktrees/feat".into()],
             false,
             &[],
         );
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state_of(snapshot);
         assert!(app
             .rows
             .iter()
@@ -14179,7 +13990,7 @@ mod tests {
 
     #[test]
     fn background_fetch_record_starts_the_outage_once_per_generation() {
-        let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
+        let mut app = app_state_of(linked_snapshot());
         let now = Instant::now();
         assert!(!app.apply_background_fetch_record(now), "no record yet");
         assert_eq!(record_other_instance_fetch(&app, true, 10), 1);
@@ -14204,7 +14015,7 @@ mod tests {
 
     #[test]
     fn background_fetch_record_success_ends_the_outage_and_keeps_the_status() {
-        let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
+        let mut app = app_state_of(linked_snapshot());
         let now = Instant::now();
         record_other_instance_fetch(&app, true, 10);
         assert!(app.apply_background_fetch_record(now));
@@ -14232,7 +14043,7 @@ mod tests {
 
     #[test]
     fn background_fetch_record_after_a_store_reset_applies() {
-        let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
+        let mut app = app_state_of(linked_snapshot());
         let now = Instant::now();
         app.note_background_fetch_outcome(Some(5), None, now);
         assert_eq!(record_other_instance_fetch(&app, true, 10), 1, "new store");
@@ -14249,10 +14060,10 @@ mod tests {
 
     #[test]
     fn background_fetch_record_from_before_launch_paints_nothing() {
-        let first = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
+        let first = app_state_of(linked_snapshot());
         let now = Instant::now();
         record_other_instance_fetch(&first, true, 10);
-        let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
+        let mut app = app_state_of(linked_snapshot());
         app.open_background_fetch_store(first.fetch_store_path.clone());
         assert!(!app.apply_background_fetch_record(now), "seeded at launch");
         assert_eq!(app.status, "");
@@ -14264,7 +14075,7 @@ mod tests {
 
     #[test]
     fn fetch_tick_includes_linked_worktrees_skips_hidden() {
-        let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
+        let mut app = app_state_of(linked_snapshot());
         match app.dispatch(Action::FetchTick) {
             Effect::Fetch { repos } => {
                 assert_eq!(repos, vec!["app", "app/.worktrees/feat"]);
@@ -14445,29 +14256,13 @@ mod tests {
 
     fn dual_ms_repo(name: &str) -> RepoSnapshot {
         RepoSnapshot {
-            repo: name.into(),
-            branch: "main".into(),
-            sync_status: SyncStatus::NoUpstream,
-            sync_note: String::new(),
-            upstream_rewrite: None,
-            head: String::new(),
             has_unstaged: true,
             has_staged: true,
-            has_untracked: false,
             changes: vec![FileChange {
-                path: "both.rs".into(),
                 staged_status: Some("M".into()),
-                unstaged_status: Some("M".into()),
-                untracked: false,
-                old_path: None,
+                ..unstaged_change("both.rs")
             }],
-            checkout_kind: CheckoutKind::Primary,
-            primary_repo: None,
-            merged_into_default: None,
-            default_branch_override: None,
-            default_tip_ref: None,
-            default_branch: None,
-            local_branches: Vec::new(),
+            ..repo_snapshot(name)
         }
     }
 
@@ -17875,44 +17670,14 @@ mod tests {
 
     fn tree_repo() -> RepoSnapshot {
         RepoSnapshot {
-            repo: "app".into(),
-            branch: "main".into(),
-            sync_status: SyncStatus::NoUpstream,
-            sync_note: String::new(),
-            upstream_rewrite: None,
-            head: String::new(),
             has_unstaged: true,
-            has_staged: false,
-            has_untracked: false,
-            changes: vec![
-                FileChange {
-                    path: "src/lib.rs".into(),
-                    staged_status: None,
-                    unstaged_status: Some("M".into()),
-                    untracked: false,
-                    old_path: None,
-                },
-                FileChange {
-                    path: "README.md".into(),
-                    staged_status: None,
-                    unstaged_status: Some("M".into()),
-                    untracked: false,
-                    old_path: None,
-                },
-            ],
-            checkout_kind: CheckoutKind::Primary,
-            primary_repo: None,
-            merged_into_default: None,
-            default_branch_override: None,
-            default_tip_ref: None,
-            default_branch: None,
-            local_branches: Vec::new(),
+            changes: vec![unstaged_change("src/lib.rs"), unstaged_change("README.md")],
+            ..repo_snapshot("app")
         }
     }
 
     fn tree_app() -> AppState {
-        let snapshot = build_workspace_snapshot(&[tree_repo()], &[], false, &[]);
-        AppState::new(PathBuf::from("/tmp"), snapshot, true)
+        app_state(&[tree_repo()])
     }
 
     fn focus_id(app: &mut AppState, id: &str) {
@@ -18405,13 +18170,7 @@ mod tests {
 
     #[test]
     fn tree_search_steps_from_the_focused_row() {
-        let snapshot = build_workspace_snapshot(
-            &[repo("app", true), repo("lib", true), repo("web", true)],
-            &[],
-            false,
-            &[],
-        );
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state(&[repo("app", true), repo("lib", true), repo("web", true)]);
         let readme = |repo: &str| format!("file:{repo}:README.md");
         let focused = |app: &AppState| app.focused_row().map(|row| row.id.clone());
         let order: Vec<String> = crate::tui::tree::flatten(&app.tree, &HashSet::new())
@@ -18838,15 +18597,11 @@ mod tests {
     #[test]
     fn list_pan_shifts_tree_and_graph_without_stealing_fold() {
         let mut snap = repo("app", true);
-        snap.changes = vec![FileChange {
-            path: format!("deep/nested/{}/tail.rs", "x".repeat(40)),
-            staged_status: None,
-            unstaged_status: Some("M".into()),
-            untracked: false,
-            old_path: None,
-        }];
-        let snapshot = build_workspace_snapshot(&[snap], &[], false, &[]);
-        let mut tree = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        snap.changes = vec![unstaged_change(&format!(
+            "deep/nested/{}/tail.rs",
+            "x".repeat(40)
+        ))];
+        let mut tree = app_state(&[snap]);
         focus_file(&mut tree, "tail.rs");
         tree.focus = FocusPane::Left;
         tree.layout.tree_width = 16;
@@ -18929,15 +18684,11 @@ mod tests {
     fn compare_file_pan_clamps_to_the_compare_list_not_the_parked_drill() {
         // Parked depth-0 tree whose file row is far longer than the list.
         let mut snap = repo("app", true);
-        snap.changes = vec![FileChange {
-            path: format!("deep/nested/{}/tail.rs", "x".repeat(60)),
-            staged_status: None,
-            unstaged_status: Some("M".into()),
-            untracked: false,
-            old_path: None,
-        }];
-        let snapshot = build_workspace_snapshot(&[snap], &[], false, &[]);
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        snap.changes = vec![unstaged_change(&format!(
+            "deep/nested/{}/tail.rs",
+            "x".repeat(60)
+        ))];
+        let mut app = app_state(&[snap]);
         focus_file(&mut app, "tail.rs");
         app.layout.tree_width = 16;
         app.tabs
@@ -19029,15 +18780,11 @@ mod tests {
     #[test]
     fn tree_mouse_hscroll_pans_without_moving_cursor() {
         let mut snap = repo("app", true);
-        snap.changes = vec![FileChange {
-            path: format!("deep/nested/{}/tail.rs", "x".repeat(40)),
-            staged_status: None,
-            unstaged_status: Some("M".into()),
-            untracked: false,
-            old_path: None,
-        }];
-        let snapshot = build_workspace_snapshot(&[snap], &[], false, &[]);
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        snap.changes = vec![unstaged_change(&format!(
+            "deep/nested/{}/tail.rs",
+            "x".repeat(40)
+        ))];
+        let mut app = app_state(&[snap]);
         focus_file(&mut app, "tail.rs");
         app.focus = FocusPane::Left;
         app.layout.tree_width = 16;
@@ -19095,11 +18842,7 @@ mod tests {
             "vertical wheel over the tree still moves the cursor"
         );
 
-        let mut fold = AppState::new(
-            PathBuf::from("/tmp"),
-            build_workspace_snapshot(&[repo("app", true)], &[], false, &[]),
-            true,
-        );
+        let mut fold = app_state(&[repo("app", true)]);
         focus_repo(&mut fold, "app");
         fold.dispatch(Action::FoldClose);
         assert!(fold.folds.contains("repo:app"));

@@ -532,7 +532,6 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
     use std::time::Duration;
 
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -549,51 +548,24 @@ mod tests {
     use super::*;
     use crate::file_index::{FileEntry, FileRead, IndexRoot};
     use crate::file_search::{SearchChunk, SearchHit};
-    use crate::snapshot::{
-        build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
-    };
+    use crate::snapshot::{CheckoutKind, RepoSnapshot};
+    use crate::testutil::{self, app_state};
 
     fn repo(name: &str, kind: CheckoutKind, primary: Option<&str>) -> RepoSnapshot {
         RepoSnapshot {
-            repo: name.into(),
-            branch: "main".into(),
-            sync_status: SyncStatus::NoUpstream,
-            sync_note: String::new(),
-            upstream_rewrite: None,
-            head: String::new(),
-            has_unstaged: true,
-            has_staged: false,
-            has_untracked: false,
-            changes: vec![FileChange {
-                path: "README.md".into(),
-                staged_status: None,
-                unstaged_status: Some("M".into()),
-                untracked: false,
-                old_path: None,
-            }],
             checkout_kind: kind,
             primary_repo: primary.map(str::to_string),
-            merged_into_default: None,
-            default_branch_override: None,
-            default_tip_ref: None,
-            default_branch: None,
-            local_branches: Vec::new(),
+            ..testutil::repo(name, true)
         }
     }
 
     /// `app` (primary) with linked `app/.worktrees/feat`, plus primary `lib`.
     fn family_state() -> AppState {
-        let snapshot = build_workspace_snapshot(
-            &[
-                repo("app", CheckoutKind::Primary, None),
-                repo("app/.worktrees/feat", CheckoutKind::Linked, Some("app")),
-                repo("lib", CheckoutKind::Primary, None),
-            ],
-            &[],
-            false,
-            &[],
-        );
-        AppState::new(PathBuf::from("/tmp"), snapshot, true)
+        app_state(&[
+            repo("app", CheckoutKind::Primary, None),
+            repo("app/.worktrees/feat", CheckoutKind::Linked, Some("app")),
+            repo("lib", CheckoutKind::Primary, None),
+        ])
     }
 
     fn focus_row(app: &mut AppState, kind: NodeKind, repo: Option<&str>) {
