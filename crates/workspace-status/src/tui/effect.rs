@@ -67,6 +67,7 @@ use super::graph_load::{
     autoload_limit, autoload_skip, load_commit_card, load_graph_model_window, merge_autoload,
     should_autoload, GraphIdentity, ShouldAutoload,
 };
+use super::latest_only::LatestOnly;
 use super::line_blame::BlameKey;
 use super::ops::{
     format_completed_op, format_mixed_running_op, format_running_op, op_targets, Op, OpTally,
@@ -891,9 +892,9 @@ pub(crate) struct Interpreter {
     diff_prepare: Option<DiffPrepareJob>,
     pending_diff_launch: Option<DiffLaunch>,
     /// Latest Quick Open index request; a newer one replaces it before spawn.
-    file_index_job: Option<(u64, Vec<IndexRoot>)>,
+    file_index_job: LatestOnly<(u64, Vec<IndexRoot>)>,
     /// Latest Quick Open score request; a newer one replaces it before spawn.
-    file_score_job: Option<(u64, Arc<FileIndex>, String)>,
+    file_score_job: LatestOnly<(u64, Arc<FileIndex>, String)>,
     /// Queued Explorer folder listings, one per enqueue.
     explorer_jobs: VecDeque<ExplorerJob>,
     /// Queued Explorer inner-tab loads, at most one per `(tab, path)`. A
@@ -903,31 +904,27 @@ pub(crate) struct Interpreter {
     explorer_previews: Vec<ExplorerJob>,
     /// Latest search-in-files index request; a newer one replaces it
     /// before spawn.
-    search_index_job: Option<(u64, Vec<IndexRoot>)>,
+    search_index_job: LatestOnly<(u64, Vec<IndexRoot>)>,
     /// Latest search-in-files chunk request; a newer one replaces it
     /// before spawn.
-    search_chunk_job: Option<SearchChunkJob>,
+    search_chunk_job: LatestOnly<SearchChunkJob>,
     /// Latest search-in-files preview read: generation, checkout, path. A
     /// newer one replaces it before spawn.
-    search_preview_job: Option<(u64, String, String)>,
+    search_preview_job: LatestOnly<(u64, String, String)>,
     /// Generation of the search that may still run (0: none). Synced from
     /// the state after every change; a running chunk stops between files
     /// once it no longer names the chunk's own generation.
     search_live: Arc<AtomicU64>,
     /// Latest focused-line blame question; a newer one replaces it
-    /// before spawn, so cursor moves never queue a blame per line.
-    line_blame_slot: Option<BlameKey>,
-    /// A [`UserTag::LineBlame`] job is queued or running.
-    line_blame_inflight: bool,
+    /// before spawn, so cursor moves never queue a blame per line. At most
+    /// one job is queued or running.
+    line_blame_job: LatestOnly<BlameKey>,
     /// Latest commit popover card to look up (checkout, full id); a newer
-    /// one replaces it before spawn.
-    commit_card_slot: Option<(String, String)>,
-    /// A [`UserTag::CommitCard`] job is queued or running.
-    commit_card_inflight: bool,
+    /// one replaces it before spawn. At most one job is queued or running.
+    commit_card_job: LatestOnly<(String, String)>,
     /// Latest Doctor probe request; a newer one replaces it before spawn.
-    doctor_slot: Option<u64>,
-    /// A [`UserTag::Doctor`] job is queued or running.
-    doctor_inflight: bool,
+    /// At most one job is queued or running.
+    doctor_job: LatestOnly<u64>,
     /// Latest blame previous-change request; a newer one replaces it
     /// before spawn.
     blame_previous: Option<(u64, String, Box<crate::git::LineBlame>)>,
@@ -968,7 +965,7 @@ pub(crate) struct Interpreter {
     pr_cancel: Arc<AtomicBool>,
     /// Latest PR title fill: the title command and the PRs tab groups. A
     /// newer one replaces it before spawn.
-    pr_title_job: Option<(PathBuf, Vec<PrGroup>)>,
+    pr_title_job: LatestOnly<(PathBuf, Vec<PrGroup>)>,
     /// Activity keys waiting for a sparkline count, one queued
     /// [`UserTag::Activity`] slot each; a slot takes the front key.
     activity_pending: VecDeque<String>,
@@ -1023,20 +1020,17 @@ impl Interpreter {
             pending_diff: None,
             diff_prepare: None,
             pending_diff_launch: None,
-            file_index_job: None,
-            file_score_job: None,
+            file_index_job: LatestOnly::overlap(UserTag::QuickOpen),
+            file_score_job: LatestOnly::overlap(UserTag::QuickOpen),
             explorer_jobs: VecDeque::new(),
             explorer_previews: Vec::new(),
-            search_index_job: None,
-            search_chunk_job: None,
-            search_preview_job: None,
+            search_index_job: LatestOnly::overlap(UserTag::SearchFiles),
+            search_chunk_job: LatestOnly::overlap(UserTag::SearchFiles),
+            search_preview_job: LatestOnly::overlap(UserTag::SearchFiles),
             search_live: Arc::new(AtomicU64::new(0)),
-            line_blame_slot: None,
-            line_blame_inflight: false,
-            commit_card_slot: None,
-            commit_card_inflight: false,
-            doctor_slot: None,
-            doctor_inflight: false,
+            line_blame_job: LatestOnly::serial(UserTag::LineBlame),
+            commit_card_job: LatestOnly::serial(UserTag::CommitCard),
+            doctor_job: LatestOnly::serial(UserTag::Doctor),
             blame_previous: None,
             pr_opens: VecDeque::new(),
             pr_ci_opens: VecDeque::new(),
@@ -1049,7 +1043,7 @@ impl Interpreter {
             pr_cli: DEFAULT_PR_CLI,
             pr_opener: DEFAULT_PR_OPENER,
             pr_cancel: Arc::new(AtomicBool::new(false)),
-            pr_title_job: None,
+            pr_title_job: LatestOnly::overlap(UserTag::PrTitles),
             activity_pending: VecDeque::new(),
             activity_cancel: Arc::new(AtomicBool::new(false)),
             activity_after_reload: false,
@@ -1716,16 +1710,14 @@ impl Interpreter {
                 self.sched.enqueue_user(UserTag::Pane);
             }
             Effect::LoadFileIndex { gen, roots } => {
-                self.file_index_job = Some((gen, roots));
-                self.sched.enqueue_user(UserTag::QuickOpen);
+                self.file_index_job.offer((gen, roots), &mut self.sched);
             }
             Effect::ScoreFiles { gen, index, query } => {
-                self.file_score_job = Some((gen, index, query));
-                self.sched.enqueue_user(UserTag::QuickOpen);
+                self.file_score_job
+                    .offer((gen, index, query), &mut self.sched);
             }
             Effect::LoadSearchIndex { gen, roots } => {
-                self.search_index_job = Some((gen, roots));
-                self.sched.enqueue_user(UserTag::SearchFiles);
+                self.search_index_job.offer((gen, roots), &mut self.sched);
             }
             Effect::SearchFilesChunk {
                 gen,
@@ -1735,15 +1727,15 @@ impl Interpreter {
                 start,
                 room,
             } => {
-                self.search_chunk_job = Some(SearchChunkJob {
+                let job = SearchChunkJob {
                     gen,
                     index,
                     query,
                     options,
                     start,
                     room,
-                });
-                self.sched.enqueue_user(UserTag::SearchFiles);
+                };
+                self.search_chunk_job.offer(job, &mut self.sched);
             }
             Effect::LoadExplorerDir {
                 tab_id,
@@ -1846,16 +1838,11 @@ impl Interpreter {
                 });
                 self.fill_pr_badge_slots();
             }
-            Effect::RunDoctor { gen } => {
-                self.doctor_slot = Some(gen);
-                self.queue_doctor();
-            }
+            Effect::RunDoctor { gen } => self.doctor_job.offer(gen, &mut self.sched),
             Effect::FillPrTitles { cmd, groups } => {
                 // The state runs one fill at a time; a queued slot only
                 // takes the newer groups.
-                if self.pr_title_job.replace((cmd, groups)).is_none() {
-                    self.sched.enqueue_user(UserTag::PrTitles);
-                }
+                self.pr_title_job.offer((cmd, groups), &mut self.sched);
             }
             Effect::CopyClipboard { text, announce } => {
                 let ok = comments::copy_to_clipboard(&text);
@@ -1888,8 +1875,7 @@ impl Interpreter {
         self.search_live
             .store(state.search_files_live_gen(), Ordering::Relaxed);
         if let Some(job) = state.search_preview_request() {
-            self.search_preview_job = Some(job);
-            self.sched.enqueue_user(UserTag::SearchFiles);
+            self.search_preview_job.offer(job, &mut self.sched);
         }
         self.maybe_queue_line_blame(state);
         self.maybe_queue_commit_card(state);
@@ -1927,54 +1913,34 @@ impl Interpreter {
 
     /// Queue a blame for the focused line when the cache has no answer.
     ///
-    /// Latest-only: the slot holds the newest question, and at most one
-    /// job is queued or running. Its apply calls this again, so a cursor
-    /// that moved on while git ran gets its own answer next.
+    /// Latest-only ([`LatestOnly`], serial): the slot holds the newest
+    /// question, and at most one job is queued or running. Its apply calls
+    /// this again, so a cursor that moved on while git ran gets its own
+    /// answer next.
     fn maybe_queue_line_blame(&mut self, state: &AppState) {
         let Some(key) = state.line_blame_want() else {
-            self.line_blame_slot = None;
+            self.line_blame_job.clear();
             return;
         };
         if state.line_blame.cached(&key).is_some() {
             return;
         }
-        self.line_blame_slot = Some(key);
-        if !self.line_blame_inflight {
-            self.line_blame_inflight = true;
-            self.sched.enqueue_user(UserTag::LineBlame);
-        }
+        self.line_blame_job.offer(key, &mut self.sched);
     }
 
     /// Queue a card lookup for the open commit popover when neither the
     /// graph nor the cache has its commit ([`AppState::commit_card_want`]).
     ///
-    /// Latest-only, like the line blame: the slot holds the newest commit,
-    /// and at most one job is queued or running. Its apply calls this
-    /// again, so a popover that moved on while git ran gets its own card
-    /// next.
+    /// Latest-only ([`LatestOnly`], serial): the slot holds the newest
+    /// commit, and at most one job is queued or running. Its apply calls
+    /// this again, so a popover that moved on while git ran gets its own
+    /// card next.
     fn maybe_queue_commit_card(&mut self, state: &AppState) {
         let Some(want) = state.commit_card_want() else {
-            self.commit_card_slot = None;
+            self.commit_card_job.clear();
             return;
         };
-        self.commit_card_slot = Some(want);
-        if !self.commit_card_inflight {
-            self.commit_card_inflight = true;
-            self.sched.enqueue_user(UserTag::CommitCard);
-        }
-    }
-
-    /// Queue one [`UserTag::Doctor`] slot for the request in
-    /// `doctor_slot`.
-    ///
-    /// Latest-only, like the line blame: at most one job is queued or
-    /// running, and the slot holds the newest request. Its apply calls this
-    /// again, so a re-run asked while a probe ran gets its own probe next.
-    fn queue_doctor(&mut self) {
-        if self.doctor_slot.is_some() && !self.doctor_inflight {
-            self.doctor_inflight = true;
-            self.sched.enqueue_user(UserTag::Doctor);
-        }
+        self.commit_card_job.offer(want, &mut self.sched);
     }
 
     /// Queue graph autoload when the cursor sits on the last loaded row.
@@ -2612,21 +2578,27 @@ impl Interpreter {
                 }
             }
             JobOutcome::Doctor { gen, checks } => {
-                self.doctor_inflight = false;
+                // A re-run asked while this probe ran gets its own probe
+                // next.
+                self.doctor_job.finish(&mut self.sched);
                 // A closed or re-run Doctor drops this answer.
                 if state.apply_doctor(gen, checks) {
                     self.mark();
                 }
-                self.queue_doctor();
             }
             JobOutcome::LineBlame { key, result } => {
-                self.line_blame_inflight = false;
+                // The waiting question may be cached or off target by now:
+                // `after_change` offers the current one again.
+                self.line_blame_job.clear();
+                self.line_blame_job.finish(&mut self.sched);
                 if state.apply_line_blame(key, result) {
                     self.mark();
                 }
             }
             JobOutcome::CommitCard { repo, sha, result } => {
-                self.commit_card_inflight = false;
+                // `after_change` offers the current popover commit again.
+                self.commit_card_job.clear();
+                self.commit_card_job.finish(&mut self.sched);
                 if state.apply_commit_card(repo, sha, result) {
                     self.mark();
                 }
@@ -3670,7 +3642,8 @@ impl Interpreter {
             UserTag::QuickOpen => {
                 // Explorer loads are queued one per enqueue, so draining them
                 // first never strands one behind the latest-only index /
-                // score slots.
+                // score slots (`LatestOnly`, overlap): each of those still
+                // holds its own queued slot.
                 let job = self.explorer_jobs.pop_front().or_else(|| {
                     (!self.explorer_previews.is_empty()).then(|| self.explorer_previews.remove(0))
                 });
@@ -3731,8 +3704,7 @@ impl Interpreter {
                 let live = Arc::clone(&self.search_live);
                 if let Some(job) = self
                     .search_chunk_job
-                    .take()
-                    .filter(|job| job.gen == live.load(Ordering::Relaxed))
+                    .take_if(|job| job.gen == live.load(Ordering::Relaxed))
                 {
                     let cwd = opts.cwd.clone();
                     spawn(id, Box::new(move || job.run(&cwd, &live)));
@@ -3741,9 +3713,8 @@ impl Interpreter {
                 self.sched.note_job_finished(id);
             }
             UserTag::LineBlame => {
-                let Some(key) = self.line_blame_slot.take() else {
+                let Some(key) = self.line_blame_job.take() else {
                     // The focused line moved off every blame target.
-                    self.line_blame_inflight = false;
                     self.sched.note_job_finished(id);
                     return;
                 };
@@ -3757,9 +3728,8 @@ impl Interpreter {
                 );
             }
             UserTag::CommitCard => {
-                let Some((repo, sha)) = self.commit_card_slot.take() else {
+                let Some((repo, sha)) = self.commit_card_job.take() else {
                     // The popover closed or its commit got its data.
-                    self.commit_card_inflight = false;
                     self.sched.note_job_finished(id);
                     return;
                 };
@@ -3776,12 +3746,7 @@ impl Interpreter {
             UserTag::Doctor => {
                 // Nothing to probe when the Doctor closed or a newer
                 // request already took the slot.
-                let Some(gen) = self
-                    .doctor_slot
-                    .take()
-                    .filter(|gen| state.doctor_awaits(*gen))
-                else {
-                    self.doctor_inflight = false;
+                let Some(gen) = self.doctor_job.take_if(|gen| state.doctor_awaits(*gen)) else {
                     self.sched.note_job_finished(id);
                     return;
                 };
@@ -7950,6 +7915,182 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Generation of a Quick Open or search-in-files outcome.
+    fn file_job_gen(outcome: &JobOutcome) -> u64 {
+        match outcome {
+            JobOutcome::FileIndex { gen, .. }
+            | JobOutcome::FileScore { gen, .. }
+            | JobOutcome::SearchIndex { gen, .. }
+            | JobOutcome::SearchChunk { gen, .. }
+            | JobOutcome::SearchPreview { gen, .. } => *gen,
+            _ => panic!("not a Quick Open or search-in-files outcome"),
+        }
+    }
+
+    /// Each latest-only Quick Open and search-in-files request kind keeps
+    /// only the newest request: two requests before a spawn queue one
+    /// slot, and the one job runs the newer request. The jobs run here over
+    /// no roots and an empty index, so they read no files.
+    #[test]
+    fn a_newer_file_job_request_replaces_the_waiting_one() {
+        fn file_index(gen: u64) -> Effect {
+            Effect::LoadFileIndex {
+                gen,
+                roots: Vec::new(),
+            }
+        }
+        fn file_score(gen: u64) -> Effect {
+            Effect::ScoreFiles {
+                gen,
+                index: Arc::new(FileIndex::default()),
+                query: "main".into(),
+            }
+        }
+        fn search_index(gen: u64) -> Effect {
+            Effect::LoadSearchIndex {
+                gen,
+                roots: Vec::new(),
+            }
+        }
+        fn search_chunk(gen: u64) -> Effect {
+            Effect::SearchFilesChunk {
+                gen,
+                index: Arc::new(FileIndex::default()),
+                query: "needle".into(),
+                options: SearchOptions::default(),
+                start: 0,
+                room: 10,
+            }
+        }
+        type Request = fn(u64) -> Effect;
+        let kinds: [(&str, UserTag, Request); 4] = [
+            ("file index", UserTag::QuickOpen, file_index),
+            ("file score", UserTag::QuickOpen, file_score),
+            ("search index", UserTag::SearchFiles, search_index),
+            ("search chunk", UserTag::SearchFiles, search_chunk),
+        ];
+        for (kind, tag, request) in kinds {
+            let mut state = fixture_state();
+            let mut interp = Interpreter::with_cap(4);
+            schedule_effect(&mut interp, &mut state, request(1), &Action::None);
+            schedule_effect(&mut interp, &mut state, request(2), &Action::None);
+            assert_eq!(interp.sched.queued_user_tag(tag), 1, "{kind}: one slot");
+            // A chunk starts only while its search is live.
+            interp.search_live.store(2, Ordering::Relaxed);
+            let jobs = capture_jobs(&mut interp, &mut state);
+            assert_eq!(jobs.len(), 1, "{kind}: one job");
+            let (_, work) = jobs.into_iter().next().unwrap();
+            assert_eq!(file_job_gen(&work()), 2, "{kind}: the newer request ran");
+
+            // A request while that job runs gets its own slot.
+            schedule_effect(&mut interp, &mut state, request(3), &Action::None);
+            assert_eq!(interp.sched.queued_user_tag(tag), 1, "{kind}: next slot");
+        }
+    }
+
+    /// Explorer loads and the latest-only index and score requests share
+    /// the Quick Open tag. Each waiting request gets a slot, in the order
+    /// Explorer load, index, score, although the Explorer load queued its
+    /// slot last.
+    #[test]
+    fn quick_open_jobs_sharing_a_tag_each_get_a_slot_in_order() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        let effects = [
+            Effect::LoadFileIndex {
+                gen: 1,
+                roots: Vec::new(),
+            },
+            Effect::ScoreFiles {
+                gen: 1,
+                index: Arc::new(FileIndex::default()),
+                query: "main".into(),
+            },
+            Effect::LoadExplorerDir {
+                tab_id: 1,
+                req: 1,
+                repo: "app".into(),
+                rel_dir: String::new(),
+                parent_ignored: true,
+            },
+        ];
+        for effect in effects {
+            schedule_effect(&mut interp, &mut state, effect, &Action::None);
+        }
+        assert_eq!(interp.sched.queued_user_tag(UserTag::QuickOpen), 3);
+        let kinds: Vec<&str> = capture_jobs(&mut interp, &mut state)
+            .into_iter()
+            .map(|(_, work)| match work() {
+                JobOutcome::ExplorerDir { .. } => "explorer",
+                JobOutcome::FileIndex { .. } => "index",
+                JobOutcome::FileScore { .. } => "score",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, ["explorer", "index", "score"]);
+    }
+
+    /// Two highlight moves before the preview read spawns: one slot, and
+    /// the one read is the newer file.
+    #[test]
+    fn a_newer_search_preview_replaces_the_waiting_read() {
+        let (root, mut state) = git_app_state("ws-effect-search-preview", "main", false);
+        std::fs::write(root.join("app/a.txt"), "needle a\n").unwrap();
+        std::fs::write(root.join("app/b.txt"), "needle b\n").unwrap();
+        let opts = opts(&state);
+        let mut interp = Interpreter::with_cap(4);
+        let effect = state.dispatch(Action::ToggleSearchFiles);
+        interp.interpret_sync(&mut state, &opts, effect, &Action::None);
+        for c in "needle".chars() {
+            let typed = Action::SearchFilesChar(c);
+            let effect = state.dispatch(typed.clone());
+            interp.interpret_sync(&mut state, &opts, effect, &typed);
+        }
+        let due = state
+            .search_files
+            .as_ref()
+            .and_then(|d| d.due)
+            .expect("armed");
+        let effect = state.fire_search_files_due(due).expect("due");
+        interp.interpret_sync(&mut state, &opts, effect, &Action::None);
+        let preview_of = |state: &AppState| {
+            let preview = state.search_files.as_ref()?.preview.as_ref()?;
+            Some((preview.gen, preview.rel.clone()))
+        };
+        let (_, first) = preview_of(&state).expect("first hit read");
+        assert_eq!(first, "a.txt");
+
+        // Down to b.txt, then back up to a.txt, with no spawn between.
+        for delta in [1, -1] {
+            let moved = Action::SearchFilesMove(delta);
+            let effect = state.dispatch(moved.clone());
+            schedule_effect(&mut interp, &mut state, effect, &moved);
+        }
+        let (newest, rel) = preview_of(&state).expect("preview waits");
+        assert_eq!(rel, "a.txt");
+        assert_eq!(interp.sched.queued_user_tag(UserTag::SearchFiles), 1);
+        assert_eq!(
+            interp.search_preview_job.waiting(),
+            Some(&(newest, "app".to_string(), "a.txt".to_string()))
+        );
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 1, "one read");
+        let (id, work) = jobs.into_iter().next().unwrap();
+        let outcome = work();
+        assert_eq!(file_job_gen(&outcome), newest, "the newer read ran");
+        apply_id(&mut interp, &mut state, id, outcome);
+        let dialog = state.search_files.as_ref().expect("dialog open");
+        match dialog
+            .preview
+            .as_ref()
+            .and_then(|preview| preview.body.as_ref())
+        {
+            Some(FileRead::Text { lines, .. }) => assert_eq!(lines[0], "needle a"),
+            _ => panic!("expected the text of a.txt"),
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Open (or focus) the Explorer tab of `checkout` and make `rel` its
     /// active inner tab: pinned, or the preview tab (replaced in place, as
     /// a tree move does). Returns the tab id and the load generation.
@@ -8486,10 +8627,24 @@ mod tests {
         let mut jobs = capture_jobs(&mut interp, &mut state);
         assert_eq!(jobs.len(), 1, "one card lookup");
 
-        // A newer commit while git runs: no second job, the slot keeps it.
+        // Newer commits while git runs: no second job, the slot keeps the
+        // newest.
+        let replaced = "d".repeat(40);
+        peek_commit(&mut state, &replaced);
+        schedule_effect(&mut interp, &mut state, Effect::None, &Action::None);
+        assert_eq!(
+            interp.commit_card_job.waiting(),
+            Some(&("app".to_string(), replaced))
+        );
         let missing = "e".repeat(40);
         peek_commit(&mut state, &missing);
         schedule_effect(&mut interp, &mut state, Effect::None, &Action::None);
+        assert_eq!(
+            interp.commit_card_job.waiting(),
+            Some(&("app".to_string(), missing.clone())),
+            "the newer commit replaced the waiting one"
+        );
+        assert_eq!(interp.sched.queued_user_tag(UserTag::CommitCard), 0);
         assert!(capture_jobs(&mut interp, &mut state).is_empty());
 
         // The stale card fills the cache without a paint, then the newer
@@ -8540,8 +8695,17 @@ mod tests {
 
         // Two more moves while git runs: no new job, the slot keeps the latest.
         move_diff_cursor(&mut interp, &mut state, 3);
+        let replaced = state.line_blame_want().expect("removed line asks");
+        assert_eq!(interp.line_blame_job.waiting(), Some(&replaced));
         move_diff_cursor(&mut interp, &mut state, 5);
         let latest = state.line_blame_want().expect("context line asks");
+        assert_ne!(replaced, latest);
+        assert_eq!(
+            interp.line_blame_job.waiting(),
+            Some(&latest),
+            "the newer line replaced the waiting one"
+        );
+        assert_eq!(interp.sched.queued_user_tag(UserTag::LineBlame), 0);
         assert!(capture_jobs(&mut interp, &mut state).is_empty());
 
         // The stale answer fills the cache, then the latest line runs.
@@ -8903,9 +9067,14 @@ mod tests {
             1,
             "a re-run replaces the queued request"
         );
+        assert_eq!(interp.doctor_job.waiting(), Some(&2), "the newest request");
         let jobs = capture_jobs(&mut interp, &mut state);
         assert_eq!(jobs.len(), 1, "one probe");
-        assert_eq!(interp.doctor_slot, None, "the job took the newest request");
+        assert_eq!(
+            interp.doctor_job.waiting(),
+            None,
+            "the job took the newest request"
+        );
         let (id, _probe) = jobs.into_iter().next().unwrap();
         apply_id(
             &mut interp,
@@ -8918,7 +9087,7 @@ mod tests {
         );
         let doctor = state.doctor.as_ref().expect("open");
         assert_eq!(doctor.checks.as_ref().map(Vec::len), Some(2));
-        assert!(!interp.doctor_inflight);
+        assert!(!interp.doctor_job.holds_slot());
         assert!(capture_jobs(&mut interp, &mut state).is_empty(), "idle");
     }
 
@@ -8950,7 +9119,7 @@ mod tests {
         // Closed before the queued probe spawns: no work starts.
         state.dispatch(Action::DoctorClose);
         assert!(capture_jobs(&mut interp, &mut state).is_empty());
-        assert!(!interp.doctor_inflight);
+        assert!(!interp.doctor_job.holds_slot());
 
         // Closed while a probe runs: its answer changes nothing.
         let effect = state.dispatch(Action::OpenDoctor);
@@ -10657,5 +10826,47 @@ mod tests {
         assert_eq!(state.pr_group_title("ABC-125"), Some("Title ABC-125"));
         let _ = std::fs::remove_dir_all(cmd.parent().unwrap());
         let _ = std::fs::remove_dir_all(renamed.parent().unwrap());
+    }
+
+    /// A newer fill before the spawn replaces the waiting one: one slot,
+    /// and the one job fills the newer groups.
+    #[cfg(unix)]
+    #[test]
+    fn a_newer_title_fill_replaces_the_waiting_one() {
+        use crate::tui::state::prs_fixtures::{set_title_command, title_script, workspace};
+        let mut state = workspace(false);
+        let cmd = title_script();
+        set_title_command(&mut state, &cmd);
+        let mut interp = Interpreter::with_cap(4);
+        let effects = match state.dispatch(Action::OpenPrsTab) {
+            Effect::Batch(effects) => effects,
+            effect => vec![effect],
+        };
+        let groups = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::FillPrTitles { groups, .. } => Some(groups),
+                _ => None,
+            })
+            .expect("the PRs tab asks for titles");
+        let older = Effect::FillPrTitles {
+            cmd: cmd.clone(),
+            groups: Vec::new(),
+        };
+        let newer = Effect::FillPrTitles {
+            cmd: cmd.clone(),
+            groups,
+        };
+        schedule_effect(&mut interp, &mut state, older, &Action::None);
+        schedule_effect(&mut interp, &mut state, newer, &Action::None);
+        assert_eq!(interp.sched.queued_user_tag(UserTag::PrTitles), 1);
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 1, "one fill");
+        let (_, work) = jobs.into_iter().next().unwrap();
+        let JobOutcome::PrTitles { titles, .. } = work() else {
+            panic!("expected a title fill");
+        };
+        assert_eq!(titles.get("ABC-123"), Some("Title ABC-123"), "newer groups");
+        let _ = std::fs::remove_dir_all(cmd.parent().unwrap());
     }
 }
