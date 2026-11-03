@@ -162,6 +162,14 @@ pub struct PrNotes {
     /// `reviewDecision: APPROVED`; GitLab `detailed_merge_status:
     /// need_rebase` with no approvals left. It has no note text: the next
     /// action [`NextAction::UpdateBranch`] carries it.
+    ///
+    /// Known gap on GitLab: `detailed_merge_status` names only the first
+    /// failed merge check, and `need_rebase` comes before
+    /// `requested_changes` and the later checks (MR dependencies, external
+    /// status checks). So a `need_rebase` MR can say `update branch` while
+    /// a reviewer's change request or such a check still blocks it.
+    /// Unresolved threads and CI do not have this gap: they come from
+    /// their own fields.
     pub behind: bool,
 }
 
