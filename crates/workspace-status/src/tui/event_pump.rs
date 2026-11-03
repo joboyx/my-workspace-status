@@ -20,14 +20,19 @@
 //! pull / push / FetchTick stay Handle so they enqueue on the per-gitdir
 //! remote queue.
 //!
-//! Held nav (`h`/`j`/`k`/`l`) maps Repeat to the same move as Press. The
-//! input thread drops queued copies of that key after each move so a hold
-//! cannot flush as a burst after release. Pane loads coalesce by request
+//! Held nav (`h`/`j`/`k`/`l`) maps Repeat to the same move as Press. After
+//! each held nav key the input thread also reads the queued copies of that
+//! key and forwards them marked. The loop thread drops a marked copy unless
+//! it types into a focused text field ([`keep_held_nav_backlog`]), so a
+//! hold cannot flush as a burst after release, and `ll` in `full` that
+//! arrives in one read types both letters. Pane loads coalesce by request
 //! id and [`super::app::RightPaneTarget`]; a stale result is discarded and
 //! the latest target is scheduled.
 
 use super::action::Action;
+use super::app::map_event;
 use super::keys::InputMode;
+use super::state::AppState;
 
 /// What to do with an event while a git subprocess owns a worker thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,6 +112,19 @@ pub fn classify_busy_dispatch(action: &Action, inner_action: Option<&Action>) ->
     }
 }
 
+/// True when a queued copy of a held nav key must still dispatch: in
+/// `state` it types a character into a focused text field
+/// ([`Action::types_text`]).
+///
+/// The input thread forwards every copy of a held nav key (`h` / `j` /
+/// `k` / `l`, arrows, PgUp / PgDn, Ctrl-u / Ctrl-d) that it reads behind
+/// the key, marked. A marked copy that does not type is dropped, so a hold
+/// in Normal mode cannot flush as a burst of moves after release. A
+/// Release never types.
+pub(crate) fn keep_held_nav_backlog(state: &AppState, event: &crossterm::event::Event) -> bool {
+    map_event(state, event).types_text()
+}
+
 /// True when the fetch, watch, and PR poll timers must not start (confirm,
 /// help, pickers, …).
 ///
@@ -149,6 +167,192 @@ pub fn action_triggers_graph_autoload(action: &Action) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::LocalBranch;
+    use crate::testutil::{app_state, key, repo};
+    use crate::tui::action::QuickOpenEntry;
+    use crate::tui::branches::{BranchPickerState, CreateBranchState};
+    use crate::tui::comments::{CommentKey, CommentPrompt};
+    use crate::tui::graph_focus::GraphFocusPickerState;
+    use crate::tui::quick_open::{QuickOpenScope, QuickOpenState};
+    use crate::tui::search_files::{SearchFilesState, SearchZone};
+    use crate::tui::theme::BackgroundMode;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+    /// A state over one `app` checkout with no overlay open (Normal mode).
+    fn normal() -> AppState {
+        app_state(&[repo("app", true)])
+    }
+
+    fn branches() -> Vec<LocalBranch> {
+        ["main", "topic/a"]
+            .iter()
+            .map(|name| LocalBranch {
+                name: (*name).into(),
+                current: *name == "main",
+                authordate: 0,
+            })
+            .collect()
+    }
+
+    fn search_files(zone: SearchZone) -> AppState {
+        let mut state = normal();
+        let mut dialog = SearchFilesState::new(
+            QuickOpenScope::Workspace,
+            String::new(),
+            crate::file_search::SearchOptions::default(),
+        );
+        dialog.zone = zone;
+        state.search_files = Some(dialog);
+        state
+    }
+
+    fn quick_open(entry: QuickOpenEntry) -> AppState {
+        let mut state = normal();
+        state.quick_open = Some(QuickOpenState::new(entry, QuickOpenScope::Workspace));
+        state
+    }
+
+    /// Builds a state with one text field focused.
+    type OpenTextField = fn() -> AppState;
+
+    /// Every `text-fields` surface in `docs/parity.md`, with a state that
+    /// has its text field focused.
+    const TEXT_FIELD_SURFACES: [(&str, OpenTextField); 10] = [
+        ("search-prompt", || {
+            let mut state = normal();
+            state.search_mode = true;
+            state
+        }),
+        ("help-search", || {
+            let mut state = normal();
+            state.help_open = true;
+            state.help_search_query = Some(String::new());
+            state
+        }),
+        ("quick-open-commands", || {
+            quick_open(QuickOpenEntry::Commands)
+        }),
+        ("quick-open-files", || quick_open(QuickOpenEntry::Files)),
+        ("search-files", || search_files(SearchZone::Query)),
+        ("comment", || {
+            let mut state = normal();
+            state.comment = Some(CommentPrompt::new(
+                CommentKey::Branch {
+                    repo: "app".into(),
+                    branch: "main".into(),
+                },
+                String::new(),
+                "app · branch main".into(),
+            ));
+            state
+        }),
+        ("create-branch", || {
+            let mut state = normal();
+            state.create_branch = Some(CreateBranchState {
+                repo: "app".into(),
+                name: String::new(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            });
+            state
+        }),
+        ("branch-picker", || {
+            let mut state = normal();
+            state.branch_picker = Some(BranchPickerState::checkout("app".into(), branches()));
+            state
+        }),
+        ("compare-picker", || {
+            let mut state = normal();
+            state.open_compare_picker("app".into(), branches());
+            state
+        }),
+        ("graph-focus-picker", || {
+            let mut state = normal();
+            state.graph_focus_picker =
+                Some(GraphFocusPickerState::new("app".into(), branches(), &[]));
+            state
+        }),
+    ];
+
+    /// Both pane looks `docs/parity.md` names: boxed (`"terminal"`) and
+    /// flat (`"paint"`).
+    const PANE_LOOKS: [(&str, BackgroundMode); 2] = [
+        ("boxed", BackgroundMode::Terminal),
+        ("flat", BackgroundMode::Paint),
+    ];
+
+    fn key_kind(code: KeyCode, kind: KeyEventKind) -> Event {
+        Event::Key(KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind))
+    }
+
+    /// A queued copy of a held nav key types in every text field, and is
+    /// dropped where it would move: Normal mode, the help body, and the
+    /// search-in-files results zone. A Release never types.
+    #[test]
+    fn held_nav_backlog_types_in_a_text_field_and_drops_elsewhere() {
+        let l = key(KeyCode::Char('l'));
+        let release = key_kind(KeyCode::Char('l'), KeyEventKind::Release);
+        for (surface, open) in TEXT_FIELD_SURFACES {
+            let state = open();
+            assert!(keep_held_nav_backlog(&state, &l), "{surface}: `l` types");
+            assert!(
+                keep_held_nav_backlog(&state, &key_kind(KeyCode::Char('l'), KeyEventKind::Repeat)),
+                "{surface}: a Repeat of `l` types"
+            );
+            assert!(
+                !keep_held_nav_backlog(&state, &release),
+                "{surface}: a Release is dropped"
+            );
+            assert!(
+                !keep_held_nav_backlog(&state, &key(KeyCode::Down)),
+                "{surface}: Down never types"
+            );
+        }
+        let mut help = normal();
+        help.help_open = true;
+        let results = search_files(SearchZone::Results);
+        for (case, state, event) in [
+            ("normal `l`", normal(), l.clone()),
+            ("normal `j`", normal(), key(KeyCode::Char('j'))),
+            ("help `j`", help, key(KeyCode::Char('j'))),
+            ("search-files results `j`", results, key(KeyCode::Char('j'))),
+        ] {
+            assert!(!keep_held_nav_backlog(&state, &event), "{case} is dropped");
+        }
+    }
+
+    /// A doubled nav letter that arrives in one read (`ll` in `full`) keeps
+    /// its second copy on every `text-fields` surface `docs/parity.md`
+    /// marks `supported` for `doubled-nav-letter`, in both looks. The
+    /// registry's surface list and this test's must match, so a new text
+    /// field gets a test case, and a surface this test drives gets a
+    /// registry row.
+    #[test]
+    fn text_fields_keep_a_doubled_nav_letter_on_every_registry_surface() {
+        let mut driven: Vec<(String, String)> = TEXT_FIELD_SURFACES
+            .iter()
+            .flat_map(|(id, _)| {
+                PANE_LOOKS
+                    .iter()
+                    .map(|(look, _)| (id.to_string(), look.to_string()))
+            })
+            .collect();
+        driven.sort();
+        assert_eq!(
+            crate::parity_registry::supported_surface_looks("text-fields", "doubled-nav-letter"),
+            driven,
+            "docs/parity.md `text-fields` / `doubled-nav-letter` surfaces and looks must match this test's"
+        );
+        for (surface, open) in TEXT_FIELD_SURFACES {
+            for (look, background) in PANE_LOOKS {
+                let mut state = open();
+                state.background = background;
+                assert!(
+                    keep_held_nav_backlog(&state, &key(KeyCode::Char('l'))),
+                    "{surface} {look}: the queued second `l` must type"
+                );
+            }
+        }
+    }
 
     #[test]
     fn resize_and_noise_do_not_autoload() {

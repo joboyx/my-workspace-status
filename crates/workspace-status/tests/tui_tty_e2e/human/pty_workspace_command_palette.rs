@@ -61,11 +61,10 @@ fn wait_readme_cursor(tui: &mut PtySession) {
     );
 }
 
-/// Type a palette filter at human key gaps for nav letters.
+/// Type a palette filter in one write.
 ///
-/// `keys("full-file")` lands as `ful-file`: the input thread treats the
-/// second `l` as held-nav backlog. `pull` can still match `Pull behind`
-/// after a dropped `l`; `full-file` cannot.
+/// `full-file` proves a doubled nav letter reaches the filter: `pull` can
+/// still match `Pull behind` after a dropped `l`; `full-file` cannot.
 fn type_palette_filter(tui: &mut PtySession, query: &str) {
     crate::support::type_palette_filter(tui, query);
 }

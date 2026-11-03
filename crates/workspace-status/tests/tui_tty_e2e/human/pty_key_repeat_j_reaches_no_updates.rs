@@ -193,7 +193,7 @@ fn pty_key_repeat_j_reaches_no_updates() {
         WAIT,
     );
 
-    // One Repeat at a time, each after the cursor moved: the input thread
+    // One Repeat at a time, each after the cursor moved: the event loop
     // drops a queued copy of a held nav key. Stop on No updates, so an
     // extra Repeat cannot reach merger.
     for _ in 0..20 {

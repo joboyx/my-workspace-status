@@ -144,8 +144,8 @@ fn pty_doctor_opens_from_palette_fills_rows_and_writes_no_ui_state() {
         WAIT,
     );
     // git is the first TOOLS row, after the seven TERMINAL rows on Unix.
-    // Each j waits for the cursor to move before the next: the input
-    // thread drops a queued copy of a held nav key, so two j presses that
+    // Each j waits for the cursor to move before the next: the event
+    // loop drops a queued copy of a held nav key, so two j presses that
     // arrive in one read move once.
     for _ in 0..7 {
         let before = cursor_row(&tui.screen());

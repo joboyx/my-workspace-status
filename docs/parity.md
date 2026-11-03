@@ -25,6 +25,7 @@ CI runs the checks in `crates/workspace-status/src/parity_registry.rs` (part of 
 | `tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tree_surface` (`tui/render.rs`) | The `file-lists` (`row-icons`), `icon-popovers` (`icon-hits`, `focused-row`), `row-marks` (`reviewed`, `comment`), or `watch-flash` (`flash`) surfaces whose code anchors name `draw_tree` or `draw_explorer_tree` differ from the trees that test drives (`tree`, `explorer-tree`), or one of them is not `supported` in each look; or on one of them a file or folder row paints other icons, glyphs, or order than on the other tree, a hit is wider than its glyph (also panned), a reloaded row does not flash, a hover does not find the icon, a click on a glyph does not pin its section (or a folder glyph changes the fold), `gh` does not pin one section per icon, or a section differs from the other tree's. |
 | `line_gutter_comment_marks_peek_pin_and_gh_on_every_registry_surface` (`tui/render.rs`) | The `icon-popovers` surfaces whose code anchors name `draw_diff_pane` or `draw_file_body` differ from the surfaces that test drives, or one of them is not `supported` for `icon-hits` and `focused-row` in each look; or on one of them (each diff tab, inline and side by side, panned or not) a comment mark records no hit or a hit wider than its glyph, a hover does not peek the comments of that line only, a click does not select the line and pin with no text selection or RULE drag, or `gh` on the marked cursor line does not pin it. |
 | `commit_popovers_match_on_every_registry_surface` (`tui/render.rs`) | The `commit-popovers` surfaces marked `supported` for `hash-card`, `time`, or `author`, in each look, differ from the surfaces that test drives; or the hit, hover peek, click pin, `y` copy, or Esc close fails on one of them. |
+| `text_fields_keep_a_doubled_nav_letter_on_every_registry_surface` (`tui/event_pump.rs`) | The `text-fields` surfaces marked `supported` for `doubled-nav-letter`, in each look, differ from the surfaces that test drives; or on one of them the loop thread drops a queued second `l`. |
 
 The `commit-footer` check is the pattern for other components: one test body that runs the same assertions on every surface the registry marks `supported`, and that compares its own surface list to `parity_registry::supported_surface_looks(component, feature)`.
 
@@ -366,6 +367,27 @@ The query dialogs that paint over the panes: the search-in-files dialog (Ctrl-f,
 | `branch-picker` | any | - | overlay | boxed, flat | `key_to_action`, `dispatch_write`, `draw_branch_picker` | n/a: I5, one Esc closes a filter picker |
 | `compare-picker` | any | - | overlay | boxed, flat | `key_to_action`, `dispatch_keymap`, `draw_compare_picker` | n/a: I5, one Esc closes a filter picker |
 | `graph-focus-picker` | Workspace | - | overlay | boxed, flat | `key_to_action`, `dispatch_keymap`, `draw_graph_focus_picker` | n/a: I5, one Esc closes a filter picker |
+
+### `text-fields` — Text fields type every printable key
+
+A focused text field types every printable key it reads, nav letters (`h` / `j` / `k` / `l`) included, also a doubled one (`ll` in `full`) that arrives in one terminal read. Outside a text field, a queued copy of a held nav key is dropped, so a hold cannot flush as a burst after release. The input thread forwards those copies marked (`take_held_nav_backlog`); the loop thread keeps a copy only when it types in the current state (`keep_held_nav_backlog`).
+
+| Feature | What | Tests |
+| --- | --- | --- |
+| `doubled-nav-letter` | A doubled nav letter typed in one write keeps both copies in the field. | `text_fields_keep_a_doubled_nav_letter_on_every_registry_surface`, `held_nav_backlog_types_in_a_text_field_and_drops_elsewhere`, `types_text_is_true_only_for_a_character_typed_into_a_text_field`, `pty_search_prompt_types_doubled_nav_letters_in_one_write`, `pty_quick_open_commands_types_doubled_nav_letters_in_one_write`, `pty_quick_open_files_types_doubled_nav_letters_in_one_write`, `pty_search_in_files_types_doubled_nav_letters_in_one_write`, `pty_comment_body_types_doubled_nav_letters_in_one_write` |
+
+| Surface | Tab | Depth | Pane | Looks | Code anchors | `doubled-nav-letter` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `search-prompt` | any | - | status row | boxed, flat | `keep_held_nav_backlog`, `key_to_action`, `dispatch_keymap` | supported |
+| `help-search` | any | - | overlay | boxed, flat | `keep_held_nav_backlog`, `key_to_action`, `dispatch_keymap`, `draw_help` | supported |
+| `quick-open-commands` | any | - | overlay | boxed, flat | `keep_held_nav_backlog`, `quick_open_key_action`, `quick_open_edit`, `draw_quick_open` | supported |
+| `quick-open-files` | any | - | overlay | boxed, flat | `keep_held_nav_backlog`, `quick_open_key_action`, `quick_open_edit`, `draw_quick_open` | supported |
+| `search-files` | any | - | overlay | boxed, flat | `keep_held_nav_backlog`, `search_files_key_action`, `search_files_edit`, `draw_search_files` | supported |
+| `comment` | any | - | overlay | boxed, flat | `keep_held_nav_backlog`, `key_to_action`, `dispatch_keymap`, `draw_comment` | supported |
+| `create-branch` | any | - | overlay | boxed, flat | `keep_held_nav_backlog`, `key_to_action`, `dispatch_write`, `draw_create_branch` | supported |
+| `branch-picker` | any | - | overlay | boxed, flat | `keep_held_nav_backlog`, `key_to_action`, `dispatch_write`, `draw_branch_picker` | supported |
+| `compare-picker` | any | - | overlay | boxed, flat | `keep_held_nav_backlog`, `key_to_action`, `dispatch_keymap`, `draw_compare_picker` | supported |
+| `graph-focus-picker` | Workspace | - | overlay | boxed, flat | `keep_held_nav_backlog`, `key_to_action`, `dispatch_keymap`, `draw_graph_focus_picker` | supported |
 
 ## Open gaps
 

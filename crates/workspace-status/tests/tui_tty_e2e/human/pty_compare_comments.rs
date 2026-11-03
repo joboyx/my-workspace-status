@@ -78,7 +78,7 @@ fn move_diff_cursor_to(tui: &mut PtySession, needle: &str) {
     );
 }
 
-/// Type a comment body; after each nav letter wait for its paint.
+/// Type a comment body in one write and wait for its paint.
 fn type_body(tui: &mut PtySession, body: &str) {
     crate::support::type_palette_filter(tui, body);
     tui.wait_pred(

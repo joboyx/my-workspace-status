@@ -30,10 +30,7 @@ fn family_row_focused(screen: &str) -> bool {
         && !tree_cursor_on(screen, "workspace")
 }
 
-/// Type a palette filter at human key gaps for nav letters.
-///
-/// `keys("vs default")` can drop the `l` in `default`. `close` has the same
-/// held-nav risk.
+/// Type a palette filter in one write.
 fn type_palette_filter(tui: &mut PtySession, query: &str) {
     crate::support::type_palette_filter(tui, query);
 }

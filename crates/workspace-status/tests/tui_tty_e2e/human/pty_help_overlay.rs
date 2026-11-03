@@ -278,7 +278,7 @@ fn pty_help_overlay() {
     );
     // One PgDn at a time until the bottom shows. PgDn is a held
     // navigation key: the event loop drops queued copies of it
-    // (`discard_held_nav_backlog` in `tui/app.rs`), so a burst of presses
+    // (`keep_held_nav_backlog` in `tui/event_pump.rs`), so a burst of presses
     // can count as one, so each PgDn waits for the help body to scroll
     // before the next. The loop stops on the bottom rows.
     for _ in 0..10 {

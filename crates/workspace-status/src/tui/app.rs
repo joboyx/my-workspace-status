@@ -1040,20 +1040,29 @@ pub(crate) fn resume_tui(
     Ok(())
 }
 
-/// Drop queued copies of a held nav key (press / repeat / release).
+/// Read the queued copies of a held nav key (press / repeat / release)
+/// and the first event after them, without dropping any.
 ///
-/// Returns the first event that is not that backlog so it is not lost
-/// (the reader cannot unread).
-pub(crate) fn discard_held_nav_backlog(held: KeyEvent) -> Option<TtyEvent> {
+/// Returns the copies in read order, then the first event that is not a
+/// copy (`None` when the queue ran dry or a read failed). The reader
+/// cannot unread, so the caller forwards all of them. The loop thread
+/// decides per copy: it types in a text field, or it is dropped so a hold
+/// cannot flush as a burst after release
+/// ([`super::event_pump::keep_held_nav_backlog`]). The input thread cannot
+/// make that call: the key that opens a text field may not be dispatched
+/// yet.
+pub(crate) fn take_held_nav_backlog(held: KeyEvent) -> (Vec<TtyEvent>, Option<TtyEvent>) {
+    let mut backlog = Vec::new();
     while poll_event(Duration::from_millis(0)).unwrap_or(false) {
         let Ok(next) = read_event_origin() else {
-            return None;
+            return (backlog, None);
         };
         if !is_held_nav_backlog(held, &next.0) {
-            return Some(next);
+            return (backlog, Some(next));
         }
+        backlog.push(next);
     }
-    None
+    (backlog, None)
 }
 
 /// Hand the terminal to a blocking editor or diff tool, wait for it, then

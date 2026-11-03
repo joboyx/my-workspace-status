@@ -1346,39 +1346,15 @@ pub fn open_regions_first_hunk_highlight(workspace: &Path) -> PtySession {
     tui
 }
 
-/// True for a key the input thread treats as held navigation.
-///
-/// After such a press it drops queued copies of the same key, so a second
-/// copy that arrives in the same read is lost even in a text field.
-fn is_nav_letter(c: char) -> bool {
-    matches!(c, 'h' | 'H' | 'j' | 'J' | 'k' | 'K' | 'l' | 'L')
-}
-
 /// Type `text` into the focused text field (palette filter, search
-/// prompt, comment body), one key per write.
+/// prompt, comment body) in one write, the way a paste or fast typing
+/// reaches the terminal.
 ///
-/// After a nav letter (`h` / `j` / `k` / `l`) it waits until the field
-/// shows the text typed so far with its caret (`…typed▏`) before the next
-/// key, so a doubled letter (`full`) is never queued behind its twin. The
-/// wait is on the paint, not on time.
+/// A text field types every key it reads, nav letters included, so a
+/// doubled letter (`full`) arrives whole. The caller waits on the paint
+/// it expects next.
 pub fn type_palette_filter(tui: &mut PtySession, text: &str) {
-    let mut typed = String::new();
-    for c in text.chars() {
-        tui.key(c);
-        typed.push(c);
-        if is_nav_letter(c) {
-            let tail: String = {
-                let chars: Vec<char> = typed.chars().collect();
-                chars[chars.len().saturating_sub(16)..].iter().collect()
-            };
-            let shown = format!("{tail}▏");
-            tui.wait_pred(
-                |screen| screen.contains(&shown),
-                &format!("the field shows `{shown}`"),
-                WAIT,
-            );
-        }
-    }
+    tui.send_bytes(text.as_bytes());
 }
 
 /// Where the focused cursor bar (`▌`) is: its screen row and the 14 cells
@@ -1400,7 +1376,7 @@ pub fn cursor_key(screen: &str) -> Option<(usize, String)> {
 /// Send one nav key with `send` and wait until the focused cursor moved
 /// ([`cursor_key`]) on a frame where `on_view` holds.
 ///
-/// One key at a time: the input thread drops a queued copy of a held nav
+/// One key at a time: the event loop drops a queued copy of a held nav
 /// key, so two presses in one read would move once.
 pub fn step_cursor(
     tui: &mut PtySession,
