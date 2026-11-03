@@ -4040,7 +4040,8 @@ mod tests {
 
     use crate::config::WorkspaceStatusConfig;
     use crate::git::{LocalBranch, NameStatus};
-    use crate::snapshot::{build_workspace_snapshot, FileChange, RepoSnapshot, SyncStatus};
+    use crate::snapshot::{build_workspace_snapshot, SyncStatus};
+    use crate::testutil::{app_state, app_state_of, repo, unstaged_change};
     use crate::tui::app::{CompareRangeLoad, MergeCompute, TuiOpts};
     use crate::tui::diff::DiffContent;
     use crate::tui::drill::{CommitFile, CommitFileSource, DrillView};
@@ -4056,46 +4057,13 @@ mod tests {
     use crate::tui::chrome::{diverged_pull_status, STATUS_NOTHING_TO_PULL};
     use crate::tui::status::StatusKind;
 
-    fn repo(name: &str, dirty: bool) -> RepoSnapshot {
-        RepoSnapshot {
-            repo: name.into(),
-            branch: "main".into(),
-            sync_status: SyncStatus::NoUpstream,
-            sync_note: String::new(),
-            upstream_rewrite: None,
-            head: String::new(),
-            has_unstaged: dirty,
-            has_staged: false,
-            has_untracked: false,
-            changes: if dirty {
-                vec![FileChange {
-                    path: "README.md".into(),
-                    staged_status: None,
-                    unstaged_status: Some("M".into()),
-                    untracked: false,
-                    old_path: None,
-                }]
-            } else {
-                vec![]
-            },
-            checkout_kind: crate::snapshot::CheckoutKind::Primary,
-            primary_repo: None,
-            merged_into_default: None,
-            default_branch_override: None,
-            default_tip_ref: None,
-            default_branch: None,
-            local_branches: Vec::new(),
-        }
-    }
-
     fn fixture_state() -> AppState {
-        let snapshot = build_workspace_snapshot(
+        app_state_of(build_workspace_snapshot(
             &[repo("app", true), repo("notes", true), repo("lib", true)],
             &["notes".into()],
             false,
             &[],
-        );
-        AppState::new(PathBuf::from("/tmp"), snapshot, true)
+        ))
     }
 
     fn opts(state: &AppState) -> TuiOpts {
@@ -5956,8 +5924,7 @@ mod tests {
         let mut wt = repo("wt", false);
         wt.checkout_kind = crate::snapshot::CheckoutKind::Linked;
         wt.primary_repo = Some("app".into());
-        let snapshot = build_workspace_snapshot(&[repo("app", false), wt], &[], false, &[]);
-        AppState::new(PathBuf::from("/tmp"), snapshot, true)
+        app_state(&[repo("app", false), wt])
     }
 
     #[test]
@@ -6224,8 +6191,7 @@ mod tests {
         app.sync_note = "ahead 1, behind 1".into();
         let mut lib = repo("lib", false);
         lib.sync_status = SyncStatus::UpToDate;
-        let snapshot = build_workspace_snapshot(&[app, lib], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[app, lib]);
         state.cursor = 0;
         let mut interp = Interpreter::with_cap(4);
         schedule_effect(
@@ -6304,8 +6270,7 @@ mod tests {
         // The leftover status must not change the outcome: a live
         // `Fetching…` line and an idle line from an earlier `p` both queue.
         for before in ["Fetching 0/2…", STATUS_NOTHING_TO_PULL] {
-            let snapshot = build_workspace_snapshot(&[app.clone(), lib.clone()], &[], false, &[]);
-            let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+            let mut state = app_state(&[app.clone(), lib.clone()]);
             state.cursor = 0;
             let mut interp = Interpreter::with_cap(4);
             schedule_effect(
@@ -6349,8 +6314,7 @@ mod tests {
         });
         let mut lib = repo("lib", false);
         lib.sync_status = SyncStatus::UpToDate;
-        let snapshot = build_workspace_snapshot(&[app, lib], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[app, lib]);
         state.cursor = 0;
         let mut interp = Interpreter::with_cap(4);
         schedule_effect(
@@ -7302,8 +7266,7 @@ mod tests {
 
     #[test]
     fn background_fetch_tick_with_nothing_to_fetch_releases_the_claim() {
-        let snapshot = build_workspace_snapshot(&[], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[]);
         let mut interp = Interpreter::with_cap(4);
         let now = unix_now_ms();
         background_tick(&mut interp, &mut state, now);
@@ -8154,13 +8117,7 @@ mod tests {
         let mut changed = lines.clone();
         changed[19] = "line twenty".into();
         std::fs::write(app.join("long.txt"), changed.join("\n") + "\n").unwrap();
-        let change = FileChange {
-            path: "long.txt".into(),
-            staged_status: None,
-            unstaged_status: Some("M".into()),
-            untracked: false,
-            old_path: None,
-        };
+        let change = unstaged_change("long.txt");
         let opts = opts(&state);
         let mut interp = Interpreter::with_cap(4);
         let (tab_id, gen) = explorer_inner(&mut state, "app", "long.txt", true, false);
@@ -9194,8 +9151,7 @@ mod tests {
     fn blame_reveal_from_a_dir_row_queues_no_older_page_for_a_loaded_commit() {
         let mut app_repo = repo("app", true);
         app_repo.changes[0].path = "src/lib.rs".into();
-        let snapshot = build_workspace_snapshot(&[app_repo], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[app_repo]);
         state.cursor = state
             .rows
             .iter()
@@ -10480,9 +10436,7 @@ mod tests {
         use crate::tui::pr_status::PrState;
         use crate::tui::pull_request::PullRequest;
         let names = ["a", "b", "c", "d"];
-        let snapshot =
-            build_workspace_snapshot(&names.map(|name| repo(name, false)), &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&names.map(|name| repo(name, false)));
         let remote = |name: &str| format!("git@github.com:acme/{name}.git");
         let found = |number: u64, pr_state| {
             let url = format!("https://github.com/acme/app/pull/{number}");
@@ -10563,9 +10517,7 @@ mod tests {
         };
         let target = |name: &str| (PathBuf::from(name), "main".to_string());
         let busy = || {
-            let snapshot =
-                build_workspace_snapshot(&names.map(|name| repo(name, false)), &[], false, &[]);
-            let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+            let mut state = app_state(&names.map(|name| repo(name, false)));
             let _ = state.due_pr_lookups();
             for (number, name) in (1..).zip(names) {
                 let first = found(number, PrState::CiRunning);

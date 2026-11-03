@@ -1154,6 +1154,7 @@ mod tests {
     use crate::snapshot::{
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
     };
+    use crate::testutil::{app_state, repo_snapshot, unstaged_change};
     use crate::tui::comments::{put_comment, CommentKey};
     use crate::tui::tree::SegRole;
     use workspace_status_graph::{
@@ -1165,44 +1166,22 @@ mod tests {
 
     fn repo(name: &str, status: SyncStatus, note: &str) -> RepoSnapshot {
         RepoSnapshot {
-            repo: name.into(),
             branch: "feature".into(),
             sync_status: status,
             sync_note: note.into(),
-            upstream_rewrite: None,
             head: "abc".into(),
             has_unstaged: true,
-            has_staged: false,
-            has_untracked: false,
-            changes: vec![FileChange {
-                path: "src/lib.rs".into(),
-                staged_status: None,
-                unstaged_status: Some("M".into()),
-                untracked: false,
-                old_path: None,
-            }],
-            checkout_kind: CheckoutKind::Primary,
-            primary_repo: None,
-            merged_into_default: None,
-            default_branch_override: None,
-            default_tip_ref: None,
-            default_branch: None,
-            local_branches: Vec::new(),
+            changes: vec![unstaged_change("src/lib.rs")],
+            ..repo_snapshot(name)
         }
     }
 
     /// `app` two commits behind, `lib` one ahead; cursor on `lib`.
     fn app() -> AppState {
-        let snapshot = build_workspace_snapshot(
-            &[
-                repo("app", SyncStatus::Behind, "behind by 2 commits"),
-                repo("lib", SyncStatus::Ahead, "ahead by 1 commits"),
-            ],
-            &[],
-            false,
-            &[],
-        );
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state(&[
+            repo("app", SyncStatus::Behind, "behind by 2 commits"),
+            repo("lib", SyncStatus::Ahead, "ahead by 1 commits"),
+        ]);
         focus(&mut app, "repo:lib");
         app
     }
@@ -2099,8 +2078,7 @@ mod tests {
         ];
         snap.has_staged = true;
         snap.has_untracked = true;
-        let snapshot = build_workspace_snapshot(&[snap], &[], false, &[]);
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state(&[snap]);
         for (line, body, resolved) in [
             (1, "first\nsecond line", false),
             (2, "fixed", true),
@@ -3401,8 +3379,7 @@ mod tests {
         wt.branch = "side".into();
         wt.checkout_kind = CheckoutKind::Linked;
         wt.primary_repo = Some("elsewhere".into());
-        let snapshot = build_workspace_snapshot(&[wt], &[], false, &[]);
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state(&[wt]);
         let row = app
             .rows
             .iter()

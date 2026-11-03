@@ -397,9 +397,8 @@ pub fn viewed_row_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::{
-        build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
-    };
+    use crate::snapshot::{build_workspace_snapshot, FileChange, RepoSnapshot};
+    use crate::testutil::{repo_snapshot, unstaged_change};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -806,32 +805,12 @@ mod tests {
         fs::write(dir.join("demo/src").join("a.ts"), "x\n").ok();
         fs::create_dir_all(dir.join("demo/src")).unwrap();
         fs::write(dir.join("demo/src/a.ts"), "x\n").unwrap();
-        let change = FileChange {
-            path: "src/a.ts".into(),
-            staged_status: None,
-            unstaged_status: Some("M".into()),
-            untracked: false,
-            old_path: None,
-        };
+        let change = unstaged_change("src/a.ts");
         let snap = build_workspace_snapshot(
             &[RepoSnapshot {
-                repo: "demo".into(),
-                branch: "main".into(),
-                sync_status: SyncStatus::NoUpstream,
-                sync_note: String::new(),
-                upstream_rewrite: None,
-                head: String::new(),
                 has_unstaged: true,
-                has_staged: false,
-                has_untracked: false,
                 changes: vec![change.clone()],
-                checkout_kind: CheckoutKind::Primary,
-                primary_repo: None,
-                merged_into_default: None,
-                default_branch_override: None,
-                default_tip_ref: None,
-                default_branch: None,
-                local_branches: Vec::new(),
+                ..repo_snapshot("demo")
             }],
             &[],
             false,
@@ -861,23 +840,10 @@ mod tests {
     fn dual_ms_snapshot(change: FileChange) -> WorkspaceSnapshot {
         build_workspace_snapshot(
             &[RepoSnapshot {
-                repo: "demo".into(),
-                branch: "main".into(),
-                sync_status: SyncStatus::NoUpstream,
-                sync_note: String::new(),
-                upstream_rewrite: None,
-                head: String::new(),
                 has_unstaged: true,
                 has_staged: true,
-                has_untracked: false,
                 changes: vec![change],
-                checkout_kind: CheckoutKind::Primary,
-                primary_repo: None,
-                merged_into_default: None,
-                default_branch_override: None,
-                default_tip_ref: None,
-                default_branch: None,
-                local_branches: Vec::new(),
+                ..repo_snapshot("demo")
             }],
             &[],
             false,

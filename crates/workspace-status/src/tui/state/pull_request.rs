@@ -2032,36 +2032,17 @@ mod tests {
     use super::super::{FocusPane, IconHit};
     use super::*;
     use crate::helpers::DETACHED_HEAD_BRANCH;
-    use crate::snapshot::{
-        build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
-    };
+    use crate::snapshot::{build_workspace_snapshot, CheckoutKind, RepoSnapshot, SyncStatus};
+    use crate::testutil::{app_state_of, repo_snapshot, unstaged_change};
     use crate::tui::action::Action;
 
     fn repo(name: &str, branch: &str) -> RepoSnapshot {
         RepoSnapshot {
-            repo: name.into(),
             branch: branch.into(),
-            sync_status: SyncStatus::NoUpstream,
-            sync_note: String::new(),
-            upstream_rewrite: None,
             head: "abc".into(),
             has_unstaged: true,
-            has_staged: false,
-            has_untracked: false,
-            changes: vec![FileChange {
-                path: "src/lib.rs".into(),
-                staged_status: None,
-                unstaged_status: Some("M".into()),
-                untracked: false,
-                old_path: None,
-            }],
-            checkout_kind: CheckoutKind::Primary,
-            primary_repo: None,
-            merged_into_default: None,
-            default_branch_override: None,
-            default_tip_ref: None,
-            default_branch: None,
-            local_branches: Vec::new(),
+            changes: vec![unstaged_change("src/lib.rs")],
+            ..repo_snapshot(name)
         }
     }
 
@@ -2074,8 +2055,7 @@ mod tests {
 
     fn app_with(repos: &[RepoSnapshot], hidden: &[&str]) -> AppState {
         let hidden: Vec<String> = hidden.iter().map(|name| name.to_string()).collect();
-        let snapshot = build_workspace_snapshot(repos, &hidden, false, &[]);
-        AppState::new(PathBuf::from("/tmp"), snapshot, true)
+        app_state_of(build_workspace_snapshot(repos, &hidden, false, &[]))
     }
 
     fn focus(app: &mut AppState, id: &str) {

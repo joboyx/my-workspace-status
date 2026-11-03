@@ -594,29 +594,15 @@ mod tests {
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
         WorkspaceRepoSnapshot,
     };
+    use crate::testutil::repo_snapshot;
     use std::path::PathBuf;
     use workspace_status_graph::{Commit, GraphRef, Stash, Worktree};
 
     /// A checkout row with `note` as its sync note.
     fn status_row(name: &str, note: &str) -> RepoSnapshot {
         RepoSnapshot {
-            repo: name.into(),
-            branch: "main".into(),
-            sync_status: SyncStatus::NoUpstream,
             sync_note: note.into(),
-            upstream_rewrite: None,
-            head: String::new(),
-            has_unstaged: false,
-            has_staged: false,
-            has_untracked: false,
-            changes: Vec::new(),
-            checkout_kind: CheckoutKind::Primary,
-            primary_repo: None,
-            merged_into_default: None,
-            default_branch_override: None,
-            default_tip_ref: None,
-            default_branch: None,
-            local_branches: Vec::new(),
+            ..repo_snapshot(name)
         }
     }
 

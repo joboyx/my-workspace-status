@@ -8390,6 +8390,7 @@ mod tests {
     use crate::snapshot::{
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
     };
+    use crate::testutil::{app_state, app_state_ascii, repo, repo_snapshot, unstaged_change};
     use crate::tui::action::{Action, Effect};
     use crate::tui::comments::{put_comment, CommentKey};
     use crate::tui::icons::{icon_linked_worktree, icon_repo};
@@ -8403,38 +8404,6 @@ mod tests {
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
     use workspace_status_graph::{graph_gutter_cap, Commit, GraphModel, GraphRow};
-
-    fn repo(name: &str, dirty: bool) -> RepoSnapshot {
-        RepoSnapshot {
-            repo: name.into(),
-            branch: "main".into(),
-            sync_status: SyncStatus::NoUpstream,
-            sync_note: String::new(),
-            upstream_rewrite: None,
-            head: String::new(),
-            has_unstaged: dirty,
-            has_staged: false,
-            has_untracked: false,
-            changes: if dirty {
-                vec![FileChange {
-                    path: "README.md".into(),
-                    staged_status: None,
-                    unstaged_status: Some("M".into()),
-                    untracked: false,
-                    old_path: None,
-                }]
-            } else {
-                vec![]
-            },
-            checkout_kind: crate::snapshot::CheckoutKind::Primary,
-            primary_repo: None,
-            merged_into_default: None,
-            default_branch_override: None,
-            default_tip_ref: None,
-            default_branch: None,
-            local_branches: Vec::new(),
-        }
-    }
 
     fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
         let buf = terminal.backend().buffer();
@@ -8515,8 +8484,7 @@ mod tests {
     }
 
     fn two_pane_diff_state() -> AppState {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         let file = state
             .rows
             .iter()
@@ -9007,16 +8975,9 @@ mod tests {
             open: || {
                 let mut app = repo("app", true);
                 app.changes = (0..BAR_LIST_ROWS)
-                    .map(|i| FileChange {
-                        path: bar_list_name(i),
-                        staged_status: None,
-                        unstaged_status: Some("M".into()),
-                        untracked: false,
-                        old_path: None,
-                    })
+                    .map(|i| unstaged_change(&bar_list_name(i)))
                     .collect();
-                let snapshot = build_workspace_snapshot(&[app], &[], false, &[]);
-                AppState::new(PathBuf::from("/tmp"), snapshot, true)
+                app_state(&[app])
             },
             pane: FocusPane::Left,
             vbar: VScrollbar::Tree,
@@ -11395,8 +11356,7 @@ mod tests {
     /// the added line still paints (it used to be built split and dropped).
     #[test]
     fn boundary_width_with_scrollbar_paints_added_lines() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         let file = state
             .rows
             .iter()
@@ -11433,8 +11393,7 @@ mod tests {
     }
 
     fn json_syntax_diff_state() -> AppState {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         let file = state
             .rows
             .iter()
@@ -11549,8 +11508,7 @@ mod tests {
     }
 
     fn word_diff_state(lines: Vec<String>, mode: DiffMode) -> AppState {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         let file = state
             .rows
             .iter()
@@ -12588,8 +12546,7 @@ mod tests {
     /// [`two_pane_graph_state`] over the checkouts `repos`, with the tree
     /// cursor on checkout `focus` (the graph is the seed graph).
     fn two_pane_graph_state_of(repos: &[RepoSnapshot], focus: &str) -> AppState {
-        let snapshot = build_workspace_snapshot(repos, &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(repos);
         let repo_row = state
             .rows
             .iter()
@@ -14998,8 +14955,7 @@ mod tests {
 
     #[test]
     fn tab_strip_hit_boxes_match_painted_cells_after_arrow_labels() {
-        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", false)]);
         state
             .tabs
             .open_or_focus("app".into(), "main".into(), "HEAD".into());
@@ -15055,8 +15011,7 @@ mod tests {
 
     #[test]
     fn tab_close_is_dim_until_hovered_on_active_and_inactive_tabs() {
-        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", false)]);
         state
             .tabs
             .open_or_focus("app".into(), "main".into(), "HEAD".into());
@@ -15138,8 +15093,7 @@ mod tests {
     /// Workspace plus five compare tabs `alpha` … `echo` against `main`.
     /// The last opened (`echo`) is active.
     fn five_compare_tabs() -> AppState {
-        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", false)]);
         for checkout in ["alpha", "bravo", "charlie", "delta", "echo"] {
             state
                 .tabs
@@ -15157,8 +15111,7 @@ mod tests {
             host: host.into(),
         };
         let now = Instant::now();
-        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, false);
+        let mut state = app_state_ascii(&[repo("app", false)], false);
         let mut terminal = Terminal::new(TestBackend::new(80, 1)).unwrap();
         let clean = paint_tab_row(&mut terminal, &mut state).concat();
         assert!(!clean.contains('✕'), "no outage, no mark: {clean}");
@@ -15355,8 +15308,7 @@ mod tests {
     fn terminal_below_minimum_drops_keys_for_a_hidden_overlay() {
         use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
         let key = |code, mods| Event::Key(KeyEvent::new(code, mods));
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
         draw_state(&mut terminal, &mut state);
         assert!(state.too_small);
@@ -15433,8 +15385,7 @@ mod tests {
         use crossterm::event::{
             Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
         };
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         for (cols, rows) in [
             (MIN_TERM_COLS - 1, MIN_TERM_ROWS),
             (MIN_TERM_COLS, MIN_TERM_ROWS - 1),
@@ -15633,9 +15584,7 @@ mod tests {
 
     #[test]
     fn paints_tree_and_graph() {
-        let snapshot =
-            build_workspace_snapshot(&[repo("app", true), repo("lib", false)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true), repo("lib", false)]);
         state.graph = Some(GraphModel {
             commits: vec![Commit {
                 id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
@@ -15682,8 +15631,7 @@ mod tests {
 
     #[test]
     fn commit_file_rows_reuse_trailing_status_badge() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.open_commit_files(
             "app".into(),
             super::super::drill::CommitFileSource::Commit {
@@ -15735,8 +15683,7 @@ mod tests {
 
     #[test]
     fn commit_file_row_paints_comment_mark_when_file_has_comments() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.comment_store = put_comment(
             &state.comment_store,
             CommentKey::CommitLine {
@@ -15795,8 +15742,7 @@ mod tests {
 
     #[test]
     fn help_overlay_is_short() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.help_open = true;
         let backend = TestBackend::new(200, 40);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -15826,8 +15772,7 @@ mod tests {
 
     #[test]
     fn help_overlay_paints_last_git_row_at_pty_size() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.help_open = true;
         let backend = TestBackend::new(140, 32);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -15856,8 +15801,7 @@ mod tests {
         use super::super::help::{
             help_body_line_count, help_column_widths, help_legend_line_count, HELP_GROUPS,
         };
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.help_open = true;
         let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
@@ -15931,8 +15875,7 @@ mod tests {
         };
         // Box widths 64, 100, and 140.
         for cols in [68u16, 104, 144] {
-            let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
-            let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+            let mut state = app_state(&[repo("app", false)]);
             state
                 .tabs
                 .open_or_focus("alpha".into(), "main".into(), "HEAD".into());
@@ -16021,8 +15964,7 @@ mod tests {
     fn help_legend_paints_under_the_columns() {
         use super::super::icons::IconKind;
         for ascii in [true, false] {
-            let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-            let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, ascii);
+            let mut state = app_state_ascii(&[repo("app", true)], ascii);
             state.help_open = true;
             let mut terminal = Terminal::new(TestBackend::new(200, 120)).unwrap();
             terminal.draw(|frame| draw(frame, &mut state)).unwrap();
@@ -16068,8 +16010,7 @@ mod tests {
             assert_help_version_lower_right(&text);
         }
 
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.help_open = true;
         state.help_search_query = Some("worktree".into());
         let mut terminal = Terminal::new(TestBackend::new(200, 120)).unwrap();
@@ -16099,8 +16040,7 @@ mod tests {
     /// footer; once it scrolls into view the cue goes.
     #[test]
     fn help_search_counts_hits_below_the_fold() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.help_open = true;
         state.help_search_query = Some("rails".into());
         // The rails meaning's first words (the row wraps at this width).
@@ -16135,8 +16075,7 @@ mod tests {
         use super::super::help::help_legend_key_width;
         use super::super::icons::IconGroup;
         for id in crate::tui::theme::THEME_IDS {
-            let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-            let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+            let mut state = app_state(&[repo("app", true)]);
             state.theme = id;
             state.help_open = true;
             let mut terminal = Terminal::new(TestBackend::new(200, 120)).unwrap();
@@ -16219,8 +16158,7 @@ mod tests {
     #[test]
     fn help_search_highlights_without_hiding_rows() {
         for id in crate::tui::theme::THEME_IDS {
-            let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-            let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+            let mut state = app_state(&[repo("app", true)]);
             state.theme = id;
             state.help_open = true;
             state.help_search_query = Some("quit".into());
@@ -16281,8 +16219,7 @@ mod tests {
     /// Draw a whole-file revert confirm over `(path, untracked)` targets and
     /// return the screen text plus its chip row (the line with `cancel`).
     fn draw_revert_confirm(targets: &[(&str, bool)]) -> (String, String) {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.confirm = Some(PendingConfirm::Revert {
             label: targets[0].0.into(),
             targets: targets
@@ -16345,8 +16282,7 @@ mod tests {
 
     #[test]
     fn confirm_overlays_are_boxed_not_status_line() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.confirm = Some(PendingConfirm::Revert {
             label: "README.md".into(),
             targets: vec![
@@ -16529,8 +16465,7 @@ mod tests {
 
     #[test]
     fn reset_confirm_names_the_repo_the_rewritten_upstream_and_the_dropped_count() {
-        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", false)]);
         let backend = TestBackend::new(100, 16);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut paint = |dropped: usize| {
@@ -16566,8 +16501,7 @@ mod tests {
 
     #[test]
     fn push_confirm_names_branch_remote_count_and_risk() {
-        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", false)]);
         let backend = TestBackend::new(100, 16);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut paint = |publish: bool, ahead_behind: Option<(u32, u32)>| {
@@ -16622,8 +16556,7 @@ mod tests {
 
     #[test]
     fn compare_revert_confirms_name_the_merge_base_and_deletions() {
-        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", false)]);
         let target = |path: &str, status: &str, old_path: Option<&str>| CompareRevertTarget {
             repo: "app".into(),
             path: path.into(),
@@ -16706,8 +16639,7 @@ mod tests {
 
     #[test]
     fn comment_overlay_paints_caret_and_hides_idle_status() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.comment = Some(CommentPrompt::new(
             CommentKey::WorktreeLine {
                 repo: "app".into(),
@@ -17396,13 +17328,7 @@ mod tests {
     #[test]
     fn narrow_file_row_keeps_status_badge_when_name_clips() {
         let mut snap = repo("app", true);
-        snap.changes = vec![FileChange {
-            path: "src/very-long-file-name-that-must-clip.rs".into(),
-            staged_status: None,
-            unstaged_status: Some("M".into()),
-            untracked: false,
-            old_path: None,
-        }];
+        snap.changes = vec![unstaged_change("src/very-long-file-name-that-must-clip.rs")];
         snap.has_unstaged = true;
         let built = build_workspace_snapshot(&[snap], &[], false, &[]);
         let tree = build_tree(&visible_for_tree(&built), true, "ws");
@@ -17441,25 +17367,9 @@ mod tests {
     #[test]
     fn search_match_paints_filter_bg_on_non_cursor_tree_rows() {
         let mut snapshot = repo("app", true);
-        snapshot.changes = vec![
-            FileChange {
-                path: "a.md".into(),
-                staged_status: None,
-                unstaged_status: Some("M".into()),
-                untracked: false,
-                old_path: None,
-            },
-            FileChange {
-                path: "b.md".into(),
-                staged_status: None,
-                unstaged_status: Some("M".into()),
-                untracked: false,
-                old_path: None,
-            },
-        ];
+        snapshot.changes = vec![unstaged_change("a.md"), unstaged_change("b.md")];
         snapshot.has_unstaged = true;
-        let snapshot = build_workspace_snapshot(&[snapshot], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[snapshot]);
         state.dispatch(super::super::action::Action::SearchStart);
         for c in "md".chars() {
             state.dispatch(super::super::action::Action::SearchChar(c));
@@ -17560,8 +17470,7 @@ mod tests {
 
     #[test]
     fn search_match_paints_filter_bg_on_non_cursor_commit_file_rows() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.open_commit_files(
             "app".into(),
             super::super::drill::CommitFileSource::Commit {
@@ -17966,8 +17875,7 @@ mod tests {
 
     #[test]
     fn compare_tab_paints_diff_pane_while_workspace_drill_is_files() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.open_commit_files(
             "app".into(),
             super::super::drill::CommitFileSource::Commit {
@@ -18094,8 +18002,7 @@ mod tests {
 
     #[test]
     fn search_match_paints_filter_bg_on_compare_commit_file_rows() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state
             .tabs
             .open_or_focus("app".into(), "main".into(), "HEAD".into());
@@ -18166,8 +18073,7 @@ mod tests {
 
     #[test]
     fn recorded_split_rule_is_the_painted_rule_column() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.diff_mode = crate::tui::split::DiffMode::SideBySide;
         state.cursor = state
             .rows
@@ -19290,8 +19196,7 @@ mod tests {
     #[test]
     fn paint_mode_clicks_on_flat_pane_edges_select_the_painted_row() {
         let repos: Vec<RepoSnapshot> = (0..40).map(|i| repo(&format!("r{i:02}"), true)).collect();
-        let snapshot = build_workspace_snapshot(&repos, &[], false, &[]);
-        let mut state = painted(AppState::new(PathBuf::from("/tmp"), snapshot, true));
+        let mut state = painted(app_state(&repos));
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
         draw_state(&mut terminal, &mut state);
         let (left, _) = pane_rects(&state, 120);
@@ -20037,8 +19942,7 @@ mod tests {
 
     #[test]
     fn paints_draggable_side_by_side_rule_on_wide_diff() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.diff_mode = crate::tui::split::DiffMode::SideBySide;
         let file = state
             .rows
@@ -20076,8 +19980,7 @@ mod tests {
 
     #[test]
     fn draw_relayouts_panes_gutter_help_and_lists() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.help_open = true;
         let mut wide = Terminal::new(TestBackend::new(200, 40)).unwrap();
         wide.draw(|frame| draw(frame, &mut state)).unwrap();
@@ -20112,8 +20015,7 @@ mod tests {
 
     #[test]
     fn empty_tree_paints_no_matching_rows() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.rows.clear();
         let backend = TestBackend::new(80, 16);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -20125,8 +20027,7 @@ mod tests {
 
     #[test]
     fn empty_commit_files_paint_loading_then_no_files_in_this_commit() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         let source = super::super::drill::CommitFileSource::Commit {
             commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
         };
@@ -20149,8 +20050,7 @@ mod tests {
 
     /// One dirty `app` checkout with a fetch in flight.
     fn fetching_app_state(ascii: bool) -> AppState {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, ascii);
+        let mut state = app_state_ascii(&[repo("app", true)], ascii);
         state.remote_activity.running.insert("app".into());
         state
     }
@@ -20220,8 +20120,7 @@ mod tests {
     #[test]
     fn loading_graph_text_has_spinner_prefix() {
         use super::super::anim::SPINNER_FRAMES_ASCII;
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.cursor = state
             .rows
             .iter()
@@ -20241,8 +20140,7 @@ mod tests {
 
     #[test]
     fn idle_draw_leaves_layout_not_animating() {
-        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", false)]);
         state.cursor = 0;
         state.layout.animating = true;
         state.layout.gliding = true;
@@ -20259,8 +20157,7 @@ mod tests {
     fn ctrl_d_on_tree_glides_list_offset_over_frames() {
         use super::super::anim::{GLIDE_FRAME_MS, GLIDE_MS};
         let repos: Vec<RepoSnapshot> = (0..40).map(|i| repo(&format!("r{i:02}"), true)).collect();
-        let snapshot = build_workspace_snapshot(&repos, &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&repos);
         assert!(state.smooth_scroll, "on by default");
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
         state.cursor = 15;
@@ -20582,8 +20479,7 @@ mod tests {
     #[test]
     fn ctrl_d_with_smooth_scroll_off_jumps_in_one_frame() {
         let repos: Vec<RepoSnapshot> = (0..40).map(|i| repo(&format!("r{i:02}"), true)).collect();
-        let snapshot = build_workspace_snapshot(&repos, &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&repos);
         state.smooth_scroll = false;
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
         state.cursor = 15;
@@ -20636,8 +20532,7 @@ mod tests {
 
     #[test]
     fn pane_loading_spinner_has_no_fg_under_no_color() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, false);
+        let mut state = app_state_ascii(&[repo("app", true)], false);
         let muted = state.theme.palette().muted;
         state.begin_commit_files(
             "app".into(),
@@ -20675,8 +20570,7 @@ mod tests {
 
     /// A one-repo `app` state with `status` set.
     fn toast_state(status: StatusMessage, ascii: bool) -> AppState {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, ascii);
+        let mut state = app_state_ascii(&[repo("app", true)], ascii);
         state.status = status;
         state
     }
@@ -21128,8 +21022,7 @@ mod tests {
         let mut wt = repo("wt", true);
         wt.checkout_kind = crate::snapshot::CheckoutKind::Linked;
         wt.primary_repo = Some("app".into());
-        let snapshot = build_workspace_snapshot(&[repo("app", true), wt], &[], false, &[]);
-        AppState::new(PathBuf::from("/tmp"), snapshot, true)
+        app_state(&[repo("app", true), wt])
     }
 
     /// Painted text of the tree row with id `id`.
@@ -21463,8 +21356,7 @@ mod tests {
         );
         assert!(!text.contains("(no diff)"), "{text}");
 
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.cursor = state
             .rows
             .iter()
@@ -21512,8 +21404,7 @@ mod tests {
     fn comment_mark_does_not_shift_line_numbers() {
         use crate::tui::comments::{put_comment, CommentKey};
 
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         let file = state
             .rows
             .iter()
@@ -21570,8 +21461,7 @@ mod tests {
     /// `app` with `README.md` open in the diff pane: one hunk of context
     /// lines `line 10`, `line 11`, … (new-file line `n` reads `line n`).
     fn context_diff_state(lines: u32) -> AppState {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.cursor = state
             .rows
             .iter()
@@ -22004,8 +21894,7 @@ mod tests {
     fn palette_rows_paint_their_reason_and_skip_empty_chips() {
         use crate::tui::action::{Action, QuickOpenEntry};
         use crate::tui::tabs::{ONLY_WORKSPACE_TAB_OPEN, WORKSPACE_TAB_CANNOT_CLOSE};
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
         for c in "tab".chars() {
             state.dispatch(Action::QuickOpenChar(c));
@@ -22073,8 +21962,7 @@ mod tests {
     #[test]
     fn palette_pr_rows_paint_no_popover_only_chip() {
         use crate::tui::action::{Action, QuickOpenEntry};
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
         for c in "pull request".chars() {
             state.dispatch(Action::QuickOpenChar(c));
@@ -22108,8 +21996,7 @@ mod tests {
     fn palette_go_to_line_row_paints_first_with_its_reason() {
         use crate::tui::action::{Action, QuickOpenEntry};
         use crate::tui::gates::FOCUS_A_FILE_DIFF;
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
         for c in "42".chars() {
             state.dispatch(Action::QuickOpenChar(c));
@@ -22142,8 +22029,7 @@ mod tests {
     fn palette_rows_keep_their_group_when_the_header_scrolled_off() {
         use crate::tui::action::{Action, QuickOpenEntry};
         const GROUPS: [&str; 4] = ["HIGHLIGHT", "MOVE", "GIT", "VIEW"];
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         for _ in 0..60 {
@@ -22170,8 +22056,7 @@ mod tests {
 
     #[test]
     fn compare_commit_picker_paints_short_sha_and_subject_rows() {
-        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", false)]);
         state.open_compare_commit_picker(
             "app".into(),
             vec![crate::git::AncestorCommit {
@@ -22218,8 +22103,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", false)]);
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         state.open_compare_commit_picker("app".into(), commits(2));
         draw_state(&mut terminal, &mut state);
@@ -22245,8 +22129,7 @@ mod tests {
     fn dialog_open_keeps_pane_height() {
         use crate::tui::action::QuickOpenEntry;
         use crate::tui::quick_open::{QuickOpenScope, QuickOpenState};
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         draw_state(&mut terminal, &mut state);
         let idle = state.layout.pane_height;
@@ -22275,8 +22158,7 @@ mod tests {
         use crate::file_index::{FileEntry, FileHit, FileIndex, IndexRoot};
         use crate::tui::action::QuickOpenEntry;
         use crate::tui::quick_open::QuickOpenScope;
-        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", false)]);
         let index = FileIndex {
             roots: vec![IndexRoot {
                 checkout: "app".into(),
@@ -22441,8 +22323,7 @@ mod tests {
     /// files: `src/lib.rs` lines 3 and 12, `src/main.rs` line 7.
     fn search_files_state(all_repos: bool) -> AppState {
         use crate::file_index::{FileEntry, IndexRoot};
-        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", false)]);
         let (scope, prefix) = if all_repos {
             (QuickOpenScope::Workspace, "app/")
         } else {
@@ -23061,8 +22942,7 @@ mod tests {
     fn status_row_stays_last_with_dialog_open() {
         use crate::tui::action::QuickOpenEntry;
         use crate::tui::quick_open::{QuickOpenScope, QuickOpenState};
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.quick_open = Some(QuickOpenState::new(
             QuickOpenEntry::Commands,
             QuickOpenScope::Workspace,
@@ -23088,8 +22968,7 @@ mod tests {
 
     #[test]
     fn help_dialog_scrolls_when_columns_exceed_box() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         assert_eq!(state.dispatch(Action::ToggleHelp), Effect::None);
         let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
         draw_state(&mut terminal, &mut state);
@@ -23129,8 +23008,7 @@ mod tests {
     fn list_dialog_footer_keeps_esc_on_narrow_terminals() {
         use crate::git::LocalBranch;
         use crate::tui::graph_focus::GraphFocusPickerState;
-        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", false)]);
         state.graph_focus_picker = Some(GraphFocusPickerState::new(
             "app".into(),
             vec![LocalBranch {
@@ -23160,8 +23038,7 @@ mod tests {
 
     #[test]
     fn compare_commit_picker_cuts_long_subjects_to_one_line_per_row() {
-        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", false)]);
         let long = "word ".repeat(40);
         let commits: Vec<_> = (0..5)
             .map(|i| crate::git::AncestorCommit {
@@ -23203,8 +23080,7 @@ mod tests {
     fn branch_picker_paints_the_create_row_last() {
         use crate::git::LocalBranch;
         use crate::tui::branches::BranchPickerState;
-        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", false)]);
         let branch = |name: &str| LocalBranch {
             name: name.into(),
             current: false,
@@ -23898,8 +23774,7 @@ mod tests {
     /// inner file tab loaded as `lines`; the file pane has focus (as after
     /// Quick Open).
     fn file_view_state(lines: &[&str]) -> AppState {
-        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", false)]);
         state.open_loaded_inner_file("app", "README.md", lines);
         state
     }
@@ -23927,15 +23802,8 @@ mod tests {
             untracked: true,
             old_path: None,
         });
-        app.changes.push(FileChange {
-            path: "src/a.rs".into(),
-            staged_status: None,
-            unstaged_status: Some("M".into()),
-            untracked: false,
-            old_path: None,
-        });
-        let snapshot = build_workspace_snapshot(&[app], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, false);
+        app.changes.push(unstaged_change("src/a.rs"));
+        let mut state = app_state_ascii(&[app], false);
         state.cursor = state
             .rows
             .iter()
@@ -24508,13 +24376,7 @@ mod tests {
 
             // Add: a new file under `deep/er` and an untracked `newdir/`.
             let mut next = state.snapshot.clone();
-            next.repos[0].changes.push(FileChange {
-                path: "deep/er/x.rs".into(),
-                staged_status: None,
-                unstaged_status: Some("M".into()),
-                untracked: false,
-                old_path: None,
-            });
+            next.repos[0].changes.push(unstaged_change("deep/er/x.rs"));
             next.repos[0].changes.push(FileChange {
                 path: "newdir/".into(),
                 staged_status: None,
@@ -24600,13 +24462,7 @@ mod tests {
             .expect("src/a.rs");
         a.staged_status = Some("M".into());
         a.unstaged_status = None;
-        next.repos[0].changes.push(FileChange {
-            path: "src/b.rs".into(),
-            staged_status: None,
-            unstaged_status: Some("M".into()),
-            untracked: false,
-            old_path: None,
-        });
+        next.repos[0].changes.push(unstaged_change("src/b.rs"));
         state.apply_snapshot(next);
         let files = |target: IconTarget| -> String {
             let sections =
@@ -25283,22 +25139,23 @@ mod tests {
     const PR_REMOTE: &str = "git@github.com:octo/demo.git";
 
     fn branch_repo(name: &str, branch: &str) -> RepoSnapshot {
-        let mut row = repo(name, false);
-        row.branch = branch.into();
-        row
+        RepoSnapshot {
+            branch: branch.into(),
+            ..repo_snapshot(name)
+        }
     }
 
     fn linked_repo(name: &str, primary: &str, branch: &str) -> RepoSnapshot {
-        let mut row = branch_repo(name, branch);
-        row.checkout_kind = crate::snapshot::CheckoutKind::Linked;
-        row.primary_repo = Some(primary.into());
-        row
+        RepoSnapshot {
+            checkout_kind: CheckoutKind::Linked,
+            primary_repo: Some(primary.into()),
+            ..branch_repo(name, branch)
+        }
     }
 
     /// State with every checkout's PR lookup in flight.
     fn pr_state(repos: &[RepoSnapshot], ascii: bool) -> AppState {
-        let snapshot = build_workspace_snapshot(repos, &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, ascii);
+        let mut state = app_state_ascii(repos, ascii);
         assert_eq!(state.due_pr_lookups().len(), repos.len());
         state
     }
@@ -28164,8 +28021,7 @@ mod tests {
     #[test]
     fn file_row_badge_and_devicon_hits_cover_the_glyph_only() {
         for ascii in [true, false] {
-            let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-            let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, ascii);
+            let mut state = app_state_ascii(&[repo("app", true)], ascii);
             focus_tree_row(&mut state, "file:app:README.md");
             let mut terminal = pr_terminal();
             terminal.draw(|frame| draw(frame, &mut state)).unwrap();
@@ -28197,8 +28053,7 @@ mod tests {
     /// folder, devicon, and status letter.
     #[test]
     fn commit_file_rows_record_icon_hits() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true)]);
         state.commit_tree_mode = true;
         state.open_commit_files(
             "app".into(),
@@ -29403,13 +29258,7 @@ mod tests {
     }
 
     fn painted_state() -> AppState {
-        let snapshot = build_workspace_snapshot(
-            &[repo("app", true), repo("lib", false), repo("web", true)],
-            &[],
-            false,
-            &[],
-        );
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", true), repo("lib", false), repo("web", true)]);
         state.background = BackgroundMode::Paint;
         state
     }
@@ -29701,8 +29550,7 @@ mod tests {
     }
 
     fn doctor_state() -> AppState {
-        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut state = app_state(&[repo("app", false)]);
         let Effect::RunDoctor { gen } = state.dispatch(Action::OpenDoctor) else {
             panic!("open asks for a probe");
         };
@@ -29739,8 +29587,7 @@ mod tests {
     /// While the probe runs the dialog says `checking…` and paints no row.
     #[test]
     fn doctor_paints_checking_until_the_probe_answers() {
-        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, false);
+        let mut state = app_state_ascii(&[repo("app", false)], false);
         state.dispatch(Action::OpenDoctor);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         draw_state(&mut terminal, &mut state);

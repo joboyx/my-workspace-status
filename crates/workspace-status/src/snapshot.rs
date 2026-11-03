@@ -614,42 +614,11 @@ pub fn non_default_branch_repos(summary: &SummaryState) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn sample_repo(name: &str, with_change: bool) -> RepoSnapshot {
-        RepoSnapshot {
-            repo: name.to_string(),
-            branch: "main".to_string(),
-            sync_status: SyncStatus::NoUpstream,
-            sync_note: String::new(),
-            upstream_rewrite: None,
-            head: String::new(),
-            has_unstaged: with_change,
-            has_staged: false,
-            has_untracked: false,
-            changes: if with_change {
-                vec![FileChange {
-                    path: "README.md".to_string(),
-                    staged_status: None,
-                    unstaged_status: Some("M".to_string()),
-                    untracked: false,
-                    old_path: None,
-                }]
-            } else {
-                vec![]
-            },
-            checkout_kind: CheckoutKind::Primary,
-            primary_repo: None,
-            merged_into_default: None,
-            default_branch_override: None,
-            default_tip_ref: None,
-            default_branch: None,
-            local_branches: Vec::new(),
-        }
-    }
+    use crate::testutil::repo;
 
     #[test]
     fn the_rewrite_survives_the_workspace_round_trip() {
-        let mut rewritten = sample_repo("app", false);
+        let mut rewritten = repo("app", false);
         rewritten.upstream_rewrite = Some(crate::git::UpstreamRewrite {
             upstream: "origin/main".into(),
             fork_point: "f".repeat(40),
@@ -665,7 +634,7 @@ mod tests {
     #[test]
     fn hidden_repo_stays_out_of_visible_snapshot() {
         let built = build_workspace_snapshot(
-            &[sample_repo("app", true), sample_repo("notes", true)],
+            &[repo("app", true), repo("notes", true)],
             &["notes".to_string()],
             false,
             &[],
@@ -684,18 +653,18 @@ mod tests {
 
     #[test]
     fn hidden_folder_hides_each_repo_under_it() {
-        let mut primary = sample_repo("tmp/x", false);
+        let mut primary = repo("tmp/x", false);
         primary.checkout_kind = CheckoutKind::Primary;
-        let mut child = sample_repo("tmp/x/.worktrees/f", false);
+        let mut child = repo("tmp/x/.worktrees/f", false);
         child.checkout_kind = CheckoutKind::Linked;
         child.primary_repo = Some("tmp/x".into());
-        let mut outside = sample_repo("tmp/app-feat", false);
+        let mut outside = repo("tmp/app-feat", false);
         outside.checkout_kind = CheckoutKind::Linked;
         outside.primary_repo = Some("app".into());
         let built = build_workspace_snapshot(
             &[
-                sample_repo("app", false),
-                sample_repo("tmpfoo", false),
+                repo("app", false),
+                repo("tmpfoo", false),
                 primary,
                 child,
                 outside,
@@ -728,7 +697,7 @@ mod tests {
     #[test]
     fn named_filter_includes_hidden_repo() {
         let built = build_workspace_snapshot(
-            &[sample_repo("notes", true)],
+            &[repo("notes", true)],
             &["notes".to_string()],
             false,
             &["notes".to_string()],
@@ -740,8 +709,8 @@ mod tests {
 
     #[test]
     fn named_filter_includes_linked_children_of_hidden_primary() {
-        let primary = sample_repo("app", true);
-        let mut linked = sample_repo("app/.worktrees/feat", false);
+        let primary = repo("app", true);
+        let mut linked = repo("app/.worktrees/feat", false);
         linked.checkout_kind = CheckoutKind::Linked;
         linked.primary_repo = Some("app".into());
         let built = build_workspace_snapshot(
@@ -769,10 +738,10 @@ mod tests {
 
     #[test]
     fn status_failed_keeps_previous_local_branches() {
-        let mut good = sample_repo("app", true);
+        let mut good = repo("app", true);
         good.local_branches = vec!["main".into(), "topic/keep".into()];
         let previous = build_workspace_snapshot(&[good], &[], false, &[]);
-        let mut failed = sample_repo("app", false);
+        let mut failed = repo("app", false);
         failed.branch = "(unknown)".into();
         failed.sync_note = "status failed".into();
         failed.local_branches = Vec::new();
@@ -786,9 +755,9 @@ mod tests {
 
     #[test]
     fn status_failed_does_not_carry_when_sibling_has_counted_branches() {
-        let mut primary = sample_repo("app", true);
+        let mut primary = repo("app", true);
         primary.local_branches = vec!["main".into(), "doomed".into(), "feature/linked-open".into()];
-        let mut linked = sample_repo("app/.worktrees/feat", false);
+        let mut linked = repo("app/.worktrees/feat", false);
         linked.checkout_kind = CheckoutKind::Linked;
         linked.primary_repo = Some("app".into());
         linked.branch = "feature/linked-open".into();

@@ -522,39 +522,18 @@ pub fn scroll_to_keep_anchor(lines: &[String], anchor: &str, view_h: u16) -> u16
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::{build_workspace_snapshot, FileChange, RepoSnapshot, SyncStatus};
+    use crate::snapshot::{build_workspace_snapshot, RepoSnapshot};
+    use crate::testutil::{repo_snapshot, unstaged_change};
     use crate::tui::drill::CommitFile;
     use crate::tui::tree::{build_tree, default_folds, visible_for_tree, NodeKind};
 
     fn repo(name: &str, dirty_path: Option<&str>) -> RepoSnapshot {
         RepoSnapshot {
-            repo: name.into(),
-            branch: "main".into(),
-            sync_status: SyncStatus::NoUpstream,
-            sync_note: String::new(),
-            upstream_rewrite: None,
-            head: String::new(),
             has_unstaged: dirty_path.is_some(),
-            has_staged: false,
-            has_untracked: false,
             changes: dirty_path
-                .map(|path| {
-                    vec![FileChange {
-                        path: path.into(),
-                        staged_status: None,
-                        unstaged_status: Some("M".into()),
-                        untracked: false,
-                        old_path: None,
-                    }]
-                })
+                .map(|path| vec![unstaged_change(path)])
                 .unwrap_or_default(),
-            checkout_kind: crate::snapshot::CheckoutKind::Primary,
-            primary_repo: None,
-            merged_into_default: None,
-            default_branch_override: None,
-            default_tip_ref: None,
-            default_branch: None,
-            local_branches: Vec::new(),
+            ..repo_snapshot(name)
         }
     }
 

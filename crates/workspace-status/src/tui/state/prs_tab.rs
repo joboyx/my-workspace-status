@@ -971,7 +971,8 @@ pub(crate) mod fixtures {
     use super::super::super::pr_status::{ChecksSummary, PrState};
     use super::super::super::pull_request::{PrLookup, PullRequest};
     use super::super::AppState;
-    use crate::snapshot::{build_workspace_snapshot, CheckoutKind, RepoSnapshot, SyncStatus};
+    use crate::snapshot::{CheckoutKind, RepoSnapshot, SyncStatus};
+    use crate::testutil::{app_state_ascii, repo_snapshot};
 
     /// GitHub remote of `acme/app`.
     pub(crate) const GH_APP: &str = "git@github.com:acme/app.git";
@@ -983,23 +984,10 @@ pub(crate) mod fixtures {
     /// A pushed primary checkout `name` on `branch`.
     pub(crate) fn checkout(name: &str, branch: &str) -> RepoSnapshot {
         RepoSnapshot {
-            repo: name.into(),
             branch: branch.into(),
             sync_status: SyncStatus::UpToDate,
-            sync_note: String::new(),
-            upstream_rewrite: None,
             head: "abc".into(),
-            has_unstaged: false,
-            has_staged: false,
-            has_untracked: false,
-            changes: Vec::new(),
-            checkout_kind: CheckoutKind::Primary,
-            primary_repo: None,
-            merged_into_default: None,
-            default_branch_override: None,
-            default_tip_ref: None,
-            default_branch: None,
-            local_branches: Vec::new(),
+            ..repo_snapshot(name)
         }
     }
 
@@ -1061,8 +1049,7 @@ pub(crate) mod fixtures {
 
     /// State over `repos` with every lookup queued.
     pub(crate) fn app_over(repos: &[RepoSnapshot], ascii: bool) -> AppState {
-        let snapshot = build_workspace_snapshot(repos, &[], false, &[]);
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, ascii);
+        let mut app = app_state_ascii(repos, ascii);
         assert_eq!(app.due_pr_lookups().len(), repos.len());
         app
     }

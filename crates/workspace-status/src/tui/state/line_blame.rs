@@ -639,8 +639,6 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use workspace_status_graph::{Commit, GraphModel};
 
     use super::super::super::action::Action;
@@ -653,9 +651,8 @@ mod tests {
     use super::*;
     use crate::config::ViewDefaults;
     use crate::file_index::FileRead;
-    use crate::snapshot::{
-        build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
-    };
+    use crate::snapshot::{build_workspace_snapshot, RepoSnapshot};
+    use crate::testutil::{self, app_state};
 
     const SHA: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     /// Inline rows: 0 label, 1 hunk, 2 ` a` (1,1), 3 `-b` (2,-), 4 `+c`
@@ -664,35 +661,14 @@ mod tests {
 
     fn repo(name: &str) -> RepoSnapshot {
         RepoSnapshot {
-            repo: name.into(),
-            branch: "main".into(),
-            sync_status: SyncStatus::NoUpstream,
-            sync_note: String::new(),
-            upstream_rewrite: None,
             head: "abc".into(),
-            has_unstaged: true,
-            has_staged: false,
-            has_untracked: false,
-            changes: vec![FileChange {
-                path: "README.md".into(),
-                staged_status: None,
-                unstaged_status: Some("M".into()),
-                untracked: false,
-                old_path: None,
-            }],
-            checkout_kind: CheckoutKind::Primary,
-            primary_repo: None,
-            merged_into_default: None,
-            default_branch_override: None,
             default_tip_ref: Some("main".into()),
-            default_branch: None,
-            local_branches: Vec::new(),
+            ..testutil::repo(name, true)
         }
     }
 
     fn state() -> AppState {
-        let snapshot = build_workspace_snapshot(&[repo("app")], &[], false, &[]);
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state(&[repo("app")]);
         app.diff_mode = DiffMode::Inline;
         app
     }
@@ -1447,8 +1423,7 @@ mod tests {
     fn dir_row_state(ids: &[&str], has_more: bool) -> AppState {
         let mut app_repo = repo("app");
         app_repo.changes[0].path = "src/lib.rs".into();
-        let snapshot = build_workspace_snapshot(&[app_repo], &[], false, &[]);
-        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut app = app_state(&[app_repo]);
         app.cursor = app
             .rows
             .iter()

@@ -145,12 +145,12 @@ mod tests {
 
     use super::*;
     use crate::snapshot::build_workspace_snapshot;
+    use crate::testutil::app_state;
     use crate::tui::doctor::{CheckGroup, CheckStatus, Fix};
     use crate::tui::keys::{InputMode, DOCTOR_PAGE_ROWS};
 
     fn app() -> AppState {
-        let snapshot = build_workspace_snapshot(&[], &[], false, &[]);
-        AppState::new(PathBuf::from("/tmp"), snapshot, true)
+        app_state(&[])
     }
 
     fn check(name: &'static str, copy: Option<&str>) -> Check {

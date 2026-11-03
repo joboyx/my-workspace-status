@@ -165,8 +165,6 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::super::super::action::{Action, Effect};
     use super::super::super::chrome::search_pill_label;
     use super::super::super::effect::ExplorerPreviewBody;
@@ -174,31 +172,16 @@ mod tests {
     use super::super::{FocusPane, SEARCH_WRAPPED_TO_BOTTOM, SEARCH_WRAPPED_TO_TOP};
     use super::*;
     use crate::file_index::FileRead;
-    use crate::snapshot::{build_workspace_snapshot, CheckoutKind, RepoSnapshot, SyncStatus};
+    use crate::snapshot::RepoSnapshot;
+    use crate::testutil::{app_state, repo_snapshot};
 
     /// A clean `app` checkout.
     fn state() -> AppState {
-        let repo = RepoSnapshot {
-            repo: "app".into(),
-            branch: "main".into(),
-            sync_status: SyncStatus::NoUpstream,
-            sync_note: String::new(),
-            upstream_rewrite: None,
+        app_state(&[RepoSnapshot {
             head: "abc".into(),
-            has_unstaged: false,
-            has_staged: false,
-            has_untracked: false,
-            changes: Vec::new(),
-            checkout_kind: CheckoutKind::Primary,
-            primary_repo: None,
-            merged_into_default: None,
-            default_branch_override: None,
             default_tip_ref: Some("main".into()),
-            default_branch: None,
-            local_branches: Vec::new(),
-        };
-        let snapshot = build_workspace_snapshot(&[repo], &[], false, &[]);
-        AppState::new(PathBuf::from("/tmp"), snapshot, true)
+            ..repo_snapshot("app")
+        }])
     }
 
     fn cursor(app: &AppState) -> usize {

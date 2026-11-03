@@ -1620,7 +1620,8 @@ fn pill_span(label: &str, pill: Pill) -> Span<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::{build_workspace_snapshot, FileChange, RepoSnapshot, SyncStatus};
+    use crate::snapshot::build_workspace_snapshot;
+    use crate::testutil::repo;
     use crate::tui::ctrl_c_exit::CTRL_C_EXIT_PROMPT;
     use crate::tui::state::AppState;
     use crate::tui::status::StatusMessage;
@@ -1628,38 +1629,6 @@ mod tests {
 
     fn hint_of(key: &str, label: &str) -> HintSegment {
         hint(key, label, false)
-    }
-
-    fn repo(name: &str, dirty: bool) -> RepoSnapshot {
-        RepoSnapshot {
-            repo: name.into(),
-            branch: "main".into(),
-            sync_status: SyncStatus::NoUpstream,
-            sync_note: String::new(),
-            upstream_rewrite: None,
-            head: String::new(),
-            has_unstaged: dirty,
-            has_staged: false,
-            has_untracked: false,
-            changes: if dirty {
-                vec![FileChange {
-                    path: "README.md".into(),
-                    staged_status: None,
-                    unstaged_status: Some("M".into()),
-                    untracked: false,
-                    old_path: None,
-                }]
-            } else {
-                Vec::new()
-            },
-            checkout_kind: CheckoutKind::Primary,
-            primary_repo: None,
-            merged_into_default: None,
-            default_branch_override: None,
-            default_tip_ref: None,
-            default_branch: None,
-            local_branches: Vec::new(),
-        }
     }
 
     fn state() -> AppState {

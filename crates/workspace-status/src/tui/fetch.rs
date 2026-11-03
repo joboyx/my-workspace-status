@@ -67,31 +67,18 @@ pub fn background_fetch_targets(snapshot: &WorkspaceSnapshot, show_hidden: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::{build_workspace_snapshot, CheckoutKind, RepoSnapshot, SyncStatus};
+    use crate::snapshot::{build_workspace_snapshot, CheckoutKind, RepoSnapshot};
+    use crate::testutil::repo_snapshot;
 
     fn snap(name: &str, primary: Option<&str>) -> RepoSnapshot {
         RepoSnapshot {
-            repo: name.into(),
-            branch: "main".into(),
-            sync_status: SyncStatus::NoUpstream,
-            sync_note: String::new(),
-            upstream_rewrite: None,
-            head: String::new(),
-            has_unstaged: false,
-            has_staged: false,
-            has_untracked: false,
-            changes: Vec::new(),
             checkout_kind: if primary.is_some() {
                 CheckoutKind::Linked
             } else {
                 CheckoutKind::Primary
             },
             primary_repo: primary.map(str::to_string),
-            merged_into_default: None,
-            default_branch_override: None,
-            default_tip_ref: None,
-            default_branch: None,
-            local_branches: Vec::new(),
+            ..repo_snapshot(name)
         }
     }
 

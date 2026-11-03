@@ -545,38 +545,19 @@ mod tests {
     use super::super::FocusPane;
     use super::*;
     use crate::helpers::DETACHED_HEAD_BRANCH;
-    use crate::snapshot::{
-        build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
-    };
+    use crate::snapshot::{CheckoutKind, RepoSnapshot, SyncStatus};
+    use crate::testutil::{app_state, repo_snapshot, unstaged_change};
     use crate::tui::action::Action;
 
     const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
 
     fn repo(name: &str, branch: &str) -> RepoSnapshot {
         RepoSnapshot {
-            repo: name.into(),
             branch: branch.into(),
-            sync_status: SyncStatus::NoUpstream,
-            sync_note: String::new(),
-            upstream_rewrite: None,
             head: HEAD.into(),
             has_unstaged: true,
-            has_staged: false,
-            has_untracked: false,
-            changes: vec![FileChange {
-                path: "src/lib.rs".into(),
-                staged_status: None,
-                unstaged_status: Some("M".into()),
-                untracked: false,
-                old_path: None,
-            }],
-            checkout_kind: CheckoutKind::Primary,
-            primary_repo: None,
-            merged_into_default: None,
-            default_branch_override: None,
-            default_tip_ref: None,
-            default_branch: None,
-            local_branches: Vec::new(),
+            changes: vec![unstaged_change("src/lib.rs")],
+            ..repo_snapshot(name)
         }
     }
 
@@ -585,11 +566,6 @@ mod tests {
         row.checkout_kind = CheckoutKind::Linked;
         row.primary_repo = Some(primary.into());
         row
-    }
-
-    fn app_with(repos: &[RepoSnapshot]) -> AppState {
-        let snapshot = build_workspace_snapshot(repos, &[], false, &[]);
-        AppState::new(PathBuf::from("/tmp"), snapshot, true)
     }
 
     fn focus(app: &mut AppState, id: &str) {
@@ -630,11 +606,11 @@ mod tests {
 
     #[test]
     fn tree_repo_and_family_rows_open_the_repository_home() {
-        let mut app = app_with(&[repo("solo", "feature")]);
+        let mut app = app_state(&[repo("solo", "feature")]);
         focus(&mut app, "repo:solo");
         assert_eq!(gw(&mut app), view("solo", RemoteTarget::Repo));
 
-        let mut app = app_with(&[
+        let mut app = app_state(&[
             repo("app", "main"),
             linked("app/.worktrees/feat", "app", "feat"),
         ]);
@@ -646,7 +622,7 @@ mod tests {
 
     #[test]
     fn tree_checkout_rows_open_the_branch_or_the_detached_head() {
-        let mut app = app_with(&[
+        let mut app = app_state(&[
             repo("app", "main"),
             linked("app/.worktrees/feat", "app", "feat"),
             linked("app/.worktrees/loose", "app", DETACHED_HEAD_BRANCH),
@@ -665,7 +641,7 @@ mod tests {
 
     #[test]
     fn tree_file_and_dir_rows_open_the_path_at_the_checkout_revision() {
-        let mut app = app_with(&[repo("app", "feature"), repo("det", DETACHED_HEAD_BRANCH)]);
+        let mut app = app_state(&[repo("app", "feature"), repo("det", DETACHED_HEAD_BRANCH)]);
         focus(&mut app, "dir:app:src");
         assert_eq!(
             gw(&mut app),
@@ -699,7 +675,7 @@ mod tests {
         clean.changes.clear();
         clean.has_unstaged = false;
         clean.sync_status = SyncStatus::UpToDate;
-        let mut app = app_with(&[repo("app", "main"), clean]);
+        let mut app = app_state(&[repo("app", "main"), clean]);
         app.cursor = 0;
         assert_eq!(app.focused_row().unwrap().kind, NodeKind::Workspace);
         assert_refused(&mut app, NOTHING_TO_VIEW, "workspace");
@@ -747,7 +723,7 @@ mod tests {
 
     /// Workspace `app` on `feature` with the `src/lib.rs` diff focused.
     fn tree_diff_app() -> AppState {
-        let mut app = app_with(&[repo("app", "feature")]);
+        let mut app = app_state(&[repo("app", "feature")]);
         focus(&mut app, "file:app:src/lib.rs");
         app.focus = FocusPane::Right;
         app.set_diff(
@@ -845,7 +821,7 @@ mod tests {
     #[test]
     fn commit_drill_diff_and_file_list_open_at_the_commit() {
         let sha = "c".repeat(40);
-        let mut app = app_with(&[repo("app", "feature")]);
+        let mut app = app_state(&[repo("app", "feature")]);
         focus(&mut app, "repo:app");
         drill_diff(
             &mut app,
@@ -878,7 +854,7 @@ mod tests {
 
     #[test]
     fn worktree_drill_opens_at_the_branch_and_stash_drill_is_local_only() {
-        let mut app = app_with(&[repo("app", "feature")]);
+        let mut app = app_state(&[repo("app", "feature")]);
         focus(&mut app, "repo:app");
         drill_diff(&mut app, CommitFileSource::Worktree);
         assert_eq!(
@@ -904,7 +880,7 @@ mod tests {
 
     #[test]
     fn compare_tab_files_and_diff_open_at_the_compare_head() {
-        let mut app = app_with(&[repo("app", "feature")]);
+        let mut app = app_state(&[repo("app", "feature")]);
         app.tabs
             .open_or_focus("app".into(), "main".into(), "HEAD".into());
         app.focus = FocusPane::Left;
@@ -971,7 +947,7 @@ mod tests {
 
     #[test]
     fn palette_row_is_off_where_gw_refuses() {
-        let mut app = app_with(&[repo("app", "feature")]);
+        let mut app = app_state(&[repo("app", "feature")]);
         app.cursor = 0;
         assert_eq!(palette_reason(&app).as_deref(), Some(NOTHING_TO_VIEW));
         focus(&mut app, "repo:app");
@@ -1006,7 +982,7 @@ mod tests {
 
     #[test]
     fn graph_rows_open_commits_and_worktree_branches_and_refuse_local_rows() {
-        let mut app = app_with(&[repo("app", "main")]);
+        let mut app = app_state(&[repo("app", "main")]);
         focus(&mut app, "repo:app");
         let worktree = |path: &str, branch: Option<&str>, head: Option<&str>| Worktree {
             path: path.into(),
@@ -1073,7 +1049,7 @@ mod tests {
 
     #[test]
     fn apply_remote_view_reports_open_refusal_and_open_failure() {
-        let mut app = app_with(&[repo("app", "main")]);
+        let mut app = app_state(&[repo("app", "main")]);
         let url = "https://github.com/octo/demo";
         app.apply_remote_view(Ok(url.into()), true);
         assert_eq!(app.status, opened_status(url));

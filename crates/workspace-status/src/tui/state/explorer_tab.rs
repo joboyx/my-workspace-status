@@ -2332,9 +2332,8 @@ mod tests {
     use super::super::super::quick_open::QuickOpenScope;
     use super::super::super::tabs::WORKSPACE_TAB_CANNOT_CLOSE;
     use super::*;
-    use crate::snapshot::{
-        build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
-    };
+    use crate::snapshot::{CheckoutKind, FileChange, RepoSnapshot};
+    use crate::testutil::{app_state, repo_snapshot};
     use crate::tui::status::StatusKind;
 
     fn change(path: &str, unstaged: Option<&str>, untracked: bool) -> FileChange {
@@ -2354,57 +2353,42 @@ mod tests {
         changes: Vec<FileChange>,
     ) -> RepoSnapshot {
         RepoSnapshot {
-            repo: name.into(),
-            branch: "main".into(),
-            sync_status: SyncStatus::NoUpstream,
-            sync_note: String::new(),
-            upstream_rewrite: None,
             head: "abc".into(),
             has_unstaged: !changes.is_empty(),
-            has_staged: false,
             has_untracked: changes.iter().any(|change| change.untracked),
             changes,
             checkout_kind: kind,
             primary_repo: primary.map(str::to_string),
-            merged_into_default: None,
-            default_branch_override: None,
             default_tip_ref: Some("main".into()),
-            default_branch: None,
-            local_branches: Vec::new(),
+            ..repo_snapshot(name)
         }
     }
 
     /// `app` (with a linked worktree) and `lib`, each with changes.
     fn state() -> AppState {
-        let snapshot = build_workspace_snapshot(
-            &[
-                repo(
-                    "app",
-                    CheckoutKind::Primary,
-                    None,
-                    vec![
-                        change("src/tui/app.rs", Some("M"), false),
-                        change("new.txt", None, true),
-                    ],
-                ),
-                repo(
-                    "app/.worktrees/feat",
-                    CheckoutKind::Linked,
-                    Some("app"),
-                    vec![change("README.md", Some("M"), false)],
-                ),
-                repo(
-                    "lib",
-                    CheckoutKind::Primary,
-                    None,
-                    vec![change("lib.rs", Some("M"), false)],
-                ),
-            ],
-            &[],
-            false,
-            &[],
-        );
-        AppState::new(PathBuf::from("/tmp"), snapshot, true)
+        app_state(&[
+            repo(
+                "app",
+                CheckoutKind::Primary,
+                None,
+                vec![
+                    change("src/tui/app.rs", Some("M"), false),
+                    change("new.txt", None, true),
+                ],
+            ),
+            repo(
+                "app/.worktrees/feat",
+                CheckoutKind::Linked,
+                Some("app"),
+                vec![change("README.md", Some("M"), false)],
+            ),
+            repo(
+                "lib",
+                CheckoutKind::Primary,
+                None,
+                vec![change("lib.rs", Some("M"), false)],
+            ),
+        ])
     }
 
     fn focus(app: &mut AppState, kind: NodeKind, repo: Option<&str>, file: Option<&str>) {
