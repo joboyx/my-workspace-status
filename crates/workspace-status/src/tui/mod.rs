@@ -32,6 +32,7 @@ mod help;
 mod hyperlink;
 mod icons;
 mod keys;
+mod latest_only;
 mod line_blame;
 mod ops;
 mod outage;
