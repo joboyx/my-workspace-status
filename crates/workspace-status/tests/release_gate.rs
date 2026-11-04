@@ -7,7 +7,7 @@
 //! only the release deploy key bypass them. These tests fail when a check job
 //! is missing from the gate or from the documented ruleset list, when
 //! tag-release gets a trigger of its own, or when the deploy key push path
-//! drifts. Rollout and settings: [docs/architecture.md](../../../docs/architecture.md)
+//! drifts. Settings and release check: [docs/architecture.md](../../../docs/architecture.md)
 //! (**Release gate**).
 
 const TEST_YML: &str = include_str!("../../../.github/workflows/test.yml");
