@@ -83,6 +83,7 @@ Do **not** invent spur heuristics (`parent.lane + 1`, spine `◇─╯`, mid-rai
 | Lint gate, allowed lints, or `src/testutil.rs` fixtures | this file (**Lint gate**) and root `Cargo.toml` |
 | TUI test layers (PTY / desktop `#[ignore]`) or `WS_STATUS_UPDATE_CHECK_STORE` | this file, `docs/tui-tty-e2e.md` (harness / run / encoding / desktop-session only — a new `pty_*` or desktop test does not edit that file), `docs/configuration.md` |
 | cargo-dist `dist generate` / Release git-cliff host steps | `docs/architecture.md` (**Distribution**) and `crates/workspace-status/tests/release_watch.rs` |
+| Release tagging (`scripts/tag-release.sh`, `.github/workflows/tag-release.yml`) | `docs/architecture.md` (**Distribution**), `crates/workspace-status/tests/tag_release.rs`, and `crates/workspace-status/tests/release_watch.rs` |
 | Output format of the plain report | `SAMPLE_OUTPUT.md` and `crates/workspace-status/tests/snapshot_contract.rs` |
 | Demo workspace seed or screenshot clips | `docs/demo.md` + `scripts/seed-demo-workspace.sh` + `scripts/capture-demo-stills.sh` |
 | Verify skill, its driver, or its scenario sets | `.agents/skills/verify/` + `scripts/verify-tui.sh` + `crates/workspace-status/tests/release_watch.rs` (+ `docs/tui-tty-e2e.md` for the fake forge) |

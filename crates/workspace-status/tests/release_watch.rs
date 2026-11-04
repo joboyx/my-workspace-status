@@ -22,6 +22,7 @@
 
 const RELEASE_YML: &str = include_str!("../../../.github/workflows/release.yml");
 const TAG_RELEASE_YML: &str = include_str!("../../../.github/workflows/tag-release.yml");
+const TAG_RELEASE_SH: &str = include_str!("../../../scripts/tag-release.sh");
 const DIST_WORKSPACE: &str = include_str!("../../../dist-workspace.toml");
 const STILLS_SH: &str = include_str!("../../../scripts/capture-demo-stills.sh");
 const VERIFY_SH: &str = include_str!("../../../scripts/verify-tui.sh");
@@ -168,6 +169,35 @@ fn tag_release_dispatches_generated_workflow() {
         TAG_RELEASE_YML.contains("workflow_dispatch"),
         "tag-release.yml must remind that release.yml keeps on.workflow_dispatch after dist generate"
     );
+}
+
+#[test]
+fn tag_release_runs_the_tested_script_before_dispatch() {
+    // `tests/tag_release.rs` tests the script's behaviour. These pins keep the
+    // workflow on that script and keep the parts a temp origin cannot prove
+    // are needed on GitHub: remote tags count as taken, and the push is atomic.
+    let run = TAG_RELEASE_YML
+        .find("version=$(bash scripts/tag-release.sh)")
+        .expect("tag-release.yml must take the version from scripts/tag-release.sh");
+    let skip = TAG_RELEASE_YML
+        .find("if [[ -z \"$version\" ]]")
+        .expect("tag-release.yml must not dispatch when the script skips");
+    let dispatch = TAG_RELEASE_YML
+        .find("gh workflow run release.yml --ref \"v${version}\"")
+        .expect("tag-release.yml must dispatch release.yml for the new tag");
+    assert!(
+        run < skip && skip < dispatch,
+        "tag-release.yml must run the script, then skip on no version, then dispatch"
+    );
+    for pin in [
+        "git fetch --tags origin",
+        "git push --atomic origin HEAD:main \"v${version}\"",
+    ] {
+        assert!(
+            TAG_RELEASE_SH.contains(pin),
+            "scripts/tag-release.sh must keep `{pin}`"
+        );
+    }
 }
 
 #[test]
