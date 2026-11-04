@@ -1,3 +1,8 @@
+# Checks for pull requests and main, then the release of a green main commit.
+#
+# Every job before `release-gate` is a check. `release-gate` needs all of
+# them, and the main ruleset requires each of them by job name (list in
+# docs/architecture.md, Distribution). CI: crates/workspace-status/tests/release_gate.rs.
 name: test
 
 on:
@@ -62,3 +67,39 @@ jobs:
         run: |
           ./scripts/with-desktop-session.sh --auto -- \
             cargo test --test tui_tty_e2e -- --ignored --nocapture --test-threads=1
+
+  # Release a main push only after every check passed, and only while that
+  # commit is still the tip of main. When a newer merge landed during the
+  # checks, this run skips and the newer merge's run releases.
+  release-gate:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [lint, cargo, tui-tty-desktop]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      current: ${{ steps.tip.outputs.current }}
+    steps:
+      - id: tip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tip=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
+          if [[ "$tip" == "$GITHUB_SHA" ]]; then
+            echo "current=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "skip: main moved from $GITHUB_SHA to $tip; the newer run releases"
+            echo "current=false" >>"$GITHUB_OUTPUT"
+          fi
+
+  release:
+    needs: release-gate
+    if: needs.release-gate.outputs.current == 'true'
+    permissions:
+      contents: write
+      actions: write
+    uses: ./.github/workflows/tag-release.yml
+    # The `release` environment secret RELEASE_DEPLOY_KEY reaches the called
+    # workflow only with `inherit`.
+    secrets: inherit

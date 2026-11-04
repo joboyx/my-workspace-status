@@ -187,7 +187,7 @@ See [graph.md](./graph.md).
 
 The CLI is published with [cargo-dist](https://axodotdev.github.io/cargo-dist/) 0.32 (`dist-workspace.toml`).
 `.github/workflows/release.yml` is generated (`dist generate`) and builds GitHub Release archives plus `workspace-status-installer.sh` / `.ps1` on a version tag (linux, macOS, and Windows `x86_64-pc-windows-msvc`; linux/mac aarch64 and x86_64).
-`.github/workflows/tag-release.yml` writes an annotated `vX.Y.Z` on each push to `main` and dispatches Release (`GITHUB_TOKEN` tag pushes do not start other workflows). The tag step is `scripts/tag-release.sh`. It fetches tags, starts from the `crates/workspace-status/Cargo.toml` version, and bumps the patch past every taken `v<version>` tag, also a tag on a commit that is on no branch (that tag stays as it is). A bump rewrites both crate versions and their `Cargo.lock` entries in one `chore(release):` commit. It pushes `main` and the tag with `git push --atomic`, so when `main` is refused (a newer merge landed first) no tag is left behind and the run for the newer merge tags instead. It prints the version for the dispatch, or nothing on a skip (an incoming `chore(release):` commit, or a HEAD that already has a `v*` tag). CI: `crates/workspace-status/tests/tag_release.rs` runs the script with real git against a temp bare `origin`. `allow-dirty = ["ci"]` lets generate succeed when `release.yml` has local edits. Generate still rewrites that file.
+`.github/workflows/tag-release.yml` writes an annotated `vX.Y.Z` for each push to `main` that passes the checks (see **Release gate**). After a `GITHUB_TOKEN` push it dispatches Release (`GITHUB_TOKEN` tag pushes do not start other workflows). The tag step is `scripts/tag-release.sh`. It fetches tags, starts from the `crates/workspace-status/Cargo.toml` version, and bumps the patch past every taken `v<version>` tag, also a tag on a commit that is on no branch (that tag stays as it is). A bump rewrites both crate versions and their `Cargo.lock` entries in one `chore(release):` commit. It pushes `main` and the tag with `git push --atomic`, so when `main` is refused (a newer merge landed first) no tag is left behind and the run for the newer merge tags instead. It prints the version for the dispatch, or nothing on a skip (an incoming `chore(release):` commit, or a HEAD that already has a `v*` tag). CI: `crates/workspace-status/tests/tag_release.rs` runs the script with real git against a temp bare `origin`. `allow-dirty = ["ci"]` lets generate succeed when `release.yml` has local edits. Generate still rewrites that file.
 Do not set `dispatch-releases = true`. That switch drops tag-push. This repo needs tag-push plus `workflow_dispatch`.
 The host job runs [git-cliff](https://git-cliff.org/) (`cliff.toml`, conventional commits) for the current tag and prepends that changelog to cargo-dist's installer/download body. That is what GitHub Release notes and `ws --update` show.
 Installers place `workspace-status`, `ws`, and `workspace-status-update` in `~/.local/bin`.
@@ -207,6 +207,26 @@ A TTY spawn that can write that file (PTY e2e, desktop e2e, `scripts/capture-dem
    - Run git-cliff (`orhun/git-cliff-action`, `--current --strip header`).
    - Prepend that changelog to the cargo-dist announcement before `gh release create`.
 4. Run `cargo test --test release_watch`. That suite fails if generate dropped those steps, or if a TTY spawn path no longer assigns `WS_STATUS_UPDATE_CHECK_STORE` or no longer drops `WS_STATUS_WORKSPACE`.
+
+### Release gate
+
+`.github/workflows/test.yml` runs the checks on every pull request and every push to `main`. On a push to `main`, its `release-gate` job needs every check job. It passes only while the tested commit is still the tip of `main`. When a newer merge landed during the checks, the run skips, and the run for the newer merge releases. The `release` job then calls `tag-release.yml` (`on: workflow_call` only, no trigger of its own). So a failed check means no tag and no Release for that commit.
+
+Required checks (job names): `lint`, `cargo`, `tui-tty-desktop`. CI: `crates/workspace-status/tests/release_gate.rs` fails when `release-gate` does not need every check job of `test.yml`, when this list misses one, or when `tag-release.yml` gets a trigger of its own.
+
+To require these checks on pull requests, a repository ruleset on `main` requires them. A required check also applies to direct pushes, and that includes the `chore(release):` version bump that `tag-release.yml` pushes to `main`. In a repository owned by a personal account, `GITHUB_TOKEN` (the GitHub Actions app) cannot be a bypass actor, so its push fails with `GH013 … required status checks are expected`. The bypass actor is a deploy key instead:
+
+- Deploy key `tag-release`, with write access. Its private key is the secret `RELEASE_DEPLOY_KEY` of the environment `release`. The environment's deployment branch policy allows only `main`, so a pull request workflow cannot read the key. `test.yml` passes it to the called workflow with `secrets: inherit`.
+- When `RELEASE_DEPLOY_KEY` is set, `tag-release.yml` checks out and pushes with the deploy key. A deploy key push starts workflows. The tag push starts Release (`on.push.tags`), so `tag-release.yml` does not dispatch it. The bump commit push starts `test.yml`, so the bump commit gets its own checks, and its `release` run skips it as a `chore(release):` commit.
+- When the secret is not set, `tag-release.yml` pushes with `GITHUB_TOKEN` and dispatches Release. That works only while `main` requires no checks.
+
+Rollout order. Each step keeps releases working:
+
+1. Merge the workflow change. Releases still push with `GITHUB_TOKEN`.
+2. Create the environment `release` with a deployment branch policy of `main` only. Add the deploy key and the environment secret `RELEASE_DEPLOY_KEY`. After the next merge, check that exactly one Release run started from the tag push, and that `test.yml` ran on the bump commit.
+3. Create the ruleset: target the default branch; rule "Require status checks to pass" with the required checks above from GitHub Actions, without "Require branches to be up to date"; bypass list: deploy keys, "Always allow". Do not add a user role to the bypass list: a bypass actor can merge a pull request before its checks pass.
+
+Step 3 before step 2 stops every release at the bump push. The atomic push leaves no tag behind. To recover, finish step 2, or disable the ruleset.
 
 ## Decisions
 
