@@ -70,7 +70,8 @@ jobs:
 
   # Release a main push only after every check passed, and only while that
   # commit is still the tip of main. When a newer merge landed during the
-  # checks, this run skips and the newer merge's run releases.
+  # checks, this run skips and the newer merge's run releases when its
+  # checks pass.
   release-gate:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [lint, cargo, tui-tty-desktop]
