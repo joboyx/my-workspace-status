@@ -210,7 +210,7 @@ A TTY spawn that can write that file (PTY e2e, desktop e2e, `scripts/capture-dem
 
 ### Release gate
 
-`.github/workflows/test.yml` runs the checks on every pull request and every push to `main`. On a push to `main`, its `release-gate` job needs every check job. It passes only while the tested commit is still the tip of `main`. When a newer merge landed during the checks, the run skips, and the run for the newer merge releases. The `release` job then calls `tag-release.yml` (`on: workflow_call` only, no trigger of its own). So a failed check means no tag and no Release for that commit.
+`.github/workflows/test.yml` runs the checks on every pull request and every push to `main`. On a push to `main`, its `release-gate` job needs every check job. It passes only while the tested commit is still the tip of `main`. When a newer merge landed during the checks, the run skips, and the run for the newer merge releases when its checks pass. A merge that lands between the tip check and the push makes that push fail as non-fast-forward; that run shows red, and the newer merge's run releases. The `release` job then calls `tag-release.yml` (`on: workflow_call` only, no trigger of its own). So a failed check means no tag and no Release for that commit.
 
 Required checks (job names): `lint`, `cargo`, `tui-tty-desktop`. CI: `crates/workspace-status/tests/release_gate.rs` fails when `release-gate` does not need every check job of `test.yml`, when this list misses one, or when `tag-release.yml` gets a trigger of its own.
 
@@ -223,7 +223,7 @@ To require these checks on pull requests, a repository ruleset on `main` require
 Rollout order. Each step keeps releases working:
 
 1. Merge the workflow change. Releases still push with `GITHUB_TOKEN`.
-2. Create the environment `release` with a deployment branch policy of `main` only. Add the deploy key and the environment secret `RELEASE_DEPLOY_KEY`. After the next merge, check that exactly one Release run started from the tag push, and that `test.yml` ran on the bump commit.
+2. Configure the environment `release` (the first release run after step 1 creates it with no branch policy): set a deployment branch policy of `main` only before you add any secret. Add the deploy key and the environment secret `RELEASE_DEPLOY_KEY`. After the next merge, check that exactly one Release run started from the tag push, and that `test.yml` ran on the bump commit.
 3. Create the ruleset: target the default branch; rule "Require status checks to pass" with the required checks above from GitHub Actions, without "Require branches to be up to date"; bypass list: deploy keys, "Always allow". Do not add a user role to the bypass list: a bypass actor can merge a pull request before its checks pass.
 
 Step 3 before step 2 stops every release at the bump push. The atomic push leaves no tag behind. To recover, finish step 2, or disable the ruleset.

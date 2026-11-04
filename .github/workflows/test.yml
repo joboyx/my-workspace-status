@@ -2,7 +2,7 @@
 #
 # Every job before `release-gate` is a check. `release-gate` needs all of
 # them, and the main ruleset requires each of them by job name (list in
-# docs/architecture.md, Distribution). CI: crates/workspace-status/tests/release_gate.rs.
+# docs/architecture.md, Release gate). CI: crates/workspace-status/tests/release_gate.rs.
 name: test
 
 on:

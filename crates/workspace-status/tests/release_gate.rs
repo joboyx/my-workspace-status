@@ -169,15 +169,26 @@ fn tag_release_pushes_with_the_release_deploy_key_when_set() {
         );
     }
     // A deploy key tag push starts release.yml by itself. Dispatching too would
-    // start a second Release run for the same tag.
+    // start a second Release run for the same tag. The guarded block must be
+    // `if <deploy key>; then <no dispatch>; else <dispatch>; fi`.
     let guard = TAG_RELEASE_YML
-        .find("if [[ \"$DEPLOY_KEY_PUSH\" == \"true\" ]]")
+        .find("if [[ \"$DEPLOY_KEY_PUSH\" == \"true\" ]]; then")
         .expect("tag-release.yml must skip the dispatch after a deploy key push");
-    let dispatch = TAG_RELEASE_YML
-        .find("gh workflow run release.yml")
-        .expect("tag-release.yml must dispatch release.yml after a GITHUB_TOKEN push");
+    let block: Vec<&str> = TAG_RELEASE_YML[guard..]
+        .lines()
+        .map(str::trim)
+        .take_while(|line| *line != "fi")
+        .collect();
+    let else_at = block
+        .iter()
+        .position(|line| *line == "else")
+        .expect("the deploy key guard must have an else branch");
+    let dispatch_at = block
+        .iter()
+        .position(|line| line.starts_with("gh workflow run release.yml"))
+        .expect("the release.yml dispatch must sit inside the deploy key guard");
     assert!(
-        guard < dispatch,
+        else_at < dispatch_at,
         "the release.yml dispatch must sit in the else branch of the deploy key guard"
     );
 }
