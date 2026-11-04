@@ -216,17 +216,21 @@ Required checks (job names): `lint`, `cargo`, `tui-tty-desktop`. CI: `crates/wor
 
 To require these checks on pull requests, a repository ruleset on `main` requires them. A required check also applies to direct pushes, and that includes the `chore(release):` version bump that `tag-release.yml` pushes to `main`. In a repository owned by a personal account, `GITHUB_TOKEN` (the GitHub Actions app) cannot be a bypass actor, so its push fails with `GH013 … required status checks are expected`. The bypass actor is a deploy key instead:
 
-- Deploy key `tag-release`, with write access. Its private key is the secret `RELEASE_DEPLOY_KEY` of the environment `release`. The environment's deployment branch policy allows only `main`, so a pull request workflow cannot read the key. `test.yml` passes it to the called workflow with `secrets: inherit`.
-- When `RELEASE_DEPLOY_KEY` is set, `tag-release.yml` checks out and pushes with the deploy key. A deploy key push starts workflows. The tag push starts Release (`on.push.tags`), so `tag-release.yml` does not dispatch it. The bump commit push starts `test.yml`, so the bump commit gets its own checks, and its `release` run skips it as a `chore(release):` commit.
-- When the secret is not set, `tag-release.yml` pushes with `GITHUB_TOKEN` and dispatches Release. That works only while `main` requires no checks.
+Live repository settings:
 
-Rollout order. Each step keeps releases working:
+- Ruleset `Require MYWS tests on main`, active, targets `main`. Rule "Require status checks to pass": `lint`, `cargo`, `tui-tty-desktop`, each from GitHub Actions, without "Require branches to be up to date". Bypass list: deploy keys only, "Always allow". Do not add a user role: a bypass actor can merge a pull request before its checks pass.
+- Deploy key `MYWS release automation`, with write access. Its private key is the secret `RELEASE_DEPLOY_KEY` of the environment `release`.
+- Environment `release`: deployment branch policy allows only `main`, so a pull request workflow cannot read the key. `test.yml` passes the secret to the called workflow with `secrets: inherit`.
 
-1. Merge the workflow change. Releases still push with `GITHUB_TOKEN`.
-2. Configure the environment `release` (the first release run after step 1 creates it with no branch policy): set a deployment branch policy of `main` only before you add any secret. Add the deploy key and the environment secret `RELEASE_DEPLOY_KEY`. After the next merge, check that exactly one Release run started from the tag push, and that `test.yml` ran on the bump commit.
-3. Create the ruleset: target the default branch; rule "Require status checks to pass" with the required checks above from GitHub Actions, without "Require branches to be up to date"; bypass list: deploy keys, "Always allow". Do not add a user role to the bypass list: a bypass actor can merge a pull request before its checks pass.
+With `RELEASE_DEPLOY_KEY` set, `tag-release.yml` checks out and pushes with the deploy key. A deploy key push starts workflows. The tag push starts Release (`on.push.tags`), so `tag-release.yml` does not dispatch it. The bump commit push starts `test.yml`, so the bump commit gets its own checks, and its `release` run skips it as a `chore(release):` commit. Without the secret, `tag-release.yml` pushes with `GITHUB_TOKEN` and dispatches Release, and the ruleset refuses that push (`GH013`). The atomic push leaves no tag behind. To recover, restore the secret or disable the ruleset.
 
-Step 3 before step 2 stops every release at the bump push. The atomic push leaves no tag behind. To recover, finish step 2, or disable the ruleset.
+Verify a release after a merge (`<merge>` is the merge commit, `<tag>` the new tag):
+
+1. `gh run list --commit <merge> --workflow test.yml`: `lint`, `cargo`, `tui-tty-desktop`, then `release-gate` and `release / tag` all pass. The `release / tag` log prints `deploy key tag push starts release.yml; no dispatch`.
+2. `git log -1 origin/main` is `chore(release): <tag>`, and its parent is `<merge>`. With the ruleset active, only the deploy key bypass lets that push land.
+3. `gh run list --workflow release.yml --branch <tag>`: exactly one run, with event `push`, and it passes.
+4. `gh run list --commit <bump> --workflow test.yml`: one run on the bump commit; its checks pass, and `release / tag` prints `skip: incoming commit is already chore(release):`.
+5. `gh release view <tag> --json assets`: the release has its archives, installers and checksums.
 
 ## Decisions
 
