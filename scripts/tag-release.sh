@@ -3,8 +3,9 @@
 #
 # Usage: scripts/tag-release.sh   (from a full clone whose origin is the repository)
 #
-# .github/workflows/tag-release.yml runs this on each push to main, then
-# dispatches release.yml for the version that this script prints. The script
+# .github/workflows/tag-release.yml runs this for each main commit that passes
+# the checks. After a GITHUB_TOKEN push it dispatches release.yml for the
+# version that this script prints. The script
 # prints the version on stdout and nothing else. It prints nothing when it
 # skips. Progress and git output go to stderr.
 #

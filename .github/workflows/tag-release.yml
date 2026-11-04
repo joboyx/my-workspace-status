@@ -1,14 +1,23 @@
-# Cut a vX.Y.Z tag on every push to main so cargo-dist's Release workflow can
-# publish GitHub Release artifacts.
+# Cut a vX.Y.Z tag for a green main commit so cargo-dist's Release workflow
+# can publish GitHub Release artifacts.
 #
-# A GITHUB_TOKEN tag push does not start other workflows (GitHub recursion
-# guard). After pushing the tag this job dispatches release.yml. Keep
-# `on.workflow_dispatch` on the generated Release workflow after `dist generate`.
+# Only the `release` job of test.yml calls this workflow, after every check
+# passed on that main commit. Do not add a push trigger here: it would tag a
+# commit before its checks pass.
+#
+# Push credential:
+# - The `release` environment secret RELEASE_DEPLOY_KEY set: checkout and push
+#   use that deploy key. The main ruleset lets the deploy key bypass its
+#   required checks, so the version-bump commit can land on main. A deploy key
+#   tag push starts release.yml (on.push.tags), so this job does not dispatch.
+# - Not set: push with GITHUB_TOKEN. That works only while main requires no
+#   checks. A GITHUB_TOKEN tag push does not start other workflows (GitHub
+#   recursion guard), so this job dispatches release.yml. Keep
+#   `on.workflow_dispatch` on the generated Release workflow after `dist generate`.
 name: tag-release
 
 on:
-  push:
-    branches: [main]
+  workflow_call:
 
 concurrency:
   group: tag-release
@@ -21,13 +30,19 @@ permissions:
 jobs:
   tag:
     runs-on: ubuntu-latest
+    # Holds RELEASE_DEPLOY_KEY. Its deployment branch policy allows only main,
+    # so a pull request workflow cannot read the key.
+    environment: release
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      DEPLOY_KEY_PUSH: ${{ secrets.RELEASE_DEPLOY_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           fetch-tags: true
+          # Empty when the secret is not set: checkout then uses GITHUB_TOKEN.
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
       - name: Tag and dispatch Release
         run: |
           set -euo pipefail
@@ -39,4 +54,8 @@ jobs:
             echo "skip: no new tag, no Release dispatch"
             exit 0
           fi
-          gh workflow run release.yml --ref "v${version}"
+          if [[ "$DEPLOY_KEY_PUSH" == "true" ]]; then
+            echo "deploy key tag push starts release.yml; no dispatch"
+          else
+            gh workflow run release.yml --ref "v${version}"
+          fi
