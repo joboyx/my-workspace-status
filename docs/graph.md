@@ -62,8 +62,10 @@ bar only when `col_offset > 0`, because it paints over the last list row.
 or stash row is a node line plus a spacer, other rows one line; width does
 not change it). The widget decides the vertical bar from that count, then
 paints once at the width the bar leaves. The TUI records the same count for
-its hit boxes, so a graph frame paints the model once. The TUI pan clamp
-reads the count the last frame recorded (`graph_content_len`).
+its hit boxes, so a graph frame paints the model once. `painted_line_of_row`
+gives a row's node line from the same counts, without a paint: the TUI keeps
+the cursor row in view with it when a paint shortens the list. The TUI pan
+clamp reads the count the last frame recorded (`graph_content_len`).
 
 `GraphWidget::gutter_width` caps painted gutter columns. Topology still
 uses the full lane model; every row shares the same left-aligned clip. `GraphWidget::lane_colors` colours each

@@ -4781,6 +4781,86 @@ fn graph_footer_height_follows_the_meta_rows_not_the_message() {
     }
 }
 
+/// A paint that wraps the selected row's meta line onto more rows than
+/// the last paint (here a narrower terminal; Enter into the narrower
+/// depth-1 pane and a relative date that grows do the same) keeps the
+/// cursor row in the list, in both looks, with no key press between. The
+/// cursor is on the root commit, the last commit row: at 200 columns it
+/// paints one row above the list bottom (the spacer under it is the last
+/// row) and its 80-col meta line fits one row; at 72 columns the meta
+/// line wraps onto 3 rows and the list gives 2 up.
+#[test]
+fn graph_cursor_stays_in_the_list_when_the_meta_wraps_without_a_key() {
+    let n = 30;
+    for (look, background) in PANE_LOOKS {
+        let mut state = two_pane_graph_state();
+        state.background = background;
+        if let Some(model) = state.graph.as_mut() {
+            model.commits = (0..n)
+                .map(|i| Commit {
+                    id: format!("c{i:02}{}", "a".repeat(37)),
+                    subject: format!("subject {i:02}"),
+                    parents: if i + 1 < n {
+                        vec![format!("c{:02}{}", i + 1, "a".repeat(37))]
+                    } else {
+                        Vec::new()
+                    },
+                    author_name: "Augusta Ada King Lovelace".into(),
+                    author_date_unix: 1_700_000_000,
+                    ..Commit::default()
+                })
+                .collect();
+            model.head_id = Some(model.commits[0].id.clone());
+        }
+        let mut wide = Terminal::new(TestBackend::new(200, 24)).unwrap();
+        draw_state(&mut wide, &mut state);
+        state.graph_cursor = graph_row_of(&state, &format!("c{:02}{}", n - 1, "a".repeat(37)));
+        state.sync_graph_scroll();
+        let cursor_in_list = |terminal: &Terminal<TestBackend>, state: &AppState| {
+            let l = &state.layout;
+            let chrome = state.graph_chrome();
+            let rule_y = l.right_y + l.diff_pane_height - chrome.footer_height;
+            let list = region_text(
+                terminal,
+                l.diff_content_x,
+                l.right_y,
+                l.diff_pane_width,
+                rule_y - l.right_y,
+            );
+            let line = state.graph_cursor_line().expect("cursor line");
+            let top = usize::from(l.graph_painted_top.expect("painted top"));
+            assert!(
+                line >= top && line < top + usize::from(chrome.list_height),
+                "{look}: cursor line {line} outside [{top}, {}):\n{list}",
+                top + usize::from(chrome.list_height)
+            );
+            assert!(
+                list.contains(&format!("subject {:02}", n - 1)),
+                "{look}: the cursor row paints in the list:\n{list}"
+            );
+            chrome
+        };
+        draw_state(&mut wide, &mut state);
+        let before = cursor_in_list(&wide, &state);
+        assert_eq!(before.meta_rows, 1, "{look}: one meta row at 200 columns");
+        let mut narrow = Terminal::new(TestBackend::new(72, 24)).unwrap();
+        let paints = workspace_status_graph::paint_calls();
+        draw_state(&mut narrow, &mut state);
+        assert_eq!(
+            workspace_status_graph::paint_calls() - paints,
+            1,
+            "{look}: the frame that moves the viewport still paints once"
+        );
+        let after = cursor_in_list(&narrow, &state);
+        assert_eq!(after.meta_rows, 3, "{look}: 3 meta rows at 72 columns");
+        assert_eq!(
+            after.list_height + 2,
+            before.list_height,
+            "{look}: the list gave up 2 rows"
+        );
+    }
+}
+
 /// The depth-2 commit-files footer wraps commit A's 62-col meta line onto
 /// 2 rows in the 46-col left pane, in both looks; the file list gives up
 /// the extra row, and the layout pass (click map) and the paint agree:

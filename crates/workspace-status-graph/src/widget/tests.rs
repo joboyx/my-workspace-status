@@ -3002,6 +3002,27 @@ fn painted_line_count_matches_paint_for_every_row_kind() {
 }
 
 #[test]
+fn painted_line_of_row_matches_paint_for_every_row_kind() {
+    for model in [
+        GraphModel::default(),
+        sample_model(),
+        merge_model(),
+        two_parent_join_model(),
+        every_row_kind_model(),
+    ] {
+        let painted = paint_model(&model, &UNICODE, None);
+        let rows = model.visible_rows().len();
+        for row in 0..rows {
+            let line = painted
+                .iter()
+                .position(|line| line.row_index == Some(row) && line.selectable);
+            assert_eq!(crate::painted_line_of_row(&model, row), line, "row {row}");
+        }
+        assert_eq!(crate::painted_line_of_row(&model, rows), None);
+    }
+}
+
+#[test]
 fn widget_paints_the_model_once_per_render() {
     let model = every_row_kind_model();
     // Tall (list fits, no bar) and short (bar) panes.

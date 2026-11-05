@@ -38,9 +38,10 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 use workspace_status_graph::{
     graph_chrome_budget_for_meta, graph_footer_request, graph_vscroll_visible, paint_model,
-    selection_footer, GraphChromeBudget, GraphFooterSelection, GraphModel, GraphRow, LabelKind,
-    LabelPart, PaintedLine, SelectionFooter, ASCII, COMMIT_MSG_LINES_DEFAULT, COMMIT_MSG_LINES_MAX,
-    COMMIT_MSG_LINES_MIN, FOOTER_RULE_ROWS, UNICODE,
+    painted_line_count, painted_line_of_row, selection_footer, GraphChromeBudget,
+    GraphFooterSelection, GraphModel, GraphRow, LabelKind, LabelPart, PaintedLine, SelectionFooter,
+    ASCII, COMMIT_MSG_LINES_DEFAULT, COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN, FOOTER_RULE_ROWS,
+    UNICODE,
 };
 
 use crate::config::ViewDefaults;
@@ -334,6 +335,12 @@ pub struct LayoutHit {
     /// selected row's meta line at this width, so the list height between
     /// frames matches the painted footer.
     pub graph_width: u16,
+    /// Graph list height at the last graph paint.
+    ///
+    /// `0` before the first paint. Not cleared between frames: the next
+    /// graph paint compares its list height with it
+    /// ([`AppState::keep_graph_cursor_in_view`]).
+    pub graph_list_height: u16,
     /// 0-based first row of the depth-2 commit-files footer (its rule row)
     /// when its expanded message is taller than its message rows (wheel
     /// there scrolls the message, not the file list).
@@ -573,6 +580,7 @@ impl Default for LayoutHit {
             graph_footer_message_rows: 0,
             graph_footer_scroll_max: 0,
             graph_width: 0,
+            graph_list_height: 0,
             commit_detail_footer_y: None,
             commit_detail_footer_x: 0,
             commit_detail_footer_width: 0,
@@ -6913,6 +6921,37 @@ impl AppState {
         let list_h = self.graph_chrome().list_height.max(1) as usize;
         let (start, _) = visible_window(line_count, idx, list_h);
         self.graph_scroll = start as u16;
+    }
+
+    /// Keep the graph cursor row in view when a paint gives the list
+    /// `list_height` rows and the last paint gave it `painted_height`.
+    ///
+    /// The list height can change with no key press: the selected row's
+    /// meta line wraps onto more rows in a narrower pane (a narrower
+    /// terminal, Enter into the depth-1 left pane) or when its relative
+    /// date grows. When the old height showed the cursor row and the new
+    /// one hides it, the viewport moves as [`Self::sync_graph_scroll`]
+    /// moves it. A cursor that the old height did not show (a scrollbar
+    /// drag moves only the viewport) keeps its viewport. It finds the
+    /// cursor line without a paint, so the frame still paints the model
+    /// once.
+    pub(crate) fn keep_graph_cursor_in_view(&mut self, painted_height: u16, list_height: u16) {
+        if list_height >= painted_height || list_height == 0 {
+            return;
+        }
+        let Some(model) = self.graph.as_ref() else {
+            return;
+        };
+        let Some(idx) = painted_line_of_row(model, self.graph_cursor) else {
+            return;
+        };
+        let line_count = painted_line_count(model);
+        let top = usize::from(self.graph_scroll);
+        let shows = |height: u16| idx >= top && idx < top + usize::from(height);
+        if shows(painted_height) && !shows(list_height) {
+            let (start, _) = visible_window(line_count, idx, usize::from(list_height));
+            self.graph_scroll = start as u16;
+        }
     }
 
     /// Painted graph line of the cursor row, the line [`Self::graph_scroll`]

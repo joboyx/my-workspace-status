@@ -2607,6 +2607,11 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
     }
     // The width the selected row's meta line wraps at between frames.
     state.layout.graph_width = area.width;
+    // A footer that grew since the last paint (more wrapped meta rows)
+    // must not hide the cursor row under it.
+    let list_height = state.graph_chrome_in(area.height, area.width).list_height;
+    state.keep_graph_cursor_in_view(state.layout.graph_list_height, list_height);
+    state.layout.graph_list_height = list_height;
     // The painted top: `graph_scroll` itself stays the jump top.
     let scroll = graph_glide_scroll(state, area);
     if state.graph.is_some() {

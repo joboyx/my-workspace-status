@@ -11454,6 +11454,38 @@ fn footer_budget_changes_keep_the_focused_graph_row_in_view() {
     in_view(&app);
 }
 
+/// A shorter list with no key press moves the graph viewport only when
+/// the old height showed the cursor row and the new one hides it.
+#[test]
+fn shorter_graph_list_keeps_a_shown_cursor_row_in_view() {
+    let mut app = graph_state(false);
+    focus_repo(&mut app, "app");
+    install_linear_graph(&mut app, 40);
+    app.graph_cursor = 10;
+    let line = painted_focus_index(&app);
+    // The cursor on the last of 10 rows: 8 rows hide it.
+    app.graph_scroll = (line - 9) as u16;
+    app.keep_graph_cursor_in_view(10, 8);
+    let top = app.graph_scroll as usize;
+    assert!(
+        line >= top && line < top + 8,
+        "cursor line {line} outside [{top}, {})",
+        top + 8
+    );
+    // Still shown at 8 rows: no move.
+    let kept = app.graph_scroll;
+    app.keep_graph_cursor_in_view(10, 8);
+    assert_eq!(app.graph_scroll, kept);
+    // A scrollbar drag left the cursor above the viewport: no move.
+    app.graph_scroll = (line + 1) as u16;
+    app.keep_graph_cursor_in_view(10, 8);
+    assert_eq!(app.graph_scroll, (line + 1) as u16);
+    // Same height: no move.
+    app.graph_scroll = (line - 9) as u16;
+    app.keep_graph_cursor_in_view(10, 10);
+    assert_eq!(app.graph_scroll, (line - 9) as u16);
+}
+
 #[test]
 fn graph_j_past_midpoint_keeps_focus_near_middle() {
     let mut app = graph_state(false);
