@@ -38,8 +38,8 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 use workspace_status_graph::{
     graph_chrome_budget_for, graph_footer_request, graph_vscroll_visible, paint_model,
-    selection_footer_parts, GraphChromeBudget, GraphFooterSelection, GraphModel, GraphRow,
-    LabelKind, LabelPart, PaintedLine, ASCII, COMMIT_MSG_LINES_DEFAULT, COMMIT_MSG_LINES_MAX,
+    selection_footer, GraphChromeBudget, GraphFooterSelection, GraphModel, GraphRow, LabelKind,
+    LabelPart, PaintedLine, SelectionFooter, ASCII, COMMIT_MSG_LINES_DEFAULT, COMMIT_MSG_LINES_MAX,
     COMMIT_MSG_LINES_MIN, FOOTER_RULE_ROWS, UNICODE,
 };
 
@@ -1958,7 +1958,8 @@ impl AppState {
         let rows = model.visible_rows();
         let selected = rows.get(self.graph_cursor);
         let glyphs = if self.ascii { &ASCII } else { &UNICODE };
-        selection_footer_parts(
+        // The message lines and one meta line.
+        selection_footer(
             model,
             GraphFooterSelection::from(selected),
             glyphs,
@@ -1966,7 +1967,9 @@ impl AppState {
             unix_now(),
             true,
         )
+        .message
         .len()
+            + 1
     }
 
     /// Message lines of the graph selection footer below the shown ones:
@@ -2415,7 +2418,7 @@ impl AppState {
         row: Option<&GraphRow>,
         fallback: Option<&str>,
         width: usize,
-    ) -> Vec<Vec<LabelPart>> {
+    ) -> SelectionFooter {
         if let (None, Some(name)) = (row, fallback) {
             let meta = |text: &str| {
                 vec![LabelPart {
@@ -2424,11 +2427,14 @@ impl AppState {
                     target: None,
                 }]
             };
-            return vec![meta(COMMIT_FOOTER_NOT_IN_GRAPH), meta(name)];
+            return SelectionFooter {
+                message: vec![meta(COMMIT_FOOTER_NOT_IN_GRAPH)],
+                meta: meta(name),
+            };
         }
         let model = self.commit_footer_model();
         let glyphs = if self.ascii { &ASCII } else { &UNICODE };
-        selection_footer_parts(
+        selection_footer(
             &model,
             GraphFooterSelection::from(row),
             glyphs,
@@ -2461,14 +2467,17 @@ impl AppState {
     /// (the graph pane beside it already shows one). The lines are the
     /// graph selection footer's for the drilled row
     /// ([`Self::commit_detail_graph_row`], [`Self::commit_footer_parts`]):
-    /// collapsed, the subject and the meta line; expanded, the whole
+    /// collapsed, the subject and the meta rows; expanded, the whole
     /// subject plus body wrapped one column short of `width` (the message
-    /// scrollbar column) with no line cap, then the meta line. Paint pins
-    /// the meta line on the footer's bottom row under the message rows,
-    /// like the graph footer. No blank padding: the footer keeps its fixed
+    /// scrollbar column) with no line cap, then the meta rows (the meta
+    /// line wrapped at `width`). Paint pins the meta rows at the footer's
+    /// bottom under the message rows, like the graph footer. No blank
+    /// padding: the footer keeps its fixed
     /// [`Self::commit_detail_footer_request`] height in paint, where unused
     /// message rows stay blank and a message taller than the rows scrolls
-    /// ([`Self::commit_detail_msg_scroll`]).
+    /// ([`Self::commit_detail_msg_scroll`]). Tests read the footer text
+    /// here.
+    #[cfg(test)]
     pub(crate) fn commit_detail_footer_lines(&self, width: usize) -> Vec<String> {
         let fallback = self.commit_detail_fallback_name();
         self.commit_footer_parts(
@@ -2476,6 +2485,7 @@ impl AppState {
             fallback.as_deref(),
             width,
         )
+        .lines(width.max(1))
         .iter()
         .map(|parts| parts.iter().map(|part| part.text.as_str()).collect())
         .collect()
@@ -2493,10 +2503,15 @@ impl AppState {
         let rows = usize::from(layout.commit_detail_footer_height)
             .saturating_sub(usize::from(FOOTER_RULE_ROWS))
             .saturating_sub(1);
+        let fallback = self.commit_detail_fallback_name();
         let messages = self
-            .commit_detail_footer_lines(usize::from(layout.commit_detail_footer_width))
-            .len()
-            .saturating_sub(1);
+            .commit_footer_parts(
+                self.commit_detail_graph_row().as_ref(),
+                fallback.as_deref(),
+                usize::from(layout.commit_detail_footer_width),
+            )
+            .message
+            .len();
         if rows == 0 || messages <= rows {
             return 0;
         }

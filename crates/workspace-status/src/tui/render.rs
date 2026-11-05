@@ -3223,17 +3223,18 @@ fn draw_commit_footer(
         height: body_h,
         ..area
     };
-    let lines = state.commit_footer_parts(
+    let content = state.commit_footer_parts(
         footer.row.as_ref(),
         footer.fallback.as_deref(),
         usize::from(area.width),
     );
-    let scroll_max = footer_message_scroll_max(lines.len(), body_h);
+    // The message lines and one meta line.
+    let scroll_max = footer_message_scroll_max(content.message.len() + 1, body_h);
     let glyphs = if state.ascii { &ASCII } else { &UNICODE };
     let spans = paint_selection_footer(
         frame.buffer_mut(),
         body,
-        lines,
+        &content,
         state.commit_msg_scroll_of(footer.msg_identity.as_deref()),
         glyphs.more_below,
         Some(graph_label_palette(palette)),
