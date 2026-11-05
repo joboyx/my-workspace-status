@@ -1,8 +1,5 @@
-use std::path::{Path, PathBuf};
-use std::process::Command;
-
 use crate::harness::{PtySession, ROWS};
-use crate::seed::{git, unique_root};
+use crate::seed::{git, seed_demo_workspace, unique_root};
 use crate::support::{
     graph_cursor_on, graph_pane_focused, prove_keys_handled, right_pane, title_has_files,
     title_has_graph, tree_cursor_on, GIT_WAIT, WAIT,
@@ -10,18 +7,6 @@ use crate::support::{
 
 const FULL_REF: &str = "feature/reconciliation";
 const ASCII_MERGED_CHIP: &str = "[+=feature/reconciliation]";
-
-fn seed_demo_workspace(dest: &Path) {
-    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("scripts/seed-demo-workspace.sh");
-    let status = Command::new("bash")
-        .arg(&script)
-        .arg(dest)
-        .status()
-        .expect("seed script runs");
-    assert!(status.success(), "seed-demo-workspace.sh failed");
-}
 
 fn open_demo_pty() -> PtySession {
     let root = unique_root("ws-tui-demo");

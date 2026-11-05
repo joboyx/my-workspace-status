@@ -51,6 +51,13 @@ static UI_STORE_SEQ: AtomicU64 = AtomicU64::new(0);
 pub const BASELINE_USER_CONFIG: &str =
     "{\"theme\":\"tokyo-night\",\"themeMode\":\"dark\",\"viewDefaults\":{\"background\":\"terminal\"}}\n";
 
+/// [`BASELINE_USER_CONFIG`] with flat panes (`viewDefaults.background`
+/// `"paint"`, the shipped look). A test writes it to
+/// [`user_config_file`] under `<workspace>/.e2e-config` before the spawn;
+/// the harness keeps a config file the test wrote.
+pub const FLAT_USER_CONFIG: &str =
+    "{\"theme\":\"tokyo-night\",\"themeMode\":\"dark\",\"viewDefaults\":{\"background\":\"paint\"}}\n";
+
 /// Which user config file a spawn starts with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UserConfig {

@@ -22,6 +22,7 @@ mod pty_click_chevron_toggles_fold;
 mod pty_click_right_pane_focuses;
 mod pty_click_selects_tree_row;
 mod pty_comment_store_keeps_foreign_workspace;
+mod pty_commit_footer_meta_wraps_on_narrow_panes;
 mod pty_commit_hash_popover_peeks_pins_and_copies_the_full_sha;
 mod pty_commit_msg_bottom_every_depth;
 mod pty_commit_msg_expand_toggle;

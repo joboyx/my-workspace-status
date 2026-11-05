@@ -4966,6 +4966,8 @@ struct FooterSurface {
     list_cursor: fn(&AppState) -> usize,
     /// Inner height of the pane the footer sits at the bottom of.
     pane_height: fn(&AppState) -> u16,
+    /// Rows of the list above the footer at the last paint.
+    list_rows: fn(&AppState) -> u16,
 }
 
 /// Give `state`'s graph a second commit (B) and a 30-line body on both
@@ -5127,6 +5129,12 @@ const FOOTER_SURFACES: [FooterSurface; 4] = [
         lines_below: AppState::graph_footer_lines_below,
         list_cursor: |state| state.graph_cursor,
         pane_height: |state| state.layout.diff_pane_height,
+        list_rows: |state| {
+            let l = &state.layout;
+            state
+                .graph_chrome_in(l.diff_pane_height, l.graph_width)
+                .list_height
+        },
     },
     FooterSurface {
         id: "graph-d1",
@@ -5141,6 +5149,7 @@ const FOOTER_SURFACES: [FooterSurface; 4] = [
         lines_below: AppState::graph_footer_lines_below,
         list_cursor: |state| state.graph_cursor,
         pane_height: |state| state.layout.tree_height,
+        list_rows: |state| state.graph_chrome().list_height,
     },
     FooterSurface {
         id: "files-d2",
@@ -5151,6 +5160,7 @@ const FOOTER_SURFACES: [FooterSurface; 4] = [
         lines_below: AppState::commit_detail_footer_lines_below,
         list_cursor: AppState::commit_files_cursor,
         pane_height: |state| state.layout.tree_height,
+        list_rows: |state| state.layout.files_list_height,
     },
     FooterSurface {
         id: "compare-commit",
@@ -5161,6 +5171,7 @@ const FOOTER_SURFACES: [FooterSurface; 4] = [
         lines_below: AppState::commit_detail_footer_lines_below,
         list_cursor: AppState::commit_files_cursor,
         pane_height: |state| state.layout.tree_height,
+        list_rows: |state| state.layout.files_list_height,
     },
 ];
 
@@ -5452,6 +5463,229 @@ fn commit_footer_rows_match_on_every_registry_surface() {
                 sections.first().map(|section| section.icon),
                 Some(chip.kind),
                 "{case}: the chip pins its popover"
+            );
+        }
+    }
+}
+
+/// The `commit-footer` meta line wraps on every surface `docs/parity.md`
+/// marks `supported` for `meta-wrap`, in both looks. In a 100x30
+/// terminal with `tree_fraction` 0.5 every footer is 46 to 49 columns
+/// wide, so commit A's 73-col meta line (`[HEAD] [main] · aaa1111 ·
+/// parent bbb2222 · Augusta Ada King Lovelace · 2m`) wraps onto 2 rows
+/// at the bottom of the footer, uncut: the footer grows by that row and
+/// the list gives it up (commit B's one-row meta gives it back). The
+/// wrapped rows keep their hash, parent id, author, date, and ref chip
+/// hits, and the author and chip hits pin their popovers. Collapsed,
+/// the 2 meta rows stay pinned at the bottom under the subject.
+#[test]
+fn commit_footer_meta_wraps_on_every_registry_surface() {
+    assert_eq!(
+        crate::parity_registry::supported_surface_looks("commit-footer", "meta-wrap"),
+        footer_surface_looks(),
+        "docs/parity.md `commit-footer` / `meta-wrap` surfaces and looks must match this test's"
+    );
+    for surface in &FOOTER_SURFACES {
+        for (look, background) in PANE_LOOKS {
+            let case = format!("{} {look}", surface.id);
+            let mut state = (surface.open)();
+            state.background = background;
+            if state.graph_identity.is_none() {
+                state.graph_identity = Some(("app".into(), FOOTER_COMMIT_A.into()));
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            if let Some(model) = state.graph.as_mut() {
+                for commit in &mut model.commits {
+                    if commit.id == FOOTER_COMMIT_A {
+                        commit.parents = vec![FOOTER_COMMIT_B.into()];
+                        commit.author_name = "Augusta Ada King Lovelace".into();
+                        commit.author_date_unix = now - 120;
+                    } else if commit.id == FOOTER_COMMIT_B {
+                        commit.author_date_unix = 0;
+                    }
+                }
+            }
+            state.tree_fraction = 0.5;
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let FooterBox {
+                y,
+                x,
+                width,
+                height,
+                ..
+            } = (surface.footer_box)(&state)
+                .unwrap_or_else(|| panic!("{case}: an overflowing footer records its box"));
+            let bottom = y + height;
+            let row_text = |terminal: &Terminal<TestBackend>, row: u16| {
+                region_text(terminal, x, row, width, 1)
+                    .trim_end()
+                    .to_string()
+            };
+            let footer = region_text(&terminal, x, y, width, height);
+            assert_eq!(
+                height,
+                1 + 4 + 2,
+                "{case}: rule + 4 message rows + 2 meta rows:\n{footer}"
+            );
+            assert!(
+                row_text(&terminal, y + 1).starts_with("seed graph"),
+                "{case}: the subject under the rule:\n{footer}"
+            );
+            assert_eq!(
+                row_text(&terminal, bottom - 2),
+                "[HEAD] [main] · aaa1111 · parent bbb2222",
+                "{case}: first meta row:\n{footer}"
+            );
+            assert_eq!(
+                row_text(&terminal, bottom - 1),
+                "Augusta Ada King Lovelace · 2m",
+                "{case}: second meta row:\n{footer}"
+            );
+            for row in [bottom - 2, bottom - 1] {
+                assert!(
+                    !row_text(&terminal, row).contains('…'),
+                    "{case}: meta row {row} is not cut:\n{footer}"
+                );
+            }
+            for row in y + 1..bottom - 2 {
+                let text = row_text(&terminal, row);
+                for token in ["aaa1111", "parent ", "Lovelace"] {
+                    assert!(
+                        !text.contains(token),
+                        "{case}: no meta on message row {row}: {text}"
+                    );
+                }
+            }
+            let a_list = (surface.list_rows)(&state);
+
+            // Hits on the wrapped rows, at their painted cells.
+            let buf = terminal.backend().buffer().clone();
+            let cells = |hit: &IconHit| -> String {
+                (hit.x..hit.x + hit.width)
+                    .map(|col| buf[(col, hit.y)].symbol().to_string())
+                    .collect()
+            };
+            let hit_at = |kind: IconKind, row: u16, col: u16| {
+                state
+                    .layout
+                    .icon_hits
+                    .iter()
+                    .find(|hit| hit.kind == kind && hit.y == row && hit.x == col)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{case}: {kind:?} hit at ({col}, {row}): {:?}",
+                            state.layout.icon_hits
+                        )
+                    })
+            };
+            let hash = hit_at(IconKind::CommitHash, bottom - 2, x + 16);
+            assert_eq!(cells(&hash), "aaa1111", "{case}: hash hit");
+            let parent = hit_at(IconKind::CommitHash, bottom - 2, x + 33);
+            assert_eq!(cells(&parent), "bbb2222", "{case}: parent hit");
+            let author = hit_at(IconKind::CommitAuthor, bottom - 1, x);
+            assert_eq!(
+                (author.width, cells(&author).as_str()),
+                (25, "Augusta Ada King Lovelace"),
+                "{case}: author hit"
+            );
+            let date = hit_at(IconKind::CommitDate, bottom - 1, x + 28);
+            assert_eq!(
+                (date.width, cells(&date).as_str()),
+                (2, "2m"),
+                "{case}: date hit"
+            );
+            let row_id = format!("commit:{FOOTER_COMMIT_A}");
+            let chip = state
+                .layout
+                .icon_hits
+                .iter()
+                .find(|hit| {
+                    hit.y == bottom - 2
+                        && matches!(&hit.target, IconTarget::GraphChip { row, .. } if *row == row_id)
+                        && cells(hit).contains("main")
+                })
+                .cloned()
+                .unwrap_or_else(|| {
+                    panic!("{case}: `main` chip hit: {:?}", state.layout.icon_hits)
+                });
+            state.dispatch(Action::Click {
+                col: author.x,
+                row: author.y,
+            });
+            assert_eq!(
+                state
+                    .open_popover_sections()
+                    .first()
+                    .map(|section| section.icon),
+                Some(IconKind::CommitAuthor),
+                "{case}: the author hit pins its popover"
+            );
+            state.dispatch(Action::PopoverClose);
+            assert!(state.popover.is_none(), "{case}: Esc closes");
+            state.dispatch(Action::Click {
+                col: chip.x,
+                row: chip.y,
+            });
+            assert_eq!(
+                state
+                    .open_popover_sections()
+                    .first()
+                    .map(|section| section.icon),
+                Some(chip.kind),
+                "{case}: the chip pins its popover"
+            );
+            state.dispatch(Action::PopoverClose);
+
+            // Commit B's meta fits one row: the list gets the row back.
+            (surface.show_commit)(&mut state, FOOTER_COMMIT_B);
+            draw_state(&mut terminal, &mut state);
+            let b = (surface.footer_box)(&state)
+                .unwrap_or_else(|| panic!("{case}: B's footer records its box"));
+            assert_eq!(b.height, 1 + 4 + 1, "{case}: one meta row");
+            assert_eq!(b.y + b.height, bottom, "{case}: B's footer is pinned");
+            assert_eq!(
+                row_text(&terminal, bottom - 1),
+                "(no refs) · bbb2222 · root commit · Ada",
+                "{case}: B's meta row"
+            );
+            assert_eq!(
+                (surface.list_rows)(&state),
+                a_list + 1,
+                "{case}: the list has one row more"
+            );
+
+            // Collapsed on A: subject, then the 2 meta rows at the bottom.
+            (surface.show_commit)(&mut state, FOOTER_COMMIT_A);
+            state.dispatch(Action::ToggleCommitMsgExpand);
+            assert!(!state.commit_msg_expand, "{case}");
+            draw_state(&mut terminal, &mut state);
+            let collapsed = region_text(&terminal, x, y, width, height);
+            assert_eq!(
+                row_text(&terminal, bottom - 2),
+                "[HEAD] [main] · aaa1111 · parent bbb2222",
+                "{case}: collapsed, first meta row:\n{collapsed}"
+            );
+            assert_eq!(
+                row_text(&terminal, bottom - 1),
+                "Augusta Ada King Lovelace · 2m",
+                "{case}: collapsed, second meta row:\n{collapsed}"
+            );
+            assert_eq!(
+                row_text(&terminal, bottom - 3),
+                "seed graph",
+                "{case}: collapsed, the subject:\n{collapsed}"
+            );
+            let rule = footer_rule_glyph(state.ascii);
+            let buf = terminal.backend().buffer();
+            assert_eq!(
+                buf[(x, bottom - 4)].symbol(),
+                rule,
+                "{case}: collapsed, the rule:\n{collapsed}"
             );
         }
     }
