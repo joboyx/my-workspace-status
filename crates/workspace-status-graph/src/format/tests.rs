@@ -1362,6 +1362,41 @@ fn wrap_label_parts_hard_splits_a_chip_and_keeps_its_target() {
 }
 
 #[test]
+fn wrap_label_parts_keeps_the_blank_after_a_hard_split_chip() {
+    let long = Some(PartTarget::Chip(vec![GraphRef::local(
+        "feature/a-very-long-branch-name",
+    )]));
+    let main = Some(PartTarget::Chip(vec![GraphRef::local("main")]));
+    // Two chips with the blank `join_chip_groups` puts between them.
+    let chips = vec![
+        LabelPart {
+            text: "[feature/a-very-long-branch-name]".into(),
+            kind: LabelKind::ChipLocal,
+            target: long.clone(),
+        },
+        wrap_part(" ", LabelKind::Meta),
+        LabelPart {
+            text: "[main]".into(),
+            kind: LabelKind::ChipDefault,
+            target: main.clone(),
+        },
+    ];
+    let rows = wrap_label_parts(&chips, 20);
+    assert_eq!(
+        row_texts(&rows),
+        vec!["[feature/a-very-long", "-branch-name] [main]"]
+    );
+    assert_eq!(rows[1].first().and_then(|p| p.target.clone()), long);
+    assert_eq!(rows[1].last().and_then(|p| p.target.clone()), main);
+    // At a row break the blank goes.
+    let rows = wrap_label_parts(&chips, 13);
+    assert_eq!(
+        row_texts(&rows),
+        vec!["[feature/a-ve", "ry-long-branc", "h-name]", "[main]"]
+    );
+}
+
+#[test]
 fn wrap_label_parts_empty_or_zero_width_is_one_empty_row() {
     assert_eq!(wrap_label_parts(&[], 10), vec![Vec::<LabelPart>::new()]);
     assert_eq!(

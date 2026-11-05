@@ -10,8 +10,8 @@
 
 use crate::format::{
     commit_ref_chip_parts, format_commit_message, format_relative_date, is_default_branch,
-    parts_text, short_id, trunc_label_parts, wrap_commit_message, wrap_label_parts, LabelKind,
-    LabelPart, PartTarget, COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN,
+    meta_group_separator, parts_text, short_id, trunc_label_parts, wrap_commit_message,
+    wrap_label_parts, LabelKind, LabelPart, PartTarget, COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN,
 };
 use crate::glyphs::GlyphSet;
 use crate::model::{GraphModel, GraphRef, GraphRow, RefKind};
@@ -478,8 +478,9 @@ pub fn selection_footer_parts(
     now_unix: i64,
     expand: bool,
 ) -> Vec<Vec<LabelPart>> {
-    let width = width.max(1);
-    selection_footer(model, selection, glyphs, width, now_unix, expand).lines(width)
+    // `selection_footer` clamps its own width; the meta rows take the same
+    // 1-column floor, so width 0 lays out like width 1 on every line.
+    selection_footer(model, selection, glyphs, width, now_unix, expand).lines(width.max(1))
 }
 
 /// Text lines for [`selection_footer_parts`].
@@ -583,11 +584,7 @@ fn join_meta_groups(groups: impl IntoIterator<Item = Vec<LabelPart>>) -> Vec<Lab
             continue;
         }
         if !first {
-            out.push(LabelPart {
-                text: " · ".into(),
-                kind: LabelKind::Meta,
-                target: None,
-            });
+            out.push(meta_group_separator());
         }
         first = false;
         out.extend(group);

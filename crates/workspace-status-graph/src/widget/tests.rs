@@ -3443,8 +3443,9 @@ fn chip_spans_follow_the_pan_and_stop_at_the_pane_edge() {
     // The spacer refits a narrow pane (`[+N]`); the footer truncates its
     // meta line instead. A footer cut inside `[v1]` keeps a span over the
     // shown cells, and the `…` has none.
-    // One-row meta: on a 3-row pane (rows 9..12, the meta row stays row 11)
-    // the footer has room for one meta row, so the meta line is still cut.
+    // Meta capped to one row: on a 3-row pane (rows 9..12, the meta row
+    // stays row 11) the footer has room for one meta row, so the meta line
+    // is still cut.
     let (buf, cut) = render_chips_in(&model, Rect::new(0, 9, 19, 3), 0, None);
     let footer: Vec<(GraphIconKind, String)> = cut
         .iter()
@@ -3665,8 +3666,8 @@ fn icon_spans_cover_spacer_hash_date_author_and_footer_parents() {
     )[1]
     .clone();
     let width = u16::try_from(full.chars().count() - 5).unwrap();
-    // One-row meta: a 3-row pane has room for one meta row, so the narrow
-    // footer still cuts its meta line.
+    // Meta capped to one row: a 3-row pane has room for one meta row, so
+    // the narrow footer still cuts its meta line.
     let (buf, spans) = render_rows(width, 3, 0);
     let footer_y = spans
         .iter()
@@ -4028,6 +4029,50 @@ fn meta_chip_split_over_rows_keeps_one_target_per_row() {
         vec![
             (7, "[feature/a-very-long".to_string(), target.clone()),
             (8, "-branch-name]".to_string(), target),
+        ]
+    );
+}
+
+#[test]
+fn meta_chip_after_a_split_chip_keeps_its_blank_and_target() {
+    let name = "feature/a-very-long-branch-name";
+    let mut tip = commit(&format!("c00{}", "a".repeat(37)), "long ref", &[]);
+    tip.refs = vec![GraphRef::local(name), GraphRef::tag("v1")];
+    let model = GraphModel {
+        commits: vec![tip],
+        uncommitted: None,
+        window: 1,
+        ..GraphModel::default()
+    };
+    let mut buf = Buffer::empty(Rect::new(0, 0, 20, 12));
+    let spans = GraphWidget::new(&model)
+        .ascii(true)
+        .now_unix(NOW)
+        .selected(Some(0))
+        .render_with_icon_spans(buf.area, &mut buf);
+    // Meta rows 7..12: `[feature/a-very-long`, `-branch-name] [v1]`,
+    // `c00aaaa`, `root commit · Ada`, `1h`.
+    assert_eq!(buf_row(&buf, 8).trim_end(), "-branch-name] [v1]");
+    let chips: Vec<(u16, u16, String, Option<PartTarget>)> = spans
+        .iter()
+        .filter(|span| span.y == 8 && span.target.is_some())
+        .map(|span| (span.y, span.x, span_text(&buf, span), span.target.clone()))
+        .collect();
+    assert_eq!(
+        chips,
+        vec![
+            (
+                8,
+                0,
+                "-branch-name]".to_string(),
+                Some(PartTarget::Chip(vec![GraphRef::local(name)]))
+            ),
+            (
+                8,
+                14,
+                "[v1]".to_string(),
+                Some(PartTarget::Chip(vec![GraphRef::tag("v1")]))
+            ),
         ]
     );
 }
