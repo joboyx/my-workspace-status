@@ -45,7 +45,9 @@ commit-files footer finds its drilled row with them).
 | `graph_scrollbar_thumb` | Thumb offset/length matching a painted bar (TUI hit-test, vertical or horizontal) |
 | `graph_col_max` | Max `col_offset` that brings the end of the longest label into the pane; a `row_badges` row has the glyph and one space less room |
 | `graph_vscroll_visible` / `graph_hscroll_visible` | Show the vertical bar whenever the painted lines overflow the list (or it has left the top); the horizontal bar only after leaving the left edge |
-| `paint_selection_footer` | Selection-footer body painter: message rows from the top, the meta line with its ref chips pinned on the bottom row; returns the chip, commit meta, and hint `IconSpan`s. The graph selection footer and the TUI commit-files footer both paint here; see **Paint** below |
+| `SelectionFooter` | Selection-footer content before layout: `message` (the message lines) and `meta` (the whole meta line, not cut). `meta_rows(width)` is the rows the meta line wraps to (at least 1), `lines(width)` the message lines then the meta rows, `scroll_max(width, body_height)` the message scroll max with the meta rows pinned; see **Paint** below |
+| `selection_footer` | Builds the `SelectionFooter` of one selection at a width, collapsed or expanded. The graph selection footer and the TUI commit-files footer both build their content here |
+| `paint_selection_footer` | Selection-footer body painter: message rows from the top, the meta line wrapped at the area width onto meta rows with their ref chips, pinned at the bottom; returns the chip, commit meta, and hint `IconSpan`s. The graph selection footer and the TUI commit-files footer both paint here; see **Paint** below |
 | `paint_footer_message` / `FooterMessagePaint` | Scrolling commit-message viewport (lines, 1-column scrollbar, more-below hint) under `paint_selection_footer`; see **Paint** below |
 | `Action` | `ToggleShowHidden` and `SetShowHidden` |
 | `Effect` | `None` today. Dispatch stays pure. |
@@ -139,7 +141,7 @@ candidate). The TUI passes the PR chip of the graph's checkout (`<glyph> <ref>
 `IconSpan` per graph icon on screen, top to bottom: the sync header and its
 chip, then per list line in paint order (node, comment mark, label glyphs and chips
 left to right, then the badge at the right edge), then the selection
-footer's commit meta and chips (by column) and hint.
+footer's commit meta and chips (by meta row, then by column) and hint.
 
 | `GraphIconKind` | Where |
 | --- | --- |
@@ -167,7 +169,9 @@ out.
 A chip is one span per run of adjacent parts with the same target, so a
 branch chip with marks reads `[`, the marks, then `name]`. A chip cut by
 `col_offset`, the footer's `…` truncation, or the pane edge keeps a span
-over the cells that show. Spacer chips carry their commit row; footer
+over the cells that show. A chip that the footer's meta wrap cuts over
+two rows has a span on each row, both with the same target. Spacer chips
+carry their commit row; footer
 chips and the hint carry the selected row (the uncommitted row's footer
 paints HEAD's chips). `LabelPart::icon` maps a part to its kind: row
 glyphs and commit meta text through `LabelKind::icon`, chips through
@@ -220,44 +224,73 @@ stay out of ops unless shown.
 
 ## Paint
 
-`GraphWidget` uses a chrome budget (`graph_chrome_budget_for`): a
-selection footer when height ≥ 3 (a rule row plus 2 lines collapsed), then a 1-line sync header if
-space remains (footer wins when tight; no header when `sync` is unset).
-The footer wraps the full subject plus body by default
-(`commit_msg_expand`, `selection_footer_parts`); `M` collapses it to the
-two clipped lines.
+`GraphWidget` uses a chrome budget (`graph_chrome_budget_for_meta`): a
+selection footer when height ≥ 3 (collapsed: a rule row, the subject, and
+the meta rows), then a 1-line sync header if space remains (footer wins
+when tight; no header when `sync` is unset). The footer content is
+`selection_footer` of the selected row at the pane width. It wraps the
+full subject plus body by default (`commit_msg_expand`); `M` collapses it
+to the clipped subject and the meta rows.
 
-The footer height is fixed. It does not follow the selected message, so
-moving between commits never changes the list height:
+The footer height follows the expand state, N, the pane size, and the
+selected row's meta row count at the pane width. It never follows the
+length of the selected message, so a short or long message does not move
+the list:
 
 - The footer's first row is a full-width rule that parts it from the
   list (`FOOTER_RULE_ROWS` = 1). `GraphWidget::footer_rule` sets its glyph
   and colour; the TUI passes `▁` (`_` in ASCII mode) and `borderDim`.
   Without it the widget paints `▁` / `_` in dark grey.
-- Under the rule, expanded requests N message rows plus the meta row
+- Under the rule, expanded requests N message rows plus one meta row
   (`graph_footer_request`, N from `GraphWidget::commit_msg_lines`, default
   `COMMIT_MSG_LINES_DEFAULT` = 4, clamped from `COMMIT_MSG_LINES_MIN` (1)
   to `COMMIT_MSG_LINES_MAX` (20)). Collapsed requests 2. The request
-  counts the rule (N + 2 expanded, 3 collapsed). The TUI passes
+  counts the rule (N + 2 expanded, 3 collapsed) and does not depend on
+  the selected row. The TUI passes
   its session N (`AppState::commit_msg_lines`: a UI-state value a drag of
   the rule saved, else `viewDefaults.commitMessageLines`, then the Shorter /
   Taller commit message palette rows or a drag of the rule) to both the
   widget and `graph_footer_request`.
-- `graph_chrome_budget_for` clamps the rows under the rule to at most
-  half the pane (never under 2), adds the rule row, and leaves the list
-  at least one row. `GraphChromeBudget::footer_height` counts the rule;
-  `footer_body_height` is the rows under it, the height
-  `footer_message_scroll_max` takes. A pane under 3 rows drops the footer
-  and its rule. The budget depends only on the pane and the
-  request. The app calls the same `graph_footer_request`, so its layout
-  matches the paint. `commit_msg_lines_fit(height)` is the most message
-  rows that budget shows in a pane `height` rows tall (1 to 20); a drag of
-  the rule clamps to it, so it never stores rows the pane cannot show.
-- The meta row is always on the footer's bottom row. A short message
-  paints from the top and leaves blank rows above the meta row.
+- The meta line wraps at the pane width onto meta rows
+  (`SelectionFooter::meta_rows`, at least 1).
+  `graph_chrome_budget_for_meta(height, want_header, request, meta_rows)`
+  sizes the footer. The meta rows have priority: they take body rows up
+  to the room that keeps one list row. The message rows get the request
+  less its rule and its one meta row, at most half the pane (never under
+  2) less one row, and at most the room the meta rows leave. So wrapped
+  meta rows add to the footer and come out of the list; the message rows
+  shrink only on a tiny pane, down to 0. Meta rows
+  that need more than the room paint in the room, with no message rows,
+  and the last meta row ends with `…`. `graph_chrome_budget_for(height,
+  want_header, request)` is the same budget with one meta row.
+- `GraphChromeBudget::footer_height` counts the rule;
+  `footer_body_height` is the rows under it; `meta_rows` is the meta rows
+  at the bottom of the body (0 without a footer); `message_rows()` is the
+  body less the meta rows. A pane under 3 rows drops the footer and its
+  rule. The app calls the same `graph_footer_request` and
+  `graph_chrome_budget_for_meta` with the same meta row count, so its
+  layout matches the paint. `commit_msg_lines_fit(height)` is the most
+  message rows the one-meta-row budget shows in a pane `height` rows tall
+  (1 to 20); a drag of the rule clamps to it, so it never stores rows the
+  pane cannot show. One commit's long meta line does not lower that fit.
+- A relative date can change width at a minute tick (`just now` → `1m`,
+  `9m` → `10m`). That can change the meta row count, so the list can move
+  by one row at that tick.
+- The meta rows are pinned at the bottom of the footer, under the message
+  rows. A short message paints from the top and leaves blank rows above
+  the meta rows.
+- Wrap rules (`wrap_label_parts`, crate-private): a meta line that fits
+  is one row, unchanged. Otherwise it breaks at its ` · ` group
+  separators, and a ` · ` at a row break is dropped. A group wider than
+  the width starts its own row and breaks after its label runs that end
+  with a blank (`parent ` / `parents `, the blank between parent ids or
+  between chips); the blank at such a break is trimmed. A piece still
+  wider than the width is cut by columns. Every cut keeps its run's
+  `LabelKind` and `target`, so a chip cut over two rows keeps its chip on
+  both rows.
 - A taller message scrolls: `commit_msg_scroll` sets the first message
   row and a 1-column scrollbar marks the position
-  (`footer_message_scroll_max`). While lines are hidden below, the last
+  (`SelectionFooter::scroll_max`). While lines are hidden below, the last
   visible message row ends with a muted `<more_below><K>` hint
   (`GlyphSet::more_below`: `` U+F103, `v<K>` with ASCII glyphs; K = hidden
   lines below) left of the scrollbar column. It is not the behind glyph.
@@ -270,28 +303,37 @@ moving between commits never changes the list height:
   and the hint (skipped when wider than the area less the bar column). It
   returns a `FooterMessagePaint`: `scroll_max` (the caller records it for
   the wheel clamp) and `more_below` (the hint cells, for an icon hit).
-  `footer_message_scroll_max` is that max for a body with the pinned meta
-  row.
-- `paint_selection_footer(buf, area, lines, scroll, arrow, palette,
-  row_index)` paints the whole body under the rule: the message lines
-  through `paint_footer_message`, then the last line (meta) on the bottom
-  row, each part in its `GraphLabelPalette` colour (the hint in `meta`).
-  It returns the chip and commit meta spans of the painted lines
-  (`part_icons`: `GraphIconKind::{CommitHash, CommitDate, CommitAuthor}`
-  over the hash, parent ids, date, and author) and the
+  `SelectionFooter::scroll_max(width, body_height)` is that max for a
+  body with the meta rows pinned (`min(meta_rows, body_height)` of them).
+  `footer_message_scroll_max(line_count, body_height)` is the one-meta-row
+  form.
+- `paint_selection_footer(buf, area, &SelectionFooter, scroll, arrow,
+  palette, row_index)` paints the whole body under the rule. It wraps the
+  meta line at the area width, at most the area height rows (the last
+  kept row ends with `…` when rows are cut), and pins those meta rows at
+  the bottom. The message lines paint in the rows above through
+  `paint_footer_message`. Each part paints in its `GraphLabelPalette`
+  colour (the hint in `meta`). It returns the chip and commit meta spans
+  of the painted lines (`part_icons`: `GraphIconKind::{CommitHash,
+  CommitDate, CommitAuthor}` over the hash, parent ids, date, and author),
+  each with the `y` of the meta row it paints on, and the
   `GraphIconKind::MoreBelow` hint span, each with `row_index`. The widget
-  calls it with `selection_footer_parts` for the selected row. The TUI's
-  depth-2 commit-files footer calls it with `selection_footer_parts` for
-  the drilled row and the same label palette, so for the same commit and
-  footer height both footers paint the same rows, chips, and hint, and
-  scroll the same way.
+  calls it with `selection_footer` for the selected row. The TUI's
+  depth-2 commit-files footer calls it with `selection_footer` for the
+  drilled row (`AppState::commit_footer_parts`) and the same label
+  palette, so for the same commit, width, and footer height both footers
+  paint the same rows, chips, and hint, and scroll the same way.
+- `selection_footer_parts` / `selection_footer_lines` give
+  `SelectionFooter::lines`: the message lines, then the meta rows.
+  `selection_detail_parts` / `selection_detail_lines` give the one-row
+  form: the subject and the meta line cut to the width with `…`.
 
 List rows stay one line.
 The pane has no `loading older…` row: the status line shows it while the next
 log page loads, and the list keeps its height.
 
-Footer copy (`selection_detail_lines` / `selection_detail_parts`; do not invent
-other strings):
+Footer copy (`selection_footer`, `selection_detail_lines` /
+`selection_detail_parts`; do not invent other strings):
 
 - no row: `no selection`
 - uncommitted: `Working tree clean` / `Uncommitted changes`, then
@@ -305,7 +347,7 @@ other strings):
   in git order: `parent <id>` for one, `parents <id> <id>` for a merge
   (first parent first), `root commit` for none. A parent outside the
   loaded window still shows its id. Expanded: wrap subject plus body,
-  then the same meta line
+  then the same meta rows
 
 Footer paint reuses the commit-spacer chip runs (`LabelKind`: HEAD /
 default / local / remote / tag) and their `target`s. A worktree row's
