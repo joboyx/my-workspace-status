@@ -4560,12 +4560,16 @@ fn depth_2_left_files_pane_pins_commit_footer_under_the_list() {
     assert!(token_row > file_row, "footer sits under the list:\n{left}");
 
     let layout = &state.layout;
-    let footer_h =
-        commit_detail_footer_height(state.commit_detail_footer_request(), layout.tree_height);
+    let footer_h = commit_detail_footer_height(
+        state.commit_detail_footer_request(),
+        state.commit_detail_footer_meta_rows(usize::from(layout.tree_width)),
+        layout.tree_height,
+    );
+    // Commit A's 62-col meta line wraps to 2 rows in the 46-col left pane.
     assert_eq!(
         footer_h as usize,
-        1 + 1 + workspace_status_graph::COMMIT_MSG_LINES_DEFAULT,
-        "rule + N message rows + meta for a one-line body"
+        1 + workspace_status_graph::COMMIT_MSG_LINES_DEFAULT + 2,
+        "rule + N message rows + the 2 meta rows for a one-line body"
     );
     assert_eq!(layout.files_list_y, layout.tree_y);
     assert_eq!(
@@ -4585,7 +4589,9 @@ fn depth_2_left_footer_keeps_one_list_row_on_a_short_pane() {
     set_seed_commit_body(&mut state, &footer_long_body(30));
     // The tallest N, so the footer outgrows the shortest pane.
     state.commit_msg_lines = workspace_status_graph::COMMIT_MSG_LINES_MAX;
-    let mut terminal = Terminal::new(TestBackend::new(120, MIN_TERM_ROWS)).unwrap();
+    // One-row meta: commit A's 62-col meta line fits the 170-col
+    // terminal's left pane, so only the message rows cap.
+    let mut terminal = Terminal::new(TestBackend::new(170, MIN_TERM_ROWS)).unwrap();
     terminal.draw(|frame| draw(frame, &mut state)).unwrap();
     let layout = &state.layout;
     let footer_len = state.commit_detail_footer_request();
@@ -4620,7 +4626,9 @@ fn depth_2_left_footer_height_is_fixed_for_short_and_long_messages() {
         set_seed_commit_body(&mut state, body);
         state.commit_msg_expand = expand;
         state.commit_msg_lines = lines;
-        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        // One-row meta: commit A's 62-col meta line fits the 170-col
+        // terminal's left pane.
+        let mut terminal = Terminal::new(TestBackend::new(170, 30)).unwrap();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let left = left_inner_text(&terminal, &state);
         (
@@ -4661,6 +4669,190 @@ fn depth_2_left_footer_height_is_fixed_for_short_and_long_messages() {
     assert_eq!(short_c, pane - 3, "collapsed: rule + subject + meta");
     let (_, grown, _, _) = list_height("", true, n + 1);
     assert_eq!(grown + 1, short_h, "one more message row");
+}
+
+/// Visible graph row index of commit `id`.
+fn graph_row_of(state: &AppState, id: &str) -> usize {
+    state
+        .graph
+        .as_ref()
+        .expect("graph")
+        .visible_rows()
+        .iter()
+        .position(|row| matches!(row, GraphRow::Commit { commit, .. } if commit.id == id))
+        .unwrap_or_else(|| panic!("commit row {id}"))
+}
+
+/// The depth-0 graph footer grows by the selected row's wrapped meta
+/// rows and the list gives them up, in both looks; the message length
+/// never moves it. In the 70-col right pane commit A's 62-col meta line
+/// is 1 row, commit B's 83-col meta line is 2. After each paint
+/// `graph_chrome()` (what clicks and page moves read between frames) is
+/// the painted split: the rule sits `footer_height` rows above the pane
+/// bottom.
+#[test]
+fn graph_footer_height_follows_the_meta_rows_not_the_message() {
+    let date = workspace_status_graph::format_local_timestamp(1_700_000_000);
+    for (look, background) in PANE_LOOKS {
+        let mut state = two_pane_graph_state();
+        state.background = background;
+        if let Some(model) = state.graph.as_mut() {
+            model.commits[0].body = footer_long_body(30);
+            let second = Commit {
+                id: FOOTER_COMMIT_B.into(),
+                subject: "second graph".into(),
+                parents: vec![FOOTER_COMMIT_A.into()],
+                author_name: "Augusta Ada King Lovelace".into(),
+                author_date_unix: 1_700_000_000,
+                body: "short body".into(),
+                ..Commit::default()
+            };
+            model.commits.insert(0, second);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        let mut draw_on = |state: &mut AppState, id: &str| {
+            state.graph_cursor = graph_row_of(state, id);
+            draw_state(&mut terminal, state);
+            let chrome = state.graph_chrome();
+            let l = &state.layout;
+            let bottom = l.right_y + l.diff_pane_height;
+            let rule_y = bottom - chrome.footer_height;
+            assert_eq!(
+                l.commit_msg_rule_y,
+                Some(rule_y),
+                "{look} {id}: graph_chrome() is the painted split"
+            );
+            let buf = terminal.backend().buffer();
+            assert_eq!(
+                buf[(l.diff_content_x, rule_y)].symbol(),
+                footer_rule_glyph(state.ascii),
+                "{look} {id}: the rule paints there"
+            );
+            let meta: Vec<String> = (bottom - chrome.meta_rows..bottom)
+                .map(|y| {
+                    region_text(&terminal, l.diff_content_x, y, l.diff_pane_width, 1)
+                        .trim_end()
+                        .to_string()
+                })
+                .collect();
+            (chrome, meta)
+        };
+        let (a, a_meta) = draw_on(&mut state, FOOTER_COMMIT_A);
+        assert_eq!(
+            a.footer_height, 6,
+            "{look}: rule + 4 message rows + 1 meta row"
+        );
+        assert_eq!(a.meta_rows, 1, "{look}");
+        assert_eq!(
+            a_meta,
+            vec![format!(
+                "[HEAD] [main] · aaa1111 · root commit · Ada · {date}"
+            )],
+            "{look}"
+        );
+        let (b, b_meta) = draw_on(&mut state, FOOTER_COMMIT_B);
+        assert_eq!(b.footer_height, 7, "{look}: one more meta row");
+        assert_eq!(b.meta_rows, 2, "{look}");
+        assert_eq!(
+            b.list_height + 1,
+            a.list_height,
+            "{look}: the list gives it up"
+        );
+        assert_eq!(
+            b_meta,
+            vec![
+                "(no refs) · bbb2222 · parent aaa1111 · Augusta Ada King Lovelace".to_string(),
+                date.clone(),
+            ],
+            "{look}"
+        );
+        let (back, _) = draw_on(&mut state, FOOTER_COMMIT_A);
+        assert_eq!(back, a, "{look}: back on A, the first split again");
+        if let Some(model) = state.graph.as_mut() {
+            let a = model
+                .commits
+                .iter_mut()
+                .find(|commit| commit.id == FOOTER_COMMIT_A)
+                .expect("commit A");
+            a.body = String::new();
+        }
+        let (short, _) = draw_on(&mut state, FOOTER_COMMIT_A);
+        assert_eq!(short, a, "{look}: A's message length does not move it");
+    }
+}
+
+/// The depth-2 commit-files footer wraps commit A's 62-col meta line onto
+/// 2 rows in the 46-col left pane, in both looks; the file list gives up
+/// the extra row, and the layout pass (click map) and the paint agree:
+/// the rule sits under the last list row, the two bottom rows are the
+/// meta rows, a click on the row above the rule picks a file, and a click
+/// on a meta row does not.
+#[test]
+fn depth_2_commit_footer_wraps_meta_and_the_file_list_gives_up_the_rows() {
+    let date = workspace_status_graph::format_local_timestamp(1_700_000_000);
+    for (look, background) in PANE_LOOKS {
+        // Many files, so a list click moves the cursor.
+        let mut state = commit_diff_state_with_files(30);
+        state.background = background;
+        state.focus = FocusPane::Left;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let l = state.layout.clone();
+        assert_eq!(
+            l.files_list_height,
+            l.tree_height - (1 + 4 + 2),
+            "{look}: rule + 4 message rows + 2 meta rows"
+        );
+        let rule_y = l.files_list_y + l.files_list_height;
+        let bottom = l.tree_y + l.tree_height;
+        let buf = terminal.backend().buffer().clone();
+        for x in l.tree_x..l.tree_x + l.tree_width {
+            assert_eq!(
+                buf[(x, rule_y)].symbol(),
+                footer_rule_glyph(state.ascii),
+                "{look}: rule at x={x}"
+            );
+        }
+        let row = |y: u16| {
+            region_text(&terminal, l.tree_x, y, l.tree_width, 1)
+                .trim_end()
+                .to_string()
+        };
+        assert_eq!(
+            row(bottom - 2),
+            "[HEAD] [main] · aaa1111 · root commit · Ada",
+            "{look}: first meta row"
+        );
+        assert_eq!(row(bottom - 1), date, "{look}: second meta row");
+        assert_eq!(
+            row(rule_y + 1),
+            "seed graph",
+            "{look}: the subject under the rule"
+        );
+
+        assert_eq!(state.commit_files_cursor(), 0, "{look}");
+        state.dispatch(Action::Click {
+            col: l.tree_x + 2,
+            row: rule_y - 1,
+        });
+        let picked = state.commit_files_cursor();
+        assert_eq!(
+            picked,
+            usize::from(l.files_list_height) - 1,
+            "{look}: the last list row picks its file"
+        );
+        for y in [bottom - 2, bottom - 1] {
+            state.dispatch(Action::Click {
+                col: l.tree_x + l.tree_width - 2,
+                row: y,
+            });
+            assert_eq!(
+                state.commit_files_cursor(),
+                picked,
+                "{look}: a meta row click at y={y} picks no file"
+            );
+        }
+    }
 }
 
 /// The more-below arrow the footers paint for `state`'s glyph set.
@@ -4707,9 +4899,12 @@ fn depth_2_commit_footer_wheel_box_matches_paint_in_boxed_and_flat_panes() {
         assert_eq!(l.commit_detail_footer_x, l.tree_x, "{case}");
         assert_eq!(l.commit_detail_footer_width, l.tree_width, "{case}");
         assert_eq!(rule_y + l.commit_detail_footer_height, bottom, "{case}");
+        // Commit A's 62-col meta line wraps to 3 rows in the 30-col left
+        // pane: the last message row is the 4th row from the bottom.
+        let last_message_y = bottom - 4;
         let buf = terminal.backend().buffer().clone();
         assert!(
-            is_scrollbar_cell(buf[(bar_x, bottom - 2)].symbol()),
+            is_scrollbar_cell(buf[(bar_x, last_message_y)].symbol()),
             "{case}: bar on the recorded box's last column, last message row"
         );
         let hint = l
@@ -4719,9 +4914,8 @@ fn depth_2_commit_footer_wheel_box_matches_paint_in_boxed_and_flat_panes() {
             .cloned()
             .unwrap_or_else(|| panic!("{case}: hint hit"));
         assert_eq!(
-            hint.y,
-            bottom - 2,
-            "{case}: hint on the last message row, over the meta row"
+            hint.y, last_message_y,
+            "{case}: hint on the last message row, over the meta rows"
         );
         let painted: String = (hint.x..hint.x + hint.width)
             .map(|x| buf[(x, hint.y)].symbol().to_string())
@@ -5284,7 +5478,10 @@ fn commit_footer_rule_drag_matches_on_every_registry_surface() {
             state.background = background;
             let dir = crate::testutil::unique_dir("ws-footer-rule-drag");
             state.ui_store_path = dir.join("ui-state.json");
-            let mut terminal = Terminal::new(TestBackend::new(80, 28)).unwrap();
+            // One-row meta: commit A's 62-col meta line fits both panes
+            // of a 170-col terminal, so the tallest footer is the
+            // message's half-pane share plus the rule.
+            let mut terminal = Terminal::new(TestBackend::new(170, 28)).unwrap();
             terminal.draw(|frame| draw(frame, &mut state)).unwrap();
             let footer = (surface.footer_box)(&state)
                 .unwrap_or_else(|| panic!("{case}: an overflowing footer records its box"));
@@ -5395,7 +5592,9 @@ fn commit_footer_shows_hint_expand_and_hash_link_on_every_registry_surface() {
             state.background = background;
             state.graph_identity = Some(("app".into(), FOOTER_COMMIT_A.into()));
             resolve_app_remote(&mut state, "git@github.com:example/demo.git");
-            let mut terminal = Terminal::new(TestBackend::new(120, 28)).unwrap();
+            // One-row meta: commit A's 62-col meta line fits both panes
+            // of a 170-col terminal, so the hash is on the bottom row.
+            let mut terminal = Terminal::new(TestBackend::new(170, 28)).unwrap();
             draw_state(&mut terminal, &mut state);
             let FooterBox {
                 y,
@@ -5951,17 +6150,22 @@ fn depth_2_commit_footer_without_overflow_has_no_scrollbar_or_hint() {
     }
 }
 
-/// Paint `draw_commit_detail` alone into a 40x8 pane with the tallest N,
+/// Paint `draw_commit_detail` alone into a 64x8 pane with the tallest N,
 /// so `commit_detail_footer_height` caps the footer to 3 message rows
 /// over the meta row. Returns the message rows as `(y, text)`.
 fn draw_capped_commit_detail(state: &mut AppState) -> Vec<(u16, String)> {
     state.commit_msg_lines = workspace_status_graph::COMMIT_MSG_LINES_MAX;
-    let (w, h) = (40, 8);
+    // One-row meta: commit A's 62-col meta line fits 64 columns.
+    let (w, h) = (64, 8);
     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
     terminal
         .draw(|frame| draw_commit_detail(frame, Rect::new(0, 0, w, h), state, 0, 0))
         .unwrap();
-    let footer_h = commit_detail_footer_height(state.commit_detail_footer_request(), h);
+    let footer_h = commit_detail_footer_height(
+        state.commit_detail_footer_request(),
+        state.commit_detail_footer_meta_rows(usize::from(w)),
+        h,
+    );
     assert!(
         usize::from(footer_h) < 1 + state.commit_detail_footer_request(),
         "the pane caps the footer"
@@ -6025,7 +6229,7 @@ fn capped_depth_2_commit_footer_scrolls_only_real_message_lines() {
     // Subject, blank, and 8 body lines.
     set_seed_commit_body(&mut state, &footer_long_body(8));
     let rows = draw_capped_commit_detail(&mut state);
-    let real = state.commit_detail_footer_lines(40).len() - 1;
+    let real = state.commit_detail_footer_lines(64).len() - 1;
     assert_eq!(real, 10);
     assert!(rows.len() < real && real < state.commit_msg_lines);
     let k = real - rows.len();
@@ -6080,7 +6284,9 @@ fn commit_detail_footer_rule_sits_between_list_and_footer() {
                 state.ascii = ascii;
                 state.commit_msg_expand = expand;
                 state.focus = FocusPane::Left;
-                let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+                // One-row meta: commit A's 62-col meta line fits the
+                // 170-col terminal's left pane.
+                let mut terminal = Terminal::new(TestBackend::new(170, 30)).unwrap();
                 draw_state(&mut terminal, &mut state);
                 let l = state.layout.clone();
                 let body_len = state.commit_detail_footer_request();
@@ -6132,17 +6338,21 @@ fn commit_detail_footer_rule_sits_between_list_and_footer() {
 /// paints nothing.
 #[test]
 fn commit_detail_footer_is_rule_only_or_nothing_on_tiny_panes() {
-    assert_eq!(commit_detail_footer_height(4, 0), 0);
-    assert_eq!(commit_detail_footer_height(4, 1), 1);
+    assert_eq!(commit_detail_footer_height(4, 1, 0), 0);
+    assert_eq!(commit_detail_footer_height(4, 1, 1), 1);
     assert_eq!(
-        commit_detail_footer_height(4, 2),
+        commit_detail_footer_height(4, 1, 2),
         1,
         "rule only, one list row"
     );
-    assert_eq!(commit_detail_footer_height(4, 3), 2);
-    assert_eq!(commit_detail_footer_height(4, 40), 5, "rule + 4 body rows");
+    assert_eq!(commit_detail_footer_height(4, 1, 3), 2);
     assert_eq!(
-        commit_detail_footer_height(usize::MAX, 40),
+        commit_detail_footer_height(4, 1, 40),
+        5,
+        "rule + 4 body rows"
+    );
+    assert_eq!(
+        commit_detail_footer_height(usize::MAX, 1, 40),
         21,
         "half the pane plus the rule, like the graph footer"
     );
@@ -6267,7 +6477,7 @@ fn graph_footer_rule_tops_the_footer_and_takes_no_click() {
             let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
             draw_state(&mut terminal, &mut state);
             let l = state.layout.clone();
-            let chrome = state.graph_chrome_in(l.diff_pane_height);
+            let chrome = state.graph_chrome_in(l.diff_pane_height, l.diff_pane_width);
             assert_eq!(chrome, state.graph_chrome(), "{case}");
             let list_top = l.right_y + u16::from(chrome.header);
             let rule_y = list_top + chrome.list_height;
@@ -6296,10 +6506,9 @@ fn graph_footer_rule_tops_the_footer_and_takes_no_click() {
             assert!(l.graph_footer_scroll_max > 0, "{case}");
             assert_eq!(
                 l.graph_footer_scroll_max,
-                footer_message_scroll_max(
-                    state.graph_footer_line_count(l.diff_pane_width as usize),
-                    chrome.footer_body_height(),
-                ),
+                state
+                    .graph_selection_footer(l.diff_pane_width as usize)
+                    .scroll_max(l.diff_pane_width as usize, chrome.footer_body_height()),
                 "{case}"
             );
 
@@ -11355,7 +11564,7 @@ fn commit_msg_rule_is_recorded_where_the_graph_footer_rule_paints() {
             } else {
                 (l.tree_x, l.tree_width, l.tree_height)
             };
-            let chrome = state.graph_chrome_in(h);
+            let chrome = state.graph_chrome_in(h, w);
             let top = if side == "right" { l.right_y } else { l.tree_y };
             let y = l.commit_msg_rule_y.expect(&case);
             assert_eq!(y, top + h - chrome.footer_height, "{case}");
@@ -17885,6 +18094,54 @@ fn commit_detail_footer_hash_links_to_forge_commit_page() {
     );
 }
 
+/// The depth-2 footer finds the short hash on whichever meta row paints
+/// it, in both looks. In the 46-col left pane commit A's 62-col meta
+/// line wraps to 2 rows and the hash sits on the first, not the bottom
+/// row: one link and one hash popover hit there, over `aaa1111`. The
+/// fallback footer (no graph row) names the commit by its 7-col short
+/// hash, which never wraps in a pane that paints a footer, so its hash
+/// stays on the one bottom meta row.
+#[test]
+fn commit_detail_footer_hash_link_finds_the_hash_on_a_wrapped_meta_row() {
+    let url = format!("https://gitlab.com/group/sub/demo/-/commit/{LINK_SHA}");
+    for (look, background) in PANE_LOOKS {
+        for in_graph in [true, false] {
+            let case = format!("{look} in_graph={in_graph}");
+            let mut state = two_pane_commit_diff_state();
+            state.background = background;
+            state.graph_identity = Some(("app".into(), LINK_SHA.into()));
+            resolve_app_remote(&mut state, "https://gitlab.com/group/sub/demo.git");
+            if !in_graph {
+                if let Some(model) = state.graph.as_mut() {
+                    model.commits[0].id = "f".repeat(40);
+                }
+                assert_eq!(state.commit_detail_graph_row(), None, "{case}");
+            }
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let l = state.layout.clone();
+            let bottom = l.tree_y + l.tree_height;
+            // `[HEAD] [main] · ` comes before the hash on the first row.
+            let (want_y, want_x) = if in_graph {
+                (bottom - 2, l.tree_x + 16)
+            } else {
+                (bottom - 1, l.tree_x)
+            };
+            let link = only_link_to(&state, &terminal, &url);
+            assert_eq!((link.y, link.x), (want_y, want_x), "{case}: {link:?}");
+            assert_eq!(link_text(&terminal, &link), "aaa1111", "{case}");
+            let hashes: Vec<(u16, u16, u16)> = state
+                .layout
+                .icon_hits
+                .iter()
+                .filter(|hit| hit.kind == IconKind::CommitHash && hit.x < l.right_x)
+                .map(|hit| (hit.y, hit.x, hit.width))
+                .collect();
+            assert_eq!(hashes, vec![(want_y, want_x, 7)], "{case}: hash hit");
+        }
+    }
+}
+
 /// Commit popover hits of the frame, each with the text painted under it.
 fn commit_hits_with_text(
     state: &AppState,
@@ -18925,11 +19182,12 @@ fn commit_detail_footer_names_a_commit_missing_from_the_graph() {
 #[test]
 fn commit_detail_rule_is_not_recorded_without_a_body_row() {
     let mut state = two_pane_commit_diff_state();
-    let mut terminal = Terminal::new(TestBackend::new(30, 8)).unwrap();
+    // One-row meta: commit A's 62-col meta line fits 64 columns.
+    let mut terminal = Terminal::new(TestBackend::new(64, 8)).unwrap();
     let mut draw_in = |state: &mut AppState, height: u16| {
         state.layout.commit_msg_rule_y = None;
         terminal
-            .draw(|frame| draw_commit_detail(frame, Rect::new(0, 0, 30, height), state, 0, 0))
+            .draw(|frame| draw_commit_detail(frame, Rect::new(0, 0, 64, height), state, 0, 0))
             .unwrap();
         state.layout.commit_msg_rule_y
     };

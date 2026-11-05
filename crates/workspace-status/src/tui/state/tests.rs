@@ -8382,12 +8382,13 @@ fn m_toggles_commit_msg_expand_on_graph_footer_and_commit_detail() {
             stat: None,
         }],
     );
-    // 32 columns: subject (2 rows), blank, body fill the N = 4 rows.
+    // 32 columns: subject (2 rows), blank, body fill the N = 4 rows. The
+    // 41-col meta line wraps to 2 meta rows.
     let collapsed_files_footer = {
         app.commit_msg_expand = false;
         app.commit_detail_footer_lines(32)
     };
-    assert_eq!(collapsed_files_footer.len(), 2, "subject + meta");
+    assert_eq!(collapsed_files_footer.len(), 1 + 2, "subject + 2 meta rows");
     let collapsed_join = collapsed_files_footer.join("\n");
     assert!(
         !collapsed_join.contains(body),
@@ -8397,8 +8398,8 @@ fn m_toggles_commit_msg_expand_on_graph_footer_and_commit_detail() {
     let expanded_files_footer = app.commit_detail_footer_lines(32);
     assert_eq!(
         expanded_files_footer.len(),
-        2 + 1 + 1 + 1,
-        "subject (2 rows) + blank + body + meta, no padding"
+        2 + 1 + 1 + 2,
+        "subject (2 rows) + blank + body + 2 meta rows, no padding"
     );
     let expanded_join = expanded_files_footer.join("");
     assert!(
@@ -8416,10 +8417,15 @@ fn m_toggles_commit_msg_expand_on_graph_footer_and_commit_detail() {
     let long_footer = app.commit_detail_footer_lines(32);
     assert_eq!(
         long_footer.len(),
-        2 + 1 + 30 + 1,
-        "subject (2 rows) + blank + 30 body lines + meta: {long_footer:?}"
+        2 + 1 + 30 + 2,
+        "subject (2 rows) + blank + 30 body lines + 2 meta rows: {long_footer:?}"
     );
-    let (meta, message) = long_footer.split_last().expect("meta line");
+    let (message, meta_rows) = long_footer.split_at(long_footer.len() - 2);
+    assert_eq!(
+        meta_rows[1], "Ada · 1m",
+        "the meta line wraps at a group: {long_footer:?}"
+    );
+    let meta = &meta_rows[0];
     assert!(
         message.iter().all(|line| !line.contains('…')),
         "no … clip: {long_footer:?}"

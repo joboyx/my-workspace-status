@@ -37,7 +37,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 use workspace_status_graph::{
-    graph_chrome_budget_for, graph_footer_request, graph_vscroll_visible, paint_model,
+    graph_chrome_budget_for_meta, graph_footer_request, graph_vscroll_visible, paint_model,
     selection_footer, GraphChromeBudget, GraphFooterSelection, GraphModel, GraphRow, LabelKind,
     LabelPart, PaintedLine, SelectionFooter, ASCII, COMMIT_MSG_LINES_DEFAULT, COMMIT_MSG_LINES_MAX,
     COMMIT_MSG_LINES_MIN, FOOTER_RULE_ROWS, UNICODE,
@@ -321,10 +321,19 @@ pub struct LayoutHit {
     pub graph_footer_x: u16,
     /// Footer width.
     pub graph_footer_width: u16,
-    /// Footer height, the rule row on top and the meta row included.
+    /// Footer height, the rule row on top and the meta rows included.
     pub graph_footer_height: u16,
+    /// Message rows of that footer: its body less the wrapped meta rows
+    /// pinned at the bottom.
+    pub graph_footer_message_rows: u16,
     /// Max message scroll for the painted footer.
     pub graph_footer_scroll_max: usize,
+    /// Graph pane width at the last graph paint.
+    ///
+    /// `0` before the first paint. [`AppState::graph_chrome`] wraps the
+    /// selected row's meta line at this width, so the list height between
+    /// frames matches the painted footer.
+    pub graph_width: u16,
     /// 0-based first row of the depth-2 commit-files footer (its rule row)
     /// when its expanded message is taller than its message rows (wheel
     /// there scrolls the message, not the file list).
@@ -335,6 +344,9 @@ pub struct LayoutHit {
     pub commit_detail_footer_width: u16,
     /// Footer height, the rule row on top included.
     pub commit_detail_footer_height: u16,
+    /// Message rows of that footer: its body less the wrapped meta rows
+    /// pinned at the bottom.
+    pub commit_detail_footer_message_rows: u16,
     /// Max message scroll for the painted commit-files footer.
     pub commit_detail_footer_scroll_max: usize,
     /// 0-based row of the commit-message footer's top rule (graph selection
@@ -558,11 +570,14 @@ impl Default for LayoutHit {
             graph_footer_x: 0,
             graph_footer_width: 0,
             graph_footer_height: 0,
+            graph_footer_message_rows: 0,
             graph_footer_scroll_max: 0,
+            graph_width: 0,
             commit_detail_footer_y: None,
             commit_detail_footer_x: 0,
             commit_detail_footer_width: 0,
             commit_detail_footer_height: 0,
+            commit_detail_footer_message_rows: 0,
             commit_detail_footer_scroll_max: 0,
             commit_msg_rule_y: None,
             commit_msg_rule_x: 0,
@@ -1930,46 +1945,54 @@ impl AppState {
     }
 
     /// Header / footer / list split for the graph pane.
+    ///
+    /// The pane width is [`LayoutHit::graph_width`] of the last paint.
     pub fn graph_chrome(&self) -> GraphChromeBudget {
-        self.graph_chrome_in(self.layout.tree_height.max(1))
+        self.graph_chrome_in(self.layout.tree_height.max(1), self.layout.graph_width)
     }
 
-    /// Header / footer / list split for a graph pane of `height` rows.
+    /// Header / footer / list split for a graph pane of `height` rows and
+    /// `width` columns.
     ///
     /// The footer request is fixed ([`graph_footer_request`], same call as
-    /// the widget), so the split does not depend on the selected message or
-    /// the pane width.
-    pub(crate) fn graph_chrome_in(&self, height: u16) -> GraphChromeBudget {
-        graph_chrome_budget_for(
+    /// the widget); the selected row's meta line, wrapped at `width`, adds
+    /// its extra rows on top ([`graph_chrome_budget_for_meta`]). So the
+    /// split follows the expand state, the rows, the pane size, and the
+    /// selected row's meta row count, never the selected message's length.
+    /// `width` 0 (no paint yet) counts one meta row.
+    pub(crate) fn graph_chrome_in(&self, height: u16, width: u16) -> GraphChromeBudget {
+        let meta_rows = if width == 0 {
+            1
+        } else {
+            let width = usize::from(width);
+            self.graph_selection_footer(width).meta_rows(width)
+        };
+        graph_chrome_budget_for_meta(
             height,
             self.graph.as_ref().is_some_and(|g| g.sync.is_some()),
             graph_footer_request(self.commit_msg_expand, self.commit_msg_lines),
+            u16::try_from(meta_rows).unwrap_or(u16::MAX),
         )
     }
 
-    /// Painted selection-footer lines at `width`, before the footer budget.
-    pub(crate) fn graph_footer_line_count(&self, width: usize) -> usize {
-        if !self.commit_msg_expand {
-            return 2;
-        }
+    /// Graph selection-footer content of the cursor row at `width`, in the
+    /// current expand state: the same [`selection_footer`] the widget
+    /// paints. No graph gives the empty footer.
+    pub(crate) fn graph_selection_footer(&self, width: usize) -> SelectionFooter {
         let Some(model) = self.graph.as_ref() else {
-            return 2;
+            return SelectionFooter::default();
         };
         let rows = model.visible_rows();
         let selected = rows.get(self.graph_cursor);
         let glyphs = if self.ascii { &ASCII } else { &UNICODE };
-        // The message lines and one meta line.
         selection_footer(
             model,
             GraphFooterSelection::from(selected),
             glyphs,
             width.max(1),
             unix_now(),
-            true,
+            self.commit_msg_expand,
         )
-        .message
-        .len()
-            + 1
     }
 
     /// Message lines of the graph selection footer below the shown ones:
@@ -1980,13 +2003,12 @@ impl AppState {
         if layout.graph_footer_y.is_none() {
             return 0;
         }
-        // Message rows: the footer less its rule and the pinned meta row.
-        let rows = usize::from(layout.graph_footer_height)
-            .saturating_sub(usize::from(FOOTER_RULE_ROWS))
-            .saturating_sub(1);
+        // Message rows: the footer less its rule and the pinned meta rows.
+        let rows = usize::from(layout.graph_footer_message_rows);
         let messages = self
-            .graph_footer_line_count(usize::from(layout.graph_footer_width))
-            .saturating_sub(1);
+            .graph_selection_footer(usize::from(layout.graph_footer_width))
+            .message
+            .len();
         if rows == 0 || messages <= rows {
             return 0;
         }
@@ -2398,10 +2420,10 @@ impl AppState {
             .map(|(_, source)| source.short_label())
     }
 
-    /// Body lines of a commit-message footer for graph row `row` at
-    /// `width`: [`selection_footer_parts`], the lines the graph selection
-    /// footer paints for that row (message lines, then the meta line), in
-    /// the current expand state.
+    /// Body content of a commit-message footer for graph row `row` at
+    /// `width`: [`selection_footer`], what the graph selection footer
+    /// paints for that row (message lines, and the whole meta line that
+    /// paint wraps onto the bottom rows), in the current expand state.
     ///
     /// With no row, a `fallback` name (the drilled source, for example a
     /// commit a watch reload dropped from the graph) gives a muted
@@ -2448,16 +2470,33 @@ impl AppState {
     ///
     /// The graph selection footer's request ([`graph_footer_request`]) less
     /// its rule row: expanded is [`Self::commit_msg_lines`] message rows
-    /// plus the meta row, collapsed is the subject and the meta row. Fixed
+    /// plus one meta row, collapsed is the subject and one meta row. Fixed
     /// for the expand state and the rows, never sized by the selected
-    /// message: [`Self::commit_detail_footer_lines`] returns only the real
-    /// message lines, so a short message or a source with no message
-    /// leaves blank rows and a long one scrolls.
+    /// message: the footer content ([`Self::commit_footer_parts`]) holds
+    /// only the real message lines, so a short message or a source with no
+    /// message leaves blank rows and a long one scrolls. A meta line that
+    /// wraps adds its extra rows on top
+    /// ([`Self::commit_detail_footer_meta_rows`]).
     pub(crate) fn commit_detail_footer_request(&self) -> usize {
         usize::from(
             graph_footer_request(self.commit_msg_expand, self.commit_msg_lines)
                 .saturating_sub(FOOTER_RULE_ROWS),
         )
+    }
+
+    /// Rows the depth-2 commit-files footer's meta line wraps to at
+    /// `width` (at least 1): [`SelectionFooter::meta_rows`] of
+    /// [`Self::commit_footer_parts`] for the drilled row. The layout pass
+    /// and the paint both size the footer with it, so the file list rows
+    /// and the click mapping agree.
+    pub(crate) fn commit_detail_footer_meta_rows(&self, width: usize) -> usize {
+        let fallback = self.commit_detail_fallback_name();
+        self.commit_footer_parts(
+            self.commit_detail_graph_row().as_ref(),
+            fallback.as_deref(),
+            width,
+        )
+        .meta_rows(width)
     }
 
     /// Text of the depth-2 commit-files footer lines at `width`.
@@ -2499,10 +2538,8 @@ impl AppState {
         if layout.commit_detail_footer_y.is_none() {
             return 0;
         }
-        // Message rows: the footer less its rule and the pinned meta row.
-        let rows = usize::from(layout.commit_detail_footer_height)
-            .saturating_sub(usize::from(FOOTER_RULE_ROWS))
-            .saturating_sub(1);
+        // Message rows: the footer less its rule and the pinned meta rows.
+        let rows = usize::from(layout.commit_detail_footer_message_rows);
         let fallback = self.commit_detail_fallback_name();
         let messages = self
             .commit_footer_parts(

@@ -14,6 +14,8 @@ const FILE: &str = "wip.txt";
 const SUBJECT: &str = "nnnnnnnnnn";
 /// Branch chip on the commit meta line (`[feature/long-msg] · <sha> · …`).
 const META_BRANCH: &str = "long-msg";
+/// Author on the commit meta line (the seed's git user).
+const META_AUTHOR: &str = "workspace-status e2e";
 /// Added line of the file diff at depth 2.
 const DIFF_HUNK: &str = "@@ -0,0 +1 @@";
 
@@ -115,8 +117,18 @@ fn depth_1_msg_on_graph_only(screen: &str, need_body: bool) -> bool {
 }
 
 /// The last painted left-pane body row is the pane's last inner row (just
-/// above the bottom border `└`), and it is the meta line: the footer pins
-/// its meta row on the bottom row, like the graph footer.
+/// above the bottom border `└`), and the rows from `meta` (the branch
+/// row) down to it are the meta rows: the footer pins its meta line,
+/// wrapped at the pane width, on the bottom rows, like the graph footer.
+///
+/// In the 30-col left pane the meta line wraps to 4 rows
+/// (`[+feature/long-msg] · <sha>`, `parent <sha>`, the author, the date)
+/// while the date reads `just now`, and to 3 once it reads `1m` (the
+/// author and the date then share a row). So the check reads the meta
+/// rows back as one line, which is the same text either way: each meta
+/// row is painted, and the rows joined with ` · ` are the whole meta line
+/// (branch chip, `parent <sha>`, author, date), with no message row
+/// among them.
 ///
 /// A blank row inside the message is fine; blank rows under the meta line
 /// are not.
@@ -130,12 +142,23 @@ fn meta_pinned_to_left_bottom(screen: &str, meta: usize) -> bool {
     else {
         return false;
     };
-    let painted = (start..border).rev().find(|&row| {
-        !cells[row - start]
+    let inner = |row: usize| {
+        cells[row - start]
             .trim_matches(|c: char| c == '\u{2502}' || c.is_whitespace())
-            .is_empty()
-    });
-    painted.is_some_and(|row| row + 1 == border && row == meta)
+            .to_string()
+    };
+    let painted = (start..border).rev().find(|&row| !inner(row).is_empty());
+    if !painted.is_some_and(|row| row + 1 == border && row >= meta) {
+        return false;
+    }
+    let rows: Vec<String> = (meta..border).map(inner).collect();
+    let line = rows.join(" \u{00B7} ");
+    !rows.iter().any(String::is_empty)
+        && line.contains(&format!("{META_BRANCH}] \u{00B7} "))
+        && line.contains(" \u{00B7} parent ")
+        && line.contains(&format!(" \u{00B7} {META_AUTHOR} \u{00B7} "))
+        && !line.contains(SUBJECT)
+        && !line.contains(COMMIT_MSG_BODY)
 }
 
 /// Depth 2: the left file list comes first, then the footer rule, the
