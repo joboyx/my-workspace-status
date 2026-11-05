@@ -8335,14 +8335,7 @@ fn m_toggles_commit_msg_expand_on_graph_footer_and_commit_detail() {
         .into_iter()
         .find(|r| matches!(r, GraphRow::Commit { .. }))
         .expect("commit row");
-    let collapsed = workspace_status_graph::selection_footer_lines(
-        model,
-        workspace_status_graph::GraphFooterSelection::Row(&row),
-        glyphs,
-        16,
-        unix_now(),
-        false,
-    );
+    let collapsed = graph_footer_lines(model, &row, glyphs, 16, false);
     let collapsed_text = collapsed.join("\n");
     assert!(
         !collapsed_text.contains(body),
@@ -8352,14 +8345,7 @@ fn m_toggles_commit_msg_expand_on_graph_footer_and_commit_detail() {
         !collapsed_text.contains(tail),
         "collapsed footer clips subject: {collapsed_text}"
     );
-    let expanded = workspace_status_graph::selection_footer_lines(
-        model,
-        workspace_status_graph::GraphFooterSelection::Row(&row),
-        glyphs,
-        16,
-        unix_now(),
-        true,
-    );
+    let expanded = graph_footer_lines(model, &row, glyphs, 16, true);
     let expanded_text = expanded.join("");
     assert!(
         expanded_text.contains(body),
@@ -8445,19 +8431,35 @@ fn m_toggles_commit_msg_expand_on_graph_footer_and_commit_detail() {
         .expect("commit row");
     assert_eq!(
         long_footer,
-        workspace_status_graph::selection_footer_lines(
-            model,
-            workspace_status_graph::GraphFooterSelection::Row(&row),
-            glyphs,
-            32,
-            unix_now(),
-            true,
-        ),
+        graph_footer_lines(model, &row, glyphs, 32, true),
         "the graph footer's lines"
     );
     app.dispatch(Action::ToggleCommitMsgExpand);
     assert!(!app.commit_msg_expand);
     assert_eq!(app.status, "msg off");
+}
+
+/// Text lines of the graph selection footer of `row` at `width`, now: the
+/// message lines, then the meta rows, a row for every line.
+fn graph_footer_lines(
+    model: &GraphModel,
+    row: &GraphRow,
+    glyphs: &workspace_status_graph::GlyphSet,
+    width: usize,
+    expand: bool,
+) -> Vec<String> {
+    workspace_status_graph::selection_footer(
+        model,
+        workspace_status_graph::GraphFooterSelection::Row(row),
+        glyphs,
+        width,
+        unix_now(),
+        expand,
+    )
+    .lines(width.max(1))
+    .iter()
+    .map(|parts| parts.iter().map(|part| part.text.as_str()).collect())
+    .collect()
 }
 
 /// A commit body of `n` lines `body line 00`, `body line 01`, ….

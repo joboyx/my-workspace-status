@@ -119,21 +119,6 @@ pub fn graph_footer_request(expand: bool, msg_lines: usize) -> u16 {
     FOOTER_RULE_ROWS + body
 }
 
-/// Max message scroll for a selection footer of `line_count` lines painted
-/// in `body_height` rows (the footer under its rule,
-/// [`GraphChromeBudget::footer_body_height`]).
-///
-/// The last line (meta) stays pinned under the message viewport, so this is
-/// the scroll max of the other lines in the rows above it, the same value
-/// [`crate::paint_footer_message`] reports for that viewport. `0` when every
-/// line fits.
-pub fn footer_message_scroll_max(line_count: usize, body_height: u16) -> usize {
-    crate::footer::footer_message_rows_scroll_max(
-        line_count.saturating_sub(1),
-        body_height.saturating_sub(1),
-    )
-}
-
 /// Footer first, then header. Collapsed footer: the rule, subject, and
 /// meta rows.
 pub fn graph_chrome_budget(height: u16, want_header: bool) -> GraphChromeBudget {
@@ -147,7 +132,7 @@ pub fn graph_chrome_budget(height: u16, want_header: bool) -> GraphChromeBudget 
 /// the meta row; collapsed: 2), never the selected message's line count.
 /// The body under the rule gets its requested height, at most half the
 /// pane (never under 2); the rule row comes on top. A message taller than
-/// the body scrolls ([`footer_message_scroll_max`]); a shorter one leaves
+/// the body scrolls ([`SelectionFooter::scroll_max`]); a shorter one leaves
 /// blank rows. The list keeps at least one row, which can cut the body
 /// short on a small pane (a 3-row pane: list, rule, meta). A pane shorter
 /// than 3 rows still drops the footer. The result depends only on the pane
@@ -469,8 +454,10 @@ pub fn selection_footer(
 /// wraps the whole subject plus body one column short of `width` (that
 /// column holds the footer scrollbar), then the same meta rows. There is no
 /// line cap: the widget scrolls a message taller than the footer. Graph
-/// list rows stay one line either way.
-pub fn selection_footer_parts(
+/// list rows stay one line either way. Test only: paint goes through
+/// [`selection_footer`] and [`crate::paint_selection_footer`].
+#[cfg(test)]
+fn selection_footer_parts(
     model: &GraphModel,
     selection: GraphFooterSelection<'_>,
     glyphs: &GlyphSet,
@@ -483,8 +470,9 @@ pub fn selection_footer_parts(
     selection_footer(model, selection, glyphs, width, now_unix, expand).lines(width.max(1))
 }
 
-/// Text lines for [`selection_footer_parts`].
-pub fn selection_footer_lines(
+/// Text lines for [`selection_footer_parts`]. Test only.
+#[cfg(test)]
+fn selection_footer_lines(
     model: &GraphModel,
     selection: GraphFooterSelection<'_>,
     glyphs: &GlyphSet,
@@ -852,7 +840,18 @@ mod tests {
         assert_eq!(footer.scroll_max(20, 7), 7);
         // One meta row at 120 columns leaves 4 message rows of 5.
         assert_eq!(footer.scroll_max(120, 5), 7);
-        assert_eq!(footer_message_scroll_max(12, 5), 7);
+        assert_eq!(one_meta_row_footer(12).scroll_max(120, 5), 7);
+    }
+
+    /// Footer of `line_count` lines: `line_count - 1` message lines, then
+    /// a meta line that fits one row at 120 columns.
+    fn one_meta_row_footer(line_count: usize) -> SelectionFooter {
+        SelectionFooter {
+            message: (0..line_count.saturating_sub(1))
+                .map(|i| vec![meta_part(format!("line {i}"))])
+                .collect(),
+            meta: vec![meta_part("meta".into())],
+        }
     }
 
     #[test]
@@ -863,12 +862,12 @@ mod tests {
     }
 
     #[test]
-    fn footer_message_scroll_max_keeps_meta_pinned() {
-        assert_eq!(footer_message_scroll_max(2, 2), 0);
-        assert_eq!(footer_message_scroll_max(9, 9), 0);
+    fn footer_scroll_max_keeps_one_meta_row_pinned() {
+        assert_eq!(one_meta_row_footer(2).scroll_max(120, 2), 0);
+        assert_eq!(one_meta_row_footer(9).scroll_max(120, 9), 0);
         // 11 message lines + meta in 5 rows: 4 message rows, 7 hidden.
-        assert_eq!(footer_message_scroll_max(12, 5), 7);
-        assert_eq!(footer_message_scroll_max(3, 2), 1);
+        assert_eq!(one_meta_row_footer(12).scroll_max(120, 5), 7);
+        assert_eq!(one_meta_row_footer(3).scroll_max(120, 2), 1);
     }
 
     #[test]

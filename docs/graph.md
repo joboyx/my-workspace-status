@@ -305,8 +305,6 @@ the list:
   the wheel clamp) and `more_below` (the hint cells, for an icon hit).
   `SelectionFooter::scroll_max(width, body_height)` is that max for a
   body with the meta rows pinned (`min(meta_rows, body_height)` of them).
-  `footer_message_scroll_max(line_count, body_height)` is the one-meta-row
-  form.
 - `paint_selection_footer(buf, area, &SelectionFooter, scroll, arrow,
   palette, row_index)` paints the whole body under the rule. It wraps the
   meta line at the area width, at most the area height rows (the last
@@ -323,8 +321,8 @@ the list:
   drilled row (`AppState::commit_footer_parts`) and the same label
   palette, so for the same commit, width, and footer height both footers
   paint the same rows, chips, and hint, and scroll the same way.
-- `selection_footer_parts` / `selection_footer_lines` give
-  `SelectionFooter::lines`: the message lines, then the meta rows.
+- `SelectionFooter::lines(width)` gives the message lines, then the meta
+  rows: what the footer paints when it has a row for every line.
   `selection_detail_parts` / `selection_detail_lines` give the one-row
   form: the subject and the meta line cut to the width with `…`.
 

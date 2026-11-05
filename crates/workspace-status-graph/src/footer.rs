@@ -14,7 +14,7 @@ use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, Stateful
 /// Max scroll of `message_lines` message lines shown in `rows` rows.
 ///
 /// `0` when every line fits. A footer with a pinned meta row passes its
-/// message rows only; [`crate::footer_message_scroll_max`] does that for
+/// message rows only; [`crate::SelectionFooter::scroll_max`] does that for
 /// the graph selection footer.
 pub(crate) fn footer_message_rows_scroll_max(message_lines: usize, rows: u16) -> usize {
     message_lines.saturating_sub(usize::from(rows))
