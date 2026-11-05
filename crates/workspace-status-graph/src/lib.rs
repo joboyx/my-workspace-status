@@ -24,11 +24,12 @@ mod widget;
 
 pub use action::{Action, Effect};
 pub use chrome::{
-    commit_msg_lines_fit, footer_message_scroll_max, graph_chrome_budget, graph_chrome_budget_for,
-    graph_footer_request, selection_detail_lines, selection_detail_parts, selection_footer_lines,
-    selection_footer_parts, GraphChromeBudget, GraphFooterSelection,
-    FOOTER_CONNECTOR_NOT_SELECTABLE, FOOTER_NO_REFS, FOOTER_NO_SELECTION, FOOTER_ROOT_COMMIT,
-    FOOTER_RULE_ROWS, FOOTER_SPACER_SUBJECT, FOOTER_WORKTREE_NOT_A_COMMIT, LOADING_OLDER,
+    commit_msg_lines_fit, graph_chrome_budget, graph_chrome_budget_for,
+    graph_chrome_budget_for_meta, graph_footer_request, selection_detail_lines,
+    selection_detail_parts, selection_footer, GraphChromeBudget, GraphFooterSelection,
+    SelectionFooter, FOOTER_CONNECTOR_NOT_SELECTABLE, FOOTER_NO_REFS, FOOTER_NO_SELECTION,
+    FOOTER_ROOT_COMMIT, FOOTER_RULE_ROWS, FOOTER_SPACER_SUBJECT, FOOTER_WORKTREE_NOT_A_COMMIT,
+    LOADING_OLDER,
 };
 pub use footer::{paint_footer_message, FooterMessagePaint};
 pub use format::{
@@ -57,7 +58,9 @@ pub use model::{
 };
 #[cfg(any(test, feature = "paint-probe"))]
 pub use paint::paint_calls;
-pub use paint::{paint_model, paint_model_with, painted_line_count, PaintOpts, PaintedLine};
+pub use paint::{
+    paint_model, paint_model_with, painted_line_count, painted_line_of_row, PaintOpts, PaintedLine,
+};
 pub use topology::{cells_text, CellRole, GraphCell};
 pub use widget::{
     graph_col_max, graph_hscroll_visible, graph_scrollbar_thumb, graph_vscroll_visible,

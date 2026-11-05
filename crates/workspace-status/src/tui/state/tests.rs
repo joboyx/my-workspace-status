@@ -8335,14 +8335,7 @@ fn m_toggles_commit_msg_expand_on_graph_footer_and_commit_detail() {
         .into_iter()
         .find(|r| matches!(r, GraphRow::Commit { .. }))
         .expect("commit row");
-    let collapsed = workspace_status_graph::selection_footer_lines(
-        model,
-        workspace_status_graph::GraphFooterSelection::Row(&row),
-        glyphs,
-        16,
-        unix_now(),
-        false,
-    );
+    let collapsed = graph_footer_lines(model, &row, glyphs, 16, false);
     let collapsed_text = collapsed.join("\n");
     assert!(
         !collapsed_text.contains(body),
@@ -8352,14 +8345,7 @@ fn m_toggles_commit_msg_expand_on_graph_footer_and_commit_detail() {
         !collapsed_text.contains(tail),
         "collapsed footer clips subject: {collapsed_text}"
     );
-    let expanded = workspace_status_graph::selection_footer_lines(
-        model,
-        workspace_status_graph::GraphFooterSelection::Row(&row),
-        glyphs,
-        16,
-        unix_now(),
-        true,
-    );
+    let expanded = graph_footer_lines(model, &row, glyphs, 16, true);
     let expanded_text = expanded.join("");
     assert!(
         expanded_text.contains(body),
@@ -8382,12 +8368,13 @@ fn m_toggles_commit_msg_expand_on_graph_footer_and_commit_detail() {
             stat: None,
         }],
     );
-    // 32 columns: subject (2 rows), blank, body fill the N = 4 rows.
+    // 32 columns: subject (2 rows), blank, body fill the N = 4 rows. The
+    // 41-col meta line wraps to 2 meta rows.
     let collapsed_files_footer = {
         app.commit_msg_expand = false;
         app.commit_detail_footer_lines(32)
     };
-    assert_eq!(collapsed_files_footer.len(), 2, "subject + meta");
+    assert_eq!(collapsed_files_footer.len(), 1 + 2, "subject + 2 meta rows");
     let collapsed_join = collapsed_files_footer.join("\n");
     assert!(
         !collapsed_join.contains(body),
@@ -8397,8 +8384,8 @@ fn m_toggles_commit_msg_expand_on_graph_footer_and_commit_detail() {
     let expanded_files_footer = app.commit_detail_footer_lines(32);
     assert_eq!(
         expanded_files_footer.len(),
-        2 + 1 + 1 + 1,
-        "subject (2 rows) + blank + body + meta, no padding"
+        2 + 1 + 1 + 2,
+        "subject (2 rows) + blank + body + 2 meta rows, no padding"
     );
     let expanded_join = expanded_files_footer.join("");
     assert!(
@@ -8416,10 +8403,15 @@ fn m_toggles_commit_msg_expand_on_graph_footer_and_commit_detail() {
     let long_footer = app.commit_detail_footer_lines(32);
     assert_eq!(
         long_footer.len(),
-        2 + 1 + 30 + 1,
-        "subject (2 rows) + blank + 30 body lines + meta: {long_footer:?}"
+        2 + 1 + 30 + 2,
+        "subject (2 rows) + blank + 30 body lines + 2 meta rows: {long_footer:?}"
     );
-    let (meta, message) = long_footer.split_last().expect("meta line");
+    let (message, meta_rows) = long_footer.split_at(long_footer.len() - 2);
+    assert_eq!(
+        meta_rows[1], "Ada · 1m",
+        "the meta line wraps at a group: {long_footer:?}"
+    );
+    let meta = &meta_rows[0];
     assert!(
         message.iter().all(|line| !line.contains('…')),
         "no … clip: {long_footer:?}"
@@ -8439,19 +8431,35 @@ fn m_toggles_commit_msg_expand_on_graph_footer_and_commit_detail() {
         .expect("commit row");
     assert_eq!(
         long_footer,
-        workspace_status_graph::selection_footer_lines(
-            model,
-            workspace_status_graph::GraphFooterSelection::Row(&row),
-            glyphs,
-            32,
-            unix_now(),
-            true,
-        ),
+        graph_footer_lines(model, &row, glyphs, 32, true),
         "the graph footer's lines"
     );
     app.dispatch(Action::ToggleCommitMsgExpand);
     assert!(!app.commit_msg_expand);
     assert_eq!(app.status, "msg off");
+}
+
+/// Text lines of the graph selection footer of `row` at `width`, now: the
+/// message lines, then the meta rows, a row for every line.
+fn graph_footer_lines(
+    model: &GraphModel,
+    row: &GraphRow,
+    glyphs: &workspace_status_graph::GlyphSet,
+    width: usize,
+    expand: bool,
+) -> Vec<String> {
+    workspace_status_graph::selection_footer(
+        model,
+        workspace_status_graph::GraphFooterSelection::Row(row),
+        glyphs,
+        width,
+        unix_now(),
+        expand,
+    )
+    .lines(width.max(1))
+    .iter()
+    .map(|parts| parts.iter().map(|part| part.text.as_str()).collect())
+    .collect()
 }
 
 /// A commit body of `n` lines `body line 00`, `body line 01`, ….
@@ -11444,6 +11452,38 @@ fn footer_budget_changes_keep_the_focused_graph_row_in_view() {
     app.dispatch(Action::ToggleCommitMsgExpand);
     assert!(app.commit_msg_expand);
     in_view(&app);
+}
+
+/// A shorter list with no key press moves the graph viewport only when
+/// the old height showed the cursor row and the new one hides it.
+#[test]
+fn shorter_graph_list_keeps_a_shown_cursor_row_in_view() {
+    let mut app = graph_state(false);
+    focus_repo(&mut app, "app");
+    install_linear_graph(&mut app, 40);
+    app.graph_cursor = 10;
+    let line = painted_focus_index(&app);
+    // The cursor on the last of 10 rows: 8 rows hide it.
+    app.graph_scroll = (line - 9) as u16;
+    app.keep_graph_cursor_in_view(10, 8);
+    let top = app.graph_scroll as usize;
+    assert!(
+        line >= top && line < top + 8,
+        "cursor line {line} outside [{top}, {})",
+        top + 8
+    );
+    // Still shown at 8 rows: no move.
+    let kept = app.graph_scroll;
+    app.keep_graph_cursor_in_view(10, 8);
+    assert_eq!(app.graph_scroll, kept);
+    // A scrollbar drag left the cursor above the viewport: no move.
+    app.graph_scroll = (line + 1) as u16;
+    app.keep_graph_cursor_in_view(10, 8);
+    assert_eq!(app.graph_scroll, (line + 1) as u16);
+    // Same height: no move.
+    app.graph_scroll = (line - 9) as u16;
+    app.keep_graph_cursor_in_view(10, 10);
+    assert_eq!(app.graph_scroll, (line - 9) as u16);
 }
 
 #[test]

@@ -121,14 +121,27 @@ pub fn paint_model(
 /// The widget and the TUI read it to decide the vertical bar before (or
 /// instead of) a paint.
 pub fn painted_line_count(model: &GraphModel) -> usize {
-    model
-        .visible_rows()
-        .iter()
-        .map(|row| match row {
-            GraphRow::Commit { .. } | GraphRow::Stash(_) => 2,
-            GraphRow::Uncommitted { .. } | GraphRow::Worktree(_) => 1,
-        })
-        .sum()
+    model.visible_rows().iter().map(row_line_count).sum()
+}
+
+/// Painted line of visible row `row_index` (its node line, the selectable
+/// one), without painting. `None` past the last row.
+///
+/// The line [`paint_model_with`] returns for that row, from the same line
+/// counts as [`painted_line_count`], so a caller can keep a row in view
+/// without a second paint in the frame.
+pub fn painted_line_of_row(model: &GraphModel, row_index: usize) -> Option<usize> {
+    let rows = model.visible_rows();
+    (row_index < rows.len()).then(|| rows[..row_index].iter().map(row_line_count).sum())
+}
+
+/// Lines one visible row paints: a node line plus a spacer for a commit or
+/// stash, one line for every other row.
+fn row_line_count(row: &GraphRow) -> usize {
+    match row {
+        GraphRow::Commit { .. } | GraphRow::Stash(_) => 2,
+        GraphRow::Uncommitted { .. } | GraphRow::Worktree(_) => 1,
+    }
 }
 
 #[cfg(any(test, feature = "paint-probe"))]

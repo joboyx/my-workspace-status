@@ -1,6 +1,8 @@
 use std::fs;
 
-use crate::harness::{left_tree, pane_body_start, user_config_file, PtySession, SGR_WHEEL_DOWN};
+use crate::harness::{
+    left_tree, pane_body_start, user_config_file, PtySession, FLAT_USER_CONFIG, SGR_WHEEL_DOWN,
+};
 use crate::seed::{
     daily_workspace, seed_two_file_long_message_repo, COMMIT_MSG_BODY, COMMIT_MSG_BODY_TAIL,
     PAIR_BASE_FILE_LINE, PAIR_FIRST_FILE_LINE, PAIR_SECOND_FILE_LINE,
@@ -182,11 +184,6 @@ enum Look {
     /// A test-owned config with `viewDefaults.background` `"paint"`.
     Flat,
 }
-
-/// Test-owned user config of [`Look::Flat`]: the baseline theme and mode,
-/// flat panes.
-const FLAT_USER_CONFIG: &str =
-    "{\"theme\":\"tokyo-night\",\"themeMode\":\"dark\",\"viewDefaults\":{\"background\":\"paint\"}}\n";
 
 impl Look {
     /// `screen` as the boxed detectors read it.

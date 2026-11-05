@@ -67,6 +67,24 @@ fn configure_identity(repo: &Path) {
     );
 }
 
+/// Seed the demo workspace (`scripts/seed-demo-workspace.sh`) at `dest`.
+///
+/// The fixture of `docs/demo.md` § Workspace: `app` on
+/// `feature/auth-refresh` with a linked worktree, `merger`,
+/// `services/api`, and `lib`. Commits are authored by `Demo User` from
+/// 2026-08-17 09:00 +08, one hour apart. Panics when the script fails.
+pub fn seed_demo_workspace(dest: &Path) {
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("scripts/seed-demo-workspace.sh");
+    let status = Command::new("bash")
+        .arg(&script)
+        .arg(dest)
+        .status()
+        .expect("seed script runs");
+    assert!(status.success(), "seed-demo-workspace.sh failed");
+}
+
 /// Two visible checkouts for streamed-collect e2e (`fast` clean, `slow` dirty).
 pub fn stream_workspace() -> (PathBuf, PathBuf) {
     let (root, workspace) = new_workspace("ws-tui-tty-stream");

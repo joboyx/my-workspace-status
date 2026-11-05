@@ -869,6 +869,265 @@ pub(crate) fn trunc_label_parts(parts: &[LabelPart], max: usize) -> Vec<LabelPar
     out
 }
 
+/// Wrap styled runs onto rows of at most `width` columns (chars, like
+/// [`parts_width`]).
+///
+/// A line that fits is one row, unchanged. Otherwise the line breaks at
+/// its ` · ` group separators ([`is_group_separator`]), and a separator at
+/// a row break is dropped. A group wider than `width` starts its own row
+/// and breaks after its untargeted meta runs that end with a blank
+/// (`parent `, the blank between parent ids or chips); the blank at such a
+/// break is trimmed. A piece still wider than `width` is cut by columns,
+/// and every cut keeps its run's kind and target. `width == 0` or no runs
+/// give one empty row.
+pub(crate) fn wrap_label_parts(parts: &[LabelPart], width: usize) -> Vec<Vec<LabelPart>> {
+    wrap_rows(parts, width)
+        .into_iter()
+        .map(|row| row.parts)
+        .collect()
+}
+
+/// [`wrap_label_parts`] cut to at most `max_rows` rows.
+///
+/// When rows are cut, the last kept row is [`trunc_label_parts`] of the
+/// rest of the line from that row's first column, so `max_rows == 1` gives
+/// exactly `vec![trunc_label_parts(parts, width)]`. `max_rows == 0` gives
+/// no rows.
+pub(crate) fn wrap_label_parts_capped(
+    parts: &[LabelPart],
+    width: usize,
+    max_rows: usize,
+) -> Vec<Vec<LabelPart>> {
+    if max_rows == 0 {
+        return Vec::new();
+    }
+    let rows = wrap_rows(parts, width);
+    if rows.len() <= max_rows {
+        return rows.into_iter().map(|row| row.parts).collect();
+    }
+    let last_start = rows[max_rows - 1].start;
+    let mut out: Vec<Vec<LabelPart>> = rows
+        .into_iter()
+        .take(max_rows - 1)
+        .map(|row| row.parts)
+        .collect();
+    out.push(trunc_label_parts(
+        &slice_label_parts(parts, last_start, usize::MAX),
+        width,
+    ));
+    out
+}
+
+/// One row of [`wrap_rows`].
+struct WrapRow {
+    /// Column of the row's first cell in the unwrapped line.
+    start: usize,
+    parts: Vec<LabelPart>,
+}
+
+impl WrapRow {
+    fn width(&self) -> usize {
+        parts_width(&self.parts)
+    }
+
+    /// Trim the blank a break point leaves at the end of the row.
+    fn trim_break_blank(&mut self) {
+        while let Some(last) = self.parts.last_mut() {
+            if !is_break_blank(last) {
+                return;
+            }
+            let trimmed = last.text.trim_end_matches(' ').len();
+            last.text.truncate(trimmed);
+            if !last.text.is_empty() {
+                return;
+            }
+            self.parts.pop();
+        }
+    }
+}
+
+/// A run of the unwrapped line with the column it starts at.
+struct WrapPiece {
+    start: usize,
+    parts: Vec<LabelPart>,
+}
+
+impl WrapPiece {
+    /// Width without the trailing break blank, the width it takes at the
+    /// end of a row.
+    fn end_width(&self) -> usize {
+        let mut width = parts_width(&self.parts);
+        for part in self.parts.iter().rev() {
+            if !is_break_blank(part) {
+                break;
+            }
+            let text_w = part.text.chars().count();
+            let kept = part.text.trim_end_matches(' ').chars().count();
+            width -= text_w - kept;
+            if kept > 0 {
+                break;
+            }
+        }
+        width
+    }
+}
+
+/// Text of the run between two selection-footer meta groups.
+const META_GROUP_SEPARATOR: &str = " · ";
+
+/// The run between two selection-footer meta groups: the one the footer
+/// meta line joins its groups with, and the one [`wrap_label_parts`] breaks
+/// at and puts back between groups that share a row.
+pub(crate) fn meta_group_separator() -> LabelPart {
+    LabelPart {
+        text: META_GROUP_SEPARATOR.into(),
+        kind: LabelKind::Meta,
+        target: None,
+    }
+}
+
+/// A [`meta_group_separator`] run.
+fn is_group_separator(part: &LabelPart) -> bool {
+    *part == meta_group_separator()
+}
+
+/// An untargeted meta run that ends with a blank: a row may break after it.
+fn is_break_blank(part: &LabelPart) -> bool {
+    part.kind == LabelKind::Meta && part.target.is_none() && part.text.ends_with(' ')
+}
+
+/// Split `parts` at the separators into groups, each with its start column.
+fn wrap_groups(parts: &[LabelPart]) -> Vec<WrapPiece> {
+    let mut groups = Vec::new();
+    let mut current = WrapPiece {
+        start: 0,
+        parts: Vec::new(),
+    };
+    let mut col = 0;
+    for part in parts {
+        let w = part.text.chars().count();
+        if is_group_separator(part) {
+            groups.push(std::mem::replace(
+                &mut current,
+                WrapPiece {
+                    start: col + w,
+                    parts: Vec::new(),
+                },
+            ));
+        } else {
+            current.parts.push(part.clone());
+        }
+        col += w;
+    }
+    groups.push(current);
+    groups.into_iter().filter(|g| !g.parts.is_empty()).collect()
+}
+
+/// Split a group after each of its inner break blanks ([`is_break_blank`]).
+fn wrap_group_pieces(group: WrapPiece) -> Vec<WrapPiece> {
+    let mut pieces = Vec::new();
+    let mut current = WrapPiece {
+        start: group.start,
+        parts: Vec::new(),
+    };
+    let mut col = group.start;
+    let last = group.parts.len().saturating_sub(1);
+    for (i, part) in group.parts.into_iter().enumerate() {
+        col += part.text.chars().count();
+        let breaks = i < last && is_break_blank(&part);
+        current.parts.push(part);
+        if breaks {
+            pieces.push(std::mem::replace(
+                &mut current,
+                WrapPiece {
+                    start: col,
+                    parts: Vec::new(),
+                },
+            ));
+        }
+    }
+    pieces.push(current);
+    pieces
+}
+
+/// Greedy rows for [`wrap_label_parts`], each with its start column.
+fn wrap_rows(parts: &[LabelPart], width: usize) -> Vec<WrapRow> {
+    if width == 0 || parts.is_empty() || parts_width(parts) <= width {
+        let parts = if width == 0 {
+            Vec::new()
+        } else {
+            parts.to_vec()
+        };
+        return vec![WrapRow { start: 0, parts }];
+    }
+    let mut rows: Vec<WrapRow> = Vec::new();
+    let mut open: Option<WrapRow> = None;
+    let close = |rows: &mut Vec<WrapRow>, open: &mut Option<WrapRow>| {
+        if let Some(mut row) = open.take() {
+            row.trim_break_blank();
+            if !row.parts.is_empty() {
+                rows.push(row);
+            }
+        }
+    };
+    let separator_w = META_GROUP_SEPARATOR.chars().count();
+    for group in wrap_groups(parts) {
+        let group_w = parts_width(&group.parts);
+        if let Some(row) = open.as_mut() {
+            if row.width() + separator_w + group_w <= width {
+                row.parts.push(meta_group_separator());
+                row.parts.extend(group.parts);
+                continue;
+            }
+        }
+        close(&mut rows, &mut open);
+        if group_w <= width {
+            open = Some(WrapRow {
+                start: group.start,
+                parts: group.parts,
+            });
+            continue;
+        }
+        for piece in wrap_group_pieces(group) {
+            if let Some(row) = open.as_mut() {
+                if row.width() + piece.end_width() <= width {
+                    row.parts.extend(piece.parts);
+                    continue;
+                }
+            }
+            close(&mut rows, &mut open);
+            if piece.end_width() <= width {
+                open = Some(WrapRow {
+                    start: piece.start,
+                    parts: piece.parts,
+                });
+                continue;
+            }
+            // Cut by columns, the trailing break blank left out so no slice
+            // is blank only.
+            let piece_w = piece.end_width();
+            let mut offset = 0;
+            while offset < piece_w {
+                close(&mut rows, &mut open);
+                open = Some(WrapRow {
+                    start: piece.start + offset,
+                    parts: slice_label_parts(&piece.parts, offset, width.min(piece_w - offset)),
+                });
+                offset += width;
+            }
+            // The last slice stays open: put the trailing break blank back so
+            // a next piece on the same row keeps its blank. A row break
+            // trims it ([`WrapRow::trim_break_blank`]).
+            if let Some(row) = open.as_mut() {
+                row.parts
+                    .extend(slice_label_parts(&piece.parts, piece_w, usize::MAX));
+            }
+        }
+    }
+    close(&mut rows, &mut open);
+    rows
+}
+
 fn pad_parts_right(parts: &mut Vec<LabelPart>, available: usize) {
     let len = parts_width(parts);
     if len < available {

@@ -175,7 +175,8 @@ fn expanded_footer_scrolls_a_message_taller_than_the_footer() {
         window: 1,
         ..GraphModel::default()
     };
-    let top = render_lines_scrolled(&model, 28, 20, true, Some(0), true, 0);
+    // One-row meta: the 44-column meta line fits 48 columns.
+    let top = render_lines_scrolled(&model, 48, 20, true, Some(0), true, 0);
     let footer = &top[top.len() - 5..];
     assert!(footer[0].starts_with("subject"), "{top:#?}");
     assert!(footer[3].starts_with("L01"), "{top:#?}");
@@ -186,7 +187,7 @@ fn expanded_footer_scrolls_a_message_taller_than_the_footer() {
         "scrollbar thumb at the top: {top:#?}"
     );
 
-    let bottom = render_lines_scrolled(&model, 28, 20, true, Some(0), true, 999);
+    let bottom = render_lines_scrolled(&model, 48, 20, true, Some(0), true, 999);
     let footer = &bottom[bottom.len() - 5..];
     assert!(footer[0].starts_with("L26"), "clamped to max: {bottom:#?}");
     assert!(footer[3].starts_with("L29"), "{bottom:#?}");
@@ -250,7 +251,8 @@ fn painted_list_rows(buf: &Buffer) -> Vec<u16> {
 #[test]
 fn expanded_footer_height_does_not_follow_the_selected_message() {
     let model = fixed_footer_model();
-    let (width, height) = (40u16, 30u16);
+    // One-row meta: the 47-column meta line fits 48 columns.
+    let (width, height) = (48u16, 30u16);
     let opts = |selected| FooterRender {
         selected,
         expand: true,
@@ -324,7 +326,8 @@ fn expanded_footer_height_does_not_follow_the_selected_message() {
 #[test]
 fn expanded_footer_pins_meta_under_blank_rows_for_a_short_message() {
     let model = fixed_footer_model();
-    let (width, height) = (40u16, 30u16);
+    // One-row meta: the 47-column meta line fits 48 columns.
+    let (width, height) = (48u16, 30u16);
     let buf = render_footer(
         &model,
         width,
@@ -348,7 +351,8 @@ fn expanded_footer_pins_meta_under_blank_rows_for_a_short_message() {
 #[test]
 fn collapsed_footer_is_two_rows_for_any_message() {
     let model = fixed_footer_model();
-    let (width, height) = (40u16, 30u16);
+    // One-row meta: the 47-column meta line fits 48 columns.
+    let (width, height) = (48u16, 30u16);
     for selected in [0, 1] {
         let buf = render_footer(
             &model,
@@ -371,7 +375,8 @@ fn collapsed_footer_is_two_rows_for_any_message() {
 #[test]
 fn footer_rule_tops_the_footer_in_the_caller_glyph_and_colour() {
     let model = fixed_footer_model();
-    let (width, height) = (40u16, 30u16);
+    // One-row meta: the 47-column meta line fits 48 columns.
+    let (width, height) = (48u16, 30u16);
     let rule_color = Color::Rgb(1, 2, 3);
     let draw = |ascii: bool, rule: Option<&'static str>, expand: bool| {
         let backend = TestBackend::new(width, height);
@@ -470,7 +475,8 @@ fn no_footer_paints_no_rule() {
 #[test]
 fn overflowing_footer_hints_hidden_lines_below() {
     let model = fixed_footer_model();
-    let (width, height) = (40u16, 30u16);
+    // One-row meta: the 47-column meta line fits 48 columns.
+    let (width, height) = (48u16, 30u16);
     let render = |msg_scroll, ascii| {
         render_footer(
             &model,
@@ -545,7 +551,8 @@ fn footer_hint_and_scrollbar_start_at_n_plus_one_lines() {
     // Subject + blank + body: commit 2 is exactly N lines, commit 3 N+1.
     model.commits[2].body = body(n - 2);
     model.commits[3].body = body(n - 1);
-    let (width, height) = (40u16, 30u16);
+    // One-row meta: the 47-column meta line fits 48 columns.
+    let (width, height) = (48u16, 30u16);
     let render = |selected| {
         render_footer(
             &model,
@@ -2995,6 +3002,27 @@ fn painted_line_count_matches_paint_for_every_row_kind() {
 }
 
 #[test]
+fn painted_line_of_row_matches_paint_for_every_row_kind() {
+    for model in [
+        GraphModel::default(),
+        sample_model(),
+        merge_model(),
+        two_parent_join_model(),
+        every_row_kind_model(),
+    ] {
+        let painted = paint_model(&model, &UNICODE, None);
+        let rows = model.visible_rows().len();
+        for row in 0..rows {
+            let line = painted
+                .iter()
+                .position(|line| line.row_index == Some(row) && line.selectable);
+            assert_eq!(crate::painted_line_of_row(&model, row), line, "row {row}");
+        }
+        assert_eq!(crate::painted_line_of_row(&model, rows), None);
+    }
+}
+
+#[test]
 fn widget_paints_the_model_once_per_render() {
     let model = every_row_kind_model();
     // Tall (list fits, no bar) and short (bar) panes.
@@ -3320,7 +3348,17 @@ fn render_chips(
     col_offset: u16,
     palette: Option<GraphLabelPalette>,
 ) -> (Buffer, Vec<IconSpan>) {
-    let mut buf = Buffer::empty(Rect::new(0, 0, width, 12));
+    render_chips_in(model, Rect::new(0, 0, width, 12), col_offset, palette)
+}
+
+/// [`render_chips`] into `area`.
+fn render_chips_in(
+    model: &GraphModel,
+    area: Rect,
+    col_offset: u16,
+    palette: Option<GraphLabelPalette>,
+) -> (Buffer, Vec<IconSpan>) {
+    let mut buf = Buffer::empty(area);
     let mut widget = GraphWidget::new(model)
         .ascii(true)
         .now_unix(NOW)
@@ -3426,7 +3464,10 @@ fn chip_spans_follow_the_pan_and_stop_at_the_pane_edge() {
     // The spacer refits a narrow pane (`[+N]`); the footer truncates its
     // meta line instead. A footer cut inside `[v1]` keeps a span over the
     // shown cells, and the `…` has none.
-    let (buf, cut) = render_chips(&model, 19, 0, None);
+    // Meta capped to one row: on a 3-row pane (rows 9..12, the meta row
+    // stays row 11) the footer has room for one meta row, so the meta line
+    // is still cut.
+    let (buf, cut) = render_chips_in(&model, Rect::new(0, 9, 19, 3), 0, None);
     let footer: Vec<(GraphIconKind, String)> = cut
         .iter()
         .filter(|span| span.y == 11 && span.target.is_some())
@@ -3524,8 +3565,8 @@ fn icon_spans_cover_spacer_hash_date_author_and_footer_parents() {
     let stash = &model.stashes[0];
     let merge_row = index_of(&merge.id);
     let stash_row = index_of(&stash.id);
-    let render = |width: u16, col_offset: u16| {
-        let mut buf = Buffer::empty(Rect::new(0, 0, width, 16));
+    let render_rows = |width: u16, height: u16, col_offset: u16| {
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
         let spans = GraphWidget::new(&model)
             .ascii(true)
             .now_unix(NOW)
@@ -3534,6 +3575,7 @@ fn icon_spans_cover_spacer_hash_date_author_and_footer_parents() {
             .render_with_icon_spans(buf.area, &mut buf);
         (buf, spans)
     };
+    let render = |width: u16, col_offset: u16| render_rows(width, 16, col_offset);
     let (buf, spans) = render(100, 0);
     // The spacer line of a row: the row's meta spans below its node.
     let spacer_y = |row: usize| {
@@ -3645,7 +3687,9 @@ fn icon_spans_cover_spacer_hash_date_author_and_footer_parents() {
     )[1]
     .clone();
     let width = u16::try_from(full.chars().count() - 5).unwrap();
-    let (buf, spans) = render(width, 0);
+    // Meta capped to one row: a 3-row pane has room for one meta row, so
+    // the narrow footer still cuts its meta line.
+    let (buf, spans) = render_rows(width, 3, 0);
     let footer_y = spans
         .iter()
         .find(|span| span.part == Some(1))
@@ -3828,7 +3872,8 @@ fn header_chip_paints_the_widest_candidate_that_fits_flush_right() {
 #[test]
 fn footer_hint_span_sits_on_the_more_below_glyph() {
     let model = fixed_footer_model();
-    let (width, height) = (40u16, 30u16);
+    // One-row meta: the 47-column meta line fits 48 columns.
+    let (width, height) = (48u16, 30u16);
     for (ascii, glyph) in [(false, UNICODE.more_below), (true, ASCII.more_below)] {
         let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
         let spans = GraphWidget::new(&model)
@@ -3858,4 +3903,197 @@ fn footer_hint_span_sits_on_the_more_below_glyph() {
     assert!(!spans
         .iter()
         .any(|span| span.kind == GraphIconKind::MoreBelow));
+}
+
+/// [`fixed_footer_model`] with no HEAD, so no row has a `[HEAD]` chip:
+/// row `i`'s meta is `(no refs) · c0<i>aaaa · parent c0<i+1>aaaa · Ada ·
+/// 1h` (47 columns).
+fn no_head_footer_model() -> GraphModel {
+    GraphModel {
+        head_id: None,
+        ..fixed_footer_model()
+    }
+}
+
+/// Expanded (default N) [`no_head_footer_model`] footer at 40x30 with row
+/// `selected`: the 47-column meta wraps to two rows.
+fn wrapped_meta_footer(selected: usize) -> (Buffer, Vec<IconSpan>) {
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 30));
+    let spans = GraphWidget::new(&no_head_footer_model())
+        .ascii(true)
+        .now_unix(NOW)
+        .selected(Some(selected))
+        .commit_msg_expand(true)
+        .render_with_icon_spans(buf.area, &mut buf);
+    (buf, spans)
+}
+
+#[test]
+fn wrapped_meta_rows_sit_under_the_message_and_the_list_gives_them_up() {
+    for i in [0usize, 1] {
+        let (buf, _) = wrapped_meta_footer(i);
+        // Rule, 4 message rows, 2 meta rows: the list gives up one row.
+        assert_eq!(painted_list_rows(&buf).len(), 23, "{i}");
+        assert_eq!(buf_row(&buf, 23), "_".repeat(40), "{i}");
+        assert!(buf_row(&buf, 24).starts_with(&format!("commit {i}")), "{i}");
+        assert_eq!(
+            buf_row(&buf, 28).trim_end(),
+            format!("(no refs) · c0{i}aaaa · parent c0{}aaaa", i + 1)
+        );
+        assert_eq!(buf_row(&buf, 29).trim_end(), "Ada · 1h");
+        for y in [28, 29] {
+            assert!(!buf_row(&buf, y).contains('…'), "{i}: row {y}");
+        }
+    }
+}
+
+#[test]
+fn wrapped_meta_rows_keep_hash_parent_author_and_date_spans_on_their_rows() {
+    let (_, spans) = wrapped_meta_footer(0);
+    let footer_span = |kind: GraphIconKind, part: Option<usize>| {
+        spans
+            .iter()
+            .find(|span| span.y >= 28 && span.kind == kind && span.part == part)
+            .map(|span| (span.x, span.y, span.width, span.row_index))
+            .unwrap_or_else(|| panic!("{kind:?} {part:?}: {spans:?}"))
+    };
+    assert_eq!(
+        footer_span(GraphIconKind::CommitHash, None),
+        (12, 28, 7, Some(0))
+    );
+    assert_eq!(
+        footer_span(GraphIconKind::CommitHash, Some(0)),
+        (29, 28, 7, Some(0))
+    );
+    assert_eq!(
+        footer_span(GraphIconKind::CommitAuthor, None),
+        (0, 29, 3, Some(0))
+    );
+    assert_eq!(
+        footer_span(GraphIconKind::CommitDate, None),
+        (6, 29, 2, Some(0))
+    );
+}
+
+#[test]
+fn collapsed_footer_wraps_meta_under_the_subject() {
+    let buf = render_footer(
+        &no_head_footer_model(),
+        40,
+        30,
+        FooterRender {
+            selected: 0,
+            expand: false,
+            msg_scroll: 0,
+            msg_lines: None,
+            ascii: true,
+        },
+    );
+    assert_eq!(painted_list_rows(&buf).len(), 26);
+    assert_eq!(buf_row(&buf, 26), "_".repeat(40));
+    assert_eq!(buf_row(&buf, 27).trim_end(), "commit 0");
+    assert_eq!(
+        buf_row(&buf, 28).trim_end(),
+        "(no refs) · c00aaaa · parent c01aaaa"
+    );
+    assert_eq!(buf_row(&buf, 29).trim_end(), "Ada · 1h");
+}
+
+#[test]
+fn meta_cut_on_a_tiny_pane_matches_the_one_row_truncation() {
+    let buf = render_footer(
+        &no_head_footer_model(),
+        16,
+        3,
+        FooterRender {
+            selected: 0,
+            expand: false,
+            msg_scroll: 0,
+            msg_lines: None,
+            ascii: true,
+        },
+    );
+    assert_eq!(painted_list_rows(&buf), vec![0]);
+    assert_eq!(buf_row(&buf, 1), "_".repeat(16));
+    assert_eq!(buf_row(&buf, 2), "(no refs) · c00…");
+}
+
+#[test]
+fn meta_chip_split_over_rows_keeps_one_target_per_row() {
+    let name = "feature/a-very-long-branch-name";
+    let mut tip = commit(&format!("c00{}", "a".repeat(37)), "long ref", &[]);
+    tip.refs = vec![GraphRef::local(name)];
+    let model = GraphModel {
+        commits: vec![tip],
+        uncommitted: None,
+        window: 1,
+        ..GraphModel::default()
+    };
+    let mut buf = Buffer::empty(Rect::new(0, 0, 20, 12));
+    let spans = GraphWidget::new(&model)
+        .ascii(true)
+        .now_unix(NOW)
+        .selected(Some(0))
+        .render_with_icon_spans(buf.area, &mut buf);
+    // Meta rows 7..12: `[feature/a-very-long`, `-branch-name]`, `c00aaaa`,
+    // `root commit · Ada`, `1h`.
+    assert_eq!(buf_row(&buf, 7), "[feature/a-very-long");
+    assert_eq!(buf_row(&buf, 8).trim_end(), "-branch-name]");
+    let chips: Vec<(u16, String, Option<PartTarget>)> = spans
+        .iter()
+        .filter(|span| span.y >= 7 && span.target.is_some())
+        .map(|span| (span.y, span_text(&buf, span), span.target.clone()))
+        .collect();
+    let target = Some(PartTarget::Chip(vec![GraphRef::local(name)]));
+    assert_eq!(
+        chips,
+        vec![
+            (7, "[feature/a-very-long".to_string(), target.clone()),
+            (8, "-branch-name]".to_string(), target),
+        ]
+    );
+}
+
+#[test]
+fn meta_chip_after_a_split_chip_keeps_its_blank_and_target() {
+    let name = "feature/a-very-long-branch-name";
+    let mut tip = commit(&format!("c00{}", "a".repeat(37)), "long ref", &[]);
+    tip.refs = vec![GraphRef::local(name), GraphRef::tag("v1")];
+    let model = GraphModel {
+        commits: vec![tip],
+        uncommitted: None,
+        window: 1,
+        ..GraphModel::default()
+    };
+    let mut buf = Buffer::empty(Rect::new(0, 0, 20, 12));
+    let spans = GraphWidget::new(&model)
+        .ascii(true)
+        .now_unix(NOW)
+        .selected(Some(0))
+        .render_with_icon_spans(buf.area, &mut buf);
+    // Meta rows 7..12: `[feature/a-very-long`, `-branch-name] [v1]`,
+    // `c00aaaa`, `root commit · Ada`, `1h`.
+    assert_eq!(buf_row(&buf, 8).trim_end(), "-branch-name] [v1]");
+    let chips: Vec<(u16, u16, String, Option<PartTarget>)> = spans
+        .iter()
+        .filter(|span| span.y == 8 && span.target.is_some())
+        .map(|span| (span.y, span.x, span_text(&buf, span), span.target.clone()))
+        .collect();
+    assert_eq!(
+        chips,
+        vec![
+            (
+                8,
+                0,
+                "-branch-name]".to_string(),
+                Some(PartTarget::Chip(vec![GraphRef::local(name)]))
+            ),
+            (
+                8,
+                14,
+                "[v1]".to_string(),
+                Some(PartTarget::Chip(vec![GraphRef::tag("v1")]))
+            ),
+        ]
+    );
 }

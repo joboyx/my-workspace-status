@@ -1,14 +1,17 @@
-//! GraphPane chrome: header / list / fixed-height selection footer.
+//! GraphPane chrome: header / list / selection footer.
 //!
 //! Header / footer budget (`graph_chrome_budget`) and selection footer copy.
+//! The footer height follows the expand state, the message rows, the pane
+//! size, and the selected row's wrapped meta rows; never the length of the
+//! selected message.
 //! Footer ref chips are the same [`LabelPart`] runs as the commit spacer,
 //! with the same [`LabelPart::target`]s. A worktree row's branch run is a
 //! local branch chip.
 
 use crate::format::{
     commit_ref_chip_parts, format_commit_message, format_relative_date, is_default_branch,
-    parts_text, short_id, trunc_label_parts, wrap_commit_message, LabelKind, LabelPart, PartTarget,
-    COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN,
+    meta_group_separator, parts_text, short_id, trunc_label_parts, wrap_commit_message,
+    wrap_label_parts, LabelKind, LabelPart, PartTarget, COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN,
 };
 use crate::glyphs::GlyphSet;
 use crate::model::{GraphModel, GraphRef, GraphRow, RefKind};
@@ -63,20 +66,31 @@ pub struct GraphChromeBudget {
     /// Paint the selection footer.
     pub footer: bool,
     /// Footer rows (0 when [`Self::footer`] is false), the
-    /// [`FOOTER_RULE_ROWS`] rule row on top included. Collapsed is 3: the
-    /// rule, the subject, and the meta row.
+    /// [`FOOTER_RULE_ROWS`] rule row on top included. Collapsed with a
+    /// one-row meta line is 3: the rule, the subject, and the meta row.
     pub footer_height: u16,
+    /// Rows of the wrapped meta line at the bottom of the footer.
+    ///
+    /// `0` without a footer, else at least 1.
+    pub meta_rows: u16,
     /// Rows left for the commit list (at least 1).
     pub list_height: u16,
 }
 
 impl GraphChromeBudget {
-    /// Footer rows under the rule: the message rows plus the meta row.
+    /// Footer rows under the rule: the message rows plus the meta rows.
     ///
     /// `0` when the footer is not painted, or when it has room for the
-    /// rule only. [`footer_message_scroll_max`] takes this height.
+    /// rule only. [`SelectionFooter::scroll_max`] takes this height.
     pub fn footer_body_height(&self) -> u16 {
         self.footer_height.saturating_sub(FOOTER_RULE_ROWS)
+    }
+
+    /// Message rows of the footer: the body less the meta rows.
+    ///
+    /// `0` without a footer, or when the meta rows take the whole body.
+    pub fn message_rows(&self) -> u16 {
+        self.footer_body_height().saturating_sub(self.meta_rows)
     }
 }
 
@@ -91,9 +105,11 @@ pub const FOOTER_RULE_ROWS: u16 = 1;
 /// `msg_lines` message rows (clamped to
 /// [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`]) plus the meta row.
 /// Collapsed body is 2 (subject + meta), so collapsed asks for 3. The value
-/// never depends on the selected message, so moving between commits keeps
-/// the list height. The app and [`crate::GraphWidget`] both call this so
-/// layout and paint agree.
+/// never depends on the selected row, and it counts one meta row:
+/// [`graph_chrome_budget_for_meta`] adds the selected row's extra wrapped
+/// meta rows, so the list height follows the meta row count at the pane
+/// width, never the message length. The app and [`crate::GraphWidget`]
+/// both call this so layout and paint agree.
 pub fn graph_footer_request(expand: bool, msg_lines: usize) -> u16 {
     let body = if expand {
         msg_lines.clamp(COMMIT_MSG_LINES_MIN, COMMIT_MSG_LINES_MAX) as u16 + 1
@@ -101,21 +117,6 @@ pub fn graph_footer_request(expand: bool, msg_lines: usize) -> u16 {
         2
     };
     FOOTER_RULE_ROWS + body
-}
-
-/// Max message scroll for a selection footer of `line_count` lines painted
-/// in `body_height` rows (the footer under its rule,
-/// [`GraphChromeBudget::footer_body_height`]).
-///
-/// The last line (meta) stays pinned under the message viewport, so this is
-/// the scroll max of the other lines in the rows above it, the same value
-/// [`crate::paint_footer_message`] reports for that viewport. `0` when every
-/// line fits.
-pub fn footer_message_scroll_max(line_count: usize, body_height: u16) -> usize {
-    crate::footer::footer_message_rows_scroll_max(
-        line_count.saturating_sub(1),
-        body_height.saturating_sub(1),
-    )
 }
 
 /// Footer first, then header. Collapsed footer: the rule, subject, and
@@ -131,27 +132,54 @@ pub fn graph_chrome_budget(height: u16, want_header: bool) -> GraphChromeBudget 
 /// the meta row; collapsed: 2), never the selected message's line count.
 /// The body under the rule gets its requested height, at most half the
 /// pane (never under 2); the rule row comes on top. A message taller than
-/// the body scrolls ([`footer_message_scroll_max`]); a shorter one leaves
+/// the body scrolls ([`SelectionFooter::scroll_max`]); a shorter one leaves
 /// blank rows. The list keeps at least one row, which can cut the body
 /// short on a small pane (a 3-row pane: list, rule, meta). A pane shorter
 /// than 3 rows still drops the footer. The result depends only on the pane
-/// and the request.
+/// and the request. This is [`graph_chrome_budget_for_meta`] with one meta
+/// row.
 pub fn graph_chrome_budget_for(
     height: u16,
     want_header: bool,
     footer_lines: u16,
 ) -> GraphChromeBudget {
+    graph_chrome_budget_for_meta(height, want_header, footer_lines, 1)
+}
+
+/// Like [`graph_chrome_budget_for`] with `meta_rows` wrapped meta rows
+/// (0 counts as 1).
+///
+/// `meta_rows` is [`SelectionFooter::meta_rows`] of the selected row at the
+/// pane width. The meta rows come first: they take body rows up to the
+/// room that keeps one list row. The message rows keep the share
+/// [`graph_chrome_budget_for`] gives them (the request less its rule and
+/// one meta row, at most half the pane less one row) while the room left
+/// under the meta rows allows, down to 0 on a tiny pane. So extra meta rows
+/// grow the footer and come out of the list. Meta rows wider than the room
+/// leave no message rows and the list one row; the footer paint cuts the
+/// meta line with `…`.
+pub fn graph_chrome_budget_for_meta(
+    height: u16,
+    want_header: bool,
+    footer_lines: u16,
+    meta_rows: u16,
+) -> GraphChromeBudget {
     let mut avail = height.max(1);
     let footer = avail >= 3;
-    let footer_height = if footer {
-        let cap = (avail / 2).max(2) + FOOTER_RULE_ROWS;
-        let h = footer_lines
-            .clamp(2 + FOOTER_RULE_ROWS, cap)
-            .min(avail.saturating_sub(1));
-        avail = avail.saturating_sub(h);
-        h
+    let (footer_height, meta_rows) = if footer {
+        // Body rows that keep one list row.
+        let room = avail - 1 - FOOTER_RULE_ROWS;
+        let meta = meta_rows.max(1).min(room);
+        // The request less its rule and its one meta row.
+        let msg_want = footer_lines.max(2 + FOOTER_RULE_ROWS) - FOOTER_RULE_ROWS - 1;
+        // The message share of the half-pane body cap.
+        let msg_cap = (avail / 2).max(2) - 1;
+        let msg = msg_want.min(msg_cap).min(room - meta);
+        let h = FOOTER_RULE_ROWS + meta + msg;
+        avail -= h;
+        (h, meta)
     } else {
-        0
+        (0, 0)
     };
     let header = want_header && avail >= 2;
     if header {
@@ -161,6 +189,7 @@ pub fn graph_chrome_budget_for(
         header,
         footer,
         footer_height,
+        meta_rows,
         list_height: avail.max(1),
     }
 }
@@ -209,62 +238,70 @@ pub fn selection_detail_parts(
     now_unix: i64,
 ) -> [Vec<LabelPart>; 2] {
     let width = width.max(1);
+    let meta = selection_meta_line(model, selection, glyphs, now_unix);
+    [
+        subject_parts(selection_subject(selection), width),
+        trunc_label_parts(&meta, width),
+    ]
+}
+
+/// Subject text of the selection footer.
+fn selection_subject(selection: GraphFooterSelection<'_>) -> &str {
     match selection {
-        GraphFooterSelection::None => [subject_parts(FOOTER_NO_SELECTION, width), Vec::new()],
-        GraphFooterSelection::Spacer => [
-            subject_parts(FOOTER_SPACER_SUBJECT, width),
-            meta_parts(FOOTER_CONNECTOR_NOT_SELECTABLE, width),
-        ],
-        GraphFooterSelection::Row(GraphRow::Uncommitted { has_changes }) => {
-            let line = if *has_changes {
-                "Uncommitted changes"
-            } else {
-                "Working tree clean"
-            };
-            let meta = head_commit_ref_parts(model, glyphs).unwrap_or_else(|| {
-                vec![LabelPart {
-                    text: FOOTER_WORKTREE_NOT_A_COMMIT.to_string(),
-                    kind: LabelKind::Meta,
-                    target: None,
-                }]
-            });
-            [subject_parts(line, width), trunc_label_parts(&meta, width)]
+        GraphFooterSelection::None => FOOTER_NO_SELECTION,
+        GraphFooterSelection::Spacer => FOOTER_SPACER_SUBJECT,
+        GraphFooterSelection::Row(GraphRow::Uncommitted { has_changes: true }) => {
+            "Uncommitted changes"
         }
-        GraphFooterSelection::Row(GraphRow::Stash(stash)) => {
-            let meta = join_meta_groups([
-                vec![meta_part(stash.stash_ref.clone())],
-                vec![hash_part(short_id(&stash.id).to_string(), None)],
-                vec![date_part(format_relative_date(
-                    stash.author_date_unix,
-                    now_unix,
-                ))],
-            ]);
-            [
-                subject_parts(&stash.subject, width),
-                trunc_label_parts(&meta, width),
-            ]
+        GraphFooterSelection::Row(GraphRow::Uncommitted { has_changes: false }) => {
+            "Working tree clean"
         }
-        GraphFooterSelection::Row(GraphRow::Worktree(wt)) => {
-            let meta = match wt.branch.as_deref() {
-                Some(branch) if !branch.is_empty() => vec![LabelPart {
-                    text: branch.to_string(),
-                    kind: if is_default_branch(branch, model.default_branch_override.as_deref()) {
-                        LabelKind::ChipDefault
-                    } else {
-                        LabelKind::ChipLocal
-                    },
-                    target: Some(PartTarget::Chip(vec![GraphRef {
-                        kind: RefKind::Local,
-                        name: branch.to_string(),
-                    }])),
-                }],
-                _ => Vec::new(),
-            };
-            [
-                subject_parts(&wt.path, width),
-                trunc_label_parts(&meta, width),
-            ]
+        GraphFooterSelection::Row(GraphRow::Stash(stash)) => &stash.subject,
+        GraphFooterSelection::Row(GraphRow::Worktree(wt)) => &wt.path,
+        GraphFooterSelection::Row(GraphRow::Commit { commit, .. }) => &commit.subject,
+    }
+}
+
+/// The whole selection-footer meta line, not cut to a width (see
+/// [`selection_detail_parts`] for the runs and their kinds).
+fn selection_meta_line(
+    model: &GraphModel,
+    selection: GraphFooterSelection<'_>,
+    glyphs: &GlyphSet,
+    now_unix: i64,
+) -> Vec<LabelPart> {
+    match selection {
+        GraphFooterSelection::None => Vec::new(),
+        GraphFooterSelection::Spacer => {
+            vec![meta_part(FOOTER_CONNECTOR_NOT_SELECTABLE.to_string())]
         }
+        GraphFooterSelection::Row(GraphRow::Uncommitted { .. }) => {
+            head_commit_ref_parts(model, glyphs)
+                .unwrap_or_else(|| vec![meta_part(FOOTER_WORKTREE_NOT_A_COMMIT.to_string())])
+        }
+        GraphFooterSelection::Row(GraphRow::Stash(stash)) => join_meta_groups([
+            vec![meta_part(stash.stash_ref.clone())],
+            vec![hash_part(short_id(&stash.id).to_string(), None)],
+            vec![date_part(format_relative_date(
+                stash.author_date_unix,
+                now_unix,
+            ))],
+        ]),
+        GraphFooterSelection::Row(GraphRow::Worktree(wt)) => match wt.branch.as_deref() {
+            Some(branch) if !branch.is_empty() => vec![LabelPart {
+                text: branch.to_string(),
+                kind: if is_default_branch(branch, model.default_branch_override.as_deref()) {
+                    LabelKind::ChipDefault
+                } else {
+                    LabelKind::ChipLocal
+                },
+                target: Some(PartTarget::Chip(vec![GraphRef {
+                    kind: RefKind::Local,
+                    name: branch.to_string(),
+                }])),
+            }],
+            _ => Vec::new(),
+        },
         GraphFooterSelection::Row(GraphRow::Commit {
             commit, is_head, ..
         }) => {
@@ -296,43 +333,105 @@ pub fn selection_detail_parts(
                     now_unix,
                 ))]);
             }
-            [
-                subject_parts(&commit.subject, width),
-                trunc_label_parts(&join_meta_groups(groups), width),
-            ]
+            join_meta_groups(groups)
         }
     }
 }
 
-/// Selection-footer runs. Collapsed is the two truncated lines from
-/// [`selection_detail_parts`]. Expanded wraps the whole subject plus body
-/// one column short of `width` (that column holds the footer scrollbar),
-/// then the same meta line. There is no line cap: the widget scrolls a
-/// message taller than the footer. Graph list rows stay one line either way.
-pub fn selection_footer_parts(
+/// Selection-footer content before layout: the message lines and the
+/// whole meta line.
+///
+/// [`crate::paint_selection_footer`] paints it: the message rows scroll
+/// on top and the meta line wraps at the footer width onto the rows under
+/// them ([`Self::meta_rows`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SelectionFooter {
+    /// Message lines.
+    ///
+    /// Collapsed: the subject cut to the width. Expanded: the subject and
+    /// body wrapped one column short of the width (that column holds the
+    /// footer scrollbar), with no line cap.
+    pub message: Vec<Vec<LabelPart>>,
+    /// The whole meta line, not cut to a width.
+    ///
+    /// Paint wraps it at the footer width. Same runs and kinds as the meta
+    /// line of [`selection_detail_parts`].
+    pub meta: Vec<LabelPart>,
+}
+
+impl SelectionFooter {
+    /// Rows the meta line wraps to at `width` (at least 1).
+    ///
+    /// An empty meta line still owns one blank row.
+    pub fn meta_rows(&self, width: usize) -> usize {
+        wrap_label_parts(&self.meta, width).len()
+    }
+
+    /// Message lines, then the meta rows at `width`.
+    ///
+    /// What the footer paints when it has a row for every line.
+    pub fn lines(&self, width: usize) -> Vec<Vec<LabelPart>> {
+        let mut lines = self.message.clone();
+        lines.extend(wrap_label_parts(&self.meta, width));
+        lines
+    }
+
+    /// Max message scroll in a footer body of `body_height` rows at
+    /// `width`.
+    ///
+    /// The meta rows stay pinned at the bottom
+    /// (`min(meta_rows, body_height)` of them), so this is the message
+    /// lines less the rows above them. It is the value
+    /// [`crate::paint_selection_footer`] paints with. `0` when every
+    /// message line fits.
+    pub fn scroll_max(&self, width: usize, body_height: u16) -> usize {
+        let meta = self.meta_rows(width).min(usize::from(body_height));
+        let rows = usize::from(body_height) - meta;
+        crate::footer::footer_message_rows_scroll_max(
+            self.message.len(),
+            u16::try_from(rows).unwrap_or(u16::MAX),
+        )
+    }
+}
+
+/// Selection-footer content of `selection` at `width`.
+///
+/// Collapsed (`expand` false), the message is the subject cut to `width`.
+/// Expanded, it is the whole subject plus body of a commit or stash,
+/// wrapped one column short of `width` (that column holds the footer
+/// scrollbar), with no line cap: the footer scrolls a message taller than
+/// its rows. Other rows keep the subject line. The meta line is never cut
+/// (see [`SelectionFooter::meta`]). Graph list rows stay one line either
+/// way.
+pub fn selection_footer(
     model: &GraphModel,
     selection: GraphFooterSelection<'_>,
     glyphs: &GlyphSet,
     width: usize,
     now_unix: i64,
     expand: bool,
-) -> Vec<Vec<LabelPart>> {
-    let [subject, meta] = selection_detail_parts(model, selection, glyphs, width, now_unix);
-    if !expand {
-        return vec![subject, meta];
-    }
-    let (message_subject, body) = match selection {
-        GraphFooterSelection::Row(GraphRow::Commit { commit, .. }) => {
-            (commit.subject.as_str(), commit.body.as_str())
+) -> SelectionFooter {
+    let width = width.max(1);
+    let meta = selection_meta_line(model, selection, glyphs, now_unix);
+    let subject = subject_parts(selection_subject(selection), width);
+    let message_source = match selection {
+        GraphFooterSelection::Row(GraphRow::Commit { commit, .. }) if expand => {
+            Some((commit.subject.as_str(), commit.body.as_str()))
         }
-        GraphFooterSelection::Row(GraphRow::Stash(stash)) => {
-            (stash.subject.as_str(), stash.body.as_str())
+        GraphFooterSelection::Row(GraphRow::Stash(stash)) if expand => {
+            Some((stash.subject.as_str(), stash.body.as_str()))
         }
-        _ => return vec![subject, meta],
+        _ => None,
+    };
+    let Some((message_subject, body)) = message_source else {
+        return SelectionFooter {
+            message: vec![subject],
+            meta,
+        };
     };
     let text = format_commit_message(message_subject, body);
     let wrapped = wrap_commit_message(&text, width.saturating_sub(1).max(1), usize::MAX);
-    let mut lines: Vec<Vec<LabelPart>> = wrapped
+    let mut message: Vec<Vec<LabelPart>> = wrapped
         .into_iter()
         .map(|text| {
             vec![LabelPart {
@@ -342,15 +441,38 @@ pub fn selection_footer_parts(
             }]
         })
         .collect();
-    if lines.is_empty() {
-        lines.push(subject);
+    if message.is_empty() {
+        message.push(subject);
     }
-    lines.push(meta);
-    lines
+    SelectionFooter { message, meta }
 }
 
-/// Text lines for [`selection_footer_parts`].
-pub fn selection_footer_lines(
+/// Selection-footer runs: [`selection_footer`] laid out with a row for
+/// every line ([`SelectionFooter::lines`]).
+///
+/// Collapsed is the subject cut to `width`, then the meta rows. Expanded
+/// wraps the whole subject plus body one column short of `width` (that
+/// column holds the footer scrollbar), then the same meta rows. There is no
+/// line cap: the widget scrolls a message taller than the footer. Graph
+/// list rows stay one line either way. Test only: paint goes through
+/// [`selection_footer`] and [`crate::paint_selection_footer`].
+#[cfg(test)]
+fn selection_footer_parts(
+    model: &GraphModel,
+    selection: GraphFooterSelection<'_>,
+    glyphs: &GlyphSet,
+    width: usize,
+    now_unix: i64,
+    expand: bool,
+) -> Vec<Vec<LabelPart>> {
+    // `selection_footer` clamps its own width; the meta rows take the same
+    // 1-column floor, so width 0 lays out like width 1 on every line.
+    selection_footer(model, selection, glyphs, width, now_unix, expand).lines(width.max(1))
+}
+
+/// Text lines for [`selection_footer_parts`]. Test only.
+#[cfg(test)]
+fn selection_footer_lines(
     model: &GraphModel,
     selection: GraphFooterSelection<'_>,
     glyphs: &GlyphSet,
@@ -390,10 +512,6 @@ fn subject_parts(text: &str, width: usize) -> Vec<LabelPart> {
         }],
         width,
     )
-}
-
-fn meta_parts(text: &str, width: usize) -> Vec<LabelPart> {
-    trunc_label_parts(&[meta_part(text.to_string())], width)
 }
 
 /// Commit footer parents group: `parent <id>`, `parents <id> <id> …`
@@ -454,11 +572,7 @@ fn join_meta_groups(groups: impl IntoIterator<Item = Vec<LabelPart>>) -> Vec<Lab
             continue;
         }
         if !first {
-            out.push(LabelPart {
-                text: " · ".into(),
-                kind: LabelKind::Meta,
-                target: None,
-            });
+            out.push(meta_group_separator());
         }
         first = false;
         out.extend(group);
@@ -604,6 +718,143 @@ mod tests {
     }
 
     #[test]
+    fn budget_adds_wrapped_meta_rows_and_takes_them_from_the_list() {
+        let wrapped = graph_chrome_budget_for_meta(40, false, graph_footer_request(true, 4), 3);
+        assert_eq!(wrapped.footer_height, 8, "rule + 4 message rows + 3 meta");
+        assert_eq!(wrapped.footer_body_height(), 7);
+        assert_eq!(wrapped.meta_rows, 3);
+        assert_eq!(wrapped.message_rows(), 4);
+        assert_eq!(wrapped.list_height, 32);
+        let one = graph_chrome_budget_for_meta(40, false, 6, 1);
+        assert_eq!(one.footer_height, 6);
+        assert_eq!(one.list_height, 34);
+        assert_eq!(one, graph_chrome_budget_for(40, false, 6));
+        assert_eq!(graph_chrome_budget_for_meta(40, false, 6, 0), one);
+    }
+
+    #[test]
+    fn budget_keeps_the_message_share_of_half_the_pane_under_wrapped_meta() {
+        let chrome = graph_chrome_budget_for_meta(10, false, graph_footer_request(true, 8), 3);
+        assert_eq!(chrome.footer_height, 8);
+        assert_eq!(chrome.message_rows(), 4);
+        assert_eq!(chrome.meta_rows, 3);
+        assert_eq!(chrome.list_height, 2);
+    }
+
+    #[test]
+    fn budget_cuts_meta_wider_than_the_pane_and_keeps_one_list_row() {
+        let chrome = graph_chrome_budget_for_meta(6, false, 6, 9);
+        assert_eq!(chrome.footer_height, 5);
+        assert_eq!(chrome.meta_rows, 4);
+        assert_eq!(chrome.message_rows(), 0);
+        assert_eq!(chrome.list_height, 1);
+    }
+
+    #[test]
+    fn budget_collapsed_footer_with_wrapped_meta() {
+        let three = graph_chrome_budget_for_meta(3, false, 3, 3);
+        assert_eq!(three.footer_height, 2, "the rule and one meta row");
+        assert_eq!(three.meta_rows, 1);
+        assert_eq!(three.list_height, 1);
+        let four = graph_chrome_budget_for_meta(4, false, 3, 2);
+        assert_eq!(four.footer_height, 3, "meta rows before the subject");
+        assert_eq!(four.meta_rows, 2);
+        assert_eq!(four.message_rows(), 0);
+        assert_eq!(four.list_height, 1);
+        let ten = graph_chrome_budget_for_meta(10, false, 3, 2);
+        assert_eq!(ten.footer_height, 4, "rule, subject, 2 meta rows");
+        assert_eq!(ten.message_rows(), 1);
+        assert_eq!(ten.list_height, 6);
+        for height in [1, 2] {
+            let chrome = graph_chrome_budget_for_meta(height, false, 3, 3);
+            assert!(!chrome.footer, "{height}: {chrome:?}");
+            assert_eq!(chrome.meta_rows, 0, "{height}");
+        }
+    }
+
+    #[test]
+    fn budget_with_wrapped_meta_keeps_the_header_when_tall() {
+        let chrome = graph_chrome_budget_for_meta(16, true, 6, 2);
+        assert_eq!(chrome.footer_height, 7);
+        assert!(chrome.header);
+        assert_eq!(chrome.list_height, 8);
+    }
+
+    /// Footer of a commit with one parent: meta
+    /// `(no refs) · abcdefg · parent 1111111 · Ada · 2m`.
+    fn one_parent_footer(width: usize, expand: bool) -> (SelectionFooter, Vec<String>) {
+        let commit = Commit {
+            id: "abcdefghhhh".into(),
+            subject: "subject".into(),
+            parents: vec!["1111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()],
+            author_name: "Ada".into(),
+            author_date_unix: 1_700_000_000 - 120,
+            ..Commit::default()
+        };
+        let model = GraphModel {
+            commits: vec![commit.clone()],
+            uncommitted: Some(false),
+            ..GraphModel::default()
+        };
+        let row = GraphRow::Commit {
+            commit,
+            is_head: false,
+            worktrees: Vec::new(),
+        };
+        let selection = GraphFooterSelection::Row(&row);
+        let footer = selection_footer(&model, selection, &UNICODE, width, 1_700_000_000, expand);
+        let lines =
+            selection_footer_lines(&model, selection, &UNICODE, width, 1_700_000_000, expand);
+        (footer, lines)
+    }
+
+    #[test]
+    fn selection_footer_keeps_the_whole_meta_line() {
+        let (footer, lines) = one_parent_footer(20, false);
+        assert_eq!(
+            parts_text(&footer.meta),
+            "(no refs) · abcdefg · parent 1111111 · Ada · 2m"
+        );
+        assert_eq!(footer.meta_rows(20), 3);
+        assert_eq!(
+            lines,
+            vec![
+                "subject",
+                "(no refs) · abcdefg",
+                "parent 1111111 · Ada",
+                "2m"
+            ]
+        );
+    }
+
+    #[test]
+    fn selection_footer_scroll_max_counts_the_wrapped_meta_rows() {
+        let (one_parent, _) = one_parent_footer(20, false);
+        let footer = SelectionFooter {
+            message: (0..11)
+                .map(|i| vec![meta_part(format!("line {i}"))])
+                .collect(),
+            meta: one_parent.meta,
+        };
+        // 3 meta rows at 20 columns leave 4 message rows of 7.
+        assert_eq!(footer.scroll_max(20, 7), 7);
+        // One meta row at 120 columns leaves 4 message rows of 5.
+        assert_eq!(footer.scroll_max(120, 5), 7);
+        assert_eq!(one_meta_row_footer(12).scroll_max(120, 5), 7);
+    }
+
+    /// Footer of `line_count` lines: `line_count - 1` message lines, then
+    /// a meta line that fits one row at 120 columns.
+    fn one_meta_row_footer(line_count: usize) -> SelectionFooter {
+        SelectionFooter {
+            message: (0..line_count.saturating_sub(1))
+                .map(|i| vec![meta_part(format!("line {i}"))])
+                .collect(),
+            meta: vec![meta_part("meta".into())],
+        }
+    }
+
+    #[test]
     fn footer_body_height_is_zero_without_a_footer() {
         let chrome = graph_chrome_budget(2, false);
         assert!(!chrome.footer);
@@ -611,12 +862,12 @@ mod tests {
     }
 
     #[test]
-    fn footer_message_scroll_max_keeps_meta_pinned() {
-        assert_eq!(footer_message_scroll_max(2, 2), 0);
-        assert_eq!(footer_message_scroll_max(9, 9), 0);
+    fn footer_scroll_max_keeps_one_meta_row_pinned() {
+        assert_eq!(one_meta_row_footer(2).scroll_max(120, 2), 0);
+        assert_eq!(one_meta_row_footer(9).scroll_max(120, 9), 0);
         // 11 message lines + meta in 5 rows: 4 message rows, 7 hidden.
-        assert_eq!(footer_message_scroll_max(12, 5), 7);
-        assert_eq!(footer_message_scroll_max(3, 2), 1);
+        assert_eq!(one_meta_row_footer(12).scroll_max(120, 5), 7);
+        assert_eq!(one_meta_row_footer(3).scroll_max(120, 2), 1);
     }
 
     #[test]
@@ -1151,7 +1402,14 @@ mod tests {
             1_700_000_000,
             false,
         );
-        assert_eq!(collapsed.len(), 2, "{collapsed:?}");
+        // The subject, then the meta line wrapped at 16 columns:
+        // `(no refs)`, `abcdefg`, `root commit`, `Ada · 2m`.
+        assert_eq!(collapsed.len(), 5, "{collapsed:?}");
+        assert_eq!(
+            &collapsed[1..],
+            ["(no refs)", "abcdefg", "root commit", "Ada · 2m"],
+            "{collapsed:?}"
+        );
         let collapsed_text = collapsed.join("\n");
         assert!(
             collapsed_text.contains('…') || !collapsed_text.contains(tail),

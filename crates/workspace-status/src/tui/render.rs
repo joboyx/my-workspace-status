@@ -16,10 +16,10 @@ use std::sync::Arc;
 use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
 use workspace_status_graph::{
-    commit_msg_lines_fit, footer_message_scroll_max, graph_chrome_budget_for, graph_col_max,
-    graph_hscroll_visible, graph_vscroll_visible, paint_selection_footer, painted_line_count,
-    short_id, GraphIconKind, GraphLabelPalette, GraphRow, GraphWidget, ASCII, COMMIT_MSG_LINES_MAX,
-    FOOTER_RULE_ROWS, UNICODE,
+    commit_msg_lines_fit, graph_chrome_budget_for_meta, graph_col_max, graph_hscroll_visible,
+    graph_vscroll_visible, paint_selection_footer, painted_line_count, short_id, GraphIconKind,
+    GraphLabelPalette, GraphRow, GraphWidget, ASCII, COMMIT_MSG_LINES_MAX, FOOTER_RULE_ROWS,
+    UNICODE,
 };
 
 use super::action::SearchFilesOption;
@@ -801,7 +801,11 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) -> R
         let footer_h = if state.is_range_compare_tab() {
             0
         } else {
-            commit_detail_footer_height(state.commit_detail_footer_request(), tree_inner.height)
+            commit_detail_footer_height(
+                state.commit_detail_footer_request(),
+                state.commit_detail_footer_meta_rows(usize::from(tree_inner.width)),
+                tree_inner.height,
+            )
         };
         // List rows only: not the horizontal bar row a panned list keeps.
         let list_h = tree_inner.height.saturating_sub(footer_h);
@@ -2583,14 +2587,14 @@ fn draw_folder_summary(
     state.layout.summary_hbar = hbar;
 }
 
-/// Graph list top to paint in a pane `area_height` rows tall:
-/// `graph_scroll`, or the step of a live Ctrl-d / Ctrl-u glide toward it.
-fn graph_glide_scroll(state: &mut AppState, area_height: u16) -> u16 {
+/// Graph list top to paint in the graph pane `area`: `graph_scroll`, or
+/// the step of a live Ctrl-d / Ctrl-u glide toward it.
+fn graph_glide_scroll(state: &mut AppState, area: Rect) -> u16 {
     if !state.glide_pending(GlidePane::Graph) {
         return state.graph_scroll;
     }
     let target = usize::from(state.graph_scroll);
-    let height = usize::from(state.graph_chrome_in(area_height).list_height);
+    let height = usize::from(state.graph_chrome_in(area.height, area.width).list_height);
     let cursor = state.graph_cursor_line().unwrap_or(target);
     let now = state.frame_now;
     let top = state.glide_start(GlidePane::Graph, target, cursor, height, now);
@@ -2601,8 +2605,15 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
     if area.width == 0 || area.height == 0 {
         return;
     }
+    // The width the selected row's meta line wraps at between frames.
+    state.layout.graph_width = area.width;
+    // A footer that grew since the last paint (more wrapped meta rows)
+    // must not hide the cursor row under it.
+    let list_height = state.graph_chrome_in(area.height, area.width).list_height;
+    state.keep_graph_cursor_in_view(state.layout.graph_list_height, list_height);
+    state.layout.graph_list_height = list_height;
     // The painted top: `graph_scroll` itself stays the jump top.
-    let scroll = graph_glide_scroll(state, area.height);
+    let scroll = graph_glide_scroll(state, area);
     if state.graph.is_some() {
         state.layout.graph_painted_top = Some(scroll);
     }
@@ -2755,7 +2766,7 @@ fn graph_commit_links(
         return Vec::new();
     };
     let checkout = std::path::Path::new(checkout);
-    let chrome = state.graph_chrome_in(area.height);
+    let chrome = state.graph_chrome_in(area.height, area.width);
     let list_bottom = area
         .y
         .saturating_add(u16::from(chrome.header))
@@ -3011,7 +3022,7 @@ fn record_commit_msg_rule(state: &mut AppState, area: Rect) {
     if state.graph.is_none() || !state.commit_msg_expand || area.width == 0 {
         return;
     }
-    let chrome = state.graph_chrome_in(area.height);
+    let chrome = state.graph_chrome_in(area.height, area.width);
     if !chrome.footer || chrome.footer_height == 0 {
         return;
     }
@@ -3033,7 +3044,7 @@ fn record_graph_scrollbar(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let chrome = state.graph_chrome_in(area.height);
+    let chrome = state.graph_chrome_in(area.height, area.width);
     let Some(model) = state.graph.as_ref() else {
         return;
     };
@@ -3045,16 +3056,17 @@ fn record_graph_scrollbar(
     let hscroll = graph_hscroll_visible(col_offset);
     let list_top = area.y.saturating_add(u16::from(chrome.header));
     let list_height = chrome.list_height;
-    let footer_scroll_max = footer_message_scroll_max(
-        state.graph_footer_line_count(area.width as usize),
-        chrome.footer_body_height(),
-    );
+    let width = usize::from(area.width);
+    let footer_scroll_max = state
+        .graph_selection_footer(width)
+        .scroll_max(width, chrome.footer_body_height());
     if chrome.footer && footer_scroll_max > 0 {
         let bottom = area.y.saturating_add(area.height);
         state.layout.graph_footer_y = Some(bottom.saturating_sub(chrome.footer_height));
         state.layout.graph_footer_x = area.x;
         state.layout.graph_footer_width = area.width;
         state.layout.graph_footer_height = chrome.footer_height;
+        state.layout.graph_footer_message_rows = chrome.message_rows();
         state.layout.graph_footer_scroll_max = footer_scroll_max;
     }
     if vscroll && list_height > 0 {
@@ -3077,22 +3089,25 @@ fn record_graph_scrollbar(
 
 /// Rows the commit-message footer takes at the bottom of a commit-files pane
 /// `pane_h` rows tall, for a footer body of `body_len` rows
-/// ([`AppState::commit_detail_footer_request`], fixed whatever the message).
+/// ([`AppState::commit_detail_footer_request`], fixed whatever the message)
+/// and a meta line of `meta_rows` wrapped rows
+/// ([`AppState::commit_detail_footer_meta_rows`]).
 ///
 /// The footer is the [`FOOTER_RULE_ROWS`] rule row, then the body, so it
 /// asks for `body_len + 1` rows. From 3 rows up the graph selection
-/// footer's budget sizes it ([`graph_chrome_budget_for`]): the body takes at
-/// most half the pane (never under 2) and the list keeps at least one row,
-/// so one request gives the same footer height on both footers. A pane of
-/// 2 rows keeps one list row and the rule only; 1 row is the rule only.
-/// Draw and layout both size the footer here so the list rows and click
-/// mapping agree.
-fn commit_detail_footer_height(body_len: usize, pane_h: u16) -> u16 {
+/// footer's budget sizes it ([`graph_chrome_budget_for_meta`]): the message
+/// rows take at most half the pane, the extra meta rows add on top, and the
+/// list keeps at least one row, so one request and meta row count give the
+/// same footer height on both footers. A pane of 2 rows keeps one list row
+/// and the rule only; 1 row is the rule only. Draw and layout both size the
+/// footer here so the list rows and click mapping agree.
+fn commit_detail_footer_height(body_len: usize, meta_rows: usize, pane_h: u16) -> u16 {
     let want = body_len
         .min(usize::from(u16::MAX - FOOTER_RULE_ROWS))
         .saturating_add(usize::from(FOOTER_RULE_ROWS)) as u16;
     if pane_h >= 3 {
-        return graph_chrome_budget_for(pane_h, false, want).footer_height;
+        let meta_rows = u16::try_from(meta_rows).unwrap_or(u16::MAX);
+        return graph_chrome_budget_for_meta(pane_h, false, want, meta_rows).footer_height;
     }
     want.min(pane_h.min(1))
 }
@@ -3124,7 +3139,11 @@ fn draw_commit_detail(
     cursor: usize,
     col_offset: usize,
 ) {
-    let footer_h = commit_detail_footer_height(state.commit_detail_footer_request(), area.height);
+    let footer_h = commit_detail_footer_height(
+        state.commit_detail_footer_request(),
+        state.commit_detail_footer_meta_rows(usize::from(area.width)),
+        area.height,
+    );
     let list_h = area.height.saturating_sub(footer_h);
     if list_h > 0 {
         let list_area = Rect {
@@ -3192,8 +3211,9 @@ struct CommitFooter {
 /// The body is the graph selection footer's: the same lines
 /// ([`AppState::commit_footer_parts`]) through the same painter
 /// ([`paint_selection_footer`]), so message rows come first in the subject
-/// colour and the meta row (coloured ref chips, hash, `parent <id>`,
-/// author, date) is pinned on the bottom row. Records the wheel box of an
+/// colour and the meta line (coloured ref chips, hash, `parent <id>`,
+/// author, date), wrapped at the footer width, is pinned on the bottom
+/// rows. Records the wheel box of an
 /// overflowing message, the more-below hint, the ref chip hits (their
 /// popovers), the commit popover hits of the hash, parent ids, author, and
 /// date ([`commit_meta_icon`]), the hash link (in the fallback footer of a
@@ -3223,17 +3243,18 @@ fn draw_commit_footer(
         height: body_h,
         ..area
     };
-    let lines = state.commit_footer_parts(
-        footer.row.as_ref(),
-        footer.fallback.as_deref(),
-        usize::from(area.width),
-    );
-    let scroll_max = footer_message_scroll_max(lines.len(), body_h);
+    let width = usize::from(area.width);
+    let content = state.commit_footer_parts(footer.row.as_ref(), footer.fallback.as_deref(), width);
+    let scroll_max = content.scroll_max(width, body_h);
+    // The wrapped meta rows pinned at the bottom of the body.
+    let meta_h = u16::try_from(content.meta_rows(width))
+        .unwrap_or(u16::MAX)
+        .min(body_h);
     let glyphs = if state.ascii { &ASCII } else { &UNICODE };
     let spans = paint_selection_footer(
         frame.buffer_mut(),
         body,
-        lines,
+        &content,
         state.commit_msg_scroll_of(footer.msg_identity.as_deref()),
         glyphs.more_below,
         Some(graph_label_palette(palette)),
@@ -3244,6 +3265,7 @@ fn draw_commit_footer(
         state.layout.commit_detail_footer_x = area.x;
         state.layout.commit_detail_footer_width = area.width;
         state.layout.commit_detail_footer_height = area.height;
+        state.layout.commit_detail_footer_message_rows = body_h - meta_h;
         state.layout.commit_detail_footer_scroll_max = scroll_max;
     }
     // The hint hovers and pins like the graph footer's; the chips open the
@@ -3270,19 +3292,22 @@ fn draw_commit_footer(
         })
     });
     state.layout.icon_hits.extend(hits);
-    // The meta row (bottom row) holds the commit's short hash, also in the
-    // fallback footer: link it to the commit page.
+    // The meta rows (the bottom rows) hold the commit's short hash, also in
+    // the fallback footer: link it to the commit page. The hash sits on the
+    // first meta row that paints it.
     let (Some(commit_id), Some(checkout)) = (&footer.commit_id, &footer.checkout) else {
         return;
     };
-    let y = body.bottom() - 1;
-    let Some((x, width)) = painted_text_span(
-        frame.buffer_mut(),
-        y,
-        body.x,
-        body.right(),
-        short_id(commit_id),
-    ) else {
+    let Some((y, (x, width))) = (body.bottom() - meta_h..body.bottom()).find_map(|y| {
+        painted_text_span(
+            frame.buffer_mut(),
+            y,
+            body.x,
+            body.right(),
+            short_id(commit_id),
+        )
+        .map(|span| (y, span))
+    }) else {
         return;
     };
     if let Some(url) = state.commit_link(std::path::Path::new(checkout), commit_id) {

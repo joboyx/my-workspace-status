@@ -7,13 +7,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget};
 
 use crate::chrome::{
-    graph_chrome_budget_for, graph_footer_request, selection_footer_parts, GraphFooterSelection,
-    FOOTER_RULE_ROWS,
+    graph_chrome_budget_for_meta, graph_footer_request, selection_footer, GraphFooterSelection,
+    SelectionFooter, FOOTER_RULE_ROWS,
 };
 use crate::footer::paint_footer_message;
 use crate::format::{
-    format_label, format_sync_parts, parts_text, slice_label_parts, LabelKind, LabelPart,
-    PartTarget, COMMIT_MSG_LINES_DEFAULT, COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN,
+    format_label, format_sync_parts, parts_text, slice_label_parts, wrap_label_parts_capped,
+    LabelKind, LabelPart, PartTarget, COMMIT_MSG_LINES_DEFAULT, COMMIT_MSG_LINES_MAX,
+    COMMIT_MSG_LINES_MIN,
 };
 use crate::glyphs::{ASCII, UNICODE};
 use crate::gutter::graph_gutter_cap;
@@ -419,7 +420,7 @@ impl<'a> GraphWidget<'a> {
     /// Expand the selection footer to the full commit / stash message.
     ///
     /// Graph list rows stay one line. Default is collapsed (truncated
-    /// subject + meta).
+    /// subject, then the meta rows pinned at the bottom).
     pub fn commit_msg_expand(mut self, expand: bool) -> Self {
         self.commit_msg_expand = expand;
         self
@@ -427,9 +428,9 @@ impl<'a> GraphWidget<'a> {
 
     /// Scroll an expanded footer message that does not fit the footer.
     ///
-    /// `offset` is the first painted message line. The meta line stays
-    /// pinned and a scrollbar marks the position. Clamped to
-    /// [`crate::footer_message_scroll_max`]. Default is `0`.
+    /// `offset` is the first painted message line. The meta rows stay
+    /// pinned at the bottom and a scrollbar marks the position. Clamped to
+    /// [`SelectionFooter::scroll_max`]. Default is `0`.
     pub fn commit_msg_scroll(mut self, offset: usize) -> Self {
         self.commit_msg_scroll = offset;
         self
@@ -437,9 +438,11 @@ impl<'a> GraphWidget<'a> {
 
     /// Fixed message rows of the expanded selection footer.
     ///
-    /// The footer requests `n` message rows plus the meta row
+    /// The footer requests `n` message rows plus one meta row
     /// ([`graph_footer_request`]) whatever the selected message is: a short
-    /// message leaves blank rows, a longer one scrolls. Clamped to
+    /// message leaves blank rows, a longer one scrolls. A meta line that
+    /// wraps adds its extra rows on top and takes them from the list
+    /// ([`crate::graph_chrome_budget_for_meta`]). Clamped to
     /// [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`]. Default is
     /// [`COMMIT_MSG_LINES_DEFAULT`]. The collapsed footer ignores it.
     pub fn commit_msg_lines(mut self, n: usize) -> Self {
@@ -593,18 +596,20 @@ impl GraphWidget<'_> {
         let rows = self.model.visible_rows();
         let selected = self.selected.and_then(|i| rows.get(i));
         let footer_sel = GraphFooterSelection::from(selected);
-        let footer_lines = selection_footer_parts(
+        let footer_width = usize::from(area.width);
+        let footer = selection_footer(
             self.model,
             footer_sel,
             glyphs,
-            area.width.max(1) as usize,
+            footer_width,
             now,
             self.commit_msg_expand,
         );
-        let chrome = graph_chrome_budget_for(
+        let chrome = graph_chrome_budget_for_meta(
             area.height,
             self.model.sync.is_some(),
             graph_footer_request(self.commit_msg_expand, self.commit_msg_lines),
+            u16::try_from(footer.meta_rows(footer_width)).unwrap_or(u16::MAX),
         );
         // The painted line count does not depend on the width, so the bar
         // is decided before the one paint at the width it leaves.
@@ -841,7 +846,7 @@ impl GraphWidget<'_> {
                 icon_spans.extend(paint_selection_footer(
                     buf,
                     body_area,
-                    footer_lines,
+                    &footer,
                     self.commit_msg_scroll,
                     glyphs.more_below,
                     self.label_palette,
@@ -855,36 +860,45 @@ impl GraphWidget<'_> {
 
 /// Paint a selection-footer body (the rows under the rule) into `area`.
 ///
-/// `lines` is [`selection_footer_parts`]: message lines, then the meta
-/// line. The meta line is pinned on the bottom row. Message lines fill the
-/// rows above it from the top; a short message leaves blank rows. A taller
-/// message scrolls by `scroll`, gets a 1-column scrollbar, and ends its
-/// last visible row with a `<arrow><K>` hint (K hidden lines below) in the
-/// palette's meta colour, left of the scrollbar. The message rows paint
-/// through [`paint_footer_message`]. Each part paints in its
+/// `footer` is [`selection_footer`]: message lines and the whole meta line.
+/// The meta line wraps at `area.width` onto the meta rows, pinned at the
+/// bottom of the area; at most `area.height` meta rows paint, and a meta
+/// line that needs more ends its last row with `…`. Message lines fill the
+/// rows above the meta rows from the top; a short message leaves blank
+/// rows. A taller message scrolls by `scroll`, gets a 1-column scrollbar,
+/// and ends its last visible row with a `<arrow><K>` hint (K hidden lines
+/// below) in the palette's meta colour, left of the scrollbar. The message
+/// rows paint through [`paint_footer_message`]. Each part paints in its
 /// [`GraphLabelPalette`] colour (`Color::Reset` with no palette).
 ///
 /// The graph selection footer ([`GraphWidget`]) and the app's commit-files
 /// footer both paint here, so the same commit paints the same rows, chips,
 /// and hint on every surface. Returns the chip and commit meta (hash,
-/// parent ids, author, date) spans of the painted lines ([`part_icons`])
-/// and the hint span ([`GraphIconKind::MoreBelow`]), each with
-/// `row_index`.
+/// parent ids, author, date) spans of the painted lines ([`part_icons`]),
+/// each on the meta row it paints on, and the hint span
+/// ([`GraphIconKind::MoreBelow`]), each with `row_index`.
 pub fn paint_selection_footer(
     buf: &mut Buffer,
     area: Rect,
-    mut lines: Vec<Vec<LabelPart>>,
+    footer: &SelectionFooter,
     scroll: usize,
     arrow: &str,
     palette: Option<GraphLabelPalette>,
     row_index: Option<usize>,
 ) -> Vec<IconSpan> {
     let fallback = Color::Reset;
-    let meta = lines.pop().unwrap_or_default();
     let mut spans = Vec::new();
     if area.height == 0 {
         return spans;
     }
+    let meta = wrap_label_parts_capped(
+        &footer.meta,
+        usize::from(area.width),
+        usize::from(area.height),
+    );
+    // `meta` has 1..=area.height rows, so this fits a u16.
+    let meta_h = meta.len() as u16;
+    let lines = &footer.message;
     let mut put = |buf: &mut Buffer, y: u16, line: &[LabelPart]| {
         put_parts_line(buf, area.x, y, area.width, line, palette, fallback);
         spans.extend(
@@ -901,9 +915,9 @@ pub fn paint_selection_footer(
                 }),
         );
     };
-    // Message rows: the body less the pinned meta row.
+    // Message rows: the body less the pinned meta rows.
     let message_area = Rect {
-        height: area.height - 1,
+        height: area.height - meta_h,
         ..area
     };
     let hint_fg = palette.map_or(fallback, |pal| pal.meta);
@@ -916,7 +930,10 @@ pub fn paint_selection_footer(
         hint_fg,
         |buf, i, y| put(buf, y, &lines[i]),
     );
-    put(buf, area.bottom() - 1, &meta);
+    let meta_top = area.bottom() - meta_h;
+    for (i, row) in meta.iter().enumerate() {
+        put(buf, meta_top + i as u16, row);
+    }
     // The span leaves out the hint's leading blank.
     spans.extend(painted.more_below.map(|hint| IconSpan {
         kind: GraphIconKind::MoreBelow,

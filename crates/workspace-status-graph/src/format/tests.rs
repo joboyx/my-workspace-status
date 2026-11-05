@@ -1258,3 +1258,169 @@ fn wrap_commit_message_marks_lines_cut_at_a_newline() {
     let exact = wrap_commit_message("one\ntwo", 8, 2);
     assert_eq!(exact, vec!["one", "two"], "nothing left: no mark");
 }
+
+fn wrap_part(text: &str, kind: LabelKind) -> LabelPart {
+    LabelPart {
+        text: text.into(),
+        kind,
+        target: None,
+    }
+}
+
+/// Footer meta line `(no refs) · c00aaaa · parent c01aaaa · Ada · 1h`
+/// (47 columns), with the separators `join_meta_groups` puts in.
+fn sample_meta_line() -> Vec<LabelPart> {
+    let sep = || wrap_part(" · ", LabelKind::Meta);
+    vec![
+        wrap_part("(no refs)", LabelKind::Meta),
+        sep(),
+        wrap_part("c00aaaa", LabelKind::MetaHash { parent: None }),
+        sep(),
+        wrap_part("parent ", LabelKind::Meta),
+        wrap_part("c01aaaa", LabelKind::MetaHash { parent: Some(0) }),
+        sep(),
+        wrap_part("Ada", LabelKind::MetaAuthor),
+        sep(),
+        wrap_part("1h", LabelKind::MetaDate),
+    ]
+}
+
+fn row_texts(rows: &[Vec<LabelPart>]) -> Vec<String> {
+    rows.iter().map(|row| parts_text(row)).collect()
+}
+
+#[test]
+fn wrap_label_parts_keeps_a_line_that_fits_as_one_row() {
+    let line = sample_meta_line();
+    assert_eq!(parts_text(&line).chars().count(), 47);
+    assert_eq!(wrap_label_parts(&line, 47), vec![line.clone()]);
+    assert_eq!(wrap_label_parts(&line, 80), vec![line]);
+}
+
+#[test]
+fn wrap_label_parts_breaks_at_group_separators_and_drops_them() {
+    let rows = wrap_label_parts(&sample_meta_line(), 40);
+    assert_eq!(
+        row_texts(&rows),
+        vec!["(no refs) · c00aaaa · parent c01aaaa", "Ada · 1h"]
+    );
+    let kinds: Vec<LabelKind> = rows[1].iter().map(|p| p.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![LabelKind::MetaAuthor, LabelKind::Meta, LabelKind::MetaDate]
+    );
+    for row in &rows {
+        let text = parts_text(row);
+        assert!(
+            !text.starts_with(" · ") && !text.ends_with(" · "),
+            "{text:?}"
+        );
+    }
+}
+
+#[test]
+fn wrap_label_parts_puts_each_group_on_its_own_row_when_narrow() {
+    let rows = wrap_label_parts(&sample_meta_line(), 16);
+    assert_eq!(
+        row_texts(&rows),
+        vec!["(no refs)", "c00aaaa", "parent c01aaaa", "Ada · 1h"]
+    );
+}
+
+#[test]
+fn wrap_label_parts_splits_a_wide_group_after_its_label() {
+    let rows = wrap_label_parts(&sample_meta_line(), 10);
+    assert_eq!(
+        row_texts(&rows),
+        vec!["(no refs)", "c00aaaa", "parent", "c01aaaa", "Ada · 1h"]
+    );
+    assert_eq!(
+        rows[3],
+        vec![wrap_part(
+            "c01aaaa",
+            LabelKind::MetaHash { parent: Some(0) }
+        )]
+    );
+}
+
+#[test]
+fn wrap_label_parts_hard_splits_a_chip_and_keeps_its_target() {
+    let target = Some(PartTarget::Chip(vec![GraphRef::local(
+        "feature/auth-refresh",
+    )]));
+    let chip = vec![LabelPart {
+        text: "[feature/auth-refresh]".into(),
+        kind: LabelKind::ChipLocal,
+        target: target.clone(),
+    }];
+    let rows = wrap_label_parts(&chip, 10);
+    assert_eq!(row_texts(&rows), vec!["[feature/a", "uth-refres", "h]"]);
+    for part in rows.iter().flatten() {
+        assert_eq!(part.kind, LabelKind::ChipLocal, "{part:?}");
+        assert_eq!(part.target, target, "{part:?}");
+    }
+}
+
+#[test]
+fn wrap_label_parts_keeps_the_blank_after_a_hard_split_chip() {
+    let long = Some(PartTarget::Chip(vec![GraphRef::local(
+        "feature/a-very-long-branch-name",
+    )]));
+    let main = Some(PartTarget::Chip(vec![GraphRef::local("main")]));
+    // Two chips with the blank `join_chip_groups` puts between them.
+    let chips = vec![
+        LabelPart {
+            text: "[feature/a-very-long-branch-name]".into(),
+            kind: LabelKind::ChipLocal,
+            target: long.clone(),
+        },
+        wrap_part(" ", LabelKind::Meta),
+        LabelPart {
+            text: "[main]".into(),
+            kind: LabelKind::ChipDefault,
+            target: main.clone(),
+        },
+    ];
+    let rows = wrap_label_parts(&chips, 20);
+    assert_eq!(
+        row_texts(&rows),
+        vec!["[feature/a-very-long", "-branch-name] [main]"]
+    );
+    assert_eq!(rows[1].first().and_then(|p| p.target.clone()), long);
+    assert_eq!(rows[1].last().and_then(|p| p.target.clone()), main);
+    // At a row break the blank goes.
+    let rows = wrap_label_parts(&chips, 13);
+    assert_eq!(
+        row_texts(&rows),
+        vec!["[feature/a-ve", "ry-long-branc", "h-name]", "[main]"]
+    );
+}
+
+#[test]
+fn wrap_label_parts_empty_or_zero_width_is_one_empty_row() {
+    assert_eq!(wrap_label_parts(&[], 10), vec![Vec::<LabelPart>::new()]);
+    assert_eq!(
+        wrap_label_parts(&sample_meta_line(), 0),
+        vec![Vec::<LabelPart>::new()]
+    );
+}
+
+#[test]
+fn wrap_label_parts_capped_to_one_row_is_trunc_label_parts() {
+    let line = sample_meta_line();
+    for width in 1..=60 {
+        assert_eq!(
+            wrap_label_parts_capped(&line, width, 1),
+            vec![trunc_label_parts(&line, width)],
+            "{width}"
+        );
+    }
+}
+
+#[test]
+fn wrap_label_parts_capped_cuts_the_rest_with_an_ellipsis() {
+    let line = sample_meta_line();
+    let rows = wrap_label_parts_capped(&line, 16, 2);
+    assert_eq!(row_texts(&rows), vec!["(no refs)", "c00aaaa · paren…"]);
+    assert!(wrap_label_parts_capped(&line, 16, 0).is_empty());
+}
