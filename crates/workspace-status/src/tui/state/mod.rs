@@ -1964,8 +1964,11 @@ impl AppState {
         let meta_rows = if width == 0 {
             1
         } else {
+            // The meta line does not depend on the expand state, so the
+            // collapsed footer gives it without wrapping the whole message.
             let width = usize::from(width);
-            self.graph_selection_footer(width).meta_rows(width)
+            self.graph_selection_footer_in(width, false)
+                .meta_rows(width)
         };
         graph_chrome_budget_for_meta(
             height,
@@ -1979,19 +1982,24 @@ impl AppState {
     /// current expand state: the same [`selection_footer`] the widget
     /// paints. No graph gives the empty footer.
     pub(crate) fn graph_selection_footer(&self, width: usize) -> SelectionFooter {
+        self.graph_selection_footer_in(width, self.commit_msg_expand)
+    }
+
+    /// [`Self::graph_selection_footer`] in the `expand` state. Clones only
+    /// the cursor row.
+    fn graph_selection_footer_in(&self, width: usize, expand: bool) -> SelectionFooter {
         let Some(model) = self.graph.as_ref() else {
             return SelectionFooter::default();
         };
-        let rows = model.visible_rows();
-        let selected = rows.get(self.graph_cursor);
+        let selected = model.visible_row_at(self.graph_cursor);
         let glyphs = if self.ascii { &ASCII } else { &UNICODE };
         selection_footer(
             model,
-            GraphFooterSelection::from(selected),
+            GraphFooterSelection::from(selected.as_ref()),
             glyphs,
             width.max(1),
             unix_now(),
-            self.commit_msg_expand,
+            expand,
         )
     }
 
