@@ -17,8 +17,11 @@
 //! `WS_STATUS_THEME_STORE`, so a spawn path must not keep naming it. These
 //! tests fail until those hazards stay fixed. The tmux driver of the verify
 //! skill (`scripts/verify-tui.sh`) is a TTY spawn path too, so it is in every
-//! loop below. Recipe:
-//! [docs/architecture.md](../../../docs/architecture.md).
+//! loop below. The skill's controller
+//! (`.agents/skills/verify-workspace-status/scripts/wsctl`) spawns only
+//! through that driver, so the driver's guards cover it; it must never start
+//! the binary or a tmux session itself (`wsctl_routes_spawns_through_the_driver`).
+//! Recipe: [docs/architecture.md](../../../docs/architecture.md).
 
 const RELEASE_YML: &str = include_str!("../../../.github/workflows/release.yml");
 const TAG_RELEASE_YML: &str = include_str!("../../../.github/workflows/tag-release.yml");
@@ -26,6 +29,7 @@ const TAG_RELEASE_SH: &str = include_str!("../../../scripts/tag-release.sh");
 const DIST_WORKSPACE: &str = include_str!("../../../dist-workspace.toml");
 const STILLS_SH: &str = include_str!("../../../scripts/capture-demo-stills.sh");
 const VERIFY_SH: &str = include_str!("../../../scripts/verify-tui.sh");
+const WSCTL: &str = include_str!("../../../.agents/skills/verify-workspace-status/scripts/wsctl");
 const PTY_HARNESS: &str = include_str!("tui_tty_e2e/harness.rs");
 const DESKTOP_HARNESS: &str = include_str!("tui_tty_e2e/desktop.rs");
 
@@ -56,6 +60,29 @@ fn isolates_workspace_env(src: &str) -> bool {
             line.contains("WS_STATUS_WORKSPACE")
                 && (line.contains("env_remove") || line.contains("unset "))
         })
+}
+
+/// True when a shell line of `src` (comments skipped) starts a program
+/// directly: `exec`, the binary by name, or the run's binary path.
+fn runs_a_binary_directly(src: &str) -> bool {
+    src.lines().any(|line| {
+        let line = line.trim_start();
+        if line.starts_with('#') {
+            return false;
+        }
+        let first = line.split_whitespace().next().unwrap_or("");
+        matches!(
+            first,
+            "exec" | "workspace-status" | "ws" | "\"$RUN_BIN\"" | "$RUN_BIN"
+        ) || line.contains("$(\"$RUN_BIN\"")
+    })
+}
+
+/// True when every `tmux -<flag>` in `src` names a socket (`-L`) or only
+/// prints the version (`-V`), so no call reaches the default tmux server.
+fn tmux_calls_use_a_private_socket(src: &str) -> bool {
+    src.match_indices("tmux -")
+        .all(|(at, _)| matches!(src[at + "tmux -".len()..].chars().next(), Some('L' | 'V')))
 }
 
 #[test]
@@ -509,5 +536,66 @@ fn verify_driver_reset_removes_only_directories() {
     assert!(
         refuse < remove && body.contains("if [[ -d \"$forge/$d\" ]]; then rm -rf"),
         "scenario --reset must check for a file before it removes, and remove directories only"
+    );
+}
+
+#[test]
+fn wsctl_spawn_guards_reject_direct_runs() {
+    assert!(!runs_a_binary_directly(""));
+    assert!(!runs_a_binary_directly("# exec workspace-status"));
+    assert!(!runs_a_binary_directly("  check binary 1 \"$RUN_BIN\""));
+    assert!(!runs_a_binary_directly("[[ -x \"$RUN_BIN\" ]]"));
+    assert!(runs_a_binary_directly("  exec \"$bin\""));
+    assert!(runs_a_binary_directly("workspace-status --plain"));
+    assert!(runs_a_binary_directly("ws -i"));
+    assert!(runs_a_binary_directly("  \"$RUN_BIN\" --json"));
+    assert!(runs_a_binary_directly("v=\"$(\"$RUN_BIN\" --version)\""));
+    assert!(tmux_calls_use_a_private_socket(
+        "tmux -L \"$RUN_SOCK\" has-session; tmux -V"
+    ));
+    assert!(!tmux_calls_use_a_private_socket("tmux -f /dev/null new"));
+    assert!(!tmux_calls_use_a_private_socket("tmux -S /tmp/sock ls"));
+}
+
+#[test]
+fn wsctl_routes_spawns_through_the_driver() {
+    // wsctl is the agent-facing layer of the verify skill. Every spawn must go
+    // through scripts/verify-tui.sh, so the isolation pinned above for the
+    // driver covers wsctl too: no tmux session, build or binary run of its own.
+    assert!(
+        WSCTL.contains("DRIVER=\"$REPO_ROOT/scripts/verify-tui.sh\""),
+        "wsctl must call the driver scripts/verify-tui.sh of its own checkout"
+    );
+    assert!(
+        WSCTL.contains("drv() { \"$DRIVER\" \"$@\""),
+        "wsctl's drv helper must run the driver"
+    );
+    for verb in ["build", "launch", "keys", "wait", "capture", "cli", "stop"] {
+        assert!(
+            WSCTL.contains(&format!("drv {verb}")) || WSCTL.contains(&format!("args=({verb})")),
+            "wsctl must route `{verb}` through the driver (drv {verb})"
+        );
+    }
+    for banned in [
+        "new-session",
+        "new -d",
+        "cargo run",
+        "cargo build",
+        "target/debug",
+        "debug/workspace-status",
+    ] {
+        assert!(
+            !WSCTL.contains(banned),
+            "wsctl must not start a TUI, a tmux session or a build itself (`{banned:?}`): \
+             use scripts/verify-tui.sh"
+        );
+    }
+    assert!(
+        !runs_a_binary_directly(WSCTL),
+        "wsctl must never exec workspace-status / ws or the run's binary: spawn through the driver"
+    );
+    assert!(
+        tmux_calls_use_a_private_socket(WSCTL),
+        "every tmux call in wsctl must use the run's private socket (tmux -L \"$RUN_SOCK\")"
     );
 }
