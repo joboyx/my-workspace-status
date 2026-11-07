@@ -131,13 +131,30 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
     };
     restore_terminal();
     let _ = terminal.show_cursor();
-    // The runtime drop waits for workers that are still running (a git
-    // fetch, say). Stop their git first (SIGTERM, then SIGKILL after a
-    // short grace) so quit returns promptly, and drop the runtime only once
-    // the terminal is back to normal.
+    // Workers may still run (a git fetch, say). Stop their git first
+    // (SIGTERM, then SIGKILL after a short grace), and shut the runtime
+    // down only once the terminal is back to normal.
     crate::git::stop_running_git();
-    drop(rt);
+    if let Ok(rt) = rt {
+        shut_down_runtime(rt, RUNTIME_SHUTDOWN_GRACE);
+    }
     result
+}
+
+/// How long quit waits for worker jobs once their git is stopped.
+const RUNTIME_SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
+
+/// Shut the loop's runtime down without waiting for ever on its blocking
+/// workers. A plain drop waits for every one of them, and a job with no git
+/// to stop (a slow file read, a stuck helper) would hold quit.
+///
+/// It first waits, bounded, while a pull still has to give stashed changes
+/// back (`git::wait_for_user_work_restore`), so quit never cuts that pop
+/// off. Then it gives the workers `grace` and returns; the ones still
+/// running end with the process.
+fn shut_down_runtime(rt: tokio::runtime::Runtime, grace: Duration) {
+    crate::git::wait_for_user_work_restore();
+    rt.shutdown_timeout(grace);
 }
 
 /// True while `run_tui` has the terminal in raw mode. The panic hook

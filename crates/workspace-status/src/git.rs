@@ -25,9 +25,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
-#[cfg(unix)]
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{mpsc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -447,6 +445,55 @@ fn stop_groups(slots: &[AtomicI32], grace: Duration) {
 pub(crate) fn stop_running_git() {
     GIT_SHUTDOWN.store(true, Ordering::SeqCst);
     stop_groups(&RUNNING_GIT_GROUPS, GIT_TERM_GRACE);
+}
+
+/// Pulls in flight that stashed the user's changes and have not popped them
+/// back yet ([`pull_quiet_detailed`], from the auto-stash push to the pop).
+/// Quit waits for it to reach zero ([`wait_for_user_work_restore`]) before
+/// it drops the worker threads.
+static RESTORING_USER_WORK: AtomicUsize = AtomicUsize::new(0);
+
+/// Longest quit waits for [`RESTORING_USER_WORK`]: the auto-stash pop's own
+/// time limit plus the `SIGTERM` grace of a stopped git. By then the pop
+/// has ended, one way or the other.
+const USER_WORK_RESTORE_WAIT: Duration = LOCAL_GIT_TIME_LIMIT.saturating_add(GIT_TERM_GRACE);
+
+/// Counts one run in [`RESTORING_USER_WORK`] while it lives.
+struct RestoringUserWork;
+
+impl RestoringUserWork {
+    fn start() -> Self {
+        RESTORING_USER_WORK.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for RestoringUserWork {
+    fn drop(&mut self) {
+        RESTORING_USER_WORK.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Wait, at most a bounded time, while a pull still has to give the
+/// user's stashed changes back. Quit calls it after [`stop_running_git`]
+/// and before it stops waiting for worker threads, so the process does
+/// not end between the auto-stash push and its pop. It sleeps, so it is
+/// not for the event loop.
+pub(crate) fn wait_for_user_work_restore() {
+    let _ = wait_while_restoring_user_work(USER_WORK_RESTORE_WAIT);
+}
+
+/// [`wait_for_user_work_restore`] with the bound `limit`. `false` when the
+/// bound ran out first.
+fn wait_while_restoring_user_work(limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    while RESTORING_USER_WORK.load(Ordering::SeqCst) > 0 {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
 }
 
 /// `Err` when `exiting` (the shutdown flag) is set: no new git may start.
@@ -1157,6 +1204,9 @@ pub struct PullQuietResult {
 pub fn pull_quiet_detailed(cwd: &Path) -> PullQuietResult {
     let dirty = repo_has_local_changes(cwd);
     let mut stashed = false;
+    // Held from before the stash push to after the pop, so a quit waits
+    // for the user's changes to come back.
+    let _restoring = dirty.then(RestoringUserWork::start);
     if dirty {
         let args = ["stash", "push", "-m", AUTO_STASH_MESSAGE, "--quiet"];
         if let Err(err) = exec_git_checked(&args, cwd) {

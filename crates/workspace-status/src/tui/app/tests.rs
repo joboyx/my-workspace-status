@@ -253,6 +253,29 @@ fn panic_hook_keeps_worker_panics_off_the_screen_and_prints_other_threads() {
 }
 
 #[test]
+fn quit_runtime_shutdown_does_not_wait_for_a_long_blocking_job() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("current-thread runtime");
+    let (started_tx, started_rx) = mpsc::channel();
+    rt.spawn_blocking(move || {
+        started_tx.send(()).unwrap();
+        thread::sleep(Duration::from_secs(10));
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the blocking job started");
+    let start = std::time::Instant::now();
+    shut_down_runtime(rt, RUNTIME_SHUTDOWN_GRACE);
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "quit waited {:?} for a blocking job",
+        start.elapsed()
+    );
+}
+
+#[test]
 fn panic_hook_restores_terminal_and_clears_progress() {
     let _serial = PANIC_HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     static SHOWN: AtomicBool = AtomicBool::new(false);
