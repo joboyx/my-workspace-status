@@ -201,14 +201,79 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::atomic::AtomicUsize;
+    use std::sync::Condvar;
     use std::time::{Duration, Instant};
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
-    const SLOW_MS: u64 = 250;
+    /// Repos in a [`GatedWorkspace`], and the cap the overlap tests run with.
+    const REPOS: usize = 4;
+
+    /// Longest a gated job waits for the others to arrive. Only a serial
+    /// (or under-cap) run hits it; the overlap proof never reads a clock,
+    /// so a slow host only makes the jobs arrive later.
+    const GATE_GUARD: Duration = Duration::from_secs(10);
 
     use crate::testutil::{git, git_env, init_repo_empty, unique_dir};
+
+    /// A rendezvous for in-process jobs. Each job checks in and waits until
+    /// `need` jobs have checked in, or until the test calls [`Gate::open`].
+    /// A wait that outlasts [`GATE_GUARD`] breaks the gate, so every later
+    /// wait fails at once and a serial run fails fast.
+    #[derive(Default)]
+    struct Gate {
+        state: Mutex<GateState>,
+        changed: Condvar,
+    }
+
+    #[derive(Default)]
+    struct GateState {
+        arrived: usize,
+        open: bool,
+        broken: bool,
+    }
+
+    impl Gate {
+        /// Check in, then wait for `need` arrivals or [`Gate::open`].
+        /// False when the gate broke instead.
+        fn arrive_and_wait(&self, need: usize) -> bool {
+            let mut state = self.state.lock().unwrap();
+            state.arrived += 1;
+            self.changed.notify_all();
+            let (mut state, timeout) = self
+                .changed
+                .wait_timeout_while(state, GATE_GUARD, |s| {
+                    !s.broken && !s.open && s.arrived < need
+                })
+                .unwrap();
+            if timeout.timed_out() {
+                state.broken = true;
+                self.changed.notify_all();
+            }
+            !state.broken
+        }
+
+        /// Release every job that waits, and every later one.
+        fn open(&self) {
+            self.state.lock().unwrap().open = true;
+            self.changed.notify_all();
+        }
+
+        /// Block until `n` jobs checked in. Panics after [`GATE_GUARD`].
+        fn wait_arrived(&self, n: usize) {
+            let state = self.state.lock().unwrap();
+            let (state, timeout) = self
+                .changed
+                .wait_timeout_while(state, GATE_GUARD, |s| s.arrived < n)
+                .unwrap();
+            assert!(
+                !timeout.timed_out(),
+                "only {} of {n} jobs started",
+                state.arrived
+            );
+        }
+    }
 
     fn unique_root(tag: &str) -> PathBuf {
         unique_dir(&format!("ws-parallel-{tag}"))
@@ -222,38 +287,69 @@ mod tests {
         }
     }
 
-    struct SlowWorkspace {
+    /// Quote `text` as one POSIX shell word.
+    fn sh_quote(text: &str) -> String {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
+
+    /// The fake `upload-pack` / `receive-pack`: check in to the gate
+    /// directory, wait until all repos have checked in, then run the real
+    /// `git <pack>`. A wait past [`GATE_GUARD`] writes `broken` and fails,
+    /// and every later process fails at once on that file.
+    fn gate_script(gate: &Path, pack: &str) -> String {
+        format!(
+            "#!/bin/sh\n\
+             gate={gate}\n\
+             arrived() {{ set -- \"$gate\"/arrived.*; if [ -e \"$1\" ]; then n=$#; else n=0; fi; }}\n\
+             mktemp \"$gate/arrived.XXXXXX\" >/dev/null || exit 1\n\
+             i=0\n\
+             arrived\n\
+             while [ \"$n\" -lt {need} ]; do\n\
+             \x20 if [ -e \"$gate/broken\" ] || [ \"$i\" -ge {tries} ]; then\n\
+             \x20   : > \"$gate/broken\"\n\
+             \x20   echo \"overlap gate: $n of {need} {pack} runs arrived together\" >&2\n\
+             \x20   exit 1\n\
+             \x20 fi\n\
+             \x20 sleep 0.02\n\
+             \x20 i=$((i+1))\n\
+             \x20 arrived\n\
+             done\n\
+             exec {git} {pack} \"$@\"\n",
+            gate = sh_quote(&gate.display().to_string()),
+            need = REPOS,
+            tries = GATE_GUARD.as_millis() / 20,
+            git = sh_quote(&git_binary().display().to_string()),
+        )
+    }
+
+    /// [`REPOS`] checkouts, each with its own bare remote. Their
+    /// `upload-pack` and `receive-pack` go through [`gate_script`], so a
+    /// fetch, pull or push on one checkout only gets through while the
+    /// same run on every other checkout is in flight too.
+    struct GatedWorkspace {
         root: PathBuf,
         workspace: PathBuf,
         repos: Vec<PathBuf>,
     }
 
-    impl SlowWorkspace {
-        fn new(n: usize) -> Self {
+    impl GatedWorkspace {
+        fn new() -> Self {
             let root = unique_root("git");
             let workspace = root.join("workspace");
             fs::create_dir_all(&workspace).unwrap();
-            let git_bin = git_binary().display().to_string();
-            let upload = root.join("slow-upload-pack");
-            let receive = root.join("slow-receive-pack");
-            write_exec(
-                &upload,
-                &format!(
-                    "#!/bin/sh\nsleep {sleep}\nexec '{git}' upload-pack \"$@\"\n",
-                    sleep = SLOW_MS as f64 / 1000.0,
-                    git = git_bin.replace('\'', "'\\''"),
-                ),
-            );
-            write_exec(
-                &receive,
-                &format!(
-                    "#!/bin/sh\nsleep {sleep}\nexec '{git}' receive-pack \"$@\"\n",
-                    sleep = SLOW_MS as f64 / 1000.0,
-                    git = git_bin.replace('\'', "'\\''"),
-                ),
-            );
+            let mut fixture = Self {
+                root,
+                workspace,
+                repos: Vec::new(),
+            };
+            fixture.reset_gate();
+            let upload = fixture.root.join("gated-upload-pack");
+            let receive = fixture.root.join("gated-receive-pack");
+            write_exec(&upload, &gate_script(&fixture.gate(), "upload-pack"));
+            write_exec(&receive, &gate_script(&fixture.gate(), "receive-pack"));
+            let (root, workspace) = (fixture.root.clone(), fixture.workspace.clone());
             let mut repos = Vec::new();
-            for i in 0..n {
+            for i in 0..REPOS {
                 let name = format!("r{i}");
                 let remote = root.join(format!("{name}.git"));
                 let repo = workspace.join(&name);
@@ -289,55 +385,44 @@ mod tests {
                 );
                 repos.push(repo);
             }
-            Self {
-                root,
-                workspace,
-                repos,
-            }
+            fixture.repos = repos;
+            fixture
+        }
+
+        fn gate(&self) -> PathBuf {
+            self.root.join("gate")
+        }
+
+        /// Empty the gate before the next round of runs. Call it only
+        /// while no gated git runs.
+        fn reset_gate(&self) {
+            let _ = fs::remove_dir_all(self.gate());
+            fs::create_dir_all(self.gate()).unwrap();
+        }
+
+        /// Fail unless every repo's run of this round reached the remote
+        /// side while all the others were in flight too.
+        fn assert_all_met(&self, label: &str) {
+            let arrived = fs::read_dir(self.gate())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("arrived."))
+                .count();
+            assert!(
+                !self.gate().join("broken").exists(),
+                "{label}: runs did not overlap, only some of {REPOS} were in flight together"
+            );
+            assert!(
+                arrived >= REPOS,
+                "{label}: {arrived} of {REPOS} runs reached the remote"
+            );
         }
     }
 
-    impl Drop for SlowWorkspace {
+    impl Drop for GatedWorkspace {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
-    }
-
-    fn assert_overlap(elapsed: Duration, max_inflight: usize, label: &str) {
-        assert!(
-            max_inflight >= 3,
-            "{label}: expected overlapping in-flight git, max was {max_inflight}"
-        );
-        let serial_floor = Duration::from_millis(SLOW_MS * 4);
-        assert!(
-            elapsed < serial_floor.saturating_sub(Duration::from_millis(80)),
-            "{label}: {elapsed:?} looks serial (4 × {SLOW_MS}ms is ~{serial_floor:?})"
-        );
-    }
-
-    fn with_inflight<T>(
-        dirs: Vec<PathBuf>,
-        cap: usize,
-        work: impl Fn(&Path) -> T + Send + Sync + 'static,
-    ) -> (Duration, usize, Vec<T>)
-    where
-        T: Send + 'static,
-    {
-        let inflight = Arc::new(AtomicUsize::new(0));
-        let max = Arc::new(AtomicUsize::new(0));
-        let start = Instant::now();
-        let results = map_with_concurrency(dirs, cap, {
-            let inflight = Arc::clone(&inflight);
-            let max = Arc::clone(&max);
-            move |dir| {
-                let n = inflight.fetch_add(1, Ordering::SeqCst) + 1;
-                max.fetch_max(n, Ordering::SeqCst);
-                let out = work(&dir);
-                inflight.fetch_sub(1, Ordering::SeqCst);
-                out
-            }
-        });
-        (start.elapsed(), max.load(Ordering::SeqCst), results)
     }
 
     #[test]
@@ -387,71 +472,81 @@ mod tests {
     #[test]
     fn cancel_skips_queued_jobs() {
         let ran = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(Gate::default());
         let batch = CappedBatch::start(vec![(); 8], 2, {
             let ran = Arc::clone(&ran);
+            let gate = Arc::clone(&gate);
             move |_| {
                 ran.fetch_add(1, Ordering::SeqCst);
-                thread::sleep(Duration::from_millis(40));
+                gate.arrive_and_wait(usize::MAX);
             }
         });
-        thread::sleep(Duration::from_millis(10));
+        // Both workers hold a job until the cancel is in.
+        gate.wait_arrived(2);
         batch.cancel();
+        gate.open();
         let slots = batch.wait_all();
-        let started = ran.load(Ordering::SeqCst);
-        assert!(started <= 4, "cancel must drop queued work, ran {started}");
-        assert!(
-            slots.iter().filter(|s| s.is_none()).count() >= 4,
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            2,
+            "cancel must drop queued work"
+        );
+        assert_eq!(
+            slots.iter().filter(|s| s.is_none()).count(),
+            6,
             "skipped jobs leave None slots, got {slots:?}"
         );
     }
 
     #[test]
-    fn sleep_jobs_overlap_under_cap() {
+    fn jobs_overlap_up_to_the_cap() {
         let inflight = Arc::new(AtomicUsize::new(0));
         let max = Arc::new(AtomicUsize::new(0));
-        let start = Instant::now();
+        let gate = Arc::new(Gate::default());
         let out = map_with_concurrency((0..6).collect::<Vec<_>>(), 4, {
             let inflight = Arc::clone(&inflight);
             let max = Arc::clone(&max);
+            let gate = Arc::clone(&gate);
             move |n| {
                 let cur = inflight.fetch_add(1, Ordering::SeqCst) + 1;
                 max.fetch_max(cur, Ordering::SeqCst);
-                thread::sleep(Duration::from_millis(60));
+                // The first 4 jobs pass only once all 4 run at the same time.
+                let met = gate.arrive_and_wait(4);
                 inflight.fetch_sub(1, Ordering::SeqCst);
-                n
+                (n, met)
             }
         });
-        let elapsed = start.elapsed();
-        assert_eq!(out, vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(
+            out.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4, 5]
+        );
         assert!(
-            max.load(Ordering::SeqCst) >= 3,
-            "cap 4 should overlap, max in-flight {}",
+            out.iter().all(|(_, met)| *met),
+            "cap 4 should run 4 jobs at once, max in-flight {}",
             max.load(Ordering::SeqCst)
         );
-        assert!(
-            max.load(Ordering::SeqCst) <= 4,
-            "must not exceed cap, max in-flight {}",
-            max.load(Ordering::SeqCst)
-        );
-        assert!(
-            elapsed < Duration::from_millis(300),
-            "6 × 60ms with cap 4 should be two waves, took {elapsed:?}"
-        );
+        assert_eq!(max.load(Ordering::SeqCst), 4, "must not exceed cap");
     }
 
     #[test]
     fn progress_counts_completions_not_starts() {
-        let mut batch = CappedBatch::start(vec![(); 4], 4, |_| {
-            thread::sleep(Duration::from_millis(80));
+        let gate = Arc::new(Gate::default());
+        let mut batch = CappedBatch::start(vec![(); 4], 4, {
+            let gate = Arc::clone(&gate);
+            move |_| {
+                gate.arrive_and_wait(usize::MAX);
+            }
         });
-        thread::sleep(Duration::from_millis(25));
+        gate.wait_arrived(4);
         assert!(
             batch.try_recv().is_none(),
             "nothing should complete just because 4 workers started"
         );
         assert!(!batch.is_finished());
+        gate.open();
         let mut seen = Vec::new();
-        let deadline = Instant::now() + Duration::from_millis(800);
+        // A hang guard only: the jobs are free to finish now.
+        let deadline = Instant::now() + GATE_GUARD;
         while !batch.is_finished() {
             if let Some(done) = batch.try_recv() {
                 seen.push(done);
@@ -470,33 +565,36 @@ mod tests {
 
     #[test]
     fn fetch_pull_push_of_several_repos_overlap() {
-        let fixture = SlowWorkspace::new(4);
+        let fixture = GatedWorkspace::new();
         let dirs = fixture.repos.clone();
 
-        let (elapsed, max, results) = with_inflight(dirs.clone(), 4, |dir| {
-            exec_git_checked(&["fetch", "--quiet"], dir)
+        let results = map_with_concurrency(dirs.clone(), REPOS, |dir| {
+            exec_git_checked(&["fetch", "--quiet"], &dir)
         });
+        // The gate first: a broken gate also fails the git runs, with a
+        // less telling message.
+        fixture.assert_all_met("fetch");
         assert!(results.iter().all(Result::is_ok), "fetch: {results:?}");
-        assert_overlap(elapsed, max, "fetch");
 
-        let (elapsed, max, results) = with_inflight(dirs.clone(), 4, pull_quiet_detailed);
+        fixture.reset_gate();
+        let results = map_with_concurrency(dirs.clone(), REPOS, |dir| pull_quiet_detailed(&dir));
+        fixture.assert_all_met("pull");
         assert!(results.iter().all(|r| r.ok), "pull: {results:?}");
-        assert_overlap(elapsed, max, "pull");
 
         for (i, dir) in dirs.iter().enumerate() {
             fs::write(dir.join("README.md"), format!("# push {i}\n")).unwrap();
             git(dir, &["add", "README.md"]);
             git(dir, &["commit", "-q", "-m", "ahead"]);
         }
-        let (elapsed, max, results) = with_inflight(dirs, 4, push_quiet);
+        fixture.reset_gate();
+        let results = map_with_concurrency(dirs, REPOS, |dir| push_quiet(&dir));
+        fixture.assert_all_met("push");
         assert!(results.iter().all(Result::is_ok), "push: {results:?}");
-        assert_overlap(elapsed, max, "push");
     }
 
     #[test]
     fn collect_snapshots_fetch_overlaps() {
-        let fixture = SlowWorkspace::new(4);
-        let start = Instant::now();
+        let fixture = GatedWorkspace::new();
         let snaps = collect_snapshots(
             &fixture.workspace,
             true,
@@ -504,16 +602,12 @@ mod tests {
             None,
             FETCH_CONCURRENCY,
         );
-        let elapsed = start.elapsed();
-        assert_eq!(snaps.len(), 4);
+        assert_eq!(snaps.len(), REPOS);
         assert_eq!(
             snaps.iter().map(|s| s.repo.as_str()).collect::<Vec<_>>(),
             vec!["r0", "r1", "r2", "r3"]
         );
-        let serial_floor = Duration::from_millis(SLOW_MS * 4);
-        assert!(
-            elapsed < serial_floor.saturating_sub(Duration::from_millis(80)),
-            "collect_snapshots fetch took {elapsed:?}; serial 4 × {SLOW_MS}ms is ~{serial_floor:?}"
-        );
+        // `process_repo` drops a fetch error, so read the gate itself.
+        fixture.assert_all_met("collect_snapshots fetch");
     }
 }
