@@ -694,17 +694,20 @@ struct ParseContext<'a> {
     user_file: &'a str,
 }
 
-/// Keys that pick a program to run or a file to write, with their env var.
+/// Keys that pick a program to run or a file to write, with their env var
+/// (`None` when the key has no env var of its own).
 ///
 /// A workspace file can be committed to a repo, so only the user file (or
 /// the env var) may set these.
-const USER_ONLY_KEYS: [(&str, &str); 6] = [
-    ("git", "WORKSPACE_STATUS_GIT"),
-    ("updateCheckStore", "WS_STATUS_UPDATE_CHECK_STORE"),
-    ("commentStore", "WS_STATUS_COMMENT_STORE"),
-    ("viewedStore", "WS_STATUS_VIEWED_STORE"),
-    ("uiStore", "WS_STATUS_UI_STORE"),
-    ("prTitleCommand", "WS_STATUS_PR_TITLE_CMD"),
+const USER_ONLY_KEYS: [(&str, Option<&str>); 8] = [
+    ("git", Some("WORKSPACE_STATUS_GIT")),
+    ("updateCheckStore", Some("WS_STATUS_UPDATE_CHECK_STORE")),
+    ("commentStore", Some("WS_STATUS_COMMENT_STORE")),
+    ("viewedStore", Some("WS_STATUS_VIEWED_STORE")),
+    ("uiStore", Some("WS_STATUS_UI_STORE")),
+    ("prTitleCommand", Some("WS_STATUS_PR_TITLE_CMD")),
+    ("editor", None),
+    ("diffTool", None),
 ];
 
 /// Fail when the workspace file sets a [`USER_ONLY_KEYS`] key. `null`
@@ -725,10 +728,15 @@ fn reject_user_only_keys(
         parsed.viewed_store.is_some(),
         parsed.ui_store.is_some(),
         parsed.pr_title_command.is_some(),
+        parsed.editor.is_some(),
+        parsed.diff_tool.is_some(),
     ];
     match USER_ONLY_KEYS.iter().zip(set).find(|(_, is_set)| *is_set) {
-        Some(((key, env_var), _)) => Err(format!(
+        Some(((key, Some(env_var)), _)) => Err(format!(
             "{file} {key} is only allowed in the user config file ({user_file}) or {env_var}"
+        )),
+        Some(((key, None), _)) => Err(format!(
+            "{file} {key} is only allowed in the user config file ({user_file})"
         )),
         None => Ok(()),
     }

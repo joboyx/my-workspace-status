@@ -772,7 +772,7 @@ fn workspace_file_without_hidden_paths_starts() {
     let (root, workspace) = fixture();
     fs::write(
         workspace.join(".workspace-status-config.json"),
-        "{\"ignoredPaths\": [\"lib\"], \"editor\": \"cursor\"}\n",
+        "{\"ignoredPaths\": [\"lib\"], \"maxDepth\": 3}\n",
     )
     .unwrap();
     let snapshot = run_json(&workspace, &["--json"]);
