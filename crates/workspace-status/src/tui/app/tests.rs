@@ -179,8 +179,82 @@ impl Write for SharedBuf {
     }
 }
 
+/// Serializes the tests that swap the process-wide panic hook and set
+/// [`TERMINAL_SET_UP`].
+static PANIC_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn panic_hook_keeps_worker_panics_off_the_screen_and_prints_other_threads() {
+    use crate::tui::effect::{run_job, JobOutcome};
+    use std::sync::atomic::AtomicUsize;
+
+    const WORKER_PANIC: &str = "boom in a worker job (hook test)";
+    const OTHER_PANIC: &str = "boom on a helper thread (hook test)";
+    static NO_BAR: AtomicBool = AtomicBool::new(false);
+    static NO_POINTER: AtomicBool = AtomicBool::new(false);
+    static PRINTED_WORKER: AtomicUsize = AtomicUsize::new(0);
+    static PRINTED_OTHER: AtomicUsize = AtomicUsize::new(0);
+
+    let _serial = PANIC_HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // The previous hook counts the panics of this test that reach it;
+    // panics of tests that run at the same time do not count.
+    std::panic::set_hook(Box::new(|info| {
+        let payload = info.payload();
+        let text = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+        match text {
+            Some(WORKER_PANIC) => PRINTED_WORKER.fetch_add(1, Ordering::SeqCst),
+            Some(OTHER_PANIC) => PRINTED_OTHER.fetch_add(1, Ordering::SeqCst),
+            _ => 0,
+        };
+    }));
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&seen);
+    install_panic_hook(&NO_BAR, &NO_POINTER, move || {
+        SharedBuf(std::sync::Arc::clone(&sink))
+    });
+    TERMINAL_SET_UP.store(true, Ordering::SeqCst);
+
+    let worker =
+        thread::spawn(|| run_job(Box::new(|| -> JobOutcome { panic!("{}", WORKER_PANIC) })))
+            .join()
+            .expect("run_job catches the panic");
+    let other = thread::spawn(|| panic!("{}", OTHER_PANIC)).join();
+
+    TERMINAL_SET_UP.store(false, Ordering::SeqCst);
+    // Put the default hook back for the other tests.
+    drop(std::panic::take_hook());
+
+    let message = worker.err().expect("the job panicked");
+    let at = message
+        .strip_prefix(&format!("{WORKER_PANIC} at "))
+        .unwrap_or_else(|| panic!("panic message, then where: {message:?}"));
+    assert!(
+        at.starts_with(&format!("{}:", file!())),
+        "the location names this file: {at:?}"
+    );
+    assert_eq!(
+        PRINTED_WORKER.load(Ordering::SeqCst),
+        0,
+        "a worker panic is not printed into the alternate screen"
+    );
+    assert!(other.is_err(), "the helper thread panicked");
+    assert_eq!(
+        PRINTED_OTHER.load(Ordering::SeqCst),
+        1,
+        "a panic on a thread that is not a worker job still prints"
+    );
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "no panic off the TUI thread restores the terminal"
+    );
+}
+
 #[test]
 fn panic_hook_restores_terminal_and_clears_progress() {
+    let _serial = PANIC_HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     static SHOWN: AtomicBool = AtomicBool::new(false);
     static POINTER: AtomicBool = AtomicBool::new(false);
     TermProgress::with_flag(true, &SHOWN)

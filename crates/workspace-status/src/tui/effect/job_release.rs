@@ -5,7 +5,9 @@
 //! records a [`JobRelease`] for each job it spawns. On a panic,
 //! [`Interpreter::apply_panic`] frees what that record names through the
 //! same release function the job's outcome handler calls, and the status
-//! line names the job and the panic message.
+//! line names the job, the panic message, and (while the TUI owns the
+//! terminal) where it panicked. The TUI panic hook does not print a worker
+//! panic then: the text would land in the alternate screen.
 //!
 //! A lookup whose answer a view waits on (a cache entry, a loading pane, a
 //! request id) gets a failed answer through its outcome handler. Without
@@ -13,6 +15,7 @@
 //! same lookup again at once.
 
 use std::any::Any;
+use std::cell::{Cell, RefCell};
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -36,12 +39,45 @@ use crate::tui::status::StatusMessage;
 /// that panicked.
 pub(crate) type JobResult = Result<JobOutcome, String>;
 
+thread_local! {
+    /// True on a worker thread while [`run_job`] runs a job there.
+    static IN_WORKER_JOB: Cell<bool> = const { Cell::new(false) };
+    /// Where the job on this worker panicked (`file:line:col`), noted by
+    /// the TUI panic hook ([`note_worker_panic_at`]) when it does not print
+    /// the panic.
+    static WORKER_PANIC_AT: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
 /// Run `work` on this worker and catch a panic, so the caller still knows
-/// which job ended. `Err` holds the panic message.
+/// which job ended. `Err` holds the panic message, then ` at <location>`
+/// when the panic hook noted one.
 pub(crate) fn run_job(work: JobWork) -> JobResult {
+    WORKER_PANIC_AT.with(|at| at.borrow_mut().take());
+    IN_WORKER_JOB.with(|flag| flag.set(true));
     // A job shares only atomics with the loop thread. A panicked job's
     // captures drop with it and no outcome of it is applied.
-    std::panic::catch_unwind(AssertUnwindSafe(work)).map_err(|payload| panic_text(&*payload))
+    let result = std::panic::catch_unwind(AssertUnwindSafe(work));
+    IN_WORKER_JOB.with(|flag| flag.set(false));
+    result.map_err(|payload| {
+        let text = panic_text(&*payload);
+        match WORKER_PANIC_AT.with(|at| at.borrow_mut().take()) {
+            Some(at) => format!("{text} at {at}"),
+            None => text,
+        }
+    })
+}
+
+/// True while this thread runs a job under [`run_job`]: a panic here is
+/// caught and reaches the status line.
+pub(crate) fn in_worker_job() -> bool {
+    IN_WORKER_JOB.with(Cell::get)
+}
+
+/// Note where the job on this worker panicked. [`run_job`] adds it to the
+/// panic message, so the status line shows what the panic hook did not
+/// print.
+pub(crate) fn note_worker_panic_at(location: String) {
+    WORKER_PANIC_AT.with(|at| *at.borrow_mut() = Some(location));
 }
 
 /// The message of a panic payload (`panic!` gives `&str` or `String`).

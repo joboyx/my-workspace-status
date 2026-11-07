@@ -89,7 +89,7 @@ use super::viewed::workspace_store_id;
 mod job_release;
 
 use job_release::JobRelease;
-pub(crate) use job_release::{run_job, JobResult};
+pub(crate) use job_release::{in_worker_job, note_worker_panic_at, run_job, JobResult};
 
 /// Blocking work that produces one [`JobOutcome`].
 pub(crate) type JobWork = Box<dyn FnOnce() -> JobOutcome + Send>;

@@ -47,6 +47,7 @@ use super::branches::{
 };
 use super::diff::{load_file_diff, DiffContent};
 use super::drill::{CommitFile, CommitFileSource, DrillView};
+use super::effect::{in_worker_job, note_worker_panic_at};
 use super::graph_load::{
     load_graph_model, load_graph_model_window, refresh_graph_limit, GraphIdentity,
 };
@@ -190,12 +191,19 @@ fn leave_alternate_screen_to<W: Write>(out: &mut W) -> io::Result<()> {
 /// previous hook prints the panic, so the message lands on the normal
 /// screen with raw mode off.
 ///
-/// It acts only for a panic on the thread that installed it (the TUI
-/// thread) while [`TERMINAL_SET_UP`] is set. A worker panic, which
-/// `run_job` catches, leaves the running TUI alone. It clears the OSC 9;4 bar only
+/// It restores only for a panic on the thread that installed it (the TUI
+/// thread) while [`TERMINAL_SET_UP`] is set. It clears the OSC 9;4 bar only
 /// while `shown` is set ([`PROGRESS_SHOWN`] outside tests), and resets the
 /// OSC 22 pointer only while `pointer_set` is set ([`POINTER_SET`] outside
 /// tests).
+///
+/// A panic in a worker job (`run_job`, which catches it) while the
+/// terminal is set up leaves the running TUI alone and is not printed: the
+/// text would land in the alternate screen and break the frame. The hook
+/// notes where it panicked instead, and the status line shows the job, the
+/// message, and that location. A panic on any other thread (the input
+/// thread, a helper thread) still goes to the previous hook, so it is never
+/// silent.
 fn install_panic_hook<W, F>(shown: &'static AtomicBool, pointer_set: &'static AtomicBool, target: F)
 where
     W: Write,
@@ -204,14 +212,19 @@ where
     let tui_thread = std::thread::current().id();
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if std::thread::current().id() == tui_thread
-            && TERMINAL_SET_UP.swap(false, Ordering::SeqCst)
-        {
-            restore_terminal_to(
-                &mut target(),
-                shown.swap(false, Ordering::SeqCst),
-                pointer_set.swap(false, Ordering::SeqCst),
-            );
+        if std::thread::current().id() == tui_thread {
+            if TERMINAL_SET_UP.swap(false, Ordering::SeqCst) {
+                restore_terminal_to(
+                    &mut target(),
+                    shown.swap(false, Ordering::SeqCst),
+                    pointer_set.swap(false, Ordering::SeqCst),
+                );
+            }
+        } else if in_worker_job() && TERMINAL_SET_UP.load(Ordering::SeqCst) {
+            if let Some(at) = info.location() {
+                note_worker_panic_at(at.to_string());
+            }
+            return;
         }
         prev(info);
     }));
