@@ -3,7 +3,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+// Only `unique_root` is used here; `git_env` serves the other test binaries.
+#[allow(dead_code)]
+#[path = "common/fixture.rs"]
+mod fixture;
 
 fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_workspace-status"))
@@ -14,15 +18,7 @@ fn ws_bin() -> PathBuf {
 }
 
 fn temp_dir() -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "ws-update-e2e-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&path).unwrap();
-    path
+    fixture::unique_root("ws-update-e2e")
 }
 
 #[cfg(unix)]

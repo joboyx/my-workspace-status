@@ -3,7 +3,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+
+#[path = "common/fixture.rs"]
+mod fixture;
+
+use fixture::{git_env, unique_root};
 
 fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_workspace-status"))
@@ -11,18 +15,6 @@ fn bin() -> PathBuf {
 
 fn ws_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ws"))
-}
-
-fn git_env() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("GIT_AUTHOR_NAME", "workspace-status e2e"),
-        ("GIT_AUTHOR_EMAIL", "workspace-status-e2e@example.invalid"),
-        ("GIT_COMMITTER_NAME", "workspace-status e2e"),
-        (
-            "GIT_COMMITTER_EMAIL",
-            "workspace-status-e2e@example.invalid",
-        ),
-    ]
 }
 
 fn git(cwd: &Path, args: &[&str]) {
@@ -41,6 +33,7 @@ fn seed_repo(workspace: &Path, name: &str, branch: &str, dirty: bool) {
     let init = Command::new("git")
         .args(["init", "-q", "-b", branch])
         .current_dir(&repo)
+        .envs(git_env())
         .status();
     if !init.map(|s| s.success()).unwrap_or(false) {
         git(&repo, &["init", "-q"]);
@@ -55,13 +48,7 @@ fn seed_repo(workspace: &Path, name: &str, branch: &str, dirty: bool) {
 }
 
 fn fixture() -> (PathBuf, PathBuf) {
-    let root = std::env::temp_dir().join(format!(
-        "workspace-status-rs-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = unique_root("workspace-status-rs");
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     seed_repo(&workspace, "app", "main", true);
@@ -297,13 +284,7 @@ fn commit_file(repo: &Path, name: &str) {
 
 #[test]
 fn json_names_a_force_pushed_upstream_and_omits_it_elsewhere() {
-    let root = std::env::temp_dir().join(format!(
-        "workspace-status-rewrite-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = unique_root("workspace-status-rewrite");
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     // A maintainer pushes base + 2 bot commits, the checkout clones them,
@@ -358,13 +339,7 @@ fn json_names_a_force_pushed_upstream_and_omits_it_elsewhere() {
 
 #[test]
 fn merged_into_default_skips_same_commit_as_default_tip() {
-    let root = std::env::temp_dir().join(format!(
-        "workspace-status-merge-mark-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = unique_root("workspace-status-merge-mark");
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
