@@ -2,7 +2,9 @@
 # Drive this checkout's own workspace-status in a private tmux server, on a
 # disposable seeded workspace, and keep screen captures as proof.
 #
-# This is a test harness for the verify skill (.agents/skills/verify/SKILL.md),
+# This is a test harness for the verify skill
+# (.agents/skills/verify-workspace-status/SKILL.md; its controller wsctl calls
+# this script for every spawn),
 # not the demo capture pipeline: scripts/capture-demo-stills.sh owns the README
 # clips. The isolation below follows the TTY spawn rules in AGENTS.md; CI guards
 # it in crates/workspace-status/tests/release_watch.rs.
@@ -14,13 +16,14 @@ unset CDPATH
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
-SCENARIOS_DIR="$REPO_ROOT/.agents/skills/verify/scenarios"
+SCENARIOS_DIR="$REPO_ROOT/.agents/skills/verify-workspace-status/scenarios"
 ROOT="${WS_VERIFY_ROOT:-${TMPDIR:-/tmp}/ws-verify}"
 ROOT="${ROOT%/}"
 SESSION=ws
 
 # GitHub / GitLab origins the seeded repos get under --fake-forge. The scenario
-# sets in .agents/skills/verify/scenarios/ are keyed to these paths.
+# sets in .agents/skills/verify-workspace-status/scenarios/ are keyed to these
+# paths.
 APP_ORIGIN=https://github.com/acme/app.git
 API_ORIGIN=https://gitlab.com/acme/services/api.git
 MERGER_ORIGIN=https://github.com/acme/merger.git

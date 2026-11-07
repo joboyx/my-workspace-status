@@ -1,5 +1,5 @@
 ---
-name: verify
+name: verify-workspace-status
 description: Prove a workspace-status change works. Picks the test layer that proves a claim, then drives the real TUI of this checkout in an isolated tmux run, offline with fake gh and glab answers or live against public repos, and saves screen captures as proof. Use when verifying a TUI, PR badge, PRs tab or forge change, reproducing a bug with evidence, or before you report a UI change done.
 ---
 
@@ -92,7 +92,7 @@ The driver points the seeded repos at made-up remotes, so the app finds a forge:
 | `services/api` | `https://gitlab.com/acme/services/api.git` | `feature/rate-limit` |
 | `lib` | local path, no forge | `main` |
 
-Scenario sets live in `.agents/skills/verify/scenarios/`. Apply sets with `scenario` before `launch` (the first lookup runs at launch) or later to swap an answer; then press `r` on the checkout (or on the workspace row, which reloads every checkout), or wait for a poll.
+Scenario sets live in `.agents/skills/verify-workspace-status/scenarios/`. Apply sets with `scenario` before `launch` (the first lookup runs at launch) or later to swap an answer; then press `r` on the checkout (or on the workspace row, which reloads every checkout), or wait for a poll.
 
 | Set | Answer |
 | --- | --- |
@@ -105,7 +105,7 @@ Scenario sets live in `.agents/skills/verify/scenarios/`. Apply sets with `scena
 | `github-cli-fails`, `gitlab-cli-fails` | The CLI exits 1 with one stderr line. |
 | `prs-tab` | Every seeded branch gets a PR whose title carries a ticket key, for the PRs tab groups: #7 CI failed and #8 stacked on it (`ABC-123`), !5 CI running (`ABC-125`), #12 merged (`ABC-120`). List and detail answers. |
 
-`.agents/skills/verify/scenarios/<set>/` has the layout of a forge directory, so `scenario` is a copy that renames each file into place and removes a stale failure file. Add a set by adding a directory.
+`.agents/skills/verify-workspace-status/scenarios/<set>/` has the layout of a forge directory, so `scenario` is a copy that renames each file into place and removes a stale failure file. Add a set by adding a directory.
 
 `$FORGE/calls.log` lists every `gh` and `glab` call the app made (argv line, program first), across runs. `calls <run>` prints only the lines of one run. Use it to prove the app asked, and to find a call the fake does not know (`fake forge: no scenario for ...`). Use one run at a time per forge directory; give runs that overlap a forge directory each.
 
