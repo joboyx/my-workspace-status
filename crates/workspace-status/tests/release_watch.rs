@@ -127,6 +127,32 @@ fn dist_workspace_allows_dirty_ci() {
     );
 }
 
+/// dist 0.32 builds `aarch64-apple-darwin` on `macos-14`, an image GitHub no
+/// longer runs. Without the pin the Release build of that target never starts,
+/// so the host job never publishes. A `dist init` that rewrites the config
+/// must keep it.
+#[test]
+fn dist_workspace_pins_a_supported_apple_silicon_runner() {
+    let section = DIST_WORKSPACE
+        .split("[dist.github-custom-runners]")
+        .nth(1)
+        .expect("dist-workspace.toml must keep [dist.github-custom-runners]");
+    let runners: Vec<&str> = section
+        .lines()
+        .map(str::trim)
+        .take_while(|line| !line.starts_with('['))
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    assert!(
+        runners.contains(&"aarch64-apple-darwin = \"macos-15\""),
+        "aarch64-apple-darwin must build on macos-15, got {runners:?}"
+    );
+    assert!(
+        !runners.iter().any(|line| line.contains("\"macos-14")),
+        "macOS 14 images are retired: {runners:?}"
+    );
+}
+
 #[test]
 fn release_workflow_keeps_dispatch_and_git_cliff() {
     assert!(
