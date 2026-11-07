@@ -81,11 +81,18 @@ pub struct TuiOpts {
 ///
 /// Every exit restores the terminal, clears a shown OSC 9;4 bar, and puts
 /// back the default pointer after an OSC 22 resize shape:
-/// quit, an error return, and a panic on this thread (panic hook).
+/// quit, an error return, a panic on this thread (panic hook), and on Unix
+/// an exit signal (`SIGINT`, `SIGTERM`, `SIGHUP`; see
+/// [`super::term_restore`]).
 pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
     install_panic_hook(&PROGRESS_SHOWN, &POINTER_SET, stdout);
     let mut state = AppState::launch(opts.cwd.clone(), opts.snapshot.clone(), &opts.settings);
     state.apply_view_defaults(&opts.config.view_defaults);
+    #[cfg(unix)]
+    {
+        super::term_restore::save_terminal_modes();
+        crate::git::set_exit_signal_hook(super::term_restore::restore_from_signal);
+    }
     enable_raw_mode().map_err(|_| 1u8)?;
     TERMINAL_SET_UP.store(true, Ordering::SeqCst);
     // Raw mode keeps the terminal's reply off the screen. The input thread
@@ -135,8 +142,9 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
 
 /// True while `run_tui` has the terminal in raw mode. The panic hook
 /// restores only then, so a panic after the TUI closed leaves the shell
-/// alone and the restore runs once.
-static TERMINAL_SET_UP: AtomicBool = AtomicBool::new(false);
+/// alone and the restore runs once. The exit-signal restore
+/// (`term_restore::restore_from_signal`) follows the same rule.
+pub(super) static TERMINAL_SET_UP: AtomicBool = AtomicBool::new(false);
 
 /// Give the terminal back on stdout. Clears the OSC 9;4 bar only when one
 /// shows ([`PROGRESS_SHOWN`]), and resets the OSC 22 pointer only while a
@@ -161,7 +169,14 @@ fn restore_terminal() {
 ///
 /// The alternate screen is left through [`leave_alternate_screen_to`],
 /// which closes any open synchronized update first.
-fn restore_terminal_to<W: Write>(out: &mut W, clear_progress: bool, reset_pointer: bool) {
+///
+/// On Unix the exit-signal restore writes the same bytes from a constant
+/// (`term_restore::RESTORE_SEQ`); a unit test keeps the two equal.
+pub(super) fn restore_terminal_to<W: Write>(
+    out: &mut W,
+    clear_progress: bool,
+    reset_pointer: bool,
+) {
     if clear_progress {
         let _ = out.write_all(PROGRESS_CLEAR.as_bytes());
     }

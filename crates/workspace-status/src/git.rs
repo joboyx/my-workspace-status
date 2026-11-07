@@ -25,6 +25,8 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
+#[cfg(unix)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{mpsc, OnceLock};
 use std::time::{Duration, Instant};
@@ -463,8 +465,9 @@ fn check_may_start(exiting: bool, restores_user_work: bool, sub: Option<&str>) -
 /// Make `SIGINT`, `SIGTERM` and `SIGHUP` stop running git before `ws`
 /// dies. Call it once at CLI startup, never from tests.
 ///
-/// The handler sends `SIGTERM` to every registered git process group, then
-/// restores the default action and raises the signal again, so `ws` exits
+/// The handler sends `SIGTERM` to every registered git process group,
+/// calls the hook from [`set_exit_signal_hook`] (the TUI terminal restore),
+/// then restores the default action and raises the signal again, so `ws` exits
 /// with the usual status. A signal whose handler is not the default (an
 /// ignored `SIGHUP` under `nohup`, say) is left alone.
 #[cfg(unix)]
@@ -489,8 +492,23 @@ pub(crate) fn stop_git_on_exit_signals() {
     }
 }
 
+/// The `fn()` the exit-signal handler calls after it stops git, stored as
+/// its address; `0` for none. Set by [`set_exit_signal_hook`].
+#[cfg(unix)]
+static EXIT_SIGNAL_HOOK: AtomicUsize = AtomicUsize::new(0);
+
+/// Make the exit-signal handler call `hook` after it stops running git and
+/// before the signal ends `ws`. The TUI registers its terminal restore
+/// here, so this module does not depend on the TUI. `hook` runs inside a
+/// signal handler: it must call only async-signal-safe functions (no
+/// allocation, no lock).
+#[cfg(unix)]
+pub(crate) fn set_exit_signal_hook(hook: fn()) {
+    EXIT_SIGNAL_HOOK.store(hook as usize, Ordering::SeqCst);
+}
+
 /// The exit-signal handler: async-signal-safe calls only (atomic loads,
-/// `kill`, `signal`, `raise`).
+/// `kill`, the registered hook, `signal`, `raise`).
 #[cfg(unix)]
 extern "C" fn on_exit_signal(signal: libc::c_int) {
     for slot in &RUNNING_GIT_GROUPS {
@@ -501,6 +519,14 @@ extern "C" fn on_exit_signal(signal: libc::c_int) {
                 libc::kill(-pgid, libc::SIGTERM);
             }
         }
+    }
+    let hook = EXIT_SIGNAL_HOOK.load(Ordering::SeqCst);
+    if hook != 0 {
+        // SAFETY: a non-zero value is only ever the address of a `fn()`
+        // that `set_exit_signal_hook` stored, and a fn pointer has the
+        // size of `usize`.
+        let hook = unsafe { std::mem::transmute::<usize, fn()>(hook) };
+        hook();
     }
     // SAFETY: both are async-signal-safe; the signal is blocked while this
     // handler runs, so it is delivered with the default action on return.
