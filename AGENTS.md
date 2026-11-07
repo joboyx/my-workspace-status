@@ -87,7 +87,7 @@ Do **not** invent spur heuristics (`parent.lane + 1`, spine `◇─╯`, mid-rai
 | `test.yml` check jobs, the release gate, or the `tag-release.yml` trigger or push credential | `docs/architecture.md` (**Release gate**, including its required checks list) and `crates/workspace-status/tests/release_gate.rs` |
 | Output format of the plain report | `SAMPLE_OUTPUT.md` and `crates/workspace-status/tests/snapshot_contract.rs` |
 | Demo workspace seed or screenshot clips | `docs/demo.md` + `scripts/seed-demo-workspace.sh` + `scripts/capture-demo-stills.sh` |
-| Verify skill, its driver, or its scenario sets | `.agents/skills/verify/` + `scripts/verify-tui.sh` + `crates/workspace-status/tests/release_watch.rs` (+ `docs/tui-tty-e2e.md` for the fake forge) |
+| Verify skill, `wsctl`, its driver, or its scenario sets | `.agents/skills/verify-workspace-status/` (+ `.agents/skills/drive-workspace-status/` for the `wsctl` loop) + `scripts/verify-tui.sh` + `crates/workspace-status/tests/release_watch.rs` and `tests/wsctl.rs` (+ `docs/tui-tty-e2e.md` for the fake forge); keymap, footer, or overlay change → edit `.agents/skills/verify-workspace-status/features/*.md` |
 | Desktop Xvfb / Openbox session | `scripts/with-desktop-session.sh` + `scripts/openbox.xml` + `docs/tui-tty-e2e.md` |
 | Behaviour of a component on any surface listed in `docs/parity.md` | `docs/parity.md` (every surface of that component) + the test named in the row |
 
@@ -132,9 +132,9 @@ coverage; in-crate git fixtures and snapshot / app-state fixtures live in
 
 ## Verify skill
 
-`.agents/skills/verify/` is the in-repo skill for proving that a change works. It maps each claim to a test layer (unit, PTY e2e, desktop `#[ignore]`, live forge `#[ignore]`) with the exact commands, and it holds the recipes of the driver `scripts/verify-tui.sh`. The driver runs the `target/debug/workspace-status` of this checkout in a private tmux server on a seeded throwaway workspace. It runs offline against the fake `gh` / `glab` scenarios, or live against public repos, and saves screen captures as proof.
+`.agents/skills/verify-workspace-status/` is the in-repo skill for proving that a change works. It maps each claim to a test layer (unit, PTY e2e, desktop `#[ignore]`, live forge `#[ignore]`) with the exact commands, and `features/` maps each feature to recipes with the expected screen text and a PASS rule (`features/README.md` is the sweep order). Its controller `scripts/wsctl` lets an agent drive the TUI as a user does from a terminal (`start`, `doctor`, `key`, `type`, `wait`, `snap`, `resize`, `run`, `stop`), with one JSON object per command. `wsctl` is a thin layer over the driver `scripts/verify-tui.sh`, which runs the `target/debug/workspace-status` of this checkout in a private tmux server on a seeded throwaway workspace. It runs offline against the fake `gh` / `glab` scenarios, or live against public repos, and saves screen captures as proof. `.agents/skills/drive-workspace-status/` is a short pointer skill to the `wsctl` loop.
 
-The driver is a **test harness** with the isolation rules of **TUI test layers**. It is not a capture pipeline and it makes no demo clips or stills: those stay in `scripts/capture-demo-stills.sh` (**Demo / screenshots**). "Do not drive the TUI by hand" below is about demo clips. For verification, drive the TUI only through the driver, never by starting the binary in a bare terminal.
+The driver is a **test harness** with the isolation rules of **TUI test layers**. It is not a capture pipeline and it makes no demo clips or stills: those stay in `scripts/capture-demo-stills.sh` (**Demo / screenshots**). "Do not drive the TUI by hand" below is about demo clips. For verification, drive the TUI only through `wsctl` or the driver, never by starting the binary in a bare terminal.
 
 Run the skill:
 
@@ -142,7 +142,7 @@ Run the skill:
 - To reproduce a TUI bug with evidence.
 - After a rebase onto work that touches those.
 
-Driver proof does not replace a test: behaviour that must stay gets a `pty_*` test. Keep the skill in step with the code: a new `gh` / `glab` call needs a fake forge answer and scenario sets, a changed badge needs `features/pr-status.md`, a changed PRs tab needs `features/prs-tab.md`. `crates/workspace-status/tests/release_watch.rs` guards the driver's isolation.
+Driver proof does not replace a test: behaviour that must stay gets a `pty_*` test. Keep the skill in step with the code: a new `gh` / `glab` call needs a fake forge answer and scenario sets, a changed badge needs `features/pr-status.md`, a changed PRs tab needs `features/prs-tab.md`, and a keymap, footer, or overlay change needs the `features/*.md` recipes that press or read it. `crates/workspace-status/tests/release_watch.rs` guards the driver's isolation and that `wsctl` spawns only through the driver; `tests/wsctl.rs` checks its syntax and its `--help`.
 
 ## Demo / screenshots
 
