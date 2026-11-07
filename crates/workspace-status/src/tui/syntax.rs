@@ -229,7 +229,8 @@ pub(crate) struct DiffSyntaxSpans {
 }
 
 impl DiffSyntaxSpans {
-    /// Spans of the left (or only) cell of `row`. Empty off the viewport.
+    /// Spans of the left (or only) cell of `row`. Empty outside the
+    /// highlighted rows.
     pub(crate) fn left(&self, row: usize) -> &[CodeSpan] {
         self.left.get(row).map(Vec::as_slice).unwrap_or(&[])
     }
@@ -240,7 +241,9 @@ impl DiffSyntaxSpans {
     }
 }
 
-/// Identity for one paint of file-diff syntax spans.
+/// Identity of file-diff syntax spans: the same key gives the same spans
+/// for every row. The viewport is not part of it (see
+/// [`cached_highlight_diff_rows`]).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DiffSyntaxKey {
     pub path: String,
@@ -248,15 +251,17 @@ pub(crate) struct DiffSyntaxKey {
     pub fallback: Color,
     /// Row and word backgrounds the contrast floor checks against.
     pub bgs: DiffBackgrounds,
-    pub visible_start: usize,
-    pub visible_end: usize,
     /// Painted diff-text identity. Must change when unified text changes.
     pub cache_id: u64,
 }
 
-/// Last computed syntax spans. Paint reuses the `Arc` when the key matches.
+/// Last computed syntax spans and the rows they cover. Paint reuses the
+/// `Arc` when the key matches and the viewport sits inside `window`.
 pub(crate) struct CachedDiffSyntax {
     key: DiffSyntaxKey,
+    /// Rows that hold spans: the viewport of the miss, padded by one
+    /// viewport height on each side.
+    window: Range<usize>,
     spans: Arc<DiffSyntaxSpans>,
 }
 
@@ -403,28 +408,39 @@ pub(crate) fn highlight_file_window(
     out
 }
 
-/// Reuse `cache` when `key` matches. Misses call [`highlight_diff_rows`]
-/// with the path, theme, colours, and viewport from `key`.
+/// Spans for the `visible` rows, from `cache` when it holds them.
+///
+/// A hit needs the same `key` and a `visible` range inside the cached
+/// window. A miss calls [`highlight_diff_rows`] for `visible` padded by its
+/// own height on each side, so a scroll of less than one viewport stays a
+/// hit. A row's spans do not depend on the range it was highlighted with
+/// (parse state starts at its hunk; word pairs are found for every row in
+/// range), so the padded window paints the same spans as the bare
+/// viewport.
 pub(crate) fn cached_highlight_diff_rows(
     cache: &mut Option<CachedDiffSyntax>,
     key: DiffSyntaxKey,
     rows: &[DiffRow],
+    visible: Range<usize>,
 ) -> Arc<DiffSyntaxSpans> {
     if let Some(hit) = cache.as_ref() {
-        if hit.key == key {
+        if hit.key == key && hit.window.start <= visible.start && visible.end <= hit.window.end {
             return Arc::clone(&hit.spans);
         }
     }
+    let pad = visible.len();
+    let window = visible.start.saturating_sub(pad)..visible.end.saturating_add(pad);
     let spans = Arc::new(highlight_diff_rows(
         &key.path,
         rows,
         key.theme,
         key.fallback,
         key.bgs,
-        key.visible_start..key.visible_end,
+        window.clone(),
     ));
     *cache = Some(CachedDiffSyntax {
         key,
+        window,
         spans: Arc::clone(&spans),
     });
     spans
@@ -806,7 +822,6 @@ impl<'a> StyledColCursor<'a> {
 mod tests {
     use super::*;
     use crate::tui::diff::{DiffCell, DiffCellKind, DiffRow, DiffSection};
-    use std::ops::Range;
     use std::sync::Arc;
 
     const FALLBACK: Color = Color::Rgb(0xc0, 0xca, 0xf5);
@@ -1269,14 +1284,12 @@ mod tests {
         assert_eq!(clipped, vec![span("A", Color::Red)]);
     }
 
-    fn syntax_key(visible: Range<usize>, cache_id: u64) -> DiffSyntaxKey {
+    fn syntax_key(cache_id: u64) -> DiffSyntaxKey {
         DiffSyntaxKey {
             path: "pack.json".into(),
             theme: ThemeId::TokyoNight,
             fallback: FALLBACK,
             bgs: BGS,
-            visible_start: visible.start,
-            visible_end: visible.end,
             cache_id,
         }
     }
@@ -1335,12 +1348,12 @@ mod tests {
             line_row(DiffCellKind::Add, r#"  "name": "alpha-syntax""#, 2),
         ];
         let visible = 0..rows.len();
-        let key = syntax_key(visible.clone(), 7);
+        let key = syntax_key(7);
         let mut cache = None;
         let _ = take_syntax_fed_lines();
-        let first = cached_highlight_diff_rows(&mut cache, key.clone(), &rows);
+        let first = cached_highlight_diff_rows(&mut cache, key.clone(), &rows, visible.clone());
         let fed_first = take_syntax_fed_lines();
-        let second = cached_highlight_diff_rows(&mut cache, key, &rows);
+        let second = cached_highlight_diff_rows(&mut cache, key, &rows, visible);
         let fed_second = take_syntax_fed_lines();
         assert!(fed_first > 0, "first paint feeds syntect");
         assert_eq!(fed_second, 0, "unchanged rows must not re-feed syntect");
@@ -1348,6 +1361,70 @@ mod tests {
             Arc::ptr_eq(&first, &second),
             "cache hit returns the same spans allocation"
         );
+    }
+
+    /// One JSON hunk of `n` add lines under a hunk header.
+    fn long_json_hunk(n: usize) -> Vec<DiffRow> {
+        let mut rows = vec![DiffRow::Hunk {
+            text: format!("@@ -1,{n} +1,{n} @@"),
+        }];
+        for i in 0..n {
+            rows.push(line_row(
+                DiffCellKind::Add,
+                &format!(r#"  "key{i}": {i},"#),
+                i as u32 + 1,
+            ));
+        }
+        rows
+    }
+
+    #[test]
+    fn cached_highlight_scroll_inside_the_window_skips_syntect() {
+        let rows = long_json_hunk(200);
+        let mut cache = None;
+        let _ = take_syntax_fed_lines();
+        let first = cached_highlight_diff_rows(&mut cache, syntax_key(3), &rows, 50..70);
+        assert!(take_syntax_fed_lines() > 0, "first paint feeds syntect");
+        // One row at a time, down and then up, up to one viewport away.
+        for start in (51..=70).chain((30..50).rev()) {
+            let again =
+                cached_highlight_diff_rows(&mut cache, syntax_key(3), &rows, start..start + 20);
+            assert_eq!(take_syntax_fed_lines(), 0, "scroll to {start} hits");
+            assert!(Arc::ptr_eq(&first, &again), "scroll to {start}");
+        }
+        let past = cached_highlight_diff_rows(&mut cache, syntax_key(3), &rows, 71..91);
+        assert!(
+            take_syntax_fed_lines() > 0,
+            "a viewport past the window misses"
+        );
+        assert!(!Arc::ptr_eq(&first, &past));
+    }
+
+    /// The padded window paints the same spans as the bare viewport, on a
+    /// hit after a scroll too.
+    #[test]
+    fn cached_highlight_window_spans_match_the_bare_viewport() {
+        let mut rows = long_json_hunk(120);
+        rows.push(line_row(DiffCellKind::Del, r#"  "ttlMs": 5000"#, 121));
+        rows.push(line_row(DiffCellKind::Add, r#"  "ttlMs": 2000"#, 121));
+        let n = rows.len();
+        let mut cache = None;
+        for visible in [n - 30..n, n - 31..n - 1, n - 50..n - 20] {
+            let cached =
+                cached_highlight_diff_rows(&mut cache, syntax_key(4), &rows, visible.clone());
+            let bare = highlight_diff_rows(
+                "pack.json",
+                &rows,
+                ThemeId::TokyoNight,
+                FALLBACK,
+                BGS,
+                visible.clone(),
+            );
+            for row in visible.clone() {
+                assert_eq!(cached.left(row), bare.left(row), "{visible:?} row {row}");
+                assert_eq!(cached.right(row), bare.right(row), "{visible:?} row {row}");
+            }
+        }
     }
 
     #[test]
@@ -1369,8 +1446,8 @@ mod tests {
         assert_eq!(alpha.len(), omega.len());
         let visible = 0..alpha.len();
         let mut cache = None;
-        let first = cached_highlight_diff_rows(&mut cache, syntax_key(visible.clone(), 1), &alpha);
-        let second = cached_highlight_diff_rows(&mut cache, syntax_key(visible.clone(), 2), &omega);
+        let first = cached_highlight_diff_rows(&mut cache, syntax_key(1), &alpha, visible.clone());
+        let second = cached_highlight_diff_rows(&mut cache, syntax_key(2), &omega, visible);
         assert!(
             !Arc::ptr_eq(&first, &second),
             "a new cache_id must not reuse the previous span list"
@@ -1408,14 +1485,14 @@ mod tests {
         let omega = rows_with(r#"  "maxMs": 5000"#);
         let visible = 0..alpha.len();
         let mut cache = None;
-        let first = cached_highlight_diff_rows(&mut cache, syntax_key(visible.clone(), 1), &alpha);
+        let first = cached_highlight_diff_rows(&mut cache, syntax_key(1), &alpha, visible.clone());
         assert_eq!(word_texts(first.left(0)), vec!["5000"]);
         assert_eq!(word_texts(first.left(1)), vec!["2000"]);
         let _ = take_syntax_fed_lines();
-        let again = cached_highlight_diff_rows(&mut cache, syntax_key(visible.clone(), 1), &alpha);
+        let again = cached_highlight_diff_rows(&mut cache, syntax_key(1), &alpha, visible.clone());
         assert_eq!(take_syntax_fed_lines(), 0, "same key must not recompute");
         assert!(Arc::ptr_eq(&first, &again));
-        let reloaded = cached_highlight_diff_rows(&mut cache, syntax_key(visible, 2), &omega);
+        let reloaded = cached_highlight_diff_rows(&mut cache, syntax_key(2), &omega, visible);
         assert!(!Arc::ptr_eq(&first, &reloaded));
         assert_eq!(word_texts(reloaded.left(0)), vec!["ttlMs"]);
         assert_eq!(word_texts(reloaded.left(1)), vec!["maxMs"]);

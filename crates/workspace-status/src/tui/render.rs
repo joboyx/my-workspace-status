@@ -3794,11 +3794,10 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                     add_word: palette.diff_add_word_bg,
                     del_word: palette.diff_del_word_bg,
                 },
-                visible_start: skip,
-                visible_end: logical_end,
                 cache_id: diff_syntax_cache_id(state, split),
             },
             &rows,
+            skip..logical_end,
         )
     });
     // Armed diff search marks every matching row; the cursor bar sits on
