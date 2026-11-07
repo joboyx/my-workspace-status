@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Seed a multi-repo workspace for workspace-status screenshots.
 # Safe to re-run: wipes DEST (including DEST/.remotes and DEST/.scratch) then reseeds.
+# It wipes only a missing or empty DEST, or one that holds the .ws-demo-seed
+# marker of an earlier seed. It refuses /, $HOME and its parents, this
+# repository and its parents, and any path in this repository outside tmp/.
 #
 # Usage: seed-demo-workspace.sh [DEST]
 # Default DEST is tmp/demo-workspace under the repository root.
@@ -17,7 +20,8 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 usage: seed-demo-workspace.sh [DEST]
 
 Default DEST is tmp/demo-workspace under the repository root.
-The directory is wiped and recreated on every run.
+The directory is wiped and recreated on every run. A non-empty DEST is wiped
+only when it holds the .ws-demo-seed marker that the seed writes.
 USAGE
   exit 0
 fi
@@ -26,24 +30,65 @@ if [[ $# -gt 1 ]]; then
   exit 2
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+
+# A seeded DEST holds this file. A non-empty DEST without it is not wiped.
+MARKER=".ws-demo-seed"
+
+refuse() {
+  echo "refusing to wipe $1: $2" >&2
+  exit 1
+}
+
+# real_path PATH: absolute physical path of PATH. A part that does not exist
+# yet is resolved through its nearest existing parent directory.
+real_path() {
+  local path="$1" tail="" base
+  [[ "$path" == /* ]] || path="$(pwd -P)/$path"
+  while [[ ! -d "$path" ]]; do
+    [[ -e "$path" || -L "$path" ]] && refuse "$1" "it exists and is not a directory"
+    base="$(basename "$path")"
+    case "$base" in
+      .) ;;
+      ..) refuse "$1" "'..' after a missing directory" ;;
+      *) tail="/$base$tail" ;;
+    esac
+    path="$(dirname "$path")"
+  done
+  path="$(cd "$path" && pwd -P)"
+  if [[ -z "$tail" ]]; then
+    echo "$path"
+  elif [[ "$path" == / ]]; then
+    echo "$tail"
+  else
+    echo "$path$tail"
+  fi
+}
+
+# is_within CHILD PARENT: CHILD is PARENT or inside it (physical paths).
+is_within() {
+  [[ "$1" == "$2" || "$2" == / || "$1" == "$2"/* ]]
+}
 
 if [[ $# -eq 1 ]]; then
-  DEST="$1"
-  if [[ "$DEST" != /* ]]; then
-    DEST="$(pwd)/$DEST"
-  fi
+  DEST="$(real_path "$1")"
 else
-  DEST="$REPO_ROOT/tmp/demo-workspace"
+  DEST="$(real_path "$REPO_ROOT/tmp/demo-workspace")"
 fi
 
-case "$DEST" in
-  /|"$HOME"|"$REPO_ROOT")
-    echo "refusing to wipe $DEST" >&2
-    exit 1
-    ;;
-esac
+[[ "$DEST" == / ]] && refuse "$DEST" "it is the filesystem root"
+if [[ -n "${HOME:-}" && -d "$HOME" ]]; then
+  HOME_REAL="$(cd "$HOME" && pwd -P)"
+  is_within "$HOME_REAL" "$DEST" && refuse "$DEST" "it is \$HOME or holds \$HOME"
+fi
+is_within "$REPO_ROOT" "$DEST" && refuse "$DEST" "it is this repository or holds it"
+if is_within "$DEST" "$REPO_ROOT" && [[ "$DEST" != "$REPO_ROOT/tmp/"* ]]; then
+  refuse "$DEST" "inside this repository, only a directory under tmp/ is allowed"
+fi
+if [[ -d "$DEST" && ! -f "$DEST/$MARKER" ]] && [[ -n "$(ls -A "$DEST")" ]]; then
+  refuse "$DEST" "it is not empty and has no $MARKER file from an earlier seed (remove it yourself)"
+fi
 
 WORKSPACE="$DEST"
 REMOTES="$DEST/.remotes"
@@ -51,6 +96,7 @@ SCRATCH="$DEST/.scratch"
 
 rm -rf "$WORKSPACE"
 mkdir -p "$WORKSPACE" "$REMOTES" "$SCRATCH"
+echo "Made by scripts/seed-demo-workspace.sh. The next seed may wipe this directory." >"$WORKSPACE/$MARKER"
 
 export GIT_AUTHOR_NAME="Demo User"
 export GIT_AUTHOR_EMAIL="demo@example.invalid"
