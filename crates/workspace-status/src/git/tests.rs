@@ -1,7 +1,7 @@
 use super::*;
 use crate::testutil::{
-    git, init_repo, init_repo_empty, unique_dir, upstream_rewrite_fixture, RewriteFixture,
-    RewriteKind,
+    git, init_repo, init_repo_empty, pull_fixture, unique_dir, upstream_rewrite_fixture,
+    RewriteFixture, RewriteKind,
 };
 use std::fs;
 use std::process::Command;
@@ -1629,23 +1629,7 @@ fn failed_patch_apply_reports_one_reason_line() {
 
 #[test]
 fn pull_reports_an_auto_stash_conflict_and_keeps_the_stash() {
-    let root = unique_dir("ws-git-pull-conflict");
-    let up = root.join("up");
-    let down = root.join("down");
-    init_repo(&up);
-    git(
-        &root,
-        &["clone", "-q", up.to_str().unwrap(), down.to_str().unwrap()],
-    );
-    git(&down, &["config", "user.name", "workspace-status test"]);
-    git(
-        &down,
-        &[
-            "config",
-            "user.email",
-            "workspace-status-test@example.invalid",
-        ],
-    );
+    let (root, up, down) = pull_fixture("ws-git-pull-conflict");
     fs::write(up.join("README.md"), "# upstream\n").unwrap();
     git(&up, &["commit", "-qam", "upstream"]);
     fs::write(down.join("README.md"), "# local edit\n").unwrap();
@@ -1654,6 +1638,97 @@ fn pull_reports_an_auto_stash_conflict_and_keeps_the_stash() {
     assert!(result.stashed && result.stash_pop_failed && !result.ok);
     assert_eq!(result.error, None, "the pull itself worked");
     assert_eq!(list_stash_refs(&down).len(), 1, "stash entry is kept");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// `stash@{0}` as `<sha> <subject>` lines, newest first.
+fn stash_entries(dir: &Path) -> Vec<String> {
+    exec_git(&["stash", "list", "--format=%H %s"], dir)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Make one user stash entry in `down` that edits `README.md`, and return
+/// [`stash_entries`].
+fn push_user_stash(down: &Path) -> Vec<String> {
+    fs::write(down.join("README.md"), "# user work\n").unwrap();
+    git(down, &["stash", "push", "-q", "-m", "user work"]);
+    let entries = stash_entries(down);
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    entries
+}
+
+#[test]
+fn pull_with_only_a_dirty_submodule_leaves_the_user_stash_alone() {
+    let (root, up, down) = pull_fixture("ws-git-pull-submodule");
+    let sub = root.join("sub");
+    init_repo(&sub);
+    git(
+        &up,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            sub.to_str().unwrap(),
+            "sub",
+        ],
+    );
+    git(&up, &["commit", "-qm", "add submodule"]);
+    git(&down, &["pull", "-q"]);
+    git(
+        &down,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "-q",
+        ],
+    );
+    let user_stash = push_user_stash(&down);
+    // A tracked edit inside the submodule: `diff --quiet` exits 1, but
+    // `stash push` saves nothing for the parent repo.
+    fs::write(down.join("sub/README.md"), "# dirty submodule\n").unwrap();
+    fs::write(up.join("upstream.txt"), "upstream\n").unwrap();
+    git(&up, &["add", "upstream.txt"]);
+    git(&up, &["commit", "-qm", "upstream"]);
+
+    let result = pull_quiet_detailed(&down);
+    assert!(result.ok, "{result:?}");
+    assert!(!result.stashed, "no auto-stash entry was made: {result:?}");
+    assert!(down.join("upstream.txt").exists(), "the pull ran");
+    assert_eq!(stash_entries(&down), user_stash, "user stash is untouched");
+    assert_eq!(
+        fs::read_to_string(down.join("README.md")).unwrap(),
+        "# seed\n",
+        "the user stash was not applied"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn pull_auto_stash_pops_its_own_entry_and_keeps_the_user_stash() {
+    let (root, up, down) = pull_fixture("ws-git-pull-own-stash");
+    let user_stash = push_user_stash(&down);
+    fs::write(down.join("README.md"), "# local edit\n").unwrap();
+    fs::write(up.join("upstream.txt"), "upstream\n").unwrap();
+    git(&up, &["add", "upstream.txt"]);
+    git(&up, &["commit", "-qm", "upstream"]);
+
+    let result = pull_quiet_detailed(&down);
+    assert!(result.ok && result.stashed, "{result:?}");
+    assert!(!result.stash_pop_failed, "{result:?}");
+    assert!(down.join("upstream.txt").exists(), "the pull ran");
+    assert_eq!(
+        fs::read_to_string(down.join("README.md")).unwrap(),
+        "# local edit\n",
+        "the auto-stash came back"
+    );
+    assert_eq!(stash_entries(&down), user_stash, "user stash is untouched");
     let _ = fs::remove_dir_all(&root);
 }
 

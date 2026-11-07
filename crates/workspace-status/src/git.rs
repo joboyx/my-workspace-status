@@ -723,8 +723,9 @@ fn run(args: &[&str], cwd: &Path) -> io::Result<Output> {
 }
 
 /// Like [`run`], but the run starts even while `ws` exits. Only for git
-/// that puts the user's work back (the auto-stash pop after a pull): a quit
-/// during the pull must not leave their changes in a stash entry. The time
+/// that puts the user's work back (the auto-stash pop after a pull, and the
+/// `refs/stash` read that decides it): a quit during the pull must not
+/// leave their changes in a stash entry. The time
 /// limit, the `SIGTERM` / `SIGKILL` stop and the group registration still
 /// apply.
 fn run_restoring_user_work(args: &[&str], cwd: &Path) -> io::Result<Output> {
@@ -823,9 +824,29 @@ pub fn blob_bytes(cwd: &Path, rev: &str, path: &str) -> Option<Vec<u8>> {
 }
 
 /// True when the worktree or index has tracked changes.
+///
+/// A check that git could not answer (timeout, error exit) counts as
+/// changes, so the guards that call this refuse to write. Use
+/// [`local_changes`] to tell the two apart.
 pub fn repo_has_local_changes(cwd: &Path) -> bool {
-    exec_git_status(&["diff", "--quiet"], cwd) != 0
-        || exec_git_status(&["diff", "--cached", "--quiet"], cwd) != 0
+    local_changes(cwd).unwrap_or(true)
+}
+
+/// Whether the worktree or index has tracked changes
+/// (`diff --quiet`, then `diff --cached --quiet`).
+///
+/// `Err` holds git's reason when a check did not exit 0 (clean) or 1
+/// (changes): a timeout, a start failure, or a git error.
+pub fn local_changes(cwd: &Path) -> Result<bool, String> {
+    let differs = |args: &[&str]| match run(args, cwd) {
+        Ok(out) => match out.status.code() {
+            Some(0) => Ok(false),
+            Some(1) => Ok(true),
+            _ => Err(git_failure_message(args, &out)),
+        },
+        Err(err) => Err(err.to_string()),
+    };
+    Ok(differs(&["diff", "--quiet"])? || differs(&["diff", "--cached", "--quiet"])?)
 }
 
 /// Resolve `ref` to a commit SHA. Missing refs return `None`.
@@ -1128,20 +1149,30 @@ pub struct PullQuietResult {
 }
 
 /// `git pull --quiet`, stashing tracked local changes first when needed.
+///
+/// The pop after the pull runs only when the auto-stash push made a new
+/// stash entry ([`stash_push_made_entry`]). A dirty submodule makes
+/// `diff --quiet` report changes while `stash push` saves nothing; a pop
+/// then would apply and drop the user's own `stash@{0}`. A dirty check
+/// that git could not answer stops before the pull and touches no stash.
 pub fn pull_quiet_detailed(cwd: &Path) -> PullQuietResult {
-    let dirty = repo_has_local_changes(cwd);
+    let failed = |error: String| PullQuietResult {
+        ok: false,
+        stashed: false,
+        stash_pop_failed: false,
+        error: Some(error),
+    };
+    let dirty = match local_changes(cwd) {
+        Ok(dirty) => dirty,
+        Err(err) => return failed(format!("local changes check failed: {err}")),
+    };
     let mut stashed = false;
     if dirty {
         let args = ["stash", "push", "-m", AUTO_STASH_MESSAGE, "--quiet"];
-        if let Err(err) = exec_git_checked(&args, cwd) {
-            return PullQuietResult {
-                ok: false,
-                stashed: false,
-                stash_pop_failed: false,
-                error: Some(format!("auto-stash failed: {err}")),
-            };
+        match stash_push_made_entry(&args, cwd) {
+            Ok(made) => stashed = made,
+            Err(err) => return failed(format!("auto-stash failed: {err}")),
         }
-        stashed = true;
     }
 
     let pulled = exec_git_checked(&["pull", "--quiet"], cwd);
@@ -1599,7 +1630,6 @@ pub fn remote_has_tag(cwd: &Path, remote: &str, tag: &str) -> Option<bool> {
 
 /// Stash worktree changes. Includes untracked files (`-u`).
 pub fn stash_push(cwd: &Path, paths: &[String]) -> Result<(), String> {
-    let before = exec_git(&["stash", "list"], cwd);
     let mut args: Vec<&str> = vec!["stash", "push", "-u"];
     if !paths.is_empty() {
         args.push("--");
@@ -1607,12 +1637,43 @@ pub fn stash_push(cwd: &Path, paths: &[String]) -> Result<(), String> {
             args.push(path);
         }
     }
-    exec_git_checked(&args, cwd)?;
-    let after = exec_git(&["stash", "list"], cwd);
-    if after == before {
+    if !stash_push_made_entry(&args, cwd)? {
         return Err("no local changes to save".into());
     }
     Ok(())
+}
+
+/// Run the `stash push` in `args` and say whether it made a new entry.
+///
+/// `stash push` exits 0 and prints `No local changes to save` when it
+/// saves nothing, so the exit code cannot say. This compares `refs/stash`
+/// before and after the push. The read after the push still starts while
+/// `ws` exits: a quit right after the push must not hide the entry from
+/// the caller that gives the work back.
+fn stash_push_made_entry(args: &[&str], cwd: &Path) -> Result<bool, String> {
+    let before = stash_tip(cwd, run)?;
+    exec_git_checked(args, cwd)?;
+    let after = stash_tip(cwd, run_restoring_user_work)?;
+    Ok(after.is_some() && after != before)
+}
+
+/// The commit `refs/stash` points at, or `None` when there is no stash.
+///
+/// `Err` when git could not say (a timeout, an error exit other than the
+/// missing-ref exit 1), so a failed read never looks like "no stash".
+fn stash_tip(
+    cwd: &Path,
+    runner: fn(&[&str], &Path) -> io::Result<Output>,
+) -> Result<Option<String>, String> {
+    let args = ["rev-parse", "-q", "--verify", "refs/stash"];
+    match runner(&args, cwd) {
+        Ok(out) if out.status.success() => Ok(Some(
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        )),
+        Ok(out) if out.status.code() == Some(1) => Ok(None),
+        Ok(out) => Err(git_failure_message(&args, &out)),
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 /// Apply a stash and keep the entry.
