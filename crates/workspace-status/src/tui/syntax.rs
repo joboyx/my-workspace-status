@@ -710,17 +710,96 @@ pub(crate) fn slice_styled_cols(parts: &[CodeSpan], offset: usize, width: usize)
                 return out;
             }
             taken = taken.saturating_add(cw);
-            match out.last_mut() {
-                Some(last) if last.fg == part.fg && last.word == part.word => last.text.push(ch),
-                _ => out.push(CodeSpan {
-                    text: ch.to_string(),
-                    fg: part.fg,
-                    word: part.word,
-                }),
-            }
+            push_styled_char(&mut out, part, ch);
         }
     }
     out
+}
+
+/// Append `ch` of `part` to `out`, merging into the last span when its fg
+/// and word flag match.
+fn push_styled_char(out: &mut Vec<CodeSpan>, part: &CodeSpan, ch: char) {
+    match out.last_mut() {
+        Some(last) if last.fg == part.fg && last.word == part.word => last.text.push(ch),
+        _ => out.push(CodeSpan {
+            text: ch.to_string(),
+            fg: part.fg,
+            word: part.word,
+        }),
+    }
+}
+
+/// Forward-only [`slice_styled_cols`] over the spans of one line.
+///
+/// Each [`Self::slice`] returns what `slice_styled_cols(parts, offset,
+/// width)` returns, but its skip starts where the last call stopped. So
+/// slicing every soft-wrap row of a line scans the line once, not once per
+/// row. Offsets must not decrease from one call to the next.
+pub(crate) struct StyledColCursor<'a> {
+    parts: &'a [CodeSpan],
+    /// Span of the first char not skipped yet.
+    part: usize,
+    /// Byte index of that char in `parts[part].text`.
+    byte: usize,
+    /// Display columns before that char.
+    col: usize,
+}
+
+impl<'a> StyledColCursor<'a> {
+    /// A cursor at column 0 of `parts`.
+    pub(crate) fn new(parts: &'a [CodeSpan]) -> Self {
+        Self {
+            parts,
+            part: 0,
+            byte: 0,
+            col: 0,
+        }
+    }
+
+    /// Skip to `offset` display columns, then take up to `width` columns,
+    /// with the rules of [`slice_styled_cols`].
+    pub(crate) fn slice(&mut self, offset: usize, width: usize) -> Vec<CodeSpan> {
+        if width == 0 {
+            return Vec::new();
+        }
+        while self.col < offset {
+            let Some(part) = self.parts.get(self.part) else {
+                return Vec::new();
+            };
+            match part.text[self.byte..].chars().next() {
+                Some(ch) => {
+                    let mut buf = [0u8; 4];
+                    let cw = visible_width(ch.encode_utf8(&mut buf));
+                    self.col = self.col.saturating_add(cw);
+                    self.byte += ch.len_utf8();
+                }
+                None => {
+                    self.part += 1;
+                    self.byte = 0;
+                }
+            }
+        }
+        let mut taken = 0usize;
+        let mut out: Vec<CodeSpan> = Vec::new();
+        let rest = self.parts.get(self.part).map(|p| (p, &p.text[self.byte..]));
+        let later = self
+            .parts
+            .iter()
+            .skip(self.part + 1)
+            .map(|p| (p, p.text.as_str()));
+        for (part, text) in rest.into_iter().chain(later) {
+            for ch in text.chars() {
+                let mut buf = [0u8; 4];
+                let cw = visible_width(ch.encode_utf8(&mut buf));
+                if taken.saturating_add(cw) > width {
+                    return out;
+                }
+                taken = taken.saturating_add(cw);
+                push_styled_char(&mut out, part, ch);
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]

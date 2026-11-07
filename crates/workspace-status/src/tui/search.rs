@@ -417,6 +417,18 @@ pub fn slice_cols(text: &str, offset: usize, width: usize) -> String {
     out
 }
 
+#[cfg(test)]
+thread_local! {
+    static WRAP_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// [`wrap_col_starts_capped`] scans on this thread since the last call, so
+/// tests can bound how often paint rescans a long line.
+#[cfg(test)]
+pub(crate) fn take_wrap_scans() -> usize {
+    WRAP_SCANS.with(|count| count.replace(0))
+}
+
 /// Display-column starts of soft-wrap rows.
 ///
 /// Always at least `[0]`. A glyph wider than `width` is skipped at the
@@ -431,6 +443,8 @@ pub fn wrap_col_starts(text: &str, width: usize) -> Vec<usize> {
 /// passes its viewport height plus one learns "taller than the view"
 /// without reading the rest of a very long line.
 pub fn wrap_col_starts_capped(text: &str, width: usize, max_rows: usize) -> Vec<usize> {
+    #[cfg(test)]
+    WRAP_SCANS.with(|count| count.set(count.get() + 1));
     let width = width.max(1);
     let mut starts = vec![0];
     let mut used = 0usize;
