@@ -1714,6 +1714,89 @@ keep-z
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Commit `base` as `f.txt`, write `edit` over it (and stage it for
+    /// [`PartialPatchKind::Unstage`]), apply `kind` to the painted row
+    /// `text` the way the TUI does, and return (index blob, worktree bytes).
+    fn exact_bytes_apply(
+        prefix: &str,
+        kind: PartialPatchKind,
+        base: &[u8],
+        edit: &[u8],
+        text: &str,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let dir = unique_dir(prefix);
+        init_repo(&dir);
+        let file = dir.join("f.txt");
+        fs::write(&file, base).unwrap();
+        git(&dir, &["add", "f.txt"]);
+        git(&dir, &["commit", "-q", "-m", "base"]);
+        fs::write(&file, edit).unwrap();
+        let staged = kind == PartialPatchKind::Unstage;
+        if staged {
+            git(&dir, &["add", "f.txt"]);
+        }
+        let change = crate::snapshot::FileChange {
+            path: "f.txt".into(),
+            staged_status: staged.then(|| "M".to_string()),
+            unstaged_status: (!staged).then(|| "M".to_string()),
+            untracked: false,
+            old_path: None,
+        };
+        let content = load_file_diff(&dir, "", &change, None);
+        let row = line_row(&content, text);
+        let patch = build_partial_patch(&content, DiffMode::Inline, row, row, kind, "f.txt")
+            .expect("patch");
+        match kind {
+            PartialPatchKind::Stage => apply_cached_patch(&dir, &patch, false),
+            PartialPatchKind::Unstage => apply_cached_patch(&dir, &patch, true),
+            PartialPatchKind::Revert | PartialPatchKind::RevertCommitted => {
+                apply_worktree_patch_reverse(&dir, &patch)
+            }
+        }
+        .unwrap_or_else(|err| panic!("{kind:?}: {err}\n{patch}"));
+        let out = (
+            blob_bytes(&dir, "", "f.txt").expect("index blob"),
+            fs::read(&file).unwrap(),
+        );
+        let _ = fs::remove_dir_all(&dir);
+        out
+    }
+
+    /// A line unstage of a CRLF file keeps every `\r` in the index and
+    /// leaves the worktree as it was.
+    #[test]
+    fn line_unstage_of_a_crlf_file_writes_its_exact_bytes() {
+        let edit: &[u8] = b"p\rq\r\na\r\nB\r\nc\r\nd\r\n";
+        let (index, worktree) = exact_bytes_apply(
+            "ws-diff-crlf-unstage",
+            PartialPatchKind::Unstage,
+            b"p\rq\r\na\r\nc\r\n",
+            edit,
+            "B",
+        );
+        assert_eq!(String::from_utf8(index).unwrap(), "p\rq\r\na\r\nc\r\nd\r\n");
+        assert_eq!(worktree, edit);
+    }
+
+    /// A line revert of a CRLF file keeps every `\r` in the worktree and
+    /// leaves the index as it was.
+    #[test]
+    fn line_revert_of_a_crlf_file_writes_its_exact_bytes() {
+        let base: &[u8] = b"p\rq\r\na\r\nc\r\n";
+        let (index, worktree) = exact_bytes_apply(
+            "ws-diff-crlf-revert",
+            PartialPatchKind::Revert,
+            base,
+            b"p\rq\r\na\r\nB\r\nc\r\nd\r\n",
+            "B",
+        );
+        assert_eq!(index, base);
+        assert_eq!(
+            String::from_utf8(worktree).unwrap(),
+            "p\rq\r\na\r\nc\r\nd\r\n"
+        );
+    }
+
     /// The last line of git's diff output keeps its trailing whitespace
     /// when one line of it is staged.
     #[test]
