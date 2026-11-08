@@ -5856,10 +5856,17 @@ impl AppState {
     }
 
     /// Drop viewed marks whose file is clean or whose fingerprint (from the
-    /// file facts) moved, and ask for a save when one dropped. No file I/O.
+    /// file facts) moved, and ask for a save when one dropped. A dirty file
+    /// with no facts keeps its mark: its fingerprint is unknown, not
+    /// changed. No file I/O.
     fn reconcile_viewed_store(&mut self) {
         if !self.viewed_store.is_empty() {
-            let current = self.file_facts.fingerprints(&self.snapshot);
+            let mut current = self.file_facts.fingerprints(&self.snapshot);
+            for identity in self.file_facts.unknown_identities(&self.snapshot) {
+                if let Some(marked) = self.viewed_store.get(&identity) {
+                    current.insert(identity, marked.clone());
+                }
+            }
             let next = reconcile_viewed(&self.viewed_store, &current);
             if next != self.viewed_store {
                 self.viewed_store = next;

@@ -6042,6 +6042,45 @@ fn reviewed_persists_and_drops_on_fingerprint_change() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// A dirty file with no file facts has an unknown fingerprint, not a
+/// changed one: a snapshot applied without its checkout's facts keeps the
+/// mark and asks for no save.
+#[test]
+fn reviewed_mark_survives_a_snapshot_without_file_facts() {
+    use crate::tui::viewed::{load_viewed_store, viewed_identity, workspace_store_id};
+    use std::fs;
+    let root = std::env::temp_dir().join(format!(
+        "ws-reviewed-no-facts-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let workspace = root.join("ws");
+    let repo_dir = workspace.join("app");
+    fs::create_dir_all(&repo_dir).unwrap();
+    fs::write(repo_dir.join("README.md"), "# dirty\n").unwrap();
+    let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+    let mut app = AppState::new(workspace.clone(), snapshot.clone(), true);
+    focus_file(&mut app, "README.md");
+    assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
+    app.flush_store_saves();
+    app.set_file_facts("app", None);
+    app.apply_snapshot(snapshot);
+    assert!(
+        app.viewed_store
+            .contains_key(&viewed_identity("app", "README.md")),
+        "missing facts must not drop the mark"
+    );
+    assert!(
+        !app.store_saves_pending(),
+        "nothing changed, nothing to save"
+    );
+    let loaded = load_viewed_store(&app.viewed_path, &workspace_store_id(&app.cwd));
+    assert!(loaded.contains_key(&viewed_identity("app", "README.md")));
+    let _ = fs::remove_dir_all(&root);
+}
+
 fn dual_ms_repo(name: &str) -> RepoSnapshot {
     RepoSnapshot {
         has_unstaged: true,

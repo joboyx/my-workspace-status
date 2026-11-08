@@ -119,6 +119,21 @@ impl FileFactsCache {
         }
         out
     }
+
+    /// Viewed identity of each dirty file of `snapshot` that has no facts.
+    /// Its fingerprint is unknown, which is not the same as changed.
+    pub(crate) fn unknown_identities(&self, snapshot: &WorkspaceSnapshot) -> Vec<String> {
+        snapshot
+            .repos
+            .iter()
+            .flat_map(|repo| {
+                repo.changes
+                    .iter()
+                    .filter(|file| self.get(&repo.repo, &file.path).is_none())
+                    .map(|file| viewed_identity(&repo.repo, &file.path))
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -174,5 +189,32 @@ mod tests {
         assert!(cache.get("app", "a.txt").is_some());
         cache.set("app", None);
         assert!(cache.get("app", "a.txt").is_none());
+    }
+
+    #[test]
+    fn unknown_identities_are_the_dirty_files_without_facts() {
+        let repo = |name: &str| RepoSnapshot {
+            has_unstaged: true,
+            changes: vec![unstaged_change("a.txt")],
+            ..repo_snapshot(name)
+        };
+        let snapshot = build_workspace_snapshot(&[repo("app"), repo("lib")], &[], false, &[]);
+        let mut cache = FileFactsCache::default();
+        let mut files = RepoFileFacts::new();
+        files.insert(
+            "a.txt".into(),
+            FileFacts {
+                disk_token: "1:1".into(),
+                fingerprint: "fp".into(),
+            },
+        );
+        cache.set("app", Some(files));
+        assert_eq!(
+            cache.unknown_identities(&snapshot),
+            vec![viewed_identity("lib", "a.txt")]
+        );
+        assert!(!cache
+            .fingerprints(&snapshot)
+            .contains_key(&viewed_identity("lib", "a.txt")));
     }
 }
