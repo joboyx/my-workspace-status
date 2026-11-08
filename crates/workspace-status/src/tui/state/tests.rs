@@ -11044,6 +11044,39 @@ fn g_pending_survives_ticks_none_and_release() {
     assert!(app.g_pending_at.is_none());
 }
 
+/// A key that does not complete a pending `g` ends it, even one that maps
+/// to no action: `g % t` inside the chord window is not `gt`. Esc ends it
+/// the same way.
+#[test]
+fn unbound_key_or_esc_ends_a_pending_g_chord() {
+    use crate::testutil::key;
+    use crossterm::event::KeyCode;
+    let mut app = state();
+    app.tabs
+        .open_or_focus("app".into(), "main".into(), "HEAD".into());
+    app.tabs.active = 0;
+    let press = |app: &mut AppState, code: KeyCode| {
+        let action = crate::tui::app::map_event(app, &key(code));
+        app.dispatch(action);
+    };
+    assert_eq!(
+        crate::tui::app::map_event(&app, &key(KeyCode::Char('%'))),
+        Action::None,
+        "`%` is unbound in Normal mode"
+    );
+    for end in [KeyCode::Char('%'), KeyCode::Esc] {
+        press(&mut app, KeyCode::Char('g'));
+        assert!(matches!(app.input_mode(), InputMode::GPending { .. }));
+        press(&mut app, end);
+        assert!(
+            matches!(app.input_mode(), InputMode::Normal { .. }),
+            "{end:?} ends the chord"
+        );
+        press(&mut app, KeyCode::Char('t'));
+        assert!(app.tabs.is_workspace(), "{end:?} then `t` is not `gt`");
+    }
+}
+
 /// The `g` chord window is the gap between the two keys' arrival.
 ///
 /// A live watch apply between the halves does not clear the chord, and
