@@ -51,17 +51,17 @@ $WS doctor                        # every check ok, or stop and report
 $WS key j                         # one key per write
 $WS wait --cursor 'Changes'       # wait for the state the key should produce
 $WS snap --name after-j           # evidence/NN-after-j.txt/.ansi; "screen" holds the text
-$WS run -- --json | jq .json.repos[0].repo
+$WS run -- --json | jq '.json.repos[0].repo'
 $WS stop                          # quit, end the tmux server, clear the current run
 ```
 
-1. **Launch.** `start` builds (`scripts/verify-tui.sh build`), seeds and launches. Options: `--size`, `--fake-forge DIR`, `--workspace DIR`, `--env K=V`, `--no-build`. It refuses while the current run is live.
+1. **Launch.** `start` builds (`scripts/verify-tui.sh build`), seeds and launches. Options: `--size`, `--fake-forge DIR`, `--workspace DIR`, `--env K=V`, `--no-build`. It refuses while this checkout's current run is live.
 2. **Doctor.** `doctor` after every `start`, and again when a step behaves oddly.
 3. **Drive.** `key`, `type`, `resize`; follow each with `wait` (or `wait-ready` after a resize or an overlay).
 4. **Evidence.** `snap` before and after the key that should change the screen; `run` for the headless snapshot. All files land in `<run>/evidence/`.
 5. **Clean up.** `stop`, also after a failure. It is safe to repeat.
 
-`wsctl --help` is the canonical command list; `wsctl <command> --help` gives the options and the JSON members. `--run DIR` (or `WSCTL_RUN`) acts on another run. The current run is a file under the root (`<root>/wsctl-current`), so it carries over between shells: each tool call may be a new shell. The root is `$WS_VERIFY_ROOT`, else `${TMPDIR:-/tmp}/ws-verify`. A system `TMPDIR` can be cleared on reboot: set `WS_VERIFY_ROOT` to a durable directory when you must keep the proof.
+`wsctl --help` is the canonical command list; `wsctl <command> --help` gives the options and the JSON members. `--run DIR` (or `WSCTL_RUN`) acts on another run of this checkout; `start` with one of them set leaves the current run alone. The current run is a file under the root, one per checkout (`<root>/wsctl-current-<checksum of the checkout path>`), so it carries over between shells (each tool call may be a new shell) and worktrees that share the root never see or replace each other's run. Every command refuses a run that is not this checkout's: outside the root, an incomplete `run.env`, a socket other than `ws-verify-<run id>`, or another checkout's path or binary. The root is `$WS_VERIFY_ROOT`, else `${TMPDIR:-/tmp}/ws-verify`. A system `TMPDIR` can be cleared on reboot: set `WS_VERIFY_ROOT` to a durable directory when you must keep the proof.
 
 For the fake forge, mouse and forge calls, use the driver with the run dir that `start` prints: `scripts/verify-tui.sh scenario "$FORGE" github-ready` (before `start --fake-forge "$FORGE"`, or later to swap an answer), `scripts/verify-tui.sh mouse "$RUN" find merger`, `scripts/verify-tui.sh calls "$RUN"`.
 

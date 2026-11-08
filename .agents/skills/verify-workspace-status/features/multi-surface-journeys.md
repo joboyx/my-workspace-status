@@ -7,8 +7,8 @@ A journey drives one user path across several surfaces in one run and checks the
 ```bash
 WS=.agents/skills/verify-workspace-status/scripts/wsctl
 $WS start
-$WS doctor
 trap '$WS stop' EXIT
+$WS doctor
 $WS wait-ready
 $WS snap --name mj1-01-start --raw | grep -E '▌ +· session\.ts'
 

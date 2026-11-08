@@ -9,8 +9,8 @@ Conventions and the sweep order: [README.md](README.md). The keys follow the dem
 ```bash
 WS=.agents/skills/verify-workspace-status/scripts/wsctl
 $WS start
-$WS doctor
 trap '$WS stop' EXIT
+$WS doctor
 $WS key /
 $WS wait 'SEARCH'
 $WS type merger

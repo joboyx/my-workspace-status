@@ -9,8 +9,8 @@ Conventions and the sweep order: [README.md](README.md). These recipes need `jq`
 ```bash
 WS=.agents/skills/verify-workspace-status/scripts/wsctl
 $WS start
-$WS doctor
 trap '$WS stop' EXIT
+$WS doctor
 OUT=$($WS run -- --json)
 echo "$OUT" | jq -e '.ok and .rc == 0'
 echo "$OUT" | jq -e '[.json.repos[].repo] == ["app","app/.worktrees/feat-login","lib","merger","merger/.worktrees/recon","services/api"]'

@@ -142,7 +142,7 @@ Run the skill:
 - To reproduce a TUI bug with evidence.
 - After a rebase onto work that touches those.
 
-Driver proof does not replace a test: behaviour that must stay gets a `pty_*` test. Keep the skill in step with the code: a new `gh` / `glab` call needs a fake forge answer and scenario sets, a changed badge needs `features/pr-status.md`, a changed PRs tab needs `features/prs-tab.md`, and a keymap, footer, or overlay change needs the `features/*.md` recipes that press or read it. `crates/workspace-status/tests/release_watch.rs` guards the driver's isolation and that `wsctl` spawns only through the driver; `tests/wsctl.rs` checks its syntax and its `--help`.
+Driver proof does not replace a test: behaviour that must stay gets a `pty_*` test. Keep the skill in step with the code: a new `gh` / `glab` call needs a fake forge answer and scenario sets, a changed badge needs `features/pr-status.md`, a changed PRs tab needs `features/prs-tab.md`, and a keymap, footer, or overlay change needs the `features/*.md` recipes that press or read it. `crates/workspace-status/tests/release_watch.rs` guards the driver's isolation and that `wsctl` spawns only through the driver; `tests/wsctl.rs` checks its syntax, its `--help`, and that it refuses a run that is not this checkout's before any tmux call.
 
 ## Demo / screenshots
 

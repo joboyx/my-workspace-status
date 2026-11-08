@@ -9,8 +9,8 @@ Conventions and the sweep order: [README.md](README.md).
 ```bash
 WS=.agents/skills/verify-workspace-status/scripts/wsctl
 $WS start
-$WS doctor
 trap '$WS stop' EXIT
+$WS doctor
 $WS wait '\? help'
 $WS snap --name ho1-before --raw | grep -E '▌ +· session\.ts'
 $WS key '?'

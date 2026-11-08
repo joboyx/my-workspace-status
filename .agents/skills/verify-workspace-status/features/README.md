@@ -20,7 +20,7 @@ Files 6 to 9 use the driver directly: they need `scenario`, `calls` and `mouse`,
 ## Recipe conventions (wsctl files)
 
 - Run from the repository root. Each block is one script: run it with `bash -e` (or paste it into one shell). `WS=.agents/skills/verify-workspace-status/scripts/wsctl`.
-- Each block starts its own run with `$WS start` and stops it with an `EXIT` trap, so a failed step still ends the run. `start` refuses while another run is live.
+- Each block starts its own run with `$WS start` and stops it with an `EXIT` trap, so a failed step still ends the run. Set the trap on the line right after `start`, before `doctor` or any other step that can fail. `start` refuses while this checkout's current run is live.
 - Put every `wsctl` call on its own line. Under `bash -e`, a failed call that is not the last one of an `a && b` list does not stop the script.
 - Every move is one `key` call followed by a `wait` on the row or text it should produce. `wait --cursor` takes plain text that must be on the focus-bar line; pick text that only the target row has (the tree and the right pane share screen lines).
 - A recipe proves a check with `snap --name <id> --raw | grep ...`: the text is read from the capture that is kept in `evidence/`.

@@ -9,8 +9,8 @@ Conventions and the sweep order: [README.md](README.md). Demo fixture changes (`
 ```bash
 WS=.agents/skills/verify-workspace-status/scripts/wsctl
 $WS start
-$WS doctor
 trap '$WS stop' EXIT
+$WS doctor
 $WS wait --cursor 'session.ts'
 $WS wait 'app/src/session\.ts +inline \(too narrow\)'
 $WS wait 'STAGED'
