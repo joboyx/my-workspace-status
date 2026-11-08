@@ -597,7 +597,9 @@ fn reset_done_status(branch: &str, upstream: &str, old_tip: &str) -> String {
 /// Bulk pull result for one repo.
 fn pull_result(dir: &std::path::Path) -> RepoOpResult {
     let pulled = pull_quiet_detailed(dir);
-    if pulled.stash_pop_failed {
+    if let Some(note) = pulled.stash_note {
+        RepoOpResult::Failed(note)
+    } else if pulled.stash_pop_failed {
         RepoOpResult::StashConflict
     } else if pulled.ok {
         RepoOpResult::Ok

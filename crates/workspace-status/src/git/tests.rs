@@ -669,8 +669,12 @@ fn quit_during_pull_in_this_process() {
             .unwrap();
         String::from_utf8_lossy(&out.stdout).lines().count()
     };
+    // The push has saved its entry and reset the worktree. A stop that still
+    // reaches the push gives the same result: the entry is popped back.
+    let pushed =
+        || stash_count() == 1 && fs::read_to_string(down.join("README.md")).unwrap() == "# seed\n";
     let give_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while stash_count() == 0 {
+    while !pushed() {
         assert!(std::time::Instant::now() < give_up, "no auto-stash");
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -1744,6 +1748,117 @@ fn pull_failure_carries_the_git_reason() {
         "{reason}"
     );
     let _ = fs::remove_dir_all(&dir);
+}
+
+/// First 12 hex chars of a `<sha> <subject>` line of [`stash_entries`].
+fn entry_short(line: &str) -> &str {
+    &line[..12]
+}
+
+#[cfg(unix)]
+#[test]
+fn pull_gives_back_an_auto_stash_whose_push_failed_after_saving() {
+    use std::os::unix::fs::PermissionsExt;
+    let (root, up, down) = pull_fixture("ws-git-pull-push-failed");
+    fs::create_dir_all(up.join("d")).unwrap();
+    fs::write(up.join("d/f"), "base\n").unwrap();
+    git(&up, &["add", "d/f"]);
+    git(&up, &["commit", "-qm", "add d/f"]);
+    git(&down, &["pull", "-q"]);
+    let user_stash = push_user_stash(&down);
+    fs::write(up.join("upstream.txt"), "upstream\n").unwrap();
+    git(&up, &["add", "upstream.txt"]);
+    git(&up, &["commit", "-qm", "upstream"]);
+    // `stash push` saves its entry, then cannot reset `d/f` in a read-only
+    // folder and exits 1.
+    fs::write(down.join("d/f"), "local\n").unwrap();
+    let dir = down.join("d");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+    if fs::write(dir.join("probe"), "").is_ok() {
+        // Root ignores the mode: this host cannot make the push fail.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = fs::remove_dir_all(&root);
+        return;
+    }
+
+    let result = pull_quiet_detailed(&down);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    let entries = stash_entries(&down);
+    assert!(result.stashed && !result.ok, "{result:?}");
+    let error = result.error.clone().unwrap_or_default();
+    assert!(error.starts_with("auto-stash failed: "), "{result:?}");
+    assert!(!down.join("upstream.txt").exists(), "no pull over the tree");
+    // The pop ran and git refused it over the file the push did not reset:
+    // the entry is kept and the note names it.
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    assert_eq!(entries[1], user_stash[0], "user stash is untouched");
+    assert!(result.stash_pop_failed, "{result:?}");
+    let note = result.stash_note.clone().unwrap_or_default();
+    assert!(
+        note.starts_with("restoring the auto-stash failed: "),
+        "{note}"
+    );
+    assert!(
+        note.contains(&format!("`git stash list` as {}", entry_short(&entries[0]))),
+        "{note}"
+    );
+    assert_eq!(fs::read_to_string(down.join("d/f")).unwrap(), "local\n");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn pull_keeps_the_auto_stash_when_a_newer_stash_lands_during_the_pull() {
+    use std::os::unix::fs::PermissionsExt;
+    let (root, up, down) = pull_fixture("ws-git-pull-newer-stash");
+    let user_stash = push_user_stash(&down);
+    // A stash made in another terminal while the pull runs: the post-merge
+    // hook stashes a new file right after the merge.
+    let hooks = root.join("hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("post-merge");
+    fs::write(
+        &hook,
+        "#!/bin/sh\necho newer > newer.txt && git add newer.txt && git stash push -q -m newer\n",
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        &down,
+        &["config", "core.hooksPath", hooks.to_str().unwrap()],
+    );
+    fs::write(down.join("README.md"), "# local edit\n").unwrap();
+    fs::write(up.join("upstream.txt"), "upstream\n").unwrap();
+    git(&up, &["add", "upstream.txt"]);
+    git(&up, &["commit", "-qm", "upstream"]);
+
+    let result = pull_quiet_detailed(&down);
+    let entries = stash_entries(&down);
+    assert!(down.join("upstream.txt").exists(), "the pull ran");
+    assert_eq!(result.error, None, "{result:?}");
+    assert!(
+        result.stashed && result.stash_pop_failed && !result.ok,
+        "{result:?}"
+    );
+    assert_eq!(entries.len(), 3, "{entries:?}");
+    assert!(entries[0].ends_with(" newer"), "{entries:?}");
+    assert!(entries[1].ends_with(AUTO_STASH_MESSAGE), "{entries:?}");
+    assert_eq!(entries[2], user_stash[0], "user stash is untouched");
+    let note = result.stash_note.unwrap_or_default();
+    assert!(
+        note.contains("a newer stash entry is on top of it"),
+        "{note}"
+    );
+    assert!(
+        note.contains(&format!("`git stash list` as {}", entry_short(&entries[1]))),
+        "{note}"
+    );
+    assert_eq!(
+        fs::read_to_string(down.join("README.md")).unwrap(),
+        "# seed\n",
+        "neither stash was applied"
+    );
+    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
