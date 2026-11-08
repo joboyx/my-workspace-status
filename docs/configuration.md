@@ -162,7 +162,7 @@ Optional object mapping workspace-relative repo paths to a single default branch
 - `--default-branch` and TUI `d` switch to that branch (not `origin/HEAD`).
 - A checkout on that branch has no PR status (see [Pull request badges](#pull-request-badges)).
 
-Repos without a key keep prior behaviour: classification still treats `main` / `master` / `develop` as default; switch target still comes from git (`origin/HEAD`, then those names). For PR status only the branch `origin/HEAD` names counts as default; without `origin/HEAD` no branch does.
+Repos without a key keep prior behaviour: classification still treats `main` / `master` / `develop` as default. The switch target and the branch that merged work is measured against come from git, in one order: `origin/HEAD`, else the first of `develop`, `main`, `master` that exists on `origin`, then locally. For PR status only the branch `origin/HEAD` names counts as default; without `origin/HEAD` no branch does.
 
 ### `editor`
 
