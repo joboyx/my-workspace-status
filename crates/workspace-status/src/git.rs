@@ -1353,14 +1353,48 @@ pub fn list_worktrees_porcelain(cwd: &Path) -> String {
     exec_git(&["worktree", "list", "--porcelain"], cwd)
 }
 
-/// Stage one path (`git add --`).
-pub fn stage_file(cwd: &Path, file_path: &str) -> Result<(), String> {
-    exec_git_checked(&["add", "--", file_path], cwd)
+/// `path` as a pathspec that matches only that path: `:(literal)<path>`.
+///
+/// A bare pathspec is a glob, so `a[b].txt` also matches `ab.txt` and a
+/// write command would act on both. Write commands that take a file path
+/// pass it through this. When `GIT_LITERAL_PATHSPECS` is on, git reads
+/// every pathspec literally and does not parse the `:(literal)` prefix, so
+/// the path goes through as-is.
+fn literal_pathspec(path: &str) -> String {
+    let literal_global = std::env::var("GIT_LITERAL_PATHSPECS")
+        .map(|v| git_env_bool(&v))
+        .unwrap_or(false);
+    literal_pathspec_with(path, literal_global)
 }
 
-/// Unstage one path (`git restore --staged --`).
+fn literal_pathspec_with(path: &str, literal_global: bool) -> String {
+    if literal_global {
+        path.to_string()
+    } else {
+        format!(":(literal){path}")
+    }
+}
+
+/// A git boolean env value: `true`/`yes`/`on` or a non-zero integer is on;
+/// `false`/`no`/`off`, empty, zero, or anything else is off.
+fn git_env_bool(value: &str) -> bool {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" => true,
+        other => other.parse::<i64>().is_ok_and(|n| n != 0),
+    }
+}
+
+/// Stage one path (`git add -- :(literal)<path>`).
+pub fn stage_file(cwd: &Path, file_path: &str) -> Result<(), String> {
+    exec_git_checked(&["add", "--", &literal_pathspec(file_path)], cwd)
+}
+
+/// Unstage one path (`git restore --staged -- :(literal)<path>`).
 pub fn unstage_file(cwd: &Path, file_path: &str) -> Result<(), String> {
-    exec_git_checked(&["restore", "--staged", "--", file_path], cwd)
+    exec_git_checked(
+        &["restore", "--staged", "--", &literal_pathspec(file_path)],
+        cwd,
+    )
 }
 
 /// Apply a unified patch to the index (`git apply --cached`).
@@ -1404,9 +1438,10 @@ fn apply_patch_stdin(cwd: &Path, patch: &str, args: &[&str]) -> Result<(), Strin
     }
 }
 
-/// Discard worktree changes to a tracked path (`git restore --`).
+/// Discard worktree changes to a tracked path
+/// (`git restore -- :(literal)<path>`).
 pub fn revert_tracked_file(cwd: &Path, file_path: &str) -> Result<(), String> {
-    exec_git_checked(&["restore", "--", file_path], cwd)
+    exec_git_checked(&["restore", "--", &literal_pathspec(file_path)], cwd)
 }
 
 /// Start of every [`ensure_compare_head_clean`] refusal.
@@ -1420,12 +1455,13 @@ pub const COMPARE_REVERT_ABORTED: &str = "revert aborted: ";
 /// `paths` (staged, unstaged, untracked, or ignored). A compare tab writes
 /// the worktree only while it equals `head` for those paths, so this runs
 /// on the write worker right before the write: the TUI snapshot can be a
-/// watch tick old.
+/// watch tick old. `paths` are matched literally ([`literal_pathspec`]).
 pub fn ensure_compare_head_clean(cwd: &Path, head: &str, paths: &[&str]) -> Result<(), String> {
     match rev_parse_commit(cwd, "HEAD")? {
         Some(now) if now == head => {}
         _ => return Err(format!("{COMPARE_REVERT_ABORTED}HEAD moved")),
     }
+    let specs: Vec<String> = paths.iter().map(|p| literal_pathspec(p)).collect();
     let mut args = vec![
         "status",
         "--porcelain=v1",
@@ -1433,7 +1469,7 @@ pub fn ensure_compare_head_clean(cwd: &Path, head: &str, paths: &[&str]) -> Resu
         "--ignored",
         "--",
     ];
-    args.extend_from_slice(paths);
+    args.extend(specs.iter().map(String::as_str));
     let out = exec_git_stdout(&args, cwd)?;
     if out.trim().is_empty() {
         Ok(())
@@ -1446,14 +1482,15 @@ pub fn ensure_compare_head_clean(cwd: &Path, head: &str, paths: &[&str]) -> Resu
 }
 
 /// Restore `paths` in the worktree from `rev`
-/// (`git restore --source=<rev> --worktree --`).
+/// (`git restore --source=<rev> --worktree -- :(literal)<path>...`).
 ///
 /// The index stays untouched. A tracked path that `rev` does not have is
 /// removed from the worktree; a path only `rev` has is written.
 pub fn restore_worktree_from(cwd: &Path, rev: &str, paths: &[&str]) -> Result<(), String> {
     let source = format!("--source={rev}");
+    let specs: Vec<String> = paths.iter().map(|p| literal_pathspec(p)).collect();
     let mut args = vec!["restore", source.as_str(), "--worktree", "--"];
-    args.extend_from_slice(paths);
+    args.extend(specs.iter().map(String::as_str));
     exec_git_stdout(&args, cwd).map(|_| ())
 }
 
@@ -1492,9 +1529,9 @@ pub fn revert_compare_patch(cwd: &Path, head: &str, path: &str, patch: &str) -> 
     apply_worktree_patch_reverse(cwd, patch)
 }
 
-/// Delete an untracked path (`git clean -f --`). Destructive.
+/// Delete an untracked path (`git clean -f -- :(literal)<path>`). Destructive.
 pub fn remove_untracked_file(cwd: &Path, file_path: &str) -> Result<(), String> {
-    exec_git_checked(&["clean", "-f", "--", file_path], cwd)
+    exec_git_checked(&["clean", "-f", "--", &literal_pathspec(file_path)], cwd)
 }
 
 /// What [`push_quiet`] will do in a checkout, read before it runs.
@@ -1684,14 +1721,16 @@ pub fn remote_has_tag(cwd: &Path, remote: &str, tag: &str) -> Option<bool> {
 }
 
 /// Stash worktree changes. Includes untracked files (`-u`).
+///
+/// Non-empty `paths` limit the stash to those paths, matched literally
+/// ([`literal_pathspec`]).
 pub fn stash_push(cwd: &Path, paths: &[String]) -> Result<(), String> {
     let before = exec_git(&["stash", "list"], cwd);
+    let specs: Vec<String> = paths.iter().map(|p| literal_pathspec(p)).collect();
     let mut args: Vec<&str> = vec!["stash", "push", "-u"];
-    if !paths.is_empty() {
+    if !specs.is_empty() {
         args.push("--");
-        for path in paths {
-            args.push(path);
-        }
+        args.extend(specs.iter().map(String::as_str));
     }
     exec_git_checked(&args, cwd)?;
     let after = exec_git(&["stash", "list"], cwd);
@@ -2019,7 +2058,10 @@ pub fn git_diff_args(base: &[&str], path: &str, context: Option<u32>) -> Vec<Str
         args.push(format!("-U{n}"));
     }
     args.push("--".into());
-    args.push(path.into());
+    // Literal: a line stage / unstage / revert builds its patch from this
+    // diff, so a glob match of a sibling file would put that file's hunks
+    // under this file's header.
+    args.push(literal_pathspec(path));
     args
 }
 
@@ -2029,8 +2071,13 @@ fn exec_git_owned(args: &[String], cwd: &Path) -> String {
 }
 
 /// Git's reason line ([`git_reason_line`]), or `git <sub> exited with code N`.
+///
+/// A quoted `:(literal)` pathspec prefix ([`literal_pathspec`]) is dropped,
+/// so the message names the path the user picked.
 fn git_failure_message(args: &[&str], out: &std::process::Output) -> String {
-    git_reason_line(out).unwrap_or_else(|| exit_code_message(args, out))
+    git_reason_line(out)
+        .map(|line| line.replace("':(literal)", "'"))
+        .unwrap_or_else(|| exit_code_message(args, out))
 }
 
 /// Run git and return stdout. Failure is `Err`, never an empty success.
