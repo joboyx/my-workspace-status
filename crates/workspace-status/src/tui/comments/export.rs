@@ -1,9 +1,13 @@
 //! Markdown export and clipboard copy.
 
 use std::io::{self, IsTerminal, Write};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use super::store::{CommentKey, CommentStore};
+use crate::tui::pull_request::wait_until;
 
 #[cfg(test)]
 /// Markdown marker for a resolved comment. Open comments have no tag.
@@ -126,31 +130,46 @@ pub fn export_markdown(store: &CommentStore) -> String {
     out
 }
 
-/// Copy `text` to the clipboard. OSC 52 when stdout is a TTY, then a host tool.
-pub fn copy_to_clipboard(text: &str) -> bool {
-    let mut ok = false;
-    if io::stdout().is_terminal() {
-        let payload = base64_encode(text.as_bytes());
-        let seq = format!("\x1b]52;c;{payload}\x07");
-        let mut out = io::stdout().lock();
-        if out.write_all(seq.as_bytes()).is_ok() && out.flush().is_ok() {
-            ok = true;
-        }
+/// Longest the host clipboard tools of one copy may run together before
+/// [`copy_with_host_tool`] kills the one that still runs.
+pub const HOST_CLIPBOARD_TIME_LIMIT: Duration = Duration::from_secs(2);
+
+/// Write `text` to the terminal clipboard with OSC 52. True when stdout is a
+/// TTY and the write and flush succeed; false (nothing written) otherwise.
+///
+/// A terminal write only, so the TTY loop calls it between frames.
+pub fn write_osc52(text: &str) -> bool {
+    if !io::stdout().is_terminal() {
+        return false;
     }
-    for argv in [
+    let payload = base64_encode(text.as_bytes());
+    let seq = format!("\x1b]52;c;{payload}\x07");
+    let mut out = io::stdout().lock();
+    out.write_all(seq.as_bytes()).is_ok() && out.flush().is_ok()
+}
+
+/// Copy `text` with the first host clipboard tool that succeeds: `wl-copy`,
+/// then `xclip -selection clipboard`, then `pbcopy`. False when none starts
+/// and succeeds before `deadline`.
+///
+/// Blocking: it spawns processes and waits for them, so the TTY loop runs
+/// it on a worker. A tool that still runs at `deadline` is killed.
+pub fn copy_with_host_tool(text: &str, deadline: Instant) -> bool {
+    [
         &["wl-copy"][..],
         &["xclip", "-selection", "clipboard"][..],
         &["pbcopy"][..],
-    ] {
-        if pipe_to(argv, text) {
-            ok = true;
-            break;
-        }
-    }
-    ok
+    ]
+    .into_iter()
+    .any(|argv| Instant::now() < deadline && pipe_to(argv, text, deadline))
 }
 
-fn pipe_to(argv: &[&str], text: &str) -> bool {
+/// Run `argv` with `text` on its stdin. True when it reads all of `text` and
+/// exits 0 before `deadline`; past `deadline` it is killed and reaped.
+///
+/// The stdin write runs on its own thread: a tool that never reads must not
+/// stall this thread past `deadline` on a full pipe.
+fn pipe_to(argv: &[&str], text: &str, deadline: Instant) -> bool {
     let Some((bin, args)) = argv.split_first() else {
         return false;
     };
@@ -163,12 +182,33 @@ fn pipe_to(argv: &[&str], text: &str) -> bool {
     else {
         return false;
     };
-    let ok = child
-        .stdin
-        .as_mut()
-        .map(|stdin| stdin.write_all(text.as_bytes()).is_ok())
+    let Some(mut stdin) = child.stdin.take() else {
+        kill_and_reap(&mut child);
+        return false;
+    };
+    let bytes = text.as_bytes().to_vec();
+    let (tx, written) = mpsc::channel();
+    std::thread::spawn(move || {
+        // The pipe drops at the end of this thread, so the tool sees EOF.
+        let _ = tx.send(stdin.write_all(&bytes).is_ok());
+    });
+    let Some(status) = wait_until(&mut child, deadline, &AtomicBool::new(false)) else {
+        // The kill closes the pipe's read end, so a blocked write ends too.
+        kill_and_reap(&mut child);
+        return false;
+    };
+    // The tool exited. A child of the tool can still hold the pipe open, so
+    // wait for the writer only until the deadline; a blocked writer thread is
+    // detached and ends when the last reader closes the pipe.
+    let wrote = written
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
         .unwrap_or(false);
-    child.wait().map(|s| s.success()).unwrap_or(false) && ok
+    status.success() && wrote
+}
+
+fn kill_and_reap(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Standard base64 (RFC 4648, `+/` alphabet, `=` padded) for OSC 52.
@@ -332,5 +372,73 @@ mod tests {
         assert_eq!(base64_encode("🎉".as_bytes()), "8J+OiQ==");
         assert_eq!(base64_encode(&[0xff, 0xef, 0xbe]), "/+++");
         assert_eq!(base64_encode(&[0x00, 0x00, 0x00]), "AAAA");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_host_tool_that_reads_stdin_and_exits_zero_copies() {
+        let dir = crate::testutil::unique_dir("ws-clipboard-ok");
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("clipboard.txt");
+        let out_arg = out.to_string_lossy().into_owned();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let ok = pipe_to(
+            &["sh", "-c", "cat > \"$0\"", &out_arg],
+            "copied text",
+            deadline,
+        );
+        assert!(ok, "the tool read stdin and exited 0");
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "copied text");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_host_tool_that_hangs_is_killed_at_the_deadline() {
+        let dir = crate::testutil::unique_dir("ws-clipboard-hang");
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("tool.pid");
+        let pid_arg = pid_file.to_string_lossy().into_owned();
+        // More than a pipe buffer, and the tool never reads it: the write
+        // must not hold the caller past the deadline.
+        let text = "x".repeat(1 << 20);
+        let started = Instant::now();
+        let ok = pipe_to(
+            &["sh", "-c", "echo $$ > \"$0\"; exec sleep 5", &pid_arg],
+            &text,
+            started + Duration::from_millis(500),
+        );
+        let took = started.elapsed();
+        assert!(!ok, "a tool that does not exit in time is a failed copy");
+        assert!(
+            took < Duration::from_secs(3),
+            "returned at the deadline, took {took:?}"
+        );
+        let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // SAFETY: signal 0 only checks that the process exists.
+        assert_ne!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "the hung tool {pid} was killed and reaped"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_host_tool_runs_once_the_deadline_has_passed() {
+        assert!(!copy_with_host_tool("text", Instant::now()));
+    }
+
+    #[test]
+    fn osc52_writes_nothing_when_stdout_is_not_a_terminal() {
+        // A run from a terminal would get the escape sequence: check only
+        // the headless case (CI, piped output).
+        if !io::stdout().is_terminal() {
+            assert!(!write_osc52("text"));
+        }
     }
 }
