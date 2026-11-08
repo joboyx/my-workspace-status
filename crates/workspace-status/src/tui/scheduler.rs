@@ -326,6 +326,11 @@ impl Scheduler {
     }
 
     /// Discover finished. Queue focused checkout first, then the rest.
+    ///
+    /// With nothing to queue (no paths, or a newer reload owns every
+    /// path), no repo result will land for this collect, so it ends here:
+    /// [`ApplyDecision::CollectionIdle`], or [`ApplyDecision::StartDiscover`]
+    /// when a watch tick latched meanwhile.
     pub fn on_discovered(&mut self, gen: u64, mut paths: Vec<String>) -> ApplyDecision {
         let Some(col) = self.collection.as_mut() else {
             return ApplyDecision::Ignore;
@@ -351,6 +356,9 @@ impl Scheduler {
             queued.push(path);
         }
         col.pending = queued.iter().cloned().collect();
+        if queued.is_empty() {
+            return self.finish_collection();
+        }
         for (i, path) in queued.into_iter().enumerate() {
             let focused_job = focused.as_deref() == Some(path.as_str());
             let kind = SpawnKind::ProcessRepo {
@@ -819,6 +827,57 @@ mod tests {
         assert!(!s.latched_watch());
         assert!(!s.on_watch_tick(None));
         assert!(s.latched_watch());
+    }
+
+    #[test]
+    fn discover_with_no_paths_ends_the_collect() {
+        let mut s = Scheduler::new(4);
+        assert!(s.on_watch_tick(None));
+        let gen = s.collection_gen().unwrap();
+        assert_eq!(s.on_discovered(gen, vec![]), ApplyDecision::CollectionIdle);
+        assert!(!s.collection_active());
+        assert!(s.on_watch_tick(None), "the next tick starts a new collect");
+    }
+
+    #[test]
+    fn discover_with_every_path_superseded_ends_the_collect() {
+        let mut s = Scheduler::new(4);
+        assert!(s.on_watch_tick(Some("r0".into())));
+        let gen = s.collection_gen().unwrap();
+        // `r` on the only checkout lands before the walk does.
+        s.on_reload_repo("r0".into());
+        assert_eq!(
+            s.note_repo_done(gen + 1, "r0"),
+            ApplyDecision::ApplyRepo {
+                path: "r0".into(),
+                load_pane_if_focused: true,
+            }
+        );
+        assert!(s.collection_active(), "the walk has not landed yet");
+        assert_eq!(
+            s.on_discovered(gen, vec!["r0".into()]),
+            ApplyDecision::CollectionIdle
+        );
+        assert!(!s.collection_active());
+        assert!(s.on_watch_tick(None), "the next tick starts a new collect");
+    }
+
+    #[test]
+    fn discover_with_no_paths_starts_a_latched_rerun() {
+        let mut s = Scheduler::new(4);
+        assert!(s.on_watch_tick(None));
+        let gen1 = s.collection_gen().unwrap();
+        assert!(!s.on_watch_tick(None));
+        assert!(s.latched_watch());
+        match s.on_discovered(gen1, vec![]) {
+            ApplyDecision::StartDiscover { gen, kind } => {
+                assert_eq!(kind, CollectionKind::Watch);
+                assert_eq!(Some(gen), s.collection_gen());
+                assert_ne!(gen, gen1);
+            }
+            other => panic!("expected latched rerun, got {other:?}"),
+        }
+        assert!(!s.latched_watch());
     }
 
     #[test]

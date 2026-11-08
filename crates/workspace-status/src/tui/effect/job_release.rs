@@ -5,7 +5,9 @@
 //! records a [`JobRelease`] for each job it spawns. On a panic,
 //! [`Interpreter::apply_panic`] frees what that record names through the
 //! same release function the job's outcome handler calls, and the status
-//! line names the job and the panic message.
+//! line names the job, the panic message, and (while the TUI owns the
+//! terminal) where it panicked. The TUI panic hook does not print a worker
+//! panic then: the text would land in the alternate screen.
 //!
 //! A lookup whose answer a view waits on (a cache entry, a loading pane, a
 //! request id) gets a failed answer through its outcome handler. Without
@@ -13,6 +15,7 @@
 //! same lookup again at once.
 
 use std::any::Any;
+use std::cell::{Cell, RefCell};
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -36,12 +39,45 @@ use crate::tui::status::StatusMessage;
 /// that panicked.
 pub(crate) type JobResult = Result<JobOutcome, String>;
 
+thread_local! {
+    /// True on a worker thread while [`run_job`] runs a job there.
+    static IN_WORKER_JOB: Cell<bool> = const { Cell::new(false) };
+    /// Where the job on this worker panicked (`file:line:col`), noted by
+    /// the TUI panic hook ([`note_worker_panic_at`]) when it does not print
+    /// the panic.
+    static WORKER_PANIC_AT: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
 /// Run `work` on this worker and catch a panic, so the caller still knows
-/// which job ended. `Err` holds the panic message.
+/// which job ended. `Err` holds the panic message, then ` at <location>`
+/// when the panic hook noted one.
 pub(crate) fn run_job(work: JobWork) -> JobResult {
+    WORKER_PANIC_AT.with(|at| at.borrow_mut().take());
+    IN_WORKER_JOB.with(|flag| flag.set(true));
     // A job shares only atomics with the loop thread. A panicked job's
     // captures drop with it and no outcome of it is applied.
-    std::panic::catch_unwind(AssertUnwindSafe(work)).map_err(|payload| panic_text(&*payload))
+    let result = std::panic::catch_unwind(AssertUnwindSafe(work));
+    IN_WORKER_JOB.with(|flag| flag.set(false));
+    result.map_err(|payload| {
+        let text = panic_text(&*payload);
+        match WORKER_PANIC_AT.with(|at| at.borrow_mut().take()) {
+            Some(at) => format!("{text} at {at}"),
+            None => text,
+        }
+    })
+}
+
+/// True while this thread runs a job under [`run_job`]: a panic here is
+/// caught and reaches the status line.
+pub(crate) fn in_worker_job() -> bool {
+    IN_WORKER_JOB.with(Cell::get)
+}
+
+/// Note where the job on this worker panicked. [`run_job`] adds it to the
+/// panic message, so the status line shows what the panic hook did not
+/// print.
+pub(crate) fn note_worker_panic_at(location: String) {
+    WORKER_PANIC_AT.with(|at| *at.borrow_mut() = Some(location));
 }
 
 /// The message of a panic payload (`panic!` gives `&str` or `String`).
@@ -402,6 +438,7 @@ mod tests {
     };
     use super::super::Interpreter;
     use crate::file_index::FileRead;
+    use crate::testutil::panic_hook_lock;
     use crate::tui::action::{Action, Effect};
     use crate::tui::anim::RemoteActivity;
     use crate::tui::event_loop::{apply_joined, spawn_job, JobJoinSet};
@@ -416,6 +453,9 @@ mod tests {
     /// Panic message of every panicked job in these tests.
     const JOB_PANIC: &str = "worker job exploded";
 
+    /// The `gh` stand-in that panics on the worker. A test that uses it
+    /// holds [`panic_hook_lock`], so the TUI panic hook tests cannot add a
+    /// location to [`JOB_PANIC`] in the status while it runs.
     fn gh_panics(_: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
         panic!("{JOB_PANIC}")
     }
@@ -460,6 +500,7 @@ mod tests {
 
     #[test]
     fn a_panicked_badge_lookup_frees_its_slot_and_the_next_poll_looks_it_up_again() {
+        let _serial = panic_hook_lock();
         let (root, mut state) = pr_app("ws-job-release-badge", Some(FORGE_REMOTE));
         let path = Path::new("app");
         let target = (PathBuf::from("app"), "feature".to_string());
@@ -521,6 +562,7 @@ mod tests {
 
     #[test]
     fn panicked_jobs_free_their_scheduler_slots_so_a_new_job_still_spawns() {
+        let _serial = panic_hook_lock();
         let (root, mut state) = pr_app("ws-job-release-cap", Some(FORGE_REMOTE));
         let cap = 2;
         let mut interp = Interpreter::with_cap(cap);
@@ -554,6 +596,7 @@ mod tests {
 
     #[test]
     fn a_worker_panic_names_the_job_and_its_message_in_the_status() {
+        let _serial = panic_hook_lock();
         let (root, mut state) = pr_app("ws-job-release-status", Some(FORGE_REMOTE));
         let mut interp = Interpreter::with_cap(4);
         live_runtime().block_on(async {
