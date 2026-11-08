@@ -5,7 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use fs4::fs_std::FileExt;
+use fs4::{FileExt, TryLockError};
 
 /// Reserved workspace map key for version-1 records.
 ///
@@ -68,7 +68,9 @@ pub(crate) fn persist_with_lock(
         .read(true)
         .write(true)
         .open(&lock_path)?;
-    lock_file.lock_exclusive()?;
+    // Trait-path call: `File` has an inherent `lock` too, unstable on the
+    // pinned toolchain.
+    FileExt::lock(&lock_file)?;
     let existing = match fs::read(file_path) {
         Ok(bytes) => Some(bytes),
         Err(err) if err.kind() == io::ErrorKind::NotFound => None,
@@ -153,9 +155,11 @@ pub(crate) fn try_lock_sibling(file_path: &Path, suffix: &str) -> io::Result<Opt
         .read(true)
         .write(true)
         .open(sibling_suffix(file_path, suffix))?;
-    if lock_file.try_lock_exclusive()? {
-        Ok(Some(lock_file))
-    } else {
-        Ok(None)
+    // `?` here would report a held lock as an `Err`: `WouldBlock` must stay
+    // `Ok(None)`.
+    match FileExt::try_lock(&lock_file) {
+        Ok(()) => Ok(Some(lock_file)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(err)) => Err(err),
     }
 }
