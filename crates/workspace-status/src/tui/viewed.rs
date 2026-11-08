@@ -404,6 +404,10 @@ fn huge_file_digest(abs: &Path, meta: &fs::Metadata) -> io::Result<Vec<u8>> {
 }
 
 /// Current identity → fingerprint map for every dirty file in the snapshot.
+///
+/// Reads every dirty file. The TUI reads them on the status workers instead
+/// ([`super::file_facts`]); tests use this as the reference.
+#[cfg(test)]
 pub fn collect_current_fingerprints(
     snapshot: &WorkspaceSnapshot,
     cwd: &Path,
@@ -418,18 +422,18 @@ pub fn collect_current_fingerprints(
     out
 }
 
-/// Row ids whose stored fingerprint still matches the worktree.
+/// Row ids whose stored fingerprint still matches `current` (identity →
+/// fingerprint of each dirty file, as read off the loop thread).
 ///
 /// Dual MS paths emit both the unsuffixed Staged id and `#unstaged`.
 pub fn viewed_row_ids(
     snapshot: &WorkspaceSnapshot,
     store: &ViewedStore,
-    cwd: &Path,
+    current: &HashMap<String, String>,
 ) -> std::collections::HashSet<String> {
     if store.is_empty() {
         return std::collections::HashSet::new();
     }
-    let current = collect_current_fingerprints(snapshot, cwd);
     let mut ids = std::collections::HashSet::new();
     for repo in &snapshot.repos {
         for file in &repo.changes {
@@ -924,7 +928,10 @@ mod tests {
         let identity = viewed_identity("demo", "src/a.ts");
         let fp = fingerprint_file_change(&dir, "demo", &change);
         let store = toggle_viewed(&ViewedStore::new(), &identity, &fp);
-        assert!(viewed_row_ids(&snap, &store, &dir).contains("file:demo:src/a.ts"));
+        assert!(
+            viewed_row_ids(&snap, &store, &collect_current_fingerprints(&snap, &dir))
+                .contains("file:demo:src/a.ts")
+        );
         fs::write(dir.join("demo/src/a.ts"), "y\n").unwrap();
         let current = collect_current_fingerprints(&snap, &dir);
         let next = reconcile_viewed(&store, &current);
@@ -1038,7 +1045,7 @@ mod tests {
                 next, store,
                 "{label}: snapshot fingerprint must survive reconcile_viewed"
             );
-            let ids = viewed_row_ids(&snap, &next, &dir);
+            let ids = viewed_row_ids(&snap, &next, &current);
             assert!(
                 ids.contains("file:demo:both.rs"),
                 "{label}: Staged dual id stays reviewed after reconcile"

@@ -68,7 +68,7 @@ use super::comments::{
     collect_live_set, comment_key_label, comments_in_focus_scope, covering_line_comment,
     diff_focus_side, diff_line_comment_state, export_markdown, format_entity_reference,
     gc_comments, load_comment_store, put_comment_entry, resolve_comment_target,
-    resolve_entity_reference, save_comment_store, viewport_line_number, viewport_line_range,
+    resolve_entity_reference, viewport_line_number, viewport_line_range, CommentEntry,
     CommentExport, CommentExportList, CommentKey, CommentPrompt, CommentStore, DiffSide, EntityRef,
 };
 use super::commit_card::CommitCardCache;
@@ -90,6 +90,7 @@ use super::drill::{
 use super::explorer::ExplorerStatus;
 use super::fetch::{background_fetch_targets, OTHER_INSTANCE_FETCH_FAILED};
 use super::fetch_claim::load_background_fetch_record;
+use super::file_facts::{FileFactsCache, RepoFileFacts};
 use super::gates::{
     ListFocusTarget, FOCUS_A_FILE_DIFF, FOCUS_A_FILE_TO_MARK_REVIEWED,
     REVIEWED_MARKS_ARE_FOR_TREE_FILES,
@@ -125,6 +126,9 @@ use super::stash::{
     stash_ops_for_context, StashMenuKeyResult, StashOp, StashOpId, StashOpsContext,
 };
 use super::status::{StatusKind, StatusMessage};
+use super::store_save::{
+    StoreKind, StoreSaveJob, StoreSaved, StoreSync, UnsavedReason, UnsavedStore,
+};
 use super::tabs::{
     compare_file_dirty, CommitPickerState, ComparePickerKind, ComparePickerState, OpenCompare,
     TabStrip, WorktreeFile, CANNOT_REVERT_COMMITTED_DIFF, CANNOT_REVERT_WORKTREE_COMPARE,
@@ -142,9 +146,8 @@ use super::tree::{
 use super::ui_state_store::{save_activity_sparkline, save_commit_msg_lines, save_theme};
 use super::undercurl::UndercurlHit;
 use super::viewed::{
-    collect_current_fingerprints, fingerprint_file_change, load_viewed_store, reconcile_viewed,
-    save_viewed_store, toggle_viewed, viewed_identity, viewed_row_ids, workspace_store_id,
-    ViewedStore,
+    load_viewed_store, reconcile_viewed, toggle_viewed, viewed_identity, viewed_row_ids,
+    workspace_store_id, ViewedStore,
 };
 use super::watch::{
     capture_removal_ghosts, checkout_flash_ids, commit_file_identity, commit_file_signatures,
@@ -966,7 +969,16 @@ struct FileSearchMemo {
     hits: std::rc::Rc<[usize]>,
 }
 
-/// Interactive session state. Dispatch is pure besides the returned [`Effect`].
+/// Interactive session state. Dispatch runs no git: that work is the
+/// returned [`Effect`].
+///
+/// Status results and the viewed / comment stores do no file I/O here
+/// either: the facts of dirty worktree files come in with each status
+/// result ([`Self::set_file_facts`]), and a store change only asks for a
+/// save that runs on a worker ([`Self::begin_store_save`]). Small file I/O
+/// left on the loop thread: the UI-state file writes (theme, sparkline,
+/// commit-message rows), the background-fetch record read on a watch
+/// tick, and the one `stat` of the open Explorer file.
 #[derive(Clone, Debug)]
 pub struct AppState {
     pub cwd: PathBuf,
@@ -1015,14 +1027,18 @@ pub struct AppState {
     diff_view: Option<DiffViewId>,
     pub reviewed: HashSet<String>,
     pub viewed_store: ViewedStore,
-    /// [`Self::viewed_store`] as last loaded or saved. Save writes only the
-    /// delta from it, so marks another `ws` process saved survive.
-    viewed_baseline: ViewedStore,
+    /// Save state of [`Self::viewed_store`]: the bucket as last loaded or
+    /// saved (a save writes only the delta from it, so marks another `ws`
+    /// process saved survive) and the save asked for or running.
+    viewed_sync: StoreSync<String, String>,
     pub viewed_path: PathBuf,
     pub comment_store: CommentStore,
-    /// [`Self::comment_store`] as last loaded or saved. Save writes only
-    /// the delta from it, so comments another `ws` process saved survive.
-    comment_baseline: CommentStore,
+    /// Save state of [`Self::comment_store`]. Same rules as
+    /// [`Self::viewed_sync`].
+    comment_sync: StoreSync<CommentKey, CommentEntry>,
+    /// Disk facts (`size:mtimeMs`, viewed fingerprint) of each dirty file,
+    /// read at launch and then by the status worker of each checkout.
+    file_facts: FileFactsCache,
     /// Checkout path → repo identity seen in this session's snapshots
     /// (`CommentLiveSet::checkout_owners`): comment GC drops a gone
     /// worktree's comment only when its owner repo is known.
@@ -1351,7 +1367,10 @@ impl AppState {
         let folds = default_folds(&tree);
         let rows = flatten_with(&tree, &folds, ascii);
         let cursor = initial_cursor(&rows);
-        let signatures = tree_signatures(&tree, &cwd);
+        // Launch reads the dirty files once, before the loop starts; status
+        // results bring them after that.
+        let file_facts = FileFactsCache::from_disk(&cwd, &snapshot);
+        let signatures = tree_signatures(&tree, &file_facts);
         let workspace_id = workspace_store_id(&cwd);
         let viewed_store = load_viewed_store(&viewed_path, &workspace_id);
         let comment_store = load_comment_store(&comment_path, &workspace_id);
@@ -1387,11 +1406,12 @@ impl AppState {
             diff_path: None,
             diff_view: None,
             reviewed: HashSet::new(),
-            viewed_baseline: viewed_store.clone(),
+            viewed_sync: StoreSync::new(&viewed_store),
             viewed_store,
             viewed_path,
-            comment_baseline: comment_store.clone(),
+            comment_sync: StoreSync::new(&comment_store),
             comment_store,
+            file_facts,
             comment_checkout_owners: HashMap::new(),
             comment_path,
             ui_store_path,
@@ -1514,7 +1534,7 @@ impl AppState {
                 self.folds = default_folds(&self.tree);
                 self.rows = flatten_with(&self.tree, &self.folds, self.ascii);
                 self.cursor = initial_cursor(&self.rows);
-                self.signatures = tree_signatures(&self.tree, &self.cwd);
+                self.signatures = tree_signatures(&self.tree, &self.file_facts);
                 self.tree_ghosts.clear();
             }
         }
@@ -2637,7 +2657,7 @@ impl AppState {
         self.folds = default_folds(&self.tree);
         self.rows = flatten_with(&self.tree, &self.folds, self.ascii);
         self.restore_focus_after_tree_rebuild(previous_id);
-        self.signatures = tree_signatures(&self.tree, &self.cwd);
+        self.signatures = tree_signatures(&self.tree, &self.file_facts);
         self.tree_ghosts.clear();
         self.status = if self.tree_mode {
             "Directory tree".into()
@@ -2684,12 +2704,14 @@ impl AppState {
         self.cursor = self.cursor.min(self.rows.len() - 1);
     }
 
+    /// Replace the snapshot. File disk tokens and viewed fingerprints come
+    /// from [`Self::set_file_facts`]; this reads no file.
     pub fn apply_snapshot(&mut self, snapshot: WorkspaceSnapshot) {
         let snapshot = carry_status_failed_local_branches(&self.snapshot, snapshot);
         self.snapshot = snapshot;
         self.snapshot.show_hidden = self.show_hidden;
         self.rebuild_rows();
-        self.signatures = tree_signatures(&self.tree, &self.cwd);
+        self.signatures = tree_signatures(&self.tree, &self.file_facts);
         self.reconcile_viewed_store();
         self.reconcile_comment_store();
         self.sync_live_refresh_outage(Instant::now());
@@ -5655,57 +5677,170 @@ impl AppState {
     }
 
     /// Toggle the persisted reviewed mark of changed file `path` in
-    /// checkout `repo` and save the store. Returns the new mark (`true`
-    /// when now reviewed), or `None` when the snapshot lists no change for
-    /// it (nothing is written).
+    /// checkout `repo` and ask for a store save. Returns the new mark
+    /// (`true` when now reviewed), or `None` when the snapshot lists no
+    /// change for it or no status result read its facts yet (nothing
+    /// changes).
+    ///
+    /// The mark takes the fingerprint the last status result read for the
+    /// file ([`Self::set_file_facts`]), not a new read of the worktree.
     pub(super) fn toggle_viewed_for(&mut self, repo: &str, path: &str) -> Option<bool> {
-        let full = self
-            .snapshot
+        self.snapshot
             .repos
             .iter()
             .find(|r| r.repo == repo)
             .and_then(|r| r.changes.iter().find(|c| c.path == path))?;
+        let fingerprint = self.file_facts.get(repo, path)?.fingerprint.clone();
         let identity = viewed_identity(repo, path);
-        let fingerprint = fingerprint_file_change(&self.cwd, repo, full);
         self.viewed_store = toggle_viewed(&self.viewed_store, &identity, &fingerprint);
         let marked = self.viewed_store.contains_key(&identity);
-        if let Err(err) = self.save_viewed() {
-            self.status = StatusMessage::error(persist_failed_status("viewed", err));
-        }
-        self.reviewed = viewed_row_ids(&self.snapshot, &self.viewed_store, &self.cwd);
+        self.viewed_sync.want(None);
+        self.refresh_reviewed();
         Some(marked)
     }
 
-    /// Save the viewed-mark changes of this session since the last load or
-    /// save, merged with the store on disk. On success the merged bucket
-    /// (with marks other `ws` processes saved) becomes the in-memory store
-    /// and the new baseline. On error both stay, so the next save retries
-    /// the same changes.
-    fn save_viewed(&mut self) -> std::io::Result<()> {
-        let merged = save_viewed_store(
-            &self.viewed_baseline,
-            &self.viewed_store,
-            &self.viewed_path,
-            &workspace_store_id(&self.cwd),
-        )?;
-        self.viewed_store = merged.clone();
-        self.viewed_baseline = merged;
-        Ok(())
+    /// Recompute [`Self::reviewed`] from the viewed store and the file
+    /// facts. No file I/O.
+    fn refresh_reviewed(&mut self) {
+        self.reviewed = if self.viewed_store.is_empty() {
+            HashSet::new()
+        } else {
+            let current = self.file_facts.fingerprints(&self.snapshot);
+            viewed_row_ids(&self.snapshot, &self.viewed_store, &current)
+        };
     }
 
-    /// Save the comment changes of this session since the last load or
-    /// save, merged with the store on disk. Same rules as
-    /// [`Self::save_viewed`].
-    fn save_comments(&mut self) -> std::io::Result<()> {
-        let merged = save_comment_store(
-            &self.comment_baseline,
-            &self.comment_store,
-            &self.comment_path,
-            &workspace_store_id(&self.cwd),
-        )?;
-        self.comment_store = merged.clone();
-        self.comment_baseline = merged;
-        Ok(())
+    /// Replace the disk facts of checkout `repo`, read by its status
+    /// worker; `None` drops them (the checkout left the snapshot). Call it
+    /// before [`Self::apply_watch_snapshot`] applies that status.
+    pub(crate) fn set_file_facts(&mut self, repo: &str, facts: Option<RepoFileFacts>) {
+        self.file_facts.set(repo, facts);
+    }
+
+    /// Read the disk facts of every dirty file of the snapshot on this
+    /// thread, as the status workers would. Tests that change a worktree
+    /// file and then apply a snapshot use it.
+    #[cfg(test)]
+    pub(crate) fn read_file_facts_from_disk(&mut self) {
+        self.file_facts = FileFactsCache::from_disk(&self.cwd, &self.snapshot);
+    }
+
+    /// A save of store `kind` is asked for and none runs.
+    pub(crate) fn store_save_ready(&self, kind: StoreKind) -> bool {
+        match kind {
+            StoreKind::Viewed => self.viewed_sync.ready(),
+            StoreKind::Comments => self.comment_sync.ready(),
+        }
+    }
+
+    /// A save of some store runs on a worker.
+    pub(crate) fn store_save_in_flight(&self) -> bool {
+        self.viewed_sync.in_flight() || self.comment_sync.in_flight()
+    }
+
+    /// A save of some store is asked for or runs.
+    pub(crate) fn store_saves_pending(&self) -> bool {
+        self.viewed_sync.pending() || self.comment_sync.pending()
+    }
+
+    /// Ask again for the save of store `kind` whose last save failed, when
+    /// none is asked for or runs. Quit calls it once per store so changes
+    /// a failed save kept still get one more try. Returns true when it
+    /// asked.
+    pub(crate) fn retry_failed_store_save(&mut self, kind: StoreKind) -> bool {
+        match kind {
+            StoreKind::Viewed => self.viewed_sync.retry_failed(),
+            StoreKind::Comments => self.comment_sync.retry_failed(),
+        }
+    }
+
+    /// The stores whose changes are not on disk at quit: a save still
+    /// asked for or running when `timed_out` (the grace that ran out) is
+    /// set, else a last save that failed.
+    pub(crate) fn unsaved_stores(&self, timed_out: Option<Duration>) -> Vec<UnsavedStore> {
+        StoreKind::ALL
+            .into_iter()
+            .filter_map(|kind| {
+                let (pending, failed) = match kind {
+                    StoreKind::Viewed => (self.viewed_sync.pending(), self.viewed_sync.failed()),
+                    StoreKind::Comments => {
+                        (self.comment_sync.pending(), self.comment_sync.failed())
+                    }
+                };
+                let reason = match (timed_out, failed) {
+                    (Some(grace), _) if pending => UnsavedReason::TimedOut(grace),
+                    (_, Some(err)) => UnsavedReason::Failed(err.to_string()),
+                    _ => return None,
+                };
+                Some(UnsavedStore { kind, reason })
+            })
+            .collect()
+    }
+
+    /// Start the save of store `kind` asked for: the job that writes this
+    /// session's changes since the last load or save. `None` unless
+    /// [`Self::store_save_ready`]. The caller runs the job off the loop
+    /// thread and lands it with [`Self::land_store_save`].
+    pub(crate) fn begin_store_save(&mut self, kind: StoreKind) -> Option<StoreSaveJob> {
+        let cwd = self.cwd.clone();
+        match kind {
+            StoreKind::Viewed => {
+                let (baseline, store) = self.viewed_sync.begin(&self.viewed_store)?;
+                Some(StoreSaveJob::Viewed {
+                    baseline,
+                    store,
+                    path: self.viewed_path.clone(),
+                    cwd,
+                })
+            }
+            StoreKind::Comments => {
+                let (baseline, store) = self.comment_sync.begin(&self.comment_store)?;
+                Some(StoreSaveJob::Comments {
+                    baseline,
+                    store,
+                    path: self.comment_path.clone(),
+                    cwd,
+                })
+            }
+        }
+    }
+
+    /// Land a store save. On success the merged bucket (with entries other
+    /// `ws` processes saved) plus the changes made since the save started
+    /// becomes the in-memory store, the merged bucket the new baseline, and
+    /// an ack the save carried shows. On error the status names the
+    /// failure, and the baseline and the changes stay, so the next save
+    /// sends them again: the next change asks for one, and quit retries
+    /// once ([`Self::retry_failed_store_save`]).
+    pub(crate) fn land_store_save(&mut self, saved: StoreSaved) {
+        let kind = saved.kind();
+        let landed = match saved {
+            StoreSaved::Viewed(result) => {
+                let landed = self.viewed_sync.land(&mut self.viewed_store, result);
+                self.refresh_reviewed();
+                landed
+            }
+            StoreSaved::Comments(result) => self.comment_sync.land(&mut self.comment_store, result),
+        };
+        match landed {
+            Ok(Some(ack)) => self.status = StatusMessage::ok(ack),
+            Ok(None) => {}
+            Err(err) => {
+                self.status = StatusMessage::error(persist_failed_status(kind.label(), err));
+            }
+        }
+    }
+
+    /// Run every store save asked for on this thread, as the workers
+    /// would. Tests that drive [`Self::dispatch`] without the interpreter
+    /// use it.
+    #[cfg(test)]
+    pub(crate) fn flush_store_saves(&mut self) {
+        for kind in StoreKind::ALL {
+            while let Some(job) = self.begin_store_save(kind) {
+                self.land_store_save(job.run());
+            }
+        }
     }
 
     /// Space on a compare tab: session-only mark on the focused committed file.
@@ -5720,16 +5855,25 @@ impl AppState {
         Effect::None
     }
 
+    /// Drop viewed marks whose file is clean or whose fingerprint (from the
+    /// file facts) moved, and ask for a save when one dropped. A dirty file
+    /// with no facts keeps its mark: its fingerprint is unknown, not
+    /// changed. No file I/O.
     fn reconcile_viewed_store(&mut self) {
-        let current = collect_current_fingerprints(&self.snapshot, &self.cwd);
-        let next = reconcile_viewed(&self.viewed_store, &current);
-        if next != self.viewed_store {
-            self.viewed_store = next;
-            if let Err(err) = self.save_viewed() {
-                self.status = StatusMessage::error(persist_failed_status("viewed", err));
+        if !self.viewed_store.is_empty() {
+            let mut current = self.file_facts.fingerprints(&self.snapshot);
+            for identity in self.file_facts.unknown_identities(&self.snapshot) {
+                if let Some(marked) = self.viewed_store.get(&identity) {
+                    current.insert(identity, marked.clone());
+                }
+            }
+            let next = reconcile_viewed(&self.viewed_store, &current);
+            if next != self.viewed_store {
+                self.viewed_store = next;
+                self.viewed_sync.want(None);
             }
         }
-        self.reviewed = viewed_row_ids(&self.snapshot, &self.viewed_store, &self.cwd);
+        self.refresh_reviewed();
     }
 
     fn reconcile_comment_store(&mut self) {
@@ -5742,9 +5886,7 @@ impl AppState {
         self.comment_checkout_owners = live.checkout_owners;
         if next != self.comment_store {
             self.comment_store = next;
-            if let Err(err) = self.save_comments() {
-                self.status = StatusMessage::error(persist_failed_status("comment", err));
-            }
+            self.comment_sync.want(None);
         }
     }
 
@@ -6090,18 +6232,12 @@ impl AppState {
         let empty = body.trim().is_empty();
         self.comment_store =
             put_comment_entry(&self.comment_store, prompt.key, &body, prompt.resolved);
-        match self.save_comments() {
-            Ok(()) => {
-                self.status = StatusMessage::ok(if empty {
-                    "comment deleted"
-                } else {
-                    "comment saved"
-                });
-            }
-            Err(err) => {
-                self.status = StatusMessage::error(persist_failed_status("comment", err));
-            }
-        }
+        // The save runs on a worker; its landing shows the ack or the error.
+        self.comment_sync.want(Some(if empty {
+            "comment deleted"
+        } else {
+            "comment saved"
+        }));
         Effect::None
     }
 

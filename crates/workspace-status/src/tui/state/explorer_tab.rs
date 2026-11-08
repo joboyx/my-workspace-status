@@ -551,18 +551,16 @@ impl AppState {
             self.status = StatusMessage::warn(FOCUS_A_FILE_TO_MARK_REVIEWED);
             return Effect::None;
         };
-        let before = self.status.clone();
         let Some(marked) = self.toggle_viewed_for(&checkout, &change.path) else {
             return Effect::None;
         };
-        // A failed save already put its error on the status line.
-        if self.status == before {
-            self.status = StatusMessage::info(if marked {
-                "marked reviewed"
-            } else {
-                "reviewed mark cleared"
-            });
-        }
+        // The save runs on a worker: a failure replaces this line when it
+        // lands.
+        self.status = StatusMessage::info(if marked {
+            "marked reviewed"
+        } else {
+            "reviewed mark cleared"
+        });
         Effect::None
     }
 

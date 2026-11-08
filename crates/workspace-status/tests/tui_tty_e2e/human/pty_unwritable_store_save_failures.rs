@@ -89,6 +89,72 @@ fn pty_semicolon_save_names_failure_when_unwritable() {
     let _ = fs::remove_dir_all(blocker_root);
 }
 
+/// Enter and `q` in one write on an unwritable comment store: the save
+/// fails inside the quit flush, after the last frame. Once the terminal is
+/// restored, `ws` must name the lost comment on stderr (the PTY), and still
+/// exit 0.
+#[test]
+fn pty_comment_save_failed_at_quit_is_named_on_stderr() {
+    let (_root, workspace) = daily_workspace();
+    let (blocker_root, path) = unwritable_store_path("ws-pty-comment-quit-fail");
+    let store = path.to_str().expect("utf-8 store path").to_string();
+    let mut tui = PtySession::open_with_env(&workspace, &[("WS_STATUS_COMMENT_STORE", &store)]);
+    tui.wait_pred(
+        documented_launch_first_paint,
+        "launch is the dirty README file diff",
+        WAIT,
+    );
+
+    tui.tab();
+    tui.wait_pred(
+        right_diff_focused,
+        "Tab focuses the dirty README diff (not a tree comment)",
+        WAIT,
+    );
+    csi_u_semicolon(&mut tui);
+    tui.wait_pred(comment_overlay, "; opens the Comment overlay", WAIT);
+    tui.keys(BODY);
+    tui.wait_pred(
+        |screen| comment_overlay(screen) && screen.contains(BODY),
+        "typed body appears in the overlay",
+        WAIT,
+    );
+
+    tui.send_bytes(b"\rq");
+    tui.wait_exit(WAIT);
+    let expected = "comment changes since the last save are lost";
+    let start = std::time::Instant::now();
+    let output = loop {
+        let output = String::from_utf8_lossy(&tui.raw_output()).into_owned();
+        if output.contains(expected) || start.elapsed() >= WAIT {
+            break output;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let line = output
+        .lines()
+        .find(|line| line.contains(expected))
+        .unwrap_or_else(|| {
+            panic!(
+                "no stderr line names the lost comment; output tail:\n{}",
+                tail(&output)
+            )
+        });
+    assert!(
+        line.contains("comment save failed: "),
+        "the line names the failed save and its error: {line:?}"
+    );
+    let _ = fs::remove_dir_all(blocker_root);
+}
+
+fn tail(output: &str) -> &str {
+    let start = output.len().saturating_sub(600);
+    let start = (start..output.len())
+        .find(|&i| output.is_char_boundary(i))
+        .unwrap_or(output.len());
+    &output[start..]
+}
+
 /// Space on a dirty file names persist failure when the viewed store parent
 /// is a regular file (`not-a-dir/store.json`).
 ///

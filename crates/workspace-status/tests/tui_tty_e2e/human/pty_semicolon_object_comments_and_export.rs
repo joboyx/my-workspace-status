@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::harness::PtySession;
 use crate::seed::{daily_workspace, git, git_env, seed_repo, unique_root, worktree_workspace};
@@ -281,6 +283,18 @@ fn pty_semicolon_object_comments_and_export() {
         "r refresh after deleting doomed drops its comment from the store",
         GIT_WAIT,
     );
+    // The tree already showed `app` before `r`, so the wait above does not
+    // prove the reload landed. GC on that reload saves the store without
+    // the doomed comment; wait for that save before `y`.
+    let deadline = Instant::now() + GIT_WAIT;
+    while store_text(&workspace).contains(ATTACH_BODY) {
+        assert!(
+            Instant::now() < deadline,
+            "refresh GC must save the store without the doomed comment:\n{}",
+            tui.screen()
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
     tui.key('y');
     tui.wait_pred(
         |screen| {

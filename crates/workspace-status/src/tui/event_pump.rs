@@ -796,6 +796,100 @@ mod tests {
             app.contains("graph_load::load_commit(dir") && effect.contains("compute_compare_range("),
             "the footer commit read runs in compute_compare_range, on spawn_blocking via Interpreter"
         );
+        // A status result reads no worktree file and a store change writes
+        // no store file on the loop thread: the status worker reads the
+        // file facts, a save is a worker job, and quit finishes the saves.
+        let watch_src = include_str!("watch.rs");
+        let explorer_state = include_str!("state/explorer_tab.rs");
+        for banned in [
+            "fingerprint_file_change(",
+            "collect_current_fingerprints(",
+            "save_viewed_store(",
+            "save_comment_store(",
+            "persist_with_lock(",
+        ] {
+            for (name, src) in [
+                ("state/mod.rs", state_src),
+                ("state/explorer_tab.rs", explorer_state),
+                ("app.rs", app),
+                ("effect.rs", effect),
+                ("event_loop.rs", loop_src),
+            ] {
+                assert!(
+                    !src.contains(banned),
+                    "{banned} must not run on the TTY loop thread ({name})"
+                );
+            }
+        }
+        // The facts read and the save job are blocking wrappers: the
+        // reducer files must not call them either.
+        for (name, src) in [
+            ("state/mod.rs", state_src),
+            ("state/explorer_tab.rs", explorer_state),
+            ("app.rs", app),
+            ("event_loop.rs", loop_src),
+        ] {
+            assert!(
+                !src.contains("collect_repo_file_facts("),
+                "collect_repo_file_facts( reads worktree files; it runs on the status worker, not the loop thread ({name})"
+            );
+        }
+        for (name, src) in [
+            ("state/explorer_tab.rs", explorer_state),
+            ("app.rs", app),
+            ("effect.rs", effect),
+            ("event_loop.rs", loop_src),
+        ] {
+            assert!(
+                !src.contains("FileFactsCache::from_disk("),
+                "FileFactsCache::from_disk( reads every dirty file; only the launch may call it ({name})"
+            );
+        }
+        assert_eq!(
+            state_src.matches("FileFactsCache::from_disk(").count(),
+            2,
+            "state/mod.rs may read the file facts from disk only at launch and in the #[cfg(test)] helper"
+        );
+        assert_eq!(
+            effect.matches("job.run()").count(),
+            1,
+            "effect.rs runs a store-save job only inside its spawned worker closure"
+        );
+        assert!(
+            effect.contains("JobOutcome::StoreSaved { saved: job.run() }"),
+            "the store-save job runs inside the spawned worker closure"
+        );
+        assert_eq!(
+            state_src.matches("job.run()").count(),
+            1,
+            "state/mod.rs runs a store-save job only in the #[cfg(test)] flush helper"
+        );
+        assert!(
+            !state_src.contains("file_disk_token("),
+            "tree signatures and viewed marks take disk tokens from the file facts"
+        );
+        let row_signature = watch_src
+            .split("pub fn row_signature(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub fn tree_signatures(").next())
+            .expect("row_signature in watch.rs");
+        assert!(
+            !row_signature.contains("file_disk_token(") && !row_signature.contains("fs::"),
+            "row_signature must read the file facts, not stat the file"
+        );
+        assert!(
+            effect.contains("collect_repo_file_facts(") && effect.contains("UserTag::StoreSave"),
+            "file facts and store saves run on spawn_blocking via Interpreter"
+        );
+        let run_tail = loop_src
+            .split("let result = drive(&mut ctx).await;")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("run drives the loop, then quits");
+        assert!(
+            run_tail.contains("flush_store_saves("),
+            "quit must finish the viewed and comment saves before the runtime shuts down"
+        );
         let blame_state = include_str!("state/line_blame.rs");
         assert!(
             !render.contains("blame_line(") && !blame_state.contains("blame_line("),

@@ -34,6 +34,7 @@ use crate::tui::pull_request::PrDetailLookup;
 use crate::tui::scheduler::UserTag;
 use crate::tui::state::AppState;
 use crate::tui::status::StatusMessage;
+use crate::tui::store_save::{StoreKind, StoreSaved};
 
 /// What a worker sends back: the outcome, or the panic message of a job
 /// that panicked.
@@ -149,6 +150,8 @@ pub(super) enum JobRelease {
     CommitCard { repo: String, sha: String },
     /// Doctor probe (serial latest-only slot).
     Doctor,
+    /// Save of store `kind` (serial slot per store file).
+    StoreSave { kind: StoreKind },
     /// PRs tab title fill (one fill at a time).
     PrTitles,
     /// Host clipboard tool copy (serial latest-only slot). `pending` when
@@ -192,6 +195,10 @@ impl JobRelease {
             Self::LineBlame { .. } => "line blame",
             Self::CommitCard { .. } => "commit card",
             Self::Doctor => "Doctor probe",
+            Self::StoreSave { kind } => match kind {
+                StoreKind::Viewed => "viewed save",
+                StoreKind::Comments => "comment save",
+            },
             Self::PrTitles => "PR title fill",
             Self::Clipboard { .. } => "clipboard copy",
             Self::PrDetail { .. } => "PR detail",
@@ -392,6 +399,11 @@ impl Interpreter {
                 self.doctor_job.finish(&mut self.sched);
                 None
             }
+            // The landing frees the slot and keeps the unsaved changes for
+            // the next save.
+            JobRelease::StoreSave { kind } => Some(JobOutcome::StoreSaved {
+                saved: StoreSaved::failed(kind, failed()),
+            }),
             JobRelease::PrTitles => {
                 // A cut-short fill changes nothing on screen and asks for
                 // no next fill; the next title cycle may start one.

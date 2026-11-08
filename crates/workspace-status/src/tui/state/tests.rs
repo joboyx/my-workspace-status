@@ -3987,6 +3987,7 @@ fn compare_semicolon_keys_line_comment_to_compare_head() {
     assert!(prompt.label.contains("commit ccc"), "{}", prompt.label);
     type_comment(&mut app, "cmp");
     app.dispatch(Action::CommentSubmit);
+    app.flush_store_saves();
     assert_eq!(app.status, "comment saved");
     assert_eq!(
         app.comment_store
@@ -5882,6 +5883,12 @@ fn submit_comment_names_save_failure_when_unwritable() {
     )));
     app.dispatch(Action::CommentSubmit);
     assert!(
+        !app.status.contains("comment save failed"),
+        "dispatch must not write the store on the loop thread: {}",
+        app.status
+    );
+    app.flush_store_saves();
+    assert!(
         !app.status.contains("comment saved"),
         "failed persist must not claim success: {}",
         app.status
@@ -5902,6 +5909,12 @@ fn toggle_reviewed_names_save_failure_when_unwritable() {
     let (root, path) = unwritable_store_path("ws-viewed-save-fail");
     app.viewed_path = path;
     assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
+    assert!(
+        !app.status.contains("viewed save failed"),
+        "dispatch must not write the store on the loop thread: {}",
+        app.status
+    );
+    app.flush_store_saves();
     assert!(
         app.reviewed.contains(&id),
         "session mark still flips when disk write fails"
@@ -5934,6 +5947,12 @@ fn reconcile_comment_names_save_failure_when_unwritable() {
     );
     app.apply_snapshot(app.snapshot.clone());
     assert!(
+        !app.status.contains("comment save failed"),
+        "a snapshot apply must not write the store on the loop thread: {}",
+        app.status
+    );
+    app.flush_store_saves();
+    assert!(
         app.status.contains("comment save failed"),
         "GC persist failure must name the failure: {}",
         app.status
@@ -5953,10 +5972,19 @@ fn reconcile_viewed_names_save_failure_when_unwritable() {
     let mut app = AppState::new(workspace.clone(), snapshot.clone(), true);
     focus_file(&mut app, "README.md");
     assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
+    app.flush_store_saves();
     let (blocker_root, path) = unwritable_store_path("ws-viewed-gc-path");
     app.viewed_path = path;
     fs::write(repo_dir.join("README.md"), "# changed\n").unwrap();
+    // The status worker reads the changed file.
+    app.read_file_facts_from_disk();
     app.apply_snapshot(snapshot);
+    assert!(
+        !app.status.contains("viewed save failed"),
+        "a snapshot apply must not write the store on the loop thread: {}",
+        app.status
+    );
+    app.flush_store_saves();
     assert!(
         app.status.contains("viewed save failed"),
         "reconcile persist failure must name the failure: {}",
@@ -5981,12 +6009,55 @@ fn reviewed_persists_and_drops_on_fingerprint_change() {
     let id = app.focused_row().unwrap().id.clone();
     assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
     assert!(app.reviewed.contains(&id));
+    app.flush_store_saves();
     let loaded = load_viewed_store(&app.viewed_path, &workspace_store_id(&app.cwd));
     assert!(loaded.contains_key(&viewed_identity("app", "README.md")));
     fs::write(repo_dir.join("README.md"), "# changed\n").unwrap();
+    // The status worker reads the changed file.
+    app.read_file_facts_from_disk();
     app.apply_snapshot(snapshot);
     assert!(!app.reviewed.contains(&id));
+    app.flush_store_saves();
     assert!(load_viewed_store(&app.viewed_path, &workspace_store_id(&app.cwd)).is_empty());
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// A dirty file with no file facts has an unknown fingerprint, not a
+/// changed one: a snapshot applied without its checkout's facts keeps the
+/// mark and asks for no save.
+#[test]
+fn reviewed_mark_survives_a_snapshot_without_file_facts() {
+    use crate::tui::viewed::{load_viewed_store, viewed_identity, workspace_store_id};
+    use std::fs;
+    let root = std::env::temp_dir().join(format!(
+        "ws-reviewed-no-facts-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let workspace = root.join("ws");
+    let repo_dir = workspace.join("app");
+    fs::create_dir_all(&repo_dir).unwrap();
+    fs::write(repo_dir.join("README.md"), "# dirty\n").unwrap();
+    let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+    let mut app = AppState::new(workspace.clone(), snapshot.clone(), true);
+    focus_file(&mut app, "README.md");
+    assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
+    app.flush_store_saves();
+    app.set_file_facts("app", None);
+    app.apply_snapshot(snapshot);
+    assert!(
+        app.viewed_store
+            .contains_key(&viewed_identity("app", "README.md")),
+        "missing facts must not drop the mark"
+    );
+    assert!(
+        !app.store_saves_pending(),
+        "nothing changed, nothing to save"
+    );
+    let loaded = load_viewed_store(&app.viewed_path, &workspace_store_id(&app.cwd));
+    assert!(loaded.contains_key(&viewed_identity("app", "README.md")));
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -11938,6 +12009,7 @@ fn semicolon_without_visual_opens_covering_range() {
     app.comment = Some(CommentPrompt::new(prompt.key, String::new(), prompt.label));
     app.dispatch(Action::CommentSubmit);
     assert!(!app.comment_store.contains_key(&range));
+    app.flush_store_saves();
     assert_eq!(app.status, "comment deleted");
 }
 
