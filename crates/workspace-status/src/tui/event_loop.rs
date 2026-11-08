@@ -224,15 +224,17 @@ fn forward<T>(
 
 struct Presenter {
     dirty: bool,
-    last_draw: Instant,
+    /// `None` until the first frame. An instant before now cannot stand in
+    /// for it: on Windows `Instant` counts from boot, so subtracting from
+    /// it panics on a host that booted moments ago.
+    last_draw: Option<Instant>,
 }
 
 impl Presenter {
     fn new() -> Self {
         Self {
             dirty: true,
-            // Backdated past the floor so the first frame draws at once.
-            last_draw: Instant::now() - Duration::from_millis(DRAW_MIN_MS),
+            last_draw: None,
         }
     }
 
@@ -255,8 +257,11 @@ impl Presenter {
         dirty.min(tick)
     }
 
+    /// Milliseconds since the last draw. With no draw yet, past every floor
+    /// and tick, so the first frame draws at once.
     fn elapsed_ms(&self) -> u64 {
-        self.last_draw.elapsed().as_millis() as u64
+        self.last_draw
+            .map_or(u64::MAX, |at| at.elapsed().as_millis() as u64)
     }
 
     /// A draw is due: past the draw floor, and dirty or one animation tick
@@ -272,7 +277,7 @@ impl Presenter {
 
     fn painted(&mut self) {
         self.dirty = false;
-        self.last_draw = Instant::now();
+        self.last_draw = Some(Instant::now());
     }
 }
 
@@ -1030,8 +1035,23 @@ mod tests {
     fn presenter(dirty: bool) -> Presenter {
         Presenter {
             dirty,
-            last_draw: Instant::now(),
+            last_draw: Some(Instant::now()),
         }
+    }
+
+    #[test]
+    fn the_first_frame_is_due_at_once_then_the_floor_applies() {
+        let mut presenter = Presenter::new();
+        assert!(presenter.should_draw(None));
+        assert_eq!(presenter.remain_ms(None), 0);
+        presenter.painted();
+        assert!(!presenter.should_draw(None), "clean after the first frame");
+        presenter.mark();
+        assert!(
+            !presenter.should_draw_after(0, None),
+            "the floor holds a dirty frame back"
+        );
+        assert!(presenter.should_draw_after(DRAW_MIN_MS, None));
     }
 
     /// A frame is one synchronized update: the begin sequence is the first

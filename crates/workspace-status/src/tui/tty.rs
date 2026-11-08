@@ -24,10 +24,8 @@ use std::time::{Duration, Instant};
 #[cfg(not(unix))]
 use crossterm::event;
 use crossterm::event::{
-    DisableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
-    MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use crossterm::execute;
 
 use super::keys::KeyStrokeOrigin;
 
@@ -40,9 +38,13 @@ use super::keys::KeyStrokeOrigin;
 /// tracking reports pointer motion with no button held. The tab strip uses
 /// it for the `[✗]` hover. Under 1003 some terminals add the motion bit (32)
 /// to wheel reports (`96`/`97` vertical, `98`/`99` horizontal). The Unix
-/// reader decodes those as the plain wheel. [`disable_mouse`] resets every
+/// reader decodes those as the plain wheel. [`MOUSE_DISABLE`] resets every
 /// mode, 1003 included.
 pub const MOUSE_ENABLE: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h";
+
+/// ANSI written to disable mouse capture: the inverse of [`MOUSE_ENABLE`], in
+/// reverse order.
+pub const MOUSE_DISABLE: &[u8] = b"\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
 
 #[cfg(test)]
 /// xterm SGR button for wheel right (trackpad hscroll).
@@ -63,9 +65,15 @@ pub fn enable_mouse(out: &mut impl Write) -> io::Result<()> {
     out.flush()
 }
 
-/// Disable mouse capture (crossterm inverse of every DECSET it turns on).
+/// Disable mouse capture. See [`MOUSE_DISABLE`].
+///
+/// Writes the bytes itself, as [`enable_mouse`] does. On Windows crossterm's
+/// `DisableMouseCapture` restores the console mode that its own
+/// `EnableMouseCapture` saved instead. [`enable_mouse`] never calls that, so
+/// the command fails and the terminal keeps reporting the mouse after exit.
 pub fn disable_mouse(out: &mut impl Write) -> io::Result<()> {
-    execute!(out, DisableMouseCapture)
+    out.write_all(MOUSE_DISABLE)?;
+    out.flush()
 }
 
 /// Poll for a TTY event. Live loop only; same reader as [`read_event`].
@@ -972,6 +980,11 @@ mod tests {
         for mode in ["1000l", "1002l", "1003l", "1015l", "1006l"] {
             assert!(disable.contains(mode), "disable misses {mode}: {disable:?}");
         }
+        #[cfg(unix)]
+        assert!(
+            super::super::term_restore::RESTORE_SEQ.starts_with(MOUSE_DISABLE),
+            "the exit-signal restore turns the mouse off the same way"
+        );
     }
 
     #[test]
