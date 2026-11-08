@@ -658,6 +658,10 @@ fn synthesize_empty_and_body() {
         synthesize_all_add_diff("a\nb\n"),
         "@@ -0,0 +1,2 @@\n+a\n+b\n"
     );
+    assert_eq!(
+        synthesize_all_add_diff("a\r\nb\rc"),
+        "@@ -0,0 +1,2 @@\n+a\r\n+b\rc\n\\ No newline at end of file\n"
+    );
 }
 
 #[test]
@@ -1108,7 +1112,7 @@ fn revert_patch_fails_closed() {
 
 mod real_git {
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use super::*;
     use crate::git::{apply_cached_patch, apply_worktree_patch_reverse, blob_bytes};
@@ -1650,6 +1654,111 @@ keep-z
                 "{kind:?} {row}"
             );
         }
+    }
+
+    /// Commit `base` as `f.txt` and write `edit` over it, or with no `base`
+    /// leave `edit` untracked. The diff loads the way the TUI loads it
+    /// ([`load_file_diff`]), so the test sees git's real output bytes.
+    fn exact_bytes_repo(prefix: &str, base: Option<&[u8]>, edit: &[u8]) -> (PathBuf, DiffContent) {
+        let dir = unique_dir(prefix);
+        init_repo(&dir);
+        let file = dir.join("f.txt");
+        if let Some(base) = base {
+            fs::write(&file, base).unwrap();
+            git(&dir, &["add", "f.txt"]);
+            git(&dir, &["commit", "-q", "-m", "base"]);
+        }
+        fs::write(&file, edit).unwrap();
+        let change = crate::snapshot::FileChange {
+            path: "f.txt".into(),
+            staged_status: None,
+            unstaged_status: base.map(|_| "M".to_string()),
+            untracked: base.is_none(),
+            old_path: None,
+        };
+        let content = load_file_diff(&dir, "", &change, None);
+        (dir, content)
+    }
+
+    /// Stage painted rows `from..=to` and read the index blob of `f.txt`.
+    fn stage_rows(dir: &Path, content: &DiffContent, from: usize, to: usize) -> Vec<u8> {
+        let patch = build_partial_patch(
+            content,
+            DiffMode::Inline,
+            from,
+            to,
+            PartialPatchKind::Stage,
+            "f.txt",
+        )
+        .expect("patch");
+        apply_cached_patch(dir, &patch, false).unwrap_or_else(|err| panic!("{err}\n{patch}"));
+        blob_bytes(dir, "", "f.txt").expect("index blob")
+    }
+
+    /// A line stage of a CRLF file keeps every `\r`, and a lone `\r` inside
+    /// a line does not split it, so the line numbers match the file.
+    #[test]
+    fn line_stage_of_a_crlf_file_writes_its_exact_bytes() {
+        let (dir, content) = exact_bytes_repo(
+            "ws-diff-crlf",
+            Some(b"p\rq\r\na\r\nc\r\n"),
+            b"p\rq\r\na\r\nB\r\nc\r\nd\r\n",
+        );
+        let row = line_row(&content, "B");
+        let line = row_line_ref(&content, DiffMode::Inline, row).expect("line ref");
+        assert_eq!(line.new_no, Some(3));
+        assert_eq!(
+            String::from_utf8(stage_rows(&dir, &content, row, row)).unwrap(),
+            "p\rq\r\na\r\nB\r\nc\r\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The last line of git's diff output keeps its trailing whitespace
+    /// when one line of it is staged.
+    #[test]
+    fn line_stage_keeps_trailing_whitespace() {
+        let (dir, content) = exact_bytes_repo("ws-diff-trailing-ws", Some(b"x\n"), b"x\ny \t\n");
+        let row = line_row(&content, "y   ");
+        assert_eq!(
+            String::from_utf8(stage_rows(&dir, &content, row, row)).unwrap(),
+            "x\ny \t\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Staging every line of an untracked CRLF file with no final newline
+    /// writes the file's bytes: the `\r` stay and no newline is added.
+    #[test]
+    fn line_stage_of_a_new_crlf_file_without_final_newline_writes_its_exact_bytes() {
+        let (dir, content) = exact_bytes_repo("ws-diff-new-crlf", None, b"u1\r\nu2");
+        let first = line_row(&content, "u1");
+        let last = line_row(&content, "u2");
+        assert_eq!(
+            String::from_utf8(stage_rows(&dir, &content, first, last)).unwrap(),
+            "u1\r\nu2"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A diff with bytes that are not UTF-8 paints U+FFFD, and a line stage
+    /// refuses instead of writing U+FFFD into the index.
+    #[test]
+    fn line_stage_refuses_a_diff_that_is_not_utf8() {
+        let (dir, content) = exact_bytes_repo("ws-diff-not-utf8", Some(b"a\n"), b"a\n\xffz\n");
+        let row = line_row(&content, "\u{FFFD}z");
+        let err = build_partial_patch(
+            &content,
+            DiffMode::Inline,
+            row,
+            row,
+            PartialPatchKind::Stage,
+            "f.txt",
+        )
+        .unwrap_err();
+        assert_eq!(err, "cannot stage highlight: diff is not UTF-8 text");
+        assert_eq!(blob_bytes(&dir, "", "f.txt").expect("index blob"), b"a\n");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

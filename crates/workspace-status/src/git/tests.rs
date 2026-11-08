@@ -1467,6 +1467,24 @@ fn compare_revert_fixture() -> (std::path::PathBuf, String, String) {
     (dir, merge_base, head)
 }
 
+/// Compare diff lines keep git's bytes: a CRLF line keeps its `\r` and
+/// the last line keeps its trailing whitespace, since a compare revert
+/// builds its patch from them.
+#[test]
+fn compare_diff_lines_keep_carriage_returns_and_trailing_whitespace() {
+    let dir = unique_dir("ws-git-compare-exact");
+    init_repo(&dir);
+    fs::write(dir.join("f.txt"), "a\r\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "base"]);
+    let base = exec_git(&["rev-parse", "HEAD"], &dir);
+    fs::write(dir.join("f.txt"), "a\r\nb \t\n").unwrap();
+    git(&dir, &["commit", "-q", "-am", "head"]);
+    let lines = diff_compare_file_ctx(&dir, &base, "HEAD", "f.txt", None, None).unwrap();
+    assert_eq!(lines[lines.len() - 2..], [" a\r", "+b \t"]);
+    let _ = fs::remove_dir_all(&dir);
+}
+
 fn index_is_head(dir: &Path) -> bool {
     exec_git_status(&["diff", "--cached", "--quiet"], dir) == 0
 }

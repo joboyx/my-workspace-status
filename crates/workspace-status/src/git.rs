@@ -2046,6 +2046,20 @@ pub fn exec_git_stdout(args: &[&str], cwd: &Path) -> Result<String, String> {
     }
 }
 
+/// [`exec_git_stdout`] without the trim: every byte of stdout, trailing
+/// whitespace and `\r` included.
+///
+/// For text a patch is built from (a `git diff` that `V` stage / unstage /
+/// revert rewrites). Bytes that are not UTF-8 still decode lossily to
+/// U+FFFD; `build_partial_patch` refuses a patch that holds one.
+pub fn exec_git_stdout_untrimmed(args: &[&str], cwd: &Path) -> Result<String, String> {
+    match run(args, cwd) {
+        Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
+        Ok(out) => Err(git_failure_message(args, &out)),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
 /// Committer times (unix seconds) of the commits on local branches in the
 /// last `days` days, newest first.
 ///
@@ -2245,6 +2259,10 @@ pub fn git_compare_diff_args(
 }
 
 /// Unified compare diff for one path. Success with empty stdout is `(no diff)`.
+///
+/// Lines split on `\n` only and keep their bytes (a CRLF line keeps its
+/// `\r`, trailing whitespace stays), because a compare revert builds its
+/// patch from them.
 pub fn diff_compare_file_ctx(
     cwd: &Path,
     base_sha: &str,
@@ -2255,12 +2273,12 @@ pub fn diff_compare_file_ctx(
 ) -> Result<Vec<String>, String> {
     let args = git_compare_diff_args(base_sha, head_sha, path, old_path, context);
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let stdout = exec_git_stdout(&refs, cwd)?;
+    let stdout = exec_git_stdout_untrimmed(&refs, cwd)?;
     if stdout.trim().is_empty() {
-        Ok(vec!["(no diff)".into()])
-    } else {
-        Ok(stdout.lines().map(str::to_string).collect())
+        return Ok(vec!["(no diff)".into()]);
     }
+    let body = stdout.strip_suffix('\n').unwrap_or(&stdout);
+    Ok(body.split('\n').map(str::to_string).collect())
 }
 
 /// `git diff` argv for one path, commit `base_sha` against the working tree.
