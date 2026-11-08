@@ -1070,12 +1070,10 @@ pub(crate) mod fixtures {
     /// caller removes its dir.
     #[cfg(unix)]
     pub(crate) fn script_with(body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let dir = crate::testutil::unique_dir("ws-prs-title");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("title");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testutil::write_sh_script(&path, body);
         path
     }
 
