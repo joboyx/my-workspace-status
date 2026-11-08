@@ -2,7 +2,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use crate::harness::PtySession;
+use crate::harness::{write_baseline_user_config_with, PtySession};
 use crate::seed::daily_workspace;
 use crate::support::{tree_cursor_on, tree_has, GIT_WAIT, WAIT};
 
@@ -72,9 +72,10 @@ fn pty_uppercase_e_opens_focused_file_in_diff_tool() {
     );
     fs::write(
         workspace.join(".workspace-status-config.json"),
-        format!("{{\n  \"hiddenPaths\": [\"notes\"],\n  \"diffTool\": \"{tool}\"\n}}\n"),
+        "{\n  \"hiddenPaths\": [\"notes\"]\n}\n",
     )
     .unwrap();
+    write_baseline_user_config_with(&workspace, &format!("\"diffTool\":\"{tool}\""));
     let marker_s = marker.display().to_string();
     let hold_s = hold.display().to_string();
     let mut tui = PtySession::open_with_env(

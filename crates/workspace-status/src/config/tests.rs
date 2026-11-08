@@ -67,35 +67,23 @@ fn omit_diff_tool_is_none() {
 
 #[test]
 fn diff_tool_vimdiff_is_kept() {
-    let dir = write_config(
-        "ws-config-diff-vim",
-        r#"{"hiddenPaths":[],"diffTool":"vimdiff"}"#,
-    );
-    let cfg = load_config_files(None, &dir).unwrap();
+    let cfg = load_layered(Some(r#"{"hiddenPaths":[],"diffTool":"vimdiff"}"#), None).unwrap();
     assert_eq!(cfg.diff_tool.as_deref(), Some("vimdiff"));
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn blank_diff_tool_is_none() {
-    let dir = write_config(
-        "ws-config-diff-blank",
-        r#"{"hiddenPaths":[],"diffTool":"  "}"#,
-    );
-    let cfg = load_config_files(None, &dir).unwrap();
+    let cfg = load_layered(Some(r#"{"hiddenPaths":[],"diffTool":"  "}"#), None).unwrap();
     assert_eq!(cfg.diff_tool, None);
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn non_string_diff_tool_is_error() {
-    let dir = write_config("ws-config-diff-bad", r#"{"hiddenPaths":[],"diffTool":1}"#);
-    let err = load_config_files(None, &dir).unwrap_err();
+    let err = load_layered(Some(r#"{"hiddenPaths":[],"diffTool":1}"#), None).unwrap_err();
     assert!(
-        err.contains("diffTool must be a string"),
+        err.ends_with(" diffTool must be a string"),
         "unexpected error: {err}"
     );
-    let _ = fs::remove_dir_all(&dir);
 }
 
 fn load_view_defaults(json: &str) -> Result<ViewDefaults, String> {
@@ -368,8 +356,8 @@ fn layered_workspace_file_only() {
 #[test]
 fn layered_workspace_wins_per_top_level_key() {
     let cfg = load_layered(
-        Some(r#"{"hiddenPaths":[],"maxDepth":2,"editor":"nvim","diffTool":"vimdiff"}"#),
-        Some(r#"{"hiddenPaths":[],"maxDepth":5,"diffTool":"  "}"#),
+        Some(r#"{"hiddenPaths":[],"maxDepth":2,"glyphs":"ascii","editor":"nvim"}"#),
+        Some(r#"{"hiddenPaths":[],"maxDepth":5,"glyphs":null}"#),
     )
     .unwrap();
     assert_eq!(cfg.max_depth, 5, "workspace maxDepth wins");
@@ -379,9 +367,9 @@ fn layered_workspace_wins_per_top_level_key() {
         "key the workspace omits keeps the user value"
     );
     assert_eq!(
-        cfg.diff_tool.as_deref(),
-        Some("vimdiff"),
-        "blank workspace diffTool is unset, so the user value applies"
+        cfg.runtime.glyphs,
+        Some(GlyphSet::Ascii),
+        "null workspace glyphs is unset, so the user value applies"
     );
 }
 
@@ -495,10 +483,13 @@ fn layered_invalid_user_file_names_the_user_path() {
 fn layered_invalid_workspace_file_names_the_workspace_file() {
     let err = load_layered(
         Some(r#"{"hiddenPaths":[]}"#),
-        Some(r#"{"hiddenPaths":[],"editor":1}"#),
+        Some(r#"{"hiddenPaths":[],"maxDepth":0}"#),
     )
     .unwrap_err();
-    assert_eq!(err, ".workspace-status-config.json editor must be a string");
+    assert_eq!(
+        err,
+        ".workspace-status-config.json maxDepth must be a positive integer"
+    );
 }
 
 #[test]
@@ -608,8 +599,8 @@ fn workspace_file_hidden_paths_is_optional() {
         r#"{}"#,
         r#"{"hiddenPaths":null}"#,
         r#"{"maxDepth":2}"#,
-        r#"{"ignoredPaths":["dotfiles","notes"],"editor":"cursor","diffTool":"cursor --diff --wait"}"#,
-        r#"{"editor":"nvim"}"#,
+        r#"{"ignoredPaths":["dotfiles","notes"],"glyphs":"ascii"}"#,
+        r#"{"theme":null}"#,
     ] {
         let cfg = load_layered(Some(r#"{"hiddenPaths":["notes"]}"#), Some(json)).unwrap();
         assert_eq!(cfg.hidden_paths, vec!["notes"], "user list kept: {json}");
@@ -1147,28 +1138,42 @@ fn dangling_user_file_symlink_is_an_error_not_a_missing_file() {
 
 #[test]
 fn workspace_file_rejects_user_only_keys() {
-    for (key, raw, env_var) in [
-        ("git", r#""sh""#, "WORKSPACE_STATUS_GIT"),
-        ("git", r#""/usr/bin/git""#, "WORKSPACE_STATUS_GIT"),
-        ("git", "1", "WORKSPACE_STATUS_GIT"),
+    // The third field is the error tail after the user file path: the env
+    // var that may also set the key, or nothing when the key has none.
+    for (key, raw, env_tail) in [
+        ("git", r#""sh""#, " or WORKSPACE_STATUS_GIT"),
+        ("git", r#""/usr/bin/git""#, " or WORKSPACE_STATUS_GIT"),
+        ("git", "1", " or WORKSPACE_STATUS_GIT"),
         (
             "updateCheckStore",
             r#""~/.bashrc""#,
-            "WS_STATUS_UPDATE_CHECK_STORE",
+            " or WS_STATUS_UPDATE_CHECK_STORE",
         ),
         (
             "commentStore",
             r#""/tmp/c.json""#,
-            "WS_STATUS_COMMENT_STORE",
+            " or WS_STATUS_COMMENT_STORE",
         ),
-        ("viewedStore", r#""/tmp/v.json""#, "WS_STATUS_VIEWED_STORE"),
-        ("uiStore", r#""~/ui-state.json""#, "WS_STATUS_UI_STORE"),
+        (
+            "viewedStore",
+            r#""/tmp/v.json""#,
+            " or WS_STATUS_VIEWED_STORE",
+        ),
+        ("uiStore", r#""~/ui-state.json""#, " or WS_STATUS_UI_STORE"),
         (
             "prTitleCommand",
             r#""/usr/local/bin/pr-title""#,
-            "WS_STATUS_PR_TITLE_CMD",
+            " or WS_STATUS_PR_TITLE_CMD",
         ),
-        ("prTitleCommand", r#""sh""#, "WS_STATUS_PR_TITLE_CMD"),
+        ("prTitleCommand", r#""sh""#, " or WS_STATUS_PR_TITLE_CMD"),
+        ("editor", r#""vim""#, ""),
+        ("editor", r#""./run-me --wait""#, ""),
+        ("editor", r#""  ""#, ""),
+        ("editor", "1", ""),
+        ("diffTool", r#""vimdiff""#, ""),
+        ("diffTool", r#""/tmp/x $LOCAL $REMOTE""#, ""),
+        ("diffTool", r#""  ""#, ""),
+        ("diffTool", "1", ""),
     ] {
         let workspace_json = format!(r#"{{"hiddenPaths":[],"{key}":{raw}}}"#);
         let (root, user_file, workspace) = layered(None, Some(&workspace_json));
@@ -1177,7 +1182,7 @@ fn workspace_file_rejects_user_only_keys() {
         assert_eq!(
                 err,
                 format!(
-                    ".workspace-status-config.json {key} is only allowed in the user config file ({}) or {env_var}",
+                    ".workspace-status-config.json {key} is only allowed in the user config file ({}){env_tail}",
                     user_file.display()
                 ),
                 "{key}: {raw}"
@@ -1186,7 +1191,7 @@ fn workspace_file_rejects_user_only_keys() {
         assert_eq!(
                 err,
                 format!(
-                    ".workspace-status-config.json {key} is only allowed in the user config file (~/.config/my-workspace-status/config.json) or {env_var}"
+                    ".workspace-status-config.json {key} is only allowed in the user config file (~/.config/my-workspace-status/config.json){env_tail}"
                 ),
                 "no user path: {key}"
             );
@@ -1195,7 +1200,7 @@ fn workspace_file_rejects_user_only_keys() {
     let cfg = load_layered(
             None,
             Some(
-                r#"{"hiddenPaths":[],"git":null,"commentStore":null,"uiStore":null,"prTitleCommand":null}"#,
+                r#"{"hiddenPaths":[],"git":null,"commentStore":null,"uiStore":null,"prTitleCommand":null,"editor":null,"diffTool":null}"#,
             ),
         )
         .unwrap();
@@ -1203,6 +1208,23 @@ fn workspace_file_rejects_user_only_keys() {
         cfg.runtime,
         RuntimeKeys::default(),
         "null counts as omitted"
+    );
+    assert_eq!(cfg.editor, None, "null editor counts as omitted");
+    assert_eq!(cfg.diff_tool, None, "null diffTool counts as omitted");
+    let cfg = load_layered(
+        Some(r#"{"editor":"nvim","diffTool":"vimdiff"}"#),
+        Some(r#"{"hiddenPaths":[],"editor":null,"diffTool":null}"#),
+    )
+    .unwrap();
+    assert_eq!(
+        cfg.editor.as_deref(),
+        Some("nvim"),
+        "null workspace editor keeps the user value"
+    );
+    assert_eq!(
+        cfg.diff_tool.as_deref(),
+        Some("vimdiff"),
+        "null workspace diffTool keeps the user value"
     );
 }
 

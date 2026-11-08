@@ -1,0 +1,877 @@
+#!/usr/bin/env bash
+# wsctl: the agent-facing controller of the verify skill
+# (.agents/skills/verify-workspace-status/SKILL.md). An agent starts an isolated
+# run of this checkout's workspace-status, sends keys, waits for text, reads the
+# screen and stops the run, as a user would from a terminal. Every command
+# prints one JSON object on stdout; a failure prints {"ok":false,...} and exits
+# non-zero.
+#
+# wsctl is a thin layer over scripts/verify-tui.sh. It never starts the binary
+# and never makes a tmux session itself: build, launch, keys, wait, capture,
+# cli and stop all go through the driver, so the isolation that
+# crates/workspace-status/tests/release_watch.rs guards there covers wsctl too.
+# It talks to tmux directly only to read the pane and to resize the window of a
+# run the driver started, on that run's private socket.
+#
+# Run `wsctl --help` for the commands. Needs bash 3.2 or later and tmux; jq is
+# optional (`run -- --json` embeds the output only when jq can parse it).
+set -euo pipefail
+unset CDPATH
+# bash 5.2+ treats & and \ in an unquoted ${s//pat/rep} replacement as special;
+# bash 3.2 keeps the quotes of a quoted one. json_str needs one form for both.
+shopt -u patsub_replacement 2>/dev/null || true
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd -P)"
+DRIVER="$REPO_ROOT/scripts/verify-tui.sh"
+ROOT="${WS_VERIFY_ROOT:-${TMPDIR:-/tmp}/ws-verify}"
+ROOT="${ROOT%/}"
+# The current run of this checkout: one line, the run dir that start printed.
+# Worktrees share the root, so the pointer name holds a checksum of the
+# checkout path: a start in another worktree never sees or replaces it.
+CHECKOUT_KEY="$(printf '%s' "$REPO_ROOT" | cksum | cut -d ' ' -f 1)"
+POINTER="$ROOT/wsctl-current-$CHECKOUT_KEY"
+# The run.env members of a finished launch. RUN_FORGE is empty for a live run.
+RUN_FIELDS="RUN_ID RUN_SOCK RUN_BIN RUN_FIXTURE RUN_FORGE RUN_SIZE RUN_REPO RUN_SOCKET_PATH"
+SESSION=ws
+# The tab strip (" Workspace" on screen row 1) is painted from the first frame
+# and stays above every overlay. The footer "? help" that launch waits for is
+# hidden by search, help and the command palette, so it is not a ready marker.
+READY_RE='^ Workspace( |$)'
+# Gap between two keys of one `key` call. A key repeat that reaches the app in
+# one read counts once (held-navigation guard), so each key needs its own write.
+KEY_GAP=0.05
+
+CMD=wsctl
+RUN_ARG="${WSCTL_RUN:-}"
+RUN_DIR=""
+ERRF=""
+
+# ---------- help ----------
+
+usage() {
+  cat <<'USAGE'
+wsctl: drive this checkout's workspace-status TUI in an isolated tmux run.
+Every command prints one JSON object on stdout ({"ok":true,...}); a failure
+prints {"ok":false,"cmd":...,"error":...} and exits 1.
+
+usage: wsctl [--run DIR] <command> [args]
+
+Commands:
+  start [--seed demo|--workspace DIR] [--size COLSxROWS] [--fake-forge DIR]
+        [--env K=V]... [--no-build]
+                        build (unless --no-build), seed, launch; make it the
+                        current run
+  doctor                check tmux, bash, a fresh binary, the run's private
+                        tmux session, run isolation and the pane size; exit 1
+                        when one check fails
+  key [--chord] <key>...
+                        send tmux key names, one write per key, 50 ms apart
+                        (j k Enter Escape Tab BSpace C-c '?'); --chord sends
+                        two keys in one write (g x, g p, z z)
+  type <text>           type literal text, one character per write
+  snap [--ansi] [--name N] [--raw]
+                        capture the screen to evidence/NN-<name>.txt/.ansi;
+                        JSON holds the paths and the screen text
+  wait <regex> [--timeout S] [--gone] [--cursor]
+                        wait until a screen line matches <regex> (default
+                        10 s); --gone: until no line matches; --cursor: until
+                        the focus-bar line holds <regex> as plain text
+  wait-ready [--timeout S]
+                        wait until the TUI is mounted and alive (tab strip)
+  resize COLSxROWS      resize the run's window; wait until the pane has it
+  run -- <args>         run the binary headless in the fixture (--plain,
+                        --json, --help or --version) with the same isolation
+  stop                  quit the TUI, end the run's tmux server, clear the
+                        current run; safe to repeat
+  help [<command>]      this text, or the help of one command
+
+Global:
+  --run DIR             act on this run dir (or its id under the root), not
+                        the current run; env WSCTL_RUN does the same. Only a
+                        run of this checkout directly under the root is used.
+Root: $WS_VERIFY_ROOT, else ${TMPDIR:-/tmp}/ws-verify. Current run:
+<root>/wsctl-current-<checksum of this checkout's path>, one per checkout.
+Screen text is UTF-8 (box drawing, the focus bar ▌): read it as UTF-8.
+
+Loop: wsctl start; wsctl doctor; wsctl key j; wsctl wait --cursor auth.ts;
+      wsctl snap --name after-j; wsctl stop
+Other driver commands (mouse, scenario, calls) take the run dir that start
+prints: scripts/verify-tui.sh mouse "$RUN" find 'merger'.
+USAGE
+}
+
+cmd_help_text() {
+  case "$1" in
+    start)
+      cat <<'H'
+usage: wsctl start [--seed demo|--workspace DIR] [--size COLSxROWS]
+                   [--fake-forge DIR] [--env K=V]... [--no-build]
+
+Builds the debug binary of this checkout (scripts/verify-tui.sh build), then
+launches it in a private tmux server (verify-tui.sh launch) and
+records the run dir as the current run of this checkout. Refuses while that
+run is live: stop it first. When two starts race, the first to record wins;
+the other stops its own new run and fails. With --run or WSCTL_RUN set, start
+leaves the current run alone and only prints the new run ("current": false).
+
+  --seed demo         seed scripts/seed-demo-workspace.sh (default)
+  --workspace DIR     drive a fixture you built inside the root instead
+  --size COLSxROWS    terminal size (default 160x45)
+  --fake-forge DIR    fake gh / glab answer from DIR (apply sets first with
+                      scripts/verify-tui.sh scenario DIR <set>...)
+  --env K=V           override one run variable (repeatable)
+  --no-build          launch the binary that is there (doctor flags a stale one)
+
+JSON: ok, cmd, run, current, binary, version, head, size, mode, evidence
+H
+      ;;
+    doctor)
+      cat <<'H'
+usage: wsctl doctor
+
+Checks, each one entry of "checks" ({name, ok, detail}); exit 1 when one fails:
+  tmux       tmux on PATH (without it: PTY e2e, cargo test -p workspace-status
+             --test tui_tty_e2e <pty_name>)
+  bash       bash on PATH is 3.2 or later (the driver runs under it)
+  binary     the run's binary exists, no file under crates/*/src, no
+             crates/*/build.rs, crates/*/Cargo.toml, Cargo.toml or Cargo.lock
+             is newer (stale build), and it was not rebuilt after the run started
+  session    the server answers on the run's socket, the session is alive and
+             runs this run's launch.sh
+Every command, doctor too, first refuses a run that is not this checkout's:
+outside the root, run.env incomplete, RUN_ID not its dir name, a socket other
+than ws-verify-<run id>, or another checkout's path or binary.
+  isolation  env.sh sets the update-check store, XDG_CONFIG_HOME and
+             XDG_STATE_HOME inside the run dir and unsets WS_STATUS_WORKSPACE
+  size       the pane size is the size of the run (start or last resize)
+H
+      ;;
+    key)
+      cat <<'H'
+usage: wsctl key [--chord] <key>...
+
+tmux key names: j k h l Enter Escape Tab BTab Space BSpace Up Down C-c C-o '?'
+'/' ':'. Each key is its own driver call, 50 ms after the previous one: two
+repeats in one write reach the app as one press. Follow each move with wait.
+  --chord   send exactly two keys in one write (g x, g c, g p, z z, g g);
+            two separate presses more than 0.4 s apart are not a chord
+JSON: ok, cmd, run, keys, chord
+H
+      ;;
+    type)
+      cat <<'H'
+usage: wsctl type <text>
+
+Types <text> as literal characters, one per write (a search term, a palette
+query). Quote text with spaces. Options (--run, --help) go before the text;
+after the text, or after --, every word is text: wsctl type -- --help types
+"--help". JSON: ok, cmd, run, text
+H
+      ;;
+    snap)
+      cat <<'H'
+usage: wsctl snap [--ansi] [--name N] [--raw]
+
+Captures the screen (scripts/verify-tui.sh capture) to evidence/NN-<name>.txt
+and .ansi (default name: snap). JSON: ok, cmd, run, txt, ansi, screen.
+  --ansi   also put the coloured capture in "screen_ansi" (with --raw: print it)
+  --name   evidence name (letters, digits, . _ -)
+  --raw    print only the screen text, no JSON
+H
+      ;;
+    wait)
+      cat <<'H'
+usage: wsctl wait <regex> [--timeout S] [--gone] [--cursor]
+
+Waits until one screen line matches the extended regex (scripts/verify-tui.sh
+wait --regex). Fails at once when the TUI exited or the session is gone (a dead
+TUI never satisfies --gone); a failure saves the screen and puts it in "screen".
+  --timeout S   seconds (default 10)
+  --gone        wait until no line matches
+  --cursor      wait until the focus-bar line (▌) holds the text; the pattern
+                is plain text here, not a regex
+JSON: ok, cmd, run, pattern, mode, gone
+H
+      ;;
+    wait-ready)
+      cat <<'H'
+usage: wsctl wait-ready [--timeout S]
+
+Waits until the TUI is mounted and alive: the tab strip " Workspace" on screen
+row 1. That strip is on every tab and above every overlay. The footer "? help"
+is not used: search, help and the command palette hide it. Default 20 s.
+JSON: ok, cmd, run, marker
+H
+      ;;
+    resize)
+      cat <<'H'
+usage: wsctl resize COLSxROWS
+
+Sets window-size manual on the run's private tmux server, resizes its window,
+then waits (5 s) until the pane reports the size. The TUI repaints on the
+resize event: follow with wait on the text you expect.
+JSON: ok, cmd, run, size, previous
+H
+      ;;
+    run)
+      cat <<'H'
+usage: wsctl run -- <args>
+
+Runs the same binary headless in the fixture with the run's isolation
+(scripts/verify-tui.sh cli). Needs --plain, --json, --help or --version;
+refuses --update and --tui. Evidence: evidence/NN-cli-*.{cmd,out,err,rc}.
+JSON: ok (rc is 0), cmd, run, rc, files {cmd,out,err,rc}, stderr, and
+"json" (the parsed --json output, when jq is installed and it parses) or
+"stdout" (the text). Exit 1 when rc is not 0.
+H
+      ;;
+    stop)
+      cat <<'H'
+usage: wsctl stop
+
+Quits the TUI, ends the run's tmux server, copies the forge calls and opened
+URLs into evidence/, and clears the current-run pointer. The run dir stays.
+Safe to repeat: with no run it prints {"ok":true,"stopped":false}. A run that
+is not this checkout's (wsctl doctor --help) is refused, not stopped.
+JSON: ok, cmd, run, stopped, evidence, files
+H
+      ;;
+    help) usage ;;
+    *) return 1 ;;
+  esac
+}
+
+# ---------- JSON ----------
+
+# json_str TEXT: print TEXT as a JSON string literal. Escapes backslash, quote,
+# newline, carriage return, tab and ESC; drops any other control character.
+json_str() {
+  local s="$1" bs='\' q='"' rep
+  rep="$bs$bs"
+  s="${s//"$bs"/$rep}"
+  rep="$bs$q"
+  s="${s//"$q"/$rep}"
+  rep="${bs}n"
+  s="${s//$'\n'/$rep}"
+  rep="${bs}r"
+  s="${s//$'\r'/$rep}"
+  rep="${bs}t"
+  s="${s//$'\t'/$rep}"
+  rep="${bs}u001b"
+  s="${s//$'\033'/$rep}"
+  if [[ "$s" == *[[:cntrl:]]* ]]; then
+    s="$(printf '%s' "$s" | LC_ALL=C tr -d '\000-\037\177')"
+  fi
+  printf '"%s"' "$s"
+}
+
+# json_arr ITEM...: a JSON array of strings.
+json_arr() {
+  local out="" item
+  for item in "$@"; do
+    out="$out${out:+,}$(json_str "$item")"
+  done
+  printf '[%s]' "$out"
+}
+
+# fail MESSAGE [EXTRA]: print the failure object and exit 1. EXTRA is more
+# JSON members, already encoded (",\"k\":v").
+fail() {
+  printf '{"ok":false,"cmd":%s,"error":%s%s}\n' "$(json_str "$CMD")" "$(json_str "$1")" "${2:-}"
+  exit 1
+}
+
+# ---------- driver calls ----------
+
+cleanup() { if [[ -n "$ERRF" ]]; then rm -f -- "$ERRF"; fi; }
+trap cleanup EXIT
+
+# drv ARG...: run the driver; its stderr goes to $ERRF for the error message.
+drv() { "$DRIVER" "$@" 2>"$ERRF"; }
+
+# The driver's own message (its last "verify-tui:" line), else the last line.
+driver_error() {
+  local line
+  line="$(grep '^verify-tui:' "$ERRF" 2>/dev/null | tail -n 1 || true)"
+  if [[ -z "$line" ]]; then line="$(grep -v '^[[:space:]]*$' "$ERRF" 2>/dev/null | tail -n 1 || true)"; fi
+  printf '%s' "${line#verify-tui: }"
+}
+
+# fail_driver WHAT [EXTRA]: fail with the driver's message and its stderr tail.
+fail_driver() {
+  local msg tail_text
+  msg="$(driver_error)"
+  tail_text="$(tail -n 20 "$ERRF" 2>/dev/null || true)"
+  fail "$1${msg:+: $msg}" ",\"stderr\":$(json_str "$tail_text")${2:-}"
+}
+
+# ---------- runs ----------
+
+# find_run: resolve the run (--run, WSCTL_RUN, else this checkout's pointer)
+# into RUN_DIR, load its run.env and check that the run is this checkout's.
+# Returns 1 with RUN_ERR set when there is no run, 2 when the run is refused.
+find_run() {
+  local arg="$RUN_ARG" from="" root_real dir f want_bin
+  RUN_ERR=""
+  RUN_DIR=""
+  if [[ -z "$arg" && -f "$POINTER" ]]; then
+    arg="$(head -n 1 "$POINTER")"
+    from=" (current-run pointer $POINTER)"
+  fi
+  if [[ -z "$arg" ]]; then
+    RUN_ERR="no current run of this checkout: wsctl start first (or pass --run DIR)"
+    return 1
+  fi
+  root_real="$(cd "$ROOT" 2>/dev/null && pwd -P || true)"
+  if [[ -f "$arg/run.env" ]]; then
+    dir="$arg"
+  elif [[ -n "$root_real" && "$arg" != */* && -f "$root_real/$arg/run.env" ]]; then
+    dir="$root_real/$arg"
+  else
+    RUN_ERR="no run '$arg' (no run.env in it or under $ROOT)$from"
+    return 1
+  fi
+  dir="$(cd "$dir" && pwd -P)"
+  # Check the place before run.env is sourced: only a dir that launch made.
+  if [[ -z "$root_real" || "${dir%/*}" != "$root_real" ]]; then
+    RUN_ERR="refused run $dir: not a run dir directly under the root ${root_real:-$ROOT}$from"
+    return 2
+  fi
+  # shellcheck disable=SC2086
+  unset $RUN_FIELDS
+  # shellcheck source=/dev/null
+  if ! source "$dir/run.env" >/dev/null 2>&1; then
+    RUN_ERR="refused run $dir: its run.env does not load$from"
+    return 2
+  fi
+  for f in $RUN_FIELDS; do
+    if [[ -z "${!f+set}" ]]; then
+      RUN_ERR="refused run $dir: run.env has no $f (an unfinished launch?)$from"
+      return 2
+    fi
+  done
+  if [[ "$RUN_ID" != "${dir##*/}" ]]; then
+    RUN_ERR="refused run $dir: RUN_ID '$RUN_ID' is not the name of its dir$from"
+    return 2
+  fi
+  if [[ "$RUN_SOCK" != "ws-verify-$RUN_ID" ]]; then
+    RUN_ERR="refused run $dir: socket name '$RUN_SOCK' is not this run's private socket ws-verify-$RUN_ID$from"
+    return 2
+  fi
+  if [[ "$RUN_REPO" != "$REPO_ROOT" ]]; then
+    RUN_ERR="refused run $dir: it is a run of the checkout $RUN_REPO, not of $REPO_ROOT$from"
+    return 2
+  fi
+  want_bin="$(drv bin)" || {
+    RUN_ERR="the driver did not name this checkout's binary: $(driver_error)"
+    return 2
+  }
+  if [[ "$RUN_BIN" != "$want_bin" ]]; then
+    RUN_ERR="refused run $dir: it runs $RUN_BIN, not this checkout's binary $want_bin$from"
+    return 2
+  fi
+  RUN_DIR="$dir"
+}
+
+need_run() { find_run || fail "$RUN_ERR"; }
+
+tm() { tmux -L "$RUN_SOCK" "$@"; }
+pane_field() { tm display-message -p -t "$SESSION" "#{$1}" 2>/dev/null; }
+
+run_alive() {
+  tm has-session -t "$SESSION" 2>/dev/null && [[ "$(pane_field pane_dead)" == 0 ]]
+}
+
+need_live() {
+  command -v tmux >/dev/null 2>&1 || fail "tmux is not on PATH"
+  tm has-session -t "$SESSION" 2>/dev/null || fail "no tmux session for run $RUN_DIR: it was stopped or never started"
+  [[ "$(pane_field pane_dead)" == 0 ]] || fail "the TUI of run $RUN_DIR exited (status $(pane_field pane_dead_status)); wsctl snap shows its last screen"
+}
+
+# The size the pane should have: the last resize, else the launch size.
+expected_size() {
+  if [[ -f "$RUN_DIR/wsctl.size" ]]; then head -n 1 "$RUN_DIR/wsctl.size"; else printf '%s' "${RUN_SIZE:-160x45}"; fi
+}
+
+run_json() { printf '"run":%s' "$(json_str "$RUN_DIR")"; }
+
+# ---------- start ----------
+
+cmd_start() {
+  local seed=demo workspace="" size="" forge="" build=1 envs=() prev
+  while (($#)); do
+    case "$1" in
+      --seed) seed="${2:-}"; shift 2 || fail "--seed needs demo" ;;
+      --workspace) workspace="${2:-}"; shift 2 || fail "--workspace needs DIR" ;;
+      --size) size="${2:-}"; shift 2 || fail "--size needs COLSxROWS" ;;
+      --fake-forge) forge="${2:-}"; shift 2 || fail "--fake-forge needs DIR" ;;
+      --env) envs+=(--env "${2:-}"); shift 2 || fail "--env needs K=V" ;;
+      --no-build) build=0; shift ;;
+      *) fail "start: unknown argument '$1' (wsctl start --help)" ;;
+    esac
+  done
+  [[ "$seed" == demo ]] || fail "--seed: only demo is known (or pass --workspace DIR)"
+  if [[ -n "$size" && ! "$size" =~ ^[0-9]+x[0-9]+$ ]]; then fail "--size must be COLSxROWS, for example 160x45"; fi
+  command -v tmux >/dev/null 2>&1 ||
+    fail "tmux is not on PATH; without tmux prove TUI behaviour with the PTY e2e: cargo test -p workspace-status --test tui_tty_e2e <pty_name>"
+
+  # One TUI per checkout at a time: a live run keeps polling and could answer
+  # into the next. With --run or WSCTL_RUN, start leaves the pointer alone.
+  local claim=1 rc=0
+  if [[ -n "$RUN_ARG" ]]; then claim=0; fi
+  if ((claim)) && [[ -f "$POINTER" ]]; then
+    prev="$(head -n 1 "$POINTER")"
+    find_run || rc=$?
+    if ((rc == 2)); then
+      fail "start: $RUN_ERR; stop that run with scripts/verify-tui.sh stop, then remove the pointer" \
+        ",\"previous\":$(json_str "$prev")"
+    fi
+    if ((rc == 0)) && tm has-session -t "$SESSION" 2>/dev/null; then
+      fail "run $RUN_DIR is still live: wsctl stop first" ",\"previous\":$(json_str "$RUN_DIR")"
+    fi
+    # The pointer names a stopped or removed run: drop it, so this start can claim.
+    if [[ "$(head -n 1 "$POINTER" 2>/dev/null || true)" == "$prev" ]]; then rm -f -- "$POINTER"; fi
+  fi
+
+  if ((build)); then
+    drv build >/dev/null || fail_driver "build failed"
+  fi
+  local args=(launch)
+  if [[ -n "$size" ]]; then args+=(--size "$size"); fi
+  if [[ -n "$forge" ]]; then args+=(--fake-forge "$forge"); fi
+  if [[ -n "$workspace" ]]; then args+=(--workspace "$workspace"); fi
+  if ((${#envs[@]})); then args+=("${envs[@]}"); fi
+  local run
+  run="$(drv "${args[@]}")" || fail_driver "launch failed"
+  run="$(printf '%s\n' "$run" | tail -n 1)"
+  if ((claim)); then
+    # Claim the pointer with noclobber (an exclusive create): when two starts
+    # race, one wins and the other stops its own new run.
+    mkdir -p "$ROOT"
+    if ! (
+      set -C
+      printf '%s\n' "$run" >"$POINTER"
+    ) 2>/dev/null; then
+      drv stop "$run" >/dev/null || true
+      fail "start: another start of this checkout became the current run first ($(head -n 1 "$POINTER" 2>/dev/null || true)); stopped the new run" \
+        ",\"stopped_run\":$(json_str "$run")"
+    fi
+  fi
+  RUN_ARG="$run"
+  if ! find_run; then
+    drv stop "$run" >/dev/null || true
+    if ((claim)) && [[ "$(head -n 1 "$POINTER" 2>/dev/null || true)" == "$run" ]]; then rm -f -- "$POINTER"; fi
+    fail "start: the new run was refused and stopped: $RUN_ERR" ",\"stopped_run\":$(json_str "$run")"
+  fi
+  local mode=live current=false
+  if [[ -n "${RUN_FORGE:-}" ]]; then mode="fake forge"; fi
+  if ((claim)); then current=true; fi
+  printf '{"ok":true,"cmd":"start",%s,"current":%s,"binary":%s,"version":%s,"head":%s,"size":%s,"mode":%s,"evidence":%s}\n' \
+    "$(run_json)" "$current" "$(json_str "$RUN_BIN")" "$(json_str "${RUN_VERSION:-unknown}")" \
+    "$(json_str "${RUN_HEAD:-unknown}")" "$(json_str "$RUN_SIZE")" "$(json_str "$mode")" \
+    "$(json_str "$RUN_DIR/evidence")"
+}
+
+# ---------- doctor ----------
+
+CHECKS=""
+FAILED=""
+check() { # check NAME OK(0|1) DETAIL
+  local ok=false
+  if [[ "$2" == 1 ]]; then ok=true; else FAILED="$FAILED${FAILED:+ }$1"; fi
+  CHECKS="$CHECKS${CHECKS:+,}{\"name\":$(json_str "$1"),\"ok\":$ok,\"detail\":$(json_str "$3")}"
+}
+
+inside_run() { [[ "$1" == "$RUN_DIR"/* ]]; }
+
+cmd_doctor() {
+  (($# == 0)) || fail "doctor takes no arguments"
+  local have_tmux=0 have_run=0 v detail newer
+
+  if command -v tmux >/dev/null 2>&1; then
+    have_tmux=1
+    check tmux 1 "$(tmux -V 2>/dev/null || echo tmux) at $(command -v tmux)"
+  else
+    check tmux 0 "tmux is not on PATH. Fallback: the PTY e2e, cargo test -p workspace-status --test tui_tty_e2e <pty_name>"
+  fi
+
+  v="$(bash -c 'printf "%s.%s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"' 2>/dev/null || true)"
+  if [[ "$v" =~ ^([0-9]+)\.([0-9]+)$ ]] &&
+    ((BASH_REMATCH[1] > 3 || (BASH_REMATCH[1] == 3 && BASH_REMATCH[2] >= 2))); then
+    check bash 1 "bash $v on PATH (the driver runs under it); wsctl runs under $BASH_VERSION"
+  else
+    check bash 0 "bash on PATH is '${v:-missing}': the driver needs 3.2 or later"
+  fi
+
+  if find_run; then have_run=1; fi
+
+  if ((have_run)); then
+    if [[ ! -x "$RUN_BIN" ]]; then
+      check binary 0 "no binary at $RUN_BIN: wsctl stop, then wsctl start (it builds)"
+    else
+      # A glob with no match stays literal; find skips that missing path.
+      newer="$(find "$REPO_ROOT"/crates/*/src "$REPO_ROOT"/crates/*/build.rs "$REPO_ROOT"/crates/*/Cargo.toml \
+        "$REPO_ROOT/Cargo.toml" "$REPO_ROOT/Cargo.lock" -type f -newer "$RUN_BIN" 2>/dev/null | head -n 1 || true)"
+      if [[ -n "$newer" ]]; then
+        check binary 0 "stale build: ${newer#"$REPO_ROOT"/} is newer than $RUN_BIN; wsctl stop, then wsctl start (it rebuilds)"
+      elif [[ "$RUN_BIN" -nt "$RUN_DIR/launch.sh" ]]; then
+        check binary 0 "$RUN_BIN was rebuilt after this run started, so the run still runs the old build; wsctl stop, then wsctl start"
+      else
+        check binary 1 "$RUN_BIN (${RUN_VERSION:-unknown}, head ${RUN_HEAD:-unknown}) is newer than every source and Cargo file"
+      fi
+    fi
+  else
+    check binary 0 "$RUN_ERR"
+  fi
+
+  if ((have_run && have_tmux)); then
+    local cmdline
+    # find_run already refused a socket other than ws-verify-<run id>.
+    if [[ -z "${RUN_SOCKET_PATH:-}" || ! -S "$RUN_SOCKET_PATH" ]]; then
+      check session 0 "no socket at '${RUN_SOCKET_PATH:-}': the run was stopped"
+    elif ! tm has-session -t "$SESSION" 2>/dev/null; then
+      check session 0 "the tmux server on $RUN_SOCK has no session '$SESSION': the run was stopped"
+    elif [[ "$(pane_field pane_dead)" != 0 ]]; then
+      check session 0 "the TUI exited (status $(pane_field pane_dead_status)); wsctl snap shows its last screen"
+    else
+      cmdline="$(pane_field pane_start_command || true)"
+      if [[ "$cmdline" == *"$RUN_DIR/launch.sh"* ]]; then
+        check session 1 "server $RUN_SOCK ($RUN_SOCKET_PATH), session '$SESSION' alive, running $RUN_DIR/launch.sh"
+      else
+        check session 0 "the session runs '$cmdline', not $RUN_DIR/launch.sh"
+      fi
+    fi
+  elif ((have_run)); then
+    check session 0 "tmux is not on PATH"
+  else
+    check session 0 "$RUN_ERR"
+  fi
+
+  if ((have_run)) && [[ -f "$RUN_DIR/env.sh" ]]; then
+    local probe ustore cfg state ws problems=""
+    # Source the run's env.sh under a parent pin, as the driver's launch does.
+    probe="$(
+      export WS_STATUS_WORKSPACE=/wsctl-doctor-probe
+      # shellcheck source=/dev/null
+      source "$RUN_DIR/env.sh" >/dev/null 2>&1
+      printf '%s\n%s\n%s\n%s\n' "${WS_STATUS_UPDATE_CHECK_STORE:-}" "${XDG_CONFIG_HOME:-}" \
+        "${XDG_STATE_HOME:-}" "${WS_STATUS_WORKSPACE-<unset>}"
+    )"
+    ustore="$(printf '%s\n' "$probe" | sed -n 1p)"
+    cfg="$(printf '%s\n' "$probe" | sed -n 2p)"
+    state="$(printf '%s\n' "$probe" | sed -n 3p)"
+    ws="$(printf '%s\n' "$probe" | sed -n 4p)"
+    if ! inside_run "$ustore"; then
+      problems="$problems; WS_STATUS_UPDATE_CHECK_STORE='$ustore' is not inside the run dir"
+    elif ! grep -q lastCheckUnix "$ustore" 2>/dev/null; then
+      problems="$problems; $ustore has no lastCheckUnix (the update prompt could block mount)"
+    fi
+    inside_run "$cfg" || problems="$problems; XDG_CONFIG_HOME='$cfg' is not inside the run dir"
+    inside_run "$state" || problems="$problems; XDG_STATE_HOME='$state' is not inside the run dir"
+    [[ "$ws" == "<unset>" ]] || problems="$problems; WS_STATUS_WORKSPACE stays set ('$ws')"
+    if [[ -z "$problems" ]]; then
+      check isolation 1 "env.sh: update-check store, XDG_CONFIG_HOME and XDG_STATE_HOME inside the run dir; WS_STATUS_WORKSPACE unset"
+    else
+      check isolation 0 "${problems#; }"
+    fi
+  elif ((have_run)); then
+    check isolation 0 "no $RUN_DIR/env.sh"
+  else
+    check isolation 0 "$RUN_ERR"
+  fi
+
+  if ((have_run && have_tmux)) && run_alive; then
+    local want got
+    want="$(expected_size)"
+    got="$(pane_field pane_width)x$(pane_field pane_height)"
+    if [[ "$got" == "$want" ]]; then
+      check size 1 "pane $got"
+    else
+      check size 0 "pane is $got, the run expects $want"
+    fi
+  else
+    check size 0 "${RUN_ERR:-no live pane to measure}"
+  fi
+
+  local run_member=""
+  if ((have_run)); then run_member=",$(run_json)"; fi
+  if [[ -z "$FAILED" ]]; then
+    printf '{"ok":true,"cmd":"doctor"%s,"checks":[%s]}\n' "$run_member" "$CHECKS"
+  else
+    fail "doctor: failed checks: $FAILED" "$run_member,\"checks\":[$CHECKS]"
+  fi
+}
+
+# ---------- drive ----------
+
+cmd_key() {
+  local chord=0 keys=() k i=0
+  while (($#)); do
+    case "$1" in
+      --chord) chord=1 ;;
+      --)
+        shift
+        keys+=("$@")
+        break
+        ;;
+      *) keys+=("$1") ;;
+    esac
+    shift
+  done
+  ((${#keys[@]})) || fail "key: give one or more tmux key names (wsctl key --help)"
+  need_run
+  need_live
+  if ((chord)); then
+    ((${#keys[@]} == 2)) || fail "key --chord takes exactly two keys, got ${#keys[@]}"
+    drv keys "$RUN_DIR" "${keys[0]}" "${keys[1]}" || fail_driver "key ${keys[*]} failed"
+  else
+    for k in "${keys[@]}"; do
+      if ((i)); then sleep "$KEY_GAP"; fi
+      drv keys "$RUN_DIR" "$k" || fail_driver "key $k failed"
+      i=$((i + 1))
+    done
+  fi
+  printf '{"ok":true,"cmd":"key",%s,"keys":%s,"chord":%s}\n' "$(run_json)" "$(json_arr "${keys[@]}")" \
+    "$(if ((chord)); then echo true; else echo false; fi)"
+}
+
+cmd_type() {
+  if [[ "${1:-}" == -- ]]; then shift; fi
+  (($# == 1)) || fail "type: give one text argument (quote text with spaces)"
+  [[ -n "$1" ]] || fail "type: the text is empty"
+  need_run
+  need_live
+  drv keys -l "$RUN_DIR" "$1" || fail_driver "type failed"
+  printf '{"ok":true,"cmd":"type",%s,"text":%s}\n' "$(run_json)" "$(json_str "$1")"
+}
+
+cmd_snap() {
+  local ansi=0 raw=0 name=snap
+  while (($#)); do
+    case "$1" in
+      --ansi) ansi=1; shift ;;
+      --raw) raw=1; shift ;;
+      --name) name="${2:-}"; shift 2 || fail "--name needs a name" ;;
+      *) fail "snap: unknown argument '$1' (wsctl snap --help)" ;;
+    esac
+  done
+  [[ -n "$name" ]] || fail "--name needs a name"
+  need_run
+  drv capture "$RUN_DIR" "$name" >/dev/null || fail_driver "snap failed"
+  local saved txt ansi_file
+  saved="$(grep '^saved: ' "$ERRF" | tail -n 1 || true)"
+  saved="${saved#saved: }"
+  txt="${saved%%, *}"
+  ansi_file="${saved#*, }"
+  [[ -f "$txt" && -f "$ansi_file" ]] || fail "snap: the driver named no capture files ('$saved')"
+  if ((raw)); then
+    if ((ansi)); then cat "$ansi_file"; else cat "$txt"; fi
+    return 0
+  fi
+  local extra=""
+  if ((ansi)); then extra=",\"screen_ansi\":$(json_str "$(cat "$ansi_file")")"; fi
+  printf '{"ok":true,"cmd":"snap",%s,"txt":%s,"ansi":%s,"screen":%s%s}\n' "$(run_json)" \
+    "$(json_str "$txt")" "$(json_str "$ansi_file")" "$(json_str "$(cat "$txt")")" "$extra"
+}
+
+# wait_on MODE PATTERN TIMEOUT GONE: the driver wait, with the saved screen in
+# the failure object.
+wait_on() {
+  local mode="$1" pattern="$2" timeout="$3" gone="$4" args=(wait)
+  if ((gone)); then args+=(--gone); fi
+  args+=("--$mode" "$RUN_DIR" "$pattern" "$timeout")
+  if ! drv "${args[@]}"; then
+    local file screen=""
+    file="$(driver_error | grep -oE '/[^ ]+\.txt' | tail -n 1 || true)"
+    if [[ -n "$file" && -f "$file" ]]; then screen="$(cat "$file")"; fi
+    fail_driver "wait failed" ",$(run_json),\"pattern\":$(json_str "$pattern"),\"screen_file\":$(json_str "$file"),\"screen\":$(json_str "$screen")"
+  fi
+}
+
+cmd_wait() {
+  local pattern="" timeout=10 gone=0 mode=regex
+  while (($#)); do
+    case "$1" in
+      --timeout) timeout="${2:-}"; shift 2 || fail "--timeout needs seconds" ;;
+      --gone) gone=1; shift ;;
+      --cursor) mode=cursor; shift ;;
+      --regex) mode=regex; shift ;;
+      --) shift; pattern="${1:-}"; break ;;
+      *)
+        [[ -z "$pattern" ]] || fail "wait: one pattern only (got '$pattern' and '$1')"
+        pattern="$1"
+        shift
+        ;;
+    esac
+  done
+  [[ -n "$pattern" ]] || fail "wait: give the pattern to wait for (wsctl wait --help)"
+  [[ "$timeout" =~ ^[0-9]+$ ]] || fail "--timeout must be whole seconds"
+  need_run
+  wait_on "$mode" "$pattern" "$timeout" "$gone"
+  printf '{"ok":true,"cmd":"wait",%s,"pattern":%s,"mode":%s,"gone":%s}\n' "$(run_json)" \
+    "$(json_str "$pattern")" "$(json_str "$mode")" "$(if ((gone)); then echo true; else echo false; fi)"
+}
+
+cmd_wait_ready() {
+  local timeout=20
+  while (($#)); do
+    case "$1" in
+      --timeout) timeout="${2:-}"; shift 2 || fail "--timeout needs seconds" ;;
+      *) fail "wait-ready: unknown argument '$1'" ;;
+    esac
+  done
+  [[ "$timeout" =~ ^[0-9]+$ ]] || fail "--timeout must be whole seconds"
+  need_run
+  wait_on regex "$READY_RE" "$timeout" 0
+  printf '{"ok":true,"cmd":"wait-ready",%s,"marker":%s}\n' "$(run_json)" "$(json_str "$READY_RE")"
+}
+
+cmd_resize() {
+  (($# == 1)) || fail "resize: give COLSxROWS, for example 100x40"
+  [[ "$1" =~ ^([0-9]+)x([0-9]+)$ ]] || fail "resize: give COLSxROWS, for example 100x40"
+  local cols="${BASH_REMATCH[1]}" rows="${BASH_REMATCH[2]}" prev got i
+  need_run
+  need_live
+  prev="$(pane_field pane_width)x$(pane_field pane_height)"
+  # The run's own server (started with -f /dev/null), so a global option
+  # changes nothing outside this run.
+  tm set-option -g window-size manual >/dev/null 2>&1 || fail "resize: tmux refused window-size manual"
+  tm resize-window -t "$SESSION" -x "$cols" -y "$rows" >/dev/null 2>&1 || fail "resize: tmux refused resize-window"
+  for ((i = 0; i < 50; i++)); do
+    got="$(pane_field pane_width)x$(pane_field pane_height)"
+    if [[ "$got" == "${cols}x${rows}" ]]; then break; fi
+    sleep 0.1
+  done
+  [[ "$got" == "${cols}x${rows}" ]] || fail "resize: the pane is $got after 5 s, wanted ${cols}x${rows}"
+  printf '%s\n' "$got" >"$RUN_DIR/wsctl.size"
+  printf '%s resize %s -> %s\n' "$(date +%H:%M:%S)" "$prev" "$got" >>"$RUN_DIR/evidence/actions.log" 2>/dev/null || true
+  printf '{"ok":true,"cmd":"resize",%s,"size":%s,"previous":%s}\n' "$(run_json)" "$(json_str "$got")" "$(json_str "$prev")"
+}
+
+cmd_run() {
+  if [[ "${1:-}" == -- ]]; then shift; fi
+  (($#)) || fail "run: give the arguments after --, for example wsctl run -- --json"
+  need_run
+  local rc=0 line base is_json=0 a
+  for a in "$@"; do
+    if [[ "$a" == --json ]]; then is_json=1; fi
+  done
+  drv cli "$RUN_DIR" -- "$@" >/dev/null || rc=$?
+  line="$(grep '^verify-tui: rc [0-9]*, evidence ' "$ERRF" | tail -n 1 || true)"
+  [[ -n "$line" ]] || fail_driver "run refused" ",$(run_json)"
+  base="${line#*, evidence }"
+  base="${base%.\{cmd,out,err,rc\}}"
+  local body
+  body=",\"rc\":$rc,\"files\":{\"cmd\":$(json_str "$base.cmd"),\"out\":$(json_str "$base.out"),\"err\":$(json_str "$base.err"),\"rc\":$(json_str "$base.rc")}"
+  body="$body,\"stderr\":$(json_str "$(cat "$base.err" 2>/dev/null || true)")"
+  if ((is_json)) && command -v jq >/dev/null 2>&1 && jq -e . "$base.out" >/dev/null 2>&1; then
+    body="$body,\"json\":$(jq -c . "$base.out")"
+  else
+    body="$body,\"stdout\":$(json_str "$(cat "$base.out" 2>/dev/null || true)")"
+  fi
+  if ((rc != 0)); then
+    fail "run: the binary exited $rc" ",$(run_json)$body"
+  fi
+  printf '{"ok":true,"cmd":"run",%s%s}\n' "$(run_json)" "$body"
+}
+
+cmd_stop() {
+  (($# == 0)) || fail "stop takes no arguments (use --run DIR for another run)"
+  local rc=0
+  find_run || rc=$?
+  if ((rc == 1)); then
+    printf '{"ok":true,"cmd":"stop","stopped":false,"note":%s}\n' "$(json_str "$RUN_ERR")"
+    return 0
+  fi
+  ((rc == 0)) || fail "$RUN_ERR"
+  local out
+  out="$(drv stop "$RUN_DIR")" || fail_driver "stop failed" ",$(run_json)"
+  if [[ -f "$POINTER" && "$(head -n 1 "$POINTER")" == "$RUN_DIR" ]]; then rm -f -- "$POINTER"; fi
+  local files=() f
+  while IFS= read -r f; do
+    if [[ -n "$f" ]]; then files+=("$f"); fi
+  done <<<"$out"
+  printf '{"ok":true,"cmd":"stop",%s,"stopped":true,"evidence":%s,"files":%s}\n' "$(run_json)" \
+    "$(json_str "$RUN_DIR/evidence")" "$(json_arr ${files[@]+"${files[@]}"})"
+}
+
+# ---------- main ----------
+
+main() {
+  # Global options before the command.
+  while (($#)); do
+    case "$1" in
+      --run)
+        (($# >= 2)) || fail "--run needs DIR"
+        RUN_ARG="$2"
+        shift 2
+        ;;
+      -h | --help)
+        usage
+        return 0
+        ;;
+      *) break ;;
+    esac
+  done
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    usage
+    return 0
+  fi
+  shift
+  CMD="$name"
+
+  # --run and --help also work after the command, up to a "--". For type they
+  # work only before the text: after it, every word is text.
+  local rest=() literal=0
+  while (($#)); do
+    if ((literal)); then
+      rest+=("$1")
+      shift
+      continue
+    fi
+    case "$1" in
+      --) literal=1; rest+=("$1"); shift ;;
+      --run)
+        (($# >= 2)) || fail "--run needs DIR"
+        RUN_ARG="$2"
+        shift 2
+        ;;
+      -h | --help)
+        cmd_help_text "$name" || fail "unknown command '$name' (wsctl --help)"
+        return 0
+        ;;
+      *)
+        rest+=("$1")
+        shift
+        if [[ "$name" == type ]]; then literal=1; fi
+        ;;
+    esac
+  done
+  set -- ${rest[@]+"${rest[@]}"}
+
+  ERRF="$(mktemp "${TMPDIR:-/tmp}/wsctl.XXXXXX")"
+  case "$name" in
+    start) cmd_start "$@" ;;
+    doctor) cmd_doctor "$@" ;;
+    key) cmd_key "$@" ;;
+    type) cmd_type "$@" ;;
+    snap) cmd_snap "$@" ;;
+    wait) cmd_wait "$@" ;;
+    wait-ready) cmd_wait_ready "$@" ;;
+    resize) cmd_resize "$@" ;;
+    run) cmd_run "$@" ;;
+    stop) cmd_stop "$@" ;;
+    help)
+      if (($#)); then
+        cmd_help_text "$1" || fail "unknown command '$1' (wsctl --help)"
+      else
+        usage
+      fi
+      ;;
+    *) fail "unknown command '$name' (wsctl --help)" ;;
+  esac
+}
+
+main "$@"

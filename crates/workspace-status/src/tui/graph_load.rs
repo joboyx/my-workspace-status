@@ -14,10 +14,11 @@ use std::fs;
 use std::path::Path;
 
 use workspace_status_graph::{
-    cap_commit_body, co_author_trailers, Commit, CommitPeople, GraphModel, GraphRef, Signature,
-    Stash, SyncState, SyncStatus, Worktree, DEFAULT_GRAPH_WINDOW,
+    cap_commit_body, co_author_trailers, Commit, CommitPeople, GraphModel, GraphRef, Person,
+    Signature, Stash, SyncState, SyncStatus, Worktree, DEFAULT_GRAPH_WINDOW,
 };
 
+use crate::file_index::{paintable_line, paintable_text};
 use crate::git::{exec_git, list_worktrees_porcelain};
 use crate::snapshot::{CheckoutKind, WorkspaceRepoSnapshot, WorkspaceSnapshot};
 use crate::worktrees::{
@@ -399,23 +400,23 @@ fn parse_commit_fields(chunk: &[&str], refs: &[(String, GraphRef)]) -> Option<Co
         return None;
     }
     let parents = chunk[1].split_whitespace().map(str::to_string).collect();
-    let subject = chunk[2].to_string();
-    let author_name = chunk[3].to_string();
+    let subject = paintable_line(chunk[2]);
+    let author_name = paintable_line(chunk[3]);
     let author_date_unix = chunk[5].trim().parse::<i64>().unwrap_or(0);
     // Trailers come from the full body: the cap below could drop them.
     let raw_body = chunk.get(11).copied().unwrap_or("");
     let people = CommitPeople {
-        author_email: chunk[4].to_string(),
+        author_email: paintable_line(chunk[4]),
         author_offset_secs: iso_offset_secs(chunk[6]),
         committer: Signature {
-            name: chunk[7].to_string(),
-            email: chunk[8].to_string(),
+            name: paintable_line(chunk[7]),
+            email: paintable_line(chunk[8]),
             unix: chunk[9].trim().parse::<i64>().unwrap_or(0),
             offset_secs: iso_offset_secs(chunk[10]),
         },
-        co_authors: co_author_trailers(raw_body),
+        co_authors: paintable_co_authors(raw_body),
     };
-    let body = cap_commit_body(raw_body);
+    let body = cap_commit_body(&paintable_text(raw_body));
     let commit_refs = refs
         .iter()
         .filter(|(sha, _)| sha == id)
@@ -431,6 +432,21 @@ fn parse_commit_fields(chunk: &[&str], refs: &[(String, GraphRef)]) -> Option<Co
         author_date_unix,
         people,
     })
+}
+
+/// Co-author trailers of `raw_body` with paintable names and emails.
+///
+/// Commit and stash text (subject, body, names, emails) only paints, so
+/// the parsers pass it through [`paintable_line`] / [`paintable_text`]: a
+/// control byte in a commit message must not reach the terminal.
+fn paintable_co_authors(raw_body: &str) -> Vec<Person> {
+    co_author_trailers(raw_body)
+        .into_iter()
+        .map(|person| Person {
+            name: paintable_line(&person.name),
+            email: paintable_line(&person.email),
+        })
+        .collect()
 }
 
 /// UTC offset in seconds east of UTC from a strict ISO date (`%aI`, `%cI`).
@@ -565,22 +581,22 @@ fn parse_stash_fields(chunk: &[&str]) -> Option<Stash> {
         return None;
     }
     let parent = chunk[2].split_whitespace().next().map(str::to_string);
-    let subject = chunk[3].to_string();
+    let subject = paintable_line(chunk[3]);
     let author_date_unix = chunk[4].trim().parse::<i64>().unwrap_or(0);
-    let author_name = chunk[5].to_string();
+    let author_name = paintable_line(chunk[5]);
     let raw_body = chunk.get(12).copied().unwrap_or("");
     let people = CommitPeople {
-        author_email: chunk[6].to_string(),
+        author_email: paintable_line(chunk[6]),
         author_offset_secs: iso_offset_secs(chunk[7]),
         committer: Signature {
-            name: chunk[8].to_string(),
-            email: chunk[9].to_string(),
+            name: paintable_line(chunk[8]),
+            email: paintable_line(chunk[9]),
             unix: chunk[10].trim().parse::<i64>().unwrap_or(0),
             offset_secs: iso_offset_secs(chunk[11]),
         },
-        co_authors: co_author_trailers(raw_body),
+        co_authors: paintable_co_authors(raw_body),
     };
-    let body = cap_commit_body(raw_body);
+    let body = cap_commit_body(&paintable_text(raw_body));
     Some(Stash {
         id: id.to_string(),
         stash_ref: stash_ref.to_string(),
@@ -850,6 +866,25 @@ mod tests {
         assert_eq!(commits[0].body, "");
     }
 
+    /// A commit message is text from anyone who can push. Its escape bytes
+    /// must not reach the terminal: tabs become spaces, other control
+    /// characters become U+FFFD, and body line breaks stay.
+    #[test]
+    fn commit_and_stash_text_is_paintable() {
+        let raw = commit_record(
+            "abc123",
+            "p1",
+            "fix\x1b[2J\tlogin",
+            "one\x1b]0;x\x07\r\n\ttwo\u{9b}",
+        );
+        let commit = parse_commit_line(&raw, &[]).expect("commit");
+        assert_eq!(commit.subject, "fix\u{FFFD}[2J login");
+        assert_eq!(commit.body, "one\u{FFFD}]0;x\u{FFFD}\n    two\u{FFFD}");
+        let stash =
+            parse_stash_line(&stash_record("stash@{0}", "s1", "a\x1bb\n\tc")).expect("stash");
+        assert_eq!(stash.body, "a\u{FFFD}b\n    c");
+    }
+
     #[test]
     fn parse_commit_stream_trims_inter_commit_lf_so_refs_match() {
         // Real `git log --pretty=format:…%b%x00` emits `\0\n` before the
@@ -1019,20 +1054,13 @@ mod live_git {
     use crate::testutil::{git, init_repo_empty, repo_snapshot};
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use workspace_status_graph::{format_commit_ref_chips, GraphRow, RefKind, ASCII};
 
     use crate::snapshot::{build_workspace_snapshot, CheckoutKind};
 
     fn temp_workspace() -> (PathBuf, PathBuf) {
-        let root = std::env::temp_dir().join(format!(
-            "ws-graph-load-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = crate::testutil::unique_dir("ws-graph-load");
         let workspace = root.join("workspace");
         let repo = workspace.join("app");
         fs::create_dir_all(&repo).unwrap();

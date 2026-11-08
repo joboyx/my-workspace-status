@@ -899,11 +899,15 @@ pub enum Effect {
         gen: u64,
     },
     /// Copy `text` to the clipboard (OSC 52 / host tool).
+    ///
+    /// The interpreter writes OSC 52 on the loop thread and runs the host
+    /// tool on a worker with a deadline. The copy succeeds when either path
+    /// does.
     CopyClipboard {
         text: String,
-        /// When true, the interpreter sets `copied` if `copy_to_clipboard`
-        /// succeeds and `copy failed` if it does not. When false, status is
-        /// left to the caller (`y` overlay chrome).
+        /// When true, the interpreter sets `copied` if the copy succeeds
+        /// and `copy failed` if it does not. When false, status is left to
+        /// the caller (`y` overlay chrome).
         announce: bool,
     },
 }

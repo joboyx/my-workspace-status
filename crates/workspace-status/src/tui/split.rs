@@ -762,93 +762,6 @@ pub fn hit_split(layout: SplitLayout, col: u16, row: u16) -> SplitHit {
     SplitHit::Other
 }
 
-#[allow(dead_code)]
-fn unified_kind(line: &str) -> &'static str {
-    if line.starts_with("+++")
-        || line.starts_with("---")
-        || line.starts_with("diff ")
-        || line.starts_with("index ")
-        || line.starts_with("new file")
-        || line.starts_with("deleted file")
-        || line.starts_with("@@")
-        || line == "staged"
-        || line == "unstaged"
-        || line.starts_with("untracked")
-        || line == "(no diff)"
-        || line.starts_with("no diff")
-    {
-        "meta"
-    } else if line.starts_with('+') {
-        "add"
-    } else if line.starts_with('-') {
-        "del"
-    } else {
-        "ctx"
-    }
-}
-
-/// Zip unified-diff lines into side-by-side pairs.
-#[allow(dead_code)]
-pub fn pair_unified_lines(lines: &[String]) -> Vec<SplitRow> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < lines.len() {
-        let kind = unified_kind(&lines[i]);
-        if kind == "meta" {
-            out.push(SplitRow {
-                left: lines[i].clone(),
-                right: String::new(),
-            });
-            i += 1;
-            continue;
-        }
-        if kind == "ctx" {
-            out.push(SplitRow {
-                left: lines[i].clone(),
-                right: lines[i].clone(),
-            });
-            i += 1;
-            continue;
-        }
-        let mut dels = Vec::new();
-        let mut adds = Vec::new();
-        while i < lines.len() && unified_kind(&lines[i]) == "del" {
-            dels.push(lines[i].clone());
-            i += 1;
-        }
-        while i < lines.len() && unified_kind(&lines[i]) == "add" {
-            adds.push(lines[i].clone());
-            i += 1;
-        }
-        if dels.is_empty() && adds.is_empty() {
-            i += 1;
-            continue;
-        }
-        let n = dels.len().max(adds.len());
-        for j in 0..n {
-            out.push(SplitRow {
-                left: dels.get(j).cloned().unwrap_or_default(),
-                right: adds.get(j).cloned().unwrap_or_default(),
-            });
-        }
-    }
-    out
-}
-
-/// Visible columns of `text`, padded or truncated to `width`.
-#[allow(dead_code)]
-pub fn pad_trunc(text: &str, width: u16) -> String {
-    let width = width as usize;
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() >= width {
-        chars.into_iter().take(width).collect()
-    } else {
-        let mut out: String = chars.into_iter().collect();
-        out.push_str(&" ".repeat(width - out.chars().count()));
-        out
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1744,22 +1657,5 @@ mod tests {
             3,
             "zero delta keeps origin offset"
         );
-    }
-
-    #[test]
-    fn pair_unified_lines_zips_del_add_runs() {
-        let lines = [
-            "@@ -1,2 +1,2 @@".into(),
-            "-old".into(),
-            "+new".into(),
-            " context".into(),
-        ];
-        let rows = pair_unified_lines(&lines);
-        assert_eq!(rows[0].left, "@@ -1,2 +1,2 @@");
-        assert_eq!(rows[0].right, "");
-        assert_eq!(rows[1].left, "-old");
-        assert_eq!(rows[1].right, "+new");
-        assert_eq!(rows[2].left, " context");
-        assert_eq!(rows[2].right, " context");
     }
 }

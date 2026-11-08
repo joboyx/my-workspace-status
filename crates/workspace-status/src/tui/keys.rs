@@ -498,10 +498,12 @@ fn fold_altgr_symbol(mut key: KeyEvent) -> KeyEvent {
     key
 }
 
-/// Keyboard enhancement reports Shift+letter as the unshifted codepoint plus
-/// [`KeyModifiers::SHIFT`] (`Char('o')` + SHIFT, not `Char('O')`).
+/// A terminal that does not honour `REPORT_ALTERNATE_KEYS` reports
+/// Shift+letter as the unshifted codepoint plus [`KeyModifiers::SHIFT`]
+/// (`Char('o')` + SHIFT, not `Char('O')`). With the flag, `tty` already
+/// decodes the shifted character.
 ///
-/// Fold that into the uppercase binding so `O` / `S` / `/` capitals match
+/// Fold that into the uppercase binding so `O` / `S` capitals match
 /// what a raw `'O'` byte already does. SHIFT stays set so Shift+h/l still pan.
 fn fold_shift_letter(mut key: KeyEvent) -> KeyEvent {
     let KeyCode::Char(c) = key.code else {
