@@ -736,7 +736,7 @@ mod tests {
         let store_b = put_comment(&CommentStore::new(), key_b.clone(), "note-b");
         save_comment_store(&CommentStore::new(), &store_a, &file, "ws-a").unwrap();
         save_comment_store(&CommentStore::new(), &store_b, &file, "ws-b").unwrap();
-        let gced = gc_comments(&store_a, &app_present_no_branches());
+        let gced = gc_comments(&store_a, &app_present_no_branches(), &dir);
         save_comment_store(&store_a, &gced, &file, "ws-a").unwrap();
         let loaded_b = load_comment_store(&file, "ws-b");
         assert_eq!(
@@ -889,7 +889,7 @@ mod tests {
                 .map(CommentEntry::as_str),
             Some("note-b")
         );
-        let gced = gc_comments(&store_b, &app_present_no_branches());
+        let gced = gc_comments(&store_b, &app_present_no_branches(), &dir);
         assert!(gced.is_empty(), "GC must drop the topic comment of B");
         save_comment_store(&store_b, &gced, &file, "ws-b").unwrap();
         assert_eq!(

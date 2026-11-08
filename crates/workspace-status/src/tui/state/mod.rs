@@ -5738,7 +5738,7 @@ impl AppState {
             &self.comment_store,
             &self.comment_checkout_owners,
         );
-        let next = gc_comments(&self.comment_store, &live);
+        let next = gc_comments(&self.comment_store, &live, &self.cwd);
         self.comment_checkout_owners = live.checkout_owners;
         if next != self.comment_store {
             self.comment_store = next;

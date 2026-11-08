@@ -2,10 +2,17 @@ use super::super::store::{put_comment, CommentEntry, CommentKey, CommentStore};
 use super::*;
 use crate::helpers::DETACHED_HEAD_BRANCH;
 use crate::snapshot::{build_workspace_snapshot, CheckoutKind, RepoSnapshot};
-use crate::testutil::{repo_snapshot, unstaged_change};
+use crate::testutil::{repo_snapshot, unique_dir, unstaged_change};
 use crate::tui::diff::{DiffCell, DiffCellKind, DiffContent, DiffRow};
 use crate::tui::tree::NodeChrome;
+use std::path::PathBuf;
 use workspace_status_graph::Commit;
+
+/// A workspace root that does not exist, so every checkout directory under
+/// it is gone on disk.
+fn no_cwd() -> PathBuf {
+    unique_dir("ws-comment-gc-none")
+}
 
 fn snap(repo: &str, branch: &str, kind: CheckoutKind, primary: Option<&str>) -> RepoSnapshot {
     RepoSnapshot {
@@ -62,7 +69,7 @@ fn gc_drops_gone_branch_keeps_commit() {
     store = put_comment(&store, line, "l");
     store = put_comment(&store, commit.clone(), "c");
     let live = collect_live_set(&snapshot, &store, &HashMap::new());
-    let next = gc_comments(&store, &live);
+    let next = gc_comments(&store, &live, &no_cwd());
     assert!(next.contains_key(&commit));
     assert_eq!(next.len(), 1);
 }
@@ -136,7 +143,7 @@ fn gc_keeps_comments_of_repo_missing_from_snapshot() {
     }
     let earlier = collect_live_set(&app_with_linked_worktree(), &store, &HashMap::new());
     assert_eq!(
-        gc_comments(&store, &earlier),
+        gc_comments(&store, &earlier, &no_cwd()),
         store,
         "all app keys are live"
     );
@@ -156,7 +163,7 @@ fn gc_keeps_comments_of_repo_missing_from_snapshot() {
     );
     for owners in [HashMap::new(), earlier.checkout_owners.clone()] {
         let live = collect_live_set(&snapshot, &store, &owners);
-        let next = gc_comments(&store, &live);
+        let next = gc_comments(&store, &live, &no_cwd());
         assert_eq!(
             next, store,
             "a repo missing from the snapshot is unknown, not gone: keep its comments"
@@ -186,7 +193,7 @@ fn gc_drops_gone_branch_and_worktree_of_present_authoritative_repo() {
         &[],
     );
     let live = collect_live_set(&snapshot, &store, &earlier.checkout_owners);
-    let next = gc_comments(&store, &live);
+    let next = gc_comments(&store, &live, &no_cwd());
     let gone_branch = CommentKey::Branch {
         repo: "app".into(),
         branch: "feature/x".into(),
@@ -210,7 +217,7 @@ fn gc_drops_gone_branch_and_worktree_of_present_authoritative_repo() {
     assert_eq!(next.len(), store.len() - 3, "{next:?}");
     // With no memory of which repo owned the missing worktree, keep it.
     let unknown_owner = collect_live_set(&snapshot, &store, &HashMap::new());
-    assert!(gc_comments(&store, &unknown_owner).contains_key(&gone_worktree));
+    assert!(gc_comments(&store, &unknown_owner, &no_cwd()).contains_key(&gone_worktree));
     // A status-failed owner is not authoritative: keep the worktree key.
     let mut failed = snap(
         "app",
@@ -221,7 +228,45 @@ fn gc_drops_gone_branch_and_worktree_of_present_authoritative_repo() {
     failed.sync_note = "status failed".into();
     let failed_snapshot = build_workspace_snapshot(&[failed], &[], false, &[]);
     let live = collect_live_set(&failed_snapshot, &store, &earlier.checkout_owners);
-    assert!(gc_comments(&store, &live).contains_key(&gone_worktree));
+    assert!(gc_comments(&store, &live, &no_cwd()).contains_key(&gone_worktree));
+}
+
+#[test]
+fn gc_keeps_missing_worktree_key_while_its_directory_exists() {
+    let worktree = CommentKey::Worktree {
+        path: "app/.worktrees/feat".into(),
+    };
+    let store = put_comment(&CommentStore::new(), worktree.clone(), "note");
+    let earlier = collect_live_set(&app_with_linked_worktree(), &store, &HashMap::new());
+    // `app` is present and authoritative; its linked worktree row is missing
+    // (for example `git worktree list` failed).
+    let snapshot = build_workspace_snapshot(
+        &[snap_with_branches(
+            "app",
+            "main",
+            CheckoutKind::Primary,
+            None,
+            &["main", "feature/x"],
+        )],
+        &[],
+        false,
+        &[],
+    );
+    let live = collect_live_set(&snapshot, &store, &earlier.checkout_owners);
+    assert!(live.authoritative.contains("app"));
+    let cwd = unique_dir("ws-comment-gc-wt");
+    let dir = cwd.join("app/.worktrees/feat");
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(
+        gc_comments(&store, &live, &cwd).contains_key(&worktree),
+        "the worktree directory still exists: keep the key"
+    );
+    std::fs::remove_dir(&dir).unwrap();
+    assert!(
+        !gc_comments(&store, &live, &cwd).contains_key(&worktree),
+        "the worktree directory is gone: drop the key"
+    );
+    std::fs::remove_dir_all(&cwd).unwrap();
 }
 
 #[test]
@@ -249,7 +294,7 @@ fn gc_keeps_branch_comments_when_status_failed() {
     store = put_comment(&store, branch.clone(), "b");
     store = put_comment(&store, line.clone(), "l");
     let live = collect_live_set(&snapshot, &store, &HashMap::new());
-    let next = gc_comments(&store, &live);
+    let next = gc_comments(&store, &live, &no_cwd());
     assert_eq!(next.get(&branch).map(CommentEntry::as_str), Some("b"));
     assert_eq!(next.get(&line).map(CommentEntry::as_str), Some("l"));
     assert!(!live.branches.contains(&("app".into(), "(unknown)".into())));
@@ -288,7 +333,7 @@ fn gc_drops_deleted_branch_when_sibling_status_failed() {
     store = put_comment(&store, branch.clone(), "b");
     store = put_comment(&store, line.clone(), "l");
     let live = collect_live_set(&snapshot, &store, &HashMap::new());
-    let next = gc_comments(&store, &live);
+    let next = gc_comments(&store, &live, &no_cwd());
     assert!(!next.contains_key(&branch));
     assert!(!next.contains_key(&line));
     assert!(!live.branches.contains(&("app".into(), "doomed".into())));
@@ -344,7 +389,7 @@ fn watch_gc_keeps_detached_worktree_comment() {
     let key = CommentKey::Worktree { path: "app".into() };
     let store = put_comment(&CommentStore::new(), key.clone(), "detached note");
     let live = collect_live_set(&snapshot, &store, &HashMap::new());
-    let next = gc_comments(&store, &live);
+    let next = gc_comments(&store, &live, &no_cwd());
     assert_eq!(
         next.get(&key).map(CommentEntry::as_str),
         Some("detached note")
