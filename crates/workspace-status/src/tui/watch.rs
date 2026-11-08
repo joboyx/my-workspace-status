@@ -757,6 +757,7 @@ mod tests {
             sync_status: status,
             sync_note: note.into(),
             upstream_rewrite: None,
+            fetch_error: None,
             head: head.into(),
             checkout_kind: CheckoutKind::Primary,
             primary_repo: None,

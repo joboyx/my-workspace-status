@@ -459,7 +459,7 @@ pub fn graph_sync_kind(status: SyncStatus) -> IconKind {
         SyncStatus::Ahead => IconKind::Ahead,
         SyncStatus::Behind => IconKind::Behind,
         SyncStatus::Diverged => IconKind::Diverged,
-        SyncStatus::NoUpstream => IconKind::NoUpstream,
+        SyncStatus::NoUpstream | SyncStatus::Gone => IconKind::NoUpstream,
         SyncStatus::UpToDate => IconKind::Synced,
     }
 }
@@ -1831,7 +1831,7 @@ fn graph_sync_role(status: SyncStatus) -> SegRole {
         SyncStatus::Ahead => SegRole::Added,
         SyncStatus::Behind => SegRole::Deleted,
         SyncStatus::Diverged => SegRole::Modified,
-        SyncStatus::UpToDate | SyncStatus::NoUpstream => SegRole::Muted,
+        SyncStatus::UpToDate | SyncStatus::NoUpstream | SyncStatus::Gone => SegRole::Muted,
     }
 }
 
@@ -1843,6 +1843,7 @@ fn graph_sync_text(state: &AppState, sync: &workspace_status_graph::SyncState) -
     let glyphs = if state.ascii { &ASCII } else { &UNICODE };
     match sync.status {
         SyncStatus::NoUpstream => "no upstream".into(),
+        SyncStatus::Gone => "upstream gone".into(),
         SyncStatus::UpToDate => "up to date".into(),
         SyncStatus::Ahead | SyncStatus::Behind | SyncStatus::Diverged => format!(
             "{}{} {}{}",
@@ -2222,6 +2223,7 @@ fn graph_sync_section(state: &AppState) -> Option<PopoverSection> {
         SyncStatus::Diverged => ("diverged", SegRole::Modified),
         SyncStatus::UpToDate => ("up to date", SegRole::Muted),
         SyncStatus::NoUpstream => ("no upstream", SegRole::Muted),
+        SyncStatus::Gone => ("upstream gone", SegRole::Muted),
     };
     if matches!(
         sync.status,

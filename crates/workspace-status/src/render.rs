@@ -116,14 +116,37 @@ fn repo_label(snapshot: &RepoSnapshot) -> String {
 }
 
 fn sync_label(snapshot: &RepoSnapshot) -> String {
+    noted_repo_label(snapshot, &[snapshot.sync_note.clone()])
+}
+
+/// Attention line: the attention sync note (unborn, status failed) and the
+/// `--fetch` failure reason, each when present.
+fn attention_label(snapshot: &RepoSnapshot) -> String {
+    let mut notes = Vec::new();
+    if is_attention_sync_note(&snapshot.sync_note) {
+        notes.push(snapshot.sync_note.clone());
+    }
+    if let Some(reason) = &snapshot.fetch_error {
+        notes.push(format!("fetch failed: {reason}"));
+    }
+    noted_repo_label(snapshot, &notes)
+}
+
+/// `repo [branch] (ticket) - note; note`, skipping empty notes.
+fn noted_repo_label(snapshot: &RepoSnapshot, notes: &[String]) -> String {
     let repo = format_checkout_repo_label(snapshot);
     let ticket = extract_ticket_id(&snapshot.branch);
     let mut label = format!("{repo} [{}]", snapshot.branch);
     if let Some(ticket) = ticket {
         label.push_str(&format!(" ({ticket})"));
     }
-    if !snapshot.sync_note.is_empty() {
-        label.push_str(&format!(" - {}", snapshot.sync_note));
+    let notes: Vec<&str> = notes
+        .iter()
+        .map(String::as_str)
+        .filter(|n| !n.is_empty())
+        .collect();
+    if !notes.is_empty() {
+        label.push_str(&format!(" - {}", notes.join("; ")));
     }
     label
 }
@@ -288,7 +311,7 @@ pub fn render_workspace_status(
         + summary.branch_unknown.len();
     let mut attention: Vec<&RepoSnapshot> = snapshots
         .iter()
-        .filter(|s| is_attention_sync_note(&s.sync_note))
+        .filter(|s| is_attention_sync_note(&s.sync_note) || s.fetch_error.is_some())
         .collect();
     attention.sort_by(|a, b| a.repo.cmp(&b.repo));
 
@@ -383,7 +406,7 @@ pub fn render_workspace_status(
         append_section_gap(&mut lines);
         lines.push(format!("⚠️ Attention ({}):", attention.len()));
         for snapshot in attention {
-            lines.push(format!("    - {}", sync_label(snapshot)));
+            lines.push(format!("    - {}", attention_label(snapshot)));
         }
     }
 

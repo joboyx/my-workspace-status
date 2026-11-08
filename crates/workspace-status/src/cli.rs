@@ -15,6 +15,7 @@ use crate::settings::Settings;
 use crate::snapshot::{
     build_summary_state, build_verbose_rows, build_workspace_snapshot, non_default_branch_repos,
     repo_snapshots_from_workspace, serialize_workspace_snapshot, visible_workspace_snapshot,
+    RepoSnapshot,
 };
 use crate::update::run_self_update;
 use crate::update_check::{offer_startup_update, StartupUpdateOffer};
@@ -139,6 +140,17 @@ fn canonicalize_workspace_dir(path: &Path) -> Result<PathBuf, String> {
         ));
     }
     Ok(canonical)
+}
+
+/// Carry each checkout's `--fetch` failure from the first status pass into a
+/// later pass (after `--pull` or `--default-branch`) that does not fetch.
+fn keep_fetch_errors(before: &[RepoSnapshot], after: &mut [RepoSnapshot]) {
+    for row in after.iter_mut().filter(|row| row.fetch_error.is_none()) {
+        row.fetch_error = before
+            .iter()
+            .find(|old| old.repo == row.repo)
+            .and_then(|old| old.fetch_error.clone());
+    }
 }
 
 fn say(json: bool, line: &str) {
@@ -278,13 +290,15 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
         say(force_json, "");
         say(force_json, "🔄 Re-checking status after pull...");
         say(force_json, "");
-        snapshots = collect_snapshots(
+        let mut rechecked = collect_snapshots(
             &cwd,
             false,
             &config,
             only_repos.as_ref(),
             settings.fetch_concurrency,
         );
+        keep_fetch_errors(&snapshots, &mut rechecked);
+        snapshots = rechecked;
         summary = build_summary_state(&snapshots);
     }
 
@@ -317,13 +331,15 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
                 say(force_json, "");
                 say(force_json, "🔄 Re-checking status after switch...");
                 say(force_json, "");
-                snapshots = collect_snapshots(
+                let mut rechecked = collect_snapshots(
                     &cwd,
                     false,
                     &config,
                     only_repos.as_ref(),
                     settings.fetch_concurrency,
                 );
+                keep_fetch_errors(&snapshots, &mut rechecked);
+                snapshots = rechecked;
             }
         }
     }

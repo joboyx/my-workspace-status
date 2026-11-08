@@ -312,6 +312,8 @@ pub enum SyncStatus {
     UpToDate,
     /// No upstream configured.
     NoUpstream,
+    /// The configured upstream no longer exists (git status `[gone]`).
+    Gone,
     /// Ahead of upstream only.
     Ahead,
     /// Behind upstream only.
