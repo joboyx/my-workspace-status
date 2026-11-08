@@ -9,11 +9,15 @@
 //! The reducer then lands the merged bucket ([`StoreSync::land`]).
 //!
 //! A change made while a save runs is not lost: landing applies it on top
-//! of the merged bucket, and the next save sends it. Quit waits for the
-//! running save and runs the last one (`event_loop::flush_store_saves`).
+//! of the merged bucket, and the next save sends it. A failed save keeps
+//! its changes; the next change sends them again, and quit tries a failed
+//! save once more. Quit waits for the running save and runs the last one
+//! (`event_loop::flush_store_saves`), and reports each store it could not
+//! save ([`UnsavedStore`]).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use super::comments::{save_comment_store, CommentStore};
 use super::persist::apply_session_delta;
@@ -39,6 +43,51 @@ impl StoreKind {
             StoreKind::Comments => "comment",
         }
     }
+
+    /// What a lost save of this store loses, for the quit report.
+    fn changes(self) -> &'static str {
+        match self {
+            StoreKind::Viewed => "reviewed-mark changes",
+            StoreKind::Comments => "comment changes",
+        }
+    }
+}
+
+/// Why quit could not save a store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UnsavedReason {
+    /// The save still ran, or was still asked for, when the quit grace ran
+    /// out.
+    TimedOut(Duration),
+    /// The last save failed, the retry at quit included.
+    Failed(String),
+}
+
+/// A store whose changes quit could not save. `run_tui` prints one line
+/// per store to stderr once the terminal is restored ([`Self::message`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnsavedStore {
+    /// Store the changes belong to.
+    pub kind: StoreKind,
+    /// Why they are not saved.
+    pub reason: UnsavedReason,
+}
+
+impl UnsavedStore {
+    /// The stderr line: `comment save failed: <error>; …` (the words of the
+    /// in-TUI status), or the timeout.
+    pub fn message(&self) -> String {
+        let (label, changes) = (self.kind.label(), self.kind.changes());
+        match &self.reason {
+            UnsavedReason::Failed(err) => {
+                format!("{label} save failed: {err}; {changes} since the last save are lost")
+            }
+            UnsavedReason::TimedOut(grace) => format!(
+                "{label} save did not finish within {} s at quit; {changes} since the last save may be lost",
+                grace.as_secs_f64()
+            ),
+        }
+    }
 }
 
 /// Save state of one in-memory store map against its file.
@@ -56,6 +105,10 @@ pub(crate) struct StoreSync<K, V> {
     wanted: bool,
     /// Status the next save shows when it succeeds (`comment saved`).
     ack: Option<String>,
+    /// Error of the last save when it failed. Its changes are still
+    /// unsaved: the loop does not retry on its own (a disk that stays
+    /// read-only would spin), but quit tries once more ([`Self::retry_failed`]).
+    failed: Option<String>,
 }
 
 impl<K: Ord + Clone, V: PartialEq + Clone> StoreSync<K, V> {
@@ -66,7 +119,23 @@ impl<K: Ord + Clone, V: PartialEq + Clone> StoreSync<K, V> {
             inflight: None,
             wanted: false,
             ack: None,
+            failed: None,
         }
+    }
+
+    /// Error of the last save when it failed and nothing saved since.
+    pub(crate) fn failed(&self) -> Option<&str> {
+        self.failed.as_deref()
+    }
+
+    /// Ask again for the save that failed, when no save is asked for or
+    /// runs. Quit calls it once per store. Returns true when it asked.
+    pub(crate) fn retry_failed(&mut self) -> bool {
+        if self.failed.is_none() || self.pending() {
+            return false;
+        }
+        self.wanted = true;
+        true
     }
 
     /// Ask for a save of the current store. `ack` replaces the status the
@@ -113,7 +182,9 @@ impl<K: Ord + Clone, V: PartialEq + Clone> StoreSync<K, V> {
     /// baseline, and `store` becomes `merged` plus the changes made since
     /// the save started, which the next save sends. Returns the ack to
     /// show. `Err` keeps the baseline and `store`, so the next save sends
-    /// the same changes again. No running save: nothing changes.
+    /// the same changes again, and records the error ([`Self::failed`]);
+    /// the ack waits for the next save unless a newer one replaced it. No
+    /// running save: nothing changes.
     pub(crate) fn land(
         &mut self,
         store: &mut BTreeMap<K, V>,
@@ -122,10 +193,20 @@ impl<K: Ord + Clone, V: PartialEq + Clone> StoreSync<K, V> {
         let Some((sent, ack)) = self.inflight.take() else {
             return Ok(None);
         };
-        let merged = result?;
+        let merged = match result {
+            Ok(merged) => merged,
+            Err(err) => {
+                if self.ack.is_none() {
+                    self.ack = ack;
+                }
+                self.failed = Some(err.clone());
+                return Err(err);
+            }
+        };
         let mut next = merged.clone();
         apply_session_delta(&mut next, &sent, store);
         self.baseline = merged;
+        self.failed = None;
         *store = next;
         Ok(ack)
     }
@@ -151,6 +232,14 @@ pub(crate) enum StoreSaveJob {
 }
 
 impl StoreSaveJob {
+    /// Store the job writes.
+    pub(crate) fn kind(&self) -> StoreKind {
+        match self {
+            StoreSaveJob::Viewed { .. } => StoreKind::Viewed,
+            StoreSaveJob::Comments { .. } => StoreKind::Comments,
+        }
+    }
+
     /// Run the save: lock, merge with the file, atomic write. Blocking;
     /// runs on a worker (or at quit).
     pub(crate) fn run(self) -> StoreSaved {
@@ -262,8 +351,53 @@ mod tests {
         );
         assert_eq!(store, map(&[("a", "1")]));
         assert!(!sync.pending(), "no retry until the next change");
+        assert_eq!(sync.failed(), Some("disk full"));
         sync.want(None);
         let (baseline, sent) = sync.begin(&store).unwrap();
         assert_eq!((baseline, sent), (map(&[]), map(&[("a", "1")])));
+        assert_eq!(
+            sync.land(&mut store, Ok(map(&[("a", "1")]))),
+            Ok(Some("saved".into())),
+            "the ack of the failed save shows when its changes land"
+        );
+        assert_eq!(sync.failed(), None);
+    }
+
+    #[test]
+    fn a_failed_save_is_asked_again_once_by_retry_failed() {
+        let mut sync = StoreSync::new(&map(&[]));
+        let mut store = map(&[("a", "1")]);
+        assert!(!sync.retry_failed(), "nothing failed");
+        sync.want(None);
+        sync.begin(&store).unwrap();
+        assert!(!sync.retry_failed(), "a save runs");
+        sync.land(&mut store, Err("read-only".into())).unwrap_err();
+        assert!(sync.retry_failed());
+        assert!(sync.ready());
+        assert!(!sync.retry_failed(), "already asked for");
+        let (baseline, sent) = sync.begin(&store).unwrap();
+        assert_eq!((baseline, sent), (map(&[]), map(&[("a", "1")])));
+        sync.land(&mut store, Ok(map(&[("a", "1")]))).unwrap();
+        assert!(!sync.retry_failed() && !sync.pending());
+    }
+
+    #[test]
+    fn unsaved_store_messages_name_the_store_and_the_reason() {
+        let failed = UnsavedStore {
+            kind: StoreKind::Comments,
+            reason: UnsavedReason::Failed("Not a directory (os error 20)".into()),
+        };
+        assert_eq!(
+            failed.message(),
+            "comment save failed: Not a directory (os error 20); comment changes since the last save are lost"
+        );
+        let timed_out = UnsavedStore {
+            kind: StoreKind::Viewed,
+            reason: UnsavedReason::TimedOut(Duration::from_secs(2)),
+        };
+        assert_eq!(
+            timed_out.message(),
+            "viewed save did not finish within 2 s at quit; reviewed-mark changes since the last save may be lost"
+        );
     }
 }

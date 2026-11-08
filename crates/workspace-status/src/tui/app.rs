@@ -84,6 +84,11 @@ pub struct TuiOpts {
 /// quit, an error return, a panic on this thread (panic hook), and on Unix
 /// an exit signal (`SIGINT`, `SIGTERM`, `SIGHUP`; see
 /// [`super::term_restore`]).
+///
+/// After the restore it prints one stderr line per viewed or comment store
+/// whose last changes quit could not save
+/// ([`super::store_save::UnsavedStore::message`]). Those lines do not
+/// change the exit code.
 pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
     install_panic_hook(&PROGRESS_SHOWN, &POINTER_SET, stdout);
     let mut state = AppState::launch(opts.cwd.clone(), opts.snapshot.clone(), &opts.settings);
@@ -125,12 +130,19 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build();
-    let result = match &rt {
+    let exit = match &rt {
         Ok(rt) => rt.block_on(super::event_loop::run(&mut terminal, &mut state, &opts)),
-        Err(_) => Err(1),
+        Err(_) => super::event_loop::LoopExit {
+            result: Err(1),
+            unsaved: Vec::new(),
+        },
     };
     restore_terminal();
     let _ = terminal.show_cursor();
+    // The status line that named a failed save is gone with the screen.
+    for store in &exit.unsaved {
+        eprintln!("{}", store.message());
+    }
     // Workers may still run (a git fetch, say). Stop their git first
     // (SIGTERM, then SIGKILL after a short grace), and shut the runtime
     // down only once the terminal is back to normal.
@@ -142,7 +154,7 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
             crate::git::wait_for_user_work_restore,
         );
     }
-    result
+    exit.result
 }
 
 /// How long quit waits for worker jobs once their git is stopped.

@@ -126,7 +126,9 @@ use super::stash::{
     stash_ops_for_context, StashMenuKeyResult, StashOp, StashOpId, StashOpsContext,
 };
 use super::status::{StatusKind, StatusMessage};
-use super::store_save::{StoreKind, StoreSaveJob, StoreSaved, StoreSync};
+use super::store_save::{
+    StoreKind, StoreSaveJob, StoreSaved, StoreSync, UnsavedReason, UnsavedStore,
+};
 use super::tabs::{
     compare_file_dirty, CommitPickerState, ComparePickerKind, ComparePickerState, OpenCompare,
     TabStrip, WorktreeFile, CANNOT_REVERT_COMMITTED_DIFF, CANNOT_REVERT_WORKTREE_COMPARE,
@@ -5741,6 +5743,40 @@ impl AppState {
         self.viewed_sync.pending() || self.comment_sync.pending()
     }
 
+    /// Ask again for the save of store `kind` whose last save failed, when
+    /// none is asked for or runs. Quit calls it once per store so changes
+    /// a failed save kept still get one more try. Returns true when it
+    /// asked.
+    pub(crate) fn retry_failed_store_save(&mut self, kind: StoreKind) -> bool {
+        match kind {
+            StoreKind::Viewed => self.viewed_sync.retry_failed(),
+            StoreKind::Comments => self.comment_sync.retry_failed(),
+        }
+    }
+
+    /// The stores whose changes are not on disk at quit: a save still
+    /// asked for or running when `timed_out` (the grace that ran out) is
+    /// set, else a last save that failed.
+    pub(crate) fn unsaved_stores(&self, timed_out: Option<Duration>) -> Vec<UnsavedStore> {
+        StoreKind::ALL
+            .into_iter()
+            .filter_map(|kind| {
+                let (pending, failed) = match kind {
+                    StoreKind::Viewed => (self.viewed_sync.pending(), self.viewed_sync.failed()),
+                    StoreKind::Comments => {
+                        (self.comment_sync.pending(), self.comment_sync.failed())
+                    }
+                };
+                let reason = match (timed_out, failed) {
+                    (Some(grace), _) if pending => UnsavedReason::TimedOut(grace),
+                    (_, Some(err)) => UnsavedReason::Failed(err.to_string()),
+                    _ => return None,
+                };
+                Some(UnsavedStore { kind, reason })
+            })
+            .collect()
+    }
+
     /// Start the save of store `kind` asked for: the job that writes this
     /// session's changes since the last load or save. `None` unless
     /// [`Self::store_save_ready`]. The caller runs the job off the loop
@@ -5774,7 +5810,8 @@ impl AppState {
     /// becomes the in-memory store, the merged bucket the new baseline, and
     /// an ack the save carried shows. On error the status names the
     /// failure, and the baseline and the changes stay, so the next save
-    /// sends them again.
+    /// sends them again: the next change asks for one, and quit retries
+    /// once ([`Self::retry_failed_store_save`]).
     pub(crate) fn land_store_save(&mut self, saved: StoreSaved) {
         let kind = saved.kind();
         let landed = match saved {
