@@ -15,6 +15,19 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// The live loop asks the terminal for the shifted character of Shift+key
+/// (`REPORT_ALTERNATE_KEYS`). Without it, kitty-protocol terminals report
+/// Shift+`;` as `;` + Shift and `:` acts as `;`.
+#[test]
+fn keyboard_enhancement_asks_for_the_shifted_key() {
+    let flags = keyboard_enhancement_flags();
+    assert!(
+        flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS),
+        "{flags:?}"
+    );
+    assert_eq!(flags.bits(), 0b1111, "{flags:?}");
+}
+
 /// Restore bytes as `restore_terminal` writes them, with `shown` as
 /// the shown-bar flag and `pointer_set` as the resize-pointer flag.
 fn restore_bytes(shown: &AtomicBool, pointer_set: &AtomicBool) -> String {

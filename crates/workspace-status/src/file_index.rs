@@ -323,13 +323,29 @@ pub fn read_text_file(path: &Path, max_bytes: u64) -> FileRead {
 }
 
 /// Expand tabs and replace control characters in one line.
-fn paintable_line(line: &str) -> String {
+///
+/// Every surface that paints text from a file, from git, or from a commit
+/// (file view, diff rows, blame, commit subjects) goes through this, so no
+/// raw control byte (ESC included) reaches the terminal. See
+/// [`push_paintable_char`] for the rules.
+pub(crate) fn paintable_line(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut col = 0usize;
     for ch in line.chars() {
         push_paintable_char(&mut out, &mut col, ch);
     }
     out
+}
+
+/// [`paintable_line`] for text of several lines (a commit message body).
+///
+/// Each `\n` stays, a `\r` right before it drops, and each line between
+/// them goes through [`paintable_line`], so tab stops restart on each line.
+pub(crate) fn paintable_text(text: &str) -> String {
+    text.split('\n')
+        .map(|line| paintable_line(line.strip_suffix('\r').unwrap_or(line)))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Append one source character to a paintable line, the way the file view

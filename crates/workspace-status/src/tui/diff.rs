@@ -10,7 +10,8 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
-use crate::git::{exec_git_stdout, git_diff_args};
+use crate::file_index::paintable_line;
+use crate::git::{exec_git_stdout_untrimmed, git_diff_args};
 use crate::snapshot::FileChange;
 
 use super::search::wrap_col_starts;
@@ -58,6 +59,9 @@ pub enum DiffCellKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiffCell {
     pub kind: DiffCellKind,
+    /// Paintable line text ([`paintable_line`]): the `\r` of a CRLF line
+    /// dropped, tabs expanded to spaces, and control characters as U+FFFD.
+    /// Partial patches read the parsed line, never this.
     pub text: String,
     /// 1-based line number in the gutter (`None` for meta / empty).
     pub line_no: Option<u32>,
@@ -231,10 +235,12 @@ pub fn load_file_diff(
     }
 }
 
-/// `git diff` stdout, trimmed like [`exec_git`]. `Err` is git's reason line.
+/// `git diff` stdout as git wrote it: no trim, so the last line keeps its
+/// trailing whitespace and a CRLF line keeps its `\r` for
+/// [`build_partial_patch`]. `Err` is git's reason line.
 pub(crate) fn git_diff_text(args: &[String], dir: &Path) -> Result<String, String> {
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    exec_git_stdout(&refs, dir).map(|text| text.trim().to_string())
+    exec_git_stdout_untrimmed(&refs, dir)
 }
 
 fn untracked_content(repo_dir: &Path, path: &str) -> DiffContent {
@@ -304,10 +310,16 @@ fn head_has_nul(abs: &Path) -> bool {
 }
 
 /// Build a unified all-add diff from file text (no file headers).
+///
+/// Lines split on `\n` only, the way git splits them: a CRLF line keeps
+/// its `\r` and a lone `\r` stays inside its line. Text without a final
+/// newline ends with `\ No newline at end of file`, as in `git diff`. A
+/// `V` stage builds its patch from this text, so it must be the file's
+/// bytes.
 fn synthesize_all_add_diff(text: &str) -> String {
-    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-    let mut raw: Vec<&str> = normalized.split('\n').collect();
-    if raw.last() == Some(&"") {
+    let mut raw: Vec<&str> = text.split('\n').collect();
+    let no_eol = raw.last() != Some(&"");
+    if !no_eol {
         raw.pop();
     }
     if raw.is_empty() {
@@ -319,16 +331,27 @@ fn synthesize_all_add_diff(text: &str) -> String {
         out.push_str(line);
         out.push('\n');
     }
+    if no_eol {
+        out.push_str(NO_EOL_MARKER);
+        out.push('\n');
+    }
     out
 }
 
+/// Git's marker line after a last line that has no newline.
+const NO_EOL_MARKER: &str = "\\ No newline at end of file";
+
 /// Parse a unified diff into hunks. File headers are skipped until the first `@@`.
+///
+/// Lines split on `\n` only, as git writes them. A `\r` stays in the line
+/// text (the end of a CRLF line, or a lone `\r` inside a line), so line
+/// numbers match the file and [`build_partial_patch`] writes the same
+/// bytes back; paint drops a trailing `\r` ([`cell_from_line`]).
 fn parse_unified_diff(text: &str) -> Vec<Hunk> {
     if text.trim().is_empty() {
         return Vec::new();
     }
-    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-    let mut raw_lines: Vec<&str> = normalized.split('\n').collect();
+    let mut raw_lines: Vec<&str> = text.split('\n').collect();
     if raw_lines.last() == Some(&"") {
         raw_lines.pop();
     }
@@ -462,6 +485,12 @@ fn empty_cell() -> DiffCell {
     }
 }
 
+/// Paintable text of one diff line or hunk header: the `\r` that ends a
+/// CRLF line drops (as in the file view), then [`paintable_line`].
+fn paintable_diff_line(text: &str) -> String {
+    paintable_line(text.strip_suffix('\r').unwrap_or(text))
+}
+
 fn cell_from_line(line: &ParsedLine, side: Side) -> DiffCell {
     let line_no = match side {
         Side::Old => line.old_no.or(line.new_no),
@@ -469,7 +498,7 @@ fn cell_from_line(line: &ParsedLine, side: Side) -> DiffCell {
     };
     DiffCell {
         kind: line.kind,
-        text: line.text.clone(),
+        text: paintable_diff_line(&line.text),
         line_no,
     }
 }
@@ -581,7 +610,7 @@ fn push_hunk_rows(
     if !hunk.header.is_empty() {
         out.push((
             DiffRow::Hunk {
-                text: hunk.header.clone(),
+                text: paintable_diff_line(&hunk.header),
             },
             RowBind::Hunk {
                 section,
@@ -666,7 +695,7 @@ fn annotated_diff_rows(content: &DiffContent, mode: DiffMode) -> Vec<(DiffRow, R
 /// Diff-pane text for a failed `git diff`: git's `reason` after a fixed
 /// prefix.
 pub fn diff_failed_text(reason: &str) -> String {
-    format!("git diff failed: {reason}")
+    paintable_line(&format!("git diff failed: {reason}"))
 }
 
 /// Rows for both diff sections. Empty sections are omitted.
@@ -989,7 +1018,24 @@ pub fn build_partial_patch(
     if body.is_empty() {
         return Err(nothing_fail(kind));
     }
-    Ok(format!("{header}{body}"))
+    let patch = format!("{header}{body}");
+    // The diff text is a lossy UTF-8 decode of git's output: a byte that is
+    // not UTF-8 reads as U+FFFD, and a patch with it would write U+FFFD
+    // where the file has that byte. Refuse rather than write other bytes.
+    // A file that holds a real U+FFFD refuses too; whole-file writes work.
+    if patch.contains('\u{FFFD}') {
+        return Err(not_utf8_fail(kind));
+    }
+    Ok(patch)
+}
+
+fn not_utf8_fail(kind: PartialPatchKind) -> String {
+    let verb = match kind {
+        PartialPatchKind::Stage => "stage",
+        PartialPatchKind::Unstage => "unstage",
+        PartialPatchKind::Revert | PartialPatchKind::RevertCommitted => "revert",
+    };
+    format!("cannot {verb} highlight: diff is not UTF-8 text")
 }
 
 fn nothing_fail(kind: PartialPatchKind) -> String {
@@ -1032,10 +1078,12 @@ fn partial_fail(kind: PartialPatchKind) -> String {
     }
 }
 
+/// The file header lines of `raw` (everything before the first hunk), each
+/// with its exact bytes. Lines split on `\n` only, like the hunk parser; git
+/// C-quotes a path with a control character, so a header line holds no `\r`.
 fn patch_file_header(raw: &str, path: &str, is_new: bool) -> String {
-    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
     let mut header = String::new();
-    for line in normalized.lines() {
+    for line in raw.split('\n') {
         if line.starts_with("@@") || is_binary_marker(line) {
             break;
         }
