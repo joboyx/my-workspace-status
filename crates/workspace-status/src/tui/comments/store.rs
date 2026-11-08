@@ -716,9 +716,19 @@ mod tests {
         }
     }
 
+    /// Live set where repo `app` is present with an authoritative branch
+    /// list that has no counted branch, so GC drops its branch keys.
+    fn app_present_no_branches() -> super::super::target::CommentLiveSet {
+        super::super::target::CommentLiveSet {
+            identities: ["app".to_string()].into_iter().collect(),
+            authoritative: ["app".to_string()].into_iter().collect(),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn gc_persist_keeps_other_workspace_comments() {
-        use super::super::target::{gc_comments, CommentLiveSet};
+        use super::super::target::gc_comments;
         let (dir, file) = temp_json("ws-comments-gc");
         let key_a = branch_key("main");
         let key_b = branch_key("topic");
@@ -726,7 +736,7 @@ mod tests {
         let store_b = put_comment(&CommentStore::new(), key_b.clone(), "note-b");
         save_comment_store(&CommentStore::new(), &store_a, &file, "ws-a").unwrap();
         save_comment_store(&CommentStore::new(), &store_b, &file, "ws-b").unwrap();
-        let gced = gc_comments(&store_a, &CommentLiveSet::default());
+        let gced = gc_comments(&store_a, &app_present_no_branches());
         save_comment_store(&store_a, &gced, &file, "ws-a").unwrap();
         let loaded_b = load_comment_store(&file, "ws-b");
         assert_eq!(
@@ -736,7 +746,7 @@ mod tests {
         );
         assert!(
             load_comment_store(&file, "ws-a").is_empty(),
-            "empty live set must drop workspace A comments"
+            "a live set without the branch must drop workspace A comments"
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -841,7 +851,7 @@ mod tests {
 
     #[test]
     fn save_from_other_workspace_keeps_version_1_comment_records() {
-        use super::super::target::{gc_comments, CommentLiveSet};
+        use super::super::target::gc_comments;
         let (dir, file) = temp_json("ws-comments-v1-keep");
         fs::write(
             &file,
@@ -879,7 +889,8 @@ mod tests {
                 .map(CommentEntry::as_str),
             Some("note-b")
         );
-        let gced = gc_comments(&store_b, &CommentLiveSet::default());
+        let gced = gc_comments(&store_b, &app_present_no_branches());
+        assert!(gced.is_empty(), "GC must drop the topic comment of B");
         save_comment_store(&store_b, &gced, &file, "ws-b").unwrap();
         assert_eq!(
             load_comment_store(&file, "ws-a")

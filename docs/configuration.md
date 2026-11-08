@@ -333,6 +333,16 @@ Each built-in palette keeps three four-step flash ramps. On a dark theme each st
 
 Two `ws` processes can open the same workspace and share one `comments.json` and one `viewed-files.json`. Each process keeps a baseline: the workspace bucket as it last loaded or saved it. A save takes the sibling `*.lock` file, reads the bucket on disk, and applies only this process's changes since its baseline: keys it removed are removed, keys it added or edited are written. Keys that the other process added or edited stay. When both processes edit the same key, the later save wins. After a save, the merged bucket becomes the process's in-memory store and its new baseline, so a process shows the other process's comments and marks after its next save. There is no file watch: a process that does not save does not see them. A failed save keeps the baseline, so the next save retries the same changes. The write goes to `*.tmp`, is fsynced, and is renamed over the store. On Unix the parent directory is fsynced after the rename.
 
+### Comment GC
+
+On each snapshot, GC drops a comment only when that snapshot shows its target is gone. A repo that is missing from one snapshot (a discovery or `git status` failure) is unknown, not gone, and keeps all its comments.
+
+| Key | Dropped when |
+| --- | --- |
+| Branch, working-tree line | The repo is in the snapshot, its branch list is readable (not `status failed`, at least one counted branch), and the branch is not in it. Detached-HEAD keys never drop. |
+| Commit, commit line | Never (the snapshot has no list of reachable commits). |
+| Worktree | The path is not in the snapshot, an earlier snapshot of this process showed which repo owned that path, and that repo is in the snapshot with a readable branch list. A path that this process never saw (for example a worktree removed while `ws` was closed) keeps its comment. |
+
 **Graph + commit files:** focusing a repo/dir at depth 0 shows the multi-branch commit graph in the right pane; depth 1 left is the same graph list and depth 1 right is the commit-file tree; depth 2 is commit files (with the commit-details footer under the list) | diff, and a focused folder there shows a summary of its changed files with line counts. Left-pane movement at every depth reloads the right pane (`load_right`). Graph lane colours follow the active built-in theme (palette `Theme: <name>` rows); no new env var. Autoload window size defaults to 300, not user-configurable. Commit file trees default to directory tree via dedicated `commit_tree_mode` (independent of workspace `tree_mode`).
 
 ### Shared background fetch

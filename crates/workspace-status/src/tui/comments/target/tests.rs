@@ -61,10 +61,167 @@ fn gc_drops_gone_branch_keeps_commit() {
     store = put_comment(&store, branch, "b");
     store = put_comment(&store, line, "l");
     store = put_comment(&store, commit.clone(), "c");
-    let live = collect_live_set(&snapshot, &store);
+    let live = collect_live_set(&snapshot, &store, &HashMap::new());
     let next = gc_comments(&store, &live);
     assert!(next.contains_key(&commit));
     assert_eq!(next.len(), 1);
+}
+
+/// `app` primary on `main` with branch `feature/x`, plus its linked
+/// worktree `app/.worktrees/feat` on `feature/x`.
+fn app_with_linked_worktree() -> WorkspaceSnapshot {
+    build_workspace_snapshot(
+        &[
+            snap_with_branches(
+                "app",
+                "main",
+                CheckoutKind::Primary,
+                None,
+                &["main", "feature/x"],
+            ),
+            snap_with_branches(
+                "app/.worktrees/feat",
+                "feature/x",
+                CheckoutKind::Linked,
+                Some("app"),
+                &["main", "feature/x"],
+            ),
+        ],
+        &[],
+        false,
+        &[],
+    )
+}
+
+fn app_keys() -> Vec<CommentKey> {
+    vec![
+        CommentKey::Branch {
+            repo: "app".into(),
+            branch: "feature/x".into(),
+        },
+        CommentKey::Branch {
+            repo: "app".into(),
+            branch: DETACHED_HEAD_BRANCH.into(),
+        },
+        CommentKey::WorktreeLine {
+            repo: "app".into(),
+            branch: "feature/x".into(),
+            path: "a.rs".into(),
+            line: 1,
+            end_line: 1,
+        },
+        CommentKey::Commit {
+            repo: "app".into(),
+            sha: "abc".into(),
+        },
+        CommentKey::CommitLine {
+            repo: "app".into(),
+            sha: "abc".into(),
+            path: "a.rs".into(),
+            line: 2,
+            end_line: 2,
+        },
+        CommentKey::Worktree { path: "app".into() },
+        CommentKey::Worktree {
+            path: "app/.worktrees/feat".into(),
+        },
+    ]
+}
+
+#[test]
+fn gc_keeps_comments_of_repo_missing_from_snapshot() {
+    let mut store = CommentStore::new();
+    for key in app_keys() {
+        store = put_comment(&store, key, "keep");
+    }
+    let earlier = collect_live_set(&app_with_linked_worktree(), &store, &HashMap::new());
+    assert_eq!(
+        gc_comments(&store, &earlier),
+        store,
+        "all app keys are live"
+    );
+    // `app` and its worktree drop out of one snapshot (discovery or status
+    // failure); only `lib` is left.
+    let snapshot = build_workspace_snapshot(
+        &[snap_with_branches(
+            "lib",
+            "main",
+            CheckoutKind::Primary,
+            None,
+            &["main"],
+        )],
+        &[],
+        false,
+        &[],
+    );
+    for owners in [HashMap::new(), earlier.checkout_owners.clone()] {
+        let live = collect_live_set(&snapshot, &store, &owners);
+        let next = gc_comments(&store, &live);
+        assert_eq!(
+            next, store,
+            "a repo missing from the snapshot is unknown, not gone: keep its comments"
+        );
+    }
+}
+
+#[test]
+fn gc_drops_gone_branch_and_worktree_of_present_authoritative_repo() {
+    let mut store = CommentStore::new();
+    for key in app_keys() {
+        store = put_comment(&store, key, "note");
+    }
+    let earlier = collect_live_set(&app_with_linked_worktree(), &store, &HashMap::new());
+    // The linked worktree and branch `feature/x` are gone; `app` itself is
+    // present with a readable branch list.
+    let snapshot = build_workspace_snapshot(
+        &[snap_with_branches(
+            "app",
+            "main",
+            CheckoutKind::Primary,
+            None,
+            &["main"],
+        )],
+        &[],
+        false,
+        &[],
+    );
+    let live = collect_live_set(&snapshot, &store, &earlier.checkout_owners);
+    let next = gc_comments(&store, &live);
+    let gone_branch = CommentKey::Branch {
+        repo: "app".into(),
+        branch: "feature/x".into(),
+    };
+    let gone_line = CommentKey::WorktreeLine {
+        repo: "app".into(),
+        branch: "feature/x".into(),
+        path: "a.rs".into(),
+        line: 1,
+        end_line: 1,
+    };
+    let gone_worktree = CommentKey::Worktree {
+        path: "app/.worktrees/feat".into(),
+    };
+    assert!(!next.contains_key(&gone_branch), "{next:?}");
+    assert!(!next.contains_key(&gone_line), "{next:?}");
+    assert!(
+        !next.contains_key(&gone_worktree),
+        "a worktree of a present, authoritative repo that is gone drops: {next:?}"
+    );
+    assert_eq!(next.len(), store.len() - 3, "{next:?}");
+    // With no memory of which repo owned the missing worktree, keep it.
+    let unknown_owner = collect_live_set(&snapshot, &store, &HashMap::new());
+    assert!(gc_comments(&store, &unknown_owner).contains_key(&gone_worktree));
+    // A status-failed owner is not authoritative: keep the worktree key.
+    let mut failed = snap(
+        "app",
+        crate::helpers::UNKNOWN_HEAD_BRANCH,
+        CheckoutKind::Primary,
+        None,
+    );
+    failed.sync_note = "status failed".into();
+    let failed_snapshot = build_workspace_snapshot(&[failed], &[], false, &[]);
+    let live = collect_live_set(&failed_snapshot, &store, &earlier.checkout_owners);
+    assert!(gc_comments(&store, &live).contains_key(&gone_worktree));
 }
 
 #[test]
@@ -91,7 +248,7 @@ fn gc_keeps_branch_comments_when_status_failed() {
     let mut store = CommentStore::new();
     store = put_comment(&store, branch.clone(), "b");
     store = put_comment(&store, line.clone(), "l");
-    let live = collect_live_set(&snapshot, &store);
+    let live = collect_live_set(&snapshot, &store, &HashMap::new());
     let next = gc_comments(&store, &live);
     assert_eq!(next.get(&branch).map(CommentEntry::as_str), Some("b"));
     assert_eq!(next.get(&line).map(CommentEntry::as_str), Some("l"));
@@ -130,7 +287,7 @@ fn gc_drops_deleted_branch_when_sibling_status_failed() {
     let mut store = CommentStore::new();
     store = put_comment(&store, branch.clone(), "b");
     store = put_comment(&store, line.clone(), "l");
-    let live = collect_live_set(&snapshot, &store);
+    let live = collect_live_set(&snapshot, &store, &HashMap::new());
     let next = gc_comments(&store, &live);
     assert!(!next.contains_key(&branch));
     assert!(!next.contains_key(&line));
@@ -186,7 +343,7 @@ fn watch_gc_keeps_detached_worktree_comment() {
     );
     let key = CommentKey::Worktree { path: "app".into() };
     let store = put_comment(&CommentStore::new(), key.clone(), "detached note");
-    let live = collect_live_set(&snapshot, &store);
+    let live = collect_live_set(&snapshot, &store, &HashMap::new());
     let next = gc_comments(&store, &live);
     assert_eq!(
         next.get(&key).map(CommentEntry::as_str),

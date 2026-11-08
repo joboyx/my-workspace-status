@@ -28,8 +28,16 @@ pub struct CommentLiveSet {
     pub worktrees: HashSet<String>,
     /// Repo identities that still have a checkout (commit comments).
     pub identities: HashSet<String>,
+    /// Identities whose branch list this snapshot can be trusted for: at
+    /// least one checkout is not `status failed` and lists a counted
+    /// branch.
+    pub authoritative: HashSet<String>,
     /// `(repo, sha)` pairs that still resolve.
     pub commits: HashSet<(String, String)>,
+    /// Checkout path → repo identity, for every checkout of this snapshot
+    /// and of earlier snapshots of the session. Lets GC tell which repo a
+    /// checkout that is now missing belonged to.
+    pub checkout_owners: HashMap<String, String>,
 }
 
 /// Collect live branches, checkouts, and stored commit SHAs from `snapshot`.
@@ -40,13 +48,25 @@ pub struct CommentLiveSet {
 /// list. A successful sibling's names win. Status-failed rows do not add
 /// stored or last-good names when that identity already has counted
 /// branches.
-pub fn collect_live_set(snapshot: &WorkspaceSnapshot, store: &CommentStore) -> CommentLiveSet {
-    let mut live = CommentLiveSet::default();
+///
+/// `known_owners` is the [`CommentLiveSet::checkout_owners`] map of the
+/// previous call in this session (empty at launch). The result keeps those
+/// entries and adds the checkouts of `snapshot`.
+pub fn collect_live_set(
+    snapshot: &WorkspaceSnapshot,
+    store: &CommentStore,
+    known_owners: &HashMap<String, String>,
+) -> CommentLiveSet {
+    let mut live = CommentLiveSet {
+        checkout_owners: known_owners.clone(),
+        ..CommentLiveSet::default()
+    };
     let mut authoritative: HashSet<String> = HashSet::new();
     for repo in &snapshot.repos {
         let path = normalize_viewed_path(&repo.repo);
-        live.worktrees.insert(path);
         let identity = repo_identity(&repo.repo, repo.primary_repo.as_deref());
+        live.checkout_owners.insert(path.clone(), identity.clone());
+        live.worktrees.insert(path);
         live.identities.insert(identity.clone());
         if repo.sync_note == "status failed" {
             continue;
@@ -85,10 +105,21 @@ pub fn collect_live_set(snapshot: &WorkspaceSnapshot, store: &CommentStore) -> C
             _ => {}
         }
     }
+    live.authoritative = authoritative;
     live
 }
 
-/// Drop comments whose branch, worktree, or commit is gone.
+/// Drop comments whose branch or worktree is gone.
+///
+/// GC drops a key only when the snapshot is authoritative for it. A key
+/// whose repo identity is not in [`CommentLiveSet::identities`] is unknown
+/// (the repo can be missing from one snapshot after a discovery or status
+/// failure) and stays. Branch and line keys of a present repo follow
+/// [`collect_live_set`] (which keeps them while that repo's branch list is
+/// unreadable). Commit keys of a present repo stay. A worktree key whose
+/// path is not in the snapshot drops only when an earlier snapshot of the
+/// session showed which repo owned that path and that repo is present and
+/// [`CommentLiveSet::authoritative`] now.
 pub fn gc_comments(store: &CommentStore, live: &CommentLiveSet) -> CommentStore {
     let mut next = CommentStore::new();
     for (key, body) in store {
@@ -99,25 +130,24 @@ pub fn gc_comments(store: &CommentStore, live: &CommentLiveSet) -> CommentStore 
     next
 }
 
+/// `false` only when `live` shows the key's target is gone (see
+/// [`gc_comments`]). Unknown targets are live.
 fn comment_is_live(key: &CommentKey, live: &CommentLiveSet) -> bool {
     match key {
-        CommentKey::Branch { repo, branch } => {
-            if is_detached_head_branch(branch) {
-                live.worktrees.contains(repo) || live.identities.contains(repo)
-            } else {
-                live.branches.contains(&(repo.clone(), branch.clone()))
-            }
+        CommentKey::Branch { repo, branch } | CommentKey::WorktreeLine { repo, branch, .. } => {
+            !live.identities.contains(repo)
+                || is_detached_head_branch(branch)
+                || live.branches.contains(&(repo.clone(), branch.clone()))
         }
-        CommentKey::WorktreeLine { repo, branch, .. } => {
-            if is_detached_head_branch(branch) {
-                live.identities.contains(repo)
-            } else {
-                live.branches.contains(&(repo.clone(), branch.clone()))
-            }
+        CommentKey::Worktree { path } => {
+            live.worktrees.contains(path)
+                || !live
+                    .checkout_owners
+                    .get(path)
+                    .is_some_and(|owner| live.authoritative.contains(owner))
         }
-        CommentKey::Worktree { path } => live.worktrees.contains(path),
         CommentKey::Commit { repo, sha } | CommentKey::CommitLine { repo, sha, .. } => {
-            live.commits.contains(&(repo.clone(), sha.clone()))
+            !live.identities.contains(repo) || live.commits.contains(&(repo.clone(), sha.clone()))
         }
     }
 }

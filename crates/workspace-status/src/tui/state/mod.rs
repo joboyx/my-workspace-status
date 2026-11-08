@@ -1023,6 +1023,10 @@ pub struct AppState {
     /// [`Self::comment_store`] as last loaded or saved. Save writes only
     /// the delta from it, so comments another `ws` process saved survive.
     comment_baseline: CommentStore,
+    /// Checkout path → repo identity seen in this session's snapshots
+    /// (`CommentLiveSet::checkout_owners`): comment GC drops a gone
+    /// worktree's comment only when its owner repo is known.
+    comment_checkout_owners: HashMap<String, String>,
     pub comment_path: PathBuf,
     /// UI-state store path (see [`crate::tui::ui_state_store`]). The
     /// palette `Theme: …` rows and Toggle activity sparkline write it;
@@ -1388,6 +1392,7 @@ impl AppState {
             viewed_path,
             comment_baseline: comment_store.clone(),
             comment_store,
+            comment_checkout_owners: HashMap::new(),
             comment_path,
             ui_store_path,
             fetch_store_path: PathBuf::new(),
@@ -5728,8 +5733,13 @@ impl AppState {
     }
 
     fn reconcile_comment_store(&mut self) {
-        let live = collect_live_set(&self.snapshot, &self.comment_store);
+        let live = collect_live_set(
+            &self.snapshot,
+            &self.comment_store,
+            &self.comment_checkout_owners,
+        );
         let next = gc_comments(&self.comment_store, &live);
+        self.comment_checkout_owners = live.checkout_owners;
         if next != self.comment_store {
             self.comment_store = next;
             if let Err(err) = self.save_comments() {
