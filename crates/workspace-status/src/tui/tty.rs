@@ -218,6 +218,8 @@ fn unix_read() -> io::Result<TtyEvent> {
 #[cfg(unix)]
 fn stdin_pending() -> io::Result<usize> {
     let mut n: libc::c_int = 0;
+    // SAFETY: `FIONREAD` writes one `c_int` through the pointer, and `n` is a
+    // live `c_int` that outlives the call. A bad fd only makes it return -1.
     let rc = unsafe { libc::ioctl(libc::STDIN_FILENO, libc::FIONREAD, &mut n) };
     if rc < 0 {
         return Err(io::Error::last_os_error());
@@ -235,6 +237,8 @@ pub(crate) fn poll_stdin(timeout: Duration) -> io::Result<bool> {
         revents: 0,
     };
     let ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    // SAFETY: `pfd` is one live `pollfd`, and the count passed is 1. `poll`
+    // only writes `revents` in that struct.
     let n = unsafe { libc::poll(&mut pfd, 1, ms) };
     if n < 0 {
         let err = io::Error::last_os_error();
@@ -278,7 +282,10 @@ fn classify_read(nread: isize) -> io::Result<usize> {
 
 #[cfg(unix)]
 fn read_winsize() -> io::Result<(u16, u16)> {
+    // SAFETY: `winsize` is plain integers, so the all-zero value is valid.
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    // SAFETY: `TIOCGWINSZ` writes one `winsize` through the pointer, and `ws`
+    // is a live `winsize`. A bad fd only makes it return -1.
     let rc = unsafe { libc::ioctl(libc::STDIN_FILENO, libc::TIOCGWINSZ, &mut ws) };
     if rc < 0 {
         return Err(io::Error::last_os_error());
@@ -319,6 +326,8 @@ fn enqueue_resize_if_changed(buf: &mut TtyBuf) -> bool {
 #[cfg(unix)]
 fn read_stdin(n: usize) -> io::Result<Vec<u8>> {
     let mut buf = vec![0u8; n.max(1)];
+    // SAFETY: `buf` is a live allocation of `buf.len()` writable bytes, and
+    // `read` writes at most that many.
     let nread = unsafe {
         libc::read(
             libc::STDIN_FILENO,
