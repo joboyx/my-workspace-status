@@ -29,7 +29,7 @@ tui-textarea = "0.7"
 # Same release ratatui 0.29 measures spans with, so a help cell cut counts
 # columns the way it paints.
 unicode-width = "0.2.0"
-fs4 = "1"
+fs4 = "1.1"
 # 0.4.5 stays on rustc 1.85. 0.5 needs a newer compiler. Cargo.lock pins
 # plist 1.7.4 and time 0.3.36 so syntect 5.3 does not pull 1.88-only crates.
 two-face = { version = "0.4.5", default-features = false, features = ["syntect-default-fancy"] }
