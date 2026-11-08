@@ -1451,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "workspace-status"
-version = "0.1.318"
+version = "0.1.319"
 dependencies = [
  "clap",
  "crossterm",
@@ -1476,7 +1476,7 @@ dependencies = [
 
 [[package]]
 name = "workspace-status-graph"
-version = "0.1.318"
+version = "0.1.319"
 dependencies = [
  "libc",
  "ratatui",
