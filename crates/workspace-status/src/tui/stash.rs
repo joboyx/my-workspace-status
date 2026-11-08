@@ -1,5 +1,6 @@
 //! Stash menu (`S`): create / apply / pop / drop for the focused checkout.
 
+use crate::git::StashTarget;
 use crate::snapshot::{FileChange, WorkspaceSnapshot};
 
 use super::tree::{NodeKind, VisibleRow};
@@ -19,8 +20,17 @@ pub struct StashOp {
     pub id: StashOpId,
     pub key: char,
     pub label: &'static str,
-    pub stash_ref: Option<String>,
+    /// Stash entry of apply / pop / drop, picked when the menu opened.
+    /// `None` for create.
+    pub stash: Option<StashTarget>,
     pub paths: Option<Vec<String>>,
+}
+
+impl StashOp {
+    /// `stash@{n}` of [`Self::stash`] as it was when the menu opened.
+    pub fn stash_ref(&self) -> Option<&str> {
+        self.stash.as_ref().map(|stash| stash.stash_ref.as_str())
+    }
 }
 
 /// Focused-row facts used to list valid stash overlay ops.
@@ -29,10 +39,10 @@ pub struct StashOpsContext {
     pub dirty: bool,
     pub dirty_paths: Option<Vec<String>>,
     /// Graph stash row only. File/repo rows leave this empty.
-    pub focused_stash_ref: Option<String>,
-    /// Latest `stash@{n}` for graph commit / uncommitted apply and pop.
-    /// Drop never uses this — that still requires [`Self::focused_stash_ref`].
-    pub latest_stash_ref: Option<String>,
+    pub focused_stash: Option<StashTarget>,
+    /// Latest stash for graph commit / uncommitted apply and pop.
+    /// Drop never uses this — that still requires [`Self::focused_stash`].
+    pub latest_stash: Option<StashTarget>,
 }
 
 /// Overlay key outcome while the stash menu is open.
@@ -47,7 +57,7 @@ pub enum StashMenuKeyResult {
 ///
 /// Apply / pop target the focused graph stash, else the latest stash.
 /// Drop requires a focused graph stash row (never "drop latest").
-/// A tree row that omits `latest_stash_ref` stays create-only when dirty.
+/// A tree row that omits `latest_stash` stays create-only when dirty.
 pub fn stash_ops_for_context(ctx: &StashOpsContext) -> Vec<StashOp> {
     let mut ops = Vec::new();
     if ctx.dirty {
@@ -56,36 +66,33 @@ pub fn stash_ops_for_context(ctx: &StashOpsContext) -> Vec<StashOp> {
             id: StashOpId::Create,
             key: 's',
             label: "stash",
-            stash_ref: None,
+            stash: None,
             paths,
         });
     }
-    let apply_ref = ctx
-        .focused_stash_ref
-        .as_deref()
-        .or(ctx.latest_stash_ref.as_deref());
-    if let Some(stash_ref) = apply_ref {
+    let apply_target = ctx.focused_stash.as_ref().or(ctx.latest_stash.as_ref());
+    if let Some(stash) = apply_target {
         ops.push(StashOp {
             id: StashOpId::Apply,
             key: 'a',
             label: "apply stash",
-            stash_ref: Some(stash_ref.to_string()),
+            stash: Some(stash.clone()),
             paths: None,
         });
         ops.push(StashOp {
             id: StashOpId::Pop,
             key: 'p',
             label: "pop stash",
-            stash_ref: Some(stash_ref.to_string()),
+            stash: Some(stash.clone()),
             paths: None,
         });
     }
-    if let Some(stash_ref) = ctx.focused_stash_ref.as_deref() {
+    if let Some(stash) = ctx.focused_stash.as_ref() {
         ops.push(StashOp {
             id: StashOpId::Drop,
             key: 'D',
             label: "drop stash",
-            stash_ref: Some(stash_ref.to_string()),
+            stash: Some(stash.clone()),
             paths: None,
         });
     }
@@ -194,13 +201,14 @@ fn is_stashable(change: &FileChange) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::stash_target;
 
     fn ctx(dirty: bool, focused: Option<&str>, latest: Option<&str>) -> StashOpsContext {
         StashOpsContext {
             dirty,
             dirty_paths: None,
-            focused_stash_ref: focused.map(str::to_string),
-            latest_stash_ref: latest.map(str::to_string),
+            focused_stash: focused.map(stash_target),
+            latest_stash: latest.map(stash_target),
         }
     }
 
@@ -213,8 +221,8 @@ mod tests {
         let ops = stash_ops_for_context(&StashOpsContext {
             dirty: true,
             dirty_paths: Some(vec!["src/a.rs".into()]),
-            focused_stash_ref: None,
-            latest_stash_ref: None,
+            focused_stash: None,
+            latest_stash: None,
         });
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].id, StashOpId::Create);
@@ -241,9 +249,7 @@ mod tests {
     fn latest_stash_offers_apply_pop_not_drop() {
         let ops = stash_ops_for_context(&ctx(false, None, Some("stash@{0}")));
         assert_eq!(op_ids(&ops), vec![StashOpId::Apply, StashOpId::Pop]);
-        assert!(ops
-            .iter()
-            .all(|op| op.stash_ref.as_deref() == Some("stash@{0}")));
+        assert!(ops.iter().all(|op| op.stash_ref() == Some("stash@{0}")));
         assert!(!ops.iter().any(|op| op.id == StashOpId::Drop));
     }
 
@@ -257,7 +263,7 @@ mod tests {
         assert!(ops
             .iter()
             .filter(|op| op.id != StashOpId::Create)
-            .all(|op| op.stash_ref.as_deref() == Some("stash@{2}")));
+            .all(|op| op.stash_ref() == Some("stash@{2}")));
     }
 
     #[test]
@@ -267,9 +273,7 @@ mod tests {
             op_ids(&ops),
             vec![StashOpId::Apply, StashOpId::Pop, StashOpId::Drop]
         );
-        assert!(ops
-            .iter()
-            .all(|op| op.stash_ref.as_deref() == Some("stash@{1}")));
+        assert!(ops.iter().all(|op| op.stash_ref() == Some("stash@{1}")));
     }
 
     #[test]
@@ -281,7 +285,7 @@ mod tests {
             .iter()
             .find(|op| op.id == StashOpId::Drop)
             .expect("drop");
-        assert_eq!(drop.stash_ref.as_deref(), Some("stash@{1}"));
+        assert_eq!(drop.stash_ref(), Some("stash@{1}"));
     }
 
     #[test]

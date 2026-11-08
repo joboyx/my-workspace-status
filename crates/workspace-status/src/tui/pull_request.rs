@@ -352,12 +352,14 @@ pub enum PrDetailLookup {
 ///
 /// Accepts scp-like `git@host:owner/repo.git`, `ssh://git@host[:port]/…`,
 /// `https://host/…`, and `http://host/…`, with or without `.git` and a
-/// trailing slash. An SSH port is dropped because it is not the web port. A
-/// host that contains `github` is GitHub (exactly `owner/repo`); one that
-/// contains `gitlab` is GitLab (subgroups allowed). Anything else is `None`.
+/// trailing slash. An SSH port is dropped because it is not the web port. An
+/// SSH host alias of a public forge (`github.com-work`, see
+/// [`ssh_alias_forge_host`]) is read as that forge's host. A host that
+/// contains `github` is GitHub (exactly `owner/repo`); one that contains
+/// `gitlab` is GitLab (subgroups allowed). Anything else is `None`.
 pub fn parse_remote(url: &str) -> Option<ForgeRepo> {
     let url = url.trim();
-    let (host, path) = match url.split_once("://") {
+    let (host, path, ssh) = match url.split_once("://") {
         Some((scheme, rest)) => {
             let scheme = scheme.to_ascii_lowercase();
             let web = match scheme.as_str() {
@@ -372,19 +374,24 @@ pub fn parse_remote(url: &str) -> Option<ForgeRepo> {
             } else {
                 host.split(':').next().unwrap_or(host)
             };
-            (host, path)
+            (host, path, scheme != "git" && !web)
         }
         None => {
             let (left, path) = url.split_once(':')?;
             if left.contains('/') {
                 return None;
             }
-            (left.rsplit_once('@').map_or(left, |(_, h)| h), path)
+            (left.rsplit_once('@').map_or(left, |(_, h)| h), path, true)
         }
     };
-    let host = host.to_ascii_lowercase();
+    let mut host = host.to_ascii_lowercase();
     if host.is_empty() || host.contains(char::is_whitespace) {
         return None;
+    }
+    if ssh {
+        if let Some(forge_host) = ssh_alias_forge_host(&host) {
+            host = forge_host.to_string();
+        }
     }
     let path = path.split(['?', '#']).next().unwrap_or_default();
     let path = path.trim_matches('/');
@@ -407,6 +414,25 @@ pub fn parse_remote(url: &str) -> Option<ForgeRepo> {
         forge,
         host,
         path: path.to_string(),
+    })
+}
+
+/// Public forge hosts whose SSH aliases [`ssh_alias_forge_host`] resolves.
+const PUBLIC_FORGE_HOSTS: [&str; 2] = ["github.com", "gitlab.com"];
+
+/// The public forge host behind an SSH host alias, or `None`.
+///
+/// Users with two accounts on one forge add an `~/.ssh/config` entry such
+/// as `Host github.com-work` with `HostName github.com`, so each remote
+/// picks its own key. `gh` / `glab` know only the real host. A lower-case
+/// `host` that is a public forge host followed by `-` and a suffix is read
+/// as that forge host. `~/.ssh/config` itself is not read: the rule needs no
+/// process and works the same on every machine.
+fn ssh_alias_forge_host(host: &str) -> Option<&'static str> {
+    PUBLIC_FORGE_HOSTS.into_iter().find(|forge| {
+        host.strip_prefix(forge)
+            .and_then(|rest| rest.strip_prefix('-'))
+            .is_some_and(|alias| !alias.is_empty())
     })
 }
 
@@ -1389,7 +1415,8 @@ pub(crate) fn wait_until(
 }
 
 /// Wait for `child` on a detached thread so it does not stay a zombie.
-fn reap_in_background(mut child: Child) {
+/// Browser openers and detached GUI editors (`tui/editor.rs`) use it.
+pub(crate) fn reap_in_background(mut child: Child) {
     std::thread::spawn(move || {
         let _ = child.wait();
     });

@@ -51,6 +51,15 @@ pub fn panic_hook_lock() -> std::sync::MutexGuard<'static, ()> {
 // Snapshot and app-state fixtures
 // ---------------------------------------------------------------------------
 
+/// A stash entry named `stash_ref` with a made-up commit id derived from
+/// that name, for tests that never run git.
+pub fn stash_target(stash_ref: &str) -> crate::git::StashTarget {
+    crate::git::StashTarget {
+        stash_ref: stash_ref.to_string(),
+        sha: format!("sha-of-{stash_ref}"),
+    }
+}
+
 /// A clean primary checkout named `name` on `main` with no upstream.
 ///
 /// This is the only test code that lists every [`RepoSnapshot`] field. Tests
@@ -63,6 +72,7 @@ pub fn repo_snapshot(name: &str) -> RepoSnapshot {
         sync_status: SyncStatus::NoUpstream,
         sync_note: String::new(),
         upstream_rewrite: None,
+        fetch_error: None,
         head: String::new(),
         has_unstaged: false,
         has_staged: false,
@@ -413,6 +423,15 @@ pub fn upstream_rewrite_fixture(kind: RewriteKind) -> RewriteFixture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Back-to-back calls never repeat a name, even on a clock that ticks
+    /// in microseconds (macOS): the counter keeps them apart.
+    #[test]
+    fn unique_dir_never_repeats_a_name_back_to_back() {
+        let names: std::collections::HashSet<PathBuf> =
+            (0..2_000).map(|_| unique_dir("ws-unique")).collect();
+        assert_eq!(names.len(), 2_000);
+    }
 
     #[test]
     fn repo_snapshot_is_a_clean_primary_checkout_on_main_with_no_upstream() {

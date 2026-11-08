@@ -705,6 +705,7 @@ pub(crate) fn sync_from_snapshot(repo: &WorkspaceRepoSnapshot) -> SyncState {
         status: match repo.sync_status {
             crate::snapshot::SyncStatus::UpToDate => SyncStatus::UpToDate,
             crate::snapshot::SyncStatus::NoUpstream => SyncStatus::NoUpstream,
+            crate::snapshot::SyncStatus::Gone => SyncStatus::Gone,
             crate::snapshot::SyncStatus::Ahead => SyncStatus::Ahead,
             crate::snapshot::SyncStatus::Behind => SyncStatus::Behind,
             crate::snapshot::SyncStatus::Diverged => SyncStatus::Diverged,
@@ -1051,7 +1052,7 @@ mod tests {
 #[cfg(test)]
 mod live_git {
     use super::*;
-    use crate::testutil::{git, init_repo_empty, repo_snapshot};
+    use crate::testutil::{git, init_repo_empty, repo_snapshot, unique_dir};
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -1060,7 +1061,7 @@ mod live_git {
     use crate::snapshot::{build_workspace_snapshot, CheckoutKind};
 
     fn temp_workspace() -> (PathBuf, PathBuf) {
-        let root = crate::testutil::unique_dir("ws-graph-load");
+        let root = unique_dir("ws-graph-load");
         let workspace = root.join("workspace");
         let repo = workspace.join("app");
         fs::create_dir_all(&repo).unwrap();

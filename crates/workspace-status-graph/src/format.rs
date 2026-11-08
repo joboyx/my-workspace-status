@@ -16,7 +16,7 @@ pub fn format_sync(sync: &SyncState, glyphs: &GlyphSet) -> String {
 
 /// [`format_sync`] as coloured runs: the branch as a branch chip kind
 /// (default or local), then [`LabelKind::SyncAhead`] /
-/// [`LabelKind::SyncBehind`], or `no-upstream` as meta.
+/// [`LabelKind::SyncBehind`], or `no-upstream` / `upstream-gone` as meta.
 pub(crate) fn format_sync_parts(
     sync: &SyncState,
     glyphs: &GlyphSet,
@@ -34,6 +34,7 @@ pub(crate) fn format_sync_parts(
     };
     match sync.status {
         SyncStatus::NoUpstream => push("no-upstream".into(), LabelKind::Meta),
+        SyncStatus::Gone => push("upstream-gone".into(), LabelKind::Meta),
         SyncStatus::UpToDate => {}
         SyncStatus::Ahead | SyncStatus::Behind | SyncStatus::Diverged => {
             if sync.ahead > 0 {

@@ -6,13 +6,13 @@ use std::path::Path;
 
 use crate::config::{default_branch_override_for, WorkspaceStatusConfig};
 use crate::git::{
-    classify_upstream_rewrite, exec_git_checked, exec_git_z, head_equals_ref, is_ancestor,
-    known_default_branch_name, list_local_branches, list_worktrees_porcelain,
-    resolve_default_branch_tip_ref, rev_parse_quiet,
+    classify_upstream_rewrite, default_branch_or_guess, exec_git_checked, exec_git_z,
+    head_equals_ref, is_ancestor, known_default_branch_name, list_local_branches,
+    list_worktrees_porcelain, resolve_default_branch_tip_ref, rev_parse_quiet,
 };
 use crate::helpers::{
     is_default_branch, path_is_under_any, DETACHED_HEAD_BRANCH, STATUS_FAILED_NOTE,
-    UNKNOWN_HEAD_BRANCH,
+    UNKNOWN_HEAD_BRANCH, UPSTREAM_GONE_NOTE,
 };
 use crate::parallel::map_with_concurrency;
 use crate::snapshot::{CheckoutKind, FileChange, RepoSnapshot, SyncStatus};
@@ -156,6 +156,14 @@ pub fn parse_branch_line(line: &str) -> Option<BranchState> {
         });
     }
     let upstream = upstream.map(str::to_string);
+    if tracking == "gone" {
+        return Some(BranchState {
+            branch: branch.to_string(),
+            sync_status: SyncStatus::Gone,
+            sync_note: UPSTREAM_GONE_NOTE.to_string(),
+            upstream,
+        });
+    }
     let ahead = capture_count(tracking, "ahead ");
     let behind = capture_count(tracking, "behind ");
     if ahead > 0 && behind > 0 {
@@ -215,6 +223,7 @@ fn failed_repo_snapshot(
         sync_status: SyncStatus::NoUpstream,
         sync_note: STATUS_FAILED_NOTE.to_string(),
         upstream_rewrite: None,
+        fetch_error: None,
         head: String::new(),
         has_unstaged: false,
         has_staged: false,
@@ -565,9 +574,13 @@ pub fn process_repo(
     if !has_git_dir(&repo_dir) {
         return None;
     }
-    if do_fetch {
-        let _ = exec_git_checked(&["fetch", "--quiet"], &repo_dir);
-    }
+    // A failed fetch is not fatal: the row still reports status from the
+    // refs it had, and names the failure so it does not read as fresh.
+    let fetch_error = if do_fetch {
+        exec_git_checked(&["fetch", "--quiet"], &repo_dir).err()
+    } else {
+        None
+    };
     let porcelain = exec_git_z(
         &[
             "status",
@@ -582,17 +595,23 @@ pub fn process_repo(
     .unwrap_or_default();
     let (header, parsed) = parse_porcelain_v1_z(&porcelain);
     let Some(branch_state) = parse_branch_line(header.unwrap_or("")) else {
-        return Some(failed_repo_snapshot(repo_path, override_name, meta));
+        return Some(RepoSnapshot {
+            fetch_error,
+            ..failed_repo_snapshot(repo_path, override_name, meta)
+        });
     };
     let changes = merge_file_changes(&parsed);
     let has_unstaged = !parsed.unstaged.is_empty();
     let has_staged = !parsed.staged.is_empty();
     let has_untracked = !parsed.untracked.is_empty();
     // Resolve the default branch and its tip once; merge-into-default and
-    // the snapshot row share them. An unknown default classifies against
-    // `main`.
+    // the snapshot row share them. The row keeps only a known default (PR
+    // status never guesses); classification guesses the same way as the
+    // `d` switch target, and falls back to `main` when nothing exists.
     let default_branch = known_default_branch_name(&repo_dir, override_name);
-    let default_name = default_branch.as_deref().unwrap_or("main");
+    let default_name = default_branch_or_guess(&repo_dir, default_branch.clone())
+        .unwrap_or_else(|| "main".to_string());
+    let default_name = default_name.as_str();
     let default_tip_ref = resolve_default_branch_tip_ref(&repo_dir, default_name);
     let merged = compute_merged_into_default(
         &repo_dir,
@@ -619,6 +638,7 @@ pub fn process_repo(
         sync_status: branch_state.sync_status,
         sync_note: branch_state.sync_note,
         upstream_rewrite,
+        fetch_error,
         head,
         has_unstaged,
         has_staged,
@@ -720,6 +740,14 @@ mod tests {
         let s = parse_branch_line("## main").unwrap();
         assert_eq!(s.branch, "main");
         assert_eq!(s.sync_status, SyncStatus::NoUpstream);
+    }
+
+    #[test]
+    fn parse_branch_deleted_upstream_is_gone_not_up_to_date() {
+        let s = parse_branch_line("## feature/x...origin/feature/x [gone]").unwrap();
+        assert_eq!(s.sync_status, SyncStatus::Gone);
+        assert_eq!(s.sync_note, "upstream gone");
+        assert_eq!(s.upstream.as_deref(), Some("origin/feature/x"));
     }
 
     #[test]
@@ -1014,5 +1042,58 @@ mod default_branch_tests {
             "the override wins"
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The `d` switch target and the branch merge-into-default classifies
+    /// against are the same branch, with or without `origin/HEAD`.
+    #[test]
+    fn the_switch_target_and_the_classification_default_agree() {
+        let cases: [(&str, &[&[&str]], &str); 4] = [
+            (
+                "only master",
+                &[&["branch", "-m", "main", "master"]],
+                "master",
+            ),
+            (
+                "only develop",
+                &[&["branch", "-m", "main", "develop"]],
+                "develop",
+            ),
+            ("main and develop", &[&["branch", "develop"]], "develop"),
+            (
+                "origin/HEAD set",
+                &[
+                    &["branch", "develop"],
+                    &["update-ref", "refs/remotes/origin/main", "HEAD"],
+                    &[
+                        "symbolic-ref",
+                        "refs/remotes/origin/HEAD",
+                        "refs/remotes/origin/main",
+                    ],
+                ],
+                "main",
+            ),
+        ];
+        let meta = RepoCheckoutMeta {
+            checkout_kind: CheckoutKind::Primary,
+            primary_repo: None,
+        };
+        for (label, setup, expected) in cases {
+            let root = unique_dir("ws-default-agree");
+            let app = root.join("app");
+            init_repo(&app);
+            for args in setup {
+                git(&app, args);
+            }
+            let switch_target = crate::git::get_default_branch(&app, None);
+            let snap = process_repo("app", &root, false, None, &meta).expect("repo snapshot");
+            let classified = snap
+                .default_tip_ref
+                .as_deref()
+                .map(|tip| tip.strip_prefix("origin/").unwrap_or(tip).to_string());
+            assert_eq!(switch_target.as_deref(), Some(expected), "{label}: switch");
+            assert_eq!(classified, switch_target, "{label}: classification");
+            let _ = fs::remove_dir_all(&root);
+        }
     }
 }

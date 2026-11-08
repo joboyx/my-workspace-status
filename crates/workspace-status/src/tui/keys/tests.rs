@@ -1482,7 +1482,24 @@ fn g_chord_tabs_and_gg_stay_distinct() {
     );
     assert_eq!(
         event_to_action(&key(KeyCode::Esc), pending, false, false),
-        Action::None
+        Action::GChordCancel
+    );
+    assert_eq!(
+        event_to_action(&key(KeyCode::Char('%')), pending, false, false),
+        Action::GChordCancel,
+        "a key with no action ends the chord"
+    );
+    assert_eq!(
+        event_to_action(
+            &key(KeyCode::Modifier(
+                crossterm::event::ModifierKeyCode::LeftShift
+            )),
+            pending,
+            false,
+            false
+        ),
+        Action::None,
+        "a bare Shift press before `T` keeps the chord"
     );
     assert_eq!(
         event_to_action(&key(KeyCode::Char('g')), pending, false, false),
@@ -1774,9 +1791,13 @@ fn gh_pins_the_icon_popover_and_bare_h_still_folds() {
         Action::PopoverOpenFocused
     );
     assert_eq!(
-        event_to_action(&ctrl(KeyCode::Char('h')), pending_g(), false, false),
         event_to_action(&ctrl(KeyCode::Char('h')), normal(), false, false),
-        "a modifier chord falls through"
+        Action::None
+    );
+    assert_eq!(
+        event_to_action(&ctrl(KeyCode::Char('h')), pending_g(), false, false),
+        Action::GChordCancel,
+        "an unbound modifier chord falls through and ends the chord"
     );
     assert_eq!(
         event_to_action(&key(KeyCode::Char('h')), normal(), false, false),
@@ -2460,7 +2481,12 @@ fn ctrl_w_closes_the_tab_in_normal_keymaps_only() {
                 "{mode:?} {event:?}"
             );
         }
-        // Alt / Super chords stay unbound.
+        // Alt / Super chords stay unbound; in a pending `g` they end it.
+        let unbound = if matches!(mode, InputMode::GPending { .. }) {
+            Action::GChordCancel
+        } else {
+            Action::None
+        };
         for mods in [
             KeyModifiers::ALT,
             KeyModifiers::CONTROL | KeyModifiers::ALT,
@@ -2468,7 +2494,7 @@ fn ctrl_w_closes_the_tab_in_normal_keymaps_only() {
         ] {
             assert_eq!(
                 event_to_action(&with_mods('w', mods), mode, true, true),
-                Action::None,
+                unbound,
                 "{mode:?} {mods:?}"
             );
         }
@@ -3154,6 +3180,7 @@ fn unbound_modifier_chords_do_not_run_plain_bindings() {
             }
             let want = match (mode, code) {
                 (InputMode::DiffVisual, Char(_)) => Action::DiffVisualUnmapped,
+                (InputMode::GPending { .. }, _) => Action::GChordCancel,
                 _ => Action::None,
             };
             assert_eq!(
@@ -3249,7 +3276,7 @@ fn altgr_symbols_act_and_type_as_the_plain_char() {
     );
     assert_eq!(
         event_to_action(&ev('1', altgr), pending_g(), false, false),
-        Action::None
+        Action::GChordCancel
     );
     assert_eq!(
         event_to_action(

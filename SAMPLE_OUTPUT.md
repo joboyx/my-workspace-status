@@ -77,6 +77,7 @@ Example verbose cell: `🚧 feature/foo 🌱`
 - ⬆️ ahead `<count>`
 - 🔀 `<ahead>/<behind>`
 - ❓ no upstream
+- ⚠️ upstream gone (the branch tracks a remote branch that no longer exists)
 
 ### Files Labels
 
@@ -122,13 +123,14 @@ When discovery finds no git repos (or every candidate was filtered out):
 ℹ️ No git repos found
 ```
 
-## Attention (Unborn / Status Failed)
+## Attention (Unborn / Status Failed / Fetch Failed)
 
-Unborn repos (`## No commits yet on …`) and repos whose `git status` output is unusable are kept in the report instead of being dropped. They never produce a false all-clean:
+Unborn repos (`## No commits yet on …`) and repos whose `git status` output is unusable are kept in the report instead of being dropped. With `--fetch`, a repo whose `git fetch` failed is listed with git's reason: its sync state comes from the refs it had before the fetch. They never produce a false all-clean:
 
 ```text
-⚠️ Attention (2):
+⚠️ Attention (3):
     - broken [(unknown)] - status failed
+    - offline [main] - fetch failed: '/srv/git/offline.git' does not appear to be a git repository
     - unborn [main] - no commits yet
 ```
 

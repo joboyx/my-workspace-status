@@ -163,6 +163,9 @@ on its `mod` line.
 Test-only helpers belong behind `#[cfg(test)]` so they leave the shipped
 binary but keep their coverage; in-crate git fixtures and snapshot /
 app-state fixtures live in `src/testutil.rs`, not in a per-module copy.
+A unit test gets its temp path from `testutil::unique_dir` (process id,
+time, and a counter), never from a timestamp alone: the macOS clock ticks
+in microseconds, so two names made back to back can be the same.
 
 Rustdoc on exported items (`///` or `//!`) is a review rule, not a lint: no
 `missing_docs` lint runs.

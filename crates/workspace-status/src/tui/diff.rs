@@ -18,9 +18,13 @@ use super::search::wrap_col_starts;
 use super::split::{side_by_side_column_widths, DiffMode, DIFF_CURSOR_BAR_COLS};
 use super::tree::list_viewport_start;
 
-/// Untracked files above ~1 MB are not previewed: binary ones get the
-/// binary stub, text ones the too-large stub.
-const HUGE_FILE_BYTES: u64 = 1_000_000;
+/// Files above ~1 MB are never read whole on the loop thread.
+///
+/// An untracked file above it is not previewed: a binary one gets the
+/// binary stub, a text one the too-large stub. The reviewed-mark
+/// fingerprint ([`super::viewed::fingerprint_file_change`]) hashes only
+/// the head and tail of a file above it.
+pub const HUGE_FILE_BYTES: u64 = 1_000_000;
 
 /// Leading bytes scanned for a NUL to call a huge untracked file binary
 /// (git's own heuristic window).

@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn smooth_scroll_defaults_on() {
-        let dir = std::env::temp_dir().join(format!("ws-smooth-scroll-{}", std::process::id()));
+        let dir = crate::testutil::unique_dir("ws-smooth-scroll");
         let stores = [
             ("WS_STATUS_VIEWED_STORE", dir.join("viewed.json")),
             ("WS_STATUS_COMMENT_STORE", dir.join("comments.json")),
