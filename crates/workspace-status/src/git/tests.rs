@@ -151,6 +151,10 @@ fn git_process_pins_config_that_changes_parsed_output() {
             "-c",
             "diff.mnemonicPrefix=false",
             "-c",
+            "diff.srcPrefix=a/",
+            "-c",
+            "diff.dstPrefix=b/",
+            "-c",
             "log.showSignature=false",
         ]
     );

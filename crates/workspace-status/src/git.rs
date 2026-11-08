@@ -84,19 +84,24 @@ const GLOBAL_OPTIONS_WITH_VALUE: [&str; 5] =
 ///
 /// - `color.ui`, `color.diff`: `always` puts ANSI escapes into diff text.
 ///   `color.diff` beats `color.ui`, so both are pinned.
-/// - `diff.noprefix`, `diff.mnemonicPrefix`: keep the `a/` and `b/` path
-///   prefixes. A line stage patch without them fails in `git apply -p1`.
+/// - `diff.noprefix`, `diff.mnemonicPrefix`, `diff.srcPrefix`,
+///   `diff.dstPrefix`: keep the `a/` and `b/` path prefixes. A line stage
+///   patch with other prefixes fails in `git apply -p1`. `diff.noprefix`
+///   does not reset the two prefix keys (git 2.45 and later). An older git
+///   ignores them.
 /// - `log.showSignature`: `true` prints signature lines (`No signature`)
 ///   into `git log` output, ahead of the requested format.
 ///
 /// Git passes `-c` values on to the git processes and hooks that it starts.
 /// `diff.external` is not pinned here: an empty value makes git run an
 /// empty command. [`DIFF_DRIVER_OFF`] turns it off instead.
-const PINNED_CONFIG: [&str; 5] = [
+const PINNED_CONFIG: [&str; 7] = [
     "color.ui=false",
     "color.diff=false",
     "diff.noprefix=false",
     "diff.mnemonicPrefix=false",
+    "diff.srcPrefix=a/",
+    "diff.dstPrefix=b/",
     "log.showSignature=false",
 ];
 

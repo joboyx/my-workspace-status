@@ -1741,12 +1741,35 @@ keep-z
     fn user_diff_noprefix_still_stages_one_line() {
         let dir = repo_with_regions("ws-diff-user-noprefix");
         git(&dir, &["config", "diff.noprefix", "true"]);
+        assert_one_line_stage_applies(&dir);
+    }
+
+    /// Git 2.45 and later read `diff.srcPrefix` / `diff.dstPrefix`, and
+    /// `diff.noprefix=false` does not reset them. A patch applies with
+    /// `-p1`, so an empty prefix or a prefix of two path components breaks
+    /// it. An older git ignores the keys, so the stage applies there too.
+    #[test]
+    fn user_diff_src_dst_prefix_still_stages_one_line() {
+        for (name, src, dst) in [
+            ("ws-diff-user-prefix-deep", "x/y/", "z/w/"),
+            ("ws-diff-user-prefix-empty", "", ""),
+        ] {
+            let dir = repo_with_regions(name);
+            git(&dir, &["config", "diff.srcPrefix", src]);
+            git(&dir, &["config", "diff.dstPrefix", dst]);
+            assert_one_line_stage_applies(&dir);
+        }
+    }
+
+    /// Edits two lines of `regions.txt`, stages only the `ALPHA` line with
+    /// a partial patch, and checks the index and the worktree.
+    fn assert_one_line_stage_applies(dir: &Path) {
         let edited = REGIONS
             .replace("ALPHA-OLD", "ALPHA-NEW")
             .replace("OMEGA-OLD", "OMEGA-NEW");
         fs::write(dir.join("regions.txt"), &edited).unwrap();
 
-        let content = loaded_unstaged(&dir);
+        let content = loaded_unstaged(dir);
         let patch = build_partial_patch(
             &content,
             DiffMode::Inline,
@@ -1756,13 +1779,13 @@ keep-z
             "regions.txt",
         )
         .expect("patch");
-        apply_cached_patch(&dir, &patch, false)
+        apply_cached_patch(dir, &patch, false)
             .unwrap_or_else(|err| panic!("stage one line: {err}\n{patch}"));
 
-        let index = String::from_utf8(blob_bytes(&dir, "", "regions.txt").expect("index blob"))
+        let index = String::from_utf8(blob_bytes(dir, "", "regions.txt").expect("index blob"))
             .expect("utf8 index blob");
         assert_eq!(index, REGIONS.replace("ALPHA-OLD", "ALPHA-NEW"));
-        assert_eq!(worktree(&dir), edited);
-        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(worktree(dir), edited);
+        let _ = fs::remove_dir_all(dir);
     }
 }
