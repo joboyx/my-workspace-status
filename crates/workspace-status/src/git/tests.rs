@@ -599,6 +599,37 @@ fn check_may_start_refuses_new_git_once_ws_is_exiting() {
     assert!(check_may_start(false, true, Some("stash")).is_ok());
 }
 
+#[test]
+fn quit_waits_while_a_pull_still_has_to_restore_the_auto_stash() {
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let hold = Duration::from_millis(200);
+    let restoring = std::thread::spawn(move || {
+        let _restoring = RestoringUserWork::start();
+        started_tx.send(()).unwrap();
+        std::thread::sleep(hold);
+    });
+    started_rx.recv().unwrap();
+    let start = Instant::now();
+    assert!(
+        wait_while_restoring_user_work(Duration::from_secs(10)),
+        "the wait ends once the restore is done"
+    );
+    assert!(
+        start.elapsed() >= hold - Duration::from_millis(50),
+        "quit waited for the restore: {:?}",
+        start.elapsed()
+    );
+    restoring.join().unwrap();
+
+    let _stuck = RestoringUserWork::start();
+    let start = Instant::now();
+    assert!(
+        !wait_while_restoring_user_work(Duration::from_millis(100)),
+        "a restore that does not end stops the wait at its bound"
+    );
+    assert!(start.elapsed() < Duration::from_secs(2));
+}
+
 /// Set in the child process that
 /// [`quit_during_pull_still_restores_the_auto_stash`] starts. The child
 /// sets the process-wide shutdown flag, which would break every other
@@ -709,8 +740,9 @@ fn quit_during_pull_in_this_process() {
 
 #[test]
 fn git_diff_args_inserts_full_context() {
+    let path = literal_pathspec("README.md");
     let normal = git_diff_args(&["diff"], "README.md", None);
-    assert_eq!(normal, vec!["diff", "--", "README.md"]);
+    assert_eq!(normal, vec!["diff".to_string(), "--".into(), path.clone()]);
     let full = git_diff_args(&["diff"], "README.md", Some(FULL_DIFF_CONTEXT_LINES));
     assert_eq!(
         full,
@@ -718,7 +750,7 @@ fn git_diff_args_inserts_full_context() {
             "diff".to_string(),
             format!("-U{FULL_DIFF_CONTEXT_LINES}"),
             "--".into(),
-            "README.md".into(),
+            path,
         ]
     );
 }
@@ -742,6 +774,183 @@ fn stage_unstage_revert_on_fixture() {
     assert!(!repo_has_local_changes(&dir));
     remove_untracked_file(&dir, "tmp-untracked.txt").unwrap();
     assert!(!dir.join("tmp-untracked.txt").exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// (target, sibling) pairs: as a glob pathspec, each target also matches
+/// its sibling (`[b]` matches `b`, `*` and `?` match `y` / `x`).
+const GLOB_NAME_PAIRS: [(&str, &str); 4] = [
+    ("a[b].txt", "ab.txt"),
+    ("u?.txt", "ux.txt"),
+    ("x*.txt", "xy.txt"),
+    ("app/[id]/page.tsx", "app/i/page.tsx"),
+];
+
+fn write_file(dir: &Path, rel: &str, body: &str) {
+    let path = dir.join(rel);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, body).unwrap();
+}
+
+fn read_file(dir: &Path, rel: &str) -> String {
+    fs::read_to_string(dir.join(rel)).unwrap()
+}
+
+/// `git diff --cached --name-only` paths (NUL-split, so no quoting).
+fn staged_paths(dir: &Path) -> Vec<String> {
+    exec_git(&["diff", "--cached", "--name-only", "-z"], dir)
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// A repo with every [`GLOB_NAME_PAIRS`] file committed as `base\n`.
+fn glob_names_fixture(prefix: &str) -> std::path::PathBuf {
+    let dir = unique_dir(prefix);
+    init_repo(&dir);
+    for (target, sibling) in GLOB_NAME_PAIRS {
+        write_file(&dir, target, "base\n");
+        write_file(&dir, sibling, "base\n");
+    }
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-q", "-m", "glob names"]);
+    dir
+}
+
+#[test]
+fn literal_pathspec_prefix_unless_git_reads_every_pathspec_literally() {
+    assert_eq!(
+        literal_pathspec_with("a[b].txt", false),
+        ":(literal)a[b].txt"
+    );
+    assert_eq!(literal_pathspec_with("a[b].txt", true), "a[b].txt");
+    for on in ["1", "true", "YES", "on", "2"] {
+        assert!(git_env_bool(on), "{on}");
+    }
+    for off in ["", "0", "false", "No", "off", "maybe"] {
+        assert!(!git_env_bool(off), "{off}");
+    }
+}
+
+// Windows does not allow `*` or `?` in file names.
+#[cfg(unix)]
+#[test]
+fn file_diff_reads_only_the_named_file() {
+    let dir = glob_names_fixture("ws-git-literal-diff");
+    for (target, sibling) in GLOB_NAME_PAIRS {
+        write_file(&dir, target, "dirty\n");
+        write_file(&dir, sibling, "dirty\n");
+        let args = git_diff_args(&["diff"], target, None);
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let diff = exec_git(&refs, &dir);
+        assert_eq!(
+            diff.matches("diff --git ").count(),
+            1,
+            "diff of {target} names one file:\n{diff}"
+        );
+        assert!(!diff.contains(sibling), "diff of {target}:\n{diff}");
+        git(&dir, &["checkout", "-q", "--", "."]);
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// Windows does not allow `*` or `?` in file names.
+#[cfg(unix)]
+#[test]
+fn stage_unstage_revert_take_paths_literally() {
+    let dir = glob_names_fixture("ws-git-literal-tracked");
+    for (target, sibling) in GLOB_NAME_PAIRS {
+        write_file(&dir, target, "dirty\n");
+        write_file(&dir, sibling, "dirty\n");
+
+        stage_file(&dir, target).unwrap();
+        assert_eq!(staged_paths(&dir), [target], "stage {target}");
+
+        git(&dir, &["add", "-A"]);
+        unstage_file(&dir, target).unwrap();
+        assert_eq!(staged_paths(&dir), [sibling], "unstage {target}");
+        git(&dir, &["reset", "-q"]);
+
+        revert_tracked_file(&dir, target).unwrap();
+        assert_eq!(read_file(&dir, target), "base\n", "revert {target}");
+        assert_eq!(read_file(&dir, sibling), "dirty\n", "revert {target}");
+        git(&dir, &["checkout", "-q", "--", "."]);
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn remove_untracked_file_takes_paths_literally() {
+    let dir = unique_dir("ws-git-literal-clean");
+    init_repo(&dir);
+    for (target, sibling) in GLOB_NAME_PAIRS {
+        write_file(&dir, target, "new\n");
+        write_file(&dir, sibling, "new\n");
+        remove_untracked_file(&dir, target).unwrap();
+        assert!(!dir.join(target).exists(), "remove {target}");
+        assert_eq!(read_file(&dir, sibling), "new\n", "remove {target}");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn stash_push_of_a_path_takes_it_literally() {
+    let dir = glob_names_fixture("ws-git-literal-stash");
+    for (target, sibling) in GLOB_NAME_PAIRS {
+        write_file(&dir, target, "dirty\n");
+        write_file(&dir, sibling, "dirty\n");
+        stash_push(&dir, &[target.to_string()]).unwrap();
+        assert_eq!(read_file(&dir, target), "base\n", "stash {target}");
+        assert_eq!(read_file(&dir, sibling), "dirty\n", "stash {target}");
+        let stashed = exec_git(&["stash", "show", "--name-only", "-z"], &dir);
+        assert_eq!(stashed.trim_end_matches('\0'), target, "stash {target}");
+        git(&dir, &["stash", "drop", "-q"]);
+        git(&dir, &["checkout", "-q", "--", "."]);
+    }
+    // An untracked target with an untracked sibling (`-u`).
+    write_file(&dir, "new/[id].txt", "new\n");
+    write_file(&dir, "new/i.txt", "new\n");
+    stash_push(&dir, &["new/[id].txt".to_string()]).unwrap();
+    assert!(!dir.join("new/[id].txt").exists());
+    assert_eq!(read_file(&dir, "new/i.txt"), "new\n");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn revert_compare_file_takes_paths_literally() {
+    let dir = glob_names_fixture("ws-git-literal-compare");
+    let merge_base = exec_git(&["rev-parse", "HEAD"], &dir);
+    git(&dir, &["checkout", "-q", "-b", "feature"]);
+    for (target, sibling) in GLOB_NAME_PAIRS {
+        write_file(&dir, target, "head\n");
+        write_file(&dir, sibling, "head\n");
+    }
+    git(&dir, &["commit", "-q", "-am", "feature"]);
+    let head = exec_git(&["rev-parse", "HEAD"], &dir);
+
+    for (target, sibling) in GLOB_NAME_PAIRS {
+        // A clean sibling: the restore must not reach it.
+        revert_compare_file(&dir, &merge_base, &head, target, None).unwrap();
+        assert_eq!(read_file(&dir, target), "base\n", "revert {target}");
+        assert_eq!(read_file(&dir, sibling), "head\n", "revert {target}");
+        git(&dir, &["checkout", "-q", "--", "."]);
+
+        // A dirty sibling: the safety check must not refuse the target.
+        write_file(&dir, sibling, "dirty\n");
+        revert_compare_file(&dir, &merge_base, &head, target, None).unwrap();
+        assert_eq!(read_file(&dir, target), "base\n", "dirty sibling {target}");
+        assert_eq!(
+            read_file(&dir, sibling),
+            "dirty\n",
+            "dirty sibling {target}"
+        );
+        git(&dir, &["checkout", "-q", "--", "."]);
+    }
+    assert!(index_is_head(&dir));
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -1605,6 +1814,9 @@ fn checked_git_errors_carry_the_git_reason_line() {
     init_repo(&dir);
     let err = stage_file(&dir, "nope.txt").unwrap_err();
     assert_eq!(err, "pathspec 'nope.txt' did not match any files");
+    // The literal pathspec prefix stays out of the reason line, glob characters included.
+    let err = stage_file(&dir, "nope[1].txt").unwrap_err();
+    assert_eq!(err, "pathspec 'nope[1].txt' did not match any files");
     let err = stash_pop(&dir, "stash@{0}").unwrap_err();
     assert!(err.contains("stash@{0} is not a valid reference"), "{err}");
     assert!(!err.starts_with("error:"), "tag is stripped: {err}");

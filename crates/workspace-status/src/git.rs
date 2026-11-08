@@ -25,7 +25,9 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+#[cfg(unix)]
+use std::sync::atomic::AtomicPtr;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{mpsc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -447,6 +449,57 @@ pub(crate) fn stop_running_git() {
     stop_groups(&RUNNING_GIT_GROUPS, GIT_TERM_GRACE);
 }
 
+/// Pulls in flight that stashed the user's changes and have not popped them
+/// back yet ([`pull_quiet_detailed`], from the auto-stash push to the pop).
+/// Quit waits for it to reach zero ([`wait_for_user_work_restore`]) before
+/// it drops the worker threads.
+static RESTORING_USER_WORK: AtomicUsize = AtomicUsize::new(0);
+
+/// Longest quit waits for [`RESTORING_USER_WORK`]: the auto-stash pop's own
+/// time limit plus the `SIGTERM` grace of a stopped git. A pop that was
+/// already running has ended by then. A pull whose git started after the
+/// stop pass may still be running when the wait gives up; if the process
+/// ends before its pop, the changes stay in `git stash list`.
+const USER_WORK_RESTORE_WAIT: Duration = LOCAL_GIT_TIME_LIMIT.saturating_add(GIT_TERM_GRACE);
+
+/// Counts one run in [`RESTORING_USER_WORK`] while it lives.
+struct RestoringUserWork;
+
+impl RestoringUserWork {
+    fn start() -> Self {
+        RESTORING_USER_WORK.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for RestoringUserWork {
+    fn drop(&mut self) {
+        RESTORING_USER_WORK.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Wait, at most a bounded time, while a pull still has to give the
+/// user's stashed changes back. Quit calls it after [`stop_running_git`]
+/// and before it stops waiting for worker threads, so the process does
+/// not end between the auto-stash push and its pop. It sleeps, so it is
+/// not for the event loop.
+pub(crate) fn wait_for_user_work_restore() {
+    let _ = wait_while_restoring_user_work(USER_WORK_RESTORE_WAIT);
+}
+
+/// [`wait_for_user_work_restore`] with the bound `limit`. `false` when the
+/// bound ran out first.
+fn wait_while_restoring_user_work(limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    while RESTORING_USER_WORK.load(Ordering::SeqCst) > 0 {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+
 /// `Err` when `exiting` (the shutdown flag) is set: no new git may start.
 /// A run that `restores_user_work` (an auto-stash pop) may still start:
 /// skipping it would leave the user's changes in a stash entry.
@@ -463,8 +516,9 @@ fn check_may_start(exiting: bool, restores_user_work: bool, sub: Option<&str>) -
 /// Make `SIGINT`, `SIGTERM` and `SIGHUP` stop running git before `ws`
 /// dies. Call it once at CLI startup, never from tests.
 ///
-/// The handler sends `SIGTERM` to every registered git process group, then
-/// restores the default action and raises the signal again, so `ws` exits
+/// The handler sends `SIGTERM` to every registered git process group,
+/// calls the hook from [`set_exit_signal_hook`] (the TUI terminal restore),
+/// then restores the default action and raises the signal again, so `ws` exits
 /// with the usual status. A signal whose handler is not the default (an
 /// ignored `SIGHUP` under `nohup`, say) is left alone.
 #[cfg(unix)]
@@ -483,14 +537,35 @@ pub(crate) fn stop_git_on_exit_signals() {
             action.sa_sigaction =
                 on_exit_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
             action.sa_flags = libc::SA_RESETHAND;
+            // Block the other exit signals while the handler runs, so a
+            // second one cannot end `ws` part way through the terminal
+            // restore. They stay pending and arrive once it returns.
             libc::sigemptyset(&mut action.sa_mask);
+            for blocked in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+                libc::sigaddset(&mut action.sa_mask, blocked);
+            }
             libc::sigaction(signal, &action, std::ptr::null_mut());
         }
     }
 }
 
+/// The `fn()` the exit-signal handler calls after it stops git, stored as
+/// a pointer; null for none. Set by [`set_exit_signal_hook`].
+#[cfg(unix)]
+static EXIT_SIGNAL_HOOK: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Make the exit-signal handler call `hook` after it stops running git and
+/// before the signal ends `ws`. The TUI registers its terminal restore
+/// here, so this module does not depend on the TUI. `hook` runs inside a
+/// signal handler: it must call only async-signal-safe functions (no
+/// allocation, no lock).
+#[cfg(unix)]
+pub(crate) fn set_exit_signal_hook(hook: fn()) {
+    EXIT_SIGNAL_HOOK.store(hook as *mut (), Ordering::SeqCst);
+}
+
 /// The exit-signal handler: async-signal-safe calls only (atomic loads,
-/// `kill`, `signal`, `raise`).
+/// `kill`, the registered hook, `signal`, `raise`).
 #[cfg(unix)]
 extern "C" fn on_exit_signal(signal: libc::c_int) {
     for slot in &RUNNING_GIT_GROUPS {
@@ -501,6 +576,14 @@ extern "C" fn on_exit_signal(signal: libc::c_int) {
                 libc::kill(-pgid, libc::SIGTERM);
             }
         }
+    }
+    let hook = EXIT_SIGNAL_HOOK.load(Ordering::SeqCst);
+    if !hook.is_null() {
+        // SAFETY: a non-null value is only ever a `fn()` that
+        // `set_exit_signal_hook` cast to `*mut ()`; casting it back gives
+        // that same function pointer.
+        let hook = unsafe { std::mem::transmute::<*mut (), fn()>(hook) };
+        hook();
     }
     // SAFETY: both are async-signal-safe; the signal is blocked while this
     // handler runs, so it is delivered with the default action on return.
@@ -1180,6 +1263,9 @@ pub fn pull_quiet_detailed(cwd: &Path) -> PullQuietResult {
         Err(err) => return failed(format!("local changes check failed: {err}")),
     };
     let mut entry = None;
+    // Held from before the stash push to after the pop, so a quit waits
+    // for the user's changes to come back.
+    let _restoring = dirty.then(RestoringUserWork::start);
     if dirty {
         let args = ["stash", "push", "-m", AUTO_STASH_MESSAGE, "--quiet"];
         let pushed = match stash_push_entry(&args, cwd) {
@@ -1371,14 +1457,48 @@ pub fn list_worktrees_porcelain(cwd: &Path) -> String {
     exec_git(&["worktree", "list", "--porcelain"], cwd)
 }
 
-/// Stage one path (`git add --`).
-pub fn stage_file(cwd: &Path, file_path: &str) -> Result<(), String> {
-    exec_git_checked(&["add", "--", file_path], cwd)
+/// `path` as a pathspec that matches only that path: `:(literal)<path>`.
+///
+/// A bare pathspec is a glob, so `a[b].txt` also matches `ab.txt` and a
+/// write command would act on both. Write commands that take a file path
+/// pass it through this. When `GIT_LITERAL_PATHSPECS` is on, git reads
+/// every pathspec literally and does not parse the `:(literal)` prefix, so
+/// the path goes through as-is.
+fn literal_pathspec(path: &str) -> String {
+    let literal_global = std::env::var("GIT_LITERAL_PATHSPECS")
+        .map(|v| git_env_bool(&v))
+        .unwrap_or(false);
+    literal_pathspec_with(path, literal_global)
 }
 
-/// Unstage one path (`git restore --staged --`).
+fn literal_pathspec_with(path: &str, literal_global: bool) -> String {
+    if literal_global {
+        path.to_string()
+    } else {
+        format!(":(literal){path}")
+    }
+}
+
+/// A git boolean env value: `true`/`yes`/`on` or a non-zero integer is on;
+/// `false`/`no`/`off`, empty, zero, or anything else is off.
+fn git_env_bool(value: &str) -> bool {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" => true,
+        other => other.parse::<i64>().is_ok_and(|n| n != 0),
+    }
+}
+
+/// Stage one path (`git add -- :(literal)<path>`).
+pub fn stage_file(cwd: &Path, file_path: &str) -> Result<(), String> {
+    exec_git_checked(&["add", "--", &literal_pathspec(file_path)], cwd)
+}
+
+/// Unstage one path (`git restore --staged -- :(literal)<path>`).
 pub fn unstage_file(cwd: &Path, file_path: &str) -> Result<(), String> {
-    exec_git_checked(&["restore", "--staged", "--", file_path], cwd)
+    exec_git_checked(
+        &["restore", "--staged", "--", &literal_pathspec(file_path)],
+        cwd,
+    )
 }
 
 /// Apply a unified patch to the index (`git apply --cached`).
@@ -1422,9 +1542,10 @@ fn apply_patch_stdin(cwd: &Path, patch: &str, args: &[&str]) -> Result<(), Strin
     }
 }
 
-/// Discard worktree changes to a tracked path (`git restore --`).
+/// Discard worktree changes to a tracked path
+/// (`git restore -- :(literal)<path>`).
 pub fn revert_tracked_file(cwd: &Path, file_path: &str) -> Result<(), String> {
-    exec_git_checked(&["restore", "--", file_path], cwd)
+    exec_git_checked(&["restore", "--", &literal_pathspec(file_path)], cwd)
 }
 
 /// Start of every [`ensure_compare_head_clean`] refusal.
@@ -1438,12 +1559,13 @@ pub const COMPARE_REVERT_ABORTED: &str = "revert aborted: ";
 /// `paths` (staged, unstaged, untracked, or ignored). A compare tab writes
 /// the worktree only while it equals `head` for those paths, so this runs
 /// on the write worker right before the write: the TUI snapshot can be a
-/// watch tick old.
+/// watch tick old. `paths` are matched literally ([`literal_pathspec`]).
 pub fn ensure_compare_head_clean(cwd: &Path, head: &str, paths: &[&str]) -> Result<(), String> {
     match rev_parse_commit(cwd, "HEAD")? {
         Some(now) if now == head => {}
         _ => return Err(format!("{COMPARE_REVERT_ABORTED}HEAD moved")),
     }
+    let specs: Vec<String> = paths.iter().map(|p| literal_pathspec(p)).collect();
     let mut args = vec![
         "status",
         "--porcelain=v1",
@@ -1451,7 +1573,7 @@ pub fn ensure_compare_head_clean(cwd: &Path, head: &str, paths: &[&str]) -> Resu
         "--ignored",
         "--",
     ];
-    args.extend_from_slice(paths);
+    args.extend(specs.iter().map(String::as_str));
     let out = exec_git_stdout(&args, cwd)?;
     if out.trim().is_empty() {
         Ok(())
@@ -1464,14 +1586,15 @@ pub fn ensure_compare_head_clean(cwd: &Path, head: &str, paths: &[&str]) -> Resu
 }
 
 /// Restore `paths` in the worktree from `rev`
-/// (`git restore --source=<rev> --worktree --`).
+/// (`git restore --source=<rev> --worktree -- :(literal)<path>...`).
 ///
 /// The index stays untouched. A tracked path that `rev` does not have is
 /// removed from the worktree; a path only `rev` has is written.
 pub fn restore_worktree_from(cwd: &Path, rev: &str, paths: &[&str]) -> Result<(), String> {
     let source = format!("--source={rev}");
+    let specs: Vec<String> = paths.iter().map(|p| literal_pathspec(p)).collect();
     let mut args = vec!["restore", source.as_str(), "--worktree", "--"];
-    args.extend_from_slice(paths);
+    args.extend(specs.iter().map(String::as_str));
     exec_git_stdout(&args, cwd).map(|_| ())
 }
 
@@ -1510,9 +1633,9 @@ pub fn revert_compare_patch(cwd: &Path, head: &str, path: &str, patch: &str) -> 
     apply_worktree_patch_reverse(cwd, patch)
 }
 
-/// Delete an untracked path (`git clean -f --`). Destructive.
+/// Delete an untracked path (`git clean -f -- :(literal)<path>`). Destructive.
 pub fn remove_untracked_file(cwd: &Path, file_path: &str) -> Result<(), String> {
-    exec_git_checked(&["clean", "-f", "--", file_path], cwd)
+    exec_git_checked(&["clean", "-f", "--", &literal_pathspec(file_path)], cwd)
 }
 
 /// What [`push_quiet`] will do in a checkout, read before it runs.
@@ -1702,13 +1825,15 @@ pub fn remote_has_tag(cwd: &Path, remote: &str, tag: &str) -> Option<bool> {
 }
 
 /// Stash worktree changes. Includes untracked files (`-u`).
+///
+/// Non-empty `paths` limit the stash to those paths, matched literally
+/// ([`literal_pathspec`]).
 pub fn stash_push(cwd: &Path, paths: &[String]) -> Result<(), String> {
+    let specs: Vec<String> = paths.iter().map(|p| literal_pathspec(p)).collect();
     let mut args: Vec<&str> = vec!["stash", "push", "-u"];
-    if !paths.is_empty() {
+    if !specs.is_empty() {
         args.push("--");
-        for path in paths {
-            args.push(path);
-        }
+        args.extend(specs.iter().map(String::as_str));
     }
     let pushed = stash_push_entry(&args, cwd)?;
     pushed.pushed?;
@@ -2082,7 +2207,10 @@ pub fn git_diff_args(base: &[&str], path: &str, context: Option<u32>) -> Vec<Str
         args.push(format!("-U{n}"));
     }
     args.push("--".into());
-    args.push(path.into());
+    // Literal: a line stage / unstage / revert builds its patch from this
+    // diff, so a glob match of a sibling file would put that file's hunks
+    // under this file's header.
+    args.push(literal_pathspec(path));
     args
 }
 
@@ -2092,8 +2220,13 @@ fn exec_git_owned(args: &[String], cwd: &Path) -> String {
 }
 
 /// Git's reason line ([`git_reason_line`]), or `git <sub> exited with code N`.
+///
+/// A quoted `:(literal)` pathspec prefix ([`literal_pathspec`]) is dropped,
+/// so the message names the path the user picked.
 fn git_failure_message(args: &[&str], out: &std::process::Output) -> String {
-    git_reason_line(out).unwrap_or_else(|| exit_code_message(args, out))
+    git_reason_line(out)
+        .map(|line| line.replace("':(literal)", "'"))
+        .unwrap_or_else(|| exit_code_message(args, out))
 }
 
 /// Run git and return stdout. Failure is `Err`, never an empty success.
