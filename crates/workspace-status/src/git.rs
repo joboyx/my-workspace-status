@@ -1740,38 +1740,43 @@ pub struct NameStatus {
     pub stat: Option<LineStat>,
 }
 
-/// Parse newline `name-status` (`M\\tpath` or `R100\\told\\tnew`).
-pub fn parse_name_status_lines(stdout: &str) -> Vec<NameStatus> {
+/// Run git and return stdout as-is (lossy UTF-8, not trimmed).
+///
+/// For `-z` output, where a leading or trailing space belongs to a path.
+/// Failure is the same `Err` as [`exec_git_stdout`].
+pub fn exec_git_z(args: &[&str], cwd: &Path) -> Result<String, String> {
+    match run(args, cwd) {
+        Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
+        Ok(out) => Err(git_failure_message(args, &out)),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// Parse `--name-status -z` output (`M\0path\0`, `R100\0old\0new\0`).
+///
+/// Paths are raw, never C-quoted. A record cut short is dropped.
+pub fn parse_name_status_z(stdout: &str) -> Vec<NameStatus> {
     let mut out = Vec::new();
-    for line in stdout.lines() {
-        if line.trim().is_empty() {
+    let mut tokens = stdout.split('\0');
+    while let Some(status) = tokens.next() {
+        let Some(letter) = status.chars().next() else {
             continue;
-        }
-        let mut parts = line.split('\t');
-        let status = parts.next().unwrap_or("").to_string();
-        if status.is_empty() {
-            continue;
-        }
-        if status.starts_with('R') || status.starts_with('C') {
-            let old_path = parts.next().map(str::to_string).filter(|s| !s.is_empty());
-            let Some(path) = parts.next().map(str::to_string).filter(|s| !s.is_empty()) else {
-                continue;
-            };
-            out.push(NameStatus {
-                status: status.chars().next().unwrap_or('M').to_string(),
-                path,
-                old_path,
-                stat: None,
-            });
-            continue;
-        }
-        let Some(path) = parts.next().map(str::to_string).filter(|s| !s.is_empty()) else {
+        };
+        let old_path = if matches!(letter, 'R' | 'C') {
+            match tokens.next().filter(|p| !p.is_empty()) {
+                Some(old) => Some(old.to_string()),
+                None => continue,
+            }
+        } else {
+            None
+        };
+        let Some(path) = tokens.next().filter(|p| !p.is_empty()) else {
             continue;
         };
         out.push(NameStatus {
-            status: status.chars().next().unwrap_or('M').to_string(),
-            path,
-            old_path: None,
+            status: letter.to_string(),
+            path: path.to_string(),
+            old_path,
             stat: None,
         });
     }
@@ -1825,19 +1830,21 @@ fn attach_numstat(files: &mut [NameStatus], numstat_z: &str) {
 /// A numstat failure leaves `stat` as `None`; the list still loads.
 pub fn list_commit_name_status(cwd: &Path, commit_id: &str) -> Vec<NameStatus> {
     let parent = format!("{commit_id}^");
-    let out = exec_git(
+    let out = exec_git_z(
         &[
             "diff-tree",
             "--no-commit-id",
             "--name-status",
+            "-z",
             "-r",
             &parent,
             commit_id,
         ],
         cwd,
-    );
+    )
+    .unwrap_or_default();
     if !out.is_empty() {
-        let mut files = parse_name_status_lines(&out);
+        let mut files = parse_name_status_z(&out);
         let numstat = exec_git(
             &[
                 "diff-tree",
@@ -1853,18 +1860,20 @@ pub fn list_commit_name_status(cwd: &Path, commit_id: &str) -> Vec<NameStatus> {
         attach_numstat(&mut files, &numstat);
         return files;
     }
-    let root = exec_git(
+    let root = exec_git_z(
         &[
             "diff-tree",
             "--no-commit-id",
             "--name-status",
+            "-z",
             "-r",
             "--root",
             commit_id,
         ],
         cwd,
-    );
-    let mut files = parse_name_status_lines(&root);
+    )
+    .unwrap_or_default();
+    let mut files = parse_name_status_z(&root);
     let numstat = exec_git(
         &[
             "diff-tree",
@@ -1883,10 +1892,9 @@ pub fn list_commit_name_status(cwd: &Path, commit_id: &str) -> Vec<NameStatus> {
 
 /// Files recorded in a stash entry, with line counts from `--numstat -z`.
 pub fn list_stash_name_status(cwd: &Path, stash_ref: &str) -> Vec<NameStatus> {
-    let mut files = parse_name_status_lines(&exec_git(
-        &["stash", "show", "--name-status", stash_ref],
-        cwd,
-    ));
+    let mut files = parse_name_status_z(
+        &exec_git_z(&["stash", "show", "--name-status", "-z", stash_ref], cwd).unwrap_or_default(),
+    );
     let numstat = exec_git(&["stash", "show", "--numstat", "-z", stash_ref], cwd);
     attach_numstat(&mut files, &numstat);
     files
@@ -1897,11 +1905,14 @@ pub fn list_stash_name_status(cwd: &Path, stash_ref: &str) -> Vec<NameStatus> {
 /// Tracked files carry line counts from `diff HEAD --numstat -z`. Untracked
 /// files have `stat: None`.
 pub fn list_worktree_name_status(cwd: &Path) -> Vec<NameStatus> {
-    let mut files = parse_name_status_lines(&exec_git(&["diff", "HEAD", "--name-status"], cwd));
+    let mut files = parse_name_status_z(
+        &exec_git_z(&["diff", "HEAD", "--name-status", "-z"], cwd).unwrap_or_default(),
+    );
     let numstat = exec_git(&["diff", "HEAD", "--numstat", "-z"], cwd);
     attach_numstat(&mut files, &numstat);
-    let untracked = exec_git(&["ls-files", "--others", "--exclude-standard"], cwd);
-    for path in untracked.lines().map(str::trim).filter(|l| !l.is_empty()) {
+    let untracked =
+        exec_git_z(&["ls-files", "-z", "--others", "--exclude-standard"], cwd).unwrap_or_default();
+    for path in untracked.split('\0').filter(|p| !p.is_empty()) {
         if files.iter().any(|f| f.path == path) {
             continue;
         }
@@ -2048,11 +2059,18 @@ pub fn list_compare_name_status(
     head_sha: &str,
 ) -> Result<Vec<NameStatus>, String> {
     let range = format!("{base_sha}...{head_sha}");
-    let stdout = exec_git_stdout(
-        &["diff", "--name-status", "--find-renames", &range, "--"],
+    let stdout = exec_git_z(
+        &[
+            "diff",
+            "--name-status",
+            "-z",
+            "--find-renames",
+            &range,
+            "--",
+        ],
         cwd,
     )?;
-    let mut files = parse_name_status_lines(&stdout);
+    let mut files = parse_name_status_z(&stdout);
     let numstat = exec_git_stdout(
         &["diff", "--numstat", "-z", "--find-renames", &range, "--"],
         cwd,
@@ -2062,25 +2080,26 @@ pub fn list_compare_name_status(
     Ok(files)
 }
 
-/// Patch key per path of `base...HEAD`, from `diff --raw --no-abbrev
+/// Patch key per path of `base...HEAD`, from `diff --raw -z --no-abbrev
 /// --find-renames`.
 ///
 /// The key holds the old and new modes, the old and new blob ids, the
 /// status letter and the path(s). Two keys are equal only when the patch
 /// for that path is the same, whatever commits produced it. Keyed by the
-/// new path, spelled as [`list_compare_name_status`] lists it: no `-z`, so
-/// git quotes unusual paths the same way in both. A failed git call gives
-/// an empty map; the file list does not depend on it.
+/// raw new path, the same spelling [`list_compare_name_status`] lists (both
+/// read `-z` output). A failed git call gives an empty map; the file list
+/// does not depend on it.
 pub fn list_compare_patch_keys(
     cwd: &Path,
     base_sha: &str,
     head_sha: &str,
 ) -> std::collections::HashMap<String, String> {
     let range = format!("{base_sha}...{head_sha}");
-    let raw = exec_git_stdout(
+    let raw = exec_git_z(
         &[
             "diff",
             "--raw",
+            "-z",
             "--no-abbrev",
             "--find-renames",
             &range,
@@ -2092,20 +2111,19 @@ pub fn list_compare_patch_keys(
     parse_raw_patch_keys(&raw)
 }
 
-/// Parse newline `git diff --raw` output into new path → patch key.
+/// Parse `git diff --raw -z` output into new path → patch key.
 ///
-/// A row is `:<old mode> <new mode> <old id> <new id> <status>[score]\t<path>`.
-/// A rename or copy row ends `\t<old path>\t<new path>`. Paths stay as git
-/// prints them (quoted when unusual), like [`parse_name_status_lines`]. The
-/// similarity score is left out of the key: the blob ids already fix it.
+/// A record is `:<old mode> <new mode> <old id> <new id> <status>[score]\0<path>\0`.
+/// A rename or copy record ends `\0<old path>\0<new path>\0`. Paths are raw,
+/// like [`parse_name_status_z`]. The similarity score is left out of the
+/// key: the blob ids already fix it.
 fn parse_raw_patch_keys(stdout: &str) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
-    for line in stdout.lines() {
-        let Some(line) = line.strip_prefix(':') else {
+    let mut tokens = stdout.split('\0');
+    while let Some(token) = tokens.next() {
+        let Some(meta) = token.strip_prefix(':') else {
             continue;
         };
-        let mut parts = line.split('\t');
-        let meta = parts.next().unwrap_or("");
         let fields: Vec<&str> = meta.split(' ').collect();
         let [old_mode, new_mode, old_id, new_id, status] = fields[..] else {
             continue;
@@ -2113,11 +2131,11 @@ fn parse_raw_patch_keys(stdout: &str) -> std::collections::HashMap<String, Strin
         let Some(letter) = status.chars().next() else {
             continue;
         };
-        let Some(first) = parts.next().filter(|p| !p.is_empty()) else {
+        let Some(first) = tokens.next().filter(|p| !p.is_empty()) else {
             continue;
         };
         let (old_path, path) = if matches!(letter, 'R' | 'C') {
-            let Some(new) = parts.next().filter(|p| !p.is_empty()) else {
+            let Some(new) = tokens.next().filter(|p| !p.is_empty()) else {
                 continue;
             };
             (first, new)
@@ -2203,7 +2221,7 @@ pub fn git_worktree_compare_diff_args(
 
 /// The one path of a commit-vs-working-tree compare, as a name-status row.
 ///
-/// Runs `diff --name-status -M <base> -- [<old>] <path>`, then the same with
+/// Runs `diff --name-status -z -M <base> -- [<old>] <path>`, then the same with
 /// `--numstat -z` for line counts (its failure leaves `stat` as `None`).
 /// Empty stdout (the worktree file equals the commit) is an empty list.
 pub fn list_worktree_vs_commit_name_status(
@@ -2213,9 +2231,9 @@ pub fn list_worktree_vs_commit_name_status(
     old_path: Option<&str>,
 ) -> Result<Vec<NameStatus>, String> {
     let paths = compare_revert_paths(path, old_path);
-    let mut args = vec!["diff", "--name-status", "-M", base_sha, "--"];
+    let mut args = vec!["diff", "--name-status", "-z", "-M", base_sha, "--"];
     args.extend_from_slice(&paths);
-    let mut files = parse_name_status_lines(&exec_git_stdout(&args, cwd)?);
+    let mut files = parse_name_status_z(&exec_git_z(&args, cwd)?);
     let mut numstat_args = vec!["diff", "--numstat", "-z", "-M", base_sha, "--"];
     numstat_args.extend_from_slice(&paths);
     let numstat = exec_git_stdout(&numstat_args, cwd).unwrap_or_default();
