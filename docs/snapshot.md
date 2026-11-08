@@ -69,11 +69,11 @@ These fields cover branch, sync, checkout kind, merge-into-default, and file cha
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `path` | string | Path relative to that repo. |
+| `path` | string | Raw path relative to that repo, as on disk (`my file.txt`, `café.md`), never git's C-quoted form. Read from `status -z`; a name that is not valid UTF-8 is decoded lossily. |
 | `stagedStatus` | string | Porcelain status letter when staged (`A`, `M`, `D`, `R`, `U`, …). |
 | `unstagedStatus` | string | Porcelain status letter when unstaged. |
 | `untracked` | boolean | True for untracked paths. |
-| `oldPath` | string | Present on renames. |
+| `oldPath` | string | Raw path before the rename, same form as `path`. Present on renames. |
 
 ## Visibility and ops
 

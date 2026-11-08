@@ -5,7 +5,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::super::persist::{persist_with_lock, LEGACY_WORKSPACE_ID};
+use super::super::persist::{apply_session_delta, persist_with_lock, LEGACY_WORKSPACE_ID};
 use super::super::viewed::normalize_viewed_path;
 
 /// On-disk store version written by save. Load accepts `1` and `2`.
@@ -459,7 +459,17 @@ pub fn load_comment_store(file_path: &Path, workspace_id: &str) -> CommentStore 
     comment_store_for_workspace(&load_comment_workspaces(&text), workspace_id)
 }
 
-/// Persist `store` as the current workspace bucket (version 2).
+/// Persist this session's comment changes into the current workspace
+/// bucket (version 2) and return the merged bucket.
+///
+/// `baseline` is the bucket this session last loaded or saved; `store` is
+/// the bucket now. Under the lock, save reads the bucket on disk (the
+/// `__legacy__` map when the bucket is missing, like load) and applies
+/// only the delta from `baseline` to `store`: keys this session removed are
+/// removed, keys it added or edited are written, and keys another `ws`
+/// process added or edited since `baseline` stay. The caller makes the
+/// returned bucket its new `store` and `baseline`, so it also picks up the
+/// other process's comments.
 ///
 /// Locks a sibling `*.lock` file, keeps every other workspace bucket
 /// (including `__legacy__`), then atomic-writes. A missing file starts an
@@ -467,10 +477,12 @@ pub fn load_comment_store(file_path: &Path, workspace_id: &str) -> CommentStore 
 /// JSON returns [`io::Error`] and leaves the bytes unchanged. Other disk
 /// errors also return [`io::Result`].
 pub fn save_comment_store(
+    baseline: &CommentStore,
     store: &CommentStore,
     file_path: &Path,
     workspace_id: &str,
-) -> io::Result<()> {
+) -> io::Result<CommentStore> {
+    let mut merged = None;
     persist_with_lock(file_path, |existing| {
         let mut workspaces = match existing {
             None => BTreeMap::new(),
@@ -486,9 +498,15 @@ pub fn save_comment_store(
                 "reserved workspace id",
             ));
         }
-        workspaces.insert(workspace_id.to_string(), store.clone());
+        let mut bucket = workspaces
+            .remove(workspace_id)
+            .unwrap_or_else(|| comment_store_for_workspace(&workspaces, workspace_id));
+        apply_session_delta(&mut bucket, baseline, store);
+        workspaces.insert(workspace_id.to_string(), bucket.clone());
+        merged = Some(bucket);
         encode_comment_file(&comment_file_v2(workspaces))
-    })
+    })?;
+    Ok(merged.unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -603,7 +621,7 @@ mod tests {
             end_line: 2,
         };
         let store = put_comment(&CommentStore::new(), key.clone(), "wt line");
-        save_comment_store(&store, &file, "test-ws").unwrap();
+        save_comment_store(&CommentStore::new(), &store, &file, "test-ws").unwrap();
         let loaded = load_comment_store(&file, "test-ws");
         assert_eq!(loaded.get(&key).map(CommentEntry::as_str), Some("wt line"));
         assert!(!loaded.get(&key).is_some_and(|e| e.resolved));
@@ -620,7 +638,7 @@ mod tests {
             end_line: 2,
         };
         let store = put_comment(&CommentStore::new(), range.clone(), "span");
-        save_comment_store(&store, &file, "test-ws").unwrap();
+        save_comment_store(&CommentStore::new(), &store, &file, "test-ws").unwrap();
         let loaded = load_comment_store(&file, "test-ws");
         assert_eq!(loaded.get(&range).map(CommentEntry::as_str), Some("span"));
         let text = fs::read_to_string(&file).unwrap();
@@ -662,7 +680,7 @@ mod tests {
             sha: "deadbeef".into(),
         };
         let store = put_comment_entry(&CommentStore::new(), resolved_key.clone(), "done", true);
-        save_comment_store(&store, &file, "test-ws").unwrap();
+        save_comment_store(&CommentStore::new(), &store, &file, "test-ws").unwrap();
         let loaded = load_comment_store(&file, "test-ws");
         assert_eq!(
             loaded.get(&resolved_key).map(CommentEntry::as_str),
@@ -698,18 +716,28 @@ mod tests {
         }
     }
 
+    /// Live set where repo `app` is present with an authoritative branch
+    /// list that has no counted branch, so GC drops its branch keys.
+    fn app_present_no_branches() -> super::super::target::CommentLiveSet {
+        super::super::target::CommentLiveSet {
+            identities: ["app".to_string()].into_iter().collect(),
+            authoritative: ["app".to_string()].into_iter().collect(),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn gc_persist_keeps_other_workspace_comments() {
-        use super::super::target::{gc_comments, CommentLiveSet};
+        use super::super::target::gc_comments;
         let (dir, file) = temp_json("ws-comments-gc");
         let key_a = branch_key("main");
         let key_b = branch_key("topic");
         let store_a = put_comment(&CommentStore::new(), key_a.clone(), "note-a");
         let store_b = put_comment(&CommentStore::new(), key_b.clone(), "note-b");
-        save_comment_store(&store_a, &file, "ws-a").unwrap();
-        save_comment_store(&store_b, &file, "ws-b").unwrap();
-        let gced = gc_comments(&store_a, &CommentLiveSet::default());
-        save_comment_store(&gced, &file, "ws-a").unwrap();
+        save_comment_store(&CommentStore::new(), &store_a, &file, "ws-a").unwrap();
+        save_comment_store(&CommentStore::new(), &store_b, &file, "ws-b").unwrap();
+        let gced = gc_comments(&store_a, &app_present_no_branches(), &dir);
+        save_comment_store(&store_a, &gced, &file, "ws-a").unwrap();
         let loaded_b = load_comment_store(&file, "ws-b");
         assert_eq!(
             loaded_b.get(&key_b).map(CommentEntry::as_str),
@@ -718,7 +746,58 @@ mod tests {
         );
         assert!(
             load_comment_store(&file, "ws-a").is_empty(),
-            "empty live set must drop workspace A comments"
+            "a live set without the branch must drop workspace A comments"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_instances_saving_one_file_keep_both_comments() {
+        let (dir, file) = temp_json("ws-comments-two");
+        let loaded_a = load_comment_store(&file, "ws");
+        let loaded_b = load_comment_store(&file, "ws");
+        let store_a = put_comment(&loaded_a, branch_key("main"), "from-a");
+        save_comment_store(&loaded_a, &store_a, &file, "ws").unwrap();
+        let store_b = put_comment(&loaded_b, branch_key("topic"), "from-b");
+        let merged_b = save_comment_store(&loaded_b, &store_b, &file, "ws").unwrap();
+        let reloaded = load_comment_store(&file, "ws");
+        assert_eq!(
+            reloaded.get(&branch_key("main")).map(CommentEntry::as_str),
+            Some("from-a"),
+            "the second save must keep the comment the first instance added"
+        );
+        assert_eq!(
+            reloaded.get(&branch_key("topic")).map(CommentEntry::as_str),
+            Some("from-b")
+        );
+        assert_eq!(
+            merged_b, reloaded,
+            "save returns the merged bucket, so instance B sees A's comment"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_in_one_instance_survives_save_of_another() {
+        let (dir, file) = temp_json("ws-comments-two-delete");
+        let mut seed = put_comment(&CommentStore::new(), branch_key("main"), "seed-main");
+        seed = put_comment(&seed, branch_key("topic"), "seed-topic");
+        save_comment_store(&CommentStore::new(), &seed, &file, "ws").unwrap();
+        let loaded_a = load_comment_store(&file, "ws");
+        let loaded_b = load_comment_store(&file, "ws");
+        let store_a = put_comment(&loaded_a, branch_key("main"), "");
+        save_comment_store(&loaded_a, &store_a, &file, "ws").unwrap();
+        let store_b = put_comment(&loaded_b, branch_key("topic"), "edited-by-b");
+        save_comment_store(&loaded_b, &store_b, &file, "ws").unwrap();
+        let reloaded = load_comment_store(&file, "ws");
+        assert!(
+            !reloaded.contains_key(&branch_key("main")),
+            "a comment instance A deleted must stay deleted after B saves: {reloaded:?}"
+        );
+        assert_eq!(
+            reloaded.get(&branch_key("topic")).map(CommentEntry::as_str),
+            Some("edited-by-b"),
+            "the edit of instance B wins"
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -729,7 +808,12 @@ mod tests {
         let blocker = dir.join("not-a-dir");
         fs::write(&blocker, "x").unwrap();
         let store = put_comment(&CommentStore::new(), branch_key("main"), "note");
-        let result = save_comment_store(&store, &blocker.join("comments.json"), "ws-a");
+        let result = save_comment_store(
+            &CommentStore::new(),
+            &store,
+            &blocker.join("comments.json"),
+            "ws-a",
+        );
         assert!(
             result.is_err(),
             "save to an unwritable path must return Err, got {result:?}"
@@ -767,7 +851,7 @@ mod tests {
 
     #[test]
     fn save_from_other_workspace_keeps_version_1_comment_records() {
-        use super::super::target::{gc_comments, CommentLiveSet};
+        use super::super::target::gc_comments;
         let (dir, file) = temp_json("ws-comments-v1-keep");
         fs::write(
             &file,
@@ -786,7 +870,7 @@ mod tests {
         )
         .unwrap();
         let store_b = put_comment(&CommentStore::new(), branch_key("topic"), "note-b");
-        save_comment_store(&store_b, &file, "ws-b").unwrap();
+        save_comment_store(&CommentStore::new(), &store_b, &file, "ws-b").unwrap();
         let text = fs::read_to_string(&file).unwrap();
         assert!(
             text.contains("\"__legacy__\""),
@@ -805,8 +889,9 @@ mod tests {
                 .map(CommentEntry::as_str),
             Some("note-b")
         );
-        let gced = gc_comments(&store_b, &CommentLiveSet::default());
-        save_comment_store(&gced, &file, "ws-b").unwrap();
+        let gced = gc_comments(&store_b, &app_present_no_branches(), &dir);
+        assert!(gced.is_empty(), "GC must drop the topic comment of B");
+        save_comment_store(&store_b, &gced, &file, "ws-b").unwrap();
         assert_eq!(
             load_comment_store(&file, "ws-a")
                 .get(&branch_key("main"))
@@ -841,7 +926,7 @@ mod tests {
         )
         .unwrap();
         let store_a = put_comment(&CommentStore::new(), branch_key("main"), "note-a");
-        save_comment_store(&store_a, &file, "ws-a").unwrap();
+        save_comment_store(&CommentStore::new(), &store_a, &file, "ws-a").unwrap();
         assert_eq!(
             load_comment_store(&file, "ws-a")
                 .get(&branch_key("main"))
@@ -883,7 +968,7 @@ mod tests {
         .unwrap();
         fs::write(&file, "not-json").unwrap();
         let store_a = put_comment(&CommentStore::new(), branch_key("main"), "note-a");
-        let result = save_comment_store(&store_a, &file, "ws-a");
+        let result = save_comment_store(&CommentStore::new(), &store_a, &file, "ws-a");
         assert!(
             result.is_err(),
             "save over unreadable bytes must return Err, got {result:?}"

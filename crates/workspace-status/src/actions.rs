@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::git::{
     checkout_branch, exec_git, exec_git_checked, get_default_branch, pull_quiet,
-    pull_quiet_detailed, repo_has_local_changes,
+    pull_quiet_detailed, repo_has_local_changes, PullQuietResult,
 };
 
 pub fn pull_behind_repos(cwd: &Path, repos: &[String]) -> Vec<String> {
@@ -18,14 +18,27 @@ pub fn pull_behind_repos(cwd: &Path, repos: &[String]) -> Vec<String> {
             } else {
                 lines.push("    ✅ Success".to_string());
             }
-        } else if result.stash_pop_failed {
-            lines.push(
-                "    ⚠️ Pulled but stash pop conflicted — resolve conflicts / check stash list"
-                    .to_string(),
-            );
         } else {
-            lines.push("    ⚠️ Failed (may have conflicts)".to_string());
+            lines.extend(pull_problem_lines(&result, "Failed"));
         }
+    }
+    lines
+}
+
+/// CLI lines for a pull that did not end `ok`: the auto-stash note or
+/// conflict first, then the reason the pull failed (`<failed>: <reason>`).
+fn pull_problem_lines(result: &PullQuietResult, failed: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(note) = &result.stash_note {
+        lines.push(format!("    ⚠️ {note}"));
+    } else if result.stash_pop_failed {
+        lines.push(
+            "    ⚠️ Pulled but stash pop conflicted — resolve conflicts / check stash list"
+                .to_string(),
+        );
+    }
+    if let Some(error) = &result.error {
+        lines.push(format!("    ⚠️ {failed}: {error}"));
     }
     lines
 }
@@ -73,13 +86,8 @@ pub fn switch_repo_to_default_branch(
             } else {
                 lines.push("    ✅ Pulled successfully".to_string());
             }
-        } else if result.stash_pop_failed {
-            lines.push(
-                "    ⚠️ Pulled but stash pop conflicted — resolve conflicts / check stash list"
-                    .to_string(),
-            );
         } else {
-            lines.push("    ⚠️ Pull failed or no updates".to_string());
+            lines.extend(pull_problem_lines(&result, "Pull failed"));
         }
         return (SwitchOutcome::Skipped("already on default".into()), lines);
     }

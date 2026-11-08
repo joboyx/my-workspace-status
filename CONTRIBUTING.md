@@ -6,6 +6,8 @@
 2. Clone this repository.
 3. Install git.
 
+With rustup installed, `scripts/agent-bootstrap.sh` does the rest: it installs the pinned toolchain with clippy and rustfmt, fetches crates, and builds the test binaries.
+
 End-user install of `workspace-status` / `ws` is the GitHub Release installer in the README.
 
 From a local clone:
@@ -22,23 +24,27 @@ cargo run -p workspace-status -- --plain
 
 ## Checks
 
-Run the same suite that CI runs:
+CI runs this gate (jobs `lint` and `cargo`). Run all three before you push:
 
 ```bash
-cargo test --workspace
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
 ```
 
-That includes the real-TTY PTY e2e on Unix (`crates/workspace-status/tests/tui_tty_e2e/`). GitHub Actions also runs xfce4-terminal (keys) and xterm (XTEST wheel) under `tui-tty-desktop` via `scripts/with-desktop-session.sh`. See [docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md).
+`--locked` fails when `Cargo.lock` does not match `Cargo.toml`, as it does in CI. The test run includes the real-TTY PTY e2e on Unix (`crates/workspace-status/tests/tui_tty_e2e/`). GitHub Actions also runs xfce4-terminal (keys) and xterm (XTEST wheel) under `tui-tty-desktop` via `scripts/with-desktop-session.sh`. See [docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md).
+
+Commands to run one test: **Start here** in [AGENTS.md](./AGENTS.md).
 
 Agents and CI must use `--plain` or `--json`. A TTY run without those flags opens the TUI.
 
 ## cargo-dist generate
 
-`.github/workflows/release.yml` is generated. After `dist generate`, restore `on.workflow_dispatch` and the host-job git-cliff steps. Numbered recipe: [docs/architecture.md](./docs/architecture.md) (**Distribution**). `cargo test --test release_watch` fails if those steps are missing, or if a TTY spawn path no longer isolates `WS_STATUS_UPDATE_CHECK_STORE`.
+`.github/workflows/release.yml` is generated. Before you run `dist generate`, read **`dist generate`** in [AGENTS.md](./AGENTS.md).
 
 ## Pull requests
 
-Open a pull request against main. GitHub Actions runs `lint`, `cargo test --workspace` (`cargo`) and the desktop TTY e2e job (`tui-tty-desktop`: xfce keys + xterm XTEST wheel) on pull requests and on main. A push to main is tagged and released only after those three pass. See **Release gate** in [docs/architecture.md](./docs/architecture.md).
+Open a pull request against main and fill in the template (`.github/pull_request_template.md`). GitHub Actions runs `lint`, `cargo test --workspace --locked` (`cargo`) and the desktop TTY e2e job (`tui-tty-desktop`: xfce keys + xterm XTEST wheel) on pull requests and on main. A push to main is tagged and released only after those three pass. See **Release gate** in [docs/architecture.md](./docs/architecture.md).
 
 Keep `SAMPLE_OUTPUT.md` in sync with `crates/workspace-status/tests/snapshot_contract.rs` when output changes.
 

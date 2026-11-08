@@ -4,7 +4,7 @@
 //! `spawn_blocking`s them onto a `JoinSet`.
 //! [`super::effect::Interpreter::interpret_sync`] runs the same jobs on the
 //! calling thread. [`Scheduler`] decides which
-//! [`TaskResult`] values may touch [`super::state::AppState`].
+//! results may touch [`super::state::AppState`].
 //! [`super::effect::Interpreter`] applies those results. Workers never draw.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -16,15 +16,6 @@ pub enum CollectionKind {
     Watch,
     /// `r` on the workspace / No-updates row, or a post-write refresh.
     Reload,
-}
-
-/// User / pane work vs background `git status`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum JobClass {
-    /// Pane load, writes, pickers, fetch/pull/push, focused status.
-    User,
-    /// Background checkout status for a collect.
-    Status,
 }
 
 /// Work the loop may spawn on the blocking pool.
@@ -74,6 +65,9 @@ pub enum UserTag {
     /// PR title command fill for the PRs tab group headers (latest-only
     /// slot).
     PrTitles,
+    /// Host clipboard tool copy (`wl-copy` / `xclip` / `pbcopy`) of one
+    /// copy, with a deadline (serial latest-only slot).
+    Clipboard,
     /// Commit-activity counts for the tree sparklines. Low priority: it
     /// waits behind every user job ([`Scheduler::enqueue_background`]).
     Activity,
@@ -83,30 +77,7 @@ pub enum UserTag {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpawnRequest {
     pub id: u64,
-    pub class: JobClass,
     pub kind: SpawnKind,
-}
-
-/// Typed worker result. Stale generations are discarded by [`Scheduler`].
-#[derive(Clone, Debug)]
-#[allow(dead_code)]
-pub enum TaskResult {
-    Discovered {
-        gen: u64,
-        paths: Vec<String>,
-    },
-    RepoStatus {
-        gen: u64,
-        path: String,
-        applied: bool,
-    },
-    Pane {
-        req_id: u64,
-        accepted: bool,
-    },
-    UserDone {
-        tag: UserTag,
-    },
 }
 
 /// What the loop should do after a result.
@@ -123,8 +94,6 @@ pub enum ApplyDecision {
     },
     QueueRepos,
     CollectionIdle,
-    #[allow(dead_code)]
-    ApplyPane,
 }
 
 /// Caps, generations, and queues for the live loop.
@@ -175,8 +144,6 @@ struct CollectionState {
 }
 
 struct Inflight {
-    #[allow(dead_code)]
-    class: JobClass,
     kind: SpawnKind,
 }
 
@@ -323,6 +290,11 @@ impl Scheduler {
     }
 
     /// Discover finished. Queue focused checkout first, then the rest.
+    ///
+    /// With nothing to queue (no paths, or a newer reload owns every
+    /// path), no repo result will land for this collect, so it ends here:
+    /// [`ApplyDecision::CollectionIdle`], or [`ApplyDecision::StartDiscover`]
+    /// when a watch tick latched meanwhile.
     pub fn on_discovered(&mut self, gen: u64, mut paths: Vec<String>) -> ApplyDecision {
         let Some(col) = self.collection.as_mut() else {
             return ApplyDecision::Ignore;
@@ -348,6 +320,9 @@ impl Scheduler {
             queued.push(path);
         }
         col.pending = queued.iter().cloned().collect();
+        if queued.is_empty() {
+            return self.finish_collection();
+        }
         for (i, path) in queued.into_iter().enumerate() {
             let focused_job = focused.as_deref() == Some(path.as_str());
             let kind = SpawnKind::ProcessRepo {
@@ -660,24 +635,13 @@ impl Scheduler {
     }
 
     fn take_inflight(&mut self, kind: SpawnKind) -> SpawnRequest {
-        let class = match &kind {
-            SpawnKind::ProcessRepo { focused: false, .. } => JobClass::Status,
-            SpawnKind::Discover { .. } => JobClass::User,
-            _ => JobClass::User,
-        };
         let id = self.next_job_id;
         self.next_job_id += 1;
         if let SpawnKind::LoadPane { req_id } = &kind {
             self.pane_inflight = Some(*req_id);
         }
-        self.inflight.insert(
-            id,
-            Inflight {
-                class,
-                kind: kind.clone(),
-            },
-        );
-        SpawnRequest { id, class, kind }
+        self.inflight.insert(id, Inflight { kind: kind.clone() });
+        SpawnRequest { id, kind }
     }
 
     pub fn note_job_finished(&mut self, id: u64) {
@@ -762,8 +726,6 @@ mod tests {
             }
             other => panic!("expected focused repo, got {other:?}"),
         }
-        assert_eq!(first.class, JobClass::User);
-        assert_eq!(second.class, JobClass::User);
         let rest: Vec<_> = s
             .spawn_ready()
             .into_iter()
@@ -816,6 +778,57 @@ mod tests {
         assert!(!s.latched_watch());
         assert!(!s.on_watch_tick(None));
         assert!(s.latched_watch());
+    }
+
+    #[test]
+    fn discover_with_no_paths_ends_the_collect() {
+        let mut s = Scheduler::new(4);
+        assert!(s.on_watch_tick(None));
+        let gen = s.collection_gen().unwrap();
+        assert_eq!(s.on_discovered(gen, vec![]), ApplyDecision::CollectionIdle);
+        assert!(!s.collection_active());
+        assert!(s.on_watch_tick(None), "the next tick starts a new collect");
+    }
+
+    #[test]
+    fn discover_with_every_path_superseded_ends_the_collect() {
+        let mut s = Scheduler::new(4);
+        assert!(s.on_watch_tick(Some("r0".into())));
+        let gen = s.collection_gen().unwrap();
+        // `r` on the only checkout lands before the walk does.
+        s.on_reload_repo("r0".into());
+        assert_eq!(
+            s.note_repo_done(gen + 1, "r0"),
+            ApplyDecision::ApplyRepo {
+                path: "r0".into(),
+                load_pane_if_focused: true,
+            }
+        );
+        assert!(s.collection_active(), "the walk has not landed yet");
+        assert_eq!(
+            s.on_discovered(gen, vec!["r0".into()]),
+            ApplyDecision::CollectionIdle
+        );
+        assert!(!s.collection_active());
+        assert!(s.on_watch_tick(None), "the next tick starts a new collect");
+    }
+
+    #[test]
+    fn discover_with_no_paths_starts_a_latched_rerun() {
+        let mut s = Scheduler::new(4);
+        assert!(s.on_watch_tick(None));
+        let gen1 = s.collection_gen().unwrap();
+        assert!(!s.on_watch_tick(None));
+        assert!(s.latched_watch());
+        match s.on_discovered(gen1, vec![]) {
+            ApplyDecision::StartDiscover { gen, kind } => {
+                assert_eq!(kind, CollectionKind::Watch);
+                assert_eq!(Some(gen), s.collection_gen());
+                assert_ne!(gen, gen1);
+            }
+            other => panic!("expected latched rerun, got {other:?}"),
+        }
+        assert!(!s.latched_watch());
     }
 
     #[test]
