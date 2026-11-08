@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::config::{default_branch_override_for, WorkspaceStatusConfig};
 use crate::git::{
-    classify_upstream_rewrite, exec_git, exec_git_checked, head_equals_ref, is_ancestor,
+    classify_upstream_rewrite, exec_git_checked, exec_git_z, head_equals_ref, is_ancestor,
     known_default_branch_name, list_local_branches, list_worktrees_porcelain,
     resolve_default_branch_tip_ref, rev_parse_quiet,
 };
@@ -250,44 +250,48 @@ pub struct PorcelainChanges {
     pub untracked: Vec<String>,
 }
 
-fn parse_tracked_file_part(status: char, file_part: &str) -> (String, Option<String>) {
-    if status == 'R' {
-        if let Some((old, new)) = file_part.split_once(" -> ") {
-            return (new.to_string(), Some(old.to_string()));
-        }
-    }
-    (file_part.to_string(), None)
-}
-
-/// Parse porcelain=v1 file lines (no `##` header).
-pub fn parse_porcelain_change_lines(lines: &[&str]) -> PorcelainChanges {
+/// Parse `git status --porcelain=v1 -z [--branch]` output.
+///
+/// Returns the `## ` branch header (when the first record is one) and the
+/// file changes. A record is `XY path\0`; a rename or copy record (`R` or
+/// `C` in `X` or `Y`) is `XY new\0old\0`, new path first. Paths are raw,
+/// never C-quoted. The old path is kept on the `R` side only.
+pub fn parse_porcelain_v1_z(stdout: &str) -> (Option<&str>, PorcelainChanges) {
     let mut out = PorcelainChanges::default();
-    for line in lines {
-        if line.len() < 3 {
+    let mut records = stdout.split('\0').peekable();
+    let header = records.next_if(|r| r.starts_with("## "));
+    while let Some(record) = records.next() {
+        let (Some(xy), Some(path)) = (record.get(..2), record.get(3..)) else {
+            continue;
+        };
+        if path.is_empty() {
             continue;
         }
-        let xy = &line[..2];
-        let file_part = &line[3..];
+        let path = path.to_string();
         if xy == "??" {
-            out.untracked.push(file_part.to_string());
+            out.untracked.push(path);
             continue;
         }
+        let old = if xy.contains(['R', 'C']) {
+            records.next().map(str::to_string)
+        } else {
+            None
+        };
         if is_unmerged_xy(xy) {
-            let (path, old) = parse_tracked_file_part('U', file_part);
-            out.unstaged.push(('U', path, old));
+            out.unstaged.push(('U', path, None));
             continue;
         }
-        let chars: Vec<char> = xy.chars().collect();
-        if let Some(st) = chars.first().copied().and_then(normalize_porcelain_status) {
-            let (path, old) = parse_tracked_file_part(st, file_part);
-            out.staged.push((st, path, old));
+        let mut chars = xy.chars();
+        if let Some(st) = chars.next().and_then(normalize_porcelain_status) {
+            let old = (st == 'R').then(|| old.clone()).flatten();
+            out.staged.push((st, path.clone(), old));
         }
-        if let Some(st) = chars.get(1).copied().and_then(normalize_porcelain_status) {
-            let (path, old) = parse_tracked_file_part(st, file_part);
+        if let Some(st) = chars.next().and_then(normalize_porcelain_status) {
+            let old = (st == 'R').then_some(old).flatten();
             out.unstaged.push((st, path, old));
         }
     }
-    out
+    (header, out)
 }
 
 fn merge_file_changes(changes: &PorcelainChanges) -> Vec<FileChange> {
@@ -564,21 +568,22 @@ pub fn process_repo(
     if do_fetch {
         let _ = exec_git_checked(&["fetch", "--quiet"], &repo_dir);
     }
-    let porcelain = exec_git(
+    let porcelain = exec_git_z(
         &[
             "status",
             "--porcelain=v1",
+            "-z",
             "--branch",
             "--ahead-behind",
             "--untracked-files=all",
         ],
         &repo_dir,
-    );
-    let lines: Vec<&str> = porcelain.lines().filter(|l| !l.is_empty()).collect();
-    let Some(branch_state) = parse_branch_line(lines.first().copied().unwrap_or("")) else {
+    )
+    .unwrap_or_default();
+    let (header, parsed) = parse_porcelain_v1_z(&porcelain);
+    let Some(branch_state) = parse_branch_line(header.unwrap_or("")) else {
         return Some(failed_repo_snapshot(repo_path, override_name, meta));
     };
-    let parsed = parse_porcelain_change_lines(&lines[1..]);
     let changes = merge_file_changes(&parsed);
     let has_unstaged = !parsed.unstaged.is_empty();
     let has_staged = !parsed.staged.is_empty();
@@ -740,9 +745,53 @@ mod tests {
 
     #[test]
     fn parse_untracked_and_modified() {
-        let parsed = parse_porcelain_change_lines(&[" M README.md", "?? new.txt"]);
+        let (header, parsed) = parse_porcelain_v1_z("## main\0 M README.md\0?? new.txt\0");
+        assert_eq!(header, Some("## main"));
         assert_eq!(parsed.unstaged[0].0, 'M');
         assert_eq!(parsed.untracked, vec!["new.txt"]);
+    }
+
+    /// `(status, path, old path)` as [`PorcelainChanges`] holds it.
+    fn change(status: char, path: &str, old: Option<&str>) -> (char, String, Option<String>) {
+        (status, path.to_string(), old.map(str::to_string))
+    }
+
+    #[test]
+    fn parse_porcelain_v1_z_keeps_odd_paths_raw() {
+        let stdout = "## main...origin/main [ahead 1]\0\
+                      \x20M my file.txt\0\
+                      A  a -> b.txt\0\
+                      R  new name.txt\0old.txt\0\
+                      RM renamed é.txt\0tab\tname.txt\0\
+                      UU both.txt\0\
+                      ?? café.md\0\
+                      ??  lead space.txt\0";
+        let (header, parsed) = parse_porcelain_v1_z(stdout);
+        assert_eq!(header, Some("## main...origin/main [ahead 1]"));
+        assert_eq!(
+            parsed.staged,
+            vec![
+                change('A', "a -> b.txt", None),
+                change('R', "new name.txt", Some("old.txt")),
+                change('R', "renamed é.txt", Some("tab\tname.txt")),
+            ]
+        );
+        assert_eq!(
+            parsed.unstaged,
+            vec![
+                change('M', "my file.txt", None),
+                change('M', "renamed é.txt", None),
+                change('U', "both.txt", None),
+            ]
+        );
+        assert_eq!(parsed.untracked, vec!["café.md", " lead space.txt"]);
+    }
+
+    #[test]
+    fn parse_porcelain_v1_z_without_a_header_reads_every_record() {
+        let (header, parsed) = parse_porcelain_v1_z(" M a.rs\0");
+        assert_eq!(header, None);
+        assert_eq!(parsed.unstaged, vec![change('M', "a.rs", None)]);
     }
 }
 

@@ -796,15 +796,6 @@ fn read_file(dir: &Path, rel: &str) -> String {
     fs::read_to_string(dir.join(rel)).unwrap()
 }
 
-/// `git diff --cached --name-only` paths (NUL-split, so no quoting).
-fn staged_paths(dir: &Path) -> Vec<String> {
-    exec_git(&["diff", "--cached", "--name-only", "-z"], dir)
-        .split('\0')
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
 /// A repo with every [`GLOB_NAME_PAIRS`] file committed as `base\n`.
 fn glob_names_fixture(prefix: &str) -> std::path::PathBuf {
     let dir = unique_dir(prefix);
@@ -1269,10 +1260,44 @@ fn remove_worktree_linked_fixture() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// One expected [`NameStatus`] row with no line counts.
+fn row(status: &str, path: &str, old_path: Option<&str>) -> NameStatus {
+    NameStatus {
+        status: status.into(),
+        path: path.into(),
+        old_path: old_path.map(str::to_string),
+        stat: None,
+    }
+}
+
+#[test]
+fn parse_name_status_z_keeps_odd_paths_raw() {
+    let stdout = "M\0my file.txt\0A\0café.md\0D\0a -> b.txt\0\
+                  R087\0old name.txt\0new name.txt\0C100\0src.rs\0copy\tof src.rs\0\
+                  M\0tab\there.txt\0";
+    assert_eq!(
+        parse_name_status_z(stdout),
+        vec![
+            row("M", "my file.txt", None),
+            row("A", "café.md", None),
+            row("D", "a -> b.txt", None),
+            row("R", "new name.txt", Some("old name.txt")),
+            row("C", "copy\tof src.rs", Some("src.rs")),
+            row("M", "tab\there.txt", None),
+        ]
+    );
+    // A rename record cut short is dropped, not misread.
+    assert_eq!(
+        parse_name_status_z("M\0a.rs\0R100\0old.rs\0"),
+        vec![row("M", "a.rs", None)]
+    );
+    assert!(parse_name_status_z("").is_empty());
+}
+
 #[test]
 fn parse_name_status_and_commit_files_fixture() {
     assert_eq!(
-        parse_name_status_lines("M\tsrc/a.rs\nR100\told.rs\tnew.rs\n"),
+        parse_name_status_z("M\0src/a.rs\0R100\0old.rs\0new.rs\0"),
         vec![
             NameStatus {
                 status: "M".into(),
@@ -1455,6 +1480,108 @@ fn list_compare_name_status_carries_line_counts_incl_rename() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Repo with `core.quotePath` on (git's default, pinned against a user
+/// config), so newline output would C-quote `café.md` and porcelain status
+/// would quote `my file.txt`.
+fn quote_path_repo(prefix: &str) -> PathBuf {
+    let dir = unique_dir(prefix);
+    init_repo(&dir);
+    git(&dir, &["config", "core.quotePath", "true"]);
+    dir
+}
+
+/// Odd names with their line count, one per quoting case git has.
+const ODD_NAMES: [(&str, &str); 5] = [
+    ("my file.txt", "a\nb\n"),
+    ("café.md", "c\n"),
+    ("a -> b.txt", "d\n"),
+    ("tab\there.txt", "t\n"),
+    ("say \"hi\".txt", "q\n"),
+];
+
+#[test]
+fn name_status_lists_give_raw_odd_paths_with_line_counts() {
+    let dir = quote_path_repo("ws-git-odd-names");
+    let base = exec_git(&["rev-parse", "HEAD"], &dir);
+    for (name, body) in ODD_NAMES {
+        fs::write(dir.join(name), body).unwrap();
+    }
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "odd names"]);
+    let head = exec_git(&["rev-parse", "HEAD"], &dir);
+    let commit = list_commit_name_status(&dir, &head);
+    let compare = list_compare_name_status(&dir, &base, &head).unwrap();
+    let keys = list_compare_patch_keys(&dir, &base, &head);
+    for (name, body) in ODD_NAMES {
+        let lines = counts(body.lines().count() as u32, 0);
+        assert_eq!(stat_of(&commit, name), lines, "commit {name}");
+        assert_eq!(stat_of(&compare, name), lines, "compare {name}");
+        assert!(keys.contains_key(name), "{name} in {keys:?}");
+    }
+
+    git(&dir, &["mv", "café.md", "new café.md"]);
+    fs::write(dir.join("my file.txt"), "a\nb\nc\n").unwrap();
+    fs::write(dir.join("un tracked é.txt"), "u\n").unwrap();
+    let worktree = list_worktree_name_status(&dir);
+    assert_eq!(stat_of(&worktree, "my file.txt"), counts(1, 0));
+    assert_eq!(stat_of(&worktree, "un tracked é.txt"), None);
+    let renamed = worktree
+        .iter()
+        .find(|f| f.path == "new café.md")
+        .unwrap_or_else(|| panic!("rename listed in {worktree:?}"));
+    assert_eq!(renamed.status, "R");
+    assert_eq!(renamed.old_path.as_deref(), Some("café.md"));
+    assert_eq!(renamed.stat, counts(0, 0));
+    let vs_commit =
+        list_worktree_vs_commit_name_status(&dir, &head, "new café.md", Some("café.md")).unwrap();
+    assert_eq!(vs_commit.len(), 1, "{vs_commit:?}");
+    assert_eq!(vs_commit[0].path, "new café.md");
+
+    stash_push(&dir, &[]).unwrap();
+    let stash = list_stash_name_status(&dir, &list_stash_refs(&dir)[0]);
+    assert_eq!(stat_of(&stash, "my file.txt"), counts(1, 0));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Paths in the index that differ from HEAD (`diff --cached -z`).
+fn staged_paths(dir: &Path) -> Vec<String> {
+    let out = Command::new(git_binary())
+        .args(["diff", "--cached", "--name-only", "-z"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn stage_and_unstage_round_trip_a_listed_path_with_a_space() {
+    let dir = quote_path_repo("ws-git-odd-stage");
+    fs::write(dir.join("my file.txt"), "a\n").unwrap();
+    git(&dir, &["add", "my file.txt"]);
+    git(&dir, &["commit", "-q", "-m", "space"]);
+    fs::write(dir.join("my file.txt"), "a\nb\n").unwrap();
+    let meta = crate::discovery::RepoCheckoutMeta {
+        checkout_kind: crate::snapshot::CheckoutKind::Primary,
+        primary_repo: None,
+    };
+    let parent = dir.parent().unwrap();
+    let repo = dir.file_name().unwrap().to_str().unwrap();
+    let snap = crate::discovery::process_repo(repo, parent, false, None, &meta).unwrap();
+    let paths: Vec<&str> = snap.changes.iter().map(|c| c.path.as_str()).collect();
+    assert_eq!(paths, ["my file.txt"]);
+
+    stage_file(&dir, paths[0]).unwrap();
+    assert_eq!(staged_paths(&dir), ["my file.txt"]);
+    unstage_file(&dir, paths[0]).unwrap();
+    assert!(staged_paths(&dir).is_empty());
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn compare_patch_keys_follow_the_file_diff_not_the_commits() {
     let dir = unique_dir("ws-git-patch-keys");
@@ -1505,10 +1632,9 @@ fn compare_patch_keys_spell_paths_like_the_compare_list() {
     let files = list_compare_name_status(&dir, &base, &head).unwrap();
     let keys = list_compare_patch_keys(&dir, &base, &head);
     assert_eq!(files.len(), 3, "{files:?}");
-    assert!(
-        files.iter().any(|f| f.path.starts_with('"')),
-        "git quotes an unusual path: {files:?}"
-    );
+    let mut paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+    paths.sort_unstable();
+    assert_eq!(paths, ["plain.txt", "tab\there.txt", "é.txt"], "raw paths");
     for file in &files {
         assert!(keys.contains_key(&file.path), "{} in {keys:?}", file.path);
     }
@@ -1520,10 +1646,15 @@ fn parse_raw_patch_keys_reads_plain_and_rename_rows() {
     let z = "1".repeat(40);
     let o = "0".repeat(40);
     let raw = format!(
-        ":100644 100644 {o} {z} M\tsrc/a.rs\n:100644 100644 {o} {z} R087\told.rs\tnew.rs\n"
+        ":100644 100644 {o} {z} M\0src/a.rs\0:100644 100644 {o} {z} R087\0old.rs\0new.rs\0\
+         :100644 100644 {o} {z} A\0:odd name.rs\0"
     );
     let keys = parse_raw_patch_keys(&raw);
-    assert_eq!(keys.len(), 2);
+    assert_eq!(keys.len(), 3);
+    assert_eq!(
+        keys[":odd name.rs"],
+        format!("100644 100644 {o} {z} A\0:odd name.rs\0:odd name.rs")
+    );
     assert_eq!(
         keys["src/a.rs"],
         format!("100644 100644 {o} {z} M\0src/a.rs\0src/a.rs")

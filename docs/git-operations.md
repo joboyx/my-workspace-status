@@ -49,13 +49,14 @@ If git exits but a process it started keeps stdout or stderr open, the runner ki
 | Function | Command | Returns | Purpose |
 | --- | --- | --- | --- |
 | `exec_git(args, cwd)` | `<git> <args>` | trimmed stdout, `""` on any failure | Generic read. Swallows errors by design — callers treat empty as "unknown". |
+| `exec_git_z(args, cwd)` | `<git> <args>` | `Result<String, String>`, stdout not trimmed | `-z` path lists (see **Path lists are NUL-separated**). Failure is the same `Err` as `exec_git_stdout`. |
 | `exec_git_stdout(args, cwd)` | `<git> <args>` | `Result<String, String>` | Compare reads, and the worktree file diff (`diff [--cached]` / `diff HEAD -- <path>`, `tui/diff.rs` `git_diff_text`). Empty stdout is success. Failure is `Err`; the diff pane paints `git diff failed: <reason>`. |
 | `rev_parse_commit` | `rev-parse --verify --quiet <ref>^{commit}` | `Result<Option<SHA>>` | Missing ref is `Ok(None)`. Other failures are `Err`. |
 | `merge_base` | `merge-base <a> <b>` | `Result<Option<SHA>>` | Unrelated histories are `Ok(None)`. |
-| `list_compare_name_status` | `diff --name-status --find-renames <base>...<head> --`, then `diff --numstat -z --find-renames <base>...<head> --` | `Result<NameStatus[]>` | Committed three-dot file list. The numstat call fills `stat` (added / deleted lines). Its failure leaves `stat` `None`; the list still loads. |
-| `list_compare_patch_keys` | `diff --raw --no-abbrev --find-renames <base>...<head> --` | `path → key` map | Patch key per compare path: old and new mode, old and new blob id, status letter, and paths. Same key means the same patch for that file. No `-z`, so paths are quoted the same way as the name-status list. A compare reviewed mark keys on it. Failure gives an empty map; the list still loads and those files cannot be marked. |
+| `list_compare_name_status` | `diff --name-status -z --find-renames <base>...<head> --`, then `diff --numstat -z --find-renames <base>...<head> --` | `Result<NameStatus[]>` | Committed three-dot file list. The numstat call fills `stat` (added / deleted lines). Its failure leaves `stat` `None`; the list still loads. |
+| `list_compare_patch_keys` | `diff --raw -z --no-abbrev --find-renames <base>...<head> --` | `path → key` map | Patch key per compare path: old and new mode, old and new blob id, status letter, and paths. Same key means the same patch for that file. Keyed by the raw path, the same spelling as the name-status list (both read `-z`). A compare reviewed mark keys on it. Failure gives an empty map; the list still loads and those files cannot be marked. |
 | `diff_compare_file_ctx` | `diff <base>...<head> -- <path>` | `Result<lines>` | One compare path. Empty stdout is `(no diff)`. |
-| `list_worktree_vs_commit_name_status` | `diff --name-status -M <base> -- [<old>] <path>`, then `diff --numstat -z -M <base> -- [<old>] <path>` | `Result<NameStatus[]>` | One path, commit against the working tree. Empty list when they match. |
+| `list_worktree_vs_commit_name_status` | `diff --name-status -z -M <base> -- [<old>] <path>`, then `diff --numstat -z -M <base> -- [<old>] <path>` | `Result<NameStatus[]>` | One path, commit against the working tree. Empty list when they match. |
 | `diff_worktree_vs_commit_file_ctx` | `diff [-U<n>] -M <base> -- [<old>] <path>` (`git_worktree_compare_diff_args`) | `Result<lines>` | Commit against the working tree for one path. Empty stdout is `(no diff)`. |
 | `blame_line(cwd, rev, path, line)` | `-c blame.showRoot=false -c core.quotePath=false blame --porcelain -L <n>,<n> [<rev> \| --contents -] -- <path>` | `Result<Option<LineBlame>>` | Who last changed one line. See **Line blame**. |
 | `previous_line_change(cwd, blamed)` | `diff -U0 -M <prev> <sha> -- [<prev-path>] <path>`, then `blame_line` at `<prev>` | `Result<PreviousLineChange>` | The change before the blamed commit. See **Line blame**. |
@@ -86,7 +87,7 @@ If git exits but a process it started keeps stdout or stderr open, the runner ki
 | `ensure_compare_head_clean(cwd, head, paths)` | `rev-parse --verify --quiet HEAD^{commit}`, then `status --porcelain=v1 --untracked-files=all --ignored -- :(literal)<path>...` | `Result` | Compare `x` guard, run on the write worker right before the write. `Err` (`revert aborted: HEAD moved` / `revert aborted: <path> has uncommitted changes`) unless HEAD is still the compare head and `git status` lists none of `paths`. Every refusal starts with `COMPARE_REVERT_ABORTED`; the TUI shows it as a warn, without the `revert failed:` prefix. |
 | `restore_worktree_from(cwd, rev, paths)` | `restore --source=<rev> --worktree -- :(literal)<path>...` | `Result` | Compare `x` whole file. Worktree only; the index stays. A tracked path that `<rev>` lacks is removed. **Destructive.** |
 | `revert_compare_file` / `revert_compare_patch` | `ensure_compare_head_clean`, then `restore_worktree_from(<merge-base>)` / `apply_worktree_patch_reverse` | `Result` | Compare `x` on a file / on highlighted lines. **Destructive.** |
-| `list_worktrees_porcelain(cwd)` | `worktree list --porcelain` | stdout (or `""`) | Enumerate checkouts for linked-worktree discovery |
+| `list_worktrees_porcelain(cwd)` | `worktree list --porcelain` | stdout (or `""`) | Enumerate checkouts for linked-worktree discovery. No `-z` (that needs git 2.36): git prints a worktree path as-is, never quoted, so only a path with a newline breaks a line |
 | `is_ancestor(cwd, maybe_ancestor, tip)` | `merge-base --is-ancestor` | `Some(true/false)` / `None` | Merge-into-default probe |
 | `head_equals_ref(cwd, git_ref)` | `rev-parse` of `HEAD` and `git_ref` | boolean | Same-commit as default tip is open, not merged |
 | `resolve_default_branch_tip_ref` / `get_default_branch` | `rev-parse` / `symbolic-ref` / `show-ref` | branch / tip | Default branch tip for classification, and the `-d` target |
@@ -96,9 +97,10 @@ If git exits but a process it started keeps stdout or stderr open, the runner ki
 | `stash_push` / `stash_apply` / `stash_pop` / `stash_drop` | `stash push -u [-- :(literal)<path>...]` / `apply` / `pop` / `drop` | `Result` | Stash menu and graph stash rows. Unchanged stash list after push is failure |
 | `list_stash_refs` / `latest_stash_ref` | `stash list --format=%gd` | refs | Latest stash for graph `S` apply / pop on a non-stash row |
 | `remove_worktree(primary, path, force)` | `worktree remove [--force] <path>` from primary | `Result` | Remove a linked worktree after TUI confirm (`W`) |
-| `list_commit_name_status` | `diff-tree --name-status -r <commit>^ <commit>`; empty → `--root`. Then `diff-tree --numstat -z -r` with the same revisions | `NameStatus[]` | First-parent file list (merges); `--root` for root commits. `stat` is the added / deleted line count; binary files and a failed numstat give `None` |
-| `list_worktree_name_status` | `diff HEAD --name-status` + `diff HEAD --numstat -z` + untracked | `NameStatus[]` | Worktree + index + untracked. Untracked files have `stat` `None` |
-| `list_stash_name_status` | `stash show --name-status <ref>` + `stash show --numstat -z <ref>` | `NameStatus[]` | Files in a stash entry, with line counts |
+| `list_commit_name_status` | `diff-tree --name-status -z -r <commit>^ <commit>`; empty → `--root`. Then `diff-tree --numstat -z -r` with the same revisions | `NameStatus[]` | First-parent file list (merges); `--root` for root commits. `stat` is the added / deleted line count; binary files and a failed numstat give `None` |
+| `list_worktree_name_status` | `diff HEAD --name-status -z` + `diff HEAD --numstat -z` + `ls-files -z --others --exclude-standard` | `NameStatus[]` | Worktree + index + untracked. Untracked files have `stat` `None` |
+| `list_stash_name_status` | `stash show --name-status -z <ref>` + `stash show --numstat -z <ref>` | `NameStatus[]` | Files in a stash entry, with line counts |
+| `parse_name_status_z` | — (pure) | `NameStatus[]` | Parses `--name-status -z` for every name-status list above: `M\0path\0`, and `R100\0old\0new\0` / `C…` (new path kept, old path in `old_path`). A record cut short is dropped |
 | `parse_numstat_z` | — (pure) | `(path, Option<LineStat>)[]` | Parses `--numstat -z`: plain rows, rename rows (`added\tdeleted\t\0old\0new\0`, new path kept), `-\t-` binary → `None`. Counts attach to the name-status list by new path |
 | `diff_commit_file` / `_ctx` | `diff <commit>^ <commit> -- <path>`; empty → `show --first-parent` | unified diff lines | First-parent per-file diff |
 | `diff_stash_file` / `_ctx` | `diff <stash>^1 <stash> -- <path>` | unified diff lines | Per-file stash diff |
@@ -116,7 +118,7 @@ Every wrapper that takes a path puts `--` before it, so a file named `-f` or `HE
 | --- | --- |
 | `expand_repos_with_linked_worktrees` | `worktree list --porcelain` per main checkout |
 | `process_repo` (when `do_fetch`) | `fetch --quiet` — failure (a timeout too) is caught and ignored; stale refs are better than no output |
-| `process_repo` | `status --porcelain=v1 --branch --ahead-behind --untracked-files=all` |
+| `process_repo` | `status --porcelain=v1 -z --branch --ahead-behind --untracked-files=all`, parsed by `parse_porcelain_v1_z`: the `## ` branch header is the first NUL record; a rename record is `XY new\0old\0` (new path first, unlike the text form `old -> new`) |
 | `process_repo` (merge probe) | `known_default_branch_name` (else `main`) + `resolve_default_branch_tip_ref`, resolved once per checkout and shared with the snapshot row, + `merge-base --is-ancestor HEAD <tip>` + same-commit SHA compare. Same-commit as the default tip is open, not merged. |
 
 After `find_repos_with_config` (primaries; still skips dot-dirs), discovery lists linked worktrees under the workspace cwd, applies the same hiddenPaths / ignoredPaths / named-filter rules (filter on a primary includes its linked children, except those at or under an `ignoredPaths` entry; filter on a linked path includes only that path), dedupes by path (linked metadata wins), and runs `process_repo` with `checkout_kind` / `primary_repo`. Independent checkouts run with a cap of `FETCH_CONCURRENCY` (10; `WS_STATUS_FETCH_CONCURRENCY`) so a live watch tick is not one-repo-at-a-time. There is no inotify.
@@ -146,8 +148,8 @@ Default tip is `known_default_branch_name` (else `main`) then `resolve_default_b
 git rev-parse --verify --quiet <head-ref>^{commit}
 git rev-parse --verify --quiet <base-ref>^{commit}
 git merge-base <base-sha> <head-sha>
-git diff --name-status --find-renames <base-sha>...<head-sha> --
-git diff --raw --no-abbrev --find-renames <base-sha>...<head-sha> --
+git diff --name-status -z --find-renames <base-sha>...<head-sha> --
+git diff --raw -z --no-abbrev --find-renames <base-sha>...<head-sha> --
 git diff <base-sha>...<head-sha> -- <path>
 ```
 
@@ -293,6 +295,8 @@ git log --branches --since=15.days.ago --format=%ct
 - **Lock safety.** Runs through `exec_git_stdout`, so `GIT_OPTIONAL_LOCKS=0` applies like every other spawn. `git log` takes no index lock.
 
 ## Non-obvious semantics
+
+**Path lists are NUL-separated.** Every read that parses file paths (status, name-status, raw, numstat, `ls-files`) uses `-z`. A status call that only checks for empty output does not need it. Without `-z`, git C-quotes a path with a space (status), a non-ASCII byte (`core.quotePath`), a `"`, `\`, or a control character: `"caf\303\251.md"`. That quoted text is not a valid pathspec, so a stage or revert of the file fails, and it no longer matches the `--numstat -z` key, so the line counts are lost. With `-z`, every path is the raw name, decoded as lossy UTF-8. `exec_git_z` returns stdout untrimmed, so a leading or trailing space stays part of a path.
 
 **Renames need both paths.** Staging only the new path leaves the deletion of the old path unstaged, and git then reports the pair as `D` + `A` rather than `R`. Writes apply to each path in order and stop at the first failure.
 
