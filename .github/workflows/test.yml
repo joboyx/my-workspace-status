@@ -10,9 +10,14 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only token by default. A job that needs more sets its own permissions.
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.85.0
@@ -27,6 +32,7 @@ jobs:
 
   cargo:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.85.0
@@ -39,6 +45,7 @@ jobs:
   # the default suite also runs on those platforms before a release.
   cargo-macos:
     runs-on: macos-15
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.85.0
@@ -51,6 +58,7 @@ jobs:
   # tests, so the explicit build step keeps every target compiling.
   cargo-windows:
     runs-on: windows-latest
+    timeout-minutes: 40
     steps:
       # Keep LF line endings: some tests compare checked-in text files.
       - run: git config --global core.autocrlf false
@@ -64,6 +72,7 @@ jobs:
 
   tui-tty-desktop:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.85.0
@@ -103,6 +112,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [lint, cargo, cargo-macos, cargo-windows, tui-tty-desktop]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
     outputs:
@@ -127,6 +137,8 @@ jobs:
     permissions:
       contents: write
       actions: write
+    # A job that calls a reusable workflow cannot set timeout-minutes; the
+    # `tag` job of tag-release.yml sets it.
     uses: ./.github/workflows/tag-release.yml
     # The `release` environment secret RELEASE_DEPLOY_KEY reaches the called
     # workflow only with `inherit`.

@@ -215,6 +215,8 @@ A TTY spawn that can write that file (PTY e2e, desktop e2e, `scripts/capture-dem
 
 Releases ship Linux, macOS and Windows builds (`dist-workspace.toml` targets), so the default suite runs on each of those platforms: `cargo` on `ubuntu-latest`, `cargo-macos` on `macos-15`, and `cargo-windows` on `windows-latest`. `cargo-windows` also runs `cargo build --workspace --all-targets`, because the PTY e2e crate compiles with no tests on Windows. It turns off `core.autocrlf` before checkout, so the tests that read checked-in text see LF line endings.
 
+`test.yml` gives its jobs a read-only token (top-level `permissions: contents: read`); `release` sets its own `contents: write` and `actions: write` for the `tag-release.yml` call. Every job sets `timeout-minutes`. `release` calls a reusable workflow and cannot set it, so the `tag` job of `tag-release.yml` sets it. CI: `test_yml_token_is_read_only_and_every_job_has_a_timeout` in `crates/workspace-status/tests/release_gate.rs`.
+
 Required checks (job names): `lint`, `cargo`, `cargo-macos`, `cargo-windows`, `tui-tty-desktop`. CI: `crates/workspace-status/tests/release_gate.rs` fails when `release-gate` does not need every check job of `test.yml`, when this list misses one, or when `tag-release.yml` gets a trigger of its own.
 
 The live ruleset (below) does not require `cargo-macos` and `cargo-windows` yet. The repository owner adds those two names to its required status checks. Until then they gate the release through `release-gate.needs` only, and a pull request can merge while they fail.

@@ -158,6 +158,45 @@ fn default_suite_runs_on_every_released_os_family() {
     );
 }
 
+/// Entries of a top-level `<key>:` block of a workflow, trimmed, in file order.
+fn top_level_block<'a>(workflow: &'a str, key: &str) -> Vec<&'a str> {
+    let header = format!("{key}:");
+    workflow
+        .lines()
+        .skip_while(|line| *line != header)
+        .skip(1)
+        .take_while(|line| line.starts_with(' '))
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect()
+}
+
+#[test]
+fn test_yml_token_is_read_only_and_every_job_has_a_timeout() {
+    assert_eq!(
+        top_level_block(TEST_YML, "permissions"),
+        ["contents: read"],
+        "test.yml must default to a read-only token; a job that needs more sets its own permissions"
+    );
+    for (name, body) in jobs(TEST_YML) {
+        if body.contains("uses: ./.github/workflows/") {
+            // A reusable workflow call cannot set timeout-minutes: each job
+            // of the called workflow sets it.
+            for (called, called_body) in jobs(TAG_RELEASE_YML) {
+                assert!(
+                    called_body.contains("timeout-minutes:"),
+                    "tag-release.yml `{called}` (called by test.yml `{name}`) must set timeout-minutes"
+                );
+            }
+            continue;
+        }
+        assert!(
+            body.contains("timeout-minutes:"),
+            "test.yml `{name}` must set timeout-minutes, so a hung run cannot hold a runner for 6 hours"
+        );
+    }
+}
+
 #[test]
 fn release_gate_runs_only_for_a_main_push_that_is_still_the_tip() {
     let all = jobs(TEST_YML);
