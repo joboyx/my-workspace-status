@@ -223,6 +223,7 @@ fn failed_repo_snapshot(
         sync_status: SyncStatus::NoUpstream,
         sync_note: STATUS_FAILED_NOTE.to_string(),
         upstream_rewrite: None,
+        fetch_error: None,
         head: String::new(),
         has_unstaged: false,
         has_staged: false,
@@ -569,9 +570,13 @@ pub fn process_repo(
     if !has_git_dir(&repo_dir) {
         return None;
     }
-    if do_fetch {
-        let _ = exec_git_checked(&["fetch", "--quiet"], &repo_dir);
-    }
+    // A failed fetch is not fatal: the row still reports status from the
+    // refs it had, and names the failure so it does not read as fresh.
+    let fetch_error = if do_fetch {
+        exec_git_checked(&["fetch", "--quiet"], &repo_dir).err()
+    } else {
+        None
+    };
     let porcelain = exec_git(
         &[
             "status",
@@ -584,7 +589,10 @@ pub fn process_repo(
     );
     let lines: Vec<&str> = porcelain.lines().filter(|l| !l.is_empty()).collect();
     let Some(branch_state) = parse_branch_line(lines.first().copied().unwrap_or("")) else {
-        return Some(failed_repo_snapshot(repo_path, override_name, meta));
+        return Some(RepoSnapshot {
+            fetch_error,
+            ..failed_repo_snapshot(repo_path, override_name, meta)
+        });
     };
     let parsed = parse_porcelain_change_lines(&lines[1..]);
     let changes = merge_file_changes(&parsed);
@@ -622,6 +630,7 @@ pub fn process_repo(
         sync_status: branch_state.sync_status,
         sync_note: branch_state.sync_note,
         upstream_rewrite,
+        fetch_error,
         head,
         has_unstaged,
         has_staged,

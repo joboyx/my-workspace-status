@@ -39,6 +39,7 @@ Paths are workspace-relative. The snapshot does not include the workspace root, 
 | `syncStatus` | string | `up-to-date`, `no-upstream`, `gone`, `behind`, `ahead`, or `diverged`. `gone`: the branch has an upstream configured, but that ref no longer exists (git status `[gone]`), for example a remote branch deleted after its PR merged and then pruned. |
 | `syncNote` | string | Extra sync text (`ahead by 2`, `status failed`, `upstream gone`, empty). |
 | `upstreamRewrite` | object | Present only on a `diverged` branch whose upstream was force-pushed under it (see below). `syncStatus` and `syncNote` stay plain `diverged`. |
+| `fetchError` | string | Present only when `--fetch` ran and `git fetch` failed on this checkout: git's reason line, for example `'/srv/git/offline.git' does not appear to be a git repository`, or the timeout text. The sync fields then come from the remote-tracking refs as they were before the fetch, so they can be stale. The exit code stays 0. |
 | `checkoutKind` | string | `primary` or `linked`. |
 | `primaryRepo` | string | Present on linked checkouts. Path of the primary checkout. |
 | `mergedIntoDefault` | boolean or null | Whether HEAD is merged into the default branch. `true` only when HEAD is a strict ancestor of the default tip. Same-commit as that tip (a just-created branch) is `false`. `null` when not checked, on the default branch, or detached. |
@@ -48,7 +49,7 @@ Paths are workspace-relative. The snapshot does not include the workspace root, 
 | `hasUntracked` | boolean | Untracked files. |
 | `changes` | object[] | Per-path file changes, sorted by `path`. |
 
-Omitted optional keys: `primaryRepo`, `defaultBranchOverride`, `upstreamRewrite`, and empty change flags on each file.
+Omitted optional keys: `primaryRepo`, `defaultBranchOverride`, `upstreamRewrite`, `fetchError`, and empty change flags on each file.
 
 ### `upstreamRewrite` object
 

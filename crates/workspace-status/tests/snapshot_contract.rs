@@ -404,6 +404,46 @@ fn json_and_plain_name_a_deleted_upstream_gone() {
 }
 
 #[test]
+fn fetch_failure_is_named_in_json_and_plain_and_exit_stays_zero() {
+    let root = temp_root("fetch-error");
+    let workspace = root.join("workspace");
+    seed_repo(&workspace, "offline", "main", false);
+    let missing = root.join("missing.git");
+    git(
+        &workspace.join("offline"),
+        &["remote", "add", "origin", missing.to_str().unwrap()],
+    );
+    seed_repo(&workspace, "local", "main", false);
+
+    // run_json asserts exit 0: a failed fetch is reported, not fatal.
+    let snapshot = run_json(&workspace, &["--json", "--fetch"]);
+    let repos = snapshot["repos"].as_array().unwrap();
+    let offline = repos.iter().find(|r| r["repo"] == "offline").unwrap();
+    let reason = offline["fetchError"].as_str().unwrap_or_else(|| {
+        panic!("offline must name its fetch failure: {offline}");
+    });
+    assert!(
+        reason.contains("does not appear to be a git repository"),
+        "{reason}"
+    );
+    let local = repos.iter().find(|r| r["repo"] == "local").unwrap();
+    assert!(local.get("fetchError").is_none(), "{local}");
+    let without_fetch = run_json(&workspace, &["--json"]);
+    assert!(
+        without_fetch["repos"][0].get("fetchError").is_none(),
+        "no fetch, no field: {without_fetch}"
+    );
+
+    let plain = run_plain(&workspace, &["--plain", "--fetch"]);
+    assert!(
+        plain.contains("offline [main] - fetch failed: "),
+        "plain must name the failed fetch:\n{plain}"
+    );
+    assert!(!plain.contains("local [main] - fetch failed"), "{plain}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn merged_into_default_skips_same_commit_as_default_tip() {
     let root = std::env::temp_dir().join(format!(
         "workspace-status-merge-mark-{}",

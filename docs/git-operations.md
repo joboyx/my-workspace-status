@@ -33,7 +33,7 @@ If git exits but a process it started keeps stdout or stderr open, the runner ki
 
 - `exec_git_checked` and `exec_git_stdout` return the error text above. `exec_git` returns `""`. `exec_git_status` returns `-1`.
 - TUI fetch / pull / push: the repo counts as failed. The wave finishes, and the status names the first failed repo, for example `Fetched 2 repos (2 failed: app — git fetch timed out after 120s: the remote did not answer, +1 more)` (`tui/ops.rs` `format_completed_op`). For the scheduled background fetch, the fetch outage toast names it instead (`git fetch (app): git fetch timed out after 120s: …`).
-- Discovery fetch (`process_repo` with `do_fetch`, used by headless `--fetch`) stays non-fatal. A timeout still gives the local snapshot, with stale remote refs.
+- Discovery fetch (`process_repo` with `do_fetch`, used by headless `--fetch`) stays non-fatal. A timeout still gives the local snapshot, with stale remote refs. The row keeps the reason: `--json` `fetchError` and a `fetch failed: <reason>` line under **Attention** in `--plain` ([snapshot.md](./snapshot.md)). The exit code stays 0. A later status pass of `--pull` or `--default-branch` keeps that reason.
 - First paint never fetches. `cli.rs` calls `collect_full_snapshot` with `do_fetch = false`. `--fetch` on a TTY only starts the background queue.
 - `ws` exit: git is in its own process group, so a terminal Ctrl-C or hang-up does not reach it. `ws` stops it instead. On TUI quit, `run_tui` calls `git::stop_running_git` after it restores the terminal: `SIGTERM` to every running git group, `SIGKILL` after 2 s, and no new git starts (`git <sub> not started: ws is exiting`). One exception: the auto-stash pop after a pull still runs while `ws` exits, so a quit during a pull gives the local changes back. On Unix, a handler for `SIGINT`, `SIGTERM` and `SIGHUP` (`git::stop_git_on_exit_signals`, installed by `cli_main`) sends `SIGTERM` to every running git group, then `ws` exits from the signal as usual.
 
@@ -114,7 +114,7 @@ Every wrapper that takes a path puts `--` before it, so a file named `-f` or `HE
 | Call | Command |
 | --- | --- |
 | `expand_repos_with_linked_worktrees` | `worktree list --porcelain` per main checkout |
-| `process_repo` (when `do_fetch`) | `fetch --quiet` — failure (a timeout too) is caught and ignored; stale refs are better than no output |
+| `process_repo` (when `do_fetch`) | `fetch --quiet` — failure (a timeout too) is not fatal; stale refs are better than no output. The reason goes into the row's `fetch_error` (`--json` `fetchError`) |
 | `process_repo` | `status --porcelain=v1 --branch --ahead-behind --untracked-files=all` |
 | `process_repo` (merge probe) | `known_default_branch_name` (else `main`) + `resolve_default_branch_tip_ref`, resolved once per checkout and shared with the snapshot row, + `merge-base --is-ancestor HEAD <tip>` + same-commit SHA compare. Same-commit as the default tip is open, not merged. |
 
