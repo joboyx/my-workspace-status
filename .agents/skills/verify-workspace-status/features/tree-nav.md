@@ -21,8 +21,8 @@ Conventions and the sweep order: [README.md](README.md). Rows of the demo fixtur
 ```bash
 WS=.agents/skills/verify-workspace-status/scripts/wsctl
 $WS start
-$WS doctor
 trap '$WS stop' EXIT
+$WS doctor
 $WS wait --cursor 'session.ts'
 $WS key j
 $WS wait --cursor '~ Changes'
@@ -87,11 +87,12 @@ $WS key z
 $WS wait --cursor '> app'
 $WS wait --gone 'session\.ts'
 $WS snap --name tn3-app-folded --raw | grep -E '▌ +> app'
+sleep 0.5    # past the 400 ms zz window: a second z inside it is zz (fold subtree)
 $WS key z
 $WS wait --cursor 'v app'
 $WS wait 'session\.ts'
 ```
 
-Expect: `h` on the `Changes` → `src` folder turns `v / src` into `> / src` and hides `auth.ts` and `login.ts`; `l` shows them again. `gg` (a chord: two keys in one write) jumps to the `# workspace` row. `z` on `app` folds the whole checkout (`> app`, no `session.ts` on screen), and the next `z` opens it.
+Expect: `h` on the `Changes` → `src` folder turns `v / src` into `> / src` and hides `auth.ts` and `login.ts`; `l` shows them again. `gg` (a chord: two keys in one write) jumps to the `# workspace` row. `z` on `app` folds the whole checkout (`> app`, no `session.ts` on screen), and the next `z` opens it. The two `z` presses are more than 400 ms apart: a second `z` inside that window is the `zz` chord (fold the subtree), not a second fold toggle.
 
 **PASS:** every `wait` is ok and both `grep` lines match: the folded rows are on captured screens.
