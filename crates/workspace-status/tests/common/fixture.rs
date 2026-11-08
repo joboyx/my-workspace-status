@@ -38,15 +38,23 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 /// binaries apart, also when the clock does not tick between two calls.
 /// `create_dir` fails on a name that exists, so a collision takes the next
 /// name instead of sharing a directory.
+///
+/// The temp dir is canonical, because the binary canonicalizes the
+/// workspace root. On macOS the default `/var/folders/...` resolves to
+/// `/private/var/folders/...`, and a test that compares a path the binary
+/// passes on (diff tool argv, git cwd) must see the same spelling.
 pub fn unique_root(prefix: &str) -> PathBuf {
     let pid = std::process::id();
+    let temp = std::env::temp_dir()
+        .canonicalize()
+        .expect("canonical temp dir");
     loop {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("{prefix}-{pid}-{n}-{nanos}"));
+        let path = temp.join(format!("{prefix}-{pid}-{n}-{nanos}"));
         match fs::create_dir(&path) {
             Ok(()) => return path,
             Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,

@@ -6,6 +6,9 @@
 //! only delete temp files. The one exception is the root test (`/`, `//`):
 //! there a bug in the root rule still meets two more refusals, because `/`
 //! holds the temp `HOME` and is not empty without the seed marker.
+//!
+//! Unix only: the script needs bash.
+#![cfg(unix)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
