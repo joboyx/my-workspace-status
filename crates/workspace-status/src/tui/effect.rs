@@ -2232,16 +2232,13 @@ impl Interpreter {
                     self.schedule(state, opts, relist, &Action::None);
                 }
                 self.queue_due_pr_lookups(state, opts);
-                let decision = self.note_repo_status_done(state, gen, &path);
+                self.note_repo_status_done(state, gen, &path);
                 if focused.as_deref() == Some(path.as_str())
                     && focused_repo_needs_pane(&before_sigs, &before_snap, state, &path)
                     && state.tabs.is_workspace()
                 {
                     self.pane_req = Some(RightPaneRequest::from_state(state));
                     self.sched.request_pane();
-                }
-                if let ApplyDecision::StartDiscover { .. } = decision {
-                    // latched collect already queued
                 }
                 self.mark();
             }
