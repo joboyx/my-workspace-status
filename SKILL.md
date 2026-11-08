@@ -1,6 +1,6 @@
 ---
 name: my-workspace-status
-description: Show status of all git repositories in current directory with AI-powered summary
+description: Show status of all git repositories in the current directory
 triggers:
   - 'status'
   - 'git status'
@@ -32,7 +32,6 @@ You are helping the user review the status of all git repositories in the curren
 - Optional `diffTool` for TUI `E` (default vimdiff). `"diffTool": "cursor --diff --wait"` opens Cursor and keeps HEAD temps until the CLI exits. No `$EDITOR` fallback.
 - Pass one or more repo paths (e.g. `dotfiles`, `dotfiles notes`) to limit output to those repos; named repos are included even when under `hiddenPaths` or `ignoredPaths`
 - The CLI already formats its own output, so prefer showing it as-is
-- When changing the CLI or its output contract, keep `SAMPLE_OUTPUT.md` and `crates/workspace-status/tests/snapshot_contract.rs` in sync
 
 **Output Format:**
 The CLI produces:
@@ -61,6 +60,7 @@ The CLI produces:
 **Optional Flags:**
 
 - `[REPO...]`: Limit status to specific repos (relative to workspace root); bypasses `hiddenPaths` and `ignoredPaths` for named repos
+- `-C` / `--workspace <path>`: Pin the workspace root (config, discovery). Also `WS_STATUS_WORKSPACE`; the flag wins, then the env var, then the process cwd
 - `--all`: Include repos under `.workspace-status-config.json` `hiddenPaths` (never `ignoredPaths`)
 - `--fetch`: Fetch from remotes before checking status (slower but more accurate)
 - `--verbose`: Show the aligned table before the summary
@@ -73,7 +73,7 @@ The CLI produces:
 
 **Interactive TUI (humans only):** On a TTY (without `-v` / `-p` / `-d` / `--plain` / `--json`), the CLI opens a ratatui TUI and blocks on keyboard input. Agents must always pass `--plain` or `--json` (see Instructions). Force TUI with `-i` / `--tui` only for interactive human use.
 
-The TUI requires a **Nerd Font** — recommended `MesloLGM Nerd Font Mono` (the **Mono** variant; the proportional build breaks column alignment). In VS Code / Cursor set `terminal.integrated.fontFamily` in **User Settings**, since the terminal font is resolved on the client rather than in WSL. `WS_STATUS_GLYPHS=ascii` swaps in plain markers.
+The TUI requires a **Nerd Font** — recommended `MesloLGS NF` (romkatv/powerlevel10k-media; see [docs/configuration.md](./docs/configuration.md)). In VS Code / Cursor set `terminal.integrated.fontFamily` in **User Settings**, since the terminal font is resolved on the client rather than in WSL. `WS_STATUS_GLYPHS=ascii` swaps in plain markers.
 
 Defaults: directory tree (`t` toggles flat), split diff (`i` toggles inline), wrap on (`\` toggles wrap), commit messages expanded (`M` collapses), line blame on (`B` hides the note at the end of the focused line), hidden repos not shown (`.` toggles; `-a` starts shown), and live refresh polling every 3s (`WS_STATUS_WATCH_MS=0` disables). `viewDefaults` in `.workspace-status-config.json` sets the launch tree, diff, wrap, commit-message, and line-blame modes; toggles change the session only. Tree status letters are `A` added, `M` modified, `S` staged, `MS` staged+modified, `D` deleted, `R` renamed, `C` copied, `U` conflicted. The emoji legend above applies to the plain report only.
 
@@ -86,6 +86,12 @@ Live TUI keymap (full overlay detail in [docs/configuration.md](./docs/configura
 | `z`                                   | toggle fold immediately; `zz` toggles subtree. No-op when the graph or a diff is focused                                                               |
 | `gg` / `G`                            | first / last visible row on the focused list; on a focused **diff**, scroll to start / end                                                             |
 | `t`                                   | flat ↔ directory tree (view-mode; works when right-focused)                                                                                            |
+| `gt` / `gT` / `g1`-`g9`                 | next tab / previous tab / jump to tab (`1` is Workspace) |
+| `gx`                                  | open the PR of the focused branch row in the browser |
+| `:`                                   | Quick Open in commands mode (named commands, including palette-only rows) |
+| `Ctrl-p` / `F`                        | Quick Open in files mode (fuzzy go to file) |
+| `o`                                   | graph list or a highlighted repo / worktree: `o` opens the branch-focus overlay (filter, space toggles, Enter applies); `Ctrl-o` clears inside it |
+| `<` / `>`                             | narrow / widen the tree pane (session only) |
 | `.`                                   | show / hide hidden repos (view-mode; works whether the app started with `-a`)                                                                         |
 | Focus file                            | load diff (lazy)                                                                                                                                       |
 | `s` / `u` / `x`                       | stage / unstage / revert (`x` confirms; untracked deletes from disk). On a `V` highlight, `s` / `u` apply only that range, not the whole file           |
@@ -108,13 +114,12 @@ Live TUI keymap (full overlay detail in [docs/configuration.md](./docs/configura
 | `y`                                   | copy comments for the focused row and its descendants as markdown (after GC) and show them in an overlay. A line comment with a newline stays one bullet. Confirm-mode `y` is still revert-yes |
 | `b`                                   | depth 0: local branch picker. Graph commit: checkout local or `origin/*` (confirm when local is out of sync, then fast-forward to that `origin/*` ref) |
 | `c`                                   | graph commit: create branch at commit (name overlay; ref only, no checkout)                                                                            |
-| `m`                                   | graph commit: boxed confirm, then merge that ref into HEAD (`--ff-only`, else `--no-ff --no-edit`). Dirty tracked worktree refuses. Tree / stash / uncommitted `m` toggles mouse reporting |
 | `Ctrl-o`                              | toggle full-file diff context (does not open editor)                                                                                                   |
 | `/`                                   | search the focused pane (substring; does not hide rows). Enter arms the query; `Esc` clears                                                            |
 | `n` / `N`                             | next / previous search match (only while a search is active; otherwise `p` is pull)                                                                    |
 | `?`                                   | keymap help overlay                                                                                                                                    |
 | `PgUp` / `PgDn` / `Ctrl-u` / `Ctrl-d` | page the **focused** pane (list or diff)                                                                                                               |
-| `m`                                   | toggle mouse reporting (on by default) except on a focused graph commit (merge, above). Drag pane / in-diff split / graph and file-diff h-bar thumbs. Drag inside a pane selects its text and copies it on release |
+| `m`                                   | graph commit: boxed confirm, then merge that ref into HEAD (`--ff-only`, else `--no-ff --no-edit`; a dirty tracked worktree refuses). Everywhere else: toggle mouse reporting (on by default). Drag pane / in-diff split / graph and file-diff h-bar thumbs. Drag inside a pane selects its text and copies it on release |
 | `Enter`                               | left: focus right; right: drill (stay on right). Double-click a list row runs Enter                                                                    |
 | `Ctrl-C` twice                        | quit (first press prompts; second within ~2s exits)                                                                                                    |
 | `q`                                   | quit immediately (Rust extra)                                                                                                                          |
