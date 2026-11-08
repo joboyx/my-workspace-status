@@ -41,6 +41,15 @@ fn last_emoji_frame_ended(raw: &[u8]) -> bool {
     })
 }
 
+/// `raw` up to its last end of frame: a later frame can still be arriving.
+fn whole_frames(raw: &[u8]) -> &[u8] {
+    let end = raw
+        .windows(END_OF_FRAME.len())
+        .rposition(|bytes| bytes == END_OF_FRAME)
+        .map_or(0, |start| start + END_OF_FRAME.len());
+    &raw[..end]
+}
+
 /// A row keeps its columns when a VS16 emoji paints over older text.
 ///
 /// `vt100` counts this emoji as one column and a real terminal draws it as two,
@@ -91,7 +100,7 @@ fn pty_vs16_emoji_row_moves_the_cursor_past_the_emoji() {
     );
 
     let raw = tui.raw_output();
-    for after in after_each_emoji(&raw[from..]) {
+    for after in after_each_emoji(whole_frames(&raw[from..])) {
         assert!(
             starts_with_cursor_move(after),
             "the bytes after the emoji must move the cursor, not write the covered cell: {:?}",
