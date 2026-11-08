@@ -28,7 +28,7 @@ Optional: with cargo-nextest installed, `cargo nextest run --profile ci` uses `.
 
 Where code goes: [docs/architecture.md](./docs/architecture.md) → **Where do I add X**.
 
-On macOS, clippy `--all-targets` reports dead code in the Linux-only desktop e2e helpers (`tests/tui_tty_e2e/desktop.rs`, `support.rs`), and `tests/tag_release.rs` needs GNU `sed`. CI runs on Linux, where both pass.
+On macOS, `tests/tag_release.rs` needs GNU `sed` (`scripts/tag-release.sh` uses `sed -i`). CI runs on Linux, where it passes.
 
 ## Definition of done
 
