@@ -2,7 +2,9 @@
 # Drive this checkout's own workspace-status in a private tmux server, on a
 # disposable seeded workspace, and keep screen captures as proof.
 #
-# This is a test harness for the verify skill (.agents/skills/verify/SKILL.md),
+# This is a test harness for the verify skill
+# (.agents/skills/verify-workspace-status/SKILL.md; its controller wsctl calls
+# this script for every spawn),
 # not the demo capture pipeline: scripts/capture-demo-stills.sh owns the README
 # clips. The isolation below follows the TTY spawn rules in AGENTS.md; CI guards
 # it in crates/workspace-status/tests/release_watch.rs.
@@ -14,13 +16,14 @@ unset CDPATH
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
-SCENARIOS_DIR="$REPO_ROOT/.agents/skills/verify/scenarios"
+SCENARIOS_DIR="$REPO_ROOT/.agents/skills/verify-workspace-status/scenarios"
 ROOT="${WS_VERIFY_ROOT:-${TMPDIR:-/tmp}/ws-verify}"
 ROOT="${ROOT%/}"
 SESSION=ws
 
 # GitHub / GitLab origins the seeded repos get under --fake-forge. The scenario
-# sets in .agents/skills/verify/scenarios/ are keyed to these paths.
+# sets in .agents/skills/verify-workspace-status/scenarios/ are keyed to these
+# paths.
 APP_ORIGIN=https://github.com/acme/app.git
 API_ORIGIN=https://gitlab.com/acme/services/api.git
 MERGER_ORIGIN=https://github.com/acme/merger.git
@@ -35,6 +38,7 @@ usage() {
 usage: scripts/verify-tui.sh <command> ...
 
   build                          build target/debug/workspace-status; print its path
+  bin                            print the binary path that build makes (no build)
   launch [--size COLSxROWS] [--env K=V]... [--fake-forge DIR] [--workspace DIR]
                                  seed a workspace, start the TUI in a private tmux
                                  server, wait for the chrome; print the run dir
@@ -310,6 +314,8 @@ EOF
   record RUN_BIN "$bin"
   record RUN_FIXTURE "$fixture"
   record RUN_FORGE "$forge"
+  # The checkout that made the run: wsctl refuses a run of another checkout.
+  record RUN_REPO "$REPO_ROOT"
   # Runs share one forge dir and its calls.log. Remember where this run starts.
   local calls_from=0
   if [[ -n "$forge" && -f "$forge/calls.log" ]]; then calls_from="$(wc -l <"$forge/calls.log" | tr -d ' ')"; fi
@@ -650,6 +656,7 @@ cmd="${1:-help}"
 if (($#)); then shift; fi
 case "$cmd" in
   build) cmd_build "$@" ;;
+  bin) binary_path ;;
   launch) cmd_launch "$@" ;;
   keys) cmd_keys "$@" ;;
   mouse) cmd_mouse "$@" ;;

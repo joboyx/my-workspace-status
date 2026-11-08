@@ -64,7 +64,7 @@ Tests that need polling pass `WS_STATUS_PR_POLL_MS` (300 ms); the poll-off test 
 
 ## Verify driver
 
-To watch the real binary run, against the same fake forge or against a live one, the verify skill drives it in a private tmux server: `.agents/skills/verify/SKILL.md` and `scripts/verify-tui.sh`. It is a test harness with the isolation rules of **Harness notes** (guarded by `crates/workspace-status/tests/release_watch.rs`), not the screenshot pipeline, and it does not replace a `pty_*` test.
+To watch the real binary run, against the same fake forge or against a live one, the verify skill drives it in a private tmux server: `.agents/skills/verify-workspace-status/SKILL.md`, its controller `wsctl` (JSON output), and the driver it calls, `scripts/verify-tui.sh`. It is a test harness with the isolation rules of **Harness notes** (guarded by `crates/workspace-status/tests/release_watch.rs`), not the screenshot pipeline, and it does not replace a `pty_*` test.
 
 ## Harness notes
 
