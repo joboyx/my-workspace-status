@@ -194,16 +194,9 @@ fn exec_updater(cmd: &mut Command, name: &str) -> ExitCode {
 mod tests {
     use super::*;
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir() -> PathBuf {
-        let path = env::temp_dir().join(format!(
-            "ws-update-sidecar-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let path = crate::testutil::unique_dir("ws-update-sidecar");
         fs::create_dir_all(&path).unwrap();
         path
     }

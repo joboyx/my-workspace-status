@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn bin() -> PathBuf {
@@ -13,13 +14,17 @@ fn ws_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ws"))
 }
 
+/// A new temp dir. The macOS clock steps in microseconds, so two test
+/// threads can read the same nanos; the counter keeps them apart.
 fn temp_dir() -> PathBuf {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
     let path = std::env::temp_dir().join(format!(
-        "ws-update-e2e-{}",
+        "ws-update-e2e-{}-{}",
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir_all(&path).unwrap();
     path
