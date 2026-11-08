@@ -1,0 +1,11 @@
+# Optional local runner: `cargo nextest run --profile ci` (needs cargo-nextest).
+# CI runs `cargo test`; this profile does not change CI.
+
+[profile.ci]
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+# PTY e2e tests can be flaky under load. Retry only that binary.
+[[profile.ci.overrides]]
+filter = "binary(tui_tty_e2e)"
+retries = 2

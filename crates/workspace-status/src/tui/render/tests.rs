@@ -2852,6 +2852,39 @@ fn row_cells(terminal: &Terminal<TestBackend>, x: u16, y: u16, width: u16) -> St
     (x..x + width).map(|col| buf[(col, y)].symbol()).collect()
 }
 
+/// File content in a diff never writes a control byte to the terminal:
+/// no painted cell holds ESC or another control character, and a tab
+/// paints as spaces.
+#[test]
+fn diff_pane_paints_no_control_character_from_file_content() {
+    let mut state = two_pane_diff_state();
+    state.set_diff(
+        "app".into(),
+        "README.md".into(),
+        super::super::diff::DiffContent::from_lines(vec![
+            "@@ -1,1 +1,1 @@ ctx\x1b]0;title\x07".into(),
+            "-old\x1b[2Jline".into(),
+            "+\tTABBED\x1b[31m\u{9b}red".into(),
+        ]),
+    );
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    draw_state(&mut terminal, &mut state);
+    let buf = terminal.backend().buffer();
+    let area = buf.area();
+    for y in 0..area.height {
+        for x in 0..area.width {
+            let symbol = buf[(x, y)].symbol();
+            assert!(
+                !symbol.contains(char::is_control),
+                "cell ({x}, {y}) holds {symbol:?}:\n{}",
+                buffer_text(&terminal)
+            );
+        }
+    }
+    let text = buffer_text(&terminal);
+    assert!(text.contains("    TABBED\u{FFFD}[31m\u{FFFD}red"), "{text}");
+}
+
 #[test]
 fn long_diff_path_header_wraps_and_the_body_starts_below_it() {
     let mut state = two_pane_diff_state();

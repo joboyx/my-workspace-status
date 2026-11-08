@@ -111,12 +111,6 @@ fn plan_parents(active: &[Option<String>], commit_lane: usize, parents: &[String
     }
 }
 
-fn trim_trailing_nulls(active: &mut Vec<Option<String>>) {
-    while active.last().is_some_and(|id| id.is_none()) {
-        active.pop();
-    }
-}
-
 /// Densify active lanes left — remove holes left by closes.
 fn compact_active(active: &mut Vec<Option<String>>) {
     let live: Vec<Option<String>> = active.iter().filter(|id| id.is_some()).cloned().collect();
@@ -356,7 +350,6 @@ pub fn layout_commits(commits: &[Commit], glyphs: &GlyphSet) -> Vec<LaidOutCommi
         });
 
         active = next;
-        trim_trailing_nulls(&mut active);
         compact_active(&mut active);
     }
 

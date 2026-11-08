@@ -367,16 +367,9 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::Path;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "ws-root-{tag}-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = crate::testutil::unique_dir(&format!("ws-root-{tag}"));
         fs::create_dir_all(&dir).unwrap();
         dir
     }

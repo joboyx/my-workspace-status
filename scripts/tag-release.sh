@@ -57,8 +57,11 @@ git config user.name "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
 if [[ "$version" != "$current" ]]; then
+  # Write to a temp file, not `sed -i`: GNU and BSD (macOS) sed take
+  # different `-i` arguments.
   for f in crates/workspace-status/Cargo.toml crates/workspace-status-graph/Cargo.toml; do
-    sed -i "s/^version = \"${current}\"/version = \"${version}\"/" "$f"
+    sed "s/^version = \"${current}\"/version = \"${version}\"/" "$f" > "$f.next"
+    mv "$f.next" "$f"
   done
   # Keep workspace package versions in Cargo.lock in lockstep.
   awk -v old="$current" -v new="$version" '

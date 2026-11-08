@@ -305,9 +305,12 @@ fn unix_local_civil(unix: i64) -> Option<(i32, u32, u32, u32, u32, u32)> {
     if t as i64 != unix {
         return None;
     }
-    // SAFETY: `tm` is a zeroed `libc::tm`. `localtime_r` writes every field
+    // SAFETY: `libc::tm` is plain integers (and on some targets a nullable
+    // pointer), so the all-zero value is valid. `localtime_r` writes every field
     // on success, or returns null without requiring the contents.
     let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
+    // SAFETY: `t` and `tm` are live locals, so both pointers are valid for the
+    // call. `localtime_r` keeps no pointer after it returns.
     let ptr = unsafe { libc::localtime_r(&t, &mut tm) };
     if ptr.is_null() {
         return None;
@@ -321,9 +324,11 @@ fn windows_local_civil(unix: i64) -> Option<(i32, u32, u32, u32, u32, u32)> {
     if t as i64 != unix {
         return None;
     }
-    // SAFETY: `tm` is a zeroed `libc::tm`. `localtime_s` writes every field
-    // on success (return 0).
+    // SAFETY: `libc::tm` is plain integers, so the all-zero value is valid.
+    // `localtime_s` writes every field on success (return 0).
     let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
+    // SAFETY: `t` and `tm` are live locals, so both pointers are valid for the
+    // call. `localtime_s` keeps no pointer after it returns.
     if unsafe { libc::localtime_s(&mut tm, &t) } != 0 {
         return None;
     }

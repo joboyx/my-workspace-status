@@ -513,6 +513,63 @@ fn shift_letter_folds_to_uppercase_binding() {
     );
 }
 
+/// A kitty Shift+symbol report with the shifted-key field
+/// (`REPORT_ALTERNATE_KEYS`) acts as the shifted character, not as the
+/// unshifted key: `:` opens the command palette, not `;`. A letter keeps
+/// SHIFT like its legacy byte, and Ctrl-Shift keeps the base key.
+#[test]
+fn shifted_symbol_reports_act_as_the_shifted_key() {
+    use super::super::action::QuickOpenEntry;
+    use super::super::tty::parse_tty_chunk;
+    let decode = |bytes: &[u8]| {
+        let events = parse_tty_chunk(bytes);
+        assert_eq!(events.len(), 1, "{bytes:?}");
+        events[0].0.clone()
+    };
+    let cases: [(&[u8], InputMode, Action); 6] = [
+        (
+            b"\x1b[59:58;2:1u",
+            normal(),
+            Action::ToggleQuickOpen(QuickOpenEntry::Commands),
+        ),
+        (b"\x1b[47:63;2:1u", normal(), Action::ToggleHelp),
+        (b"\x1b[46:62;2:1u", normal(), Action::ResizeTree(1)),
+        (
+            b"\x1b[45:95;2:1u",
+            InputMode::SearchPrompt,
+            Action::SearchChar('_'),
+        ),
+        (
+            b"\x1b[49:33;2:1u",
+            InputMode::SearchPrompt,
+            Action::SearchChar('!'),
+        ),
+        (b"\x1b[115:83;2:1u", normal(), Action::StashMenu),
+    ];
+    for (bytes, mode, action) in cases {
+        assert_eq!(
+            event_to_action(&decode(bytes), mode, false, false),
+            action,
+            "{bytes:?}"
+        );
+    }
+    assert_eq!(
+        decode(b"\x1b[59:58;2:1u"),
+        Event::Key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE))
+    );
+    assert_eq!(
+        decode(b"\x1b[104:72;2:1u"),
+        Event::Key(KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT))
+    );
+    assert_eq!(
+        decode(b"\x1b[117:85;6:1u"),
+        Event::Key(KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        ))
+    );
+}
+
 #[test]
 fn enter_esc_and_graph_stash_keys() {
     assert_eq!(
