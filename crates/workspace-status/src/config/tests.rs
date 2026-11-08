@@ -891,12 +891,13 @@ fn runtime_keys_parse_valid_values() {
         load_runtime_key("prPolling", "true").unwrap().pr_polling,
         Some(true)
     );
+    let pr_title = abs_path("/opt/bin/pr-title");
     for (raw, want) in [
-        (r#""/opt/bin/pr-title""#, "/opt/bin/pr-title"),
-        (r#""pr-title""#, "pr-title"),
+        (format!(r#""{pr_title}""#), pr_title.as_str()),
+        (r#""pr-title""#.to_string(), "pr-title"),
     ] {
         assert_eq!(
-            load_runtime_key("prTitleCommand", raw)
+            load_runtime_key("prTitleCommand", &raw)
                 .unwrap()
                 .pr_title_command,
             Some(PathBuf::from(want)),
@@ -913,13 +914,14 @@ fn runtime_keys_parse_valid_values() {
             .update_check,
         Some(true)
     );
+    let git = abs_path("/usr/local/bin/git");
     for (raw, want) in [
-        (r#""/usr/local/bin/git""#, "/usr/local/bin/git"),
-        (r#""~/bin/git""#, "/home/demo/bin/git"),
-        (r#""git""#, "git"),
+        (format!(r#""{git}""#), git.as_str()),
+        (r#""~/bin/git""#.to_string(), "/home/demo/bin/git"),
+        (r#""git""#.to_string(), "git"),
     ] {
         assert_eq!(
-            load_runtime_key("git", raw).unwrap().git,
+            load_runtime_key("git", &raw).unwrap().git,
             Some(PathBuf::from(want)),
             "git: {raw}"
         );
