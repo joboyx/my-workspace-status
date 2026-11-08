@@ -2,7 +2,7 @@
 
 ## Setup
 
-1. Install a stable Rust toolchain (rustc 1.85 or later, and cargo). This repository pins 1.85 in `rust-toolchain.toml`.
+1. Install a stable Rust toolchain (rustc 1.88 or later, and cargo). This repository pins 1.88 in `rust-toolchain.toml`.
 2. Clone this repository.
 3. Install git.
 

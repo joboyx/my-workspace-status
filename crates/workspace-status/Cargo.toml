@@ -30,15 +30,17 @@ tui-textarea = "0.7"
 # columns the way it paints.
 unicode-width = "0.2.0"
 fs4 = "1.1"
-# 0.4.5 stays on rustc 1.85. 0.5 needs a newer compiler. Cargo.lock pins
-# plist 1.7.4 and time 0.3.36 so syntect 5.3 does not pull 1.88-only crates.
+# Held at 0.4.5, with plist 1.7.4 and time 0.3.36 in Cargo.lock: holds from the
+# old rustc 1.85 floor. plist 1.9+ and time 0.3.46+ declare rustc 1.88, so the
+# floor no longer blocks them. Moving these crates is a separate bump.
 two-face = { version = "0.4.5", default-features = false, features = ["syntect-default-fancy"] }
 # 0.3.1 declares no rust-version; deps memchr / unicode-segmentation are
-# already locked at versions that build on 1.85.
+# already locked at versions that build on 1.88.
 nucleo-matcher = "0.3.1"
 # Search in files runs ripgrep's engine in process. These releases build on
-# rustc 1.85; Cargo.lock pins encoding_rs 0.8.35 because 0.8.36+ needs a
-# newer compiler.
+# rustc 1.88. Cargo.lock keeps encoding_rs at 0.8.35, a hold from the old rustc
+# 1.85 floor. 0.8.40+ declares rustc 1.88, so the floor no longer blocks it.
+# Moving it is a separate bump.
 grep-matcher = "0.1.9"
 grep-regex = "0.1.14"
 grep-searcher = "0.1.17"

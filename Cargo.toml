@@ -22,7 +22,7 @@ large_enum_variant = "allow"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/joboyx/my-workspace-status"
-rust-version = "1.85"
+rust-version = "1.88"
 
 # The profile that 'dist' will build with
 [profile.dist]

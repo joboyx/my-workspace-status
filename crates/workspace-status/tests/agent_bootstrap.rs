@@ -27,7 +27,7 @@ fn script() -> PathBuf {
     repo_root().join("scripts/agent-bootstrap.sh")
 }
 
-/// Pinned channel of `rust-toolchain.toml` (`channel = "1.85.0"`).
+/// Pinned channel of `rust-toolchain.toml` (`channel = "1.88.0"`).
 fn pinned_channel() -> String {
     let toml = fs::read_to_string(repo_root().join("rust-toolchain.toml")).unwrap();
     toml.lines()
