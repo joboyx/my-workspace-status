@@ -3,20 +3,12 @@ use std::path::{Path, PathBuf};
 
 use crate::harness::PtySession;
 use crate::seed::{git, seed_primary_and_linked_family, unique_root};
-use crate::support::{corrupt_index, tree_cursor_on, tree_has, GIT_WAIT, WAIT};
+use crate::support::{corrupt_index, tree_cursor_on, tree_has, wait_comment_store, GIT_WAIT, WAIT};
 
 const BODY: &str = "sibling-failed-drop-e2e";
 const BRANCH: &str = "doomed";
 const PRIMARY: &str = "feature/primary-open";
 const LINKED: &str = "feature/linked-open";
-
-fn comment_store(workspace: &Path) -> std::path::PathBuf {
-    workspace.join(".e2e-state").join("comments.json")
-}
-
-fn store_text(workspace: &Path) -> String {
-    fs::read_to_string(comment_store(workspace)).unwrap_or_default()
-}
 
 fn comment_overlay(screen: &str) -> bool {
     screen.contains("Comment")
@@ -103,10 +95,14 @@ fn pty_semicolon_deleted_branch_drops_when_sibling_status_failed() {
         "Enter saves the doomed branch comment",
         WAIT,
     );
-    let stored = store_text(&workspace);
-    assert!(
-        stored.contains(BODY) && stored.contains("\"kind\": \"branch\"") && stored.contains(BRANCH),
-        "doomed branch comment must persist before delete:\n{stored}"
+    wait_comment_store(
+        &workspace,
+        |stored| {
+            stored.contains(BODY)
+                && stored.contains("\"kind\": \"branch\"")
+                && stored.contains(BRANCH)
+        },
+        "doomed branch comment must persist before delete",
     );
 
     git(&app, &["checkout", "-q", PRIMARY]);
@@ -143,9 +139,9 @@ fn pty_semicolon_deleted_branch_drops_when_sibling_status_failed() {
         "y finds no comments once the doomed one is gone: no overlay, says so",
         WAIT,
     );
-    let stored = store_text(&workspace);
-    assert!(
-        !stored.contains(BODY) && !stored.contains(BRANCH),
-        "GC must drop the doomed branch comment while a sibling status-failed:\n{stored}"
+    wait_comment_store(
+        &workspace,
+        |stored| !stored.contains(BODY) && !stored.contains(BRANCH),
+        "GC must drop the doomed branch comment while a sibling status-failed",
     );
 }

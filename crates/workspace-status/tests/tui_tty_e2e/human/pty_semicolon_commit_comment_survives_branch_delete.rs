@@ -5,20 +5,12 @@ use std::process::{Command, Stdio};
 use crate::harness::PtySession;
 use crate::seed::{git, git_env, seed_repo, unique_root};
 use crate::support::{
-    graph_cursor_on, graph_pane_focused, prove_keys_handled, tree_cursor_on, tree_has, GIT_WAIT,
-    WAIT,
+    graph_cursor_on, graph_pane_focused, prove_keys_handled, tree_cursor_on, tree_has,
+    wait_comment_store, GIT_WAIT, WAIT,
 };
 
 const BODY: &str = "commit-survives-branch-e2e";
 const SUBJECT: &str = "doomed-leaf-e2e";
-
-fn comment_store(workspace: &Path) -> std::path::PathBuf {
-    workspace.join(".e2e-state").join("comments.json")
-}
-
-fn store_text(workspace: &Path) -> String {
-    fs::read_to_string(comment_store(workspace)).unwrap_or_default()
-}
 
 fn git_stdout(repo: &Path, args: &[&str]) -> String {
     let mut cmd = Command::new("git");
@@ -117,10 +109,14 @@ fn pty_semicolon_commit_comment_survives_branch_delete() {
         "Enter saves the commit object comment",
         WAIT,
     );
-    let stored = store_text(&workspace);
-    assert!(
-        stored.contains(BODY) && stored.contains("\"kind\": \"commit\"") && stored.contains(&sha),
-        "commit object comment must persist with the SHA:\n{stored}"
+    wait_comment_store(
+        &workspace,
+        |stored| {
+            stored.contains(BODY)
+                && stored.contains("\"kind\": \"commit\"")
+                && stored.contains(&sha)
+        },
+        "commit object comment must persist with the SHA",
     );
 
     git(&app, &["branch", "-D", "doomed"]);
@@ -153,9 +149,13 @@ fn pty_semicolon_commit_comment_survives_branch_delete() {
         "y export still lists the commit comment after the branch is gone",
         WAIT,
     );
-    let stored = store_text(&workspace);
-    assert!(
-        stored.contains(BODY) && stored.contains("\"kind\": \"commit\"") && stored.contains(&sha),
-        "GC on refresh must keep the commit comment after branch -D:\n{stored}"
+    wait_comment_store(
+        &workspace,
+        |stored| {
+            stored.contains(BODY)
+                && stored.contains("\"kind\": \"commit\"")
+                && stored.contains(&sha)
+        },
+        "GC on refresh must keep the commit comment after branch -D",
     );
 }

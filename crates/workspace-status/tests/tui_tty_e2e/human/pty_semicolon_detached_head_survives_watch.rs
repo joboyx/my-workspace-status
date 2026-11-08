@@ -1,19 +1,10 @@
 use std::fs;
-use std::path::Path;
 
 use crate::harness::PtySession;
 use crate::seed::{git, seed_repo, unique_root};
-use crate::support::{tree_cursor_on, tree_has, GIT_WAIT, WAIT};
+use crate::support::{tree_cursor_on, tree_has, wait_comment_store, GIT_WAIT, WAIT};
 
 const BODY: &str = "detached-wt-note-e2e";
-
-fn comment_store(workspace: &Path) -> std::path::PathBuf {
-    workspace.join(".e2e-state").join("comments.json")
-}
-
-fn store_text(workspace: &Path) -> String {
-    fs::read_to_string(comment_store(workspace)).unwrap_or_default()
-}
 
 fn comment_overlay(screen: &str) -> bool {
     screen.contains("Comment")
@@ -78,12 +69,14 @@ fn pty_semicolon_detached_head_survives_watch() {
         "Enter saves the detached checkout comment",
         WAIT,
     );
-    let stored = store_text(&workspace);
-    assert!(
-        stored.contains(BODY)
-            && stored.contains("\"kind\": \"worktree\"")
-            && !stored.contains("HEAD (detached)"),
-        "detached HEAD must persist as a worktree key, not Branch HEAD (detached):\n{stored}"
+    wait_comment_store(
+        &workspace,
+        |stored| {
+            stored.contains(BODY)
+                && stored.contains("\"kind\": \"worktree\"")
+                && !stored.contains("HEAD (detached)")
+        },
+        "detached HEAD must persist as a worktree key, not Branch HEAD (detached)",
     );
 
     // Prove a watch apply ran after the save: a new untracked file makes the
@@ -95,9 +88,9 @@ fn pty_semicolon_detached_head_survives_watch() {
         "a watch apply after the save counts the new dirty file; the TUI stays mounted",
         GIT_WAIT,
     );
-    let stored = store_text(&workspace);
-    assert!(
-        stored.contains(BODY) && stored.contains("\"kind\": \"worktree\""),
-        "watch GC must keep the detached worktree comment:\n{stored}"
+    wait_comment_store(
+        &workspace,
+        |stored| stored.contains(BODY) && stored.contains("\"kind\": \"worktree\""),
+        "watch GC must keep the detached worktree comment",
     );
 }

@@ -1,21 +1,12 @@
 use std::fs;
-use std::path::Path;
 
 use crate::harness::PtySession;
 use crate::seed::{seed_repo, unique_root};
-use crate::support::{tree_cursor_on, tree_has, GIT_WAIT, WAIT};
+use crate::support::{tree_cursor_on, tree_has, wait_comment_store, GIT_WAIT, WAIT};
 
 const FILE1_BODY: &str = "scope-file1-note-e2e";
 const FILE2_BODY: &str = "scope-file2-note-e2e";
 const README_BODY: &str = "scope-readme-note-e2e";
-
-fn comment_store(workspace: &Path) -> std::path::PathBuf {
-    workspace.join(".e2e-state").join("comments.json")
-}
-
-fn store_text(workspace: &Path) -> String {
-    fs::read_to_string(comment_store(workspace)).unwrap_or_default()
-}
 
 fn comment_overlay(screen: &str) -> bool {
     screen.contains("Comment")
@@ -124,10 +115,14 @@ fn pty_y_copies_focused_tree_scope() {
         WAIT,
     );
     save_line_comment(&mut tui, "README.md", README_BODY);
-    let stored = store_text(&workspace);
-    assert!(
-        stored.contains(FILE1_BODY) && stored.contains(FILE2_BODY) && stored.contains(README_BODY),
-        "all three line comments must persist:\n{stored}"
+    wait_comment_store(
+        &workspace,
+        |stored| {
+            stored.contains(FILE1_BODY)
+                && stored.contains(FILE2_BODY)
+                && stored.contains(README_BODY)
+        },
+        "all three line comments must persist",
     );
 
     tui.key('k');

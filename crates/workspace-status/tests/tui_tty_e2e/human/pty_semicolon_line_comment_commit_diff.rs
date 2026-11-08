@@ -1,22 +1,12 @@
-use std::fs;
-use std::path::Path;
-
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
     documented_launch_first_paint, graph_cursor_on, merger_graph_drilled_right,
-    merger_graph_left_unfocused, title_has_diff, title_has_files, GIT_WAIT, WAIT,
+    merger_graph_left_unfocused, title_has_diff, title_has_files, wait_comment_store, GIT_WAIT,
+    WAIT,
 };
 
 const BODY: &str = "commit-line-note-e2e";
-
-fn comment_store(workspace: &Path) -> std::path::PathBuf {
-    workspace.join(".e2e-state").join("comments.json")
-}
-
-fn store_text(workspace: &Path) -> String {
-    fs::read_to_string(comment_store(workspace)).unwrap_or_default()
-}
 
 fn comment_overlay(screen: &str) -> bool {
     screen.contains("Comment")
@@ -128,9 +118,9 @@ fn pty_semicolon_line_comment_commit_diff() {
         "Enter saves: overlay gone, ASCII \" on the commit diff, toast comment saved",
         GIT_WAIT,
     );
-    let stored = store_text(&workspace);
-    assert!(
-        stored.contains(BODY) && stored.contains("commitLine"),
-        "store must keep a commit-line comment (not worktreeLine):\n{stored}"
+    wait_comment_store(
+        &workspace,
+        |stored| stored.contains(BODY) && stored.contains("commitLine"),
+        "store must keep a commit-line comment (not worktreeLine)",
     );
 }
