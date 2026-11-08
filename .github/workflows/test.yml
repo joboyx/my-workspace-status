@@ -72,7 +72,9 @@ jobs:
         with:
           shared-key: test
       - run: cargo build --workspace --all-targets --locked
-      - run: cargo test --workspace --locked
+      # Windows failures reproduce only here, so one run shows every failing
+      # test binary.
+      - run: cargo test --workspace --locked --no-fail-fast
 
   tui-tty-desktop:
     runs-on: ubuntu-latest
