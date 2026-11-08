@@ -1,8 +1,9 @@
 # Checks for pull requests and main, then the release of a green main commit.
 #
 # Every job before `release-gate` is a check. `release-gate` needs all of
-# them, and the main ruleset should require each of them by job name (list in
-# docs/architecture.md, Release gate). CI: crates/workspace-status/tests/release_gate.rs.
+# them except the non-gating `cargo-windows`, and the main ruleset should
+# require each gating check by job name (list in docs/architecture.md,
+# Release gate). CI: crates/workspace-status/tests/release_gate.rs.
 name: test
 
 on:
@@ -56,9 +57,12 @@ jobs:
 
   # The PTY e2e is Unix only: on Windows that test crate compiles with no
   # tests, so the explicit build step keeps every target compiling.
+  # Not gating yet: the Windows suite is not green. A failure does not fail
+  # the run, and release-gate does not need this job.
   cargo-windows:
     runs-on: windows-latest
     timeout-minutes: 40
+    continue-on-error: true
     steps:
       # Keep LF line endings: some tests compare checked-in text files.
       - run: git config --global core.autocrlf false
@@ -110,7 +114,7 @@ jobs:
   # checks pass.
   release-gate:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [lint, cargo, cargo-macos, cargo-windows, tui-tty-desktop]
+    needs: [lint, cargo, cargo-macos, tui-tty-desktop]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

@@ -38,7 +38,7 @@ Agents and CI must use `--plain` or `--json`. A TTY run without those flags open
 
 ## Pull requests
 
-Open a pull request against main. GitHub Actions runs `lint`, `cargo test --workspace` on Linux, macOS and Windows (`cargo`, `cargo-macos`, `cargo-windows`) and the desktop TTY e2e job (`tui-tty-desktop`: xfce keys + xterm XTEST wheel) on pull requests and on main. A push to main is tagged and released only after all of them pass. See **Release gate** in [docs/architecture.md](./docs/architecture.md).
+Open a pull request against main. GitHub Actions runs `lint`, `cargo test --workspace` on Linux, macOS and Windows (`cargo`, `cargo-macos`, `cargo-windows`) and the desktop TTY e2e job (`tui-tty-desktop`: xfce keys + xterm XTEST wheel) on pull requests and on main. A push to main is tagged and released only after all of them pass, except `cargo-windows`, which does not gate yet. See **Release gate** in [docs/architecture.md](./docs/architecture.md).
 
 Keep `SAMPLE_OUTPUT.md` in sync with `crates/workspace-status/tests/snapshot_contract.rs` when output changes.
 
