@@ -54,7 +54,7 @@ missing() {
 }
 warn() { echo "warn    $*" >&2; }
 
-# Pinned channel from rust-toolchain.toml (`channel = "1.85.0"`).
+# Pinned channel from rust-toolchain.toml (`channel = "1.88.0"`).
 CHANNEL="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$REPO_ROOT/rust-toolchain.toml")"
 [[ -n "$CHANNEL" ]] || {
   echo "agent-bootstrap: no channel in rust-toolchain.toml" >&2
@@ -106,7 +106,7 @@ RUSTUP_VERSION="$(rustup_probe --version 2>/dev/null)" || RUSTUP_VERSION=""
 ok "rustup (${RUSTUP_VERSION%%$'\n'*})"
 
 if ((CHECK)); then
-  # `rustup toolchain list` lines: `1.85.0-<host> (default)`.
+  # `rustup toolchain list` lines: `1.88.0-<host> (default)`.
   TOOLCHAINS="$(rustup_probe toolchain list 2>/dev/null)" || TOOLCHAINS=""
   if has_line_prefix "$TOOLCHAINS" "$CHANNEL-"; then
     ok "toolchain $CHANNEL"

@@ -1154,10 +1154,10 @@ mod live_git {
         );
         let subjects: Vec<&str> = model.commits.iter().map(|c| c.subject.as_str()).collect();
         assert!(
-            subjects.iter().any(|s| *s == "c-feature"),
+            subjects.contains(&"c-feature"),
             "other-branch tip must appear under --all, got {subjects:?}"
         );
-        assert!(subjects.iter().any(|s| *s == "c2-main"), "{subjects:?}");
+        assert!(subjects.contains(&"c2-main"), "{subjects:?}");
         let feature = model
             .commits
             .iter()
@@ -1267,15 +1267,12 @@ mod live_git {
         );
         let subjects: Vec<&str> = model.commits.iter().map(|c| c.subject.as_str()).collect();
         assert!(
-            subjects.iter().any(|s| *s == "c-feature"),
+            subjects.contains(&"c-feature"),
             "focused tip must stay, got {subjects:?}"
         );
+        assert!(subjects.contains(&"c1"), "ancestors stay, got {subjects:?}");
         assert!(
-            subjects.iter().any(|s| *s == "c1"),
-            "ancestors stay, got {subjects:?}"
-        );
-        assert!(
-            !subjects.iter().any(|s| *s == "c2-main"),
+            !subjects.contains(&"c2-main"),
             "unrelated main leaf must drop, got {subjects:?}"
         );
         let _ = fs::remove_dir_all(&root);

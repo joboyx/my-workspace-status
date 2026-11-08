@@ -1062,9 +1062,9 @@ fn curl(p: &Probe) -> Option<Check> {
 }
 
 /// Oldest rustc that builds the crate (`rust-version` in Cargo.toml).
-const MIN_RUSTC: (u64, u64) = (1, 85);
+const MIN_RUSTC: (u64, u64) = (1, 88);
 
-/// `(major, minor)` from `rustc 1.85.0 (…)`.
+/// `(major, minor)` from `rustc 1.88.0 (…)`.
 fn rustc_version(text: &str) -> Option<(u64, u64)> {
     let version = text.split_whitespace().nth(1)?;
     let mut parts = version.split(['.', '-']);
@@ -2081,13 +2081,13 @@ mod tests {
             get(&p, "Rust toolchain (dev build)").status,
             CheckStatus::Ok
         );
-        p.rustc = Some(Ok("rustc 1.85.0 (4d91de4e4 2025-02-17)".to_string()));
+        p.rustc = Some(Ok("rustc 1.88.0 (6b00bc388 2025-06-23)".to_string()));
         assert_eq!(
             get(&p, "Rust toolchain (dev build)").status,
             CheckStatus::Ok
         );
         for rustc in [
-            Some(Ok("rustc 1.84.1 (e71f9a9a9 2025-01-27)".to_string())),
+            Some(Ok("rustc 1.87.0 (17067e9ac 2025-05-09)".to_string())),
             Some(Ok("garbage".to_string())),
             Some(Err("not found".to_string())),
         ] {
@@ -2202,8 +2202,8 @@ mod tests {
     #[test]
     fn rustc_version_parses_major_minor() {
         assert_eq!(
-            rustc_version("rustc 1.85.0 (4d91de4e4 2025-02-17)"),
-            Some((1, 85))
+            rustc_version("rustc 1.88.0 (6b00bc388 2025-06-23)"),
+            Some((1, 88))
         );
         assert_eq!(rustc_version("rustc 1.92.0-nightly (x)"), Some((1, 92)));
         assert_eq!(rustc_version("rustc"), None);

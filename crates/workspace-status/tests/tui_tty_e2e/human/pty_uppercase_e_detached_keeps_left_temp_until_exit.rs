@@ -141,7 +141,7 @@ fn pty_uppercase_e_detached_keeps_left_temp_until_exit() {
         args.len()
     );
     assert!(
-        args.iter().any(|a| *a == "--diff") && args.iter().any(|a| *a == "--wait"),
+        args.contains(&"--diff") && args.contains(&"--wait"),
         "detached config must pass --diff --wait:\n{marker_body}"
     );
     assert!(

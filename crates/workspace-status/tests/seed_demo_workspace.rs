@@ -318,7 +318,7 @@ fn seed_demo_workspace_state_and_snapshot() {
         .iter()
         .map(|r| r["repo"].as_str().unwrap())
         .collect();
-    assert!(!names.iter().any(|n| *n == "notes"));
+    assert!(!names.contains(&"notes"));
     assert!(names.contains(&"app"));
     assert!(names.contains(&"app/.worktrees/feat-login"));
     assert!(names.contains(&"services/api"));

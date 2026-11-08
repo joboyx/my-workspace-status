@@ -408,7 +408,7 @@ Fix lines use the OS form: `export NAME=value` on Linux and macOS, `$env:NAME = 
 | Browser opener (gx, Open PR) | the `BROWSER` program, else `open` (macOS) / `cmd` (Windows) / `xdg-open`, is found (View remotely, `gw`, uses the same opener) | not found | — |
 | Forge CLIs (PR badges) | no GitHub or GitLab remote, or `gh` / `glab` found for each forge in use (login is not checked) | a needed CLI is missing | — |
 | curl (release check; not on a dev build) | `curl` found | missing: the startup release check and `ws --update` notes need it | — |
-| Rust toolchain (dev build only) | `rustc --version` is 1.85 or later | older or missing; fix `rustup update stable` | — |
+| Rust toolchain (dev build only) | `rustc --version` is 1.88 or later | older or missing; fix `rustup update stable` | — |
 | Config files | both files load (each shown as `loaded` or `not present`) | — | the config loader refuses a file; the row shows its error |
 | State files | each store file is missing (created on first save) or one its store accepts | — | a present file its store refuses: saves will fail; fix moves it aside with `mv` (Windows `Move-Item`) |
 

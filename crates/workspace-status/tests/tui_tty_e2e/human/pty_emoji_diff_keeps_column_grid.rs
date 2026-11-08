@@ -29,7 +29,7 @@ const EMOJI_COUNT: usize = 30;
 fn seed_emoji_left_cell(workspace: &Path) {
     let app = workspace.join("app");
     let path = app.join(FILE);
-    let emoji: String = std::iter::repeat(EMOJI).take(EMOJI_COUNT).collect();
+    let emoji: String = std::iter::repeat_n(EMOJI, EMOJI_COUNT).collect();
     fs::write(&path, format!("{BEFORE}\n{LEFT_MARK} {emoji}\n{AFTER}\n")).unwrap();
     git(&app, &["add", FILE]);
     git(&app, &["commit", "-q", "-m", "emoji-grid base"]);

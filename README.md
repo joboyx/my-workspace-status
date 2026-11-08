@@ -97,7 +97,7 @@ That removes `~/.local/bin/{ws,workspace-status,workspace-status-update}` (and a
 
 ### From source
 
-Requires rustc 1.85 or later. This repository is a Cargo workspace. Name the package when you install from git:
+Requires rustc 1.88 or later. This repository is a Cargo workspace. Name the package when you install from git:
 
     cargo install --git https://github.com/joboyx/my-workspace-status --locked --package workspace-status
 
