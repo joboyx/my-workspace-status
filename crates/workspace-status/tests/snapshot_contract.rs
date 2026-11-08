@@ -356,6 +356,53 @@ fn json_names_a_force_pushed_upstream_and_omits_it_elsewhere() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// New empty temp dir for one test.
+fn temp_root(tag: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "workspace-status-{tag}-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(root.join("workspace")).unwrap();
+    root
+}
+
+#[test]
+fn json_and_plain_name_a_deleted_upstream_gone() {
+    let root = temp_root("gone");
+    let workspace = root.join("workspace");
+    git(&root, &["init", "-q", "--bare", "-b", "main", "remote.git"]);
+    let remote = root.join("remote.git");
+    seed_repo(&workspace, "pruned", "main", false);
+    let pruned = workspace.join("pruned");
+    git(
+        &pruned,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&pruned, &["push", "-q", "-u", "origin", "main"]);
+    git(&pruned, &["checkout", "-q", "-b", "feature/merged"]);
+    git(&pruned, &["push", "-q", "-u", "origin", "feature/merged"]);
+    // The forge deletes the branch after its PR merged; the push --delete
+    // also drops origin/feature/merged, as a pruning fetch would.
+    git(
+        &pruned,
+        &["push", "-q", "origin", "--delete", "feature/merged"],
+    );
+
+    let snapshot = run_json(&workspace, &["--json"]);
+    let row = &snapshot["repos"][0];
+    assert_eq!(row["repo"], "pruned");
+    assert_eq!(row["syncStatus"], "gone", "{row}");
+    assert_eq!(row["syncNote"], "upstream gone", "{row}");
+
+    let plain = run_plain(&workspace, &["--plain", "--verbose"]);
+    assert!(plain.contains("upstream gone"), "{plain}");
+    assert!(!plain.contains("✅ current"), "{plain}");
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn merged_into_default_skips_same_commit_as_default_tip() {
     let root = std::env::temp_dir().join(format!(

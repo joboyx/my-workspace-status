@@ -1071,6 +1071,13 @@ fn sync_header_parts_colour_the_marks_and_keep_the_text() {
     let parts = format_sync_parts(&feature, &ASCII, None);
     assert_eq!(parts[0].kind, LabelKind::ChipLocal);
     assert_eq!(parts_text(&parts), "feat no-upstream");
+    let gone = SyncState {
+        branch: "feat".into(),
+        ..sync(SyncStatus::Gone, 0, 0)
+    };
+    let parts = format_sync_parts(&gone, &ASCII, None);
+    assert_eq!(parts_text(&parts), "feat upstream-gone");
+    assert_eq!(parts[2].kind, LabelKind::Meta);
 }
 
 #[test]

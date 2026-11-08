@@ -77,6 +77,7 @@ Example verbose cell: `🚧 feature/foo 🌱`
 - ⬆️ ahead `<count>`
 - 🔀 `<ahead>/<behind>`
 - ❓ no upstream
+- ⚠️ upstream gone (the branch tracks a remote branch that no longer exists)
 
 ### Files Labels
 

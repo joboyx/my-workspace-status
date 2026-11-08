@@ -20,6 +20,9 @@ pub enum SyncStatus {
     UpToDate,
     #[serde(rename = "no-upstream")]
     NoUpstream,
+    /// The branch tracks an upstream that no longer exists (git status
+    /// `[gone]`), for example a remote branch deleted after its PR merged.
+    Gone,
     Behind,
     Ahead,
     Diverged,
@@ -30,6 +33,7 @@ impl SyncStatus {
         match self {
             Self::UpToDate => "up-to-date",
             Self::NoUpstream => "no-upstream",
+            Self::Gone => "gone",
             Self::Behind => "behind",
             Self::Ahead => "ahead",
             Self::Diverged => "diverged",
@@ -463,6 +467,7 @@ fn sync_display(status: SyncStatus, note: &str) -> String {
             }
             "🔀 diverged".to_string()
         }
+        SyncStatus::Gone => "⚠️ upstream gone".to_string(),
         SyncStatus::UpToDate => "✅ current".to_string(),
     }
 }

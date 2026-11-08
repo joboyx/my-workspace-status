@@ -36,8 +36,8 @@ Paths are workspace-relative. The snapshot does not include the workspace root, 
 | `repo` | string | Workspace-relative checkout path. |
 | `hidden` | boolean | True when `repo` is at or under a `hiddenPaths` entry. A linked worktree whose primary is hidden reports `false`: it is left out with its primary unless shown or named. A linked worktree that sits under a `hiddenPaths` entry while its primary does not reports `true`. |
 | `branch` | string | Current branch, or a detached / unknown label from git status. |
-| `syncStatus` | string | `up-to-date`, `no-upstream`, `behind`, `ahead`, or `diverged`. |
-| `syncNote` | string | Extra sync text (`ahead by 2`, `status failed`, empty). |
+| `syncStatus` | string | `up-to-date`, `no-upstream`, `gone`, `behind`, `ahead`, or `diverged`. `gone`: the branch has an upstream configured, but that ref no longer exists (git status `[gone]`), for example a remote branch deleted after its PR merged and then pruned. |
+| `syncNote` | string | Extra sync text (`ahead by 2`, `status failed`, `upstream gone`, empty). |
 | `upstreamRewrite` | object | Present only on a `diverged` branch whose upstream was force-pushed under it (see below). `syncStatus` and `syncNote` stay plain `diverged`. |
 | `checkoutKind` | string | `primary` or `linked`. |
 | `primaryRepo` | string | Present on linked checkouts. Path of the primary checkout. |

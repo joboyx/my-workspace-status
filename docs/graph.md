@@ -361,9 +361,11 @@ italic), as on the spacer.
 Do not flatten the footer to one colour.
 
 The sync header is `branch` then the ahead / behind marks
-(`format_sync`), or `branch no-upstream`. With a `label_palette` the
+(`format_sync`), or `branch no-upstream`, or `branch upstream-gone` when
+the configured upstream no longer exists. With a `label_palette` the
 branch paints in `branch_default` or `branch_local`, the ahead count in
-`ahead`, the behind count in `behind`, and `no-upstream` in `meta`.
+`ahead`, the behind count in `behind`, and `no-upstream` /
+`upstream-gone` in `meta`.
 Without a palette it keeps the terminal default colour.
 
 Then one gutter plus label per visible row. Commit and stash rows also

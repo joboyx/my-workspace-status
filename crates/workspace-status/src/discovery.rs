@@ -12,7 +12,7 @@ use crate::git::{
 };
 use crate::helpers::{
     is_default_branch, path_is_under_any, DETACHED_HEAD_BRANCH, STATUS_FAILED_NOTE,
-    UNKNOWN_HEAD_BRANCH,
+    UNKNOWN_HEAD_BRANCH, UPSTREAM_GONE_NOTE,
 };
 use crate::parallel::map_with_concurrency;
 use crate::snapshot::{CheckoutKind, FileChange, RepoSnapshot, SyncStatus};
@@ -156,6 +156,14 @@ pub fn parse_branch_line(line: &str) -> Option<BranchState> {
         });
     }
     let upstream = upstream.map(str::to_string);
+    if tracking == "gone" {
+        return Some(BranchState {
+            branch: branch.to_string(),
+            sync_status: SyncStatus::Gone,
+            sync_note: UPSTREAM_GONE_NOTE.to_string(),
+            upstream,
+        });
+    }
     let ahead = capture_count(tracking, "ahead ");
     let behind = capture_count(tracking, "behind ");
     if ahead > 0 && behind > 0 {
@@ -715,6 +723,14 @@ mod tests {
         let s = parse_branch_line("## main").unwrap();
         assert_eq!(s.branch, "main");
         assert_eq!(s.sync_status, SyncStatus::NoUpstream);
+    }
+
+    #[test]
+    fn parse_branch_deleted_upstream_is_gone_not_up_to_date() {
+        let s = parse_branch_line("## feature/x...origin/feature/x [gone]").unwrap();
+        assert_eq!(s.sync_status, SyncStatus::Gone);
+        assert_eq!(s.sync_note, "upstream gone");
+        assert_eq!(s.upstream.as_deref(), Some("origin/feature/x"));
     }
 
     #[test]
