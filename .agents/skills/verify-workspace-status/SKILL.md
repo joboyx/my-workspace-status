@@ -124,6 +124,7 @@ for row in '/ src' '# Staged' '& feature/auth-refresh'; do  # cursor from sessio
 done
 $V keys "$RUN" g x                        # gx opens the PR; the recorder gets the URL
 $V wait "$RUN" 'opened PR #7'
+for _ in $(seq 50); do grep -q . "$RUN/opened.log" 2>/dev/null && break; sleep 0.1; done   # the recorder can lag the status line
 cat "$RUN/opened.log"
 $V capture "$RUN" after-gx                # prints the screen, saves evidence/NN-after-gx.txt/.ansi
 $V stop "$RUN"
