@@ -74,6 +74,9 @@ pub enum UserTag {
     /// PR title command fill for the PRs tab group headers (latest-only
     /// slot).
     PrTitles,
+    /// Host clipboard tool copy (`wl-copy` / `xclip` / `pbcopy`) of one
+    /// copy, with a deadline (serial latest-only slot).
+    Clipboard,
     /// Commit-activity counts for the tree sparklines. Low priority: it
     /// waits behind every user job ([`Scheduler::enqueue_background`]).
     Activity,
