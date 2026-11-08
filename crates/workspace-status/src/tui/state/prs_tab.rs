@@ -950,7 +950,9 @@ impl AppState {
 /// PRs of a made-up workspace for the PRs tab tests (state and paint).
 #[cfg(test)]
 pub(crate) mod fixtures {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
+    #[cfg(unix)]
+    use std::path::PathBuf;
 
     use super::super::super::pr_status::{ChecksSummary, PrState};
     use super::super::super::pull_request::{PrLookup, PullRequest};
@@ -1396,7 +1398,7 @@ mod tests {
 
         // Two presses that arrived 399 ms apart, long ago: one toggle.
         let (mut app, row) = setup();
-        let first = Instant::now() - Duration::from_secs(5);
+        let first = crate::testutil::instant_ago(Duration::from_secs(5));
         press(&mut app, first, row);
         assert!(folded(&app), "the first press folds the header");
         press(&mut app, first + Duration::from_millis(399), row);
@@ -1820,7 +1822,7 @@ mod tests {
         let view = app.prs_view().unwrap();
         assert_eq!(view.lookups, (0, 2), "nothing landed");
         assert_eq!(view.checked, None);
-        let long_ago = Instant::now() - Duration::from_secs(3600);
+        let landed = Instant::now();
         assert!(app.apply_pr_lookup_at(
             Path::new("app"),
             "feature/ABC-123-retry",
@@ -1833,7 +1835,7 @@ mod tests {
                 "feature/ABC-123-retry",
                 "main"
             )),
-            long_ago,
+            landed,
         ));
         assert!(app.apply_pr_lookup(
             Path::new("api"),
@@ -1841,11 +1843,12 @@ mod tests {
             Some(GL_API.into()),
             PrLookup::Failed(Some("401 Unauthorized".into())),
         ));
-        let view = app.prs_view().unwrap();
+        let tab = app.tabs.active_prs().unwrap();
+        let view = app.build_prs_view(tab, landed + Duration::from_secs(3600));
         assert_eq!(view.lookups, (2, 2));
         assert_eq!(view.errors, ["! glab (gitlab.com): 401 Unauthorized"]);
         let checked = view.checked.expect("a lookup succeeded");
-        assert_eq!(checked.at, long_ago);
+        assert_eq!(checked.at, landed);
         assert!(checked.failing, "a failing lookup and a stale PR");
         assert_eq!(lines(&app), ["ABC-123", "  #318"], "other hosts still list");
     }

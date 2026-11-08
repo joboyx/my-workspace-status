@@ -1686,7 +1686,9 @@ fn expired_arming_g_does_not_drop_the_next_protocol_g() {
     assert!(!drop_protocol_dup_g_chord_press(&mut echo, normal(), &g));
     expire_stale_g_chord_echo(&mut echo, &mut pending, Instant::now());
     assert!(pending.is_some(), "fresh pending must stay");
-    pending = Some(Instant::now() - Duration::from_millis(DOUBLE_TAP_MS + 1));
+    pending = Some(crate::testutil::instant_ago(Duration::from_millis(
+        DOUBLE_TAP_MS + 1,
+    )));
     expire_stale_g_chord_echo(&mut echo, &mut pending, Instant::now());
     assert!(pending.is_none());
     assert!(

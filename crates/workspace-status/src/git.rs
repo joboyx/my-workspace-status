@@ -428,7 +428,7 @@ pub(crate) fn exiting() -> bool {
 }
 
 /// True while `pgid` holds a slot in [`RUNNING_GIT_GROUPS`].
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn is_tracked(pgid: i32) -> bool {
     RUNNING_GIT_GROUPS
         .iter()

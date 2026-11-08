@@ -42,12 +42,18 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 /// The temp dir is canonical, because the binary canonicalizes the
 /// workspace root. On macOS the default `/var/folders/...` resolves to
 /// `/private/var/folders/...`, and a test that compares a path the binary
-/// passes on (diff tool argv, git cwd) must see the same spelling.
+/// passes on (diff tool argv, git cwd) must see the same spelling. On
+/// Windows canonicalize adds a `\\?\` prefix, which this drops: git reads
+/// `\\?\C:\x` as the remote `\\?\C` on an ssh host, not as a local path.
 pub fn unique_root(prefix: &str) -> PathBuf {
     let pid = std::process::id();
-    let temp = std::env::temp_dir()
+    let canonical = std::env::temp_dir()
         .canonicalize()
         .expect("canonical temp dir");
+    let temp = canonical
+        .to_str()
+        .and_then(|path| path.strip_prefix(r"\\?\"))
+        .map_or_else(|| canonical.clone(), PathBuf::from);
     loop {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let nanos = SystemTime::now()

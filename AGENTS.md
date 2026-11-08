@@ -166,6 +166,10 @@ app-state fixtures live in `src/testutil.rs`, not in a per-module copy.
 A unit test gets its temp path from `testutil::unique_dir` (process id,
 time, and a counter), never from a timestamp alone: the macOS clock ticks
 in microseconds, so two names made back to back can be the same.
+A unit test gets a past instant from `testutil::instant_ago`, never from
+`Instant::now() - d`: on Windows the clock counts from boot, so that panics
+on a fresh host. A fixture path that must be absolute comes from
+`testutil::abs_path`: on Windows `/x` is relative.
 
 Rustdoc on exported items (`///` or `//!`) is a review rule, not a lint: no
 `missing_docs` lint runs.

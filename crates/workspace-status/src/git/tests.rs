@@ -40,36 +40,14 @@ fn git_binary_is_nonempty() {
 fn git_command_nulls_stdin_and_disables_prompts() {
     let dir = unique_dir("ws-git-stdin");
     fs::create_dir_all(&dir).unwrap();
-    let script = dir.join("probe");
-    fs::write(
-            &script,
-            "#!/bin/sh\nif [ -t 0 ]; then echo TTY; exit 7; fi\nprintf 'prompt=%s\\n' \"${GIT_TERMINAL_PROMPT-}\"\n",
-        )
-        .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    // Write + chmod + exec can return ETXTBSY on a busy runner.
-    let out = {
-        let mut last_err = None;
-        let mut result = None;
-        for _ in 0..8 {
-            match git_command(&script, &["status"], &dir).output() {
-                Ok(out) => {
-                    result = Some(out);
-                    break;
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                    last_err = Some(err);
-                    std::thread::sleep(std::time::Duration::from_millis(25));
-                }
-                Err(err) => panic!("probe runs: {err}"),
-            }
-        }
-        result.unwrap_or_else(|| panic!("probe runs: {last_err:?}"))
-    };
+    // A git alias runs under git's own `sh` on every host, with the stdin and
+    // the env of the git process. A script file does not run on Windows:
+    // `CreateProcess` starts only Win32 programs.
+    let probe =
+        "alias.probe=!if [ -t 0 ]; then echo TTY; exit 7; fi; echo prompt=${GIT_TERMINAL_PROMPT-}";
+    let out = git_command(git_binary(), &["-c", probe, "probe"], &dir)
+        .output()
+        .expect("git runs");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
@@ -127,6 +105,7 @@ fn git_command_and_run_with_stdin_disable_optional_locks() {
 
 /// Shell lines for a fake git script: drop the [`PINNED_CONFIG`] `-c`
 /// pairs that [`git_process`] puts first, so `$1` is the subcommand.
+#[cfg(unix)]
 const SKIP_PINS: &str = "while [ \"$1\" = -c ]; do shift 2; done\n";
 
 #[test]
@@ -188,22 +167,22 @@ fn git_process_pins_config_that_changes_parsed_output() {
     );
 }
 
-/// Write an executable fake git `script` into a new temp dir.
+/// Write an executable fake git `script` into a new temp dir. Unix only:
+/// `CreateProcess` on Windows starts only Win32 programs, not a script.
+#[cfg(unix)]
 fn fake_git(name: &str, script: &str) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
     let dir = unique_dir(name);
     fs::create_dir_all(&dir).unwrap();
     let bin = dir.join("fake-git");
     fs::write(&bin, script).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
     (dir, bin)
 }
 
 /// Run `cmd()` under `limit`, retrying while write + chmod + exec
 /// returns ETXTBSY on a busy runner.
+#[cfg(unix)]
 fn output_retrying_busy(
     cmd: impl Fn() -> Command,
     limit: std::time::Duration,
@@ -267,6 +246,56 @@ fn default_ssh_command_adds_timeouts_only_when_no_custom_ssh_is_set() {
     assert_eq!(default_ssh_command(None, None, Some("my-ssh -i key")), None);
 }
 
+/// The same rule as
+/// [`remote_git_gets_ssh_connect_timeout_unless_a_custom_ssh_is_set`] with the
+/// real git, read from the command's env, so it also holds on Windows, where
+/// a fake git script cannot run.
+#[test]
+fn ssh_deadline_reads_real_git_config_and_never_replaces_a_custom_ssh() {
+    let dir = unique_dir("ws-git-ssh-real");
+    init_repo_empty(&dir);
+    let ssh_env = |bin: &Path, envs: &[(&str, &str)]| {
+        let mut cmd = git_command(bin, &["fetch", "--quiet"], &dir);
+        cmd.env_remove("GIT_SSH_COMMAND").env_remove("GIT_SSH");
+        cmd.envs(envs.iter().copied());
+        apply_ssh_deadline(&mut cmd, REMOTE_GIT_TIME_LIMIT);
+        child_env(&cmd, "GIT_SSH_COMMAND").map(|value| value.to_string_lossy().into_owned())
+    };
+    // An empty value counts as unset, and it hides a global value of the
+    // host that runs this test.
+    git(&dir, &["config", "core.sshCommand", ""]);
+    assert_eq!(
+        ssh_env(git_binary(), &[]),
+        default_ssh_command(None, None, None),
+        "remote git gets the ssh deadline"
+    );
+    assert_eq!(
+        ssh_env(Path::new("ws-no-such-git"), &[]),
+        None,
+        "a failed core.sshCommand lookup leaves the env alone"
+    );
+    assert_eq!(
+        ssh_env(git_binary(), &[("GIT_SSH_COMMAND", "my-ssh")]).as_deref(),
+        Some("my-ssh"),
+        "GIT_SSH_COMMAND must not be replaced"
+    );
+    assert_eq!(
+        ssh_env(git_binary(), &[("GIT_SSH", "my-ssh")]),
+        None,
+        "GIT_SSH must not get a GIT_SSH_COMMAND on top"
+    );
+    git(&dir, &["config", "core.sshCommand", "my-ssh -i key"]);
+    assert_eq!(
+        ssh_env(git_binary(), &[]),
+        None,
+        "core.sshCommand must not be replaced"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// Unix only: the fake git is a shell script. Its Windows twin is
+// `ssh_deadline_reads_real_git_config_and_never_replaces_a_custom_ssh`.
+#[cfg(unix)]
 #[test]
 fn remote_git_gets_ssh_connect_timeout_unless_a_custom_ssh_is_set() {
     // `config` answers the `core.sshCommand` lookup; `envs` go on the
@@ -691,6 +720,7 @@ fn quit_waits_while_a_pull_still_has_to_restore_the_auto_stash() {
 /// [`quit_during_pull_still_restores_the_auto_stash`] starts. The child
 /// sets the process-wide shutdown flag, which would break every other
 /// test in a shared test process.
+#[cfg(unix)]
 const EXITING_CHILD_ENV: &str = "WS_STATUS_TEST_EXITING_CHILD";
 
 #[cfg(unix)]
@@ -835,7 +865,9 @@ fn stage_unstage_revert_on_fixture() {
 }
 
 /// (target, sibling) pairs: as a glob pathspec, each target also matches
-/// its sibling (`[b]` matches `b`, `*` and `?` match `y` / `x`).
+/// its sibling (`[b]` matches `b`, `*` and `?` match `y` / `x`). Unix only:
+/// a Windows file name cannot hold `*` or `?`.
+#[cfg(unix)]
 const GLOB_NAME_PAIRS: [(&str, &str); 4] = [
     ("a[b].txt", "ab.txt"),
     ("u?.txt", "ux.txt"),
@@ -843,17 +875,20 @@ const GLOB_NAME_PAIRS: [(&str, &str); 4] = [
     ("app/[id]/page.tsx", "app/i/page.tsx"),
 ];
 
+#[cfg(unix)]
 fn write_file(dir: &Path, rel: &str, body: &str) {
     let path = dir.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, body).unwrap();
 }
 
+#[cfg(unix)]
 fn read_file(dir: &Path, rel: &str) -> String {
     fs::read_to_string(dir.join(rel)).unwrap()
 }
 
 /// A repo with every [`GLOB_NAME_PAIRS`] file committed as `base\n`.
+#[cfg(unix)]
 fn glob_names_fixture(prefix: &str) -> std::path::PathBuf {
     let dir = unique_dir(prefix);
     init_repo(&dir);
@@ -1535,12 +1570,16 @@ fn quote_path_repo(prefix: &str) -> PathBuf {
     dir
 }
 
-/// Odd names with their line count, one per quoting case git has.
-const ODD_NAMES: [(&str, &str); 5] = [
+/// Odd names with their line count, one per quoting case git has. Windows
+/// file names cannot hold `>`, a tab, or `"`, so those cases are Unix only.
+const ODD_NAMES: &[(&str, &str)] = &[
     ("my file.txt", "a\nb\n"),
     ("café.md", "c\n"),
+    #[cfg(unix)]
     ("a -> b.txt", "d\n"),
+    #[cfg(unix)]
     ("tab\there.txt", "t\n"),
+    #[cfg(unix)]
     ("say \"hi\".txt", "q\n"),
 ];
 
@@ -1548,7 +1587,7 @@ const ODD_NAMES: [(&str, &str); 5] = [
 fn name_status_lists_give_raw_odd_paths_with_line_counts() {
     let dir = quote_path_repo("ws-git-odd-names");
     let base = exec_git(&["rev-parse", "HEAD"], &dir);
-    for (name, body) in ODD_NAMES {
+    for &(name, body) in ODD_NAMES {
         fs::write(dir.join(name), body).unwrap();
     }
     git(&dir, &["add", "."]);
@@ -1557,7 +1596,7 @@ fn name_status_lists_give_raw_odd_paths_with_line_counts() {
     let commit = list_commit_name_status(&dir, &head);
     let compare = list_compare_name_status(&dir, &base, &head).unwrap();
     let keys = list_compare_patch_keys(&dir, &base, &head);
-    for (name, body) in ODD_NAMES {
+    for &(name, body) in ODD_NAMES {
         let lines = counts(body.lines().count() as u32, 0);
         assert_eq!(stat_of(&commit, name), lines, "commit {name}");
         assert_eq!(stat_of(&compare, name), lines, "compare {name}");
@@ -1668,18 +1707,26 @@ fn compare_patch_keys_spell_paths_like_the_compare_list() {
     init_repo(&dir);
     git(&dir, &["config", "core.quotePath", "true"]);
     let base = exec_git(&["rev-parse", "HEAD"], &dir);
-    fs::write(dir.join("é.txt"), "e\n").unwrap();
-    fs::write(dir.join("tab\there.txt"), "t\n").unwrap();
-    fs::write(dir.join("plain.txt"), "p\n").unwrap();
+    // Sorted, as the assert below reads them. A Windows file name cannot
+    // hold a tab.
+    let names = [
+        "plain.txt",
+        #[cfg(unix)]
+        "tab\there.txt",
+        "é.txt",
+    ];
+    for name in names {
+        fs::write(dir.join(name), format!("{name}\n")).unwrap();
+    }
     git(&dir, &["add", "."]);
     git(&dir, &["commit", "-q", "-m", "odd names"]);
     let head = exec_git(&["rev-parse", "HEAD"], &dir);
     let files = list_compare_name_status(&dir, &base, &head).unwrap();
     let keys = list_compare_patch_keys(&dir, &base, &head);
-    assert_eq!(files.len(), 3, "{files:?}");
+    assert_eq!(files.len(), names.len(), "{files:?}");
     let mut paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
     paths.sort_unstable();
-    assert_eq!(paths, ["plain.txt", "tab\there.txt", "é.txt"], "raw paths");
+    assert_eq!(paths, names, "raw paths");
     for file in &files {
         assert!(keys.contains_key(&file.path), "{} in {keys:?}", file.path);
     }
@@ -2142,6 +2189,7 @@ fn pull_failure_carries_the_git_reason() {
 }
 
 /// First 12 hex chars of a `<sha> <subject>` line of [`stash_entries`].
+#[cfg(unix)]
 fn entry_short(line: &str) -> &str {
     &line[..12]
 }

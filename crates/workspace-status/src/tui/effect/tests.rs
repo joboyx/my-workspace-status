@@ -6826,7 +6826,7 @@ fn pr_changes_alert_within_the_wait_bound_while_poll_cycles_overlap() {
         (state, interp)
     };
     let landed_ago = |state: &mut AppState, ms: u64| {
-        let at = Instant::now() - Duration::from_millis(ms);
+        let at = crate::testutil::instant_ago(Duration::from_millis(ms));
         let failed = found(1, PrState::CiFailed);
         assert!(state.apply_pr_lookup_at(Path::new("a"), "main", Some(remote("a")), failed, at));
         at
