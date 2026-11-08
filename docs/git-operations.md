@@ -6,6 +6,23 @@ Most wrappers in this file attach stdin to `/dev/null` and set `GIT_TERMINAL_PRO
 
 Every git subprocess also runs with `GIT_OPTIONAL_LOCKS=0` (set by `git::git_process`, the shared constructor `git_command` and `run_with_stdin` build on). `ws` polls every repo's status on a timer, and plain `git status` can take `.git/index.lock` to write a refreshed index; with several `ws` instances running, or a user/agent running `git add` / `commit` / `checkout` at the same time, that collides and fails with `Unable to create '.git/index.lock': File exists`. `GIT_OPTIONAL_LOCKS=0` tells git to skip that optional lock (see git-status(1), "BACKGROUND REFRESH"). It only affects optional locks — write commands still take the locks they need — so it is safe on every spawn, read or write.
 
+## Pinned git config
+
+`ws` parses git's output and applies patches it builds from `git diff`. Some user or repository config changes that output, so `git::git_process` starts every git command with these `-c` options. A `-c` value beats every config file.
+
+| Pin | User setting it overrides | Effect without the pin |
+| --- | --- | --- |
+| `color.ui=false`, `color.diff=false` | `color.ui=always`, `color.diff=always` | ANSI escapes in diff text. `color.diff` beats `color.ui`, so both are pinned. |
+| `diff.noprefix=false`, `diff.mnemonicPrefix=false` | `diff.noprefix=true`, `diff.mnemonicPrefix=true` | No `a/` / `b/` path prefixes. A line stage fails in `git apply` (`git diff header lacks filename information`). |
+| `log.showSignature=false` | `log.showSignature=true` | `No signature` or gpg lines in `git log` stdout ahead of the format, so the graph reads a wrong commit id. |
+
+`git_command` also puts `--no-ext-diff --no-textconv` right after the subcommand of `diff`, `show`, `log` and `stash show`, and `--no-textconv` after `blame` (`git::with_diff_driver_off`). `--no-ext-diff` turns off `diff.external`, `GIT_EXTERNAL_DIFF` and `diff.<driver>.command`, which replace the unified diff. `--no-textconv` turns off `diff.<driver>.textconv` filters, whose lines are not the blob's lines, so a patch built from them does not apply. `-c diff.external=` is not a fix: git then tries to run an empty command and the diff fails.
+
+- The pins also reach the hooks and the git commands that git starts (git passes `-c` values on in `GIT_CONFIG_PARAMETERS`).
+- A wrapper set as `WORKSPACE_STATUS_GIT` sees the `-c` pairs before the subcommand.
+- The external diff tool (`E`) is not a git command. It keeps the user's own settings.
+- Not pinned, because the output stays parseable or the setting is the user's choice: `diff.renames`, `status.renames` (rename rows become delete plus add), `diff.context`, `diff.algorithm`, `diff.suppressBlankEmpty` (the parser reads an empty hunk line as context), `core.abbrev`, `core.quotePath` (`-z` reads have no quoting; blame pins it), `diff.relative` (`ws` runs git at the checkout root), `status.*` (`ws` passes `--porcelain=v1 -z --branch --untracked-files=all`), and `format.pretty` / `log.decorate` / `log.date` (they change only the header of the `show` fallback in `diff_commit_file`).
+
 ## Subprocess deadlines
 
 Every git process `ws` starts is built by `git::git_process` and run by one bounded runner, `git::git_output` (`git_output_within` takes an explicit limit). Do not call `output()` or `spawn()` on a git command. A new git spawn must use the same pair. Every other background network spawn has its own time limit (see **Other limits**), and a new one must have one too. The one exception is the `ws --update` self-update sidecar (`update.rs`): it runs in the foreground with the terminal, so the user can stop it with Ctrl-C. The runner puts two bounds on each git run, so a stalled network cannot hold a worker forever.
@@ -58,7 +75,7 @@ If git exits but a process it started keeps stdout or stderr open, the runner ki
 | `diff_compare_file_ctx` | `diff <base>...<head> -- <path>` | `Result<lines>` | One compare path. Empty stdout is `(no diff)`. |
 | `list_worktree_vs_commit_name_status` | `diff --name-status -z -M <base> -- [<old>] <path>`, then `diff --numstat -z -M <base> -- [<old>] <path>` | `Result<NameStatus[]>` | One path, commit against the working tree. Empty list when they match. |
 | `diff_worktree_vs_commit_file_ctx` | `diff [-U<n>] -M <base> -- [<old>] <path>` (`git_worktree_compare_diff_args`) | `Result<lines>` | Commit against the working tree for one path. Empty stdout is `(no diff)`. |
-| `blame_line(cwd, rev, path, line)` | `-c blame.showRoot=false -c core.quotePath=false blame --porcelain -L <n>,<n> [<rev> \| --contents -] -- <path>` | `Result<Option<LineBlame>>` | Who last changed one line. See **Line blame**. |
+| `blame_line(cwd, rev, path, line)` | `-c blame.showRoot=false -c core.quotePath=false blame --no-textconv --porcelain -L <n>,<n> [<rev> \| --contents -] -- <path>` | `Result<Option<LineBlame>>` | Who last changed one line. See **Line blame**. |
 | `previous_line_change(cwd, blamed)` | `diff -U0 -M <prev> <sha> -- [<prev-path>] <path>`, then `blame_line` at `<prev>` | `Result<PreviousLineChange>` | The change before the blamed commit. See **Line blame**. |
 | `commit_times_since(cwd, days)` | `log --branches --since=<days+1>.days.ago --format=%ct` | `Vec<i64>` (committer unix times) | Tree commit-activity sparkline. Local branches only, so it shows local work, not commits a fetch brought in. Any failure is an empty list (no bars). See **Commit activity**. |
 | `list_compare_picker_branches` | `for-each-ref` on `refs/heads/` + `refs/remotes/origin/` | `Result<LocalBranch[]>` | Drops `origin/HEAD` and the current local. No checkout. |
@@ -271,7 +288,7 @@ Manual `f` / `p` / `P` / `d` paint a trailing breadcrumb counter (`Fetching n/N�
 ## Line blame (`git.rs` `blame_line` / `previous_line_change`)
 
 ```
-git -c blame.showRoot=false -c core.quotePath=false blame --porcelain -L <n>,<n> [<rev>] -- <path>
+git -c blame.showRoot=false -c core.quotePath=false blame --no-textconv --porcelain -L <n>,<n> [<rev>] -- <path>
 ```
 
 - **Revision.** No `<rev>` blames the working-tree file. A commit, `<sha>^`, or a stash ref blames that version. The index has no revision name, so `blame_line` reads the blob `:<path>` (`blob_bytes`) and feeds it on stdin with `--contents -`. Lines that differ from HEAD come back uncommitted.
