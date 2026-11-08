@@ -19,7 +19,10 @@ use serde::Deserialize;
 
 use crate::update_check::{github_get, is_newer_release};
 
-/// GitHub Releases list (newest first). `per_page=100` covers this project's history.
+/// GitHub Releases list (newest first), first page only (`per_page=100`, the
+/// API maximum). This project has more than 100 releases, so an install more
+/// than 100 releases behind the latest sees only the newest 100 in the
+/// changelog it prints. The updater itself is not affected.
 const RELEASES_LIST_URL: &str =
     "https://api.github.com/repos/joboyx/my-workspace-status/releases?per_page=100";
 
@@ -194,16 +197,9 @@ fn exec_updater(cmd: &mut Command, name: &str) -> ExitCode {
 mod tests {
     use super::*;
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir() -> PathBuf {
-        let path = env::temp_dir().join(format!(
-            "ws-update-sidecar-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let path = crate::testutil::unique_dir("ws-update-sidecar");
         fs::create_dir_all(&path).unwrap();
         path
     }

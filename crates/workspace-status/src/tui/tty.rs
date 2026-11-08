@@ -218,6 +218,8 @@ fn unix_read() -> io::Result<TtyEvent> {
 #[cfg(unix)]
 fn stdin_pending() -> io::Result<usize> {
     let mut n: libc::c_int = 0;
+    // SAFETY: `FIONREAD` writes one `c_int` through the pointer, and `n` is a
+    // live `c_int` that outlives the call. A bad fd only makes it return -1.
     let rc = unsafe { libc::ioctl(libc::STDIN_FILENO, libc::FIONREAD, &mut n) };
     if rc < 0 {
         return Err(io::Error::last_os_error());
@@ -235,6 +237,8 @@ pub(crate) fn poll_stdin(timeout: Duration) -> io::Result<bool> {
         revents: 0,
     };
     let ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    // SAFETY: `pfd` is one live `pollfd`, and the count passed is 1. `poll`
+    // only writes `revents` in that struct.
     let n = unsafe { libc::poll(&mut pfd, 1, ms) };
     if n < 0 {
         let err = io::Error::last_os_error();
@@ -278,7 +282,10 @@ fn classify_read(nread: isize) -> io::Result<usize> {
 
 #[cfg(unix)]
 fn read_winsize() -> io::Result<(u16, u16)> {
+    // SAFETY: `winsize` is plain integers, so the all-zero value is valid.
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    // SAFETY: `TIOCGWINSZ` writes one `winsize` through the pointer, and `ws`
+    // is a live `winsize`. A bad fd only makes it return -1.
     let rc = unsafe { libc::ioctl(libc::STDIN_FILENO, libc::TIOCGWINSZ, &mut ws) };
     if rc < 0 {
         return Err(io::Error::last_os_error());
@@ -319,6 +326,8 @@ fn enqueue_resize_if_changed(buf: &mut TtyBuf) -> bool {
 #[cfg(unix)]
 fn read_stdin(n: usize) -> io::Result<Vec<u8>> {
     let mut buf = vec![0u8; n.max(1)];
+    // SAFETY: `buf` is a live allocation of `buf.len()` writable bytes, and
+    // `read` writes at most that many.
     let nread = unsafe {
         libc::read(
             libc::STDIN_FILENO,
@@ -749,17 +758,34 @@ fn take_csi_u(bytes: &[u8]) -> Take {
     } else {
         return Take::Skip(bytes.len());
     };
-    if modifiers.contains(KeyModifiers::SHIFT) {
-        if let Some(shifted) = codes
-            .next()
-            .and_then(|field| field.parse::<u32>().ok())
-            .and_then(char::from_u32)
-        {
-            code = KeyCode::Char(shifted);
-            modifiers.remove(KeyModifiers::SHIFT);
-        }
+    if let Some(shifted) = shifted_key(code, modifiers, codes.next()) {
+        code = KeyCode::Char(shifted);
+        // Same modifiers as the legacy byte of that character: SHIFT only
+        // on an uppercase letter (`O`), none on a symbol (`:`).
+        modifiers.set(KeyModifiers::SHIFT, shifted.is_uppercase());
     }
     key_protocol(bytes.len(), KeyEvent::new_with_kind(code, modifiers, kind))
+}
+
+/// The character a Shift+key report names in its shifted-key field
+/// (`CSI 59:58;2u` is Shift+`;` = `:`).
+///
+/// The terminal sends that field because the live loop asks for
+/// `REPORT_ALTERNATE_KEYS`. It knows the keyboard layout, so `:`, `?`,
+/// `>`, `_`, `!` (and `/` on a layout where that is Shift+7) come from it,
+/// not from a guessed US layout. Used only for a text key with Shift and no
+/// Ctrl / Alt / Super: Ctrl-Shift-u keeps `u`, as the legacy C0 byte does.
+fn shifted_key(code: KeyCode, modifiers: KeyModifiers, field: Option<&str>) -> Option<char> {
+    if !matches!(code, KeyCode::Char(_))
+        || !modifiers.contains(KeyModifiers::SHIFT)
+        || modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+    {
+        return None;
+    }
+    field
+        .and_then(|field| field.parse::<u32>().ok())
+        .and_then(char::from_u32)
+        .filter(|c| !c.is_control())
 }
 
 fn translate_functional(codepoint: u32) -> Option<KeyCode> {

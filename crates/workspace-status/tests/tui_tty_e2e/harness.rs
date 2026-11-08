@@ -546,16 +546,29 @@ impl PtySession {
         self.send_bytes(seq.as_bytes());
     }
 
-    /// Shift+letter the way `event::read` sees it with keyboard enhancement.
+    /// Shift+letter the way `event::read` sees it with keyboard enhancement
+    /// from a terminal that sends no shifted-key field.
     ///
-    /// Terminals report the unshifted codepoint with modifier 2 (Shift) and
-    /// a press then a release. A raw `'O'` byte is a different path and does
+    /// Such terminals report the unshifted codepoint with modifier 2
+    /// (Shift) and a press then a release. A raw `'O'` byte is a different path and does
     /// not catch that remap.
     pub fn shift_letter(&mut self, letter: char) {
         let codepoint = u32::from(letter.to_ascii_lowercase());
         self.send_tap(
             &format!("\x1b[{codepoint};2:1u"),
             &format!("\x1b[{codepoint};2:3u"),
+        );
+    }
+
+    /// Shift+key with the shifted-key field, the way a terminal reports it
+    /// once the live loop asks for `REPORT_ALTERNATE_KEYS`
+    /// (`CSI base : shifted ; 2 : 1 u`, then `: 3` release). Shift+`;` is
+    /// `shift_symbol(';', ':')`.
+    pub fn shift_symbol(&mut self, base: char, shifted: char) {
+        let (base, shifted) = (u32::from(base), u32::from(shifted));
+        self.send_tap(
+            &format!("\x1b[{base}:{shifted};2:1u"),
+            &format!("\x1b[{base}:{shifted};2:3u"),
         );
     }
 
@@ -1467,6 +1480,8 @@ fn b64_val(c: u8) -> Option<u8> {
     }
 }
 
+/// Fresh update-check store for the Linux-only desktop harness.
+#[cfg(target_os = "linux")]
 pub(crate) fn write_fresh_update_check(path: &Path) {
     write_update_check(path, None);
 }

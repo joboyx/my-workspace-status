@@ -17,8 +17,11 @@
 //! `WS_STATUS_THEME_STORE`, so a spawn path must not keep naming it. These
 //! tests fail until those hazards stay fixed. The tmux driver of the verify
 //! skill (`scripts/verify-tui.sh`) is a TTY spawn path too, so it is in every
-//! loop below. Recipe:
-//! [docs/architecture.md](../../../docs/architecture.md).
+//! loop below. The skill's controller
+//! (`.agents/skills/verify-workspace-status/scripts/wsctl`) spawns only
+//! through that driver, so the driver's guards cover it; it must never start
+//! the binary or a tmux session itself (`wsctl_routes_spawns_through_the_driver`).
+//! Recipe: [docs/architecture.md](../../../docs/architecture.md).
 
 const RELEASE_YML: &str = include_str!("../../../.github/workflows/release.yml");
 const TAG_RELEASE_YML: &str = include_str!("../../../.github/workflows/tag-release.yml");
@@ -26,6 +29,7 @@ const TAG_RELEASE_SH: &str = include_str!("../../../scripts/tag-release.sh");
 const DIST_WORKSPACE: &str = include_str!("../../../dist-workspace.toml");
 const STILLS_SH: &str = include_str!("../../../scripts/capture-demo-stills.sh");
 const VERIFY_SH: &str = include_str!("../../../scripts/verify-tui.sh");
+const WSCTL: &str = include_str!("../../../.agents/skills/verify-workspace-status/scripts/wsctl");
 const PTY_HARNESS: &str = include_str!("tui_tty_e2e/harness.rs");
 const DESKTOP_HARNESS: &str = include_str!("tui_tty_e2e/desktop.rs");
 
@@ -56,6 +60,269 @@ fn isolates_workspace_env(src: &str) -> bool {
             line.contains("WS_STATUS_WORKSPACE")
                 && (line.contains("env_remove") || line.contains("unset "))
         })
+}
+
+/// `src` without its comment lines (first non-blank character `#`), so no
+/// guard passes or fails on what a comment says. Trailing comments stay.
+fn strip_comment_lines(src: &str) -> String {
+    src.lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `src` without the bodies of its here-documents (`<<'H'` ... `H`): help
+/// text, not commands. The line that opens one stays.
+fn strip_heredoc_bodies(src: &str) -> String {
+    let mut out = Vec::new();
+    let mut end: Option<String> = None;
+    for line in src.lines() {
+        if let Some(delim) = &end {
+            if line.trim() == delim {
+                end = None;
+            }
+            continue;
+        }
+        out.push(line);
+        if let Some(at) = line.find("<<") {
+            let rest = &line[at + 2..];
+            if !rest.starts_with('<') {
+                let delim: String = rest
+                    .trim_start_matches('-')
+                    .trim_start()
+                    .trim_start_matches(['\'', '"'])
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                if !delim.is_empty() {
+                    end = Some(delim);
+                }
+            }
+        }
+    }
+    out.join("\n")
+}
+
+/// True when a line of `src` starts a program directly: `exec`, or the binary
+/// by name. Give it text without comment lines.
+fn runs_a_binary_directly(src: &str) -> bool {
+    src.lines().any(|line| {
+        let first = line.split_whitespace().next().unwrap_or("");
+        matches!(first, "exec" | "workspace-status" | "ws")
+    })
+}
+
+/// True when a line of `src` runs the run's binary: `$RUN_BIN` or
+/// `${RUN_BIN}` (quoted or not) in command position — at the line start or
+/// after `;`, `&&`, `||`, `|`, `$(`, `(`, `{`, a backquote, an `env` style
+/// assignment, or one of `if then else elif do while until ! exec env command
+/// time nohup eval xargs` — or anywhere on a `send-keys` line. A reference
+/// inside a word (`x="$RUN_BIN"`) or after another word (`[[ -x "$RUN_BIN"`,
+/// `json_str "$RUN_BIN"`) is data. Give it text without comment lines.
+fn runs_run_bin(src: &str) -> bool {
+    src.lines().any(|line| {
+        let refs: Vec<usize> = ["$RUN_BIN", "${RUN_BIN}"]
+            .iter()
+            .flat_map(|form| line.match_indices(form).map(|(at, _)| at))
+            .collect();
+        if refs.is_empty() {
+            return false;
+        }
+        if line.contains("send-keys") {
+            return true;
+        }
+        refs.into_iter().any(|at| {
+            let start = if line[..at].ends_with('"') {
+                at - 1
+            } else {
+                at
+            };
+            let head = &line[..start];
+            let in_word = head
+                .chars()
+                .last()
+                .is_some_and(|prev| !(prev.is_whitespace() || "(;|&`!{".contains(prev)));
+            !in_word && in_command_position(&head.split_whitespace().collect::<Vec<_>>())
+        })
+    })
+}
+
+/// Shell words after which the next word is a command.
+const COMMAND_KEYWORDS: [&str; 15] = [
+    "if", "then", "else", "elif", "do", "while", "until", "!", "exec", "env", "command", "time",
+    "nohup", "eval", "xargs",
+];
+
+/// Word endings after which the next word is a command.
+const COMMAND_OPENERS: [&str; 9] = [";", "&&", "||", "|", "$(", "(", "{", "`", "!"];
+
+/// True when `word` is a `NAME=value` assignment.
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty()
+            && name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+    })
+}
+
+/// True when the word after `before` (the words before it on its line) is a
+/// command: nothing before it but assignments, or an opener or a keyword
+/// right before it.
+fn in_command_position(before: &[&str]) -> bool {
+    let mut words = before;
+    while let [rest @ .., last] = words {
+        if !is_assignment(last) {
+            break;
+        }
+        words = rest;
+    }
+    match words.last() {
+        None => true,
+        Some(last) => {
+            COMMAND_KEYWORDS.contains(last) || COMMAND_OPENERS.iter().any(|op| last.ends_with(op))
+        }
+    }
+}
+
+/// The tmux subcommands wsctl may run, each on a run's private server: check
+/// the session, read pane fields and the screen, and resize the window. Keys
+/// go through the driver (`drv keys`), so `send-keys` is not here: a wsctl
+/// `send-keys` could type a command line that starts the binary. Nothing here
+/// makes a session, a window or a pane (`new`, `new-session`, `new-window`,
+/// `split-window`, `respawn-pane`).
+const WSCTL_TMUX_SUBCOMMANDS: [&str; 4] = [
+    "has-session",
+    "display-message",
+    "set-option",
+    "resize-window",
+];
+
+/// The only `set-option` form wsctl may use: hooks are options in tmux 3.x,
+/// so any other option could run a command.
+const WSCTL_SET_OPTION: &str = "set-option -g window-size manual";
+
+/// The tmux subcommand of every tmux call in `src` (no comment lines, no
+/// here-document bodies). A call is `tm` (wsctl's helper) or `tmux` in
+/// command position (see `in_command_position`; `"$(tmux` is one too); the
+/// subcommand is the next word, or the word after `tmux -L <socket>`. `tmux
+/// -V` has none. Other `tmux` words are prose (`command -v tmux`, `check tmux
+/// 1`, `"... without tmux ..."`). Err names the line of a call that is not on
+/// a private socket, chains subcommands (`\;`), or forwards `"$@"` outside the
+/// `tm()` helper.
+fn tmux_subcommands(src: &str) -> Result<Vec<String>, String> {
+    let mut subs = Vec::new();
+    for line in src.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let mut on_line = false;
+        for (i, word) in words.iter().enumerate() {
+            // `"$(tm x` and `(tmux` start a command; a prefix left on the word
+            // (`"tmux`) makes it prose.
+            let core = word
+                .rsplit("$(")
+                .next()
+                .unwrap_or(word)
+                .trim_start_matches(['(', '!', '`', '{', ';', '|', '&']);
+            if !matches!(core, "tm" | "tmux") {
+                continue;
+            }
+            if core.len() == word.len() && !in_command_position(&words[..i]) {
+                continue;
+            }
+            let sub = match (core, words.get(i + 1).copied()) {
+                ("tmux", Some("-V")) => continue,
+                ("tmux", Some("-L")) => words.get(i + 3).copied(),
+                ("tmux", _) => return Err(format!("tmux call without -L <socket>: {line}")),
+                (_, next) => next,
+            };
+            let sub = sub
+                .ok_or_else(|| format!("tmux call with no subcommand: {line}"))?
+                .trim_matches(['"', '\'', ';']);
+            if sub == "$@" {
+                if !line.trim_start().starts_with("tm() {") {
+                    return Err(format!("tmux forwards \"$@\" outside tm(): {line}"));
+                }
+                continue;
+            }
+            on_line = true;
+            subs.push(sub.to_string());
+        }
+        if on_line && line.contains("\\;") {
+            return Err(format!("tmux call chains subcommands: {line}"));
+        }
+    }
+    Ok(subs)
+}
+
+/// Every way `src` (wsctl's text) breaks the rule that it spawns only through
+/// the driver; empty when it keeps it. Comment lines are stripped first; the
+/// `$RUN_BIN` and tmux checks also skip here-document bodies (help text).
+fn wsctl_spawn_problems(src: &str) -> Vec<String> {
+    let code = strip_comment_lines(src);
+    let commands = strip_heredoc_bodies(&code);
+    let mut problems = Vec::new();
+    if !code.contains("DRIVER=\"$REPO_ROOT/scripts/verify-tui.sh\"") {
+        problems.push("no DRIVER=\"$REPO_ROOT/scripts/verify-tui.sh\"".to_string());
+    }
+    if !code.contains("drv() { \"$DRIVER\" \"$@\"") {
+        problems.push("no drv() { \"$DRIVER\" \"$@\" ... }".to_string());
+    }
+    if !code.contains("tm() { tmux -L \"$RUN_SOCK\" \"$@\"; }") {
+        problems.push("no tm() { tmux -L \"$RUN_SOCK\" \"$@\"; }".to_string());
+    }
+    for verb in ["build", "launch", "keys", "wait", "capture", "cli", "stop"] {
+        if !code.contains(&format!("drv {verb}")) && !code.contains(&format!("args=({verb})")) {
+            problems.push(format!(
+                "`{verb}` not routed through the driver (drv {verb})"
+            ));
+        }
+    }
+    for banned in [
+        "new-session",
+        "new -d",
+        "cargo run",
+        "cargo build",
+        "target/debug",
+        "debug/workspace-status",
+    ] {
+        if code.contains(banned) {
+            problems.push(format!(
+                "starts a TUI, a session or a build itself: `{banned}`"
+            ));
+        }
+    }
+    if runs_a_binary_directly(&code) {
+        problems.push("execs workspace-status / ws directly".to_string());
+    }
+    // Here-document bodies are skipped below, so they may only be printed.
+    for line in code.lines() {
+        let opens = line
+            .match_indices("<<")
+            .any(|(at, _)| !line[at + 2..].starts_with('<') && !line[..at].ends_with('<'));
+        if opens && line.split_whitespace().next() != Some("cat") {
+            problems.push(format!(
+                "here-document fed to something other than cat: {line}"
+            ));
+        }
+    }
+    if runs_run_bin(&commands) {
+        problems.push("runs $RUN_BIN as a command".to_string());
+    }
+    match tmux_subcommands(&commands) {
+        Err(err) => problems.push(err),
+        Ok(subs) => {
+            for sub in subs {
+                if !WSCTL_TMUX_SUBCOMMANDS.contains(&sub.as_str()) {
+                    problems.push(format!("tmux subcommand `{sub}` is not allowed"));
+                }
+            }
+        }
+    }
+    for line in code.lines().filter(|line| line.contains("set-option")) {
+        if !line.contains(WSCTL_SET_OPTION) {
+            problems.push(format!("only `{WSCTL_SET_OPTION}` is allowed: {line}"));
+        }
+    }
+    problems
 }
 
 #[test]
@@ -509,5 +776,107 @@ fn verify_driver_reset_removes_only_directories() {
     assert!(
         refuse < remove && body.contains("if [[ -d \"$forge/$d\" ]]; then rm -rf"),
         "scenario --reset must check for a file before it removes, and remove directories only"
+    );
+}
+
+/// The smallest text that keeps every wsctl spawn rule, for the guard's
+/// self-tests.
+const WSCTL_MINIMAL: &str = "DRIVER=\"$REPO_ROOT/scripts/verify-tui.sh\"
+drv() { \"$DRIVER\" \"$@\" 2>\"$ERRF\"; }
+tm() { tmux -L \"$RUN_SOCK\" \"$@\"; }
+drv build; args=(launch); drv keys; drv wait; drv capture; drv cli; drv stop
+command -v tmux >/dev/null 2>&1 || fail x
+check tmux 1 \"$(tmux -V 2>/dev/null || echo tmux)\"
+tm has-session -t \"$SESSION\" 2>/dev/null
+pane_field() { tm display-message -p -t \"$SESSION\" \"#{$1}\" 2>/dev/null; }
+tm set-option -g window-size manual >/dev/null 2>&1
+tm resize-window -t \"$SESSION\" -x 1 -y 1
+check binary 0 \"no binary at $RUN_BIN: wsctl stop\"
+if [[ ! -x \"$RUN_BIN\" ]]; then :; fi
+elif [[ \"$RUN_BIN\" -nt \"$RUN_DIR/launch.sh\" ]]; then :
+want=\"$RUN_BIN\"; printf '%s' \"$(json_str \"$RUN_BIN\")\"
+# exec \"$RUN_BIN\"; tmux new-session; tm send-keys \"$RUN_BIN\" Enter
+";
+
+#[test]
+fn wsctl_spawn_guard_rejects_bad_snippets() {
+    assert_eq!(
+        wsctl_spawn_problems(WSCTL_MINIMAL),
+        Vec::<String>::new(),
+        "the minimal wsctl text keeps every rule (comment lines do not count)"
+    );
+    // A required line that is only a comment does not count.
+    let commented = WSCTL_MINIMAL.replace("DRIVER=", "# DRIVER=");
+    assert!(
+        !wsctl_spawn_problems(&commented).is_empty(),
+        "a commented-out DRIVER= must fail"
+    );
+    let commented = WSCTL_MINIMAL.replace("drv build;", "# drv build;");
+    assert!(
+        !wsctl_spawn_problems(&commented).is_empty(),
+        "a commented-out drv build must fail"
+    );
+    for bad in [
+        // The binary started directly.
+        "exec \"$bin\"",
+        "workspace-status --plain",
+        "ws -i",
+        "\"$RUN_BIN\" --json",
+        "  $RUN_BIN --json",
+        "x=1; \"$RUN_BIN\" --plain",
+        "ok && $RUN_BIN --json",
+        "false || \"${RUN_BIN}\"",
+        "echo | \"$RUN_BIN\"",
+        "v=\"$(\"$RUN_BIN\" --version)\"",
+        "out=$($RUN_BIN --json)",
+        "( \"$RUN_BIN\" )",
+        "if \"$RUN_BIN\" --version; then :; fi",
+        "then ${RUN_BIN} -i",
+        "! \"$RUN_BIN\" --plain",
+        "exec_it; exec \"$RUN_BIN\"",
+        "env FOO=1 \"$RUN_BIN\"",
+        "FOO=1 \"$RUN_BIN\"",
+        "command \"$RUN_BIN\" --plain",
+        // A session, window or pane of its own, or keys that type a command.
+        "tm new-window -t ws",
+        "tm split-window -t ws",
+        "tm respawn-pane -k -t ws",
+        "tmux -L \"$RUN_SOCK\" new -d",
+        "tmux -L \"$RUN_SOCK\" new-session -d",
+        "tm send-keys -t ws q",
+        "tm send-keys -t ws \"$RUN_BIN\" Enter",
+        "tmux -L s send-keys -t ws \"exec ${RUN_BIN}\" Enter",
+        "tm has-session -t ws \\; new-window",
+        // The default server, another socket, or a forward outside tm().
+        "tmux new-session -d",
+        "tmux ls",
+        "tmux -S /tmp/sock ls",
+        "tmux -f /dev/null new",
+        "x() { tmux -L s \"$@\"; }",
+        // A here-document run as a script hides its body from the checks.
+        "bash <<'X'\n\"$RUN_BIN\"\nX",
+        // A build of its own.
+        "cargo build -p workspace-status",
+        "bin=\"$REPO_ROOT/target/debug/workspace-status\"",
+    ] {
+        let src = format!("{WSCTL_MINIMAL}{bad}\n");
+        assert!(
+            !wsctl_spawn_problems(&src).is_empty(),
+            "the wsctl spawn guard must reject `{bad}`"
+        );
+    }
+}
+
+#[test]
+fn wsctl_routes_spawns_through_the_driver() {
+    // wsctl is the agent-facing layer of the verify skill. Every spawn must go
+    // through scripts/verify-tui.sh, so the isolation pinned above for the
+    // driver covers wsctl too: no tmux session, window, pane, keys, build or
+    // binary run of its own. It may only check, read and resize the run's
+    // private tmux server (WSCTL_TMUX_SUBCOMMANDS).
+    assert_eq!(
+        wsctl_spawn_problems(WSCTL),
+        Vec::<String>::new(),
+        "wsctl must spawn only through scripts/verify-tui.sh"
     );
 }

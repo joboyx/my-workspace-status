@@ -49,9 +49,14 @@ fn tree_ready(screen: &str) -> bool {
 
 fn save_line_comment(tui: &mut PtySession, name: &str, body: &str) {
     tui.tab();
+    // The diff header names the file only once its diff has loaded. Until
+    // then the pane still shows the previous file, and `;` would edit the
+    // comment there.
+    let header = format!("/{name}");
     tui.wait_pred(
         |screen| {
             tree_has(screen, name)
+                && screen.contains(&header)
                 && !tree_cursor_on(screen, name)
                 && overlay_closed(screen)
                 && (screen.contains("UNSTAGED")

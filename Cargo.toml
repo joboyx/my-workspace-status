@@ -3,13 +3,18 @@ resolver = "2"
 members = ["crates/workspace-status-graph", "crates/workspace-status"]
 
 [workspace.lints.clippy]
-# Known debt, not a blanket exemption. Eight wide signatures remain:
-# `render.rs` (419, 470, 1411, 1614), `comments/target.rs` (199, 274),
-# `diff.rs` (1180), `graph/layout.rs` (205). Each wants
-# the params-struct treatment `graph/widget.rs::put_painted_line` got
-# (20 args -> 9). Drop this line once they are done.
+# Known debt, not a blanket exemption. Nine wide signatures remain, named
+# by function (line numbers drift): in the graph crate `layout.rs::paint_cells`
+# and `widget.rs::put_painted_line`; in the app crate
+# `tui/comments/target.rs::{resolve_comment_target, resolve_entity_reference}`,
+# `tui/diff.rs::diff_pane_header`, and `tui/render.rs::{paint_tree_row,
+# paint_segmented_row, paint_diff_row, paint_cell_spans}`. Each wants a
+# params-struct. Drop this line once they are done.
 too_many_arguments = "allow"
-# `Effect` is at least 736 bytes because of its largest variant. Boxing it
+# Five enums trip this lint: `JobOutcome` (`tui/effect.rs`, largest variant
+# 808 bytes), `SessionTab` (`tui/tabs.rs`, 1120), `PrDetailLookup`
+# (`tui/pull_request.rs`, 288), `PrDetailState` and `BranchPr`
+# (`tui/state/pull_request.rs`, 288 and 208). Boxing the large variants
 # touches every construction site, so it is its own change.
 large_enum_variant = "allow"
 

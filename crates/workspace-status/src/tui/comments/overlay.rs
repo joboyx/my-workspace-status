@@ -6,6 +6,8 @@
 use crossterm::event::KeyEvent;
 use tui_textarea::{CursorMove, Input, Key, TextArea};
 
+use workspace_status_graph::short_id;
+
 use super::store::CommentKey;
 
 /// First footer row: save / delete / Ctrl-R resolve or unresolve / cancel.
@@ -218,7 +220,7 @@ pub fn comment_key_label(key: &CommentKey) -> String {
     match key {
         CommentKey::Branch { repo, branch } => format!("{repo} · branch {branch}"),
         CommentKey::Commit { repo, sha } => {
-            format!("{repo} · commit {}", short_sha(sha))
+            format!("{repo} · commit {}", short_id(sha))
         }
         CommentKey::Worktree { path } => format!("{path} · worktree"),
         CommentKey::WorktreeLine {
@@ -239,7 +241,7 @@ pub fn comment_key_label(key: &CommentKey) -> String {
             end_line,
         } => format!(
             "{repo} · commit {} · {path}:{}",
-            short_sha(sha),
+            short_id(sha),
             line_span_label(*line, *end_line)
         ),
     }
@@ -265,14 +267,6 @@ fn visible_window(cursor_row: usize, line_count: usize, window: usize) -> (usize
         start = n - w;
     }
     (start, start + w)
-}
-
-fn short_sha(sha: &str) -> &str {
-    if sha.len() >= 7 {
-        &sha[..7]
-    } else {
-        sha
-    }
 }
 
 fn line_span_label(line: u32, end_line: u32) -> String {

@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use workspace_status_graph::short_id;
 
 use super::action::Action;
 use crate::git::{BlameRev, LineBlame};
@@ -100,7 +101,7 @@ pub struct GraphReveal {
 
 /// First seven characters of a commit id.
 pub fn short_sha(sha: &str) -> String {
-    sha.chars().take(7).collect()
+    short_id(sha).to_string()
 }
 
 /// One `git blame -L n,n` question: checkout, revision, path, line, and

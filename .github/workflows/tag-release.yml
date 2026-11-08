@@ -30,6 +30,7 @@ permissions:
 jobs:
   tag:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     # Holds RELEASE_DEPLOY_KEY. Its deployment branch policy allows only main,
     # so a pull request workflow cannot read the key.
     environment: release

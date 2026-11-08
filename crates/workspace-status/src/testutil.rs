@@ -230,6 +230,41 @@ pub fn unique_dir(prefix: &str) -> PathBuf {
     ))
 }
 
+/// The argument that ends a [`write_sh_script`] script before its body.
+#[cfg(target_os = "macos")]
+const SH_SCRIPT_WARM_UP: &str = "--warm-up";
+
+/// Writes `path` as an executable `/bin/sh` script that runs `body`.
+///
+/// On macOS the first exec of a new executable file waits for a system
+/// security check, and the system checks one file at a time. With many tests
+/// starting new scripts at once, a script can take seconds to start, so a
+/// test that runs it under a short time limit fails. On macOS this function
+/// therefore runs the script once with no time limit, as
+/// `<path> --warm-up`. A first line ends that run before `body`, so `body`
+/// has no side effects from it. Elsewhere the script is only `body`.
+#[cfg(unix)]
+pub fn write_sh_script(path: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(target_os = "macos")]
+    let guard = format!("if [ \"$1\" = {SH_SCRIPT_WARM_UP} ]; then exit 0; fi\n");
+    #[cfg(not(target_os = "macos"))]
+    let guard = "";
+    fs::write(path, format!("#!/bin/sh\n{guard}{body}\n")).expect("write script");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("make script executable");
+    #[cfg(target_os = "macos")]
+    {
+        let status = Command::new(path)
+            .arg(SH_SCRIPT_WARM_UP)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("warm up script");
+        assert!(status.success(), "warm-up run of {path:?}: {status}");
+    }
+}
+
 /// What the checkout under test holds when the maintainer force-pushes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RewriteKind {

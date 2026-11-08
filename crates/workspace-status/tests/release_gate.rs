@@ -3,7 +3,7 @@
 //! `.github/workflows/test.yml` runs the checks on pull requests and on main.
 //! Its `release` job calls `.github/workflows/tag-release.yml` only after
 //! every check passed on a main push, and only while that commit is still the
-//! tip of main. The main ruleset requires the same checks by job name and lets
+//! tip of main. The main ruleset requires the checks by job name and lets
 //! only the release deploy key bypass them. These tests fail when a check job
 //! is missing from the gate or from the documented ruleset list, when
 //! tag-release gets a trigger of its own, or when the deploy key push path
@@ -16,6 +16,11 @@ const ARCHITECTURE_MD: &str = include_str!("../../../docs/architecture.md");
 
 /// Jobs of `test.yml` that are not checks: the gate and the release call.
 const RELEASE_JOBS: [&str; 2] = ["release-gate", "release"];
+
+/// Check jobs that run but do not gate a release: the Windows suite is not
+/// green yet. Each one sets `continue-on-error: true` and stays out of
+/// `release-gate.needs` and of the documented required checks.
+const NON_GATING_JOBS: [&str; 1] = ["cargo-windows"];
 
 /// Top-level `jobs:` entries of a workflow, as `(name, body)` in file order.
 ///
@@ -76,7 +81,7 @@ fn check_jobs() -> Vec<&'static str> {
     jobs(TEST_YML)
         .into_iter()
         .map(|(name, _)| name)
-        .filter(|name| !RELEASE_JOBS.contains(name))
+        .filter(|name| !RELEASE_JOBS.contains(name) && !NON_GATING_JOBS.contains(name))
         .collect()
 }
 
@@ -92,10 +97,10 @@ fn jobs_parser_reads_top_level_jobs_only() {
 #[test]
 fn release_gate_needs_every_check_job() {
     let checks = check_jobs();
-    for expected in ["lint", "cargo", "tui-tty-desktop"] {
+    for expected in ["lint", "cargo", "cargo-macos", "tui-tty-desktop"] {
         assert!(
             checks.contains(&expected),
-            "test.yml must keep the `{expected}` check (the main ruleset requires it by name)"
+            "test.yml must keep the `{expected}` check (the main ruleset requires checks by name)"
         );
     }
     let all = jobs(TEST_YML);
@@ -107,6 +112,104 @@ fn release_gate_needs_every_check_job() {
         gate, want,
         "release-gate must need every check job of test.yml, so no release runs before a check passes"
     );
+}
+
+#[test]
+fn non_gating_jobs_cannot_fail_the_run_or_block_a_release() {
+    let all = jobs(TEST_YML);
+    let gate = needs(job(&all, "release-gate"));
+    for name in NON_GATING_JOBS {
+        assert!(
+            job(&all, name).contains("continue-on-error: true"),
+            "test.yml `{name}` is not gating yet and must set `continue-on-error: true`"
+        );
+        assert!(
+            !gate.contains(&name),
+            "release-gate must not need the non-gating `{name}` job"
+        );
+    }
+}
+
+#[test]
+fn default_suite_runs_on_every_released_os_family() {
+    // dist-workspace.toml ships Linux, macOS and Windows builds; each one
+    // gets the default suite before a release.
+    let all = jobs(TEST_YML);
+    for (name, runner, commands) in [
+        (
+            "cargo",
+            "runs-on: ubuntu-latest",
+            &["run: cargo test --workspace --locked"][..],
+        ),
+        (
+            "cargo-macos",
+            "runs-on: macos-15",
+            &["run: cargo test --workspace --locked"][..],
+        ),
+        (
+            "cargo-windows",
+            "runs-on: windows-latest",
+            &[
+                "run: cargo build --workspace --all-targets --locked",
+                "run: cargo test --workspace --locked",
+            ][..],
+        ),
+    ] {
+        let body = job(&all, name);
+        assert!(
+            body.contains(runner),
+            "test.yml `{name}` must keep `{runner}`"
+        );
+        for command in commands {
+            assert!(
+                body.contains(command),
+                "test.yml `{name}` must keep `{command}`"
+            );
+        }
+    }
+    assert!(
+        job(&all, "cargo-windows").contains("core.autocrlf false"),
+        "cargo-windows must check out with LF line endings; tests read checked-in text"
+    );
+}
+
+/// Entries of a top-level `<key>:` block of a workflow, trimmed, in file order.
+fn top_level_block<'a>(workflow: &'a str, key: &str) -> Vec<&'a str> {
+    let header = format!("{key}:");
+    workflow
+        .lines()
+        .skip_while(|line| *line != header)
+        .skip(1)
+        .take_while(|line| line.starts_with(' '))
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect()
+}
+
+#[test]
+fn test_yml_token_is_read_only_and_every_job_has_a_timeout() {
+    assert_eq!(
+        top_level_block(TEST_YML, "permissions"),
+        ["contents: read"],
+        "test.yml must default to a read-only token; a job that needs more sets its own permissions"
+    );
+    for (name, body) in jobs(TEST_YML) {
+        if body.contains("uses: ./.github/workflows/") {
+            // A reusable workflow call cannot set timeout-minutes: each job
+            // of the called workflow sets it.
+            for (called, called_body) in jobs(TAG_RELEASE_YML) {
+                assert!(
+                    called_body.contains("timeout-minutes:"),
+                    "tag-release.yml `{called}` (called by test.yml `{name}`) must set timeout-minutes"
+                );
+            }
+            continue;
+        }
+        assert!(
+            body.contains("timeout-minutes:"),
+            "test.yml `{name}` must set timeout-minutes, so a hung run cannot hold a runner for 6 hours"
+        );
+    }
 }
 
 #[test]
@@ -203,6 +306,12 @@ fn architecture_doc_lists_every_required_check() {
         assert!(
             line.contains(&format!("`{check}`")),
             "docs/architecture.md required checks must name `{check}`; the ruleset must match test.yml"
+        );
+    }
+    for name in NON_GATING_JOBS {
+        assert!(
+            !line.contains(&format!("`{name}`")),
+            "docs/architecture.md required checks must not name the non-gating `{name}`"
         );
     }
 }
