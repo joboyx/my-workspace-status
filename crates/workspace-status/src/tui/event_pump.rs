@@ -821,6 +821,49 @@ mod tests {
                 );
             }
         }
+        // The facts read and the save job are blocking wrappers: the
+        // reducer files must not call them either.
+        for (name, src) in [
+            ("state/mod.rs", state_src),
+            ("state/explorer_tab.rs", explorer_state),
+            ("app.rs", app),
+            ("event_loop.rs", loop_src),
+        ] {
+            assert!(
+                !src.contains("collect_repo_file_facts("),
+                "collect_repo_file_facts( reads worktree files; it runs on the status worker, not the loop thread ({name})"
+            );
+        }
+        for (name, src) in [
+            ("state/explorer_tab.rs", explorer_state),
+            ("app.rs", app),
+            ("effect.rs", effect),
+            ("event_loop.rs", loop_src),
+        ] {
+            assert!(
+                !src.contains("FileFactsCache::from_disk("),
+                "FileFactsCache::from_disk( reads every dirty file; only the launch may call it ({name})"
+            );
+        }
+        assert_eq!(
+            state_src.matches("FileFactsCache::from_disk(").count(),
+            2,
+            "state/mod.rs may read the file facts from disk only at launch and in the #[cfg(test)] helper"
+        );
+        assert_eq!(
+            effect.matches("job.run()").count(),
+            1,
+            "effect.rs runs a store-save job only inside its spawned worker closure"
+        );
+        assert!(
+            effect.contains("JobOutcome::StoreSaved { saved: job.run() }"),
+            "the store-save job runs inside the spawned worker closure"
+        );
+        assert_eq!(
+            state_src.matches("job.run()").count(),
+            1,
+            "state/mod.rs runs a store-save job only in the #[cfg(test)] flush helper"
+        );
         assert!(
             !state_src.contains("file_disk_token("),
             "tree signatures and viewed marks take disk tokens from the file facts"
