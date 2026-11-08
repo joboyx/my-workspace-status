@@ -25,6 +25,8 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
+#[cfg(unix)]
+use std::sync::atomic::AtomicPtr;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{mpsc, OnceLock};
 use std::time::{Duration, Instant};
@@ -454,8 +456,10 @@ pub(crate) fn stop_running_git() {
 static RESTORING_USER_WORK: AtomicUsize = AtomicUsize::new(0);
 
 /// Longest quit waits for [`RESTORING_USER_WORK`]: the auto-stash pop's own
-/// time limit plus the `SIGTERM` grace of a stopped git. By then the pop
-/// has ended, one way or the other.
+/// time limit plus the `SIGTERM` grace of a stopped git. A pop that was
+/// already running has ended by then. A pull whose git started after the
+/// stop pass may still be running when the wait gives up; if the process
+/// ends before its pop, the changes stay in `git stash list`.
 const USER_WORK_RESTORE_WAIT: Duration = LOCAL_GIT_TIME_LIMIT.saturating_add(GIT_TERM_GRACE);
 
 /// Counts one run in [`RESTORING_USER_WORK`] while it lives.
@@ -533,16 +537,22 @@ pub(crate) fn stop_git_on_exit_signals() {
             action.sa_sigaction =
                 on_exit_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
             action.sa_flags = libc::SA_RESETHAND;
+            // Block the other exit signals while the handler runs, so a
+            // second one cannot end `ws` part way through the terminal
+            // restore. They stay pending and arrive once it returns.
             libc::sigemptyset(&mut action.sa_mask);
+            for blocked in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+                libc::sigaddset(&mut action.sa_mask, blocked);
+            }
             libc::sigaction(signal, &action, std::ptr::null_mut());
         }
     }
 }
 
 /// The `fn()` the exit-signal handler calls after it stops git, stored as
-/// its address; `0` for none. Set by [`set_exit_signal_hook`].
+/// a pointer; null for none. Set by [`set_exit_signal_hook`].
 #[cfg(unix)]
-static EXIT_SIGNAL_HOOK: AtomicUsize = AtomicUsize::new(0);
+static EXIT_SIGNAL_HOOK: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Make the exit-signal handler call `hook` after it stops running git and
 /// before the signal ends `ws`. The TUI registers its terminal restore
@@ -551,7 +561,7 @@ static EXIT_SIGNAL_HOOK: AtomicUsize = AtomicUsize::new(0);
 /// allocation, no lock).
 #[cfg(unix)]
 pub(crate) fn set_exit_signal_hook(hook: fn()) {
-    EXIT_SIGNAL_HOOK.store(hook as usize, Ordering::SeqCst);
+    EXIT_SIGNAL_HOOK.store(hook as *mut (), Ordering::SeqCst);
 }
 
 /// The exit-signal handler: async-signal-safe calls only (atomic loads,
@@ -568,11 +578,11 @@ extern "C" fn on_exit_signal(signal: libc::c_int) {
         }
     }
     let hook = EXIT_SIGNAL_HOOK.load(Ordering::SeqCst);
-    if hook != 0 {
-        // SAFETY: a non-zero value is only ever the address of a `fn()`
-        // that `set_exit_signal_hook` stored, and a fn pointer has the
-        // size of `usize`.
-        let hook = unsafe { std::mem::transmute::<usize, fn()>(hook) };
+    if !hook.is_null() {
+        // SAFETY: a non-null value is only ever a `fn()` that
+        // `set_exit_signal_hook` cast to `*mut ()`; casting it back gives
+        // that same function pointer.
+        let hook = unsafe { std::mem::transmute::<*mut (), fn()>(hook) };
         hook();
     }
     // SAFETY: both are async-signal-safe; the signal is blocked while this

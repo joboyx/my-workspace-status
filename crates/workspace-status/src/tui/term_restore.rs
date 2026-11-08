@@ -25,22 +25,54 @@ use super::term_progress::{PROGRESS_CLEAR, PROGRESS_SHOWN};
 pub(super) const RESTORE_SEQ: &[u8] =
     b"\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[<1u\x1b[?2026l\x1b[?1049l\x1b[?25h";
 
-/// The stdin terminal modes from before raw mode. Set once by
-/// [`save_terminal_modes`]. The signal handler reads it with
+/// The terminal modes from before raw mode, and the descriptor they were
+/// read from.
+struct SavedModes {
+    /// Stdin when it is a terminal, else an open `/dev/tty`: the same
+    /// choice crossterm makes for raw mode.
+    fd: libc::c_int,
+    /// The modes `tcgetattr` read from `fd`.
+    termios: libc::termios,
+}
+
+/// Set once by [`save_terminal_modes`]. The signal handler reads it with
 /// `OnceLock::get`, which is one atomic load and a reference: no lock and
 /// no allocation.
-static SAVED_TERMIOS: OnceLock<libc::termios> = OnceLock::new();
+static SAVED_MODES: OnceLock<SavedModes> = OnceLock::new();
 
-/// Save the stdin terminal modes for [`restore_from_signal`]. `run_tui`
-/// calls it just before raw mode. Stdin that is not a terminal saves
+/// Save the terminal modes for [`restore_from_signal`]. `run_tui` calls it
+/// just before raw mode.
+///
+/// It reads them from the terminal crossterm puts in raw mode: stdin when
+/// stdin is a terminal, else `/dev/tty` (stdin from a pipe, say). The
+/// `/dev/tty` descriptor stays open for the life of the process, so the
+/// signal handler does not have to open it. With no terminal it saves
 /// nothing, and the signal restore then only writes [`RESTORE_SEQ`].
 pub(super) fn save_terminal_modes() {
+    if SAVED_MODES.get().is_some() {
+        return;
+    }
+    // SAFETY: `isatty`, `open` and `close` are plain syscalls; the path is
+    // a NUL-terminated literal.
+    let fd = unsafe {
+        if libc::isatty(libc::STDIN_FILENO) == 1 {
+            libc::STDIN_FILENO
+        } else {
+            libc::open(c"/dev/tty".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC)
+        }
+    };
+    if fd < 0 {
+        return;
+    }
     let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
     // SAFETY: `tcgetattr` writes a whole `termios` into the pointer on
     // success, and the value is read only then.
     unsafe {
-        if libc::tcgetattr(libc::STDIN_FILENO, termios.as_mut_ptr()) == 0 {
-            let _ = SAVED_TERMIOS.set(termios.assume_init());
+        if libc::tcgetattr(fd, termios.as_mut_ptr()) == 0 {
+            let termios = termios.assume_init();
+            let _ = SAVED_MODES.set(SavedModes { fd, termios });
+        } else if fd != libc::STDIN_FILENO {
+            libc::close(fd);
         }
     }
 }
@@ -64,11 +96,11 @@ pub(super) fn restore_from_signal() {
         write_stdout(POINTER_RESET.as_bytes());
     }
     write_stdout(RESTORE_SEQ);
-    if let Some(saved) = SAVED_TERMIOS.get() {
-        // SAFETY: `saved` is a `termios` that `tcgetattr` filled; the call
-        // only reads it.
+    if let Some(saved) = SAVED_MODES.get() {
+        // SAFETY: `saved.termios` is a `termios` that `tcgetattr` filled
+        // from `saved.fd`, which stays open; the call only reads it.
         unsafe {
-            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, saved);
+            libc::tcsetattr(saved.fd, libc::TCSANOW, &saved.termios);
         }
     }
 }
