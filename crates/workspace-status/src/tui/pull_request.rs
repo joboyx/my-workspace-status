@@ -1389,7 +1389,8 @@ pub(crate) fn wait_until(
 }
 
 /// Wait for `child` on a detached thread so it does not stay a zombie.
-fn reap_in_background(mut child: Child) {
+/// Browser openers and detached GUI editors (`tui/editor.rs`) use it.
+pub(crate) fn reap_in_background(mut child: Child) {
     std::thread::spawn(move || {
         let _ = child.wait();
     });
