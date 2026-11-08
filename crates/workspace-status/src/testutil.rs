@@ -12,6 +12,9 @@
 //! care about, so a new field means one edit here, not one per test module.
 //! The app-state fixtures ([`app_state`], [`app_state_ascii`],
 //! [`app_state_of`]) build an [`AppState`] over those rows.
+//!
+//! [`panic_hook_lock`] serializes the tests that touch the process-wide
+//! panic hook or let a worker job panic.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -26,6 +29,23 @@ use crate::snapshot::{
     build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus, WorkspaceSnapshot,
 };
 use crate::tui::AppState;
+
+// ---------------------------------------------------------------------------
+// Process-wide panic hook
+// ---------------------------------------------------------------------------
+
+/// Serializes the tests that touch the process-wide panic state: the tests
+/// that install the TUI panic hook and set the terminal set-up flag, and
+/// the tests that let a worker job panic under `run_job`. While a hook
+/// test runs, the hook adds the panic location to a worker panic message,
+/// so a worker-panic test that ran at the same time would see other text.
+static PANIC_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Hold [`PANIC_HOOK_LOCK`] for the rest of the test. A test that failed
+/// while it held the lock does not block the others.
+pub fn panic_hook_lock() -> std::sync::MutexGuard<'static, ()> {
+    PANIC_HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 // ---------------------------------------------------------------------------
 // Snapshot and app-state fixtures
@@ -280,6 +300,19 @@ fn clone_with_identity(root: &Path, remote: &Path, name: &str) -> PathBuf {
         ],
     );
     dir
+}
+
+/// An upstream repo and a clone that tracks it, for pull tests.
+///
+/// Returns `(root, up, down)`. `up` is an [`init_repo`] repo at `root/up`.
+/// `down` is its clone at `root/down`, on `main` tracking `origin/main`,
+/// with a repo-local identity. The caller removes `root`.
+pub fn pull_fixture(prefix: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let root = unique_dir(prefix);
+    let up = root.join("up");
+    init_repo(&up);
+    let down = clone_with_identity(&root, &up, "down");
+    (root, up, down)
 }
 
 /// Build the "a maintainer force-pushed `main` and dropped bot commits" story.
