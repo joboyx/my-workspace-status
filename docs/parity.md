@@ -100,14 +100,15 @@ The file diff (`draw_diff_pane`) and the clean-file view (`draw_file_body`, an E
 | `cursor-middle` | `j` / `k` keep the cursor near the vertical middle. | none |
 | `section-label` | The section label names the diff's side (`STAGED`, `UNSTAGED`, `COMMITTED`, …). | `depth_2_commit_and_stash_diffs_paint_committed_in_boxed_and_flat_panes`, `commit_and_stash_diffs_label_committed_and_keep_partial_patch_kinds` |
 | `full-context` | `Ctrl-o` toggles the whole-file context. | none |
+| `paintable-text` | Tabs expand to 4-column stops and other control characters paint as U+FFFD, so file content never writes a control byte to the terminal. | `diff_pane_paints_no_control_character_from_file_content`, `diff_rows_expand_tabs_and_replace_control_characters`, `read_text_file_text_binary_and_too_large` |
 
-| Surface | Tab | Depth | Pane | Looks | Code anchors | `click-row` | `cursor-middle` | `section-label` | `full-context` |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `diff-d0` | Workspace | 0 (file focused) | right | boxed, flat | `draw_right`, `draw_diff_pane`, `click_diff` | supported | supported | supported | supported |
-| `diff-d2` | Workspace | 2 | right | boxed, flat | `draw_right`, `draw_diff_pane`, `click_diff`, `compute_commit_diff`, `from_commit_lines` | supported | supported | supported | supported |
-| `compare-diff` | Compare | - | right | boxed, flat | `draw_right`, `draw_diff_pane`, `click_diff` | supported | supported | supported | supported |
-| `explorer-diff` | Explorer (changed file) | - | right | boxed, flat | `draw_explorer_tab`, `draw_diff_pane`, `explorer_click`, `explorer_click_row`, `click_diff` | supported | supported | supported | n/a: I4, Explorer diffs always show the whole file and `Ctrl-o` refuses |
-| `explorer-file` | Explorer (clean file) | - | right | boxed, flat | `draw_explorer_tab`, `draw_file_body`, `click_file_tab` | supported | n/a: I3, the clean-file view scrolls at the edge | n/a: a clean file has no diff sections | n/a: I4, the Explorer refuses `Ctrl-o` and a clean file shows the whole file |
+| Surface | Tab | Depth | Pane | Looks | Code anchors | `click-row` | `cursor-middle` | `section-label` | `full-context` | `paintable-text` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `diff-d0` | Workspace | 0 (file focused) | right | boxed, flat | `draw_right`, `draw_diff_pane`, `click_diff` | supported | supported | supported | supported | supported |
+| `diff-d2` | Workspace | 2 | right | boxed, flat | `draw_right`, `draw_diff_pane`, `click_diff`, `compute_commit_diff`, `from_commit_lines` | supported | supported | supported | supported | supported |
+| `compare-diff` | Compare | - | right | boxed, flat | `draw_right`, `draw_diff_pane`, `click_diff` | supported | supported | supported | supported | supported |
+| `explorer-diff` | Explorer (changed file) | - | right | boxed, flat | `draw_explorer_tab`, `draw_diff_pane`, `explorer_click`, `explorer_click_row`, `click_diff` | supported | supported | supported | n/a: I4, Explorer diffs always show the whole file and `Ctrl-o` refuses | supported |
+| `explorer-file` | Explorer (clean file) | - | right | boxed, flat | `draw_explorer_tab`, `draw_file_body`, `click_file_tab` | supported | n/a: I3, the clean-file view scrolls at the edge | n/a: a clean file has no diff sections | n/a: I4, the Explorer refuses `Ctrl-o` and a clean file shows the whole file | supported |
 
 ### `scrollbars` — Scrollbars
 

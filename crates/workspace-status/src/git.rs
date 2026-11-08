@@ -31,6 +31,8 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{mpsc, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::file_index::paintable_line;
+
 /// The git binary for this process. [`init_git_binary`] sets it once at
 /// startup from the resolved settings. A process that never calls it (unit
 /// tests, library use) resolves it on the first git call from
@@ -2251,6 +2253,20 @@ pub fn exec_git_stdout(args: &[&str], cwd: &Path) -> Result<String, String> {
     }
 }
 
+/// [`exec_git_stdout`] without the trim: every byte of stdout, trailing
+/// whitespace and `\r` included.
+///
+/// For text a patch is built from (a `git diff` that `V` stage / unstage /
+/// revert rewrites). Bytes that are not UTF-8 still decode lossily to
+/// U+FFFD; `build_partial_patch` refuses a patch that holds one.
+pub fn exec_git_stdout_untrimmed(args: &[&str], cwd: &Path) -> Result<String, String> {
+    match run(args, cwd) {
+        Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
+        Ok(out) => Err(git_failure_message(args, &out)),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
 /// Committer times (unix seconds) of the commits on local branches in the
 /// last `days` days, newest first.
 ///
@@ -2457,6 +2473,10 @@ pub fn git_compare_diff_args(
 }
 
 /// Unified compare diff for one path. Success with empty stdout is `(no diff)`.
+///
+/// Lines split on `\n` only and keep their bytes (a CRLF line keeps its
+/// `\r`, trailing whitespace stays), because a compare revert builds its
+/// patch from them.
 pub fn diff_compare_file_ctx(
     cwd: &Path,
     base_sha: &str,
@@ -2467,12 +2487,12 @@ pub fn diff_compare_file_ctx(
 ) -> Result<Vec<String>, String> {
     let args = git_compare_diff_args(base_sha, head_sha, path, old_path, context);
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let stdout = exec_git_stdout(&refs, cwd)?;
+    let stdout = exec_git_stdout_untrimmed(&refs, cwd)?;
     if stdout.trim().is_empty() {
-        Ok(vec!["(no diff)".into()])
-    } else {
-        Ok(stdout.lines().map(str::to_string).collect())
+        return Ok(vec!["(no diff)".into()]);
     }
+    let body = stdout.strip_suffix('\n').unwrap_or(&stdout);
+    Ok(body.split('\n').map(str::to_string).collect())
 }
 
 /// `git diff` argv for one path, commit `base_sha` against the working tree.
@@ -2611,14 +2631,19 @@ fn list_compare_picker_commits_capped(
     Ok(raw
         .lines()
         .skip(1)
-        .filter_map(|line| {
-            let (id, subject) = line.split_once('\t').unwrap_or((line, ""));
-            (!id.is_empty()).then(|| AncestorCommit {
-                id: id.to_string(),
-                subject: subject.to_string(),
-            })
-        })
+        .filter_map(parse_compare_picker_line)
         .collect())
+}
+
+/// One `%H%x09%s` line of the compare picker log. The subject goes through
+/// [`paintable_line`], so a tab or a control byte in a commit subject
+/// cannot reach the terminal. `None` for a line with no id.
+fn parse_compare_picker_line(line: &str) -> Option<AncestorCommit> {
+    let (id, subject) = line.split_once('\t').unwrap_or((line, ""));
+    (!id.is_empty()).then(|| AncestorCommit {
+        id: id.to_string(),
+        subject: paintable_line(subject),
+    })
 }
 
 /// First-parent unified diff for one path in a commit.
@@ -2678,12 +2703,13 @@ pub enum BlameRev {
 pub struct LineBlame {
     /// Full commit id. All zeros when the line is not committed.
     pub sha: String,
-    /// `author` header. For an uncommitted line it is a git placeholder;
-    /// use [`LineBlame::uncommitted`], not this name, to detect that case.
+    /// `author` header, paintable (tabs expanded, control characters as
+    /// U+FFFD). For an uncommitted line it is a git placeholder; use
+    /// [`LineBlame::uncommitted`], not this name, to detect that case.
     pub author: String,
     /// `author-time`, unix seconds.
     pub author_time: i64,
-    /// `summary` header: the commit subject.
+    /// `summary` header: the commit subject, paintable like `author`.
     pub summary: String,
     /// 1-based line number in that commit's version of the file.
     pub orig_line: u32,
@@ -2727,9 +2753,11 @@ pub fn parse_blame_porcelain(stdout: &str) -> Option<LineBlame> {
         }
         let (key, value) = line.split_once(' ').unwrap_or((line, ""));
         match key {
-            "author" => blame.author = value.to_string(),
+            // Author and subject only paint: control bytes must not reach
+            // the terminal.
+            "author" => blame.author = paintable_line(value),
             "author-time" => blame.author_time = value.parse().unwrap_or(0),
-            "summary" => blame.summary = value.to_string(),
+            "summary" => blame.summary = paintable_line(value),
             "filename" => blame.filename = unquote_c_path(value),
             "boundary" => blame.boundary = true,
             "previous" => {
