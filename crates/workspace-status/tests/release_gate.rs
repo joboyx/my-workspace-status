@@ -3,7 +3,7 @@
 //! `.github/workflows/test.yml` runs the checks on pull requests and on main.
 //! Its `release` job calls `.github/workflows/tag-release.yml` only after
 //! every check passed on a main push, and only while that commit is still the
-//! tip of main. The main ruleset requires the same checks by job name and lets
+//! tip of main. The main ruleset requires the checks by job name and lets
 //! only the release deploy key bypass them. These tests fail when a check job
 //! is missing from the gate or from the documented ruleset list, when
 //! tag-release gets a trigger of its own, or when the deploy key push path
@@ -92,10 +92,16 @@ fn jobs_parser_reads_top_level_jobs_only() {
 #[test]
 fn release_gate_needs_every_check_job() {
     let checks = check_jobs();
-    for expected in ["lint", "cargo", "tui-tty-desktop"] {
+    for expected in [
+        "lint",
+        "cargo",
+        "cargo-macos",
+        "cargo-windows",
+        "tui-tty-desktop",
+    ] {
         assert!(
             checks.contains(&expected),
-            "test.yml must keep the `{expected}` check (the main ruleset requires it by name)"
+            "test.yml must keep the `{expected}` check (the main ruleset requires checks by name)"
         );
     }
     let all = jobs(TEST_YML);
@@ -106,6 +112,49 @@ fn release_gate_needs_every_check_job() {
     assert_eq!(
         gate, want,
         "release-gate must need every check job of test.yml, so no release runs before a check passes"
+    );
+}
+
+#[test]
+fn default_suite_runs_on_every_released_os_family() {
+    // dist-workspace.toml ships Linux, macOS and Windows builds; each one
+    // gets the default suite before a release.
+    let all = jobs(TEST_YML);
+    for (name, runner, commands) in [
+        (
+            "cargo",
+            "runs-on: ubuntu-latest",
+            &["run: cargo test --workspace --locked"][..],
+        ),
+        (
+            "cargo-macos",
+            "runs-on: macos-15",
+            &["run: cargo test --workspace --locked"][..],
+        ),
+        (
+            "cargo-windows",
+            "runs-on: windows-latest",
+            &[
+                "run: cargo build --workspace --all-targets --locked",
+                "run: cargo test --workspace --locked",
+            ][..],
+        ),
+    ] {
+        let body = job(&all, name);
+        assert!(
+            body.contains(runner),
+            "test.yml `{name}` must keep `{runner}`"
+        );
+        for command in commands {
+            assert!(
+                body.contains(command),
+                "test.yml `{name}` must keep `{command}`"
+            );
+        }
+    }
+    assert!(
+        job(&all, "cargo-windows").contains("core.autocrlf false"),
+        "cargo-windows must check out with LF line endings; tests read checked-in text"
     );
 }
 

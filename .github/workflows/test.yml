@@ -1,7 +1,7 @@
 # Checks for pull requests and main, then the release of a green main commit.
 #
 # Every job before `release-gate` is a check. `release-gate` needs all of
-# them, and the main ruleset requires each of them by job name (list in
+# them, and the main ruleset should require each of them by job name (list in
 # docs/architecture.md, Release gate). CI: crates/workspace-status/tests/release_gate.rs.
 name: test
 
@@ -33,6 +33,33 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
+      - run: cargo test --workspace --locked
+
+  # Releases ship macOS and Windows builds (dist-workspace.toml targets), so
+  # the default suite also runs on those platforms before a release.
+  cargo-macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      - run: cargo test --workspace --locked
+
+  # The PTY e2e is Unix only: on Windows that test crate compiles with no
+  # tests, so the explicit build step keeps every target compiling.
+  cargo-windows:
+    runs-on: windows-latest
+    steps:
+      # Keep LF line endings: some tests compare checked-in text files.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      - run: cargo build --workspace --all-targets --locked
       - run: cargo test --workspace --locked
 
   tui-tty-desktop:
@@ -74,7 +101,7 @@ jobs:
   # checks pass.
   release-gate:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [lint, cargo, tui-tty-desktop]
+    needs: [lint, cargo, cargo-macos, cargo-windows, tui-tty-desktop]
     runs-on: ubuntu-latest
     permissions:
       contents: read
