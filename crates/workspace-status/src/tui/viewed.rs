@@ -477,6 +477,17 @@ mod tests {
         assert_eq!(id, workspace_store_id(Path::new("/tmp")));
     }
 
+    /// The id keys the bucket of saved marks on disk, so a hash change would
+    /// orphan them. The path does not exist: canonicalize fails and the id
+    /// hashes these exact bytes on every platform.
+    #[test]
+    fn workspace_store_id_matches_golden() {
+        assert_eq!(
+            workspace_store_id(Path::new("/nonexistent/workspace-status/store-id-golden")),
+            "8ac02c13ef02d371c92965dbfcd084b399cce070967cc5eef9a4bbf1a1a33fb0"
+        );
+    }
+
     #[test]
     fn fingerprint_matches_golden() {
         let fp = viewed_fingerprint(ViewedFingerprintInput {
