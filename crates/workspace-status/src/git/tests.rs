@@ -796,15 +796,6 @@ fn read_file(dir: &Path, rel: &str) -> String {
     fs::read_to_string(dir.join(rel)).unwrap()
 }
 
-/// `git diff --cached --name-only` paths (NUL-split, so no quoting).
-fn staged_paths(dir: &Path) -> Vec<String> {
-    exec_git(&["diff", "--cached", "--name-only", "-z"], dir)
-        .split('\0')
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
 /// A repo with every [`GLOB_NAME_PAIRS`] file committed as `base\n`.
 fn glob_names_fixture(prefix: &str) -> std::path::PathBuf {
     let dir = unique_dir(prefix);
