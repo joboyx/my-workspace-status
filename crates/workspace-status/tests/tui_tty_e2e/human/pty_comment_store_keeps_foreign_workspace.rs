@@ -4,25 +4,18 @@ use std::path::Path;
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    documented_launch_first_paint, pane_unstaged_readme, tree_cursor_on, tree_has, GIT_WAIT, WAIT,
+    comment_store_path, documented_launch_first_paint, pane_unstaged_readme, tree_cursor_on,
+    tree_has, wait_comment_store, GIT_WAIT, WAIT,
 };
 
 const FOREIGN_BODY: &str = "FOREIGN-WS-COMMENT-E2E";
 const LIVE_BODY: &str = "live-ws-comment-e2e";
 
-fn comment_store(workspace: &Path) -> std::path::PathBuf {
-    workspace.join(".e2e-state").join("comments.json")
-}
-
-fn store_text(workspace: &Path) -> String {
-    fs::read_to_string(comment_store(workspace)).unwrap_or_default()
-}
-
 fn seed_foreign_bucket(workspace: &Path) {
     let dir = workspace.join(".e2e-state");
     fs::create_dir_all(&dir).unwrap();
     fs::write(
-        comment_store(workspace),
+        comment_store_path(workspace),
         format!(
             r#"{{
   "version": 2,
@@ -117,10 +110,10 @@ fn pty_comment_store_keeps_foreign_workspace() {
         "Enter saves: overlay gone, toast comment saved",
         GIT_WAIT,
     );
-    let stored = store_text(&workspace);
-    assert!(
-        stored.contains(LIVE_BODY),
-        "live save must persist this session's comment:\n{stored}"
+    let stored = wait_comment_store(
+        &workspace,
+        |stored| stored.contains(LIVE_BODY),
+        "live save must persist this session's comment",
     );
     assert!(
         stored.contains(FOREIGN_BODY),

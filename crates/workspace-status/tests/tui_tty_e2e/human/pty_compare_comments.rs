@@ -1,12 +1,12 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::harness::PtySession;
 use crate::seed::{compare_regions_workspace, git_stdout};
 use crate::support::{
     compare_regions_diff_focused, open_compare_regions_diff, open_compare_regions_in,
-    panes_tree_focused_diff_unfocused, panes_tree_unfocused_diff_focused, press_j, wait_screen,
-    GIT_WAIT, WAIT,
+    panes_tree_focused_diff_unfocused, panes_tree_unfocused_diff_focused, press_j,
+    wait_comment_store, wait_screen, GIT_WAIT, WAIT,
 };
 
 const LINE_BODY: &str = "compare-line-note";
@@ -14,14 +14,6 @@ const RANGE_BODY: &str = "compare-range-note";
 const WORKSPACE_BODY: &str = "workspace-line-note";
 /// Worktree edit of `keep-b` (line 2) for the Workspace comment scenario.
 const DIRTY_B: &str = "wt-dirty-b";
-
-fn comment_store(workspace: &Path) -> PathBuf {
-    workspace.join(".e2e-state").join("comments.json")
-}
-
-fn store_text(workspace: &Path) -> String {
-    fs::read_to_string(comment_store(workspace)).unwrap_or_default()
-}
 
 fn head_sha(workspace: &Path) -> String {
     git_stdout(&workspace.join("app"), &["rev-parse", "HEAD"])
@@ -131,15 +123,17 @@ fn pty_compare_semicolon_comments_line_resolves_and_exports() {
         "Enter saves: \" on keep-a only",
         GIT_WAIT,
     );
-    let stored = store_text(&workspace);
-    assert!(
-        stored.contains(LINE_BODY)
-            && stored.contains("commitLine")
-            && stored.contains(&format!("\"sha\": \"{head}\""))
-            && stored.contains("\"path\": \"regions.txt\"")
-            && stored.contains("\"line\": 1")
-            && !stored.contains("endLine"),
-        "store must key the comment to the compare head, regions.txt:1:\n{stored}"
+    wait_comment_store(
+        &workspace,
+        |stored| {
+            stored.contains(LINE_BODY)
+                && stored.contains("commitLine")
+                && stored.contains(&format!("\"sha\": \"{head}\""))
+                && stored.contains("\"path\": \"regions.txt\"")
+                && stored.contains("\"line\": 1")
+                && !stored.contains("endLine")
+        },
+        "store must key the comment to the compare head, regions.txt:1",
     );
 
     tui.key(';');
@@ -170,10 +164,10 @@ fn pty_compare_semicolon_comments_line_resolves_and_exports() {
         "Enter saves resolved: keep-a shows the ' mark",
         GIT_WAIT,
     );
-    assert!(
-        store_text(&workspace).contains("\"resolved\": true"),
-        "store must keep the resolved flag:\n{}",
-        store_text(&workspace)
+    wait_comment_store(
+        &workspace,
+        |stored| stored.contains("\"resolved\": true"),
+        "store must keep the resolved flag",
     );
 
     tui.key('y');
@@ -246,14 +240,16 @@ fn pty_compare_highlight_semicolon_comments_range() {
         "Enter saves: \" on keep-a through keep-c only, highlight gone",
         GIT_WAIT,
     );
-    let stored = store_text(&workspace);
-    assert!(
-        stored.contains(RANGE_BODY)
-            && stored.contains("commitLine")
-            && stored.contains(&format!("\"sha\": \"{head}\""))
-            && stored.contains("\"line\": 1")
-            && stored.contains("\"endLine\": 3"),
-        "store must keep a compare range 1-3 on the head:\n{stored}"
+    wait_comment_store(
+        &workspace,
+        |stored| {
+            stored.contains(RANGE_BODY)
+                && stored.contains("commitLine")
+                && stored.contains(&format!("\"sha\": \"{head}\""))
+                && stored.contains("\"line\": 1")
+                && stored.contains("\"endLine\": 3")
+        },
+        "store must keep a compare range 1-3 on the head",
     );
 
     tui.key('y');
@@ -321,10 +317,10 @@ fn pty_compare_hides_workspace_line_comment() {
         "Enter saves: \" on the Workspace line",
         GIT_WAIT,
     );
-    assert!(
-        store_text(&workspace).contains("worktreeLine"),
-        "{}",
-        store_text(&workspace)
+    wait_comment_store(
+        &workspace,
+        |stored| stored.contains("worktreeLine"),
+        "store must keep the Workspace line comment as worktreeLine",
     );
 
     // The tree cursor stays on regions.txt, so the parked Workspace diff is

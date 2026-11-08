@@ -1,8 +1,9 @@
 //! Shared WAIT, tree, and crumb helpers for human-path TTY e2e.
 
 use std::fs;
-use std::path::Path;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::harness::{left_tree, tree_row_containing, PtySession};
 use crate::seed::{REGIONS_ALPHA, REGIONS_OMEGA};
@@ -1273,6 +1274,42 @@ pub fn wait_screen(
         timeout,
     );
     matched.into_inner()
+}
+
+/// Path of the comment store of `workspace`: the harness default, unless the
+/// test passes its own `WS_STATUS_COMMENT_STORE`.
+pub fn comment_store_path(workspace: &Path) -> PathBuf {
+    workspace.join(".e2e-state").join("comments.json")
+}
+
+/// Text of the comment store of `workspace`. Empty when the file does not
+/// exist yet.
+///
+/// A read in a live TUI uses [`wait_comment_store`]. A direct read fits a TUI
+/// that has exited, since quit flushes saves.
+pub fn comment_store_text(workspace: &Path) -> String {
+    fs::read_to_string(comment_store_path(workspace)).unwrap_or_default()
+}
+
+/// Wait until `pred` holds on the comment store text and return that text.
+///
+/// A save runs on a worker. The screen updates from memory first and the file
+/// is written later, so a comment mark does not prove that the save reached
+/// the file. The `comment saved` toast does not prove it either: a toast from
+/// an earlier save can still be on screen.
+pub fn wait_comment_store(workspace: &Path, pred: impl Fn(&str) -> bool, what: &str) -> String {
+    let start = Instant::now();
+    loop {
+        let text = comment_store_text(workspace);
+        if pred(&text) {
+            return text;
+        }
+        // A GC save follows a git reload, so it gets the git timeout.
+        if start.elapsed() >= GIT_WAIT {
+            panic!("timeout waiting for the comment store: {what}:\n{text}");
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 /// Two SGR left press + release reports on one cell, in one write

@@ -1,25 +1,14 @@
-use std::fs;
-use std::path::Path;
-
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
     documented_launch_first_paint, pane_unstaged_readme, status_row, tree_cursor_on, tree_has,
-    GIT_WAIT, WAIT,
+    wait_comment_store, GIT_WAIT, WAIT,
 };
 
 const BODY: &str = "textarea-note-e2e";
 const PREFIX: &str = "Z";
 /// Kitty CSI-u Left. Crossterm 0.28 `event::read` yields Char U+E006.
 const KITTY_LEFT: u32 = 57350;
-
-fn comment_store(workspace: &Path) -> std::path::PathBuf {
-    workspace.join(".e2e-state").join("comments.json")
-}
-
-fn store_text(workspace: &Path) -> String {
-    fs::read_to_string(comment_store(workspace)).unwrap_or_default()
-}
 
 fn comment_overlay(screen: &str) -> bool {
     screen.contains("Comment")
@@ -176,12 +165,13 @@ fn pty_semicolon_comment_textarea_cursor() {
         "Enter saves: overlay gone, toast comment saved",
         GIT_WAIT,
     );
-    // The store is written before the toast paints.
-    let stored = store_text(&workspace);
-    assert!(
-        stored.contains(&expected)
-            && !stored.contains(BODY)
-            && !stored.contains(&format!("{BODY}{PREFIX}")),
-        "store must keep mid-string edit {expected}, not append-only {BODY}{PREFIX}:\n{stored}"
+    wait_comment_store(
+        &workspace,
+        |stored| {
+            stored.contains(&expected)
+                && !stored.contains(BODY)
+                && !stored.contains(&format!("{BODY}{PREFIX}"))
+        },
+        &format!("store must keep mid-string edit {expected}, not append-only {BODY}{PREFIX}"),
     );
 }

@@ -1,12 +1,12 @@
 use std::fs;
-use std::path::Path;
 use std::time::Duration;
 
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    documented_launch_first_paint, pane_unstaged_readme, panes_tree_unfocused_diff_focused,
-    step_cursor, tree_cursor_on, tree_has, GIT_WAIT, WAIT,
+    comment_store_text, documented_launch_first_paint, pane_unstaged_readme,
+    panes_tree_unfocused_diff_focused, step_cursor, tree_cursor_on, tree_has, wait_comment_store,
+    GIT_WAIT, WAIT,
 };
 
 const BODY: &str = "range-note-e2e";
@@ -14,14 +14,6 @@ const WATCH_BODY: &str = "watch-span-e2e";
 const WATCH_EXTRA: &str = "watch-extra-line";
 /// Kitty CSI-u Down. Crossterm 0.28 `event::read` yields Char U+E009.
 const KITTY_DOWN: u32 = 57353;
-
-fn comment_store(workspace: &Path) -> std::path::PathBuf {
-    workspace.join(".e2e-state").join("comments.json")
-}
-
-fn store_text(workspace: &Path) -> String {
-    fs::read_to_string(comment_store(workspace)).unwrap_or_default()
-}
 
 /// CSI-u unmodified letter (`CSI code ; 1 : 1 u` press, `: 3` release).
 ///
@@ -162,13 +154,15 @@ fn pty_v_then_semicolon_comments_line_range() {
         "Enter saves: overlay gone, VISUAL gone, ASCII \" on the dirty diff",
         GIT_WAIT,
     );
-    let stored = store_text(&workspace);
-    assert!(
-        stored.contains(BODY)
-            && stored.contains("worktreeLine")
-            && stored.contains("\"endLine\": 2")
-            && stored.contains("\"line\": 1"),
-        "store must keep a worktree line range 1-2, not a single line:\n{stored}"
+    wait_comment_store(
+        &workspace,
+        |stored| {
+            stored.contains(BODY)
+                && stored.contains("worktreeLine")
+                && stored.contains("\"endLine\": 2")
+                && stored.contains("\"line\": 1")
+        },
+        "store must keep a worktree line range 1-2, not a single line",
     );
 }
 
@@ -218,9 +212,13 @@ fn pty_v_esc_exits_highlight_without_comment() {
         "Esc drops VISUAL and stays on the focused diff (no Comment, no unfocus)",
         WAIT,
     );
-    let stored = store_text(&workspace);
+    // Quit flushes any save that was asked for, so the empty store proves
+    // that Esc asked for none.
+    tui.key('q');
+    tui.wait_exit(WAIT);
+    let stored = comment_store_text(&workspace);
     assert!(
-        stored.trim().is_empty() || !stored.contains(BODY),
+        stored.trim().is_empty(),
         "Esc must not write a comment:\n{stored}"
     );
 }
@@ -262,6 +260,13 @@ fn pty_semicolon_opens_existing_range_on_covered_line() {
         "Enter saves the 1-2 range (VISUAL off, ASCII \")",
         GIT_WAIT,
     );
+    // The absence read below proves the delete only once this save is in the
+    // file: an empty file has no BODY either.
+    wait_comment_store(
+        &workspace,
+        |stored| stored.contains(BODY),
+        "the 1-2 range must reach the store before the delete",
+    );
 
     csi_u_semicolon(&mut tui);
     tui.wait_pred(
@@ -290,11 +295,10 @@ fn pty_semicolon_opens_existing_range_on_covered_line() {
         "empty Enter deletes the covering range (not a no-op single-line key)",
         WAIT,
     );
-    // The store is written before the toast paints.
-    let stored = store_text(&workspace);
-    assert!(
-        !stored.contains(BODY) && !stored.contains("\"endLine\": 2"),
-        "empty submit must drop the 1-2 range comment:\n{stored}"
+    wait_comment_store(
+        &workspace,
+        |stored| !stored.contains(BODY) && !stored.contains("\"endLine\": 2"),
+        "empty submit must drop the 1-2 range comment",
     );
 }
 
@@ -377,11 +381,13 @@ fn pty_watch_reload_clears_visual_so_semicolon_is_not_stale_span() {
         "Enter saves the post-watch line comment",
         GIT_WAIT,
     );
-    let stored = store_text(&workspace);
-    assert!(
-        stored.contains(WATCH_BODY)
-            && stored.contains("worktreeLine")
-            && !stored.contains("\"endLine\""),
-        "store must be one line, not a stale visual span:\n{stored}"
+    wait_comment_store(
+        &workspace,
+        |stored| {
+            stored.contains(WATCH_BODY)
+                && stored.contains("worktreeLine")
+                && !stored.contains("\"endLine\"")
+        },
+        "store must be one line, not a stale visual span",
     );
 }

@@ -1,23 +1,13 @@
-use std::fs;
-use std::path::Path;
-
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    documented_launch_first_paint, pane_unstaged_readme, tree_cursor_on, tree_has, GIT_WAIT, WAIT,
+    documented_launch_first_paint, pane_unstaged_readme, tree_cursor_on, tree_has,
+    wait_comment_store, GIT_WAIT, WAIT,
 };
 
 const LINE1: &str = "one";
 const HEADING: &str = "# heading";
 const LIST: &str = "- list";
-
-fn comment_store(workspace: &Path) -> std::path::PathBuf {
-    workspace.join(".e2e-state").join("comments.json")
-}
-
-fn store_text(workspace: &Path) -> String {
-    fs::read_to_string(comment_store(workspace)).unwrap_or_default()
-}
 
 fn comment_overlay(screen: &str) -> bool {
     screen.contains("Comment")
@@ -133,10 +123,12 @@ fn pty_semicolon_comment_multiline_export() {
         "Enter saves: overlay gone, toast comment saved",
         GIT_WAIT,
     );
-    let stored = store_text(&workspace);
-    assert!(
-        stored.contains("one\\n# heading\\n- list") && stored.contains("\"resolved\": true"),
-        "store must keep newlines and resolved:\n{stored}"
+    wait_comment_store(
+        &workspace,
+        |stored| {
+            stored.contains("one\\n# heading\\n- list") && stored.contains("\"resolved\": true")
+        },
+        "store must keep newlines and resolved",
     );
 
     tui.key('y');

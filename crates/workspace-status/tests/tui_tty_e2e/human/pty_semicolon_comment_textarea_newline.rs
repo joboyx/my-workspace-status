@@ -1,11 +1,8 @@
-use std::fs;
-use std::path::Path;
-
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
     documented_launch_first_paint, pane_unstaged_readme, status_row, tree_cursor_on, tree_has,
-    GIT_WAIT, WAIT,
+    wait_comment_store, GIT_WAIT, WAIT,
 };
 
 const LINE1: &str = "one";
@@ -14,14 +11,6 @@ const LINE2: &str = "two three";
 const KITTY_LEFT: u32 = 57350;
 /// Kitty CSI-u Right. Pair of [`KITTY_LEFT`].
 const KITTY_RIGHT: u32 = 57351;
-
-fn comment_store(workspace: &Path) -> std::path::PathBuf {
-    workspace.join(".e2e-state").join("comments.json")
-}
-
-fn store_text(workspace: &Path) -> String {
-    fs::read_to_string(comment_store(workspace)).unwrap_or_default()
-}
 
 fn comment_overlay(screen: &str) -> bool {
     screen.contains("Comment")
@@ -217,12 +206,13 @@ fn pty_semicolon_comment_textarea_newline() {
         "Enter saves: overlay gone, toast comment saved",
         GIT_WAIT,
     );
-    // The store is written before the toast paints.
-    let stored = store_text(&workspace);
-    assert!(
-        stored.contains("one\\ntwo three")
-            && !stored.contains("onetwo three")
-            && !stored.contains("one two three"),
-        "store must keep the Shift+Enter newline, not append-only:\n{stored}"
+    wait_comment_store(
+        &workspace,
+        |stored| {
+            stored.contains("one\\ntwo three")
+                && !stored.contains("onetwo three")
+                && !stored.contains("one two three")
+        },
+        "store must keep the Shift+Enter newline, not append-only",
     );
 }

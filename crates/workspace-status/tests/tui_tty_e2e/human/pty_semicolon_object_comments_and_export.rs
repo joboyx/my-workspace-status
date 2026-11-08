@@ -1,14 +1,13 @@
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
 
 use crate::harness::PtySession;
 use crate::seed::{daily_workspace, git, git_env, seed_repo, unique_root, worktree_workspace};
 use crate::support::{
     documented_launch_first_paint, graph_cursor_on, merger_graph_drilled_right,
-    merger_graph_left_unfocused, prove_keys_handled, tree_cursor_on, tree_has, GIT_WAIT, WAIT,
+    merger_graph_left_unfocused, prove_keys_handled, tree_cursor_on, tree_has, wait_comment_store,
+    GIT_WAIT, WAIT,
 };
 
 const BRANCH_BODY: &str = "branch-obj-note-e2e";
@@ -16,14 +15,6 @@ const COMMIT_BODY: &str = "commit-obj-note-e2e";
 const WORKTREE_BODY: &str = "worktree-obj-note-e2e";
 const ATTACH_BODY: &str = "doomed-attach-note-e2e";
 const LINKED_BRANCH: &str = "feature/linked-open";
-
-fn comment_store(workspace: &Path) -> std::path::PathBuf {
-    workspace.join(".e2e-state").join("comments.json")
-}
-
-fn store_text(workspace: &Path) -> String {
-    fs::read_to_string(comment_store(workspace)).unwrap_or_default()
-}
 
 fn git_stdout(repo: &Path, args: &[&str]) -> String {
     let mut cmd = Command::new("git");
@@ -69,6 +60,8 @@ fn save_overlay_body(tui: &mut PtySession, body: &str) {
     tui.wait_pred(comment_overlay, "; opens Comment overlay", WAIT);
     tui.keys(body);
     tui.enter();
+    // The toast can be from the previous save, so a read of the store after
+    // this wait still waits for its own save.
     tui.wait_pred(
         |screen| overlay_closed(screen) && screen.contains("comment saved"),
         "Enter saves the object comment",
@@ -134,10 +127,10 @@ fn pty_semicolon_object_comments_and_export() {
         GIT_WAIT,
     );
     save_overlay_body(&mut tui, BRANCH_BODY);
-    let stored = store_text(&workspace);
-    assert!(
-        stored.contains(BRANCH_BODY) && stored.contains("feature/graph"),
-        "branch object comment must persist:\n{stored}"
+    wait_comment_store(
+        &workspace,
+        |stored| stored.contains(BRANCH_BODY) && stored.contains("feature/graph"),
+        "branch object comment must persist",
     );
 
     tui.enter();
@@ -165,10 +158,10 @@ fn pty_semicolon_object_comments_and_export() {
         WAIT,
     );
     save_overlay_body(&mut tui, COMMIT_BODY);
-    let stored = store_text(&workspace);
-    assert!(
-        stored.contains(COMMIT_BODY) && stored.contains("\"kind\": \"commit\""),
-        "commit object comment must persist:\n{stored}"
+    wait_comment_store(
+        &workspace,
+        |stored| stored.contains(COMMIT_BODY) && stored.contains("\"kind\": \"commit\""),
+        "commit object comment must persist",
     );
 
     tui.key('y');
@@ -218,10 +211,10 @@ fn pty_semicolon_object_comments_and_export() {
         WAIT,
     );
     save_overlay_body(&mut tui, WORKTREE_BODY);
-    let stored = store_text(&wt_workspace);
-    assert!(
-        stored.contains(WORKTREE_BODY) && stored.contains("worktree"),
-        "worktree object comment must persist:\n{stored}"
+    wait_comment_store(
+        &wt_workspace,
+        |stored| stored.contains(WORKTREE_BODY) && stored.contains("worktree"),
+        "worktree object comment must persist",
     );
     tui.key('y');
     tui.wait_pred(
@@ -252,10 +245,10 @@ fn pty_semicolon_object_comments_and_export() {
         WAIT,
     );
     save_overlay_body(&mut tui, ATTACH_BODY);
-    let stored = store_text(&workspace);
-    assert!(
-        stored.contains(ATTACH_BODY) && stored.contains("doomed"),
-        "repo-scope comment on default-branch app must attach to doomed:\n{stored}"
+    wait_comment_store(
+        &workspace,
+        |stored| stored.contains(ATTACH_BODY) && stored.contains("doomed"),
+        "repo-scope comment on default-branch app must attach to doomed",
     );
     tui.key('y');
     tui.wait_pred(
@@ -271,30 +264,20 @@ fn pty_semicolon_object_comments_and_export() {
     git(&app, &["branch", "-D", "doomed"]);
     tui.key('r');
     prove_keys_handled(&mut tui);
-    // `r` reloads the repo on a worker, so the keys above can be handled
-    // before that reload lands. The reload drops the comment of the gone
-    // branch from the store file, so wait for that before `y`.
     tui.wait_pred(
-        |screen| {
-            overlay_closed(screen)
-                && tree_has(screen, "app")
-                && !store_text(&workspace).contains(ATTACH_BODY)
-        },
-        "r refresh after deleting doomed drops its comment from the store",
+        |screen| overlay_closed(screen) && tree_has(screen, "app"),
+        "r refresh after deleting doomed",
         GIT_WAIT,
     );
-    // The tree already showed `app` before `r`, so the wait above does not
-    // prove the reload landed. GC on that reload saves the store without
-    // the doomed comment; wait for that save before `y`.
-    let deadline = Instant::now() + GIT_WAIT;
-    while store_text(&workspace).contains(ATTACH_BODY) {
-        assert!(
-            Instant::now() < deadline,
-            "refresh GC must save the store without the doomed comment:\n{}",
-            tui.screen()
-        );
-        thread::sleep(Duration::from_millis(50));
-    }
+    // `r` reloads the repo on a worker, and the tree already showed `app`
+    // before `r`, so the wait above does not prove the reload landed. GC on
+    // that reload saves the store without the doomed comment; wait for that
+    // save before `y`.
+    wait_comment_store(
+        &workspace,
+        |stored| !stored.contains(ATTACH_BODY),
+        "refresh GC must save the store without the doomed comment",
+    );
     tui.key('y');
     tui.wait_pred(
         |screen| {
@@ -305,9 +288,9 @@ fn pty_semicolon_object_comments_and_export() {
         "y after GC finds no comments: no overlay, no copy, says so",
         WAIT,
     );
-    let stored = store_text(&workspace);
-    assert!(
-        !stored.contains(ATTACH_BODY) && !stored.contains("doomed"),
-        "GC on refresh must drop branch comments for a gone branch:\n{stored}"
+    wait_comment_store(
+        &workspace,
+        |stored| !stored.contains(ATTACH_BODY) && !stored.contains("doomed"),
+        "GC on refresh must drop branch comments for a gone branch",
     );
 }

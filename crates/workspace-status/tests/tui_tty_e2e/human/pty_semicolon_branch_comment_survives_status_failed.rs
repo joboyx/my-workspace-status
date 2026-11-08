@@ -3,18 +3,13 @@ use std::path::Path;
 
 use crate::harness::PtySession;
 use crate::seed::{git, seed_repo, unique_root};
-use crate::support::{corrupt_index, prove_keys_handled, tree_cursor_on, tree_has, GIT_WAIT, WAIT};
+use crate::support::{
+    comment_store_path, corrupt_index, prove_keys_handled, tree_cursor_on, tree_has,
+    wait_comment_store, GIT_WAIT, WAIT,
+};
 
 const BODY: &str = "status-failed-keep-e2e";
 const BRANCH: &str = "topic/keep";
-
-fn comment_store(workspace: &Path) -> std::path::PathBuf {
-    workspace.join(".e2e-state").join("comments.json")
-}
-
-fn store_text(workspace: &Path) -> String {
-    fs::read_to_string(comment_store(workspace)).unwrap_or_default()
-}
 
 fn comment_overlay(screen: &str) -> bool {
     screen.contains("Comment")
@@ -88,7 +83,7 @@ fn remap_copied_store_workspace(store_path: &Path, cwd: &Path) {
 }
 
 fn remap_copied_workspace_stores(workspace: &Path) {
-    remap_copied_store_workspace(&comment_store(workspace), workspace);
+    remap_copied_store_workspace(&comment_store_path(workspace), workspace);
     let viewed = workspace.join(".e2e-state").join("viewed-files.json");
     if viewed.exists() {
         remap_copied_store_workspace(&viewed, workspace);
@@ -96,10 +91,14 @@ fn remap_copied_workspace_stores(workspace: &Path) {
 }
 
 fn store_kept_branch_comment(workspace: &Path) {
-    let stored = store_text(workspace);
-    assert!(
-        stored.contains(BODY) && stored.contains("\"kind\": \"branch\"") && stored.contains(BRANCH),
-        "branch comment must survive a failed-status snapshot:\n{stored}"
+    wait_comment_store(
+        workspace,
+        |stored| {
+            stored.contains(BODY)
+                && stored.contains("\"kind\": \"branch\"")
+                && stored.contains(BRANCH)
+        },
+        "branch comment must survive a failed-status snapshot",
     );
 }
 
