@@ -138,8 +138,27 @@ pub fn step_from_anchor(
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    static LABEL_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Label lists [`collect_match_ids`] and [`collect_graph_match_indices`]
+/// built on this thread since the last call.
+#[cfg(test)]
+fn take_label_builds() -> usize {
+    LABEL_BUILDS.with(|count| count.replace(0))
+}
+
 /// Stable ids whose labels match `query`, in tree order (including folded).
+///
+/// A blank query matches nothing and returns before the tree is flattened.
 pub fn collect_match_ids(tree: &TreeNode, query: &str) -> Vec<String> {
+    if query.trim().is_empty() {
+        return Vec::new();
+    }
+    #[cfg(test)]
+    LABEL_BUILDS.with(|count| count.set(count.get() + 1));
     let all = flatten(tree, &HashSet::new());
     let labels: Vec<&str> = all.iter().map(|r| r.label.as_str()).collect();
     match_indices(&labels, query)
@@ -295,7 +314,15 @@ fn push_dates(parts: &mut Vec<String>, unix: i64, now_unix: i64) {
 }
 
 /// Indices of graph rows whose search text matches `query`.
+///
+/// A blank query matches nothing and returns before any row label is
+/// built.
 pub fn collect_graph_match_indices(rows: &[GraphRow], query: &str) -> Vec<usize> {
+    if query.trim().is_empty() {
+        return Vec::new();
+    }
+    #[cfg(test)]
+    LABEL_BUILDS.with(|count| count.set(count.get() + 1));
     let labels: Vec<String> = rows.iter().map(graph_row_search_text).collect();
     let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
     match_indices(&refs, query)
@@ -417,6 +444,18 @@ pub fn slice_cols(text: &str, offset: usize, width: usize) -> String {
     out
 }
 
+#[cfg(test)]
+thread_local! {
+    static WRAP_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// [`wrap_col_starts_capped`] scans on this thread since the last call, so
+/// tests can bound how often paint rescans a long line.
+#[cfg(test)]
+pub(crate) fn take_wrap_scans() -> usize {
+    WRAP_SCANS.with(|count| count.replace(0))
+}
+
 /// Display-column starts of soft-wrap rows.
 ///
 /// Always at least `[0]`. A glyph wider than `width` is skipped at the
@@ -431,6 +470,8 @@ pub fn wrap_col_starts(text: &str, width: usize) -> Vec<usize> {
 /// passes its viewport height plus one learns "taller than the view"
 /// without reading the rest of a very long line.
 pub fn wrap_col_starts_capped(text: &str, width: usize, max_rows: usize) -> Vec<usize> {
+    #[cfg(test)]
+    WRAP_SCANS.with(|count| count.set(count.get() + 1));
     let width = width.max(1);
     let mut starts = vec![0];
     let mut used = 0usize;
@@ -657,6 +698,28 @@ mod tests {
                     .iter()
                     .any(|r| r.label.contains("notes"))
         );
+    }
+
+    #[test]
+    fn blank_query_returns_before_building_labels() {
+        let shown = tree(true);
+        let rows = vec![GraphRow::Commit {
+            commit: workspace_status_graph::Commit {
+                subject: "fix login timeout".into(),
+                ..Default::default()
+            },
+            is_head: true,
+            worktrees: Vec::new(),
+        }];
+        let _ = take_label_builds();
+        for blank in ["", "   ", "\t"] {
+            assert!(collect_match_ids(&shown, blank).is_empty(), "{blank:?}");
+            assert!(collect_graph_match_indices(&rows, blank).is_empty());
+        }
+        assert_eq!(take_label_builds(), 0, "a blank query builds no labels");
+        assert_eq!(collect_graph_match_indices(&rows, "login"), vec![0]);
+        assert!(!collect_match_ids(&shown, "secret").is_empty());
+        assert_eq!(take_label_builds(), 2, "a real query builds them");
     }
 
     #[test]

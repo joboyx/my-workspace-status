@@ -205,6 +205,7 @@ mod pty_v_highlight_comment_range;
 mod pty_v_highlight_stage_unstage_range;
 mod pty_v_highlight_x_reverts_range;
 mod pty_watch_applies_while_keys_arrive;
+mod pty_watch_finds_repo_added_to_empty_workspace;
 mod pty_watch_keeps_graph_focus;
 mod pty_watch_reloads_silent_head_move;
 mod pty_watch_row_flash_add_and_remove;
