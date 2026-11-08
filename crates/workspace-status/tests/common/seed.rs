@@ -56,9 +56,17 @@ fn git_stdout_env(cwd: &Path, args: &[&str], extra: &[(&str, &str)]) -> String {
 ///
 /// The macOS clock steps in microseconds, so two test threads can read the
 /// same `nanos`; the per-process counter `seq` keeps them apart.
+///
+/// The temp dir is canonical, because the binary canonicalizes the
+/// workspace root. On macOS the default `/var/folders/...` resolves to
+/// `/private/var/folders/...`, and a test that compares a path the binary
+/// passes on (diff tool argv, git cwd) must see the same spelling.
 pub fn unique_root(prefix: &str) -> PathBuf {
     static NEXT: AtomicU32 = AtomicU32::new(0);
-    std::env::temp_dir().join(format!(
+    let temp = std::env::temp_dir()
+        .canonicalize()
+        .expect("canonical temp dir");
+    temp.join(format!(
         "{prefix}-{}-{}",
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
