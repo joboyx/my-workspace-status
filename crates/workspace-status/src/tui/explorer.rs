@@ -728,22 +728,31 @@ mod tests {
         fs::create_dir_all(cwd.join("Alpha")).unwrap();
         fs::write(cwd.join("zeta.rs"), "").unwrap();
         fs::write(cwd.join("b.txt"), "").unwrap();
-        fs::write(cwd.join("B.txt"), "").unwrap();
+        // A case-insensitive filesystem (the macOS default) finds `b.txt`
+        // for `B.txt`, so it cannot hold both names.
+        let case_sensitive = !cwd.join("B.txt").exists();
+        if case_sensitive {
+            fs::write(cwd.join("B.txt"), "").unwrap();
+        }
         fs::write(cwd.join("a.md"), "").unwrap();
 
         let listed = list_dir(&cwd, "", false).unwrap();
-        assert_eq!(
-            names(&listed),
-            vec![
-                ("Alpha", true, false),
-                ("beta", true, false),
-                ("a.md", false, false),
-                ("B.txt", false, false),
-                ("b.txt", false, false),
-                ("README.md", false, false),
-                ("zeta.rs", false, false),
-            ]
-        );
+        let mut expected = vec![
+            ("Alpha", true, false),
+            ("beta", true, false),
+            ("a.md", false, false),
+            ("B.txt", false, false),
+            ("b.txt", false, false),
+            ("README.md", false, false),
+            ("zeta.rs", false, false),
+        ];
+        if !case_sensitive {
+            expected.retain(|(name, ..)| *name != "B.txt");
+        }
+        assert_eq!(names(&listed), expected);
+        // The exact name breaks a tie of names that differ only in case,
+        // on any filesystem.
+        assert_eq!(entry_order(false, "B.txt", false, "b.txt"), Ordering::Less);
         let _ = fs::remove_dir_all(&cwd);
     }
 
