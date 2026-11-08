@@ -157,7 +157,10 @@ fn seed_demo_workspace_state_and_snapshot() {
     )
     .unwrap();
     assert_eq!(config["hiddenPaths"], serde_json::json!(["notes"]));
-    assert_eq!(config["editor"], "vim");
+    assert!(
+        config.get("editor").is_none(),
+        "editor is user-file only, so the workspace file must not set it"
+    );
     assert!(dest.join(".remotes/app.git").exists());
     assert!(dest.join(".scratch").is_dir());
 

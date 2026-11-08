@@ -1488,6 +1488,20 @@ pub(crate) fn write_baseline_user_config(config_home: &Path) {
     fs::write(file, BASELINE_USER_CONFIG).unwrap();
 }
 
+/// Write [`BASELINE_USER_CONFIG`] plus the JSON members `extra` (such as
+/// `"diffTool":"vimdiff"`) as the user config of a PTY spawn on
+/// `workspace`. Keys that only the user file may set (`editor`,
+/// `diffTool`) go here, not in the workspace file.
+pub fn write_baseline_user_config_with(workspace: &Path, extra: &str) {
+    let file = user_config_file(&workspace.join(".e2e-config"));
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let base = BASELINE_USER_CONFIG
+        .trim_end()
+        .strip_suffix('}')
+        .expect("baseline user config is a JSON object");
+    fs::write(file, format!("{base},{extra}}}\n")).unwrap();
+}
+
 /// Write the update-check store at `path`. `last_check_unix = None` writes
 /// "now" so the startup prompt is skipped.
 pub(crate) fn write_update_check(path: &Path, last_check_unix: Option<u64>) {

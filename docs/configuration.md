@@ -8,7 +8,7 @@ An env value that the env parser accepts wins. An env value that it ignores (uns
 
 ## Config files
 
-Two files use the same keys, except that `git`, `updateCheckStore`, `commentStore`, `viewedStore`, and `uiStore` are user file only (see [Env-backed keys](#env-backed-keys)). `load_workspace_status_config` in `crates/workspace-status/src/config.rs` reads both and merges them.
+Two files use the same keys, except that `editor`, `diffTool`, `git`, `prTitleCommand`, `updateCheckStore`, `commentStore`, `viewedStore`, and `uiStore` are user file only (see [User-only keys](#user-only-keys)). `load_workspace_status_config` in `crates/workspace-status/src/config.rs` reads both and merges them.
 
 | File | Path | Role |
 | --- | --- | --- |
@@ -23,7 +23,7 @@ Merge rules:
 - The workspace file wins per top-level key. A key that the workspace file omits keeps the user file value.
 - `viewDefaults` and `defaultBranches` merge per sub-key. The workspace sub-key wins.
 - Arrays are replaced, not joined. A workspace `hiddenPaths` or `ignoredPaths` (also `[]`) replaces the user list of the same name.
-- A `null` value, and a blank `editor` / `diffTool`, count as omitted, so the user file value applies.
+- A `null` value counts as omitted, so the user file value applies.
 - Both files are strict. An invalid user file fails the same way as an invalid workspace file. The error starts with the file: the full path for the user file, `.workspace-status-config.json` for the workspace file. Example: `~/.config/my-workspace-status/config.json maxDepth must be a positive integer` (with your real home path).
 - `hiddenPaths` and `ignoredPaths` are optional in both files. An omitted or `null` key sets nothing. A wrong type is an error in both files.
 - The old key `ignoredRepos` (any value, also `null`) is an error in both files. See [Migrating from `ignoredRepos`](#migrating-from-ignoredrepos).
@@ -45,8 +45,6 @@ The keys below apply to both files. A missing file means nothing is hidden or ig
   "defaultBranches": {
     "acme/acme-main": "develop"
   },
-  "editor": "vim",
-  "diffTool": "vimdiff",
   "viewDefaults": {
     "tree": "tree",
     "diff": "split",
@@ -65,10 +63,12 @@ The keys below apply to both files. A missing file means nothing is hidden or ig
 }
 ```
 
-User file only (a workspace file that sets these keys fails to load):
+User file only (a workspace file that sets these keys fails to load, see [User-only keys](#user-only-keys)):
 
 ```json
 {
+  "editor": "vim",
+  "diffTool": "vimdiff",
   "updateCheckStore": "~/.local/state/my-workspace-status/update-check.json",
   "commentStore": "~/.local/state/my-workspace-status/comments.json",
   "viewedStore": "~/.local/state/my-workspace-status/viewed-files.json",
@@ -84,8 +84,8 @@ User file only (a workspace file that sets these keys fails to load):
 | `ignoredPaths`    | no                                 | `[]` when no file sets it    | Paths relative to the workspace root whose repos are never shown, unless named on the CLI      |
 | `maxDepth`        | no                                 | `3`                          | Walk depth for primary `.git` dirs/gitfiles (dot dirs skipped; linked via `git worktree list`) |
 | `defaultBranches` | no                                 | `{}`                         | Map of workspace-relative repo path → sole default branch for that repo                        |
-| `editor`          | no                                 | unset (`vim` at resolve)     | Command string for TUI `e` (same shape as `$EDITOR`). Overrides `$VISUAL` / `$EDITOR`.         |
-| `diffTool`        | no                                 | unset (`vimdiff` at resolve) | Command string for TUI `E`. No `$EDITOR` / `$VISUAL` / `$GIT_EXTERNAL_DIFF` fallback.          |
+| `editor`          | no; user file only                 | unset (`vim` at resolve)     | Command string for TUI `e` (same shape as `$EDITOR`). Overrides `$VISUAL` / `$EDITOR`.         |
+| `diffTool`        | no; user file only                 | unset (`vimdiff` at resolve) | Command string for TUI `E`. No `$EDITOR` / `$VISUAL` / `$GIT_EXTERNAL_DIFF` fallback.          |
 | `viewDefaults`    | no                                 | `{}` (in-app defaults)       | TUI launch view modes. See [`viewDefaults`](#viewdefaults)                                     |
 | `theme`, `themeMode`, `glyphs`, `watchMs`, `fetchMs`, `fetchConcurrency`, `updateCheck`, `termProgress`, `smoothScroll`, `prPolling` | no | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
 | `updateCheckStore`, `commentStore`, `viewedStore`, `uiStore`, `git`, `prTitleCommand` | no; user file or env only | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
@@ -166,7 +166,7 @@ Repos without a key keep prior behaviour: classification still treats `main` / `
 
 ### `editor`
 
-Optional command string for TUI `e`, same shape as `$EDITOR` (`"vim"`, `"nvim"`, `"cursor"`, `"cursor --wait"`, `"code --wait"`). Not a closed list of names. `"cursor"` already opens at `path:line` via `-g`.
+Optional command string for TUI `e`, same shape as `$EDITOR` (`"vim"`, `"nvim"`, `"cursor"`, `"cursor --wait"`, `"code --wait"`). Not a closed list of names. `"cursor"` already opens at `path:line` via `-g`. User file only: a workspace file that sets it fails to load (see [User-only keys](#user-only-keys)).
 
 - Omit the key, or set `"editor": "vim"`, for **vim** (the default when `$VISUAL` / `$EDITOR` are also unset). vim takes the TTY. The TUI leaves the alternate screen and resumes the same fold, focus, and scroll.
 - `"editor": "cursor"` opens Cursor IDE without changing the shell `$EDITOR`. Cursor / VS Code stay mounted, so fold, focus, and scroll do not rebuild.
@@ -174,7 +174,7 @@ Optional command string for TUI `e`, same shape as `$EDITOR` (`"vim"`, `"nvim"`,
 
 ### `diffTool`
 
-Optional command string for TUI `E`. Same argv shape as `editor`. Default is **vimdiff** when the key is omitted or blank. There is no `$EDITOR` / `$VISUAL` / `$GIT_EXTERNAL_DIFF` fallback. This is not `git difftool`. The TUI builds LEFT and RIGHT and runs the command.
+Optional command string for TUI `E`. Same argv shape as `editor`. Default is **vimdiff** when the key is omitted or blank. There is no `$EDITOR` / `$VISUAL` / `$GIT_EXTERNAL_DIFF` fallback. This is not `git difftool`. The TUI builds LEFT and RIGHT and runs the command. User file only: a workspace file that sets it fails to load (see [User-only keys](#user-only-keys)).
 
 Copy-paste samples:
 
@@ -231,13 +231,19 @@ These top-level keys set the same settings as the env vars in [Environment varia
 | `git` | `WORKSPACE_STATUS_GIT` | path, or a command name without `/` (looked up on `PATH`). User file or env only |
 | `prTitleCommand` | `WS_STATUS_PR_TITLE_CMD` | path, or a command name without `/` (looked up on `PATH`). User file or env only |
 
-`updateCheckStore`, `commentStore`, `viewedStore`, `uiStore`, `git`, and `prTitleCommand` are allowed only in the user file (or the env var), because a workspace file can be committed to a repo and must not pick a program to run or a file to write. A workspace file that sets one fails to load: `.workspace-status-config.json git is only allowed in the user config file (<user file path>) or WORKSPACE_STATUS_GIT`. `null` counts as omitted and is allowed.
+The store paths, `git`, and `prTitleCommand` are user file only. See [User-only keys](#user-only-keys).
 
 - Values are strict, like `viewDefaults`. A wrong type, an unknown value, a blank string, or a fraction is an error that names the file, the key, and the allowed values. Example: `.workspace-status-config.json glyphs must be "nerd" or "ascii"`. String values are trimmed, then matched case-sensitively.
 - A path must be absolute or start with `~/`. `~/` expands with `$HOME`. A relative path is an error: `<file> commentStore must be an absolute path or a path that starts with ~/`. When `$HOME` is unset, a `~/` path is an error.
 - `git` and `prTitleCommand` also accept a bare command name (`"git"`). A relative path with `/` (`"bin/git"`) is an error.
 - `null` counts as omitted, so the user file value or the default applies.
 - Env-only settings have no key: see the **Config key** column in [Environment variables](#environment-variables).
+
+### User-only keys
+
+`editor`, `diffTool`, `updateCheckStore`, `commentStore`, `viewedStore`, `uiStore`, `git`, and `prTitleCommand` are allowed only in the user file (or the env var, for the keys that have one), because a workspace file can be committed to a repo and must not pick a program to run or a file to write. A workspace file that sets one fails to load: `.workspace-status-config.json git is only allowed in the user config file (<user file path>) or WORKSPACE_STATUS_GIT`. `editor` and `diffTool` have no env var of their own, so their error ends at the user file path: `.workspace-status-config.json editor is only allowed in the user config file (<user file path>)`. Any value counts as set, a blank string and a wrong type included. `null` counts as omitted and is allowed.
+
+`editor` and `diffTool` were read from either file before they became user-only. A workspace file that still sets one fails to load: move the key to the user file, or set `$VISUAL` / `$EDITOR` for the editor.
 
 ### `viewDefaults`
 
@@ -305,7 +311,7 @@ Optional object. It sets the TUI view modes at launch. Each key is optional. An 
 | `WS_STATUS_SMOOTH_SCROLL` | `smoothScroll` | unset (glide on) | Ctrl-d / Ctrl-u glide the viewport to its new top over about 3 frames (48 ms, ease-out cubic) instead of jumping, in the workspace tree, the graph list, the file diff, and the Explorer file view. Visual only: the cursor moves 5 rows at once, and no extra pane load runs. While the glide runs the loop redraws at the 16 ms draw floor; then there is no timer again. Any other key, a click, or the wheel ends a glide at once. The commit-file list and the Explorer tree jump. Not a colour or glyph feature, so `NO_COLOR` and ASCII glyphs keep it. `0`, `false`, or `off` turns it off: Ctrl-d / Ctrl-u jump. `1`, `true`, or `on` turns it on. Any other value falls through to config `smoothScroll`, then on. |
 | `WS_STATUS_PR_POLL_MS` | `prPolling` (on or off only) | unset (60 s hot, 180 s calm) | PR poll period in ms. It replaces both the hot period (60 s, while a pollable PR has CI running or is ready to merge) and the calm period (180 s). `0` turns polling off. There is no floor, so tests can poll every few hundred ms. A valid value wins over config `prPolling`. Empty, negative, or non-numeric falls through to `prPolling`, then on. With polling off, a branch change, `r`, and a full reload still look up. See [Pull request badges](#pull-request-badges). |
 | `WS_STATUS_PR_TITLE_CMD` | `prTitleCommand` (user file only) | unset | Program that gives a title for a ticket key, for the group titles of a PRs tab: an absolute path, a path that starts with `~/` (config only), or a command name on `PATH`. A non-blank value wins over the config key; a blank one falls through. The PRs tab runs `<cmd> <KEY>` for each ticket group (`ABC-123`) on a worker: no shell (the key is the one argument), a 2 s limit, once per key per run. A run starts when the tab opens, and after the PR lookups go idle only when the listed ticket keys changed, the last run is older than one PR poll period, or `r` was pressed on the tab. Exit 0 with a non-empty first stdout line gives the group title; anything else (a missing file, a non-zero exit, no output, the time limit) gives none, with no error, and the group keeps the title it had. It never runs for a shared-branch or `other` group. The titles stay on screen while a run goes. Quitting `ws` ends a command that still runs. |
-| `WORKSPACE_STATUS_GITHUB_TOKEN` | — (secret; a workspace file may be committed) | unset | Optional Bearer token for GitHub Releases API (`curl`). Used by the TUI startup check and by `ws --update` when fetching notes. Unset is fine for the public repo rate limit. |
+| `WORKSPACE_STATUS_GITHUB_TOKEN` | — (secret; a workspace file may be committed) | unset | Optional Bearer token for GitHub Releases API (`curl`). Used by the TUI startup check and by `ws --update` when fetching notes. curl reads the `Authorization` header from its stdin (`-H @-`, curl 7.55 or later), so the token is not in the process arguments that `ps` shows. A blank value counts as unset. Unset is fine for the public repo rate limit. |
 | `WS_STATUS_DEV_BUILD` | — (build time) | unset                                                   | **Build time** (`option_env!`, `DEV_BUILD` in `lib.rs`). `scripts/install-dev.sh` sets it to the short git sha, plus `-dirty` for a dirty tree. A dev build shows `-dev (sha)` in `--version` and the help footer, skips the TUI-startup release prompt, and makes `--update` exec `workspace-status-update-dev` with no release notes. Has no effect at run time. |
 | `WS_DEV_BIN_DIR` | — (`scripts/install-dev.sh` only) | `$HOME/.local/bin`                                      | `scripts/install-dev.sh` only: where `ws-dev`, `workspace-status-dev`, and `workspace-status-update-dev` go (and what `--uninstall` cleans). The generated `workspace-status-update-dev` keeps the directory it was installed with. |
 | `WS_DEV_TARGET_DIR` | — (`scripts/install-dev.sh` only) | `<repo>/target/dev-install`                             | `scripts/install-dev.sh` only: `CARGO_TARGET_DIR` for the dev build. Kept apart from `target/release` so the dev marker never reaches a release or demo build. The generated `workspace-status-update-dev` keeps the target dir it was installed with. |
