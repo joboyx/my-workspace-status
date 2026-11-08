@@ -48,7 +48,7 @@ fs4 = "1.1"
 # through ratatui/std, which workspace-status-graph turns on. Moving up costs the
 # time move, the Cell::skip deprecation (-D warnings fails on it) and a new before
 # and after run of the TUI.
-two-face = { version = "0.4.5", default-features = false, features = ["syntect-default-fancy"] }
+two-face = { version = "0.5.2", default-features = false, features = ["syntect-default-fancy"] }
 # 0.3.1 declares no rust-version; deps memchr / unicode-segmentation are
 # already locked at versions that build on 1.88.
 nucleo-matcher = "0.3.1"
