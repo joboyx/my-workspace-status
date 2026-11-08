@@ -46,6 +46,13 @@ to_top() { $V keys "$RUN" g g && $V wait --cursor "$RUN" 'workspace  '; }   # al
 to_app() { to_top && $V keys "$RUN" j && $V wait --cursor "$RUN" 'v app' && $V keys "$RUN" j && $V wait --cursor "$RUN" '& feature/auth-refresh'; }
 to_row() { $V keys "$RUN" / && $V keys -l "$RUN" "$1" && $V keys "$RUN" Enter && $V wait --cursor "$RUN" "$1" && $V keys "$RUN" Escape && $V wait "$RUN" 'search cleared'; }
 to_api() { to_row 'rate-limit'; }
+
+# opened_is <url>: wait up to 5 s until the last line of opened.log is <url>. The status
+# line ("opened PR #7") shows before the URL recorder has written the file.
+opened_is() {
+  for _ in $(seq 50); do [ "$(tail -n 1 "$RUN/opened.log" 2>/dev/null)" = "$1" ] && return 0; sleep 0.1; done
+  echo "opened.log ends in '$(tail -n 1 "$RUN/opened.log" 2>/dev/null)', not '$1'" >&2; return 1
+}
 ```
 
 `$V calls "$RUN"` lists the `gh` / `glab` calls of this run only, so an earlier run on the same forge dir does not count.
@@ -79,7 +86,7 @@ The `trap` stops the last run when the shell that set it exits. What that means 
     $V wait --regex "$RUN" 'feature/auth-refresh +P'
     to_app && $V keys "$RUN" g x
     $V wait "$RUN" 'opened PR #7'
-    tail -n 1 "$RUN/opened.log"                   # https://github.com/acme/app/pull/7
+    opened_is https://github.com/acme/app/pull/7 && echo "PASS gx #7"
     $V capture "$RUN" after-gx
     echo "run dir: $RUN"                          # the trap stops the run when this call ends
     ```
@@ -129,13 +136,13 @@ sweep review  "#7 P$END" "!5 P$END"
 ```bash
 to_app && $V keys "$RUN" g x
 $V wait "$RUN" 'opened PR #7'
-tail -n 1 "$RUN/opened.log"        # https://github.com/acme/app/pull/7
+opened_is https://github.com/acme/app/pull/7 && echo "PASS gx #7" || echo "FAIL gx #7"
 to_api && $V keys "$RUN" g x
 $V wait "$RUN" 'opened PR #5'
-tail -n 1 "$RUN/opened.log"        # https://gitlab.com/acme/services/api/-/merge_requests/5
+opened_is https://gitlab.com/acme/services/api/-/merge_requests/5 && echo "PASS gx !5" || echo "FAIL gx !5"
 ```
 
-**PASS:** the status line says `opened PR #7` / `opened PR #5`, and the last line of `opened.log` is the PR URL of that forge. No browser starts: the recorder only appends the URL.
+**PASS:** the status line says `opened PR #7` / `opened PR #5`, and both lines print PASS: the last line of `opened.log` is the PR URL of that forge. The status line can show before the recorder writes the file, so `opened_is` polls (5 s at most). No browser starts: the recorder only appends the URL.
 
 ## PS4 `gc` opens the CI page
 
@@ -152,7 +159,37 @@ tail -n 1 "$RUN/opened.log"        # https://gitlab.com/acme/services/api/-/merg
 
 Steps per row: `$V scenario "$FORGE" <set>`, `to_top`, `r`, `wait` for the badge of that set, `to_app` or `to_api`, note the line count of `opened.log`, `$V keys "$RUN" g c`, `wait` for the status text of the row, then read `opened.log`. With `github-none`: `g c` says `no PR for feature/auth-refresh` and `opened.log` does not grow.
 
-**PASS:** the status line shows the exact text of the row (`opened CI for #7` or `opened CI for !5`), `opened.log` grew by one line, and its last line equals the URL of the row.
+Two rows give the same URL (`job/6002`), so `ci_row` waits for the line count to grow, not for the URL.
+
+```bash
+fresh context github-review gitlab-review -- --fake-forge "$FORGE"
+$V wait "$RUN" '#7 P' && $V wait "$RUN" '!5 P'
+END='($|[^[:alnum:]])'
+lines() { if [ -f "$RUN/opened.log" ]; then wc -l <"$RUN/opened.log" | tr -d ' '; else echo 0; fi; }
+ci_row() { # ci_row <set> <badge regex> <to_app|to_api> <status text> <url>
+  local n m
+  $V scenario "$FORGE" "$1" >/dev/null && to_top && $V keys "$RUN" r && $V wait --regex "$RUN" "$2" && $3 ||
+    { echo "FAIL $1: badge or cursor"; return; }
+  n=$(lines)
+  $V keys "$RUN" g c && $V wait "$RUN" "$4" || { echo "FAIL $1: status text"; return; }
+  for _ in $(seq 50); do m=$(lines); [ "$m" -gt "$n" ] && break; sleep 0.1; done
+  [ "$m" -eq $((n + 1)) ] && [ "$(tail -n 1 "$RUN/opened.log")" = "$5" ] && echo "PASS $1" ||
+    echo "FAIL $1: $n -> $m lines, last '$(tail -n 1 "$RUN/opened.log" 2>/dev/null)'"
+}
+ci_row github-failed  "#7 x$END" to_app 'opened CI for #7' https://github.com/acme/app/actions/runs/501/job/6002
+ci_row github-running "#7 r$END" to_app 'opened CI for #7' https://github.com/acme/app/actions/runs/501/job/6002
+ci_row github-ready   "#7 A$END" to_app 'opened CI for #7' https://github.com/acme/app/actions/runs/501/job/6001
+ci_row gitlab-failed  "!5 x$END" to_api 'opened CI for !5' https://gitlab.com/acme/services/api/-/pipelines/9001
+ci_row gitlab-running "!5 r$END" to_api 'opened CI for !5' https://gitlab.com/acme/services/api/-/pipelines/9002
+ci_row gitlab-ready   "!5 A$END" to_api 'opened CI for !5' https://gitlab.com/acme/services/api/-/pipelines/9003
+$V scenario "$FORGE" github-none >/dev/null && to_top && $V keys "$RUN" r && $V wait --gone --regex "$RUN" "#7 [xArdPm]$END"
+to_app && N=$(lines) && $V keys "$RUN" g c && $V wait "$RUN" 'no PR for feature/auth-refresh'
+sleep 1                                              # give a wrong open the time to land
+[ "$(lines)" -eq "$N" ] && echo "PASS github-none" || echo "FAIL github-none: opened.log grew"
+$V capture "$RUN" gc-end
+```
+
+**PASS:** every row and `github-none` print PASS: the status line shows the exact text of the row (`opened CI for #7` or `opened CI for !5`), `opened.log` grew by one line, and its last line equals the URL of the row.
 
 ## PS5 No PR
 
@@ -287,18 +324,18 @@ GH_MERGED=$(gh pr list -R cli/cli --state merged --limit 100 --json headRefName,
 GL_OPEN=$(glab api 'projects/gitlab-org%2Fcli/merge_requests?state=opened&per_page=100' | jq -r '[.[] | select(.source_project_id == .target_project_id)][0].source_branch // empty')
 GL_MERGED=$(glab api 'projects/gitlab-org%2Fcli/merge_requests?state=merged&per_page=100' | jq -r '[.[] | select(.source_project_id == .target_project_id)][0].source_branch // empty')
 
-ROOT=${WS_VERIFY_ROOT:-${TMPDIR:-/tmp}/ws-verify}; WS=$ROOT/live-fixture
-rm -rf "$WS"; mkdir -p "$WS"
+ROOT=${WS_VERIFY_ROOT:-${TMPDIR:-/tmp}/ws-verify}; LIVE=$ROOT/live-fixture
+rm -rf "$LIVE"; mkdir -p "$LIVE"
 mk() { # mk <dir> <origin> <branch>: a clean checkout on that branch; no fetch happens
-  git init -q -b main "$WS/$1" &&
-    git -C "$WS/$1" -c user.name=verify -c user.email=verify@example.invalid commit -q --allow-empty -m init &&
-    git -C "$WS/$1" remote add origin "$2" && git -C "$WS/$1" checkout -q -b "$3"
+  git init -q -b main "$LIVE/$1" &&
+    git -C "$LIVE/$1" -c user.name=verify -c user.email=verify@example.invalid commit -q --allow-empty -m init &&
+    git -C "$LIVE/$1" remote add origin "$2" && git -C "$LIVE/$1" checkout -q -b "$3"
 }
 mk gh-open   https://github.com/cli/cli.git        "$GH_OPEN"
 mk gh-merged https://github.com/cli/cli.git        "$GH_MERGED"
 mk gl-open   https://gitlab.com/gitlab-org/cli.git "$GL_OPEN"
 mk gl-merged https://gitlab.com/gitlab-org/cli.git "$GL_MERGED"
-relaunch --workspace "$WS"                          # no --fake-forge: the real gh and glab
+relaunch --workspace "$LIVE"                        # no --fake-forge: the real gh and glab
 
 # Wait for every badge to land, then capture: the PASS rule judges this screen.
 $V wait --regex "$RUN" 'gh-open .* [xArdP]($|[^[:alnum:]])' 20
@@ -311,21 +348,22 @@ $V capture "$RUN" live-badges
 Expect: the open PR rows get an open-PR badge (one of `x A r d P`, with `#<n>` or `!<n>` before it), the merged rows get `m` (`#<n> m`). Then check `gx` on each row against the forge CLI itself, and stop the run:
 
 ```bash
-live_check() { # live_check <branch> <url the forge CLI gives for that branch>
-  to_row "$1" && $V keys "$RUN" g x || return 1
-  for _ in $(seq 50); do [ "$(tail -n 1 "$RUN/opened.log" 2>/dev/null)" = "$2" ] && break; sleep 0.2; done
-  [ "$(tail -n 1 "$RUN/opened.log")" = "$2" ] && echo "PASS $1" || echo "FAIL $1"
+# Select a row by its checkout dir (gh-open, ...): a long branch name is cut to fit the
+# tree row, so the cursor line may not hold the whole branch.
+live_check() { # live_check <checkout dir> <url the forge CLI gives for its branch>
+  to_row "$1" && $V keys "$RUN" g x || { echo "FAIL $1: row or key"; return 1; }
+  opened_is "$2" && echo "PASS $1" || echo "FAIL $1"
 }
 gh_url() { gh pr list -R cli/cli --head "$1" --state "$2" --json url --jq '.[0].url'; }
 gl_url() { glab api "projects/gitlab-org%2Fcli/merge_requests?state=$2&per_page=100" | jq -r --arg b "$1" '[.[] | select(.source_branch == $b)][0].web_url'; }
-live_check "$GH_OPEN"   "$(gh_url "$GH_OPEN" open)"
-live_check "$GH_MERGED" "$(gh_url "$GH_MERGED" merged)"
-live_check "$GL_OPEN"   "$(gl_url "$GL_OPEN" opened)"
-live_check "$GL_MERGED" "$(gl_url "$GL_MERGED" merged)"
+live_check gh-open   "$(gh_url "$GH_OPEN" open)"
+live_check gh-merged "$(gh_url "$GH_MERGED" merged)"
+live_check gl-open   "$(gl_url "$GL_OPEN" opened)"
+live_check gl-merged "$(gl_url "$GL_MERGED" merged)"
 $V stop "$RUN"
 ```
 
-**PASS:** the `live-badges` capture shows a badge of the right kind on every row (open or merged), and each `gx` URL equals the URL the forge CLI gives for that branch. SKIP, with the reason, when a CLI is missing or not logged in, when no same-repository PR of that kind exists, or when the network is down. Do not report a fake-forge run as the live result. The live `#[ignore]` unit tests (`SKILL.md`, **Pick the layer**) check the same parse in code.
+**PASS:** the `live-badges` capture shows a badge of the right kind on every row (open or merged), and each `live_check` prints PASS: the `gx` URL equals the URL the forge CLI gives for that branch. SKIP, with the reason, when a CLI is missing or not logged in, when no same-repository PR of that kind exists, or when the network is down. Do not report a fake-forge run as the live result. The live `#[ignore]` unit tests (`SKILL.md`, **Pick the layer**) check the same parse in code.
 
 ## Gotchas
 

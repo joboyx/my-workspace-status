@@ -89,6 +89,7 @@ $V keys "$RUN" g c && $V wait "$RUN" 'opened CI for #7'
 walk '#8   acme' 'v ABC-125' '!5   acme'
 $V keys "$RUN" Enter && $V wait "$RUN" 'opened PR #5'
 $V keys "$RUN" g c && $V wait "$RUN" 'opened CI for !5'
+opened_is https://gitlab.com/acme/services/api/-/pipelines/9002   # the recorder can lag the status line
 cat "$RUN/opened.log"
 ```
 

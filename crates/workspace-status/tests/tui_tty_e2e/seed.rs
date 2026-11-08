@@ -110,6 +110,7 @@ fn init_bare_remote(remote: &Path) {
     let init = Command::new("git")
         .args(["init", "-q", "--bare", "-b", "main"])
         .arg(remote)
+        .envs(git_env())
         .status();
     if !init.map(|s| s.success()).unwrap_or(false) {
         fs::create_dir_all(remote).unwrap();

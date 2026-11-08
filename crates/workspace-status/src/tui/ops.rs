@@ -5,6 +5,7 @@ use crate::snapshot::{
     CheckoutKind, FileChange, SyncStatus, WorkspaceRepoSnapshot, WorkspaceSnapshot,
 };
 
+use super::branches::is_family_container;
 use super::tree::{
     changes_side_change, dir_path_from_id, path_under_dir, staged_side_change, NodeKind, VisibleRow,
 };
@@ -14,12 +15,6 @@ use super::tree::{
 pub struct ScopedFile {
     pub repo: String,
     pub change: FileChange,
-}
-
-fn is_family_container(snapshot: &WorkspaceSnapshot, repo: &str) -> bool {
-    snapshot.repos.iter().any(|member| {
-        member.checkout_kind == CheckoutKind::Linked && member.primary_repo.as_deref() == Some(repo)
-    })
 }
 
 fn files_for_repo(snapshot: &WorkspaceSnapshot, repo: &str) -> Vec<ScopedFile> {

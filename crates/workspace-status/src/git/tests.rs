@@ -1744,6 +1744,24 @@ fn compare_revert_fixture() -> (std::path::PathBuf, String, String) {
     (dir, merge_base, head)
 }
 
+/// Compare diff lines keep git's bytes: a CRLF line keeps its `\r` and
+/// the last line keeps its trailing whitespace, since a compare revert
+/// builds its patch from them.
+#[test]
+fn compare_diff_lines_keep_carriage_returns_and_trailing_whitespace() {
+    let dir = unique_dir("ws-git-compare-exact");
+    init_repo(&dir);
+    fs::write(dir.join("f.txt"), "a\r\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "base"]);
+    let base = exec_git(&["rev-parse", "HEAD"], &dir);
+    fs::write(dir.join("f.txt"), "a\r\nb \t\n").unwrap();
+    git(&dir, &["commit", "-q", "-am", "head"]);
+    let lines = diff_compare_file_ctx(&dir, &base, "HEAD", "f.txt", None, None).unwrap();
+    assert_eq!(lines[lines.len() - 2..], [" a\r", "+b \t"]);
+    let _ = fs::remove_dir_all(&dir);
+}
+
 fn index_is_head(dir: &Path) -> bool {
     exec_git_status(&["diff", "--cached", "--quiet"], dir) == 0
 }
@@ -1889,7 +1907,10 @@ fn compare_picker_commits_list_ancestors_without_head() {
     want.sort_unstable();
     assert_eq!(ids, want, "first- and merge-side ancestors");
     let side_row = rows.iter().find(|c| c.id == side).unwrap();
-    assert_eq!(side_row.subject, "Side\twork", "a tab stays in the subject");
+    assert_eq!(
+        side_row.subject, "Side    work",
+        "the id splits at the first tab; a tab in the subject is painted as spaces"
+    );
 
     // The cap keeps the newest `limit` ancestors and still drops HEAD.
     let capped = list_compare_picker_commits_capped(&dir, 1).unwrap();
@@ -2233,6 +2254,34 @@ fn blame(dir: &std::path::Path, rev: BlameRev, path: &str, line: u32) -> LineBla
     blame_line(dir, &rev, path, line)
         .expect("git starts")
         .unwrap_or_else(|| panic!("blame {path}:{line}"))
+}
+
+/// The blame annotation paints author and subject: no control byte from
+/// the commit reaches the terminal.
+#[test]
+fn parse_blame_porcelain_makes_author_and_summary_paintable() {
+    let porcelain = "\
+63b08ad4823cc8096b108736af6268306d1c5328 1 1 1
+author Ada\x1b[31m
+author-time 1791204822
+summary fix\tit\x07
+filename a.txt
+\tA
+";
+    let blame = parse_blame_porcelain(porcelain).expect("parses");
+    assert_eq!(blame.author, "Ada\u{FFFD}[31m");
+    assert_eq!(blame.summary, "fix it\u{FFFD}");
+}
+
+#[test]
+fn parse_compare_picker_line_makes_the_subject_paintable() {
+    let row = parse_compare_picker_line(
+        "63b08ad4823cc8096b108736af6268306d1c5328\tfix\tit\x1b[31m\u{9b}2J\x07",
+    )
+    .expect("parses");
+    assert_eq!(row.id, "63b08ad4823cc8096b108736af6268306d1c5328");
+    assert_eq!(row.subject, "fix it\u{FFFD}[31m\u{FFFD}2J\u{FFFD}");
+    assert_eq!(parse_compare_picker_line("\tno id"), None);
 }
 
 #[test]
