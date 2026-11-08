@@ -129,7 +129,7 @@ Set `WS_STATUS_GLYPHS=ascii`, or `"glyphs": "ascii"` in a config file, for plain
 
 `workspace-status` reads `.workspace-status-config.json` from the workspace root. Pin that root with `-C` / `--workspace <path>` or `WS_STATUS_WORKSPACE` (CLI flag > env > process cwd). Missing or non-directory paths error; they do not fall back to cwd.
 
-An optional user file, `~/.config/my-workspace-status/config.json` (`$XDG_CONFIG_HOME` when set), uses the same keys. The workspace file wins per key; `viewDefaults` and `defaultBranches` merge per sub-key. Most `WS_STATUS_*` env vars also have a config key (`theme`, `themeMode`, `glyphs`, `watchMs`, `fetchMs`, `fetchConcurrency`, `updateCheck`, `termProgress`, `smoothScroll`, `prPolling`, the store paths, `git`, `prTitleCommand`); a valid env var wins over the key. The store paths, `git`, and `prTitleCommand` are allowed only in the user file. See [docs/configuration.md](./docs/configuration.md).
+An optional user file, `~/.config/my-workspace-status/config.json` (`$XDG_CONFIG_HOME` when set), uses the same keys. The workspace file wins per key; `viewDefaults` and `defaultBranches` merge per sub-key. Most `WS_STATUS_*` env vars also have a config key (`theme`, `themeMode`, `glyphs`, `watchMs`, `fetchMs`, `fetchConcurrency`, `updateCheck`, `termProgress`, `smoothScroll`, `prPolling`, the store paths, `git`, `prTitleCommand`); a valid env var wins over the key. `editor`, `diffTool`, the store paths, `git`, and `prTitleCommand` pick a program to run or a file to write, so they are allowed only in the user file: a workspace file that sets one fails to load. See [docs/configuration.md](./docs/configuration.md).
 
 ```json
 {
@@ -139,8 +139,6 @@ An optional user file, `~/.config/my-workspace-status/config.json` (`$XDG_CONFIG
   "defaultBranches": {
     "services/api": "develop"
   },
-  "editor": "vim",
-  "diffTool": "vimdiff",
   "viewDefaults": {
     "diff": "split",
     "wrap": "wrap"
@@ -154,8 +152,8 @@ An optional user file, `~/.config/my-workspace-status/config.json` (`$XDG_CONFIG
 - `ignoredRepos` is removed. A config that still has it fails startup: rename it to `hiddenPaths`, and add `ignoredPaths` for folders that must never show.
 - `maxDepth` — how many path segments below cwd to search for git repos (default **3**, so `group/app/module` is included)
 - `defaultBranches` — optional map of workspace-relative repo path → sole default branch. When set, that branch is used for classification, markers, ordering, and `--default-branch` / TUI `d`. When omitted for a repo, behaviour matches today (classification: `main`/`master`/`develop`; switch target from git).
-- `editor` — optional command for TUI `e` (same shape as `$EDITOR`). Omit the key or set `"editor": "vim"` for vim (the default). `"editor": "cursor"` opens Cursor IDE. Order: config `editor`, `$VISUAL`, `$EDITOR`, then vim (git's order).
-- `diffTool` — optional command for TUI `E` (default vimdiff). `"diffTool": "cursor --diff --wait"` opens Cursor and keeps HEAD temps until the CLI exits. No `$EDITOR` fallback.
+- `editor` — optional command for TUI `e` (same shape as `$EDITOR`), user file only. Omit the key or set `"editor": "vim"` for vim (the default). `"editor": "cursor"` opens Cursor IDE. Order: config `editor`, `$VISUAL`, `$EDITOR`, then vim (git's order).
+- `diffTool` — optional command for TUI `E` (default vimdiff), user file only. `"diffTool": "cursor --diff --wait"` opens Cursor and keeps HEAD temps until the CLI exits. No `$EDITOR` fallback.
 - `viewDefaults` — optional TUI launch modes: `tree` / `commitTree` (`tree` | `flat`), `diff` (`split` | `inline`), `wrap` (`wrap` | `unwrap`, default `wrap`), `commitMessage` (`expand` | `collapse`), `commitMessageLines` (integer 1 to 20, default 4), `lineBlame` (`show` | `hide`, default `show`), `background` (`paint` | `terminal`, default `paint`). Keys and values are checked; a typo is an error. Toggle keys change the session only. A mouse drag of the commit-message footer rule saves its rows in the UI-state file, and that saved value beats `commitMessageLines` at launch. Detail: [docs/configuration.md](docs/configuration.md).
 
 Pass `-a` or `--all` to include repos under `hiddenPaths` for that run (`maxDepth` is unchanged; `ignoredPaths` stays excluded). In the TUI, `.` shows or hides those repos at runtime (starts shown with `-a`, hidden without it). Hidden repos stay out of workspace operations unless you show them.
@@ -234,7 +232,7 @@ Agent map of PTY vs desktop `#[ignore]`, plus `WS_STATUS_UPDATE_CHECK_STORE`: [A
 | Default branch switch | `--default-branch` switches clean non-default branches back to default and skips dirty repos                                                                                                    |
 | Symlinked / gitfile   | Symlinked directories and repos with a `.git` file (linked worktrees / some submodules) are discovered like regular repos                                                                       |
 | Linked worktrees      | `git worktree list` paths under cwd appear with `🔗`; Files column = dirty/clean; `✅`/`🌱` merge marks (`✅` only for a strict ancestor of the default tip); named filters accept `.worktrees/` paths |
-| Workspace config      | `hiddenPaths` hides repos (shown by `.` or `-a`); `ignoredPaths` never shows them; `maxDepth` (default 3) caps discovery depth; `defaultBranches` overrides per-repo default; `editor` sets TUI `e`; `diffTool` sets TUI `E`; `viewDefaults` sets TUI launch view modes; `--all` includes hidden repos |
+| Workspace config      | `hiddenPaths` hides repos (shown by `.` or `-a`); `ignoredPaths` never shows them; `maxDepth` (default 3) caps discovery depth; `defaultBranches` overrides per-repo default; `editor` sets TUI `e` and `diffTool` sets TUI `E` (user file only); `viewDefaults` sets TUI launch view modes; `--all` includes hidden repos |
 | Repo filter           | Positional repo paths limit output to named repos; named repos bypass `hiddenPaths` and `ignoredPaths`; unknown repos exit with an error                                                                          |
 
 ### Scenario isolation

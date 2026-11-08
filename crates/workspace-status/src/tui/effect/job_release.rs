@@ -154,6 +154,10 @@ pub(super) enum JobRelease {
     StoreSave { kind: StoreKind },
     /// PRs tab title fill (one fill at a time).
     PrTitles,
+    /// Host clipboard tool copy (serial latest-only slot). `pending` when
+    /// OSC 52 failed, so the copy result still waits on this job;
+    /// `announce` as in [`super::Effect::CopyClipboard`].
+    Clipboard { pending: bool, announce: bool },
     /// PR popover detail fetch `job`, on a badge slot.
     PrDetail { job: PrDetailJob },
     /// Badge lookup of `branch` in checkout `repo`, on a badge slot.
@@ -196,6 +200,7 @@ impl JobRelease {
                 StoreKind::Comments => "comment save",
             },
             Self::PrTitles => "PR title fill",
+            Self::Clipboard { .. } => "clipboard copy",
             Self::PrDetail { .. } => "PR detail",
             Self::PrBadge { .. } => "PR badge lookup",
         }
@@ -405,6 +410,12 @@ impl Interpreter {
                 let _ = state.apply_pr_titles(TitleCache::default(), true, Instant::now());
                 None
             }
+            // The outcome frees the slot; a copy still waiting on its
+            // result shows `copy failed`.
+            JobRelease::Clipboard { pending, announce } => Some(JobOutcome::ClipboardCopied {
+                ok: pending.then_some(false),
+                announce,
+            }),
             JobRelease::PrDetail { job } => {
                 self.land_pr_detail(state, opts, job, PrDetailLookup::Failed(Some(failed())));
                 None

@@ -4,7 +4,7 @@
 //! `spawn_blocking`s them onto a `JoinSet`.
 //! [`super::effect::Interpreter::interpret_sync`] runs the same jobs on the
 //! calling thread. [`Scheduler`] decides which
-//! [`TaskResult`] values may touch [`super::state::AppState`].
+//! results may touch [`super::state::AppState`].
 //! [`super::effect::Interpreter`] applies those results. Workers never draw.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -18,15 +18,6 @@ pub enum CollectionKind {
     Watch,
     /// `r` on the workspace / No-updates row, or a post-write refresh.
     Reload,
-}
-
-/// User / pane work vs background `git status`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum JobClass {
-    /// Pane load, writes, pickers, fetch/pull/push, focused status.
-    User,
-    /// Background checkout status for a collect.
-    Status,
 }
 
 /// Work the loop may spawn on the blocking pool.
@@ -76,6 +67,9 @@ pub enum UserTag {
     /// PR title command fill for the PRs tab group headers (latest-only
     /// slot).
     PrTitles,
+    /// Host clipboard tool copy (`wl-copy` / `xclip` / `pbcopy`) of one
+    /// copy, with a deadline (serial latest-only slot).
+    Clipboard,
     /// Commit-activity counts for the tree sparklines. Low priority: it
     /// waits behind every user job ([`Scheduler::enqueue_background`]).
     Activity,
@@ -89,30 +83,7 @@ pub enum UserTag {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpawnRequest {
     pub id: u64,
-    pub class: JobClass,
     pub kind: SpawnKind,
-}
-
-/// Typed worker result. Stale generations are discarded by [`Scheduler`].
-#[derive(Clone, Debug)]
-#[allow(dead_code)]
-pub enum TaskResult {
-    Discovered {
-        gen: u64,
-        paths: Vec<String>,
-    },
-    RepoStatus {
-        gen: u64,
-        path: String,
-        applied: bool,
-    },
-    Pane {
-        req_id: u64,
-        accepted: bool,
-    },
-    UserDone {
-        tag: UserTag,
-    },
 }
 
 /// What the loop should do after a result.
@@ -129,8 +100,6 @@ pub enum ApplyDecision {
     },
     QueueRepos,
     CollectionIdle,
-    #[allow(dead_code)]
-    ApplyPane,
 }
 
 /// Caps, generations, and queues for the live loop.
@@ -181,8 +150,6 @@ struct CollectionState {
 }
 
 struct Inflight {
-    #[allow(dead_code)]
-    class: JobClass,
     kind: SpawnKind,
 }
 
@@ -674,24 +641,13 @@ impl Scheduler {
     }
 
     fn take_inflight(&mut self, kind: SpawnKind) -> SpawnRequest {
-        let class = match &kind {
-            SpawnKind::ProcessRepo { focused: false, .. } => JobClass::Status,
-            SpawnKind::Discover { .. } => JobClass::User,
-            _ => JobClass::User,
-        };
         let id = self.next_job_id;
         self.next_job_id += 1;
         if let SpawnKind::LoadPane { req_id } = &kind {
             self.pane_inflight = Some(*req_id);
         }
-        self.inflight.insert(
-            id,
-            Inflight {
-                class,
-                kind: kind.clone(),
-            },
-        );
-        SpawnRequest { id, class, kind }
+        self.inflight.insert(id, Inflight { kind: kind.clone() });
+        SpawnRequest { id, kind }
     }
 
     pub fn note_job_finished(&mut self, id: u64) {
@@ -776,8 +732,6 @@ mod tests {
             }
             other => panic!("expected focused repo, got {other:?}"),
         }
-        assert_eq!(first.class, JobClass::User);
-        assert_eq!(second.class, JobClass::User);
         let rest: Vec<_> = s
             .spawn_ready()
             .into_iter()

@@ -886,6 +886,33 @@ mod tests {
             "E blob/temp prepare must run on spawn_blocking via Interpreter"
         );
 
+        // The clipboard arm writes OSC 52 only; the host tool (a process
+        // that can hang) runs on a worker with a deadline.
+        let copy_arm = effect
+            .split("Effect::CopyClipboard { text, announce } =>")
+            .nth(1)
+            .and_then(|rest| rest.split("\n            }\n").next())
+            .expect("the CopyClipboard arm of schedule_effect");
+        for banned in [
+            "copy_to_clipboard(",
+            "copy_with_host_tool(",
+            "pipe_to(",
+            "clipboard_tool)(",
+        ] {
+            assert!(
+                !copy_arm.contains(banned),
+                "{banned} must not run in the CopyClipboard arm, on the TTY loop thread"
+            );
+        }
+        assert!(
+            effect.contains("UserTag::Clipboard =>") && copy_arm.contains("clipboard_job.offer("),
+            "the host clipboard tool must run on spawn_blocking via Interpreter"
+        );
+        assert!(
+            !app.contains("copy_with_host_tool(") && !loop_src.contains("copy_with_host_tool("),
+            "the host clipboard tool must not run on the TTY loop thread"
+        );
+
         let comments_target = include_str!("comments/target.rs");
         for banned in ["list_local_branches", "rev_parse", "exec_git"] {
             assert!(
