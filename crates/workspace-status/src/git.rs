@@ -1972,7 +1972,10 @@ pub fn git_diff_args(base: &[&str], path: &str, context: Option<u32>) -> Vec<Str
         args.push(format!("-U{n}"));
     }
     args.push("--".into());
-    args.push(path.into());
+    // Literal: a line stage / unstage / revert builds its patch from this
+    // diff, so a glob match of a sibling file would put that file's hunks
+    // under this file's header.
+    args.push(literal_pathspec(path));
     args
 }
 

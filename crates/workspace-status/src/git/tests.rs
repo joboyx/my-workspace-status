@@ -705,8 +705,9 @@ fn quit_during_pull_in_this_process() {
 
 #[test]
 fn git_diff_args_inserts_full_context() {
+    let path = literal_pathspec("README.md");
     let normal = git_diff_args(&["diff"], "README.md", None);
-    assert_eq!(normal, vec!["diff", "--", "README.md"]);
+    assert_eq!(normal, vec!["diff".to_string(), "--".into(), path.clone()]);
     let full = git_diff_args(&["diff"], "README.md", Some(FULL_DIFF_CONTEXT_LINES));
     assert_eq!(
         full,
@@ -714,7 +715,7 @@ fn git_diff_args_inserts_full_context() {
             "diff".to_string(),
             format!("-U{FULL_DIFF_CONTEXT_LINES}"),
             "--".into(),
-            "README.md".into(),
+            path,
         ]
     );
 }
@@ -795,6 +796,28 @@ fn literal_pathspec_prefix_unless_git_reads_every_pathspec_literally() {
     for off in ["", "0", "false", "No", "off", "maybe"] {
         assert!(!git_env_bool(off), "{off}");
     }
+}
+
+// Windows does not allow `*` or `?` in file names.
+#[cfg(unix)]
+#[test]
+fn file_diff_reads_only_the_named_file() {
+    let dir = glob_names_fixture("ws-git-literal-diff");
+    for (target, sibling) in GLOB_NAME_PAIRS {
+        write_file(&dir, target, "dirty\n");
+        write_file(&dir, sibling, "dirty\n");
+        let args = git_diff_args(&["diff"], target, None);
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let diff = exec_git(&refs, &dir);
+        assert_eq!(
+            diff.matches("diff --git ").count(),
+            1,
+            "diff of {target} names one file:\n{diff}"
+        );
+        assert!(!diff.contains(sibling), "diff of {target}:\n{diff}");
+        git(&dir, &["checkout", "-q", "--", "."]);
+    }
+    let _ = fs::remove_dir_all(&dir);
 }
 
 // Windows does not allow `*` or `?` in file names.
