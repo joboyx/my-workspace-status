@@ -66,6 +66,41 @@ fn parse_remote_gitlab_subgroups_and_enterprise_github() {
 }
 
 #[test]
+fn parse_remote_ssh_alias_of_a_public_forge_maps_to_the_forge_host() {
+    for url in [
+        "git@github.com-work:octo/demo.git",
+        "ssh://git@github.com-work/octo/demo.git",
+        "git@GitHub.com-Work:octo/demo",
+    ] {
+        assert_eq!(
+            parse_remote(url),
+            Some(repo(Forge::GitHub, "github.com", "octo/demo")),
+            "{url}"
+        );
+    }
+    assert_eq!(
+        parse_remote("git@gitlab.com-work:group/sub/demo.git"),
+        Some(repo(Forge::GitLab, "gitlab.com", "group/sub/demo"))
+    );
+    // Only the ssh forms: an https host is a real DNS name.
+    assert_eq!(
+        parse_remote("https://github.com-work/octo/demo.git"),
+        Some(repo(Forge::GitHub, "github.com-work", "octo/demo"))
+    );
+    // Other hosts keep their name.
+    for (url, host) in [
+        ("git@github-work:octo/demo.git", "github-work"),
+        ("git@github.example.com:octo/demo.git", "github.example.com"),
+        (
+            "git@github.com.example.com:octo/demo.git",
+            "github.com.example.com",
+        ),
+    ] {
+        assert_eq!(parse_remote(url).unwrap().host, host, "{url}");
+    }
+}
+
+#[test]
 fn commit_url_for_github_and_gitlab_subgroups() {
     const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
     let github = parse_remote("git@github.com:example/demo.git").unwrap();
