@@ -905,6 +905,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("pause acked while the channel is full");
         assert_eq!(rx.try_recv().ok(), Some(0));
+        assert!(rx.try_recv().is_err(), "held event not sent while paused");
         cmd_tx.send(InputCmd::Resume).unwrap();
         ack_rx
             .recv_timeout(Duration::from_secs(5))
