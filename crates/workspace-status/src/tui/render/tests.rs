@@ -8626,7 +8626,7 @@ fn confirm_overlays_are_boxed_not_status_line() {
 
     state.confirm = Some(PendingConfirm::StashDrop {
         repo: "app".into(),
-        stash_ref: "stash@{0}".into(),
+        stash: crate::testutil::stash_target("stash@{0}"),
     });
     terminal.draw(|frame| draw(frame, &mut state)).unwrap();
     let text = buffer_text(&terminal);
@@ -11196,7 +11196,7 @@ fn paint_sweep_screens() -> Vec<(String, AppState, u16, u16)> {
     let mut state = base();
     state.confirm = Some(PendingConfirm::StashDrop {
         repo: "app".into(),
-        stash_ref: "stash@{0}".into(),
+        stash: crate::testutil::stash_target("stash@{0}"),
     });
     dialogs.push(("confirm", state));
     let mut state = base();
@@ -11204,8 +11204,8 @@ fn paint_sweep_screens() -> Vec<(String, AppState, u16, u16)> {
     state.stash_menu = Some(stash_ops_for_context(&StashOpsContext {
         dirty: true,
         dirty_paths: None,
-        focused_stash_ref: Some("stash@{0}".into()),
-        latest_stash_ref: Some("stash@{0}".into()),
+        focused_stash: Some(crate::testutil::stash_target("stash@{0}")),
+        latest_stash: Some(crate::testutil::stash_target("stash@{0}")),
     }));
     dialogs.push(("stash menu", state));
     let mut state = base();
@@ -11437,7 +11437,7 @@ fn terminal_mode_popups_sit_on_panel_over_unfilled_panes() {
     assert_eq!(state.background, BackgroundMode::Terminal);
     state.confirm = Some(PendingConfirm::StashDrop {
         repo: "app".into(),
-        stash_ref: "stash@{0}".into(),
+        stash: crate::testutil::stash_target("stash@{0}"),
     });
     for id in crate::tui::theme::THEME_IDS {
         state.theme = id;
@@ -14410,7 +14410,7 @@ fn dialog_open_keeps_pane_height() {
     state.help_open = false;
     state.confirm = Some(PendingConfirm::StashDrop {
         repo: "app".into(),
-        stash_ref: "stash@{0}".into(),
+        stash: crate::testutil::stash_target("stash@{0}"),
     });
     draw_state(&mut terminal, &mut state);
     assert_eq!(state.layout.pane_height, idle, "confirm");
@@ -21594,7 +21594,7 @@ fn confirm_and_help_dim_the_backdrop() {
         if open == "confirm" {
             state.confirm = Some(PendingConfirm::StashDrop {
                 repo: "app".into(),
-                stash_ref: "stash@{0}".into(),
+                stash: crate::testutil::stash_target("stash@{0}"),
             });
         } else {
             state.help_open = true;
@@ -21766,7 +21766,7 @@ fn badge_link_outside_the_dialog_reprints_dimmed() {
 
     state.confirm = Some(PendingConfirm::StashDrop {
         repo: "app".into(),
-        stash_ref: "stash@{0}".into(),
+        stash: crate::testutil::stash_target("stash@{0}"),
     });
     draw_state(&mut terminal, &mut state);
     let keep = open_dialog_box(&state, 160);

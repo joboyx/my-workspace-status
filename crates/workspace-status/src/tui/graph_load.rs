@@ -705,6 +705,7 @@ pub(crate) fn sync_from_snapshot(repo: &WorkspaceRepoSnapshot) -> SyncState {
         status: match repo.sync_status {
             crate::snapshot::SyncStatus::UpToDate => SyncStatus::UpToDate,
             crate::snapshot::SyncStatus::NoUpstream => SyncStatus::NoUpstream,
+            crate::snapshot::SyncStatus::Gone => SyncStatus::Gone,
             crate::snapshot::SyncStatus::Ahead => SyncStatus::Ahead,
             crate::snapshot::SyncStatus::Behind => SyncStatus::Behind,
             crate::snapshot::SyncStatus::Diverged => SyncStatus::Diverged,

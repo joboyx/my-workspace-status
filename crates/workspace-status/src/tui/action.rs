@@ -6,6 +6,7 @@ use super::drill::CommitFileSource;
 use super::pull_request::PrPage;
 use super::remote_view::RemoteTarget;
 use super::theme::ThemeId;
+use crate::git::StashTarget;
 
 /// User or system input that changes TUI state.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -265,7 +266,8 @@ pub enum Action {
     /// Copy the focused line of the pinned popover (`y`).
     PopoverCopyLine,
     /// End a pending `g` chord and do nothing else: a second key the
-    /// chord in a pinned popover does not bind (Esc, `j`, …).
+    /// chord does not bind and that has no action of its own (Esc, an
+    /// unbound key; in a pinned popover any key but `x` / `c`).
     GChordCancel,
     /// Close the pinned popover (Esc, right click).
     PopoverClose,
@@ -629,17 +631,19 @@ pub enum Effect {
         repo: String,
         paths: Vec<String>,
     },
+    /// Apply / pop / drop act on the stash entry that holds `stash.sha` at
+    /// run time, not on the `stash@{n}` it had when it was picked.
     StashApply {
         repo: String,
-        stash_ref: String,
+        stash: StashTarget,
     },
     StashPop {
         repo: String,
-        stash_ref: String,
+        stash: StashTarget,
     },
     StashDrop {
         repo: String,
-        stash_ref: String,
+        stash: StashTarget,
     },
     PrepareBranchPicker {
         repo: String,

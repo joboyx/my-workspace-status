@@ -5524,7 +5524,8 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             ];
             (accent, lines)
         }
-        PendingConfirm::StashDrop { stash_ref, .. } => {
+        PendingConfirm::StashDrop { stash, .. } => {
+            let stash_ref = &stash.stash_ref;
             let accent = palette.deleted;
             let lines = vec![
                 Line::from(vec![
@@ -5819,7 +5820,7 @@ fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         let detail = match op.id {
             super::stash::StashOpId::Apply
             | super::stash::StashOpId::Pop
-            | super::stash::StashOpId::Drop => op.stash_ref.as_deref().unwrap_or(""),
+            | super::stash::StashOpId::Drop => op.stash_ref().unwrap_or(""),
             super::stash::StashOpId::Create => "",
         };
         let mut spans = vec![

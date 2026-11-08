@@ -7,6 +7,8 @@ pub const DETACHED_HEAD_BRANCH: &str = "HEAD (detached)";
 pub const UNKNOWN_HEAD_BRANCH: &str = "(unknown)";
 /// Sync note of a checkout whose `git status` failed.
 pub const STATUS_FAILED_NOTE: &str = "status failed";
+/// Sync note of a branch whose upstream no longer exists ([`SyncStatus::Gone`]).
+pub const UPSTREAM_GONE_NOTE: &str = "upstream gone";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchKind {
@@ -99,9 +101,10 @@ pub fn get_sync_priority(status: SyncStatus) -> i32 {
     match status {
         SyncStatus::UpToDate => 0,
         SyncStatus::NoUpstream => 1,
-        SyncStatus::Behind => 2,
-        SyncStatus::Ahead => 3,
-        SyncStatus::Diverged => 4,
+        SyncStatus::Gone => 2,
+        SyncStatus::Behind => 3,
+        SyncStatus::Ahead => 4,
+        SyncStatus::Diverged => 5,
     }
 }
 

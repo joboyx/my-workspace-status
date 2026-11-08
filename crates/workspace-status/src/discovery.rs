@@ -12,7 +12,7 @@ use crate::git::{
 };
 use crate::helpers::{
     is_default_branch, path_is_under_any, DETACHED_HEAD_BRANCH, STATUS_FAILED_NOTE,
-    UNKNOWN_HEAD_BRANCH,
+    UNKNOWN_HEAD_BRANCH, UPSTREAM_GONE_NOTE,
 };
 use crate::parallel::map_with_concurrency;
 use crate::snapshot::{CheckoutKind, FileChange, RepoSnapshot, SyncStatus};
@@ -156,6 +156,14 @@ pub fn parse_branch_line(line: &str) -> Option<BranchState> {
         });
     }
     let upstream = upstream.map(str::to_string);
+    if tracking == "gone" {
+        return Some(BranchState {
+            branch: branch.to_string(),
+            sync_status: SyncStatus::Gone,
+            sync_note: UPSTREAM_GONE_NOTE.to_string(),
+            upstream,
+        });
+    }
     let ahead = capture_count(tracking, "ahead ");
     let behind = capture_count(tracking, "behind ");
     if ahead > 0 && behind > 0 {
@@ -215,6 +223,7 @@ fn failed_repo_snapshot(
         sync_status: SyncStatus::NoUpstream,
         sync_note: STATUS_FAILED_NOTE.to_string(),
         upstream_rewrite: None,
+        fetch_error: None,
         head: String::new(),
         has_unstaged: false,
         has_staged: false,
@@ -565,9 +574,13 @@ pub fn process_repo(
     if !has_git_dir(&repo_dir) {
         return None;
     }
-    if do_fetch {
-        let _ = exec_git_checked(&["fetch", "--quiet"], &repo_dir);
-    }
+    // A failed fetch is not fatal: the row still reports status from the
+    // refs it had, and names the failure so it does not read as fresh.
+    let fetch_error = if do_fetch {
+        exec_git_checked(&["fetch", "--quiet"], &repo_dir).err()
+    } else {
+        None
+    };
     let porcelain = exec_git_z(
         &[
             "status",
@@ -582,7 +595,10 @@ pub fn process_repo(
     .unwrap_or_default();
     let (header, parsed) = parse_porcelain_v1_z(&porcelain);
     let Some(branch_state) = parse_branch_line(header.unwrap_or("")) else {
-        return Some(failed_repo_snapshot(repo_path, override_name, meta));
+        return Some(RepoSnapshot {
+            fetch_error,
+            ..failed_repo_snapshot(repo_path, override_name, meta)
+        });
     };
     let changes = merge_file_changes(&parsed);
     let has_unstaged = !parsed.unstaged.is_empty();
@@ -622,6 +638,7 @@ pub fn process_repo(
         sync_status: branch_state.sync_status,
         sync_note: branch_state.sync_note,
         upstream_rewrite,
+        fetch_error,
         head,
         has_unstaged,
         has_staged,
@@ -723,6 +740,14 @@ mod tests {
         let s = parse_branch_line("## main").unwrap();
         assert_eq!(s.branch, "main");
         assert_eq!(s.sync_status, SyncStatus::NoUpstream);
+    }
+
+    #[test]
+    fn parse_branch_deleted_upstream_is_gone_not_up_to_date() {
+        let s = parse_branch_line("## feature/x...origin/feature/x [gone]").unwrap();
+        assert_eq!(s.sync_status, SyncStatus::Gone);
+        assert_eq!(s.sync_note, "upstream gone");
+        assert_eq!(s.upstream.as_deref(), Some("origin/feature/x"));
     }
 
     #[test]
