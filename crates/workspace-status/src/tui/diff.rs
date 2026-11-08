@@ -1078,10 +1078,12 @@ fn partial_fail(kind: PartialPatchKind) -> String {
     }
 }
 
+/// The file header lines of `raw` (everything before the first hunk), each
+/// with its exact bytes. Lines split on `\n` only, like the hunk parser; git
+/// C-quotes a path with a control character, so a header line holds no `\r`.
 fn patch_file_header(raw: &str, path: &str, is_new: bool) -> String {
-    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
     let mut header = String::new();
-    for line in normalized.lines() {
+    for line in raw.split('\n') {
         if line.starts_with("@@") || is_binary_marker(line) {
             break;
         }

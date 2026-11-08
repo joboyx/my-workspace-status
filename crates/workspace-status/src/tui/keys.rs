@@ -503,7 +503,7 @@ fn fold_altgr_symbol(mut key: KeyEvent) -> KeyEvent {
 /// (`Char('o')` + SHIFT, not `Char('O')`). With the flag, `tty` already
 /// decodes the shifted character.
 ///
-/// Fold that into the uppercase binding so `O` / `S` / `/` capitals match
+/// Fold that into the uppercase binding so `O` / `S` capitals match
 /// what a raw `'O'` byte already does. SHIFT stays set so Shift+h/l still pan.
 fn fold_shift_letter(mut key: KeyEvent) -> KeyEvent {
     let KeyCode::Char(c) = key.code else {
