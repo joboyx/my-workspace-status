@@ -806,8 +806,9 @@ fn run(args: &[&str], cwd: &Path) -> io::Result<Output> {
 }
 
 /// Like [`run`], but the run starts even while `ws` exits. Only for git
-/// that puts the user's work back (the auto-stash pop after a pull): a quit
-/// during the pull must not leave their changes in a stash entry. The time
+/// that puts the user's work back (the auto-stash pop after a pull, and the
+/// `refs/stash` reads that decide it): a quit during the pull must not
+/// leave their changes in a stash entry. The time
 /// limit, the `SIGTERM` / `SIGKILL` stop and the group registration still
 /// apply.
 fn run_restoring_user_work(args: &[&str], cwd: &Path) -> io::Result<Output> {
@@ -906,9 +907,29 @@ pub fn blob_bytes(cwd: &Path, rev: &str, path: &str) -> Option<Vec<u8>> {
 }
 
 /// True when the worktree or index has tracked changes.
+///
+/// A check that git could not answer (timeout, error exit) counts as
+/// changes, so the guards that call this refuse to write. Use
+/// [`local_changes`] to tell the two apart.
 pub fn repo_has_local_changes(cwd: &Path) -> bool {
-    exec_git_status(&["diff", "--quiet"], cwd) != 0
-        || exec_git_status(&["diff", "--cached", "--quiet"], cwd) != 0
+    local_changes(cwd).unwrap_or(true)
+}
+
+/// Whether the worktree or index has tracked changes
+/// (`diff --quiet`, then `diff --cached --quiet`).
+///
+/// `Err` holds git's reason when a check did not exit 0 (clean) or 1
+/// (changes): a timeout, a start failure, or a git error.
+pub fn local_changes(cwd: &Path) -> Result<bool, String> {
+    let differs = |args: &[&str]| match run(args, cwd) {
+        Ok(out) => match out.status.code() {
+            Some(0) => Ok(false),
+            Some(1) => Ok(true),
+            _ => Err(git_failure_message(args, &out)),
+        },
+        Err(err) => Err(err.to_string()),
+    };
+    Ok(differs(&["diff", "--quiet"])? || differs(&["diff", "--cached", "--quiet"])?)
 }
 
 /// Resolve `ref` to a commit SHA. Missing refs return `None`.
@@ -1202,47 +1223,130 @@ const AUTO_STASH_MESSAGE: &str = "ws-status: auto-stash before pull";
 pub struct PullQuietResult {
     /// The pull ran and any auto-stash came back cleanly.
     pub ok: bool,
-    /// Tracked local changes were stashed before the pull.
+    /// The auto-stash push made a stash entry (it holds the tracked local
+    /// changes until the pop).
     pub stashed: bool,
-    /// The pull ran, but popping the auto-stash conflicted. The stash is kept.
+    /// The auto-stash entry was not given back. The entry stays in
+    /// `git stash list` unless the note says it is gone. With no
+    /// [`stash_note`](Self::stash_note) the pop conflicted and the tree has
+    /// conflict markers.
     pub stash_pop_failed: bool,
-    /// Git's reason line when the auto-stash push or the pull failed.
+    /// Why the auto-stash entry was kept when the reason is not a pop
+    /// conflict (a newer stash entry on top of it, a pop that could not
+    /// run), and which `git stash list` entry holds the changes.
+    pub stash_note: Option<String>,
+    /// Why the pull did not finish: `local changes check failed: …`,
+    /// `auto-stash failed: …`, `auto-stash check failed: …`, or git's
+    /// reason line when the pull failed.
     pub error: Option<String>,
 }
 
 /// `git pull --quiet`, stashing tracked local changes first when needed.
+///
+/// The pop after the pull runs only when the auto-stash push made a new
+/// stash entry (`stash_push_entry`). A dirty submodule makes
+/// `diff --quiet` report changes while `stash push` saves nothing; a pop
+/// then would apply and drop the user's own `stash@{0}`. A dirty check
+/// that git could not answer stops before the pull and touches no stash.
+/// A push that failed or was stopped after it saved an entry skips the
+/// pull and gives that entry back at once (`restore_auto_stash`).
 pub fn pull_quiet_detailed(cwd: &Path) -> PullQuietResult {
-    let dirty = repo_has_local_changes(cwd);
-    let mut stashed = false;
+    let failed = |error: String| PullQuietResult {
+        ok: false,
+        stashed: false,
+        stash_pop_failed: false,
+        stash_note: None,
+        error: Some(error),
+    };
+    let dirty = match local_changes(cwd) {
+        Ok(dirty) => dirty,
+        Err(err) => return failed(format!("local changes check failed: {err}")),
+    };
+    let mut entry = None;
     // Held from before the stash push to after the pop, so a quit waits
     // for the user's changes to come back.
     let _restoring = dirty.then(RestoringUserWork::start);
     if dirty {
         let args = ["stash", "push", "-m", AUTO_STASH_MESSAGE, "--quiet"];
-        if let Err(err) = exec_git_checked(&args, cwd) {
-            return PullQuietResult {
-                ok: false,
-                stashed: false,
-                stash_pop_failed: false,
-                error: Some(format!("auto-stash failed: {err}")),
-            };
+        let pushed = match stash_push_entry(&args, cwd) {
+            Ok(pushed) => pushed,
+            Err(err) => return failed(format!("auto-stash failed: {err}")),
+        };
+        entry = match pushed.entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                return failed(format!(
+                    "auto-stash check failed: {err} — your changes may be in `git stash list`"
+                ))
+            }
+        };
+        if let Err(err) = pushed.pushed {
+            // The push failed or a quit stopped it, maybe after it saved an
+            // entry. The worktree state is unknown: do not pull over it.
+            let mut result = failed(format!("auto-stash failed: {err}"));
+            if let Some(entry) = entry {
+                result.stashed = true;
+                (result.stash_pop_failed, result.stash_note) = restore_auto_stash(cwd, &entry);
+            }
+            return result;
         }
-        stashed = true;
     }
 
     let pulled = exec_git_checked(&["pull", "--quiet"], cwd);
     // The pop runs even when a quit stopped the pull: it gives the user's
     // changes back.
-    let stash_pop_failed = stashed
-        && !matches!(
-            run_restoring_user_work(&["stash", "pop", "--quiet"], cwd),
-            Ok(out) if out.status.success()
-        );
+    let (stash_pop_failed, stash_note) = match &entry {
+        Some(entry) => restore_auto_stash(cwd, entry),
+        None => (false, None),
+    };
     PullQuietResult {
         ok: pulled.is_ok() && !stash_pop_failed,
-        stashed,
+        stashed: entry.is_some(),
         stash_pop_failed,
+        stash_note,
         error: pulled.err(),
+    }
+}
+
+/// Pop the auto-stash `entry` (its commit id) when it is still `stash@{0}`.
+///
+/// Returns `(stash_pop_failed, stash_note)` for [`PullQuietResult`]. The
+/// user may have stashed in another terminal during the pull: a plain
+/// `stash pop` would then apply their entry, so a newer entry, a missing
+/// one, or a failed read keeps the auto-stash and says where it is. A pop
+/// that conflicts gives no note (the tree has conflict markers); a pop that
+/// fails for another reason, or cannot run, gives git's reason. Every git
+/// run here still starts while `ws` exits.
+fn restore_auto_stash(cwd: &Path, entry: &str) -> (bool, Option<String>) {
+    let short = entry.get(..12).unwrap_or(entry);
+    let kept = |reason: String| {
+        let note = format!(
+            "{reason}; your changes are in `git stash list` as {short} \"{AUTO_STASH_MESSAGE}\""
+        );
+        (true, Some(note))
+    };
+    match stash_tip(cwd, run_restoring_user_work) {
+        Ok(Some(tip)) if tip == entry => {}
+        Ok(Some(_)) => {
+            return kept("auto-stash not restored: a newer stash entry is on top of it".into())
+        }
+        Ok(None) => {
+            let note =
+                format!("auto-stash not restored: entry {short} is no longer in `git stash list`");
+            return (true, Some(note));
+        }
+        Err(err) => return kept(format!("auto-stash not restored: {err}")),
+    }
+    // Not `--quiet`: a conflict prints its `CONFLICT` lines on stdout.
+    let args = ["stash", "pop"];
+    match run_restoring_user_work(&args, cwd) {
+        Ok(out) if out.status.success() => (false, None),
+        Ok(out) if String::from_utf8_lossy(&out.stdout).contains("CONFLICT") => (true, None),
+        Ok(out) => kept(format!(
+            "restoring the auto-stash failed: {}",
+            git_failure_message(&args, &out)
+        )),
+        Err(err) => kept(format!("restoring the auto-stash failed: {err}")),
     }
 }
 
@@ -1733,19 +1837,64 @@ pub fn remote_has_tag(cwd: &Path, remote: &str, tag: &str) -> Option<bool> {
 /// Non-empty `paths` limit the stash to those paths, matched literally
 /// ([`literal_pathspec`]).
 pub fn stash_push(cwd: &Path, paths: &[String]) -> Result<(), String> {
-    let before = exec_git(&["stash", "list"], cwd);
     let specs: Vec<String> = paths.iter().map(|p| literal_pathspec(p)).collect();
     let mut args: Vec<&str> = vec!["stash", "push", "-u"];
     if !specs.is_empty() {
         args.push("--");
         args.extend(specs.iter().map(String::as_str));
     }
-    exec_git_checked(&args, cwd)?;
-    let after = exec_git(&["stash", "list"], cwd);
-    if after == before {
-        return Err("no local changes to save".into());
+    let pushed = stash_push_entry(&args, cwd)?;
+    pushed.pushed?;
+    match pushed.entry? {
+        Some(_) => Ok(()),
+        None => Err("no local changes to save".into()),
     }
-    Ok(())
+}
+
+/// What a `stash push` did ([`stash_push_entry`]).
+struct StashPushed {
+    /// The push's own result: git's reason when it failed or was stopped.
+    pushed: Result<(), String>,
+    /// The new entry's commit id when `refs/stash` moved, `None` when it
+    /// did not, `Err` when it could not be read after the push.
+    entry: Result<Option<String>, String>,
+}
+
+/// Run the `stash push` in `args` and find the entry it made, if any.
+///
+/// `stash push` exits 0 and prints `No local changes to save` when it
+/// saves nothing, and it can fail or be stopped after it saved an entry,
+/// so the exit code cannot say. This compares `refs/stash` before and
+/// after the push, whatever the push returned. The read after the push
+/// still starts while `ws` exits: a quit during or right after the push
+/// must not hide the entry from the caller that gives the work back.
+/// `Err` only when `refs/stash` could not be read before the push (the
+/// push did not run).
+fn stash_push_entry(args: &[&str], cwd: &Path) -> Result<StashPushed, String> {
+    let before = stash_tip(cwd, run)?;
+    let pushed = exec_git_checked(args, cwd);
+    let entry = stash_tip(cwd, run_restoring_user_work)
+        .map(|after| after.filter(|after| Some(after) != before.as_ref()));
+    Ok(StashPushed { pushed, entry })
+}
+
+/// The commit `refs/stash` points at, or `None` when there is no stash.
+///
+/// `Err` when git could not say (a timeout, an error exit other than the
+/// missing-ref exit 1), so a failed read never looks like "no stash".
+fn stash_tip(
+    cwd: &Path,
+    runner: fn(&[&str], &Path) -> io::Result<Output>,
+) -> Result<Option<String>, String> {
+    let args = ["rev-parse", "-q", "--verify", "refs/stash"];
+    match runner(&args, cwd) {
+        Ok(out) if out.status.success() => Ok(Some(
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        )),
+        Ok(out) if out.status.code() == Some(1) => Ok(None),
+        Ok(out) => Err(git_failure_message(&args, &out)),
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 /// Apply a stash and keep the entry.
@@ -1873,38 +2022,43 @@ pub struct NameStatus {
     pub stat: Option<LineStat>,
 }
 
-/// Parse newline `name-status` (`M\\tpath` or `R100\\told\\tnew`).
-pub fn parse_name_status_lines(stdout: &str) -> Vec<NameStatus> {
+/// Run git and return stdout as-is (lossy UTF-8, not trimmed).
+///
+/// For `-z` output, where a leading or trailing space belongs to a path.
+/// Failure is the same `Err` as [`exec_git_stdout`].
+pub fn exec_git_z(args: &[&str], cwd: &Path) -> Result<String, String> {
+    match run(args, cwd) {
+        Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
+        Ok(out) => Err(git_failure_message(args, &out)),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// Parse `--name-status -z` output (`M\0path\0`, `R100\0old\0new\0`).
+///
+/// Paths are raw, never C-quoted. A record cut short is dropped.
+pub fn parse_name_status_z(stdout: &str) -> Vec<NameStatus> {
     let mut out = Vec::new();
-    for line in stdout.lines() {
-        if line.trim().is_empty() {
+    let mut tokens = stdout.split('\0');
+    while let Some(status) = tokens.next() {
+        let Some(letter) = status.chars().next() else {
             continue;
-        }
-        let mut parts = line.split('\t');
-        let status = parts.next().unwrap_or("").to_string();
-        if status.is_empty() {
-            continue;
-        }
-        if status.starts_with('R') || status.starts_with('C') {
-            let old_path = parts.next().map(str::to_string).filter(|s| !s.is_empty());
-            let Some(path) = parts.next().map(str::to_string).filter(|s| !s.is_empty()) else {
-                continue;
-            };
-            out.push(NameStatus {
-                status: status.chars().next().unwrap_or('M').to_string(),
-                path,
-                old_path,
-                stat: None,
-            });
-            continue;
-        }
-        let Some(path) = parts.next().map(str::to_string).filter(|s| !s.is_empty()) else {
+        };
+        let old_path = if matches!(letter, 'R' | 'C') {
+            match tokens.next().filter(|p| !p.is_empty()) {
+                Some(old) => Some(old.to_string()),
+                None => continue,
+            }
+        } else {
+            None
+        };
+        let Some(path) = tokens.next().filter(|p| !p.is_empty()) else {
             continue;
         };
         out.push(NameStatus {
-            status: status.chars().next().unwrap_or('M').to_string(),
-            path,
-            old_path: None,
+            status: letter.to_string(),
+            path: path.to_string(),
+            old_path,
             stat: None,
         });
     }
@@ -1958,19 +2112,21 @@ fn attach_numstat(files: &mut [NameStatus], numstat_z: &str) {
 /// A numstat failure leaves `stat` as `None`; the list still loads.
 pub fn list_commit_name_status(cwd: &Path, commit_id: &str) -> Vec<NameStatus> {
     let parent = format!("{commit_id}^");
-    let out = exec_git(
+    let out = exec_git_z(
         &[
             "diff-tree",
             "--no-commit-id",
             "--name-status",
+            "-z",
             "-r",
             &parent,
             commit_id,
         ],
         cwd,
-    );
+    )
+    .unwrap_or_default();
     if !out.is_empty() {
-        let mut files = parse_name_status_lines(&out);
+        let mut files = parse_name_status_z(&out);
         let numstat = exec_git(
             &[
                 "diff-tree",
@@ -1986,18 +2142,20 @@ pub fn list_commit_name_status(cwd: &Path, commit_id: &str) -> Vec<NameStatus> {
         attach_numstat(&mut files, &numstat);
         return files;
     }
-    let root = exec_git(
+    let root = exec_git_z(
         &[
             "diff-tree",
             "--no-commit-id",
             "--name-status",
+            "-z",
             "-r",
             "--root",
             commit_id,
         ],
         cwd,
-    );
-    let mut files = parse_name_status_lines(&root);
+    )
+    .unwrap_or_default();
+    let mut files = parse_name_status_z(&root);
     let numstat = exec_git(
         &[
             "diff-tree",
@@ -2016,10 +2174,9 @@ pub fn list_commit_name_status(cwd: &Path, commit_id: &str) -> Vec<NameStatus> {
 
 /// Files recorded in a stash entry, with line counts from `--numstat -z`.
 pub fn list_stash_name_status(cwd: &Path, stash_ref: &str) -> Vec<NameStatus> {
-    let mut files = parse_name_status_lines(&exec_git(
-        &["stash", "show", "--name-status", stash_ref],
-        cwd,
-    ));
+    let mut files = parse_name_status_z(
+        &exec_git_z(&["stash", "show", "--name-status", "-z", stash_ref], cwd).unwrap_or_default(),
+    );
     let numstat = exec_git(&["stash", "show", "--numstat", "-z", stash_ref], cwd);
     attach_numstat(&mut files, &numstat);
     files
@@ -2030,11 +2187,14 @@ pub fn list_stash_name_status(cwd: &Path, stash_ref: &str) -> Vec<NameStatus> {
 /// Tracked files carry line counts from `diff HEAD --numstat -z`. Untracked
 /// files have `stat: None`.
 pub fn list_worktree_name_status(cwd: &Path) -> Vec<NameStatus> {
-    let mut files = parse_name_status_lines(&exec_git(&["diff", "HEAD", "--name-status"], cwd));
+    let mut files = parse_name_status_z(
+        &exec_git_z(&["diff", "HEAD", "--name-status", "-z"], cwd).unwrap_or_default(),
+    );
     let numstat = exec_git(&["diff", "HEAD", "--numstat", "-z"], cwd);
     attach_numstat(&mut files, &numstat);
-    let untracked = exec_git(&["ls-files", "--others", "--exclude-standard"], cwd);
-    for path in untracked.lines().map(str::trim).filter(|l| !l.is_empty()) {
+    let untracked =
+        exec_git_z(&["ls-files", "-z", "--others", "--exclude-standard"], cwd).unwrap_or_default();
+    for path in untracked.split('\0').filter(|p| !p.is_empty()) {
         if files.iter().any(|f| f.path == path) {
             continue;
         }
@@ -2189,11 +2349,18 @@ pub fn list_compare_name_status(
     head_sha: &str,
 ) -> Result<Vec<NameStatus>, String> {
     let range = format!("{base_sha}...{head_sha}");
-    let stdout = exec_git_stdout(
-        &["diff", "--name-status", "--find-renames", &range, "--"],
+    let stdout = exec_git_z(
+        &[
+            "diff",
+            "--name-status",
+            "-z",
+            "--find-renames",
+            &range,
+            "--",
+        ],
         cwd,
     )?;
-    let mut files = parse_name_status_lines(&stdout);
+    let mut files = parse_name_status_z(&stdout);
     let numstat = exec_git_stdout(
         &["diff", "--numstat", "-z", "--find-renames", &range, "--"],
         cwd,
@@ -2203,25 +2370,26 @@ pub fn list_compare_name_status(
     Ok(files)
 }
 
-/// Patch key per path of `base...HEAD`, from `diff --raw --no-abbrev
+/// Patch key per path of `base...HEAD`, from `diff --raw -z --no-abbrev
 /// --find-renames`.
 ///
 /// The key holds the old and new modes, the old and new blob ids, the
 /// status letter and the path(s). Two keys are equal only when the patch
 /// for that path is the same, whatever commits produced it. Keyed by the
-/// new path, spelled as [`list_compare_name_status`] lists it: no `-z`, so
-/// git quotes unusual paths the same way in both. A failed git call gives
-/// an empty map; the file list does not depend on it.
+/// raw new path, the same spelling [`list_compare_name_status`] lists (both
+/// read `-z` output). A failed git call gives an empty map; the file list
+/// does not depend on it.
 pub fn list_compare_patch_keys(
     cwd: &Path,
     base_sha: &str,
     head_sha: &str,
 ) -> std::collections::HashMap<String, String> {
     let range = format!("{base_sha}...{head_sha}");
-    let raw = exec_git_stdout(
+    let raw = exec_git_z(
         &[
             "diff",
             "--raw",
+            "-z",
             "--no-abbrev",
             "--find-renames",
             &range,
@@ -2233,20 +2401,19 @@ pub fn list_compare_patch_keys(
     parse_raw_patch_keys(&raw)
 }
 
-/// Parse newline `git diff --raw` output into new path → patch key.
+/// Parse `git diff --raw -z` output into new path → patch key.
 ///
-/// A row is `:<old mode> <new mode> <old id> <new id> <status>[score]\t<path>`.
-/// A rename or copy row ends `\t<old path>\t<new path>`. Paths stay as git
-/// prints them (quoted when unusual), like [`parse_name_status_lines`]. The
-/// similarity score is left out of the key: the blob ids already fix it.
+/// A record is `:<old mode> <new mode> <old id> <new id> <status>[score]\0<path>\0`.
+/// A rename or copy record ends `\0<old path>\0<new path>\0`. Paths are raw,
+/// like [`parse_name_status_z`]. The similarity score is left out of the
+/// key: the blob ids already fix it.
 fn parse_raw_patch_keys(stdout: &str) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
-    for line in stdout.lines() {
-        let Some(line) = line.strip_prefix(':') else {
+    let mut tokens = stdout.split('\0');
+    while let Some(token) = tokens.next() {
+        let Some(meta) = token.strip_prefix(':') else {
             continue;
         };
-        let mut parts = line.split('\t');
-        let meta = parts.next().unwrap_or("");
         let fields: Vec<&str> = meta.split(' ').collect();
         let [old_mode, new_mode, old_id, new_id, status] = fields[..] else {
             continue;
@@ -2254,11 +2421,11 @@ fn parse_raw_patch_keys(stdout: &str) -> std::collections::HashMap<String, Strin
         let Some(letter) = status.chars().next() else {
             continue;
         };
-        let Some(first) = parts.next().filter(|p| !p.is_empty()) else {
+        let Some(first) = tokens.next().filter(|p| !p.is_empty()) else {
             continue;
         };
         let (old_path, path) = if matches!(letter, 'R' | 'C') {
-            let Some(new) = parts.next().filter(|p| !p.is_empty()) else {
+            let Some(new) = tokens.next().filter(|p| !p.is_empty()) else {
                 continue;
             };
             (first, new)
@@ -2344,7 +2511,7 @@ pub fn git_worktree_compare_diff_args(
 
 /// The one path of a commit-vs-working-tree compare, as a name-status row.
 ///
-/// Runs `diff --name-status -M <base> -- [<old>] <path>`, then the same with
+/// Runs `diff --name-status -z -M <base> -- [<old>] <path>`, then the same with
 /// `--numstat -z` for line counts (its failure leaves `stat` as `None`).
 /// Empty stdout (the worktree file equals the commit) is an empty list.
 pub fn list_worktree_vs_commit_name_status(
@@ -2354,9 +2521,9 @@ pub fn list_worktree_vs_commit_name_status(
     old_path: Option<&str>,
 ) -> Result<Vec<NameStatus>, String> {
     let paths = compare_revert_paths(path, old_path);
-    let mut args = vec!["diff", "--name-status", "-M", base_sha, "--"];
+    let mut args = vec!["diff", "--name-status", "-z", "-M", base_sha, "--"];
     args.extend_from_slice(&paths);
-    let mut files = parse_name_status_lines(&exec_git_stdout(&args, cwd)?);
+    let mut files = parse_name_status_z(&exec_git_z(&args, cwd)?);
     let mut numstat_args = vec!["diff", "--numstat", "-z", "-M", base_sha, "--"];
     numstat_args.extend_from_slice(&paths);
     let numstat = exec_git_stdout(&numstat_args, cwd).unwrap_or_default();

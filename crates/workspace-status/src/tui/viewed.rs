@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use super::diff::HUGE_FILE_BYTES;
-use super::persist::{persist_with_lock, LEGACY_WORKSPACE_ID};
+use super::persist::{apply_session_delta, persist_with_lock, LEGACY_WORKSPACE_ID};
 use super::tree::{file_row_id, UNSTAGED_ROW_SUFFIX};
 use crate::snapshot::{FileChange, WorkspaceSnapshot};
 
@@ -294,7 +294,16 @@ pub fn load_viewed_store(file_path: &Path, workspace_id: &str) -> ViewedStore {
     viewed_store_for_workspace(&load_viewed_workspaces(&text), workspace_id)
 }
 
-/// Persist `store` as the current workspace bucket (version 2).
+/// Persist this session's viewed-mark changes into the current workspace
+/// bucket (version 2) and return the merged bucket.
+///
+/// `baseline` is the bucket this session last loaded or saved; `store` is
+/// the bucket now. Under the lock, save reads the bucket on disk (the
+/// `__legacy__` map when the bucket is missing, like load) and applies
+/// only the delta from `baseline` to `store`: marks this session removed
+/// are removed, marks it added or changed are written, and marks another
+/// `ws` process wrote since `baseline` stay. The caller makes the returned
+/// bucket its new `store` and `baseline`.
 ///
 /// Locks a sibling `*.lock` file, keeps every other workspace bucket
 /// (including `__legacy__`), then atomic-writes. A missing file starts an
@@ -302,10 +311,12 @@ pub fn load_viewed_store(file_path: &Path, workspace_id: &str) -> ViewedStore {
 /// JSON returns [`io::Error`] and leaves the bytes unchanged. Other disk
 /// errors also return [`io::Result`].
 pub fn save_viewed_store(
+    baseline: &ViewedStore,
     store: &ViewedStore,
     file_path: &Path,
     workspace_id: &str,
-) -> io::Result<()> {
+) -> io::Result<ViewedStore> {
+    let mut merged = None;
     persist_with_lock(file_path, |existing| {
         let mut workspaces = match existing {
             None => BTreeMap::new(),
@@ -321,9 +332,15 @@ pub fn save_viewed_store(
                 "reserved workspace id",
             ));
         }
-        workspaces.insert(workspace_id.to_string(), store.clone());
+        let mut bucket = workspaces
+            .remove(workspace_id)
+            .unwrap_or_else(|| viewed_store_for_workspace(&workspaces, workspace_id));
+        apply_session_delta(&mut bucket, baseline, store);
+        workspaces.insert(workspace_id.to_string(), bucket.clone());
+        merged = Some(bucket);
         encode_viewed_file(&viewed_file_v2(workspaces))
-    })
+    })?;
+    Ok(merged.unwrap_or_default())
 }
 
 /// Worktree bytes (or `missing`, or a length, time and edge-hash stand-in
@@ -626,13 +643,18 @@ mod tests {
             loaded.get(&identity).map(String::as_str),
             Some(fingerprint.as_str())
         );
-        save_viewed_store(&loaded, &file, "test-ws").unwrap();
+        save_viewed_store(&ViewedStore::new(), &loaded, &file, "test-ws").unwrap();
         let again = load_viewed_store(&file, "test-ws");
         assert_eq!(again, loaded);
         assert!(load_viewed_store(&dir.join("missing.json"), "test-ws").is_empty());
         let blocker = dir.join("not-a-dir");
         fs::write(&blocker, "x").unwrap();
-        let _ = save_viewed_store(&loaded, &blocker.join("viewed-files.json"), "test-ws");
+        let _ = save_viewed_store(
+            &ViewedStore::new(),
+            &loaded,
+            &blocker.join("viewed-files.json"),
+            "test-ws",
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -662,10 +684,10 @@ mod tests {
         let (id_b, fp_b) = sample_mark("b.ts");
         let store_a = toggle_viewed(&ViewedStore::new(), &id_a, &fp_a);
         let store_b = toggle_viewed(&ViewedStore::new(), &id_b, &fp_b);
-        save_viewed_store(&store_a, &file, "ws-a").unwrap();
-        save_viewed_store(&store_b, &file, "ws-b").unwrap();
+        save_viewed_store(&ViewedStore::new(), &store_a, &file, "ws-a").unwrap();
+        save_viewed_store(&ViewedStore::new(), &store_b, &file, "ws-b").unwrap();
         let gced = reconcile_viewed(&store_a, &HashMap::new());
-        save_viewed_store(&gced, &file, "ws-a").unwrap();
+        save_viewed_store(&store_a, &gced, &file, "ws-a").unwrap();
         let loaded_b = load_viewed_store(&file, "ws-b");
         assert_eq!(
             loaded_b.get(&id_b).map(String::as_str),
@@ -680,13 +702,75 @@ mod tests {
     }
 
     #[test]
+    fn two_instances_saving_one_file_keep_both_marks() {
+        let (dir, file) = temp_viewed("ws-viewed-two");
+        let (id_a, fp_a) = sample_mark("a.ts");
+        let (id_b, fp_b) = sample_mark("b.ts");
+        let loaded_a = load_viewed_store(&file, "ws");
+        let loaded_b = load_viewed_store(&file, "ws");
+        let store_a = toggle_viewed(&loaded_a, &id_a, &fp_a);
+        save_viewed_store(&loaded_a, &store_a, &file, "ws").unwrap();
+        let store_b = toggle_viewed(&loaded_b, &id_b, &fp_b);
+        let merged_b = save_viewed_store(&loaded_b, &store_b, &file, "ws").unwrap();
+        let reloaded = load_viewed_store(&file, "ws");
+        assert_eq!(
+            reloaded.get(&id_a).map(String::as_str),
+            Some(fp_a.as_str()),
+            "the second save must keep the mark the first instance added"
+        );
+        assert_eq!(reloaded.get(&id_b).map(String::as_str), Some(fp_b.as_str()));
+        assert_eq!(
+            merged_b, reloaded,
+            "save returns the merged bucket, so instance B sees A's mark"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unmark_in_one_instance_survives_save_of_another() {
+        let (dir, file) = temp_viewed("ws-viewed-two-unmark");
+        let (id_a, fp_a) = sample_mark("a.ts");
+        let (id_b, fp_b) = sample_mark("b.ts");
+        let seed = toggle_viewed(
+            &toggle_viewed(&ViewedStore::new(), &id_a, &fp_a),
+            &id_b,
+            &fp_b,
+        );
+        save_viewed_store(&ViewedStore::new(), &seed, &file, "ws").unwrap();
+        let loaded_a = load_viewed_store(&file, "ws");
+        let loaded_b = load_viewed_store(&file, "ws");
+        let store_a = toggle_viewed(&loaded_a, &id_a, &fp_a);
+        assert!(!store_a.contains_key(&id_a));
+        save_viewed_store(&loaded_a, &store_a, &file, "ws").unwrap();
+        let mut store_b = loaded_b.clone();
+        store_b.insert(id_b.clone(), "changed".into());
+        save_viewed_store(&loaded_b, &store_b, &file, "ws").unwrap();
+        let reloaded = load_viewed_store(&file, "ws");
+        assert!(
+            !reloaded.contains_key(&id_a),
+            "a mark instance A removed must stay removed after B saves: {reloaded:?}"
+        );
+        assert_eq!(
+            reloaded.get(&id_b).map(String::as_str),
+            Some("changed"),
+            "the change of instance B wins"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn save_viewed_store_returns_err_when_unwritable() {
         let (dir, _) = temp_viewed("ws-viewed-err");
         let blocker = dir.join("not-a-dir");
         fs::write(&blocker, "x").unwrap();
         let (identity, fingerprint) = sample_mark("a.ts");
         let store = toggle_viewed(&ViewedStore::new(), &identity, &fingerprint);
-        let result = save_viewed_store(&store, &blocker.join("viewed-files.json"), "ws-a");
+        let result = save_viewed_store(
+            &ViewedStore::new(),
+            &store,
+            &blocker.join("viewed-files.json"),
+            "ws-a",
+        );
         assert!(
             result.is_err(),
             "save to an unwritable path must return Err, got {result:?}"
@@ -727,7 +811,7 @@ mod tests {
         )
         .unwrap();
         let store_b = toggle_viewed(&ViewedStore::new(), &id_b, &fp_b);
-        save_viewed_store(&store_b, &file, "ws-b").unwrap();
+        save_viewed_store(&ViewedStore::new(), &store_b, &file, "ws-b").unwrap();
         let text = fs::read_to_string(&file).unwrap();
         assert!(
             text.contains("\"__legacy__\""),
@@ -747,7 +831,7 @@ mod tests {
             Some(fp_b.as_str())
         );
         let gced = reconcile_viewed(&store_b, &HashMap::new());
-        save_viewed_store(&gced, &file, "ws-b").unwrap();
+        save_viewed_store(&store_b, &gced, &file, "ws-b").unwrap();
         assert_eq!(
             load_viewed_store(&file, "ws-a")
                 .get(&id_a)
@@ -773,7 +857,7 @@ mod tests {
         )
         .unwrap();
         let store_a = toggle_viewed(&ViewedStore::new(), &id_a, &fp_a);
-        save_viewed_store(&store_a, &file, "ws-a").unwrap();
+        save_viewed_store(&ViewedStore::new(), &store_a, &file, "ws-a").unwrap();
         assert_eq!(
             load_viewed_store(&file, "ws-a")
                 .get(&id_a)
@@ -806,7 +890,7 @@ mod tests {
         fs::write(&file, "not-json").unwrap();
         let (id_a, fp_a) = sample_mark("a.ts");
         let store_a = toggle_viewed(&ViewedStore::new(), &id_a, &fp_a);
-        let result = save_viewed_store(&store_a, &file, "ws-a");
+        let result = save_viewed_store(&ViewedStore::new(), &store_a, &file, "ws-a");
         assert!(
             result.is_err(),
             "save over unreadable bytes must return Err, got {result:?}"

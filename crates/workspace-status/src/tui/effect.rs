@@ -324,6 +324,13 @@ pub(crate) enum JobOutcome {
         page: Result<String, String>,
         opened: bool,
     },
+    /// Host clipboard tool copy of one [`Effect::CopyClipboard`]. `ok` is
+    /// the copy result to show; `None` when OSC 52 already showed a
+    /// success on the loop thread.
+    ClipboardCopied {
+        ok: Option<bool>,
+        announce: bool,
+    },
     /// Day commit counts of activity key `key` for its tree sparkline.
     /// `None` when the job saw the quit flag and ran no git.
     Activity {
@@ -443,6 +450,62 @@ const DEFAULT_PR_OPENER: PrUrlOpener = open_in_browser;
 /// and a test that needs an open sets a fake.
 #[cfg(test)]
 const DEFAULT_PR_OPENER: PrUrlOpener = |_, _| Err(());
+
+/// OSC 52 clipboard write on the loop thread: the text in, success out.
+type Osc52Writer = fn(&str) -> bool;
+
+/// Host clipboard copy: the text and the deadline in, success out.
+type ClipboardTool = fn(&str, Instant) -> bool;
+
+/// OSC 52 writer a new [`Interpreter`] starts with.
+#[cfg(not(test))]
+const DEFAULT_OSC52_WRITER: Osc52Writer = comments::write_osc52;
+
+/// Test builds never write OSC 52 to the terminal that runs them: the
+/// default fails without a write, and a test that needs one sets a fake.
+#[cfg(test)]
+const DEFAULT_OSC52_WRITER: Osc52Writer = |_| false;
+
+/// Host clipboard copy a new [`Interpreter`] starts with.
+#[cfg(not(test))]
+const DEFAULT_CLIPBOARD_TOOL: ClipboardTool = comments::copy_with_host_tool;
+
+/// Test builds never spawn `wl-copy` / `xclip` / `pbcopy`: the default fails
+/// without a spawn, and a test that needs a copy sets a fake.
+#[cfg(test)]
+const DEFAULT_CLIPBOARD_TOOL: ClipboardTool = |_, _| false;
+
+/// One queued host clipboard copy: the fields of [`Effect::CopyClipboard`]
+/// plus the OSC 52 result the loop thread already showed.
+#[derive(Clone, Debug)]
+struct ClipboardJob {
+    text: String,
+    announce: bool,
+    /// OSC 52 succeeded, so the copy result is already on screen and the
+    /// host tool's result changes nothing.
+    osc52: bool,
+}
+
+/// Show the result `ok` of one clipboard copy: the `y` export overlay
+/// header (once per overlay), and the status line when `announce`.
+fn show_copy_result(state: &mut AppState, ok: bool, announce: bool) {
+    // `y` opens the export overlay right before this copy; its header
+    // shows the result.
+    if let Some(export) = state
+        .comment_export
+        .as_mut()
+        .filter(|export| export.copied.is_none())
+    {
+        export.copied = Some(ok);
+    }
+    if announce {
+        state.status = if ok {
+            StatusMessage::ok(STATUS_COPIED)
+        } else {
+            StatusMessage::error(STATUS_COPY_FAILED)
+        };
+    }
+}
 
 /// Most badge lookups and popover detail fetches on workers at once, so
 /// pane loads are not starved. A `gx` open does not wait for this cap.
@@ -597,7 +660,9 @@ fn reset_done_status(branch: &str, upstream: &str, old_tip: &str) -> String {
 /// Bulk pull result for one repo.
 fn pull_result(dir: &std::path::Path) -> RepoOpResult {
     let pulled = pull_quiet_detailed(dir);
-    if pulled.stash_pop_failed {
+    if let Some(note) = pulled.stash_note {
+        RepoOpResult::Failed(note)
+    } else if pulled.stash_pop_failed {
         RepoOpResult::StashConflict
     } else if pulled.ok {
         RepoOpResult::Ok
@@ -930,6 +995,15 @@ pub(crate) struct Interpreter {
     /// Latest Doctor probe request; a newer one replaces it before spawn.
     /// At most one job is queued or running.
     doctor_job: LatestOnly<u64>,
+    /// Latest host clipboard copy; a newer one replaces a waiting one, so
+    /// the clipboard ends on the newest text. At most one job is queued or
+    /// running.
+    clipboard_job: LatestOnly<ClipboardJob>,
+    /// OSC 52 writer ([`DEFAULT_OSC52_WRITER`]; tests swap in a fake).
+    osc52_writer: Osc52Writer,
+    /// Host clipboard copy ([`DEFAULT_CLIPBOARD_TOOL`]; tests swap in a
+    /// fake).
+    clipboard_tool: ClipboardTool,
     /// Latest blame previous-change request; a newer one replaces it
     /// before spawn.
     blame_previous: Option<(u64, String, Box<crate::git::LineBlame>)>,
@@ -1039,6 +1113,9 @@ impl Interpreter {
             line_blame_job: LatestOnly::serial(UserTag::LineBlame),
             commit_card_job: LatestOnly::serial(UserTag::CommitCard),
             doctor_job: LatestOnly::serial(UserTag::Doctor),
+            clipboard_job: LatestOnly::serial(UserTag::Clipboard),
+            osc52_writer: DEFAULT_OSC52_WRITER,
+            clipboard_tool: DEFAULT_CLIPBOARD_TOOL,
             blame_previous: None,
             pr_opens: VecDeque::new(),
             pr_ci_opens: VecDeque::new(),
@@ -1854,24 +1931,22 @@ impl Interpreter {
                 self.pr_title_job.offer((cmd, groups), &mut self.sched);
             }
             Effect::CopyClipboard { text, announce } => {
-                let ok = comments::copy_to_clipboard(&text);
-                // `y` opens the export overlay right before this copy; its
-                // header shows the result.
-                if let Some(export) = state
-                    .comment_export
-                    .as_mut()
-                    .filter(|export| export.copied.is_none())
-                {
-                    export.copied = Some(ok);
+                // OSC 52 is a terminal write between frames. The host tool
+                // is a process that can hang, so it runs on a worker.
+                let osc52 = (self.osc52_writer)(&text);
+                if osc52 {
+                    // One working path makes the copy a success.
+                    show_copy_result(state, true, announce);
+                    self.mark();
                 }
-                if announce {
-                    state.status = if ok {
-                        StatusMessage::ok(STATUS_COPIED)
-                    } else {
-                        StatusMessage::error(STATUS_COPY_FAILED)
-                    };
-                }
-                self.mark();
+                self.clipboard_job.offer(
+                    ClipboardJob {
+                        text,
+                        announce,
+                        osc52,
+                    },
+                    &mut self.sched,
+                );
             }
         }
     }
@@ -2617,6 +2692,13 @@ impl Interpreter {
             JobOutcome::RemoteView { page, opened } => {
                 state.apply_remote_view(page, opened);
                 self.mark();
+            }
+            JobOutcome::ClipboardCopied { ok, announce } => {
+                self.clipboard_job.finish(&mut self.sched);
+                if let Some(ok) = ok {
+                    show_copy_result(state, ok, announce);
+                    self.mark();
+                }
             }
             JobOutcome::CheckoutRemote {
                 repo,
@@ -3922,6 +4004,30 @@ impl Interpreter {
                     Box::new(move || JobOutcome::Doctor {
                         gen,
                         checks: inputs.run(),
+                    }),
+                );
+            }
+            UserTag::Clipboard => {
+                let Some(job) = self.clipboard_job.take() else {
+                    self.sched.note_job_finished(id);
+                    return;
+                };
+                let copy = self.clipboard_tool;
+                // Only a copy whose OSC 52 failed still waits on a result.
+                let pending = !job.osc52;
+                let announce = job.announce;
+                spawn(
+                    id,
+                    JobRelease::Clipboard { pending, announce },
+                    Box::new(move || {
+                        let ok = copy(
+                            &job.text,
+                            Instant::now() + comments::HOST_CLIPBOARD_TIME_LIMIT,
+                        );
+                        JobOutcome::ClipboardCopied {
+                            ok: pending.then_some(ok),
+                            announce,
+                        }
                     }),
                 );
             }
