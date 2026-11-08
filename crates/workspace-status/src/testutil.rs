@@ -31,6 +31,15 @@ use crate::tui::AppState;
 // Snapshot and app-state fixtures
 // ---------------------------------------------------------------------------
 
+/// A stash entry named `stash_ref` with a made-up commit id derived from
+/// that name, for tests that never run git.
+pub fn stash_target(stash_ref: &str) -> crate::git::StashTarget {
+    crate::git::StashTarget {
+        stash_ref: stash_ref.to_string(),
+        sha: format!("sha-of-{stash_ref}"),
+    }
+}
+
 /// A clean primary checkout named `name` on `main` with no upstream.
 ///
 /// This is the only test code that lists every [`RepoSnapshot`] field. Tests

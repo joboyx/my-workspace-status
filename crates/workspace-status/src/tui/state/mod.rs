@@ -85,7 +85,7 @@ use super::diff::{
     wrap_viewport_start, DiffContent, DiffRow, PartialPatchKind,
 };
 use super::drill::{
-    source_from_graph_row, stash_ref_from_graph_row, CommitFile, CommitFileSource, DrillView,
+    source_from_graph_row, stash_target_from_graph_row, CommitFile, CommitFileSource, DrillView,
 };
 use super::explorer::ExplorerStatus;
 use super::fetch::{background_fetch_targets, OTHER_INSTANCE_FETCH_FAILED};
@@ -153,7 +153,7 @@ use super::watch::{
     prune_ghosts, tree_signatures, FlashKind, FlashStamp, GhostRow, GraphFlashDecision,
     GraphFlashMeta,
 };
-use crate::git::{PushPlan, FULL_DIFF_CONTEXT_LINES};
+use crate::git::{PushPlan, StashTarget, FULL_DIFF_CONTEXT_LINES};
 
 /// Status for a key drained while a git write runs and the job has no name.
 pub(crate) const BUSY_WRITE_RUNNING: &str = "busy: a git write is running";
@@ -751,7 +751,7 @@ pub enum PendingConfirm {
     },
     StashDrop {
         repo: String,
-        stash_ref: String,
+        stash: StashTarget,
     },
     CheckoutOutOfSync {
         repo: String,
@@ -1656,7 +1656,7 @@ impl AppState {
         !self.is_explorer_tab()
             && !self.is_prs_tab()
             && self.graph_pane_focused()
-            && self.focused_graph_stash_ref().is_some()
+            && self.focused_graph_stash().is_some()
     }
 
     pub fn graph_commit_focused(&self) -> bool {
@@ -5497,9 +5497,9 @@ impl AppState {
                 self.status = StatusMessage::progress(format!("reverting range {path}…"));
                 Effect::RevertPatch { repo, path, patch }
             }
-            Some(PendingConfirm::StashDrop { repo, stash_ref }) => {
-                self.status = StatusMessage::progress(format!("dropping {stash_ref}…"));
-                Effect::StashDrop { repo, stash_ref }
+            Some(PendingConfirm::StashDrop { repo, stash }) => {
+                self.status = StatusMessage::progress(format!("dropping {}…", stash.stash_ref));
+                Effect::StashDrop { repo, stash }
             }
             Some(PendingConfirm::CheckoutOutOfSync {
                 repo,
@@ -6334,8 +6334,11 @@ impl AppState {
     }
 
     /// Fill the stash overlay after git lists the latest stash.
-    pub fn open_stash_menu(&mut self, repo: String, latest_stash_ref: Option<String>) {
-        let focused_stash = self.focused_graph_stash_ref();
+    ///
+    /// Each op keeps the stash entry it targets (its commit id too), so a
+    /// stash pushed or dropped before the key press cannot shift it.
+    pub fn open_stash_menu(&mut self, repo: String, latest_stash: Option<StashTarget>) {
+        let focused_stash = self.focused_graph_stash();
         let row = self.focused_row();
         let (dirty, dirty_paths) = if focused_stash.is_some() {
             let dirty = row
@@ -6358,15 +6361,15 @@ impl AppState {
             .iter()
             .any(|r| r.repo == repo && (r.has_unstaged || r.has_staged || r.has_untracked));
         let latest_for_ops = if self.graph_pane_focused() || checkout_clean {
-            latest_stash_ref
+            latest_stash
         } else {
             None
         };
         let ops = stash_ops_for_context(&StashOpsContext {
             dirty,
             dirty_paths,
-            focused_stash_ref: focused_stash,
-            latest_stash_ref: latest_for_ops,
+            focused_stash,
+            latest_stash: latest_for_ops,
         });
         if ops.is_empty() {
             self.stash_menu = None;
@@ -6410,29 +6413,38 @@ impl AppState {
                     paths: op.paths.unwrap_or_default(),
                 }
             }
-            StashOpId::Apply => {
-                let stash_ref = op.stash_ref.unwrap_or_else(|| "stash@{0}".into());
+            StashOpId::Apply | StashOpId::Pop | StashOpId::Drop => {
                 self.stash_menu = None;
-                self.stash_repo = None;
-                self.status = StatusMessage::progress(format!("applying {stash_ref}…"));
-                Effect::StashApply { repo, stash_ref }
+                // Apply / pop / drop ops always carry the entry they act on.
+                let Some(stash) = op.stash else {
+                    self.stash_repo = None;
+                    self.status = StatusMessage::warn("no stash picked");
+                    return Effect::None;
+                };
+                if op.id != StashOpId::Drop {
+                    self.stash_repo = None;
+                }
+                self.stash_effect(op.id, repo, stash)
+            }
+        }
+    }
+
+    /// Effect of apply / pop / drop on `stash`; drop opens its confirm.
+    fn stash_effect(&mut self, id: StashOpId, repo: String, stash: StashTarget) -> Effect {
+        match id {
+            StashOpId::Apply => {
+                self.status = StatusMessage::progress(format!("applying {}…", stash.stash_ref));
+                Effect::StashApply { repo, stash }
             }
             StashOpId::Pop => {
-                let stash_ref = op.stash_ref.unwrap_or_else(|| "stash@{0}".into());
-                self.stash_menu = None;
-                self.stash_repo = None;
-                self.status = StatusMessage::progress(format!("popping {stash_ref}…"));
-                Effect::StashPop { repo, stash_ref }
+                self.status = StatusMessage::progress(format!("popping {}…", stash.stash_ref));
+                Effect::StashPop { repo, stash }
             }
             StashOpId::Drop => {
-                let stash_ref = op.stash_ref.unwrap_or_else(|| "stash@{0}".into());
-                self.stash_menu = None;
-                self.confirm = Some(PendingConfirm::StashDrop {
-                    repo,
-                    stash_ref: stash_ref.clone(),
-                });
+                self.confirm = Some(PendingConfirm::StashDrop { repo, stash });
                 Effect::None
             }
+            StashOpId::Create => Effect::None,
         }
     }
 
@@ -6835,11 +6847,13 @@ impl AppState {
         self.graph.as_ref()?.visible_row_at(self.graph_cursor)
     }
 
-    pub fn focused_graph_stash_ref(&self) -> Option<String> {
+    /// The stash entry of the focused graph stash row, when the graph pane
+    /// has focus.
+    pub fn focused_graph_stash(&self) -> Option<StashTarget> {
         if !self.graph_pane_focused() {
             return None;
         }
-        stash_ref_from_graph_row(&self.focused_graph_row()?)
+        stash_target_from_graph_row(&self.focused_graph_row()?)
     }
 
     fn move_graph_cursor(&mut self, delta: i32) {
@@ -7227,7 +7241,7 @@ impl AppState {
         if self.hidden_focus() {
             return Effect::None;
         }
-        let Some(stash_ref) = self.focused_graph_stash_ref() else {
+        let Some(stash) = self.focused_graph_stash() else {
             self.status = StatusMessage::warn("focus a graph stash row");
             return Effect::None;
         };
@@ -7235,24 +7249,7 @@ impl AppState {
             self.status = StatusMessage::warn("focus a visible repo to stash");
             return Effect::None;
         };
-        match id {
-            StashOpId::Apply => {
-                self.status = StatusMessage::progress(format!("applying {stash_ref}…"));
-                Effect::StashApply { repo, stash_ref }
-            }
-            StashOpId::Pop => {
-                self.status = StatusMessage::progress(format!("popping {stash_ref}…"));
-                Effect::StashPop { repo, stash_ref }
-            }
-            StashOpId::Drop => {
-                self.confirm = Some(PendingConfirm::StashDrop {
-                    repo,
-                    stash_ref: stash_ref.clone(),
-                });
-                Effect::None
-            }
-            StashOpId::Create => Effect::None,
-        }
+        self.stash_effect(id, repo, stash)
     }
 
     fn hit_tab(&self, col: u16, row: u16) -> Option<usize> {

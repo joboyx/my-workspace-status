@@ -1630,7 +1630,9 @@ pub fn stash_drop(cwd: &Path, stash_ref: &str) -> Result<(), String> {
     exec_git_checked(&["stash", "drop", stash_ref], cwd)
 }
 
-/// Stash refs newest first (`stash@{0}`, …).
+/// Stash refs newest first (`stash@{0}`, …). Test fixtures; the TUI uses
+/// [`list_stashes`].
+#[cfg(test)]
 pub fn list_stash_refs(cwd: &Path) -> Vec<String> {
     exec_git(&["stash", "list", "--format=%gd"], cwd)
         .lines()
@@ -1640,9 +1642,69 @@ pub fn list_stash_refs(cwd: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Newest stash ref, if any.
+/// Newest stash ref, if any. Test fixtures; the TUI uses [`latest_stash`].
+#[cfg(test)]
 pub fn latest_stash_ref(cwd: &Path) -> Option<String> {
     list_stash_refs(cwd).into_iter().next()
+}
+
+/// One stash entry that a stash action targets.
+///
+/// `stash@{n}` is positional: a stash pushed or dropped after the entry was
+/// picked moves `n`. The commit id does not change, so actions find the
+/// entry again by [`Self::sha`] ([`resolve_stash_target`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StashTarget {
+    /// `stash@{n}` when the entry was listed. Status and confirm text only.
+    pub stash_ref: String,
+    /// Full stash commit id.
+    pub sha: String,
+}
+
+/// Stash entries newest first, each with its commit id.
+pub fn list_stashes(cwd: &Path) -> Vec<StashTarget> {
+    parse_stash_list(&exec_git(&["stash", "list", "--format=%gd%x09%H"], cwd))
+}
+
+fn parse_stash_list(out: &str) -> Vec<StashTarget> {
+    out.lines()
+        .filter_map(|line| {
+            let (stash_ref, sha) = line.trim().split_once('\t')?;
+            Some(StashTarget {
+                stash_ref: stash_ref.to_string(),
+                sha: sha.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Newest stash entry, if any.
+pub fn latest_stash(cwd: &Path) -> Option<StashTarget> {
+    list_stashes(cwd).into_iter().next()
+}
+
+/// The `stash@{n}` that holds `target`'s commit now.
+///
+/// `git stash pop` / `drop` take only a stash ref, never a commit id, so
+/// the action asks the stash list for the entry's current position.
+/// `Err` names the entry when no stash holds that commit any more (popped,
+/// dropped, or cleared since it was picked).
+pub fn resolve_stash_target(cwd: &Path, target: &StashTarget) -> Result<String, String> {
+    find_stash_ref(&list_stashes(cwd), target)
+}
+
+fn find_stash_ref(stashes: &[StashTarget], target: &StashTarget) -> Result<String, String> {
+    stashes
+        .iter()
+        .find(|entry| entry.sha == target.sha)
+        .map(|entry| entry.stash_ref.clone())
+        .ok_or_else(|| {
+            let short: String = target.sha.chars().take(7).collect();
+            format!(
+                "{} ({short}) is no longer in the stash list; nothing changed",
+                target.stash_ref
+            )
+        })
 }
 
 /// One local branch for the picker.
