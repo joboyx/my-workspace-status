@@ -125,6 +125,69 @@ fn git_command_and_run_with_stdin_disable_optional_locks() {
     );
 }
 
+/// Shell lines for a fake git script: drop the [`PINNED_CONFIG`] `-c`
+/// pairs that [`git_process`] puts first, so `$1` is the subcommand.
+const SKIP_PINS: &str = "while [ \"$1\" = -c ]; do shift 2; done\n";
+
+#[test]
+fn git_process_pins_config_that_changes_parsed_output() {
+    let cmd = git_process(git_binary());
+    let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy()).collect();
+    assert_eq!(
+        args,
+        [
+            "-c",
+            "color.ui=false",
+            "-c",
+            "color.diff=false",
+            "-c",
+            "diff.noprefix=false",
+            "-c",
+            "diff.mnemonicPrefix=false",
+            "-c",
+            "diff.srcPrefix=a/",
+            "-c",
+            "diff.dstPrefix=b/",
+            "-c",
+            "log.showSignature=false",
+        ]
+    );
+    let argv = |args: &[&str]| {
+        let cmd = git_command(git_binary(), args, Path::new("."));
+        let all: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        all[2 * PINNED_CONFIG.len()..].join(" ")
+    };
+    assert_eq!(
+        git_subcommand(&["-c", "color.ui=false", "fetch"]),
+        Some("fetch")
+    );
+    assert_eq!(argv(&["fetch", "--quiet"]), "fetch --quiet");
+    assert_eq!(
+        argv(&["diff", "--", "x"]),
+        "diff --no-ext-diff --no-textconv -- x"
+    );
+    assert_eq!(
+        argv(&["show", "--first-parent", "HEAD"]),
+        "show --no-ext-diff --no-textconv --first-parent HEAD"
+    );
+    assert_eq!(
+        argv(&["log", "--format=%ct"]),
+        "log --no-ext-diff --no-textconv --format=%ct"
+    );
+    assert_eq!(
+        argv(&["stash", "show", "--numstat", "-z", "stash@{0}"]),
+        "stash show --no-ext-diff --no-textconv --numstat -z stash@{0}"
+    );
+    assert_eq!(argv(&["stash", "list"]), "stash list");
+    assert_eq!(
+        argv(&["-c", "core.quotePath=false", "blame", "--porcelain"]),
+        "-c core.quotePath=false blame --no-textconv --porcelain"
+    );
+}
+
 /// Write an executable fake git `script` into a new temp dir.
 fn fake_git(name: &str, script: &str) -> (PathBuf, PathBuf) {
     let dir = unique_dir(name);
@@ -211,7 +274,7 @@ fn remote_git_gets_ssh_connect_timeout_unless_a_custom_ssh_is_set() {
     // process env is not touched).
     let probe = |name: &str, config: &str, envs: &[(&str, &str)]| {
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = config ]; then {config}; fi\n\
+            "#!/bin/sh\n{SKIP_PINS}if [ \"$1\" = config ]; then {config}; fi\n\
                  printf 'ssh=%s\\n' \"${{GIT_SSH_COMMAND-}}\"\n"
         );
         let (dir, bin) = fake_git(name, &script);
@@ -307,7 +370,7 @@ fn stalled_git_is_killed_with_its_process_group_at_the_time_limit() {
         let (dir, bin) = fake_git(name, "");
         let pid_file = dir.join("sleep.pid");
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = config ]; then exit 1; fi\n{}wait\n",
+            "#!/bin/sh\n{SKIP_PINS}if [ \"$1\" = config ]; then exit 1; fi\n{}wait\n",
             background_sleep(&pid_file)
         );
         fs::write(&bin, script).unwrap();

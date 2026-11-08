@@ -1877,4 +1877,139 @@ keep-z
         assert_eq!(worktree(&dir), edited);
         let _ = fs::remove_dir_all(&dir);
     }
+
+    /// The unstaged `regions.txt` diff through the production loader.
+    fn loaded_unstaged(dir: &Path) -> DiffContent {
+        let change = FileChange {
+            path: "regions.txt".into(),
+            staged_status: None,
+            unstaged_status: Some("M".into()),
+            untracked: false,
+            old_path: None,
+        };
+        let parent = dir.parent().expect("fixture parent");
+        let name = dir.file_name().expect("fixture name").to_string_lossy();
+        load_file_diff(parent, &name, &change, None)
+    }
+
+    #[test]
+    fn user_color_diff_always_leaves_no_escape_in_loaded_diffs() {
+        let dir = repo_with_regions("ws-diff-user-color");
+        git(&dir, &["config", "color.diff", "always"]);
+        fs::write(
+            dir.join("regions.txt"),
+            REGIONS.replace("ALPHA-OLD", "ALPHA-NEW"),
+        )
+        .unwrap();
+
+        let content = loaded_unstaged(&dir);
+        assert!(content.error.is_none(), "{content:?}");
+        assert!(content.unstaged.contains("\n+ALPHA-NEW"), "{content:?}");
+        assert!(!content.unstaged.contains('\x1b'), "{:?}", content.unstaged);
+
+        let head = exec_git(&["rev-parse", "HEAD"], &dir);
+        let commit = crate::git::diff_commit_file(&dir, &head, "regions.txt").join("\n");
+        assert!(commit.contains("+ALPHA-OLD"), "{commit}");
+        assert!(!commit.contains('\x1b'), "{commit:?}");
+        // The seed commit has no parent: this read takes the `show` fallback.
+        let root = exec_git(&["rev-list", "--max-parents=0", "HEAD"], &dir);
+        let shown = crate::git::diff_commit_file(&dir, &root, "README.md").join("\n");
+        assert!(shown.contains("+# seed"), "{shown}");
+        assert!(!shown.contains('\x1b'), "{shown:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn user_external_diff_and_textconv_do_not_replace_loaded_hunks() {
+        let dir = repo_with_regions("ws-diff-user-ext");
+        git(&dir, &["config", "diff.external", "echo EXTERNAL"]);
+        fs::write(
+            dir.join("regions.txt"),
+            REGIONS.replace("ALPHA-OLD", "ALPHA-NEW"),
+        )
+        .unwrap();
+
+        let content = loaded_unstaged(&dir);
+        assert!(content.error.is_none(), "{content:?}");
+        assert!(
+            content.unstaged.contains("@@") && content.unstaged.contains("\n+ALPHA-NEW"),
+            "{:?}",
+            content.unstaged
+        );
+        assert!(
+            !content.unstaged.contains("EXTERNAL"),
+            "{:?}",
+            content.unstaged
+        );
+
+        // A textconv filter rewrites the lines, so a patch built from them
+        // would not apply to the real blob.
+        git(&dir, &["config", "--unset", "diff.external"]);
+        git(&dir, &["config", "diff.shout.textconv", "echo TEXTCONV"]);
+        fs::write(dir.join(".git/info/attributes"), "regions.txt diff=shout\n").unwrap();
+        let content = loaded_unstaged(&dir);
+        assert!(
+            content.unstaged.contains("\n+ALPHA-NEW"),
+            "{:?}",
+            content.unstaged
+        );
+        assert!(
+            !content.unstaged.contains("TEXTCONV"),
+            "{:?}",
+            content.unstaged
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn user_diff_noprefix_still_stages_one_line() {
+        let dir = repo_with_regions("ws-diff-user-noprefix");
+        git(&dir, &["config", "diff.noprefix", "true"]);
+        assert_one_line_stage_applies(&dir);
+    }
+
+    /// Git 2.45 and later read `diff.srcPrefix` / `diff.dstPrefix`, and
+    /// `diff.noprefix=false` does not reset them. A patch applies with
+    /// `-p1`, so an empty prefix or a prefix of two path components breaks
+    /// it. An older git ignores the keys, so the stage applies there too.
+    #[test]
+    fn user_diff_src_dst_prefix_still_stages_one_line() {
+        for (name, src, dst) in [
+            ("ws-diff-user-prefix-deep", "x/y/", "z/w/"),
+            ("ws-diff-user-prefix-empty", "", ""),
+        ] {
+            let dir = repo_with_regions(name);
+            git(&dir, &["config", "diff.srcPrefix", src]);
+            git(&dir, &["config", "diff.dstPrefix", dst]);
+            assert_one_line_stage_applies(&dir);
+        }
+    }
+
+    /// Edits two lines of `regions.txt`, stages only the `ALPHA` line with
+    /// a partial patch, and checks the index and the worktree.
+    fn assert_one_line_stage_applies(dir: &Path) {
+        let edited = REGIONS
+            .replace("ALPHA-OLD", "ALPHA-NEW")
+            .replace("OMEGA-OLD", "OMEGA-NEW");
+        fs::write(dir.join("regions.txt"), &edited).unwrap();
+
+        let content = loaded_unstaged(dir);
+        let patch = build_partial_patch(
+            &content,
+            DiffMode::Inline,
+            line_row(&content, "ALPHA-OLD"),
+            line_row(&content, "ALPHA-NEW"),
+            PartialPatchKind::Stage,
+            "regions.txt",
+        )
+        .expect("patch");
+        apply_cached_patch(dir, &patch, false)
+            .unwrap_or_else(|err| panic!("stage one line: {err}\n{patch}"));
+
+        let index = String::from_utf8(blob_bytes(dir, "", "regions.txt").expect("index blob"))
+            .expect("utf8 index blob");
+        assert_eq!(index, REGIONS.replace("ALPHA-OLD", "ALPHA-NEW"));
+        assert_eq!(worktree(dir), edited);
+        let _ = fs::remove_dir_all(dir);
+    }
 }

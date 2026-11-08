@@ -1489,6 +1489,36 @@ mod live_git {
     }
 
     #[test]
+    fn user_log_show_signature_keeps_the_commit_record() {
+        let (root, repo) = temp_workspace();
+        init_repo_empty(&repo);
+        commit_file(&repo, "a.txt", "1\n", "first");
+        // A commit with an ssh signature header. No key verifies it: with
+        // `log.showSignature` git prints `No signature` ahead of the record.
+        let tree = exec_git(&["write-tree"], &repo);
+        let parent = exec_git(&["rev-parse", "HEAD"], &repo);
+        let body = format!(
+            "tree {tree}\nparent {parent}\n\
+             author A <a@example.invalid> 1700000000 +0000\n\
+             committer A <a@example.invalid> 1700000000 +0000\n\
+             gpgsig -----BEGIN SSH SIGNATURE-----\n U1NIU0lH\n -----END SSH SIGNATURE-----\n\n\
+             signed subject\n"
+        );
+        let object = root.join("signed-commit");
+        fs::write(&object, body).unwrap();
+        let object = object.to_string_lossy().into_owned();
+        let sha = exec_git(&["hash-object", "-t", "commit", "-w", &object], &repo);
+        git(&repo, &["update-ref", "refs/heads/main", &sha]);
+        git(&repo, &["config", "log.showSignature", "true"]);
+
+        let card = load_commit_card(&repo, &sha).expect("card");
+        assert_eq!(card.id, sha);
+        assert_eq!(card.subject, "signed subject");
+        assert_eq!(card.parents, vec![parent]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn graph_omits_worktree_mark_on_primary_keeps_linked_extra() {
         let (root, repo) = temp_workspace();
         init_repo_empty(&repo);

@@ -79,6 +79,41 @@ const PIPE_CLOSE_GRACE: Duration = Duration::from_millis(200);
 const GLOBAL_OPTIONS_WITH_VALUE: [&str; 5] =
     ["-c", "-C", "--git-dir", "--work-tree", "--namespace"];
 
+/// Config that [`git_process`] sets on every git run as `-c <key>=<value>`
+/// before the subcommand. `-c` beats every config file, so a user or
+/// repository setting cannot change text that `ws` parses or a patch it
+/// applies:
+///
+/// - `color.ui`, `color.diff`: `always` puts ANSI escapes into diff text.
+///   `color.diff` beats `color.ui`, so both are pinned.
+/// - `diff.noprefix`, `diff.mnemonicPrefix`, `diff.srcPrefix`,
+///   `diff.dstPrefix`: keep the `a/` and `b/` path prefixes. A line stage
+///   patch with other prefixes fails in `git apply -p1`. `diff.noprefix`
+///   does not reset the two prefix keys (git 2.45 and later). An older git
+///   ignores them.
+/// - `log.showSignature`: `true` prints signature lines (`No signature`)
+///   into `git log` output, ahead of the requested format.
+///
+/// Git passes `-c` values on to the git processes and hooks that it starts.
+/// `diff.external` is not pinned here: an empty value makes git run an
+/// empty command. [`DIFF_DRIVER_OFF`] turns it off instead.
+const PINNED_CONFIG: [&str; 7] = [
+    "color.ui=false",
+    "color.diff=false",
+    "diff.noprefix=false",
+    "diff.mnemonicPrefix=false",
+    "diff.srcPrefix=a/",
+    "diff.dstPrefix=b/",
+    "log.showSignature=false",
+];
+
+/// Options that [`with_diff_driver_off`] puts after the subcommand of a git
+/// run that can print a diff. `--no-ext-diff` skips `diff.external`,
+/// `GIT_EXTERNAL_DIFF` and `diff.<driver>.command`, which replace the
+/// unified diff. `--no-textconv` skips `diff.<driver>.textconv` filters,
+/// whose lines are not the blob's lines.
+const DIFF_DRIVER_OFF: [&str; 2] = ["--no-ext-diff", "--no-textconv"];
+
 /// The git binary: the value [`init_git_binary`] set, else
 /// [`resolve_git_binary`] from `WORKSPACE_STATUS_GIT` with no config value.
 pub fn git_binary() -> &'static Path {
@@ -131,8 +166,14 @@ pub fn resolve_git_binary(env_value: Option<&str>, config: Option<&Path>) -> Pat
 /// fail with `Unable to create '.git/index.lock': File exists`. The flag
 /// only skips *optional* locks — write commands still take the locks they
 /// need, so it is safe on every spawn, read or write.
+///
+/// The command starts with the [`PINNED_CONFIG`] `-c` options, so the
+/// caller's arguments follow them.
 pub(crate) fn git_process(bin: &Path) -> Command {
     let mut cmd = Command::new(bin);
+    for pin in PINNED_CONFIG {
+        cmd.args(["-c", pin]);
+    }
     cmd.env("GIT_OPTIONAL_LOCKS", "0");
     cmd
 }
@@ -141,11 +182,12 @@ pub(crate) fn git_process(bin: &Path) -> Command {
 ///
 /// Stdin is `/dev/null` so a credential prompt cannot deadlock against the
 /// event loop. `GIT_TERMINAL_PROMPT=0` fails fast instead of waiting on a
-/// hidden prompt. Run the result with [`git_output`] so both deadlines
-/// apply.
+/// hidden prompt. A run that can print a diff gets [`DIFF_DRIVER_OFF`]
+/// ([`with_diff_driver_off`]). Run the result with [`git_output`] so both
+/// deadlines apply.
 fn git_command(bin: &Path, args: &[&str], cwd: &Path) -> Command {
     let mut cmd = git_process(bin);
-    cmd.args(args)
+    cmd.args(with_diff_driver_off(args))
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -154,18 +196,43 @@ fn git_command(bin: &Path, args: &[&str], cwd: &Path) -> Command {
     cmd
 }
 
-/// The git subcommand in `args`: the first argument that is not a global
-/// option (`-c k=v`, `-C dir`, `--no-pager`, …) or an option's value.
-fn git_subcommand<'a>(args: &[&'a str]) -> Option<&'a str> {
-    let mut rest = args.iter();
-    while let Some(arg) = rest.next() {
+/// The index of the git subcommand in `args`: the first argument that is
+/// not a global option (`-c k=v`, `-C dir`, `--no-pager`, …) or an
+/// option's value.
+fn git_subcommand_index(args: &[&str]) -> Option<usize> {
+    let mut rest = args.iter().enumerate();
+    while let Some((at, arg)) = rest.next() {
         if GLOBAL_OPTIONS_WITH_VALUE.contains(arg) {
             rest.next();
         } else if !arg.starts_with('-') {
-            return Some(arg);
+            return Some(at);
         }
     }
     None
+}
+
+/// The git subcommand in `args` ([`git_subcommand_index`]).
+fn git_subcommand<'a>(args: &[&'a str]) -> Option<&'a str> {
+    git_subcommand_index(args).map(|at| args[at])
+}
+
+/// `args` with [`DIFF_DRIVER_OFF`] right after the subcommand when the run
+/// can print a diff: `diff`, `show`, `log` and `stash show`. `blame` gets
+/// `--no-textconv` only, so its line numbers are the blob's. Other runs
+/// are unchanged.
+fn with_diff_driver_off<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let mut out = args.to_vec();
+    let Some(sub) = git_subcommand_index(args) else {
+        return out;
+    };
+    let (at, options): (usize, &[&'static str]) = match (args[sub], args.get(sub + 1)) {
+        ("diff" | "show" | "log", _) => (sub + 1, &DIFF_DRIVER_OFF),
+        ("stash", Some(&"show")) => (sub + 2, &DIFF_DRIVER_OFF),
+        ("blame", _) => (sub + 1, &DIFF_DRIVER_OFF[1..]),
+        _ => return out,
+    };
+    out.splice(at..at, options.iter().copied());
+    out
 }
 
 /// True when `args` run a git subcommand that talks to a remote.
@@ -2910,7 +2977,8 @@ fn unquote_c_path_bytes(value: &str) -> Vec<u8> {
 /// Blame line `line` (1-based) of `path` in `rev`.
 ///
 /// Runs `git -c blame.showRoot=false -c core.quotePath=false blame
-/// --porcelain -L n,n [<rev>] -- <path>`. Paths in the result are unquoted.
+/// --porcelain -L n,n [<rev>] -- <path>` (the runner adds `--no-textconv`,
+/// see `with_diff_driver_off`). Paths in the result are unquoted.
 /// [`BlameRev::Index`] feeds the index blob through `--contents -`, so lines
 /// that differ from HEAD come back uncommitted. `Ok(None)` when git exits
 /// non-zero (untracked or missing path, unborn HEAD, line out of range) or
