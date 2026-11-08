@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn bin() -> PathBuf {
@@ -55,12 +56,16 @@ fn seed_repo(workspace: &Path, name: &str, branch: &str, dirty: bool) {
 }
 
 fn fixture() -> (PathBuf, PathBuf) {
+    // The macOS clock steps in microseconds, so two test threads can read
+    // the same nanos; the counter keeps their roots apart.
+    static NEXT: AtomicU32 = AtomicU32::new(0);
     let root = std::env::temp_dir().join(format!(
-        "workspace-status-rs-{}",
+        "workspace-status-rs-{}-{}",
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();

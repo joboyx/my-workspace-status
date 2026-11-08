@@ -5,6 +5,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::hscroll::{GRAPH_HSCROLL_TAIL, TREE_HSCROLL_DIR, TREE_HSCROLL_FILE};
@@ -51,14 +52,19 @@ fn git_stdout_env(cwd: &Path, args: &[&str], extra: &[(&str, &str)]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-/// Unique temp directory: `{prefix}-{nanos}`.
+/// Unique temp directory: `{prefix}-{nanos}-{seq}`.
+///
+/// The macOS clock steps in microseconds, so two test threads can read the
+/// same `nanos`; the per-process counter `seq` keeps them apart.
 pub fn unique_root(prefix: &str) -> PathBuf {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
     std::env::temp_dir().join(format!(
-        "{prefix}-{}",
+        "{prefix}-{}-{}",
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
     ))
 }
 
