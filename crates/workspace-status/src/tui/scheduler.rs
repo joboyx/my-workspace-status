@@ -9,6 +9,8 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use super::store_save::StoreKind;
+
 /// Why a workspace collect was started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CollectionKind {
@@ -77,6 +79,10 @@ pub enum UserTag {
     /// Commit-activity counts for the tree sparklines. Low priority: it
     /// waits behind every user job ([`Scheduler::enqueue_background`]).
     Activity,
+    /// Lock, merge, and write of one store file (viewed marks or
+    /// comments). One serial slot per store, so saves of one file land in
+    /// order.
+    StoreSave(StoreKind),
 }
 
 /// A job the loop should `spawn_blocking`.

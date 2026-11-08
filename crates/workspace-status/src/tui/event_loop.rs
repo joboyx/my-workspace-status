@@ -39,6 +39,7 @@ use super::pointer_shape::{shape_for, TermPointer};
 use super::render::draw;
 use super::state::{AppState, PendingConfirm};
 use super::status::StatusMessage;
+use super::store_save::StoreKind;
 use super::term_progress::{progress_for, TermProgress};
 use super::tty::{poll_event, read_event_origin, TtyEvent};
 use super::undercurl::{undercurl_cells, write_undercurls};
@@ -329,8 +330,30 @@ pub async fn run(
             .schedule(ctx.state, ctx.opts, effect, &Action::Fetch);
     }
 
+    let result = drive(&mut ctx).await;
+    ctx.input.shutdown();
+    // Every exit path, an error included: a viewed or comment save asked
+    // for just before quit (a comment saved, then `q`) still reaches disk.
+    flush_store_saves(
+        &mut ctx.interp,
+        ctx.state,
+        ctx.opts,
+        &mut ctx.join,
+        STORE_FLUSH_GRACE,
+    )
+    .await;
+    result
+}
+
+/// Longest time quit waits for the viewed and comment saves
+/// ([`flush_store_saves`]). A save is a lock, a read, and a small write;
+/// this only bounds a lock another process holds for ever.
+const STORE_FLUSH_GRACE: Duration = Duration::from_secs(2);
+
+/// Run the loop until quit, an input close, or a draw error.
+async fn drive(ctx: &mut LoopCtx<'_>) -> Result<(), u8> {
     while !ctx.quit {
-        spawn_joinset(&mut ctx);
+        spawn_joinset(ctx);
         let now = Instant::now();
         let watch_remain = if overlay_blocks_background_ticks(ctx.state.input_mode()) {
             u64::MAX
@@ -362,10 +385,10 @@ pub async fn run(
         tokio::select! {
             event = ctx.input.rx.recv() => {
                 let Some(event) = event else { break; };
-                handle_input(&mut ctx, event);
+                handle_input(ctx, event);
                 for _ in 1..INPUT_BATCH {
                     match ctx.input.rx.try_recv() {
-                        Ok(next) => handle_input(&mut ctx, next),
+                        Ok(next) => handle_input(ctx, next),
                         Err(_) => break,
                     }
                 }
@@ -373,7 +396,7 @@ pub async fn run(
             Some(joined) = ctx.join.join_next(), if !join_empty => {
                 apply_joined(&mut ctx.interp, ctx.state, ctx.opts, joined);
                 if let Some(launch) = ctx.interp.take_pending_diff_launch() {
-                    launch_diff(&mut ctx, launch);
+                    launch_diff(ctx, launch);
                 }
                 if ctx.interp.take_dirty() {
                     ctx.presenter.mark();
@@ -455,8 +478,49 @@ pub async fn run(
             }
         }
     }
-    ctx.input.shutdown();
     Ok(())
+}
+
+/// Finish the viewed and comment saves at quit, within `grace`.
+///
+/// The loop no longer spawns jobs, and the runtime shutdown that follows
+/// waits only a short grace for running workers, so a save asked for just
+/// before quit would be lost. First a running save lands (other results
+/// that come back first are applied too; nothing new is spawned), so the
+/// saves of one file stay in order. Then each save still asked for runs on
+/// the blocking pool, outside the scheduler (its lanes may be full of git
+/// work), and lands. Returns false when `grace` ran out first; the rest
+/// is not saved.
+pub(super) async fn flush_store_saves(
+    interp: &mut Interpreter,
+    state: &mut AppState,
+    opts: &TuiOpts,
+    join: &mut JobJoinSet,
+    grace: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + grace;
+    while state.store_saves_pending() {
+        if state.store_save_in_flight() {
+            match tokio::time::timeout_at(deadline, join.join_next()).await {
+                Ok(Some(joined)) => apply_joined(interp, state, opts, joined),
+                // Out of time, or no worker left to land it.
+                Ok(None) | Err(_) => return false,
+            }
+            continue;
+        }
+        let jobs: Vec<_> = StoreKind::ALL
+            .into_iter()
+            .filter_map(|kind| state.begin_store_save(kind))
+            .collect();
+        for job in jobs {
+            let worker = tokio::task::spawn_blocking(move || job.run());
+            match tokio::time::timeout_at(deadline, worker).await {
+                Ok(Ok(saved)) => state.land_store_save(saved),
+                Ok(Err(_)) | Err(_) => return false,
+            }
+        }
+    }
+    true
 }
 
 /// Draw one frame, then paint its hyperlinks over it (OSC 8), then its
@@ -994,5 +1058,147 @@ mod tests {
             pointer_motion(&click, &Action::Click { col: 7, row: 0 }),
             None
         );
+    }
+
+    mod quit_flush {
+        use super::*;
+        use crate::config::WorkspaceStatusConfig;
+        use crate::snapshot::{build_workspace_snapshot, RepoSnapshot};
+        use crate::testutil::{repo, unique_dir};
+        use crate::tui::comments::{load_comment_store, CommentKey};
+        use crate::tui::tree::NodeKind;
+        use crate::tui::viewed::workspace_store_id;
+        use crossterm::event::{KeyCode, KeyEvent};
+        use std::path::PathBuf;
+
+        /// Checkout `app` on branch `feature` in a fresh workspace, cursor
+        /// on its checkout row (a branch comment target); the stores sit in
+        /// `<root>/state`.
+        fn workspace(prefix: &str) -> (PathBuf, AppState, TuiOpts) {
+            let root = unique_dir(prefix);
+            let cwd = root.join("ws");
+            std::fs::create_dir_all(cwd.join("app")).unwrap();
+            let feature = RepoSnapshot {
+                branch: "feature".into(),
+                ..repo("app", true)
+            };
+            let snapshot = build_workspace_snapshot(&[feature], &[], false, &[]);
+            let mut state = AppState::with_viewed_path(
+                cwd.clone(),
+                snapshot.clone(),
+                true,
+                root.join("state/viewed.json"),
+            );
+            state.cursor = state
+                .rows
+                .iter()
+                .position(|row| {
+                    row.repo.as_deref() == Some("app")
+                        && matches!(row.kind, NodeKind::Repo | NodeKind::Checkout)
+                })
+                .expect("checkout row");
+            let opts = TuiOpts {
+                cwd,
+                snapshot,
+                config: WorkspaceStatusConfig::with_defaults(),
+                settings: crate::settings::Settings::resolve(&Default::default(), |_| None),
+                start_fetch: false,
+            };
+            (root, state, opts)
+        }
+
+        /// `;`, type `text` after the body already there, Enter, the way
+        /// the live loop dispatches and schedules each key.
+        fn save_comment(
+            interp: &mut Interpreter,
+            state: &mut AppState,
+            opts: &TuiOpts,
+            text: &str,
+        ) {
+            let mut actions = vec![Action::CommentStart];
+            actions.extend(
+                text.chars()
+                    .map(|c| Action::CommentInput(KeyEvent::from(KeyCode::Char(c)))),
+            );
+            actions.push(Action::CommentSubmit);
+            for action in actions {
+                let effect = state.dispatch(action.clone());
+                interp.schedule(state, opts, effect, &action);
+            }
+        }
+
+        fn stored_bodies(state: &AppState) -> Vec<String> {
+            load_comment_store(&state.comment_path, &workspace_store_id(&state.cwd))
+                .into_iter()
+                .filter(|(key, _)| matches!(key, CommentKey::Branch { .. }))
+                .map(|(_, entry)| entry.body)
+                .collect()
+        }
+
+        fn runtime() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .expect("current-thread runtime")
+        }
+
+        /// A comment saved, then `q` in the same input batch: the loop
+        /// never spawned the save. Quit runs it before the runtime shuts
+        /// down.
+        #[test]
+        fn quit_saves_a_comment_whose_save_never_started() {
+            let (root, mut state, opts) = workspace("ws-quit-flush");
+            let mut interp = Interpreter::with_fetch_cap(4);
+            save_comment(&mut interp, &mut state, &opts, "before-quit");
+            assert!(
+                stored_bodies(&state).is_empty(),
+                "the save waits for a worker"
+            );
+            let mut join = JobJoinSet::new();
+            let flushed = runtime().block_on(flush_store_saves(
+                &mut interp,
+                &mut state,
+                &opts,
+                &mut join,
+                Duration::from_secs(10),
+            ));
+            assert!(flushed);
+            assert_eq!(stored_bodies(&state), vec!["before-quit".to_string()]);
+            assert_eq!(state.status, "comment saved");
+            let _ = std::fs::remove_dir_all(root);
+        }
+
+        /// A save runs on a worker when the comment changes again, then
+        /// `q`: quit lands the running save first, then saves the change,
+        /// so the file ends on the last body.
+        #[test]
+        fn quit_lands_the_running_save_before_the_last_change() {
+            let (root, mut state, opts) = workspace("ws-quit-flush-order");
+            let mut interp = Interpreter::with_fetch_cap(4);
+            let rt = runtime();
+            let mut join = JobJoinSet::new();
+            save_comment(&mut interp, &mut state, &opts, "first");
+            {
+                let _enter = rt.enter();
+                let mut started = 0;
+                interp.spawn_ready(&mut state, &opts, &mut |id, work| {
+                    started += 1;
+                    spawn_job(&mut join, id, work);
+                });
+                assert_eq!(started, 1, "the first save runs on a worker");
+            }
+            save_comment(&mut interp, &mut state, &opts, "-second");
+            let flushed = rt.block_on(flush_store_saves(
+                &mut interp,
+                &mut state,
+                &opts,
+                &mut join,
+                Duration::from_secs(10),
+            ));
+            assert!(flushed);
+            assert_eq!(stored_bodies(&state), vec!["first-second".to_string()]);
+            assert!(!state.store_saves_pending());
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 }

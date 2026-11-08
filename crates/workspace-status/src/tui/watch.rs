@@ -18,6 +18,7 @@ use crate::snapshot::WorkspaceSnapshot;
 
 use super::commit_files::CommitFileRow;
 use super::drill::CommitFileSource;
+use super::file_facts::FileFactsCache;
 use super::icons::{status_letter_from_change, upstream_rewrite_text};
 use super::tree::{NodeKind, TreeNode, VisibleRow};
 
@@ -168,7 +169,10 @@ pub(crate) fn file_disk_token(cwd: &Path, repo: &str, rel: &str) -> String {
 /// Chrome rows use path / branch / sync enum / sync note / HEAD / change
 /// count / fold so a new commit or ahead 2→3 is a semantic update, while
 /// glyph paint still is not.
-pub fn row_signature(row: &VisibleRow, cwd: &Path) -> String {
+///
+/// The disk token comes from `facts` (read by the status worker, see
+/// [`super::file_facts`]); this function never touches the disk.
+pub fn row_signature(row: &VisibleRow, facts: &FileFactsCache) -> String {
     match row.kind {
         NodeKind::File => {
             let status = row
@@ -177,8 +181,8 @@ pub fn row_signature(row: &VisibleRow, cwd: &Path) -> String {
                 .map(status_letter_from_change)
                 .unwrap_or(super::icons::FileStatusLetter::M);
             let disk = match (row.repo.as_deref(), row.file.as_ref()) {
-                (Some(repo), Some(file)) => file_disk_token(cwd, repo, &file.path),
-                _ => "gone".into(),
+                (Some(repo), Some(file)) => facts.disk_token(repo, &file.path),
+                _ => GONE_DISK_TOKEN,
             };
             format!("{}:{disk}", status.as_str())
         }
@@ -201,12 +205,13 @@ pub fn row_signature(row: &VisibleRow, cwd: &Path) -> String {
 }
 
 /// Signatures keyed by row id from a full (unfolded) walk so folded files
-/// still participate in change detection.
-pub fn tree_signatures(tree: &TreeNode, cwd: &Path) -> BTreeMap<String, String> {
+/// still participate in change detection. File disk tokens come from
+/// `facts`; no `stat` runs here.
+pub fn tree_signatures(tree: &TreeNode, facts: &FileFactsCache) -> BTreeMap<String, String> {
     let rows = super::tree::flatten(tree, &std::collections::HashSet::new());
     rows.into_iter()
         .map(|row| {
-            let sig = row_signature(&row, cwd);
+            let sig = row_signature(&row, facts);
             (row.id, sig)
         })
         .collect()
@@ -806,7 +811,7 @@ mod tests {
 
     #[test]
     fn chrome_signature_moves_on_head_or_sync_note() {
-        let cwd = Path::new("/nonexistent");
+        let cwd = &FileFactsCache::default();
         let base = chrome_row("alpha", "feature/watch", SyncStatus::NoUpstream, "", "aaa");
         let same_chrome = chrome_row("alpha", "feature/watch", SyncStatus::NoUpstream, "", "aaa");
         assert_eq!(row_signature(&base, cwd), row_signature(&same_chrome, cwd));
@@ -841,7 +846,7 @@ mod tests {
 
     #[test]
     fn chrome_and_checkout_signatures_move_on_a_force_push_classification() {
-        let cwd = Path::new("/nonexistent");
+        let cwd = &FileFactsCache::default();
         let note = "diverged (ahead 2, behind 1)";
         let plain = chrome_row("alpha", "main", SyncStatus::Diverged, note, "aaa");
         let mut rewritten = plain.clone();
@@ -917,7 +922,7 @@ mod tests {
             "repo:alpha".into(),
             row_signature(
                 &chrome_row("alpha", "feature/watch", SyncStatus::NoUpstream, "", "aaa"),
-                Path::new("/nonexistent"),
+                &FileFactsCache::default(),
             ),
         );
         let mut after_sigs = before_sigs.clone();
@@ -925,7 +930,7 @@ mod tests {
             "repo:alpha".into(),
             row_signature(
                 &chrome_row("alpha", "feature/watch", SyncStatus::NoUpstream, "", "bbb"),
-                Path::new("/nonexistent"),
+                &FileFactsCache::default(),
             ),
         );
         let mut before_checkouts = BTreeMap::new();
@@ -993,16 +998,28 @@ mod tests {
         let file = cwd.join("demo/src/main.ts");
         fs::write(&file, "a\n").unwrap();
         let row = modified_file_row("demo", "src/main.ts");
+        // What the status worker reads for the row's checkout.
+        let read = |cwd: &Path| {
+            let mut facts = FileFactsCache::default();
+            let changes = [row.file.clone().unwrap()];
+            facts.set(
+                "demo",
+                Some(super::super::file_facts::collect_repo_file_facts(
+                    cwd, "demo", &changes,
+                )),
+            );
+            facts
+        };
 
-        let first = row_signature(&row, &cwd);
+        let first = row_signature(&row, &read(&cwd));
         assert!(first.starts_with("M:"), "{first}");
         assert!(!first.ends_with(":gone"), "{first}");
 
-        let again = row_signature(&row, &cwd);
+        let again = row_signature(&row, &read(&cwd));
         assert_eq!(first, again);
 
         fs::write(&file, "a\nb\n").unwrap();
-        let after_save = row_signature(&row, &cwd);
+        let after_save = row_signature(&row, &read(&cwd));
         assert_ne!(
             first, after_save,
             "same-letter in-place save must change the watch signature"
@@ -1015,8 +1032,22 @@ mod tests {
     #[test]
     fn missing_worktree_file_signs_gone() {
         let row = modified_file_row("demo", "src/gone.ts");
-        let sig = row_signature(&row, Path::new("/nonexistent"));
-        assert_eq!(sig, "M:gone");
+        let mut facts = FileFactsCache::default();
+        let changes = [row.file.clone().unwrap()];
+        facts.set(
+            "demo",
+            Some(super::super::file_facts::collect_repo_file_facts(
+                Path::new("/nonexistent"),
+                "demo",
+                &changes,
+            )),
+        );
+        assert_eq!(row_signature(&row, &facts), "M:gone");
+        assert_eq!(
+            row_signature(&row, &FileFactsCache::default()),
+            "M:gone",
+            "a file with no facts signs gone"
+        );
     }
 
     #[test]

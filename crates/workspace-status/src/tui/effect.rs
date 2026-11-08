@@ -63,6 +63,7 @@ use super::event_pump::action_triggers_graph_autoload;
 use super::explorer::{list_dir, ExplorerEntry};
 use super::fetch::scheduled_fetch_failure_text;
 use super::fetch_claim::{try_claim_background_fetch, BackgroundFetchClaim};
+use super::file_facts::{collect_repo_file_facts, RepoFileFacts};
 use super::graph_load::{
     autoload_limit, autoload_skip, load_commit_card, load_graph_model_window, merge_autoload,
     should_autoload, GraphIdentity, ShouldAutoload,
@@ -83,6 +84,7 @@ use super::search_files::SEARCH_CHUNK_BUDGET;
 use super::stash::{resolve_stash_menu_key, StashMenuKeyResult, StashOpId};
 use super::state::{revert_scope, AppState, PendingConfirm};
 use super::status::{StatusKind, StatusMessage};
+use super::store_save::{StoreKind, StoreSaved};
 use super::tabs::{ComparePickerKind, ComparePickerRows, WorktreeFile};
 use super::viewed::workspace_store_id;
 
@@ -110,6 +112,13 @@ pub(crate) enum JobOutcome {
         gen: u64,
         path: String,
         snap: Option<RepoSnapshot>,
+        /// Disk facts of the dirty files of `snap`, read on the worker.
+        /// `None` with no `snap`.
+        facts: Option<RepoFileFacts>,
+    },
+    /// One viewed or comment store save: the merged bucket or the error.
+    StoreSaved {
+        saved: StoreSaved,
     },
     RightPane {
         req_id: u64,
@@ -932,6 +941,12 @@ pub(crate) struct Interpreter {
     /// Latest Doctor probe request; a newer one replaces it before spawn.
     /// At most one job is queued or running.
     doctor_job: LatestOnly<u64>,
+    /// Viewed-store save slot (serial: one save of the file at a time).
+    /// The job takes the store at spawn ([`AppState::begin_store_save`]),
+    /// so it always sends every change made so far.
+    viewed_save_job: LatestOnly<()>,
+    /// Comment-store save slot. Same rules as [`Self::viewed_save_job`].
+    comment_save_job: LatestOnly<()>,
     /// Latest blame previous-change request; a newer one replaces it
     /// before spawn.
     blame_previous: Option<(u64, String, Box<crate::git::LineBlame>)>,
@@ -1041,6 +1056,8 @@ impl Interpreter {
             line_blame_job: LatestOnly::serial(UserTag::LineBlame),
             commit_card_job: LatestOnly::serial(UserTag::CommitCard),
             doctor_job: LatestOnly::serial(UserTag::Doctor),
+            viewed_save_job: LatestOnly::serial(UserTag::StoreSave(StoreKind::Viewed)),
+            comment_save_job: LatestOnly::serial(UserTag::StoreSave(StoreKind::Comments)),
             blame_previous: None,
             pr_opens: VecDeque::new(),
             pr_ci_opens: VecDeque::new(),
@@ -1880,9 +1897,11 @@ impl Interpreter {
 
     /// Jobs the state asks for after any schedule or apply: the
     /// search-in-files preview read, the focused line's blame, the card of
-    /// an open commit popover off the graph, and an older graph page for a
-    /// pending blame reveal (dropped once the graph pane loses focus).
+    /// an open commit popover off the graph, an older graph page for a
+    /// pending blame reveal (dropped once the graph pane loses focus), and
+    /// the viewed / comment store saves the state asks for.
     fn after_change(&mut self, state: &mut AppState) {
+        self.queue_store_saves(state);
         self.search_live
             .store(state.search_files_live_gen(), Ordering::Relaxed);
         if let Some(job) = state.search_preview_request() {
@@ -1894,6 +1913,38 @@ impl Interpreter {
         if Self::autoload_allowed(state) && state.graph_reveal_wants_older() {
             self.queue_autoload(state);
         }
+    }
+
+    /// Queue a save of each store whose save the state asks for and that
+    /// has none running ([`AppState::store_save_ready`]). The serial slot
+    /// holds at most one job per store file; the landing of a save calls
+    /// this again for changes made while it ran.
+    fn queue_store_saves(&mut self, state: &AppState) {
+        for kind in StoreKind::ALL {
+            if state.store_save_ready(kind) {
+                let (slot, sched) = self.store_save_slot(kind);
+                slot.offer((), sched);
+            }
+        }
+    }
+
+    /// Save slot of store `kind`, with the scheduler it queues on.
+    fn store_save_slot(&mut self, kind: StoreKind) -> (&mut LatestOnly<()>, &mut Scheduler) {
+        let slot = match kind {
+            StoreKind::Viewed => &mut self.viewed_save_job,
+            StoreKind::Comments => &mut self.comment_save_job,
+        };
+        (slot, &mut self.sched)
+    }
+
+    /// Land store save `saved`: free its slot, then apply the merged
+    /// bucket or the error ([`AppState::land_store_save`]). `after_change`
+    /// queues the next save when a change came in while this one ran.
+    fn land_store_save(&mut self, state: &mut AppState, saved: StoreSaved) {
+        let (slot, sched) = self.store_save_slot(saved.kind());
+        slot.finish(sched);
+        state.land_store_save(saved);
+        self.mark();
     }
 
     /// Queue a sparkline count for each of `checkouts` (activity keys).
@@ -2098,7 +2149,17 @@ impl Interpreter {
                                         local_branches: row.local_branches,
                                     })
                             };
-                            JobOutcome::RepoStatus { gen, path, snap }
+                            // Disk facts of the dirty files, read here so the
+                            // reducer never stats or reads them.
+                            let facts = snap
+                                .as_ref()
+                                .map(|snap| collect_repo_file_facts(&cwd, &path, &snap.changes));
+                            JobOutcome::RepoStatus {
+                                gen,
+                                path,
+                                snap,
+                                facts,
+                            }
                         }),
                     );
                 }
@@ -2216,13 +2277,21 @@ impl Interpreter {
                 self.after_collection_step(state, &decision);
                 self.mark();
             }
-            JobOutcome::RepoStatus { gen, path, snap } => {
+            JobOutcome::RepoStatus {
+                gen,
+                path,
+                snap,
+                facts,
+            } => {
                 if !self.sched.accept_repo_result(gen, &path) {
                     return;
                 }
                 let before_sigs = state.signatures.clone();
                 let before_snap = state.snapshot.clone();
                 let focused = state.focused_checkout_path();
+                if facts.is_some() {
+                    state.set_file_facts(&path, facts);
+                }
                 apply_one_repo_snapshot(state, &path, snap);
                 if let Some(reload) = state.worktree_compare_reload(&path) {
                     self.schedule(state, opts, reload, &Action::None);
@@ -2539,6 +2608,7 @@ impl Interpreter {
                     }
                 }
             }
+            JobOutcome::StoreSaved { saved } => self.land_store_save(state, saved),
             JobOutcome::Doctor { gen, checks } => {
                 // A re-run asked while this probe ran gets its own probe
                 // next.
@@ -3906,6 +3976,23 @@ impl Interpreter {
                         repo,
                         sha,
                     }),
+                );
+            }
+            UserTag::StoreSave(kind) => {
+                // The job takes the store now, so it sends every change so
+                // far. Nothing to save when an earlier slot already sent it.
+                let (slot, _) = self.store_save_slot(kind);
+                let job = slot
+                    .take_if(|_| state.store_save_ready(kind))
+                    .and_then(|()| state.begin_store_save(kind));
+                let Some(job) = job else {
+                    self.sched.note_job_finished(id);
+                    return;
+                };
+                spawn(
+                    id,
+                    JobRelease::StoreSave { kind },
+                    Box::new(move || JobOutcome::StoreSaved { saved: job.run() }),
                 );
             }
             UserTag::Doctor => {

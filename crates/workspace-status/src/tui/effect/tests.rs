@@ -6252,6 +6252,7 @@ fn apply_app_status(interp: &mut Interpreter, state: &mut AppState, gen: u64, br
             gen,
             path: "app".into(),
             snap: Some(snap),
+            facts: Some(Default::default()),
         },
     );
 }
@@ -6891,4 +6892,207 @@ fn a_newer_title_fill_replaces_the_waiting_one() {
     };
     assert_eq!(titles.get("ABC-123"), Some("Title ABC-123"), "newer groups");
     let _ = std::fs::remove_dir_all(cmd.parent().unwrap());
+}
+
+mod store_io_off_loop {
+    use super::*;
+    use crate::testutil::unique_dir;
+    use crate::tui::file_facts::{FileFacts, RepoFileFacts};
+    use crate::tui::store_save::StoreKind;
+    use crate::tui::tree::NodeKind;
+    use crate::tui::viewed::{load_viewed_store, viewed_identity, workspace_store_id};
+
+    const README_ROW: &str = "file:app:README.md";
+
+    /// A store path whose parent is a regular file: every save fails.
+    fn unwritable_store(root: &Path) -> PathBuf {
+        fs::create_dir_all(root).unwrap();
+        let blocker = root.join("not-a-dir");
+        fs::write(&blocker, "x").unwrap();
+        blocker.join("viewed.json")
+    }
+
+    /// Checkout `app` with a dirty `README.md` on disk; the stores sit in
+    /// `<root>/state`.
+    fn dirty_readme_state(root: &Path) -> AppState {
+        let cwd = root.join("ws");
+        fs::create_dir_all(cwd.join("app")).unwrap();
+        fs::write(cwd.join("app/README.md"), "# dirty\n").unwrap();
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        AppState::with_viewed_path(cwd, snapshot, true, root.join("state/viewed.json"))
+    }
+
+    fn focus_readme(state: &mut AppState) {
+        state.cursor = state
+            .rows
+            .iter()
+            .position(|row| row.kind == NodeKind::File && row.id == README_ROW)
+            .expect("README row");
+    }
+
+    /// Facts the status worker of checkout `app` read for its README.
+    fn readme_facts(disk_token: &str, fingerprint: &str) -> RepoFileFacts {
+        let mut facts = RepoFileFacts::new();
+        facts.insert(
+            "README.md".into(),
+            FileFacts {
+                disk_token: disk_token.into(),
+                fingerprint: fingerprint.into(),
+            },
+        );
+        facts
+    }
+
+    fn readme_status(facts: RepoFileFacts) -> JobOutcome {
+        JobOutcome::RepoStatus {
+            gen: 0,
+            path: "app".into(),
+            snap: Some(repo("app", true)),
+            facts: Some(facts),
+        }
+    }
+
+    /// A status result lands with no file I/O on the loop thread: the
+    /// worktree does not exist and the viewed store cannot be written, yet
+    /// the watch signature and the viewed mark follow the worker's facts,
+    /// and the save a dropped mark asks for waits for a worker.
+    #[test]
+    fn a_status_result_takes_file_facts_from_the_worker_and_writes_no_store() {
+        let root = unique_dir("ws-status-no-io");
+        let cwd = root.join("no-such-workspace");
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::with_viewed_path(cwd, snapshot, true, unwritable_store(&root));
+        let identity = viewed_identity("app", "README.md");
+        state
+            .viewed_store
+            .insert(identity.clone(), "fp-on-worker".into());
+        let mut interp = Interpreter::with_cap(4);
+
+        apply(
+            &mut interp,
+            &mut state,
+            readme_status(readme_facts("8:1700000000000", "fp-on-worker")),
+        );
+        assert_eq!(
+            state.signatures.get(README_ROW).map(String::as_str),
+            Some("M:8:1700000000000"),
+            "the disk token is the worker's, not a stat of a missing file"
+        );
+        assert!(
+            state.reviewed.contains(README_ROW),
+            "the mark matches the worker's fingerprint, not a read of a missing file"
+        );
+
+        apply(
+            &mut interp,
+            &mut state,
+            readme_status(readme_facts("9:1700000000001", "fp-moved")),
+        );
+        assert!(
+            !state.reviewed.contains(README_ROW),
+            "a moved file drops it"
+        );
+        assert!(state.viewed_store.is_empty());
+        assert!(
+            !state.status.contains("viewed save failed"),
+            "the apply must not write the store: {}",
+            state.status
+        );
+        assert_eq!(
+            interp
+                .sched
+                .queued_user_tag(UserTag::StoreSave(StoreKind::Viewed)),
+            1,
+            "the save waits for a worker"
+        );
+
+        drain_jobs(&mut interp, &mut state, 4);
+        assert!(
+            state.status.contains("viewed save failed"),
+            "the worker's save lands its failure: {}",
+            state.status
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Space asks for a save; a worker runs it. A second Space while it
+    /// runs waits (one save per store file), and landing the first save
+    /// keeps the second change, which the next save writes.
+    #[test]
+    fn a_store_save_is_a_serial_job_and_a_change_while_it_runs_is_not_lost() {
+        let root = unique_dir("ws-save-serial");
+        let mut state = dirty_readme_state(&root);
+        focus_readme(&mut state);
+        let mut interp = Interpreter::with_cap(4);
+        let identity = viewed_identity("app", "README.md");
+        let on_disk = |state: &AppState| {
+            load_viewed_store(&state.viewed_path, &workspace_store_id(&state.cwd))
+        };
+
+        let effect = state.dispatch(Action::ToggleReviewed);
+        schedule_effect(&mut interp, &mut state, effect, &Action::ToggleReviewed);
+        assert!(state.reviewed.contains(README_ROW));
+        assert!(
+            !state.viewed_path.exists(),
+            "dispatch must not write the store on the loop thread"
+        );
+        let mut first = capture_jobs(&mut interp, &mut state);
+        assert_eq!(first.len(), 1, "one save job");
+
+        let effect = state.dispatch(Action::ToggleReviewed);
+        schedule_effect(&mut interp, &mut state, effect, &Action::ToggleReviewed);
+        assert!(!state.reviewed.contains(README_ROW));
+        assert!(
+            capture_jobs(&mut interp, &mut state).is_empty(),
+            "a second save of the file waits for the running one"
+        );
+
+        let (id, work) = first.pop().unwrap();
+        let outcome = work();
+        apply_id(&mut interp, &mut state, id, outcome);
+        assert!(
+            on_disk(&state).contains_key(&identity),
+            "the first save wrote the mark"
+        );
+        assert!(
+            state.viewed_store.is_empty() && !state.reviewed.contains(README_ROW),
+            "landing the first save must not bring the cleared mark back"
+        );
+
+        drain_jobs(&mut interp, &mut state, 4);
+        assert!(
+            on_disk(&state).is_empty(),
+            "the next save clears it on disk"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A panicked save frees its slot and keeps the change: the next
+    /// change saves both.
+    #[test]
+    fn a_panicked_store_save_frees_its_slot_and_the_next_save_sends_the_change() {
+        let root = unique_dir("ws-save-panic");
+        let mut state = dirty_readme_state(&root);
+        focus_readme(&mut state);
+        let mut interp = Interpreter::with_cap(4);
+        let effect = state.dispatch(Action::ToggleReviewed);
+        schedule_effect(&mut interp, &mut state, effect, &Action::ToggleReviewed);
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 1);
+        let tui_opts = opts(&state);
+        interp.apply_panic(&mut state, &tui_opts, jobs[0].0, "boom");
+        assert_eq!(state.status, "viewed save job panicked: boom");
+        assert!(!interp.viewed_save_job.holds_slot(), "the slot is free");
+        assert!(state.reviewed.contains(README_ROW), "the mark stays");
+
+        // A later change (clear, then mark again) saves the unsaved mark.
+        let effect = state.dispatch(Action::ToggleReviewed);
+        schedule_effect(&mut interp, &mut state, effect, &Action::ToggleReviewed);
+        let effect = state.dispatch(Action::ToggleReviewed);
+        schedule_effect(&mut interp, &mut state, effect, &Action::ToggleReviewed);
+        drain_jobs(&mut interp, &mut state, 4);
+        let disk = load_viewed_store(&state.viewed_path, &workspace_store_id(&state.cwd));
+        assert!(disk.contains_key(&viewed_identity("app", "README.md")));
+        let _ = fs::remove_dir_all(root);
+    }
 }

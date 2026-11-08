@@ -1273,11 +1273,18 @@ pub(crate) fn filter_repo_set(
 }
 
 /// Apply one checkout result; other repos stay on the previous generation.
+///
+/// The status worker's file facts of `path` go in first
+/// ([`AppState::set_file_facts`]); a gone checkout (`None`) drops its facts
+/// here. No file I/O.
 pub(crate) fn apply_one_repo_snapshot(
     state: &mut AppState,
     path: &str,
     snap: Option<crate::snapshot::RepoSnapshot>,
 ) {
+    if snap.is_none() {
+        state.set_file_facts(path, None);
+    }
     let next =
         crate::snapshot::replace_repo_in_snapshot(&state.snapshot, path, snap, state.show_hidden);
     state.apply_watch_snapshot(next);
