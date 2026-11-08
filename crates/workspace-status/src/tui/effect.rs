@@ -89,7 +89,7 @@ use super::viewed::workspace_store_id;
 mod job_release;
 
 use job_release::JobRelease;
-pub(crate) use job_release::{run_job, JobResult};
+pub(crate) use job_release::{in_worker_job, note_worker_panic_at, run_job, JobResult};
 
 /// Blocking work that produces one [`JobOutcome`].
 pub(crate) type JobWork = Box<dyn FnOnce() -> JobOutcome + Send>;
@@ -597,7 +597,9 @@ fn reset_done_status(branch: &str, upstream: &str, old_tip: &str) -> String {
 /// Bulk pull result for one repo.
 fn pull_result(dir: &std::path::Path) -> RepoOpResult {
     let pulled = pull_quiet_detailed(dir);
-    if pulled.stash_pop_failed {
+    if let Some(note) = pulled.stash_note {
+        RepoOpResult::Failed(note)
+    } else if pulled.stash_pop_failed {
         RepoOpResult::StashConflict
     } else if pulled.ok {
         RepoOpResult::Ok
@@ -2199,20 +2201,19 @@ impl Interpreter {
         let _ = self.finish_job(id);
         match outcome {
             JobOutcome::Discovered { gen, entries } => {
-                if self
-                    .sched
-                    .on_discovered(gen, entries.iter().map(|(p, _, _)| p.clone()).collect())
-                    == ApplyDecision::Ignore
-                {
+                let keep: Vec<String> = entries.iter().map(|(p, _, _)| p.clone()).collect();
+                let decision = self.sched.on_discovered(gen, keep.clone());
+                if decision == ApplyDecision::Ignore {
                     return;
                 }
-                let keep: Vec<String> = entries.iter().map(|(p, _, _)| p.clone()).collect();
                 drop_undiscovered_checkouts(state, &keep);
                 self.metas = entries
                     .into_iter()
                     .map(|(path, meta, ov)| (path, (meta, ov)))
                     .collect();
                 self.queue_due_pr_lookups(state, opts);
+                // A walk with nothing to load ends the collect here, not on a repo result.
+                self.after_collection_step(state, &decision);
                 self.mark();
             }
             JobOutcome::RepoStatus { gen, path, snap } => {
@@ -2673,12 +2674,18 @@ impl Interpreter {
     /// The `r` reload that lands here counts every repo it found.
     fn note_repo_status_done(&mut self, state: &AppState, gen: u64, path: &str) -> ApplyDecision {
         let decision = self.sched.note_repo_done(gen, path);
-        if decision == ApplyDecision::CollectionIdle
+        self.after_collection_step(state, &decision);
+        decision
+    }
+
+    /// Follow-up once a collect step lands: an `r` reload that ended the
+    /// collect counts activity from the new snapshot.
+    fn after_collection_step(&mut self, state: &AppState, decision: &ApplyDecision) {
+        if *decision == ApplyDecision::CollectionIdle
             && std::mem::take(&mut self.activity_after_reload)
         {
             self.queue_activity(state, activity_targets(&state.snapshot, None));
         }
-        decision
     }
 
     /// Free the exclusive write slot of job `id` and the gitdirs it holds.
