@@ -10,7 +10,7 @@ readme = "README.md"
 
 [dependencies]
 libc = "0.2"
-ratatui = { version = "0.29", default-features = false }
+ratatui = { version = "0.30", default-features = false }
 
 [features]
 # Test-only paint call counter (`paint_calls`); keep off in release builds.
