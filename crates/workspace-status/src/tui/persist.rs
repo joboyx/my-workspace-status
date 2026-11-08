@@ -49,8 +49,8 @@ pub(crate) fn apply_session_delta<K: Ord + Clone, V: PartialEq + Clone>(
 }
 
 /// Exclusive lock on a sibling `*.lock` file, merge on-disk bytes, then
-/// atomic-write (`*.tmp` + flush + fsync + rename, then fsync of the parent
-/// directory on Unix so the rename survives a crash).
+/// atomic-write (`*.tmp` + flush + fsync + rename, then a best-effort fsync
+/// of the parent directory on Unix so the rename survives a crash).
 pub(crate) fn persist_with_lock(
     file_path: &Path,
     merge: impl FnOnce(Option<&[u8]>) -> io::Result<Vec<u8>>,
@@ -80,14 +80,42 @@ pub(crate) fn persist_with_lock(
         let mut file = fs::File::create(&tmp)?;
         file.write_all(&body)?;
         file.flush()?;
-        file.sync_all()?;
+        sync_file(&file)?;
         fs::rename(&tmp, file_path)
     })();
     if write_result.is_err() {
         let _ = fs::remove_file(&tmp);
     }
     write_result?;
-    sync_parent_dir(file_path)
+    // The new bytes are already in place: a failed directory fsync only
+    // weakens crash durability, so it must not report the save as failed
+    // (the caller would keep its old baseline and apply the same delta again).
+    let _ = sync_parent_dir(file_path);
+    Ok(())
+}
+
+/// Fsync `file`. On macOS `sync_all` is `F_FULLFSYNC`, which some
+/// filesystems (SMB shares, some external volumes) reject with `ENOTSUP` or
+/// `EINVAL`. Fall back to a plain `fsync` there.
+#[cfg(target_vendor = "apple")]
+fn sync_file(file: &fs::File) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    match file.sync_all() {
+        Err(err) if matches!(err.raw_os_error(), Some(libc::ENOTSUP | libc::EINVAL)) => {
+            // SAFETY: `file` owns an open descriptor for this whole call.
+            if unsafe { libc::fsync(file.as_raw_fd()) } == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
+        other => other,
+    }
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn sync_file(file: &fs::File) -> io::Result<()> {
+    file.sync_all()
 }
 
 /// Fsync the directory that holds `file_path`, so a rename into it is
