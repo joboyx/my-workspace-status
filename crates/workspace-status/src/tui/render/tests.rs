@@ -3427,6 +3427,105 @@ fn wrapped_word_diff_keeps_word_bg_on_continuation_row() {
     }
 }
 
+/// Styled spans of one long line: plain code, a changed word, an emoji, a
+/// CJK run, and a zero-width joiner, repeated `times`.
+fn long_styled_line(times: usize) -> (String, Vec<CodeSpan>) {
+    let unit = [
+        ("let total = price + ", Color::Rgb(1, 2, 3), false),
+        ("count", Color::Rgb(1, 2, 3), true),
+        (" 🙂 漢字", Color::Rgb(4, 5, 6), false),
+        ("\u{200d}x; ", Color::Rgb(7, 8, 9), false),
+    ];
+    let spans: Vec<CodeSpan> = (0..times)
+        .flat_map(|_| unit)
+        .map(|(text, fg, word)| CodeSpan {
+            text: text.to_string(),
+            fg,
+            word,
+        })
+        .collect();
+    let text = spans.iter().map(|span| span.text.as_str()).collect();
+    (text, spans)
+}
+
+/// Each wrap row of a cell is the same slice the per-row rescan
+/// (`slice_styled_cols` at that row's wrap start) painted, at every width,
+/// including widths narrower than a wide glyph.
+#[test]
+fn wrapped_cell_rows_match_per_row_slices() {
+    let (text, spans) = long_styled_line(12);
+    let palette = app_state(&[repo("app", true)]).theme.palette();
+    for kind in [DiffCellKind::Add, DiffCellKind::Ctx, DiffCellKind::Meta] {
+        let cell = DiffCell {
+            kind,
+            text: text.clone(),
+            line_no: Some(7),
+        };
+        for width in [8u16, 9, 10, 23, 80] {
+            let mut rows = CellRows::new(&cell, &spans, width, 3, false, true);
+            let code_w = rows.code_w;
+            let starts = wrap_col_starts(&text, code_w);
+            assert_eq!(rows.height(), starts.len(), "{kind:?} width {width}");
+            for (part, &start) in starts.iter().enumerate() {
+                let expected = paint_code_parts(&cell, &spans, start, code_w, palette);
+                assert_eq!(
+                    rows.code(part, 0, palette),
+                    expected,
+                    "{kind:?} width {width} row {part}"
+                );
+            }
+            assert!(
+                rows.code(starts.len(), 0, palette).is_empty(),
+                "a row past the last one is empty"
+            );
+        }
+    }
+}
+
+/// A wrapped long line scans its wrap starts once per cell, not once per
+/// painted row, and its rows still paint the whole line.
+#[test]
+fn wrapped_long_line_scans_wrap_starts_once_per_cell() {
+    let state = two_pane_diff_state();
+    let (text, spans) = long_styled_line(200);
+    let cell = |kind| DiffCell {
+        kind,
+        text: text.clone(),
+        line_no: Some(1),
+    };
+    let inline = DiffRow::Line {
+        left: cell(DiffCellKind::Add),
+        right: None,
+    };
+    let split = DiffRow::Line {
+        left: cell(DiffCellKind::Del),
+        right: Some(cell(DiffCellKind::Add)),
+    };
+    for (row, is_split, cells) in [(&inline, false, 1), (&split, true, 2)] {
+        crate::tui::search::take_wrap_scans();
+        let lines = paint_diff_row(
+            row, 100, 3, is_split, 0, true, &state, false, false, false, None, &spans, &spans,
+        );
+        assert_eq!(
+            crate::tui::search::take_wrap_scans(),
+            cells,
+            "split {is_split}: one scan per cell"
+        );
+        assert!(lines.len() > 50, "the line wraps: {} rows", lines.len());
+        if !is_split {
+            // Edge, gutter, rule, sign, then code spans and the pad.
+            let painted: String = lines
+                .iter()
+                .flat_map(|line| line.spans[4..line.spans.len() - 1].iter())
+                .map(|span| span.content.as_ref())
+                .collect();
+            // A zero-width joiner at a row edge paints on both rows.
+            let joiner = |s: &str| s.replace('\u{200d}', "");
+            assert!(joiner(&painted) == joiner(&text), "rows paint the line");
+        }
+    }
+}
+
 #[test]
 fn panned_word_diff_stays_on_changed_glyphs_past_an_emoji() {
     let tail = format!(" // {}", "z".repeat(150));

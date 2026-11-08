@@ -1015,8 +1015,18 @@ pub struct AppState {
     diff_view: Option<DiffViewId>,
     pub reviewed: HashSet<String>,
     pub viewed_store: ViewedStore,
+    /// [`Self::viewed_store`] as last loaded or saved. Save writes only the
+    /// delta from it, so marks another `ws` process saved survive.
+    viewed_baseline: ViewedStore,
     pub viewed_path: PathBuf,
     pub comment_store: CommentStore,
+    /// [`Self::comment_store`] as last loaded or saved. Save writes only
+    /// the delta from it, so comments another `ws` process saved survive.
+    comment_baseline: CommentStore,
+    /// Checkout path → repo identity seen in this session's snapshots
+    /// (`CommentLiveSet::checkout_owners`): comment GC drops a gone
+    /// worktree's comment only when its owner repo is known.
+    comment_checkout_owners: HashMap<String, String>,
     pub comment_path: PathBuf,
     /// UI-state store path (see [`crate::tui::ui_state_store`]). The
     /// palette `Theme: …` rows and Toggle activity sparkline write it;
@@ -1377,9 +1387,12 @@ impl AppState {
             diff_path: None,
             diff_view: None,
             reviewed: HashSet::new(),
+            viewed_baseline: viewed_store.clone(),
             viewed_store,
             viewed_path,
+            comment_baseline: comment_store.clone(),
             comment_store,
+            comment_checkout_owners: HashMap::new(),
             comment_path,
             ui_store_path,
             fetch_store_path: PathBuf::new(),
@@ -5655,15 +5668,44 @@ impl AppState {
         let identity = viewed_identity(repo, path);
         let fingerprint = fingerprint_file_change(&self.cwd, repo, full);
         self.viewed_store = toggle_viewed(&self.viewed_store, &identity, &fingerprint);
-        if let Err(err) = save_viewed_store(
-            &self.viewed_store,
-            &self.viewed_path,
-            &workspace_store_id(&self.cwd),
-        ) {
+        let marked = self.viewed_store.contains_key(&identity);
+        if let Err(err) = self.save_viewed() {
             self.status = StatusMessage::error(persist_failed_status("viewed", err));
         }
         self.reviewed = viewed_row_ids(&self.snapshot, &self.viewed_store, &self.cwd);
-        Some(self.viewed_store.contains_key(&identity))
+        Some(marked)
+    }
+
+    /// Save the viewed-mark changes of this session since the last load or
+    /// save, merged with the store on disk. On success the merged bucket
+    /// (with marks other `ws` processes saved) becomes the in-memory store
+    /// and the new baseline. On error both stay, so the next save retries
+    /// the same changes.
+    fn save_viewed(&mut self) -> std::io::Result<()> {
+        let merged = save_viewed_store(
+            &self.viewed_baseline,
+            &self.viewed_store,
+            &self.viewed_path,
+            &workspace_store_id(&self.cwd),
+        )?;
+        self.viewed_store = merged.clone();
+        self.viewed_baseline = merged;
+        Ok(())
+    }
+
+    /// Save the comment changes of this session since the last load or
+    /// save, merged with the store on disk. Same rules as
+    /// [`Self::save_viewed`].
+    fn save_comments(&mut self) -> std::io::Result<()> {
+        let merged = save_comment_store(
+            &self.comment_baseline,
+            &self.comment_store,
+            &self.comment_path,
+            &workspace_store_id(&self.cwd),
+        )?;
+        self.comment_store = merged.clone();
+        self.comment_baseline = merged;
+        Ok(())
     }
 
     /// Space on a compare tab: session-only mark on the focused committed file.
@@ -5683,11 +5725,7 @@ impl AppState {
         let next = reconcile_viewed(&self.viewed_store, &current);
         if next != self.viewed_store {
             self.viewed_store = next;
-            if let Err(err) = save_viewed_store(
-                &self.viewed_store,
-                &self.viewed_path,
-                &workspace_store_id(&self.cwd),
-            ) {
+            if let Err(err) = self.save_viewed() {
                 self.status = StatusMessage::error(persist_failed_status("viewed", err));
             }
         }
@@ -5695,15 +5733,16 @@ impl AppState {
     }
 
     fn reconcile_comment_store(&mut self) {
-        let live = collect_live_set(&self.snapshot, &self.comment_store);
-        let next = gc_comments(&self.comment_store, &live);
+        let live = collect_live_set(
+            &self.snapshot,
+            &self.comment_store,
+            &self.comment_checkout_owners,
+        );
+        let next = gc_comments(&self.comment_store, &live, &self.cwd);
+        self.comment_checkout_owners = live.checkout_owners;
         if next != self.comment_store {
             self.comment_store = next;
-            if let Err(err) = save_comment_store(
-                &self.comment_store,
-                &self.comment_path,
-                &workspace_store_id(&self.cwd),
-            ) {
+            if let Err(err) = self.save_comments() {
                 self.status = StatusMessage::error(persist_failed_status("comment", err));
             }
         }
@@ -6051,11 +6090,7 @@ impl AppState {
         let empty = body.trim().is_empty();
         self.comment_store =
             put_comment_entry(&self.comment_store, prompt.key, &body, prompt.resolved);
-        match save_comment_store(
-            &self.comment_store,
-            &self.comment_path,
-            &workspace_store_id(&self.cwd),
-        ) {
+        match self.save_comments() {
             Ok(()) => {
                 self.status = StatusMessage::ok(if empty {
                     "comment deleted"

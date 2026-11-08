@@ -1,7 +1,7 @@
 use super::*;
 use crate::testutil::{
-    git, init_repo, init_repo_empty, unique_dir, upstream_rewrite_fixture, RewriteFixture,
-    RewriteKind,
+    git, init_repo, init_repo_empty, pull_fixture, unique_dir, upstream_rewrite_fixture,
+    RewriteFixture, RewriteKind,
 };
 use std::fs;
 use std::process::Command;
@@ -599,6 +599,37 @@ fn check_may_start_refuses_new_git_once_ws_is_exiting() {
     assert!(check_may_start(false, true, Some("stash")).is_ok());
 }
 
+#[test]
+fn quit_waits_while_a_pull_still_has_to_restore_the_auto_stash() {
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let hold = Duration::from_millis(200);
+    let restoring = std::thread::spawn(move || {
+        let _restoring = RestoringUserWork::start();
+        started_tx.send(()).unwrap();
+        std::thread::sleep(hold);
+    });
+    started_rx.recv().unwrap();
+    let start = Instant::now();
+    assert!(
+        wait_while_restoring_user_work(Duration::from_secs(10)),
+        "the wait ends once the restore is done"
+    );
+    assert!(
+        start.elapsed() >= hold - Duration::from_millis(50),
+        "quit waited for the restore: {:?}",
+        start.elapsed()
+    );
+    restoring.join().unwrap();
+
+    let _stuck = RestoringUserWork::start();
+    let start = Instant::now();
+    assert!(
+        !wait_while_restoring_user_work(Duration::from_millis(100)),
+        "a restore that does not end stops the wait at its bound"
+    );
+    assert!(start.elapsed() < Duration::from_secs(2));
+}
+
 /// Set in the child process that
 /// [`quit_during_pull_still_restores_the_auto_stash`] starts. The child
 /// sets the process-wide shutdown flag, which would break every other
@@ -669,8 +700,12 @@ fn quit_during_pull_in_this_process() {
             .unwrap();
         String::from_utf8_lossy(&out.stdout).lines().count()
     };
+    // The push has saved its entry and reset the worktree. A stop that still
+    // reaches the push gives the same result: the entry is popped back.
+    let pushed =
+        || stash_count() == 1 && fs::read_to_string(down.join("README.md")).unwrap() == "# seed\n";
     let give_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while stash_count() == 0 {
+    while !pushed() {
         assert!(std::time::Instant::now() < give_up, "no auto-stash");
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -705,8 +740,9 @@ fn quit_during_pull_in_this_process() {
 
 #[test]
 fn git_diff_args_inserts_full_context() {
+    let path = literal_pathspec("README.md");
     let normal = git_diff_args(&["diff"], "README.md", None);
-    assert_eq!(normal, vec!["diff", "--", "README.md"]);
+    assert_eq!(normal, vec!["diff".to_string(), "--".into(), path.clone()]);
     let full = git_diff_args(&["diff"], "README.md", Some(FULL_DIFF_CONTEXT_LINES));
     assert_eq!(
         full,
@@ -714,7 +750,7 @@ fn git_diff_args_inserts_full_context() {
             "diff".to_string(),
             format!("-U{FULL_DIFF_CONTEXT_LINES}"),
             "--".into(),
-            "README.md".into(),
+            path,
         ]
     );
 }
@@ -738,6 +774,174 @@ fn stage_unstage_revert_on_fixture() {
     assert!(!repo_has_local_changes(&dir));
     remove_untracked_file(&dir, "tmp-untracked.txt").unwrap();
     assert!(!dir.join("tmp-untracked.txt").exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// (target, sibling) pairs: as a glob pathspec, each target also matches
+/// its sibling (`[b]` matches `b`, `*` and `?` match `y` / `x`).
+const GLOB_NAME_PAIRS: [(&str, &str); 4] = [
+    ("a[b].txt", "ab.txt"),
+    ("u?.txt", "ux.txt"),
+    ("x*.txt", "xy.txt"),
+    ("app/[id]/page.tsx", "app/i/page.tsx"),
+];
+
+fn write_file(dir: &Path, rel: &str, body: &str) {
+    let path = dir.join(rel);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, body).unwrap();
+}
+
+fn read_file(dir: &Path, rel: &str) -> String {
+    fs::read_to_string(dir.join(rel)).unwrap()
+}
+
+/// A repo with every [`GLOB_NAME_PAIRS`] file committed as `base\n`.
+fn glob_names_fixture(prefix: &str) -> std::path::PathBuf {
+    let dir = unique_dir(prefix);
+    init_repo(&dir);
+    for (target, sibling) in GLOB_NAME_PAIRS {
+        write_file(&dir, target, "base\n");
+        write_file(&dir, sibling, "base\n");
+    }
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-q", "-m", "glob names"]);
+    dir
+}
+
+#[test]
+fn literal_pathspec_prefix_unless_git_reads_every_pathspec_literally() {
+    assert_eq!(
+        literal_pathspec_with("a[b].txt", false),
+        ":(literal)a[b].txt"
+    );
+    assert_eq!(literal_pathspec_with("a[b].txt", true), "a[b].txt");
+    for on in ["1", "true", "YES", "on", "2"] {
+        assert!(git_env_bool(on), "{on}");
+    }
+    for off in ["", "0", "false", "No", "off", "maybe"] {
+        assert!(!git_env_bool(off), "{off}");
+    }
+}
+
+// Windows does not allow `*` or `?` in file names.
+#[cfg(unix)]
+#[test]
+fn file_diff_reads_only_the_named_file() {
+    let dir = glob_names_fixture("ws-git-literal-diff");
+    for (target, sibling) in GLOB_NAME_PAIRS {
+        write_file(&dir, target, "dirty\n");
+        write_file(&dir, sibling, "dirty\n");
+        let args = git_diff_args(&["diff"], target, None);
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let diff = exec_git(&refs, &dir);
+        assert_eq!(
+            diff.matches("diff --git ").count(),
+            1,
+            "diff of {target} names one file:\n{diff}"
+        );
+        assert!(!diff.contains(sibling), "diff of {target}:\n{diff}");
+        git(&dir, &["checkout", "-q", "--", "."]);
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// Windows does not allow `*` or `?` in file names.
+#[cfg(unix)]
+#[test]
+fn stage_unstage_revert_take_paths_literally() {
+    let dir = glob_names_fixture("ws-git-literal-tracked");
+    for (target, sibling) in GLOB_NAME_PAIRS {
+        write_file(&dir, target, "dirty\n");
+        write_file(&dir, sibling, "dirty\n");
+
+        stage_file(&dir, target).unwrap();
+        assert_eq!(staged_paths(&dir), [target], "stage {target}");
+
+        git(&dir, &["add", "-A"]);
+        unstage_file(&dir, target).unwrap();
+        assert_eq!(staged_paths(&dir), [sibling], "unstage {target}");
+        git(&dir, &["reset", "-q"]);
+
+        revert_tracked_file(&dir, target).unwrap();
+        assert_eq!(read_file(&dir, target), "base\n", "revert {target}");
+        assert_eq!(read_file(&dir, sibling), "dirty\n", "revert {target}");
+        git(&dir, &["checkout", "-q", "--", "."]);
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn remove_untracked_file_takes_paths_literally() {
+    let dir = unique_dir("ws-git-literal-clean");
+    init_repo(&dir);
+    for (target, sibling) in GLOB_NAME_PAIRS {
+        write_file(&dir, target, "new\n");
+        write_file(&dir, sibling, "new\n");
+        remove_untracked_file(&dir, target).unwrap();
+        assert!(!dir.join(target).exists(), "remove {target}");
+        assert_eq!(read_file(&dir, sibling), "new\n", "remove {target}");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn stash_push_of_a_path_takes_it_literally() {
+    let dir = glob_names_fixture("ws-git-literal-stash");
+    for (target, sibling) in GLOB_NAME_PAIRS {
+        write_file(&dir, target, "dirty\n");
+        write_file(&dir, sibling, "dirty\n");
+        stash_push(&dir, &[target.to_string()]).unwrap();
+        assert_eq!(read_file(&dir, target), "base\n", "stash {target}");
+        assert_eq!(read_file(&dir, sibling), "dirty\n", "stash {target}");
+        let stashed = exec_git(&["stash", "show", "--name-only", "-z"], &dir);
+        assert_eq!(stashed.trim_end_matches('\0'), target, "stash {target}");
+        git(&dir, &["stash", "drop", "-q"]);
+        git(&dir, &["checkout", "-q", "--", "."]);
+    }
+    // An untracked target with an untracked sibling (`-u`).
+    write_file(&dir, "new/[id].txt", "new\n");
+    write_file(&dir, "new/i.txt", "new\n");
+    stash_push(&dir, &["new/[id].txt".to_string()]).unwrap();
+    assert!(!dir.join("new/[id].txt").exists());
+    assert_eq!(read_file(&dir, "new/i.txt"), "new\n");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn revert_compare_file_takes_paths_literally() {
+    let dir = glob_names_fixture("ws-git-literal-compare");
+    let merge_base = exec_git(&["rev-parse", "HEAD"], &dir);
+    git(&dir, &["checkout", "-q", "-b", "feature"]);
+    for (target, sibling) in GLOB_NAME_PAIRS {
+        write_file(&dir, target, "head\n");
+        write_file(&dir, sibling, "head\n");
+    }
+    git(&dir, &["commit", "-q", "-am", "feature"]);
+    let head = exec_git(&["rev-parse", "HEAD"], &dir);
+
+    for (target, sibling) in GLOB_NAME_PAIRS {
+        // A clean sibling: the restore must not reach it.
+        revert_compare_file(&dir, &merge_base, &head, target, None).unwrap();
+        assert_eq!(read_file(&dir, target), "base\n", "revert {target}");
+        assert_eq!(read_file(&dir, sibling), "head\n", "revert {target}");
+        git(&dir, &["checkout", "-q", "--", "."]);
+
+        // A dirty sibling: the safety check must not refuse the target.
+        write_file(&dir, sibling, "dirty\n");
+        revert_compare_file(&dir, &merge_base, &head, target, None).unwrap();
+        assert_eq!(read_file(&dir, target), "base\n", "dirty sibling {target}");
+        assert_eq!(
+            read_file(&dir, sibling),
+            "dirty\n",
+            "dirty sibling {target}"
+        );
+        git(&dir, &["checkout", "-q", "--", "."]);
+    }
+    assert!(index_is_head(&dir));
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -1056,10 +1260,44 @@ fn remove_worktree_linked_fixture() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// One expected [`NameStatus`] row with no line counts.
+fn row(status: &str, path: &str, old_path: Option<&str>) -> NameStatus {
+    NameStatus {
+        status: status.into(),
+        path: path.into(),
+        old_path: old_path.map(str::to_string),
+        stat: None,
+    }
+}
+
+#[test]
+fn parse_name_status_z_keeps_odd_paths_raw() {
+    let stdout = "M\0my file.txt\0A\0café.md\0D\0a -> b.txt\0\
+                  R087\0old name.txt\0new name.txt\0C100\0src.rs\0copy\tof src.rs\0\
+                  M\0tab\there.txt\0";
+    assert_eq!(
+        parse_name_status_z(stdout),
+        vec![
+            row("M", "my file.txt", None),
+            row("A", "café.md", None),
+            row("D", "a -> b.txt", None),
+            row("R", "new name.txt", Some("old name.txt")),
+            row("C", "copy\tof src.rs", Some("src.rs")),
+            row("M", "tab\there.txt", None),
+        ]
+    );
+    // A rename record cut short is dropped, not misread.
+    assert_eq!(
+        parse_name_status_z("M\0a.rs\0R100\0old.rs\0"),
+        vec![row("M", "a.rs", None)]
+    );
+    assert!(parse_name_status_z("").is_empty());
+}
+
 #[test]
 fn parse_name_status_and_commit_files_fixture() {
     assert_eq!(
-        parse_name_status_lines("M\tsrc/a.rs\nR100\told.rs\tnew.rs\n"),
+        parse_name_status_z("M\0src/a.rs\0R100\0old.rs\0new.rs\0"),
         vec![
             NameStatus {
                 status: "M".into(),
@@ -1242,6 +1480,108 @@ fn list_compare_name_status_carries_line_counts_incl_rename() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Repo with `core.quotePath` on (git's default, pinned against a user
+/// config), so newline output would C-quote `café.md` and porcelain status
+/// would quote `my file.txt`.
+fn quote_path_repo(prefix: &str) -> PathBuf {
+    let dir = unique_dir(prefix);
+    init_repo(&dir);
+    git(&dir, &["config", "core.quotePath", "true"]);
+    dir
+}
+
+/// Odd names with their line count, one per quoting case git has.
+const ODD_NAMES: [(&str, &str); 5] = [
+    ("my file.txt", "a\nb\n"),
+    ("café.md", "c\n"),
+    ("a -> b.txt", "d\n"),
+    ("tab\there.txt", "t\n"),
+    ("say \"hi\".txt", "q\n"),
+];
+
+#[test]
+fn name_status_lists_give_raw_odd_paths_with_line_counts() {
+    let dir = quote_path_repo("ws-git-odd-names");
+    let base = exec_git(&["rev-parse", "HEAD"], &dir);
+    for (name, body) in ODD_NAMES {
+        fs::write(dir.join(name), body).unwrap();
+    }
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "odd names"]);
+    let head = exec_git(&["rev-parse", "HEAD"], &dir);
+    let commit = list_commit_name_status(&dir, &head);
+    let compare = list_compare_name_status(&dir, &base, &head).unwrap();
+    let keys = list_compare_patch_keys(&dir, &base, &head);
+    for (name, body) in ODD_NAMES {
+        let lines = counts(body.lines().count() as u32, 0);
+        assert_eq!(stat_of(&commit, name), lines, "commit {name}");
+        assert_eq!(stat_of(&compare, name), lines, "compare {name}");
+        assert!(keys.contains_key(name), "{name} in {keys:?}");
+    }
+
+    git(&dir, &["mv", "café.md", "new café.md"]);
+    fs::write(dir.join("my file.txt"), "a\nb\nc\n").unwrap();
+    fs::write(dir.join("un tracked é.txt"), "u\n").unwrap();
+    let worktree = list_worktree_name_status(&dir);
+    assert_eq!(stat_of(&worktree, "my file.txt"), counts(1, 0));
+    assert_eq!(stat_of(&worktree, "un tracked é.txt"), None);
+    let renamed = worktree
+        .iter()
+        .find(|f| f.path == "new café.md")
+        .unwrap_or_else(|| panic!("rename listed in {worktree:?}"));
+    assert_eq!(renamed.status, "R");
+    assert_eq!(renamed.old_path.as_deref(), Some("café.md"));
+    assert_eq!(renamed.stat, counts(0, 0));
+    let vs_commit =
+        list_worktree_vs_commit_name_status(&dir, &head, "new café.md", Some("café.md")).unwrap();
+    assert_eq!(vs_commit.len(), 1, "{vs_commit:?}");
+    assert_eq!(vs_commit[0].path, "new café.md");
+
+    stash_push(&dir, &[]).unwrap();
+    let stash = list_stash_name_status(&dir, &list_stash_refs(&dir)[0]);
+    assert_eq!(stat_of(&stash, "my file.txt"), counts(1, 0));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Paths in the index that differ from HEAD (`diff --cached -z`).
+fn staged_paths(dir: &Path) -> Vec<String> {
+    let out = Command::new(git_binary())
+        .args(["diff", "--cached", "--name-only", "-z"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn stage_and_unstage_round_trip_a_listed_path_with_a_space() {
+    let dir = quote_path_repo("ws-git-odd-stage");
+    fs::write(dir.join("my file.txt"), "a\n").unwrap();
+    git(&dir, &["add", "my file.txt"]);
+    git(&dir, &["commit", "-q", "-m", "space"]);
+    fs::write(dir.join("my file.txt"), "a\nb\n").unwrap();
+    let meta = crate::discovery::RepoCheckoutMeta {
+        checkout_kind: crate::snapshot::CheckoutKind::Primary,
+        primary_repo: None,
+    };
+    let parent = dir.parent().unwrap();
+    let repo = dir.file_name().unwrap().to_str().unwrap();
+    let snap = crate::discovery::process_repo(repo, parent, false, None, &meta).unwrap();
+    let paths: Vec<&str> = snap.changes.iter().map(|c| c.path.as_str()).collect();
+    assert_eq!(paths, ["my file.txt"]);
+
+    stage_file(&dir, paths[0]).unwrap();
+    assert_eq!(staged_paths(&dir), ["my file.txt"]);
+    unstage_file(&dir, paths[0]).unwrap();
+    assert!(staged_paths(&dir).is_empty());
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn compare_patch_keys_follow_the_file_diff_not_the_commits() {
     let dir = unique_dir("ws-git-patch-keys");
@@ -1292,10 +1632,9 @@ fn compare_patch_keys_spell_paths_like_the_compare_list() {
     let files = list_compare_name_status(&dir, &base, &head).unwrap();
     let keys = list_compare_patch_keys(&dir, &base, &head);
     assert_eq!(files.len(), 3, "{files:?}");
-    assert!(
-        files.iter().any(|f| f.path.starts_with('"')),
-        "git quotes an unusual path: {files:?}"
-    );
+    let mut paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+    paths.sort_unstable();
+    assert_eq!(paths, ["plain.txt", "tab\there.txt", "é.txt"], "raw paths");
     for file in &files {
         assert!(keys.contains_key(&file.path), "{} in {keys:?}", file.path);
     }
@@ -1307,10 +1646,15 @@ fn parse_raw_patch_keys_reads_plain_and_rename_rows() {
     let z = "1".repeat(40);
     let o = "0".repeat(40);
     let raw = format!(
-        ":100644 100644 {o} {z} M\tsrc/a.rs\n:100644 100644 {o} {z} R087\told.rs\tnew.rs\n"
+        ":100644 100644 {o} {z} M\0src/a.rs\0:100644 100644 {o} {z} R087\0old.rs\0new.rs\0\
+         :100644 100644 {o} {z} A\0:odd name.rs\0"
     );
     let keys = parse_raw_patch_keys(&raw);
-    assert_eq!(keys.len(), 2);
+    assert_eq!(keys.len(), 3);
+    assert_eq!(
+        keys[":odd name.rs"],
+        format!("100644 100644 {o} {z} A\0:odd name.rs\0:odd name.rs")
+    );
     assert_eq!(
         keys["src/a.rs"],
         format!("100644 100644 {o} {z} M\0src/a.rs\0src/a.rs")
@@ -1601,6 +1945,9 @@ fn checked_git_errors_carry_the_git_reason_line() {
     init_repo(&dir);
     let err = stage_file(&dir, "nope.txt").unwrap_err();
     assert_eq!(err, "pathspec 'nope.txt' did not match any files");
+    // The literal pathspec prefix stays out of the reason line, glob characters included.
+    let err = stage_file(&dir, "nope[1].txt").unwrap_err();
+    assert_eq!(err, "pathspec 'nope[1].txt' did not match any files");
     let err = stash_pop(&dir, "stash@{0}").unwrap_err();
     assert!(err.contains("stash@{0} is not a valid reference"), "{err}");
     assert!(!err.starts_with("error:"), "tag is stripped: {err}");
@@ -1629,23 +1976,7 @@ fn failed_patch_apply_reports_one_reason_line() {
 
 #[test]
 fn pull_reports_an_auto_stash_conflict_and_keeps_the_stash() {
-    let root = unique_dir("ws-git-pull-conflict");
-    let up = root.join("up");
-    let down = root.join("down");
-    init_repo(&up);
-    git(
-        &root,
-        &["clone", "-q", up.to_str().unwrap(), down.to_str().unwrap()],
-    );
-    git(&down, &["config", "user.name", "workspace-status test"]);
-    git(
-        &down,
-        &[
-            "config",
-            "user.email",
-            "workspace-status-test@example.invalid",
-        ],
-    );
+    let (root, up, down) = pull_fixture("ws-git-pull-conflict");
     fs::write(up.join("README.md"), "# upstream\n").unwrap();
     git(&up, &["commit", "-qam", "upstream"]);
     fs::write(down.join("README.md"), "# local edit\n").unwrap();
@@ -1654,6 +1985,97 @@ fn pull_reports_an_auto_stash_conflict_and_keeps_the_stash() {
     assert!(result.stashed && result.stash_pop_failed && !result.ok);
     assert_eq!(result.error, None, "the pull itself worked");
     assert_eq!(list_stash_refs(&down).len(), 1, "stash entry is kept");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// `stash@{0}` as `<sha> <subject>` lines, newest first.
+fn stash_entries(dir: &Path) -> Vec<String> {
+    exec_git(&["stash", "list", "--format=%H %s"], dir)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Make one user stash entry in `down` that edits `README.md`, and return
+/// [`stash_entries`].
+fn push_user_stash(down: &Path) -> Vec<String> {
+    fs::write(down.join("README.md"), "# user work\n").unwrap();
+    git(down, &["stash", "push", "-q", "-m", "user work"]);
+    let entries = stash_entries(down);
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    entries
+}
+
+#[test]
+fn pull_with_only_a_dirty_submodule_leaves_the_user_stash_alone() {
+    let (root, up, down) = pull_fixture("ws-git-pull-submodule");
+    let sub = root.join("sub");
+    init_repo(&sub);
+    git(
+        &up,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            sub.to_str().unwrap(),
+            "sub",
+        ],
+    );
+    git(&up, &["commit", "-qm", "add submodule"]);
+    git(&down, &["pull", "-q"]);
+    git(
+        &down,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "-q",
+        ],
+    );
+    let user_stash = push_user_stash(&down);
+    // A tracked edit inside the submodule: `diff --quiet` exits 1, but
+    // `stash push` saves nothing for the parent repo.
+    fs::write(down.join("sub/README.md"), "# dirty submodule\n").unwrap();
+    fs::write(up.join("upstream.txt"), "upstream\n").unwrap();
+    git(&up, &["add", "upstream.txt"]);
+    git(&up, &["commit", "-qm", "upstream"]);
+
+    let result = pull_quiet_detailed(&down);
+    assert!(result.ok, "{result:?}");
+    assert!(!result.stashed, "no auto-stash entry was made: {result:?}");
+    assert!(down.join("upstream.txt").exists(), "the pull ran");
+    assert_eq!(stash_entries(&down), user_stash, "user stash is untouched");
+    assert_eq!(
+        fs::read_to_string(down.join("README.md")).unwrap(),
+        "# seed\n",
+        "the user stash was not applied"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn pull_auto_stash_pops_its_own_entry_and_keeps_the_user_stash() {
+    let (root, up, down) = pull_fixture("ws-git-pull-own-stash");
+    let user_stash = push_user_stash(&down);
+    fs::write(down.join("README.md"), "# local edit\n").unwrap();
+    fs::write(up.join("upstream.txt"), "upstream\n").unwrap();
+    git(&up, &["add", "upstream.txt"]);
+    git(&up, &["commit", "-qm", "upstream"]);
+
+    let result = pull_quiet_detailed(&down);
+    assert!(result.ok && result.stashed, "{result:?}");
+    assert!(!result.stash_pop_failed, "{result:?}");
+    assert!(down.join("upstream.txt").exists(), "the pull ran");
+    assert_eq!(
+        fs::read_to_string(down.join("README.md")).unwrap(),
+        "# local edit\n",
+        "the auto-stash came back"
+    );
+    assert_eq!(stash_entries(&down), user_stash, "user stash is untouched");
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -1669,6 +2091,117 @@ fn pull_failure_carries_the_git_reason() {
         "{reason}"
     );
     let _ = fs::remove_dir_all(&dir);
+}
+
+/// First 12 hex chars of a `<sha> <subject>` line of [`stash_entries`].
+fn entry_short(line: &str) -> &str {
+    &line[..12]
+}
+
+#[cfg(unix)]
+#[test]
+fn pull_gives_back_an_auto_stash_whose_push_failed_after_saving() {
+    use std::os::unix::fs::PermissionsExt;
+    let (root, up, down) = pull_fixture("ws-git-pull-push-failed");
+    fs::create_dir_all(up.join("d")).unwrap();
+    fs::write(up.join("d/f"), "base\n").unwrap();
+    git(&up, &["add", "d/f"]);
+    git(&up, &["commit", "-qm", "add d/f"]);
+    git(&down, &["pull", "-q"]);
+    let user_stash = push_user_stash(&down);
+    fs::write(up.join("upstream.txt"), "upstream\n").unwrap();
+    git(&up, &["add", "upstream.txt"]);
+    git(&up, &["commit", "-qm", "upstream"]);
+    // `stash push` saves its entry, then cannot reset `d/f` in a read-only
+    // folder and exits 1.
+    fs::write(down.join("d/f"), "local\n").unwrap();
+    let dir = down.join("d");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+    if fs::write(dir.join("probe"), "").is_ok() {
+        // Root ignores the mode: this host cannot make the push fail.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = fs::remove_dir_all(&root);
+        return;
+    }
+
+    let result = pull_quiet_detailed(&down);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    let entries = stash_entries(&down);
+    assert!(result.stashed && !result.ok, "{result:?}");
+    let error = result.error.clone().unwrap_or_default();
+    assert!(error.starts_with("auto-stash failed: "), "{result:?}");
+    assert!(!down.join("upstream.txt").exists(), "no pull over the tree");
+    // The pop ran and git refused it over the file the push did not reset:
+    // the entry is kept and the note names it.
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    assert_eq!(entries[1], user_stash[0], "user stash is untouched");
+    assert!(result.stash_pop_failed, "{result:?}");
+    let note = result.stash_note.clone().unwrap_or_default();
+    assert!(
+        note.starts_with("restoring the auto-stash failed: "),
+        "{note}"
+    );
+    assert!(
+        note.contains(&format!("`git stash list` as {}", entry_short(&entries[0]))),
+        "{note}"
+    );
+    assert_eq!(fs::read_to_string(down.join("d/f")).unwrap(), "local\n");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn pull_keeps_the_auto_stash_when_a_newer_stash_lands_during_the_pull() {
+    use std::os::unix::fs::PermissionsExt;
+    let (root, up, down) = pull_fixture("ws-git-pull-newer-stash");
+    let user_stash = push_user_stash(&down);
+    // A stash made in another terminal while the pull runs: the post-merge
+    // hook stashes a new file right after the merge.
+    let hooks = root.join("hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("post-merge");
+    fs::write(
+        &hook,
+        "#!/bin/sh\necho newer > newer.txt && git add newer.txt && git stash push -q -m newer\n",
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        &down,
+        &["config", "core.hooksPath", hooks.to_str().unwrap()],
+    );
+    fs::write(down.join("README.md"), "# local edit\n").unwrap();
+    fs::write(up.join("upstream.txt"), "upstream\n").unwrap();
+    git(&up, &["add", "upstream.txt"]);
+    git(&up, &["commit", "-qm", "upstream"]);
+
+    let result = pull_quiet_detailed(&down);
+    let entries = stash_entries(&down);
+    assert!(down.join("upstream.txt").exists(), "the pull ran");
+    assert_eq!(result.error, None, "{result:?}");
+    assert!(
+        result.stashed && result.stash_pop_failed && !result.ok,
+        "{result:?}"
+    );
+    assert_eq!(entries.len(), 3, "{entries:?}");
+    assert!(entries[0].ends_with(" newer"), "{entries:?}");
+    assert!(entries[1].ends_with(AUTO_STASH_MESSAGE), "{entries:?}");
+    assert_eq!(entries[2], user_stash[0], "user stash is untouched");
+    let note = result.stash_note.unwrap_or_default();
+    assert!(
+        note.contains("a newer stash entry is on top of it"),
+        "{note}"
+    );
+    assert!(
+        note.contains(&format!("`git stash list` as {}", entry_short(&entries[1]))),
+        "{note}"
+    );
+    assert_eq!(
+        fs::read_to_string(down.join("README.md")).unwrap(),
+        "# seed\n",
+        "neither stash was applied"
+    );
+    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
