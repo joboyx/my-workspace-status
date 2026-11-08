@@ -19,20 +19,32 @@ path = "src/bin/ws.rs"
 [dependencies]
 clap = { version = "4.5.23", features = ["derive"] }
 crossterm = "0.28.1"
-ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+# layout-cache: 0.30 moved the cache 0.29 always had behind this feature, and
+# the frame splits layouts on every draw.
+ratatui = { version = "0.30", default-features = false, features = ["layout-cache"] }
+# Named here, not through a ratatui feature: every ratatui 0.30 feature that
+# enables the backend also enables its defaults, crossterm 0.29 (which then
+# wins over crossterm_0_28) and underline-color. This keeps the backend on the
+# crossterm the keyboard tests pin, and the cell free of an underline colour.
+ratatui-crossterm = { version = "0.1", default-features = false, features = ["crossterm_0_28"] }
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.135"
 tokio = { version = "1.47.1", features = ["rt", "macros", "sync", "time"] }
 workspace-status-graph = { path = "../workspace-status-graph" }
 sha2 = "0.11"
 tui-textarea = "0.7"
-# Same release ratatui 0.29 measures spans with, so a help cell cut counts
-# columns the way it paints.
-unicode-width = "0.2.0"
+# Exact: ratatui 0.30 also accepts later releases and measures spans with the one
+# in Cargo.lock, so this pin sets it. A help cell cut then counts columns the way
+# it paints, and a new width table is a deliberate change. tui-textarea 0.7 pins
+# the same release through its private ratatui 0.29.
+unicode-width = "=0.2.0"
 fs4 = "1.1"
 # Held at 0.4.5. 0.5 declares rustc 1.79 and was not tried. Cargo.lock holds
-# plist 1.7.4 and time 0.3.36. plist 1.9+ and time 0.3.46+ declare rustc 1.88,
+# plist 1.7.4 and time 0.3.37. plist 1.9+ and time 0.3.46+ declare rustc 1.88,
 # above the old floor of 1.85. Moving any of these crates is a separate bump.
+# time is at 0.3.37, not 0.3.36, because ratatui builds ratatui-widgets with its
+# calendar on, and the calendar of 0.3.0 calls Month::length, new in 0.3.37.
+# Cargo.lock keeps the ratatui 0.30.0 set: ratatui 0.30.1+ asks for time 0.3.47+.
 two-face = { version = "0.4.5", default-features = false, features = ["syntect-default-fancy"] }
 # 0.3.1 declares no rust-version; deps memchr / unicode-segmentation are
 # already locked at versions that build on 1.88.

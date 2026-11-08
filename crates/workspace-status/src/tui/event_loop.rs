@@ -14,10 +14,12 @@ use std::time::{Duration, Instant};
 
 use crossterm::queue;
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
-use ratatui::backend::CrosstermBackend;
+use ratatui::buffer::Buffer;
 use ratatui::Terminal;
+use ratatui_crossterm::CrosstermBackend;
 use tokio::task::{JoinError, JoinSet};
 use tokio::time::{sleep, Duration as TokioDuration};
+use unicode_width::UnicodeWidthStr;
 
 use super::action::{Action, Effect, ExternalDiffKind};
 use super::activity::activity_targets;
@@ -604,6 +606,30 @@ pub(super) async fn flush_store_saves(
     state.unsaved_stores(None)
 }
 
+/// Keep the cells a wide VS16 emoji (`❤️`) covers out of the frame diff.
+///
+/// Ratatui 0.30 writes such a cell again when it changed. The backend sends no
+/// cursor move between two neighbour cells, but the emoji has already moved the
+/// cursor two columns on a terminal that draws it wide. The blank then lands one
+/// column late, and so does the rest of the row. With `skip` set, the next cell
+/// gets its own cursor move, the same bytes as for any other wide character.
+fn keep_emoji_tails_out_of_diff(buffer: &mut Buffer) {
+    for i in 0..buffer.content.len() {
+        let symbol = buffer.content[i].symbol();
+        if symbol.contains('\u{fe0f}') {
+            let width = symbol.width();
+            for tail in buffer
+                .content
+                .iter_mut()
+                .skip(i + 1)
+                .take(width.saturating_sub(1))
+            {
+                tail.skip = true;
+            }
+        }
+    }
+}
+
 /// Draw one frame, then paint its hyperlinks over it (OSC 8), then its
 /// curly underlines (SGR 4:3 + 58), then write the batch's terminal
 /// progress (OSC 9;4) and the resize-edge pointer shape (OSC 22) when they
@@ -629,7 +655,12 @@ fn draw_frame<W: io::Write>(
     pointer: &mut TermPointer,
 ) -> Result<(), u8> {
     queue!(terminal.backend_mut(), BeginSynchronizedUpdate).map_err(|_| 1u8)?;
-    let completed = terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
+    let completed = terminal
+        .draw(|frame| {
+            draw(frame, state);
+            keep_emoji_tails_out_of_diff(frame.buffer_mut());
+        })
+        .map_err(|_| 1u8)?;
     let links = link_cells(completed.buffer, &state.layout.links);
     let curls = undercurl_cells(completed.buffer, &state.layout.undercurls);
     write_links(terminal.backend_mut(), &links).map_err(|_| 1u8)?;
@@ -1054,6 +1085,64 @@ mod tests {
         assert!(presenter.should_draw_after(DRAW_MIN_MS, None));
     }
 
+    /// Bytes the backend writes, readable after the draw.
+    #[derive(Clone, Default)]
+    struct Sink(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+    impl io::Write for Sink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Text the backend prints for `next` painted over `previous`.
+    fn repaint_bytes(previous: &str, next: &str) -> String {
+        use ratatui::layout::Rect;
+        use ratatui::style::Style;
+        use ratatui::{TerminalOptions, Viewport};
+
+        let sink = Sink::default();
+        let mut terminal = Terminal::with_options(
+            CrosstermBackend::new(sink.clone()),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 10, 1)),
+            },
+        )
+        .unwrap();
+        for text in [previous, next] {
+            sink.0.borrow_mut().clear();
+            terminal
+                .draw(|frame| {
+                    frame.buffer_mut().set_string(0, 0, text, Style::default());
+                    keep_emoji_tails_out_of_diff(frame.buffer_mut());
+                })
+                .unwrap();
+        }
+        let bytes = sink.0.borrow();
+        String::from_utf8(bytes.clone()).unwrap()
+    }
+
+    #[test]
+    fn the_text_after_a_wide_emoji_gets_its_own_cursor_move() {
+        let out = repaint_bytes("abcd", "❤️.t");
+        assert!(out.contains("❤️\x1b[1;3H.t"), "{out:?}");
+    }
+
+    #[test]
+    fn a_wide_character_without_vs16_paints_the_same_way() {
+        let out = repaint_bytes("abcd", "全.t");
+        assert!(out.contains("全\x1b[1;3H.t"), "{out:?}");
+    }
+
+    #[test]
+    fn text_painted_over_a_wide_emoji_reaches_the_cell_it_covered() {
+        let out = repaint_bytes("❤️.t", "abcd");
+        assert!(out.contains("abcd"), "{out:?}");
+    }
+
     /// A frame is one synchronized update: the begin sequence is the first
     /// byte written and the end sequence the last, so a terminal never
     /// shows the frame half drawn.
@@ -1061,19 +1150,6 @@ mod tests {
     fn a_frame_is_one_synchronized_update() {
         use ratatui::layout::Rect;
         use ratatui::{TerminalOptions, Viewport};
-
-        /// Bytes the backend writes, readable after the draw.
-        #[derive(Clone, Default)]
-        struct Sink(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
-        impl io::Write for Sink {
-            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                self.0.borrow_mut().extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
 
         const BEGIN: &[u8] = b"\x1b[?2026h";
         const END: &[u8] = b"\x1b[?2026l";

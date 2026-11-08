@@ -16,8 +16,9 @@ use std::io::{self, Write};
 
 use crossterm::cursor::{RestorePosition, SavePosition};
 use crossterm::queue;
-use ratatui::backend::{Backend, CrosstermBackend};
+use ratatui::backend::Backend;
 use ratatui::buffer::{Buffer, Cell};
+use ratatui_crossterm::CrosstermBackend;
 
 use super::undercurl::span_cells;
 
