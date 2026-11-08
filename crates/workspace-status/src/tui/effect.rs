@@ -2160,6 +2160,7 @@ impl Interpreter {
                                         sync_status: row.sync_status,
                                         sync_note: row.sync_note,
                                         upstream_rewrite: row.upstream_rewrite,
+                                        fetch_error: row.fetch_error,
                                         head: row.head,
                                         has_unstaged: row.has_unstaged,
                                         has_staged: row.has_staged,

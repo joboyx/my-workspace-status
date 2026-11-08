@@ -337,6 +337,87 @@ fn json_names_a_force_pushed_upstream_and_omits_it_elsewhere() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// New empty temp dir for one test.
+fn temp_root(tag: &str) -> PathBuf {
+    let root = unique_root(&format!("workspace-status-{tag}"));
+    fs::create_dir_all(root.join("workspace")).unwrap();
+    root
+}
+
+#[test]
+fn json_and_plain_name_a_deleted_upstream_gone() {
+    let root = temp_root("gone");
+    let workspace = root.join("workspace");
+    git(&root, &["init", "-q", "--bare", "-b", "main", "remote.git"]);
+    let remote = root.join("remote.git");
+    seed_repo(&workspace, "pruned", "main", false);
+    let pruned = workspace.join("pruned");
+    git(
+        &pruned,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&pruned, &["push", "-q", "-u", "origin", "main"]);
+    git(&pruned, &["checkout", "-q", "-b", "feature/merged"]);
+    git(&pruned, &["push", "-q", "-u", "origin", "feature/merged"]);
+    // The forge deletes the branch after its PR merged; the push --delete
+    // also drops origin/feature/merged, as a pruning fetch would.
+    git(
+        &pruned,
+        &["push", "-q", "origin", "--delete", "feature/merged"],
+    );
+
+    let snapshot = run_json(&workspace, &["--json"]);
+    let row = &snapshot["repos"][0];
+    assert_eq!(row["repo"], "pruned");
+    assert_eq!(row["syncStatus"], "gone", "{row}");
+    assert_eq!(row["syncNote"], "upstream gone", "{row}");
+
+    let plain = run_plain(&workspace, &["--plain", "--verbose"]);
+    assert!(plain.contains("upstream gone"), "{plain}");
+    assert!(!plain.contains("✅ current"), "{plain}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn fetch_failure_is_named_in_json_and_plain_and_exit_stays_zero() {
+    let root = temp_root("fetch-error");
+    let workspace = root.join("workspace");
+    seed_repo(&workspace, "offline", "main", false);
+    let missing = root.join("missing.git");
+    git(
+        &workspace.join("offline"),
+        &["remote", "add", "origin", missing.to_str().unwrap()],
+    );
+    seed_repo(&workspace, "local", "main", false);
+
+    // run_json asserts exit 0: a failed fetch is reported, not fatal.
+    let snapshot = run_json(&workspace, &["--json", "--fetch"]);
+    let repos = snapshot["repos"].as_array().unwrap();
+    let offline = repos.iter().find(|r| r["repo"] == "offline").unwrap();
+    let reason = offline["fetchError"].as_str().unwrap_or_else(|| {
+        panic!("offline must name its fetch failure: {offline}");
+    });
+    assert!(
+        reason.contains("does not appear to be a git repository"),
+        "{reason}"
+    );
+    let local = repos.iter().find(|r| r["repo"] == "local").unwrap();
+    assert!(local.get("fetchError").is_none(), "{local}");
+    let without_fetch = run_json(&workspace, &["--json"]);
+    assert!(
+        without_fetch["repos"][0].get("fetchError").is_none(),
+        "no fetch, no field: {without_fetch}"
+    );
+
+    let plain = run_plain(&workspace, &["--plain", "--fetch"]);
+    assert!(
+        plain.contains("offline [main] - fetch failed: "),
+        "plain must name the failed fetch:\n{plain}"
+    );
+    assert!(!plain.contains("local [main] - fetch failed"), "{plain}");
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn merged_into_default_skips_same_commit_as_default_tip() {
     let root = unique_root("workspace-status-merge-mark");

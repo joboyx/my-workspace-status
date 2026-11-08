@@ -72,6 +72,7 @@ pub fn repo_snapshot(name: &str) -> RepoSnapshot {
         sync_status: SyncStatus::NoUpstream,
         sync_note: String::new(),
         upstream_rewrite: None,
+        fetch_error: None,
         head: String::new(),
         has_unstaged: false,
         has_staged: false,

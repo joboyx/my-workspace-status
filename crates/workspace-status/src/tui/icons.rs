@@ -1203,7 +1203,7 @@ pub fn tui_merge_mark(ascii: bool, merged: Option<bool>) -> &'static str {
 /// Sync mark: glyph plus commit count, e.g. ahead-by-2 or behind-by-3.
 pub fn tui_sync_mark(ascii: bool, status: SyncStatus, note: &str) -> String {
     match status {
-        SyncStatus::NoUpstream => icon_no_upstream(ascii).to_string(),
+        SyncStatus::NoUpstream | SyncStatus::Gone => icon_no_upstream(ascii).to_string(),
         SyncStatus::Behind => {
             let count = capture_count(note, "behind by ");
             format!("{}{count}", icon_behind(ascii))
@@ -1258,7 +1258,7 @@ pub fn sync_color_role(status: SyncStatus) -> StatusColorRole {
         SyncStatus::Behind => StatusColorRole::Deleted,
         SyncStatus::Ahead => StatusColorRole::Added,
         SyncStatus::Diverged => StatusColorRole::Modified,
-        SyncStatus::UpToDate | SyncStatus::NoUpstream => StatusColorRole::Muted,
+        SyncStatus::UpToDate | SyncStatus::NoUpstream | SyncStatus::Gone => StatusColorRole::Muted,
     }
 }
 
