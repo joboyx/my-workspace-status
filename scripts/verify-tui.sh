@@ -38,6 +38,7 @@ usage() {
 usage: scripts/verify-tui.sh <command> ...
 
   build                          build target/debug/workspace-status; print its path
+  bin                            print the binary path that build makes (no build)
   launch [--size COLSxROWS] [--env K=V]... [--fake-forge DIR] [--workspace DIR]
                                  seed a workspace, start the TUI in a private tmux
                                  server, wait for the chrome; print the run dir
@@ -313,6 +314,8 @@ EOF
   record RUN_BIN "$bin"
   record RUN_FIXTURE "$fixture"
   record RUN_FORGE "$forge"
+  # The checkout that made the run: wsctl refuses a run of another checkout.
+  record RUN_REPO "$REPO_ROOT"
   # Runs share one forge dir and its calls.log. Remember where this run starts.
   local calls_from=0
   if [[ -n "$forge" && -f "$forge/calls.log" ]]; then calls_from="$(wc -l <"$forge/calls.log" | tr -d ' ')"; fi
@@ -653,6 +656,7 @@ cmd="${1:-help}"
 if (($#)); then shift; fi
 case "$cmd" in
   build) cmd_build "$@" ;;
+  bin) binary_path ;;
   launch) cmd_launch "$@" ;;
   keys) cmd_keys "$@" ;;
   mouse) cmd_mouse "$@" ;;

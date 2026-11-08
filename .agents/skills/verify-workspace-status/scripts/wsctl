@@ -26,8 +26,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd -P)"
 DRIVER="$REPO_ROOT/scripts/verify-tui.sh"
 ROOT="${WS_VERIFY_ROOT:-${TMPDIR:-/tmp}/ws-verify}"
 ROOT="${ROOT%/}"
-# The current run: one line, the run dir that start printed.
-POINTER="$ROOT/wsctl-current"
+# The current run of this checkout: one line, the run dir that start printed.
+# Worktrees share the root, so the pointer name holds a checksum of the
+# checkout path: a start in another worktree never sees or replaces it.
+CHECKOUT_KEY="$(printf '%s' "$REPO_ROOT" | cksum | cut -d ' ' -f 1)"
+POINTER="$ROOT/wsctl-current-$CHECKOUT_KEY"
+# The run.env members of a finished launch. RUN_FORGE is empty for a live run.
+RUN_FIELDS="RUN_ID RUN_SOCK RUN_BIN RUN_FIXTURE RUN_FORGE RUN_SIZE RUN_REPO RUN_SOCKET_PATH"
 SESSION=ws
 # The tab strip (" Workspace" on screen row 1) is painted from the first frame
 # and stays above every overlay. The footer "? help" that launch waits for is
@@ -83,8 +88,11 @@ Commands:
 
 Global:
   --run DIR             act on this run dir (or its id under the root), not
-                        the current run; env WSCTL_RUN does the same
-Root: $WS_VERIFY_ROOT, else ${TMPDIR:-/tmp}/ws-verify. Current run: <root>/wsctl-current.
+                        the current run; env WSCTL_RUN does the same. Only a
+                        run of this checkout directly under the root is used.
+Root: $WS_VERIFY_ROOT, else ${TMPDIR:-/tmp}/ws-verify. Current run:
+<root>/wsctl-current-<checksum of this checkout's path>, one per checkout.
+Screen text is UTF-8 (box drawing, the focus bar ▌): read it as UTF-8.
 
 Loop: wsctl start; wsctl doctor; wsctl key j; wsctl wait --cursor auth.ts;
       wsctl snap --name after-j; wsctl stop
@@ -102,8 +110,10 @@ usage: wsctl start [--seed demo|--workspace DIR] [--size COLSxROWS]
 
 Builds the debug binary of this checkout (scripts/verify-tui.sh build), then
 launches it in a private tmux server (verify-tui.sh launch) and
-records the run dir as the current run. Refuses while the current run is live:
-stop it first.
+records the run dir as the current run of this checkout. Refuses while that
+run is live: stop it first. When two starts race, the first to record wins;
+the other stops its own new run and fails. With --run or WSCTL_RUN set, start
+leaves the current run alone and only prints the new run ("current": false).
 
   --seed demo         seed scripts/seed-demo-workspace.sh (default)
   --workspace DIR     drive a fixture you built inside the root instead
@@ -113,7 +123,7 @@ stop it first.
   --env K=V           override one run variable (repeatable)
   --no-build          launch the binary that is there (doctor flags a stale one)
 
-JSON: ok, cmd, run, binary, version, head, size, mode, evidence
+JSON: ok, cmd, run, current, binary, version, head, size, mode, evidence
 H
       ;;
     doctor)
@@ -124,10 +134,14 @@ Checks, each one entry of "checks" ({name, ok, detail}); exit 1 when one fails:
   tmux       tmux on PATH (without it: PTY e2e, cargo test -p workspace-status
              --test tui_tty_e2e <pty_name>)
   bash       bash on PATH is 3.2 or later (the driver runs under it)
-  binary     the run's binary exists, no file under crates/*/src or Cargo.lock
+  binary     the run's binary exists, no file under crates/*/src, no
+             crates/*/build.rs, crates/*/Cargo.toml, Cargo.toml or Cargo.lock
              is newer (stale build), and it was not rebuilt after the run started
-  session    the run uses its own socket (ws-verify-<run id>), the server
-             answers, the session is alive and runs this run's launch.sh
+  session    the server answers on the run's socket, the session is alive and
+             runs this run's launch.sh
+Every command, doctor too, first refuses a run that is not this checkout's:
+outside the root, run.env incomplete, RUN_ID not its dir name, a socket other
+than ws-verify-<run id>, or another checkout's path or binary.
   isolation  env.sh sets the update-check store, XDG_CONFIG_HOME and
              XDG_STATE_HOME inside the run dir and unsets WS_STATUS_WORKSPACE
   size       the pane size is the size of the run (start or last resize)
@@ -150,7 +164,9 @@ H
 usage: wsctl type <text>
 
 Types <text> as literal characters, one per write (a search term, a palette
-query). Quote text with spaces. JSON: ok, cmd, run, text
+query). Quote text with spaces. Options (--run, --help) go before the text;
+after the text, or after --, every word is text: wsctl type -- --help types
+"--help". JSON: ok, cmd, run, text
 H
       ;;
     snap)
@@ -216,7 +232,8 @@ usage: wsctl stop
 
 Quits the TUI, ends the run's tmux server, copies the forge calls and opened
 URLs into evidence/, and clears the current-run pointer. The run dir stays.
-Safe to repeat: with no run it prints {"ok":true,"stopped":false}.
+Safe to repeat: with no run it prints {"ok":true,"stopped":false}. A run that
+is not this checkout's (wsctl doctor --help) is refused, not stopped.
 JSON: ok, cmd, run, stopped, evidence, files
 H
       ;;
@@ -291,26 +308,70 @@ fail_driver() {
 
 # ---------- runs ----------
 
-# find_run: resolve the run (--run, WSCTL_RUN, else the pointer) into RUN_DIR
-# and load its run.env. Returns 1 with RUN_ERR set when there is none.
+# find_run: resolve the run (--run, WSCTL_RUN, else this checkout's pointer)
+# into RUN_DIR, load its run.env and check that the run is this checkout's.
+# Returns 1 with RUN_ERR set when there is no run, 2 when the run is refused.
 find_run() {
-  local arg="$RUN_ARG"
+  local arg="$RUN_ARG" from="" root_real dir f want_bin
   RUN_ERR=""
-  if [[ -z "$arg" && -f "$POINTER" ]]; then arg="$(head -n 1 "$POINTER")"; fi
+  RUN_DIR=""
+  if [[ -z "$arg" && -f "$POINTER" ]]; then
+    arg="$(head -n 1 "$POINTER")"
+    from=" (current-run pointer $POINTER)"
+  fi
   if [[ -z "$arg" ]]; then
-    RUN_ERR="no current run: wsctl start first (or pass --run DIR)"
+    RUN_ERR="no current run of this checkout: wsctl start first (or pass --run DIR)"
     return 1
   fi
+  root_real="$(cd "$ROOT" 2>/dev/null && pwd -P || true)"
   if [[ -f "$arg/run.env" ]]; then
-    RUN_DIR="$(cd "$arg" && pwd -P)"
-  elif [[ -f "$ROOT/$arg/run.env" ]]; then
-    RUN_DIR="$(cd "$ROOT/$arg" && pwd -P)"
+    dir="$arg"
+  elif [[ -n "$root_real" && "$arg" != */* && -f "$root_real/$arg/run.env" ]]; then
+    dir="$root_real/$arg"
   else
-    RUN_ERR="no run '$arg' (no run.env in it or under $ROOT)"
+    RUN_ERR="no run '$arg' (no run.env in it or under $ROOT)$from"
     return 1
   fi
+  dir="$(cd "$dir" && pwd -P)"
+  # Check the place before run.env is sourced: only a dir that launch made.
+  if [[ -z "$root_real" || "${dir%/*}" != "$root_real" ]]; then
+    RUN_ERR="refused run $dir: not a run dir directly under the root ${root_real:-$ROOT}$from"
+    return 2
+  fi
+  # shellcheck disable=SC2086
+  unset $RUN_FIELDS
   # shellcheck source=/dev/null
-  source "$RUN_DIR/run.env"
+  if ! source "$dir/run.env" >/dev/null 2>&1; then
+    RUN_ERR="refused run $dir: its run.env does not load$from"
+    return 2
+  fi
+  for f in $RUN_FIELDS; do
+    if [[ -z "${!f+set}" ]]; then
+      RUN_ERR="refused run $dir: run.env has no $f (an unfinished launch?)$from"
+      return 2
+    fi
+  done
+  if [[ "$RUN_ID" != "${dir##*/}" ]]; then
+    RUN_ERR="refused run $dir: RUN_ID '$RUN_ID' is not the name of its dir$from"
+    return 2
+  fi
+  if [[ "$RUN_SOCK" != "ws-verify-$RUN_ID" ]]; then
+    RUN_ERR="refused run $dir: socket name '$RUN_SOCK' is not this run's private socket ws-verify-$RUN_ID$from"
+    return 2
+  fi
+  if [[ "$RUN_REPO" != "$REPO_ROOT" ]]; then
+    RUN_ERR="refused run $dir: it is a run of the checkout $RUN_REPO, not of $REPO_ROOT$from"
+    return 2
+  fi
+  want_bin="$(drv bin)" || {
+    RUN_ERR="the driver did not name this checkout's binary: $(driver_error)"
+    return 2
+  }
+  if [[ "$RUN_BIN" != "$want_bin" ]]; then
+    RUN_ERR="refused run $dir: it runs $RUN_BIN, not this checkout's binary $want_bin$from"
+    return 2
+  fi
+  RUN_DIR="$dir"
 }
 
 need_run() { find_run || fail "$RUN_ERR"; }
@@ -355,16 +416,22 @@ cmd_start() {
   command -v tmux >/dev/null 2>&1 ||
     fail "tmux is not on PATH; without tmux prove TUI behaviour with the PTY e2e: cargo test -p workspace-status --test tui_tty_e2e <pty_name>"
 
-  # One TUI at a time: a live run keeps polling and could answer into the next.
-  if [[ -z "$RUN_ARG" && -f "$POINTER" ]]; then
+  # One TUI per checkout at a time: a live run keeps polling and could answer
+  # into the next. With --run or WSCTL_RUN, start leaves the pointer alone.
+  local claim=1 rc=0
+  if [[ -n "$RUN_ARG" ]]; then claim=0; fi
+  if ((claim)) && [[ -f "$POINTER" ]]; then
     prev="$(head -n 1 "$POINTER")"
-    if [[ -f "$prev/run.env" ]] && (
-      # shellcheck source=/dev/null
-      source "$prev/run.env"
-      tmux -L "$RUN_SOCK" has-session -t "$SESSION" 2>/dev/null
-    ); then
-      fail "run $prev is still live: wsctl stop first" ",\"previous\":$(json_str "$prev")"
+    find_run || rc=$?
+    if ((rc == 2)); then
+      fail "start: $RUN_ERR; stop that run with scripts/verify-tui.sh stop, then remove the pointer" \
+        ",\"previous\":$(json_str "$prev")"
     fi
+    if ((rc == 0)) && tm has-session -t "$SESSION" 2>/dev/null; then
+      fail "run $RUN_DIR is still live: wsctl stop first" ",\"previous\":$(json_str "$RUN_DIR")"
+    fi
+    # The pointer names a stopped or removed run: drop it, so this start can claim.
+    if [[ "$(head -n 1 "$POINTER" 2>/dev/null || true)" == "$prev" ]]; then rm -f -- "$POINTER"; fi
   fi
 
   if ((build)); then
@@ -378,14 +445,30 @@ cmd_start() {
   local run
   run="$(drv "${args[@]}")" || fail_driver "launch failed"
   run="$(printf '%s\n' "$run" | tail -n 1)"
-  mkdir -p "$ROOT"
-  printf '%s\n' "$run" >"$POINTER"
+  if ((claim)); then
+    # Claim the pointer with noclobber (an exclusive create): when two starts
+    # race, one wins and the other stops its own new run.
+    mkdir -p "$ROOT"
+    if ! (
+      set -C
+      printf '%s\n' "$run" >"$POINTER"
+    ) 2>/dev/null; then
+      drv stop "$run" >/dev/null || true
+      fail "start: another start of this checkout became the current run first ($(head -n 1 "$POINTER" 2>/dev/null || true)); stopped the new run" \
+        ",\"stopped_run\":$(json_str "$run")"
+    fi
+  fi
   RUN_ARG="$run"
-  need_run
-  local mode=live
+  if ! find_run; then
+    drv stop "$run" >/dev/null || true
+    if ((claim)) && [[ "$(head -n 1 "$POINTER" 2>/dev/null || true)" == "$run" ]]; then rm -f -- "$POINTER"; fi
+    fail "start: the new run was refused and stopped: $RUN_ERR" ",\"stopped_run\":$(json_str "$run")"
+  fi
+  local mode=live current=false
   if [[ -n "${RUN_FORGE:-}" ]]; then mode="fake forge"; fi
-  printf '{"ok":true,"cmd":"start",%s,"binary":%s,"version":%s,"head":%s,"size":%s,"mode":%s,"evidence":%s}\n' \
-    "$(run_json)" "$(json_str "$RUN_BIN")" "$(json_str "${RUN_VERSION:-unknown}")" \
+  if ((claim)); then current=true; fi
+  printf '{"ok":true,"cmd":"start",%s,"current":%s,"binary":%s,"version":%s,"head":%s,"size":%s,"mode":%s,"evidence":%s}\n' \
+    "$(run_json)" "$current" "$(json_str "$RUN_BIN")" "$(json_str "${RUN_VERSION:-unknown}")" \
     "$(json_str "${RUN_HEAD:-unknown}")" "$(json_str "$RUN_SIZE")" "$(json_str "$mode")" \
     "$(json_str "$RUN_DIR/evidence")"
 }
@@ -427,13 +510,15 @@ cmd_doctor() {
     if [[ ! -x "$RUN_BIN" ]]; then
       check binary 0 "no binary at $RUN_BIN: wsctl stop, then wsctl start (it builds)"
     else
-      newer="$(find "$REPO_ROOT"/crates/*/src "$REPO_ROOT/Cargo.lock" -type f -newer "$RUN_BIN" 2>/dev/null | head -n 1 || true)"
+      # A glob with no match stays literal; find skips that missing path.
+      newer="$(find "$REPO_ROOT"/crates/*/src "$REPO_ROOT"/crates/*/build.rs "$REPO_ROOT"/crates/*/Cargo.toml \
+        "$REPO_ROOT/Cargo.toml" "$REPO_ROOT/Cargo.lock" -type f -newer "$RUN_BIN" 2>/dev/null | head -n 1 || true)"
       if [[ -n "$newer" ]]; then
         check binary 0 "stale build: ${newer#"$REPO_ROOT"/} is newer than $RUN_BIN; wsctl stop, then wsctl start (it rebuilds)"
       elif [[ "$RUN_BIN" -nt "$RUN_DIR/launch.sh" ]]; then
         check binary 0 "$RUN_BIN was rebuilt after this run started, so the run still runs the old build; wsctl stop, then wsctl start"
       else
-        check binary 1 "$RUN_BIN (${RUN_VERSION:-unknown}, head ${RUN_HEAD:-unknown}) is newer than every file under crates/*/src and Cargo.lock"
+        check binary 1 "$RUN_BIN (${RUN_VERSION:-unknown}, head ${RUN_HEAD:-unknown}) is newer than every source and Cargo file"
       fi
     fi
   else
@@ -442,9 +527,8 @@ cmd_doctor() {
 
   if ((have_run && have_tmux)); then
     local cmdline
-    if [[ "$RUN_SOCK" != "ws-verify-$RUN_ID" ]]; then
-      check session 0 "socket name '$RUN_SOCK' is not this run's private socket ws-verify-$RUN_ID"
-    elif [[ -z "${RUN_SOCKET_PATH:-}" || ! -S "$RUN_SOCKET_PATH" ]]; then
+    # find_run already refused a socket other than ws-verify-<run id>.
+    if [[ -z "${RUN_SOCKET_PATH:-}" || ! -S "$RUN_SOCKET_PATH" ]]; then
       check session 0 "no socket at '${RUN_SOCKET_PATH:-}': the run was stopped"
     elif ! tm has-session -t "$SESSION" 2>/dev/null; then
       check session 0 "the tmux server on $RUN_SOCK has no session '$SESSION': the run was stopped"
@@ -526,6 +610,11 @@ cmd_key() {
   while (($#)); do
     case "$1" in
       --chord) chord=1 ;;
+      --)
+        shift
+        keys+=("$@")
+        break
+        ;;
       *) keys+=("$1") ;;
     esac
     shift
@@ -548,6 +637,7 @@ cmd_key() {
 }
 
 cmd_type() {
+  if [[ "${1:-}" == -- ]]; then shift; fi
   (($# == 1)) || fail "type: give one text argument (quote text with spaces)"
   [[ -n "$1" ]] || fail "type: the text is empty"
   need_run
@@ -688,10 +778,13 @@ cmd_run() {
 
 cmd_stop() {
   (($# == 0)) || fail "stop takes no arguments (use --run DIR for another run)"
-  if ! find_run; then
+  local rc=0
+  find_run || rc=$?
+  if ((rc == 1)); then
     printf '{"ok":true,"cmd":"stop","stopped":false,"note":%s}\n' "$(json_str "$RUN_ERR")"
     return 0
   fi
+  ((rc == 0)) || fail "$RUN_ERR"
   local out
   out="$(drv stop "$RUN_DIR")" || fail_driver "stop failed" ",$(run_json)"
   if [[ -f "$POINTER" && "$(head -n 1 "$POINTER")" == "$RUN_DIR" ]]; then rm -f -- "$POINTER"; fi
@@ -729,16 +822,17 @@ main() {
   shift
   CMD="$name"
 
-  # --run and --help also work after the command (up to a "--").
-  local rest=() seen_dashdash=0
+  # --run and --help also work after the command, up to a "--". For type they
+  # work only before the text: after it, every word is text.
+  local rest=() literal=0
   while (($#)); do
-    if ((seen_dashdash)); then
+    if ((literal)); then
       rest+=("$1")
       shift
       continue
     fi
     case "$1" in
-      --) seen_dashdash=1; rest+=("$1"); shift ;;
+      --) literal=1; rest+=("$1"); shift ;;
       --run)
         (($# >= 2)) || fail "--run needs DIR"
         RUN_ARG="$2"
@@ -748,7 +842,11 @@ main() {
         cmd_help_text "$name" || fail "unknown command '$name' (wsctl --help)"
         return 0
         ;;
-      *) rest+=("$1"); shift ;;
+      *)
+        rest+=("$1")
+        shift
+        if [[ "$name" == type ]]; then literal=1; fi
+        ;;
     esac
   done
   set -- ${rest[@]+"${rest[@]}"}
