@@ -1,6 +1,10 @@
 //! Resolve config.editor / `$VISUAL` / `$EDITOR` and build the spawn argv.
 
+use std::io;
 use std::path::Path;
+use std::process::{Command, Stdio};
+
+use super::pull_request::reap_in_background;
 
 /// Editors that accept `+LINE` before the path.
 const PLUS_LINE: &[&str] = &["vim", "nvim", "vi", "nano", "gvim"];
@@ -68,6 +72,24 @@ pub fn is_detached_editor(editor: &str) -> bool {
         .and_then(|s| s.to_str())
         .unwrap_or(command);
     DETACHED.contains(&name)
+}
+
+/// Start a detached GUI editor `cmd` with `args` in `cwd`, with null stdio,
+/// and return its process id.
+///
+/// A background thread waits for it, so it does not stay a zombie after it
+/// exits while the TUI runs on.
+pub fn spawn_detached_editor(cmd: &str, args: &[String], cwd: &Path) -> io::Result<u32> {
+    let child = Command::new(cmd)
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let pid = child.id();
+    reap_in_background(child);
+    Ok(pid)
 }
 
 /// Executable plus args to open `file_path` (optional 1-based `line`).
@@ -139,5 +161,31 @@ mod tests {
         let (cmd, args) = editor_command("vim", "README.md", Some(12));
         assert_eq!(cmd, "vim");
         assert_eq!(args, vec!["+12", "README.md"]);
+    }
+
+    /// A detached editor that exits is waited for: `ps` stops listing it
+    /// instead of showing a zombie (`Z`) for as long as the TUI runs.
+    #[cfg(unix)]
+    #[test]
+    fn a_detached_editor_that_exits_is_reaped() {
+        use std::time::{Duration, Instant};
+        let git = crate::git::git_binary().to_string_lossy().into_owned();
+        let pid = spawn_detached_editor(&git, &["--version".into()], &std::env::temp_dir())
+            .expect("spawn git --version")
+            .to_string();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut last = String::new();
+        while Instant::now() < deadline {
+            let out = Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid])
+                .output()
+                .expect("run ps");
+            last = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if last.is_empty() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("pid {pid} still listed with state {last:?}");
     }
 }

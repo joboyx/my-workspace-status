@@ -424,6 +424,15 @@ pub fn upstream_rewrite_fixture(kind: RewriteKind) -> RewriteFixture {
 mod tests {
     use super::*;
 
+    /// Back-to-back calls never repeat a name, even on a clock that ticks
+    /// in microseconds (macOS): the counter keeps them apart.
+    #[test]
+    fn unique_dir_never_repeats_a_name_back_to_back() {
+        let names: std::collections::HashSet<PathBuf> =
+            (0..2_000).map(|_| unique_dir("ws-unique")).collect();
+        assert_eq!(names.len(), 2_000);
+    }
+
     #[test]
     fn repo_snapshot_is_a_clean_primary_checkout_on_main_with_no_upstream() {
         let snap = repo_snapshot("app");

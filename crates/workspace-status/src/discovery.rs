@@ -6,9 +6,9 @@ use std::path::Path;
 
 use crate::config::{default_branch_override_for, WorkspaceStatusConfig};
 use crate::git::{
-    classify_upstream_rewrite, exec_git_checked, exec_git_z, head_equals_ref, is_ancestor,
-    known_default_branch_name, list_local_branches, list_worktrees_porcelain,
-    resolve_default_branch_tip_ref, rev_parse_quiet,
+    classify_upstream_rewrite, default_branch_or_guess, exec_git_checked, exec_git_z,
+    head_equals_ref, is_ancestor, known_default_branch_name, list_local_branches,
+    list_worktrees_porcelain, resolve_default_branch_tip_ref, rev_parse_quiet,
 };
 use crate::helpers::{
     is_default_branch, path_is_under_any, DETACHED_HEAD_BRANCH, STATUS_FAILED_NOTE,
@@ -605,10 +605,13 @@ pub fn process_repo(
     let has_staged = !parsed.staged.is_empty();
     let has_untracked = !parsed.untracked.is_empty();
     // Resolve the default branch and its tip once; merge-into-default and
-    // the snapshot row share them. An unknown default classifies against
-    // `main`.
+    // the snapshot row share them. The row keeps only a known default (PR
+    // status never guesses); classification guesses the same way as the
+    // `d` switch target, and falls back to `main` when nothing exists.
     let default_branch = known_default_branch_name(&repo_dir, override_name);
-    let default_name = default_branch.as_deref().unwrap_or("main");
+    let default_name = default_branch_or_guess(&repo_dir, default_branch.clone())
+        .unwrap_or_else(|| "main".to_string());
+    let default_name = default_name.as_str();
     let default_tip_ref = resolve_default_branch_tip_ref(&repo_dir, default_name);
     let merged = compute_merged_into_default(
         &repo_dir,
@@ -1039,5 +1042,58 @@ mod default_branch_tests {
             "the override wins"
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The `d` switch target and the branch merge-into-default classifies
+    /// against are the same branch, with or without `origin/HEAD`.
+    #[test]
+    fn the_switch_target_and_the_classification_default_agree() {
+        let cases: [(&str, &[&[&str]], &str); 4] = [
+            (
+                "only master",
+                &[&["branch", "-m", "main", "master"]],
+                "master",
+            ),
+            (
+                "only develop",
+                &[&["branch", "-m", "main", "develop"]],
+                "develop",
+            ),
+            ("main and develop", &[&["branch", "develop"]], "develop"),
+            (
+                "origin/HEAD set",
+                &[
+                    &["branch", "develop"],
+                    &["update-ref", "refs/remotes/origin/main", "HEAD"],
+                    &[
+                        "symbolic-ref",
+                        "refs/remotes/origin/HEAD",
+                        "refs/remotes/origin/main",
+                    ],
+                ],
+                "main",
+            ),
+        ];
+        let meta = RepoCheckoutMeta {
+            checkout_kind: CheckoutKind::Primary,
+            primary_repo: None,
+        };
+        for (label, setup, expected) in cases {
+            let root = unique_dir("ws-default-agree");
+            let app = root.join("app");
+            init_repo(&app);
+            for args in setup {
+                git(&app, args);
+            }
+            let switch_target = crate::git::get_default_branch(&app, None);
+            let snap = process_repo("app", &root, false, None, &meta).expect("repo snapshot");
+            let classified = snap
+                .default_tip_ref
+                .as_deref()
+                .map(|tip| tip.strip_prefix("origin/").unwrap_or(tip).to_string());
+            assert_eq!(switch_target.as_deref(), Some(expected), "{label}: switch");
+            assert_eq!(classified, switch_target, "{label}: classification");
+            let _ = fs::remove_dir_all(&root);
+        }
     }
 }

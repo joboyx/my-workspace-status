@@ -647,14 +647,7 @@ mod tests {
     }
 
     fn tmp_workspace(prefix: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "{prefix}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = crate::testutil::unique_dir(prefix);
         fs::create_dir_all(&dir).unwrap();
         dir
     }

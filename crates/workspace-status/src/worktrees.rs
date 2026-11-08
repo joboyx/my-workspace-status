@@ -433,14 +433,7 @@ detached
 
     #[test]
     fn gitfile_vs_gitdir_classifies_linked_vs_main() {
-        let root = std::env::temp_dir().join(format!(
-            "ws-wt-kind-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = crate::testutil::unique_dir("ws-wt-kind");
         let main = root.join("main");
         let linked = root.join("linked");
         fs::create_dir_all(&main).unwrap();

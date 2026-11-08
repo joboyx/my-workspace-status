@@ -1390,8 +1390,9 @@ pub fn resolve_default_branch_tip_ref(cwd: &Path, default_branch: &str) -> Optio
 
 /// The repository's default branch when it is known: the non-empty
 /// configured override, else the branch `origin/HEAD` points at. `None`
-/// when neither names one; no branch name is guessed. Merge-into-default
-/// classification uses `main` for `None`.
+/// when neither names one; no branch name is guessed. PR status uses this
+/// answer as is; the switch target and merge-into-default classification
+/// add the guess of [`default_branch_or_guess`].
 pub fn known_default_branch_name(cwd: &Path, override_name: Option<&str>) -> Option<String> {
     if let Some(name) = override_name {
         if !name.is_empty() {
@@ -1417,41 +1418,48 @@ pub fn known_default_branch_name(cwd: &Path, override_name: Option<&str>) -> Opt
     )
 }
 
-/// Default branch used by `--default-branch` (origin/HEAD, then develop/main/master).
+/// Branch names tried, in this order, when neither the configured override
+/// nor `origin/HEAD` names the default branch.
+const GUESSED_DEFAULT_BRANCHES: [&str; 3] = ["develop", "main", "master"];
+
+/// The default branch to switch to and to classify merged work against.
+///
+/// `known` is the answer of [`known_default_branch_name`] for `cwd`. When
+/// it is `None`, the first of [`GUESSED_DEFAULT_BRANCHES`] that exists as
+/// `origin/<name>` wins, then the first that exists as a local branch
+/// (one `for-each-ref`). `None` when no candidate exists.
+///
+/// [`get_default_branch`] and the snapshot worker both resolve through
+/// this function, so `--default-branch` / TUI `d` and merge-into-default
+/// classification always name the same branch.
+pub fn default_branch_or_guess(cwd: &Path, known: Option<String>) -> Option<String> {
+    if known.is_some() {
+        return known;
+    }
+    // Remote candidates first, then local ones, each in guess order.
+    let candidates: Vec<(String, &str)> = ["refs/remotes/origin", "refs/heads"]
+        .iter()
+        .flat_map(|prefix| {
+            GUESSED_DEFAULT_BRANCHES
+                .iter()
+                .map(move |name| (format!("{prefix}/{name}"), *name))
+        })
+        .collect();
+    let mut args = vec!["for-each-ref", "--format=%(refname)"];
+    args.extend(candidates.iter().map(|(full, _)| full.as_str()));
+    let out = exec_git(&args, cwd);
+    // A pattern also matches refs below it (`origin/main/x`): exact names only.
+    candidates
+        .iter()
+        .find(|(full, _)| out.lines().any(|line| line.trim() == full))
+        .map(|(_, name)| (*name).to_string())
+}
+
+/// Default branch used by `--default-branch` and TUI `d`: the override,
+/// else `origin/HEAD`, else the first of develop / main / master that
+/// exists ([`default_branch_or_guess`]).
 pub fn get_default_branch(cwd: &Path, override_name: Option<&str>) -> Option<String> {
-    if let Some(name) = override_name {
-        if !name.is_empty() {
-            return Some(name.to_string());
-        }
-    }
-    let remote_head = exec_git(
-        &[
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "refs/remotes/origin/HEAD",
-        ],
-        cwd,
-    );
-    if !remote_head.is_empty() {
-        if let Some(rest) = remote_head.strip_prefix("origin/") {
-            return Some(rest.to_string());
-        }
-        return Some(remote_head);
-    }
-    for name in ["develop", "main", "master"] {
-        let remote = format!("refs/remotes/origin/{name}");
-        if exec_git_status(&["show-ref", "--verify", &remote], cwd) == 0 {
-            return Some(name.to_string());
-        }
-    }
-    for name in ["develop", "main", "master"] {
-        let local = format!("refs/heads/{name}");
-        if exec_git_status(&["show-ref", "--verify", &local], cwd) == 0 {
-            return Some(name.to_string());
-        }
-    }
-    None
+    default_branch_or_guess(cwd, known_default_branch_name(cwd, override_name))
 }
 
 /// `git worktree list --porcelain` stdout (empty on failure).
