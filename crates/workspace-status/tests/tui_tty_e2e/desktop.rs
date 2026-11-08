@@ -335,8 +335,7 @@ impl DesktopSession {
             }
             if start.elapsed() >= timeout {
                 panic!(
-                    "timeout waiting for clipped long path on a tree row (no {}):\n{screen}",
-                    TREE_HSCROLL_TAIL
+                    "timeout waiting for clipped long path on a tree row (no {TREE_HSCROLL_TAIL}):\n{screen}"
                 );
             }
             thread::sleep(Duration::from_millis(25));
