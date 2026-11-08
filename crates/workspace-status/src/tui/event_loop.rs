@@ -613,6 +613,9 @@ pub(super) async fn flush_store_saves(
 /// cursor two columns on a terminal that draws it wide. The blank then lands one
 /// column late, and so does the rest of the row. With `skip` set, the next cell
 /// gets its own cursor move, the same bytes as for any other wide character.
+/// This restores the 0.29 bytes on purpose: the upstream write lands on the covered
+/// cell of a terminal that draws VS16 one column wide, so such a terminal can now
+/// keep the old character in that cell.
 fn keep_emoji_tails_out_of_diff(buffer: &mut Buffer) {
     for i in 0..buffer.content.len() {
         let symbol = buffer.content[i].symbol();
@@ -1141,6 +1144,12 @@ mod tests {
     fn text_painted_over_a_wide_emoji_reaches_the_cell_it_covered() {
         let out = repaint_bytes("❤️.t", "abcd");
         assert!(out.contains("abcd"), "{out:?}");
+    }
+
+    #[test]
+    fn shorter_text_painted_over_a_wide_emoji_blanks_the_cells_it_left() {
+        let out = repaint_bytes("❤️.t", "a");
+        assert!(out.contains("a   "), "{out:?}");
     }
 
     /// A frame is one synchronized update: the begin sequence is the first

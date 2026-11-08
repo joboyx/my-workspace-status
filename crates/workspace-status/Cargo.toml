@@ -44,7 +44,10 @@ fs4 = "1.1"
 # above the old floor of 1.85. Moving any of these crates is a separate bump.
 # time is at 0.3.37, not 0.3.36, because ratatui builds ratatui-widgets with its
 # calendar on, and the calendar of 0.3.0 calls Month::length, new in 0.3.37.
-# Cargo.lock keeps the ratatui 0.30.0 set: ratatui 0.30.1+ asks for time 0.3.47+.
+# Cargo.lock keeps the ratatui 0.30.0 set. ratatui 0.30.2 asks for time 0.3.47+
+# through ratatui/std, which workspace-status-graph turns on. Moving up costs the
+# time move, the Cell::skip deprecation (-D warnings fails on it) and a new before
+# and after run of the TUI.
 two-face = { version = "0.4.5", default-features = false, features = ["syntect-default-fancy"] }
 # 0.3.1 declares no rust-version; deps memchr / unicode-segmentation are
 # already locked at versions that build on 1.88.
