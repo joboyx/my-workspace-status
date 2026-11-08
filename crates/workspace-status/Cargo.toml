@@ -30,9 +30,9 @@ tui-textarea = "0.7"
 # columns the way it paints.
 unicode-width = "0.2.0"
 fs4 = "1.1"
-# Held at 0.4.5, with plist 1.7.4 and time 0.3.36 in Cargo.lock: holds from the
-# old rustc 1.85 floor. plist 1.9+ and time 0.3.46+ declare rustc 1.88, so the
-# floor no longer blocks them. Moving these crates is a separate bump.
+# Held at 0.4.5. 0.5 declares rustc 1.79 and was not tried. Cargo.lock holds
+# plist 1.7.4 and time 0.3.36. plist 1.9+ and time 0.3.46+ declare rustc 1.88,
+# above the old floor of 1.85. Moving any of these crates is a separate bump.
 two-face = { version = "0.4.5", default-features = false, features = ["syntect-default-fancy"] }
 # 0.3.1 declares no rust-version; deps memchr / unicode-segmentation are
 # already locked at versions that build on 1.88.

@@ -477,7 +477,7 @@ mod tests {
         assert_eq!(id, workspace_store_id(Path::new("/tmp")));
     }
 
-    /// The id keys the bucket of saved marks on disk, so a hash change would
+    /// The id keys the saved marks and comments on disk, so a hash change would
     /// orphan them. The path does not exist: canonicalize fails and the id
     /// hashes these exact bytes on every platform.
     #[test]
