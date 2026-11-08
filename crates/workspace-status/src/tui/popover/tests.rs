@@ -696,17 +696,16 @@ mod pr {
         for (remote, pr) in forges(PrState::CiRunning) {
             let mut app = app_state(&[checkout("c0", &pr.head)]);
             let _ = app.due_pr_lookups();
-            let then = Instant::now()
-                .checked_sub(Duration::from_secs(12 * 60))
-                .expect("clock");
+            let landed = Instant::now();
             let head = pr.head.clone();
             assert!(app.apply_pr_lookup_at(
                 Path::new("c0"),
                 &head,
                 Some(remote.into()),
                 PrLookup::Found(pr),
-                then,
+                landed,
             ));
+            app.frame_now = landed + Duration::from_secs(12 * 60);
             let section = section_of(&mut app, "c0", None);
             assert_eq!(style_of(&section, "checked: 12m ago"), (SegRole::Muted, 0));
 

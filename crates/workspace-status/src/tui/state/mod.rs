@@ -1086,7 +1086,9 @@ pub struct AppState {
     /// ([`Self::arm_scroll_glide`], [`Self::glide_start`]).
     pub(crate) scroll_glide: Option<ScrollGlide>,
     /// Clock of the frame being drawn, set at the top of each draw. Glide
-    /// painters read it so one frame uses one instant.
+    /// painters and the PR `checked` age and stale marks read it, so one
+    /// frame uses one instant and a test can draw a frame later than the
+    /// lookup it lands. Between draws it holds the last frame's instant.
     pub(crate) frame_now: Instant,
     /// Remote git work in flight, published by the interpreter for paint.
     pub remote_activity: RemoteActivity,

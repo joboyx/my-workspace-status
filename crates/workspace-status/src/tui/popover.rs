@@ -23,7 +23,6 @@
 
 use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 use ratatui::layout::Rect;
 use workspace_status_graph::{
@@ -1615,7 +1614,7 @@ fn pr_review_field(detail: &PullRequestDetail) -> Option<PopoverLine> {
 /// (`12m ago · last lookup failed: HTTP 401`). `None` with neither.
 fn pr_checked_field(state: &AppState, repo: &Path, now_unix: i64) -> Option<PopoverLine> {
     let age = state.pr_checked_at(repo).map(|at| {
-        let secs = Instant::now().saturating_duration_since(at).as_secs();
+        let secs = state.frame_now.saturating_duration_since(at).as_secs();
         relative_age(now_unix, now_unix.saturating_sub_unsigned(secs))
     });
     let Some(failure) = state.pr_lookup_failure(repo) else {
