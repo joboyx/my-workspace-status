@@ -167,10 +167,14 @@ pub fn source_from_graph_row(row: &GraphRow) -> Option<CommitFileSource> {
     }
 }
 
-/// Stash ref when the focused graph row is a stash.
-pub fn stash_ref_from_graph_row(row: &GraphRow) -> Option<String> {
+/// Stash entry (`stash@{n}` and commit id) when the focused graph row is a
+/// stash.
+pub fn stash_target_from_graph_row(row: &GraphRow) -> Option<crate::git::StashTarget> {
     match row {
-        GraphRow::Stash(stash) => Some(stash.stash_ref.clone()),
+        GraphRow::Stash(stash) => Some(crate::git::StashTarget {
+            stash_ref: stash.stash_ref.clone(),
+            sha: stash.id.clone(),
+        }),
         _ => None,
     }
 }
@@ -215,16 +219,19 @@ mod tests {
             source_from_graph_row(&GraphRow::Uncommitted { has_changes: true }),
             Some(CommitFileSource::Worktree)
         );
-        assert_eq!(stash_ref_from_graph_row(&commit_row("abc")), None);
+        assert_eq!(stash_target_from_graph_row(&commit_row("abc")), None);
         assert_eq!(
-            stash_ref_from_graph_row(&GraphRow::Stash(Stash {
+            stash_target_from_graph_row(&GraphRow::Stash(Stash {
+                id: "5a5h".into(),
                 stash_ref: "stash@{1}".into(),
                 subject: "wip".into(),
                 parent_id: None,
                 ..Stash::default()
-            }))
-            .as_deref(),
-            Some("stash@{1}")
+            })),
+            Some(crate::git::StashTarget {
+                stash_ref: "stash@{1}".into(),
+                sha: "5a5h".into(),
+            })
         );
     }
 

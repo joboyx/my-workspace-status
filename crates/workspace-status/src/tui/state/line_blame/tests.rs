@@ -1346,6 +1346,29 @@ fn worktree_compare_tab_reloads_when_the_file_changes_on_watch() {
     assert_eq!(app.activate_tab(1), Effect::None, "stamp unchanged");
 }
 
+/// Closing the active tab onto a commit-vs-worktree tab catches it up the
+/// same way a switch to it does.
+#[test]
+fn closing_onto_a_worktree_compare_tab_reloads_it() {
+    let mut app = state();
+    app.open_worktree_compare_tab("app".into(), SHA.into(), disk_file("README.md", None));
+    load_worktree_tab(&mut app);
+    let tab_id = app.tabs.active_compare().unwrap().id;
+    app.open_compare_tab("app".into(), "main".into(), "HEAD".into());
+    assert_eq!(app.tabs.active, 2);
+
+    // The file changes while the worktree tab is inactive.
+    let clean = RepoSnapshot {
+        changes: Vec::new(),
+        has_unstaged: false,
+        ..repo("app")
+    };
+    app.apply_watch_snapshot(build_workspace_snapshot(&[clean], &[], false, &[]));
+    let back = app.close_tab_at(2);
+    assert_eq!(app.tabs.active, 1, "the left neighbour is active");
+    expect_range_reload(Some(back), tab_id);
+}
+
 #[test]
 fn worktree_compare_tab_has_no_external_diff_pair() {
     let mut app = state();

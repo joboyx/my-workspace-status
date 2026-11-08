@@ -744,7 +744,10 @@ fn key_to_action(
             ),
         },
         // A modifier chord falls through to `normal_key`, which keeps
-        // Ctrl-o / Ctrl-u / Ctrl-d / Ctrl-w and maps the rest to None.
+        // Ctrl-o / Ctrl-u / Ctrl-d / Ctrl-w and maps the rest to None. A
+        // key that neither completes the chord nor runs an action ends it
+        // (`GChordCancel`), so a later chord key cannot complete it. A bare
+        // modifier press (a protocol Shift before `T`) leaves it armed.
         InputMode::GPending { .. } => {
             if !has_command_modifier(key) {
                 if let Some(action) = bound_action(G_CHORD_KEYS, key) {
@@ -755,15 +758,19 @@ fn key_to_action(
                 KeyCode::Char(c @ '1'..='9') if !has_command_modifier(key) => {
                     Action::JumpToTab(c as u8 - b'0')
                 }
-                KeyCode::Esc => Action::None,
-                _ => normal_key(
+                KeyCode::Esc => Action::GChordCancel,
+                KeyCode::Modifier(_) => Action::None,
+                _ => match normal_key(
                     key,
                     right_is_diff,
                     focus_right,
                     graph_stash_focused,
                     graph_commit_focused,
                     hl_folds,
-                ),
+                ) {
+                    Action::None => Action::GChordCancel,
+                    action => action,
+                },
             }
         }
         InputMode::Confirm => match key.code {

@@ -30,12 +30,12 @@ use crate::file_index::{
 use crate::file_search::{build_matcher, search_chunk, SearchChunk, SearchOptions};
 use crate::git::{
     apply_cached_patch, apply_worktree_patch_reverse, blame_line, create_branch_at,
-    create_branch_checkout, exec_git_checked, latest_stash_ref, list_compare_picker_branches,
+    create_branch_checkout, exec_git_checked, latest_stash, list_compare_picker_branches,
     list_compare_picker_commits, list_local_branches, previous_line_change, pull_quiet_detailed,
     push_plan, push_quiet, remote_url_for_branch, remove_untracked_file, remove_worktree,
-    reset_keep_to_upstream, revert_compare_file, revert_compare_patch, revert_tracked_file,
-    stage_file, stash_apply, stash_drop, stash_pop, stash_push, unstage_file, PushPlan,
-    COMPARE_REVERT_ABORTED,
+    reset_keep_to_upstream, resolve_stash_target, revert_compare_file, revert_compare_patch,
+    revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop, stash_push, unstage_file,
+    PushPlan, StashTarget, COMPARE_REVERT_ABORTED,
 };
 use crate::settings::Settings;
 use crate::snapshot::RepoSnapshot;
@@ -132,7 +132,7 @@ pub(crate) enum JobOutcome {
     PrepareStash {
         gen: u64,
         repo: String,
-        latest: Option<String>,
+        latest: Option<StashTarget>,
     },
     PreparePush {
         gen: u64,
@@ -1561,39 +1561,42 @@ impl Interpreter {
                     Box::new(move || stash_push(&dir, &paths).map(|_| ok_status)),
                 );
             }
-            Effect::StashApply { repo, stash_ref } => {
+            // Each stash write first finds the entry's current `stash@{n}`
+            // by its commit id: a stash pushed or dropped since the pick
+            // moves `n`, and `git stash pop` / `drop` take only a ref.
+            Effect::StashApply { repo, stash } => {
                 let dir = opts.cwd.join(&repo);
-                let label = stash_ref.clone();
                 self.enqueue_write(
                     state,
                     "stash apply",
                     &[&repo],
                     Box::new(move || {
-                        stash_apply(&dir, &stash_ref).map(|_| format!("applied {label}"))
+                        let stash_ref = resolve_stash_target(&dir, &stash)?;
+                        stash_apply(&dir, &stash_ref).map(|_| format!("applied {stash_ref}"))
                     }),
                 );
             }
-            Effect::StashPop { repo, stash_ref } => {
+            Effect::StashPop { repo, stash } => {
                 let dir = opts.cwd.join(&repo);
-                let label = stash_ref.clone();
                 self.enqueue_write(
                     state,
                     "stash pop",
                     &[&repo],
                     Box::new(move || {
-                        stash_pop(&dir, &stash_ref).map(|_| format!("popped {label}"))
+                        let stash_ref = resolve_stash_target(&dir, &stash)?;
+                        stash_pop(&dir, &stash_ref).map(|_| format!("popped {stash_ref}"))
                     }),
                 );
             }
-            Effect::StashDrop { repo, stash_ref } => {
+            Effect::StashDrop { repo, stash } => {
                 let dir = opts.cwd.join(&repo);
-                let label = stash_ref.clone();
                 self.enqueue_write(
                     state,
                     "stash drop",
                     &[&repo],
                     Box::new(move || {
-                        stash_drop(&dir, &stash_ref).map(|_| format!("dropped {label}"))
+                        let stash_ref = resolve_stash_target(&dir, &stash)?;
+                        stash_drop(&dir, &stash_ref).map(|_| format!("dropped {stash_ref}"))
                     }),
                 );
             }
@@ -3608,7 +3611,7 @@ impl Interpreter {
                         id,
                         JobRelease::Prepare { what: "stash menu" },
                         Box::new(move || {
-                            let latest = latest_stash_ref(&dir);
+                            let latest = latest_stash(&dir);
                             JobOutcome::PrepareStash { gen, repo, latest }
                         }),
                     );

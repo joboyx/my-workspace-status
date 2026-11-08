@@ -1239,7 +1239,7 @@ fn push_plan_does_not_replace_an_open_confirm() {
     let mut app = ahead_app(SyncStatus::Ahead, "ahead by 1 commits");
     let drop = PendingConfirm::StashDrop {
         repo: "app".into(),
-        stash_ref: "stash@{0}".into(),
+        stash: crate::testutil::stash_target("stash@{0}"),
     };
     app.confirm = Some(drop.clone());
     app.open_push_confirm("app".into(), push_plan_ok("main", false));
@@ -3858,7 +3858,7 @@ fn compare_confirms_never_cross_tabs() {
 fn tab_switch_and_close_drop_highlight_and_confirm() {
     let stash_drop = || PendingConfirm::StashDrop {
         repo: "app".into(),
-        stash_ref: "stash@{0}".into(),
+        stash: crate::testutil::stash_target("stash@{0}"),
     };
     let mut app = state();
     compare_tab_with_added_lines(&mut app);
@@ -4730,7 +4730,10 @@ fn stash_pop_drop_confirm_cancel_and_apply() {
     let mut app = state();
     focus_file(&mut app, "README.md");
     app.focus = FocusPane::Left;
-    app.open_stash_menu("app".into(), Some("stash@{0}".into()));
+    app.open_stash_menu(
+        "app".into(),
+        Some(crate::testutil::stash_target("stash@{0}")),
+    );
     let ops = app.stash_menu.clone().expect("file menu");
     assert_eq!(
         ops.iter().map(|op| op.id).collect::<Vec<_>>(),
@@ -4740,7 +4743,10 @@ fn stash_pop_drop_confirm_cancel_and_apply() {
     assert!(app.stash_menu.is_none());
     assert!(app.status.contains("cancelled"));
 
-    app.open_stash_menu("app".into(), Some("stash@{0}".into()));
+    app.open_stash_menu(
+        "app".into(),
+        Some(crate::testutil::stash_target("stash@{0}")),
+    );
     assert_eq!(
         app.dispatch(Action::StashMenuChar('s')),
         Effect::StashCreate {
@@ -4748,7 +4754,10 @@ fn stash_pop_drop_confirm_cancel_and_apply() {
             paths: vec!["README.md".into()],
         }
     );
-    app.open_stash_menu("app".into(), Some("stash@{0}".into()));
+    app.open_stash_menu(
+        "app".into(),
+        Some(crate::testutil::stash_target("stash@{0}")),
+    );
     assert_eq!(app.dispatch(Action::StashMenuChar('a')), Effect::None);
     assert!(app.confirm.is_none());
     assert_eq!(app.dispatch(Action::StashMenuChar('p')), Effect::None);
@@ -4764,7 +4773,10 @@ fn stash_pop_drop_confirm_cancel_and_apply() {
     assert!(app.stash_menu.is_none());
     assert!(app.status.contains("nothing to stash"));
     // A clean checkout with a stash offers apply / pop of the latest.
-    app.open_stash_menu("lib".into(), Some("stash@{0}".into()));
+    app.open_stash_menu(
+        "lib".into(),
+        Some(crate::testutil::stash_target("stash@{0}")),
+    );
     let ops = app.stash_menu.clone().expect("clean row menu");
     assert_eq!(
         ops.iter().map(|op| op.id).collect::<Vec<_>>(),
@@ -4775,13 +4787,11 @@ fn stash_pop_drop_confirm_cancel_and_apply() {
         "the box lists the keys; no status line repeats them: {:?}",
         app.status
     );
-    assert!(ops
-        .iter()
-        .all(|op| op.stash_ref.as_deref() == Some("stash@{0}")));
+    assert!(ops.iter().all(|op| op.stash_ref() == Some("stash@{0}")));
     match app.dispatch(Action::StashMenuChar('a')) {
-        Effect::StashApply { repo, stash_ref } => {
+        Effect::StashApply { repo, stash } => {
             assert_eq!(repo, "lib");
-            assert_eq!(stash_ref, "stash@{0}");
+            assert_eq!(stash.stash_ref, "stash@{0}");
         }
         other => panic!("{other:?}"),
     }
@@ -4806,9 +4816,9 @@ fn stash_pop_drop_confirm_cancel_and_apply() {
         .expect("stash");
     app.graph_cursor = idx;
     match app.dispatch(Action::GraphStashApply) {
-        Effect::StashApply { repo, stash_ref } => {
+        Effect::StashApply { repo, stash } => {
             assert_eq!(repo, "app");
-            assert_eq!(stash_ref, "stash@{0}");
+            assert_eq!(stash.stash_ref, "stash@{0}");
         }
         other => panic!("{other:?}"),
     }
@@ -4818,11 +4828,11 @@ fn stash_pop_drop_confirm_cancel_and_apply() {
     assert!(app.status.contains("drop cancelled"));
     app.dispatch(Action::GraphStashDrop);
     match app.dispatch(Action::ConfirmYes) {
-        Effect::StashDrop { stash_ref, .. } => assert_eq!(stash_ref, "stash@{0}"),
+        Effect::StashDrop { stash, .. } => assert_eq!(stash.stash_ref, "stash@{0}"),
         other => panic!("{other:?}"),
     }
     match app.dispatch(Action::GraphStashPop) {
-        Effect::StashPop { stash_ref, .. } => assert_eq!(stash_ref, "stash@{0}"),
+        Effect::StashPop { stash, .. } => assert_eq!(stash.stash_ref, "stash@{0}"),
         other => panic!("{other:?}"),
     }
 }
@@ -5466,8 +5476,8 @@ fn graph_stash_b_stays_tree_and_c_is_noop() {
 fn stash_and_branch_git_fixture_honor_confirm() {
     use crate::config::WorkspaceStatusConfig;
     use crate::git::{
-        checkout_branch, create_branch_checkout, latest_stash_ref, list_local_branches,
-        stash_apply, stash_drop, stash_pop, stash_push,
+        checkout_branch, create_branch_checkout, latest_stash, latest_stash_ref,
+        list_local_branches, stash_apply, stash_drop, stash_pop, stash_push,
     };
     use crate::parallel::FETCH_CONCURRENCY;
     use crate::tui::collect_full_snapshot;
@@ -5490,7 +5500,7 @@ fn stash_and_branch_git_fixture_honor_confirm() {
     let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false, FETCH_CONCURRENCY);
     let mut app = AppState::new(workspace.clone(), snapshot, true);
     focus_file(&mut app, "README.md");
-    app.open_stash_menu("app".into(), latest_stash_ref(&repo_dir));
+    app.open_stash_menu("app".into(), latest_stash(&repo_dir));
     match app.dispatch(Action::StashMenuChar('s')) {
         Effect::StashCreate { paths, .. } => stash_push(&repo_dir, &paths).unwrap(),
         other => panic!("{other:?}"),
@@ -5520,7 +5530,7 @@ fn stash_and_branch_git_fixture_honor_confirm() {
         .expect("stash row");
     app.graph_cursor = idx;
     match app.dispatch(Action::GraphStashApply) {
-        Effect::StashApply { stash_ref, .. } => stash_apply(&repo_dir, &stash_ref).unwrap(),
+        Effect::StashApply { stash, .. } => stash_apply(&repo_dir, &stash.stash_ref).unwrap(),
         other => panic!("{other:?}"),
     }
     assert_eq!(
@@ -5535,17 +5545,19 @@ fn stash_and_branch_git_fixture_honor_confirm() {
     );
     app.dispatch(Action::GraphStashDrop);
     match app.dispatch(Action::ConfirmYes) {
-        Effect::StashDrop { stash_ref, .. } => stash_drop(&repo_dir, &stash_ref).unwrap(),
+        Effect::StashDrop { stash, .. } => stash_drop(&repo_dir, &stash.stash_ref).unwrap(),
         other => panic!("{other:?}"),
     }
     assert!(latest_stash_ref(&repo_dir).is_none());
 
     fs::write(repo_dir.join("README.md"), "# again\n").unwrap();
     stash_push(&repo_dir, &[]).unwrap();
-    let latest = latest_stash_ref(&repo_dir).expect("stash2");
+    let latest_target = latest_stash(&repo_dir).expect("stash2");
+    let latest = latest_target.stash_ref.clone();
     install_graph(
         &mut app,
         vec![Stash {
+            id: latest_target.sha.clone(),
             stash_ref: latest.clone(),
             subject: "again".into(),
             parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
@@ -5565,7 +5577,7 @@ fn stash_and_branch_git_fixture_honor_confirm() {
         app.dispatch(Action::GraphStashPop),
         Effect::StashPop {
             repo: "app".into(),
-            stash_ref: latest.clone(),
+            stash: latest_target,
         }
     );
     stash_pop(&repo_dir, &latest).unwrap();
@@ -6596,9 +6608,9 @@ fn graph_stash_row_apply_pop_drop_target_that_ref() {
         .expect("stash@{1}");
     app.graph_cursor = idx;
     match app.dispatch(Action::GraphStashApply) {
-        Effect::StashApply { stash_ref, repo } => {
+        Effect::StashApply { stash, repo } => {
             assert_eq!(repo, "app");
-            assert_eq!(stash_ref, "stash@{1}");
+            assert_eq!(stash.stash_ref, "stash@{1}");
         }
         other => panic!("{other:?}"),
     }
@@ -6608,11 +6620,11 @@ fn graph_stash_row_apply_pop_drop_target_that_ref() {
     assert!(app.status.contains("drop cancelled"));
     app.dispatch(Action::GraphStashDrop);
     match app.dispatch(Action::ConfirmYes) {
-        Effect::StashDrop { stash_ref, .. } => assert_eq!(stash_ref, "stash@{1}"),
+        Effect::StashDrop { stash, .. } => assert_eq!(stash.stash_ref, "stash@{1}"),
         other => panic!("{other:?}"),
     }
     match app.dispatch(Action::GraphStashPop) {
-        Effect::StashPop { stash_ref, .. } => assert_eq!(stash_ref, "stash@{1}"),
+        Effect::StashPop { stash, .. } => assert_eq!(stash.stash_ref, "stash@{1}"),
         other => panic!("{other:?}"),
     }
 }
@@ -6622,13 +6634,16 @@ fn stash_menu_from_repo_or_file_is_create_only() {
     let mut app = state();
     focus_file(&mut app, "README.md");
     app.focus = FocusPane::Left;
-    app.open_stash_menu("app".into(), Some("stash@{0}".into()));
+    app.open_stash_menu(
+        "app".into(),
+        Some(crate::testutil::stash_target("stash@{0}")),
+    );
     let ops = app.stash_menu.clone().expect("menu");
     assert_eq!(
         ops.iter().map(|op| op.id).collect::<Vec<_>>(),
         vec![StashOpId::Create]
     );
-    assert!(ops.iter().all(|op| op.stash_ref.is_none()));
+    assert!(ops.iter().all(|op| op.stash_ref().is_none()));
     app.stash_menu = None;
     focus_repo(&mut app, "app");
     install_graph(
@@ -6649,17 +6664,19 @@ fn stash_menu_from_repo_or_file_is_create_only() {
         .position(|r| matches!(r, GraphRow::Stash(s) if s.stash_ref == "stash@{1}"))
         .expect("stash");
     app.graph_cursor = idx;
-    app.open_stash_menu("app".into(), Some("stash@{0}".into()));
+    app.open_stash_menu(
+        "app".into(),
+        Some(crate::testutil::stash_target("stash@{0}")),
+    );
     let ops = app.stash_menu.clone().expect("graph menu");
     assert!(ops.iter().any(|op| op.id == StashOpId::Drop));
     assert!(
-        ops.iter()
-            .any(|op| op.stash_ref.as_deref() == Some("stash@{1}")),
+        ops.iter().any(|op| op.stash_ref() == Some("stash@{1}")),
         "{ops:?}"
     );
     assert!(ops
         .iter()
-        .all(|op| { op.stash_ref.is_none() || op.stash_ref.as_deref() == Some("stash@{1}") }));
+        .all(|op| { op.stash_ref().is_none() || op.stash_ref() == Some("stash@{1}") }));
 }
 
 fn focus_graph_row(app: &mut AppState, pred: impl Fn(&GraphRow) -> bool) {
@@ -6917,7 +6934,10 @@ fn graph_stash_menu_on_commit_offers_latest_apply_pop_not_drop() {
     focus_repo(&mut app, "app");
     install_graph(&mut app, vec![graph_stash("stash@{0}", "latest")]);
     focus_graph_row(&mut app, |r| matches!(r, GraphRow::Commit { .. }));
-    app.open_stash_menu("app".into(), Some("stash@{0}".into()));
+    app.open_stash_menu(
+        "app".into(),
+        Some(crate::testutil::stash_target("stash@{0}")),
+    );
     let ops = app.stash_menu.clone().expect("graph commit menu");
     assert_eq!(
         ops.iter().map(|op| op.id).collect::<Vec<_>>(),
@@ -6925,20 +6945,23 @@ fn graph_stash_menu_on_commit_offers_latest_apply_pop_not_drop() {
     );
     assert!(ops
         .iter()
-        .all(|op| { op.stash_ref.is_none() || op.stash_ref.as_deref() == Some("stash@{0}") }));
+        .all(|op| { op.stash_ref().is_none() || op.stash_ref() == Some("stash@{0}") }));
     assert!(!ops.iter().any(|op| op.id == StashOpId::Drop));
 
     match app.dispatch(Action::StashMenuChar('p')) {
-        Effect::StashPop { repo, stash_ref } => {
+        Effect::StashPop { repo, stash } => {
             assert_eq!(repo, "app");
-            assert_eq!(stash_ref, "stash@{0}");
+            assert_eq!(stash.stash_ref, "stash@{0}");
         }
         other => panic!("{other:?}"),
     }
     assert!(app.confirm.is_none());
     assert!(app.stash_menu.is_none());
 
-    app.open_stash_menu("app".into(), Some("stash@{0}".into()));
+    app.open_stash_menu(
+        "app".into(),
+        Some(crate::testutil::stash_target("stash@{0}")),
+    );
     assert_eq!(app.dispatch(Action::StashMenuChar('d')), Effect::None);
     assert!(app.confirm.is_none());
 }
@@ -6963,7 +6986,10 @@ fn graph_stash_menu_on_uncommitted_offers_latest_apply_pop() {
         graph.uncommitted = Some(true);
     }
     focus_graph_row(&mut app, |r| matches!(r, GraphRow::Uncommitted { .. }));
-    app.open_stash_menu("app".into(), Some("stash@{0}".into()));
+    app.open_stash_menu(
+        "app".into(),
+        Some(crate::testutil::stash_target("stash@{0}")),
+    );
     let ops = app.stash_menu.clone().expect("uncommitted menu");
     assert_eq!(
         ops.iter().map(|op| op.id).collect::<Vec<_>>(),
@@ -6973,7 +6999,7 @@ fn graph_stash_menu_on_uncommitted_offers_latest_apply_pop() {
     assert!(ops
         .iter()
         .filter(|op| op.id != StashOpId::Create)
-        .all(|op| op.stash_ref.as_deref() == Some("stash@{0}")));
+        .all(|op| op.stash_ref() == Some("stash@{0}")));
 }
 
 #[test]
@@ -6985,24 +7011,30 @@ fn stash_menu_pop_runs_immediately_drop_still_confirms() {
         &mut app,
         |r| matches!(r, GraphRow::Stash(s) if s.stash_ref == "stash@{0}"),
     );
-    app.open_stash_menu("app".into(), Some("stash@{0}".into()));
+    app.open_stash_menu(
+        "app".into(),
+        Some(crate::testutil::stash_target("stash@{0}")),
+    );
     let ops = app.stash_menu.clone().expect("stash row menu");
     assert!(ops.iter().any(|op| op.id == StashOpId::Drop));
     match app.dispatch(Action::StashMenuChar('p')) {
-        Effect::StashPop { repo, stash_ref } => {
+        Effect::StashPop { repo, stash } => {
             assert_eq!(repo, "app");
-            assert_eq!(stash_ref, "stash@{0}");
+            assert_eq!(stash.stash_ref, "stash@{0}");
         }
         other => panic!("{other:?}"),
     }
     assert!(app.confirm.is_none());
     assert!(app.stash_menu.is_none());
 
-    app.open_stash_menu("app".into(), Some("stash@{0}".into()));
+    app.open_stash_menu(
+        "app".into(),
+        Some(crate::testutil::stash_target("stash@{0}")),
+    );
     assert_eq!(app.dispatch(Action::StashMenuChar('d')), Effect::None);
     assert!(app.confirm.is_some());
     match app.dispatch(Action::ConfirmYes) {
-        Effect::StashDrop { stash_ref, .. } => assert_eq!(stash_ref, "stash@{0}"),
+        Effect::StashDrop { stash, .. } => assert_eq!(stash.stash_ref, "stash@{0}"),
         other => panic!("{other:?}"),
     }
 }
@@ -11010,6 +11042,39 @@ fn g_pending_survives_ticks_none_and_release() {
     assert!(matches!(app.input_mode(), InputMode::GPending { .. }));
     app.dispatch(Action::ToggleTreeMode);
     assert!(app.g_pending_at.is_none());
+}
+
+/// A key that does not complete a pending `g` ends it, even one that maps
+/// to no action: `g % t` inside the chord window is not `gt`. Esc ends it
+/// the same way.
+#[test]
+fn unbound_key_or_esc_ends_a_pending_g_chord() {
+    use crate::testutil::key;
+    use crossterm::event::KeyCode;
+    let mut app = state();
+    app.tabs
+        .open_or_focus("app".into(), "main".into(), "HEAD".into());
+    app.tabs.active = 0;
+    let press = |app: &mut AppState, code: KeyCode| {
+        let action = crate::tui::app::map_event(app, &key(code));
+        app.dispatch(action);
+    };
+    assert_eq!(
+        crate::tui::app::map_event(&app, &key(KeyCode::Char('%'))),
+        Action::None,
+        "`%` is unbound in Normal mode"
+    );
+    for end in [KeyCode::Char('%'), KeyCode::Esc] {
+        press(&mut app, KeyCode::Char('g'));
+        assert!(matches!(app.input_mode(), InputMode::GPending { .. }));
+        press(&mut app, end);
+        assert!(
+            matches!(app.input_mode(), InputMode::Normal { .. }),
+            "{end:?} ends the chord"
+        );
+        press(&mut app, KeyCode::Char('t'));
+        assert!(app.tabs.is_workspace(), "{end:?} then `t` is not `gt`");
+    }
 }
 
 /// The `g` chord window is the gap between the two keys' arrival.
