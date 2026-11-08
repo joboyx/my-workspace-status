@@ -842,7 +842,12 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("\n            }\n").next())
             .expect("the CopyClipboard arm of schedule_effect");
-        for banned in ["copy_to_clipboard(", "copy_with_host_tool(", "pipe_to("] {
+        for banned in [
+            "copy_to_clipboard(",
+            "copy_with_host_tool(",
+            "pipe_to(",
+            "clipboard_tool)(",
+        ] {
             assert!(
                 !copy_arm.contains(banned),
                 "{banned} must not run in the CopyClipboard arm, on the TTY loop thread"

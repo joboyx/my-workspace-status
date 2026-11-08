@@ -197,7 +197,9 @@ fn pipe_to(argv: &[&str], text: &str, deadline: Instant) -> bool {
         kill_and_reap(&mut child);
         return false;
     };
-    // The tool exited, so its stdin is closed and the write has ended.
+    // The tool exited. A child of the tool can still hold the pipe open, so
+    // wait for the writer only until the deadline; a blocked writer thread is
+    // detached and ends when the last reader closes the pipe.
     let wrote = written
         .recv_timeout(deadline.saturating_duration_since(Instant::now()))
         .unwrap_or(false);
