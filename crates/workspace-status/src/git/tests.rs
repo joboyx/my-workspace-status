@@ -1756,6 +1756,9 @@ fn checked_git_errors_carry_the_git_reason_line() {
     init_repo(&dir);
     let err = stage_file(&dir, "nope.txt").unwrap_err();
     assert_eq!(err, "pathspec 'nope.txt' did not match any files");
+    // The literal pathspec prefix stays out of the reason line, glob characters included.
+    let err = stage_file(&dir, "nope[1].txt").unwrap_err();
+    assert_eq!(err, "pathspec 'nope[1].txt' did not match any files");
     let err = stash_pop(&dir, "stash@{0}").unwrap_err();
     assert!(err.contains("stash@{0} is not a valid reference"), "{err}");
     assert!(!err.starts_with("error:"), "tag is stripped: {err}");
