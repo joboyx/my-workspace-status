@@ -437,8 +437,8 @@ pub fn viewed_row_ids(
 mod tests {
     use super::*;
     use crate::snapshot::{build_workspace_snapshot, FileChange, RepoSnapshot};
-    use crate::testutil::{repo_snapshot, unstaged_change};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::testutil::{repo_snapshot, unique_dir, unstaged_change};
+    use std::time::UNIX_EPOCH;
 
     #[test]
     fn identity_normalizes_repo_and_file_paths() {
@@ -608,13 +608,7 @@ mod tests {
 
     #[test]
     fn load_save_round_trip_json() {
-        let dir = std::env::temp_dir().join(format!(
-            "ws-viewed-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = unique_dir("ws-viewed");
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("viewed-files.json");
         let identity = viewed_identity("demo", "src/a.ts");
@@ -643,13 +637,7 @@ mod tests {
     }
 
     fn temp_viewed(prefix: &str) -> (PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "{prefix}-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = unique_dir(prefix);
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("viewed-files.json");
         (dir, file)
@@ -833,13 +821,7 @@ mod tests {
 
     #[test]
     fn reconcile_on_refresh_drops_changed_fingerprint() {
-        let dir = std::env::temp_dir().join(format!(
-            "ws-viewed-refresh-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = unique_dir("ws-viewed-refresh");
         fs::create_dir_all(dir.join("demo")).unwrap();
         fs::write(dir.join("demo/src").join("a.ts"), "x\n").ok();
         fs::create_dir_all(dir.join("demo/src")).unwrap();
@@ -880,7 +862,7 @@ mod tests {
     /// (new time).
     #[test]
     fn same_size_edits_to_a_huge_file_change_its_fingerprint() {
-        let dir = crate::testutil::unique_dir("ws-viewed-huge");
+        let dir = unique_dir("ws-viewed-huge");
         fs::create_dir_all(dir.join("demo")).unwrap();
         let path = dir.join("demo/big.bin");
         let change = unstaged_change("big.bin");
@@ -938,13 +920,7 @@ mod tests {
     /// the same hash, so dual Staged and `#unstaged` ids stay marked.
     #[test]
     fn dual_ms_toggle_survives_reconcile_and_emits_both_row_ids() {
-        let dir = std::env::temp_dir().join(format!(
-            "ws-viewed-dual-ms-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = unique_dir("ws-viewed-dual-ms");
         fs::create_dir_all(dir.join("demo")).unwrap();
         fs::write(dir.join("demo/both.rs"), "x\n").unwrap();
         let change = dual_ms_change();

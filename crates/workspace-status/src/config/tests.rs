@@ -1,16 +1,10 @@
 use super::*;
+use crate::testutil::unique_dir;
 use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn missing_config_uses_defaults() {
-    let dir = std::env::temp_dir().join(format!(
-        "ws-config-missing-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir = unique_dir("ws-config-missing");
     fs::create_dir_all(&dir).unwrap();
     let cfg = load_config_files(None, &dir).unwrap();
     assert!(cfg.hidden_paths.is_empty());
@@ -21,13 +15,7 @@ fn missing_config_uses_defaults() {
 
 #[test]
 fn loads_hidden_paths_sorted() {
-    let dir = std::env::temp_dir().join(format!(
-        "ws-config-ok-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir = unique_dir("ws-config-ok");
     fs::create_dir_all(&dir).unwrap();
     fs::write(
         dir.join(CONFIG_FILENAME),
@@ -41,17 +29,7 @@ fn loads_hidden_paths_sorted() {
 }
 
 fn write_config(dir_prefix: &str, json: &str) -> std::path::PathBuf {
-    // Tests share a prefix and run in parallel: a counter keeps each dir unique.
-    static NEXT_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "{dir_prefix}-{}-{}-{}",
-        std::process::id(),
-        NEXT_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir = unique_dir(dir_prefix);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join(CONFIG_FILENAME), json).unwrap();
     dir
@@ -285,16 +263,7 @@ fn view_defaults_unknown_key_is_error() {
 /// Returns `(root, user_file, workspace_root)`; `user_file` is the path the
 /// loader gets, whether or not the file exists.
 fn layered(user_json: Option<&str>, workspace_json: Option<&str>) -> (PathBuf, PathBuf, PathBuf) {
-    static NEXT_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let root = std::env::temp_dir().join(format!(
-        "ws-config-layered-{}-{}-{}",
-        std::process::id(),
-        NEXT_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = unique_dir("ws-config-layered");
     let user_file = root
         .join("xdg-config")
         .join(USER_CONFIG_DIR)

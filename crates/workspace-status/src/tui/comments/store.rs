@@ -494,7 +494,7 @@ pub fn save_comment_store(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::testutil::unique_dir;
 
     #[test]
     fn store_path_env_beats_config_then_xdg() {
@@ -586,13 +586,7 @@ mod tests {
 
     #[test]
     fn load_save_round_trip_json() {
-        let dir = std::env::temp_dir().join(format!(
-            "ws-comments-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = unique_dir("ws-comments");
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("comments.json");
         let key = CommentKey::WorktreeLine {
@@ -679,13 +673,7 @@ mod tests {
     }
 
     fn temp_json(prefix: &str) -> (PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "{prefix}-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = unique_dir(prefix);
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("comments.json");
         (dir, file)

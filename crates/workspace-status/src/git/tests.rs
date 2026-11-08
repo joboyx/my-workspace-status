@@ -38,13 +38,7 @@ fn git_binary_is_nonempty() {
 
 #[test]
 fn git_command_nulls_stdin_and_disables_prompts() {
-    let dir = std::env::temp_dir().join(format!(
-        "ws-git-stdin-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir = unique_dir("ws-git-stdin");
     fs::create_dir_all(&dir).unwrap();
     let script = dir.join("probe");
     fs::write(
@@ -952,13 +946,7 @@ fn revert_compare_file_takes_paths_literally() {
 
 #[test]
 fn apply_cached_patch_stages_and_unstages_one_hunk() {
-    let dir = std::env::temp_dir().join(format!(
-        "ws-git-apply-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir = unique_dir("ws-git-apply");
     init_repo(&dir);
     let body = "\
 keep-a
@@ -1158,13 +1146,7 @@ fn fast_forward_to_remote_ref_ahead_and_missing_leave_head() {
 
 #[test]
 fn merge_into_head_ff_merge_commit_conflict_and_worktree() {
-    let dir = std::env::temp_dir().join(format!(
-        "ws-git-merge-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir = unique_dir("ws-git-merge");
     init_repo(&dir);
     let seed = exec_git(&["rev-parse", "HEAD"], &dir);
     assert_eq!(
@@ -1532,13 +1514,7 @@ fn parse_raw_patch_keys_reads_plain_and_rename_rows() {
 
 #[test]
 fn blob_bytes_returns_head_contents_without_utf8_trim() {
-    let dir = std::env::temp_dir().join(format!(
-        "ws-git-blob-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir = unique_dir("ws-git-blob");
     init_repo(&dir);
     let payload = b"hello \n\x00\xff";
     fs::write(dir.join("bin.dat"), payload).unwrap();
@@ -1557,13 +1533,7 @@ fn blob_bytes_returns_head_contents_without_utf8_trim() {
 
 #[test]
 fn blob_bytes_missing_path_is_none() {
-    let dir = std::env::temp_dir().join(format!(
-        "ws-git-blob-miss-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir = unique_dir("ws-git-blob-miss");
     init_repo(&dir);
     assert_eq!(blob_bytes(&dir, "HEAD", "nope.txt"), None);
     let _ = fs::remove_dir_all(&dir);
@@ -1571,13 +1541,7 @@ fn blob_bytes_missing_path_is_none() {
 
 #[test]
 fn compare_wrappers_ahead_behind_diverged_rename_and_failure() {
-    let dir = std::env::temp_dir().join(format!(
-        "ws-git-compare-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir = unique_dir("ws-git-compare");
     init_repo(&dir);
     let base = exec_git(&["rev-parse", "HEAD"], &dir);
     fs::write(dir.join("one.txt"), "one\n").unwrap();

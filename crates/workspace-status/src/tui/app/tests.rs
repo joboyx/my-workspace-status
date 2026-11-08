@@ -2,7 +2,7 @@ use super::*;
 use crate::config::WorkspaceStatusConfig;
 use crate::git::{exec_git, git_binary, list_local_branches, stage_file};
 use crate::parallel::FETCH_CONCURRENCY;
-use crate::testutil::{app_state, git, init_repo, panic_hook_lock, repo_snapshot};
+use crate::testutil::{app_state, git, init_repo, panic_hook_lock, repo_snapshot, unique_dir};
 use crate::tui::action::{Action, Effect};
 use crate::tui::branches::DIRTY_WORKTREE_STATUS;
 use crate::tui::pointer_shape::PointerShape;
@@ -13,7 +13,7 @@ use std::fs;
 use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 /// Restore bytes as `restore_terminal` writes them, with `shown` as
 /// the shown-bar flag and `pointer_set` as the resize-pointer flag.
@@ -404,13 +404,7 @@ fn drop_undiscovered_checkouts_removes_vanished_paths() {
 
 #[test]
 fn tree_picker_dirty_refuses_tracked_only() {
-    let root = std::env::temp_dir().join(format!(
-        "ws-tui-checkout-dirty-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = unique_dir("ws-tui-checkout-dirty");
     let workspace = root.join("workspace");
     let repo_dir = workspace.join("app");
     init_repo(&repo_dir);
@@ -477,13 +471,7 @@ fn tree_picker_dirty_refuses_tracked_only() {
 
 #[test]
 fn origin_selection_confirms_then_ff_only_local_does_not() {
-    let root = std::env::temp_dir().join(format!(
-        "ws-tui-checkout-ff-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = unique_dir("ws-tui-checkout-ff");
     let workspace = root.join("workspace");
     let repo_dir = workspace.join("app");
     init_repo(&repo_dir);
@@ -660,13 +648,7 @@ fn checkout_ff_failure_on_a_rewritten_upstream_points_to_p() {
 
 #[test]
 fn graph_merge_dirty_refuses_then_ff_and_conflict_stay_uncommitted() {
-    let root = std::env::temp_dir().join(format!(
-        "ws-tui-merge-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = unique_dir("ws-tui-merge");
     let workspace = root.join("workspace");
     let repo_dir = workspace.join("app");
     init_repo(&repo_dir);
@@ -746,13 +728,7 @@ fn right_pane_load_types_are_send() {
 
 #[test]
 fn compute_right_pane_load_fills_graph_for_a_repo_row() {
-    let root = std::env::temp_dir().join(format!(
-        "ws-tui-pane-load-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = unique_dir("ws-tui-pane-load");
     let workspace = root.join("workspace");
     let repo_dir = workspace.join("app");
     init_repo(&repo_dir);
@@ -781,13 +757,7 @@ fn compute_right_pane_load_follows_graph_row_at_files_depth() {
     use super::super::drill::{CommitFileSource, DrillView};
     use super::super::state::FocusPane;
 
-    let root = std::env::temp_dir().join(format!(
-        "ws-tui-pane-follow-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = unique_dir("ws-tui-pane-follow");
     let workspace = root.join("workspace");
     let repo_dir = workspace.join("app");
     init_repo(&repo_dir);
@@ -836,13 +806,7 @@ fn compute_right_pane_load_follows_graph_row_at_files_depth() {
 
 #[test]
 fn event_thread_keeps_polling_while_right_pane_git_runs() {
-    let root = std::env::temp_dir().join(format!(
-        "ws-tui-pane-pump-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = unique_dir("ws-tui-pane-pump");
     let workspace = root.join("workspace");
     let repo_dir = workspace.join("app");
     init_repo(&repo_dir);
@@ -898,13 +862,7 @@ fn checkout_and_merge_compute_are_send() {
 
 #[test]
 fn event_thread_keeps_polling_while_git_write_runs() {
-    let root = std::env::temp_dir().join(format!(
-        "ws-tui-write-pump-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = unique_dir("ws-tui-write-pump");
     let workspace = root.join("workspace");
     let repo_dir = workspace.join("app");
     init_repo(&repo_dir);
@@ -940,13 +898,7 @@ fn event_thread_keeps_polling_while_git_write_runs() {
 
 #[test]
 fn busy_wait_applies_nav_before_write_finishes() {
-    let root = std::env::temp_dir().join(format!(
-        "ws-tui-busy-nav-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = unique_dir("ws-tui-busy-nav");
     let workspace = root.join("workspace");
     let repo_dir = workspace.join("app");
     init_repo(&repo_dir);
@@ -989,13 +941,7 @@ fn busy_wait_applies_nav_before_write_finishes() {
 
 #[test]
 fn unchanged_watch_signatures_let_the_loop_skip_pane_git() {
-    let root = std::env::temp_dir().join(format!(
-        "ws-tui-watch-skip-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = unique_dir("ws-tui-watch-skip");
     let workspace = root.join("workspace");
     let repo_dir = workspace.join("app");
     init_repo(&repo_dir);
@@ -1016,13 +962,7 @@ fn unchanged_watch_signatures_let_the_loop_skip_pane_git() {
 
 #[test]
 fn watch_tick_reloads_when_head_moves_without_tree_chrome_flip() {
-    let root = std::env::temp_dir().join(format!(
-        "ws-tui-watch-head-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = unique_dir("ws-tui-watch-head");
     let workspace = root.join("workspace");
     let alpha = workspace.join("alpha");
     let beta = workspace.join("beta");
@@ -1089,13 +1029,7 @@ fn watch_tick_reloads_when_head_moves_without_tree_chrome_flip() {
 
 #[test]
 fn watch_tick_reloads_when_ahead_count_moves() {
-    let root = std::env::temp_dir().join(format!(
-        "ws-tui-watch-ahead-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = unique_dir("ws-tui-watch-ahead");
     let workspace = root.join("workspace");
     let remote = root.join("remote.git");
     let tracker = workspace.join("tracker");
@@ -1390,13 +1324,7 @@ fn probe_ignores_head_moves_for_a_pinned_head() {
 
 #[test]
 fn probe_without_recorded_sha_is_not_a_change() {
-    let dir = std::env::temp_dir().join(format!(
-        "ws-probe-none-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir = unique_dir("ws-probe-none");
     init_repo(&dir);
     let head = exec_git(&["rev-parse", "HEAD"], &dir);
     let (changed, got_head, got_base) =

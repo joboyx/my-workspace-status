@@ -316,12 +316,11 @@ fn wait_then_cleanup(mut child: Child, prepared: PreparedDiff) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{git, init_repo};
+    use crate::testutil::{git, init_repo, unique_dir};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::Mutex;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn resolve_none_blank_whitespace_is_vimdiff() {
@@ -396,13 +395,7 @@ mod tests {
     }
 
     fn unique_repo(prefix: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "{prefix}-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = unique_dir(prefix);
         init_repo(&dir);
         dir
     }
@@ -617,7 +610,7 @@ mod tests {
     /// Each private directory is new: two calls never share one.
     #[test]
     fn private_dirs_are_new_each_time() {
-        let parent = crate::testutil::unique_dir("ws-ext-diff-private");
+        let parent = unique_dir("ws-ext-diff-private");
         fs::create_dir_all(&parent).unwrap();
         let a = create_private_dir(&parent, "x").unwrap();
         let b = create_private_dir(&parent, "x").unwrap();
@@ -630,7 +623,7 @@ mod tests {
     /// has open; with none open, the root goes too.
     #[test]
     fn quit_removes_every_session_but_the_live_ones() {
-        let parent = crate::testutil::unique_dir("ws-ext-diff-quit");
+        let parent = unique_dir("ws-ext-diff-quit");
         fs::create_dir_all(&parent).unwrap();
         let root = create_private_dir(&parent, "root").unwrap();
         let done = create_private_dir(&root, "session").unwrap();

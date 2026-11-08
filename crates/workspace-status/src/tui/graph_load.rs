@@ -1016,23 +1016,16 @@ mod tests {
 #[cfg(test)]
 mod live_git {
     use super::*;
-    use crate::testutil::{git, init_repo_empty, repo_snapshot};
+    use crate::testutil::{git, init_repo_empty, repo_snapshot, unique_dir};
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use workspace_status_graph::{format_commit_ref_chips, GraphRow, RefKind, ASCII};
 
     use crate::snapshot::{build_workspace_snapshot, CheckoutKind};
 
     fn temp_workspace() -> (PathBuf, PathBuf) {
-        let root = std::env::temp_dir().join(format!(
-            "ws-graph-load-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = unique_dir("ws-graph-load");
         let workspace = root.join("workspace");
         let repo = workspace.join("app");
         fs::create_dir_all(&repo).unwrap();

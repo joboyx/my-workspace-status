@@ -4608,15 +4608,8 @@ fn file_writes_on_git_fixture_honor_revert_confirm() {
     use crate::parallel::FETCH_CONCURRENCY;
     use crate::tui::collect_full_snapshot;
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    let root = std::env::temp_dir().join(format!(
-        "ws-tui-ops-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = crate::testutil::unique_dir("ws-tui-ops");
     let workspace = root.join("workspace");
     let repo_dir = workspace.join("app");
     init_repo(&repo_dir);
@@ -5472,15 +5465,8 @@ fn stash_and_branch_git_fixture_honor_confirm() {
     use crate::parallel::FETCH_CONCURRENCY;
     use crate::tui::collect_full_snapshot;
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    let root = std::env::temp_dir().join(format!(
-        "ws-tui-stash-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = crate::testutil::unique_dir("ws-tui-stash");
     let workspace = root.join("workspace");
     let repo_dir = workspace.join("app");
     init_repo(&repo_dir);
@@ -5864,13 +5850,7 @@ fn fetch_tick_includes_linked_worktrees_skips_hidden() {
 
 fn unwritable_store_path(prefix: &str) -> (PathBuf, PathBuf) {
     use std::fs;
-    let root = std::env::temp_dir().join(format!(
-        "{prefix}-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = crate::testutil::unique_dir(prefix);
     fs::create_dir_all(&root).unwrap();
     let blocker = root.join("not-a-dir");
     fs::write(&blocker, "x").unwrap();
@@ -5952,13 +5932,7 @@ fn reconcile_comment_names_save_failure_when_unwritable() {
 #[test]
 fn reconcile_viewed_names_save_failure_when_unwritable() {
     use std::fs;
-    let root = std::env::temp_dir().join(format!(
-        "ws-viewed-gc-fail-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = crate::testutil::unique_dir("ws-viewed-gc-fail");
     let workspace = root.join("ws");
     let repo_dir = workspace.join("app");
     fs::create_dir_all(&repo_dir).unwrap();
@@ -5984,13 +5958,7 @@ fn reconcile_viewed_names_save_failure_when_unwritable() {
 fn reviewed_persists_and_drops_on_fingerprint_change() {
     use crate::tui::viewed::{load_viewed_store, viewed_identity, workspace_store_id};
     use std::fs;
-    let root = std::env::temp_dir().join(format!(
-        "ws-reviewed-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = crate::testutil::unique_dir("ws-reviewed");
     let workspace = root.join("ws");
     let repo_dir = workspace.join("app");
     fs::create_dir_all(&repo_dir).unwrap();
@@ -6034,13 +6002,7 @@ fn focus_row_id(app: &mut AppState, id: &str) {
 #[test]
 fn toggle_reviewed_on_dual_ms_rows_survives_reconcile() {
     use std::fs;
-    let root = std::env::temp_dir().join(format!(
-        "ws-reviewed-dual-ms-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = crate::testutil::unique_dir("ws-reviewed-dual-ms");
     let workspace = root.join("ws");
     let repo_dir = workspace.join("app");
     fs::create_dir_all(&repo_dir).unwrap();

@@ -379,14 +379,7 @@ mod tests {
     use super::*;
 
     fn temp_store() -> PathBuf {
-        env::temp_dir().join(format!(
-            "ws-update-check-{}-{}.json",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+        crate::testutil::unique_dir("ws-update-check").with_extension("json")
     }
 
     fn hooks(
