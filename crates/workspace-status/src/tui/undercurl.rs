@@ -1,7 +1,7 @@
 //! Curly coloured underline (SGR 4:3 + SGR 58) under the code of commented
 //! lines, painted over the finished frame.
 //!
-//! Ratatui 0.29 (built without `underline-color`) has no underline colour
+//! Ratatui (built without `underline-color`) has no underline colour
 //! or style, and its buffer diff would undo a curl with a plain `\x1b[4m`.
 //! So the frame paints the commented code with [`Modifier::UNDERLINED`] (the
 //! fallback every terminal shows), records each painted run as an
@@ -20,6 +20,7 @@ use crossterm::style::{Attribute, SetAttribute, SetBackgroundColor, SetForegroun
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
+use ratatui_crossterm::IntoCrossterm;
 use unicode_width::UnicodeWidthStr;
 
 use super::hyperlink::LinkHit;
@@ -243,8 +244,8 @@ pub(crate) fn write_undercurls<W: Write>(
                 }
                 queue!(
                     out,
-                    SetForegroundColor(cell.fg.into()),
-                    SetBackgroundColor(cell.bg.into())
+                    SetForegroundColor(cell.fg.into_crossterm()),
+                    SetBackgroundColor(cell.bg.into_crossterm())
                 )?;
                 write!(out, "\x1b[4:3m")?;
                 if let Some(sgr) = &curl_color {

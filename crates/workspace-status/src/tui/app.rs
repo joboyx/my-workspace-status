@@ -20,9 +20,9 @@ use crossterm::terminal::{
     EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::{execute, queue};
-use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::{Terminal, TerminalOptions, Viewport};
+use ratatui_crossterm::CrosstermBackend;
 
 use crate::config::{ThemeMode, WorkspaceStatusConfig};
 use crate::discovery::{collect_snapshots, process_repo, RepoCheckoutMeta};
