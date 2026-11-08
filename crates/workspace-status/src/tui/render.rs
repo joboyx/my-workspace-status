@@ -93,7 +93,7 @@ use super::state::{
 };
 use super::syntax::{
     cached_highlight_diff_rows, highlight_file_window, readable_fg, slice_styled_cols,
-    CachedDiffSyntax, CodeSpan, DiffBackgrounds, DiffSyntaxKey,
+    CachedDiffSyntax, CodeSpan, DiffBackgrounds, DiffSyntaxKey, StyledColCursor,
 };
 use super::tabs::{
     compare_picker_empty, file_gutter_width, file_too_large, file_view_gutter_width,
@@ -3794,11 +3794,10 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                     add_word: palette.diff_add_word_bg,
                     del_word: palette.diff_del_word_bg,
                 },
-                visible_start: skip,
-                visible_end: logical_end,
                 cache_id: diff_syntax_cache_id(state, split),
             },
             &rows,
+            skip..logical_end,
         )
     });
     // Armed diff search marks every matching row; the cursor bar sits on
@@ -4222,38 +4221,35 @@ fn paint_diff_row(
         }
         DiffRow::Line { left, right } if split && right.is_some() => {
             let cols = side_by_side_column_widths(width, state.diff_split_fraction);
-            let (left_h, right_h) = if wrap {
-                let mark = comment_mark_cols(state.ascii);
-                let gutter_with_mark = gutter.saturating_add(mark);
-                let left_h = wrap_col_starts(
-                    &left.text,
-                    cell_code_width(cols.left_width as usize, gutter_with_mark),
-                )
-                .len()
-                .max(1);
-                let right_h = wrap_col_starts(
-                    &right.as_ref().unwrap().text,
-                    cell_code_width(cols.right_width as usize, gutter_with_mark),
-                )
-                .len()
-                .max(1);
-                (left_h, right_h)
-            } else {
-                (1, 1)
-            };
+            let right_cell = right.as_ref().unwrap();
+            let mut left_rows = CellRows::new(
+                left,
+                left_syntax,
+                cols.left_width,
+                gutter,
+                state.ascii,
+                wrap,
+            );
+            let mut right_rows = CellRows::new(
+                right_cell,
+                right_syntax,
+                cols.right_width,
+                gutter,
+                state.ascii,
+                wrap,
+            );
+            let (left_h, right_h) = (left_rows.height(), right_rows.height());
             (0..left_h.max(right_h))
                 .map(|part| {
                     let mut spans = paint_cell_spans(
                         left,
                         cols.left_width,
                         gutter,
-                        col_offset,
-                        wrap,
-                        part,
+                        part == 0,
+                        left_rows.code(part, col_offset, palette),
                         palette,
                         state,
                         overlay,
-                        left_syntax,
                     );
                     if let Some((text, BlameSide::Old)) = &blame {
                         if part + 1 == left_h {
@@ -4265,16 +4261,14 @@ fn paint_diff_row(
                         Style::default().fg(diff_rule_fg(state)),
                     ));
                     let mut right_spans = paint_cell_spans(
-                        right.as_ref().unwrap(),
+                        right_cell,
                         cols.right_width,
                         gutter,
-                        col_offset,
-                        wrap,
-                        part,
+                        part == 0,
+                        right_rows.code(part, col_offset, palette),
                         palette,
                         state,
                         overlay,
-                        right_syntax,
                     );
                     if let Some((text, BlameSide::New)) = &blame {
                         if part + 1 == right_h {
@@ -4287,30 +4281,19 @@ fn paint_diff_row(
                 .collect()
         }
         DiffRow::Line { left, .. } => {
-            let n = if wrap {
-                let mark = comment_mark_cols(state.ascii);
-                wrap_col_starts(
-                    &left.text,
-                    cell_code_width(width as usize, gutter.saturating_add(mark)),
-                )
-                .len()
-                .max(1)
-            } else {
-                1
-            };
+            let mut rows = CellRows::new(left, left_syntax, width, gutter, state.ascii, wrap);
+            let n = rows.height();
             (0..n)
                 .map(|part| {
                     let mut spans = paint_cell_spans(
                         left,
                         width,
                         gutter,
-                        col_offset,
-                        wrap,
-                        part,
+                        part == 0,
+                        rows.code(part, col_offset, palette),
                         palette,
                         state,
                         overlay,
-                        left_syntax,
                     );
                     if let Some((text, _)) = &blame {
                         if part + 1 == n {
@@ -4572,23 +4555,84 @@ fn section_style(section: DiffSection, palette: Palette) -> Style {
     }
 }
 
+/// One diff cell's code, cut into the screen rows the cell paints.
+///
+/// With wrap on, the wrap starts are scanned once per cell and a
+/// forward-only [`StyledColCursor`] slices each row from the last one, so
+/// a line of `n` wrap rows costs one scan, not `n`.
+struct CellRows<'a> {
+    cell: &'a DiffCell,
+    syntax: &'a [CodeSpan],
+    /// Code columns after the gutter, comment mark, and sign.
+    code_w: usize,
+    /// Wrap-row start columns; `None` with wrap off.
+    starts: Option<Vec<usize>>,
+    cursor: StyledColCursor<'a>,
+}
+
+impl<'a> CellRows<'a> {
+    fn new(
+        cell: &'a DiffCell,
+        syntax: &'a [CodeSpan],
+        width: u16,
+        gutter: usize,
+        ascii: bool,
+        wrap: bool,
+    ) -> Self {
+        let code_w = cell_code_width(
+            width as usize,
+            gutter.saturating_add(comment_mark_cols(ascii)),
+        );
+        Self {
+            cell,
+            syntax,
+            code_w,
+            starts: wrap.then(|| wrap_col_starts(&cell.text, code_w)),
+            cursor: StyledColCursor::new(syntax),
+        }
+    }
+
+    /// Screen rows the cell paints: its wrap rows, else one.
+    fn height(&self) -> usize {
+        self.starts.as_ref().map_or(1, |starts| starts.len().max(1))
+    }
+
+    /// Code of screen row `part`, in increasing `part` order. With wrap off
+    /// the one row starts at the pan `col_offset`; a wrap row past the
+    /// cell's last one (the taller side of a split row) is empty.
+    fn code(&mut self, part: usize, col_offset: usize, palette: Palette) -> Vec<CodeSpan> {
+        let offset = match &self.starts {
+            None => col_offset,
+            Some(starts) => match starts.get(part) {
+                Some(&offset) => offset,
+                None => return Vec::new(),
+            },
+        };
+        match (self.starts.is_some(), self.cell.kind) {
+            (true, DiffCellKind::Add | DiffCellKind::Del | DiffCellKind::Ctx) => {
+                self.cursor.slice(offset, self.code_w)
+            }
+            _ => paint_code_parts(self.cell, self.syntax, offset, self.code_w, palette),
+        }
+    }
+}
+
+/// Spans of one painted row of `cell`: gutter, rule, sign, `code_parts`
+/// (from [`CellRows::code`]), and the blank pad to `width`. `first` marks
+/// the cell's first row, which carries the line number, comment mark, and
+/// sign.
 fn paint_cell_spans(
     cell: &DiffCell,
     width: u16,
     gutter: usize,
-    col_offset: usize,
-    wrap: bool,
-    wrap_part: usize,
+    first: bool,
+    code_parts: Vec<CodeSpan>,
     palette: Palette,
     state: &AppState,
     overlay: Option<Color>,
-    syntax: &[CodeSpan],
 ) -> Vec<Span<'static>> {
     let ascii = state.ascii;
     let width = width as usize;
-    let mark_w = comment_mark_cols(ascii);
-    let code_w = cell_code_width(width, gutter.saturating_add(mark_w));
-    let first = !wrap || wrap_part == 0;
     let line_comment = cell.line_no.and_then(|n| state.diff_line_comment(n));
     let comment = if first { line_comment } else { None };
     // Every painted row of a line with an open comment underlines its code
@@ -4621,19 +4665,6 @@ fn paint_cell_spans(
         accent.unwrap_or_default().add_modifier(Modifier::BOLD),
         chrome_bg,
     );
-    let code_off = if wrap {
-        wrap_col_starts(&cell.text, code_w)
-            .get(wrap_part)
-            .copied()
-            .unwrap_or(usize::MAX)
-    } else {
-        col_offset
-    };
-    let code_parts = if wrap && code_off == usize::MAX {
-        Vec::new()
-    } else {
-        paint_code_parts(cell, syntax, code_off, code_w, palette)
-    };
     let used = visible_width(&line_no)
         + 4
         + code_parts

@@ -28,8 +28,8 @@ You are helping the user review the status of all git repositories in the curren
 - The CLI reads `.workspace-status-config.json` from the current workspace root; repos at or under a `hiddenPaths` entry are hidden unless `-a` or `--all` is passed; repos under an `ignoredPaths` entry are never shown (unless named on the command line)
 - Optional `defaultBranches` map (repo path → branch) overrides the default branch for classification, markers, ordering, and `--default-branch` / TUI `d`; without an entry, defaults are derived as today
 - `maxDepth` (default **3**) controls how many path segments below cwd are searched for git repos (so `acme/packages/*` is included by default)
-- Optional `editor` for TUI `e` (same shape as `$EDITOR`). Omit the key or set `"editor": "vim"` for vim (the default). `"editor": "cursor"` opens Cursor IDE. Config overrides `$EDITOR` / `$VISUAL`.
-- Optional `diffTool` for TUI `E` (default vimdiff). `"diffTool": "cursor --diff --wait"` opens Cursor and keeps HEAD temps until the CLI exits. No `$EDITOR` fallback.
+- Optional `editor` for TUI `e` (same shape as `$EDITOR`), in the user config file only (`~/.config/my-workspace-status/config.json`; a workspace file that sets it fails to load). Omit the key or set `"editor": "vim"` for vim (the default). `"editor": "cursor"` opens Cursor IDE. Config overrides `$EDITOR` / `$VISUAL`.
+- Optional `diffTool` for TUI `E` (default vimdiff), in the user config file only. `"diffTool": "cursor --diff --wait"` opens Cursor and keeps HEAD temps until the CLI exits. No `$EDITOR` fallback.
 - Pass one or more repo paths (e.g. `dotfiles`, `dotfiles notes`) to limit output to those repos; named repos are included even when under `hiddenPaths` or `ignoredPaths`
 - The CLI already formats its own output, so prefer showing it as-is
 

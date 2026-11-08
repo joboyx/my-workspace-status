@@ -20,6 +20,7 @@
 /// Only part of `seed` is used here.
 #[allow(dead_code)]
 mod common {
+    pub mod fixture;
     pub mod hscroll;
     pub mod seed;
 }

@@ -14,7 +14,11 @@ mod reference;
 mod store;
 mod target;
 
-pub use export::{copy_to_clipboard, export_markdown};
+pub use export::{export_markdown, HOST_CLIPBOARD_TIME_LIMIT};
+// Test builds write no OSC 52 and run no host clipboard tool from the
+// interpreter.
+#[cfg(not(test))]
+pub use export::{copy_with_host_tool, write_osc52};
 pub use overlay::{
     comment_key_label, comment_overlay_footer_save, CommentExport, CommentPrompt,
     COMMENT_OVERLAY_CHROME_ROWS, COMMENT_OVERLAY_FOOTER_EDIT, COMMENT_OVERLAY_MAX_BODY_LINES,

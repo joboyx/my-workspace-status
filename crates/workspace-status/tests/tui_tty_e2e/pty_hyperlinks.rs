@@ -20,10 +20,10 @@ const APP_REPO: &str = "octo/demo";
 /// Subject of the `app` commit that adds `my notes.txt`.
 const NOTES_COMMIT: &str = "notes-link";
 
-/// A diff pane title paints `app/my notes.txt`, or `app/"my notes.txt"`
-/// when git C-quotes the path.
+/// A diff pane title paints the raw path `app/my notes.txt`, never the
+/// C-quoted `app/"my notes.txt"` git prints without `-z`.
 fn notes_diff_title(screen: &str) -> bool {
-    screen.contains("app/my notes.txt") || screen.contains("app/\"my notes.txt\"")
+    screen.contains("app/my notes.txt") && !screen.contains("\"my notes.txt\"")
 }
 
 /// No frame links a file name: the tree row, the working-tree diff title,
@@ -62,7 +62,14 @@ fn pty_emits_no_osc8_file_link() {
     );
 
     // Commit-files list of the notes commit (file row + footer hash).
-    // The app row sits right above its first file row.
+    // Rows sort by raw path, so `README.md` sits between the app row and
+    // `my notes.txt`.
+    tui.key('k');
+    tui.wait_pred(
+        |screen| tree_cursor_on(screen, "README.md"),
+        "k moves onto README.md",
+        WAIT,
+    );
     tui.key('k');
     tui.wait_pred(
         |screen| tree_cursor_on(screen, "app") && screen.contains(NOTES_COMMIT),
@@ -125,7 +132,7 @@ fn pty_emits_no_osc8_file_link() {
     tui.esc();
     tui.wait_pred(
         |screen| {
-            !notes_diff_title(screen)
+            !screen.contains("app/my notes.txt")
                 && links_since(&tui, files_focused)
                     .iter()
                     .any(|(url, _)| *url == commit_url)

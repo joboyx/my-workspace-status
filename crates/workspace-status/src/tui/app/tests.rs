@@ -2,7 +2,7 @@ use super::*;
 use crate::config::WorkspaceStatusConfig;
 use crate::git::{exec_git, git_binary, list_local_branches, stage_file};
 use crate::parallel::FETCH_CONCURRENCY;
-use crate::testutil::{app_state, git, init_repo, repo_snapshot};
+use crate::testutil::{app_state, git, init_repo, panic_hook_lock, repo_snapshot};
 use crate::tui::action::{Action, Effect};
 use crate::tui::branches::DIRTY_WORKTREE_STATUS;
 use crate::tui::pointer_shape::PointerShape;
@@ -180,7 +180,113 @@ impl Write for SharedBuf {
 }
 
 #[test]
+fn panic_hook_keeps_worker_panics_off_the_screen_and_prints_other_threads() {
+    use crate::tui::effect::{run_job, JobOutcome};
+    use std::sync::atomic::AtomicUsize;
+
+    const WORKER_PANIC: &str = "boom in a worker job (hook test)";
+    const OTHER_PANIC: &str = "boom on a helper thread (hook test)";
+    static NO_BAR: AtomicBool = AtomicBool::new(false);
+    static NO_POINTER: AtomicBool = AtomicBool::new(false);
+    static PRINTED_WORKER: AtomicUsize = AtomicUsize::new(0);
+    static PRINTED_OTHER: AtomicUsize = AtomicUsize::new(0);
+
+    let _serial = panic_hook_lock();
+    // The previous hook counts the panics of this test that reach it;
+    // panics of tests that run at the same time do not count.
+    std::panic::set_hook(Box::new(|info| {
+        let payload = info.payload();
+        let text = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+        match text {
+            Some(WORKER_PANIC) => PRINTED_WORKER.fetch_add(1, Ordering::SeqCst),
+            Some(OTHER_PANIC) => PRINTED_OTHER.fetch_add(1, Ordering::SeqCst),
+            _ => 0,
+        };
+    }));
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&seen);
+    install_panic_hook(&NO_BAR, &NO_POINTER, move || {
+        SharedBuf(std::sync::Arc::clone(&sink))
+    });
+    TERMINAL_SET_UP.store(true, Ordering::SeqCst);
+
+    let worker =
+        thread::spawn(|| run_job(Box::new(|| -> JobOutcome { panic!("{}", WORKER_PANIC) })))
+            .join()
+            .expect("run_job catches the panic");
+    let other = thread::spawn(|| panic!("{}", OTHER_PANIC)).join();
+
+    TERMINAL_SET_UP.store(false, Ordering::SeqCst);
+    // Put the default hook back for the other tests.
+    drop(std::panic::take_hook());
+
+    let message = worker.err().expect("the job panicked");
+    let at = message
+        .strip_prefix(&format!("{WORKER_PANIC} at "))
+        .unwrap_or_else(|| panic!("panic message, then where: {message:?}"));
+    assert!(
+        at.starts_with(&format!("{}:", file!())),
+        "the location names this file: {at:?}"
+    );
+    assert_eq!(
+        PRINTED_WORKER.load(Ordering::SeqCst),
+        0,
+        "a worker panic is not printed into the alternate screen"
+    );
+    assert!(other.is_err(), "the helper thread panicked");
+    assert_eq!(
+        PRINTED_OTHER.load(Ordering::SeqCst),
+        1,
+        "a panic on a thread that is not a worker job still prints"
+    );
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "no panic off the TUI thread restores the terminal"
+    );
+}
+
+#[test]
+fn quit_runtime_shutdown_does_not_wait_for_a_long_blocking_job() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("current-thread runtime");
+    let (started_tx, started_rx) = mpsc::channel();
+    rt.spawn_blocking(move || {
+        started_tx.send(()).unwrap();
+        thread::sleep(Duration::from_secs(10));
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the blocking job started");
+    // The real wait reads a process-wide count that other tests may hold;
+    // this test checks only that the wait runs, and that it runs first.
+    let waited = AtomicBool::new(false);
+    let start = std::time::Instant::now();
+    shut_down_runtime(rt, RUNTIME_SHUTDOWN_GRACE, || {
+        assert!(
+            start.elapsed() < RUNTIME_SHUTDOWN_GRACE,
+            "the user-work wait runs before the worker grace"
+        );
+        waited.store(true, Ordering::SeqCst);
+    });
+    assert!(
+        waited.load(Ordering::SeqCst),
+        "quit waits for stashed changes to come back"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "quit waited {:?} for a blocking job",
+        start.elapsed()
+    );
+}
+
+#[test]
 fn panic_hook_restores_terminal_and_clears_progress() {
+    let _serial = panic_hook_lock();
     static SHOWN: AtomicBool = AtomicBool::new(false);
     static POINTER: AtomicBool = AtomicBool::new(false);
     TermProgress::with_flag(true, &SHOWN)
