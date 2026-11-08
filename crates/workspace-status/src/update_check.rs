@@ -39,8 +39,10 @@ const LATEST_RELEASE_URL: &str =
 
 /// GET a GitHub API URL with `curl`. `max_time_secs` is `--max-time`.
 ///
-/// `WORKSPACE_STATUS_GITHUB_TOKEN` adds a Bearer header when set. Missing
-/// `curl`, a non-zero exit, or non-UTF-8 stdout is an error.
+/// `WORKSPACE_STATUS_GITHUB_TOKEN` adds a Bearer header when set. curl
+/// reads that header from its stdin (`-H @-`, curl 7.55 or later), so the
+/// token is not in the argv that `ps` shows. Missing `curl`, a non-zero
+/// exit, or non-UTF-8 stdout is an error.
 pub(crate) fn github_get(url: &str, max_time_secs: &str) -> Result<String, String> {
     let mut cmd = Command::new("curl");
     cmd.args([
@@ -52,21 +54,29 @@ pub(crate) fn github_get(url: &str, max_time_secs: &str) -> Result<String, Strin
         "-H",
         "Accept: application/vnd.github+json",
     ]);
-    if let Ok(token) = env::var("WORKSPACE_STATUS_GITHUB_TOKEN") {
-        let trimmed = token.trim();
-        if !trimmed.is_empty() {
-            cmd.arg("-H")
-                .arg(format!("Authorization: Bearer {trimmed}"));
-        }
+    let auth_header = env::var("WORKSPACE_STATUS_GITHUB_TOKEN")
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+        .map(|token| format!("Authorization: Bearer {token}\n"));
+    if auth_header.is_some() {
+        cmd.args(["-H", "@-"]).stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
     }
-    cmd.arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let output = cmd.output().map_err(|err| err.to_string())?;
+    cmd.arg(url).stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut child = cmd.spawn().map_err(|err| err.to_string())?;
+    let written = match (auth_header, child.stdin.take()) {
+        // Dropping stdin after the write closes it, so curl sees the end
+        // of the header list.
+        (Some(header), Some(mut stdin)) => stdin.write_all(header.as_bytes()),
+        _ => Ok(()),
+    };
+    let output = child.wait_with_output().map_err(|err| err.to_string())?;
     if !output.status.success() {
         return Err("curl failed".into());
     }
+    written.map_err(|err| err.to_string())?;
     String::from_utf8(output.stdout).map_err(|err| err.to_string())
 }
 
