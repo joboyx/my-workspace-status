@@ -1,5 +1,5 @@
 use super::*;
-use crate::testutil::unique_dir;
+use crate::testutil::{abs_path, unique_dir};
 use std::fs;
 
 #[test]
@@ -857,9 +857,10 @@ fn theme_mode_key_parses_and_rejects_bad_values() {
 
 #[test]
 fn runtime_keys_parse_valid_values() {
+    let comments = abs_path("/var/ws/comments.json");
     let cfg = load_layered_home(
             Some(
-                r#"{"theme":" dracula ","themeMode":"light","glyphs":"ascii","watchMs":0,"fetchMs":60000,"fetchConcurrency":4,"updateCheck":false,"updateCheckStore":"~/state/update-check.json","commentStore":"/var/ws/comments.json","viewedStore":"~/viewed.json","uiStore":"~/state/ui-state.json","git":"git-wrapper","termProgress":false,"smoothScroll":false,"prPolling":false,"prTitleCommand":"~/bin/pr-title"}"#,
+                &format!(r#"{{"theme":" dracula ","themeMode":"light","glyphs":"ascii","watchMs":0,"fetchMs":60000,"fetchConcurrency":4,"updateCheck":false,"updateCheckStore":"~/state/update-check.json","commentStore":"{comments}","viewedStore":"~/viewed.json","uiStore":"~/state/ui-state.json","git":"git-wrapper","termProgress":false,"smoothScroll":false,"prPolling":false,"prTitleCommand":"~/bin/pr-title"}}"#),
             ),
             None,
             Some("/home/demo"),
@@ -876,7 +877,7 @@ fn runtime_keys_parse_valid_values() {
             fetch_concurrency: Some(4),
             update_check: Some(false),
             update_check_store: Some(PathBuf::from("/home/demo/state/update-check.json")),
-            comment_store: Some(PathBuf::from("/var/ws/comments.json")),
+            comment_store: Some(PathBuf::from(comments)),
             viewed_store: Some(PathBuf::from("/home/demo/viewed.json")),
             ui_store: Some(PathBuf::from("/home/demo/state/ui-state.json")),
             git: Some(PathBuf::from("git-wrapper")),
@@ -890,12 +891,13 @@ fn runtime_keys_parse_valid_values() {
         load_runtime_key("prPolling", "true").unwrap().pr_polling,
         Some(true)
     );
+    let pr_title = abs_path("/opt/bin/pr-title");
     for (raw, want) in [
-        (r#""/opt/bin/pr-title""#, "/opt/bin/pr-title"),
-        (r#""pr-title""#, "pr-title"),
+        (format!(r#""{pr_title}""#), pr_title.as_str()),
+        (r#""pr-title""#.to_string(), "pr-title"),
     ] {
         assert_eq!(
-            load_runtime_key("prTitleCommand", raw)
+            load_runtime_key("prTitleCommand", &raw)
                 .unwrap()
                 .pr_title_command,
             Some(PathBuf::from(want)),
@@ -912,13 +914,14 @@ fn runtime_keys_parse_valid_values() {
             .update_check,
         Some(true)
     );
+    let git = abs_path("/usr/local/bin/git");
     for (raw, want) in [
-        (r#""/usr/local/bin/git""#, "/usr/local/bin/git"),
-        (r#""~/bin/git""#, "/home/demo/bin/git"),
-        (r#""git""#, "git"),
+        (format!(r#""{git}""#), git.as_str()),
+        (r#""~/bin/git""#.to_string(), "/home/demo/bin/git"),
+        (r#""git""#.to_string(), "git"),
     ] {
         assert_eq!(
-            load_runtime_key("git", raw).unwrap().git,
+            load_runtime_key("git", &raw).unwrap().git,
             Some(PathBuf::from(want)),
             "git: {raw}"
         );
@@ -1059,8 +1062,11 @@ fn runtime_path_keys_need_home_for_tilde() {
 
 #[test]
 fn runtime_keys_merge_per_key_workspace_wins() {
+    let git = abs_path("/opt/git");
     let cfg = load_layered_home(
-        Some(r#"{"theme":"dracula","watchMs":4000,"git":"/opt/git"}"#),
+        Some(&format!(
+            r#"{{"theme":"dracula","watchMs":4000,"git":"{git}"}}"#
+        )),
         Some(r#"{"hiddenPaths":[],"theme":"monokai","fetchMs":0}"#),
         Some("/home/demo"),
     )
@@ -1068,7 +1074,7 @@ fn runtime_keys_merge_per_key_workspace_wins() {
     assert_eq!(cfg.runtime.theme, Some(ThemeId::Monokai), "workspace wins");
     assert_eq!(cfg.runtime.watch_ms, Some(4000), "user key kept");
     assert_eq!(cfg.runtime.fetch_ms, Some(0));
-    assert_eq!(cfg.runtime.git, Some(PathBuf::from("/opt/git")));
+    assert_eq!(cfg.runtime.git, Some(PathBuf::from(git)));
 }
 
 #[test]
@@ -1213,9 +1219,10 @@ fn pr_polling_is_allowed_in_either_file_and_the_workspace_wins() {
 
 #[test]
 fn user_file_sets_user_only_keys_under_a_workspace_file() {
+    let (comments, viewed) = (abs_path("/c.json"), abs_path("/v.json"));
     let cfg = load_layered_home(
             Some(
-                r#"{"git":"git-wrapper","updateCheckStore":"~/u.json","commentStore":"/c.json","viewedStore":"/v.json","uiStore":"~/ui.json","prTitleCommand":"~/bin/pr-title"}"#,
+                &format!(r#"{{"git":"git-wrapper","updateCheckStore":"~/u.json","commentStore":"{comments}","viewedStore":"{viewed}","uiStore":"~/ui.json","prTitleCommand":"~/bin/pr-title"}}"#),
             ),
             Some(r#"{"hiddenPaths":[],"theme":"monokai"}"#),
             Some("/home/demo"),
@@ -1230,8 +1237,8 @@ fn user_file_sets_user_only_keys_under_a_workspace_file() {
         cfg.runtime.update_check_store,
         Some(PathBuf::from("/home/demo/u.json"))
     );
-    assert_eq!(cfg.runtime.comment_store, Some(PathBuf::from("/c.json")));
-    assert_eq!(cfg.runtime.viewed_store, Some(PathBuf::from("/v.json")));
+    assert_eq!(cfg.runtime.comment_store, Some(PathBuf::from(comments)));
+    assert_eq!(cfg.runtime.viewed_store, Some(PathBuf::from(viewed)));
     assert_eq!(
         cfg.runtime.ui_store,
         Some(PathBuf::from("/home/demo/ui.json"))

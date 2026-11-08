@@ -292,6 +292,15 @@ mod tests {
         format!("'{}'", text.replace('\'', "'\\''"))
     }
 
+    /// `path` as a shell reads it. Git runs a remote's `uploadpack` and
+    /// `receivepack` through `sh`, also on Windows, where an unquoted `\`
+    /// is an escape and `C:/...` is a path.
+    fn sh_path(path: &Path) -> String {
+        path.display()
+            .to_string()
+            .replace(std::path::MAIN_SEPARATOR, "/")
+    }
+
     /// The fake `upload-pack` / `receive-pack`: check in to the gate
     /// directory, wait until all repos have checked in, then run the real
     /// `git <pack>`. A wait past [`GATE_GUARD`] writes `broken` and fails,
@@ -315,10 +324,10 @@ mod tests {
              \x20 arrived\n\
              done\n\
              exec {git} {pack} \"$@\"\n",
-            gate = sh_quote(&gate.display().to_string()),
+            gate = sh_quote(&sh_path(gate)),
             need = REPOS,
             tries = GATE_GUARD.as_millis() / 20,
-            git = sh_quote(&git_binary().display().to_string()),
+            git = sh_quote(&sh_path(git_binary())),
         )
     }
 
@@ -369,19 +378,11 @@ mod tests {
                 git(&repo, &["push", "-u", "origin", "main", "--quiet"]);
                 git(
                     &repo,
-                    &[
-                        "config",
-                        "remote.origin.uploadpack",
-                        upload.to_str().unwrap(),
-                    ],
+                    &["config", "remote.origin.uploadpack", &sh_path(&upload)],
                 );
                 git(
                     &repo,
-                    &[
-                        "config",
-                        "remote.origin.receivepack",
-                        receive.to_str().unwrap(),
-                    ],
+                    &["config", "remote.origin.receivepack", &sh_path(&receive)],
                 );
                 repos.push(repo);
             }

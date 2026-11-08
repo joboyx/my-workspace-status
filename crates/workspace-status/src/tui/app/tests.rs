@@ -374,7 +374,7 @@ fn press_only_gg_runs_the_loop_decode_on_arrival_instants() {
         action
     };
 
-    let t0 = Instant::now() - Duration::from_secs(5);
+    let t0 = crate::testutil::instant_ago(Duration::from_secs(5));
     let mut app = fresh();
     assert_eq!(key_at(&mut app, t0), Some(Action::ArmGChord));
     assert_eq!(

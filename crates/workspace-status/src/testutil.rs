@@ -20,7 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
@@ -240,6 +240,33 @@ pub fn unique_dir(prefix: &str) -> PathBuf {
     ))
 }
 
+/// `unix_path` (`/opt/git`) as an absolute path on this host: on Windows a
+/// path with no drive is relative, so it gets one there.
+pub fn abs_path(unix_path: &str) -> String {
+    if cfg!(windows) {
+        format!("C:{unix_path}")
+    } else {
+        unix_path.to_string()
+    }
+}
+
+/// The instant `ago` before now, for a test about something that happened
+/// earlier.
+///
+/// `Instant::now() - ago` panics on Windows while the host has been up for
+/// less than `ago`, because the clock counts from boot. This waits until the
+/// clock has room instead, so keep `ago` to seconds. For a longer age, land
+/// the event at now and draw a later frame ([`crate::tui::AppState`]'s
+/// `frame_now`).
+pub fn instant_ago(ago: Duration) -> Instant {
+    loop {
+        if let Some(at) = Instant::now().checked_sub(ago) {
+            return at;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// The argument that ends a [`write_sh_script`] script before its body.
 #[cfg(target_os = "macos")]
 const SH_SCRIPT_WARM_UP: &str = "--warm-up";
@@ -431,6 +458,19 @@ mod tests {
         let names: std::collections::HashSet<PathBuf> =
             (0..2_000).map(|_| unique_dir("ws-unique")).collect();
         assert_eq!(names.len(), 2_000);
+    }
+
+    #[test]
+    fn instant_ago_is_at_least_that_long_ago() {
+        let ago = Duration::from_millis(250);
+        assert!(instant_ago(ago).elapsed() >= ago);
+    }
+
+    #[test]
+    fn abs_path_is_absolute_on_this_host_and_keeps_its_tail() {
+        let path = abs_path("/opt/git");
+        assert!(Path::new(&path).is_absolute(), "{path}");
+        assert!(path.ends_with("/opt/git"), "{path}");
     }
 
     #[test]

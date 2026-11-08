@@ -1578,7 +1578,9 @@ mod tests {
             .into_iter()
             .map(|(kind, name)| StoreProbe {
                 kind,
-                path: PathBuf::from("/home/u/.local/state/my-workspace-status").join(name),
+                // Spelled out, not `join`ed: tests read this text back with
+                // the separator of a Linux host, whatever host runs them.
+                path: PathBuf::from(format!("/home/u/.local/state/my-workspace-status/{name}")),
                 read: StoreRead::Missing,
             })
             .collect(),

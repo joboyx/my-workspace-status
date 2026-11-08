@@ -205,7 +205,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
 }
 
 /// [`draw`] with the frame clock pinned to `now`: a scroll glide paints
-/// its step for that instant.
+/// its step for that instant, and a PR age and stale mark read it.
 pub(crate) fn draw_at(frame: &mut Frame<'_>, state: &mut AppState, now: Instant) {
     state.frame_now = now;
     state.prune_expired_flashes();

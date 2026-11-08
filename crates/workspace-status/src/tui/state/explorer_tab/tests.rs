@@ -947,11 +947,11 @@ fn explorer_tree_search_is_parked_per_tab_and_survives_previews() {
 #[test]
 fn zz_window_reads_the_key_arrival_instant() {
     use crate::tui::keys::InputMode;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     let mut app = state();
     open_root(&mut app);
     assert_eq!(cursor_rel(&app), "src");
-    let first = Instant::now() - Duration::from_secs(5);
+    let first = crate::testutil::instant_ago(Duration::from_secs(5));
     app.begin_input(first);
     let _ = app.dispatch(Action::FoldToggle);
     app.end_input();

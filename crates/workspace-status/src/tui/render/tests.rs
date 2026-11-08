@@ -1998,7 +1998,11 @@ fn explorer_tree_double_click_reads_the_press_arrival_instant() {
             state.end_input();
         };
         for (first, gap, double) in [
-            (Instant::now() - Duration::from_secs(5), 399, true),
+            (
+                crate::testutil::instant_ago(Duration::from_secs(5)),
+                399,
+                true,
+            ),
             (Instant::now(), 401, false),
         ] {
             let (mut state, cell) = open();
@@ -12922,9 +12926,7 @@ fn toast_ascii_and_no_color_fallbacks() {
 
 /// An instant `ms` before now, for a toast part way through its life.
 fn toast_pushed_ago(ms: u64) -> Instant {
-    Instant::now()
-        .checked_sub(std::time::Duration::from_millis(ms))
-        .expect("host uptime exceeds the toast TTL")
+    crate::testutil::instant_ago(std::time::Duration::from_millis(ms))
 }
 
 #[test]
@@ -17824,7 +17826,7 @@ fn stale_tree_pr_badge_paints_muted() {
     let palette = ThemeId::TokyoNight.palette();
     let mut state = pr_state(&[branch_repo("app", "feature")], true);
     state.set_pr_poll_mode(crate::tui::pr_poll::PrPollMode::Every(50));
-    let landed = Instant::now() - std::time::Duration::from_secs(1);
+    let landed = crate::testutil::instant_ago(std::time::Duration::from_secs(1));
     assert!(state.apply_pr_lookup_at(
         Path::new("app"),
         "feature",
@@ -21064,7 +21066,7 @@ fn graph_worktree_badges_paint_each_state_and_stale_muted() {
                         state.ascii = ascii;
                         state.set_pr_poll_mode(crate::tui::pr_poll::PrPollMode::Every(50));
                         let landed = if stale {
-                            Instant::now() - std::time::Duration::from_secs(1)
+                            crate::testutil::instant_ago(std::time::Duration::from_secs(1))
                         } else {
                             Instant::now()
                         };
@@ -21348,7 +21350,7 @@ fn graph_header_chip_reads_state_ref_label_and_next_action() {
         "feature",
         Some(PR_REMOTE.into()),
         PrLookup::Found(found_pr_value()),
-        Instant::now() - std::time::Duration::from_secs(1),
+        crate::testutil::instant_ago(std::time::Duration::from_secs(1)),
     ));
     let chip = graph_pr_chip(&state, now).expect("stale chip");
     for span in chip.candidates[0]

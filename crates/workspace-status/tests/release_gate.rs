@@ -5,10 +5,10 @@
 //! every check passed on a main push, and only while that commit is still the
 //! tip of main. The main ruleset requires the checks by job name and lets
 //! only the release deploy key bypass them. These tests fail when a check job
-//! is missing from the gate or from the documented ruleset list, when
-//! tag-release gets a trigger of its own, or when the deploy key push path
-//! drifts. Settings and release check: [docs/architecture.md](../../../docs/architecture.md)
-//! (**Release gate**).
+//! is missing from the gate or from the documented ruleset list, when a check
+//! job sets `continue-on-error`, when tag-release gets a trigger of its own, or
+//! when the deploy key push path drifts. Settings and release check:
+//! [docs/architecture.md](../../../docs/architecture.md) (**Release gate**).
 
 const TEST_YML: &str = include_str!("../../../.github/workflows/test.yml");
 const TAG_RELEASE_YML: &str = include_str!("../../../.github/workflows/tag-release.yml");
@@ -16,11 +16,6 @@ const ARCHITECTURE_MD: &str = include_str!("../../../docs/architecture.md");
 
 /// Jobs of `test.yml` that are not checks: the gate and the release call.
 const RELEASE_JOBS: [&str; 2] = ["release-gate", "release"];
-
-/// Check jobs that run but do not gate a release: the Windows suite is not
-/// green yet. Each one sets `continue-on-error: true` and stays out of
-/// `release-gate.needs` and of the documented required checks.
-const NON_GATING_JOBS: [&str; 1] = ["cargo-windows"];
 
 /// Top-level `jobs:` entries of a workflow, as `(name, body)` in file order.
 ///
@@ -81,8 +76,17 @@ fn check_jobs() -> Vec<&'static str> {
     jobs(TEST_YML)
         .into_iter()
         .map(|(name, _)| name)
-        .filter(|name| !RELEASE_JOBS.contains(name) && !NON_GATING_JOBS.contains(name))
+        .filter(|name| !RELEASE_JOBS.contains(name))
         .collect()
+}
+
+/// True when a job body sets `continue-on-error`, on the job or on a step.
+/// Comment lines do not count.
+fn sets_continue_on_error(body: &str) -> bool {
+    body.lines()
+        .map(str::trim_start)
+        .filter(|line| !line.starts_with('#'))
+        .any(|line| line.contains("continue-on-error:"))
 }
 
 #[test]
@@ -95,9 +99,29 @@ fn jobs_parser_reads_top_level_jobs_only() {
 }
 
 #[test]
+fn continue_on_error_parser_finds_job_and_step_settings_only() {
+    assert!(sets_continue_on_error("    continue-on-error: true\n"));
+    assert!(sets_continue_on_error(
+        "    steps:\n      - run: x\n        continue-on-error: true\n"
+    ));
+    assert!(sets_continue_on_error(
+        "    steps:\n      - continue-on-error: true\n        run: x\n"
+    ));
+    assert!(!sets_continue_on_error(
+        "    # continue-on-error: true\n    steps:\n      - run: x\n"
+    ));
+}
+
+#[test]
 fn release_gate_needs_every_check_job() {
     let checks = check_jobs();
-    for expected in ["lint", "cargo", "cargo-macos", "tui-tty-desktop"] {
+    for expected in [
+        "lint",
+        "cargo",
+        "cargo-macos",
+        "cargo-windows",
+        "tui-tty-desktop",
+    ] {
         assert!(
             checks.contains(&expected),
             "test.yml must keep the `{expected}` check (the main ruleset requires checks by name)"
@@ -115,17 +139,12 @@ fn release_gate_needs_every_check_job() {
 }
 
 #[test]
-fn non_gating_jobs_cannot_fail_the_run_or_block_a_release() {
+fn no_check_job_sets_continue_on_error() {
     let all = jobs(TEST_YML);
-    let gate = needs(job(&all, "release-gate"));
-    for name in NON_GATING_JOBS {
+    for name in check_jobs() {
         assert!(
-            job(&all, name).contains("continue-on-error: true"),
-            "test.yml `{name}` is not gating yet and must set `continue-on-error: true`"
-        );
-        assert!(
-            !gate.contains(&name),
-            "release-gate must not need the non-gating `{name}` job"
+            !sets_continue_on_error(job(&all, name)),
+            "test.yml `{name}` gates the release and must not set `continue-on-error`: a failure would count as a pass"
         );
     }
 }
@@ -306,12 +325,6 @@ fn architecture_doc_lists_every_required_check() {
         assert!(
             line.contains(&format!("`{check}`")),
             "docs/architecture.md required checks must name `{check}`; the ruleset must match test.yml"
-        );
-    }
-    for name in NON_GATING_JOBS {
-        assert!(
-            !line.contains(&format!("`{name}`")),
-            "docs/architecture.md required checks must not name the non-gating `{name}`"
         );
     }
 }

@@ -331,8 +331,8 @@ pub fn classify_merged_into_default(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::abs_path;
     use std::fs;
-    use std::path::Path;
 
     #[test]
     fn parse_porcelain_branch_and_detached() {
@@ -378,40 +378,43 @@ detached
 
     #[test]
     fn resolve_remove_target_uses_listed_path() {
+        let (app, feat) = remove_target_paths();
         let entries = vec![
             GitWorktreeListEntry {
-                path: PathBuf::from("/tmp/app"),
+                path: app.clone(),
                 head: None,
                 branch: Some("main".into()),
                 bare: false,
                 detached: false,
             },
             GitWorktreeListEntry {
-                path: PathBuf::from("/tmp/app/.worktrees/feat"),
+                path: feat.clone(),
                 head: None,
                 branch: Some("feature/x".into()),
                 bare: false,
                 detached: false,
             },
         ];
-        let target = resolve_worktree_remove_target(
-            &entries,
-            Path::new("/tmp/app"),
-            Path::new("/tmp/app/.worktrees/feat"),
-        );
-        assert_eq!(target.git_path, PathBuf::from("/tmp/app/.worktrees/feat"));
-        assert_eq!(target.git_cwd, PathBuf::from("/tmp/app"));
+        let target = resolve_worktree_remove_target(&entries, &app, &feat);
+        assert_eq!(target.git_path, feat);
+        assert_eq!(target.git_cwd, app);
     }
 
     #[test]
     fn resolve_remove_target_falls_back_when_unlisted() {
-        let target = resolve_worktree_remove_target(
-            &[],
-            Path::new("/tmp/app"),
-            Path::new("/tmp/app/.worktrees/feat"),
-        );
-        assert_eq!(target.git_path, PathBuf::from("/tmp/app/.worktrees/feat"));
-        assert_eq!(target.git_cwd, PathBuf::from("/tmp/app"));
+        let (app, feat) = remove_target_paths();
+        let target = resolve_worktree_remove_target(&[], &app, &feat);
+        assert_eq!(target.git_path, feat);
+        assert_eq!(target.git_cwd, app);
+    }
+
+    /// A primary and its linked worktree that do not exist on disk, absolute
+    /// on this host so no current directory joins onto them.
+    fn remove_target_paths() -> (PathBuf, PathBuf) {
+        (
+            PathBuf::from(abs_path("/tmp/app")),
+            PathBuf::from(abs_path("/tmp/app/.worktrees/feat")),
+        )
     }
 
     #[test]

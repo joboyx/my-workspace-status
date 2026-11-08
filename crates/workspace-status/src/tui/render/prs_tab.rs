@@ -247,7 +247,7 @@ fn row_segments(
     width: usize,
 ) -> (Vec<TextSeg>, usize) {
     let ascii = state.ascii;
-    let stale = state.pr_is_stale(&row.checkout, Instant::now());
+    let stale = state.pr_is_stale(&row.checkout, state.frame_now);
     let glyph_role = pr_badge_role(row.pr.state, stale);
     let ref_role = if stale { SegRole::Muted } else { SegRole::Repo };
     let (mark, mark_role) = ci_mark(ascii, row);
@@ -327,7 +327,8 @@ fn header_segments(
     }
     let trailing = match view.checked.filter(|_| first) {
         Some(checked) => {
-            let secs = Instant::now()
+            let secs = state
+                .frame_now
                 .saturating_duration_since(checked.at)
                 .as_secs();
             let age = relative_age(now_unix, now_unix.saturating_sub_unsigned(secs));
@@ -741,8 +742,18 @@ mod tests {
     /// Paint `state` on a `cols` × `rows` frame; the terminal and its text,
     /// one line per row.
     fn paint(state: &mut AppState, cols: u16, rows: u16) -> (Terminal<TestBackend>, Vec<String>) {
+        paint_at(state, cols, rows, Instant::now())
+    }
+
+    /// [`paint`] with the frame clock at `now`.
+    fn paint_at(
+        state: &mut AppState,
+        cols: u16,
+        rows: u16,
+        now: Instant,
+    ) -> (Terminal<TestBackend>, Vec<String>) {
         let mut terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap();
-        terminal.draw(|frame| draw(frame, state)).unwrap();
+        terminal.draw(|frame| draw_at(frame, state, now)).unwrap();
         let buf = terminal.backend().buffer().clone();
         let text = (0..rows)
             .map(|y| (0..cols).map(|x| buf[(x, y)].symbol()).collect())
@@ -1108,7 +1119,7 @@ mod tests {
                 Some(GL_API.into()),
                 PrLookup::Failed(Some("401 Unauthorized".into())),
             ));
-            let hour_ago = Instant::now() - std::time::Duration::from_secs(3600);
+            let landed = Instant::now();
             assert!(state.apply_pr_lookup_at(
                 Path::new("app"),
                 "feature/ABC-123-retry",
@@ -1121,10 +1132,11 @@ mod tests {
                     "feature/ABC-123-retry",
                     "main"
                 )),
-                hour_ago,
+                landed,
             ));
             drop(terminal);
-            let (terminal, text) = paint(&mut state, 132, 30);
+            let hour_later = landed + std::time::Duration::from_secs(3600);
+            let (terminal, text) = paint_at(&mut state, 132, 30, hour_later);
             let buf = terminal.backend().buffer();
             let palette = state.theme.palette();
             let (y, error) = line_with(&text, "! glab (gitlab.com): 401 Unauthorized");

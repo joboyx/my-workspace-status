@@ -1316,7 +1316,7 @@ fn ctrl_c_expired_arm_is_a_fresh_prompt_not_quit() {
 /// fresh prompt.
 #[test]
 fn ctrl_c_window_reads_the_press_arrival_instant() {
-    let first = Instant::now() - Duration::from_secs(10);
+    let first = crate::testutil::instant_ago(Duration::from_secs(10));
     let window = Duration::from_millis(crate::tui::ctrl_c_exit::CTRL_C_EXIT_MS);
 
     let mut app = state();
@@ -11040,7 +11040,7 @@ fn expired_z_is_a_new_single_toggle() {
     focus_id(&mut app, "dir:app:src");
     app.dispatch(Action::FoldToggle);
     assert!(app.folds.contains("dir:app:src"));
-    app.z_pending_at = Some(Instant::now() - Duration::from_millis(500));
+    app.z_pending_at = Some(crate::testutil::instant_ago(Duration::from_millis(500)));
     app.dispatch(Action::FoldToggle);
     assert!(!app.folds.contains("dir:app:src"));
     assert!(!app.folds.contains("repo:app"));
@@ -11121,7 +11121,7 @@ fn g_chord_window_reads_the_key_arrival_instant_across_a_watch_apply() {
     let mut app = state();
     app.tabs
         .open_or_focus("app".into(), "main".into(), "HEAD".into());
-    let g_at = Instant::now() - Duration::from_secs(5);
+    let g_at = crate::testutil::instant_ago(Duration::from_secs(5));
     app.begin_input(g_at);
     assert_eq!(
         app.input_mode(),
@@ -11681,7 +11681,7 @@ fn double_click_window_reads_the_press_arrival_instant() {
     };
     // Both presses arrived long ago, 399 ms apart: the loop takes them
     // late, and they are still a double-click.
-    let first = Instant::now() - Duration::from_secs(5);
+    let first = crate::testutil::instant_ago(Duration::from_secs(5));
     let mut app = tree_app();
     let (col, row) = setup(&mut app);
     app.begin_input(first);

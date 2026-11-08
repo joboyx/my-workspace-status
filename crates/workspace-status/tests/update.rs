@@ -1,7 +1,9 @@
 //! `--update` prints newer GitHub Release notes, then execs the cargo-dist sidecar.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 
 // Only `unique_root` is used here; `git_env` serves the other test binaries.
@@ -13,6 +15,7 @@ fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_workspace-status"))
 }
 
+#[cfg(unix)]
 fn ws_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ws"))
 }
