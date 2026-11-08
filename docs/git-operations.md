@@ -295,7 +295,7 @@ git log --branches --since=15.days.ago --format=%ct
 
 ## Non-obvious semantics
 
-**Path lists are NUL-separated.** Every read that lists file paths (status, name-status, raw, numstat, `ls-files`) uses `-z`. Without `-z`, git C-quotes a path with a space (status), a non-ASCII byte (`core.quotePath`), a `"`, `\`, or a control character: `"caf\303\251.md"`. That quoted text is not a valid pathspec, so a stage or revert of the file fails, and it no longer matches the `--numstat -z` key, so the line counts are lost. With `-z`, every path is the raw name, decoded as lossy UTF-8. `exec_git_z` returns stdout untrimmed, so a leading or trailing space stays part of a path.
+**Path lists are NUL-separated.** Every read that parses file paths (status, name-status, raw, numstat, `ls-files`) uses `-z`. A status call that only checks for empty output does not need it. Without `-z`, git C-quotes a path with a space (status), a non-ASCII byte (`core.quotePath`), a `"`, `\`, or a control character: `"caf\303\251.md"`. That quoted text is not a valid pathspec, so a stage or revert of the file fails, and it no longer matches the `--numstat -z` key, so the line counts are lost. With `-z`, every path is the raw name, decoded as lossy UTF-8. `exec_git_z` returns stdout untrimmed, so a leading or trailing space stays part of a path.
 
 **Renames need both paths.** Staging only the new path leaves the deletion of the old path unstaged, and git then reports the pair as `D` + `A` rather than `R`. Writes apply to each path in order and stop at the first failure.
 
