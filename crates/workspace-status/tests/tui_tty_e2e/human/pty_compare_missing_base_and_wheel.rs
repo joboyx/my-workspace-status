@@ -3,7 +3,7 @@ use crate::seed::{compare_ahead_workspace, git};
 use crate::support::{
     panes_tree_unfocused_diff_focused, right_cursor_on, right_diff_has_focused_cursor,
     right_of_split, right_pane, status_row, tree_cursor_on, tree_has, tree_inactive_selection_on,
-    GIT_WAIT, RIGHT_PANE_COL, TREE_LABEL_COL, WAIT,
+    wait_screen, GIT_WAIT, RIGHT_PANE_COL, TREE_LABEL_COL, WAIT,
 };
 
 fn palette_open(screen: &str) -> bool {
@@ -104,6 +104,12 @@ fn compare_diff_pane_focused(screen: &str) -> bool {
             || status.contains("← files"))
 }
 
+/// The right pane paints the `beta.txt` diff, not the kept `alpha.txt` one.
+fn beta_diff_loaded(screen: &str) -> bool {
+    let right = right_pane(screen);
+    right.contains("beta-body") && !right.contains("alpha-body")
+}
+
 fn right_cursor_line(screen: &str) -> Option<String> {
     right_pane(screen)
         .lines()
@@ -188,36 +194,42 @@ fn pty_compare_wheel_moves_file_list_and_diff() {
     let (_root, workspace) = compare_ahead_workspace();
     let mut tui = PtySession::open(&workspace);
     open_app_vs_default(&mut tui);
-    tui.wait_pred(
+    let first_file = wait_screen(
+        &tui,
         cursor_on_alpha_first_file,
         "compare vs origin/main starts on alpha.txt, not beta.txt",
         GIT_WAIT,
     );
 
-    let alpha_row = tree_row_containing(&tui.screen(), "alpha.txt")
-        .unwrap_or_else(|| panic!("left compare alpha.txt row:\n{}", tui.screen()));
+    let alpha_row = tree_row_containing(&first_file, "alpha.txt")
+        .unwrap_or_else(|| panic!("left compare alpha.txt row:\n{first_file}"));
     tui.sgr_mouse(SGR_WHEEL_DOWN, TREE_LABEL_COL, alpha_row);
+    // The file list moves at once. The beta.txt diff comes later from a
+    // worker and puts the diff cursor back on its first row, so a wheel sent
+    // before that paint moves a row of the alpha.txt diff that the load undoes.
     tui.wait_pred(
-        cursor_on_beta_not_parked_tree,
-        "left compare wheel moves the file list to beta.txt (a no-op stays on alpha.txt; landing on app / workspace / README.md steals the parked tree)",
-        WAIT,
+        |screen| cursor_on_beta_not_parked_tree(screen) && beta_diff_loaded(screen),
+        "left compare wheel moves the file list to beta.txt and loads its diff (a no-op stays on alpha.txt; landing on app / workspace / README.md steals the parked tree)",
+        GIT_WAIT,
     );
 
     tui.enter();
-    tui.wait_pred(
-        compare_diff_pane_focused,
+    let focused = wait_screen(
+        &tui,
+        |screen| compare_diff_pane_focused(screen) && beta_diff_loaded(screen),
         "Enter focuses the compare DiffPane (▌, status drops focus right) and keeps beta.txt selected",
         WAIT,
     );
 
-    let before_cursor = right_cursor_line(&tui.screen())
-        .unwrap_or_else(|| panic!("focused ▌ on the compare DiffPane:\n{}", tui.screen()));
-    let body_row = right_pane_body_row(&tui.screen())
-        .unwrap_or_else(|| panic!("right pane body row:\n{}", tui.screen()));
+    let before_cursor = right_cursor_line(&focused)
+        .unwrap_or_else(|| panic!("focused ▌ on the compare DiffPane:\n{focused}"));
+    let body_row =
+        right_pane_body_row(&focused).unwrap_or_else(|| panic!("right pane body row:\n{focused}"));
     tui.sgr_mouse(SGR_WHEEL_DOWN, RIGHT_PANE_COL, body_row);
     tui.wait_pred(
         |screen| {
             beta_file_selected(screen)
+                && beta_diff_loaded(screen)
                 && right_cursor_line(screen).is_some_and(|line| line != before_cursor)
         },
         "right compare wheel moves the focused ▌ line (a no-op keeps the same DiffPane row; leaving beta.txt moves the file list)",
