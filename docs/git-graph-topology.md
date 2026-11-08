@@ -13,12 +13,12 @@ covers **how cells are painted**.
 ## Connection model
 
 Paint builds an internal directional model per cell (`up` / `down` / `left` /
-`right`) before choosing a glyph. Public `GraphCell` stays `{ ch, colorLane,
+`right`) before choosing a glyph. Public `GraphCell` stays `{ ch, color_lane,
 role }`.
 
 Colour ownership:
 
-| Content | `colorLane` |
+| Content | `color_lane` |
 | --- | --- |
 | Node | commit lane |
 | Horizontal parent edge / open / join | target (parent) lane |
@@ -144,7 +144,7 @@ That is the stash leaf. Do not invent a separate “stash chrome” metaphor
    commit chrono stream. Out-of-window `stash^1` is fetched into the model at
    load so it can park. True orphans (parent object missing) sit after
    uncommitted, newest-first. Extra parents are appended after the log-window
-   prefix (`windowCount`); autoload skip uses that prefix, not `commits.length`.
+   prefix (`window_count()`); autoload skip uses that prefix, not `commits.length`.
    Layout inserts extras into the git window by author date without reordering
    window rows; extra `%P` ids not in the layout set are dropped (no ghost waiter).
 3. The tip is **one node**: no second node under `◇`, and no **dangling** side rail.
@@ -217,7 +217,7 @@ disagrees, fix the code):
    tip-above-parent; parent outside window → lone free-lane `◇` (no fake spine tee).
 6. Subject: no leading `◇`.
 
-`stashRailCells` remains **commit↔commit densify** on commit spacers (historical
+`stash_rail_cells` remains **commit↔commit densify** on commit spacers (historical
 name; not stash leaf paint).
 
 ### Code map (where to change what)
@@ -277,7 +277,7 @@ Park-on-parent + 3b→◇ leaf paint landed (PR #54 era). Residual issues — do
 | One-node side tip (commit) | side `●` with nothing under it; join on older row |
 | HEAD | node becomes `⊙` / `@`; checkout chip gets nf-fa-crosshairs before the name (or standalone `[HEAD]` when detached) |
 | Stash side leaf | same as one-node side tip with `◇`; see S0–S7 |
-| Adjacent commits after densify remap (no stash) | densify elbows on the **spacer** between them; full overlay then `sliceCellsAroundLane`; layout stem cols unchanged |
+| Adjacent commits after densify remap (no stash) | densify elbows on the **spacer** between them; the full overlay is painted; layout stem cols unchanged |
 
 Schematic mockups are visual guidance — **DAG connectivity wins** when a
 drawing conflicts with the commit graph. For stash tips, the isomorphism to a

@@ -6,6 +6,8 @@ It drives the real `workspace-status` binary the way a person does: a PTY (and, 
 
 Git seeds live in `crates/workspace-status/tests/common/seed.rs`. `seed_two_tall_commit_files` adds a pair of long committed files so a file switch in a commit diff can prove the new view starts at the origin. `seed_two_file_long_message_repo` adds two commits with the same long message (`pair base` with one file, `pair tip` with two) so a depth-2 commit-files footer can scroll a message on one commit and prove another commit starts at the top. The tree hscroll oracle (clipped `very-long` vs `TAIL99`), file-diff tail (`UNIQUE_DIFF_TAIL`), and graph subject prefix (`UNIQUE_GRAP`) live in `tests/common/hscroll.rs`. The PTY harness extracts the left pane itself.
 
+Temp roots and the git env come from `crates/workspace-status/tests/common/fixture.rs` (std only, shared by every integration test binary). `unique_root(prefix)` creates `{prefix}-{pid}-{n}-{nanos}` on the spot under the canonical temp dir, so parallel tests never share a directory. `git_env()` sets the author and committer and points `GIT_CONFIG_GLOBAL` at `/dev/null` with `GIT_CONFIG_NOSYSTEM=1`. Pass it to every `git`, `git init` included, so host hooks and config stay out of the fixtures.
+
 ## What runs where
 
 | Path | How | Where it executes |
@@ -62,7 +64,7 @@ Tests that need polling pass `WS_STATUS_PR_POLL_MS` (300 ms); the poll-off test 
 
 ## Verify driver
 
-To watch the real binary run, against the same fake forge or against a live one, the verify skill drives it in a private tmux server: `.agents/skills/verify/SKILL.md` and `scripts/verify-tui.sh`. It is a test harness with the isolation rules of **Harness notes** (guarded by `crates/workspace-status/tests/release_watch.rs`), not the screenshot pipeline, and it does not replace a `pty_*` test.
+To watch the real binary run, against the same fake forge or against a live one, the verify skill drives it in a private tmux server: `.agents/skills/verify-workspace-status/SKILL.md`, its controller `wsctl` (JSON output), and the driver it calls, `scripts/verify-tui.sh`. It is a test harness with the isolation rules of **Harness notes** (guarded by `crates/workspace-status/tests/release_watch.rs`), not the screenshot pipeline, and it does not replace a `pty_*` test.
 
 ## Harness notes
 

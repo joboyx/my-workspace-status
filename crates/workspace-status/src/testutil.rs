@@ -336,6 +336,19 @@ fn clone_with_identity(root: &Path, remote: &Path, name: &str) -> PathBuf {
     dir
 }
 
+/// An upstream repo and a clone that tracks it, for pull tests.
+///
+/// Returns `(root, up, down)`. `up` is an [`init_repo`] repo at `root/up`.
+/// `down` is its clone at `root/down`, on `main` tracking `origin/main`,
+/// with a repo-local identity. The caller removes `root`.
+pub fn pull_fixture(prefix: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let root = unique_dir(prefix);
+    let up = root.join("up");
+    init_repo(&up);
+    let down = clone_with_identity(&root, &up, "down");
+    (root, up, down)
+}
+
 /// Build the "a maintainer force-pushed `main` and dropped bot commits" story.
 ///
 /// A bare remote gets a base commit and two bot commits from a maintainer

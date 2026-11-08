@@ -3,8 +3,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+
+#[path = "common/fixture.rs"]
+mod fixture;
+
+use fixture::{git_env, unique_root};
 
 fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_workspace-status"))
@@ -12,18 +15,6 @@ fn bin() -> PathBuf {
 
 fn ws_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ws"))
-}
-
-fn git_env() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("GIT_AUTHOR_NAME", "workspace-status e2e"),
-        ("GIT_AUTHOR_EMAIL", "workspace-status-e2e@example.invalid"),
-        ("GIT_COMMITTER_NAME", "workspace-status e2e"),
-        (
-            "GIT_COMMITTER_EMAIL",
-            "workspace-status-e2e@example.invalid",
-        ),
-    ]
 }
 
 fn git(cwd: &Path, args: &[&str]) {
@@ -42,6 +33,7 @@ fn seed_repo(workspace: &Path, name: &str, branch: &str, dirty: bool) {
     let init = Command::new("git")
         .args(["init", "-q", "-b", branch])
         .current_dir(&repo)
+        .envs(git_env())
         .status();
     if !init.map(|s| s.success()).unwrap_or(false) {
         git(&repo, &["init", "-q"]);
@@ -56,17 +48,7 @@ fn seed_repo(workspace: &Path, name: &str, branch: &str, dirty: bool) {
 }
 
 fn fixture() -> (PathBuf, PathBuf) {
-    // The macOS clock steps in microseconds, so two test threads can read
-    // the same nanos; the counter keeps their roots apart.
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let root = std::env::temp_dir().join(format!(
-        "workspace-status-rs-{}-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let root = unique_root("workspace-status-rs");
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     seed_repo(&workspace, "app", "main", true);
@@ -302,13 +284,7 @@ fn commit_file(repo: &Path, name: &str) {
 
 #[test]
 fn json_names_a_force_pushed_upstream_and_omits_it_elsewhere() {
-    let root = std::env::temp_dir().join(format!(
-        "workspace-status-rewrite-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = unique_root("workspace-status-rewrite");
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     // A maintainer pushes base + 2 bot commits, the checkout clones them,
@@ -363,13 +339,7 @@ fn json_names_a_force_pushed_upstream_and_omits_it_elsewhere() {
 
 #[test]
 fn merged_into_default_skips_same_commit_as_default_tip() {
-    let root = std::env::temp_dir().join(format!(
-        "workspace-status-merge-mark-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = unique_root("workspace-status-merge-mark");
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
@@ -773,11 +743,50 @@ fn invalid_ignored_paths_entry_fails_startup() {
 }
 
 #[test]
+fn json_and_plain_give_raw_paths_for_odd_file_names() {
+    let (root, workspace) = fixture();
+    let app = workspace.join("app");
+    // git's default; pinned so a user config cannot hide the quoting.
+    git(&app, &["config", "core.quotePath", "true"]);
+    fs::write(app.join("my file.txt"), "a\n").unwrap();
+    fs::write(app.join("old name.txt"), "o\n").unwrap();
+    git(&app, &["add", "my file.txt", "old name.txt"]);
+    git(&app, &["commit", "-q", "-m", "odd names"]);
+    fs::write(app.join("my file.txt"), "a\nb\n").unwrap();
+    git(&app, &["mv", "old name.txt", "new name.txt"]);
+    fs::write(app.join("café.md"), "c\n").unwrap();
+
+    let snapshot = run_json(&workspace, &["--json"]);
+    let app_json = snapshot["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["repo"] == "app")
+        .unwrap();
+    assert_eq!(
+        app_json["changes"],
+        serde_json::json!([
+            { "path": "README.md", "unstagedStatus": "M" },
+            { "path": "café.md", "untracked": true },
+            { "path": "my file.txt", "unstagedStatus": "M" },
+            { "path": "new name.txt", "stagedStatus": "R", "oldPath": "old name.txt" },
+        ])
+    );
+
+    let plain = run_plain(&workspace, &["--plain"]);
+    for name in ["my file.txt", "café.md", "new name.txt"] {
+        assert!(plain.contains(name), "{name} in {plain}");
+    }
+    assert!(!plain.contains('"'), "no C-quoted path: {plain}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn workspace_file_without_hidden_paths_starts() {
     let (root, workspace) = fixture();
     fs::write(
         workspace.join(".workspace-status-config.json"),
-        "{\"ignoredPaths\": [\"lib\"], \"editor\": \"cursor\"}\n",
+        "{\"ignoredPaths\": [\"lib\"], \"maxDepth\": 3}\n",
     )
     .unwrap();
     let snapshot = run_json(&workspace, &["--json"]);

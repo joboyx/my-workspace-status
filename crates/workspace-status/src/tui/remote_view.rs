@@ -15,6 +15,8 @@
 
 use std::path::Path;
 
+use workspace_status_graph::short_id;
+
 use super::pull_request::{commit_url, parse_remote, percent_encode, Forge, ForgeRepo};
 use crate::git;
 
@@ -38,7 +40,7 @@ pub fn not_forge_status(remote: &str) -> String {
 /// Status line when commit `sha` is on no branch of `remote`. Shows the
 /// short id.
 pub fn commit_not_on_remote_status(sha: &str, remote: &str) -> String {
-    format!("commit {} is not on {remote}", short_sha(sha))
+    format!("commit {} is not on {remote}", short_id(sha))
 }
 
 /// Status line when `branch` has no remote-tracking branch on `remote`.
@@ -70,11 +72,6 @@ pub fn opened_status(url: &str) -> String {
 /// Status line for a stash entry such as `stash@{0}`.
 pub fn stash_local_only_status(stash_ref: &str) -> String {
     format!("{stash_ref} is local only")
-}
-
-/// First seven characters of a commit id, the short id on screen.
-fn short_sha(sha: &str) -> &str {
-    sha.get(..7).unwrap_or(sha)
 }
 
 /// The revision a file or directory page opens at.
@@ -283,7 +280,7 @@ pub fn resolve(checkout: &Path, target: &RemoteTarget) -> Result<(ForgeRepo, Rem
                 }
                 FileRev::Commit(sha) => {
                     remote_commit(checkout, &remote, sha)?;
-                    let place = format!("{remote} at {}", short_sha(sha));
+                    let place = format!("{remote} at {}", short_id(sha));
                     (sha.clone(), sha.clone(), place)
                 }
             };

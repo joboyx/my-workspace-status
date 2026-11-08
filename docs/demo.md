@@ -49,6 +49,9 @@ From the repository root:
 
 The script wipes and recreates `tmp/demo-workspace`.
 Pass a directory as the first argument to seed somewhere else.
+The seed writes a `.ws-demo-seed` marker into DEST. It wipes DEST only when DEST is missing, empty, or holds that marker.
+It refuses `/`, `$HOME` and its parents, this repository and its parents, and any path in this repository outside `tmp/`.
+A DEST seeded before the marker existed is refused once: remove it by hand, then seed again.
 Local remotes live under `DEST/.remotes`. Scratch clones live under `DEST/.scratch`.
 Both go away when DEST is wiped.
 

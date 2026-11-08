@@ -15,6 +15,8 @@ pub const TAB_CLOSE: &str = "[\u{2717}]";
 
 pub const GIT_WAIT: Duration = Duration::from_secs(20);
 
+/// Settle pause of the Linux-only desktop e2e.
+#[cfg(target_os = "linux")]
 pub const SETTLE_MS: u64 = 200;
 
 pub fn tree_line_containing(screen: &str, needle: &str) -> Option<String> {
@@ -88,10 +90,12 @@ pub fn documented_space_reviewed(screen: &str) -> bool {
         && !screen.contains("[x]")
 }
 
+#[cfg(target_os = "linux")]
 pub fn op_finished(screen: &str, verb: &str) -> bool {
     screen.contains(&format!("{verb} 1 repo")) && !screen.contains("failed")
 }
 
+#[cfg(target_os = "linux")]
 pub fn tree_cleared_ahead_behind(screen: &str) -> bool {
     let left = left_tree(screen);
     !left.contains("v1") && !left.contains("^1")
@@ -922,6 +926,7 @@ pub fn right_of_split(line: &str) -> String {
 }
 
 /// Cells after `wip.txt` on the left-tree file row (trailing chrome).
+#[cfg(target_os = "linux")]
 pub fn after_wip_name(screen: &str) -> Option<String> {
     let line = tree_line_containing(screen, "wip.txt")?;
     let at = line.find("wip.txt")?;
@@ -929,6 +934,7 @@ pub fn after_wip_name(screen: &str) -> Option<String> {
 }
 
 /// Restored `wip.txt` on the merger tree. Badge `A` is the staged add.
+#[cfg(target_os = "linux")]
 pub fn merger_wip_added(screen: &str) -> bool {
     tree_has(screen, "wip.txt")
         && tree_has(screen, "merger")
@@ -936,12 +942,14 @@ pub fn merger_wip_added(screen: &str) -> bool {
 }
 
 /// Right pane still lists merger `stash@{0}` (`WIP on graph`).
+#[cfg(target_os = "linux")]
 pub fn graph_stash_still_listed(screen: &str) -> bool {
     let right = right_pane(screen);
     right.contains("WIP on graph") || right.contains("stash@{0}")
 }
 
 /// Pull, apply-only, drop-only, or stash-push toasts. Graph pop is `popped`.
+#[cfg(target_os = "linux")]
 pub fn no_pull_or_other_stash_write(screen: &str) -> bool {
     let crumb = ack_rows(screen);
     !crumb.contains("Pulled")
@@ -952,6 +960,7 @@ pub fn no_pull_or_other_stash_write(screen: &str) -> bool {
 }
 
 /// SEARCH / help / stash-menu / pull-idle toasts that are not graph pop.
+#[cfg(target_os = "linux")]
 pub fn no_wrong_stash_pop_overlays(screen: &str) -> bool {
     !screen.contains("SEARCH")
         && !screen.contains("MOVE")
@@ -963,6 +972,7 @@ pub fn no_wrong_stash_pop_overlays(screen: &str) -> bool {
 }
 
 /// Tab focused the merger graph. HEAD is clean. Stash is listed. Pop idle.
+#[cfg(target_os = "linux")]
 pub fn graph_focused_merger_stash_listed(screen: &str) -> bool {
     merger_graph_drilled_right(screen)
         && graph_pane_focused(screen)
@@ -974,6 +984,7 @@ pub fn graph_focused_merger_stash_listed(screen: &str) -> bool {
 }
 
 /// Tab lands on the uncommitted row. Stash is the next `j`.
+#[cfg(target_os = "linux")]
 pub fn graph_focused_merger_before_stash_pop(screen: &str) -> bool {
     graph_focused_merger_stash_listed(screen)
         && graph_cursor_on(screen, "working tree")
@@ -981,6 +992,7 @@ pub fn graph_focused_merger_before_stash_pop(screen: &str) -> bool {
 }
 
 /// Graph cursor on `stash@{0}` (`WIP on graph`). Hint `p` is pop stash.
+#[cfg(target_os = "linux")]
 pub fn stash_row_ready_to_pop(screen: &str) -> bool {
     let status = status_row(screen);
     graph_focused_merger_stash_listed(screen)
@@ -994,6 +1006,7 @@ pub fn stash_row_ready_to_pop(screen: &str) -> bool {
 
 /// Graph `p` popped `stash@{0}`: apply + drop. Apply-only / drop-only fail.
 /// The wait checks the `popped stash@{0}` toast (`after_ack`).
+#[cfg(target_os = "linux")]
 pub fn documented_graph_stash_pop(screen: &str) -> bool {
     let status = status_row(screen);
     graph_pane_focused(screen)

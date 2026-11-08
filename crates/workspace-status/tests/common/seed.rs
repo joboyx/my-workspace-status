@@ -5,25 +5,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::hscroll::{GRAPH_HSCROLL_TAIL, TREE_HSCROLL_DIR, TREE_HSCROLL_FILE};
 
-/// Author / committer plus isolated git config for e2e repos.
-pub fn git_env() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("GIT_AUTHOR_NAME", "workspace-status e2e"),
-        ("GIT_AUTHOR_EMAIL", "workspace-status-e2e@example.invalid"),
-        ("GIT_COMMITTER_NAME", "workspace-status e2e"),
-        (
-            "GIT_COMMITTER_EMAIL",
-            "workspace-status-e2e@example.invalid",
-        ),
-        ("GIT_CONFIG_GLOBAL", "/dev/null"),
-        ("GIT_CONFIG_NOSYSTEM", "1"),
-    ]
-}
+pub use super::fixture::{git_env, unique_root};
 
 /// Run `git` in `cwd` with [`git_env`]. Panics on non-zero exit.
 pub fn git(cwd: &Path, args: &[&str]) {
@@ -52,30 +38,6 @@ fn git_stdout_env(cwd: &Path, args: &[&str], extra: &[(&str, &str)]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-/// Unique temp directory: `{prefix}-{nanos}-{seq}`.
-///
-/// The macOS clock steps in microseconds, so two test threads can read the
-/// same `nanos`; the per-process counter `seq` keeps them apart.
-///
-/// The temp dir is canonical, because the binary canonicalizes the
-/// workspace root. On macOS the default `/var/folders/...` resolves to
-/// `/private/var/folders/...`, and a test that compares a path the binary
-/// passes on (diff tool argv, git cwd) must see the same spelling.
-pub fn unique_root(prefix: &str) -> PathBuf {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let temp = std::env::temp_dir()
-        .canonicalize()
-        .expect("canonical temp dir");
-    temp.join(format!(
-        "{prefix}-{}-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ))
-}
-
 /// Unique root plus a `workspace/` directory inside it.
 pub fn new_workspace(prefix: &str) -> (PathBuf, PathBuf) {
     let root = unique_root(prefix);
@@ -101,6 +63,7 @@ fn init_repo(repo: &Path, branch: &str) {
     let init = Command::new("git")
         .args(["init", "-q", "-b", branch])
         .current_dir(repo)
+        .envs(git_env())
         .status();
     if !init.map(|s| s.success()).unwrap_or(false) {
         git(repo, &["init", "-q"]);
