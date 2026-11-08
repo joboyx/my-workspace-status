@@ -1143,7 +1143,8 @@ pub struct PullQuietResult {
     /// The auto-stash push made a stash entry (it holds the tracked local
     /// changes until the pop).
     pub stashed: bool,
-    /// The auto-stash entry was not given back. The entry is kept. With no
+    /// The auto-stash entry was not given back. The entry stays in
+    /// `git stash list` unless the note says it is gone. With no
     /// [`stash_note`](Self::stash_note) the pop conflicted and the tree has
     /// conflict markers.
     pub stash_pop_failed: bool,
