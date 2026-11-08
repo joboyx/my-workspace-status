@@ -190,13 +190,16 @@ fn in_command_position(before: &[&str]) -> bool {
 /// `send-keys` could type a command line that starts the binary. Nothing here
 /// makes a session, a window or a pane (`new`, `new-session`, `new-window`,
 /// `split-window`, `respawn-pane`).
-const WSCTL_TMUX_SUBCOMMANDS: [&str; 5] = [
+const WSCTL_TMUX_SUBCOMMANDS: [&str; 4] = [
     "has-session",
     "display-message",
     "set-option",
     "resize-window",
-    "capture-pane",
 ];
+
+/// The only `set-option` form wsctl may use: hooks are options in tmux 3.x,
+/// so any other option could run a command.
+const WSCTL_SET_OPTION: &str = "set-option -g window-size manual";
 
 /// The tmux subcommand of every tmux call in `src` (no comment lines, no
 /// here-document bodies). A call is `tm` (wsctl's helper) or `tmux` in
@@ -312,6 +315,11 @@ fn wsctl_spawn_problems(src: &str) -> Vec<String> {
                     problems.push(format!("tmux subcommand `{sub}` is not allowed"));
                 }
             }
+        }
+    }
+    for line in code.lines().filter(|line| line.contains("set-option")) {
+        if !line.contains(WSCTL_SET_OPTION) {
+            problems.push(format!("only `{WSCTL_SET_OPTION}` is allowed: {line}"));
         }
     }
     problems

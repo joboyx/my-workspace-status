@@ -324,18 +324,18 @@ GH_MERGED=$(gh pr list -R cli/cli --state merged --limit 100 --json headRefName,
 GL_OPEN=$(glab api 'projects/gitlab-org%2Fcli/merge_requests?state=opened&per_page=100' | jq -r '[.[] | select(.source_project_id == .target_project_id)][0].source_branch // empty')
 GL_MERGED=$(glab api 'projects/gitlab-org%2Fcli/merge_requests?state=merged&per_page=100' | jq -r '[.[] | select(.source_project_id == .target_project_id)][0].source_branch // empty')
 
-ROOT=${WS_VERIFY_ROOT:-${TMPDIR:-/tmp}/ws-verify}; WS=$ROOT/live-fixture
-rm -rf "$WS"; mkdir -p "$WS"
+ROOT=${WS_VERIFY_ROOT:-${TMPDIR:-/tmp}/ws-verify}; LIVE=$ROOT/live-fixture
+rm -rf "$LIVE"; mkdir -p "$LIVE"
 mk() { # mk <dir> <origin> <branch>: a clean checkout on that branch; no fetch happens
-  git init -q -b main "$WS/$1" &&
-    git -C "$WS/$1" -c user.name=verify -c user.email=verify@example.invalid commit -q --allow-empty -m init &&
-    git -C "$WS/$1" remote add origin "$2" && git -C "$WS/$1" checkout -q -b "$3"
+  git init -q -b main "$LIVE/$1" &&
+    git -C "$LIVE/$1" -c user.name=verify -c user.email=verify@example.invalid commit -q --allow-empty -m init &&
+    git -C "$LIVE/$1" remote add origin "$2" && git -C "$LIVE/$1" checkout -q -b "$3"
 }
 mk gh-open   https://github.com/cli/cli.git        "$GH_OPEN"
 mk gh-merged https://github.com/cli/cli.git        "$GH_MERGED"
 mk gl-open   https://gitlab.com/gitlab-org/cli.git "$GL_OPEN"
 mk gl-merged https://gitlab.com/gitlab-org/cli.git "$GL_MERGED"
-relaunch --workspace "$WS"                          # no --fake-forge: the real gh and glab
+relaunch --workspace "$LIVE"                        # no --fake-forge: the real gh and glab
 
 # Wait for every badge to land, then capture: the PASS rule judges this screen.
 $V wait --regex "$RUN" 'gh-open .* [xArdP]($|[^[:alnum:]])' 20
