@@ -3,7 +3,9 @@
 //! Seeds a temp dir, then asserts git state and `--plain` / `--json`.
 //! The wipe guard tests run a copy of the script inside a fake repository
 //! under a temp root, with `HOME` pointed at a temp dir, so a guard bug can
-//! only delete temp files.
+//! only delete temp files. The one exception is the root test (`/`, `//`):
+//! there a bug in the root rule still meets two more refusals, because `/`
+//! holds the temp `HOME` and is not empty without the seed marker.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -103,10 +105,16 @@ impl GuardSandbox {
 
     /// The script refused `dest` and every canary is still there.
     fn assert_refused(&self, dest: &str) {
+        self.assert_refused_because(dest, "");
+    }
+
+    /// As `assert_refused`, and the refusal names `reason`.
+    fn assert_refused_because(&self, dest: &str, reason: &str) {
         let out = self.seed(dest);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(1), "dest {dest}: {stderr}");
         assert!(stderr.contains("refusing to wipe"), "dest {dest}: {stderr}");
+        assert!(stderr.contains(reason), "dest {dest}: {stderr}");
         for dir in [&self.root, &self.home, &self.repo, &self.repo.join("docs")] {
             assert!(
                 dir.join("canary").is_file(),
@@ -140,7 +148,42 @@ fn seed_refuses_an_ancestor_of_home() {
     let sandbox = GuardSandbox::new();
     sandbox.assert_refused(&path_arg(&sandbox.root.join("parent")));
     sandbox.assert_refused(&format!("{}/", path_arg(&sandbox.root)));
-    sandbox.assert_refused("/");
+}
+
+#[test]
+fn seed_refuses_the_filesystem_root() {
+    let sandbox = GuardSandbox::new();
+    // `pwd -P` in bash keeps a leading `//`: it must still hit the root rule.
+    for dest in ["/", "//", "//."] {
+        sandbox.assert_refused_because(dest, "it is the filesystem root");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn seed_refuses_an_unreadable_dir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sandbox = GuardSandbox::new();
+    // 0o300: cd works, ls fails. 0o000: cd fails too.
+    for (mode, reason) in [
+        (0o300, "cannot list it"),
+        (0o000, "cannot resolve its physical path"),
+    ] {
+        let locked = sandbox.root.join(format!("locked-{mode:o}"));
+        fs::create_dir_all(&locked).unwrap();
+        fs::write(locked.join("keep.txt"), "keep\n").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(mode)).unwrap();
+        // As root the mode does not lock the dir: then the non-empty rule refuses.
+        let reason = if fs::read_dir(&locked).is_ok() {
+            "it is not empty"
+        } else {
+            reason
+        };
+        sandbox.assert_refused_because(&path_arg(&locked), reason);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(locked.join("keep.txt").is_file());
+    }
 }
 
 #[test]

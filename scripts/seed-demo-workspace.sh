@@ -56,7 +56,10 @@ real_path() {
     esac
     path="$(dirname "$path")"
   done
-  path="$(cd "$path" && pwd -P)"
+  # Without this check a failed cd (no search permission) gives "".
+  path="$(cd "$path" && pwd -P)" || refuse "$1" "cannot resolve its physical path"
+  # POSIX lets `pwd -P` keep a leading `//` (bash does): make it `/`.
+  while [[ "$path" == //* ]]; do path="${path#/}"; done
   if [[ -z "$tail" ]]; then
     echo "$path"
   elif [[ "$path" == / ]]; then
@@ -86,8 +89,12 @@ is_within "$REPO_ROOT" "$DEST" && refuse "$DEST" "it is this repository or holds
 if is_within "$DEST" "$REPO_ROOT" && [[ "$DEST" != "$REPO_ROOT/tmp/"* ]]; then
   refuse "$DEST" "inside this repository, only a directory under tmp/ is allowed"
 fi
-if [[ -d "$DEST" && ! -f "$DEST/$MARKER" ]] && [[ -n "$(ls -A "$DEST")" ]]; then
-  refuse "$DEST" "it is not empty and has no $MARKER file from an earlier seed (remove it yourself)"
+if [[ -d "$DEST" && ! -f "$DEST/$MARKER" ]]; then
+  # An unreadable DEST is not known to be empty: refuse it.
+  ENTRIES="$(ls -A "$DEST")" || refuse "$DEST" "cannot list it to check that it is empty"
+  if [[ -n "$ENTRIES" ]]; then
+    refuse "$DEST" "it is not empty and has no $MARKER file from an earlier seed (remove it yourself)"
+  fi
 fi
 
 WORKSPACE="$DEST"
