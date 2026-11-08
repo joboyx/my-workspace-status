@@ -47,6 +47,7 @@ use super::branches::{
 };
 use super::diff::{load_file_diff, DiffContent};
 use super::drill::{CommitFile, CommitFileSource, DrillView};
+use super::effect::{in_worker_job, note_worker_panic_at};
 use super::graph_load::{
     load_graph_model, load_graph_model_window, refresh_graph_limit, GraphIdentity,
 };
@@ -80,11 +81,18 @@ pub struct TuiOpts {
 ///
 /// Every exit restores the terminal, clears a shown OSC 9;4 bar, and puts
 /// back the default pointer after an OSC 22 resize shape:
-/// quit, an error return, and a panic on this thread (panic hook).
+/// quit, an error return, a panic on this thread (panic hook), and on Unix
+/// an exit signal (`SIGINT`, `SIGTERM`, `SIGHUP`; see
+/// [`super::term_restore`]).
 pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
     install_panic_hook(&PROGRESS_SHOWN, &POINTER_SET, stdout);
     let mut state = AppState::launch(opts.cwd.clone(), opts.snapshot.clone(), &opts.settings);
     state.apply_view_defaults(&opts.config.view_defaults);
+    #[cfg(unix)]
+    {
+        super::term_restore::save_terminal_modes();
+        crate::git::set_exit_signal_hook(super::term_restore::restore_from_signal);
+    }
     enable_raw_mode().map_err(|_| 1u8)?;
     TERMINAL_SET_UP.store(true, Ordering::SeqCst);
     // Raw mode keeps the terminal's reply off the screen. The input thread
@@ -123,30 +131,66 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
     };
     restore_terminal();
     let _ = terminal.show_cursor();
-    // The runtime drop waits for workers that are still running (a git
-    // fetch, say). Stop their git first (SIGTERM, then SIGKILL after a
-    // short grace) so quit returns promptly, and drop the runtime only once
-    // the terminal is back to normal.
+    // Workers may still run (a git fetch, say). Stop their git first
+    // (SIGTERM, then SIGKILL after a short grace), and shut the runtime
+    // down only once the terminal is back to normal.
     crate::git::stop_running_git();
-    drop(rt);
+    if let Ok(rt) = rt {
+        shut_down_runtime(
+            rt,
+            RUNTIME_SHUTDOWN_GRACE,
+            crate::git::wait_for_user_work_restore,
+        );
+    }
     result
+}
+
+/// How long quit waits for worker jobs once their git is stopped.
+const RUNTIME_SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
+
+/// Shut the loop's runtime down without waiting for ever on its blocking
+/// workers. A plain drop waits for every one of them, and a job with no git
+/// to stop (a slow file read, a stuck helper) would hold quit.
+///
+/// It first calls `wait_for_user_work`, a bounded wait while a pull still
+/// has to give stashed changes back (`git::wait_for_user_work_restore` in
+/// `run_tui`), so quit does not cut that pop off. Then it gives the
+/// workers `grace` and returns; the ones still running end with the
+/// process.
+fn shut_down_runtime(
+    rt: tokio::runtime::Runtime,
+    grace: Duration,
+    wait_for_user_work: impl FnOnce(),
+) {
+    wait_for_user_work();
+    rt.shutdown_timeout(grace);
 }
 
 /// True while `run_tui` has the terminal in raw mode. The panic hook
 /// restores only then, so a panic after the TUI closed leaves the shell
-/// alone and the restore runs once.
-static TERMINAL_SET_UP: AtomicBool = AtomicBool::new(false);
+/// alone and the restore runs once. The exit-signal restore
+/// (`term_restore::restore_from_signal`) follows the same rule.
+pub(super) static TERMINAL_SET_UP: AtomicBool = AtomicBool::new(false);
 
 /// Give the terminal back on stdout. Clears the OSC 9;4 bar only when one
 /// shows ([`PROGRESS_SHOWN`]), and resets the OSC 22 pointer only while a
 /// resize shape shows ([`POINTER_SET`]).
+///
+/// It clears [`TERMINAL_SET_UP`] only after the restore bytes are out. An
+/// exit signal that comes during the write then still finds the flag set,
+/// and its handler (`term_restore::restore_from_signal`) restores in full
+/// before the signal ends `ws`; with the flag cleared first, the signal
+/// would end `ws` part way through this restore. The panic hook and the
+/// signal handler take the flag with a swap, so each of them restores at
+/// most once. A restore that overlaps this one writes the same bytes
+/// again, and each of those steps is safe to repeat.
 fn restore_terminal() {
-    TERMINAL_SET_UP.store(false, Ordering::SeqCst);
     restore_terminal_to(
         &mut stdout(),
         PROGRESS_SHOWN.swap(false, Ordering::SeqCst),
         POINTER_SET.swap(false, Ordering::SeqCst),
     );
+    TERMINAL_SET_UP.store(false, Ordering::SeqCst);
 }
 
 /// Clear the OSC 9;4 bar first (when `clear_progress`), then put the
@@ -160,7 +204,14 @@ fn restore_terminal() {
 ///
 /// The alternate screen is left through [`leave_alternate_screen_to`],
 /// which closes any open synchronized update first.
-fn restore_terminal_to<W: Write>(out: &mut W, clear_progress: bool, reset_pointer: bool) {
+///
+/// On Unix the exit-signal restore writes the same bytes from a constant
+/// (`term_restore::RESTORE_SEQ`); a unit test keeps the two equal.
+pub(super) fn restore_terminal_to<W: Write>(
+    out: &mut W,
+    clear_progress: bool,
+    reset_pointer: bool,
+) {
     if clear_progress {
         let _ = out.write_all(PROGRESS_CLEAR.as_bytes());
     }
@@ -190,12 +241,19 @@ fn leave_alternate_screen_to<W: Write>(out: &mut W) -> io::Result<()> {
 /// previous hook prints the panic, so the message lands on the normal
 /// screen with raw mode off.
 ///
-/// It acts only for a panic on the thread that installed it (the TUI
-/// thread) while [`TERMINAL_SET_UP`] is set. A worker panic, which
-/// `run_job` catches, leaves the running TUI alone. It clears the OSC 9;4 bar only
+/// It restores only for a panic on the thread that installed it (the TUI
+/// thread) while [`TERMINAL_SET_UP`] is set. It clears the OSC 9;4 bar only
 /// while `shown` is set ([`PROGRESS_SHOWN`] outside tests), and resets the
 /// OSC 22 pointer only while `pointer_set` is set ([`POINTER_SET`] outside
 /// tests).
+///
+/// A panic in a worker job (`run_job`, which catches it) while the
+/// terminal is set up leaves the running TUI alone and is not printed: the
+/// text would land in the alternate screen and break the frame. The hook
+/// notes where it panicked instead, and the status line shows the job, the
+/// message, and that location. A panic on any other thread (the input
+/// thread, a helper thread) still goes to the previous hook, so it is never
+/// silent.
 fn install_panic_hook<W, F>(shown: &'static AtomicBool, pointer_set: &'static AtomicBool, target: F)
 where
     W: Write,
@@ -204,14 +262,19 @@ where
     let tui_thread = std::thread::current().id();
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if std::thread::current().id() == tui_thread
-            && TERMINAL_SET_UP.swap(false, Ordering::SeqCst)
-        {
-            restore_terminal_to(
-                &mut target(),
-                shown.swap(false, Ordering::SeqCst),
-                pointer_set.swap(false, Ordering::SeqCst),
-            );
+        if std::thread::current().id() == tui_thread {
+            if TERMINAL_SET_UP.swap(false, Ordering::SeqCst) {
+                restore_terminal_to(
+                    &mut target(),
+                    shown.swap(false, Ordering::SeqCst),
+                    pointer_set.swap(false, Ordering::SeqCst),
+                );
+            }
+        } else if in_worker_job() && TERMINAL_SET_UP.load(Ordering::SeqCst) {
+            if let Some(at) = info.location() {
+                note_worker_panic_at(at.to_string());
+            }
+            return;
         }
         prev(info);
     }));
