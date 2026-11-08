@@ -880,6 +880,28 @@ impl PtySession {
         self.raw.lock().unwrap().clone()
     }
 
+    /// Process id of the child, for a test that sends it a signal.
+    pub fn child_pid(&self) -> u32 {
+        self.child.process_id().expect("child process id")
+    }
+
+    /// Local modes (`c_lflag`) of the PTY now: the child's raw mode
+    /// clears `ICANON` and `ECHO`.
+    pub fn local_modes(&self) -> libc::tcflag_t {
+        let fd = self.master.as_raw_fd().expect("pty master fd");
+        let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // SAFETY: `tcgetattr` writes a whole `termios` on success, and the
+        // value is read only then.
+        unsafe {
+            assert_eq!(
+                libc::tcgetattr(fd, termios.as_mut_ptr()),
+                0,
+                "tcgetattr on the pty master"
+            );
+            termios.assume_init().c_lflag
+        }
+    }
+
     /// Most recent decoded OSC 52 clipboard text.
     pub fn last_clipboard(&self) -> Option<String> {
         self.clipboard.lock().unwrap().last().cloned()

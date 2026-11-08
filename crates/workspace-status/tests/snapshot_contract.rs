@@ -768,6 +768,45 @@ fn invalid_ignored_paths_entry_fails_startup() {
 }
 
 #[test]
+fn json_and_plain_give_raw_paths_for_odd_file_names() {
+    let (root, workspace) = fixture();
+    let app = workspace.join("app");
+    // git's default; pinned so a user config cannot hide the quoting.
+    git(&app, &["config", "core.quotePath", "true"]);
+    fs::write(app.join("my file.txt"), "a\n").unwrap();
+    fs::write(app.join("old name.txt"), "o\n").unwrap();
+    git(&app, &["add", "my file.txt", "old name.txt"]);
+    git(&app, &["commit", "-q", "-m", "odd names"]);
+    fs::write(app.join("my file.txt"), "a\nb\n").unwrap();
+    git(&app, &["mv", "old name.txt", "new name.txt"]);
+    fs::write(app.join("café.md"), "c\n").unwrap();
+
+    let snapshot = run_json(&workspace, &["--json"]);
+    let app_json = snapshot["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["repo"] == "app")
+        .unwrap();
+    assert_eq!(
+        app_json["changes"],
+        serde_json::json!([
+            { "path": "README.md", "unstagedStatus": "M" },
+            { "path": "café.md", "untracked": true },
+            { "path": "my file.txt", "unstagedStatus": "M" },
+            { "path": "new name.txt", "stagedStatus": "R", "oldPath": "old name.txt" },
+        ])
+    );
+
+    let plain = run_plain(&workspace, &["--plain"]);
+    for name in ["my file.txt", "café.md", "new name.txt"] {
+        assert!(plain.contains(name), "{name} in {plain}");
+    }
+    assert!(!plain.contains('"'), "no C-quoted path: {plain}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn workspace_file_without_hidden_paths_starts() {
     let (root, workspace) = fixture();
     fs::write(

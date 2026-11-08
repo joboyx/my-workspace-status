@@ -662,7 +662,7 @@ fn clipboard(p: &Probe) -> Check {
         Os::Linux => {
             let wayland = p.var("WAYLAND_DISPLAY").is_some();
             let x11 = p.var("DISPLAY").is_some();
-            // Same order as `copy_to_clipboard`: wl-copy, then xclip.
+            // Same order as `copy_with_host_tool`: wl-copy, then xclip.
             let tool = if wayland && p.has("wl-copy") {
                 Some("wl-copy")
             } else if x11 && p.has("xclip") {
