@@ -768,9 +768,10 @@ mod tests {
         let temps = ExtDiffTemps::new();
         let parent = unique_dir("ws-ext-diff-swap");
         fs::create_dir_all(&parent).unwrap();
+        // A file in a subdirectory: quit runs `remove_dir_all` on each entry.
         let target = parent.join("someone-elses");
-        fs::create_dir_all(&target).unwrap();
-        let keep = target.join("keep.txt");
+        fs::create_dir_all(target.join("data")).unwrap();
+        let keep = target.join("data").join("keep.txt");
         fs::write(&keep, "keep").unwrap();
 
         let root = temps.temp_dir(&parent).unwrap();
