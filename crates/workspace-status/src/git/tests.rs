@@ -1943,7 +1943,10 @@ fn compare_picker_commits_list_ancestors_without_head() {
     want.sort_unstable();
     assert_eq!(ids, want, "first- and merge-side ancestors");
     let side_row = rows.iter().find(|c| c.id == side).unwrap();
-    assert_eq!(side_row.subject, "Side\twork", "a tab stays in the subject");
+    assert_eq!(
+        side_row.subject, "Side    work",
+        "the id splits at the first tab; a tab in the subject is painted as spaces"
+    );
 
     // The cap keeps the newest `limit` ancestors and still drops HEAD.
     let capped = list_compare_picker_commits_capped(&dir, 1).unwrap();
@@ -2304,6 +2307,17 @@ filename a.txt
     let blame = parse_blame_porcelain(porcelain).expect("parses");
     assert_eq!(blame.author, "Ada\u{FFFD}[31m");
     assert_eq!(blame.summary, "fix it\u{FFFD}");
+}
+
+#[test]
+fn parse_compare_picker_line_makes_the_subject_paintable() {
+    let row = parse_compare_picker_line(
+        "63b08ad4823cc8096b108736af6268306d1c5328\tfix\tit\x1b[31m\u{9b}2J\x07",
+    )
+    .expect("parses");
+    assert_eq!(row.id, "63b08ad4823cc8096b108736af6268306d1c5328");
+    assert_eq!(row.subject, "fix it\u{FFFD}[31m\u{FFFD}2J\u{FFFD}");
+    assert_eq!(parse_compare_picker_line("\tno id"), None);
 }
 
 #[test]

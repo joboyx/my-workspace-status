@@ -2631,14 +2631,19 @@ fn list_compare_picker_commits_capped(
     Ok(raw
         .lines()
         .skip(1)
-        .filter_map(|line| {
-            let (id, subject) = line.split_once('\t').unwrap_or((line, ""));
-            (!id.is_empty()).then(|| AncestorCommit {
-                id: id.to_string(),
-                subject: subject.to_string(),
-            })
-        })
+        .filter_map(parse_compare_picker_line)
         .collect())
+}
+
+/// One `%H%x09%s` line of the compare picker log. The subject goes through
+/// [`paintable_line`], so a tab or a control byte in a commit subject
+/// cannot reach the terminal. `None` for a line with no id.
+fn parse_compare_picker_line(line: &str) -> Option<AncestorCommit> {
+    let (id, subject) = line.split_once('\t').unwrap_or((line, ""));
+    (!id.is_empty()).then(|| AncestorCommit {
+        id: id.to_string(),
+        subject: paintable_line(subject),
+    })
 }
 
 /// First-parent unified diff for one path in a commit.

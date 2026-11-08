@@ -44,7 +44,7 @@ Diff cells clip and pad by **display columns**, not Unicode scalar count. Clip u
 
 Diff text comes from files and commits, so it can hold ESC and other control bytes. Paint never writes those to the terminal. `cell_from_line` and the hunk header row drop the `\r` that ends a CRLF line, then they and `diff_failed_text` pass their text through `file_index::paintable_line`, the same helper the Explorer file view uses: a tab expands with spaces to the next multiple of 4 columns (counted from the start of the code column), and every other control character (C0, DEL, C1, ESC included) paints as U+FFFD. Search, wrap, word ranges, and syntax spans all read that paintable text. The parsed lines that `build_partial_patch` reads keep the original text, so a patch never carries the expanded tabs or the U+FFFD placeholders.
 
-Commit and stash subjects, bodies, names, and emails (`graph_load.rs`) and the blame author and summary (`parse_blame_porcelain`) go through the same helper when they are parsed (`paintable_text` keeps the line breaks of a body).
+Commit and stash subjects, bodies, names, and emails (`graph_load.rs`) the blame author and summary (`parse_blame_porcelain`), and the commit subjects of the Diff vs commit picker (`parse_compare_picker_line`) go through the same helper when they are parsed (`paintable_text` keeps the line breaks of a body).
 
 ## Highlighting
 
