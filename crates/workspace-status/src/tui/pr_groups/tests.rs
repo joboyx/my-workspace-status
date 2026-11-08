@@ -980,8 +980,7 @@ mod title_command {
             let dir = crate::testutil::unique_dir("ws-pr-title");
             fs::create_dir_all(&dir).unwrap();
             let path = dir.join("script");
-            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            crate::testutil::write_sh_script(&path, body);
             Self { dir, path }
         }
     }
