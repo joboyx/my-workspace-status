@@ -212,9 +212,13 @@ fn pty_v_esc_exits_highlight_without_comment() {
         "Esc drops VISUAL and stays on the focused diff (no Comment, no unfocus)",
         WAIT,
     );
+    // Quit flushes any save that was asked for, so the empty store proves
+    // that Esc asked for none.
+    tui.key('q');
+    tui.wait_exit(WAIT);
     let stored = comment_store_text(&workspace);
     assert!(
-        stored.trim().is_empty() || !stored.contains(BODY),
+        stored.trim().is_empty(),
         "Esc must not write a comment:\n{stored}"
     );
 }

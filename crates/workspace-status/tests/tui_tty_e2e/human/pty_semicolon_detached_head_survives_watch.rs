@@ -2,7 +2,9 @@ use std::fs;
 
 use crate::harness::PtySession;
 use crate::seed::{git, seed_repo, unique_root};
-use crate::support::{tree_cursor_on, tree_has, wait_comment_store, GIT_WAIT, WAIT};
+use crate::support::{
+    comment_store_text, tree_cursor_on, tree_has, wait_comment_store, GIT_WAIT, WAIT,
+};
 
 const BODY: &str = "detached-wt-note-e2e";
 
@@ -88,9 +90,13 @@ fn pty_semicolon_detached_head_survives_watch() {
         "a watch apply after the save counts the new dirty file; the TUI stays mounted",
         GIT_WAIT,
     );
-    wait_comment_store(
-        &workspace,
-        |stored| stored.contains(BODY) && stored.contains("\"kind\": \"worktree\""),
-        "watch GC must keep the detached worktree comment",
+    // A GC on that apply changes memory first and saves later. Quit flushes
+    // that save, so the read after exit sees a wrong drop.
+    tui.key('q');
+    tui.wait_exit(WAIT);
+    let stored = comment_store_text(&workspace);
+    assert!(
+        stored.contains(BODY) && stored.contains("\"kind\": \"worktree\""),
+        "watch GC must keep the detached worktree comment:\n{stored}"
     );
 }
