@@ -4899,6 +4899,37 @@ fn reload_counts_activity_when_the_snapshot_lands() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// A reload whose walk finds no checkout ends there: the tree empties, the
+/// pending activity count is consumed, and the next watch tick collects.
+#[test]
+fn reload_that_discovers_nothing_ends_the_collect() {
+    let mut state = fixture_state();
+    let mut interp = Interpreter::with_cap(4);
+    schedule_effect(
+        &mut interp,
+        &mut state,
+        Effect::ReloadSnapshot,
+        &Action::Refresh,
+    );
+    assert!(interp.activity_after_reload);
+    let gen = interp.sched.collection_gen().expect("the reload collects");
+    apply(
+        &mut interp,
+        &mut state,
+        JobOutcome::Discovered {
+            gen,
+            entries: vec![],
+        },
+    );
+    assert!(state.snapshot.repos.is_empty(), "no checkout is left");
+    assert!(!interp.sched.collection_active(), "the collect ended");
+    assert!(!interp.activity_after_reload, "the reload landed");
+    assert!(
+        interp.sched.on_watch_tick(None),
+        "the next watch tick starts a collect"
+    );
+}
+
 #[test]
 fn finished_pull_wave_recounts_activity_of_its_repos() {
     let (root, mut state) = git_app_state("ws-effect-activity-pull", "main", false);

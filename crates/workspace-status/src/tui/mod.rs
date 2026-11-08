@@ -59,6 +59,8 @@ pub(crate) mod syntax;
 mod tabs;
 mod term_bg;
 mod term_progress;
+#[cfg(unix)]
+mod term_restore;
 pub(crate) mod theme;
 mod toast;
 mod tree;
