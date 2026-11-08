@@ -1,5 +1,6 @@
 //! Shared lock and atomic write for workspace-namespaced persist files.
 
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -22,8 +23,34 @@ fn sibling_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(os)
 }
 
+/// Apply the changes one session made since `baseline` onto `disk`.
+///
+/// `baseline` is the bucket this session last loaded or saved, `current` is
+/// its bucket now. A key in `baseline` that is gone from `current` is
+/// removed from `disk`. A key that is new in `current`, or whose value
+/// differs from `baseline`, is written to `disk`. Every other key of `disk`
+/// stays as it is, so a key another process added or edited since
+/// `baseline` survives.
+pub(crate) fn apply_session_delta<K: Ord + Clone, V: PartialEq + Clone>(
+    disk: &mut BTreeMap<K, V>,
+    baseline: &BTreeMap<K, V>,
+    current: &BTreeMap<K, V>,
+) {
+    for key in baseline.keys() {
+        if !current.contains_key(key) {
+            disk.remove(key);
+        }
+    }
+    for (key, value) in current {
+        if baseline.get(key) != Some(value) {
+            disk.insert(key.clone(), value.clone());
+        }
+    }
+}
+
 /// Exclusive lock on a sibling `*.lock` file, merge on-disk bytes, then
-/// atomic-write (`*.tmp` + flush + rename).
+/// atomic-write (`*.tmp` + flush + fsync + rename, then a best-effort fsync
+/// of the parent directory on Unix so the rename survives a crash).
 pub(crate) fn persist_with_lock(
     file_path: &Path,
     merge: impl FnOnce(Option<&[u8]>) -> io::Result<Vec<u8>>,
@@ -53,12 +80,59 @@ pub(crate) fn persist_with_lock(
         let mut file = fs::File::create(&tmp)?;
         file.write_all(&body)?;
         file.flush()?;
+        sync_file(&file)?;
         fs::rename(&tmp, file_path)
     })();
     if write_result.is_err() {
         let _ = fs::remove_file(&tmp);
     }
-    write_result
+    write_result?;
+    // The new bytes are already in place: a failed directory fsync only
+    // weakens crash durability, so it must not report the save as failed
+    // (the caller would keep its old baseline and apply the same delta again).
+    let _ = sync_parent_dir(file_path);
+    Ok(())
+}
+
+/// Fsync `file`. On macOS `sync_all` is `F_FULLFSYNC`, which some
+/// filesystems (SMB shares, some external volumes) reject with `ENOTSUP` or
+/// `EINVAL`. Fall back to a plain `fsync` there.
+#[cfg(target_vendor = "apple")]
+fn sync_file(file: &fs::File) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    match file.sync_all() {
+        Err(err) if matches!(err.raw_os_error(), Some(libc::ENOTSUP | libc::EINVAL)) => {
+            // SAFETY: `file` owns an open descriptor for this whole call.
+            if unsafe { libc::fsync(file.as_raw_fd()) } == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
+        other => other,
+    }
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn sync_file(file: &fs::File) -> io::Result<()> {
+    file.sync_all()
+}
+
+/// Fsync the directory that holds `file_path`, so a rename into it is
+/// durable. Windows cannot open a directory as a file; NTFS journals the
+/// rename itself.
+#[cfg(unix)]
+fn sync_parent_dir(file_path: &Path) -> io::Result<()> {
+    let parent = match file_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_file_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 /// Non-blocking exclusive lock on the sibling file `<file_path><suffix>`.

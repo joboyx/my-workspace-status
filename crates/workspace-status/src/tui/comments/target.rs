@@ -1,9 +1,11 @@
 //! Comment targets, paint markers, and refresh GC.
 //!
 //! Live refs come from the workspace snapshot (`local_branches`, checkout
-//! paths, repo identity). This module does not run git.
+//! paths, repo identity). This module does not run git. GC stats a
+//! checkout directory only for a worktree key it would otherwise drop.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::Path;
 
 use crate::helpers::{is_counted_local_branch, is_default_branch, is_detached_head_branch};
 use crate::snapshot::{CheckoutKind, WorkspaceSnapshot};
@@ -26,13 +28,20 @@ pub struct CommentLiveSet {
     pub branches: BTreeSet<(String, String)>,
     /// Checkout paths that still exist.
     pub worktrees: HashSet<String>,
-    /// Repo identities that still have a checkout (commit comments).
+    /// Repo identities with at least one checkout in this snapshot. GC
+    /// treats a key whose repo is not here as unknown and keeps it.
     pub identities: HashSet<String>,
-    /// `(repo, sha)` pairs that still resolve.
-    pub commits: HashSet<(String, String)>,
+    /// Identities whose branch list this snapshot can be trusted for: at
+    /// least one checkout is not `status failed` and lists a counted
+    /// branch.
+    pub authoritative: HashSet<String>,
+    /// Checkout path → repo identity, for every checkout of this snapshot
+    /// and of earlier snapshots of the session. Lets GC tell which repo a
+    /// checkout that is now missing belonged to.
+    pub checkout_owners: HashMap<String, String>,
 }
 
-/// Collect live branches, checkouts, and stored commit SHAs from `snapshot`.
+/// Collect live branches, checkouts, and repo identities from `snapshot`.
 ///
 /// Does not run git. `local_branches` is filled on the snapshot worker.
 /// Skip-wipe (keep stored branch comments while porcelain is unreadable)
@@ -40,13 +49,25 @@ pub struct CommentLiveSet {
 /// list. A successful sibling's names win. Status-failed rows do not add
 /// stored or last-good names when that identity already has counted
 /// branches.
-pub fn collect_live_set(snapshot: &WorkspaceSnapshot, store: &CommentStore) -> CommentLiveSet {
-    let mut live = CommentLiveSet::default();
+///
+/// `known_owners` is the [`CommentLiveSet::checkout_owners`] map of the
+/// previous call in this session (empty at launch). The result keeps those
+/// entries and adds the checkouts of `snapshot`.
+pub fn collect_live_set(
+    snapshot: &WorkspaceSnapshot,
+    store: &CommentStore,
+    known_owners: &HashMap<String, String>,
+) -> CommentLiveSet {
+    let mut live = CommentLiveSet {
+        checkout_owners: known_owners.clone(),
+        ..CommentLiveSet::default()
+    };
     let mut authoritative: HashSet<String> = HashSet::new();
     for repo in &snapshot.repos {
         let path = normalize_viewed_path(&repo.repo);
-        live.worktrees.insert(path);
         let identity = repo_identity(&repo.repo, repo.primary_repo.as_deref());
+        live.checkout_owners.insert(path.clone(), identity.clone());
+        live.worktrees.insert(path);
         live.identities.insert(identity.clone());
         if repo.sync_note == "status failed" {
             continue;
@@ -68,58 +89,75 @@ pub fn collect_live_set(snapshot: &WorkspaceSnapshot, store: &CommentStore) -> C
         }
     }
     for key in store.keys() {
-        match key {
-            CommentKey::Commit { repo, sha } | CommentKey::CommitLine { repo, sha, .. } => {
-                if live.identities.contains(repo) {
-                    live.commits.insert((repo.clone(), sha.clone()));
-                }
+        if let CommentKey::Branch { repo, branch } | CommentKey::WorktreeLine { repo, branch, .. } =
+            key
+        {
+            if live.identities.contains(repo)
+                && !authoritative.contains(repo)
+                && is_counted_local_branch(branch)
+            {
+                live.branches.insert((repo.clone(), branch.clone()));
             }
-            CommentKey::Branch { repo, branch } | CommentKey::WorktreeLine { repo, branch, .. } => {
-                if live.identities.contains(repo)
-                    && !authoritative.contains(repo)
-                    && is_counted_local_branch(branch)
-                {
-                    live.branches.insert((repo.clone(), branch.clone()));
-                }
-            }
-            _ => {}
         }
     }
+    live.authoritative = authoritative;
     live
 }
 
-/// Drop comments whose branch, worktree, or commit is gone.
-pub fn gc_comments(store: &CommentStore, live: &CommentLiveSet) -> CommentStore {
+/// Drop comments whose branch or worktree is gone.
+///
+/// GC drops a key only when the snapshot is authoritative for it. A key
+/// whose repo identity is not in [`CommentLiveSet::identities`] is unknown
+/// (the repo can be missing from one snapshot after a discovery or status
+/// failure) and stays. Branch and line keys of a present repo follow
+/// [`collect_live_set`] (which keeps them while that repo's branch list is
+/// unreadable). Commit and commit-line keys always stay: the snapshot has
+/// no list of reachable commits. A worktree key whose path is not in the
+/// snapshot drops only when an earlier snapshot of the session showed which
+/// repo owned that path, that repo is present and
+/// [`CommentLiveSet::authoritative`] now, and the checkout directory
+/// `cwd/<path>` is gone on disk. The directory check covers a linked
+/// worktree that drops out of one snapshot because `git worktree list`
+/// failed: `git worktree remove` deletes the directory, a failed listing
+/// does not.
+///
+/// Runs on the caller's thread. The only I/O is one `stat` per worktree key
+/// that passes the other checks, which is rare (a worktree just removed).
+pub fn gc_comments(store: &CommentStore, live: &CommentLiveSet, cwd: &Path) -> CommentStore {
     let mut next = CommentStore::new();
     for (key, body) in store {
-        if comment_is_live(key, live) {
+        if comment_is_live(key, live, cwd) {
             next.insert(key.clone(), body.clone());
         }
     }
     next
 }
 
-fn comment_is_live(key: &CommentKey, live: &CommentLiveSet) -> bool {
+/// `false` only when `live` (and, for a worktree key, the disk) shows the
+/// key's target is gone (see [`gc_comments`]). Unknown targets are live.
+fn comment_is_live(key: &CommentKey, live: &CommentLiveSet, cwd: &Path) -> bool {
     match key {
-        CommentKey::Branch { repo, branch } => {
-            if is_detached_head_branch(branch) {
-                live.worktrees.contains(repo) || live.identities.contains(repo)
-            } else {
-                live.branches.contains(&(repo.clone(), branch.clone()))
-            }
+        CommentKey::Branch { repo, branch } | CommentKey::WorktreeLine { repo, branch, .. } => {
+            !live.identities.contains(repo)
+                || is_detached_head_branch(branch)
+                || live.branches.contains(&(repo.clone(), branch.clone()))
         }
-        CommentKey::WorktreeLine { repo, branch, .. } => {
-            if is_detached_head_branch(branch) {
-                live.identities.contains(repo)
-            } else {
-                live.branches.contains(&(repo.clone(), branch.clone()))
-            }
+        CommentKey::Worktree { path } => {
+            live.worktrees.contains(path)
+                || !live
+                    .checkout_owners
+                    .get(path)
+                    .is_some_and(|owner| live.authoritative.contains(owner))
+                || !checkout_dir_gone(cwd, path)
         }
-        CommentKey::Worktree { path } => live.worktrees.contains(path),
-        CommentKey::Commit { repo, sha } | CommentKey::CommitLine { repo, sha, .. } => {
-            live.commits.contains(&(repo.clone(), sha.clone()))
-        }
+        CommentKey::Commit { .. } | CommentKey::CommitLine { .. } => true,
     }
+}
+
+/// `true` only when `cwd/<path>` surely does not exist. A stat error other
+/// than not-found (permissions, I/O) counts as present, so GC keeps the key.
+fn checkout_dir_gone(cwd: &Path, path: &str) -> bool {
+    matches!(cwd.join(path).try_exists(), Ok(false))
 }
 
 /// First numbered line in the viewport (prefer the new/right side).
