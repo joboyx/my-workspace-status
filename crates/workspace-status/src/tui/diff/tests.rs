@@ -401,6 +401,38 @@ fn inline_mode_one_cell_per_line() {
         .all(|r| matches!(r, DiffRow::Line { right: None, .. })));
 }
 
+/// Diff rows hold paintable text: tabs expand to 4-column stops and every
+/// other control character (ESC, BEL, C1) is U+FFFD, in both layouts and
+/// in the hunk header. The parsed lines that patches read keep the bytes.
+#[test]
+fn diff_rows_expand_tabs_and_replace_control_characters() {
+    let content = DiffContent::from_unified(
+        "@@ -1,2 +1,2 @@ fn\x1b[2J\tx\n-a\tb\x07\n+ab\t\x1b[31mred\u{9b}\n \tctx\n",
+    );
+    for mode in [DiffMode::Inline, DiffMode::SideBySide] {
+        let rows = build_diff_rows(&content, mode);
+        let texts: Vec<String> = rows
+            .iter()
+            .flat_map(|row| match row {
+                DiffRow::Hunk { text } => vec![text.clone()],
+                DiffRow::Line { left, right } => std::iter::once(left.text.clone())
+                    .chain(right.iter().map(|cell| cell.text.clone()))
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        for text in &texts {
+            assert!(!text.contains(char::is_control), "{mode:?}: {text:?}");
+        }
+        assert!(texts.contains(&"@@ -1,2 +1,2 @@ fn\u{FFFD}[2J  x".to_string()));
+        assert!(texts.contains(&"a   b\u{FFFD}".to_string()), "{texts:?}");
+        assert!(texts.contains(&"ab  \u{FFFD}[31mred\u{FFFD}".to_string()));
+        assert!(texts.contains(&"    ctx".to_string()));
+    }
+    let hunks = parse_unified_diff(&content.unstaged);
+    assert_eq!(hunks[0].lines[0].text, "a\tb\x07");
+}
+
 #[test]
 fn side_by_side_pairs_del_with_add() {
     let rows = build_diff_rows(

@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
+use crate::file_index::paintable_line;
 use crate::git::{exec_git_stdout, git_diff_args};
 use crate::snapshot::FileChange;
 
@@ -58,6 +59,9 @@ pub enum DiffCellKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiffCell {
     pub kind: DiffCellKind,
+    /// Paintable line text ([`paintable_line`]): tabs expanded to spaces
+    /// and control characters as U+FFFD. Partial patches read the parsed
+    /// line, never this.
     pub text: String,
     /// 1-based line number in the gutter (`None` for meta / empty).
     pub line_no: Option<u32>,
@@ -469,7 +473,7 @@ fn cell_from_line(line: &ParsedLine, side: Side) -> DiffCell {
     };
     DiffCell {
         kind: line.kind,
-        text: line.text.clone(),
+        text: paintable_line(&line.text),
         line_no,
     }
 }
@@ -581,7 +585,7 @@ fn push_hunk_rows(
     if !hunk.header.is_empty() {
         out.push((
             DiffRow::Hunk {
-                text: hunk.header.clone(),
+                text: paintable_line(&hunk.header),
             },
             RowBind::Hunk {
                 section,
@@ -666,7 +670,7 @@ fn annotated_diff_rows(content: &DiffContent, mode: DiffMode) -> Vec<(DiffRow, R
 /// Diff-pane text for a failed `git diff`: git's `reason` after a fixed
 /// prefix.
 pub fn diff_failed_text(reason: &str) -> String {
-    format!("git diff failed: {reason}")
+    paintable_line(&format!("git diff failed: {reason}"))
 }
 
 /// Rows for both diff sections. Empty sections are omitted.

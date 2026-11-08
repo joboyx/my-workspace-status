@@ -40,6 +40,12 @@ A line with an open comment underlines its code on every painted row (wrapped co
 
 Diff cells clip and pad by **display columns**, not Unicode scalar count. Clip uses `slice_cols` (meta / hunk) or `slice_styled_cols` (syntax spans). Pad uses `visible_width` of the clipped text (MesloLGS NF: emoji and other pictographs are two columns; private-use Nerd glyphs stay one). Hunk headers use the same clip. Emoji stay emoji. Do not replace them with ASCII placeholders. Char-count clip or pad under-counts those glyphs, so a split left cell grows and the in-diff RULE leaves the context-row column.
 
+## Tabs and control characters
+
+Diff text comes from files and commits, so it can hold ESC and other control bytes. Paint never writes those to the terminal. `cell_from_line`, the hunk header row, and `diff_failed_text` pass their text through `file_index::paintable_line`, the same helper the Explorer file view uses: a tab expands with spaces to the next multiple of 4 columns (counted from the start of the code column), and every other control character (C0, DEL, C1, ESC included) paints as U+FFFD. Search, wrap, word ranges, and syntax spans all read that paintable text. The parsed lines that `build_partial_patch` reads keep the original text, so a patch never carries the expanded tabs or the U+FFFD placeholders.
+
+Commit and stash subjects, bodies, names, and emails (`graph_load.rs`) and the blame author and summary (`parse_blame_porcelain`) go through the same helper when they are parsed (`paintable_text` keeps the line breaks of a body).
+
 ## Highlighting
 
 Syntax highlighting uses `two-face` (syntect). Language comes from the file path (basename, then extension). A compare tab uses that tab's active file path, not a parked Workspace drill or `diff_path`. An unknown path uses Plain Text and the theme `repo` foreground. Tokens set **foreground** only. The Explorer file view's `syntax::highlight_file_window` shares this syntect setup (syntax set, theme map, `MAX_HIGHLIGHT_CHARS` budget) and feeds one stream from 200 lines above its window.

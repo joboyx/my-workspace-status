@@ -1769,6 +1769,23 @@ fn blame(dir: &std::path::Path, rev: BlameRev, path: &str, line: u32) -> LineBla
         .unwrap_or_else(|| panic!("blame {path}:{line}"))
 }
 
+/// The blame annotation paints author and subject: no control byte from
+/// the commit reaches the terminal.
+#[test]
+fn parse_blame_porcelain_makes_author_and_summary_paintable() {
+    let porcelain = "\
+63b08ad4823cc8096b108736af6268306d1c5328 1 1 1
+author Ada\x1b[31m
+author-time 1791204822
+summary fix\tit\x07
+filename a.txt
+\tA
+";
+    let blame = parse_blame_porcelain(porcelain).expect("parses");
+    assert_eq!(blame.author, "Ada\u{FFFD}[31m");
+    assert_eq!(blame.summary, "fix it\u{FFFD}");
+}
+
 #[test]
 fn parse_blame_porcelain_reads_headers_previous_and_boundary() {
     let renamed = "\
