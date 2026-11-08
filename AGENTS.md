@@ -157,6 +157,9 @@ delete the entry once its sites are done, and do not add new ones.
 New dead code is a build error under `-D warnings`. An `#[allow(dead_code)]`
 needs a one-line comment that says why. The existing sites
 (`grep -rn 'allow(dead_code)' crates`) are tracked debt: do not copy them.
+One case is accepted: an integration test binary that uses only part of a
+shared module under `tests/common/` may put the allow, with that comment,
+on its `mod` line.
 Test-only helpers belong behind `#[cfg(test)]` so they leave the shipped
 binary but keep their coverage; in-crate git fixtures and snapshot /
 app-state fixtures live in `src/testutil.rs`, not in a per-module copy.
@@ -191,4 +194,3 @@ Driver proof does not replace a test: behaviour that must stay gets a `pty_*` te
 
 Refresh the README/demo GIF clips with `./scripts/capture-demo-stills.sh` (ffmpeg records the terminal window; see `docs/demo.md`).
 Do not invent a fixture. Do not invent a new capture pipeline. Do not drive the TUI by hand: do not hand-record demo clips.
-For checks, agents drive the TUI through the verify skill driver (see **Verify skill**).
