@@ -339,13 +339,7 @@ fn json_names_a_force_pushed_upstream_and_omits_it_elsewhere() {
 
 /// New empty temp dir for one test.
 fn temp_root(tag: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "workspace-status-{tag}-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = unique_root(&format!("workspace-status-{tag}"));
     fs::create_dir_all(root.join("workspace")).unwrap();
     root
 }
