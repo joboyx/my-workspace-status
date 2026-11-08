@@ -142,8 +142,11 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
             crate::git::wait_for_user_work_restore,
         );
     }
-    // Only open detached diffs keep their temps; a diff worker still
-    // running after the grace cannot make the directory again.
+    // Only open detached diffs keep their temps. A diff worker still
+    // running after the grace cannot make the directory again, but one
+    // that already holds it can add a session while quit deletes; that
+    // only leaves temps behind for the `$TMPDIR` cleaner (see the
+    // function's doc).
     super::diff_tool::remove_ext_diff_temp_dir();
     result
 }
