@@ -929,19 +929,20 @@ fn graph_stash_ops(state: &AppState) -> Vec<super::stash::StashOp> {
         .graph
         .as_ref()
         .is_some_and(|model| model.uncommitted == Some(true));
-    let latest = state
-        .graph
-        .as_ref()
-        .and_then(|model| model.stashes.first().map(|stash| stash.stash_ref.clone()));
-    let focused = match state.focused_graph_row() {
-        Some(GraphRow::Stash(stash)) => Some(stash.stash_ref),
-        _ => None,
-    };
+    let latest = state.graph.as_ref().and_then(|model| {
+        model.stashes.first().map(|stash| crate::git::StashTarget {
+            stash_ref: stash.stash_ref.clone(),
+            sha: stash.id.clone(),
+        })
+    });
+    let focused = state
+        .focused_graph_row()
+        .and_then(|row| super::drill::stash_target_from_graph_row(&row));
     stash_ops_for_context(&StashOpsContext {
         dirty,
         dirty_paths: None,
-        focused_stash_ref: focused,
-        latest_stash_ref: latest,
+        focused_stash: focused,
+        latest_stash: latest,
     })
 }
 
@@ -2278,7 +2279,7 @@ mod tests {
         assert_eq!(dialog_height(&app, DialogKind::Confirm, 96), 6);
         app.confirm = Some(super::super::state::PendingConfirm::StashDrop {
             repo: "app".into(),
-            stash_ref: "stash@{0}".into(),
+            stash: crate::testutil::stash_target("stash@{0}"),
         });
         assert_eq!(dialog_height(&app, DialogKind::Confirm, 96), 5);
         app.confirm = Some(super::super::state::PendingConfirm::RevertRange {

@@ -20,6 +20,9 @@ pub enum SyncStatus {
     UpToDate,
     #[serde(rename = "no-upstream")]
     NoUpstream,
+    /// The branch tracks an upstream that no longer exists (git status
+    /// `[gone]`), for example a remote branch deleted after its PR merged.
+    Gone,
     Behind,
     Ahead,
     Diverged,
@@ -30,6 +33,7 @@ impl SyncStatus {
         match self {
             Self::UpToDate => "up-to-date",
             Self::NoUpstream => "no-upstream",
+            Self::Gone => "gone",
             Self::Behind => "behind",
             Self::Ahead => "ahead",
             Self::Diverged => "diverged",
@@ -71,6 +75,10 @@ pub struct RepoSnapshot {
     /// Set when a diverged branch's upstream was force-pushed under it.
     /// `sync_status` and `sync_note` stay plain `diverged`.
     pub upstream_rewrite: Option<UpstreamRewrite>,
+    /// Why `git fetch` failed on this checkout during a `--fetch` run.
+    /// `None` when no fetch ran or it succeeded. Sync fields then come from
+    /// the remote-tracking refs as they were before the fetch.
+    pub fetch_error: Option<String>,
     /// `HEAD` sha. Live-watch identity only; not part of `--json`.
     pub head: String,
     pub has_unstaged: bool,
@@ -111,6 +119,11 @@ pub struct WorkspaceRepoSnapshot {
     /// diverged branch. Omitted when the branch is not such a case.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_rewrite: Option<UpstreamRewrite>,
+    /// Additive `--json` string: why `git fetch` failed on this checkout.
+    /// Same rules as [`RepoSnapshot::fetch_error`]. Omitted when no fetch
+    /// ran or it succeeded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fetch_error: Option<String>,
     /// `HEAD` sha. Live-watch identity only; omitted from `--json`.
     #[serde(skip)]
     pub head: String,
@@ -222,6 +235,7 @@ fn to_workspace_repo(snapshot: &RepoSnapshot, hidden: &[String]) -> WorkspaceRep
         sync_status: snapshot.sync_status,
         sync_note: snapshot.sync_note.clone(),
         upstream_rewrite: snapshot.upstream_rewrite.clone(),
+        fetch_error: snapshot.fetch_error.clone(),
         head: snapshot.head.clone(),
         checkout_kind: snapshot.checkout_kind,
         primary_repo: snapshot.primary_repo.clone(),
@@ -396,6 +410,7 @@ pub fn repo_snapshots_from_workspace(snapshot: &WorkspaceSnapshot) -> Vec<RepoSn
             sync_status: repo.sync_status,
             sync_note: repo.sync_note.clone(),
             upstream_rewrite: repo.upstream_rewrite.clone(),
+            fetch_error: repo.fetch_error.clone(),
             head: repo.head.clone(),
             has_unstaged: repo.has_unstaged,
             has_staged: repo.has_staged,
@@ -463,6 +478,7 @@ fn sync_display(status: SyncStatus, note: &str) -> String {
             }
             "🔀 diverged".to_string()
         }
+        SyncStatus::Gone => "⚠️ upstream gone".to_string(),
         SyncStatus::UpToDate => "✅ current".to_string(),
     }
 }

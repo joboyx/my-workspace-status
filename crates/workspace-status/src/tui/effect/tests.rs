@@ -1217,7 +1217,7 @@ fn late_prepare_stash_after_repo_change_does_not_open_menu() {
         JobOutcome::PrepareStash {
             gen,
             repo: "app".into(),
-            latest: Some("stash@{0}".into()),
+            latest: Some(crate::testutil::stash_target("stash@{0}")),
         },
     );
     assert!(
@@ -1239,7 +1239,7 @@ fn matching_prepare_stash_still_opens_menu() {
         JobOutcome::PrepareStash {
             gen,
             repo: "app".into(),
-            latest: Some("stash@{0}".into()),
+            latest: Some(crate::testutil::stash_target("stash@{0}")),
         },
     );
     assert!(
@@ -1355,7 +1355,7 @@ fn prepare_stash_does_not_open_menu_on_compare_tab() {
         JobOutcome::PrepareStash {
             gen,
             repo: "app".into(),
-            latest: Some("stash@{0}".into()),
+            latest: Some(crate::testutil::stash_target("stash@{0}")),
         },
     );
     assert!(
@@ -1802,7 +1802,7 @@ fn stale_prepare_stash_gen_does_not_open_when_repo_still_matches() {
         JobOutcome::PrepareStash {
             gen: old,
             repo: "app".into(),
-            latest: Some("stash@{0}".into()),
+            latest: Some(crate::testutil::stash_target("stash@{0}")),
         },
     );
     assert!(
@@ -2773,7 +2773,7 @@ fn stash_menu_write_on_occupied_gitdir_keeps_menu() {
         id: StashOpId::Create,
         key: 's',
         label: "stash",
-        stash_ref: None,
+        stash: None,
         paths: Some(vec!["README.md".into()]),
     };
     state.stash_repo = Some("app".into());
@@ -2794,7 +2794,7 @@ fn stash_menu_write_on_occupied_gitdir_keeps_menu() {
         id: StashOpId::Drop,
         key: 'D',
         label: "drop stash",
-        stash_ref: Some("stash@{0}".into()),
+        stash: Some(crate::testutil::stash_target("stash@{0}")),
         paths: None,
     };
     state.stash_menu = Some(vec![drop]);
@@ -4483,12 +4483,19 @@ fn explorer_file_loads_text_binary_and_too_large() {
 fn failed_write_names_the_op_and_git_reason() {
     let (root, mut state) = git_app_state("ws-effect-write-fail", "main", false);
     let mut interp = Interpreter::with_cap(4);
+    // The stash entry exists, so the pop reaches git, which refuses it:
+    // the local change would be overwritten.
+    let dir = root.join("app");
+    std::fs::write(dir.join("README.md"), "# stashed\n").unwrap();
+    crate::testutil::git(&dir, &["stash", "-q"]);
+    let stash = crate::git::latest_stash(&dir).expect("stash");
+    std::fs::write(dir.join("README.md"), "# local\n").unwrap();
     schedule_effect(
         &mut interp,
         &mut state,
         Effect::StashPop {
             repo: "app".into(),
-            stash_ref: "stash@{0}".into(),
+            stash,
         },
         &Action::None,
     );
@@ -4496,11 +4503,102 @@ fn failed_write_names_the_op_and_git_reason() {
     assert!(
         state
             .status
-            .starts_with("stash pop failed: stash@{0} is not a valid reference"),
+            .starts_with("stash pop failed: Your local changes to the following files"),
         "{}",
         state.status
     );
     assert_eq!(state.status.kind(), StatusKind::Error);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Stash `content` into README.md of `dir` and return that entry.
+fn push_stash(dir: &std::path::Path, content: &str) -> crate::git::StashTarget {
+    std::fs::write(dir.join("README.md"), content).unwrap();
+    crate::testutil::git(dir, &["stash", "-q"]);
+    crate::git::latest_stash(dir).expect("stash")
+}
+
+fn stash_shas(dir: &std::path::Path) -> Vec<String> {
+    crate::git::list_stashes(dir)
+        .into_iter()
+        .map(|stash| stash.sha)
+        .collect()
+}
+
+#[test]
+fn stash_pop_and_drop_act_on_the_picked_entry_after_a_newer_stash() {
+    let (root, mut state) = git_app_state("ws-effect-stash-by-sha", "main", false);
+    let dir = root.join("app");
+    let mut interp = Interpreter::with_cap(4);
+
+    // Picked as stash@{0}; a newer stash then moves it to stash@{1}.
+    let picked = push_stash(&dir, "# picked\n");
+    assert_eq!(picked.stash_ref, "stash@{0}");
+    let newer = push_stash(&dir, "# newer\n");
+    schedule_effect(
+        &mut interp,
+        &mut state,
+        Effect::StashPop {
+            repo: "app".into(),
+            stash: picked.clone(),
+        },
+        &Action::None,
+    );
+    run_jobs(&mut interp, &mut state);
+    assert_eq!(state.status, "popped stash@{1}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("README.md")).unwrap(),
+        "# picked\n"
+    );
+    assert_eq!(stash_shas(&dir), vec![newer.sha.clone()]);
+
+    // Drop: the picked entry sits under a newer one again.
+    crate::testutil::git(&dir, &["checkout", "-q", "--", "README.md"]);
+    let picked = push_stash(&dir, "# drop me\n");
+    let newest = push_stash(&dir, "# keep me\n");
+    schedule_effect(
+        &mut interp,
+        &mut state,
+        Effect::StashDrop {
+            repo: "app".into(),
+            stash: picked,
+        },
+        &Action::None,
+    );
+    run_jobs(&mut interp, &mut state);
+    assert_eq!(state.status, "dropped stash@{1}");
+    assert_eq!(stash_shas(&dir), vec![newest.sha, newer.sha]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn stash_pop_refuses_when_the_picked_entry_is_gone() {
+    let (root, mut state) = git_app_state("ws-effect-stash-gone", "main", false);
+    let dir = root.join("app");
+    let mut interp = Interpreter::with_cap(4);
+    let picked = push_stash(&dir, "# picked\n");
+    // Another tool drops it, and a new stash takes stash@{0}.
+    crate::testutil::git(&dir, &["stash", "drop", "-q"]);
+    let other = push_stash(&dir, "# other\n");
+    schedule_effect(
+        &mut interp,
+        &mut state,
+        Effect::StashPop {
+            repo: "app".into(),
+            stash: picked.clone(),
+        },
+        &Action::None,
+    );
+    run_jobs(&mut interp, &mut state);
+    let short = &picked.sha[..7];
+    assert_eq!(
+        state.status,
+        format!(
+            "stash pop failed: stash@{{0}} ({short}) is no longer in the stash list; nothing changed"
+        )
+    );
+    assert_eq!(state.status.kind(), StatusKind::Error);
+    assert_eq!(stash_shas(&dir), vec![other.sha], "the other stash stays");
     let _ = std::fs::remove_dir_all(root);
 }
 

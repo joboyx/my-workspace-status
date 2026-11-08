@@ -116,6 +116,24 @@ fn copy(text: &str) -> Effect {
 }
 
 #[test]
+fn gone_upstream_paints_the_no_upstream_mark_and_names_it() {
+    let mut app = app_state(&[repo(
+        "pruned",
+        SyncStatus::Gone,
+        crate::helpers::UPSTREAM_GONE_NOTE,
+    )]);
+    let sections = gh_on(&mut app, "repo:pruned");
+    let (_, lines) = sections
+        .iter()
+        .find(|(kind, _)| *kind == IconKind::NoUpstream)
+        .unwrap_or_else(|| panic!("no sync section: {sections:?}"));
+    assert!(
+        lines.iter().any(|line| line.contains("upstream gone")),
+        "{lines:?}"
+    );
+}
+
+#[test]
 fn sync_mark_records_a_hit_on_its_glyph_cells() {
     let mut app = app();
     let terminal = paint(&mut app);

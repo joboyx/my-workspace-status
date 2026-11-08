@@ -38,13 +38,7 @@ fn git_binary_is_nonempty() {
 
 #[test]
 fn git_command_nulls_stdin_and_disables_prompts() {
-    let dir = std::env::temp_dir().join(format!(
-        "ws-git-stdin-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir = unique_dir("ws-git-stdin");
     fs::create_dir_all(&dir).unwrap();
     let script = dir.join("probe");
     fs::write(
@@ -128,6 +122,69 @@ fn git_command_and_run_with_stdin_disable_optional_locks() {
         String::from_utf8_lossy(&out.stdout).trim().len(),
         40,
         "stdin reached git through the bounded runner: {out:?}"
+    );
+}
+
+/// Shell lines for a fake git script: drop the [`PINNED_CONFIG`] `-c`
+/// pairs that [`git_process`] puts first, so `$1` is the subcommand.
+const SKIP_PINS: &str = "while [ \"$1\" = -c ]; do shift 2; done\n";
+
+#[test]
+fn git_process_pins_config_that_changes_parsed_output() {
+    let cmd = git_process(git_binary());
+    let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy()).collect();
+    assert_eq!(
+        args,
+        [
+            "-c",
+            "color.ui=false",
+            "-c",
+            "color.diff=false",
+            "-c",
+            "diff.noprefix=false",
+            "-c",
+            "diff.mnemonicPrefix=false",
+            "-c",
+            "diff.srcPrefix=a/",
+            "-c",
+            "diff.dstPrefix=b/",
+            "-c",
+            "log.showSignature=false",
+        ]
+    );
+    let argv = |args: &[&str]| {
+        let cmd = git_command(git_binary(), args, Path::new("."));
+        let all: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        all[2 * PINNED_CONFIG.len()..].join(" ")
+    };
+    assert_eq!(
+        git_subcommand(&["-c", "color.ui=false", "fetch"]),
+        Some("fetch")
+    );
+    assert_eq!(argv(&["fetch", "--quiet"]), "fetch --quiet");
+    assert_eq!(
+        argv(&["diff", "--", "x"]),
+        "diff --no-ext-diff --no-textconv -- x"
+    );
+    assert_eq!(
+        argv(&["show", "--first-parent", "HEAD"]),
+        "show --no-ext-diff --no-textconv --first-parent HEAD"
+    );
+    assert_eq!(
+        argv(&["log", "--format=%ct"]),
+        "log --no-ext-diff --no-textconv --format=%ct"
+    );
+    assert_eq!(
+        argv(&["stash", "show", "--numstat", "-z", "stash@{0}"]),
+        "stash show --no-ext-diff --no-textconv --numstat -z stash@{0}"
+    );
+    assert_eq!(argv(&["stash", "list"]), "stash list");
+    assert_eq!(
+        argv(&["-c", "core.quotePath=false", "blame", "--porcelain"]),
+        "-c core.quotePath=false blame --no-textconv --porcelain"
     );
 }
 
@@ -217,7 +274,7 @@ fn remote_git_gets_ssh_connect_timeout_unless_a_custom_ssh_is_set() {
     // process env is not touched).
     let probe = |name: &str, config: &str, envs: &[(&str, &str)]| {
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = config ]; then {config}; fi\n\
+            "#!/bin/sh\n{SKIP_PINS}if [ \"$1\" = config ]; then {config}; fi\n\
                  printf 'ssh=%s\\n' \"${{GIT_SSH_COMMAND-}}\"\n"
         );
         let (dir, bin) = fake_git(name, &script);
@@ -313,7 +370,7 @@ fn stalled_git_is_killed_with_its_process_group_at_the_time_limit() {
         let (dir, bin) = fake_git(name, "");
         let pid_file = dir.join("sleep.pid");
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = config ]; then exit 1; fi\n{}wait\n",
+            "#!/bin/sh\n{SKIP_PINS}if [ \"$1\" = config ]; then exit 1; fi\n{}wait\n",
             background_sleep(&pid_file)
         );
         fs::write(&bin, script).unwrap();
@@ -947,13 +1004,7 @@ fn revert_compare_file_takes_paths_literally() {
 
 #[test]
 fn apply_cached_patch_stages_and_unstages_one_hunk() {
-    let dir = std::env::temp_dir().join(format!(
-        "ws-git-apply-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir = unique_dir("ws-git-apply");
     init_repo(&dir);
     let body = "\
 keep-a
@@ -1153,13 +1204,7 @@ fn fast_forward_to_remote_ref_ahead_and_missing_leave_head() {
 
 #[test]
 fn merge_into_head_ff_merge_commit_conflict_and_worktree() {
-    let dir = std::env::temp_dir().join(format!(
-        "ws-git-merge-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir = unique_dir("ws-git-merge");
     init_repo(&dir);
     let seed = exec_git(&["rev-parse", "HEAD"], &dir);
     assert_eq!(
@@ -1667,13 +1712,7 @@ fn parse_raw_patch_keys_reads_plain_and_rename_rows() {
 
 #[test]
 fn blob_bytes_returns_head_contents_without_utf8_trim() {
-    let dir = std::env::temp_dir().join(format!(
-        "ws-git-blob-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir = unique_dir("ws-git-blob");
     init_repo(&dir);
     let payload = b"hello \n\x00\xff";
     fs::write(dir.join("bin.dat"), payload).unwrap();
@@ -1692,13 +1731,7 @@ fn blob_bytes_returns_head_contents_without_utf8_trim() {
 
 #[test]
 fn blob_bytes_missing_path_is_none() {
-    let dir = std::env::temp_dir().join(format!(
-        "ws-git-blob-miss-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir = unique_dir("ws-git-blob-miss");
     init_repo(&dir);
     assert_eq!(blob_bytes(&dir, "HEAD", "nope.txt"), None);
     let _ = fs::remove_dir_all(&dir);
@@ -1706,13 +1739,7 @@ fn blob_bytes_missing_path_is_none() {
 
 #[test]
 fn compare_wrappers_ahead_behind_diverged_rename_and_failure() {
-    let dir = std::env::temp_dir().join(format!(
-        "ws-git-compare-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir = unique_dir("ws-git-compare");
     init_repo(&dir);
     let base = exec_git(&["rev-parse", "HEAD"], &dir);
     fs::write(dir.join("one.txt"), "one\n").unwrap();

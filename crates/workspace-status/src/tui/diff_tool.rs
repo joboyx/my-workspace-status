@@ -1,8 +1,11 @@
 //! External diff tool config, argv, and LEFT/RIGHT temp files.
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Child;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::editor::parse_editor_argv;
@@ -44,9 +47,191 @@ pub fn diff_tool_command(tool: &str, left: &str, right: &str) -> (String, Vec<St
     }
 }
 
-/// Shared directory for external-diff temp files (`$TMPDIR/workspace-status-ext-diff`).
-pub fn ext_diff_temp_dir() -> PathBuf {
-    std::env::temp_dir().join("workspace-status-ext-diff")
+/// Name prefix of this process's external-diff directory under `$TMPDIR`.
+const EXT_DIFF_DIR_PREFIX: &str = "workspace-status-ext-diff";
+
+/// Identity of a real directory: device, inode and owner on Unix. A
+/// symlink, or a directory made again at the same name by someone else,
+/// does not match the identity recorded when this process made it.
+#[cfg(unix)]
+type DirId = (u64, u64, u32);
+/// Identity of a real directory. Off Unix, only "a directory, not a link".
+#[cfg(not(unix))]
+type DirId = ();
+
+/// [`DirId`] of `path` without following a link at its last component, or
+/// `None` when `path` is missing, a symlink, or not a directory.
+fn dir_id(path: &Path) -> Option<DirId> {
+    let meta = fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_dir() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((meta.dev(), meta.ino(), meta.uid()))
+    }
+    #[cfg(not(unix))]
+    {
+        Some(())
+    }
+}
+
+/// This process's external-diff directory.
+enum ExtDiffDir {
+    /// Not made yet.
+    Unmade,
+    /// Made at this path, with the identity it had when made.
+    Made(PathBuf, DirId),
+    /// Removed at quit; no new one is made.
+    Closed,
+}
+
+/// This process's external-diff directory and the sessions in it that a
+/// detached tool still has open. One global instance ([`TEMPS`]); tests
+/// use their own.
+struct ExtDiffTemps {
+    /// The root ([`ext_diff_temp_dir`]).
+    dir: Mutex<ExtDiffDir>,
+    /// Session directories a detached tool still has open
+    /// ([`wait_and_cleanup_in_background`]).
+    live: Mutex<Vec<PathBuf>>,
+}
+
+/// This process's external-diff temps.
+static TEMPS: ExtDiffTemps = ExtDiffTemps::new();
+
+/// Lock `mutex`, also after a panic in another holder.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+impl ExtDiffTemps {
+    const fn new() -> Self {
+        Self {
+            dir: Mutex::new(ExtDiffDir::Unmade),
+            live: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The root under `parent`: the one made before when it is still the
+    /// same real directory, else a new one. `Err` after [`Self::remove`].
+    fn temp_dir(&self, parent: &Path) -> Result<PathBuf, String> {
+        let mut slot = lock(&self.dir);
+        match &*slot {
+            ExtDiffDir::Made(dir, id) if dir_id(dir) == Some(*id) => return Ok(dir.clone()),
+            ExtDiffDir::Closed => return Err("ws is exiting".into()),
+            ExtDiffDir::Made(..) | ExtDiffDir::Unmade => {}
+        }
+        let dir = create_private_dir(parent, EXT_DIFF_DIR_PREFIX).map_err(|e| e.to_string())?;
+        let id = dir_id(&dir).ok_or("external-diff temp directory changed")?;
+        *slot = ExtDiffDir::Made(dir.clone(), id);
+        Ok(dir)
+    }
+
+    /// Close the root and delete it, except the live sessions. The delete
+    /// is skipped when the path is no longer the directory this process
+    /// made (a tmp cleaner removed it and something else took the name).
+    fn remove(&self) {
+        let mut slot = lock(&self.dir);
+        if let ExtDiffDir::Made(root, id) = std::mem::replace(&mut *slot, ExtDiffDir::Closed) {
+            if dir_id(&root) == Some(id) {
+                remove_ext_diff_dir_at(&root, &lock(&self.live));
+            }
+        }
+    }
+
+    /// Mark the session live, then wait for `child` on a new thread.
+    fn wait_in_background(&'static self, child: Child, prepared: PreparedDiff) {
+        lock(&self.live).push(prepared.session_dir.clone());
+        std::thread::spawn(move || self.wait_then_cleanup(child, prepared));
+    }
+
+    /// Wait for `child`, delete the session, and drop it from the live list.
+    fn wait_then_cleanup(&self, mut child: Child, prepared: PreparedDiff) {
+        let _ = child.wait();
+        cleanup_prepared(&prepared);
+        lock(&self.live).retain(|dir| dir != &prepared.session_dir);
+    }
+}
+
+/// This process's private directory for external-diff temp files:
+/// `$TMPDIR/workspace-status-ext-diff-<pid>-<nanos>-<n>`, made on first use
+/// by [`create_private_dir`].
+///
+/// Each process and user gets its own directory, so a shared `/tmp` never
+/// mixes their temps. Another user cannot add files to it (mode 0700). A
+/// later call reuses it only while the path is still the same real
+/// directory: if a tmp cleaner deletes it and another user puts a symlink
+/// or a new directory at that name, a new root is made instead.
+/// [`remove_ext_diff_temp_dir`] deletes it when the TUI quits; after that
+/// this is `Err`, so a diff worker that outlives quit leaves nothing.
+pub fn ext_diff_temp_dir() -> Result<PathBuf, String> {
+    TEMPS.temp_dir(&std::env::temp_dir())
+}
+
+/// Create a new directory `<parent>/<prefix>-<pid>-<nanos>-<n>` that only
+/// its owner can open (mode 0700 on Unix).
+///
+/// The create fails on a name that exists, so a directory someone else
+/// made first is never used: the next `n` is tried instead.
+fn create_private_dir(parent: &Path, prefix: &str) -> io::Result<PathBuf> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    for _ in 0..100 {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir = parent.join(format!("{prefix}-{}-{nanos}-{n}", std::process::id()));
+        match builder.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no free external-diff temp directory name",
+    ))
+}
+
+/// Delete this process's external-diff directory when the TUI quits.
+///
+/// A session a detached tool still has open stays on disk (no one waits
+/// for that tool after the TUI exits), and so does the directory that
+/// holds it. Everything else goes. When the path is no longer the real
+/// directory this process made (for example, a symlink now), nothing is
+/// deleted.
+///
+/// A session can still appear or go while this runs: a diff worker that
+/// got the root before quit makes its session between the listing and the
+/// final `remove_dir`, or a detached tool exits and its thread deletes its
+/// session after the root was skipped as non-empty. Either one only
+/// leaves the root (empty, or with that one session) for the `$TMPDIR`
+/// cleaner.
+pub fn remove_ext_diff_temp_dir() {
+    TEMPS.remove();
+}
+
+/// Delete every session under `root` except `live`, then `root` when it
+/// is empty.
+fn remove_ext_diff_dir_at(root: &Path, live: &[PathBuf]) {
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !live.contains(&path) {
+                let _ = fs::remove_dir_all(&path);
+            }
+        }
+    }
+    let _ = fs::remove_dir(root);
 }
 
 /// LEFT/RIGHT paths for one external-diff session.
@@ -62,20 +247,12 @@ pub struct PreparedDiff {
     session_dir: PathBuf,
 }
 
-/// One session directory: `$TMPDIR/workspace-status-ext-diff/<pid>-<nanos>/`.
+/// One new session directory `session-<n>` under [`ext_diff_temp_dir`].
 ///
 /// Later prepares do not delete sibling sessions. A detached GUI keeps this
 /// directory until [`wait_and_cleanup`] runs after the child exits.
 fn new_session_dir() -> Result<PathBuf, String> {
-    let root = ext_diff_temp_dir();
-    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let dir = root.join(format!("{}-{nanos}", std::process::id()));
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir)
+    create_private_dir(&ext_diff_temp_dir()?, "session").map_err(|e| e.to_string())
 }
 
 /// `{stem}.{side}.{nanos}.{ext}` so tools that key off the last suffix (vimdiff) see `.rs`, not `{nanos}`.
@@ -196,20 +373,30 @@ pub fn cleanup_prepared(prepared: &PreparedDiff) {
 /// command includes `--wait`. Cleanup runs when that process exits. Without
 /// `--wait`, the LEFT HEAD temp is gone before the IDE opens the files.
 /// Config `diffTool` is used as-is. Samples use `cursor --diff --wait`.
-pub fn wait_and_cleanup(mut child: Child, prepared: PreparedDiff) {
-    let _ = child.wait();
-    cleanup_prepared(&prepared);
+///
+/// While it waits, the session counts as live, so
+/// [`remove_ext_diff_temp_dir`] at quit leaves it in place. The live loop
+/// uses [`wait_and_cleanup_in_background`].
+#[cfg(test)]
+pub fn wait_and_cleanup(child: Child, prepared: PreparedDiff) {
+    lock(&TEMPS.live).push(prepared.session_dir.clone());
+    TEMPS.wait_then_cleanup(child, prepared);
+}
+
+/// [`wait_and_cleanup`] on a new thread. The session counts as live
+/// before this returns, so a quit right after the spawn keeps it.
+pub fn wait_and_cleanup_in_background(child: Child, prepared: PreparedDiff) {
+    TEMPS.wait_in_background(child, prepared);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{git, init_repo};
+    use crate::testutil::{git, init_repo, unique_dir};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::Mutex;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn resolve_none_blank_whitespace_is_vimdiff() {
@@ -284,13 +471,7 @@ mod tests {
     }
 
     fn unique_repo(prefix: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "{prefix}-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = unique_dir(prefix);
         init_repo(&dir);
         dir
     }
@@ -342,13 +523,13 @@ mod tests {
         assert_eq!(fs::read(&prepared.left).unwrap(), b"# seed\n");
         assert_eq!(prepared.right, dir.join("README.md"));
         assert_ne!(prepared.left, dir.join("README.md"));
-        assert!(prepared.left.starts_with(ext_diff_temp_dir()));
+        assert!(prepared.left.starts_with(ext_diff_temp_dir().unwrap()));
         assert!(prepared
             .left
             .parent()
             .and_then(|p| p.file_name())
             .and_then(|s| s.to_str())
-            .is_some_and(|name| name.starts_with(&format!("{}-", std::process::id()))));
+            .is_some_and(|name| name.starts_with("session-")));
         cleanup_prepared(&prepared);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -361,7 +542,7 @@ mod tests {
         let prepared = prepare_worktree_diff(&dir, "new.txt").unwrap();
         assert_eq!(fs::read(&prepared.left).unwrap(), b"");
         assert_eq!(prepared.right, dir.join("new.txt"));
-        assert!(prepared.left.starts_with(ext_diff_temp_dir()));
+        assert!(prepared.left.starts_with(ext_diff_temp_dir().unwrap()));
         cleanup_prepared(&prepared);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -375,7 +556,7 @@ mod tests {
         assert_eq!(fs::read(&prepared.left).unwrap(), b"# seed\n");
         assert_eq!(fs::read(&prepared.right).unwrap(), b"");
         assert_ne!(prepared.right, dir.join("README.md"));
-        assert!(prepared.right.starts_with(ext_diff_temp_dir()));
+        assert!(prepared.right.starts_with(ext_diff_temp_dir().unwrap()));
         cleanup_prepared(&prepared);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -408,8 +589,7 @@ mod tests {
     fn prepare_does_not_delete_other_session_temps() {
         let _lock = lock_temps();
         let dir = unique_repo("ws-ext-diff-nosweep");
-        fs::create_dir_all(ext_diff_temp_dir()).unwrap();
-        let other = ext_diff_temp_dir().join("999999-1");
+        let other = ext_diff_temp_dir().unwrap().join("999999-1");
         fs::create_dir_all(&other).unwrap();
         let leftover = other.join("still-open-in-gui.rs");
         fs::write(&leftover, b"stale").unwrap();
@@ -436,7 +616,7 @@ mod tests {
         fs::write(dir.join("README.md"), "# dirty\n").unwrap();
         let prepared = prepare_worktree_diff(&dir, "README.md").unwrap();
         let left = prepared.left.clone();
-        let other = ext_diff_temp_dir().join("888888-2");
+        let other = ext_diff_temp_dir().unwrap().join("888888-2");
         fs::create_dir_all(&other).unwrap();
         let leftover = other.join("gui-left.rs");
         fs::write(&leftover, b"open").unwrap();
@@ -484,6 +664,138 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The temp root belongs to this process: not the old shared
+    /// `$TMPDIR/workspace-status-ext-diff`, named by this process id, and
+    /// owner-only on Unix.
+    #[test]
+    fn ext_diff_dir_is_private_to_this_process() {
+        let _lock = lock_temps();
+        let root = ext_diff_temp_dir().unwrap();
+        assert_ne!(root, std::env::temp_dir().join(EXT_DIFF_DIR_PREFIX));
+        let name = root.file_name().and_then(|s| s.to_str()).unwrap();
+        let own = format!("{EXT_DIFF_DIR_PREFIX}-{}-", std::process::id());
+        assert!(name.starts_with(&own), "{name}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "root mode {mode:o}");
+        }
+    }
+
+    /// Each private directory is new: two calls never share one.
+    #[test]
+    fn private_dirs_are_new_each_time() {
+        let parent = unique_dir("ws-ext-diff-private");
+        fs::create_dir_all(&parent).unwrap();
+        let a = create_private_dir(&parent, "x").unwrap();
+        let b = create_private_dir(&parent, "x").unwrap();
+        assert_ne!(a, b);
+        assert!(a.is_dir() && b.is_dir());
+        let _ = fs::remove_dir_all(&parent);
+    }
+
+    /// Quit deletes finished sessions and keeps one a detached tool still
+    /// has open; with none open, the root goes too.
+    #[test]
+    fn quit_removes_every_session_but_the_live_ones() {
+        let parent = unique_dir("ws-ext-diff-quit");
+        fs::create_dir_all(&parent).unwrap();
+        let root = create_private_dir(&parent, "root").unwrap();
+        let done = create_private_dir(&root, "session").unwrap();
+        fs::write(done.join("left.rs"), "x").unwrap();
+        let live = create_private_dir(&root, "session").unwrap();
+        fs::write(live.join("left.rs"), "y").unwrap();
+        remove_ext_diff_dir_at(&root, std::slice::from_ref(&live));
+        assert!(!done.exists(), "finished session removed");
+        assert!(live.join("left.rs").exists(), "live session kept");
+        remove_ext_diff_dir_at(&root, &[]);
+        assert!(!root.exists(), "empty root removed");
+        let _ = fs::remove_dir_all(&parent);
+    }
+
+    /// Quit reads the live list that a detached wait fills before its
+    /// thread starts: the open session stays, the finished one goes, and
+    /// no root is made after quit.
+    #[test]
+    fn quit_keeps_the_session_a_detached_tool_still_has_open() {
+        let temps: &'static ExtDiffTemps = Box::leak(Box::new(ExtDiffTemps::new()));
+        let parent = unique_dir("ws-ext-diff-live");
+        fs::create_dir_all(&parent).unwrap();
+        let root = temps.temp_dir(&parent).unwrap();
+        let done = create_private_dir(&root, "session").unwrap();
+        fs::write(done.join("left.rs"), "x").unwrap();
+        let open = create_private_dir(&root, "session").unwrap();
+        let left = open.join("left.rs");
+        fs::write(&left, "y").unwrap();
+        let mut child = Command::new(crate::git::git_binary())
+            .args(["hash-object", "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn git hash-object --stdin");
+        let stdin = child.stdin.take().expect("piped stdin");
+        let prepared = PreparedDiff {
+            left: left.clone(),
+            right: parent.join("worktree.rs"),
+            left_is_temp: true,
+            right_is_temp: false,
+            session_dir: open.clone(),
+        };
+        temps.wait_in_background(child, prepared);
+
+        temps.remove();
+        assert!(left.exists(), "open session kept");
+        assert!(!done.exists(), "finished session removed");
+        assert!(temps.temp_dir(&parent).is_err(), "no root after quit");
+
+        drop(stdin);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while open.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!open.exists(), "session removed once the tool exits");
+        let _ = fs::remove_dir_all(&parent);
+    }
+
+    /// A root that a tmp cleaner removed and another user replaced with a
+    /// symlink is neither reused by a later diff nor emptied at quit.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_swapped_for_a_symlink_is_not_reused_or_emptied() {
+        use std::os::unix::fs::symlink;
+        let temps = ExtDiffTemps::new();
+        let parent = unique_dir("ws-ext-diff-swap");
+        fs::create_dir_all(&parent).unwrap();
+        // A file in a subdirectory: quit runs `remove_dir_all` on each entry.
+        let target = parent.join("someone-elses");
+        fs::create_dir_all(target.join("data")).unwrap();
+        let keep = target.join("data").join("keep.txt");
+        fs::write(&keep, "keep").unwrap();
+
+        let root = temps.temp_dir(&parent).unwrap();
+        fs::remove_dir(&root).unwrap();
+        symlink(&target, &root).unwrap();
+        let fresh = temps.temp_dir(&parent).unwrap();
+        assert_ne!(fresh, root, "a new root, not the link");
+        assert!(fs::symlink_metadata(&fresh).unwrap().is_dir());
+        let session = create_private_dir(&fresh, "session").unwrap();
+        assert!(session.starts_with(&fresh));
+        let in_target: Vec<_> = fs::read_dir(&target).unwrap().flatten().collect();
+        assert_eq!(in_target.len(), 1, "nothing written through the link");
+
+        fs::remove_dir_all(&fresh).unwrap();
+        symlink(&target, &fresh).unwrap();
+        temps.remove();
+        assert!(keep.exists(), "quit does not delete through the link");
+        assert!(fs::symlink_metadata(&fresh)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let _ = fs::remove_dir_all(&parent);
+    }
+
     #[test]
     fn rev_diff_both_sides_are_blob_temps() {
         let _lock = lock_temps();
@@ -494,8 +806,8 @@ mod tests {
         let prepared = prepare_rev_diff(&dir, "HEAD^", "HEAD", "README.md").unwrap();
         assert_eq!(fs::read(&prepared.left).unwrap(), b"# seed\n");
         assert_eq!(fs::read(&prepared.right).unwrap(), b"# v2\n");
-        assert!(prepared.left.starts_with(ext_diff_temp_dir()));
-        assert!(prepared.right.starts_with(ext_diff_temp_dir()));
+        assert!(prepared.left.starts_with(ext_diff_temp_dir().unwrap()));
+        assert!(prepared.right.starts_with(ext_diff_temp_dir().unwrap()));
         assert_ne!(prepared.right, dir.join("README.md"));
         cleanup_prepared(&prepared);
         let _ = fs::remove_dir_all(&dir);

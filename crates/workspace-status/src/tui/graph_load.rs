@@ -705,6 +705,7 @@ pub(crate) fn sync_from_snapshot(repo: &WorkspaceRepoSnapshot) -> SyncState {
         status: match repo.sync_status {
             crate::snapshot::SyncStatus::UpToDate => SyncStatus::UpToDate,
             crate::snapshot::SyncStatus::NoUpstream => SyncStatus::NoUpstream,
+            crate::snapshot::SyncStatus::Gone => SyncStatus::Gone,
             crate::snapshot::SyncStatus::Ahead => SyncStatus::Ahead,
             crate::snapshot::SyncStatus::Behind => SyncStatus::Behind,
             crate::snapshot::SyncStatus::Diverged => SyncStatus::Diverged,
@@ -1051,7 +1052,7 @@ mod tests {
 #[cfg(test)]
 mod live_git {
     use super::*;
-    use crate::testutil::{git, init_repo_empty, repo_snapshot};
+    use crate::testutil::{git, init_repo_empty, repo_snapshot, unique_dir};
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -1060,7 +1061,7 @@ mod live_git {
     use crate::snapshot::{build_workspace_snapshot, CheckoutKind};
 
     fn temp_workspace() -> (PathBuf, PathBuf) {
-        let root = crate::testutil::unique_dir("ws-graph-load");
+        let root = unique_dir("ws-graph-load");
         let workspace = root.join("workspace");
         let repo = workspace.join("app");
         fs::create_dir_all(&repo).unwrap();
@@ -1484,6 +1485,36 @@ mod live_git {
             load_commit_card(&repo, &"0".repeat(40)),
             Err("commit not found".to_string())
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn user_log_show_signature_keeps_the_commit_record() {
+        let (root, repo) = temp_workspace();
+        init_repo_empty(&repo);
+        commit_file(&repo, "a.txt", "1\n", "first");
+        // A commit with an ssh signature header. No key verifies it: with
+        // `log.showSignature` git prints `No signature` ahead of the record.
+        let tree = exec_git(&["write-tree"], &repo);
+        let parent = exec_git(&["rev-parse", "HEAD"], &repo);
+        let body = format!(
+            "tree {tree}\nparent {parent}\n\
+             author A <a@example.invalid> 1700000000 +0000\n\
+             committer A <a@example.invalid> 1700000000 +0000\n\
+             gpgsig -----BEGIN SSH SIGNATURE-----\n U1NIU0lH\n -----END SSH SIGNATURE-----\n\n\
+             signed subject\n"
+        );
+        let object = root.join("signed-commit");
+        fs::write(&object, body).unwrap();
+        let object = object.to_string_lossy().into_owned();
+        let sha = exec_git(&["hash-object", "-t", "commit", "-w", &object], &repo);
+        git(&repo, &["update-ref", "refs/heads/main", &sha]);
+        git(&repo, &["config", "log.showSignature", "true"]);
+
+        let card = load_commit_card(&repo, &sha).expect("card");
+        assert_eq!(card.id, sha);
+        assert_eq!(card.subject, "signed subject");
+        assert_eq!(card.parents, vec![parent]);
         let _ = fs::remove_dir_all(&root);
     }
 

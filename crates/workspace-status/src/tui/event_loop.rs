@@ -25,8 +25,8 @@ use super::app::{
     apply_terminal_resize, map_event, run_blocking_editor, sync_mouse_capture,
     take_held_nav_backlog, TuiOpts,
 };
-use super::diff_tool::{cleanup_prepared, diff_tool_command, wait_and_cleanup};
-use super::editor::{editor_command, is_detached_editor, resolve_editor};
+use super::diff_tool::{cleanup_prepared, diff_tool_command, wait_and_cleanup_in_background};
+use super::editor::{editor_command, is_detached_editor, resolve_editor, spawn_detached_editor};
 use super::effect::{run_job, DiffLaunch, Interpreter, JobResult, JobWork};
 use super::event_pump::{
     action_triggers_graph_autoload, classify_busy_dispatch, keep_held_nav_backlog,
@@ -133,25 +133,13 @@ fn input_thread(
     cmd_rx: std_mpsc::Receiver<InputCmd>,
     ack_tx: std_mpsc::Sender<()>,
 ) {
-    let mut paused = false;
     loop {
-        if paused {
-            match cmd_rx.recv() {
-                Ok(InputCmd::Resume) => {
-                    paused = false;
-                    let _ = ack_tx.send(());
-                }
-                Ok(InputCmd::Pause) => {
-                    let _ = ack_tx.send(());
-                }
-                Ok(InputCmd::Shutdown) | Err(_) => break,
-            }
-            continue;
-        }
         match cmd_rx.try_recv() {
             Ok(InputCmd::Pause) => {
-                paused = true;
                 let _ = ack_tx.send(());
+                if !wait_while_paused(&cmd_rx, &ack_tx) {
+                    break;
+                }
                 continue;
             }
             Ok(InputCmd::Shutdown) => break,
@@ -177,9 +165,59 @@ fn input_thread(
             .chain(backlog.into_iter().map(InputEvent::held_backlog))
             .chain(next.map(InputEvent::read));
         for input in forwarded {
-            if tx.blocking_send(input).is_err() {
+            if !forward(&tx, input, &cmd_rx, &ack_tx) {
                 return;
             }
+        }
+    }
+}
+
+/// Block until the loop thread sends Resume (ack it): `true`. A repeated
+/// Pause is acked and waits on; Shutdown or a closed channel is `false`.
+fn wait_while_paused(cmd_rx: &std_mpsc::Receiver<InputCmd>, ack_tx: &std_mpsc::Sender<()>) -> bool {
+    loop {
+        match cmd_rx.recv() {
+            Ok(InputCmd::Resume) => {
+                let _ = ack_tx.send(());
+                return true;
+            }
+            Ok(InputCmd::Pause) => {
+                let _ = ack_tx.send(());
+            }
+            Ok(InputCmd::Shutdown) | Err(_) => return false,
+        }
+    }
+}
+
+/// Send `item` to the loop thread. `false` when the loop or the bridge is
+/// gone.
+///
+/// While the channel is full, keep answering Pause: the loop thread waits
+/// for that ack in [`InputBridge::pause`] before it opens an editor, and
+/// does not drain the channel meanwhile, so a blocking send would hang
+/// both threads. The item is sent after Resume, in read order.
+fn forward<T>(
+    tx: &tokio::sync::mpsc::Sender<T>,
+    mut item: T,
+    cmd_rx: &std_mpsc::Receiver<InputCmd>,
+    ack_tx: &std_mpsc::Sender<()>,
+) -> bool {
+    use tokio::sync::mpsc::error::TrySendError;
+    loop {
+        match tx.try_send(item) {
+            Ok(()) => return true,
+            Err(TrySendError::Closed(_)) => return false,
+            Err(TrySendError::Full(back)) => item = back,
+        }
+        match cmd_rx.recv_timeout(Duration::from_millis(5)) {
+            Ok(InputCmd::Pause) => {
+                let _ = ack_tx.send(());
+                if !wait_while_paused(cmd_rx, ack_tx) {
+                    return false;
+                }
+            }
+            Ok(InputCmd::Resume) | Err(std_mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(InputCmd::Shutdown) | Err(std_mpsc::RecvTimeoutError::Disconnected) => return false,
         }
     }
 }
@@ -838,13 +876,7 @@ fn schedule_edit(ctx: &mut LoopCtx<'_>, repo: String, path: String, line: Option
     let abs = ctx.opts.cwd.join(&repo).join(&path);
     let (cmd, args) = editor_command(&editor, &abs.to_string_lossy(), line);
     if is_detached_editor(&editor) {
-        let spawned = Command::new(&cmd)
-            .args(&args)
-            .current_dir(ctx.opts.cwd.join(&repo))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+        let spawned = spawn_detached_editor(&cmd, &args, &ctx.opts.cwd.join(&repo));
         ctx.state.status = match spawned {
             Ok(_) => StatusMessage::ok(format!("opened {path}")),
             Err(err) => StatusMessage::error(format!("edit failed: {cmd}: {err}")),
@@ -913,9 +945,7 @@ fn launch_diff(ctx: &mut LoopCtx<'_>, launch: DiffLaunch) {
             .spawn()
         {
             Ok(child) => {
-                std::thread::spawn(move || {
-                    wait_and_cleanup(child, prepared);
-                });
+                wait_and_cleanup_in_background(child, prepared);
                 ctx.state.status = StatusMessage::ok(format!("opened diff {path}"));
             }
             Err(err) => {
@@ -961,6 +991,30 @@ fn launch_diff(ctx: &mut LoopCtx<'_>, launch: DiffLaunch) {
 mod tests {
     use super::*;
     use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    /// A full input channel does not stop the input thread from acking
+    /// Pause, so the loop thread pauses before an editor without a hang.
+    /// The event read before the pause is sent after Resume.
+    #[test]
+    fn pause_is_acked_while_the_input_channel_is_full() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<u32>(1);
+        tx.try_send(0).unwrap();
+        let (cmd_tx, cmd_rx) = std_mpsc::channel();
+        let (ack_tx, ack_rx) = std_mpsc::channel();
+        let input = thread::spawn(move || forward(&tx, 1, &cmd_rx, &ack_tx));
+        cmd_tx.send(InputCmd::Pause).unwrap();
+        ack_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("pause acked while the channel is full");
+        assert_eq!(rx.try_recv().ok(), Some(0));
+        assert!(rx.try_recv().is_err(), "held event not sent while paused");
+        cmd_tx.send(InputCmd::Resume).unwrap();
+        ack_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("resume acked");
+        assert!(input.join().unwrap(), "forward goes on after resume");
+        assert_eq!(rx.try_recv().ok(), Some(1), "held event sent after resume");
+    }
 
     fn mouse(kind: MouseEventKind) -> Event {
         Event::Mouse(MouseEvent {

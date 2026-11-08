@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+use super::diff::HUGE_FILE_BYTES;
 use super::persist::{apply_session_delta, persist_with_lock, LEGACY_WORKSPACE_ID};
 use super::tree::{file_row_id, UNSTAGED_ROW_SUFFIX};
 use crate::snapshot::{FileChange, WorkspaceSnapshot};
@@ -22,8 +23,8 @@ use crate::snapshot::{FileChange, WorkspaceSnapshot};
 /// bytes unchanged.
 pub const VIEWED_STORE_VERSION: u32 = 2;
 
-/// Files larger than this hash size only (`huge:<len>`).
-pub const HUGE_FILE_BYTES: u64 = 1_000_000;
+/// Bytes hashed from each end of a file over [`HUGE_FILE_BYTES`].
+const HUGE_FILE_EDGE_BYTES: u64 = 64 * 1024;
 
 /// identity → fingerprint captured at mark time.
 pub type ViewedStore = BTreeMap<String, String>;
@@ -342,12 +343,17 @@ pub fn save_viewed_store(
     Ok(merged.unwrap_or_default())
 }
 
-/// Worktree bytes (or `missing` / `huge:<len>`) hashed with the status token.
+/// Worktree bytes (or `missing`, or a length, time and edge-hash stand-in
+/// for a file over [`HUGE_FILE_BYTES`]) hashed with the status token.
+///
+/// The reducer calls it on the loop thread (Space, and the reconcile after
+/// each snapshot), so a huge file costs one `stat` and two 64 KiB reads,
+/// less than a file just under the size limit.
 pub fn fingerprint_file_change(cwd: &Path, repo: &str, file: &FileChange) -> String {
     let abs = cwd.join(repo).join(&file.path);
     let content = match fs::metadata(&abs).and_then(|m| {
         if m.len() > HUGE_FILE_BYTES {
-            Ok(format!("huge:{}", m.len()).into_bytes())
+            huge_file_digest(&abs, &m)
         } else {
             fs::read(&abs)
         }
@@ -362,6 +368,39 @@ pub fn fingerprint_file_change(cwd: &Path, repo: &str, file: &FileChange) -> Str
         old_path: file.old_path.as_deref(),
         content: &content,
     })
+}
+
+/// Content stand-in for a file over [`HUGE_FILE_BYTES`]: its length, its
+/// modification time, and a hash of its first and last
+/// [`HUGE_FILE_EDGE_BYTES`].
+///
+/// A same-size edit changes the mark when it touches either end or moves
+/// the modification time. An edit inside the middle that keeps both the
+/// size and the time (a tool that restores the time, or a file system
+/// with coarse times) goes unseen. Marks saved with the older `huge:<len>`
+/// stand-in do not match, so such a file shows unreviewed once.
+fn huge_file_digest(abs: &Path, meta: &fs::Metadata) -> io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let len = meta.len();
+    let mtime_ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    let mut file = fs::File::open(abs)?;
+    let mut hasher = Sha256::new();
+    let mut edge = Vec::with_capacity(HUGE_FILE_EDGE_BYTES as usize);
+    (&mut file)
+        .take(HUGE_FILE_EDGE_BYTES)
+        .read_to_end(&mut edge)?;
+    hasher.update(&edge);
+    edge.clear();
+    file.seek(SeekFrom::Start(len.saturating_sub(HUGE_FILE_EDGE_BYTES)))?;
+    (&mut file)
+        .take(HUGE_FILE_EDGE_BYTES)
+        .read_to_end(&mut edge)?;
+    hasher.update(&edge);
+    Ok(format!("huge:{len}:{mtime_ns}:{}", hex_encode(&hasher.finalize())).into_bytes())
 }
 
 /// Current identity → fingerprint map for every dirty file in the snapshot.
@@ -419,8 +458,8 @@ pub fn viewed_row_ids(
 mod tests {
     use super::*;
     use crate::snapshot::{build_workspace_snapshot, FileChange, RepoSnapshot};
-    use crate::testutil::{repo_snapshot, unstaged_change};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::testutil::{repo_snapshot, unique_dir, unstaged_change};
+    use std::time::UNIX_EPOCH;
 
     #[test]
     fn identity_normalizes_repo_and_file_paths() {
@@ -590,13 +629,7 @@ mod tests {
 
     #[test]
     fn load_save_round_trip_json() {
-        let dir = std::env::temp_dir().join(format!(
-            "ws-viewed-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = unique_dir("ws-viewed");
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("viewed-files.json");
         let identity = viewed_identity("demo", "src/a.ts");
@@ -630,13 +663,7 @@ mod tests {
     }
 
     fn temp_viewed(prefix: &str) -> (PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "{prefix}-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = unique_dir(prefix);
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("viewed-files.json");
         (dir, file)
@@ -882,13 +909,7 @@ mod tests {
 
     #[test]
     fn reconcile_on_refresh_drops_changed_fingerprint() {
-        let dir = std::env::temp_dir().join(format!(
-            "ws-viewed-refresh-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = unique_dir("ws-viewed-refresh");
         fs::create_dir_all(dir.join("demo")).unwrap();
         fs::write(dir.join("demo/src").join("a.ts"), "x\n").ok();
         fs::create_dir_all(dir.join("demo/src")).unwrap();
@@ -915,6 +936,50 @@ mod tests {
         let current = collect_current_fingerprints(&snap, &dir);
         let next = reconcile_viewed(&store, &current);
         assert!(next.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Writes `bytes` to `path` and pins its modification time to `secs`
+    /// after the epoch, so a test controls the time part of the digest.
+    fn write_with_mtime(path: &Path, bytes: &[u8], secs: u64) {
+        fs::write(path, bytes).unwrap();
+        let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    /// A file over the size limit keeps its mark while unchanged, and loses
+    /// it on a same-size edit at either end (same time) or in the middle
+    /// (new time).
+    #[test]
+    fn same_size_edits_to_a_huge_file_change_its_fingerprint() {
+        let dir = unique_dir("ws-viewed-huge");
+        fs::create_dir_all(dir.join("demo")).unwrap();
+        let path = dir.join("demo/big.bin");
+        let change = unstaged_change("big.bin");
+        let size = HUGE_FILE_BYTES as usize + 100_000;
+        let base = vec![b'a'; size];
+        write_with_mtime(&path, &base, 1_000);
+        let marked = fingerprint_file_change(&dir, "demo", &change);
+        assert_eq!(
+            fingerprint_file_change(&dir, "demo", &change),
+            marked,
+            "unchanged huge file"
+        );
+        for (label, at, secs) in [
+            ("first byte, same time", 0, 1_000),
+            ("last byte, same time", size - 1, 1_000),
+            ("middle byte, new time", size / 2, 2_000),
+        ] {
+            let mut edited = base.clone();
+            edited[at] = b'b';
+            write_with_mtime(&path, &edited, secs);
+            assert_ne!(
+                fingerprint_file_change(&dir, "demo", &change),
+                marked,
+                "{label}"
+            );
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -946,13 +1011,7 @@ mod tests {
     /// the same hash, so dual Staged and `#unstaged` ids stay marked.
     #[test]
     fn dual_ms_toggle_survives_reconcile_and_emits_both_row_ids() {
-        let dir = std::env::temp_dir().join(format!(
-            "ws-viewed-dual-ms-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = unique_dir("ws-viewed-dual-ms");
         fs::create_dir_all(dir.join("demo")).unwrap();
         fs::write(dir.join("demo/both.rs"), "x\n").unwrap();
         let change = dual_ms_change();

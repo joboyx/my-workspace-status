@@ -79,6 +79,41 @@ const PIPE_CLOSE_GRACE: Duration = Duration::from_millis(200);
 const GLOBAL_OPTIONS_WITH_VALUE: [&str; 5] =
     ["-c", "-C", "--git-dir", "--work-tree", "--namespace"];
 
+/// Config that [`git_process`] sets on every git run as `-c <key>=<value>`
+/// before the subcommand. `-c` beats every config file, so a user or
+/// repository setting cannot change text that `ws` parses or a patch it
+/// applies:
+///
+/// - `color.ui`, `color.diff`: `always` puts ANSI escapes into diff text.
+///   `color.diff` beats `color.ui`, so both are pinned.
+/// - `diff.noprefix`, `diff.mnemonicPrefix`, `diff.srcPrefix`,
+///   `diff.dstPrefix`: keep the `a/` and `b/` path prefixes. A line stage
+///   patch with other prefixes fails in `git apply -p1`. `diff.noprefix`
+///   does not reset the two prefix keys (git 2.45 and later). An older git
+///   ignores them.
+/// - `log.showSignature`: `true` prints signature lines (`No signature`)
+///   into `git log` output, ahead of the requested format.
+///
+/// Git passes `-c` values on to the git processes and hooks that it starts.
+/// `diff.external` is not pinned here: an empty value makes git run an
+/// empty command. [`DIFF_DRIVER_OFF`] turns it off instead.
+const PINNED_CONFIG: [&str; 7] = [
+    "color.ui=false",
+    "color.diff=false",
+    "diff.noprefix=false",
+    "diff.mnemonicPrefix=false",
+    "diff.srcPrefix=a/",
+    "diff.dstPrefix=b/",
+    "log.showSignature=false",
+];
+
+/// Options that [`with_diff_driver_off`] puts after the subcommand of a git
+/// run that can print a diff. `--no-ext-diff` skips `diff.external`,
+/// `GIT_EXTERNAL_DIFF` and `diff.<driver>.command`, which replace the
+/// unified diff. `--no-textconv` skips `diff.<driver>.textconv` filters,
+/// whose lines are not the blob's lines.
+const DIFF_DRIVER_OFF: [&str; 2] = ["--no-ext-diff", "--no-textconv"];
+
 /// The git binary: the value [`init_git_binary`] set, else
 /// [`resolve_git_binary`] from `WORKSPACE_STATUS_GIT` with no config value.
 pub fn git_binary() -> &'static Path {
@@ -131,8 +166,14 @@ pub fn resolve_git_binary(env_value: Option<&str>, config: Option<&Path>) -> Pat
 /// fail with `Unable to create '.git/index.lock': File exists`. The flag
 /// only skips *optional* locks — write commands still take the locks they
 /// need, so it is safe on every spawn, read or write.
+///
+/// The command starts with the [`PINNED_CONFIG`] `-c` options, so the
+/// caller's arguments follow them.
 pub(crate) fn git_process(bin: &Path) -> Command {
     let mut cmd = Command::new(bin);
+    for pin in PINNED_CONFIG {
+        cmd.args(["-c", pin]);
+    }
     cmd.env("GIT_OPTIONAL_LOCKS", "0");
     cmd
 }
@@ -141,11 +182,12 @@ pub(crate) fn git_process(bin: &Path) -> Command {
 ///
 /// Stdin is `/dev/null` so a credential prompt cannot deadlock against the
 /// event loop. `GIT_TERMINAL_PROMPT=0` fails fast instead of waiting on a
-/// hidden prompt. Run the result with [`git_output`] so both deadlines
-/// apply.
+/// hidden prompt. A run that can print a diff gets [`DIFF_DRIVER_OFF`]
+/// ([`with_diff_driver_off`]). Run the result with [`git_output`] so both
+/// deadlines apply.
 fn git_command(bin: &Path, args: &[&str], cwd: &Path) -> Command {
     let mut cmd = git_process(bin);
-    cmd.args(args)
+    cmd.args(with_diff_driver_off(args))
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -154,18 +196,43 @@ fn git_command(bin: &Path, args: &[&str], cwd: &Path) -> Command {
     cmd
 }
 
-/// The git subcommand in `args`: the first argument that is not a global
-/// option (`-c k=v`, `-C dir`, `--no-pager`, …) or an option's value.
-fn git_subcommand<'a>(args: &[&'a str]) -> Option<&'a str> {
-    let mut rest = args.iter();
-    while let Some(arg) = rest.next() {
+/// The index of the git subcommand in `args`: the first argument that is
+/// not a global option (`-c k=v`, `-C dir`, `--no-pager`, …) or an
+/// option's value.
+fn git_subcommand_index(args: &[&str]) -> Option<usize> {
+    let mut rest = args.iter().enumerate();
+    while let Some((at, arg)) = rest.next() {
         if GLOBAL_OPTIONS_WITH_VALUE.contains(arg) {
             rest.next();
         } else if !arg.starts_with('-') {
-            return Some(arg);
+            return Some(at);
         }
     }
     None
+}
+
+/// The git subcommand in `args` ([`git_subcommand_index`]).
+fn git_subcommand<'a>(args: &[&'a str]) -> Option<&'a str> {
+    git_subcommand_index(args).map(|at| args[at])
+}
+
+/// `args` with [`DIFF_DRIVER_OFF`] right after the subcommand when the run
+/// can print a diff: `diff`, `show`, `log` and `stash show`. `blame` gets
+/// `--no-textconv` only, so its line numbers are the blob's. Other runs
+/// are unchanged.
+fn with_diff_driver_off<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let mut out = args.to_vec();
+    let Some(sub) = git_subcommand_index(args) else {
+        return out;
+    };
+    let (at, options): (usize, &[&'static str]) = match (args[sub], args.get(sub + 1)) {
+        ("diff" | "show" | "log", _) => (sub + 1, &DIFF_DRIVER_OFF),
+        ("stash", Some(&"show")) => (sub + 2, &DIFF_DRIVER_OFF),
+        ("blame", _) => (sub + 1, &DIFF_DRIVER_OFF[1..]),
+        _ => return out,
+    };
+    out.splice(at..at, options.iter().copied());
+    out
 }
 
 /// True when `args` run a git subcommand that talks to a remote.
@@ -1390,8 +1457,9 @@ pub fn resolve_default_branch_tip_ref(cwd: &Path, default_branch: &str) -> Optio
 
 /// The repository's default branch when it is known: the non-empty
 /// configured override, else the branch `origin/HEAD` points at. `None`
-/// when neither names one; no branch name is guessed. Merge-into-default
-/// classification uses `main` for `None`.
+/// when neither names one; no branch name is guessed. PR status uses this
+/// answer as is; the switch target and merge-into-default classification
+/// add the guess of [`default_branch_or_guess`].
 pub fn known_default_branch_name(cwd: &Path, override_name: Option<&str>) -> Option<String> {
     if let Some(name) = override_name {
         if !name.is_empty() {
@@ -1417,41 +1485,48 @@ pub fn known_default_branch_name(cwd: &Path, override_name: Option<&str>) -> Opt
     )
 }
 
-/// Default branch used by `--default-branch` (origin/HEAD, then develop/main/master).
+/// Branch names tried, in this order, when neither the configured override
+/// nor `origin/HEAD` names the default branch.
+const GUESSED_DEFAULT_BRANCHES: [&str; 3] = ["develop", "main", "master"];
+
+/// The default branch to switch to and to classify merged work against.
+///
+/// `known` is the answer of [`known_default_branch_name`] for `cwd`. When
+/// it is `None`, the first of [`GUESSED_DEFAULT_BRANCHES`] that exists as
+/// `origin/<name>` wins, then the first that exists as a local branch
+/// (one `for-each-ref`). `None` when no candidate exists.
+///
+/// [`get_default_branch`] and the snapshot worker both resolve through
+/// this function, so `--default-branch` / TUI `d` and merge-into-default
+/// classification always name the same branch.
+pub fn default_branch_or_guess(cwd: &Path, known: Option<String>) -> Option<String> {
+    if known.is_some() {
+        return known;
+    }
+    // Remote candidates first, then local ones, each in guess order.
+    let candidates: Vec<(String, &str)> = ["refs/remotes/origin", "refs/heads"]
+        .iter()
+        .flat_map(|prefix| {
+            GUESSED_DEFAULT_BRANCHES
+                .iter()
+                .map(move |name| (format!("{prefix}/{name}"), *name))
+        })
+        .collect();
+    let mut args = vec!["for-each-ref", "--format=%(refname)"];
+    args.extend(candidates.iter().map(|(full, _)| full.as_str()));
+    let out = exec_git(&args, cwd);
+    // A pattern also matches refs below it (`origin/main/x`): exact names only.
+    candidates
+        .iter()
+        .find(|(full, _)| out.lines().any(|line| line.trim() == full))
+        .map(|(_, name)| (*name).to_string())
+}
+
+/// Default branch used by `--default-branch` and TUI `d`: the override,
+/// else `origin/HEAD`, else the first of develop / main / master that
+/// exists ([`default_branch_or_guess`]).
 pub fn get_default_branch(cwd: &Path, override_name: Option<&str>) -> Option<String> {
-    if let Some(name) = override_name {
-        if !name.is_empty() {
-            return Some(name.to_string());
-        }
-    }
-    let remote_head = exec_git(
-        &[
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "refs/remotes/origin/HEAD",
-        ],
-        cwd,
-    );
-    if !remote_head.is_empty() {
-        if let Some(rest) = remote_head.strip_prefix("origin/") {
-            return Some(rest.to_string());
-        }
-        return Some(remote_head);
-    }
-    for name in ["develop", "main", "master"] {
-        let remote = format!("refs/remotes/origin/{name}");
-        if exec_git_status(&["show-ref", "--verify", &remote], cwd) == 0 {
-            return Some(name.to_string());
-        }
-    }
-    for name in ["develop", "main", "master"] {
-        let local = format!("refs/heads/{name}");
-        if exec_git_status(&["show-ref", "--verify", &local], cwd) == 0 {
-            return Some(name.to_string());
-        }
-    }
-    None
+    default_branch_or_guess(cwd, known_default_branch_name(cwd, override_name))
 }
 
 /// `git worktree list --porcelain` stdout (empty on failure).
@@ -1906,7 +1981,9 @@ pub fn stash_drop(cwd: &Path, stash_ref: &str) -> Result<(), String> {
     exec_git_checked(&["stash", "drop", stash_ref], cwd)
 }
 
-/// Stash refs newest first (`stash@{0}`, …).
+/// Stash refs newest first (`stash@{0}`, …). Test fixtures; the TUI uses
+/// [`list_stashes`].
+#[cfg(test)]
 pub fn list_stash_refs(cwd: &Path) -> Vec<String> {
     exec_git(&["stash", "list", "--format=%gd"], cwd)
         .lines()
@@ -1916,9 +1993,69 @@ pub fn list_stash_refs(cwd: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Newest stash ref, if any.
+/// Newest stash ref, if any. Test fixtures; the TUI uses [`latest_stash`].
+#[cfg(test)]
 pub fn latest_stash_ref(cwd: &Path) -> Option<String> {
     list_stash_refs(cwd).into_iter().next()
+}
+
+/// One stash entry that a stash action targets.
+///
+/// `stash@{n}` is positional: a stash pushed or dropped after the entry was
+/// picked moves `n`. The commit id does not change, so actions find the
+/// entry again by [`Self::sha`] ([`resolve_stash_target`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StashTarget {
+    /// `stash@{n}` when the entry was listed. Status and confirm text only.
+    pub stash_ref: String,
+    /// Full stash commit id.
+    pub sha: String,
+}
+
+/// Stash entries newest first, each with its commit id.
+pub fn list_stashes(cwd: &Path) -> Vec<StashTarget> {
+    parse_stash_list(&exec_git(&["stash", "list", "--format=%gd%x09%H"], cwd))
+}
+
+fn parse_stash_list(out: &str) -> Vec<StashTarget> {
+    out.lines()
+        .filter_map(|line| {
+            let (stash_ref, sha) = line.trim().split_once('\t')?;
+            Some(StashTarget {
+                stash_ref: stash_ref.to_string(),
+                sha: sha.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Newest stash entry, if any.
+pub fn latest_stash(cwd: &Path) -> Option<StashTarget> {
+    list_stashes(cwd).into_iter().next()
+}
+
+/// The `stash@{n}` that holds `target`'s commit now.
+///
+/// `git stash pop` / `drop` take only a stash ref, never a commit id, so
+/// the action asks the stash list for the entry's current position.
+/// `Err` names the entry when no stash holds that commit any more (popped,
+/// dropped, or cleared since it was picked).
+pub fn resolve_stash_target(cwd: &Path, target: &StashTarget) -> Result<String, String> {
+    find_stash_ref(&list_stashes(cwd), target)
+}
+
+fn find_stash_ref(stashes: &[StashTarget], target: &StashTarget) -> Result<String, String> {
+    stashes
+        .iter()
+        .find(|entry| entry.sha == target.sha)
+        .map(|entry| entry.stash_ref.clone())
+        .ok_or_else(|| {
+            let short: String = target.sha.chars().take(7).collect();
+            format!(
+                "{} ({short}) is no longer in the stash list; nothing changed",
+                target.stash_ref
+            )
+        })
 }
 
 /// One local branch for the picker.
@@ -2840,7 +2977,8 @@ fn unquote_c_path_bytes(value: &str) -> Vec<u8> {
 /// Blame line `line` (1-based) of `path` in `rev`.
 ///
 /// Runs `git -c blame.showRoot=false -c core.quotePath=false blame
-/// --porcelain -L n,n [<rev>] -- <path>`. Paths in the result are unquoted.
+/// --porcelain -L n,n [<rev>] -- <path>` (the runner adds `--no-textconv`,
+/// see `with_diff_driver_off`). Paths in the result are unquoted.
 /// [`BlameRev::Index`] feeds the index blob through `--contents -`, so lines
 /// that differ from HEAD come back uncommitted. `Ok(None)` when git exits
 /// non-zero (untracked or missing path, unborn HEAD, line out of range) or

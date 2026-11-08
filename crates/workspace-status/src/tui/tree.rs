@@ -385,9 +385,10 @@ fn family_container(
 
 fn worst_sync_status(statuses: &[SyncStatus]) -> SyncStatus {
     let rank = |s: SyncStatus| match s {
-        SyncStatus::Diverged => 4,
-        SyncStatus::Behind => 3,
-        SyncStatus::Ahead => 2,
+        SyncStatus::Diverged => 5,
+        SyncStatus::Behind => 4,
+        SyncStatus::Ahead => 3,
+        SyncStatus::Gone => 2,
         SyncStatus::NoUpstream => 1,
         SyncStatus::UpToDate => 0,
     };
@@ -887,7 +888,7 @@ pub fn sync_icon_kind(status: SyncStatus) -> IconKind {
         SyncStatus::Ahead => IconKind::Ahead,
         SyncStatus::Behind => IconKind::Behind,
         SyncStatus::Diverged => IconKind::Diverged,
-        SyncStatus::NoUpstream => IconKind::NoUpstream,
+        SyncStatus::NoUpstream | SyncStatus::Gone => IconKind::NoUpstream,
         SyncStatus::UpToDate => IconKind::Clean,
     }
 }

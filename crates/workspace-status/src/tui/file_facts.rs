@@ -32,7 +32,8 @@ pub(crate) type RepoFileFacts = HashMap<String, FileFacts>;
 /// Read the disk facts of each dirty file in `changes` of checkout `repo`.
 ///
 /// Blocking: one `stat` and one read (at most
-/// [`super::viewed::HUGE_FILE_BYTES`]) per file. Run it on a worker, or
+/// [`super::diff::HUGE_FILE_BYTES`]; a larger file gets two 64 KiB reads)
+/// per file. Run it on a worker, or
 /// once at launch before the loop starts.
 pub(crate) fn collect_repo_file_facts(
     cwd: &Path,
