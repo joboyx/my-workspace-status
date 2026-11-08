@@ -599,6 +599,37 @@ fn check_may_start_refuses_new_git_once_ws_is_exiting() {
     assert!(check_may_start(false, true, Some("stash")).is_ok());
 }
 
+#[test]
+fn quit_waits_while_a_pull_still_has_to_restore_the_auto_stash() {
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let hold = Duration::from_millis(200);
+    let restoring = std::thread::spawn(move || {
+        let _restoring = RestoringUserWork::start();
+        started_tx.send(()).unwrap();
+        std::thread::sleep(hold);
+    });
+    started_rx.recv().unwrap();
+    let start = Instant::now();
+    assert!(
+        wait_while_restoring_user_work(Duration::from_secs(10)),
+        "the wait ends once the restore is done"
+    );
+    assert!(
+        start.elapsed() >= hold - Duration::from_millis(50),
+        "quit waited for the restore: {:?}",
+        start.elapsed()
+    );
+    restoring.join().unwrap();
+
+    let _stuck = RestoringUserWork::start();
+    let start = Instant::now();
+    assert!(
+        !wait_while_restoring_user_work(Duration::from_millis(100)),
+        "a restore that does not end stops the wait at its bound"
+    );
+    assert!(start.elapsed() < Duration::from_secs(2));
+}
+
 /// Set in the child process that
 /// [`quit_during_pull_still_restores_the_auto_stash`] starts. The child
 /// sets the process-wide shutdown flag, which would break every other

@@ -178,6 +178,7 @@ mod pty_shift_letters_csi_u_type_into_search;
 mod pty_shift_p_csi_u_pushes_ahead;
 mod pty_shift_s_csi_u_opens_stash_menu;
 mod pty_shift_t_does_not_cycle_theme;
+mod pty_sigterm_restores_terminal;
 mod pty_slash_pane_search;
 mod pty_space_marks_dirty_file_reviewed;
 mod pty_stage_and_unstage_dirty_file;
