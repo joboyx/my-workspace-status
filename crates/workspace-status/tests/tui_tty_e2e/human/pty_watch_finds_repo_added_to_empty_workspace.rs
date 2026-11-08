@@ -4,8 +4,9 @@ use crate::common::seed::{new_workspace, seed_repo};
 use crate::harness::PtySession;
 use crate::support::{tree_has, GIT_WAIT};
 
-/// Watch period of this test. Short, so several collects run in the wait.
-const WATCH_MS: &str = "300";
+/// Watch period of this test: the shortest the app accepts (a lower value is
+/// raised to 500 ms), so at least two collects run in the wait.
+const WATCH_MS: &str = "500";
 
 /// Long enough for a few watch collects to walk the empty workspace.
 const EMPTY_TICKS: Duration = Duration::from_millis(1200);
