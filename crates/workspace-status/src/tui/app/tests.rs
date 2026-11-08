@@ -2,7 +2,7 @@ use super::*;
 use crate::config::WorkspaceStatusConfig;
 use crate::git::{exec_git, git_binary, list_local_branches, stage_file};
 use crate::parallel::FETCH_CONCURRENCY;
-use crate::testutil::{app_state, git, init_repo, repo_snapshot};
+use crate::testutil::{app_state, git, init_repo, panic_hook_lock, repo_snapshot};
 use crate::tui::action::{Action, Effect};
 use crate::tui::branches::DIRTY_WORKTREE_STATUS;
 use crate::tui::pointer_shape::PointerShape;
@@ -179,10 +179,6 @@ impl Write for SharedBuf {
     }
 }
 
-/// Serializes the tests that swap the process-wide panic hook and set
-/// [`TERMINAL_SET_UP`].
-static PANIC_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 #[test]
 fn panic_hook_keeps_worker_panics_off_the_screen_and_prints_other_threads() {
     use crate::tui::effect::{run_job, JobOutcome};
@@ -195,7 +191,7 @@ fn panic_hook_keeps_worker_panics_off_the_screen_and_prints_other_threads() {
     static PRINTED_WORKER: AtomicUsize = AtomicUsize::new(0);
     static PRINTED_OTHER: AtomicUsize = AtomicUsize::new(0);
 
-    let _serial = PANIC_HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = panic_hook_lock();
     // The previous hook counts the panics of this test that reach it;
     // panics of tests that run at the same time do not count.
     std::panic::set_hook(Box::new(|info| {
@@ -266,8 +262,21 @@ fn quit_runtime_shutdown_does_not_wait_for_a_long_blocking_job() {
     started_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("the blocking job started");
+    // The real wait reads a process-wide count that other tests may hold;
+    // this test checks only that the wait runs, and that it runs first.
+    let waited = AtomicBool::new(false);
     let start = std::time::Instant::now();
-    shut_down_runtime(rt, RUNTIME_SHUTDOWN_GRACE);
+    shut_down_runtime(rt, RUNTIME_SHUTDOWN_GRACE, || {
+        assert!(
+            start.elapsed() < RUNTIME_SHUTDOWN_GRACE,
+            "the user-work wait runs before the worker grace"
+        );
+        waited.store(true, Ordering::SeqCst);
+    });
+    assert!(
+        waited.load(Ordering::SeqCst),
+        "quit waits for stashed changes to come back"
+    );
     assert!(
         start.elapsed() < Duration::from_secs(2),
         "quit waited {:?} for a blocking job",
@@ -277,7 +286,7 @@ fn quit_runtime_shutdown_does_not_wait_for_a_long_blocking_job() {
 
 #[test]
 fn panic_hook_restores_terminal_and_clears_progress() {
-    let _serial = PANIC_HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = panic_hook_lock();
     static SHOWN: AtomicBool = AtomicBool::new(false);
     static POINTER: AtomicBool = AtomicBool::new(false);
     TermProgress::with_flag(true, &SHOWN)

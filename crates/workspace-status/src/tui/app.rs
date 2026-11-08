@@ -136,7 +136,11 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
     // down only once the terminal is back to normal.
     crate::git::stop_running_git();
     if let Ok(rt) = rt {
-        shut_down_runtime(rt, RUNTIME_SHUTDOWN_GRACE);
+        shut_down_runtime(
+            rt,
+            RUNTIME_SHUTDOWN_GRACE,
+            crate::git::wait_for_user_work_restore,
+        );
     }
     result
 }
@@ -148,12 +152,17 @@ const RUNTIME_SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 /// workers. A plain drop waits for every one of them, and a job with no git
 /// to stop (a slow file read, a stuck helper) would hold quit.
 ///
-/// It first waits, bounded, while a pull still has to give stashed changes
-/// back (`git::wait_for_user_work_restore`), so quit never cuts that pop
-/// off. Then it gives the workers `grace` and returns; the ones still
-/// running end with the process.
-fn shut_down_runtime(rt: tokio::runtime::Runtime, grace: Duration) {
-    crate::git::wait_for_user_work_restore();
+/// It first calls `wait_for_user_work`, a bounded wait while a pull still
+/// has to give stashed changes back (`git::wait_for_user_work_restore` in
+/// `run_tui`), so quit does not cut that pop off. Then it gives the
+/// workers `grace` and returns; the ones still running end with the
+/// process.
+fn shut_down_runtime(
+    rt: tokio::runtime::Runtime,
+    grace: Duration,
+    wait_for_user_work: impl FnOnce(),
+) {
+    wait_for_user_work();
     rt.shutdown_timeout(grace);
 }
 
@@ -166,13 +175,22 @@ pub(super) static TERMINAL_SET_UP: AtomicBool = AtomicBool::new(false);
 /// Give the terminal back on stdout. Clears the OSC 9;4 bar only when one
 /// shows ([`PROGRESS_SHOWN`]), and resets the OSC 22 pointer only while a
 /// resize shape shows ([`POINTER_SET`]).
+///
+/// It clears [`TERMINAL_SET_UP`] only after the restore bytes are out. An
+/// exit signal that comes during the write then still finds the flag set,
+/// and its handler (`term_restore::restore_from_signal`) restores in full
+/// before the signal ends `ws`; with the flag cleared first, the signal
+/// would end `ws` part way through this restore. The panic hook and the
+/// signal handler take the flag with a swap, so each of them restores at
+/// most once. A restore that overlaps this one writes the same bytes
+/// again, and each of those steps is safe to repeat.
 fn restore_terminal() {
-    TERMINAL_SET_UP.store(false, Ordering::SeqCst);
     restore_terminal_to(
         &mut stdout(),
         PROGRESS_SHOWN.swap(false, Ordering::SeqCst),
         POINTER_SET.swap(false, Ordering::SeqCst),
     );
+    TERMINAL_SET_UP.store(false, Ordering::SeqCst);
 }
 
 /// Clear the OSC 9;4 bar first (when `clear_progress`), then put the

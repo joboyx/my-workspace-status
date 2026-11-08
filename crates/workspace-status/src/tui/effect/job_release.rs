@@ -427,6 +427,7 @@ mod tests {
     };
     use super::super::Interpreter;
     use crate::file_index::FileRead;
+    use crate::testutil::panic_hook_lock;
     use crate::tui::action::{Action, Effect};
     use crate::tui::anim::RemoteActivity;
     use crate::tui::event_loop::{apply_joined, spawn_job, JobJoinSet};
@@ -441,6 +442,9 @@ mod tests {
     /// Panic message of every panicked job in these tests.
     const JOB_PANIC: &str = "worker job exploded";
 
+    /// The `gh` stand-in that panics on the worker. A test that uses it
+    /// holds [`panic_hook_lock`], so the TUI panic hook tests cannot add a
+    /// location to [`JOB_PANIC`] in the status while it runs.
     fn gh_panics(_: &[String], _: &AtomicBool) -> Result<String, Option<String>> {
         panic!("{JOB_PANIC}")
     }
@@ -485,6 +489,7 @@ mod tests {
 
     #[test]
     fn a_panicked_badge_lookup_frees_its_slot_and_the_next_poll_looks_it_up_again() {
+        let _serial = panic_hook_lock();
         let (root, mut state) = pr_app("ws-job-release-badge", Some(FORGE_REMOTE));
         let path = Path::new("app");
         let target = (PathBuf::from("app"), "feature".to_string());
@@ -546,6 +551,7 @@ mod tests {
 
     #[test]
     fn panicked_jobs_free_their_scheduler_slots_so_a_new_job_still_spawns() {
+        let _serial = panic_hook_lock();
         let (root, mut state) = pr_app("ws-job-release-cap", Some(FORGE_REMOTE));
         let cap = 2;
         let mut interp = Interpreter::with_cap(cap);
@@ -579,6 +585,7 @@ mod tests {
 
     #[test]
     fn a_worker_panic_names_the_job_and_its_message_in_the_status() {
+        let _serial = panic_hook_lock();
         let (root, mut state) = pr_app("ws-job-release-status", Some(FORGE_REMOTE));
         let mut interp = Interpreter::with_cap(4);
         live_runtime().block_on(async {
