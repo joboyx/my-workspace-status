@@ -749,17 +749,34 @@ fn take_csi_u(bytes: &[u8]) -> Take {
     } else {
         return Take::Skip(bytes.len());
     };
-    if modifiers.contains(KeyModifiers::SHIFT) {
-        if let Some(shifted) = codes
-            .next()
-            .and_then(|field| field.parse::<u32>().ok())
-            .and_then(char::from_u32)
-        {
-            code = KeyCode::Char(shifted);
-            modifiers.remove(KeyModifiers::SHIFT);
-        }
+    if let Some(shifted) = shifted_key(code, modifiers, codes.next()) {
+        code = KeyCode::Char(shifted);
+        // Same modifiers as the legacy byte of that character: SHIFT only
+        // on an uppercase letter (`O`), none on a symbol (`:`).
+        modifiers.set(KeyModifiers::SHIFT, shifted.is_uppercase());
     }
     key_protocol(bytes.len(), KeyEvent::new_with_kind(code, modifiers, kind))
+}
+
+/// The character a Shift+key report names in its shifted-key field
+/// (`CSI 59:58;2u` is Shift+`;` = `:`).
+///
+/// The terminal sends that field because the live loop asks for
+/// `REPORT_ALTERNATE_KEYS`. It knows the keyboard layout, so `:`, `?`,
+/// `>`, `_`, `!` (and `/` on a layout where that is Shift+7) come from it,
+/// not from a guessed US layout. Used only for a text key with Shift and no
+/// Ctrl / Alt / Super: Ctrl-Shift-u keeps `u`, as the legacy C0 byte does.
+fn shifted_key(code: KeyCode, modifiers: KeyModifiers, field: Option<&str>) -> Option<char> {
+    if !matches!(code, KeyCode::Char(_))
+        || !modifiers.contains(KeyModifiers::SHIFT)
+        || modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+    {
+        return None;
+    }
+    field
+        .and_then(|field| field.parse::<u32>().ok())
+        .and_then(char::from_u32)
+        .filter(|c| !c.is_control())
 }
 
 fn translate_functional(codepoint: u32) -> Option<KeyCode> {

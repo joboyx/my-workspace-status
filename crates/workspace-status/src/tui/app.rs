@@ -280,13 +280,22 @@ where
     }));
 }
 
+/// Kitty keyboard protocol flags the live loop pushes.
+///
+/// `REPORT_ALTERNATE_KEYS` makes a Shift+key report carry the shifted
+/// character the layout produces (`CSI 59:58;2u` for `:`). Without it the
+/// report names only the unshifted key (`;` + Shift), and `:`, `?`, `>`,
+/// `_`, `!` would act as `;`, `/`, `.`, `-`, `1`. `tty::take_csi_u` reads
+/// that field.
 fn keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
     KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
         | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
         | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
 }
 
-/// Ask the terminal for press / repeat / release on letter keys (`h`/`j`/`k`/`l`).
+/// Ask the terminal for press / repeat / release on letter keys (`h`/`j`/`k`/`l`),
+/// and for the shifted character of Shift+key.
 ///
 /// Terminals that do not support the protocol ignore the CSI. Failures stay
 /// quiet; traditional byte-repeat still maps to Press.
