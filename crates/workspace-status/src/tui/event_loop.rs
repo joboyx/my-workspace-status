@@ -1390,7 +1390,7 @@ mod tests {
         /// the flush gives up and reports the save as timed out.
         #[test]
         fn quit_reports_a_comment_save_that_timed_out() {
-            use fs4::fs_std::FileExt;
+            use fs4::FileExt;
             let (root, mut state, opts) = workspace("ws-quit-flush-timeout");
             // Made before the lock, so a failed assert drops the lock first
             // and the runtime drop does not wait for ever on the save.
@@ -1403,7 +1403,7 @@ mod tests {
                 .open(root.join("state/comments.json.lock"))
                 .unwrap();
             assert_eq!(state.comment_path, root.join("state/comments.json"));
-            lock.lock_exclusive().unwrap();
+            FileExt::lock(&lock).unwrap();
             let mut interp = Interpreter::with_fetch_cap(4);
             save_comment(&mut interp, &mut state, &opts, "late");
             let mut join = JobJoinSet::new();
