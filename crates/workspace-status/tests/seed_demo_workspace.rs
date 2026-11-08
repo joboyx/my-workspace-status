@@ -1,6 +1,9 @@
 //! Smoke check for `scripts/seed-demo-workspace.sh`.
 //!
 //! Seeds a temp dir, then asserts git state and `--plain` / `--json`.
+//!
+//! Unix only: the script needs bash.
+#![cfg(unix)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
