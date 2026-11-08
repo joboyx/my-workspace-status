@@ -3,7 +3,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+// Only `unique_root` is used here; `git_env` serves the other test binaries.
+#[allow(dead_code)]
+#[path = "common/fixture.rs"]
+mod fixture;
 
 fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_workspace-status"))
@@ -14,15 +18,7 @@ fn ws_bin() -> PathBuf {
 }
 
 fn temp_dir() -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "ws-update-e2e-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&path).unwrap();
-    path
+    fixture::unique_root("ws-update-e2e")
 }
 
 #[cfg(unix)]
@@ -349,4 +345,77 @@ fn update_prints_release_notes_then_runs_sidecar() {
         "notes should print before the sidecar: {text}"
     );
     let _ = fs::remove_dir_all(dir);
+}
+
+/// Run `--update` with a fake `curl` that logs its argv and stdin, with
+/// `token` as `WORKSPACE_STATUS_GITHUB_TOKEN` (`None` removes it). Returns
+/// the logged argv and stdin.
+#[cfg(unix)]
+fn update_curl_argv_and_stdin(token: Option<&str>) -> (String, String) {
+    let dir = temp_dir();
+    let argv_log = dir.join("curl-argv.log");
+    let stdin_log = dir.join("curl-stdin.log");
+    let fixture = dir.join("releases.json");
+    fs::write(&fixture, "[]").unwrap();
+    write_script(
+        &dir.join("curl"),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n/bin/cat > '{}'\nexec /bin/cat '{}'\n",
+            argv_log.display(),
+            stdin_log.display(),
+            fixture.display()
+        ),
+    );
+    write_script(&dir.join("workspace-status-update"), "#!/bin/sh\nexit 0\n");
+    let mut cmd = Command::new(bin());
+    cmd.env("XDG_CONFIG_HOME", dir.join("xdg-config"))
+        .arg("--update")
+        .env("PATH", &dir);
+    match token {
+        Some(token) => cmd.env("WORKSPACE_STATUS_GITHUB_TOKEN", token),
+        None => cmd.env_remove("WORKSPACE_STATUS_GITHUB_TOKEN"),
+    };
+    let out = cmd
+        .output()
+        .expect("workspace-status --update with fake curl");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let argv = fs::read_to_string(&argv_log).expect("fake curl ran");
+    let stdin = fs::read_to_string(&stdin_log).expect("fake curl read stdin");
+    let _ = fs::remove_dir_all(dir);
+    (argv, stdin)
+}
+
+#[cfg(unix)]
+#[test]
+fn update_passes_github_token_to_curl_on_stdin_not_argv() {
+    let token = "ghp_fake_token_for_argv_test";
+    let (argv, stdin) = update_curl_argv_and_stdin(Some(&format!("  {token}  ")));
+    assert!(
+        !argv.contains(token),
+        "token must not be in curl argv:\n{argv}"
+    );
+    assert!(
+        argv.lines().any(|arg| arg == "@-"),
+        "curl reads headers from stdin (-H @-):\n{argv}"
+    );
+    assert_eq!(stdin, format!("Authorization: Bearer {token}\n"));
+
+    let (argv, stdin) = update_curl_argv_and_stdin(None);
+    assert!(
+        !argv.lines().any(|arg| arg == "@-"),
+        "no token, no stdin header:\n{argv}"
+    );
+    assert!(!argv.contains("Authorization"), "{argv}");
+    assert_eq!(stdin, "", "no token, nothing on stdin");
+
+    let (argv, stdin) = update_curl_argv_and_stdin(Some("   "));
+    assert!(
+        !argv.lines().any(|arg| arg == "@-"),
+        "blank token counts as unset:\n{argv}"
+    );
+    assert_eq!(stdin, "", "blank token, nothing on stdin");
 }

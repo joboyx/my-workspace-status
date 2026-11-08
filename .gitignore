@@ -7,6 +7,10 @@ tmp/
 # Local git worktrees
 .worktrees/
 
+# Agent local settings (.claude/settings.json and .claude/skills stay tracked)
+.claude/settings.local.json
+.cursor/
+
 # Editor / OS
 .DS_Store
 *.swp

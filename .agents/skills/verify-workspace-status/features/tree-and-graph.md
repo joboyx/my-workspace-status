@@ -73,10 +73,14 @@ to_app
 $V wait "$RUN" 'x #7 CI failed  > fix CI' 10            # the chip, on the graph header line of app
 $V capture "$RUN" chip-and-total
 fresh context github-failed gitlab-failed -- --size 80x40 --fake-forge "$FORGE"
-$V wait --regex "$RUN" '#7 x($|[^[:alnum:]])' 10
-to_app
-$V wait --regex "$RUN" 'x #7' 10
-$V capture "$RUN" chip-narrow
+# A 32-column tree: the refs drop (glyph only) and the branch is cut, so to_app's waits
+# do not fit. Wait on what this width paints.
+$V wait --regex "$RUN" '& feature/auth-[^ ]* +\^1 3 +x($|[^[:alnum:]])' 10   # the app row: glyph x, no #7
+to_top && $V keys "$RUN" j && $V wait --cursor "$RUN" 'v app'
+$V keys "$RUN" j && $V wait --cursor "$RUN" '& feature/auth-'
+$V wait "$RUN" 'x #7 CI failed' 10                       # the chip, on the graph header line of app
+$V wait --gone "$RUN" '> fix CI'                         # dropped at this width
+$V capture "$RUN" chip-narrow | grep -c '#7 x'           # 0: no ref in the tree
 ```
 
-**PASS:** both lines are on `chip-and-total`. On `chip-narrow` (80x40, a 48-column graph pane) the chip is shorter than the whole `x #7 CI failed  > fix CI`: it has dropped `> fix CI` and keeps `x #7 CI failed` (a narrower pane drops the state label next). At 100x40 the pane still fits the whole chip.
+**PASS:** both lines are on `chip-and-total`. On `chip-narrow` (80x40, a 48-column graph pane) the tree row shows the glyph `x` with no `#7`, and the chip is shorter than the whole `x #7 CI failed  > fix CI`: it has dropped `> fix CI` and keeps `x #7 CI failed` (a narrower pane drops the state label next); the count prints `0`. At 100x40 the pane still fits the whole chip.

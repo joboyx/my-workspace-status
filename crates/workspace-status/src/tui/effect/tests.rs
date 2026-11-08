@@ -6892,3 +6892,107 @@ fn a_newer_title_fill_replaces_the_waiting_one() {
     assert_eq!(titles.get("ABC-123"), Some("Title ABC-123"), "newer groups");
     let _ = std::fs::remove_dir_all(cmd.parent().unwrap());
 }
+
+fn copy_effect(text: &str) -> Effect {
+    Effect::CopyClipboard {
+        text: text.into(),
+        announce: true,
+    }
+}
+
+/// OSC 52 fails (no terminal): the host tool runs on a worker, never in
+/// `schedule`, and its result lands as `copied` / `copy failed` plus the
+/// `y` overlay header. One copy at a time; a copy asked for meanwhile runs
+/// next.
+#[test]
+fn clipboard_host_tool_runs_on_a_worker_and_its_result_lands() {
+    let mut state = fixture_state();
+    let mut interp = Interpreter::with_cap(4);
+    interp.clipboard_tool = |text, _| text == "good";
+    state.comment_export = Some(comments::CommentExport {
+        markdown: "good".into(),
+        copied: None,
+    });
+    schedule_effect(&mut interp, &mut state, copy_effect("good"), &Action::None);
+    assert_eq!(state.status, "", "nothing shows before the tool answers");
+    assert_eq!(state.comment_export.as_ref().unwrap().copied, None);
+    assert_eq!(interp.sched.queued_user_tag(UserTag::Clipboard), 1);
+
+    let mut jobs = capture_jobs(&mut interp, &mut state);
+    assert_eq!(jobs.len(), 1, "one host tool copy");
+    let (id, work) = jobs.pop().unwrap();
+    schedule_effect(&mut interp, &mut state, copy_effect("bad"), &Action::None);
+    assert_eq!(
+        interp.sched.queued_user_tag(UserTag::Clipboard),
+        0,
+        "the next copy waits for the running one"
+    );
+    let outcome = work();
+    assert!(matches!(
+        outcome,
+        JobOutcome::ClipboardCopied {
+            ok: Some(true),
+            announce: true
+        }
+    ));
+    apply_id(&mut interp, &mut state, id, outcome);
+    assert_eq!(state.status, STATUS_COPIED);
+    assert_eq!(state.status.kind(), StatusKind::Ok);
+    assert_eq!(state.comment_export.as_ref().unwrap().copied, Some(true));
+
+    let mut jobs = capture_jobs(&mut interp, &mut state);
+    assert_eq!(jobs.len(), 1, "the waiting copy spawns");
+    let (id, work) = jobs.pop().unwrap();
+    apply_id(&mut interp, &mut state, id, work());
+    assert_eq!(state.status, STATUS_COPY_FAILED);
+    assert_eq!(state.status.kind(), StatusKind::Error);
+    assert!(!interp.clipboard_job.holds_slot());
+    assert!(capture_jobs(&mut interp, &mut state).is_empty(), "idle");
+}
+
+/// OSC 52 works: the copy shows `copied` at once on the loop thread. The
+/// host tool still runs on a worker, and its answer does not overwrite a
+/// newer status.
+#[test]
+fn clipboard_osc52_shows_the_result_at_once_and_the_tool_answer_changes_nothing() {
+    let mut state = fixture_state();
+    let mut interp = Interpreter::with_cap(4);
+    interp.osc52_writer = |_| true;
+    interp.clipboard_tool = |_, _| false;
+    schedule_effect(&mut interp, &mut state, copy_effect("text"), &Action::None);
+    assert_eq!(state.status, STATUS_COPIED, "OSC 52 is enough");
+    let mut jobs = capture_jobs(&mut interp, &mut state);
+    assert_eq!(jobs.len(), 1, "the host tool still runs");
+    let (id, work) = jobs.pop().unwrap();
+    state.status = StatusMessage::info("newer");
+    apply_id(&mut interp, &mut state, id, work());
+    assert_eq!(
+        state.status, "newer",
+        "a failed tool after OSC 52 is silent"
+    );
+    assert!(!interp.clipboard_job.holds_slot());
+}
+
+/// A host tool copy that panics frees its slot, and a copy that still
+/// waits on its result gets `copy failed` in the `y` overlay header.
+#[test]
+fn clipboard_copy_that_panics_frees_its_slot_and_fails_the_copy() {
+    let mut state = fixture_state();
+    let mut interp = Interpreter::with_cap(4);
+    interp.clipboard_tool = |_, _| panic!("clipboard tool exploded");
+    state.comment_export = Some(comments::CommentExport {
+        markdown: "text".into(),
+        copied: None,
+    });
+    schedule_effect(&mut interp, &mut state, copy_effect("text"), &Action::None);
+    let (id, work) = capture_jobs(&mut interp, &mut state).pop().unwrap();
+    let message = run_job(work).err().expect("the job panicked");
+    let tui_opts = opts(&state);
+    interp.apply_panic(&mut state, &tui_opts, id, &message);
+    assert_eq!(state.comment_export.as_ref().unwrap().copied, Some(false));
+    assert_eq!(
+        state.status,
+        "clipboard copy job panicked: clipboard tool exploded"
+    );
+    assert!(!interp.clipboard_job.holds_slot());
+}

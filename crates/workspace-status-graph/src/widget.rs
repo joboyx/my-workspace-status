@@ -20,6 +20,7 @@ use crate::glyphs::{ASCII, UNICODE};
 use crate::gutter::graph_gutter_cap;
 use crate::lane_colors::{default_lane_colors, lane_fg};
 use crate::model::{GraphModel, GraphRow};
+use crate::paint::now_unix_seconds;
 use crate::paint::{paint_model_with, painted_line_count, PaintOpts, PaintedLine};
 use crate::topology::CellRole;
 
@@ -592,7 +593,7 @@ impl GraphWidget<'_> {
             self.lane_colors
         };
         let fallback = Color::Reset;
-        let now = self.now_unix.unwrap_or_else(now_unix_secs);
+        let now = self.now_unix.unwrap_or_else(now_unix_seconds);
         let rows = self.model.visible_rows();
         let selected = self.selected.and_then(|i| rows.get(i));
         let footer_sel = GraphFooterSelection::from(selected);
@@ -945,13 +946,6 @@ pub fn paint_selection_footer(
         target: None,
     }));
     spans
-}
-
-fn now_unix_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 /// Per-row state for [`put_painted_line`].

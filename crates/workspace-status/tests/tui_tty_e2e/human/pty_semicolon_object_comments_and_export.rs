@@ -269,9 +269,16 @@ fn pty_semicolon_object_comments_and_export() {
     git(&app, &["branch", "-D", "doomed"]);
     tui.key('r');
     prove_keys_handled(&mut tui);
+    // `r` reloads the repo on a worker, so the keys above can be handled
+    // before that reload lands. The reload drops the comment of the gone
+    // branch from the store file, so wait for that before `y`.
     tui.wait_pred(
-        |screen| overlay_closed(screen) && tree_has(screen, "app"),
-        "r refresh after deleting doomed",
+        |screen| {
+            overlay_closed(screen)
+                && tree_has(screen, "app")
+                && !store_text(&workspace).contains(ATTACH_BODY)
+        },
+        "r refresh after deleting doomed drops its comment from the store",
         GIT_WAIT,
     );
     tui.key('y');

@@ -6,16 +6,18 @@ It drives the real `workspace-status` binary the way a person does: a PTY (and, 
 
 Git seeds live in `crates/workspace-status/tests/common/seed.rs`. `seed_two_tall_commit_files` adds a pair of long committed files so a file switch in a commit diff can prove the new view starts at the origin. `seed_two_file_long_message_repo` adds two commits with the same long message (`pair base` with one file, `pair tip` with two) so a depth-2 commit-files footer can scroll a message on one commit and prove another commit starts at the top. The tree hscroll oracle (clipped `very-long` vs `TAIL99`), file-diff tail (`UNIQUE_DIFF_TAIL`), and graph subject prefix (`UNIQUE_GRAP`) live in `tests/common/hscroll.rs`. The PTY harness extracts the left pane itself.
 
+Temp roots and the git env come from `crates/workspace-status/tests/common/fixture.rs` (std only, shared by every integration test binary). `unique_root(prefix)` creates `{prefix}-{pid}-{n}-{nanos}` on the spot under the canonical temp dir, so parallel tests never share a directory. `git_env()` sets the author and committer and points `GIT_CONFIG_GLOBAL` at `/dev/null` with `GIT_CONFIG_NOSYSTEM=1`. Pass it to every `git`, `git init` included, so host hooks and config stay out of the fixtures.
+
 ## What runs where
 
 | Path | How | Where it executes |
 | --- | --- | --- |
-| PTY | `portable-pty` spawn + byte writes (keys, xterm SGR mouse) + `vt100` screen | `cargo test --workspace` on Unix. GitHub Actions `cargo` job. |
+| PTY | `portable-pty` spawn + byte writes (keys, xterm SGR mouse) + `vt100` screen | `cargo test --workspace` on Unix. GitHub Actions `cargo` (Ubuntu) and `cargo-macos` jobs. |
 | Desktop | xfce4-terminal keys; xterm + XTEST `click 7` for wheel; `script(1)` typescript | GitHub Actions `tui-tty-desktop` job (`scripts/with-desktop-session.sh`). Local Linux with `DISPLAY`. |
 
 GitHub-hosted runners have no physical trackpad. The PTY path writes the same SGR bytes a terminal sends for trackpad hscroll (`CSI < 67` wheel right) into a live `event::read` loop. Motion-bit `CSI < 99` must not pan. The desktop wheel path uses xterm: VTE 0.76 does not report X11 buttons 6/7, so xfce never encodes SGR 67. xterm does, from a real XTEST `click 7`.
 
-Windows `cargo test --workspace` skips this crate (no PTY harness). The Actions `cargo` job is Ubuntu.
+Windows `cargo test --workspace` skips this crate (no PTY harness).
 
 ## Commands
 
@@ -62,7 +64,7 @@ Tests that need polling pass `WS_STATUS_PR_POLL_MS` (300 ms); the poll-off test 
 
 ## Verify driver
 
-To watch the real binary run, against the same fake forge or against a live one, the verify skill drives it in a private tmux server: `.agents/skills/verify/SKILL.md` and `scripts/verify-tui.sh`. It is a test harness with the isolation rules of **Harness notes** (guarded by `crates/workspace-status/tests/release_watch.rs`), not the screenshot pipeline, and it does not replace a `pty_*` test.
+To watch the real binary run, against the same fake forge or against a live one, the verify skill drives it in a private tmux server: `.agents/skills/verify-workspace-status/SKILL.md`, its controller `wsctl` (JSON output), and the driver it calls, `scripts/verify-tui.sh`. It is a test harness with the isolation rules of **Harness notes** (guarded by `crates/workspace-status/tests/release_watch.rs`), not the screenshot pipeline, and it does not replace a `pty_*` test.
 
 ## Harness notes
 
@@ -93,7 +95,7 @@ To watch the real binary run, against the same fake forge or against a live one,
 - Wait for a screen condition, never for time; the harness has no fixed sleep. An absence claim ("Ctrl-o does nothing here", "the confirm holds") needs a later positive anchor, since keys and clicks run in order: `support::prove_keys_handled` (`?` then Esc) in Normal mode, `support::prove_palette_keys_handled` (type `z`, delete it) in an open palette, or the next key that answers an open confirm or picker. Put the whole claim in one `wait_pred` frame (`support::wait_screen`); a second `screen()` read can see a later frame.
 - One nav key per wait. Outside text fields the event loop drops a queued copy of a held nav key (`h` `j` `k` `l`, arrows, page), so two copies in one read move once. Step with `support::step_cursor` / `support::step_until_changed` (wait for the cursor, pan, or scroll to change) and stop on the target paint. A text field types every key, nav letters included, so `support::type_palette_filter` writes the text in one write. Separate setup clicks from a double-click by cell (one column over), not by time.
 
-PTY tests are independent processes (own temp workspace + PTY). `cargo test --test tui_tty_e2e` may parallelize them. Desktop stays `--test-threads=1` on one X display. No second screenshot pipeline. Desktop twins exist only where PTY cannot encode the input (XTEST wheel).
+PTY tests are independent processes (own temp workspace + PTY). The temp workspace path is canonical (`unique_root`), like the root the binary resolves, so on macOS a path the binary passes on matches the fixture path under `/private/var`. `cargo test --test tui_tty_e2e` may parallelize them. Desktop stays `--test-threads=1` on one X display. No second screenshot pipeline. Desktop twins exist only where PTY cannot encode the input (XTEST wheel).
 
 The tests live under `crates/workspace-status/tests/tui_tty_e2e/human/`. Adding a test does not edit this file.
 
