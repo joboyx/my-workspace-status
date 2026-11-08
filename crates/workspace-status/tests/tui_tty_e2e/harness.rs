@@ -1467,6 +1467,8 @@ fn b64_val(c: u8) -> Option<u8> {
     }
 }
 
+/// Fresh update-check store for the Linux-only desktop harness.
+#[cfg(target_os = "linux")]
 pub(crate) fn write_fresh_update_check(path: &Path) {
     write_update_check(path, None);
 }

@@ -10,7 +10,7 @@
 #[cfg(unix)]
 #[path = "../common/mod.rs"]
 mod common;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod desktop;
 #[cfg(unix)]
 mod harness;
