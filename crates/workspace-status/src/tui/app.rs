@@ -904,7 +904,7 @@ pub(crate) struct CompareRangeLoad {
 }
 
 /// Resolve `base_ref` and list the one file of a commit-vs-working-tree
-/// compare (`diff --name-status -M <base> -- [<old>] <path>`).
+/// compare (`diff --name-status -z -M <base> -- [<old>] <path>`).
 ///
 /// A file on disk that equals the commit lists nothing.
 pub(crate) fn compute_worktree_compare_range(
