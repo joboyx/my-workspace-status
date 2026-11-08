@@ -7377,9 +7377,16 @@ impl AppState {
         self.park_active_session();
         self.tabs.active = index;
         self.apply_active_session();
-        // A working-tree tab or an Explorer inner file tab may have missed
-        // watch reloads while inactive. Only one tab is active, so at most
-        // one check reloads. The PRs tab asks for the details it lists.
+        self.newly_active_tab_reload()
+    }
+
+    /// Catch-up work of a tab that just became active, by a switch or by
+    /// closing the active tab.
+    ///
+    /// A working-tree tab or an Explorer inner file tab may have missed
+    /// watch reloads while inactive. Only one tab is active, so at most
+    /// one check reloads. The PRs tab asks for the details it lists.
+    fn newly_active_tab_reload(&mut self) -> Effect {
         match self.active_worktree_compare_reload() {
             Effect::None if self.is_prs_tab() => self.request_pr_details(),
             Effect::None => self.active_explorer_live_reload(),
@@ -7600,9 +7607,8 @@ impl AppState {
         self.clear_tab_transients();
         if closing_active {
             self.apply_active_session();
-            // An Explorer inner file tab that becomes active may have
-            // missed watch reloads.
-            return self.active_explorer_live_reload();
+            // The tab that becomes active catches up as on a switch.
+            return self.newly_active_tab_reload();
         }
         Effect::None
     }
