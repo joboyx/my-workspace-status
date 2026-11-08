@@ -45,7 +45,6 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-cd "$REPO_ROOT"
 
 MISSING=0
 ok() { echo "ok      $*"; }
@@ -56,7 +55,7 @@ missing() {
 warn() { echo "warn    $*" >&2; }
 
 # Pinned channel from rust-toolchain.toml (`channel = "1.85.0"`).
-CHANNEL="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+CHANNEL="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$REPO_ROOT/rust-toolchain.toml")"
 [[ -n "$CHANNEL" ]] || {
   echo "agent-bootstrap: no channel in rust-toolchain.toml" >&2
   exit 1
@@ -83,20 +82,43 @@ if ! command -v rustup >/dev/null 2>&1; then
   missing "rustup (install from https://rustup.rs, then re-run)"
   exit 1
 fi
-ok "rustup ($(rustup --version 2>/dev/null | head -n 1))"
-
-toolchain_installed() {
-  rustup toolchain list | grep -q "^$CHANNEL-"
+# rustup_probe ARGS...: read-only rustup query that cannot install anything.
+# Inside the repository, rust-toolchain.toml makes `rustup --version` and
+# `rustup toolchain list` resolve (and install) the pinned toolchain. Run
+# from / with RUSTUP_AUTO_INSTALL=0 (rustup 1.28+) and no RUSTUP_TOOLCHAIN,
+# so older rustup has no toolchain file or override to act on either.
+rustup_probe() {
+  (cd / && env -u RUSTUP_TOOLCHAIN RUSTUP_AUTO_INSTALL=0 rustup "$@")
 }
 
-component_installed() {
-  rustup component list --installed --toolchain "$CHANNEL" 2>/dev/null | grep -q "^$1-"
+# has_line_prefix TEXT PREFIX: some line of TEXT starts with PREFIX.
+# Plain string match: no grep pipe (SIGPIPE under pipefail) and no regex
+# meaning for the dots of a version.
+has_line_prefix() {
+  local line
+  while IFS= read -r line; do
+    [[ "$line" == "$2"* ]] && return 0
+  done <<<"$1"
+  return 1
 }
+
+RUSTUP_VERSION="$(rustup_probe --version 2>/dev/null)" || RUSTUP_VERSION=""
+ok "rustup (${RUSTUP_VERSION%%$'\n'*})"
 
 if ((CHECK)); then
-  if toolchain_installed; then ok "toolchain $CHANNEL"; else missing "toolchain $CHANNEL"; fi
+  # `rustup toolchain list` lines: `1.85.0-<host> (default)`.
+  TOOLCHAINS="$(rustup_probe toolchain list 2>/dev/null)" || TOOLCHAINS=""
+  if has_line_prefix "$TOOLCHAINS" "$CHANNEL-"; then
+    ok "toolchain $CHANNEL"
+    # Installed component lines: `clippy-<host>`.
+    COMPONENTS="$(rustup_probe component list --installed --toolchain "$CHANNEL" 2>/dev/null)" ||
+      COMPONENTS=""
+  else
+    missing "toolchain $CHANNEL"
+    COMPONENTS=""
+  fi
   for component in clippy rustfmt; do
-    if toolchain_installed && component_installed "$component"; then
+    if has_line_prefix "$COMPONENTS" "$component-"; then
       ok "component $component"
     else
       missing "component $component"
@@ -115,6 +137,7 @@ if ((MISSING)); then
   exit 1
 fi
 
+cd "$REPO_ROOT"
 # rustup reads rust-toolchain.toml (channel, profile, components). It skips
 # components when the toolchain already exists, so add clippy/rustfmt apart.
 rustup toolchain install "$CHANNEL" --profile minimal
