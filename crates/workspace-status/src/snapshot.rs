@@ -324,27 +324,31 @@ pub fn visible_workspace_snapshot(snapshot: &WorkspaceSnapshot) -> WorkspaceSnap
     }
 }
 
-/// Replace or drop one checkout, then rebuild the workspace snapshot.
+/// Replace or drop each checkout of `changes`, then rebuild the workspace
+/// snapshot once.
 ///
-/// Repos that are not `repo` stay as they were (previous generation) until
-/// a later result arrives. `None` removes that path.
-pub fn replace_repo_in_snapshot(
+/// Each change is a checkout path and its new row; `None` removes that
+/// path. Changes apply in order, so a later change of the same path wins.
+/// Repos that no change names stay as they were (previous generation)
+/// until a later result arrives.
+pub fn replace_repos_in_snapshot(
     snapshot: &WorkspaceSnapshot,
-    repo: &str,
-    next: Option<RepoSnapshot>,
+    changes: Vec<(String, Option<RepoSnapshot>)>,
     show_hidden: bool,
 ) -> WorkspaceSnapshot {
     let mut snaps = repo_snapshots_from_workspace(snapshot);
-    match next {
-        Some(row) => {
-            if let Some(slot) = snaps.iter_mut().find(|r| r.repo == repo) {
-                *slot = row;
-            } else {
-                snaps.push(row);
+    for (repo, next) in changes {
+        match next {
+            Some(row) => {
+                if let Some(slot) = snaps.iter_mut().find(|r| r.repo == repo) {
+                    *slot = row;
+                } else {
+                    snaps.push(row);
+                }
             }
-        }
-        None => {
-            snaps.retain(|r| r.repo != repo);
+            None => {
+                snaps.retain(|r| r.repo != repo);
+            }
         }
     }
     build_workspace_snapshot(

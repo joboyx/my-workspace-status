@@ -142,10 +142,11 @@ fn focused_fast_updated_before_slow(screen: &str, marker: &str) -> bool {
 
 /// Streamed watch collect paints the focused checkout before a blocked peer.
 ///
-/// Docs (`tui-rust.md`, `app.rs`): each
-/// checkout result applies as it finishes. Unfinished paths stay on the
-/// previous generation. The focused checkout is queued first; its pane
-/// reloads as soon as that identity changes (`focused_repo_needs_pane`).
+/// Docs (`tui-rust.md`, `effect.rs`): the focused checkout is queued
+/// first and its result applies as it finishes; the other results of the
+/// collect wait for its end (at most `STATUS_BATCH_MAX_HOLD`). Unfinished
+/// paths stay on the previous generation. The focused pane reloads as soon
+/// as that identity changes (`focused_repo_needs_pane`).
 /// A slow `git status` must not hold the focused tree or pane. `r` and
 /// watch-while-keys are out of scope.
 ///

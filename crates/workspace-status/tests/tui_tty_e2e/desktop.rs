@@ -6,7 +6,7 @@
 //! xfce never encodes SGR 67. xterm does. Screen text is recovered from a
 //! `script(1)` typescript on that TTY.
 //!
-//! Ignored in `cargo test --workspace`. The `tui-tty-desktop` GitHub Actions
+//! Ignored in `cargo test --workspace --all-features`. The `tui-tty-desktop` GitHub Actions
 //! job runs these tests under `scripts/with-desktop-session.sh`. Local Linux:
 //! see docs/tui-tty-e2e.md.
 

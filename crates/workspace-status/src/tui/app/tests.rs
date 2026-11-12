@@ -416,6 +416,85 @@ fn drop_undiscovered_checkouts_removes_vanished_paths() {
 }
 
 #[test]
+fn drop_undiscovered_checkouts_removes_every_gone_path_in_one_rebuild() {
+    use crate::tui::state::{rebuild_rows_count, reset_rebuild_rows_count};
+    let names = ["app", "gone-1", "gone-2", "gone-3"];
+    let mut app = app_state(&names.map(repo_snapshot));
+    reset_rebuild_rows_count();
+    drop_undiscovered_checkouts(&mut app, &["app".into()]);
+    assert_eq!(rebuild_rows_count(), 1, "three gone paths, one rebuild");
+    let left: Vec<&str> = app.snapshot.repos.iter().map(|r| r.repo.as_str()).collect();
+    assert_eq!(left, vec!["app"]);
+    reset_rebuild_rows_count();
+    drop_undiscovered_checkouts(&mut app, &["app".into()]);
+    assert_eq!(rebuild_rows_count(), 0, "nothing gone, nothing applied");
+}
+
+/// Painted tree row ids (removal ghosts included) and the ids of those
+/// that flash.
+fn painted_and_flashing(app: &AppState) -> (Vec<String>, Vec<String>) {
+    let painted: Vec<String> = app
+        .painted_tree_rows()
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    let flashing = painted
+        .iter()
+        .filter(|id| app.flash_color(id).is_some())
+        .cloned()
+        .collect();
+    (painted, flashing)
+}
+
+/// One batch apply of several checkouts leaves the removal ghosts that
+/// applying them one by one does, and flashes the same rows, less those
+/// whose signature only moved and came back between the single applies
+/// (an aggregate row such as the workspace root).
+#[test]
+fn a_batch_apply_flashes_and_ghosts_like_one_apply_per_checkout() {
+    use crate::testutil::repo;
+    let start = [
+        repo("a", true),
+        repo("b", false),
+        repo("c", false),
+        repo("d", false),
+    ];
+    let changes = vec![
+        ("a".to_string(), Some(repo("a", false))),
+        ("b".to_string(), Some(repo("b", true))),
+        ("c".to_string(), None),
+    ];
+    let mut one_by_one = app_state(&start);
+    let start_sigs = one_by_one.signatures.clone();
+    for (path, snap) in changes.clone() {
+        apply_one_repo_snapshot(&mut one_by_one, &path, snap);
+    }
+    let mut batch = app_state(&start);
+    apply_repo_snapshots(&mut batch, changes);
+
+    let (painted, flashing) = painted_and_flashing(&batch);
+    let (single_painted, single_flashing) = painted_and_flashing(&one_by_one);
+    assert_eq!(painted, single_painted, "same rows and removal ghosts");
+    let changed: Vec<String> = single_flashing
+        .into_iter()
+        .filter(|id| start_sigs.get(id) != batch.signatures.get(id))
+        .collect();
+    assert_eq!(flashing, changed, "the rows that changed flash");
+    assert!(
+        painted.iter().any(|id| id == "file:a:README.md"),
+        "the cleaned file stays as a ghost: {painted:?}"
+    );
+    assert!(
+        flashing.iter().any(|id| id == "file:b:README.md"),
+        "the new dirty file flashes: {flashing:?}"
+    );
+    assert_eq!(
+        crate::snapshot::serialize_workspace_snapshot(&batch.snapshot),
+        crate::snapshot::serialize_workspace_snapshot(&one_by_one.snapshot)
+    );
+}
+
+#[test]
 fn tree_picker_dirty_refuses_tracked_only() {
     let root = unique_dir("ws-tui-checkout-dirty");
     let workspace = root.join("workspace");

@@ -441,6 +441,7 @@ async fn drive(ctx: &mut LoopCtx<'_>) -> Result<(), u8> {
         let peek_remain = ctx.state.peek_remaining_ms(now).unwrap_or(u64::MAX);
         let search_remain = ctx.state.search_files_due_ms(now).unwrap_or(u64::MAX);
         let present_remain = ctx.presenter.remain_ms(ctx.state.next_anim_tick_ms());
+        let status_hold_remain = ctx.interp.status_hold_remain_ms(now);
         let join_empty = ctx.join.is_empty();
 
         tokio::select! {
@@ -495,6 +496,14 @@ async fn drive(ctx: &mut LoopCtx<'_>) -> Result<(), u8> {
                     if ctx.interp.take_dirty() {
                         ctx.presenter.mark();
                     }
+                }
+            }
+            _ = sleep_ms(status_hold_remain) => {
+                // A collect's held status results waited
+                // `STATUS_BATCH_MAX_HOLD`: apply them before it ends.
+                ctx.interp.flush_held_status_if_due(ctx.state, ctx.opts, Instant::now());
+                if ctx.interp.take_dirty() {
+                    ctx.presenter.mark();
                 }
             }
             _ = sleep_ms(ctrl_remain) => {
@@ -892,7 +901,9 @@ pub(super) fn spawn_job(join: &mut JobJoinSet, id: u64, work: JobWork) {
 }
 
 /// Apply one `JoinSet` result to `interp`: an outcome, a panicked job
-/// (its slots are released), or a worker that ended with no job id.
+/// (its slots are released), or a worker that ended with no job id. Then
+/// apply the held status results when their hold ran out
+/// ([`Interpreter::flush_held_status_if_due`]).
 pub(super) fn apply_joined(
     interp: &mut Interpreter,
     state: &mut AppState,
@@ -904,6 +915,9 @@ pub(super) fn apply_joined(
         Ok((id, Err(message))) => interp.apply_panic(state, opts, id, &message),
         Err(err) => interp.apply_lost_job(state, &err),
     }
+    // A job that lands after the status hold ran out applies the held
+    // results too, even while the hold timer arm waits its turn.
+    interp.flush_held_status_if_due(state, opts, Instant::now());
 }
 
 fn schedule_edit(ctx: &mut LoopCtx<'_>, repo: String, path: String, line: Option<u32>) {

@@ -1,5 +1,6 @@
 # Optional local runner: `cargo nextest run --profile ci` (needs cargo-nextest).
-# CI runs `cargo test`; this profile does not change CI.
+# Add `--all-features` to include the `slow-tests` suites (the PTY e2e binary
+# below and the load test). CI runs `cargo test`; this profile does not change CI.
 
 [profile.ci]
 fail-fast = false

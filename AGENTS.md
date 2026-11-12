@@ -8,23 +8,26 @@ Tag `ink-tui` is a historical snapshot of a previous TypeScript TUI. It is not a
 
 Cold machine: run `scripts/agent-bootstrap.sh` (`--check` only reports). It checks git and a C linker, installs the toolchain of `rust-toolchain.toml` with clippy and rustfmt, fetches crates, and builds the test binaries.
 
-Build: `cargo build --workspace`. The gate (CI runs the same commands on Linux):
+Build: `cargo build --workspace`. The local gate:
 
 ```bash
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --locked
 ```
+
+`cargo test --workspace --locked` runs the fast suites only. The slow suites sit behind the test-only cargo feature `slow-tests` of `workspace-status`: the real-TTY PTY e2e (`tests/tui_tty_e2e`) and the watch-tick load test (`tui/effect/load_tests.rs`). Clippy builds them with `--all-features`, so they still compile and lint. CI runs them before merge: the pull request checks `cargo`, `cargo-macos` and `cargo-windows` run `cargo test --workspace --locked --all-features`, and `tui-tty-desktop` runs the desktop `#[ignore]` tests (**Release gate** in [docs/architecture.md](./docs/architecture.md)). Do not run the whole slow suite locally on each change; run one slow test with `--features slow-tests` when you work on it.
 
 Run one test:
 
 | Test | Command |
 | --- | --- |
 | Lib unit test | `cargo test -p workspace-status --lib <name>` |
-| One PTY test (name = file name under `tests/tui_tty_e2e/human/`) | `cargo test -p workspace-status --test tui_tty_e2e <pty_name>` |
+| One PTY test (name = file name under `tests/tui_tty_e2e/human/`) | `cargo test -p workspace-status --features slow-tests --test tui_tty_e2e <pty_name>` |
+| Load test | `cargo test -p workspace-status --lib --features slow-tests load_tests` |
 | Graph crate | `cargo test -p workspace-status-graph <name>` |
 
-Optional: with cargo-nextest installed, `cargo nextest run --profile ci` uses `.config/nextest.toml` (retries for the PTY e2e binary, slow-test timeout). CI stays on `cargo test`.
+Optional: with cargo-nextest installed, `cargo nextest run --profile ci` uses `.config/nextest.toml` (retries for the PTY e2e binary, slow-test timeout); add `--all-features` for the slow suites. CI stays on `cargo test`.
 
 Where code goes: [docs/architecture.md](./docs/architecture.md) → **Where do I add X**.
 
@@ -32,7 +35,8 @@ On macOS, `tests/tag_release.rs` needs GNU `sed` (`scripts/tag-release.sh` uses 
 
 ## Definition of done
 
-- The gate in **Start here** is green.
+- The local gate in **Start here** is green.
+- The pull request's CI checks are green. They run the slow suites (PTY e2e, load test) that the local gate skips.
 - Tests cover the changed behaviour: unit tests, plus a `pty_*` test for keys and screens.
 - Each row of **Update the docs with the code** that the change touches is updated.
 - A UI change is seen live through the verify skill driver (see **Verify skill**).
@@ -45,15 +49,15 @@ Two harnesses. Do not mix them. Detail: [docs/tui-tty-e2e.md](./docs/tui-tty-e2e
 
 | Layer | Path | What it drives | Command |
 | --- | --- | --- | --- |
-| Real-input PTY | `crates/workspace-status/tests/tui_tty_e2e/` (tests without `#[ignore]`) | Spawns the `workspace-status` binary on a PTY. Live `event::read`. Unix only. Windows compiles this crate with no tests. | `cargo test --workspace` |
-| Desktop `#[ignore]` | same crate, `#[ignore]` tests (xfce keys, xterm XTEST wheel) | Real terminal emulator under `DISPLAY`. GitHub Actions job `tui-tty-desktop` (`xvfb-run`). | `cargo test --test tui_tty_e2e -- --ignored` |
+| Real-input PTY | `crates/workspace-status/tests/tui_tty_e2e/` (tests without `#[ignore]`) | Spawns the `workspace-status` binary on a PTY. Live `event::read`. Unix only. Windows compiles this crate with no tests. | `cargo test --workspace --all-features` (CI `cargo`, `cargo-macos`) |
+| Desktop `#[ignore]` | same crate, `#[ignore]` tests (xfce keys, xterm XTEST wheel) | Real terminal emulator under `DISPLAY`. GitHub Actions job `tui-tty-desktop` (`xvfb-run`). | `cargo test -p workspace-status --features slow-tests --test tui_tty_e2e -- --ignored` |
 
-`cargo test --workspace` is the default suite. It covers both crates, the snapshot contract, CLI, discovery, and Unix PTY e2e. It does not run `#[ignore]` tests.
+The PTY crate needs the `slow-tests` feature (`required-features` in `crates/workspace-status/Cargo.toml`), so the local `cargo test --workspace` skips it. That fast suite covers both crates, the snapshot contract, CLI, and discovery. CI adds `--all-features`, which adds the Unix PTY e2e and the load test. Neither command runs `#[ignore]` tests.
 
 Desktop local run (Linux, `DISPLAY`, packages in [docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md)):
 
 ```bash
-cargo test --test tui_tty_e2e -- --ignored --nocapture --test-threads=1
+cargo test -p workspace-status --features slow-tests --test tui_tty_e2e -- --ignored --nocapture --test-threads=1
 ```
 
 Demo GIF clips stay in `scripts/capture-demo-stills.sh`. That script is not a TUI e2e harness.
@@ -146,7 +150,8 @@ CI (`cargo test --workspace`, `crates/workspace-status/src/parity_registry.rs`) 
 ## Lint gate
 
 CI job `lint` runs `cargo fmt --all --check` and
-`cargo clippy --workspace --all-targets --locked -- -D warnings`. Run both
+`cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
+(`--all-features` lints the `slow-tests` suites too). Run both
 before pushing; `cargo clippy --fix` handles most of what it reports.
 
 Two lints are allowed workspace-wide in the root `Cargo.toml`, each with the
@@ -176,7 +181,7 @@ Rustdoc on exported items (`///` or `//!`) is a review rule, not a lint: no
 
 ## Conventions
 
-- `cargo test --workspace` at the repository root covers `workspace-status` and `workspace-status-graph` (Unix PTY e2e). Desktop `#[ignore]` tests need `--ignored`. See **TUI test layers**.
+- `cargo test --workspace` at the repository root covers `workspace-status` and `workspace-status-graph`, fast suites only. `--all-features` (CI) adds the `slow-tests` suites: Unix PTY e2e and the load test. Desktop `#[ignore]` tests need `--ignored`. See **Start here** and **TUI test layers**.
 - Exported Rust items need rustdoc (`///` or `//!`). Reviews check it; no lint does (see **Lint gate**).
 - The plain-text report is a user-facing contract — changing it means updating `SAMPLE_OUTPUT.md` and the snapshot e2e suite.
 - TTY event loop: do not run git or other blocking I/O on the draw/event thread. The live path is `tui/event_loop.rs` (current-thread Tokio, dedicated input thread, `spawn_blocking` on a `JoinSet`) through `tui/effect.rs`. Fetch / pull / push enqueue on a per-gitdir remote queue (`RemoteQueue`) under the resolved `fetchConcurrency` cap (`WS_STATUS_FETCH_CONCURRENCY` > config > 10). Exclusive writes stay serial. While an exclusive write or default-branch job is in flight, nav / pane switch / cancel / remotes stay live (`BusyAction::Handle`); keys that would start another exclusive write are drained (`Ignore`). An exclusive write on a gitdir that already has a remote dispatches, then `schedule` refuses with breadcrumb `busy`. `E` blob/temp prepare is `UserTag::DiffPrepare` on that pool; `blob_bytes` must not run on the loop thread. Guard: `tty_event_loop_must_not_call_sync_pane_git` in `tui/event_pump.rs`.

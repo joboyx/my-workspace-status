@@ -198,7 +198,9 @@ impl Scheduler {
         self.inflight.len()
     }
 
-    #[cfg(test)]
+    /// Generation of the running collect (watch tick or workspace reload),
+    /// if one runs. A status result of another generation (a single-checkout
+    /// reload) is not part of it.
     pub fn collection_gen(&self) -> Option<u64> {
         self.collection.as_ref().map(|c| c.gen)
     }

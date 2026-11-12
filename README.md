@@ -207,18 +207,19 @@ The CLI is treated as a black box:
 ### Running the test suite
 
 ```bash
-cargo test --workspace
+cargo test --workspace                 # fast suites
+cargo test --workspace --all-features  # adds the slow suites (PTY e2e, load test), as CI runs it
 ```
 
 Agent map of PTY vs desktop `#[ignore]`, plus `WS_STATUS_UPDATE_CHECK_STORE`: [AGENTS.md](./AGENTS.md).
 
 ### Coverage
 
-`cargo test --workspace` covers the snapshot contract, CLI flags, discovery, and the real-TTY TUI path (PTY, Unix):
+`cargo test --workspace --all-features` covers the snapshot contract, CLI flags, discovery, and the real-TTY TUI path (PTY, Unix):
 
 | Area                  | Covered behavior                                                                                                                                                                                |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Real-TTY TUI e2e      | PTY in `cargo test` plus the Actions `tui-tty-desktop` job. Tests: [crates/workspace-status/tests/tui_tty_e2e/](./crates/workspace-status/tests/tui_tty_e2e/) |
+| Real-TTY TUI e2e      | PTY in `cargo test --all-features` plus the Actions `tui-tty-desktop` job. Tests: [crates/workspace-status/tests/tui_tty_e2e/](./crates/workspace-status/tests/tui_tty_e2e/) |
 | CLI contract          | `--help` documents `--all`, `--fetch`, `--verbose`, `--pull`, `--default-branch`, `--plain`, `--json`, `--update`, and `--workspace` (`-C`) |
 | Snapshot contract     | `--json` and `--plain` share one workspace snapshot; fixture e2e builds a temp workspace and asserts both without a TTY                                                                         |
 | Clean summary         | all-clean default-branch workspaces and mixed clean default/non-default workspaces                                                                                                              |

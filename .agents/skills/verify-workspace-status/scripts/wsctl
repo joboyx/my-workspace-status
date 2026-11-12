@@ -132,7 +132,7 @@ usage: wsctl doctor
 
 Checks, each one entry of "checks" ({name, ok, detail}); exit 1 when one fails:
   tmux       tmux on PATH (without it: PTY e2e, cargo test -p workspace-status
-             --test tui_tty_e2e <pty_name>)
+             --features slow-tests --test tui_tty_e2e <pty_name>)
   bash       bash on PATH is 3.2 or later (the driver runs under it)
   binary     the run's binary exists, no file under crates/*/src, no
              crates/*/build.rs, crates/*/Cargo.toml, Cargo.toml or Cargo.lock
@@ -414,7 +414,7 @@ cmd_start() {
   [[ "$seed" == demo ]] || fail "--seed: only demo is known (or pass --workspace DIR)"
   if [[ -n "$size" && ! "$size" =~ ^[0-9]+x[0-9]+$ ]]; then fail "--size must be COLSxROWS, for example 160x45"; fi
   command -v tmux >/dev/null 2>&1 ||
-    fail "tmux is not on PATH; without tmux prove TUI behaviour with the PTY e2e: cargo test -p workspace-status --test tui_tty_e2e <pty_name>"
+    fail "tmux is not on PATH; without tmux prove TUI behaviour with the PTY e2e: cargo test -p workspace-status --features slow-tests --test tui_tty_e2e <pty_name>"
 
   # One TUI per checkout at a time: a live run keeps polling and could answer
   # into the next. With --run or WSCTL_RUN, start leaves the pointer alone.
@@ -493,7 +493,7 @@ cmd_doctor() {
     have_tmux=1
     check tmux 1 "$(tmux -V 2>/dev/null || echo tmux) at $(command -v tmux)"
   else
-    check tmux 0 "tmux is not on PATH. Fallback: the PTY e2e, cargo test -p workspace-status --test tui_tty_e2e <pty_name>"
+    check tmux 0 "tmux is not on PATH. Fallback: the PTY e2e, cargo test -p workspace-status --features slow-tests --test tui_tty_e2e <pty_name>"
   fi
 
   v="$(bash -c 'printf "%s.%s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"' 2>/dev/null || true)"

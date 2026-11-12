@@ -4,7 +4,8 @@
 //! `event::read` sees keys and xterm SGR mouse bytes. This is not
 //! demo GIF capture (`scripts/capture-demo-stills.sh`).
 //!
-//! Unix only (PTY). Windows `cargo test --workspace` compiles this crate
+//! A slow suite: it builds only with the `slow-tests` feature
+//! (`--all-features` in CI). Unix only (PTY). Windows compiles this crate
 //! with no tests.
 
 #[cfg(unix)]
