@@ -2178,19 +2178,26 @@ impl Interpreter {
                 }
                 SpawnKind::ProcessRepo { gen, path, .. } => {
                     let cwd = opts.cwd.clone();
-                    let snapshot = state.snapshot.clone();
                     let show_hidden = state.show_hidden;
                     let meta = self.metas.get(&path).cloned().or_else(|| {
-                        snapshot.repos.iter().find(|r| r.repo == path).map(|row| {
-                            (
-                                RepoCheckoutMeta {
-                                    checkout_kind: row.checkout_kind,
-                                    primary_repo: row.primary_repo.clone(),
-                                },
-                                row.default_branch_override.clone(),
-                            )
-                        })
+                        state
+                            .snapshot
+                            .repos
+                            .iter()
+                            .find(|r| r.repo == path)
+                            .map(|row| {
+                                (
+                                    RepoCheckoutMeta {
+                                        checkout_kind: row.checkout_kind,
+                                        primary_repo: row.primary_repo.clone(),
+                                    },
+                                    row.default_branch_override.clone(),
+                                )
+                            })
                     });
+                    // Only the fallback with no checkout meta reads the whole
+                    // snapshot, so only it pays for the clone.
+                    let meta_or_snapshot = meta.ok_or_else(|| state.snapshot.clone());
                     start(
                         id,
                         JobRelease::RepoStatus {
@@ -2198,33 +2205,41 @@ impl Interpreter {
                             path: path.clone(),
                         },
                         Box::new(move || {
-                            let snap = if let Some((meta, override_name)) = meta {
-                                process_repo(&path, &cwd, false, override_name.as_deref(), &meta)
-                            } else {
-                                let next = compute_reload_repo(&cwd, &snapshot, &path, show_hidden);
-                                next.repos
-                                    .into_iter()
-                                    .find(|row| row.repo == path)
-                                    .map(|row| RepoSnapshot {
-                                        repo: row.repo,
-                                        branch: row.branch,
-                                        sync_status: row.sync_status,
-                                        sync_note: row.sync_note,
-                                        upstream_rewrite: row.upstream_rewrite,
-                                        fetch_error: row.fetch_error,
-                                        head: row.head,
-                                        has_unstaged: row.has_unstaged,
-                                        has_staged: row.has_staged,
-                                        has_untracked: row.has_untracked,
-                                        changes: row.changes,
-                                        checkout_kind: row.checkout_kind,
-                                        primary_repo: row.primary_repo,
-                                        merged_into_default: row.merged_into_default,
-                                        default_branch_override: row.default_branch_override,
-                                        default_tip_ref: row.default_tip_ref,
-                                        default_branch: row.default_branch,
-                                        local_branches: row.local_branches,
-                                    })
+                            let snap = match meta_or_snapshot {
+                                Ok((meta, override_name)) => process_repo(
+                                    &path,
+                                    &cwd,
+                                    false,
+                                    override_name.as_deref(),
+                                    &meta,
+                                ),
+                                Err(snapshot) => {
+                                    let next =
+                                        compute_reload_repo(&cwd, &snapshot, &path, show_hidden);
+                                    next.repos
+                                        .into_iter()
+                                        .find(|row| row.repo == path)
+                                        .map(|row| RepoSnapshot {
+                                            repo: row.repo,
+                                            branch: row.branch,
+                                            sync_status: row.sync_status,
+                                            sync_note: row.sync_note,
+                                            upstream_rewrite: row.upstream_rewrite,
+                                            fetch_error: row.fetch_error,
+                                            head: row.head,
+                                            has_unstaged: row.has_unstaged,
+                                            has_staged: row.has_staged,
+                                            has_untracked: row.has_untracked,
+                                            changes: row.changes,
+                                            checkout_kind: row.checkout_kind,
+                                            primary_repo: row.primary_repo,
+                                            merged_into_default: row.merged_into_default,
+                                            default_branch_override: row.default_branch_override,
+                                            default_tip_ref: row.default_tip_ref,
+                                            default_branch: row.default_branch,
+                                            local_branches: row.local_branches,
+                                        })
+                                }
                             };
                             // Disk facts of the dirty files, read here so the
                             // reducer never stats or reads them.

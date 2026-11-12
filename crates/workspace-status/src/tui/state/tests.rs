@@ -1977,6 +1977,61 @@ fn apply_watch_snapshot_does_not_reset_graph_cursor() {
 }
 
 #[test]
+fn apply_watch_snapshot_rebuilds_rows_once() {
+    let mut app = state();
+    let mut snapshot = app.snapshot.clone();
+    snapshot.repos[0].changes.push(unstaged_change("new.rs"));
+    reset_rebuild_rows_count();
+    let _ = app.apply_watch_snapshot(snapshot);
+    assert_eq!(rebuild_rows_count(), 1);
+    assert!(
+        app.rows.iter().any(|row| row.label.contains("new.rs")),
+        "the one rebuild must show the new file"
+    );
+}
+
+#[test]
+fn apply_watch_snapshot_that_adds_and_removes_rows_keeps_folds_focus_and_scroll() {
+    let mut app = app_state_of(build_workspace_snapshot(
+        &[
+            RepoSnapshot {
+                has_unstaged: true,
+                changes: vec![unstaged_change("README.md"), unstaged_change("old.rs")],
+                ..repo_snapshot("app")
+            },
+            repo("lib", false),
+        ],
+        &[],
+        false,
+        &[],
+    ));
+    app.layout.tree_height = 24;
+    // Open the group the default folds close, so a reset to the default
+    // folds would show.
+    assert!(app.folds.remove("group:no-updates"));
+    app.rebuild_rows();
+    assert!(app.rows.iter().any(|row| row.id == "repo:lib"));
+    focus_file(&mut app, "README.md");
+    let focus_id = app.focused_row().unwrap().id.clone();
+    let folds = app.folds.clone();
+    app.set_graph(mini_graph(&["aaa", "bbb"]), "app".into(), "aaa".into());
+    app.graph_scroll = 1;
+    app.diff_scroll = 4;
+    app.diff_cursor = 2;
+    let mut snapshot = app.snapshot.clone();
+    snapshot.repos[0].changes = vec![unstaged_change("README.md"), unstaged_change("aaa-new.rs")];
+    let _ = app.apply_watch_snapshot(snapshot);
+    assert!(app.rows.iter().any(|row| row.label.contains("aaa-new.rs")));
+    assert!(app.rows.iter().all(|row| !row.label.contains("old.rs")));
+    assert_eq!(app.folds, folds);
+    assert!(app.rows.iter().any(|row| row.id == "repo:lib"));
+    assert_eq!(app.focused_row().unwrap().id, focus_id);
+    assert_eq!(app.graph_scroll, 1);
+    assert_eq!(app.diff_scroll, 4);
+    assert_eq!(app.diff_cursor, 2);
+}
+
+#[test]
 fn edit_keeps_fold_focus_scroll() {
     let mut app = state();
     app.folds.insert("group:no-updates".into());

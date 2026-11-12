@@ -200,6 +200,28 @@ pub(crate) const ESC_EXITS_HIGHLIGHT: &str = "Esc exits highlight";
 /// `V` on a pane with no line to highlight.
 pub(crate) const NO_HIGHLIGHT_TARGET: &str = "no highlight target";
 
+#[cfg(test)]
+thread_local! {
+    /// Calls of [`AppState::rebuild_rows`] on this thread since the last
+    /// [`reset_rebuild_rows_count`].
+    static REBUILD_ROWS_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Number of [`AppState::rebuild_rows`] calls on this thread since the last
+/// [`reset_rebuild_rows_count`]. Each unit test runs on its own thread, and
+/// the sync interpreter runs jobs on the calling thread, so a test reads
+/// only its own rebuilds.
+#[cfg(test)]
+pub(crate) fn rebuild_rows_count() -> usize {
+    REBUILD_ROWS_CALLS.with(std::cell::Cell::get)
+}
+
+/// Set the [`rebuild_rows_count`] of this thread back to zero.
+#[cfg(test)]
+pub(crate) fn reset_rebuild_rows_count() {
+    REBUILD_ROWS_CALLS.with(|calls| calls.set(0));
+}
+
 /// Which pane has keyboard focus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FocusPane {
@@ -2642,7 +2664,11 @@ impl AppState {
         )
     }
 
+    /// Rebuild the tree and its rows from the snapshot and the current
+    /// folds, and keep the focused row (or its nearest ancestor).
     pub fn rebuild_rows(&mut self) {
+        #[cfg(test)]
+        REBUILD_ROWS_CALLS.with(|calls| calls.set(calls.get() + 1));
         let focus_id = self.focused_row().map(|r| r.id.clone());
         self.tree = self.visible_tree();
         self.rows = flatten_with(&self.tree, &self.folds, self.ascii);
@@ -2721,18 +2747,17 @@ impl AppState {
 
     /// Apply a watch poll. Keeps fold / focus / scroll. Flashes only rows
     /// whose identity actually changed.
+    ///
+    /// Rebuilds the rows once, through [`Self::apply_snapshot`]: that step
+    /// never changes the folds, and its [`Self::rebuild_rows`] keeps the
+    /// focused row (or its nearest ancestor).
     pub fn apply_watch_snapshot(&mut self, snapshot: WorkspaceSnapshot) -> Vec<String> {
-        let focus_id = self.focused_row().map(|r| r.id.clone());
-        let folds = self.folds.clone();
         let graph_scroll = self.graph_scroll;
         let diff_scroll = self.diff_scroll;
         let diff_cursor = self.diff_cursor;
         let before = self.signatures.clone();
         let old_rows = self.rows.clone();
         self.apply_snapshot(snapshot);
-        self.folds = folds;
-        self.rebuild_rows();
-        self.restore_focus_after_tree_rebuild(focus_id);
         self.graph_scroll = graph_scroll;
         self.diff_scroll = diff_scroll;
         self.diff_cursor = diff_cursor;
