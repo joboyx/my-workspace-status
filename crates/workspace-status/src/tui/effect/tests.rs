@@ -7298,3 +7298,261 @@ fn clipboard_copy_that_panics_frees_its_slot_and_fails_the_copy() {
     );
     assert!(!interp.clipboard_job.holds_slot());
 }
+
+/// A collect holds its status results and applies them in one watch apply.
+mod status_batch {
+    use super::*;
+    use crate::testutil::instant_ago;
+    use crate::tui::event_loop::apply_joined;
+    use crate::tui::state::{rebuild_rows_count, reset_rebuild_rows_count};
+
+    const PATHS: [&str; 4] = ["a", "b", "c", "d"];
+
+    /// Checkout `path` with an unstaged `start.txt` (so its row shows),
+    /// before any status lands.
+    fn start_repo(path: &str) -> RepoSnapshot {
+        RepoSnapshot {
+            has_unstaged: true,
+            changes: vec![unstaged_change("start.txt")],
+            ..repo(path, false)
+        }
+    }
+
+    /// Checkouts `home` and a..d, the cursor on `home`.
+    fn batch_state() -> AppState {
+        let mut repos = vec![start_repo("home")];
+        repos.extend(PATHS.iter().map(|path| start_repo(path)));
+        let mut state = app_state(&repos);
+        focus_repo(&mut state, "home");
+        state
+    }
+
+    /// Start a watch collect whose walk found `paths`; returns its gen.
+    fn start_collect(interp: &mut Interpreter, state: &AppState, paths: &[&str]) -> u64 {
+        assert!(interp.sched.on_watch_tick(state.focused_checkout_path()));
+        let gen = interp.sched.collection_gen().expect("the tick collects");
+        let found = paths.iter().map(|path| path.to_string()).collect();
+        assert_eq!(
+            interp.sched.on_discovered(gen, found),
+            ApplyDecision::QueueRepos
+        );
+        gen
+    }
+
+    /// Status of `path` from collect `gen`, with a dirty `README.md`.
+    fn dirty_status(gen: u64, path: &str) -> JobOutcome {
+        JobOutcome::RepoStatus {
+            gen,
+            path: path.into(),
+            snap: Some(repo(path, true)),
+            facts: Some(Default::default()),
+        }
+    }
+
+    /// True once a status of `path` with its `README.md` edit applied.
+    fn is_dirty(state: &AppState, path: &str) -> bool {
+        state.snapshot.repos.iter().any(|row| {
+            row.repo == path && row.changes.iter().any(|change| change.path == "README.md")
+        })
+    }
+
+    fn branch_of(state: &AppState, path: &str) -> String {
+        state
+            .snapshot
+            .repos
+            .iter()
+            .find(|row| row.repo == path)
+            .map(|row| row.branch.clone())
+            .expect("checkout row")
+    }
+
+    #[test]
+    fn a_collect_applies_its_results_in_one_rebuild_when_it_ends() {
+        let mut state = batch_state();
+        let mut interp = Interpreter::with_cap(4);
+        let gen = start_collect(&mut interp, &state, &PATHS);
+        let _ = interp.take_dirty();
+        reset_rebuild_rows_count();
+        for path in &PATHS[..3] {
+            apply(&mut interp, &mut state, dirty_status(gen, path));
+            assert_eq!(rebuild_rows_count(), 0, "{path} waits for the collect end");
+            assert!(!is_dirty(&state, path));
+        }
+        assert!(!interp.take_dirty(), "nothing applied: no redraw");
+
+        apply(&mut interp, &mut state, dirty_status(gen, "d"));
+        assert_eq!(rebuild_rows_count(), 1, "the last result applies all four");
+        assert!(PATHS.iter().all(|path| is_dirty(&state, path)));
+        assert!(!interp.sched.collection_active(), "the collect ended");
+        assert!(interp.take_dirty());
+        assert_eq!(interp.status_hold_remain_ms(Instant::now()), u64::MAX);
+    }
+
+    #[test]
+    fn the_focused_checkout_result_applies_at_once() {
+        let mut state = batch_state();
+        focus_repo(&mut state, "a");
+        let mut interp = Interpreter::with_cap(4);
+        let gen = start_collect(&mut interp, &state, &PATHS);
+        reset_rebuild_rows_count();
+
+        apply(&mut interp, &mut state, dirty_status(gen, "a"));
+        assert_eq!(rebuild_rows_count(), 1);
+        assert!(is_dirty(&state, "a"), "the focused rows move at once");
+
+        apply(&mut interp, &mut state, dirty_status(gen, "b"));
+        assert_eq!(rebuild_rows_count(), 1, "the next result waits");
+        assert!(!is_dirty(&state, "b"));
+    }
+
+    #[test]
+    fn a_panicked_last_job_still_applies_the_held_results() {
+        let mut state = batch_state();
+        let mut interp = Interpreter::with_cap(4);
+        let gen = start_collect(&mut interp, &state, &["a", "b"]);
+        apply(&mut interp, &mut state, dirty_status(gen, "a"));
+        assert!(!is_dirty(&state, "a"));
+        reset_rebuild_rows_count();
+
+        let id = 99;
+        interp.job_releases.insert(
+            id,
+            JobRelease::RepoStatus {
+                gen,
+                path: "b".into(),
+            },
+        );
+        let tui_opts = opts(&state);
+        interp.apply_panic(&mut state, &tui_opts, id, "boom");
+        assert_eq!(rebuild_rows_count(), 1);
+        assert!(is_dirty(&state, "a"), "the held result landed");
+        assert!(!interp.sched.collection_active(), "the collect ended");
+    }
+
+    /// A single-checkout `r` reload is not part of the collect: it applies
+    /// at once, with what the collect held, and its newer row wins.
+    #[test]
+    fn a_single_checkout_reload_applies_at_once_and_the_newest_wins() {
+        let mut state = batch_state();
+        let mut interp = Interpreter::with_cap(4);
+        let gen = start_collect(&mut interp, &state, &PATHS);
+        apply(&mut interp, &mut state, dirty_status(gen, "a"));
+        apply(&mut interp, &mut state, dirty_status(gen, "b"));
+        reset_rebuild_rows_count();
+
+        interp.sched.on_reload_repo("a".into());
+        let reload_gen = gen + 1;
+        let mut reloaded = repo("a", false);
+        reloaded.branch = "reloaded".into();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::RepoStatus {
+                gen: reload_gen,
+                path: "a".into(),
+                snap: Some(reloaded),
+                facts: Some(Default::default()),
+            },
+        );
+        assert_eq!(
+            rebuild_rows_count(),
+            1,
+            "one apply for the reload and the batch"
+        );
+        assert_eq!(
+            branch_of(&state, "a"),
+            "reloaded",
+            "the newest row of a wins"
+        );
+        assert!(!is_dirty(&state, "a"));
+        assert!(is_dirty(&state, "b"), "the held result of b landed with it");
+        assert!(interp.sched.collection_active(), "c and d still run");
+    }
+
+    #[test]
+    fn held_results_apply_once_the_max_hold_runs_out() {
+        let mut state = batch_state();
+        let mut interp = Interpreter::with_cap(4);
+        let tui_opts = opts(&state);
+        let gen = start_collect(&mut interp, &state, &PATHS);
+        assert_eq!(interp.status_hold_remain_ms(Instant::now()), u64::MAX);
+        apply(&mut interp, &mut state, dirty_status(gen, "a"));
+        let left = interp.status_hold_remain_ms(Instant::now());
+        assert!(left > 0 && left <= 1000, "{left}");
+        reset_rebuild_rows_count();
+
+        interp.flush_held_status_if_due(&mut state, &tui_opts, Instant::now());
+        assert_eq!(rebuild_rows_count(), 0, "still inside the hold");
+
+        interp.status_batch.since = Some(instant_ago(
+            STATUS_BATCH_MAX_HOLD + Duration::from_millis(1),
+        ));
+        assert_eq!(interp.status_hold_remain_ms(Instant::now()), 0);
+        interp.flush_held_status_if_due(&mut state, &tui_opts, Instant::now());
+        assert_eq!(rebuild_rows_count(), 1);
+        assert!(is_dirty(&state, "a"));
+        assert!(interp.take_dirty());
+        assert_eq!(interp.status_hold_remain_ms(Instant::now()), u64::MAX);
+        assert!(interp.sched.collection_active(), "the collect goes on");
+    }
+
+    /// The live loop lands each job through `apply_joined`: a result that
+    /// lands after the hold ran out applies the batch, itself included.
+    #[test]
+    fn a_result_landing_after_the_max_hold_applies_the_batch() {
+        let mut state = batch_state();
+        let mut interp = Interpreter::with_cap(4);
+        let tui_opts = opts(&state);
+        let gen = start_collect(&mut interp, &state, &PATHS);
+        apply(&mut interp, &mut state, dirty_status(gen, "a"));
+        interp.status_batch.since = Some(instant_ago(STATUS_BATCH_MAX_HOLD));
+        reset_rebuild_rows_count();
+
+        apply_joined(
+            &mut interp,
+            &mut state,
+            &tui_opts,
+            Ok((1, Ok(dirty_status(gen, "b")))),
+        );
+        assert_eq!(rebuild_rows_count(), 1);
+        assert!(is_dirty(&state, "a") && is_dirty(&state, "b"));
+        assert!(interp.sched.collection_active(), "c and d still run");
+    }
+
+    /// The flush runs the follow-ups of every held checkout: the focused
+    /// checkout (moved onto a held one meanwhile) loads its pane, and a
+    /// new branch gets its PR lookup.
+    #[test]
+    fn a_flush_runs_the_follow_ups_of_the_held_checkouts() {
+        let mut state = batch_state();
+        let mut interp = Interpreter::with_cap(4);
+        let _ = state.due_pr_lookups();
+        let gen = start_collect(&mut interp, &state, &["a", "b"]);
+        let mut feature = repo("a", true);
+        feature.branch = "feature".into();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::RepoStatus {
+                gen,
+                path: "a".into(),
+                snap: Some(feature),
+                facts: Some(Default::default()),
+            },
+        );
+        assert!(interp.pr_badges.is_empty(), "held: no lookup yet");
+        assert!(interp.pane_req.is_none());
+
+        focus_repo(&mut state, "a");
+        apply(&mut interp, &mut state, dirty_status(gen, "b"));
+        assert_eq!(
+            interp.pr_badges,
+            VecDeque::from([(PathBuf::from("a"), "feature".to_string())])
+        );
+        assert_eq!(
+            interp.pane_req.as_ref().map(RightPaneRequest::target),
+            Some(RightPaneRequest::from_state(&state).target()),
+            "the focused held checkout moved: its pane reloads"
+        );
+    }
+}

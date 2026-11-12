@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use workspace_status_graph::LOADING_OLDER;
 
@@ -44,12 +44,12 @@ use super::action::{Action, Effect, ExternalDiffKind};
 use super::activity::{activity_targets, load_activity, ACTIVITY_DAYS};
 use super::anim::{BatchProgress, RemoteActivity};
 use super::app::{
-    apply_checkout_compute, apply_merge_compute, apply_one_repo_snapshot, apply_right_pane_load,
+    apply_checkout_compute, apply_merge_compute, apply_repo_snapshots, apply_right_pane_load,
     commit_diff_list, compute_checkout, compute_commit_diff, compute_commit_files,
     compute_compare_diff, compute_compare_range, compute_merge, compute_reload_repo,
     compute_worktree_compare_range, discover_config, drop_undiscovered_checkouts, filter_repo_set,
-    focused_repo_needs_pane, probe_compare_range, RightPaneLoad, RightPaneRequest, RightPaneTarget,
-    TuiOpts,
+    focused_repo_needs_pane, probe_compare_range, FocusedPaneBefore, RightPaneLoad,
+    RightPaneRequest, RightPaneTarget, TuiOpts,
 };
 use super::chrome::{is_idle_pull_status, STATUS_COPIED, STATUS_COPY_FAILED};
 use super::comments;
@@ -523,6 +523,56 @@ const PR_BADGE_LOOKUPS_MAX: usize = 2;
 /// Longest a PR change waits for the badge lookups to go idle (ms): a
 /// landing after that alerts it even while lookups keep coming.
 const PR_ALERT_WAIT_MS: u64 = 2000;
+
+/// Longest a held status result of a collect waits before the live loop
+/// applies the held batch ([`Interpreter::flush_held_status_if_due`]).
+///
+/// A collect holds its checkout results and applies them in one watch
+/// apply when it ends, so a tick costs one tree rebuild, not one per
+/// checkout. This bounds how stale the tree gets while one checkout's git
+/// is slow.
+pub(crate) const STATUS_BATCH_MAX_HOLD: Duration = Duration::from_millis(1000);
+
+/// One held status result: the checkout's new row (`None`: gone) and the
+/// disk facts its worker read.
+struct HeldStatus {
+    path: String,
+    snap: Option<RepoSnapshot>,
+    facts: Option<RepoFileFacts>,
+}
+
+/// Status results of the running collect that wait to be applied together.
+#[derive(Default)]
+struct StatusBatch {
+    held: Vec<HeldStatus>,
+    /// When the oldest held result landed. `None` while nothing is held.
+    since: Option<Instant>,
+}
+
+impl StatusBatch {
+    /// Hold the result of checkout `path`, landed at `now`. A held result
+    /// of the same path is replaced: the newer result wins.
+    fn hold(&mut self, now: Instant, status: HeldStatus) {
+        self.since.get_or_insert(now);
+        match self.held.iter_mut().find(|held| held.path == status.path) {
+            Some(slot) => *slot = status,
+            None => self.held.push(status),
+        }
+    }
+
+    /// Take every held result, oldest first, and empty the batch.
+    fn take(&mut self) -> Vec<HeldStatus> {
+        self.since = None;
+        std::mem::take(&mut self.held)
+    }
+
+    /// Time left until the oldest held result reaches
+    /// [`STATUS_BATCH_MAX_HOLD`] at `now`; `None` while nothing is held.
+    fn remain(&self, now: Instant) -> Option<Duration> {
+        self.since
+            .map(|since| STATUS_BATCH_MAX_HOLD.saturating_sub(now.saturating_duration_since(since)))
+    }
+}
 
 /// Live TTY launch after [`JobOutcome::DiffPrepared`].
 pub(crate) struct DiffLaunch {
@@ -1077,6 +1127,9 @@ pub(crate) struct Interpreter {
     /// What each job on a worker holds, by job id, so a job that panics
     /// still releases it ([`Self::apply_panic`]).
     job_releases: HashMap<u64, JobRelease>,
+    /// Status results of the running collect, held to be applied in one
+    /// watch apply ([`Self::flush_status_batch`]).
+    status_batch: StatusBatch,
     dirty: bool,
 }
 
@@ -1153,6 +1206,7 @@ impl Interpreter {
             running_write: None,
             fetch_claim: None,
             job_releases: HashMap::new(),
+            status_batch: StatusBatch::default(),
             dirty: false,
         }
     }
@@ -2378,32 +2432,24 @@ impl Interpreter {
                 if !self.sched.accept_repo_result(gen, &path) {
                     return;
                 }
-                let before_sigs = state.signatures.clone();
-                let before_snap = state.snapshot.clone();
-                let focused = state.focused_checkout_path();
-                if facts.is_some() {
-                    state.set_file_facts(&path, facts);
+                // A result of the running collect waits for the collect
+                // end; the focused checkout's result and one from outside
+                // the collect (single-checkout `r`) apply at once, with
+                // what is held before them.
+                let in_collect = self.sched.collection_gen() == Some(gen);
+                let focused = state.focused_checkout_path().as_deref() == Some(path.as_str());
+                self.status_batch.hold(
+                    Instant::now(),
+                    HeldStatus {
+                        path: path.clone(),
+                        snap,
+                        facts,
+                    },
+                );
+                if focused || !in_collect {
+                    self.flush_status_batch(state, opts);
                 }
-                apply_one_repo_snapshot(state, &path, snap);
-                if let Some(reload) = state.worktree_compare_reload(&path) {
-                    self.schedule(state, opts, reload, &Action::None);
-                }
-                if let Some(reload) = state.explorer_live_reload(&path) {
-                    self.schedule(state, opts, reload, &Action::None);
-                }
-                if let Some(relist) = state.explorer_status_relist(&path) {
-                    self.schedule(state, opts, relist, &Action::None);
-                }
-                self.queue_due_pr_lookups(state, opts);
-                self.note_repo_status_done(state, gen, &path);
-                if focused.as_deref() == Some(path.as_str())
-                    && focused_repo_needs_pane(&before_sigs, &before_snap, state, &path)
-                    && state.tabs.is_workspace()
-                {
-                    self.pane_req = Some(RightPaneRequest::from_state(state));
-                    self.sched.request_pane();
-                }
-                self.mark();
+                self.note_repo_status_done(state, opts, gen, &path);
             }
             JobOutcome::RightPane {
                 req_id,
@@ -2837,11 +2883,101 @@ impl Interpreter {
     // (`job_release.rs`): each job kind frees what it holds in one place.
 
     /// Checkout `path` of collect `gen` is done: the collect may finish.
-    /// The `r` reload that lands here counts every repo it found.
-    fn note_repo_status_done(&mut self, state: &AppState, gen: u64, path: &str) -> ApplyDecision {
+    /// A collect that ends applies its held status results
+    /// ([`Self::flush_status_batch`]); the `r` reload that lands here then
+    /// counts every repo it found.
+    fn note_repo_status_done(
+        &mut self,
+        state: &mut AppState,
+        opts: &TuiOpts,
+        gen: u64,
+        path: &str,
+    ) -> ApplyDecision {
         let decision = self.sched.note_repo_done(gen, path);
+        if matches!(
+            decision,
+            ApplyDecision::CollectionIdle | ApplyDecision::StartDiscover { .. }
+        ) {
+            self.flush_status_batch(state, opts);
+        }
         self.after_collection_step(state, &decision);
         decision
+    }
+
+    /// Apply every held status result with one snapshot rebuild and one
+    /// watch apply, then run their follow-ups: the worktree compare and
+    /// Explorer reloads of each checkout, the due PR lookups, and a pane
+    /// load when the focused checkout is in the batch and moved. Marks a
+    /// redraw only when something was held.
+    fn flush_status_batch(&mut self, state: &mut AppState, opts: &TuiOpts) {
+        let held = self.status_batch.take();
+        if held.is_empty() {
+            return;
+        }
+        let focused = state
+            .focused_checkout_path()
+            .filter(|focus| held.iter().any(|status| status.path == *focus));
+        let before = focused
+            .as_deref()
+            .map(|focus| FocusedPaneBefore::capture(state, focus));
+        let mut paths = Vec::with_capacity(held.len());
+        let mut changes = Vec::with_capacity(held.len());
+        for HeldStatus { path, snap, facts } in held {
+            if facts.is_some() {
+                state.set_file_facts(&path, facts);
+            }
+            paths.push(path.clone());
+            changes.push((path, snap));
+        }
+        apply_repo_snapshots(state, changes);
+        for path in &paths {
+            if let Some(reload) = state.worktree_compare_reload(path) {
+                self.schedule(state, opts, reload, &Action::None);
+            }
+            if let Some(reload) = state.explorer_live_reload(path) {
+                self.schedule(state, opts, reload, &Action::None);
+            }
+            if let Some(relist) = state.explorer_status_relist(path) {
+                self.schedule(state, opts, relist, &Action::None);
+            }
+        }
+        self.queue_due_pr_lookups(state, opts);
+        if let (Some(focus), Some(before)) = (focused, before) {
+            if focused_repo_needs_pane(&before, state, &focus) && state.tabs.is_workspace() {
+                self.pane_req = Some(RightPaneRequest::from_state(state));
+                self.sched.request_pane();
+            }
+        }
+        self.mark();
+    }
+
+    /// Milliseconds until the held status results reach
+    /// [`STATUS_BATCH_MAX_HOLD`] at `now` (`0` when overdue), or
+    /// `u64::MAX` while nothing is held. The live loop sleeps on it.
+    /// Rounded up, so the timer never wakes before the hold runs out.
+    pub(crate) fn status_hold_remain_ms(&self, now: Instant) -> u64 {
+        self.status_batch
+            .remain(now)
+            .map_or(u64::MAX, |left| left.as_micros().div_ceil(1000) as u64)
+    }
+
+    /// Apply the held status results once the oldest has waited
+    /// [`STATUS_BATCH_MAX_HOLD`] at `now`, then run the state-driven
+    /// follow-ups. The live loop calls it on its hold timer and after each
+    /// landed job, so one slow checkout cannot keep the rest of a collect
+    /// off the screen. The sync test path ([`Self::interpret_sync`]) never
+    /// calls it: there results apply only at the flush points.
+    pub(crate) fn flush_held_status_if_due(
+        &mut self,
+        state: &mut AppState,
+        opts: &TuiOpts,
+        now: Instant,
+    ) {
+        if self.status_batch.remain(now) != Some(Duration::ZERO) {
+            return;
+        }
+        self.flush_status_batch(state, opts);
+        self.after_change(state);
     }
 
     /// Follow-up once a collect step lands: an `r` reload that ended the

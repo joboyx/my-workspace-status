@@ -300,7 +300,9 @@ impl Interpreter {
             }
             JobRelease::RepoStatus { gen, path } => {
                 if self.sched.accept_repo_result(gen, &path) {
-                    let _ = self.note_repo_status_done(state, gen, &path);
+                    // A panicked last job still ends the collect and
+                    // applies the results it held.
+                    let _ = self.note_repo_status_done(state, opts, gen, &path);
                 }
                 None
             }

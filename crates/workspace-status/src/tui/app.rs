@@ -1301,19 +1301,39 @@ pub(crate) fn filter_repo_set(
 
 /// Apply one checkout result; other repos stay on the previous generation.
 ///
-/// The status worker's file facts of `path` go in first
-/// ([`AppState::set_file_facts`]); a gone checkout (`None`) drops its facts
-/// here. No file I/O.
+/// A one-item [`apply_repo_snapshots`]: a gone checkout (`None`) drops its
+/// file facts. No file I/O. The live path applies a collect's results as a
+/// batch; tests apply one checkout through this.
+#[cfg(test)]
 pub(crate) fn apply_one_repo_snapshot(
     state: &mut AppState,
     path: &str,
     snap: Option<crate::snapshot::RepoSnapshot>,
 ) {
-    if snap.is_none() {
-        state.set_file_facts(path, None);
+    apply_repo_snapshots(state, vec![(path.to_string(), snap)]);
+}
+
+/// Apply several checkout results with one snapshot rebuild and one watch
+/// apply; repos that no change names stay on the previous generation.
+///
+/// Each change is a checkout path and its new row; `None` removes the path
+/// and drops its file facts. The status worker's facts of a present row go
+/// in before this call ([`AppState::set_file_facts`]). An empty `changes`
+/// applies nothing. No file I/O.
+pub(crate) fn apply_repo_snapshots(
+    state: &mut AppState,
+    changes: Vec<(String, Option<crate::snapshot::RepoSnapshot>)>,
+) {
+    if changes.is_empty() {
+        return;
+    }
+    for (path, snap) in &changes {
+        if snap.is_none() {
+            state.set_file_facts(path, None);
+        }
     }
     let next =
-        crate::snapshot::replace_repo_in_snapshot(&state.snapshot, path, snap, state.show_hidden);
+        crate::snapshot::replace_repos_in_snapshot(&state.snapshot, changes, state.show_hidden);
     state.apply_watch_snapshot(next);
 }
 
@@ -1321,56 +1341,74 @@ pub(crate) fn apply_one_repo_snapshot(
 ///
 /// Streamed collect keeps unfinished paths from the new generation. Paths
 /// that vanished (worktree remove, deleted repo) never get a `None` result,
-/// so they must leave the snapshot when discovery completes.
+/// so they must leave the snapshot when discovery completes. All gone paths
+/// leave in one watch apply.
 pub(crate) fn drop_undiscovered_checkouts(state: &mut AppState, keep: &[String]) {
-    let gone: Vec<String> = state
+    let gone: Vec<(String, Option<crate::snapshot::RepoSnapshot>)> = state
         .snapshot
         .repos
         .iter()
         .map(|row| row.repo.clone())
         .filter(|path| !keep.iter().any(|k| k == path))
+        .map(|path| (path, None))
         .collect();
-    for path in gone {
-        apply_one_repo_snapshot(state, &path, None);
+    apply_repo_snapshots(state, gone);
+}
+
+/// What [`focused_repo_needs_pane`] compares for one checkout, captured
+/// before a status apply: its watch identity and its own tree signatures.
+///
+/// Holds only that checkout's part of the state, so a flush does not clone
+/// the whole snapshot or signature map.
+pub(crate) struct FocusedPaneBefore {
+    identity: Option<String>,
+    sigs: std::collections::BTreeMap<String, String>,
+}
+
+impl FocusedPaneBefore {
+    /// Capture checkout `repo` of `state` before an apply.
+    pub(crate) fn capture(state: &AppState, repo: &str) -> Self {
+        Self {
+            identity: checkout_identity_of(&state.snapshot, repo),
+            sigs: checkout_signatures(&state.signatures, repo),
+        }
     }
 }
 
-/// True when the focused checkout's identity or file signatures moved.
-pub(crate) fn focused_repo_needs_pane(
-    before_sigs: &std::collections::BTreeMap<String, String>,
-    before_snap: &WorkspaceSnapshot,
-    state: &AppState,
+/// Watch identity of checkout `repo` in `snapshot`, if it is there.
+fn checkout_identity_of(snapshot: &WorkspaceSnapshot, repo: &str) -> Option<String> {
+    snapshot
+        .repos
+        .iter()
+        .find(|row| row.repo == repo)
+        .map(super::watch::checkout_watch_identity)
+}
+
+/// The file rows and the repo / checkout chrome signatures of `repo`.
+fn checkout_signatures(
+    sigs: &std::collections::BTreeMap<String, String>,
     repo: &str,
-) -> bool {
-    let before_id = before_snap
-        .repos
-        .iter()
-        .find(|row| row.repo == repo)
-        .map(super::watch::checkout_watch_identity);
-    let after_id = state
-        .snapshot
-        .repos
-        .iter()
-        .find(|row| row.repo == repo)
-        .map(super::watch::checkout_watch_identity);
-    if before_id != after_id {
-        return true;
-    }
+) -> std::collections::BTreeMap<String, String> {
     let file = format!("file:{repo}:");
     let chrome_repo = format!("repo:{repo}");
     let chrome_co = format!("checkout:{repo}");
-    let before: std::collections::BTreeMap<_, _> = before_sigs
-        .iter()
+    sigs.iter()
         .filter(|(k, _)| k.starts_with(&file) || *k == &chrome_repo || *k == &chrome_co)
         .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    let after: std::collections::BTreeMap<_, _> = state
-        .signatures
-        .iter()
-        .filter(|(k, _)| k.starts_with(&file) || *k == &chrome_repo || *k == &chrome_co)
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    before != after
+        .collect()
+}
+
+/// True when the focused checkout's identity or file signatures moved
+/// since `before`.
+pub(crate) fn focused_repo_needs_pane(
+    before: &FocusedPaneBefore,
+    state: &AppState,
+    repo: &str,
+) -> bool {
+    if before.identity != checkout_identity_of(&state.snapshot, repo) {
+        return true;
+    }
+    before.sigs != checkout_signatures(&state.signatures, repo)
 }
 
 #[cfg(test)]
