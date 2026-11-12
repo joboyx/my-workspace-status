@@ -12,31 +12,35 @@ Temp roots and the git env come from `crates/workspace-status/tests/common/fixtu
 
 | Path | How | Where it executes |
 | --- | --- | --- |
-| PTY | `portable-pty` spawn + byte writes (keys, xterm SGR mouse) + `vt100` screen | `cargo test --workspace` on Unix. GitHub Actions `cargo` (Ubuntu) and `cargo-macos` jobs. |
+| PTY | `portable-pty` spawn + byte writes (keys, xterm SGR mouse) + `vt100` screen | `cargo test --workspace --all-features` on Unix. GitHub Actions `cargo` (Ubuntu) and `cargo-macos` jobs. |
 | Desktop | xfce4-terminal keys; xterm + XTEST `click 7` for wheel; `script(1)` typescript | GitHub Actions `tui-tty-desktop` job (`scripts/with-desktop-session.sh`). Local Linux with `DISPLAY`. |
 
 GitHub-hosted runners have no physical trackpad. The PTY path writes the same SGR bytes a terminal sends for trackpad hscroll (`CSI < 67` wheel right) into a live `event::read` loop. Motion-bit `CSI < 99` must not pan. The desktop wheel path uses xterm: VTE 0.76 does not report X11 buttons 6/7, so xfce never encodes SGR 67. xterm does, from a real XTEST `click 7`.
 
-Windows `cargo test --workspace` skips this crate (no PTY harness).
+Windows compiles this crate with no tests (no PTY harness).
 
 ## Commands
+
+The crate is a slow suite: its `[[test]]` entry in `crates/workspace-status/Cargo.toml` has `required-features = ["slow-tests"]`, so the local gate (`cargo test --workspace --locked`) skips it. CI runs it on every pull request (`--all-features` in the `cargo` and `cargo-macos` jobs). Locally, run the test you work on, not the whole crate on each change.
 
 From the repository root:
 
 ```bash
-cargo test --workspace
-cargo test --test tui_tty_e2e
+# One PTY test (name = file name under tests/tui_tty_e2e/human/):
+cargo test -p workspace-status --features slow-tests --test tui_tty_e2e <pty_name>
+# The whole crate, as CI runs it:
+cargo test -p workspace-status --features slow-tests --test tui_tty_e2e
 ```
 
 Desktop (Linux, needs `DISPLAY`, `xfce4-terminal`, `xterm`, `xdotool`, `script`):
 
 ```bash
 # Existing DISPLAY (local X):
-cargo test --test tui_tty_e2e -- --ignored --nocapture --test-threads=1
+cargo test -p workspace-status --features slow-tests --test tui_tty_e2e -- --ignored --nocapture --test-threads=1
 
 # No DISPLAY (same helper as GitHub Actions tui-tty-desktop):
 ./scripts/with-desktop-session.sh --auto -- \
-  cargo test --test tui_tty_e2e -- --ignored --nocapture --test-threads=1
+  cargo test -p workspace-status --features slow-tests --test tui_tty_e2e -- --ignored --nocapture --test-threads=1
 ```
 
 Packages (Debian/Ubuntu): `xvfb xfce4-terminal xterm xdotool dbus-x11 openbox`. `script` is util-linux. `scripts/with-desktop-session.sh` starts Xvfb when `DISPLAY` is unset, then dbus and Openbox (`scripts/openbox.xml`) so xdotool can focus the terminal. `scripts/capture-demo-stills.sh` sources the same helper. Do not invent a second screenshot pipeline. The Actions `tui-tty-desktop` job removes the image Chrome apt files (`google-chrome.list` and `google-chrome.sources`) before `apt-get update`. A hash mismatch on that index must not skip xfce or xterm.
@@ -96,7 +100,7 @@ To watch the real binary run, against the same fake forge or against a live one,
 - A comment save runs on a worker, so the screen updates before the file does. A test that reads the comment store in a live TUI uses `support::wait_comment_store`; the `comment saved` toast can be from an earlier save. A claim that nothing changed the store needs a read after exit, since quit flushes saves.
 - One nav key per wait. Outside text fields the event loop drops a queued copy of a held nav key (`h` `j` `k` `l`, arrows, page), so two copies in one read move once. Step with `support::step_cursor` / `support::step_until_changed` (wait for the cursor, pan, or scroll to change) and stop on the target paint. A text field types every key, nav letters included, so `support::type_palette_filter` writes the text in one write. Separate setup clicks from a double-click by cell (one column over), not by time.
 
-PTY tests are independent processes (own temp workspace + PTY). The temp workspace path is canonical (`unique_root`), like the root the binary resolves, so on macOS a path the binary passes on matches the fixture path under `/private/var`. `cargo test --test tui_tty_e2e` may parallelize them. Desktop stays `--test-threads=1` on one X display. No second screenshot pipeline. Desktop twins exist only where PTY cannot encode the input (XTEST wheel).
+PTY tests are independent processes (own temp workspace + PTY). The temp workspace path is canonical (`unique_root`), like the root the binary resolves, so on macOS a path the binary passes on matches the fixture path under `/private/var`. `cargo test -p workspace-status --features slow-tests --test tui_tty_e2e` may parallelize them. Desktop stays `--test-threads=1` on one X display. No second screenshot pipeline. Desktop twins exist only where PTY cannot encode the input (XTEST wheel).
 
 The tests live under `crates/workspace-status/tests/tui_tty_e2e/human/`. Adding a test does not edit this file.
 

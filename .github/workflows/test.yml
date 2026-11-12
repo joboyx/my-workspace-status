@@ -4,6 +4,9 @@
 # them, and the main ruleset should require each check by job name (list in
 # docs/architecture.md, Release gate). CI:
 # crates/workspace-status/tests/release_gate.rs.
+#
+# `--all-features` turns on the `slow-tests` feature: the PTY e2e and the
+# watch-tick load test run here, before merge, and not in the local gate.
 name: test
 
 on:
@@ -29,7 +32,7 @@ jobs:
           shared-key: test
           save-if: false
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   cargo:
     runs-on: ubuntu-latest
@@ -40,10 +43,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      - run: cargo test --workspace --locked
+      - run: cargo test --workspace --locked --all-features
 
   # Releases ship macOS and Windows builds (dist-workspace.toml targets), so
-  # the default suite also runs on those platforms before a release.
+  # the full suite also runs on those platforms before a release.
   cargo-macos:
     runs-on: macos-15
     timeout-minutes: 40
@@ -53,7 +56,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      - run: cargo test --workspace --locked
+      - run: cargo test --workspace --locked --all-features
 
   # The PTY e2e is Unix only: on Windows that test crate compiles with no
   # tests, so the explicit build step keeps every target compiling.
@@ -68,10 +71,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      - run: cargo build --workspace --all-targets --locked
+      - run: cargo build --workspace --all-targets --all-features --locked
       # Windows failures reproduce only here, so one run shows every failing
       # test binary.
-      - run: cargo test --workspace --locked --no-fail-fast
+      - run: cargo test --workspace --locked --all-features --no-fail-fast
 
   tui-tty-desktop:
     runs-on: ubuntu-latest
@@ -105,7 +108,7 @@ jobs:
       - name: Desktop TTY e2e (xfce keys + xterm XTEST wheel)
         run: |
           ./scripts/with-desktop-session.sh --auto -- \
-            cargo test --test tui_tty_e2e -- --ignored --nocapture --test-threads=1
+            cargo test -p workspace-status --features slow-tests --test tui_tty_e2e -- --ignored --nocapture --test-threads=1
 
   # Release a main push only after every check passed, and only while that
   # commit is still the tip of main. When a newer merge landed during the

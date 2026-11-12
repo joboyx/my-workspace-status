@@ -20,11 +20,11 @@ Commands run from the repository root (or a worktree root).
 | Layer | Proves | Command |
 | --- | --- | --- |
 | Unit | A rule or a parser: state ladders, JSON to state, layout math, glyph widths | `cargo test -p workspace-status --lib`, `cargo test -p workspace-status-graph` |
-| PTY e2e | The real binary on a PTY with live `event::read`: keys, painted text, fake `gh` / `glab`. Unix only | `cargo test -p workspace-status --test tui_tty_e2e` (add a test name to filter) |
-| Desktop `#[ignore]` | Real terminal emulator under `DISPLAY`: xfce keys, xterm wheel | `./scripts/with-desktop-session.sh --auto -- cargo test --test tui_tty_e2e -- --ignored --nocapture --test-threads=1` |
+| PTY e2e | The real binary on a PTY with live `event::read`: keys, painted text, fake `gh` / `glab`. Unix only. A `slow-tests` suite: CI runs it all, run the tests you work on | `cargo test -p workspace-status --features slow-tests --test tui_tty_e2e <pty_name>` |
+| Desktop `#[ignore]` | Real terminal emulator under `DISPLAY`: xfce keys, xterm wheel | `./scripts/with-desktop-session.sh --auto -- cargo test -p workspace-status --features slow-tests --test tui_tty_e2e -- --ignored --nocapture --test-threads=1` |
 | Live forge `#[ignore]` | Real `gh` / `glab` against public PRs on github.com and gitlab.com (`cli/cli`, `gitlab-org/cli`), read-only | `cargo test -p workspace-status --lib pull_request -- --ignored --nocapture` |
 | wsctl / driver | What a user sees, in states a test does not cover yet; live forge in the TUI | `wsctl` (below); `scripts/verify-tui.sh` for scenarios, mouse and forge calls |
-| CI gate | Everything CI runs | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked` |
+| Local gate | The fast suites; CI adds the `slow-tests` suites (`--all-features`) on the pull request | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`, `cargo test --workspace --locked` |
 
 Rule of thumb: a rule goes to a unit test. A key, a screen, or a forge answer that must keep working goes to a `pty_*` test. Drive the TUI to see a change with your own eyes, to reproduce a bug, to try a live forge, and to recheck after a rebase. Driver proof does not replace a test: behaviour that must stay needs a `pty_*` test too.
 
@@ -40,7 +40,7 @@ Before a repro or a sweep, report the five capabilities and stop (fail closed) w
 | Snapshot | `wsctl run -- --json` (`jq` to check it) | No headless checks; TUI checks can still run |
 | Clean up | `wsctl stop` prints `"stopped":true` | Do not start another run; report the live socket |
 
-`wsctl doctor` checks tmux, bash, a fresh binary, the run's private tmux session, the run's isolation and the pane size, and exits 1 when one fails. Without tmux, prove the behaviour with the PTY e2e instead: `cargo test -p workspace-status --test tui_tty_e2e <pty_name>`.
+`wsctl doctor` checks tmux, bash, a fresh binary, the run's private tmux session, the run's isolation and the pane size, and exits 1 when one fails. Without tmux, prove the behaviour with the PTY e2e instead: `cargo test -p workspace-status --features slow-tests --test tui_tty_e2e <pty_name>`.
 
 ## wsctl loop
 

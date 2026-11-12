@@ -150,27 +150,28 @@ fn no_check_job_sets_continue_on_error() {
 }
 
 #[test]
-fn default_suite_runs_on_every_released_os_family() {
+fn full_suite_runs_on_every_released_os_family() {
     // dist-workspace.toml ships Linux, macOS and Windows builds; each one
-    // gets the default suite before a release.
+    // gets the full suite, slow tests included (`--all-features` turns on
+    // `slow-tests`), before a merge and before a release.
     let all = jobs(TEST_YML);
     for (name, runner, commands) in [
         (
             "cargo",
             "runs-on: ubuntu-latest",
-            &["run: cargo test --workspace --locked"][..],
+            &["run: cargo test --workspace --locked --all-features"][..],
         ),
         (
             "cargo-macos",
             "runs-on: macos-15",
-            &["run: cargo test --workspace --locked"][..],
+            &["run: cargo test --workspace --locked --all-features"][..],
         ),
         (
             "cargo-windows",
             "runs-on: windows-latest",
             &[
-                "run: cargo build --workspace --all-targets --locked",
-                "run: cargo test --workspace --locked",
+                "run: cargo build --workspace --all-targets --all-features --locked",
+                "run: cargo test --workspace --locked --all-features",
             ][..],
         ),
     ] {
@@ -190,6 +191,28 @@ fn default_suite_runs_on_every_released_os_family() {
         job(&all, "cargo-windows").contains("core.autocrlf false"),
         "cargo-windows must check out with LF line endings; tests read checked-in text"
     );
+}
+
+#[test]
+fn lint_and_desktop_checks_cover_the_slow_tests() {
+    // The local gate skips the `slow-tests` suites; these required checks
+    // still lint them and run the desktop PTY tests.
+    let all = jobs(TEST_YML);
+    for (name, command) in [
+        (
+            "lint",
+            "run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+        ),
+        (
+            "tui-tty-desktop",
+            "cargo test -p workspace-status --features slow-tests --test tui_tty_e2e -- --ignored",
+        ),
+    ] {
+        assert!(
+            job(&all, name).contains(command),
+            "test.yml `{name}` must keep `{command}`"
+        );
+    }
 }
 
 /// Entries of a top-level `<key>:` block of a workflow, trimmed, in file order.

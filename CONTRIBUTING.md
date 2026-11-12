@@ -24,15 +24,15 @@ cargo run -p workspace-status -- --plain
 
 ## Checks
 
-CI runs this gate (jobs `lint` and `cargo`). Run all three before you push:
+Run the local gate before you push:
 
 ```bash
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-`--locked` fails when `Cargo.lock` does not match `Cargo.toml`, as it does in CI. The test run includes the real-TTY PTY e2e on Unix (`crates/workspace-status/tests/tui_tty_e2e/`). GitHub Actions also runs xfce4-terminal (keys) and xterm (XTEST wheel) under `tui-tty-desktop` via `scripts/with-desktop-session.sh`. See [docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md).
+`--locked` fails when `Cargo.lock` does not match `Cargo.toml`, as it does in CI. The local test run covers the fast suites only. The slow suites need the test-only `slow-tests` feature: the real-TTY PTY e2e on Unix (`crates/workspace-status/tests/tui_tty_e2e/`) and the watch-tick load test. CI runs them on the pull request (`cargo test --workspace --locked --all-features` in the `cargo`, `cargo-macos` and `cargo-windows` jobs). To run one locally, add `--features slow-tests` (commands: **Start here** in [AGENTS.md](./AGENTS.md)). GitHub Actions also runs xfce4-terminal (keys) and xterm (XTEST wheel) under `tui-tty-desktop` via `scripts/with-desktop-session.sh`. See [docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md).
 
 Commands to run one test: **Start here** in [AGENTS.md](./AGENTS.md).
 
@@ -44,7 +44,7 @@ Agents and CI must use `--plain` or `--json`. A TTY run without those flags open
 
 ## Pull requests
 
-Open a pull request against main and fill in the template (`.github/pull_request_template.md`). GitHub Actions runs `lint`, `cargo test --workspace --locked` on Linux, macOS and Windows (`cargo`, `cargo-macos`, `cargo-windows`) and the desktop TTY e2e job (`tui-tty-desktop`: xfce keys + xterm XTEST wheel) on pull requests and on main. A push to main is tagged and released only after all of them pass. See **Release gate** in [docs/architecture.md](./docs/architecture.md).
+Open a pull request against main and fill in the template (`.github/pull_request_template.md`). GitHub Actions runs `lint`, `cargo test --workspace --locked --all-features` (slow suites included) on Linux, macOS and Windows (`cargo`, `cargo-macos`, `cargo-windows`) and the desktop TTY e2e job (`tui-tty-desktop`: xfce keys + xterm XTEST wheel) on pull requests and on main. A push to main is tagged and released only after all of them pass. See **Release gate** in [docs/architecture.md](./docs/architecture.md).
 
 Keep `SAMPLE_OUTPUT.md` in sync with `crates/workspace-status/tests/snapshot_contract.rs` when output changes.
 
