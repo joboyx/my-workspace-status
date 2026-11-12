@@ -16,6 +16,19 @@ path = "src/bin/workspace-status.rs"
 name = "ws"
 path = "src/bin/ws.rs"
 
+# Slow suites, opt-in with `--features slow-tests`: CI runs them as pull
+# request checks, the local gate does not.
+[[test]]
+name = "tui_tty_e2e"
+path = "tests/tui_tty_e2e/main.rs"
+required-features = ["slow-tests"]
+
+[features]
+# Test only: turns on the slow test suites, the real-TTY PTY e2e
+# (`tests/tui_tty_e2e`) and the watch-tick load test (`tui/effect/load_tests.rs`).
+# No effect on the shipped binaries.
+slow-tests = []
+
 [dependencies]
 clap = { version = "4.5.23", features = ["derive"] }
 crossterm = "0.28.1"

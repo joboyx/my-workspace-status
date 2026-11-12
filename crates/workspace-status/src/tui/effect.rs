@@ -4525,3 +4525,6 @@ impl Interpreter {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "slow-tests"))]
+mod load_tests;
