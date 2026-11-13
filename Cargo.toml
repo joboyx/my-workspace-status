@@ -24,6 +24,15 @@ license = "Apache-2.0"
 repository = "https://github.com/joboyx/my-workspace-status"
 rust-version = "1.88"
 
+# Keep integer overflow checks on in release builds, as in dev and test.
+# Without them a `usize` subtraction that goes below zero wraps silently, and
+# a later `" ".repeat(n)` panics with `capacity overflow` inside the standard
+# library, with no `ws` file or line. With them the panic names the line of
+# the subtraction. The tests already run with the checks on, so code that
+# passes them does not rely on wrapping.
+[profile.release]
+overflow-checks = true
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"

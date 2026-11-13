@@ -34,6 +34,7 @@ fn version_label_for(version: &str, dev_build: Option<&str>) -> String {
 pub mod actions;
 pub mod cli;
 pub mod config;
+pub(crate) mod crash_report;
 pub mod discovery;
 pub mod file_index;
 pub mod file_search;

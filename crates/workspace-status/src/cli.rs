@@ -162,6 +162,7 @@ fn say(json: bool, line: &str) {
 }
 
 pub fn cli_main() -> ExitCode {
+    crate::crash_report::install_crash_report_hook();
     let cli = Cli::parse();
     if cli.update {
         return run_self_update();
