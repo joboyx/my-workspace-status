@@ -81,12 +81,19 @@ fn file_diff_header_split(right: &str) -> bool {
 fn documented_emoji_split_grid(screen: &str) -> bool {
     let right = right_pane(screen);
     let before = pane_line_containing(&right, BEFORE);
-    let emoji_row = pane_line_containing(&right, LEFT_MARK);
+    let mark_row = pane_line_containing(&right, LEFT_MARK);
+    let emoji_row = pane_line_containing(&right, &EMOJI.to_string());
     let after = pane_line_containing(&right, AFTER);
     let Some(before) = before else {
         return false;
     };
+    let Some(mark_row) = mark_row else {
+        return false;
+    };
     let Some(emoji_row) = emoji_row else {
+        return false;
+    };
+    let Some(mark_rule) = split_rule_col(mark_row) else {
         return false;
     };
     let Some(after) = after else {
@@ -110,11 +117,16 @@ fn documented_emoji_split_grid(screen: &str) -> bool {
         && file_diff_header_split(&right)
         && right.contains("UNSTAGED")
         && !right.contains("NEW")
-        && emoji_row.contains(EMOJI)
-        && emoji_row.contains(LEFT_MARK)
-        && emoji_row.contains(RIGHT_MARK)
+        && mark_row.contains(RIGHT_MARK)
+        && !mark_row.contains(BEFORE)
+        && !mark_row.contains(AFTER)
+        // Word wrap: the 30-emoji run is one word wider than the cell, so it
+        // starts on the wrap row under `EMOJI_LEFT` and breaks by glyph there.
+        && !mark_row.contains(EMOJI)
+        && !emoji_row.contains(LEFT_MARK)
         && !emoji_row.contains(BEFORE)
         && !emoji_row.contains(AFTER)
+        && mark_rule == emoji_rule
         && before.contains(BEFORE)
         && !before.contains(EMOJI)
         && !before.contains(LEFT_MARK)
@@ -124,6 +136,7 @@ fn documented_emoji_split_grid(screen: &str) -> bool {
         && before_rule == emoji_rule
         && after_rule == emoji_rule
         && display_width(before) <= usize::from(WIDE_COLS)
+        && display_width(mark_row) <= usize::from(WIDE_COLS)
         && display_width(emoji_row) <= usize::from(WIDE_COLS)
         && display_width(after) <= usize::from(WIDE_COLS)
         && status_row(screen).contains(" split")
@@ -141,9 +154,12 @@ fn documented_emoji_split_grid(screen: &str) -> bool {
 /// splits `EMOJI_LEFT` from the paired `hello world` cell.
 ///
 /// Use a 200-col PTY so split paints. Search `emoji-grid`. The
-/// deleted left cell is `EMOJI_LEFT` plus thirty `😀`. The RULE on that
-/// row must match `ASCII_BEFORE` / `ASCII_AFTER`. A no-op, an ASCII
-/// placeholder, a RULE shift, or a wrap fragment is red.
+/// deleted left cell is `EMOJI_LEFT` plus thirty `😀`. Word wrap keeps
+/// `EMOJI_LEFT` on the first row beside `hello world` and moves the emoji
+/// run (one word wider than the cell) to the wrap rows under it. The RULE
+/// on the `EMOJI_LEFT` row and on the first emoji row must match
+/// `ASCII_BEFORE` / `ASCII_AFTER`. A no-op, an ASCII placeholder, a RULE
+/// shift, or a wrap fragment is red.
 #[test]
 fn pty_emoji_diff_keeps_column_grid() {
     let (_root, workspace) = daily_workspace();
@@ -175,11 +191,8 @@ fn pty_emoji_diff_keeps_column_grid() {
 
     let screen = tui.screen();
     let right = right_pane(&screen);
-    let emoji_row = pane_line_containing(&right, LEFT_MARK).expect("EMOJI_LEFT row after hold");
-    assert!(
-        emoji_row.contains(EMOJI),
-        "left cell must keep the emoji glyph, not an ASCII placeholder:\n{right}"
-    );
+    let emoji_row = pane_line_containing(&right, &EMOJI.to_string())
+        .expect("left cell must keep the emoji glyph, not an ASCII placeholder");
     assert_eq!(
         split_rule_col(pane_line_containing(&right, BEFORE).expect("ASCII_BEFORE row")),
         split_rule_col(emoji_row),
