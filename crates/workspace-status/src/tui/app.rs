@@ -418,8 +418,10 @@ pub(crate) struct RightPaneRequest {
     follow_diff: Option<FollowDiffRequest>,
 }
 
-/// Identity of the row a [`RightPaneRequest`] would load. Used to detect
-/// cursor movement while pane git is in flight.
+/// Identity of the row a [`RightPaneRequest`] would load, plus the load
+/// options of the diff it would show. Used to detect cursor movement, and a
+/// whitespace or context toggle, while pane git is in flight: a result whose
+/// target differs from the live one is dropped and the pane loads again.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RightPaneTarget {
     in_graph: bool,
@@ -427,6 +429,9 @@ pub(crate) struct RightPaneTarget {
     graph_repo: Option<String>,
     follow_files: Option<(String, CommitFileSource)>,
     follow_diff: Option<(String, CommitFileSource, String)>,
+    /// Options of the diff the request shows (depth-2 commit-file diff, or
+    /// the focused file diff in the graph view); `None` when it shows none.
+    diff_opts: Option<DiffOpts>,
 }
 
 /// Inputs for a depth-2 commit-file diff loaded through [`RightPaneRequest`].
@@ -540,6 +545,12 @@ impl RightPaneRequest {
                 .follow_diff
                 .as_ref()
                 .map(|diff| (diff.repo.clone(), diff.source.clone(), diff.path.clone())),
+            // Same branch order as `compute`: the diff it would load.
+            diff_opts: match &self.follow_diff {
+                Some(follow) => Some(follow.opts),
+                None if self.in_graph && self.focused_file.is_some() => Some(self.file_diff_opts),
+                None => None,
+            },
         }
     }
 

@@ -21956,30 +21956,33 @@ fn whitespace_screen(state: &mut AppState) -> String {
 
 /// The diff header marks a diff loaded with `-w`. The mark follows the
 /// loaded content, not the live setting, so it matches the painted rows
-/// while a reload is in flight.
+/// while a reload is in flight. Boxed and flat panes.
 #[test]
 fn diff_header_marks_a_dash_w_load_from_the_content() {
-    for (setting, loaded, marked) in [
-        (false, false, false),
-        (true, true, true),
-        (true, false, false),
-        (false, true, true),
-    ] {
-        let mut state = two_pane_diff_state();
-        state.ignore_whitespace = setting;
-        let mut content = super::super::diff::DiffContent::from_lines(vec![
-            "@@ -1,1 +1,1 @@".into(),
-            "-old line".into(),
-            "+new line".into(),
-        ]);
-        content.ignore_whitespace = loaded;
-        state.set_diff("app".into(), "README.md".into(), content);
-        let text = whitespace_screen(&mut state);
-        assert_eq!(
-            text.contains("· -w"),
-            marked,
-            "setting={setting} loaded={loaded}:\n{text}"
-        );
+    for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+        for (setting, loaded, marked) in [
+            (false, false, false),
+            (true, true, true),
+            (true, false, false),
+            (false, true, true),
+        ] {
+            let mut state = two_pane_diff_state();
+            state.background = background;
+            state.ignore_whitespace = setting;
+            let mut content = super::super::diff::DiffContent::from_lines(vec![
+                "@@ -1,1 +1,1 @@".into(),
+                "-old line".into(),
+                "+new line".into(),
+            ]);
+            content.ignore_whitespace = loaded;
+            state.set_diff("app".into(), "README.md".into(), content);
+            let text = whitespace_screen(&mut state);
+            assert_eq!(
+                text.contains("· -w"),
+                marked,
+                "{background:?} setting={setting} loaded={loaded}:\n{text}"
+            );
+        }
     }
 }
 
@@ -22017,24 +22020,29 @@ fn an_all_whitespace_dash_w_diff_shows_no_diff_under_the_mark() {
 }
 
 /// An Explorer diff loaded with `-w` shows the header mark and a `-w`
-/// pill on the viewer status line, next to where `wrap` shows.
+/// pill on the viewer status line, next to where `wrap` shows. Boxed and
+/// flat panes.
 #[test]
 fn explorer_diff_loaded_with_dash_w_shows_the_pill() {
-    for loaded in [false, true] {
-        let mut state = two_pane_diff_state();
-        let mut content = super::super::diff::DiffContent::from_unified(
-            "@@ -1,1 +1,1 @@\n-old line\n+new line\n",
-        );
-        content.ignore_whitespace = loaded;
-        state.open_loaded_inner_diff("app", "README.md", content);
-        state.diff_wrap = true;
-        let text = whitespace_screen(&mut state);
-        let status = text
-            .lines()
-            .find(|line| line.contains("? help"))
-            .unwrap_or_else(|| panic!("viewer status line:\n{text}"));
-        assert!(status.contains("wrap"), "{status}");
-        assert_eq!(status.contains("-w"), loaded, "{status}");
-        assert_eq!(text.contains("· -w"), loaded, "{text}");
+    for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+        for loaded in [false, true] {
+            let case = format!("{background:?} loaded={loaded}");
+            let mut state = two_pane_diff_state();
+            state.background = background;
+            let mut content = super::super::diff::DiffContent::from_unified(
+                "@@ -1,1 +1,1 @@\n-old line\n+new line\n",
+            );
+            content.ignore_whitespace = loaded;
+            state.open_loaded_inner_diff("app", "README.md", content);
+            state.diff_wrap = true;
+            let text = whitespace_screen(&mut state);
+            let status = text
+                .lines()
+                .find(|line| line.contains("? help"))
+                .unwrap_or_else(|| panic!("{case}: viewer status line:\n{text}"));
+            assert!(status.contains("wrap"), "{case}: {status}");
+            assert_eq!(status.contains("-w"), loaded, "{case}: {status}");
+            assert_eq!(text.contains("· -w"), loaded, "{case}:\n{text}");
+        }
     }
 }
