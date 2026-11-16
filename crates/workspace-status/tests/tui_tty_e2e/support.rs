@@ -1767,6 +1767,53 @@ fn strip_csi(s: &str) -> String {
     out
 }
 
+/// Tokyo Night `diffAddBg`. Keep in sync with `tui/theme.rs` TOKYO_NIGHT.
+pub const DIFF_ADD_BG: (u8, u8, u8) = (0x3f, 0x4d, 0x39);
+/// Tokyo Night `diffAddWordBg`.
+pub const DIFF_ADD_WORD_BG: (u8, u8, u8) = (0x42, 0x68, 0x32);
+
+/// Expected background of each cell from a `mask`: `#` is `word_bg`, any
+/// other char `row_bg`.
+pub fn bgs_from_mask(
+    mask: &str,
+    row_bg: (u8, u8, u8),
+    word_bg: (u8, u8, u8),
+) -> Vec<Option<(u8, u8, u8)>> {
+    mask.chars()
+        .map(|c| Some(if c == '#' { word_bg } else { row_bg }))
+        .collect()
+}
+
+/// The first on-screen `add` needle paints the exact Tokyo Night add
+/// backgrounds of `add_mask` (see [`bgs_from_mask`]). The `del` needle
+/// follows `del_mask` with two different backgrounds read from the screen:
+/// the diff cursor can sit on the `-` line and tint its row and word
+/// backgrounds, so only the add line checks exact colours.
+pub fn assert_word_bgs(
+    tui: &PtySession,
+    (add, add_mask): (&str, &str),
+    (del, del_mask): (&str, &str),
+    when: &str,
+) {
+    let screen = tui.screen();
+    assert_eq!(
+        tui.first_needle_bgs(add),
+        Some(bgs_from_mask(add_mask, DIFF_ADD_BG, DIFF_ADD_WORD_BG)),
+        "{when}: word background of `{add}` must follow `{add_mask}`:\n{screen}"
+    );
+    let bgs = tui
+        .first_needle_bgs(del)
+        .unwrap_or_else(|| panic!("{when}: `{del}` missing:\n{screen}"));
+    let row_bg = bgs[del_mask.find(|c| c != '#').expect("an unmarked cell")].expect("row bg");
+    let word_bg = bgs[del_mask.find('#').expect("a marked cell")].expect("word bg");
+    assert_ne!(row_bg, word_bg, "{when}: `-` word bg differs:\n{screen}");
+    assert_eq!(
+        bgs,
+        bgs_from_mask(del_mask, row_bg, word_bg),
+        "{when}: word background of `{del}` must follow `{del_mask}`:\n{screen}"
+    );
+}
+
 /// OSC 8 links (URL, wrapped text) in the raw PTY output from byte `from` on.
 pub fn links_since(tui: &PtySession, from: usize) -> Vec<(String, String)> {
     let raw = tui.raw_output();

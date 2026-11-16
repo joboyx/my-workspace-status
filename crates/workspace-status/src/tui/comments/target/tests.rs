@@ -405,11 +405,13 @@ fn viewport_line_prefers_right_number() {
                 kind: DiffCellKind::Ctx,
                 text: "a".into(),
                 line_no: Some(1),
+                ..Default::default()
             },
             right: Some(DiffCell {
                 kind: DiffCellKind::Add,
                 text: "b".into(),
                 line_no: Some(2),
+                ..Default::default()
             }),
         },
     ];
@@ -1448,6 +1450,7 @@ fn entity_diff_side_from_painted_rows() {
             kind: DiffCellKind::Add,
             text: "+x".into(),
             line_no: Some(2),
+            ..Default::default()
         },
         right: None,
     };
@@ -1456,6 +1459,7 @@ fn entity_diff_side_from_painted_rows() {
             kind: DiffCellKind::Del,
             text: "-y".into(),
             line_no: Some(1),
+            ..Default::default()
         },
         right: None,
     };
@@ -1464,6 +1468,7 @@ fn entity_diff_side_from_painted_rows() {
             kind: DiffCellKind::Ctx,
             text: " z".into(),
             line_no: Some(1),
+            ..Default::default()
         },
         right: None,
     };

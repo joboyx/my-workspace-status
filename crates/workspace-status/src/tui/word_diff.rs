@@ -9,6 +9,8 @@
 //! Tokens are words (`alphanumeric` or `_` runs), whitespace runs, and
 //! single other chars. A token-level LCS marks the changed tokens. Ranges
 //! are byte ranges into the cell text and always land on char boundaries.
+//! The comparison reads each cell's word key, which keeps the columns of
+//! an expanded tab as `\t`, so a tab ↔ spaces change is not invisible.
 
 use std::ops::Range;
 
@@ -99,11 +101,22 @@ pub(crate) type WordChangeRanges = (Vec<Range<usize>>, Vec<Range<usize>>);
 /// Byte ranges of changed text on the old (del) and new (add) line.
 ///
 /// Returns `None` when the texts are identical, either text is over the
-/// character budget, the token diff is over the work budget, or the lines
+/// character budget, the token diff is over the work budget, the lines
 /// share no non-whitespace token (a full rewrite: the row background
-/// already says that). One side may be empty (a pure insertion or deletion
-/// inside the line). A change inside a word marks the whole word.
-pub(crate) fn word_change_ranges(old: &str, new: &str) -> Option<WordChangeRanges> {
+/// already says that), or nothing is marked. One side may be empty (a pure
+/// insertion or deletion inside the line). A change inside a word marks
+/// the whole word.
+///
+/// With `ignore_whitespace` (content loaded with `git diff -w`),
+/// whitespace tokens take no part in the comparison and are never marked:
+/// a changed, inserted, or removed whitespace run stays on the row
+/// background, and a whitespace-only difference returns `None`. Two
+/// changed words with only whitespace between them paint as two ranges.
+pub(crate) fn word_change_ranges(
+    old: &str,
+    new: &str,
+    ignore_whitespace: bool,
+) -> Option<WordChangeRanges> {
     if old == new
         || old.chars().count() > MAX_WORD_DIFF_CHARS
         || new.chars().count() > MAX_WORD_DIFF_CHARS
@@ -112,38 +125,48 @@ pub(crate) fn word_change_ranges(old: &str, new: &str) -> Option<WordChangeRange
     }
     let old_tokens = tokenize(old);
     let new_tokens = tokenize(new);
-    let old_text = |i: usize| &old[old_tokens[i].range.clone()];
-    let new_text = |j: usize| &new[new_tokens[j].range.clone()];
+    // Indices of the tokens that take part in the comparison.
+    let compared = |tokens: &[Token]| -> Vec<usize> {
+        (0..tokens.len())
+            .filter(|&i| !ignore_whitespace || tokens[i].class != TokenClass::Space)
+            .collect()
+    };
+    let old_seq = compared(&old_tokens);
+    let new_seq = compared(&new_tokens);
+    let old_text = |i: usize| &old[old_tokens[old_seq[i]].range.clone()];
+    let new_text = |j: usize| &new[new_tokens[new_seq[j]].range.clone()];
 
+    let common = old_seq.len().min(new_seq.len());
     let mut prefix = 0;
-    while prefix < old_tokens.len().min(new_tokens.len()) && old_text(prefix) == new_text(prefix) {
+    while prefix < common && old_text(prefix) == new_text(prefix) {
         prefix += 1;
     }
     let mut suffix = 0;
-    while suffix < old_tokens.len().min(new_tokens.len()) - prefix
-        && old_text(old_tokens.len() - 1 - suffix) == new_text(new_tokens.len() - 1 - suffix)
+    while suffix < common - prefix
+        && old_text(old_seq.len() - 1 - suffix) == new_text(new_seq.len() - 1 - suffix)
     {
         suffix += 1;
     }
-    let old_mid = prefix..old_tokens.len() - suffix;
-    let new_mid = prefix..new_tokens.len() - suffix;
+    let old_mid = prefix..old_seq.len() - suffix;
+    let new_mid = prefix..new_seq.len() - suffix;
     if old_mid.len().saturating_mul(new_mid.len()) > MAX_LCS_CELLS {
         return None;
     }
 
-    let mut old_kept = vec![false; old_tokens.len()];
-    let mut new_kept = vec![false; new_tokens.len()];
-    for i in (0..prefix).chain(old_mid.end..old_tokens.len()) {
-        old_kept[i] = true;
+    // Tokens left out of the comparison count as kept: never marked.
+    let mut old_kept = vec![true; old_tokens.len()];
+    let mut new_kept = vec![true; new_tokens.len()];
+    for i in old_mid.clone() {
+        old_kept[old_seq[i]] = false;
     }
-    for j in (0..prefix).chain(new_mid.end..new_tokens.len()) {
-        new_kept[j] = true;
+    for j in new_mid.clone() {
+        new_kept[new_seq[j]] = false;
     }
     for (i, j) in lcs_pairs(old_mid.len(), new_mid.len(), |i, j| {
         old_text(old_mid.start + i) == new_text(new_mid.start + j)
     }) {
-        old_kept[old_mid.start + i] = true;
-        new_kept[new_mid.start + j] = true;
+        old_kept[old_seq[old_mid.start + i]] = true;
+        new_kept[new_seq[new_mid.start + j]] = true;
     }
 
     let shares_text = old_tokens
@@ -153,10 +176,12 @@ pub(crate) fn word_change_ranges(old: &str, new: &str) -> Option<WordChangeRange
     if !shares_text {
         return None;
     }
-    Some((
-        changed_ranges(&old_tokens, &old_kept),
-        changed_ranges(&new_tokens, &new_kept),
-    ))
+    let old_ranges = changed_ranges(&old_tokens, &old_kept);
+    let new_ranges = changed_ranges(&new_tokens, &new_kept);
+    if old_ranges.is_empty() && new_ranges.is_empty() {
+        return None;
+    }
+    Some((old_ranges, new_ranges))
 }
 
 /// Index pairs `(i, j)` of one longest common subsequence of two sequences
@@ -287,8 +312,18 @@ fn row_pairs(rows: &[DiffRow]) -> Vec<RowPair> {
 /// pair a run of del rows with the run of add rows right after it, by
 /// index; extra rows of the longer run stay unpaired. A partner outside
 /// `visible` is still paired. Pairs fully outside `visible` are not
-/// computed.
-pub(crate) fn diff_word_ranges(rows: &[DiffRow], visible: Range<usize>) -> DiffWordRanges {
+/// computed. `ignore_whitespace` is the shown content's `-w` marker and
+/// goes to [`word_change_ranges`].
+///
+/// Each side compares its [`DiffCell::word_key`](super::diff::DiffCell::word_key),
+/// not the painted text: a tab and the spaces it expanded to differ, so a
+/// tab ↔ spaces change marks the expanded columns (unless whitespace is
+/// ignored).
+pub(crate) fn diff_word_ranges(
+    rows: &[DiffRow],
+    visible: Range<usize>,
+    ignore_whitespace: bool,
+) -> DiffWordRanges {
     let mut out = DiffWordRanges {
         left: vec![Vec::new(); rows.len()],
         right: vec![Vec::new(); rows.len()],
@@ -301,16 +336,20 @@ pub(crate) fn diff_word_ranges(rows: &[DiffRow], visible: Range<usize>) -> DiffW
         if !visible.contains(&del) && !visible.contains(&add) {
             continue;
         }
+        // Word keys keep tab columns as `\t`, so a tab that became spaces
+        // still differs; ranges into a key are ranges into the cell text.
         let old_text = match &rows[del] {
-            DiffRow::Line { left, .. } => left.text.as_str(),
+            DiffRow::Line { left, .. } => left.word_key(),
             _ => continue,
         };
         let new_text = match (&rows[add], pair) {
-            (DiffRow::Line { right: Some(r), .. }, RowPair::Split(_)) => r.text.as_str(),
-            (DiffRow::Line { left, .. }, RowPair::Inline { .. }) => left.text.as_str(),
+            (DiffRow::Line { right: Some(r), .. }, RowPair::Split(_)) => r.word_key(),
+            (DiffRow::Line { left, .. }, RowPair::Inline { .. }) => left.word_key(),
             _ => continue,
         };
-        let Some((old_ranges, new_ranges)) = word_change_ranges(old_text, new_text) else {
+        let Some((old_ranges, new_ranges)) =
+            word_change_ranges(old_text, new_text, ignore_whitespace)
+        else {
             continue;
         };
         out.left[del] = old_ranges;
@@ -332,7 +371,84 @@ mod tests {
             kind,
             text: text.to_string(),
             line_no: Some(1),
+            ..Default::default()
         }
+    }
+
+    /// Inline row built from the source line, the way the parser builds it
+    /// (tabs expanded, tab columns kept in the word key).
+    fn source_row(kind: DiffCellKind, line: &str) -> DiffRow {
+        DiffRow::Line {
+            left: DiffCell::from_source(kind, line, Some(1)),
+            right: None,
+        }
+    }
+
+    /// Word ranges of an inline del/add pair built from source lines.
+    fn source_pair(old: &str, new: &str, ignore_whitespace: bool) -> DiffWordRanges {
+        let rows = vec![
+            source_row(DiffCellKind::Del, old),
+            source_row(DiffCellKind::Add, new),
+        ];
+        diff_word_ranges(&rows, 0..rows.len(), ignore_whitespace)
+    }
+
+    const TAB_LINE: &str = "\tTab indented line";
+    const SPACES_LINE: &str = "    Tab indented line";
+
+    #[test]
+    fn tab_to_spaces_marks_the_indent_on_both_sides() {
+        let ranges = source_pair(TAB_LINE, SPACES_LINE, false);
+        assert_eq!(ranges.left(0), one(0, 4));
+        assert_eq!(ranges.left(1), one(0, 4));
+        // Spaces back to a tab marks the same columns.
+        let back = source_pair(SPACES_LINE, TAB_LINE, false);
+        assert_eq!(back.left(0), one(0, 4));
+        assert_eq!(back.left(1), one(0, 4));
+    }
+
+    #[test]
+    fn split_tab_to_spaces_marks_the_indent_on_both_sides() {
+        let rows = vec![split(
+            DiffCell::from_source(DiffCellKind::Del, TAB_LINE, Some(1)),
+            DiffCell::from_source(DiffCellKind::Add, SPACES_LINE, Some(1)),
+        )];
+        let ranges = diff_word_ranges(&rows, 0..1, false);
+        assert_eq!(ranges.left(0), one(0, 4));
+        assert_eq!(ranges.right(0), one(0, 4));
+    }
+
+    #[test]
+    fn tab_kept_as_tab_is_not_marked() {
+        let ranges = source_pair("\tlet a = 1;", "\tlet a = 2;", false);
+        assert_eq!(ranges.left(0), one(12, 13));
+        assert_eq!(ranges.left(1), one(12, 13));
+        let same = source_pair("\tlet a = 1;", "\tlet a = 1;  ", false);
+        assert!(same.left(0).is_empty());
+        assert_eq!(same.left(1), one(14, 16));
+    }
+
+    #[test]
+    fn tab_inside_a_line_vs_spaces_marks_the_expanded_columns() {
+        // `a\tb` paints `a   b`: the tab fills columns 1..4.
+        let ranges = source_pair("let a\t= 1;", "let a   = 1;", false);
+        assert_eq!(ranges.left(0), one(5, 8));
+        assert_eq!(ranges.left(1), one(5, 8));
+    }
+
+    #[test]
+    fn ignore_whitespace_leaves_tab_to_spaces_unmarked() {
+        for (old, new) in [(TAB_LINE, SPACES_LINE), ("let a\t= 1;", "let a   = 1;")] {
+            let ranges = source_pair(old, new, true);
+            assert!(
+                ranges.left(0).is_empty() && ranges.left(1).is_empty(),
+                "{old:?} {new:?}"
+            );
+        }
+        // A real word change next to the tab still marks the word only.
+        let ranges = source_pair("\tlet a = 1;", "    let a = 2;", true);
+        assert_eq!(ranges.left(0), one(12, 13));
+        assert_eq!(ranges.left(1), one(12, 13));
     }
 
     fn inline(kind: DiffCellKind, text: &str) -> DiffRow {
@@ -360,13 +476,13 @@ mod tests {
 
     /// Changed text on each side, for readable assertions.
     fn changed<'a>(old: &'a str, new: &'a str) -> (Vec<&'a str>, Vec<&'a str>) {
-        let (o, n) = word_change_ranges(old, new).expect("ranges");
+        let (o, n) = word_change_ranges(old, new, false).expect("ranges");
         (texts(old, &o), texts(new, &n))
     }
 
     #[test]
     fn one_changed_word_has_exact_ranges() {
-        let ranges = word_change_ranges("let count = 1;", "let total = 1;");
+        let ranges = word_change_ranges("let count = 1;", "let total = 1;", false);
         assert_eq!(ranges, Some((one(4, 9), one(4, 9))));
     }
 
@@ -397,7 +513,7 @@ mod tests {
 
     #[test]
     fn pure_insertion_leaves_old_side_empty() {
-        let ranges = word_change_ranges("foo(a)", "foo(a, b)");
+        let ranges = word_change_ranges("foo(a)", "foo(a, b)", false);
         assert_eq!(ranges, Some((vec![], one(5, 8))));
     }
 
@@ -407,11 +523,87 @@ mod tests {
         assert_eq!(changed("let x = 1;", "let x = 1;  "), (vec![], vec!["  "]));
     }
 
+    /// Changed text on each side with `ignore_whitespace` on.
+    fn changed_w<'a>(old: &'a str, new: &'a str) -> (Vec<&'a str>, Vec<&'a str>) {
+        let (o, n) = word_change_ranges(old, new, true).expect("ranges");
+        (texts(old, &o), texts(new, &n))
+    }
+
+    const ONE_WORD: &str = "The real change on this line is one word, also extra spaces are added.";
+    const TWO_WORDS: &str =
+        "The real change on this line is two words, also  extra spaces are added.";
+
+    #[test]
+    fn ignore_whitespace_marks_only_the_real_change() {
+        assert_eq!(
+            changed_w(ONE_WORD, TWO_WORDS),
+            (vec!["one", "word"], vec!["two", "words"])
+        );
+        // Without the flag the widened space is marked too.
+        assert_eq!(
+            changed(ONE_WORD, TWO_WORDS),
+            (vec!["one", "word", " "], vec!["two", "words", "  "])
+        );
+    }
+
+    #[test]
+    fn ignore_whitespace_skips_whitespace_inserted_on_one_side() {
+        assert_eq!(changed_w("call(a,b)", "call(a, c)"), (vec!["b"], vec!["c"]));
+        assert_eq!(
+            changed_w("  let x = old;", "let x = new;   "),
+            (vec!["old"], vec!["new"])
+        );
+        // Without the flag the inserted space joins the changed word.
+        assert_eq!(changed("call(a,b)", "call(a, c)"), (vec!["b"], vec![" c"]));
+    }
+
+    #[test]
+    fn ignore_whitespace_whitespace_only_change_has_no_ranges() {
+        for (old, new) in [
+            ("a  b", "a b"),
+            ("x = 1;", "    x = 1;"),
+            ("x = 1;", "x = 1;  "),
+            ("x\t= 1;", "x = 1;"),
+        ] {
+            assert_eq!(word_change_ranges(old, new, true), None, "{old:?} {new:?}");
+        }
+    }
+
+    /// Whitespace between two changed words is never marked, so the words
+    /// paint as two ranges, even when that whitespace changed too.
+    #[test]
+    fn ignore_whitespace_splits_changed_words_at_whitespace() {
+        let (old, new) = ("a x y b", "a X  Y b");
+        let (o, n) = word_change_ranges(old, new, true).expect("ranges");
+        assert_eq!(o, vec![2..3, 4..5]);
+        assert_eq!(n, vec![2..3, 5..6]);
+        assert_eq!(changed(old, new), (vec!["x y"], vec!["X  Y"]));
+    }
+
+    #[test]
+    fn ignore_whitespace_keeps_the_shared_text_rule() {
+        assert_eq!(word_change_ranges("alpha beta", "gamma  delta", true), None);
+    }
+
+    #[test]
+    fn diff_word_ranges_passes_the_flag_on() {
+        let rows = vec![
+            inline(DiffCellKind::Del, "let a =  1;"),
+            inline(DiffCellKind::Add, "let a = 2;"),
+        ];
+        let ignored = diff_word_ranges(&rows, 0..rows.len(), true);
+        assert_eq!(ignored.left(0), one(9, 10));
+        assert_eq!(ignored.left(1), one(8, 9));
+        let shown = diff_word_ranges(&rows, 0..rows.len(), false);
+        assert_eq!(shown.left(0), one(7, 10));
+        assert_eq!(shown.left(1), one(7, 9));
+    }
+
     #[test]
     fn emoji_ranges_stay_on_char_boundaries() {
         let old = "status ✅ ok";
         let new = "status ❌ ok";
-        let (o, n) = word_change_ranges(old, new).expect("ranges");
+        let (o, n) = word_change_ranges(old, new, false).expect("ranges");
         assert_eq!(texts(old, &o), vec!["✅"]);
         assert_eq!(texts(new, &n), vec!["❌"]);
         for r in &o {
@@ -454,19 +646,19 @@ mod tests {
 
     #[test]
     fn identical_lines_have_no_ranges() {
-        assert_eq!(word_change_ranges("same line", "same line"), None);
+        assert_eq!(word_change_ranges("same line", "same line", false), None);
     }
 
     #[test]
     fn total_rewrite_has_no_ranges() {
-        assert_eq!(word_change_ranges("alpha beta", "gamma delta"), None);
+        assert_eq!(word_change_ranges("alpha beta", "gamma delta", false), None);
     }
 
     #[test]
     fn over_char_budget_has_no_ranges() {
         let old = format!("{} a", "x".repeat(MAX_WORD_DIFF_CHARS));
         let new = format!("{} b", "x".repeat(MAX_WORD_DIFF_CHARS));
-        assert_eq!(word_change_ranges(&old, &new), None);
+        assert_eq!(word_change_ranges(&old, &new, false), None);
     }
 
     #[test]
@@ -474,7 +666,7 @@ mod tests {
         // ~1000 tokens per side between a shared prefix and suffix.
         let old = format!("start {} end", "a ".repeat(500));
         let new = format!("start {} end", "b,".repeat(500));
-        assert_eq!(word_change_ranges(&old, &new), None);
+        assert_eq!(word_change_ranges(&old, &new, false), None);
     }
 
     #[test]
@@ -487,7 +679,7 @@ mod tests {
             inline(DiffCellKind::Add, "let a = 2;"),
             inline(DiffCellKind::Add, "let b = 3;"),
         ];
-        let ranges = diff_word_ranges(&rows, 0..rows.len());
+        let ranges = diff_word_ranges(&rows, 0..rows.len(), false);
         assert_eq!(ranges.left(1), one(8, 9));
         assert_eq!(ranges.left(2), one(8, 9));
         assert!(ranges.left(3).is_empty());
@@ -512,7 +704,7 @@ mod tests {
                 cell(DiffCellKind::Empty, ""),
             ),
         ];
-        let ranges = diff_word_ranges(&rows, 0..rows.len());
+        let ranges = diff_word_ranges(&rows, 0..rows.len(), false);
         assert_eq!(ranges.left(1), one(8, 9));
         assert_eq!(ranges.right(1), one(8, 9));
         for row in [0, 2] {
@@ -528,7 +720,7 @@ mod tests {
             inline(DiffCellKind::Meta, "\\ No newline at end of file"),
             inline(DiffCellKind::Add, "let a = 2;"),
         ];
-        let ranges = diff_word_ranges(&rows, 0..rows.len());
+        let ranges = diff_word_ranges(&rows, 0..rows.len(), false);
         for row in 0..rows.len() {
             assert!(ranges.left(row).is_empty());
         }
@@ -543,7 +735,7 @@ mod tests {
             inline(DiffCellKind::Del, "let a = 1;"),
             inline(DiffCellKind::Ctx, "ctx"),
         ];
-        let ranges = diff_word_ranges(&rows, 0..rows.len());
+        let ranges = diff_word_ranges(&rows, 0..rows.len(), false);
         for row in 0..rows.len() {
             assert!(ranges.left(row).is_empty());
         }
@@ -557,7 +749,7 @@ mod tests {
             inline(DiffCellKind::Add, "let a = 2;"),
             inline(DiffCellKind::Add, "let b = 2;"),
         ];
-        let ranges = diff_word_ranges(&rows, 3..4);
+        let ranges = diff_word_ranges(&rows, 3..4, false);
         assert_eq!(ranges.left(3), one(8, 9));
         assert_eq!(ranges.left(1), one(8, 9));
         // Pair 0↔2 lies fully outside `visible`.
@@ -577,7 +769,7 @@ mod tests {
                 cell(DiffCellKind::Add, "let b = 2;"),
             ),
         ];
-        let ranges = diff_word_ranges(&rows, 1..2);
+        let ranges = diff_word_ranges(&rows, 1..2, false);
         assert!(ranges.left(0).is_empty());
         assert!(ranges.right(0).is_empty());
         assert_eq!(ranges.left(1), one(8, 9));

@@ -6,20 +6,19 @@ use crate::harness::PtySession;
 use crate::seed::{daily_workspace, git};
 use crate::support::{
     no_wrong_overlays, panes_tree_focused_diff_unfocused, right_pane, title_has_files,
-    tree_cursor_on, tree_has, GIT_WAIT,
+    tree_cursor_on, tree_has, DIFF_ADD_BG, DIFF_ADD_WORD_BG, GIT_WAIT,
 };
 
 const FILE: &str = "pack.json";
 const ADD_MARK: &str = "alpha-syntax";
 const DEL_MARK: &str = "old-name";
-/// Tokyo Night `palette.added` / `deleted` / `diffAddBg` / `diffDelBg`.
-/// Keep in sync with `tui/theme.rs` TOKYO_NIGHT.
+/// Tokyo Night `palette.added` / `deleted` / `diffDelBg`. Keep in sync
+/// with `tui/theme.rs` TOKYO_NIGHT (`diffAddBg` / `diffAddWordBg` come
+/// from the shared support module).
 const ADDED: (u8, u8, u8) = (0x9e, 0xce, 0x6a);
 const DELETED: (u8, u8, u8) = (0xf7, 0x76, 0x8e);
-const DIFF_ADD_BG: (u8, u8, u8) = (0x3f, 0x4d, 0x39);
 const DIFF_DEL_BG: (u8, u8, u8) = (0x58, 0x34, 0x43);
-/// Tokyo Night `diffAddWordBg` / `diffDelWordBg`.
-const DIFF_ADD_WORD_BG: (u8, u8, u8) = (0x42, 0x68, 0x32);
+/// Tokyo Night `diffDelWordBg`.
 const DIFF_DEL_WORD_BG: (u8, u8, u8) = (0x81, 0x3d, 0x59);
 
 /// Tracked JSON with one replaced string and one replaced number.

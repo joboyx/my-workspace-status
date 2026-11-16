@@ -10,11 +10,11 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
-use crate::file_index::paintable_line;
+use crate::file_index::{paintable_line, push_paintable_char};
 use crate::git::{exec_git_stdout_untrimmed, git_diff_args, DiffOpts};
 use crate::snapshot::FileChange;
 
-use super::search::wrap_col_starts;
+use super::search::{word_wrap_col_starts, wrap_col_starts};
 use super::split::{side_by_side_column_widths, DiffMode, DIFF_CURSOR_BAR_COLS};
 use super::tree::list_viewport_start;
 
@@ -50,17 +50,19 @@ pub enum DiffSection {
 }
 
 /// Cell kind for one side of a diff row.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DiffCellKind {
     Add,
     Del,
     Ctx,
     Meta,
+    /// The blank side of an unpaired split row (and the default).
+    #[default]
     Empty,
 }
 
 /// One side of a painted diff line.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DiffCell {
     pub kind: DiffCellKind,
     /// Paintable line text ([`paintable_line`]): the `\r` of a CRLF line
@@ -69,6 +71,54 @@ pub struct DiffCell {
     pub text: String,
     /// 1-based line number in the gutter (`None` for meta / empty).
     pub line_no: Option<u32>,
+    /// [`Self::text`] with each column that a source tab expanded to
+    /// written as `\t` instead of a space; `None` when the line has no tab.
+    ///
+    /// Same byte length and char boundaries as `text`, so byte ranges
+    /// into it are ranges into `text`. Only the word highlight reads it
+    /// ([`Self::word_key`]), so a tab that became spaces still differs.
+    pub tab_key: Option<String>,
+}
+
+impl DiffCell {
+    /// Cell for one parsed diff line `line` (sign already removed).
+    ///
+    /// `text` is the paintable line: a trailing CRLF `\r` dropped, then
+    /// [`paintable_line`]. A line with a tab also gets
+    /// [`Self::tab_key`].
+    pub(crate) fn from_source(kind: DiffCellKind, line: &str, line_no: Option<u32>) -> Self {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let (text, tab_key) = if line.contains('\t') {
+            let mut text = String::with_capacity(line.len());
+            let mut key = String::with_capacity(line.len());
+            let mut col = 0usize;
+            for ch in line.chars() {
+                let start = text.len();
+                push_paintable_char(&mut text, &mut col, ch);
+                if ch == '\t' {
+                    key.extend(std::iter::repeat_n('\t', text.len() - start));
+                } else {
+                    key.push_str(&text[start..]);
+                }
+            }
+            (text, Some(key))
+        } else {
+            (paintable_line(line), None)
+        };
+        DiffCell {
+            kind,
+            text,
+            line_no,
+            tab_key,
+        }
+    }
+
+    /// Text the word highlight compares: [`Self::tab_key`] when the line
+    /// had a tab, else [`Self::text`]. Byte ranges into it are ranges into
+    /// `text`.
+    pub(crate) fn word_key(&self) -> &str {
+        self.tab_key.as_deref().unwrap_or(&self.text)
+    }
 }
 
 /// One painted body row (section, hunk header, or inline / split line).
@@ -489,11 +539,7 @@ fn parse_hunk_count(token: &str) -> u32 {
 }
 
 fn empty_cell() -> DiffCell {
-    DiffCell {
-        kind: DiffCellKind::Empty,
-        text: String::new(),
-        line_no: None,
-    }
+    DiffCell::default()
 }
 
 /// Paintable text of one diff line or hunk header: the `\r` that ends a
@@ -507,11 +553,7 @@ fn cell_from_line(line: &ParsedLine, side: Side) -> DiffCell {
         Side::Old => line.old_no.or(line.new_no),
         Side::New => line.new_no.or(line.old_no),
     };
-    DiffCell {
-        kind: line.kind,
-        text: paintable_diff_line(&line.text),
-        line_no,
-    }
+    DiffCell::from_source(line.kind, &line.text, line_no)
 }
 
 enum Side {
@@ -1540,6 +1582,10 @@ pub fn row_search_text(row: &DiffRow) -> String {
 ///
 /// Split rows use the taller side. Continuation rows are extra visual
 /// lines of the same logical row (blank gutter / sign on those lines).
+/// Code cells count word-wrap rows ([`word_wrap_col_starts`], as
+/// `CellRows` paints them); section labels and error text count
+/// glyph-wrap rows ([`wrap_col_starts`], as their paint wraps them). A
+/// hunk header is always one row: paint clips it at the pane edge.
 pub fn diff_row_visual_height(
     row: &DiffRow,
     content_w: u16,
@@ -1553,18 +1599,17 @@ pub fn diff_row_visual_height(
             let text = format!(" {} ", section_header(*section));
             wrap_col_starts(&text, width).len().max(1)
         }
-        DiffRow::Hunk { text } | DiffRow::Error { text } => {
-            wrap_col_starts(text, width).len().max(1)
-        }
+        DiffRow::Hunk { .. } => 1,
+        DiffRow::Error { text } => wrap_col_starts(text, width).len().max(1),
         DiffRow::Line { left, right } if split && right.is_some() => {
             let cols = side_by_side_column_widths(content_w, split_fraction);
-            let left_h = wrap_col_starts(
+            let left_h = word_wrap_col_starts(
                 &left.text,
                 cell_code_width(cols.left_width as usize, gutter_with_mark),
             )
             .len()
             .max(1);
-            let right_h = wrap_col_starts(
+            let right_h = word_wrap_col_starts(
                 &right.as_ref().unwrap().text,
                 cell_code_width(cols.right_width as usize, gutter_with_mark),
             )
@@ -1573,7 +1618,7 @@ pub fn diff_row_visual_height(
             left_h.max(right_h)
         }
         DiffRow::Line { left, .. } => {
-            wrap_col_starts(&left.text, cell_code_width(width, gutter_with_mark))
+            word_wrap_col_starts(&left.text, cell_code_width(width, gutter_with_mark))
                 .len()
                 .max(1)
         }

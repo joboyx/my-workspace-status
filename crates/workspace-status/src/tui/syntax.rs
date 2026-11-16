@@ -253,6 +253,9 @@ pub(crate) struct DiffSyntaxKey {
     pub bgs: DiffBackgrounds,
     /// Painted diff-text identity. Must change when unified text changes.
     pub cache_id: u64,
+    /// The shown content's `-w` marker (`DiffContent::ignore_whitespace`):
+    /// word runs skip whitespace while it is on.
+    pub ignore_whitespace: bool,
 }
 
 /// Last computed syntax spans and the rows they cover. Paint reuses the
@@ -270,7 +273,8 @@ pub(crate) struct CachedDiffSyntax {
 /// Each hunk/section is an independent parse stream. Lines above the
 /// viewport in the same hunk still feed the highlighter so multiline
 /// tokens stay correct, but those rows do not store spans. Visible paired
-/// add/del cells get their changed-word runs flagged.
+/// add/del cells get their changed-word runs flagged; with
+/// `ignore_whitespace` those runs skip whitespace ([`diff_word_ranges`]).
 pub(crate) fn highlight_diff_rows(
     path: &str,
     rows: &[DiffRow],
@@ -278,6 +282,7 @@ pub(crate) fn highlight_diff_rows(
     fallback: Color,
     bgs: DiffBackgrounds,
     visible: Range<usize>,
+    ignore_whitespace: bool,
 ) -> DiffSyntaxSpans {
     let n = rows.len();
     let visible = visible.start.min(n)..visible.end.min(n);
@@ -286,7 +291,7 @@ pub(crate) fn highlight_diff_rows(
     if visible.is_empty() {
         return DiffSyntaxSpans { left, right };
     }
-    let words = diff_word_ranges(rows, visible.clone());
+    let words = diff_word_ranges(rows, visible.clone(), ignore_whitespace);
     let finish = |cell: &DiffCell, raw: Vec<(String, Color)>, ranges: &[Range<usize>]| {
         resolve_spans(
             raw,
@@ -437,6 +442,7 @@ pub(crate) fn cached_highlight_diff_rows(
         key.fallback,
         key.bgs,
         window.clone(),
+        key.ignore_whitespace,
     ));
     *cache = Some(CachedDiffSyntax {
         key,
@@ -845,6 +851,7 @@ mod tests {
                 kind,
                 text: text.into(),
                 line_no: Some(line_no),
+                ..Default::default()
             },
             right: None,
         }
@@ -858,6 +865,7 @@ mod tests {
             FALLBACK,
             BGS,
             0..rows.len(),
+            false,
         )
     }
 
@@ -937,6 +945,7 @@ mod tests {
                     kind: DiffCellKind::Ctx,
                     text: " {".into(),
                     line_no: Some(1),
+                    ..Default::default()
                 },
                 right: None,
             },
@@ -945,6 +954,7 @@ mod tests {
                     kind: DiffCellKind::Add,
                     text: r#"  "name": "alpha-syntax""#.into(),
                     line_no: Some(2),
+                    ..Default::default()
                 },
                 right: None,
             },
@@ -1028,6 +1038,7 @@ mod tests {
             kind,
             text: text.into(),
             line_no: Some(1),
+            ..Default::default()
         };
         let rows = vec![DiffRow::Line {
             left: cell(DiffCellKind::Del, "let total = price * qty;"),
@@ -1094,7 +1105,8 @@ mod tests {
                 add_word: pal.diff_add_word_bg,
                 del_word: pal.diff_del_word_bg,
             };
-            let spans = highlight_diff_rows("calc.rs", &rows, id, pal.repo, bgs, 0..rows.len());
+            let spans =
+                highlight_diff_rows("calc.rs", &rows, id, pal.repo, bgs, 0..rows.len(), false);
             for (row, row_bg, word_bg) in [(0, bgs.del, bgs.del_word), (1, bgs.add, bgs.add_word)] {
                 let line = spans.left(row);
                 assert!(line.iter().any(|s| s.word), "{id:?} row {row}: {line:?}");
@@ -1291,6 +1303,7 @@ mod tests {
             fallback: FALLBACK,
             bgs: BGS,
             cache_id,
+            ignore_whitespace: false,
         }
     }
 
@@ -1317,6 +1330,7 @@ mod tests {
             FALLBACK,
             BGS,
             visible.clone(),
+            false,
         );
         let fed = take_syntax_fed_lines();
         assert!(
@@ -1419,6 +1433,7 @@ mod tests {
                 FALLBACK,
                 BGS,
                 visible.clone(),
+                false,
             );
             for row in visible.clone() {
                 assert_eq!(cached.left(row), bare.left(row), "{visible:?} row {row}");
@@ -1496,6 +1511,36 @@ mod tests {
         assert!(!Arc::ptr_eq(&first, &reloaded));
         assert_eq!(word_texts(reloaded.left(0)), vec!["ttlMs"]);
         assert_eq!(word_texts(reloaded.left(1)), vec!["maxMs"]);
+    }
+
+    /// A `-w` load of the same text (same `cache_id`) must not reuse the
+    /// word runs painted without `-w`, and the other way round.
+    #[test]
+    fn cached_word_runs_refresh_when_ignore_whitespace_flips() {
+        let rows = vec![
+            line_row(DiffCellKind::Del, r#"  "ttlMs":  5000"#, 1),
+            line_row(DiffCellKind::Add, r#"  "ttlMs": 2000"#, 1),
+        ];
+        let visible = 0..rows.len();
+        let key = |ignore_whitespace| DiffSyntaxKey {
+            ignore_whitespace,
+            ..syntax_key(5)
+        };
+        let words = |spans: &DiffSyntaxSpans| {
+            (
+                word_texts(spans.left(0)).concat(),
+                word_texts(spans.left(1)).concat(),
+            )
+        };
+        let mut cache = None;
+        let shown = cached_highlight_diff_rows(&mut cache, key(false), &rows, visible.clone());
+        assert_eq!(words(&shown), ("  5000".into(), " 2000".into()));
+        let ignored = cached_highlight_diff_rows(&mut cache, key(true), &rows, visible.clone());
+        assert!(!Arc::ptr_eq(&shown, &ignored), "-w must miss the cache");
+        assert_eq!(words(&ignored), ("5000".into(), "2000".into()));
+        let again = cached_highlight_diff_rows(&mut cache, key(false), &rows, visible);
+        assert!(!Arc::ptr_eq(&ignored, &again), "back to shown must miss");
+        assert_eq!(words(&again), ("  5000".into(), " 2000".into()));
     }
 
     #[test]
@@ -1582,24 +1627,18 @@ mod tests {
                 kind: DiffCellKind::Del,
                 text: " {".into(),
                 line_no: Some(1),
+                ..Default::default()
             },
-            right: Some(DiffCell {
-                kind: DiffCellKind::Empty,
-                text: String::new(),
-                line_no: None,
-            }),
+            right: Some(DiffCell::default()),
         };
         let later = DiffRow::Line {
             left: DiffCell {
                 kind: DiffCellKind::Del,
                 text: r#"  "name": "alpha-syntax""#.into(),
                 line_no: Some(20),
+                ..Default::default()
             },
-            right: Some(DiffCell {
-                kind: DiffCellKind::Empty,
-                text: String::new(),
-                line_no: None,
-            }),
+            right: Some(DiffCell::default()),
         };
         let within = vec![open.clone(), later.clone()];
         let across = vec![
