@@ -1541,8 +1541,9 @@ pub fn row_search_text(row: &DiffRow) -> String {
 /// Split rows use the taller side. Continuation rows are extra visual
 /// lines of the same logical row (blank gutter / sign on those lines).
 /// Code cells count word-wrap rows ([`word_wrap_col_starts`], as
-/// `CellRows` paints them); section labels and hunk / error text count
-/// glyph-wrap rows ([`wrap_col_starts`], as their paint wraps them).
+/// `CellRows` paints them); section labels and error text count
+/// glyph-wrap rows ([`wrap_col_starts`], as their paint wraps them). A
+/// hunk header is always one row: paint clips it at the pane edge.
 pub fn diff_row_visual_height(
     row: &DiffRow,
     content_w: u16,
@@ -1556,9 +1557,8 @@ pub fn diff_row_visual_height(
             let text = format!(" {} ", section_header(*section));
             wrap_col_starts(&text, width).len().max(1)
         }
-        DiffRow::Hunk { text } | DiffRow::Error { text } => {
-            wrap_col_starts(text, width).len().max(1)
-        }
+        DiffRow::Hunk { .. } => 1,
+        DiffRow::Error { text } => wrap_col_starts(text, width).len().max(1),
         DiffRow::Line { left, right } if split && right.is_some() => {
             let cols = side_by_side_column_widths(content_w, split_fraction);
             let left_h = word_wrap_col_starts(

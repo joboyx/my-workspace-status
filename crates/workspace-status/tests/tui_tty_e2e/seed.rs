@@ -388,6 +388,38 @@ pub fn long_line_markdown_workspace(prefix: &str) -> (PathBuf, PathBuf) {
     (root, workspace)
 }
 
+/// `notes.md` of [`hunk_context_markdown_workspace`]: the long line
+/// [`LONG_LINE_OLD`], a blank line, then `- item 3` … `- item 12`, with
+/// item `changed` written as `- item <changed>`.
+fn hunk_context_notes(changed: &str) -> String {
+    let mut out = format!("{LONG_LINE_OLD}\n\n");
+    for n in 3..=12 {
+        let item = if n == 10 {
+            changed.to_string()
+        } else {
+            n.to_string()
+        };
+        out.push_str(&format!("- item {item}\n"));
+    }
+    out
+}
+
+/// Repo `app` with `notes.md` (see [`hunk_context_notes`]) committed and
+/// `- item 10` changed to `- item ten` in the worktree, the only dirty
+/// file. The hunk starts at line 7, so git puts the last earlier line that
+/// starts with a letter, [`LONG_LINE_OLD`], after the second `@@` as the
+/// hunk's function context: a hunk header longer than the diff pane.
+pub fn hunk_context_markdown_workspace(prefix: &str) -> (PathBuf, PathBuf) {
+    let (root, workspace) = new_workspace(prefix);
+    seed_repo(&workspace, "app", "main", false);
+    let repo = workspace.join("app");
+    fs::write(repo.join("notes.md"), hunk_context_notes("10")).unwrap();
+    git(&repo, &["add", "notes.md"]);
+    git(&repo, &["commit", "-q", "-m", "notes"]);
+    fs::write(repo.join("notes.md"), hunk_context_notes("ten")).unwrap();
+    (root, workspace)
+}
+
 /// File that [`compare_regions_workspace`] adds on the feature branch.
 ///
 /// It sorts after `regions.txt`, so the compare tab opens on the regions diff.

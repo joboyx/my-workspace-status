@@ -59,6 +59,7 @@ mod pty_demo_head_chip_and_narrow_footer;
 mod pty_depth_2_commit_footer_wheel_scrolls_message;
 mod pty_depth_2_new_commit_file_resets_diff_viewport;
 mod pty_diff_hscrollbar_thumb_drag;
+mod pty_diff_hunk_header_takes_one_row_with_wrap;
 mod pty_diff_path_header_wraps_long_path;
 mod pty_diff_syntax_highlight_keeps_signs_and_row_bg;
 mod pty_diff_wrap_toggle;

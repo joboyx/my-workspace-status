@@ -3714,6 +3714,101 @@ fn wrapped_split_diff_line_breaks_between_words_and_realigns() {
     assert_eq!(lines.len(), counted, "paint and the row-height count agree");
 }
 
+/// Hunk header with git's function context after the second `@@`, longer
+/// than any diff pane of the render tests.
+fn long_hunk_header() -> String {
+    format!(
+        "@@ -8,3 +8,3 @@ {}HUNK_TAIL",
+        "function context words ".repeat(8)
+    )
+}
+
+/// With wrap on, a long hunk header paints one row, clipped at the pane
+/// edge, the same row wrap off paints, inline and split.
+#[test]
+fn wrapped_long_hunk_header_paints_one_clipped_row() {
+    let state = two_pane_diff_state();
+    let text = long_hunk_header();
+    let row = DiffRow::Hunk { text: text.clone() };
+    for split in [false, true] {
+        let paint = |wrap| {
+            paint_diff_row(
+                &row,
+                40,
+                3,
+                split,
+                0,
+                wrap,
+                &state,
+                false,
+                false,
+                false,
+                None,
+                &[],
+                &[],
+            )
+        };
+        let lines = paint(true);
+        assert_eq!(lines.len(), 1, "split {split}: {lines:?}");
+        let painted: String = lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        // The blank cursor-bar edge, then the header cut at 40 columns.
+        assert_eq!(
+            painted,
+            format!(" {}", slice_cols(&text, 0, 40)),
+            "split {split}"
+        );
+        assert_eq!(lines, paint(false), "split {split}: wrap on = wrap off");
+    }
+}
+
+/// In a drawn diff pane with wrap on, the long hunk header takes one row:
+/// the row under it is the first code line of the hunk, and the clipped
+/// tail of the function context paints on no row.
+#[test]
+fn wrapped_long_hunk_header_takes_one_row_in_the_diff_pane() {
+    let mut state = two_pane_diff_state();
+    let header = long_hunk_header();
+    state.set_diff(
+        "app".into(),
+        "README.md".into(),
+        super::super::diff::DiffContent::from_unified(format!(
+            "{header}\n context seven\n-old eight\n+new eight\n context nine\n"
+        )),
+    );
+    state.diff_wrap = true;
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    draw_state(&mut terminal, &mut state);
+    let buf = terminal.backend().buffer();
+    let text = buffer_text(&terminal);
+    let y = first_row_with(buf, "@@ -8,3 +8,3 @@ function").expect("hunk header row");
+    assert!(
+        buf_line(buf, y + 1).contains("context seven"),
+        "the row under the hunk header is the first code line:\n{text}"
+    );
+    assert!(!text.contains("HUNK_TAIL"), "the header clips:\n{text}");
+    // The header cells run from the header start up to the vertical-bar
+    // column before the pane's right border: the row is cut there.
+    let x = find_cell_col(buf, y, "@@ -8,3").expect("header start");
+    let matched = header
+        .chars()
+        .zip(x..buf.area().width)
+        .take_while(|(c, col)| buf[(*col, y)].symbol() == c.to_string())
+        .count() as u16;
+    let border = (0..buf.area().width)
+        .rev()
+        .find(|&col| buf[(col, y)].symbol() == "│")
+        .expect("right pane border");
+    assert_eq!(
+        x + matched,
+        border - crate::tui::split::DIFF_VSCROLL_COLS,
+        "the header clips at the pane edge:\n{text}"
+    );
+}
+
 #[test]
 fn panned_word_diff_stays_on_changed_glyphs_past_an_emoji() {
     let tail = format!(" // {}", "z".repeat(150));

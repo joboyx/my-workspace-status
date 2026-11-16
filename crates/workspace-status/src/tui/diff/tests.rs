@@ -646,6 +646,18 @@ fn wrap_height_uses_display_columns_and_viewport_snaps() {
     assert_eq!(wrap_viewport_start(&[], 0, 10), 0);
 }
 
+/// With wrap on, a hunk header longer than the pane counts one row (paint
+/// clips it), inline and split; an error message as long still wraps.
+#[test]
+fn wrap_height_of_a_long_hunk_header_is_one_row() {
+    let text = format!("@@ -8,6 +8,6 @@ {}", "context words ".repeat(10));
+    let hunk = DiffRow::Hunk { text: text.clone() };
+    assert_eq!(diff_row_visual_height(&hunk, 24, 3, false, 0.5), 1);
+    assert_eq!(diff_row_visual_height(&hunk, 24, 3, true, 0.5), 1);
+    let error = DiffRow::Error { text };
+    assert!(diff_row_visual_height(&error, 24, 3, false, 0.5) > 1);
+}
+
 #[test]
 fn blank_content_and_from_lines() {
     assert!(DiffContent::default().is_blank());

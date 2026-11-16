@@ -4207,19 +4207,13 @@ fn paint_diff_row(
                 .map(|chunk| Line::from(Span::styled(chunk, color.add_modifier(Modifier::BOLD))))
                 .collect()
         }
-        DiffRow::Hunk { text } => {
-            let chunks = if wrap {
-                wrap_cols(text, width as usize)
-            } else {
-                vec![slice_cols(text, 0, width as usize)]
-            };
-            chunks
-                .into_iter()
-                .map(|chunk| {
-                    Line::from(Span::styled(chunk, Style::default().fg(palette.diff_hunk)))
-                })
-                .collect()
-        }
+        // The hunk header clips to one row, wrap on or off: git's function
+        // context after the second `@@` must not wrap onto a gutterless
+        // row (`diff_row_visual_height` counts one row).
+        DiffRow::Hunk { text } => vec![Line::from(Span::styled(
+            slice_cols(text, 0, width as usize),
+            Style::default().fg(palette.diff_hunk),
+        ))],
         DiffRow::Error { text } => {
             let chunks = if wrap {
                 wrap_cols(text, width as usize)
