@@ -126,3 +126,59 @@ git -C "$RUN/workspace/app" diff --cached --quiet -- src/auth.ts
 Expect: before `w` the `config.ts` diff shows its one hunk (`-export const API_BASE = "/api";`, `+export  const API_BASE = "/api";   `). On `df4-hidden` the header ends `· wrap · -w`, the body is `(no diff)`, the status says `whitespace hidden`, and `config.ts` stays in the tree. The second `w` brings the hunk back (`whitespace shown`). The palette row turns it on again and the UI-state file holds `"ignoreWhitespace": true`. After the restart the `config.ts` header has `· -w` with no key pressed. On `auth.ts` (a real change, so its hunks still show), `V` `s` refuses with `turn whitespace on to stage hunks` and nothing is staged.
 
 **PASS:** every `wait` is ok, both `grep` lines match their captures, `jq -e` exits 0, and the last `git diff --cached --quiet` exits 0.
+
+## DF5 Long markdown lines with wrap on: word breaks, one-row hunk header, whitespace marks
+
+A tracked `lib/GUIDE.md` in the `app` checkout has six long-line cases between `HEAD` and the worktree, each line wider than the 96-column diff pane: (1) trailing spaces added (line 3), (2) double spaces inside a line (5), (3) a real word change plus a double space (11), (4) a nested-list indent change (8), (5) a markdown hard break, two trailing spaces (10), (6) a tab changed to 4 spaces (13). Wrap is on (the default). Detail: `docs/diff-rendering.md` § Soft wrap, § Word highlight, § Ignore whitespace.
+
+```bash
+WS=.agents/skills/verify-workspace-status/scripts/wsctl
+RUN=$($WS start | jq -r .run)
+trap '$WS stop' EXIT
+$WS doctor
+APP="$RUN/workspace/app"
+mkdir -p "$APP/lib"
+guide() { # $1: 0 = the HEAD copy, 1 = the worktree copy
+  local t3='' t5='words that become double' t8='  -' t10='' t11='one word, also extra' t13=$'\t'
+  if [ "$1" = 1 ]; then t3='   ' t5='words  that become  double' t8='    -' t10='  ' t11='two words, also  extra' t13='    '; fi
+  printf '%s\n' '# Guide' '' \
+    "This first paragraph line is long enough to wrap in the diff pane, and the worktree copy adds trailing spaces.$t3" '' \
+    "Here the second paragraph has $t5 spaced in the worktree copy, so every later break moves." '' \
+    '- A list item that has a nested item under it, and the line is long enough to wrap in the diff pane of the run.' \
+    "$t8 The nested item moves to a deeper indent in the worktree copy, and this line is long enough to wrap too." '' \
+    "This line ends with a markdown hard break in the worktree copy, which is two trailing spaces at the line end.$t10" \
+    "The real change on this line is $t11 spaces are added, and the line is long enough to wrap." '' \
+    "${t13}Tab indented line that becomes four spaces in the worktree copy, and it is long enough to wrap as well."
+}
+guide 0 >"$APP/lib/GUIDE.md"
+git -C "$APP" add lib/GUIDE.md
+git -C "$APP" -c user.name=verify -c user.email=verify@example.invalid commit -q -m 'add guide' -- lib/GUIDE.md
+guide 1 >"$APP/lib/GUIDE.md"
+$WS key r
+$WS wait 'GUIDE\.md'
+$WS key /
+$WS wait 'SEARCH'
+$WS type GUIDE
+$WS key Enter
+$WS wait --cursor 'GUIDE.md'
+$WS key Escape
+$WS wait 'app/lib/GUIDE\.md +inline \(too narrow\) · wrap'
+$WS wait '@@ -1,13 \+1,13 @@'
+SHOW=$($WS snap --name df5-show | jq -r .txt)
+grep -F -- '-This first paragraph line is long enough to wrap in the diff pane, and the worktree' "$SHOW"
+grep -E '│  copy adds trailing spaces\.' "$SHOW"
+# Word background (diffDelWordBg / diffAddWordBg, default theme) on the 4 indent columns of the tab → spaces pair.
+grep -aF $'\e[48;2;96;59;63m    \e[48;2;59;41;46mTab indented' "${SHOW%.txt}.ansi"
+grep -aF $'\e[48;2;56;88;70m    \e[48;2;38;56;50mTab indented' "${SHOW%.txt}.ansi"
+$WS key w
+$WS wait 'app/lib/GUIDE\.md +inline \(too narrow\) · wrap · -w'
+$WS wait '@@ -8,6 \+8,6 @@ Here the second paragraph'
+IGN=$($WS snap --name df5-ignore | jq -r .txt)
+grep -A1 -F '@@ -8,6 +8,6 @@' "$IGN" | tail -1 | grep -F '8 │'
+# Only the changed words get the word background; the double space stays on the row background.
+grep -aF $'\e[48;2;56;88;70mwords\e[48;2;38;56;50m, also  extra spaces' "${IGN%.txt}.ansi"
+```
+
+Expect on `df5-show` (whitespace shown): every wrapped code row breaks between words, never inside one: `… and the worktree` / `copy adds trailing spaces.`, `… in the worktree copy,` / `so every later break moves.`. The trailing spaces, double spaces, indent, and hard break get the word background, also on wrapped rows. Line 13 (`-` tab, `+` 4 spaces) paints the same text on both rows, and its 4 indent columns get the word background on both. On `df5-ignore` (`w`, ` · -w`): only line 11 stays changed. The hunk header `@@ -8,6 +8,6 @@ Here the second paragraph …` is clipped to one row, and the next row is line 8. On line 11 only `two` and `words` get the word background; the double space in `also  extra` does not.
+
+**PASS:** every `wait` is ok and every `grep` matches its capture.
