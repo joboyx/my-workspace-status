@@ -323,6 +323,7 @@ impl AppState {
             | Action::ResizeTree(_)
             | Action::ToggleDiffMode
             | Action::ToggleDiffWrap
+            | Action::ToggleIgnoreWhitespace
             | Action::ToggleCommitMsgExpand
             | Action::ResizeCommitMsg(_)
             | Action::ExplorerReveal

@@ -672,6 +672,13 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         CommandScope::NoHighlight,
     ),
     bound(
+        "Ignore / show whitespace",
+        bindings::IGNORE_WHITESPACE,
+        CommandGroup::View,
+        &["whitespace", "-w"],
+        CommandScope::NoHighlight,
+    ),
+    bound(
         "Wrap / unwrap",
         bindings::WRAP_DIFF,
         CommandGroup::View,
@@ -953,12 +960,24 @@ impl CommandPaletteState {
     ///
     /// The go-to-line row, while it shows, is the only landing row, enabled
     /// or not: Enter on `:42` runs it or says why it cannot.
-    /// Otherwise rows the filter finds by title, key chips, or group, and
-    /// whose scope fits the highlight mode, outrank rows it finds only by
-    /// an alias: typing `pull` lands on Pull behind, not on a row that has
-    /// a `pull request` alias. With no such row, every visible row may
-    /// take the cursor (`exit` outside a highlight lands on Quit, not on
-    /// Exit highlight).
+    /// Otherwise, among rows whose scope fits the highlight mode, the
+    /// ranking is: title match > exact alias > key chip / group > alias
+    /// substring.
+    ///
+    /// - A row whose title contains the query keeps today's rule alone:
+    ///   rows found by title, key chips, or group land (`exit` in a
+    ///   highlight lands on Exit highlight, not on Quit's `exit` alias).
+    /// - With no such title, rows with an alias equal to the query
+    ///   (trimmed, case-insensitive) come first, in table order, ahead of
+    ///   the rest of that set, and no row of it is dropped: `-w` lands on
+    ///   Ignore / show whitespace before Close tab (its `Ctrl-w` chip).
+    ///   Those rows ([`Self::exact_alias_rows`]) take the cursor even while
+    ///   disabled, so Enter says why instead of running the next row.
+    /// - Rows found by key chips or group outrank rows found only by an
+    ///   alias substring: typing `pull` lands on Pull behind, not on a row
+    ///   that has a `pull request` alias.
+    /// - With no row found by name, every visible row may take the cursor
+    ///   (`exit` outside a highlight lands on Quit, not on Exit highlight).
     pub fn landing_rows(&self, highlighted: bool) -> Vec<usize> {
         if self.go_to_line().is_some() {
             return vec![0];
@@ -973,11 +992,45 @@ impl CommandPaletteState {
             })
             .map(|(index, _)| index)
             .collect();
-        if named.is_empty() {
+        let rest: Vec<usize> = if named.is_empty() {
             (0..visible.len()).collect()
         } else {
             named
+        };
+        let exact = self.exact_alias_rows(highlighted);
+        let others = rest.into_iter().filter(|index| !exact.contains(index));
+        exact.iter().copied().chain(others).collect()
+    }
+
+    /// Indexes into [`Self::rows`] of the rows whose alias equals the
+    /// filter (trimmed, case-insensitive) and whose scope fits, in table
+    /// order. Empty for a blank filter, while the go-to-line row shows, and
+    /// when a fitting row's title contains the filter (a title match
+    /// outranks an exact alias). [`Self::landing_rows`] puts them first.
+    pub fn exact_alias_rows(&self, highlighted: bool) -> Vec<usize> {
+        if self.go_to_line().is_some() {
+            return Vec::new();
         }
+        let visible = self.visible();
+        let q = self.filter.trim().to_ascii_lowercase();
+        let title_named = visible.iter().any(|command| {
+            command.scope.fits(highlighted) && command.title.to_ascii_lowercase().contains(&q)
+        });
+        if q.is_empty() || title_named {
+            return Vec::new();
+        }
+        visible
+            .iter()
+            .enumerate()
+            .filter(|(_, command)| {
+                command.scope.fits(highlighted)
+                    && command
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.to_ascii_lowercase() == q)
+            })
+            .map(|(index, _)| index)
+            .collect()
     }
 
     /// Highlighted row, if [`Self::rows`] is non-empty.
@@ -1181,6 +1234,8 @@ mod tests {
             ("find", "Search focused pane"),
             ("wrap", "Wrap / unwrap"),
             ("split", "Inline / split"),
+            ("whitespace", "Ignore / show whitespace"),
+            ("-w", "Ignore / show whitespace"),
             ("comment", "Comment"),
             ("yank", "Copy comments"),
             ("yank", "Copy entity reference"),
@@ -1205,6 +1260,50 @@ mod tests {
         }
         assert_eq!(titles("close app"), vec!["Quit"]);
         assert_eq!(titles("sparkline"), vec!["Toggle activity sparkline"]);
+        assert_eq!(titles("whitespace"), vec!["Ignore / show whitespace"]);
+    }
+
+    /// Landing rank within the scope rule: title match > exact alias >
+    /// key chip / group > alias substring. An exact alias moves its row to
+    /// the front and drops no other landing row.
+    #[test]
+    fn exact_alias_rows_land_first_unless_a_title_names_the_query() {
+        let landing_in = |query: &str, highlighted: bool| {
+            let mut palette = CommandPaletteState::new();
+            palette.set_filter(query);
+            let visible = palette.visible();
+            palette
+                .landing_rows(highlighted)
+                .into_iter()
+                .map(|index| visible[index].title)
+                .collect::<Vec<_>>()
+        };
+        let landing = |query: &str| landing_in(query, false);
+        // `-w` is an exact alias; Close tab's `Ctrl-w` chip also names it
+        // and stays, after it.
+        assert_eq!(titles("-w"), vec!["Close tab", "Ignore / show whitespace"]);
+        assert_eq!(landing("-w"), vec!["Ignore / show whitespace", "Close tab"]);
+        assert_eq!(
+            landing(" -W "),
+            vec!["Ignore / show whitespace", "Close tab"]
+        );
+        assert_eq!(landing("whitespace"), vec!["Ignore / show whitespace"]);
+        // In a highlight the title Exit highlight beats Quit's `exit`
+        // alias; outside one, Exit highlight is out of scope and Quit leads.
+        assert_eq!(landing_in("exit", true), vec!["Exit highlight"]);
+        assert_eq!(landing("exit").first(), Some(&"Quit"));
+        // An exact `pull request` / `merge request` alias keeps the rows
+        // that only contain it (`pull requests`), in table order.
+        let pr_rows = vec![
+            "Open PR",
+            "Open PR CI",
+            "Copy PR URL",
+            "Refresh this PR",
+            "Refresh PRs",
+            "PRs tab",
+        ];
+        assert_eq!(landing("pull request"), pr_rows);
+        assert_eq!(landing("merge request"), pr_rows);
     }
 
     /// The Doctor is a VIEW row with no key that runs from anywhere, and

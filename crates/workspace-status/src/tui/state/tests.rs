@@ -12481,6 +12481,23 @@ fn visual_stage_refuses_worktree_drill_diff() {
     assert_visual_write_refused(&mut app, "an uncommitted drill diff");
 }
 
+#[test]
+fn read_only_refusal_beats_the_whitespace_refusal() {
+    // A drill diff is read-only whatever the whitespace setting says: its
+    // own text shows, not the whitespace one.
+    let mut app = state();
+    app.ignore_whitespace = true;
+    open_visual_drill_diff(&mut app, sample_commit_source());
+    assert_visual_write_refused(&mut app, "a committed diff");
+    // A Workspace diff is writable, so the whitespace setting refuses.
+    let mut app = state();
+    app.ignore_whitespace = true;
+    focus_readme_diff(&mut app, two_hunk_readme());
+    highlight_alpha_new(&mut app);
+    assert_eq!(app.dispatch(Action::Stage), Effect::None);
+    assert_eq!(app.status, "turn whitespace on to stage hunks");
+}
+
 fn binary_readme() -> DiffContent {
     DiffContent::from_unified("Binary files a/README.md and b/README.md differ\n")
 }

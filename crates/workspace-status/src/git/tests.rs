@@ -2698,16 +2698,17 @@ fn commit_and_stash_diff_with_dash_w_hide_a_whitespace_only_change() {
     assert!(has_hunk(&shown), "{shown:?}");
     // The primary diff is empty under `-w`; the `git show` fallback must
     // not bring the hunk back.
+    // `--format=` drops the commit header, so the empty fallback is the
+    // same `(no diff)` an empty diff shows everywhere else.
     let hidden = diff_commit_file_ctx(&dir, &head, "f.txt", ignore);
-    assert!(!has_hunk(&hidden), "{hidden:?}");
-    assert!(!hidden.iter().any(|l| l == "+  two"), "{hidden:?}");
+    assert_eq!(hidden, ["(no diff)"]);
 
     fs::write(dir.join("f.txt"), "one\n  two  \n").unwrap();
     stash_push(&dir, &[]).unwrap();
     let shown = diff_stash_file_ctx(&dir, "stash@{0}", "f.txt", DiffOpts::default());
     assert!(has_hunk(&shown), "{shown:?}");
     let hidden = diff_stash_file_ctx(&dir, "stash@{0}", "f.txt", ignore);
-    assert!(!has_hunk(&hidden), "{hidden:?}");
+    assert_eq!(hidden, ["(no diff)"]);
     let _ = fs::remove_dir_all(&dir);
 }
 

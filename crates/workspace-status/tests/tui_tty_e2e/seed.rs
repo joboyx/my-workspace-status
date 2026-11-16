@@ -339,6 +339,33 @@ pub fn two_hunk_regions_workspace(prefix: &str) -> (PathBuf, PathBuf) {
     (root, workspace)
 }
 
+/// Line of `indent.txt` that [`whitespace_workspace`] re-indents.
+pub const INDENT_LINE: &str = "INDENT-ONLY-LINE";
+
+/// [`two_hunk_regions_workspace`] plus `indent.txt`, committed and then
+/// changed by whitespace alone ([`INDENT_LINE`] gains leading spaces).
+///
+/// `indent.txt` sorts before `regions.txt`, so launch focuses it. With
+/// whitespace ignored (`-w`) its diff is empty, while the `regions.txt`
+/// hunks (real changes) still show.
+pub fn whitespace_workspace(prefix: &str) -> (PathBuf, PathBuf) {
+    let (root, workspace) = two_hunk_regions_workspace(prefix);
+    let repo = workspace.join("app");
+    fs::write(
+        repo.join("indent.txt"),
+        format!("first\n{INDENT_LINE}\nlast\n"),
+    )
+    .unwrap();
+    git(&repo, &["add", "indent.txt"]);
+    git(&repo, &["commit", "-q", "-m", "indent"]);
+    fs::write(
+        repo.join("indent.txt"),
+        format!("first\n        {INDENT_LINE}\nlast\n"),
+    )
+    .unwrap();
+    (root, workspace)
+}
+
 /// File that [`compare_regions_workspace`] adds on the feature branch.
 ///
 /// It sorts after `regions.txt`, so the compare tab opens on the regions diff.

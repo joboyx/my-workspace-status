@@ -41,8 +41,8 @@ use super::commit_files::FolderSummary;
 use super::diff::{
     cell_code_width, cell_sign, diff_failed_text, diff_pane_header, diff_pane_header_rows,
     diff_pane_mode_label, diff_row_content_width, diff_row_gutter_cells, diff_wrap_row_heights,
-    gutter_width, section_header, wrap_viewport_start, DiffCell, DiffCellKind, DiffRow,
-    DiffSection, DIFF_RULE,
+    gutter_width, section_header, wrap_viewport_start, DiffCell, DiffCellKind, DiffHeaderMarks,
+    DiffRow, DiffSection, DIFF_RULE,
 };
 use super::doctor::{summary as doctor_summary, Check, CheckGroup, CheckStatus};
 use super::drill::DrillView;
@@ -3681,11 +3681,15 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let vscroll = graph_vscroll_visible(content_rows, line_h as u16, state.diff_scroll);
     let v_cols = u16::from(vscroll);
     let mode_label = diff_pane_mode_label(state.diff_mode, effective);
+    let marks = DiffHeaderMarks {
+        full: state.full_context_active(),
+        wrap,
+        ignore_whitespace: state.current_diff_content().ignore_whitespace,
+    };
     let header = diff_pane_header(
         &path,
         mode_label,
-        state.full_context_active(),
-        wrap,
+        marks,
         if wrap { 0 } else { state.diff_col_offset },
         skip,
         line_h,

@@ -1453,15 +1453,28 @@ pub fn diff_pane_mode_label(mode: DiffMode, effective: DiffMode) -> &'static str
     }
 }
 
-/// `{path}  inline|split · full? · wrap?` header text (plus pan / scroll when set).
+/// The on / off marks of the diff pane header, after the mode label.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DiffHeaderMarks {
+    /// Full-file context is on (` · full`).
+    pub full: bool,
+    /// Soft wrap is on (` · wrap`).
+    pub wrap: bool,
+    /// The shown content was loaded with `-w` (` · -w`). It comes from
+    /// [`DiffContent::ignore_whitespace`], not the live setting, so the
+    /// mark matches what the pane paints while a reload is in flight.
+    pub ignore_whitespace: bool,
+}
+
+/// `{path}  inline|split · full? · wrap? · -w?` header text (plus pan /
+/// scroll when set).
 ///
 /// The pane wraps the path part over [`diff_pane_header_rows`] rows; the
 /// extras follow it on its last row.
 pub fn diff_pane_header(
     path: &str,
     mode_label: &str,
-    full: bool,
-    wrap: bool,
+    marks: DiffHeaderMarks,
     pan: u16,
     start: usize,
     view_h: usize,
@@ -1469,11 +1482,14 @@ pub fn diff_pane_header(
 ) -> String {
     let title = if path.is_empty() { "Diff" } else { path };
     let mut extra = format!("  {mode_label}");
-    if full {
+    if marks.full {
         extra.push_str(" · full");
     }
-    if wrap {
+    if marks.wrap {
         extra.push_str(" · wrap");
+    }
+    if marks.ignore_whitespace {
+        extra.push_str(" · -w");
     }
     if pan > 0 {
         extra.push_str(&format!(" · pan {pan}"));

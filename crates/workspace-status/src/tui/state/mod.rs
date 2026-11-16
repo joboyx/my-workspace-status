@@ -1,5 +1,6 @@
 //! TUI state and Action dispatch.
 
+mod diff_reload;
 mod dispatch;
 mod dispatch_drill;
 mod dispatch_keymap;
@@ -20,6 +21,7 @@ mod remote_view;
 mod scroll_glide;
 mod summary;
 mod tab_park;
+mod whitespace;
 
 #[cfg(test)]
 pub(crate) use prs_tab::fixtures as prs_fixtures;
@@ -80,9 +82,9 @@ use super::ctrl_c_exit::{
     handle_ctrl_c, is_ctrl_c_exit_prompt, CTRL_C_EXIT_PROMPT, QUIT_WHILE_BUSY_PROMPT,
 };
 use super::diff::{
-    anchor_row_text, build_diff_rows, build_partial_patch, diff_pane_header_rows,
-    diff_row_content_width, diff_wrap_row_heights, find_anchor_row, gutter_width, row_search_text,
-    whitespace_ignored_fail, wrap_viewport_start, DiffContent, DiffRow, PartialPatchKind,
+    build_diff_rows, build_partial_patch, diff_pane_header_rows, diff_row_content_width,
+    diff_wrap_row_heights, find_anchor_row, gutter_width, row_search_text, whitespace_ignored_fail,
+    wrap_viewport_start, DiffContent, DiffRow, PartialPatchKind,
 };
 use super::drill::{
     source_from_graph_row, stash_target_from_graph_row, CommitFile, CommitFileSource, DrillView,
@@ -5112,42 +5114,10 @@ impl AppState {
         let Some(id) = self.displayed_diff_id() else {
             return Effect::None;
         };
-        let rows = self.current_diff_rows();
-        self.pending_hunk_anchor = Some(anchor_row_text(
-            &rows,
-            self.diff_cursor,
-            self.diff_body_height(),
-        ));
         if !self.full_context.remove(&id) {
             self.full_context.insert(id);
         }
-        if let Some(tab) = self.tabs.active_compare() {
-            let Some(source) = tab.source.clone() else {
-                return Effect::None;
-            };
-            let Some(path) = tab.path.clone() else {
-                return Effect::None;
-            };
-            let old_path = self.focused_compare_old_path();
-            return Effect::LoadCompareDiff {
-                tab_id: tab.id,
-                repo: tab.checkout_path.clone(),
-                source,
-                path,
-                old_path,
-            };
-        }
-        match &self.drill {
-            DrillView::Diff {
-                repo, source, path, ..
-            } => Effect::LoadCommitDiff {
-                repo: repo.clone(),
-                source: source.clone(),
-                path: path.clone(),
-            },
-            DrillView::Graph => Effect::LoadRightPane,
-            DrillView::Files { .. } => Effect::None,
-        }
+        self.anchored_shown_diff_reload()
     }
 
     fn apply_pending_hunk_anchor(&mut self) {
@@ -5220,18 +5190,16 @@ impl AppState {
     /// [`PartialPatchKind::RevertCommitted`] on the loaded compare diff, and
     /// only when [`Self::compare_revert_target`] allows the write.
     ///
-    /// While whitespace is ignored every kind refuses first, with the same
-    /// text [`build_partial_patch`] gives a `-w` diff: a reload after the
-    /// toggle may still be in flight, so the loaded content alone is not
-    /// enough.
+    /// While whitespace is ignored a writable target still refuses, with
+    /// the same text [`build_partial_patch`] gives a `-w` diff: a reload
+    /// after the toggle may still be in flight, so the loaded content
+    /// alone is not enough. A read-only target refuses with its own text
+    /// first, so whitespace never hides why a diff is read-only.
     fn visual_patch(
         &self,
         anchor: usize,
         kind: PartialPatchKind,
     ) -> Result<(String, String, String), String> {
-        if self.ignore_whitespace {
-            return Err(whitespace_ignored_fail(kind));
-        }
         let (repo, path, kind) = if self.is_compare_tab() {
             if kind != PartialPatchKind::Revert {
                 return Err(self.visual_write_refuse_status(kind));
@@ -5244,6 +5212,9 @@ impl AppState {
             };
             (repo, path, kind)
         };
+        if self.ignore_whitespace {
+            return Err(whitespace_ignored_fail(kind));
+        }
         let patch = build_partial_patch(
             self.current_diff_content(),
             self.diff_layout(),
@@ -7623,13 +7594,22 @@ impl AppState {
     ///
     /// A working-tree tab or an Explorer inner file tab may have missed
     /// watch reloads while inactive. Only one tab is active, so at most
-    /// one check reloads. The PRs tab asks for the details it lists.
+    /// one check reloads. The PRs tab asks for the details it lists. A
+    /// diff loaded with the other whitespace setting reloads too
+    /// ([`Self::stale_whitespace_reload`]).
     fn newly_active_tab_reload(&mut self) -> Effect {
-        match self.active_worktree_compare_reload() {
+        let catch_up = match self.active_worktree_compare_reload() {
             Effect::None if self.is_prs_tab() => self.request_pr_details(),
             Effect::None => self.active_explorer_live_reload(),
             reload => reload,
-        }
+        };
+        let whitespace = self.stale_whitespace_reload();
+        single_or_batch(
+            [catch_up, whitespace]
+                .into_iter()
+                .filter(|effect| *effect != Effect::None)
+                .collect(),
+        )
     }
 
     /// Drop the visual-line highlight and any pending confirm.
@@ -7746,7 +7726,7 @@ impl AppState {
         match opened {
             OpenCompare::Focused => {
                 self.apply_active_session();
-                self.active_worktree_compare_reload()
+                self.newly_active_tab_reload()
             }
             OpenCompare::Created(tab_id) => {
                 self.apply_active_session();

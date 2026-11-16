@@ -579,17 +579,37 @@ fn header_rows_are_one_on_a_tiny_or_zero_width_pane() {
 
 #[test]
 fn header_includes_path_mode_and_optional_full() {
+    let none = DiffHeaderMarks::default();
     assert_eq!(
-        diff_pane_header("app/README.md", "inline", false, false, 0, 0, 20, 5),
+        diff_pane_header("app/README.md", "inline", none, 0, 0, 20, 5),
         "app/README.md  inline"
     );
+    let full = DiffHeaderMarks { full: true, ..none };
     assert_eq!(
-        diff_pane_header("src/lib.rs", "split", true, false, 3, 0, 10, 40),
+        diff_pane_header("src/lib.rs", "split", full, 3, 0, 10, 40),
         "src/lib.rs  split · full · pan 3  10/40"
     );
+    let wrap = DiffHeaderMarks { wrap: true, ..none };
     assert_eq!(
-        diff_pane_header("app/x.rs", "inline", false, true, 0, 0, 20, 5),
+        diff_pane_header("app/x.rs", "inline", wrap, 0, 0, 20, 5),
         "app/x.rs  inline · wrap"
+    );
+    let dash_w = DiffHeaderMarks {
+        ignore_whitespace: true,
+        ..none
+    };
+    assert_eq!(
+        diff_pane_header("app/x.rs", "inline", dash_w, 0, 0, 20, 5),
+        "app/x.rs  inline · -w"
+    );
+    let all = DiffHeaderMarks {
+        full: true,
+        wrap: true,
+        ignore_whitespace: true,
+    };
+    assert_eq!(
+        diff_pane_header("app/x.rs", "split", all, 0, 0, 20, 5),
+        "app/x.rs  split · full · wrap · -w"
     );
     assert_eq!(
         diff_pane_mode_label(DiffMode::SideBySide, DiffMode::Inline),

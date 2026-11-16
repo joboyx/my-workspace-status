@@ -2813,7 +2813,8 @@ pub fn diff_commit_file(cwd: &Path, commit_id: &str, path: &str) -> Vec<String> 
 /// An empty `diff <commit>^ <commit>` (a root commit, or a change that
 /// `-w` hides) falls back to `git show --first-parent`, which also gets
 /// `-w` when `opts` ignores whitespace, so the fallback cannot bring the
-/// hidden whitespace hunks back.
+/// hidden whitespace hunks back. `--format=` drops the commit header, so a
+/// fallback with no hunks becomes `(no diff)`.
 pub fn diff_commit_file_ctx(
     cwd: &Path,
     commit_id: &str,
@@ -2826,7 +2827,7 @@ pub fn diff_commit_file_ctx(
     if !primary.is_empty() {
         return primary.lines().map(str::to_string).collect();
     }
-    let mut show: Vec<&str> = vec!["show", "--first-parent"];
+    let mut show: Vec<&str> = vec!["show", "--first-parent", "--format="];
     if opts.ignore_whitespace {
         show.push("-w");
     }

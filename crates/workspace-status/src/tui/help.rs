@@ -29,13 +29,13 @@ use super::bindings::{
     FOLD_FINISHED_PR_GROUPS, FOLD_ROW, FOLD_SUBTREE, FULL_FILE_CONTEXT, GO_TO_BOTTOM, GO_TO_FILE,
     GO_TO_FILE_F, GO_TO_TOP, GRAPH_CREATE_BRANCH, GRAPH_FOCUS_BRANCHES, GRAPH_MERGE,
     GRAPH_STASH_APPLY, GRAPH_STASH_DROP, GRAPH_STASH_POP, HALF_PAGE_DOWN, HALF_PAGE_UP,
-    HIGHLIGHT_LINES, ICON_POPOVER, INLINE_OR_SPLIT, KEYMAP_HELP, LINE_BLAME, MARK_REVIEWED,
-    MOVE_DOWN, MOVE_TO_END, MOVE_TO_START, MOVE_UP, NARROW_TREE, NAV_BACK, NAV_ENTER,
-    NEXT_FILE_TAB, NEXT_MATCH, NEXT_TAB, OPEN_IN_DIFF_TOOL, OPEN_IN_EDITOR, OPEN_IN_EXPLORER,
-    OPEN_PR, OPEN_PR_CI, OTHER_PANE, PAGE_DOWN, PAGE_UP, PAN_LEFT, PAN_RIGHT, PREVIOUS_FILE_TAB,
-    PREVIOUS_MATCH, PREVIOUS_TAB, PRS_TAB, PULL, PUSH, QUICK_OPEN_COMMANDS, QUIT, REFRESH,
-    REMOVE_WORKTREE, REVERT, SEARCH_IN_FILES, SEARCH_PANE, SHOW_HIDDEN, STAGE, STASH_MENU,
-    TOGGLE_MOUSE, UNSTAGE, VIEW_REMOTELY, WIDEN_TREE, WRAP_DIFF,
+    HIGHLIGHT_LINES, ICON_POPOVER, IGNORE_WHITESPACE, INLINE_OR_SPLIT, KEYMAP_HELP, LINE_BLAME,
+    MARK_REVIEWED, MOVE_DOWN, MOVE_TO_END, MOVE_TO_START, MOVE_UP, NARROW_TREE, NAV_BACK,
+    NAV_ENTER, NEXT_FILE_TAB, NEXT_MATCH, NEXT_TAB, OPEN_IN_DIFF_TOOL, OPEN_IN_EDITOR,
+    OPEN_IN_EXPLORER, OPEN_PR, OPEN_PR_CI, OTHER_PANE, PAGE_DOWN, PAGE_UP, PAN_LEFT, PAN_RIGHT,
+    PREVIOUS_FILE_TAB, PREVIOUS_MATCH, PREVIOUS_TAB, PRS_TAB, PULL, PUSH, QUICK_OPEN_COMMANDS,
+    QUIT, REFRESH, REMOVE_WORKTREE, REVERT, SEARCH_IN_FILES, SEARCH_PANE, SHOW_HIDDEN, STAGE,
+    STASH_MENU, TOGGLE_MOUSE, UNSTAGE, VIEW_REMOTELY, WIDEN_TREE, WRAP_DIFF,
 };
 use super::icons::{IconGroup, IconSpec, ICON_CATALOG};
 
@@ -155,8 +155,8 @@ macro_rules! view_group {
                 },
                 $($ignored,)*
                 HelpEntry {
-                    keys: FULL_FILE_CONTEXT.chip,
-                    desc: "full-file · keep hunk in view",
+                    keys: chips!(FULL_FILE_CONTEXT.chip, IGNORE_WHITESPACE.chip),
+                    desc: "full-file · keep hunk in view · whitespace",
                 },
                 HelpEntry {
                     keys: chips!(GRAPH_FOCUS_BRANCHES.chip, CLEAR_GRAPH_FOCUS.chip),
@@ -267,8 +267,8 @@ pub const HELP_EXPLORER_VIEW_GROUP: HelpGroup = HelpGroup {
     title: "VIEW",
     entries: &[
         HelpEntry {
-            keys: chips!(INLINE_OR_SPLIT.chip, WRAP_DIFF.chip),
-            desc: "inline / split · wrap (file pane)",
+            keys: chips!(INLINE_OR_SPLIT.chip, WRAP_DIFF.chip, IGNORE_WHITESPACE.chip),
+            desc: "inline / split · wrap · whitespace (file pane)",
         },
         HelpEntry {
             keys: PAGE_CHIPS,
@@ -1446,6 +1446,21 @@ mod tests {
         ));
     }
 
+    /// `w` (ignore / show whitespace) is on the VIEW column of every tab
+    /// that shows a diff.
+    #[test]
+    fn view_columns_list_the_whitespace_key() {
+        let has = |group: &HelpGroup, keys: &str| {
+            group
+                .entries
+                .iter()
+                .any(|e| e.keys == keys && e.desc.contains("whitespace"))
+        };
+        assert!(has(&HELP_GROUPS[2], "Ctrl-o w"));
+        assert!(has(&HELP_COMPARE_GROUPS[2], "Ctrl-o w"));
+        assert!(has(&HELP_EXPLORER_VIEW_GROUP, "i \\ w"));
+    }
+
     #[test]
     fn empty_query_is_not_a_match() {
         assert!(!help_entry_matches("j k", "down / up", ""));
@@ -1514,7 +1529,7 @@ mod tests {
         assert!(view_keys.contains(&"i \\ M B"));
         assert!(!view_keys.contains(&"i \\"));
         assert!(!view_keys.contains(&"i"));
-        assert!(view_keys.contains(&"Ctrl-o"));
+        assert!(view_keys.contains(&"Ctrl-o w"), "full-file · whitespace");
         assert!(view_keys.contains(&": Ctrl-p F"));
         assert!(view_keys.contains(&"?"));
         assert!(!view_keys.iter().any(|keys| keys.contains("Ctrl-k")));

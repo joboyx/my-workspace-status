@@ -166,6 +166,7 @@ impl AppState {
             Action::ResizeTree(steps) => self.step_tree_width(steps),
             Action::ToggleDiffMode => self.toggle_diff_mode(),
             Action::ToggleDiffWrap => self.toggle_diff_wrap(),
+            Action::ToggleIgnoreWhitespace => self.toggle_ignore_whitespace(),
             Action::ToggleCommitMsgExpand => self.toggle_commit_msg_expand(),
             Action::ResizeCommitMsg(delta) => self.resize_commit_msg(delta),
             Action::ToggleLineBlame => self.toggle_line_blame(),

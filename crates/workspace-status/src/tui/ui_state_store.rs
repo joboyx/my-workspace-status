@@ -230,8 +230,6 @@ pub fn save_commit_msg_lines(path: &Path, lines: usize) -> io::Result<()> {
 ///
 /// The user config file (`viewDefaults.whitespace`) is never written. See
 /// [`update_store`] for the create, foreign-file, and lock rules.
-// Temporary: the whitespace toggle action calls this; remove the allow when it lands.
-#[allow(dead_code)]
 pub fn save_ignore_whitespace(path: &Path, on: bool) -> io::Result<()> {
     update_store(path, |file| {
         file.ignore_whitespace = Some(serde_json::Value::Bool(on));
