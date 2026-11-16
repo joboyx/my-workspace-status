@@ -11,7 +11,7 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use crate::file_index::paintable_line;
-use crate::git::{exec_git_stdout_untrimmed, git_diff_args};
+use crate::git::{exec_git_stdout_untrimmed, git_diff_args, DiffOpts};
 use crate::snapshot::FileChange;
 
 use super::search::wrap_col_starts;
@@ -126,6 +126,10 @@ pub struct DiffContent {
     /// [`build_partial_patch`], blame, and go to line read the diff as an
     /// unstaged one; [`Self::is_committed`] stays false.
     pub committed_label: bool,
+    /// Loaded with `git diff -w` (whitespace changes hidden). The rows do
+    /// not match the file byte for byte, so [`build_partial_patch`]
+    /// refuses this content for every kind.
+    pub ignore_whitespace: bool,
     /// Git's reason when `git diff` failed, so the pane does not read as
     /// an empty diff.
     pub error: Option<String>,
@@ -141,6 +145,7 @@ impl DiffContent {
             is_committed: false,
             vs_worktree: false,
             committed_label: false,
+            ignore_whitespace: false,
             error: None,
         }
     }
@@ -154,6 +159,7 @@ impl DiffContent {
             is_committed: true,
             vs_worktree: false,
             committed_label: false,
+            ignore_whitespace: false,
             error: None,
         }
     }
@@ -200,29 +206,28 @@ impl DiffContent {
 }
 
 /// Load a unified diff for one dirty file. Untracked files synthesise an all-add hunk.
-/// `context` of `Some(n)` adds `-Un`.
-pub fn load_file_diff(
-    cwd: &Path,
-    repo: &str,
-    change: &FileChange,
-    context: Option<u32>,
-) -> DiffContent {
+/// `opts` adds `-U<n>` and `-w`; an untracked file ignores them (no
+/// `git diff` runs) but still records `opts.ignore_whitespace`.
+pub fn load_file_diff(cwd: &Path, repo: &str, change: &FileChange, opts: DiffOpts) -> DiffContent {
     let repo_dir = cwd.join(repo);
     if change.untracked {
-        return untracked_content(&repo_dir, &change.path);
+        return DiffContent {
+            ignore_whitespace: opts.ignore_whitespace,
+            ..untracked_content(&repo_dir, &change.path)
+        };
     }
     let mut staged = String::new();
     let mut unstaged = String::new();
     let mut error = None;
     if change.staged_status.is_some() {
-        let args = git_diff_args(&["diff", "--cached"], &change.path, context);
+        let args = git_diff_args(&["diff", "--cached"], &change.path, opts);
         match git_diff_text(&args, &repo_dir) {
             Ok(text) => staged = text,
             Err(reason) => error = Some(reason),
         }
     }
     if change.unstaged_status.is_some() {
-        let args = git_diff_args(&["diff"], &change.path, context);
+        let args = git_diff_args(&["diff"], &change.path, opts);
         match git_diff_text(&args, &repo_dir) {
             Ok(text) => unstaged = text,
             Err(reason) => error = error.or(Some(reason)),
@@ -235,6 +240,7 @@ pub fn load_file_diff(
         is_committed: false,
         vs_worktree: false,
         committed_label: false,
+        ignore_whitespace: opts.ignore_whitespace,
         error,
     }
 }
@@ -257,6 +263,7 @@ fn untracked_content(repo_dir: &Path, path: &str) -> DiffContent {
         is_committed: false,
         vs_worktree: false,
         committed_label: false,
+        ignore_whitespace: false,
         error: None,
     }
 }
@@ -865,6 +872,12 @@ pub fn build_partial_patch(
     kind: PartialPatchKind,
     path: &str,
 ) -> Result<String, String> {
+    // A `-w` diff hides whitespace changes, so its rows are not the file's
+    // bytes: a patch built from them would not apply, or would apply
+    // wrong. Refuse before any row is read.
+    if content.ignore_whitespace {
+        return Err(whitespace_ignored_fail(kind));
+    }
     if path.is_empty() {
         return Err(partial_fail(kind));
     }
@@ -1033,13 +1046,24 @@ pub fn build_partial_patch(
     Ok(patch)
 }
 
-fn not_utf8_fail(kind: PartialPatchKind) -> String {
-    let verb = match kind {
+/// The verb a refusal text uses for `kind`.
+fn patch_verb(kind: PartialPatchKind) -> &'static str {
+    match kind {
         PartialPatchKind::Stage => "stage",
         PartialPatchKind::Unstage => "unstage",
         PartialPatchKind::Revert | PartialPatchKind::RevertCommitted => "revert",
-    };
+    }
+}
+
+fn not_utf8_fail(kind: PartialPatchKind) -> String {
+    let verb = patch_verb(kind);
     format!("cannot {verb} highlight: diff is not UTF-8 text")
+}
+
+/// Refusal of a partial `kind` patch while whitespace is ignored (the
+/// loaded diff came from `git diff -w`, or the setting is on).
+pub(crate) fn whitespace_ignored_fail(kind: PartialPatchKind) -> String {
+    format!("turn whitespace on to {} hunks", patch_verb(kind))
 }
 
 fn nothing_fail(kind: PartialPatchKind) -> String {

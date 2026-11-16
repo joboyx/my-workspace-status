@@ -374,6 +374,8 @@ enum ExplorerJob {
         repo: String,
         path: String,
         change: Option<crate::snapshot::FileChange>,
+        /// Diff options read from the state when the job was queued.
+        diff_opts: crate::git::DiffOpts,
     },
 }
 
@@ -405,14 +407,11 @@ fn run_explorer_job(cwd: &Path, job: ExplorerJob) -> JobOutcome {
             repo,
             path,
             change,
+            diff_opts,
         } => {
-            // The Explorer always shows the whole file of a changed file.
             let body = match change {
                 Some(change) => ExplorerPreviewBody::Diff(super::diff::load_file_diff(
-                    cwd,
-                    &repo,
-                    &change,
-                    Some(crate::git::FULL_DIFF_CONTEXT_LINES),
+                    cwd, &repo, &change, diff_opts,
                 )),
                 None => ExplorerPreviewBody::File(read_text_file(
                     &cwd.join(&repo).join(&path),
@@ -1941,6 +1940,9 @@ impl Interpreter {
                     repo,
                     path: path.clone(),
                     change,
+                    // The Explorer always shows the whole file of a changed
+                    // file.
+                    diff_opts: state.diff_opts(Some(crate::git::FULL_DIFF_CONTEXT_LINES)),
                 };
                 if let Some(slot) = self
                     .explorer_previews
@@ -3972,7 +3974,8 @@ impl Interpreter {
                 }
                 if let Some(job) = self.compare_diff.pop_front() {
                     let dir = opts.cwd.join(&job.repo);
-                    let context = state.commit_diff_context(&job.repo, &job.path);
+                    let diff_opts =
+                        state.diff_opts(state.commit_diff_context(&job.repo, &job.path));
                     spawn(
                         id,
                         JobRelease::CompareDiff {
@@ -3988,7 +3991,7 @@ impl Interpreter {
                                 &job.source,
                                 &job.path,
                                 job.old_path.as_deref(),
-                                context,
+                                diff_opts,
                             );
                             JobOutcome::CompareDiff {
                                 tab_id: job.tab_id,
@@ -4045,7 +4048,7 @@ impl Interpreter {
                     return;
                 }
                 if let Some((gen, repo, source, path)) = self.commit_diff.take() {
-                    let context = state.commit_diff_context(&repo, &path);
+                    let diff_opts = state.diff_opts(state.commit_diff_context(&repo, &path));
                     let focused = state.focused_file();
                     let (files, file_cursor) = commit_diff_list(state);
                     let cwd = opts.cwd.clone();
@@ -4063,7 +4066,7 @@ impl Interpreter {
                                 &repo_w,
                                 &source_w,
                                 &path_w,
-                                context,
+                                diff_opts,
                                 focused.as_ref(),
                             );
                             JobOutcome::CommitDiff {

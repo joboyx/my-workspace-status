@@ -4201,6 +4201,33 @@ fn explorer_preview_queue_keeps_only_live_loads() {
     assert!(capture_jobs(&mut interp, &mut state).is_empty());
 }
 
+/// A queued Explorer diff load keeps the whitespace setting of the moment
+/// it was queued, with the whole-file context.
+#[test]
+fn explorer_preview_job_captures_the_whitespace_setting_when_queued() {
+    let mut state = fixture_state();
+    let mut interp = Interpreter::with_cap(4);
+    let (tab, gen) = explorer_inner(&mut state, "app", "a.txt", false, false);
+    state.ignore_whitespace = true;
+    schedule_effect(
+        &mut interp,
+        &mut state,
+        explorer_load(tab, gen, "a.txt"),
+        &Action::None,
+    );
+    state.ignore_whitespace = false;
+    match interp.explorer_previews.as_slice() {
+        [ExplorerJob::Preview { diff_opts, .. }] => assert_eq!(
+            *diff_opts,
+            crate::git::DiffOpts {
+                context: Some(crate::git::FULL_DIFF_CONTEXT_LINES),
+                ignore_whitespace: true,
+            }
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
 /// A pinned file whose load is still queued keeps it when a later tree
 /// move queues the preview tab's load on the same tab.
 #[test]

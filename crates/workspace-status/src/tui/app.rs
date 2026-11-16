@@ -32,7 +32,7 @@ use crate::git::{
     fast_forward_to_remote_ref, git_diff_args, list_commit_name_status, list_compare_name_status,
     list_compare_patch_keys, list_stash_name_status, list_worktree_name_status,
     list_worktree_vs_commit_name_status, merge_base, merge_into_head, repo_has_local_changes,
-    rev_parse_commit, rev_parse_quiet, MergeIntoHeadResult, NameStatus,
+    rev_parse_commit, rev_parse_quiet, DiffOpts, MergeIntoHeadResult, NameStatus,
 };
 use crate::settings::Settings;
 use crate::snapshot::{
@@ -406,7 +406,7 @@ pub(crate) struct RightPaneRequest {
     show_hidden: bool,
     in_graph: bool,
     focused_file: Option<(String, FileChange)>,
-    file_diff_context: Option<u32>,
+    file_diff_opts: DiffOpts,
     focused_graph_repo: Option<String>,
     same_repo: bool,
     graph_limit: usize,
@@ -435,7 +435,7 @@ struct FollowDiffRequest {
     repo: String,
     source: CommitFileSource,
     path: String,
-    context: Option<u32>,
+    opts: DiffOpts,
     files: Vec<CommitFile>,
     file_cursor: usize,
     focused_file: Option<(String, FileChange)>,
@@ -498,7 +498,7 @@ impl RightPaneRequest {
                         repo: repo.clone(),
                         source: source.clone(),
                         path: row.path.clone(),
-                        context: state.commit_diff_context(repo, &row.path),
+                        opts: state.diff_opts(state.commit_diff_context(repo, &row.path)),
                         files,
                         file_cursor,
                         focused_file: focused_file.clone(),
@@ -512,9 +512,11 @@ impl RightPaneRequest {
             snapshot: state.snapshot.clone(),
             show_hidden: state.show_hidden,
             in_graph: state.drill.is_graph(),
-            file_diff_context: focused_file
-                .as_ref()
-                .and_then(|(repo, change)| state.workspace_diff_context(repo, &change.path)),
+            file_diff_opts: state.diff_opts(
+                focused_file
+                    .as_ref()
+                    .and_then(|(repo, change)| state.workspace_diff_context(repo, &change.path)),
+            ),
             focused_file,
             focused_graph_repo,
             same_repo,
@@ -548,7 +550,7 @@ impl RightPaneRequest {
                 &follow.repo,
                 &follow.source,
                 &follow.path,
-                follow.context,
+                follow.opts,
                 follow.focused_file.as_ref(),
             );
             return RightPaneLoad::CommitDiff {
@@ -562,7 +564,7 @@ impl RightPaneRequest {
         }
         if self.in_graph {
             if let Some((repo, change)) = &self.focused_file {
-                let content = load_file_diff(&self.cwd, repo, change, self.file_diff_context);
+                let content = load_file_diff(&self.cwd, repo, change, self.file_diff_opts);
                 return RightPaneLoad::Diff {
                     repo: repo.clone(),
                     path: change.path.clone(),
@@ -1031,28 +1033,32 @@ pub(crate) fn compute_commit_diff(
     repo: &str,
     source: &CommitFileSource,
     path: &str,
-    context: Option<u32>,
+    opts: DiffOpts,
     focused_file: Option<&(String, FileChange)>,
 ) -> DiffContent {
     let dir = cwd.join(repo);
-    match source {
+    let content = match source {
         CommitFileSource::Commit { commit_id } => {
-            DiffContent::from_commit_lines(diff_commit_file_ctx(&dir, commit_id, path, context))
+            DiffContent::from_commit_lines(diff_commit_file_ctx(&dir, commit_id, path, opts))
         }
         CommitFileSource::Stash { stash_ref } => {
-            DiffContent::from_commit_lines(diff_stash_file_ctx(&dir, stash_ref, path, context))
+            DiffContent::from_commit_lines(diff_stash_file_ctx(&dir, stash_ref, path, opts))
         }
         CommitFileSource::Worktree => {
             if let Some((file_repo, change)) = focused_file {
                 if file_repo == repo && change.path == path {
-                    return load_file_diff(cwd, repo, change, context);
+                    return load_file_diff(cwd, repo, change, opts);
                 }
             }
-            head_file_diff(&dir, path, context)
+            head_file_diff(&dir, path, opts)
         }
         CommitFileSource::Compare { .. } | CommitFileSource::CommitVsWorktree { .. } => {
             DiffContent::default()
         }
+    };
+    DiffContent {
+        ignore_whitespace: opts.ignore_whitespace,
+        ..content
     }
 }
 
@@ -1065,23 +1071,27 @@ pub(crate) fn compute_compare_diff(
     source: &CommitFileSource,
     path: &str,
     old_path: Option<&str>,
-    context: Option<u32>,
+    opts: DiffOpts,
 ) -> Result<DiffContent, String> {
-    match source {
+    let content = match source {
         CommitFileSource::Compare { base_tip, head, .. } => {
-            let lines = diff_compare_file_ctx(dir, base_tip, head, path, old_path, context)?;
-            Ok(DiffContent::from_compare_lines(lines))
+            let lines = diff_compare_file_ctx(dir, base_tip, head, path, old_path, opts)?;
+            DiffContent::from_compare_lines(lines)
         }
         CommitFileSource::CommitVsWorktree { base, .. } => {
-            let lines = diff_worktree_vs_commit_file_ctx(dir, base, path, old_path, context)?;
-            Ok(DiffContent::from_worktree_compare_lines(lines))
+            let lines = diff_worktree_vs_commit_file_ctx(dir, base, path, old_path, opts)?;
+            DiffContent::from_worktree_compare_lines(lines)
         }
-        _ => Ok(DiffContent::default()),
-    }
+        _ => DiffContent::default(),
+    };
+    Ok(DiffContent {
+        ignore_whitespace: opts.ignore_whitespace,
+        ..content
+    })
 }
 
-fn head_file_diff(dir: &Path, path: &str, context: Option<u32>) -> DiffContent {
-    let args = git_diff_args(&["diff", "HEAD"], path, context);
+fn head_file_diff(dir: &Path, path: &str, opts: DiffOpts) -> DiffContent {
+    let args = git_diff_args(&["diff", "HEAD"], path, opts);
     match super::diff::git_diff_text(&args, dir) {
         Ok(text) => DiffContent::from_unified(text),
         Err(reason) => DiffContent {

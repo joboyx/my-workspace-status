@@ -10250,8 +10250,14 @@ fn depth_2_commit_and_stash_diffs_paint_committed_in_boxed_and_flat_panes() {
         },
     ];
     for source in sources {
-        let content =
-            super::super::app::compute_commit_diff(&cwd, "app", &source, "README.md", None, None);
+        let content = super::super::app::compute_commit_diff(
+            &cwd,
+            "app",
+            &source,
+            "README.md",
+            crate::git::DiffOpts::default(),
+            None,
+        );
         assert!(!content.unstaged.is_empty(), "{source:?}: diff loaded");
         for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
             let case = format!("{source:?} {background:?}");

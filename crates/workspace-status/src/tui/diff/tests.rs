@@ -133,6 +133,7 @@ fn row_line_ref_tells_staged_from_unstaged() {
         is_committed: false,
         vs_worktree: false,
         committed_label: false,
+        ignore_whitespace: false,
         error: None,
     };
     let at = |row| row_line_ref(&content, DiffMode::Inline, row);
@@ -162,6 +163,7 @@ fn row_for_new_line_prefers_the_unstaged_section() {
         is_committed: false,
         vs_worktree: false,
         committed_label: false,
+        ignore_whitespace: false,
         error: None,
     };
     // STAGED 0, hunk 1, a 2, -b 3, +B 4; UNSTAGED 5, hunk 6, a 7, +x 8,
@@ -239,6 +241,7 @@ fn partial_diff_failure_appends_an_error_row() {
         is_committed: false,
         vs_worktree: false,
         committed_label: false,
+        ignore_whitespace: false,
         error: Some("fatal: bad object".into()),
     };
     let rows = build_diff_rows(&content, DiffMode::Inline);
@@ -280,6 +283,7 @@ fn build_diff_rows_emits_section_per_nonempty_slot() {
             is_committed: false,
             vs_worktree: false,
             committed_label: false,
+            ignore_whitespace: false,
             error: None,
         },
         DiffMode::Inline,
@@ -297,6 +301,7 @@ fn build_diff_rows_emits_section_per_nonempty_slot() {
             is_committed: false,
             vs_worktree: false,
             committed_label: false,
+            ignore_whitespace: false,
             error: None,
         },
         DiffMode::Inline,
@@ -353,7 +358,7 @@ fn failed_git_diff_keeps_the_reason() {
         untracked: false,
         old_path: None,
     };
-    let content = load_file_diff(&root, "app", &change, None);
+    let content = load_file_diff(&root, "app", &change, DiffOpts::default());
     assert!(content.unstaged.is_empty(), "{content:?}");
     let reason = content.error.expect("git diff failure reason");
     assert!(!reason.is_empty() && !reason.contains('\n'), "{reason}");
@@ -370,6 +375,7 @@ fn untracked_section_is_new() {
             is_committed: false,
             vs_worktree: false,
             committed_label: false,
+            ignore_whitespace: false,
             error: None,
         },
         DiffMode::Inline,
@@ -387,6 +393,7 @@ fn inline_mode_one_cell_per_line() {
             is_committed: false,
             vs_worktree: false,
             committed_label: false,
+            ignore_whitespace: false,
             error: None,
         },
         DiffMode::Inline,
@@ -443,6 +450,7 @@ fn side_by_side_pairs_del_with_add() {
             is_committed: false,
             vs_worktree: false,
             committed_label: false,
+            ignore_whitespace: false,
             error: None,
         },
         DiffMode::SideBySide,
@@ -516,6 +524,7 @@ fn gutter_width_floors_at_two_and_grows() {
             is_committed: false,
             vs_worktree: false,
             committed_label: false,
+            ignore_whitespace: false,
             error: None,
         },
         DiffMode::Inline,
@@ -728,6 +737,7 @@ fn two_hunk_content() -> DiffContent {
         is_committed: false,
         vs_worktree: false,
         committed_label: false,
+        ignore_whitespace: false,
         error: None,
     }
 }
@@ -822,6 +832,7 @@ fn partial_patch_fails_closed_on_context_only_and_committed() {
         is_committed: true,
         vs_worktree: false,
         committed_label: false,
+        ignore_whitespace: false,
         error: None,
     };
     let err = build_partial_patch(
@@ -845,6 +856,7 @@ fn partial_patch_unstages_from_the_staged_section() {
         is_committed: false,
         vs_worktree: false,
         committed_label: false,
+        ignore_whitespace: false,
         error: None,
     };
     let rows = build_diff_rows(&content, DiffMode::Inline);
@@ -909,6 +921,7 @@ fn partial_patch_fails_closed_on_binary() {
         is_committed: false,
         vs_worktree: false,
         committed_label: false,
+        ignore_whitespace: false,
         error: None,
     };
     let end = build_diff_rows(&staged, DiffMode::Inline)
@@ -935,6 +948,7 @@ fn partial_patch_fails_closed_on_mixed_sections() {
         is_committed: false,
         vs_worktree: false,
         committed_label: false,
+        ignore_whitespace: false,
         error: None,
     };
     let end = build_diff_rows(&content, DiffMode::Inline).len() - 1;
@@ -1029,6 +1043,7 @@ fn revert_patch_fails_closed() {
         is_committed: true,
         vs_worktree: false,
         committed_label: false,
+        ignore_whitespace: false,
         error: None,
         ..two_hunk_content()
     };
@@ -1047,6 +1062,7 @@ fn revert_patch_fails_closed() {
         is_committed: false,
         vs_worktree: false,
         committed_label: false,
+        ignore_whitespace: false,
         error: None,
     };
     let end = build_diff_rows(&new_file, DiffMode::Inline).len() - 1;
@@ -1070,6 +1086,7 @@ fn revert_patch_fails_closed() {
         is_committed: false,
         vs_worktree: false,
         committed_label: false,
+        ignore_whitespace: false,
         error: None,
     };
     let end = build_diff_rows(&staged_only, DiffMode::Inline).len() - 1;
@@ -1083,6 +1100,7 @@ fn revert_patch_fails_closed() {
         is_committed: false,
         vs_worktree: false,
         committed_label: false,
+        ignore_whitespace: false,
         error: None,
     };
     let end = build_diff_rows(&mixed, DiffMode::Inline).len() - 1;
@@ -1155,6 +1173,7 @@ keep-z
             is_committed: false,
             vs_worktree: false,
             committed_label: false,
+            ignore_whitespace: false,
             error: None,
         }
     }
@@ -1176,8 +1195,15 @@ keep-z
         fs::write(dir.join("summary.txt"), "summary\n").unwrap();
         git(&dir, &["add", "."]);
         git(&dir, &["commit", "-q", "-m", "feature"]);
-        let lines = crate::git::diff_compare_file_ctx(&dir, "main", "HEAD", path, None, None)
-            .expect("compare diff");
+        let lines = crate::git::diff_compare_file_ctx(
+            &dir,
+            "main",
+            "HEAD",
+            path,
+            None,
+            DiffOpts::default(),
+        )
+        .expect("compare diff");
         (dir, DiffContent::from_compare_lines(lines))
     }
 
@@ -1501,6 +1527,7 @@ keep-z
             is_committed: false,
             vs_worktree: false,
             committed_label: false,
+            ignore_whitespace: false,
             error: None,
         };
         let hunks = parse_unified_diff(if kind == PartialPatchKind::Unstage {
@@ -1611,6 +1638,7 @@ keep-z
             is_committed: false,
             vs_worktree: false,
             committed_label: false,
+            ignore_whitespace: false,
             error: None,
         };
         let row = line_row(&content, row);
@@ -1676,7 +1704,7 @@ keep-z
             untracked: base.is_none(),
             old_path: None,
         };
-        let content = load_file_diff(&dir, "", &change, None);
+        let content = load_file_diff(&dir, "", &change, DiffOpts::default());
         (dir, content)
     }
 
@@ -1742,7 +1770,7 @@ keep-z
             untracked: false,
             old_path: None,
         };
-        let content = load_file_diff(&dir, "", &change, None);
+        let content = load_file_diff(&dir, "", &change, DiffOpts::default());
         let row = line_row(&content, text);
         let patch = build_partial_patch(&content, DiffMode::Inline, row, row, kind, "f.txt")
             .expect("patch");
@@ -1889,7 +1917,7 @@ keep-z
         };
         let parent = dir.parent().expect("fixture parent");
         let name = dir.file_name().expect("fixture name").to_string_lossy();
-        load_file_diff(parent, &name, &change, None)
+        load_file_diff(parent, &name, &change, DiffOpts::default())
     }
 
     #[test]
@@ -2012,4 +2040,102 @@ keep-z
         assert_eq!(worktree(dir), edited);
         let _ = fs::remove_dir_all(dir);
     }
+}
+
+#[test]
+fn partial_patch_refuses_a_diff_loaded_with_dash_w_for_every_kind() {
+    let unstaged = DiffContent::from_unified(FIXTURE);
+    let staged = DiffContent {
+        staged: FIXTURE.into(),
+        ..DiffContent::default()
+    };
+    let compare = DiffContent::from_compare_lines(FIXTURE.lines().map(String::from).collect());
+    let cases = [
+        (
+            PartialPatchKind::Stage,
+            &unstaged,
+            "turn whitespace on to stage hunks",
+        ),
+        (
+            PartialPatchKind::Unstage,
+            &staged,
+            "turn whitespace on to unstage hunks",
+        ),
+        (
+            PartialPatchKind::Revert,
+            &unstaged,
+            "turn whitespace on to revert hunks",
+        ),
+        (
+            PartialPatchKind::RevertCommitted,
+            &compare,
+            "turn whitespace on to revert hunks",
+        ),
+    ];
+    for (kind, content, refusal) in cases {
+        let rows = build_diff_rows(content, DiffMode::Inline).len();
+        let last = rows - 1;
+        // The same content without the marker builds a patch, so only the
+        // marker refuses.
+        build_partial_patch(content, DiffMode::Inline, 0, last, kind, "hello.ts")
+            .unwrap_or_else(|err| panic!("{kind:?} without -w: {err}"));
+        let ignored = DiffContent {
+            ignore_whitespace: true,
+            ..content.clone()
+        };
+        assert_eq!(
+            build_partial_patch(&ignored, DiffMode::Inline, 0, last, kind, "hello.ts"),
+            Err(refusal.to_string()),
+            "{kind:?}"
+        );
+    }
+}
+
+/// A committed `f.txt` with a whitespace-only unstaged edit.
+fn whitespace_only_edit(prefix: &str) -> (std::path::PathBuf, FileChange) {
+    let dir = crate::testutil::unique_dir(prefix);
+    crate::testutil::init_repo(&dir);
+    std::fs::write(dir.join("f.txt"), "one\ntwo\n").unwrap();
+    crate::testutil::git(&dir, &["add", "f.txt"]);
+    crate::testutil::git(&dir, &["commit", "-q", "-m", "base"]);
+    std::fs::write(dir.join("f.txt"), "one\n  two\t\n").unwrap();
+    let change = FileChange {
+        path: "f.txt".into(),
+        staged_status: None,
+        unstaged_status: Some("M".into()),
+        untracked: false,
+        old_path: None,
+    };
+    (dir, change)
+}
+
+#[test]
+fn load_file_diff_with_dash_w_hides_a_whitespace_only_change_and_marks_the_content() {
+    let (dir, change) = whitespace_only_edit("ws-diff-ignore-ws");
+    let shown = load_file_diff(&dir, "", &change, DiffOpts::default());
+    assert!(shown.unstaged.contains("@@"), "{shown:?}");
+    assert!(!shown.ignore_whitespace);
+
+    let ignore = DiffOpts {
+        context: None,
+        ignore_whitespace: true,
+    };
+    let hidden = load_file_diff(&dir, "", &change, ignore);
+    assert!(!hidden.unstaged.contains("@@"), "{hidden:?}");
+    assert!(hidden.ignore_whitespace);
+
+    // A staged whitespace-only change hides the same way.
+    crate::testutil::git(&dir, &["add", "f.txt"]);
+    let staged = FileChange {
+        staged_status: Some("M".into()),
+        unstaged_status: None,
+        ..change
+    };
+    assert!(load_file_diff(&dir, "", &staged, DiffOpts::default())
+        .staged
+        .contains("@@"));
+    let hidden = load_file_diff(&dir, "", &staged, ignore);
+    assert!(!hidden.staged.contains("@@"), "{hidden:?}");
+    assert!(hidden.ignore_whitespace);
+    let _ = std::fs::remove_dir_all(&dir);
 }
