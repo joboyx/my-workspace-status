@@ -101,14 +101,15 @@ The file diff (`draw_diff_pane`) and the clean-file view (`draw_file_body`, an E
 | `section-label` | The section label names the diff's side (`STAGED`, `UNSTAGED`, `COMMITTED`, …). | `depth_2_commit_and_stash_diffs_paint_committed_in_boxed_and_flat_panes`, `commit_and_stash_diffs_label_committed_and_keep_partial_patch_kinds` |
 | `full-context` | `Ctrl-o` toggles the whole-file context. | none |
 | `paintable-text` | Tabs expand to 4-column stops and other control characters paint as U+FFFD, so file content never writes a control byte to the terminal. | `diff_pane_paints_no_control_character_from_file_content`, `diff_rows_expand_tabs_and_replace_control_characters`, `read_text_file_text_binary_and_too_large` |
+| `ignore-ws` | `w` / the palette row Ignore / show whitespace hide whitespace-only changes with `git diff -w` and mark the header ` · -w` (the Explorer status line shows a `-w` pill). One global setting: a parked tab loaded with the other value reloads when it becomes active. | `w_on_the_workspace_diff_reloads_the_right_pane_near_the_cursor`, `w_on_a_drill_diff_reloads_the_commit_diff`, `w_on_a_compare_tab_reloads_its_open_file`, `w_on_an_explorer_diff_requeues_its_preview_and_a_clean_file_stays`, `a_parked_tab_reloads_its_diff_when_it_becomes_active`, `a_parked_explorer_diff_reloads_when_its_tab_becomes_active`, `diff_header_marks_a_dash_w_load_from_the_content`, `explorer_diff_loaded_with_dash_w_shows_the_pill`, `pty_w_ignores_whitespace_in_the_diff`, `pty_ignore_whitespace_survives_restart`, `pty_ignore_whitespace_refuses_hunk_stage` |
 
-| Surface | Tab | Depth | Pane | Looks | Code anchors | `click-row` | `cursor-middle` | `section-label` | `full-context` | `paintable-text` |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `diff-d0` | Workspace | 0 (file focused) | right | boxed, flat | `draw_right`, `draw_diff_pane`, `click_diff` | supported | supported | supported | supported | supported |
-| `diff-d2` | Workspace | 2 | right | boxed, flat | `draw_right`, `draw_diff_pane`, `click_diff`, `compute_commit_diff`, `from_commit_lines` | supported | supported | supported | supported | supported |
-| `compare-diff` | Compare | - | right | boxed, flat | `draw_right`, `draw_diff_pane`, `click_diff` | supported | supported | supported | supported | supported |
-| `explorer-diff` | Explorer (changed file) | - | right | boxed, flat | `draw_explorer_tab`, `draw_diff_pane`, `explorer_click`, `explorer_click_row`, `click_diff` | supported | supported | supported | n/a: I4, Explorer diffs always show the whole file and `Ctrl-o` refuses | supported |
-| `explorer-file` | Explorer (clean file) | - | right | boxed, flat | `draw_explorer_tab`, `draw_file_body`, `click_file_tab` | supported | n/a: I3, the clean-file view scrolls at the edge | n/a: a clean file has no diff sections | n/a: I4, the Explorer refuses `Ctrl-o` and a clean file shows the whole file | supported |
+| Surface | Tab | Depth | Pane | Looks | Code anchors | `click-row` | `cursor-middle` | `section-label` | `full-context` | `paintable-text` | `ignore-ws` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `diff-d0` | Workspace | 0 (file focused) | right | boxed, flat | `draw_right`, `draw_diff_pane`, `click_diff` | supported | supported | supported | supported | supported | supported |
+| `diff-d2` | Workspace | 2 | right | boxed, flat | `draw_right`, `draw_diff_pane`, `click_diff`, `compute_commit_diff`, `from_commit_lines` | supported | supported | supported | supported | supported | supported |
+| `compare-diff` | Compare | - | right | boxed, flat | `draw_right`, `draw_diff_pane`, `click_diff` | supported | supported | supported | supported | supported | supported |
+| `explorer-diff` | Explorer (changed file) | - | right | boxed, flat | `draw_explorer_tab`, `draw_diff_pane`, `explorer_click`, `explorer_click_row`, `click_diff` | supported | supported | supported | n/a: I4, Explorer diffs always show the whole file and `Ctrl-o` refuses | supported | supported |
+| `explorer-file` | Explorer (clean file) | - | right | boxed, flat | `draw_explorer_tab`, `draw_file_body`, `click_file_tab` | supported | n/a: I3, the clean-file view scrolls at the edge | n/a: a clean file has no diff sections | n/a: I4, the Explorer refuses `Ctrl-o` and a clean file shows the whole file | supported | n/a: a clean file has no diff |
 
 ### `scrollbars` — Scrollbars
 

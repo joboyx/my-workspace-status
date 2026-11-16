@@ -122,7 +122,7 @@ Split rows (`left + RULE + right`) take column widths from `tui/split.rs`: they 
 
 ## Path header
 
-The path header sits above the diff body in `draw_diff_pane`. A path wider than the pane wraps over several rows by display columns and can break anywhere. `diff_pane_header_rows` sets the row count: the rows the path needs, at most half the pane height (at least 1). A path cut by that cap is clipped on its last row. The muted extras (`inline|split`, ` · full`, ` · wrap`, ` · pan N`, `shown/total`) follow the path on its last row and clip at the pane edge. The row count does not depend on the extras or the scroll position, so the body does not move while it scrolls or pans. Paint, click, PageUp / PageDown, and the viewport use the same count.
+The path header sits above the diff body in `draw_diff_pane`. A path wider than the pane wraps over several rows by display columns and can break anywhere. `diff_pane_header_rows` sets the row count: the rows the path needs, at most half the pane height (at least 1). A path cut by that cap is clipped on its last row. The muted extras (`inline|split`, ` · full`, ` · wrap`, ` · -w`, ` · pan N`, `shown/total`) follow the path on its last row and clip at the pane edge. The row count does not depend on the extras or the scroll position, so the body does not move while it scrolls or pans. Paint, click, PageUp / PageDown, and the viewport use the same count.
 
 ## Focused row
 
@@ -164,6 +164,10 @@ When wrap is off, long diff lines clip to the pane. The cursor bar uses one colu
 `Ctrl-o` on a file row — or on a focused file **diff** — toggles unlimited unified context (`FULL_DIFF_CONTEXT_LINES`, `-U999999`) so hunks expand to the whole file. `Esc` or a second `Ctrl-o` restores the default-context diff. Untracked (`NEW`) files already synthesise full content and ignore this flag. An Explorer tab always loads a changed file with `FULL_DIFF_CONTEXT_LINES` (the header shows the full-context marker); `Ctrl-o` there only says `Explorer diffs always show the whole file`.
 
 Toggling full-file does **not** open an editor (`e` does). After the new rows load, scroll recenters on the prior hunk/change anchor.
+
+## Ignore whitespace
+
+`w` (or palette Ignore / show whitespace) flips one global setting, `AppState::ignore_whitespace`, for every diff pane and tab. While it is on, every diff load gets `-w` through `git::DiffOpts` (see [git-operations.md](./git-operations.md)): the workspace file diff, commit / stash / worktree drill diffs, compare-tab diffs, and the Explorer changed-file preview. The loaded `DiffContent` records it in `DiffContent::ignore_whitespace`. The parser and the paint do not change. A diff whose every change is whitespace has no hunks and paints `(no diff)`; the file stays in its file list, because name-status and numstat do not take `-w`. The path header adds ` · -w` (`DiffHeaderMarks::ignore_whitespace`, after ` · wrap`), and the Explorer viewer status line shows a `-w` pill next to `wrap`. Both read the shown content's marker, not the live setting, so they match the painted rows while a reload is still in flight. The toggle reloads the shown diff with the cursor text as the anchor (as `Ctrl-o` does) and drops a `V` range. A parked tab whose content has the other marker reloads when it becomes active. `build_partial_patch` refuses `-w` content for every kind (`turn whitespace on to stage hunks`), because its rows are not the bytes git would apply.
 
 ## Commit / stash / worktree diffs at depth 2
 

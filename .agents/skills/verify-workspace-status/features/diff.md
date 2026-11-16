@@ -1,6 +1,6 @@
 # Diff pane
 
-A dirty file row in the tree shows its diff in the right pane: a header line `<checkout>/<path>  <mode> · wrap`, a section line (`STAGED` or `UNSTAGED`), then the hunks (`@@ -a,b +c,d @@`) with old and new line numbers. The default mode is split, but split needs a diff pane of 100 columns or more: at the default `160x45` the pane has 96 columns and the header says `inline (too narrow)`. Detail: `docs/diff-rendering.md`.
+A dirty file row in the tree shows its diff in the right pane: a header line `<checkout>/<path>  <mode> · wrap` (plus ` · -w` while whitespace is ignored, DF4), a section line (`STAGED` or `UNSTAGED`), then the hunks (`@@ -a,b +c,d @@`) with old and new line numbers. The default mode is split, but split needs a diff pane of 100 columns or more: at the default `160x45` the pane has 96 columns and the header says `inline (too narrow)`. Detail: `docs/diff-rendering.md`.
 
 Conventions and the sweep order: [README.md](README.md). Demo fixture changes (`docs/demo.md` § Workspace): `session.ts` staged (`session expired` → `session expired — sign in again`), `auth.ts` unstaged (refresh window `5m` → `2m`, plus `withRefreshedExpiry`), `login.ts` untracked.
 
@@ -72,3 +72,57 @@ $WS doctor
 Expect: at `200x45` the tree has 80 columns and the diff pane 120, so the header says `split · wrap` and one screen line holds the old line 7 on the left and the new line 7 on the right of the `│` gutter. Back at `160x45` the header says `inline (too narrow)` again, and `doctor` checks the pane size against the last resize.
 
 **PASS:** both `wait` lines on the header are ok, the `grep` finds the side-by-side line on `df3-split`, and `doctor` is ok.
+
+## DF4 `w` hides a whitespace-only change, the palette row flips it, a restart keeps it
+
+`w` (or `:` `whitespace` Enter) loads every diff with `git diff -w`: the header adds ` · -w`, and a diff whose every change is whitespace shows `(no diff)`. The value is saved in the run's UI-state file, so a second run on the same workspace and the same file starts with it. While it is on, a `V` stage refuses.
+
+```bash
+WS=.agents/skills/verify-workspace-status/scripts/wsctl
+RUN=$($WS start | jq -r .run)
+trap '$WS stop' EXIT
+# A whitespace-only change to the tracked, clean app/src/config.ts.
+printf '%s\n' 'export  const API_BASE = "/api";   ' 'export const SESSION_TTL_MS = 30 * 60 * 1000;' >"$RUN/workspace/app/src/config.ts"
+$WS key r
+$WS wait 'config\.ts'
+$WS key j j j j
+$WS wait --cursor 'config.ts'
+$WS wait 'app/src/config\.ts +inline \(too narrow\) · wrap'
+$WS wait '@@ -1,2 \+1,2 @@'
+$WS wait --gone '· -w'
+$WS key w
+$WS wait 'app/src/config\.ts +inline \(too narrow\) · wrap · -w'
+$WS wait 'whitespace hidden'
+$WS wait '\(no diff\)'
+$WS snap --name df4-hidden --raw | grep -F '(no diff)'
+$WS key w
+$WS wait 'whitespace shown'
+$WS wait '@@ -1,2 \+1,2 @@'
+$WS key :
+$WS type whitespace
+$WS wait 'Ignore / show whitespace'
+$WS key Enter
+$WS wait 'app/src/config\.ts +inline \(too narrow\) · wrap · -w'
+jq -e '.ignoreWhitespace == true' "$RUN/state/ui-state.json"
+$WS stop
+# Same workspace, same UI-state file: the saved value wins at launch.
+$WS start --no-build --workspace "$RUN/workspace" --env WS_STATUS_UI_STORE="$RUN/state/ui-state.json"
+$WS key j j j j
+$WS wait --cursor 'config.ts'
+$WS wait 'app/src/config\.ts +inline \(too narrow\) · wrap · -w'
+$WS wait '\(no diff\)'
+$WS key k
+$WS wait --cursor 'auth.ts'
+$WS wait 'app/src/auth\.ts +inline \(too narrow\) · wrap · -w'
+$WS key Enter
+$WS key V
+$WS wait 'VISUAL'
+$WS key s
+$WS wait 'turn whitespace on to stage hunks'
+$WS snap --name df4-stage-refused --raw | grep -F 'turn whitespace on to stage hunks'
+git -C "$RUN/workspace/app" diff --cached --quiet -- src/auth.ts
+```
+
+Expect: before `w` the `config.ts` diff shows its one hunk (`-export const API_BASE = "/api";`, `+export  const API_BASE = "/api";   `). On `df4-hidden` the header ends `· wrap · -w`, the body is `(no diff)`, the status says `whitespace hidden`, and `config.ts` stays in the tree. The second `w` brings the hunk back (`whitespace shown`). The palette row turns it on again and the UI-state file holds `"ignoreWhitespace": true`. After the restart the `config.ts` header has `· -w` with no key pressed. On `auth.ts` (a real change, so its hunks still show), `V` `s` refuses with `turn whitespace on to stage hunks` and nothing is staged.
+
+**PASS:** every `wait` is ok, both `grep` lines match their captures, `jq -e` exits 0, and the last `git diff --cached --quiet` exits 0.
