@@ -159,6 +159,9 @@ pub struct ViewDefaults {
     pub commit_message_expand: Option<bool>,
     /// `lineBlame`: `Some(true)` for `"show"`, `Some(false)` for `"hide"`.
     pub line_blame: Option<bool>,
+    /// `whitespace`: `Some(true)` for `"ignore"` (diffs load with `git diff -w`),
+    /// `Some(false)` for `"show"`.
+    pub ignore_whitespace: Option<bool>,
     /// `commitMessageLines`: message rows of the expanded commit-message
     /// footer, an integer from [`COMMIT_MSG_LINES_MIN`] to
     /// [`COMMIT_MSG_LINES_MAX`].
@@ -328,7 +331,7 @@ fn parse_view_defaults(
     let Some(obj) = v.as_object() else {
         return Err(format!("{file} viewDefaults must be an object"));
     };
-    const KEYS: [&str; 8] = [
+    const KEYS: [&str; 9] = [
         "tree",
         "commitTree",
         "diff",
@@ -336,6 +339,7 @@ fn parse_view_defaults(
         "commitMessage",
         "commitMessageLines",
         "lineBlame",
+        "whitespace",
         "background",
     ];
     if let Some(key) = obj.keys().find(|k| !KEYS.contains(&k.as_str())) {
@@ -348,6 +352,7 @@ fn parse_view_defaults(
         wrap: parse_view_choice(file, obj, "wrap", "wrap", "unwrap")?,
         commit_message_expand: parse_view_choice(file, obj, "commitMessage", "expand", "collapse")?,
         line_blame: parse_view_choice(file, obj, "lineBlame", "show", "hide")?,
+        ignore_whitespace: parse_view_choice(file, obj, "whitespace", "ignore", "show")?,
         commit_message_lines: parse_view_msg_lines(file, obj)?,
         background: parse_view_choice(file, obj, "background", "paint", "terminal")?.map(|paint| {
             if paint {
@@ -369,6 +374,7 @@ impl ViewDefaults {
             wrap: over.wrap.or(self.wrap),
             commit_message_expand: over.commit_message_expand.or(self.commit_message_expand),
             line_blame: over.line_blame.or(self.line_blame),
+            ignore_whitespace: over.ignore_whitespace.or(self.ignore_whitespace),
             commit_message_lines: over.commit_message_lines.or(self.commit_message_lines),
             background: over.background.or(self.background),
         }

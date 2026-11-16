@@ -69,6 +69,11 @@ pub struct Settings {
     /// It beats config `viewDefaults.commitMessageLines`
     /// ([`crate::tui::state::AppState::apply_view_defaults`]). No env var.
     pub(crate) commit_msg_lines: Option<usize>,
+    /// Last-used "ignore whitespace" diff setting saved in
+    /// [`Self::ui_store`]: `None` when none was saved or the value is bad.
+    /// It beats config `viewDefaults.whitespace`
+    /// ([`crate::tui::state::AppState::apply_view_defaults`]). No env var.
+    pub(crate) ignore_whitespace: Option<bool>,
     /// Shared background-fetch claim and outcome JSON file
     /// ([`crate::tui::fetch_claim`]): `$XDG_STATE_HOME/my-workspace-status/
     /// background-fetch.json`. No env var or config key.
@@ -137,6 +142,7 @@ impl Settings {
             ui_store,
             activity_sparkline: ui_state.activity_sparkline,
             commit_msg_lines: ui_state.commit_msg_lines,
+            ignore_whitespace: ui_state.ignore_whitespace,
             fetch_store: background_fetch_store_path_from_env(&mut get),
             git: resolve_git_binary(get("WORKSPACE_STATUS_GIT").as_deref(), keys.git.as_deref()),
             no_color,
@@ -326,6 +332,7 @@ mod tests {
                 ui_store: PathBuf::from("/cfg/ui-state.json"),
                 activity_sparkline: false,
                 commit_msg_lines: None,
+                ignore_whitespace: None,
                 fetch_store: PathBuf::from(
                     "/.local/state/my-workspace-status/background-fetch.json"
                 ),
@@ -377,6 +384,7 @@ mod tests {
                 ui_store: PathBuf::from("/env/ui-state.json"),
                 activity_sparkline: false,
                 commit_msg_lines: None,
+                ignore_whitespace: None,
                 fetch_store: PathBuf::from(
                     "/.local/state/my-workspace-status/background-fetch.json"
                 ),
