@@ -3823,46 +3823,54 @@ fn wrapped_long_hunk_header_paints_one_clipped_row() {
 
 /// In a drawn diff pane with wrap on, the long hunk header takes one row:
 /// the row under it is the first code line of the hunk, and the clipped
-/// tail of the function context paints on no row.
+/// tail of the function context paints on no row. Both looks (boxed and
+/// flat panes) cut the row at the diff paint width.
 #[test]
 fn wrapped_long_hunk_header_takes_one_row_in_the_diff_pane() {
-    let mut state = two_pane_diff_state();
-    let header = long_hunk_header();
-    state.set_diff(
-        "app".into(),
-        "README.md".into(),
-        super::super::diff::DiffContent::from_unified(format!(
-            "{header}\n context seven\n-old eight\n+new eight\n context nine\n"
-        )),
-    );
-    state.diff_wrap = true;
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-    draw_state(&mut terminal, &mut state);
-    let buf = terminal.backend().buffer();
-    let text = buffer_text(&terminal);
-    let y = first_row_with(buf, "@@ -8,3 +8,3 @@ function").expect("hunk header row");
-    assert!(
-        buf_line(buf, y + 1).contains("context seven"),
-        "the row under the hunk header is the first code line:\n{text}"
-    );
-    assert!(!text.contains("HUNK_TAIL"), "the header clips:\n{text}");
-    // The header cells run from the header start up to the vertical-bar
-    // column before the pane's right border: the row is cut there.
-    let x = find_cell_col(buf, y, "@@ -8,3").expect("header start");
-    let matched = header
-        .chars()
-        .zip(x..buf.area().width)
-        .take_while(|(c, col)| buf[(*col, y)].symbol() == c.to_string())
-        .count() as u16;
-    let border = (0..buf.area().width)
-        .rev()
-        .find(|&col| buf[(col, y)].symbol() == "│")
-        .expect("right pane border");
-    assert_eq!(
-        x + matched,
-        border - crate::tui::split::DIFF_VSCROLL_COLS,
-        "the header clips at the pane edge:\n{text}"
-    );
+    for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+        let case = format!("{background:?}");
+        let mut state = two_pane_diff_state();
+        state.background = background;
+        let header = long_hunk_header();
+        state.set_diff(
+            "app".into(),
+            "README.md".into(),
+            super::super::diff::DiffContent::from_unified(format!(
+                "{header}\n context seven\n-old eight\n+new eight\n context nine\n"
+            )),
+        );
+        state.diff_wrap = true;
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let buf = terminal.backend().buffer();
+        let text = buffer_text(&terminal);
+        let y = first_row_with(buf, "@@ -8,3 +8,3 @@ function")
+            .unwrap_or_else(|| panic!("{case}: hunk header row"));
+        assert!(
+            buf_line(buf, y + 1).contains("context seven"),
+            "{case}: the row under the hunk header is the first code line:\n{text}"
+        );
+        assert!(
+            !text.contains("HUNK_TAIL"),
+            "{case}: the header clips:\n{text}"
+        );
+        // The header cells run from the header start up to the end of the
+        // diff paint width (the pane less the vertical-bar column): the
+        // row is cut there.
+        let x = find_cell_col(buf, y, "@@ -8,3").unwrap_or_else(|| panic!("{case}: header start"));
+        let matched = header
+            .chars()
+            .zip(x..buf.area().width)
+            .take_while(|(c, col)| buf[(*col, y)].symbol() == c.to_string())
+            .count() as u16;
+        let edge = state.layout.diff_content_x
+            + crate::tui::split::diff_paint_width(state.layout.diff_pane_width);
+        assert_eq!(
+            x + matched,
+            edge,
+            "{case}: the header clips at the pane edge:\n{text}"
+        );
+    }
 }
 
 #[test]
@@ -17557,7 +17565,9 @@ fn file_view_wraps_and_keeps_the_cursor_in_view() {
 
 /// The clean-file view wraps a long line between words: every painted row
 /// holds whole words only, the rows hold every word in order, and the
-/// painted row count is the count the viewport math uses.
+/// painted row count is the count the viewport math uses. Both looks
+/// (boxed and flat panes); at each code width a glyph wrap would cut a
+/// word, so the test fails if the view falls back to it.
 #[test]
 fn file_view_wraps_a_long_line_between_words() {
     let words: Vec<String> = (0..24)
@@ -17567,42 +17577,57 @@ fn file_view_wraps_a_long_line_between_words() {
         })
         .collect();
     let long = words.join(" ");
-    let mut state = file_view_state(&[long.as_str(), "tail"]);
-    assert!(state.diff_wrap, "a file view opens wrapped");
-    let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
-    terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-    let tab = state.tabs.active_file_view().expect("a file view");
-    let code_w = tab.code_width(state.layout.file_view_width, state.ascii);
-    let row_count = tab.line_rows(0, code_w, true, usize::MAX);
-    let rows = state.layout.file_view_row_lines.clone();
-    assert_eq!(
-        rows.iter().filter(|&&line| line == 0).count(),
-        row_count,
-        "{rows:?}"
-    );
-    assert!(row_count > 1, "the line wraps: {rows:?}");
-    let x0 = usize::from(state.layout.file_view_x) + file_view_gutter_width(2, state.ascii);
-    let buf = terminal.backend().buffer();
-    let painted: Vec<String> = (0..row_count)
-        .map(|part| {
-            buf_line(buf, state.layout.file_view_y + part as u16)
-                .chars()
-                .skip(x0)
-                .take(code_w)
-                .collect()
-        })
-        .collect();
-    let mut seen = Vec::new();
-    for row in &painted {
-        for token in row.split_whitespace() {
-            assert!(
-                words.iter().any(|word| word == token),
-                "row {row:?} cuts a word ({token:?}):\n{painted:#?}"
-            );
-            seen.push(token.to_string());
+    for background in [BackgroundMode::Terminal, BackgroundMode::Paint] {
+        let case = format!("{background:?}");
+        let mut state = file_view_state(&[long.as_str(), "tail"]);
+        state.background = background;
+        assert!(state.diff_wrap, "{case}: a file view opens wrapped");
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let tab = state.tabs.active_file_view().expect("a file view");
+        let code_w = tab.code_width(state.layout.file_view_width, state.ascii);
+        // The fixture line is ASCII, so a column is a byte index. Under the
+        // glyph wrap some row would start inside a word at this width.
+        let bytes = long.as_bytes();
+        let glyph = crate::tui::search::wrap_col_starts(&long, code_w);
+        assert!(
+            glyph
+                .iter()
+                .skip(1)
+                .any(|&start| bytes[start - 1] != b' ' && bytes[start] != b' '),
+            "{case}: a glyph wrap at code width {code_w} must cut a word: {glyph:?}"
+        );
+        let row_count = tab.line_rows(0, code_w, true, usize::MAX);
+        let rows = state.layout.file_view_row_lines.clone();
+        assert_eq!(
+            rows.iter().filter(|&&line| line == 0).count(),
+            row_count,
+            "{case}: {rows:?}"
+        );
+        assert!(row_count > 1, "{case}: the line wraps: {rows:?}");
+        let x0 = usize::from(state.layout.file_view_x) + file_view_gutter_width(2, state.ascii);
+        let buf = terminal.backend().buffer();
+        let painted: Vec<String> = (0..row_count)
+            .map(|part| {
+                buf_line(buf, state.layout.file_view_y + part as u16)
+                    .chars()
+                    .skip(x0)
+                    .take(code_w)
+                    .collect()
+            })
+            .collect();
+        let mut seen = Vec::new();
+        for row in &painted {
+            for token in row.split_whitespace() {
+                assert!(
+                    words.iter().any(|word| word == token),
+                    "{case}: row {row:?} cuts a word ({token:?}):\n{painted:#?}"
+                );
+                seen.push(token.to_string());
+            }
         }
+        assert_eq!(seen, words, "{case}: the rows hold every word in order");
     }
-    assert_eq!(seen, words, "the rows hold every word in order");
 }
 
 #[test]
