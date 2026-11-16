@@ -449,9 +449,9 @@ thread_local! {
     static WRAP_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// [`wrap_col_starts_capped`] and [`word_wrap_col_starts_capped`] scans on
-/// this thread since the last call, so tests can bound how often paint
-/// rescans a long line.
+/// [`word_wrap_col_starts_capped`] (the code-cell wrap that paint uses) and
+/// [`wrap_col_starts`] scans on this thread since the last call, so tests
+/// can bound how often paint rescans a long line.
 #[cfg(test)]
 pub(crate) fn take_wrap_scans() -> usize {
     WRAP_SCANS.with(|count| count.replace(0))
@@ -460,21 +460,12 @@ pub(crate) fn take_wrap_scans() -> usize {
 /// Display-column starts of soft-wrap rows that break at any glyph.
 ///
 /// Each row fills `width` columns. Titles and labels (the diff path
-/// header, section labels, hunk headers) wrap here; the code text of a
+/// header, section labels, error rows) wrap here; the code text of a
 /// line viewer wraps at word boundaries ([`word_wrap_col_starts`]).
 ///
 /// Always at least `[0]`. A glyph wider than `width` is skipped at the
 /// start of a row (same as [`slice_cols`] omitting it).
 pub fn wrap_col_starts(text: &str, width: usize) -> Vec<usize> {
-    wrap_col_starts_capped(text, width, usize::MAX)
-}
-
-/// [`wrap_col_starts`] that stops after `max_rows` rows (at least one).
-///
-/// The scan ends where row `max_rows + 1` would start, so a caller that
-/// passes its viewport height plus one learns "taller than the view"
-/// without reading the rest of a very long line.
-pub fn wrap_col_starts_capped(text: &str, width: usize, max_rows: usize) -> Vec<usize> {
     #[cfg(test)]
     WRAP_SCANS.with(|count| count.set(count.get() + 1));
     let width = width.max(1);
@@ -485,9 +476,6 @@ pub fn wrap_col_starts_capped(text: &str, width: usize, max_rows: usize) -> Vec<
         let mut buf = [0u8; 4];
         let cw = visible_width(ch.encode_utf8(&mut buf));
         if used > 0 && used.saturating_add(cw) > width {
-            if starts.len() >= max_rows.max(1) {
-                break;
-            }
             starts.push(col);
             used = 0;
         }
