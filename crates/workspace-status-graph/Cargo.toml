@@ -1,6 +1,6 @@
 [package]
 name = "workspace-status-graph"
-version = "0.1.326"
+version = "0.1.327"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
