@@ -960,6 +960,7 @@ mod tests {
             kind,
             text: String::new(),
             line_no,
+            ..Default::default()
         };
         let inline = |kind, n| DiffRow::Line {
             left: cell(kind, Some(n)),

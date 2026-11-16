@@ -3390,6 +3390,59 @@ fn split_word_diff_paints_word_bg_on_both_sides() {
     assert_eq!(rows_with_bg(buf, palette.diff_del_word_bg), vec![y]);
 }
 
+/// A leading tab that became 4 spaces paints the same text on both rows;
+/// the 4 indent columns of the `-` and `+` cell take the word background,
+/// and the rest of the line keeps the row background. Inline and split.
+#[test]
+fn tab_to_spaces_paints_word_bg_on_the_indent() {
+    let lines = word_diff_lines("\tTab indented line;", "    Tab indented line;");
+    for mode in [DiffMode::Inline, DiffMode::SideBySide] {
+        let mut state = word_diff_state(lines.clone(), mode);
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(220, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(state.diff_layout(), mode);
+        let buf = terminal.backend().buffer();
+        let text = buffer_text(&terminal);
+        let rows: Vec<u16> = (0..buf.area().height)
+            .filter(|&y| buf_line(buf, y).contains("    Tab indented line;"))
+            .collect();
+        // Code columns of each painted copy of the line, left to right.
+        let mut copies: Vec<(u16, u16)> = Vec::new();
+        for &y in &rows {
+            let line = buf_line(buf, y);
+            let mut from = 0;
+            while let Some(at) = line[from..].find("Tab indented line;") {
+                let col = line[..from + at].chars().count() as u16;
+                copies.push((y, col));
+                from += at + 1;
+            }
+        }
+        assert_eq!(
+            copies.len(),
+            2,
+            "{mode:?}: one `-` and one `+` copy:\n{text}"
+        );
+        let (del, add) = (copies[0], copies[1]);
+        for ((y, tab_col), word_bg, row_bg) in [
+            (del, palette.diff_del_word_bg, palette.diff_del_bg),
+            (add, palette.diff_add_word_bg, palette.diff_add_bg),
+        ] {
+            let indent: Vec<u16> = (tab_col - 4..tab_col).collect();
+            assert_eq!(
+                cols_with_bg(buf, y, word_bg),
+                indent,
+                "{mode:?}: only the indent sits on the word bg:\n{text}"
+            );
+            for x in tab_col..tab_col + "Tab indented line;".len() as u16 {
+                assert_eq!(buf[(x, y)].bg, row_bg, "{mode:?}: col {x}:\n{text}");
+            }
+        }
+        assert_eq!(rows_with_bg(buf, palette.diff_add_word_bg), vec![add.0]);
+        assert_eq!(rows_with_bg(buf, palette.diff_del_word_bg), vec![del.0]);
+    }
+}
+
 #[test]
 fn two_edits_on_one_line_keep_the_middle_on_the_row_bg() {
     let mut state = word_diff_state(
@@ -3497,6 +3550,7 @@ fn wrapped_cell_rows_match_per_row_slices() {
             kind,
             text: text.clone(),
             line_no: Some(7),
+            ..Default::default()
         };
         for width in [8u16, 9, 10, 23, 80] {
             let mut rows = CellRows::new(&cell, &spans, width, 3, false, true);
@@ -3530,6 +3584,7 @@ fn wrapped_long_line_scans_wrap_starts_once_per_cell() {
         kind,
         text: text.clone(),
         line_no: Some(1),
+        ..Default::default()
     };
     let inline = DiffRow::Line {
         left: cell(DiffCellKind::Add),
@@ -3620,6 +3675,7 @@ fn wrap_cell(kind: DiffCellKind, text: &str) -> DiffCell {
         kind,
         text: text.to_string(),
         line_no: Some(1),
+        ..Default::default()
     }
 }
 

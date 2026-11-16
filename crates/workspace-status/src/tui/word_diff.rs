@@ -9,6 +9,8 @@
 //! Tokens are words (`alphanumeric` or `_` runs), whitespace runs, and
 //! single other chars. A token-level LCS marks the changed tokens. Ranges
 //! are byte ranges into the cell text and always land on char boundaries.
+//! The comparison reads each cell's word key, which keeps the columns of
+//! an expanded tab as `\t`, so a tab ↔ spaces change is not invisible.
 
 use std::ops::Range;
 
@@ -312,6 +314,11 @@ fn row_pairs(rows: &[DiffRow]) -> Vec<RowPair> {
 /// `visible` is still paired. Pairs fully outside `visible` are not
 /// computed. `ignore_whitespace` is the shown content's `-w` marker and
 /// goes to [`word_change_ranges`].
+///
+/// Each side compares its [`DiffCell::word_key`](super::diff::DiffCell::word_key),
+/// not the painted text: a tab and the spaces it expanded to differ, so a
+/// tab ↔ spaces change marks the expanded columns (unless whitespace is
+/// ignored).
 pub(crate) fn diff_word_ranges(
     rows: &[DiffRow],
     visible: Range<usize>,
@@ -329,13 +336,15 @@ pub(crate) fn diff_word_ranges(
         if !visible.contains(&del) && !visible.contains(&add) {
             continue;
         }
+        // Word keys keep tab columns as `\t`, so a tab that became spaces
+        // still differs; ranges into a key are ranges into the cell text.
         let old_text = match &rows[del] {
-            DiffRow::Line { left, .. } => left.text.as_str(),
+            DiffRow::Line { left, .. } => left.word_key(),
             _ => continue,
         };
         let new_text = match (&rows[add], pair) {
-            (DiffRow::Line { right: Some(r), .. }, RowPair::Split(_)) => r.text.as_str(),
-            (DiffRow::Line { left, .. }, RowPair::Inline { .. }) => left.text.as_str(),
+            (DiffRow::Line { right: Some(r), .. }, RowPair::Split(_)) => r.word_key(),
+            (DiffRow::Line { left, .. }, RowPair::Inline { .. }) => left.word_key(),
             _ => continue,
         };
         let Some((old_ranges, new_ranges)) =
@@ -362,7 +371,84 @@ mod tests {
             kind,
             text: text.to_string(),
             line_no: Some(1),
+            ..Default::default()
         }
+    }
+
+    /// Inline row built from the source line, the way the parser builds it
+    /// (tabs expanded, tab columns kept in the word key).
+    fn source_row(kind: DiffCellKind, line: &str) -> DiffRow {
+        DiffRow::Line {
+            left: DiffCell::from_source(kind, line, Some(1)),
+            right: None,
+        }
+    }
+
+    /// Word ranges of an inline del/add pair built from source lines.
+    fn source_pair(old: &str, new: &str, ignore_whitespace: bool) -> DiffWordRanges {
+        let rows = vec![
+            source_row(DiffCellKind::Del, old),
+            source_row(DiffCellKind::Add, new),
+        ];
+        diff_word_ranges(&rows, 0..rows.len(), ignore_whitespace)
+    }
+
+    const TAB_LINE: &str = "\tTab indented line";
+    const SPACES_LINE: &str = "    Tab indented line";
+
+    #[test]
+    fn tab_to_spaces_marks_the_indent_on_both_sides() {
+        let ranges = source_pair(TAB_LINE, SPACES_LINE, false);
+        assert_eq!(ranges.left(0), one(0, 4));
+        assert_eq!(ranges.left(1), one(0, 4));
+        // Spaces back to a tab marks the same columns.
+        let back = source_pair(SPACES_LINE, TAB_LINE, false);
+        assert_eq!(back.left(0), one(0, 4));
+        assert_eq!(back.left(1), one(0, 4));
+    }
+
+    #[test]
+    fn split_tab_to_spaces_marks_the_indent_on_both_sides() {
+        let rows = vec![split(
+            DiffCell::from_source(DiffCellKind::Del, TAB_LINE, Some(1)),
+            DiffCell::from_source(DiffCellKind::Add, SPACES_LINE, Some(1)),
+        )];
+        let ranges = diff_word_ranges(&rows, 0..1, false);
+        assert_eq!(ranges.left(0), one(0, 4));
+        assert_eq!(ranges.right(0), one(0, 4));
+    }
+
+    #[test]
+    fn tab_kept_as_tab_is_not_marked() {
+        let ranges = source_pair("\tlet a = 1;", "\tlet a = 2;", false);
+        assert_eq!(ranges.left(0), one(12, 13));
+        assert_eq!(ranges.left(1), one(12, 13));
+        let same = source_pair("\tlet a = 1;", "\tlet a = 1;  ", false);
+        assert!(same.left(0).is_empty());
+        assert_eq!(same.left(1), one(14, 16));
+    }
+
+    #[test]
+    fn tab_inside_a_line_vs_spaces_marks_the_expanded_columns() {
+        // `a\tb` paints `a   b`: the tab fills columns 1..4.
+        let ranges = source_pair("let a\t= 1;", "let a   = 1;", false);
+        assert_eq!(ranges.left(0), one(5, 8));
+        assert_eq!(ranges.left(1), one(5, 8));
+    }
+
+    #[test]
+    fn ignore_whitespace_leaves_tab_to_spaces_unmarked() {
+        for (old, new) in [(TAB_LINE, SPACES_LINE), ("let a\t= 1;", "let a   = 1;")] {
+            let ranges = source_pair(old, new, true);
+            assert!(
+                ranges.left(0).is_empty() && ranges.left(1).is_empty(),
+                "{old:?} {new:?}"
+            );
+        }
+        // A real word change next to the tab still marks the word only.
+        let ranges = source_pair("\tlet a = 1;", "    let a = 2;", true);
+        assert_eq!(ranges.left(0), one(12, 13));
+        assert_eq!(ranges.left(1), one(12, 13));
     }
 
     fn inline(kind: DiffCellKind, text: &str) -> DiffRow {

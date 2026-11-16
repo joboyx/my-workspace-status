@@ -440,6 +440,36 @@ fn diff_rows_expand_tabs_and_replace_control_characters() {
     assert_eq!(hunks[0].lines[0].text, "a\tb\x07");
 }
 
+/// The word key of a cell is its painted text with each expanded tab
+/// column as `\t`: the same length, so word ranges stay valid for `text`.
+/// A line with no tab has no key, and the painted text does not change.
+#[test]
+fn diff_cell_word_key_keeps_tab_columns() {
+    let cell = DiffCell::from_source(DiffCellKind::Del, "\tab\tc\x07\r", Some(3));
+    assert_eq!(cell.text, "    ab  c\u{FFFD}");
+    assert_eq!(cell.text, paintable_diff_line("\tab\tc\x07\r"));
+    assert_eq!(cell.word_key(), "\t\t\t\tab\t\tc\u{FFFD}");
+    assert_eq!(cell.word_key().len(), cell.text.len());
+    assert_eq!((cell.kind, cell.line_no), (DiffCellKind::Del, Some(3)));
+
+    let plain = DiffCell::from_source(DiffCellKind::Add, "    ab", None);
+    assert_eq!(plain.tab_key, None);
+    assert_eq!(plain.word_key(), "    ab");
+
+    let rows = build_diff_rows(
+        &DiffContent::from_unified("@@ -1 +1 @@\n-\tx\n+    x\n"),
+        DiffMode::Inline,
+    );
+    let keys: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| match row {
+            DiffRow::Line { left, .. } => Some(left.word_key()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(keys, vec!["\t\t\t\tx", "    x"]);
+}
+
 #[test]
 fn side_by_side_pairs_del_with_add() {
     let rows = build_diff_rows(
@@ -624,6 +654,7 @@ fn wrap_height_uses_display_columns_and_viewport_snaps() {
             kind: DiffCellKind::Add,
             text: "n".repeat(20),
             line_no: Some(1),
+            ..Default::default()
         },
         right: None,
     };
@@ -637,6 +668,7 @@ fn wrap_height_uses_display_columns_and_viewport_snaps() {
             kind: DiffCellKind::Add,
             text: "ok".into(),
             line_no: Some(1),
+            ..Default::default()
         },
         right: None,
     };

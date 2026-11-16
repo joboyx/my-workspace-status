@@ -412,6 +412,25 @@ pub fn word_and_space_change_workspace(prefix: &str) -> (PathBuf, PathBuf) {
     (root, workspace)
 }
 
+/// Text after the indent of `notes.txt` in [`tab_to_spaces_workspace`].
+pub const TAB_SPACES_TEXT: &str = "Tab indented line that becomes four spaces in the worktree \
+                                   copy, and it is long enough to wrap as well.";
+
+/// Repo `app` with `notes.txt` committed as a tab and [`TAB_SPACES_TEXT`],
+/// and the worktree copy indented with 4 spaces instead: a whitespace-only
+/// change that paints the same text on both sides, the only dirty file,
+/// so launch shows its diff.
+pub fn tab_to_spaces_workspace(prefix: &str) -> (PathBuf, PathBuf) {
+    let (root, workspace) = new_workspace(prefix);
+    seed_repo(&workspace, "app", "main", false);
+    let repo = workspace.join("app");
+    fs::write(repo.join("notes.txt"), format!("\t{TAB_SPACES_TEXT}\n")).unwrap();
+    git(&repo, &["add", "notes.txt"]);
+    git(&repo, &["commit", "-q", "-m", "notes"]);
+    fs::write(repo.join("notes.txt"), format!("    {TAB_SPACES_TEXT}\n")).unwrap();
+    (root, workspace)
+}
+
 /// `notes.md` of [`hunk_context_markdown_workspace`]: the long line
 /// [`LONG_LINE_OLD`], a blank line, then `- item 3` … `- item 12`, with
 /// item `changed` written as `- item <changed>`.

@@ -851,6 +851,7 @@ mod tests {
                 kind,
                 text: text.into(),
                 line_no: Some(line_no),
+                ..Default::default()
             },
             right: None,
         }
@@ -944,6 +945,7 @@ mod tests {
                     kind: DiffCellKind::Ctx,
                     text: " {".into(),
                     line_no: Some(1),
+                    ..Default::default()
                 },
                 right: None,
             },
@@ -952,6 +954,7 @@ mod tests {
                     kind: DiffCellKind::Add,
                     text: r#"  "name": "alpha-syntax""#.into(),
                     line_no: Some(2),
+                    ..Default::default()
                 },
                 right: None,
             },
@@ -1035,6 +1038,7 @@ mod tests {
             kind,
             text: text.into(),
             line_no: Some(1),
+            ..Default::default()
         };
         let rows = vec![DiffRow::Line {
             left: cell(DiffCellKind::Del, "let total = price * qty;"),
@@ -1623,24 +1627,18 @@ mod tests {
                 kind: DiffCellKind::Del,
                 text: " {".into(),
                 line_no: Some(1),
+                ..Default::default()
             },
-            right: Some(DiffCell {
-                kind: DiffCellKind::Empty,
-                text: String::new(),
-                line_no: None,
-            }),
+            right: Some(DiffCell::default()),
         };
         let later = DiffRow::Line {
             left: DiffCell {
                 kind: DiffCellKind::Del,
                 text: r#"  "name": "alpha-syntax""#.into(),
                 line_no: Some(20),
+                ..Default::default()
             },
-            right: Some(DiffCell {
-                kind: DiffCellKind::Empty,
-                text: String::new(),
-                line_no: None,
-            }),
+            right: Some(DiffCell::default()),
         };
         let within = vec![open.clone(), later.clone()];
         let across = vec![

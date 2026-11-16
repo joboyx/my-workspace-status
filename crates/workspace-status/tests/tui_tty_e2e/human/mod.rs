@@ -193,6 +193,7 @@ mod pty_stash_graph_pop;
 mod pty_streamed_collect_updates_focused_repo_before_slow;
 mod pty_t_and_i_toggle_view_modes;
 mod pty_tab_swaps_selection_cursor;
+mod pty_tab_to_spaces_marks_the_indent;
 mod pty_terminal_resize_relayouts;
 mod pty_text_fields_type_doubled_nav_letters;
 mod pty_theme_persists_across_restart;
