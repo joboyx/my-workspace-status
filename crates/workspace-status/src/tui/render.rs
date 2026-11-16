@@ -3807,6 +3807,7 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                     del_word: palette.diff_del_word_bg,
                 },
                 cache_id: diff_syntax_cache_id(state, split),
+                ignore_whitespace: state.current_diff_content().ignore_whitespace,
             },
             &rows,
             skip..logical_end,

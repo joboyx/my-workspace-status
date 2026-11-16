@@ -388,6 +388,30 @@ pub fn long_line_markdown_workspace(prefix: &str) -> (PathBuf, PathBuf) {
     (root, workspace)
 }
 
+/// Committed line of `notes.txt` in [`word_and_space_change_workspace`].
+pub const WORD_SPACE_OLD: &str = "The real change on this line is one word, also extra spaces \
+                                  are added, and the line is long enough to wrap.";
+
+/// [`WORD_SPACE_OLD`] as the worktree has it: `one word` became
+/// `two words`, and the space after `also` is doubled.
+pub const WORD_SPACE_NEW: &str = "The real change on this line is two words, also  extra spaces \
+                                  are added, and the line is long enough to wrap.";
+
+/// Repo `app` with `notes.txt` committed as [`WORD_SPACE_OLD`] and changed
+/// to [`WORD_SPACE_NEW`] in the worktree: a real word change and a
+/// whitespace change on one line, the only dirty file, so launch shows
+/// its diff.
+pub fn word_and_space_change_workspace(prefix: &str) -> (PathBuf, PathBuf) {
+    let (root, workspace) = new_workspace(prefix);
+    seed_repo(&workspace, "app", "main", false);
+    let repo = workspace.join("app");
+    fs::write(repo.join("notes.txt"), format!("{WORD_SPACE_OLD}\n")).unwrap();
+    git(&repo, &["add", "notes.txt"]);
+    git(&repo, &["commit", "-q", "-m", "notes"]);
+    fs::write(repo.join("notes.txt"), format!("{WORD_SPACE_NEW}\n")).unwrap();
+    (root, workspace)
+}
+
 /// `notes.md` of [`hunk_context_markdown_workspace`]: the long line
 /// [`LONG_LINE_OLD`], a blank line, then `- item 3` … `- item 12`, with
 /// item `changed` written as `- item <changed>`.

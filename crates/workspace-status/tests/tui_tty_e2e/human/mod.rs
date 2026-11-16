@@ -212,6 +212,7 @@ mod pty_v_highlight_stage_unstage_range;
 mod pty_v_highlight_x_reverts_range;
 mod pty_vs16_emoji_row_moves_the_cursor_past_the_emoji;
 mod pty_w_ignores_whitespace_in_the_diff;
+mod pty_w_skips_whitespace_in_the_word_highlight;
 mod pty_watch_applies_while_keys_arrive;
 mod pty_watch_finds_repo_added_to_empty_workspace;
 mod pty_watch_keeps_graph_focus;
