@@ -366,6 +366,28 @@ pub fn whitespace_workspace(prefix: &str) -> (PathBuf, PathBuf) {
     (root, workspace)
 }
 
+/// Committed line of `notes.md` in [`long_line_markdown_workspace`].
+pub const LONG_LINE_OLD: &str = "Here the second paragraph has words that become double spaced \
+                                 in the worktree copy, so every later break moves.";
+
+/// [`LONG_LINE_OLD`] as the worktree has it: two of its spaces doubled.
+pub const LONG_LINE_NEW: &str = "Here the second paragraph has words  that become  double spaced \
+                                 in the worktree copy, so every later break moves.";
+
+/// Repo `app` with `notes.md` committed as [`LONG_LINE_OLD`] and changed
+/// to [`LONG_LINE_NEW`] in the worktree: one long-line markdown change,
+/// the only dirty file, so launch shows its diff.
+pub fn long_line_markdown_workspace(prefix: &str) -> (PathBuf, PathBuf) {
+    let (root, workspace) = new_workspace(prefix);
+    seed_repo(&workspace, "app", "main", false);
+    let repo = workspace.join("app");
+    fs::write(repo.join("notes.md"), format!("{LONG_LINE_OLD}\n")).unwrap();
+    git(&repo, &["add", "notes.md"]);
+    git(&repo, &["commit", "-q", "-m", "notes"]);
+    fs::write(repo.join("notes.md"), format!("{LONG_LINE_NEW}\n")).unwrap();
+    (root, workspace)
+}
+
 /// File that [`compare_regions_workspace`] adds on the feature branch.
 ///
 /// It sorts after `regions.txt`, so the compare tab opens on the regions diff.

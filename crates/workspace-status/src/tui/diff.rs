@@ -14,7 +14,7 @@ use crate::file_index::paintable_line;
 use crate::git::{exec_git_stdout_untrimmed, git_diff_args, DiffOpts};
 use crate::snapshot::FileChange;
 
-use super::search::wrap_col_starts;
+use super::search::{word_wrap_col_starts, wrap_col_starts};
 use super::split::{side_by_side_column_widths, DiffMode, DIFF_CURSOR_BAR_COLS};
 use super::tree::list_viewport_start;
 
@@ -1540,6 +1540,9 @@ pub fn row_search_text(row: &DiffRow) -> String {
 ///
 /// Split rows use the taller side. Continuation rows are extra visual
 /// lines of the same logical row (blank gutter / sign on those lines).
+/// Code cells count word-wrap rows ([`word_wrap_col_starts`], as
+/// `CellRows` paints them); section labels and hunk / error text count
+/// glyph-wrap rows ([`wrap_col_starts`], as their paint wraps them).
 pub fn diff_row_visual_height(
     row: &DiffRow,
     content_w: u16,
@@ -1558,13 +1561,13 @@ pub fn diff_row_visual_height(
         }
         DiffRow::Line { left, right } if split && right.is_some() => {
             let cols = side_by_side_column_widths(content_w, split_fraction);
-            let left_h = wrap_col_starts(
+            let left_h = word_wrap_col_starts(
                 &left.text,
                 cell_code_width(cols.left_width as usize, gutter_with_mark),
             )
             .len()
             .max(1);
-            let right_h = wrap_col_starts(
+            let right_h = word_wrap_col_starts(
                 &right.as_ref().unwrap().text,
                 cell_code_width(cols.right_width as usize, gutter_with_mark),
             )
@@ -1573,7 +1576,7 @@ pub fn diff_row_visual_height(
             left_h.max(right_h)
         }
         DiffRow::Line { left, .. } => {
-            wrap_col_starts(&left.text, cell_code_width(width, gutter_with_mark))
+            word_wrap_col_starts(&left.text, cell_code_width(width, gutter_with_mark))
                 .len()
                 .max(1)
         }

@@ -76,7 +76,8 @@ use super::quick_open::{
 };
 use super::search::{
     collect_graph_match_indices, collect_match_ids, explorer_row_match_indices, list_prefix_cols,
-    slice_cols, wrap_col_starts, wrap_col_starts_capped, wrap_cols, SearchPane,
+    slice_cols, word_wrap_col_starts, word_wrap_col_starts_capped, wrap_cols, wrap_row_cols,
+    SearchPane,
 };
 use super::search_files::{
     option_is_on, option_tooltip, search_row_shows_status, SearchFilesState, SearchRow, SearchZone,
@@ -1081,7 +1082,7 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
         };
         let code = spans.get(line - scroll).map(Vec::as_slice).unwrap_or(&[]);
         let starts = if wrap {
-            wrap_col_starts_capped(text, code_w, row_cap)
+            word_wrap_col_starts_capped(text, code_w, row_cap)
         } else {
             vec![usize::from(col_offset)]
         };
@@ -1108,7 +1109,14 @@ fn draw_file_body(frame: &mut Frame<'_>, pane: PaneArea, state: &mut AppState) {
             let with_bg = |style: Style| bg.map_or(style, |bg| style.bg(bg));
             let mut row = vec![Span::styled(number, with_bg(gutter_style))];
             let mut used = 0usize;
-            for span in slice_styled_cols(code, start, code_w) {
+            // A word-wrap row ends at the next row's start, short of the
+            // width when a word moved down; the pad fills the rest.
+            let row_w = if wrap {
+                wrap_row_cols(&starts, part, code_w)
+            } else {
+                code_w
+            };
+            for span in slice_styled_cols(code, start, row_w) {
                 used += visible_width(&span.text);
                 let fg = match_fg.unwrap_or(span.fg);
                 let style = Style::default().fg(fg).add_modifier(underline);
@@ -4561,9 +4569,10 @@ fn section_style(section: DiffSection, palette: Palette) -> Style {
 
 /// One diff cell's code, cut into the screen rows the cell paints.
 ///
-/// With wrap on, the wrap starts are scanned once per cell and a
-/// forward-only [`StyledColCursor`] slices each row from the last one, so
-/// a line of `n` wrap rows costs one scan, not `n`.
+/// With wrap on, the word-wrap starts ([`word_wrap_col_starts`]) are
+/// scanned once per cell and a forward-only [`StyledColCursor`] slices each
+/// row from the last one, so a line of `n` wrap rows costs one scan, not
+/// `n`. Each wrap row ends at the next row's start.
 struct CellRows<'a> {
     cell: &'a DiffCell,
     syntax: &'a [CodeSpan],
@@ -4591,7 +4600,7 @@ impl<'a> CellRows<'a> {
             cell,
             syntax,
             code_w,
-            starts: wrap.then(|| wrap_col_starts(&cell.text, code_w)),
+            starts: wrap.then(|| word_wrap_col_starts(&cell.text, code_w)),
             cursor: StyledColCursor::new(syntax),
         }
     }
@@ -4605,18 +4614,18 @@ impl<'a> CellRows<'a> {
     /// the one row starts at the pan `col_offset`; a wrap row past the
     /// cell's last one (the taller side of a split row) is empty.
     fn code(&mut self, part: usize, col_offset: usize, palette: Palette) -> Vec<CodeSpan> {
-        let offset = match &self.starts {
-            None => col_offset,
+        let (offset, width) = match &self.starts {
+            None => (col_offset, self.code_w),
             Some(starts) => match starts.get(part) {
-                Some(&offset) => offset,
+                Some(&offset) => (offset, wrap_row_cols(starts, part, self.code_w)),
                 None => return Vec::new(),
             },
         };
         match (self.starts.is_some(), self.cell.kind) {
             (true, DiffCellKind::Add | DiffCellKind::Del | DiffCellKind::Ctx) => {
-                self.cursor.slice(offset, self.code_w)
+                self.cursor.slice(offset, width)
             }
-            _ => paint_code_parts(self.cell, self.syntax, offset, self.code_w, palette),
+            _ => paint_code_parts(self.cell, self.syntax, offset, width, palette),
         }
     }
 }

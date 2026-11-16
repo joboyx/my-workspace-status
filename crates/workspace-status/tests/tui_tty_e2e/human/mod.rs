@@ -62,6 +62,7 @@ mod pty_diff_hscrollbar_thumb_drag;
 mod pty_diff_path_header_wraps_long_path;
 mod pty_diff_syntax_highlight_keeps_signs_and_row_bg;
 mod pty_diff_wrap_toggle;
+mod pty_diff_wraps_code_at_word_boundaries;
 mod pty_divider_scrollbar_drag;
 mod pty_dot_hides_linked_of_hidden_primary;
 mod pty_dot_skips_ignored_paths;

@@ -449,14 +449,19 @@ thread_local! {
     static WRAP_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// [`wrap_col_starts_capped`] scans on this thread since the last call, so
-/// tests can bound how often paint rescans a long line.
+/// [`wrap_col_starts_capped`] and [`word_wrap_col_starts_capped`] scans on
+/// this thread since the last call, so tests can bound how often paint
+/// rescans a long line.
 #[cfg(test)]
 pub(crate) fn take_wrap_scans() -> usize {
     WRAP_SCANS.with(|count| count.replace(0))
 }
 
-/// Display-column starts of soft-wrap rows.
+/// Display-column starts of soft-wrap rows that break at any glyph.
+///
+/// Each row fills `width` columns. Titles and labels (the diff path
+/// header, section labels, hunk headers) wrap here; the code text of a
+/// line viewer wraps at word boundaries ([`word_wrap_col_starts`]).
 ///
 /// Always at least `[0]`. A glyph wider than `width` is skipped at the
 /// start of a row (same as [`slice_cols`] omitting it).
@@ -494,6 +499,98 @@ pub fn wrap_col_starts_capped(text: &str, width: usize, max_rows: usize) -> Vec<
         col = col.saturating_add(cw);
     }
     starts
+}
+
+/// Display-column starts of soft-wrap rows that break between words.
+///
+/// The wrap of a line viewer's code text (diff cells and the clean-file
+/// view). A space is any [`char::is_whitespace`] char. When the next glyph
+/// does not fit on the row:
+///
+/// - a space, or the first glyph of a word (a non-space after a space),
+///   starts the next row;
+/// - else the row ends just before the last word start it holds after its
+///   first glyph, so the cut word moves down whole and the row keeps its
+///   trailing spaces;
+/// - else (one word longer than the row) the row breaks at the glyph, as
+///   [`wrap_col_starts`] does.
+///
+/// A row never exceeds `width` columns and can end short of it, so paint
+/// slices row `i` up to the next start ([`wrap_row_cols`]). The rows,
+/// joined in order, are the whole text. Always at least `[0]`. A glyph
+/// wider than `width` is skipped at the start of a row, as in
+/// [`wrap_col_starts`].
+pub fn word_wrap_col_starts(text: &str, width: usize) -> Vec<usize> {
+    word_wrap_col_starts_capped(text, width, usize::MAX)
+}
+
+/// [`word_wrap_col_starts`] that stops after `max_rows` rows (at least one).
+///
+/// The scan ends where row `max_rows + 1` would start, so a caller that
+/// passes its viewport height plus one learns "taller than the view"
+/// without reading the rest of a very long line.
+pub fn word_wrap_col_starts_capped(text: &str, width: usize, max_rows: usize) -> Vec<usize> {
+    #[cfg(test)]
+    WRAP_SCANS.with(|count| count.set(count.get() + 1));
+    let width = width.max(1);
+    let max_rows = max_rows.max(1);
+    let mut starts = vec![0];
+    // Columns on the current row, and the column of the next glyph.
+    let mut used = 0usize;
+    let mut col = 0usize;
+    // Last word start on the current row after its first glyph.
+    let mut word_start: Option<usize> = None;
+    let mut prev_space = false;
+    for ch in text.chars() {
+        let mut buf = [0u8; 4];
+        let cw = visible_width(ch.encode_utf8(&mut buf));
+        let space = ch.is_whitespace();
+        if used > 0 && used.saturating_add(cw) > width {
+            if starts.len() >= max_rows {
+                break;
+            }
+            let at = if space || prev_space {
+                col
+            } else {
+                word_start.unwrap_or(col)
+            };
+            starts.push(at);
+            used = col - at;
+            word_start = None;
+            // A row that held only spaces before the word can leave the
+            // moved word and this glyph wider than the row: break here too.
+            if used > 0 && used.saturating_add(cw) > width {
+                if starts.len() >= max_rows {
+                    break;
+                }
+                starts.push(col);
+                used = 0;
+            }
+        }
+        if used == 0 && cw > width {
+            col = col.saturating_add(cw);
+            prev_space = space;
+            continue;
+        }
+        if used > 0 && !space && prev_space {
+            word_start = Some(col);
+        }
+        used = used.saturating_add(cw);
+        col = col.saturating_add(cw);
+        prev_space = space;
+    }
+    starts
+}
+
+/// Display columns to paint for wrap row `part` of `starts` in a row of
+/// `width` columns: up to the next row's start (a word-wrap row can end
+/// short of `width`), the last row up to `width`. Never more than `width`.
+pub fn wrap_row_cols(starts: &[usize], part: usize, width: usize) -> usize {
+    let width = width.max(1);
+    match (starts.get(part), starts.get(part + 1)) {
+        (Some(&start), Some(&next)) => next.saturating_sub(start).min(width),
+        _ => width,
+    }
 }
 
 /// Soft-wrap `text` into display-column chunks of `width`.
@@ -962,5 +1059,112 @@ mod tests {
         assert_eq!(list_row_pan_max(20, 0, 0, 10), 13);
         assert_eq!(hunk_anchor(&lines, 1).as_deref(), Some("@@ hunk @@"));
         assert_eq!(scroll_to_keep_anchor(&lines, "@@ hunk @@", 9), 0);
+    }
+
+    /// The word-wrap rows of `text` at `width`, each sliced from its start
+    /// to the next one, as paint slices them.
+    fn word_rows(text: &str, width: usize) -> Vec<String> {
+        let starts = word_wrap_col_starts(text, width);
+        (0..starts.len())
+            .map(|part| slice_cols(text, starts[part], wrap_row_cols(&starts, part, width)))
+            .collect()
+    }
+
+    #[test]
+    fn word_wrap_breaks_before_the_cut_word() {
+        assert_eq!(word_rows("hello world", 8), vec!["hello ", "world"]);
+        assert_eq!(
+            word_rows("aaaa bbbb cccc dddd eeee", 12),
+            vec!["aaaa bbbb ", "cccc dddd ", "eeee"]
+        );
+    }
+
+    #[test]
+    fn word_wrap_starts_the_next_row_at_a_word_that_does_not_fit() {
+        // The glyph that overflows is itself the first glyph of a word.
+        assert_eq!(word_rows("ab cd", 3), vec!["ab ", "cd"]);
+    }
+
+    #[test]
+    fn word_wrap_starts_the_next_row_with_a_space_run_that_does_not_fit() {
+        assert_eq!(word_rows("abcd ef", 4), vec!["abcd", " ef"]);
+        assert_eq!(word_rows("abcd  ef", 4), vec!["abcd", "  ef"]);
+    }
+
+    #[test]
+    fn word_wrap_keeps_trailing_spaces_on_the_row() {
+        assert_eq!(word_rows("ab  cdef", 5), vec!["ab  ", "cdef"]);
+    }
+
+    #[test]
+    fn word_wrap_breaks_a_word_longer_than_the_row_at_the_glyph() {
+        assert_eq!(word_rows("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        assert_eq!(word_rows("a bcdefghij", 4), vec!["a ", "bcde", "fghi", "j"]);
+        // A row of spaces then a word: the word moves down, then breaks.
+        assert_eq!(word_rows("ab  cdefg", 3), vec!["ab ", " ", "cde", "fg"]);
+    }
+
+    #[test]
+    fn word_wrap_counts_wide_glyphs_in_display_columns() {
+        assert_eq!(word_rows("ab 😀😀", 4), vec!["ab ", "😀😀"]);
+        assert_eq!(word_rows("😀😀 x", 3), vec!["😀", "😀 ", "x"]);
+        assert_eq!(word_rows("x 漢字漢", 5), vec!["x ", "漢字", "漢"]);
+        // The moved word plus a wide glyph overflow the row: break again.
+        assert_eq!(word_rows("aaa bc😀", 3), vec!["aaa", " ", "bc", "😀"]);
+    }
+
+    #[test]
+    fn word_wrap_cap_stops_where_the_next_row_would_start() {
+        let text = "aa bb cc dd";
+        assert_eq!(word_wrap_col_starts(text, 3), vec![0, 3, 6, 9]);
+        assert_eq!(word_wrap_col_starts_capped(text, 3, 2), vec![0, 3]);
+        assert_eq!(word_wrap_col_starts_capped(text, 3, 3), vec![0, 3, 6]);
+        assert_eq!(word_wrap_col_starts_capped(text, 3, 0), vec![0]);
+    }
+
+    #[test]
+    fn word_wrap_of_empty_text_is_one_row() {
+        assert_eq!(word_wrap_col_starts("", 4), vec![0]);
+        assert_eq!(word_rows("", 4), vec![""]);
+        assert_eq!(word_rows("ab", 0), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn word_wrap_rows_join_back_to_the_text_and_fit_the_width() {
+        let text = "Here the second paragraph has words  that become  double spaced \
+                    in the worktree copy, so every later break moves. 🙂 漢字 x  y   z \
+                    a_very_long_identifier_that_is_wider_than_the_row end";
+        // From 2 columns every glyph fits a row, so none is skipped.
+        for width in 2..=40 {
+            let rows = word_rows(text, width);
+            assert_eq!(rows.concat(), text, "width {width}");
+            for row in &rows {
+                assert!(visible_width(row) <= width, "width {width}: {row:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn word_wrap_cuts_no_word_that_fits_the_row() {
+        let text = "Here the second paragraph has words  that become  double spaced \
+                    in the worktree copy, so every later break moves.";
+        for width in 12..=40 {
+            let rows = word_rows(text, width);
+            for pair in rows.windows(2) {
+                let (row, next) = (&pair[0], &pair[1]);
+                assert!(
+                    row.ends_with(' ') || next.starts_with(' '),
+                    "width {width}: {row:?} / {next:?} cuts a word"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn word_wrap_realigns_after_one_extra_space() {
+        let old = word_rows("aaaa bbbb cccc dddd eeee", 12);
+        let new = word_rows("aaaa  bbbb cccc dddd eeee", 12);
+        assert_eq!(new, vec!["aaaa  bbbb ", "cccc dddd ", "eeee"]);
+        assert_eq!(old[1..], new[1..], "the rows after the change line up");
     }
 }

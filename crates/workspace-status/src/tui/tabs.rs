@@ -21,7 +21,7 @@ use super::drill::{CommitFile, CommitFileSource};
 use super::explorer::ExplorerTree;
 use super::icons::comment_mark_cols;
 use super::pr_groups::GroupKind;
-use super::search::{wrap_col_starts_capped, SearchPane};
+use super::search::{word_wrap_col_starts_capped, SearchPane};
 use super::split::diff_paint_width;
 
 /// Palette / overlay copy when the focused row is not a compare target.
@@ -730,7 +730,8 @@ impl FileTab {
     }
 
     /// Painted rows of `line` in `code_w` code columns: 1 with wrap off,
-    /// else its wrapped rows, counted to at most `row_cap` so a very long
+    /// else its word-wrap rows (as `draw_file_body` paints them), counted
+    /// to at most `row_cap` so a very long
     /// line scans at most that many rows of its text.
     pub(crate) fn line_rows(
         &self,
@@ -740,7 +741,7 @@ impl FileTab {
         row_cap: usize,
     ) -> usize {
         match self.lines().get(line) {
-            Some(text) if wrap => wrap_col_starts_capped(text, code_w, row_cap).len(),
+            Some(text) if wrap => word_wrap_col_starts_capped(text, code_w, row_cap).len(),
             _ => 1,
         }
     }

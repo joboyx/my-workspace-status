@@ -3486,8 +3486,8 @@ fn long_styled_line(times: usize) -> (String, Vec<CodeSpan>) {
 }
 
 /// Each wrap row of a cell is the same slice the per-row rescan
-/// (`slice_styled_cols` at that row's wrap start) painted, at every width,
-/// including widths narrower than a wide glyph.
+/// (`slice_styled_cols` from that row's word-wrap start to the next one)
+/// painted, at every width, including widths narrower than a wide glyph.
 #[test]
 fn wrapped_cell_rows_match_per_row_slices() {
     let (text, spans) = long_styled_line(12);
@@ -3501,10 +3501,11 @@ fn wrapped_cell_rows_match_per_row_slices() {
         for width in [8u16, 9, 10, 23, 80] {
             let mut rows = CellRows::new(&cell, &spans, width, 3, false, true);
             let code_w = rows.code_w;
-            let starts = wrap_col_starts(&text, code_w);
+            let starts = word_wrap_col_starts(&text, code_w);
             assert_eq!(rows.height(), starts.len(), "{kind:?} width {width}");
             for (part, &start) in starts.iter().enumerate() {
-                let expected = paint_code_parts(&cell, &spans, start, code_w, palette);
+                let row_w = wrap_row_cols(&starts, part, code_w);
+                let expected = paint_code_parts(&cell, &spans, start, row_w, palette);
                 assert_eq!(
                     rows.code(part, 0, palette),
                     expected,
@@ -3561,6 +3562,156 @@ fn wrapped_long_line_scans_wrap_starts_once_per_cell() {
             assert!(joiner(&painted) == joiner(&text), "rows paint the line");
         }
     }
+}
+
+/// One plain syntax span over `text`, as the highlighter gives a cell.
+fn plain_spans(text: &str) -> Vec<CodeSpan> {
+    vec![CodeSpan {
+        text: text.to_string(),
+        fg: Color::Rgb(1, 2, 3),
+        word: false,
+    }]
+}
+
+/// Code text of each painted row of an inline diff line: the spans between
+/// the sign and the pad (edge, gutter, rule, sign, code…, pad).
+fn inline_code_rows(lines: &[Line<'static>]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| {
+            line.spans[4..line.spans.len() - 1]
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect()
+}
+
+/// Code text of each painted row of a split diff line, `(left, right)`:
+/// edge, gutter, rule, sign, code…, pad, RULE, gutter, rule, sign, code…,
+/// pad.
+fn split_code_rows(lines: &[Line<'static>]) -> Vec<(String, String)> {
+    let rule = DIFF_RULE.to_string();
+    lines
+        .iter()
+        .map(|line| {
+            let mid = line
+                .spans
+                .iter()
+                .position(|span| span.content == rule.as_str())
+                .expect("the side-by-side RULE span");
+            let text = |spans: &[Span<'static>]| -> String {
+                spans.iter().map(|span| span.content.as_ref()).collect()
+            };
+            (
+                text(&line.spans[4..mid - 1]),
+                text(&line.spans[mid + 4..line.spans.len() - 1]),
+            )
+        })
+        .collect()
+}
+
+/// A `-` / `+` pair that differs by one extra space, as diff cells.
+const WRAP_OLD: &str = "aaaa bbbb cccc dddd eeee";
+const WRAP_NEW: &str = "aaaa  bbbb cccc dddd eeee";
+
+fn wrap_cell(kind: DiffCellKind, text: &str) -> DiffCell {
+    DiffCell {
+        kind,
+        text: text.to_string(),
+        line_no: Some(1),
+    }
+}
+
+/// With wrap on, an inline diff line breaks between words: no row ends
+/// inside a word, a row keeps its trailing space, and the `+` line with
+/// one extra space lines up with the `-` line again after that space.
+#[test]
+fn wrapped_inline_diff_line_breaks_between_words_and_realigns() {
+    let state = two_pane_diff_state();
+    let probe = wrap_cell(DiffCellKind::Add, WRAP_NEW);
+    let width = (10u16..200)
+        .find(|&w| CellRows::new(&probe, &[], w, 3, state.ascii, true).code_w == 12)
+        .expect("a width with 12 code columns");
+    let paint = |kind, text: &str| {
+        let row = DiffRow::Line {
+            left: wrap_cell(kind, text),
+            right: None,
+        };
+        let spans = plain_spans(text);
+        inline_code_rows(&paint_diff_row(
+            &row, width, 3, false, 0, true, &state, false, false, false, None, &spans, &spans,
+        ))
+    };
+    let old = paint(DiffCellKind::Del, WRAP_OLD);
+    let new = paint(DiffCellKind::Add, WRAP_NEW);
+    assert_eq!(old, vec!["aaaa bbbb ", "cccc dddd ", "eeee"]);
+    assert_eq!(new, vec!["aaaa  bbbb ", "cccc dddd ", "eeee"]);
+    // A glyph wrap would paint `aaaa bbbb cc` / `cc dddd eeee`.
+    assert!(old.iter().all(|row| !row.ends_with("cc")), "{old:?}");
+    let counted = crate::tui::diff::diff_row_visual_height(
+        &DiffRow::Line {
+            left: wrap_cell(DiffCellKind::Add, WRAP_NEW),
+            right: None,
+        },
+        width,
+        3 + comment_mark_cols(state.ascii),
+        false,
+        state.diff_split_fraction,
+    );
+    assert_eq!(new.len(), counted, "paint and the row-height count agree");
+}
+
+/// With wrap on, both cells of a side-by-side line break between words,
+/// and the rows after the extra space line up across the RULE.
+#[test]
+fn wrapped_split_diff_line_breaks_between_words_and_realigns() {
+    let state = two_pane_diff_state();
+    let probe = wrap_cell(DiffCellKind::Add, WRAP_NEW);
+    let code_w = |w: u16| CellRows::new(&probe, &[], w, 3, state.ascii, true).code_w;
+    let width = (20u16..300)
+        .find(|&w| {
+            let cols = side_by_side_column_widths(w, state.diff_split_fraction);
+            code_w(cols.left_width) == 12 && code_w(cols.right_width) == 12
+        })
+        .expect("a split width with 12 code columns a side");
+    let row = DiffRow::Line {
+        left: wrap_cell(DiffCellKind::Del, WRAP_OLD),
+        right: Some(wrap_cell(DiffCellKind::Add, WRAP_NEW)),
+    };
+    let lines = paint_diff_row(
+        &row,
+        width,
+        3,
+        true,
+        0,
+        true,
+        &state,
+        false,
+        false,
+        false,
+        None,
+        &plain_spans(WRAP_OLD),
+        &plain_spans(WRAP_NEW),
+    );
+    let rows = split_code_rows(&lines);
+    let pairs: Vec<(&str, &str)> = rows.iter().map(|(l, r)| (l.as_str(), r.as_str())).collect();
+    assert_eq!(
+        pairs,
+        vec![
+            ("aaaa bbbb ", "aaaa  bbbb "),
+            ("cccc dddd ", "cccc dddd "),
+            ("eeee", "eeee"),
+        ]
+    );
+    let counted = crate::tui::diff::diff_row_visual_height(
+        &row,
+        width,
+        3 + comment_mark_cols(state.ascii),
+        true,
+        state.diff_split_fraction,
+    );
+    assert_eq!(lines.len(), counted, "paint and the row-height count agree");
 }
 
 #[test]
@@ -17253,6 +17404,56 @@ fn file_view_wraps_and_keeps_the_cursor_in_view() {
     );
 }
 
+/// The clean-file view wraps a long line between words: every painted row
+/// holds whole words only, the rows hold every word in order, and the
+/// painted row count is the count the viewport math uses.
+#[test]
+fn file_view_wraps_a_long_line_between_words() {
+    let words: Vec<String> = (0..24)
+        .map(|i| {
+            let letter = char::from(b'a' + (i % 26) as u8);
+            letter.to_string().repeat(3 + i % 5)
+        })
+        .collect();
+    let long = words.join(" ");
+    let mut state = file_view_state(&[long.as_str(), "tail"]);
+    assert!(state.diff_wrap, "a file view opens wrapped");
+    let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+    let tab = state.tabs.active_file_view().expect("a file view");
+    let code_w = tab.code_width(state.layout.file_view_width, state.ascii);
+    let row_count = tab.line_rows(0, code_w, true, usize::MAX);
+    let rows = state.layout.file_view_row_lines.clone();
+    assert_eq!(
+        rows.iter().filter(|&&line| line == 0).count(),
+        row_count,
+        "{rows:?}"
+    );
+    assert!(row_count > 1, "the line wraps: {rows:?}");
+    let x0 = usize::from(state.layout.file_view_x) + file_view_gutter_width(2, state.ascii);
+    let buf = terminal.backend().buffer();
+    let painted: Vec<String> = (0..row_count)
+        .map(|part| {
+            buf_line(buf, state.layout.file_view_y + part as u16)
+                .chars()
+                .skip(x0)
+                .take(code_w)
+                .collect()
+        })
+        .collect();
+    let mut seen = Vec::new();
+    for row in &painted {
+        for token in row.split_whitespace() {
+            assert!(
+                words.iter().any(|word| word == token),
+                "row {row:?} cuts a word ({token:?}):\n{painted:#?}"
+            );
+            seen.push(token.to_string());
+        }
+    }
+    assert_eq!(seen, words, "the rows hold every word in order");
+}
+
 #[test]
 fn file_view_paints_binary_and_loading_notices() {
     use crate::tui::effect::ExplorerPreviewBody;
@@ -17345,7 +17546,7 @@ fn file_view_wrap_scan_of_a_huge_line_is_bounded_by_the_view() {
         code_w,
         usize::from(state.layout.file_view_width) - 1 - file_view_gutter_width(2, state.ascii)
     );
-    let capped = wrap_col_starts_capped(&huge, code_w, height + 1);
+    let capped = word_wrap_col_starts_capped(&huge, code_w, height + 1);
     assert_eq!(
         capped.len(),
         height + 1,
