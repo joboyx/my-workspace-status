@@ -320,23 +320,39 @@ keep-y
 keep-z
 ";
 
+/// Commit `file` in `repo` as `committed` (the commit message is the file
+/// name without its extension), then write `worktree` over it, unstaged.
+fn commit_then_edit(repo: &Path, file: &str, committed: &str, worktree: &str) {
+    let message = Path::new(file)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .expect("file name with a UTF-8 stem");
+    write_commit(repo, file, committed, message);
+    fs::write(repo.join(file), worktree).unwrap();
+}
+
+/// New workspace `prefix` with repo `app` on `main`, where `file` is
+/// committed as `committed` and changed to `worktree` in the worktree
+/// ([`commit_then_edit`]): the only dirty file, so launch shows its diff.
+fn one_change_workspace(
+    prefix: &str,
+    file: &str,
+    committed: &str,
+    worktree: &str,
+) -> (PathBuf, PathBuf) {
+    let (root, workspace) = new_workspace(prefix);
+    seed_repo(&workspace, "app", "main", false);
+    commit_then_edit(&workspace.join("app"), file, committed, worktree);
+    (root, workspace)
+}
+
 /// Repo `app` with `regions.txt` committed, then two separable unstaged
 /// hunks (ALPHA near the top, OMEGA near the bottom) for `V` range writes.
 pub fn two_hunk_regions_workspace(prefix: &str) -> (PathBuf, PathBuf) {
-    let (root, workspace) = new_workspace(prefix);
-    seed_repo(&workspace, "app", "main", false);
-    let repo = workspace.join("app");
-    fs::write(repo.join("regions.txt"), REGIONS_COMMITTED).unwrap();
-    git(&repo, &["add", "regions.txt"]);
-    git(&repo, &["commit", "-q", "-m", "regions"]);
-    fs::write(
-        repo.join("regions.txt"),
-        REGIONS_COMMITTED
-            .replace("ALPHA-OLD", REGIONS_ALPHA)
-            .replace("OMEGA-OLD", REGIONS_OMEGA),
-    )
-    .unwrap();
-    (root, workspace)
+    let worktree = REGIONS_COMMITTED
+        .replace("ALPHA-OLD", REGIONS_ALPHA)
+        .replace("OMEGA-OLD", REGIONS_OMEGA);
+    one_change_workspace(prefix, "regions.txt", REGIONS_COMMITTED, &worktree)
 }
 
 /// Line of `indent.txt` that [`whitespace_workspace`] re-indents.
@@ -350,19 +366,12 @@ pub const INDENT_LINE: &str = "INDENT-ONLY-LINE";
 /// hunks (real changes) still show.
 pub fn whitespace_workspace(prefix: &str) -> (PathBuf, PathBuf) {
     let (root, workspace) = two_hunk_regions_workspace(prefix);
-    let repo = workspace.join("app");
-    fs::write(
-        repo.join("indent.txt"),
-        format!("first\n{INDENT_LINE}\nlast\n"),
-    )
-    .unwrap();
-    git(&repo, &["add", "indent.txt"]);
-    git(&repo, &["commit", "-q", "-m", "indent"]);
-    fs::write(
-        repo.join("indent.txt"),
-        format!("first\n        {INDENT_LINE}\nlast\n"),
-    )
-    .unwrap();
+    commit_then_edit(
+        &workspace.join("app"),
+        "indent.txt",
+        &format!("first\n{INDENT_LINE}\nlast\n"),
+        &format!("first\n        {INDENT_LINE}\nlast\n"),
+    );
     (root, workspace)
 }
 
@@ -378,14 +387,12 @@ pub const LONG_LINE_NEW: &str = "Here the second paragraph has words  that becom
 /// to [`LONG_LINE_NEW`] in the worktree: one long-line markdown change,
 /// the only dirty file, so launch shows its diff.
 pub fn long_line_markdown_workspace(prefix: &str) -> (PathBuf, PathBuf) {
-    let (root, workspace) = new_workspace(prefix);
-    seed_repo(&workspace, "app", "main", false);
-    let repo = workspace.join("app");
-    fs::write(repo.join("notes.md"), format!("{LONG_LINE_OLD}\n")).unwrap();
-    git(&repo, &["add", "notes.md"]);
-    git(&repo, &["commit", "-q", "-m", "notes"]);
-    fs::write(repo.join("notes.md"), format!("{LONG_LINE_NEW}\n")).unwrap();
-    (root, workspace)
+    one_change_workspace(
+        prefix,
+        "notes.md",
+        &format!("{LONG_LINE_OLD}\n"),
+        &format!("{LONG_LINE_NEW}\n"),
+    )
 }
 
 /// Committed line of `notes.txt` in [`word_and_space_change_workspace`].
@@ -402,14 +409,12 @@ pub const WORD_SPACE_NEW: &str = "The real change on this line is two words, als
 /// whitespace change on one line, the only dirty file, so launch shows
 /// its diff.
 pub fn word_and_space_change_workspace(prefix: &str) -> (PathBuf, PathBuf) {
-    let (root, workspace) = new_workspace(prefix);
-    seed_repo(&workspace, "app", "main", false);
-    let repo = workspace.join("app");
-    fs::write(repo.join("notes.txt"), format!("{WORD_SPACE_OLD}\n")).unwrap();
-    git(&repo, &["add", "notes.txt"]);
-    git(&repo, &["commit", "-q", "-m", "notes"]);
-    fs::write(repo.join("notes.txt"), format!("{WORD_SPACE_NEW}\n")).unwrap();
-    (root, workspace)
+    one_change_workspace(
+        prefix,
+        "notes.txt",
+        &format!("{WORD_SPACE_OLD}\n"),
+        &format!("{WORD_SPACE_NEW}\n"),
+    )
 }
 
 /// Text after the indent of `notes.txt` in [`tab_to_spaces_workspace`].
@@ -421,14 +426,12 @@ pub const TAB_SPACES_TEXT: &str = "Tab indented line that becomes four spaces in
 /// change that paints the same text on both sides, the only dirty file,
 /// so launch shows its diff.
 pub fn tab_to_spaces_workspace(prefix: &str) -> (PathBuf, PathBuf) {
-    let (root, workspace) = new_workspace(prefix);
-    seed_repo(&workspace, "app", "main", false);
-    let repo = workspace.join("app");
-    fs::write(repo.join("notes.txt"), format!("\t{TAB_SPACES_TEXT}\n")).unwrap();
-    git(&repo, &["add", "notes.txt"]);
-    git(&repo, &["commit", "-q", "-m", "notes"]);
-    fs::write(repo.join("notes.txt"), format!("    {TAB_SPACES_TEXT}\n")).unwrap();
-    (root, workspace)
+    one_change_workspace(
+        prefix,
+        "notes.txt",
+        &format!("\t{TAB_SPACES_TEXT}\n"),
+        &format!("    {TAB_SPACES_TEXT}\n"),
+    )
 }
 
 /// `notes.md` of [`hunk_context_markdown_workspace`]: the long line
@@ -453,14 +456,12 @@ fn hunk_context_notes(changed: &str) -> String {
 /// starts with a letter, [`LONG_LINE_OLD`], after the second `@@` as the
 /// hunk's function context: a hunk header longer than the diff pane.
 pub fn hunk_context_markdown_workspace(prefix: &str) -> (PathBuf, PathBuf) {
-    let (root, workspace) = new_workspace(prefix);
-    seed_repo(&workspace, "app", "main", false);
-    let repo = workspace.join("app");
-    fs::write(repo.join("notes.md"), hunk_context_notes("10")).unwrap();
-    git(&repo, &["add", "notes.md"]);
-    git(&repo, &["commit", "-q", "-m", "notes"]);
-    fs::write(repo.join("notes.md"), hunk_context_notes("ten")).unwrap();
-    (root, workspace)
+    one_change_workspace(
+        prefix,
+        "notes.md",
+        &hunk_context_notes("10"),
+        &hunk_context_notes("ten"),
+    )
 }
 
 /// File that [`compare_regions_workspace`] adds on the feature branch.
