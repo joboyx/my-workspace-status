@@ -229,6 +229,8 @@ pub const NARROW_TREE: KeyBinding = bind("<", Action::ResizeTree(-1));
 pub const WIDEN_TREE: KeyBinding = bind(">", Action::ResizeTree(1));
 /// `\`: wrap or unwrap the diff.
 pub const WRAP_DIFF: KeyBinding = bind("\\", Action::ToggleDiffWrap);
+/// `w`: ignore or show whitespace changes in the diff.
+pub const IGNORE_WHITESPACE: KeyBinding = bind("w", Action::ToggleIgnoreWhitespace);
 /// `M`: collapse or expand the commit message.
 pub const EXPAND_COMMIT_MESSAGE: KeyBinding = bind("M", Action::ToggleCommitMsgExpand);
 /// `-`: open in the Explorer tab.
@@ -314,6 +316,7 @@ pub const NORMAL_KEYS: &[KeyBinding] = &[
     NARROW_TREE,
     WIDEN_TREE,
     WRAP_DIFF,
+    IGNORE_WHITESPACE,
     EXPAND_COMMIT_MESSAGE,
     OPEN_IN_EXPLORER,
     LINE_BLAME,
@@ -987,6 +990,13 @@ mod tests {
                 Scope::NoHighlight,
                 Some((Normal, key(Char('>')))),
                 Action::ResizeTree(1),
+            ),
+            (
+                "Ignore / show whitespace",
+                "w",
+                Scope::NoHighlight,
+                Some((Normal, key(Char('w')))),
+                Action::ToggleIgnoreWhitespace,
             ),
             (
                 "Wrap / unwrap",

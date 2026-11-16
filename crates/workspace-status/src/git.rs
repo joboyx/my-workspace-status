@@ -2350,12 +2350,35 @@ fn lines_or_empty_diff(text: &str) -> Vec<String> {
 /// Context large enough to show a typical source file in one hunk.
 pub const FULL_DIFF_CONTEXT_LINES: u32 = 999_999;
 
-/// Build `git diff` argv, inserting `-U{n}` when `context` is set.
-pub fn git_diff_args(base: &[&str], path: &str, context: Option<u32>) -> Vec<String> {
-    let mut args: Vec<String> = base.iter().map(|s| (*s).to_string()).collect();
-    if let Some(n) = context {
-        args.push(format!("-U{n}"));
+/// Options for one shown diff: context lines and whitespace handling.
+///
+/// `Default` is git's own default: 3 context lines, whitespace changes
+/// shown.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DiffOpts {
+    /// `Some(n)` adds `-U<n>`; `None` keeps git's default context.
+    pub context: Option<u32>,
+    /// Add `-w` (`--ignore-all-space`). A diff loaded this way must never
+    /// feed a partial stage, unstage or revert patch.
+    pub ignore_whitespace: bool,
+}
+
+impl DiffOpts {
+    /// Push `-U<n>` and `-w` for these options onto `args`.
+    fn push_args(self, args: &mut Vec<String>) {
+        if let Some(n) = self.context {
+            args.push(format!("-U{n}"));
+        }
+        if self.ignore_whitespace {
+            args.push("-w".into());
+        }
     }
+}
+
+/// Build `git diff` argv, inserting `-U{n}` and `-w` from `opts`.
+pub fn git_diff_args(base: &[&str], path: &str, opts: DiffOpts) -> Vec<String> {
+    let mut args: Vec<String> = base.iter().map(|s| (*s).to_string()).collect();
+    opts.push_args(&mut args);
     args.push("--".into());
     // Literal: a line stage / unstage / revert builds its patch from this
     // diff, so a glob match of a sibling file would put that file's hunks
@@ -2591,13 +2614,11 @@ pub fn git_compare_diff_args(
     head_sha: &str,
     path: &str,
     old_path: Option<&str>,
-    context: Option<u32>,
+    opts: DiffOpts,
 ) -> Vec<String> {
     let range = format!("{base_sha}...{head_sha}");
     let mut args = vec!["diff".to_string()];
-    if let Some(n) = context {
-        args.push(format!("-U{n}"));
-    }
+    opts.push_args(&mut args);
     args.push(range);
     args.push("--".into());
     if let Some(old) = old_path {
@@ -2620,9 +2641,9 @@ pub fn diff_compare_file_ctx(
     head_sha: &str,
     path: &str,
     old_path: Option<&str>,
-    context: Option<u32>,
+    opts: DiffOpts,
 ) -> Result<Vec<String>, String> {
-    let args = git_compare_diff_args(base_sha, head_sha, path, old_path, context);
+    let args = git_compare_diff_args(base_sha, head_sha, path, old_path, opts);
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let stdout = exec_git_stdout_untrimmed(&refs, cwd)?;
     if stdout.trim().is_empty() {
@@ -2634,19 +2655,18 @@ pub fn diff_compare_file_ctx(
 
 /// `git diff` argv for one path, commit `base_sha` against the working tree.
 ///
-/// `diff [-U<n>] -M <base> -- [<old>] <path>`: git's own commit-vs-worktree
-/// form, so no revision stands for the working tree. `old_path` joins the
-/// pathspec when it differs from `path`, so `-M` can pair a rename.
+/// `diff [-U<n>] [-w] -M <base> -- [<old>] <path>`: git's own
+/// commit-vs-worktree form, so no revision stands for the working tree.
+/// `old_path` joins the pathspec when it differs from `path`, so `-M` can
+/// pair a rename.
 pub fn git_worktree_compare_diff_args(
     base_sha: &str,
     path: &str,
     old_path: Option<&str>,
-    context: Option<u32>,
+    opts: DiffOpts,
 ) -> Vec<String> {
     let mut args = vec!["diff".to_string()];
-    if let Some(n) = context {
-        args.push(format!("-U{n}"));
-    }
+    opts.push_args(&mut args);
     args.push("-M".into());
     args.push(base_sha.into());
     args.push("--".into());
@@ -2689,9 +2709,9 @@ pub fn diff_worktree_vs_commit_file_ctx(
     base_sha: &str,
     path: &str,
     old_path: Option<&str>,
-    context: Option<u32>,
+    opts: DiffOpts,
 ) -> Result<Vec<String>, String> {
-    let args = git_worktree_compare_diff_args(base_sha, path, old_path, context);
+    let args = git_worktree_compare_diff_args(base_sha, path, old_path, opts);
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     Ok(lines_or_empty_diff(&exec_git_stdout(&refs, cwd)?))
 }
@@ -2785,42 +2805,45 @@ fn parse_compare_picker_line(line: &str) -> Option<AncestorCommit> {
 
 /// First-parent unified diff for one path in a commit.
 pub fn diff_commit_file(cwd: &Path, commit_id: &str, path: &str) -> Vec<String> {
-    diff_commit_file_ctx(cwd, commit_id, path, None)
+    diff_commit_file_ctx(cwd, commit_id, path, DiffOpts::default())
 }
 
-/// First-parent unified diff with optional `-U` context.
+/// First-parent unified diff with optional `-U` context and `-w`.
+///
+/// An empty `diff <commit>^ <commit>` (a root commit, or a change that
+/// `-w` hides) falls back to `git show --first-parent`, which also gets
+/// `-w` when `opts` ignores whitespace, so the fallback cannot bring the
+/// hidden whitespace hunks back. `--format=` drops the commit header, so a
+/// fallback with no hunks becomes `(no diff)`.
 pub fn diff_commit_file_ctx(
     cwd: &Path,
     commit_id: &str,
     path: &str,
-    context: Option<u32>,
+    opts: DiffOpts,
 ) -> Vec<String> {
     let parent = format!("{commit_id}^");
-    let args = git_diff_args(&["diff", &parent, commit_id], path, context);
+    let args = git_diff_args(&["diff", &parent, commit_id], path, opts);
     let primary = exec_git_owned(&args, cwd);
     if !primary.is_empty() {
         return primary.lines().map(str::to_string).collect();
     }
-    lines_or_empty_diff(&exec_git(
-        &["show", "--first-parent", commit_id, "--", path],
-        cwd,
-    ))
+    let mut show: Vec<&str> = vec!["show", "--first-parent", "--format="];
+    if opts.ignore_whitespace {
+        show.push("-w");
+    }
+    show.extend_from_slice(&[commit_id, "--", path]);
+    lines_or_empty_diff(&exec_git(&show, cwd))
 }
 
 /// First-parent unified diff for one path inside a stash.
 pub fn diff_stash_file(cwd: &Path, stash_ref: &str, path: &str) -> Vec<String> {
-    diff_stash_file_ctx(cwd, stash_ref, path, None)
+    diff_stash_file_ctx(cwd, stash_ref, path, DiffOpts::default())
 }
 
-/// Stash-file unified diff with optional `-U` context.
-pub fn diff_stash_file_ctx(
-    cwd: &Path,
-    stash_ref: &str,
-    path: &str,
-    context: Option<u32>,
-) -> Vec<String> {
+/// Stash-file unified diff with optional `-U` context and `-w`.
+pub fn diff_stash_file_ctx(cwd: &Path, stash_ref: &str, path: &str, opts: DiffOpts) -> Vec<String> {
     let parent = format!("{stash_ref}^1");
-    let args = git_diff_args(&["diff", &parent, stash_ref], path, context);
+    let args = git_diff_args(&["diff", &parent, stash_ref], path, opts);
     lines_or_empty_diff(&exec_git_owned(&args, cwd))
 }
 

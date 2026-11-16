@@ -65,6 +65,7 @@ fn worktree_diff(staged: &str, unstaged: &str, is_new: bool) -> AppState {
             is_committed: false,
             vs_worktree: false,
             committed_label: false,
+            ignore_whitespace: false,
             error: None,
         },
     );

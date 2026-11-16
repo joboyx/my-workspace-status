@@ -1,5 +1,6 @@
 //! TUI state and Action dispatch.
 
+mod diff_reload;
 mod dispatch;
 mod dispatch_drill;
 mod dispatch_keymap;
@@ -20,6 +21,7 @@ mod remote_view;
 mod scroll_glide;
 mod summary;
 mod tab_park;
+mod whitespace;
 
 #[cfg(test)]
 pub(crate) use prs_tab::fixtures as prs_fixtures;
@@ -80,8 +82,8 @@ use super::ctrl_c_exit::{
     handle_ctrl_c, is_ctrl_c_exit_prompt, CTRL_C_EXIT_PROMPT, QUIT_WHILE_BUSY_PROMPT,
 };
 use super::diff::{
-    anchor_row_text, build_diff_rows, build_partial_patch, diff_pane_header_rows,
-    diff_row_content_width, diff_wrap_row_heights, find_anchor_row, gutter_width, row_search_text,
+    build_diff_rows, build_partial_patch, diff_pane_header_rows, diff_row_content_width,
+    diff_wrap_row_heights, find_anchor_row, gutter_width, row_search_text, whitespace_ignored_fail,
     wrap_viewport_start, DiffContent, DiffRow, PartialPatchKind,
 };
 use super::drill::{
@@ -156,7 +158,7 @@ use super::watch::{
     prune_ghosts, tree_signatures, FlashKind, FlashStamp, GhostRow, GraphFlashDecision,
     GraphFlashMeta,
 };
-use crate::git::{PushPlan, StashTarget, FULL_DIFF_CONTEXT_LINES};
+use crate::git::{DiffOpts, PushPlan, StashTarget, FULL_DIFF_CONTEXT_LINES};
 
 /// Status for a key drained while a git write runs and the job has no name.
 pub(crate) const BUSY_WRITE_RUNNING: &str = "busy: a git write is running";
@@ -169,6 +171,7 @@ static EMPTY_DIFF: DiffContent = DiffContent {
     is_committed: false,
     vs_worktree: false,
     committed_label: false,
+    ignore_whitespace: false,
     error: None,
 };
 
@@ -1209,6 +1212,16 @@ pub struct AppState {
     /// none or a bad value). They beat `viewDefaults.commitMessageLines` in
     /// [`Self::apply_view_defaults`].
     saved_commit_msg_lines: Option<usize>,
+    /// Ignore whitespace changes in every diff pane and tab (`git diff -w`).
+    /// Off by default (whitespace changes show). Launch value: the UI-state
+    /// store value (`saved_ignore_whitespace`), else
+    /// `viewDefaults.whitespace`, else off. The user config file is never
+    /// written.
+    pub ignore_whitespace: bool,
+    /// "Ignore whitespace" value the UI-state store held at launch (`None`
+    /// when none or a bad value). It beats `viewDefaults.whitespace` in
+    /// [`Self::apply_view_defaults`].
+    saved_ignore_whitespace: Option<bool>,
     /// Scroll of an expanded message taller than its footer, keyed by the
     /// graph row identity of the commit or stash it belongs to. The graph
     /// selection footer and the depth-2 commit-files footer share it, so
@@ -1327,6 +1340,10 @@ impl AppState {
         state.saved_commit_msg_lines = settings.commit_msg_lines;
         if let Some(lines) = settings.commit_msg_lines {
             state.commit_msg_lines = lines;
+        }
+        state.saved_ignore_whitespace = settings.ignore_whitespace;
+        if let Some(on) = settings.ignore_whitespace {
+            state.ignore_whitespace = on;
         }
         state.open_background_fetch_store(settings.fetch_store.clone());
         // A checkout whose `git status` failed in the launch snapshot
@@ -1502,6 +1519,8 @@ impl AppState {
             commit_msg_expand: true,
             commit_msg_lines: COMMIT_MSG_LINES_DEFAULT,
             saved_commit_msg_lines: None,
+            ignore_whitespace: false,
+            saved_ignore_whitespace: None,
             commit_msg_scroll: None,
             drag: SplitDrag::None,
             pad_press: None,
@@ -1549,7 +1568,8 @@ impl AppState {
     /// no status message. `commitTree` also sets the file list mode that
     /// each new compare tab opens in.
     /// `commitMessageLines` applies only when the UI-state store held no
-    /// valid saved value at launch: saved > config > default.
+    /// valid saved value at launch: saved > config > default. `whitespace`
+    /// follows the same order.
     pub fn apply_view_defaults(&mut self, defaults: &ViewDefaults) {
         if let Some(tree) = defaults.tree {
             if tree != self.tree_mode {
@@ -1588,6 +1608,10 @@ impl AppState {
         }
         if let Some(on) = defaults.line_blame {
             self.line_blame.set_enabled(on);
+        }
+        // A saved last-used value beats the config baseline.
+        if let Some(on) = self.saved_ignore_whitespace.or(defaults.ignore_whitespace) {
+            self.ignore_whitespace = on;
         }
         if let Some(background) = defaults.background {
             self.background = background;
@@ -5048,6 +5072,16 @@ impl AppState {
         }
     }
 
+    /// Load options for a shown diff: `context` plus the live
+    /// [`Self::ignore_whitespace`]. Every diff load the view shows builds
+    /// its options here, so this is the one place that reads the setting.
+    pub fn diff_opts(&self, context: Option<u32>) -> DiffOpts {
+        DiffOpts {
+            context,
+            ignore_whitespace: self.ignore_whitespace,
+        }
+    }
+
     /// Workspace dirty-file context, independent of pane focus.
     pub fn workspace_diff_context(&self, repo: &str, path: &str) -> Option<u32> {
         self.diff_context_for(&Self::file_context_id(repo, path))
@@ -5080,42 +5114,10 @@ impl AppState {
         let Some(id) = self.displayed_diff_id() else {
             return Effect::None;
         };
-        let rows = self.current_diff_rows();
-        self.pending_hunk_anchor = Some(anchor_row_text(
-            &rows,
-            self.diff_cursor,
-            self.diff_body_height(),
-        ));
         if !self.full_context.remove(&id) {
             self.full_context.insert(id);
         }
-        if let Some(tab) = self.tabs.active_compare() {
-            let Some(source) = tab.source.clone() else {
-                return Effect::None;
-            };
-            let Some(path) = tab.path.clone() else {
-                return Effect::None;
-            };
-            let old_path = self.focused_compare_old_path();
-            return Effect::LoadCompareDiff {
-                tab_id: tab.id,
-                repo: tab.checkout_path.clone(),
-                source,
-                path,
-                old_path,
-            };
-        }
-        match &self.drill {
-            DrillView::Diff {
-                repo, source, path, ..
-            } => Effect::LoadCommitDiff {
-                repo: repo.clone(),
-                source: source.clone(),
-                path: path.clone(),
-            },
-            DrillView::Graph => Effect::LoadRightPane,
-            DrillView::Files { .. } => Effect::None,
-        }
+        self.anchored_shown_diff_reload()
     }
 
     fn apply_pending_hunk_anchor(&mut self) {
@@ -5187,6 +5189,12 @@ impl AppState {
     /// On a compare tab only Revert builds a patch: it becomes
     /// [`PartialPatchKind::RevertCommitted`] on the loaded compare diff, and
     /// only when [`Self::compare_revert_target`] allows the write.
+    ///
+    /// While whitespace is ignored a writable target still refuses, with
+    /// the same text [`build_partial_patch`] gives a `-w` diff: a reload
+    /// after the toggle may still be in flight, so the loaded content
+    /// alone is not enough. A read-only target refuses with its own text
+    /// first, so whitespace never hides why a diff is read-only.
     fn visual_patch(
         &self,
         anchor: usize,
@@ -5204,6 +5212,9 @@ impl AppState {
             };
             (repo, path, kind)
         };
+        if self.ignore_whitespace {
+            return Err(whitespace_ignored_fail(kind));
+        }
         let patch = build_partial_patch(
             self.current_diff_content(),
             self.diff_layout(),
@@ -7583,13 +7594,22 @@ impl AppState {
     ///
     /// A working-tree tab or an Explorer inner file tab may have missed
     /// watch reloads while inactive. Only one tab is active, so at most
-    /// one check reloads. The PRs tab asks for the details it lists.
+    /// one check reloads. The PRs tab asks for the details it lists. A
+    /// diff loaded with the other whitespace setting reloads too
+    /// ([`Self::stale_whitespace_reload`]).
     fn newly_active_tab_reload(&mut self) -> Effect {
-        match self.active_worktree_compare_reload() {
+        let catch_up = match self.active_worktree_compare_reload() {
             Effect::None if self.is_prs_tab() => self.request_pr_details(),
             Effect::None => self.active_explorer_live_reload(),
             reload => reload,
-        }
+        };
+        let whitespace = self.stale_whitespace_reload();
+        single_or_batch(
+            [catch_up, whitespace]
+                .into_iter()
+                .filter(|effect| *effect != Effect::None)
+                .collect(),
+        )
     }
 
     /// Drop the visual-line highlight and any pending confirm.
@@ -7706,7 +7726,7 @@ impl AppState {
         match opened {
             OpenCompare::Focused => {
                 self.apply_active_session();
-                self.active_worktree_compare_reload()
+                self.newly_active_tab_reload()
             }
             OpenCompare::Created(tab_id) => {
                 self.apply_active_session();

@@ -7748,6 +7748,49 @@ fn launch_commit_msg_lines_saved_beats_config_beats_default() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Launch "ignore whitespace": a saved last-used value beats config
+/// `viewDefaults.whitespace`, which beats the default (off, whitespace
+/// shows). A bad saved value falls through to config.
+#[test]
+fn launch_ignore_whitespace_saved_beats_config_beats_default() {
+    use crate::tui::ui_state_store::save_ignore_whitespace;
+    let dir = crate::testutil::unique_dir("ws-launch-ignore-ws");
+    let ui_store = dir.join("state").join("ui-state.json");
+    let ui_store_s = ui_store.display().to_string();
+    let launch = |whitespace: Option<bool>| {
+        let settings = Settings::resolve(&Default::default(), |key| match key {
+            "WS_STATUS_UI_STORE" => Some(ui_store_s.clone()),
+            _ => None,
+        });
+        let snapshot = build_workspace_snapshot(&[tree_repo()], &[], false, &[]);
+        let mut app = AppState::launch(PathBuf::from("/tmp"), snapshot, &settings);
+        app.apply_view_defaults(&ViewDefaults {
+            ignore_whitespace: whitespace,
+            ..ViewDefaults::default()
+        });
+        app.ignore_whitespace
+    };
+
+    assert!(!launch(None), "nothing saved, no config: whitespace shows");
+    assert!(launch(Some(true)), "nothing saved: config ignore");
+    assert!(!launch(Some(false)), "nothing saved: config show");
+
+    save_ignore_whitespace(&ui_store, false).unwrap();
+    assert!(!launch(Some(true)), "saved show beats config ignore");
+    save_ignore_whitespace(&ui_store, true).unwrap();
+    assert!(launch(Some(false)), "saved ignore beats config show");
+    assert!(launch(None), "saved ignore, no config");
+
+    std::fs::write(
+        &ui_store,
+        "{\"version\": 1, \"ignoreWhitespace\": \"yes\"}\n",
+    )
+    .unwrap();
+    assert!(launch(Some(true)), "a bad saved value falls to config");
+    assert!(!launch(None), "a bad saved value, no config: default");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Hover matches what a press does: a tab label on the divider band
 /// takes the press (it activates the tab), so it does not light the
 /// edge; the strip cells past the labels still do, as a press there
@@ -9683,6 +9726,7 @@ fn view_defaults_set_launch_modes_and_omitted_keys_keep_in_app_defaults() {
         wrap: Some(false),
         commit_message_expand: Some(false),
         line_blame: None,
+        ignore_whitespace: None,
         commit_message_lines: Some(3),
         background: Some(BackgroundMode::Paint),
     });
@@ -12285,6 +12329,91 @@ fn visual_stage_fails_closed_on_context_only() {
     assert!(app.status.contains("nothing to stage"), "{}", app.status);
 }
 
+/// Highlighted stage / unstage / revert while whitespace is ignored: each
+/// warns, keeps the highlight, and builds no patch. `content` is the
+/// loaded diff (whitespace shown, so only the live setting refuses, or a
+/// `-w` diff).
+fn assert_visual_writes_refuse_while_whitespace_ignored(content: DiffContent) {
+    let mut app = state();
+    app.ignore_whitespace = true;
+    focus_readme_diff(&mut app, content);
+    highlight_alpha_new(&mut app);
+    for (action, title, verb) in [
+        (Action::Stage, "Stage highlighted lines", "stage"),
+        (Action::Unstage, "Unstage highlighted lines", "unstage"),
+        (Action::Revert, "Revert highlighted lines", "revert"),
+    ] {
+        let want = format!("turn whitespace on to {verb} hunks");
+        assert_eq!(
+            palette_reason(&app, title).as_deref(),
+            Some(want.as_str()),
+            "{title}"
+        );
+        assert_eq!(app.dispatch(action), Effect::None, "{verb}");
+        assert_eq!(app.status, want);
+        assert_eq!(app.status.kind(), StatusKind::Warn, "{verb}");
+        assert!(app.diff_visual_anchor.is_some(), "refusal keeps highlight");
+        assert!(app.confirm.is_none(), "refusal opens no confirm");
+    }
+    assert_eq!(
+        app.highlight_revert_refusal().as_deref(),
+        Some("turn whitespace on to revert hunks")
+    );
+}
+
+#[test]
+fn visual_writes_refuse_while_whitespace_ignored_even_before_reload() {
+    // The setting is on but the shown diff still has whitespace (its
+    // reload is in flight): the live setting alone refuses.
+    assert_visual_writes_refuse_while_whitespace_ignored(two_hunk_readme());
+}
+
+#[test]
+fn visual_writes_refuse_a_diff_loaded_with_dash_w() {
+    let mut content = two_hunk_readme();
+    content.staged = content.unstaged.clone();
+    content.ignore_whitespace = true;
+    assert_visual_writes_refuse_while_whitespace_ignored(content);
+}
+
+#[test]
+fn visual_stage_refuses_a_dash_w_diff_after_the_setting_turns_off() {
+    // The setting is off again but the `-w` diff is still shown (its
+    // reload is in flight): the content marker refuses.
+    let mut app = state();
+    let mut content = two_hunk_readme();
+    content.ignore_whitespace = true;
+    focus_readme_diff(&mut app, content);
+    highlight_alpha_new(&mut app);
+    assert_eq!(app.dispatch(Action::Stage), Effect::None);
+    assert_eq!(app.status, "turn whitespace on to stage hunks");
+    assert_eq!(app.status.kind(), StatusKind::Warn);
+}
+
+#[test]
+fn whole_file_stage_still_runs_while_whitespace_ignored() {
+    // README.md has an unstaged change here, so a whole-file stage runs.
+    let mut app = app_state_of(build_workspace_snapshot(
+        &[two_file_repo()],
+        &[],
+        false,
+        &[],
+    ));
+    app.ignore_whitespace = true;
+    let mut content = two_hunk_readme();
+    content.ignore_whitespace = true;
+    focus_readme_diff(&mut app, content);
+    // Whole-file stage runs from the tree.
+    app.focus = FocusPane::Left;
+    match app.dispatch(Action::Stage) {
+        Effect::Stage { repo, paths } => {
+            assert_eq!(repo, "app");
+            assert_eq!(paths, vec!["README.md"]);
+        }
+        other => panic!("{other:?} status={}", app.status),
+    }
+}
+
 fn highlight_alpha_new(app: &mut AppState) {
     let rows = app.current_diff_rows();
     let change = rows
@@ -12352,6 +12481,23 @@ fn visual_stage_refuses_worktree_drill_diff() {
     assert_visual_write_refused(&mut app, "an uncommitted drill diff");
 }
 
+#[test]
+fn read_only_refusal_beats_the_whitespace_refusal() {
+    // A drill diff is read-only whatever the whitespace setting says: its
+    // own text shows, not the whitespace one.
+    let mut app = state();
+    app.ignore_whitespace = true;
+    open_visual_drill_diff(&mut app, sample_commit_source());
+    assert_visual_write_refused(&mut app, "a committed diff");
+    // A Workspace diff is writable, so the whitespace setting refuses.
+    let mut app = state();
+    app.ignore_whitespace = true;
+    focus_readme_diff(&mut app, two_hunk_readme());
+    highlight_alpha_new(&mut app);
+    assert_eq!(app.dispatch(Action::Stage), Effect::None);
+    assert_eq!(app.status, "turn whitespace on to stage hunks");
+}
+
 fn binary_readme() -> DiffContent {
     DiffContent::from_unified("Binary files a/README.md and b/README.md differ\n")
 }
@@ -12365,6 +12511,7 @@ fn mixed_readme() -> DiffContent {
         is_committed: false,
         vs_worktree: false,
         committed_label: false,
+        ignore_whitespace: false,
         error: None,
     }
 }
@@ -12409,6 +12556,7 @@ fn visual_unstage_fails_closed_on_binary() {
             is_committed: false,
             vs_worktree: false,
             committed_label: false,
+            ignore_whitespace: false,
             error: None,
         },
     );

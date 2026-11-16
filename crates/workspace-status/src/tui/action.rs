@@ -106,6 +106,11 @@ pub enum Action {
     /// Session-only, like mouse. Wrap uses display columns.
     /// Horizontal pan is a no-op while wrap is on.
     ToggleDiffWrap,
+    /// Ignore or show whitespace changes in every diff (`w`).
+    ///
+    /// One global setting: every diff load adds `-w` while it is on. The
+    /// last-used value is saved to the UI-state store.
+    ToggleIgnoreWhitespace,
     /// Toggle expand of the selected commit / stash message (`M`).
     ///
     /// Session-only, like wrap and mouse. Graph list rows stay one line.

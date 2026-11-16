@@ -896,6 +896,90 @@ fn compute_right_pane_load_follows_graph_row_at_files_depth() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// The right-pane request reads the live whitespace setting: the focused
+/// file's whitespace-only edit loads with `-w` (no hunk) and the content
+/// carries the marker.
+#[test]
+fn right_pane_request_loads_the_focused_file_with_dash_w_when_whitespace_is_ignored() {
+    let root = unique_dir("ws-tui-pane-ignore-ws");
+    let workspace = root.join("workspace");
+    let repo_dir = workspace.join("app");
+    init_repo(&repo_dir);
+    fs::write(repo_dir.join("README.md"), "  # seed  \n").unwrap();
+    let config = WorkspaceStatusConfig::with_defaults();
+    let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false, FETCH_CONCURRENCY);
+    let mut app = AppState::new(workspace.clone(), snapshot, true);
+    app.cursor = app
+        .rows
+        .iter()
+        .position(|r| {
+            r.kind == super::super::tree::NodeKind::File
+                && r.file.as_ref().is_some_and(|f| f.path == "README.md")
+        })
+        .expect("README.md file row");
+    for (ignore, want_hunk) in [(false, true), (true, false)] {
+        app.ignore_whitespace = ignore;
+        match RightPaneRequest::from_state(&app).compute() {
+            RightPaneLoad::Diff { path, content, .. } => {
+                assert_eq!(path, "README.md");
+                assert_eq!(content.ignore_whitespace, ignore);
+                assert_eq!(content.unstaged.contains("@@"), want_hunk, "{content:?}");
+            }
+            other => panic!("expected a file diff, got {other:?}"),
+        }
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Commit and compare loads mark content loaded with `-w`, and the
+/// whitespace-only change shows no hunk.
+#[test]
+fn commit_and_compare_diffs_mark_and_hide_a_whitespace_only_change() {
+    let cwd = unique_dir("ws-d2-ignore-ws");
+    let dir = cwd.join("app");
+    init_repo(&dir);
+    let base = exec_git(&["rev-parse", "HEAD"], &dir);
+    fs::write(dir.join("README.md"), "#  seed\t\n").unwrap();
+    git(&dir, &["commit", "-q", "-am", "spaces"]);
+    let head = exec_git(&["rev-parse", "HEAD"], &dir);
+    let ignore = DiffOpts {
+        context: None,
+        ignore_whitespace: true,
+    };
+    let commit = CommitFileSource::Commit {
+        commit_id: head.clone(),
+    };
+    let shown = compute_commit_diff(&cwd, "app", &commit, "README.md", DiffOpts::default(), None);
+    assert!(
+        !shown.ignore_whitespace && shown.unstaged.contains("@@"),
+        "{shown:?}"
+    );
+    let hidden = compute_commit_diff(&cwd, "app", &commit, "README.md", ignore, None);
+    assert!(hidden.ignore_whitespace, "{hidden:?}");
+    assert!(!hidden.unstaged.contains("@@"), "{hidden:?}");
+
+    let compare = CommitFileSource::Compare {
+        base_ref: base.clone(),
+        head_ref: head.clone(),
+        base_tip: base.clone(),
+        merge_base: base.clone(),
+        head: head.clone(),
+    };
+    let shown =
+        compute_compare_diff(&dir, &compare, "README.md", None, DiffOpts::default()).unwrap();
+    assert!(
+        !shown.ignore_whitespace && shown.unstaged.contains("@@"),
+        "{shown:?}"
+    );
+    let hidden = compute_compare_diff(&dir, &compare, "README.md", None, ignore).unwrap();
+    assert!(
+        hidden.ignore_whitespace && hidden.is_committed,
+        "{hidden:?}"
+    );
+    assert!(!hidden.unstaged.contains("@@"), "{hidden:?}");
+    let _ = fs::remove_dir_all(&cwd);
+}
+
 #[test]
 fn event_thread_keeps_polling_while_right_pane_git_runs() {
     let root = unique_dir("ws-tui-pane-pump");
@@ -1303,8 +1387,14 @@ fn worktree_range_lists_and_diffs_the_one_file_against_the_commit() {
             old_path: Some("old.txt".into()),
         }
     );
-    let content =
-        compute_compare_diff(&dir, &load.source, "new.txt", Some("old.txt"), None).unwrap();
+    let content = compute_compare_diff(
+        &dir,
+        &load.source,
+        "new.txt",
+        Some("old.txt"),
+        DiffOpts::default(),
+    )
+    .unwrap();
     assert!(content.vs_worktree && !content.is_committed);
     assert!(content.unstaged.contains("+more"), "{content:?}");
 
@@ -1340,17 +1430,18 @@ fn commit_and_stash_diffs_label_committed_and_keep_partial_patch_kinds() {
             CommitFileSource::Commit {
                 commit_id: exec_git(&["rev-parse", "HEAD"], &dir),
             },
-            diff_commit_file_ctx(&dir, "HEAD", "README.md", None),
+            diff_commit_file_ctx(&dir, "HEAD", "README.md", DiffOpts::default()),
         ),
         (
             CommitFileSource::Stash {
                 stash_ref: "stash@{0}".into(),
             },
-            diff_stash_file_ctx(&dir, "stash@{0}", "README.md", None),
+            diff_stash_file_ctx(&dir, "stash@{0}", "README.md", DiffOpts::default()),
         ),
     ];
     for (source, lines) in cases {
-        let content = compute_commit_diff(&cwd, "app", &source, "README.md", None, None);
+        let content =
+            compute_commit_diff(&cwd, "app", &source, "README.md", DiffOpts::default(), None);
         let plain = DiffContent::from_lines(lines);
         assert!(!content.is_committed, "{source:?}");
         assert_eq!(content.unstaged, plain.unstaged, "{source:?}");

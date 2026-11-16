@@ -435,6 +435,7 @@ impl AppState {
             | Action::ToggleFullContext
             | Action::ToggleDiffMode
             | Action::ToggleDiffWrap
+            | Action::ToggleIgnoreWhitespace
             | Action::ResizeTree(_)
             | Action::ToggleReviewed
             | Action::Edit

@@ -1,9 +1,9 @@
 //! Persist TUI view state (last-used theme, activity sparkline, commit
-//! message rows) in a state file.
+//! message rows, ignore whitespace) in a state file.
 //!
 //! The theme that a palette `Theme: …` row sets, the activity sparkline
-//! toggle, and the commit-message footer height a mouse drag sets are
-//! state, not config: they live in one JSON file
+//! toggle, the commit-message footer height a mouse drag sets, and the
+//! last "ignore whitespace" diff setting are state, not config: they live in one JSON file
 //! (`$XDG_STATE_HOME/my-workspace-status/ui-state.json`) and the user config
 //! file is never written. [`crate::settings::Settings`] loads it at launch;
 //! see [`super::theme::theme_id_from`] for the theme precedence.
@@ -26,16 +26,18 @@ const STORE_FILE_NAME: &str = "ui-state.json";
 
 /// On-disk shape:
 /// `{"version": 1, "theme": "<slug>", "activitySparkline": false,
-/// "commitMessageLines": 6}`.
+/// "commitMessageLines": 6, "ignoreWhitespace": true}`.
 ///
-/// `version` is required; `theme`, `activitySparkline`, and
-/// `commitMessageLines` are optional. An object with any other key (for
-/// example a config file that also has `version` and `theme`) is not a
-/// store: load ignores it and save leaves it unchanged. Save keeps the raw
-/// `theme` string and the raw `commitMessageLines` JSON value, so an unknown
-/// slug or a bad row count survives a save of another key.
-/// `commitMessageLines` takes any JSON value here: a bad value is only that
-/// key unset ([`saved_commit_msg_lines`]), never the whole file foreign.
+/// `version` is required; `theme`, `activitySparkline`,
+/// `commitMessageLines`, and `ignoreWhitespace` are optional. An object with
+/// any other key (for example a config file that also has `version` and
+/// `theme`) is not a store: load ignores it and save leaves it unchanged.
+/// Save keeps the raw `theme` string and the raw `commitMessageLines` and
+/// `ignoreWhitespace` JSON values, so an unknown slug or a bad value
+/// survives a save of another key. `commitMessageLines` and
+/// `ignoreWhitespace` take any JSON value here: a bad value is only that
+/// key unset ([`saved_commit_msg_lines`], [`saved_ignore_whitespace`]),
+/// never the whole file foreign.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct StoreFile {
@@ -46,6 +48,8 @@ struct StoreFile {
     activity_sparkline: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     commit_message_lines: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ignore_whitespace: Option<serde_json::Value>,
 }
 
 /// The view state the TUI restores at launch.
@@ -63,6 +67,16 @@ pub struct UiState {
     /// saved value is not an integer in
     /// [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`].
     pub commit_msg_lines: Option<usize>,
+    /// Last-used "ignore whitespace" diff setting: `Some(true)` loads diffs
+    /// with `git diff -w`, `Some(false)` shows whitespace changes. `None`
+    /// when none was saved or the saved value is not a JSON bool.
+    pub ignore_whitespace: Option<bool>,
+}
+
+/// The saved `ignoreWhitespace` when it is a JSON bool; any other value
+/// reads as not saved.
+fn saved_ignore_whitespace(value: Option<&serde_json::Value>) -> Option<bool> {
+    value?.as_bool()
 }
 
 /// The saved `commitMessageLines` when it is a JSON integer in
@@ -133,8 +147,9 @@ pub(crate) fn check_ui_state_bytes(bytes: &[u8]) -> Result<(), String> {
 /// store JSON (extra keys included), or has another version. An unknown
 /// theme slug loads as no theme and keeps the other keys; a missing
 /// `activitySparkline` is off; a missing or bad `commitMessageLines` (not an
-/// integer in [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`]) loads as
-/// not saved and keeps the other keys.
+/// integer in [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`]) or
+/// `ignoreWhitespace` (not a bool) loads as not saved and keeps the other
+/// keys.
 pub fn load_ui_state(path: &Path) -> UiState {
     let Some(parsed) = fs::read(path).ok().and_then(|bytes| parse_store(&bytes)) else {
         return UiState::default();
@@ -146,6 +161,7 @@ pub fn load_ui_state(path: &Path) -> UiState {
         theme: parsed.theme.as_deref().and_then(parse_theme_id),
         activity_sparkline: parsed.activity_sparkline,
         commit_msg_lines: saved_commit_msg_lines(parsed.commit_message_lines.as_ref()),
+        ignore_whitespace: saved_ignore_whitespace(parsed.ignore_whitespace.as_ref()),
     }
 }
 
@@ -205,6 +221,18 @@ pub fn save_commit_msg_lines(path: &Path, lines: usize) -> io::Result<()> {
     let lines = lines.clamp(COMMIT_MSG_LINES_MIN, COMMIT_MSG_LINES_MAX);
     update_store(path, |file| {
         file.commit_message_lines = Some(serde_json::Value::from(lines));
+    })
+}
+
+/// Persist the "ignore whitespace" diff setting as the last-used value, and
+/// keep the other stored keys as they are (an unknown theme slug or a bad
+/// `commitMessageLines` included).
+///
+/// The user config file (`viewDefaults.whitespace`) is never written. See
+/// [`update_store`] for the create, foreign-file, and lock rules.
+pub fn save_ignore_whitespace(path: &Path, on: bool) -> io::Result<()> {
+    update_store(path, |file| {
+        file.ignore_whitespace = Some(serde_json::Value::Bool(on));
     })
 }
 
@@ -292,6 +320,7 @@ mod tests {
                     theme: Some(id),
                     activity_sparkline: false,
                     commit_msg_lines: None,
+                    ignore_whitespace: None,
                 },
                 "{id:?}"
             );
@@ -323,6 +352,7 @@ mod tests {
                 theme: Some(ThemeId::Nord),
                 activity_sparkline: true,
                 commit_msg_lines: None,
+                ignore_whitespace: None,
             }
         );
         let _ = fs::remove_dir_all(dir);
@@ -340,6 +370,7 @@ mod tests {
                 theme: Some(ThemeId::Dracula),
                 activity_sparkline: true,
                 commit_msg_lines: None,
+                ignore_whitespace: None,
             }
         );
         save_activity_sparkline(&path, false).unwrap();
@@ -361,6 +392,7 @@ mod tests {
                 theme: None,
                 activity_sparkline: true,
                 commit_msg_lines: None,
+                ignore_whitespace: None,
             },
             "unknown slug is no theme; the sparkline still loads"
         );
@@ -382,6 +414,7 @@ mod tests {
                 theme: None,
                 activity_sparkline: true,
                 commit_msg_lines: None,
+                ignore_whitespace: None,
             }
         );
         let _ = fs::remove_dir_all(dir);
@@ -403,6 +436,7 @@ mod tests {
             (|p: &Path| save_theme(p, ThemeId::Nord)) as Save,
             |p: &Path| save_activity_sparkline(p, true),
             |p: &Path| save_commit_msg_lines(p, 6),
+            |p: &Path| save_ignore_whitespace(p, true),
         ] {
             let (dir, path) = temp_store();
             let path = path
@@ -447,6 +481,7 @@ mod tests {
                 theme: Some(ThemeId::Dracula),
                 activity_sparkline: false,
                 commit_msg_lines: None,
+                ignore_whitespace: None,
             },
             "compact, missing activitySparkline is off"
         );
@@ -457,6 +492,7 @@ mod tests {
                 theme: None,
                 activity_sparkline: true,
                 commit_msg_lines: None,
+                ignore_whitespace: None,
             },
             "no theme, sparkline on"
         );
@@ -467,10 +503,11 @@ mod tests {
     fn save_never_overwrites_a_file_that_is_not_the_store() {
         let (dir, path) = temp_store();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let saves: [(&str, Save); 3] = [
+        let saves: [(&str, Save); 4] = [
             ("theme", |p| save_theme(p, ThemeId::Monokai)),
             ("sparkline", |p| save_activity_sparkline(p, true)),
             ("commit message lines", |p| save_commit_msg_lines(p, 6)),
+            ("ignore whitespace", |p| save_ignore_whitespace(p, true)),
         ];
         for (name, save) in saves {
             for body in [
@@ -549,6 +586,7 @@ mod tests {
                 theme: Some(ThemeId::Dracula),
                 activity_sparkline: true,
                 commit_msg_lines: Some(7),
+                ignore_whitespace: None,
             }
         );
         save_theme(&path, ThemeId::Nord).unwrap();
@@ -559,6 +597,7 @@ mod tests {
                 theme: Some(ThemeId::Nord),
                 activity_sparkline: false,
                 commit_msg_lines: Some(7),
+                ignore_whitespace: None,
             },
             "theme and sparkline saves keep the rows"
         );
@@ -600,6 +639,7 @@ mod tests {
                     theme: Some(ThemeId::Nord),
                     activity_sparkline: true,
                     commit_msg_lines: None,
+                    ignore_whitespace: None,
                 },
                 "{bad}"
             );
@@ -617,6 +657,109 @@ mod tests {
             }
             save_commit_msg_lines(&path, 5).unwrap();
             assert_eq!(load_ui_state(&path).commit_msg_lines, Some(5), "{bad}");
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// An `ignoreWhitespace` save round-trips both values and keeps the
+    /// theme (an unknown slug too), the sparkline, and the rows; the other
+    /// saves keep it; an absent key loads as not saved.
+    #[test]
+    fn ignore_whitespace_round_trips_and_keeps_the_other_keys() {
+        let (dir, path) = temp_store();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "{\"version\":1,\"theme\":\"dracula\",\"activitySparkline\":true,\"commitMessageLines\":7}\n",
+        )
+        .unwrap();
+        assert_eq!(load_ui_state(&path).ignore_whitespace, None, "absent key");
+        save_ignore_whitespace(&path, true).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "{\n  \"version\": 1,\n  \"theme\": \"dracula\",\n  \"activitySparkline\": true,\n  \"commitMessageLines\": 7,\n  \"ignoreWhitespace\": true\n}\n"
+        );
+        assert_eq!(
+            load_ui_state(&path),
+            UiState {
+                theme: Some(ThemeId::Dracula),
+                activity_sparkline: true,
+                commit_msg_lines: Some(7),
+                ignore_whitespace: Some(true),
+            }
+        );
+        save_ignore_whitespace(&path, false).unwrap();
+        assert_eq!(load_ui_state(&path).ignore_whitespace, Some(false));
+
+        save_theme(&path, ThemeId::Nord).unwrap();
+        save_activity_sparkline(&path, false).unwrap();
+        save_commit_msg_lines(&path, 3).unwrap();
+        assert_eq!(
+            load_ui_state(&path),
+            UiState {
+                theme: Some(ThemeId::Nord),
+                activity_sparkline: false,
+                commit_msg_lines: Some(3),
+                ignore_whitespace: Some(false),
+            },
+            "the other saves keep the setting"
+        );
+
+        fs::write(&path, "{\"version\":1,\"theme\":\"solarized\"}\n").unwrap();
+        save_ignore_whitespace(&path, true).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "{\n  \"version\": 1,\n  \"theme\": \"solarized\",\n  \"activitySparkline\": false,\n  \"ignoreWhitespace\": true\n}\n",
+            "unknown slug kept as is"
+        );
+
+        let (fresh_dir, fresh) = temp_store();
+        save_ignore_whitespace(&fresh, true).unwrap();
+        assert_eq!(
+            fs::read_to_string(&fresh).unwrap(),
+            "{\n  \"version\": 1,\n  \"activitySparkline\": false,\n  \"ignoreWhitespace\": true\n}\n",
+            "a missing file gets no theme"
+        );
+        let _ = fs::remove_dir_all(fresh_dir);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// An `ignoreWhitespace` that is not a JSON bool loads as not saved;
+    /// the other keys still load, and a save of another key keeps the bad
+    /// value as is (the `commitMessageLines` rule).
+    #[test]
+    fn bad_ignore_whitespace_is_unset_and_the_rest_still_loads() {
+        let (dir, path) = temp_store();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for bad in ["\"true\"", "1", "0", "null", "[true]", "{}", "\"ignore\""] {
+            let body = format!(
+                "{{\"version\":1,\"theme\":\"nord\",\"activitySparkline\":true,\"commitMessageLines\":4,\"ignoreWhitespace\":{bad}}}\n"
+            );
+            fs::write(&path, &body).unwrap();
+            assert_eq!(
+                load_ui_state(&path),
+                UiState {
+                    theme: Some(ThemeId::Nord),
+                    activity_sparkline: true,
+                    commit_msg_lines: Some(4),
+                    ignore_whitespace: None,
+                },
+                "{bad}"
+            );
+            assert_eq!(check_ui_state_bytes(body.as_bytes()), Ok(()), "{bad}");
+            save_activity_sparkline(&path, false).unwrap();
+            let kept = fs::read_to_string(&path).unwrap();
+            if bad == "null" {
+                assert!(!kept.contains("ignoreWhitespace"), "{kept}");
+            } else {
+                let compact: String = kept.chars().filter(|c| !c.is_whitespace()).collect();
+                assert!(
+                    compact.contains(&format!("\"ignoreWhitespace\":{bad}")),
+                    "{bad}: kept as is: {kept}"
+                );
+            }
+            save_ignore_whitespace(&path, true).unwrap();
+            assert_eq!(load_ui_state(&path).ignore_whitespace, Some(true), "{bad}");
         }
         let _ = fs::remove_dir_all(dir);
     }

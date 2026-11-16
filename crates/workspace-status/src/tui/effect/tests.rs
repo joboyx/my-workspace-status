@@ -1135,6 +1135,126 @@ fn late_commit_diff_after_other_path_does_not_reopen_old_diff() {
     }
 }
 
+/// Workspace with repo `app` whose HEAD commit changes the last of ten
+/// README.md lines and re-indents `src.rs` only. Returns the workspace
+/// state drilled at depth 2 on README.md (diff from a stub), the file list
+/// focused, and the root to remove.
+fn depth_2_whitespace_drill(prefix: &str) -> (AppState, PathBuf) {
+    let root = crate::testutil::unique_dir(prefix);
+    let dir = root.join("app");
+    crate::testutil::init_repo(&dir);
+    let lines = |last: &str| format!("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\n{last}\n");
+    fs::write(dir.join("README.md"), lines("l10")).unwrap();
+    fs::write(dir.join("src.rs"), "fn x() {\n    y();\n}\n").unwrap();
+    crate::testutil::git(&dir, &["add", "README.md", "src.rs"]);
+    crate::testutil::git(&dir, &["commit", "-q", "-m", "one"]);
+    fs::write(dir.join("README.md"), lines("L10")).unwrap();
+    fs::write(dir.join("src.rs"), "fn x() {\n\ty();\n}\n").unwrap();
+    crate::testutil::git(&dir, &["commit", "-q", "-am", "two"]);
+    let head = crate::git::exec_git(&["rev-parse", "HEAD"], &dir);
+    let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+    let mut state = AppState::new(root.clone(), snapshot, true);
+    state.ui_store_path = root.join("ui-state.json");
+    state.open_commit_diff(
+        "app".into(),
+        CommitFileSource::Commit { commit_id: head },
+        vec![commit_file("README.md"), commit_file("src.rs")],
+        0,
+        "README.md".into(),
+        DiffContent::from_commit_lines(vec!["@@ -10 +10 @@".into(), "-l10".into(), "+L10".into()]),
+    );
+    state.focus = FocusPane::Left;
+    (state, root)
+}
+
+/// Run the jobs in `jobs` in order, then every follow-up job until none is
+/// left (bounded, so a re-request loop fails the test instead of hanging).
+fn run_jobs_to_idle(interp: &mut Interpreter, state: &mut AppState, jobs: Vec<(u64, JobWork)>) {
+    for (id, work) in jobs {
+        apply_id(interp, state, id, work());
+    }
+    for _ in 0..8 {
+        let jobs = capture_jobs(interp, state);
+        if jobs.is_empty() {
+            return;
+        }
+        for (id, work) in jobs {
+            apply_id(interp, state, id, work());
+        }
+    }
+    panic!("jobs never went idle");
+}
+
+#[test]
+fn w_before_a_moved_depth_2_pane_load_lands_shows_the_new_file_with_dash_w() {
+    let (mut state, root) = depth_2_whitespace_drill("ws-effect-w-pane-race");
+    let mut interp = Interpreter::with_cap(4);
+    // Move to src.rs: its pane load starts with whitespace shown.
+    let effect = state.dispatch(Action::Move(1));
+    assert_eq!(effect, Effect::LoadRightPane);
+    schedule_effect(&mut interp, &mut state, effect, &Action::Move(1));
+    let stale = capture_jobs(&mut interp, &mut state);
+    // `w` arrives before that load lands.
+    let effect = state.dispatch(Action::ToggleIgnoreWhitespace);
+    schedule_effect(
+        &mut interp,
+        &mut state,
+        effect,
+        &Action::ToggleIgnoreWhitespace,
+    );
+    let mut jobs = stale;
+    jobs.extend(capture_jobs(&mut interp, &mut state));
+    run_jobs_to_idle(&mut interp, &mut state, jobs);
+    match &state.drill {
+        DrillView::Diff { path, content, .. } => {
+            assert_eq!(path, "src.rs");
+            assert!(
+                content.ignore_whitespace,
+                "the stale pane load must not paint the diff without -w"
+            );
+            assert!(
+                !content.unstaged.contains("+\ty();"),
+                "{:?}",
+                content.unstaged
+            );
+        }
+        other => panic!("expected the src.rs diff, got {other:?}"),
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ctrl_o_before_an_in_flight_pane_load_of_the_same_file_keeps_full_context() {
+    let (mut state, root) = depth_2_whitespace_drill("ws-effect-ctrl-o-pane-race");
+    let mut interp = Interpreter::with_cap(4);
+    // A pane reload of README.md (a watch tick or a write) is in flight.
+    schedule_effect(
+        &mut interp,
+        &mut state,
+        Effect::LoadRightPane,
+        &Action::WatchTick,
+    );
+    let stale = capture_jobs(&mut interp, &mut state);
+    let effect = state.dispatch(Action::ToggleFullContext);
+    schedule_effect(&mut interp, &mut state, effect, &Action::ToggleFullContext);
+    // The full-context reload lands first, the old pane load after it.
+    let mut jobs = capture_jobs(&mut interp, &mut state);
+    jobs.extend(stale);
+    run_jobs_to_idle(&mut interp, &mut state, jobs);
+    match &state.drill {
+        DrillView::Diff { path, content, .. } => {
+            assert_eq!(path, "README.md");
+            assert!(
+                content.unstaged.lines().any(|line| line == " l1"),
+                "full context must survive the old pane load: {:?}",
+                content.unstaged
+            );
+        }
+        other => panic!("expected the README.md diff, got {other:?}"),
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn matching_commit_diff_still_applies() {
     let mut state = fixture_state();
@@ -4199,6 +4319,33 @@ fn explorer_preview_queue_keeps_only_live_loads() {
         "only the newest pick per tab"
     );
     assert!(capture_jobs(&mut interp, &mut state).is_empty());
+}
+
+/// A queued Explorer diff load keeps the whitespace setting of the moment
+/// it was queued, with the whole-file context.
+#[test]
+fn explorer_preview_job_captures_the_whitespace_setting_when_queued() {
+    let mut state = fixture_state();
+    let mut interp = Interpreter::with_cap(4);
+    let (tab, gen) = explorer_inner(&mut state, "app", "a.txt", false, false);
+    state.ignore_whitespace = true;
+    schedule_effect(
+        &mut interp,
+        &mut state,
+        explorer_load(tab, gen, "a.txt"),
+        &Action::None,
+    );
+    state.ignore_whitespace = false;
+    match interp.explorer_previews.as_slice() {
+        [ExplorerJob::Preview { diff_opts, .. }] => assert_eq!(
+            *diff_opts,
+            crate::git::DiffOpts {
+                context: Some(crate::git::FULL_DIFF_CONTEXT_LINES),
+                ignore_whitespace: true,
+            }
+        ),
+        other => panic!("{other:?}"),
+    }
 }
 
 /// A pinned file whose load is still queued keeps it when a later tree

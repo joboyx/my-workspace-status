@@ -5,7 +5,7 @@ One file per feature. Each file lists recipes with steps, the screen text to exp
 | # | File | Proves | Driven with |
 | --- | --- | --- | --- |
 | 1 | [tree-nav](tree-nav.md) | Tree cursor `j` / `k`, `Enter` focuses the right pane, `Esc` comes back, folds `h` / `l` / `z` | `wsctl` |
-| 2 | [diff](diff.md) | A dirty file row shows its diff: staged and unstaged hunks, inline under 100 diff columns, split at 200 terminal columns | `wsctl` |
+| 2 | [diff](diff.md) | A dirty file row shows its diff: staged and unstaged hunks, inline under 100 diff columns, split at 200 terminal columns, `w` ignore whitespace (saved across a restart) | `wsctl` |
 | 3 | [search](search.md) | `/` search: `/merger` Enter (demo clip 02), `/auth` Enter `n` wraps (clips 04, 14), no match and `Esc` clears (clip 12) | `wsctl` |
 | 4 | [help-overlay](help-overlay.md) | `?` opens the key overlay over the panes, `Esc` closes it | `wsctl` |
 | 5 | [json-snapshot](json-snapshot.md) | `--json` and `--plain` of the fixture, run headless with the run's isolation; the refused flags | `wsctl run` |

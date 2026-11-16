@@ -94,7 +94,7 @@ fn empty_view_defaults_object_is_all_none() {
 #[test]
 fn view_defaults_first_values_are_true() {
     let got = load_view_defaults(
-            r#"{"hiddenPaths":[],"viewDefaults":{"tree":"tree","commitTree":"tree","diff":"split","wrap":"wrap","commitMessage":"expand","lineBlame":"show","background":"paint"}}"#,
+            r#"{"hiddenPaths":[],"viewDefaults":{"tree":"tree","commitTree":"tree","diff":"split","wrap":"wrap","commitMessage":"expand","lineBlame":"show","whitespace":"ignore","background":"paint"}}"#,
         )
         .unwrap();
     assert_eq!(
@@ -106,6 +106,7 @@ fn view_defaults_first_values_are_true() {
             wrap: Some(true),
             commit_message_expand: Some(true),
             line_blame: Some(true),
+            ignore_whitespace: Some(true),
             commit_message_lines: None,
             background: Some(BackgroundMode::Paint),
         }
@@ -115,7 +116,7 @@ fn view_defaults_first_values_are_true() {
 #[test]
 fn view_defaults_second_values_are_false() {
     let got = load_view_defaults(
-            r#"{"hiddenPaths":[],"viewDefaults":{"tree":"flat","commitTree":"flat","diff":"inline","wrap":"unwrap","commitMessage":"collapse","lineBlame":"hide","background":"terminal"}}"#,
+            r#"{"hiddenPaths":[],"viewDefaults":{"tree":"flat","commitTree":"flat","diff":"inline","wrap":"unwrap","commitMessage":"collapse","lineBlame":"hide","whitespace":"show","background":"terminal"}}"#,
         )
         .unwrap();
     assert_eq!(
@@ -127,6 +128,7 @@ fn view_defaults_second_values_are_false() {
             wrap: Some(false),
             commit_message_expand: Some(false),
             line_blame: Some(false),
+            ignore_whitespace: Some(false),
             commit_message_lines: None,
             background: Some(BackgroundMode::Terminal),
         }
@@ -174,6 +176,9 @@ fn view_defaults_bad_value_names_the_key_and_choices() {
         ("commitMessage", "null", r#""expand" or "collapse""#),
         ("lineBlame", r#""on""#, r#""show" or "hide""#),
         ("lineBlame", "true", r#""show" or "hide""#),
+        ("whitespace", r#""hide""#, r#""ignore" or "show""#),
+        ("whitespace", r#""Ignore""#, r#""ignore" or "show""#),
+        ("whitespace", "true", r#""ignore" or "show""#),
         ("background", r#""Paint""#, r#""paint" or "terminal""#),
         ("background", r#""none""#, r#""paint" or "terminal""#),
         ("background", "false", r#""paint" or "terminal""#),
@@ -346,7 +351,7 @@ fn layered_workspace_wins_per_top_level_key() {
 fn layered_view_defaults_merge_per_sub_key() {
     let cfg = load_layered(
             Some(
-                r#"{"hiddenPaths":[],"viewDefaults":{"tree":"flat","wrap":"unwrap","commitMessageLines":12}}"#,
+                r#"{"hiddenPaths":[],"viewDefaults":{"tree":"flat","wrap":"unwrap","commitMessageLines":12,"whitespace":"ignore"}}"#,
             ),
             Some(
                 r#"{"hiddenPaths":[],"viewDefaults":{"wrap":"wrap","lineBlame":"hide","background":"terminal"}}"#,
@@ -359,6 +364,7 @@ fn layered_view_defaults_merge_per_sub_key() {
             tree: Some(false),
             wrap: Some(true),
             line_blame: Some(false),
+            ignore_whitespace: Some(true),
             commit_message_lines: Some(12),
             background: Some(BackgroundMode::Terminal),
             ..ViewDefaults::default()

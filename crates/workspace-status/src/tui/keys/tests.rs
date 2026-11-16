@@ -374,7 +374,7 @@ fn stash_push_branch_keys() {
     );
     assert_eq!(
         event_to_action(&key(KeyCode::Char('w')), normal(), false, false),
-        Action::None,
+        Action::ToggleIgnoreWhitespace,
         "unshifted w must not remove a worktree"
     );
     assert_eq!(
@@ -814,6 +814,17 @@ fn mouse_drag_and_release_and_inline_key() {
         event_to_action(&key(KeyCode::Char('\\')), normal(), false, false),
         Action::ToggleDiffWrap
     );
+    for (right_is_diff, focus_right) in [(false, false), (true, true)] {
+        assert_eq!(
+            event_to_action(
+                &key(KeyCode::Char('w')),
+                normal(),
+                right_is_diff,
+                focus_right
+            ),
+            Action::ToggleIgnoreWhitespace
+        );
+    }
     assert_eq!(
         event_to_action(&key(KeyCode::Char('M')), normal(), false, false),
         Action::ToggleCommitMsgExpand
@@ -1736,8 +1747,13 @@ fn a_opens_the_blame_menu_and_the_menu_owns_its_keys() {
     }
     assert_eq!(
         event_to_action(&key(KeyCode::Char('w')), normal(), true, true),
-        Action::None,
-        "w stays unbound outside the menu"
+        Action::ToggleIgnoreWhitespace,
+        "w outside the menu is the whitespace toggle"
+    );
+    assert_eq!(
+        event_to_action(&key(KeyCode::Char('w')), pending_g(), true, true),
+        Action::ViewRemotely,
+        "gw stays view remotely"
     );
     let menu = InputMode::BlameMenu;
     for c in ['c', 'p', 'w', 'g', 'j', 'k', ':'] {
@@ -2500,11 +2516,12 @@ fn ctrl_w_closes_the_tab_in_normal_keymaps_only() {
                 "{mode:?} {mods:?}"
             );
         }
-        // Plain `w` is unbound, except `gw` (view remotely).
+        // Plain `w` is `gw` (view remotely) in the g chord, else the
+        // whitespace toggle.
         let plain_w = if matches!(mode, InputMode::GPending { .. }) {
             Action::ViewRemotely
         } else {
-            Action::None
+            Action::ToggleIgnoreWhitespace
         };
         assert_eq!(
             event_to_action(&key(KeyCode::Char('w')), mode, true, true),
@@ -2972,6 +2989,7 @@ fn unbound_modifier_chords_do_not_run_plain_bindings() {
         (n, 0, Char('<'), Action::ResizeTree(-1)),
         (n, 0, Char('>'), Action::ResizeTree(1)),
         (n, 0, Char('\\'), Action::ToggleDiffWrap),
+        (n, 0, Char('w'), Action::ToggleIgnoreWhitespace),
         (n, 0, Char('M'), Action::ToggleCommitMsgExpand),
         (n, 0, Char('-'), Action::ExplorerReveal),
         (n, 0, Char('B'), Action::ToggleLineBlame),

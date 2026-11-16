@@ -828,9 +828,9 @@ fn quit_during_pull_in_this_process() {
 #[test]
 fn git_diff_args_inserts_full_context() {
     let path = literal_pathspec("README.md");
-    let normal = git_diff_args(&["diff"], "README.md", None);
+    let normal = git_diff_args(&["diff"], "README.md", DiffOpts::default());
     assert_eq!(normal, vec!["diff".to_string(), "--".into(), path.clone()]);
-    let full = git_diff_args(&["diff"], "README.md", Some(FULL_DIFF_CONTEXT_LINES));
+    let full = git_diff_args(&["diff"], "README.md", ctx(Some(FULL_DIFF_CONTEXT_LINES)));
     assert_eq!(
         full,
         vec![
@@ -924,7 +924,7 @@ fn file_diff_reads_only_the_named_file() {
     for (target, sibling) in GLOB_NAME_PAIRS {
         write_file(&dir, target, "dirty\n");
         write_file(&dir, sibling, "dirty\n");
-        let args = git_diff_args(&["diff"], target, None);
+        let args = git_diff_args(&["diff"], target, DiffOpts::default());
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let diff = exec_git(&refs, &dir);
         assert_eq!(
@@ -1867,7 +1867,8 @@ fn compare_diff_lines_keep_carriage_returns_and_trailing_whitespace() {
     let base = exec_git(&["rev-parse", "HEAD"], &dir);
     fs::write(dir.join("f.txt"), "a\r\nb \t\n").unwrap();
     git(&dir, &["commit", "-q", "-am", "head"]);
-    let lines = diff_compare_file_ctx(&dir, &base, "HEAD", "f.txt", None, None).unwrap();
+    let lines =
+        diff_compare_file_ctx(&dir, &base, "HEAD", "f.txt", None, DiffOpts::default()).unwrap();
     assert_eq!(lines[lines.len() - 2..], [" a\r", "+b \t"]);
     let _ = fs::remove_dir_all(&dir);
 }
@@ -1959,7 +1960,7 @@ fn revert_compare_file_aborts_when_head_moved_or_path_dirty() {
 #[test]
 fn revert_compare_patch_checks_before_apply() {
     let (dir, mb, head) = compare_revert_fixture();
-    let patch = diff_compare_file_ctx(&dir, &mb, &head, "m.txt", None, None)
+    let patch = diff_compare_file_ctx(&dir, &mb, &head, "m.txt", None, DiffOpts::default())
         .unwrap()
         .join("\n")
         + "\n";
@@ -2626,13 +2627,106 @@ fn map_line_to_parent_follows_u0_hunks() {
 #[test]
 fn git_worktree_compare_diff_args_adds_context_and_rename_path() {
     assert_eq!(
-        git_worktree_compare_diff_args("abc", "new.txt", Some("old.txt"), Some(3)),
+        git_worktree_compare_diff_args("abc", "new.txt", Some("old.txt"), ctx(Some(3))),
         ["diff", "-U3", "-M", "abc", "--", "old.txt", "new.txt"]
     );
     assert_eq!(
-        git_worktree_compare_diff_args("abc", "f.txt", Some("f.txt"), None),
+        git_worktree_compare_diff_args("abc", "f.txt", Some("f.txt"), DiffOpts::default()),
         ["diff", "-M", "abc", "--", "f.txt"]
     );
+}
+
+/// [`DiffOpts`] with `context` and whitespace shown.
+fn ctx(context: Option<u32>) -> DiffOpts {
+    DiffOpts {
+        context,
+        ..DiffOpts::default()
+    }
+}
+
+#[test]
+fn every_diff_argv_builder_adds_dash_w_only_when_whitespace_is_ignored() {
+    type Build = fn(DiffOpts) -> Vec<String>;
+    let builders: [(&str, Build); 3] = [
+        ("git_diff_args", |o| git_diff_args(&["diff"], "f.txt", o)),
+        ("git_compare_diff_args", |o| {
+            git_compare_diff_args("a", "b", "f.txt", None, o)
+        }),
+        ("git_worktree_compare_diff_args", |o| {
+            git_worktree_compare_diff_args("a", "f.txt", None, o)
+        }),
+    ];
+    for (name, build) in builders {
+        for context in [None, Some(3)] {
+            let shown = build(ctx(context));
+            assert!(
+                !shown.iter().any(|a| a == "-w"),
+                "{name} {context:?}: {shown:?}"
+            );
+            let ignored = build(DiffOpts {
+                context,
+                ignore_whitespace: true,
+            });
+            assert_eq!(
+                ignored.iter().filter(|a| *a == "-w").count(),
+                1,
+                "{name} {context:?}: {ignored:?}"
+            );
+            // `-w` is an option: it sits before the `--` pathspec split.
+            let dash_w = ignored.iter().position(|a| a == "-w").unwrap();
+            let split = ignored.iter().position(|a| a == "--").unwrap();
+            assert!(dash_w < split, "{name}: {ignored:?}");
+            let mut without: Vec<String> = ignored.clone();
+            without.remove(dash_w);
+            assert_eq!(without, shown, "{name}: only -w differs");
+        }
+    }
+}
+
+#[test]
+fn commit_and_stash_diff_with_dash_w_hide_a_whitespace_only_change() {
+    let dir = unique_dir("ws-git-ignore-ws-commit");
+    init_repo(&dir);
+    commit_file(&dir, "f.txt", "one\ntwo\n", "base");
+    let head = commit_file(&dir, "f.txt", "one\n  two\n", "indent");
+    let ignore = DiffOpts {
+        context: None,
+        ignore_whitespace: true,
+    };
+    let has_hunk = |lines: &[String]| lines.iter().any(|l| l.starts_with("@@"));
+    let shown = diff_commit_file_ctx(&dir, &head, "f.txt", DiffOpts::default());
+    assert!(has_hunk(&shown), "{shown:?}");
+    // The primary diff is empty under `-w`; the `git show` fallback must
+    // not bring the hunk back.
+    // `--format=` drops the commit header, so the empty fallback is the
+    // same `(no diff)` an empty diff shows everywhere else.
+    let hidden = diff_commit_file_ctx(&dir, &head, "f.txt", ignore);
+    assert_eq!(hidden, ["(no diff)"]);
+
+    fs::write(dir.join("f.txt"), "one\n  two  \n").unwrap();
+    stash_push(&dir, &[]).unwrap();
+    let shown = diff_stash_file_ctx(&dir, "stash@{0}", "f.txt", DiffOpts::default());
+    assert!(has_hunk(&shown), "{shown:?}");
+    let hidden = diff_stash_file_ctx(&dir, "stash@{0}", "f.txt", ignore);
+    assert_eq!(hidden, ["(no diff)"]);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn root_commit_diff_with_dash_w_still_shows_the_added_file() {
+    let dir = unique_dir("ws-git-ignore-ws-root");
+    init_repo_empty(&dir);
+    fs::write(dir.join("f.txt"), "one\n").unwrap();
+    git(&dir, &["add", "f.txt"]);
+    git(&dir, &["commit", "-q", "-m", "root"]);
+    let head = exec_git(&["rev-parse", "HEAD"], &dir);
+    let ignore = DiffOpts {
+        context: None,
+        ignore_whitespace: true,
+    };
+    let lines = diff_commit_file_ctx(&dir, &head, "f.txt", ignore);
+    assert!(lines.iter().any(|l| l == "+one"), "{lines:?}");
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -2645,7 +2739,8 @@ fn worktree_vs_commit_lists_and_diffs_one_path() {
     let clean = list_worktree_vs_commit_name_status(&dir, &base, "old.txt", None).unwrap();
     assert!(clean.is_empty(), "{clean:?}");
     assert_eq!(
-        diff_worktree_vs_commit_file_ctx(&dir, &base, "old.txt", None, None).unwrap(),
+        diff_worktree_vs_commit_file_ctx(&dir, &base, "old.txt", None, DiffOpts::default())
+            .unwrap(),
         ["(no diff)"]
     );
 
@@ -2660,13 +2755,21 @@ fn worktree_vs_commit_lists_and_diffs_one_path() {
     assert_eq!(rows[0].old_path.as_deref(), Some("old.txt"));
     assert_eq!(rows[0].stat, counts(1, 0));
     let diff =
-        diff_worktree_vs_commit_file_ctx(&dir, &base, "new.txt", Some("old.txt"), Some(0)).unwrap();
+        diff_worktree_vs_commit_file_ctx(&dir, &base, "new.txt", Some("old.txt"), ctx(Some(0)))
+            .unwrap();
     assert!(diff.iter().any(|l| l == "rename from old.txt"), "{diff:?}");
     assert!(diff.iter().any(|l| l == "+four"), "{diff:?}");
 
     let added = list_worktree_vs_commit_name_status(&dir, &base, "f.txt", None).unwrap();
     assert_eq!(added[0].status, "A", "f.txt is newer than base: {added:?}");
-    assert!(diff_worktree_vs_commit_file_ctx(&dir, "no-such-ref", "f.txt", None, None).is_err());
+    assert!(diff_worktree_vs_commit_file_ctx(
+        &dir,
+        "no-such-ref",
+        "f.txt",
+        None,
+        DiffOpts::default()
+    )
+    .is_err());
     let _ = fs::remove_dir_all(&dir);
 }
 

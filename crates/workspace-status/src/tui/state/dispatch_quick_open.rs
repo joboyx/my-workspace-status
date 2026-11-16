@@ -304,28 +304,40 @@ impl AppState {
         }
     }
 
-    /// Put the commands cursor on the first enabled landing row, else on the
-    /// first landing row.
+    /// Put the commands cursor on the first exact-alias row, else on the
+    /// first enabled landing row, else on the first landing row.
     ///
     /// Runs on open and on each filter change, so the HIGHLIGHT rows that
     /// paint first do not take the cursor while they are disabled. Landing
     /// rows are [`CommandPaletteState::landing_rows`]: a row found only by
     /// an alias never takes the cursor from an in-scope row found by its
-    /// name, even a disabled one. The go-to-line row (`:42`), while it
-    /// shows, is the only landing row, so Enter runs it or says why not.
-    /// Moves still go over every row.
+    /// name, even a disabled one, unless the query equals that alias and
+    /// no in-scope title names it (`-w`). An exact-alias row
+    /// ([`CommandPaletteState::exact_alias_rows`]) keeps the cursor even
+    /// while disabled, so Enter on `:-w` on the PRs tab says why instead of
+    /// running Close tab. The go-to-line row (`:42`), while it shows, is the
+    /// only landing row, so Enter runs it or says why not. Moves still go
+    /// over every row.
     fn land_palette_cursor(&mut self) {
         let highlighted = self.diff_visual_anchor.is_some();
-        let Some((rows, landing)) = self
-            .command_palette()
-            .map(|p| (p.rows(), p.landing_rows(highlighted)))
-        else {
+        let Some((rows, landing, exact)) = self.command_palette().map(|p| {
+            (
+                p.rows(),
+                p.landing_rows(highlighted),
+                p.exact_alias_rows(highlighted),
+            )
+        }) else {
             return;
         };
-        let cursor = landing
-            .iter()
+        let cursor = exact
+            .first()
             .copied()
-            .find(|&index| self.palette_disabled_reason(&rows[index]).is_none())
+            .or_else(|| {
+                landing
+                    .iter()
+                    .copied()
+                    .find(|&index| self.palette_disabled_reason(&rows[index]).is_none())
+            })
             .or_else(|| landing.first().copied())
             .unwrap_or(0);
         if let Some(palette) = self.command_palette_mut() {

@@ -1405,9 +1405,9 @@ pub fn explorer_tab_hint_segments() -> Vec<HintSegment> {
     ]
 }
 
-/// Idle row on an Explorer tab: `wrap` and armed-search pills,
-/// `? help` (`z…` while a `zz` is pending), `hints`, then the pinned
-/// `q quit`.
+/// Idle row on an Explorer tab: `wrap`, `-w` (the shown diff was loaded
+/// with whitespace ignored), and armed-search pills, `? help` (`z…` while
+/// a `zz` is pending), `hints`, then the pinned `q quit`.
 fn viewer_status_line(
     state: &AppState,
     palette: Palette,
@@ -1419,6 +1419,12 @@ fn viewer_status_line(
     let mut spans = Vec::new();
     if state.diff_wrap {
         spans.push(pill_span("wrap", pills.diff));
+    }
+    if state
+        .explorer_diff()
+        .is_some_and(|(_, _, content)| content.ignore_whitespace)
+    {
+        spans.push(pill_span("-w", pills.diff));
     }
     if let Some(label) = search_pill_label(state) {
         spans.push(pill_span(&label, pills.filter));

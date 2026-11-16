@@ -1954,7 +1954,10 @@ impl AppState {
 
     /// Live-reload token of `rel` in `checkout`: its disk token (one
     /// `stat`) and the stamp (that token plus its snapshot `change`, so a
-    /// stage, commit, or clean / changed flip moves it too).
+    /// stage, commit, or clean / changed flip moves it too). A changed
+    /// file's stamp also records the whitespace setting, so `w` (or a tab
+    /// parked while it flipped) reloads its diff; a clean file view does
+    /// not depend on it.
     fn explorer_stamp(
         &self,
         checkout: &str,
@@ -1962,7 +1965,12 @@ impl AppState {
         change: Option<&FileChange>,
     ) -> (String, String) {
         let disk = file_disk_token(&self.cwd, checkout, rel);
-        let stamp = format!("{disk}|{change:?}");
+        let whitespace = if change.is_some() && self.ignore_whitespace {
+            "|-w"
+        } else {
+            ""
+        };
+        let stamp = format!("{disk}|{change:?}{whitespace}");
         (disk, stamp)
     }
 
