@@ -19,6 +19,7 @@
 
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::config::{load_workspace_status_config, user_config_path};
 use crate::discovery::discover_checkouts;
@@ -34,6 +35,21 @@ const STATUS_WIDTH: usize = 7;
 /// Indent of the why, `hint:`, and `fix:` lines: under the row name
 /// (two spaces, the status word, one space).
 const TEXT_INDENT: usize = 2 + STATUS_WIDTH + 1;
+
+/// Test hook: the longest wait, in milliseconds, for the terminal's
+/// capability replies in `ws doctor`. Only the CLI reads it; the TUI
+/// always waits [`CAPS_QUERY_TIMEOUT`]. A PTY test sets a long wait so it
+/// can send a signal while the CLI holds raw mode.
+const CAPS_QUERY_TIMEOUT_ENV: &str = "WS_STATUS_CAPS_QUERY_TIMEOUT_MS";
+
+/// The CLI capability wait for the [`CAPS_QUERY_TIMEOUT_ENV`] value: a
+/// whole number of milliseconds, else (unset, blank, or not a number)
+/// [`CAPS_QUERY_TIMEOUT`]. The row texts keep naming the 200 ms default.
+fn caps_query_timeout(value: Option<&str>) -> Duration {
+    value
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map_or(CAPS_QUERY_TIMEOUT, Duration::from_millis)
+}
 
 /// Run `ws doctor` on the workspace root `cwd`: probe the setup, print the
 /// report on stdout, and return the exit code.
@@ -54,7 +70,9 @@ pub(crate) fn run(cwd: &Path) -> u8 {
 
     // Ask the terminal before anything prints: the query holds raw mode
     // for its wait, and the report prints once raw mode is off again.
-    let caps = query_capabilities(CAPS_QUERY_TIMEOUT);
+    let caps = query_capabilities(caps_query_timeout(
+        std::env::var(CAPS_QUERY_TIMEOUT_ENV).ok().as_deref(),
+    ));
     let term_size = if io::stdout().is_terminal() {
         crossterm::terminal::size().ok()
     } else {
@@ -303,6 +321,19 @@ mod tests {
                 "0 ok · 0 warn · 0 fail · 0 unknown",
             ]
         );
+    }
+
+    #[test]
+    fn caps_query_timeout_takes_whole_milliseconds_else_the_default() {
+        assert_eq!(caps_query_timeout(None), CAPS_QUERY_TIMEOUT);
+        assert_eq!(
+            caps_query_timeout(Some("30000")),
+            Duration::from_millis(30_000)
+        );
+        assert_eq!(caps_query_timeout(Some(" 5 ")), Duration::from_millis(5));
+        for bad in ["", "  ", "abc", "-1", "1.5", "200ms"] {
+            assert_eq!(caps_query_timeout(Some(bad)), CAPS_QUERY_TIMEOUT, "{bad:?}");
+        }
     }
 
     #[test]

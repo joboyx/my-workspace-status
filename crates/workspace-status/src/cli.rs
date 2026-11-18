@@ -184,7 +184,7 @@ const WORKSPACE_ARG: &str = "workspace";
 
 /// Parse the command line. Beyond clap's own checks, a subcommand takes no
 /// top-level argument from the command line except `-C` / `--workspace`
-/// (and `-h` / `--help`, which clap answers first). The check reads clap's
+/// (and `-h` / `--help` / `-V` / `--version`, which clap answers first). The check reads clap's
 /// own argument list, so a new flag is covered without a change here. A
 /// usage error exits with clap's code `2`.
 fn parse_cli<I, T>(args: I) -> Result<Cli, clap::Error>

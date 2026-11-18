@@ -379,8 +379,10 @@ pub(crate) fn query_capabilities(timeout: Duration) -> TermCaps {
     impl Drop for RawGuard {
         fn drop(&mut self) {
             if self.0 {
-                QUERY_RAW_MODE.store(false, Ordering::SeqCst);
+                // Raw mode off first: a signal before the flag clears
+                // still puts the saved modes back.
                 let _ = crossterm::terminal::disable_raw_mode();
+                QUERY_RAW_MODE.store(false, Ordering::SeqCst);
             }
         }
     }

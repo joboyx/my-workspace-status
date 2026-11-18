@@ -358,19 +358,20 @@ impl PtySession {
     /// such as `doctor`) on a `cols` x `rows` terminal that answers the
     /// Doctor's capability query as [`Self::open_size_with_caps_reply`]
     /// does. Does not wait for a TUI; the spawn env is the same as for the
-    /// TUI.
+    /// TUI, plus `extra_env`.
     pub fn run_args_with_caps_reply(
         workspace: &Path,
         cols: u16,
         rows: u16,
         args: &[&str],
+        extra_env: &[(&str, &str)],
         reply: &[u8],
     ) -> Self {
         Self::spawn(
             workspace,
             cols,
             rows,
-            &[],
+            extra_env,
             SpawnOpts {
                 wait_ready: false,
                 caps_reply: Some(reply.to_vec()),
@@ -446,6 +447,7 @@ impl PtySession {
                     | "WS_STATUS_THEME_MODE"
                     | "WS_STATUS_TERM_PROGRESS"
                     | "WS_STATUS_PR_POLL_MS"
+                    | "WS_STATUS_CAPS_QUERY_TIMEOUT_MS"
                     | "VISUAL"
             ) {
                 continue;
@@ -459,7 +461,9 @@ impl PtySession {
         // baseline config theme or theme mode, and an operator
         // WS_STATUS_TERM_PROGRESS would turn off the default-on progress.
         // An operator WS_STATUS_PR_POLL_MS would poll in a test that leaves
-        // it unset; a test that wants polling passes it.
+        // it unset; a test that wants polling passes it. An operator
+        // WS_STATUS_CAPS_QUERY_TIMEOUT_MS would change the `ws doctor`
+        // wait; a test that wants another wait passes it.
         // `e` reads $VISUAL before $EDITOR, so an operator VISUAL would
         // outrank the stub EDITOR a test passes.
         cmd.env_remove("NO_COLOR");
@@ -469,6 +473,7 @@ impl PtySession {
         cmd.env_remove("WS_STATUS_THEME_MODE");
         cmd.env_remove("WS_STATUS_TERM_PROGRESS");
         cmd.env_remove("WS_STATUS_PR_POLL_MS");
+        cmd.env_remove("WS_STATUS_CAPS_QUERY_TIMEOUT_MS");
         cmd.env_remove("VISUAL");
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
@@ -1343,6 +1348,25 @@ impl PtySession {
                 self.screen()
             ),
             Err(err) => panic!("wait child: {err}"),
+        }
+    }
+
+    /// Wait until the child process exits, with any status, and return
+    /// that status. A still-alive process at timeout is a fail.
+    pub fn wait_exit_status(&mut self, timeout: Duration) -> portable_pty::ExitStatus {
+        let start = Instant::now();
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => return status,
+                Ok(None) => {}
+                Err(err) => panic!("wait child: {err}"),
+            }
+            assert!(
+                start.elapsed() < timeout,
+                "timeout waiting for the process to exit; screen:\n{}",
+                self.screen()
+            );
+            thread::sleep(Duration::from_millis(10));
         }
     }
 
