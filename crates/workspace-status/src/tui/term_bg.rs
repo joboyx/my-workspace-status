@@ -215,7 +215,9 @@ fn scale_channel(hex: &str) -> Option<u8> {
 }
 
 /// Span of the first complete DA1 reply (`ESC [ ? <digits and ;> c`).
-fn find_da1(bytes: &[u8]) -> Option<Range<usize>> {
+///
+/// Also used by [`super::term_caps::parse_csi_reply`] to tell a DA1 reply.
+pub(super) fn find_da1(bytes: &[u8]) -> Option<Range<usize>> {
     let mut from = 0;
     while let Some(at) = find_bytes(&bytes[from..], DA1_INTRO) {
         let start = from + at;

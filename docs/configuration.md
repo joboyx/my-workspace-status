@@ -388,7 +388,7 @@ A missing Nerd Font only affects glyphs. It does not change which keys the termi
 
 ## Doctor setup checkup
 
-The `:` palette row `Doctor: setup checkup` (aliases `doctor`, `checkup`, `setup`, `health`) opens a dialog that checks the setup the TUI needs. Each row has a status (`ok` / `warn` / `fail`), a name, what was found, and, when there is one, a hint and a fix line. The head shows `<n> ok · <n> warn · <n> fail`, or `checking…` while the probe runs.
+The `:` palette row `Doctor: setup checkup` (aliases `doctor`, `checkup`, `setup`, `health`) opens a dialog that checks the setup the TUI needs. Each row has a status (`ok` / `warn` / `fail`, or `unknown` when the probe could not tell, for example when the terminal did not answer; `unknown` is never a failure and its chip is `?`), a name, what was found, and, when there is one, a hint and a fix line. The head shows `<n> ok · <n> warn · <n> fail · <n> unknown`, or `checking…` while the probe runs.
 
 The Doctor only reports. It does not change a file, a setting, the config, the theme, the UI-state file, or the environment. The probe reads environment variables, `PATH`, the config and state files, and runs only `<git> --version`, `rustc --version` (dev build), `tmux show-options -gv <option>` (inside tmux), and, in each loaded checkout, the read-only remote lookups `git config --get branch.<branch>.remote`, `git remote`, and `git remote get-url <remote>`. The one write is `y`, which copies the focused row's fix line to the clipboard (the same path as Copy entity reference).
 
@@ -405,6 +405,12 @@ Fix lines use the OS form: `export NAME=value` on Linux and macOS, `$env:NAME = 
 | Hyperlinks (OSC 8) | outside tmux (the terminal cannot be asked); inside tmux when `terminal-features` has `hyperlinks` | inside tmux without it, or options not readable; fix `set -as terminal-features ",*:hyperlinks"` | — |
 | Clipboard | Linux: `wl-copy` with `WAYLAND_DISPLAY` or `xclip` with `DISPLAY`; macOS: `pbcopy`; Windows: always (OSC 52 only) | no host tool: only OSC 52; inside tmux, `set-clipboard` not `on`, fix `set -g set-clipboard on` | — |
 | Mouse | mouse off, or on outside tmux, or tmux `mouse` is `on` | mouse on inside tmux with tmux `mouse` not `on`; fix `set -g mouse on` | — |
+| Terminal (XTVERSION) | the terminal reports its name and version; the row shows that text | — | — |
+| SGR mouse (1006) | DECRQM reports the mode (set, reset, or permanent) | not recognized or permanently reset: mouse reports past column 223 can be lost | — |
+| Bracketed paste (2004) | any DECRQM answer (the app does not use bracketed paste) | — | — |
+| Synchronized output (2026) | any DECRQM answer; without it a large redraw can flicker (optional) | — | — |
+| Kitty keyboard (CSI u) | the terminal reports its flags, or it answers DA1 with no flags reply (legacy key encoding, optional) | — | — |
+| Background (OSC 11) | the terminal reports its background: the row shows `#rrggbb` and `light` or `dark` | — | — |
 | git | `<git> --version` runs | WSL with a git path that ends in `.exe`; fix `export WORKSPACE_STATUS_GIT=/usr/bin/git` | `<git> --version` fails |
 | Editor (e) | the `e` program (config `editor`, `VISUAL`, `EDITOR`, `vim`) is found | not found; fix names the first of `nvim`, `vim`, `nano`, `code`, `cursor` (Windows also `notepad`) found | — |
 | Diff tool (E) | the `diffTool` program (default `vimdiff`) is found | not found; fix `"diffTool": "code --diff --wait"` (or `cursor`) when one is found | — |
@@ -414,6 +420,8 @@ Fix lines use the OS form: `export NAME=value` on Linux and macOS, `$env:NAME = 
 | Rust toolchain (dev build only) | `rustc --version` is 1.88 or later | older or missing; fix `rustup update stable` | — |
 | Config files | both files load (each shown as `loaded` or `not present`) | — | the config loader refuses a file; the row shows its error |
 | State files | each store file is missing (created on first save) or one its store accepts | — | a present file its store refuses: saves will fail; fix moves it aside with `mv` (Windows `Move-Item`) |
+
+The six capability rows from Terminal (XTVERSION) to Background (OSC 11) ask the terminal instead of reading environment variables: one write of XTVERSION (`ESC [ > 0 q`), DECRQM for modes 1006, 2004, and 2026 (`ESC [ ? <mode> $ p`), the kitty keyboard flags (`ESC [ ? u`), OSC 11 (`ESC ] 11 ; ? ESC \`), and DA1 (`ESC [ c`). Terminals answer in order, so the DA1 reply ends the wait; it never passes 200 ms. A row with no answer is `unknown`, and its text ends with `(no answer)` when the DA1 reply ended the wait or `(no answer within 200 ms)` when the time ran out. The Kitty keyboard row is `unknown` only when the time ran out. Inside tmux each capability row without another hint says `Inside tmux, tmux answers for the outer terminal.` On Windows the queries are not sent and every capability row is `unknown` (`Not asked on Windows.`). A reply never reads as keys, also when it arrives after the wait.
 
 The State files row checks the comment, viewed, UI-state, and background-fetch stores, and the update-check store only when the startup release check runs (release build, `updateCheck` on).
 

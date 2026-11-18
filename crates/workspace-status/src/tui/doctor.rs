@@ -70,15 +70,30 @@ impl Os {
     }
 }
 
-/// Outcome of one check. Ordered by severity: `Ok < Warn < Fail`.
+/// Outcome of one check. Ordered by severity: `Ok < Unknown < Warn < Fail`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CheckStatus {
     /// Set up as expected (or an intentional fallback).
     Ok,
+    /// The probe could not tell: the terminal did not answer, or a live test
+    /// has not run yet. Never a failure.
+    Unknown,
     /// Works, but a feature degrades or the probe cannot confirm it.
     Warn,
     /// A feature the TUI needs does not work.
     Fail,
+}
+
+impl CheckStatus {
+    /// Status word in the summary line: `ok`, `unknown`, `warn`, or `fail`.
+    pub fn label(self) -> &'static str {
+        match self {
+            CheckStatus::Ok => "ok",
+            CheckStatus::Unknown => "unknown",
+            CheckStatus::Warn => "warn",
+            CheckStatus::Fail => "fail",
+        }
+    }
 }
 
 /// Section a check belongs to, in paint order.
@@ -333,6 +348,21 @@ pub struct Summary {
     pub warn: usize,
     /// Rows with [`CheckStatus::Fail`].
     pub fail: usize,
+    /// Rows with [`CheckStatus::Unknown`].
+    pub unknown: usize,
+}
+
+impl Summary {
+    /// Each status with its count, in the order the summary line prints
+    /// them: `<n> ok · <n> warn · <n> fail · <n> unknown`.
+    pub fn counts(self) -> [(CheckStatus, usize); 4] {
+        [
+            (CheckStatus::Ok, self.ok),
+            (CheckStatus::Warn, self.warn),
+            (CheckStatus::Fail, self.fail),
+            (CheckStatus::Unknown, self.unknown),
+        ]
+    }
 }
 
 /// Count `checks` by status.
@@ -341,6 +371,7 @@ pub fn summary(checks: &[Check]) -> Summary {
     for check in checks {
         match check.status {
             CheckStatus::Ok => out.ok += 1,
+            CheckStatus::Unknown => out.unknown += 1,
             CheckStatus::Warn => out.warn += 1,
             CheckStatus::Fail => out.fail += 1,
         }
@@ -376,7 +407,9 @@ pub fn checks(probe: &Probe) -> Vec<Check> {
     .collect()
 }
 
-fn row(
+/// One check row. Shared with the capability rows of
+/// [`super::term_caps::capability_checks`].
+pub(super) fn row(
     group: CheckGroup,
     name: &'static str,
     status: CheckStatus,
@@ -392,7 +425,8 @@ fn row(
     }
 }
 
-fn hint(text: impl Into<String>) -> Option<Fix> {
+/// A fix with advice only, no copy line.
+pub(super) fn hint(text: impl Into<String>) -> Option<Fix> {
     Some(Fix {
         hint: Some(text.into()),
         copy: None,
@@ -2194,9 +2228,41 @@ mod tests {
             Summary {
                 ok: 13,
                 warn: 1,
-                fail: 1
+                fail: 1,
+                unknown: 0,
             }
         );
+    }
+
+    #[test]
+    fn summary_counts_unknown_rows_and_lists_them_last() {
+        let mut rows = checks(&base(Os::Linux));
+        rows[0].status = CheckStatus::Unknown;
+        rows[1].status = CheckStatus::Unknown;
+        rows[2].status = CheckStatus::Warn;
+        let got = summary(&rows);
+        assert_eq!(
+            got,
+            Summary {
+                ok: 12,
+                warn: 1,
+                fail: 0,
+                unknown: 2,
+            }
+        );
+        let printed: Vec<String> = got
+            .counts()
+            .iter()
+            .map(|(status, n)| format!("{n} {}", status.label()))
+            .collect();
+        assert_eq!(printed.join(" · "), "12 ok · 1 warn · 0 fail · 2 unknown");
+    }
+
+    #[test]
+    fn unknown_ranks_between_ok_and_warn() {
+        assert!(CheckStatus::Ok < CheckStatus::Unknown);
+        assert!(CheckStatus::Unknown < CheckStatus::Warn);
+        assert!(CheckStatus::Warn < CheckStatus::Fail);
     }
 
     #[test]

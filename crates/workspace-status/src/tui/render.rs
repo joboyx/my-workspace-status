@@ -5925,26 +5925,27 @@ fn doctor_group_title(group: CheckGroup) -> &'static str {
 fn doctor_status_chip(status: CheckStatus, palette: Palette) -> (&'static str, Color) {
     match status {
         CheckStatus::Ok => ("ok", palette.added),
+        CheckStatus::Unknown => ("?", palette.muted),
         CheckStatus::Warn => ("warn", palette.modified),
         CheckStatus::Fail => ("fail", palette.deleted),
     }
 }
 
-/// `<n> ok · <n> warn · <n> fail`, each count in its chip colour.
+/// `<n> ok · <n> warn · <n> fail · <n> unknown`, each count in its chip
+/// colour.
 fn doctor_summary_line(checks: &[Check], palette: Palette) -> Line<'static> {
-    let counts = doctor_summary(checks);
-    let sep = || Span::styled(" · ", Style::default().fg(palette.muted));
-    let part = |n: usize, status: CheckStatus| {
-        let (label, color) = doctor_status_chip(status, palette);
-        Span::styled(format!("{n} {label}"), Style::default().fg(color))
-    };
-    Line::from(vec![
-        part(counts.ok, CheckStatus::Ok),
-        sep(),
-        part(counts.warn, CheckStatus::Warn),
-        sep(),
-        part(counts.fail, CheckStatus::Fail),
-    ])
+    let mut spans = Vec::new();
+    for (status, n) in doctor_summary(checks).counts() {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ", Style::default().fg(palette.muted)));
+        }
+        let (_, color) = doctor_status_chip(status, palette);
+        spans.push(Span::styled(
+            format!("{n} {}", status.label()),
+            Style::default().fg(color),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// Doctor body: a header per group, then per row its name line (cursor

@@ -22248,7 +22248,7 @@ fn doctor_paints_title_summary_groups_rows_and_footer_at_80x24() {
     draw_state(&mut terminal, &mut state);
     assert_eq!(open_dialog(&state), Some(DialogKind::Doctor));
     let text = buffer_text(&terminal);
-    let summary = "4 ok · 1 warn · 1 fail";
+    let summary = "4 ok · 1 warn · 1 fail · 0 unknown";
     for want in [
         DOCTOR_TITLE,
         summary,
@@ -22263,6 +22263,39 @@ fn doctor_paints_title_summary_groups_rows_and_footer_at_80x24() {
         assert!(text.contains(want), "{want:?}\n{text}");
     }
     assert!(!text.contains('❯'), "ASCII cursor mark\n{text}");
+}
+
+/// An unknown row paints a `?` chip in the theme's muted colour, padded to
+/// the chip width, and the summary counts it last.
+#[test]
+fn doctor_paints_unknown_as_a_muted_question_mark_chip() {
+    let mut state = app_state(&[repo("app", false)]);
+    let Effect::RunDoctor { gen } = state.dispatch(Action::OpenDoctor) else {
+        panic!("open asks for a probe");
+    };
+    let mut rows = doctor_rows();
+    rows[3].status = CheckStatus::Unknown;
+    assert!(state.apply_doctor(gen, rows));
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    draw_state(&mut terminal, &mut state);
+    let text = buffer_text(&terminal);
+    for want in [
+        "3 ok · 1 warn · 1 fail · 1 unknown",
+        "  ?    curl (release check)",
+    ] {
+        assert!(text.contains(want), "{want:?}\n{text}");
+    }
+    let buf = terminal.backend().buffer();
+    let muted = state.theme.palette().muted;
+    let y = first_row_with(buf, "?    curl").expect("unknown row");
+    assert_eq!(needle_cells(buf, y, "?")[0].fg, muted, "chip colour");
+    let y = first_row_with(buf, "1 unknown").expect("summary");
+    assert!(
+        needle_cells(buf, y, "1 unknown")
+            .iter()
+            .all(|cell| cell.fg == muted),
+        "summary count colour"
+    );
 }
 
 /// While the probe runs the dialog says `checking…` and paints no row.

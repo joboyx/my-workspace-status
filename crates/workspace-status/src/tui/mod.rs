@@ -60,6 +60,14 @@ mod store_save;
 pub(crate) mod syntax;
 mod tabs;
 mod term_bg;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the Doctor query in the TUI loop and `ws doctor` are its first callers"
+    )
+)]
+mod term_caps;
 mod term_progress;
 #[cfg(unix)]
 mod term_restore;

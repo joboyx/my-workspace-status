@@ -15,24 +15,23 @@ const TITLE: &str = "Doctor · setup checkup";
 const PALETTE_ROW: &str = "Doctor: setup checkup";
 
 /// Status chips, padded to one width as the overlay paints them.
-const CHIPS: [&str; 3] = ["ok  ", "warn", "fail"];
+const CHIPS: [&str; 4] = ["ok  ", "?   ", "warn", "fail"];
 
-/// True when the screen shows the summary line `<n> ok · <n> warn · <n> fail`.
+/// True when the screen shows the summary line
+/// `<n> ok · <n> warn · <n> fail · <n> unknown`.
 fn has_summary(screen: &str) -> bool {
+    const LABELS: [&str; 4] = ["ok", "warn", "fail", "unknown"];
     screen.lines().any(|line| {
         let words: Vec<&str> = line
             .split(|c: char| c.is_whitespace() || c == '│')
             .filter(|word| !word.is_empty())
             .collect();
-        words.windows(8).any(|w| {
-            w[0].parse::<usize>().is_ok()
-                && w[1] == "ok"
-                && w[2] == "·"
-                && w[3].parse::<usize>().is_ok()
-                && w[4] == "warn"
-                && w[5] == "·"
-                && w[6].parse::<usize>().is_ok()
-                && w[7] == "fail"
+        words.windows(11).any(|w| {
+            LABELS.iter().enumerate().all(|(i, label)| {
+                w[i * 3].parse::<usize>().is_ok()
+                    && w[i * 3 + 1] == *label
+                    && (i == LABELS.len() - 1 || w[i * 3 + 2] == "·")
+            })
         })
     })
 }
