@@ -1799,6 +1799,12 @@ fn first_remote_name(cwd: &Path) -> String {
         .to_string()
 }
 
+/// Short name of the branch HEAD is on (`symbolic-ref --short -q HEAD`),
+/// or an empty string on a detached HEAD. Local and read-only.
+pub fn current_branch(cwd: &Path) -> String {
+    exec_git(&["symbolic-ref", "--short", "-q", "HEAD"], cwd)
+}
+
 /// Name of the remote for an entity of the whole checkout (repo home,
 /// commit, tag).
 ///
@@ -1806,7 +1812,7 @@ fn first_remote_name(cwd: &Path) -> String {
 /// then [`push_remote_name`]). On a detached HEAD: the first configured
 /// remote, else `origin`. The name is not checked.
 pub fn checkout_remote_name(cwd: &Path) -> String {
-    let current = exec_git(&["symbolic-ref", "--short", "-q", "HEAD"], cwd);
+    let current = current_branch(cwd);
     if current.is_empty() {
         first_remote_name(cwd)
     } else {

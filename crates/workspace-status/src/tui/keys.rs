@@ -128,7 +128,8 @@ pub enum InputMode {
     PopoverGPending,
     /// Doctor setup checkup overlay: `j` / `k` / arrows / page keys / `g` /
     /// `G` move, `y` copies the focused fix line, `r` re-runs, Esc / `q`
-    /// close. Every other key is swallowed.
+    /// close. Every other key is swallowed. Up / Down arrows and the mouse
+    /// wheel also feed the live wheel test; clicks and motion do nothing.
     Doctor,
 }
 
@@ -309,8 +310,9 @@ pub fn event_to_action_ex(
 /// a left click without Ctrl is [`Action::Click`] (`app::map_event` turns
 /// it into [`Action::SearchFilesToggleOption`] on a chip and drops it
 /// elsewhere), motion is [`Action::PointerMove`] for their hover, and any
-/// other mouse event is [`Action::None`]. Prompts, menus, and the other
-/// list dialogs drop the mouse.
+/// other mouse event is [`Action::None`]. In the Doctor only the wheel acts
+/// ([`doctor_mouse_action`]). Prompts, menus, and the other list dialogs
+/// drop the mouse.
 pub fn event_to_action_with(
     event: &Event,
     mode: InputMode,
@@ -349,10 +351,11 @@ pub fn event_to_action_with(
                     | InputMode::CreateBranch
                     | InputMode::Comment
                     | InputMode::CommentExport
-                    | InputMode::QuickOpen
-                    | InputMode::Doctor,
+                    | InputMode::QuickOpen,
             ) {
                 Action::None
+            } else if mode == InputMode::Doctor {
+                doctor_mouse_action(*mouse)
             } else if matches!(mode, InputMode::SearchFiles { .. }) {
                 // Only the option chips on the border take the mouse:
                 // `app::map_event` keeps a left click only on a chip, and
@@ -976,8 +979,12 @@ fn doctor_key_action(key: KeyEvent) -> Action {
     }
     match key.code {
         _ if is_unbound_chord(key) => Action::None,
-        KeyCode::Char('j') | KeyCode::Down => Action::DoctorMove(1),
-        KeyCode::Char('k') | KeyCode::Up => Action::DoctorMove(-1),
+        KeyCode::Char('j') => Action::DoctorMove(1),
+        KeyCode::Char('k') => Action::DoctorMove(-1),
+        // Arrows also feed the live wheel test: a terminal with mouse
+        // reporting off sends them for the wheel.
+        KeyCode::Down => Action::DoctorArrow(1),
+        KeyCode::Up => Action::DoctorArrow(-1),
         KeyCode::PageDown => Action::DoctorMove(DOCTOR_PAGE_ROWS),
         KeyCode::PageUp => Action::DoctorMove(-DOCTOR_PAGE_ROWS),
         KeyCode::Char('g') | KeyCode::Home => Action::DoctorTop,
@@ -1176,6 +1183,23 @@ fn mouse_to_action(mouse: MouseEvent) -> Action {
         MouseEventKind::ScrollUp => wheel_action(mouse, -1, false),
         MouseEventKind::ScrollLeft => wheel_action(mouse, -1, true),
         MouseEventKind::ScrollRight => wheel_action(mouse, 1, true),
+        _ => Action::None,
+    }
+}
+
+/// The mouse inside the Doctor overlay: only the wheel acts. It records
+/// the live wheel test, and a vertical wheel moves the cursor one row
+/// (down = next row). A horizontal wheel (left / right, or Shift+wheel as
+/// in [`wheel_action`]) only records. Clicks, drags, and motion do nothing.
+fn doctor_mouse_action(mouse: MouseEvent) -> Action {
+    let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
+    match mouse.kind {
+        MouseEventKind::ScrollDown if !shift => Action::DoctorWheel(1),
+        MouseEventKind::ScrollUp if !shift => Action::DoctorWheel(-1),
+        MouseEventKind::ScrollDown
+        | MouseEventKind::ScrollUp
+        | MouseEventKind::ScrollLeft
+        | MouseEventKind::ScrollRight => Action::DoctorWheel(0),
         _ => Action::None,
     }
 }

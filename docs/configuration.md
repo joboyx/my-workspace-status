@@ -314,13 +314,14 @@ Optional object. It sets the TUI view modes at launch. Each key is optional. An 
 | `WS_STATUS_SMOOTH_SCROLL` | `smoothScroll` | unset (glide on) | Ctrl-d / Ctrl-u glide the viewport to its new top over about 3 frames (48 ms, ease-out cubic) instead of jumping, in the workspace tree, the graph list, the file diff, and the Explorer file view. Visual only: the cursor moves 5 rows at once, and no extra pane load runs. While the glide runs the loop redraws at the 16 ms draw floor; then there is no timer again. Any other key, a click, or the wheel ends a glide at once. The commit-file list and the Explorer tree jump. Not a colour or glyph feature, so `NO_COLOR` and ASCII glyphs keep it. `0`, `false`, or `off` turns it off: Ctrl-d / Ctrl-u jump. `1`, `true`, or `on` turns it on. Any other value falls through to config `smoothScroll`, then on. |
 | `WS_STATUS_PR_POLL_MS` | `prPolling` (on or off only) | unset (60 s hot, 180 s calm) | PR poll period in ms. It replaces both the hot period (60 s, while a pollable PR has CI running or is ready to merge) and the calm period (180 s). `0` turns polling off. There is no floor, so tests can poll every few hundred ms. A valid value wins over config `prPolling`. Empty, negative, or non-numeric falls through to `prPolling`, then on. With polling off, a branch change, `r`, and a full reload still look up. See [Pull request badges](#pull-request-badges). |
 | `WS_STATUS_PR_TITLE_CMD` | `prTitleCommand` (user file only) | unset | Program that gives a title for a ticket key, for the group titles of a PRs tab: an absolute path, a path that starts with `~/` (config only), or a command name on `PATH`. A non-blank value wins over the config key; a blank one falls through. The PRs tab runs `<cmd> <KEY>` for each ticket group (`ABC-123`) on a worker: no shell (the key is the one argument), a 2 s limit, once per key per run. A run starts when the tab opens, and after the PR lookups go idle only when the listed ticket keys changed, the last run is older than one PR poll period, or `r` was pressed on the tab. Exit 0 with a non-empty first stdout line gives the group title; anything else (a missing file, a non-zero exit, no output, the time limit) gives none, with no error, and the group keeps the title it had. It never runs for a shared-branch or `other` group. The titles stay on screen while a run goes. Quitting `ws` ends a command that still runs. |
+| `WS_STATUS_CAPS_QUERY_TIMEOUT_MS` | — (test hook) | unset (200 ms) | Test hook, read only by `ws doctor`: the longest wait, in whole milliseconds, for the terminal's answers to the capability query. A PTY test sets a long wait so it can send a signal while the CLI holds raw mode. Blank or not a whole number keeps 200 ms. The TUI Doctor always waits 200 ms, and the row texts name 200 ms either way. The PTY harness drops a parent value. |
 | `WORKSPACE_STATUS_GITHUB_TOKEN` | — (secret; a workspace file may be committed) | unset | Optional Bearer token for GitHub Releases API (`curl`). Used by the TUI startup check and by `ws --update` when fetching notes. curl reads the `Authorization` header from its stdin (`-H @-`, curl 7.55 or later), so the token is not in the process arguments that `ps` shows. A blank value counts as unset. Unset is fine for the public repo rate limit. |
 | `WS_STATUS_DEV_BUILD` | — (build time) | unset                                                   | **Build time** (`option_env!`, `DEV_BUILD` in `lib.rs`). `scripts/install-dev.sh` sets it to the short git sha, plus `-dirty` for a dirty tree. A dev build shows `-dev (sha)` in `--version` and the help footer, skips the TUI-startup release prompt, and makes `--update` exec `workspace-status-update-dev` with no release notes. Has no effect at run time. |
 | `WS_DEV_BIN_DIR` | — (`scripts/install-dev.sh` only) | `$HOME/.local/bin`                                      | `scripts/install-dev.sh` only: where `ws-dev`, `workspace-status-dev`, and `workspace-status-update-dev` go (and what `--uninstall` cleans). The generated `workspace-status-update-dev` keeps the directory it was installed with. |
 | `WS_DEV_TARGET_DIR` | — (`scripts/install-dev.sh` only) | `<repo>/target/dev-install`                             | `scripts/install-dev.sh` only: `CARGO_TARGET_DIR` for the dev build. Kept apart from `target/release` so the dev marker never reaches a release or demo build. The generated `workspace-status-update-dev` keeps the target dir it was installed with. |
 
 
-A **Config key** sets the same setting from a config file; a valid env var wins over it (see [Env-backed keys](#env-backed-keys)). For the store paths, `WORKSPACE_STATUS_GIT`, and `WS_STATUS_PR_TITLE_CMD`, a blank (store, title command) or empty (git) env value falls through to the config key. Env-only, with no config key: `WS_STATUS_WORKSPACE` (it picks the workspace file), `WORKSPACE_STATUS_GITHUB_TOKEN` (a secret, and a workspace file may be committed), the test-harness vars `WS_STATUS_E2E_*` and `WS_E2E_REAL_GIT`, `WS_STATUS_DEV_BUILD` (build time), `WS_DEV_BIN_DIR` / `WS_DEV_TARGET_DIR` (`scripts/install-dev.sh` only), and the system vars `EDITOR`, `VISUAL`, `BROWSER`, `DISPLAY`, `PATH`, `XDG_*`, and `HOME`.
+A **Config key** sets the same setting from a config file; a valid env var wins over it (see [Env-backed keys](#env-backed-keys)). For the store paths, `WORKSPACE_STATUS_GIT`, and `WS_STATUS_PR_TITLE_CMD`, a blank (store, title command) or empty (git) env value falls through to the config key. Env-only, with no config key: `WS_STATUS_WORKSPACE` (it picks the workspace file), `WORKSPACE_STATUS_GITHUB_TOKEN` (a secret, and a workspace file may be committed), the test-harness vars `WS_STATUS_E2E_*`, `WS_E2E_REAL_GIT`, and `WS_STATUS_CAPS_QUERY_TIMEOUT_MS` (read only by `ws doctor`), `WS_STATUS_DEV_BUILD` (build time), `WS_DEV_BIN_DIR` / `WS_DEV_TARGET_DIR` (`scripts/install-dev.sh` only), and the system vars `EDITOR`, `VISUAL`, `BROWSER`, `DISPLAY`, `PATH`, `XDG_*`, and `HOME`.
 
 ### Theme flash tokens
 
@@ -388,11 +389,11 @@ A missing Nerd Font only affects glyphs. It does not change which keys the termi
 
 ## Doctor setup checkup
 
-The `:` palette row `Doctor: setup checkup` (aliases `doctor`, `checkup`, `setup`, `health`) opens a dialog that checks the setup the TUI needs. Each row has a status (`ok` / `warn` / `fail`), a name, what was found, and, when there is one, a hint and a fix line. The head shows `<n> ok · <n> warn · <n> fail`, or `checking…` while the probe runs.
+The `:` palette row `Doctor: setup checkup` (aliases `doctor`, `checkup`, `setup`, `health`) opens a dialog that checks the setup the TUI needs. Each row has a status (`ok` / `warn` / `fail`, or `unknown` when the probe could not tell, for example when the terminal did not answer; `unknown` is never a failure and its chip is `?`), a name, what was found, and, when there is one, a hint and a fix line. The head shows `<n> ok · <n> warn · <n> fail · <n> unknown`, or `checking…` while the probe runs and while it waits for the terminal's answers (at most 200 ms), so no probe or capability row changes after it shows. Only the live Mouse wheel row changes while the dialog is open (below).
 
-The Doctor only reports. It does not change a file, a setting, the config, the theme, the UI-state file, or the environment. The probe reads environment variables, `PATH`, the config and state files, and runs only `<git> --version`, `rustc --version` (dev build), `tmux show-options -gv <option>` (inside tmux), and, in each loaded checkout, the read-only remote lookups `git config --get branch.<branch>.remote`, `git remote`, and `git remote get-url <remote>`. The one write is `y`, which copies the focused row's fix line to the clipboard (the same path as Copy entity reference).
+The Doctor only reports. It does not change a file, a setting, the config, the theme, the UI-state file, the environment, or a terminal mode. The probe reads environment variables, `PATH`, the config and state files, and runs only `<git> --version`, `rustc --version` (dev build), `tmux show-options -gv <option>` (inside tmux), and, in each loaded checkout, the read-only remote lookups `git config --get branch.<branch>.remote`, `git remote`, and `git remote get-url <remote>`. It also writes the capability queries (below) to the terminal once each time the Doctor opens and on each `r`; they only ask, and change nothing. The one write the user asks for is `y`, which copies the focused row's fix line to the clipboard (the same path as Copy entity reference).
 
-Keys: `j` / `k` or arrows move, PgUp / PgDn and Ctrl-u / Ctrl-d move 5 rows, `g` / Home and `G` / End go to the first / last row, `y` copies the fix line (`no fix to copy` when the row has none), `r` runs the probe again, Esc / `q` close. Ctrl-c keeps its quit chord; other keys and the mouse do nothing while it is open.
+Keys: `j` / `k` or arrows move, PgUp / PgDn and Ctrl-u / Ctrl-d move 5 rows, `g` / Home and `G` / End go to the first / last row, `y` copies the fix line (`no fix to copy` when the row has none), `r` runs the probe and the capability queries again, Esc / `q` close. Ctrl-c keeps its quit chord; other keys do nothing while it is open. The mouse wheel records the live wheel test and moves the cursor one row (wheel down = next row); a horizontal wheel (or Shift+wheel) only records it. The Up / Down arrows also record the test (as arrow keys); `j` / `k` do not. Clicks and pointer motion do nothing.
 
 Fix lines use the OS form: `export NAME=value` on Linux and macOS, `$env:NAME = "value"` in PowerShell on Windows. A program counts as found when the app could start it by that name: a name with a path separator is checked as a path, a bare name is looked up on `PATH` (on Windows as `<name>.exe`).
 
@@ -405,6 +406,13 @@ Fix lines use the OS form: `export NAME=value` on Linux and macOS, `$env:NAME = 
 | Hyperlinks (OSC 8) | outside tmux (the terminal cannot be asked); inside tmux when `terminal-features` has `hyperlinks` | inside tmux without it, or options not readable; fix `set -as terminal-features ",*:hyperlinks"` | — |
 | Clipboard | Linux: `wl-copy` with `WAYLAND_DISPLAY` or `xclip` with `DISPLAY`; macOS: `pbcopy`; Windows: always (OSC 52 only) | no host tool: only OSC 52; inside tmux, `set-clipboard` not `on`, fix `set -g set-clipboard on` | — |
 | Mouse | mouse off, or on outside tmux, or tmux `mouse` is `on` | mouse on inside tmux with tmux `mouse` not `on`; fix `set -g mouse on` | — |
+| Mouse wheel (live test) | a wheel event arrived while the Doctor is open: the terminal sends mouse reports (later arrow keys keep it ok) | Up / Down arrow keys and no wheel event: the terminal turns the wheel into arrow keys (mouse reporting off); hint macOS Terminal.app View → Allow Mouse Reporting (Cmd+R) or tmux `set -g mouse on` (the copy line inside tmux only) | — |
+| Terminal (XTVERSION) | the terminal reports its name and version; the row shows that text | — | — |
+| SGR mouse (1006) | DECRQM reports the mode (set, reset, or permanent) | not recognized or permanently reset: mouse reports past column 223 can be lost | — |
+| Bracketed paste (2004) | any DECRQM answer (the app does not use bracketed paste) | — | — |
+| Synchronized output (2026) | any DECRQM answer; without it a large redraw can flicker (optional) | — | — |
+| Kitty keyboard (CSI u) | the terminal reports its flags, or it answers DA1 with no flags reply (legacy key encoding, optional) | — | — |
+| Background (OSC 11) | the terminal reports its background: the row shows `#rrggbb` and `light` or `dark` | — | — |
 | git | `<git> --version` runs | WSL with a git path that ends in `.exe`; fix `export WORKSPACE_STATUS_GIT=/usr/bin/git` | `<git> --version` fails |
 | Editor (e) | the `e` program (config `editor`, `VISUAL`, `EDITOR`, `vim`) is found | not found; fix names the first of `nvim`, `vim`, `nano`, `code`, `cursor` (Windows also `notepad`) found | — |
 | Diff tool (E) | the `diffTool` program (default `vimdiff`) is found | not found; fix `"diffTool": "code --diff --wait"` (or `cursor`) when one is found | — |
@@ -415,9 +423,53 @@ Fix lines use the OS form: `export NAME=value` on Linux and macOS, `$env:NAME = 
 | Config files | both files load (each shown as `loaded` or `not present`) | — | the config loader refuses a file; the row shows its error |
 | State files | each store file is missing (created on first save) or one its store accepts | — | a present file its store refuses: saves will fail; fix moves it aside with `mv` (Windows `Move-Item`) |
 
+The six capability rows from Terminal (XTVERSION) to Background (OSC 11) ask the terminal instead of reading environment variables: one write of XTVERSION (`ESC [ > 0 q`), DECRQM for modes 1006, 2004, and 2026 (`ESC [ ? <mode> $ p`), the kitty keyboard flags (`ESC [ ? u`), OSC 11 (`ESC ] 11 ; ? ESC \`), and DA1 (`ESC [ c`). Terminals answer in order, so the DA1 reply ends the wait; it never passes 200 ms. A row with no answer is `unknown`, and its text ends with `(no answer)` when the DA1 reply ended the wait or `(no answer within 200 ms)` when the time ran out. The Kitty keyboard row is `unknown` only when the time ran out. Inside tmux each capability row without another hint says `Inside tmux, tmux answers for the outer terminal.` On Windows the queries are not sent and every capability row is `unknown` (`Not asked on Windows.`). A reply never reads as keys, also when it arrives after the wait or after the Doctor closed; such a late reply changes no row.
+
+The Mouse wheel row is a live test, not a probe: scroll once over the dialog. Until a wheel event or an arrow key arrives it is `unknown` (`Scroll the mouse wheel once over this dialog.`); with mouse capture off (`m`) it is `unknown` and says to close the Doctor and press `m`. An event that arrives while the head shows `checking…` shows once the rows paint. The result stays across `r` and resets when the Doctor opens again.
+
 The State files row checks the comment, viewed, UI-state, and background-fetch stores, and the update-check store only when the startup release check runs (release build, `updateCheck` on).
 
 Terminal size, mouse, the environment, and the loaded repos' remotes are read when the probe runs; the Config files and State files rows re-read the files. The glyph mode, git binary, store paths, `editor`, and `diffTool` are the values resolved at launch.
+
+### `ws doctor`
+
+`ws doctor` (or `workspace-status doctor`) prints the same rows, in the same order, as plain text to paste into an issue: no colour, no escape codes, no TUI, and no startup release check. The workspace root comes from `-C` / `--workspace` (before or after `doctor`), `WS_STATUS_WORKSPACE`, or the current directory, as for the other modes. The probe reads the checkouts the TUI would load (hidden ones too) with the branch each is on (`git symbolic-ref --short -q HEAD`, read-only); it runs no `git status`. Only `-C` / `--workspace` goes with `doctor`, beside clap's own `-h` / `--help` (before or after `doctor`) and `-V` / `--version` (before it), which print the help or the version instead of the report: a repo filter or another flag is a usage error. An exit signal (`SIGINT`, `SIGTERM`, `SIGHUP`) during the terminal wait turns raw mode off before `ws` exits. `doctor` as the first word is the subcommand; to filter a repo named `doctor`, pass `./doctor`.
+
+The rows differ from the TUI only where the CLI cannot know:
+
+- Terminal size: read from the terminal when stdout is one; otherwise `unknown` (`stdout is not a terminal.`).
+- The six capability rows: the queries are sent only when stdin and stdout are both a terminal. The CLI turns raw mode on for the wait (at most 200 ms, or until the DA1 reply), drops stdin bytes that are not replies, and turns raw mode off again before it prints. Otherwise each row is `unknown` (`Not asked: stdin or stdout is not a terminal.`), and on Windows `Not asked on Windows.`.
+- Mouse wheel (live test): always `unknown` (`TUI only: open Doctor: setup checkup in the TUI and scroll once.`).
+- Mouse: the state the TUI starts with (capture on).
+
+Format: the line `Doctor · setup checkup · workspace-status <version>` (the `--version` label with its `v`), the line `<n> ok · <n> warn · <n> fail · <n> unknown`, then per group a blank line and its title (`TERMINAL`, `TOOLS`, `FILES`). Each row is `  <status> <name>`, with the status word (`ok`, `warn`, `fail`, `unknown`) padded to 7 columns. Under the name, indented 10 columns, come the why line, then `hint: <advice>` and `fix: <line to paste>` when the row has them. Lines do not wrap.
+
+```text
+Doctor · setup checkup · workspace-status v0.1.327
+11 ok · 2 warn · 1 fail · 8 unknown
+
+TERMINAL
+  unknown Terminal size
+          stdout is not a terminal.
+  ok      Mouse
+          On.
+  unknown Mouse wheel (live test)
+          TUI only: open Doctor: setup checkup in the TUI and scroll once.
+  unknown Terminal (XTVERSION)
+          Not asked: stdin or stdout is not a terminal.
+
+TOOLS
+  ok      git
+          git version 2.55.0 (/usr/bin/git)
+
+FILES
+  fail    State files
+          UI state (~/.local/state/my-workspace-status/ui-state.json): not a UI-state store; UI state saves will fail, the file is left unchanged.
+          hint: Move the file aside; the next save starts a new one.
+          fix: mv '/home/me/.local/state/my-workspace-status/ui-state.json' '/home/me/.local/state/my-workspace-status/ui-state.json.bak'
+```
+
+(Rows cut for length.) Exit codes: `0` when no row is `fail` (`warn` and `unknown` rows are fine), `1` when a row is `fail` or the config does not load (the error goes to stderr and nothing else prints), `2` for a usage error.
 
 ## Alternate screen
 

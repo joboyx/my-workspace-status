@@ -257,10 +257,12 @@ pub(crate) enum JobOutcome {
         gen: u64,
         body: ExplorerPreviewBody,
     },
-    /// Doctor rows for probe request `gen`.
+    /// Doctor probe rows for request `gen`; `in_tmux` when `TMUX` was set
+    /// in the environment the probe read.
     Doctor {
         gen: u64,
         checks: Vec<Check>,
+        in_tmux: bool,
     },
     /// `git blame -L n,n` answer for one focused line.
     LineBlame {
@@ -859,28 +861,15 @@ impl DoctorJob {
         }
     }
 
-    /// Remote URLs of the checkouts, read with read-only git
-    /// ([`remote_url_for_branch`]), without duplicates. Blocks.
-    fn remote_urls(&self) -> Vec<String> {
-        let mut urls: Vec<String> = Vec::new();
-        for (dir, branch) in &self.checkouts {
-            if let Some(url) = remote_url_for_branch(dir, branch) {
-                if !urls.contains(&url) {
-                    urls.push(url);
-                }
-            }
-        }
-        urls
-    }
-
-    /// Probe the setup and build the rows. Blocks (PATH scan, read-only
-    /// commands, file reads), so it runs only on a worker. Writes nothing.
-    fn run(self) -> Vec<Check> {
+    /// Probe the setup and build the probe rows, with whether the probe
+    /// ran inside tmux ([`doctor::Probe::in_tmux`]). Blocks (remote
+    /// lookups, PATH scan, read-only commands, file reads), so it runs
+    /// only on a worker. Writes nothing.
+    fn run(self) -> (Vec<Check>, bool) {
         let user_config = user_config_path();
-        let remote_urls = self.remote_urls();
+        let remote_urls = doctor::remote_urls(&self.checkouts);
         let probe = doctor::collect(&CollectInputs {
-            term_cols: self.term_cols,
-            term_rows: self.term_rows,
+            term_size: Some((self.term_cols, self.term_rows)),
             settings: &self.settings,
             mouse_enabled: self.mouse_enabled,
             editor_config: self.editor_config.as_deref(),
@@ -889,7 +878,7 @@ impl DoctorJob {
             workspace_root: &self.workspace_root,
             user_config: user_config.as_deref(),
         });
-        doctor::checks(&probe)
+        (doctor::checks(&probe), probe.in_tmux())
     }
 }
 
@@ -2746,12 +2735,16 @@ impl Interpreter {
                 }
             }
             JobOutcome::StoreSaved { saved } => self.land_store_save(state, saved),
-            JobOutcome::Doctor { gen, checks } => {
+            JobOutcome::Doctor {
+                gen,
+                checks,
+                in_tmux,
+            } => {
                 // A re-run asked while this probe ran gets its own probe
                 // next.
                 self.doctor_job.finish(&mut self.sched);
                 // A closed or re-run Doctor drops this answer.
-                if state.apply_doctor(gen, checks) {
+                if state.apply_doctor(gen, checks, in_tmux) {
                     self.mark();
                 }
             }
@@ -4243,9 +4236,13 @@ impl Interpreter {
                 spawn(
                     id,
                     JobRelease::Doctor,
-                    Box::new(move || JobOutcome::Doctor {
-                        gen,
-                        checks: inputs.run(),
+                    Box::new(move || {
+                        let (checks, in_tmux) = inputs.run();
+                        JobOutcome::Doctor {
+                            gen,
+                            checks,
+                            in_tmux,
+                        }
                     }),
                 );
             }

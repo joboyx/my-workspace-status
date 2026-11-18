@@ -60,6 +60,7 @@ mod store_save;
 pub(crate) mod syntax;
 mod tabs;
 mod term_bg;
+pub(crate) mod term_caps;
 mod term_progress;
 #[cfg(unix)]
 mod term_restore;
@@ -73,8 +74,13 @@ pub(crate) mod viewed;
 pub(crate) mod watch;
 mod word_diff;
 
+pub(crate) use app::discover_config;
 pub use app::{collect_full_snapshot, run_tui, TuiOpts};
 pub use keys::InputMode;
+
+/// Mouse capture when the TUI starts: on, until `m` turns it off. The
+/// `ws doctor` CLI reports its Mouse row with this start state.
+pub(crate) const MOUSE_CAPTURE_AT_START: bool = true;
 /// Test-only path for `crate::testutil` app-state fixtures; `state` is private.
 #[cfg(test)]
 pub(crate) use state::AppState;

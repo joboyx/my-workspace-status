@@ -36,6 +36,7 @@ pub mod cli;
 pub mod config;
 pub(crate) mod crash_report;
 pub mod discovery;
+pub(crate) mod doctor_cli;
 pub mod file_index;
 pub mod file_search;
 pub mod git;

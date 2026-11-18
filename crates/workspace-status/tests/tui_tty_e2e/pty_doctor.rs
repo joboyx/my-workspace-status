@@ -1,10 +1,11 @@
 //! Doctor setup checkup: the palette opens a report-only overlay that the
-//! probe fills off the draw thread.
+//! probe fills off the draw thread, with the terminal's answers to the
+//! capability query.
 
 use std::fs;
 use std::path::Path;
 
-use crate::harness::PtySession;
+use crate::harness::{byte_positions, find_bytes, PtySession, CAPS_QUERY, COLS, SGR_WHEEL_DOWN};
 use crate::seed::daily_workspace;
 use crate::support::{open_command_palette, type_palette_filter, WAIT};
 
@@ -15,24 +16,23 @@ const TITLE: &str = "Doctor · setup checkup";
 const PALETTE_ROW: &str = "Doctor: setup checkup";
 
 /// Status chips, padded to one width as the overlay paints them.
-const CHIPS: [&str; 3] = ["ok  ", "warn", "fail"];
+const CHIPS: [&str; 4] = ["ok  ", "?   ", "warn", "fail"];
 
-/// True when the screen shows the summary line `<n> ok · <n> warn · <n> fail`.
+/// True when the screen shows the summary line
+/// `<n> ok · <n> warn · <n> fail · <n> unknown`.
 fn has_summary(screen: &str) -> bool {
+    const LABELS: [&str; 4] = ["ok", "warn", "fail", "unknown"];
     screen.lines().any(|line| {
         let words: Vec<&str> = line
             .split(|c: char| c.is_whitespace() || c == '│')
             .filter(|word| !word.is_empty())
             .collect();
-        words.windows(8).any(|w| {
-            w[0].parse::<usize>().is_ok()
-                && w[1] == "ok"
-                && w[2] == "·"
-                && w[3].parse::<usize>().is_ok()
-                && w[4] == "warn"
-                && w[5] == "·"
-                && w[6].parse::<usize>().is_ok()
-                && w[7] == "fail"
+        words.windows(11).any(|w| {
+            LABELS.iter().enumerate().all(|(i, label)| {
+                w[i * 3].parse::<usize>().is_ok()
+                    && w[i * 3 + 1] == *label
+                    && (i == LABELS.len() - 1 || w[i * 3 + 2] == "·")
+            })
         })
     })
 }
@@ -143,11 +143,12 @@ fn pty_doctor_opens_from_palette_fills_rows_and_writes_no_ui_state() {
         "g puts the cursor on the first row",
         WAIT,
     );
-    // git is the first TOOLS row, after the seven TERMINAL rows on Unix.
-    // Each j waits for the cursor to move before the next: the event
-    // loop drops a queued copy of a held nav key, so two j presses that
-    // arrive in one read move once.
-    for _ in 0..7 {
+    // git is the first TOOLS row, after the fourteen TERMINAL rows on Unix
+    // (seven probe rows, the live wheel test row, and six capability rows).
+    // Each j waits for the cursor to move before the next: the event loop
+    // drops a queued copy of a held nav key, so two j presses that arrive in
+    // one read move once.
+    for _ in 0..14 {
         let before = cursor_row(&tui.screen());
         tui.key('j');
         tui.wait_pred(
@@ -158,7 +159,7 @@ fn pty_doctor_opens_from_palette_fills_rows_and_writes_no_ui_state() {
     }
     tui.wait_pred(
         |screen| doctor_filled_with(screen, "git") && cursor_on(screen, "git"),
-        "seven j moves put the cursor on the git row",
+        "fourteen j moves put the cursor on the git row",
         WAIT,
     );
 
@@ -183,5 +184,404 @@ fn pty_doctor_opens_from_palette_fills_rows_and_writes_no_ui_state() {
         !ui_store.exists() && dir_entries(&ui_dir).is_empty(),
         "opening, moving, re-running and closing the Doctor writes no UI-state store: {:?}",
         dir_entries(&ui_dir)
+    );
+}
+
+/// Rows of the tall terminal the capability tests use, so every TERMINAL
+/// row and its text fit in the dialog without scrolling.
+const TALL_ROWS: u16 = 80;
+
+/// A whole answer to the capability query, as one terminal write:
+/// XTVERSION, DECRPM 1006 → 2, 2004 → 2, 2026 → 0, kitty flags 1, OSC 11
+/// black, then DA1. The text holds `r`, `k`, `g`, `m`, `y`, and `c`, which
+/// are Doctor or app keys if a reply byte were read as a key.
+const FAKE_TERM_ANSWER: &[u8] = b"\x1bP>|fake-term(1.2)\x1b\\\
+\x1b[?1006;2$y\x1b[?2004;2$y\x1b[?2026;0$y\
+\x1b[?1u\
+\x1b]11;rgb:0000/0000/0000\x1b\\\
+\x1b[?62c";
+
+/// True when the child wrote `text` after its `nth` capability query
+/// (1-based).
+fn painted_after_query(tui: &PtySession, nth: usize, text: &[u8]) -> bool {
+    let raw = tui.raw_output();
+    byte_positions(&raw, CAPS_QUERY)
+        .get(nth - 1)
+        .is_some_and(|at| find_bytes(&raw, text, *at).is_some())
+}
+
+/// Open the Doctor from the palette.
+fn open_doctor(tui: &mut PtySession) {
+    open_command_palette(tui);
+    type_palette_filter(tui, "doctor");
+    tui.wait_contains(PALETTE_ROW, WAIT);
+    tui.enter();
+}
+
+/// The open Doctor shows the fake terminal's answers.
+fn shows_fake_term_answers(screen: &str) -> bool {
+    doctor_filled_with(screen, "Terminal (XTVERSION)")
+        && has_row(screen, "Background (OSC 11)")
+        && [
+            "fake-term(1.2)",
+            "Not supported (optional): a large redraw can flicker.",
+            "Supported (flags 1).",
+            "#000000, dark.",
+        ]
+        .iter()
+        .all(|text| screen.contains(text))
+}
+
+/// A terminal that answers the capability query: the TERMINAL rows show
+/// its answers, the query is written once per request (open, then `r`),
+/// and no reply byte acts as a key. Fail if a row misses an answer, the
+/// query is written again on later frames, or the Doctor cursor moves,
+/// the Doctor closes, or a fix line is copied while the replies land.
+#[test]
+fn pty_doctor_shows_the_terminal_answers_and_reads_no_reply_as_keys() {
+    let (_root, workspace) = daily_workspace();
+    let mut tui = PtySession::open_size_with_caps_reply(
+        &workspace,
+        COLS,
+        TALL_ROWS,
+        &[("WS_STATUS_GLYPHS", "ascii")],
+        FAKE_TERM_ANSWER,
+    );
+    assert_eq!(
+        tui.raw_count(CAPS_QUERY),
+        0,
+        "no query before the Doctor opens"
+    );
+    open_doctor(&mut tui);
+    let screen = tui.wait_screen(
+        shows_fake_term_answers,
+        "the Doctor shows the fake terminal's answers",
+        WAIT,
+    );
+    assert!(
+        has_row(&screen, "SGR mouse (1006)")
+            && has_row(&screen, "Bracketed paste (2004)")
+            && has_row(&screen, "Kitty keyboard (CSI u)"),
+        "every capability row paints:\n{screen}"
+    );
+    assert!(
+        cursor_on(&screen, "Terminal size"),
+        "the replies moved no cursor:\n{screen}"
+    );
+    assert_eq!(tui.raw_count(CAPS_QUERY), 1, "one query for the open");
+
+    // Move off the first row, so a reply byte read as `k` or `g` would
+    // move the cursor back up.
+    for _ in 0..2 {
+        let before = cursor_row(&tui.screen());
+        tui.key('j');
+        tui.wait_pred(
+            |screen| cursor_row(screen).is_some_and(|row| Some(row) != before),
+            "j moves the Doctor cursor one row",
+            WAIT,
+        );
+    }
+    let focused = cursor_row(&tui.screen()).expect("cursor row");
+    tui.key('r');
+    // The second query goes out in the `checking…` frame, so the refilled
+    // rows are the ones painted after it: a screen that still shows the
+    // first answer must not pass.
+    // The asserts read the screen that matched, not a later one.
+    let screen = tui.wait_screen(
+        |screen| painted_after_query(&tui, 2, b"fake-term(1.2)") && shows_fake_term_answers(screen),
+        "r writes the query again and the rows show the answers again",
+        WAIT,
+    );
+    assert_eq!(
+        cursor_row(&screen).as_deref(),
+        Some(focused.as_str()),
+        "the replies to the second query moved no cursor:\n{screen}"
+    );
+    assert!(screen.contains(TITLE), "the Doctor stays open:\n{screen}");
+    assert!(
+        tui.clipboard_payloads().is_empty(),
+        "no reply byte copied a fix line"
+    );
+    assert_eq!(tui.raw_count(CAPS_QUERY), 2, "one query per request");
+    tui.assert_running("after the replies");
+}
+
+/// A terminal that answers nothing, not even DA1: after the 200 ms wait the
+/// capability rows show unknown with the wait in their text, and the head
+/// shows four counts. Fail if the Doctor stays `checking…` or a capability
+/// row shows anything but unknown.
+#[test]
+fn pty_doctor_capability_rows_are_unknown_when_the_terminal_does_not_answer() {
+    let (_root, workspace) = daily_workspace();
+    let mut tui = PtySession::open_size_with_env(
+        &workspace,
+        COLS,
+        TALL_ROWS,
+        &[("WS_STATUS_GLYPHS", "ascii")],
+    );
+    open_doctor(&mut tui);
+    let screen = tui.wait_screen(
+        |screen| {
+            doctor_filled_with(screen, "Terminal (XTVERSION)")
+                && screen.contains("The terminal did not report its name and version.")
+                && screen.contains("(no answer within 200 ms)")
+        },
+        "the capability rows show unknown after the wait",
+        WAIT,
+    );
+    for name in [
+        "Terminal (XTVERSION)",
+        "SGR mouse (1006)",
+        "Bracketed paste (2004)",
+        "Synchronized output (2026)",
+        "Kitty keyboard (CSI u)",
+        "Background (OSC 11)",
+    ] {
+        assert!(
+            screen.contains(&format!("?    {name}")),
+            "{name} is unknown:\n{screen}"
+        );
+    }
+    assert!(has_summary(&screen), "four counts in the head:\n{screen}");
+    assert!(
+        cursor_on(&screen, "Terminal size"),
+        "the cursor stays on the first row:\n{screen}"
+    );
+    assert_eq!(tui.raw_count(CAPS_QUERY), 1, "the query is written once");
+}
+
+/// The live wheel test row.
+const WHEEL_ROW: &str = "Mouse wheel (live test)";
+
+/// Why text of the wheel row before any wheel event or arrow key.
+const WHEEL_WAITING: &str = "Scroll the mouse wheel once over this dialog.";
+
+/// Open the Doctor on a tall terminal and wait until the wheel row shows
+/// the waiting text with the unknown chip. Returns the session.
+fn doctor_waiting_for_the_wheel(workspace: &Path) -> PtySession {
+    let mut tui = PtySession::open_size_with_env(
+        workspace,
+        COLS,
+        TALL_ROWS,
+        &[("WS_STATUS_GLYPHS", "ascii")],
+    );
+    open_doctor(&mut tui);
+    let screen = tui.wait_screen(
+        |screen| doctor_filled_with(screen, WHEEL_ROW) && screen.contains(WHEEL_WAITING),
+        "the wheel row waits for a wheel event",
+        WAIT,
+    );
+    assert!(
+        screen.contains(&format!("?    {WHEEL_ROW}")),
+        "the waiting wheel row is unknown:\n{screen}"
+    );
+    assert!(
+        cursor_on(&screen, "Terminal size"),
+        "the cursor starts on the first row:\n{screen}"
+    );
+    tui
+}
+
+/// One SGR wheel-down report over the dialog turns the wheel row ok and
+/// moves the cursor one row. Fail if the row stays unknown, turns warn, or
+/// the cursor stays on the first row.
+#[test]
+fn pty_doctor_wheel_event_turns_the_live_wheel_row_ok() {
+    let (_root, workspace) = daily_workspace();
+    let mut tui = doctor_waiting_for_the_wheel(&workspace);
+    tui.sgr_mouse(SGR_WHEEL_DOWN, COLS / 2, TALL_ROWS / 2);
+    let screen = tui.wait_screen(
+        |screen| {
+            doctor_filled_with(screen, WHEEL_ROW)
+                && screen.contains("A wheel event arrived: the terminal sends mouse reports.")
+        },
+        "a wheel event turns the wheel row ok",
+        WAIT,
+    );
+    assert!(
+        screen.contains(&format!("ok   {WHEEL_ROW}")),
+        "the wheel row is ok:\n{screen}"
+    );
+    assert!(
+        cursor_row(&screen).is_some() && !cursor_on(&screen, "Terminal size"),
+        "wheel down moves the cursor to the next row:\n{screen}"
+    );
+    assert!(screen.contains(TITLE), "the Doctor stays open:\n{screen}");
+    tui.assert_running("after the wheel event");
+}
+
+/// A Down arrow key (`ESC [ B`) with no wheel event turns the wheel row
+/// warn with the Terminal.app fix in its hint, and still moves the cursor.
+/// Fail if the row stays unknown, turns ok, or the fix text is missing.
+#[test]
+fn pty_doctor_down_arrow_warns_the_live_wheel_row_with_the_fix() {
+    let (_root, workspace) = daily_workspace();
+    let mut tui = doctor_waiting_for_the_wheel(&workspace);
+    tui.send_bytes(b"\x1b[B");
+    let screen = tui.wait_screen(
+        |screen| {
+            doctor_filled_with(screen, WHEEL_ROW)
+                && screen.contains("Got Up/Down arrow keys and no wheel event.")
+        },
+        "a Down arrow turns the wheel row warn",
+        WAIT,
+    );
+    assert!(
+        screen.contains(&format!("warn {WHEEL_ROW}")),
+        "the wheel row is warn:\n{screen}"
+    );
+    for text in ["Terminal.app:", "(Cmd+R)."] {
+        assert!(
+            screen.contains(text),
+            "the hint names the fix ({text}):\n{screen}"
+        );
+    }
+    assert!(
+        cursor_row(&screen).is_some() && !cursor_on(&screen, "Terminal size"),
+        "Down still moves the cursor:\n{screen}"
+    );
+    tui.assert_running("after the arrow key");
+}
+
+/// Wait until the raw PTY output holds `needle`, or fail with the output.
+fn wait_raw(tui: &PtySession, needle: &[u8], what: &str) {
+    let deadline = std::time::Instant::now() + WAIT;
+    while find_bytes(&tui.raw_output(), needle, 0).is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{what}; output:\n{}",
+            String::from_utf8_lossy(&tui.raw_output())
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// `workspace-status doctor` on a terminal that answers the capability
+/// query: the CLI writes the query once, prints the answered rows as text
+/// in cooked mode, and exits 0 with the terminal back out of raw mode. Fail
+/// if a reply is echoed into the output, a row misses its answer, a report
+/// line ends in a bare line feed (raw mode still on), or the exit is not 0.
+#[test]
+fn pty_doctor_cli_prints_the_terminal_answers_and_restores_the_terminal() {
+    let (_root, workspace) = daily_workspace();
+    let mut cli = PtySession::run_args_with_caps_reply(
+        &workspace,
+        COLS,
+        TALL_ROWS,
+        &["doctor"],
+        &[],
+        FAKE_TERM_ANSWER,
+    );
+    cli.wait_exit(WAIT);
+    wait_raw(
+        &cli,
+        b"  ok      State files\r\n",
+        "the report reaches its last row",
+    );
+    wait_raw(&cli, b"\r\nFILES\r\n", "the FILES group prints");
+    let raw = cli.raw_output();
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    assert_eq!(cli.raw_count(CAPS_QUERY), 1, "one query:\n{text}");
+
+    for (name, why) in [
+        ("Terminal size", format!("{COLS}×{TALL_ROWS}")),
+        ("Terminal (XTVERSION)", "fake-term(1.2)".to_string()),
+        ("SGR mouse (1006)", "Supported.".to_string()),
+        (
+            "Synchronized output (2026)",
+            "Not supported (optional): a large redraw can flicker.".to_string(),
+        ),
+        ("Kitty keyboard (CSI u)", "Supported (flags 1).".to_string()),
+        ("Background (OSC 11)", "#000000, dark.".to_string()),
+    ] {
+        let row = format!("\r\n  ok      {name}\r\n          {why}\r\n");
+        assert!(text.contains(&row), "{row:?}:\n{text}");
+    }
+    assert!(
+        text.contains(
+            "\r\n  unknown Mouse wheel (live test)\r\n          TUI only: open Doctor: setup \
+             checkup in the TUI and scroll once.\r\n"
+        ),
+        "{text}"
+    );
+    let report = &text[text
+        .find("Doctor · setup checkup · workspace-status v")
+        .expect("head")..];
+    let summary = report.lines().nth(1).expect("summary line");
+    assert!(has_summary(summary), "summary {summary:?}:\n{text}");
+
+    // An echoed reply shows as `^[P>|…`, `…$y`, or `rgb:…` in the output.
+    for echoed in [&b"P>|"[..], b"$y", b"rgb:", b"62c"] {
+        assert_eq!(
+            cli.raw_count(echoed),
+            0,
+            "reply bytes {:?} echoed:\n{text}",
+            String::from_utf8_lossy(echoed)
+        );
+    }
+    let query_end = byte_positions(&raw, CAPS_QUERY)[0] + CAPS_QUERY.len();
+    let bare_lf = raw[query_end..]
+        .windows(2)
+        .any(|pair| pair[1] == b'\n' && pair[0] != b'\r');
+    assert!(
+        !bare_lf,
+        "every report line ends in CR LF (cooked mode):\n{text}"
+    );
+    let cooked = libc::ICANON | libc::ECHO;
+    assert_eq!(
+        cli.local_modes() & cooked,
+        cooked,
+        "raw mode is off after the CLI exits"
+    );
+}
+
+/// `SIGTERM` while `workspace-status doctor` waits for a terminal that
+/// never answers: the exit-signal handler turns raw mode off before the
+/// process dies, and no report prints. Fail if raw mode is off before the
+/// signal, the process exits other than by the signal, a report prints, or
+/// the terminal stays in raw mode after the signal.
+///
+/// `WS_STATUS_CAPS_QUERY_TIMEOUT_MS` holds the wait for 30 s, so the
+/// signal always lands inside it.
+#[test]
+fn pty_doctor_cli_sigterm_during_the_query_leaves_raw_mode() {
+    let (_root, workspace) = daily_workspace();
+    let mut cli = PtySession::run_args_with_caps_reply(
+        &workspace,
+        COLS,
+        TALL_ROWS,
+        &["doctor"],
+        &[("WS_STATUS_CAPS_QUERY_TIMEOUT_MS", "30000")],
+        b"",
+    );
+    wait_raw(&cli, CAPS_QUERY, "the CLI writes the capability query");
+    let cooked = libc::ICANON | libc::ECHO;
+    assert_eq!(
+        cli.local_modes() & cooked,
+        0,
+        "the CLI holds raw mode while it waits for the replies"
+    );
+    let pid = libc::pid_t::try_from(cli.child_pid()).expect("pid fits pid_t");
+    // SAFETY: a plain syscall with no pointers, to the child this test
+    // spawned and has not reaped.
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+    }
+    let status = cli.wait_exit_status(WAIT);
+    assert!(
+        !status.success() && status.signal().is_some(),
+        "the signal ends the CLI: {status:?}"
+    );
+    assert_eq!(
+        cli.local_modes() & cooked,
+        cooked,
+        "raw mode is off after SIGTERM: local modes {:#x}",
+        cli.local_modes()
+    );
+    let raw = cli.raw_output();
+    assert!(
+        find_bytes(&raw, "Doctor · setup checkup".as_bytes(), 0).is_none(),
+        "the signal ended the CLI during the wait, before the report:\n{}",
+        String::from_utf8_lossy(&raw)
     );
 }

@@ -5335,7 +5335,7 @@ fn doctor_row(name: &'static str) -> Check {
 }
 
 /// Open queues one probe job; a re-run before spawn keeps it at one
-/// (latest-only). The worker answer fills the rows. The probe closure
+/// (latest-only). The worker answer fills the probe rows. The probe closure
 /// is never run here: it reads the real host setup.
 #[test]
 fn doctor_opens_with_one_latest_only_probe_and_its_answer_lands() {
@@ -5368,10 +5368,11 @@ fn doctor_opens_with_one_latest_only_probe_and_its_answer_lands() {
         JobOutcome::Doctor {
             gen: 2,
             checks: vec![doctor_row("git"), doctor_row("curl")],
+            in_tmux: false,
         },
     );
     let doctor = state.doctor.as_ref().expect("open");
-    assert_eq!(doctor.checks.as_ref().map(Vec::len), Some(2));
+    assert_eq!(doctor.probe.as_ref().map(Vec::len), Some(2));
     assert!(!interp.doctor_job.holds_slot());
     assert!(capture_jobs(&mut interp, &mut state).is_empty(), "idle");
 }
@@ -5396,9 +5397,10 @@ fn doctor_drops_stale_answers_and_spawns_nothing_once_closed() {
     let stale = JobOutcome::Doctor {
         gen: 1,
         checks: vec![doctor_row("old")],
+        in_tmux: false,
     };
     apply_id(&mut interp, &mut state, first, stale);
-    assert_eq!(state.doctor.as_ref().unwrap().checks, None, "stale");
+    assert_eq!(state.doctor.as_ref().unwrap().probe, None, "stale");
     assert_eq!(interp.sched.queued_user_tag(UserTag::Doctor), 1, "next");
 
     // Closed before the queued probe spawns: no work starts.
@@ -5418,6 +5420,7 @@ fn doctor_drops_stale_answers_and_spawns_nothing_once_closed() {
         JobOutcome::Doctor {
             gen: 3,
             checks: vec![doctor_row("late")],
+            in_tmux: false,
         },
     );
     assert!(state.doctor.is_none());
@@ -5467,7 +5470,7 @@ fn doctor_job_carries_every_checkout_and_reads_remotes_with_git() {
             (root.join("wt"), "HEAD".to_string()),
         ]
     );
-    let mut urls = job.remote_urls();
+    let mut urls = crate::tui::doctor::remote_urls(&job.checkouts);
     urls.sort();
     assert_eq!(
         urls,

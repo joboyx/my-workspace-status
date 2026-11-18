@@ -8,14 +8,15 @@ One file per feature. Each file lists recipes with steps, the screen text to exp
 | 2 | [diff](diff.md) | A dirty file row shows its diff: staged and unstaged hunks, inline under 100 diff columns, split at 200 terminal columns, `w` ignore whitespace (saved across a restart), long markdown lines with wrap on (word breaks, one-row hunk header, whitespace marks) | `wsctl` |
 | 3 | [search](search.md) | `/` search: `/merger` Enter (demo clip 02), `/auth` Enter `n` wraps (clips 04, 14), no match and `Esc` clears (clip 12) | `wsctl` |
 | 4 | [help-overlay](help-overlay.md) | `?` opens the key overlay over the panes, `Esc` closes it | `wsctl` |
-| 5 | [json-snapshot](json-snapshot.md) | `--json` and `--plain` of the fixture, run headless with the run's isolation; the refused flags | `wsctl run` |
-| 6 | [tree-and-graph](tree-and-graph.md) | PR badges in the tree and the graph pane, the glyph column at wide and narrow widths, the graph chip | `scripts/verify-tui.sh` (fake forge) |
-| 7 | [pr-status](pr-status.md) | PR badge states on both forges, `gx` and `gc`, a scripted transition, a failing CLI, the lookup outage, live recipe | `scripts/verify-tui.sh` (fake forge, live) |
-| 8 | [popovers](popovers.md) | The PR popover and the commit popovers by mouse hover and click | `scripts/verify-tui.sh` (fake forge, mouse) |
-| 9 | [prs-tab](prs-tab.md) | The PRs tab (`gp`): groups, detail, folds, actions, narrow layout, outage, empty state | `scripts/verify-tui.sh` (fake forge) |
-| 10 | [multi-surface-journeys](multi-surface-journeys.md) | One user path across tree → diff → graph (`Tab`) → commit files → back | `wsctl` |
+| 5 | [doctor](doctor.md) | `Doctor: setup checkup` from the palette: the four-count head, the terminal capability rows inside tmux (answered or unknown, never fail), the live wheel row (wheel → ok, Down arrow → warn, reset on a new open), `ws doctor` text report and exit 0 | `wsctl`, `wsctl run`, driver `mouse wheel` |
+| 6 | [json-snapshot](json-snapshot.md) | `--json` and `--plain` of the fixture, run headless with the run's isolation; the refused flags | `wsctl run` |
+| 7 | [tree-and-graph](tree-and-graph.md) | PR badges in the tree and the graph pane, the glyph column at wide and narrow widths, the graph chip | `scripts/verify-tui.sh` (fake forge) |
+| 8 | [pr-status](pr-status.md) | PR badge states on both forges, `gx` and `gc`, a scripted transition, a failing CLI, the lookup outage, live recipe | `scripts/verify-tui.sh` (fake forge, live) |
+| 9 | [popovers](popovers.md) | The PR popover and the commit popovers by mouse hover and click | `scripts/verify-tui.sh` (fake forge, mouse) |
+| 10 | [prs-tab](prs-tab.md) | The PRs tab (`gp`): groups, detail, folds, actions, narrow layout, outage, empty state | `scripts/verify-tui.sh` (fake forge) |
+| 11 | [multi-surface-journeys](multi-surface-journeys.md) | One user path across tree → diff → graph (`Tab`) → commit files → back | `wsctl` |
 
-Files 6 to 9 use the driver directly: they need `scenario`, `calls` and `mouse`, which `wsctl` leaves to the driver. Their shared prelude is **Setup** in [pr-status.md](pr-status.md).
+Files 7 to 10 use the driver directly: they need `scenario`, `calls` and `mouse`, which `wsctl` leaves to the driver. Their shared prelude is **Setup** in [pr-status.md](pr-status.md). File 5 is a `wsctl` file that calls the driver only for `mouse` (the run dir comes from `start`).
 
 ## Recipe conventions (wsctl files)
 

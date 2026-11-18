@@ -639,6 +639,24 @@ fn tty_spawn_paths_drop_parent_pr_poll_period() {
 }
 
 #[test]
+fn tty_spawn_paths_drop_parent_caps_query_timeout() {
+    // `ws doctor` reads WS_STATUS_CAPS_QUERY_TIMEOUT_MS as a test hook for
+    // its terminal wait. A parent value (left from a manual try) must not
+    // stretch the wait of a test that leaves it unset; a test that wants a
+    // long wait passes its own.
+    assert!(
+        PTY_HARNESS.contains("env_remove(\"WS_STATUS_CAPS_QUERY_TIMEOUT_MS\")"),
+        "tui_tty_e2e/harness.rs must drop a parent WS_STATUS_CAPS_QUERY_TIMEOUT_MS"
+    );
+    // The verify driver unsets every inherited WS_STATUS_* variable.
+    assert!(
+        VERIFY_SH.contains("WS_STATUS_* | WORKSPACE_STATUS_*) unset \"$v\" ;;"),
+        "scripts/verify-tui.sh must unset every inherited WS_STATUS_* variable \
+         (WS_STATUS_CAPS_QUERY_TIMEOUT_MS among them)"
+    );
+}
+
+#[test]
 fn verify_driver_isolates_forge_theme_and_git() {
     // The verify driver (`scripts/verify-tui.sh`) shares the TTY spawn rules
     // above through the loops; these are the pins only it adds.

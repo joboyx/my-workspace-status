@@ -44,7 +44,7 @@ use super::diff::{
     gutter_width, section_header, wrap_viewport_start, DiffCell, DiffCellKind, DiffHeaderMarks,
     DiffRow, DiffSection, DIFF_RULE,
 };
-use super::doctor::{summary as doctor_summary, Check, CheckGroup, CheckStatus};
+use super::doctor::{summary as doctor_summary, Check, CheckStatus, DOCTOR_TITLE};
 use super::drill::DrillView;
 use super::explorer::{ExplorerRow, ExplorerStatus};
 use super::gates::ListFocusTarget;
@@ -5902,9 +5902,6 @@ fn draw_blame_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     );
 }
 
-/// Doctor dialog title.
-const DOCTOR_TITLE: &str = "Doctor · setup checkup";
-
 /// Doctor footer chips.
 const DOCTOR_FOOTER: &str = "j/k move · y copy fix · r re-run · Esc close";
 
@@ -5912,39 +5909,31 @@ const DOCTOR_FOOTER: &str = "j/k move · y copy fix · r re-run · Esc close";
 /// the status chip (4), and a space.
 const DOCTOR_INDENT: usize = 7;
 
-/// Section header the Doctor paints above `group`'s rows.
-fn doctor_group_title(group: CheckGroup) -> &'static str {
-    match group {
-        CheckGroup::Terminal => "TERMINAL",
-        CheckGroup::Tools => "TOOLS",
-        CheckGroup::Files => "FILES",
-    }
-}
-
 /// Status chip text, so a row reads without colour, and its theme colour.
 fn doctor_status_chip(status: CheckStatus, palette: Palette) -> (&'static str, Color) {
     match status {
         CheckStatus::Ok => ("ok", palette.added),
+        CheckStatus::Unknown => ("?", palette.muted),
         CheckStatus::Warn => ("warn", palette.modified),
         CheckStatus::Fail => ("fail", palette.deleted),
     }
 }
 
-/// `<n> ok · <n> warn · <n> fail`, each count in its chip colour.
+/// `<n> ok · <n> warn · <n> fail · <n> unknown`, each count in its chip
+/// colour.
 fn doctor_summary_line(checks: &[Check], palette: Palette) -> Line<'static> {
-    let counts = doctor_summary(checks);
-    let sep = || Span::styled(" · ", Style::default().fg(palette.muted));
-    let part = |n: usize, status: CheckStatus| {
-        let (label, color) = doctor_status_chip(status, palette);
-        Span::styled(format!("{n} {label}"), Style::default().fg(color))
-    };
-    Line::from(vec![
-        part(counts.ok, CheckStatus::Ok),
-        sep(),
-        part(counts.warn, CheckStatus::Warn),
-        sep(),
-        part(counts.fail, CheckStatus::Fail),
-    ])
+    let mut spans = Vec::new();
+    for (status, n) in doctor_summary(checks).counts() {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ", Style::default().fg(palette.muted)));
+        }
+        let (_, color) = doctor_status_chip(status, palette);
+        spans.push(Span::styled(
+            format!("{n} {}", status.label()),
+            Style::default().fg(color),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// Doctor body: a header per group, then per row its name line (cursor
@@ -5968,7 +5957,7 @@ fn doctor_body_lines(
         if group != Some(check.group) {
             group = Some(check.group);
             lines.push(Line::from(Span::styled(
-                doctor_group_title(check.group),
+                check.group.title(),
                 Style::default()
                     .fg(palette.heading)
                     .add_modifier(Modifier::BOLD),

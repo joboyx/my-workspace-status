@@ -85,7 +85,7 @@ pub(crate) fn query_background(timeout: Duration) -> Option<(u8, u8, u8)> {
     use std::io::{self, IsTerminal, Write};
     use std::time::Instant;
 
-    use super::tty::{poll_stdin, push_pending_input};
+    use super::tty::{push_pending_input, read_stdin_until};
 
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return None;
@@ -94,38 +94,7 @@ pub(crate) fn query_background(timeout: Duration) -> Option<(u8, u8, u8)> {
     if out.write_all(QUERY).and_then(|()| out.flush()).is_err() {
         return None;
     }
-    let deadline = Instant::now() + timeout;
-    let mut got = Vec::new();
-    let mut chunk = [0u8; 256];
-    loop {
-        if split_replies(&got).done {
-            break;
-        }
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            break;
-        }
-        match poll_stdin(left) {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(_) => break,
-        }
-        // SAFETY: `chunk` is a live buffer of `chunk.len()` writable bytes.
-        let n = unsafe {
-            libc::read(
-                libc::STDIN_FILENO,
-                chunk.as_mut_ptr().cast::<libc::c_void>(),
-                chunk.len(),
-            )
-        };
-        let Ok(n) = usize::try_from(n) else {
-            break;
-        };
-        if n == 0 {
-            break;
-        }
-        got.extend_from_slice(&chunk[..n]);
-    }
+    let got = read_stdin_until(Instant::now() + timeout, |got| split_replies(got).done);
     let replies = split_replies(&got);
     push_pending_input(&replies.rest);
     replies.rgb
@@ -215,7 +184,9 @@ fn scale_channel(hex: &str) -> Option<u8> {
 }
 
 /// Span of the first complete DA1 reply (`ESC [ ? <digits and ;> c`).
-fn find_da1(bytes: &[u8]) -> Option<Range<usize>> {
+///
+/// Also used by [`super::term_caps::parse_csi_reply`] to tell a DA1 reply.
+pub(super) fn find_da1(bytes: &[u8]) -> Option<Range<usize>> {
     let mut from = 0;
     while let Some(at) = find_bytes(&bytes[from..], DA1_INTRO) {
         let start = from + at;

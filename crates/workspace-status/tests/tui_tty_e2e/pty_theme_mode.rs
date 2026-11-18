@@ -49,9 +49,7 @@ fn wait_theme(tui: &PtySession, active: &ThemeChrome, other: &ThemeChrome) {
 }
 
 fn wrote_query(tui: &PtySession) -> bool {
-    tui.raw_output()
-        .windows(OSC11_QUERY.len())
-        .any(|w| w == OSC11_QUERY)
+    tui.raw_count(OSC11_QUERY) > 0
 }
 
 /// `auto` on a white terminal: the baseline Tokyo Night launches as its

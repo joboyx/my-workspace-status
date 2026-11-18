@@ -78,6 +78,11 @@ struct SpawnOpts {
     user_config: UserConfig,
     /// Bytes the reader thread writes back when the child asks OSC 11.
     bg_reply: Option<Vec<u8>>,
+    /// Bytes the reader thread writes back when the child writes the
+    /// Doctor's capability query ([`CAPS_QUERY`]).
+    caps_reply: Option<Vec<u8>>,
+    /// Command-line arguments of the binary; empty opens the TUI.
+    args: Vec<String>,
 }
 
 impl Default for SpawnOpts {
@@ -87,12 +92,19 @@ impl Default for SpawnOpts {
             wait_ready: true,
             user_config: UserConfig::Baseline,
             bg_reply: None,
+            caps_reply: None,
+            args: Vec::new(),
         }
     }
 }
 
 /// OSC 11 background query the TUI writes at startup in `themeMode` `auto`.
 const OSC11_QUERY: &[u8] = b"\x1b]11;?";
+
+/// The Doctor's terminal capability query: XTVERSION, DECRQM 1006 / 2004 /
+/// 2026, kitty keyboard flags, OSC 11, then DA1.
+pub const CAPS_QUERY: &[u8] =
+    b"\x1b[>0q\x1b[?1006$p\x1b[?2004$p\x1b[?2026$p\x1b[?u\x1b]11;?\x1b\\\x1b[c";
 
 /// Start of a synchronized update (DEC private mode 2026). The TUI opens
 /// one before each frame (and before the clear of a resize).
@@ -227,7 +239,8 @@ impl FrameParser {
 
 pub struct PtySession {
     child: Box<dyn portable_pty::Child + Send>,
-    /// PTY master writer. The reader thread shares it to answer OSC 11.
+    /// PTY master writer. The reader thread shares it to answer OSC 11 and
+    /// the Doctor's capability query.
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
     /// Terminal side of the PTY. Every screen and cell read below sees a
@@ -315,6 +328,59 @@ impl PtySession {
         )
     }
 
+    /// Spawn a `cols` x `rows` terminal that answers the Doctor's
+    /// capability query.
+    ///
+    /// Each time the child writes [`CAPS_QUERY`], the reader thread writes
+    /// `reply` back on the PTY in one write, like a terminal that answers
+    /// every part of it. The OSC 11 part of the query gets only what
+    /// `reply` holds.
+    pub fn open_size_with_caps_reply(
+        workspace: &Path,
+        cols: u16,
+        rows: u16,
+        extra_env: &[(&str, &str)],
+        reply: &[u8],
+    ) -> Self {
+        Self::spawn(
+            workspace,
+            cols,
+            rows,
+            extra_env,
+            SpawnOpts {
+                caps_reply: Some(reply.to_vec()),
+                ..SpawnOpts::default()
+            },
+        )
+    }
+
+    /// Run the binary with `args` (a CLI subcommand that prints and exits,
+    /// such as `doctor`) on a `cols` x `rows` terminal that answers the
+    /// Doctor's capability query as [`Self::open_size_with_caps_reply`]
+    /// does. Does not wait for a TUI; the spawn env is the same as for the
+    /// TUI, plus `extra_env`.
+    pub fn run_args_with_caps_reply(
+        workspace: &Path,
+        cols: u16,
+        rows: u16,
+        args: &[&str],
+        extra_env: &[(&str, &str)],
+        reply: &[u8],
+    ) -> Self {
+        Self::spawn(
+            workspace,
+            cols,
+            rows,
+            extra_env,
+            SpawnOpts {
+                wait_ready: false,
+                caps_reply: Some(reply.to_vec()),
+                args: args.iter().map(|arg| arg.to_string()).collect(),
+                ..SpawnOpts::default()
+            },
+        )
+    }
+
     /// Spawn without waiting for the TUI. Used when the GitHub Release
     /// prompt must paint on the primary screen first.
     pub fn open_pending(
@@ -347,6 +413,8 @@ impl PtySession {
             wait_ready,
             user_config,
             bg_reply,
+            caps_reply,
+            args,
         } = opts;
         assert!(
             workspace.is_dir(),
@@ -365,6 +433,7 @@ impl PtySession {
 
         let bin = env!("CARGO_BIN_EXE_workspace-status");
         let mut cmd = CommandBuilder::new(bin);
+        cmd.args(&args);
         cmd.cwd(workspace);
         for (k, v) in std::env::vars() {
             if matches!(
@@ -378,6 +447,7 @@ impl PtySession {
                     | "WS_STATUS_THEME_MODE"
                     | "WS_STATUS_TERM_PROGRESS"
                     | "WS_STATUS_PR_POLL_MS"
+                    | "WS_STATUS_CAPS_QUERY_TIMEOUT_MS"
                     | "VISUAL"
             ) {
                 continue;
@@ -391,7 +461,9 @@ impl PtySession {
         // baseline config theme or theme mode, and an operator
         // WS_STATUS_TERM_PROGRESS would turn off the default-on progress.
         // An operator WS_STATUS_PR_POLL_MS would poll in a test that leaves
-        // it unset; a test that wants polling passes it.
+        // it unset; a test that wants polling passes it. An operator
+        // WS_STATUS_CAPS_QUERY_TIMEOUT_MS would change the `ws doctor`
+        // wait; a test that wants another wait passes it.
         // `e` reads $VISUAL before $EDITOR, so an operator VISUAL would
         // outrank the stub EDITOR a test passes.
         cmd.env_remove("NO_COLOR");
@@ -401,6 +473,7 @@ impl PtySession {
         cmd.env_remove("WS_STATUS_THEME_MODE");
         cmd.env_remove("WS_STATUS_TERM_PROGRESS");
         cmd.env_remove("WS_STATUS_PR_POLL_MS");
+        cmd.env_remove("WS_STATUS_CAPS_QUERY_TIMEOUT_MS");
         cmd.env_remove("VISUAL");
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
@@ -478,8 +551,14 @@ impl PtySession {
                     Ok(n) => {
                         let chunk = &buf[..n];
                         push_osc52(&mut pending, chunk, &clipboard_thread);
-                        let queries = push_raw(&raw_thread, chunk);
-                        if let Some(reply) = &bg_reply {
+                        let [bg_queries, caps_queries] =
+                            push_raw(&raw_thread, chunk, [OSC11_QUERY, CAPS_QUERY]);
+                        for (reply, queries) in
+                            [(&bg_reply, bg_queries), (&caps_reply, caps_queries)]
+                        {
+                            let Some(reply) = reply else {
+                                continue;
+                            };
                             let mut writer = writer_thread.lock().unwrap();
                             for _ in 0..queries {
                                 let _ = writer.write_all(reply);
@@ -893,6 +972,11 @@ impl PtySession {
         self.raw.lock().unwrap().clone()
     }
 
+    /// How many times `needle` occurs in [`Self::raw_output`] so far.
+    pub fn raw_count(&self, needle: &[u8]) -> usize {
+        byte_positions(&self.raw.lock().unwrap(), needle).len()
+    }
+
     /// Process id of the child, for a test that sends it a signal.
     pub fn child_pid(&self) -> u32 {
         self.child.process_id().expect("child process id")
@@ -1211,11 +1295,22 @@ impl PtySession {
     }
 
     pub fn wait_pred(&self, pred: impl Fn(&str) -> bool, what: &str, timeout: Duration) {
+        self.wait_screen(pred, what, timeout);
+    }
+
+    /// [`Self::wait_pred`], returning the screen that matched `pred`, so
+    /// the asserts after the wait read that same frame and not a later one.
+    pub fn wait_screen(
+        &self,
+        pred: impl Fn(&str) -> bool,
+        what: &str,
+        timeout: Duration,
+    ) -> String {
         let start = Instant::now();
         loop {
             let screen = self.screen();
             if pred(&screen) {
-                return;
+                return screen;
             }
             if start.elapsed() >= timeout {
                 panic!("timeout waiting for {what}:\n{screen}");
@@ -1253,6 +1348,25 @@ impl PtySession {
                 self.screen()
             ),
             Err(err) => panic!("wait child: {err}"),
+        }
+    }
+
+    /// Wait until the child process exits, with any status, and return
+    /// that status. A still-alive process at timeout is a fail.
+    pub fn wait_exit_status(&mut self, timeout: Duration) -> portable_pty::ExitStatus {
+        let start = Instant::now();
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => return status,
+                Ok(None) => {}
+                Err(err) => panic!("wait child: {err}"),
+            }
+            assert!(
+                start.elapsed() < timeout,
+                "timeout waiting for the process to exit; screen:\n{}",
+                self.screen()
+            );
+            thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -1309,16 +1423,21 @@ impl Drop for PtySession {
     }
 }
 
-/// Append `chunk` to the raw tap and count the OSC 11 queries it completes.
-/// A query split across reads counts once, in the read that ends it.
-fn push_raw(raw: &Arc<Mutex<Vec<u8>>>, chunk: &[u8]) -> usize {
+/// Append `chunk` to the raw tap and count, for each of `queries`, the
+/// times this read completes it (the fake terminal answers each one). A
+/// query split across reads counts once, in the read that ends it.
+fn push_raw<const N: usize>(
+    raw: &Arc<Mutex<Vec<u8>>>,
+    chunk: &[u8],
+    queries: [&[u8]; N],
+) -> [usize; N] {
     let mut raw = raw.lock().unwrap();
-    let from = raw.len().saturating_sub(OSC11_QUERY.len() - 1);
+    let start = raw.len();
     raw.extend_from_slice(chunk);
-    raw[from..]
-        .windows(OSC11_QUERY.len())
-        .filter(|w| *w == OSC11_QUERY)
-        .count()
+    queries.map(|query| {
+        let from = start.saturating_sub(query.len() - 1);
+        byte_positions(&raw[from..], query).len()
+    })
 }
 
 const OSC52_INTRO: &[u8] = b"\x1b]52;";
@@ -1359,7 +1478,7 @@ fn push_osc52(pending: &mut Vec<u8>, chunk: &[u8], dest: &Arc<Mutex<Vec<String>>
 }
 
 fn take_osc52(pending: &[u8]) -> Osc52Take {
-    match find_bytes(pending, OSC52_INTRO) {
+    match find_bytes(pending, OSC52_INTRO, 0) {
         None => {
             let keep = osc52_prefix_keep(pending);
             let skip = pending.len() - keep;
@@ -1386,7 +1505,7 @@ fn take_osc52(pending: &[u8]) -> Osc52Take {
             let payload_at = after + sel_rel + 1;
             let rest = &pending[payload_at..];
             let bel = rest.iter().position(|&b| b == 0x07);
-            let st = find_bytes(rest, b"\x1b\\");
+            let st = find_bytes(rest, b"\x1b\\", 0);
             let term = match (bel, st) {
                 (Some(b), Some(s)) if b <= s => Some((b, 1)),
                 (Some(_), Some(s)) => Some((s, 2)),
@@ -1415,11 +1534,28 @@ fn osc52_prefix_keep(buf: &[u8]) -> usize {
     0
 }
 
-fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || hay.len() < needle.len() {
+/// Byte offsets of every `needle` in `hay`, in order (overlaps included).
+/// Empty for an empty `needle`.
+pub fn byte_positions(hay: &[u8], needle: &[u8]) -> Vec<usize> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    hay.windows(needle.len())
+        .enumerate()
+        .filter_map(|(at, w)| (w == needle).then_some(at))
+        .collect()
+}
+
+/// First offset of `needle` in `hay` at or after `from`. `None` for an
+/// empty `needle` or a `from` past the end.
+pub fn find_bytes(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    let rest = hay.get(from..)?;
+    if needle.is_empty() || rest.len() < needle.len() {
         return None;
     }
-    hay.windows(needle.len()).position(|w| w == needle)
+    rest.windows(needle.len())
+        .position(|w| w == needle)
+        .map(|at| from + at)
 }
 
 fn decode_base64_utf8(input: &[u8]) -> Option<String> {

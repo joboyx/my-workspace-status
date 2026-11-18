@@ -1897,9 +1897,10 @@ fn doctor_mode_keys_move_copy_rerun_close_and_swallow_the_rest() {
     let page = DOCTOR_PAGE_ROWS;
     for (event, want) in [
         (key(KeyCode::Char('j')), Action::DoctorMove(1)),
-        (key(KeyCode::Down), Action::DoctorMove(1)),
+        // Arrows move too, and also count for the live wheel test.
+        (key(KeyCode::Down), Action::DoctorArrow(1)),
         (key(KeyCode::Char('k')), Action::DoctorMove(-1)),
-        (key(KeyCode::Up), Action::DoctorMove(-1)),
+        (key(KeyCode::Up), Action::DoctorArrow(-1)),
         (key(KeyCode::PageDown), Action::DoctorMove(page)),
         (key(KeyCode::PageUp), Action::DoctorMove(-page)),
         (ctrl(KeyCode::Char('d')), Action::DoctorMove(page)),
@@ -1923,11 +1924,45 @@ fn doctor_mode_keys_move_copy_rerun_close_and_swallow_the_rest() {
     ] {
         assert_eq!(at(event.clone()), want, "{event:?}");
     }
-    let wheel = mouse(MouseEventKind::ScrollDown, 40, 4);
-    assert_eq!(
-        event_to_action(&wheel, InputMode::Doctor, false, false),
-        Action::None
-    );
+}
+
+/// In the Doctor only the wheel acts: vertical moves one row and records,
+/// horizontal (left / right, Shift+wheel) only records. Clicks, drags,
+/// releases, and motion do nothing.
+#[test]
+fn doctor_mode_mouse_maps_the_wheel_only() {
+    let at = |kind, modifiers| {
+        event_to_action(
+            &mouse_mods(kind, 40, 4, modifiers),
+            InputMode::Doctor,
+            false,
+            false,
+        )
+    };
+    let none = KeyModifiers::NONE;
+    for (kind, modifiers, want) in [
+        (MouseEventKind::ScrollDown, none, Action::DoctorWheel(1)),
+        (MouseEventKind::ScrollUp, none, Action::DoctorWheel(-1)),
+        (MouseEventKind::ScrollLeft, none, Action::DoctorWheel(0)),
+        (MouseEventKind::ScrollRight, none, Action::DoctorWheel(0)),
+        (
+            MouseEventKind::ScrollDown,
+            KeyModifiers::SHIFT,
+            Action::DoctorWheel(0),
+        ),
+        (MouseEventKind::Down(MouseButton::Left), none, Action::None),
+        (
+            MouseEventKind::Down(MouseButton::Left),
+            KeyModifiers::CONTROL,
+            Action::None,
+        ),
+        (MouseEventKind::Down(MouseButton::Right), none, Action::None),
+        (MouseEventKind::Up(MouseButton::Left), none, Action::None),
+        (MouseEventKind::Drag(MouseButton::Left), none, Action::None),
+        (MouseEventKind::Moved, none, Action::None),
+    ] {
+        assert_eq!(at(kind, modifiers), want, "{kind:?} {modifiers:?}");
+    }
 }
 
 #[test]

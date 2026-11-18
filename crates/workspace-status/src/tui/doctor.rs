@@ -30,9 +30,13 @@ use super::split::{MIN_TERM_COLS, MIN_TERM_ROWS};
 use super::ui_state_store::check_ui_state_bytes;
 use super::viewed::check_viewed_store_bytes;
 use crate::config::{load_config_files, CONFIG_FILENAME};
-use crate::git::{git_version_output, resolve_git_binary};
+use crate::git::{git_version_output, remote_url_for_branch, resolve_git_binary};
 use crate::settings::Settings;
 use crate::update_check::check_update_check_store_bytes;
+
+/// Title of the report: the TUI dialog title, and the start of the first
+/// `ws doctor` line.
+pub(crate) const DOCTOR_TITLE: &str = "Doctor · setup checkup";
 
 /// Operating system family the checks target.
 ///
@@ -70,15 +74,30 @@ impl Os {
     }
 }
 
-/// Outcome of one check. Ordered by severity: `Ok < Warn < Fail`.
+/// Outcome of one check. Ordered by severity: `Ok < Unknown < Warn < Fail`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CheckStatus {
     /// Set up as expected (or an intentional fallback).
     Ok,
+    /// The probe could not tell: the terminal did not answer, or a live test
+    /// has not run yet. Never a failure.
+    Unknown,
     /// Works, but a feature degrades or the probe cannot confirm it.
     Warn,
     /// A feature the TUI needs does not work.
     Fail,
+}
+
+impl CheckStatus {
+    /// Status word in the summary line: `ok`, `unknown`, `warn`, or `fail`.
+    pub fn label(self) -> &'static str {
+        match self {
+            CheckStatus::Ok => "ok",
+            CheckStatus::Unknown => "unknown",
+            CheckStatus::Warn => "warn",
+            CheckStatus::Fail => "fail",
+        }
+    }
 }
 
 /// Section a check belongs to, in paint order.
@@ -90,6 +109,18 @@ pub enum CheckGroup {
     Tools,
     /// Config and state files.
     Files,
+}
+
+impl CheckGroup {
+    /// Section header above the group's rows, in the TUI dialog and in the
+    /// `ws doctor` text: `TERMINAL`, `TOOLS`, or `FILES`.
+    pub fn title(self) -> &'static str {
+        match self {
+            CheckGroup::Terminal => "TERMINAL",
+            CheckGroup::Tools => "TOOLS",
+            CheckGroup::Files => "FILES",
+        }
+    }
 }
 
 /// What the user can do about a check.
@@ -233,10 +264,9 @@ pub struct Probe {
     pub env: BTreeMap<String, String>,
     /// Commands found on `PATH` (or as a path), by the name the app runs.
     pub on_path: BTreeSet<String>,
-    /// Terminal width in columns.
-    pub term_cols: u16,
-    /// Terminal height in rows.
-    pub term_rows: u16,
+    /// Terminal `(columns, rows)`; `None` when stdout is not a terminal
+    /// (the `ws doctor` CLI piped to a file or a pager).
+    pub term_size: Option<(u16, u16)>,
     /// ASCII glyphs instead of Nerd Font glyphs (resolved setting).
     pub ascii: bool,
     /// App mouse capture is on.
@@ -296,6 +326,12 @@ impl Probe {
         self.on_path.contains(cmd)
     }
 
+    /// True inside tmux: `TMUX` is set and not empty in the environment the
+    /// probe read. The capability rows add their tmux hint from it.
+    pub fn in_tmux(&self) -> bool {
+        self.var("TMUX").is_some()
+    }
+
     /// True on WSL (`WSL_DISTRO_NAME` set on Linux).
     fn wsl(&self) -> bool {
         self.os == Os::Linux && self.var("WSL_DISTRO_NAME").is_some()
@@ -333,6 +369,21 @@ pub struct Summary {
     pub warn: usize,
     /// Rows with [`CheckStatus::Fail`].
     pub fail: usize,
+    /// Rows with [`CheckStatus::Unknown`].
+    pub unknown: usize,
+}
+
+impl Summary {
+    /// Each status with its count, in the order the summary line prints
+    /// them: `<n> ok · <n> warn · <n> fail · <n> unknown`.
+    pub fn counts(self) -> [(CheckStatus, usize); 4] {
+        [
+            (CheckStatus::Ok, self.ok),
+            (CheckStatus::Warn, self.warn),
+            (CheckStatus::Fail, self.fail),
+            (CheckStatus::Unknown, self.unknown),
+        ]
+    }
 }
 
 /// Count `checks` by status.
@@ -341,6 +392,7 @@ pub fn summary(checks: &[Check]) -> Summary {
     for check in checks {
         match check.status {
             CheckStatus::Ok => out.ok += 1,
+            CheckStatus::Unknown => out.unknown += 1,
             CheckStatus::Warn => out.warn += 1,
             CheckStatus::Fail => out.fail += 1,
         }
@@ -376,7 +428,9 @@ pub fn checks(probe: &Probe) -> Vec<Check> {
     .collect()
 }
 
-fn row(
+/// One check row. Shared with the capability rows of
+/// [`super::term_caps::capability_checks`].
+pub(super) fn row(
     group: CheckGroup,
     name: &'static str,
     status: CheckStatus,
@@ -392,7 +446,8 @@ fn row(
     }
 }
 
-fn hint(text: impl Into<String>) -> Option<Fix> {
+/// A fix with advice only, no copy line.
+pub(super) fn hint(text: impl Into<String>) -> Option<Fix> {
     Some(Fix {
         hint: Some(text.into()),
         copy: None,
@@ -410,7 +465,15 @@ fn hint_copy(text: impl Into<String>, copy: impl Into<String>) -> Option<Fix> {
 
 fn terminal_size(p: &Probe) -> Check {
     const NAME: &str = "Terminal size";
-    let (cols, rows) = (p.term_cols, p.term_rows);
+    let Some((cols, rows)) = p.term_size else {
+        return row(
+            CheckGroup::Terminal,
+            NAME,
+            CheckStatus::Unknown,
+            "stdout is not a terminal.",
+            None,
+        );
+    };
     if cols < MIN_TERM_COLS || rows < MIN_TERM_ROWS {
         return row(
             CheckGroup::Terminal,
@@ -727,8 +790,12 @@ fn clipboard(p: &Probe) -> Check {
     )
 }
 
+/// Name of the mouse capture row. The live wheel test row and the
+/// capability rows of [`super::term_caps::doctor_rows`] go right after it.
+pub(super) const MOUSE_ROW: &str = "Mouse";
+
 fn mouse(p: &Probe) -> Check {
-    const NAME: &str = "Mouse";
+    const NAME: &str = MOUSE_ROW;
     if !p.mouse_enabled {
         return row(
             CheckGroup::Terminal,
@@ -758,6 +825,103 @@ fn mouse(p: &Probe) -> Check {
         }
     }
     row(CheckGroup::Terminal, NAME, CheckStatus::Ok, "On.", None)
+}
+
+/// Name of the live mouse wheel test row, right after [`MOUSE_ROW`].
+pub(super) const WHEEL_ROW: &str = "Mouse wheel (live test)";
+
+/// What the open Doctor saw of the live mouse wheel test.
+///
+/// Sticky: once a wheel event arrived, later arrow keys do not change it.
+/// It survives `r`; a new open starts at [`WheelTest::Waiting`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum WheelTest {
+    /// No wheel event and no Up / Down arrow key yet.
+    #[default]
+    Waiting,
+    /// Up / Down arrow keys arrived and no wheel event yet: a terminal with
+    /// mouse reporting off turns the wheel into arrow keys.
+    Arrows,
+    /// A wheel event arrived: the terminal sends mouse reports.
+    Wheel,
+}
+
+impl WheelTest {
+    /// The state after an Up / Down arrow key: a wheel result stays.
+    pub(crate) fn arrow(self) -> Self {
+        match self {
+            WheelTest::Waiting | WheelTest::Arrows => WheelTest::Arrows,
+            WheelTest::Wheel => WheelTest::Wheel,
+        }
+    }
+}
+
+/// Input of the live mouse wheel test row ([`wheel_check`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WheelRow {
+    /// The TUI Doctor: what it saw, and whether mouse capture is on.
+    Live {
+        /// The live test state of the open Doctor.
+        test: WheelTest,
+        /// Mouse capture is on (`m`), so the terminal can send wheel events.
+        capture: bool,
+    },
+    /// The `ws doctor` CLI: no live input, so the test needs the TUI.
+    TuiOnly,
+}
+
+/// The live mouse wheel test row (group TERMINAL). Pure.
+///
+/// Never a failure: with capture off, while it waits, and in the CLI it is
+/// unknown. A wheel event is ok; Up / Down arrow keys with no wheel event
+/// are a warning with the fix, and the `set -g mouse on` copy line only
+/// inside tmux (`in_tmux`).
+pub(crate) fn wheel_check(wheel: WheelRow, in_tmux: bool) -> Check {
+    const NAME: &str = WHEEL_ROW;
+    let unknown = |why| row(CheckGroup::Terminal, NAME, CheckStatus::Unknown, why, None);
+    match wheel {
+        WheelRow::TuiOnly => {
+            unknown("TUI only: open Doctor: setup checkup in the TUI and scroll once.")
+        }
+        WheelRow::Live { capture: false, .. } => unknown(
+            "Mouse capture is off, so the wheel cannot be tested. Close the Doctor and press m \
+             to turn it on.",
+        ),
+        WheelRow::Live {
+            test: WheelTest::Waiting,
+            ..
+        } => unknown("Scroll the mouse wheel once over this dialog."),
+        WheelRow::Live {
+            test: WheelTest::Wheel,
+            ..
+        } => row(
+            CheckGroup::Terminal,
+            NAME,
+            CheckStatus::Ok,
+            "A wheel event arrived: the terminal sends mouse reports.",
+            None,
+        ),
+        WheelRow::Live {
+            test: WheelTest::Arrows,
+            ..
+        } => {
+            const ADVICE: &str = "macOS Terminal.app: View → Allow Mouse Reporting (Cmd+R). \
+                                  In tmux: set -g mouse on. If you pressed the arrow keys, \
+                                  scroll once to test again.";
+            row(
+                CheckGroup::Terminal,
+                NAME,
+                CheckStatus::Warn,
+                "Got Up/Down arrow keys and no wheel event. If you scrolled, the terminal turns \
+                 the wheel into arrow keys: mouse reporting is off.",
+                if in_tmux {
+                    hint_copy(ADVICE, "set -g mouse on")
+                } else {
+                    hint(ADVICE)
+                },
+            )
+        }
+    }
 }
 
 /* ── TOOLS ──────────────────────────────────────────────────────────────── */
@@ -1261,10 +1425,8 @@ fn state_files(p: &Probe) -> Check {
 /// What only the app knows, for [`collect`].
 #[derive(Clone, Copy, Debug)]
 pub struct CollectInputs<'a> {
-    /// Terminal width in columns.
-    pub term_cols: u16,
-    /// Terminal height in rows.
-    pub term_rows: u16,
+    /// Terminal `(columns, rows)`; `None` when stdout is not a terminal.
+    pub term_size: Option<(u16, u16)>,
     /// The resolved settings (glyphs, git binary, store paths).
     pub settings: &'a Settings,
     /// App mouse capture is on.
@@ -1279,6 +1441,25 @@ pub struct CollectInputs<'a> {
     pub workspace_root: &'a Path,
     /// User config path ([`crate::config::user_config_path`]).
     pub user_config: Option<&'a Path>,
+}
+
+/// Remote URLs of `checkouts` (absolute path, branch) for
+/// [`CollectInputs::remote_urls`], each once, in checkout order.
+///
+/// Each URL is the one the branch pushes to ([`remote_url_for_branch`]). A
+/// detached or empty branch takes the first remote. Read-only git; it
+/// blocks, so call it on a worker thread. The TUI Doctor job and the
+/// `ws doctor` CLI both call it.
+pub(crate) fn remote_urls(checkouts: &[(PathBuf, String)]) -> Vec<String> {
+    let mut urls: Vec<String> = Vec::new();
+    for (dir, branch) in checkouts {
+        if let Some(url) = remote_url_for_branch(dir, branch) {
+            if !urls.contains(&url) {
+                urls.push(url);
+            }
+        }
+    }
+    urls
 }
 
 /// Commands the checks look up on `PATH` besides the editor, diff tool, and
@@ -1390,8 +1571,7 @@ where
         os,
         env,
         on_path,
-        term_cols: inputs.term_cols,
-        term_rows: inputs.term_rows,
+        term_size: inputs.term_size,
         ascii: settings.ascii,
         mouse_enabled: inputs.mouse_enabled,
         dev_build,
@@ -1541,8 +1721,7 @@ mod tests {
             .into_iter()
             .map(str::to_string)
             .collect(),
-            term_cols: 120,
-            term_rows: 40,
+            term_size: Some((120, 40)),
             ascii: true,
             mouse_enabled: true,
             dev_build: false,
@@ -1663,20 +1842,29 @@ mod tests {
     #[test]
     fn terminal_size_fail_warn_ok() {
         let mut p = base(Os::Linux);
-        p.term_cols = MIN_TERM_COLS - 1;
+        p.term_size = Some((MIN_TERM_COLS - 1, 40));
         let check = get(&p, "Terminal size");
         assert_eq!(check.status, CheckStatus::Fail);
         assert!(check.why.contains("need ≥ 46×12"), "{}", check.why);
-        p.term_cols = 80;
-        p.term_rows = MIN_TERM_ROWS - 1;
+        p.term_size = Some((80, MIN_TERM_ROWS - 1));
         assert_eq!(get(&p, "Terminal size").status, CheckStatus::Fail);
-        p.term_rows = MIN_TERM_ROWS;
+        p.term_size = Some((80, MIN_TERM_ROWS));
         let check = get(&p, "Terminal size");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.why.contains("search in files"), "{}", check.why);
         assert!(hint_of(&check).contains("100+ columns"));
-        p.term_cols = SEARCH_PREVIEW_MIN_COLS;
+        p.term_size = Some((SEARCH_PREVIEW_MIN_COLS, MIN_TERM_ROWS));
         assert_eq!(get(&p, "Terminal size").status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn terminal_size_without_a_terminal_is_unknown() {
+        let mut p = base(Os::Linux);
+        p.term_size = None;
+        let check = get(&p, "Terminal size");
+        assert_eq!(check.status, CheckStatus::Unknown);
+        assert_eq!(check.why, "stdout is not a terminal.");
+        assert_eq!(check.fix, None);
     }
 
     #[test]
@@ -1886,6 +2074,69 @@ mod tests {
         assert_eq!(get(&p, "Mouse").status, CheckStatus::Warn);
         in_tmux(&mut p, Some("hyperlinks"), Some("on"), Some("on"));
         assert_eq!(get(&p, "Mouse").status, CheckStatus::Ok);
+    }
+
+    /// Every state of the live wheel test row: capture off, waiting, the
+    /// CLI form (unknown), a wheel event (ok), arrow keys (warn, with the
+    /// tmux copy line only inside tmux).
+    #[test]
+    fn wheel_row_states() {
+        let live = |test, capture| WheelRow::Live { test, capture };
+        let unknown = [
+            (
+                live(WheelTest::Wheel, false),
+                "Mouse capture is off, so the wheel cannot be tested. Close the Doctor and \
+                 press m to turn it on.",
+            ),
+            (
+                live(WheelTest::Waiting, true),
+                "Scroll the mouse wheel once over this dialog.",
+            ),
+            (
+                WheelRow::TuiOnly,
+                "TUI only: open Doctor: setup checkup in the TUI and scroll once.",
+            ),
+        ];
+        for (wheel, why) in unknown {
+            for tmux in [false, true] {
+                let check = wheel_check(wheel, tmux);
+                assert_eq!(check.group, CheckGroup::Terminal);
+                assert_eq!(check.name, "Mouse wheel (live test)");
+                assert_eq!(check.status, CheckStatus::Unknown, "{wheel:?}");
+                assert_eq!(check.why, why, "{wheel:?}");
+                assert_eq!(check.fix, None, "{wheel:?}");
+            }
+        }
+
+        let ok = wheel_check(live(WheelTest::Wheel, true), true);
+        assert_eq!(ok.status, CheckStatus::Ok);
+        assert_eq!(
+            ok.why,
+            "A wheel event arrived: the terminal sends mouse reports."
+        );
+        assert_eq!(ok.fix, None);
+
+        let advice = "macOS Terminal.app: View → Allow Mouse Reporting (Cmd+R). In tmux: set \
+                      -g mouse on. If you pressed the arrow keys, scroll once to test again.";
+        for (tmux, line) in [(false, None), (true, Some("set -g mouse on"))] {
+            let warn = wheel_check(live(WheelTest::Arrows, true), tmux);
+            assert_eq!(warn.status, CheckStatus::Warn, "tmux {tmux}");
+            assert_eq!(
+                warn.why,
+                "Got Up/Down arrow keys and no wheel event. If you scrolled, the terminal \
+                 turns the wheel into arrow keys: mouse reporting is off."
+            );
+            assert_eq!(hint_of(&warn), advice, "tmux {tmux}");
+            assert_eq!(copy(&warn), line, "tmux {tmux}");
+        }
+    }
+
+    /// The wheel test is sticky: arrows after a wheel event keep it ok.
+    #[test]
+    fn wheel_test_arrow_step_keeps_a_wheel_result() {
+        assert_eq!(WheelTest::Waiting.arrow(), WheelTest::Arrows);
+        assert_eq!(WheelTest::Arrows.arrow(), WheelTest::Arrows);
+        assert_eq!(WheelTest::Wheel.arrow(), WheelTest::Wheel);
     }
 
     #[test]
@@ -2186,7 +2437,7 @@ mod tests {
     #[test]
     fn summary_counts_by_status() {
         let mut p = base(Os::Linux);
-        p.term_cols = 10;
+        p.term_size = Some((10, 40));
         p.ascii = false;
         let got = summary(&checks(&p));
         assert_eq!(
@@ -2194,9 +2445,41 @@ mod tests {
             Summary {
                 ok: 13,
                 warn: 1,
-                fail: 1
+                fail: 1,
+                unknown: 0,
             }
         );
+    }
+
+    #[test]
+    fn summary_counts_unknown_rows_and_lists_them_last() {
+        let mut rows = checks(&base(Os::Linux));
+        rows[0].status = CheckStatus::Unknown;
+        rows[1].status = CheckStatus::Unknown;
+        rows[2].status = CheckStatus::Warn;
+        let got = summary(&rows);
+        assert_eq!(
+            got,
+            Summary {
+                ok: 12,
+                warn: 1,
+                fail: 0,
+                unknown: 2,
+            }
+        );
+        let printed: Vec<String> = got
+            .counts()
+            .iter()
+            .map(|(status, n)| format!("{n} {}", status.label()))
+            .collect();
+        assert_eq!(printed.join(" · "), "12 ok · 1 warn · 0 fail · 2 unknown");
+    }
+
+    #[test]
+    fn unknown_ranks_between_ok_and_warn() {
+        assert!(CheckStatus::Ok < CheckStatus::Unknown);
+        assert!(CheckStatus::Unknown < CheckStatus::Warn);
+        assert!(CheckStatus::Warn < CheckStatus::Fail);
     }
 
     #[test]
@@ -2432,8 +2715,7 @@ mod tests {
             "https://example.com/x/y".to_string(),
         ];
         let inputs = CollectInputs {
-            term_cols: 120,
-            term_rows: 40,
+            term_size: Some((120, 40)),
             settings: &settings,
             mouse_enabled: true,
             editor_config: Some("gh"),
@@ -2490,8 +2772,7 @@ mod tests {
             (key == "XDG_STATE_HOME").then(|| dir.join("state").display().to_string())
         });
         let inputs = CollectInputs {
-            term_cols: 120,
-            term_rows: 40,
+            term_size: Some((120, 40)),
             settings: &settings,
             mouse_enabled: false,
             editor_config: None,
