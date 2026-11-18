@@ -533,3 +533,43 @@ fn pty_doctor_cli_prints_the_terminal_answers_and_restores_the_terminal() {
         "raw mode is off after the CLI exits"
     );
 }
+
+/// `SIGTERM` while `workspace-status doctor` waits for a terminal that
+/// never answers: the exit-signal handler turns raw mode off before the
+/// process dies, and no report prints. Fail if the terminal stays in raw
+/// mode after the signal.
+///
+/// The wait lasts 200 ms. If it already ended when the test checks (a
+/// loaded machine), the test has nothing to signal into and stops there.
+#[test]
+fn pty_doctor_cli_sigterm_during_the_query_leaves_raw_mode() {
+    let (_root, workspace) = daily_workspace();
+    let cli = PtySession::run_args_with_caps_reply(&workspace, COLS, TALL_ROWS, &["doctor"], b"");
+    wait_raw(&cli, CAPS_QUERY, "the CLI writes the capability query");
+    let cooked = libc::ICANON | libc::ECHO;
+    if cli.local_modes() & cooked != 0 {
+        eprintln!("the 200 ms wait ended before the check; nothing to signal into");
+        return;
+    }
+    let pid = libc::pid_t::try_from(cli.child_pid()).expect("pid fits pid_t");
+    // SAFETY: a plain syscall with no pointers, to the child this test
+    // spawned and has not reaped.
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+    }
+    let deadline = std::time::Instant::now() + WAIT;
+    while cli.local_modes() & cooked != cooked {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "raw mode is still on after SIGTERM: local modes {:#x}",
+            cli.local_modes()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let raw = cli.raw_output();
+    assert!(
+        find_bytes(&raw, "Doctor · setup checkup".as_bytes(), 0).is_none(),
+        "the signal ended the CLI during the wait, before the report:\n{}",
+        String::from_utf8_lossy(&raw)
+    );
+}

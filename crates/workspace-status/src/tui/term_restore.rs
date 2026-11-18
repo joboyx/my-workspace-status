@@ -1,5 +1,6 @@
 //! Give the terminal back when an exit signal (`SIGINT`, `SIGTERM`,
-//! `SIGHUP`) ends `ws` while the TUI owns it.
+//! `SIGHUP`) ends `ws` while the TUI owns it, or while the `ws doctor`
+//! capability query holds raw mode ([`restore_query_modes_from_signal`]).
 //!
 //! The git exit-signal handler (`git::stop_git_on_exit_signals`) calls
 //! [`restore_from_signal`] through the hook that `run_tui` registers
@@ -10,7 +11,7 @@
 //! `write(2)`, and puts back the terminal modes saved before raw mode
 //! ([`save_terminal_modes`]) with `tcsetattr(3)`.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use super::app::TERMINAL_SET_UP;
@@ -40,8 +41,9 @@ struct SavedModes {
 /// no allocation.
 static SAVED_MODES: OnceLock<SavedModes> = OnceLock::new();
 
-/// Save the terminal modes for [`restore_from_signal`]. `run_tui` calls it
-/// just before raw mode.
+/// Save the terminal modes for [`restore_from_signal`] and
+/// [`restore_query_modes_from_signal`]. `run_tui` and the `ws doctor`
+/// capability query call it just before raw mode.
 ///
 /// It reads them from the terminal crossterm puts in raw mode: stdin when
 /// stdin is a terminal, else `/dev/tty` (stdin from a pipe, say). The
@@ -96,6 +98,28 @@ pub(super) fn restore_from_signal() {
         write_stdout(POINTER_RESET.as_bytes());
     }
     write_stdout(RESTORE_SEQ);
+    restore_saved_modes();
+}
+
+/// Set while the `ws doctor` capability query holds raw mode
+/// (`term_caps::query_capabilities`).
+pub(super) static QUERY_RAW_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Leave the raw mode of the `ws doctor` capability query from an
+/// exit-signal handler: put back the modes [`save_terminal_modes`] saved.
+/// Async-signal-safe: one atomic and `tcsetattr(3)`.
+///
+/// Acts only while [`QUERY_RAW_MODE`] is set, and only once. The query
+/// sets no screen mode, so it writes no bytes.
+pub(super) fn restore_query_modes_from_signal() {
+    if QUERY_RAW_MODE.swap(false, Ordering::SeqCst) {
+        restore_saved_modes();
+    }
+}
+
+/// Put back the terminal modes saved before raw mode, if any were saved.
+/// Async-signal-safe.
+fn restore_saved_modes() {
     if let Some(saved) = SAVED_MODES.get() {
         // SAFETY: `saved.termios` is a `termios` that `tcgetattr` filled
         // from `saved.fd`, which stays open; the call only reads it.

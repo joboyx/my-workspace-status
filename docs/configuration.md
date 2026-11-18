@@ -432,7 +432,7 @@ Terminal size, mouse, the environment, and the loaded repos' remotes are read wh
 
 ### `ws doctor`
 
-`ws doctor` (or `workspace-status doctor`) prints the same rows, in the same order, as plain text to paste into an issue: no colour, no escape codes, no TUI, and no startup release check. The workspace root comes from `-C` / `--workspace` (before or after `doctor`), `WS_STATUS_WORKSPACE`, or the current directory, as for the other modes. The probe reads the checkouts the TUI would load (hidden ones too) with the branch each is on (`git symbolic-ref --short -q HEAD`, read-only); it runs no `git status`. Only `-C` / `--workspace` goes with `doctor`: a repo filter or another flag is a usage error. `doctor` as the first word is the subcommand; to filter a repo named `doctor`, pass `./doctor`.
+`ws doctor` (or `workspace-status doctor`) prints the same rows, in the same order, as plain text to paste into an issue: no colour, no escape codes, no TUI, and no startup release check. The workspace root comes from `-C` / `--workspace` (before or after `doctor`), `WS_STATUS_WORKSPACE`, or the current directory, as for the other modes. The probe reads the checkouts the TUI would load (hidden ones too) with the branch each is on (`git symbolic-ref --short -q HEAD`, read-only); it runs no `git status`. Only `-C` / `--workspace` and `-h` / `--help` go with `doctor`: a repo filter or another flag is a usage error. An exit signal (`SIGINT`, `SIGTERM`, `SIGHUP`) during the terminal wait turns raw mode off before `ws` exits. `doctor` as the first word is the subcommand; to filter a repo named `doctor`, pass `./doctor`.
 
 The rows differ from the TUI only where the CLI cannot know:
 

@@ -11,6 +11,9 @@
 //! - Mouse: the capture state the TUI starts with
 //!   ([`crate::tui::MOUSE_CAPTURE_AT_START`]).
 //!
+//! - Checkouts: a detached HEAD looks up its remote with the branch name
+//!   the TUI snapshot holds ([`DETACHED_HEAD_BRANCH`]).
+//!
 //! The text has no colour and no escape codes. The exit code is `1` when a
 //! row fails or the config does not load, else `0` ([`exit_code`]).
 
@@ -20,6 +23,7 @@ use std::path::{Path, PathBuf};
 use crate::config::{load_workspace_status_config, user_config_path};
 use crate::discovery::discover_checkouts;
 use crate::git::current_branch;
+use crate::helpers::DETACHED_HEAD_BRANCH;
 use crate::settings::Settings;
 use crate::tui::doctor::{self, Check, CheckStatus, CollectInputs, WheelRow, DOCTOR_TITLE};
 use crate::tui::term_caps::{doctor_rows, query_capabilities, CAPS_QUERY_TIMEOUT};
@@ -63,7 +67,7 @@ pub(crate) fn run(cwd: &Path) -> u8 {
             .into_iter()
             .map(|(repo, _, _)| {
                 let dir = cwd.join(repo);
-                let branch = current_branch(&dir);
+                let branch = lookup_branch(current_branch(&dir));
                 (dir, branch)
             })
             .collect();
@@ -97,6 +101,18 @@ pub(crate) fn run(cwd: &Path) -> u8 {
     }
     let _ = out.flush();
     exit_code(&rows)
+}
+
+/// The branch the remote lookup gets for a checkout on `current` (empty on
+/// a detached HEAD): the value the TUI snapshot holds, so a detached
+/// checkout gets [`DETACHED_HEAD_BRANCH`] as in the TUI Doctor, never an
+/// empty name.
+fn lookup_branch(current: String) -> String {
+    if current.is_empty() {
+        DETACHED_HEAD_BRANCH.to_string()
+    } else {
+        current
+    }
 }
 
 /// The report lines for `rows`. Pure.
@@ -287,6 +303,12 @@ mod tests {
                 "0 ok · 0 warn · 0 fail · 0 unknown",
             ]
         );
+    }
+
+    #[test]
+    fn a_detached_head_looks_up_the_snapshot_branch_name() {
+        assert_eq!(lookup_branch(String::new()), DETACHED_HEAD_BRANCH);
+        assert_eq!(lookup_branch("main".to_string()), "main");
     }
 
     #[test]

@@ -1,5 +1,12 @@
 //! `workspace-status doctor` with stdout not a terminal: the report text,
 //! the rows that need a terminal or the TUI, and the exit code.
+//!
+//! Unix only: the asserts read the Unix row forms (`Not asked: stdin or
+//! stdout is not a terminal.`, the `mv` fix line), and the child runs on a
+//! cleared environment. Unit tests in `tui/doctor.rs` and
+//! `tui/term_caps.rs` cover the Windows rows.
+
+#![cfg(unix)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -43,16 +50,21 @@ fn workspace_with(repos: &[&str]) -> (PathBuf, PathBuf) {
 }
 
 /// Run the binary from `cwd` with `args`, stdout and stderr piped (not a
-/// terminal), and stdin empty. The user config, every store, and the
-/// workspace pin come from the temp `root`, never the operator's.
+/// terminal), and stdin empty.
+///
+/// The child starts from an empty environment plus `PATH`, so no parent
+/// variable can change a row (`NO_COLOR`, `COLORTERM`, `WS_STATUS_GLYPHS`,
+/// `EDITOR`, `VISUAL`, `TMUX`, the store and git overrides) or pin the
+/// workspace (`WS_STATUS_WORKSPACE`). `HOME`, the user config, and every
+/// store come from the temp `root`, never the operator's.
 fn run(root: &Path, cwd: &Path, args: &[&str]) -> Output {
     let state = root.join("xdg-state");
     Command::new(bin())
         .args(args)
         .current_dir(cwd)
-        .env_remove("WS_STATUS_WORKSPACE")
-        .env_remove("WORKSPACE_STATUS_GIT")
-        .env_remove("TMUX")
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", root)
         .env("XDG_CONFIG_HOME", root.join("xdg-config"))
         .env("XDG_STATE_HOME", &state)
         .env("WS_STATUS_UI_STORE", state.join("ui-state.json"))

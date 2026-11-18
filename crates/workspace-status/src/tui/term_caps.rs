@@ -360,12 +360,18 @@ fn row_names() -> impl Iterator<Item = &'static str> {
 /// `timeout`. Stdin bytes that are not replies are dropped: the CLI reads no
 /// keys. A failed write, poll, or read ends the wait as a timeout. When the
 /// wait ends with no DA1 reply, pending stdin is discarded before raw mode
-/// goes off.
+/// goes off. An exit signal (`SIGINT`, `SIGTERM`, `SIGHUP`) during the
+/// wait also turns raw mode off, through the git exit-signal handler and
+/// `term_restore::restore_query_modes_from_signal`.
 #[cfg(unix)]
 pub(crate) fn query_capabilities(timeout: Duration) -> TermCaps {
     use std::io::{self, IsTerminal, Write};
+    use std::sync::atomic::Ordering;
     use std::time::Instant;
 
+    use super::term_restore::{
+        restore_query_modes_from_signal, save_terminal_modes, QUERY_RAW_MODE,
+    };
     use super::tty::{read_stdin_until, term_replies_in};
 
     /// Turns raw mode off on drop when it turned it on.
@@ -373,6 +379,7 @@ pub(crate) fn query_capabilities(timeout: Duration) -> TermCaps {
     impl Drop for RawGuard {
         fn drop(&mut self) {
             if self.0 {
+                QUERY_RAW_MODE.store(false, Ordering::SeqCst);
                 let _ = crossterm::terminal::disable_raw_mode();
             }
         }
@@ -382,7 +389,20 @@ pub(crate) fn query_capabilities(timeout: Duration) -> TermCaps {
         return TermCaps::not_asked();
     }
     let was_raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
-    let _raw = RawGuard(!was_raw && crossterm::terminal::enable_raw_mode().is_ok());
+    let turned_on = !was_raw && {
+        // An exit signal during the wait puts the saved modes back, so
+        // the shell does not get a terminal left in raw mode. The flag is
+        // set before raw mode, so no signal falls between the two.
+        save_terminal_modes();
+        crate::git::set_exit_signal_hook(restore_query_modes_from_signal);
+        QUERY_RAW_MODE.store(true, Ordering::SeqCst);
+        let on = crossterm::terminal::enable_raw_mode().is_ok();
+        if !on {
+            QUERY_RAW_MODE.store(false, Ordering::SeqCst);
+        }
+        on
+    };
+    let _raw = RawGuard(turned_on);
     let mut out = io::stdout();
     if out.write_all(QUERY).and_then(|()| out.flush()).is_err() {
         let mut caps = TermCaps::default();

@@ -178,36 +178,44 @@ fn say(json: bool, line: &str) {
     }
 }
 
-/// Parse the command line. Beyond clap's own checks, `doctor` takes no
-/// mode flag: only `-C` / `--workspace` goes with it. A usage error exits
-/// with clap's code `2`.
+/// Id of the `-C` / `--workspace` argument: the only top-level argument
+/// that goes with a subcommand.
+const WORKSPACE_ARG: &str = "workspace";
+
+/// Parse the command line. Beyond clap's own checks, a subcommand takes no
+/// top-level argument from the command line except `-C` / `--workspace`
+/// (and `-h` / `--help`, which clap answers first). The check reads clap's
+/// own argument list, so a new flag is covered without a change here. A
+/// usage error exits with clap's code `2`.
 fn parse_cli<I, T>(args: I) -> Result<Cli, clap::Error>
 where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let cli = Cli::try_parse_from(args)?;
-    if cli.command == Some(Command::Doctor) {
-        let flags = [
-            (cli.all, "--all"),
-            (cli.fetch, "--fetch"),
-            (cli.verbose, "--verbose"),
-            (cli.pull, "--pull"),
-            (cli.default_branch, "--default-branch"),
-            (cli.plain, "--plain"),
-            (cli.json, "--json"),
-            (cli.tui, "--tui"),
-            (cli.update, "--update"),
-        ];
-        if let Some((_, flag)) = flags.iter().find(|(set, _)| *set) {
-            use clap::CommandFactory;
-            return Err(Cli::command().error(
+    use clap::parser::ValueSource;
+    use clap::{CommandFactory, FromArgMatches};
+
+    let mut command = Cli::command();
+    let matches = command.try_get_matches_from_mut(args)?;
+    if let Some(sub) = matches.subcommand_name() {
+        let given = command.get_arguments().find(|arg| {
+            let id = arg.get_id().as_str();
+            id != WORKSPACE_ARG
+                && matches.try_get_raw(id).is_ok()
+                && matches.value_source(id) == Some(ValueSource::CommandLine)
+        });
+        if let Some(arg) = given {
+            let name = match arg.get_long() {
+                Some(long) => format!("--{long}"),
+                None => "a repo filter".to_string(),
+            };
+            return Err(command.error(
                 clap::error::ErrorKind::ArgumentConflict,
-                format!("`doctor` does not take {flag}; only -C / --workspace goes with it"),
+                format!("`{sub}` does not take {name}; only -C / --workspace goes with it"),
             ));
         }
     }
-    Ok(cli)
+    Cli::from_arg_matches(&matches)
 }
 
 pub fn cli_main() -> ExitCode {
@@ -484,10 +492,49 @@ mod tests {
             cli.filter_repos,
             vec!["app".to_string(), "doctor".to_string()]
         );
+        assert!(parse(&["--json", "doctor"])
+            .unwrap_err()
+            .to_string()
+            .contains("`doctor` does not take --json"));
         // No `help` subcommand: `help` is still a repo filter.
         let cli = parse(&["help"]).unwrap();
         assert_eq!(cli.command, None);
         assert_eq!(cli.filter_repos, vec!["help".to_string()]);
+    }
+
+    /// Every top-level argument clap knows, except `-C` and help / version,
+    /// is a usage error with `doctor`, so a new flag is covered here
+    /// without a change to the test.
+    #[test]
+    fn every_top_level_argument_but_workspace_is_a_usage_error_with_doctor() {
+        use clap::CommandFactory;
+        let mut checked = 0;
+        for arg in Cli::command().get_arguments() {
+            let id = arg.get_id().as_str();
+            if [WORKSPACE_ARG, "help", "version"].contains(&id) {
+                continue;
+            }
+            let args: Vec<String> = if arg.is_positional() {
+                // After `doctor` a positional is the subcommand's to refuse.
+                vec!["doctor".into(), "app".into()]
+            } else {
+                let long = arg.get_long().expect("flags have a long name");
+                let mut args = vec![format!("--{long}")];
+                if arg.get_action().takes_values() {
+                    args.push("x".into());
+                }
+                args.push("doctor".into());
+                args
+            };
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            let err = parse(&refs).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{args:?}: {err}");
+            checked += 1;
+        }
+        assert!(
+            checked >= 10,
+            "flags and the repo filter were checked: {checked}"
+        );
     }
 
     #[test]
