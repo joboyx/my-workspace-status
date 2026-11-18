@@ -502,6 +502,30 @@ mod tests {
         assert_eq!(cli.filter_repos, vec!["help".to_string()]);
     }
 
+    /// `-V` / `--version` is a top-level flag: before `doctor` clap prints the
+    /// version, after it the subcommand does not know it (usage error, 2).
+    #[test]
+    fn version_flag_works_only_before_doctor() {
+        for args in [&["doctor", "-V"][..], &["doctor", "--version"][..]] {
+            let err = parse(args).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{args:?}"
+            );
+            assert_eq!(err.exit_code(), 2, "{args:?}: {err}");
+        }
+        for args in [&["-V", "doctor"][..], &["--version", "doctor"][..]] {
+            let err = parse(args).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::DisplayVersion,
+                "{args:?}"
+            );
+            assert_eq!(err.exit_code(), 0, "{args:?}");
+        }
+    }
+
     /// Every top-level argument clap knows, except `-C` and help / version,
     /// is a usage error with `doctor`, so a new flag is covered here
     /// without a change to the test.
