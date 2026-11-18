@@ -130,8 +130,10 @@ struct TtyBuf {
     /// from `raw` carry this instant.
     read_at: Instant,
     last_winsize: Option<(u16, u16)>,
-    /// Set after [`unix_poll`] waited one timeout with a lone ESC and no
-    /// further stdin. [`unix_read`] emits Escape only when this is set.
+    /// Set after [`unix_poll`] waited one timeout with a held prefix (a lone
+    /// ESC, or `ESC P` / `ESC P >` that may start an XTVERSION reply) and
+    /// no further stdin. [`unix_read`] turns a held prefix into keys
+    /// (Escape, or Alt+`P` and `>`) only when this is set.
     lone_esc_ready: bool,
     /// Terminal replies parsed from `raw`, oldest first, until
     /// [`take_term_replies`] drains them.
@@ -298,6 +300,44 @@ pub(crate) fn poll_stdin(timeout: Duration) -> io::Result<bool> {
     classify_poll(n, pfd.revents)
 }
 
+/// Read stdin with a poll wait until `done` says the bytes so far are
+/// enough, `deadline` passes, or a poll or read fails or hangs up. Returns
+/// every byte read.
+///
+/// For the blocking terminal queries before the input thread runs
+/// ([`super::term_bg::query_background`]) and in the CLI
+/// ([`super::term_caps::query_capabilities`]); never on the TTY event
+/// thread.
+#[cfg(unix)]
+pub(crate) fn read_stdin_until(deadline: Instant, mut done: impl FnMut(&[u8]) -> bool) -> Vec<u8> {
+    let mut got = Vec::new();
+    let mut chunk = [0u8; 256];
+    while !done(&got) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        match poll_stdin(left) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(_) => break,
+        }
+        // SAFETY: `chunk` is a live buffer of `chunk.len()` writable bytes.
+        let n = unsafe {
+            libc::read(
+                libc::STDIN_FILENO,
+                chunk.as_mut_ptr().cast::<libc::c_void>(),
+                chunk.len(),
+            )
+        };
+        match usize::try_from(n) {
+            Ok(n) if n > 0 => got.extend_from_slice(&chunk[..n]),
+            _ => break,
+        }
+    }
+    got
+}
+
 /// Map `poll` return + revents. POLLHUP without POLLIN is hangup, not idle.
 #[cfg(unix)]
 fn classify_poll(n: i32, revents: libc::c_short) -> io::Result<bool> {
@@ -397,23 +437,43 @@ fn take_ready_event(buf: &mut TtyBuf, more_stdin: bool) -> Option<TtyEvent> {
         buf.lone_esc_ready = false;
         return Some(event);
     }
-    if buf.lone_esc_ready && can_finish_lone_esc(buf) && !more_stdin {
+    if !(buf.lone_esc_ready && can_finish_lone_esc(buf) && !more_stdin) {
+        return None;
+    }
+    buf.lone_esc_ready = false;
+    if buf.raw == [0x1b] {
         buf.raw.clear();
-        buf.lone_esc_ready = false;
         return Some((
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             KeyStrokeOrigin::Protocol,
             buf.read_at,
         ));
     }
-    None
+    // `ESC P` or `ESC P >` that no reply followed: Alt+P, then `>` as typed.
+    if let Take::Ready(n, event, origin) = take_esc_keys(&buf.raw, false) {
+        buf.raw.drain(..n.min(buf.raw.len()));
+        let read_at = buf.read_at;
+        buf.events.push_back((event, origin, read_at));
+    }
+    drain_parsed(buf, false);
+    buf.events.pop_front()
 }
 
+/// True when `raw` is only a held prefix and no event waits: a lone ESC,
+/// or `ESC P` / `ESC P >` (the start of an XTVERSION reply).
 fn can_finish_lone_esc(buf: &TtyBuf) -> bool {
-    buf.raw == [0x1b] && buf.events.is_empty()
+    is_held_prefix(&buf.raw) && buf.events.is_empty()
 }
 
-/// Arm Escape only after a non-zero poll wait with no further stdin.
+/// A lone ESC, `ESC P`, or `ESC P >`: bytes that may be the start of a
+/// longer sequence, held until more stdin arrives or one poll timeout
+/// passes with none.
+fn is_held_prefix(raw: &[u8]) -> bool {
+    !raw.is_empty() && raw.len() < XTVERSION_INTRO.len() && XTVERSION_INTRO.starts_with(raw)
+}
+
+/// Arm a held prefix (Escape, or Alt+`P`) only after a non-zero poll wait
+/// with no further stdin.
 ///
 /// `poll_event(0)` (nav backlog drain) must not count as that wait.
 fn arm_lone_esc_after_wait(buf: &mut TtyBuf, timeout: Duration) -> bool {
@@ -526,12 +586,15 @@ fn take_esc(bytes: &[u8], more: bool) -> Take {
     }
     let reply = match bytes[1] {
         b']' => take_osc_reply(bytes, more),
-        b'P' => take_dcs_reply(bytes, more),
+        b'P' => take_dcs_reply(bytes),
         _ => None,
     };
-    if let Some(take) = reply {
-        return take;
-    }
+    reply.unwrap_or_else(|| take_esc_keys(bytes, more))
+}
+
+/// An escape sequence that is not a terminal reply: SS3, CSI, a doubled
+/// ESC, or Alt plus the next key.
+fn take_esc_keys(bytes: &[u8], more: bool) -> Take {
     match bytes[1] {
         b'O' => take_ss3(bytes),
         b'[' => take_csi(bytes),
@@ -582,16 +645,18 @@ fn take_osc_reply(bytes: &[u8], more: bool) -> Option<Take> {
 const XTVERSION_INTRO: &[u8] = b"\x1bP>|";
 
 /// Take an XTVERSION reply (`ESC P > | <text> ESC \`) as
-/// [`TermReply::XtVersion`], with control characters dropped from the
-/// text; an empty text is skipped.
+/// [`TermReply::XtVersion`]. In the text each control character becomes a
+/// space, runs of spaces collapse to one, and the ends are trimmed; an
+/// empty text is skipped.
 ///
-/// `None` when the bytes do not start `ESC P > |` (Alt+`P` stays a key),
-/// when only `ESC P` or `ESC P >` arrived and no more stdin is queued, or
-/// when an unterminated reply passes [`STRING_REPLY_MAX`] bytes.
-fn take_dcs_reply(bytes: &[u8], more: bool) -> Option<Take> {
+/// `ESC P` or `ESC P >` alone is a held prefix: it waits for more bytes,
+/// and [`take_ready_event`] turns it into Alt+`P` only after one poll
+/// timeout with no further stdin, as a lone ESC becomes Escape. `None`
+/// when the bytes do not start `ESC P > |` (Alt+`P` stays a key), or when
+/// an unterminated reply passes [`STRING_REPLY_MAX`] bytes.
+fn take_dcs_reply(bytes: &[u8]) -> Option<Take> {
     if !bytes.starts_with(XTVERSION_INTRO) {
-        // `ESC P` or `ESC P >` so far: wait only while more stdin is queued.
-        return (XTVERSION_INTRO.starts_with(bytes) && more).then_some(Take::NeedMore);
+        return is_held_prefix(bytes).then_some(Take::NeedMore);
     }
     let Some(end) = string_end(bytes) else {
         return (bytes.len() < STRING_REPLY_MAX).then_some(Take::NeedMore);
@@ -601,15 +666,16 @@ fn take_dcs_reply(bytes: &[u8], more: bool) -> Option<Take> {
     } else {
         end - 2
     };
-    let text: String = String::from_utf8_lossy(&bytes[XTVERSION_INTRO.len()..body_end])
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect();
-    let text = text.trim();
+    let text = String::from_utf8_lossy(&bytes[XTVERSION_INTRO.len()..body_end])
+        .replace(char::is_control, " ")
+        .split(' ')
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
     Some(if text.is_empty() {
         Take::Skip(end)
     } else {
-        Take::Reply(end, TermReply::XtVersion(text.to_string()))
+        Take::Reply(end, TermReply::XtVersion(text))
     })
 }
 
@@ -1586,9 +1652,21 @@ mod tests {
     }
 
     #[test]
-    fn xtversion_text_drops_control_characters() {
-        let (_, replies) = parse_with_replies(b"\x1bP>| tmux\x013.4 \x1b\\");
-        assert_eq!(replies, [TermReply::XtVersion("tmux3.4".to_string())]);
+    fn xtversion_text_turns_control_characters_into_one_space() {
+        for (bytes, want) in [
+            (&b"\x1bP>|tmux\x013.4\x1b\\"[..], "tmux 3.4"),
+            (b"\x1bP>| tmux \x01\x02 3.4 \x1b\\", "tmux 3.4"),
+            (b"\x1bP>|\x01xterm(390)\x7f\x1b\\", "xterm(390)"),
+        ] {
+            let (_, replies) = parse_with_replies(bytes);
+            assert_eq!(
+                replies,
+                [TermReply::XtVersion(want.to_string())],
+                "{bytes:?}"
+            );
+        }
+        let (_, replies) = parse_with_replies(b"\x1bP>| \x01 \x1b\\");
+        assert!(replies.is_empty(), "only blanks: no reply");
     }
 
     #[test]
@@ -1624,28 +1702,73 @@ mod tests {
             assert_eq!(buf.replies, [want], "{head:?}");
             assert!(take_ready_event(&mut buf, false).is_none(), "{head:?}");
         }
+    }
 
-        // `ESC P` waits while more stdin is queued, then parses whole.
+    /// A read cut right after `ESC P` or `ESC P >`, with no more stdin
+    /// queued, holds those bytes: the next read completes the reply, and no
+    /// key comes out.
+    #[test]
+    fn xtversion_cut_after_esc_p_is_held_not_typed() {
+        for (head, tail) in [
+            (&b"\x1bP"[..], &b">|xterm(390)\x1b\\"[..]),
+            (b"\x1bP>", b"|xterm(390)\x1b\\"),
+        ] {
+            let mut buf = empty_tty_buf();
+            buf.raw.extend_from_slice(head);
+            assert!(take_ready_event(&mut buf, false).is_none(), "{head:?}");
+            assert_eq!(buf.raw, head, "{head:?}: held");
+            buf.raw.extend_from_slice(tail);
+            buf.lone_esc_ready = false;
+            assert!(take_ready_event(&mut buf, false).is_none(), "{head:?}");
+            assert!(buf.events.is_empty(), "{head:?}: {:?}", buf.events);
+            assert!(buf.raw.is_empty(), "{head:?}");
+            assert_eq!(
+                buf.replies,
+                [TermReply::XtVersion("xterm(390)".to_string())],
+                "{head:?}"
+            );
+        }
+    }
+
+    /// A typed Alt+P (`ESC P`) or `ESC P >` with nothing after it becomes
+    /// keys only after one non-zero poll wait with no further stdin.
+    #[test]
+    fn lone_esc_p_is_alt_p_only_after_the_wait() {
         let mut buf = empty_tty_buf();
         buf.raw.extend_from_slice(b"\x1bP");
-        drain_parsed(&mut buf, true);
-        assert!(buf.events.is_empty() && buf.replies.is_empty());
-        buf.raw.extend_from_slice(b">|foot(1.17)\x1b\\");
-        drain_parsed(&mut buf, false);
-        assert!(buf.events.is_empty(), "{:?}", buf.events);
-        assert_eq!(
-            buf.replies,
-            [TermReply::XtVersion("foot(1.17)".to_string())]
+        assert!(take_ready_event(&mut buf, false).is_none(), "no wait yet");
+        assert!(
+            !arm_lone_esc_after_wait(&mut buf, Duration::ZERO),
+            "a 0 ms drain is not the wait"
         );
+        assert!(take_ready_event(&mut buf, false).is_none());
+        assert!(arm_lone_esc_after_wait(&mut buf, Duration::from_millis(16)));
+        let (event, origin, _) = take_ready_event(&mut buf, false).expect("Alt+P");
+        assert_eq!(alt_key(&event), Some(KeyCode::Char('P')));
+        assert_eq!(origin, KeyStrokeOrigin::Protocol);
+        assert!(take_ready_event(&mut buf, false).is_none());
+        assert!(buf.raw.is_empty() && buf.replies.is_empty());
+
+        let mut buf = empty_tty_buf();
+        buf.raw.extend_from_slice(b"\x1bP>");
+        assert!(take_ready_event(&mut buf, false).is_none());
+        assert!(arm_lone_esc_after_wait(&mut buf, Duration::from_millis(16)));
+        let (event, _, _) = take_ready_event(&mut buf, false).expect("Alt+P");
+        assert_eq!(alt_key(&event), Some(KeyCode::Char('P')));
+        let (event, origin, _) = take_ready_event(&mut buf, false).expect(">");
+        assert_eq!(key_code(&event), KeyCode::Char('>'));
+        assert_eq!(origin, KeyStrokeOrigin::LegacyByte);
+        assert!(buf.raw.is_empty());
+
+        // More stdin queued: the wait does not finish the prefix.
+        let mut buf = empty_tty_buf();
+        buf.raw.extend_from_slice(b"\x1bP");
+        assert!(arm_lone_esc_after_wait(&mut buf, Duration::from_millis(16)));
+        assert!(take_ready_event(&mut buf, true).is_none());
     }
 
     #[test]
     fn esc_p_without_xtversion_intro_stays_alt_p() {
-        let (events, replies) = parse_with_replies(b"\x1bP");
-        assert!(replies.is_empty());
-        assert_eq!(events.len(), 1, "{events:?}");
-        assert_eq!(alt_key(&events[0]), Some(KeyCode::Char('P')));
-
         let (events, replies) = parse_with_replies(b"\x1bPx");
         assert!(replies.is_empty());
         assert_eq!(events.len(), 2, "{events:?}");

@@ -316,7 +316,9 @@ fn row_names() -> impl Iterator<Item = &'static str> {
 /// Turns raw mode on for the wait when it is off, and turns it off again on
 /// every return. Reads stdin with a poll wait until the DA1 reply or
 /// `timeout`. Stdin bytes that are not replies are dropped: the CLI reads no
-/// keys. A failed write, poll, or read ends the wait as a timeout.
+/// keys. A failed write, poll, or read ends the wait as a timeout. When the
+/// wait ends with no DA1 reply, pending stdin is discarded before raw mode
+/// goes off.
 #[cfg(unix)]
 #[cfg_attr(
     test,
@@ -329,7 +331,7 @@ pub(crate) fn query_capabilities(timeout: Duration) -> TermCaps {
     use std::io::{self, IsTerminal, Write};
     use std::time::Instant;
 
-    use super::tty::{poll_stdin, term_replies_in};
+    use super::tty::{read_stdin_until, term_replies_in};
 
     /// Turns raw mode off on drop when it turned it on.
     struct RawGuard(bool);
@@ -346,42 +348,31 @@ pub(crate) fn query_capabilities(timeout: Duration) -> TermCaps {
     }
     let was_raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
     let _raw = RawGuard(!was_raw && crossterm::terminal::enable_raw_mode().is_ok());
-    let mut caps = TermCaps::default();
     let mut out = io::stdout();
     if out.write_all(QUERY).and_then(|()| out.flush()).is_err() {
+        let mut caps = TermCaps::default();
         caps.time_out();
         return caps;
     }
-    let deadline = Instant::now() + timeout;
-    let mut got = Vec::new();
-    let mut chunk = [0u8; 256];
-    while !caps.is_done() {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            break;
-        }
-        match poll_stdin(left) {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(_) => break,
-        }
-        // SAFETY: `chunk` is a live buffer of `chunk.len()` writable bytes.
-        let n = unsafe {
-            libc::read(
-                libc::STDIN_FILENO,
-                chunk.as_mut_ptr().cast::<libc::c_void>(),
-                chunk.len(),
-            )
-        };
-        match usize::try_from(n) {
-            Ok(n) if n > 0 => got.extend_from_slice(&chunk[..n]),
-            _ => break,
-        }
-        // Parse from the start each time: a reply cut between two reads
-        // parses once its tail arrives.
-        caps = TermCaps::default();
-        for reply in term_replies_in(&got) {
+    // Parse from the start each time: a reply cut between two reads parses
+    // once its tail arrives.
+    let caps_of = |got: &[u8]| {
+        let mut caps = TermCaps::default();
+        for reply in term_replies_in(got) {
             caps.apply(reply);
+        }
+        caps
+    };
+    let got = read_stdin_until(Instant::now() + timeout, |got| caps_of(got).is_done());
+    let mut caps = caps_of(&got);
+    if !caps.is_done() {
+        // No DA1 reply yet: the rest of the answer may still come. Drop
+        // what the terminal already queued, so a reply that lands now does
+        // not show up as typed text at the shell prompt once raw mode is
+        // off again.
+        // SAFETY: `tcflush` only acts on the open stdin descriptor.
+        unsafe {
+            libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);
         }
     }
     caps.time_out();

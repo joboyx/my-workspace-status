@@ -85,7 +85,7 @@ pub(crate) fn query_background(timeout: Duration) -> Option<(u8, u8, u8)> {
     use std::io::{self, IsTerminal, Write};
     use std::time::Instant;
 
-    use super::tty::{poll_stdin, push_pending_input};
+    use super::tty::{push_pending_input, read_stdin_until};
 
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return None;
@@ -94,38 +94,7 @@ pub(crate) fn query_background(timeout: Duration) -> Option<(u8, u8, u8)> {
     if out.write_all(QUERY).and_then(|()| out.flush()).is_err() {
         return None;
     }
-    let deadline = Instant::now() + timeout;
-    let mut got = Vec::new();
-    let mut chunk = [0u8; 256];
-    loop {
-        if split_replies(&got).done {
-            break;
-        }
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            break;
-        }
-        match poll_stdin(left) {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(_) => break,
-        }
-        // SAFETY: `chunk` is a live buffer of `chunk.len()` writable bytes.
-        let n = unsafe {
-            libc::read(
-                libc::STDIN_FILENO,
-                chunk.as_mut_ptr().cast::<libc::c_void>(),
-                chunk.len(),
-            )
-        };
-        let Ok(n) = usize::try_from(n) else {
-            break;
-        };
-        if n == 0 {
-            break;
-        }
-        got.extend_from_slice(&chunk[..n]);
-    }
+    let got = read_stdin_until(Instant::now() + timeout, |got| split_replies(got).done);
     let replies = split_replies(&got);
     push_pending_input(&replies.rest);
     replies.rgb
