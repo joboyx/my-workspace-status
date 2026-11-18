@@ -808,6 +808,11 @@ fn write_caps_query<W: io::Write>(
     state: &AppState,
     caps_epoch: &AtomicU64,
 ) -> io::Result<Option<u64>> {
+    // Only the Unix reader parses the replies; on Windows the Doctor never
+    // asks (its `Os` is Windows there), and this keeps the bytes off it too.
+    if !cfg!(unix) {
+        return Ok(None);
+    }
     let Some(gen) = state.doctor_caps_query_to_send() else {
         return Ok(None);
     };

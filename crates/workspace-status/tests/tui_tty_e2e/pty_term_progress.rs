@@ -3,7 +3,7 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::harness::PtySession;
+use crate::harness::{find_bytes, PtySession};
 use crate::seed::two_unfetched_behind_workspace;
 use crate::slow_git::{wait_slow_git_started, SlowFetchPullGit};
 use crate::support::{ack_rows, tree_cursor_on, GIT_WAIT, WAIT};
@@ -15,11 +15,7 @@ const OSC_9_4: &[u8] = b"\x1b]9;4;";
 fn progress_states(raw: &[u8]) -> Vec<String> {
     let mut states = Vec::new();
     let mut at = 0;
-    while let Some(start) = raw[at..]
-        .windows(OSC_9_4.len())
-        .position(|w| w == OSC_9_4)
-        .map(|i| at + i + OSC_9_4.len())
-    {
+    while let Some(start) = find_bytes(raw, OSC_9_4, at).map(|i| i + OSC_9_4.len()) {
         let Some(len) = raw[start..].iter().position(|b| *b == 0x07) else {
             break;
         };
@@ -67,10 +63,7 @@ fn settle_raw(tui: &PtySession) -> Vec<u8> {
     let start = Instant::now();
     loop {
         let raw = tui.raw_output();
-        if raw
-            .windows(LEAVE_ALT_SCREEN.len())
-            .any(|w| w == LEAVE_ALT_SCREEN)
-        {
+        if find_bytes(&raw, LEAVE_ALT_SCREEN, 0).is_some() {
             return raw;
         }
         assert!(
@@ -130,7 +123,7 @@ fn pty_quit_without_batch_writes_no_osc_9_4() {
     tui.wait_exit(WAIT);
     let raw = settle_raw(&tui);
     assert!(
-        !raw.windows(OSC_9_4.len()).any(|w| w == OSC_9_4),
+        find_bytes(&raw, OSC_9_4, 0).is_none(),
         "no batch: no OSC 9;4; states: {:?}",
         progress_states(&raw)
     );

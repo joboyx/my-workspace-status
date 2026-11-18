@@ -8,7 +8,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::harness::{
-    tree_row_containing, user_config_file, PtySession, BASELINE_USER_CONFIG, COLS,
+    byte_positions, find_bytes, tree_row_containing, user_config_file, PtySession,
+    BASELINE_USER_CONFIG, COLS,
 };
 use crate::seed::{daily_workspace, seed_multiline_message_repo};
 use crate::support::{
@@ -41,26 +42,13 @@ const DRAG_ROWS: u16 = 3;
 /// `viewDefaults.commitMessageLines` default.
 const DEFAULT_MSG_LINES: u16 = 4;
 
-/// Byte offsets of every `needle` in `hay`.
-fn positions(hay: &[u8], needle: &[u8]) -> Vec<usize> {
-    hay.windows(needle.len())
-        .enumerate()
-        .filter_map(|(i, w)| (w == needle).then_some(i))
-        .collect()
-}
-
-/// First offset of `needle` at or after `from`.
-fn find_from(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-    positions(hay, needle).into_iter().find(|at| *at >= from)
-}
-
 /// Every OSC 22 payload (`ew-resize`, `default`, ...) in `raw`, in order.
 fn pointer_shapes(raw: &[u8]) -> Vec<String> {
-    positions(raw, OSC_22)
+    byte_positions(raw, OSC_22)
         .into_iter()
         .filter_map(|at| {
             let body = &raw[at + OSC_22.len()..];
-            let end = body.windows(2).position(|w| w == b"\x1b\\")?;
+            let end = find_bytes(body, b"\x1b\\", 0)?;
             Some(String::from_utf8_lossy(&body[..end]).into_owned())
         })
         .collect()
@@ -203,7 +191,7 @@ fn pty_pane_divider_hover_lights_edge_sets_pointer_and_drags() {
     );
     wait_raw(
         &tui,
-        |raw| positions(raw, EW_RESIZE).len() == 1,
+        |raw| byte_positions(raw, EW_RESIZE).len() == 1,
         "hover writes OSC 22 ew-resize",
     );
     assert!(
@@ -240,9 +228,9 @@ fn pty_pane_divider_hover_lights_edge_sets_pointer_and_drags() {
     wait_raw(
         &tui,
         |raw| {
-            let ew = positions(raw, EW_RESIZE);
+            let ew = byte_positions(raw, EW_RESIZE);
             ew.last()
-                .is_some_and(|at| find_from(raw, POINTER_DEFAULT, *at).is_some())
+                .is_some_and(|at| find_bytes(raw, POINTER_DEFAULT, *at).is_some())
         },
         "motion off the divider writes OSC 22 default after ew-resize",
     );
@@ -282,34 +270,34 @@ fn pty_editor_suspend_resets_and_resume_restores_pointer_shape() {
     tui.sgr_mouse(SGR_MOTION, join, row);
     wait_raw(
         &tui,
-        |raw| !positions(raw, EW_RESIZE).is_empty(),
+        |raw| !byte_positions(raw, EW_RESIZE).is_empty(),
         "hover writes OSC 22 ew-resize",
     );
     tui.key('e');
     wait_raw(
         &tui,
         |raw| {
-            let Some(hover) = positions(raw, EW_RESIZE).first().copied() else {
+            let Some(hover) = byte_positions(raw, EW_RESIZE).first().copied() else {
                 return false;
             };
-            let Some(reset) = find_from(raw, POINTER_DEFAULT, hover) else {
+            let Some(reset) = find_bytes(raw, POINTER_DEFAULT, hover) else {
                 return false;
             };
-            let Some(leave) = find_from(raw, ALT_SCREEN_OFF, reset) else {
+            let Some(leave) = find_bytes(raw, ALT_SCREEN_OFF, reset) else {
                 return false;
             };
-            let Some(back) = find_from(raw, ALT_SCREEN_ON, leave) else {
+            let Some(back) = find_bytes(raw, ALT_SCREEN_ON, leave) else {
                 return false;
             };
-            find_from(raw, EW_RESIZE, back).is_some()
+            find_bytes(raw, EW_RESIZE, back).is_some()
         },
         "ew-resize, default, leave alt screen, re-enter, ew-resize",
     );
     let raw = tui.raw_output();
-    let hover = positions(&raw, EW_RESIZE)[0];
-    let leave = find_from(&raw, ALT_SCREEN_OFF, hover).unwrap();
+    let hover = byte_positions(&raw, EW_RESIZE)[0];
+    let leave = find_bytes(&raw, ALT_SCREEN_OFF, hover).unwrap();
     assert!(
-        find_from(&raw, POINTER_DEFAULT, hover).is_some_and(|reset| reset < leave),
+        find_bytes(&raw, POINTER_DEFAULT, hover).is_some_and(|reset| reset < leave),
         "the reset lands before the suspend leaves the alternate screen"
     );
     tui.wait_pred(
@@ -366,7 +354,7 @@ fn pty_commit_msg_rule_drag_saves_rows_and_relaunch_keeps_them() {
     );
     wait_raw(
         &first,
-        |raw| !positions(raw, NS_RESIZE).is_empty(),
+        |raw| !byte_positions(raw, NS_RESIZE).is_empty(),
         "hover on the rule writes OSC 22 ns-resize",
     );
 

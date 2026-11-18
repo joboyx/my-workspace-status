@@ -32,10 +32,6 @@ use super::AppState;
 /// Status text when `y` lands on a row with no fix line to copy.
 pub(crate) const NO_FIX_TO_COPY: &str = "no fix to copy";
 
-/// True when the TUI sends the capability query. Not on Windows: there
-/// crossterm reads the input, and it may read the replies as keys.
-const ASK_TERMINAL: bool = cfg!(unix);
-
 /// Where the Doctor's terminal capability query stands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CapsQuery {
@@ -57,6 +53,8 @@ pub struct DoctorOverlay {
     /// The request whose probe answer and terminal replies may fill the
     /// rows. The input thread tags replies with it too.
     pub(crate) gen: u64,
+    /// OS family the rows target ([`AppState::doctor_os`] at open).
+    pub(crate) os: Os,
     /// Probe rows of request `gen`. `None` while the probe runs.
     pub(crate) probe: Option<Vec<Check>>,
     /// `TMUX` was set in the environment the probe read.
@@ -75,13 +73,14 @@ pub struct DoctorOverlay {
     pub scroll: usize,
 }
 
-/// A new capability query: requested when `ask`, else ended at once with
-/// every capability row "not asked".
-fn new_caps_query(ask: bool) -> (CapsQuery, TermCaps) {
-    if ask {
-        (CapsQuery::Requested, TermCaps::default())
-    } else {
+/// A new capability query for `os`: requested, except on Windows, where it
+/// ends at once with every capability row "not asked" (crossterm reads the
+/// input there, and it may read the replies as keys).
+fn new_caps_query(os: Os) -> (CapsQuery, TermCaps) {
+    if os == Os::Windows {
         (CapsQuery::Ended, TermCaps::not_asked())
+    } else {
+        (CapsQuery::Requested, TermCaps::default())
     }
 }
 
@@ -95,7 +94,7 @@ impl DoctorOverlay {
         let Some(probe) = self.probe.as_deref() else {
             return false;
         };
-        let rows = term_caps::doctor_rows(probe, &self.caps, Os::current(), self.in_tmux);
+        let rows = term_caps::doctor_rows(probe, &self.caps, self.os, self.in_tmux);
         self.cursor = self.cursor.min(rows.len().saturating_sub(1));
         self.checks = Some(rows);
         true
@@ -107,9 +106,11 @@ impl AppState {
     pub(super) fn dispatch_doctor(&mut self, action: Action) -> Effect {
         match action {
             Action::OpenDoctor => {
-                let (caps_query, caps) = new_caps_query(ASK_TERMINAL);
+                let os = self.doctor_os;
+                let (caps_query, caps) = new_caps_query(os);
                 self.doctor = Some(DoctorOverlay {
                     gen: 0,
+                    os,
                     probe: None,
                     in_tmux: false,
                     caps_query,
@@ -152,7 +153,7 @@ impl AppState {
         doctor.gen = self.doctor_gen;
         doctor.probe = None;
         doctor.checks = None;
-        (doctor.caps_query, doctor.caps) = new_caps_query(ASK_TERMINAL);
+        (doctor.caps_query, doctor.caps) = new_caps_query(doctor.os);
         Effect::RunDoctor {
             gen: self.doctor_gen,
         }
@@ -322,8 +323,17 @@ mod tests {
     use crate::tui::doctor::{CheckGroup, CheckStatus, Fix};
     use crate::tui::keys::{InputMode, DOCTOR_PAGE_ROWS};
 
+    /// An app whose Doctor targets `os`.
+    fn app_on(os: Os) -> AppState {
+        let mut app = app_state(&[]);
+        app.doctor_os = os;
+        app
+    }
+
+    /// An app whose Doctor targets Linux, so the query is sent on every
+    /// host the tests run on.
     fn app() -> AppState {
-        app_state(&[])
+        app_on(Os::Linux)
     }
 
     fn check(group: CheckGroup, name: &'static str, copy: Option<&str>) -> Check {
@@ -553,7 +563,7 @@ mod tests {
         assert_eq!(names(&app), MERGED);
 
         // Probe first, deadline second.
-        let mut app = app_state(&[]);
+        let mut app = app_on(Os::Linux);
         let Effect::RunDoctor { gen } = app.dispatch(Action::OpenDoctor) else {
             panic!("open asks for a probe");
         };
@@ -611,28 +621,38 @@ mod tests {
         assert!(app.doctor.is_none());
     }
 
-    /// A query that is not sent (Windows) ends at once with "not asked"
-    /// rows, so the rows wait for the probe only.
+    /// Windows: open and `r` send no query; it ends at once, so the rows
+    /// wait for the probe only, and every capability row says it was not
+    /// asked.
     #[test]
-    fn a_query_not_sent_ends_at_once() {
-        assert_eq!(
-            new_caps_query(false),
-            (CapsQuery::Ended, TermCaps::not_asked())
-        );
-        assert_eq!(
-            new_caps_query(true),
-            (CapsQuery::Requested, TermCaps::default())
-        );
-        let mut app = app();
+    fn windows_sends_no_query_and_its_rows_say_not_asked() {
+        let mut app = app_on(Os::Windows);
         let Effect::RunDoctor { gen } = app.dispatch(Action::OpenDoctor) else {
             panic!("open asks for a probe");
         };
-        let doctor = app.doctor.as_mut().unwrap();
-        (doctor.caps_query, doctor.caps) = new_caps_query(false);
+        assert_eq!(caps_query(&app), CapsQuery::Ended);
         assert_eq!(app.doctor_caps_query_to_send(), None, "nothing to write");
-        assert!(app.apply_doctor(gen, rows(), false));
+        assert_eq!(app.doctor_caps_remain_ms(Instant::now()), None);
+        assert_eq!(app.doctor.as_ref().unwrap().checks, None, "probe runs");
+        assert!(app.apply_doctor(gen, rows(), true));
         assert_eq!(names(&app), MERGED);
-        assert_eq!(row(&app, "SGR mouse (1006)").status, CheckStatus::Unknown);
+        for name in &MERGED[1..7] {
+            let check = row(&app, name);
+            assert_eq!(check.status, CheckStatus::Unknown, "{name}");
+            assert_eq!(check.why, "Not asked on Windows.", "{name}");
+            assert_eq!(check.fix, None, "{name}: no tmux hint either");
+        }
+
+        let Effect::RunDoctor { gen } = app.dispatch(Action::DoctorRerun) else {
+            panic!("re-run asks for a probe");
+        };
+        assert_eq!(caps_query(&app), CapsQuery::Ended, "r asks nothing either");
+        assert_eq!(app.doctor_caps_query_to_send(), None);
+        assert!(app.apply_doctor(gen, rows(), false));
+        assert_eq!(
+            row(&app, "Background (OSC 11)").why,
+            "Not asked on Windows."
+        );
     }
 
     #[test]

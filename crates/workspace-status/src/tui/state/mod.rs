@@ -1153,6 +1153,10 @@ pub struct AppState {
     pub doctor: Option<doctor::DoctorOverlay>,
     /// Last Doctor probe request id; only the newest answer lands.
     doctor_gen: u64,
+    /// OS family the Doctor targets: `Os::current()` in the app. It picks
+    /// whether the capability query is sent (not on Windows) and the OS
+    /// form of the rows. Tests pin it, so one host tests every OS.
+    pub(crate) doctor_os: super::doctor::Os,
     pub branch_picker: Option<BranchPickerState>,
     pub graph_focus_picker: Option<GraphFocusPickerState>,
     /// Per-repo local branch names whose ancestors the graph shows. `None` = `--all`.
@@ -1491,6 +1495,7 @@ impl AppState {
             blame_menu: false,
             doctor: None,
             doctor_gen: 0,
+            doctor_os: super::doctor::Os::current(),
             branch_picker: None,
             graph_focus_picker: None,
             graph_branch_focus: None,

@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::Path;
 
-use crate::harness::{PtySession, CAPS_QUERY, COLS};
+use crate::harness::{byte_positions, find_bytes, PtySession, CAPS_QUERY, COLS};
 use crate::seed::daily_workspace;
 use crate::support::{open_command_palette, type_palette_filter, WAIT};
 
@@ -200,28 +200,13 @@ const FAKE_TERM_ANSWER: &[u8] = b"\x1bP>|fake-term(1.2)\x1b\\\
 \x1b]11;rgb:0000/0000/0000\x1b\\\
 \x1b[?62c";
 
-/// How many times the child wrote the capability query.
-fn query_count(tui: &PtySession) -> usize {
-    tui.raw_output()
-        .windows(CAPS_QUERY.len())
-        .filter(|w| *w == CAPS_QUERY)
-        .count()
-}
-
 /// True when the child wrote `text` after its `nth` capability query
 /// (1-based).
 fn painted_after_query(tui: &PtySession, nth: usize, text: &[u8]) -> bool {
     let raw = tui.raw_output();
-    let Some(at) = raw
-        .windows(CAPS_QUERY.len())
-        .enumerate()
-        .filter(|(_, w)| *w == CAPS_QUERY)
-        .nth(nth - 1)
-        .map(|(at, _)| at)
-    else {
-        return false;
-    };
-    raw[at..].windows(text.len()).any(|w| w == text)
+    byte_positions(&raw, CAPS_QUERY)
+        .get(nth - 1)
+        .is_some_and(|at| find_bytes(&raw, text, *at).is_some())
 }
 
 /// Open the Doctor from the palette.
@@ -261,14 +246,17 @@ fn pty_doctor_shows_the_terminal_answers_and_reads_no_reply_as_keys() {
         &[("WS_STATUS_GLYPHS", "ascii")],
         FAKE_TERM_ANSWER,
     );
-    assert_eq!(query_count(&tui), 0, "no query before the Doctor opens");
+    assert_eq!(
+        tui.raw_count(CAPS_QUERY),
+        0,
+        "no query before the Doctor opens"
+    );
     open_doctor(&mut tui);
-    tui.wait_pred(
+    let screen = tui.wait_screen(
         shows_fake_term_answers,
         "the Doctor shows the fake terminal's answers",
         WAIT,
     );
-    let screen = tui.screen();
     assert!(
         has_row(&screen, "SGR mouse (1006)")
             && has_row(&screen, "Bracketed paste (2004)")
@@ -279,7 +267,7 @@ fn pty_doctor_shows_the_terminal_answers_and_reads_no_reply_as_keys() {
         cursor_on(&screen, "Terminal size"),
         "the replies moved no cursor:\n{screen}"
     );
-    assert_eq!(query_count(&tui), 1, "one query for the open");
+    assert_eq!(tui.raw_count(CAPS_QUERY), 1, "one query for the open");
 
     // Move off the first row, so a reply byte read as `k` or `g` would
     // move the cursor back up.
@@ -297,12 +285,12 @@ fn pty_doctor_shows_the_terminal_answers_and_reads_no_reply_as_keys() {
     // The second query goes out in the `checking…` frame, so the refilled
     // rows are the ones painted after it: a screen that still shows the
     // first answer must not pass.
-    tui.wait_pred(
+    // The asserts read the screen that matched, not a later one.
+    let screen = tui.wait_screen(
         |screen| painted_after_query(&tui, 2, b"fake-term(1.2)") && shows_fake_term_answers(screen),
         "r writes the query again and the rows show the answers again",
         WAIT,
     );
-    let screen = tui.screen();
     assert_eq!(
         cursor_row(&screen).as_deref(),
         Some(focused.as_str()),
@@ -313,7 +301,7 @@ fn pty_doctor_shows_the_terminal_answers_and_reads_no_reply_as_keys() {
         tui.clipboard_payloads().is_empty(),
         "no reply byte copied a fix line"
     );
-    assert_eq!(query_count(&tui), 2, "one query per request");
+    assert_eq!(tui.raw_count(CAPS_QUERY), 2, "one query per request");
     tui.assert_running("after the replies");
 }
 
@@ -331,7 +319,7 @@ fn pty_doctor_capability_rows_are_unknown_when_the_terminal_does_not_answer() {
         &[("WS_STATUS_GLYPHS", "ascii")],
     );
     open_doctor(&mut tui);
-    tui.wait_pred(
+    let screen = tui.wait_screen(
         |screen| {
             doctor_filled_with(screen, "Terminal (XTVERSION)")
                 && screen.contains("The terminal did not report its name and version.")
@@ -340,7 +328,6 @@ fn pty_doctor_capability_rows_are_unknown_when_the_terminal_does_not_answer() {
         "the capability rows show unknown after the wait",
         WAIT,
     );
-    let screen = tui.screen();
     for name in [
         "Terminal (XTVERSION)",
         "SGR mouse (1006)",
@@ -359,5 +346,5 @@ fn pty_doctor_capability_rows_are_unknown_when_the_terminal_does_not_answer() {
         cursor_on(&screen, "Terminal size"),
         "the cursor stays on the first row:\n{screen}"
     );
-    assert_eq!(query_count(&tui), 1, "the query is written once");
+    assert_eq!(tui.raw_count(CAPS_QUERY), 1, "the query is written once");
 }

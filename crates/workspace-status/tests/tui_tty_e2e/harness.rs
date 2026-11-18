@@ -936,6 +936,11 @@ impl PtySession {
         self.raw.lock().unwrap().clone()
     }
 
+    /// How many times `needle` occurs in [`Self::raw_output`] so far.
+    pub fn raw_count(&self, needle: &[u8]) -> usize {
+        byte_positions(&self.raw.lock().unwrap(), needle).len()
+    }
+
     /// Process id of the child, for a test that sends it a signal.
     pub fn child_pid(&self) -> u32 {
         self.child.process_id().expect("child process id")
@@ -1254,11 +1259,22 @@ impl PtySession {
     }
 
     pub fn wait_pred(&self, pred: impl Fn(&str) -> bool, what: &str, timeout: Duration) {
+        self.wait_screen(pred, what, timeout);
+    }
+
+    /// [`Self::wait_pred`], returning the screen that matched `pred`, so
+    /// the asserts after the wait read that same frame and not a later one.
+    pub fn wait_screen(
+        &self,
+        pred: impl Fn(&str) -> bool,
+        what: &str,
+        timeout: Duration,
+    ) -> String {
         let start = Instant::now();
         loop {
             let screen = self.screen();
             if pred(&screen) {
-                return;
+                return screen;
             }
             if start.elapsed() >= timeout {
                 panic!("timeout waiting for {what}:\n{screen}");
@@ -1352,8 +1368,9 @@ impl Drop for PtySession {
     }
 }
 
-/// Append `chunk` to the raw tap and count the OSC 11 queries it completes.
-/// A query split across reads counts once, in the read that ends it.
+/// Append `chunk` to the raw tap and count, for each of `queries`, the
+/// times this read completes it (the fake terminal answers each one). A
+/// query split across reads counts once, in the read that ends it.
 fn push_raw<const N: usize>(
     raw: &Arc<Mutex<Vec<u8>>>,
     chunk: &[u8],
@@ -1364,10 +1381,7 @@ fn push_raw<const N: usize>(
     raw.extend_from_slice(chunk);
     queries.map(|query| {
         let from = start.saturating_sub(query.len() - 1);
-        raw[from..]
-            .windows(query.len())
-            .filter(|w| *w == query)
-            .count()
+        byte_positions(&raw[from..], query).len()
     })
 }
 
@@ -1409,7 +1423,7 @@ fn push_osc52(pending: &mut Vec<u8>, chunk: &[u8], dest: &Arc<Mutex<Vec<String>>
 }
 
 fn take_osc52(pending: &[u8]) -> Osc52Take {
-    match find_bytes(pending, OSC52_INTRO) {
+    match find_bytes(pending, OSC52_INTRO, 0) {
         None => {
             let keep = osc52_prefix_keep(pending);
             let skip = pending.len() - keep;
@@ -1436,7 +1450,7 @@ fn take_osc52(pending: &[u8]) -> Osc52Take {
             let payload_at = after + sel_rel + 1;
             let rest = &pending[payload_at..];
             let bel = rest.iter().position(|&b| b == 0x07);
-            let st = find_bytes(rest, b"\x1b\\");
+            let st = find_bytes(rest, b"\x1b\\", 0);
             let term = match (bel, st) {
                 (Some(b), Some(s)) if b <= s => Some((b, 1)),
                 (Some(_), Some(s)) => Some((s, 2)),
@@ -1465,11 +1479,28 @@ fn osc52_prefix_keep(buf: &[u8]) -> usize {
     0
 }
 
-fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || hay.len() < needle.len() {
+/// Byte offsets of every `needle` in `hay`, in order (overlaps included).
+/// Empty for an empty `needle`.
+pub fn byte_positions(hay: &[u8], needle: &[u8]) -> Vec<usize> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    hay.windows(needle.len())
+        .enumerate()
+        .filter_map(|(at, w)| (w == needle).then_some(at))
+        .collect()
+}
+
+/// First offset of `needle` in `hay` at or after `from`. `None` for an
+/// empty `needle` or a `from` past the end.
+pub fn find_bytes(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    let rest = hay.get(from..)?;
+    if needle.is_empty() || rest.len() < needle.len() {
         return None;
     }
-    hay.windows(needle.len()).position(|w| w == needle)
+    rest.windows(needle.len())
+        .position(|w| w == needle)
+        .map(|at| from + at)
 }
 
 fn decode_base64_utf8(input: &[u8]) -> Option<String> {

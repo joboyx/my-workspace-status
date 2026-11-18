@@ -22268,6 +22268,8 @@ fn doctor_paints_title_summary_groups_rows_and_footer_at_80x24() {
 #[test]
 fn doctor_head_stays_checking_until_the_terminal_query_ends() {
     let mut state = app_state(&[repo("app", false)]);
+    // A Doctor that sends the query on every host (Windows sends none).
+    state.doctor_os = crate::tui::doctor::Os::Linux;
     let Effect::RunDoctor { gen } = state.dispatch(Action::OpenDoctor) else {
         panic!("open asks for a probe");
     };
