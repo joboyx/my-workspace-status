@@ -81,7 +81,8 @@ Commands:
                         wait until the TUI is mounted and alive (tab strip)
   resize COLSxROWS      resize the run's window; wait until the pane has it
   run -- <args>         run the binary headless in the fixture (--plain,
-                        --json, --help or --version) with the same isolation
+                        --json, --help, --version, or doctor) with the same
+                        isolation
   stop                  quit the TUI, end the run's tmux server, clear the
                         current run; safe to repeat
   help [<command>]      this text, or the help of one command
@@ -219,8 +220,10 @@ H
 usage: wsctl run -- <args>
 
 Runs the same binary headless in the fixture with the run's isolation
-(scripts/verify-tui.sh cli). Needs --plain, --json, --help or --version;
-refuses --update and --tui. Evidence: evidence/NN-cli-*.{cmd,out,err,rc}.
+(scripts/verify-tui.sh cli). Needs --plain, --json, --help, --version, or
+doctor as the first word (the ws doctor report: stdin and stdout are not a
+terminal there); refuses --update and --tui.
+Evidence: evidence/NN-cli-*.{cmd,out,err,rc} (doctor: NN-clidoctor.*).
 JSON: ok (rc is 0), cmd, run, rc, files {cmd,out,err,rc}, stderr, and
 "json" (the parsed --json output, when jq is installed and it parses) or
 "stdout" (the text). Exit 1 when rc is not 0.

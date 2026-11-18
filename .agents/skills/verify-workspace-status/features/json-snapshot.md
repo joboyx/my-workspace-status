@@ -1,6 +1,6 @@
 # JSON and plain snapshot
 
-`wsctl run -- <args>` runs the binary of the run headless, in the run's fixture, with the run's `env.sh` (through `scripts/verify-tui.sh cli`). It needs `--plain`, `--json`, `--help` or `--version` and refuses `--update` and `--tui`. The output, stderr and exit code go to `evidence/NN-cli-*.{cmd,out,err,rc}`. For `--json`, the JSON of `wsctl` embeds the parsed snapshot as `.json` when `jq` is installed. The snapshot contract is `docs/snapshot.md`; the plain report is `SAMPLE_OUTPUT.md`.
+`wsctl run -- <args>` runs the binary of the run headless, in the run's fixture, with the run's `env.sh` (through `scripts/verify-tui.sh cli`). It needs `--plain`, `--json`, `--help` or `--version`, or `doctor` as the first word (the `ws doctor` report: [doctor.md](doctor.md) D5), and refuses `--update` and `--tui`. The output, stderr and exit code go to `evidence/NN-cli-*.{cmd,out,err,rc}`. For `--json`, the JSON of `wsctl` embeds the parsed snapshot as `.json` when `jq` is installed. The snapshot contract is `docs/snapshot.md`; the plain report is `SAMPLE_OUTPUT.md`.
 
 Conventions and the sweep order: [README.md](README.md). These recipes need `jq`. A headless result proves the snapshot, not the TUI: it never stands in for a TUI check.
 

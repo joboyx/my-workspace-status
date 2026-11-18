@@ -49,6 +49,9 @@ usage: scripts/verify-tui.sh <command> ...
                                  (row 1 is the first capture line): move = pointer
                                  motion, no button (hover); click = left press and
                                  release
+  mouse <run> wheel up|down <col> <row>
+                                 send one SGR wheel report (button 64 up, 65 down)
+                                 at a 1-based screen cell
   mouse <run> find <text>        print "<col> <row>" (1-based) of the first cell
                                  where <text> starts on screen; exit 1 if absent
   wait [--gone] [--cursor|--regex] <run> <text> [timeout-s]
@@ -60,7 +63,8 @@ usage: scripts/verify-tui.sh <command> ...
   capture <run> [name]           print the screen; save evidence/NN-<name>.txt/.ansi
   stop <run>                     quit the TUI, end the tmux server, keep the run dir
   cli <run> -- <args>            run the binary headless (--plain/--json/--help/
-                                 --version) with the same isolation in the fixture
+                                 --version, or doctor as the first word) with the
+                                 same isolation in the fixture
   scenario [--reset] <forge-dir> <set>...
                                  copy scenario sets into a fake forge directory;
                                  --reset clears the old ones first (before launch)
@@ -385,7 +389,9 @@ cmd_keys() {
 
 # The TUI turns on xterm SGR (1006) mouse reports, so a report written to the
 # pane reaches it as a real pointer event. Cells are 1-based, as the reports
-# count them; with the status line off, capture line N is screen row N.
+# count them; with the status line off, capture line N is screen row N. The
+# run's tmux server keeps its mouse option off: send-keys writes the report
+# into the pane, so it still reaches the app, as a terminal's report would.
 cmd_mouse() {
   load_run "${1:-}"
   local action="${2:-}"
@@ -404,6 +410,19 @@ cmd_mouse() {
       fi
       log_action "mouse $action $col $row"
       ;;
+    wheel)
+      local dir="${3:-}" col="${4:-}" row="${5:-}" button
+      case "$dir" in
+        up) button=64 ;;
+        down) button=65 ;;
+        *) die "mouse wheel: give up|down <col> <row>, got '$dir'" ;;
+      esac
+      [[ "$col" =~ ^[1-9][0-9]*$ && "$row" =~ ^[1-9][0-9]*$ ]] ||
+        die "mouse wheel: give <col> <row> as positive integers (1-based cells), got '$col' '$row'"
+      # A wheel notch is one press report, with no release (64 up, 65 down).
+      tm send-keys -t "$SESSION" -l -- $'\e'"[<$button;$col;${row}M"
+      log_action "mouse wheel $dir $col $row"
+      ;;
     find)
       local text="${3:-}"
       [[ -n "$text" ]] || die "mouse find: give the text to find"
@@ -413,7 +432,7 @@ cmd_mouse() {
       log_action "mouse find '$text' -> $cell"
       echo "$cell"
       ;;
-    *) die "mouse: give move|click <col> <row>, or find <text>" ;;
+    *) die "mouse: give move|click <col> <row>, wheel up|down <col> <row>, or find <text>" ;;
   esac
 }
 
@@ -549,14 +568,28 @@ cmd_cli() {
   shift
   if [[ "${1:-}" == -- ]]; then shift; fi
   (($#)) || die "cli: give arguments after --"
-  local a headless=0
+  local a headless=0 skip=0 first=""
   for a in "$@"; do
     case "$a" in
       --update | --update=* | --tui) die "cli: $a is refused (updater and TUI need the tmux run)" ;;
       --plain | --json | --help | -h | --version | -V) headless=1 ;;
     esac
+    # The first word that is not an option or the value of -C / --workspace:
+    # `doctor` there is the subcommand, which prints and exits. A word before
+    # it makes `doctor` a repo filter, and that run opens the TUI.
+    if ((skip)); then
+      skip=0
+    elif [[ -z "$first" ]]; then
+      case "$a" in
+        -C | --workspace) skip=1 ;;
+        --) first="$a" ;; # every word after -- is a repo filter
+        -*) ;;
+        *) first="$a" ;;
+      esac
+    fi
   done
-  ((headless)) || die "cli: pass --plain, --json, --help or --version (a bare run opens the TUI and waits for keys)"
+  if [[ "$first" == doctor ]]; then headless=1; fi
+  ((headless)) || die "cli: pass --plain, --json, --help or --version, or doctor as the first word (a bare run opens the TUI and waits for keys)"
   local slug base rc=0
   slug="$(printf '%s' "$*" | tr -c 'A-Za-z0-9' '-' | tr -s '-' | cut -c1-40)"
   base="$EVIDENCE/$(next_seq)-cli${slug%-}"
