@@ -12,7 +12,7 @@
 //!   replies ([`AppState::apply_doctor_term_replies`]), and the DA1 reply or
 //!   the deadline ([`AppState::expire_doctor_caps_query`]) ends the wait.
 //!
-//! The head stays `checking…` until both parts ended (R5). Then
+//! The head stays `checking…` until both parts ended. Then
 //! [`term_caps::doctor_rows`] builds the one row list that paint, the
 //! cursor clamp, and the `y` copy read, so no probe or capability row
 //! changes after it paints.
@@ -605,7 +605,7 @@ mod tests {
         );
     }
 
-    /// R5: the head stays checking until the probe answered AND the query
+    /// The head stays checking until the probe answered AND the query
     /// ended, in either order.
     #[test]
     fn rows_wait_for_both_the_probe_and_the_query() {

@@ -22264,7 +22264,7 @@ fn doctor_paints_title_summary_groups_rows_and_footer_at_80x24() {
 }
 
 /// The probe answered but the terminal query still waits: the head stays
-/// `checking…` and no row paints (R5).
+/// `checking…` and no row paints.
 #[test]
 fn doctor_head_stays_checking_until_the_terminal_query_ends() {
     let mut state = app_state(&[repo("app", false)]);
