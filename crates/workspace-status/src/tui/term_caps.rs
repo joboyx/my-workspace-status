@@ -12,7 +12,8 @@
 //! [`TermReply`] and queues it, so a reply never reads as keys, also when it
 //! lands late. [`TermCaps`] collects the replies of one query, and
 //! [`capability_checks`] turns it into the Doctor's capability rows, and
-//! [`doctor_rows`] puts them into the probe rows. All three are pure. The
+//! [`doctor_rows`] puts them, after the live wheel test row, into the probe
+//! rows. All three are pure. The
 //! TUI writes [`QUERY`] from its draw path (`tui/event_loop.rs`), gets the
 //! replies from its input thread, and keeps the query state in the open
 //! Doctor (`tui/state/doctor.rs`). [`query_capabilities`] is the blocking
@@ -22,7 +23,9 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use super::doctor::{hint, row, Check, CheckGroup, CheckStatus, Os, MOUSE_ROW};
+use super::doctor::{
+    hint, row, wheel_check, Check, CheckGroup, CheckStatus, Os, WheelRow, MOUSE_ROW,
+};
 use super::term_bg::{find_da1, is_light_background};
 
 /// Longest wait for the replies to [`QUERY`].
@@ -305,14 +308,21 @@ pub(crate) fn capability_checks(caps: &TermCaps, os: Os, in_tmux: bool) -> Vec<C
 }
 
 /// The Doctor's full row list, in paint order: the probe rows of
-/// [`super::doctor::checks`] with the capability rows of `caps`
-/// ([`capability_checks`]) inserted right after the `Mouse` row of the
-/// TERMINAL group (R4). Pure.
+/// [`super::doctor::checks`] with, right after the `Mouse` row of the
+/// TERMINAL group, the live wheel test row ([`wheel_check`] of `wheel`)
+/// and then the capability rows of `caps` ([`capability_checks`]). Pure.
 ///
 /// Paint, the cursor clamp, and the `y` copy of the TUI all read this list,
-/// and the `ws doctor` CLI prints it. With no `Mouse` row the capability
-/// rows go after the last TERMINAL row, and with no TERMINAL row first.
-pub(crate) fn doctor_rows(probe: &[Check], caps: &TermCaps, os: Os, in_tmux: bool) -> Vec<Check> {
+/// and the `ws doctor` CLI prints it (with [`WheelRow::TuiOnly`]). With no
+/// `Mouse` row the inserted rows go after the last TERMINAL row, and with
+/// no TERMINAL row first.
+pub(crate) fn doctor_rows(
+    probe: &[Check],
+    wheel: WheelRow,
+    caps: &TermCaps,
+    os: Os,
+    in_tmux: bool,
+) -> Vec<Check> {
     let at = probe
         .iter()
         .position(|check| check.group == CheckGroup::Terminal && check.name == MOUSE_ROW)
@@ -324,8 +334,9 @@ pub(crate) fn doctor_rows(probe: &[Check], caps: &TermCaps, os: Os, in_tmux: boo
                 .map(|last| last + 1)
         })
         .unwrap_or(0);
-    let mut rows = Vec::with_capacity(probe.len() + MODE_ROWS.len() + 3);
+    let mut rows = Vec::with_capacity(probe.len() + MODE_ROWS.len() + 4);
     rows.extend_from_slice(&probe[..at]);
+    rows.push(wheel_check(wheel, in_tmux));
     rows.extend(capability_checks(caps, os, in_tmux));
     rows.extend_from_slice(&probe[at..]);
     rows
@@ -417,7 +428,7 @@ pub(crate) fn query_capabilities(_timeout: Duration) -> TermCaps {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::doctor::Fix;
+    use crate::tui::doctor::{Fix, WheelTest};
 
     /// A query that the DA1 reply ended after `replies`.
     fn answered(replies: Vec<TermReply>) -> TermCaps {
@@ -715,13 +726,21 @@ mod tests {
         rows.iter().map(|check| check.name).collect()
     }
 
-    /// The capability rows go right after `Mouse`, before the TERMINAL rows
-    /// that follow it and the TOOLS rows; with no `Mouse` row after the
-    /// last TERMINAL row; with no TERMINAL row first.
+    /// The live wheel test row and then the capability rows go right after
+    /// `Mouse`, before the TERMINAL rows that follow it and the TOOLS rows;
+    /// with no `Mouse` row after the last TERMINAL row; with no TERMINAL
+    /// row first.
     #[test]
-    fn doctor_rows_put_the_capability_rows_after_mouse() {
+    fn doctor_rows_put_the_wheel_and_capability_rows_after_mouse() {
         let caps = full_answer();
-        let capability: Vec<&str> = row_names().collect();
+        let wheel = WheelRow::Live {
+            test: WheelTest::Wheel,
+            capture: true,
+        };
+        let inserted: Vec<&str> = ["Mouse wheel (live test)"]
+            .into_iter()
+            .chain(row_names())
+            .collect();
         let probe = [
             probe_row(CheckGroup::Terminal, "Terminal size"),
             probe_row(CheckGroup::Terminal, "Mouse"),
@@ -731,14 +750,20 @@ mod tests {
         ];
         let want: Vec<&str> = ["Terminal size", "Mouse"]
             .into_iter()
-            .chain(capability.iter().copied())
+            .chain(inserted.iter().copied())
             .chain(["Later terminal row", "git", "State files"])
             .collect();
-        let rows = doctor_rows(&probe, &caps, Os::Linux, false);
+        let rows = doctor_rows(&probe, wheel, &caps, Os::Linux, false);
         assert_eq!(names(&rows), want);
-        assert_eq!(rows[2].why, "xterm(390)", "the answers of `caps`");
         assert_eq!(
-            rows[2..8],
+            rows[2],
+            wheel_check(wheel, false),
+            "the wheel row of `wheel`"
+        );
+        assert_eq!(rows[2].status, CheckStatus::Ok);
+        assert_eq!(rows[3].why, "xterm(390)", "the answers of `caps`");
+        assert_eq!(
+            rows[3..9],
             capability_checks(&caps, Os::Linux, false)[..],
             "the same rows as capability_checks"
         );
@@ -747,17 +772,17 @@ mod tests {
             probe_row(CheckGroup::Terminal, "Terminal size"),
             probe_row(CheckGroup::Tools, "git"),
         ];
-        let rows = doctor_rows(&no_mouse, &caps, Os::Linux, false);
+        let rows = doctor_rows(&no_mouse, wheel, &caps, Os::Linux, false);
         let want: Vec<&str> = ["Terminal size"]
             .into_iter()
-            .chain(capability.iter().copied())
+            .chain(inserted.iter().copied())
             .chain(["git"])
             .collect();
         assert_eq!(names(&rows), want);
 
         let no_terminal = [probe_row(CheckGroup::Tools, "git")];
-        let rows = doctor_rows(&no_terminal, &caps, Os::Linux, false);
-        let want: Vec<&str> = capability.iter().copied().chain(["git"]).collect();
+        let rows = doctor_rows(&no_terminal, wheel, &caps, Os::Linux, false);
+        let want: Vec<&str> = inserted.iter().copied().chain(["git"]).collect();
         assert_eq!(names(&rows), want);
 
         // A TOOLS row named `Mouse` is not the TERMINAL one.
@@ -765,10 +790,36 @@ mod tests {
             probe_row(CheckGroup::Terminal, "Terminal size"),
             probe_row(CheckGroup::Tools, "Mouse"),
         ];
-        let rows = doctor_rows(&tools_mouse, &caps, Os::Linux, false);
+        let rows = doctor_rows(&tools_mouse, wheel, &caps, Os::Linux, false);
         assert_eq!(rows[0].name, "Terminal size");
-        assert_eq!(rows[1].name, "Terminal (XTVERSION)");
-        assert_eq!(rows[7].name, "Mouse");
+        assert_eq!(rows[1].name, "Mouse wheel (live test)");
+        assert_eq!(rows[2].name, "Terminal (XTVERSION)");
+        assert_eq!(rows[8].name, "Mouse");
+    }
+
+    /// The `ws doctor` form: the wheel row says the test needs the TUI,
+    /// at the same place in the list.
+    #[test]
+    fn doctor_rows_tui_only_wheel_row_needs_the_tui() {
+        let probe = [
+            probe_row(CheckGroup::Terminal, "Mouse"),
+            probe_row(CheckGroup::Tools, "git"),
+        ];
+        let rows = doctor_rows(
+            &probe,
+            WheelRow::TuiOnly,
+            &TermCaps::not_asked(),
+            Os::Linux,
+            true,
+        );
+        let wheel = &rows[1];
+        assert_eq!(wheel.name, "Mouse wheel (live test)");
+        assert_eq!(wheel.status, CheckStatus::Unknown);
+        assert_eq!(
+            wheel.why,
+            "TUI only: open Doctor: setup checkup in the TUI and scroll once."
+        );
+        assert_eq!(wheel.fix, None, "no tmux fix in the CLI form");
     }
 
     #[test]

@@ -14,7 +14,15 @@
 //!
 //! The head stays `checking…` until both parts ended (R5). Then
 //! [`term_caps::doctor_rows`] builds the one row list that paint, the
-//! cursor clamp, and the `y` copy read, so no row changes after it paints.
+//! cursor clamp, and the `y` copy read, so no probe or capability row
+//! changes after it paints.
+//!
+//! The live mouse wheel test ([`WheelTest`]) is not a probe: Up / Down
+//! arrows ([`Action::DoctorArrow`]) and wheel events
+//! ([`Action::DoctorWheel`]) record it on the open overlay, also while it
+//! shows `checking…`, and it survives `r`. When it changes on painted rows,
+//! the list is built again from the stored probe rows and replies (no new
+//! probe or query), so only its row changes and the cursor stays.
 //!
 //! Report only: nothing here writes a file, a setting, or the UI-state
 //! store, and the query changes no terminal mode. The one write is `y`,
@@ -24,7 +32,7 @@
 use std::time::Instant;
 
 use super::super::action::{Action, Effect};
-use super::super::doctor::{Check, Os};
+use super::super::doctor::{Check, Os, WheelRow, WheelTest};
 use super::super::status::StatusMessage;
 use super::super::term_caps::{self, TermCaps, TermReply, CAPS_QUERY_TIMEOUT};
 use super::AppState;
@@ -63,6 +71,8 @@ pub struct DoctorOverlay {
     pub(crate) caps_query: CapsQuery,
     /// The terminal replies to that query.
     pub(crate) caps: TermCaps,
+    /// The live mouse wheel test since open. Kept across `r`.
+    pub(crate) wheel: WheelTest,
     /// The full row list in paint order ([`term_caps::doctor_rows`]).
     /// `None` until the probe answered and the query ended.
     pub checks: Option<Vec<Check>>,
@@ -85,19 +95,41 @@ fn new_caps_query(os: Os) -> (CapsQuery, TermCaps) {
 }
 
 impl DoctorOverlay {
-    /// Build the row list once the probe answered and the query ended.
-    /// True when it did so now.
-    fn finish_rows(&mut self) -> bool {
+    /// Build the row list once the probe answered and the query ended
+    /// (`capture`: mouse capture is on). True when it did so now.
+    fn finish_rows(&mut self, capture: bool) -> bool {
         if self.checks.is_some() || self.caps_query != CapsQuery::Ended {
             return false;
         }
+        self.build_rows(capture)
+    }
+
+    /// Build the row list from the stored probe rows, replies, and wheel
+    /// test, clamping the cursor. False while the probe runs.
+    fn build_rows(&mut self, capture: bool) -> bool {
         let Some(probe) = self.probe.as_deref() else {
             return false;
         };
-        let rows = term_caps::doctor_rows(probe, &self.caps, self.os, self.in_tmux);
+        let wheel = WheelRow::Live {
+            test: self.wheel,
+            capture,
+        };
+        let rows = term_caps::doctor_rows(probe, wheel, &self.caps, self.os, self.in_tmux);
         self.cursor = self.cursor.min(rows.len().saturating_sub(1));
         self.checks = Some(rows);
         true
+    }
+
+    /// Store the wheel test state `next`; rebuild painted rows when it
+    /// changed (rows still checking pick it up when they are built).
+    fn record_wheel_test(&mut self, next: WheelTest, capture: bool) {
+        if next == self.wheel {
+            return;
+        }
+        self.wheel = next;
+        if self.checks.is_some() {
+            self.build_rows(capture);
+        }
     }
 }
 
@@ -115,6 +147,7 @@ impl AppState {
                     in_tmux: false,
                     caps_query,
                     caps,
+                    wheel: WheelTest::Waiting,
                     checks: None,
                     cursor: 0,
                     scroll: 0,
@@ -123,6 +156,16 @@ impl AppState {
             }
             Action::DoctorRerun => self.rerun_doctor(),
             Action::DoctorMove(delta) => {
+                self.move_doctor_cursor(i64::from(delta));
+                Effect::None
+            }
+            Action::DoctorArrow(delta) => {
+                self.record_doctor_wheel_test(WheelTest::arrow);
+                self.move_doctor_cursor(i64::from(delta));
+                Effect::None
+            }
+            Action::DoctorWheel(delta) => {
+                self.record_doctor_wheel_test(|_| WheelTest::Wheel);
                 self.move_doctor_cursor(i64::from(delta));
                 Effect::None
             }
@@ -156,6 +199,15 @@ impl AppState {
         (doctor.caps_query, doctor.caps) = new_caps_query(doctor.os);
         Effect::RunDoctor {
             gen: self.doctor_gen,
+        }
+    }
+
+    /// Record one wheel test input on the open Doctor: `step` maps the
+    /// state before it to the state after it.
+    fn record_doctor_wheel_test(&mut self, step: impl FnOnce(WheelTest) -> WheelTest) {
+        let capture = self.mouse_enabled;
+        if let Some(doctor) = self.doctor.as_mut() {
+            doctor.record_wheel_test(step(doctor.wheel), capture);
         }
     }
 
@@ -213,12 +265,13 @@ impl AppState {
         if !self.doctor_awaits(gen) {
             return false;
         }
+        let capture = self.mouse_enabled;
         let Some(doctor) = self.doctor.as_mut() else {
             return false;
         };
         doctor.probe = Some(checks);
         doctor.in_tmux = in_tmux;
-        doctor.finish_rows();
+        doctor.finish_rows(capture);
         true
     }
 
@@ -252,6 +305,7 @@ impl AppState {
         epoch: u64,
         replies: Vec<TermReply>,
     ) -> bool {
+        let capture = self.mouse_enabled;
         let Some(doctor) = self.doctor.as_mut() else {
             return false;
         };
@@ -265,7 +319,7 @@ impl AppState {
             return false;
         }
         doctor.caps_query = CapsQuery::Ended;
-        doctor.finish_rows()
+        doctor.finish_rows(capture)
     }
 
     /// Milliseconds until the capability query's deadline (rounded up),
@@ -283,6 +337,7 @@ impl AppState {
     /// End a written query whose deadline passed by `now`: the rows with no
     /// reply show unknown. True when the wait ended now (redraw).
     pub(crate) fn expire_doctor_caps_query(&mut self, now: Instant) -> bool {
+        let capture = self.mouse_enabled;
         let Some(doctor) = self.doctor.as_mut() else {
             return false;
         };
@@ -294,7 +349,7 @@ impl AppState {
         }
         doctor.caps.time_out();
         doctor.caps_query = CapsQuery::Ended;
-        doctor.finish_rows();
+        doctor.finish_rows(capture);
         true
     }
 
@@ -359,10 +414,11 @@ mod tests {
         ]
     }
 
-    /// Row names of the merged list for [`rows`]: the six capability rows
-    /// right after `Mouse`.
-    const MERGED: [&str; 10] = [
+    /// Row names of the merged list for [`rows`]: the live wheel test row
+    /// and the six capability rows right after `Mouse`.
+    const MERGED: [&str; 11] = [
         "Mouse",
+        "Mouse wheel (live test)",
         "Terminal (XTVERSION)",
         "SGR mouse (1006)",
         "Bracketed paste (2004)",
@@ -375,7 +431,13 @@ mod tests {
     ];
 
     /// Index of `git` in [`MERGED`].
-    const GIT: usize = 7;
+    const GIT: usize = 8;
+
+    /// Index of the wheel test row in [`MERGED`].
+    const WHEEL: usize = 1;
+
+    /// Name of the wheel test row.
+    const WHEEL_ROW: &str = "Mouse wheel (live test)";
 
     /// A full answer to the query, DA1 last.
     fn full_answer() -> Vec<TermReply> {
@@ -524,7 +586,7 @@ mod tests {
         assert_eq!(caps_query(&app), CapsQuery::Ended);
         assert_eq!(names(&app), MERGED);
         assert_eq!(row(&app, "Terminal (XTVERSION)").status, CheckStatus::Ok);
-        for name in &MERGED[2..7] {
+        for name in &MERGED[3..8] {
             let check = row(&app, name);
             assert_eq!(check.status, CheckStatus::Unknown, "{name}");
             assert!(
@@ -636,7 +698,7 @@ mod tests {
         assert_eq!(app.doctor.as_ref().unwrap().checks, None, "probe runs");
         assert!(app.apply_doctor(gen, rows(), true));
         assert_eq!(names(&app), MERGED);
-        for name in &MERGED[1..7] {
+        for name in &MERGED[2..8] {
             let check = row(&app, name);
             assert_eq!(check.status, CheckStatus::Unknown, "{name}");
             assert_eq!(check.why, "Not asked on Windows.", "{name}");
@@ -713,7 +775,11 @@ mod tests {
         assert_eq!(cursor(&app), last, "still checking");
         let epoch = send_query(&mut app);
         assert!(app.apply_doctor_term_replies(epoch, full_answer()));
-        assert_eq!(cursor(&app), 6, "Mouse plus six capability rows");
+        assert_eq!(
+            cursor(&app),
+            7,
+            "Mouse, the wheel row, and six capability rows"
+        );
         assert_eq!(app.dispatch(Action::DoctorClose), Effect::None);
         assert!(app.doctor.is_none());
         assert_ne!(app.input_mode(), InputMode::Doctor);
@@ -736,10 +802,10 @@ mod tests {
         assert_eq!(app.status, NO_FIX_TO_COPY);
         // A capability row has no copy line.
         app.dispatch(Action::DoctorTop);
-        app.dispatch(Action::DoctorMove(1));
+        app.dispatch(Action::DoctorMove(2));
         assert_eq!(app.dispatch(Action::DoctorCopy), Effect::None);
         // Still checking: nothing to copy either.
-        app.dispatch(Action::DoctorMove(GIT as i32 - 1));
+        app.dispatch(Action::DoctorMove(GIT as i32 - 2));
         app.dispatch(Action::DoctorRerun);
         assert_eq!(app.dispatch(Action::DoctorCopy), Effect::None);
     }
@@ -778,5 +844,158 @@ mod tests {
         assert!(!app.ui_store_path.exists(), "no UI-state save");
         assert_eq!(files(), before, "no file written");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn cursor(app: &AppState) -> usize {
+        app.doctor.as_ref().unwrap().cursor
+    }
+
+    fn wheel_status(app: &AppState) -> CheckStatus {
+        row(app, WHEEL_ROW).status
+    }
+
+    /// Open: the wheel row waits (unknown). A wheel event turns it ok and
+    /// moves the cursor one row (down = next, up = previous); later arrow
+    /// keys keep it ok. Each change rebuilds the rows in place: no new
+    /// probe or query, same rows apart from the wheel row, cursor kept.
+    #[test]
+    fn a_wheel_event_turns_the_wheel_row_ok_and_arrows_after_it_keep_it() {
+        let mut app = app();
+        opened(&mut app);
+        assert_eq!(names(&app)[WHEEL], WHEEL_ROW, "right after Mouse");
+        assert_eq!(wheel_status(&app), CheckStatus::Unknown);
+        assert_eq!(
+            row(&app, WHEEL_ROW).why,
+            "Scroll the mouse wheel once over this dialog."
+        );
+        let before = app.doctor.as_ref().unwrap().clone();
+
+        app.dispatch(Action::DoctorMove(3));
+        assert_eq!(app.dispatch(Action::DoctorWheel(1)), Effect::None);
+        assert_eq!(wheel_status(&app), CheckStatus::Ok);
+        assert_eq!(cursor(&app), 4, "wheel down: next row");
+        let doctor = app.doctor.as_ref().unwrap();
+        assert_eq!(doctor.gen, before.gen, "no new request");
+        assert_eq!(doctor.caps_query, CapsQuery::Ended, "no new query");
+        assert_eq!(app.doctor_caps_query_to_send(), None);
+        let rows = doctor.checks.as_ref().unwrap();
+        let old = before.checks.as_ref().unwrap();
+        assert_eq!(names(&app), MERGED);
+        for (i, (new, old)) in rows.iter().zip(old).enumerate() {
+            if i != WHEEL {
+                assert_eq!(new, old, "only the wheel row changes");
+            }
+        }
+
+        app.dispatch(Action::DoctorWheel(-1));
+        assert_eq!(cursor(&app), 3, "wheel up: previous row");
+        app.dispatch(Action::DoctorWheel(0));
+        assert_eq!(cursor(&app), 3, "a horizontal wheel only records");
+        assert_eq!(app.dispatch(Action::DoctorArrow(1)), Effect::None);
+        assert_eq!(cursor(&app), 4, "arrows still move");
+        assert_eq!(wheel_status(&app), CheckStatus::Ok, "sticky");
+    }
+
+    /// Up / Down arrows with no wheel event warn with the Terminal.app and
+    /// tmux fix; the `set -g mouse on` copy line only inside tmux. A wheel
+    /// event after the arrows turns the row ok. `j` / `k` do not count.
+    #[test]
+    fn arrows_without_a_wheel_event_warn_and_a_wheel_after_them_is_ok() {
+        for (in_tmux, line) in [(false, None), (true, Some("set -g mouse on"))] {
+            let mut app = app();
+            let Effect::RunDoctor { gen } = app.dispatch(Action::OpenDoctor) else {
+                panic!("open asks for a probe");
+            };
+            assert!(app.apply_doctor(gen, rows(), in_tmux));
+            let epoch = send_query(&mut app);
+            assert!(app.apply_doctor_term_replies(epoch, full_answer()));
+            app.dispatch(Action::DoctorMove(1));
+            app.dispatch(Action::DoctorMove(-1));
+            assert_eq!(wheel_status(&app), CheckStatus::Unknown, "j / k");
+
+            app.dispatch(Action::DoctorArrow(1));
+            assert_eq!(cursor(&app), 1, "Down moves");
+            app.dispatch(Action::DoctorArrow(-1));
+            assert_eq!(cursor(&app), 0, "Up moves");
+            let check = row(&app, WHEEL_ROW);
+            assert_eq!(check.status, CheckStatus::Warn, "tmux {in_tmux}");
+            let fix = check.fix.as_ref().expect("fix");
+            assert!(
+                fix.hint
+                    .as_deref()
+                    .is_some_and(|hint| hint.contains("Terminal.app: View → Allow Mouse")),
+                "{fix:?}"
+            );
+            assert_eq!(fix.copy.as_deref(), line, "tmux {in_tmux}");
+            app.dispatch(Action::DoctorMove(WHEEL as i32));
+            assert_eq!(
+                app.doctor_copy_text().as_deref(),
+                line,
+                "y copies the tmux line on the wheel row"
+            );
+
+            app.dispatch(Action::DoctorWheel(1));
+            assert_eq!(wheel_status(&app), CheckStatus::Ok, "tmux {in_tmux}");
+        }
+    }
+
+    /// Mouse capture off: the wheel row says it cannot test, whatever came.
+    #[test]
+    fn capture_off_makes_the_wheel_row_unknown() {
+        let mut app = app();
+        app.mouse_enabled = false;
+        opened(&mut app);
+        app.dispatch(Action::DoctorArrow(1));
+        let check = row(&app, WHEEL_ROW);
+        assert_eq!(check.status, CheckStatus::Unknown);
+        assert_eq!(
+            check.why,
+            "Mouse capture is off, so the wheel cannot be tested. Close the Doctor and press m \
+             to turn it on."
+        );
+    }
+
+    /// An event while the head shows `checking…` is kept and shows when the
+    /// rows paint; the result survives `r`; a new open waits again.
+    #[test]
+    fn the_wheel_test_is_kept_while_checking_and_across_r_but_not_a_new_open() {
+        let mut app = app();
+        let Effect::RunDoctor { gen } = app.dispatch(Action::OpenDoctor) else {
+            panic!("open asks for a probe");
+        };
+        app.dispatch(Action::DoctorWheel(1));
+        assert_eq!(app.doctor.as_ref().unwrap().checks, None, "checking");
+        assert_eq!(cursor(&app), 0, "no rows to move on");
+        assert!(app.apply_doctor(gen, rows(), false));
+        let epoch = send_query(&mut app);
+        assert!(app.apply_doctor_term_replies(epoch, full_answer()));
+        assert_eq!(
+            wheel_status(&app),
+            CheckStatus::Ok,
+            "recorded while checking"
+        );
+
+        let Effect::RunDoctor { gen } = app.dispatch(Action::DoctorRerun) else {
+            panic!("re-run asks for a probe");
+        };
+        app.dispatch(Action::DoctorArrow(1));
+        assert!(app.apply_doctor(gen, rows(), false));
+        let epoch = send_query(&mut app);
+        assert!(app.apply_doctor_term_replies(epoch, full_answer()));
+        assert_eq!(wheel_status(&app), CheckStatus::Ok, "survives r");
+
+        app.dispatch(Action::DoctorClose);
+        opened(&mut app);
+        assert_eq!(wheel_status(&app), CheckStatus::Unknown, "a new open waits");
+
+        // Arrows while checking show as a warning once the rows paint.
+        let Effect::RunDoctor { gen } = app.dispatch(Action::DoctorRerun) else {
+            panic!("re-run asks for a probe");
+        };
+        app.dispatch(Action::DoctorArrow(-1));
+        assert!(app.apply_doctor(gen, rows(), false));
+        let epoch = send_query(&mut app);
+        assert!(app.apply_doctor_term_replies(epoch, full_answer()));
+        assert_eq!(wheel_status(&app), CheckStatus::Warn);
     }
 }

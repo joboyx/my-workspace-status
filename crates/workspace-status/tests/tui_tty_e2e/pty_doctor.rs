@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::Path;
 
-use crate::harness::{byte_positions, find_bytes, PtySession, CAPS_QUERY, COLS};
+use crate::harness::{byte_positions, find_bytes, PtySession, CAPS_QUERY, COLS, SGR_WHEEL_DOWN};
 use crate::seed::daily_workspace;
 use crate::support::{open_command_palette, type_palette_filter, WAIT};
 
@@ -143,11 +143,12 @@ fn pty_doctor_opens_from_palette_fills_rows_and_writes_no_ui_state() {
         "g puts the cursor on the first row",
         WAIT,
     );
-    // git is the first TOOLS row, after the thirteen TERMINAL rows on Unix
-    // (seven probe rows and six capability rows). Each j waits for the
-    // cursor to move before the next: the event loop drops a queued copy
-    // of a held nav key, so two j presses that arrive in one read move once.
-    for _ in 0..13 {
+    // git is the first TOOLS row, after the fourteen TERMINAL rows on Unix
+    // (seven probe rows, the live wheel test row, and six capability rows).
+    // Each j waits for the cursor to move before the next: the event loop
+    // drops a queued copy of a held nav key, so two j presses that arrive in
+    // one read move once.
+    for _ in 0..14 {
         let before = cursor_row(&tui.screen());
         tui.key('j');
         tui.wait_pred(
@@ -158,7 +159,7 @@ fn pty_doctor_opens_from_palette_fills_rows_and_writes_no_ui_state() {
     }
     tui.wait_pred(
         |screen| doctor_filled_with(screen, "git") && cursor_on(screen, "git"),
-        "thirteen j moves put the cursor on the git row",
+        "fourteen j moves put the cursor on the git row",
         WAIT,
     );
 
@@ -347,4 +348,97 @@ fn pty_doctor_capability_rows_are_unknown_when_the_terminal_does_not_answer() {
         "the cursor stays on the first row:\n{screen}"
     );
     assert_eq!(tui.raw_count(CAPS_QUERY), 1, "the query is written once");
+}
+
+/// The live wheel test row.
+const WHEEL_ROW: &str = "Mouse wheel (live test)";
+
+/// Why text of the wheel row before any wheel event or arrow key.
+const WHEEL_WAITING: &str = "Scroll the mouse wheel once over this dialog.";
+
+/// Open the Doctor on a tall terminal and wait until the wheel row shows
+/// the waiting text with the unknown chip. Returns the session.
+fn doctor_waiting_for_the_wheel(workspace: &Path) -> PtySession {
+    let mut tui = PtySession::open_size_with_env(
+        workspace,
+        COLS,
+        TALL_ROWS,
+        &[("WS_STATUS_GLYPHS", "ascii")],
+    );
+    open_doctor(&mut tui);
+    let screen = tui.wait_screen(
+        |screen| doctor_filled_with(screen, WHEEL_ROW) && screen.contains(WHEEL_WAITING),
+        "the wheel row waits for a wheel event",
+        WAIT,
+    );
+    assert!(
+        screen.contains(&format!("?    {WHEEL_ROW}")),
+        "the waiting wheel row is unknown:\n{screen}"
+    );
+    assert!(
+        cursor_on(&screen, "Terminal size"),
+        "the cursor starts on the first row:\n{screen}"
+    );
+    tui
+}
+
+/// One SGR wheel-down report over the dialog turns the wheel row ok and
+/// moves the cursor one row. Fail if the row stays unknown, turns warn, or
+/// the cursor stays on the first row.
+#[test]
+fn pty_doctor_wheel_event_turns_the_live_wheel_row_ok() {
+    let (_root, workspace) = daily_workspace();
+    let mut tui = doctor_waiting_for_the_wheel(&workspace);
+    tui.sgr_mouse(SGR_WHEEL_DOWN, COLS / 2, TALL_ROWS / 2);
+    let screen = tui.wait_screen(
+        |screen| {
+            doctor_filled_with(screen, WHEEL_ROW)
+                && screen.contains("A wheel event arrived: the terminal sends mouse reports.")
+        },
+        "a wheel event turns the wheel row ok",
+        WAIT,
+    );
+    assert!(
+        screen.contains(&format!("ok   {WHEEL_ROW}")),
+        "the wheel row is ok:\n{screen}"
+    );
+    assert!(
+        cursor_row(&screen).is_some() && !cursor_on(&screen, "Terminal size"),
+        "wheel down moves the cursor to the next row:\n{screen}"
+    );
+    assert!(screen.contains(TITLE), "the Doctor stays open:\n{screen}");
+    tui.assert_running("after the wheel event");
+}
+
+/// A Down arrow key (`ESC [ B`) with no wheel event turns the wheel row
+/// warn with the Terminal.app fix in its hint, and still moves the cursor.
+/// Fail if the row stays unknown, turns ok, or the fix text is missing.
+#[test]
+fn pty_doctor_down_arrow_warns_the_live_wheel_row_with_the_fix() {
+    let (_root, workspace) = daily_workspace();
+    let mut tui = doctor_waiting_for_the_wheel(&workspace);
+    tui.send_bytes(b"\x1b[B");
+    let screen = tui.wait_screen(
+        |screen| {
+            doctor_filled_with(screen, WHEEL_ROW)
+                && screen.contains("Got Up/Down arrow keys and no wheel event.")
+        },
+        "a Down arrow turns the wheel row warn",
+        WAIT,
+    );
+    assert!(
+        screen.contains(&format!("warn {WHEEL_ROW}")),
+        "the wheel row is warn:\n{screen}"
+    );
+    for text in ["Terminal.app:", "(Cmd+R)."] {
+        assert!(
+            screen.contains(text),
+            "the hint names the fix ({text}):\n{screen}"
+        );
+    }
+    assert!(
+        cursor_row(&screen).is_some() && !cursor_on(&screen, "Terminal size"),
+        "Down still moves the cursor:\n{screen}"
+    );
+    tui.assert_running("after the arrow key");
 }

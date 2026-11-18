@@ -316,9 +316,18 @@ pub enum Action {
     /// [`Effect::RunDoctor`]: the probe runs on a blocking worker. Report
     /// only: opening writes nothing.
     OpenDoctor,
-    /// Move the Doctor cursor by this many rows (`j` / `k`, arrows, page
-    /// keys). Clamped to the rows.
+    /// Move the Doctor cursor by this many rows (`j` / `k`, page keys).
+    /// Clamped to the rows.
     DoctorMove(i32),
+    /// Up (`-1`) / Down (`1`) arrow key in the Doctor: moves the cursor
+    /// like [`Action::DoctorMove`] and records arrow keys for the live
+    /// mouse wheel test (a terminal with mouse reporting off turns the
+    /// wheel into arrow keys).
+    DoctorArrow(i32),
+    /// Mouse wheel event in the Doctor: records the live mouse wheel test
+    /// and moves the cursor by this many rows (wheel down `1`, up `-1`; `0`
+    /// for a horizontal wheel, which only records).
+    DoctorWheel(i32),
     /// Doctor cursor to the first row (`g`).
     DoctorTop,
     /// Doctor cursor to the last row (`G`).

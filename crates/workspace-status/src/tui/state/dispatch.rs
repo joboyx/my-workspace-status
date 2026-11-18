@@ -258,6 +258,8 @@ impl AppState {
             // Report-only, from every tab: no gate above refuses these.
             action @ (Action::OpenDoctor
             | Action::DoctorMove(_)
+            | Action::DoctorArrow(_)
+            | Action::DoctorWheel(_)
             | Action::DoctorTop
             | Action::DoctorBottom
             | Action::DoctorCopy

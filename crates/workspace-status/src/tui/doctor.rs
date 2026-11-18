@@ -767,8 +767,8 @@ fn clipboard(p: &Probe) -> Check {
     )
 }
 
-/// Name of the mouse capture row. The capability rows of
-/// [`super::term_caps::doctor_rows`] go right after it.
+/// Name of the mouse capture row. The live wheel test row and the
+/// capability rows of [`super::term_caps::doctor_rows`] go right after it.
 pub(super) const MOUSE_ROW: &str = "Mouse";
 
 fn mouse(p: &Probe) -> Check {
@@ -802,6 +802,107 @@ fn mouse(p: &Probe) -> Check {
         }
     }
     row(CheckGroup::Terminal, NAME, CheckStatus::Ok, "On.", None)
+}
+
+/// Name of the live mouse wheel test row, right after [`MOUSE_ROW`].
+pub(super) const WHEEL_ROW: &str = "Mouse wheel (live test)";
+
+/// What the open Doctor saw of the live mouse wheel test.
+///
+/// Sticky: once a wheel event arrived, later arrow keys do not change it.
+/// It survives `r`; a new open starts at [`WheelTest::Waiting`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum WheelTest {
+    /// No wheel event and no Up / Down arrow key yet.
+    #[default]
+    Waiting,
+    /// Up / Down arrow keys arrived and no wheel event yet: a terminal with
+    /// mouse reporting off turns the wheel into arrow keys.
+    Arrows,
+    /// A wheel event arrived: the terminal sends mouse reports.
+    Wheel,
+}
+
+impl WheelTest {
+    /// The state after an Up / Down arrow key: a wheel result stays.
+    pub(crate) fn arrow(self) -> Self {
+        match self {
+            WheelTest::Waiting | WheelTest::Arrows => WheelTest::Arrows,
+            WheelTest::Wheel => WheelTest::Wheel,
+        }
+    }
+}
+
+/// Input of the live mouse wheel test row ([`wheel_check`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WheelRow {
+    /// The TUI Doctor: what it saw, and whether mouse capture is on.
+    Live {
+        /// The live test state of the open Doctor.
+        test: WheelTest,
+        /// Mouse capture is on (`m`), so the terminal can send wheel events.
+        capture: bool,
+    },
+    /// The `ws doctor` CLI: no live input, so the test needs the TUI.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the `ws doctor` CLI is its first caller")
+    )]
+    TuiOnly,
+}
+
+/// The live mouse wheel test row (group TERMINAL). Pure.
+///
+/// Never a failure: with capture off, while it waits, and in the CLI it is
+/// unknown. A wheel event is ok; Up / Down arrow keys with no wheel event
+/// are a warning with the fix, and the `set -g mouse on` copy line only
+/// inside tmux (`in_tmux`).
+pub(crate) fn wheel_check(wheel: WheelRow, in_tmux: bool) -> Check {
+    const NAME: &str = WHEEL_ROW;
+    let unknown = |why| row(CheckGroup::Terminal, NAME, CheckStatus::Unknown, why, None);
+    match wheel {
+        WheelRow::TuiOnly => {
+            unknown("TUI only: open Doctor: setup checkup in the TUI and scroll once.")
+        }
+        WheelRow::Live { capture: false, .. } => unknown(
+            "Mouse capture is off, so the wheel cannot be tested. Close the Doctor and press m \
+             to turn it on.",
+        ),
+        WheelRow::Live {
+            test: WheelTest::Waiting,
+            ..
+        } => unknown("Scroll the mouse wheel once over this dialog."),
+        WheelRow::Live {
+            test: WheelTest::Wheel,
+            ..
+        } => row(
+            CheckGroup::Terminal,
+            NAME,
+            CheckStatus::Ok,
+            "A wheel event arrived: the terminal sends mouse reports.",
+            None,
+        ),
+        WheelRow::Live {
+            test: WheelTest::Arrows,
+            ..
+        } => {
+            const ADVICE: &str = "macOS Terminal.app: View → Allow Mouse Reporting (Cmd+R). \
+                                  In tmux: set -g mouse on. If you pressed the arrow keys, \
+                                  scroll once to test again.";
+            row(
+                CheckGroup::Terminal,
+                NAME,
+                CheckStatus::Warn,
+                "Got Up/Down arrow keys and no wheel event. If you scrolled, the terminal turns \
+                 the wheel into arrow keys: mouse reporting is off.",
+                if in_tmux {
+                    hint_copy(ADVICE, "set -g mouse on")
+                } else {
+                    hint(ADVICE)
+                },
+            )
+        }
+    }
 }
 
 /* ── TOOLS ──────────────────────────────────────────────────────────────── */
@@ -1930,6 +2031,69 @@ mod tests {
         assert_eq!(get(&p, "Mouse").status, CheckStatus::Warn);
         in_tmux(&mut p, Some("hyperlinks"), Some("on"), Some("on"));
         assert_eq!(get(&p, "Mouse").status, CheckStatus::Ok);
+    }
+
+    /// Every state of the live wheel test row: capture off, waiting, the
+    /// CLI form (unknown), a wheel event (ok), arrow keys (warn, with the
+    /// tmux copy line only inside tmux).
+    #[test]
+    fn wheel_row_states() {
+        let live = |test, capture| WheelRow::Live { test, capture };
+        let unknown = [
+            (
+                live(WheelTest::Wheel, false),
+                "Mouse capture is off, so the wheel cannot be tested. Close the Doctor and \
+                 press m to turn it on.",
+            ),
+            (
+                live(WheelTest::Waiting, true),
+                "Scroll the mouse wheel once over this dialog.",
+            ),
+            (
+                WheelRow::TuiOnly,
+                "TUI only: open Doctor: setup checkup in the TUI and scroll once.",
+            ),
+        ];
+        for (wheel, why) in unknown {
+            for tmux in [false, true] {
+                let check = wheel_check(wheel, tmux);
+                assert_eq!(check.group, CheckGroup::Terminal);
+                assert_eq!(check.name, "Mouse wheel (live test)");
+                assert_eq!(check.status, CheckStatus::Unknown, "{wheel:?}");
+                assert_eq!(check.why, why, "{wheel:?}");
+                assert_eq!(check.fix, None, "{wheel:?}");
+            }
+        }
+
+        let ok = wheel_check(live(WheelTest::Wheel, true), true);
+        assert_eq!(ok.status, CheckStatus::Ok);
+        assert_eq!(
+            ok.why,
+            "A wheel event arrived: the terminal sends mouse reports."
+        );
+        assert_eq!(ok.fix, None);
+
+        let advice = "macOS Terminal.app: View → Allow Mouse Reporting (Cmd+R). In tmux: set \
+                      -g mouse on. If you pressed the arrow keys, scroll once to test again.";
+        for (tmux, line) in [(false, None), (true, Some("set -g mouse on"))] {
+            let warn = wheel_check(live(WheelTest::Arrows, true), tmux);
+            assert_eq!(warn.status, CheckStatus::Warn, "tmux {tmux}");
+            assert_eq!(
+                warn.why,
+                "Got Up/Down arrow keys and no wheel event. If you scrolled, the terminal \
+                 turns the wheel into arrow keys: mouse reporting is off."
+            );
+            assert_eq!(hint_of(&warn), advice, "tmux {tmux}");
+            assert_eq!(copy(&warn), line, "tmux {tmux}");
+        }
+    }
+
+    /// The wheel test is sticky: arrows after a wheel event keep it ok.
+    #[test]
+    fn wheel_test_arrow_step_keeps_a_wheel_result() {
+        assert_eq!(WheelTest::Waiting.arrow(), WheelTest::Arrows);
+        assert_eq!(WheelTest::Arrows.arrow(), WheelTest::Arrows);
+        assert_eq!(WheelTest::Wheel.arrow(), WheelTest::Wheel);
     }
 
     #[test]
