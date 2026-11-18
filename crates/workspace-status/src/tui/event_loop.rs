@@ -5,10 +5,18 @@
 //! [`super::tty::read_event_origin`]. Every git/process effect runs on
 //! `spawn_blocking`. [`super::effect::Interpreter`] schedules and applies
 //! those jobs. The loop thread only dispatches, applies results, and draws.
+//!
+//! The Doctor's terminal capability query follows the same split: the draw
+//! path writes [`QUERY`] once per request ([`write_caps_query`]), the input
+//! thread forwards the replies the reader parsed ([`InputMsg::Replies`]),
+//! and a timer arm in [`drive`] ends the wait at the deadline. The loop
+//! thread never reads stdin.
 
 use std::io;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -42,8 +50,9 @@ use super::render::draw;
 use super::state::{AppState, PendingConfirm};
 use super::status::StatusMessage;
 use super::store_save::{StoreKind, StoreSaved, UnsavedStore};
+use super::term_caps::{TermReply, QUERY};
 use super::term_progress::{progress_for, TermProgress};
-use super::tty::{poll_event, read_event_origin, TtyEvent};
+use super::tty::{poll_event, read_event_origin, take_term_replies, TtyEvent};
 use super::undercurl::{undercurl_cells, write_undercurls};
 use super::watch::watch_remain_ms;
 
@@ -90,10 +99,29 @@ impl InputEvent {
     }
 }
 
+/// One item the input thread forwards to the loop thread, in read order.
+enum InputMsg {
+    /// A terminal event.
+    Event(InputEvent),
+    /// Terminal replies the reader parsed ([`take_term_replies`]), tagged
+    /// with the Doctor request whose capability query was the last one
+    /// written when the input thread took them ([`InputBridge::caps_epoch`]).
+    Replies {
+        /// The Doctor request id; `0` before any query was written.
+        epoch: u64,
+        /// The replies, oldest first.
+        replies: Vec<TermReply>,
+    },
+}
+
 struct InputBridge {
-    rx: tokio::sync::mpsc::Receiver<InputEvent>,
+    rx: tokio::sync::mpsc::Receiver<InputMsg>,
     cmd: std_mpsc::Sender<InputCmd>,
     ack: std_mpsc::Receiver<()>,
+    /// The Doctor request whose capability query the loop thread wrote
+    /// last ([`write_caps_query`]). The input thread tags the replies it
+    /// forwards with it.
+    caps_epoch: Arc<AtomicU64>,
 }
 
 impl InputBridge {
@@ -101,11 +129,14 @@ impl InputBridge {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let (cmd_tx, cmd_rx) = std_mpsc::channel();
         let (ack_tx, ack_rx) = std_mpsc::channel();
-        thread::spawn(move || input_thread(tx, cmd_rx, ack_tx));
+        let caps_epoch = Arc::new(AtomicU64::new(0));
+        let epoch = Arc::clone(&caps_epoch);
+        thread::spawn(move || input_thread(tx, cmd_rx, ack_tx, &epoch));
         Self {
             rx,
             cmd: cmd_tx,
             ack: ack_rx,
+            caps_epoch,
         }
     }
 
@@ -130,11 +161,17 @@ impl InputBridge {
 /// the first event after them ([`take_held_nav_backlog`]), and marks the
 /// copies. It drops nothing: the loop thread knows the input mode and
 /// decides ([`handle_input`]).
+///
+/// After each poll and read attempt it also forwards the terminal replies
+/// the reader parsed ([`forward_replies`]), also when the read ends in
+/// `WouldBlock`: a read that brought only replies has no event.
 fn input_thread(
-    tx: tokio::sync::mpsc::Sender<InputEvent>,
+    tx: tokio::sync::mpsc::Sender<InputMsg>,
     cmd_rx: std_mpsc::Receiver<InputCmd>,
     ack_tx: std_mpsc::Sender<()>,
+    caps_epoch: &AtomicU64,
 ) {
+    let replies = || forward_replies(&tx, caps_epoch, &cmd_rx, &ack_tx);
     loop {
         match cmd_rx.try_recv() {
             Ok(InputCmd::Pause) => {
@@ -149,12 +186,20 @@ fn input_thread(
             Err(std_mpsc::TryRecvError::Empty) => {}
             Err(std_mpsc::TryRecvError::Disconnected) => break,
         }
-        match poll_event(Duration::from_millis(16)) {
+        let polled = poll_event(Duration::from_millis(16));
+        if !replies() {
+            return;
+        }
+        match polled {
             Ok(true) => {}
             Ok(false) => continue,
             Err(_) => break,
         }
-        let ready = match read_event_origin() {
+        let read = read_event_origin();
+        if !replies() {
+            return;
+        }
+        let ready = match read {
             Ok(ready) => ready,
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
             Err(_) => break,
@@ -167,11 +212,34 @@ fn input_thread(
             .chain(backlog.into_iter().map(InputEvent::held_backlog))
             .chain(next.map(InputEvent::read));
         for input in forwarded {
-            if !forward(&tx, input, &cmd_rx, &ack_tx) {
+            if !forward(&tx, InputMsg::Event(input), &cmd_rx, &ack_tx) {
                 return;
             }
         }
     }
+}
+
+/// Forward the terminal replies the reader parsed since the last call,
+/// tagged with the current query epoch. `false` when the loop or the bridge
+/// is gone.
+///
+/// The epoch is read before the replies are taken. The loop thread drops
+/// the queued replies, then stores the new epoch, then writes the query
+/// ([`write_caps_query`]); only this thread parses stdin, and it parsed
+/// every reply it takes here before it read the epoch. So a reply tagged
+/// with an older epoch was read before the new query went out, and the
+/// loop thread drops it. A late reply to an older query that is parsed
+/// after the loop thread dropped the queue still gets the new epoch: the
+/// bytes alone cannot tell it apart.
+fn forward_replies(
+    tx: &tokio::sync::mpsc::Sender<InputMsg>,
+    caps_epoch: &AtomicU64,
+    cmd_rx: &std_mpsc::Receiver<InputCmd>,
+    ack_tx: &std_mpsc::Sender<()>,
+) -> bool {
+    let epoch = caps_epoch.load(Ordering::SeqCst);
+    let replies = take_term_replies();
+    replies.is_empty() || forward(tx, InputMsg::Replies { epoch, replies }, cmd_rx, ack_tx)
 }
 
 /// Block until the loop thread sends Resume (ack it): `true`. A repeated
@@ -335,7 +403,13 @@ pub async fn run(
     let mut presenter = Presenter::new();
     let mut progress = TermProgress::new(opts.settings.term_progress);
     let mut pointer = TermPointer::default();
-    if let Err(code) = draw_frame(terminal, state, &mut progress, &mut pointer) {
+    if let Err(code) = draw_frame(
+        terminal,
+        state,
+        &mut progress,
+        &mut pointer,
+        &input.caps_epoch,
+    ) {
         return LoopExit {
             result: Err(code),
             unsaved: Vec::new(),
@@ -440,6 +514,7 @@ async fn drive(ctx: &mut LoopCtx<'_>) -> Result<(), u8> {
         let status_remain = ctx.state.status_expiry_ms(now).unwrap_or(u64::MAX);
         let peek_remain = ctx.state.peek_remaining_ms(now).unwrap_or(u64::MAX);
         let search_remain = ctx.state.search_files_due_ms(now).unwrap_or(u64::MAX);
+        let caps_remain = ctx.state.doctor_caps_remain_ms(now).unwrap_or(u64::MAX);
         let present_remain = ctx.presenter.remain_ms(ctx.state.next_anim_tick_ms());
         let status_hold_remain = ctx.interp.status_hold_remain_ms(now);
         let join_empty = ctx.join.is_empty();
@@ -542,8 +617,20 @@ async fn drive(ctx: &mut LoopCtx<'_>) -> Result<(), u8> {
                 // Animation frames redraw on their own tick (spinner,
                 // flash, glide); idle draws only when dirty.
                 if ctx.presenter.should_draw(ctx.state.next_anim_tick_ms()) {
-                    draw_frame(ctx.terminal, ctx.state, &mut ctx.progress, &mut ctx.pointer)?;
+                    draw_frame(
+                        ctx.terminal,
+                        ctx.state,
+                        &mut ctx.progress,
+                        &mut ctx.pointer,
+                        &ctx.input.caps_epoch,
+                    )?;
                     ctx.presenter.painted();
+                }
+            }
+            _ = sleep_ms(caps_remain) => {
+                // The Doctor's capability query got no DA1 reply in time.
+                if ctx.state.expire_doctor_caps_query(Instant::now()) {
+                    ctx.presenter.mark();
                 }
             }
         }
@@ -660,11 +747,16 @@ fn keep_emoji_tails_out_of_diff(buffer: &mut Buffer) {
 /// A terminal resize opens the update before its clear (see
 /// [`super::app::apply_terminal_resize`]); this frame closes it. Terminals
 /// without the mode ignore both sequences.
+///
+/// When the open Doctor asks for its capability query, the frame also
+/// writes [`QUERY`] ([`write_caps_query`]) and, once the bytes are
+/// flushed, records the send instant that starts the query's deadline.
 fn draw_frame<W: io::Write>(
     terminal: &mut Terminal<CrosstermBackend<W>>,
     state: &mut AppState,
     progress: &mut TermProgress,
     pointer: &mut TermPointer,
+    caps_epoch: &AtomicU64,
 ) -> Result<(), u8> {
     queue!(terminal.backend_mut(), BeginSynchronizedUpdate).map_err(|_| 1u8)?;
     let completed = terminal
@@ -689,8 +781,40 @@ fn draw_frame<W: io::Write>(
             shape_for(state.hovered_resize_edge()),
         )
         .map_err(|_| 1u8)?;
+    let caps_sent = write_caps_query(terminal.backend_mut(), state, caps_epoch).map_err(|_| 1u8)?;
     queue!(terminal.backend_mut(), EndSynchronizedUpdate).map_err(|_| 1u8)?;
-    io::Write::flush(terminal.backend_mut()).map_err(|_| 1u8)
+    io::Write::flush(terminal.backend_mut()).map_err(|_| 1u8)?;
+    if let Some(gen) = caps_sent {
+        state.doctor_caps_query_sent(gen, Instant::now());
+    }
+    Ok(())
+}
+
+/// Write the Doctor's capability query [`QUERY`] when the open request
+/// asks for it ([`AppState::doctor_caps_query_to_send`]). Returns that
+/// request; the caller records the send instant once the bytes are
+/// flushed, which makes this once per request.
+///
+/// First it drops the replies the reader still holds: they answer an
+/// older query, or the startup background query
+/// ([`super::term_bg::query_background`]), whose late DA1 reply would
+/// otherwise end this query at once. Then it stores the request in
+/// `caps_epoch`, so the input thread tags the replies it takes from now on
+/// with it ([`forward_replies`]); the replies already forwarded carry an
+/// older epoch and the loop drops them. A few escape bytes on the draw path,
+/// like the OSC 8 / OSC 22 / OSC 9;4 writes: no stdin read, no wait.
+fn write_caps_query<W: io::Write>(
+    out: &mut W,
+    state: &AppState,
+    caps_epoch: &AtomicU64,
+) -> io::Result<Option<u64>> {
+    let Some(gen) = state.doctor_caps_query_to_send() else {
+        return Ok(None);
+    };
+    drop(take_term_replies());
+    caps_epoch.store(gen, Ordering::SeqCst);
+    out.write_all(QUERY)?;
+    Ok(Some(gen))
 }
 
 async fn sleep_ms(ms: u64) {
@@ -712,7 +836,20 @@ async fn sleep_ms(ms: u64) {
 /// in the current state ([`keep_held_nav_backlog`]): the key read before
 /// it is already dispatched, so a `/` that opened the search prompt
 /// counts.
-fn handle_input(ctx: &mut LoopCtx<'_>, input: InputEvent) {
+///
+/// Terminal replies are no input: they go to the open Doctor's capability
+/// query ([`AppState::apply_doctor_term_replies`]), which drops them when
+/// they do not belong to it.
+fn handle_input(ctx: &mut LoopCtx<'_>, msg: InputMsg) {
+    let input = match msg {
+        InputMsg::Event(input) => input,
+        InputMsg::Replies { epoch, replies } => {
+            if ctx.state.apply_doctor_term_replies(epoch, replies) {
+                ctx.presenter.mark();
+            }
+            return;
+        }
+    };
     let InputEvent {
         event: (event, origin, read_at),
         held_backlog,
@@ -1187,15 +1324,25 @@ mod tests {
         .unwrap();
         let mut progress = TermProgress::new(true);
         let mut pointer = TermPointer::default();
+        let epoch = AtomicU64::new(0);
         for _ in 0..2 {
             sink.0.borrow_mut().clear();
-            draw_frame(&mut terminal, &mut state, &mut progress, &mut pointer).unwrap();
+            draw_frame(
+                &mut terminal,
+                &mut state,
+                &mut progress,
+                &mut pointer,
+                &epoch,
+            )
+            .unwrap();
             let out = sink.0.borrow();
             let count = |seq: &[u8]| out.windows(seq.len()).filter(|w| *w == seq).count();
             assert!(out.starts_with(BEGIN), "frame opens the update first");
             assert!(out.ends_with(END), "frame closes the update last");
             assert_eq!((count(BEGIN), count(END)), (1, 1), "one update per frame");
+            assert_eq!(count(QUERY), 0, "no Doctor: no capability query");
         }
+        assert_eq!(epoch.load(Ordering::SeqCst), 0);
     }
 
     #[test]

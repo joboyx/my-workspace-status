@@ -1,10 +1,11 @@
 //! Doctor setup checkup: the palette opens a report-only overlay that the
-//! probe fills off the draw thread.
+//! probe fills off the draw thread, with the terminal's answers to the
+//! capability query.
 
 use std::fs;
 use std::path::Path;
 
-use crate::harness::PtySession;
+use crate::harness::{PtySession, CAPS_QUERY, COLS};
 use crate::seed::daily_workspace;
 use crate::support::{open_command_palette, type_palette_filter, WAIT};
 
@@ -142,11 +143,11 @@ fn pty_doctor_opens_from_palette_fills_rows_and_writes_no_ui_state() {
         "g puts the cursor on the first row",
         WAIT,
     );
-    // git is the first TOOLS row, after the seven TERMINAL rows on Unix.
-    // Each j waits for the cursor to move before the next: the event
-    // loop drops a queued copy of a held nav key, so two j presses that
-    // arrive in one read move once.
-    for _ in 0..7 {
+    // git is the first TOOLS row, after the thirteen TERMINAL rows on Unix
+    // (seven probe rows and six capability rows). Each j waits for the
+    // cursor to move before the next: the event loop drops a queued copy
+    // of a held nav key, so two j presses that arrive in one read move once.
+    for _ in 0..13 {
         let before = cursor_row(&tui.screen());
         tui.key('j');
         tui.wait_pred(
@@ -157,7 +158,7 @@ fn pty_doctor_opens_from_palette_fills_rows_and_writes_no_ui_state() {
     }
     tui.wait_pred(
         |screen| doctor_filled_with(screen, "git") && cursor_on(screen, "git"),
-        "seven j moves put the cursor on the git row",
+        "thirteen j moves put the cursor on the git row",
         WAIT,
     );
 
@@ -183,4 +184,180 @@ fn pty_doctor_opens_from_palette_fills_rows_and_writes_no_ui_state() {
         "opening, moving, re-running and closing the Doctor writes no UI-state store: {:?}",
         dir_entries(&ui_dir)
     );
+}
+
+/// Rows of the tall terminal the capability tests use, so every TERMINAL
+/// row and its text fit in the dialog without scrolling.
+const TALL_ROWS: u16 = 80;
+
+/// A whole answer to the capability query, as one terminal write:
+/// XTVERSION, DECRPM 1006 → 2, 2004 → 2, 2026 → 0, kitty flags 1, OSC 11
+/// black, then DA1. The text holds `r`, `k`, `g`, `m`, `y`, and `c`, which
+/// are Doctor or app keys if a reply byte were read as a key.
+const FAKE_TERM_ANSWER: &[u8] = b"\x1bP>|fake-term(1.2)\x1b\\\
+\x1b[?1006;2$y\x1b[?2004;2$y\x1b[?2026;0$y\
+\x1b[?1u\
+\x1b]11;rgb:0000/0000/0000\x1b\\\
+\x1b[?62c";
+
+/// How many times the child wrote the capability query.
+fn query_count(tui: &PtySession) -> usize {
+    tui.raw_output()
+        .windows(CAPS_QUERY.len())
+        .filter(|w| *w == CAPS_QUERY)
+        .count()
+}
+
+/// True when the child wrote `text` after its `nth` capability query
+/// (1-based).
+fn painted_after_query(tui: &PtySession, nth: usize, text: &[u8]) -> bool {
+    let raw = tui.raw_output();
+    let Some(at) = raw
+        .windows(CAPS_QUERY.len())
+        .enumerate()
+        .filter(|(_, w)| *w == CAPS_QUERY)
+        .nth(nth - 1)
+        .map(|(at, _)| at)
+    else {
+        return false;
+    };
+    raw[at..].windows(text.len()).any(|w| w == text)
+}
+
+/// Open the Doctor from the palette.
+fn open_doctor(tui: &mut PtySession) {
+    open_command_palette(tui);
+    type_palette_filter(tui, "doctor");
+    tui.wait_contains(PALETTE_ROW, WAIT);
+    tui.enter();
+}
+
+/// The open Doctor shows the fake terminal's answers.
+fn shows_fake_term_answers(screen: &str) -> bool {
+    doctor_filled_with(screen, "Terminal (XTVERSION)")
+        && has_row(screen, "Background (OSC 11)")
+        && [
+            "fake-term(1.2)",
+            "Not supported (optional): a large redraw can flicker.",
+            "Supported (flags 1).",
+            "#000000, dark.",
+        ]
+        .iter()
+        .all(|text| screen.contains(text))
+}
+
+/// A terminal that answers the capability query: the TERMINAL rows show
+/// its answers, the query is written once per request (open, then `r`),
+/// and no reply byte acts as a key. Fail if a row misses an answer, the
+/// query is written again on later frames, or the Doctor cursor moves,
+/// the Doctor closes, or a fix line is copied while the replies land.
+#[test]
+fn pty_doctor_shows_the_terminal_answers_and_reads_no_reply_as_keys() {
+    let (_root, workspace) = daily_workspace();
+    let mut tui = PtySession::open_size_with_caps_reply(
+        &workspace,
+        COLS,
+        TALL_ROWS,
+        &[("WS_STATUS_GLYPHS", "ascii")],
+        FAKE_TERM_ANSWER,
+    );
+    assert_eq!(query_count(&tui), 0, "no query before the Doctor opens");
+    open_doctor(&mut tui);
+    tui.wait_pred(
+        shows_fake_term_answers,
+        "the Doctor shows the fake terminal's answers",
+        WAIT,
+    );
+    let screen = tui.screen();
+    assert!(
+        has_row(&screen, "SGR mouse (1006)")
+            && has_row(&screen, "Bracketed paste (2004)")
+            && has_row(&screen, "Kitty keyboard (CSI u)"),
+        "every capability row paints:\n{screen}"
+    );
+    assert!(
+        cursor_on(&screen, "Terminal size"),
+        "the replies moved no cursor:\n{screen}"
+    );
+    assert_eq!(query_count(&tui), 1, "one query for the open");
+
+    // Move off the first row, so a reply byte read as `k` or `g` would
+    // move the cursor back up.
+    for _ in 0..2 {
+        let before = cursor_row(&tui.screen());
+        tui.key('j');
+        tui.wait_pred(
+            |screen| cursor_row(screen).is_some_and(|row| Some(row) != before),
+            "j moves the Doctor cursor one row",
+            WAIT,
+        );
+    }
+    let focused = cursor_row(&tui.screen()).expect("cursor row");
+    tui.key('r');
+    // The second query goes out in the `checking…` frame, so the refilled
+    // rows are the ones painted after it: a screen that still shows the
+    // first answer must not pass.
+    tui.wait_pred(
+        |screen| painted_after_query(&tui, 2, b"fake-term(1.2)") && shows_fake_term_answers(screen),
+        "r writes the query again and the rows show the answers again",
+        WAIT,
+    );
+    let screen = tui.screen();
+    assert_eq!(
+        cursor_row(&screen).as_deref(),
+        Some(focused.as_str()),
+        "the replies to the second query moved no cursor:\n{screen}"
+    );
+    assert!(screen.contains(TITLE), "the Doctor stays open:\n{screen}");
+    assert!(
+        tui.clipboard_payloads().is_empty(),
+        "no reply byte copied a fix line"
+    );
+    assert_eq!(query_count(&tui), 2, "one query per request");
+    tui.assert_running("after the replies");
+}
+
+/// A terminal that answers nothing, not even DA1: after the 200 ms wait the
+/// capability rows show unknown with the wait in their text, and the head
+/// shows four counts. Fail if the Doctor stays `checking…` or a capability
+/// row shows anything but unknown.
+#[test]
+fn pty_doctor_capability_rows_are_unknown_when_the_terminal_does_not_answer() {
+    let (_root, workspace) = daily_workspace();
+    let mut tui = PtySession::open_size_with_env(
+        &workspace,
+        COLS,
+        TALL_ROWS,
+        &[("WS_STATUS_GLYPHS", "ascii")],
+    );
+    open_doctor(&mut tui);
+    tui.wait_pred(
+        |screen| {
+            doctor_filled_with(screen, "Terminal (XTVERSION)")
+                && screen.contains("The terminal did not report its name and version.")
+                && screen.contains("(no answer within 200 ms)")
+        },
+        "the capability rows show unknown after the wait",
+        WAIT,
+    );
+    let screen = tui.screen();
+    for name in [
+        "Terminal (XTVERSION)",
+        "SGR mouse (1006)",
+        "Bracketed paste (2004)",
+        "Synchronized output (2026)",
+        "Kitty keyboard (CSI u)",
+        "Background (OSC 11)",
+    ] {
+        assert!(
+            screen.contains(&format!("?    {name}")),
+            "{name} is unknown:\n{screen}"
+        );
+    }
+    assert!(has_summary(&screen), "four counts in the head:\n{screen}");
+    assert!(
+        cursor_on(&screen, "Terminal size"),
+        "the cursor stays on the first row:\n{screen}"
+    );
+    assert_eq!(query_count(&tui), 1, "the query is written once");
 }

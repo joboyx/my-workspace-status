@@ -78,6 +78,9 @@ struct SpawnOpts {
     user_config: UserConfig,
     /// Bytes the reader thread writes back when the child asks OSC 11.
     bg_reply: Option<Vec<u8>>,
+    /// Bytes the reader thread writes back when the child writes the
+    /// Doctor's capability query ([`CAPS_QUERY`]).
+    caps_reply: Option<Vec<u8>>,
 }
 
 impl Default for SpawnOpts {
@@ -87,12 +90,18 @@ impl Default for SpawnOpts {
             wait_ready: true,
             user_config: UserConfig::Baseline,
             bg_reply: None,
+            caps_reply: None,
         }
     }
 }
 
 /// OSC 11 background query the TUI writes at startup in `themeMode` `auto`.
 const OSC11_QUERY: &[u8] = b"\x1b]11;?";
+
+/// The Doctor's terminal capability query: XTVERSION, DECRQM 1006 / 2004 /
+/// 2026, kitty keyboard flags, OSC 11, then DA1.
+pub const CAPS_QUERY: &[u8] =
+    b"\x1b[>0q\x1b[?1006$p\x1b[?2004$p\x1b[?2026$p\x1b[?u\x1b]11;?\x1b\\\x1b[c";
 
 /// Start of a synchronized update (DEC private mode 2026). The TUI opens
 /// one before each frame (and before the clear of a resize).
@@ -227,7 +236,8 @@ impl FrameParser {
 
 pub struct PtySession {
     child: Box<dyn portable_pty::Child + Send>,
-    /// PTY master writer. The reader thread shares it to answer OSC 11.
+    /// PTY master writer. The reader thread shares it to answer OSC 11 and
+    /// the Doctor's capability query.
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
     /// Terminal side of the PTY. Every screen and cell read below sees a
@@ -315,6 +325,32 @@ impl PtySession {
         )
     }
 
+    /// Spawn a `cols` x `rows` terminal that answers the Doctor's
+    /// capability query.
+    ///
+    /// Each time the child writes [`CAPS_QUERY`], the reader thread writes
+    /// `reply` back on the PTY in one write, like a terminal that answers
+    /// every part of it. The OSC 11 part of the query gets only what
+    /// `reply` holds.
+    pub fn open_size_with_caps_reply(
+        workspace: &Path,
+        cols: u16,
+        rows: u16,
+        extra_env: &[(&str, &str)],
+        reply: &[u8],
+    ) -> Self {
+        Self::spawn(
+            workspace,
+            cols,
+            rows,
+            extra_env,
+            SpawnOpts {
+                caps_reply: Some(reply.to_vec()),
+                ..SpawnOpts::default()
+            },
+        )
+    }
+
     /// Spawn without waiting for the TUI. Used when the GitHub Release
     /// prompt must paint on the primary screen first.
     pub fn open_pending(
@@ -347,6 +383,7 @@ impl PtySession {
             wait_ready,
             user_config,
             bg_reply,
+            caps_reply,
         } = opts;
         assert!(
             workspace.is_dir(),
@@ -478,8 +515,14 @@ impl PtySession {
                     Ok(n) => {
                         let chunk = &buf[..n];
                         push_osc52(&mut pending, chunk, &clipboard_thread);
-                        let queries = push_raw(&raw_thread, chunk);
-                        if let Some(reply) = &bg_reply {
+                        let [bg_queries, caps_queries] =
+                            push_raw(&raw_thread, chunk, [OSC11_QUERY, CAPS_QUERY]);
+                        for (reply, queries) in
+                            [(&bg_reply, bg_queries), (&caps_reply, caps_queries)]
+                        {
+                            let Some(reply) = reply else {
+                                continue;
+                            };
                             let mut writer = writer_thread.lock().unwrap();
                             for _ in 0..queries {
                                 let _ = writer.write_all(reply);
@@ -1311,14 +1354,21 @@ impl Drop for PtySession {
 
 /// Append `chunk` to the raw tap and count the OSC 11 queries it completes.
 /// A query split across reads counts once, in the read that ends it.
-fn push_raw(raw: &Arc<Mutex<Vec<u8>>>, chunk: &[u8]) -> usize {
+fn push_raw<const N: usize>(
+    raw: &Arc<Mutex<Vec<u8>>>,
+    chunk: &[u8],
+    queries: [&[u8]; N],
+) -> [usize; N] {
     let mut raw = raw.lock().unwrap();
-    let from = raw.len().saturating_sub(OSC11_QUERY.len() - 1);
+    let start = raw.len();
     raw.extend_from_slice(chunk);
-    raw[from..]
-        .windows(OSC11_QUERY.len())
-        .filter(|w| *w == OSC11_QUERY)
-        .count()
+    queries.map(|query| {
+        let from = start.saturating_sub(query.len() - 1);
+        raw[from..]
+            .windows(query.len())
+            .filter(|w| *w == query)
+            .count()
+    })
 }
 
 const OSC52_INTRO: &[u8] = b"\x1b]52;";

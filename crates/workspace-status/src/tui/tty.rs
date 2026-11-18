@@ -136,8 +136,21 @@ struct TtyBuf {
     /// (Escape, or Alt+`P` and `>`) only when this is set.
     lone_esc_ready: bool,
     /// Terminal replies parsed from `raw`, oldest first, until
-    /// [`take_term_replies`] drains them.
+    /// [`take_term_replies`] drains them. At most [`REPLY_QUEUE_MAX`].
     replies: Vec<TermReply>,
+}
+
+/// Most terminal replies [`TtyBuf::replies`] keeps. A full answer to the
+/// Doctor's query is 7 replies; past the cap the oldest reply goes, so a
+/// terminal that sends replies while nothing drains them cannot grow memory.
+const REPLY_QUEUE_MAX: usize = 64;
+
+/// Queue `reply`, dropping the oldest one past [`REPLY_QUEUE_MAX`].
+fn push_reply(replies: &mut Vec<TermReply>, reply: TermReply) {
+    if replies.len() >= REPLY_QUEUE_MAX {
+        replies.remove(0);
+    }
+    replies.push(reply);
 }
 
 fn empty_tty_buf() -> TtyBuf {
@@ -181,16 +194,11 @@ pub(crate) fn push_pending_input(bytes: &[u8]) {
 /// Take the terminal replies the reader parsed since the last call, oldest
 /// first.
 ///
-/// The input thread calls it after each [`poll_event`] / [`read_event`]
-/// attempt. A reply is never an event: a read that brought only replies
-/// ends in `WouldBlock`.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the input thread's Doctor query forwarding is its first caller"
-    )
-)]
+/// The input thread calls it after each [`poll_event`] /
+/// [`read_event_origin`] attempt and forwards the replies to the loop
+/// thread. A reply is never an event: a read that brought only replies
+/// ends in `WouldBlock`. The loop thread also calls it, to drop the replies
+/// still queued, right before it writes the Doctor's query.
 pub(crate) fn take_term_replies() -> Vec<TermReply> {
     std::mem::take(&mut lock_tty_buf().replies)
 }
@@ -504,7 +512,7 @@ fn drain_parsed(buf: &mut TtyBuf, more: bool) {
             Take::Reply(n, reply) => {
                 let n = n.min(buf.raw.len()).max(1);
                 buf.raw.drain(..n);
-                buf.replies.push(reply);
+                push_reply(&mut buf.replies, reply);
             }
         }
     }
@@ -1553,6 +1561,31 @@ mod tests {
         assert_eq!(key_code(&alt[1].0), KeyCode::Char('x'));
     }
 
+    /// A terminal that floods replies while nothing drains them keeps at
+    /// most `REPLY_QUEUE_MAX` of them, the newest ones, and still types
+    /// the key after them.
+    #[test]
+    fn reply_queue_keeps_only_the_newest_replies() {
+        let mut bytes = Vec::new();
+        for flags in 0..REPLY_QUEUE_MAX as u32 + 6 {
+            bytes.extend_from_slice(format!("\x1b[?{flags}u").as_bytes());
+        }
+        bytes.push(b'j');
+        let (events, replies) = parse_with_replies(&bytes);
+        assert_eq!(replies.len(), REPLY_QUEUE_MAX);
+        assert_eq!(
+            replies.first(),
+            Some(&TermReply::KittyFlags(6)),
+            "oldest dropped"
+        );
+        assert_eq!(
+            replies.last(),
+            Some(&TermReply::KittyFlags(REPLY_QUEUE_MAX as u32 + 5))
+        );
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(key_code(&events[0]), KeyCode::Char('j'));
+    }
+
     /// Parse `bytes` as one read: the events and the queued replies.
     fn parse_with_replies(bytes: &[u8]) -> (Vec<Event>, Vec<TermReply>) {
         let mut buf = empty_tty_buf();
@@ -1718,7 +1751,6 @@ mod tests {
             assert!(take_ready_event(&mut buf, false).is_none(), "{head:?}");
             assert_eq!(buf.raw, head, "{head:?}: held");
             buf.raw.extend_from_slice(tail);
-            buf.lone_esc_ready = false;
             assert!(take_ready_event(&mut buf, false).is_none(), "{head:?}");
             assert!(buf.events.is_empty(), "{head:?}: {:?}", buf.events);
             assert!(buf.raw.is_empty(), "{head:?}");

@@ -693,6 +693,19 @@ mod tests {
             );
         }
 
+        // The Doctor's capability query: the loop thread only writes it
+        // (draw path); the input thread reads the replies. The blocking
+        // CLI form waits on stdin.
+        for (name, src) in [
+            ("app.rs", app),
+            ("event_loop.rs", loop_src),
+            ("state/doctor.rs", include_str!("state/doctor.rs")),
+        ] {
+            assert!(
+                !src.contains(concat!("query_", "capabilities(")),
+                "the blocking capability query must not run on the TTY loop thread ({name})"
+            );
+        }
         assert!(
             !app.contains("load_right(") && !loop_src.contains("load_right("),
             "TTY must not call load_right(; that puts git log / git diff on the loop thread"

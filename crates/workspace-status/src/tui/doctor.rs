@@ -311,6 +311,12 @@ impl Probe {
         self.on_path.contains(cmd)
     }
 
+    /// True inside tmux: `TMUX` is set and not empty in the environment the
+    /// probe read. The capability rows add their tmux hint from it.
+    pub fn in_tmux(&self) -> bool {
+        self.var("TMUX").is_some()
+    }
+
     /// True on WSL (`WSL_DISTRO_NAME` set on Linux).
     fn wsl(&self) -> bool {
         self.os == Os::Linux && self.var("WSL_DISTRO_NAME").is_some()
@@ -761,8 +767,12 @@ fn clipboard(p: &Probe) -> Check {
     )
 }
 
+/// Name of the mouse capture row. The capability rows of
+/// [`super::term_caps::doctor_rows`] go right after it.
+pub(super) const MOUSE_ROW: &str = "Mouse";
+
 fn mouse(p: &Probe) -> Check {
-    const NAME: &str = "Mouse";
+    const NAME: &str = MOUSE_ROW;
     if !p.mouse_enabled {
         return row(
             CheckGroup::Terminal,
