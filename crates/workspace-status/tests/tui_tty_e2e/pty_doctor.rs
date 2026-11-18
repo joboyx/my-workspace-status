@@ -442,3 +442,94 @@ fn pty_doctor_down_arrow_warns_the_live_wheel_row_with_the_fix() {
     );
     tui.assert_running("after the arrow key");
 }
+
+/// Wait until the raw PTY output holds `needle`, or fail with the output.
+fn wait_raw(tui: &PtySession, needle: &[u8], what: &str) {
+    let deadline = std::time::Instant::now() + WAIT;
+    while find_bytes(&tui.raw_output(), needle, 0).is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{what}; output:\n{}",
+            String::from_utf8_lossy(&tui.raw_output())
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// `workspace-status doctor` on a terminal that answers the capability
+/// query: the CLI writes the query once, prints the answered rows as text
+/// in cooked mode, and exits 0 with the terminal back out of raw mode. Fail
+/// if a reply is echoed into the output, a row misses its answer, a report
+/// line ends in a bare line feed (raw mode still on), or the exit is not 0.
+#[test]
+fn pty_doctor_cli_prints_the_terminal_answers_and_restores_the_terminal() {
+    let (_root, workspace) = daily_workspace();
+    let mut cli = PtySession::run_args_with_caps_reply(
+        &workspace,
+        COLS,
+        TALL_ROWS,
+        &["doctor"],
+        FAKE_TERM_ANSWER,
+    );
+    cli.wait_exit(WAIT);
+    wait_raw(
+        &cli,
+        b"  ok      State files\r\n",
+        "the report reaches its last row",
+    );
+    wait_raw(&cli, b"\r\nFILES\r\n", "the FILES group prints");
+    let raw = cli.raw_output();
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    assert_eq!(cli.raw_count(CAPS_QUERY), 1, "one query:\n{text}");
+
+    for (name, why) in [
+        ("Terminal size", format!("{COLS}×{TALL_ROWS}")),
+        ("Terminal (XTVERSION)", "fake-term(1.2)".to_string()),
+        ("SGR mouse (1006)", "Supported.".to_string()),
+        (
+            "Synchronized output (2026)",
+            "Not supported (optional): a large redraw can flicker.".to_string(),
+        ),
+        ("Kitty keyboard (CSI u)", "Supported (flags 1).".to_string()),
+        ("Background (OSC 11)", "#000000, dark.".to_string()),
+    ] {
+        let row = format!("\r\n  ok      {name}\r\n          {why}\r\n");
+        assert!(text.contains(&row), "{row:?}:\n{text}");
+    }
+    assert!(
+        text.contains(
+            "\r\n  unknown Mouse wheel (live test)\r\n          TUI only: open Doctor: setup \
+             checkup in the TUI and scroll once.\r\n"
+        ),
+        "{text}"
+    );
+    let report = &text[text
+        .find("Doctor · setup checkup · workspace-status v")
+        .expect("head")..];
+    let summary = report.lines().nth(1).expect("summary line");
+    assert!(has_summary(summary), "summary {summary:?}:\n{text}");
+
+    // An echoed reply shows as `^[P>|…`, `…$y`, or `rgb:…` in the output.
+    for echoed in [&b"P>|"[..], b"$y", b"rgb:", b"62c"] {
+        assert_eq!(
+            cli.raw_count(echoed),
+            0,
+            "reply bytes {:?} echoed:\n{text}",
+            String::from_utf8_lossy(echoed)
+        );
+    }
+    let query_end = byte_positions(&raw, CAPS_QUERY)[0] + CAPS_QUERY.len();
+    let bare_lf = raw[query_end..]
+        .windows(2)
+        .any(|pair| pair[1] == b'\n' && pair[0] != b'\r');
+    assert!(
+        !bare_lf,
+        "every report line ends in CR LF (cooked mode):\n{text}"
+    );
+    let cooked = libc::ICANON | libc::ECHO;
+    assert_eq!(
+        cli.local_modes() & cooked,
+        cooked,
+        "raw mode is off after the CLI exits"
+    );
+}

@@ -430,6 +430,46 @@ The State files row checks the comment, viewed, UI-state, and background-fetch s
 
 Terminal size, mouse, the environment, and the loaded repos' remotes are read when the probe runs; the Config files and State files rows re-read the files. The glyph mode, git binary, store paths, `editor`, and `diffTool` are the values resolved at launch.
 
+### `ws doctor`
+
+`ws doctor` (or `workspace-status doctor`) prints the same rows, in the same order, as plain text to paste into an issue: no colour, no escape codes, no TUI, and no startup release check. The workspace root comes from `-C` / `--workspace` (before or after `doctor`), `WS_STATUS_WORKSPACE`, or the current directory, as for the other modes. The probe reads the checkouts the TUI would load (hidden ones too) with the branch each is on (`git symbolic-ref --short -q HEAD`, read-only); it runs no `git status`. Only `-C` / `--workspace` goes with `doctor`: a repo filter or another flag is a usage error. `doctor` as the first word is the subcommand; to filter a repo named `doctor`, pass `./doctor`.
+
+The rows differ from the TUI only where the CLI cannot know:
+
+- Terminal size: read from the terminal when stdout is one; otherwise `unknown` (`stdout is not a terminal.`).
+- The six capability rows: the queries are sent only when stdin and stdout are both a terminal. The CLI turns raw mode on for the wait (at most 200 ms, or until the DA1 reply), drops stdin bytes that are not replies, and turns raw mode off again before it prints. Otherwise each row is `unknown` (`Not asked: stdin or stdout is not a terminal.`), and on Windows `Not asked on Windows.`.
+- Mouse wheel (live test): always `unknown` (`TUI only: open Doctor: setup checkup in the TUI and scroll once.`).
+- Mouse: the state the TUI starts with (capture on).
+
+Format: the line `Doctor · setup checkup · workspace-status <version>` (the `--version` label with its `v`), the line `<n> ok · <n> warn · <n> fail · <n> unknown`, then per group a blank line and its title (`TERMINAL`, `TOOLS`, `FILES`). Each row is `  <status> <name>`, with the status word (`ok`, `warn`, `fail`, `unknown`) padded to 7 columns. Under the name, indented 10 columns, come the why line, then `hint: <advice>` and `fix: <line to paste>` when the row has them. Lines do not wrap.
+
+```text
+Doctor · setup checkup · workspace-status v0.1.327
+11 ok · 2 warn · 1 fail · 8 unknown
+
+TERMINAL
+  unknown Terminal size
+          stdout is not a terminal.
+  ok      Mouse
+          On.
+  unknown Mouse wheel (live test)
+          TUI only: open Doctor: setup checkup in the TUI and scroll once.
+  unknown Terminal (XTVERSION)
+          Not asked: stdin or stdout is not a terminal.
+
+TOOLS
+  ok      git
+          git version 2.55.0 (/usr/bin/git)
+
+FILES
+  fail    State files
+          UI state (~/.local/state/my-workspace-status/ui-state.json): not a UI-state store; UI state saves will fail, the file is left unchanged.
+          hint: Move the file aside; the next save starts a new one.
+          fix: mv '/home/me/.local/state/my-workspace-status/ui-state.json' '/home/me/.local/state/my-workspace-status/ui-state.json.bak'
+```
+
+(Rows cut for length.) Exit codes: `0` when no row is `fail` (`warn` and `unknown` rows are fine), `1` when a row is `fail` or the config does not load (the error goes to stderr and nothing else prints), `2` for a usage error.
+
 ## Alternate screen
 
 The TUI uses the terminal alternate screen (DEC 1049) while it is mounted. Normal quit writes leave sequences and shows the cursor. `SIGKILL` (`kill -9`) cannot run those hooks. After SIGKILL, reset the terminal if the primary buffer stays hidden.

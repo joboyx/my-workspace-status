@@ -81,6 +81,8 @@ struct SpawnOpts {
     /// Bytes the reader thread writes back when the child writes the
     /// Doctor's capability query ([`CAPS_QUERY`]).
     caps_reply: Option<Vec<u8>>,
+    /// Command-line arguments of the binary; empty opens the TUI.
+    args: Vec<String>,
 }
 
 impl Default for SpawnOpts {
@@ -91,6 +93,7 @@ impl Default for SpawnOpts {
             user_config: UserConfig::Baseline,
             bg_reply: None,
             caps_reply: None,
+            args: Vec::new(),
         }
     }
 }
@@ -351,6 +354,32 @@ impl PtySession {
         )
     }
 
+    /// Run the binary with `args` (a CLI subcommand that prints and exits,
+    /// such as `doctor`) on a `cols` x `rows` terminal that answers the
+    /// Doctor's capability query as [`Self::open_size_with_caps_reply`]
+    /// does. Does not wait for a TUI; the spawn env is the same as for the
+    /// TUI.
+    pub fn run_args_with_caps_reply(
+        workspace: &Path,
+        cols: u16,
+        rows: u16,
+        args: &[&str],
+        reply: &[u8],
+    ) -> Self {
+        Self::spawn(
+            workspace,
+            cols,
+            rows,
+            &[],
+            SpawnOpts {
+                wait_ready: false,
+                caps_reply: Some(reply.to_vec()),
+                args: args.iter().map(|arg| arg.to_string()).collect(),
+                ..SpawnOpts::default()
+            },
+        )
+    }
+
     /// Spawn without waiting for the TUI. Used when the GitHub Release
     /// prompt must paint on the primary screen first.
     pub fn open_pending(
@@ -384,6 +413,7 @@ impl PtySession {
             user_config,
             bg_reply,
             caps_reply,
+            args,
         } = opts;
         assert!(
             workspace.is_dir(),
@@ -402,6 +432,7 @@ impl PtySession {
 
         let bin = env!("CARGO_BIN_EXE_workspace-status");
         let mut cmd = CommandBuilder::new(bin);
+        cmd.args(&args);
         cmd.cwd(workspace);
         for (k, v) in std::env::vars() {
             if matches!(

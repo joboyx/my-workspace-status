@@ -22166,7 +22166,7 @@ fn badge_link_outside_the_dialog_reprints_dimmed() {
 /// Rows like a real run: every group, a wrapped why, a hint, a copy
 /// line, and all three statuses.
 fn doctor_rows() -> Vec<Check> {
-    use crate::tui::doctor::Fix;
+    use crate::tui::doctor::{CheckGroup, Fix};
     let row = |group, name, status, why: &str, fix: Option<Fix>| Check {
         group,
         name,

@@ -861,30 +861,15 @@ impl DoctorJob {
         }
     }
 
-    /// Remote URLs of the checkouts, read with read-only git
-    /// ([`remote_url_for_branch`]), without duplicates. Blocks.
-    fn remote_urls(&self) -> Vec<String> {
-        let mut urls: Vec<String> = Vec::new();
-        for (dir, branch) in &self.checkouts {
-            if let Some(url) = remote_url_for_branch(dir, branch) {
-                if !urls.contains(&url) {
-                    urls.push(url);
-                }
-            }
-        }
-        urls
-    }
-
     /// Probe the setup and build the probe rows, with whether the probe
-    /// ran inside tmux ([`doctor::Probe::in_tmux`]). Blocks (PATH scan,
-    /// read-only commands, file reads), so it runs only on a worker. Writes
-    /// nothing.
+    /// ran inside tmux ([`doctor::Probe::in_tmux`]). Blocks (remote
+    /// lookups, PATH scan, read-only commands, file reads), so it runs
+    /// only on a worker. Writes nothing.
     fn run(self) -> (Vec<Check>, bool) {
         let user_config = user_config_path();
-        let remote_urls = self.remote_urls();
+        let remote_urls = doctor::remote_urls(&self.checkouts);
         let probe = doctor::collect(&CollectInputs {
-            term_cols: self.term_cols,
-            term_rows: self.term_rows,
+            term_size: Some((self.term_cols, self.term_rows)),
             settings: &self.settings,
             mouse_enabled: self.mouse_enabled,
             editor_config: self.editor_config.as_deref(),

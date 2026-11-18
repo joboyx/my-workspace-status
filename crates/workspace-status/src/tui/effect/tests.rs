@@ -5470,7 +5470,7 @@ fn doctor_job_carries_every_checkout_and_reads_remotes_with_git() {
             (root.join("wt"), "HEAD".to_string()),
         ]
     );
-    let mut urls = job.remote_urls();
+    let mut urls = crate::tui::doctor::remote_urls(&job.checkouts);
     urls.sort();
     assert_eq!(
         urls,

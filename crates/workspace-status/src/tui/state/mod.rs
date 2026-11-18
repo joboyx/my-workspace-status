@@ -1534,7 +1534,7 @@ impl AppState {
             too_small: false,
             theme,
             background: BackgroundMode::default(),
-            mouse_enabled: true,
+            mouse_enabled: super::MOUSE_CAPTURE_AT_START,
             pointer: None,
             popover: None,
             peek: popover::PeekTimers::default(),

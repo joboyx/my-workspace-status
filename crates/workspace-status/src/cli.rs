@@ -19,7 +19,7 @@ use crate::snapshot::{
 };
 use crate::update::run_self_update;
 use crate::update_check::{offer_startup_update, StartupUpdateOffer};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::sync::LazyLock;
 
 /// `--version` text: [`crate::version_label`] without the leading `v`.
@@ -33,6 +33,8 @@ fn cli_version_for(label: &str) -> String {
 #[command(
     name = "workspace-status",
     version = CLI_VERSION.as_str(),
+    // `ws help` stays a repo filter, as before `doctor` came.
+    disable_help_subcommand = true,
     about = "Workspace git status. TUI on a TTY. --plain / --json for agents.",
     long_about = "Display git repository status across repos in the workspace.\n\n\
 On a TTY, this binary opens a ratatui TUI unless you pass --plain, --json,\n\
@@ -48,7 +50,11 @@ before the TUI mounts. --plain, --json, and --update skip that check.\n\n\
 --update prints GitHub Release notes for versions newer than this install,\n\
 then runs the cargo-dist updater (workspace-status-update) and exits.\n\
 That run does not open the TUI or apply repo filters. A dev build\n\
-(scripts/install-dev.sh) instead rebuilds and reinstalls its checkout."
+(scripts/install-dev.sh) instead rebuilds and reinstalls its checkout.\n\n\
+`ws doctor` prints the Doctor setup checkup as plain text to paste, and\n\
+exits 1 when a row fails (0 otherwise). It asks the terminal for its\n\
+capabilities only when stdin and stdout are both a TTY. To filter a repo\n\
+named doctor, pass ./doctor."
 )]
 struct Cli {
     /// Include hidden repos (`hiddenPaths`). Never includes `ignoredPaths`.
@@ -88,12 +94,23 @@ struct Cli {
     update: bool,
 
     /// Pin the workspace root (absolute or relative path).
-    #[arg(short = 'C', long = "workspace", value_name = "PATH")]
+    #[arg(short = 'C', long = "workspace", value_name = "PATH", global = true)]
     workspace: Option<PathBuf>,
 
     /// Optional workspace-relative repo filters. Named repos bypass hiddenPaths and ignoredPaths.
     #[arg(value_name = "REPO")]
     filter_repos: Vec<String>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// Subcommands. A first word that names one wins over a repo filter of the
+/// same name; `./<name>` still filters that repo.
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+enum Command {
+    /// Print the Doctor setup checkup as plain text. Exit 1 when a row fails.
+    Doctor,
 }
 
 /// Resolve the workspace root to a canonical absolute directory.
@@ -161,9 +178,41 @@ fn say(json: bool, line: &str) {
     }
 }
 
+/// Parse the command line. Beyond clap's own checks, `doctor` takes no
+/// mode flag: only `-C` / `--workspace` goes with it. A usage error exits
+/// with clap's code `2`.
+fn parse_cli<I, T>(args: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let cli = Cli::try_parse_from(args)?;
+    if cli.command == Some(Command::Doctor) {
+        let flags = [
+            (cli.all, "--all"),
+            (cli.fetch, "--fetch"),
+            (cli.verbose, "--verbose"),
+            (cli.pull, "--pull"),
+            (cli.default_branch, "--default-branch"),
+            (cli.plain, "--plain"),
+            (cli.json, "--json"),
+            (cli.tui, "--tui"),
+            (cli.update, "--update"),
+        ];
+        if let Some((_, flag)) = flags.iter().find(|(set, _)| *set) {
+            use clap::CommandFactory;
+            return Err(Cli::command().error(
+                clap::error::ErrorKind::ArgumentConflict,
+                format!("`doctor` does not take {flag}; only -C / --workspace goes with it"),
+            ));
+        }
+    }
+    Ok(cli)
+}
+
 pub fn cli_main() -> ExitCode {
     crate::crash_report::install_crash_report_hook();
-    let cli = Cli::parse();
+    let cli = parse_cli(env::args_os()).unwrap_or_else(|err| err.exit());
     if cli.update {
         return run_self_update();
     }
@@ -187,6 +236,9 @@ pub fn cli_main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    if cli.command == Some(Command::Doctor) {
+        return ExitCode::from(crate::doctor_cli::run(&cwd));
+    }
     match run(cli, cwd) {
         Ok(()) => ExitCode::SUCCESS,
         Err(code) => ExitCode::from(code),
@@ -391,6 +443,51 @@ mod tests {
             Cli::command().get_version(),
             Some(cli_version_for(&crate::version_label()).as_str())
         );
+    }
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        parse_cli(std::iter::once("ws").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn doctor_subcommand_wins_over_a_repo_filter_named_doctor() {
+        let cli = parse(&["doctor"]).unwrap();
+        assert_eq!(cli.command, Some(Command::Doctor));
+        assert!(cli.filter_repos.is_empty());
+
+        let cli = parse(&["./doctor"]).unwrap();
+        assert_eq!(cli.command, None);
+        assert_eq!(cli.filter_repos, vec!["./doctor".to_string()]);
+        assert_eq!(normalize_filter_repo(&cli.filter_repos[0]), "doctor");
+
+        for args in [&["-C", "ws", "doctor"][..], &["doctor", "-C", "ws"][..]] {
+            let cli = parse(args).unwrap();
+            assert_eq!(cli.command, Some(Command::Doctor), "{args:?}");
+            assert_eq!(cli.workspace.as_deref(), Some(Path::new("ws")), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn doctor_takes_no_repo_filter_and_no_mode_flag() {
+        for args in [
+            &["doctor", "app"][..],
+            &["--json", "doctor"][..],
+            &["-a", "doctor"][..],
+            &["doctor", "--plain"][..],
+        ] {
+            let err = parse(args).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{args:?}: {err}");
+        }
+        let cli = parse(&["app", "doctor"]).unwrap();
+        assert_eq!(cli.command, None);
+        assert_eq!(
+            cli.filter_repos,
+            vec!["app".to_string(), "doctor".to_string()]
+        );
+        // No `help` subcommand: `help` is still a repo filter.
+        let cli = parse(&["help"]).unwrap();
+        assert_eq!(cli.command, None);
+        assert_eq!(cli.filter_repos, vec!["help".to_string()]);
     }
 
     #[test]

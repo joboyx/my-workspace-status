@@ -30,9 +30,13 @@ use super::split::{MIN_TERM_COLS, MIN_TERM_ROWS};
 use super::ui_state_store::check_ui_state_bytes;
 use super::viewed::check_viewed_store_bytes;
 use crate::config::{load_config_files, CONFIG_FILENAME};
-use crate::git::{git_version_output, resolve_git_binary};
+use crate::git::{git_version_output, remote_url_for_branch, resolve_git_binary};
 use crate::settings::Settings;
 use crate::update_check::check_update_check_store_bytes;
+
+/// Title of the report: the TUI dialog title, and the start of the first
+/// `ws doctor` line.
+pub(crate) const DOCTOR_TITLE: &str = "Doctor · setup checkup";
 
 /// Operating system family the checks target.
 ///
@@ -105,6 +109,18 @@ pub enum CheckGroup {
     Tools,
     /// Config and state files.
     Files,
+}
+
+impl CheckGroup {
+    /// Section header above the group's rows, in the TUI dialog and in the
+    /// `ws doctor` text: `TERMINAL`, `TOOLS`, or `FILES`.
+    pub fn title(self) -> &'static str {
+        match self {
+            CheckGroup::Terminal => "TERMINAL",
+            CheckGroup::Tools => "TOOLS",
+            CheckGroup::Files => "FILES",
+        }
+    }
 }
 
 /// What the user can do about a check.
@@ -248,10 +264,9 @@ pub struct Probe {
     pub env: BTreeMap<String, String>,
     /// Commands found on `PATH` (or as a path), by the name the app runs.
     pub on_path: BTreeSet<String>,
-    /// Terminal width in columns.
-    pub term_cols: u16,
-    /// Terminal height in rows.
-    pub term_rows: u16,
+    /// Terminal `(columns, rows)`; `None` when stdout is not a terminal
+    /// (the `ws doctor` CLI piped to a file or a pager).
+    pub term_size: Option<(u16, u16)>,
     /// ASCII glyphs instead of Nerd Font glyphs (resolved setting).
     pub ascii: bool,
     /// App mouse capture is on.
@@ -450,7 +465,15 @@ fn hint_copy(text: impl Into<String>, copy: impl Into<String>) -> Option<Fix> {
 
 fn terminal_size(p: &Probe) -> Check {
     const NAME: &str = "Terminal size";
-    let (cols, rows) = (p.term_cols, p.term_rows);
+    let Some((cols, rows)) = p.term_size else {
+        return row(
+            CheckGroup::Terminal,
+            NAME,
+            CheckStatus::Unknown,
+            "stdout is not a terminal.",
+            None,
+        );
+    };
     if cols < MIN_TERM_COLS || rows < MIN_TERM_ROWS {
         return row(
             CheckGroup::Terminal,
@@ -844,10 +867,6 @@ pub(crate) enum WheelRow {
         capture: bool,
     },
     /// The `ws doctor` CLI: no live input, so the test needs the TUI.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the `ws doctor` CLI is its first caller")
-    )]
     TuiOnly,
 }
 
@@ -1406,10 +1425,8 @@ fn state_files(p: &Probe) -> Check {
 /// What only the app knows, for [`collect`].
 #[derive(Clone, Copy, Debug)]
 pub struct CollectInputs<'a> {
-    /// Terminal width in columns.
-    pub term_cols: u16,
-    /// Terminal height in rows.
-    pub term_rows: u16,
+    /// Terminal `(columns, rows)`; `None` when stdout is not a terminal.
+    pub term_size: Option<(u16, u16)>,
     /// The resolved settings (glyphs, git binary, store paths).
     pub settings: &'a Settings,
     /// App mouse capture is on.
@@ -1424,6 +1441,25 @@ pub struct CollectInputs<'a> {
     pub workspace_root: &'a Path,
     /// User config path ([`crate::config::user_config_path`]).
     pub user_config: Option<&'a Path>,
+}
+
+/// Remote URLs of `checkouts` (absolute path, branch) for
+/// [`CollectInputs::remote_urls`], each once, in checkout order.
+///
+/// Each URL is the one the branch pushes to ([`remote_url_for_branch`]). A
+/// detached or empty branch takes the first remote. Read-only git; it
+/// blocks, so call it on a worker thread. The TUI Doctor job and the
+/// `ws doctor` CLI both call it.
+pub(crate) fn remote_urls(checkouts: &[(PathBuf, String)]) -> Vec<String> {
+    let mut urls: Vec<String> = Vec::new();
+    for (dir, branch) in checkouts {
+        if let Some(url) = remote_url_for_branch(dir, branch) {
+            if !urls.contains(&url) {
+                urls.push(url);
+            }
+        }
+    }
+    urls
 }
 
 /// Commands the checks look up on `PATH` besides the editor, diff tool, and
@@ -1535,8 +1571,7 @@ where
         os,
         env,
         on_path,
-        term_cols: inputs.term_cols,
-        term_rows: inputs.term_rows,
+        term_size: inputs.term_size,
         ascii: settings.ascii,
         mouse_enabled: inputs.mouse_enabled,
         dev_build,
@@ -1686,8 +1721,7 @@ mod tests {
             .into_iter()
             .map(str::to_string)
             .collect(),
-            term_cols: 120,
-            term_rows: 40,
+            term_size: Some((120, 40)),
             ascii: true,
             mouse_enabled: true,
             dev_build: false,
@@ -1808,20 +1842,29 @@ mod tests {
     #[test]
     fn terminal_size_fail_warn_ok() {
         let mut p = base(Os::Linux);
-        p.term_cols = MIN_TERM_COLS - 1;
+        p.term_size = Some((MIN_TERM_COLS - 1, 40));
         let check = get(&p, "Terminal size");
         assert_eq!(check.status, CheckStatus::Fail);
         assert!(check.why.contains("need ≥ 46×12"), "{}", check.why);
-        p.term_cols = 80;
-        p.term_rows = MIN_TERM_ROWS - 1;
+        p.term_size = Some((80, MIN_TERM_ROWS - 1));
         assert_eq!(get(&p, "Terminal size").status, CheckStatus::Fail);
-        p.term_rows = MIN_TERM_ROWS;
+        p.term_size = Some((80, MIN_TERM_ROWS));
         let check = get(&p, "Terminal size");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.why.contains("search in files"), "{}", check.why);
         assert!(hint_of(&check).contains("100+ columns"));
-        p.term_cols = SEARCH_PREVIEW_MIN_COLS;
+        p.term_size = Some((SEARCH_PREVIEW_MIN_COLS, MIN_TERM_ROWS));
         assert_eq!(get(&p, "Terminal size").status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn terminal_size_without_a_terminal_is_unknown() {
+        let mut p = base(Os::Linux);
+        p.term_size = None;
+        let check = get(&p, "Terminal size");
+        assert_eq!(check.status, CheckStatus::Unknown);
+        assert_eq!(check.why, "stdout is not a terminal.");
+        assert_eq!(check.fix, None);
     }
 
     #[test]
@@ -2394,7 +2437,7 @@ mod tests {
     #[test]
     fn summary_counts_by_status() {
         let mut p = base(Os::Linux);
-        p.term_cols = 10;
+        p.term_size = Some((10, 40));
         p.ascii = false;
         let got = summary(&checks(&p));
         assert_eq!(
@@ -2672,8 +2715,7 @@ mod tests {
             "https://example.com/x/y".to_string(),
         ];
         let inputs = CollectInputs {
-            term_cols: 120,
-            term_rows: 40,
+            term_size: Some((120, 40)),
             settings: &settings,
             mouse_enabled: true,
             editor_config: Some("gh"),
@@ -2730,8 +2772,7 @@ mod tests {
             (key == "XDG_STATE_HOME").then(|| dir.join("state").display().to_string())
         });
         let inputs = CollectInputs {
-            term_cols: 120,
-            term_rows: 40,
+            term_size: Some((120, 40)),
             settings: &settings,
             mouse_enabled: false,
             editor_config: None,

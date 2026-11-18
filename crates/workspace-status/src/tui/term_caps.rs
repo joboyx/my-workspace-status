@@ -362,10 +362,6 @@ fn row_names() -> impl Iterator<Item = &'static str> {
 /// wait ends with no DA1 reply, pending stdin is discarded before raw mode
 /// goes off.
 #[cfg(unix)]
-#[expect(
-    dead_code,
-    reason = "the `ws doctor` CLI is its first caller; it needs a real terminal, so no unit test calls it"
-)]
 pub(crate) fn query_capabilities(timeout: Duration) -> TermCaps {
     use std::io::{self, IsTerminal, Write};
     use std::time::Instant;
@@ -420,7 +416,6 @@ pub(crate) fn query_capabilities(timeout: Duration) -> TermCaps {
 
 /// Non-Unix builds never send the query.
 #[cfg(not(unix))]
-#[expect(dead_code, reason = "the `ws doctor` CLI is its first caller")]
 pub(crate) fn query_capabilities(_timeout: Duration) -> TermCaps {
     TermCaps::not_asked()
 }

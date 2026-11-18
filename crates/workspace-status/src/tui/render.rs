@@ -44,7 +44,7 @@ use super::diff::{
     gutter_width, section_header, wrap_viewport_start, DiffCell, DiffCellKind, DiffHeaderMarks,
     DiffRow, DiffSection, DIFF_RULE,
 };
-use super::doctor::{summary as doctor_summary, Check, CheckGroup, CheckStatus};
+use super::doctor::{summary as doctor_summary, Check, CheckStatus, DOCTOR_TITLE};
 use super::drill::DrillView;
 use super::explorer::{ExplorerRow, ExplorerStatus};
 use super::gates::ListFocusTarget;
@@ -5902,24 +5902,12 @@ fn draw_blame_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     );
 }
 
-/// Doctor dialog title.
-const DOCTOR_TITLE: &str = "Doctor · setup checkup";
-
 /// Doctor footer chips.
 const DOCTOR_FOOTER: &str = "j/k move · y copy fix · r re-run · Esc close";
 
 /// Columns before a Doctor row's name and under it: the cursor mark (2),
 /// the status chip (4), and a space.
 const DOCTOR_INDENT: usize = 7;
-
-/// Section header the Doctor paints above `group`'s rows.
-fn doctor_group_title(group: CheckGroup) -> &'static str {
-    match group {
-        CheckGroup::Terminal => "TERMINAL",
-        CheckGroup::Tools => "TOOLS",
-        CheckGroup::Files => "FILES",
-    }
-}
 
 /// Status chip text, so a row reads without colour, and its theme colour.
 fn doctor_status_chip(status: CheckStatus, palette: Palette) -> (&'static str, Color) {
@@ -5969,7 +5957,7 @@ fn doctor_body_lines(
         if group != Some(check.group) {
             group = Some(check.group);
             lines.push(Line::from(Span::styled(
-                doctor_group_title(check.group),
+                check.group.title(),
                 Style::default()
                     .fg(palette.heading)
                     .add_modifier(Modifier::BOLD),
