@@ -69,7 +69,7 @@ $WS wait 'app/src/auth\.ts +inline \(too narrow\)'
 $WS doctor
 ```
 
-Expect: at `200x45` the tree has 80 columns and the diff pane 120, so the header says `split · wrap` and one screen line holds the old line 7 on the left and the new line 7 on the right of the `│` gutter. Back at `160x45` the header says `inline (too narrow)` again, and `doctor` checks the pane size against the last resize.
+Expect: at `200x45` the tree keeps its 64 launch columns ([pane-split](pane-split.md)) and the diff pane gets 136, so the header says `split · wrap` and one screen line holds the old line 7 on the left and the new line 7 on the right of the `│` gutter. Back at `160x45` the header says `inline (too narrow)` again, and `doctor` checks the pane size against the last resize.
 
 **PASS:** both `wait` lines on the header are ok, the `grep` finds the side-by-side line on `df3-split`, and `doctor` is ok.
 

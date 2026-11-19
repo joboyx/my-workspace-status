@@ -10,8 +10,9 @@ use crate::snapshot::{
 };
 use crate::testutil::{app_state, app_state_of, init_repo, repo, repo_snapshot, unstaged_change};
 use crate::tui::split::{
-    diff_split_fraction_from_left_width, diff_split_row_width, diff_split_rule_x, pane_widths,
-    side_by_side_column_widths, DIFF_SPLIT_FRACTION, MIN_PANE_COLS, MIN_TERM_COLS,
+    diff_split_fraction_from_left_width, diff_split_row_width, diff_split_rule_x,
+    launch_tree_width, pane_widths, side_by_side_column_widths, DIFF_PAD_X, DIFF_SPLIT_FRACTION,
+    MIN_PANE_COLS, MIN_TERM_COLS,
 };
 use crate::tui::status::StatusKind;
 use crate::tui::ui_state_store::load_ui_state;
@@ -7144,20 +7145,20 @@ fn wide_split_layout() -> super::LayoutHit {
 fn pane_drag_updates_ratio_and_release_ends_drag() {
     let mut app = state();
     app.layout = wide_split_layout();
-    let start = pane_widths(160, app.tree_fraction).tree_width;
+    let start = pane_widths(160, app.tree_width_cols(160)).tree_width;
     assert_eq!(
         app.dispatch(Action::Click { col: 47, row: 5 }),
         Effect::None
     );
     assert_eq!(app.drag, SplitDrag::Pane);
     assert_eq!(app.dispatch(Action::Drag { col: 70, row: 8 }), Effect::None);
-    let after = pane_widths(160, app.tree_fraction).tree_width;
+    let after = pane_widths(160, app.tree_width_cols(160)).tree_width;
     assert!(after > start, "start={start} after={after}");
     assert_eq!(after, 71);
     assert_eq!(app.drag, SplitDrag::Pane);
     assert_eq!(app.dispatch(Action::Release), Effect::None);
     assert_eq!(app.drag, SplitDrag::None);
-    assert_eq!(pane_widths(160, app.tree_fraction).tree_width, after);
+    assert_eq!(pane_widths(160, app.tree_width_cols(160)).tree_width, after);
 }
 
 #[test]
@@ -7907,7 +7908,7 @@ fn flat_divider_pad_release_without_move_clicks_the_row() {
     let mut app = state();
     app.background = BackgroundMode::Paint;
     app.layout = split_layout_for(BackgroundMode::Paint);
-    let fraction = app.tree_fraction;
+    let tree_cols = app.tree_cols;
     let start = app.cursor;
     let target = (0..app.rows.len())
         .find(|&idx| app.layout.list_offset + idx != start)
@@ -7922,7 +7923,7 @@ fn flat_divider_pad_release_without_move_clicks_the_row() {
         col: 47,
         row: row + 1,
     });
-    assert_eq!(app.tree_fraction, fraction);
+    assert_eq!(app.tree_cols, tree_cols);
     assert_eq!(app.dispatch(Action::Release), Effect::LoadRightPane);
     assert_eq!(app.drag, SplitDrag::None);
     assert_eq!(
@@ -7931,7 +7932,7 @@ fn flat_divider_pad_release_without_move_clicks_the_row() {
         "left pane's right pad"
     );
     assert_eq!(app.focus, FocusPane::Left);
-    assert_eq!(app.tree_fraction, fraction, "a click never resizes");
+    assert_eq!(app.tree_cols, tree_cols, "a click never resizes");
 
     // A second press + release on the same cell is a double-click on
     // the row, as on its text.
@@ -7948,7 +7949,7 @@ fn flat_divider_pad_release_without_move_clicks_the_row() {
     assert_eq!(app.drag, SplitDrag::Pane);
     app.dispatch(Action::Release);
     assert_eq!(app.focus, FocusPane::Right, "right pane's left pad");
-    assert_eq!(app.tree_fraction, fraction);
+    assert_eq!(app.tree_cols, tree_cols);
 }
 
 /// A flat divider press that moves resizes as before and clicks no row.
@@ -7958,12 +7959,12 @@ fn flat_divider_pad_press_and_drag_resizes() {
         let mut app = state();
         app.background = BackgroundMode::Paint;
         app.layout = split_layout_for(BackgroundMode::Paint);
-        let start = pane_widths(160, app.tree_fraction).tree_width;
+        let start = pane_widths(160, app.tree_width_cols(160)).tree_width;
         let cursor = app.cursor;
         let row = app.layout.tree_y + u16::from(cursor == 0);
         app.dispatch(Action::Click { col, row });
         app.dispatch(Action::Drag { col: 70, row });
-        let after = pane_widths(160, app.tree_fraction).tree_width;
+        let after = pane_widths(160, app.tree_width_cols(160)).tree_width;
         assert!(after > start, "col {col}: start={start} after={after}");
         assert_eq!(app.dispatch(Action::Release), Effect::None, "col {col}");
         assert_eq!(app.cursor, cursor, "col {col}: no row click after a drag");
@@ -8025,7 +8026,7 @@ fn drag_clamp_keeps_panes_nonzero() {
     app.layout = wide_split_layout();
     app.dispatch(Action::Click { col: 47, row: 4 });
     app.dispatch(Action::Drag { col: 0, row: 4 });
-    let w = pane_widths(160, app.tree_fraction);
+    let w = pane_widths(160, app.tree_width_cols(160));
     assert!(w.tree_width >= 20);
     assert!(w.diff_width >= 20);
     app.dispatch(Action::Release);
@@ -8138,61 +8139,85 @@ fn i_says_what_width_split_needs_when_the_pane_is_too_narrow() {
     assert_eq!(app.status, "Diff: split");
 }
 
-/// Terminal resize events never round the stored split. A drag resize
-/// of the terminal sends one `Resize` per column; each step must give
-/// the tree width a fresh launch at that size paints, and a split the
-/// terminal squeezed comes back when the terminal grows again.
+/// The tree keeps its remembered columns through terminal resizes. A
+/// wider terminal gives its extra columns to the right pane; a narrower
+/// one clamps only the painted tree, so the right pane keeps its
+/// minimum, and the tree gets its columns back when the terminal grows
+/// again. A drag resize of the terminal sends one `Resize` per column;
+/// none of them changes the remembered width.
 #[test]
-fn terminal_resize_keeps_the_tree_fraction_unrounded() {
+fn terminal_resize_keeps_the_tree_columns() {
     let resize = |app: &mut AppState, cols: u16| {
         assert_eq!(
             app.dispatch(Action::Resize { cols, rows: 40 }),
             Effect::None
         );
     };
-    let width = |app: &AppState, cols: u16| pane_widths(cols, app.tree_fraction);
+    let width = |app: &AppState, cols: u16| pane_widths(cols, app.tree_width_cols(cols));
 
     let mut app = state();
-    resize(&mut app, 124);
-    for cols in 125..=134 {
+    resize(&mut app, 160);
+    assert_eq!(app.tree_cols, None, "a resize fixes no tree width");
+    // The first pane paint, at 160 columns, fixes the launch width.
+    assert_eq!(app.paint_tree_width_cols(160), 64);
+    assert_eq!(app.tree_cols, Some(64));
+    for cols in 161..=220 {
         resize(&mut app, cols);
-        assert_eq!(width(&app, cols), pane_widths(cols, TREE_WIDTH_FRACTION));
+        let widths = width(&app, cols);
+        assert_eq!(widths.tree_width, 64, "{cols} cols");
+        assert_eq!(widths.diff_width, cols - 64 - DIFF_PAD_X, "{cols} cols");
     }
-    assert_eq!(app.tree_fraction, TREE_WIDTH_FRACTION);
-    assert_eq!(width(&app, 134).tree_width, 53);
-    assert_eq!(width(&app, 134).tree_inner_width, 50);
+    assert_eq!(app.tree_cols, Some(64));
 
-    // The narrowest terminal holds the tree at its minimum width. A `<`
-    // the clamp refuses there keeps the stored split.
+    // The narrowest terminal clamps the painted tree so the right pane
+    // keeps its minimum. A `>` the clamp refuses there keeps the stored
+    // width.
+    resize(&mut app, MIN_TERM_COLS);
+    let narrow = width(&app, MIN_TERM_COLS);
+    assert_eq!(
+        narrow.tree_width,
+        MIN_TERM_COLS - MIN_PANE_COLS - DIFF_PAD_X
+    );
+    assert_eq!(narrow.diff_width, MIN_PANE_COLS);
+    app.dispatch(Action::ResizeTree(1));
+    assert_eq!(app.status, "tree pane is at its widest");
+    assert_eq!(app.tree_cols, Some(64));
+    resize(&mut app, 160);
+    assert_eq!(width(&app, 160).tree_width, 64);
+
+    // `>` at 220 columns adds round(5% of 220) = 11 columns. The clamp of
+    // an 80-column terminal paints 58 and keeps the 75 stored.
+    resize(&mut app, 220);
+    app.dispatch(Action::ResizeTree(1));
+    assert_eq!(app.tree_cols, Some(75));
+    resize(&mut app, 80);
+    assert_eq!(width(&app, 80).tree_width, 58);
+    assert_eq!(app.tree_cols, Some(75));
+    resize(&mut app, 220);
+    assert_eq!(width(&app, 220).tree_width, 75);
+    app.dispatch(Action::ResizeTree(-1));
+    assert_eq!(app.tree_cols, Some(64));
+
+    // A launch at the narrowest terminal (18 columns, painted at the
+    // 20-column minimum): a `<` the clamp refuses keeps the stored width.
+    app.tree_cols = Some(launch_tree_width(MIN_TERM_COLS));
     resize(&mut app, MIN_TERM_COLS);
     assert_eq!(width(&app, MIN_TERM_COLS).tree_width, MIN_PANE_COLS);
     app.dispatch(Action::ResizeTree(-1));
     assert_eq!(app.status, "tree pane is at its narrowest");
-    assert_eq!(app.tree_fraction, TREE_WIDTH_FRACTION);
-    resize(&mut app, 134);
-    assert_eq!(width(&app, 134).tree_width, 53);
+    assert_eq!(app.tree_cols, Some(18));
 
-    // A `>` the clamp refuses keeps a split wider than the clamp too.
-    app.tree_fraction = 0.6;
-    assert_eq!(width(&app, 134).tree_width, 80);
-    resize(&mut app, MIN_TERM_COLS);
-    app.dispatch(Action::ResizeTree(1));
-    assert_eq!(app.status, "tree pane is at its widest");
-    assert_eq!(app.tree_fraction, 0.6);
-    resize(&mut app, 134);
-    assert_eq!(width(&app, 134).tree_width, 80);
-
-    // A dragged split keeps its own fraction the same way.
+    // A drag sets the remembered columns, and a full shrink / grow sweep
+    // keeps them.
     app.layout = wide_split_layout();
     app.dispatch(Action::Click { col: 47, row: 5 });
     app.dispatch(Action::Drag { col: 70, row: 8 });
     app.dispatch(Action::Release);
-    let dragged = app.tree_fraction;
-    assert_eq!(width(&app, 160).tree_width, 71);
-    for cols in (MIN_TERM_COLS..160).rev().chain(MIN_TERM_COLS..=160) {
+    assert_eq!(app.tree_cols, Some(71));
+    for cols in (MIN_TERM_COLS..160).rev().chain(MIN_TERM_COLS..=220) {
         resize(&mut app, cols);
     }
-    assert_eq!(app.tree_fraction, dragged);
+    assert_eq!(app.tree_cols, Some(71));
     assert_eq!(width(&app, 160).tree_width, 71);
 }
 
@@ -8200,10 +8225,11 @@ fn terminal_resize_keeps_the_tree_fraction_unrounded() {
 fn angle_brackets_move_the_tree_split_by_five_percent_and_clamp() {
     let mut app = state();
     app.layout.term_cols = 140;
-    let width = |app: &AppState| pane_widths(140, app.tree_fraction).tree_width;
+    let width = |app: &AppState| pane_widths(140, app.tree_width_cols(140)).tree_width;
     assert_eq!(width(&app), 56);
     assert_eq!(app.dispatch(Action::ResizeTree(1)), Effect::None);
     assert_eq!(width(&app), 63);
+    assert_eq!(app.tree_cols, Some(63), "`>` sets the remembered columns");
     app.dispatch(Action::ResizeTree(-1));
     app.dispatch(Action::ResizeTree(-1));
     assert_eq!(width(&app), 49);
@@ -8216,7 +8242,7 @@ fn angle_brackets_move_the_tree_split_by_five_percent_and_clamp() {
         app.dispatch(Action::ResizeTree(1));
     }
     assert_eq!(
-        pane_widths(140, app.tree_fraction).diff_width,
+        pane_widths(140, app.tree_width_cols(140)).diff_width,
         MIN_PANE_COLS
     );
     assert_eq!(app.status, "tree pane is at its widest");

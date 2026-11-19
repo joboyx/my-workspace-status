@@ -1,10 +1,19 @@
 //! Session-only pane and in-diff split math.
 //!
 //! Pane split, hit-testing, and side-by-side column math.
-//! Fractions are not written to disk; the next launch resets to the defaults.
+//! The tree width and the in-diff fraction are not written to disk; the
+//! next launch resets to the defaults.
 
-/// Default tree/right split.
+/// Share of the terminal width the tree pane takes at launch
+/// ([`launch_tree_width`]). After the first pane paint the tree keeps a
+/// width in columns, not this share.
 pub const TREE_WIDTH_FRACTION: f64 = 0.4;
+
+/// Widest launch tree pane, in columns ([`launch_tree_width`]). 80 is 40%
+/// of a 200-column terminal, so every launch up to 200 columns keeps the
+/// [`TREE_WIDTH_FRACTION`] width, and a wider launch (a zoomed or very
+/// wide pane) stops at 80 columns.
+pub const TREE_LAUNCH_MAX_COLS: u16 = 80;
 
 /// Default in-diff split.
 pub const DIFF_SPLIT_FRACTION: f64 = 0.5;
@@ -32,7 +41,9 @@ pub const MIN_TERM_COLS: u16 = 46;
 /// row, and pane borders leave a graph list with its selection footer.
 pub const MIN_TERM_ROWS: u16 = 12;
 
-/// Tree / right split step for `<` / `>` (fraction of the terminal width).
+/// Tree / right split step for `<` / `>`: this share of the current
+/// terminal width, rounded to whole columns (at least 1), added to or
+/// taken from the tree width ([`step_tree_width`]).
 pub const TREE_FRACTION_STEP: f64 = 0.05;
 
 /// Minimum width of either side-by-side column when the pane is wide enough.
@@ -250,7 +261,7 @@ impl SplitDrag {
     }
 }
 
-/// Frozen pane widths from terminal columns + session fraction.
+/// Painted pane widths from terminal columns + the session tree width.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PaneWidths {
     pub tree_width: u16,
@@ -349,7 +360,13 @@ fn finite_or(value: f64, fallback: f64) -> f64 {
     }
 }
 
-/// Clamp an outer tree width so both panes stay ≥ [`MIN_PANE_COLS`].
+/// Clamp an outer tree width so both panes stay ≥ [`MIN_PANE_COLS`]: the
+/// tree is at most `term_cols − MIN_PANE_COLS − DIFF_PAD_X`, so the right
+/// pane never gets narrower than its minimum.
+///
+/// The one bound for a divider drag, `<` / `>`, and a terminal shrink.
+/// A shrink clamps only the painted width ([`pane_widths`]); the session
+/// tree width stays, so the tree gets it back when the terminal grows.
 pub fn clamp_tree_width(term_cols: u16, tree_width: u16) -> u16 {
     let cols = term_cols.max(1);
     let min_tree = MIN_PANE_COLS;
@@ -357,35 +374,26 @@ pub fn clamp_tree_width(term_cols: u16, tree_width: u16) -> u16 {
     tree_width.clamp(min_tree, max_tree)
 }
 
-/// Convert an outer tree width into a fraction of `term_cols` (after clamp).
-pub fn tree_fraction_from_width(term_cols: u16, tree_width: u16) -> f64 {
+/// Outer tree width a launch in a `term_cols`-wide terminal starts with:
+/// [`TREE_WIDTH_FRACTION`] of the terminal, rounded down, at most
+/// [`TREE_LAUNCH_MAX_COLS`]. Not clamped: [`pane_widths`] clamps at paint.
+pub fn launch_tree_width(term_cols: u16) -> u16 {
+    let share = (f64::from(term_cols) * TREE_WIDTH_FRACTION).floor() as u16;
+    share.min(TREE_LAUNCH_MAX_COLS)
+}
+
+/// Outer tree width of a divider press or drag at 0-based mouse column
+/// `col`: the divider lands under the pointer (a 1-based width), clamped.
+pub fn tree_width_from_col(term_cols: u16, col: u16) -> u16 {
+    clamp_tree_width(term_cols, col.saturating_add(1))
+}
+
+/// Outer tree width, inner content width, and right-pane content width
+/// for a session tree width of `tree_cols` columns, clamped to
+/// `term_cols` ([`clamp_tree_width`]).
+pub fn pane_widths(term_cols: u16, tree_cols: u16) -> PaneWidths {
     let cols = term_cols.max(1);
-    f64::from(clamp_tree_width(cols, tree_width)) / f64::from(cols)
-}
-
-/// Map a 0-based mouse column onto a tree-width fraction.
-pub fn tree_fraction_from_col(term_cols: u16, col: u16) -> f64 {
-    tree_fraction_from_width(term_cols, col.saturating_add(1))
-}
-
-/// Clamp a tree-width fraction so both panes stay ≥ [`MIN_PANE_COLS`].
-pub fn clamp_tree_fraction(term_cols: u16, fraction: f64) -> f64 {
-    let cols = term_cols.max(1);
-    tree_fraction_from_width(cols, fraction_cols(cols, fraction))
-}
-
-/// Whole columns for `fraction` of `cols`. The epsilon keeps a width that
-/// went through [`tree_fraction_from_width`] on the same column (`w / c * c`
-/// can land a hair under `w` in floating point).
-fn fraction_cols(cols: u16, fraction: f64) -> u16 {
-    let raw = finite_or(fraction, TREE_WIDTH_FRACTION);
-    (f64::from(cols) * raw + 1e-9).floor().max(0.0) as u16
-}
-
-/// Outer tree width, inner content width, and right-pane content width.
-pub fn pane_widths(term_cols: u16, fraction: f64) -> PaneWidths {
-    let cols = term_cols.max(1);
-    let tree_width = clamp_tree_width(cols, fraction_cols(cols, fraction));
+    let tree_width = clamp_tree_width(cols, tree_cols);
     let tree_inner_width = tree_width.saturating_sub(3).max(8);
     let diff_width = cols
         .saturating_sub(tree_width)
@@ -426,16 +434,18 @@ pub fn diff_pane_mode(mode: DiffMode, pane_width: u16) -> DiffMode {
     effective_diff_mode(mode, diff_paint_width(pane_width))
 }
 
-/// Tree fraction after `steps` keyboard steps of [`TREE_FRACTION_STEP`].
+/// Outer tree width after `steps` keyboard steps (`<` / `>`) from a
+/// session tree width of `tree_cols`.
 ///
-/// Moves the outer tree width by whole columns from its current width, so
-/// a step never rounds back to the same column, then clamps like a drag.
-pub fn step_tree_fraction(term_cols: u16, fraction: f64, steps: i32) -> f64 {
+/// Each step is [`TREE_FRACTION_STEP`] of `term_cols`, rounded to whole
+/// columns (at least 1). The step starts from the painted (clamped) width,
+/// then clamps like a drag ([`clamp_tree_width`]).
+pub fn step_tree_width(term_cols: u16, tree_cols: u16, steps: i32) -> u16 {
     let cols = term_cols.max(1);
-    let current = pane_widths(cols, fraction).tree_width;
+    let current = pane_widths(cols, tree_cols).tree_width;
     let step = (f64::from(cols) * TREE_FRACTION_STEP).round().max(1.0) as i32;
     let target = (i32::from(current) + steps * step).clamp(0, i32::from(u16::MAX)) as u16;
-    tree_fraction_from_width(cols, target)
+    clamp_tree_width(cols, target)
 }
 
 /// Columns a file-diff row paints before its text: the cursor bar (`▌` /
@@ -502,8 +512,9 @@ pub fn side_by_side_column_widths(pane_width: u16, fraction: f64) -> SideBySideW
     let inner = (i32::from(pane_width) - 1).max(1);
     let raw = finite_or(fraction, DIFF_SPLIT_FRACTION);
     // The epsilon keeps a width that went through
-    // [`diff_split_fraction_from_left_width`] on the same column, as in
-    // `fraction_cols`: a press on the RULE must not move it.
+    // [`diff_split_fraction_from_left_width`] on the same column (`w / c * c`
+    // can land a hair under `w` in floating point): a press on the RULE
+    // must not move it.
     let desired = (inner as f64 * raw + 1e-9).floor() as i32;
     let left_width = clamp_diff_left_width(pane_width, desired);
     let right_width = (inner as u16).saturating_sub(left_width);
@@ -767,20 +778,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pane_widths_default_fraction_depends_only_on_cols() {
-        let a = pane_widths(120, TREE_WIDTH_FRACTION);
-        let b = pane_widths(120, TREE_WIDTH_FRACTION);
+    fn pane_widths_at_the_launch_width_depend_only_on_cols() {
+        let a = pane_widths(120, launch_tree_width(120));
+        let b = pane_widths(120, launch_tree_width(120));
         assert_eq!(a, b);
         assert_eq!(a.tree_width, 48);
         assert_eq!(a.tree_inner_width, 45);
         assert_eq!(a.diff_width, 70);
     }
 
+    /// A launch takes 40% of the terminal up to 200 columns, then stops
+    /// at [`TREE_LAUNCH_MAX_COLS`].
+    #[test]
+    fn launch_tree_width_is_forty_percent_capped_at_eighty_columns() {
+        for (cols, want) in [(100, 40), (160, 64), (200, 80), (300, 80), (400, 80)] {
+            assert_eq!(launch_tree_width(cols), want, "{cols} cols");
+        }
+    }
+
+    /// A wider terminal gives its extra columns to the right pane; the
+    /// tree keeps its columns.
+    #[test]
+    fn pane_widths_keep_the_tree_columns_when_the_terminal_grows() {
+        let at_160 = pane_widths(160, 64);
+        assert_eq!((at_160.tree_width, at_160.diff_width), (64, 94));
+        let at_220 = pane_widths(220, 64);
+        assert_eq!((at_220.tree_width, at_220.diff_width), (64, 154));
+    }
+
+    /// A shrink clamps only the painted tree so the right pane keeps its
+    /// minimum; the same tree columns paint in full again once the
+    /// terminal grows.
+    #[test]
+    fn pane_widths_clamp_a_shrink_and_give_the_columns_back() {
+        let at_80 = pane_widths(80, 64);
+        assert_eq!(at_80.tree_width, 80 - MIN_PANE_COLS - DIFF_PAD_X);
+        assert_eq!(at_80.tree_width, 58);
+        assert_eq!(at_80.diff_width, MIN_PANE_COLS);
+        assert_eq!(pane_widths(220, 64).tree_width, 64);
+    }
+
     #[test]
     fn clamp_keeps_both_panes_above_min() {
         let cols = 100;
-        let too_wide = pane_widths(cols, clamp_tree_fraction(cols, 0.95));
-        let too_narrow = pane_widths(cols, clamp_tree_fraction(cols, 0.05));
+        let too_wide = pane_widths(cols, 95);
+        let too_narrow = pane_widths(cols, 5);
         assert!(too_wide.tree_width >= MIN_PANE_COLS);
         assert!(too_wide.diff_width >= MIN_PANE_COLS);
         assert!(too_narrow.tree_width >= MIN_PANE_COLS);
@@ -789,17 +831,11 @@ mod tests {
     }
 
     #[test]
-    fn tree_fraction_from_width_round_trips() {
+    fn tree_width_from_col_uses_one_based_width() {
         let cols = 120;
-        let fraction = tree_fraction_from_width(cols, 55);
-        assert_eq!(pane_widths(cols, fraction).tree_width, 55);
-    }
-
-    #[test]
-    fn tree_fraction_from_col_uses_one_based_width() {
-        let cols = 120;
-        let fraction = tree_fraction_from_col(cols, 54);
-        assert_eq!(pane_widths(cols, fraction).tree_width, 55);
+        let width = tree_width_from_col(cols, 54);
+        assert_eq!(width, 55);
+        assert_eq!(pane_widths(cols, width).tree_width, 55);
     }
 
     #[test]
@@ -864,37 +900,46 @@ mod tests {
     }
 
     #[test]
-    fn step_tree_fraction_moves_five_percent_and_clamps() {
+    fn step_tree_width_moves_five_percent_of_cols_and_clamps() {
         let cols = 140;
-        let start = pane_widths(cols, TREE_WIDTH_FRACTION).tree_width;
-        assert_eq!(start, 56);
-        let wider = step_tree_fraction(cols, TREE_WIDTH_FRACTION, 1);
-        assert_eq!(pane_widths(cols, wider).tree_width, 63);
-        let narrower = step_tree_fraction(cols, TREE_WIDTH_FRACTION, -1);
-        assert_eq!(pane_widths(cols, narrower).tree_width, 49);
-        // Every column count round-trips, so a step never stalls.
+        let start = launch_tree_width(cols);
+        assert_eq!(pane_widths(cols, start).tree_width, 56);
+        assert_eq!(step_tree_width(cols, start, 1), 63);
+        assert_eq!(step_tree_width(cols, start, -1), 49);
+        // The step starts from the painted width: a tree the terminal
+        // clamps steps from its clamped width.
+        assert_eq!(step_tree_width(80, 64, -1), 58 - 4);
+        // A step never stalls short of either clamp.
         for cols in [80u16, 99, 140, 157, 200] {
-            let mut fraction = TREE_WIDTH_FRACTION;
+            let step = (f64::from(cols) * TREE_FRACTION_STEP).round() as u16;
+            let mut tree = launch_tree_width(cols);
+            let first = step_tree_width(cols, tree, 1);
+            assert_eq!(first, tree + step, "{cols} cols: one step");
             for _ in 0..40 {
-                fraction = step_tree_fraction(cols, fraction, 1);
+                tree = step_tree_width(cols, tree, 1);
             }
-            let widths = pane_widths(cols, fraction);
-            assert_eq!(widths.tree_width, cols - MIN_PANE_COLS - DIFF_PAD_X);
+            let widths = pane_widths(cols, tree);
+            assert_eq!(tree, cols - MIN_PANE_COLS - DIFF_PAD_X, "{cols} cols");
+            assert_eq!(widths.tree_width, tree);
             assert!(widths.diff_width >= MIN_PANE_COLS);
             for _ in 0..40 {
-                fraction = step_tree_fraction(cols, fraction, -1);
+                tree = step_tree_width(cols, tree, -1);
             }
-            assert_eq!(pane_widths(cols, fraction).tree_width, MIN_PANE_COLS);
+            assert_eq!(tree, MIN_PANE_COLS, "{cols} cols");
+            assert_eq!(pane_widths(cols, tree).tree_width, MIN_PANE_COLS);
         }
     }
 
+    /// A divider at every column paints the tree with the divider under
+    /// the pointer, within the clamp.
     #[test]
     fn tree_width_round_trips_for_every_column() {
         for cols in 1u16..400 {
             for width in MIN_PANE_COLS..cols.saturating_sub(MIN_PANE_COLS + DIFF_PAD_X) {
-                let fraction = tree_fraction_from_width(cols, width);
+                let dragged = tree_width_from_col(cols, width - 1);
+                assert_eq!(dragged, width, "{cols} {width}");
                 assert_eq!(
-                    pane_widths(cols, fraction).tree_width,
+                    pane_widths(cols, dragged).tree_width,
                     width,
                     "{cols} {width}"
                 );

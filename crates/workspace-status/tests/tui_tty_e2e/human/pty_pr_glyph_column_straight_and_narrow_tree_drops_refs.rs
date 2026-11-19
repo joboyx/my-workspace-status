@@ -73,9 +73,8 @@ fn fixture(
 /// (read off the cell grid), every row's glyph sits in the tree's edge
 /// cell, and the refs are on every row exactly when `inner` is 50 or more.
 ///
-/// A fresh launch, not a resize: the split a resize leaves does not follow
-/// the width (the tree keeps the share it had), so only a launch gives a
-/// known inner width.
+/// A fresh launch, not a resize: a resize keeps the tree's columns, so
+/// only a launch gives a known inner width.
 fn launch_at(prefix: &str, cols: u16, inner: u16) {
     let (_root, workspace, forge, board) = fixture(prefix);
     let tui = PtySession::open_size_with_env(&workspace, cols, 36, &forge_env(&forge, &[]));
@@ -100,15 +99,18 @@ fn launch_at(prefix: &str, cols: u16, inner: u16) {
 /// Seed: fourteen checkouts (six states on each forge, plus two dirty rows
 /// whose other marks differ), fake `gh` / `glab` answers per state.
 ///
-/// Proof: at 140 columns each row ends in `<ref> <glyph>`. The terminal then
-/// resizes to 100 and 120 columns and back to 140. At each width every
-/// row's glyph sits in the pane's last cell (one column, read from the pane
-/// border), and the refs are on every row when the inner tree is 50 columns
-/// or wider and on no row when narrower. Reverting the ref drop keeps refs
-/// on a narrow tree and fails the narrow wait; moving the badge earlier in
-/// the trailing run leaves another mark in the edge cell of the dirty rows
-/// and fails the badge check. The 50-column boundary itself is the next two
-/// tests.
+/// Proof: at 140 columns each row ends in `<ref> <glyph>` (a 56-column
+/// tree, inner 54). The terminal then resizes to 100 columns (the tree
+/// keeps its columns), `<` narrows the tree twice (5 columns each, inner
+/// 49 then 44), the terminal goes back to 140 columns, and `>` widens the
+/// tree by 7 columns (inner 51). At each step every row's glyph sits in
+/// the pane's last cell (one column, read from the pane border), and the
+/// refs are on every row when the inner tree is 50 columns or wider and on
+/// no row when narrower. Reverting the ref drop keeps refs on a narrow
+/// tree and fails the narrow wait; moving the badge earlier in the
+/// trailing run leaves another mark in the edge cell of the dirty rows
+/// and fails the badge check. The 50-column boundary itself is the next
+/// two tests.
 #[test]
 fn pty_pr_glyph_column_straight_and_narrow_tree_drops_refs() {
     let (_root, workspace, forge, board) = fixture("ws-tui-tty-pr-column");
@@ -119,19 +121,30 @@ fn pty_pr_glyph_column_straight_and_narrow_tree_drops_refs() {
         GIT_WAIT,
     );
 
-    for cols in [100, 120, 140] {
-        tui.resize(cols, 36);
-        // One sample must satisfy all of it: the frame of the width before
-        // the resize cannot.
+    // (terminal columns, key, inner tree width after it)
+    for (cols, key, inner) in [
+        (100, None, 54),
+        (100, Some('<'), 49),
+        (100, Some('<'), 44),
+        (140, None, 44),
+        (140, Some('>'), 51),
+    ] {
+        match key {
+            Some(key) => tui.key(key),
+            None => tui.resize(cols, 36),
+        }
+        // One sample must satisfy all of it: the frame before the step
+        // cannot (another terminal width or another tree edge).
         tui.wait_pred(
             |_| {
                 frame_fits_terminal(&tui)
                     && tree_edge(&tui).is_some_and(|edge| {
-                        board_matches(&tui, &board, edge.glyph_col >= REF_MIN_COLS)
+                        edge.glyph_col == inner
+                            && board_matches(&tui, &board, inner >= REF_MIN_COLS)
                     })
             },
             &format!(
-                "{cols} columns: every row ends at the tree edge, refs on every row only when the tree is {REF_MIN_COLS}+ wide"
+                "{cols} columns, inner tree {inner}: every row ends at the tree edge, refs on every row only when the tree is {REF_MIN_COLS}+ wide"
             ),
             GIT_WAIT,
         );
@@ -162,9 +175,10 @@ fn pty_pr_tree_of_50_columns_paints_refs() {
 /// and drops the refs on a narrow tree.
 ///
 /// Seed: as the boxed test. Proof: at 140 columns every row ends in
-/// `<ref> <glyph>` with the glyph in the tree's edge cell; at 100 columns
-/// every row ends in the glyph alone, still in that cell. Reverting the
-/// flat edge placement or the ref drop fails the matching wait.
+/// `<ref> <glyph>` with the glyph in the tree's edge cell; at 100 columns,
+/// with the tree two `<` narrower (46 columns), every row ends in the
+/// glyph alone, still in that cell. Reverting the flat edge placement or
+/// the ref drop fails the matching wait.
 #[test]
 fn pty_pr_glyph_column_straight_in_the_flat_look() {
     let (_root, workspace, forge, board) = fixture("ws-tui-tty-pr-column-flat");
@@ -181,6 +195,8 @@ fn pty_pr_glyph_column_straight_in_the_flat_look() {
         GIT_WAIT,
     );
     tui.resize(100, 36);
+    tui.key('<');
+    tui.key('<');
     tui.wait_pred(
         |_| board_matches(&tui, &board, false),
         "flat look, 100 columns: glyphs only, at the edge",
