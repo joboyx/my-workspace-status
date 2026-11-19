@@ -1371,7 +1371,10 @@ fn explorer_tree_stale_pan_clamps_at_paint_boxed_and_flat() {
         );
         assert_eq!(state.layout.explorer_tree_hbar.col_max, max, "{look}: bar");
 
+        // The tree keeps its columns through a resize: widen it too (96
+        // columns, 40% of 240), as `>` or a drag does.
         let mut wide = Terminal::new(TestBackend::new(240, 30)).unwrap();
+        state.tree_cols = Some(96);
         draw_state(&mut wide, &mut state);
         let tree = state.layout.explorer_tree;
         let vbar = state.layout.explorer_tree_vbar.x.is_some();
@@ -1760,14 +1763,14 @@ fn resize_edges_drag_and_hover_on_every_registry_surface() {
                 accent,
                 "{case}: the hovered divider lights"
             );
-            let before = pane_widths(cols, state.tree_fraction).tree_width;
+            let before = pane_widths(cols, state.tree_width_cols(cols)).tree_width;
             state.dispatch(Action::Click { col: x, row: y });
             assert_eq!(state.drag, SplitDrag::Pane, "{case}: a divider press");
             state.dispatch(Action::Drag {
                 col: x + 10,
                 row: y,
             });
-            let after = pane_widths(cols, state.tree_fraction).tree_width;
+            let after = pane_widths(cols, state.tree_width_cols(cols)).tree_width;
             assert_eq!(after, before + 10, "{case}: the drag widens the left pane");
             assert_eq!(state.dispatch(Action::Release), Effect::None, "{case}");
             assert_eq!(state.drag, SplitDrag::None, "{case}: release ends the drag");
@@ -1823,13 +1826,14 @@ fn resize_edges_drag_and_hover_on_every_registry_surface() {
     }
 }
 
-/// A terminal resized one column at a time paints the tree width of a
-/// fresh launch at the end size on every divider surface, in both
-/// looks, and a tree the narrowest terminal squeezed comes back when
-/// the terminal grows again. Each step is a `Resize` then a paint, as
-/// in the live loop.
+/// A terminal resized one column at a time keeps the tree columns the
+/// launch paint fixed, on every divider surface, in both looks: a wider
+/// terminal gives its extra columns to the right pane, the narrowest
+/// terminal clamps only the painted tree, and the tree gets its columns
+/// back when the terminal grows again. Each step is a `Resize` then a
+/// paint, as in the live loop.
 #[test]
-fn stepwise_terminal_resize_paints_the_fresh_launch_tree_width_on_every_surface() {
+fn stepwise_terminal_resize_keeps_the_launch_tree_columns_on_every_surface() {
     const ROWS: u16 = 30;
     let resize_and_draw = |terminal: &mut Terminal<TestBackend>, state: &mut AppState, cols| {
         state.dispatch(Action::Resize { cols, rows: ROWS });
@@ -1837,53 +1841,82 @@ fn stepwise_terminal_resize_paints_the_fresh_launch_tree_width_on_every_surface(
         draw_state(terminal, state);
         state.layout.outer_tree_width
     };
+    let narrowest_widest = MIN_TERM_COLS - MIN_PANE_COLS - crate::tui::split::DIFF_PAD_X;
     for (id, fixture) in RESIZE_EDGE_SURFACES {
         for (look, background) in PANE_LOOKS {
             let case = format!("{id} {look}");
-            let open = || {
-                let mut state = (DIFF_BAR_SURFACES[fixture].open)(&long_bar_diff());
-                state.background = background;
-                state
-            };
-            let mut fresh = open();
-            let mut terminal = Terminal::new(TestBackend::new(134, ROWS)).unwrap();
-            draw_state(&mut terminal, &mut fresh);
-            assert_eq!(fresh.layout.outer_tree_width, 53, "{case}: fresh 134 cols");
-
-            let mut state = open();
+            let mut state = (DIFF_BAR_SURFACES[fixture].open)(&long_bar_diff());
+            state.background = background;
             let mut terminal = Terminal::new(TestBackend::new(124, ROWS)).unwrap();
             draw_state(&mut terminal, &mut state);
+            assert_eq!(state.layout.outer_tree_width, 49, "{case}: launch 124 cols");
+            assert_eq!(state.tree_cols, Some(49), "{case}: the launch paint");
             for cols in 125..=134 {
-                resize_and_draw(&mut terminal, &mut state, cols);
+                assert_eq!(
+                    resize_and_draw(&mut terminal, &mut state, cols),
+                    49,
+                    "{case}: {cols} cols"
+                );
             }
             assert_eq!(
-                state.layout.outer_tree_width, 53,
-                "{case}: resize steps 124 -> 134"
-            );
-            assert_eq!(
                 resize_and_draw(&mut terminal, &mut state, MIN_TERM_COLS),
-                MIN_PANE_COLS,
-                "{case}: the narrowest terminal"
+                narrowest_widest,
+                "{case}: the narrowest terminal clamps the tree"
             );
-            // A divider press released in place and a `<` the clamp
+            // A divider press released in place and a `>` the clamp
             // refuses do not change the painted width, so they keep the
-            // split.
+            // remembered columns.
             let (x, y) = (state.layout.outer_tree_width - 1, state.layout.right_y + 2);
             state.dispatch(Action::Click { col: x, row: y });
             assert_eq!(state.drag, SplitDrag::Pane, "{case}: a divider press");
             state.dispatch(Action::Release);
-            state.dispatch(Action::ResizeTree(-1));
+            state.dispatch(Action::ResizeTree(1));
             draw_state(&mut terminal, &mut state);
             assert_eq!(
-                state.layout.outer_tree_width, MIN_PANE_COLS,
-                "{case}: still the narrowest tree"
+                state.layout.outer_tree_width, narrowest_widest,
+                "{case}: still the widest tree"
             );
+            assert_eq!(state.tree_cols, Some(49), "{case}: remembered");
             assert_eq!(
                 resize_and_draw(&mut terminal, &mut state, 134),
-                53,
+                49,
                 "{case}: back to 134 cols"
             );
         }
+    }
+}
+
+/// The first pane paint fixes the launch tree width on every divider
+/// surface: 40% of the terminal, capped at 80 columns, so a launch at
+/// 300 columns paints an 80-column tree and a wider repaint keeps it.
+/// A frame too small for the panes paints none and fixes nothing.
+#[test]
+fn the_first_pane_paint_fixes_the_capped_launch_tree_width() {
+    const ROWS: u16 = 30;
+    for (id, fixture) in RESIZE_EDGE_SURFACES {
+        let mut state = (DIFF_BAR_SURFACES[fixture].open)(&long_bar_diff());
+        let mut terminal = Terminal::new(TestBackend::new(MIN_TERM_COLS - 1, ROWS)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert!(state.too_small, "{id}: the resize notice");
+        assert_eq!(state.tree_cols, None, "{id}: no pane paint");
+
+        state.dispatch(Action::Resize {
+            cols: 300,
+            rows: ROWS,
+        });
+        terminal.backend_mut().resize(300, ROWS);
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(state.layout.outer_tree_width, 80, "{id}: 300 cols");
+        assert_eq!(state.tree_cols, Some(80), "{id}: fixed at launch");
+
+        state.dispatch(Action::Resize {
+            cols: 400,
+            rows: ROWS,
+        });
+        terminal.backend_mut().resize(400, ROWS);
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(state.layout.outer_tree_width, 80, "{id}: 400 cols");
+        assert_eq!(state.tree_cols, Some(80), "{id}: still 80");
     }
 }
 
@@ -2028,7 +2061,7 @@ fn explorer_flat_divider_pad_press_released_in_place_clicks_the_tree_row() {
         .find(|&y| find_cell_col(&buf, y, "README.md").is_some_and(|x| x < tree.right()))
         .expect("a README.md row");
     let x = state.layout.outer_tree_width - 1;
-    let fraction = state.tree_fraction;
+    let tree_cols = state.tree_cols;
     assert_eq!(
         state.dispatch(Action::Click { col: x, row: y }),
         Effect::None
@@ -2040,7 +2073,7 @@ fn explorer_flat_divider_pad_press_released_in_place_clicks_the_tree_row() {
         "the release clicks the row: {released:?}"
     );
     assert_eq!(state.drag, SplitDrag::None);
-    assert_eq!(state.tree_fraction, fraction, "a click never resizes");
+    assert_eq!(state.tree_cols, tree_cols, "a click never resizes");
     assert_eq!(state.focus, FocusPane::Left);
 }
 
@@ -2603,7 +2636,10 @@ fn list_pan_left_stale_by_a_wider_pane_drops_to_the_clamp_and_keeps_no_bar_row()
             assert!(list_pan(&state, surface) > 0, "{case}: panned");
             assert!(list_hbar(&state, hbar_id).y.is_some(), "{case}: bar shows");
 
+            // The tree keeps its columns through a resize: widen it too
+            // (160 columns, 40% of 400), as `>` or a drag does.
             let mut wide = Terminal::new(TestBackend::new(400, 30)).unwrap();
+            state.tree_cols = Some(160);
             draw_state(&mut wide, &mut state);
             assert_eq!(list_pan(&state, surface), 0, "{case}: clamped to 0");
             assert_eq!(list_hbar(&state, hbar_id).y, None, "{case}: no bar");
@@ -5233,8 +5269,9 @@ fn graph_footer_height_follows_the_meta_rows_not_the_message() {
 /// cursor row in the list, in both looks, with no key press between. The
 /// cursor is on the root commit, the last commit row: at 200 columns it
 /// paints one row above the list bottom (the spacer under it is the last
-/// row) and its 80-col meta line fits one row; at 72 columns the meta
-/// line wraps onto 3 rows and the list gives 2 up.
+/// row) and its 80-col meta line fits one row; at 124 columns (the tree
+/// keeps its 80 launch columns, so the right pane is 42 columns) the
+/// meta line wraps onto 3 rows and the list gives 2 up.
 #[test]
 fn graph_cursor_stays_in_the_list_when_the_meta_wraps_without_a_key() {
     let n = 30;
@@ -5289,7 +5326,7 @@ fn graph_cursor_stays_in_the_list_when_the_meta_wraps_without_a_key() {
         draw_state(&mut wide, &mut state);
         let before = cursor_in_list(&wide, &state);
         assert_eq!(before.meta_rows, 1, "{look}: one meta row at 200 columns");
-        let mut narrow = Terminal::new(TestBackend::new(72, 24)).unwrap();
+        let mut narrow = Terminal::new(TestBackend::new(124, 24)).unwrap();
         let paints = workspace_status_graph::paint_calls();
         draw_state(&mut narrow, &mut state);
         assert_eq!(
@@ -5298,7 +5335,7 @@ fn graph_cursor_stays_in_the_list_when_the_meta_wraps_without_a_key() {
             "{look}: the frame that moves the viewport still paints once"
         );
         let after = cursor_in_list(&narrow, &state);
-        assert_eq!(after.meta_rows, 3, "{look}: 3 meta rows at 72 columns");
+        assert_eq!(after.meta_rows, 3, "{look}: 3 meta rows at 124 columns");
         assert_eq!(
             after.list_height + 2,
             before.list_height,
@@ -5882,7 +5919,7 @@ fn commit_footer_rows_match_on_every_registry_surface() {
             }
             state.background = background;
             let mut terminal = Terminal::new(TestBackend::new(120, 28)).unwrap();
-            state.tree_fraction = 0.5;
+            state.tree_cols = Some(60);
             terminal.draw(|frame| draw(frame, &mut state)).unwrap();
             let FooterBox {
                 y,
@@ -5996,7 +6033,7 @@ fn commit_footer_rows_match_on_every_registry_surface() {
 
 /// The `commit-footer` meta line wraps on every surface `docs/parity.md`
 /// marks `supported` for `meta-wrap`, in both looks. In a 100x30
-/// terminal with `tree_fraction` 0.5 every footer is 46 to 49 columns
+/// terminal with a 50-column tree every footer is 46 to 49 columns
 /// wide, so commit A's 73-col meta line (`[HEAD] [main] · aaa1111 ·
 /// parent bbb2222 · Augusta Ada King Lovelace · 2m`) wraps onto 2 rows
 /// at the bottom of the footer, uncut: the footer grows by that row and
@@ -6034,7 +6071,7 @@ fn commit_footer_meta_wraps_on_every_registry_surface() {
                     }
                 }
             }
-            state.tree_fraction = 0.5;
+            state.tree_cols = Some(50);
             let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
             draw_state(&mut terminal, &mut state);
             let FooterBox {
@@ -6565,7 +6602,7 @@ fn blame_opened_compare_commit_footer_reads_the_tab_commit_off_the_graph() {
             let case = format!("{graph} {look}");
             let mut state = open(graph);
             state.background = background;
-            state.tree_fraction = 0.5;
+            state.tree_cols = Some(60);
             let mut terminal = Terminal::new(TestBackend::new(120, 28)).unwrap();
             draw_state(&mut terminal, &mut state);
             let FooterBox {
@@ -6773,7 +6810,7 @@ fn compare_commit_footer_paints_a_head_tab_commit_like_the_graph_row() {
     for (look, background) in PANE_LOOKS {
         let mut state = two_pane_graph_state();
         state.background = background;
-        state.tree_fraction = 0.5;
+        state.tree_cols = Some(60);
         let row = state
             .snapshot
             .repos
@@ -11187,7 +11224,7 @@ fn paint_mode_pad_clicks_select_the_row_and_boundary_pads_drag_the_split() {
     }
 
     // Press + drag on a boundary pad still resizes.
-    let fraction = state.tree_fraction;
+    let tree_cols = state.tree_cols.expect("the paint fixed the tree width");
     state.dispatch(Action::Click {
         col: right.x,
         row: first,
@@ -11197,7 +11234,10 @@ fn paint_mode_pad_clicks_select_the_row_and_boundary_pads_drag_the_split() {
         row: first,
     });
     state.dispatch(Action::Release);
-    assert!(state.tree_fraction > fraction, "the drag resized the panes");
+    assert!(
+        state.tree_cols.expect("a tree width") > tree_cols,
+        "the drag resized the panes"
+    );
 }
 
 /// Terminal mode keeps the boxed panes: border glyphs, no `▁` rule,
@@ -13814,7 +13854,10 @@ fn narrow_tree_omits_sparkline() {
     let id = app_repo_row_id(&state);
     assert!(tree_row_text(&wide, &state, &id).contains('█'));
 
+    // The tree keeps its columns through a resize: narrow it as `<` does
+    // (32 columns, 40% of the 80-column terminal).
     let mut narrow = Terminal::new(TestBackend::new(80, 16)).unwrap();
+    state.tree_cols = Some(32);
     draw_state(&mut narrow, &mut state);
     assert!(
         usize::from(state.layout.tree_width) < SPARK_MIN_TREE_COLS,
@@ -16781,8 +16824,11 @@ fn tree_rows_paint_the_same_icons_marks_flash_and_popovers_on_every_registry_tre
 
             // Panned on a narrow terminal, each hit is still its glyph:
             // the devicon pans out with the label's first column, and
-            // the right-aligned marks keep their cells.
+            // the right-aligned marks keep their cells. The tree keeps
+            // its columns through a resize, so narrow it to its minimum
+            // too (as `<` does).
             let mut narrow = Terminal::new(TestBackend::new(48, 20)).unwrap();
+            state.tree_cols = Some(MIN_PANE_COLS);
             (surface.focus)(&mut state, "README.md");
             draw_state(&mut narrow, &mut state);
             let badge = target_hit(&state, "README.md", IconKind::StatusModified);
@@ -18279,7 +18325,7 @@ fn workspace_row_paints_the_pr_total_after_the_change_summary() {
         .collect();
     for (cols, want) in [(160, "3 PRs · 2 need you"), (100, "2 need you")] {
         let mut state = pr_state(&rows, true);
-        state.tree_fraction = 0.5;
+        state.tree_cols = Some(cols / 2);
         for (name, pr, number) in prs {
             let url = format!("https://github.com/octo/demo/pull/{number}");
             set_pr(
@@ -18357,7 +18403,7 @@ fn narrow_tree_keeps_need_you_beside_a_long_workspace_name() {
             PrLookup::Found(PullRequest::fixture(number, &url, pr)),
         );
     }
-    state.tree_fraction = 0.47;
+    state.tree_cols = Some(47);
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal.draw(|frame| draw(frame, &mut state)).unwrap();
     assert_eq!(state.layout.tree_width, 45);
@@ -21176,7 +21222,7 @@ fn hover_popover_over_the_pane_divider_clears_its_highlight() {
         state.background = background;
         // The narrowest tree pane: the badge's popover hangs across
         // the divider.
-        state.tree_fraction = 0.0;
+        state.tree_cols = Some(0);
         let mut terminal = pr_terminal();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let badge = state.layout.pr_badge_hits()[0].clone();
@@ -21788,12 +21834,12 @@ fn graph_header_chip_paints_flush_right_and_links_its_ref_in_every_look() {
                     );
                 }
                 // The graph pane is the left pane at depth 1.
-                state.tree_fraction = match (depth_1, wide) {
-                    (false, true) => 0.3,
-                    (false, false) => 0.78,
-                    (true, true) => 0.6,
-                    (true, false) => 0.22,
-                };
+                state.tree_cols = Some(match (depth_1, wide) {
+                    (false, true) => 48,
+                    (false, false) => 124,
+                    (true, true) => 96,
+                    (true, false) => 35,
+                });
                 let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
                 terminal.draw(|frame| draw(frame, &mut state)).unwrap();
                 let (x0, width) = if depth_1 {

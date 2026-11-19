@@ -206,6 +206,7 @@ mod pty_terminal_resize_relayouts;
 mod pty_text_fields_type_doubled_nav_letters;
 mod pty_theme_persists_across_restart;
 mod pty_tree_b_picker_enter_checkout;
+mod pty_tree_keeps_columns_on_resize;
 mod pty_tree_o_focuses_graph_branches;
 mod pty_tree_sgr_hscroll_pans_clipped_path;
 mod pty_tree_staged_changes_sections;

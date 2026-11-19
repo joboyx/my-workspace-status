@@ -5,7 +5,7 @@ use crate::harness::{tree_row_containing, PtySession, COLS};
 use crate::seed::{daily_workspace, seed_tall_graph, unique_root};
 use crate::support::{
     crumb_row, documented_launch_first_paint, no_mouse_toggle_toast, no_wrong_overlays,
-    panes_tree_focused_diff_unfocused, panes_tree_focused_graph_unfocused,
+    pane_join_col, panes_tree_focused_diff_unfocused, panes_tree_focused_graph_unfocused,
     panes_tree_unfocused_graph_focused, prove_keys_handled, status_row, title_has_graph,
     tree_cursor_on, tree_has, GIT_WAIT, TREE_LABEL_COL, WAIT,
 };
@@ -25,20 +25,6 @@ fn tall_graph_workspace() -> (PathBuf, PathBuf) {
     fs::create_dir_all(&workspace).unwrap();
     seed_tall_graph(&workspace, "history");
     (root, workspace)
-}
-
-/// 0-based column of the tree/right box join (`┐┌` / `││`).
-fn pane_join_col(screen: &str) -> Option<u16> {
-    let line = screen.lines().next()?;
-    for sep in ["┐┌", "││", "┘└"] {
-        if let Some(byte_at) = line.find(sep) {
-            return Some(line[..byte_at].chars().count() as u16);
-        }
-    }
-    screen.lines().skip(1).find_map(|line| {
-        line.find("││")
-            .map(|byte_at| line[..byte_at].chars().count() as u16)
-    })
 }
 
 fn sgr_release(tui: &mut PtySession, col: u16, row: u16) {

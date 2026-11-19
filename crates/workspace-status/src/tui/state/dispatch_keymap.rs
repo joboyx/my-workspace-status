@@ -163,7 +163,7 @@ impl AppState {
                     self.dispatch(Action::NavEsc)
                 }
             }
-            Action::ResizeTree(steps) => self.step_tree_width(steps),
+            Action::ResizeTree(steps) => self.resize_tree_by_steps(steps),
             Action::ToggleDiffMode => self.toggle_diff_mode(),
             Action::ToggleDiffWrap => self.toggle_diff_wrap(),
             Action::ToggleIgnoreWhitespace => self.toggle_ignore_whitespace(),

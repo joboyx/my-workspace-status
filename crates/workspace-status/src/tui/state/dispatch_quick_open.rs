@@ -760,14 +760,14 @@ mod tests {
         use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
         let mut app = family_state();
         app.layout.term_cols = 140;
-        let fraction = app.tree_fraction;
+        let tree_cols = app.tree_width_cols(140);
 
         press(&mut app, 'F');
         assert!(app.quick_open.is_some(), "`F` opens Quick Open");
         press(&mut app, '>');
         press(&mut app, '<');
         assert_eq!(quick(&app).query, "><", "both keys type into the query");
-        assert_eq!(app.tree_fraction, fraction, "no resize while open");
+        assert_eq!(app.tree_width_cols(140), tree_cols, "no resize while open");
 
         let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         let action = crate::tui::app::map_event(&app, &esc);
@@ -778,7 +778,10 @@ mod tests {
         assert!(app.quick_open.is_none(), "Esc on `>` closes Quick Open");
 
         press(&mut app, '<');
-        assert!(app.tree_fraction < fraction, "`<` narrows the tree again");
+        assert!(
+            app.tree_width_cols(140) < tree_cols,
+            "`<` narrows the tree again"
+        );
     }
 
     /// Two primaries that share the leaf `web`, each with a `README.md`:

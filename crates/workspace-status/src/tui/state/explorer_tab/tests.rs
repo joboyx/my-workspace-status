@@ -1019,11 +1019,11 @@ fn zz_collapses_and_expands_subtree() {
 }
 
 #[test]
-fn angle_brackets_resize_shared_tree_fraction() {
+fn angle_brackets_resize_shared_tree_width() {
     use super::super::super::split::pane_widths;
     let mut app = state();
     app.layout.term_cols = 140;
-    let width = |app: &AppState| pane_widths(140, app.tree_fraction).tree_width;
+    let width = |app: &AppState| pane_widths(140, app.tree_width_cols(140)).tree_width;
     open_root(&mut app);
     assert_eq!(width(&app), 56);
     assert_eq!(app.dispatch(Action::ResizeTree(1)), Effect::None);

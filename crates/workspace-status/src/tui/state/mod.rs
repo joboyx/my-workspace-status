@@ -120,11 +120,11 @@ use super::search::{
 use super::search_files::{SearchFilesState, SearchZone};
 use super::selection::TextSelection;
 use super::split::{
-    clamp_tree_fraction, diff_paint_width, diff_pane_mode, diff_split_fraction_from_col,
-    graph_scroll_max, hcol_from_col, hcol_from_delta, hit_split, list_hbar_rows, pane_widths,
-    step_tree_fraction, tree_fraction_from_col, vscroll_from_delta, vscroll_from_row, DiffMode,
+    diff_paint_width, diff_pane_mode, diff_split_fraction_from_col, graph_scroll_max,
+    hcol_from_col, hcol_from_delta, hit_split, launch_tree_width, list_hbar_rows, pane_widths,
+    step_tree_width, tree_width_from_col, vscroll_from_delta, vscroll_from_row, DiffMode,
     HScrollbar, HScrollbarLayout, ResizeEdge, SplitDrag, SplitHit, SplitLayout, VScrollbar,
-    VScrollbarLayout, DIFF_SPLIT_FRACTION, NARROW_SXS, TREE_WIDTH_FRACTION,
+    VScrollbarLayout, DIFF_SPLIT_FRACTION, NARROW_SXS,
 };
 use super::stash::{
     checkout_path, resolve_stash_menu_key, row_is_hidden, stash_dirty_for_row,
@@ -1212,7 +1212,14 @@ pub struct AppState {
     commit_file_signatures: BTreeMap<String, String>,
     tree_ghosts: Vec<GhostRow<VisibleRow>>,
     commit_file_ghosts: Vec<GhostRow<CommitFileRow>>,
-    pub tree_fraction: f64,
+    /// Remembered outer tree-pane width in columns, session-only (no
+    /// config key). `None` until the first pane paint fixes the launch
+    /// width ([`launch_tree_width`] of the terminal width then). A divider
+    /// drag and `<` / `>` set it; a terminal resize never does, so a
+    /// narrower terminal clamps only the painted width ([`pane_widths`])
+    /// and a wider one gives its extra columns to the right pane. Read it
+    /// through [`Self::tree_width_cols`].
+    pub tree_cols: Option<u16>,
     pub diff_split_fraction: f64,
     pub diff_mode: DiffMode,
     /// Soft-wrap file-diff code. On by default; `viewDefaults.wrap` sets the
@@ -1542,7 +1549,7 @@ impl AppState {
             commit_file_signatures: BTreeMap::new(),
             tree_ghosts: Vec::new(),
             commit_file_ghosts: Vec::new(),
-            tree_fraction: TREE_WIDTH_FRACTION,
+            tree_cols: None,
             diff_split_fraction: DIFF_SPLIT_FRACTION,
             diff_mode: DiffMode::SideBySide,
             diff_wrap: true,
@@ -3507,17 +3514,32 @@ impl AppState {
         }
     }
 
-    /// Store the split of a divider press or drag at `col`. A column that
-    /// paints the tree at its current width (a press on the divider, or a
-    /// drag the clamp holds at a narrow terminal) keeps the stored fraction,
-    /// so it can come back when the terminal grows.
-    fn apply_tree_fraction_from_col(&mut self, col: u16) {
+    /// Session tree width in columns for a `term_cols`-wide terminal: the
+    /// remembered [`Self::tree_cols`], or the launch width before the
+    /// first pane paint fixes it. Not clamped: [`pane_widths`] clamps.
+    pub(crate) fn tree_width_cols(&self, term_cols: u16) -> u16 {
+        self.tree_cols
+            .unwrap_or_else(|| launch_tree_width(term_cols))
+    }
+
+    /// Session tree width for a pane paint `term_cols` wide. The first
+    /// pane paint fixes the launch width in [`Self::tree_cols`]; a frame
+    /// too small for the panes paints none and fixes nothing.
+    pub(crate) fn paint_tree_width_cols(&mut self, term_cols: u16) -> u16 {
+        *self
+            .tree_cols
+            .get_or_insert_with(|| launch_tree_width(term_cols))
+    }
+
+    /// Store the tree width of a divider press or drag at `col`. A column
+    /// that paints the tree at its current width (a press on the divider,
+    /// or a drag the clamp holds at a narrow terminal) keeps the stored
+    /// width, so it can come back when the terminal grows.
+    fn apply_tree_width_from_col(&mut self, col: u16) {
         let cols = self.layout.term_cols.max(1);
-        let fraction = clamp_tree_fraction(cols, tree_fraction_from_col(cols, col));
-        if pane_widths(cols, fraction).tree_width
-            != pane_widths(cols, self.tree_fraction).tree_width
-        {
-            self.tree_fraction = fraction;
+        let width = tree_width_from_col(cols, col);
+        if width != pane_widths(cols, self.tree_width_cols(cols)).tree_width {
+            self.tree_cols = Some(width);
         }
     }
 
@@ -3631,7 +3653,7 @@ impl AppState {
             }
             SplitHit::Pane => {
                 self.drag = SplitDrag::Pane;
-                self.apply_tree_fraction_from_col(col);
+                self.apply_tree_width_from_col(col);
                 self.last_click = None;
             }
             SplitHit::DiffSplit => {
@@ -3898,7 +3920,7 @@ impl AppState {
                     // a double-click.
                     self.last_click = None;
                 }
-                self.apply_tree_fraction_from_col(col);
+                self.apply_tree_width_from_col(col);
             }
             SplitDrag::Diff => self.apply_diff_fraction_from_col(col),
             SplitDrag::CommitMsg {
@@ -4321,17 +4343,19 @@ impl AppState {
         }
     }
 
-    /// Move the tree / right split by `steps` of 5% (`<` / `>`). Session-only, like a drag.
-    /// A step the clamp refuses keeps the stored fraction.
-    fn step_tree_width(&mut self, steps: i32) -> Effect {
+    /// Move the tree / right split by `steps` steps (`<` / `>`), each 5% of
+    /// the terminal width in whole columns ([`step_tree_width`]), and
+    /// remember the new tree width. Session-only, like a drag. A step the
+    /// clamp refuses keeps the stored width.
+    fn resize_tree_by_steps(&mut self, steps: i32) -> Effect {
         let cols = self.layout.term_cols.max(1);
-        let before = pane_widths(cols, self.tree_fraction).tree_width;
-        let stepped = step_tree_fraction(cols, self.tree_fraction, steps);
-        if pane_widths(cols, stepped).tree_width == before {
+        let current = self.tree_width_cols(cols);
+        let stepped = step_tree_width(cols, current, steps);
+        if stepped == pane_widths(cols, current).tree_width {
             let edge = if steps < 0 { "narrowest" } else { "widest" };
             self.status = StatusMessage::warn(format!("tree pane is at its {edge}"));
         } else {
-            self.tree_fraction = stepped;
+            self.tree_cols = Some(stepped);
         }
         Effect::None
     }
@@ -7164,11 +7188,11 @@ impl AppState {
         self.follow_graph_files()
     }
 
-    /// Record the new terminal width. The stored `tree_fraction` stays as it
-    /// is: [`pane_widths`] clamps it to whole columns at draw time. Rounding
-    /// it here would shrink the split a little on each `Resize` event of a
-    /// terminal drag, and a split the narrowest terminal clamped would not
-    /// come back when the terminal grows.
+    /// Record the new terminal width. The remembered [`Self::tree_cols`]
+    /// stay as they are: [`pane_widths`] clamps them at paint time, so a
+    /// tree a narrow terminal squeezed gets its columns back when the
+    /// terminal grows, and a wider terminal gives its extra columns to the
+    /// right pane. A resize before the first pane paint fixes no width.
     fn apply_terminal_size(&mut self, cols: u16) {
         self.layout.term_cols = cols.max(1);
     }

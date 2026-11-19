@@ -712,7 +712,10 @@ struct ResizeEdgeArea {
 /// Returns the geometry the resize-edge highlight paints over, once the
 /// overlays have painted.
 fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) -> ResizeEdgeArea {
-    let widths = pane_widths(pane_area.width, state.tree_fraction);
+    let widths = pane_widths(
+        pane_area.width,
+        state.paint_tree_width_cols(pane_area.width),
+    );
     let panes = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -1485,7 +1488,7 @@ fn draw_explorer_tab(
     area: Rect,
     state: &mut AppState,
 ) -> Option<ResizeEdgeArea> {
-    let widths = pane_widths(area.width, state.tree_fraction);
+    let widths = pane_widths(area.width, state.paint_tree_width_cols(area.width));
     let panes = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([

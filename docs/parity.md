@@ -229,13 +229,14 @@ A press on a resize edge drags it: the tree / right pane divider and the in-diff
 | `divider` | A drag on the pane divider resizes the panes. | `flat_divider_pad_press_and_drag_resizes`, `resize_edges_drag_and_hover_on_every_registry_surface`, `explorer_flat_divider_pad_press_released_in_place_clicks_the_tree_row` |
 | `diff-rule` | A drag on the split-mode diff rule moves it. | `diff_split_rule_round_trips_through_the_fraction_boxed_and_flat`, `resize_edges_drag_and_hover_on_every_registry_surface` |
 | `hover` | The edge under the pointer lights. | `hovered_pane_divider_lights_the_left_pane_edge_boxed_and_flat`, `resize_edges_drag_and_hover_on_every_registry_surface` |
+| `keeps-cols` | The tree keeps its remembered column width when the terminal resizes; the shrink clamp does not overwrite it. | `pane_widths_keep_the_tree_columns_when_the_terminal_grows`, `pane_widths_clamp_a_shrink_and_give_the_columns_back`, `terminal_resize_keeps_the_tree_columns`, `stepwise_terminal_resize_keeps_the_launch_tree_columns_on_every_surface`, `the_first_pane_paint_fixes_the_capped_launch_tree_width`, `pty_tree_keeps_columns_on_resize`, `pty_tree_launch_width_caps_at_eighty_columns` |
 
-| Surface | Tab | Depth | Pane | Looks | Code anchors | `divider` | `diff-rule` | `hover` |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `workspace` | Workspace | any | both | boxed, flat | `click_at`, `press_split_hit`, `hit_split`, `resize_edges_take_mouse`, `hovered_resize_edge` | supported | supported | supported |
-| `compare` | Compare | - | both | boxed, flat | `click_at`, `press_split_hit`, `hit_split`, `resize_edges_take_mouse`, `hovered_resize_edge` | supported | supported | supported |
-| `explorer` | Explorer | - | both | boxed, flat | `explorer_click`, `press_split_hit`, `hit_split`, `resize_edges_take_mouse`, `hovered_resize_edge`, `draw_explorer_tab` | supported | supported | supported |
-| `prs-tab` | PRs | - | both | boxed, flat | `click_at`, `resize_edges_take_mouse`, `draw_prs_tab` | n/a: the detail pane takes a fixed third of the width | n/a: the PRs tab paints no diff | n/a: the PRs tab has no edge to drag |
+| Surface | Tab | Depth | Pane | Looks | Code anchors | `divider` | `diff-rule` | `hover` | `keeps-cols` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `workspace` | Workspace | any | both | boxed, flat | `click_at`, `press_split_hit`, `hit_split`, `resize_edges_take_mouse`, `hovered_resize_edge` | supported | supported | supported | supported |
+| `compare` | Compare | - | both | boxed, flat | `click_at`, `press_split_hit`, `hit_split`, `resize_edges_take_mouse`, `hovered_resize_edge` | supported | supported | supported | supported |
+| `explorer` | Explorer | - | both | boxed, flat | `explorer_click`, `press_split_hit`, `hit_split`, `resize_edges_take_mouse`, `hovered_resize_edge`, `draw_explorer_tab` | supported | supported | supported | supported |
+| `prs-tab` | PRs | - | both | boxed, flat | `click_at`, `resize_edges_take_mouse`, `draw_prs_tab` | n/a: the detail pane takes a fixed third of the width | n/a: the PRs tab paints no diff | n/a: the PRs tab has no edge to drag | n/a: the detail pane takes a fixed third of the width |
 
 ### `horizontal-pan` — Horizontal pan
 

@@ -196,7 +196,8 @@ fn pty_demo_merged_head_chip_matches_footer_on_painted_row() {
 /// Narrow demo graph truncates the spacer chip; the footer keeps the full ref.
 ///
 /// Same seed and `/` `merger` Enter as the merged-chip test, then Tab
-/// focuses the graph and a 64×28 resize clips the spacer. The footer
+/// focuses the graph and a 95×28 resize clips the spacer (the tree keeps
+/// its 56 launch columns, so the graph pane is 37 columns wide). The footer
 /// still lists `feature/reconciliation` and does not collapse leftover
 /// refs to `[+N]`. `l` pans the graph and leaves the full ref in the
 /// footer.
@@ -222,10 +223,10 @@ fn pty_demo_narrow_graph_truncates_chip_name_footer_keeps_full_ref() {
         "narrow-footer short-grid claim must be false before resize (launch is 140x32):\n{}",
         tui.screen()
     );
-    tui.resize(64, 28);
+    tui.resize(95, 28);
     tui.wait_pred(
         narrow_graph_footer_on_short_grid,
-        "64x28 resize keeps the full ref in the footer; spacer keeps a full or truncated chip",
+        "95x28 resize keeps the full ref in the footer; spacer keeps a full or truncated chip",
         WAIT,
     );
     prove_keys_handled(&mut tui);
