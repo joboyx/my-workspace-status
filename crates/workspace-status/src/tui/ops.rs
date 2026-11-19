@@ -418,9 +418,10 @@ impl OpTally {
 /// local changes conflicted — …`, with `(+N more failed)` for the rest.
 ///
 /// With a `scope` (a workspace-row op under a focus query) the count names
-/// the focused set and the families left out follow the notes:
-/// `Fetched 3 focused repos (1 failed: …) · 28 outside focus skipped`. The
-/// skipped part shows only when at least one family is outside.
+/// the focused set and the count of families outside the focus follows the
+/// notes: `Fetched 3 focused repos (1 failed: …) · 28 skipped`. The short
+/// suffix keeps the line inside one ack toast row. It shows only when at
+/// least one family is outside.
 pub fn format_completed_op(kind: RunningOp, tally: &OpTally, scope: Option<FocusScope>) -> String {
     let failed: Vec<(&str, Option<&str>)> = tally
         .results
@@ -477,7 +478,7 @@ pub fn format_completed_op(kind: RunningOp, tally: &OpTally, scope: Option<Focus
         format!("{verb} {total} {noun} ({})", notes.join("; "))
     };
     if let Some(FocusScope { outside }) = scope.filter(|scope| scope.outside > 0) {
-        text.push_str(&format!(" · {outside} outside focus skipped"));
+        text.push_str(&format!(" · {outside} skipped"));
     }
     text
 }
@@ -1521,7 +1522,7 @@ mod tests {
         let two_ok = tally(&[("app", RepoOpResult::Ok), ("lib", RepoOpResult::Ok)]);
         assert_eq!(
             format_completed_op(RunningOp::Fetch, &two_ok, scope(28)),
-            "Fetched 2 focused repos · 28 outside focus skipped"
+            "Fetched 2 focused repos · 28 skipped"
         );
         assert_eq!(
             format_completed_op(
@@ -1529,7 +1530,7 @@ mod tests {
                 &tally(&[("app", RepoOpResult::Ok)]),
                 scope(1)
             ),
-            "Pulled 1 focused repo · 1 outside focus skipped"
+            "Pulled 1 focused repo · 1 skipped"
         );
         assert_eq!(
             format_completed_op(RunningOp::Fetch, &two_ok, scope(0)),
@@ -1547,7 +1548,7 @@ mod tests {
         assert_eq!(
             format_completed_op(RunningOp::DefaultBranch, &mixed, scope(3)),
             "Switched 3 focused repos (1 failed: app — no default branch found; \
-             1 skipped: dirty) · 3 outside focus skipped",
+             1 skipped: dirty) · 3 skipped",
             "the notes stay right after the count"
         );
         assert_eq!(

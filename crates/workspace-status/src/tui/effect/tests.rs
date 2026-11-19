@@ -3236,10 +3236,7 @@ fn a_focused_workspace_fetch_names_the_focused_set_and_the_skipped_count() {
     let jobs = capture_jobs(&mut interp, &mut state);
     assert_eq!(jobs.len(), 2);
     finish_fetches(&mut interp, &mut state, jobs, None);
-    assert_eq!(
-        state.status,
-        "Fetched 2 focused repos · 2 outside focus skipped"
-    );
+    assert_eq!(state.status, "Fetched 2 focused repos · 2 skipped");
 }
 
 #[test]
@@ -3255,7 +3252,7 @@ fn a_focused_workspace_fetch_keeps_the_failure_note_after_the_count() {
     assert_eq!(
         state.status,
         "Fetched 2 focused repos (1 failed: app — could not read from remote repository) \
-         · 2 outside focus skipped"
+         · 2 skipped"
     );
     assert_eq!(state.status.kind(), StatusKind::Error);
 }
@@ -3320,10 +3317,7 @@ fn a_focused_workspace_default_switch_names_the_focused_set() {
             result: RepoOpResult::Ok,
         },
     );
-    assert_eq!(
-        state.status,
-        "Switched 1 focused repo · 2 outside focus skipped"
-    );
+    assert_eq!(state.status, "Switched 1 focused repo · 2 skipped");
 }
 
 #[test]
